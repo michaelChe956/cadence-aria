@@ -112,30 +112,90 @@ fn scope_for_action(
     Some(invocation.clone())
 }
 
+/// REQ-TOP-04 场景 6（F-52）：从 durable candidate ref 提取候选身份段
+/// （canonical ref 尾段 `ir-<hash16>` 的 `<hash16>`，无 store 读、确定性）。
+fn candidate_revision_hash_segment(revision_ref: &str) -> &str {
+    revision_ref.rsplit('-').next().unwrap_or(revision_ref)
+}
+
+/// 终态 action 集合：这些路由结束后本 review cycle 关闭（durable scope 置
+/// None），人工修订后的新候选开全新 Initial cycle，不误入旧 cycle 的
+/// Verification 相位。TriggerAggregateRepair 保留 scope（同一 invocation
+/// 链继续复评）。REQ-TOP-04 场景 7。
+fn closes_single_candidate_cycle(action: &RoutingAction) -> bool {
+    matches!(
+        action,
+        RoutingAction::ContinueToCompleted
+            | RoutingAction::EnterHumanGate { .. }
+            | RoutingAction::StopNeedsHuman { .. }
+            | RoutingAction::AbortFatal { .. }
+    )
+}
+
 /// Returns the only durable review-cycle identity and phase for a SingleCandidate
-/// reviewer invocation. A SingleCandidate review always stays attached to its
-/// ReviewerRun node, regardless of any legacy WorkItemPlan node subtype.
+/// reviewer invocation. The cycle is anchored on the initial candidate's
+/// source-revision identity (`sc:candidate:<hash16>`), so a review chain
+/// (initial review → automatic repair → verification) shares one cycle across
+/// ReviewerRun node rotation, while a fresh candidate starts a fresh cycle.
+///
+/// `durable_scope=None` → key = hash segment of `current_ir_ref` (new cycle,
+/// Initial). Both missing → fail-closed `Err`.
+/// `Initial{R}` → key anchored on R; phase = Verification iff the anchored
+/// cycle already consumed its initial review (interrupted reruns stay Initial).
+/// `Verification{..}` → key anchored on `cycle_anchor_revision_id` (old
+/// durable records without the anchor fail-safe to the repaired revision).
+/// Legacy `review:<node>` cycle records are never migrated: their counts do
+/// not apply to the new identity keys (fresh Initial, fail-safe unknown).
 pub(super) fn single_candidate_review_cycle(
-    active_node_id: Option<&str>,
+    durable_scope: Option<&ReviewInvocationScope>,
+    current_ir_ref: Option<&str>,
     run_history: &RunHistory,
 ) -> Result<(String, ReviewPhase), String> {
-    let reviewer_node_id = active_node_id
-        .filter(|node_id| !node_id.is_empty() && *node_id != "review_unknown")
-        .ok_or_else(|| {
-            "active ReviewerRun node is unavailable for SingleCandidate review".to_string()
-        })?;
-    let cycle_key = format!("review:{reviewer_node_id}");
-    let cycle = run_history
-        .review_cycles
-        .get(&cycle_key)
-        .cloned()
-        .unwrap_or_default();
-    let phase = if cycle.initial_count == 0 && cycle.verification_count == 0 {
-        ReviewPhase::Initial
-    } else {
-        ReviewPhase::Verification
-    };
-    Ok((cycle_key, phase))
+    match durable_scope {
+        Some(ReviewInvocationScope::Verification {
+            repaired_revision_id,
+            cycle_anchor_revision_id,
+            ..
+        }) => {
+            let anchor = cycle_anchor_revision_id
+                .as_deref()
+                .unwrap_or(repaired_revision_id);
+            Ok((
+                format!("sc:candidate:{}", candidate_revision_hash_segment(anchor)),
+                ReviewPhase::Verification,
+            ))
+        }
+        Some(ReviewInvocationScope::Initial {
+            initial_revision_id,
+            ..
+        }) => {
+            let cycle_key = format!(
+                "sc:candidate:{}",
+                candidate_revision_hash_segment(initial_revision_id)
+            );
+            let phase = if run_history
+                .review_cycles
+                .get(&cycle_key)
+                .is_some_and(|cycle| cycle.initial_count >= 1)
+            {
+                ReviewPhase::Verification
+            } else {
+                ReviewPhase::Initial
+            };
+            Ok((cycle_key, phase))
+        }
+        None => {
+            let ir_ref = current_ir_ref
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    "active plan candidate is unavailable for SingleCandidate review".to_string()
+                })?;
+            Ok((
+                format!("sc:candidate:{}", candidate_revision_hash_segment(ir_ref)),
+                ReviewPhase::Initial,
+            ))
+        }
+    }
 }
 
 fn validate_single_candidate_scope(
@@ -230,6 +290,16 @@ impl WorkspaceEngine {
         action: &RoutingAction,
         durable_scope: Option<&ReviewInvocationScope>,
     ) -> Option<ReviewInvocationScope> {
+        // REQ-TOP-04 场景 7：SC 流的终态路由关闭本 review cycle——durable
+        // scope 置 None，人工修订后的新候选不再误入旧 cycle 的 Verification。
+        // TriggerAggregateRepair 保留 scope（同一 invocation 链继续复评）；
+        // legacy 流保持既有行为（free fn 的 ProtocolViolation 保序由既有
+        // 单测锚定）。
+        if self.session.flow_kind == WorkItemPlanFlowKind::SingleCandidate
+            && closes_single_candidate_cycle(action)
+        {
+            return None;
+        }
         scope_for_action(
             durable_scope.or(self.session.review_invocation_scope.as_ref()),
             invocation,
@@ -251,6 +321,7 @@ impl WorkspaceEngine {
                 self.session.run_history.seen_fingerprints.clone(),
                 cycle_key.to_string(),
                 "legacy_mechanical_report",
+                None,
             ),
         })
     }
@@ -258,15 +329,34 @@ impl WorkspaceEngine {
     pub(super) fn single_candidate_policy_invocation(
         &self,
         phase: ReviewPhase,
-        cycle_key: &str,
+        // 锚定改造后 SC 分支不再消费 cycle_key（anchor 由 durable candidate
+        // ref 派生）；保留参数以维持与 legacy 分派同形的调用面。
+        _cycle_key: &str,
     ) -> Result<ReviewInvocationScope, RoutingAction> {
         let scope = match self.session.review_invocation_scope.clone() {
             Some(scope) => scope,
             // A direct policy invocation may be used by recovery code before
             // the provider-drive hook has run. Construct the initial scope
             // here; the CAS below makes it durable before routing continues.
+            // The anchor must be the durable candidate ref itself（不是
+            // cycle key）：Initial scope 的 initial_revision_id 是后续 cycle
+            // key 派生与 Verification anchor 的唯一来源。
             None if phase == ReviewPhase::Initial => {
-                ReviewInvocationScope::initial(cycle_key.to_string())
+                let anchor = self
+                    .session
+                    .plan_candidate_ir_ref
+                    .clone()
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| RoutingAction::AbortFatal {
+                        reason: FatalReason::ProtocolViolation,
+                        diagnostics: vec![PolicyDiagnostic {
+                            code: "verification_scope_violation".to_string(),
+                            message: "initial review requires a durable plan candidate IR"
+                                .to_string(),
+                            field: Some("plan_candidate_ir_ref".to_string()),
+                        }],
+                    })?;
+                ReviewInvocationScope::initial(anchor)
             }
             None => {
                 return Err(RoutingAction::AbortFatal {
@@ -292,12 +382,13 @@ impl WorkspaceEngine {
             return Ok(());
         }
 
-        let node_id = self.active_node_id.as_deref().ok_or_else(|| {
-            "active ReviewerRun node is unavailable for SingleCandidate review".to_string()
-        })?;
         // Validate only the active-node identity from worker state. The authoritative
         // phase remains derived below from the durable record's history.
-        let _ = single_candidate_review_cycle(Some(node_id), &self.session.run_history)?;
+        let _ = single_candidate_review_cycle(
+            self.session.review_invocation_scope.as_ref(),
+            self.session.plan_candidate_ir_ref.as_deref(),
+            &self.session.run_history,
+        )?;
         // A worker-held scope is protocol input too. Reject a bad digest before the
         // durable reload so reconciliation cannot conceal the violation.
         if let Some(scope) = self.session.review_invocation_scope.as_ref() {
@@ -312,7 +403,11 @@ impl WorkspaceEngine {
         let expected = store
             .get_workspace_session(&self.session.session_id)
             .map_err(|error| format!("load workspace session for review scope failed: {error}"))?;
-        let (_, phase) = single_candidate_review_cycle(Some(node_id), &expected.run_history)?;
+        let (cycle_key, phase) = single_candidate_review_cycle(
+            expected.review_invocation_scope.as_ref(),
+            expected.plan_candidate_ir_ref.as_deref(),
+            &expected.run_history,
+        )?;
         let scope = match phase {
             ReviewPhase::Initial => {
                 let plan_candidate_ir_ref = expected
@@ -330,10 +425,33 @@ impl WorkspaceEngine {
                     .mechanical_report_ref
                     .clone()
                     .ok_or("verification review requires a durable mechanical report")?;
+                // REQ-TOP-04 场景 6：anchor 沿用 durable scope 声明的
+                // invocation 链头（Initial 的候选 ref；scope 已是 Verification
+                // 时沿用其 anchor），original_fingerprints 取锚定 cycle 的
+                // 初评集合，空集（旧 durable）fail-safe 回退 seen_fingerprints。
+                let cycle_anchor_revision_id = match expected.review_invocation_scope.as_ref() {
+                    Some(ReviewInvocationScope::Initial {
+                        initial_revision_id,
+                        ..
+                    }) => Some(initial_revision_id.clone()),
+                    Some(ReviewInvocationScope::Verification {
+                        cycle_anchor_revision_id,
+                        ..
+                    }) => cycle_anchor_revision_id.clone(),
+                    None => None,
+                };
+                let original_fingerprints = expected
+                    .run_history
+                    .review_cycles
+                    .get(&cycle_key)
+                    .map(|cycle| cycle.original_fingerprints.clone())
+                    .filter(|fingerprints| !fingerprints.is_empty())
+                    .unwrap_or_else(|| expected.run_history.seen_fingerprints.clone());
                 ReviewInvocationScope::verification(
-                    expected.run_history.seen_fingerprints.clone(),
+                    original_fingerprints,
                     repaired_revision_id,
                     mechanical_report_ref,
+                    cycle_anchor_revision_id,
                 )
             }
         };
@@ -961,103 +1079,4 @@ fn verification_scope_store_error(message: String, persistence_failure: bool) ->
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::product::work_item_plan_policy::ReviewCycleState;
-
-    #[test]
-    fn single_candidate_cycle_is_reviewer_node_scoped_and_counter_derived() {
-        let (initial_key, initial_phase) =
-            single_candidate_review_cycle(Some("reviewer-node"), &RunHistory::default())
-                .expect("reviewer node has an initial cycle");
-        assert_eq!(initial_key, "review:reviewer-node");
-        assert_eq!(initial_phase, ReviewPhase::Initial);
-
-        let history = RunHistory {
-            review_cycles: std::collections::BTreeMap::from([(
-                "review:reviewer-node".to_string(),
-                ReviewCycleState {
-                    initial_count: 1,
-                    ..ReviewCycleState::default()
-                },
-            )]),
-            ..RunHistory::default()
-        };
-        assert_eq!(
-            single_candidate_review_cycle(Some("reviewer-node"), &history),
-            Ok((
-                "review:reviewer-node".to_string(),
-                ReviewPhase::Verification
-            ))
-        );
-
-        let outline_or_batch_history = RunHistory {
-            review_cycles: std::collections::BTreeMap::from([(
-                "batch:generation-round".to_string(),
-                ReviewCycleState {
-                    initial_count: 1,
-                    verification_count: 1,
-                    ..ReviewCycleState::default()
-                },
-            )]),
-            ..RunHistory::default()
-        };
-        assert_eq!(
-            single_candidate_review_cycle(Some("reviewer-node"), &outline_or_batch_history),
-            Ok(("review:reviewer-node".to_string(), ReviewPhase::Initial))
-        );
-        assert!(single_candidate_review_cycle(None, &RunHistory::default()).is_err());
-        assert!(
-            single_candidate_review_cycle(Some("review_unknown"), &RunHistory::default()).is_err()
-        );
-    }
-
-    #[test]
-    fn single_candidate_scope_rejects_initial_scope_during_verification() {
-        let result = validate_single_candidate_scope(
-            ReviewInvocationScope::initial("revision-001"),
-            ReviewPhase::Verification,
-        );
-        assert!(matches!(
-            result,
-            Err(RoutingAction::AbortFatal {
-                reason: FatalReason::ProtocolViolation,
-                ..
-            })
-        ));
-    }
-
-    #[test]
-    fn single_candidate_scope_preserves_existing_scope_on_protocol_fatal() {
-        let durable_scope = ReviewInvocationScope::initial("durable-revision");
-        let replacement_scope = ReviewInvocationScope::initial("replacement-revision");
-        let action = RoutingAction::AbortFatal {
-            reason: FatalReason::ProtocolViolation,
-            diagnostics: Vec::new(),
-        };
-        assert_eq!(
-            scope_for_action(Some(&durable_scope), &replacement_scope, &action),
-            Some(durable_scope)
-        );
-        assert_eq!(scope_for_action(None, &replacement_scope, &action), None);
-    }
-
-    #[test]
-    fn single_candidate_scope_rejects_verification_scope_during_initial() {
-        let result = validate_single_candidate_scope(
-            ReviewInvocationScope::verification(
-                std::collections::BTreeSet::new(),
-                "revision-001",
-                "report-001",
-            ),
-            ReviewPhase::Initial,
-        );
-        assert!(matches!(
-            result,
-            Err(RoutingAction::AbortFatal {
-                reason: FatalReason::ProtocolViolation,
-                ..
-            })
-        ));
-    }
-}
+mod routing_scope_cycle_tests;

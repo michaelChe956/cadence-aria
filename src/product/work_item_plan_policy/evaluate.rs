@@ -172,6 +172,11 @@ impl RunHistoryDelta {
             else {
                 return Err(state_corruption());
             };
+            // REQ-TOP-04 场景 6：cycle 的初评指纹集合按并集合并（BTreeSet
+            // 天然幂等，重复 delta 不产生重复成员）。
+            cycle
+                .original_fingerprints
+                .extend(delta.original_fingerprints.iter().cloned());
             cycle.repairs_used = repairs_used;
             cycle.initial_count = initial_count;
             cycle.verification_count = verification_count;
@@ -242,7 +247,13 @@ pub fn evaluate(
         );
     }
 
-    let mut history_delta = review_count_delta(input.cycle_key, input.phase);
+    let findings = actionable_findings(input);
+    let actionable_fingerprints: BTreeSet<FindingFingerprint> = findings
+        .iter()
+        .map(|finding| finding.fingerprint.clone())
+        .collect();
+    let mut history_delta =
+        review_count_delta(input.cycle_key, input.phase, &actionable_fingerprints);
     if !delta_can_merge(history, &history_delta, budgets) {
         return fatal_decision(FatalReason::StateCorruption, state_corruption_diagnostics());
     }
@@ -261,11 +272,7 @@ pub fn evaluate(
         };
     }
 
-    let findings = actionable_findings(input);
-    history_delta.seen_fingerprints_to_add = findings
-        .iter()
-        .map(|finding| finding.fingerprint.clone())
-        .collect();
+    history_delta.seen_fingerprints_to_add = actionable_fingerprints;
 
     // A verification invocation is intentionally closed over the original
     // finding identities.  A finding outside that scope is not a protocol
@@ -417,17 +424,26 @@ fn invocation_matches_phase(input: &ReviewEvaluationInput<'_>) -> bool {
     )
 }
 
-fn review_count_delta(cycle_key: &str, phase: ReviewPhase) -> RunHistoryDelta {
+fn review_count_delta(
+    cycle_key: &str,
+    phase: ReviewPhase,
+    actionable_fingerprints: &BTreeSet<FindingFingerprint>,
+) -> RunHistoryDelta {
     let cycle_delta = match phase {
+        // REQ-TOP-04 场景 6：初评相位把 actionable 指纹写入本 cycle 的
+        // original_fingerprints——复评 Verification scope 判重边界的权威来源。
         ReviewPhase::Initial => ReviewCycleState {
             repairs_used: 0,
             initial_count: 1,
             verification_count: 0,
+            original_fingerprints: actionable_fingerprints.clone(),
         },
+        // 复评相位不得改写初评集合（merge_into 只做并集，空集保持原状）。
         ReviewPhase::Verification => ReviewCycleState {
             repairs_used: 0,
             initial_count: 0,
             verification_count: 1,
+            original_fingerprints: BTreeSet::new(),
         },
     };
     let mut delta = RunHistoryDelta {

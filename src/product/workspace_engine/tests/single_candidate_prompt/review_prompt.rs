@@ -226,6 +226,7 @@ fn single_candidate_verification_prompt_replays_only_original_fingerprints() {
         BTreeSet::from([fingerprint.clone()]),
         "revision-002",
         "project/issue/plan/mechanical_report/report-002",
+        None,
     );
     let instructions = crate::product::workspace_engine::review_scope_instructions(&scope)
         .expect("verification scope instructions");
@@ -278,8 +279,175 @@ fn single_candidate_scope_instructions_reject_invalid_digest() {
 
 #[test]
 fn single_candidate_scope_instructions_reject_empty_verification_report() {
-    let scope = ReviewInvocationScope::verification(BTreeSet::new(), "revision-002", "");
+    let scope = ReviewInvocationScope::verification(BTreeSet::new(), "revision-002", "", None);
     let error = crate::product::workspace_engine::review_scope_instructions(&scope)
         .expect_err("missing mechanical report must be fatal");
     assert!(error.contains("mechanical report"));
+}
+
+/// REQ-TOP-04 场景 6（F-52 L2 前轮注入）：复评轮 prompt 必须携带上一
+/// ReviewerRun 持久化 verdict 的非 advisory findings 结构化身份清单
+/// （fingerprint/category/contract_field/required_action）+ 当前候选 ref，
+/// 并教学「同一 fingerprint 重现须显式标注 repeated」；首轮（无前轮
+/// verdict）不注入该段。
+#[test]
+fn single_candidate_review_prompt_injects_previous_round_finding_identities() {
+    let (_tmp, _checkpoint_store, lifecycle, plan_id, mut engine) =
+        super::super::make_work_item_plan_engine_with_draft_candidate("previous_round_injection");
+    let (ir_ref, report_ref) = super::persist_verification_artifacts(&lifecycle, &plan_id);
+    let mut record = lifecycle
+        .get_workspace_session(&engine.session().session_id)
+        .expect("load session");
+    record.flow_kind = WorkItemPlanFlowKind::SingleCandidate;
+    record.plan_candidate_ir_ref = Some(ir_ref.clone());
+    record.mechanical_report_ref = Some(report_ref);
+    write_json(
+        &lifecycle
+            .app_paths()
+            .issue_root(&record.project_id, &record.issue_id)
+            .join("workspace-sessions")
+            .join(format!("{}.json", record.id)),
+        &record,
+    )
+    .expect("persist session refs");
+    engine.session = crate::product::workspace_engine::types::WorkspaceSession::from_record(record);
+    engine.active_node_id = Some("reviewer-current".to_string());
+    engine.timeline_nodes.push(TimelineNode {
+        node_id: "reviewer-current".to_string(),
+        node_type: TimelineNodeType::ReviewerRun,
+        agent: None,
+        stage: WsWorkspaceStage::CrossReview,
+        round: Some(2),
+        status: TimelineNodeStatus::Active,
+        title: "reviewer run".to_string(),
+        summary: None,
+        started_at: "2026-09-25T00:00:00Z".to_string(),
+        completed_at: None,
+        duration_ms: None,
+        artifact_ref: None,
+        provider_config_snapshot: ProviderConfigSnapshot {
+            author: crate::product::models::ProviderName::ClaudeCode,
+            reviewer: Some(crate::product::models::ProviderName::KimiCode),
+            review_rounds: 2,
+            permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
+        },
+        retry: None,
+    });
+
+    // 首轮形态（无前轮 verdict）：不注入前轮 findings 段。
+    let first_round = engine
+        .build_work_item_plan_review_input()
+        .expect("first-round review input");
+    assert!(
+        !first_round
+            .prompt
+            .contains("Previous Review Round Findings"),
+        "the initial round must not carry a previous-round section"
+    );
+
+    // 上一轮 ReviewerRun 节点 + durable verdict。
+    let previous_finding = ReviewFinding {
+        severity: ReviewFindingSeverity::MustFix,
+        message: "coverage 缺口：上游未提供 capability".to_string(),
+        evidence: "edge wi-a -> wi-b".to_string(),
+        required_action: "补齐 capability 声明".to_string(),
+        category: Some(ReviewFindingCategory::ContractGap),
+        class_hint: None,
+        contract_field: Some("WI-001.output_contracts[CT-001].capabilities".to_string()),
+    };
+    let previous_verdict = ReviewVerdict {
+        verdict: ReviewVerdictType::Revise,
+        comments: "previous round revise".to_string(),
+        summary: "previous round revise".to_string(),
+        findings: vec![previous_finding],
+        review_gate: ReviewGate::RequiresRevision,
+        work_item_plan_review: None,
+        structured_output_diagnostic: None,
+    };
+    let previous_node_id = "reviewer-previous".to_string();
+    engine.timeline_nodes.insert(
+        0,
+        TimelineNode {
+            node_id: previous_node_id.clone(),
+            node_type: TimelineNodeType::ReviewerRun,
+            agent: None,
+            stage: WsWorkspaceStage::CrossReview,
+            round: Some(1),
+            status: TimelineNodeStatus::Completed,
+            title: "reviewer run".to_string(),
+            summary: None,
+            started_at: "2026-09-25T00:00:00Z".to_string(),
+            completed_at: Some("2026-09-25T00:01:00Z".to_string()),
+            duration_ms: None,
+            artifact_ref: None,
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: crate::product::models::ProviderName::ClaudeCode,
+                reviewer: Some(crate::product::models::ProviderName::KimiCode),
+                review_rounds: 2,
+                permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
+            },
+            retry: None,
+        },
+    );
+    lifecycle
+        .save_node_detail(
+            &engine.session().session_id,
+            &previous_node_id.clone(),
+            &crate::product::models::NodeDetail {
+                node_id: previous_node_id,
+                session_id: engine.session().session_id.clone(),
+                node_type: TimelineNodeType::ReviewerRun,
+                status: TimelineNodeStatus::Completed,
+                agent_role: None,
+                provider: None,
+                prompt: None,
+                messages: Vec::new(),
+                streaming_content: String::new(),
+                execution_events: Vec::new(),
+                permission_events: Vec::new(),
+                verdict: Some(serde_json::to_value(&previous_verdict).expect("verdict json")),
+                artifact_ref: None,
+                is_revision: false,
+                revision_feedback: None,
+                base_artifact_ref: None,
+                started_at: "2026-09-25T00:00:00Z".to_string(),
+                ended_at: None,
+            },
+        )
+        .expect("persist previous reviewer verdict");
+
+    let replay_round = engine
+        .build_work_item_plan_review_input()
+        .expect("replay review input");
+    let (fingerprint, unstable) = FindingFingerprint::identity_for_finding(
+        Some(ReviewFindingCategory::ContractGap),
+        FindingClass::Repairable,
+        "coverage 缺口：上游未提供 capability",
+        Some("WI-001.output_contracts[CT-001].capabilities"),
+    );
+    assert!(!unstable, "fixture must sit in the stable identity domain");
+    assert!(
+        replay_round
+            .prompt
+            .contains("Previous Review Round Findings")
+    );
+    assert!(
+        replay_round.prompt.contains(fingerprint.0.as_str()),
+        "prompt must carry the previous-round finding fingerprint identity"
+    );
+    assert!(replay_round.prompt.contains("contract_gap"));
+    assert!(
+        replay_round
+            .prompt
+            .contains("WI-001.output_contracts[CT-001].capabilities")
+    );
+    assert!(replay_round.prompt.contains("补齐 capability 声明"));
+    assert!(
+        replay_round.prompt.contains(&ir_ref),
+        "prompt must name the current plan_candidate_ir_ref under review"
+    );
+    assert!(
+        replay_round.prompt.contains("repeated"),
+        "prompt must teach explicit repeated marking for recurring fingerprints"
+    );
 }

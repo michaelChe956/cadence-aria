@@ -196,7 +196,24 @@ fn policy_cas_conflict_rejects_stale_record_and_routing_reloads_then_reevaluates
         } if id == &stale.id
     ));
 
-    let mut engine = recovery_engine(checkpoints, store.clone(), concurrent);
+    // 锚定语义下 SC policy 路由需要 durable 候选 ref（无 scope 无候选即
+    // protocol violation）；为该 CAS 重演夹具提供确定性的候选 ref。
+    let mut anchored = concurrent.clone();
+    anchored.plan_candidate_ir_ref = Some(
+        "project/project_0001/issue/issue_0001/plan/work_item_plan_cas_conflict/plan_candidate_ir/ir-cas-conflict"
+            .to_string(),
+    );
+    write_json(
+        &store
+            .app_paths()
+            .issue_root(&anchored.project_id, &anchored.issue_id)
+            .join("workspace-sessions")
+            .join(format!("{}.json", anchored.id)),
+        &anchored,
+    )
+    .expect("persist anchored candidate ref");
+
+    let mut engine = recovery_engine(checkpoints, store.clone(), anchored);
     engine.policy_route_before_persist = Some(Box::new(|store, session_id| {
         store
             .update_workspace_session_status(session_id, WorkspaceSessionStatus::WaitingForHuman)
@@ -217,7 +234,7 @@ fn policy_cas_conflict_rejects_stale_record_and_routing_reloads_then_reevaluates
     assert_eq!(persisted.status, WorkspaceSessionStatus::StoppedNeedsHuman);
     assert_eq!(persisted.run_history.initial_review_count, 1);
     assert_eq!(
-        persisted.run_history.review_cycles["review:outline_review"].initial_count, 1,
+        persisted.run_history.review_cycles["sc:candidate:conflict"].initial_count, 1,
         "re-evaluation must not merge the stale history delta twice"
     );
 }

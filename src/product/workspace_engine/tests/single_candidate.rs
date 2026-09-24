@@ -18,7 +18,6 @@ use crate::web::workspace_ws_types::{
     ReviewFinding, ReviewFindingSeverity, ReviewGate, ReviewVerdict, ReviewVerdictType,
 };
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
 
 use crate::product::workspace_engine::review::policy_routing::RoutingAction;
 
@@ -480,14 +479,14 @@ mod phase_machine {
             .clone()
             .expect("durable mechanical report");
         let mut durable = durable_candidate;
-        durable.review_invocation_scope = Some(ReviewInvocationScope::verification(
-            BTreeSet::new(),
-            current_ir_ref.clone(),
-            report_ref,
-        ));
+        // 锚定语义下 durable 在途 scope 是 Initial（初评被中断重跑）；
+        // Verification scope 由 ensure 在返修后派生，不再作为夹具起点。
+        durable.review_invocation_scope =
+            Some(ReviewInvocationScope::initial(current_ir_ref.clone()));
+        let _ = report_ref;
         durable.run_history = RunHistory {
             review_cycles: std::collections::BTreeMap::from([(
-                "review:new-reviewer-node".to_string(),
+                "sc:candidate:repaired".to_string(),
                 ReviewCycleState::default(),
             )]),
             ..RunHistory::default()
@@ -540,8 +539,8 @@ mod phase_machine {
             durable
                 .run_history
                 .review_cycles
-                .get("review:new-reviewer-node")
-                .expect("new reviewer node cycle")
+                .get("sc:candidate:repaired")
+                .expect("anchored candidate cycle")
                 .initial_count,
             1,
             "the merged verdict must consume the new node's Initial review budget"
@@ -660,19 +659,21 @@ mod phase_machine {
         engine
             .ensure_review_invocation_scope()
             .await
-            .expect("new node must materialize Initial scope");
+            .expect("node rotation must stay anchored on the initial candidate cycle");
         let second_scope = engine
             .session()
             .review_invocation_scope
             .clone()
             .expect("scope materialized for node B");
-        assert!(matches!(
-            second_scope,
-            ReviewInvocationScope::Initial { .. }
-        ));
+        // REQ-TOP-04 场景 6：节点轮换不得重开开放式初审——同候选链复评相位
+        // 必须是 Verification（cycle 锚定初评候选，跨 ReviewerRun 节点不换 key）。
+        assert!(
+            matches!(second_scope, ReviewInvocationScope::Verification { .. }),
+            "node rotation must materialize Verification, got {second_scope:?}"
+        );
         second_scope
             .validate_digest()
-            .expect("node B initial scope digest is valid");
+            .expect("node B verification scope digest is valid");
 
         complete_single_candidate_review(&mut engine, pass_verdict()).await;
 
@@ -695,14 +696,128 @@ mod phase_machine {
             .run_history
             .review_cycles
             .iter()
-            .filter(|(key, _)| key.starts_with("review:"))
+            .filter(|(key, _)| key.starts_with("sc:candidate:"))
             .collect::<Vec<_>>();
-        assert_eq!(reviewer_cycles.len(), 2, "each ReviewerRun owns one cycle");
+        assert_eq!(
+            reviewer_cycles.len(),
+            1,
+            "one anchored review cycle spans the repair round across reviewer nodes"
+        );
         for (_, cycle) in reviewer_cycles {
-            assert!(cycle.initial_count <= 1);
-            assert!(cycle.verification_count <= 1);
+            assert_eq!(cycle.initial_count, 1);
+            assert_eq!(cycle.verification_count, 1);
             assert!(cycle.repairs_used <= 1);
         }
+        // REQ-TOP-04 场景 7：终态 action 关闭本 review cycle——durable scope 置空，
+        // 人工修订后的新候选不得误入旧 cycle 的 Verification。
+        assert_eq!(
+            completed.review_invocation_scope, None,
+            "terminal ContinueToCompleted must close the anchored review cycle"
+        );
+    }
+
+    /// REQ-TOP-04 场景 7（F-52）：终态关闭 cycle 后，人工修订产生的新候选开
+    /// 全新 Initial cycle——旧 cycle 计数不被触碰，新 cycle 不继承 Verification。
+    #[tokio::test]
+    async fn terminal_cycle_closure_gives_next_candidate_a_fresh_initial_cycle() {
+        let (_tmp, lifecycle, _plan_id, mut engine) =
+            make_work_item_plan_engine_with_accepted_contract_drafts();
+        single_candidate_record(
+            &lifecycle,
+            &mut engine,
+            SingleCandidatePhase::Evaluate,
+            RunPolicy::Interactive,
+        );
+        engine.start_review().await;
+        complete_single_candidate_review(&mut engine, repairable_verdict("first round")).await;
+        complete_repair_generation(&lifecycle, &mut engine, "auto-repair-round");
+        engine.start_review().await;
+        engine
+            .ensure_review_invocation_scope()
+            .await
+            .expect("repaired candidate stays in the anchored Verification cycle");
+        complete_single_candidate_review(&mut engine, pass_verdict()).await;
+
+        let first_terminal = lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("first terminal persisted");
+        assert_eq!(
+            first_terminal.review_invocation_scope, None,
+            "ContinueToCompleted must close the review cycle durably"
+        );
+        let first_cycle = first_terminal
+            .run_history
+            .review_cycles
+            .iter()
+            .filter(|(key, _)| key.starts_with("sc:candidate:"))
+            .map(|(key, cycle)| (key.clone(), cycle.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(first_cycle.len(), 1);
+        let (first_key, first_counts) = first_cycle[0].clone();
+        assert_eq!(first_counts.initial_count, 1);
+        assert_eq!(first_counts.verification_count, 1);
+
+        // 人工修订轮：新候选（新 source_revision 身份）→ 新 cycle。人工修订
+        // 不走自动返修的 generation CAS（该 CAS 仅放行 Prepare/Generate 相位），
+        // 按 durable 直写模拟人工产物落盘。
+        let manual_refs = persist_candidate_artifacts(&lifecycle, &engine, "manual-revision-round");
+        update_durable_candidate_refs(
+            &lifecycle,
+            &mut engine,
+            SingleCandidatePhase::Evaluate,
+            manual_refs,
+        );
+        engine.start_review().await;
+        engine
+            .ensure_review_invocation_scope()
+            .await
+            .expect("manual revision must materialize a fresh Initial scope");
+        let manual_scope = engine
+            .session()
+            .review_invocation_scope
+            .clone()
+            .expect("manual revision scope");
+        assert!(
+            matches!(manual_scope, ReviewInvocationScope::Initial { .. }),
+            "manual revision must not inherit the closed cycle's Verification, got {manual_scope:?}"
+        );
+        manual_scope
+            .validate_digest()
+            .expect("manual revision initial scope digest is valid");
+        complete_single_candidate_review(&mut engine, pass_verdict()).await;
+
+        let second_terminal = lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("manual revision review persisted");
+        let anchored_cycles = second_terminal
+            .run_history
+            .review_cycles
+            .iter()
+            .filter(|(key, _)| key.starts_with("sc:candidate:"))
+            .map(|(key, cycle)| (key.clone(), cycle.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            anchored_cycles.len(),
+            2,
+            "the manual revision candidate opens a second anchored cycle"
+        );
+        let (second_key, second_counts) = anchored_cycles
+            .iter()
+            .find(|(key, _)| key != &first_key)
+            .expect("the new cycle key differs from the closed one")
+            .clone();
+        assert_eq!(second_counts.initial_count, 1);
+        assert_eq!(second_counts.verification_count, 0);
+        assert_eq!(
+            second_terminal
+                .run_history
+                .review_cycles
+                .get(&first_key)
+                .expect("closed cycle counts remain durable"),
+            &first_counts,
+            "the closed cycle's counters must stay untouched by the new cycle"
+        );
+        assert!(second_key.starts_with("sc:candidate:"));
     }
 
     #[tokio::test]

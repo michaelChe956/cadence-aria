@@ -508,3 +508,76 @@ fn validate_plan_projection_hashes(projection: &PlanProjectionBundle) -> Result<
     }
     Ok(())
 }
+
+/// REQ-TOP-04 场景 6（F-52 L2 前轮注入）：加载上一 ReviewerRun 持久化
+/// verdict（与 F5-B 闸门同源的单候选加载形态），其非 advisory findings
+/// 逐条经 classify_finding 得到结构化身份（fingerprint/category/
+/// contract_field/required_action）注入复评轮 prompt——reviewer 可比对
+/// fingerprint 显式标注 repeated，不再依赖措辞巧合判重。首轮（无前轮
+/// verdict 或前轮无非 advisory finding）返回 None；prompt 字节预算由
+/// `ensure_single_candidate_review_prompt_budget`（96KiB）兜底。
+pub(super) fn single_candidate_previous_round_findings_section(
+    engine: &WorkspaceEngine,
+    current_ir_ref: &str,
+) -> Option<String> {
+    let active_node_id = engine.active_node_id.as_ref()?;
+    let lifecycle = engine.lifecycle_store.as_ref()?;
+    let previous = engine
+        .timeline_nodes
+        .iter()
+        .rev()
+        .filter(|node| {
+            matches!(
+                node.node_type,
+                crate::web::workspace_ws_types::TimelineNodeType::ReviewerRun
+            )
+        })
+        .filter(|node| &node.node_id != active_node_id)
+        .find_map(|node| {
+            let detail = lifecycle
+                .load_node_detail_for_issue_session(
+                    &engine.session.project_id,
+                    &engine.session.issue_id,
+                    &engine.session.session_id,
+                    &node.node_id,
+                )
+                .ok()?;
+            let persisted = detail.verdict?;
+            crate::product::workspace_engine::deserialize_historical_review_verdict(persisted).ok()
+        })?;
+    let previous_findings: Vec<_> = previous
+        .findings
+        .iter()
+        .map(|finding| {
+            crate::product::work_item_plan_policy::classify::classify_finding(
+                previous.verdict.clone(),
+                finding,
+            )
+        })
+        .filter(|classified| {
+            classified.class != crate::product::work_item_plan_policy::FindingClass::Advisory
+        })
+        .map(|classified| {
+            json!({
+                "fingerprint": classified.fingerprint.0,
+                "category": classified.category.map(|category| category.as_str()),
+                "contract_field": classified.contract_field,
+                "required_action": classified.required_action,
+            })
+        })
+        .collect();
+    if previous_findings.is_empty() {
+        return None;
+    }
+    let payload = json!({
+        "note": "上一轮评审已登记的 finding 身份；fingerprint 是其稳定身份指纹",
+        "previous_findings": previous_findings,
+        "current_plan_candidate_ir_ref": current_ir_ref,
+    });
+    let serialized = serde_json::to_string_pretty(&payload).ok()?;
+    Some(format!(
+        "\n### Previous Review Round Findings\n{serialized}\n\
+         [previous_round_repetition_discipline]\n\
+         若上列某条 fingerprint 在本轮再次出现（同一问题未收敛），必须在该 finding 的 evidence 中显式标注 repeated 并说明为何自动修订未能关闭它；不得以改写措辞的方式隐式重复同一问题。\n"
+    ))
+}

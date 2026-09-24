@@ -153,6 +153,7 @@ fn verification_scope_allows_new_findings_but_rejects_missing_mechanical_report(
         BTreeSet::from([original]),
         "revision-002",
         "mechanical-report-002",
+        None,
     );
     let new_finding = envelope(
         ReviewVerdictType::Revise,
@@ -165,7 +166,8 @@ fn verification_scope_allows_new_findings_but_rejects_missing_mechanical_report(
     );
     assert!(classify_review(&new_finding, &invocation, Some("mechanical-report-002"),).is_ok());
 
-    let missing_report = ReviewInvocationScope::verification(BTreeSet::new(), "revision-002", "");
+    let missing_report =
+        ReviewInvocationScope::verification(BTreeSet::new(), "revision-002", "", None);
     let pass = envelope(ReviewVerdictType::Pass, Vec::new());
     assert!(matches!(
         classify_review(&pass, &missing_report, None),

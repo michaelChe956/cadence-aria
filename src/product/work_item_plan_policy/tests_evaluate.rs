@@ -71,9 +71,12 @@ fn evaluate_findings(
 ) -> EvaluationDecision {
     let invocation = match phase {
         ReviewPhase::Initial => ReviewInvocationScope::initial("initial-revision"),
-        ReviewPhase::Verification => {
-            ReviewInvocationScope::verification(BTreeSet::new(), "repaired-revision", "report")
-        }
+        ReviewPhase::Verification => ReviewInvocationScope::verification(
+            BTreeSet::new(),
+            "repaired-revision",
+            "report",
+            None,
+        ),
     };
     evaluate(
         &ReviewEvaluationInput {
@@ -113,6 +116,7 @@ fn verification_new_finding_is_human_required_instead_of_protocol_fatal() {
         BTreeSet::from([original.fingerprint]),
         "repaired-revision",
         "report",
+        None,
     );
     let decision = evaluate(
         &ReviewEvaluationInput {
@@ -539,6 +543,7 @@ fn review_budgets_are_scoped_to_the_review_cycle_not_the_session_total() {
                 repairs_used: 0,
                 initial_count: 1,
                 verification_count: 1,
+                original_fingerprints: std::collections::BTreeSet::new(),
             },
         )]),
         ..RunHistory::default()
@@ -556,6 +561,7 @@ fn review_budgets_are_scoped_to_the_review_cycle_not_the_session_total() {
                 repairs_used: 0,
                 initial_count: 1,
                 verification_count: 0,
+                original_fingerprints: std::collections::BTreeSet::new(),
             },
         )]),
     );
@@ -571,6 +577,7 @@ fn a_second_verification_in_the_same_cycle_is_state_corruption_but_other_cycles_
                 repairs_used: 0,
                 initial_count: 1,
                 verification_count: 1,
+                original_fingerprints: std::collections::BTreeSet::new(),
             },
         )]),
         ..RunHistory::default()
@@ -586,6 +593,7 @@ fn a_second_verification_in_the_same_cycle_is_state_corruption_but_other_cycles_
                 repairs_used: 0,
                 initial_count: 0,
                 verification_count: 1,
+                original_fingerprints: std::collections::BTreeSet::new(),
             },
         )]),
     );
@@ -597,6 +605,7 @@ fn a_second_verification_in_the_same_cycle_is_state_corruption_but_other_cycles_
                 repairs_used: 0,
                 initial_count: 0,
                 verification_count: 1,
+                original_fingerprints: std::collections::BTreeSet::new(),
             },
         )]),
         ..RunHistoryDelta::default()
@@ -623,6 +632,7 @@ fn corrupt_history_or_a_delta_that_exceeds_limits_is_fatal_state_corruption() {
                 repairs_used: 0,
                 initial_count: 2,
                 verification_count: 0,
+                original_fingerprints: std::collections::BTreeSet::new(),
             },
         )]),
         ..RunHistory::default()
@@ -646,6 +656,7 @@ fn corrupt_history_or_a_delta_that_exceeds_limits_is_fatal_state_corruption() {
                 repairs_used: 0,
                 initial_count: 1,
                 verification_count: 0,
+                original_fingerprints: std::collections::BTreeSet::new(),
             },
         )]),
         ..RunHistoryDelta::default()
@@ -658,6 +669,7 @@ fn corrupt_history_or_a_delta_that_exceeds_limits_is_fatal_state_corruption() {
                 repairs_used: 0,
                 initial_count: 1,
                 verification_count: 0,
+                original_fingerprints: std::collections::BTreeSet::new(),
             },
         )]),
         ..RunHistory::default()
@@ -690,6 +702,7 @@ fn run_history_delta_merges_sets_and_all_counters_with_checked_addition() {
                 repairs_used: 1,
                 initial_count: 1,
                 verification_count: 1,
+                original_fingerprints: std::collections::BTreeSet::new(),
             },
         )]),
     };
@@ -717,6 +730,7 @@ fn run_history_delta_merges_sets_and_all_counters_with_checked_addition() {
             repairs_used: 1,
             initial_count: 1,
             verification_count: 1,
+            original_fingerprints: std::collections::BTreeSet::new(),
         }
     );
 }
@@ -811,5 +825,124 @@ fn fatal_reason_display_and_reservation_state_have_stable_snake_case_wire_values
         serde_json::from_value::<RepairReservation>(serde_json::to_value(&reservation).unwrap())
             .unwrap(),
         reservation
+    );
+}
+
+/// REQ-TOP-04 场景 6（F-52）：Initial 相位把 actionable 指纹写入本 cycle 的
+/// original_fingerprints（复评 Verification scope 判重边界的权威来源）；
+/// Verification 相位不得改写该集合。
+#[test]
+fn initial_phase_records_cycle_original_fingerprints_for_the_verification_scope() {
+    let finding = structured_finding(
+        FindingClass::Repairable,
+        super::super::ReviewFindingCategory::ContractGap,
+        "WI-001.output_contracts[CT-001].capabilities",
+        "capability 缺口",
+    );
+    let initial = evaluate_findings(
+        &[],
+        std::slice::from_ref(&finding),
+        ReviewPhase::Initial,
+        &RunHistory::default(),
+        &RunBudgets::default(),
+    );
+    assert_eq!(
+        initial.outcome,
+        PlanOutcome::Repairable {
+            findings: vec![finding.clone()],
+        }
+    );
+    let cycle_delta = &initial.history_delta.review_cycles_to_add["draft:two"];
+    assert_eq!(cycle_delta.initial_count, 1);
+    assert_eq!(
+        cycle_delta.original_fingerprints,
+        BTreeSet::from([finding.fingerprint.clone()]),
+        "the initial phase must record the actionable fingerprints on the cycle"
+    );
+    assert_eq!(
+        initial.history_delta.seen_fingerprints_to_add,
+        BTreeSet::from([finding.fingerprint.clone()]),
+    );
+
+    let verification_invocation = ReviewInvocationScope::verification(
+        BTreeSet::from([finding.fingerprint.clone()]),
+        "repaired-revision",
+        "report",
+        None,
+    );
+    let verification = evaluate(
+        &ReviewEvaluationInput {
+            mechanical: &[],
+            review: std::slice::from_ref(&finding),
+            cycle_key: "draft:two",
+            phase: ReviewPhase::Verification,
+            invocation: &verification_invocation,
+        },
+        &RunHistory::default(),
+        &RunBudgets::default(),
+    );
+    let verification_cycle = &verification.history_delta.review_cycles_to_add["draft:two"];
+    assert_eq!(verification_cycle.verification_count, 1);
+    assert!(
+        verification_cycle.original_fingerprints.is_empty(),
+        "the verification phase must not rewrite the cycle's original finding set"
+    );
+}
+
+/// REQ-TOP-04 场景 6：merge_into 对 cycle original_fingerprints 做并集合并，
+/// 重复 delta 幂等（BTreeSet 语义，不产生重复成员）。
+#[test]
+fn merge_into_unions_cycle_original_fingerprints_idempotently() {
+    let first = structured_finding(
+        FindingClass::Repairable,
+        super::super::ReviewFindingCategory::ContractGap,
+        "WI-001.output_contracts[CT-001].capabilities",
+        "第一缺口",
+    )
+    .fingerprint;
+    let second = structured_finding(
+        FindingClass::Repairable,
+        super::super::ReviewFindingCategory::ContractGap,
+        "WI-002.output_contracts[CT-002].capabilities",
+        "第二缺口",
+    )
+    .fingerprint;
+    let mut history = RunHistory {
+        review_cycles: std::collections::BTreeMap::from([(
+            "draft:two".to_owned(),
+            ReviewCycleState {
+                initial_count: 1,
+                original_fingerprints: BTreeSet::from([first.clone()]),
+                ..ReviewCycleState::default()
+            },
+        )]),
+        ..RunHistory::default()
+    };
+    let delta = RunHistoryDelta {
+        review_cycles_to_add: std::collections::BTreeMap::from([(
+            "draft:two".to_owned(),
+            ReviewCycleState {
+                original_fingerprints: BTreeSet::from([first.clone(), second.clone()]),
+                ..ReviewCycleState::default()
+            },
+        )]),
+        ..RunHistoryDelta::default()
+    };
+    delta
+        .merge_into(&mut history, &RunBudgets::default())
+        .expect("merge original fingerprints");
+    assert_eq!(
+        history.review_cycles["draft:two"].original_fingerprints,
+        BTreeSet::from([first.clone(), second.clone()]),
+    );
+    delta
+        .merge_into(&mut history, &RunBudgets::default())
+        .expect("re-merge stays idempotent");
+    assert_eq!(
+        history.review_cycles["draft:two"]
+            .original_fingerprints
+            .len(),
+        2,
+        "duplicate deltas must not duplicate members"
     );
 }

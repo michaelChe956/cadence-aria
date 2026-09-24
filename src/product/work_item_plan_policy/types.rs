@@ -115,6 +115,11 @@ pub struct ReviewCycleState {
     pub repairs_used: u32,
     pub initial_count: u32,
     pub verification_count: u32,
+    /// REQ-TOP-04 场景 6（F-52）：初评相位的 actionable finding 指纹集合——
+    /// Verification scope 的 original_fingerprints 权威来源（复评判重边界）。
+    /// 旧 durable JSON 缺省空集（fail-safe：消费方回退 seen_fingerprints）。
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub original_fingerprints: BTreeSet<FindingFingerprint>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -200,6 +205,11 @@ pub enum ReviewInvocationScope {
         original_fingerprints: BTreeSet<FindingFingerprint>,
         repaired_revision_id: String,
         mechanical_report_ref: String,
+        /// REQ-TOP-04 场景 6/7（F-52）：本 invocation 链锚定的初评候选 ref
+        /// （cycle key 派生源）。纯元数据，不参与 scope_digest；旧 durable
+        /// 记录缺省 None → fail-safe 退化用 repaired_revision_id 派生 key。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cycle_anchor_revision_id: Option<String>,
         scope_digest: String,
     },
 }
@@ -218,9 +228,11 @@ impl ReviewInvocationScope {
         original_fingerprints: BTreeSet<FindingFingerprint>,
         repaired_revision_id: impl Into<String>,
         mechanical_report_ref: impl Into<String>,
+        cycle_anchor_revision_id: Option<String>,
     ) -> Self {
         let repaired_revision_id = repaired_revision_id.into();
         let mechanical_report_ref = mechanical_report_ref.into();
+        // anchor 是纯元数据，不参与 scope_digest（复评身份仍由指纹集+refs 锚定）。
         let scope_digest = scope_digest_for_verification(
             &original_fingerprints,
             &repaired_revision_id,
@@ -230,6 +242,7 @@ impl ReviewInvocationScope {
             original_fingerprints,
             repaired_revision_id,
             mechanical_report_ref,
+            cycle_anchor_revision_id,
             scope_digest,
         }
     }
@@ -291,6 +304,8 @@ enum RawReviewInvocationScope {
         original_fingerprints: BTreeSet<FindingFingerprint>,
         repaired_revision_id: String,
         mechanical_report_ref: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cycle_anchor_revision_id: Option<String>,
         scope_digest: String,
     },
 }
@@ -311,11 +326,13 @@ impl TryFrom<RawReviewInvocationScope> for ReviewInvocationScope {
                 original_fingerprints,
                 repaired_revision_id,
                 mechanical_report_ref,
+                cycle_anchor_revision_id,
                 scope_digest,
             } => Self::Verification {
                 original_fingerprints,
                 repaired_revision_id,
                 mechanical_report_ref,
+                cycle_anchor_revision_id,
                 scope_digest,
             },
         };

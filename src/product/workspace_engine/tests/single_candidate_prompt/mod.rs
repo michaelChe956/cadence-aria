@@ -223,7 +223,7 @@ async fn single_candidate_scope_uses_one_reviewer_cycle_key_across_ensure_and_po
         ReviewInvocationScope::initial(ir_ref.clone()),
         RunHistory {
             review_cycles: std::collections::BTreeMap::from([(
-                "review:reviewer-node".to_string(),
+                "sc:candidate:001".to_string(),
                 ReviewCycleState {
                     initial_count: 1,
                     ..ReviewCycleState::default()
@@ -303,7 +303,7 @@ async fn ensure_materializes_verification_scope_from_durable_same_node_cycle() {
         RunHistory {
             seen_fingerprints: BTreeSet::from([original_fingerprint.clone()]),
             review_cycles: std::collections::BTreeMap::from([(
-                "review:verification-node".to_string(),
+                "sc:candidate:ir".to_string(),
                 ReviewCycleState {
                     initial_count: 1,
                     ..ReviewCycleState::default()
@@ -343,6 +343,7 @@ async fn ensure_materializes_verification_scope_from_durable_same_node_cycle() {
         BTreeSet::from([original_fingerprint]),
         repaired_ir_ref,
         report_ref,
+        Some("first-review-ir".to_string()),
     );
     assert_eq!(
         engine.session().review_invocation_scope,
@@ -372,7 +373,7 @@ async fn single_candidate_verification_scope_requires_durable_mechanical_report_
         ReviewInvocationScope::initial("initial-ir"),
         RunHistory {
             review_cycles: std::collections::BTreeMap::from([(
-                "review:reviewer-node".to_string(),
+                "sc:candidate:ir".to_string(),
                 ReviewCycleState {
                     initial_count: 1,
                     ..ReviewCycleState::default()
@@ -420,7 +421,7 @@ async fn repaired_review_upgrades_initial_scope_from_durable_session_report_ref(
         ReviewInvocationScope::initial(ir_ref.clone()),
         RunHistory {
             review_cycles: std::collections::BTreeMap::from([(
-                "review:verification-node".to_string(),
+                "sc:candidate:001".to_string(),
                 ReviewCycleState {
                     initial_count: 1,
                     ..ReviewCycleState::default()

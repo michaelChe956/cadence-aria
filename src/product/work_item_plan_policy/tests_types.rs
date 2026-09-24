@@ -37,6 +37,7 @@ fn run_history_defaults_missing_fields_and_rejects_unknown_fields() {
             repairs_used: 0,
             initial_count: 1,
             verification_count: 1,
+            original_fingerprints: std::collections::BTreeSet::new(),
         },
         "old cycle JSON without repairs_used must recover a zero cycle budget"
     );
@@ -81,6 +82,7 @@ fn review_invocation_scope_digest_is_canonical_and_validated() {
         original_fingerprints,
         "revision-002",
         "mechanical-report-001",
+        None,
     );
     verification.validate_digest().unwrap();
 
@@ -88,6 +90,7 @@ fn review_invocation_scope_digest_is_canonical_and_validated() {
         BTreeSet::new(),
         "revision-002",
         "mechanical-report-001",
+        None,
     );
     assert_eq!(
         serde_json::to_value(&empty_verification).unwrap()["phase"],

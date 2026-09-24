@@ -15,7 +15,7 @@ fn verification_scope_missing_mechanical_report_fails_protocol_and_durably_marks
     persist_verification_scope(
         &lifecycle,
         &mut engine,
-        ReviewInvocationScope::verification(BTreeSet::new(), "ir-001", report_ref),
+        ReviewInvocationScope::verification(BTreeSet::new(), "ir-001", report_ref, None),
     );
 
     let action = engine
@@ -69,7 +69,7 @@ fn verification_scope_rejects_mismatched_mechanical_report_ref() {
     persist_verification_scope(
         &lifecycle,
         &mut engine,
-        ReviewInvocationScope::verification(BTreeSet::new(), ir_ref, wrong_report_ref),
+        ReviewInvocationScope::verification(BTreeSet::new(), ir_ref, wrong_report_ref, None),
     );
 
     let action = engine
@@ -120,7 +120,7 @@ fn verification_scope_rejects_report_version_mismatched_with_repaired_ir() {
     persist_verification_scope(
         &lifecycle,
         &mut engine,
-        ReviewInvocationScope::verification(BTreeSet::new(), ir_ref, report_ref),
+        ReviewInvocationScope::verification(BTreeSet::new(), ir_ref, report_ref, None),
     );
 
     let action = engine
@@ -171,7 +171,7 @@ fn verification_scope_rejects_report_hash_mismatched_with_repaired_ir() {
     persist_verification_scope(
         &lifecycle,
         &mut engine,
-        ReviewInvocationScope::verification(BTreeSet::new(), ir_ref, report_ref),
+        ReviewInvocationScope::verification(BTreeSet::new(), ir_ref, report_ref, None),
     );
 
     let action = engine
@@ -198,7 +198,7 @@ async fn verification_scope_parser_error_is_protocol_fatal_instead_of_needs_huma
     persist_verification_scope(
         &lifecycle,
         &mut engine,
-        ReviewInvocationScope::verification(BTreeSet::new(), ir_ref, report_ref),
+        ReviewInvocationScope::verification(BTreeSet::new(), ir_ref, report_ref, None),
     );
     let completion = ProviderCompletion::plain("reviewer omitted structured output", None);
 
@@ -238,6 +238,7 @@ fn single_candidate_scope_json_roundtrip_and_reconnect_preserve_digest() {
         BTreeSet::from([fingerprint("original finding")]),
         ir_ref,
         report_ref,
+        None,
     );
     let scope_json = serde_json::to_string(&scope).expect("serialize verification scope");
     let round_tripped_scope = serde_json::from_str::<ReviewInvocationScope>(&scope_json)
@@ -285,7 +286,7 @@ fn single_candidate_scope_phase_violations_fail_closed_for_initial_and_verificat
         ReviewInvocationScope::initial("revision-001"),
         RunHistory {
             review_cycles: std::collections::BTreeMap::from([(
-                "review:verification-node".to_string(),
+                "sc:candidate:001".to_string(),
                 ReviewCycleState {
                     initial_count: 1,
                     ..ReviewCycleState::default()
@@ -313,12 +314,33 @@ fn single_candidate_scope_phase_violations_fail_closed_for_initial_and_verificat
     persist_single_candidate_scope(
         &lifecycle,
         &mut engine,
-        ReviewInvocationScope::verification(BTreeSet::new(), "ir-001", "report-001"),
+        ReviewInvocationScope::verification(BTreeSet::new(), "ir-001", "report-001", None),
         RunHistory::default(),
     );
+    // 锚定语义下 Verification scope 即自声明复评相位（相位派生由 scope 决定，
+    // 不再由 cycle 计数推断）；不一致改由 immutable refs 绑定校验拦截——
+    // durable 候选 refs 缺席时复评必须 fail-closed。
+    {
+        let mut record = lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("load session");
+        record.plan_candidate_ir_ref = None;
+        record.mechanical_report_ref = None;
+        write_json(
+            &lifecycle
+                .app_paths()
+                .issue_root(&record.project_id, &record.issue_id)
+                .join("workspace-sessions")
+                .join(format!("{}.json", record.id)),
+            &record,
+        )
+        .expect("clear durable candidate refs");
+        engine.session.plan_candidate_ir_ref = None;
+        engine.session.mechanical_report_ref = None;
+    }
     let action = engine
         .work_item_policy_action("initial-node", &pass_verdict())
-        .expect("verification scope in initial must be routed");
+        .expect("verification scope without durable refs must be routed");
     assert!(matches!(
         action,
         RoutingAction::AbortFatal {
@@ -336,7 +358,8 @@ fn verification_scope_rejects_invalid_scope_digest() {
             "verification_scope_invalid_digest",
         );
     let (ir_ref, report_ref) = persist_verification_artifacts(&lifecycle, &plan_id);
-    let valid_scope = ReviewInvocationScope::verification(BTreeSet::new(), ir_ref, report_ref);
+    let valid_scope =
+        ReviewInvocationScope::verification(BTreeSet::new(), ir_ref, report_ref, None);
     let ReviewInvocationScope::Verification {
         repaired_revision_id,
         mechanical_report_ref,
@@ -352,12 +375,14 @@ fn verification_scope_rejects_invalid_scope_digest() {
             BTreeSet::new(),
             repaired_revision_id.clone(),
             mechanical_report_ref.clone(),
+            None,
         ),
     );
     engine.session.review_invocation_scope = Some(ReviewInvocationScope::Verification {
         original_fingerprints: BTreeSet::new(),
         repaired_revision_id,
         mechanical_report_ref,
+        cycle_anchor_revision_id: None,
         scope_digest: "review_scope_v1:invalid".to_string(),
     });
 
@@ -386,7 +411,12 @@ fn verification_scope_repeated_original_fingerprint_enters_human_without_second_
     persist_verification_scope(
         &lifecycle,
         &mut engine,
-        ReviewInvocationScope::verification(BTreeSet::from([original.clone()]), ir_ref, report_ref),
+        ReviewInvocationScope::verification(
+            BTreeSet::from([original.clone()]),
+            ir_ref,
+            report_ref,
+            None,
+        ),
     );
     engine
         .session
@@ -448,6 +478,7 @@ fn verification_scope_new_fingerprint_requires_human_without_second_repair() {
             BTreeSet::from([fingerprint("original finding")]),
             ir_ref,
             report_ref,
+            None,
         ),
         0,
     );

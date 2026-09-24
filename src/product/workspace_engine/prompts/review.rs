@@ -5,7 +5,8 @@ use super::history_compaction::{
 use super::review_context::{
     PlanReviewSource, SINGLE_CANDIDATE_REVIEW_REPETITION_TEACHING, append_review_context_section,
     append_single_candidate_contract_gap_teaching, load_plan_review_context,
-    single_candidate_dependency_graph, single_candidate_reviewer_coverage,
+    single_candidate_dependency_graph, single_candidate_previous_round_findings_section,
+    single_candidate_reviewer_coverage,
 };
 use super::reviewer_context_filter::reviewer_context_content;
 use super::*;
@@ -85,6 +86,7 @@ pub(crate) fn review_scope_instructions(scope: &ReviewInvocationScope) -> Result
             repaired_revision_id,
             mechanical_report_ref,
             scope_digest,
+            ..
         } if repaired_revision_id.trim().is_empty() => {
             Err("verification review scope requires an immutable repaired revision".to_string())
         }
@@ -93,6 +95,7 @@ pub(crate) fn review_scope_instructions(scope: &ReviewInvocationScope) -> Result
             repaired_revision_id,
             mechanical_report_ref,
             scope_digest,
+            ..
         } if mechanical_report_ref.trim().is_empty() => {
             Err("verification review scope requires a mechanical report".to_string())
         }
@@ -101,6 +104,7 @@ pub(crate) fn review_scope_instructions(scope: &ReviewInvocationScope) -> Result
             repaired_revision_id,
             mechanical_report_ref,
             scope_digest,
+            ..
         } => {
             let fingerprints = original_fingerprints
                 .iter()
@@ -610,6 +614,11 @@ impl WorkspaceEngine {
         }
         append_single_candidate_contract_gap_teaching(&mut prompt, &reviewer_coverage);
         prompt.push_str(SINGLE_CANDIDATE_REVIEW_REPETITION_TEACHING);
+        // REQ-TOP-04 场景 6（F-52 L2 前轮注入）：复评轮携带上一轮 finding 身份清单。
+        if let Some(previous_round) = single_candidate_previous_round_findings_section(self, ir_ref)
+        {
+            prompt.push_str(&previous_round);
+        }
         let nonce = structured_output_nonce();
         let contract = StructuredOutputContract {
             nonce: nonce.clone(),

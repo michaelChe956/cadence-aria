@@ -257,4 +257,123 @@ mod preflight_options_loop {
             "disabled option must not consume any repair budget"
         );
     }
+
+    /// C1 Task 4（REQ-TOP-04 场景 6；F-51×F-52 交叉回放）：options 缺口
+    /// 机械返修后，修复候选的复评落进锚定初评候选的同一 review cycle——
+    /// scope=Verification（anchor=初评候选 ref、original_fingerprints=初评
+    /// 机械缺口指纹集）、verification_count=1，终态后 cycle 关闭。
+    #[tokio::test]
+    async fn options_gap_repair_round_lands_in_verification_of_the_anchored_cycle() {
+        let (_tmp, lifecycle, _plan_id, mut engine) =
+            make_work_item_plan_engine_with_accepted_contract_drafts();
+        set_plan_options(&lifecycle, true);
+        author_round_record(&lifecycle, &mut engine);
+
+        // 第一轮：options 缺口 → 机械 verdict → TriggerAggregateRepair。
+        engine
+            .complete_single_candidate_work_item_plan_author(
+                no_integration_candidate(1),
+                "repo_fixture".to_string(),
+            )
+            .await
+            .expect("first gapped round completes");
+        let after_gap = lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("load gapped session");
+        let anchor_ref = after_gap
+            .plan_candidate_ir_ref
+            .clone()
+            .expect("anchor candidate ref");
+        let anchor_key = format!(
+            "sc:candidate:{}",
+            anchor_ref.rsplit('-').next().unwrap_or(&anchor_ref)
+        );
+        assert_eq!(
+            after_gap
+                .run_history
+                .review_cycles
+                .get(&anchor_key)
+                .map(|cycle| (cycle.initial_count, cycle.repairs_used)),
+            Some((1, 1)),
+            "the mechanical gap round must consume the anchored cycle's initial review"
+        );
+        assert!(
+            matches!(
+                after_gap.review_invocation_scope,
+                Some(ReviewInvocationScope::Initial { .. })
+            ),
+            "TriggerAggregateRepair keeps the invocation chain scope Initial"
+        );
+
+        // 修复轮：补上 integration item 的收敛候选 → reviewer 复评。
+        engine
+            .complete_single_candidate_work_item_plan_author(
+                REP4_FIXTURE.replace(
+                    "Integration levels API coverage",
+                    "Integration levels API coverage round-2",
+                ),
+                "repo_fixture".to_string(),
+            )
+            .await
+            .expect("fixed candidate must complete");
+        engine
+            .ensure_review_invocation_scope()
+            .await
+            .expect("the replay review must materialize the anchored Verification scope");
+        let scope = engine
+            .session()
+            .review_invocation_scope
+            .clone()
+            .expect("verification scope");
+        let ReviewInvocationScope::Verification {
+            original_fingerprints,
+            repaired_revision_id,
+            cycle_anchor_revision_id,
+            ..
+        } = &scope
+        else {
+            panic!("the replay scope must be Verification, got {scope:?}")
+        };
+        assert_eq!(
+            cycle_anchor_revision_id.as_deref(),
+            Some(anchor_ref.as_str()),
+            "the verification scope must anchor the initial gap-round candidate"
+        );
+        assert_ne!(
+            repaired_revision_id, &anchor_ref,
+            "the repaired revision must be the fixed round-two candidate"
+        );
+        let anchored_cycle = lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("reload session")
+            .run_history
+            .review_cycles
+            .get(&anchor_key)
+            .expect("anchored cycle")
+            .clone();
+        assert_eq!(
+            original_fingerprints, &anchored_cycle.original_fingerprints,
+            "the verification scope closes over the cycle's initial fingerprint set"
+        );
+        assert!(
+            !anchored_cycle.original_fingerprints.is_empty(),
+            "the options-gap fingerprints must be durable on the cycle"
+        );
+
+        complete_single_candidate_review(&mut engine, pass_verdict()).await;
+        let verified = lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("verification persisted");
+        let cycle = verified
+            .run_history
+            .review_cycles
+            .get(&anchor_key)
+            .expect("anchored cycle after verification");
+        assert_eq!(cycle.initial_count, 1);
+        assert_eq!(cycle.verification_count, 1);
+        assert!(
+            verified.review_invocation_scope.is_none(),
+            "the terminal action must close the anchored cycle"
+        );
+    }
 }

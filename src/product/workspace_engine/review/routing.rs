@@ -179,7 +179,11 @@ impl WorkspaceEngine {
         let envelope_value = serde_json::to_value(verdict).ok()?;
         let (cycle_key, single_candidate_phase) =
             if self.session.flow_kind == WorkItemPlanFlowKind::SingleCandidate {
-                match single_candidate_review_cycle(Some(node_id), &self.session.run_history) {
+                match single_candidate_review_cycle(
+                    self.session.review_invocation_scope.as_ref(),
+                    self.session.plan_candidate_ir_ref.as_deref(),
+                    &self.session.run_history,
+                ) {
                     Ok((cycle_key, phase)) => (cycle_key, Some(phase)),
                     Err(message) => {
                         let scope =

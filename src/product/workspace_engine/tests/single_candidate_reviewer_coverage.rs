@@ -180,6 +180,7 @@ fn single_candidate_reviewer_coverage_prompt_contains_projection_and_gap_teachin
         BTreeSet::new(),
         "ir-coverage",
         "report-coverage",
+        None,
     ));
     write_json(
         &lifecycle
