@@ -13,10 +13,7 @@ impl WorkspaceSessionManager {
     /// REQ-DLS-01：run 层的 lease 复核在状态锁内重读 attachment 当前 epoch，
     /// 不使用 socket 建立时刻的 epoch 快照——自愈授予或重新接管都会推进
     /// epoch，快照比对会把紧随其后的 run 写以旧 epoch 误拒。
-    fn attachment_holds_lease(
-        state: &super::ManagerState,
-        connection_id: Option<&str>,
-    ) -> bool {
+    fn attachment_holds_lease(state: &super::ManagerState, connection_id: Option<&str>) -> bool {
         let Some(connection_id) = connection_id else {
             return true;
         };
@@ -49,7 +46,6 @@ impl WorkspaceSessionManager {
         self.start_run_from_attachment(None, requested_node_id)
             .await
     }
-
 
     /// 在取得 engine 锁前，以 attachment epoch 核验 lease 并立即 supersede 当前
     /// run。故已被接管的迟到写永远不会取消 run，同时保留同一 holder 覆盖流式 run 的
