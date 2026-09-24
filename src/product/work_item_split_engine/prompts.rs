@@ -93,6 +93,14 @@ pub(crate) const WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES: usize = 15_600;
 // key 如 requested_fields 会被编译器拒），净增 132B。预算维持 22,000（已是整百级，
 // 余量仍为正，先例 2026-09-06/09-07 同口径）；实测 21,978/余 22B（最大 fixture
 // prompt_contract_weak_model，其余 fixture 余 30~40B）。
+// 第 13 次评估（2026-09-24，F-48 ears-delivery-normalization）：CJK 空格规则补
+// `」` 收尾判例（合法 `WHEN 点击「重开」 THE SYSTEM SHALL 清空` / 非法
+// `WHEN 点击「重开」THE SYSTEM SHALL 清空`），净增 150B；因红线余量仅 22B，同批在
+// 同一 grammar 块内删除/压缩语义重复表述（删「标题 `# Work Item Plan`；item …」
+// 冗余行——document_heading/item_heading_prefix/item_id_suffix/item_id_prefix 四个
+// 语法常量在「所有标题必须逐字使用上列英文名…」行与 dependency_syntax_rules 行另有
+// 注入锚点；删紧随 EARS 模板的重复注解「（WHEN、THE SYSTEM SHALL）」；压缩
+// Blockers 尾句与 section 序号措辞），共 151B。净 −1B，红线保持 22,000 不变。
 pub(crate) const WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES: usize = 22_000;
 
 /// SC markdown author prompt 的尾部输出指令。首轮与修订轮共享同一段字节；
@@ -169,15 +177,14 @@ pub(crate) fn work_item_plan_markdown_grammar() -> String {
     format!(
         "[markdown_grammar]\n\
          输出的第一行必须精确为 `{document_heading}`；之前不得有任何前言、解释、宣布、空白行或代码围栏（```）。\n\
-         标题 `{document_heading}`；item `{item_heading_prefix}{item_id_suffix}: <title>`（ID 前缀 `{item_id_prefix}`）。\n\
          所有标题必须逐字使用上列英文名（一级 `# Work Item Plan`、二级 `## Work Item WI-<三位数字>: <title>`、三级 section 名恰为上列 13 个英文名之一）；禁止翻译标题、禁止附加中文注或括号。\n\
          输出保持精炼：每个 statement 恰好一句话；同一信息不得在多个 section 重复；不写解释性散文或总结段——机械校验只消费结构化字段。\n\
-         section 按序且各一次：{structured_sections}；自由文本仅 `{free_text_sections}`（`{free_text_policy}`）。\n\
-         Blockers 为空时保留空 section（### Blockers 后直接下一 section），表示无 blocker；若存在 blocker 字段则仍须完整填写 reason_code、route、target_contract_refs。\n\
+         section 按序各一次：{structured_sections}；自由文本仅 `{free_text_sections}`（`{free_text_policy}`）。\n\
+         Blockers 为空时保留空 section（### Blockers 后直接下一 section）；存在 blocker 字段时须完整填写 reason_code、route、target_contract_refs。\n\
          Verification.command 直接声明，将按声明执行；命令证据不足时改用 manual_instruction 或 blocker，禁止臆造命令。\n\
-         行 `{structured_line}`；ID 行 `{identified_line}`；statement `{ears_template}`（{ears_keywords}）。\n\
+         行 `{structured_line}`；ID 行 `{identified_line}`；statement `{ears_template}`。\n\
          task_id、criterion_id、check_id 在整份文档内全局唯一且全局递增——第二个 Work Item 的任务从 TASK-004、验收从 AC-004 继续（假设前一 item 用了 TASK-001~003），不得在每个 item 内重新从 001 编号；contract_id 同理在整份文档内全局唯一，不得重复。\n\
-         CJK 空格规则：WHEN 与条件文本之间、条件文本与 THE SYSTEM SHALL 之间必须各有一个半角空格；条件为中文时同样必须（正例：`WHEN 服务读取静态文件 THE SYSTEM SHALL 返回五项记录`；反例：`WHEN服务读取静态文件 THE SYSTEM SHALL 返回五项记录` 非法）。
+         CJK 空格规则：WHEN 与条件文本之间、条件文本与 THE SYSTEM SHALL 之间必须各有一个半角空格；条件为中文时同样必须（正例：`WHEN 服务读取静态文件 THE SYSTEM SHALL 返回五项记录`；反例：`WHEN服务读取静态文件 THE SYSTEM SHALL 返回五项记录` 非法）。`」` 收尾时同样必须（`WHEN 点击「重开」 THE SYSTEM SHALL 清空` 合法；`WHEN 点击「重开」THE SYSTEM SHALL 清空` 非法）。
 \
          Inputs 四行且 contract_id 首行：provider_logical_work_item_id、required_capabilities、compatibility_policy（require_all|require_any）各一行；四行缺一不可。\n\
          示例：若 WI-002 依赖 WI-001 的输出，则 WI-002 的 Inputs 写：\n\
@@ -194,16 +201,12 @@ pub(crate) fn work_item_plan_markdown_grammar() -> String {
          值域：kind={item_kinds}；compatibility_policy={compatibility_policies}；required_evidence={evidence_kinds}；route={blocker_routes}。\n\
          未知结构化 key 必须拒绝（{unknown_key_policy}）；未知 section、非法 ID、除空 Blockers 外的缺 section/field、EARS 非法均失败关闭；诊断：{diagnostic_codes}。\n\n",
         document_heading = grammar::DOCUMENT_HEADING,
-        item_heading_prefix = grammar::ITEM_HEADING_PREFIX,
-        item_id_suffix = grammar::ITEM_ID_SUFFIX,
-        item_id_prefix = grammar::ITEM_ID_PREFIX,
         structured_sections = grammar::STRUCTURED_SECTIONS.join("、"),
         free_text_sections = grammar::FREE_TEXT_SECTIONS.join("、"),
         free_text_policy = grammar::FREE_TEXT_SECTION_POLICY,
         structured_line = grammar::STRUCTURED_LINE_PREFIX,
         identified_line = grammar::IDENTIFIED_LINE_PREFIX,
         ears_template = grammar::EARS_STATEMENT_TEMPLATE,
-        ears_keywords = grammar::EARS_KEYWORDS.join("、"),
         structured_keys = grammar::STRUCTURED_KEYS.join("、"),
         item_kinds = grammar::ALLOWED_ITEM_KINDS.join("、"),
         compatibility_policies = grammar::ALLOWED_COMPATIBILITY_POLICIES.join("、"),
