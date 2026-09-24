@@ -407,6 +407,15 @@ describe("ChatCockpitPage", () => {
           expect(button).toBeEnabled();
         }
 
+        // F-50 视觉 v2 fix2：钻取决策面（产物面板动作位）终止钮与门卡/
+        // 收件箱先例一致走 ghost（无底描边透明红字），不与「确认定稿」抢权重。
+        const panelTerminate = within(
+          screen.getByTestId("artifact-review-panel"),
+        ).getByRole("button", { name: "终止此门" });
+        expect(panelTerminate.className).toContain("bg-transparent");
+        expect(panelTerminate.className).toContain("text-red-600");
+        expect(panelTerminate.className).not.toContain("bg-white");
+
         // 对话流门卡。
         await user.click(screen.getByTestId("cockpit-conversation-tab"));
         const gateCard = screen.getByTestId("gate-prompt-entry");

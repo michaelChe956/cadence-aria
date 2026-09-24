@@ -461,6 +461,7 @@ function HardErrorInboxRow({
               ) : null}
               {/* 裁决 4：terminate → abandon_human_gate（门级），命名显式带作用域。 */}
               <ConfirmTwiceButton
+                variant="ghost"
                 label={GATE_TERMINATE_BUTTON_LABEL}
                 confirmLabel={GATE_TERMINATE_CONFIRM_LABEL}
                 onConfirm={actions.terminate}

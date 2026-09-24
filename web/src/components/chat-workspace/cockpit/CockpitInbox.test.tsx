@@ -840,6 +840,22 @@ describe("CockpitInbox 视觉 v2", () => {
     expect(terminate.className).not.toContain("bg-white");
   });
 
+  it("错误条终止钮同样走 ghost 形态：红字透明底，不与重试抢权重（F-50 fix2）", () => {
+    render(
+      <CockpitInbox
+        items={[staleLeaseErrorItem]}
+        actions={mockActions()}
+        actionableSessionId="session_001"
+      />,
+    );
+
+    const row = screen.getByTestId("cockpit-inbox-item-hard_error");
+    const terminate = within(row).getByRole("button", { name: "终止此门" });
+    expect(terminate.className).toContain("bg-transparent");
+    expect(terminate.className).toContain("text-red-600");
+    expect(terminate.className).not.toContain("bg-white");
+  });
+
   it("批量勾选行为独立 text-sm 行", () => {
     render(
       <CockpitInbox

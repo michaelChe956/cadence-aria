@@ -878,6 +878,7 @@ export function ChatCockpitPage({
                       </button>
                     ) : null}
                     <ConfirmTwiceButton
+                      variant="ghost"
                       label={GATE_TERMINATE_BUTTON_LABEL}
                       confirmLabel={GATE_TERMINATE_CONFIRM_LABEL}
                       onConfirm={actions.terminate}
