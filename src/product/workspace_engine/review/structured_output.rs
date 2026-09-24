@@ -147,6 +147,65 @@ impl WorkspaceEngine {
             )
     }
 
+    /// C2（REQ-HGC-03 场景 2/F-52 R6）：同 invocation 恰一次静默重试的共享
+    /// 收尾（直连与 gateway 两路 drive 镜像复用；会话由调用方以同一 input
+    /// 启动后传入）——驱动重试会话后：解析成功则正常消费并带
+    /// attempted/succeeded diagnostic；provider 失败或二次解析失败则保原始
+    /// diagnostic 进人工（attempted=true，routing 侧对该降级轮零计数）。
+    /// Aborted 仅静默返回（调用臂后无后续语句，语义与整体 return 等价）。
+    pub(crate) async fn complete_silent_output_retry(
+        &mut self,
+        first_completion: &ProviderCompletion,
+        first_error: &ReviewCompletionError,
+        retry_session: Result<
+            ProviderSession,
+            crate::cross_cutting::provider_adapter::ProviderAdapterError,
+        >,
+        command_rx: &mut mpsc::Receiver<ProviderCommand>,
+        reviewer: &ProviderName,
+    ) {
+        let retry_completion = match self
+            .drive_reviewer_provider_session_once(retry_session, command_rx, reviewer)
+            .await
+        {
+            ReviewProviderRunResult::Completed(completion) => completion,
+            ReviewProviderRunResult::Aborted => return,
+            ReviewProviderRunResult::Failed(_) => {
+                let verdict = fallback_review_verdict(first_completion, first_error, true);
+                self.complete_review(first_completion.clone(), verdict).await;
+                return;
+            }
+        };
+        match self.parse_review_completion_for_active_node(&retry_completion) {
+            Ok(mut verdict) => {
+                verdict.structured_output_diagnostic = Some(success_diagnostic(first_error));
+                let normalized = ProviderCompletion {
+                    full_output: format!(
+                        "{}\n{}",
+                        first_completion.full_output, retry_completion.full_output
+                    ),
+                    readable_output: first_completion.readable_output.clone(),
+                    structured_output: retry_completion.structured_output,
+                    provider_session_id: retry_completion.provider_session_id,
+                };
+                self.complete_review(normalized, verdict).await;
+            }
+            Err(second_error) => {
+                let normalized = ProviderCompletion {
+                    full_output: format!(
+                        "{}\n{}",
+                        first_completion.full_output, retry_completion.full_output
+                    ),
+                    readable_output: first_completion.readable_output.clone(),
+                    structured_output: retry_completion.structured_output,
+                    provider_session_id: retry_completion.provider_session_id,
+                };
+                let verdict = fallback_review_verdict(&normalized, &second_error, true);
+                self.complete_review(normalized, verdict).await;
+            }
+        }
+    }
+
     fn verification_scope_error_if_needed(
         &self,
         error: ReviewCompletionError,

@@ -227,48 +227,14 @@ impl WorkspaceEngine {
                     ..input.clone()
                 };
                 let retry_session = provider.start(retry_input, self.cancel.clone()).await;
-                let retry_completion = match self
-                    .drive_reviewer_provider_session_once(retry_session, &mut command_rx, &reviewer)
-                    .await
-                {
-                    ReviewProviderRunResult::Completed(completion) => completion,
-                    ReviewProviderRunResult::Aborted => return,
-                    ReviewProviderRunResult::Failed(_) => {
-                        let verdict =
-                            fallback_review_verdict(&first_completion, &first_error, true);
-                        self.complete_review(first_completion, verdict).await;
-                        return;
-                    }
-                };
-                match self.parse_review_completion_for_active_node(&retry_completion) {
-                    Ok(mut verdict) => {
-                        verdict.structured_output_diagnostic =
-                            Some(success_diagnostic(&first_error));
-                        let normalized = ProviderCompletion {
-                            full_output: format!(
-                                "{}\n{}",
-                                first_completion.full_output, retry_completion.full_output
-                            ),
-                            readable_output: first_completion.readable_output,
-                            structured_output: retry_completion.structured_output,
-                            provider_session_id: retry_completion.provider_session_id,
-                        };
-                        self.complete_review(normalized, verdict).await;
-                    }
-                    Err(second_error) => {
-                        let normalized = ProviderCompletion {
-                            full_output: format!(
-                                "{}\n{}",
-                                first_completion.full_output, retry_completion.full_output
-                            ),
-                            readable_output: first_completion.readable_output,
-                            structured_output: retry_completion.structured_output,
-                            provider_session_id: retry_completion.provider_session_id,
-                        };
-                        let verdict = fallback_review_verdict(&normalized, &second_error, true);
-                        self.complete_review(normalized, verdict).await;
-                    }
-                }
+                self.complete_silent_output_retry(
+                    &first_completion,
+                    &first_error,
+                    retry_session,
+                    &mut command_rx,
+                    &reviewer,
+                )
+                .await;
             }
             Err(error) => {
                 let verdict = fallback_review_verdict(&first_completion, &error, false);
@@ -523,48 +489,14 @@ impl WorkspaceEngine {
                     self.cancel.clone(),
                 )
                 .await;
-                let retry_completion = match self
-                    .drive_reviewer_provider_session_once(retry_session, &mut command_rx, &reviewer)
-                    .await
-                {
-                    ReviewProviderRunResult::Completed(completion) => completion,
-                    ReviewProviderRunResult::Aborted => return,
-                    ReviewProviderRunResult::Failed(_) => {
-                        let verdict =
-                            fallback_review_verdict(&first_completion, &first_error, true);
-                        self.complete_review(first_completion, verdict).await;
-                        return;
-                    }
-                };
-                match self.parse_review_completion_for_active_node(&retry_completion) {
-                    Ok(mut verdict) => {
-                        verdict.structured_output_diagnostic =
-                            Some(success_diagnostic(&first_error));
-                        let normalized = ProviderCompletion {
-                            full_output: format!(
-                                "{}\n{}",
-                                first_completion.full_output, retry_completion.full_output
-                            ),
-                            readable_output: first_completion.readable_output,
-                            structured_output: retry_completion.structured_output,
-                            provider_session_id: retry_completion.provider_session_id,
-                        };
-                        self.complete_review(normalized, verdict).await;
-                    }
-                    Err(second_error) => {
-                        let normalized = ProviderCompletion {
-                            full_output: format!(
-                                "{}\n{}",
-                                first_completion.full_output, retry_completion.full_output
-                            ),
-                            readable_output: first_completion.readable_output,
-                            structured_output: retry_completion.structured_output,
-                            provider_session_id: retry_completion.provider_session_id,
-                        };
-                        let verdict = fallback_review_verdict(&normalized, &second_error, true);
-                        self.complete_review(normalized, verdict).await;
-                    }
-                }
+                self.complete_silent_output_retry(
+                    &first_completion,
+                    &first_error,
+                    retry_session,
+                    &mut command_rx,
+                    &reviewer,
+                )
+                .await;
             }
             Err(error) => {
                 let verdict = fallback_review_verdict(&first_completion, &error, false);
