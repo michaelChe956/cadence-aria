@@ -184,6 +184,16 @@ function TimelineFlowTile({
   const title = displayTitleForNode(node);
   const stateLabel = flowRow ? FLOW_STATE_LABELS[flowRow.state] : node.status;
   const tokenUsage = nodeTokenUsage(nodeDetail);
+  // F-47 REQ-NDR-03：detail 尚未水合时 token 位此前直接不渲染，用户无法区分
+  //「还没读到」与「确实没有 usage」。判据是 store 占位壳标记（`emptyNodeDetail`
+  // 打的 `hydration_pending`，见 TimelineNodeDetail 类型注释）：已水合 detail
+  //（REST / 快照内联）即便没有任何 usage 事件也属「确认缺失」终态，不再占位；
+  // 仅对占位壳里带 provider 用量位（`agent_role` 非空）的节点占位——门卡/上下文类
+  // 节点本就不产生 usage 事件，不该挂一个永不结算的「读取中」。
+  const tokenPending =
+    tokenUsage === null &&
+    nodeDetail?.hydration_pending === true &&
+    nodeDetail.agent_role !== null;
   const startedAt = clockTimeText(flowRow?.started_at ?? node.started_at);
   const completedAt = clockTimeText(node.completed_at);
   // 方块的时间读取取 flowRow（与执行流同源）；缺 flowRow 时回退节点自身的耗时。
@@ -284,7 +294,9 @@ function TimelineFlowTile({
       </span>
       {/* F-40：token 三段数（↙输入/输出/缓存）此前与时间/耗时同行，左侧窄栏方块里
           顶穿右边界、尾字被裁。裁决改为独立一行（时间/耗时行下方）——行内允许换行
-          吸收极长读数，不截数、不裁切；无 usage 事件时不渲染空行。 */}
+          吸收极长读数，不截数、不裁切；无 usage 事件时不渲染空行。
+          F-47（REQ-NDR-03）：detail 未水合时同一位置渲染 pending 占位，
+          水合完成（数值或确认缺失）后转终态。 */}
       {tokenUsage ? (
         <span
           data-testid={`flow-token-row-${node.node_type}`}
@@ -296,6 +308,19 @@ function TimelineFlowTile({
             className="aria-mono aria-num min-w-0 break-words text-[10px] text-[var(--aria-ink-muted)]"
           >
             {tokenUsage.compact}
+          </span>
+        </span>
+      ) : tokenPending ? (
+        <span
+          data-testid={`flow-token-row-${node.node_type}`}
+          className="flex min-w-0 flex-wrap items-center gap-x-1.5"
+        >
+          <span
+            data-testid={`flow-tokens-pending-${node.node_type}`}
+            aria-label="Tokens 读取中"
+            className="aria-mono aria-num min-w-0 break-words text-[10px] text-[var(--aria-ink-muted)]"
+          >
+            ↘读取中…
           </span>
         </span>
       ) : null}

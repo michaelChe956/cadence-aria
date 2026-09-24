@@ -1,6 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { ExecutionEvent, TimelineNode, TimelineNodeDetail } from "../../state/workspace-ws-store";
+import { emptyNodeDetail } from "../../state/workspace-ws-store-helpers";
 import type { CockpitFlowState } from "../../state/workspace-cockpit-projection";
 import { TimelineNodeList } from "./TimelineNodeList";
 
@@ -150,6 +151,11 @@ function usageEvent(payload: Record<string, number>): ExecutionEvent {
     title: "usage",
     output: JSON.stringify(payload),
   };
+}
+
+/** detail 尚未水合时的真实形状：store 的占位壳（`emptyNodeDetail`）。 */
+function placeholderNodeDetail(node: TimelineNode): TimelineNodeDetail {
+  return emptyNodeDetail(node.node_id, { sessionId: "session-flow", node });
 }
 
 describe("TimelineNodeList flow variant", () => {
@@ -563,5 +569,97 @@ describe("TimelineNodeList flow variant", () => {
       />,
     );
     expect(screen.getAllByTestId("timeline-node-reviewer_run")).toHaveLength(1);
+  });
+
+  // F-47 REQ-NDR-03：detail 未水合时 token 位此前直接不渲染，用户无法区分
+  //「还没读到」与「确实没有 usage」→ 未水合时改为 pending 占位。
+  it("shows a pending token slot while the node detail is still unhydrated", () => {
+    render(
+      <TimelineNodeList
+        nodes={[flowNode]}
+        activeNodeId={null}
+        selectedNodeId={null}
+        onSelectNode={vi.fn()}
+        variant="flow"
+        flowRows={[flowRows[0]!]}
+        nodeDetails={{ "node-flow-1": placeholderNodeDetail(flowNode) }}
+      />,
+    );
+
+    expect(screen.getByTestId("flow-tokens-pending-author_run")).toHaveTextContent("读取中");
+    expect(screen.queryByTestId("flow-tokens-author_run")).toBeNull();
+  });
+
+  // Review Focus 3：占位只在 detail 未到时出现——水合一到即转终态（数值或确认缺失），
+  // 不得残留 pending（水合极快时占位须一闪即走）。
+  it("turns the token slot terminal once the detail arrives", () => {
+    const { rerender } = render(
+      <TimelineNodeList
+        nodes={[flowNode]}
+        activeNodeId={null}
+        selectedNodeId={null}
+        onSelectNode={vi.fn()}
+        variant="flow"
+        flowRows={[flowRows[0]!]}
+        nodeDetails={{ "node-flow-1": placeholderNodeDetail(flowNode) }}
+      />,
+    );
+    expect(screen.getByTestId("flow-tokens-pending-author_run")).toBeInTheDocument();
+
+    rerender(
+      <TimelineNodeList
+        nodes={[flowNode]}
+        activeNodeId={null}
+        selectedNodeId={null}
+        onSelectNode={vi.fn()}
+        variant="flow"
+        flowRows={[flowRows[0]!]}
+        nodeDetails={{
+          "node-flow-1": nodeDetail({
+            execution_events: [usageEvent({ input_tokens: 1_200, output_tokens: 300 })],
+          }),
+        }}
+      />,
+    );
+    expect(screen.queryByTestId("flow-tokens-pending-author_run")).toBeNull();
+    expect(screen.getByTestId("flow-tokens-author_run")).toHaveTextContent("↘1.2k/300");
+
+    // 已水合但无 usage 事件 → 确认缺失终态：既不显示占位也不显示数值。
+    rerender(
+      <TimelineNodeList
+        nodes={[flowNode]}
+        activeNodeId={null}
+        selectedNodeId={null}
+        onSelectNode={vi.fn()}
+        variant="flow"
+        flowRows={[flowRows[0]!]}
+        nodeDetails={{ "node-flow-1": nodeDetail({ execution_events: [] }) }}
+      />,
+    );
+    expect(screen.queryByTestId("flow-tokens-pending-author_run")).toBeNull();
+    expect(screen.queryByTestId("flow-tokens-author_run")).toBeNull();
+  });
+
+  // 无 provider 用量位的节点（门卡等）不占位——它们的 detail 本就不产生 usage 事件。
+  it("shows no pending token slot for nodes without a provider usage slot", () => {
+    const gateNode = timelineNode({
+      node_id: "node-flow-2",
+      node_type: "human_confirm",
+      agent: null,
+    });
+    render(
+      <TimelineNodeList
+        nodes={[gateNode]}
+        activeNodeId={null}
+        selectedNodeId={null}
+        onSelectNode={vi.fn()}
+        variant="flow"
+        flowRows={[{ ...flowRows[1]!, node_id: "node-flow-2" }]}
+        nodeDetails={{ "node-flow-2": placeholderNodeDetail(gateNode) }}
+      />,
+    );
+
+    expect(screen.queryByTestId("flow-tokens-pending-human_confirm")).toBeNull();
+    expect(screen.queryByTestId("flow-token-row-human_confirm")).toBeNull();
   });
 });
