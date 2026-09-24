@@ -11,6 +11,7 @@ mod full_lowering_validator;
 mod heading_normalization;
 mod null_placeholder_command;
 mod publish_freshness;
+mod repeated_field_accumulation;
 mod reviewer_finding_channel_boundary;
 
 fn assert_ast_traits<T: std::fmt::Debug + Clone + PartialEq + Eq>() {}

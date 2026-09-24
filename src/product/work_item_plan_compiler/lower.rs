@@ -511,7 +511,7 @@ fn lower_inputs(
             }
             "required_capabilities" => {
                 if let Some(entry) = current.as_mut() {
-                    entry.2 = split_value(&field.value.value);
+                    append_first_seen(&mut entry.2, split_value(&field.value.value));
                 }
             }
             "compatibility_policy" => {
@@ -584,7 +584,7 @@ fn lower_outputs(
         } else if field.key.value == "capabilities"
             && let Some((_, capabilities)) = current.as_mut()
         {
-            *capabilities = split_value(&field.value.value);
+            append_first_seen(capabilities, split_value(&field.value.value));
         }
     }
     if let Some((contract_id, capabilities)) = current {
@@ -789,6 +789,18 @@ fn split_value(value: &str) -> Vec<String> {
         .filter(|value| !value.is_empty() && *value != "[]")
         .map(str::to_string)
         .collect()
+}
+
+/// 重复字段累积语义（REQ-WSC-02 / F-52）：同一 contract 的重复
+/// `capabilities`/`required_capabilities` 行按出现顺序 append，完全相同
+/// （字节级）的值仅保留首次出现。不排序、不改写值形态——去重只消除完全
+/// 相同的重复元素，不制造能力。
+fn append_first_seen(target: &mut Vec<String>, incoming: Vec<String>) {
+    for value in incoming {
+        if !target.contains(&value) {
+            target.push(value);
+        }
+    }
 }
 fn parse_compatibility_policy(
     value: &str,
