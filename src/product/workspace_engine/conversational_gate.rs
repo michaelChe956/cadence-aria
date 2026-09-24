@@ -533,6 +533,9 @@ impl super::WorkspaceEngine {
                 source_story_spec_ids: &plan.source_story_spec_ids,
                 source_design_spec_ids: &plan.source_design_spec_ids,
                 repository_profile: repository_profile.as_ref(),
+                // F-51：三生产路径之二（门内人工修订）——存储 options 显式提供。
+                plan_options: &plan.options,
+                baseline_tree: None,
                 now: &validation_now,
             },
         ) {

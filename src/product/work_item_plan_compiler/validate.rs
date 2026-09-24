@@ -4,8 +4,8 @@
 //! 规则全部复用 `work_item_split_validator`。
 
 use crate::product::models::{
-    IssueWorkItemDependencyEdge, IssueWorkItemPlan, IssueWorkItemPlanOptions,
-    IssueWorkItemPlanStatus, LifecycleWorkItemRecord, RepositoryProfileConfidence,
+    IssueWorkItemDependencyEdge, IssueWorkItemPlan, IssueWorkItemPlanStatus,
+    LifecycleWorkItemRecord, RepositoryProfileConfidence,
     VerificationCommand, VerificationCommandSafety, VerificationCommandSource,
     VerificationFallbackPolicy, VerificationManualCheck, VerificationPlan, VerificationScope,
     WorkItemContextBudget, WorkItemDraftCandidate, WorkItemKind, WorkItemOutline,
@@ -78,11 +78,25 @@ pub fn validate_plan_candidate_ir(
         compiler_version: ir.compiler_version.clone(),
         findings,
     };
-    if report.has_errors() {
+    // F-51（REQ-WSC-02 场景 11-13）：options×items 三族与 AC 路径×基线树核对
+    // 属 preflight 族——Error 级结果保留在报告里、经既有机械 ReviewVerdict
+    // 回灌修订（contract_prerevision 先例），不得把 author 轮次硬失败；结构性
+    // Error（grammar/契约图等）保持 fail-closed 原样。
+    if report
+        .findings
+        .iter()
+        .any(|finding| {
+            finding.severity == WorkItemSplitFindingSeverity::Error
+                && !super::types::PREFLIGHT_FINDING_CODES.contains(&finding.code.as_str())
+        })
+    {
         return Err(report
             .findings
             .iter()
-            .filter(|finding| finding.severity == WorkItemSplitFindingSeverity::Error)
+            .filter(|finding| {
+                finding.severity == WorkItemSplitFindingSeverity::Error
+                    && !super::types::PREFLIGHT_FINDING_CODES.contains(&finding.code.as_str())
+            })
             .map(validator_diagnostic)
             .collect());
     }
@@ -210,23 +224,9 @@ fn project_issue_work_item_plan(
         issue_id: context.issue_id.to_string(),
         source_story_spec_ids: context.source_story_spec_ids.to_vec(),
         source_design_spec_ids: context.source_design_spec_ids.to_vec(),
-        options: IssueWorkItemPlanOptions {
-            include_integration_tests: ir.items.iter().any(|item| {
-                work_item_kind(&item.contract.identity.kind) == WorkItemKind::Integration
-            }),
-            include_e2e_tests: ir
-                .items
-                .iter()
-                .any(|item| work_item_kind(&item.contract.identity.kind) == WorkItemKind::E2e),
-            force_frontend_backend_split: ir
-                .items
-                .iter()
-                .any(|item| work_item_kind(&item.contract.identity.kind) == WorkItemKind::Backend)
-                && ir.items.iter().any(|item| {
-                    work_item_kind(&item.contract.identity.kind) == WorkItemKind::Frontend
-                }),
-            require_execution_plan_confirm: false,
-        },
+        // F-51：候选校验消费存储 options（context 显式提供），不得从 IR items
+        // 反推——反推使三族 options 预检结构性不可触发。
+        options: context.plan_options.clone(),
         status: IssueWorkItemPlanStatus::Draft,
         work_item_ids,
         repository_profile_ref: context.repository_profile.map(|profile| profile.id.clone()),

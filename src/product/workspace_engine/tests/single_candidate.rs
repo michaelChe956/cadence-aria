@@ -1029,3 +1029,5 @@ async fn sc_legacy_revise_gate_ignores_new_findings_and_advisory_only_repetition
 include!("single_candidate/contract_prerevision.rs");
 // DEF-PVR-ALL 确定性 capability 补齐器（contract_autorepair）用例拆分至子文件内联。
 include!("single_candidate/contract_autorepair.rs");
+// C1 Task 1 options 预检回灌链用例拆分至子文件内联。
+include!("single_candidate/preflight_options_loop.rs");

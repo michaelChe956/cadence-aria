@@ -230,6 +230,9 @@ fn prevalidate_plan_candidate_ir(
             source_story_spec_ids: &request.story_spec_ids,
             source_design_spec_ids: &request.design_spec_ids,
             repository_profile: repository_profile.as_ref(),
+            // F-51：三生产路径之三（运行期预校验）——同一 plan record options。
+            plan_options: &plan.options,
+            baseline_tree: None,
             now: &validation_now,
         },
     );

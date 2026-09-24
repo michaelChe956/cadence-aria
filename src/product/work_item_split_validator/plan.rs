@@ -276,7 +276,9 @@ pub(crate) fn validate_semantics(
     if plan.options.force_frontend_backend_split && (!has_backend || !has_frontend) {
         findings.push(error(
             "frontend_backend_split_required",
-            "force_frontend_backend_split is enabled but the plan does not contain both a backend and a frontend work item",
+            format!(
+                "force_frontend_backend_split is enabled but the plan does not contain both a backend and a frontend work item；修复动作：{FRONTEND_BACKEND_SPLIT_REQUIRED_REPAIR_ACTION}"
+            ),
             Vec::new(),
         ));
     }
@@ -284,7 +286,9 @@ pub(crate) fn validate_semantics(
     if plan.options.include_integration_tests && !has_integration {
         findings.push(error(
             "integration_work_item_required",
-            "include_integration_tests is enabled but the plan does not contain an integration work item",
+            format!(
+                "include_integration_tests is enabled but the plan does not contain an integration work item；修复动作：{INTEGRATION_WORK_ITEM_REQUIRED_REPAIR_ACTION}"
+            ),
             Vec::new(),
         ));
     }
@@ -292,7 +296,9 @@ pub(crate) fn validate_semantics(
     if plan.options.include_e2e_tests && !has_e2e {
         findings.push(error(
             "e2e_work_item_required",
-            "include_e2e_tests is enabled but the plan does not contain an e2e work item",
+            format!(
+                "include_e2e_tests is enabled but the plan does not contain an e2e work item；修复动作：{E2E_WORK_ITEM_REQUIRED_REPAIR_ACTION}"
+            ),
             Vec::new(),
         ));
     }

@@ -3,7 +3,7 @@
 //! 这些类型只描述 compiler 的稳定边界。parser 构造带行号的 AST，lowering 由后续
 //! 任务实现；本模块本身不读取 source，也不生成诊断。
 
-use crate::product::models::{RepositoryProfile, WorkItemSplitFinding};
+use crate::product::models::{IssueWorkItemPlanOptions, RepositoryProfile, WorkItemSplitFinding};
 
 /// 带 1-based source 行号的 AST 值。
 ///
@@ -73,17 +73,32 @@ pub struct CompilerDiagnostic {
     pub repair_example: String,
 }
 
-/// 将编译后的 IR 投影为既有机械 validator 输入时由外层注入的已确认上下文。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlanCandidateValidationContext<'a> {
-    pub project_id: &'a str,
-    pub issue_id: &'a str,
-    pub plan_id: &'a str,
-    pub source_story_spec_ids: &'a [String],
-    pub source_design_spec_ids: &'a [String],
-    pub repository_profile: Option<&'a RepositoryProfile>,
-    pub now: &'a str,
-}
+/// options×items 预检（三族）与 AC 路径×基线树核对的共享修复路径文案。
+/// 与 `work_item_split_validator` 的 finding 消息、`workspace_engine` 的机械
+/// verdict 适配、SC author prompt 教学逐字同源（REQ-WSC-06 口径一致纪律）。
+pub const PREFLIGHT_FINDING_CODES: &[&str] = &[
+    "integration_work_item_required",
+    "e2e_work_item_required",
+    "frontend_backend_split_required",
+];
+
+ /// 将编译后的 IR 投影为既有机械 validator 输入时由外层注入的已确认上下文。
+ #[derive(Debug, Clone, PartialEq, Eq)]
+ pub struct PlanCandidateValidationContext<'a> {
+     pub project_id: &'a str,
+     pub issue_id: &'a str,
+     pub plan_id: &'a str,
+     pub source_story_spec_ids: &'a [String],
+     pub source_design_spec_ids: &'a [String],
+     pub repository_profile: Option<&'a RepositoryProfile>,
+    /// 创建计划时落库的存储 options（F-51）：候选校验 MUST 消费该事实，
+    /// SHALL NOT 从 IR items 反推（反推使三族预检结构性不可触发）。
+    pub plan_options: &'a IssueWorkItemPlanOptions,
+    /// plan 基线树（worktree fork base 的仓库相对路径集合，F-56）。None 表示
+    /// 基线不可用：AC 路径核对不触发（与现状一致），三族 options 预检不受影响。
+    pub baseline_tree: Option<&'a std::collections::BTreeSet<String>>,
+     pub now: &'a str,
+ }
 
 /// 既有机械 validator 对单一候选 IR 的原样 findings 报告。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

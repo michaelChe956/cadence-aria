@@ -175,6 +175,14 @@ fn weak_model_precision_teaching_matches_contract_validator_judgement() {
         let spec_ids = vec!["story_spec_0001".to_string()];
         let design_ids = vec!["design_spec_0001".to_string()];
         let now = chrono::Utc::now().to_rfc3339();
+        // 显式 options（F-51 纪律）：教学基线 fixture 不携带 options 意图，
+        // 全 false 且不得依赖默认值丢意图。
+        let plan_options = crate::product::models::IssueWorkItemPlanOptions {
+            include_integration_tests: false,
+            include_e2e_tests: false,
+            force_frontend_backend_split: false,
+            require_execution_plan_confirm: false,
+        };
         crate::product::work_item_plan_compiler::validate_plan_candidate_ir(
             ir,
             &crate::product::work_item_plan_compiler::PlanCandidateValidationContext {
@@ -184,6 +192,8 @@ fn weak_model_precision_teaching_matches_contract_validator_judgement() {
                 source_story_spec_ids: &spec_ids,
                 source_design_spec_ids: &design_ids,
                 repository_profile: None,
+                plan_options: &plan_options,
+                baseline_tree: None,
                 now: &now,
             },
         )

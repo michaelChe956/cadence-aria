@@ -100,6 +100,7 @@ pub(crate) use mappings::permission_mode_for_provider_type;
 mod parsers;
 mod plan_outline;
 mod plan_projection;
+pub(crate) mod plan_preflight;
 mod plan_repair;
 mod plan_repair_artifacts;
 mod plan_repair_publication;

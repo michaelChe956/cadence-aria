@@ -244,6 +244,10 @@ impl WorkspaceEngine {
                 source_story_spec_ids: &plan.source_story_spec_ids,
                 source_design_spec_ids: &plan.source_design_spec_ids,
                 repository_profile: repository_profile.as_ref(),
+                // F-51：三生产路径之一（author 权威落盘）——存储 options 显式
+                // 提供，候选校验不从 IR 反推。
+                plan_options: &plan.options,
+                baseline_tree: None,
                 now: &validation_now,
             },
         )
@@ -266,6 +270,18 @@ impl WorkspaceEngine {
             report,
             content_hash: String::new(),
         };
+        // C1 preflight 前移（F-51/F-56）：存储 options×items 三族缺口与 AC
+        // 路径×基线树缺口同样在本轮 Evaluate 产生机械返修 verdict（preflight
+        // 族不硬失败 author 轮次），与 canonical 契约缺口共用一次 complete_review
+        // ingestion。
+        let preflight_verdict = plan_preflight::preflight_review_verdict(&report_record.report);
+        let mechanical_revision_verdict =
+            match (contract_prerevision_verdict, preflight_verdict) {
+                (Some(contract), Some(preflight)) => {
+                    Some(plan_preflight::merge_revision_verdicts(contract, preflight))
+                }
+                (contract, preflight) => contract.or(preflight),
+            };
         report_record.content_hash = report_record
             .content_hash()
             .map_err(|error| format!("hash mechanical report failed: {error:?}"))?;
@@ -304,7 +320,7 @@ impl WorkspaceEngine {
             )
         };
         self.complete_active_node(Some(completion_message)).await;
-        if let Some(verdict) = contract_prerevision_verdict {
+        if let Some(verdict) = mechanical_revision_verdict {
             self.route_single_candidate_contract_prerevision(verdict)
                 .await;
         } else if self.session.review_rounds == 0 || self.session.reviewer_provider.is_none() {
@@ -345,7 +361,17 @@ impl WorkspaceEngine {
             self.finish_failed_run().await;
             return;
         }
-        let readable = contract_prerevision::contract_prerevision_readable_output(&verdict);
+        // preflight/合并 verdict 的 readable 用 preflight 前缀（timeline 可区分
+        // 来源）；纯 canonical 契约缺口保持既有文本零变化。
+        let readable = if verdict
+            .findings
+            .iter()
+            .any(|finding| finding.evidence.starts_with("plan preflight mechanical finding"))
+        {
+            plan_preflight::preflight_readable_output(&verdict)
+        } else {
+            contract_prerevision::contract_prerevision_readable_output(&verdict)
+        };
         self.complete_review(ProviderCompletion::plain(readable, None), verdict)
             .await;
     }
