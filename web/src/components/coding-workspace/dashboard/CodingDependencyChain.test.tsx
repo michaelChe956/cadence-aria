@@ -44,4 +44,16 @@ describe("CodingDependencyChainView", () => {
     expect(screen.getByTestId("coding-chain-no-upstream")).toHaveTextContent("无上游依赖");
     expect(screen.getByTestId("coding-chain-no-downstream")).toHaveTextContent("无下游消费");
   });
+
+  // F-55 对比度：状态小字与空态文案用 slate-600，压浅灰底仍可读。
+  it("renders state captions and empty copy in the higher-contrast slate-600 token", () => {
+    render(
+      <CodingDependencyChainView
+        chain={{ workItemId: "wi_solo", upstream: [], downstream: [], blockingSources: [] }}
+        onSelectWorkItem={() => undefined}
+      />,
+    );
+    expect(screen.getByTestId("coding-chain-no-upstream").className).toContain("text-slate-600");
+    expect(screen.getByTestId("coding-chain-no-downstream").className).toContain("text-slate-600");
+  });
 });

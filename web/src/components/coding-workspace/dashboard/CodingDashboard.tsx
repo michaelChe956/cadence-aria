@@ -43,7 +43,7 @@ export function CodingDashboard() {
         <div className="flex items-center gap-2 text-xs font-semibold text-[var(--aria-ink)]">
           <Activity className="h-4 w-4" aria-hidden="true" />
           编码仪表盘
-          <span className="text-[10px] font-normal text-[var(--aria-ink-muted)]">只读视图 · 动作入口统一收口于 Phase 4</span>
+          <span className="text-[10px] font-normal text-slate-600">只读视图 · 动作入口统一收口于 Phase 4</span>
         </div>
         <button
           type="button"

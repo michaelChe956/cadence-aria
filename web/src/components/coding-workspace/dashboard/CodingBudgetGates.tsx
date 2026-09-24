@@ -19,7 +19,7 @@ export function CodingBudgetGates({ gates, nowMs }: { gates: readonly CodingBudg
   if (gates.length === 0) {
     return (
       <section data-testid="coding-budget-gates" aria-label="预算门" className="rounded-lg border border-[var(--aria-line)] bg-white p-3">
-        <div data-testid="coding-budget-empty" className="text-xs text-[var(--aria-ink-muted)]">
+        <div data-testid="coding-budget-empty" className="text-xs text-slate-600">
           尚未进入 Coding 阶段，预算门未开始计时
         </div>
       </section>
@@ -38,7 +38,7 @@ export function CodingBudgetGates({ gates, nowMs }: { gates: readonly CodingBudg
             <span className="font-semibold text-[var(--aria-ink)]">{gate.label}</span>
             <span
               data-testid={`coding-budget-remaining-${gate.kind}`}
-              className="aria-mono aria-num text-[11px] text-[var(--aria-ink-muted)]"
+              className="aria-mono aria-num text-[11px] text-slate-600"
             >
               {gate.remainingMs <= 0 ? "已耗尽" : `剩 ${formatFlowElapsed(gate.remainingMs)}`}
             </span>
@@ -62,7 +62,7 @@ export function CodingBudgetGates({ gates, nowMs }: { gates: readonly CodingBudg
           </div>
         </div>
       ))}
-      <p data-testid="coding-budget-disclaimer" className="text-[11px] leading-4 text-[var(--aria-ink-muted)]">
+      <p data-testid="coding-budget-disclaimer" className="text-[11px] leading-4 text-slate-600">
         预算口径为 driver 约定（Work Item 60 分钟 / Coding 90 分钟），由前端自计时呈现，非引擎事件数据。
       </p>
       {nearGates.length > 0 ? (

@@ -34,6 +34,9 @@ describe("CodingBudgetGates", () => {
     const disclaimer = screen.getByTestId("coding-budget-disclaimer").textContent ?? "";
     expect(disclaimer).toContain("前端自计时");
     expect(disclaimer).toContain("非引擎事件数据");
+    // F-55 对比度：剩余时间小字与说明文案提升到 slate-600。
+    expect(screen.getByTestId("coding-budget-remaining-work_item").className).toContain("text-slate-600");
+    expect(screen.getByTestId("coding-budget-disclaimer").className).toContain("text-slate-600");
   });
 
   it("turns the bar orange and announces through an alert when near exhaustion", () => {

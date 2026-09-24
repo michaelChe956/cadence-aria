@@ -76,7 +76,7 @@ export function CodingTopologyGraph({
     return (
       <div
         data-testid="coding-topology-empty"
-        className="flex min-h-11 items-center justify-center rounded-lg border border-dashed border-[var(--aria-line-strong)] px-4 py-3 text-xs text-[var(--aria-ink-muted)]"
+        className="flex min-h-11 items-center justify-center rounded-lg border border-dashed border-[var(--aria-line-strong)] px-4 py-3 text-xs text-slate-600"
       >
         暂无执行单元
       </div>
@@ -136,9 +136,6 @@ export function CodingTopologyGraph({
               key={node.workItemId}
               data-node={node.workItemId}
               data-state={node.state}
-              fill={`var(--aria-topo-node-${token}-bg)`}
-              stroke={selected ? "var(--aria-topo-edge-active)" : `var(--aria-topo-node-${token}-border)`}
-              strokeWidth={selected ? 2 : 1}
               className={[
                 node.state === "awaiting_triage" ? "aria-pulse" : undefined,
                 "cursor-pointer rounded-md transition-colors duration-200 focus-visible:outline-2 focus-visible:outline-[var(--aria-primary)]",
@@ -151,13 +148,25 @@ export function CodingTopologyGraph({
               onClick={() => onSelectWorkItem(node.workItemId)}
               onKeyDown={(event) => handleKeyDown(event, node.workItemId)}
             >
-              <rect x={position.x} y={position.y} width={NODE_WIDTH} height={NODE_HEIGHT} rx={8} />
+              {/* F-55 重影修复：卡片底/描边只落在 rect 上。<g> 上的 stroke 会继承进
+                  <text>，10px 小字每个笔画被描一圈浅色边，呈现「偏移重影」。 */}
+              <rect
+                x={position.x}
+                y={position.y}
+                width={NODE_WIDTH}
+                height={NODE_HEIGHT}
+                rx={8}
+                fill={`var(--aria-topo-node-${token}-bg)`}
+                stroke={selected ? "var(--aria-topo-edge-active)" : `var(--aria-topo-node-${token}-border)`}
+                strokeWidth={selected ? 2 : 1}
+              />
               <text
                 x={position.x + 12}
                 y={position.y + 18}
                 fontSize={12}
                 fontWeight={600}
                 fill={`var(--aria-topo-node-${token}-fg)`}
+                stroke="none"
               >
                 {node.title.length > 18 ? `${node.title.slice(0, 17)}…` : node.title}
               </text>
@@ -165,8 +174,8 @@ export function CodingTopologyGraph({
                 x={position.x + 12}
                 y={position.y + 34}
                 fontSize={10}
-                className="aria-mono"
-                fill="var(--aria-ink-muted)"
+                className="aria-mono fill-slate-600"
+                stroke="none"
               >
                 {`${node.workItemId} · ${CODING_UNIT_STATE_LABELS[node.state]}`}
               </text>

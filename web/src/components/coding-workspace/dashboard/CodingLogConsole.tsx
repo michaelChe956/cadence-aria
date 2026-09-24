@@ -79,7 +79,7 @@ export function CodingLogConsole() {
         <div className="flex items-center gap-1.5 text-xs font-semibold text-[var(--aria-ink)]">
           <ScrollText className="h-4 w-4" aria-hidden="true" />
           实时日志
-          <span className="aria-num text-[10px] font-normal text-[var(--aria-ink-muted)]">
+          <span className="aria-num text-[10px] font-normal text-slate-600">
             {visibleLines.length}/{lines.length}
           </span>
         </div>
@@ -98,7 +98,7 @@ export function CodingLogConsole() {
         </select>
       </div>
       {visibleLines.length === 0 ? (
-        <div data-testid="coding-log-empty" className="text-xs text-[var(--aria-ink-muted)]">
+        <div data-testid="coding-log-empty" className="text-xs text-slate-600">
           暂无日志
         </div>
       ) : (
@@ -121,9 +121,9 @@ export function CodingLogConsole() {
                   className="absolute left-0 top-0 flex w-full min-w-0 items-baseline gap-2 overflow-hidden px-2 font-mono text-[11px] leading-5"
                   style={{ transform: `translateY(${item.start}px)` }}
                 >
-                  <span className="aria-num shrink-0 text-[var(--aria-ink-muted)]">{line.at.slice(11, 19)}</span>
+                  <span className="aria-num shrink-0 text-slate-600">{line.at.slice(11, 19)}</span>
                   {/* 节点名限宽可收缩：shrink-0 + 无上限会把行撑出容器（横向溢出）。 */}
-                  <span className="min-w-0 max-w-[8rem] shrink truncate text-[var(--aria-ink-muted)]">
+                  <span className="min-w-0 max-w-[8rem] shrink truncate text-slate-600">
                     {line.nodeTitle ?? "全局"}
                   </span>
                   {/* 消息允许按词换行（break-words + pre-wrap），行高由测量承接；不再叠加

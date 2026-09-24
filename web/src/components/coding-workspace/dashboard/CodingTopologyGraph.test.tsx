@@ -35,7 +35,7 @@ describe("CodingTopologyGraph", () => {
     expect(graph.querySelector('[data-node="wi_a"]')).toHaveAttribute("data-state", "done");
     expect(graph.querySelector('[data-node="wi_b"]')).toHaveAttribute("data-state", "running");
     expect(graph.querySelector('[data-node="wi_c"]')).toHaveAttribute("data-state", "awaiting_triage");
-    expect(graph.querySelector('[data-node="wi_a"]')).toHaveAttribute("fill", "var(--aria-topo-node-done-bg)");
+    expect(graph.querySelector('[data-node="wi_a"] rect')).toHaveAttribute("fill", "var(--aria-topo-node-done-bg)");
     expect(graph.querySelector('[data-edge="wi_a__wi_b"]')).toHaveAttribute("data-edge-state", "satisfied");
     expect(graph.querySelector('[data-edge="wi_b__wi_c"]')).toHaveAttribute("data-edge-state", "blocking");
     expect(graph.querySelector('[data-edge="wi_b__wi_c"]')).toHaveAttribute("stroke", "var(--aria-topo-node-blocked-fg)");
@@ -44,7 +44,7 @@ describe("CodingTopologyGraph", () => {
 
   it("marks the selected node with the active edge token", () => {
     renderGraph({ selectedWorkItemId: "wi_b" });
-    expect(screen.getByTestId("coding-topology-graph").querySelector('[data-node="wi_b"]')).toHaveAttribute(
+    expect(screen.getByTestId("coding-topology-graph").querySelector('[data-node="wi_b"] rect')).toHaveAttribute(
       "stroke",
       "var(--aria-topo-edge-active)",
     );
@@ -65,6 +65,31 @@ describe("CodingTopologyGraph", () => {
     renderGraph();
     const node = screen.getByTestId("coding-topology-graph").querySelector('[data-node="wi_c"]');
     expect(node?.classList.contains("aria-pulse")).toBe(true);
+  });
+
+  // F-55 重影回归：节点卡片描边只落在 rect 上，文字不得继承 stroke——
+  // 否则 10px 小字每个笔画被描一圈浅色边，呈现「偏移重影」。
+  it("keeps the card stroke off node text so captions render without a ghost outline", () => {
+    renderGraph();
+    const graph = screen.getByTestId("coding-topology-graph");
+    const texts = graph.querySelectorAll('[data-node] text');
+    expect(texts.length).toBeGreaterThan(0);
+    texts.forEach((text) => {
+      expect(text).toHaveAttribute("stroke", "none");
+    });
+    expect(graph.querySelector('[data-node="wi_b"] rect')).toHaveAttribute(
+      "stroke",
+      "var(--aria-topo-node-running-border)",
+    );
+  });
+
+  // F-55 对比度：副标题（WI 号 · 状态）用 slate-600 小字，压浅底仍可读。
+  it("renders the node subtitle caption in the higher-contrast slate-600 token", () => {
+    renderGraph();
+    const graph = screen.getByTestId("coding-topology-graph");
+    const subtitle = graph.querySelectorAll('[data-node="wi_b"] text')[1];
+    expect(subtitle).toHaveTextContent("wi_b · 执行中");
+    expect(subtitle?.classList.contains("fill-slate-600")).toBe(true);
   });
 
   it("renders an explicit empty state when there is no unit", () => {

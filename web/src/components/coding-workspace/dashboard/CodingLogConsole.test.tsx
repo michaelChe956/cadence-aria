@@ -65,6 +65,18 @@ describe("CodingLogConsole", () => {
     expect(screen.getByTestId("coding-log-empty")).toHaveTextContent("暂无日志");
   });
 
+  // F-55 对比度：时间戳与节点名小字提升到 slate-600，压浅灰底仍可读。
+  it("renders log meta captions in the higher-contrast slate-600 token", () => {
+    act(() => {
+      useCodingLogStore.getState().appendLines([line()]);
+    });
+    render(<CodingLogConsole />);
+    const row = screen.getAllByTestId("coding-log-line")[0]!;
+    const spans = row.querySelectorAll("span");
+    expect(spans[0]!.className).toContain("text-slate-600"); // 时间戳
+    expect(spans[1]!.className).toContain("text-slate-600"); // 节点名
+  });
+
   // F-43 ④：日志行此前「绝对定位 + 写死 20px 行高 + truncate 与
   // whitespace-pre-wrap 互相覆盖」——多行文本在定高行里换行后溢出到下一行
   // （文字叠印），节点名 shrink-0 又把长串撑出横向滚动。契约：行高交给

@@ -18,8 +18,8 @@ function ChainRow({ node, onSelectWorkItem }: { node: CodingTopologyNode; onSele
         style={{ background: `var(--aria-topo-node-${token}-fg)` }}
       />
       <span className="min-w-0 flex-1 truncate font-semibold text-[var(--aria-ink)]">{node.title}</span>
-      <span className="shrink-0 text-[10px] text-[var(--aria-ink-muted)]">{CODING_UNIT_STATE_LABELS[node.state]}</span>
-      <span className="shrink-0 font-mono text-[10px] text-[var(--aria-ink-muted)]">{node.workItemId}</span>
+      <span className="shrink-0 text-[10px] text-slate-600">{CODING_UNIT_STATE_LABELS[node.state]}</span>
+      <span className="shrink-0 font-mono text-[10px] text-slate-600">{node.workItemId}</span>
     </button>
   );
 }
@@ -46,7 +46,7 @@ function ChainColumn({
         {title}
       </div>
       {nodes.length === 0 ? (
-        <div data-testid={emptyTestId} className="px-1 py-2 text-[11px] text-[var(--aria-ink-muted)]">
+        <div data-testid={emptyTestId} className="px-1 py-2 text-[11px] text-slate-600">
           {emptyCopy}
         </div>
       ) : (
@@ -77,7 +77,7 @@ export function CodingDependencyChainView({
     >
       <div className="flex min-h-6 items-center gap-2 px-1 text-xs font-semibold text-[var(--aria-ink)]">
         依赖链
-        <span className="font-mono text-[11px] font-normal text-[var(--aria-ink-muted)]">{chain.workItemId}</span>
+        <span className="font-mono text-[11px] font-normal text-slate-600">{chain.workItemId}</span>
       </div>
       {chain.blockingSources.length > 0 ? (
         <div
