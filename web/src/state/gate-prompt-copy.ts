@@ -18,6 +18,85 @@ export function gateWhyRequiredCopy(requiredCount: number): string {
 }
 
 /**
+ * C2（REQ-HGC-02 场景 1/F-54）：批次确认门（compile 成功后等待发布确认）
+ * 专属标题——与候选修订确认门「需要人工确认」在标题层级可区分。
+ */
+export function gateBatchConfirmTitle(): string {
+  return "确认发布整组 Work Items";
+}
+
+/** C2（REQ-HGC-02）：批次门 why——发布含义一句（确认即发布进入执行）。 */
+export function gateBatchConfirmWhyCopy(): string {
+  return "原因：Final Compile 已通过；确认后整组 Work Item Draft 将发布进入执行阶段，此门将关闭。";
+}
+
+export type GateDistanceStatus = "ok" | "pending" | "unknown";
+
+export interface GateDistanceItem {
+  key: "blockers" | "preflight" | "verification" | "approve";
+  label: string;
+  status: GateDistanceStatus;
+}
+
+/**
+ * C2（REQ-HGC-02 场景 2/F-52 §三）：「距通过」清单——当前 must_fix/error 项、
+ * C1 options 预检结果（mechanical_error 类 findings）、Verification 状态与
+ * approve 可用性，全部从 durable findings/trigger/阻断判据派生（零新状态机）。
+ * findings 不带 class（review 元数据形态）或 trigger 缺席时显式 unknown，不猜。
+ */
+export function gateDistanceToPass(input: {
+  findings: ReadonlyArray<{
+    severity: string;
+    class?: string;
+  }>;
+  trigger: string | null;
+  approveAvailable: boolean;
+}): GateDistanceItem[] {
+  const blockers = input.findings.filter((finding) =>
+    ["blocking", "must_fix", "error"].includes(finding.severity),
+  );
+  const preflightGaps = input.findings.filter(
+    (finding) => finding.class === "mechanical_error",
+  );
+  const hasClassFact = input.findings.some((finding) => typeof finding.class === "string");
+  return [
+    {
+      key: "blockers",
+      label:
+        blockers.length > 0
+          ? `必须处理项 ${blockers.length} 条（must_fix/error）`
+          : "无必须处理项",
+      status: blockers.length > 0 ? "pending" : "ok",
+    },
+    {
+      key: "preflight",
+      label:
+        preflightGaps.length > 0
+          ? `编译前预检缺口 ${preflightGaps.length} 条`
+          : hasClassFact
+            ? "编译前预检无缺口"
+            : "预检结果未同步",
+      status: preflightGaps.length > 0 ? "pending" : hasClassFact ? "ok" : "unknown",
+    },
+    {
+      key: "verification",
+      label:
+        input.trigger === "verification_new_findings"
+          ? "复评（Verification）发现新问题，需再修订"
+          : input.trigger
+            ? "评审已完成，等待人工"
+            : "复评状态未同步",
+      status: input.trigger === "verification_new_findings" ? "pending" : input.trigger ? "ok" : "unknown",
+    },
+    {
+      key: "approve",
+      label: input.approveAvailable ? "可直接确认（或先反馈修订）" : "门动作当前被阻断",
+      status: input.approveAvailable ? "ok" : "pending",
+    },
+  ];
+}
+
+/**
  * F-50 裁决 1：triage intent 门的原因行——标题保留「需要判断 reviewer 意图」
  * 时，原因行解释为什么无法自动取舍并给出两条出路。
  */

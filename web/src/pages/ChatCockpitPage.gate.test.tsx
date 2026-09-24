@@ -265,7 +265,12 @@ describe("ChatCockpitPage", () => {
     expect(sendAdvance).not.toHaveBeenCalled();
   });
 
-  it("blocks phase-mismatched gate actions from hotkeys", () => {
+  // C2 改写登记（REQ-HGC-02/plan T2 ④，F-54 §4.2 加固①裁决为删除）：
+  // phase_mismatch 的通用「门相位与当前阶段不一致」提示行误导（0009 现场：
+  // 编译失败残留开门，用户以为是同步问题）——门卡不再渲染该行；阻断语义
+  // （热键零出站）保持不变。原断言 getAllByText("门相位与当前阶段不一致")
+  // 随本修订退役。
+  it("blocks phase-mismatched gate actions from hotkeys without the misleading phase copy", () => {
     const sendHumanConfirm = vi.fn(() => true);
     const sendAbandonGate = vi.fn(() => true);
     const sendHumanGateFeedback = vi.fn(() => true);
@@ -286,12 +291,42 @@ describe("ChatCockpitPage", () => {
     });
     renderCockpit("session_001", false);
 
-    expect(screen.getAllByText("门相位与当前阶段不一致").length).toBeGreaterThan(0);
+    expect(screen.queryByText("门相位与当前阶段不一致")).toBeNull();
     fireEvent.keyDown(document, { code: COCKPIT_HOTKEYS.confirm.code, ctrlKey: true });
     fireEvent.keyDown(document, { code: COCKPIT_HOTKEYS.advance.code, ctrlKey: true });
     expect(sendHumanConfirm).not.toHaveBeenCalled();
     expect(sendHumanGateFeedback).not.toHaveBeenCalled();
     expect(sendAdvance).not.toHaveBeenCalled();
+  });
+
+  // C2（REQ-HGC-02 场景 1）：批次确认门专属卡面——标题「确认发布整组 Work
+  // Items」+发布含义 why，与候选修订门（「需要人工确认」+修订上下文）标题/
+  // 原因行层级可区分；无反馈编辑器（批次门无反馈通路）。
+  it("renders the batch confirm gate card with publication copy and no feedback editor", () => {
+    mockWorkspaceWs({});
+    useWorkspaceStore.setState({
+      stage: "author_confirm",
+      workspaceType: "work_item_plan",
+      flowKind: "single_candidate",
+      sessionStatus: "waiting_for_human",
+      humanGateTurn: null,
+      humanGateSnapshot: null,
+      humanGateClosure: null,
+      timelineNodes: [
+        timelineNode({
+          node_id: "node_batch",
+          node_type: "work_item_batch_confirm",
+          stage: "author_confirm",
+          status: "active",
+          title: "整组 Draft 确认",
+        }),
+      ],
+    });
+    useWorkspaceStore.getState().rebuildChatEntries();
+    renderCockpit("session_001", false);
+
+    expect(screen.getAllByText("确认发布整组 Work Items").length).toBeGreaterThan(0);
+    expect(screen.queryByTestId("gate-feedback-hint")).toBeNull();
   });
 
   it.each([

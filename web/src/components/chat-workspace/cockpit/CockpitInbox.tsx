@@ -536,7 +536,9 @@ function GateInboxActions({
     );
   }
 
-  if (actionBlockReason && terminateBlockReason) {
+  // C2（REQ-HGC-02/plan T2 ④，F-54 §4.2）：phase_mismatch 通用相位提示行删除
+  // （与门卡同源裁决）——不渲染误导文案，终止通路照常。
+  if (actionBlockReason && actionBlockReason !== "phase_mismatch" && terminateBlockReason) {
     return (
       <p className="mt-2 text-xs text-[var(--aria-ink-muted)]">
         {gateActionBlockCopy(actionBlockReason)}
@@ -559,7 +561,7 @@ function GateInboxActions({
     <div className="mt-3 space-y-3">
       {summary ? <GateSummary {...summary} /> : null}
       <div className="flex flex-wrap gap-2">
-        {actionBlockReason !== null ? (
+        {actionBlockReason !== null && actionBlockReason !== "phase_mismatch" ? (
           // F-21：phase_mismatch 的 plan 门终止专属放行——只露终止，说明行替代
           // 确认/反馈（相位纪律维持）。
           <p className="w-full text-xs text-slate-500">

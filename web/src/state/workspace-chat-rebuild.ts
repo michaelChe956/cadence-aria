@@ -587,13 +587,36 @@ export function buildGatePromptEntry(
   if (!projection) {
     return null;
   }
-  // REQ-PCG-01/02（plan-compile-gate-visibility）：批次确认与 compile recovery 是
-  // durable node 门，本函数构造的是 typed/legacy 决策卡（feedback 编辑器 +
-  // confirm/abandon 三命令面）——不得把两新门映射进该面（REQ-RET-02/REQ-CG-02）。
-  // 两新门的可见性与动作面在 Cockpit 收件箱与流程投影
-  // （selectCockpitInbox / selectCockpitFlow），此处保持改前行为（无投影即无卡）。
-  if (projection.kind !== "human_gate") {
+  // REQ-PCG-01/02（plan-compile-gate-visibility）→ C2 改写登记（REQ-HGC-02
+  // 场景 1/F-54）：批次确认门现在获得**专属发布确认卡**（标题「确认发布整组
+  // Work Items」+发布含义 why，动作面 confirmBatch+terminate）——仍不得铸成
+  // typed 决策卡（无 feedback 编辑器/三命令面，action_facade=legacy），REQ-RET-02/
+  // REQ-CG-02 的命令边界不变。compile recovery 门维持无卡（动作面在收件箱）。
+  if (projection.kind === "compile_recovery") {
     return null;
+  }
+  if (projection.kind === "batch_confirm") {
+    const batchNode = state.timelineNodes.find(
+      (node) =>
+        node.node_type === "work_item_batch_confirm" && node.status === "active",
+    );
+    return {
+      id: chatEntryId(projection.key, "gate-prompt"),
+      type: "gate_prompt",
+      role: "system",
+      content: "Final Compile 已通过，等待发布确认",
+      timestamp: batchNode?.started_at ?? new Date().toISOString(),
+      node_id: batchNode?.node_id,
+      metadata: {
+        gate_identity: projection.key,
+        action_facade: "legacy",
+        gate_kind: "batch_confirm",
+        gate_status: projection.closed ?? projection.status,
+        action_block_reason: projection.action_block_reason,
+        terminate_block_reason: projection.terminate_block_reason,
+      },
+      ...(projection.closed ? { resolved: true, resolution: projection.closed } : {}),
+    };
   }
 
   const gatePromptNode =

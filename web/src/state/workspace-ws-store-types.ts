@@ -320,10 +320,14 @@ export interface WorkItemPlanHumanGateSnapshot {
     evidence: string | null;
     required_action: string | null;
     contract_field: string | null;
+    /** C1（REQ-TOP-04 场景 4）：无稳定 ID 措辞域身份——true 时跨轮对比禁推断。 */
+    identity_unstable?: boolean;
   }>;
   repeated_fingerprints: string[];
   attempts_used: number;
   manual_repairs_remaining: number;
+  /** C2（REQ-HGC-01）：gate-local 已接受反馈轮次；旧会话缺席=预算历史不可用。 */
+  accepted_feedback_turns?: number | null;
   trigger:
     | "native_human_required"
     | "repeated_fingerprint"

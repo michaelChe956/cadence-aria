@@ -19,6 +19,9 @@ import {
   GATE_TERMINATE_CONFIRM_LABEL,
   GATE_TRIAGE_WHY_COPY,
   gateAdoptFindingsFeedback,
+  gateBatchConfirmTitle,
+  gateBatchConfirmWhyCopy,
+  gateDistanceToPass,
   gateFindingsToggleLabel,
   gateWhyAdvisoryCopy,
   gateWhyRequiredCopy,
@@ -130,19 +133,48 @@ export function GatePromptEntry({
         : (projection.action_block_reason ?? null),
     ),
   );
+  // C2（REQ-HGC-02 场景 1/F-54）：批次确认门专属标题/why——与候选修订门在
+  // 标题/原因行层级可区分；确认动作走 confirmBatch（HTTP），无反馈编辑器。
+  const isBatchConfirmGate = gateKindFromEntry(entry) === "batch_confirm";
   // F-50 裁决 1（单标题制）：默认「需要人工确认」，仅 triage intent 门保留
   // 「需要判断 reviewer 意图」——标题回答「现在要做什么」，原因与建议交给
   // gate-why 单一原因行，不再三层同义。
-  const title = requiresTriage ? "需要判断 reviewer 意图" : "需要人工确认";
+  const title = isBatchConfirmGate
+    ? gateBatchConfirmTitle()
+    : requiresTriage
+      ? "需要判断 reviewer 意图"
+      : "需要人工确认";
   // F-50 裁决 2：gate-why = 单一原因行（含下一步建议）。triage 门给 intent
   // 原因行；其余按 findings 分级；无 findings 不猜（fail-closed）。
-  const whyCopy = requiresTriage
-    ? GATE_TRIAGE_WHY_COPY
-    : findings.length === 0
-      ? null
-      : requiredFindings.length > 0
-        ? gateWhyRequiredCopy(requiredFindings.length)
-        : gateWhyAdvisoryCopy(findings.length);
+  const whyCopy = isBatchConfirmGate
+    ? gateBatchConfirmWhyCopy()
+    : requiresTriage
+      ? GATE_TRIAGE_WHY_COPY
+      : findings.length === 0
+        ? null
+        : requiredFindings.length > 0
+          ? gateWhyRequiredCopy(requiredFindings.length)
+          : gateWhyAdvisoryCopy(findings.length);
+  // C2（REQ-HGC-02 场景 2）：距通过清单——优先用 durable 快照 findings（带
+  // class，可判预检缺口），缺席退卡面 findings；仅 plan 候选修订门渲染。
+  const snapshotFindings = useWorkspaceStore(
+    (state) => state.humanGateSnapshot?.findings ?? null,
+  );
+  const workspaceTypeForDistance = useWorkspaceStore((state) => state.workspaceType);
+  const distanceItems =
+    !isBatchConfirmGate &&
+    !isResolved &&
+    workspaceTypeForDistance === "work_item_plan"
+      ? gateDistanceToPass({
+          findings: (snapshotFindings ?? findings).map((finding) =>
+            "class" in finding && typeof finding.class === "string"
+              ? { severity: finding.severity, class: finding.class }
+              : { severity: finding.severity },
+          ),
+          trigger: gateTrigger,
+          approveAvailable: actionBlockReason === null,
+        })
+      : null;
   const archiveNote = archiveNoteFromEntry(entry);
   // F-49 B6：adoptable = advisory findings（must_fix 处理路径不同，不进默认采纳）。
   // 采纳按钮的目标是下方反馈输入框——编辑器不可用即无处可填，不露按钮（fail-closed）。
@@ -291,6 +323,22 @@ export function GatePromptEntry({
               .join(" · ")}
           </p>
         ) : null}
+        {/* C2（REQ-HGC-02 场景 2/F-52 §三）：「距通过」清单——从 durable
+            findings/trigger/阻断判据派生的收敛路径；ok=已满足、pending=待处理、
+            unknown=事实未同步（不猜）。 */}
+        {distanceItems ? (
+          <ul
+            data-testid="gate-distance-to-pass"
+            className={`space-y-1 text-xs ${GATE_META_TEXT_CLASS}`}
+          >
+            {distanceItems.map((item) => (
+              <li key={item.key} data-testid={`gate-distance-${item.key}`}>
+                {item.status === "ok" ? "✓" : item.status === "pending" ? "•" : "?"}{" "}
+                {item.label}
+              </li>
+            ))}
+          </ul>
+        ) : null}
         {revisionProgressCopy && !isResolved ? (
           <div
             data-testid="gate-revision-status"
@@ -337,7 +385,10 @@ export function GatePromptEntry({
           // 终止（二次确认惯例），confirm/反馈编辑器维持相位纪律不渲染。
           // F-50 §4.1-5：动作区以分隔线成组，与说明区视觉分层。
           <div className={`space-y-2 ${GATE_DIVIDER_CLASS}`}>
-            {actionBlockReason !== null ? (
+            {/* C2（REQ-HGC-02/plan T2 ④，F-54 §4.2）：phase_mismatch 的通用相位
+                提示行删除（0009 现场误导——编译失败残留被读成同步问题）；
+                其余阻断理由（已离开门/已关闭）仍如实呈现。 */}
+            {actionBlockReason !== null && actionBlockReason !== "phase_mismatch" ? (
               <p className={`text-xs ${GATE_META_TEXT_CLASS}`}>
                 {gateActionBlockCopy(actionBlockReason)}，可终止后重新发起
               </p>
@@ -378,13 +429,21 @@ export function GatePromptEntry({
             ) : null}
             <div className="flex flex-wrap justify-end gap-2">
               {isContextBlockerGate || actionBlockReason !== null ? null : (
+                // C2（REQ-HGC-02）：批次门确认=HTTP confirmBatch（发布语义）；
+                // 候选修订门维持 WS confirm（确认当前版本）。
                 <button
                   type="button"
-                  onClick={() => actions.confirm()}
+                  onClick={() => {
+                    if (isBatchConfirmGate) {
+                      void actions.confirmBatch();
+                    } else {
+                      actions.confirm();
+                    }
+                  }}
                   className={BTN_PRIMARY_CLASS}
                 >
                   <Check className="h-4 w-4" aria-hidden="true" />
-                  {confirmLabel}
+                  {isBatchConfirmGate ? gateBatchConfirmTitle() : confirmLabel}
                 </button>
               )}
               <ConfirmTwiceButton
@@ -395,7 +454,7 @@ export function GatePromptEntry({
               />
             </div>
           </div>
-        ) : actionBlockReason ? (
+        ) : actionBlockReason && actionBlockReason !== "phase_mismatch" ? (
           <p className={`text-xs ${GATE_META_TEXT_CLASS}`}>
             {gateActionBlockCopy(actionBlockReason)}
           </p>

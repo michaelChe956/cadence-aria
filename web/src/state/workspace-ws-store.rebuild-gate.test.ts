@@ -259,16 +259,16 @@ describe("workspace ws store gate rebuild", () => {
     expect(selectCockpitInbox(useWorkspaceStore.getState())).toHaveLength(0);
   });
 
-  // REQ-PCG-01/02（plan-compile-gate-visibility）：批次确认与 compile recovery 是
-  // durable node 门——重建（刷新/重连）不得把它们铸成 typed/legacy 决策卡：卡面
-  // 带 `action_facade=typed` 时会露出 feedback 编辑器与 confirm/abandon 三命令动作，
-  // 而 REQ-RET-02/REQ-CG-02 明确禁止把两新门映射进该面。两新门只经 Cockpit 收件箱
-  // 与流程投影呈现。
+  // REQ-PCG-01/02（plan-compile-gate-visibility）→ C2 改写登记（REQ-HGC-02
+  // 场景 1/F-54）：批次确认门重建获得**专属发布确认卡**（gate_kind=
+  // batch_confirm、action_facade=legacy——不露 feedback 编辑器与三命令面，
+  // REQ-RET-02/REQ-CG-02 命令边界不变）；compile recovery 门维持无卡（动作面
+  // 在收件箱）。原「两新门一律无卡」断言随本修订退役（batch 行）。
   it.each([
     ["work_item_batch_confirm", "author_confirm"],
     ["work_item_plan_compile_recovery", "human_confirm"],
   ] as const)(
-    "does not mint a typed decision card for the %s node gate",
+    "%s node gate never mints a typed decision card",
     (nodeType, stage) => {
       useWorkspaceStore.setState({
         sessionId: "session_node_gate",
@@ -306,11 +306,18 @@ describe("workspace ws store gate rebuild", () => {
 
       useWorkspaceStore.getState().rebuildChatEntries();
 
-      expect(
-        useWorkspaceStore
-          .getState()
-          .chatEntries.filter((entry) => entry.type === "gate_prompt"),
-      ).toHaveLength(0);
+      const gateCards = useWorkspaceStore
+        .getState()
+        .chatEntries.filter((entry) => entry.type === "gate_prompt");
+      if (nodeType === "work_item_batch_confirm") {
+        // C2：批次门=专属发布卡（非 typed 决策卡）。
+        expect(gateCards).toHaveLength(1);
+        const metadata = (gateCards[0]?.metadata ?? {}) as Record<string, unknown>;
+        expect(metadata.gate_kind).toBe("batch_confirm");
+        expect(metadata.action_facade).not.toBe("typed");
+      } else {
+        expect(gateCards).toHaveLength(0);
+      }
       // 门本身仍可见——可见面收敛到收件箱，而不是丢失。
       expect(
         selectCockpitInbox(useWorkspaceStore.getState()).filter(
