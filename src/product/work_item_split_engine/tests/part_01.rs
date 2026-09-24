@@ -16,6 +16,17 @@ use crate::product::work_item_split_engine::{
 };
 use crate::web::types::GenerateWorkItemsRequest;
 
+/// F-51 夹具纪律：SC author prompt 教学基线 fixture 不携带 options 意图，
+/// 全 false 且不依赖默认值丢意图（与 weak_model validator 夹具同口径）。
+/// 四个 prompt_contract 子模块经 `use super::*` 共享本定义。
+static TEST_ALL_FALSE_PLAN_OPTIONS: crate::product::models::IssueWorkItemPlanOptions =
+    crate::product::models::IssueWorkItemPlanOptions {
+        include_integration_tests: false,
+        include_e2e_tests: false,
+        force_frontend_backend_split: false,
+        require_execution_plan_confirm: false,
+    };
+
 fn split_prompt_fixture() -> (GenerateWorkItemsRequest, IssueRecord, RepositoryRecord) {
     let request = GenerateWorkItemsRequest {
         title: "test plan".to_string(),

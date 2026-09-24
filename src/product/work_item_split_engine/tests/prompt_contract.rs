@@ -1,15 +1,6 @@
 const TEST_SINGLE_CANDIDATE_LANGUAGE_RULES: &str =
     "## 语言规则\n\n- **必须使用中文** - 所有响应、解释、注释和文档必须使用中文。";
 
-/// F-51 夹具纪律：教学基线 fixture 不携带 options 意图，全 false 且
-/// 不依赖默认值丢意图（与 weak_model validator 夹具同口径）。
-static TEST_ALL_FALSE_PLAN_OPTIONS: crate::product::models::IssueWorkItemPlanOptions =
-    crate::product::models::IssueWorkItemPlanOptions {
-        include_integration_tests: false,
-        include_e2e_tests: false,
-        force_frontend_backend_split: false,
-        require_execution_plan_confirm: false,
-    };
 
 #[test]
 fn single_item_prompt_scopes_writing_plans_to_pre_confirmation_candidate() {
