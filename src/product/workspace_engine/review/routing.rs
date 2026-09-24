@@ -1128,14 +1128,16 @@ fn legacy_work_item_plan_repair_finding(verdict: &ReviewVerdict) -> Option<Class
         _ => return None,
     };
     let message = format!("{kind}: {}", verdict.summary);
+    let (fingerprint, identity_unstable) = FindingFingerprint::identity_for_finding(
+        Some(ReviewFindingCategory::Other),
+        FindingClass::Repairable,
+        &message,
+        Some(contract_field),
+    );
     Some(ClassifiedFinding {
         class: FindingClass::Repairable,
-        fingerprint: FindingFingerprint::for_finding(
-            Some(ReviewFindingCategory::Other),
-            FindingClass::Repairable,
-            &message,
-            Some(contract_field),
-        ),
+        fingerprint,
+        identity_unstable,
         category: Some(ReviewFindingCategory::Other),
         severity: "must_fix".to_string(),
         message,

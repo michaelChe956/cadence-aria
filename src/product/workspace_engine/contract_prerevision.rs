@@ -195,10 +195,13 @@ fn evidence_text(
     parts.join(" ")
 }
 
-/// 跨轮指纹定位器：有 category 时 fingerprint=hash(category, contract_field)，
-/// 缺能力缺口必须精确到 capability 级，避免同一契约的两个不同缺口共享指纹。
+/// 跨轮指纹定位器：机械 finding 以确定性投影构造（REQ-TOP-04：消费方 WI +
+/// contract + capability），消费方 WI 使受限提取命中稳定域，同一缺口跨轮
+/// 同指纹；缺能力缺口必须精确到 capability 级，避免同一契约的两个不同缺口
+/// 共享指纹。
 fn contract_field_text(finding: &ContractValidationFinding) -> Option<String> {
-    match (
+    let consumer = finding.logical_work_item_id.as_deref();
+    let projection = match (
         finding.code.as_str(),
         &finding.contract_ref,
         &finding.capability_ref,
@@ -208,7 +211,11 @@ fn contract_field_text(finding: &ContractValidationFinding) -> Option<String> {
         }
         (_, Some(contract_id), _) => Some(contract_id.clone()),
         _ => finding.code.clone().into(),
-    }
+    };
+    projection.map(|projection| match consumer {
+        Some(consumer) => format!("{consumer}::{projection}"),
+        None => projection,
+    })
 }
 
 /// required_action 按 code 模板化；provider 从 graph 反查补全（对

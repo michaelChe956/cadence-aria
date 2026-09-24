@@ -278,14 +278,15 @@ fn classified_finding(class: FindingClass, message: &str) -> ClassifiedFinding {
             Some(ReviewFindingCategory::ContractGap),
             class,
             message,
-            Some("contract.field"),
+            Some("WI-001.output_contracts[CT-001].capabilities"),
         ),
         category: Some(ReviewFindingCategory::ContractGap),
         severity: "must_fix".to_string(),
         message: message.to_string(),
         evidence: Some("evidence".to_string()),
         required_action: Some("repair".to_string()),
-        contract_field: Some("contract.field".to_string()),
+        contract_field: Some("WI-001.output_contracts[CT-001].capabilities".to_string()),
+        identity_unstable: false,
     }
 }
 
@@ -310,7 +311,7 @@ fn gate_context(trigger: HumanReason) -> GateSnapshotContext {
             Some(ReviewFindingCategory::ContractGap),
             FindingClass::Repairable,
             "repeated",
-            Some("contract.field"),
+            Some("WI-001.output_contracts[CT-001].capabilities"),
         )],
         trigger,
     }

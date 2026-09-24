@@ -83,6 +83,7 @@ impl fmt::Display for FatalReason {
 pub enum HumanReason {
     NativeHumanRequired,
     RepeatedFingerprint,
+    UnstableFindingIdentity,
     VerificationNewFindings,
     RepairBudgetExhausted,
 }
@@ -300,9 +301,16 @@ pub fn evaluate(
         };
     }
 
-    let repeated_fingerprints = findings
+    let repeated_findings = findings
         .iter()
         .filter(|finding| history.seen_fingerprints.contains(&finding.fingerprint))
+        .collect::<Vec<_>>();
+    // F-52（REQ-TOP-04 场景 4）：稳定重复才走 RepeatedFingerprint 自动终态；
+    // 仅 unstable（无稳定 ID 的措辞域）重复时 fail-safe 人工——措辞域身份
+    // 不足以自动断言「同一问题再现」。
+    let repeated_fingerprints = repeated_findings
+        .iter()
+        .filter(|finding| !finding.identity_unstable)
         .map(|finding| finding.fingerprint.clone())
         .collect::<BTreeSet<_>>()
         .into_iter()
@@ -313,6 +321,19 @@ pub fn evaluate(
                 findings,
                 repeated_fingerprints,
                 reason: HumanReason::RepeatedFingerprint,
+            },
+            history_delta,
+        };
+    }
+    if repeated_findings
+        .iter()
+        .any(|finding| finding.identity_unstable)
+    {
+        return EvaluationDecision {
+            outcome: PlanOutcome::HumanRequired {
+                findings,
+                repeated_fingerprints: Vec::new(),
+                reason: HumanReason::UnstableFindingIdentity,
             },
             history_delta,
         };

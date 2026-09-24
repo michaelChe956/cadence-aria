@@ -89,6 +89,8 @@ fn non_advisory_finding_fingerprints(verdict: &ReviewVerdict) -> BTreeSet<Findin
         .iter()
         .map(|finding| classify_finding(verdict.verdict.clone(), finding))
         .filter(|classified| classified.class != FindingClass::Advisory)
+        // F-52：unstable（无稳定 ID 措辞域）指纹不参与 F5-B 自动断言。
+        .filter(|classified| !classified.identity_unstable)
         .map(|classified| classified.fingerprint)
         .collect()
 }
@@ -475,20 +477,24 @@ impl WorkspaceEngine {
             .filter(|finding| {
                 finding.severity == crate::product::models::WorkItemSplitFindingSeverity::Error
             })
-            .map(|finding| ClassifiedFinding {
-                class: FindingClass::MechanicalError,
-                fingerprint: FindingFingerprint::for_finding(
+            .map(|finding| {
+                let (fingerprint, identity_unstable) = FindingFingerprint::identity_for_finding(
                     Some(ReviewFindingCategory::Other),
                     FindingClass::MechanicalError,
                     &finding.message,
-                    Some(&finding.code),
-                ),
-                category: Some(ReviewFindingCategory::Other),
-                severity: "error".to_string(),
-                message: finding.message,
-                evidence: Some(report_ref.to_string()),
-                required_action: Some(finding.code.clone()),
-                contract_field: Some(finding.code),
+                    Some(&format!("mechanical.{}", finding.code)),
+                );
+                ClassifiedFinding {
+                    class: FindingClass::MechanicalError,
+                    fingerprint,
+                    identity_unstable,
+                    category: Some(ReviewFindingCategory::Other),
+                    severity: "error".to_string(),
+                    message: finding.message,
+                    evidence: Some(report_ref.to_string()),
+                    required_action: Some(finding.code.clone()),
+                    contract_field: Some(format!("mechanical.{}", finding.code)),
+                }
             })
             .collect())
     }

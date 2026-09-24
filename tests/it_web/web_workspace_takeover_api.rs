@@ -60,6 +60,7 @@ fn human_gate(resumable: bool) -> HumanGateSnapshot {
             evidence: Some("冲突证据".to_string()),
             required_action: Some("确认范围".to_string()),
             contract_field: Some("scope".to_string()),
+            identity_unstable: false,
         }],
         repeated_fingerprints: Vec::new(),
         attempts_used: 2,

@@ -150,7 +150,7 @@ fn persist_verification_artifacts(
 }
 
 fn repairable_verdict(message: &str) -> ReviewVerdict {
-    repairable_verdict_for_field(message, "contract.field")
+    repairable_verdict_for_field(message, "WI-001.output_contracts[CT-001].capabilities")
 }
 
 fn repairable_verdict_for_field(message: &str, contract_field: &str) -> ReviewVerdict {
@@ -178,7 +178,7 @@ fn fingerprint(message: &str) -> FindingFingerprint {
         Some(ReviewFindingCategory::ContractGap),
         FindingClass::Repairable,
         message,
-        Some("contract.field"),
+        Some("WI-001.output_contracts[CT-001].capabilities"),
     )
 }
 

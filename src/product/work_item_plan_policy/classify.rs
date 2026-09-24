@@ -130,23 +130,17 @@ pub(crate) fn classify_finding(
         .map(class_for_hint)
         .unwrap_or_else(|| fallback_class(raw_verdict, finding));
     let contract_field = finding.contract_field.clone();
+    let (fingerprint, identity_unstable) = FindingFingerprint::identity_for_finding(
+        finding.category,
+        class,
+        &finding.message,
+        contract_field.as_deref(),
+    );
 
     ClassifiedFinding {
         class,
-        fingerprint: match finding.category {
-            Some(category) => FindingFingerprint::for_finding(
-                Some(category),
-                class,
-                &finding.message,
-                contract_field.as_deref(),
-            ),
-            None => FindingFingerprint::for_finding(
-                None,
-                class,
-                &finding.message,
-                contract_field.as_deref(),
-            ),
-        },
+        fingerprint,
+        identity_unstable,
         category: finding.category,
         severity: severity_as_str(finding).to_string(),
         message: finding.message.clone(),

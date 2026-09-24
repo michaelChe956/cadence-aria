@@ -74,7 +74,7 @@ fn repairable_verdict(message: &str) -> ReviewVerdict {
             required_action: "repair".to_string(),
             category: Some(ReviewFindingCategory::ContractGap),
             class_hint: Some(FindingClassHint::Repairable),
-            contract_field: Some("contract.field".to_string()),
+            contract_field: Some("WI-001.output_contracts[CT-001].capabilities".to_string()),
         }],
         review_gate: ReviewGate::RequiresRevision,
         work_item_plan_review: None,

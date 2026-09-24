@@ -55,6 +55,7 @@ fn recovery_gate(resumable: bool) -> crate::product::work_item_plan_policy::Huma
             evidence: Some("冲突证据".to_string()),
             required_action: Some("确认范围".to_string()),
             contract_field: Some("scope".to_string()),
+            identity_unstable: false,
         }],
         repeated_fingerprints: Vec::new(),
         attempts_used: 2,

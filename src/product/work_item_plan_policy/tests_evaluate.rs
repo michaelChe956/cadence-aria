@@ -11,6 +11,7 @@ fn finding(class: FindingClass, message: &str) -> ClassifiedFinding {
     ClassifiedFinding {
         class,
         fingerprint: FindingFingerprint::for_finding(None, class, message, None),
+        identity_unstable: false,
         category: None,
         severity: "error".to_owned(),
         message: message.to_owned(),
@@ -26,14 +27,16 @@ fn structured_finding(
     contract_field: &str,
     message: &str,
 ) -> ClassifiedFinding {
+    let (fingerprint, identity_unstable) = FindingFingerprint::identity_for_finding(
+        Some(category),
+        class,
+        message,
+        Some(contract_field),
+    );
     ClassifiedFinding {
         class,
-        fingerprint: FindingFingerprint::for_finding(
-            Some(category),
-            class,
-            message,
-            Some(contract_field),
-        ),
+        fingerprint,
+        identity_unstable,
         category: Some(category),
         severity: "error".to_owned(),
         message: message.to_owned(),
@@ -41,6 +44,22 @@ fn structured_finding(
         required_action: None,
         contract_field: Some(contract_field.to_owned()),
     }
+}
+
+/// 无稳定 ID 的结构化 finding（`output_contracts[0].capabilities` 形态，
+/// F-52 现场 node_027 同款）：构造时断言 unstable 置位，防止夹具漂移。
+fn unstable_structured_finding(
+    class: FindingClass,
+    category: super::super::ReviewFindingCategory,
+    contract_field: &str,
+    message: &str,
+) -> ClassifiedFinding {
+    let finding = structured_finding(class, category, contract_field, message);
+    assert!(
+        finding.identity_unstable,
+        "夹具 {contract_field} 必须落在 unstable 措辞域"
+    );
+    finding
 }
 
 fn evaluate_findings(
@@ -192,6 +211,82 @@ fn a_repeated_non_advisory_fingerprint_requires_human_before_repair_or_native_hu
             repeated.fingerprint,
             native_human.fingerprint,
         ])
+    );
+}
+
+#[test]
+fn repeated_unstable_identity_routes_to_human_via_unstable_finding_identity() {
+    // F-52 L1（REQ-TOP-04 场景 4）：无稳定 ID 的措辞域重复 MUST NOT 走
+    // RepeatedFingerprint 自动终态（旧实现会把「异题同措辞」误判为同一问题
+    // 而漏放，或把「同题异措辞」漏判为不重复）——分流到人工门。
+    let unstable = unstable_structured_finding(
+        FindingClass::Repairable,
+        super::super::ReviewFindingCategory::ContractGap,
+        "output_contracts[0].capabilities",
+        "message A",
+    );
+    let history = RunHistory {
+        seen_fingerprints: BTreeSet::from([unstable.fingerprint.clone()]),
+        ..RunHistory::default()
+    };
+
+    let decision = evaluate_findings(
+        &[],
+        std::slice::from_ref(&unstable),
+        ReviewPhase::Initial,
+        &history,
+        &RunBudgets::default(),
+    );
+
+    assert_eq!(
+        decision.outcome,
+        PlanOutcome::HumanRequired {
+            findings: vec![unstable.clone()],
+            repeated_fingerprints: Vec::new(),
+            reason: HumanReason::UnstableFindingIdentity,
+        }
+    );
+}
+
+#[test]
+fn mixed_repetition_prefers_stable_repeated_fingerprint_reason() {
+    // 稳定重复与 unstable 重复并存时按稳定 RepeatedFingerprint 终态（更强
+    // 信号优先裁决），unstable finding 仍留在 findings 面向人工。
+    let stable = structured_finding(
+        FindingClass::Repairable,
+        super::super::ReviewFindingCategory::ContractGap,
+        "WI-001.output_contracts[CT-001].capabilities",
+        "same stable finding",
+    );
+    let unstable = unstable_structured_finding(
+        FindingClass::Repairable,
+        super::super::ReviewFindingCategory::ContractGap,
+        "output_contracts[0].capabilities",
+        "message A",
+    );
+    let history = RunHistory {
+        seen_fingerprints: BTreeSet::from([
+            stable.fingerprint.clone(),
+            unstable.fingerprint.clone(),
+        ]),
+        ..RunHistory::default()
+    };
+
+    let decision = evaluate_findings(
+        &[],
+        &[stable.clone(), unstable.clone()],
+        ReviewPhase::Initial,
+        &history,
+        &RunBudgets::default(),
+    );
+
+    assert_eq!(
+        decision.outcome,
+        PlanOutcome::HumanRequired {
+            findings: vec![stable.clone(), unstable.clone()],
+            repeated_fingerprints: vec![stable.fingerprint.clone()],
+            reason: HumanReason::RepeatedFingerprint,
+        }
     );
 }
 

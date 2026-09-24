@@ -70,6 +70,11 @@ pub struct ClassifiedFinding {
     pub message: String,
     pub evidence: Option<String>,
     pub required_action: Option<String>,
+    /// F-52（REQ-TOP-04 场景 4）：finding 身份落在无稳定 ID 的措辞域时为
+    /// true——重复检测禁自动裁决（fail-safe 人工），durable 旧 JSON 缺省
+    /// false（legacy 口径视为稳定）。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub identity_unstable: bool,
     pub contract_field: Option<String>,
 }
 

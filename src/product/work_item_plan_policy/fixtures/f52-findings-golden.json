@@ -1,0 +1,157 @@
+[
+  {
+    "node": "timeline_node_007",
+    "verdict": "revise",
+    "finding": {
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "WI-001.output_contracts[CT-001].capabilities",
+      "evidence": "capability_coverage entry: from WI-001 -> to WI-002, contract_id CT-001, required_capabilities [\"CommonJS 与浏览器全局暴露同一个 judge 函数\"], provided_capabilities [\"仓库根存在可供静态托管的 gomoku-rules.js 文件\"], missing_capabilities [\"CommonJS 与浏览器全局暴露同一个 judge 函数\"], compatibility_policy require_all；同一 CT-001 在 WI-001 -> WI-003 边上的 required_capabilities 与 provided_capabilities 完全一致，说明缺失仅发生在 WI-001 -> WI-002 这条边。",
+      "message": "WI-001 的输出契约 CT-001 只声明了「仓库根存在可供静态托管的 gomoku-rules.js 文件」，未声明 WI-002 消费时按 require_all 强制要求的能力「CommonJS 与浏览器全局暴露同一个 judge 函数」，导致 WI-001 -> WI-002 的契约供需无法满足，WI-002 的输入契约在其前置完成时不可被判定为已交付。",
+      "required_action": "在 WI-001 的输出契约 CT-001 的 capabilities 中补充「CommonJS 与浏览器全局暴露同一个 judge 函数」（依据已存在的 WI-001 AC-006、CHECK-002 与 TASK-003），使 CT-001 的 provided_capabilities 覆盖 WI-002 按 require_all 声明的 required_capabilities，并保持 WI-001 -> WI-003 边既有能力不变。",
+      "severity": "must_fix"
+    }
+  },
+  {
+    "node": "timeline_node_007",
+    "verdict": "revise",
+    "finding": {
+      "category": "completeness",
+      "class_hint": "advisory",
+      "contract_field": "WI-001.tasks[TASK-001].done_when_refs",
+      "evidence": "WI-001 task TASK-001 statement 覆盖多类断言，done_when_refs 为 [\"AC-005\"]；AC-001、AC-002、AC-003、AC-004 未出现在任何 task 的 done_when_refs 中，仅被 CHECK-001（node --test）覆盖。",
+      "message": "TASK-001 的语句覆盖四方向恰好五连判胜、六连判胜、被阻断四连不判胜、空盘进行中与满盘平局五类断言，但 done_when_refs 仅指向 AC-005，使 AC-001 至 AC-004 缺少任务级完成判据映射（仅由 CHECK-001 兜底）。",
+      "required_action": "可选：将 TASK-001 的 done_when_refs 扩展为 AC-001、AC-002、AC-003、AC-004、AC-005，或按断言拆分任务以恢复任务级追溯。",
+      "severity": "suggestion"
+    }
+  },
+  {
+    "node": "timeline_node_012",
+    "verdict": "revise",
+    "finding": {
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts[WI-001].capabilities/CT-001",
+      "evidence": "Projection capability_coverage entry: from=WI-001, to=WI-002, contract_id=CT-001, required_capabilities=[CommonJS 与浏览器全局暴露同一个 judge 函数], provided_capabilities=[仓库根存在可供静态托管的 gomoku-rules.js 文件], missing_capabilities=[CommonJS 与浏览器全局暴露同一个 judge 函数], compatibility_policy=require_all；同时 WI-001 的 input_contracts 为空、output_contracts[CT-001] 能力列表仍为单条静态托管文件表述。",
+      "message": "edge WI-001 -> WI-002 的 CT-001 capability 覆盖不闭合：WI-002 以 compatibility_policy=require_all 依赖能力『CommonJS 与浏览器全局暴露同一个 judge 函数』，而 WI-001 的 output_contracts[CT-001].capabilities 仅声明『仓库根存在可供静态托管的 gomoku-rules.js 文件』，导致 required_capabilities 无法由 provider 已声明的 capability 满足。",
+      "required_action": "在 WI-001 的 output_contracts[CT-001].capabilities 中补入 WI-002/WI-003 实际消费的能力『CommonJS 与浏览器全局暴露同一个 judge 函数』（保留既有『仓库根存在可供静态托管的 gomoku-rules.js 文件』），或将该能力拆分为与 WI-002/WI-003 required_capabilities 完全对齐的能力项，使 provider 声明能力集合 ⊇ 所有 consumer 的 required_capabilities，然后重新生成候选与 projection。",
+      "severity": "must_fix"
+    }
+  },
+  {
+    "node": "timeline_node_027",
+    "verdict": "revise",
+    "finding": {
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts[0].capabilities",
+      "evidence": "edge WI-001 -> WI-002, contract_id CT-001, missing_capabilities [CommonJS 与浏览器全局暴露同一个 judge 函数]",
+      "message": "边 WI-001 -> WI-002 要求 CT-001 提供「CommonJS 与浏览器全局暴露同一个 judge 函数」，但 WI-001 的 CT-001 output_contracts 仅声明「仓库根存在可供静态托管的 gomoku-rules.js 文件」，missing_capabilities 非空；在 compatibility_policy=require_all 下该消费边不可满足，供应商输出能力与消费者需求不一致。",
+      "required_action": "在 WI-001 的 CT-001 capabilities 中补入「CommonJS 与浏览器全局暴露同一个 judge 函数」（与 AC-006/TASK-003 一致），使 require_all 可满足。",
+      "severity": "must_fix"
+    }
+  },
+  {
+    "node": "timeline_node_027",
+    "verdict": "revise",
+    "finding": {
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts[0].capabilities",
+      "evidence": "edge WI-001 -> WI-004, contract_id CT-001, missing_capabilities [CommonJS 与浏览器全局暴露同一个 judge 函数]",
+      "message": "边 WI-001 -> WI-004 同样要求 CT-001 提供「CommonJS 与浏览器全局暴露同一个 judge 函数」，而 WI-001 的 CT-001 未声明该能力；集成验证项将无法在不引入隐式假设的前提下取得可调用 judge 的跨环境导出契约。",
+      "required_action": "同上，在 WI-001 的 CT-001 capabilities 中补入该能力，使 WI-002 与 WI-004 两条消费边同时闭合。",
+      "severity": "must_fix"
+    }
+  },
+  {
+    "node": "timeline_node_027",
+    "verdict": "revise",
+    "finding": {
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts[0].capabilities",
+      "evidence": "edge WI-002 -> WI-004, contract_id CT-002, missing_capabilities [页面经 script src 加载 gomoku-rules.js 并调用同一 judge 函数]",
+      "message": "边 WI-002 -> WI-004 要求 CT-002 提供「页面经 script src 加载 gomoku-rules.js 并调用同一 judge 函数」，但 WI-002 的 CT-002 仅声明「仓库根存在可供静态托管的 gomoku.html 文件」，missing_capabilities 非空；端到端链路无法据契约证明页面判定调用点可用（AC-029/TASK-016 所依赖的契约面缺失）。",
+      "required_action": "在 WI-002 的 CT-002 capabilities 中补入「页面经 script src 加载 gomoku-rules.js 并调用同一 judge 函数」，与 AC-014/AC-029 保持一致。",
+      "severity": "must_fix"
+    }
+  },
+  {
+    "node": "timeline_node_027",
+    "verdict": "revise",
+    "finding": {
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts[0].capabilities",
+      "evidence": "edge WI-003 -> WI-004, contract_id CT-003, missing_capabilities [既有 GET /api/status 与 GET /status.html 与未知路径及非 GET 请求的响应保持不变]",
+      "message": "边 WI-003 -> WI-004 要求 CT-003 提供「既有 GET /api/status 与 GET /status.html 与未知路径及非 GET 请求的响应保持不变」，但 WI-003 的 CT-003 仅声明「服务与规则模块仅使用 node:http 与 node:fs 与 node:path 与 process」，missing_capabilities 非空；集成项声明回归保持能力却无 provider 契约支撑，属契约供需错配。",
+      "required_action": "在 WI-003 的 CT-003 capabilities 中补入「既有 GET /api/status 与 GET /status.html 与未知路径及非 GET 请求的响应保持不变」，与 AC-023/TASK-014 保持一致。",
+      "severity": "must_fix"
+    }
+  },
+  {
+    "node": "timeline_node_027",
+    "verdict": "revise",
+    "finding": {
+      "category": "completeness",
+      "class_hint": "advisory",
+      "evidence": "projection finding code=integration_or_e2e_skipped_risk, severity=warning, work_item_ids []，由 WI-004 CHECK-011/CHECK-012 承接",
+      "message": "机械校验报告含 warning integration_or_e2e_skipped_risk（e2e 被跳过）；WI-004 已由检查项 CHECK-011（node --test）与 CHECK-012（手工端到端核对）承接，建议在验收时保留 CHECK-012 的人工证据以覆盖该风险，不阻断本轮发布判定。",
+      "required_action": "无需契约改动；验收阶段确保 CHECK-012 人工核对证据被记录即可。",
+      "severity": "suggestion"
+    }
+  },
+  {
+    "node": "timeline_node_029",
+    "verdict": "revise",
+    "finding": {
+      "category": "verification_unattributable",
+      "class_hint": "repairable",
+      "contract_field": "WI-003.acceptance_criteria[AC-023].required_evidence",
+      "evidence": "WI-003 tasks：TASK-011 done_when_refs=[AC-019]、TASK-012 done_when_refs=[AC-020]、TASK-014 done_when_refs=[AC-023]（语句为行为描述，无测试编写动作）；WI-003 verification_checks：CHECK-008 command=node --test（non_zero_test_execution_required=true）、CHECK-009 与 CHECK-010 均为 manual_instruction；AC-024 仅覆盖「服务测试全部通过」。",
+      "message": "AC-023 的 required_evidence 为 non_zero_test_execution，但 WI-003 内只有 TASK-011、TASK-012 规划编写测试，分别断言 GET /gomoku.html 与 GET /gomoku-rules.js；承接 AC-023 的 TASK-014 只以行为语句声明「保持既有状态接口与既有页面与非 GET 请求的 404 文本响应不变」，未规划在 test/gomoku-server.test.js 中为既有 GET /api/status、GET /status.html、未知路径与非 GET 请求编写任何断言。WI-003 唯一的自动化检查 CHECK-008 为仓库级 node --test，其「非零执行」可由规则测试等无关测试满足，导致 AC-023 的测试类证据在计划层面不可归属，验收时可能在没有相应断言的情况下声称通过。",
+      "required_action": "在 WI-003（write_policy.exclusive_scopes 已含 test/gomoku-server.test.js）新增或改写任务：先为既有 GET /api/status、GET /status.html、未知路径与非 GET 请求的响应分别编写断言并观察到测试失败，再实现静态路由，使 AC-023 的 non_zero_test_execution 有明确且唯一的证据归属。",
+      "severity": "must_fix"
+    }
+  },
+  {
+    "node": "timeline_node_029",
+    "verdict": "revise",
+    "finding": {
+      "category": "completeness",
+      "class_hint": "advisory",
+      "contract_field": "WI-001/WI-002/WI-003/WI-004 tasks[].done_when_refs",
+      "evidence": "WI-001：TASK-001/TASK-002 done_when_refs=[AC-005]、TASK-003 done_when_refs=[AC-007]；WI-002：TASK-007 done_when_refs=[AC-014]，AC-011/AC-012 仅由 CHECK-004 人工覆盖，AC-016/AC-017 仅由 CHECK-006 覆盖；WI-004：TASK-016 done_when_refs=[AC-029]，AC-025 仅由 CHECK-011 覆盖。",
+      "message": "多个任务的 done_when_refs 与其语句所覆盖的验收准则错位，且部分 AC 未出现在任何 done_when_refs：TASK-001、TASK-002 语句覆盖四方向恰好五连判胜、六连判胜、被阻断四连不判胜、空盘进行中、满盘平局，却仅引用 AC-005；TASK-003 语句对应 AC-006 却引用 AC-007；TASK-007 语句对应 AC-011/AC-012 却引用 AC-014；TASK-016 语句对应 AC-025 却引用 AC-029。AC-001、AC-002、AC-003、AC-004、AC-006、AC-011、AC-012、AC-016、AC-017、AC-024、AC-025 未出现在任何任务的 done_when_refs 中。由于上述 AC 仍可由既有 verification_checks（CHECK-001 至 CHECK-012）归属证据，此项目前只影响任务级 done 定义的可追溯性，不构成发布阻断，属完备度建议。",
+      "required_action": "可选：将各任务 done_when_refs 对齐其语句实际覆盖的 AC，并为 AC-006、AC-011、AC-012、AC-016、AC-017、AC-024、AC-025 指定归属任务，提升任务级验收可追溯性。",
+      "severity": "suggestion"
+    }
+  },
+  {
+    "node": "timeline_node_029",
+    "verdict": "revise",
+    "finding": {
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-003.capabilities",
+      "evidence": "CT-003.capabilities = [「服务与规则模块仅使用 node:http 与 node:fs 与 node:path 与 process」,「既有 GET /api/status 与 GET /status.html 与未知路径及非 GET 请求的响应保持不变」]；WI-003 AC-019/AC-020 定义 GET /gomoku.html 与 GET /gomoku-rules.js 的托管行为；WI-004 input_contracts 对 CT-003 的 required_capabilities 仅为既有响应不变，而其 AC-025/AC-026 需要静态路由可用。capability_coverage 中 WI-003 -> WI-004 的 missing_capabilities 为空数组。",
+      "message": "CT-003（WI-003 提供）仅声明「服务与规则模块仅使用 node:http 与 node:fs 与 node:path 与 process」与「既有 GET /api/status 与 GET /status.html 与未知路径及非 GET 请求的响应保持不变」两项能力，未声明本工作项新增的静态托管能力（GET /gomoku.html 与 GET /gomoku-rules.js 返回仓库根对应文件内容），而消费者 WI-004 的 AC-025、AC-026 恰恰依赖该行为；WI-004 对 CT-003 的 required_capabilities 亦仅为「既有响应保持不变」与自身需求不符。供需双方对这条真实依赖均未描述，仅由依赖边 WI-003 -> WI-004 隐含保证执行顺序。因 capability_coverage 各 edge 的 missing_capabilities 均为空，本条不构成必须阻断的 contract_gap，仅建议补齐契约表述。",
+      "required_action": "可选：在 CT-003.capabilities 增补「GET /gomoku.html 与 GET /gomoku-rules.js 返回仓库根对应文件完整内容与文本类型」，并在 WI-004 的 input_contracts 中显式要求该 capability，使 WI-004 的真实依赖可被机械校验覆盖。",
+      "severity": "suggestion"
+    }
+  },
+  {
+    "node": "timeline_node_029",
+    "verdict": "revise",
+    "finding": {
+      "category": "other",
+      "class_hint": "advisory",
+      "contract_field": "Projection Validation Report.findings[integration_or_e2e_skipped_risk]",
+      "evidence": "WI-004 identity.kind=integration，verification_checks=[CHECK-011(node --test, non_zero_test_execution_required=true), CHECK-012(端到端人工核对)]；WI-002 提供 CHECK-004 至 CHECK-007 的 manual_instruction 检查；Projection Validation Report summary：error_count=0、warning_count=1，且该 finding 的 work_item_ids=[]。",
+      "message": "机械校验摘要中的 integration_or_e2e_skipped_risk 警告与候选事实不符：候选已包含 kind=integration 的 WI-004，并配 CHECK-011（command=node --test，non_zero_test_execution_required=true）与 CHECK-012（端到端人工核对），WI-002 与 WI-003 亦分别提供 CHECK-004 至 CHECK-007、CHECK-009、CHECK-010 的人工验收检查，并非「e2e 被跳过且缺少人工验证」。该 warning 的 work_item_ids 为空，无对应变更对象，无需任何候选修订。",
+      "required_action": "无需修订；建议在报告消费侧将此泛化 warning 与已存在的集成工作项和人工验收检查对齐，避免误判为缺失端到端验证。",
+      "severity": "suggestion"
+    }
+  }
+]
