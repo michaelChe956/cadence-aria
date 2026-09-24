@@ -6,6 +6,7 @@
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -19,12 +20,28 @@ const MAX_CODEX_SESSION_DEPTH: usize = 4;
 const SCAN_BLOCK_BYTES: u64 = 64 * 1024;
 /// 反向块扫描允许读取的总字节数上限，防止超大日志被全量载入。
 const SCAN_MAX_BYTES: u64 = 8 * 1024 * 1024;
+/// pi 会话 usage 记录的必需字段（`parse_pi_usage_value` 与扫描谓词共用）。
+const PI_USAGE_REQUIRED_FIELDS: &[&str] = &["input", "output", "cacheRead"];
+/// pi usage 首次读不到时的短重试间隔（kimi 同构：settle 后异步落盘竞态）。
+const PI_USAGE_RETRY_DELAY: Duration = Duration::from_millis(200);
 
 /// 从 Pi `data.sessionFile` 指向的 JSONL 文件读取最近一条 usage 记录。
+///
+/// 复用 F-45 的反向块扫描（固定尾部窗口会被少数超长行占满，把最新 usage 挤出
+/// 128 KiB 窗口）；首次读不到时短等重试一次，与 `read_kimi_usage` 同构。
+/// 仍然 best-effort：读取失败或记录不完整返回 `None`，调用方据此降级（失败环节
+/// 由调用方经结构化 warn 留痕，见 REQ-NDR-05）。
 pub(crate) fn read_pi_usage(session_file: &Path, role: &str) -> Option<UsageReportData> {
-    latest_json_line(session_file)
-        .into_iter()
-        .find_map(|value| parse_pi_usage_value(&value, role))
+    if let Some(report) = read_pi_usage_once(session_file, role) {
+        return Some(report);
+    }
+    std::thread::sleep(PI_USAGE_RETRY_DELAY);
+    read_pi_usage_once(session_file, role)
+}
+
+fn read_pi_usage_once(session_file: &Path, role: &str) -> Option<UsageReportData> {
+    let value = latest_matching_line(session_file, is_pi_usage)?;
+    parse_pi_usage_value(&value, role)
 }
 
 /// 从 Codex 本地 rollout 文件读取指定 ACP thread 的最近一条 token_count。
@@ -152,8 +169,14 @@ impl UsageTotal {
 }
 
 fn parse_pi_usage_value(value: &Value, role: &str) -> Option<UsageReportData> {
-    let usage = find_nested_usage(value, &["input", "output", "cacheRead"])?;
+    let usage = find_nested_usage(value, PI_USAGE_REQUIRED_FIELDS)?;
     report_from_required_fields(usage, "input", "output", "cacheRead", "cacheWrite", role)
+}
+
+/// pi 会话行的 usage 谓词：与 `parse_pi_usage_value` 同一必需字段集，
+/// 供反向块扫描（`latest_matching_line`）逐行筛选。
+fn is_pi_usage(value: &Value) -> bool {
+    find_nested_usage(value, PI_USAGE_REQUIRED_FIELDS).is_some()
 }
 
 fn parse_codex_usage_value(value: &Value, role: &str) -> Option<UsageReportData> {
@@ -415,6 +438,26 @@ mod tests {
         let malformed = root.path().join("malformed.jsonl");
         write(&malformed, "not json\n{\"usage\":{\"input\":1}}\n");
         assert!(read_pi_usage(&malformed, "author").is_none());
+    }
+
+    #[test]
+    fn local_usage_reads_pi_usage_pushed_beyond_fixed_tail_window() {
+        let root = tempdir().expect("tempdir");
+        let session = root.path().join("pi.jsonl");
+        // 会话里的大行（story/工具输出）会把最新 usage 挤出固定 128 KiB 尾部窗口
+        // （与 F-45 kimi 同源故障面）；反向块扫描必须仍能读到该轮 usage。
+        let filler = "x".repeat(150 * 1024);
+        write(
+            &session,
+            &format!(
+                "{{\"type\":\"message\",\"usage\":{{\"input\":30,\"output\":5,\"cacheRead\":4,\"cacheWrite\":2}}}}\n{{\"type\":\"story.chunk\",\"content\":\"{filler}\"}}\n{{\"type\":\"status\"}}\n"
+            ),
+        );
+        let report = read_pi_usage(&session, "author").expect("usage");
+        assert_eq!(report.input_tokens, Some(30));
+        assert_eq!(report.output_tokens, Some(5));
+        assert_eq!(report.cache_read_tokens, Some(4));
+        assert_eq!(report.cache_creation_tokens, Some(2));
     }
 
     #[test]
