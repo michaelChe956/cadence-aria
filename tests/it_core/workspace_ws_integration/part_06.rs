@@ -867,9 +867,19 @@ async fn workspace_ws_historical_disconnect_marker_is_preserved_not_misjudged() 
     drop(ws);
     let _diagnostic = wait_for_connection_diagnostic(&controls, "eof").await;
 
+    // REQ-DLS-03（driver-lease-self-healing）：lease-diagnostics.jsonl 是本 change
+    // 新增的 append-only 租约诊断分区（本用例的连接关闭即产生 release 打点），
+    // 不属于「业务 durable 不得改写」的冻结面；其余文件仍必须逐字节不变。
+    let strip_lease_diagnostics =
+        |snapshot: Vec<(std::path::PathBuf, Vec<u8>)>| -> Vec<(std::path::PathBuf, Vec<u8>)> {
+            snapshot
+                .into_iter()
+                .filter(|(path, _)| !path.ends_with("lease-diagnostics.jsonl"))
+                .collect()
+        };
     assert_eq!(
-        durable_tree_snapshot(root.path()),
-        durable_after_read,
+        strip_lease_diagnostics(durable_tree_snapshot(root.path())),
+        strip_lease_diagnostics(durable_after_read),
         "正常往返和关闭不得改写含历史标记的 durable"
     );
     let nodes = LifecycleStore::new(ProductAppPaths::new(root.path().join(".aria")))

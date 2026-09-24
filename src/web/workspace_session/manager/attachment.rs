@@ -67,14 +67,19 @@ impl WorkspaceSessionManager {
     /// REQ-WCR-03：连接关闭只摘除 attachment；若它持有 lease，仅撤销该授权。
     /// 连接关闭绝不取消 run、不写入 durable 终态也不改写 engine 状态。
     pub(crate) async fn handle_connection_closed(self: &Arc<Self>, connection_id: &str) {
-        {
+        let released_epoch = {
             let mut state = self
                 .state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            state.lease.revoke_if_holder(connection_id);
+            let released = state.lease.revoke_if_holder(connection_id);
             state.pending_attachments.remove(connection_id);
             state.attachments.remove(connection_id);
+            released.then_some(state.lease.epoch)
+        };
+        if let Some(epoch) = released_epoch {
+            // REQ-DLS-03：holder 释放打点（锁外、失败零影响）。
+            self.lease_diagnostics.record_release(connection_id, epoch);
         }
         self.maybe_recycle().await;
     }

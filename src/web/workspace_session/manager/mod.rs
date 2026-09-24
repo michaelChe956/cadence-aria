@@ -23,6 +23,8 @@ mod arbitration;
 mod attachment;
 mod choices;
 mod durable_projection;
+pub(crate) use lease_diagnostics::lease_diagnostics_path;
+mod lease_diagnostics;
 mod runs;
 
 pub(super) struct Attachment {
@@ -74,6 +76,8 @@ pub struct WorkspaceSessionManager {
     pub(super) engine: Arc<Mutex<WorkspaceEngine>>,
     engine_tx: mpsc::Sender<EngineEvent>,
     pub(super) state: StdMutex<ManagerState>,
+    /// REQ-DLS-03：租约转移 append-only 诊断流（打点在状态锁外，失败零影响）。
+    lease_diagnostics: lease_diagnostics::LeaseDiagnostics,
     /// 序号在 manager 生命周期内严格单调；manager 被回收后 durable 重建会改走
     /// snapshot 基线，故不需要将它持久化。
     pub(super) next_event_seq: AtomicU64,
@@ -106,6 +110,14 @@ impl WorkspaceSessionManager {
                 journal: EventJournal::default(),
                 recovery_error: None,
             }),
+            lease_diagnostics: lease_diagnostics::LeaseDiagnostics::new(
+                session_id,
+                Some(
+                    std::env::temp_dir()
+                        .join(session_id)
+                        .join(lease_diagnostics::LEASE_DIAGNOSTICS_FILE),
+                ),
+            ),
             session_id: session_id.to_string(),
             session_record: test_session_record(session_id),
             app_paths: ProductAppPaths::new(std::env::temp_dir().join(session_id)),
@@ -136,6 +148,14 @@ impl WorkspaceSessionManager {
                 lease: LeaseState::default(),
                 recovery_error: None,
             }),
+            lease_diagnostics: lease_diagnostics::LeaseDiagnostics::new(
+                session_id,
+                Some(
+                    std::env::temp_dir()
+                        .join(session_id)
+                        .join(lease_diagnostics::LEASE_DIAGNOSTICS_FILE),
+                ),
+            ),
             next_event_seq: AtomicU64::new(1),
             session_id: session_id.to_string(),
             session_record,
@@ -210,6 +230,11 @@ impl WorkspaceSessionManager {
                 .map_err(|error| format!("workspace context unavailable: {error}"))?;
         let repository = workspace_repository_for_session(&app_paths, &lifecycle, &session_record)
             .map_err(|error| format!("workspace repository unavailable: {error}"))?;
+        // REQ-DLS-03：打点路径解析失败（如会话目录不可定位）静默降级为无 durable 腿。
+        let lease_diagnostics = lease_diagnostics::LeaseDiagnostics::new(
+            session_id,
+            lease_diagnostics::lease_diagnostics_path(&lifecycle, session_id),
+        );
         let checkpoint_store = Arc::new(CheckpointStore::new(
             app_paths.issue_lifecycle_root(&session_record.project_id, &session_record.issue_id),
         ));
@@ -261,6 +286,7 @@ impl WorkspaceSessionManager {
                 recovery_error: None,
                 journal: EventJournal::default(),
             }),
+            lease_diagnostics,
             session_id: session_id.to_string(),
             session_record,
             app_paths,
@@ -350,6 +376,14 @@ impl WorkspaceSessionManager {
                 journal: EventJournal::default(),
                 recovery_error: None,
             }),
+            lease_diagnostics: lease_diagnostics::LeaseDiagnostics::new(
+                session_id,
+                Some(
+                    std::env::temp_dir()
+                        .join(session_id)
+                        .join(lease_diagnostics::LEASE_DIAGNOSTICS_FILE),
+                ),
+            ),
             session_id: session_id.to_string(),
             session_record,
             app_paths,

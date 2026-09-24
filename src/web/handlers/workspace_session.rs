@@ -75,6 +75,38 @@ pub async fn workspace_session_takeover(
     }))
 }
 
+/// REQ-DLS-03：租约诊断只读端点——返回当前持有者与最近转移序列。活跃 manager
+/// 优先（内存快照）；manager 已回收时退化为 durable jsonl 尾读（最近 200 行）。
+pub async fn workspace_session_lease_diagnostics(
+    State(state): State<WebAppState>,
+    Path(session_id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if let Some(manager) = state.workspace_sessions.get(&session_id).await {
+        return Ok(Json(manager.lease_diagnostics_snapshot()));
+    }
+    let lifecycle = LifecycleStore::new(product_app_paths(&state));
+    let events = crate::web::workspace_session::lease_diagnostics_path(&lifecycle, &session_id)
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|content| {
+            let mut events: Vec<serde_json::Value> = content
+                .lines()
+                .filter_map(|line| serde_json::from_str(line).ok())
+                .collect();
+            if events.len() > 200 {
+                events.drain(0..events.len() - 200);
+            }
+            events
+        })
+        .unwrap_or_default();
+    Ok(Json(json!({
+        "session_id": session_id,
+        "holder": null,
+        "epoch": null,
+        "last_holder": null,
+        "events": events,
+    })))
+}
+
 fn workspace_session_takeover_api_error(error: ProductStoreError) -> ApiError {
     match error {
         ProductStoreError::InvalidRecord {

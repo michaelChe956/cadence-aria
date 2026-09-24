@@ -341,6 +341,140 @@ async fn workspace_ws_dangling_lease_self_heals_on_first_write() {
     server.abort();
 }
 
+// REQ-DLS-03：只读诊断端点返回当前持有者与最近转移序列——偷窃可定案，
+// 无需推测（F-50-1 诊断 §2.3 的结构性补面）。
+#[tokio::test]
+async fn workspace_ws_lease_diagnostics_endpoint_returns_holder_and_recent_events() {
+    let root = tempdir().expect("root");
+    let _repo = create_workspace_session_fixture(&root).await;
+    let state = WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    );
+    let app = build_web_router(state.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+
+    let (mut driver, _) = connect_async(url).await.expect("driver");
+    let _initial = recv_json(&mut driver).await;
+    send_json(
+        &mut driver,
+        &WsInMessage::Hello {
+            session_id: "workspace_session_0001".into(),
+            last_seen_node_id: None,
+            role: Some(HelloRole::Driver),
+            after_event_seq: None,
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_json(&mut driver).await,
+        WsOutMessage::SessionState { .. }
+    ));
+
+    let response = build_web_router(state)
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/workspace-sessions/workspace_session_0001/lease-diagnostics")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("endpoint response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("endpoint body");
+    let payload: Value = serde_json::from_slice(&body).expect("endpoint json");
+    assert!(
+        payload["holder"].as_str().is_some_and(|holder| !holder.is_empty()),
+        "端点必须暴露当前持有者连接，got {payload}"
+    );
+    let events = payload["events"].as_array().expect("events array");
+    assert!(
+        events
+            .iter()
+            .any(|event| event["event"] == "hold" && event["connection_id"].is_string()),
+        "hello 显式获取必须可定案（hold 打点），got {events:?}"
+    );
+
+    drop(driver);
+    server.abort();
+}
+
+// REQ-DLS-03：manager 已回收（无活跃连接）时，端点退化为 durable jsonl 尾读。
+#[tokio::test]
+async fn workspace_ws_lease_diagnostics_endpoint_reads_durable_tail_without_live_manager() {
+    let root = tempdir().expect("root");
+    let _repo = create_workspace_session_fixture(&root).await;
+    let timelines_root = workspace_timelines_root(&root.path().join(".aria"));
+    let diagnostics_path = timelines_root
+        .join("workspace_session_0001")
+        .join("lease-diagnostics.jsonl");
+    std::fs::create_dir_all(diagnostics_path.parent().expect("parent")).expect("mkdir");
+    std::fs::write(
+        &diagnostics_path,
+        concat!(
+            "{\"schema_version\":1,\"event\":\"hold\",\"connection_id\":\"conn-1\",\"role\":\"driver\"}\n",
+            "{\"schema_version\":1,\"event\":\"release\",\"connection_id\":\"conn-1\",\"role\":\"driver\"}\n",
+        ),
+    )
+    .expect("seed diagnostics");
+
+    let state = WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    );
+    let response = build_web_router(state)
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/workspace-sessions/workspace_session_0001/lease-diagnostics")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("endpoint response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("endpoint body");
+    let payload: Value = serde_json::from_slice(&body).expect("endpoint json");
+    assert!(
+        payload["holder"].is_null(),
+        "无活跃 manager 时持有者为 null，got {payload}"
+    );
+    let events = payload["events"].as_array().expect("events array");
+    assert_eq!(
+        events.len(),
+        2,
+        "durable 尾读必须返回 jsonl 既有事件，got {events:?}"
+    );
+    assert_eq!(events[0]["event"], "hold");
+    assert_eq!(events[1]["event"], "release");
+}
+
+fn workspace_timelines_root(aria_root: &std::path::Path) -> std::path::PathBuf {
+    let projects = aria_root.join("projects");
+    let project = fs::read_dir(&projects)
+        .expect("projects dir")
+        .next()
+        .expect("project entry")
+        .expect("project read")
+        .path();
+    let issues = project.join("issues");
+    let issue = fs::read_dir(&issues)
+        .expect("issues dir")
+        .next()
+        .expect("issue entry")
+        .expect("issue read")
+        .path();
+    issue.join("workspace-timelines")
+}
+
 // REQ-WCR-04/T9：manager 只分配一次序号；attach 基线和所有在线 attachment 的直播
 // 事件必须携带同一递增 `event_seq`，而非 socket-local 序号。
 #[tokio::test]

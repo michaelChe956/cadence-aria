@@ -23,7 +23,6 @@ impl WorkspaceSessionManager {
         }
     }
 
-
     /// Hello 入口完成 wire role 的一次归一。pending 期间的连接也必须先归一，
     /// 随后 cursor 分支会在同一状态锁内将其转为直播 attachment。
     pub(crate) fn bind_role(
@@ -32,59 +31,65 @@ impl WorkspaceSessionManager {
         role: ConnectionRole,
         after_event_seq: Option<u64>,
     ) {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let connection_id = state
-            .pending_attachments
-            .iter()
-            .find_map(|(connection_id, attachment)| {
-                attachment
-                    .outbound_tx
-                    .same_channel(outbound_tx)
-                    .then(|| connection_id.clone())
-            })
-            .or_else(|| {
-                state
-                    .attachments
-                    .iter()
-                    .find_map(|(connection_id, attachment)| {
-                        attachment
-                            .outbound_tx
-                            .same_channel(outbound_tx)
-                            .then(|| connection_id.clone())
-                    })
-            });
-        let Some(connection_id) = connection_id else {
-            return;
-        };
-        let provisional_lease =
-            if let Some(attachment) = state.pending_attachments.get_mut(&connection_id) {
-                attachment.role = role;
-                attachment.after_event_seq = after_event_seq;
-                attachment.provisional_lease.take()
-            } else if let Some(attachment) = state.attachments.get_mut(&connection_id) {
-                attachment.role = role;
-                attachment.after_event_seq = after_event_seq;
-                attachment.provisional_lease.take()
-            } else {
+        let hold = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let connection_id = state
+                .pending_attachments
+                .iter()
+                .find_map(|(connection_id, attachment)| {
+                    attachment
+                        .outbound_tx
+                        .same_channel(outbound_tx)
+                        .then(|| connection_id.clone())
+                })
+                .or_else(|| {
+                    state
+                        .attachments
+                        .iter()
+                        .find_map(|(connection_id, attachment)| {
+                            attachment
+                                .outbound_tx
+                                .same_channel(outbound_tx)
+                                .then(|| connection_id.clone())
+                        })
+                });
+            let Some(connection_id) = connection_id else {
                 return;
             };
-        if role == ConnectionRole::Observer {
-            if let Some(rollback) = provisional_lease
-                && state.lease.holder.as_deref() == Some(connection_id.as_str())
-            {
-                state.lease = rollback;
+            let provisional_lease =
+                if let Some(attachment) = state.pending_attachments.get_mut(&connection_id) {
+                    attachment.role = role;
+                    attachment.after_event_seq = after_event_seq;
+                    attachment.provisional_lease.take()
+                } else if let Some(attachment) = state.attachments.get_mut(&connection_id) {
+                    attachment.role = role;
+                    attachment.after_event_seq = after_event_seq;
+                    attachment.provisional_lease.take()
+                } else {
+                    return;
+                };
+            if role == ConnectionRole::Observer {
+                if let Some(rollback) = provisional_lease
+                    && state.lease.holder.as_deref() == Some(connection_id.as_str())
+                {
+                    state.lease = rollback;
+                }
+                None
+            } else {
+                let from_holder = state.lease.holder.clone();
+                state.lease.acquire(&connection_id);
+                let lease_epoch = state.lease.epoch;
+                Self::refresh_attachment_epoch(&mut state, &connection_id, lease_epoch);
+                Some((connection_id, from_holder, lease_epoch))
             }
-            return;
-        }
-        state.lease.acquire(&connection_id);
-        let lease_epoch = state.lease.epoch;
-        if let Some(attachment) = state.pending_attachments.get_mut(&connection_id) {
-            attachment.lease_epoch = lease_epoch;
-        } else if let Some(attachment) = state.attachments.get_mut(&connection_id) {
-            attachment.lease_epoch = lease_epoch;
+        };
+        // REQ-DLS-03：打点在状态锁外执行，失败零影响仲裁状态机。
+        if let Some((connection_id, from_holder, epoch)) = hold {
+            self.lease_diagnostics
+                .record_hold(&connection_id, from_holder.as_deref(), epoch);
         }
     }
 
@@ -113,41 +118,93 @@ impl WorkspaceSessionManager {
         connection_id: &str,
         message: &WsInMessage,
     ) -> Result<(), ConnectionRole> {
-        let mut state = self
+        enum Arbitration {
+            Allow,
+            SelfHeal { epoch: u64 },
+            RejectedObserver,
+            RejectedStale { holder: Option<String>, epoch: u64 },
+        }
+        let decision = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let role = state
+                .attachments
+                .get(connection_id)
+                .or_else(|| state.pending_attachments.get(connection_id))
+                .map(|attachment| attachment.role)
+                // attachment 只会在 socket 收尾时摘除；若发生内部竞态，写面保守拒绝。
+                .unwrap_or(ConnectionRole::Observer);
+            if !is_write_message(message) {
+                return Ok(());
+            }
+            if role == ConnectionRole::Observer {
+                Arbitration::RejectedObserver
+            } else if state.lease.holder.as_deref() != Some(connection_id) {
+                // REQ-DLS-01：悬空态首写自愈；有活跃持有者时维持既有拒绝。
+                if !state.lease.acquire_if_vacant(connection_id) {
+                    Arbitration::RejectedStale {
+                        holder: state.lease.holder.clone(),
+                        epoch: state.lease.epoch,
+                    }
+                } else {
+                    let lease_epoch = state.lease.epoch;
+                    Self::refresh_attachment_epoch(&mut state, connection_id, lease_epoch);
+                    Arbitration::SelfHeal { epoch: lease_epoch }
+                }
+            } else {
+                let holds_current_epoch = state
+                    .attachments
+                    .get(connection_id)
+                    .or_else(|| state.pending_attachments.get(connection_id))
+                    .is_some_and(|attachment| state.lease.matches_epoch(attachment.lease_epoch));
+                if holds_current_epoch {
+                    Arbitration::Allow
+                } else {
+                    Arbitration::RejectedStale {
+                        holder: state.lease.holder.clone(),
+                        epoch: state.lease.epoch,
+                    }
+                }
+            }
+        };
+        // REQ-DLS-03：打点在状态锁外执行且不参与裁决，失败零影响仲裁状态机。
+        match decision {
+            Arbitration::Allow => Ok(()),
+            Arbitration::SelfHeal { epoch } => {
+                self.lease_diagnostics
+                    .record_self_heal(connection_id, epoch);
+                Ok(())
+            }
+            Arbitration::RejectedObserver => {
+                self.lease_diagnostics
+                    .record_write_rejected_observer(connection_id);
+                Err(ConnectionRole::Observer)
+            }
+            Arbitration::RejectedStale { holder, epoch } => {
+                self.lease_diagnostics.record_write_rejected_stale(
+                    connection_id,
+                    holder.as_deref(),
+                    epoch,
+                );
+                Err(ConnectionRole::Driver)
+            }
+        }
+    }
+
+    /// REQ-DLS-03 诊断端点数据源：当前持有者 + 最近转移序列（内存环形缓冲）。
+    pub(crate) fn lease_diagnostics_snapshot(&self) -> serde_json::Value {
+        let state = self
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let role = state
-            .attachments
-            .get(connection_id)
-            .or_else(|| state.pending_attachments.get(connection_id))
-            .map(|attachment| attachment.role)
-            // attachment 只会在 socket 收尾时摘除；若发生内部竞态，写面保守拒绝。
-            .unwrap_or(ConnectionRole::Observer);
-        if !is_write_message(message) {
-            return Ok(());
-        }
-        if role == ConnectionRole::Observer {
-            return Err(ConnectionRole::Observer);
-        }
-        if state.lease.holder.as_deref() != Some(connection_id) {
-            // REQ-DLS-01：悬空态首写自愈；有活跃持有者时维持既有拒绝。
-            if !state.lease.acquire_if_vacant(connection_id) {
-                return Err(ConnectionRole::Driver);
-            }
-            let lease_epoch = state.lease.epoch;
-            Self::refresh_attachment_epoch(&mut state, connection_id, lease_epoch);
-            return Ok(());
-        }
-        let holds_current_epoch = state
-            .attachments
-            .get(connection_id)
-            .or_else(|| state.pending_attachments.get(connection_id))
-            .is_some_and(|attachment| state.lease.matches_epoch(attachment.lease_epoch));
-        if holds_current_epoch {
-            Ok(())
-        } else {
-            Err(ConnectionRole::Driver)
-        }
+        serde_json::json!({
+            "session_id": self.session_id,
+            "holder": state.lease.holder,
+            "epoch": state.lease.epoch,
+            "last_holder": state.lease.last_holder,
+            "events": self.lease_diagnostics.recent(),
+        })
     }
 }

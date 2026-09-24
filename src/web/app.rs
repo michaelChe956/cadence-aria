@@ -333,6 +333,10 @@ pub fn build_web_router_with_evidence(state: WebAppState, evidence_enabled: bool
             post(handlers::workspace_session_takeover),
         )
         .route(
+            "/api/workspace-sessions/{session_id}/lease-diagnostics",
+            get(handlers::workspace_session_lease_diagnostics),
+        )
+        .route(
             "/api/workspace-sessions/{session_id}/timeline-node-details/{node_id}",
             get(handlers::workspace_session_timeline_node_detail),
         )

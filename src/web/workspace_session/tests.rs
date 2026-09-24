@@ -1046,3 +1046,94 @@ async fn self_heal_window_does_not_relax_observer_write_rejection() {
         "悬空窗口对 observer 不适用：写拒绝语义不得放宽"
     );
 }
+
+/// REQ-DLS-03：五类租约事件（hold/self_heal/release/write_rejected_stale/
+/// write_rejected_observer）以 append-only 单行 JSON 落会话级
+/// `lease-diagnostics.jsonl`；自愈授予幂等（同连接重复写不重复打点）。
+#[tokio::test]
+async fn lease_diagnostics_records_five_event_kinds_to_session_jsonl() {
+    use crate::web::workspace_session::ConnectionRole;
+    use crate::web::workspace_ws_types::WsInMessage;
+
+    let session_id = "session_lease_diag_events";
+    let diagnostics_path = std::env::temp_dir()
+        .join(session_id)
+        .join("lease-diagnostics.jsonl");
+    let _ = std::fs::remove_file(&diagnostics_path);
+
+    let manager = WorkspaceSessionManager::test_fixture(session_id);
+    let (a_tx, _a_rx) = mpsc::channel::<OutboundControl>(1);
+    manager.register_attachment("conn_a", a_tx.clone());
+    manager.bind_role(&a_tx, ConnectionRole::Driver, None);
+    let (b_tx, _b_rx) = mpsc::channel::<OutboundControl>(1);
+    manager.register_attachment("conn_b", b_tx.clone());
+    manager.bind_role(&b_tx, ConnectionRole::Driver, None);
+    // b 活跃持有：a 写被拒 → write_rejected_stale
+    assert!(matches!(
+        manager.arbitrate("conn_a", &WsInMessage::Abort),
+        Err(ConnectionRole::Driver)
+    ));
+    // b 断开释放 → release；a 首写自愈 → self_heal（重复写不再打点）
+    manager.handle_connection_closed("conn_b").await;
+    assert!(manager.arbitrate("conn_a", &WsInMessage::Abort).is_ok());
+    assert!(manager.arbitrate("conn_a", &WsInMessage::Abort).is_ok());
+    // observer 写拒 → write_rejected_observer
+    let (o_tx, _o_rx) = mpsc::channel::<OutboundControl>(1);
+    manager.register_attachment("conn_observer", o_tx.clone());
+    manager.bind_role(&o_tx, ConnectionRole::Observer, None);
+    assert!(matches!(
+        manager.arbitrate("conn_observer", &WsInMessage::Abort),
+        Err(ConnectionRole::Observer)
+    ));
+
+    let content = std::fs::read_to_string(&diagnostics_path)
+        .expect("lease-diagnostics.jsonl must exist after lease transitions");
+    let events: Vec<serde_json::Value> = content
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let kinds: Vec<&str> = events
+        .iter()
+        .map(|event| event["event"].as_str().unwrap_or_default())
+        .collect();
+    for expected in [
+        "hold",
+        "self_heal",
+        "release",
+        "write_rejected_stale",
+        "write_rejected_observer",
+    ] {
+        assert!(
+            kinds.contains(&expected),
+            "lease-diagnostics.jsonl 缺少 {expected} 事件，现有：{kinds:?}"
+        );
+    }
+    assert_eq!(
+        kinds.iter().filter(|kind| **kind == "self_heal").count(),
+        1,
+        "同连接重复写不得重复授予/重复打点（自愈幂等）"
+    );
+    // release 先于 self_heal：悬空是自愈的前提，序列必须可定案。
+    let release_at = kinds
+        .iter()
+        .position(|kind| *kind == "release")
+        .expect("release event");
+    let heal_at = kinds
+        .iter()
+        .position(|kind| *kind == "self_heal")
+        .expect("self_heal event");
+    assert!(release_at < heal_at);
+    // 字段完整性：时刻、连接标识、角色、epoch。
+    let heal = events
+        .iter()
+        .find(|event| event["event"] == "self_heal")
+        .expect("self_heal record");
+    assert_eq!(heal["connection_id"], "conn_a");
+    assert_eq!(heal["role"], "driver");
+    assert!(
+        heal["recorded_at"]
+            .as_str()
+            .is_some_and(|at| !at.is_empty())
+    );
+    assert!(heal["epoch"].as_u64().is_some());
+}
