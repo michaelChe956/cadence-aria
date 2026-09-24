@@ -212,6 +212,64 @@ impl WorkspaceEngine {
                     }
                 }
             }
+            // C2（REQ-HGC-03 场景 2/F-52 R6）：invalid_json 等输出解析失败在
+            // 同 invocation 内恰一次静默重试——同一 input 重新拉起 provider
+            // （不铸 repair prompt、不发执行事件、不登记 ledger），续用同一
+            // provider 会话；成功则正常消费（计入这一次 review），仍失败保
+            // 原始 diagnostic 进人工，该轮不计为一次完整 review（routing 侧
+            // 对 attempted&&!succeeded 的降级轮零计数）。
+            Err(first_error) if first_error.is_output_parse_failure() => {
+                let retry_input = StreamingProviderInput {
+                    resume_provider_session_id: first_completion
+                        .provider_session_id
+                        .clone()
+                        .filter(|session_id| !session_id.trim().is_empty()),
+                    ..input.clone()
+                };
+                let retry_session = provider.start(retry_input, self.cancel.clone()).await;
+                let retry_completion = match self
+                    .drive_reviewer_provider_session_once(retry_session, &mut command_rx, &reviewer)
+                    .await
+                {
+                    ReviewProviderRunResult::Completed(completion) => completion,
+                    ReviewProviderRunResult::Aborted => return,
+                    ReviewProviderRunResult::Failed(_) => {
+                        let verdict =
+                            fallback_review_verdict(&first_completion, &first_error, true);
+                        self.complete_review(first_completion, verdict).await;
+                        return;
+                    }
+                };
+                match self.parse_review_completion_for_active_node(&retry_completion) {
+                    Ok(mut verdict) => {
+                        verdict.structured_output_diagnostic =
+                            Some(success_diagnostic(&first_error));
+                        let normalized = ProviderCompletion {
+                            full_output: format!(
+                                "{}\n{}",
+                                first_completion.full_output, retry_completion.full_output
+                            ),
+                            readable_output: first_completion.readable_output,
+                            structured_output: retry_completion.structured_output,
+                            provider_session_id: retry_completion.provider_session_id,
+                        };
+                        self.complete_review(normalized, verdict).await;
+                    }
+                    Err(second_error) => {
+                        let normalized = ProviderCompletion {
+                            full_output: format!(
+                                "{}\n{}",
+                                first_completion.full_output, retry_completion.full_output
+                            ),
+                            readable_output: first_completion.readable_output,
+                            structured_output: retry_completion.structured_output,
+                            provider_session_id: retry_completion.provider_session_id,
+                        };
+                        let verdict = fallback_review_verdict(&normalized, &second_error, true);
+                        self.complete_review(normalized, verdict).await;
+                    }
+                }
+            }
             Err(error) => {
                 let verdict = fallback_review_verdict(&first_completion, &error, false);
                 self.complete_review(first_completion, verdict).await;
@@ -442,6 +500,67 @@ impl WorkspaceEngine {
                             Some(reviewer.clone()),
                         )
                         .await;
+                        let verdict = fallback_review_verdict(&normalized, &second_error, true);
+                        self.complete_review(normalized, verdict).await;
+                    }
+                }
+            }
+            // C2（REQ-HGC-03 场景 2）：gateway 路径镜像同一「同 invocation 恰
+            // 一次静默重试」契约（同一 input、静默、零记账）。
+            Err(first_error) if first_error.is_output_parse_failure() => {
+                let retry_input = StreamingProviderInput {
+                    resume_provider_session_id: first_completion
+                        .provider_session_id
+                        .clone()
+                        .filter(|session_id| !session_id.trim().is_empty()),
+                    ..input.clone()
+                };
+                let retry_session = start_review_session_via_gateway(
+                    &gateway,
+                    &reviewer,
+                    retry_input,
+                    project_id,
+                    self.cancel.clone(),
+                )
+                .await;
+                let retry_completion = match self
+                    .drive_reviewer_provider_session_once(retry_session, &mut command_rx, &reviewer)
+                    .await
+                {
+                    ReviewProviderRunResult::Completed(completion) => completion,
+                    ReviewProviderRunResult::Aborted => return,
+                    ReviewProviderRunResult::Failed(_) => {
+                        let verdict =
+                            fallback_review_verdict(&first_completion, &first_error, true);
+                        self.complete_review(first_completion, verdict).await;
+                        return;
+                    }
+                };
+                match self.parse_review_completion_for_active_node(&retry_completion) {
+                    Ok(mut verdict) => {
+                        verdict.structured_output_diagnostic =
+                            Some(success_diagnostic(&first_error));
+                        let normalized = ProviderCompletion {
+                            full_output: format!(
+                                "{}\n{}",
+                                first_completion.full_output, retry_completion.full_output
+                            ),
+                            readable_output: first_completion.readable_output,
+                            structured_output: retry_completion.structured_output,
+                            provider_session_id: retry_completion.provider_session_id,
+                        };
+                        self.complete_review(normalized, verdict).await;
+                    }
+                    Err(second_error) => {
+                        let normalized = ProviderCompletion {
+                            full_output: format!(
+                                "{}\n{}",
+                                first_completion.full_output, retry_completion.full_output
+                            ),
+                            readable_output: first_completion.readable_output,
+                            structured_output: retry_completion.structured_output,
+                            provider_session_id: retry_completion.provider_session_id,
+                        };
                         let verdict = fallback_review_verdict(&normalized, &second_error, true);
                         self.complete_review(normalized, verdict).await;
                     }

@@ -384,6 +384,19 @@ impl WorkspaceEngine {
                 reason: HumanReason::NativeHumanRequired,
             };
         }
+        // C2（REQ-HGC-03 场景 2/F-52 R6）：解析降级轮（已尝试结构化输出
+        // 恢复——同 invocation 静默重试或 JSON repair——但失败）不计为一
+        // 次完整 review：review/cycle 计数零增量。现场 R6 的 invalid_json
+        // 白耗轮即反例锚点；降级轮 verdict 无 findings，seen 集合并入也为空。
+        if verdict
+            .structured_output_diagnostic
+            .as_ref()
+            .is_some_and(|diagnostic| {
+                diagnostic.repair_attempted && !diagnostic.repair_succeeded
+            })
+        {
+            decision.history_delta = RunHistoryDelta::default();
+        }
         let mut history = self.session.run_history.clone();
         if let Err(error) = decision
             .history_delta

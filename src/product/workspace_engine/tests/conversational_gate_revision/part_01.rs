@@ -61,6 +61,54 @@ fn conversational_gate_revision_prompt_includes_candidate_feedback_grammar_langu
     );
 }
 
+/// C2（REQ-HGC-03→修订教学逃生/tasks 4.1）：反馈点名结构性变更时允许受影响
+/// 闭包联动+影响面声明（Notes 自由文本区，grammar 标题仍是第一行）；禁删
+/// 必需字段/绕过 validator 的反面清单不放宽。
+#[test]
+fn conversational_gate_revision_teaching_carries_structural_escape_clause() {
+    let candidate =
+        "# Work Item Plan\n\n## Work Item WI-001: 当前候选\n\n### Outputs\n- contract_id: CT-001\n";
+    let prompt = build_sc_manual_revision_prompt(ScManualRevisionPromptInput {
+        candidate_markdown: candidate,
+        feedback: "把 TASK-003 移动到 WI-002，并同步受影响的完成判据",
+        grammar_boundary: "[markdown_grammar]\n标题必须逐字为 # Work Item Plan；Handoff Schema 必须保留三个字段。",
+        language_rule: LANGUAGE_RULE_FIXTURE,
+    })
+    .expect("revision prompt should fit the contract budget");
+
+    assert!(
+        prompt.contains("结构性变更"),
+        "missing escape clause trigger wording: {prompt}"
+    );
+    assert!(
+        prompt.contains("受影响的闭包"),
+        "missing affected-closure linkage permission: {prompt}"
+    );
+    assert!(
+        prompt.contains("影响面"),
+        "missing impact-declaration requirement: {prompt}"
+    );
+    assert!(
+        prompt.contains("Notes"),
+        "declaration must be placed in the free-text Notes section: {prompt}"
+    );
+    // 反面清单不放宽：禁删字段/绕 validator 维持。
+    assert!(
+        prompt.contains("禁止删字段"),
+        "missing delete-fields prohibition: {prompt}"
+    );
+    assert!(
+        prompt.contains("绕过 grammar 或 validator") || prompt.contains("绕过 validator"),
+        "missing validator-bypass prohibition: {prompt}"
+    );
+    assert!(
+        prompt.len() <= SC_MANUAL_REVISION_PROMPT_QUALITY_BUDGET_BYTES,
+        "escape clause must fit the teaching budget: {} > {}",
+        prompt.len(),
+        SC_MANUAL_REVISION_PROMPT_QUALITY_BUDGET_BYTES
+    );
+}
+
 #[tokio::test]
 async fn conversational_gate_revision_prompt_rejects_oversized_feedback_before_reservation() {
     let (_root, lifecycle, mut engine) = super::conversational_gate::gate_fixture(2);

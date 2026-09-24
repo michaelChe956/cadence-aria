@@ -80,6 +80,13 @@ impl ReviewCompletionError {
                 )
         )
     }
+
+    /// C2（REQ-HGC-03 场景 2/F-52 R6）：输出侧解析失败（envelope/JSON 语法
+    /// 族）——同 invocation 一次静默重试的适用面；schema/协议错误是确定性
+    /// 业务校验失败，重发不改变结果，不适用。
+    pub(crate) fn is_output_parse_failure(&self) -> bool {
+        matches!(self, Self::Syntax(_))
+    }
 }
 
 pub(crate) fn repair_payload_is_compatible(

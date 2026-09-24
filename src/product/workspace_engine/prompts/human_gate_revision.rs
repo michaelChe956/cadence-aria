@@ -44,7 +44,7 @@ pub(crate) fn validate_sc_manual_revision_feedback(feedback: &str) -> Result<(),
     Ok(())
 }
 
-const REVISION_TEACHING: &str = "只改反馈点名的内容，其余逐字保留。必须输出完整修订版 markdown，不得输出 diff、patch 或解释。反面清单：禁止删字段；禁止清空 Outputs；禁止遗漏 Handoff Schema 三字段（required_fields、provided_contract_refs、reviewer_check_refs）。";
+const REVISION_TEACHING: &str = "只改反馈点名的内容，其余逐字保留。逃生条款（仅当反馈点名结构性变更时适用）：若反馈要求新增、删除、移动或改写 Work Item、契约、AC、TASK 等实体或其引用关系，允许同步修订受影响的闭包字段（如 done_when_refs、provided_contract_refs、reviewer_check_refs、契约能力行），使候选保持自洽；且必须在 Notes section 首行以「影响面：」声明联动修改的字段范围（候选无 Notes section 时新增该 section，置于文档尾部）；逃生条款不放宽反面清单。必须输出完整修订版 markdown，不得输出 diff、patch 或解释。反面清单：禁止删字段；禁止清空 Outputs；禁止遗漏 Handoff Schema 三字段（required_fields、provided_contract_refs、reviewer_check_refs）；禁止以联动为名绕过 grammar 或 validator。";
 
 /// 构造 SC manual revision 的完整 markdown prompt。
 ///

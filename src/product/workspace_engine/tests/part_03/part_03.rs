@@ -811,29 +811,129 @@ async fn review_structured_output_repair_rejects_payload_change() {
     );
 }
 
+// C2 改写登记（REQ-HGC-03 场景 2）：invalid_json 现在获得同 invocation 恰一次
+// 静默重试（同一 input 重发，非 repair prompt）；重试仍失败保原始 diagnostic
+// 进人工。「不触发不可验证 repair」的原语义保留——重试不是 payload-equality
+// repair，成功消费的前提是重试输出自身完整可解析。
 #[tokio::test]
-async fn invalid_review_json_does_not_trigger_unverifiable_repair() {
-    let provider = QueuedReviewProvider::new(vec![valid_structured_output(
-        r#"{"verdict":"pass","summary":}"#,
-    )]);
-    let (_tmp, mut engine, _rx, _review_node_id) =
+async fn invalid_review_json_retries_same_input_without_verifiable_payload_repair() {
+    let provider = QueuedReviewProvider::new(vec![
+        valid_structured_output(r#"{"verdict":"pass","summary":}"#),
+        valid_structured_output(r#"{"verdict":"pass","summary":}"#),
+    ]);
+    let (_tmp, mut engine, mut rx, _review_node_id) =
         queued_review_engine("sess_review_invalid_json_no_repair").await;
 
     engine
         .drive_review_session(Arc::new(provider.clone()), empty_provider_commands())
         .await;
 
-    assert_eq!(provider.starts.load(Ordering::SeqCst), 1);
+    assert_eq!(provider.starts.load(Ordering::SeqCst), 2);
+    let prompts = provider.prompts.lock().unwrap().clone();
+    assert_eq!(prompts[0], prompts[1], "retry resends the original input");
     let verdict = engine.latest_review_verdict.as_ref().expect("fallback verdict");
     assert_eq!(verdict.verdict, ReviewVerdictType::NeedsHuman);
-    assert_eq!(
-        verdict
-            .structured_output_diagnostic
-            .as_ref()
-            .expect("invalid json diagnostic")
-            .code,
-        "invalid_json"
+    let diagnostic = verdict
+        .structured_output_diagnostic
+        .as_ref()
+        .expect("invalid json diagnostic");
+    assert_eq!(diagnostic.code, "invalid_json");
+    assert!(diagnostic.repair_attempted);
+    assert!(!diagnostic.repair_succeeded);
+    assert!(repair_event_statuses(&mut rx).is_empty());
+}
+
+// —— C2 human-gate-convergence（REQ-HGC-03 场景 2/F-52 R6）——
+//
+// 现场（issue_0002/workspace_session_0009 R6）：reviewer raw output 实为
+// pass+3 advisory，仅结构化 JSON 非法（invalid_json）——整轮被丢弃降级
+// needs_human，白耗一轮 + 3h 门等待。新契约：解析失败（invalid_json 等
+// Syntax 族）在同 invocation 内恰一次静默重试（同一 input、不发事件、
+// 不记账）；重试成功正常消费；仍失败保原始 diagnostic 进人工，且该轮
+// 不计为一次完整 review（review/cycle/返修计数零增量）。
+#[tokio::test]
+async fn invalid_json_retries_once_within_invocation_and_consumes_recovery() {
+    let provider = QueuedReviewProvider::new(vec![
+        valid_structured_output(r#"{"verdict":"pass","summary":}"#),
+        valid_structured_output(r#"{"verdict":"pass","summary":"格式恢复","findings":[]}"#),
+    ]);
+    let (_tmp, mut engine, mut rx, _review_node_id) =
+        queued_review_engine("sess_review_invalid_json_retry_success").await;
+
+    engine
+        .drive_review_session(Arc::new(provider.clone()), empty_provider_commands())
+        .await;
+
+    assert_eq!(provider.starts.load(Ordering::SeqCst), 2);
+    // 同 invocation 静默重试：同一份 input 重新拉起（非 repair prompt），
+    // 续用同一 provider 会话。
+    let prompts = provider.prompts.lock().unwrap().clone();
+    assert_eq!(prompts[0], prompts[1], "retry must resend the original input");
+    assert!(
+        !prompts[1].contains("结构化输出格式无效"),
+        "retry must not build a repair prompt"
     );
+    assert_eq!(
+        provider.resume_provider_session_ids.lock().unwrap()[1],
+        Some("review-session-1".to_string())
+    );
+    let verdict = engine
+        .latest_review_verdict
+        .as_ref()
+        .expect("recovered verdict");
+    assert_eq!(verdict.verdict, ReviewVerdictType::Pass);
+    let diagnostic = verdict
+        .structured_output_diagnostic
+        .as_ref()
+        .expect("retry diagnostic");
+    assert_eq!(diagnostic.code, "invalid_json");
+    assert!(diagnostic.repair_attempted);
+    assert!(diagnostic.repair_succeeded);
+    // 静默纪律：不发 structured_output_repair 执行事件。
+    assert!(repair_event_statuses(&mut rx).is_empty());
+}
+
+#[tokio::test]
+async fn invalid_json_retry_failure_preserves_diagnostic_and_counts_nothing() {
+    let provider = QueuedReviewProvider::new(vec![
+        valid_structured_output(r#"{"verdict":"pass","summary":}"#),
+        valid_structured_output(r#"{"verdict":"pass","summary":}"#),
+    ]);
+    let (_tmp, mut engine, _rx, _review_node_id) =
+        queued_work_item_plan_outline_review_engine("sess_review_invalid_json_retry_failed")
+            .await;
+
+    engine
+        .drive_review_session(Arc::new(provider.clone()), empty_provider_commands())
+        .await;
+
+    // 恰一次重试：两次 provider 启动后不再追加第三次。
+    assert_eq!(provider.starts.load(Ordering::SeqCst), 2);
+    let verdict = engine
+        .latest_review_verdict
+        .as_ref()
+        .expect("fallback verdict");
+    assert_eq!(verdict.verdict, ReviewVerdictType::NeedsHuman);
+    let diagnostic = verdict
+        .structured_output_diagnostic
+        .as_ref()
+        .expect("degraded diagnostic");
+    assert_eq!(diagnostic.code, "invalid_json");
+    assert!(diagnostic.repair_attempted);
+    assert!(!diagnostic.repair_succeeded);
+    assert!(diagnostic.raw_output_preview.is_some());
+    // 零计数增量×3（REQ-HGC-03）：review 计数（含 cycle）/自动返修/人工预算
+    // ——降级轮不计为一次完整 review，人工门以默认预算开门。
+    assert_eq!(engine.session.run_history.initial_review_count, 0);
+    assert!(engine.session.run_history.review_cycles.is_empty());
+    assert_eq!(engine.session.run_history.repairs_used, 0);
+    let gate = engine
+        .session
+        .human_gate_snapshot
+        .as_ref()
+        .expect("degraded round opens the human gate");
+    assert_eq!(gate.manual_repairs_remaining, 3);
+    assert_eq!(gate.accepted_feedback_turns, Some(0));
 }
 
 #[tokio::test]
