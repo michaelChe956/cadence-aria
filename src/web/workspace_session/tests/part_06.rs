@@ -48,6 +48,54 @@ async fn degraded_attachment_keyframe_recovers_via_bounded_waiting_delivery() {
     }
 }
 
+/// REQ-HTR-03 场景 1 变体（当场降级腿，C3K3 P3-1/M4 测试钉）：关键帧广播
+/// 本身就是首次溢出帧——降级与关键帧同帧发生，有界等待任务由
+/// try_send_live_event 的 Full 支路直接起（区别于既有用例的「先经非关键帧
+/// 降级、关键帧后走 try_recover 支路」形态——M4 变异即禁用本腿）。引擎
+/// 静默期基线必达。
+#[tokio::test]
+async fn keyframe_broadcast_first_overflow_delivers_baseline_during_silence() {
+    let manager = WorkspaceSessionManager::test_fixture("session_keyframe_first_overflow");
+    let (slow_tx, mut slow_rx) = mpsc::channel(1);
+    manager.attach("slow", slow_tx).await;
+    // 容量 1：首帧（非关键帧）入队占满——连接尚健康。
+    manager
+        .broadcast_test_event(crate::web::workspace_ws_types::WsProviderStatus::Starting)
+        .await;
+    assert!(
+        !manager.attachment_is_degraded("slow"),
+        "首帧入队成功不得降级"
+    );
+
+    // 关键帧即第二帧：首次溢出当场降级 + 有界等待投递任务直接接管。
+    manager.broadcast_test_keyframe(crate::web::workspace_ws_types::WsOutMessage::StageChange {
+        stage: "human_confirm".to_string(),
+    });
+    assert!(
+        manager.attachment_is_degraded("slow"),
+        "关键帧首次溢出必须当场降级"
+    );
+
+    // 客户端恢复读取：腾出队列容量——此后不再有任何新广播（引擎静默）。
+    let first = slow_rx.recv().await.expect("queued provider_status frame");
+    assert!(matches!(first, OutboundControl::Text(json) if json.contains("provider_status")));
+    let recovered = tokio::time::timeout(std::time::Duration::from_secs(3), slow_rx.recv())
+        .await
+        .expect("当场降级的关键帧同样必须在引擎静默期送达恢复基线（不依赖后续广播）")
+        .expect("attachment channel stays open");
+    match recovered {
+        OutboundControl::Text(json) => {
+            let value: serde_json::Value = serde_json::from_str(&json).expect("baseline JSON");
+            assert_eq!(
+                value["type"], "session_state",
+                "等待式投递送达的是恢复基线（全量 session_state）"
+            );
+            assert_eq!(value["event_seq"], 2, "基线必须携带关键帧广播的 event_seq");
+        }
+        other => panic!("unexpected outbound control: {other:?}"),
+    }
+}
+
 /// REQ-HTR-03 场景 1（resync 腿）：持续满队列的关键帧在两次有界退避尝试
 /// 后必须显式发出 resync_required——客户端收到后主动重连拉取全量，不出现
 /// 「帧被吞且无任何信号」的 stale 停留。
