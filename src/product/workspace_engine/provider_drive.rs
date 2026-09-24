@@ -6,6 +6,9 @@ mod aggregate_writeback;
 pub(crate) mod artifact_retry;
 mod choice_audit;
 mod pending_choices;
+// `pub(crate)`：REQ-NDR-05 usage 落盘失败诊断（降级档位 / 有界 detail）由
+// `workspace_engine::tests::usage_persistence_diagnostic` 直接断言。
+pub(crate) mod usage_diagnostic;
 mod watchdog;
 
 use crate::product::lifecycle_store::spec::ExistingSpecRecord;

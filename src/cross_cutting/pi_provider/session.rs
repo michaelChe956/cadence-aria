@@ -667,7 +667,10 @@ async fn emit_pi_usage<W>(
         match send_pi_command(peer, pending_by_id, next_id, json!({ "type": "get_state" })).await {
             Ok(get_state) => get_state,
             Err(error) => {
-                tracing::warn!(target: "pi_provider", %error, "usage get_state send failed");
+                warn_pi_usage_unavailable(
+                    PiUsageStage::RpcSend,
+                    Some(&format!("get_state send failed: {error}")),
+                );
                 return;
             }
         };
@@ -687,22 +690,88 @@ async fn emit_pi_usage<W>(
     {
         Ok(PiResponseWait::Response(response, _)) => response,
         _ => {
-            tracing::warn!(target: "pi_provider", "usage get_state did not complete");
+            warn_pi_usage_unavailable(PiUsageStage::RpcResponse, None);
             return;
         }
     };
     // 优先使用 Pi 协议层 cost；当前版本通常为 null，才读 get_state 明示的
-    // sessionFile 尾部。任何本地读取失败均降级为无 usage，不影响完成路径。
-    let report = parse_pi_usage(&response, role).or_else(|| {
-        parse_pi_session_file(&response).and_then(|session_file| read_pi_usage(&session_file, role))
-    });
+    // sessionFile 尾部。任何本地读取失败均降级为无 usage，不影响完成路径；
+    // 失败环节按 rpc/parse/file 结构化留痕（REQ-NDR-05）。
+    let report = match parse_pi_usage(&response, role) {
+        Some(report) => Some(report),
+        None => match parse_pi_session_file(&response) {
+            Some(session_file) => match read_pi_usage(&session_file, role) {
+                Some(report) => Some(report),
+                None => {
+                    warn_pi_usage_unavailable(
+                        PiUsageStage::File,
+                        Some(&format!(
+                            "local session usage unavailable: {}",
+                            session_file.display()
+                        )),
+                    );
+                    None
+                }
+            },
+            None => {
+                warn_pi_usage_unavailable(
+                    PiUsageStage::Parse,
+                    Some("no cost and no absolute session_file"),
+                );
+                None
+            }
+        },
+    };
     if let Some(report) = report
         && send_event(event_tx, ProviderEvent::UsageReport(report))
             .await
             .is_err()
     {
-        tracing::warn!(target: "pi_provider", "usage event receiver closed");
+        warn_pi_usage_unavailable(PiUsageStage::Emit, None);
     }
+}
+
+/// REQ-NDR-05：pi usage 兜底链路的失败环节（结构化 warn 的稳定标签）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PiUsageStage {
+    /// `get_state` 请求写入失败（对端已关闭）。
+    RpcSend,
+    /// `get_state` 响应未到达（流提前结束/被中断）。
+    RpcResponse,
+    /// 响应既无 `data.cost`，也无可用的绝对 `data.sessionFile`。
+    Parse,
+    /// 会话文件可定位，但本地记录读不到该轮 usage。
+    File,
+    /// usage 事件接收端已关闭。
+    Emit,
+}
+
+impl PiUsageStage {
+    /// 稳定环节标签（诊断检索键，勿改名）。
+    fn label(self) -> &'static str {
+        match self {
+            Self::RpcSend => "rpc_send",
+            Self::RpcResponse => "rpc_response",
+            Self::Parse => "parse",
+            Self::File => "file",
+            Self::Emit => "emit",
+        }
+    }
+}
+
+/// REQ-NDR-05：usage 兜底失败的结构化留痕（`stage` 稳定标签 + detail）。
+///
+/// 只写结构化 warn，不改会话与 gate 行为；节点「无 usage」因此可定责到环节
+/// （rpc 获取 / parse 解析 / file 本地读取 / emit 上报）。服务器 stderr 无落盘
+/// 文件时，durable 可检索性由 usage durable 落盘侧（节点 detail 诊断事件 /
+/// `usage-diagnostics.jsonl`）承担。
+pub(crate) fn warn_pi_usage_unavailable(stage: PiUsageStage, detail: Option<&str>) {
+    tracing::warn!(
+        target: "pi_provider",
+        stage = stage.label(),
+        detail = detail.unwrap_or(""),
+        "pi usage unavailable"
+    );
 }
 
 async fn complete_pi_session(

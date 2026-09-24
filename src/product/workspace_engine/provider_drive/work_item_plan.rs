@@ -370,11 +370,21 @@ impl WorkspaceEngine {
     ) {
         if let Some(node_id) = node_id.as_deref() {
             let event_json = execution_event_json(&event);
-            let _ = self
+            let persisted = self
                 .update_node_detail(node_id, |detail| {
                     upsert_execution_event_json(&mut detail.execution_events, event_json);
                 })
                 .await;
+            // REQ-NDR-05：usage 事件的 durable 落盘失败此前被 `let _ =` 静默吞掉，导致
+            // 「节点无 usage」无法区分「本来没有」与「落盘失败」。这里按档位留痕
+            // （节点 detail 诊断事件 → 会话级 usage-diagnostics.jsonl → 结构化 warn），
+            // 不改变事件广播与 gate/provider 行为。
+            if let Err(error) = persisted
+                && event.kind == ProviderExecutionEventKind::Usage
+            {
+                self.record_usage_persist_diagnostic(node_id, &event.event_id, &error)
+                    .await;
+            }
         }
         let _ = self
             .event_tx
