@@ -55,8 +55,8 @@ describe("GatePromptEntry actionability", () => {
 
     expect(screen.getByText("已离开人工确认门")).toBeVisible();
     expect(screen.queryByTestId("gate-feedback-editor")).toBeNull();
-    expect(screen.queryByRole("button", { name: "确认产物" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "终止" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "确认当前版本" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "终止此门" })).toBeNull();
     expect(gateActions.confirm).not.toHaveBeenCalled();
     expect(gateActions.feedback).not.toHaveBeenCalled();
     expect(gateActions.terminate).not.toHaveBeenCalled();
@@ -71,13 +71,13 @@ describe("GatePromptEntry actionability", () => {
         actions={gateActions}
       />,
     );
-    expect(screen.getByRole("button", { name: "确认产物" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "确认当前版本" })).toBeVisible();
 
     act(() => useWorkspaceStore.getState().setStage("compile_plan"));
 
     expect(screen.getByText("已离开人工确认门")).toBeVisible();
-    expect(screen.queryByRole("button", { name: "确认产物" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "终止" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "确认当前版本" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "终止此门" })).toBeNull();
   });
   it("locks a rebuilt typed gate card when the live stage leaves human confirmation", () => {
     const gateActions = actions();
@@ -91,7 +91,7 @@ describe("GatePromptEntry actionability", () => {
         actions={gateActions}
       />,
     );
-    expect(screen.getByRole("button", { name: "确认产物" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "确认当前版本" })).toBeVisible();
 
     act(() =>
       handleWorkspaceWsMessage(
@@ -105,8 +105,8 @@ describe("GatePromptEntry actionability", () => {
     );
 
     expect(screen.getByText("已离开人工确认门")).toBeVisible();
-    expect(screen.queryByRole("button", { name: "确认产物" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "终止" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "确认当前版本" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "终止此门" })).toBeNull();
   });
 
   // F-38：确认卡此前只说「等待人工确认」——确认者不知道在确认什么。有产物版本时
@@ -214,9 +214,9 @@ describe("GatePromptEntry actionability", () => {
 
     await user.type(screen.getByLabelText("门禁反馈"), "请补齐边界");
     await user.click(screen.getByRole("button", { name: "提交反馈" }));
-    fireEvent.click(screen.getByRole("button", { name: "确认产物" }));
-    fireEvent.click(screen.getByRole("button", { name: "终止" }));
-    fireEvent.click(screen.getByRole("button", { name: "确认终止" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认当前版本" }));
+    fireEvent.click(screen.getByRole("button", { name: "终止此门" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认终止此门" }));
 
     expect(gateActions.feedback).toHaveBeenCalledWith("请补齐边界");
     expect(gateActions.confirm).toHaveBeenCalledOnce();
@@ -245,13 +245,13 @@ describe("GatePromptEntry actionability", () => {
       />,
     );
 
-    expect(screen.getByRole("button", { name: "终止" })).toBeVisible();
-    expect(screen.queryByRole("button", { name: "确认产物" })).toBeNull();
+    expect(screen.getByRole("button", { name: "终止此门" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "确认当前版本" })).toBeNull();
     expect(screen.queryByTestId("gate-feedback-editor")).toBeNull();
 
-    await user.click(screen.getByRole("button", { name: "终止" }));
+    await user.click(screen.getByRole("button", { name: "终止此门" }));
     expect(gateActions.terminate).not.toHaveBeenCalled();
-    await user.click(screen.getByRole("button", { name: "确认终止" }));
+    await user.click(screen.getByRole("button", { name: "确认终止此门" }));
     expect(gateActions.terminate).toHaveBeenCalledOnce();
     expect(gateActions.confirm).not.toHaveBeenCalled();
     expect(gateActions.feedback).not.toHaveBeenCalled();
@@ -276,8 +276,8 @@ describe("GatePromptEntry actionability", () => {
 
     expect(screen.getByText("该人工确认门已关闭")).toBeVisible();
     expect(screen.queryByTestId("gate-feedback-editor")).toBeNull();
-    expect(screen.queryByRole("button", { name: "确认产物" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "终止" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "确认当前版本" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "终止此门" })).toBeNull();
     expect(gateActions.confirm).not.toHaveBeenCalled();
     expect(gateActions.feedback).not.toHaveBeenCalled();
   });
@@ -288,7 +288,7 @@ describe("GatePromptEntry actionability", () => {
     render(<GatePromptEntry entry={gateEntry(null, "turn_1")} actions={gateActions} />);
 
     expect(screen.getByText("该人工确认门已关闭")).toBeVisible();
-    expect(screen.queryByRole("button", { name: "确认产物" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "确认当前版本" })).toBeNull();
   });
 
   // F-49 A4：提交成功后清空输入并给出成功反馈；此前文本永久留在输入框（用户以
@@ -346,8 +346,8 @@ describe("GatePromptEntry actionability", () => {
     ).toBeVisible();
     expect(screen.getByText("已留档")).toBeVisible();
     expect(screen.queryByTestId("gate-feedback-editor")).toBeNull();
-    expect(screen.queryByRole("button", { name: "确认产物" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "终止" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "确认当前版本" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "终止此门" })).toBeNull();
   });
 
   // F-49 B1/B2/B3：门卡此前只有 4 字 trigger chip，无「为什么需要你」、无「建议确认
@@ -372,7 +372,7 @@ describe("GatePromptEntry actionability", () => {
       );
 
       expect(screen.getByTestId("gate-why")).toHaveTextContent(
-        "复评仍有 2 条 findings（均为建议级，不阻断发布）；引擎不做自动取舍，由你确认采纳或反馈修改。",
+        "原因：机械校验 0 error，复评有 2 条建议（不阻断发布）；可直接确认，或提交反馈后再修订。",
       );
     });
 
@@ -388,7 +388,7 @@ describe("GatePromptEntry actionability", () => {
         />,
       );
 
-      expect(screen.getByTestId("gate-why")).toHaveTextContent("存在 1 条必须处理项，建议先提交反馈");
+      expect(screen.getByTestId("gate-why")).toHaveTextContent("原因：有 1 条必须处理项；建议先提交反馈。");
     });
 
     it("renders no reason line when the round carries no findings (B1 fail-closed)", () => {
@@ -397,7 +397,9 @@ describe("GatePromptEntry actionability", () => {
       expect(screen.queryByTestId("gate-why")).toBeNull();
     });
 
-    it("advises a direct confirm on advisory-only rounds (B2)", () => {
+    // F-50 裁决 2：「机械校验 0 error」并入原因行前半句，不再渲染独立的
+    // 绿色建议行（gate-advice 退役）。
+    it("merges the 0-error advice into the single reason line (F-50)", () => {
       render(
         <GatePromptEntry
           entry={gateEntry(null, undefined, {
@@ -409,23 +411,7 @@ describe("GatePromptEntry actionability", () => {
         />,
       );
 
-      expect(screen.getByTestId("gate-advice")).toHaveTextContent(
-        "机械校验 0 error——可直接确认；如需采纳建议请提交反馈",
-      );
-    });
-
-    it("omits the advice line when the gate cannot be confirmed (B2 fail-closed)", () => {
-      render(
-        <GatePromptEntry
-          entry={gateEntry("phase_mismatch", "stage:human_confirm", {
-            findings: advisoryFindings,
-            verdict: "pass",
-            review_gate: "user_confirm_allowed",
-          })}
-          actions={actions()}
-        />,
-      );
-
+      expect(screen.getByTestId("gate-why")).toHaveTextContent("机械校验 0 error");
       expect(screen.queryByTestId("gate-advice")).toBeNull();
     });
 
@@ -751,6 +737,112 @@ describe("GatePromptEntry actionability", () => {
       expect(
         meta.compareDocumentPosition(progress) & Node.DOCUMENT_POSITION_FOLLOWING,
       ).toBeTruthy();
+    });
+  });
+
+  // F-50 裁决 1/3/4/9（第二批语义文案）：单标题制、反馈与确认并行、终止按
+  // 门级作用域命名、颜色契约（门禁=琥珀，不染 system 红）。
+  describe("F-50 gate card semantics", () => {
+    it("单标题制：默认门卡只有一个「需要人工确认」标题", () => {
+      render(
+        <GatePromptEntry
+          entry={gateEntry(null, undefined, {
+            verdict: "needs_human",
+            review_gate: "requires_revision",
+          })}
+          actions={actions()}
+        />,
+      );
+
+      expect(screen.getByText("需要人工确认")).toBeVisible();
+      expect(screen.queryByText("可确认当前版本")).toBeNull();
+      expect(screen.queryByText("人工确认")).toBeNull();
+    });
+
+    it("triage intent 门保留「需要判断 reviewer 意图」并配 intent 原因行", () => {
+      render(
+        <GatePromptEntry
+          entry={gateEntry(null, undefined, {
+            verdict: "needs_human",
+            review_gate: "user_triage_required",
+          })}
+          actions={actions()}
+        />,
+      );
+
+      expect(screen.getByText("需要判断 reviewer 意图")).toBeVisible();
+      expect(screen.getByTestId("gate-why")).toHaveTextContent(
+        "原因：评审结果无法自动取舍；请选择确认当前版本或反馈修改。",
+      );
+    });
+
+    it("entry.content 与标题同义时不渲染（单标题不留同义正文）", () => {
+      render(
+        <GatePromptEntry
+          entry={{
+            ...gateEntry(null),
+            content: "需要人工确认",
+            metadata: { summary: "等待人工确认" },
+          }}
+          actions={actions()}
+        />,
+      );
+
+      // 标题保留一份，同义的正文/摘要全部让位。
+      expect(screen.getAllByText("需要人工确认")).toHaveLength(1);
+      expect(screen.queryByText("等待人工确认")).toBeNull();
+    });
+
+    it("独立事实的 content 与 summary 保留渲染；summary 与 content 同义只留一份", () => {
+      render(
+        <GatePromptEntry
+          entry={{
+            ...gateEntry(null),
+            content: "复评发现边界场景缺口",
+            metadata: { summary: "复评发现边界场景缺口" },
+          }}
+          actions={actions()}
+        />,
+      );
+
+      expect(screen.getAllByText("复评发现边界场景缺口")).toHaveLength(1);
+    });
+
+    it("反馈与确认并行：帮助文案标明反馈可选、确认无需填写", () => {
+      render(<GatePromptEntry entry={gateEntry(null)} actions={actions()} />);
+
+      expect(screen.getByTestId("gate-feedback-hint")).toHaveTextContent(
+        "如需调整，请在反馈框填写修改意见；确认当前版本无需填写。",
+      );
+    });
+
+    it("修订进行中隐藏静态反馈指导（F-50 §2.3-5）", () => {
+      const store = useWorkspaceStore.getState();
+      store.setStage("human_confirm");
+      store.applyHumanGateTurnOpen("turn_hint", "cmd_hint", 2);
+
+      render(
+        <GatePromptEntry
+          entry={gateEntry(null, "turn_hint", { turn_id: "turn_hint" })}
+          actions={actions()}
+        />,
+      );
+
+      expect(screen.getByTestId("gate-revision-status")).toHaveTextContent(
+        "已提交，正在按反馈修订",
+      );
+      expect(screen.queryByTestId("gate-feedback-hint")).toBeNull();
+    });
+
+    it("颜色契约：门卡标题/面板用 gate-open 色，不染 system 红（F-50 裁决 9）", () => {
+      render(<GatePromptEntry entry={gateEntry(null)} actions={actions()} />);
+
+      const card = screen.getByTestId("gate-prompt-entry");
+      expect(card.className).toContain("border-[var(--aria-gate-open-border)]");
+      expect(card.className).not.toContain("bg-red-50");
+      const title = screen.getByText("需要人工确认");
+      expect(title.className).toContain("text-[var(--aria-gate-open-fg)]");
+      expect(title.className).not.toContain("text-red-500");
     });
   });
 });

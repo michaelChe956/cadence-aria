@@ -443,7 +443,7 @@ describe("ChatCockpitPage", () => {
       expect(screen.queryByTestId("cockpit-plan-approval-panel")).toBeNull();
       // 滚动断言（裁决补充）：跳转回对话流后落点滚动确实发生在 gate 条目上。
       const list = screen.getByTestId("cockpit-conversation-flow-list");
-      expect(within(list).getByText("等待人工确认")).toBeVisible();
+      expect(within(list).getByText("需要人工确认")).toBeVisible();
       expect(scrollIntoView).toHaveBeenCalled();
     });
 
@@ -640,14 +640,14 @@ describe("ChatCockpitPage", () => {
         renderCockpitWith(workspaceWs);
 
         const inbox = screen.getByTestId("cockpit-inbox");
-        expect(within(inbox).getByText("门禁等待")).toBeVisible();
+        expect(within(inbox).getByText("需要人工确认")).toBeVisible();
 
         // 收件箱门条：终止二次确认后恰一次发送。
         await user.click(
-          within(inbox).getByRole("button", { name: "终止" }),
+          within(inbox).getByRole("button", { name: "终止此门" }),
         );
         expect(workspaceWs.sendAbandonGate).not.toHaveBeenCalled();
-        await user.click(within(inbox).getByRole("button", { name: "确认终止" }));
+        await user.click(within(inbox).getByRole("button", { name: "确认终止此门" }));
         expect(workspaceWs.sendAbandonGate).toHaveBeenCalledTimes(1);
         expect(workspaceWs.sendAbandonGate).toHaveBeenCalledWith(expect.any(String));
         expect(workspaceWs.sendConfirmGate).not.toHaveBeenCalled();
@@ -656,10 +656,10 @@ describe("ChatCockpitPage", () => {
         // 对话流门卡：同一发送器、同一惯例。
         await user.click(screen.getByTestId("cockpit-conversation-tab"));
         const gateCard = screen.getByTestId("gate-prompt-entry");
-        await user.click(within(gateCard).getByRole("button", { name: "终止" }));
+        await user.click(within(gateCard).getByRole("button", { name: "终止此门" }));
         expect(workspaceWs.sendAbandonGate).not.toHaveBeenCalled();
         await user.click(
-          within(gateCard).getByRole("button", { name: "确认终止" }),
+          within(gateCard).getByRole("button", { name: "确认终止此门" }),
         );
         expect(workspaceWs.sendAbandonGate).toHaveBeenCalledTimes(1);
         expect(workspaceWs.sendAbandonGate).toHaveBeenCalledWith(expect.any(String));
@@ -678,8 +678,8 @@ describe("ChatCockpitPage", () => {
       await user.click(within(inbox).getByRole("button", { name: "确认" }));
       expect(workspaceWs.sendConfirmGate).toHaveBeenCalledTimes(1);
 
-      await user.click(within(inbox).getByRole("button", { name: "终止" }));
-      await user.click(within(inbox).getByRole("button", { name: "确认终止" }));
+      await user.click(within(inbox).getByRole("button", { name: "终止此门" }));
+      await user.click(within(inbox).getByRole("button", { name: "确认终止此门" }));
       expect(workspaceWs.sendAbandonGate).toHaveBeenCalledTimes(1);
     });
   });

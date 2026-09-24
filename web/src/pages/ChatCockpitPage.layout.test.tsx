@@ -95,15 +95,15 @@ describe("ChatCockpitPage 布局（UI-A）", () => {
 
     const trigger = screen.getByTestId("cockpit-inbox-drawer-trigger");
     fireEvent.click(trigger);
-    fireEvent.click(screen.getByLabelText("选择 门禁等待"));
-    expect(screen.getByLabelText("选择 门禁等待")).toBeChecked();
+    fireEvent.click(screen.getByLabelText("选择 需要人工确认"));
+    expect(screen.getByLabelText("选择 需要人工确认")).toBeChecked();
 
     fireEvent.click(screen.getByRole("button", { name: "收起待处理抽屉" }));
     expect(screen.getByTestId("cockpit-inbox-drawer")).toHaveAttribute("data-state", "closed");
-    expect(screen.getByLabelText("选择 门禁等待")).toBeChecked();
+    expect(screen.getByLabelText("选择 需要人工确认")).toBeChecked();
 
     fireEvent.click(trigger);
-    expect(screen.getByLabelText("选择 门禁等待")).toBeChecked();
+    expect(screen.getByLabelText("选择 需要人工确认")).toBeChecked();
     fireEvent.click(screen.getByTestId("cockpit-inbox-drawer-backdrop"));
     expect(screen.getByTestId("cockpit-inbox-drawer")).toHaveAttribute("data-state", "closed");
   });

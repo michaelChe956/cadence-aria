@@ -3,19 +3,63 @@
 // findings 只在「requiresTriage 且 0 条」时被用于一句提示——实测门卡 metadata 带
 // 3 条 advisory 却完全不渲染（诊断 f49-gate-ui-diagnosis.md §2.2）。
 
-/** B1：advisory-only 轮次的「为什么需要你」首行（N = 本轮 findings 条数）。 */
+/**
+ * F-50 裁决 2：门卡唯一原因行（advisory-only，N = 本轮建议级 findings 数）。
+ * 「机械校验 0 error」并入前半句作证据，下一步建议（可直接确认，或反馈后
+ * 再修订）收在同一行——不再渲染独立的绿色建议行。
+ */
 export function gateWhyAdvisoryCopy(findingCount: number): string {
-  return `复评仍有 ${findingCount} 条 findings（均为建议级，不阻断发布）；引擎不做自动取舍，由你确认采纳或反馈修改。`;
+  return `原因：机械校验 0 error，复评有 ${findingCount} 条建议（不阻断发布）；可直接确认，或提交反馈后再修订。`;
 }
 
-/** B1：存在必须处理项时的首行（N = must_fix/blocking 条数）。 */
+/** F-50 裁决 2：存在必须处理项时的原因行（N = must_fix/blocking 条数）。 */
 export function gateWhyRequiredCopy(requiredCount: number): string {
-  return `存在 ${requiredCount} 条必须处理项，建议先提交反馈`;
+  return `原因：有 ${requiredCount} 条必须处理项；建议先提交反馈。`;
 }
 
-/** B2：advisory-only 且可确认时的建议行。 */
-export const GATE_ADVISORY_CONFIRM_HINT =
-  "机械校验 0 error——可直接确认；如需采纳建议请提交反馈";
+/**
+ * F-50 裁决 1：triage intent 门的原因行——标题保留「需要判断 reviewer 意图」
+ * 时，原因行解释为什么无法自动取舍并给出两条出路。
+ */
+export const GATE_TRIAGE_WHY_COPY =
+  "原因：评审结果无法自动取舍；请选择确认当前版本或反馈修改。";
+
+/**
+ * F-50 裁决 3：反馈与确认并行——可直接确认，反馈是可选修订路径。帮助文案
+ * 明示「反馈可选、确认无需填写」，消除「必须先反馈」的误读。
+ */
+export const GATE_FEEDBACK_OPTIONAL_HINT =
+  "如需调整，请在反馈框填写修改意见；确认当前版本无需填写。";
+
+/**
+ * F-50 裁决 4：终止按钮按实际作用域命名——actions.terminate 发送
+ * abandon_human_gate（门级 abandon，见 cockpit-action-routing.ts），故所有
+ * 终止入口统一「终止此门」，与错误条/会话级动作不再同名歧义。
+ */
+export const GATE_TERMINATE_BUTTON_LABEL = "终止此门";
+export const GATE_TERMINATE_CONFIRM_LABEL = "确认终止此门";
+
+/** 与门卡标题同义的内容/摘要短语（归一化比较，去空白与标点）。 */
+const GATE_TITLE_SYNONYMS: Record<string, true> = {
+  需要人工确认: true,
+  需要判断reviewer意图: true,
+  人工确认: true,
+  等待人工确认: true,
+  需人工确认: true,
+  等待确认: true,
+  可确认当前版本: true,
+};
+
+/**
+ * F-50 裁决 1：entry.content / summary 与标题同义（「等待人工确认」等人工
+ * 介入同义句）时不渲染——单标题制下不让正文重复标题。独立事实不受影响。
+ */
+export function isGateTitleSynonymousCopy(text: string): boolean {
+  const normalized = text
+    .trim()
+    .replace(/[\s，。；、·（）()：:—\-]/gu, "");
+  return GATE_TITLE_SYNONYMS[normalized] === true;
+}
 
 /** B3：门卡内 findings 折叠列表的开关文案（N = 本轮 findings 条数）。 */
 export function gateFindingsToggleLabel(findingCount: number): string {

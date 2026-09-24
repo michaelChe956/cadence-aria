@@ -579,7 +579,7 @@ describe("ChatCockpitPage", () => {
     renderCockpitWith(workspaceWs);
 
     const inputBar = screen.getByTestId("chat-input-bar");
-    expect(within(inputBar).getByRole("alert")).toHaveTextContent(/连接租约已过期/);
+    expect(within(inputBar).getByRole("alert")).toHaveTextContent(/连接租约已失效/);
     expect(
       within(inputBar).getByRole("button", { name: "开始生成" }),
     ).toBeInTheDocument();
@@ -604,13 +604,13 @@ describe("ChatCockpitPage", () => {
     });
 
     renderCockpit();
-    expect(screen.getByTestId("chat-input-bar")).toHaveTextContent(/连接租约已过期/);
+    expect(screen.getByTestId("chat-input-bar")).toHaveTextContent(/连接租约已失效/);
 
     act(() => {
       useWorkspaceStore.getState().setProtocolError(null);
     });
 
-    expect(screen.queryByText(/连接租约已过期/)).toBeNull();
+    expect(screen.queryByText(/连接租约已失效/)).toBeNull();
   });
 
   // F-28 二轮（v34 复验「失败态点开始生成零反馈」）：classifyProtocolError 把
@@ -670,7 +670,7 @@ describe("ChatCockpitPage", () => {
     const alert = screen.getByTestId("hard-error-notice");
     expect(alert).toHaveTextContent("SESSION_ALREADY_CONFIRMED");
     expect(alert).toHaveTextContent(/刷新/);
-    expect(alert).not.toHaveTextContent(/连接租约已过期/);
+    expect(alert).not.toHaveTextContent(/连接租约已失效/);
     expect(screen.queryByRole("button", { name: "重新接管" })).toBeNull();
   });
 

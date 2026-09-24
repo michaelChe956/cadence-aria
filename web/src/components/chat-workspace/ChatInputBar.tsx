@@ -23,6 +23,7 @@ import { getProviderOption } from "../../state/provider-options";
 import { useProviderAvailabilityStore } from "../../state/provider-availability-store";
 import type { ChatEntry, ChatEntryType } from "../../state/chat-entries";
 import { ConfirmTwiceButton } from "./cockpit/ConfirmTwiceButton";
+import { PROTOCOL_ERROR_DETAILS_LABEL, protocolErrorCopy } from "../../state/protocol-error-copy";
 import { DraftValidationFailureNotice } from "../workspace/DraftValidationFailureNotice";
 
 interface ChatInputBarProps {
@@ -59,6 +60,11 @@ export interface HardErrorNotice {
   message: string;
   /** lease 拒收两码提供：重发 driver hello 夺回租约（复用 F-11 回调链）。 */
   onRetakeLease: (() => void) | null;
+  /**
+   * F-50 裁决 7：抽屉打开承载完整错误动作时，页级缩为引用面——显示指向
+   * 待处理抽屉的提示并不再渲染重接管按钮；null 表示页级自持完整动作面。
+   */
+  referenceNote?: string | null;
 }
 
 /**
@@ -220,26 +226,58 @@ export const ChatInputBar = forwardRef<ChatInputBarHandle, ChatInputBarProps>(
             视线导致零反馈；lease 拒收两码的重接管复用 F-11 的
             ConfirmTwiceButton 二次确认纪律，其余码报错误码+建议刷新。 */}
         {hardErrorNotice ? (
-          <div
-            data-testid="hard-error-notice"
-            role="alert"
-            className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-red-200 bg-red-50 px-3 py-2"
-          >
-            <span className="text-xs font-semibold text-red-700">
-              {hardErrorLeadText(hardErrorNotice.code)}（{hardErrorNotice.code}）：
-              {hardErrorNotice.message}
-              {hardErrorNotice.onRetakeLease === null
-                ? "——建议刷新页面或重新进入会话后重试"
-                : null}
-            </span>
-            {hardErrorNotice.onRetakeLease !== null ? (
-              <ConfirmTwiceButton
-                label="重新接管"
-                confirmLabel="确认重新接管"
-                onConfirm={hardErrorNotice.onRetakeLease}
-              />
-            ) : null}
-          </div>
+          // F-50 裁决 6/7：中文主显 lead + mono 错误码副行 + 中文正文；英文原文
+          // 进折叠详情（无译文时原文主显，不藏信息）。抽屉打开时（referenceNote）
+          // 页级缩为引用面——只报状态与处理入口，不渲染重接管动作。
+          (() => {
+            const errorCopy = protocolErrorCopy(hardErrorNotice.code);
+            const body = errorCopy.body ?? hardErrorNotice.message;
+            const hasTranslation = errorCopy.body !== null;
+            return (
+              <div
+                data-testid="hard-error-notice"
+                role="alert"
+                className="rounded-md border border-red-200 bg-red-50 px-3 py-2"
+              >
+                <div className="flex min-w-0 flex-1 flex-col gap-1">
+                  <p className="flex flex-wrap items-baseline gap-x-2">
+                    <span className="text-xs font-semibold text-red-700">{errorCopy.lead}</span>
+                    <span
+                      data-testid="hard-error-code"
+                      className="aria-mono text-xs font-normal text-red-600"
+                    >
+                      {hardErrorNotice.code}
+                    </span>
+                  </p>
+                  <p className="text-xs leading-4 text-red-700">
+                    {body}
+                    {hardErrorNotice.referenceNote != null
+                      ? `——${hardErrorNotice.referenceNote}`
+                      : hardErrorNotice.onRetakeLease === null
+                        ? "——建议刷新页面或重新进入会话后重试"
+                        : null}
+                  </p>
+                  {hasTranslation ? (
+                    <details data-testid="hard-error-details">
+                      <summary className="cursor-pointer text-xs font-medium text-red-600">
+                        {PROTOCOL_ERROR_DETAILS_LABEL}
+                      </summary>
+                      <p className="aria-mono mt-1 break-words text-xs leading-4 text-red-600">
+                        {hardErrorNotice.message}
+                      </p>
+                    </details>
+                  ) : null}
+                </div>
+                {hardErrorNotice.onRetakeLease !== null ? (
+                  <ConfirmTwiceButton
+                    label="重新接管"
+                    confirmLabel="确认重新接管"
+                    onConfirm={hardErrorNotice.onRetakeLease}
+                  />
+                ) : null}
+              </div>
+            );
+          })()
         ) : null}
         <div className="flex flex-wrap items-center justify-end gap-2">
           {isBusy ? (
@@ -339,12 +377,4 @@ function appendOptimisticEntry(type: ChatEntryType, content: string) {
   useWorkspaceStore.getState().appendChatEntry(entry);
 }
 
-function hardErrorLeadText(code: string): string {
-  if (code === "STALE_DRIVER_LEASE") {
-    return "连接租约已过期——本连接的写操作已被拒绝";
-  }
-  if (code === "OBSERVER_WRITE_REJECTED") {
-    return "本连接为观察者连接，写操作已被拒收";
-  }
-  return "操作被拒绝";
-}
+

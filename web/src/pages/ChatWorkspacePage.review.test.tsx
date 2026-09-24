@@ -179,10 +179,10 @@ describe("ChatWorkspacePage review decisions", () => {
     // typed 动作面由 cockpit 页测试覆盖（ChatCockpitPage.gate）。
     expect(screen.getByTestId("gate-prompt-entry")).toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "确认使用当前版本" }),
+      screen.queryByRole("button", { name: "确认当前版本" }),
     ).not.toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "终止" }),
+      screen.queryByRole("button", { name: "终止此门" }),
     ).not.toBeInTheDocument();
   });
 

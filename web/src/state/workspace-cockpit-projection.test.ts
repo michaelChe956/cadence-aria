@@ -724,11 +724,27 @@ describe("F-20 story/design author_confirm gate projection", () => {
     expect(items[0]).toMatchObject({
       id: "gate:stage:author_confirm",
       kind: "gate",
-      title: "门禁等待",
+      title: "需要人工确认",
       triage: false,
       source: "gate",
       gate: expect.objectContaining({ key: "stage:author_confirm" }),
     });
+  });
+
+  // F-50 裁决 1/6：门条默认标题与门卡同题（需要人工确认），triage intent 门
+  // 保留「需要判断 reviewer 意图」；协议错误条目以中文主显 lead 投影（code 由
+  // protocolErrorCode 承载，原文留在 summary）。
+  it("projects protocol errors with the Chinese lead title (F-50)", () => {
+    useWorkspaceStore.getState().setProtocolError({
+      code: "STALE_DRIVER_LEASE",
+      message: "driver connection no longer holds the lease",
+    });
+
+    const item = selectCockpitInbox(useWorkspaceStore.getState())[0]!;
+
+    expect(item.title).toBe("连接租约已失效");
+    expect(item.protocolErrorCode).toBe("STALE_DRIVER_LEASE");
+    expect(item.summary).toBe("driver connection no longer holds the lease");
   });
 
   // F-31（v37 复验 #2）：author 门投影携带 review_available（=reviewerEnabled），

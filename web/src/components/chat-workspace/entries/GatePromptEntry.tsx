@@ -10,15 +10,19 @@ import {
 } from "../../../state/workspace-cockpit-projection";
 import {
   GATE_ADOPT_FINDINGS_BUTTON_LABEL,
-  GATE_ADVISORY_CONFIRM_HINT,
   GATE_ARCHIVE_BADGE_LABEL,
+  GATE_FEEDBACK_OPTIONAL_HINT,
   GATE_FEEDBACK_SUBMITTED_NOTE,
   GATE_REVISION_REVIEWING_NOTE,
   GATE_REVISION_RUNNING_NOTE,
+  GATE_TERMINATE_BUTTON_LABEL,
+  GATE_TERMINATE_CONFIRM_LABEL,
+  GATE_TRIAGE_WHY_COPY,
   gateAdoptFindingsFeedback,
   gateFindingsToggleLabel,
   gateWhyAdvisoryCopy,
   gateWhyRequiredCopy,
+  isGateTitleSynonymousCopy,
 } from "../../../state/gate-prompt-copy";
 import type { WorkspaceWsState } from "../../../state/workspace-ws-store-types";
 import { useWorkspaceStore } from "../../../state/workspace-ws-store";
@@ -59,9 +63,7 @@ export function GatePromptEntry({
   const requiredFindings = findings.filter((finding) =>
     isRequiredFindingSeverity(finding.severity),
   );
-  const needsHuman = verdict === "needs_human";
   const requiresTriage = reviewGate === "user_triage_required";
-  const allowsCurrentVersion = reviewGate === "user_confirm_allowed";
   // F-38：确认者必须知道在确认什么——门卡说明区带出待确认产物版本与入口。
   // 没有产物版本即不渲染（fail-closed 不猜）；版本取 is_current，缺省退最新一轮。
   const workspaceType = useWorkspaceStore((state) => state.workspaceType);
@@ -77,14 +79,9 @@ export function GatePromptEntry({
       )
     );
   });
-  const confirmLabel =
-    requiresTriage
-      ? "确认当前版本"
-      : allowsCurrentVersion
-      ? "确认使用当前版本"
-      : needsHuman
-        ? "提交人工确认"
-        : "确认产物";
+  // F-50 裁决 1/3：反馈与确认并行，确认按钮统一「确认当前版本」——与原因行的
+  // 「可直接确认」和帮助文案同一称呼。
+  const confirmLabel = "确认当前版本";
   // L1（REQ-RET-02）：request-change 按钮随 legacy 决策发送面删除；findings 仅作呈现。
   const isResolved = entry.resolved === true;
   const gateTrigger = gateTriggerFromEntry(entry);
@@ -119,26 +116,20 @@ export function GatePromptEntry({
         : (projection.action_block_reason ?? null),
     ),
   );
-  const title = requiresTriage
-    ? "需要判断 reviewer 意图"
-    : allowsCurrentVersion
-      ? "可确认当前版本"
-      : needsHuman
-        ? "需要人工确认"
-        : "人工确认";
-  // F-49 B1/B2：门卡首行必须回答「为什么需要你」与「建议确认还是反馈」——此前只有
-  // 4 字 trigger chip，确认者拿不到决策依据（文案见 gate-prompt-copy.ts）。无 findings
-  // 即不猜（fail-closed）；建议行只在确认按钮确实露出（无阻断、非 context blocker 门）
-  // 时才给「可直接确认」的建议。
-  const whyCopy =
-    findings.length === 0
+  // F-50 裁决 1（单标题制）：默认「需要人工确认」，仅 triage intent 门保留
+  // 「需要判断 reviewer 意图」——标题回答「现在要做什么」，原因与建议交给
+  // gate-why 单一原因行，不再三层同义。
+  const title = requiresTriage ? "需要判断 reviewer 意图" : "需要人工确认";
+  // F-50 裁决 2：gate-why = 单一原因行（含下一步建议）。triage 门给 intent
+  // 原因行；其余按 findings 分级；无 findings 不猜（fail-closed）。
+  const whyCopy = requiresTriage
+    ? GATE_TRIAGE_WHY_COPY
+    : findings.length === 0
       ? null
       : requiredFindings.length > 0
         ? gateWhyRequiredCopy(requiredFindings.length)
         : gateWhyAdvisoryCopy(findings.length);
   const archiveNote = archiveNoteFromEntry(entry);
-  const confirmOffered = !isResolved && actionBlockReason === null && !isContextBlockerGate;
-  const advisoryOnly = findings.length > 0 && requiredFindings.length === 0;
   // F-49 B6：adoptable = advisory findings（must_fix 处理路径不同，不进默认采纳）。
   // 采纳按钮的目标是下方反馈输入框——编辑器不可用即无处可填，不露按钮（fail-closed）。
   const adoptableFindings = findings.filter(
@@ -197,7 +188,12 @@ export function GatePromptEntry({
     <ChatEntryContainer
       role="system"
       title={title}
-      className="border-slate-200 bg-slate-50"
+      // F-50 裁决 9（颜色契约）：门禁开放态用 gate-open（琥珀）token——红色只
+      // 留给错误与终止；不再让 system role 的默认红标题/红面板染流程状态。
+      // 覆盖走 panelClassName（F-49 A7 纪律），className 追加会与 role 红面板
+      // 并列输出、胜负取决于 Tailwind 输出顺序。
+      panelClassName="border-[var(--aria-gate-open-border)] bg-[var(--aria-gate-open-bg)]"
+      titleClassName="text-[var(--aria-gate-open-fg)]"
       testId="gate-prompt-entry"
     >
       {/* F-50 §4.1-3（第一批布局减负）：门卡固定「原因→正文→产物→证据→
@@ -211,13 +207,14 @@ export function GatePromptEntry({
             {whyCopy}
           </div>
         ) : null}
-        {advisoryOnly && confirmOffered ? (
-          <div data-testid="gate-advice" className="text-xs text-emerald-700">
-            {GATE_ADVISORY_CONFIRM_HINT}
-          </div>
+        {/* F-50 裁决 1：entry.content/summary 与标题同义（人工介入同义句）时
+            不渲染——单标题制下不让正文重复标题；独立事实保留。 */}
+        {isGateTitleSynonymousCopy(entry.content) ? null : (
+          <div className="text-sm text-[var(--aria-ink)]">{entry.content}</div>
+        )}
+        {summary && !isGateTitleSynonymousCopy(summary) && summary !== entry.content ? (
+          <div className="text-xs text-[var(--aria-ink-muted)]">{summary}</div>
         ) : null}
-        <div className="text-sm text-[var(--aria-ink)]">{entry.content}</div>
-        {summary ? <div className="text-xs text-[var(--aria-ink-muted)]">{summary}</div> : null}
         {!isResolved && pendingArtifactVersion && onOpenArtifact ? (
           <div
             data-testid="gate-artifact-context"
@@ -303,11 +300,6 @@ export function GatePromptEntry({
             {inlineError.code} · {inlineError.message}
           </div>
         ) : null}
-        {requiresTriage && findings.length === 0 ? (
-          <div className="text-xs text-[var(--aria-ink-muted)]">
-            请在下方输入人工修改说明后发送返修。
-          </div>
-        ) : null}
         {isContextBlockerGate && !isResolved ? (
           <div className="text-xs text-[var(--aria-ink-muted)]">
             请在下方输入补充上下文后发送（对应 provide_context），或选择终止
@@ -334,12 +326,25 @@ export function GatePromptEntry({
               </p>
             ) : null}
             {actionFacade === "typed" && actionBlockReason === null ? (
-              <GateFeedbackEditor
-                multiline={false}
-                value={feedback}
-                onChange={setFeedback}
-                onSubmit={handleFeedbackSubmit}
-              />
+              <>
+                {/* F-50 裁决 3：反馈与确认并行——帮助文案明示反馈可选；修订
+                    进行中隐藏静态指导（§2.3-5）。context blocker 门有自己的
+                    专属指导，不叠两句。 */}
+                {!revisionProgressCopy && !isContextBlockerGate ? (
+                  <p
+                    data-testid="gate-feedback-hint"
+                    className="text-xs text-[var(--aria-ink-muted)]"
+                  >
+                    {GATE_FEEDBACK_OPTIONAL_HINT}
+                  </p>
+                ) : null}
+                <GateFeedbackEditor
+                  multiline={false}
+                  value={feedback}
+                  onChange={setFeedback}
+                  onSubmit={handleFeedbackSubmit}
+                />
+              </>
             ) : null}
             {feedbackSubmitted && !revisionProgressCopy ? (
               <p
@@ -366,8 +371,8 @@ export function GatePromptEntry({
                 </button>
               )}
               <ConfirmTwiceButton
-                label="终止"
-                confirmLabel="确认终止"
+                label={GATE_TERMINATE_BUTTON_LABEL}
+                confirmLabel={GATE_TERMINATE_CONFIRM_LABEL}
                 onConfirm={actions.terminate}
               />
             </div>

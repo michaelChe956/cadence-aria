@@ -98,7 +98,7 @@ export function gateItem(sessionId: string, key: string): CockpitInboxItem {
     id: `${sessionId}:gate:${key}`,
     kind: "gate",
     severity: 1,
-    title: "门禁等待",
+    title: "需要人工确认",
     summary: "等待人工确认",
     triage: false,
     source: "gate",

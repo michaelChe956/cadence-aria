@@ -297,11 +297,11 @@ describe("chat workspace p1 entries", () => {
     });
 
     render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), confirmReview: () => undefined, feedback: () => undefined, terminate: () => onDecision("terminate"), advance: () => undefined, adoptReview: () => undefined, confirmBatch: async () => undefined, recoverCompile: async () => undefined }} />);
-    fireEvent.click(screen.getByRole("button", { name: "确认产物" }));
-    fireEvent.click(screen.getByRole("button", { name: "终止" }));
-    fireEvent.click(screen.getByRole("button", { name: "确认终止" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认当前版本" }));
+    fireEvent.click(screen.getByRole("button", { name: "终止此门" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认终止此门" }));
 
-    expect(screen.getByText("等待人工确认")).toBeInTheDocument();
+    expect(screen.queryByText("等待人工确认")).not.toBeInTheDocument();
     expect(screen.getByText("可以进入人工确认")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "修改" })).not.toBeInTheDocument();
     expect(onDecision).toHaveBeenNthCalledWith(1, "confirm");
@@ -318,10 +318,11 @@ describe("chat workspace p1 entries", () => {
     });
 
     render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), confirmReview: () => undefined, feedback: () => undefined, terminate: () => onDecision("terminate"), advance: () => undefined, adoptReview: () => undefined, confirmBatch: async () => undefined, recoverCompile: async () => undefined }} />);
-    fireEvent.click(screen.getByRole("button", { name: "提交人工确认" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认当前版本" }));
 
-    expect(screen.getAllByText("需要人工确认").length).toBeGreaterThanOrEqual(1);
-    expect(screen.queryByRole("button", { name: "确认产物" })).not.toBeInTheDocument();
+    // F-50 单标题制：content 与标题同义去重，标题只出现一次；独立摘要保留。
+    expect(screen.getAllByText("需要人工确认")).toHaveLength(1);
+    expect(screen.getByText("需要先确认弹窗触发时机")).toBeInTheDocument();
     expect(onDecision).toHaveBeenCalledWith("confirm");
   });
 
@@ -339,7 +340,7 @@ describe("chat workspace p1 entries", () => {
     });
 
     render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), confirmReview: () => undefined, feedback: () => undefined, terminate: () => onDecision("terminate"), advance: () => undefined, adoptReview: () => undefined, confirmBatch: async () => undefined, recoverCompile: async () => undefined }} />);
-    fireEvent.click(screen.getByRole("button", { name: "确认使用当前版本" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认当前版本" }));
 
     expect(screen.queryByRole("button", { name: "采纳建议并返修" })).not.toBeInTheDocument();
     expect(onDecision).toHaveBeenCalledWith("confirm");
@@ -368,7 +369,11 @@ describe("chat workspace p1 entries", () => {
     fireEvent.click(screen.getByRole("button", { name: "确认当前版本" }));
 
     expect(screen.getByText("需要判断 reviewer 意图")).toBeInTheDocument();
-    expect(screen.getByText("请在下方输入人工修改说明后发送返修。")).toBeInTheDocument();
+    // F-50 裁决 1/3：triage 原因行说明无法自动取舍与两条出路；旧返修指导行
+    // 退役（反馈可选帮助文案跟随反馈编辑器，见 GatePromptEntry.test）。
+    expect(screen.getByTestId("gate-why")).toHaveTextContent(
+      "原因：评审结果无法自动取舍；请选择确认当前版本或反馈修改。",
+    );
     expect(screen.queryByRole("button", { name: "按 reviewer 意见返修" })).not.toBeInTheDocument();
     expect(onDecision).toHaveBeenCalledWith("confirm");
   });
@@ -489,8 +494,8 @@ describe("chat workspace p1 entries", () => {
     render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), confirmReview: () => undefined, feedback: () => undefined, terminate: () => onDecision("terminate"), advance: () => undefined, adoptReview: () => undefined, confirmBatch: async () => undefined, recoverCompile: async () => undefined }} />);
 
     expect(screen.getByText(label)).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "确认产物" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "终止" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "确认当前版本" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "终止此门" })).not.toBeInTheDocument();
     expect(onDecision).not.toHaveBeenCalled();
   });
 
@@ -520,8 +525,8 @@ describe("chat workspace p1 entries", () => {
       screen.getByText("请在下方输入补充上下文后发送（对应 provide_context），或选择终止"),
     ).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "终止" }));
-    fireEvent.click(screen.getByRole("button", { name: "确认终止" }));
+    fireEvent.click(screen.getByRole("button", { name: "终止此门" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认终止此门" }));
     expect(onDecision).toHaveBeenCalledWith("terminate");
     expect(onDecision).not.toHaveBeenCalledWith("confirm");
   });
@@ -542,7 +547,7 @@ describe("chat workspace p1 entries", () => {
     expect(
       screen.queryByText("请在下方输入补充上下文后发送（对应 provide_context），或选择终止"),
     ).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "终止" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "终止此门" })).not.toBeInTheDocument();
   });
 
   // workspace-artifact-bug-triage：表驱动覆盖 story/design/work_item 三类 gate，
@@ -563,8 +568,8 @@ describe("chat workspace p1 entries", () => {
 
     render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), confirmReview: () => undefined, feedback: () => undefined, terminate: () => onDecision("terminate"), advance: () => undefined, adoptReview: () => undefined, confirmBatch: async () => undefined, recoverCompile: async () => undefined }} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "确认产物" }));
-    expect(screen.getByRole("button", { name: "终止" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "确认当前版本" }));
+    expect(screen.getByRole("button", { name: "终止此门" })).toBeInTheDocument();
     expect(
       screen.queryByText("请在下方输入补充上下文后发送（对应 provide_context），或选择终止"),
     ).not.toBeInTheDocument();

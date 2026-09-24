@@ -109,7 +109,7 @@ describe("ChatCockpitPage", () => {
     renderCockpit();
 
     const inbox = screen.getByTestId("cockpit-inbox");
-    expect(within(inbox).getByText("门禁等待")).toBeInTheDocument();
+    expect(within(inbox).getByText("需要人工确认")).toBeInTheDocument();
     expect(within(inbox).getByText(/复验发现新问题/)).toBeInTheDocument();
     expect(within(inbox).getByText(/剩余修复轮次 1/)).toBeInTheDocument();
   });
@@ -151,10 +151,10 @@ describe("ChatCockpitPage", () => {
 
     const gateEntry = screen.getByTestId("gate-prompt-entry");
     expect(gateEntry).toBeInTheDocument();
-    expect(within(gateEntry).getByRole("button", { name: "确认产物" })).toBeVisible();
-    expect(within(gateEntry).getByRole("button", { name: "终止" })).toBeVisible();
+    expect(within(gateEntry).getByRole("button", { name: "确认当前版本" })).toBeVisible();
+    expect(within(gateEntry).getByRole("button", { name: "终止此门" })).toBeVisible();
   });
-  it("sends plan gate confirmation from the 确认产物 button", async () => {
+  it("sends plan gate confirmation from the 确认当前版本 button", async () => {
     const sendHumanConfirm = vi.fn(() => true);
     const sendAbandonGate = vi.fn(() => true);
     mockWorkspaceWs({ sendConfirmGate: sendHumanConfirm, sendAbandonGate });
@@ -169,7 +169,7 @@ describe("ChatCockpitPage", () => {
 
     renderCockpit("session_001", false);
 
-    await userEvent.click(screen.getByRole("button", { name: "确认产物" }));
+    await userEvent.click(screen.getByRole("button", { name: "确认当前版本" }));
 
     expect(sendHumanConfirm).toHaveBeenCalledOnce();
     expect(sendHumanConfirm).toHaveBeenCalledWith();
@@ -352,7 +352,7 @@ describe("ChatCockpitPage", () => {
 
     const inbox = screen.getByTestId("cockpit-inbox");
     expect(within(inbox).getByText("会话停在停点")).toBeInTheDocument();
-    expect(within(inbox).getByText("协议错误 PROTOCOL_X")).toBeInTheDocument();
+    expect(within(inbox).getByText("操作被拒绝")).toBeInTheDocument();
     expect(within(inbox).getByText("协议错误原文")).toBeInTheDocument();
   });
 
@@ -378,13 +378,13 @@ describe("ChatCockpitPage", () => {
   it("removes a closed gate from the inbox", () => {
     useWorkspaceStore.getState().setStage("human_confirm");
     renderCockpit();
-    expect(within(screen.getByTestId("cockpit-inbox")).getByText("门禁等待")).toBeInTheDocument();
+    expect(within(screen.getByTestId("cockpit-inbox")).getByText("需要人工确认")).toBeInTheDocument();
 
     act(() => {
       useWorkspaceStore.getState().applyHumanGateClosed("confirm", "human_confirm");
     });
 
-    expect(within(screen.getByTestId("cockpit-inbox")).queryByText("门禁等待")).toBeNull();
+    expect(within(screen.getByTestId("cockpit-inbox")).queryByText("需要人工确认")).toBeNull();
   });
 
   it("renders triage as a single gate item marked as triage", () => {
@@ -402,8 +402,8 @@ describe("ChatCockpitPage", () => {
     renderCockpit();
 
     const inbox = screen.getByTestId("cockpit-inbox");
-    expect(within(inbox).getAllByText(/门禁等待/)).toHaveLength(1);
-    expect(within(inbox).getByText("门禁等待（需分诊）")).toBeInTheDocument();
+    expect(within(inbox).getAllByText(/需要判断 reviewer 意图|需要人工确认/)).toHaveLength(1);
+    expect(within(inbox).getByText("需要判断 reviewer 意图")).toBeInTheDocument();
   });
 
   it("drills down into the conversation flow when a flow row is clicked", async () => {

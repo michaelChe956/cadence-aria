@@ -22,6 +22,15 @@ import {
   isStaleDriverLeaseItem,
   type CockpitInboxItem,
 } from "../../../state/workspace-cockpit-projection";
+import {
+  GATE_TERMINATE_BUTTON_LABEL,
+  GATE_TERMINATE_CONFIRM_LABEL,
+} from "../../../state/gate-prompt-copy";
+import {
+  PROTOCOL_ERROR_DETAILS_LABEL,
+  PROTOCOL_ERROR_NO_RETRY_NOTE,
+  protocolErrorCopy,
+} from "../../../state/protocol-error-copy";
 import { ConfirmTwiceButton } from "./ConfirmTwiceButton";
 import { GateFeedbackEditor } from "./GateFeedbackEditor";
 import { useCockpitInboxPulse } from "../../cockpit/CockpitShell";
@@ -133,8 +142,18 @@ export function CockpitInbox({
       aria-label="待处理收件箱"
       className="flex flex-col gap-2 rounded-xl border-2 border-[var(--aria-line-strong)] bg-[var(--aria-panel)] p-3"
     >
-      <p className="text-xs text-[var(--aria-ink-muted)]">
-        跨会话批量确认；每会话仅一个开态门，每个所选会话恰好确认一次（REQ-CFC-06）
+      {/* F-50 裁决 8：批量规则默认一句短句，REQ 编号与完整规则收进折叠详情，
+          不再占一整组首屏高度。 */}
+      <p data-testid="inbox-bulk-rule" className="text-xs text-[var(--aria-ink-muted)]">
+        跨会话批量确认 · 每个会话一次
+        <details data-testid="inbox-bulk-rule-details" className="ml-1 inline-block">
+          <summary className="cursor-pointer text-xs font-medium text-[var(--aria-primary)]">
+            详情
+          </summary>
+          <span className="mt-1 block text-xs leading-4">
+            每会话仅一个开态门，每个所选会话恰好确认一次（REQ-CFC-06）
+          </span>
+        </details>
       </p>
       {canBulkApply("confirm") && onBulkConfirm && selectedItems.length > 0 ? (
         <button
@@ -351,7 +370,24 @@ function HardErrorInboxRow({
       <div className="flex items-start gap-2">
         <Glyph className="mt-0.5 h-4 w-4 shrink-0 text-[var(--aria-danger)]" aria-hidden="true" />
         <div className="min-w-0 flex-1">
-          <p className="text-sm font-semibold text-[var(--aria-ink)]">{item.title}</p>
+          <p className="flex flex-wrap items-baseline gap-x-2">
+            <span className="text-sm font-semibold text-[var(--aria-ink)]">{item.title}</span>
+            {item.protocolErrorCode ? (
+              <span
+                data-testid="cockpit-inbox-error-code"
+                className="aria-mono text-xs font-normal text-[var(--aria-danger)]"
+              >
+                {item.protocolErrorCode}
+              </span>
+            ) : null}
+          </p>
+          {/* F-50 裁决 6：已知码配中文正文；没有可负责任的译文时不编（正文缺省，
+              原文已在折叠详情）。 */}
+          {item.protocolErrorCode && protocolErrorCopy(item.protocolErrorCode).body ? (
+            <p className="mt-1 text-xs leading-4 text-[var(--aria-ink)]">
+              {protocolErrorCopy(item.protocolErrorCode).body}
+            </p>
+          ) : null}
           {item.inlineError ? (
             <p className="aria-mono mt-1 break-words text-xs text-[var(--aria-danger)]">
               {item.inlineError.code} · {item.inlineError.message}
@@ -359,11 +395,17 @@ function HardErrorInboxRow({
           ) : null}
           <details data-testid="cockpit-inbox-error-details" className="mt-1">
             <summary className="cursor-pointer text-xs font-medium text-[var(--aria-ink-muted)]">
-              查看诊断详情
+              {PROTOCOL_ERROR_DETAILS_LABEL}
             </summary>
-            <p className="mt-1 break-words text-xs leading-4 text-[var(--aria-ink-muted)]">
+            <p className="aria-mono mt-1 break-words text-xs leading-4 text-[var(--aria-ink-muted)]">
               {item.summary}
             </p>
+            {/* 裁决 5：不可安全重放的原因作为可见文本（title 悬停不可达）。 */}
+            {item.source !== "advance" ? (
+              <p className="mt-1 text-xs text-[var(--aria-ink-muted)]">
+                {PROTOCOL_ERROR_NO_RETRY_NOTE}
+              </p>
+            ) : null}
           </details>
           {actions && actionable ? (
             <div className="mt-2 flex flex-wrap gap-2">
@@ -381,12 +423,13 @@ function HardErrorInboxRow({
                   className="inline-flex min-h-11 items-center gap-1 rounded-md border border-[var(--aria-line-strong)] bg-white px-3 text-xs font-semibold text-[var(--aria-ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
                 >
                   <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
-                  重试
+                  重试推进
                 </button>
               ) : null}
+              {/* 裁决 4：terminate → abandon_human_gate（门级），命名显式带作用域。 */}
               <ConfirmTwiceButton
-                label="终止"
-                confirmLabel="确认终止"
+                label={GATE_TERMINATE_BUTTON_LABEL}
+                confirmLabel={GATE_TERMINATE_CONFIRM_LABEL}
                 onConfirm={actions.terminate}
               />
             </div>
@@ -526,8 +569,8 @@ function GateInboxActions({
           </button>
         ) : null}
         <ConfirmTwiceButton
-          label="终止"
-          confirmLabel="确认终止"
+          label={GATE_TERMINATE_BUTTON_LABEL}
+          confirmLabel={GATE_TERMINATE_CONFIRM_LABEL}
           onConfirm={actions.terminate}
         />
       </div>
@@ -554,8 +597,8 @@ function BatchConfirmActions({ actions }: { actions: CockpitActionFacade }) {
         确认整组
       </button>
       <ConfirmTwiceButton
-        label="终止"
-        confirmLabel="确认终止"
+        label={GATE_TERMINATE_BUTTON_LABEL}
+        confirmLabel={GATE_TERMINATE_CONFIRM_LABEL}
         onConfirm={actions.terminate}
       />
     </div>

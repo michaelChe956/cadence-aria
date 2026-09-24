@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { createRef } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useProviderAvailabilityStore } from "../../state/provider-availability-store";
@@ -256,9 +256,9 @@ describe("ChatInputBar", () => {
     expect(useWorkspaceStore.getState().chatEntries).toEqual([]);
   });
 
-  // F-28（v33 复验 3）：STALE_DRIVER_LEASE 就地错误面在生成动作区直出——
-  // 传入 notice 即渲染「连接租约已过期」文案与二次确认重接管；宿主不传则不渲染。
-  it("renders the stale-lease notice with a confirm-twice retake beside the action buttons (F-28)", () => {
+  // F-28（v33 复验 3）+ F-50 裁决 6：STALE_DRIVER_LEASE 就地错误面中文主显
+  //（连接租约已失效）+ mono 错误码副行 + 中文正文，英文原文进折叠详情。
+  it("renders the stale-lease notice with Chinese lead, mono code, folded original (F-28/F-50)", () => {
     const onRetakeLease = vi.fn();
     render(
       <ChatInputBar
@@ -274,9 +274,17 @@ describe("ChatInputBar", () => {
       />,
     );
 
-    const alert = screen.getByRole("alert");
-    expect(alert).toHaveTextContent(/连接租约已过期/);
-    expect(alert).toHaveTextContent("STALE_DRIVER_LEASE");
+    const alert = screen.getByTestId("hard-error-notice");
+    expect(alert).toHaveTextContent("连接租约已失效");
+    const code = within(alert).getByTestId("hard-error-code");
+    expect(code).toHaveTextContent("STALE_DRIVER_LEASE");
+    expect(code.className).toContain("aria-mono");
+    expect(alert).toHaveTextContent("本连接已失去写入租约，当前操作未提交。");
+    expect(
+      within(screen.getByTestId("hard-error-details")).getByText(
+        /driver connection no longer holds the lease/,
+      ),
+    ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "开始生成" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "重新接管" }));
@@ -284,6 +292,29 @@ describe("ChatInputBar", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "确认重新接管" }));
     expect(onRetakeLease).toHaveBeenCalledTimes(1);
+  });
+
+  // F-50 裁决 7：抽屉打开时完整错误动作面归抽屉，页级缩为引用面（无重接管钮）。
+  it("shrinks the page-level notice to a drawer reference while the drawer owns the actions (F-50)", () => {
+    render(
+      <ChatInputBar
+        stage="prepare_context"
+        onSendContextNote={vi.fn()}
+        onStartGeneration={vi.fn()}
+        onAbort={vi.fn()}
+        hardErrorNotice={{
+          code: "STALE_DRIVER_LEASE",
+          message: "driver connection no longer holds the lease",
+          onRetakeLease: null,
+          referenceNote: "处理入口在待处理抽屉",
+        }}
+      />,
+    );
+
+    const alert = screen.getByTestId("hard-error-notice");
+    expect(alert).toHaveTextContent("处理入口在待处理抽屉");
+    expect(alert).not.toHaveTextContent(/建议刷新页面/);
+    expect(screen.queryByRole("button", { name: "重新接管" })).toBeNull();
   });
 
   // F-28 二轮（v34 复验「失败态点开始生成零反馈」）：就地面泛化 hard_error

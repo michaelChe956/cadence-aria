@@ -11,7 +11,7 @@ const gateItem: CockpitInboxItem = {
   id: "session_001:gate:gate_001",
   kind: "gate",
   severity: 2,
-  title: "门禁等待",
+  title: "需要人工确认",
   summary: "等待人工确认",
   triage: false,
   source: "gate",
@@ -79,7 +79,7 @@ const authorConfirmItem = (reviewAvailable: boolean): CockpitInboxItem => ({
   id: "session_001:gate:stage:author_confirm",
   kind: "gate",
   severity: 1,
-  title: "门禁等待",
+  title: "需要人工确认",
   summary: "等待人工确认",
   triage: false,
   source: "gate",
@@ -132,11 +132,13 @@ const recoveryItem: CockpitInboxItem = {
 // F-50 §4.1-1/6/7/8（第一批布局减负）：抽屉只保留顶栏「待处理」，收件箱内部
 // 改语义分组；滚动归抽屉 body；协议错误压成紧凑 alert 条（原文进折叠详情）；
 // 无安全重放命令的重试不再以灰置占位（advance 来源才渲染）。
+// F-50 裁决 6：投影后协议错误条目的 title 是中文主显 lead，code 走
+// protocolErrorCode（mono 副行），原文进 summary（折叠详情）。
 const staleLeaseErrorItem: CockpitInboxItem = {
   id: "session_001:hard_error:protocol:STALE_DRIVER_LEASE",
   kind: "hard_error",
   severity: 3,
-  title: "协议错误 STALE_DRIVER_LEASE",
+  title: "连接租约已失效",
   summary: "driver connection no longer holds the lease for write message advance",
   triage: false,
   source: "protocol_error",
@@ -205,7 +207,7 @@ describe("CockpitInbox F-50 layout", () => {
     ).toBeInTheDocument();
   });
 
-  it("无安全重放命令的重试不渲染；advance 来源保留重试", () => {
+  it("无安全重放命令的重试不渲染；advance 来源保留「重试推进」", () => {
     render(
       <CockpitInbox
         items={[staleLeaseErrorItem, advanceErrorItem]}
@@ -215,11 +217,46 @@ describe("CockpitInbox F-50 layout", () => {
       />,
     );
 
-    const retryButtons = screen.getAllByRole("button", { name: "重试" });
+    const retryButtons = screen.getAllByRole("button", { name: "重试推进" });
     expect(retryButtons).toHaveLength(1);
     expect(retryButtons[0].closest('[data-testid="cockpit-inbox-item-hard_error"]')).toHaveTextContent(
       "推进被拒",
     );
+    expect(screen.queryByRole("button", { name: "重试" })).toBeNull();
+  });
+
+  it("协议错误中文主显 + mono 错误码副行 + 原文/不可重试说明折叠（裁决 5/6）", () => {
+    render(
+      <CockpitInbox
+        items={[staleLeaseErrorItem]}
+        actions={mockActions()}
+        actionableSessionId="session_001"
+        onRetakeLease={vi.fn()}
+      />,
+    );
+
+    const row = screen.getByTestId("cockpit-inbox-item-hard_error");
+    expect(within(row).getByText("连接租约已失效")).toBeVisible();
+    const code = within(row).getByTestId("cockpit-inbox-error-code");
+    expect(code).toHaveTextContent("STALE_DRIVER_LEASE");
+    expect(code.className).toContain("aria-mono");
+    expect(within(row).getByText("本连接已失去写入租约，当前操作未提交。")).toBeVisible();
+    const details = within(row).getByTestId("cockpit-inbox-error-details");
+    expect(within(details).getByText(/driver connection no longer holds/)).toBeInTheDocument();
+    expect(within(details).getByText("该错误不支持安全重试")).toBeInTheDocument();
+  });
+
+  it("REQ-CFC-06 规则改短句 + 详情折叠（裁决 8）", () => {
+    render(<CockpitInbox items={[]} actions={mockActions()} />);
+
+    const rule = screen.getByTestId("inbox-bulk-rule");
+    expect(rule).toHaveTextContent("跨会话批量确认 · 每个会话一次");
+    const details = screen.getByTestId("inbox-bulk-rule-details");
+    expect(details.tagName).toBe("DETAILS");
+    // 默认收起：完整规则与 REQ 编号只在展开后可见。
+    expect(details).not.toHaveAttribute("open");
+    expect(within(details).getByText(/每会话仅一个开态门/)).toBeInTheDocument();
+    expect(within(details).getByText(/REQ-CFC-06/)).toBeInTheDocument();
   });
 });
 
@@ -333,9 +370,9 @@ describe("CockpitInbox", () => {
     await user.click(within(inbox).getByRole("button", { name: "确认并评审" }));
     expect(gateActions.confirmReview).toHaveBeenCalledOnce();
 
-    await user.click(within(inbox).getByRole("button", { name: "终止" }));
+    await user.click(within(inbox).getByRole("button", { name: "终止此门" }));
     expect(gateActions.terminate).not.toHaveBeenCalled();
-    await user.click(within(inbox).getByRole("button", { name: "确认终止" }));
+    await user.click(within(inbox).getByRole("button", { name: "确认终止此门" }));
     expect(gateActions.terminate).toHaveBeenCalledOnce();
   });
 
@@ -351,7 +388,7 @@ describe("CockpitInbox", () => {
     const inbox = screen.getByTestId("cockpit-inbox");
     expect(within(inbox).getByRole("button", { name: "确认定稿" })).toBeVisible();
     expect(within(inbox).queryByRole("button", { name: "确认并评审" })).toBeNull();
-    expect(within(inbox).getByRole("button", { name: "终止" })).toBeVisible();
+    expect(within(inbox).getByRole("button", { name: "终止此门" })).toBeVisible();
     // author 门是 HTTP confirm 通路：无 typed 反馈编辑器（维持既有纪律）。
     expect(within(inbox).queryByTestId("gate-feedback-editor")).toBeNull();
   });
@@ -375,7 +412,7 @@ describe("CockpitInbox", () => {
     expect(within(inbox).getByRole("button", { name: "确认定稿" })).toBeVisible();
     expect(within(inbox).getByRole("button", { name: "确认并评审" })).toBeVisible();
     expect(within(inbox).getByRole("button", { name: "采纳 Review 意见" })).toBeVisible();
-    expect(within(inbox).getByRole("button", { name: "终止" })).toBeVisible();
+    expect(within(inbox).getByRole("button", { name: "终止此门" })).toBeVisible();
 
     await user.click(within(inbox).getByRole("button", { name: "采纳 Review 意见" }));
     expect(gateActions.adoptReview).toHaveBeenCalledOnce();
@@ -398,7 +435,7 @@ describe("CockpitInbox", () => {
     expect(within(inbox).queryByRole("button", { name: "采纳 Review 意见" })).toBeNull();
     expect(within(inbox).getByRole("button", { name: "确认定稿" })).toBeVisible();
     expect(within(inbox).getByRole("button", { name: "确认并评审" })).toBeVisible();
-    expect(within(inbox).getByRole("button", { name: "终止" })).toBeVisible();
+    expect(within(inbox).getByRole("button", { name: "终止此门" })).toBeVisible();
   });
 
   it("only warns about a new feedback command while a typed gate has a repair reservation", () => {
@@ -442,7 +479,7 @@ describe("CockpitInbox", () => {
 
     const inbox = screen.getByTestId("cockpit-inbox");
     expect(within(inbox).getByText("已离开人工确认门")).toBeVisible();
-    expect(within(inbox).queryByLabelText("选择 门禁等待")).toBeNull();
+    expect(within(inbox).queryByLabelText("选择 需要人工确认")).toBeNull();
     expect(within(inbox).queryByTestId("gate-feedback-editor")).toBeNull();
   });
 
@@ -471,15 +508,15 @@ describe("CockpitInbox", () => {
     );
 
     const inbox = screen.getByTestId("cockpit-inbox");
-    expect(within(inbox).getByRole("button", { name: "终止" })).toBeVisible();
+    expect(within(inbox).getByRole("button", { name: "终止此门" })).toBeVisible();
     expect(within(inbox).queryByRole("button", { name: "确认" })).toBeNull();
     expect(within(inbox).queryByTestId("gate-feedback-editor")).toBeNull();
     // phase_mismatch 语义对 confirm 仍成立：批量勾选同样不提供。
-    expect(within(inbox).queryByLabelText("选择 门禁等待")).toBeNull();
+    expect(within(inbox).queryByLabelText("选择 需要人工确认")).toBeNull();
 
-    await user.click(within(inbox).getByRole("button", { name: "终止" }));
+    await user.click(within(inbox).getByRole("button", { name: "终止此门" }));
     expect(gateActions.terminate).not.toHaveBeenCalled();
-    await user.click(within(inbox).getByRole("button", { name: "确认终止" }));
+    await user.click(within(inbox).getByRole("button", { name: "确认终止此门" }));
     expect(gateActions.terminate).toHaveBeenCalledOnce();
   });
 
@@ -634,9 +671,9 @@ describe("CockpitInbox", () => {
     expect(gateActions.confirmBatch).toHaveBeenCalledOnce();
     expect(gateActions.confirm).not.toHaveBeenCalled();
 
-    await user.click(within(inbox).getByRole("button", { name: "终止" }));
+    await user.click(within(inbox).getByRole("button", { name: "终止此门" }));
     expect(gateActions.terminate).not.toHaveBeenCalled();
-    await user.click(within(inbox).getByRole("button", { name: "确认终止" }));
+    await user.click(within(inbox).getByRole("button", { name: "确认终止此门" }));
     expect(gateActions.terminate).toHaveBeenCalledOnce();
   });
 
@@ -706,7 +743,7 @@ describe("CockpitInbox", () => {
       expect(screen.queryByRole("button", { name: "继续" })).toBeNull();
       expect(screen.queryByRole("button", { name: "放弃并回滚" })).toBeNull();
       expect(screen.queryByRole("button", { name: "转人工" })).toBeNull();
-      expect(screen.queryByRole("button", { name: "终止" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "终止此门" })).toBeNull();
     },
   );
 

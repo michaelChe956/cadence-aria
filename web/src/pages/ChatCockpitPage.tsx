@@ -26,6 +26,11 @@ import {
   useCockpitShellInbox,
 } from "../components/cockpit/CockpitShell";
 import { CockpitInboxDrawer } from "../components/cockpit/CockpitInboxDrawer";
+import { HARD_ERROR_DRAWER_REFERENCE_NOTE } from "../state/protocol-error-copy";
+import {
+  GATE_TERMINATE_BUTTON_LABEL,
+  GATE_TERMINATE_CONFIRM_LABEL,
+} from "../state/gate-prompt-copy";
 import { CockpitPageHeader } from "../components/cockpit/CockpitPageHeader";
 import { useWorkspaceContentLoaders } from "../hooks/useWorkspaceContentLoaders";
 import { useCockpitAutopilot } from "../hooks/useCockpitAutopilot";
@@ -485,15 +490,20 @@ export function ChatCockpitPage({
   // OBSERVER_WRITE_REJECTED 或其它 hard_error 时生成按钮旁零显示。泛化为
   // hard_error 全族：lease 拒收两码给「重新接管」（复用上面 F-11 回调链），
   // 其余码报错误码+建议刷新（错误面仍与 F-30 终态禁用提示同屏共存）。
+  // F-50 裁决 7（动作面归属）：当前会话 hard error 的完整动作面只有一个——
+  // 抽屉打开时归收件箱错误条（当前会话条目 actionable），页级 ChatInputBar 缩为
+  // 引用面（只报状态与处理入口，不重复重接管按钮）；抽屉收起时页级自持完整
+  // 动作面。判据用抽屉开合状态，不新增协议字段（scope 契约归 lease change C 面）。
   const hardErrorNotice =
     isCurrentSession && state.protocolError !== null
       ? {
           code: state.protocolError.code,
           message: state.protocolError.message,
           onRetakeLease:
-            RETAKABLE_LEASE_CODES[state.protocolError.code] === true
-              ? handleRetakeLease
-              : null,
+            inboxDrawerOpen || RETAKABLE_LEASE_CODES[state.protocolError.code] !== true
+              ? null
+              : handleRetakeLease,
+          referenceNote: inboxDrawerOpen ? HARD_ERROR_DRAWER_REFERENCE_NOTE : null,
         }
       : null;
   const chatListRef = useRef<ChatEntryListHandle | null>(null);
@@ -868,8 +878,8 @@ export function ChatCockpitPage({
                       </button>
                     ) : null}
                     <ConfirmTwiceButton
-                      label="终止"
-                      confirmLabel="确认终止"
+                      label={GATE_TERMINATE_BUTTON_LABEL}
+                      confirmLabel={GATE_TERMINATE_CONFIRM_LABEL}
                       onConfirm={actions.terminate}
                     />
                   </>

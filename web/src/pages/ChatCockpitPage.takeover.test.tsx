@@ -220,8 +220,8 @@ describe("ChatCockpitPage", () => {
 
     renderCockpit();
 
-    expect(screen.getByRole("button", { name: "重试" })).toBeVisible();
-    expect(screen.getByRole("button", { name: "终止" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "重试推进" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "终止此门" })).toBeVisible();
     expect(screen.queryByRole("button", { name: "接管" })).toBeNull();
   });
 
@@ -246,6 +246,37 @@ describe("ChatCockpitPage", () => {
     expect(sendHello).toHaveBeenCalledWith("session_001", "author-1");
     expect(useWorkspaceStore.getState().protocolError).toBeNull();
     expect(screen.queryByTestId("cockpit-inbox-item-hard_error")).toBeNull();
+  });
+
+  // F-50 裁决 7（动作面归属）：当前会话 hard error 的完整动作面只有一个——
+  // 抽屉关：页级 ChatInputBar 自持重接管；抽屉开：完整动作归抽屉错误条，
+  // 页级缩为引用面（只报状态与处理入口，不再重复重接管按钮）。
+  it("动作面归属：抽屉打开时页级错误缩为引用面，抽屉承载完整动作（F-50）", async () => {
+    const user = userEvent.setup();
+    useWorkspaceStore.setState({
+      stage: "prepare_context",
+      protocolError: {
+        code: "STALE_DRIVER_LEASE",
+        message: "driver connection no longer holds the lease",
+      },
+    });
+
+    renderCockpit();
+
+    const notice = screen.getByTestId("hard-error-notice");
+    expect(within(notice).getByRole("button", { name: "重新接管" })).toBeVisible();
+    expect(notice).not.toHaveTextContent("处理入口在待处理抽屉");
+
+    await user.click(screen.getByTestId("cockpit-inbox-drawer-trigger"));
+    expect(screen.getByTestId("cockpit-inbox-drawer")).toHaveAttribute("data-state", "open");
+
+    expect(notice).toHaveTextContent("处理入口在待处理抽屉");
+    expect(within(notice).queryByRole("button", { name: "重新接管" })).toBeNull();
+    expect(
+      within(screen.getByTestId("cockpit-inbox-item-hard_error")).getByRole("button", {
+        name: "重新接管",
+      }),
+    ).toBeVisible();
   });
 
   it("arms takeover on the first hotkey and calls the existing takeover only on the second", () => {

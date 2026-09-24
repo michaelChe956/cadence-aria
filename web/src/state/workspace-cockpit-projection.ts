@@ -1,4 +1,5 @@
 import { gateIdentityFromState } from "./cockpit-action-routing";
+import { protocolErrorCopy, STALE_DRIVER_LEASE_CODE } from "./protocol-error-copy";
 import type { WorkItemPlanHumanGateSnapshot } from "../api/types";
 import type { ChatEntry } from "./chat-entries";
 import type {
@@ -472,8 +473,8 @@ export interface CockpitInboxItem {
   protocolErrorCode?: string | null;
 }
 
-/** 裸 driver 抢走租约后，本连接写操作被拒的协议码（F-11 恢复入口依据）。 */
-export const STALE_DRIVER_LEASE_CODE = "STALE_DRIVER_LEASE";
+/** 裸 driver 抢走租约后的协议码——常量源头在 protocol-error-copy（F-50）。 */
+export { STALE_DRIVER_LEASE_CODE } from "./protocol-error-copy";
 
 export function isStaleDriverLeaseItem(item: CockpitInboxItem): boolean {
   return item.source === "protocol_error" && item.protocolErrorCode === STALE_DRIVER_LEASE_CODE;
@@ -501,7 +502,9 @@ function gateInboxTitle(gate: GateProjection): string {
   if (gate.kind === "compile_recovery") {
     return "Final Compile 恢复";
   }
-  return gate.triage ? "门禁等待（需分诊）" : "门禁等待";
+  // F-50 裁决 1：与主区门卡同一单标题制——默认「需要人工确认」，仅 triage
+  // intent 门保留「需要判断 reviewer 意图」。
+  return gate.triage ? "需要判断 reviewer 意图" : "需要人工确认";
 }
 
 function gateInboxHeadline(gate: GateProjection): string {
@@ -511,7 +514,9 @@ function gateInboxHeadline(gate: GateProjection): string {
   if (gate.kind === "compile_recovery") {
     return "Final Compile 中断，等待恢复动作";
   }
-  return gate.trigger ? GATE_TRIGGER_LABELS[gate.trigger] : "等待人工确认";
+  // F-50 §3.5：触发原因独立成「原因：…」行（与门卡 gate-why 同构），
+  // 不再用标题重复人工介入语义。
+  return gate.trigger ? `原因：${GATE_TRIGGER_LABELS[gate.trigger]}` : "等待人工确认";
 }
 
 export function selectCockpitInbox(state: WorkspaceWsState): CockpitInboxItem[] {
@@ -575,7 +580,9 @@ export function selectCockpitInbox(state: WorkspaceWsState): CockpitInboxItem[] 
       id: `hard_error:protocol:${state.protocolError.code}`,
       kind: "hard_error",
       severity: 3,
-      title: `协议错误 ${state.protocolError.code}`,
+      // F-50 裁决 6：中文主显 lead（错误码由 protocolErrorCode 走 mono 副行，
+      // 英文原文留在 summary 由错误条折叠呈现）。
+      title: protocolErrorCopy(state.protocolError.code).lead,
       summary: state.protocolError.message,
       triage: false,
       source: "protocol_error",

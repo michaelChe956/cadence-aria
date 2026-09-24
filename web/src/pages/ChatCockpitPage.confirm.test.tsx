@@ -390,9 +390,9 @@ describe("ChatCockpitPage", () => {
         // 收件箱门条（默认产物视图下仍可见）带 确认定稿+终止（v37 复验 #2 起
         // author 门与主区门卡动作面对齐，确认语义=定稿）。
         const inbox = screen.getByTestId("cockpit-inbox");
-        expect(within(inbox).getByText("门禁等待")).toBeVisible();
+        expect(within(inbox).getByText("需要人工确认")).toBeVisible();
         expect(within(inbox).getByRole("button", { name: "确认定稿" })).toBeEnabled();
-        expect(within(inbox).getByRole("button", { name: "终止" })).toBeEnabled();
+        expect(within(inbox).getByRole("button", { name: "终止此门" })).toBeEnabled();
 
         // 产物审核页签（author_confirm 默认视图）动作位同样露出——收件箱与
         // 产物面板各一枚定稿/终止（二次确认惯例），均可点。
@@ -401,7 +401,7 @@ describe("ChatCockpitPage", () => {
           "true",
         );
         expect(screen.getAllByRole("button", { name: "确认定稿" })).toHaveLength(2);
-        const terminateButtons = screen.getAllByRole("button", { name: "终止" });
+        const terminateButtons = screen.getAllByRole("button", { name: "终止此门" });
         expect(terminateButtons.length).toBeGreaterThanOrEqual(2);
         for (const button of terminateButtons) {
           expect(button).toBeEnabled();
@@ -411,8 +411,8 @@ describe("ChatCockpitPage", () => {
         await user.click(screen.getByTestId("cockpit-conversation-tab"));
         const gateCard = screen.getByTestId("gate-prompt-entry");
         expect(gateCard).toBeVisible();
-        expect(within(gateCard).getByRole("button", { name: "确认产物" })).toBeEnabled();
-        expect(within(gateCard).getByRole("button", { name: "终止" })).toBeEnabled();
+        expect(within(gateCard).getByRole("button", { name: "确认当前版本" })).toBeEnabled();
+        expect(within(gateCard).getByRole("button", { name: "终止此门" })).toBeEnabled();
       },
     );
 
@@ -537,7 +537,7 @@ describe("ChatCockpitPage", () => {
         screen.queryByRole("button", { name: "确认定稿" }),
       ).toBeNull();
       expect(
-        within(screen.getByTestId("cockpit-inbox")).queryByText("门禁等待"),
+        within(screen.getByTestId("cockpit-inbox")).queryByText("需要人工确认"),
       ).toBeNull();
       // F-29：confirm 响应携带 issue_id——invalidation 按 issue 精确通知。
       expect(invalidations).toEqual(["issue_0001"]);
@@ -588,7 +588,7 @@ describe("ChatCockpitPage", () => {
       // 不乐观置 confirmed：评审在途，决策面等 session_state 关门。
       expect(useWorkspaceStore.getState().sessionStatus).toBe("waiting_for_human");
       expect(
-        within(screen.getByTestId("cockpit-inbox")).getByText("门禁等待"),
+        within(screen.getByTestId("cockpit-inbox")).getByText("需要人工确认"),
       ).toBeVisible();
       expect(screen.getAllByRole("button", { name: "确认定稿" })).toHaveLength(2);
 
@@ -625,7 +625,7 @@ describe("ChatCockpitPage", () => {
       });
       expect(useWorkspaceStore.getState().sessionStatus).toBe("running");
       expect(
-        within(screen.getByTestId("cockpit-inbox")).queryByText("门禁等待"),
+        within(screen.getByTestId("cockpit-inbox")).queryByText("需要人工确认"),
       ).toBeNull();
       unsubscribe();
     });
@@ -698,10 +698,10 @@ describe("ChatCockpitPage", () => {
       renderCockpitWith(workspaceWs);
       const inbox = screen.getByTestId("cockpit-inbox");
 
-      await user.click(within(inbox).getByRole("button", { name: "终止" }));
+      await user.click(within(inbox).getByRole("button", { name: "终止此门" }));
       expect(workspaceWs.sendAbandonGate).not.toHaveBeenCalled();
 
-      await user.click(within(inbox).getByRole("button", { name: "确认终止" }));
+      await user.click(within(inbox).getByRole("button", { name: "确认终止此门" }));
 
       expect(workspaceWs.sendAbandonGate).toHaveBeenCalledTimes(1);
       expect(workspaceWs.sendAbandonGate).toHaveBeenCalledWith(expect.any(String));
@@ -727,7 +727,7 @@ describe("ChatCockpitPage", () => {
       await user.click(screen.getByTestId("cockpit-conversation-tab"));
       const gateCard = screen.getByTestId("gate-prompt-entry");
       expect(
-        within(gateCard).getByRole("button", { name: "确认产物" }),
+        within(gateCard).getByRole("button", { name: "确认当前版本" }),
       ).toBeEnabled();
       act(() => {
         // stage_change 现场只 setStage 不重建 chatEntries——旧门卡留在对话流
@@ -737,7 +737,7 @@ describe("ChatCockpitPage", () => {
 
       expect(within(gateCard).getByText("已离开人工确认门")).toBeVisible();
       expect(
-        within(gateCard).queryByRole("button", { name: "确认产物" }),
+        within(gateCard).queryByRole("button", { name: "确认当前版本" }),
       ).toBeNull();
       // 即便遗留按钮被点到（防御），确认/终止零发送。
       expect(workspaceWs.sendConfirmGate).not.toHaveBeenCalled();

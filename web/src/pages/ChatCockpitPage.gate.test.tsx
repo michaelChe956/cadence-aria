@@ -105,7 +105,7 @@ describe("ChatCockpitPage", () => {
     });
 
     renderCockpit("session_001", false);
-    await user.click(screen.getByRole("button", { name: "重试" }));
+    await user.click(screen.getByRole("button", { name: "重试推进" }));
 
     expect(sendAdvance).toHaveBeenCalledWith("command_001");
   });
@@ -143,7 +143,7 @@ describe("ChatCockpitPage", () => {
 
     renderCockpit("session_001", false);
 
-    const gateChoices = screen.getAllByRole("checkbox", { name: "选择 门禁等待" });
+    const gateChoices = screen.getAllByRole("checkbox", { name: "选择 需要人工确认" });
     expect(gateChoices).toHaveLength(2);
     await user.click(gateChoices[0]);
     await user.click(gateChoices[1]);
@@ -157,7 +157,7 @@ describe("ChatCockpitPage", () => {
         itemId: "session_002:gate:g2",
         sessionId: "session_002",
         gateKey: "g2",
-        title: "门禁等待",
+        title: "需要人工确认",
       },
     ]);
     expect(takeoverWorkspaceSession).not.toHaveBeenCalled();
