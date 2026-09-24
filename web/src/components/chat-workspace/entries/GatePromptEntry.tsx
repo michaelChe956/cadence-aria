@@ -200,6 +200,8 @@ export function GatePromptEntry({
       className="border-slate-200 bg-slate-50"
       testId="gate-prompt-entry"
     >
+      {/* F-50 §4.1-3（第一批布局减负）：门卡固定「原因→正文→产物→证据→
+          metadata→进度→局部错误→动作」顺序，确认对象（产物）不再被状态行压下去。 */}
       <div className="space-y-3">
         {whyCopy && !isResolved ? (
           <div
@@ -212,6 +214,30 @@ export function GatePromptEntry({
         {advisoryOnly && confirmOffered ? (
           <div data-testid="gate-advice" className="text-xs text-emerald-700">
             {GATE_ADVISORY_CONFIRM_HINT}
+          </div>
+        ) : null}
+        <div className="text-sm text-[var(--aria-ink)]">{entry.content}</div>
+        {summary ? <div className="text-xs text-[var(--aria-ink-muted)]">{summary}</div> : null}
+        {!isResolved && pendingArtifactVersion && onOpenArtifact ? (
+          <div
+            data-testid="gate-artifact-context"
+            className="flex flex-wrap items-center gap-2 text-xs text-[var(--aria-ink-muted)]"
+          >
+            <span>
+              待确认产物：
+              {GATE_ARTIFACT_LABELS[workspaceType ?? ""]
+                ? `${GATE_ARTIFACT_LABELS[workspaceType ?? ""]} `
+                : ""}
+              v{pendingArtifactVersion.version}
+            </span>
+            <button
+              type="button"
+              data-testid="gate-artifact-open"
+              onClick={onOpenArtifact}
+              className="inline-flex min-h-9 items-center gap-1 rounded-md border border-[var(--aria-line-strong)] bg-white px-2 text-xs font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+            >
+              <FileText className="h-3.5 w-3.5" aria-hidden="true" /> 查看产物
+            </button>
           </div>
         ) : null}
         {findings.length > 0 && !isResolved ? (
@@ -239,50 +265,28 @@ export function GatePromptEntry({
             </div>
           </details>
         ) : null}
-        <div className="text-sm text-[var(--aria-ink)]">{entry.content}</div>
-        {summary ? <div className="text-xs text-[var(--aria-ink-muted)]">{summary}</div> : null}
-        {!isResolved && pendingArtifactVersion && onOpenArtifact ? (
-          <div
-            data-testid="gate-artifact-context"
-            className="flex flex-wrap items-center gap-2 text-xs text-[var(--aria-ink-muted)]"
-          >
-            <span>
-              待确认产物：
-              {GATE_ARTIFACT_LABELS[workspaceType ?? ""]
-                ? `${GATE_ARTIFACT_LABELS[workspaceType ?? ""]} `
-                : ""}
-              v{pendingArtifactVersion.version}
-            </span>
-            <button
-              type="button"
-              data-testid="gate-artifact-open"
-              onClick={onOpenArtifact}
-              className="inline-flex min-h-9 items-center gap-1 rounded-md border border-[var(--aria-line-strong)] bg-white px-2 text-xs font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
-            >
-              <FileText className="h-3.5 w-3.5" aria-hidden="true" /> 查看产物
-            </button>
-          </div>
-        ) : null}
+        {/* F-50 §4.1-4：trigger 与预算合并为一条弱化元数据行（不再两个胶囊
+            抢主视觉）——「引擎判定需人工」不作为独立大胶囊重复人工介入语义。 */}
         {gateTrigger || remainingBudget !== null ? (
-          <div className="flex flex-wrap items-center gap-2 text-xs">
-            {gateTrigger ? (
-              <span
-                data-testid="gate-trigger-label"
-                className="aria-chip border-[var(--aria-gate-open-border)] bg-[var(--aria-gate-open-bg)] text-[var(--aria-gate-open-fg)]"
-              >
-                {GATE_TRIGGER_LABELS[gateTrigger]}
-              </span>
-            ) : null}
-            {remainingBudget !== null ? (
-              <span
-                data-testid="gate-budget"
-                className="aria-chip aria-mono aria-num border-[var(--aria-line-strong)] text-[var(--aria-ink-muted)]"
-              >
-                剩余修复轮次 {remainingBudget}
-              </span>
-            ) : null}
+          <p data-testid="gate-meta" className="text-xs text-[var(--aria-ink-muted)]">
+            {[
+              gateTrigger ? `触发：${GATE_TRIGGER_LABELS[gateTrigger]}` : null,
+              remainingBudget !== null ? `剩余修复轮次 ${remainingBudget}` : null,
+            ]
+              .filter((part): part is string => Boolean(part))
+              .join(" · ")}
+          </p>
+        ) : null}
+        {revisionProgressCopy && !isResolved ? (
+          <div
+            data-testid="gate-revision-status"
+            className="text-xs font-medium text-[var(--aria-ink)]"
+          >
+            {revisionProgressCopy}
           </div>
         ) : null}
+        {/* F-50 §2.3-7/§2.7：门卡只保留与该门动作直接相关的局部错误（租约/
+            连接级 hard error 由页级错误面与收件箱承载），置于动作区之前。 */}
         {failureMessage ? (
           <div
             data-testid="gate-failure"
@@ -297,14 +301,6 @@ export function GatePromptEntry({
             className="aria-mono text-xs text-[var(--aria-danger)]"
           >
             {inlineError.code} · {inlineError.message}
-          </div>
-        ) : null}
-        {revisionProgressCopy && !isResolved ? (
-          <div
-            data-testid="gate-revision-status"
-            className="text-xs font-medium text-[var(--aria-ink)]"
-          >
-            {revisionProgressCopy}
           </div>
         ) : null}
         {requiresTriage && findings.length === 0 ? (
@@ -330,7 +326,8 @@ export function GatePromptEntry({
           // F-21：终止放行即渲染动作位——phase_mismatch 的 plan 门（context
           // blocker/author 失败/缺相位）此前整面消失，终止零通路；现在露出
           // 终止（二次确认惯例），confirm/反馈编辑器维持相位纪律不渲染。
-          <div className="space-y-2">
+          // F-50 §4.1-5：动作区以分隔线成组，与说明区视觉分层。
+          <div className="space-y-2 border-t border-[var(--aria-line)] pt-3">
             {actionBlockReason !== null ? (
               <p className="text-xs text-[var(--aria-ink-muted)]">
                 {gateActionBlockCopy(actionBlockReason)}，可终止后重新发起

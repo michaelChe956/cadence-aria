@@ -666,7 +666,8 @@ describe("ChatCockpitPage", () => {
 
     renderCockpit();
 
-    const alert = screen.getByRole("alert");
+    // F-50：抽屉错误条同为 role=alert，页级断言按 testid 定位就地面。
+    const alert = screen.getByTestId("hard-error-notice");
     expect(alert).toHaveTextContent("SESSION_ALREADY_CONFIRMED");
     expect(alert).toHaveTextContent(/刷新/);
     expect(alert).not.toHaveTextContent(/连接租约已过期/);
@@ -736,6 +737,8 @@ describe("ChatCockpitPage", () => {
     expect(screen.getByTestId("start-generation-blocked-hint")).toHaveTextContent(
       /终态/,
     );
-    expect(screen.getByRole("alert")).toHaveTextContent(/OBSERVER_WRITE_REJECTED/);
+    expect(screen.getByTestId("hard-error-notice")).toHaveTextContent(
+      /OBSERVER_WRITE_REJECTED/,
+    );
   });
 });

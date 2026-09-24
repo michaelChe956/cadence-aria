@@ -673,4 +673,84 @@ describe("GatePromptEntry actionability", () => {
       expect(screen.queryByTestId("gate-adopt-findings")).toBeNull();
     });
   });
+
+  // F-50 §4.1-3/4（第一批布局减负）：门卡固定为「标题→原因→产物→证据→
+  // metadata→进度→动作」顺序；trigger 与预算从两个胶囊合并为一条弱化元数据行，
+  // 不再与标题组抢主视觉。
+  describe("F-50 gate card layout", () => {
+    function artifactVersion(versionNo: number, isCurrent: boolean) {
+      return {
+        version: versionNo,
+        generated_by: "pi" as const,
+        reviewed_by: null,
+        review_verdict: null,
+        confirmed_by: null,
+        is_current: isCurrent,
+        created_at: "2026-09-24T00:00:00Z",
+        source_node_id: `timeline_node_00${versionNo}`,
+      };
+    }
+
+    function layoutEntry(): ChatEntry {
+      return gateEntry(null, "turn_layout", {
+        turn_id: "turn_layout",
+        findings: [
+          { severity: "suggestion", message: "建议补充复杂度说明" },
+          { severity: "suggestion", message: "建议统一命名" },
+        ],
+        verdict: "pass",
+        review_gate: "user_confirm_allowed",
+        gate_trigger: "native_human_required",
+        remaining_budget: 3,
+      });
+    }
+
+    it("trigger 与预算合并为一条弱化元数据行，不再渲染两个胶囊", () => {
+      render(<GatePromptEntry entry={layoutEntry()} actions={actions()} />);
+
+      const meta = screen.getByTestId("gate-meta");
+      expect(meta).toHaveTextContent("触发：引擎判定需人工");
+      expect(meta).toHaveTextContent("剩余修复轮次 3");
+      expect(meta.className).not.toContain("aria-chip");
+      expect(screen.queryByTestId("gate-trigger-label")).toBeNull();
+      expect(screen.queryByTestId("gate-budget")).toBeNull();
+    });
+
+    it("门卡顺序：原因 → 产物 → 证据 → 元数据 → 进度", () => {
+      const store = useWorkspaceStore.getState();
+      store.setStage("human_confirm");
+      store.applyHumanGateTurnOpen("turn_layout", "cmd_layout", 3);
+      store.applyHumanGateTurnCompleted("turn_layout", "artifact_9");
+      useWorkspaceStore.setState({
+        workspaceType: "work_item_plan",
+        artifactVersions: [artifactVersion(6, true)],
+      });
+
+      render(
+        <GatePromptEntry
+          entry={layoutEntry()}
+          actions={actions()}
+          onOpenArtifact={vi.fn()}
+        />,
+      );
+
+      const why = screen.getByTestId("gate-why");
+      const artifact = screen.getByTestId("gate-artifact-context");
+      const findings = screen.getByTestId("gate-findings");
+      const meta = screen.getByTestId("gate-meta");
+      const progress = screen.getByTestId("gate-revision-status");
+      expect(
+        why.compareDocumentPosition(artifact) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+      expect(
+        artifact.compareDocumentPosition(findings) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+      expect(
+        findings.compareDocumentPosition(meta) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+      expect(
+        meta.compareDocumentPosition(progress) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+    });
+  });
 });

@@ -35,7 +35,6 @@ const KIND_GLYPH = {
 const KIND_CLASS = {
   gate: "border-[var(--aria-gate-open-border)] bg-[var(--aria-gate-open-bg)]",
   stopped: "border-[var(--aria-line-strong)] bg-[var(--aria-panel-subtle)]",
-  hard_error: "border-[var(--aria-danger)] bg-[var(--aria-danger-soft)]",
 } as const;
 
 export function CockpitInbox({
@@ -106,13 +105,34 @@ export function CockpitInbox({
     setSelectedIds(new Set());
     onBulkConfirm?.(selectedItems);
   };
+  // F-50 §4.1-1/6（第一批布局减负）：抽屉顶栏已定义「待处理」作用域，收件箱
+  // 不再内嵌同名标题；滚动归抽屉 body（唯一滚动容器），本 section 不自带
+  // overflow-auto。条目按「连接问题 / 需要人工处理」语义分组，空组不留壳。
+  const connectionItems = items.filter((item) => item.kind === "hard_error");
+  const humanItems = items.filter((item) => item.kind !== "hard_error");
+  const rowProps = (item: CockpitInboxItem) => ({
+    key: item.id,
+    item,
+    actions,
+    onTakeover,
+    onRetry,
+    actionable: actionableSessionId === cockpitInboxItemSessionId(item.id),
+    onRetakeLease,
+    selectable: selectableIds.has(item.id),
+    selected: selectedIds.has(item.id),
+    onSelectionChange: () => toggleSelected(item),
+    artifactVersions,
+    latestReviewSummary,
+    repairReservation,
+    takeoverButtonRef:
+      actionableSessionId === cockpitInboxItemSessionId(item.id) ? takeoverButtonRef : undefined,
+  });
   return (
     <section
       data-testid="cockpit-inbox"
       aria-label="待处理收件箱"
-      className="flex min-h-0 flex-col gap-2 overflow-auto rounded-xl border-2 border-[var(--aria-line-strong)] bg-[var(--aria-panel)] p-3"
+      className="flex flex-col gap-2 rounded-xl border-2 border-[var(--aria-line-strong)] bg-[var(--aria-panel)] p-3"
     >
-      <h2 className="text-sm font-semibold text-[var(--aria-ink)]">待处理</h2>
       <p className="text-xs text-[var(--aria-ink-muted)]">
         跨会话批量确认；每会话仅一个开态门，每个所选会话恰好确认一次（REQ-CFC-06）
       </p>
@@ -128,26 +148,24 @@ export function CockpitInbox({
       {items.length === 0 ? (
         <p className="text-xs text-[var(--aria-ink-muted)]">{emptyHint ?? "暂无待处理项"}</p>
       ) : (
-        items.map((item) => (
-          <CockpitInboxRow
-            key={item.id}
-            item={item}
-            actions={actions}
-            onTakeover={onTakeover}
-            onRetry={onRetry}
-            actionable={actionableSessionId === cockpitInboxItemSessionId(item.id)}
-            onRetakeLease={onRetakeLease}
-            selectable={selectableIds.has(item.id)}
-            selected={selectedIds.has(item.id)}
-            onSelectionChange={() => toggleSelected(item)}
-            artifactVersions={artifactVersions}
-            latestReviewSummary={latestReviewSummary}
-            repairReservation={repairReservation}
-            takeoverButtonRef={
-              actionableSessionId === cockpitInboxItemSessionId(item.id) ? takeoverButtonRef : undefined
-            }
-          />
-        ))
+        <>
+          {connectionItems.length > 0 ? (
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-[var(--aria-ink-muted)]">
+              连接问题
+            </h3>
+          ) : null}
+          {connectionItems.map((item) => (
+            <CockpitInboxRow {...rowProps(item)} />
+          ))}
+          {humanItems.length > 0 ? (
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-[var(--aria-ink-muted)]">
+              需要人工处理
+            </h3>
+          ) : null}
+          {humanItems.map((item) => (
+            <CockpitInboxRow {...rowProps(item)} />
+          ))}
+        </>
       )}
     </section>
   );
@@ -188,6 +206,18 @@ function CockpitInboxRow({
   const [takeoverDisabled, setTakeoverDisabled] = useState(false);
 
   const sessionId = cockpitInboxItemSessionId(item.id);
+  if (item.kind === "hard_error") {
+    return (
+      <HardErrorInboxRow
+        item={item}
+        pulse={pulse}
+        actions={actions}
+        actionable={actionable}
+        onRetry={onRetry}
+        onRetakeLease={onRetakeLease}
+      />
+    );
+  }
   return (
     <article
       data-testid={`cockpit-inbox-item-${item.kind}`}
@@ -282,32 +312,86 @@ function CockpitInboxRow({
             )}
           </div>
         ) : null}
-        {item.kind === "hard_error" && actions && actionable ? (
-          <div className="mt-2 flex flex-wrap gap-2">
-            {isStaleDriverLeaseItem(item) && onRetakeLease ? (
+      </div>
+    </article>
+  );
+}
+
+/**
+ * F-50 §4.1-7/8/10：协议/引擎错误条——紧凑 alert（role=alert），不再复刻门禁卡
+ * 高度；原文与长诊断进折叠详情；无安全重放命令（source ≠ advance）的重试不渲染
+ * （灰置会被误读为暂时忙），advance 来源保留「重试」。
+ */
+function HardErrorInboxRow({
+  item,
+  pulse,
+  actions,
+  actionable,
+  onRetry,
+  onRetakeLease,
+}: {
+  item: CockpitInboxItem;
+  pulse: boolean;
+  actions?: CockpitActionFacade;
+  actionable: boolean;
+  onRetry?: (item: CockpitInboxItem) => void;
+  onRetakeLease?: () => void;
+}) {
+  const Glyph = KIND_GLYPH.hard_error;
+  return (
+    <article
+      data-testid="cockpit-inbox-item-hard_error"
+      data-pulse={pulse}
+      role="alert"
+      className={[
+        "rounded-lg border-2 border-[var(--aria-danger)] bg-[var(--aria-danger-soft)] px-3 py-2",
+        pulse ? "motion-safe:animate-pulse ring-2 ring-[var(--aria-danger)]" : "",
+      ].join(" ")}
+    >
+      <div className="flex items-start gap-2">
+        <Glyph className="mt-0.5 h-4 w-4 shrink-0 text-[var(--aria-danger)]" aria-hidden="true" />
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-semibold text-[var(--aria-ink)]">{item.title}</p>
+          {item.inlineError ? (
+            <p className="aria-mono mt-1 break-words text-xs text-[var(--aria-danger)]">
+              {item.inlineError.code} · {item.inlineError.message}
+            </p>
+          ) : null}
+          <details data-testid="cockpit-inbox-error-details" className="mt-1">
+            <summary className="cursor-pointer text-xs font-medium text-[var(--aria-ink-muted)]">
+              查看诊断详情
+            </summary>
+            <p className="mt-1 break-words text-xs leading-4 text-[var(--aria-ink-muted)]">
+              {item.summary}
+            </p>
+          </details>
+          {actions && actionable ? (
+            <div className="mt-2 flex flex-wrap gap-2">
+              {isStaleDriverLeaseItem(item) && onRetakeLease ? (
+                <ConfirmTwiceButton
+                  label="重新接管"
+                  confirmLabel="确认重新接管"
+                  onConfirm={onRetakeLease}
+                />
+              ) : null}
+              {item.source === "advance" ? (
+                <button
+                  type="button"
+                  onClick={() => onRetry?.(item)}
+                  className="inline-flex min-h-11 items-center gap-1 rounded-md border border-[var(--aria-line-strong)] bg-white px-3 text-xs font-semibold text-[var(--aria-ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+                >
+                  <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
+                  重试
+                </button>
+              ) : null}
               <ConfirmTwiceButton
-                label="重新接管"
-                confirmLabel="确认重新接管"
-                onConfirm={onRetakeLease}
+                label="终止"
+                confirmLabel="确认终止"
+                onConfirm={actions.terminate}
               />
-            ) : null}
-            <button
-              type="button"
-              disabled={item.source !== "advance"}
-              title={item.source === "advance" ? undefined : "该错误没有可安全重放的命令"}
-              onClick={() => onRetry?.(item)}
-              className="inline-flex min-h-11 items-center gap-1 rounded-md border border-[var(--aria-line-strong)] bg-white px-3 text-xs font-semibold text-[var(--aria-ink-muted)] disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
-            >
-              <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
-              重试
-            </button>
-            <ConfirmTwiceButton
-              label="终止"
-              confirmLabel="确认终止"
-              onConfirm={actions.terminate}
-            />
-          </div>
-        ) : null}
+            </div>
+          ) : null}
+        </div>
       </div>
     </article>
   );

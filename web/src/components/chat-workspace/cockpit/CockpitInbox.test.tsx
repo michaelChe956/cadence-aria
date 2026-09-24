@@ -129,6 +129,100 @@ const recoveryItem: CockpitInboxItem = {
   inlineError: null,
 };
 
+// F-50 §4.1-1/6/7/8（第一批布局减负）：抽屉只保留顶栏「待处理」，收件箱内部
+// 改语义分组；滚动归抽屉 body；协议错误压成紧凑 alert 条（原文进折叠详情）；
+// 无安全重放命令的重试不再以灰置占位（advance 来源才渲染）。
+const staleLeaseErrorItem: CockpitInboxItem = {
+  id: "session_001:hard_error:protocol:STALE_DRIVER_LEASE",
+  kind: "hard_error",
+  severity: 3,
+  title: "协议错误 STALE_DRIVER_LEASE",
+  summary: "driver connection no longer holds the lease for write message advance",
+  triage: false,
+  source: "protocol_error",
+  createdAt: null,
+  gate: null,
+  inlineError: null,
+  protocolErrorCode: "STALE_DRIVER_LEASE",
+};
+
+const advanceErrorItem: CockpitInboxItem = {
+  id: "session_001:hard_error:advance:cmd_1",
+  kind: "hard_error",
+  severity: 3,
+  title: "推进被拒",
+  summary: "ADVANCE_STAGE_INVALID · stage mismatch",
+  triage: false,
+  source: "advance",
+  createdAt: null,
+  gate: null,
+  inlineError: null,
+};
+describe("CockpitInbox F-50 layout", () => {
+  it("不再内嵌「待处理」标题，按连接问题/需要人工处理分组", () => {
+    render(
+      <CockpitInbox
+        items={[staleLeaseErrorItem, gateItem]}
+        actions={mockActions()}
+        actionableSessionId="session_001"
+      />,
+    );
+
+    const inbox = screen.getByTestId("cockpit-inbox");
+    expect(within(inbox).queryByRole("heading", { name: "待处理" })).toBeNull();
+    expect(within(inbox).getByRole("heading", { name: "连接问题" })).toBeVisible();
+    expect(within(inbox).getByRole("heading", { name: "需要人工处理" })).toBeVisible();
+    // 连接问题分组在需要人工处理之前（错误优先）。
+    const connection = within(inbox).getByRole("heading", { name: "连接问题" });
+    const human = within(inbox).getByRole("heading", { name: "需要人工处理" });
+    expect(
+      (connection.compareDocumentPosition(human) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0,
+    ).toBe(true);
+  });
+
+  it("收件箱不再自滚：滚动容器归抽屉 body", () => {
+    render(<CockpitInbox items={[]} actions={mockActions()} />);
+
+    expect(screen.getByTestId("cockpit-inbox").className).not.toContain("overflow-auto");
+  });
+
+  it("协议错误为紧凑 alert 条：role=alert、原文只在折叠详情内", () => {
+    render(
+      <CockpitInbox
+        items={[staleLeaseErrorItem]}
+        actions={mockActions()}
+        actionableSessionId="session_001"
+        onRetakeLease={vi.fn()}
+      />,
+    );
+
+    const row = screen.getByTestId("cockpit-inbox-item-hard_error");
+    expect(row).toHaveAttribute("role", "alert");
+    const details = within(row).getByTestId("cockpit-inbox-error-details");
+    expect(details.tagName).toBe("DETAILS");
+    expect(
+      within(details).getByText(/driver connection no longer holds the lease/),
+    ).toBeInTheDocument();
+  });
+
+  it("无安全重放命令的重试不渲染；advance 来源保留重试", () => {
+    render(
+      <CockpitInbox
+        items={[staleLeaseErrorItem, advanceErrorItem]}
+        actions={mockActions()}
+        actionableSessionId="session_001"
+        onRetry={vi.fn()}
+      />,
+    );
+
+    const retryButtons = screen.getAllByRole("button", { name: "重试" });
+    expect(retryButtons).toHaveLength(1);
+    expect(retryButtons[0].closest('[data-testid="cockpit-inbox-item-hard_error"]')).toHaveTextContent(
+      "推进被拒",
+    );
+  });
+});
+
 function mockActions(): CockpitActionFacade {
   return {
     confirm: vi.fn(),

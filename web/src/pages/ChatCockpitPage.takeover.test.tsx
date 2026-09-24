@@ -204,8 +204,19 @@ describe("ChatCockpitPage", () => {
     expect(await screen.findByRole("button", { name: "接管" })).toBeVisible();
   });
 
-  it("offers retry and terminate but never takeover for hard error", () => {
-    cockpitInbox.push(hardErrorItem("session_001"));
+  // F-50 §4.1-8：无安全重放命令的重试不再渲染（引擎错误来源没有可重放的
+  // advance 命令）；advance 来源才保留重试。硬错误永不提供「接管」。
+  it("offers retry only for replayable advance errors and never takeover for hard error", () => {
+    cockpitInbox.push(
+      hardErrorItem("session_002"),
+      {
+        ...hardErrorItem("session_001"),
+        id: "session_001:hard_error:advance:cmd_1",
+        source: "advance",
+        title: "推进被拒",
+        summary: "ADVANCE_STAGE_INVALID · stage mismatch",
+      },
+    );
 
     renderCockpit();
 

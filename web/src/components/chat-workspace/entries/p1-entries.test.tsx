@@ -614,19 +614,20 @@ describe("gate prompt read-only truth", () => {
       metadata,
     });
 
-  it.each(triggerCases)("renders the %s gate trigger label", (trigger, label) => {
+  // F-50 §4.1-4：trigger 与预算合并为一条弱化元数据行（gate-meta），
+  // 不再是两个独立胶囊。
+  it.each(triggerCases)("renders the %s gate trigger label in the merged meta line", (trigger, label) => {
     render(<GatePromptEntry entry={gateEntry({ gate_trigger: trigger })} />);
 
-    expect(screen.getByTestId("gate-trigger-label")).toHaveTextContent(label);
+    expect(screen.getByTestId("gate-meta")).toHaveTextContent(`触发：${label}`);
   });
 
   it("always shows the remaining manual repair budget next to the gate", () => {
     render(<GatePromptEntry entry={gateEntry({ remaining_budget: 1 })} />);
 
-    const budget = screen.getByTestId("gate-budget");
-    expect(budget).toHaveTextContent("剩余修复轮次 1");
-    expect(budget.className).toContain("aria-mono");
-    expect(budget.className).toContain("aria-num");
+    const meta = screen.getByTestId("gate-meta");
+    expect(meta).toHaveTextContent("剩余修复轮次 1");
+    expect(meta.className).not.toContain("aria-chip");
   });
 
   it("renders the turn failure inline while the gate stays visible", () => {
