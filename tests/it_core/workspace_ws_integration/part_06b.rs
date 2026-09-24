@@ -275,6 +275,72 @@ async fn workspace_ws_observer_connection_does_not_take_over_lease() {
     server.abort();
 }
 
+// REQ-DLS-01：悬空自愈——驾驶连接的租约被并发连接占走后悬空（holder=None，
+// F-50-1 现场：偷窃连接断开），原连接的首条写消息必须无感恢复：不产生
+// STALE_DRIVER_LEASE，操作直接生效（UserMessage 走 run 启动全路径）。
+#[tokio::test]
+async fn workspace_ws_dangling_lease_self_heals_on_first_write() {
+    let (_lock, _controls_env) = ConnectionDiagnosticTestControlsGuard::enable().await;
+    let root = tempdir().expect("root");
+    let _repo = create_workspace_session_fixture(&root).await;
+    let complete = Arc::new(Notify::new());
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::Fake,
+        Arc::new(SignalledCompletionStreamingProvider {
+            complete: complete.clone(),
+        }),
+    );
+    let state = WebAppState::with_provider_registry(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        registry,
+    );
+    let controls = state.test_controls.clone();
+    let app = build_web_router(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+
+    let (mut driver, _) = connect_async(url.clone()).await.expect("driver");
+    let _initial = recv_json(&mut driver).await;
+    send_json(
+        &mut driver,
+        &WsInMessage::UserMessage {
+            content: long_message("dangling_self_heal_first"),
+        },
+    )
+    .await;
+    let _chunk = recv_until_stream_chunk(&mut driver).await;
+
+    // 偷窃连接接入后立刻悬空（F-50-1 引爆链：attach 占走 → 断开 → 无人持有）。
+    let (mut thief, _) = connect_async(url).await.expect("thief");
+    let _thief_initial = recv_json(&mut thief).await;
+    drop(thief);
+    let eof = wait_for_connection_diagnostic(&controls, "eof").await;
+    assert!(
+        eof["connection_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty()),
+        "eof 诊断必须先于自愈断言落到偷窃连接上"
+    );
+
+    // 原驾驶连接首写：不 STALE、不报错，run 直接启动并推进到流式输出。
+    send_json(
+        &mut driver,
+        &WsInMessage::UserMessage {
+            content: long_message("dangling_self_heal_second"),
+        },
+    )
+    .await;
+    let _healed_chunk = recv_until_stream_chunk(&mut driver).await;
+
+    drop(driver);
+    complete.notify_one();
+    server.abort();
+}
+
 // REQ-WCR-04/T9：manager 只分配一次序号；attach 基线和所有在线 attachment 的直播
 // 事件必须携带同一递增 `event_seq`，而非 socket-local 序号。
 #[tokio::test]

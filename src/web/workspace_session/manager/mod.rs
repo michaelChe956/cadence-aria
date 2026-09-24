@@ -286,7 +286,6 @@ impl WorkspaceSessionManager {
             workspace_runs,
             session_id: self.session_id.clone(),
             connection_id: None,
-            lease_epoch: None,
             app_paths: self.app_paths.clone(),
             session_record: self.session_record.clone(),
         }

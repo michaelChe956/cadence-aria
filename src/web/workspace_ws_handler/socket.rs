@@ -494,9 +494,7 @@ pub(crate) async fn handle_workspace_socket(
         }
     });
 
-    let mut run_context = manager.provider_run_context(state.workspace_runs.clone());
-    run_context.connection_id = Some(connection_id.clone());
-    run_context.lease_epoch = manager.lease_epoch_for_connection(&connection_id);
+    let run_context = manager.provider_run_context(state.workspace_runs.clone());
     let inbound_context = WorkspaceInboundContext {
         app_state: state.clone(),
         engine: engine.clone(),

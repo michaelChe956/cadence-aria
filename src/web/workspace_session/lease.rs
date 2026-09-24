@@ -55,6 +55,17 @@ impl LeaseState {
         }
     }
 
+    /// REQ-DLS-01 写时自愈：仅当租约悬空（holder=None）时授予该连接。调用方必须在
+    /// manager 状态锁内使用，使「判空 + 授予 + attachment epoch 刷新」成为同一
+    /// 原子临界区；返回是否实际发生授予（幂等：已持有者不重复推进）。
+    pub fn acquire_if_vacant(&mut self, connection_id: &str) -> bool {
+        if self.holder.is_some() {
+            return false;
+        }
+        self.acquire(connection_id);
+        true
+    }
+
     /// 仅 holder 的连接关闭才撤销 lease；运行的生命周期完全不受影响。
     pub fn revoke_if_holder(&mut self, connection_id: &str) -> bool {
         if self.holder.as_deref() != Some(connection_id) {

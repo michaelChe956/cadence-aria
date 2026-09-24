@@ -53,7 +53,6 @@ pub(crate) async fn spawn_provider_run_from_handler(
         workspace_runs,
         session_id,
         connection_id,
-        lease_epoch,
         app_paths: _,
         session_record: _,
     } = run_context;
@@ -78,7 +77,7 @@ pub(crate) async fn spawn_provider_run_from_handler(
     // socket 发起的 supersede 在进入 engine 锁前原子核验 attachment epoch；已被
     // 接管的 stale driver 会在触碰 active run 前返回 STALE_DRIVER_LEASE。
     manager
-        .abort_active_run_from_attachment(connection_id.as_deref(), lease_epoch)
+        .abort_active_run_from_attachment(connection_id.as_deref())
         .await?;
     let provider_name = {
         let engine = engine.lock().await;
@@ -115,7 +114,7 @@ pub(crate) async fn spawn_provider_run_from_handler(
         engine.active_timeline_node_id()
     };
     let (run_id, run_token, run_cancel, command_rx, _node_id) = manager
-        .start_run_from_attachment(connection_id.as_deref(), lease_epoch, target_node_id)
+        .start_run_from_attachment(connection_id.as_deref(), target_node_id)
         .await?;
     let run_label = format!("run-{run_id}");
     // provider drive 期标记（idle 关闭守卫扩展）：从 run 任务启动到结束，该 session
