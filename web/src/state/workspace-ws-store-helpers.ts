@@ -484,6 +484,37 @@ export function normalizeTimelineNodeDetails(details: Record<string, TimelineNod
   );
 }
 
+/**
+ * F-47 REQ-NDR-01/Review Focus 1：快照内联 detail 覆盖「已物化」detail 时的 merge。
+ *
+ * 内联优先（spec 场景二）：状态/正文等一律以快照内联为准。但快照投影会**裁剪**
+ * 执行事件——`build_session_state_node_detail` 把每个事件的 `output` 置 null 并截断
+ * 正文，纯粹为了压缩帧体积；`output: null` 是「裁剪」而不是「无输出」。若原样覆盖，
+ * work_item_plan 的 outline/draft/batch run 节点（内联白名单，durable 里有 usage）
+ * 会在下一个门/choice/重连快照帧上丢掉 token 载荷，而水合去重 ref 阻止二次拉取 →
+ * token 行静默消失且不自愈，与 F-47 主诉同形。
+ *
+ * 因此：同 event_id 的事件保留已水合的非空 `output`，其余字段仍取内联（较新的投影）。
+ */
+export function mergeSnapshotNodeDetail(
+  hydrated: TimelineNodeDetail,
+  inline: TimelineNodeDetail,
+): TimelineNodeDetail {
+  return {
+    ...hydrated,
+    ...inline,
+    execution_events: inline.execution_events.map((event) => {
+      if (typeof event.output === "string" && event.output.length > 0) {
+        return event;
+      }
+      const hydratedEvent = hydrated.execution_events.find(
+        (candidate) => candidate.event_id === event.event_id,
+      );
+      return hydratedEvent?.output ? { ...event, output: hydratedEvent.output } : event;
+    }),
+  };
+}
+
 function deduplicateExecutionEvents(events: ExecutionEvent[]) {
   return events.reduce<ExecutionEvent[]>((deduped, event) => {
     const index = deduped.findIndex((existing) => existing.event_id === event.event_id);

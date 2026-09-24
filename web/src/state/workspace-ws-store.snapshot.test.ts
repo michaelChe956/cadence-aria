@@ -541,6 +541,50 @@ describe("workspace ws store snapshots", () => {
     );
   });
 
+  // REQ-NDR-01 + Review Focus 1：快照内联投影会把执行事件 output 置 null 瘦身
+  // （build_session_state_node_detail）——内联优先不得把已水合的 usage 载荷抹掉，
+  // 否则 work_item_plan 的 outline/draft/batch run 节点（内联白名单）会在下一个
+  // 门/choice/重连帧上丢 token 行，且水合去重 ref 阻止二次拉取 → 不自愈。
+  it("keeps hydrated event payloads when an inline snapshot detail overrides the node", () => {
+    const store = useWorkspaceStore.getState();
+    store.setSessionState(f47DesignSnapshot({ timeline_node_details: {} }));
+    store.setNodeDetail(
+      makeNodeDetail({
+        node_id: "timeline_node_002",
+        session_id: "session_f47",
+        streaming_content: "完整正文（水合）",
+        execution_events: [usageEvent({ input_tokens: 464, output_tokens: 21_136 })],
+      }),
+    );
+    expect(usageEntryCount()).toBe(1);
+
+    // 第二帧：该节点被内联（投影裁剪：正文只剩 preview、output 置 null）。
+    store.setSessionState(
+      f47DesignSnapshot({
+        timeline_node_details: {
+          timeline_node_002: makeNodeDetail({
+            node_id: "timeline_node_002",
+            session_id: "session_f47",
+            streaming_content: "内联摘要",
+            execution_events: [
+              {
+                ...usageEvent({ input_tokens: 464, output_tokens: 21_136 }),
+                output: null,
+              },
+            ],
+          }),
+        },
+      }),
+    );
+
+    const detail = useWorkspaceStore.getState().nodeDetails.timeline_node_002;
+    // 内联优先：正文取内联（较新的投影）。
+    expect(detail.streaming_content).toBe("内联摘要");
+    // 但裁剪掉的 output 不覆盖已水合载荷 → token 行数据仍在。
+    expect(detail.execution_events[0]?.output).toContain('"output_tokens":21136');
+    expect(usageEntryCount()).toBe(1);
+  });
+
   // merge 只在同会话内保留：跨会话节点 id 同构（timeline_node_00N），不得串场。
   it("does not carry hydrated details across a session switch", () => {
     const store = useWorkspaceStore.getState();

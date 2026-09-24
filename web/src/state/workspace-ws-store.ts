@@ -26,6 +26,7 @@ import {
   emptyWorkItemPlanProjectionArtifacts,
   emptyNodeDetail,
   ensureNodeDetail,
+  mergeSnapshotNodeDetail,
   mergeVisitedStages,
   normalizeTimelineNodeDetails,
   normalizeWorkspaceArtifact,
@@ -229,6 +230,18 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
             ),
           )
         : {};
+      // 快照内联 detail 覆盖对应节点（场景二：内联优先），但对已物化条目走 merge——
+      // 内联投影裁剪掉的执行事件 output 不覆盖已水合的载荷（见 mergeSnapshotNodeDetail）。
+      const inlineNodeDetails = Object.fromEntries(
+        Object.entries(normalizeTimelineNodeDetails(state.timeline_node_details ?? {})).map(
+          ([nodeId, inline]) => [
+            nodeId,
+            preservedNodeDetails[nodeId]
+              ? mergeSnapshotNodeDetail(preservedNodeDetails[nodeId], inline)
+              : inline,
+          ],
+        ),
+      );
       const nextState: WorkspaceWsState = {
         ...prev,
         sessionId: state.session_id,
@@ -284,7 +297,7 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
         nodeDetails: {
           ...detailsForTimelineNodes(timelineNodes, state.session_id),
           ...preservedNodeDetails,
-          ...normalizeTimelineNodeDetails(state.timeline_node_details ?? {}),
+          ...inlineNodeDetails,
         },
         nodeSummaries: state.timeline_node_summaries ?? {},
         contentCache:
