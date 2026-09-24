@@ -6,6 +6,9 @@
 
 - [x] 1.1 gate-local accepted_feedback_turns（与预留同 CAS 原子）；REQ-CG-02 重置边界修订（普通门重建快照 carry-forward）；红绿：三轮修订 3→2→1→0 递减/刷新不回填/accepted 不污染 policy 计数（REQ-HGC-01、CG-02 场景）。
 - [x] 1.2 旧会话缺 gate-local 事实保守 unknown（不补预算）。
+## 2. 收敛投影与门区分（前端）
+
+
 
 - [x] 2.1 批次确认门专属 title/why 文案+删除误导相位提示行；两道门可区分用例（REQ-HGC-02 场景 1）。
 - [x] 2.2 「距通过」清单投影（must_fix/预检/Verification/approve 可用性）；红绿（REQ-HGC-02 场景 2）。
