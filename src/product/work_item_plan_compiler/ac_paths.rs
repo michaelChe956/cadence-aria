@@ -2,14 +2,19 @@
 //!
 //! 只认显式路径形态——statement 中的方法前缀路由（`GET /status.html`）、
 //! 反引号/引号 span、验证命令 token——不做全文模糊匹配。文件形态判定共用
-//! 一条规则（末段必须含扩展名点、无内部空白、不含 `..`/`:`/通配符、非
-//! 绝对路径/URL/flag/变量），使 `/api/status` 等无扩展名路由与裸 prose
-//! 一律不触发。
+//! 一条规则（末段必须含扩展名点、无内部空白、不含 `..`/`:`/通配符/shell
+//! 标点、非绝对路径/URL/flag/变量，尾部 CJK 句读剥除），使 `/api/status`
+//! 等无扩展名路由与裸 prose 一律不触发。
 
 use super::lower::PlanCandidateIr;
 
 /// statement 路由形态认定的 HTTP 方法集（小写不认：路由惯例全大写）。
 const HTTP_METHODS: [&str; 6] = ["GET", "POST", "PUT", "DELETE", "HEAD", "PATCH"];
+
+/// 命令链/引号 span 尾缀常见的 shell 标点：含任一即整体拒绝——`test/x.test.js;`
+/// 这类拼接残渣无法与路径本体安全区分，宁拒勿误报（拒绝方向 fail-safe，
+/// 不产生基线核对假阳性）。
+const SHELL_PUNCT: &[u8] = b";><|&(),=";
 
 /// 路径 token 的允许字符（ASCII 字母数字 + `._-/`）：遇到其余字符（空白、
 /// CJK 连接词、标点）即终止，天然兼容中文 statement 中的 `与`/`。` 等边界。
@@ -128,11 +133,16 @@ fn strip_method_prefix(span: &str) -> &str {
     span
 }
 
-/// 文件形态判定与入列：剥前导 `./`；拒绝含内部空白/`..`/`:`/`*`/`?`/`\`、
-/// 绝对路径、`-` flag、`$` 变量；要求末段含 `.`（扩展名）——含 `/` 的目录
-/// 形态（`api/status`）与无扩展名裸词（`CommonJS`）一律不入列。
+/// 文件形态判定与入列：剥前导 `./` 与尾部 CJK 句读（`。` `，` `；` `、`——
+/// 中文 statement 反引号 span 常见 `status.html。` 形态，句读不属路径本体）；
+/// 拒绝含内部空白/`..`/`:`/`*`/`?`/`\`、shell 标点（[`SHELL_PUNCT`]）、绝对
+/// 路径、`-` flag、`$` 变量；要求末段含 `.`（扩展名）——含 `/` 的目录形态
+/// （`api/status`）与无扩展名裸词（`CommonJS`）一律不入列。
 fn push_repo_path(candidate: &str, refs: &mut Vec<String>) {
-    let candidate = candidate.trim().trim_start_matches("./");
+    let candidate = candidate
+        .trim()
+        .trim_start_matches("./")
+        .trim_end_matches(['。', '，', '；', '、']);
     if candidate.is_empty()
         || candidate.starts_with('/')
         || candidate.starts_with('-')
@@ -143,6 +153,7 @@ fn push_repo_path(candidate: &str, refs: &mut Vec<String>) {
     if candidate
         .bytes()
         .any(|byte| byte.is_ascii_whitespace() || matches!(byte, b':' | b'*' | b'?' | b'\\'))
+        || candidate.bytes().any(|byte| SHELL_PUNCT.contains(&byte))
     {
         return;
     }
@@ -181,6 +192,33 @@ mod tests {
             refs,
             vec!["status.html", "test/x.test.js", "test/status.test.js"]
         );
+    }
+
+    /// C1K3 P2 负例：命令链尾分号 token——`test/x.test.js;` 属 shell 拼接残渣，
+    /// 必须整体拒绝（基线树只有 `test/x.test.js`，带分号入列即基线核对误报）；
+    /// 无标点 token 不受影响。
+    #[test]
+    fn command_chain_trailing_shell_punctuation_is_rejected() {
+        let mut refs = Vec::new();
+        collect_command_paths("node --test test/x.test.js; npm run lint", &mut refs);
+        assert!(refs.is_empty(), "带尾分号 token 不得入列：{refs:?}");
+
+        let mut clean = Vec::new();
+        collect_command_paths("node --test test/x.test.js", &mut clean);
+        assert_eq!(clean, vec!["test/x.test.js".to_string()]);
+    }
+
+    /// C1K3 P2 负例：中文 statement 反引号 span 尾部全角句号（`status.html。`）
+    /// 属句读而非路径本体——剥离后命中真实路径；无句读 span 不受影响。
+    #[test]
+    fn quoted_span_trailing_cjk_punctuation_is_stripped() {
+        let mut refs = Vec::new();
+        collect_quoted_spans("更新 `status.html。` 后重启服务", &mut refs);
+        assert_eq!(refs, vec!["status.html".to_string()]);
+
+        let mut clean = Vec::new();
+        collect_quoted_spans("更新 `status.html` 后重启服务", &mut clean);
+        assert_eq!(clean, vec!["status.html".to_string()]);
     }
 
     #[test]
