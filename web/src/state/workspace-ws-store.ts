@@ -213,6 +213,22 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
       const durableGateStillOpen = humanGateSnapshot !== null;
       // 重建口径：durable snapshot 在场即门仍开；否则要求仍处 legacy human_confirm 阶段。
       const gateProjectionStillOpen = durableGateStillOpen || state.stage === "human_confirm";
+      // F-47 REQ-NDR-01：快照应用是 merge 而非重建——原实现整表重建 nodeDetails，
+      // 任何一帧 session_state 都会把 REST 已水合的 detail 换成空壳，而水合去重 ref
+      // 阻止二次拉取 → token 行静默消失且不自愈（诊断 §2.2 B2，探针实测）。
+      // 保留规则：同会话 + 节点仍在 timeline 中 + 条目已物化（REST 水合 / 内联 /
+      // 本地内容落库，参见 `hydration_pending`）。纯占位壳按当前节点重建，避免沿用
+      // 陈旧 status/ended_at；快照内联 detail 最后覆盖（REQ-NDR-01 场景二：内联优先）。
+      // 跨会话不保留：节点 id 同构（timeline_node_00N），串场即错误数据。
+      const timelineNodeIdSet = new Set(timelineNodes.map((node) => node.node_id));
+      const preservedNodeDetails = sameSession
+        ? Object.fromEntries(
+            Object.entries(prev.nodeDetails).filter(
+              ([nodeId, detail]) =>
+                timelineNodeIdSet.has(nodeId) && detail.hydration_pending !== true,
+            ),
+          )
+        : {};
       const nextState: WorkspaceWsState = {
         ...prev,
         sessionId: state.session_id,
@@ -267,6 +283,7 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
         selectedNodeId: selectedNodeStillExists ? prev.selectedNodeId : defaultSelectedNodeId,
         nodeDetails: {
           ...detailsForTimelineNodes(timelineNodes, state.session_id),
+          ...preservedNodeDetails,
           ...normalizeTimelineNodeDetails(state.timeline_node_details ?? {}),
         },
         nodeSummaries: state.timeline_node_summaries ?? {},

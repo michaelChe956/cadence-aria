@@ -78,6 +78,9 @@ export function emptyNodeDetail(
     base_artifact_ref: null,
     started_at: node?.started_at ?? "",
     ended_at: node?.completed_at ?? null,
+    // F-47 REQ-NDR-01/03：占位壳标记——durable detail 尚未水合/内联，内容与
+    // token 位均按「未读取」处理（详见 TimelineNodeDetail 的类型注释）。
+    hydration_pending: true,
   };
 }
 
@@ -418,7 +421,7 @@ export function workItemPlanProjectionArtifactFromRecord(
 
 export function ensureNodeDetail(details: Record<string, TimelineNodeDetail>, nodeId: string) {
   const existing = details[nodeId];
-  details[nodeId] = existing
+  const next: TimelineNodeDetail = existing
     ? {
         ...existing,
         messages: [...existing.messages],
@@ -426,6 +429,11 @@ export function ensureNodeDetail(details: Record<string, TimelineNodeDetail>, no
         permission_events: [...existing.permission_events],
       }
     : emptyNodeDetail(nodeId);
+  // F-47 REQ-NDR-01/03：ensureNodeDetail 的语义是「取可变 detail 准备写入本地内容」
+  // （流式分片 / 执行事件 / 消息 / 结论）——内容一到场就不再是水合占位壳：清掉标记，
+  // 使其在快照 merge 中按已物化条目保留，token 位也从 pending 转终态。
+  delete next.hydration_pending;
+  details[nodeId] = next;
   return details[nodeId];
 }
 

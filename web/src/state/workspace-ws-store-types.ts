@@ -234,7 +234,15 @@ export interface ArtifactVersion extends ArtifactVersionSummary {
   projection_validation?: ProjectionValidationReport;
 }
 
-export type TimelineNodeDetail = NodeDetail;
+/**
+ * F-47 REQ-NDR-01/03：`hydration_pending` 是前端本地水合态标记（非 WS/REST 载荷
+ * 字段）。`emptyNodeDetail` 造的占位壳带 `hydration_pending: true`，表示该节点的
+ * durable detail 尚未经 REST 水合或快照内联填充；一旦有本地内容写入（流式分片 /
+ * 执行事件 / 消息 / 结论，见 `ensureNodeDetail`）或 REST/内联 detail 落库，标记即消失。
+ * 用途：①快照 merge 只保留「已物化」条目，纯占位壳按当前节点重建（避免沿用陈旧
+ * status/ended_at）；②token 位据此区分「尚未读取」与「确认无 usage」。
+ */
+export type TimelineNodeDetail = NodeDetail & { hydration_pending?: boolean };
 
 export interface NodeDetailSummary {
   node_id: string;

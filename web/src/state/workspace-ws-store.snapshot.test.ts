@@ -15,7 +15,11 @@ import {
   makeWorkItemPlanCandidate,
 } from "./workspace-ws-store.test-utils";
 import { observerStateFromSessionState } from "./workspace-observer-store";
-import type { WorkspaceSessionStatePayload } from "./workspace-ws-store-types";
+import type {
+  ExecutionEvent,
+  TimelineNode,
+  WorkspaceSessionStatePayload,
+} from "./workspace-ws-store-types";
 import { planRepairSnapshotFixture } from "./workspace-plan-repair-test-fixtures";
 
 describe("workspace ws store snapshots", () => {
@@ -475,6 +479,93 @@ describe("workspace ws store snapshots", () => {
     expect(state.activeRunId).toBeNull();
   });
 
+  // F-47 REQ-NDR-01：快照应用是 merge 而非重建——已水合 detail 不得被空壳清空。
+  // 三步断言结构与 F47Diag 实测探针一致（快照→水合→再快照），现状第三步回 0（红）。
+  it("keeps a hydrated node detail when a later snapshot arrives without that detail", () => {
+    const store = useWorkspaceStore.getState();
+    const snapshot = f47DesignSnapshot({ timeline_node_details: {} });
+
+    store.setSessionState(snapshot);
+    expect(
+      useWorkspaceStore.getState().nodeDetails.timeline_node_002?.execution_events ?? [],
+    ).toHaveLength(0);
+    expect(usageEntryCount()).toBe(0);
+
+    store.setNodeDetail(
+      makeNodeDetail({
+        node_id: "timeline_node_002",
+        session_id: "session_f47",
+        status: "failed",
+        streaming_content: "author 正文",
+        execution_events: [usageEvent({ input_tokens: 14_512, output_tokens: 19_493 })],
+      }),
+    );
+    expect(
+      useWorkspaceStore.getState().nodeDetails.timeline_node_002.execution_events,
+    ).toHaveLength(1);
+    expect(usageEntryCount()).toBe(1);
+
+    store.setSessionState(snapshot);
+    expect(
+      useWorkspaceStore.getState().nodeDetails.timeline_node_002.execution_events,
+    ).toHaveLength(1);
+    expect(usageEntryCount()).toBe(1);
+  });
+
+  // REQ-NDR-01 场景二：快照内联 detail 覆盖对应节点（merge 契约边界，防版本倒挂）。
+  it("lets a snapshot inline detail override the hydrated detail of the same node", () => {
+    const store = useWorkspaceStore.getState();
+    store.setSessionState(f47DesignSnapshot({ timeline_node_details: {} }));
+    store.setNodeDetail(
+      makeNodeDetail({
+        node_id: "timeline_node_002",
+        session_id: "session_f47",
+        streaming_content: "REST 水合输出",
+      }),
+    );
+
+    store.setSessionState(
+      f47DesignSnapshot({
+        timeline_node_details: {
+          timeline_node_002: makeNodeDetail({
+            node_id: "timeline_node_002",
+            session_id: "session_f47",
+            streaming_content: "快照内联输出",
+          }),
+        },
+      }),
+    );
+
+    expect(useWorkspaceStore.getState().nodeDetails.timeline_node_002.streaming_content).toBe(
+      "快照内联输出",
+    );
+  });
+
+  // merge 只在同会话内保留：跨会话节点 id 同构（timeline_node_00N），不得串场。
+  it("does not carry hydrated details across a session switch", () => {
+    const store = useWorkspaceStore.getState();
+    store.setSessionState(f47DesignSnapshot({ timeline_node_details: {} }));
+    store.setNodeDetail(
+      makeNodeDetail({
+        node_id: "timeline_node_002",
+        session_id: "session_f47",
+        streaming_content: "上一会话输出",
+      }),
+    );
+
+    store.setSessionState(
+      f47DesignSnapshot({
+        session_id: "session_f48",
+        timeline_node_details: {},
+        timeline_nodes: [f47TimelineNode({ node_id: "timeline_node_002" })],
+      }),
+    );
+
+    expect(
+      useWorkspaceStore.getState().nodeDetails.timeline_node_002.streaming_content,
+    ).toBe("");
+  });
+
   it("selectNodeDetail returns the requested snapshot detail", () => {
     const store = useWorkspaceStore.getState();
     const detail = makeNodeDetail({
@@ -600,6 +691,79 @@ describe("workspace ws store snapshots", () => {
     expect(selectPrepareContextNotes(useWorkspaceStore.getState())).toEqual([]);
   });
 });
+
+// F-47 快照 merge 用例的共用夹具：design 会话（author/reviewer 节点一律走 summary
+// 分支、快照不内联 detail），与诊断报告实测的会话形态一致。
+function f47TimelineNode(overrides: Partial<TimelineNode> = {}): TimelineNode {
+  return {
+    node_id: "timeline_node_002",
+    node_type: "author_run",
+    agent: "pi",
+    stage: "running",
+    round: null,
+    status: "failed",
+    title: "Author Run",
+    summary: null,
+    started_at: "2026-09-23T16:15:05.965Z",
+    completed_at: "2026-09-23T16:16:44.926Z",
+    duration_ms: 98_961,
+    artifact_ref: null,
+    provider_config_snapshot: {
+      author: "pi",
+      reviewer: "kimi_code",
+      review_rounds: 1,
+    },
+    ...overrides,
+  };
+}
+
+function f47DesignSnapshot(
+  overrides: Partial<WorkspaceSessionStatePayload> = {},
+): WorkspaceSessionStatePayload {
+  return {
+    session_id: "session_f47",
+    workspace_type: "design",
+    stage: "running",
+    session_status: "running",
+    flow_kind: "legacy",
+    run_policy: "interactive",
+    run_history: {
+      seen_fingerprints: [],
+      repairs_used: 0,
+      manual_repairs_used: 0,
+      transitions_used: 0,
+      initial_review_count: 0,
+      verification_review_count: 0,
+    },
+    messages: [],
+    checkpoints: [],
+    artifact: null,
+    providers: { author: "pi", reviewer: "kimi_code" },
+    timeline_nodes: [f47TimelineNode()],
+    active_node_id: null,
+    artifact_versions: [],
+    timeline_node_details: {},
+    active_run_id: null,
+    ...overrides,
+  };
+}
+
+function usageEvent(payload: Record<string, number>): ExecutionEvent {
+  return {
+    event_id: "usage_author",
+    kind: "usage",
+    status: "completed",
+    title: "author token usage",
+    output: JSON.stringify({ role: "author", ...payload }),
+  };
+}
+
+/** 对话流里带 token 读数的条目数——「token 行可见」的数据面等价断言。 */
+function usageEntryCount(): number {
+  return useWorkspaceStore
+    .getState()
+    .chatEntries.filter((entry) => (entry as ChatEntry).metadata?.usage !== undefined).length;
+}
 
 describe("plan repair snapshot mirroring", () => {
   installWorkspaceStoreTestHooks();
