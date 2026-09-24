@@ -644,6 +644,14 @@ impl WorkspaceEngine {
         Ok(())
     }
 
+    /// F-54 B2（诊断 §4.1）：SC Final Compile 的可恢复失败只追加 diagnostics，
+    /// 不落 `status=Failed + phase=Failed`。三处调用点（initial compile 的
+    /// failure() 通道、recovery Continue 的 validate/resume）失败后门都会保持/
+    /// 重开在 `WaitingForHuman`，残留 Failed 相位会形成 `(waiting_for_human,
+    /// failed)` 矛盾对——confirm 与 abandon 双拒（0009 全通路死锁）。相位与
+    /// 状态保持调用前的值（compile 前置已保证 Approval），与 strict validator
+    /// 深层失败「不落 durable 相位」的既有观测良好行为对齐；终态 Failed 保留
+    /// 给 AbortFatal / provider 级终态（routing_scope / provider run 既有路径）。
     fn record_single_candidate_compile_failure(
         &mut self,
         lifecycle: &LifecycleStore,
@@ -662,8 +670,8 @@ impl WorkspaceEngine {
         if let Ok(saved) = lifecycle.compare_and_save_policy_route(
             &record,
             PolicyRoutePersist {
-                status: WorkspaceSessionStatus::Failed,
-                single_candidate_phase: Some(crate::product::models::SingleCandidatePhase::Failed),
+                status: record.status.clone(),
+                single_candidate_phase: record.single_candidate_phase.clone(),
                 run_history: record.run_history.clone(),
                 scope: record.review_invocation_scope.clone(),
                 gate: record.human_gate_snapshot.clone(),

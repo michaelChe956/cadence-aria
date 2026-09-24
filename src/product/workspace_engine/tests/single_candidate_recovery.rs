@@ -1024,15 +1024,16 @@ async fn single_candidate_recovery_rejects_invalid_source_ref(case: &str, expect
         .await
         .expect_err("invalid direct ref 必须拒绝恢复");
     assert!(error.contains(expected_code), "{case}: {error}");
-    let failed = lifecycle
+    let durable = lifecycle
         .get_workspace_session(&recovered.session().session_id)
         .expect("durable failure diagnostic");
     assert_eq!(
-        failed.single_candidate_phase,
-        Some(SingleCandidatePhase::Failed)
+        durable.single_candidate_phase,
+        Some(SingleCandidatePhase::Approval),
+        "F-54 B2: 可恢复失败不得污染门相位（recovery 门保持可应答）"
     );
-    assert_eq!(failed.status, WorkspaceSessionStatus::Failed);
-    assert!(failed.policy_diagnostics.iter().any(|diagnostic| {
+    assert_eq!(durable.status, WorkspaceSessionStatus::WaitingForHuman);
+    assert!(durable.policy_diagnostics.iter().any(|diagnostic| {
         diagnostic.code == "single_candidate_recovery_failed"
             && diagnostic.message.contains(expected_code)
     }));

@@ -6,7 +6,9 @@
 // `update_workspace_session_status` 只在终态清快照、从不创建快照，Evaluate 门
 // 若没有快照在场就不是本 CAS 应当关闭的门形态。禁止 trigger/resumable 判据：
 // NativeHumanRequired 跨两族复用、resumable 是策略派生值；Completed 必须继续拒
-// （amendment 重开门不得流经 approval compile）。
+//（amendment 重开门不得流经 approval compile）。
+// F-54 fix round：terminate 放行面扩展到 Failed 相位（用户脱困权），confirm
+// 授权面 {Approval, Evaluate} 一字不动（见 ⑩⑪）。
 
 use crate::product::models::{SingleCandidatePhase, WorkspaceSessionStatus};
 
@@ -276,6 +278,10 @@ fn human_gate_close_stale_expected_record_keeps_workspace_session_conflict() {
 // stage==HumanConfirm——CAS 对 terminate（Terminated）放行这三形态（Prepare/
 // Generate/None），confirm（Running）前置一字不动（反伪造与 Completed 拒收
 // 维持）。
+
+// F-54 fix round：Failed 相位加入 terminate 放行面——compile 失败残留相位 ×
+// 门重开 WaitingForHuman（0009 形态）此前 abandon 也被拒＝全通路死锁。
+// fail-closed 只锁 confirm，永不锁 terminate（用户脱困权）。
 /// ⑧F-21：terminate 放行 context blocker/author 失败/缺相位门（无快照）。
 #[test]
 fn human_gate_close_terminate_relaxes_non_approval_gate_shapes() {
@@ -322,9 +328,38 @@ fn human_gate_close_confirm_keeps_rejecting_non_approval_gate_shapes() {
     }
 }
 
-/// ⑩F-21 边界：Failed 相位 terminate 仍拒（失败终态门不在放行面）。
+/// ⑩F-54 B3：terminate 放行 Failed 相位门（快照在场，0009 形态）。fail-closed
+/// 只锁 confirm（防未授权推进），永不锁 terminate——用户脱困权。terminate 不
+/// 提升相位，快照与 reservation 照常清空。
 #[test]
-fn human_gate_close_terminate_still_rejects_failed_phase() {
+fn human_gate_close_terminate_relaxes_failed_phase_gate() {
+    let (_tmp, store) = setup();
+    let expected = gate_close_session(
+        &store,
+        Some(SingleCandidatePhase::Failed),
+        WorkspaceSessionStatus::WaitingForHuman,
+        true,
+    );
+    let closed = store
+        .compare_and_save_human_gate_close(&expected, WorkspaceSessionStatus::Terminated)
+        .expect("F-54: failed-phase gate must stay terminable (user egress)");
+    assert_eq!(closed.status, WorkspaceSessionStatus::Terminated);
+    assert_eq!(
+        closed.single_candidate_phase,
+        Some(SingleCandidatePhase::Failed),
+        "terminate 不改相位"
+    );
+    assert_eq!(closed.human_gate_snapshot, None);
+    assert_eq!(closed.human_gate_reservation, None);
+
+    let durable = store.get_workspace_session(&expected.id).unwrap();
+    assert_eq!(durable.status, WorkspaceSessionStatus::Terminated);
+}
+
+/// ⑪F-54 B3 边界：confirm（Running）对 Failed 相位门维持 Conflict——放行的
+/// 只有 terminate（脱困），approve 授权面 {Approval, Evaluate} 一字不动。
+#[test]
+fn human_gate_close_confirm_still_rejects_failed_phase() {
     let (_tmp, store) = setup();
     let expected = gate_close_session(
         &store,
@@ -333,7 +368,7 @@ fn human_gate_close_terminate_still_rejects_failed_phase() {
         true,
     );
     assert_conflict_kind(
-        store.compare_and_save_human_gate_close(&expected, WorkspaceSessionStatus::Terminated),
+        store.compare_and_save_human_gate_close(&expected, WorkspaceSessionStatus::Running),
         "human_gate_close",
     );
 }

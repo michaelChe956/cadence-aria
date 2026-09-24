@@ -372,6 +372,13 @@ impl LifecycleStore {
             // `compare_and_save_single_candidate_evaluation` after report persistence.
             if is_repair_generation {
                 stored.mechanical_report_ref = None;
+                // F-54 B1：修复轮换 refs 即产生新候选，旧 Approval 元组对新 refs 失效。
+                // 不清空会在下次 approve 命中 compile 的元组冲突臂（attempt_id 按新
+                // refs 重算 ≠ 旧元组）→ durable Failed 污染门相位（0009 事故根因）。
+                // 清空后下次 approve 走 (None, None) 全新元组分支。
+                stored.approval_attempt_id = None;
+                stored.approved_at = None;
+                stored.compile_reservation = None;
             }
             stored.single_candidate_phase = Some(SingleCandidatePhase::Evaluate);
             stored.updated_at = Utc::now().to_rfc3339();
@@ -1063,5 +1070,119 @@ mod tests {
             ),
             Err(ProductStoreError::Conflict { .. })
         ));
+    }
+
+    /// F-54 B1（诊断 §4.1）：修复轮经本 CAS 轮换 refs 时必须同时失效旧 Approval
+    /// 元组（approval_attempt_id / approved_at / compile_reservation）。0009 事故：
+    /// 旧元组与新 refs 失配 → 下次 approve 命中 compile 冲突臂 → durable Failed
+    /// 污染门相位。清空后下次 approve 走 (None, None) 全新元组分支。
+    #[test]
+    fn repair_generation_rotation_invalidates_stale_approval_tuple() {
+        let temp = tempdir().unwrap();
+        let store = LifecycleStore::new(ProductAppPaths::new(temp.path()));
+        let mut session = store
+            .create_workspace_session(CreateWorkspaceSessionInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                entity_id: "entity_0001".to_string(),
+                workspace_type: WorkspaceType::WorkItemPlan,
+                author_provider: ProviderName::Codex,
+                reviewer_provider: ProviderName::ClaudeCode,
+                review_rounds: 1,
+                superpowers_enabled: false,
+                openspec_enabled: false,
+                work_item_plan_options: Some(WorkItemPlanSessionOptions {
+                    flow_kind: WorkItemPlanFlowKind::SingleCandidate,
+                    run_policy: RunPolicy::Interactive,
+                    rollout_snapshot: true,
+                }),
+            })
+            .expect("create single candidate session");
+        let source_ref_v1 =
+            "project/project_0001/issue/issue_0001/plan/entity_0001/source_revision/source-001";
+        let ir_ref_v1 =
+            "project/project_0001/issue/issue_0001/plan/entity_0001/plan_candidate_ir/ir-001";
+        let report_ref_v1 =
+            "project/project_0001/issue/issue_0001/plan/entity_0001/mechanical_report/report-001";
+        // 门内反馈修订轮启动：phase=Generate + v1 refs/report + 首次 approve 落的旧元组。
+        session.single_candidate_phase = Some(SingleCandidatePhase::Generate);
+        session.work_item_plan_source_revision_ref = Some(source_ref_v1.to_string());
+        session.plan_candidate_ir_ref = Some(ir_ref_v1.to_string());
+        session.mechanical_report_ref = Some(report_ref_v1.to_string());
+        session.approval_attempt_id = Some("affac4fc084a_stale_attempt_for_v1_refs".to_string());
+        session.approved_at = Some("2026-09-24T10:09:16.606292797+00:00".to_string());
+        session.compile_reservation = Some(SingleCandidateCompileReservation {
+            compile_id: "1f94b833_stale_compile".to_string(),
+            now: "2026-09-24T10:09:16.606292797+00:00".to_string(),
+            publication_provenance_ref: "project/project_0001/issue/issue_0001/plan/entity_0001/publication_provenance/1f94b833_stale_compile".to_string(),
+        });
+        write_json(
+            &store
+                .workspace_sessions_root("project_0001", "issue_0001")
+                .join(format!("{}.json", session.id)),
+            &session,
+        )
+        .expect("seed repairing session with stale approval tuple");
+        let expected = store
+            .get_workspace_session(&session.id)
+            .expect("reload repairing session");
+
+        let source_ref_v2 =
+            "project/project_0001/issue/issue_0001/plan/entity_0001/source_revision/source-002";
+        let ir_ref_v2 =
+            "project/project_0001/issue/issue_0001/plan/entity_0001/plan_candidate_ir/ir-002";
+        let rotated = store
+            .compare_and_save_single_candidate_generation(&expected, source_ref_v2, ir_ref_v2)
+            .expect("persist repaired refs");
+        assert_eq!(rotated.mechanical_report_ref, None);
+        assert_eq!(
+            rotated.single_candidate_phase,
+            Some(SingleCandidatePhase::Evaluate)
+        );
+        assert_eq!(
+            rotated.approval_attempt_id, None,
+            "F-54 B1: refs 轮换必须失效旧 Approval 元组"
+        );
+        assert_eq!(rotated.approved_at, None, "F-54 B1: approved_at 随元组失效");
+        assert_eq!(
+            rotated.compile_reservation, None,
+            "F-54 B1: compile_reservation 随元组失效"
+        );
+
+        // 修复轮后的下一次 approve 不得再冲突：evaluation 落新报告 → approval CAS
+        // 以新 refs 计算 attempt id 落全新元组（旧代码在此处 Conflict）。
+        let report_ref_v2 =
+            "project/project_0001/issue/issue_0001/plan/entity_0001/mechanical_report/report-002";
+        let evaluated = store
+            .compare_and_save_single_candidate_evaluation(&rotated, report_ref_v2)
+            .expect("persist repaired mechanical report");
+        // 评审路由开门（EnterHumanGate）把相位从 Evaluate 提升到 Approval（M1/D6）。
+        let mut gated = evaluated;
+        gated.single_candidate_phase = Some(SingleCandidatePhase::Approval);
+        write_json(
+            &store
+                .workspace_sessions_root("project_0001", "issue_0001")
+                .join(format!("{}.json", gated.id)),
+            &gated,
+        )
+        .expect("seed Approval gate after repaired evaluation");
+        let fresh_attempt = single_candidate_approval_attempt_id(
+            &gated.id,
+            &gated.entity_id,
+            source_ref_v2,
+            ir_ref_v2,
+            report_ref_v2,
+        );
+        let approved = store
+            .compare_and_save_single_candidate_approval(
+                &gated,
+                &fresh_attempt,
+                "2026-09-24T13:29:03Z",
+            )
+            .expect("approve after repair rotation must not conflict with the stale tuple");
+        assert_eq!(
+            approved.approval_attempt_id.as_deref(),
+            Some(fresh_attempt.as_str())
+        );
     }
 }

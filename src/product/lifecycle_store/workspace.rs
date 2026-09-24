@@ -588,6 +588,11 @@ impl LifecycleStore {
     /// 不提相位，WaitingForHuman 本身即这两门的 durable 开态证据；引擎
     /// close_human_gate 已在内存校验 stage==HumanConfirm 后才抵达本 CAS，矩阵
     /// HumanConfirm SC 臂放行 AbandonHumanGate。confirm（Running）前置一字不动。
+    ///
+    /// F-54 fix round：`Failed` 相位加入 terminate 放行面——compile 失败残留
+    /// 相位 × 门重开 WaitingForHuman（0009 形态）此前 abandon 也被拒＝全通路
+    /// 死锁。fail-closed 只锁 confirm（防未授权推进），永不锁 terminate（用户
+    /// 脱困权）；confirm 授权面 {Approval, Evaluate} 一字不动。
     pub fn compare_and_save_human_gate_close(
         &self,
         expected: &WorkspaceSessionRecord,
@@ -607,6 +612,8 @@ impl LifecycleStore {
                 expected.single_candidate_phase,
                 None | Some(crate::product::models::SingleCandidatePhase::Prepare)
                     | Some(crate::product::models::SingleCandidatePhase::Generate)
+                    // F-54 B3：失败残留相位的开门也必须可终止（用户脱困权）。
+                    | Some(crate::product::models::SingleCandidatePhase::Failed)
             );
         if expected.status != WorkspaceSessionStatus::WaitingForHuman
             || !(relaxed_terminate

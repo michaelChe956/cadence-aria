@@ -216,6 +216,9 @@ fn task_3_4_recovery_failure_records_durable_failed_diagnostic() {
     store.put_compile_transaction(&tx).expect("seed tx");
     engine.session.stage = WorkspaceStage::HumanConfirm;
     engine.session.session_status = WorkspaceSessionStatus::WaitingForHuman;
+    let before = lifecycle
+        .get_workspace_session(&engine.session.session_id)
+        .expect("durable before recovery failure");
     let error = engine
         .validate_single_candidate_transaction_refs(&tx)
         .expect_err("missing source ref");
@@ -223,7 +226,10 @@ fn task_3_4_recovery_failure_records_durable_failed_diagnostic() {
         .get_workspace_session(&engine.session.session_id)
         .expect("session");
     assert!(error.contains("source ref"));
-    assert_eq!(failure.status, WorkspaceSessionStatus::Failed);
+    // F-54 B2：可恢复失败只追加 diagnostics，不落 status/phase=Failed
+    //（门保持可应答，不得形成 (waiting_for_human, failed) 死锁对）。
+    assert_eq!(failure.status, before.status);
+    assert_eq!(failure.single_candidate_phase, before.single_candidate_phase);
     assert!(
         failure
             .policy_diagnostics

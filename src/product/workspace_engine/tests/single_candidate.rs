@@ -384,6 +384,73 @@ mod phase_machine {
         );
     }
 
+    /// F-54 B2（诊断 §4.1）：SC Final Compile 的可恢复失败（failure() 通道）不得
+    /// 把 durable 落成 `Failed`——三条门重开路径只写 WaitingForHuman，残留 Failed
+    /// 会形成 `(waiting_for_human, failed)` 矛盾对（0009：confirm/abandon 双拒，
+    /// 全通路死锁）。可恢复失败只追加 diagnostics，门重开落在 Approval 相位，
+    /// close CAS 授权面仍可过。
+    #[tokio::test]
+    async fn compile_failure_reopens_gate_confirmable_without_failed_phase() {
+        let (_tmp, lifecycle, _plan_id, mut engine) =
+            make_work_item_plan_engine_with_accepted_contract_drafts();
+        single_candidate_record(
+            &lifecycle,
+            &mut engine,
+            SingleCandidatePhase::Evaluate,
+            RunPolicy::Interactive,
+        );
+        complete_single_candidate_review(&mut engine, pass_verdict()).await;
+        assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
+
+        // 篡改机械报告文件（内容与 content_hash 失配）→ 下一次 approve 的
+        // Final Compile 在 reload 检查点经 failure() 通道确定性失败。
+        let report_ref = mechanical_report_ref(&engine).to_string();
+        let report_path = lifecycle
+            .app_paths()
+            .issue_root("project_0001", "issue_0001")
+            .join("work-item-plan-sources")
+            .join(&engine.session().entity_id)
+            .join("mechanical_report")
+            .join(format!("{}.json", report_ref.rsplit('/').next().unwrap()));
+        let tampered = std::fs::read_to_string(&report_path).expect("read mechanical report");
+        let mut value: serde_json::Value =
+            serde_json::from_str(&tampered).expect("parse mechanical report");
+        value["report"]["source_revision_hash"] = serde_json::json!("tampered-by-f54-test");
+        std::fs::write(&report_path, serde_json::to_string(&value).unwrap())
+            .expect("tamper mechanical report");
+
+        engine.handle_confirm().await.expect("confirm outcome");
+
+        let durable = lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("durable after failed compile");
+        assert_eq!(durable.status, WorkspaceSessionStatus::WaitingForHuman);
+        assert_eq!(
+            durable.single_candidate_phase,
+            Some(SingleCandidatePhase::Approval),
+            "F-54 B2: 门重开后相位必须落在授权面 {{approval, evaluate}}，不得残留 Failed"
+        );
+        assert!(durable.policy_diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "SOURCE_STORE_CONTENT_HASH_MISMATCH"
+                && diagnostic
+                    .message
+                    .contains("mechanical report reload failed")
+        }));
+        assert_eq!(
+            engine.session().session_status,
+            WorkspaceSessionStatus::WaitingForHuman
+        );
+        assert_eq!(
+            engine.session().single_candidate_phase,
+            Some(SingleCandidatePhase::Approval)
+        );
+
+        // 用户未被锁死：门开形态仍过 close CAS（confirm 授权面不动）。
+        lifecycle
+            .compare_and_save_human_gate_close(&durable, WorkspaceSessionStatus::Running)
+            .expect("gate stays confirmable after a recoverable compile failure");
+    }
+
     #[tokio::test]
     async fn ensure_reconciles_stale_memory_scope_from_durable_candidate_and_cycle() {
         let (_tmp, lifecycle, _plan_id, mut engine) =
