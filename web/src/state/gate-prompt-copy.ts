@@ -54,3 +54,45 @@ export function gateArchiveFeedbackCopy(round: number, feedback: string): string
 export function gateArchiveClosedCopy(round: number): string {
   return `第 ${round} 轮已收口`;
 }
+
+/** B6：「采纳建议为反馈」按钮文案。 */
+export const GATE_ADOPT_FINDINGS_BUTTON_LABEL = "采纳建议为反馈";
+
+/** B6：采纳文本开头一句（模板见 gateAdoptFindingsFeedback）。 */
+export const GATE_ADOPT_FINDINGS_LEAD = "按复评建议修订以下内容：";
+
+/** B6：采纳文本收尾一句（模板见 gateAdoptFindingsFeedback）。 */
+export const GATE_ADOPT_FINDINGS_TRAIL = "其余内容保持不变。";
+
+/**
+ * B6：单条 advisory finding 的采纳句。对象=message、建议动作=required_action
+ * （门卡 metadata findings 的结构化文本位就这两个，与 B3 渲染同源）；建议缺失即
+ * 字段不足，整条原文降级拼入。
+ */
+export function gateAdoptFindingLine(finding: {
+  message: string;
+  required_action?: string;
+}): string {
+  const subject = finding.message.trim();
+  const action = finding.required_action?.trim() ?? "";
+  if (subject && action) {
+    return `${subject}：${action}；`;
+  }
+  return `${subject || action}；`;
+}
+
+/**
+ * B6：advisory findings → 反馈输入框的修订指令文本（只填入不提交，用户可继续
+ * 编辑）。must_fix 不在拼接范围（处理路径不同），由调用方过滤后传入。
+ *
+ * 单行串接：门卡反馈框是单行 <input>（HTML value 净化会剥掉换行），开头/收尾
+ * 两句按前后缀直接串接，保证所见即所交。
+ */
+export function gateAdoptFindingsFeedback(
+  findings: ReadonlyArray<{ message: string; required_action?: string }>,
+): string {
+  const items = findings
+    .map(gateAdoptFindingLine)
+    .filter((line) => line !== "；");
+  return `${GATE_ADOPT_FINDINGS_LEAD}${items.join("")}${GATE_ADOPT_FINDINGS_TRAIL}`;
+}

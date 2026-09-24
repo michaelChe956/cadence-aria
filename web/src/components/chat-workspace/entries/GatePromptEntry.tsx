@@ -9,11 +9,13 @@ import {
   GATE_TRIGGER_LABELS,
 } from "../../../state/workspace-cockpit-projection";
 import {
+  GATE_ADOPT_FINDINGS_BUTTON_LABEL,
   GATE_ADVISORY_CONFIRM_HINT,
   GATE_ARCHIVE_BADGE_LABEL,
   GATE_FEEDBACK_SUBMITTED_NOTE,
   GATE_REVISION_REVIEWING_NOTE,
   GATE_REVISION_RUNNING_NOTE,
+  gateAdoptFindingsFeedback,
   gateFindingsToggleLabel,
   gateWhyAdvisoryCopy,
   gateWhyRequiredCopy,
@@ -137,6 +139,18 @@ export function GatePromptEntry({
   const archiveNote = archiveNoteFromEntry(entry);
   const confirmOffered = !isResolved && actionBlockReason === null && !isContextBlockerGate;
   const advisoryOnly = findings.length > 0 && requiredFindings.length === 0;
+  // F-49 B6：adoptable = advisory findings（must_fix 处理路径不同，不进默认采纳）。
+  // 采纳按钮的目标是下方反馈输入框——编辑器不可用即无处可填，不露按钮（fail-closed）。
+  const adoptableFindings = findings.filter(
+    (finding) => !isRequiredFindingSeverity(finding.severity),
+  );
+  const feedbackEditorVisible =
+    !isResolved &&
+    terminateBlockReason === null &&
+    actions !== undefined &&
+    actionFacade === "typed" &&
+    actionBlockReason === null;
+  const showAdoptFindingsButton = adoptableFindings.length > 0 && feedbackEditorVisible;
   // F-49 B4：门内修订进程（提交后「正在按反馈修订」→ 完成后「正在复评」）。只取
   // 「本卡就是当前 typed turn」的门卡（turn_id 匹配活 turn）——门内轮次切换后旧卡
   // 由 A1 收口为留档，不会误报进程。failed 交给失败行，不另报进程。
@@ -162,6 +176,14 @@ export function GatePromptEntry({
     recordGateFeedbackSubmission(entry.id, value);
     setFeedback("");
     setFeedbackSubmitted(true);
+  };
+
+  const handleAdoptFindings = () => {
+    // F-49 B6：把 advisory findings 按模板填入下方反馈输入框——只填入不提交
+    // （用户可继续编辑）；已有输入时以空格追加，防覆盖用户已写内容（反馈框是
+    // 单行 input，value 净化会剥换行，不用换行连接）。
+    const adopted = gateAdoptFindingsFeedback(adoptableFindings);
+    setFeedback((current) => (current.trim() ? `${current} ${adopted}` : adopted));
   };
 
   return (
@@ -194,6 +216,18 @@ export function GatePromptEntry({
               {gateFindingsToggleLabel(findings.length)}
             </summary>
             <div className="mt-2 space-y-2">
+              {showAdoptFindingsButton ? (
+                <div className="flex justify-end">
+                  <button
+                    type="button"
+                    data-testid="gate-adopt-findings"
+                    onClick={handleAdoptFindings}
+                    className="inline-flex min-h-9 items-center gap-1 rounded-md border border-[var(--aria-line-strong)] bg-white px-2 text-xs font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+                  >
+                    {GATE_ADOPT_FINDINGS_BUTTON_LABEL}
+                  </button>
+                </div>
+              ) : null}
               <ReviewFindingGroups findings={findings} />
             </div>
           </details>

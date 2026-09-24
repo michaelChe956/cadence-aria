@@ -563,4 +563,91 @@ describe("GatePromptEntry actionability", () => {
       expect(screen.getByLabelText("门禁反馈")).toHaveValue("");
     });
   });
+
+  // F-49 B6：advisory findings 一键采纳为反馈草稿——按钮在 findings 列表区顶部，
+  // 点击把 advisory（非 must_fix）findings 按模板填入下方反馈输入框（用户可继续
+  // 编辑，不自动提交；已有输入时追加防覆盖）。must_fix 不进默认采纳（处理路径不
+  // 同）；全部 must_fix 即无 advisory 可采纳，按钮不显示。模板常量在
+  // gate-prompt-copy.ts（单测见 gate-prompt-copy.test.ts）。
+  describe("F-49 adopt advisory findings", () => {
+    const mixedFindings = [
+      { severity: "must_fix", message: "缺少验证命令", required_action: "补充验证命令" },
+      { severity: "suggestion", message: "复杂度说明", required_action: "补充复杂度说明" },
+      { severity: "suggestion", message: "统一命名" },
+    ];
+
+    it("fills the feedback input with only the advisory findings on click (B6)", () => {
+      render(
+        <GatePromptEntry
+          entry={gateEntry(null, undefined, {
+            findings: mixedFindings,
+            verdict: "revise",
+            review_gate: "requires_revision",
+          })}
+          actions={actions()}
+        />,
+      );
+
+      const button = screen.getByTestId("gate-adopt-findings");
+      expect(button).toHaveTextContent("采纳建议为反馈");
+      fireEvent.click(button);
+
+      expect(screen.getByLabelText("门禁反馈")).toHaveValue(
+        "按复评建议修订以下内容：复杂度说明：补充复杂度说明；统一命名；其余内容保持不变。",
+      );
+    });
+
+    it("appends the adopted text without overwriting the typed feedback (B6)", async () => {
+      const user = userEvent.setup();
+      render(
+        <GatePromptEntry
+          entry={gateEntry(null, undefined, {
+            findings: mixedFindings.slice(1),
+            verdict: "revise",
+            review_gate: "requires_revision",
+          })}
+          actions={actions()}
+        />,
+      );
+
+      await user.type(screen.getByLabelText("门禁反馈"), "先修标题");
+      fireEvent.click(screen.getByTestId("gate-adopt-findings"));
+
+      expect(screen.getByLabelText("门禁反馈")).toHaveValue(
+        "先修标题 按复评建议修订以下内容：复杂度说明：补充复杂度说明；统一命名；其余内容保持不变。",
+      );
+    });
+
+    it("hides the adopt button when every finding is must-fix (B6)", () => {
+      render(
+        <GatePromptEntry
+          entry={gateEntry(null, undefined, {
+            findings: [{ severity: "must_fix", message: "缺少验证命令" }],
+            verdict: "revise",
+            review_gate: "requires_revision",
+          })}
+          actions={actions()}
+        />,
+      );
+
+      expect(screen.getByTestId("gate-findings")).toBeInTheDocument();
+      expect(screen.queryByTestId("gate-adopt-findings")).toBeNull();
+    });
+
+    it("hides the adopt button when no feedback editor is available (B6 fail-closed)", () => {
+      render(
+        <GatePromptEntry
+          entry={gateEntry("phase_mismatch", undefined, {
+            findings: mixedFindings.slice(1),
+            verdict: "revise",
+            review_gate: "requires_revision",
+          })}
+          actions={actions()}
+        />,
+      );
+
+      expect(screen.queryByTestId("gate-feedback-editor")).toBeNull();
+      expect(screen.queryByTestId("gate-adopt-findings")).toBeNull();
+    });
+  });
 });
