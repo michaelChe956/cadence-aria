@@ -34,9 +34,9 @@
 
 **Steps:**
 
-- [ ] **1.1** 失败测试（F47Diag 探针三步转正式用例）：①快照→空 detail；②setNodeDetail（含 usage）→metadata.usage=1；③再一帧快照→**仍=1**（现状红：回 0）。另：快照内联某节点 detail 时该节点以内联呈现（内联优先）。
-- [ ] **1.2** 跑红 → merge 实现（保留未内联已水合节点；内联覆盖对应节点）→ 跑绿。
-- [ ] **1.3** vitest 相关面 + tsc → commit `fix(ws-store): 快照 merge 保留已水合 node detail（REQ-NDR-01，F-47）`。
+- [x] **1.1** 失败测试（F47Diag 探针三步转正式用例）：①快照→空 detail；②setNodeDetail（含 usage）→metadata.usage=1；③再一帧快照→**仍=1**（现状红：回 0）。另：快照内联某节点 detail 时该节点以内联呈现（内联优先）。
+- [x] **1.2** 跑红 → merge 实现（保留未内联已水合节点；内联覆盖对应节点）→ 跑绿。
+- [x] **1.3** vitest 相关面 + tsc → commit `fix(ws-store): 快照 merge 保留已水合 node detail（REQ-NDR-01，F-47）`。
 
 ### Task 2: 水合集合全终态（REQ-NDR-02，前端）
 
@@ -44,9 +44,9 @@
 
 **Steps:**
 
-- [ ] **2.1** 失败测试：failed/aborted/interrupted 节点进入水合集合（completed+active/selected 既有集合不变）；按需语义不变（无全量预取断言：不可见节点不拉）。
-- [ ] **2.2** 跑红 → 集合判定扩展 → 跑绿；failed 节点 token 可见用例（合成 failed 节点+usage 事件）。
-- [ ] **2.3** vitest+tsc → commit `fix(hydration): 水合集合纳入 failed/aborted/interrupted（REQ-NDR-02，F-47）`。
+- [x] **2.1** 失败测试：failed/aborted/interrupted 节点进入水合集合（completed+active/selected 既有集合不变）；按需语义不变（无全量预取断言：不可见节点不拉）。
+- [x] **2.2** 跑红 → 集合判定扩展 → 跑绿；failed 节点 token 可见用例（合成 failed 节点+usage 事件）。
+- [x] **2.3** vitest+tsc → commit `fix(hydration): 水合集合纳入 failed/aborted/interrupted（REQ-NDR-02，F-47）`。
 
 ### Task 3: token 位 pending 占位（REQ-NDR-03，前端）
 
@@ -54,8 +54,8 @@
 
 **Steps:**
 
-- [ ] **3.1** 失败测试：summary 在而 detail 未到→token 位渲染 pending 占位；detail 到→数值或确认缺失终态；detail 在但无 usage 事件→缺失态（非 pending）。
-- [ ] **3.2** 跑红 → 占位实现（纯呈现层）→ 跑绿；vitest+tsc → commit `feat(ui): token 位未水合 pending 占位（REQ-NDR-03，F-47）`。
+- [x] **3.1** 失败测试：summary 在而 detail 未到→token 位渲染 pending 占位；detail 到→数值或确认缺失终态；detail 在但无 usage 事件→缺失态（非 pending）。
+- [x] **3.2** 跑红 → 占位实现（纯呈现层）→ 跑绿；vitest+tsc → commit `feat(ui): token 位未水合 pending 占位（REQ-NDR-03，F-47）`。
 
 ### Task 4: pi usage 兜底接入反向扫描（REQ-NDR-04，后端）
 
@@ -63,8 +63,8 @@
 
 **Steps:**
 
-- [ ] **4.1** 失败测试：pi 会话文件 usage 记录在 128KiB 尾窗之外（大行构造）→ 现实现 None（红）→ 接入 `latest_matching_line` + 200ms 短重试（kimi 同构）→ 读到。pi 既有用例零改动全绿；kimi 用例零改动全绿（只复用不改）。
-- [ ] **4.2** 跑红→绿；fmt/clippy → commit `fix(usage): pi 兜底读取接入反向块扫描与短重试（REQ-NDR-04，F-47）`。
+- [x] **4.1** 失败测试：pi 会话文件 usage 记录在 128KiB 尾窗之外（大行构造）→ 现实现 None（红）→ 接入 `latest_matching_line` + 200ms 短重试（kimi 同构）→ 读到。pi 既有用例零改动全绿；kimi 用例零改动全绿（只复用不改）。
+- [x] **4.2** 跑红→绿；fmt/clippy → commit `fix(usage): pi 兜底读取接入反向块扫描与短重试（REQ-NDR-04，F-47）`。
 
 ### Task 5: usage 失败可观测（REQ-NDR-05，后端）
 
@@ -72,12 +72,12 @@
 
 **Steps:**
 
-- [ ] **5.1** 失败测试：①emit 三环节（rpc/parse/file）失败各落结构化 warn（环节标签）②落盘失败写可检索诊断事件（durable 化，非仅 stderr——Review Focus 5）③诊断写失败不影响 gate/provider 行为。
-- [ ] **5.2** 跑红→实现（warn 结构化+落盘失败诊断事件，通道按 execution_events 惯例）→跑绿；fmt/clippy → commit `feat(usage): emit/落盘失败可观测（REQ-NDR-05，F-47）`。
+- [x] **5.1** 失败测试：①emit 三环节（rpc/parse/file）失败各落结构化 warn（环节标签）②落盘失败写可检索诊断事件（durable 化，非仅 stderr——Review Focus 5）③诊断写失败不影响 gate/provider 行为。
+- [x] **5.2** 跑红→实现（warn 结构化+落盘失败诊断事件，通道按 execution_events 惯例）→跑绿；fmt/clippy → commit `feat(usage): emit/落盘失败可观测（REQ-NDR-05，F-47）`。
 
 ### Task 6: 门禁收口
 
-- [ ] **6.1** 前端 vitest 全量 + tsc 0；后端 lib 全量 + it_web（handler 面未触则记录依据）；strict 复跑；guard 绿；刷新场景手动复验脚本（快照帧注入后 token 保持）交 controller 浏览器复验清单。
+- [x] **6.1** 前端 vitest 全量 + tsc 0；后端 lib 全量 + it_web（handler 面未触则记录依据）；strict 复跑；guard 绿；刷新场景手动复验脚本（快照帧注入后 token 保持）交 controller 浏览器复验清单。
 
 ---
 
