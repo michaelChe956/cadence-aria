@@ -153,6 +153,7 @@ async fn conversational_gate_feedback_reaches_service_through_socket_dispatch() 
         manual_repairs_remaining: 2,
         trigger: HumanReason::NativeHumanRequired,
         resumable: false,
+        accepted_feedback_turns: None,
     });
     crate::product::json_store::write_json(
         &app_paths
@@ -263,6 +264,7 @@ async fn conversational_gate_budget_exhausted_reaches_handler_as_protocol_error(
         manual_repairs_remaining: 0,
         trigger: HumanReason::NativeHumanRequired,
         resumable: false,
+        accepted_feedback_turns: None,
     });
     let session_path = app_paths
         .issue_lifecycle_root(&record.project_id, &record.issue_id)
@@ -477,6 +479,7 @@ async fn conversational_gate_post_approve_feedback_is_structured_protocol_error(
         manual_repairs_remaining: 1,
         trigger: HumanReason::NativeHumanRequired,
         resumable: false,
+        accepted_feedback_turns: None,
     });
     let session_path = app_paths
         .issue_lifecycle_root(&record.project_id, &record.issue_id)
@@ -607,6 +610,7 @@ async fn confirm_compile_failure_surfaces_findings_as_protocol_error_context() {
         manual_repairs_remaining: 1,
         trigger: HumanReason::NativeHumanRequired,
         resumable: false,
+        accepted_feedback_turns: None,
     });
     crate::product::json_store::write_json(
         &app_paths
@@ -828,6 +832,7 @@ async fn late_confirm_after_gate_closed_is_silent_idempotent_noop_at_ws_boundary
         manual_repairs_remaining: 1,
         trigger: HumanReason::NativeHumanRequired,
         resumable: false,
+        accepted_feedback_turns: None,
     });
     session.artifact = Some(crate::web::workspace_ws_types::ArtifactPayload::Markdown {
         markdown: "# Work Item Plan\n".to_string(),

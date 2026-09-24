@@ -227,6 +227,7 @@ fn durable_revision_fixture(
         manual_repairs_remaining: budget,
         trigger: crate::product::work_item_plan_policy::HumanReason::NativeHumanRequired,
         resumable: false,
+        accepted_feedback_turns: None,
     });
     crate::product::json_store::write_json(
         &lifecycle

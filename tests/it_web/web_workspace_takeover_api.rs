@@ -67,6 +67,7 @@ fn human_gate(resumable: bool) -> HumanGateSnapshot {
         manual_repairs_remaining: 1,
         trigger: HumanReason::NativeHumanRequired,
         resumable,
+        accepted_feedback_turns: None,
     }
 }
 

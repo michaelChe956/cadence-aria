@@ -97,6 +97,7 @@ fn single_candidate_terminal_actions_close_the_review_cycle() {
         manual_repairs_remaining: 0,
         trigger: crate::product::work_item_plan_policy::HumanReason::NativeHumanRequired,
         resumable: true,
+        accepted_feedback_turns: None,
     };
     for action in [
         RoutingAction::ContinueToCompleted,

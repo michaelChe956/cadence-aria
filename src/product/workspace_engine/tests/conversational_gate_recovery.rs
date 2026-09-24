@@ -148,6 +148,7 @@ fn conversational_gate_recovery_revision_crash_window_with_cross_round_refs_fail
         manual_repairs_remaining: 2,
         trigger: HumanReason::NativeHumanRequired,
         resumable: false,
+        accepted_feedback_turns: None,
     });
     let session_path = lifecycle
         .app_paths()
@@ -382,6 +383,7 @@ fn conversational_gate_recovery_forward_evidence_completes_revision() {
         manual_repairs_remaining: 2,
         trigger: HumanReason::NativeHumanRequired,
         resumable: false,
+        accepted_feedback_turns: None,
     });
     let session_path = lifecycle
         .app_paths()

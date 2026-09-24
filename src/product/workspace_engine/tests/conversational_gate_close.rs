@@ -29,6 +29,7 @@ fn approval_fixture() -> (tempfile::TempDir, LifecycleStore, WorkspaceEngine) {
         manual_repairs_remaining: 1,
         trigger: crate::product::work_item_plan_policy::HumanReason::NativeHumanRequired,
         resumable: false,
+        accepted_feedback_turns: None,
     });
     crate::product::json_store::write_json(
         &lifecycle
@@ -194,6 +195,7 @@ async fn conversational_gate_post_approve_feedback_keeps_structured_stage_reject
         manual_repairs_remaining: 1,
         trigger: crate::product::work_item_plan_policy::HumanReason::NativeHumanRequired,
         resumable: false,
+        accepted_feedback_turns: None,
     });
     crate::product::json_store::write_json(
         &lifecycle
@@ -680,6 +682,7 @@ fn evaluate_gate_fixture(
         manual_repairs_remaining: budget,
         trigger: crate::product::work_item_plan_policy::HumanReason::NativeHumanRequired,
         resumable: true,
+        accepted_feedback_turns: None,
     });
     crate::product::json_store::write_json(
         &lifecycle

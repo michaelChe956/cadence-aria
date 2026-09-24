@@ -13,6 +13,7 @@ fn human_gate_recovery_attempt_updates_same_turn_and_terminal_replay_reserves_ag
         manual_repairs_remaining: 2,
         trigger: HumanReason::NativeHumanRequired,
         resumable: true,
+        accepted_feedback_turns: None,
     });
     let session_path = store
         .app_paths()

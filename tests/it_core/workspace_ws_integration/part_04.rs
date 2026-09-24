@@ -90,6 +90,7 @@ async fn workspace_ws_sc_human_gate_feedback_reaches_dispatch_after_socket_stage
             manual_repairs_remaining: 1,
             trigger: cadence_aria::product::work_item_plan_policy::HumanReason::NativeHumanRequired,
             resumable: false,
+            accepted_feedback_turns: None,
         },
     );
     session_record.messages.push(cadence_aria::product::models::WorkspaceMessageRecord {

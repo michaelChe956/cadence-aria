@@ -475,6 +475,7 @@ async fn human_gate_open_rebuilds_session_state_for_existing_attachments() {
             manual_repairs_remaining: 1,
             trigger: HumanReason::NativeHumanRequired,
             resumable: false,
+            accepted_feedback_turns: None,
         });
     }
     manager

@@ -1,5 +1,4 @@
-use super::policy_routing::{GateSnapshotContext, route_outcome};
-use super::routing::policy_route_record_values;
+use super::policy_routing::{GateSnapshotContext, policy_route_record_values, route_outcome};
 use super::*;
 use std::collections::BTreeSet;
 
@@ -634,6 +633,17 @@ impl WorkspaceEngine {
             // 由调用方按 AbortFatal{PersistenceFailure} fail-closed，不落盘。
             gate = Some(self.single_candidate_approval_gate(history)?);
         }
+        // C2（REQ-HGC-01/F-52）：同一 logical gate 内的自动返修不清预算权威——
+        // durable 快照在场（门 episode 未关闭）时 TriggerAggregateRepair 期间
+        // 原样保留，复评重建（EnterHumanGate/审批门）再 carry-forward。现场
+        // issue_0002/session_0009 的 3 次修订均穿插自动返修，清快照会让预算
+        // 在每个 Repairable 轮后凭空恢复默认值。
+        if gate.is_none()
+            && matches!(action, RoutingAction::TriggerAggregateRepair { .. })
+            && let Some(retained) = expected.and_then(|record| record.human_gate_snapshot.as_ref())
+        {
+            gate = Some(retained.clone());
+        }
         let scope = self.policy_scope_for_action(
             invocation,
             action,
@@ -697,6 +707,14 @@ impl WorkspaceEngine {
                     fail_closed = true;
                 }
             }
+        }
+        // C2（REQ-HGC-01）：内存回退分支与持久化路径同源——TriggerAggregateRepair
+        // 不清在场门快照（预算权威跨自动返修轮保留）。
+        if gate.is_none()
+            && matches!(action, RoutingAction::TriggerAggregateRepair { .. })
+            && self.session.human_gate_snapshot.is_some()
+        {
+            gate = self.session.human_gate_snapshot.clone();
         }
         self.session.run_history = history;
         self.session.review_invocation_scope =
@@ -790,34 +808,55 @@ impl WorkspaceEngine {
         &self,
         history: &RunHistory,
     ) -> Result<HumanGateSnapshot, ProductStoreError> {
-        // I-1（REQ-CG-02 amendment 分叉，round2 判别加固、round3 F-A/F-B）：
-        // 普通 SC 修订门重建 = 重置为「默认预算 − run_history 计数」（与初始
-        // author Evaluate-pass 同构，campaign 用例锚定）；而 amendment 门
-        // （attempt AwaitingPlanAmendment 期间重开的原门）重建时 MUST 接续现有
-        // human_gate_snapshot 的 manual_repairs_remaining——typed amendment turn
-        // 只扣快照、不递增 run_history 计数，重置公式会凭空恢复已耗预算。判别
-        // 不只信 SC+Completed+WaitingForHuman 三元组（通用状态写入可伪造，
-        // round2），也不只看 context 状态（round3 F-B）：MUST 命中 probe 放行
-        // 重开的同一完整谓词（见 durable_reopened_amendment_record）；判别命中
-        // 而快照缺席时 fail-closed 报错；判别所需 durable 事实无法读取/校验时
-        // 同样 fail-closed 上抛（round3 F-A），不得回退重置公式。
-        let manual_repairs_remaining = match self.durable_reopened_amendment_record()? {
-            Some(record) => record
-                .human_gate_snapshot
-                .as_ref()
-                .map(|snapshot| snapshot.manual_repairs_remaining)
-                .ok_or_else(|| ProductStoreError::InvalidRecord {
-                    kind: "human_gate_amendment_snapshot_missing",
-                    reason: format!(
-                        "reopened amendment gate {} has no retained human_gate_snapshot; \
-                         refusing to rebuild the approval gate with the reset formula",
-                        record.id
-                    ),
-                })?,
-            None => RunBudgets::default()
-                .max_manual_repairs
-                .saturating_sub(history.manual_repairs_used),
-        };
+        // I-1（REQ-CG-02 amendment 分叉，round2 判别加固、round3 F-A/F-B）+
+        // C2（REQ-CG-02 预算重置边界修订，F-52）：预算接续粒度 = logical gate。
+        // amendment 门（attempt AwaitingPlanAmendment 期间重开的原门）重建时
+        // MUST 接续现有 human_gate_snapshot——typed amendment turn 只扣快照、
+        // 不递增 run_history 计数，重置公式会凭空恢复已耗预算；普通 SC 修订门
+        // 在同一 logical gate 内的重建同样 MUST 接续 durable 快照剩余预算
+        // （现场 issue_0002/session_0009：3 次门内修订后 manual_repairs_used
+        // 恒 0，重置公式每轮回填默认 3，预算永不耗尽）。判别不只信
+        // SC+Completed+WaitingForHuman 三元组（通用状态写入可伪造，round2），
+        // 也不只看 context 状态（round3 F-B）：MUST 命中 probe 放行重开的同一
+        // 完整谓词（见 durable_reopened_amendment_record）；判别命中而快照缺席
+        // 时 fail-closed 报错；判别所需 durable 事实无法读取/校验时同样
+        // fail-closed 上抛（round3 F-A），不得回退重置公式。
+        let (manual_repairs_remaining, accepted_feedback_turns) =
+            match self.durable_reopened_amendment_record()? {
+                Some(record) => {
+                    let snapshot = record.human_gate_snapshot.as_ref().ok_or_else(|| {
+                        ProductStoreError::InvalidRecord {
+                            kind: "human_gate_amendment_snapshot_missing",
+                            reason: format!(
+                                "reopened amendment gate {} has no retained human_gate_snapshot; \
+                                 refusing to rebuild the approval gate with the reset formula",
+                                record.id
+                            ),
+                        }
+                    })?;
+                    (
+                        snapshot.manual_repairs_remaining,
+                        snapshot.accepted_feedback_turns,
+                    )
+                }
+                None => {
+                    // C2 普通门臂：同 logical gate（durable 快照在场 = 门episode
+                    // 未关闭）carry-forward；快照缺席（新 logical gate：新候选/
+                    // 新会话首开审批门）才取默认公式建立新预算。
+                    match self.session.human_gate_snapshot.as_ref() {
+                        Some(snapshot) => (
+                            snapshot.manual_repairs_remaining,
+                            snapshot.accepted_feedback_turns,
+                        ),
+                        None => (
+                            RunBudgets::default()
+                                .max_manual_repairs
+                                .saturating_sub(history.manual_repairs_used),
+                            Some(0),
+                        ),
+                    }
+                }
+            };
         Ok(HumanGateSnapshot {
             findings: Vec::new(),
             repeated_fingerprints: Vec::new(),
@@ -829,6 +868,7 @@ impl WorkspaceEngine {
             // 仍用其既有 trigger 以避免新增决策协议。
             trigger: HumanReason::NativeHumanRequired,
             resumable: true,
+            accepted_feedback_turns,
         })
     }
 

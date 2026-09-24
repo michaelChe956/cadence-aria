@@ -106,5 +106,56 @@ fn human_gate_snapshot(context: &GateSnapshotContext, resumable: bool) -> HumanG
             .saturating_sub(context.history.manual_repairs_used),
         trigger: context.trigger,
         resumable,
+        // C2（REQ-HGC-01）：纯路由公式只服务新 logical gate——gate-local 轮次
+        // 从零起算；同 logical gate 重建由引擎层 carry-forward 覆盖。
+        accepted_feedback_turns: Some(0),
+    }
+}
+
+/// C2（REQ-HGC-01）：durable 快照在场（同一 logical gate 的门 episode 未关闭，
+/// 含自动返修期间保留的快照）时，HumanRequired 路由重建的快照预算字段
+/// MUST 接续 durable 真值；快照缺席（新 logical gate）保持纯路由公式的
+/// 新预算。只覆盖预算双字段，findings/repeated/trigger 仍由本轮 verdict 重建。
+pub(super) fn carry_forward_open_gate_budget(
+    action: &mut RoutingAction,
+    durable: Option<&HumanGateSnapshot>,
+) {
+    let Some(durable) = durable else {
+        return;
+    };
+    if let RoutingAction::EnterHumanGate { snapshot } = action {
+        snapshot.manual_repairs_remaining = durable.manual_repairs_remaining;
+        snapshot.accepted_feedback_turns = durable.accepted_feedback_turns;
+    }
+}
+
+pub(super) fn policy_route_record_values(
+    action: &RoutingAction,
+) -> (
+    crate::product::models::WorkspaceSessionStatus,
+    Option<HumanGateSnapshot>,
+    Vec<PolicyDiagnostic>,
+) {
+    match action {
+        RoutingAction::EnterHumanGate { snapshot } => (
+            crate::product::models::WorkspaceSessionStatus::WaitingForHuman,
+            Some(snapshot.clone()),
+            Vec::new(),
+        ),
+        RoutingAction::StopNeedsHuman { snapshot } => (
+            crate::product::models::WorkspaceSessionStatus::StoppedNeedsHuman,
+            Some(snapshot.clone()),
+            Vec::new(),
+        ),
+        RoutingAction::AbortFatal { diagnostics, .. } => (
+            crate::product::models::WorkspaceSessionStatus::Failed,
+            None,
+            diagnostics.clone(),
+        ),
+        RoutingAction::ContinueToCompleted | RoutingAction::TriggerAggregateRepair { .. } => (
+            crate::product::models::WorkspaceSessionStatus::Running,
+            None,
+            Vec::new(),
+        ),
     }
 }

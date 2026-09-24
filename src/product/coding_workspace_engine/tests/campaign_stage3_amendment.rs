@@ -134,6 +134,7 @@ async fn campaign_confirmed_plan_session(budget: u32) -> (TempDir, LifecycleStor
         manual_repairs_remaining: budget,
         trigger: HumanReason::NativeHumanRequired,
         resumable: true,
+        accepted_feedback_turns: None,
     });
     crate::product::json_store::write_json(
         &app_paths

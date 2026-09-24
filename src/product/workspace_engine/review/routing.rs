@@ -1,7 +1,7 @@
 #[path = "routing_scope.rs"]
 mod routing_scope;
 use super::feedback::format_review_feedback;
-use super::policy_routing::RoutingAction;
+use super::policy_routing::{RoutingAction, carry_forward_open_gate_budget};
 use super::*;
 use crate::product::lifecycle_store::PolicyRoutePersist;
 use crate::product::work_item_plan_policy::{
@@ -129,8 +129,19 @@ impl WorkspaceEngine {
             if let Some(record) = expected.as_ref() {
                 self.refresh_policy_state(record);
             }
-            let (invocation, action, history) =
+            let (invocation, mut action, history) =
                 self.evaluate_work_item_policy_route(node_id, verdict)?;
+            // C2（REQ-HGC-01/REQ-CG-02 预算重置边界修订，F-52）：同一 logical
+            // gate 内的 HumanRequired 重建 MUST 接续 durable 快照剩余预算与
+            // gate-local 轮次——纯路由公式 `max − manual_repairs_used` 只对
+            // 新 logical gate（durable 快照缺席）成立；门 episode 在场（快照
+            // 存留，含自动返修期间的保留快照）时在此覆盖，避免每轮回填默认 3。
+            carry_forward_open_gate_budget(
+                &mut action,
+                expected
+                    .as_ref()
+                    .and_then(|record| record.human_gate_snapshot.as_ref()),
+            );
 
             #[cfg(test)]
             if let Some(hook) = self.policy_route_before_persist.take()
@@ -1086,33 +1097,6 @@ fn provider_run_kind_for_batch_outcome(
         }
         WorkItemBatchDecisionOutcome::StartReview => Some(ProviderRunKind::ReviewOnly),
         WorkItemBatchDecisionOutcome::HumanConfirm => None,
-    }
-}
-
-pub(super) fn policy_route_record_values(
-    action: &RoutingAction,
-) -> (
-    WorkspaceSessionStatus,
-    Option<crate::product::work_item_plan_policy::HumanGateSnapshot>,
-    Vec<PolicyDiagnostic>,
-) {
-    match action {
-        RoutingAction::EnterHumanGate { snapshot } => (
-            WorkspaceSessionStatus::WaitingForHuman,
-            Some(snapshot.clone()),
-            Vec::new(),
-        ),
-        RoutingAction::StopNeedsHuman { snapshot } => (
-            WorkspaceSessionStatus::StoppedNeedsHuman,
-            Some(snapshot.clone()),
-            Vec::new(),
-        ),
-        RoutingAction::AbortFatal { diagnostics, .. } => {
-            (WorkspaceSessionStatus::Failed, None, diagnostics.clone())
-        }
-        RoutingAction::ContinueToCompleted | RoutingAction::TriggerAggregateRepair { .. } => {
-            (WorkspaceSessionStatus::Running, None, Vec::new())
-        }
     }
 }
 

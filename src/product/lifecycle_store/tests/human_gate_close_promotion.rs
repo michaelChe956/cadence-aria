@@ -32,6 +32,7 @@ fn gate_close_session(
         manual_repairs_remaining: 1,
         trigger: HumanReason::NativeHumanRequired,
         resumable: true,
+        accepted_feedback_turns: None,
     });
     record.work_item_plan_source_revision_ref = Some("source_revision_ref_0001".to_string());
     record.plan_candidate_ir_ref = Some("plan_candidate_ir_ref_0001".to_string());

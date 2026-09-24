@@ -54,6 +54,7 @@ pub(super) fn gate_fixture_with_event_rx(
         manual_repairs_remaining: budget,
         trigger: HumanReason::NativeHumanRequired,
         resumable: false,
+        accepted_feedback_turns: None,
     });
     crate::product::json_store::write_json(
         &lifecycle

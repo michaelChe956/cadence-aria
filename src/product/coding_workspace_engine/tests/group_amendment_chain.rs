@@ -184,6 +184,7 @@ async fn amendment_chain_fixture(resume_mode: AmendmentResumeMode) -> AmendmentC
         manual_repairs_remaining: 2,
         trigger: HumanReason::NativeHumanRequired,
         resumable: true,
+        accepted_feedback_turns: None,
     });
     crate::product::json_store::write_json(
         &paths

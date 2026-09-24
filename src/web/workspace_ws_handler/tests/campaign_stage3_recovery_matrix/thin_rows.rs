@@ -81,9 +81,9 @@ async fn campaign_stage3_recovery_matrix_turn_reservation_row_alive_and_dead() {
     assert_eq!(recovered_turn.turn_id, turn_a.turn_id, "同 turn_id");
     assert_eq!(recovered_turn.status, HumanGateTurnStatus::Completed);
     assert_eq!(recovered_turn.attempt_no, 1, "attempt_no 对账：恰一次");
-    // 修订完成后 Evaluate policy route 重建 approval 门快照(与初始 author 同构，
-    // 预算从 run_history 重新推导)。
-    assert_eq!(harness.budget_remaining(), 3, "门预算经路由重建");
+    // C2（改写登记）：修订完成后 Evaluate route 重建 MUST carry-forward
+    // durable 剩余（fixture 预算 2，本轮 reserve 后 1），不回填默认 3。
+    assert_eq!(harness.budget_remaining(), 1, "门预算经路由重建接续（改写登记：原重置断言 3）");
     assert_eq!(harness.provider_start_keys().len(), 1, "ledger 恰一项");
     // 重开后再同 command：Replay 同一终态 turn，零增量。
     let mut replay_a = matrix_reopened_engine(&harness, "matrix-turn-a-replay");
@@ -98,7 +98,7 @@ async fn campaign_stage3_recovery_matrix_turn_reservation_row_alive_and_dead() {
         &replayed,
         HumanGateCommandOutcome::Replayed { turn } if turn.turn_id == turn_a.turn_id
     ));
-    assert_eq!(harness.budget_remaining(), 3);
+    assert_eq!(harness.budget_remaining(), 1);
     assert_eq!(harness.provider_start_keys().len(), 1);
 
     // —— fault point B：启动 ledger 后 / 完成前 ——
@@ -212,6 +212,7 @@ async fn campaign_stage3_recovery_matrix_takeover_row_reconnect_continues_on_chi
         manual_repairs_remaining: 2,
         trigger: HumanReason::NativeHumanRequired,
         resumable: true,
+        accepted_feedback_turns: None,
     });
     parent.policy_diagnostics = vec![PolicyDiagnostic {
         code: "transition_budget_low".to_string(),

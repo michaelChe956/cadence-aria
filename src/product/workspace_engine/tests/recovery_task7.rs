@@ -62,6 +62,7 @@ fn recovery_gate(resumable: bool) -> crate::product::work_item_plan_policy::Huma
         manual_repairs_remaining: 1,
         trigger: crate::product::work_item_plan_policy::HumanReason::NativeHumanRequired,
         resumable,
+        accepted_feedback_turns: None,
     }
 }
 

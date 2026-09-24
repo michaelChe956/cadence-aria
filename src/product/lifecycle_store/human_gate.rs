@@ -168,10 +168,19 @@ impl LifecycleStore {
 
             let original = stored.clone();
             let mut next = stored;
-            next.human_gate_snapshot
-                .as_mut()
-                .expect("snapshot checked above")
-                .manual_repairs_remaining -= 1;
+            {
+                let snapshot = next
+                    .human_gate_snapshot
+                    .as_mut()
+                    .expect("snapshot checked above");
+                snapshot.manual_repairs_remaining -= 1;
+                // C2（REQ-CG-02/REQ-HGC-01）：被接受为修订 turn 的反馈与预算
+                // 预留同 CAS 原子计数；旧会话缺 gate-local 事实（None）保持
+                // unknown，不补计数不改历史。
+                if let Some(turns) = snapshot.accepted_feedback_turns {
+                    snapshot.accepted_feedback_turns = Some(turns.saturating_add(1));
+                }
+            }
             next.human_gate_reservation = Some(reservation.clone());
             next.provider_start_ledger.push(
                 crate::product::work_item_plan_policy::ProviderStartLedgerEntry {

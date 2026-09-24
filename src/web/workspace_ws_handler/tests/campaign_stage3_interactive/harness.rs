@@ -295,6 +295,7 @@ pub(super) async fn campaign_stage3_fixture(
         manual_repairs_remaining: budget,
         trigger: HumanReason::NativeHumanRequired,
         resumable: true,
+        accepted_feedback_turns: None,
     });
     let session_path = app_paths
         .issue_root(&record.project_id, &record.issue_id)

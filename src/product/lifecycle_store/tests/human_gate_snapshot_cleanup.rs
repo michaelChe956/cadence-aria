@@ -13,6 +13,7 @@ fn persist_session_with_gate_snapshot(store: &LifecycleStore, session_id: &str) 
         manual_repairs_remaining: 1,
         trigger: HumanReason::NativeHumanRequired,
         resumable: false,
+        accepted_feedback_turns: None,
     });
     write_json(
         &store

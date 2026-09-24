@@ -56,6 +56,7 @@ fn human_gate_reservation_cas_writes_turn_budget_and_provider_key_atomically() {
         manual_repairs_remaining: 2,
         trigger: HumanReason::NativeHumanRequired,
         resumable: true,
+        accepted_feedback_turns: None,
     });
     let session_path = store
         .app_paths()
@@ -182,6 +183,7 @@ fn human_gate_reservation_replay_repairs_torn_turn_file_without_double_debit() {
         manual_repairs_remaining: 1,
         trigger: HumanReason::NativeHumanRequired,
         resumable: true,
+        accepted_feedback_turns: None,
     });
     let session_path = store
         .app_paths()

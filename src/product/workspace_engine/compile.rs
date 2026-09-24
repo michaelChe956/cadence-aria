@@ -691,6 +691,7 @@ impl WorkspaceEngine {
                 .saturating_sub(history.manual_repairs_used),
             trigger: HumanReason::NativeHumanRequired,
             resumable: true,
+            accepted_feedback_turns: Some(0),
         };
         match store.compare_and_save_policy_route(
             &record,

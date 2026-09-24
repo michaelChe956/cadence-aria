@@ -62,6 +62,7 @@ async fn real_approval_fixture(budget: u32) -> (TempDir, LifecycleStore, String,
         manual_repairs_remaining: budget,
         trigger: HumanReason::NativeHumanRequired,
         resumable: true,
+        accepted_feedback_turns: None,
     });
     crate::product::json_store::write_json(
         &lifecycle
@@ -769,11 +770,13 @@ async fn forged_reopen_signature_without_amendment_context_keeps_terminal_guard(
     );
 }
 
-/// I-1 round2 回归（伪造场景·不继承）：伪造三元组（无 amendment context）命中
-/// Evaluate 重建时，快照预算 MUST 走普通门重置公式（默认 3 − run_history 计数），
-/// 不得继承被伪造会话遗留的旧快照预算（remaining=2）。
+/// I-1 round2 回归（伪造场景·不继承）→ C2 改写登记（REQ-CG-02 预算重置
+/// 边界修订）：伪造三元组（无 amendment context）命中 Evaluate 重建时走
+/// 普通门臂——C2 起普通门臂同样 carry-forward durable 快照在场值（伪造
+/// 场景旧快照 remaining=2 被接续），amendment 判别仍由完整谓词钉死（本
+/// 文件 fail-closed/终态守卫用例）；预算字段不再是两臂的区分观测面。
 #[tokio::test]
-async fn forged_reopen_signature_rebuild_uses_reset_formula() {
+async fn forged_reopen_signature_rebuild_carries_durable_budget() {
     let _serial = crate::product::workspace_engine::single_candidate_compile_test_lock().await;
     let (_root, lifecycle, mut engine, plan_session_id) =
         forged_reopen_signature_prefix("forged_reset", 0).await;
@@ -791,9 +794,11 @@ async fn forged_reopen_signature_rebuild_uses_reset_formula() {
         "伪造场景仍按普通门语义路由进 Approval"
     );
     let snapshot = routed.human_gate_snapshot.as_ref().expect("gate snapshot");
+    // C2 改写登记：普通门臂接续在场快照（保守方向：只会少不会多），
+    // 原重置公式断言（3）随 REQ-CG-02 修订退役。
     assert_eq!(
-        snapshot.manual_repairs_remaining, 3,
-        "伪造场景必须走普通门重置公式（默认 3 − 计数 = 3），不得继承旧快照的 2"
+        snapshot.manual_repairs_remaining, 2,
+        "伪造场景普通门臂 carry-forward 在场快照（改写登记：原重置断言 3）"
     );
 }
 
@@ -1051,8 +1056,8 @@ async fn amendment_context_read_failure_fails_closed_on_late_verdict() {
 /// 本 plan session entity）。context 先行 Open→Applying 而 attempt 已离开
 /// AwaitingPlanAmendment 的应用窗口内（amendment.rs 落盘顺序），probe 不放行，
 /// 判别同样不得按 amendment 门：(a) 迟到 verdict 必须被终态守卫丢弃；
-/// (b) Evaluate 重建必须走普通门重置公式，不得接续快照预算。轮 2 判别只看
-/// context 状态，两条均被绕过（本用例红）。
+/// (b) Evaluate 重建走普通门臂（C2 起普通门臂同样 carry-forward 在场快照，
+/// 见 (b) 处改写登记）。轮 2 判别只看 context 状态，两条均被绕过（本用例红）。
 #[tokio::test]
 async fn amendment_applying_window_not_discriminated_as_amendment_gate() {
     let _serial = crate::product::workspace_engine::single_candidate_compile_test_lock().await;
@@ -1097,7 +1102,10 @@ async fn amendment_applying_window_not_discriminated_as_amendment_gate() {
         "F-B: 不得经接续分支改写快照"
     );
 
-    // (b) Evaluate 重建：不得按 amendment 接续，必须走普通门重置公式
+    // (b) Evaluate 重建：走普通门臂（amendment 判别由 (a) 与完整谓词钉死）。
+    // C2 改写登记（REQ-CG-02 预算重置边界修订）：普通门臂同样 carry-forward
+    // 在场快照（1）——重置回 3 会凭空恢复已耗预算（F-52 反模式）；预算字段
+    // 不再是两臂的区分观测面，原重置断言随本修订退役。
     engine
         .route_single_candidate_evaluate_without_reviewer()
         .await;
@@ -1111,7 +1119,7 @@ async fn amendment_applying_window_not_discriminated_as_amendment_gate() {
     );
     let rebuilt = routed.human_gate_snapshot.as_ref().expect("gate snapshot");
     assert_eq!(
-        rebuilt.manual_repairs_remaining, 3,
-        "F-B: 应用窗口不得按 amendment 接续（不得继承 1），按普通门重置公式 3"
+        rebuilt.manual_repairs_remaining, 1,
+        "F-B: 应用窗口普通门臂 carry-forward 在场快照（改写登记：原重置断言 3）"
     );
 }

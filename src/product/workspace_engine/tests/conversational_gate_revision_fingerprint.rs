@@ -28,6 +28,7 @@ fn conversational_gate_revision_repeated_fingerprint_returns_same_gate() {
         manual_repairs_remaining: 2,
         trigger: HumanReason::RepeatedFingerprint,
         resumable: false,
+        accepted_feedback_turns: None,
     };
     assert!(route_repeated_human_gate_fingerprint(&snapshot, &fingerprint).is_ok());
     let context = GateSnapshotContext {

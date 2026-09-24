@@ -323,6 +323,8 @@ fn evaluate_gate_revision_fixture(
         manual_repairs_remaining: budget,
         trigger: HumanReason::NativeHumanRequired,
         resumable: true,
+        // C2 新会话口径：gate-local 轮次已知为零（区别于旧会话 None=unknown）。
+        accepted_feedback_turns: Some(0),
     });
     write_json(
         &lifecycle

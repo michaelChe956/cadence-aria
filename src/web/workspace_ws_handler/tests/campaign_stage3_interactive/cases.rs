@@ -65,9 +65,10 @@ async fn campaign_stage3_interactive_multi_turn_revision_then_approve_confirms_p
     };
     assert_eq!(command_id_2, "cmd-campaign-fb-2");
     assert_ne!(turn_id_2, turn_id_1, "turn IDs 唯一");
-    // 修订完成后 Evaluate policy route 重建 approval 门快照(与初始 author 同构，
-    // 预算从 run_history 重新推导=默认 3)，本轮 reserve 后 remaining=2。
-    assert_eq!(remaining_2, 2, "门预算经路由重建后每 turn 预算减一");
+    // C2（REQ-CG-02 预算重置边界修订，改写登记）：修订完成后 Evaluate route
+    // 重建 approval 门快照 MUST carry-forward durable 剩余（2−1=1），本轮
+    // reserve 后 remaining=0——同 logical gate 预算真实递减，不回填默认 3。
+    assert_eq!(remaining_2, 0, "门预算同 logical gate 内真实递减（改写登记：原重置断言 2）");
     let completed2 = harness.await_gate_event("human_gate_turn_completed").await;
     let WsOutMessage::HumanGateTurnCompleted {
         artifact_ref: artifact_ref_2,
@@ -111,9 +112,9 @@ async fn campaign_stage3_interactive_multi_turn_revision_then_approve_confirms_p
         ],
         "候选 refs 递进且只保存 ref（durable 列表新→旧，与顺序无关地核对）",
     );
-    // 修订完成后 Evaluate policy route 重建 approval 门快照(与初始 author 同构，
-    // 预算从 run_history 重新推导)，终态门预算为重建值而非旧快照的耗尽值。
-    assert_eq!(harness.budget_remaining(), 3, "门预算经两次路由重建");
+    // C2（改写登记）：两轮修订重建均 carry-forward（2→1→0），耗尽态如实
+    // 显示 0 而非回填默认 3；预算耗尽不关门，confirm 仍可用。
+    assert_eq!(harness.budget_remaining(), 0, "门预算经两次路由重建后真实耗尽（改写登记：原重置断言 3）");
     let keys = harness.provider_start_keys();
     assert_eq!(keys.len(), 2, "provider ledger 每真实 start 一项");
     assert!(
@@ -573,9 +574,9 @@ async fn campaign_stage3_turn_reservation_crash_recovers_exactly_once() {
     assert_eq!(recovered_turn.turn_id, turn_a.turn_id, "同 turn_id");
     assert_eq!(recovered_turn.status, HumanGateTurnStatus::Completed);
     assert_eq!(recovered_turn.attempt_no, 1, "不超过上限");
-    // 修订完成后 Evaluate policy route 重建 approval 门快照，预算从 run_history
-    // 重新推导(与初始 author 同构)，不再是旧快照的 reserve 后值。
-    assert_eq!(harness.budget_remaining(), 3, "门预算经路由重建");
+    // C2（改写登记）：修订完成后 Evaluate route 重建 MUST carry-forward
+    // durable 剩余（fixture 预算 2，本轮 reserve 后 1），不回填默认 3。
+    assert_eq!(harness.budget_remaining(), 1, "门预算经路由重建接续（改写登记：原重置断言 3）");
     assert_eq!(harness.provider_start_keys().len(), 1, "ledger 恰一项");
 
     // —— fault point B：启动 ledger 后 / 完成前 ——
@@ -755,6 +756,7 @@ async fn campaign_stage3_takeover_auto_stopped_reuses_snapshot_budget_and_candid
         manual_repairs_remaining: 2,
         trigger: HumanReason::NativeHumanRequired,
         resumable: true,
+        accepted_feedback_turns: None,
     });
     parent.policy_diagnostics = vec![PolicyDiagnostic {
         code: "transition_budget_low".to_string(),

@@ -85,6 +85,12 @@ pub struct HumanGateSnapshot {
     pub repeated_fingerprints: Vec<FindingFingerprint>,
     pub attempts_used: u32,
     pub manual_repairs_remaining: u32,
+    /// C2（REQ-HGC-01）：本 logical gate 内被接受为修订 turn 的反馈轮次，
+    /// 与 `manual_repairs_remaining` 预留同一 CAS 原子递增（不双计 policy
+    /// 的 repairs_used/manual_repairs_used）。旧会话 durable JSON 缺省 None
+    /// ——gate-local 事实缺席，保守呈现「预算历史不可用」，不补计数不改历史。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_feedback_turns: Option<u32>,
     pub trigger: super::HumanReason,
     pub resumable: bool,
 }
