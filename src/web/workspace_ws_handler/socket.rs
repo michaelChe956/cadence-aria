@@ -429,6 +429,37 @@ async fn flush_initial_attachment(
     }
 }
 
+/// C3/REQ-HTR-01：Abort 矩阵校验的 stage 读取（非阻塞）。
+/// - engine 锁空闲：活 stage 参与矩阵判定（门开/终态拒、run 族放行）。
+/// - 锁被 run/compile 持有：若人工确认门开着（router 维护的锁无关门开标志，
+///   覆盖 human_confirm 门内 in-flight 修订 run 场景），按 human_confirm 拒收
+///   （design D1：in-flight 修订期 Abort 窄 escape 不实现，watchdog 600s 兜底）；
+///   否则返回 None 放行进入取消臂——存在 active run 时 Abort 的既有语义
+///   （取消并回执 Aborted）必须原样可达。
+async fn abort_stage_type(
+    engine: std::sync::Arc<tokio::sync::Mutex<WorkspaceEngine>>,
+    manager: &WorkspaceSessionManager,
+) -> Option<(WorkspaceStage, WorkspaceType, bool)> {
+    match engine.try_lock() {
+        Ok(engine) => Some((
+            engine.current_stage(),
+            engine.session().workspace_type.clone(),
+            false,
+        )),
+        Err(_) => {
+            if manager.human_confirm_gate_open() {
+                Some((
+                    WorkspaceStage::HumanConfirm,
+                    manager.session_record.workspace_type.clone(),
+                    false,
+                ))
+            } else {
+                None
+            }
+        }
+    }
+}
+
 pub(crate) async fn handle_workspace_socket(
     socket: WebSocket,
     session_id: String,
@@ -647,20 +678,27 @@ pub(crate) async fn handle_workspace_socket(
                 }
 
                 let stage_type_and_cancel_replay = if requires_stage_validation(in_msg) {
-                    Some({
-                        let engine = engine.lock().await;
-                        let completed_cancel_replay = matches!(
-                            in_msg,
-                            WsInMessage::CancelPlanAmendment { amendment_id, .. }
-                                if engine.current_stage() == WorkspaceStage::Completed
-                                    && engine.is_cancelled_plan_amendment_replay(amendment_id)
-                        );
-                        (
-                            engine.current_stage(),
-                            engine.session().workspace_type.clone(),
-                            completed_cancel_replay,
-                        )
-                    })
+                    if matches!(in_msg, WsInMessage::Abort) {
+                        // C3/REQ-HTR-01：Abort 的矩阵校验用非阻塞 stage 读——
+                        // provider run 全程持有 engine 锁，阻塞等锁会让 Abort
+                        // （run 级取消的逃生口）在最需要它的时刻楔死整个读循环。
+                        abort_stage_type(engine.clone(), manager.as_ref()).await
+                    } else {
+                        Some({
+                            let engine = engine.lock().await;
+                            let completed_cancel_replay = matches!(
+                                in_msg,
+                                WsInMessage::CancelPlanAmendment { amendment_id, .. }
+                                    if engine.current_stage() == WorkspaceStage::Completed
+                                        && engine.is_cancelled_plan_amendment_replay(amendment_id)
+                            );
+                            (
+                                engine.current_stage(),
+                                engine.session().workspace_type.clone(),
+                                completed_cancel_replay,
+                            )
+                        })
+                    }
                 } else {
                     None
                 };

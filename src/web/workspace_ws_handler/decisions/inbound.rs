@@ -87,7 +87,10 @@ async fn handle_workspace_inbound_message_inner(
     }
 
     if run_context.session_record.flow_kind == WorkItemPlanFlowKind::SingleCandidate
-        && (requires_stage_validation(&envelope.message)
+        && ((requires_stage_validation(&envelope.message)
+            // C3/REQ-HTR-01：Abort 的门态拒收已在 socket 层非阻塞判定；此处
+            // 不得再等 engine 锁——run 持锁期 Abort 必须即刻到达取消臂。
+            && !matches!(envelope.message, WsInMessage::Abort))
             || matches!(envelope.message, WsInMessage::UserMessage { .. }))
     {
         let stage = engine.lock().await.current_stage();
@@ -388,6 +391,18 @@ async fn handle_workspace_inbound_message_inner(
                     },
                 )
                 .await;
+            } else {
+                // C3/REQ-HTR-01：无 active run 的 Abort 不再静默零回执——返回
+                // 稳定码 abort_no_active_run + 当前阶段（门开态附门级动作指路）。
+                // stage 读取放独立任务：错误回执不在取消关键路径上，等锁不阻塞
+                // socket 读循环。
+                let engine_for_error = engine.clone();
+                let outbound_for_error = outbound_tx.clone();
+                tokio::spawn(async move {
+                    let stage = engine_for_error.lock().await.current_stage();
+                    let err = crate::web::workspace_ws_handler::abort_no_active_run_error(&stage);
+                    let _ = send_json_outbound(&outbound_for_error, &err).await;
+                });
             }
         }
         WsInMessage::Ping => {

@@ -219,6 +219,11 @@ pub(crate) fn human_gate_message_boundary_error(
         return None;
     }
 
+    // C3/REQ-HTR-01：Abort 在门开态的拒收必须自带门级动作指路。
+    if matches!(message, WsInMessage::Abort) && stage == WorkspaceStage::HumanConfirm {
+        return Some(abort_human_gate_stage_error(flow_kind, &stage));
+    }
+
     // Legacy/control traffic keeps its existing routing. New conversational-gate commands and
     // ordinary user messages fail closed before any provider/store operation.
     if stage == WorkspaceStage::HumanConfirm || matches!(message, WsInMessage::UserMessage { .. }) {
@@ -267,17 +272,76 @@ pub(crate) fn advance_stage_error(
     }
 }
 
+/// C3/REQ-HTR-01：Abort 不再豁免——矩阵既有放行表即刻生效（PrepareContext/
+/// Running/CrossReview/Revision/AuthorConfirm 受理；HumanConfirm/Completed 拒收）。
+/// 中 run 期消息（Permission/Choice/UserMessage/Rollback）仍豁免：provider run
+/// 全程持有 engine 锁，矩阵校验的 `engine.lock()` 会令它们在 run 期楔死。
+/// Abort 的矩阵校验在 socket 层用非阻塞 stage 读（try_lock + 门开标志），
+/// 不得进入本函数的阻塞路径语义。
 pub(crate) fn requires_stage_validation(msg: &WsInMessage) -> bool {
     !matches!(
         msg,
-        WsInMessage::Abort
-            | WsInMessage::PermissionResponse { .. }
+        WsInMessage::PermissionResponse { .. }
             | WsInMessage::ChoiceResponse { .. }
             | WsInMessage::UserMessage { .. }
             | WsInMessage::Rollback { .. }
             | WsInMessage::Hello { .. }
             | WsInMessage::Ping
     )
+}
+
+/// C3/REQ-HTR-01：Abort 在人工门开态的拒收指路——run 级中止不占用户「终止」
+/// 心智，错误必须携带可用门级动作（反馈/确认/终止此门）。沿用门态稳定码
+/// WORK_ITEM_PLAN_HUMAN_GATE_STAGE_INVALID（spec 允许的 stage 相关稳定码）。
+pub(crate) fn abort_human_gate_stage_error(
+    flow_kind: WorkItemPlanFlowKind,
+    stage: &WorkspaceStage,
+) -> WsOutMessage {
+    WsOutMessage::ProtocolError {
+        code: "WORK_ITEM_PLAN_HUMAN_GATE_STAGE_INVALID".to_string(),
+        message: format!(
+            "message abort not allowed in stage {}: no provider run to abort while a human gate \
+             is open — use human_gate_feedback (feedback), confirm (approve) or \
+             abandon_human_gate (terminate this gate)",
+            stage.as_str()
+        ),
+        context: Some(serde_json::json!({
+            "stage": stage.as_str(),
+            "received": "abort",
+            "flow_kind": flow_kind,
+            "available_actions": [
+                "human_gate_feedback",
+                "confirm",
+                "abandon_human_gate",
+            ],
+        })),
+    }
+}
+
+/// C3/REQ-HTR-01：无 active run 的 Abort 诚实回执——稳定码 abort_no_active_run
+/// + 当前阶段；门开态附门级动作（与矩阵拒收共用指路面）。
+pub(crate) fn abort_no_active_run_error(stage: &WorkspaceStage) -> WsOutMessage {
+    let mut context = serde_json::json!({
+        "stage": stage.as_str(),
+        "received": "abort",
+    });
+    let message = if *stage == WorkspaceStage::HumanConfirm {
+        context["available_actions"] =
+            serde_json::json!(["human_gate_feedback", "confirm", "abandon_human_gate",]);
+        "no active provider run to abort: a human gate is open — use human_gate_feedback, \
+         confirm or abandon_human_gate (terminate this gate)"
+            .to_string()
+    } else {
+        format!(
+            "no active provider run to abort in stage {}",
+            stage.as_str()
+        )
+    };
+    WsOutMessage::ProtocolError {
+        code: "abort_no_active_run".to_string(),
+        message,
+        context: Some(context),
+    }
 }
 
 pub(crate) fn message_type(msg: &WsInMessage) -> &'static str {

@@ -507,6 +507,71 @@ async fn human_gate_open_rebuilds_session_state_for_existing_attachments() {
         );
     }
 }
+/// C3/REQ-HTR-01：router 消费 HumanGateOpened/Closed 维护锁无关门开标志——
+/// Abort 矩阵校验在 engine 锁被 in-flight 修订 run 持有时以它拒收门内 Abort。
+/// 顺序锚：标志先于同事件的广播帧置位/复位，收到广播即代表标志已更新。
+#[tokio::test]
+async fn human_gate_events_maintain_lock_free_gate_open_flag() {
+    let manager = WorkspaceSessionManager::test_fixture_with_event_router("session_gate_flag");
+    let (observer_tx, mut observer_rx) = mpsc::channel(8);
+    manager.attach("observer", observer_tx).await;
+    assert!(
+        !manager.human_confirm_gate_open(),
+        "初始无门：标志必须为 false"
+    );
+
+    manager
+        .engine_tx()
+        .send(EngineEvent::HumanGateOpened {
+            stage: "human_confirm".to_string(),
+        })
+        .await
+        .expect("send human gate opened event");
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let Some(OutboundControl::Text(json)) = observer_rx.recv().await else {
+                panic!("attachment closed before session_state");
+            };
+            let value: serde_json::Value = serde_json::from_str(&json).expect("frame JSON");
+            if value["type"] == "session_state" {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("gate open must broadcast session_state");
+    assert!(
+        manager.human_confirm_gate_open(),
+        "HumanGateOpened(human_confirm) 后标志必须置位"
+    );
+
+    manager
+        .engine_tx()
+        .send(EngineEvent::HumanGateClosed {
+            decision: "terminate".to_string(),
+            stage: "completed".to_string(),
+        })
+        .await
+        .expect("send human gate closed event");
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let Some(OutboundControl::Text(json)) = observer_rx.recv().await else {
+                panic!("attachment closed before human_gate_closed");
+            };
+            let value: serde_json::Value = serde_json::from_str(&json).expect("frame JSON");
+            if value["type"] == "human_gate_closed" {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("gate close must broadcast human_gate_closed");
+    assert!(
+        !manager.human_confirm_gate_open(),
+        "HumanGateClosed 后标志必须复位"
+    );
+}
+
 // F-1 回归（P2 终审 p38-p2-final-review-k3.md §6）：「无活动 run 且无订阅者」窗口的
 // 接力 ProviderRunRequested 不得被 continue 丢弃——必须以 throwaway outbound 通道
 // spawn（恢复链 recover_outline_run 同款），run 持续至真实终态。修复前本测试超时必红。
@@ -647,4 +712,3 @@ async fn provider_run_requested_without_attachments_spawns_throwaway_run() {
     .await
     .expect("无订阅者时接力 run 必须仍被 spawn（F-1：修复前事件被 continue 丢弃，本断言超时必红）");
 }
-

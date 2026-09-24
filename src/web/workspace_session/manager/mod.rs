@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
@@ -81,6 +81,11 @@ pub struct WorkspaceSessionManager {
     /// 序号在 manager 生命周期内严格单调；manager 被回收后 durable 重建会改走
     /// snapshot 基线，故不需要将它持久化。
     pub(super) next_event_seq: AtomicU64,
+    /// C3/REQ-HTR-01：人工确认门开标志（router 消费 HumanGateOpened/Closed
+    /// 维护，锁无关）。Abort 矩阵校验在 engine 锁被 in-flight 修订 run 持有
+    /// 时以它判定门态（非阻塞拒收）；初值 false（manager 重建后由下一次
+    /// 门事件/全量基线收敛，误判面= 放行进取消臂=既有语义，fail-open 安全）。
+    human_confirm_gate_open: AtomicBool,
     pub session_id: String,
     pub session_record: WorkspaceSessionRecord,
     pub app_paths: ProductAppPaths,
@@ -124,6 +129,7 @@ impl WorkspaceSessionManager {
             provider_registry: Arc::new(ProviderRegistry::new()),
             workspace_runs: crate::web::state::WorkspaceRunRegistry::default(),
             next_event_seq: AtomicU64::new(1),
+            human_confirm_gate_open: AtomicBool::new(false),
             registry: WorkspaceSessionRegistry::default(),
         })
     }
@@ -157,6 +163,7 @@ impl WorkspaceSessionManager {
                 ),
             ),
             next_event_seq: AtomicU64::new(1),
+            human_confirm_gate_open: AtomicBool::new(false),
             session_id: session_id.to_string(),
             session_record,
             app_paths,
@@ -294,6 +301,7 @@ impl WorkspaceSessionManager {
             workspace_runs: state.workspace_runs.clone(),
             registry: state.workspace_sessions.clone(),
             next_event_seq: AtomicU64::new(1),
+            human_confirm_gate_open: AtomicBool::new(false),
         });
         manager.spawn_event_router(engine_rx, state.workspace_runs.clone());
         manager.recover_on_creation().await;
@@ -315,6 +323,18 @@ impl WorkspaceSessionManager {
             app_paths: self.app_paths.clone(),
             session_record: self.session_record.clone(),
         }
+    }
+
+    /// C3/REQ-HTR-01：人工确认门是否开着（router 维护，锁无关）。
+    pub fn human_confirm_gate_open(&self) -> bool {
+        self.human_confirm_gate_open
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// C3/REQ-HTR-01：router 事件面维护门开标志。
+    pub(super) fn set_human_confirm_gate_open(&self, open: bool) {
+        self.human_confirm_gate_open
+            .store(open, std::sync::atomic::Ordering::Release);
     }
 
     pub fn engine(&self) -> Arc<Mutex<WorkspaceEngine>> {
@@ -390,6 +410,7 @@ impl WorkspaceSessionManager {
             provider_registry: Arc::new(ProviderRegistry::new()),
             workspace_runs: crate::web::state::WorkspaceRunRegistry::default(),
             next_event_seq: AtomicU64::new(1),
+            human_confirm_gate_open: AtomicBool::new(false),
             registry: WorkspaceSessionRegistry::default(),
         });
         manager.spawn_event_router(

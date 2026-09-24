@@ -64,7 +64,10 @@ impl WorkspaceSessionManager {
                             }
                         });
                     }
-                    EngineEvent::HumanGateOpened { stage: _ } => {
+                    EngineEvent::HumanGateOpened { stage } => {
+                        // C3/REQ-HTR-01：锁无关门开标志（Abort 矩阵在 engine 锁
+                        // 被 in-flight 修订 run 持有时的非阻塞判定源）。
+                        manager.set_human_confirm_gate_open(stage == "human_confirm");
                         let session_state = manager.engine.lock().await.build_session_state();
                         manager.broadcast(session_state);
                     }
@@ -124,6 +127,14 @@ impl WorkspaceSessionManager {
                         // 投影即时可见）——广播全量 session_state，前端对账
                         // 收敛已答卡。
                         manager.broadcast_choice_pending_state(true);
+                    }
+                    EngineEvent::HumanGateClosed { .. } => {
+                        // C3/REQ-HTR-01：任何门关闭即摘门开标志（会话至多一个
+                        // Active 门，见 enter_human_confirm 收口注释）。
+                        manager.set_human_confirm_gate_open(false);
+                        if let Some(message) = map_engine_event(event) {
+                            manager.broadcast(message);
+                        }
                     }
                     event => {
                         if let Some(message) = map_engine_event(event) {

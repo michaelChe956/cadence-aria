@@ -262,7 +262,9 @@ fn completed_stage_rejects_business_messages() {
 
 #[test]
 fn control_and_legacy_messages_do_not_require_stage_lock_validation() {
-    assert!(!requires_stage_validation(&WsInMessage::Abort));
+    // C3/REQ-HTR-01：Abort 收编 stage 矩阵——不再豁免（门开态必须得到可见
+    // 拒收回执而非静默假成功）；矩阵对 Abort 的非阻塞 stage 读见 socket 层。
+    assert!(requires_stage_validation(&WsInMessage::Abort));
     assert!(!requires_stage_validation(
         &WsInMessage::PermissionResponse {
             id: "permission-1".to_string(),
@@ -292,6 +294,50 @@ fn control_and_legacy_messages_do_not_require_stage_lock_validation() {
     assert!(requires_stage_validation(&WsInMessage::ContextNote {
         content: "new protocol action".to_string(),
     }));
+}
+
+// C3/REQ-HTR-01：Abort 收编 stage 矩阵后的放行/拒收集——run 族阶段（含
+// PrepareContext/AuthorConfirm 既有放行）受理；人工门开态（HumanConfirm）与
+// 终态（Completed）拒绝，门开态点击中止得到可见错误而非静默假成功。
+#[test]
+fn abort_is_governed_by_stage_matrix_after_termination_reliability_change() {
+    for stage in [
+        WorkspaceStage::PrepareContext,
+        WorkspaceStage::Running,
+        WorkspaceStage::AuthorConfirm,
+        WorkspaceStage::CrossReview,
+        WorkspaceStage::Revision,
+    ] {
+        assert!(
+            is_message_valid_for_stage_with_flow(
+                WorkItemPlanFlowKind::SingleCandidate,
+                &WsInMessage::Abort,
+                &stage
+            ),
+            "run 族阶段必须受理 Abort: {stage:?}"
+        );
+    }
+    for (flow_kind, stage) in [
+        (
+            WorkItemPlanFlowKind::SingleCandidate,
+            WorkspaceStage::HumanConfirm,
+        ),
+        (WorkItemPlanFlowKind::Legacy, WorkspaceStage::HumanConfirm),
+        (
+            WorkItemPlanFlowKind::SingleCandidate,
+            WorkspaceStage::Completed,
+        ),
+        (WorkItemPlanFlowKind::Legacy, WorkspaceStage::Completed),
+        (
+            WorkItemPlanFlowKind::SingleCandidate,
+            WorkspaceStage::ReviewDecision,
+        ),
+    ] {
+        assert!(
+            !is_message_valid_for_stage_with_flow(flow_kind, &WsInMessage::Abort, &stage),
+            "门开/终态阶段必须拒绝 Abort: {stage:?} ({flow_kind:?})"
+        );
+    }
 }
 
 #[test]
