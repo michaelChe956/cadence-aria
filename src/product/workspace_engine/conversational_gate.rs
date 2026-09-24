@@ -90,45 +90,8 @@ fn rejected(code: &str, reason: impl Into<String>) -> HumanGateCommandOutcome {
     }
 }
 
-/// k3 审 P2 测试注入口：story 门 terminate 的「durable 读 → CAS 写」窗口内
-/// 注入一次外部写入（模拟 HTTP confirm/另一 terminate 先行落盘），仅测试构建存在。
 #[cfg(test)]
-type StoryTerminateDriftHook = Box<dyn Fn() + Send>;
-
-#[cfg(test)]
-fn story_terminate_drift_hooks() -> &'static std::sync::Mutex<Vec<(String, StoryTerminateDriftHook)>>
-{
-    static HOOKS: std::sync::OnceLock<std::sync::Mutex<Vec<(String, StoryTerminateDriftHook)>>> =
-        std::sync::OnceLock::new();
-    HOOKS.get_or_init(|| std::sync::Mutex::new(Vec::new()))
-}
-
-#[cfg(test)]
-pub(crate) fn register_story_terminate_drift_hook(session_id: &str, hook: StoryTerminateDriftHook) {
-    story_terminate_drift_hooks()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .push((session_id.to_string(), hook));
-}
-
-#[cfg(test)]
-fn run_story_terminate_drift_hooks(session_id: &str) {
-    let mut hooks = story_terminate_drift_hooks()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    hooks.retain(|(id, hook)| {
-        if id == session_id {
-            hook();
-            false
-        } else {
-            true
-        }
-    });
-}
-
-#[cfg(not(test))]
-#[inline]
-fn run_story_terminate_drift_hooks(_session_id: &str) {}
+pub(crate) use story_terminate::register_story_terminate_drift_hook;
 
 fn non_terminal(turn: &HumanGateTurn) -> bool {
     matches!(

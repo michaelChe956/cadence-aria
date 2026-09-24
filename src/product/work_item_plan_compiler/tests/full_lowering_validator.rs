@@ -33,6 +33,15 @@ fn rep4_validation_context<'a>(
     story_ids: &'a [String],
     design_ids: &'a [String],
 ) -> PlanCandidateValidationContext<'a> {
+    // F-51：fixture 显式构造 options——rep4 自带 integration+backend+frontend，
+    // 存储意图为「不要求 integration/e2e」（false），不从 IR 反推。
+    static REP4_OPTIONS: std::sync::LazyLock<crate::product::models::IssueWorkItemPlanOptions> =
+        std::sync::LazyLock::new(|| crate::product::models::IssueWorkItemPlanOptions {
+            include_integration_tests: false,
+            include_e2e_tests: false,
+            force_frontend_backend_split: false,
+            require_execution_plan_confirm: false,
+        });
     PlanCandidateValidationContext {
         project_id: "project_levels_0001",
         issue_id: "issue_levels_0001",
@@ -40,6 +49,8 @@ fn rep4_validation_context<'a>(
         source_story_spec_ids: story_ids,
         source_design_spec_ids: design_ids,
         repository_profile: profile,
+        plan_options: &REP4_OPTIONS,
+        baseline_tree: None,
         now: "2026-08-27T00:00:00Z",
     }
 }
