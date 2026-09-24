@@ -10,6 +10,11 @@ import {
 import { refreshPreparedContextAuthorGuidance } from "./workspace-ws-store-guidance";
 import { setProviderSelection } from "./workspace-ws-store-providers";
 import {
+  appendBufferedStreamChunk,
+  clearBufferedStream,
+  flushBufferedStream,
+} from "./workspace-ws-store-stream-buffers";
+import {
   beginHumanPresentationSave,
   completeHumanPresentationSave,
   failHumanPresentationSave,
@@ -407,55 +412,9 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
     }),
 
   appendBufferedStreamChunk: (content, nodeId, role) =>
-    set((prev) => {
-      const existing = prev.streamBuffers[nodeId] ?? { chunks: [], visibleText: "", role };
-      return {
-        streamBuffers: {
-          ...prev.streamBuffers,
-          [nodeId]: {
-            ...existing,
-            role,
-            chunks: [...existing.chunks, content],
-          },
-        },
-      };
-    }),
+    set((prev) => appendBufferedStreamChunk(prev, content, nodeId, role)),
 
-  flushBufferedStream: (nodeId) =>
-    set((prev) => {
-      const buffer = prev.streamBuffers[nodeId];
-      if (!buffer || buffer.chunks.length === 0) {
-        return {};
-      }
-      const appended = buffer.chunks.join("");
-      const visibleText = buffer.visibleText + appended;
-      const entryId = chatEntryId(nodeId, "stream-active");
-      const index = prev.chatEntries.findIndex((entry) => entry.id === entryId);
-      const timelineNode = prev.timelineNodes.find((candidate) => candidate.node_id === nodeId);
-      const provider = timelineNode?.agent ?? prev.nodeDetails[nodeId]?.provider?.name ?? null;
-      const entry: ChatEntry = {
-        id: entryId,
-        type: "provider_stream",
-        role: buffer.role,
-        content: visibleText,
-        timestamp: new Date().toISOString(),
-        node_id: nodeId,
-        content_ref: { kind: "node_stream", nodeId },
-        metadata: providerEntryMetadata(timelineNode, provider),
-      };
-      const chatEntries = index === -1 ? [...prev.chatEntries, entry] : [...prev.chatEntries];
-      if (index !== -1) {
-        chatEntries[index] = entry;
-      }
-      return {
-        chatEntries,
-        streamBuffers: {
-          ...prev.streamBuffers,
-          [nodeId]: { ...buffer, chunks: [], visibleText },
-        },
-        activeStreamEntryId: entryId,
-      };
-    }),
+  flushBufferedStream: (nodeId) => set((prev) => flushBufferedStream(prev, nodeId)),
 
   completeBufferedStream: (nodeId, messageId, checkpointId) => {
     get().flushBufferedStream(nodeId);
@@ -463,14 +422,7 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
     get().clearBufferedStream(nodeId);
   },
 
-  clearBufferedStream: (nodeId) =>
-    set((prev) => {
-      if (!prev.streamBuffers[nodeId]) {
-        return {};
-      }
-      const { [nodeId]: _removed, ...streamBuffers } = prev.streamBuffers;
-      return { streamBuffers };
-    }),
+  clearBufferedStream: (nodeId) => set((prev) => clearBufferedStream(prev, nodeId)),
 
   clearAllStreamBuffers: () => set({ streamBuffers: {} }),
 
