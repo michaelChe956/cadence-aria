@@ -234,6 +234,9 @@ impl WorkspaceEngine {
             .compare_and_save_single_candidate_generation(&expected, &source_ref, &ir_ref)
             .map_err(|error| format!("persist single candidate generated refs failed: {error}"))?;
 
+        // F-56（REQ-WSC-02 场景 13）：共享 worktree fork base 树作 plan 基线，
+        // AC 路径核对挂接；不可用 → None（核对不触发）。
+        let baseline_tree = plan_preflight::plan_baseline_tree(&lifecycle, &project_id, &issue_id);
         let validation_now = chrono::Utc::now().to_rfc3339();
         let report = validate_plan_candidate_ir(
             &ir_record.ir,
@@ -247,14 +250,13 @@ impl WorkspaceEngine {
                 // F-51：三生产路径之一（author 权威落盘）——存储 options 显式
                 // 提供，候选校验不从 IR 反推。
                 plan_options: &plan.options,
-                baseline_tree: None,
+                baseline_tree: baseline_tree.as_ref(),
                 now: &validation_now,
             },
         )
         .map_err(|diagnostics| {
             format_compiler_diagnostics("validate plan candidate IR", &diagnostics)
         })?;
-        // F5 回灌扩展（3.6 矩阵 codex×重）：对 IR 既有 canonical 契约跑 Approval
         // compile 同源机械校验（build/validate_dependency_contract_graph）。
         // 存在 Error 级缺口时在本轮 Evaluate 即产生机械返修 verdict（经
         // complete_review 既有 ingestion 驱动 F5-A 修订轮回灌），不再等到
@@ -275,13 +277,12 @@ impl WorkspaceEngine {
         // 族不硬失败 author 轮次），与 canonical 契约缺口共用一次 complete_review
         // ingestion。
         let preflight_verdict = plan_preflight::preflight_review_verdict(&report_record.report);
-        let mechanical_revision_verdict =
-            match (contract_prerevision_verdict, preflight_verdict) {
-                (Some(contract), Some(preflight)) => {
-                    Some(plan_preflight::merge_revision_verdicts(contract, preflight))
-                }
-                (contract, preflight) => contract.or(preflight),
-            };
+        let mechanical_revision_verdict = match (contract_prerevision_verdict, preflight_verdict) {
+            (Some(contract), Some(preflight)) => {
+                Some(plan_preflight::merge_revision_verdicts(contract, preflight))
+            }
+            (contract, preflight) => contract.or(preflight),
+        };
         report_record.content_hash = report_record
             .content_hash()
             .map_err(|error| format!("hash mechanical report failed: {error:?}"))?;
@@ -363,11 +364,11 @@ impl WorkspaceEngine {
         }
         // preflight/合并 verdict 的 readable 用 preflight 前缀（timeline 可区分
         // 来源）；纯 canonical 契约缺口保持既有文本零变化。
-        let readable = if verdict
-            .findings
-            .iter()
-            .any(|finding| finding.evidence.starts_with("plan preflight mechanical finding"))
-        {
+        let readable = if verdict.findings.iter().any(|finding| {
+            finding
+                .evidence
+                .starts_with("plan preflight mechanical finding")
+        }) {
             plan_preflight::preflight_readable_output(&verdict)
         } else {
             contract_prerevision::contract_prerevision_readable_output(&verdict)

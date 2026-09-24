@@ -5,12 +5,12 @@
 
 use crate::product::models::{
     IssueWorkItemDependencyEdge, IssueWorkItemPlan, IssueWorkItemPlanStatus,
-    LifecycleWorkItemRecord, RepositoryProfileConfidence,
-    VerificationCommand, VerificationCommandSafety, VerificationCommandSource,
-    VerificationFallbackPolicy, VerificationManualCheck, VerificationPlan, VerificationScope,
-    WorkItemContextBudget, WorkItemDraftCandidate, WorkItemKind, WorkItemOutline,
-    WorkItemOutlineSessionFit, WorkItemPlanOutline, WorkItemPlanStatus, WorkItemSplitFinding,
-    WorkItemSplitFindingSeverity, WorkItemStatus,
+    LifecycleWorkItemRecord, RepositoryProfileConfidence, VerificationCommand,
+    VerificationCommandSafety, VerificationCommandSource, VerificationFallbackPolicy,
+    VerificationManualCheck, VerificationPlan, VerificationScope, WorkItemContextBudget,
+    WorkItemDraftCandidate, WorkItemKind, WorkItemOutline, WorkItemOutlineSessionFit,
+    WorkItemPlanOutline, WorkItemPlanStatus, WorkItemSplitFinding, WorkItemSplitFindingSeverity,
+    WorkItemStatus,
 };
 use crate::product::work_item_split_validator::{
     WorkItemDraftLocalValidator, WorkItemPlanOutlineValidator, WorkItemSplitValidator,
@@ -64,6 +64,30 @@ pub fn validate_plan_candidate_ir(
         )
         .findings,
     );
+    // REQ-WSC-02 场景 13（F-56）：AC/验证计划引用的仓库内文件路径与 plan
+    // 基线树交叉核对——受限提取（ac_paths，不做全文模糊匹配），缺失即
+    // Error finding（preflight 族，附三条修复建议）；基线不可用不触发。
+    if let Some(baseline_tree) = context.baseline_tree {
+        for (work_item_id, refs) in super::ac_paths::extract_acceptance_path_refs(ir) {
+            let missing: Vec<&str> = refs
+                .iter()
+                .map(String::as_str)
+                .filter(|path| !baseline_tree.contains(*path))
+                .collect();
+            if !missing.is_empty() {
+                findings.push(WorkItemSplitFinding {
+                    severity: WorkItemSplitFindingSeverity::Error,
+                    code: "acceptance_path_not_in_baseline".to_string(),
+                    message: format!(
+                        "work item {work_item_id} 的验收标准/验证计划引用路径 [{}] 不存在于 plan 基线树；修复动作：{}",
+                        missing.join("、"),
+                        super::types::ACCEPTANCE_PATH_NOT_IN_BASELINE_REPAIR_ACTION
+                    ),
+                    work_item_ids: vec![work_item_id],
+                });
+            }
+        }
+    }
     findings.sort_by(|left, right| {
         left.severity
             .as_str()
@@ -82,14 +106,10 @@ pub fn validate_plan_candidate_ir(
     // 属 preflight 族——Error 级结果保留在报告里、经既有机械 ReviewVerdict
     // 回灌修订（contract_prerevision 先例），不得把 author 轮次硬失败；结构性
     // Error（grammar/契约图等）保持 fail-closed 原样。
-    if report
-        .findings
-        .iter()
-        .any(|finding| {
-            finding.severity == WorkItemSplitFindingSeverity::Error
-                && !super::types::PREFLIGHT_FINDING_CODES.contains(&finding.code.as_str())
-        })
-    {
+    if report.findings.iter().any(|finding| {
+        finding.severity == WorkItemSplitFindingSeverity::Error
+            && !super::types::PREFLIGHT_FINDING_CODES.contains(&finding.code.as_str())
+    }) {
         return Err(report
             .findings
             .iter()

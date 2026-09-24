@@ -1,3 +1,4 @@
+mod ac_paths;
 pub mod freshness;
 pub mod grammar;
 mod lower;

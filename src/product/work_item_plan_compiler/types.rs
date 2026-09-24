@@ -80,25 +80,32 @@ pub const PREFLIGHT_FINDING_CODES: &[&str] = &[
     "integration_work_item_required",
     "e2e_work_item_required",
     "frontend_backend_split_required",
+    "acceptance_path_not_in_baseline",
 ];
 
- /// 将编译后的 IR 投影为既有机械 validator 输入时由外层注入的已确认上下文。
- #[derive(Debug, Clone, PartialEq, Eq)]
- pub struct PlanCandidateValidationContext<'a> {
-     pub project_id: &'a str,
-     pub issue_id: &'a str,
-     pub plan_id: &'a str,
-     pub source_story_spec_ids: &'a [String],
-     pub source_design_spec_ids: &'a [String],
-     pub repository_profile: Option<&'a RepositoryProfile>,
+/// AC 路径×基线树核对（REQ-WSC-02 场景 13，F-56）的三条修复建议共享文案：
+/// 删除该 AC / 改用基线内路径 / 显式声明基线恢复依赖并纳入写范围
+/// （exclusive_scopes）。与 finding 消息、SC author prompt 教学
+/// （REQ-WSC-06）逐字同源。
+pub const ACCEPTANCE_PATH_NOT_IN_BASELINE_REPAIR_ACTION: &str = "删除引用基线外路径的验收标准（AC），或改用 plan 基线树内存在的既有路径，或显式声明基线恢复依赖并将该路径纳入写范围（exclusive_scopes）";
+
+/// 将编译后的 IR 投影为既有机械 validator 输入时由外层注入的已确认上下文。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanCandidateValidationContext<'a> {
+    pub project_id: &'a str,
+    pub issue_id: &'a str,
+    pub plan_id: &'a str,
+    pub source_story_spec_ids: &'a [String],
+    pub source_design_spec_ids: &'a [String],
+    pub repository_profile: Option<&'a RepositoryProfile>,
     /// 创建计划时落库的存储 options（F-51）：候选校验 MUST 消费该事实，
     /// SHALL NOT 从 IR items 反推（反推使三族预检结构性不可触发）。
     pub plan_options: &'a IssueWorkItemPlanOptions,
     /// plan 基线树（worktree fork base 的仓库相对路径集合，F-56）。None 表示
     /// 基线不可用：AC 路径核对不触发（与现状一致），三族 options 预检不受影响。
     pub baseline_tree: Option<&'a std::collections::BTreeSet<String>>,
-     pub now: &'a str,
- }
+    pub now: &'a str,
+}
 
 /// 既有机械 validator 对单一候选 IR 的原样 findings 报告。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

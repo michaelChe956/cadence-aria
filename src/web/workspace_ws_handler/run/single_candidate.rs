@@ -220,6 +220,13 @@ fn prevalidate_plan_candidate_ir(
                 .get_repository_profile(&session.project_id, &session.issue_id, profile_id)
                 .ok()
         });
+    // F-56（REQ-WSC-02 场景 13）：运行期预校验与权威路径共用基线加载；
+    // 此处只预检（不产 verdict），权威收敛仍由 complete_... 路径承担。
+    let baseline_tree = crate::product::workspace_engine::plan_preflight::plan_baseline_tree(
+        lifecycle,
+        &session.project_id,
+        &session.issue_id,
+    );
     let validation_now = chrono::Utc::now().to_rfc3339();
     let validation = crate::product::work_item_plan_compiler::validate_plan_candidate_ir(
         ir,
@@ -232,7 +239,7 @@ fn prevalidate_plan_candidate_ir(
             repository_profile: repository_profile.as_ref(),
             // F-51：三生产路径之三（运行期预校验）——同一 plan record options。
             plan_options: &plan.options,
-            baseline_tree: None,
+            baseline_tree: baseline_tree.as_ref(),
             now: &validation_now,
         },
     );

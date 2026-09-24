@@ -486,6 +486,12 @@ impl super::WorkspaceEngine {
                 });
             }
         };
+        // F-56（REQ-WSC-02 场景 13）：门内人工修订与 author 路径共用基线加载。
+        let baseline_tree = super::plan_preflight::plan_baseline_tree(
+            &lifecycle,
+            &self.session.project_id,
+            &self.session.issue_id,
+        );
         let validation_now = chrono::Utc::now().to_rfc3339();
         let report = match validate_plan_candidate_ir(
             &ir,
@@ -498,7 +504,7 @@ impl super::WorkspaceEngine {
                 repository_profile: repository_profile.as_ref(),
                 // F-51：三生产路径之二（门内人工修订）——存储 options 显式提供。
                 plan_options: &plan.options,
-                baseline_tree: None,
+                baseline_tree: baseline_tree.as_ref(),
                 now: &validation_now,
             },
         ) {

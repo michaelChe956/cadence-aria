@@ -10,6 +10,7 @@ mod ears_spacing;
 mod full_lowering_validator;
 mod heading_normalization;
 mod null_placeholder_command;
+mod preflight_baseline_paths;
 mod preflight_options;
 mod repeated_field_accumulation;
 mod reviewer_finding_channel_boundary;

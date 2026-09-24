@@ -205,8 +205,8 @@ fn disabled_flags_keep_skipped_risk_warning_without_errors() {
 fn satisfied_options_do_not_produce_preflight_errors() {
     let ir = compile_candidate(REP4_FIXTURE);
     let fixture = PreflightFixture::new(false, false, true);
-    let report = validate_plan_candidate_ir(&ir, &fixture.context())
-        .expect("rep4 satisfies split options");
+    let report =
+        validate_plan_candidate_ir(&ir, &fixture.context()).expect("rep4 satisfies split options");
 
     for code in [
         "integration_work_item_required",

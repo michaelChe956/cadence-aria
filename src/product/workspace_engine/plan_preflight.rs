@@ -116,6 +116,37 @@ pub(crate) fn merge_revision_verdicts(
     }
 }
 
+/// 加载 plan 基线树（REQ-WSC-02 场景 13，F-56）：issue 共享 worktree 的 fork
+/// base 分支全量文件清单（`git ls-tree -r --name-only`，仓库相对路径集合）。
+/// 任一环节不可用（无共享 worktree / 目录缺失 / git 失败）→ None（基线
+/// 不可用，AC 路径核对不触发，fail-safe 与现状一致）。三生产路径（author/
+/// 修订/运行期预校验）共用本实现。
+pub(crate) fn plan_baseline_tree(
+    lifecycle: &crate::product::lifecycle_store::LifecycleStore,
+    project_id: &str,
+    issue_id: &str,
+) -> Option<std::collections::BTreeSet<String>> {
+    let shared = lifecycle
+        .get_issue_shared_worktree(project_id, issue_id)
+        .ok()??;
+    let output = std::process::Command::new("git")
+        .current_dir(&shared.worktree_path)
+        .args(["ls-tree", "-r", "--name-only", &shared.base_branch])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
 /// preflight code → 确定性身份定位器（跨轮指纹稳定：category+contract_field）。
 fn preflight_contract_field(code: &str) -> String {
     match code {
@@ -131,10 +162,16 @@ fn preflight_contract_field(code: &str) -> String {
 /// preflight code → 与校验器消息同源的修复路径（REQ-WSC-06 口径一致纪律）。
 fn preflight_required_action(code: &str) -> String {
     match code {
-        "integration_work_item_required" => INTEGRATION_WORK_ITEM_REQUIRED_REPAIR_ACTION.to_string(),
+        "integration_work_item_required" => {
+            INTEGRATION_WORK_ITEM_REQUIRED_REPAIR_ACTION.to_string()
+        }
         "e2e_work_item_required" => E2E_WORK_ITEM_REQUIRED_REPAIR_ACTION.to_string(),
         "frontend_backend_split_required" => {
             FRONTEND_BACKEND_SPLIT_REQUIRED_REPAIR_ACTION.to_string()
+        }
+        "acceptance_path_not_in_baseline" => {
+            crate::product::work_item_plan_compiler::ACCEPTANCE_PATH_NOT_IN_BASELINE_REPAIR_ACTION
+                .to_string()
         }
         other => format!("按 finding 消息修复 {other}"),
     }
@@ -225,6 +262,28 @@ mod tests {
             finding.required_action
         );
         assert!(preflight_readable_output(&verdict).contains("[plan_preflight]"));
+    }
+
+    #[test]
+    fn acceptance_path_gap_adapts_to_mechanical_revision_verdict() {
+        let report = report_with(
+            "acceptance_path_not_in_baseline",
+            "work item WI-001 的验收标准/验证计划引用路径 [status.html] 不存在于 plan 基线树",
+        );
+        let verdict = preflight_review_verdict(&report).expect("gap must produce verdict");
+        assert_eq!(verdict.verdict, ReviewVerdictType::Revise);
+        assert_eq!(verdict.review_gate, ReviewGate::RequiresRevision);
+        let finding = &verdict.findings[0];
+        assert_eq!(finding.severity, ReviewFindingSeverity::MustFix);
+        assert_eq!(
+            finding.contract_field.as_deref(),
+            Some("plan_preflight.acceptance_path_not_in_baseline")
+        );
+        assert_eq!(
+            finding.required_action,
+            crate::product::work_item_plan_compiler::ACCEPTANCE_PATH_NOT_IN_BASELINE_REPAIR_ACTION,
+            "required_action 与共享常量逐字同源（REQ-WSC-06 口径一致）"
+        );
     }
 
     #[test]
