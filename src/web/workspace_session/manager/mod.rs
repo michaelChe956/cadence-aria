@@ -32,10 +32,10 @@ pub(super) struct Attachment {
     /// 一旦直播通道溢出，该连接只能通过重连回到一致状态；此后 router 不再向其投递。
     pub(super) degraded: bool,
     // Hello 前的一个 RTT 内，连接维持 legacy driver 等价，待 Hello 归一后覆盖。
+    // REQ-DLS-04：attach 对租约零效应，role 与 epoch 之外不携带任何租约状态。
     role: ConnectionRole,
     after_event_seq: Option<u64>,
     lease_epoch: u64,
-    provisional_lease: Option<LeaseState>,
 }
 
 pub(super) struct ManagerState {

@@ -77,8 +77,9 @@ async fn workspace_session_manager_recycled_after_terminal_without_subscribers()
     server.abort();
 }
 
-// REQ-WCR-02：第二个 legacy driver 接管会话 lease；被接管的旧连接迟到写必须
-// 以可诊断的协议错误拒绝，而当前 holder 仍可中止同一活动 run。
+// REQ-WCR-02/REQ-DLS-04：第二连接经显式 hello（无 role 缺席归一为 Driver）
+// 接管会话 lease——attach 对租约零效应后这是唯一接管路径；被接管的旧连接
+// 迟到写必须以可诊断的协议错误拒绝，而当前 holder 仍可中止同一活动 run。
 #[tokio::test]
 async fn workspace_ws_lease_takeover_and_stale_write_rejection() {
     let root = tempdir().expect("root");
@@ -114,6 +115,27 @@ async fn workspace_ws_lease_takeover_and_stale_write_rejection() {
 
     let (mut second_driver, _) = connect_async(url).await.expect("second driver");
     let _second_initial = recv_json(&mut second_driver).await;
+    // REQ-DLS-04：第二连接必须显式 hello 才能接管（多 tab 驾驶切换语义保持）。
+    send_json(
+        &mut second_driver,
+        &WsInMessage::Hello {
+            session_id: "workspace_session_0001".into(),
+            last_seen_node_id: None,
+            role: None,
+            after_event_seq: None,
+        },
+    )
+    .await;
+    // hello 的 session_state 回复在活跃 run 持有 engine 锁期间不可达；同连接
+    // 读循环顺序处理入站，Pong 返回即 hello（bind_role 接管）已生效。
+    send_json(&mut second_driver, &WsInMessage::Ping).await;
+    loop {
+        match recv_json(&mut second_driver).await {
+            WsOutMessage::Pong => break,
+            WsOutMessage::Error { message } => panic!("second driver ws error: {message}"),
+            _ => continue,
+        }
+    }
 
     send_json(&mut first_driver, &WsInMessage::Abort).await;
     match recv_json(&mut first_driver).await {
@@ -314,9 +336,31 @@ async fn workspace_ws_dangling_lease_self_heals_on_first_write() {
     .await;
     let _chunk = recv_until_stream_chunk(&mut driver).await;
 
-    // 偷窃连接接入后立刻悬空（F-50-1 引爆链：attach 占走 → 断开 → 无人持有）。
+    // 偷窃连接显式接管后立刻悬空（F-50-1 引爆链在新形态下为：hello(driver)
+    // 接管 → 断开 → 无人持有；REQ-DLS-04 后 attach 不再抢占，显式 hello 是
+    // 并发连接占走租约的唯一路径）。
     let (mut thief, _) = connect_async(url).await.expect("thief");
     let _thief_initial = recv_json(&mut thief).await;
+    send_json(
+        &mut thief,
+        &WsInMessage::Hello {
+            session_id: "workspace_session_0001".into(),
+            last_seen_node_id: None,
+            role: Some(HelloRole::Driver),
+            after_event_seq: None,
+        },
+    )
+    .await;
+    // 同连接读循环顺序：Pong 返回即 hello 接管已生效（run 持锁时
+    // session_state 回复不可达，不能用其做屏障）。
+    send_json(&mut thief, &WsInMessage::Ping).await;
+    loop {
+        match recv_json(&mut thief).await {
+            WsOutMessage::Pong => break,
+            WsOutMessage::Error { message } => panic!("thief ws error: {message}"),
+            _ => continue,
+        }
+    }
     drop(thief);
     let eof = wait_for_connection_diagnostic(&controls, "eof").await;
     assert!(

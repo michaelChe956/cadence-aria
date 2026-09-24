@@ -33,10 +33,9 @@ impl WorkspaceSessionManager {
                 }),
             ));
         }
-        // role 字段直到 Hello 才可见。先以 legacy Driver 绑定保住旧客户端和第二
-        // 连接 abort 语义；若随后显式声明 Observer，bind_role 原样回滚此次临时接管。
-        let provisional_lease = state.lease.clone();
-        state.lease.acquire(connection_id);
+        // REQ-DLS-04：attach 对租约零效应——不获取、不快照、不回滚。role 在
+        // Hello 前维持 legacy Driver 缺省；lease_epoch 仅记录 attach 时刻的当前
+        // epoch，由 hello 显式获取或首写自愈（REQ-DLS-01）在同一状态锁内刷新。
         let lease_epoch = state.lease.epoch;
         state.pending_attachments.insert(
             connection_id.to_string(),
@@ -46,7 +45,6 @@ impl WorkspaceSessionManager {
                 role: ConnectionRole::Driver,
                 after_event_seq: None,
                 lease_epoch,
-                provisional_lease: Some(provisional_lease),
             },
         );
     }

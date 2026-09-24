@@ -59,24 +59,17 @@ impl WorkspaceSessionManager {
             let Some(connection_id) = connection_id else {
                 return;
             };
-            let provisional_lease =
-                if let Some(attachment) = state.pending_attachments.get_mut(&connection_id) {
-                    attachment.role = role;
-                    attachment.after_event_seq = after_event_seq;
-                    attachment.provisional_lease.take()
-                } else if let Some(attachment) = state.attachments.get_mut(&connection_id) {
-                    attachment.role = role;
-                    attachment.after_event_seq = after_event_seq;
-                    attachment.provisional_lease.take()
-                } else {
-                    return;
-                };
+            if let Some(attachment) = state.pending_attachments.get_mut(&connection_id) {
+                attachment.role = role;
+                attachment.after_event_seq = after_event_seq;
+            } else if let Some(attachment) = state.attachments.get_mut(&connection_id) {
+                attachment.role = role;
+                attachment.after_event_seq = after_event_seq;
+            } else {
+                return;
+            }
             if role == ConnectionRole::Observer {
-                if let Some(rollback) = provisional_lease
-                    && state.lease.holder.as_deref() == Some(connection_id.as_str())
-                {
-                    state.lease = rollback;
-                }
+                // REQ-DLS-04：observer 不获取租约；attach 零效应后无回滚面。
                 None
             } else {
                 let from_holder = state.lease.holder.clone();

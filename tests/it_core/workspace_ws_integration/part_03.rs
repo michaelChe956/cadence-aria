@@ -573,8 +573,10 @@ async fn workspace_ws_second_connection_does_not_mark_active_run_stale() {
     server.abort();
 }
 
-/// 缺席 role 的 legacy 次连接接管 lease 后仍可中止活动 run；被接管的主连接
-/// 此后任何迟到写均须被拒绝，保持旧脚本的次连接 abort 行为同时收紧单活写面。
+/// REQ-DLS-04：次连接经显式 hello（无 role 缺席归一为 Driver）接管 lease 后
+/// 仍可中止活动 run——attach 对租约零效应后这是唯一接管路径；被接管的主
+/// 连接此后任何迟到写均须被拒绝，保持旧脚本的次连接 abort 行为同时收紧
+/// 单活写面。
 #[tokio::test]
 async fn workspace_ws_secondary_connection_takes_lease_and_can_abort_active_run_started_by_primary() {
     let root = tempdir().expect("root");
@@ -611,7 +613,27 @@ async fn workspace_ws_secondary_connection_takes_lease_and_can_abort_active_run_
         .await
         .expect("connect secondary ws");
     let _secondary_state = recv_json(&mut secondary).await;
-
+    // REQ-DLS-04：次连接必须显式 hello 才接管（无 role 归一 Driver）。
+    send_json(
+        &mut secondary,
+        &WsInMessage::Hello {
+            session_id: "workspace_session_0001".into(),
+            last_seen_node_id: None,
+            role: None,
+            after_event_seq: None,
+        },
+    )
+    .await;
+    // 同连接读循环顺序：Pong 返回即 hello（bind_role 接管）已生效；活跃
+    // run 持有 engine 锁期间 hello 的 session_state 回复不可达，不能作屏障。
+    send_json(&mut secondary, &WsInMessage::Ping).await;
+    loop {
+        match recv_json(&mut secondary).await {
+            WsOutMessage::Pong => break,
+            WsOutMessage::Error { message } => panic!("secondary ws error: {message}"),
+            _ => continue,
+        }
+    }
     send_json(&mut primary, &WsInMessage::Abort).await;
     match recv_json(&mut primary).await {
         WsOutMessage::ProtocolError { code, .. } => assert_eq!(code, "STALE_DRIVER_LEASE"),
@@ -840,7 +862,22 @@ async fn workspace_ws_second_connection_receives_and_answers_pending_choice() {
     let _state = recv_json(&mut secondary).await;
     let replayed_choice = recv_until_choice_request(&mut secondary).await;
 
-    // 次连接已取 lease（legacy 次连接接管语义），可代答；run 驱动至完成。
+    // REQ-DLS-04：attach 对租约零效应——次连接代答前必须显式 hello（无 role
+    // 缺席归一为 Driver）接管 lease，方可写；F-24 用户语义（重连代答）不变。
+    send_json(
+        &mut secondary,
+        &WsInMessage::Hello {
+            session_id: "workspace_session_0001".into(),
+            last_seen_node_id: None,
+            role: None,
+            after_event_seq: None,
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_json(&mut secondary).await,
+        WsOutMessage::SessionState { .. }
+    ));
     send_json(
         &mut secondary,
         &WsInMessage::ChoiceResponse {
