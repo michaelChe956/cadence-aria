@@ -22,6 +22,7 @@ use crate::web::workspace_ws_types::WsOutMessage;
 mod arbitration;
 mod attachment;
 mod choices;
+mod degraded_diagnostics;
 mod durable_projection;
 pub(crate) use lease_diagnostics::lease_diagnostics_path;
 mod lease_diagnostics;
@@ -78,6 +79,8 @@ pub struct WorkspaceSessionManager {
     pub(super) state: StdMutex<ManagerState>,
     /// REQ-DLS-03：租约转移 append-only 诊断流（打点在状态锁外，失败零影响）。
     lease_diagnostics: lease_diagnostics::LeaseDiagnostics,
+    /// C3/REQ-HTR-03：degraded 转移 append-only 诊断流（同构通道，失败零影响）。
+    degraded_diagnostics: degraded_diagnostics::DegradedDeliveryDiagnostics,
     /// 序号在 manager 生命周期内严格单调；manager 被回收后 durable 重建会改走
     /// snapshot 基线，故不需要将它持久化。
     pub(super) next_event_seq: AtomicU64,
@@ -123,6 +126,14 @@ impl WorkspaceSessionManager {
                         .join(lease_diagnostics::LEASE_DIAGNOSTICS_FILE),
                 ),
             ),
+            degraded_diagnostics: degraded_diagnostics::DegradedDeliveryDiagnostics::new(
+                session_id,
+                Some(
+                    std::env::temp_dir()
+                        .join(session_id)
+                        .join(degraded_diagnostics::DEGRADED_DIAGNOSTICS_FILE),
+                ),
+            ),
             session_id: session_id.to_string(),
             session_record: test_session_record(session_id),
             app_paths: ProductAppPaths::new(std::env::temp_dir().join(session_id)),
@@ -160,6 +171,14 @@ impl WorkspaceSessionManager {
                     std::env::temp_dir()
                         .join(session_id)
                         .join(lease_diagnostics::LEASE_DIAGNOSTICS_FILE),
+                ),
+            ),
+            degraded_diagnostics: degraded_diagnostics::DegradedDeliveryDiagnostics::new(
+                session_id,
+                Some(
+                    std::env::temp_dir()
+                        .join(session_id)
+                        .join(degraded_diagnostics::DEGRADED_DIAGNOSTICS_FILE),
                 ),
             ),
             next_event_seq: AtomicU64::new(1),
@@ -242,6 +261,10 @@ impl WorkspaceSessionManager {
             session_id,
             lease_diagnostics::lease_diagnostics_path(&lifecycle, session_id),
         );
+        let degraded_diagnostics = degraded_diagnostics::DegradedDeliveryDiagnostics::new(
+            session_id,
+            degraded_diagnostics::degraded_diagnostics_path(&lifecycle, session_id),
+        );
         let checkpoint_store = Arc::new(CheckpointStore::new(
             app_paths.issue_lifecycle_root(&session_record.project_id, &session_record.issue_id),
         ));
@@ -294,6 +317,7 @@ impl WorkspaceSessionManager {
                 journal: EventJournal::default(),
             }),
             lease_diagnostics,
+            degraded_diagnostics,
             session_id: session_id.to_string(),
             session_record,
             app_paths,
@@ -331,6 +355,18 @@ impl WorkspaceSessionManager {
             .load(std::sync::atomic::Ordering::Acquire)
     }
 
+    /// C3/REQ-HTR-03：degraded 进入打点（锁外调用，失败零影响）。
+    pub(super) fn record_degraded_enter(&self, connection_id: &str, event_seq: u64) {
+        self.degraded_diagnostics
+            .record_enter(connection_id, event_seq);
+    }
+
+    /// C3/REQ-HTR-03：degraded 退出打点（锁外调用，失败零影响）。
+    pub(super) fn record_degraded_exit(&self, connection_id: &str, event_seq: u64) {
+        self.degraded_diagnostics
+            .record_exit(connection_id, event_seq);
+    }
+
     /// C3/REQ-HTR-01：router 事件面维护门开标志。
     pub(super) fn set_human_confirm_gate_open(&self, open: bool) {
         self.human_confirm_gate_open
@@ -366,10 +402,16 @@ impl WorkspaceSessionManager {
 
     #[cfg(test)]
     pub(crate) async fn broadcast_test_event(
-        &self,
+        self: &Arc<Self>,
         status: crate::web::workspace_ws_types::WsProviderStatus,
     ) {
         self.broadcast(WsOutMessage::ProviderStatus { status });
+    }
+
+    /// 仅供单测广播关键帧（REQ-HTR-03 白名单面）。
+    #[cfg(test)]
+    pub(crate) fn broadcast_test_keyframe(self: &Arc<Self>, message: WsOutMessage) {
+        self.broadcast(message);
     }
 
     #[cfg(test)]
@@ -402,6 +444,14 @@ impl WorkspaceSessionManager {
                     std::env::temp_dir()
                         .join(session_id)
                         .join(lease_diagnostics::LEASE_DIAGNOSTICS_FILE),
+                ),
+            ),
+            degraded_diagnostics: degraded_diagnostics::DegradedDeliveryDiagnostics::new(
+                session_id,
+                Some(
+                    std::env::temp_dir()
+                        .join(session_id)
+                        .join(degraded_diagnostics::DEGRADED_DIAGNOSTICS_FILE),
                 ),
             ),
             session_id: session_id.to_string(),

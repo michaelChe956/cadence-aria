@@ -155,7 +155,7 @@ impl WorkspaceSessionManager {
             self.durable_projection().0
         }
     }
-    pub(super) fn broadcast(&self, message: WsOutMessage) {
+    pub(super) fn broadcast(self: &Arc<Self>, message: WsOutMessage) {
         let Ok(serialized) = serde_json::to_string(&message) else {
             eprintln!(
                 "[aria-broadcast] serialize failed session={}",
@@ -171,6 +171,7 @@ impl WorkspaceSessionManager {
             );
             return;
         };
+        let keyframe = is_keyframe_message(&message);
         let attachments = {
             let mut state = self
                 .state
@@ -183,19 +184,20 @@ impl WorkspaceSessionManager {
                 .map(|(connection_id, attachment)| (connection_id.clone(), attachment.degraded))
                 .collect::<Vec<_>>()
         };
-        let recovery_baseline = attachments
-            .iter()
-            .any(|(_, degraded)| *degraded)
+        // C3/REQ-HTR-03：基线构造条件放宽——关键帧广播时即使暂无 degraded
+        // 连接也预建（新降级连接的有界等待投递以基线恢复；非关键帧维持
+        // 既有「存在 degraded 才建」的惰性）。
+        let recovery_baseline = (keyframe || attachments.iter().any(|(_, degraded)| *degraded))
             .then(|| self.current_session_state())
             .and_then(|snapshot| serde_json::to_string(&snapshot).ok())
             .and_then(|baseline| inject_event_seq(baseline, seq));
         for (connection_id, degraded) in attachments {
             if degraded {
                 if let Some(baseline) = recovery_baseline.as_deref() {
-                    self.try_recover_degraded_attachment(&connection_id, baseline);
+                    self.try_recover_degraded_attachment(&connection_id, baseline, keyframe, seq);
                 }
             } else {
-                self.try_send_live_event(&connection_id, &json);
+                self.try_send_live_event(&connection_id, &json, keyframe, seq, &recovery_baseline);
             }
         }
     }
@@ -203,7 +205,18 @@ impl WorkspaceSessionManager {
     /// 直播发送只允许 `try_send`：任何 attachment 都不能使 provider/router 等待。
     /// 队列满时仅标记该 attachment；不发送可被同样丢弃的 `ResyncRequired`。下一次
     /// 广播会先试投递带当前 event_seq 的全量 session_state，成功后恢复直播。
-    fn try_send_live_event(&self, connection_id: &str, json: &str) {
+    /// C3/REQ-HTR-03：关键帧（stage_change/session_state/human_gate_closed 族）
+    /// 在本连接降级时额外起有界等待投递任务（两次有界退避后必发
+    /// resync_required）——V0 现场「门开后引擎静默、下一次广播永不触发」的
+    /// stale 停留由此收口。
+    fn try_send_live_event(
+        self: &Arc<Self>,
+        connection_id: &str,
+        json: &str,
+        keyframe: bool,
+        seq: u64,
+        recovery_baseline: &Option<String>,
+    ) {
         let sender = {
             let state = self
                 .state
@@ -229,6 +242,18 @@ impl WorkspaceSessionManager {
                 {
                     attachment.degraded = true;
                 }
+                drop(state);
+                // 打点在状态锁外（lease-diagnostics 同款纪律）。
+                self.record_degraded_enter(connection_id, seq);
+                if keyframe && let Some(baseline) = recovery_baseline.as_deref() {
+                    spawn_keyframe_delivery(
+                        Arc::clone(self),
+                        connection_id.to_string(),
+                        sender,
+                        baseline.to_string(),
+                        seq,
+                    );
+                }
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 self.state
@@ -242,7 +267,15 @@ impl WorkspaceSessionManager {
 
     /// 降级连接只尝试一次无等待投递；它收到的 session_state 即当前事件序号的基线，
     /// 因而即使溢出时的增量帧已丢失，也能安全继续接收后续单调 event_seq 帧。
-    fn try_recover_degraded_attachment(&self, connection_id: &str, baseline: &str) {
+    /// C3/REQ-HTR-03：关键帧的恢复尝试失败（队列仍满）时起有界等待投递——
+    /// 引擎门开后静默、无后续广播触发恢复的窗口由此兜底。
+    fn try_recover_degraded_attachment(
+        self: &Arc<Self>,
+        connection_id: &str,
+        baseline: &str,
+        keyframe: bool,
+        seq: u64,
+    ) {
         let sender = {
             let state = self
                 .state
@@ -271,6 +304,8 @@ impl WorkspaceSessionManager {
                         attachment.degraded = false;
                     }
                 }
+                // 打点在状态锁外（lease-diagnostics 同款纪律）。
+                self.record_degraded_exit(connection_id, seq);
                 // F-24（0484 现场锚）：降级期间被 try_send 丢弃的 choice 帧不在
                 // session_state 里——恢复时必须补发挂起帧，否则连接全程在线的
                 // 用户永远看不到卡。等待式投递放独立任务：队列腾出即送达，
@@ -290,7 +325,17 @@ impl WorkspaceSessionManager {
                     });
                 }
             }
-            Err(mpsc::error::TrySendError::Full(_)) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                if keyframe {
+                    spawn_keyframe_delivery(
+                        Arc::clone(self),
+                        connection_id.to_string(),
+                        sender,
+                        baseline.to_string(),
+                        seq,
+                    );
+                }
+            }
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 self.state
                     .lock()
@@ -303,7 +348,7 @@ impl WorkspaceSessionManager {
 
     /// F-23：恢复链整流后向全部连接广播当前快照（manager 创建时无订阅者，
     /// 广播仍入 journal 供后续 cursor 回放）。
-    pub(crate) fn broadcast_current_session_state(&self) {
+    pub(crate) fn broadcast_current_session_state(self: &Arc<Self>) {
         self.broadcast(self.current_session_state());
     }
 
@@ -347,7 +392,7 @@ impl WorkspaceSessionManager {
     /// 引擎内存投影，再向全部 attachment 广播全量 session_state（顺带入
     /// journal，后续 cursor 回放同样取到 confirmed 态）。
     pub(crate) async fn broadcast_http_confirm(
-        &self,
+        self: &Arc<Self>,
         record: &crate::product::models::WorkspaceSessionRecord,
     ) {
         {
@@ -355,5 +400,97 @@ impl WorkspaceSessionManager {
             engine.apply_external_confirm_record(record);
         }
         self.broadcast_current_session_state();
+    }
+}
+
+// ── C3/REQ-HTR-03：degraded 连接关键帧投递 ──────────────────────────────────
+
+/// 有界等待单次上限。
+const KEYFRAME_DELIVER_WAIT: std::time::Duration = std::time::Duration::from_millis(750);
+/// 两次尝试之间的退避。
+const KEYFRAME_DELIVER_BACKOFF: std::time::Duration = std::time::Duration::from_millis(250);
+/// 有界尝试次数（全局约束：有界（如 2 次退避）后必发 resync_required）。
+const KEYFRAME_DELIVER_ATTEMPTS: usize = 2;
+
+/// 关键帧白名单（design D3）：stage_change / session_state（含 HumanGateOpened
+/// 触发的门开全量广播）/ human_gate_closed（abandon 终止后引擎同样静默）。
+/// 流式/增量帧不入列——它们可由恢复基线与后续广播覆盖，等待式投递只保留给
+/// 「丢了它 + 引擎静默 = stale 至 reload」的帧。
+fn is_keyframe_message(message: &WsOutMessage) -> bool {
+    matches!(
+        message,
+        WsOutMessage::StageChange { .. }
+            | WsOutMessage::SessionState { .. }
+            | WsOutMessage::HumanGateClosed { .. }
+    )
+}
+
+/// 关键帧有界等待投递：两次有界退避尝试送达恢复基线；均失败则必发
+/// resync_required（等待不设界——它是「帧被吞且无任何信号」的最后防线；
+/// 客户端恢复读取即送达、通道关闭即退出，parked 任务不占 router）。
+/// 每次发送前复查 degraded 态：连接若已按后续广播恢复直播，本任务的旧
+/// 基线不再投递（防 event_seq 回退覆盖新状态）。
+fn spawn_keyframe_delivery(
+    manager: Arc<WorkspaceSessionManager>,
+    connection_id: String,
+    sender: mpsc::Sender<OutboundControl>,
+    baseline: String,
+    seq: u64,
+) {
+    let resync = serde_json::to_string(&WsOutMessage::ResyncRequired { event_seq: seq })
+        .unwrap_or_else(|_| "{\"type\":\"resync_required\",\"event_seq\":0}".to_string());
+    tokio::spawn(async move {
+        for attempt in 0..KEYFRAME_DELIVER_ATTEMPTS {
+            if attempt > 0 {
+                tokio::time::sleep(KEYFRAME_DELIVER_BACKOFF).await;
+            }
+            if !manager.attachment_is_degraded(&connection_id) {
+                return;
+            }
+            if tokio::time::timeout(
+                KEYFRAME_DELIVER_WAIT,
+                sender.send(OutboundControl::Text(baseline.clone())),
+            )
+            .await
+            .is_ok_and(|result| result.is_ok())
+            {
+                return;
+            }
+        }
+        if !manager.attachment_is_degraded(&connection_id) {
+            return;
+        }
+        let _ = sender.send(OutboundControl::Text(resync)).await;
+    });
+}
+
+#[cfg(test)]
+mod degraded_keyframe_tests {
+    use super::*;
+
+    /// REQ-HTR-03：白名单只覆盖门开/门关/全量基线帧。
+    #[test]
+    fn keyframe_whitelist_covers_gate_critical_frames_only() {
+        assert!(is_keyframe_message(&WsOutMessage::StageChange {
+            stage: "human_confirm".to_string()
+        }));
+        assert!(is_keyframe_message(&WsOutMessage::HumanGateClosed {
+            decision: "terminate".to_string(),
+            stage: "completed".to_string()
+        }));
+        assert!(!is_keyframe_message(&WsOutMessage::ProviderStatus {
+            status: crate::web::workspace_ws_types::WsProviderStatus::Running
+        }));
+        assert!(!is_keyframe_message(&WsOutMessage::StreamChunk {
+            role: "author".to_string(),
+            content: "chunk".to_string(),
+            node_id: None
+        }));
+        assert!(!is_keyframe_message(&WsOutMessage::TimelineNodeUpdated {
+            node_id: "node".to_string(),
+            status: crate::web::workspace_ws_types::TimelineNodeStatus::Active,
+            summary: None,
+            completed_at: None
+        }));
     }
 }

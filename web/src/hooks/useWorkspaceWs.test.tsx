@@ -602,6 +602,35 @@ describe("useWorkspaceWs websocket messages", () => {
     });
   });
 
+  // C3/REQ-HTR-03（Review Focus 2）：重复 resync_required 只关闭一次连接、
+  // 只走一轮「重连→cursor 全量拉取」——不产生关闭/重连循环。
+  it("closes the socket exactly once for repeated resync_required frames", () => {
+    vi.useFakeTimers();
+    const harness = renderWorkspaceHook();
+
+    act(() => {
+      harness.ws.open();
+      harness.ws.receive(workspaceSessionState(10));
+      harness.ws.receive({ type: "resync_required", event_seq: 99 });
+      harness.ws.receive({ type: "resync_required", event_seq: 100 });
+      harness.ws.receive({ type: "resync_required", event_seq: 101 });
+    });
+
+    expect(harness.ws.closeCodes).toEqual([4000]);
+
+    act(() => {
+      vi.advanceTimersByTime(1000);
+      harness.latestWs.open();
+    });
+    // 重连后的新连接不处于 degraded 态：不再有关闭/重连调度。
+    expect(harness.ws.closeCodes).toEqual([4000]);
+    expect(JSON.parse(harness.latestWs.sent.at(-1) ?? "{}")).toMatchObject({
+      type: "hello",
+      role: "driver",
+      after_event_seq: 10,
+    });
+  });
+
   it("does not carry a cursor across workspace sessions", () => {
     const harness = renderWorkspaceHook();
 

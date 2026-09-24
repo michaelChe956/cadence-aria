@@ -338,7 +338,8 @@ impl WorkspaceSessionManager {
         self.maybe_recycle().await;
     }
 
-    #[cfg(test)]
+    /// C3/REQ-HTR-03：关键帧有界等待投递任务复查 degraded 态（已恢复直播的
+    /// 连接不再投递旧基线，防 event_seq 回退覆盖新状态）。
     pub(crate) fn attachment_is_degraded(&self, connection_id: &str) -> bool {
         self.state
             .lock()
