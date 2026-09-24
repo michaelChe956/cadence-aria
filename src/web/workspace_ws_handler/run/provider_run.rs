@@ -985,11 +985,13 @@ pub(crate) async fn spawn_provider_run_from_handler(
                     return;
                 }
 
-                let node_id = if let Some(node_id) = engine.active_timeline_node_id() {
-                    node_id
-                } else {
-                    engine.begin_work_item_plan_author_run().await
-                };
+                // F-49/A6：门修订轮必须与普通 SC 修订同构地落在 author 节点上。
+                // 此前取 `active_timeline_node_id()`——门内活动节点就是 HumanConfirm
+                // 门节点，修订 prompt/输出流/artifact_ref 与产物版本 source_node_id
+                // 全部写进门节点 detail；门节点在对话流 rebuild 判 role=null，整节点
+                // 零条目，用户侧「author 修订步不可见」。选节点规则（复用活动
+                // AuthorRun / 新建）见 `begin_work_item_plan_human_gate_revision_run`。
+                let node_id = engine.begin_work_item_plan_human_gate_revision_run().await;
                 let author_provider = engine.session().author_provider.clone();
                 engine
                     .emit_provider_prompt_event(

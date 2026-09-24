@@ -262,6 +262,52 @@ pub(crate) fn prepare_revision_delivery_for_compile(
 }
 
 impl super::WorkspaceEngine {
+    /// F-49/A6：门内人工修订轮必须与普通 SC 修订同构地落在一个 author 节点上。
+    ///
+    /// 修订轮此前沿用 `active_timeline_node_id()`——门内活动节点就是 HumanConfirm
+    /// 门节点，于是 revision prompt / streaming_content / output 事件 / artifact_ref
+    /// 与「产物版本 source_node_id」全部写进门节点 detail。门节点
+    /// `node_type=human_confirm` 在前端对话流 rebuild 的 `chatRoleForTimelineNode`
+    /// 判为 `null`，整节点零条目（实测 issue_0002/workspace_session_0009：artifact v3
+    /// 挂 timeline_node_006，74 条 rebuild 条目里既无 node_006 也无 v3），用户侧
+    /// 「author 修订步不可见」。
+    ///
+    /// 本入口给出与普通 SC 修订（`single_candidate.rs` 的 SC author Run）同构的载体：
+    /// 活动节点已是 AuthorRun 时复用——provider 在修订 run 内中断、恢复以同一 turn
+    /// 重跑时不得重复建节点（与 SC author 的选节点约定一致）；否则新建 AuthorRun
+    /// 节点（agent=author provider；stage 取会话阶段 human_confirm，理由见方法内注释）。
+    /// 修订事实随之落在该节点 detail 上，前端既有 rebuild 分支（`author_run` →
+    /// author 气泡）与 live `TimelineNodeCreated` 帧即可渲染「author 正在修订 /
+    /// 修订完成」；本入口不新造事件类型，`human_gate_turn_open`/
+    /// `human_gate_turn_completed` 契约（REQ-CG-01/03）零变化。
+    pub(crate) async fn begin_work_item_plan_human_gate_revision_run(&mut self) -> String {
+        use crate::product::workspace_engine::TimelineNodeDraft;
+        use crate::web::workspace_ws_types::{TimelineNodeStatus, TimelineNodeType};
+
+        if self.active_node_type() == Some(TimelineNodeType::AuthorRun)
+            && let Some(node_id) = self.active_node_id.clone()
+        {
+            return node_id;
+        }
+        // stage 必须与会话阶段一致（human_confirm）：`WorkspaceEngine::new_persistent`
+        // 对非空 durable 时间线以「活动节点的 stage」重建 `session.stage`
+        // （lifecycle.rs 的 `workspace_stage_from_ws_stage`），而门内修订期间会话阶段
+        // 恒为 human_confirm——门命令语义（REQ-CG-02 单飞：在飞 turn 期间 feedback/
+        // approve/abandon 返回 gate_busy）以该阶段为前提。若本节点写成 running，
+        // 重连/第二 worker 重建后会把阶段推导为 running，门命令被拒为
+        // STAGE_INVALID（campaign 单飞用例实测回归），用户重连即失去门内反馈能力。
+        self.create_timeline_node(TimelineNodeDraft {
+            node_type: TimelineNodeType::AuthorRun,
+            agent: Some(self.session.author_provider.clone()),
+            stage: super::WorkspaceStage::HumanConfirm,
+            round: None,
+            title: "Work Item Plan 生成".to_string(),
+            summary: None,
+            status: TimelineNodeStatus::Active,
+        })
+        .await
+    }
+
     pub(crate) fn mark_human_gate_turn_running(&mut self, turn_id: &str) -> Result<(), String> {
         use crate::product::models::HumanGateTurnStatus;
         let store = self
@@ -656,6 +702,16 @@ impl super::WorkspaceEngine {
             .find(|version| version.is_current)
         {
             self.session.artifact = Some(current_version.payload.clone());
+        }
+        // F-49/A6：修订轮载体是 author 节点时在路由前收口该节点——与普通 SC 修订
+        // 同构（`single_candidate.rs` 的 complete_single_candidate_work_item_plan_author
+        // 同样先 complete_active_node 再 route，实测 workspace_session_0009 的
+        // node_004/node_008 均 Completed）。不收口会留下永久 Active 的「修订中」author
+        // 节点（时间线 UI 持续显示进行中）。门节点载体（历史直驱/引擎级调用）保持
+        // Active：门仍开着，其收口由 enter_human_confirm 与终态 compile 负责。
+        if self.active_node_type() == Some(super::TimelineNodeType::AuthorRun) {
+            self.complete_active_node(Some("已按人工反馈完成修订并持久化，等待复评".to_string()))
+                .await;
         }
         // 人工修订与初始 author 同构：候选落盘后必须重走 Evaluate policy route。
         // Evaluate 路由仍是进 Approval 的主路径；close 时的人工权威升级（confirm

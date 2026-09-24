@@ -442,6 +442,8 @@ impl WorkspaceEngine {
             .await;
     }
 
+    /// F-42/F-49：收口仍处 Active 的 HumanConfirm 门节点。
+    ///
     /// F-42：确认链（SC 人门 approve → Final Compile → Confirmed）离开 human_confirm
     /// 时收口门节点。此前链路只关 compile 节点，门节点 human_confirm 留在 Active——
     /// 持久层不自洽（实测 workspace_session_0003：node_004 human_confirm 仍 active，
@@ -449,38 +451,48 @@ impl WorkspaceEngine {
     /// 门态，对话流门卡仍渲染可点的确认/终止按钮，二次点击被服务端矩阵拒
     /// （INVALID_MESSAGE_FOR_STAGE: confirm not allowed in stage completed）。
     ///
-    /// 只收口「活动节点确为 Active 的 HumanConfirm」，不得覆写其他节点的状态/摘要/
-    /// 完成时间。本入口的两类 callsite：
-    /// - 人工确认源：`conversational_gate.rs` 的 close_human_gate approve 臂与
+    /// F-49：F-42 的判据是「活动节点恰为 Active HumanConfirm」——门内轮次切换后该
+    /// 前提不再成立：人工反馈触发的修订轮在 author 节点上执行、复评在 review 节点上
+    /// 执行，活动节点早已推进，被取代的旧门节点滞留 Active（实测
+    /// workspace_session_0009：timeline_node_006 与 timeline_node_010 同时 active）。
+    /// 故判据放宽为「收口所有 HumanConfirm + Active 节点」——同一会话至多一个当前门，
+    /// 多个 Active 门即持久层不自洽。
+    ///
+    /// 只触碰 HumanConfirm + Active 节点，不得覆写其他节点的状态/摘要/完成时间。
+    /// 本入口的两类 callsite：
+    /// - 终态确认链：`conversational_gate.rs` 的 close_human_gate approve 臂与
     ///   `controls.rs` 的 handle_confirm（HumanConfirm + SC Approval 臂）——活动节点
-    ///   正是待收口的门节点；
-    /// - 自动评审源：`review/routing.rs` 的 apply_policy_route（ContinueToCompleted +
-    ///   SC + AutoIfValid）、batch review Pass、serial draft 完结三处直入 compile——
-    ///   活动节点是 review/draft 节点，双条件使其为 no-op（评审要求「跳过可选建议」的
-    ///   路径经 `work_item_plan_optional_pass_review` → `enter_review_decision`，不直入
-    ///   本入口）。时间/摘要走既有同源链路（complete_active_node →
-    ///   update_timeline_node 取 now，与 compile 节点一致）。
-    async fn close_active_human_confirm_node(&mut self) {
-        let is_open_human_confirm_gate = self
-            .active_node_id
-            .as_ref()
-            .and_then(|node_id| {
-                self.timeline_nodes
-                    .iter()
-                    .find(|node| &node.node_id == node_id)
-            })
-            .is_some_and(|node| {
+    ///   正是待收口的门节点；以及 `review/routing.rs` 的 apply_policy_route
+    ///   （ContinueToCompleted + SC + AutoIfValid）、batch review Pass、serial draft
+    ///   完结三处直入 compile——活动节点是 review/draft 节点，无 Active 门节点时为
+    ///   no-op（评审要求「跳过可选建议」的路径经
+    ///   `work_item_plan_optional_pass_review` → `enter_review_decision`，不直入本入口）；
+    /// - 门内轮次切换：`decisions.rs` 的 enter_human_confirm 在建新一轮门节点前收口
+    ///   被取代的旧门。
+    ///
+    /// 时间/摘要走既有同源链路（update_timeline_node 取 now，与 compile 节点一致）。
+    pub(crate) async fn close_active_human_confirm_node(&mut self, summary: &str) {
+        let superseded: Vec<String> = self
+            .timeline_nodes
+            .iter()
+            .filter(|node| {
                 node.node_type == TimelineNodeType::HumanConfirm
                     && node.status == TimelineNodeStatus::Active
-            });
-        if is_open_human_confirm_gate {
-            self.complete_active_node(Some("已确认通过".to_string()))
-                .await;
+            })
+            .map(|node| node.node_id.clone())
+            .collect();
+        for node_id in superseded {
+            self.update_timeline_node(
+                &node_id,
+                TimelineNodeStatus::Completed,
+                Some(summary.to_string()),
+            )
+            .await;
         }
     }
 
     async fn enter_work_item_plan_compile_with_auto_confirmation(&mut self, auto_confirm: bool) {
-        self.close_active_human_confirm_node().await;
+        self.close_active_human_confirm_node("已确认通过").await;
         self.transition_stage(WorkspaceStage::Running).await;
         self.create_timeline_node(TimelineNodeDraft {
             node_type: TimelineNodeType::WorkItemPlanCompile,

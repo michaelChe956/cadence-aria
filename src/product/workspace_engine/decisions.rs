@@ -299,6 +299,14 @@ impl WorkspaceEngine {
     }
 
     pub(crate) async fn enter_human_confirm(&mut self, summary: Option<String>) {
+        // F-49：门内轮次切换即收口被取代的旧门节点（同一会话至多一个 Active 门）。
+        // 判据/边界见 `compile.rs::close_active_human_confirm_node`：门内人工反馈 →
+        // 修订（author 节点）→ 复评（review 节点）后旧门节点活动态已被抢走，F-42
+        // 只在终态确认链收口的旧判据无法覆盖本形态，实测 durable 双 active 门节点。
+        // 本收口只标记完成，不作废 durable 门快照/预算（门身份与预算接续由
+        // `human_gate_snapshot` 承载，与本次轮次切换无关）。
+        self.close_active_human_confirm_node("已被新一轮人工门取代")
+            .await;
         self.transition_stage(WorkspaceStage::HumanConfirm).await;
         let _ = self
             .create_timeline_node(TimelineNodeDraft {

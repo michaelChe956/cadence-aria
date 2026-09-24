@@ -1131,6 +1131,240 @@ async fn conversational_gate_revision_heading_normalized_audit_events_coexist_ac
     )));
 }
 
+/// F-49/A5：门内轮次切换（反馈 → 修订 → 复评 → 新门）必须收口被取代的门节点。
+///
+/// 现场同构（issue_0002/workspace_session_0009 实测）：timeline_node_006 与
+/// timeline_node_010 同时 `status=active`——F-42 的收口判据是「活动节点恰为 Active
+/// HumanConfirm」，只在终态确认链（approve/compile）成立；门内轮次之间零收口，
+/// 旧门节点永久滞留 Active，重连投影据残留 Active 节点恢复门态。
+#[tokio::test]
+async fn conversational_gate_round_switch_closes_superseded_human_confirm_node() {
+    use crate::web::workspace_ws_types::{TimelineNodeStatus, TimelineNodeType};
+
+    let (_root, lifecycle, mut engine) = evaluate_gate_revision_fixture("gate_round_switch", 2, 1);
+    // 第一轮门：真实开门（enter_human_confirm 建 Active HumanConfirm 节点）。
+    engine
+        .enter_human_confirm(Some("第一轮人工确认".to_string()))
+        .await;
+    let first_gate = engine.active_timeline_node_id().expect("first gate node");
+    assert_eq!(
+        timeline_node_status(&engine, &first_gate),
+        TimelineNodeStatus::Active
+    );
+
+    // 门内反馈 → 修订 → 复评 pass → 第二轮以新门取代旧门。
+    let turn_id = open_running_revision_turn(&mut engine, "gate_round_switch_command").await;
+    let result = engine
+        .run_sc_manual_revision_turn(&turn_id, handoff_clean_rep4_v2())
+        .await
+        .expect("valid revision must complete");
+    assert!(matches!(
+        result,
+        crate::product::workspace_engine::ScManualRevisionResult::Accepted { .. }
+    ));
+    engine
+        .complete_review(
+            crate::cross_cutting::streaming_provider::ProviderCompletion::plain(
+                "review".to_string(),
+                None,
+            ),
+            pass_revision_review_verdict(),
+        )
+        .await;
+    let second_gate = engine.active_timeline_node_id().expect("second gate node");
+    assert_ne!(second_gate, first_gate, "轮次切换必须开新一轮门节点");
+
+    // 核心断言：旧门节点被收口；任一时刻只有一个 Active 门节点。
+    assert_eq!(
+        timeline_node_status(&engine, &first_gate),
+        TimelineNodeStatus::Completed,
+        "门内轮次切换必须收口被取代的门节点（实测缺陷：双 active human_confirm）"
+    );
+    let active_gates: Vec<&str> = engine
+        .timeline_nodes
+        .iter()
+        .filter(|node| {
+            node.node_type == TimelineNodeType::HumanConfirm
+                && node.status == TimelineNodeStatus::Active
+        })
+        .map(|node| node.node_id.as_str())
+        .collect();
+    assert_eq!(active_gates, vec![second_gate.as_str()]);
+
+    // durable 同步：重启/重连投影只据落盘事实恢复门态。
+    let session_id = engine.session().session_id.as_str();
+    let durable = lifecycle
+        .load_timeline_nodes(session_id)
+        .expect("durable timeline nodes");
+    let durable_first = durable
+        .iter()
+        .find(|node| node.node_id == first_gate)
+        .expect("durable first gate node");
+    assert_eq!(durable_first.status, TimelineNodeStatus::Completed);
+    assert!(
+        durable_first.completed_at.is_some(),
+        "收口必须落完成时间（与 F-42 同源链路）"
+    );
+    assert_eq!(
+        durable
+            .iter()
+            .filter(|node| {
+                node.node_type == TimelineNodeType::HumanConfirm
+                    && node.status == TimelineNodeStatus::Active
+            })
+            .count(),
+        1,
+        "durable 时间线只允许一个 Active 门节点"
+    );
+}
+
+/// F-49/A6：门内人工修订轮必须与普通 SC 修订同构地落在一个 author 节点上。
+///
+/// 现状（现场同构 workspace_session_0009）：修订由 `active_timeline_node_id()`
+/// （门节点）驱动，revision prompt / streaming_content / output 事件 / artifact_ref
+/// 全部写进门节点 detail；门节点 `node_type=human_confirm` 在对话流 rebuild 的
+/// `chatRoleForTimelineNode` 判为 null，整节点零条目——实测 artifact v3 挂
+/// timeline_node_006，用户侧「author 修订步不可见」。
+#[tokio::test]
+async fn conversational_gate_revision_round_records_facts_on_author_node() {
+    use crate::product::models::AgentRole;
+    use crate::web::workspace_ws_types::{TimelineNodeStatus, TimelineNodeType};
+
+    let (_root, lifecycle, mut engine) =
+        evaluate_gate_revision_fixture("gate_revision_author_node", 2, 1);
+    engine
+        .enter_human_confirm(Some("门内修订".to_string()))
+        .await;
+    let gate_node = engine.active_timeline_node_id().expect("gate node");
+    let author_nodes_before = engine
+        .timeline_nodes
+        .iter()
+        .filter(|node| node.node_type == TimelineNodeType::AuthorRun)
+        .count();
+
+    let turn_id =
+        open_running_revision_turn(&mut engine, "gate_revision_author_node_command").await;
+    // ws 层（provider_run.rs 的 HumanGateScManualRevision 臂）在驱动 provider 前
+    // 以本入口选节点：门修订轮的 author 载体。
+    let run_node = engine.begin_work_item_plan_human_gate_revision_run().await;
+    assert_ne!(run_node, gate_node, "门修订不得把修订事实写进门节点");
+    assert_eq!(
+        timeline_node_status(&engine, &run_node),
+        TimelineNodeStatus::Active
+    );
+    assert_eq!(
+        engine
+            .timeline_nodes
+            .iter()
+            .find(|node| node.node_id == run_node)
+            .map(|node| node.node_type.clone()),
+        Some(TimelineNodeType::AuthorRun)
+    );
+    // stage 必须与会话阶段一致：`new_persistent` 对非空 durable 时间线以活动节点的
+    // stage 重建 session.stage，门内修订期间会话阶段恒为 human_confirm（REQ-CG-02
+    // 门命令以该阶段为前提）。写成 running 会让重连/第二 worker 把阶段推导成
+    // running，门内 feedback/approve/abandon 被拒为 STAGE_INVALID（campaign 单飞
+    // 用例实测回归）。
+    assert_eq!(
+        engine
+            .timeline_nodes
+            .iter()
+            .find(|node| node.node_id == run_node)
+            .map(|node| node.stage.clone()),
+        Some(crate::web::workspace_ws_types::WorkspaceStage::HumanConfirm)
+    );
+    // provider 中断后以同一 turn 重跑（恢复）：复用同一 author 节点，不重复建节点。
+    assert_eq!(
+        engine.begin_work_item_plan_human_gate_revision_run().await,
+        run_node,
+        "同一修订轮重跑必须复用既有 author 节点"
+    );
+    assert_eq!(
+        engine
+            .timeline_nodes
+            .iter()
+            .filter(|node| node.node_type == TimelineNodeType::AuthorRun)
+            .count(),
+        author_nodes_before + 1
+    );
+
+    let result = engine
+        .run_sc_manual_revision_turn(&turn_id, handoff_clean_rep4_v2())
+        .await
+        .expect("valid revision must complete");
+    assert!(matches!(
+        result,
+        crate::product::workspace_engine::ScManualRevisionResult::Accepted { .. }
+    ));
+
+    // 修订事实同源：`human_gate_turn_completed` 帧携带的 artifact_ref 必须等于 author
+    // 节点 detail 的 artifact_ref（前端可从帧与 node detail 两处消费同一修订事实）。
+    let session_id = engine.session().session_id.as_str();
+    // 修订成功即收口该节点（与普通修订 node_004/node_008 的 Completed 同构），
+    // 不留永久 Active 的「修订中」节点。
+    assert_eq!(
+        timeline_node_status(&engine, &run_node),
+        TimelineNodeStatus::Completed
+    );
+    let turn = lifecycle
+        .get_human_gate_turn(session_id, &turn_id)
+        .expect("durable turn");
+    let turn_artifact_ref = turn
+        .result_artifact_ref
+        .expect("completed turn artifact ref");
+    let author_detail = lifecycle
+        .load_node_detail(session_id, &run_node)
+        .expect("author node detail");
+    assert_eq!(author_detail.node_type, TimelineNodeType::AuthorRun);
+    assert_eq!(
+        author_detail.agent_role,
+        Some(AgentRole::Author),
+        "修订事实必须落在 author 角色节点（前端 rebuild 据 agent_role 渲染气泡）"
+    );
+    assert_eq!(
+        author_detail
+            .artifact_ref
+            .as_ref()
+            .map(|artifact| artifact.artifact_id.as_str()),
+        Some(turn_artifact_ref.as_str()),
+        "author 节点 detail 必须携带本次修订产物（现状缺陷：v3 挂门节点）"
+    );
+    // 门节点不得携带修订产物引用。
+    match lifecycle.load_node_detail(session_id, &gate_node) {
+        Ok(gate_detail) => assert!(
+            gate_detail.artifact_ref.is_none(),
+            "门节点不得携带修订产物: {:?}",
+            gate_detail.artifact_ref
+        ),
+        Err(crate::product::json_store::ProductStoreError::NotFound { .. }) => {}
+        Err(error) => panic!("load gate node detail failed: {error}"),
+    }
+}
+
+fn timeline_node_status(
+    engine: &crate::product::workspace_engine::WorkspaceEngine,
+    node_id: &str,
+) -> crate::web::workspace_ws_types::TimelineNodeStatus {
+    engine
+        .timeline_nodes
+        .iter()
+        .find(|node| node.node_id == node_id)
+        .map(|node| node.status.clone())
+        .unwrap_or_else(|| panic!("timeline node not found: {node_id}"))
+}
+
+fn pass_revision_review_verdict() -> crate::web::workspace_ws_types::ReviewVerdict {
+    crate::web::workspace_ws_types::ReviewVerdict {
+        verdict: crate::web::workspace_ws_types::ReviewVerdictType::Pass,
+        comments: "review pass".to_string(),
+        summary: "review pass".to_string(),
+        findings: Vec::new(),
+        review_gate: crate::web::workspace_ws_types::ReviewGate::UserConfirmAllowed,
+        work_item_plan_review: None,
+        structured_output_diagnostic: None,
+    }
+}
+
 #[tokio::test]
 async fn conversational_gate_revision_result_rejects_unknown_chinese_heading() {
     let (_root, _lifecycle, mut engine) =

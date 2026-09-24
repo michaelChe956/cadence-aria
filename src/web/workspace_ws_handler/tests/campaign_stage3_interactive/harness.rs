@@ -460,6 +460,22 @@ impl CampaignStage3Harness {
             .expect("durable turns")
     }
 
+    /// F-49：durable 时间线节点（重启/重连投影的唯一事实源，非内存态）。
+    pub(super) fn durable_timeline_nodes(
+        &self,
+    ) -> Vec<crate::web::workspace_ws_types::TimelineNode> {
+        self.lifecycle
+            .load_timeline_nodes(&self.session_id)
+            .expect("durable timeline nodes")
+    }
+
+    /// F-49：durable 节点 detail（修订事实落点：prompt / 输出流 / artifact_ref）。
+    pub(super) fn durable_node_detail(&self, node_id: &str) -> crate::product::models::NodeDetail {
+        self.lifecycle
+            .load_node_detail(&self.session_id, node_id)
+            .unwrap_or_else(|error| panic!("durable node detail {node_id}: {error}"))
+    }
+
     fn session_bytes(&self) -> Vec<u8> {
         let path = self
             .app_paths

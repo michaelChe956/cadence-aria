@@ -934,3 +934,138 @@ async fn campaign_stage3_takeover_auto_stopped_reuses_snapshot_budget_and_candid
         .expect("lookup");
     assert!(event_missing.is_none(), "无 takeover event");
 }
+
+// Step F-49 —— 门内轮次切换的 durable 事实（A5 双 active 收口 + A6 修订事实落点）。
+//
+// 现场同构（issue_0002/workspace_session_0009）：门节点真实在场（node_006），用户在门内
+// 提交反馈 → 修订轮 → 复评 → 新门（node_010）。缺陷形态：
+//   A5 旧门节点滞留 Active（node_006 与 node_010 双 active）；
+//   A6 修订事实（prompt/输出流/artifact_ref）落进门节点（v3 挂 timeline_node_006），
+//      而 human_confirm 节点在前端 rebuild 判 role=null → 「author 修订步不可见」。
+// 本用例在「门节点真实在场」的形态下断言 durable 落点（4 个 campaign fixture 只设
+// stage 不建节点，故此处显式 enter_human_confirm 复现现场）。
+#[tokio::test]
+async fn campaign_stage3_interactive_gate_round_records_author_revision_facts() {
+    use crate::product::models::AgentRole;
+    use crate::web::workspace_ws_types::{TimelineNodeStatus, TimelineNodeType};
+
+    let harness = campaign_stage3_fixture(
+        2,
+        vec![RevisionScriptStep::Complete(campaign_candidate_v2())],
+    )
+    .await;
+    {
+        let mut engine = harness.engine.lock().await;
+        engine
+            .enter_human_confirm(Some("第一轮人工确认".to_string()))
+            .await;
+    }
+    let first_gate_node = harness
+        .engine
+        .lock()
+        .await
+        .active_timeline_node_id()
+        .expect("first gate node");
+
+    harness
+        .send(WsInMessage::HumanGateFeedback {
+            command_id: "cmd-f49-gate-round".to_string(),
+            feedback: "反馈A：补充验收条件".to_string(),
+        })
+        .await;
+    let open = harness.await_gate_event("human_gate_turn_open").await;
+    let WsOutMessage::HumanGateTurnOpen { turn_id, .. } = open else {
+        panic!("expected turn open, got {open:?}");
+    };
+    let completed = harness.await_gate_event("human_gate_turn_completed").await;
+    let WsOutMessage::HumanGateTurnCompleted { artifact_ref, .. } = completed else {
+        panic!("expected turn completed, got {completed:?}");
+    };
+    assert!(!artifact_ref.is_empty());
+
+    let nodes = harness.durable_timeline_nodes();
+
+    // A6：门修订轮的修订事实必须落在一个 author 节点上（与普通 SC 修订同构）。
+    let author_node = nodes
+        .iter()
+        .find(|node| node.node_type == TimelineNodeType::AuthorRun)
+        .expect("gate revision must run on an author node");
+    assert_ne!(
+        author_node.node_id, first_gate_node,
+        "门修订不得把修订事实写进门节点"
+    );
+    let author_detail = harness.durable_node_detail(&author_node.node_id);
+    assert_eq!(author_detail.agent_role, Some(AgentRole::Author));
+    assert!(
+        author_detail
+            .prompt
+            .as_deref()
+            .is_some_and(|prompt| !prompt.trim().is_empty()),
+        "修订 prompt 必须持久化在 author 节点"
+    );
+    assert!(
+        !author_detail.streaming_content.trim().is_empty(),
+        "修订输出流必须持久化在 author 节点（前端 rebuild 据 author_run detail 出气泡）"
+    );
+    assert_eq!(
+        author_detail
+            .artifact_ref
+            .as_ref()
+            .map(|artifact| artifact.artifact_id.as_str()),
+        Some(artifact_ref.as_str()),
+        "human_gate_turn_completed 帧与 author 节点 detail 必须同源"
+    );
+    // 修订成功即收口该节点（与普通修订 author 节点同构），不留 Active 的「修订中」节点。
+    let completed_author_node = harness
+        .durable_timeline_nodes()
+        .into_iter()
+        .find(|node| node.node_id == author_node.node_id)
+        .expect("author node in durable timeline");
+    assert_eq!(
+        completed_author_node.status,
+        TimelineNodeStatus::Completed,
+        "修订完成必须收口 author 节点"
+    );
+    // 门节点不得携带修订产物引用（现状缺陷：v3 挂门节点）。
+    let gate_detail = harness.durable_node_detail(&first_gate_node);
+    assert!(
+        gate_detail.artifact_ref.is_none(),
+        "门节点不得携带修订产物: {:?}",
+        gate_detail.artifact_ref
+    );
+
+    // A5：新门取代旧门时收口旧门节点；durable 任一时刻只有一个 Active 门节点。
+    let superseded_gate = nodes
+        .iter()
+        .find(|node| node.node_id == first_gate_node)
+        .expect("first gate node in durable timeline");
+    assert_eq!(
+        superseded_gate.status,
+        TimelineNodeStatus::Completed,
+        "门内轮次切换必须收口被取代的门节点"
+    );
+    assert!(
+        superseded_gate.completed_at.is_some(),
+        "收口必须落完成时间"
+    );
+    let active_gates: Vec<&str> = nodes
+        .iter()
+        .filter(|node| {
+            node.node_type == TimelineNodeType::HumanConfirm
+                && node.status == TimelineNodeStatus::Active
+        })
+        .map(|node| node.node_id.as_str())
+        .collect();
+    assert_eq!(
+        active_gates.len(),
+        1,
+        "durable 时间线只允许一个 Active 门节点: {active_gates:?}"
+    );
+    assert_ne!(active_gates[0], first_gate_node, "新门必须是另一个节点");
+    // 修订轮完成、门重开：durable 门仍是等待态（人可继续反馈或 approve）。
+    assert_eq!(
+        harness.session_record().await.status,
+        WorkspaceSessionStatus::WaitingForHuman
+    );
+    assert!(!turn_id.is_empty());
+}
