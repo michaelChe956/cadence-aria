@@ -654,6 +654,49 @@ describe("CockpitInbox", () => {
     expect(screen.queryByRole("button", { name: "重新接管" })).toBeNull();
   });
 
+  // REQ-DLS-03 规范句：STALE 手动错误面引用最近租约转移事件——抽屉错误条
+  // （完整动作面归属地）渲染折叠摘要；非 STALE 硬错误或诊断缺省不渲染。
+  it("renders the folded lease transfer summary on the stale driver lease error row (REQ-DLS-03)", () => {
+    const leaseEvents = [
+      {
+        recorded_at: "2026-09-24T03:06:07.123456+00:00",
+        event: "hold",
+        connection_id: "conn-thief",
+      },
+      {
+        recorded_at: "2026-09-24T03:07:08.123456+00:00",
+        event: "write_rejected_stale",
+        connection_id: "conn-self",
+      },
+    ];
+    const { rerender } = render(
+      <CockpitInbox
+        items={[staleLeaseItem]}
+        actions={actions}
+        actionableSessionId="session_001"
+        onRetakeLease={vi.fn()}
+        leaseEvents={leaseEvents}
+      />,
+    );
+
+    const row = screen.getByTestId("cockpit-inbox-item-hard_error");
+    const summary = within(row).getByTestId("lease-diagnostics-summary");
+    expect(summary).toHaveTextContent("最近租约转移");
+    expect(within(summary).getAllByTestId("lease-diagnostics-event")).toHaveLength(2);
+    expect(summary).toHaveTextContent("持有 · conn-thief");
+
+    rerender(
+      <CockpitInbox
+        items={[{ ...staleLeaseItem, protocolErrorCode: "OTHER_CODE" }]}
+        actions={actions}
+        actionableSessionId="session_001"
+        onRetakeLease={vi.fn()}
+        leaseEvents={leaseEvents}
+      />,
+    );
+    expect(screen.queryByTestId("lease-diagnostics-summary")).toBeNull();
+  });
+
   // REQ-PCG-01：整组 Draft 确认门——[确认整组] 走 HTTP confirm 通路（门面
   // confirmBatch），[终止] 复用既有 WS abandon 二次确认；整组确认不是 WS confirm
   // 门，故不提供批量勾选、不出现 typed 反馈编辑器。

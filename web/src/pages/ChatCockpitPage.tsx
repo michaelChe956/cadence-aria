@@ -27,12 +27,14 @@ import {
 } from "../components/cockpit/CockpitShell";
 import { CockpitInboxDrawer } from "../components/cockpit/CockpitInboxDrawer";
 import { HARD_ERROR_DRAWER_REFERENCE_NOTE } from "../state/protocol-error-copy";
+import { STALE_DRIVER_LEASE_CODE } from "../state/workspace-cockpit-projection";
 import {
   GATE_TERMINATE_BUTTON_LABEL,
   GATE_TERMINATE_CONFIRM_LABEL,
 } from "../state/gate-prompt-copy";
 import { CockpitPageHeader } from "../components/cockpit/CockpitPageHeader";
 import { useWorkspaceContentLoaders } from "../hooks/useWorkspaceContentLoaders";
+import { useLeaseDiagnostics } from "../hooks/useLeaseDiagnostics";
 import { useCockpitAutopilot } from "../hooks/useCockpitAutopilot";
 import { useUnloadGuard } from "../hooks/useUnloadGuard";
 import type { WorkspaceWsApi } from "../hooks/useWorkspaceWs";
@@ -494,6 +496,13 @@ export function ChatCockpitPage({
   // 抽屉打开时归收件箱错误条（当前会话条目 actionable），页级 ChatInputBar 缩为
   // 引用面（只报状态与处理入口，不重复重接管按钮）；抽屉收起时页级自持完整
   // 动作面。判据用抽屉开合状态，不新增协议字段（scope 契约归 lease change C 面）。
+  // REQ-DLS-03 规范句「既有 STALE_DRIVER_LEASE 错误面 SHALL 引用最近相关转移
+  // 事件」：当前会话 STALE 手动错误面激活时拉取只读诊断端点（REQ-DLS-02 单次
+  // 自动重试失败后回落此面），页级错误面与抽屉错误条共用同一份摘要；端点失败
+  // 静默降级为不展示——诊断不可用不阻塞恢复动作（重接管/刷新建议照常可用）。
+  const staleLeaseNoticeActive =
+    isCurrentSession && state.protocolError?.code === STALE_DRIVER_LEASE_CODE;
+  const staleLeaseEvents = useLeaseDiagnostics(sessionId, staleLeaseNoticeActive);
   const hardErrorNotice =
     isCurrentSession && state.protocolError !== null
       ? {
@@ -504,6 +513,7 @@ export function ChatCockpitPage({
               ? null
               : handleRetakeLease,
           referenceNote: inboxDrawerOpen ? HARD_ERROR_DRAWER_REFERENCE_NOTE : null,
+          leaseEvents: staleLeaseNoticeActive ? staleLeaseEvents : null,
         }
       : null;
   const chatListRef = useRef<ChatEntryListHandle | null>(null);
@@ -978,6 +988,7 @@ export function ChatCockpitPage({
           emptyHint={inboxEmptyHint}
           artifactVersions={selectedState?.artifactVersions}
           latestReviewSummary={latestReviewReport ?? null}
+          leaseEvents={staleLeaseNoticeActive ? staleLeaseEvents : null}
           repairReservation={state.repairReservation}
         />
       </CockpitInboxDrawer>

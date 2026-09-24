@@ -32,6 +32,8 @@ import {
   PROTOCOL_ERROR_NO_RETRY_NOTE,
   protocolErrorCopy,
 } from "../../../state/protocol-error-copy";
+import { LeaseDiagnosticsSummary } from "../LeaseDiagnosticsSummary";
+import type { LeaseDiagnosticsEvent } from "../../../state/lease-diagnostics";
 import { ConfirmTwiceButton } from "./ConfirmTwiceButton";
 import { GateFeedbackEditor } from "./GateFeedbackEditor";
 import {
@@ -69,6 +71,7 @@ export function CockpitInbox({
   onBulkConfirm,
   emptyHint,
   artifactVersions = [],
+  leaseEvents = null,
   latestReviewSummary = null,
   repairReservation = null,
 }: {
@@ -83,6 +86,8 @@ export function CockpitInbox({
   /** 空收件箱时的引导文案；缺省渲染既有「暂无待处理项」。 */
   emptyHint?: string | null;
   artifactVersions?: readonly ArtifactVersionSummary[];
+  /** REQ-DLS-03：STALE 错误条引用的最近租约转移事件（诊断端点拉取，缺省不渲染）。 */
+  leaseEvents?: readonly LeaseDiagnosticsEvent[] | null;
   latestReviewSummary?: string | null;
   repairReservation?: WorkItemPlanRepairReservation | null;
 }) {
@@ -142,6 +147,7 @@ export function CockpitInbox({
     selected: selectedIds.has(item.id),
     onSelectionChange: () => toggleSelected(item),
     artifactVersions,
+    leaseEvents,
     latestReviewSummary,
     repairReservation,
     takeoverButtonRef:
@@ -224,6 +230,7 @@ function CockpitInboxRow({
   selected,
   onSelectionChange,
   artifactVersions,
+  leaseEvents,
   latestReviewSummary,
   repairReservation,
   takeoverButtonRef,
@@ -238,6 +245,7 @@ function CockpitInboxRow({
   selected: boolean;
   onSelectionChange(): void;
   artifactVersions: readonly ArtifactVersionSummary[];
+  leaseEvents: readonly LeaseDiagnosticsEvent[] | null;
   latestReviewSummary: string | null;
   repairReservation: WorkItemPlanRepairReservation | null;
   takeoverButtonRef?: Ref<ConfirmTwiceButtonHandle>;
@@ -257,6 +265,7 @@ function CockpitInboxRow({
         actionable={actionable}
         onRetry={onRetry}
         onRetakeLease={onRetakeLease}
+        leaseEvents={leaseEvents}
       />
     );
   }
@@ -374,6 +383,7 @@ function HardErrorInboxRow({
   actionable,
   onRetry,
   onRetakeLease,
+  leaseEvents,
 }: {
   item: CockpitInboxItem;
   pulse: boolean;
@@ -381,6 +391,8 @@ function HardErrorInboxRow({
   actionable: boolean;
   onRetry?: (item: CockpitInboxItem) => void;
   onRetakeLease?: () => void;
+  /** REQ-DLS-03：STALE 错误条引用的最近租约转移事件（缺省不渲染）。 */
+  leaseEvents: readonly LeaseDiagnosticsEvent[] | null;
 }) {
   const Glyph = KIND_GLYPH.hard_error;
   return (
@@ -414,6 +426,11 @@ function HardErrorInboxRow({
             <p className="mt-1 text-xs leading-4 text-slate-600">
               {protocolErrorCopy(item.protocolErrorCode).body}
             </p>
+          ) : null}
+          {/* REQ-DLS-03 规范句：STALE 错误条引用最近租约转移事件（可定案
+              偷窃者身份）；非 STALE 硬错误或诊断缺省（端点失败静默降级）不渲染。 */}
+          {isStaleDriverLeaseItem(item) && leaseEvents ? (
+            <LeaseDiagnosticsSummary events={leaseEvents} />
           ) : null}
           {item.inlineError ? (
             <p className="aria-mono mt-1 break-words text-xs text-red-600">

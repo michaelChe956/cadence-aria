@@ -13,6 +13,7 @@ import type {
   GenerateStorySpecsResponse,
   GenerateWorkItemsResponse,
   IssueLifecycleResponse,
+  LeaseDiagnosticsResponse,
   PrepareWorkItemPlanRequest,
   PrepareWorkItemPlanResponse,
   ProductIssue,
@@ -90,6 +91,17 @@ export function takeoverWorkspaceSession(sessionId: string): Promise<TakeoverRes
   return requestJson<TakeoverResponse>(
     `/api/workspace-sessions/${encodeURIComponent(sessionId)}/takeover`,
     { method: "POST" },
+  );
+}
+
+// REQ-DLS-03：STALE 手动错误面引用最近租约转移事件的数据源（只读诊断端点）。
+// 失败（网络/非 2xx）抛 ApiRequestError，由调用方静默降级——诊断不可用
+// 不阻塞错误面的恢复动作。
+export function getWorkspaceSessionLeaseDiagnostics(
+  sessionId: string,
+): Promise<LeaseDiagnosticsResponse> {
+  return requestJson<LeaseDiagnosticsResponse>(
+    `/api/workspace-sessions/${encodeURIComponent(sessionId)}/lease-diagnostics`,
   );
 }
 

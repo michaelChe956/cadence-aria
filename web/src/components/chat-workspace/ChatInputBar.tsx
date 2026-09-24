@@ -25,6 +25,8 @@ import type { ChatEntry, ChatEntryType } from "../../state/chat-entries";
 import { ConfirmTwiceButton } from "./cockpit/ConfirmTwiceButton";
 import { PROTOCOL_ERROR_DETAILS_LABEL, protocolErrorCopy } from "../../state/protocol-error-copy";
 import { DraftValidationFailureNotice } from "../workspace/DraftValidationFailureNotice";
+import { LeaseDiagnosticsSummary } from "./LeaseDiagnosticsSummary";
+import type { LeaseDiagnosticsEvent } from "../../state/lease-diagnostics";
 
 interface ChatInputBarProps {
   stage: string;
@@ -65,6 +67,11 @@ export interface HardErrorNotice {
    * 待处理抽屉的提示并不再渲染重接管按钮；null 表示页级自持完整动作面。
    */
   referenceNote?: string | null;
+  /**
+   * REQ-DLS-03：STALE 错误面引用的最近租约转移事件（诊断端点拉取）。
+   * null/缺省（未激活或端点失败静默降级）不渲染摘要。
+   */
+  leaseEvents?: readonly LeaseDiagnosticsEvent[] | null;
 }
 
 /**
@@ -257,6 +264,9 @@ export const ChatInputBar = forwardRef<ChatInputBarHandle, ChatInputBarProps>(
                         ? "——建议刷新页面或重新进入会话后重试"
                         : null}
                   </p>
+                  {hardErrorNotice.leaseEvents ? (
+                    <LeaseDiagnosticsSummary events={hardErrorNotice.leaseEvents} />
+                  ) : null}
                   {hasTranslation ? (
                     <details data-testid="hard-error-details">
                       <summary className="cursor-pointer text-xs font-medium text-red-600">

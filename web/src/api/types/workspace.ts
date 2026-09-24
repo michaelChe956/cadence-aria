@@ -136,6 +136,17 @@ export type TakeoverResponse = WorkspaceSession & {
   takeover_event_id: string;
 };
 
+// REQ-DLS-03：只读租约诊断端点响应（活跃 manager 内存快照优先，回收后
+// durable jsonl 尾读回退——两形态同构）。事件行只声明消费面字段，其余打点
+// 字段（role/reason/from_holder/to_holder/epoch 等）由前端防御性解析忽略。
+export interface LeaseDiagnosticsResponse {
+  session_id: string;
+  holder: string | null;
+  epoch: number | null;
+  last_holder: string | null;
+  events: unknown[];
+}
+
 export type ArtifactUpdateMessage =
   | { type: "artifact_update"; version: number; markdown: string; diff?: string | null }
   | { type: "artifact_update"; version: number; candidate: WorkItemPlanCandidateDto }

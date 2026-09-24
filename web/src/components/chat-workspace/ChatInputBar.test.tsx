@@ -317,6 +317,60 @@ describe("ChatInputBar", () => {
     expect(screen.queryByRole("button", { name: "重新接管" })).toBeNull();
   });
 
+  // REQ-DLS-03 规范句：STALE 手动错误面引用最近租约转移事件（诊断端点拉取，
+  // 失败缺省不渲染）——页级错误面在正文下方渲染折叠摘要（时间+事件+连接标识）。
+  it("renders the folded lease transfer summary inside the stale-lease notice (REQ-DLS-03)", () => {
+    const { rerender } = render(
+      <ChatInputBar
+        stage="prepare_context"
+        onSendContextNote={vi.fn()}
+        onStartGeneration={vi.fn()}
+        onAbort={vi.fn()}
+        hardErrorNotice={{
+          code: "STALE_DRIVER_LEASE",
+          message: "driver connection no longer holds the lease",
+          onRetakeLease: vi.fn(),
+          leaseEvents: [
+            {
+              recorded_at: "2026-09-24T03:06:07.123456+00:00",
+              event: "hold",
+              connection_id: "conn-thief",
+            },
+            {
+              recorded_at: "2026-09-24T03:07:08.123456+00:00",
+              event: "write_rejected_stale",
+              connection_id: "conn-self",
+            },
+          ],
+        }}
+      />,
+    );
+
+    const alert = screen.getByTestId("hard-error-notice");
+    const summary = within(alert).getByTestId("lease-diagnostics-summary");
+    expect(summary).toHaveTextContent("最近租约转移");
+    expect(within(summary).getAllByTestId("lease-diagnostics-event")).toHaveLength(2);
+    expect(summary).toHaveTextContent("持有 · conn-thief");
+    expect(summary).toHaveTextContent("写被拒（租约易主） · conn-self");
+
+    // 诊断不可用（端点失败或缺省）不渲染摘要，错误面其余结构不受影响。
+    rerender(
+      <ChatInputBar
+        stage="prepare_context"
+        onSendContextNote={vi.fn()}
+        onStartGeneration={vi.fn()}
+        onAbort={vi.fn()}
+        hardErrorNotice={{
+          code: "STALE_DRIVER_LEASE",
+          message: "driver connection no longer holds the lease",
+          onRetakeLease: vi.fn(),
+        }}
+      />,
+    );
+    expect(screen.queryByTestId("lease-diagnostics-summary")).toBeNull();
+    expect(screen.getByTestId("hard-error-notice")).toHaveTextContent("连接租约已失效");
+  });
+
   // F-28 二轮（v34 复验「失败态点开始生成零反馈」）：就地面泛化 hard_error
   // 全族——长开 tab 断线重连后拒收码可能是 OBSERVER_WRITE_REJECTED（本连接以
   // observer 身份重连，写操作被拒），同样给「重新接管」二次确认（sendHello
