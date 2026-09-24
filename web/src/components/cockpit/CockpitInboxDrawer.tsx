@@ -98,11 +98,11 @@ export function CockpitInboxDrawer({
         ].join(" ")}
       >
         <div className="flex min-h-11 shrink-0 items-center justify-between gap-2 border-b border-[var(--aria-line)] px-3 py-2">
-          <h2 className="text-sm font-semibold text-[var(--aria-ink)]">待处理</h2>
+          <h2 className="min-w-0 truncate text-sm font-semibold text-slate-900">待处理</h2>
           <button
             type="button"
             onClick={onClose}
-            className="inline-flex min-h-11 items-center gap-1 rounded-md px-3 text-xs font-semibold text-[var(--aria-ink-muted)] hover:bg-[var(--aria-panel-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+            className="inline-flex min-h-11 shrink-0 items-center gap-1 rounded-md px-3 text-xs font-semibold text-slate-600 transition-colors duration-200 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400"
           >
             <X className="h-4 w-4" aria-hidden="true" />
             收起待处理抽屉

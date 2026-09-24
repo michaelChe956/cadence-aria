@@ -1,6 +1,7 @@
 import {
   AlertTriangle,
   Check,
+  ChevronRight,
   ClipboardCopy,
   ClipboardList,
   CircleAlert,
@@ -33,6 +34,15 @@ import {
 } from "../../../state/protocol-error-copy";
 import { ConfirmTwiceButton } from "./ConfirmTwiceButton";
 import { GateFeedbackEditor } from "./GateFeedbackEditor";
+import {
+  BTN_GHOST_CLASS,
+  BTN_PRIMARY_CLASS,
+  BTN_SECONDARY_CLASS,
+  DISCLOSURE_CHEVRON_CLASS,
+  DISCLOSURE_SUMMARY_CLASS,
+  GATE_CARD_CLASS,
+  GATE_NESTED_BLOCK_CLASS,
+} from "../gate-visual-tokens";
 import { useCockpitInboxPulse } from "../../cockpit/CockpitShell";
 
 const KIND_GLYPH = {
@@ -41,9 +51,11 @@ const KIND_GLYPH = {
   hard_error: AlertTriangle,
 } as const;
 
+// F-50 视觉 v2 §3：门禁条目与门卡同一视觉常量（中性底+琥珀左线）；stopped 维持
+// 中性弱化——琥珀不再做整卡底色。
 const KIND_CLASS = {
-  gate: "border-[var(--aria-gate-open-border)] bg-[var(--aria-gate-open-bg)]",
-  stopped: "border-[var(--aria-line-strong)] bg-[var(--aria-panel-subtle)]",
+  gate: GATE_CARD_CLASS,
+  stopped: "rounded-lg border border-slate-200 bg-gray-50 px-3 py-2",
 } as const;
 
 export function CockpitInbox({
@@ -120,7 +132,6 @@ export function CockpitInbox({
   const connectionItems = items.filter((item) => item.kind === "hard_error");
   const humanItems = items.filter((item) => item.kind !== "hard_error");
   const rowProps = (item: CockpitInboxItem) => ({
-    key: item.id,
     item,
     actions,
     onTakeover,
@@ -140,14 +151,20 @@ export function CockpitInbox({
     <section
       data-testid="cockpit-inbox"
       aria-label="待处理收件箱"
-      className="flex flex-col gap-2 rounded-xl border-2 border-[var(--aria-line-strong)] bg-[var(--aria-panel)] p-3"
+      className="flex flex-col gap-2 rounded-xl border border-slate-200 bg-white p-3"
     >
       {/* F-50 裁决 8：批量规则默认一句短句，REQ 编号与完整规则收进折叠详情，
           不再占一整组首屏高度。 */}
-      <p data-testid="inbox-bulk-rule" className="text-xs text-[var(--aria-ink-muted)]">
+      <p data-testid="inbox-bulk-rule" className="text-xs text-slate-500">
         跨会话批量确认 · 每个会话一次
-        <details data-testid="inbox-bulk-rule-details" className="ml-1 inline-block">
-          <summary className="cursor-pointer text-xs font-medium text-[var(--aria-primary)]">
+        <details
+          data-testid="inbox-bulk-rule-details"
+          className="group ml-1 inline-block"
+        >
+          <summary
+            className={`${DISCLOSURE_SUMMARY_CLASS} ml-0.5 inline-flex items-center gap-0.5 text-xs font-medium text-indigo-600`}
+          >
+            <ChevronRight className={DISCLOSURE_CHEVRON_CLASS} aria-hidden="true" />
             详情
           </summary>
           <span className="mt-1 block text-xs leading-4">
@@ -159,32 +176,38 @@ export function CockpitInbox({
         <button
           type="button"
           onClick={handleBulkConfirm}
-          className="min-h-11 rounded-md border border-emerald-200 bg-white px-3 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+          className={`${BTN_PRIMARY_CLASS} w-full`}
         >
           批量确认 {selectedItems.length} 项（{new Set(selectedItems.map((item) => cockpitInboxItemSessionId(item.id))).size} 个会话）
         </button>
       ) : null}
       {items.length === 0 ? (
-        <p className="text-xs text-[var(--aria-ink-muted)]">{emptyHint ?? "暂无待处理项"}</p>
+        <p className="text-xs text-slate-500">{emptyHint ?? "暂无待处理项"}</p>
       ) : (
-        <>
+        // F-50 视觉 v2 §3：分组标题弱化（uppercase tracking-wider），组间距
+        // space-y-4；组内条目 6px 紧排——组间 16px / 组内 6px 拉开层级。
+        <div className="space-y-4">
           {connectionItems.length > 0 ? (
-            <h3 className="text-xs font-semibold uppercase tracking-wide text-[var(--aria-ink-muted)]">
-              连接问题
-            </h3>
+            <div className="space-y-1.5">
+              <h3 className="text-xs font-medium uppercase tracking-wider text-slate-500">
+                连接问题
+              </h3>
+              {connectionItems.map((item) => (
+                <CockpitInboxRow key={item.id} {...rowProps(item)} />
+              ))}
+            </div>
           ) : null}
-          {connectionItems.map((item) => (
-            <CockpitInboxRow {...rowProps(item)} />
-          ))}
           {humanItems.length > 0 ? (
-            <h3 className="text-xs font-semibold uppercase tracking-wide text-[var(--aria-ink-muted)]">
-              需要人工处理
-            </h3>
+            <div className="space-y-1.5">
+              <h3 className="text-xs font-medium uppercase tracking-wider text-slate-500">
+                需要人工处理
+              </h3>
+              {humanItems.map((item) => (
+                <CockpitInboxRow key={item.id} {...rowProps(item)} />
+              ))}
+            </div>
           ) : null}
-          {humanItems.map((item) => (
-            <CockpitInboxRow {...rowProps(item)} />
-          ))}
-        </>
+        </div>
       )}
     </section>
   );
@@ -242,7 +265,7 @@ function CockpitInboxRow({
       data-testid={`cockpit-inbox-item-${item.kind}`}
       data-pulse={pulse}
       className={[
-        "flex min-h-11 items-start gap-2 rounded-lg border-2 px-3 py-2",
+        "flex items-start gap-2",
         "motion-safe:transition-colors motion-safe:duration-200",
         pulse ? "motion-safe:animate-pulse ring-2 ring-[var(--aria-danger)]" : "",
         KIND_CLASS[item.kind],
@@ -250,14 +273,15 @@ function CockpitInboxRow({
     >
       <Glyph className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
       <div className="min-w-0 flex-1">
-        <p className="text-sm font-semibold text-[var(--aria-ink)]">{item.title}</p>
+        {/* F-50 视觉 v2 §3：标题行 truncate+min-w-0，副信息换行不挤同行。 */}
+        <p className="min-w-0 truncate text-sm font-semibold text-slate-900">{item.title}</p>
         {item.summary ? (
-          <p className="mt-1 break-words text-xs leading-4 text-[var(--aria-ink-muted)]">
+          <p className="mt-1 break-words text-xs leading-4 text-slate-600">
             {item.summary}
           </p>
         ) : null}
         {selectable ? (
-          <label className="mt-2 flex min-h-11 items-center gap-2 text-xs font-medium text-[var(--aria-ink)]">
+          <label className="mt-2 flex min-h-11 items-center gap-2 text-sm font-medium text-slate-700">
             <input
               type="checkbox"
               aria-label={`选择 ${item.title}`}
@@ -291,7 +315,7 @@ function CockpitInboxRow({
               <button
                 type="button"
                 disabled
-                className="inline-flex min-h-11 items-center gap-1 rounded-md border border-[var(--aria-line-strong)] bg-white px-3 text-xs font-semibold text-[var(--aria-ink)] disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+                className={`${BTN_SECONDARY_CLASS} disabled:cursor-not-allowed disabled:opacity-60`}
               >
                 接管
               </button>
@@ -365,19 +389,20 @@ function HardErrorInboxRow({
       data-pulse={pulse}
       role="alert"
       className={[
-        "rounded-lg border-2 border-[var(--aria-danger)] bg-[var(--aria-danger-soft)] px-3 py-2",
+        // F-50 视觉 v2 §3：错误条中性底——红只上图标+mono 码（不再红底整条）。
+        "rounded-lg border border-slate-200 bg-white px-3 py-2",
         pulse ? "motion-safe:animate-pulse ring-2 ring-[var(--aria-danger)]" : "",
       ].join(" ")}
     >
       <div className="flex items-start gap-2">
-        <Glyph className="mt-0.5 h-4 w-4 shrink-0 text-[var(--aria-danger)]" aria-hidden="true" />
+        <Glyph className="mt-0.5 h-4 w-4 shrink-0 text-red-600" aria-hidden="true" />
         <div className="min-w-0 flex-1">
           <p className="flex flex-wrap items-baseline gap-x-2">
-            <span className="text-sm font-semibold text-[var(--aria-ink)]">{item.title}</span>
+            <span className="text-sm font-semibold text-slate-900">{item.title}</span>
             {item.protocolErrorCode ? (
               <span
                 data-testid="cockpit-inbox-error-code"
-                className="aria-mono text-xs font-normal text-[var(--aria-danger)]"
+                className="aria-mono text-xs font-normal text-red-600"
               >
                 {item.protocolErrorCode}
               </span>
@@ -386,25 +411,31 @@ function HardErrorInboxRow({
           {/* F-50 裁决 6：已知码配中文正文；没有可负责任的译文时不编（正文缺省，
               原文已在折叠详情）。 */}
           {item.protocolErrorCode && protocolErrorCopy(item.protocolErrorCode).body ? (
-            <p className="mt-1 text-xs leading-4 text-[var(--aria-ink)]">
+            <p className="mt-1 text-xs leading-4 text-slate-600">
               {protocolErrorCopy(item.protocolErrorCode).body}
             </p>
           ) : null}
           {item.inlineError ? (
-            <p className="aria-mono mt-1 break-words text-xs text-[var(--aria-danger)]">
+            <p className="aria-mono mt-1 break-words text-xs text-red-600">
               {item.inlineError.code} · {item.inlineError.message}
             </p>
           ) : null}
-          <details data-testid="cockpit-inbox-error-details" className="mt-1">
-            <summary className="cursor-pointer text-xs font-medium text-[var(--aria-ink-muted)]">
+          <details
+            data-testid="cockpit-inbox-error-details"
+            className="group mt-1"
+          >
+            <summary
+              className={`${DISCLOSURE_SUMMARY_CLASS} flex items-center gap-1 text-xs font-medium text-slate-600`}
+            >
+              <ChevronRight className={DISCLOSURE_CHEVRON_CLASS} aria-hidden="true" />
               {PROTOCOL_ERROR_DETAILS_LABEL}
             </summary>
-            <p className="aria-mono mt-1 break-words text-xs leading-4 text-[var(--aria-ink-muted)]">
+            <p className="aria-mono mt-1 break-words text-xs leading-4 text-slate-600">
               {item.summary}
             </p>
             {/* 裁决 5：不可安全重放的原因作为可见文本（title 悬停不可达）。 */}
             {item.source !== "advance" ? (
-              <p className="mt-1 text-xs text-[var(--aria-ink-muted)]">
+              <p className="mt-1 text-xs text-slate-600">
                 {PROTOCOL_ERROR_NO_RETRY_NOTE}
               </p>
             ) : null}
@@ -422,9 +453,9 @@ function HardErrorInboxRow({
                 <button
                   type="button"
                   onClick={() => onRetry?.(item)}
-                  className="inline-flex min-h-11 items-center gap-1 rounded-md border border-[var(--aria-line-strong)] bg-white px-3 text-xs font-semibold text-[var(--aria-ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+                  className={BTN_SECONDARY_CLASS}
                 >
-                  <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
+                  <RotateCcw className="h-4 w-4" aria-hidden="true" />
                   重试推进
                 </button>
               ) : null}
@@ -513,14 +544,14 @@ function GateInboxActions({
         {actionBlockReason !== null ? (
           // F-21：phase_mismatch 的 plan 门终止专属放行——只露终止，说明行替代
           // 确认/反馈（相位纪律维持）。
-          <p className="w-full text-xs text-[var(--aria-ink-muted)]">
+          <p className="w-full text-xs text-slate-500">
             {gateActionBlockCopy(actionBlockReason)}，可终止后重新发起
           </p>
         ) : null}
         {typed && actionBlockReason === null ? (
           <>
             {typedGateNeedsNewCommand ? (
-              <p className="w-full text-xs text-[var(--aria-ink-muted)]">
+              <p className="w-full text-xs text-slate-500">
                 未同步门命令，将以新命令提交
               </p>
             ) : null}
@@ -537,9 +568,9 @@ function GateInboxActions({
           <button
             type="button"
             onClick={actions.confirm}
-            className="btn-primary inline-flex min-h-11 items-center gap-1 px-3 text-xs font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+            className={BTN_PRIMARY_CLASS}
           >
-            <Check className="h-3.5 w-3.5" aria-hidden="true" />
+            <Check className="h-4 w-4" aria-hidden="true" />
             {authorGate ? "确认定稿" : "确认"}
           </button>
         ) : null}
@@ -550,7 +581,7 @@ function GateInboxActions({
           <button
             type="button"
             onClick={actions.confirmReview}
-            className="btn-secondary inline-flex min-h-11 items-center gap-1 px-3 text-xs font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+            className={BTN_SECONDARY_CLASS}
           >
             确认并评审
           </button>
@@ -564,13 +595,14 @@ function GateInboxActions({
           <button
             type="button"
             onClick={actions.adoptReview}
-            className="btn-secondary inline-flex min-h-11 items-center gap-1 px-3 text-xs font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+            className={BTN_SECONDARY_CLASS}
           >
-            <ClipboardCopy className="h-3.5 w-3.5" aria-hidden="true" />
+            <ClipboardCopy className="h-4 w-4" aria-hidden="true" />
             采纳 Review 意见
           </button>
         ) : null}
         <ConfirmTwiceButton
+          variant="ghost"
           label={GATE_TERMINATE_BUTTON_LABEL}
           confirmLabel={GATE_TERMINATE_CONFIRM_LABEL}
           onConfirm={actions.terminate}
@@ -593,12 +625,13 @@ function BatchConfirmActions({ actions }: { actions: CockpitActionFacade }) {
         onClick={() => {
           void actions.confirmBatch();
         }}
-        className="btn-primary inline-flex min-h-11 items-center gap-1 px-3 text-xs font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+        className={BTN_PRIMARY_CLASS}
       >
-        <Check className="h-3.5 w-3.5" aria-hidden="true" />
+        <Check className="h-4 w-4" aria-hidden="true" />
         确认整组
       </button>
       <ConfirmTwiceButton
+        variant="ghost"
         label={GATE_TERMINATE_BUTTON_LABEL}
         confirmLabel={GATE_TERMINATE_CONFIRM_LABEL}
         onConfirm={actions.terminate}
@@ -614,8 +647,7 @@ function BatchConfirmActions({ actions }: { actions: CockpitActionFacade }) {
  */
 function CompileRecoveryActions({ actions }: { actions: CockpitActionFacade }) {
   const [triageReason, setTriageReason] = useState("");
-  const buttonClass =
-    "btn-secondary inline-flex min-h-11 items-center gap-1 px-3 text-xs font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]";
+  // F-50 视觉 v2 §1：recovery 三动作=次操作描边（确认类才上实心主操作）。
   return (
     <div className="mt-3 space-y-2">
       <div className="flex flex-wrap gap-2">
@@ -624,9 +656,9 @@ function CompileRecoveryActions({ actions }: { actions: CockpitActionFacade }) {
           onClick={() => {
             void actions.recoverCompile("continue");
           }}
-          className={buttonClass}
+          className={BTN_SECONDARY_CLASS}
         >
-          <Play className="h-3.5 w-3.5" aria-hidden="true" />
+          <Play className="h-4 w-4" aria-hidden="true" />
           继续
         </button>
         <button
@@ -634,9 +666,9 @@ function CompileRecoveryActions({ actions }: { actions: CockpitActionFacade }) {
           onClick={() => {
             void actions.recoverCompile("abort_and_rollback");
           }}
-          className={buttonClass}
+          className={BTN_SECONDARY_CLASS}
         >
-          <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
+          <RotateCcw className="h-4 w-4" aria-hidden="true" />
           放弃并回滚
         </button>
         <button
@@ -644,19 +676,19 @@ function CompileRecoveryActions({ actions }: { actions: CockpitActionFacade }) {
           onClick={() => {
             void actions.recoverCompile("human_triage", triageReason.trim() || undefined);
           }}
-          className={buttonClass}
+          className={BTN_SECONDARY_CLASS}
         >
-          <UserRound className="h-3.5 w-3.5" aria-hidden="true" />
+          <UserRound className="h-4 w-4" aria-hidden="true" />
           转人工
         </button>
       </div>
-      <label className="flex min-h-11 items-center gap-2 text-xs font-medium text-[var(--aria-ink)]">
+      <label className="flex min-h-11 items-center gap-2 text-xs font-medium text-slate-700">
         转人工原因（可选）
         <input
           type="text"
           value={triageReason}
           onChange={(event) => setTriageReason(event.target.value)}
-          className="min-h-9 flex-1 rounded-md border border-[var(--aria-line-strong)] px-2 text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+          className="min-h-9 flex-1 rounded-md border border-slate-300 bg-gray-50 px-2 text-xs text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400"
         />
       </label>
     </div>
@@ -698,12 +730,12 @@ function GateSummary({
 }) {
   const verdictLabel = verdict === "pass" ? "审核通过" : verdict === "revise" ? "需要返修" : verdict === "needs_human" ? "需要人工判断" : "待审核";
   return (
-    <section aria-label="等待确认的内容" className="rounded-md border border-[var(--aria-line)] bg-white/70 p-3">
-      <p className="text-xs font-semibold text-[var(--aria-ink-muted)]">等待确认的内容</p>
-      <p className="mt-1 text-sm font-semibold text-[var(--aria-ink)]">{title}</p>
-      <p className="mt-1 text-xs text-[var(--aria-ink-muted)]">版本 {version} · {verdictLabel}</p>
-      {changes ? <p className="mt-2 text-xs leading-5 text-[var(--aria-ink)]">{changes}</p> : null}
-      {review ? <p className="mt-2 text-xs leading-5 text-[var(--aria-ink-muted)]">{review}</p> : null}
+    <section aria-label="等待确认的内容" className={GATE_NESTED_BLOCK_CLASS}>
+      <p className="text-xs font-semibold text-slate-500">等待确认的内容</p>
+      <p className="mt-1 truncate text-sm font-semibold text-slate-900">{title}</p>
+      <p className="mt-1 text-xs text-slate-500">版本 {version} · {verdictLabel}</p>
+      {changes ? <p className="mt-2 text-xs leading-5 text-slate-700">{changes}</p> : null}
+      {review ? <p className="mt-2 text-xs leading-5 text-slate-500">{review}</p> : null}
     </section>
   );
 }

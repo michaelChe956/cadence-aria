@@ -1,4 +1,5 @@
 import type { ChangeEvent } from "react";
+import { BTN_SECONDARY_CLASS, GATE_INPUT_CLASS } from "../gate-visual-tokens";
 
 export function GateFeedbackEditor({
   multiline = false,
@@ -14,32 +15,33 @@ export function GateFeedbackEditor({
   const handleChange = (event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     onChange(event.target.value);
   };
-  const className = "min-h-11 min-w-0 flex-1 rounded-md border border-[var(--aria-line-strong)] bg-white px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]";
+  // F-50 视觉 v2 §2：反馈输入行——input 中性灰底 slate 描边（dark: bg-slate-800
+  // border-slate-700），提交=次操作描边钮（旧琥珀描边形态退役：琥珀不再上按钮）。
 
   return (
     <div data-testid="gate-feedback-editor" className="flex flex-wrap items-center gap-2">
       {multiline ? (
         <textarea
           aria-label="门禁反馈"
+          className={GATE_INPUT_CLASS}
           value={value}
           onChange={handleChange}
           placeholder="请输入反馈内容"
-          className={className}
         />
       ) : (
         <input
           aria-label="门禁反馈"
+          className={GATE_INPUT_CLASS}
           value={value}
           onChange={handleChange}
           placeholder="请输入反馈内容"
-          className={className}
         />
       )}
       <button
         type="button"
         disabled={!value.trim()}
         onClick={() => onSubmit(value.trim())}
-        className="inline-flex min-h-11 items-center gap-1 rounded-md border border-amber-200 bg-white px-3 text-xs font-semibold text-amber-700 hover:bg-amber-50 disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+        className={`${BTN_SECONDARY_CLASS} disabled:cursor-not-allowed disabled:opacity-60`}
       >
         提交反馈
       </button>

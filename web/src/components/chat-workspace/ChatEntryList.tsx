@@ -155,7 +155,7 @@ export const ChatEntryList = forwardRef<ChatEntryListHandle, ChatEntryListProps>
                 return null;
               }
 
-              const rowClassName = "absolute left-0 top-0 w-full min-w-0 pb-3";
+              const rowClassName = "absolute left-0 top-0 w-full min-w-0 pb-4";
               const rowStyle = { transform: `translateY(${virtualRow.start}px)` };
 
               if (item.kind === "group") {

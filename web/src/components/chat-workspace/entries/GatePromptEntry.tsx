@@ -1,4 +1,4 @@
-import { Check, FileText } from "lucide-react";
+import { Check, ChevronRight, FileText } from "lucide-react";
 import { useState } from "react";
 import type { ChatEntry } from "../../../state/chat-entries";
 import {
@@ -32,6 +32,20 @@ import type { CockpitActionFacade } from "../../../state/cockpit-action-routing"
 import { ConfirmTwiceButton } from "../cockpit/ConfirmTwiceButton";
 import { GateFeedbackEditor } from "../cockpit/GateFeedbackEditor";
 import { ChatEntryContainer } from "../ChatEntryContainer";
+import {
+  BTN_GHOST_CLASS,
+  BTN_PRIMARY_CLASS,
+  BTN_SECONDARY_CLASS,
+  DISCLOSURE_CHEVRON_CLASS,
+  DISCLOSURE_SUMMARY_CLASS,
+  GATE_CARD_CLASS,
+  GATE_CHIP_CLASS,
+  GATE_DIVIDER_CLASS,
+  GATE_META_TEXT_CLASS,
+  GATE_NESTED_BLOCK_CLASS,
+  GATE_SECONDARY_TEXT_CLASS,
+  GATE_TITLE_CLASS,
+} from "../gate-visual-tokens";
 import { isRequiredFindingSeverity, ReviewFindingGroups, reviewFindingsFromEntry } from "../finding-list";
 
 /** F-38：门卡产物行的种类名（与生命周期卡片同一套称呼）。 */
@@ -188,12 +202,12 @@ export function GatePromptEntry({
     <ChatEntryContainer
       role="system"
       title={title}
-      // F-50 裁决 9（颜色契约）：门禁开放态用 gate-open（琥珀）token——红色只
-      // 留给错误与终止；不再让 system role 的默认红标题/红面板染流程状态。
-      // 覆盖走 panelClassName（F-49 A7 纪律），className 追加会与 role 红面板
-      // 并列输出、胜负取决于 Tailwind 输出顺序。
-      panelClassName="border-[var(--aria-gate-open-border)] bg-[var(--aria-gate-open-bg)]"
-      titleClassName="text-[var(--aria-gate-open-fg)]"
+      titleSuffix={!isResolved ? <span className={GATE_CHIP_CLASS}>需人工</span> : undefined}
+      // F-50 视觉 v2（f50-ui-visual-spec-v2 §1/§2）：门卡改中性白底+4px 琥珀左线
+      // +chip——琥珀不再做整卡底色（琥珀压琥珀/零间距连片根因）；类常量与抽屉
+      // 门禁条目共用（gate-visual-tokens.ts）。旧 gate-open token 面板退役。
+      panelClassName={GATE_CARD_CLASS}
+      titleClassName={GATE_TITLE_CLASS}
       testId="gate-prompt-entry"
     >
       {/* F-50 §4.1-3（第一批布局减负）：门卡固定「原因→正文→产物→证据→
@@ -202,7 +216,7 @@ export function GatePromptEntry({
         {whyCopy && !isResolved ? (
           <div
             data-testid="gate-why"
-            className="text-sm font-medium text-[var(--aria-ink)]"
+            className={`mt-1 text-sm font-medium ${GATE_SECONDARY_TEXT_CLASS}`}
           >
             {whyCopy}
           </div>
@@ -210,15 +224,15 @@ export function GatePromptEntry({
         {/* F-50 裁决 1：entry.content/summary 与标题同义（人工介入同义句）时
             不渲染——单标题制下不让正文重复标题；独立事实保留。 */}
         {isGateTitleSynonymousCopy(entry.content) ? null : (
-          <div className="text-sm text-[var(--aria-ink)]">{entry.content}</div>
+          <div className="text-sm text-slate-900">{entry.content}</div>
         )}
         {summary && !isGateTitleSynonymousCopy(summary) && summary !== entry.content ? (
-          <div className="text-xs text-[var(--aria-ink-muted)]">{summary}</div>
+          <div className={`text-xs ${GATE_META_TEXT_CLASS}`}>{summary}</div>
         ) : null}
         {!isResolved && pendingArtifactVersion && onOpenArtifact ? (
           <div
             data-testid="gate-artifact-context"
-            className="flex flex-wrap items-center gap-2 text-xs text-[var(--aria-ink-muted)]"
+            className={`flex flex-wrap items-center gap-2 text-xs ${GATE_META_TEXT_CLASS}`}
           >
             <span>
               待确认产物：
@@ -231,18 +245,21 @@ export function GatePromptEntry({
               type="button"
               data-testid="gate-artifact-open"
               onClick={onOpenArtifact}
-              className="inline-flex min-h-9 items-center gap-1 rounded-md border border-[var(--aria-line-strong)] bg-white px-2 text-xs font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+              className={BTN_SECONDARY_CLASS}
             >
-              <FileText className="h-3.5 w-3.5" aria-hidden="true" /> 查看产物
+              <FileText className="h-4 w-4" aria-hidden="true" /> 查看产物
             </button>
           </div>
         ) : null}
         {findings.length > 0 && !isResolved ? (
           <details
             data-testid="gate-findings"
-            className="rounded-md border border-[var(--aria-line)] bg-white px-3 py-2"
+            className={`group ${GATE_NESTED_BLOCK_CLASS}`}
           >
-            <summary className="cursor-pointer text-xs font-semibold text-[var(--aria-ink)]">
+            <summary
+              className={`${DISCLOSURE_SUMMARY_CLASS} flex items-center gap-1 text-xs font-semibold text-slate-900`}
+            >
+              <ChevronRight className={DISCLOSURE_CHEVRON_CLASS} aria-hidden="true" />
               {gateFindingsToggleLabel(findings.length)}
             </summary>
             <div className="mt-2 space-y-2">
@@ -252,7 +269,7 @@ export function GatePromptEntry({
                     type="button"
                     data-testid="gate-adopt-findings"
                     onClick={handleAdoptFindings}
-                    className="inline-flex min-h-9 items-center gap-1 rounded-md border border-[var(--aria-line-strong)] bg-white px-2 text-xs font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+                    className={BTN_SECONDARY_CLASS}
                   >
                     {GATE_ADOPT_FINDINGS_BUTTON_LABEL}
                   </button>
@@ -265,7 +282,7 @@ export function GatePromptEntry({
         {/* F-50 §4.1-4：trigger 与预算合并为一条弱化元数据行（不再两个胶囊
             抢主视觉）——「引擎判定需人工」不作为独立大胶囊重复人工介入语义。 */}
         {gateTrigger || remainingBudget !== null ? (
-          <p data-testid="gate-meta" className="text-xs text-[var(--aria-ink-muted)]">
+          <p data-testid="gate-meta" className={`text-xs ${GATE_META_TEXT_CLASS}`}>
             {[
               gateTrigger ? `触发：${GATE_TRIGGER_LABELS[gateTrigger]}` : null,
               remainingBudget !== null ? `剩余修复轮次 ${remainingBudget}` : null,
@@ -277,7 +294,7 @@ export function GatePromptEntry({
         {revisionProgressCopy && !isResolved ? (
           <div
             data-testid="gate-revision-status"
-            className="text-xs font-medium text-[var(--aria-ink)]"
+            className="text-xs font-medium text-slate-900"
           >
             {revisionProgressCopy}
           </div>
@@ -301,14 +318,14 @@ export function GatePromptEntry({
           </div>
         ) : null}
         {isContextBlockerGate && !isResolved ? (
-          <div className="text-xs text-[var(--aria-ink-muted)]">
+          <div className={`text-xs ${GATE_META_TEXT_CLASS}`}>
             请在下方输入补充上下文后发送（对应 provide_context），或选择终止
           </div>
         ) : null}
         {isResolved ? (
           <div className="space-y-2">
             {archiveNote ? (
-              <div data-testid="gate-archive-note" className="text-xs text-[var(--aria-ink-muted)]">
+              <div data-testid="gate-archive-note" className={`text-xs ${GATE_META_TEXT_CLASS}`}>
                 {archiveNote}
               </div>
             ) : null}
@@ -319,9 +336,9 @@ export function GatePromptEntry({
           // blocker/author 失败/缺相位）此前整面消失，终止零通路；现在露出
           // 终止（二次确认惯例），confirm/反馈编辑器维持相位纪律不渲染。
           // F-50 §4.1-5：动作区以分隔线成组，与说明区视觉分层。
-          <div className="space-y-2 border-t border-[var(--aria-line)] pt-3">
+          <div className={`space-y-2 ${GATE_DIVIDER_CLASS}`}>
             {actionBlockReason !== null ? (
-              <p className="text-xs text-[var(--aria-ink-muted)]">
+              <p className={`text-xs ${GATE_META_TEXT_CLASS}`}>
                 {gateActionBlockCopy(actionBlockReason)}，可终止后重新发起
               </p>
             ) : null}
@@ -333,7 +350,7 @@ export function GatePromptEntry({
                 {!revisionProgressCopy && !isContextBlockerGate ? (
                   <p
                     data-testid="gate-feedback-hint"
-                    className="text-xs text-[var(--aria-ink-muted)]"
+                    className={`text-xs ${GATE_META_TEXT_CLASS}`}
                   >
                     {GATE_FEEDBACK_OPTIONAL_HINT}
                   </p>
@@ -355,7 +372,7 @@ export function GatePromptEntry({
               </p>
             ) : null}
             {typedGateAwaitingCommand && actionBlockReason === null ? (
-              <p className="text-xs text-[var(--aria-ink-muted)]">
+              <p className={`text-xs ${GATE_META_TEXT_CLASS}`}>
                 未同步门命令，将以新命令提交
               </p>
             ) : null}
@@ -364,13 +381,14 @@ export function GatePromptEntry({
                 <button
                   type="button"
                   onClick={() => actions.confirm()}
-                  className="inline-flex min-h-11 items-center gap-1 rounded-md border border-emerald-200 bg-white px-3 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+                  className={BTN_PRIMARY_CLASS}
                 >
-                  <Check className="h-3.5 w-3.5" aria-hidden="true" />
+                  <Check className="h-4 w-4" aria-hidden="true" />
                   {confirmLabel}
                 </button>
               )}
               <ConfirmTwiceButton
+                variant="ghost"
                 label={GATE_TERMINATE_BUTTON_LABEL}
                 confirmLabel={GATE_TERMINATE_CONFIRM_LABEL}
                 onConfirm={actions.terminate}
@@ -378,7 +396,7 @@ export function GatePromptEntry({
             </div>
           </div>
         ) : actionBlockReason ? (
-          <p className="text-xs text-[var(--aria-ink-muted)]">
+          <p className={`text-xs ${GATE_META_TEXT_CLASS}`}>
             {gateActionBlockCopy(actionBlockReason)}
           </p>
         ) : null}

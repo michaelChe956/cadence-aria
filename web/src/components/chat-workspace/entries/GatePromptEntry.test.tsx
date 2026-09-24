@@ -834,15 +834,71 @@ describe("GatePromptEntry actionability", () => {
       expect(screen.queryByTestId("gate-feedback-hint")).toBeNull();
     });
 
-    it("颜色契约：门卡标题/面板用 gate-open 色，不染 system 红（F-50 裁决 9）", () => {
+    it("视觉 v2：中性卡底+琥珀左线+chip，按钮权重阶梯实心>描边>ghost（f50-ui-visual-spec-v2 §1/§2）", () => {
       render(<GatePromptEntry entry={gateEntry(null)} actions={actions()} />);
 
       const card = screen.getByTestId("gate-prompt-entry");
-      expect(card.className).toContain("border-[var(--aria-gate-open-border)]");
+      // 门卡=中性底，琥珀只上左线（4px）/chip/图标——不再整卡琥珀底（琥珀压琥珀根因）。
+      expect(card.className).toContain("bg-white");
+      expect(card.className).toContain("border-l-4");
+      expect(card.className).toContain("border-l-amber-500/60");
+      expect(card.className).not.toContain("bg-[var(--aria-gate-open-bg)]");
       expect(card.className).not.toContain("bg-red-50");
+      // 标题行：text-base + slate 正文主色（不染 system 红的旧约束保留）。
       const title = screen.getByText("需要人工确认");
-      expect(title.className).toContain("text-[var(--aria-gate-open-fg)]");
+      expect(title.className).toContain("text-slate-900");
       expect(title.className).not.toContain("text-red-500");
+      // chip：琥珀只出现在标签。
+      expect(screen.getByText("需人工").className).toContain("text-amber-700");
+      // 主操作=实心 emerald（白底描边旧形态退役，权重淹没根因）。
+      const confirm = screen.getByRole("button", { name: "确认当前版本" });
+      expect(confirm.className).toContain("bg-emerald-600");
+      expect(confirm.className).not.toContain("border-emerald-200");
+      // Ghost 终止=无底透明红字，与主/次操作拉开权重阶梯。
+      const terminate = screen.getByRole("button", { name: "终止此门" });
+      expect(terminate.className).toContain("text-red-600");
+      expect(terminate.className).not.toContain("bg-white");
+    });
+
+    it("视觉 v2：查看产物=次操作描边钮 min-h-9，findings 折叠去原生三角（§2/§4）", () => {
+      useWorkspaceStore.setState({
+        workspaceType: "work_item_plan",
+        artifactVersions: [
+          {
+            version: 2,
+            generated_by: "pi",
+            reviewed_by: null,
+            review_verdict: null,
+            confirmed_by: null,
+            is_current: true,
+            created_at: "2026-09-22T16:02:09Z",
+            source_node_id: "timeline_node_002",
+          },
+        ],
+      });
+      render(
+        <GatePromptEntry
+          entry={gateEntry(null, undefined, {
+            findings: [{ severity: "suggestion", message: "建议补充复杂度说明" }],
+            verdict: "pass",
+            review_gate: "user_confirm_allowed",
+          })}
+          actions={actions()}
+          onOpenArtifact={vi.fn()}
+        />,
+      );
+
+      const openArtifact = screen.getByTestId("gate-artifact-open");
+      expect(openArtifact.className).toContain("border-slate-300");
+      expect(openArtifact.className).toContain("text-slate-700");
+      expect(openArtifact.className).toContain("min-h-9");
+      // findings 折叠：原生 ▶ marker 隐藏，chevron-right 由 open 态旋转。
+      const findings = screen.getByTestId("gate-findings");
+      const summary = findings.querySelector("summary");
+      expect(summary?.className).toContain("list-none");
+      const chevron = summary?.querySelector("svg.lucide-chevron-right");
+      expect(chevron?.getAttribute("class")).toContain("group-open:rotate-90");
+      expect(chevron).not.toBeNull();
     });
   });
 });

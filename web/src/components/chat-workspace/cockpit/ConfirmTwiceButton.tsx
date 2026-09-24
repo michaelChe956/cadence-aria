@@ -9,6 +9,7 @@ import {
   DANGEROUS_CONFIRM_TIMEOUT_MS,
   type ConfirmTwiceButtonHandle,
 } from "../../../state/cockpit-operation-semantics";
+import { BTN_GHOST_CLASS } from "../gate-visual-tokens";
 
 export const ConfirmTwiceButton = forwardRef<ConfirmTwiceButtonHandle, {
   label: string;
@@ -17,9 +18,14 @@ export const ConfirmTwiceButton = forwardRef<ConfirmTwiceButtonHandle, {
   ariaLabel?: string;
   /** 同上，已 armed（可见文案为 confirmLabel）时的可访问名。 */
   confirmAriaLabel?: string;
+  /**
+   * F-50 视觉 v2（f50-ui-visual-spec-v2 §1）：终止类动作走 ghost（无底描边透明红字），
+   * 与主/次操作拉开权重阶梯；缺省保持既有红描边形态（接管/重新接管等非终止动作）。
+   */
+  variant?: "default" | "ghost";
   onConfirm: () => void;
 }>(function ConfirmTwiceButton(
-  { label, confirmLabel, ariaLabel, confirmAriaLabel, onConfirm },
+  { label, confirmLabel, ariaLabel, confirmAriaLabel, variant = "default", onConfirm },
   ref,
 ) {
   const [armed, setArmed] = useState(false);
@@ -48,7 +54,11 @@ export const ConfirmTwiceButton = forwardRef<ConfirmTwiceButtonHandle, {
       type="button"
       onClick={arm}
       aria-label={armed ? confirmAriaLabel : ariaLabel}
-      className="inline-flex min-h-11 items-center gap-1 rounded-md border border-red-200 bg-white px-3 text-xs font-semibold text-red-700 hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+      className={
+        variant === "ghost"
+          ? BTN_GHOST_CLASS
+          : "inline-flex min-h-11 items-center gap-1 rounded-md border border-red-200 bg-white px-3 text-xs font-semibold text-red-700 hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+      }
     >
       {armed ? confirmLabel : label}
     </button>

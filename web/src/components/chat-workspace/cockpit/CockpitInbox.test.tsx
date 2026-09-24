@@ -342,7 +342,7 @@ describe("CockpitInbox", () => {
     expect(within(inbox).getByText("修复 Issue 索引；补齐流式渲染")).toBeVisible();
     expect(within(inbox).getByText("审核通过，允许人工确认")).toBeVisible();
     expect(within(inbox).getByText("选择此门以批量确认")).toBeVisible();
-    expect(within(inbox).getByRole("button", { name: "确认" })).toHaveClass("btn-primary");
+    expect(within(inbox).getByRole("button", { name: "确认" })).toHaveClass("bg-emerald-600");
     expect(within(inbox).queryByText("未同步门命令，将以新命令提交")).toBeNull();
   });
 
@@ -770,5 +770,86 @@ describe("CockpitInbox", () => {
     expect(screen.queryByRole("button", { name: "继续" })).toBeNull();
     expect(screen.queryByRole("button", { name: "放弃并回滚" })).toBeNull();
     expect(screen.queryByRole("button", { name: "转人工" })).toBeNull();
+  });
+});
+
+// F-50 视觉 v2（f50-ui-visual-spec-v2 §3）：抽屉门禁条目与门卡同一视觉常量、
+// 错误条红只上图标+mono 码、分组标题弱化、组间距 space-y-4、终止 ghost。
+describe("CockpitInbox 视觉 v2", () => {
+  it("门禁条目复用门卡视觉：中性底+琥珀左线（不再整卡琥珀底）", () => {
+    render(
+      <CockpitInbox items={[gateItem]} actions={mockActions()} />,
+    );
+
+    const row = screen.getByTestId("cockpit-inbox-item-gate");
+    expect(row.className).toContain("bg-white");
+    expect(row.className).toContain("border-l-4");
+    expect(row.className).toContain("border-l-amber-500/60");
+    expect(row.className).not.toContain("bg-[var(--aria-gate-open-bg)]");
+  });
+
+  it("错误条：中性底+红色只上图标与 mono 码，不再红底整条", () => {
+    render(
+      <CockpitInbox
+        items={[staleLeaseErrorItem]}
+        actions={mockActions()}
+        actionableSessionId="session_001"
+      />,
+    );
+
+    const row = screen.getByTestId("cockpit-inbox-item-hard_error");
+    expect(row.className).toContain("bg-white");
+    expect(row.className).not.toContain("bg-[var(--aria-danger-soft)]");
+    const code = within(row).getByTestId("cockpit-inbox-error-code");
+    expect(code.className).toContain("text-red-600");
+    const glyph = row.querySelector("svg.lucide-triangle-alert");
+    expect(glyph?.getAttribute("class")).toContain("text-red-600");
+  });
+
+  it("分组标题弱化为 uppercase tracking-wider，两组之间 space-y-4", () => {
+    render(
+      <CockpitInbox
+        items={[staleLeaseErrorItem, gateItem]}
+        actions={mockActions()}
+      />,
+    );
+
+    const connection = screen.getByRole("heading", { name: "连接问题" });
+    expect(connection.className).toContain("tracking-wider");
+    expect(connection.className).toContain("font-medium");
+    const human = screen.getByRole("heading", { name: "需要人工处理" });
+    expect(human.className).toContain("tracking-wider");
+    // 两组共享同一个 space-y-4 容器（组间距 16px）。
+    const connectionGroup = connection.closest("div.space-y-4");
+    const humanGroup = human.closest("div.space-y-4");
+    expect(connectionGroup).not.toBeNull();
+    expect(connectionGroup).toBe(humanGroup);
+  });
+
+  it("终止走 ghost 形态：红字无底，不与主操作抢权重", () => {
+    render(
+      <CockpitInbox
+        items={[gateItem]}
+        actions={mockActions()}
+        actionableSessionId="session_001"
+      />,
+    );
+
+    const terminate = screen.getByRole("button", { name: "终止此门" });
+    expect(terminate.className).toContain("text-red-600");
+    expect(terminate.className).not.toContain("bg-white");
+  });
+
+  it("批量勾选行为独立 text-sm 行", () => {
+    render(
+      <CockpitInbox
+        items={[gateItem]}
+        actions={mockActions()}
+        onBulkConfirm={vi.fn()}
+      />,
+    );
+
+    const label = screen.getByText("选择此门以批量确认").closest("label");
+    expect(label?.className).toContain("text-sm");
   });
 });
