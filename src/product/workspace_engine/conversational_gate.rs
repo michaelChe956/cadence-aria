@@ -243,18 +243,21 @@ pub(crate) fn trim_provider_preamble(source: &str) -> &str {
         .unwrap_or(source)
 }
 
-/// SC 修订交付进入 compiler 前的确定性净化（结构标题归一化 + 前言修剪）。
+/// SC 修订交付进入 compiler 前的确定性净化（结构标题归一化 + EARS 关键字空白
+/// 归一化 + 前言修剪）。
 ///
-/// 与 author 路径共用 [`crate::product::work_item_plan_compiler::normalize_structural_headings']
+/// 与 author 路径共用 [`crate::product::work_item_plan_compiler::normalize_delivery_before_compile`]
 /// 同一单点实现；归一化先于修剪（前言锚定规范英文标题），表外未知标题不改，
 /// 由 compiler fail-closed。
 pub(crate) fn prepare_revision_delivery_for_compile(
     raw: &str,
 ) -> crate::product::work_item_plan_compiler::NormalizedPlanSource {
-    let normalized = crate::product::work_item_plan_compiler::normalize_structural_headings(raw);
+    let normalized =
+        crate::product::work_item_plan_compiler::normalize_delivery_before_compile(raw);
     crate::product::work_item_plan_compiler::NormalizedPlanSource {
         source: trim_provider_preamble(&normalized.source).to_string(),
         normalized_heading_lines: normalized.normalized_heading_lines,
+        normalized_ears_lines: normalized.normalized_ears_lines,
     }
 }
 
@@ -374,6 +377,41 @@ impl super::WorkspaceEngine {
                     detail: Some(format!(
                         "normalized {} structural heading lines via the fixed zh→en table before compile",
                         delivery.normalized_heading_lines
+                    )),
+                    command: None,
+                    cwd: None,
+                    output: None,
+                    exit_code: None,
+                },
+                self.active_node_id.clone(),
+                Some(self.session.author_provider.clone()),
+            )
+            .await;
+        }
+        if delivery.normalized_ears_lines > 0 {
+            let node_id = self
+                .active_node_id
+                .clone()
+                .unwrap_or_else(|| "timeline_node_unknown".to_string());
+            tracing::info!(
+                session_id = %self.session.session_id,
+                turn_id = %turn_id,
+                node_id = %node_id,
+                diagnostic = crate::product::work_item_plan_compiler::PLAN_EARS_SPACING_NORMALIZATION_DIAGNOSTIC,
+                normalized_ears_lines = delivery.normalized_ears_lines,
+                "人工修订 markdown EARS 关键字空白已确定性归一化后再编译"
+            );
+            self.emit_execution_event(
+                crate::cross_cutting::streaming_provider::ProviderExecutionEvent {
+                    event_id: format!(
+                        "human_gate_revision_ears_spacing_normalized_{node_id}_{turn_id}"
+                    ),
+                    kind: crate::cross_cutting::streaming_provider::ProviderExecutionEventKind::Provider,
+                    status: crate::cross_cutting::streaming_provider::ProviderExecutionEventStatus::Completed,
+                    title: "人工修订 EARS 关键字空白确定性归一化".to_string(),
+                    detail: Some(format!(
+                        "normalized {} EARS statement lines (keyword-adjacent whitespace only; WHEN / THE SYSTEM SHALL spacing) before compile",
+                        delivery.normalized_ears_lines
                     )),
                     command: None,
                     cwd: None,

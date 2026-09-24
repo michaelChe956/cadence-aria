@@ -33,15 +33,18 @@ fn trim_provider_preamble(source: &str) -> &str {
         .unwrap_or(source)
 }
 
-/// SC author 交付进入 compiler 前的确定性净化（结构标题归一化 + 前言修剪）。
+/// SC author 交付进入 compiler 前的确定性净化（结构标题归一化 + EARS 关键字
+/// 空白归一化 + 前言修剪）。
 ///
 /// 归一化先于修剪：前言修剪锚定的是规范英文文档标题，provider 输出「前言 +
-/// 中文标题」时必须先把标题归一化才能锚定修剪。归一化只吸收固定词表的
-/// 中文翻译抖动；表外未知标题不改，由 compiler fail-closed。
+/// 中文标题」时必须先把标题归一化才能锚定修剪。两处归一化都只吸收确定性
+/// 抖动（固定词表标题翻译 / 关键字邻位空白），表外未知标题与正文不改，由
+/// compiler fail-closed。
 fn prepare_author_delivery_for_compile(
     raw: &str,
 ) -> crate::product::work_item_plan_compiler::NormalizedPlanSource {
-    let normalized = crate::product::work_item_plan_compiler::normalize_structural_headings(raw);
+    let normalized =
+        crate::product::work_item_plan_compiler::normalize_delivery_before_compile(raw);
     crate::product::work_item_plan_compiler::NormalizedPlanSource {
         source: trim_provider_preamble(&normalized.source).to_string(),
         normalized_heading_lines: normalized.normalized_heading_lines,
@@ -58,11 +61,12 @@ fn prepare_author_delivery_for_compile(
 /// 重试)时若 event_id 只含 node_id,后一次归一化会覆盖前一次的审计记录。
 /// 以 provider 原文内容摘要为去重键(与修订链 report id 的 `source_hash[..16]`
 /// 模式一致):不同尝试内容各留一条审计,同内容重放保持同 ID 幂等去重。
-fn author_heading_normalized_event_id(node_id: &str, raw_output: &str) -> String {
+fn author_normalization_event_id(kind: &str, node_id: &str, raw_output: &str) -> String {
     use sha2::{Digest, Sha256};
     let digest = hex::encode(Sha256::digest(raw_output.as_bytes()));
     format!(
-        "single_candidate_heading_normalized_{node_id}_{}",
+        normalized_ears_lines: normalized.normalized_ears_lines,
+        "single_candidate_{kind}_normalized_{node_id}_{}",
         &digest[..16]
     )
 }
@@ -84,6 +88,14 @@ async fn emit_author_heading_normalized_event(
         diagnostic = crate::product::work_item_plan_compiler::PLAN_HEADING_NORMALIZATION_DIAGNOSTIC,
         normalized_heading_lines = delivery.normalized_heading_lines,
         "single-candidate author markdown 结构标题已确定性归一化后再编译"
+fn author_heading_normalized_event_id(node_id: &str, raw_output: &str) -> String {
+    author_normalization_event_id("heading", node_id, raw_output)
+}
+
+fn author_ears_normalized_event_id(node_id: &str, raw_output: &str) -> String {
+    author_normalization_event_id("ears_spacing", node_id, raw_output)
+}
+
     );
     engine
         .emit_execution_event(
@@ -124,6 +136,49 @@ fn format_compile_failure_reasons(
 }
 
 /// 3.6 弱模型基线加固：IR 预校验——在持久化前跑与
+/// EARS 关键字空白归一化审计事件发射（首轮与 F2-B 教学重驱轮共用）：
+/// 救回行数>0 时才发，保证「本次交付被确定性救回」可判定（REQ-WSC-02）。
+async fn emit_author_ears_normalized_event(
+    engine: &mut WorkspaceEngine,
+    node_id: &str,
+    raw_output: &str,
+    delivery: &crate::product::work_item_plan_compiler::NormalizedPlanSource,
+    author_provider: &ProviderName,
+) {
+    if delivery.normalized_ears_lines == 0 {
+        return;
+    }
+    tracing::info!(
+        session_id = %engine.session().session_id,
+        node_id = %node_id,
+        diagnostic =
+            crate::product::work_item_plan_compiler::PLAN_EARS_SPACING_NORMALIZATION_DIAGNOSTIC,
+        normalized_ears_lines = delivery.normalized_ears_lines,
+        "single-candidate author markdown EARS 关键字空白已确定性归一化后再编译"
+    );
+    engine
+        .emit_execution_event(
+            ProviderExecutionEvent {
+                event_id: author_ears_normalized_event_id(node_id, raw_output),
+                kind: ProviderExecutionEventKind::Provider,
+                status: ProviderExecutionEventStatus::Completed,
+                title: "SingleCandidate EARS 关键字空白确定性归一化".to_string(),
+                detail: Some(format!(
+                    "normalized {} EARS statement lines (keyword-adjacent whitespace only; \
+                     WHEN / THE SYSTEM SHALL spacing) before compile",
+                    delivery.normalized_ears_lines
+                )),
+                command: None,
+                cwd: None,
+                output: None,
+                exit_code: None,
+            },
+            Some(node_id.to_string()),
+            Some(author_provider.clone()),
+        )
+        .await;
+}
+
 /// `complete_single_candidate_work_item_plan_author` 内部同源的
 /// `validate_plan_candidate_ir`（上下文组装同源：plan 的 source spec ids 与
 /// repository profile），使 IR 校验失败（unknown_requirement_ref /
@@ -256,6 +311,14 @@ pub(crate) async fn run_single_candidate_author(
                 crate::product::models::SingleCandidatePhase::Failed,
             );
             return Err(SingleCandidateProviderRunError::Message(message));
+    emit_author_ears_normalized_event(
+        engine,
+        node_id,
+        &reredrive_output,
+        &reredrive_delivery,
+        author_provider,
+    )
+    .await;
         }
     };
     if !should_start {
@@ -480,6 +543,8 @@ pub(crate) async fn run_single_candidate_author(
     let compile_context = crate::product::work_item_plan_compiler::WorkItemPlanSourceContext {
         target_repository_id: repository.id.clone(),
     };
+    emit_author_ears_normalized_event(engine, &node_id, &full_output, &delivery, &author_provider)
+        .await;
     let mut compile_source = full_output;
     let mut first_round_failure: Option<String> = None;
     let candidate_item_count = loop {

@@ -485,7 +485,7 @@ fn validate_ears(items: &[ParsedItem], diagnostics: &mut Vec<CompilerDiagnostic>
     }
 }
 
-fn is_ears_statement(statement: &str) -> bool {
+pub(crate) fn is_ears_statement(statement: &str) -> bool {
     statement
         .strip_prefix(grammar::EARS_WHEN_PREFIX)
         .and_then(|rest| rest.split_once(grammar::EARS_SHALL_PREFIX))

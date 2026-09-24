@@ -20,6 +20,10 @@ use super::grammar;
 /// 归一化发生时的审计诊断名(与 `preamble_trimmed` 诊断同一模式)。
 pub const PLAN_HEADING_NORMALIZATION_DIAGNOSTIC: &str = "plan_heading_translations_normalized";
 
+/// EARS 关键字空白归一化发生时的审计诊断名(与结构标题归一化同一模式)。
+pub const PLAN_EARS_SPACING_NORMALIZATION_DIAGNOSTIC: &str =
+    "plan_ears_statement_spacing_normalized";
+
 /// 一级文档标题的已知中文翻译;归一化目标固定为 [`grammar::DOCUMENT_HEADING`]。
 const DOCUMENT_HEADING_TRANSLATIONS: [&str; 2] = ["工作项计划", "工作项计划 (Work Item Plan)"];
 
@@ -86,6 +90,22 @@ pub struct NormalizedPlanSource {
     pub source: String,
     /// 被改写的结构标题行数;`0` 表示原文未被触碰。
     pub normalized_heading_lines: usize,
+    /// 被救回的 EARS statement 行数(关键字空白缺口);`0` 表示无救回。
+    pub normalized_ears_lines: usize,
+}
+
+/// 交付进入 compiler 前的完整确定性净化:结构标题归一化 → EARS 关键字空白归一化。
+///
+/// author 与人工修订两条交付路径共用本单点实现;两类归一化各自的改写行数分别
+/// 落在返回值的两个计数字段上,供调用方落审计诊断/事件。
+pub fn normalize_delivery_before_compile(source: &str) -> NormalizedPlanSource {
+    let headings = normalize_structural_headings(source);
+    let ears = normalize_ears_statement_spacing(&headings.source);
+    NormalizedPlanSource {
+        source: ears.source,
+        normalized_heading_lines: headings.normalized_heading_lines,
+        normalized_ears_lines: ears.normalized_ears_lines,
+    }
 }
 
 /// 把固定词表结构标题的已知中文翻译逐字映射回规范英文。
@@ -108,6 +128,7 @@ pub fn normalize_structural_headings(source: &str) -> NormalizedPlanSource {
     NormalizedPlanSource {
         source: lines.join("\n"),
         normalized_heading_lines,
+        normalized_ears_lines: 0,
     }
 }
 
@@ -135,6 +156,117 @@ fn rewrite_heading_line(line: &str) -> Option<String> {
         return Some(format!("### {canonical}"));
     }
     None
+}
+
+/// EARS statement 结构化字段行的固定前缀(与 `grammar::STRUCTURED_LINE_PREFIX` 的
+/// `- key: value` 形态一致,值紧随 `: ` 之后)。
+const STATEMENT_FIELD_PREFIX: &str = "- statement: ";
+
+/// EARS 关键字字面量;取自语法契约登记的 [`grammar::EARS_KEYWORDS`],避免第二套口径。
+const EARS_WHEN_KEYWORD: &str = grammar::EARS_KEYWORDS[0];
+const EARS_SHALL_KEYWORD: &str = grammar::EARS_KEYWORDS[1];
+
+/// 唯一被写入的空白字符。
+const HALF_WIDTH_SPACE: char = ' ';
+
+/// 关键字邻位允许被归一为半角空格的空白字符:U+3000 全角空格 / U+00A0 NBSP。
+fn is_normalizable_space(character: char) -> bool {
+    matches!(character, '\u{3000}' | '\u{00A0}')
+}
+
+/// EARS 关键字空白确定性归一化:救回「只差关键字邻位空白」的 statement 行。
+///
+/// 落点与结构标题归一化同层同入口(compiler 之前),author 与人工修订两条交付
+/// 路径自动共用。允许的操作严格限定三类:
+/// ①`WHEN` 后缺半角空格 → 补一个;②`THE SYSTEM SHALL` 前缺半角空格 → 补一个;
+/// ③关键字邻位 U+3000/NBSP → 归一为单个半角空格。
+///
+/// 护栏:
+/// - 只扫描结构化 section 内的 `- statement:` 字段行(自由文本 section 与
+///   表外未知标题下的内容一律不动);
+/// - 只在「原文不满足 [`super::parse::is_ears_statement`] 且三类空白操作后满足」
+///   时改写,故非空白类语法错误(缺 `WHEN` 前缀、关键字缺失/顺序错误等)零改动,
+///   照旧由 compiler fail-closed 拒绝;
+/// - 正文与 CJK 标点零触碰(归一化前后去除全部空白后逐字相同),幂等。
+pub fn normalize_ears_statement_spacing(source: &str) -> NormalizedPlanSource {
+    let mut normalized_ears_lines = 0usize;
+    let mut lines = Vec::new();
+    let mut in_structured_section = false;
+    for line in source.split('\n') {
+        if line == grammar::DOCUMENT_HEADING || line.starts_with("## ") {
+            in_structured_section = false;
+        } else if let Some(heading) = line.strip_prefix("### ") {
+            in_structured_section = grammar::STRUCTURED_SECTIONS.contains(&heading.trim());
+        }
+        let rescued = in_structured_section
+            .then(|| line.strip_prefix(STATEMENT_FIELD_PREFIX))
+            .flatten()
+            .and_then(rescue_ears_statement_value);
+        match rescued {
+            Some(value) => {
+                normalized_ears_lines += 1;
+                lines.push(format!("{STATEMENT_FIELD_PREFIX}{value}"));
+            }
+            None => lines.push(line.to_string()),
+        }
+    }
+    NormalizedPlanSource {
+        source: lines.join("\n"),
+        normalized_heading_lines: 0,
+        normalized_ears_lines,
+    }
+}
+
+/// 救回单条 statement 值的关键字空白缺口;无需救回或缺口非空白类时返回 `None`
+/// (调用方保持原行)。
+fn rescue_ears_statement_value(value: &str) -> Option<String> {
+    if super::parse::is_ears_statement(value) {
+        return None;
+    }
+    let candidate = rewrite_ears_keyword_spacing(value);
+    (candidate != value && super::parse::is_ears_statement(&candidate)).then_some(candidate)
+}
+
+/// 三类关键字邻位空白操作(纯空白改写,不增删任何非空白字符)。
+fn rewrite_ears_keyword_spacing(value: &str) -> String {
+    // ① WHEN:前缀后的邻位全角空白归一为半角空格;完全缺半角空格时补一个。
+    let mut out = String::with_capacity(value.len() + 2);
+    match value.strip_prefix(EARS_WHEN_KEYWORD) {
+        Some(rest) if rest.starts_with(HALF_WIDTH_SPACE) => {
+            out.push_str(EARS_WHEN_KEYWORD);
+            out.push_str(rest);
+        }
+        Some(rest) => {
+            out.push_str(EARS_WHEN_KEYWORD);
+            out.push(HALF_WIDTH_SPACE);
+            out.push_str(rest.trim_start_matches(is_normalizable_space));
+        }
+        None => out.push_str(value),
+    }
+
+    // ②③ THE SYSTEM SHALL:前导邻位归一为/补齐为单个半角空格;尾随邻位全角
+    // 空白归一为单个半角空格(尾随缺空格不在三类操作内,留给 fail-closed)。
+    let Some(index) = out.find(EARS_SHALL_KEYWORD) else {
+        return out;
+    };
+    let before = &out[..index];
+    let after = &out[index + EARS_SHALL_KEYWORD.len()..];
+    let mut fixed = String::with_capacity(out.len() + 2);
+    if before.ends_with(HALF_WIDTH_SPACE) {
+        fixed.push_str(before);
+    } else {
+        fixed.push_str(before.trim_end_matches(is_normalizable_space));
+        fixed.push(HALF_WIDTH_SPACE);
+    }
+    fixed.push_str(EARS_SHALL_KEYWORD);
+    let trimmed_after = after.trim_start_matches(is_normalizable_space);
+    if trimmed_after.len() != after.len() {
+        fixed.push(HALF_WIDTH_SPACE);
+        fixed.push_str(trimmed_after);
+    } else {
+        fixed.push_str(after);
+    }
+    fixed
 }
 
 #[cfg(test)]

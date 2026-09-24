@@ -6,6 +6,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 mod blockers;
+mod ears_spacing;
 mod full_lowering_validator;
 mod heading_normalization;
 mod null_placeholder_command;

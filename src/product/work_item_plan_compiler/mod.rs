@@ -13,7 +13,9 @@ pub use lower::{
     lower_work_item_plan,
 };
 pub use normalize::{
-    NormalizedPlanSource, PLAN_HEADING_NORMALIZATION_DIAGNOSTIC, normalize_structural_headings,
+    NormalizedPlanSource, PLAN_EARS_SPACING_NORMALIZATION_DIAGNOSTIC,
+    PLAN_HEADING_NORMALIZATION_DIAGNOSTIC, normalize_delivery_before_compile,
+    normalize_ears_statement_spacing, normalize_structural_headings,
 };
 pub use parse::{lint_work_item_plan_source, parse_work_item_plan};
 pub use types::*;
