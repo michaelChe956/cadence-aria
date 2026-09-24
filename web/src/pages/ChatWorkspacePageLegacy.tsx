@@ -62,6 +62,7 @@ import {
   requestIdFromEntry,
   scrollTargetEntryIdForNode,
 } from "./ChatWorkspacePageParts";
+import { detailHydrationNodeIds } from "./useCockpitNodeDetailHydration";
 
 
 export function LegacyChatWorkspacePage({
@@ -314,14 +315,12 @@ export function LegacyChatWorkspacePage({
     if (!sessionReady) {
       return;
     }
-    // 拉取全部已完成节点的 detail（气泡 usage 行依赖 detail.execution_events；
-    // 仅拉 selected/active 会导致未选中节点气泡缺失 token 数据）
-    const completedNodeIds = timelineNodes
-      .filter((node) => node.status === "completed")
-      .map((node) => node.node_id);
+    // 拉取全部终态节点的 detail（气泡 usage 行依赖 detail.execution_events；
+    // 仅拉 selected/active 会导致未选中节点气泡缺失 token 数据；终态含 failed/
+    // skipped 等——见 detailHydrationNodeIds，F-47 REQ-NDR-02）
     const nodeIds = Array.from(
       new Set(
-        [selectedNodeId, activeNodeId, ...completedNodeIds].filter(
+        [selectedNodeId, activeNodeId, ...detailHydrationNodeIds(timelineNodes)].filter(
           (nodeId): nodeId is string =>
             typeof nodeId === "string" && nodeId.length > 0,
         ),

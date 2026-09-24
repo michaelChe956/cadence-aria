@@ -5,8 +5,23 @@ import { useWorkspaceStore } from "../state/workspace-ws-store";
 import type { TimelineNode } from "../state/workspace-ws-store-types";
 
 /**
+ * F-47 REQ-NDR-02：detail 水合集合 = 呈现节点里的「非运行中」节点。
+ *
+ * 判定用排除法（非 active、非 paused）而非枚举 completed：failed/skipped 以及
+ * spec 点名的 aborted/interrupted（前端状态 union 尚未枚举）这类终态节点此前
+ * 全被排除在水合之外，即便 durable 里已有 usage，其 token 行也永不显示
+ * （诊断 §2.2 B3）。仍维持按需语义：只水合调用方传入的呈现节点，不做全量预取；
+ * paused 未终态（durable detail 尚未产生）同样排除在集合外。
+ */
+export function detailHydrationNodeIds(timelineNodes: TimelineNode[]): string[] {
+  return timelineNodes
+    .filter((node) => node.status !== "active" && node.status !== "paused")
+    .map((node) => node.node_id);
+}
+
+/**
  * cockpit 节点 detail 水合 effect 族（自 ChatCockpitPage 机械拆出，纯移动零行为
- * 变化）：v40 复验 #3 水合去重 ref + 会话切换清空 + completed/active 节点 detail
+ * 变化）：v40 复验 #3 水合去重 ref + 会话切换清空 + 终态/active 节点 detail
  * 拉取 + 断连中止节点确认态恢复，effect 体与依赖数组原样迁移。
  */
 export function useCockpitNodeDetailHydration({
@@ -29,12 +44,9 @@ export function useCockpitNodeDetailHydration({
     hydratedNodeIdsRef.current.clear();
   }, [sessionId]);
   useEffect(() => {
-    const completedNodeIds = timelineNodes
-      .filter((node) => node.status === "completed")
-      .map((node) => node.node_id);
     const nodeIds = Array.from(
       new Set(
-        [activeNodeId, ...completedNodeIds].filter(
+        [activeNodeId, ...detailHydrationNodeIds(timelineNodes)].filter(
           (nodeId): nodeId is string => typeof nodeId === "string" && nodeId.length > 0,
         ),
       ),

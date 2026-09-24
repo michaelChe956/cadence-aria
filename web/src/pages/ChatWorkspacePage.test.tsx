@@ -577,6 +577,67 @@ describe("ChatWorkspacePage shell and content loading", () => {
       await screen.findByText("mcp__codegraph__codegraph_explore"),
     ).toBeInTheDocument();
   });
+
+  // F-47 REQ-NDR-02：failed 节点此前不在水合集合内（只拉 completed+selected/active）
+  // → 刷新后 durable 里的 usage 永远读不到，token 行不显示。
+  it("hydrates a failed node detail so its token usage is reachable", async () => {
+    mockWorkspaceWs();
+    vi.mocked(fetchWorkspaceNodeDetail).mockResolvedValue(
+      makeNodeDetail({
+        node_id: "timeline_node_failed",
+        session_id: "workspace_session_0001",
+        node_type: "author_run",
+        agent_role: "author",
+        status: "failed",
+        streaming_content: "失败节点正文",
+        execution_events: [
+          {
+            event_id: "usage_author",
+            kind: "usage",
+            status: "completed",
+            title: "author token usage",
+            output: JSON.stringify({ role: "author", input_tokens: 7_597, output_tokens: 19_493 }),
+          },
+        ],
+      }),
+    );
+    useWorkspaceStore.setState({
+      sessionId: "workspace_session_0001",
+      workspaceType: "design",
+      stage: "running",
+      providers: { author: "pi", reviewer: "kimi_code" },
+      selectedNodeId: null,
+      activeNodeId: null,
+      timelineNodes: [
+        timelineNode({
+          node_id: "timeline_node_failed",
+          node_type: "author_run",
+          agent: "pi",
+          round: null,
+          title: "Author Run",
+          status: "failed",
+          completed_at: "2026-09-23T16:16:44.926Z",
+        }),
+      ],
+      nodeDetails: {},
+      chatEntries: [],
+    });
+
+    render(
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
+    );
+
+    await waitFor(() => {
+      expect(fetchWorkspaceNodeDetail).toHaveBeenCalledWith(
+        "workspace_session_0001",
+        "timeline_node_failed",
+      );
+    });
+    expect(await screen.findByText("失败节点正文")).toBeInTheDocument();
+    expect(await screen.findByTestId("provider-stream-usage")).toHaveTextContent(
+      "Tokens 输入 7,597 · 输出 19,493",
+    );
+  });
   // 「uses the stable typed gate command after a session snapshot arrives」随 OQ2
   // 只读化退役：Legacy 页门卡不再装配动作面（typed 反馈编辑器随之不渲染）；
   // stable command 语义由 cockpit-action-routing.test.ts
