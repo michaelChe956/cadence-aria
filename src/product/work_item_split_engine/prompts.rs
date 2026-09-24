@@ -3,10 +3,16 @@ use crate::product::cadence_skills::routing_reference::{
 };
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::models::{
-    IssueRecord, LifecycleWorkItemRecord, OutlineContextBlockerResolution, ProviderName,
-    RepositoryRecord, WorkItemDraftRecord, WorkItemGenerationMode, WorkspaceType,
+    IssueRecord, IssueWorkItemPlanOptions, LifecycleWorkItemRecord,
+    OutlineContextBlockerResolution, ProviderName, RepositoryRecord, WorkItemDraftRecord,
+    WorkItemGenerationMode, WorkspaceType,
 };
+use crate::product::work_item_plan_compiler::ACCEPTANCE_PATH_NOT_IN_BASELINE_REPAIR_ACTION;
 use crate::product::work_item_plan_compiler::grammar;
+use crate::product::work_item_split_validator::{
+    E2E_WORK_ITEM_REQUIRED_REPAIR_ACTION, FRONTEND_BACKEND_SPLIT_REQUIRED_REPAIR_ACTION,
+    INTEGRATION_WORK_ITEM_REQUIRED_REPAIR_ACTION,
+};
 use crate::product::workspace_engine::{allowed_outputs_for, forbidden_outputs_for};
 use crate::web::error::ApiResult;
 use crate::web::types::GenerateWorkItemsRequest;
@@ -49,6 +55,10 @@ pub(crate) struct WorkItemPlanMarkdownAuthorContext<'a> {
     /// SingleCandidate 启动前从目标仓库读取的 `.claude/rules/language.md` 全文。
     /// 缺失或不可读必须由调用方拒绝启动，不能回退为指针式提示。
     pub language_rules: &'a str,
+    /// 已确认的创建计划选项（F-51/F-56，REQ-WSC-06）：启用 flag 的镜像教学与
+    /// AC 基线纪律逐字引用校验器共享常量；由生产调用方从 plan record 提供，
+    /// 测试夹具必须显式提供（不得依赖默认值丢意图）。
+    pub plan_options: &'a IssueWorkItemPlanOptions,
     /// 仅在逻辑代码库中保留 gateway 已验证的政策权威信息；传统单仓不注入旧指针。
     pub routing_context: &'a RoutingReferenceContext,
 }
@@ -101,6 +111,21 @@ pub(crate) const WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES: usize = 15_600;
 // 语法常量在「所有标题必须逐字使用上列英文名…」行与 dependency_syntax_rules 行另有
 // 注入锚点；删紧随 EARS 模板的重复注解「（WHEN、THE SYSTEM SHALL）」；压缩
 // Blockers 尾句与 section 序号措辞），共 151B。净 −1B，红线保持 22,000 不变。
+// 第 14 次评估（2026-09-25，C1-T5 options 镜像+AC 基线纪律，REQ-WSC-06/F-51/F-56）：
+// 固定面净增 AC 基线纪律行 394B（含 ACCEPTANCE_PATH_NOT_IN_BASELINE_REPAIR_ACTION
+// 常量 189B 逐字同源）；控制器裁决不提额，同批按 EarsImpl 方案 A 先例删/压语义
+// 重复表述共约 481B（头部删「；原始输出直接成为 source revision 并交 compiler
+// parse」——[output] 指令三重重复；source_boundary 删「只写 markdown 字段；」
+// 「；依赖、contract、验收、handoff 必须可验证」（cross_reference_discipline 另有
+// 注入锚点）、「Verification.command 直接声明…禁止臆造。」（grammar 块逐字重复）、
+// 「、code fence 或解释」（grammar/反前导语行另有注入）；format_clamp 删「重申：」
+// 前缀；PROJECT_RULE_PRIORITY 删「,不做翻译」「;代码、路径、命令、契约 ID 保持
+// 原样」（CODE_READING_SUMMARY 另有注入锚点）；CODE_USAGE_SUMMARY 删「保持职责与
+// 范围最小化…」尾句（grammar「输出保持精炼」另有注入锚点））——未触碰任何 pinned
+// 断言。全 false fixture 实测净 −87B（最大 F2-C 21,977→21,890/余 110）；三 flag
+// 镜像行 717B 为条件渲染（outline split_option_semantics 先例，仅启用时出现），
+// 全 true fixture 实测 22,607（未纳入红线口径，硬兜底 65,536 远未触及）。红线
+// 保持 22,000 不变。
 pub(crate) const WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES: usize = 22_000;
 
 /// SC markdown author prompt 的尾部输出指令。首轮与修订轮共享同一段字节；
@@ -112,9 +137,9 @@ pub(crate) const WORK_ITEM_PLAN_MARKDOWN_OUTPUT_DIRECTIVE: &str =
 mod sc_revision;
 pub(crate) use sc_revision::build_work_item_plan_markdown_revision_prompt;
 
-pub(crate) const SINGLE_CANDIDATE_PROJECT_RULE_PRIORITY: &str = "结构标题(##/### section 名)、字段 key、ID(WI-*/CT-*/TASK-*/AC-*/REQ-*/CHECK-* 等)、枚举值(require_all/require_any/backend/frontend/integration 等)永远保持 grammar 指定的英文原样,不做翻译;上述语言规则仅约束自由文本值(各 ## 标题的 <title> 部分、statement/description/capabilities 等字段的值)与说明性文字;代码、路径、命令、契约 ID 保持原样。字段行分隔符必须是半角 ASCII:每行写作 `- key: value`(冒号+一个空格均为半角),禁止全角冒号`：`或全角空格;EARS 关键词(WHEN/THE SYSTEM SHALL)、ID 前缀(WI-/CT-/TASK-/AC-/REQ-/CHECK-)与枚举值内的分隔亦为半角;中文仅出现在值的自由文本中。";
+pub(crate) const SINGLE_CANDIDATE_PROJECT_RULE_PRIORITY: &str = "结构标题(##/### section 名)、字段 key、ID(WI-*/CT-*/TASK-*/AC-*/REQ-*/CHECK-* 等)、枚举值(require_all/require_any/backend/frontend/integration 等)永远保持 grammar 指定的英文原样;上述语言规则仅约束自由文本值(各 ## 标题的 <title> 部分、statement/description/capabilities 等字段的值)与说明性文字。字段行分隔符必须是半角 ASCII:每行写作 `- key: value`(冒号+一个空格均为半角),禁止全角冒号`：`或全角空格;EARS 关键词(WHEN/THE SYSTEM SHALL)、ID 前缀(WI-/CT-/TASK-/AC-/REQ-/CHECK-)与枚举值内的分隔亦为半角;中文仅出现在值的自由文本中。";
 
-const SINGLE_CANDIDATE_CODE_USAGE_SUMMARY: &str = "任务拆分与验证设计遵循测试先行纪律：先明确可验证验收，再安排实现步骤；验证命令必须真实可执行、可复现，并与仓库现有工具链相符；遵守安全边界，不引入未授权依赖、凭据、网络访问或外部服务；保持职责与范围最小化，产出精炼，只含结构化必需内容，不写重复过程说明。";
+const SINGLE_CANDIDATE_CODE_USAGE_SUMMARY: &str = "任务拆分与验证设计遵循测试先行纪律：先明确可验证验收，再安排实现步骤；验证命令必须真实可执行、可复现，并与仓库现有工具链相符；遵守安全边界，不引入未授权依赖、凭据、网络访问或外部服务。";
 
 const SINGLE_CANDIDATE_CODE_READING_SUMMARY: &str = "对目标仓库做事实核查时，大范围定位优先检索工具，精确结构优先 outline 式阅读；先依据真实文件确认事实再写计划。引用的代码、路径、命令与契约 ID 必须来自真实仓库内容，保留原样且可追溯；不得臆造、猜测不存在的接口、目录、测试或验证命令。";
 
@@ -368,6 +393,37 @@ fn work_item_plan_real_few_shot() -> Result<String, String> {
 
     Ok(cases)
 }
+/// F-51/F-56（REQ-WSC-06）：SC author prompt 的创建计划选项镜像教学。
+/// 仅渲染已启用 flag 的镜像行（条件渲染先例：outline 路径 split_option_semantics）；
+/// 修复动作逐字引用校验器共享常量（两种修复路径），错误后果在段头明示。
+/// 全 false 时返回空串（教学缺席；权威校验仍由编译前预检承担）。
+fn work_item_plan_option_mirror_teaching(options: &IssueWorkItemPlanOptions) -> String {
+    let mut lines = Vec::new();
+    if options.include_integration_tests {
+        lines.push(format!(
+            "- include_integration_tests=true：{INTEGRATION_WORK_ITEM_REQUIRED_REPAIR_ACTION}。"
+        ));
+    }
+    if options.include_e2e_tests {
+        lines.push(format!(
+            "- include_e2e_tests=true：{E2E_WORK_ITEM_REQUIRED_REPAIR_ACTION}。"
+        ));
+    }
+    if options.force_frontend_backend_split {
+        lines.push(format!(
+            "- force_frontend_backend_split=true：{FRONTEND_BACKEND_SPLIT_REQUIRED_REPAIR_ACTION}。"
+        ));
+    }
+    if lines.is_empty() {
+        return String::new();
+    }
+    format!(
+        "[plan_options_mirror]\n\
+         以下创建计划选项已启用；启用而缺对应 kind 的 Work Item 将被编译前预检 Error 拒绝（修复动作）：\n\
+         {}\n\n",
+        lines.join("\n")
+    )
+}
 
 /// 构造单候选路径专用的 markdown source author prompt。
 ///
@@ -381,6 +437,7 @@ pub(crate) fn build_work_item_plan_markdown_prompt(
     context: WorkItemPlanMarkdownAuthorContext<'_>,
 ) -> Result<String, String> {
     let few_shot = work_item_plan_real_few_shot()?;
+    let plan_options_mirror = work_item_plan_option_mirror_teaching(context.plan_options);
     let dependency_syntax_rules = work_item_plan_dependency_syntax_rules();
     let reference_discipline =
         work_item_plan_markdown_reference_discipline(Some(context.design_requirement_ids));
@@ -392,23 +449,25 @@ pub(crate) fn build_work_item_plan_markdown_prompt(
         context.repository_structure,
     );
     let prompt = format!(
-        "只输出完整 `work-item-plan.md` source；原始输出直接成为 source revision 并交 compiler parse。\n\
+        "只输出完整 `work-item-plan.md` source。\n\
          [issue] {issue_title}\n{issue_description}\nrepo={repository_id} path={repository_path}\n\
          [routing_reference]\n{routing_reference}\n\
          [confirmed_context]\nstory:{story_context}\ndesign:{design_context}\nstructure:{repository_structure}\n\
          story_spec_ids:{story_spec_ids}\ndesign_spec_ids:{design_spec_ids}\n\
          [source_boundary]\n\
-         只写 markdown 字段；不得从 issue、prompt 或 runtime 补齐 markdown 缺失字段。\n\
-         exclusive_scopes 仅限本项且依赖项不得重叠；non_goals 不得与 tasks、验收、write policy 矛盾；依赖、contract、验收、handoff 必须可验证。\n\
-         Verification.command 直接声明，将按声明执行；命令证据不足写 manual_instruction 或 blocker，禁止臆造。不要 JSON、私有协议、私有 draft、classifier 字段、code fence 或解释。\n\
+         不得从 issue、prompt 或 runtime 补齐 markdown 缺失字段。\n\
+         exclusive_scopes 仅限本项且依赖项不得重叠；non_goals 不得与 tasks、验收、write policy 矛盾。\n\
+         不要 JSON、私有协议、私有 draft、classifier 字段。\n\
+         AC 与验证计划引用的仓库内文件路径必须存在于 plan 基线树，不得引用其他分支才存在的文件；缺失 → acceptance_path_not_in_baseline Error；修复动作：{acceptance_baseline_repair_action}。\n\
          {dependency_syntax_rules}\n\n\
          {reference_discipline}
          {weak_model_discipline}
          {grammar}\
          [minimum_legal_source] 仅示语法形状；按当前上下文替换，勿照抄。\n{minimum_source}\n\
          {few_shot}\n\
+         {plan_options_mirror}\
          [format_clamp]\n\
-         重申：结构标题必须逐字照抄 [markdown_grammar]/[minimum_legal_source] 的英文原文（含 `# Work Item Plan` 与全部 `###` 标题）；仅自由文本值用中文；禁止翻译、改写或加中文括号。\n\
+         结构标题必须逐字照抄 [markdown_grammar]/[minimum_legal_source] 的英文原文（含 `# Work Item Plan` 与全部 `###` 标题）；仅自由文本值用中文；禁止翻译、改写或加中文括号。\n\
          禁止任何前言、寒暄、说明性开场或路由回执；输出的第一个字符必须是文档标题。\n\
          {output_directive}",
         issue_title = issue.title,
@@ -424,6 +483,7 @@ pub(crate) fn build_work_item_plan_markdown_prompt(
         repository_structure = repository_structure,
         story_spec_ids = request.story_spec_ids.join(", "),
         design_spec_ids = request.design_spec_ids.join(", "),
+        acceptance_baseline_repair_action = ACCEPTANCE_PATH_NOT_IN_BASELINE_REPAIR_ACTION,
         reference_discipline = reference_discipline,
         weak_model_discipline = WORK_ITEM_PLAN_WEAK_MODEL_PRECISION_DISCIPLINE,
         grammar = work_item_plan_markdown_grammar(),

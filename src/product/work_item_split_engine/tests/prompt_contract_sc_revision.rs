@@ -9,6 +9,16 @@ use crate::web::workspace_ws_types::{
 const TEST_SINGLE_CANDIDATE_LANGUAGE_RULES: &str =
     "## 语言规则\n\n- **必须使用中文** - 所有响应、解释、注释和文档必须使用中文。\n";
 
+/// F-51 夹具纪律：教学基线 fixture 不携带 options 意图，全 false 且
+/// 不依赖默认值丢意图（与 weak_model validator 夹具同口径）。
+static TEST_ALL_FALSE_PLAN_OPTIONS: crate::product::models::IssueWorkItemPlanOptions =
+    crate::product::models::IssueWorkItemPlanOptions {
+        include_integration_tests: false,
+        include_e2e_tests: false,
+        force_frontend_backend_split: false,
+        require_execution_plan_confirm: false,
+    };
+
 const SC_REVISION_OUTPUT_DIRECTIVE: &str = "[output] 现在仅输出完整 markdown source。";
 
 fn revise_verdict_fixture(
@@ -59,6 +69,7 @@ fn author_context()
         design_requirement_ids: &[],
         repository_structure: "src/product/levels; web/src/levels; tests/integration",
         language_rules: TEST_SINGLE_CANDIDATE_LANGUAGE_RULES,
+        plan_options: &TEST_ALL_FALSE_PLAN_OPTIONS,
         routing_context: &RoutingReferenceContext::Legacy,
     }
 }

@@ -6,6 +6,16 @@
 const WEAK_MODEL_TEST_LANGUAGE_RULES: &str =
     "## 语言规则\n\n- **必须使用中文** - 所有响应、解释、注释和文档必须使用中文。";
 
+/// F-51 夹具纪律：教学基线 fixture 不携带 options 意图，全 false 且
+/// 不依赖默认值丢意图（与 weak_model validator 夹具同口径）。
+static TEST_ALL_FALSE_PLAN_OPTIONS: crate::product::models::IssueWorkItemPlanOptions =
+    crate::product::models::IssueWorkItemPlanOptions {
+        include_integration_tests: false,
+        include_e2e_tests: false,
+        force_frontend_backend_split: false,
+        require_execution_plan_confirm: false,
+    };
+
 /// 3.6 弱模型基线加固（组 1）：SC author prompt 增补面向 flash 级弱模型的
 /// 精度教学两段——AC 纪律（reviewer check 字段成对，含字段形态正例）与引用
 /// 纪律（只逐字复制输入 spec 已定义 id，含 REQ-002 反例）。既有教学段逐字保留。
@@ -24,6 +34,7 @@ fn work_item_plan_markdown_prompt_teaches_weak_model_precision_discipline() {
                 design_requirement_ids: &design_requirement_ids,
                 repository_structure: "src/product/levels; web/src/levels; tests/integration",
                 language_rules: WEAK_MODEL_TEST_LANGUAGE_RULES,
+                plan_options: &TEST_ALL_FALSE_PLAN_OPTIONS,
                 routing_context: &RoutingReferenceContext::Legacy,
             },
         )
@@ -122,6 +133,7 @@ fn weak_model_precision_teaching_matches_contract_validator_judgement() {
                 design_requirement_ids: &design_requirement_ids,
                 repository_structure: "src/product",
                 language_rules: WEAK_MODEL_TEST_LANGUAGE_RULES,
+                plan_options: &TEST_ALL_FALSE_PLAN_OPTIONS,
                 routing_context: &RoutingReferenceContext::Legacy,
             },
         )
@@ -255,6 +267,7 @@ fn work_item_plan_markdown_prompt_teaches_output_contract_capability_verbatim_co
                 design_requirement_ids: &design_requirement_ids,
                 repository_structure: "src/product/levels; web/src/levels; tests/integration",
                 language_rules: WEAK_MODEL_TEST_LANGUAGE_RULES,
+                plan_options: &TEST_ALL_FALSE_PLAN_OPTIONS,
                 routing_context: &RoutingReferenceContext::Legacy,
             },
         )
@@ -320,6 +333,7 @@ fn work_item_plan_markdown_prompt_teaches_cross_wi_paired_writing() {
                 design_requirement_ids: &design_requirement_ids,
                 repository_structure: "src/product/levels; web/src/levels; tests/integration",
                 language_rules: WEAK_MODEL_TEST_LANGUAGE_RULES,
+                plan_options: &TEST_ALL_FALSE_PLAN_OPTIONS,
                 routing_context: &RoutingReferenceContext::Legacy,
             },
         )
@@ -425,6 +439,7 @@ fn output_contract_capability_teaching_matches_dependency_validator_judgement() 
                 design_requirement_ids: &design_requirement_ids,
                 repository_structure: "src/product/levels; web/src/levels; tests/integration",
                 language_rules: WEAK_MODEL_TEST_LANGUAGE_RULES,
+                plan_options: &TEST_ALL_FALSE_PLAN_OPTIONS,
                 routing_context: &RoutingReferenceContext::Legacy,
             },
         )

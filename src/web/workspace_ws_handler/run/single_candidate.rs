@@ -449,6 +449,20 @@ pub(crate) async fn run_single_candidate_author(
     // F5-A：SC 修订轮 findings 回灌——最近 verdict 要求返修时，本轮 author 重跑
     // 使用返修 prompt（在首轮完整 prompt 的尾部输出指令前注入 reviewer findings 与
     // 硬性修复指令）；首轮（无 verdict）prompt 逐字节不变。
+    // F-51（REQ-WSC-06）：author prompt 镜像教学使用与 prevalidate 同源的 plan record
+    // options；记录缺失时 fail-safe 全 false（教学缺席，权威校验仍由编译前预检承担）。
+    let plan_options = {
+        let session = engine.session();
+        lifecycle
+            .get_issue_work_item_plan(&session.project_id, &session.issue_id, &session.entity_id)
+            .map(|plan| plan.options)
+            .unwrap_or(crate::product::models::IssueWorkItemPlanOptions {
+                include_integration_tests: false,
+                include_e2e_tests: false,
+                force_frontend_backend_split: false,
+                require_execution_plan_confirm: false,
+            })
+    };
     let revision_verdict = engine.single_candidate_pending_revision_verdict();
     let full_prompt = match revision_verdict.as_ref() {
         Some(review) => {
@@ -462,6 +476,7 @@ pub(crate) async fn run_single_candidate_author(
                         design_context: &design_context,
                         design_requirement_ids: &design_requirement_ids,
                         repository_structure: &repository_structure,
+                        plan_options: &plan_options,
                         language_rules: &language_rules,
                         routing_context: &launch.routing_context(),
                     },
@@ -477,6 +492,7 @@ pub(crate) async fn run_single_candidate_author(
                 design_context: &design_context,
                 design_requirement_ids: &design_requirement_ids,
                 repository_structure: &repository_structure,
+                plan_options: &plan_options,
                 language_rules: &language_rules,
                 routing_context: &launch.routing_context(),
             },

@@ -21,6 +21,11 @@ mod prompt_contract_sc_anti_preamble {
 
     include!("tests/prompt_contract_sc_anti_preamble.rs");
 }
+mod prompt_contract_plan_options {
+    use super::*;
+
+    include!("tests/prompt_contract_plan_options.rs");
+}
 include!("tests/part_02.rs");
 include!("tests/routing_reference_contract.rs");
 include!("tests/part_03.rs");
