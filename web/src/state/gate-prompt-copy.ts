@@ -25,6 +25,17 @@ export function gateFindingsToggleLabel(findingCount: number): string {
 /** A4：反馈提交被门面接受后的成功反馈。 */
 export const GATE_FEEDBACK_SUBMITTED_NOTE = "反馈已提交";
 
+/**
+ * B4：反馈已提交、引擎正在跑门内修订 provider。
+ * 草案原为「（第 N/3 轮）」，但前端无单调轮次事实源——门每次重开预算按默认值重置
+ * （REQ-CG-02 重建公式 ⇒ `remaining_budget` 非单调），turn 计数不在 session_state 内，
+ * 补序号属新增可见事实面（契约增量），故先不绑序号。
+ */
+export const GATE_REVISION_RUNNING_NOTE = "已提交，正在按反馈修订";
+
+/** B4：门内修订已完成，引擎正在复评（复评结论随后以 review 结论卡呈现）。 */
+export const GATE_REVISION_REVIEWING_NOTE = "修订完成，正在复评";
+
 /** B5：留档卡徽章。 */
 export const GATE_ARCHIVE_BADGE_LABEL = "已留档";
 

@@ -476,4 +476,91 @@ describe("GatePromptEntry actionability", () => {
       expect(screen.queryByTestId("gate-findings")).toBeNull();
     });
   });
+
+  // F-49 B4：提交反馈后门卡必须报出进程——此前 submitted 后只剩门卡状态悄悄变化，
+  // 「author 修订步不可见」（诊断问 3）。文案常量在 gate-prompt-copy.ts；草案的
+  // 「第 N/3 轮」序号无可用单调事实源（门每次重开预算重置为默认值，remaining_budget
+  // 非单调；turn 计数不在 session_state 内）故不绑序号——需新增事实面才能补，见报告。
+  describe("F-49 revision progress copy", () => {
+    function turnCard() {
+      return gateEntry(null, "turn_1", { turn_id: "turn_1", action_facade: "typed" });
+    }
+
+    it("reports the running revision while the typed turn is in flight (B4)", () => {
+      const store = useWorkspaceStore.getState();
+      store.setStage("human_confirm");
+      store.applyHumanGateTurnOpen("turn_1", "cmd_1", 2);
+
+      render(<GatePromptEntry entry={turnCard()} actions={actions()} />);
+
+      expect(screen.getByTestId("gate-revision-status")).toHaveTextContent(
+        "已提交，正在按反馈修订",
+      );
+    });
+
+    it("reports the finished revision once the turn completes (B4)", () => {
+      const store = useWorkspaceStore.getState();
+      store.setStage("human_confirm");
+      store.applyHumanGateTurnOpen("turn_1", "cmd_1", 2);
+      store.applyHumanGateTurnCompleted("turn_1", "artifact_9");
+
+      render(<GatePromptEntry entry={turnCard()} actions={actions()} />);
+
+      expect(screen.getByTestId("gate-revision-status")).toHaveTextContent(
+        "修订完成，正在复评",
+      );
+    });
+
+    it("reports no progress line for a gate card without a live turn (B4 fail-closed)", () => {
+      const store = useWorkspaceStore.getState();
+      store.setStage("human_confirm");
+      store.applyHumanGateTurnOpen("turn_other", "cmd_other", 2);
+
+      render(<GatePromptEntry entry={turnCard()} actions={actions()} />);
+
+      expect(screen.queryByTestId("gate-revision-status")).toBeNull();
+    });
+
+    it("leaves the failed turn to the failure line instead of a progress note (B4)", () => {
+      const store = useWorkspaceStore.getState();
+      store.setStage("human_confirm");
+      store.applyHumanGateTurnOpen("turn_1", "cmd_1", 2);
+      store.applyHumanGateTurnFailed("turn_1", "provider_err", "provider 退出");
+      // live 路径失败时重铸的门卡携失败元数据（buildGatePromptEntry 取 turn 的
+      // failure_class/failure_message）。
+      const failedCard = gateEntry(null, "turn_1", {
+        turn_id: "turn_1",
+        failure_class: "provider_err",
+        failure_message: "provider 退出",
+      });
+
+      render(<GatePromptEntry entry={failedCard} actions={actions()} />);
+
+      expect(screen.queryByTestId("gate-revision-status")).toBeNull();
+      expect(screen.getByTestId("gate-failure")).toHaveTextContent("provider 退出");
+    });
+
+    it("gives way to the revision progress line after a successful submit (B4)", async () => {
+      const gateActions = actions();
+      const user = userEvent.setup();
+      const entry = turnCard();
+      const store = useWorkspaceStore.getState();
+      store.setStage("human_confirm");
+      store.appendChatEntry(entry);
+      store.applyHumanGateTurnOpen("turn_1", "cmd_1", 2);
+
+      render(<GatePromptEntry entry={entry} actions={gateActions} />);
+      expect(screen.getByTestId("gate-revision-status")).toHaveTextContent(
+        "已提交，正在按反馈修订",
+      );
+
+      await user.type(screen.getByLabelText("门禁反馈"), "请补齐边界");
+      await user.click(screen.getByRole("button", { name: "提交反馈" }));
+
+      expect(gateActions.feedback).toHaveBeenCalledWith("请补齐边界");
+      // 进程行已含「已提交」语义，不再并列第二条成功反馈。
+      expect(screen.queryByTestId("gate-feedback-submitted")).toBeNull();
+      expect(screen.getByLabelText("门禁反馈")).toHaveValue("");
+    });
+  });
 });

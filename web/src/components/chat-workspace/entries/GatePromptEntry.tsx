@@ -12,6 +12,8 @@ import {
   GATE_ADVISORY_CONFIRM_HINT,
   GATE_ARCHIVE_BADGE_LABEL,
   GATE_FEEDBACK_SUBMITTED_NOTE,
+  GATE_REVISION_REVIEWING_NOTE,
+  GATE_REVISION_RUNNING_NOTE,
   gateFindingsToggleLabel,
   gateWhyAdvisoryCopy,
   gateWhyRequiredCopy,
@@ -135,6 +137,22 @@ export function GatePromptEntry({
   const archiveNote = archiveNoteFromEntry(entry);
   const confirmOffered = !isResolved && actionBlockReason === null && !isContextBlockerGate;
   const advisoryOnly = findings.length > 0 && requiredFindings.length === 0;
+  // F-49 B4：门内修订进程（提交后「正在按反馈修订」→ 完成后「正在复评」）。只取
+  // 「本卡就是当前 typed turn」的门卡（turn_id 匹配活 turn）——门内轮次切换后旧卡
+  // 由 A1 收口为留档，不会误报进程。failed 交给失败行，不另报进程。
+  const entryTurnId =
+    (entry.metadata as Record<string, unknown> | undefined)?.turn_id;
+  const liveTurnStatus = useWorkspaceStore((state) =>
+    typeof entryTurnId === "string" && state.humanGateTurn?.turn_id === entryTurnId
+      ? state.humanGateTurn.status
+      : null,
+  );
+  const revisionProgressCopy =
+    liveTurnStatus === "open" || liveTurnStatus === "busy"
+      ? GATE_REVISION_RUNNING_NOTE
+      : liveTurnStatus === "awaiting_confirm"
+        ? GATE_REVISION_REVIEWING_NOTE
+        : null;
   const handleFeedbackSubmit = (value: string) => {
     if (!actions || !actions.feedback(value)) {
       return;
@@ -240,6 +258,14 @@ export function GatePromptEntry({
             {inlineError.code} · {inlineError.message}
           </div>
         ) : null}
+        {revisionProgressCopy && !isResolved ? (
+          <div
+            data-testid="gate-revision-status"
+            className="text-xs font-medium text-[var(--aria-ink)]"
+          >
+            {revisionProgressCopy}
+          </div>
+        ) : null}
         {requiresTriage && findings.length === 0 ? (
           <div className="text-xs text-[var(--aria-ink-muted)]">
             请在下方输入人工修改说明后发送返修。
@@ -277,7 +303,7 @@ export function GatePromptEntry({
                 onSubmit={handleFeedbackSubmit}
               />
             ) : null}
-            {feedbackSubmitted ? (
+            {feedbackSubmitted && !revisionProgressCopy ? (
               <p
                 data-testid="gate-feedback-submitted"
                 className="text-xs font-medium text-emerald-700"
