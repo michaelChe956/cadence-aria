@@ -54,6 +54,40 @@ describe("ChatInputBar", () => {
     expect(screen.queryByRole("button", { name: "发送" })).toBeNull();
   });
 
+  // C3/REQ-HTR-02：门态呈现分层——人工门开态（stage 漂移停在 busy 形态的
+  // F-53 现场即此形态）不得渲染 run 级中止钮；run 级取消不占用户「终止」心智，
+  // 门级动作（反馈/确认/终止此门）由门卡承载。
+  it("hides the abort button while a human gate is open even in busy stages", () => {
+    render(
+      <ChatInputBar
+        stage="running"
+        gateOpen={true}
+        onSendContextNote={vi.fn()}
+        onStartGeneration={vi.fn()}
+        onAbort={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "中止" })).toBeNull();
+    // busy 形态的输入禁用保持不变（门开态只隐藏中止钮，不改输入态呈现）。
+    expect(screen.getByRole("textbox")).toBeDisabled();
+  });
+
+  // 负例（Review Focus 3）：无门会话的 busy 阶段必须仍渲染中止钮——F-19
+  // 生成期楔死逃生口不受门态分层影响。
+  it("keeps the abort button for busy stages without an open gate", () => {
+    render(
+      <ChatInputBar
+        stage="cross_review"
+        onSendContextNote={vi.fn()}
+        onStartGeneration={vi.fn()}
+        onAbort={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "中止" })).toBeInTheDocument();
+  });
+
   it("hides start generation while an interrupted run is recoverable", () => {
     render(
       <ChatInputBar

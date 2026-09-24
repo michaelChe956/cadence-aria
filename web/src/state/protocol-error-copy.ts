@@ -22,6 +22,20 @@ export function protocolErrorCopy(code: string): ProtocolErrorDisplayCopy {
   if (code === "OBSERVER_WRITE_REJECTED") {
     return { lead: "本连接为观察者连接，写操作已被拒收", body: null };
   }
+  // C3/REQ-HTR-02：门态操作错误面指路（门态→门卡入口）；lease 类错误指路
+  // （连接/租约→重新接管）由上方两码 + onRetakeLease 按钮既有承载。
+  if (code === "abort_no_active_run") {
+    return {
+      lead: "当前没有进行中的运行可中止",
+      body: "若人工门已开启，请在门卡上提交反馈、确认或终止此门。",
+    };
+  }
+  if (code === "WORK_ITEM_PLAN_HUMAN_GATE_STAGE_INVALID") {
+    return {
+      lead: "当前阶段不接受该操作",
+      body: "会话停在人工门阶段时，请使用门卡上的操作：提交反馈 / 确认 / 终止此门。",
+    };
+  }
   return { lead: "操作被拒绝", body: null };
 }
 

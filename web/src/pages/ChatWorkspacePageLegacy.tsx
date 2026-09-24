@@ -35,7 +35,10 @@ import { useProviderDefaultsApplication } from "../hooks/useProviderDefaultsAppl
 import { useUnloadGuard } from "../hooks/useUnloadGuard";
 import { useWorkspaceContentLoaders } from "../hooks/useWorkspaceContentLoaders";
 import type { WorkspaceWsApi } from "../hooks/useWorkspaceWs";
-import { gateActionBlockReason as gateActionBlockReasonForState } from "../state/workspace-cockpit-projection";
+import {
+  gateActionBlockReason as gateActionBlockReasonForState,
+  selectGateProjection,
+} from "../state/workspace-cockpit-projection";
 import type {
   ChatEntry,
   ChoiceResponsePayload,
@@ -101,6 +104,10 @@ export function LegacyChatWorkspacePage({
     state.stage === "human_confirm"
       ? gateActionBlockReasonForState(state)
       : null,
+  );
+  // C3/REQ-HTR-02：门开态（门投影存在）隐藏输入条 run 级中止钮。
+  const gateOpen = useWorkspaceStore(
+    (state) => selectGateProjection(state) !== null,
   );
   const providers = useWorkspaceStore((state) => state.providers);
   const reviewRounds = useWorkspaceStore((state) => state.reviewRounds);
@@ -650,6 +657,7 @@ export function LegacyChatWorkspacePage({
                   }
                   hideStartGeneration={Boolean(recoverableInterruptedRun)}
                   onAbort={abort}
+                  gateOpen={gateOpen}
                 />
                 {reviewPanelVisible ? null : (
                   <div
@@ -789,6 +797,7 @@ export function LegacyChatWorkspacePage({
                 }
                 hideStartGeneration={Boolean(recoverableInterruptedRun)}
                 onAbort={abort}
+                gateOpen={gateOpen}
               />
             </div>
             )}

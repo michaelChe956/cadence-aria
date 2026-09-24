@@ -1,12 +1,8 @@
-export type StageAction =
-  | "start_generation"
-  | "abort"
-  | "accept_author"
-  | "reject_author";
-
+// C3/REQ-HTR-02 死代码清理：`actions: StageAction[]` 字段与 StageAction 类型删除——
+// 全仓 grep 证零渲染消费（两页只用 providerEditable/headerBadge，F53Diag §C）；
+// 动作呈现归门卡/输入条单一归属，stage 配置只保留呈现位。
 export type GateActionFacade = "typed" | "legacy";
 export interface StageUIConfig {
-  actions: StageAction[];
   headerBadge: string;
   showContextInput: boolean;
   providerEditable: boolean;
@@ -14,25 +10,21 @@ export interface StageUIConfig {
 
 const STAGE_CONFIG_MAP: Record<string, StageUIConfig> = {
   prepare_context: {
-    actions: ["start_generation"],
     headerBadge: "准备中",
     showContextInput: true,
     providerEditable: true,
   },
   running: {
-    actions: ["abort"],
     headerBadge: "运行中 · 保持本页打开",
     showContextInput: false,
     providerEditable: false,
   },
   author_confirm: {
-    actions: ["accept_author", "reject_author"],
     headerBadge: "Author 待确认",
     showContextInput: false,
     providerEditable: false,
   },
   cross_review: {
-    actions: ["abort"],
     headerBadge: "审核中",
     showContextInput: false,
     providerEditable: false,
@@ -41,25 +33,21 @@ const STAGE_CONFIG_MAP: Record<string, StageUIConfig> = {
   // request_change/terminate）随旧协议退役收敛为只读呈现；headerBadge 保留——
   // 历史会话 stage 值仍在服务端快照内。
   review_decision: {
-    actions: [],
     headerBadge: "审核结论待处理",
     showContextInput: false,
     providerEditable: false,
   },
   revision: {
-    actions: ["abort"],
     headerBadge: "修订中",
     showContextInput: false,
     providerEditable: false,
   },
   human_confirm: {
-    actions: [],
     headerBadge: "等待确认",
     showContextInput: false,
     providerEditable: false,
   },
   completed: {
-    actions: [],
     headerBadge: "已完成",
     showContextInput: false,
     providerEditable: false,

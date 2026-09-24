@@ -24,6 +24,22 @@ describe("protocol-error-copy (F-50 裁决 5/6/7)", () => {
     });
   });
 
+  // C3/REQ-HTR-02：错误面指路——门态操作错误指向门卡入口；连接/租约类错误
+  // 由既有 lead/body + 重新接管按钮承载（lease→接管）。
+  it("maps abort_no_active_run to gate-card guidance", () => {
+    expect(protocolErrorCopy("abort_no_active_run")).toEqual({
+      lead: "当前没有进行中的运行可中止",
+      body: "若人工门已开启，请在门卡上提交反馈、确认或终止此门。",
+    });
+  });
+
+  it("maps the human-gate stage code to gate-card guidance", () => {
+    expect(protocolErrorCopy("WORK_ITEM_PLAN_HUMAN_GATE_STAGE_INVALID")).toEqual({
+      lead: "当前阶段不接受该操作",
+      body: "会话停在人工门阶段时，请使用门卡上的操作：提交反馈 / 确认 / 终止此门。",
+    });
+  });
+
   it("falls back to a neutral lead for unknown codes (fail-closed，不猜语义)", () => {
     expect(protocolErrorCopy("SOME_FUTURE_CODE")).toEqual({
       lead: "操作被拒绝",

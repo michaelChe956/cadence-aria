@@ -687,13 +687,6 @@ export function useWorkspaceWs(sessionId: string | null) {
     console.warn("startGeneration() without args is deprecated");
   }, []);
 
-  const rollback = useCallback(
-    (checkpointId: string) => {
-      sendJson({ type: "rollback", checkpoint_id: checkpointId });
-    },
-    [sendJson],
-  );
-
   const confirm = useCallback(() => {
     sendJson({ type: "confirm" });
   }, [sendJson]);
@@ -795,7 +788,6 @@ export function useWorkspaceWs(sessionId: string | null) {
     sendHello,
     sendPing,
     startGeneration,
-    rollback,
     confirm,
     abort,
     selectProvider,

@@ -55,6 +55,10 @@ interface ChatInputBarProps {
    * 拒收两码（STALE_DRIVER_LEASE/OBSERVER_WRITE_REJECTED）附重接管二次确认；
    * 其余码只报错误码与建议刷新。 */
   hardErrorNotice?: HardErrorNotice | null;
+  /** C3/REQ-HTR-02：人工门开态（门投影存在）不渲染 run 级中止钮——stage
+   * 漂移停在 busy 形态（F-53 现场）时中止钮被误当会话级「终止」；门级
+   * 动作（反馈/确认/终止此门）由门卡承载，此处只做呈现分层不发新帧。 */
+  gateOpen?: boolean;
 }
 
 export interface HardErrorNotice {
@@ -102,6 +106,7 @@ export const ChatInputBar = forwardRef<ChatInputBarHandle, ChatInputBarProps>(
   startGenerationDisabledHint = null,
   onInputFocus,
   hardErrorNotice = null,
+  gateOpen = false,
 }, ref) {
   const [input, setInput] = useState("");
   const trimmedInput = input.trim();
@@ -290,7 +295,9 @@ export const ChatInputBar = forwardRef<ChatInputBarHandle, ChatInputBarProps>(
           })()
         ) : null}
         <div className="flex flex-wrap items-center justify-end gap-2">
-          {isBusy ? (
+          {/* C3/REQ-HTR-02：busy 形态叠加「无开启中人工门」——门开态（含
+              stage 漂移误显 busy）不渲染 run 级中止钮，避免挤占「终止」心智。 */}
+          {isBusy && !gateOpen ? (
             <button
               type="button"
               onClick={onAbort}

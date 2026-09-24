@@ -25,7 +25,6 @@ export function mockWorkspaceWs(overrides: Partial<WorkspaceWsApi> = {}) {
     sendHello: vi.fn(),
     sendPing: vi.fn(),
     startGeneration: vi.fn(),
-    rollback: vi.fn(),
     confirm: vi.fn(),
     abort: vi.fn(),
     selectProvider: vi.fn(),

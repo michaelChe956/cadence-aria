@@ -969,6 +969,7 @@ export function ChatCockpitPage({
               onStartGeneration={handleStartGeneration}
               onAbort={workspaceWs.abort}
               hardErrorNotice={hardErrorNotice}
+              gateOpen={selectGateProjection(state) !== null}
             />
           ) : null}
           {/* 退役留档（T5/REQ-RET-02）：review_decision 动作条随消息族删除。 */}
