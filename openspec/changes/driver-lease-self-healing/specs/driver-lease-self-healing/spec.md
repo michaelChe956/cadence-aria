@@ -52,3 +52,22 @@ driver 写租约丢失后的自愈契约：驾驶连接因租约被并发 attach
 
 - **WHEN** 诊断流写入失败
 - **THEN** 租约仲裁与写消息处理行为不变，仅缺失该次打点
+
+### Requirement: attach 对租约零效应（REQ-DLS-04）
+
+连接 attach SHALL NOT 对租约产生任何获取、转移或快照效应（provisional_lease 快照与回滚机制整体删除）；租约唯一获取点为 hello(driver/缺席归一) 显式获取，holder==None 时的首写自愈（REQ-DLS-01）为无 hello 连接的唯一幸存路径。observer 连接全程不触碰租约。既有 REQ-WCR-02（cockpit-fullcourse-connection-resilience change，未归档）所载「observer 无 lease/显式接管」语义与本 requirement 一致，此处显式交叉引用。仓内既有三个「attach 即抢租约」语义用例（it_core part_06b.rs:83、part_03.rs:579、part_03.rs:807 F-24 现场锚）SHALL 逐名改写为新语义（改写不删除），并补「无 role hello 保归一」覆盖用例。
+
+#### Scenario: observer attach 不偷租约
+
+- **WHEN** observer 连接到某会话（纯 attach，不发 hello）且该会话已有 driver 持有租约
+- **THEN** 租约持有者不变，driver 写操作不受影响
+
+#### Scenario: 无 hello 首写经自愈放行
+
+- **WHEN** 连接未发 hello 直接发送写消息且 holder==None
+- **THEN** 按 REQ-DLS-01 自愈放行并授予租约（该连接角色归一为 driver 语义）
+
+#### Scenario: 无 hello 且他人持有时拒绝
+
+- **WHEN** 连接未发 hello 直接发送写消息且 holder=Some(其他活跃连接)
+- **THEN** 按既有语义拒绝 STALE_DRIVER_LEASE（仓外 raw 客户端行为变化已在 proposal 披露）

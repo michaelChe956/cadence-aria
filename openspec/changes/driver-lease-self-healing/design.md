@@ -20,9 +20,9 @@ hello 重发+原命令重放一次；二次失败回退既有手动面。防循�
 
 复用仓内 append-only JSONL 先例（usage-diagnostics.jsonl 同构）：`<session>/lease-diagnostics.jsonl`（schema_version=1）。事件枚举：acquire_provisional/hold/steal_by_attach/rollback/orphan/release。只读端点挂在既有 workspace 诊断 HTTP 面。不进仲裁状态机。
 
-### D4 B 方向（待 oracle）
+### D4 B 方向（oracle 已裁：全并入，形态二）
 
-若裁并入：①observer 纯 attach 不偷租约（role=Observer 的 attach 不做 provisional acquire）②回滚恢复最近 driver 持有者而非 attach 快照③it_core part_06b 语义变化在 delta 显式登记。若裁缓：A+C 先上，打点数据（D3）为 B 的后续裁决供证据。
+裁决依据 f50-lease-oracle.md：契约四层（设计裁定 §3.4 / REQ-WCR-02 / P2 计划 D5）全部写显式接管，attach 即抢是 attachment.rs:36-39 注释自认的实现妥协；前端三处 hello 全带 role，多 tab 驾驶切换不受损；服务端触点与 A/C 同文件族（lease.rs/attachment.rs/arbitration.rs），前端零改动。形态二=attach 对租约零效应 + provisional 快照/回滚整体删除（B②③ 结构性吸收）。A 成为无 hello 首写的承重墙（R2），必须与 B 同批落地；自愈放款须同步刷新 attachment.lease_epoch。R3：bind_role same_channel 反查不动，删回滚分支后复核 pending→live 迁移。三个语义反转用例逐名改写不删除（part_06b.rs:83 / part_03.rs:579 / part_03.rs:807）。
 
 ## Risks / Trade-offs
 
