@@ -49,7 +49,7 @@ import {
   GATE_SECONDARY_TEXT_CLASS,
   GATE_TITLE_CLASS,
 } from "../gate-visual-tokens";
-import { isRequiredFindingSeverity, ReviewFindingGroups, reviewFindingsFromEntry } from "../finding-list";
+import { isBlockingFinding, ReviewFindingGroups, reviewFindingsFromEntry } from "../finding-list";
 import {
   gateFindingsCrossRoundDelta,
   gateFindingsDeltaCopy,
@@ -81,9 +81,10 @@ export function GatePromptEntry({
   const verdict = verdictFromEntry(entry);
   const reviewGate = reviewGateFromEntry(entry);
   const findings = reviewFindingsFromEntry(entry);
-  const requiredFindings = findings.filter((finding) =>
-    isRequiredFindingSeverity(finding.severity),
-  );
+  // C2（REQ-HGC-03 场景 1）：阻断口径以 effective class（class_hint 优先，
+  // severity 保底）为准——severity=suggestion 而 class_hint=repairable 时
+  // 原因行不得再写「不阻断发布」。
+  const requiredFindings = findings.filter((finding) => isBlockingFinding(finding));
   const requiresTriage = reviewGate === "user_triage_required";
   // F-38：确认者必须知道在确认什么——门卡说明区带出待确认产物版本与入口。
   // 没有产物版本即不渲染（fail-closed 不猜）；版本取 is_current，缺省退最新一轮。
@@ -195,9 +196,7 @@ export function GatePromptEntry({
   const archiveNote = archiveNoteFromEntry(entry);
   // F-49 B6：adoptable = advisory findings（must_fix 处理路径不同，不进默认采纳）。
   // 采纳按钮的目标是下方反馈输入框——编辑器不可用即无处可填，不露按钮（fail-closed）。
-  const adoptableFindings = findings.filter(
-    (finding) => !isRequiredFindingSeverity(finding.severity),
-  );
+  const adoptableFindings = findings.filter((finding) => !isBlockingFinding(finding));
   const feedbackEditorVisible =
     !isResolved &&
     terminateBlockReason === null &&

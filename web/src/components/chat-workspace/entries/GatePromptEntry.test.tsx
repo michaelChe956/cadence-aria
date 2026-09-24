@@ -978,3 +978,31 @@ describe("C2 REQ-HGC-02 gate findings delta", () => {
     expect(screen.queryByTestId("gate-findings-delta")).toBeNull();
   });
 });
+
+describe("C2 REQ-HGC-03 gate card dual-track classification", () => {
+  installWorkspaceStoreTestHooks();
+
+  it("keeps the gate why copy honest when severity and effective class disagree", () => {
+    // F-52 现场：severity=advisory/suggestion 而 class_hint=repairable——门实际
+    // 阻断，原因行不得再写「不阻断发布」的建议级文案。
+    render(
+      <GatePromptEntry
+        entry={gateEntry(null, undefined, {
+          findings: [
+            {
+              severity: "suggestion",
+              class_hint: "repairable",
+              message: "CT-001 能力缺口（建议级措辞）",
+            },
+          ],
+          verdict: "revise",
+          review_gate: "requires_revision",
+        })}
+        actions={actions()}
+      />,
+    );
+
+    expect(screen.getByTestId("gate-why")).toHaveTextContent("有 1 条必须处理项");
+    expect(screen.getByTestId("gate-why")).not.toContainHTML("不阻断发布");
+  });
+});
