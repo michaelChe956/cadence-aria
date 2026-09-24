@@ -141,6 +141,15 @@ export function GatePromptEntry({
   // C2（REQ-HGC-02 场景 1/F-54）：批次确认门专属标题/why——与候选修订门在
   // 标题/原因行层级可区分；确认动作走 confirmBatch（HTTP），无反馈编辑器。
   const isBatchConfirmGate = gateKindFromEntry(entry) === "batch_confirm";
+  // C2K3 P3（REQ-HGC-01）：gate-local 已接受反馈轮次——CAS/serde/wire/store
+  // 已端到端接线，此处补渲染消费（预算行「已反馈 N 轮 · 剩余 M」）。仅
+  // plan 候选修订门当前卡消费；旧会话缺席（undefined/null）= 预算历史
+  // 不可用，不猜（不渲染该段）。
+  const acceptedFeedbackTurns = useWorkspaceStore((state) =>
+    !isBatchConfirmGate && !isResolved && state.workspaceType === "work_item_plan"
+      ? (state.humanGateSnapshot?.accepted_feedback_turns ?? null)
+      : null,
+  );
   // F-50 裁决 1（单标题制）：默认「需要人工确认」，仅 triage intent 门保留
   // 「需要判断 reviewer 意图」——标题回答「现在要做什么」，原因与建议交给
   // gate-why 单一原因行，不再三层同义。
@@ -338,11 +347,16 @@ export function GatePromptEntry({
           </p>
         ) : null}
         {/* F-50 §4.1-4：trigger 与预算合并为一条弱化元数据行（不再两个胶囊
-            抢主视觉）——「引擎判定需人工」不作为独立大胶囊重复人工介入语义。 */}
-        {gateTrigger || remainingBudget !== null ? (
+            抢主视觉）——「引擎判定需人工」不作为独立大胶囊重复人工介入语义。
+            C2K3 P3：已接受反馈轮次并入本行（「已反馈 N 轮 · 剩余 M」），
+            零轮次/旧会话缺席维持既有形态。 */}
+        {gateTrigger || remainingBudget !== null || (acceptedFeedbackTurns ?? 0) > 0 ? (
           <p data-testid="gate-meta" className={`text-xs ${GATE_META_TEXT_CLASS}`}>
             {[
               gateTrigger ? `触发：${GATE_TRIGGER_LABELS[gateTrigger]}` : null,
+              acceptedFeedbackTurns !== null && acceptedFeedbackTurns > 0
+                ? `已反馈 ${acceptedFeedbackTurns} 轮`
+                : null,
               remainingBudget !== null ? `剩余修复轮次 ${remainingBudget}` : null,
             ]
               .filter((part): part is string => Boolean(part))

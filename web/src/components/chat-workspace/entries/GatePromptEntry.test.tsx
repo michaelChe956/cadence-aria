@@ -979,6 +979,67 @@ describe("C2 REQ-HGC-02 gate findings delta", () => {
   });
 });
 
+// C2K3 P3（REQ-HGC-01）：accepted_feedback_turns 已端到端接线（CAS/serde/
+// wire/store）但此前零渲染消费——预算行补「已反馈 N 轮」段：有轮次时与
+// 剩余预算同行呈现；零轮次/旧会话缺席维持既有预算行。
+describe("C2 gate accepted feedback turns budget line", () => {
+  installWorkspaceStoreTestHooks();
+
+  function turnsEntry(): ChatEntry {
+    return gateEntry(null, "turn_turns", {
+      turn_id: "turn_turns",
+      gate_trigger: "native_human_required",
+      remaining_budget: 3,
+    });
+  }
+
+  function planSnapshot(acceptedFeedbackTurns?: number) {
+    return {
+      findings: [],
+      repeated_fingerprints: [],
+      attempts_used: 1,
+      manual_repairs_remaining: 3,
+      // 旧会话缺席（undefined）= 预算历史不可用：字段整体省略。
+      ...(acceptedFeedbackTurns === undefined
+        ? {}
+        : { accepted_feedback_turns: acceptedFeedbackTurns }),
+      trigger: "native_human_required" as const,
+      resumable: true,
+    };
+  }
+
+  it("有反馈轮次时预算行呈现「已反馈 N 轮」与剩余预算同行", () => {
+    useWorkspaceStore.setState({
+      workspaceType: "work_item_plan",
+      humanGateSnapshot: planSnapshot(2),
+    });
+
+    render(<GatePromptEntry entry={turnsEntry()} actions={actions()} />);
+
+    const meta = screen.getByTestId("gate-meta");
+    expect(meta).toHaveTextContent("已反馈 2 轮");
+    expect(meta).toHaveTextContent("剩余修复轮次 3");
+  });
+
+  it("零轮次与旧会话缺席都维持既有预算行（不渲染已反馈段）", () => {
+    useWorkspaceStore.setState({
+      workspaceType: "work_item_plan",
+      humanGateSnapshot: planSnapshot(0),
+    });
+    const { unmount } = render(<GatePromptEntry entry={turnsEntry()} actions={actions()} />);
+    const meta = screen.getByTestId("gate-meta");
+    expect(meta).toHaveTextContent("剩余修复轮次 3");
+    expect(meta).not.toHaveTextContent("已反馈");
+    unmount();
+
+    useWorkspaceStore.setState({ humanGateSnapshot: planSnapshot() });
+    render(<GatePromptEntry entry={turnsEntry()} actions={actions()} />);
+    const metaAbsent = screen.getByTestId("gate-meta");
+    expect(metaAbsent).toHaveTextContent("剩余修复轮次 3");
+    expect(metaAbsent).not.toHaveTextContent("已反馈");
+  });
+});
+
 describe("C2 REQ-HGC-03 gate card dual-track classification", () => {
   installWorkspaceStoreTestHooks();
 
