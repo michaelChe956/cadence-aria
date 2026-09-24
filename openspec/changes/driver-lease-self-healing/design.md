@@ -18,7 +18,7 @@ hello 重发+原命令重放一次；二次失败回退既有手动面。防循�
 
 ### D3 打点为 append-only 诊断流
 
-复用仓内 append-only JSONL 先例（usage-diagnostics.jsonl 同构）：`<session>/lease-diagnostics.jsonl`（schema_version=1）。事件枚举：acquire_provisional/hold/steal_by_attach/rollback/orphan/release。只读端点挂在既有 workspace 诊断 HTTP 面。不进仲裁状态机。
+复用仓内 append-only JSONL 先例（usage-diagnostics.jsonl 同构）：`<session>/lease-diagnostics.jsonl`（schema_version=1）。事件枚举（形态二后）：hold（hello 显式获取）/self_heal（首写自愈授予）/release（断开释放）/write_rejected_stale（含持有者快照）/write_rejected_observer。只读端点挂在既有 workspace 诊断 HTTP 面。不进仲裁状态机。
 
 ### D4 B 方向（oracle 已裁：全并入，形态二）
 
