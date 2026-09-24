@@ -50,6 +50,10 @@ import {
   GATE_TITLE_CLASS,
 } from "../gate-visual-tokens";
 import { isRequiredFindingSeverity, ReviewFindingGroups, reviewFindingsFromEntry } from "../finding-list";
+import {
+  gateFindingsCrossRoundDelta,
+  gateFindingsDeltaCopy,
+} from "../../../state/gate-prompt-copy";
 
 /** F-38：门卡产物行的种类名（与生命周期卡片同一套称呼）。 */
 const GATE_ARTIFACT_LABELS: Record<string, string> = {
@@ -174,6 +178,19 @@ export function GatePromptEntry({
           trigger: gateTrigger,
           approveAvailable: actionBlockReason === null,
         })
+      : null;
+  // C2（REQ-HGC-02 场景 3）：跨轮 delta——current 取 durable 快照 findings
+  // （C1 fingerprint+identity_unstable），previous 取 store 保留的上一轮快照
+  // （缺席=刷新/历史不全 → 显式 unknown，不猜）；仅 plan 候选修订门渲染。
+  const previousGateFindings = useWorkspaceStore(
+    (state) => state.previousGateFindings,
+  );
+  const findingsDelta =
+    !isBatchConfirmGate &&
+    !isResolved &&
+    workspaceTypeForDistance === "work_item_plan" &&
+    snapshotFindings !== null
+      ? gateFindingsCrossRoundDelta(snapshotFindings, previousGateFindings)
       : null;
   const archiveNote = archiveNoteFromEntry(entry);
   // F-49 B6：adoptable = advisory findings（must_fix 处理路径不同，不进默认采纳）。
@@ -310,6 +327,16 @@ export function GatePromptEntry({
               <ReviewFindingGroups findings={findings} />
             </div>
           </details>
+        ) : null}
+        {/* C2（REQ-HGC-02 场景 3）：跨轮 delta 计数行——新增/已解决/复现，
+            历史不全或身份 unstable 时如实显示 unknown（不猜）。 */}
+        {findingsDelta ? (
+          <p
+            data-testid="gate-findings-delta"
+            className={`text-xs font-medium ${GATE_META_TEXT_CLASS}`}
+          >
+            {gateFindingsDeltaCopy(findingsDelta)}
+          </p>
         ) : null}
         {/* F-50 §4.1-4：trigger 与预算合并为一条弱化元数据行（不再两个胶囊
             抢主视觉）——「引擎判定需人工」不作为独立大胶囊重复人工介入语义。 */}

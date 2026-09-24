@@ -8,6 +8,8 @@ import {
   gateBatchConfirmTitle,
   gateBatchConfirmWhyCopy,
   gateDistanceToPass,
+  gateFindingsCrossRoundDelta,
+  gateFindingsDeltaCopy,
 } from "./gate-prompt-copy";
 
 function baseGateState() {
@@ -154,5 +156,170 @@ describe("REQ-HGC-02 距通过清单", () => {
     // findings 不带 class（review 元数据形态）时预检结果 unknown，不猜。
     expect(items.find((item) => item.key === "preflight")?.status).toBe("unknown");
     expect(items.find((item) => item.key === "verification")?.status).toBe("unknown");
+  });
+});
+
+// —— REQ-HGC-02 场景 3（跨轮 delta）：本轮 × 前轮 findings 的结构化 identity 对比 ——
+//
+// 数据锚定 C1 golden（src/product/work_item_plan_policy/fixtures/
+// f52-findings-golden.json，Rust tests_fingerprint.rs 已锁定 node_007 与
+// node_012 对同一 CT-001 供需缺口「同题异措辞同指纹」）：前端以同一 fingerprint
+// 常量驱动，锁定集合差语义——新增=current−prev、已解决=prev−current、
+// 复现=prev∩current；任一侧 unstable/前轮缺席/任一侧空 → 整体 unknown
+//（findings 空≠历史已解决，历史不全显式 unknown，不猜）。
+describe("REQ-HGC-02 跨轮 delta", () => {
+  const FP_CT001 = "11".repeat(32);
+  const FP_TASK_MAPPING = "22".repeat(32);
+  const FP_UNSTABLE = "33".repeat(32);
+
+  const goldenFinding = (overrides: Record<string, unknown>) => ({
+    severity: "must_fix",
+    message: "WI-001 的输出契约 CT-001 只声明了静态托管文件",
+    fingerprint: FP_CT001,
+    ...overrides,
+  });
+
+  // 前轮（node_007 口径）：CT-001 缺口 + TASK-001 done_when_refs 映射不足。
+  const previousRound = [
+    goldenFinding({
+      message: "WI-001 的输出契约 CT-001 未声明 WI-002 消费时要求的能力",
+    }),
+    goldenFinding({
+      severity: "suggestion",
+      class_hint: "advisory",
+      message: "TASK-001 的 done_when_refs 仅指向 AC-005",
+      fingerprint: FP_TASK_MAPPING,
+    }),
+  ];
+  // 本轮（node_012 口径）：同一 CT-001 缺口换措辞复现 + 一条新缺口。
+  const currentRound = [
+    goldenFinding({
+      message: "edge WI-001 -> WI-002 的 CT-001 capability 覆盖不闭合",
+    }),
+    goldenFinding({
+      severity: "must_fix",
+      class_hint: "repairable",
+      message: "WI-003 的 CHECK-002 引用了基线外路径",
+      fingerprint: "44".repeat(32),
+    }),
+  ];
+
+  it("counts added/resolved/recurring across rounds by fingerprint identity", () => {
+    const delta = gateFindingsCrossRoundDelta(currentRound, previousRound);
+    expect(delta).toEqual({
+      kind: "counts",
+      added: 1,
+      resolved: 1,
+      recurring: 1,
+    });
+    expect(gateFindingsDeltaCopy(delta)).toContain("新增 1");
+    expect(gateFindingsDeltaCopy(delta)).toContain("已解决 1");
+    expect(gateFindingsDeltaCopy(delta)).toContain("复现 1");
+  });
+
+  it("treats empty current findings as unknown instead of all-resolved", () => {
+    // findings 空 ≠ 历史问题已解决（Review Focus 2）：本轮空集不可推断。
+    const delta = gateFindingsCrossRoundDelta([], previousRound);
+    expect(delta.kind).toBe("unknown");
+    expect(gateFindingsDeltaCopy(delta)).not.toContain("已解决");
+  });
+
+  it("reports unknown when the previous round is missing (history incomplete)", () => {
+    // 刷新/重连后前轮快照不可得（历史不全）：显式 unknown，不猜。
+    const delta = gateFindingsCrossRoundDelta(currentRound, null);
+    expect(delta.kind).toBe("unknown");
+    expect(gateFindingsDeltaCopy(delta)).not.toContain("新增");
+  });
+
+  it("refuses to infer when either round carries an unstable identity", () => {
+    const unstableCurrent = [
+      goldenFinding({ fingerprint: FP_UNSTABLE, identity_unstable: true }),
+    ];
+    const delta = gateFindingsCrossRoundDelta(unstableCurrent, previousRound);
+    expect(delta.kind).toBe("unknown");
+
+    const unstablePrevious = [
+      goldenFinding({ fingerprint: FP_UNSTABLE, identity_unstable: true }),
+    ];
+    expect(
+      gateFindingsCrossRoundDelta(currentRound, unstablePrevious).kind,
+    ).toBe("unknown");
+  });
+
+  it("keeps the prior snapshot findings when the same gate is re-reviewed", () => {
+    useWorkspaceStore.setState({ ...baseGateState(), previousGateFindings: null });
+    const frame = (remaining: number, message: string) => ({
+      session_id: "session_gate_conv",
+      workspace_type: "work_item_plan",
+      stage: "human_confirm",
+      timeline_nodes: [],
+      providers: { author: "claude_code", reviewer: null },
+      messages: [],
+      checkpoints: [],
+      human_gate_snapshot: {
+        findings: [goldenFinding({ message })],
+        repeated_fingerprints: [],
+        attempts_used: 0,
+        manual_repairs_remaining: remaining,
+        trigger: "native_human_required",
+        resumable: true,
+      },
+    });
+
+    useWorkspaceStore.getState().setSessionState(frame(3, "round one") as never);
+
+    // 首次开门：无前轮可比对。
+    expect(useWorkspaceStore.getState().previousGateFindings).toBeNull();
+
+    useWorkspaceStore.getState().setSessionState(frame(2, "round two") as never);
+
+    // 同一 logical gate 复评重建：旧快照 findings 成为前轮。
+    expect(useWorkspaceStore.getState().previousGateFindings).toEqual([
+      goldenFinding({ message: "round one" }),
+    ]);
+    const delta = gateFindingsCrossRoundDelta(
+      useWorkspaceStore.getState().humanGateSnapshot?.findings ?? [],
+      useWorkspaceStore.getState().previousGateFindings,
+    );
+    expect(delta).toEqual({ kind: "counts", added: 0, resolved: 0, recurring: 1 });
+  });
+
+  it("drops the previous findings across sessions or gate closure", () => {
+    useWorkspaceStore.setState({ ...baseGateState(), previousGateFindings: null });
+    const frame = (sessionId: string, withSnapshot: boolean) => ({
+      session_id: sessionId,
+      workspace_type: "work_item_plan",
+      stage: "human_confirm",
+      timeline_nodes: [],
+      providers: { author: "claude_code", reviewer: null },
+      messages: [],
+      checkpoints: [],
+      ...(withSnapshot
+        ? {
+            human_gate_snapshot: {
+              findings: [goldenFinding({})],
+              repeated_fingerprints: [],
+              attempts_used: 0,
+              manual_repairs_remaining: 3,
+              trigger: "native_human_required",
+              resumable: true,
+            },
+          }
+        : {}),
+    });
+
+    useWorkspaceStore.getState().setSessionState(frame("session_a", true) as never);
+
+    useWorkspaceStore.getState().setSessionState(frame("session_a", false) as never);
+
+    // 关门（快照缺席）：前轮事实作废。
+    expect(useWorkspaceStore.getState().previousGateFindings).toBeNull();
+
+    useWorkspaceStore.getState().setSessionState(frame("session_a", true) as never);
+
+    useWorkspaceStore.getState().setSessionState(frame("session_b", true) as never);
+
+    // 跨会话新门：不得拿他门 findings 当前轮。
+    expect(useWorkspaceStore.getState().previousGateFindings).toBeNull();
   });
 });

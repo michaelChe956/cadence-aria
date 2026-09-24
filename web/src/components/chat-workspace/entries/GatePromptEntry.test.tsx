@@ -909,3 +909,72 @@ describe("GatePromptEntry actionability", () => {
     });
   });
 });
+
+describe("C2 REQ-HGC-02 gate findings delta", () => {
+  installWorkspaceStoreTestHooks();
+
+  const snapshotFinding = (fingerprint: string) => ({
+    class: "repairable" as const,
+    fingerprint,
+    category: null,
+    severity: "must_fix",
+    message: "WI-001 输出契约 CT-001 能力缺口",
+    evidence: null,
+    required_action: null,
+    contract_field: null,
+  });
+
+  it("renders the cross-round delta counts from the durable snapshot pair", () => {
+    useWorkspaceStore.setState({
+      workspaceType: "work_item_plan",
+      humanGateSnapshot: {
+        findings: [snapshotFinding("aa".repeat(32)), snapshotFinding("bb".repeat(32))],
+        repeated_fingerprints: [],
+        attempts_used: 0,
+        manual_repairs_remaining: 2,
+        trigger: "native_human_required",
+        resumable: true,
+      },
+      previousGateFindings: [snapshotFinding("aa".repeat(32))],
+    });
+
+    render(<GatePromptEntry entry={gateEntry(null)} actions={actions()} />);
+
+    expect(screen.getByTestId("gate-findings-delta")).toHaveTextContent(
+      "较上一轮：新增 1 · 已解决 0 · 复现 1",
+    );
+  });
+
+  it("renders unknown honestly when the previous round is unavailable", () => {
+    useWorkspaceStore.setState({
+      workspaceType: "work_item_plan",
+      humanGateSnapshot: {
+        findings: [snapshotFinding("aa".repeat(32))],
+        repeated_fingerprints: [],
+        attempts_used: 0,
+        manual_repairs_remaining: 3,
+        trigger: "native_human_required",
+        resumable: true,
+      },
+      previousGateFindings: null,
+    });
+
+    render(<GatePromptEntry entry={gateEntry(null)} actions={actions()} />);
+
+    expect(screen.getByTestId("gate-findings-delta")).toHaveTextContent(
+      "较上一轮：未能判断（历史不可比）",
+    );
+  });
+
+  it("keeps the delta line off gates without durable snapshot findings", () => {
+    useWorkspaceStore.setState({
+      workspaceType: "work_item_plan",
+      humanGateSnapshot: null,
+      previousGateFindings: [{ ...snapshotFinding("aa".repeat(32)), severity: "suggestion" }],
+    });
+
+    render(<GatePromptEntry entry={gateEntry(null)} actions={actions()} />);
+
+    expect(screen.queryByTestId("gate-findings-delta")).toBeNull();
+  });
+});

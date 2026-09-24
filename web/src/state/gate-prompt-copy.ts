@@ -96,6 +96,68 @@ export function gateDistanceToPass(input: {
   ];
 }
 
+/** 跨轮 delta 的单侧 findings：带 C1 结构化 identity（fingerprint/unstable）。 */
+export type GateFindingsDeltaSide = ReadonlyArray<{
+  fingerprint: string;
+  identity_unstable?: boolean;
+}> | null;
+
+export type GateFindingsDelta =
+  | { kind: "counts"; added: number; resolved: number; recurring: number }
+  | { kind: "unknown"; reason: "no_previous" | "empty_current" | "empty_previous" | "unstable" };
+
+/**
+ * C2（REQ-HGC-02 场景 3/F-52 §三）：本轮 × 前轮 findings 的跨轮 delta——
+ * 按 C1 结构化 fingerprint 集合差：新增=current−prev、已解决=prev−current、
+ * 复现=prev∩current。保守纪律：前轮缺席（刷新/历史不全）、任一侧 findings
+ * 为空（findings 空 ≠ 历史问题已解决）、任一侧含 unstable 措辞域身份 →
+ * 整体 unknown，不推断。
+ */
+export function gateFindingsCrossRoundDelta(
+  current: GateFindingsDeltaSide,
+  previous: GateFindingsDeltaSide,
+): GateFindingsDelta {
+  if (!Array.isArray(current) || !Array.isArray(previous)) {
+    return { kind: "unknown", reason: "no_previous" };
+  }
+  if (current.length === 0) {
+    return { kind: "unknown", reason: "empty_current" };
+  }
+  if (previous.length === 0) {
+    return { kind: "unknown", reason: "empty_previous" };
+  }
+  if (
+    current.some((finding) => finding.identity_unstable === true) ||
+    previous.some((finding) => finding.identity_unstable === true)
+  ) {
+    return { kind: "unknown", reason: "unstable" };
+  }
+  const previousFingerprints = new Set(previous.map((finding) => finding.fingerprint));
+  let added = 0;
+  let recurring = 0;
+  for (const fingerprint of current.map((finding) => finding.fingerprint)) {
+    if (previousFingerprints.has(fingerprint)) {
+      recurring += 1;
+    } else {
+      added += 1;
+    }
+  }
+  return {
+    kind: "counts",
+    added,
+    resolved: previousFingerprints.size - recurring,
+    recurring,
+  };
+}
+
+/** C2（REQ-HGC-02 场景 3）：delta 计数行文案；unknown 一律如实，不猜。 */
+export function gateFindingsDeltaCopy(delta: GateFindingsDelta): string {
+  if (delta.kind === "unknown") {
+    return "较上一轮：未能判断（历史不可比）";
+  }
+  return `较上一轮：新增 ${delta.added} · 已解决 ${delta.resolved} · 复现 ${delta.recurring}`;
+}
+
 /**
  * F-50 裁决 1：triage intent 门的原因行——标题保留「需要判断 reviewer 意图」
  * 时，原因行解释为什么无法自动取舍并给出两条出路。

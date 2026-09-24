@@ -432,6 +432,12 @@ export interface WorkspaceWsState {
   runHistory: WorkItemPlanRunHistory | null;
   reviewInvocationScope: unknown | null;
   humanGateSnapshot: WorkItemPlanHumanGateSnapshot | null;
+  /**
+   * C2（REQ-HGC-02 场景 3）：同一 logical gate 内上一轮 durable 快照的
+   * findings（复评重建时由 setSessionState 保留）——跨轮 delta 的前轮事实；
+   * 刷新/跨会话/关门后为 null（历史不全显式 unknown，不猜）。
+   */
+  previousGateFindings: WorkItemPlanHumanGateSnapshot["findings"] | null;
   repairReservation: WorkItemPlanRepairReservation | null;
   policyDiagnostics: WorkItemPlanPolicyDiagnostic[];
   providerStartLedger: WorkItemPlanProviderStartLedgerEntry[];

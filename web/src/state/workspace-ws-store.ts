@@ -102,6 +102,7 @@ const initialState: WorkspaceWsState = {
   runHistory: null,
   reviewInvocationScope: null,
   humanGateSnapshot: null,
+  previousGateFindings: null,
   repairReservation: null,
   snapshotGateIdentity: null,
   snapshotGateOpenedAt: null,
@@ -267,6 +268,16 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
       const humanGateSnapshot = state.human_gate_snapshot
         ? { ...state.human_gate_snapshot, opened_at: snapshotGateOpenedAt ?? undefined }
         : null;
+      // C2（REQ-HGC-02 场景 3）：跨轮 delta 的前轮事实——同会话且快照被替换
+      // （复评重建；与 T1 后端 carry-forward 同一「快照在场=同一 logical gate
+      // episode」判据）时保留旧快照 findings；首次开门/关门/跨会话/刷新一律
+      // null（历史不全 → 门卡显式 unknown，不猜）。
+      const previousGateFindings =
+        sameSession && humanGateSnapshot !== null && snapshotGateChanged
+          ? prev.humanGateSnapshot?.findings ?? null
+          : humanGateSnapshot !== null && sameSession
+            ? prev.previousGateFindings
+            : null;
       const durableGateStillOpen = humanGateSnapshot !== null;
       // 重建口径：durable snapshot 在场即门仍开；否则要求仍处 legacy human_confirm 阶段。
       const gateProjectionStillOpen = durableGateStillOpen || state.stage === "human_confirm";
@@ -310,6 +321,7 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
         flowKind: state.flow_kind,
         runPolicy: state.run_policy,
         runHistory: state.run_history,
+        previousGateFindings,
         reviewInvocationScope: state.review_invocation_scope ?? null,
         humanGateSnapshot,
         snapshotGateIdentity,
