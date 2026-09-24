@@ -14,6 +14,7 @@ import { useLinkedWorkspaceAmendmentStore } from "../state/linked-workspace-amen
 import { useWorkspaceStore } from "../state/workspace-ws-store";
 import { useOperationAuditStore } from "../state/operation-audit-store";
 import { selectGateProjection } from "../state/workspace-cockpit-projection";
+import { STALE_DRIVER_LEASE_CODE } from "../state/protocol-error-copy";
 import type { ChoiceAnswerPayload } from "../state/chat-entries";
 import {
   ACTIVE_PROVIDER_STAGES,
@@ -44,6 +45,15 @@ export function newCommandId(): string {
   return crypto.randomUUID();
 }
 
+/** STALE_DRIVER_LEASE 的 context.received（被拒写命令的 message_type）；缺省 null。 */
+function staleLeaseReceivedMessageType(context: unknown): string | null {
+  if (typeof context !== "object" || context === null) {
+    return null;
+  }
+  const received = (context as Record<string, unknown>).received;
+  return typeof received === "string" ? received : null;
+}
+
 
 export type WorkspaceWsApi = ReturnType<typeof useWorkspaceWs>;
 
@@ -63,6 +73,15 @@ export function useWorkspaceWs(sessionId: string | null) {
   const lastPongOrServerMessageAtRef = useRef<string | null>(null);
   const lastPingAtRef = useRef<string | null>(null);
   const lastEventSeqRef = useRef<number | null>(null);
+  // REQ-DLS-02（driver-lease-self-healing）：写命令 STALE 单次自动重试状态。
+  // 镜像服务端 is_write_message（hello/ping 之外皆写面）记录最近一条已出站
+  // 写命令；STALE_DRIVER_LEASE 到达且该命令未重放过时，先重发 driver hello
+  // 夺回租约再原样重放一次（恰一次）。重放仍 STALE 则回落既有手动接管面。
+  const leaseAutoRetryRef = useRef<{
+    message: WorkspaceWsSendMessage;
+    retried: boolean;
+  } | null>(null);
+
   const [closeCode, setCloseCode] = useState<number | undefined>();
   const [sessionSnapshot, setSessionSnapshot] = useState({
     sessionId: null as string | null,
@@ -308,6 +327,32 @@ export function useWorkspaceWs(sessionId: string | null) {
   }, [workspaceConnectionStatus, resetReconnect]);
 
   function handleMessage(msg: WsServerMessage) {
+    // REQ-DLS-02：写命令被 STALE_DRIVER_LEASE 拒收时单次自动重试——重发
+    // driver hello 夺回租约（服务端 bind_role 对既有连接同样执行
+    // lease.acquire）后原样重放一次，成功即无感（不落 protocolError 错误
+    // 面）；重放后的再次 STALE 消费完恰一次守卫，回落下方既有手动接管面。
+    if (
+      sessionId &&
+      msg.type === "protocol_error" &&
+      msg.code === STALE_DRIVER_LEASE_CODE
+    ) {
+      const lastWrite = leaseAutoRetryRef.current;
+      const receivedType = staleLeaseReceivedMessageType(msg.context);
+      if (
+        lastWrite !== null &&
+        !lastWrite.retried &&
+        (receivedType === null || receivedType === lastWrite.message.type)
+      ) {
+        lastWrite.retried = true;
+        const store = useWorkspaceStore.getState();
+        sendHello(
+          sessionId,
+          store.activeNodeId ?? store.timelineNodes.at(-1)?.node_id ?? null,
+        );
+        sendWire(lastWrite.message);
+        return;
+      }
+    }
     handleWorkspaceWsMessage(msg, {
       invalidatedPreStageNodeIds: invalidatedPreStageNodeIdsRef.current,
       scheduleFlush,
@@ -316,18 +361,32 @@ export function useWorkspaceWs(sessionId: string | null) {
     aggregatePlanRepairChildMessage(msg, sessionId, planRepairSourceRef.current);
   }
 
-  const sendJson = useCallback((message: WorkspaceWsSendMessage) => {
-    const ws = wsRef.current;
-    if (
-      !sessionId ||
-      socketSessionIdRef.current !== sessionId ||
-      ws?.readyState !== WebSocket.OPEN
-    ) {
-      return false;
-    }
-    ws.send(JSON.stringify(message));
-    return true;
-  }, [sessionId]);
+  const sendWire = useCallback(
+    (message: WorkspaceWsSendMessage) => {
+      const ws = wsRef.current;
+      if (
+        !sessionId ||
+        socketSessionIdRef.current !== sessionId ||
+        ws?.readyState !== WebSocket.OPEN
+      ) {
+        return false;
+      }
+      ws.send(JSON.stringify(message));
+      return true;
+    },
+    [sessionId],
+  );
+
+  const sendJson = useCallback(
+    (message: WorkspaceWsSendMessage) => {
+      const sent = sendWire(message);
+      if (sent && message.type !== "hello" && message.type !== "ping") {
+        leaseAutoRetryRef.current = { message, retried: false };
+      }
+      return sent;
+    },
+    [sendWire],
+  );
 
   const sendContextNote = useCallback(
     (content: string) => {
