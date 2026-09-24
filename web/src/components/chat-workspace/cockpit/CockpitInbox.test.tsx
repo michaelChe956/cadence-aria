@@ -258,6 +258,14 @@ describe("CockpitInbox F-50 layout", () => {
     expect(within(details).getByText(/每会话仅一个开态门/)).toBeInTheDocument();
     expect(within(details).getByText(/REQ-CFC-06/)).toBeInTheDocument();
   });
+
+  it("空 summary 不渲染摘要行，仅保留标题（F-50 fix1）", () => {
+    render(<CockpitInbox items={[{ ...gateItem, summary: "" }]} />);
+
+    const row = screen.getByTestId("cockpit-inbox-item-gate");
+    expect(within(row).getByText("需要人工确认")).toBeVisible();
+    expect(row.querySelectorAll("p")).toHaveLength(1);
+  });
 });
 
 function mockActions(): CockpitActionFacade {

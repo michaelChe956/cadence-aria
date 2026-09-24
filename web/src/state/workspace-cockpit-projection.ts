@@ -507,7 +507,7 @@ function gateInboxTitle(gate: GateProjection): string {
   return gate.triage ? "需要判断 reviewer 意图" : "需要人工确认";
 }
 
-function gateInboxHeadline(gate: GateProjection): string {
+function gateInboxHeadline(gate: GateProjection): string | null {
   if (gate.kind === "batch_confirm") {
     return "等待整组 Work Item Draft 确认";
   }
@@ -515,8 +515,10 @@ function gateInboxHeadline(gate: GateProjection): string {
     return "Final Compile 中断，等待恢复动作";
   }
   // F-50 §3.5：触发原因独立成「原因：…」行（与门卡 gate-why 同构），
-  // 不再用标题重复人工介入语义。
-  return gate.trigger ? `原因：${GATE_TRIGGER_LABELS[gate.trigger]}` : "等待人工确认";
+  // 不再用标题重复人工介入语义；无 trigger 即无独立事实，返回 null 让位
+  // （parts 已 filter），不以「等待人工确认」与标题「需要人工确认」近义叠行
+  // （fix1，k3 P2——story/design author_confirm 主流程 trigger 恒 null）。
+  return gate.trigger ? `原因：${GATE_TRIGGER_LABELS[gate.trigger]}` : null;
 }
 
 export function selectCockpitInbox(state: WorkspaceWsState): CockpitInboxItem[] {

@@ -731,6 +731,28 @@ describe("F-20 story/design author_confirm gate projection", () => {
     });
   });
 
+  // F-50 fix1（k3 P2）：无 trigger 门（story/design author_confirm 主流程
+  // trigger 恒 null，运行时实证复现）的收件箱条目不再以「等待人工确认」与标题
+  // 「需要人工确认」近义叠行——headline fallback 让位（parts 已 filter），
+  // 无独立事实时 summary 为空串，渲染面判空不渲染。
+  it("drops the synonymous fallback headline for a triggerless gate (F-50 fix1)", () => {
+    useWorkspaceStore.setState({
+      sessionId: "session_story_gate",
+      stage: "author_confirm",
+      workspaceType: "story",
+      flowKind: "legacy",
+      sessionStatus: "waiting_for_human",
+      humanGateTurn: null,
+      humanGateSnapshot: null,
+      humanGateClosure: null,
+    });
+
+    const item = selectCockpitInbox(useWorkspaceStore.getState())[0]!;
+
+    expect(item.title).toBe("需要人工确认");
+    expect(item.summary).toBe("");
+  });
+
   // F-50 裁决 1/6：门条默认标题与门卡同题（需要人工确认），triage intent 门
   // 保留「需要判断 reviewer 意图」；协议错误条目以中文主显 lead 投影（code 由
   // protocolErrorCode 承载，原文留在 summary）。

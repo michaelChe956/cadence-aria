@@ -251,9 +251,11 @@ function CockpitInboxRow({
       <Glyph className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
       <div className="min-w-0 flex-1">
         <p className="text-sm font-semibold text-[var(--aria-ink)]">{item.title}</p>
-        <p className="mt-1 break-words text-xs leading-4 text-[var(--aria-ink-muted)]">
-          {item.summary}
-        </p>
+        {item.summary ? (
+          <p className="mt-1 break-words text-xs leading-4 text-[var(--aria-ink-muted)]">
+            {item.summary}
+          </p>
+        ) : null}
         {selectable ? (
           <label className="mt-2 flex min-h-11 items-center gap-2 text-xs font-medium text-[var(--aria-ink)]">
             <input
