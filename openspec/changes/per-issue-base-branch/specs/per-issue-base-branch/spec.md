@@ -2,7 +2,7 @@
 
 ## Purpose
 
-issue 级基准分支的设置、锁定与全链锚定：author 生成上下文、coding worktree fork、AC 基线核对三面同源于 issue.base_branch，杜绝跨分支上下文泄漏（F-57）与基线错位（F-56）。
+issue 级基准分支的设置、锁定与全链锚定：author 生成上下文、coding worktree fork、AC 基线核对三面同源于 issue.base_branch，杜绝跨分支上下文泄漏（F-57）与基线错位（F-56）。host-served 通道获得通道层硬边界；provider 原生通道以 prompt 软限制运行（用户 2026-09-25 裁决接受残余风险），其 AC 路径引用形态由 REQ-PIB-03 的核对 fail-closed 兜底。
 
 ## ADDED Requirements
 
@@ -42,31 +42,36 @@ issue 级基准分支的设置、锁定与全链锚定：author 生成上下文�
 
 ### Requirement: author 上下文基线限定（REQ-PIB-02）
 
-story/design/plan 生成期间的仓库文件浏览与读取 SHALL 仅经 issue.base_branch 的树内容，并以**通道层路由**为安全边界（分级落地）：host-served 文件通道（如 provider 桥接的 fs 服务）SHALL 路由为 `git show <base>:<path>` / `git ls-tree <base>` 形态（不 checkout、不触工作区）；provider 原生文件能力（自带读文件的 provider 会话）SHALL 以 base 专用检出为会话根且根外不可读（该检出 SHALL 位于仓库工作区外，不含 `.worktrees/`）；无法在通道层收束的通道 SHALL fail-closed 拒绝启动该 provider。工具策略层仅维持既有写拒绝与 spawn 守卫纵深，SHALL NOT 承载基线语义；prompt 仅作教学。author 的文件访问 SHALL NOT 到达仓库工作区、其他分支检出或兄弟 issue worktree 路径。基线分支在生成时不可解析（被删/改名）SHALL fail-closed 终止生成并给出明确诊断。
+story/design/plan 生成期间的仓库文件浏览与读取 SHALL 以 issue.base_branch 的树内容为基线语义，按通道分级落地：**host-served 文件通道**（如 provider 桥接的 fs 服务）SHALL 路由为 `git show <base>:<path>` / `git ls-tree <base>` 形态（不 checkout、不触工作区）并对其 terminal 通道维持基线拒绝——该通道层为硬安全边界，工作区与兄弟 worktree 路径不可达；**provider 原生文件通道**（host 无法在通道层转码/收束者，如 claude/codex/pi）SHALL 在 author prompt 注入基线限制教学块（仅以 base_branch 树内容为「既有事实」来源、不得访问 `.worktrees/` 及仓库工作区外路径的指引）——该限制为软约束，不构成安全边界，其 AC 路径引用形态的后果由 REQ-PIB-03 的核对 fail-closed 拦截，其余形态为用户明示接受的残余风险。工具策略层仅维持既有写拒绝与 spawn 守卫纵深，SHALL NOT 承载基线语义；prompt 教学块不因注入而获得边界地位。host-served 通道的 author 文件访问 SHALL NOT 到达仓库工作区、其他分支检出或兄弟 issue worktree 路径。基线分支在生成时不可解析（被删/改名）SHALL fail-closed 终止生成并给出明确诊断（两种通道同此语义）。
 
-#### Scenario: 看不到兄弟 worktree
+#### Scenario: host-served 通道看不到兄弟 worktree
 
-- **WHEN** plan author 在生成中浏览仓库寻找「既有交付物」
-- **THEN** 其可见集为 base_branch 树内容；`.worktrees/aria-issues/*` 等工作区路径不可达——F-57 形态（把兄弟分支文件当既有契约）不再可能
+- **WHEN** plan author 经 host-served 通道（如 kimi fs 桥）在生成中浏览仓库寻找「既有交付物」
+- **THEN** 其可见集为 base_branch 树内容，`.worktrees/aria-issues/*` 等工作区路径不可达——F-57 形态在该通道层不再可能；provider 原生通道见软限制场景
 
 #### Scenario: 引用与所见一致
 
 - **WHEN** author 在 spec 中引用某仓库文件作为「既有」事实
-- **THEN** 该文件必存在于 base_branch 树（AC 基线核对同源通过）
+- **THEN** 该文件必存在于 base_branch 树（该保证由 plan 期核对（REQ-PIB-03）承载，不依赖 author 侧访问受限）
 
 #### Scenario: 基线消失 fail-closed
 
 - **WHEN** 生成时 base_branch 已被删除或不可解析
 - **THEN** 生成终止并报「基准分支不存在」诊断，不回退 main、不猜替代分支
 
-#### Scenario: 收不住的通道拒启
+#### Scenario: provider 原生通道的软限制注入
 
-- **WHEN** 某 provider 的文件访问无法在通道层限定到基线树或专用检出根
-- **THEN** 拒绝以该 provider 启动生成会话（fail-closed），不降级为 prompt 劝导或路径白名单
+- **WHEN** provider 原生文件通道（host 无法在通道层收束者，如 claude/codex/pi）的 author 会话携带基线锚点启动
+- **THEN** 其 prompt 注入基线限制教学块（仅以 base_branch 树内容为「既有事实」来源、不得访问 `.worktrees/` 及仓库工作区外路径的指引）；该教学块为软约束，不构成访问边界，author 的物理可达集不受限——残余风险由用户显式裁决接受
+
+#### Scenario: 软限制漏网的 AC 路径硬兜底
+
+- **WHEN** provider 原生通道的 author 绕过 prompt 软约束，将基线外路径写入 plan 的 AC/验证计划
+- **THEN** C1 的 AC×基线机械核对以 fail-closed 拦截该候选（acceptance_path_not_in_baseline，MustFix），不放行
 
 ### Requirement: coding fork 与核对同源（REQ-PIB-03）
 
-coding attempt 的 worktree 分支 SHALL 从 issue.base_branch fork（`create_branch` 的 base 取 base_branch——现行各上游入口以当前检出/HEAD 隐式确定基线的形态 SHALL 统一改为读取 issue.base_branch）；C1 的 AC×基线核对树 SHALL 取 issue.base_branch 的树，且 SHALL NOT 依赖共享 coding worktree 解析（直接按分支名取树）；基线分支不可解析时核对 SHALL fail-closed 失败（不静默跳过核对）。author 所见、核对所用、coder 所 fork 三者 SHALL 为同一基线。
+coding attempt 的 worktree 分支 SHALL 从 issue.base_branch fork（`create_branch` 的 base 取 base_branch——现行各上游入口以当前检出/HEAD 隐式确定基线的形态 SHALL 统一改为读取 issue.base_branch）；C1 的 AC×基线核对树 SHALL 取 issue.base_branch 的树，且 SHALL NOT 依赖共享 coding worktree 解析（直接按分支名取树）；基线分支不可解析时核对 SHALL fail-closed 失败（不静默跳过核对——本条为 provider 原生通道软限制残余风险的唯一硬兜底，其有效性以该 fail-closed 语义为前提）。author 所见、核对所用、coder 所 fork 三者 SHALL 为同一基线。
 
 #### Scenario: fork 自所选基线
 
@@ -76,7 +81,7 @@ coding attempt 的 worktree 分支 SHALL 从 issue.base_branch fork（`create_br
 #### Scenario: 三面同源
 
 - **WHEN** 任一文件路径分别被 author 引用、被 AC 核对检查、被 coder 作为基线
-- **THEN** 三者的存在性判定全部基于同一 base_branch 树，不再出现「author 看得到/核对判不在」或「AC 要求基线外文件」的错位
+- **THEN** 三者的存在性判定全部基于同一 base_branch 树，不再出现「author 看得到/核对判不在」或「AC 要求基线外文件」的错位；author 物理可达集在 provider 原生通道不受通道层限制，存在性判定仍以 base_branch 树为唯一口径
 
 #### Scenario: 核对基线不可解析不跳过
 

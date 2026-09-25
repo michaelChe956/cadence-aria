@@ -7,7 +7,7 @@ F-57 实证：design/plan author 的文件系统浏览泄漏到兄弟 issue work
 ## What Changes
 
 1. **Issue 模型增 `base_branch`**：创建时显式设置（UI 选择器列出仓库分支 + REST 字段；默认 main）；创建时校验分支存在（fail-closed）；创建后锁定（改基线=新 issue——防已生成产物与基线错位）；存量 issue 缺省视为 main（零迁移）。
-2. **author 上下文基线限定（F-57 根治）**：story/design/plan 生成的仓库文件浏览/读取 SHALL 经 issue.base_branch 的树（git show base:path 或专用检出），SHALL NOT 访问仓库工作区/兄弟 worktree 路径。
+2. **author 上下文基线限定（F-57 根治）**：story/design/plan 生成的仓库文件浏览/读取以 issue.base_branch 的树为基线语义——host-served 通道（kimi）通道层硬路由（git show/ls-tree+terminal 拒绝，SHALL NOT 访问工作区/兄弟 worktree）；provider 原生通道（claude/codex/pi）prompt 软限制教学块（用户 2026-09-25 裁决，残余风险接受，AC 路径形态由核对兜底）；沙箱（专用检出根）遗留后续。
 3. **coding worktree fork base 接线**：`create_branch` 的 base 从 issue.base_branch 取（现隐式 main）。
 4. **C1 AC×基线核对统一取值**：plan_baseline_tree 从 issue.base_branch（与 author 所见、coding fork 同源）。
 
