@@ -431,14 +431,14 @@ fn review_output_parts(output: &str) -> (&str, &str) {
     (output[..start].trim_end(), json)
 }
 
-async fn create_workspace_session_fixture(root: &TempDir) -> TempDir {
+async fn create_workspace_session_fixture(root: &TempDir) -> PathBuf {
     create_workspace_session_fixture_with_author(root, "fake").await
 }
 
 async fn create_workspace_session_fixture_with_author(
     root: &TempDir,
     author_provider: &str,
-) -> TempDir {
+) -> PathBuf {
     create_workspace_session_fixture_with_providers(root, author_provider, "fake", 1).await
 }
 
@@ -463,8 +463,8 @@ async fn create_workspace_session_fixture_with_providers(
     author_provider: &str,
     reviewer_provider: &str,
     review_rounds: u32,
-) -> TempDir {
-    let repo = git_repo();
+) -> PathBuf {
+    let repo = git_repo(root.path());
     let app = build_web_router(WebAppState::new(
         root.path().to_path_buf(),
         WebRuntime::new_fake(root.path().to_path_buf()),
@@ -481,7 +481,7 @@ async fn create_workspace_session_fixture_with_providers(
         app.clone(),
         Method::POST,
         "/api/projects/project_0001/repositories",
-        json!({"name":"Repo","path":repo.path()}),
+        json!({"name":"Repo","path":repo}),
     )
     .await;
     assert_eq!(status, StatusCode::ACCEPTED, "{accepted}");
@@ -806,14 +806,30 @@ fn executable_fixture(relative_path: &str) -> PathBuf {
     path
 }
 
-fn git_repo() -> TempDir {
-    let dir = tempdir().expect("repo");
+fn git_repo(root: &std::path::Path) -> PathBuf {
+    // REQ-PIB-02：夹具对齐生产不变量（main 分支+初始提交，裸 init 无分支
+    // 会令基线解析 fail-closed）；仓库置于 root 下由调用方持有生命周期，
+    // 避免 TempDir 早删令 run 期基准分支解析失效。
+    let dir = root.join("repo");
+    std::fs::create_dir_all(&dir).expect("create repo dir");
     let status = Command::new("git")
         .args(["init", "--initial-branch", "main"])
-        .current_dir(dir.path())
+        .current_dir(&dir)
         .status()
         .expect("git init");
     assert!(status.success());
+    for args in [
+        vec!["config", "user.email", "test@example.com"],
+        vec!["config", "user.name", "Test User"],
+        vec!["commit", "--allow-empty", "-m", "fixture baseline"],
+    ] {
+        let status = Command::new("git")
+            .args(&args)
+            .current_dir(&dir)
+            .status()
+            .expect("git fixture");
+        assert!(status.success());
+    }
     dir
 }
 

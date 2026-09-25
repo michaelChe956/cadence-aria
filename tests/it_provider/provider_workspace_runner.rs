@@ -43,8 +43,8 @@ fn workspace_runner_calls_provider_and_records_configured_review_rounds() {
             title: "会话过期".to_string(),
             description: Some("描述".to_string()),
             change_id: None,
-                   base_branch: None,
- })
+            base_branch: None,
+        })
         .expect("issue");
     let store = LifecycleStore::new(paths.clone());
     let story = store

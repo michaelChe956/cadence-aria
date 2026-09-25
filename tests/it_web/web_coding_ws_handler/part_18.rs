@@ -297,7 +297,7 @@ async fn coding_ws_new_connection_receives_and_answers_pending_choice() {
 
     let mut saw_ack = false;
     let outcome = timeout(Duration::from_secs(20), async {
-        loop {
+        let result = loop {
             tokio::select! {
                 result = &mut execute => break result,
                 event = engine_event_rx.recv() => {
@@ -308,7 +308,18 @@ async fn coding_ws_new_connection_receives_and_answers_pending_choice() {
                     }
                 }
             }
+        };
+        // 竞态收口：Ack 可能早于 execute 完成进入缓冲但 select 双就绪时先取
+        // execute 分支（随机偏好），留下已发送的 Ack 未读（假阴性，~1/3 复现
+        // 的负载敏感 flaky）。run 结束后引擎不再发事件，排空即达终态。
+        while let Ok(event) = engine_event_rx.try_recv() {
+            if let CodingWsOutMessage::CodingChoiceResponseAck { id, .. } = event
+                && id == PENDING_CHOICE_ID
+            {
+                saw_ack = true;
+            }
         }
+        result
     })
     .await
     .expect("engine must consume the pending choice response routed from the new connection");

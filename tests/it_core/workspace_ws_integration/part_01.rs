@@ -139,7 +139,7 @@ async fn workspace_ws_runs_provider_from_repository_path() {
     assert!(checkpoint.starts_with("cp_"));
     assert_eq!(
         observed_working_dir.lock().unwrap().as_ref(),
-        Some(&repo.path().canonicalize().expect("repo canonical path"))
+        Some(&repo.canonicalize().expect("repo canonical path"))
     );
 
     drop(ws);

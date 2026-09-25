@@ -741,7 +741,13 @@ async fn issue_creation_locks_explicit_base_branch() {
     let root = tempdir().expect("root");
     let repo = git_repo_with_branches("main", &["feature/x"]);
     let app = seeded_issue_app(root.path()).await;
-    seed_repository_record(root.path(), "project_0001", "repository_0001", "pib", repo.path());
+    seed_repository_record(
+        root.path(),
+        "project_0001",
+        "repository_0001",
+        "pib",
+        repo.path(),
+    );
 
     let (status, created) = request_json(
         app.clone(),
@@ -824,7 +830,13 @@ async fn issue_creation_without_default_requires_explicit_base_branch() {
     let root = tempdir().expect("root");
     let repo = git_repo_with_branches("trunk", &["release/1.0"]);
     let app = seeded_issue_app(root.path()).await;
-    seed_repository_record(root.path(), "project_0001", "repository_0001", "pib", repo.path());
+    seed_repository_record(
+        root.path(),
+        "project_0001",
+        "repository_0001",
+        "pib",
+        repo.path(),
+    );
 
     // 无 main/master：无默认值，缺省提交即拒（fail-closed，不猜字母序）。
     let (status, rejected) = request_json(
@@ -859,7 +871,13 @@ async fn issue_creation_rejects_unknown_base_branch_without_side_effects() {
     let root = tempdir().expect("root");
     let repo = git_repo_with_branches("main", &[]);
     let app = seeded_issue_app(root.path()).await;
-    seed_repository_record(root.path(), "project_0001", "repository_0001", "pib", repo.path());
+    seed_repository_record(
+        root.path(),
+        "project_0001",
+        "repository_0001",
+        "pib",
+        repo.path(),
+    );
 
     let (status, rejected) = request_json(
         app.clone(),
@@ -902,10 +920,20 @@ async fn repository_branches_endpoint_lists_local_refs_with_server_default() {
     // 伪造远端跟踪引用：端点不得列出（仅本地 refs/heads）。
     run_git_at(
         repo.path(),
-        &["update-ref", "refs/remotes/origin/remote-only", "refs/heads/main"],
+        &[
+            "update-ref",
+            "refs/remotes/origin/remote-only",
+            "refs/heads/main",
+        ],
     );
     let app = seeded_issue_app(root.path()).await;
-    seed_repository_record(root.path(), "project_0001", "repository_0001", "pib", repo.path());
+    seed_repository_record(
+        root.path(),
+        "project_0001",
+        "repository_0001",
+        "pib",
+        repo.path(),
+    );
 
     let (status, body) = request_json(
         app.clone(),

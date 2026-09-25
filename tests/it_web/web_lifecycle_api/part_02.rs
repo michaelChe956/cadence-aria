@@ -537,12 +537,26 @@ async fn delete_repository_with_idempotency_key(
 
 fn git_repo() -> tempfile::TempDir {
     let dir = tempdir().expect("repo");
+    // REQ-PIB-02：issue 基线解析要求 refs/heads 可解析（裸 init 无分支会
+    // fail-closed），夹具对齐生产不变量（main 分支+初始提交）。
     let status = Command::new("git")
-        .args(["init"])
+        .args(["init", "-b", "main"])
         .current_dir(dir.path())
         .status()
         .expect("git init");
     assert!(status.success());
+    for args in [
+        vec!["config", "user.email", "test@example.com"],
+        vec!["config", "user.name", "Test User"],
+        vec!["commit", "--allow-empty", "-m", "fixture baseline"],
+    ] {
+        let status = Command::new("git")
+            .args(&args)
+            .current_dir(dir.path())
+            .status()
+            .expect("git fixture");
+        assert!(status.success());
+    }
     dir
 }
 

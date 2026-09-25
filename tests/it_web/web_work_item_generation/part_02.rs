@@ -1,19 +1,32 @@
 // 退役留档（T5/REQ-RET-02）：valid_canonical_draft_output 夹具为 staged draft 族测试（serial/batch/compile/
 // staged_flow/恢复矩阵）专用，随消息族一并退役。
 
-
 pub(crate) async fn app_with_confirmed_story_and_design_and_streaming_outputs(
     outputs: Vec<Value>,
 ) -> (axum::Router, tempfile::TempDir, Arc<Mutex<Vec<String>>>) {
     let root = tempdir().expect("root");
     let repo = root.path().join("repo");
     std::fs::create_dir_all(&repo).expect("create repo dir");
+    // REQ-PIB-02：夹具对齐生产不变量（main 分支+初始提交，裸 init 无分支
+    // 会令基线解析 fail-closed）。
     let status = Command::new("git")
-        .args(["init"])
+        .args(["init", "-b", "main"])
         .current_dir(&repo)
         .status()
         .expect("git init");
     assert!(status.success());
+    for args in [
+        vec!["config", "user.email", "test@example.com"],
+        vec!["config", "user.name", "Test User"],
+        vec!["commit", "--allow-empty", "-m", "fixture baseline"],
+    ] {
+        let status = Command::new("git")
+            .args(&args)
+            .current_dir(&repo)
+            .status()
+            .expect("git fixture");
+        assert!(status.success());
+    }
 
     let runtime = WebRuntime::new_fake(root.path().to_path_buf());
     let mut state = WebAppState::new(root.path().to_path_buf(), runtime).with_provider_adapter(

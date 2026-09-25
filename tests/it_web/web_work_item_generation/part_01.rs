@@ -252,7 +252,6 @@ pub(crate) fn valid_outline_output() -> Value {
 
 // 退役留档（T5/REQ-RET-02）：malformed_outline_structured_stdout 夹具为 outline structured 解析重试测试专用，随消息族退役。
 
-
 // 退役留档（T5/REQ-RET-02）：valid_revision_redo_output 夹具为 legacy full-candidate revision 流测试专用，随消息族退役。
 
 pub(crate) fn invalid_split_output_missing_e2e() -> Value {
@@ -394,7 +393,12 @@ impl StreamingProviderAdapter for QueuedSplitStreamingProvider {
                 return;
             }
             let _ = event_tx
-                .send(ProviderEvent::Completed(cadence_aria::cross_cutting::streaming_provider::ProviderCompletion::plain(full_output, None)))
+                .send(ProviderEvent::Completed(
+                    cadence_aria::cross_cutting::streaming_provider::ProviderCompletion::plain(
+                        full_output,
+                        None,
+                    ),
+                ))
                 .await;
         });
 
@@ -458,14 +462,18 @@ async fn bootstrap_project_repo_issue_and_specs(
     let operation_id = response["operation_id"]
         .as_str()
         .expect("bootstrap repository initialization operation id");
-    let operation_uri = format!(
-        "/api/projects/project_0001/repository-initializations/{operation_id}"
-    );
+    let operation_uri =
+        format!("/api/projects/project_0001/repository-initializations/{operation_id}");
     let mut last_snapshot = response;
     let mut completed = None;
     for _ in 0..100 {
-        let (status, snapshot) = request_json(app.clone(), Method::GET, &operation_uri, json!({})).await;
-        assert_eq!(status, StatusCode::OK, "bootstrap repository initialization poll failed: {snapshot}");
+        let (status, snapshot) =
+            request_json(app.clone(), Method::GET, &operation_uri, json!({})).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "bootstrap repository initialization poll failed: {snapshot}"
+        );
         match snapshot["status"].as_str() {
             Some("completed") => {
                 completed = Some(snapshot);
@@ -505,7 +513,10 @@ async fn bootstrap_project_repo_issue_and_specs(
         }),
     )
     .await;
-    assert!(status.is_success(), "bootstrap story generation failed: {response}");
+    assert!(
+        status.is_success(),
+        "bootstrap story generation failed: {response}"
+    );
     let (status, response) = request_json(
         app.clone(),
         Method::POST,
@@ -513,7 +524,10 @@ async fn bootstrap_project_repo_issue_and_specs(
         json!({"confirmed_by":"human"}),
     )
     .await;
-    assert!(status.is_success(), "bootstrap story confirmation failed: {response}");
+    assert!(
+        status.is_success(),
+        "bootstrap story confirmation failed: {response}"
+    );
 
     let (status, response) = request_json(
         app.clone(),
@@ -530,7 +544,10 @@ async fn bootstrap_project_repo_issue_and_specs(
         }),
     )
     .await;
-    assert!(status.is_success(), "bootstrap design generation failed: {response}");
+    assert!(
+        status.is_success(),
+        "bootstrap design generation failed: {response}"
+    );
     let (status, response) = request_json(
         app.clone(),
         Method::POST,
@@ -538,7 +555,10 @@ async fn bootstrap_project_repo_issue_and_specs(
         json!({"confirmed_by":"human"}),
     )
     .await;
-    assert!(status.is_success(), "bootstrap design confirmation failed: {response}");
+    assert!(
+        status.is_success(),
+        "bootstrap design confirmation failed: {response}"
+    );
 
     app
 }
@@ -549,12 +569,26 @@ pub(crate) async fn app_with_confirmed_story_and_design(
     let root = tempdir().expect("root");
     let repo = root.path().join("repo");
     std::fs::create_dir_all(&repo).expect("create repo dir");
+    // REQ-PIB-02：夹具对齐生产不变量（main 分支+初始提交，裸 init 无分支
+    // 会令基线解析 fail-closed）。
     let status = Command::new("git")
-        .args(["init"])
+        .args(["init", "-b", "main"])
         .current_dir(&repo)
         .status()
         .expect("git init");
     assert!(status.success());
+    for args in [
+        vec!["config", "user.email", "test@example.com"],
+        vec!["config", "user.name", "Test User"],
+        vec!["commit", "--allow-empty", "-m", "fixture baseline"],
+    ] {
+        let status = Command::new("git")
+            .args(&args)
+            .current_dir(&repo)
+            .status()
+            .expect("git fixture");
+        assert!(status.success());
+    }
 
     let runtime = WebRuntime::new_fake(root.path().to_path_buf());
     let state = WebAppState::new(root.path().to_path_buf(), runtime).with_provider_adapter(
@@ -579,12 +613,26 @@ pub(crate) async fn app_with_confirmed_story_and_design_and_streaming_revision_o
     let root = tempdir().expect("root");
     let repo = root.path().join("repo");
     std::fs::create_dir_all(&repo).expect("create repo dir");
+    // REQ-PIB-02：夹具对齐生产不变量（main 分支+初始提交，裸 init 无分支
+    // 会令基线解析 fail-closed）。
     let status = Command::new("git")
-        .args(["init"])
+        .args(["init", "-b", "main"])
         .current_dir(&repo)
         .status()
         .expect("git init");
     assert!(status.success());
+    for args in [
+        vec!["config", "user.email", "test@example.com"],
+        vec!["config", "user.name", "Test User"],
+        vec!["commit", "--allow-empty", "-m", "fixture baseline"],
+    ] {
+        let status = Command::new("git")
+            .args(&args)
+            .current_dir(&repo)
+            .status()
+            .expect("git fixture");
+        assert!(status.success());
+    }
 
     let runtime = WebRuntime::new_fake(root.path().to_path_buf());
     let mut state = WebAppState::new(root.path().to_path_buf(), runtime).with_provider_adapter(

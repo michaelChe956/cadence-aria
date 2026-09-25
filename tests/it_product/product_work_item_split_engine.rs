@@ -304,8 +304,8 @@ async fn split_engine_fixture() -> (TempDir, LifecycleStore, IssueRecord, Reposi
             title: "登录会话过期".to_string(),
             description: Some("描述".to_string()),
             change_id: None,
-                   base_branch: None,
- })
+            base_branch: None,
+        })
         .expect("create issue");
 
     let lifecycle = LifecycleStore::new(paths);

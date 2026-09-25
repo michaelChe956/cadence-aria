@@ -159,8 +159,8 @@ async fn pointer_publication_scenario_f_logical_context_injects_authority_refere
             title: "多仓聚合 Story".to_string(),
             description: Some("跨 api 仓库的聚合变更".to_string()),
             change_id: None,
-                   base_branch: None,
- })
+            base_branch: None,
+        })
         .expect("logical issue");
     let member_id = LogicalRepositoryId(uuid::Uuid::from_u128(1));
     seed_logical_codebase_prompt(&app_paths, member_id);
@@ -183,7 +183,11 @@ async fn pointer_publication_scenario_f_logical_context_injects_authority_refere
         }),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "logical story generate: {story_response}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "logical story generate: {story_response}"
+    );
 
     let content = find_generation_context_message(&story_response);
     let authority_root = std::fs::canonicalize(app_paths.root().join("aggregate-root"))
@@ -225,12 +229,25 @@ async fn pointer_publication_scenario_f_legacy_context_keeps_original_reference(
     let root = tempdir().expect("root");
     let repo = {
         let dir = tempdir().expect("repo");
+        // REQ-PIB-02：夹具对齐生产不变量（main 分支+初始提交）。
         let status = Command::new("git")
-            .args(["init"])
+            .args(["init", "-b", "main"])
             .current_dir(dir.path())
             .status()
             .expect("git init");
         assert!(status.success());
+        for args in [
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Test User"],
+            vec!["commit", "--allow-empty", "-m", "fixture baseline"],
+        ] {
+            let status = Command::new("git")
+                .args(&args)
+                .current_dir(dir.path())
+                .status()
+                .expect("git fixture");
+            assert!(status.success());
+        }
         dir
     };
     let app = build_web_router(WebAppState::new(
@@ -272,7 +289,11 @@ async fn pointer_publication_scenario_f_legacy_context_keeps_original_reference(
         }),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "legacy story generate: {story_response}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "legacy story generate: {story_response}"
+    );
 
     let content = find_generation_context_message(&story_response);
     assert!(
