@@ -414,15 +414,28 @@ const KEYFRAME_DELIVER_ATTEMPTS: usize = 2;
 
 /// 关键帧白名单（design D3）：stage_change / session_state（含 HumanGateOpened
 /// 触发的门开全量广播）/ human_gate_closed（abandon 终止后引擎同样静默）。
+/// F-59：choice_request（非 text_fallback 源）入列——修订/生成运行发出
+/// AskUserQuestion 后引擎静默等待应答，choice 帧被降级丢弃且无后续广播
+/// 时同样「stale 至 provider_choice_wait_timeout」（issue_0002 现场）；
+/// 恢复基线自带 pending_choice_requests 投影，前端对账即补弹卡。
+/// text_fallback 不入列：该源无 provider 挂起等待界，投影
+///（pending_author_choice）是其唯一恢复面，由 F-27 广播链覆盖。
 /// 流式/增量帧不入列——它们可由恢复基线与后续广播覆盖，等待式投递只保留给
-/// 「丢了它 + 引擎静默 = stale 至 reload」的帧。
+/// 「丢了它 + 引擎静默 = stale」的帧。
 fn is_keyframe_message(message: &WsOutMessage) -> bool {
-    matches!(
+    let gate_frame = matches!(
         message,
         WsOutMessage::StageChange { .. }
             | WsOutMessage::SessionState { .. }
             | WsOutMessage::HumanGateClosed { .. }
-    )
+    );
+    let pending_choice_frame = matches!(
+        message,
+        WsOutMessage::ChoiceRequest { source, .. }
+            if source != crate::cross_cutting::streaming_provider::ChoiceRequestSource::TextFallback
+                .as_str()
+    );
+    gate_frame || pending_choice_frame
 }
 
 /// 关键帧有界等待投递：两次有界退避尝试送达恢复基线；均失败则必发
@@ -492,5 +505,34 @@ mod degraded_keyframe_tests {
             summary: None,
             completed_at: None
         }));
+    }
+    /// F-59：choice_request（非 text_fallback 源）入关键帧白名单——degraded/
+    /// 断线期间到达的 choice 卡与门开帧同级：「丢了它 + 引擎静默（等待应答）=
+    /// stale 至 provider_choice_wait_timeout」。text_fallback 不入列：该源
+    /// 无 provider 挂起等待界，且投影（pending_author_choice）是其恢复面。
+    #[test]
+    fn keyframe_whitelist_covers_pending_choice_frames() {
+        for source in ["ask_user_question", "request_user_input", "provider_choice"] {
+            assert!(
+                is_keyframe_message(&choice_frame_with_source(source)),
+                "source={source} 的 choice_request 必须按关键帧投递"
+            );
+        }
+        assert!(
+            !is_keyframe_message(&choice_frame_with_source("text_fallback")),
+            "text_fallback 无等待界且以投影为恢复面，不入关键帧白名单"
+        );
+    }
+
+    fn choice_frame_with_source(source: &str) -> WsOutMessage {
+        WsOutMessage::ChoiceRequest {
+            id: "choice_keyframe_probe".to_string(),
+            prompt: "验收口径歧义需要用户裁定".to_string(),
+            options: Vec::new(),
+            allow_multiple: false,
+            allow_free_text: false,
+            questions: Vec::new(),
+            source: source.to_string(),
+        }
     }
 }

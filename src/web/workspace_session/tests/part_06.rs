@@ -193,3 +193,60 @@ async fn degraded_transitions_are_recorded_to_append_only_diagnostics() {
     assert_eq!(exits[0]["reason"], "session_state_baseline_delivered");
     assert_eq!(exits[0]["event_seq"], 4, "exit 携带恢复基线的 event_seq");
 }
+
+/// F-59（缺陷 1）：degraded 连接期间到达的 choice_request 帧本身按关键帧
+/// 投递——修订/生成运行发出 AskUserQuestion 后引擎静默等待应答（无后续
+/// 广播触发既有恢复），有界等待任务必须把含 pending_choice_requests 投影
+/// 的恢复基线送达该连接，否则卡无处渲染、run 楔死到
+/// provider_choice_wait_timeout（issue_0002 现场复盘）。
+#[tokio::test]
+async fn choice_request_broadcast_on_degraded_attachment_delivers_baseline_during_silence() {
+    let manager = WorkspaceSessionManager::test_fixture("session_choice_keyframe_delivery");
+    let (slow_tx, mut slow_rx) = mpsc::channel(1);
+    manager.attach("slow", slow_tx).await;
+    // 容量 1：首帧（非关键帧）入队占满，第二帧触发降级。
+    manager
+        .broadcast_test_event(crate::web::workspace_ws_types::WsProviderStatus::Starting)
+        .await;
+    assert!(!manager.attachment_is_degraded("slow"));
+
+    // choice_request（ask_user_question 族）即降级帧：关键帧白名单命中后，
+    // 有界等待投递任务由 try_recover_degraded_attachment 的 Full 支路起。
+    manager.broadcast_test_keyframe(choice_frame_with_delivery_source());
+    assert!(
+        manager.attachment_is_degraded("slow"),
+        "choice 广播溢出必须降级"
+    );
+
+    // 客户端恢复读取：腾出队列容量——此后不再有任何新广播（引擎静默
+    // 等待 choice 应答）。
+    let first = slow_rx.recv().await.expect("queued provider_status frame");
+    assert!(matches!(first, OutboundControl::Text(json) if json.contains("provider_status")));
+    let recovered = tokio::time::timeout(std::time::Duration::from_secs(3), slow_rx.recv())
+        .await
+        .expect("choice 关键帧的有界等待投递必须在引擎静默期送达恢复基线（不依赖后续广播）")
+        .expect("attachment channel stays open");
+    match recovered {
+        OutboundControl::Text(json) => {
+            let value: serde_json::Value = serde_json::from_str(&json).expect("baseline JSON");
+            assert_eq!(
+                value["type"], "session_state",
+                "等待式投递送达的是恢复基线（全量 session_state，前端对账补挂 choice 卡）"
+            );
+            assert_eq!(value["event_seq"], 2, "基线必须携带 choice 广播的 event_seq");
+        }
+        other => panic!("unexpected outbound control: {other:?}"),
+    }
+}
+
+fn choice_frame_with_delivery_source() -> crate::web::workspace_ws_types::WsOutMessage {
+    crate::web::workspace_ws_types::WsOutMessage::ChoiceRequest {
+        id: "choice_keyframe_delivery_1".to_string(),
+        prompt: "修订轮需要用户裁定".to_string(),
+        options: Vec::new(),
+        allow_multiple: false,
+        allow_free_text: false,
+        questions: Vec::new(),
+        source: "ask_user_question".to_string(),
+    }
+}
