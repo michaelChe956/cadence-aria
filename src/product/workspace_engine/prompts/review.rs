@@ -4,9 +4,9 @@ use super::history_compaction::{
 };
 use super::review_context::{
     PlanReviewSource, SINGLE_CANDIDATE_REVIEW_REPETITION_TEACHING, append_review_context_section,
-    append_single_candidate_contract_gap_teaching, load_plan_review_context,
-    single_candidate_dependency_graph, single_candidate_previous_round_findings_section,
-    single_candidate_reviewer_coverage,
+    append_single_candidate_contract_gap_teaching, ensure_single_candidate_review_prompt_budget,
+    load_plan_review_context, single_candidate_dependency_graph,
+    single_candidate_previous_round_findings_section, single_candidate_reviewer_coverage,
 };
 use super::reviewer_context_filter::reviewer_context_content;
 use super::*;
@@ -16,24 +16,6 @@ use crate::product::work_item_plan_policy::{ReviewFindingCategory, ReviewInvocat
 use crate::product::work_item_plan_source_store::{SourceStoreScope, WorkItemPlanSourceStore};
 use serde_json::json;
 use std::collections::BTreeMap;
-
-// 余量按完整多 WI plan 的增长预留；接近上限时先实测，再放宽至整百级。
-// 实测记录：2026-09-07 pi×重 levels 单轮 66018B（64KiB 触顶→72KiB）；2026-09-08 pi×重 v4 多轮修订 81923B（72KiB 触顶→96KiB）。若第三次触顶应转 history 压缩调优而非继续放宽。
-// 2026-09-07 3.6 矩阵 pi×重 levels 语料多轮修订真跑实测 66018B 触顶旧 64KiB，
-// 按上述方针提额至 72KiB（留 ~11% 余量）。
-pub(crate) const SINGLE_CANDIDATE_REVIEW_PROMPT_MAX_BYTES: usize = 96 * 1024;
-
-pub(crate) fn ensure_single_candidate_review_prompt_budget(prompt: &str) -> Result<(), String> {
-    if prompt.len() <= SINGLE_CANDIDATE_REVIEW_PROMPT_MAX_BYTES {
-        Ok(())
-    } else {
-        Err(format!(
-            "single-candidate reviewer prompt exceeds byte budget: actual={} max={}",
-            prompt.len(),
-            SINGLE_CANDIDATE_REVIEW_PROMPT_MAX_BYTES
-        ))
-    }
-}
 
 fn review_finding_category_whitelist() -> String {
     [
