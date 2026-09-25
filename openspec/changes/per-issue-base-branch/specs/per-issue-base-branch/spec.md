@@ -8,11 +8,8 @@ issue 级基准分支的设置、锁定与全链锚定：author 生成上下文�
 
 ### Requirement: 基准分支设置与锁定（REQ-PIB-01）
 
-创建 Issue 时系统 SHALL 允许设置 `base_branch`（UI 分支选择器 + REST 字段；未提供时默认 main）；系统 SHALL 在创建时校验该分支存在于默认仓库（不存在即 fail-closed 拒绝创建并提示）。`base_branch` 在 Issue 创建后 SHALL 锁定不可修改；需要不同基线时应创建新 Issue。存量 Issue 缺少该字段时 SHALL 视为 main（零迁移兼容）。
+创建 Issue 时系统 SHALL 获取并展示默认仓库的全部分支供用户选择（UI 分支选择器 + REST 字段）；默认值 SHALL 按以下规则确定：仓库存在 `main` 分支时默认 `main`；否则存在 `master` 时默认 `master`；两者皆不存在时的默认规则见 design 决策（待 oracle/max-task 定案后回填）。系统 SHALL 在创建时校验所选分支存在于默认仓库（不存在即 fail-closed 拒绝创建并提示）。`base_branch` 在 Issue 创建后 SHALL 锁定不可修改；需要不同基线时应创建新 Issue。存量 Issue 缺少该字段时 SHALL 视为该仓库的默认基线分支（同上默认规则，兼容 main/master 仓库；零迁移）。
 
-#### Scenario: 创建时选择非默认分支
-
-- **WHEN** 用户创建 Issue 时选择基准分支 `feature/x`
 - **THEN** Issue 记录 base_branch=feature/x；后续 story/design/plan 生成与 coding worktree 均锚定该分支
 
 #### Scenario: 分支不存在拒绝创建
