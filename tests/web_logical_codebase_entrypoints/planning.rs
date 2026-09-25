@@ -383,7 +383,8 @@ impl PlanningHttpFixture {
                 title: "stale index planning".to_string(),
                 description: Some("exercise fresh planning read".to_string()),
                 change_id: None,
-            })
+                           base_branch: None,
+ })
             .expect("create logical issue");
         IssueCodebaseSelectionStore::new(paths.clone())
             .save(&IssueCodebaseSelection::all_members(
@@ -686,7 +687,8 @@ impl LegacyPlanningHttpFixture {
                 title: "legacy planning issue".to_string(),
                 description: None,
                 change_id: None,
-            })
+                           base_branch: None,
+ })
             .expect("create legacy issue");
 
         let app = build_web_router(WebAppState::new(root.clone(), WebRuntime::new_fake(root)));

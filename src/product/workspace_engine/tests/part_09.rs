@@ -532,6 +532,7 @@ fn make_work_item_plan_engine_with_draft_candidate(
             active_binding_id: None,
             created_at: now.clone(),
             updated_at: now,
+        base_branch: None,
         },
     )
     .unwrap();

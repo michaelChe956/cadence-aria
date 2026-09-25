@@ -577,7 +577,8 @@ fn app_with_full_chain_attempt_and_provider(
             title: "coding ws full chain issue".to_string(),
             description: None,
             change_id: None,
-        })
+                   base_branch: None,
+ })
         .expect("create issue");
     let repository = RepositoryStore::new(app_paths.clone())
         .create(CreateRepositoryInput {

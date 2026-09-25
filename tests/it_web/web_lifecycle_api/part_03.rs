@@ -39,7 +39,8 @@ async fn create_logical_prepare_fixture(
             title: "多仓聚合 WorkItemPlan".to_string(),
             description: Some("跨仓库聚合计划".to_string()),
             change_id: None,
-        })
+                   base_branch: None,
+ })
         .expect("multi-repo issue");
     seed_logical_codebase(&app_paths, member);
     let lifecycle = LifecycleStore::new(app_paths.clone());
@@ -207,7 +208,8 @@ async fn create_logical_confirm_fixture_with_spec_path(
             title: "多仓 confirm 加载失败".to_string(),
             description: None,
             change_id: None,
-        })
+                   base_branch: None,
+ })
         .expect("multi-repo issue");
     let story = lifecycle
         .create_story_spec(CreateStorySpecInput {

@@ -159,7 +159,8 @@ async fn pointer_publication_scenario_f_logical_context_injects_authority_refere
             title: "多仓聚合 Story".to_string(),
             description: Some("跨 api 仓库的聚合变更".to_string()),
             change_id: None,
-        })
+                   base_branch: None,
+ })
         .expect("logical issue");
     let member_id = LogicalRepositoryId(uuid::Uuid::from_u128(1));
     seed_logical_codebase_prompt(&app_paths, member_id);

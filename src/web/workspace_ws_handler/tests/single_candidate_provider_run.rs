@@ -125,7 +125,8 @@ impl ProviderRunFixture {
                 title: "Provider run flow dispatch".to_string(),
                 description: Some("durable flow_kind must select one provider chain".to_string()),
                 change_id: None,
-            })
+                           base_branch: None,
+ })
             .expect("create issue");
         let lifecycle = LifecycleStore::new(app_paths.clone());
         let story = lifecycle

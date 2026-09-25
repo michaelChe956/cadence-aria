@@ -693,7 +693,8 @@ async fn runtime_reader_derives_coding_unit_binding_and_rejects_run_hash_mismatc
             title: "Runtime Reader Issue".to_string(),
             description: None,
             change_id: None,
-        })
+                   base_branch: None,
+ })
         .unwrap();
     assert_eq!(issue.id, ISSUE_ID);
     let revision_store = WorkItemRevisionStore::new(paths.clone());

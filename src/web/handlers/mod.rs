@@ -126,7 +126,7 @@ pub use providers::{providers_recheck, providers_status};
 #[rustfmt::skip]
 pub use lifecycle::{confirm_gate, delete_design_spec, delete_story_spec, delete_work_item, delete_work_item_plan, generate_design_specs, generate_story_specs, issue_lifecycle, prepare_work_item_plan, request_gate_change, terminate_gate};
 #[rustfmt::skip]
-pub use product_resources::{create_issue, create_product_issue, create_project, create_workspace, delete_issue, delete_product_issue, delete_project, delete_repository, delete_workspace, get_project, list_issues, list_product_issues, list_projects, list_repositories, list_workspaces, open_project};
+pub use product_resources::{create_issue, create_product_issue, create_project, create_workspace, delete_issue, delete_product_issue, delete_project, delete_repository, delete_workspace, get_project, list_issues, list_product_issues, list_projects, list_repositories, list_repository_branches, list_workspaces, open_project};
 pub use aggregate_index::{
     AggregateIndexActiveResponse, get_active_aggregate_index, get_lc_active_aggregate_index,
     rebuild_aggregate_index, rebuild_lc_aggregate_index,

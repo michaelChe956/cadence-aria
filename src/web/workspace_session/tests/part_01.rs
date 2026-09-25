@@ -648,7 +648,8 @@ async fn provider_run_requested_without_attachments_spawns_throwaway_run() {
             title: "throwaway run issue".to_string(),
             description: None,
             change_id: None,
-        })
+                   base_branch: None,
+ })
         .expect("issue");
     let lifecycle = LifecycleStore::new(app_paths.clone());
     let story = lifecycle

@@ -24,6 +24,7 @@ import type {
   RepositoryRegistrationErrorDetails,
   RepositoryDeletionReceipt,
   RepositoryInitializationOperationSnapshot,
+  RepositoryBranchListResponse,
   RepositoryListResponse,
   TakeoverResponse,
   WorkspaceSession,
@@ -217,6 +218,16 @@ export function createProductIssue(
       method: "POST",
       body: JSON.stringify(payload),
     },
+  );
+}
+
+/// REQ-PIB-01：仓库本地分支列表（服务端默认链；UI 不自行推导默认值）。
+export function listRepositoryBranches(
+  projectId: string,
+  repositoryId: string,
+): Promise<RepositoryBranchListResponse> {
+  return requestJson<RepositoryBranchListResponse>(
+    `/api/projects/${encodeURIComponent(projectId)}/repositories/${encodeURIComponent(repositoryId)}/branches`,
   );
 }
 

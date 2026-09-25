@@ -412,7 +412,8 @@ async fn logical_plan_validate_failure_is_reported_by_handler() {
             title: "Logical plan validation".to_string(),
             description: None,
             change_id: None,
-        })
+                   base_branch: None,
+ })
         .expect("issue");
     let lifecycle = LifecycleStore::new(fixture.paths.clone());
     let story = lifecycle

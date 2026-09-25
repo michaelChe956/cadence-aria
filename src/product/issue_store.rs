@@ -7,11 +7,13 @@ use crate::product::id::next_sequential_id_in_directory;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::models::{IssuePhase, IssueRecord, IssueStatus};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateProductIssueInput {
     pub project_id: String,
     pub repo_id: Option<String>,
     pub logical_codebase_id: Option<String>,
+    /// 基准分支（REQ-PIB-01）：由 REST 层解析锁定后传入（Some）；逻辑代码库
+    /// issue（多仓非目标）与测试缺省 None。
+    pub base_branch: Option<String>,
     pub title: String,
     pub description: Option<String>,
     pub change_id: Option<String>,
@@ -22,6 +24,7 @@ pub struct CreateProductIssueWithRepositoryInput {
     pub project_id: String,
     pub repo_id: String,
     pub logical_codebase_id: Option<String>,
+    pub base_branch: Option<String>,
     pub title: String,
     pub description: Option<String>,
     pub change_id: Option<String>,
@@ -126,6 +129,7 @@ impl IssueStore {
             project_id: input.project_id,
             repo_id: input.repo_id,
             logical_codebase_id: input.logical_codebase_id,
+            base_branch: input.base_branch,
             title: input.title,
             description: input.description,
             change_id,
@@ -148,6 +152,7 @@ impl IssueStore {
             project_id: input.project_id,
             repo_id: Some(input.repo_id),
             logical_codebase_id: input.logical_codebase_id,
+            base_branch: input.base_branch,
             title: input.title,
             description: input.description,
             change_id: input.change_id,
@@ -210,7 +215,8 @@ mod tests {
                 title: "issue".to_string(),
                 description: None,
                 change_id: None,
-            })
+                           base_branch: None,
+ })
             .unwrap()
     }
 
@@ -271,5 +277,75 @@ mod tests {
         assert_eq!(again.status, IssueStatus::Completed);
         let read_again = store.get(PROJECT_ID, &created.id).unwrap();
         assert_eq!(read_again.status, IssueStatus::Completed);
+    }
+    fn base_issue_input() -> CreateProductIssueInput {
+        CreateProductIssueInput {
+            project_id: PROJECT_ID.to_string(),
+            repo_id: Some("repository_0001".to_string()),
+            logical_codebase_id: None,
+            title: "issue".to_string(),
+            description: None,
+            change_id: None,
+            base_branch: None,
+        }
+    }
+
+    #[test]
+    fn legacy_issue_json_without_base_branch_parses_as_none() {
+        // 存量兼容（REQ-PIB-01 场景 6）：本功能之前的 issue.json 无 base_branch
+        // 字段——serde 缺省解析为 None（零迁移），读取不失败。
+        let (tmp, store) = setup_store();
+        let issue_root = tmp
+            .path()
+            .join(".aria")
+            .join("projects")
+            .join(PROJECT_ID)
+            .join("issues")
+            .join("issue_0001");
+        std::fs::create_dir_all(&issue_root).unwrap();
+        std::fs::write(
+            issue_root.join("issue.json"),
+            serde_json::json!({
+                "id": "issue_0001",
+                "project_id": PROJECT_ID,
+                "repo_id": "repository_0001",
+                "title": "legacy",
+                "description": null,
+                "change_id": "legacy-change",
+                "phase": "clarification",
+                "status": "draft",
+                "active_binding_id": null,
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let issue = store.get(PROJECT_ID, "issue_0001").unwrap();
+        assert_eq!(issue.base_branch, None);
+    }
+
+    #[test]
+    fn update_status_keeps_base_branch_locked() {
+        // 锁定（REQ-PIB-01 场景 5）：issue 唯一修改通道 update_status 不触碰
+        // base_branch——改基线=新 issue，结构上无字段级修改路径。
+        let (_tmp, store) = setup_store();
+        let locked = store
+            .create(CreateProductIssueInput {
+                base_branch: Some("feature/x".to_string()),
+                ..base_issue_input()
+            })
+            .unwrap();
+        assert_eq!(locked.base_branch.as_deref(), Some("feature/x"));
+
+        let updated = store
+            .update_status(PROJECT_ID, &locked.id, IssueStatus::Completed)
+            .unwrap();
+        assert_eq!(updated.base_branch.as_deref(), Some("feature/x"));
+        assert_eq!(
+            store.get(PROJECT_ID, &locked.id).unwrap().base_branch,
+            Some("feature/x".to_string())
+        );
     }
 }

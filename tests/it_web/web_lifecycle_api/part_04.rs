@@ -29,7 +29,8 @@ async fn logical_issue_lifecycle_does_not_require_repo_id() {
             title: "多仓聚合 Issue".to_string(),
             description: Some("跨 api 仓库的聚合变更".to_string()),
             change_id: None,
-        })
+                   base_branch: None,
+ })
         .expect("multi-repo issue");
     let member_id = LogicalRepositoryId(uuid::Uuid::from_u128(1));
     seed_logical_codebase(&app_paths, member_id);
@@ -80,7 +81,8 @@ async fn generate_story_specs_logical_branch_injects_aggregate_prompt() {
             title: "多仓聚合 Story".to_string(),
             description: Some("跨 api 仓库的聚合变更".to_string()),
             change_id: None,
-        })
+                   base_branch: None,
+ })
         .expect("multi-repo issue");
     let member_id = LogicalRepositoryId(uuid::Uuid::from_u128(1));
     seed_logical_codebase(&app_paths, member_id);
@@ -170,7 +172,8 @@ async fn generate_design_specs_logical_branch_injects_aggregate_prompt() {
             title: "多仓聚合 Design".to_string(),
             description: Some("跨 api 仓库的聚合设计".to_string()),
             change_id: None,
-        })
+                   base_branch: None,
+ })
         .expect("multi-repo issue");
     let member_id = LogicalRepositoryId(uuid::Uuid::from_u128(1));
     seed_logical_codebase(&app_paths, member_id);
@@ -293,7 +296,8 @@ async fn create_logical_confirm_fixture(
             title: "多仓聚合 confirm".to_string(),
             description: None,
             change_id: None,
-        })
+                   base_branch: None,
+ })
         .expect("multi-repo issue");
     let effective = involved.clone();
     let entity_id = match kind {
@@ -449,7 +453,8 @@ async fn confirm_legacy_single_repo_story_without_involved_succeeds() {
             title: "单仓 Story confirm".to_string(),
             description: None,
             change_id: None,
-        })
+                   base_branch: None,
+ })
         .expect("legacy issue");
     let story = lifecycle
         .create_story_spec(CreateStorySpecInput {
@@ -540,7 +545,8 @@ async fn lifecycle_projects_review_status_from_workspace_timeline_reviewer_runs(
             title: "review evidence issue".to_string(),
             description: None,
             change_id: None,
-        })
+                   base_branch: None,
+ })
         .expect("issue");
     let story = lifecycle
         .create_story_spec(CreateStorySpecInput {

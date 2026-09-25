@@ -117,6 +117,7 @@ pub(super) fn seed_initial_fixture(root: &Path) -> Result<(), PlanRepairFixtureE
             active_binding_id: None,
             created_at: CREATED_AT.to_string(),
             updated_at: CREATED_AT.to_string(),
+            base_branch: None,
         },
     )
     .map_err(fixture_error)?;

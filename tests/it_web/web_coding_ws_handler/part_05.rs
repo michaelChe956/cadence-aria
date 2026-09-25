@@ -18,7 +18,8 @@ fn app_with_internal_review_rework_attempt(root_path: &Path) -> axum::Router {
             title: "coding ws internal review issue".to_string(),
             description: None,
             change_id: None,
-        })
+                   base_branch: None,
+ })
         .expect("create issue");
     let repository = RepositoryStore::new(app_paths.clone())
         .create(CreateRepositoryInput {
@@ -106,7 +107,8 @@ fn app_with_code_review_rework_attempt(
             title: "coding ws code review rework issue".to_string(),
             description: None,
             change_id: None,
-        })
+                   base_branch: None,
+ })
         .expect("create issue");
     let repository = RepositoryStore::new(app_paths.clone())
         .create(CreateRepositoryInput {

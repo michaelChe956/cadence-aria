@@ -46,7 +46,8 @@
                 title: "分组视图测试".to_string(),
                 description: None,
                 change_id: None,
-            })
+                           base_branch: None,
+ })
             .unwrap();
         assert_eq!(issue.id, ISSUE_ID);
 
@@ -318,7 +319,8 @@
                 title: "preflight issue".to_string(),
                 description: None,
                 change_id: None,
-            })
+                           base_branch: None,
+ })
             .unwrap();
         let repository_names = ["checkout-preflight-a", "checkout-preflight-b"];
         let members = repository_names
@@ -391,7 +393,8 @@
                 title: "single physical preflight issue".to_string(),
                 description: None,
                 change_id: None,
-            })
+                           base_branch: None,
+ })
             .unwrap();
         let now = "2026-08-27T00:00:00Z".to_string();
         crate::product::json_store::write_json(
@@ -894,7 +897,8 @@
                 title: "聚合投影测试".to_string(),
                 description: None,
                 change_id: None,
-            })
+                           base_branch: None,
+ })
             .unwrap();
         let alpha = LogicalRepositoryId(Uuid::new_v4());
         let beta = LogicalRepositoryId(Uuid::new_v4());

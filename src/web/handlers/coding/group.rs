@@ -916,7 +916,8 @@ mod tests {
                 title: "mixed-target group".to_string(),
                 description: None,
                 change_id: None,
-            })
+                           base_branch: None,
+ })
             .unwrap();
         let fixture = SplitResolutionFixture {
             _root: root,

@@ -125,7 +125,8 @@ async fn multi_target_delivery_chains_are_independent_per_repo() {
             title: "multi-target delivery".to_string(),
             description: None,
             change_id: None,
-        })
+                   base_branch: None,
+ })
         .expect("issue");
     let store = CodingAttemptStore::new(paths);
     seed_delivery_work_item(&store, "work_item_0001", "repo_api");

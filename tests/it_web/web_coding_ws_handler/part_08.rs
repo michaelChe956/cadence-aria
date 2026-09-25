@@ -46,7 +46,8 @@ fn app_with_group_full_chain_attempt_fixture(
             title: "coding ws group fixture".to_string(),
             description: None,
             change_id: None,
-        })
+                   base_branch: None,
+ })
         .expect("create issue");
     assert_eq!(issue.id, "issue_0001");
     let lifecycle = LifecycleStore::new(app_paths.clone());

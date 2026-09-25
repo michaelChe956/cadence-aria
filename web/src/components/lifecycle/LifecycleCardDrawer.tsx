@@ -56,6 +56,8 @@ export interface DrawerEntity {
   description?: string;
   artifacts?: ProductIssueArtifact[];
   phase?: string;
+  /// REQ-PIB-01：issue 基准分支（创建后锁定呈现；null=存量按默认链解析）。
+  baseBranch?: string | null;
   createdAt?: string;
   latestAttempt?: CodingAttempt | null;
   // Work item split metadata
@@ -182,6 +184,15 @@ export function LifecycleCardDrawer({
             >
               {LIFECYCLE_STATUS_LABELS[entity.status] ?? entity.status}
             </span>
+            {entity.kind === "issue" && entity.baseBranch ? (
+              <span
+                data-testid="drawer-base-branch-chip"
+                className={LIFECYCLE_META_CHIP_CLASS}
+                title="基准分支已锁定（修改基线需新建 Issue）"
+              >
+                基准 {entity.baseBranch} · 锁定
+              </span>
+            ) : null}
             {entity.version ? (
               <span
                 data-testid="drawer-version-chip"

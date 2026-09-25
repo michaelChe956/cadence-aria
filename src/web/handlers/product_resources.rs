@@ -1,6 +1,7 @@
 use super::dto::*;
 use super::support::*;
 use super::*;
+use crate::product::issue_baseline::resolve_effective_base_branch;
 use crate::product::logical_codebase::{
     IssueCodebaseSelection, IssueCodebaseSelectionStore, LogicalCodebaseStore, MemberStatus,
 };
@@ -180,19 +181,67 @@ pub async fn create_product_issue(
         None => {
             // 单仓路径保持 legacy create 语义，绝不写 codebase-selection.json，
             // 也绝不触碰 LC store（for_project 过渡语义已移除）。
-            let _repository = find_repository(&app_paths, &project_id, repository_id)?;
+            let repository = find_repository(&app_paths, &project_id, repository_id)?;
+            // REQ-PIB-01：基准分支创建时解析并锁定（默认链 main→master；皆无且
+            // 未显式选择即 fail-closed 拒绝；显式选择须本地存在）。逻辑代码库
+            // issue（多仓非目标）不经此分支，保持无基线语义。
+            let base_branch = resolve_effective_base_branch(
+                &repository.path,
+                request.base_branch.as_deref(),
+            )
+            .map_err(issue_baseline_api_error)?;
             let store = IssueStore::new(app_paths);
             let issue = store
                 .create_with_repository(CreateProductIssueWithRepositoryInput {
                     project_id,
                     repo_id: repository_id.to_string(),
                     logical_codebase_id: None,
+                    base_branch: Some(base_branch),
                     title: request.title,
                     description: request.description,
                     change_id: request.change_id,
                 })
                 .map_err(product_store_api_error)?;
             Ok(Json(product_issue_dto(issue, None)))
+        }
+    }
+}
+
+/// REQ-PIB-01 分支列表端点：默认仓库全部本地分支（refs/heads，不隐式 fetch）
+/// + 服务端默认链（main→master→null）。供创建表单选择器消费；创建时仍按
+/// 同一解析规则重新校验（不信任页面加载时的旧列表）。
+pub async fn list_repository_branches(
+    State(state): State<WebAppState>,
+    Path((project_id, repository_id)): Path<(String, String)>,
+) -> ApiResult<Json<RepositoryBranchListResponse>> {
+    let app_paths = product_app_paths(&state);
+    let repository = find_repository(&app_paths, &project_id, &repository_id)?;
+    let branches = crate::product::issue_baseline::list_local_branches(&repository.path)
+        .map_err(issue_baseline_api_error)?;
+    let default_branch = match (
+        branches.iter().any(|branch| branch == "main"),
+        branches.iter().any(|branch| branch == "master"),
+    ) {
+        (true, _) => Some("main".to_string()),
+        (false, true) => Some("master".to_string()),
+        (false, false) => None,
+    };
+    Ok(Json(RepositoryBranchListResponse {
+        branches,
+        default_branch,
+    }))
+}
+
+fn issue_baseline_api_error(error: crate::product::issue_baseline::IssueBaselineError) -> ApiError {
+    match error {
+        crate::product::issue_baseline::IssueBaselineError::BranchMissing { .. } => {
+            ApiError::validation("issue_base_branch_not_found", error.diagnosis())
+        }
+        crate::product::issue_baseline::IssueBaselineError::NoDefaultBranch => {
+            ApiError::validation("issue_base_branch_required", error.diagnosis())
+        }
+        crate::product::issue_baseline::IssueBaselineError::GitUnavailable { .. } => {
+            ApiError::validation("repository_branch_list_failed", error.diagnosis())
         }
     }
 }
@@ -217,6 +266,8 @@ fn create_logical_codebase_issue(
             project_id: project_id.to_string(),
             repo_id: repository_id.to_string(),
             logical_codebase_id: Some(logical_codebase_id.to_string()),
+            // 多仓差异基线为 Non-Goal：逻辑代码库 issue 不设置基准分支。
+            base_branch: None,
             title: request.title.clone(),
             description: request.description.clone(),
             change_id: request.change_id.clone(),

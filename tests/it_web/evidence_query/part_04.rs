@@ -314,7 +314,8 @@ async fn fifty_member_planning_query_returns_all_unique_member_ids_and_aliases()
             title: "50 member planning query".to_string(),
             description: None,
             change_id: None,
-        })
+                   base_branch: None,
+ })
         .expect("create logical issue");
     cadence_aria::product::logical_codebase::IssueCodebaseSelectionStore::new(fx.app_paths.clone())
         .save(&cadence_aria::product::logical_codebase::IssueCodebaseSelection::all_members(

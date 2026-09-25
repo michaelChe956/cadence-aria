@@ -18,6 +18,7 @@ import {
   getRepositoryInitialization,
   listProductIssues,
   listProjects,
+  listRepositoryBranches,
   listRepositories,
 } from "../../api/client";
 import { rebuildAggregateIndex } from "../../api/aggregate-index";
@@ -720,6 +721,7 @@ export function IssueLifecycleWorkbench({
       change_id: null,
       repository_id: payload.repository_id,
       logical_codebase_id: payload.logical_codebase_id,
+      base_branch: payload.base_branch,
     });
     createdIssuesRef.current = [
       ...createdIssuesRef.current.filter((issue) => issue.issue_id !== createdIssue.issue_id),
@@ -905,8 +907,12 @@ export function IssueLifecycleWorkbench({
       ) : null}
       {dialogOpen ? (
         <CreateLifecycleIssueDialog
+          projectId={selectedProjectId}
           repositories={repositories}
           codebases={codebases}
+          listBranches={(projectId, repositoryId) =>
+            listRepositoryBranches(projectId, repositoryId)
+          }
           listMembers={(logicalCodebaseId) =>
             selectedProjectId
               ? listLogicalCodebaseMembers(

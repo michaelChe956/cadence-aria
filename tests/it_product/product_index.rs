@@ -121,7 +121,8 @@ fn creates_project_repository_issue_and_runtime_binding() {
             title: "Add project workbench".to_string(),
             description: Some("Manage issues".to_string()),
             change_id: None,
-        })
+                   base_branch: None,
+ })
         .expect("issue");
 
     let binding = RuntimeBindingStore::new(paths.clone())
@@ -185,7 +186,8 @@ fn find_by_repo_and_task_returns_error_for_corrupt_binding_json() {
             title: "Add project workbench".to_string(),
             description: Some("Manage issues".to_string()),
             change_id: None,
-        })
+                   base_branch: None,
+ })
         .expect("issue");
 
     let binding = RuntimeBindingStore::new(paths.clone())

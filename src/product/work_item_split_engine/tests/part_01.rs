@@ -56,6 +56,7 @@ fn split_prompt_fixture() -> (GenerateWorkItemsRequest, IssueRecord, RepositoryR
         active_binding_id: None,
         created_at: String::new(),
         updated_at: String::new(),
+    base_branch: None,
     };
     let repository = RepositoryRecord {
         id: "repo_0001".to_string(),
@@ -105,6 +106,7 @@ fn build_split_prompt_includes_revision_feedback() {
         active_binding_id: None,
         created_at: String::new(),
         updated_at: String::new(),
+    base_branch: None,
     };
     let repository = RepositoryRecord {
         id: "repo_0001".to_string(),
@@ -256,6 +258,7 @@ fn build_outline_revision_prompt_is_delta_only() {
         active_binding_id: None,
         created_at: String::new(),
         updated_at: String::new(),
+    base_branch: None,
     };
 
     let (prompt, nonce) = build_outline_revision_prompt(

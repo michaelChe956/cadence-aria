@@ -69,7 +69,8 @@ pub fn rebuild_index_from_runtime(
                     title: runtime_task.title.clone(),
                     description: None,
                     change_id: Some(runtime_task.change_id.clone()),
-                })?
+                                   base_branch: None,
+ })?
             }
         };
 

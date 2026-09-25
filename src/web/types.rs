@@ -319,6 +319,15 @@ pub struct RepositoryListResponse {
     pub repositories: Vec<RepositoryDto>,
 }
 
+/// 仓库本地分支列表（REQ-PIB-01）：仅 refs/heads（不隐式 fetch）；
+/// default_branch 为服务端默认链 main→master→null（UI 不自行推导）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RepositoryBranchListResponse {
+    pub branches: Vec<String>,
+    pub default_branch: Option<String>,
+}
+
 /// Task R2（v1.3 §4）：统一 codebases 混合列表条目。单仓条目是 repos.json 的呈现层
 /// 投影（数据不动），逻辑条目来自 LogicalCodebaseStore。
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -416,6 +425,8 @@ pub struct ProductIssueDto {
     pub issue_id: String,
     pub project_id: String,
     pub repo_id: Option<String>,
+    /// issue 基准分支（REQ-PIB-01）：创建时锁定；null=存量记录（默认链解析）。
+    pub base_branch: Option<String>,
     pub workspace_id: Option<String>,
     pub task_id: Option<String>,
     pub session_id: Option<String>,
@@ -454,6 +465,10 @@ pub struct CreateProductIssueRequest {
     pub description: Option<String>,
     pub change_id: Option<String>,
     pub repository_id: Option<String>,
+    /// 基准分支（REQ-PIB-01）：单仓 issue 创建时可选显式指定；缺省按默认链
+    /// main→master 解析，皆无且未指定即 422。逻辑代码库 issue 忽略本字段。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_branch: Option<String>,
     /// v1.3：逻辑代码库归属；Some 时创建逻辑 issue（repository_id 须为其 active primary）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logical_codebase_id: Option<String>,

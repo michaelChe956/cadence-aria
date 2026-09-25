@@ -29,6 +29,43 @@ vi.mock("../shared/MonacoDiffViewer", () => ({
 }));
 
 describe("LifecycleCardDrawer", () => {
+
+  it("REQ-PIB-01：issue 抽屉呈现锁定的基准分支，非 issue 实体不呈现", () => {
+    const { rerender } = render(
+      <LifecycleCardDrawer
+        entity={{
+          id: "issue_0001",
+          kind: "issue",
+          title: "分支锚定",
+          status: "draft",
+          version: null,
+          baseBranch: "feature/x",
+        }}
+        onClose={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("drawer-base-branch-chip")).toHaveTextContent(
+      "基准 feature/x · 锁定",
+    );
+
+    rerender(
+      <LifecycleCardDrawer
+        entity={{
+          id: "issue_0002",
+          kind: "issue",
+          title: "存量 issue",
+          status: "draft",
+          version: null,
+          baseBranch: null,
+        }}
+        onClose={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+      />,
+    );
+    expect(screen.queryByTestId("drawer-base-branch-chip")).toBeNull();
+  });
+
   it("renders entity info, version history, artifact preview, and next action", () => {
     const onOpenWorkspace = vi.fn();
     const onGenerateNext = vi.fn();

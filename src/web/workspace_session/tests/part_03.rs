@@ -83,7 +83,8 @@ async fn manager_creation_recovers_stale_running_session_after_process_restart()
             title: "f23 zombie issue".to_string(),
             description: None,
             change_id: None,
-        })
+                   base_branch: None,
+ })
         .expect("issue");
     let lifecycle = LifecycleStore::new(app_paths.clone());
     let story = lifecycle

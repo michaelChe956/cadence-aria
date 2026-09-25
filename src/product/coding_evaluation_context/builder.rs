@@ -721,7 +721,8 @@ mod tests {
                 title: "评估上下文 fail-closed".to_string(),
                 description: None,
                 change_id: None,
-            })
+                           base_branch: None,
+ })
             .unwrap();
         let logical_repository_id =
             LogicalRepositoryId(Uuid::parse_str("00000000-0000-0000-0000-000000000000").unwrap());
@@ -894,7 +895,8 @@ mod tests {
                 title: "schema-v2 routing".to_string(),
                 description: None,
                 change_id: None,
-            })
+                           base_branch: None,
+ })
             .unwrap();
         let mut targets = Vec::new();
         let mut api_physical_id = String::new();

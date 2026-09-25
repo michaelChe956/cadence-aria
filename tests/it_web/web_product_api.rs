@@ -652,11 +652,300 @@ async fn delete_repository_with_idempotency_key(
 
 fn git_repo() -> tempfile::TempDir {
     let dir = tempdir().expect("repo");
-    let status = Command::new("git")
-        .args(["init"])
-        .current_dir(dir.path())
-        .status()
-        .expect("git init");
-    assert!(status.success());
+    // REQ-PIB-01：issue 创建需仓库存在本地默认分支（main/master）——
+    // 空仓（无任何提交）按 fail-closed 拒绝，故夹具带初始提交。
+    run_git_at(dir.path(), &["init"]);
+    run_git_at(dir.path(), &["config", "user.email", "test@example.com"]);
+    run_git_at(dir.path(), &["config", "user.name", "Test User"]);
+    std::fs::write(dir.path().join("README.md"), "base\n").expect("write readme");
+    run_git_at(dir.path(), &["add", "README.md"]);
+    run_git_at(dir.path(), &["commit", "-m", "base"]);
     dir
+}
+
+// ---- per-issue-base-branch（REQ-PIB-01）T1.1 ----
+
+fn run_git_at(path: &std::path::Path, args: &[&str]) {
+    let status = Command::new("git")
+        .args(args)
+        .current_dir(path)
+        .status()
+        .expect("run git fixture command");
+    assert!(
+        status.success(),
+        "git {args:?} failed in {}",
+        path.display()
+    );
+}
+
+fn git_repo_with_branches(initial_branch: &str, extra_branches: &[&str]) -> tempfile::TempDir {
+    let dir = tempdir().expect("repo");
+    run_git_at(dir.path(), &["init", "-b", initial_branch]);
+    run_git_at(dir.path(), &["config", "user.email", "test@example.com"]);
+    run_git_at(dir.path(), &["config", "user.name", "Test User"]);
+    std::fs::write(dir.path().join("README.md"), "base\n").expect("write readme");
+    run_git_at(dir.path(), &["add", "README.md"]);
+    run_git_at(dir.path(), &["commit", "-m", "base"]);
+    for branch in extra_branches {
+        run_git_at(dir.path(), &["branch", branch]);
+    }
+    dir
+}
+
+fn seed_repository_record(
+    root: &std::path::Path,
+    project_id: &str,
+    repo_id: &str,
+    name: &str,
+    repo_path: &std::path::Path,
+) {
+    let paths = cadence_aria::product::app_paths::ProductAppPaths::new(root.join(".aria"));
+    cadence_aria::product::json_store::write_json(
+        &paths.project_root(project_id).join("repos.json"),
+        &vec![serde_json::json!({
+            "id": repo_id,
+            "project_id": project_id,
+            "name": name,
+            "path": repo_path,
+            "repo_hash": format!("{repo_id}-hash"),
+            "runtime_root": repo_path.join(".aria/runtime"),
+            "default_policy_preset": "manual-write",
+            "default_provider_mode": "fake",
+            "created_at": "2026-09-25T00:00:00Z",
+            "updated_at": "2026-09-25T00:00:00Z",
+        })],
+    )
+    .expect("seed repos.json");
+}
+
+async fn seeded_issue_app(root: &std::path::Path) -> axum::Router {
+    let state = WebAppState::with_events(
+        root.to_path_buf(),
+        WebRuntime::new_fake(root.to_path_buf()),
+        EventHub::new(),
+    );
+    let app = build_web_router(state);
+    let (status, _) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects",
+        json!({"name":"Pib","description":null}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    app
+}
+
+#[tokio::test]
+async fn issue_creation_locks_explicit_base_branch() {
+    let root = tempdir().expect("root");
+    let repo = git_repo_with_branches("main", &["feature/x"]);
+    let app = seeded_issue_app(root.path()).await;
+    seed_repository_record(root.path(), "project_0001", "repository_0001", "pib", repo.path());
+
+    let (status, created) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues",
+        json!({
+            "title":"分支锚定",
+            "description":null,
+            "repository_id":"repository_0001",
+            "base_branch":"feature/x"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    assert_eq!(created["base_branch"], "feature/x");
+
+    // 读取透传（锁定值持久化，而非每次重新推导）。
+    let (status, issues) = request_json(
+        app.clone(),
+        Method::GET,
+        "/api/projects/project_0001/issues",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(issues["issues"][0]["base_branch"], "feature/x");
+}
+
+#[tokio::test]
+async fn issue_creation_default_chain_resolves_main_then_master() {
+    let root = tempdir().expect("root");
+    let main_repo = git_repo_with_branches("main", &[]);
+    let master_repo = git_repo_with_branches("master", &[]);
+    let app = seeded_issue_app(root.path()).await;
+    let paths = cadence_aria::product::app_paths::ProductAppPaths::new(root.path().join(".aria"));
+    cadence_aria::product::json_store::write_json(
+        &paths.project_root("project_0001").join("repos.json"),
+        &vec![
+            serde_json::json!({
+                "id": "repository_0001", "project_id": "project_0001", "name": "main-repo",
+                "path": main_repo.path(), "repo_hash": "h1",
+                "runtime_root": main_repo.path().join(".aria/runtime"),
+                "default_policy_preset": "manual-write", "default_provider_mode": "fake",
+                "created_at": "2026-09-25T00:00:00Z", "updated_at": "2026-09-25T00:00:00Z",
+            }),
+            serde_json::json!({
+                "id": "repository_0002", "project_id": "project_0001", "name": "master-repo",
+                "path": master_repo.path(), "repo_hash": "h2",
+                "runtime_root": master_repo.path().join(".aria/runtime"),
+                "default_policy_preset": "manual-write", "default_provider_mode": "fake",
+                "created_at": "2026-09-25T00:00:00Z", "updated_at": "2026-09-25T00:00:00Z",
+            }),
+        ],
+    )
+    .expect("seed repos.json");
+
+    let (status, on_main) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues",
+        json!({"title":"main 默认","description":null,"repository_id":"repository_0001"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{on_main}");
+    assert_eq!(on_main["base_branch"], "main");
+
+    let (status, on_master) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues",
+        json!({"title":"master 默认","description":null,"repository_id":"repository_0002"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{on_master}");
+    assert_eq!(on_master["base_branch"], "master");
+}
+
+#[tokio::test]
+async fn issue_creation_without_default_requires_explicit_base_branch() {
+    let root = tempdir().expect("root");
+    let repo = git_repo_with_branches("trunk", &["release/1.0"]);
+    let app = seeded_issue_app(root.path()).await;
+    seed_repository_record(root.path(), "project_0001", "repository_0001", "pib", repo.path());
+
+    // 无 main/master：无默认值，缺省提交即拒（fail-closed，不猜字母序）。
+    let (status, rejected) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues",
+        json!({"title":"皆无","description":null,"repository_id":"repository_0001"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{rejected}");
+    assert_eq!(rejected["code"], "issue_base_branch_required");
+
+    // 显式选择 release/1.0 即可创建。
+    let (status, created) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues",
+        json!({
+            "title":"显式选择",
+            "description":null,
+            "repository_id":"repository_0001",
+            "base_branch":"release/1.0"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    assert_eq!(created["base_branch"], "release/1.0");
+}
+
+#[tokio::test]
+async fn issue_creation_rejects_unknown_base_branch_without_side_effects() {
+    let root = tempdir().expect("root");
+    let repo = git_repo_with_branches("main", &[]);
+    let app = seeded_issue_app(root.path()).await;
+    seed_repository_record(root.path(), "project_0001", "repository_0001", "pib", repo.path());
+
+    let (status, rejected) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues",
+        json!({
+            "title":"不存在分支",
+            "description":null,
+            "repository_id":"repository_0001",
+            "base_branch":"no-such-branch"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{rejected}");
+    assert_eq!(rejected["code"], "issue_base_branch_not_found");
+    assert!(
+        rejected["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no-such-branch"),
+        "诊断应包含分支名: {rejected}"
+    );
+
+    // 不产生半配置 Issue。
+    let (status, issues) = request_json(
+        app.clone(),
+        Method::GET,
+        "/api/projects/project_0001/issues",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(issues["issues"].as_array().expect("issues").len(), 0);
+}
+
+#[tokio::test]
+async fn repository_branches_endpoint_lists_local_refs_with_server_default() {
+    let root = tempdir().expect("root");
+    let repo = git_repo_with_branches("main", &["feature/x"]);
+    // 伪造远端跟踪引用：端点不得列出（仅本地 refs/heads）。
+    run_git_at(
+        repo.path(),
+        &["update-ref", "refs/remotes/origin/remote-only", "refs/heads/main"],
+    );
+    let app = seeded_issue_app(root.path()).await;
+    seed_repository_record(root.path(), "project_0001", "repository_0001", "pib", repo.path());
+
+    let (status, body) = request_json(
+        app.clone(),
+        Method::GET,
+        "/api/projects/project_0001/repositories/repository_0001/branches",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let branches: Vec<String> = body["branches"]
+        .as_array()
+        .expect("branches array")
+        .iter()
+        .map(|value| value.as_str().unwrap_or_default().to_string())
+        .collect();
+    assert_eq!(branches, vec!["feature/x", "main"]);
+    assert_eq!(body["default_branch"], "main");
+
+    // 皆无 main/master：default_branch 为 null（服务端同一默认链规则，UI 不自行推导）。
+    let trunk_repo = git_repo_with_branches("trunk", &[]);
+    let paths = cadence_aria::product::app_paths::ProductAppPaths::new(root.path().join(".aria"));
+    cadence_aria::product::json_store::write_json(
+        &paths.project_root("project_0001").join("repos.json"),
+        &vec![serde_json::json!({
+            "id": "repository_0002", "project_id": "project_0001", "name": "trunk-repo",
+            "path": trunk_repo.path(), "repo_hash": "h2",
+            "runtime_root": trunk_repo.path().join(".aria/runtime"),
+            "default_policy_preset": "manual-write", "default_provider_mode": "fake",
+            "created_at": "2026-09-25T00:00:00Z", "updated_at": "2026-09-25T00:00:00Z",
+        })],
+    )
+    .expect("re-seed repos.json");
+    let (status, body) = request_json(
+        app,
+        Method::GET,
+        "/api/projects/project_0001/repositories/repository_0002/branches",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["branches"].as_array().expect("branches").len(), 1);
+    assert_eq!(body["default_branch"], Value::Null);
 }

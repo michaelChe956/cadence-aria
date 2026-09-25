@@ -128,6 +128,8 @@ export type ProductIssue = {
   issue_id: string;
   project_id: string;
   repo_id: string | null;
+  /// REQ-PIB-01：issue 基准分支（创建时锁定；null=存量记录按默认链解析）。
+  base_branch: string | null;
   workspace_id: string | null;
   task_id: string | null;
   session_id: string | null;
@@ -160,10 +162,18 @@ export type CreateProductIssueRequest = {
   description?: string | null;
   change_id?: string | null;
   repository_id: string;
+  /// REQ-PIB-01：基准分支显式选择；缺省由服务端按默认链 main→master 解析
+  ///（皆无且未选择即 422）。逻辑代码库 issue 忽略本字段。
+  base_branch?: string | null;
   /// v1.3：逻辑代码库归属；逻辑 issue 时必填，repository_id 为其 active primary 成员。
   logical_codebase_id?: string | null;
 };
 
+
+export type RepositoryBranchListResponse = {
+  branches: string[];
+  default_branch: string | null;
+};
 export type LifecycleConfirmationStatus =
   | "draft"
   | "in_review"

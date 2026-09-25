@@ -410,7 +410,8 @@ async fn start_generation_refreshes_stale_provider_guidance_before_prompting_aut
             title: "Provider guidance refresh".to_string(),
             description: Some("旧 context 不能把 Codex 交互纪律注入 Claude Code run".to_string()),
             change_id: None,
-        })
+                   base_branch: None,
+ })
         .unwrap();
     let lifecycle = LifecycleStore::new(app_paths.clone());
     let story = lifecycle
@@ -539,7 +540,8 @@ async fn provider_select_refreshes_provider_guidance_in_session_state() {
                 "prepare context should reflect selected author provider".to_string(),
             ),
             change_id: None,
-        })
+                   base_branch: None,
+ })
         .unwrap();
     let lifecycle = LifecycleStore::new(app_paths.clone());
     let story = lifecycle
@@ -668,7 +670,8 @@ async fn provider_select_then_user_message_forces_pi_to_auto_from_stale_supervis
             title: "Pi permission bypass".to_string(),
             description: Some("stale Supervised mode must not reach Pi".to_string()),
             change_id: None,
-        })
+                   base_branch: None,
+ })
         .unwrap();
     let lifecycle = LifecycleStore::new(app_paths.clone());
     let story = lifecycle

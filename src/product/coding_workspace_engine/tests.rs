@@ -975,7 +975,8 @@ fn running_attempt_with_worktree() -> (
             title: "issue".to_string(),
             description: None,
             change_id: None,
-        })
+                   base_branch: None,
+ })
         .expect("issue");
     let store = CodingAttemptStore::new(paths);
     let attempt = store
@@ -1086,7 +1087,8 @@ fn delivery_fixture() -> (tempfile::TempDir, CodingAttemptStore, CodingWorkspace
             title: "issue".to_string(),
             description: None,
             change_id: None,
-        })
+                   base_branch: None,
+ })
         .expect("issue");
     let store = CodingAttemptStore::new(paths);
     let (tx, _rx) = mpsc::channel(8);

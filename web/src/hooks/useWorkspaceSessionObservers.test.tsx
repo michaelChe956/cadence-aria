@@ -42,6 +42,7 @@ function observerOptions(overrides: Partial<WorkspaceSessionObserverOptions> = {
         issue_id: "issue_1",
         project_id: "project_1",
         repo_id: null,
+        base_branch: null,
         workspace_id: null,
         task_id: null,
         session_id: null,

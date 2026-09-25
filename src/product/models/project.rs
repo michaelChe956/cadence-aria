@@ -134,6 +134,10 @@ pub struct IssueRecord {
     pub id: String,
     pub project_id: String,
     pub repo_id: Option<String>,
+    /// issue 基准分支（REQ-PIB-01）：Some=创建时解析并锁定的本地分支名；
+    /// None=存量记录（零迁移），消费时按默认链 main→master 解析、皆无 fail-closed。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_branch: Option<String>,
     /// Issue 唯一归属的代码库（v1.3）：Some 表示逻辑代码库 lc_id；None 表示单仓代码库。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logical_codebase_id: Option<String>,

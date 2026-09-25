@@ -529,7 +529,8 @@ async fn stale_context_rebuild_starts_new_outline_run_with_rebuilt_context() {
             title: "Rebuild planning".to_string(),
             description: None,
             change_id: None,
-        })
+                   base_branch: None,
+ })
         .unwrap();
     assert_eq!(issue.id, "issue_0001");
 

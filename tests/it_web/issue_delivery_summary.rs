@@ -185,7 +185,8 @@ async fn build_delivery_fixture(
             title: "交付状态聚合验收".to_string(),
             description: None,
             change_id: None,
-        })
+                   base_branch: None,
+ })
         .expect("create issue");
 
     let lifecycle = LifecycleStore::new(app_paths.clone());

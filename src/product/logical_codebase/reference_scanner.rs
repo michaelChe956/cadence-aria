@@ -878,6 +878,7 @@ mod tests {
                 active_binding_id: None,
                 created_at: now.clone(),
                 updated_at: now,
+            base_branch: None,
             };
             crate::product::json_store::write_json(
                 &self

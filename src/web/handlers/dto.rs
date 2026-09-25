@@ -149,6 +149,7 @@ pub(crate) fn product_issue_dto(
         issue_id: record.id,
         project_id: record.project_id,
         repo_id: record.repo_id,
+        base_branch: record.base_branch,
         workspace_id,
         task_id,
         session_id,

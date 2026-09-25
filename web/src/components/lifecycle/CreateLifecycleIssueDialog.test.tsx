@@ -12,9 +12,13 @@ describe("CreateLifecycleIssueDialog", () => {
 
     render(
       <CreateLifecycleIssueDialog
+        projectId="project_0001"
         repositories={[repositoryRecord()]}
         codebases={[]}
         listMembers={vi.fn().mockResolvedValue([])}
+        listBranches={vi
+          .fn()
+          .mockResolvedValue({ branches: ["main"], default_branch: "main" })}
         onCreate={onCreate}
         onClose={vi.fn()}
       />,
@@ -73,9 +77,11 @@ describe("CreateLifecycleIssueDialog 代码库选择（R8）", () => {
 
     render(
       <CreateLifecycleIssueDialog
+        projectId="project_0001"
         repositories={[repositoryRecord()]}
         codebases={[logicalCodebase()]}
         listMembers={listMembers}
+        listBranches={vi.fn().mockResolvedValue({ branches: ["main"], default_branch: "main" })}
         onCreate={onCreate}
         onClose={vi.fn()}
       />,
@@ -101,6 +107,7 @@ describe("CreateLifecycleIssueDialog 代码库选择（R8）", () => {
       description: null,
       repository_id: "repository_1001",
       logical_codebase_id: "lc_0001",
+      base_branch: null,
     });
   });
 
@@ -110,9 +117,11 @@ describe("CreateLifecycleIssueDialog 代码库选择（R8）", () => {
 
     render(
       <CreateLifecycleIssueDialog
+        projectId="project_0001"
         repositories={[repositoryRecord()]}
         codebases={[]}
         listMembers={vi.fn()}
+        listBranches={vi.fn().mockResolvedValue({ branches: ["main"], default_branch: "main" })}
         onCreate={onCreate}
         onClose={vi.fn()}
       />,
@@ -130,6 +139,7 @@ describe("CreateLifecycleIssueDialog 代码库选择（R8）", () => {
       description: null,
       repository_id: "repository_0001",
       logical_codebase_id: null,
+      base_branch: "main",
     });
   });
 
@@ -147,9 +157,11 @@ describe("CreateLifecycleIssueDialog 代码库选择（R8）", () => {
 
     render(
       <CreateLifecycleIssueDialog
+        projectId="project_0001"
         repositories={[repositoryRecord()]}
         codebases={[logicalCodebase()]}
         listMembers={listMembers}
+        listBranches={vi.fn().mockResolvedValue({ branches: ["main"], default_branch: "main" })}
         onCreate={onCreate}
         onClose={vi.fn()}
       />,
@@ -172,9 +184,11 @@ describe("CreateLifecycleIssueDialog 代码库选择（R8）", () => {
 
     render(
       <CreateLifecycleIssueDialog
+        projectId="project_0001"
         repositories={[repositoryRecord()]}
         codebases={[logicalCodebase()]}
         listMembers={listMembers}
+        listBranches={vi.fn().mockResolvedValue({ branches: ["main"], default_branch: "main" })}
         onCreate={onCreate}
         onClose={vi.fn()}
       />,
@@ -188,5 +202,129 @@ describe("CreateLifecycleIssueDialog 代码库选择（R8）", () => {
       ),
     ).toBeInTheDocument();
     expect(listMembers).toHaveBeenCalledWith("lc_0001");
+  });
+});
+
+describe("CreateLifecycleIssueDialog 基准分支选择（REQ-PIB-01）", () => {
+  it("单仓默认分支预选：选择器加载列表并预选服务端 default_branch，payload 携带所选分支", async () => {
+    const onCreate = vi.fn().mockResolvedValue(undefined);
+    const listBranches = vi.fn().mockResolvedValue({
+      branches: ["feature/x", "main", "release/1.0"],
+      default_branch: "main",
+    });
+    const user = userEvent.setup();
+
+    render(
+      <CreateLifecycleIssueDialog
+        projectId="project_0001"
+        repositories={[repositoryRecord()]}
+        codebases={[]}
+        listMembers={vi.fn()}
+        listBranches={listBranches}
+        onCreate={onCreate}
+        onClose={vi.fn()}
+      />,
+    );
+
+    expect(listBranches).not.toHaveBeenCalled();
+    await user.type(screen.getByLabelText("Issue 标题"), "分支锚定");
+    await user.selectOptions(
+      screen.getByLabelText("代码库"),
+      "repo:repository_0001",
+    );
+    expect(listBranches).toHaveBeenCalledWith("project_0001", "repository_0001");
+
+    const branchSelect = await screen.findByLabelText(/^基准分支/, { selector: "select" });
+    expect(branchSelect).toHaveValue("main");
+
+    await user.selectOptions(branchSelect, "feature/x");
+    await user.click(screen.getByRole("button", { name: "创建 Issue" }));
+
+    expect(onCreate).toHaveBeenCalledWith({
+      title: "分支锚定",
+      description: null,
+      repository_id: "repository_0001",
+      logical_codebase_id: null,
+      base_branch: "feature/x",
+    });
+  });
+
+  it("仓库无 main/master（default_branch=null）：无默认值且未显式选择即阻止提交", async () => {
+    const onCreate = vi.fn().mockResolvedValue(undefined);
+    const user = userEvent.setup();
+
+    render(
+      <CreateLifecycleIssueDialog
+        projectId="project_0001"
+        repositories={[repositoryRecord()]}
+        codebases={[]}
+        listMembers={vi.fn()}
+        listBranches={vi
+          .fn()
+          .mockResolvedValue({ branches: ["release/1.0"], default_branch: null })}
+        onCreate={onCreate}
+        onClose={vi.fn()}
+      />,
+    );
+
+    await user.type(screen.getByLabelText("Issue 标题"), "皆无默认");
+    await user.selectOptions(
+      screen.getByLabelText("代码库"),
+      "repo:repository_0001",
+    );
+    const branchSelect = await screen.findByLabelText(/^基准分支/, { selector: "select" });
+    expect(branchSelect).toHaveValue("");
+
+    await user.click(screen.getByRole("button", { name: "创建 Issue" }));
+    expect(
+      await screen.findByText("仓库无 main/master 默认分支，请显式选择基准分支"),
+    ).toBeInTheDocument();
+    expect(onCreate).not.toHaveBeenCalled();
+
+    await user.selectOptions(branchSelect, "release/1.0");
+    await user.click(screen.getByRole("button", { name: "创建 Issue" }));
+    expect(onCreate).toHaveBeenCalledWith({
+      title: "皆无默认",
+      description: null,
+      repository_id: "repository_0001",
+      logical_codebase_id: null,
+      base_branch: "release/1.0",
+    });
+  });
+
+  it("逻辑代码库选择不渲染基准分支选择器（多仓差异基线为 Non-Goal）", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <CreateLifecycleIssueDialog
+        projectId="project_0001"
+        repositories={[repositoryRecord()]}
+        codebases={[
+          {
+            id: "lc_0001",
+            name: "monorepo",
+            kind: "logical",
+            repository_id: null,
+            logical_codebase_id: "lc_0001",
+            member_count: 1,
+          },
+        ]}
+        listMembers={vi.fn().mockResolvedValue([
+          {
+            logical_repository_id: "lr-1",
+            physical_repository_id: "repository_1001",
+            alias: "api",
+            status: "active" as const,
+          },
+        ])}
+        listBranches={vi.fn()}
+        onCreate={vi.fn().mockResolvedValue(undefined)}
+        onClose={vi.fn()}
+      />,
+    );
+
+    await user.selectOptions(screen.getByLabelText("代码库"), "lc:lc_0001");
+    await screen.findByLabelText("Primary 成员");
+    expect(screen.queryByLabelText(/^基准分支/, { selector: "select" })).toBeNull();
   });
 });

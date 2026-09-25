@@ -84,6 +84,10 @@ pub fn build_web_router_with_evidence(state: WebAppState, evidence_enabled: bool
             delete(handlers::delete_repository),
         )
         .route(
+            "/api/projects/{project_id}/repositories/{repository_id}/branches",
+            get(handlers::list_repository_branches),
+        )
+        .route(
             "/api/projects/{project_id}/repository-initializations/{operation_id}",
             get(handlers::get_repository_initialization),
         )

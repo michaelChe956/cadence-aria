@@ -742,6 +742,7 @@ export function toDrawerEntity(
       artifacts: card.raw.artifacts,
       phase: card.raw.phase,
       createdAt: card.raw.created_at,
+      baseBranch: card.raw.base_branch ?? null,
     };
   }
 

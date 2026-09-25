@@ -79,7 +79,8 @@ impl LegacySingleRepositoryFixture {
                 title: "legacy issue".to_string(),
                 description: Some("stored before logical codebase migration".to_string()),
                 change_id: Some("legacy-change".to_string()),
-            })
+                           base_branch: None,
+ })
             .expect("create legacy issue");
         assert_eq!(issue.id, ISSUE_ID);
 

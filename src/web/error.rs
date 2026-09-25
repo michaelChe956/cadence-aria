@@ -88,7 +88,10 @@ impl IntoResponse for ApiError {
             | "mixed_target_group_rejected"
             | "target_snapshot_missing_for_logical"
             | "aggregate_index_unavailable"
-            | "issue_selection_write_failed" => StatusCode::UNPROCESSABLE_ENTITY,
+            | "issue_selection_write_failed"
+            | "issue_base_branch_required"
+            | "issue_base_branch_not_found"
+            | "repository_branch_list_failed" => StatusCode::UNPROCESSABLE_ENTITY,
             "registration_batch_conflict"
             | "aggregate_initialization_conflict"
             | "aggregate_index_rebuild_in_progress"
