@@ -85,3 +85,110 @@ describe("PendingChoiceNotice", () => {
     expect(onJump).toHaveBeenCalledWith("choice-request-2");
   });
 });
+
+// F-59（缺陷 2）：等待提示条——修订/生成运行期间 session_state 投影带
+// pending choice 时常驻可见，choice 卡未渲染（帧丢失/未送达）也不依赖卡
+// 在场；含发问角色、已等待时长与 901s 超时倒计时。
+describe("PendingChoiceNotice wait hint (F-59)", () => {
+  const waitRequest = (overrides: Record<string, unknown> = {}) => ({
+    id: "choice_wait_a",
+    prompt: "修订口径需要裁定",
+    role: "author",
+    created_at_ms: Date.now() - 30_000,
+    first_seen_at_ms: Date.now() - 30_000,
+    ...overrides,
+  });
+
+  it("shows the wait hint from the projection alone, with elapsed time and countdown", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-25T12:00:00Z"));
+    try {
+      render(
+        <PendingChoiceNotice
+          entries={[]}
+          requests={[waitRequest()]}
+          onJump={vi.fn()}
+        />,
+      );
+
+      const notice = screen.getByTestId("pending-choice-notice");
+      expect(notice).toHaveTextContent("⏳ author 有问题等你回答");
+      expect(notice).toHaveTextContent("已等待 0:30");
+      // 901s 窗口减 30s：剩余 871s = 14:31。
+      expect(notice).toHaveTextContent("14:31");
+      expect(notice).toHaveTextContent("后超时");
+      expect(notice).toHaveTextContent("刷新页面可补卡");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("labels reviewer role for reviewer-asked choices", () => {
+    render(
+      <PendingChoiceNotice
+        entries={[]}
+        requests={[waitRequest({ role: "reviewer", prompt: "复核口径需要裁定" })]}
+        onJump={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("pending-choice-notice")).toHaveTextContent(
+      "⏳ reviewer 有问题等你回答",
+    );
+  });
+
+  it("offers the jump button when the card entry exists alongside the projection", () => {
+    const onJump = vi.fn();
+    render(
+      <PendingChoiceNotice
+        entries={[
+          choiceEntry({ id: "choice-request-wait", prompt: "修订口径需要裁定" }),
+        ]}
+        requests={[waitRequest({ id: "choice_wait_a" })]}
+        onJump={onJump}
+      />,
+    );
+
+    expect(screen.getByTestId("pending-choice-notice")).toHaveTextContent("⏳ author 有问题等你回答");
+    fireEvent.click(screen.getByRole("button", { name: "定位选择卡" }));
+    expect(onJump).toHaveBeenCalledWith("choice-request-wait");
+  });
+
+  it("omits the countdown when no timestamp is known and falls back to first-seen", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-25T12:00:00Z"));
+    try {
+      render(
+        <PendingChoiceNotice
+          entries={[]}
+          requests={[
+            waitRequest({
+              created_at_ms: null,
+              first_seen_at_ms: Date.now() - 5_000,
+            }),
+          ]}
+          onJump={vi.fn()}
+        />,
+      );
+
+      const notice = screen.getByTestId("pending-choice-notice");
+      expect(notice).toHaveTextContent("已等待 0:05");
+      // 901s 窗口减 5s：剩余 896s = 14:56。
+      expect(notice).toHaveTextContent("14:56");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("shows the pending count when several choices wait together", () => {
+    render(
+      <PendingChoiceNotice
+        entries={[]}
+        requests={[waitRequest(), waitRequest({ id: "choice_wait_b", prompt: "第二问" })]}
+        onJump={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("pending-choice-notice")).toHaveTextContent("2 个问题");
+  });
+});

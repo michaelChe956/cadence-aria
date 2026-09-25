@@ -13,6 +13,7 @@ import type {
   ArtifactVersion,
   ArtifactVersionSummary,
   ExecutionEvent,
+  PendingChoiceRequestProjection,
   TimelineNode,
   TimelineNodeDetail,
   WorkspaceArtifact,
@@ -525,4 +526,49 @@ function deduplicateExecutionEvents(events: ExecutionEvent[]) {
     }
     return deduped;
   }, []);
+}
+
+/**
+ * F-59：session_state `pending_choice_requests` 载荷归一——畸形条目（无 id）
+ * 跳过；`created_at_ms` 缺省（旧载荷/TextFallback）回退 null，由调用方按
+ * 首见时刻补齐。同会话同 id 的首见时刻跨帧保留（first_seen_at_ms 稳定）。
+ */
+export function pendingChoiceRequestsFromSession(
+  raw: unknown,
+  previous: readonly PendingChoiceRequestProjection[],
+  sameSession: boolean,
+): PendingChoiceRequestProjection[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  const previousById = new Map(previous.map((item) => [item.id, item]));
+  const now = Date.now();
+  const projected: PendingChoiceRequestProjection[] = [];
+  for (const item of raw) {
+    if (typeof item !== "object" || item === null) {
+      continue;
+    }
+    const record = item as Record<string, unknown>;
+    if (typeof record.id !== "string" || record.id.length === 0) {
+      continue;
+    }
+    const seen = sameSession ? previousById.get(record.id) : undefined;
+    projected.push({
+      id: record.id,
+      prompt:
+        typeof record.prompt === "string"
+          ? record.prompt
+          : seen?.prompt ?? "",
+      role:
+        typeof record.role === "string" && record.role.length > 0
+          ? record.role
+          : seen?.role ?? "author",
+      created_at_ms:
+        typeof record.created_at_ms === "number" && Number.isFinite(record.created_at_ms)
+          ? record.created_at_ms
+          : seen?.created_at_ms ?? null,
+      first_seen_at_ms: seen?.first_seen_at_ms ?? now,
+    });
+  }
+  return projected;
 }

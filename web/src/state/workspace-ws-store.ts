@@ -36,6 +36,7 @@ import {
   mergeVisitedStages,
   normalizeTimelineNodeDetails,
   normalizeWorkspaceArtifact,
+  pendingChoiceRequestsFromSession,
   STREAMING_STAGES,
   upsertArtifactVersionSummary,
   upsertEvent,
@@ -117,6 +118,7 @@ const initialState: WorkspaceWsState = {
   messages: [],
   checkpoints: [],
   chatEntries: [],
+  pendingChoiceRequests: [],
   artifact: null,
   workItemPlanCandidate: null,
   workItemPlanArtifact: null,
@@ -338,6 +340,13 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
         messages,
         checkpoints: state.checkpoints,
         chatEntries: [],
+        // F-59：pending_choice_requests 归一进 store（等待提示条数据源；
+        // 首见时刻同会话跨帧保留）。
+        pendingChoiceRequests: pendingChoiceRequestsFromSession(
+          state.pending_choice_requests,
+          prev.pendingChoiceRequests,
+          sameSession,
+        ),
         artifact: artifactMarkdown,
         workItemPlanCandidate,
         workItemPlanArtifact,

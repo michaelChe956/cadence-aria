@@ -420,6 +420,20 @@ export interface WorkItemPlanProviderStartLedgerEntry {
   started: boolean;
 }
 
+/**
+ * F-59：session_state `pending_choice_requests` 投影条目——等待提示条的
+ * 数据源。`created_at_ms` 是 provider pending 登记时刻（epoch ms，跨刷新
+ * 不失真的等待锚点；TextFallback/旧载荷缺省 null，回退 first_seen_at_ms）；
+ * `role` 标注发问方（author/reviewer）。
+ */
+export interface PendingChoiceRequestProjection {
+  id: string;
+  prompt: string;
+  role: string;
+  created_at_ms: number | null;
+  first_seen_at_ms: number | null;
+}
+
 export interface WorkspaceWsState {
   sessionId: string | null;
   workspaceType: string | null;
@@ -448,8 +462,10 @@ export interface WorkspaceWsState {
   publicationProvenanceRef: string | null;
   visitedStages: string[];
   messages: WsMessage[];
-  checkpoints: WsCheckpoint[];
   chatEntries: ChatEntry[];
+  checkpoints: WsCheckpoint[];
+  /** F-59：session_state pending_choice_requests 归一投影（等待提示条数据源）。 */
+  pendingChoiceRequests: PendingChoiceRequestProjection[];
   artifact: string | null;
   workItemPlanCandidate: WorkItemPlanCandidateDto | null;
   workItemPlanArtifact: WorkItemPlanArtifactPayload | null;
@@ -537,6 +553,8 @@ export interface WorkspaceSessionStatePayload {
   reviewer_enabled_at_start?: boolean | null;
   recoverable_interrupted_run?: RecoverableInterruptedRun | null;
   plan_repair?: PlanRepairSessionSnapshot | null;
+  /** F-59：挂起 choice 全量投影（含 role/created_at_ms）。 */
+  pending_choice_requests?: unknown;
 }
 
 export interface WorkspaceWsActions {

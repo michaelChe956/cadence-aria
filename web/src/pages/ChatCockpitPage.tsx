@@ -135,6 +135,9 @@ export function ChatCockpitPage({
       : observedRecords.find((record) => record.sessionId === takeoverSessionId)?.state ?? null;
   const selectedSessionId = takeoverSessionId ?? sessionId;
   const pendingChoices = pendingChoiceEntries(selectedState?.chatEntries ?? []);
+  // F-59：等待提示条数据源——投影驱动的 pending choice（观测/takeover 态同样带）。
+  const pendingChoiceRequests =
+    selectedState?.pendingChoiceRequests ?? state.pendingChoiceRequests;
   const statusState = selectedState ?? state;
   const activeTimelineNode =
     statusState.timelineNodes.find((node) => node.node_id === statusState.activeNodeId) ??
@@ -827,9 +830,10 @@ export function ChatCockpitPage({
               </div>
             ) : null}
           </div>
-          {pendingChoices.length > 0 ? (
+          {pendingChoices.length > 0 || pendingChoiceRequests.length > 0 ? (
             <PendingChoiceNotice
               entries={selectedState?.chatEntries ?? []}
+              requests={pendingChoiceRequests}
               onJump={handleJumpToEntry}
             />
           ) : null}

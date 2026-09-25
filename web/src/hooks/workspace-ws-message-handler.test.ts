@@ -965,3 +965,128 @@ describe("workspace websocket session_state pending choice reconciliation", () =
     expect(choiceEntries()).toHaveLength(0);
   });
 });
+
+// F-59（缺陷 2）：等待提示条数据源——session_state 的 pending_choice_requests
+// 归一进 store.pendingChoiceRequests：role/created_at_ms 直通（提示条标注
+// 发问方 + 已等待时长/901s 倒计时锚点）；旧载荷缺 created_at_ms 时按首见
+// 时刻回退且跨帧稳定；pending 清空即收敛空。
+describe("workspace websocket pending choice wait state projection", () => {
+  installWorkspaceStoreTestHooks();
+
+  const handlerOptions = () => ({
+    invalidatedPreStageNodeIds: new Set<string>(),
+    scheduleFlush: vi.fn(),
+    streamFlushTimeouts: {},
+  });
+
+  const sessionStateMessage = (pendingChoiceRequests: unknown) => ({
+    type: "session_state",
+    session_id: "session_pending_choice_wait",
+    workspace_type: "story",
+    stage: "running",
+    session_status: "running",
+    flow_kind: "legacy",
+    run_policy: "interactive",
+    run_history: {
+      seen_fingerprints: [],
+      repairs_used: 0,
+      manual_repairs_used: 0,
+      transitions_used: 0,
+      initial_review_count: 0,
+      verification_review_count: 0,
+    },
+    messages: [],
+    checkpoints: [],
+    artifact: null,
+    providers: { author: "claude_code", reviewer: null },
+    timeline_nodes: [],
+    active_node_id: null,
+    artifact_versions: [],
+    timeline_node_details: {},
+    human_presentation_revisions: [],
+    pending_choice_requests: pendingChoiceRequests,
+  });
+
+  const projected = () => useWorkspaceStore.getState().pendingChoiceRequests;
+
+  it("projects role and created_at_ms from session_state pending_choice_requests", () => {
+    const created_at_ms = Date.now() - 30_000;
+    handleWorkspaceWsMessage(
+      sessionStateMessage([
+        {
+          id: "choice_wait_a",
+          prompt: "修订口径需要裁定",
+          options: [],
+          allow_multiple: false,
+          allow_free_text: false,
+          questions: [],
+          source: "ask_user_question",
+          role: "author",
+          created_at_ms,
+        },
+      ]) as unknown as WsServerMessage,
+      handlerOptions(),
+    );
+
+    expect(projected()).toEqual([
+      {
+        id: "choice_wait_a",
+        prompt: "修订口径需要裁定",
+        role: "author",
+        created_at_ms,
+        first_seen_at_ms: expect.any(Number),
+      },
+    ]);
+  });
+
+  it("falls back to first-seen time when created_at_ms is absent and keeps it stable", () => {
+    handleWorkspaceWsMessage(
+      sessionStateMessage([
+        {
+          id: "choice_wait_legacy",
+          prompt: "旧载荷无时刻",
+          source: "text_fallback",
+        },
+      ]) as unknown as WsServerMessage,
+      handlerOptions(),
+    );
+    const firstSeen = projected()[0]?.first_seen_at_ms;
+    expect(firstSeen).toEqual(expect.any(Number));
+    expect(projected()[0]).toMatchObject({
+      id: "choice_wait_legacy",
+      created_at_ms: null,
+      role: "author",
+    });
+
+    handleWorkspaceWsMessage(
+      sessionStateMessage([
+        {
+          id: "choice_wait_legacy",
+          prompt: "旧载荷无时刻",
+          source: "text_fallback",
+        },
+      ]) as unknown as WsServerMessage,
+      handlerOptions(),
+    );
+    expect(projected()[0]?.first_seen_at_ms).toBe(firstSeen);
+  });
+
+  it("clears once the pending projection empties", () => {
+    handleWorkspaceWsMessage(
+      sessionStateMessage([{ id: "choice_wait_b", prompt: "p", source: "provider_choice" }]) as unknown as WsServerMessage,
+      handlerOptions(),
+    );
+    expect(projected()).toHaveLength(1);
+
+    handleWorkspaceWsMessage(sessionStateMessage([]) as unknown as WsServerMessage, handlerOptions());
+    expect(projected()).toHaveLength(0);
+  });
+
+  it("defaults role to author for malformed entries that still carry an id", () => {
+    handleWorkspaceWsMessage(
+      sessionStateMessage([{ id: "choice_wait_c", prompt: "p", source: "provider_choice" }]) as unknown as WsServerMessage,
+      handlerOptions(),
+    );
+    expect(projected()[0]).toMatchObject({ id: "choice_wait_c", role: "author" });
+  });
+});

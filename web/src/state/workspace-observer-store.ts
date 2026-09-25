@@ -4,6 +4,7 @@ import type { CockpitInboxItem } from "./workspace-cockpit-projection";
 import { selectCockpitInbox } from "./workspace-cockpit-projection";
 import {
   normalizeWorkspaceArtifact,
+  pendingChoiceRequestsFromSession,
   workItemPlanProjectionArtifactsFromVersions,
   workItemPlanVersionsFromSession,
 } from "./workspace-ws-store-helpers";
@@ -414,6 +415,14 @@ export function observerStateFromSessionState(
       content: message.content,
       timestamp: message.created_at,
     })),
+    // F-59：观测态同样带 pending_choice_requests 归一投影——驾驶连接缺席
+    //（issue_0002 现场：日志全 observer）时，驾驶舱观测视图的等待提示条
+    // 仍可见。
+    pendingChoiceRequests: pendingChoiceRequestsFromSession(
+      (message as Record<string, unknown>).pending_choice_requests,
+      [],
+      false,
+    ),
     timelineNodes,
     activeNodeId: message.active_node_id ?? null,
     selectedNodeId: message.active_node_id ?? timelineNodes.at(-1)?.node_id ?? null,
