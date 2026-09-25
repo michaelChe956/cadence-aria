@@ -46,7 +46,7 @@ impl WorkspaceEngine {
 
         if is_design {
             self.append_missing_context_notes_to_prompt(&mut prompt);
-            self.append_design_author_artifact_contract(&mut prompt, true);
+            self.append_workspace_author_artifact_contract(&mut prompt, true);
         }
 
         prompt

@@ -363,7 +363,7 @@ fn pending_author_choice() -> PendingAuthorChoice {
 }
 
 #[tokio::test]
-async fn story_author_choice_followup_prompt_remains_byte_for_byte_unchanged() {
+async fn story_author_choice_followup_prompt_includes_full_output_contract() {
     let (event_tx, _event_rx) = mpsc::channel(8);
     let checkpoint_tmp = TempDir::new().unwrap();
     let mut engine = WorkspaceEngine::new(
@@ -382,10 +382,32 @@ async fn story_author_choice_followup_prompt_remains_byte_for_byte_unchanged() {
         .await
         .expect("Story choice followup prompt");
 
-    assert_eq!(
-        prompt,
-        "用户回答了 author 的确认问题：\n问题：输出格式？\n选择：\n- JSON\n补充：保持可读性\n\n请基于该回答继续生成完整候选产物；如果仍有必须由用户确认的问题，请继续发起选择请求，不要进入 reviewer。"
+    // 应答内容保持原样（问题/选择/补充与继续生成指令不丢）。
+    assert!(
+        prompt.contains("用户回答了 author 的确认问题：\n问题：输出格式？\n选择：\n- JSON\n补充：保持可读性"),
+        "{prompt}"
     );
+    assert!(
+        prompt.contains("请基于该回答继续生成完整候选产物"),
+        "{prompt}"
+    );
+    // F-60 防线 2：续跑 prompt 带与初次生成同源的完整输出格式契约
+    //（artifact fence 规则 + parser schema + 结构化交互决策契约 + 负面清单 + 骨架）。
+    assert!(
+        prompt.contains("原始返回必须使用完整 artifact fenced block"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("四反引号 ````artifact"), "{prompt}");
+    assert!(prompt.contains("[artifact_schema_contract]"), "{prompt}");
+    assert!(
+        prompt.contains("`[REQ-*]`（例如 `[REQ-001]`）"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("`## 待确认项`"), "{prompt}");
+    assert!(prompt.contains("author-decision-*"), "{prompt}");
+    assert!(prompt.contains("输出纪律（负面清单）"), "{prompt}");
+    assert!(prompt.contains("# Story Spec 标题"), "{prompt}");
+    assert!(prompt.contains("## 成功标准"), "{prompt}");
 }
 
 #[tokio::test]
@@ -567,7 +589,9 @@ async fn author_choice_followup_resumes_author_provider_session() {
         inputs[1].resume_provider_session_id.as_deref(),
         Some("provider-author-session-1")
     );
-    assert_eq!(inputs[1].prompt, prompt);
+    // normalize_generation_prompt 在转发前 trim；契约块（F-60 防线 2）尾部
+    // 含换行，逐字节断言以 trim 后文本为准（delta 直通语义不变）。
+    assert_eq!(inputs[1].prompt, prompt.trim());
     assert!(
         inputs[1]
             .prompt

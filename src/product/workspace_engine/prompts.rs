@@ -508,13 +508,18 @@ impl WorkspaceEngine {
         }
     }
 
-    pub(crate) fn append_design_author_artifact_contract(
+    /// F-60 防线 2：delta-only 续跑路径（choice 应答续跑、design 增量修订）注入
+    /// 与初次生成同源的完整输出契约——artifact fence 规则 + parser schema +
+    /// 结构化交互决策契约 + 负面清单 + 当前工作类型的结构骨架。
+    pub(crate) fn append_workspace_author_artifact_contract(
         &self,
         prompt: &mut String,
         mentions_prior_artifact: bool,
     ) {
         self.append_author_artifact_output_contract(prompt, mentions_prior_artifact);
-        prompt.push_str(author_artifact_skeleton_example(&WorkspaceType::Design));
+        prompt.push_str(author_artifact_skeleton_example(
+            &self.session.workspace_type,
+        ));
     }
 
     pub(crate) fn append_author_artifact_output_contract(
