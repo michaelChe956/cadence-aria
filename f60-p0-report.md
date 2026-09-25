@@ -43,6 +43,15 @@
 
 短引用较完整装配块（1-3KB）每轮省约 80%，N 轮续跑不再线性膨胀。历史与基线注入不计入该预算（由既有滑动窗口/基线预算约束）。
 
+### 1d. 双测算裁决修正（oracle+max 互证，2026-09-26 第二轮）
+
+**短引用仅在「可信同一物理会话 resume」时安全；fresh／resume 不可用必须完整合同**（否则短引用指向会话开头合同的指针悬空）：
+
+- `build_streaming_input` 分流判据与 revision 出口统一，**以 `resume_provider_session_id` 为准，不依赖 adapter 自称**：`DeltaOnly && resume_id.is_some()` → 短引用；`DeltaOnly` 无 resume（fresh／kimi MCP／pi 等策略漂移成 fresh）→ 完整装配；`FullConversation` 初次 → 完整装配。这同时覆盖 adapter 层把 resume 漂移成 fresh 的场景——出口层看到的 resume id 为空即自足降级为完整合同。
+- 窗口结论（max 实测）：kimi/pi 默认 1M 窗口下 6-8 轮分层累计 3.4-4.1K tok（真实 BPE 237-354 tok/轮）<0.5%，膨胀担忧在分层+大窗口下不成立；262K 较小配置仍由预算常量看守（§1c 保留）。
+- system 持久位方案不采纳（pi 有能力基础但 aria 未接线、kimi 无会话 system 槽），登记为后续演进（若 kimi ACP 未来提供会话 system 槽，短引用可再瘦）。
+- 测试：`exit_contract_covers_full_and_delta_for_all_markdown_workspace_types` 扩为三分支断言（Full=完整 / DeltaOnly 无 resume=完整 / DeltaOnly+resume=短引用 × 四类型）；choice 两轮与 stale-marker delta 腿夹具对齐真实生产形态（choice 续跑必有已记录 author 会话）。
+
 配套拆除业务分支点注入（出口统一，不再「记得追加」）：
 
 - `lifecycle.rs::take_pending_author_choice_prompt`：移除 Story|Design 的 F60Fix 防线 2 点注入（**测试语义保留**，见 §三）；choice 点只产问答内容——顺带消除了契约文本进入 session 历史/压缩历史造成的 marker 污染源。

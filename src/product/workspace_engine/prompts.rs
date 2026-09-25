@@ -313,15 +313,17 @@ impl WorkspaceEngine {
         // 教学注入（provider 无关——host 通道另有硬边界，见 baseline_teaching_block）。
         let baseline_tree = self.append_author_baseline_teaching(&mut prompt)?;
 
-        // F-60 P0（因素三 + 用户裁决 2026-09-26 分层合同注入）：契约出口强制
-        // 注入——Full/Delta 两模式发出 prompt 前，末端最后可信合同块无条件在位，
-        // 不因历史消息或 delta 原文中出现旧 marker 而省略。分层：初次生成
-        //（FullConversation）= 完整装配；后续轮（DeltaOnly 续跑）= 一行短引用
-        //（点名全部必需 heading 与关键追踪 token，指向会话开头完整合同），
-        // 避免 1-3KB 全合同 ×N 轮膨胀上下文。
+        // F-60 P0（因素三 + 用户裁决 2026-09-26 分层合同注入 + 双测算裁决修正）：
+        // 契约出口强制注入——Full/Delta 两模式发出 prompt 前，末端最后可信合同块
+        // 无条件在位，不因历史消息或 delta 原文中出现旧 marker 而省略。分层判据
+        // 与 revision 出口一致，以 resume_provider_session_id 为准（不依赖 adapter
+        // 自称）：可信同一物理会话 resume（DeltaOnly 且有 resume id）= 一行短引用
+        //（会话开头已有完整合同）；fresh／resume 不可用（含 adapter 策略漂移成
+        // fresh）= 完整装配——否则短引用指针悬空。FullConversation 初次 = 完整装配。
         prompt.push_str(&markdown_author_output_contract_for_round(
             &self.session.workspace_type,
-            matches!(prompt_mode, AuthorPromptMode::DeltaOnly),
+            matches!(prompt_mode, AuthorPromptMode::DeltaOnly)
+                && resume_provider_session_id.is_some(),
             false,
         ));
 

@@ -170,10 +170,13 @@ fn assert_terminal_delta_reference(prompt: &str, workspace_type: &WorkspaceType)
     );
 }
 
-/// F-46 回归基座：初次 Full = 完整装配；后续轮 Delta = 一行短引用，四个 Markdown 类型。
+/// F-46 回归基座 + 双测算裁决修正（2026-09-26）：四类型三分支——初次 Full =
+/// 完整装配；DeltaOnly 无可信 resume（fresh/策略漂移）= 完整装配（短引用指针
+/// 不得悬空）；DeltaOnly + resume = 一行短引用。
 #[test]
 fn exit_contract_covers_full_and_delta_for_all_markdown_workspace_types() {
     for workspace_type in ALL_MARKDOWN_WORKSPACE_TYPES {
+        // 初次 FullConversation：完整装配。
         let engine = exit_contract_engine(
             &format!("sess_f60_exit_full_{workspace_type:?}"),
             workspace_type.clone(),
@@ -188,19 +191,44 @@ fn exit_contract_covers_full_and_delta_for_all_markdown_workspace_types() {
         );
         assert_terminal_full_contract(&full.prompt, &workspace_type);
 
+        // DeltaOnly 无 resume id：fresh 会话无会话内完整合同可指 → 完整装配。
         let engine = exit_contract_engine(
-            &format!("sess_f60_exit_delta_{workspace_type:?}"),
+            &format!("sess_f60_exit_delta_fresh_{workspace_type:?}"),
             workspace_type.clone(),
         );
-        let delta = engine
+        let delta_fresh = engine
             .build_streaming_input("请继续输出完整候选产物", AuthorPromptMode::DeltaOnly)
-            .expect("delta streaming input");
+            .expect("delta fresh streaming input");
         assert!(
-            delta.prompt.starts_with("请继续输出完整候选产物"),
-            "{workspace_type:?} delta content must pass through verbatim at the head: {}",
-            delta.prompt
+            delta_fresh.resume_provider_session_id.is_none(),
+            "{workspace_type:?} fixture must model a fresh delta round"
         );
-        assert_terminal_delta_reference(&delta.prompt, &workspace_type);
+        assert!(
+            delta_fresh.prompt.starts_with("请继续输出完整候选产物"),
+            "{workspace_type:?} delta content must pass through verbatim at the head: {}",
+            delta_fresh.prompt
+        );
+        assert_terminal_full_contract(&delta_fresh.prompt, &workspace_type);
+
+        // DeltaOnly + 可信 resume：会话开头已有完整合同 → 一行短引用。
+        let mut engine = exit_contract_engine(
+            &format!("sess_f60_exit_delta_resume_{workspace_type:?}"),
+            workspace_type.clone(),
+        );
+        engine.session.provider_conversations = vec![recorded_author_conversation()];
+        let delta_resume = engine
+            .build_streaming_input("请继续输出完整候选产物", AuthorPromptMode::DeltaOnly)
+            .expect("delta resume streaming input");
+        assert_eq!(
+            delta_resume.resume_provider_session_id.as_deref(),
+            Some("author-session-1")
+        );
+        assert!(
+            delta_resume.prompt.starts_with("请继续输出完整候选产物"),
+            "{workspace_type:?} delta content must pass through verbatim at the head: {}",
+            delta_resume.prompt
+        );
+        assert_terminal_delta_reference(&delta_resume.prompt, &workspace_type);
     }
 }
 
@@ -227,17 +255,24 @@ fn exit_contract_survives_stale_marker_in_session_history_and_delta_content() {
     );
     assert_terminal_full_contract(&full.prompt, &WorkspaceType::Story);
 
+    // 双测算裁决修正：短引用仅在可信 resume 轮成立——补 author 会话记录后
+    // delta 原文中的旧 marker 仍不得抑制末端短引用。
+    engine.session.provider_conversations = vec![recorded_author_conversation()];
     let delta = engine
         .build_streaming_input(
             "继续生成（历史 delta 原文中带 [artifact_schema_contract] 旧标记）",
             AuthorPromptMode::DeltaOnly,
         )
         .expect("delta input");
+    assert_eq!(
+        delta.resume_provider_session_id.as_deref(),
+        Some("author-session-1")
+    );
     assert_terminal_delta_reference(&delta.prompt, &WorkspaceType::Story);
 }
 
-/// choice 应答续跑：连续两轮，每轮 delta 出口都以短引用收尾，choice 点本身只产
-/// 问答内容（不再各业务分支自行拼契约）。
+/// choice 应答续跑：连续两轮（同一物理 provider 会话的 resume 轮，双测算裁决），
+/// 每轮 delta 出口都以短引用收尾，choice 点本身只产问答内容。
 #[tokio::test]
 async fn choice_followup_two_rounds_each_carry_terminal_contract() {
     for (round, workspace_type) in [(1, WorkspaceType::Story), (2, WorkspaceType::Design)] {
@@ -245,6 +280,7 @@ async fn choice_followup_two_rounds_each_carry_terminal_contract() {
             &format!("sess_f60_choice_round_{round}"),
             workspace_type.clone(),
         );
+        engine.session.provider_conversations = vec![recorded_author_conversation()];
         engine.pending_author_choice = Some(PendingAuthorChoice {
             id: format!("author_choice_round_{round}"),
             prompt: format!("第 {round} 轮问题：范围如何取舍？"),

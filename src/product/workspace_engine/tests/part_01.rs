@@ -371,6 +371,14 @@ async fn story_author_choice_followup_prompt_includes_output_contract_short_refe
         event_tx,
         make_session("sess_story_choice_prompt"),
     );
+    // choice 续跑是同一物理 provider 会话的 resume 轮（双测算裁决 2026-09-26）。
+    engine.session.provider_conversations = vec![ProviderConversationRef {
+        role: ProviderConversationRole::Author,
+        provider: ProviderName::ClaudeCode,
+        provider_session_id: "author-session-1".to_string(),
+        updated_at: chrono::Utc::now().to_rfc3339(),
+        last_node_id: None,
+    }];
     engine.pending_author_choice = Some(pending_author_choice());
 
     let content = engine
@@ -441,6 +449,13 @@ async fn design_author_choice_followup_prompt_includes_output_contract_and_decis
         event_tx,
         session,
     );
+    engine.session.provider_conversations = vec![ProviderConversationRef {
+        role: ProviderConversationRole::Author,
+        provider: ProviderName::ClaudeCode,
+        provider_session_id: "author-session-1".to_string(),
+        updated_at: chrono::Utc::now().to_rfc3339(),
+        last_node_id: None,
+    }];
     engine.pending_author_choice = Some(pending_author_choice());
 
     let content = engine
