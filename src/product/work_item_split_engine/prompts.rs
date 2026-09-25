@@ -569,13 +569,144 @@ fn split_option_semantics(request: &GenerateWorkItemsRequest) -> String {
 ///
 /// 校验器强制 work_item_outlines 每项的 source spec ID 非空；示例若用空数组，
 /// 弱模型 provider 照抄示例会导致第一轮 outline 必失败。优先注入 request 中
-/// 的真实 spec ID；request 为空时退回占位 ID。
-fn example_source_spec_id_array(ids: &[String], placeholder: &str) -> String {
+/// 的真实 spec ID；request 为空时退回占位 ID，并通过返回的 `using_placeholder`
+/// 标记让调用方显式标注占位（F-60 P1b，方案 v1.1 因素二：不得把占位当成
+/// 真实来源教给 author，不通过机械伪造来源骗 gate）。
+fn example_source_spec_id_array(ids: &[String], placeholder: &str) -> (String, bool) {
     if ids.is_empty() {
-        return format!("[\"{placeholder}\"]");
+        return (format!("[\"{placeholder}\"]"), true);
     }
     let quoted = ids.iter().map(|id| format!("\"{id}\"")).collect::<Vec<_>>();
-    format!("[{}]", quoted.join(","))
+    (format!("[{}]", quoted.join(",")), false)
+}
+
+/// F-60 P1b：最小正确示例前缀。占位仅在无真实 ID 时使用，且必须显式标注
+/// 「仅为形状占位」，防止弱模型照抄占位 ID 伪造来源骗 gate。
+fn minimal_example_prefix(using_placeholder: bool) -> &'static str {
+    if using_placeholder {
+        "最小正确示例（示例中的 spec ID 仅为形状占位、不是真实来源，必须替换为会话中已确认 spec 的真实 ID，禁止照抄占位值）："
+    } else {
+        "最小正确示例："
+    }
+}
+
+/// F-60 P1b：Outline 真实来源 ID 条款（初次/修订共享入口，按轮次指向不同）。
+///
+/// - 初次：指向 prompt 内 [confirmed_story_specs]/[confirmed_design_specs] 小节；
+/// - 修订：prompt 不重复全量 spec 上下文，改为直接点名 request 已确认的真实
+///   ID；对应一侧为空时指回上一版 outline 的既有来源（增量修订依赖同会话
+///   历史），两侧都禁止空数组、禁止虚构或照抄占位 ID。
+fn outline_source_spec_id_rule(
+    story_ids: &[String],
+    design_ids: &[String],
+    revision: bool,
+) -> String {
+    if !revision {
+        return "work_item_outlines[] 每项的 source_story_spec_ids/source_design_spec_ids 必须填写 [confirmed_story_specs]/[confirmed_design_specs] 中的真实 spec ID，禁止空数组。\n\
+                "
+            .to_string();
+    }
+    let story_clause = if story_ids.is_empty() {
+        "source_story_spec_ids 必须沿用上一版 outline 已引用的真实 story spec ID".to_string()
+    } else {
+        format!(
+            "source_story_spec_ids 必须从本请求已确认的真实 ID 中填写（story: {}）",
+            story_ids.join(", ")
+        )
+    };
+    let design_clause = if design_ids.is_empty() {
+        "source_design_spec_ids 必须沿用上一版 outline 已引用的真实 design spec ID".to_string()
+    } else {
+        format!(
+            "source_design_spec_ids 必须从本请求已确认的真实 ID 中填写（design: {}）",
+            design_ids.join(", ")
+        )
+    };
+    format!(
+        "work_item_outlines[] 每项的 source_story_spec_ids/source_design_spec_ids：{story_clause}；{design_clause}；两数组都禁止空数组，禁止虚构或照抄占位 ID。\n"
+    )
+}
+
+/// F-60 P1b：Outline 最小正确示例（初次/修订共享渲染）。
+///
+/// 真实来源 ID 优先取自 request；无真实 ID 时回退占位并经 prefix 显式标注。
+/// 修订轮与初次使用同一份示例，保证弱模型在增量轮同样看到非空双来源的
+/// 正确形状（Bug A：空数组示例会被照抄导致第一轮必失败）。
+fn outline_minimal_correct_example(
+    nonce: &str,
+    project_id: &str,
+    issue_id: &str,
+    example_story_spec_ids: &str,
+    example_design_spec_ids: &str,
+    using_placeholder: bool,
+) -> String {
+    format!(
+        "{prefix}{{\"nonce\":\"{nonce}\",\"outline\":{{\"id\":\"outline_artifact_1\",\"project_id\":\"{project_id}\",\"issue_id\":\"{issue_id}\",\"source_story_spec_ids\":{example_story_spec_ids},\"source_design_spec_ids\":{example_design_spec_ids},\"strategy_summary\":\"...\",\"work_item_outlines\":[{{\"outline_id\":\"outline_backend\",\"logical_work_item_id\":\"wi_backend\",\"title\":\"...\",\"kind\":\"backend\",\"goal\":\"...\",\"scope\":[],\"non_goals\":[],\"estimated_context_tokens\":12000,\"session_fit\":\"fits_single_agent_session\",\"source_story_spec_ids\":{example_story_spec_ids},\"source_design_spec_ids\":{example_design_spec_ids},\"exclusive_write_scopes\":[],\"forbidden_write_scopes\":[],\"depends_on\":[],\"verification_intent\":[],\"trusted_verification_commands\":[],\"handoff_notes\":\"...\"}},{{\"outline_id\":\"outline_frontend\",\"logical_work_item_id\":\"wi_frontend\",\"title\":\"...\",\"kind\":\"frontend\",\"goal\":\"...\",\"scope\":[],\"non_goals\":[],\"estimated_context_tokens\":10000,\"session_fit\":\"fits_single_agent_session\",\"source_story_spec_ids\":{example_story_spec_ids},\"source_design_spec_ids\":{example_design_spec_ids},\"exclusive_write_scopes\":[],\"forbidden_write_scopes\":[],\"depends_on\":[\"outline_backend\"],\"verification_intent\":[],\"trusted_verification_commands\":[],\"handoff_notes\":\"...\"}}],\"risks\":[],\"handoff_strategy\":\"...\",\"status\":\"draft\"}},\"context_blockers\":[]}}\n",
+        prefix = minimal_example_prefix(using_placeholder),
+    )
+}
+
+/// F-60 P1b：Outline 初次/修订共享的 [strict_output_contract] 渲染（增量契约等价）。
+///
+/// 修订轮 prompt 不重复全量 story/design/repository 上下文，但 gate 必需条款
+/// （nonce sentinel 规则、JSON 转义、context_blockers 纪律、真实来源 ID 要求、
+/// 最小正确示例、完整 JSON schema）与初次同源自同一渲染，不依赖会话历史补
+/// 合同。轮次差异仅限：措辞「提供/保留」、context_blockers 首猜指引（仅初次
+/// ——修订轮已有上一版 outline 可依）与过程说明用词。
+///
+/// P0 分层对齐（方案 v1.1 因素三）：Markdown author 族的「后续轮一行短引用」
+/// 形态不适用于 JSON 子链——nonce 每轮新生成，短引用会指向旧轮 sentinel 规则；
+/// JSON schema 无法一行穷举。JSON 子链的分层体现为「上下文两档」（初次全量
+/// 上下文/修订短上下文），合同本体两轮完整同源。
+fn outline_strict_output_contract(
+    nonce: &str,
+    source_spec_id_rule: &str,
+    minimal_example: &str,
+    revision: bool,
+) -> String {
+    let keep = if revision { "保留" } else { "提供" };
+    let first_guess_blockers = if revision {
+        ""
+    } else {
+        "如果无法补齐模块边界、关键路径或测试策略，请不要猜测完整拆分；请在 context_blockers 数组中写明需要用户补充的上下文。\n"
+    };
+    let process_note = if revision {
+        "修改说明"
+    } else {
+        "规划过程"
+    };
+    format!(
+        "[strict_output_contract]\n\
+         只能输出 WorkItemPlan Outline，不得输出完整 Work Item。\n\
+         不得输出 VerificationPlan、verification_plan、verification_plans、work_item_id、work_item_ids。\n\
+         不得输出 repository_profile，不得输出 parallel_groups。\n\
+         不要输出 implementation plan 或旧版 Work Item 拆分计划字段：work_item_outlines[] 中不要使用 id、layer、summary、key_paths、reuse_modules、test_strategy、acceptance_refs。\n\
+         work_item_outlines[] 每项必须同时{keep}稳定且唯一的 outline_id 与 logical_work_item_id；依赖只能写在各 item 的 depends_on 数组中。\n\
+         不要输出 dependency_graph；后端会从 work_item_outlines[].depends_on 自动派生内部 dependency_graph。\n\
+         work_item_outlines[] 每项必须包含 estimated_context_tokens(1..=50000) 与 session_fit=\"fits_single_agent_session\"。\n\
+         {source_spec_id_rule}\
+         work_item_outlines[] 每项必须{keep} trusted_verification_commands：仅登记已确认仓库/Design/Outline 证据支持的 command、cwd、purpose、source_ref；证据不足时使用空数组，绝不根据 WorkItemKind 猜测命令。\n\
+         不得修改仓库文件，不得创建计划文档。\n\
+         {first_guess_blockers}\
+         如果能输出完整 outline，不得输出非空 context_blockers。\n\
+         只有完全无法产出 outline 时才输出 context_blockers，且不要同时输出 outline。\n\
+         路径不确定性写入 risks 或 handoff_notes，不要用 context_blockers 阻塞。\n\
+         JSON 字符串内不得直接包含未转义英文双引号；自然语言引用请改用中文引号「」或转义为 \\\"，输出前必须确认 sentinel block 内 JSON 可被标准 JSON.parse/serde_json 解析。\n\
+         可以在最终结构化 JSON 前输出简短、可读的{process_note}，供 Workbench 流式展示。\n\
+         最后必须输出一个 nonce sentinel JSON block。\n\
+         后端只解析最后一个 nonce 匹配的 <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">...</ARIA_STRUCTURED_OUTPUT> block。\n\
+         标签内部必须是一个完整 JSON object，JSON 顶层必须含 `\"nonce\":\"{nonce}\"` 并与开始标签一致，不要输出 Markdown code fence。\n\
+         {minimal_example}\
+         严格按以下 JSON schema 输出。\n\n\
+         {schema}",
+        keep = keep,
+        first_guess_blockers = first_guess_blockers,
+        process_note = process_note,
+        source_spec_id_rule = source_spec_id_rule,
+        minimal_example = minimal_example,
+        nonce = nonce,
+        schema = WORK_ITEM_PLAN_OUTLINE_OUTPUT_SCHEMA,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -602,6 +733,24 @@ pub(crate) fn build_outline_prompt_with_nonce(
             )
         })
         .unwrap_or_default();
+    // F-60 P1b：初次/修订共享合同渲染（增量契约等价），真实来源 ID 优先。
+    let (example_story_spec_ids, story_placeholder) =
+        example_source_spec_id_array(&request.story_spec_ids, "story_spec_0001");
+    let (example_design_spec_ids, design_placeholder) =
+        example_source_spec_id_array(&request.design_spec_ids, "design_spec_0001");
+    let strict_output_contract = outline_strict_output_contract(
+        &nonce,
+        &outline_source_spec_id_rule(&request.story_spec_ids, &request.design_spec_ids, false),
+        &outline_minimal_correct_example(
+            &nonce,
+            &issue.project_id,
+            &issue.id,
+            &example_story_spec_ids,
+            &example_design_spec_ids,
+            story_placeholder || design_placeholder,
+        ),
+        false,
+    );
     let prompt = format!(
         "你是 Aria 的 WorkItemPlan Outline Planner。请基于以下输入生成第一阶段 WorkItemPlan Outline。\n\n\
          {runtime_contract}\
@@ -624,35 +773,11 @@ pub(crate) fn build_outline_prompt_with_nonce(
          require_execution_plan_confirm: {require_execution_plan_confirm}\n\n\
          {split_option_semantics}\
          {outline_write_scope_rules}\
-         [strict_output_contract]\n\
-         只能输出 WorkItemPlan Outline，不得输出完整 Work Item。\n\
-         不得输出 VerificationPlan、verification_plan、verification_plans、work_item_id、work_item_ids。\n\
-         不得输出 repository_profile，不得输出 parallel_groups。\n\
-         不要输出 implementation plan 或旧版 Work Item 拆分计划字段：work_item_outlines[] 中不要使用 id、layer、summary、key_paths、reuse_modules、test_strategy、acceptance_refs。\n\
-         work_item_outlines[] 每项必须同时提供稳定且唯一的 outline_id 与 logical_work_item_id；依赖只能写在各 item 的 depends_on 数组中。\n\
-         不要输出 dependency_graph；后端会从 work_item_outlines[].depends_on 自动派生内部 dependency_graph。\n\
-         work_item_outlines[] 每项必须包含 estimated_context_tokens(1..=50000) 与 session_fit=\"fits_single_agent_session\"。\n\
-         work_item_outlines[] 每项的 source_story_spec_ids/source_design_spec_ids 必须填写 [confirmed_story_specs]/[confirmed_design_specs] 中的真实 spec ID，禁止空数组。\n\
-         work_item_outlines[] 每项必须包含 trusted_verification_commands：仅登记已确认仓库/Design/Outline 证据支持的 command、cwd、purpose、source_ref；证据不足时使用空数组，绝不根据 WorkItemKind 猜测命令。\n\
-         不得修改仓库文件，不得创建计划文档。\n\
-         如果无法补齐模块边界、关键路径或测试策略，请不要猜测完整拆分；请在 context_blockers 数组中写明需要用户补充的上下文。\n\
-         如果能输出完整 outline，不得输出非空 context_blockers。\n\
-         只有完全无法产出 outline 时才输出 context_blockers，且不要同时输出 outline。\n\
-         路径不确定性写入 risks 或 handoff_notes，不要用 context_blockers 阻塞。\n\
-         JSON 字符串内不得直接包含未转义英文双引号；自然语言引用请改用中文引号「」或转义为 \\\"，输出前必须确认 sentinel block 内 JSON 可被标准 JSON.parse/serde_json 解析。\n\
-         可以在最终结构化 JSON 前输出简短、可读的规划过程，供 Workbench 流式展示。\n\
-         最后必须输出一个 nonce sentinel JSON block。\n\
-         后端只解析最后一个 nonce 匹配的 <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">...</ARIA_STRUCTURED_OUTPUT> block。\n\
-         标签内部必须是一个完整 JSON object，JSON 顶层必须含 `\"nonce\":\"{nonce}\"` 并与开始标签一致，不要输出 Markdown code fence。\n\
-         最小正确示例：{{\"nonce\":\"{nonce}\",\"outline\":{{\"id\":\"outline_artifact_1\",\"project_id\":\"{project_id}\",\"issue_id\":\"{issue_id}\",\"source_story_spec_ids\":{example_story_spec_ids},\"source_design_spec_ids\":{example_design_spec_ids},\"strategy_summary\":\"...\",\"work_item_outlines\":[{{\"outline_id\":\"outline_backend\",\"logical_work_item_id\":\"wi_backend\",\"title\":\"...\",\"kind\":\"backend\",\"goal\":\"...\",\"scope\":[],\"non_goals\":[],\"estimated_context_tokens\":12000,\"session_fit\":\"fits_single_agent_session\",\"source_story_spec_ids\":{example_story_spec_ids},\"source_design_spec_ids\":{example_design_spec_ids},\"exclusive_write_scopes\":[],\"forbidden_write_scopes\":[],\"depends_on\":[],\"verification_intent\":[],\"trusted_verification_commands\":[],\"handoff_notes\":\"...\"}},{{\"outline_id\":\"outline_frontend\",\"logical_work_item_id\":\"wi_frontend\",\"title\":\"...\",\"kind\":\"frontend\",\"goal\":\"...\",\"scope\":[],\"non_goals\":[],\"estimated_context_tokens\":10000,\"session_fit\":\"fits_single_agent_session\",\"source_story_spec_ids\":{example_story_spec_ids},\"source_design_spec_ids\":{example_design_spec_ids},\"exclusive_write_scopes\":[],\"forbidden_write_scopes\":[],\"depends_on\":[\"outline_backend\"],\"verification_intent\":[],\"trusted_verification_commands\":[],\"handoff_notes\":\"...\"}}],\"risks\":[],\"handoff_strategy\":\"...\",\"status\":\"draft\"}},\"context_blockers\":[]}}\n\
-         严格按以下 JSON schema 输出。\n\n\
-         {schema}",
+         {strict_output_contract}",
         title = issue.title,
         runtime_contract = runtime_contract,
         description = issue.description.as_deref().unwrap_or("无"),
         repo_id = repository.id,
-        project_id = issue.project_id,
-        issue_id = issue.id,
         repo_path = repository.path.display(),
         story_context = story_context.join("\n\n"),
         design_context = design_context.join("\n\n"),
@@ -666,12 +791,7 @@ pub(crate) fn build_outline_prompt_with_nonce(
         require_execution_plan_confirm = request.require_execution_plan_confirm.unwrap_or(false),
         split_option_semantics = split_option_semantics(request),
         outline_write_scope_rules = OUTLINE_WRITE_SCOPE_RULES,
-        nonce = nonce,
-        schema = WORK_ITEM_PLAN_OUTLINE_OUTPUT_SCHEMA,
-        example_story_spec_ids =
-            example_source_spec_id_array(&request.story_spec_ids, "story_spec_0001"),
-        example_design_spec_ids =
-            example_source_spec_id_array(&request.design_spec_ids, "design_spec_0001"),
+        strict_output_contract = strict_output_contract,
     );
     (prompt, nonce)
 }
@@ -684,6 +804,26 @@ pub(crate) fn build_outline_revision_prompt(
 ) -> (String, String) {
     let nonce = structured_output_nonce();
     let runtime_contract = work_item_plan_runtime_contract("WorkItemPlan Outline Planner", context);
+    // F-60 P1b（增量契约等价）：修订轮与初次共用同一 strict contract 渲染与
+    // 最小正确示例；真实来源 ID 直接取自 request，无真实 ID 时占位显式标注、
+    // 条款指回上一版 outline 的既有来源——修订不依赖会话历史补 gate 必需条款。
+    let (example_story_spec_ids, story_placeholder) =
+        example_source_spec_id_array(&request.story_spec_ids, "story_spec_0001");
+    let (example_design_spec_ids, design_placeholder) =
+        example_source_spec_id_array(&request.design_spec_ids, "design_spec_0001");
+    let strict_output_contract = outline_strict_output_contract(
+        &nonce,
+        &outline_source_spec_id_rule(&request.story_spec_ids, &request.design_spec_ids, true),
+        &outline_minimal_correct_example(
+            &nonce,
+            &issue.project_id,
+            &issue.id,
+            &example_story_spec_ids,
+            &example_design_spec_ids,
+            story_placeholder || design_placeholder,
+        ),
+        true,
+    );
     let prompt = format!(
         "你是 Aria 的 WorkItemPlan Outline Planner。当前请求是基于同一会话中上一版 outline 进行增量返修。\n\n\
          {runtime_contract}\
@@ -701,26 +841,7 @@ pub(crate) fn build_outline_revision_prompt(
          require_execution_plan_confirm: {require_execution_plan_confirm}\n\n\
          {split_option_semantics}\
          {outline_write_scope_rules}\
-         [strict_output_contract]\n\
-         只能输出 WorkItemPlan Outline，不得输出完整 Work Item。\n\
-         不得输出 VerificationPlan、verification_plan、verification_plans、work_item_id、work_item_ids。\n\
-         不得输出 repository_profile，不得输出 parallel_groups。\n\
-         不要输出 implementation plan 或旧版 Work Item 拆分计划字段：work_item_outlines[] 中不要使用 id、layer、summary、key_paths、reuse_modules、test_strategy、acceptance_refs。\n\
-         work_item_outlines[] 每项必须同时保留稳定且唯一的 outline_id 与 logical_work_item_id；依赖只能写在各 item 的 depends_on 数组中。\n\
-         不要输出 dependency_graph；后端会从 work_item_outlines[].depends_on 自动派生内部 dependency_graph。\n\
-         work_item_outlines[] 每项必须包含 estimated_context_tokens(1..=50000) 与 session_fit=\"fits_single_agent_session\"。\n\
-         work_item_outlines[] 每项必须保留 trusted_verification_commands；仅登记证据支持的 command、cwd、purpose、source_ref，证据不足时为 []，不得根据 WorkItemKind 猜测命令。\n\
-         不得修改仓库文件，不得创建计划文档。\n\
-         如果能输出完整 outline，不得输出非空 context_blockers。\n\
-         只有完全无法产出 outline 时才输出 context_blockers，且不要同时输出 outline。\n\
-         路径不确定性写入 risks 或 handoff_notes，不要用 context_blockers 阻塞。\n\
-         JSON 字符串内不得直接包含未转义英文双引号；自然语言引用请改用中文引号「」或转义为 \\\"，输出前必须确认 sentinel block 内 JSON 可被标准 JSON.parse/serde_json 解析。\n\
-         可以在最终结构化 JSON 前输出简短、可读的修改说明，供 Workbench 流式展示。\n\
-         最后必须输出一个 nonce sentinel JSON block。\n\
-         后端只解析最后一个 nonce 匹配的 <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">...</ARIA_STRUCTURED_OUTPUT> block。\n\
-         标签内部必须是一个完整 JSON object，JSON 顶层必须含 `\"nonce\":\"{nonce}\"` 并与开始标签一致，不要输出 Markdown code fence。\n\
-         严格按以下 JSON schema 输出。\n\n\
-         {schema}",
+         {strict_output_contract}",
         project_id = issue.project_id,
         runtime_contract = runtime_contract,
         issue_id = issue.id,
@@ -732,10 +853,35 @@ pub(crate) fn build_outline_revision_prompt(
         require_execution_plan_confirm = request.require_execution_plan_confirm.unwrap_or(false),
         split_option_semantics = split_option_semantics(request),
         outline_write_scope_rules = OUTLINE_WRITE_SCOPE_RULES,
-        nonce = nonce,
-        schema = WORK_ITEM_PLAN_OUTLINE_OUTPUT_SCHEMA,
+        strict_output_contract = strict_output_contract,
     );
     (prompt, nonce)
+}
+
+/// F-60 P1b：Split 初次/redo 共享的 [output_schema] 合同渲染（增量契约等价）。
+///
+/// sentinel 规则、可读过程纪律、kind 合法值指导与完整 schema 两轮同源；仅
+/// schema 限定语（`schema_tail`）与数组组成条款（`composition_rule`）按轮次
+/// 置换（初次=全量执行顺序／redo=仅重做项对应 redo_work_items）。redo 轮
+/// 不依赖会话历史补合同。
+fn split_output_contract(nonce: &str, composition_rule: &str, schema_tail: &str) -> String {
+    format!(
+        "可以在最终结构化 JSON 前输出简短、可读的拆分过程，供 Workbench 流式展示。\n\
+         长时间分析、探索代码库或自动修正前，先输出一行简短可读状态，供 Workbench 流式展示；不要等待所有工具调用结束后才给第一段说明。\n\
+         如果需要执行多步代码库探索，每完成一组探索后输出一句当前发现摘要。\n\
+         这些可读状态必须位于最终 <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\"> 之前；最终结构化 JSON 仍只放在最后一个 sentinel block 中。\n\
+         最后必须输出一个 nonce sentinel JSON block。\n\
+         后端只解析最后一个 nonce 匹配的 <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">...</ARIA_STRUCTURED_OUTPUT> block。\n\
+         标签内部必须是一个完整 JSON object，JSON 顶层必须含 `\"nonce\":\"{nonce}\"` 并与开始标签一致，不要输出 Markdown code fence。\n\
+         严格按以下 JSON schema 输出{schema_tail}。\n\
+         {composition_rule}\n\
+         每个 work_item 必须包含 `kind` 字段（不要写成 `type`），合法取值为以下之一：backend、frontend、integration、e2e、docs、infra、other。\n\n\
+         {schema}",
+        nonce = nonce,
+        schema_tail = schema_tail,
+        composition_rule = composition_rule,
+        schema = WORK_ITEM_SPLIT_OUTPUT_SCHEMA,
+    )
 }
 
 pub(crate) fn build_split_prompt(
@@ -782,17 +928,7 @@ pub(crate) fn build_split_prompt(
          force_frontend_backend_split: {force_frontend_backend_split}\n\
          require_execution_plan_confirm: {require_execution_plan_confirm}\n\n\
          [output_schema]\n\
-         可以在最终结构化 JSON 前输出简短、可读的拆分过程，供 Workbench 流式展示。\n\
-         长时间分析、探索代码库或自动修正前，先输出一行简短可读状态，供 Workbench 流式展示；不要等待所有工具调用结束后才给第一段说明。\n\
-         如果需要执行多步代码库探索，每完成一组探索后输出一句当前发现摘要。\n\
-         这些可读状态必须位于最终 <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\"> 之前；最终结构化 JSON 仍只放在最后一个 sentinel block 中。\n\
-         最后必须输出一个 nonce sentinel JSON block。\n\
-         后端只解析最后一个 nonce 匹配的 <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">...</ARIA_STRUCTURED_OUTPUT> block。\n\
-         标签内部必须是一个完整 JSON object，JSON 顶层必须含 `\"nonce\":\"{nonce}\"` 并与开始标签一致，不要输出 Markdown code fence。\n\
-         严格按以下 JSON schema 输出。\n\
-         work_items 数组顺序即执行顺序；depends_on 使用同数组中的 0-based 索引。verification_plans 数组与 work_items 一一对应。\n\
-         每个 work_item 必须包含 `kind` 字段（不要写成 `type`），合法取值为以下之一：backend、frontend、integration、e2e、docs、infra、other。\n\n\
-         {schema}",
+         {output_contract}",
         title = issue.title,
         runtime_contract = runtime_contract,
         description = issue.description.as_deref().unwrap_or("无"),
@@ -808,8 +944,11 @@ pub(crate) fn build_split_prompt(
         include_e2e_tests = request.include_e2e_tests.unwrap_or(false),
         force_frontend_backend_split = request.force_frontend_backend_split.unwrap_or(false),
         require_execution_plan_confirm = request.require_execution_plan_confirm.unwrap_or(false),
-        nonce = nonce,
-        schema = WORK_ITEM_SPLIT_OUTPUT_SCHEMA,
+        output_contract = split_output_contract(
+            &nonce,
+            "work_items 数组顺序即执行顺序；depends_on 使用同数组中的 0-based 索引。verification_plans 数组与 work_items 一一对应。",
+            "",
+        ),
     )
 }
 
@@ -878,18 +1017,16 @@ pub(crate) fn build_revision_prompt(
          以下 WorkItem 必须保留，不得在输出中重写：\n{retained_section}\n\n\
          [redo_work_items]\n\
          以下 WorkItem 需要按用户反馈重做，请只输出这些项：\n{redo_section}\n\n\
+         [openspec_constraint_summary]\n\
+         story_spec_ids: {story_ids}\n\
+         design_spec_ids: {design_ids}\n\n\
+         [user_options]\n\
+         include_integration_tests: {include_integration_tests}\n\
+         include_e2e_tests: {include_e2e_tests}\n\
+         force_frontend_backend_split: {force_frontend_backend_split}\n\
+         require_execution_plan_confirm: {require_execution_plan_confirm}\n\n\
          [output_schema]\n\
-         可以在最终结构化 JSON 前输出简短、可读的拆分过程，供 Workbench 流式展示。\n\
-         长时间分析、探索代码库或自动修正前，先输出一行简短可读状态，供 Workbench 流式展示；不要等待所有工具调用结束后才给第一段说明。\n\
-         如果需要执行多步代码库探索，每完成一组探索后输出一句当前发现摘要。\n\
-         这些可读状态必须位于最终 <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\"> 之前；最终结构化 JSON 仍只放在最后一个 sentinel block 中。\n\
-         最后必须输出一个 nonce sentinel JSON block。\n\
-         后端只解析最后一个 nonce 匹配的 <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">...</ARIA_STRUCTURED_OUTPUT> block。\n\
-         标签内部必须是一个完整 JSON object，JSON 顶层必须含 `\"nonce\":\"{nonce}\"` 并与开始标签一致，不要输出 Markdown code fence。\n\
-         严格按以下 JSON schema 输出 redo-only 结果。\n\
-         work_items 数组必须且仅包含重做项，顺序对应 redo_work_items 列表；verification_plans 与 work_items 一一对应；depends_on 使用 0-based 索引。\n\
-         每个 work_item 必须包含 `kind` 字段（不要写成 `type`），合法取值为以下之一：backend、frontend、integration、e2e、docs、infra、other。\n\n\
-         {schema}",
+         {output_contract}",
         title = issue.title,
         runtime_contract = runtime_contract,
         description = issue.description.as_deref().unwrap_or("无"),
@@ -900,8 +1037,17 @@ pub(crate) fn build_revision_prompt(
         repository_structure = repository_structure,
         retained_section = retained_section,
         redo_section = redo_section,
-        nonce = nonce,
-        schema = WORK_ITEM_SPLIT_OUTPUT_SCHEMA,
+        story_ids = request.story_spec_ids.join(", "),
+        design_ids = request.design_spec_ids.join(", "),
+        include_integration_tests = request.include_integration_tests.unwrap_or(false),
+        include_e2e_tests = request.include_e2e_tests.unwrap_or(false),
+        force_frontend_backend_split = request.force_frontend_backend_split.unwrap_or(false),
+        require_execution_plan_confirm = request.require_execution_plan_confirm.unwrap_or(false),
+        output_contract = split_output_contract(
+            &nonce,
+            "work_items 数组必须且仅包含重做项，顺序对应 redo_work_items 列表；verification_plans 与 work_items 一一对应；depends_on 使用 0-based 索引。",
+            " redo-only 结果",
+        ),
     )
 }
 

@@ -35,4 +35,5 @@ include!("tests/outline_option_semantics.rs");
 include!("tests/engine_gateway_guard.rs");
 include!("tests/provider_ref_mapping.rs");
 include!("tests/outline_traceability_example.rs");
+include!("tests/f60_plan_json_contract_equivalence.rs");
 include!("tests/design_context_canonical.rs");
