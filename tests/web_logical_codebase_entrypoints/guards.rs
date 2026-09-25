@@ -71,6 +71,27 @@ async fn single_repo_rejects_logical_codebase_routes_without_persisting_artifact
     logical
         .save_member("project_0001", &member(id, "api"))
         .unwrap();
+    // PIB（REQ-PIB-01）：legacy 单仓 issue 创建经 REST 锁定基准分支（默认链
+    // main→master；git 仓库不可用 fail-closed 422）——夹具须为可解析的真实
+    // git 仓库，同 planning.rs LegacyPlanningHttpFixture / it_web
+    // git_repo_with_branches 同构。
+    let legacy_root = root.path().join("legacy");
+    std::fs::create_dir_all(&legacy_root).unwrap();
+    crate::planning::git(&legacy_root, &["init", "-q", "-b", "main"]);
+    std::fs::write(legacy_root.join("lib.rs"), "pub fn legacy() {}\n").unwrap();
+    crate::planning::git(&legacy_root, &["add", "lib.rs"]);
+    crate::planning::git(
+        &legacy_root,
+        &[
+            "-c",
+            "user.name=Legacy Test",
+            "-c",
+            "user.email=legacy@example.test",
+            "commit",
+            "-qm",
+            "legacy baseline",
+        ],
+    );
     write_json(
         &paths.project_root("project_0002").join("repos.json"),
         &vec![RepositoryRecord {
