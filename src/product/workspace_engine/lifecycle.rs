@@ -718,17 +718,10 @@ impl WorkspaceEngine {
         prompt.push_str(
             "\n请基于该回答继续生成完整候选产物；如果仍有必须由用户确认的问题，请继续发起选择请求，不要进入 reviewer。",
         );
-        // F-60 防线 2：choice 应答续跑是 delta-only resume——provider 会话里只剩
-        // 初次的系统契约记忆，author 答完题易凭记忆续写丢追踪标记（issue_0002
-        // story node_003：完整 spec 缺 [REQ-*] 被 gate 拒）。续跑 prompt 必须带
-        // 与初次生成同源的完整输出契约（heading/[REQ-*]/[AC-*]/source id、
-        // artifact fence 规则、负面清单与结构骨架）。
-        if matches!(
-            self.session.workspace_type,
-            WorkspaceType::Story | WorkspaceType::Design
-        ) {
-            self.append_workspace_author_artifact_contract(&mut prompt, false);
-        }
+        // F-60 P0（因素三）：choice 应答续跑的输出契约升级为出口级覆盖——本函数
+        // 只产问答内容（不再自行拼契约，避免契约文本进入 session 历史造成
+        // marker 污染），由 build_streaming_input 的 DeltaOnly 出口无条件装配
+        // 当前类型全条款（防线 2 语义保留，覆盖扩至全部 Markdown 类型）。
         Ok(prompt)
     }
 

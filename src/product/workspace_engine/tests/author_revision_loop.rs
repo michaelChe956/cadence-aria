@@ -275,8 +275,14 @@ async fn design_author_revision_prompt_includes_output_contract_skeleton_and_con
         )
         .await;
 
-    for resumed_session in [false, true] {
-        let prompt = engine.build_author_revision_prompt("补充失败路径的设计决策", resumed_session);
+    // F-60 P0：输出契约由 build_revision_input_with_resume 出口装配——经
+    // StreamingProviderInput 断言（不再直查 builder 字符串）。
+    engine.pending_revision_context = Some("补充失败路径的设计决策".to_string());
+    for allow_resume in [false, true] {
+        let prompt = engine
+            .build_revision_input_with_resume(allow_resume)
+            .expect("author feedback revision input")
+            .prompt;
 
         assert!(prompt.contains("[artifact_schema_contract]"), "{prompt}");
         assert!(

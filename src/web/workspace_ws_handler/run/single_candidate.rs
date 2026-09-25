@@ -1,5 +1,6 @@
 use super::*;
 use crate::product::work_item_plan_compiler::grammar;
+use crate::product::workspace_engine::PlanAuthorOutputContract;
 
 pub(crate) enum SingleCandidateProviderRunOutcome {
     Completed,
@@ -291,6 +292,7 @@ async fn drive_single_candidate_reredrive(
             reredrive_prompt.to_string(),
             repository_path.to_string_lossy().to_string(),
             author_provider.clone(),
+            PlanAuthorOutputContract::Structured,
         )
         .map_err(SingleCandidateProviderRunError::Message)?;
     let reredrive_input = engine.attach_tool_policy_audit(reredrive_input);
@@ -541,6 +543,7 @@ pub(crate) async fn run_single_candidate_author(
             full_prompt.clone(),
             repository.path.to_string_lossy().to_string(),
             author_provider.clone(),
+            PlanAuthorOutputContract::Structured,
         )
         .map_err(SingleCandidateProviderRunError::Message)?;
     let provider_input = engine.attach_tool_policy_audit(provider_input);

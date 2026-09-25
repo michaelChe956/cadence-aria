@@ -526,6 +526,33 @@ pub(crate) fn author_artifact_schema_contract_for(
     Some(output)
 }
 
+/// F-60 P0（用户裁决 2026-09-26，分层合同注入）：后续轮（choice 续跑/修订/返修
+/// delta）一行短引用的条目渲染——同一 `artifact_constraint_spec_for` 规则源，
+/// 点名当前类型全部必需二级 heading、必需稳定 ID 与追踪 token（含 source id）。
+pub(crate) fn author_artifact_short_reference_items(workspace_type: &WorkspaceType) -> String {
+    let spec = artifact_constraint_spec_for(workspace_type);
+    let mut items = format!(
+        "全部必需二级 heading：{}",
+        format_markdown_heading_labels(&spec.required_headings)
+    );
+    if !spec.required_id_patterns.is_empty() || !spec.required_tokens.is_empty() {
+        items.push_str("；必需稳定 ID 与追踪 token：");
+        let mut labels = Vec::new();
+        for rule in &spec.required_id_patterns {
+            labels.push(format!(
+                "`{}`（例如 `{}`）",
+                rule.label,
+                example_for_token_pattern(&rule.pattern)
+            ));
+        }
+        for rule in &spec.required_tokens {
+            labels.push(format!("`{}`", rule.label));
+        }
+        items.push_str(&labels.join("、"));
+    }
+    items
+}
+
 pub(crate) fn reviewer_artifact_schema_gate_for(workspace_type: &WorkspaceType) -> Option<String> {
     let spec = markdown_artifact_constraint_spec_for(workspace_type)?;
     let mut output = String::from("\n[artifact_schema_review_gate]\n");

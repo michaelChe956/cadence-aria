@@ -590,6 +590,26 @@ impl AuthorPromptMode {
     }
 }
 
+/// F-60 P0（因素三）：`build_work_item_plan_streaming_input*` 的显式输出合同族。
+/// 该出口同时承载 JSON 子链与 Markdown 直发两类 invocation，禁止从 prompt 文本
+/// 猜用途——由调用方声明产物合同族：
+/// - [`Self::Structured`]：JSON Outline／Split／Draft 与 SC compiler-source。
+///   不注入 Markdown artifact gate 合同（JSON schema 契约由各自 builder 负责）。
+/// - [`Self::MarkdownArtifact`]：Markdown artifact author 直发。出口注入与
+///   `build_streaming_input` 同源的完整契约装配（WorkItemPlan gate 全条款）。
+///
+/// 当前生产调用方全部为 Structured（JSON 子链与 SC compiler-source，后者走
+/// work-item-plan compiler 而非 artifact gate，误拼 Markdown 合同会教坏格式）；
+/// MarkdownArtifact 为设计要求的显式合同族入口（方案因素三「仅对 Markdown
+/// author invocation 调同一装配」），由 f60_exit_contract_matrix 测试锁定两侧行为，
+/// 后续 Markdown 直发调用方接入时不得绕过。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanAuthorOutputContract {
+    Structured,
+    #[allow(dead_code)]
+    MarkdownArtifact,
+}
+
 pub(crate) struct ArtifactRetryContext {
     pub(crate) provider: Arc<dyn StreamingProviderAdapter>,
     pub(crate) input: StreamingProviderInput,

@@ -6,7 +6,8 @@ impl WorkspaceEngine {
     /// 且 add-monorepo 分支已参数化，避免触碰）。
     ///
     /// `_resumed_session` 为后续启用 compact_history 预留：届时仅 fresh 会话注入压缩历史。
-    /// 本期无论 fresh 或 resume，Design 均注入相同的结构输出契约。
+    /// F-60 P0：输出契约由 build_revision_input_with_resume 出口统一装配（见 revision.rs），
+    /// 本函数只负责修订指令与材料本身。
     pub(crate) fn build_author_revision_prompt(
         &self,
         feedback: &str,
@@ -46,8 +47,11 @@ impl WorkspaceEngine {
 
         if is_design {
             self.append_missing_context_notes_to_prompt(&mut prompt);
-            self.append_workspace_author_artifact_contract(&mut prompt, true);
         }
+        // F-60 P0（因素三）：输出契约（含 fence/schema/决策归档/负面清单/骨架）
+        // 不再由本分支 Design-only 追加——Story/Design/WorkItem/WorkItemPlan 的
+        // 用户反馈修订统一由 build_revision_input_with_resume 出口装配到末端，
+        // 补齐 F-60 确认缺口 2（此前仅 Design 有契约）。
 
         prompt
     }

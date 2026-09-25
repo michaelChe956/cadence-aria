@@ -1,4 +1,5 @@
 use super::*;
+use crate::product::workspace_engine::PlanAuthorOutputContract;
 
 pub(super) fn work_item_plan_findings_feedback(findings: &[WorkItemSplitFinding]) -> String {
     findings
@@ -177,6 +178,7 @@ macro_rules! workspace_ws_work_item_plan_revision_arm {
                     invocation.prompt.clone(),
                     invocation.worktree_path.clone(),
                     invocation.author_provider.clone(),
+                    PlanAuthorOutputContract::Structured,
                 ) {
                     Ok(provider_input) => provider_input,
                     Err(message) => {
@@ -366,6 +368,7 @@ macro_rules! workspace_ws_work_item_plan_revision_arm {
                                     invocation.prompt.clone(),
                                     invocation.worktree_path.clone(),
                                     invocation.author_provider.clone(),
+                                    PlanAuthorOutputContract::Structured,
                                 ) {
                                 Ok(provider_input) => provider_input,
                                 Err(message) => {
@@ -789,6 +792,7 @@ pub(crate) async fn drive_current_work_item_plan_outline_run(
             invocation.prompt.clone(),
             invocation.worktree_path.clone(),
             invocation.author_provider.clone(),
+            PlanAuthorOutputContract::Structured,
         )?;
         let provider_input = engine.attach_tool_policy_audit(provider_input);
         let provider_session = start_work_item_plan_author(

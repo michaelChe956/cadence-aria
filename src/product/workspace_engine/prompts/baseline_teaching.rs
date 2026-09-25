@@ -207,6 +207,7 @@ mod author_baseline_tests {
     use super::baseline_teaching_fixture::baseline_engine;
     use crate::product::models::{ProviderName, WorkspaceType};
     use crate::product::workspace_engine::types::AuthorPromptMode;
+    use crate::product::workspace_engine::types::PlanAuthorOutputContract;
 
     /// REQ-PIB-02 场景 4（软限制注入）：native（ClaudeCode）会话正常构造（不
     /// 拒启），prompt 含基线教学块，input 携带基线锚点——story/design 与 plan
@@ -247,6 +248,7 @@ mod author_baseline_tests {
                 "plan prompt".to_string(),
                 "/tmp/worktree".to_string(),
                 ProviderName::ClaudeCode,
+                PlanAuthorOutputContract::Structured,
             )
             .expect("native plan baseline session must start");
         assert!(
@@ -275,6 +277,7 @@ mod author_baseline_tests {
                 "plan prompt".to_string(),
                 "/tmp/worktree".to_string(),
                 ProviderName::ClaudeCode,
+                PlanAuthorOutputContract::Structured,
             )
             .expect_err("plan family must fail closed too");
         assert!(plan_error.contains("基准分支不存在"), "{plan_error}");

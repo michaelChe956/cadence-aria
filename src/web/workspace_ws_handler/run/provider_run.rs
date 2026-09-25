@@ -1,4 +1,5 @@
 use super::*;
+use crate::product::workspace_engine::PlanAuthorOutputContract;
 
 pub(crate) async fn spawn_provider_run_from_event(
     run_context: ProviderRunContext,
@@ -381,6 +382,7 @@ pub(crate) async fn spawn_provider_run_from_handler(
                         invocation.prompt.clone(),
                         invocation.worktree_path.clone(),
                         invocation.author_provider.clone(),
+                        PlanAuthorOutputContract::Structured,
                     )
                 } else {
                     engine.build_work_item_plan_streaming_input(
@@ -388,6 +390,7 @@ pub(crate) async fn spawn_provider_run_from_handler(
                         invocation.prompt.clone(),
                         invocation.worktree_path.clone(),
                         invocation.author_provider.clone(),
+                        PlanAuthorOutputContract::Structured,
                     )
                 };
                 // REQ-PIB-02（T2.3）：基线不可解析 → 终止本轮 run（可观测错误出站）。
@@ -562,6 +565,7 @@ pub(crate) async fn spawn_provider_run_from_handler(
                                 invocation.prompt.clone(),
                                 invocation.worktree_path.clone(),
                                 invocation.author_provider.clone(),
+                                PlanAuthorOutputContract::Structured,
                             );
                             // REQ-PIB-02（T2.3）：基线不可解析 → 终止本轮 run。
                             let provider_input = match provider_input {
@@ -1035,6 +1039,7 @@ pub(crate) async fn spawn_provider_run_from_handler(
                     prompt.clone(),
                     worktree_path.to_string_lossy().to_string(),
                     author_provider.clone(),
+                    PlanAuthorOutputContract::Structured,
                 ) {
                     Ok(provider_input) => provider_input,
                     Err(message) => {

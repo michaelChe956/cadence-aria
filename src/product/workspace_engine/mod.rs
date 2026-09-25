@@ -184,10 +184,10 @@ pub(crate) use single_candidate::{
 pub(crate) use types::WorkItemDraftAuthorOutcome;
 pub(crate) use types::{
     ArtifactRetryContext, AuthorPromptMode, HttpConfirmDisposition, OutlineRevisionCrashPoint,
-    OutlineRevisionPersistencePolicy, PendingAuthorChoice, PlanRepairCrashPoint, ProviderRunKind,
-    ProviderSessionDriveInput, ReviewProviderRunResult, RevisionResumeFallbackContext,
-    StructuredOutputDisplayFilter, TimelineNodeDraft, WorkItemPlanCompileProjectionContext,
-    WorkItemPlanOutlineRevisionSource,
+    OutlineRevisionPersistencePolicy, PendingAuthorChoice, PlanAuthorOutputContract,
+    PlanRepairCrashPoint, ProviderRunKind, ProviderSessionDriveInput, ReviewProviderRunResult,
+    RevisionResumeFallbackContext, StructuredOutputDisplayFilter, TimelineNodeDraft,
+    WorkItemPlanCompileProjectionContext, WorkItemPlanOutlineRevisionSource,
 };
 
 const SUMMARY_PREVIEW_CHARS: usize = 2048;

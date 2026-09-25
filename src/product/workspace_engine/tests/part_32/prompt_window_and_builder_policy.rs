@@ -413,6 +413,7 @@ fn entry_input(entry: &str) -> StreamingProviderInput {
                     "work item plan prompt".to_string(),
                     checkpoint_tmp.path().to_string_lossy().to_string(),
                     ProviderName::ClaudeCode,
+                    PlanAuthorOutputContract::Structured,
                 )
                 .expect("plan input")
         }
@@ -726,6 +727,7 @@ async fn workspace_builder_family_pairs_role_with_tool_policy() {
                     "plan prompt".to_string(),
                     worktree.clone(),
                     ProviderName::ClaudeCode,
+                    PlanAuthorOutputContract::Structured,
                 )
                 .expect("plan input"),
         ));
@@ -737,6 +739,7 @@ async fn workspace_builder_family_pairs_role_with_tool_policy() {
                     "plan prompt".to_string(),
                     worktree.clone(),
                     ProviderName::ClaudeCode,
+                    PlanAuthorOutputContract::Structured,
                 )
                 .expect("plan input"),
         ));
@@ -749,6 +752,7 @@ async fn workspace_builder_family_pairs_role_with_tool_policy() {
                     worktree,
                     ProviderName::ClaudeCode,
                     None,
+                    PlanAuthorOutputContract::Structured,
                 )
                 .expect("plan input"),
         ));

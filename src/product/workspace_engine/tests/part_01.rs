@@ -363,7 +363,7 @@ fn pending_author_choice() -> PendingAuthorChoice {
 }
 
 #[tokio::test]
-async fn story_author_choice_followup_prompt_includes_full_output_contract() {
+async fn story_author_choice_followup_prompt_includes_output_contract_short_reference() {
     let (event_tx, _event_rx) = mpsc::channel(8);
     let checkpoint_tmp = TempDir::new().unwrap();
     let mut engine = WorkspaceEngine::new(
@@ -373,41 +373,61 @@ async fn story_author_choice_followup_prompt_includes_full_output_contract() {
     );
     engine.pending_author_choice = Some(pending_author_choice());
 
-    let prompt = engine
+    let content = engine
         .take_pending_author_choice_prompt(
             "author_choice_prompt_001",
             vec!["json".to_string()],
             Some("保持可读性".to_string()),
         )
         .await
-        .expect("Story choice followup prompt");
+        .expect("Story choice followup content");
 
-    // 应答内容保持原样（问题/选择/补充与继续生成指令不丢）。
+    // 应答内容保持原样（问题/选择/补充与继续生成指令不丢）；F-60 P0 后 choice
+    // 点只产问答内容，不再自行拼契约（避免契约文本进入 session 历史）。
     assert!(
-        prompt.contains("用户回答了 author 的确认问题：\n问题：输出格式？\n选择：\n- JSON\n补充：保持可读性"),
+        content.contains("用户回答了 author 的确认问题：\n问题：输出格式？\n选择：\n- JSON\n补充：保持可读性"),
+        "{content}"
+    );
+    assert!(
+        content.contains("请基于该回答继续生成完整候选产物"),
+        "{content}"
+    );
+    assert!(!content.contains("[artifact_schema_contract]"), "{content}");
+
+    // F-60 P0（防线 2 语义保留 + 用户裁决 2026-09-26 分层）：续跑 delta 经
+    // build_streaming_input 出口以一行短引用收尾——点名全部必需 heading 与
+    // [REQ-*]/[AC-*]/source id 关键追踪 token，指向会话开头完整合同。
+    let prompt = engine
+        .build_streaming_input(content.trim(), AuthorPromptMode::DeltaOnly)
+        .expect("Story choice followup streaming input")
+        .prompt;
+    assert!(
+        prompt.starts_with("用户回答了 author 的确认问题："),
         "{prompt}"
     );
     assert!(
-        prompt.contains("请基于该回答继续生成完整候选产物"),
+        prompt.contains("输出格式契约（本轮简引"),
         "{prompt}"
     );
-    // F-60 防线 2：续跑 prompt 带与初次生成同源的完整输出格式契约
-    //（artifact fence 规则 + parser schema + 结构化交互决策契约 + 负面清单 + 骨架）。
     assert!(
-        prompt.contains("原始返回必须使用完整 artifact fenced block"),
+        prompt.contains("完整 artifact fenced block"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("fence 内第一行是 Story Spec 一级标题"),
         "{prompt}"
     );
     assert!(prompt.contains("四反引号 ````artifact"), "{prompt}");
     assert!(prompt.contains("[artifact_schema_contract]"), "{prompt}");
-    assert!(
-        prompt.contains("`[REQ-*]`（例如 `[REQ-001]`）"),
-        "{prompt}"
-    );
-    assert!(prompt.contains("`## 待确认项`"), "{prompt}");
-    assert!(prompt.contains("author-decision-*"), "{prompt}");
-    assert!(prompt.contains("输出纪律（负面清单）"), "{prompt}");
-    assert!(prompt.contains("# Story Spec 标题"), "{prompt}");
+    assert!(prompt.contains("`[REQ-*]`"), "{prompt}");
+    assert!(prompt.contains("`[AC-*]`"), "{prompt}");
+    assert!(prompt.contains("source id"), "{prompt}");
+    assert!(prompt.contains("## 待确认项"), "{prompt}");
     assert!(prompt.contains("## 成功标准"), "{prompt}");
+    assert!(prompt.contains("author-decision-*"), "{prompt}");
+    // 分层：后续轮不重复全文（完整装配独有块不得出现）。
+    assert!(!prompt.contains("输出纪律（负面清单）"), "{prompt}");
+    assert!(!prompt.contains("最小结构骨架示例"), "{prompt}");
 }
 
 #[tokio::test]
@@ -423,26 +443,37 @@ async fn design_author_choice_followup_prompt_includes_output_contract_and_decis
     );
     engine.pending_author_choice = Some(pending_author_choice());
 
-    let prompt = engine
+    let content = engine
         .take_pending_author_choice_prompt(
             "author_choice_prompt_001",
             vec!["json".to_string()],
             None,
         )
         .await
-        .expect("Design choice followup prompt");
+        .expect("Design choice followup content");
+    assert!(!content.contains("[artifact_schema_contract]"), "{content}");
 
+    let prompt = engine
+        .build_streaming_input(content.trim(), AuthorPromptMode::DeltaOnly)
+        .expect("Design choice followup streaming input")
+        .prompt;
     assert!(
-        prompt.contains("原始返回必须使用完整 artifact fenced block"),
+        prompt.contains("输出格式契约（本轮简引"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("fence 内第一行是 Design Spec 一级标题"),
         "{prompt}"
     );
     assert!(prompt.contains("四反引号 ````artifact"), "{prompt}");
-    assert!(prompt.contains("# Design Spec 标题"), "{prompt}");
     assert!(prompt.contains("## 设计决策"), "{prompt}");
     assert!(prompt.contains("## 追踪关系"), "{prompt}");
     assert!(prompt.contains("author-decision-*"), "{prompt}");
-    assert!(prompt.contains("[DEC-*]"), "{prompt}");
+    assert!(prompt.contains("`[DEC-*]`"), "{prompt}");
+    assert!(prompt.contains("source id"), "{prompt}");
+    assert!(!prompt.contains("最小结构骨架示例"), "{prompt}");
 }
+
 
 #[derive(Default)]
 struct SessionRecordingProvider {
@@ -589,9 +620,10 @@ async fn author_choice_followup_resumes_author_provider_session() {
         inputs[1].resume_provider_session_id.as_deref(),
         Some("provider-author-session-1")
     );
-    // normalize_generation_prompt 在转发前 trim；契约块（F-60 防线 2）尾部
-    // 含换行，逐字节断言以 trim 后文本为准（delta 直通语义不变）。
-    assert_eq!(inputs[1].prompt, prompt.trim());
+    // normalize_generation_prompt 在转发前 trim；出口装配的契约块（F-60 P0）
+    // 追加在 delta 内容之后——直通语义以「内容逐字节开头 + 末端契约在场」断言。
+    assert!(inputs[1].prompt.starts_with(prompt.trim()));
+    assert!(inputs[1].prompt.contains("[artifact_schema_contract]"));
     assert!(
         inputs[1]
             .prompt

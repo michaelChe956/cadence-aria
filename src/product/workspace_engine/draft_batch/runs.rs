@@ -1,4 +1,5 @@
 use super::*;
+use crate::product::workspace_engine::PlanAuthorOutputContract;
 
 impl WorkspaceEngine {
     pub(crate) fn current_work_item_draft_candidate_payload(
@@ -135,6 +136,7 @@ impl WorkspaceEngine {
             invocation.prompt,
             working_dir.to_string_lossy().to_string(),
             self.session.author_provider.clone(),
+            PlanAuthorOutputContract::Structured,
         )
     }
 
@@ -190,6 +192,7 @@ impl WorkspaceEngine {
             invocation.prompt,
             working_dir.to_string_lossy().to_string(),
             self.session.author_provider.clone(),
+            PlanAuthorOutputContract::Structured,
         )
     }
 

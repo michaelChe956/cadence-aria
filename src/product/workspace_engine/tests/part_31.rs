@@ -288,17 +288,22 @@ fn story_schema_contract_exposes_open_item_resolution_protocol() {
     );
 }
 
+/// F-46 回归 + F-60 P0：retry 与 reviewer delta/full 修订的 StreamingProviderInput
+/// 末端都渲染 parser 派生 schema（经 build_revision_input_with_resume 出口装配，
+/// 不再直查 builder 字符串）。
 #[test]
 fn retry_and_revision_prompts_render_parser_derived_schema() {
-    let review = ReviewVerdict {
-        verdict: ReviewVerdictType::Revise,
-        comments: "请补全结构。".to_string(),
-        summary: "缺少 artifact schema".to_string(),
-        findings: Vec::new(),
-        review_gate: ReviewGate::RequiresRevision,
-        work_item_plan_review: None,
-        structured_output_diagnostic: None,
-    };
+    fn schema_revise_verdict() -> ReviewVerdict {
+        ReviewVerdict {
+            verdict: ReviewVerdictType::Revise,
+            comments: "请补全结构。".to_string(),
+            summary: "缺少 artifact schema".to_string(),
+            findings: Vec::new(),
+            review_gate: ReviewGate::RequiresRevision,
+            work_item_plan_review: None,
+            structured_output_diagnostic: None,
+        }
+    }
 
     for workspace_type in [
         WorkspaceType::Story,
@@ -306,12 +311,38 @@ fn retry_and_revision_prompts_render_parser_derived_schema() {
         WorkspaceType::WorkItem,
         WorkspaceType::WorkItemPlan,
     ] {
+        let spec = artifact_constraint_spec_for(&workspace_type);
+
+        // delta：有 author provider 会话 → resume 增量返修。
         let (_tmp, store) = setup();
         let (event_tx, _event_rx) = mpsc::channel(8);
-        let mut session = make_session(&format!("sess_schema_revision_{workspace_type:?}"));
+        let mut session = make_session(&format!("sess_schema_revision_delta_{workspace_type:?}"));
         session.workspace_type = workspace_type.clone();
-        let engine = WorkspaceEngine::new(store, event_tx, session);
-        let spec = artifact_constraint_spec_for(&workspace_type);
+        session.provider_conversations = vec![ProviderConversationRef {
+            role: ProviderConversationRole::Author,
+            provider: ProviderName::ClaudeCode,
+            provider_session_id: "author-session-1".to_string(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            last_node_id: None,
+        }];
+        let mut engine = WorkspaceEngine::new(store, event_tx, session);
+        engine.latest_review_verdict = Some(schema_revise_verdict());
+        let delta_prompt = engine
+            .build_revision_input()
+            .expect("delta revision input")
+            .prompt;
+
+        // full：无 author provider 会话 → fresh 全量返修。
+        let (_tmp, store) = setup();
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let mut session = make_session(&format!("sess_schema_revision_full_{workspace_type:?}"));
+        session.workspace_type = workspace_type.clone();
+        let mut engine = WorkspaceEngine::new(store, event_tx, session);
+        engine.latest_review_verdict = Some(schema_revise_verdict());
+        let full_prompt = engine
+            .build_revision_input()
+            .expect("full revision input")
+            .prompt;
 
         for (kind, prompt) in [
             (
@@ -322,18 +353,8 @@ fn retry_and_revision_prompts_render_parser_derived_schema() {
                     &["缺少 heading".to_string()],
                 ),
             ),
-            (
-                "delta revision",
-                engine.build_revision_delta_prompt(&review, &RoutingReferenceContext::Legacy),
-            ),
-            (
-                "full revision",
-                engine.build_revision_full_prompt(
-                    "# 上一版 artifact",
-                    &review,
-                    &RoutingReferenceContext::Legacy,
-                ),
-            ),
+            ("delta revision", delta_prompt),
+            ("full revision", full_prompt),
         ] {
             assert!(
                 prompt.contains("[artifact_schema_contract]"),
@@ -351,6 +372,8 @@ fn retry_and_revision_prompts_render_parser_derived_schema() {
                     "{workspace_type:?} {kind} prompt must include parser label `{label}`: {prompt}"
                 );
             }
+            // F-60 P0 分层：骨架仅 retry 与 fresh full revision 携带；delta 轮
+            // 出口为短引用（无骨架、无负面清单，见 f60_exit_contract_matrix）。
             if matches!(kind, "retry" | "full revision") {
                 assert!(
                     prompt.contains("最小结构骨架示例"),
@@ -374,8 +397,12 @@ fn retry_and_revision_prompts_render_parser_derived_schema() {
     }
 }
 
+/// F-60 P0（因素三）：full revision 的末端最后可信合同必须始终是当前类型的完整
+/// 渲染——历史 system 消息携带旧 marker 不再省略 schema。原「marker 只出现一次」
+/// 断言按方案改造为「末端最新合同正确」，避免修复被旧测试误拦；路由引用的
+/// 去重语义保持不变。
 #[test]
-fn full_revision_prompt_does_not_repeat_schema_from_generation_context() {
+fn full_revision_prompt_terminal_contract_stays_current_despite_stale_generation_context_marker() {
     let review = ReviewVerdict {
         verdict: ReviewVerdictType::Revise,
         comments: "请补全结构。".to_string(),
@@ -393,7 +420,7 @@ fn full_revision_prompt_does_not_repeat_schema_from_generation_context() {
         id: "msg_generation_context".to_string(),
         role: "system".to_string(),
         content: format!(
-            "[workflow_discipline]\n{}\n[output_schema]\n[artifact_schema_contract]\n来自正常 generation brief 的合同。",
+            "[workflow_discipline]\n{}\n[output_schema]\n[artifact_schema_contract]\n来自正常 generation brief 的旧合同（不含当前 gate 全条款）。",
             crate::product::cadence_skills::routing_reference::direct_cadence_routing_rules_reference(
                 &crate::product::cadence_skills::routing_reference::RoutingReferenceContext::Legacy
             )
@@ -401,19 +428,29 @@ fn full_revision_prompt_does_not_repeat_schema_from_generation_context() {
         checkpoint_id: None,
         created_at: "2026-07-23T00:00:00Z".to_string(),
     });
-    let engine = WorkspaceEngine::new(store, event_tx, session);
+    let mut engine = WorkspaceEngine::new(store, event_tx, session);
+    engine.latest_review_verdict = Some(review);
 
-    let prompt = engine.build_revision_full_prompt(
-        "# 上一版 artifact",
-        &review,
-        &RoutingReferenceContext::Legacy,
-    );
+    let prompt = engine
+        .build_revision_input()
+        .expect("full revision input")
+        .prompt;
 
-    assert_eq!(
-        prompt.matches("[artifact_schema_contract]").count(),
-        1,
-        "full revision must reuse, not repeat, the schema already present in generation context: {prompt}"
+    // 末端最新合同正确：最后一个 marker 之后逐字节是当前类型的同源完整渲染。
+    let schema = author_artifact_schema_contract_for(&WorkspaceType::Story)
+        .expect("Story schema contract");
+    let expected_schema = schema.trim_start_matches('\n');
+    let tail = &prompt[prompt.rfind("[artifact_schema_contract]").expect("marker")..];
+    assert!(
+        tail.starts_with(expected_schema),
+        "terminal contract must be the current full render: {prompt}"
     );
+    // 历史 marker 保留（≥2），但不得抑制末端合同。
+    assert!(
+        prompt.matches("[artifact_schema_contract]").count() >= 2,
+        "stale generation-context marker must not suppress the terminal contract: {prompt}"
+    );
+    // 路由引用去重语义不变：直接引用仍只出现一次。
     assert_eq!(
         prompt.matches("[cadence_project_rules]").count(),
         1,

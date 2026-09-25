@@ -233,6 +233,7 @@ fn build_work_item_plan_streaming_input_uses_splitter_role() {
             "split prompt".to_string(),
             "/tmp/worktree".to_string(),
             ProviderName::Fake,
+            PlanAuthorOutputContract::Structured,
         )
         .expect("plan input");
 
@@ -267,6 +268,7 @@ fn build_work_item_plan_streaming_input_reuses_author_provider_session() {
             "split prompt".to_string(),
             "/tmp/worktree".to_string(),
             ProviderName::ClaudeCode,
+            PlanAuthorOutputContract::Structured,
         )
         .expect("plan input");
 
@@ -297,6 +299,7 @@ fn build_work_item_plan_streaming_input_fresh_never_resumes_old_author_session()
             "split prompt".to_string(),
             "/tmp/worktree".to_string(),
             ProviderName::ClaudeCode,
+            PlanAuthorOutputContract::Structured,
         )
         .expect("plan input");
     assert_eq!(
@@ -312,6 +315,7 @@ fn build_work_item_plan_streaming_input_fresh_never_resumes_old_author_session()
             "split prompt".to_string(),
             "/tmp/worktree".to_string(),
             ProviderName::ClaudeCode,
+            PlanAuthorOutputContract::Structured,
         )
         .expect("plan input");
     assert_eq!(

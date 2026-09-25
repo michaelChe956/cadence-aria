@@ -77,7 +77,9 @@ async fn revision_input_uses_persisted_codex_author_session_when_engine_session_
     assert!(!input.prompt.contains("会话上下文:"));
     assert!(!input.prompt.contains("[system]:"));
     assert!(!input.prompt.contains("上一版 Artifact"));
-    assert!(!input.prompt.contains("# Story Spec"));
+    // F-60 P0：delta 出口装配含骨架示例（`# Story Spec 标题`），旧产物 H1
+    //（`# Story Spec` + 换行）仍不得回放。
+    assert!(!input.prompt.contains("# Story Spec\n"));
 }
 
 #[tokio::test]
@@ -165,9 +167,10 @@ async fn revision_with_existing_author_provider_session_uses_delta_prompt() {
     assert!(input.prompt.contains("如二者冲突，以用户补充信息为准"));
     assert!(input.prompt.contains("输出完整更新后的 artifact markdown"));
     assert!(!input.prompt.contains("会话上下文:"));
-    assert!(!input.prompt.contains("[system]:"));
+    // F-60 P0：delta 出口装配含骨架示例（`# Story Spec 标题`），旧产物 H1
+    //（`# Story Spec` + 换行）仍不得回放。
+    assert!(!input.prompt.contains("# Story Spec\n"));
     assert!(!input.prompt.contains("上一版 Artifact"));
-    assert!(!input.prompt.contains("# Story Spec"));
 }
 
 #[tokio::test]
@@ -209,8 +212,9 @@ async fn revision_prompt_requires_structured_interaction_decisions_in_artifact()
 
     let input = engine.build_revision_input().expect("revision input");
 
-    assert!(input.prompt.contains("结构化交互"));
-    assert!(input.prompt.contains("用户确认决策"));
+    // F-60 P0 分层：resume delta 轮出口为短引用——决策归档以指针形式在场
+    //（author-decision-*），完整决策契约见会话开头合同。
+    assert!(input.prompt.contains("决策归档"));
     assert!(input.prompt.contains("author-decision"));
     assert!(input.prompt.contains("[REQ-"));
     assert!(input.prompt.contains("[AC-"));

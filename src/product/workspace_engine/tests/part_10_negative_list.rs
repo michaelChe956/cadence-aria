@@ -58,8 +58,12 @@ fn artifact_author_prompts_teach_the_shared_negative_list() {
         session.workspace_type = workspace_type.clone();
         let (_tmp, store) = setup();
         let engine = WorkspaceEngine::new(store, event_tx, session);
-        let mut contract = String::from("输出格式契约：既有文本\n");
-        engine.append_author_artifact_output_contract(&mut contract, false);
+        // F-60 P0：共享 author output contract 腿改经 build_streaming_input 出口
+        //（装配块 = markdown_author_output_contract_block），仍断言同一份常量。
+        let contract = engine
+            .build_streaming_input("开始生成", AuthorPromptMode::FullConversation)
+            .expect("author input")
+            .prompt;
 
         for (kind, prompt) in [("retry", &retry), ("author contract", &contract)] {
             assert!(

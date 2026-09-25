@@ -42,7 +42,8 @@ impl WorkspaceEngine {
         // spec-design-dialog-revision T4：author 反馈修订路径（pending_revision_context 存在且无 review
         // verdict）走专用增量修订 prompt，reviewer 返修路径维持既有 delta/full 分流。
         // T5/M-1：谓词提取为共享 helper is_author_feedback_revision（decisions.rs），与 provider_drive.rs 同语义。
-        let mut prompt = if self.is_author_feedback_revision() {
+        let is_author_feedback = self.is_author_feedback_revision();
+        let mut prompt = if is_author_feedback {
             let feedback = self.pending_revision_context.as_deref().unwrap_or_default();
             self.build_author_revision_prompt(feedback, resume_provider_session_id.is_some())
         } else {
@@ -59,6 +60,16 @@ impl WorkspaceEngine {
         // 基线解析链 fail-closed + 基线教学注入 + 锚点透传（修订产物同样须以
         // 基线树为「既有事实」来源）。
         let baseline_tree = self.append_author_baseline_teaching(&mut prompt)?;
+        // F-60 P0（因素三 + 用户裁决 2026-09-26 分层合同注入）：用户反馈／reviewer
+        // delta／full／Codex fresh 全部经本出口，末端最后可信合同无条件在位（不因
+        // 历史 marker 省略）。分层：resume 增量轮 = 一行短引用（会话里已有初次完整
+        // 合同）；fresh 轮（无 resume id，含 Codex resume-stall fresh）= 完整装配——
+        // fresh provider 会话无会话内记忆，prompt 必须自足（方案因素一）。
+        prompt.push_str(&markdown_author_output_contract_for_round(
+            &self.session.workspace_type,
+            resume_provider_session_id.is_some(),
+            resume_provider_session_id.is_none(),
+        ));
         Ok(StreamingProviderInput {
             baseline_tree,
             tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
@@ -106,7 +117,8 @@ impl WorkspaceEngine {
             prompt.push_str("\n\n用户补充信息优先级高于 Reviewer 审核意见；如二者冲突，以用户补充信息为准，并在更新后的 artifact 中体现用户补充要求。\n用户补充信息:\n");
             prompt.push_str(context);
         }
-        self.append_author_artifact_output_contract(&mut prompt, false);
+        // F-60 P0（因素三）：输出契约不再由业务分支追加——由
+        // build_revision_input_with_resume 出口统一装配到 prompt 末端。
         prompt.push_str("\n\n请根据以上审核意见修改产物，输出完整更新后的 artifact markdown。\n");
         prompt
     }
@@ -153,10 +165,8 @@ impl WorkspaceEngine {
             prompt.push_str("\n\n用户补充信息优先级高于 Reviewer 审核意见；如二者冲突，以用户补充信息为准，并在更新后的 artifact 中体现用户补充要求。\n用户补充信息:\n");
             prompt.push_str(context);
         }
-        self.append_author_artifact_output_contract(&mut prompt, true);
-        prompt.push_str(super::author_artifact_skeleton_example(
-            &self.session.workspace_type,
-        ));
+        // F-60 P0（因素三）：输出契约与骨架不再由业务分支追加——由
+        // build_revision_input_with_resume 出口统一装配到 prompt 末端。
         prompt.push_str("\n\n请根据以上审核意见修改产物，输出完整更新后的 artifact markdown。\n");
         prompt
     }

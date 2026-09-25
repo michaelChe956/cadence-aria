@@ -112,6 +112,22 @@ pub(crate) const AUTHOR_ARTIFACT_NEGATIVE_LIST: &str = "\
 - prompt 中的骨架/示例只是结构说明，不得作为最终候选回显；最终 fence 内第一行必须是当前工作类型的一级标题。
 ";
 
+/// F-60 P0（用户裁决 2026-09-26，分层合同注入）：Story/Design markdown author 族
+///（WorkItem/WorkItemPlan 同构）的 prompt 质量预算——无历史、无基线注入夹具下
+/// 「初次生成完整合同装配后」prompt 的字节上限，参照 plan 链
+/// `WORK_ITEM_PLAN_MARKDOWN_PROMPT_MAX_BYTES` 预算先例。
+/// 分层后实测（2026-09-26，empty-session 夹具）：Story 3,583 B / Design 3,076 B
+///（runtime contract + 完整合同 + 决策归档 + 负面清单 + 骨架）；会话历史与基线
+/// 教学注入不计入本预算（由既有滑动窗口/基线预算约束）。
+#[cfg(test)]
+pub(crate) const MARKDOWN_AUTHOR_PROMPT_MAX_BYTES: usize = 6_000;
+
+/// F-60 P0 分层短引用（后续轮：choice 续跑 delta／resume 增量修订）字节上限。
+/// 分层后实测（2026-09-26）：Story 659 B / Design 713 B / WorkItem 587 B /
+/// WorkItemPlan 645 B（对照完整装配块 1-3KB，后续轮每轮省 ~80%）。
+#[cfg(test)]
+pub(crate) const MARKDOWN_AUTHOR_DELTA_REFERENCE_MAX_BYTES: usize = 1_200;
+
 pub(crate) fn build_artifact_retry_prompt(
     workspace_type: &WorkspaceType,
     previous_output: &str,
@@ -297,6 +313,18 @@ impl WorkspaceEngine {
         // 教学注入（provider 无关——host 通道另有硬边界，见 baseline_teaching_block）。
         let baseline_tree = self.append_author_baseline_teaching(&mut prompt)?;
 
+        // F-60 P0（因素三 + 用户裁决 2026-09-26 分层合同注入）：契约出口强制
+        // 注入——Full/Delta 两模式发出 prompt 前，末端最后可信合同块无条件在位，
+        // 不因历史消息或 delta 原文中出现旧 marker 而省略。分层：初次生成
+        //（FullConversation）= 完整装配；后续轮（DeltaOnly 续跑）= 一行短引用
+        //（点名全部必需 heading 与关键追踪 token，指向会话开头完整合同），
+        // 避免 1-3KB 全合同 ×N 轮膨胀上下文。
+        prompt.push_str(&markdown_author_output_contract_for_round(
+            &self.session.workspace_type,
+            matches!(prompt_mode, AuthorPromptMode::DeltaOnly),
+            false,
+        ));
+
         Ok(StreamingProviderInput {
             baseline_tree,
             tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
@@ -340,6 +368,7 @@ impl WorkspaceEngine {
         prompt: String,
         worktree_path: String,
         author_provider: ProviderName,
+        contract_family: PlanAuthorOutputContract,
     ) -> Result<StreamingProviderInput, String> {
         let resume_provider_session_id =
             self.provider_resume_session_id(ProviderConversationRole::Author, &author_provider);
@@ -349,6 +378,7 @@ impl WorkspaceEngine {
             worktree_path,
             author_provider,
             resume_provider_session_id,
+            contract_family,
         )
     }
 
@@ -362,6 +392,7 @@ impl WorkspaceEngine {
         prompt: String,
         worktree_path: String,
         author_provider: ProviderName,
+        contract_family: PlanAuthorOutputContract,
     ) -> Result<StreamingProviderInput, String> {
         self.build_work_item_plan_streaming_input_with_session(
             provider_type,
@@ -369,6 +400,7 @@ impl WorkspaceEngine {
             worktree_path,
             author_provider,
             None,
+            contract_family,
         )
     }
 
@@ -379,10 +411,20 @@ impl WorkspaceEngine {
         worktree_path: String,
         author_provider: ProviderName,
         resume_provider_session_id: Option<String>,
+        contract_family: PlanAuthorOutputContract,
     ) -> Result<StreamingProviderInput, String> {
         // REQ-PIB-02（T2.3）：基线解析 fail-closed（不可解析终止生成）+ 软限制
         // 教学注入（provider 无关，kimi 同注入冗余无害）。
         let baseline_tree = self.append_author_baseline_teaching(&mut prompt)?;
+        // F-60 P0（因素三）：仅对显式声明 Markdown artifact 的 author invocation
+        // 注入同一出口装配（WorkItemPlan gate 全条款）；JSON Outline／Split／
+        // Draft 与 SC compiler-source 保持 Structured，不误拼 Markdown 合同。
+        if matches!(contract_family, PlanAuthorOutputContract::MarkdownArtifact) {
+            prompt.push_str(&markdown_author_output_contract_block(
+                &WorkspaceType::WorkItemPlan,
+                false,
+            ));
+        }
         Ok(StreamingProviderInput {
             baseline_tree,
             tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
@@ -410,14 +452,9 @@ impl WorkspaceEngine {
             !self.has_direct_cadence_routing_rules_system_context(),
             &context,
         );
-        if !self.has_author_artifact_schema_system_context()
-            && let Some(schema) = author_artifact_schema_contract_for(&self.session.workspace_type)
-        {
-            prompt.push_str(&schema);
-        }
-        prompt.push_str(author_artifact_skeleton_example(
-            &self.session.workspace_type,
-        ));
+        // F-60 P0（因素三）：schema 契约与骨架不再在 build_prompt 顶部条件注入
+        //（旧逻辑遇 system marker 会整段省略）——由 build_streaming_input 出口
+        // 无条件装配到 prompt 末端，保证末端最后可信合同始终是当前类型全条款。
         let last_current_user_message_index =
             self.session.messages.len().checked_sub(1).filter(|index| {
                 let message = &self.session.messages[*index];
@@ -453,12 +490,6 @@ impl WorkspaceEngine {
             prompt.push_str(&format!("[user]: {user_content}\n"));
         }
         prompt
-    }
-
-    fn has_author_artifact_schema_system_context(&self) -> bool {
-        self.session.messages.iter().any(|message| {
-            message.role == "system" && message.content.contains(ARTIFACT_SCHEMA_CONTRACT_MARKER)
-        })
     }
 
     /// 会话 system 上下文是否已含路由引用段标记(`[cadence_project_rules]`)。
@@ -507,53 +538,92 @@ impl WorkspaceEngine {
             prompt.push_str(&format!("- {note}\n"));
         }
     }
+}
 
-    /// F-60 防线 2：delta-only 续跑路径（choice 应答续跑、design 增量修订）注入
-    /// 与初次生成同源的完整输出契约——artifact fence 规则 + parser schema +
-    /// 结构化交互决策契约 + 负面清单 + 当前工作类型的结构骨架。
-    pub(crate) fn append_workspace_author_artifact_contract(
-        &self,
-        prompt: &mut String,
-        mentions_prior_artifact: bool,
-    ) {
-        self.append_author_artifact_output_contract(prompt, mentions_prior_artifact);
-        prompt.push_str(author_artifact_skeleton_example(
-            &self.session.workspace_type,
-        ));
-    }
-
-    pub(crate) fn append_author_artifact_output_contract(
-        &self,
-        prompt: &mut String,
-        mentions_prior_artifact: bool,
-    ) {
-        prompt.push_str("\n\n输出格式契约：");
-        if mentions_prior_artifact {
-            prompt.push_str(
-                "上一版 Artifact 是 daemon 已提取的 markdown，外层 artifact fence 已被剥离；不要把上一版 Artifact 的裸 markdown 形态当作原始返回格式样例。",
-            );
-        } else {
-            prompt.push_str(
-                "当前 provider 会话中的既有 artifact 是 daemon 已提取的 markdown，外层 artifact fence 可能已被剥离；不要把裸 markdown 形态当作原始返回格式样例。",
-            );
-        }
-        prompt.push_str("原始返回必须使用完整 artifact fenced block，fence 内第一行必须是 ");
-        prompt.push_str(workspace_type_title(&self.session.workspace_type));
-        prompt.push_str(
-            " 一级标题。正文内部包含 ``` 代码块时，外层使用四反引号 ````artifact ... ````，避免和内部代码块冲突。\
-             过程说明必须放在 artifact fence 外，最终候选产物必须放在 artifact fence 内。",
+/// F-60 P0（因素三）：Markdown author 输出契约的唯一出口装配（完整形态）。
+///
+/// 以 [`artifact_constraint_spec_for`] 为唯一规则源（经
+/// [`author_artifact_schema_contract_for`] 渲染），同一装配合并：
+/// - fence／一级标题／内部代码块（四反引号）处理与旧稿裸 markdown 防误教；
+/// - 按类型 gate 正文（必需 heading／稳定 ID／追踪 token／禁止项）——**无条件**
+///   渲染当前类型全条款，不因 prompt 或历史中出现 `[artifact_schema_contract]`
+///   旧 marker 而省略；
+/// - choice 决策归档（`author-decision-*` 绑定）；
+/// - 负面清单（[`AUTHOR_ARTIFACT_NEGATIVE_LIST`]）与结构骨架。
+///
+/// 调用点是最终构造 [`StreamingProviderInput::prompt`] 的出口
+/// （`build_streaming_input` 覆盖初次 Full；`build_revision_input_with_resume`
+/// 覆盖 fresh 修订轮；计划流出口按显式合同族），各业务分支不再自行「记得追加」。
+/// 后续轮（DeltaOnly 续跑／resume 增量修订）走
+/// [`markdown_author_output_contract_short_reference`]（用户裁决 2026-09-26 分层）。
+pub(crate) fn markdown_author_output_contract_block(
+    workspace_type: &WorkspaceType,
+    mentions_prior_artifact: bool,
+) -> String {
+    let mut block = String::new();
+    block.push_str("\n\n输出格式契约：");
+    if mentions_prior_artifact {
+        block.push_str(
+            "上一版 Artifact 是 daemon 已提取的 markdown，外层 artifact fence 已被剥离；不要把上一版 Artifact 的裸 markdown 形态当作原始返回格式样例。",
         );
-        if !prompt.contains(ARTIFACT_SCHEMA_CONTRACT_MARKER)
-            && let Some(schema) = author_artifact_schema_contract_for(&self.session.workspace_type)
-        {
-            prompt.push_str(&schema);
-        }
-        prompt.push_str(structured_interaction_artifact_decision_contract(
-            &self.session.workspace_type,
-        ));
-        prompt.push_str("\n\n");
-        prompt.push_str(AUTHOR_ARTIFACT_NEGATIVE_LIST);
+    } else {
+        block.push_str(
+            "当前 provider 会话中的既有 artifact 是 daemon 已提取的 markdown，外层 artifact fence 可能已被剥离；不要把裸 markdown 形态当作原始返回格式样例。",
+        );
     }
+    block.push_str("原始返回必须使用完整 artifact fenced block，fence 内第一行必须是 ");
+    block.push_str(workspace_type_title(workspace_type));
+    block.push_str(
+        " 一级标题。正文内部包含 ``` 代码块时，外层使用四反引号 ````artifact ... ````，避免和内部代码块冲突。\
+         过程说明必须放在 artifact fence 外，最终候选产物必须放在 artifact fence 内。",
+    );
+    if let Some(schema) = author_artifact_schema_contract_for(workspace_type) {
+        block.push_str(&schema);
+    }
+    block.push_str(structured_interaction_artifact_decision_contract(
+        workspace_type,
+    ));
+    block.push_str("\n\n");
+    block.push_str(AUTHOR_ARTIFACT_NEGATIVE_LIST);
+    block.push_str(author_artifact_skeleton_example(workspace_type));
+    block
+}
+
+/// F-60 P0（用户裁决 2026-09-26，分层合同注入）：出口装配的轮次分发。
+///
+/// - 初次生成（FullConversation／fresh 修订轮／Markdown 直发）＝ 完整装配
+///   （现状语义不变）；
+/// - 后续轮（choice 续跑 delta／resume 增量修订返修）＝ 一行短引用——点名当前
+///   类型全部必需 heading 与关键追踪 token（[REQ-*]/[AC-*]/source id 按类型置换），
+///   指向会话开头的完整合同，不重复全文（实测全合同 1-3KB ×N 轮膨胀上下文）。
+///
+/// 短引用有效性由 P2 真实 provider 测量验证，不够再升级为完整装配。
+pub(crate) fn markdown_author_output_contract_for_round(
+    workspace_type: &WorkspaceType,
+    subsequent_round: bool,
+    mentions_prior_artifact: bool,
+) -> String {
+    if subsequent_round {
+        markdown_author_output_contract_short_reference(workspace_type)
+    } else {
+        markdown_author_output_contract_block(workspace_type, mentions_prior_artifact)
+    }
+}
+
+/// F-60 P0 分层短引用：条目来自 [`author_artifact_short_reference_items`]（同一
+/// `artifact_constraint_spec_for` 规则源），字节预算见
+/// [`MARKDOWN_AUTHOR_DELTA_REFERENCE_MAX_BYTES`]。
+pub(crate) fn markdown_author_output_contract_short_reference(
+    workspace_type: &WorkspaceType,
+) -> String {
+    format!(
+        "\n\n输出格式契约（本轮简引；完整合同见本会话开头的 [artifact_schema_contract]）：\
+         最终返回仍必须是完整 artifact fenced block，fence 内第一行是 {} 一级标题，\
+         正文内代码块用四反引号 ````artifact 外层 fence；{}——续写/返修不得丢失任一项；\
+         已确认的选择仍须按该完整合同记入决策归档（author-decision-*）。",
+        workspace_type_title(workspace_type),
+        author_artifact_short_reference_items(workspace_type),
+    )
 }
 
 fn author_artifact_skeleton_example(workspace_type: &WorkspaceType) -> &'static str {
