@@ -56,12 +56,17 @@ artifact 候选选择发生或失败时，系统 SHALL 在当前 timeline node �
 
 ### Requirement: 弱模型输出负面清单教学（REQ-ACS-03）
 
-Story/Design/Work Item/legacy Work Item Plan 的 author prompt（初次 output schema、共享 author output contract、非 kimi 的 artifact retry contract）SHALL 注入一致的负面清单教学：最终响应只生成一个顶层完整 artifact block；过程说明与思考必须在最终 fence 之外且不输出 `<thinking>` 标签；正文内代码块用四反引号外层；prompt 中的骨架/示例不得作为候选回显。该教学为预防层，SHALL NOT 改变 REQ-ACS-01 的 gate 判定语义。Work Item Plan 的 split JSON 流 SHALL NOT 注入该 Markdown 教学。
+Story/Design/Work Item/legacy Work Item Plan 的 author prompt（初次 brief 的 output schema、author 输出合同在最终构造 provider 输入时的出口统一装配、非 kimi 的 artifact retry contract）SHALL 注入一致的负面清单教学：最终响应只生成一个顶层完整 artifact block；过程说明与思考必须在最终 fence 之外且不输出 `<thinking>` 标签；正文内代码块用四反引号外层；prompt 中的骨架/示例不得作为候选回显。该教学为预防层，SHALL NOT 改变 REQ-ACS-01 的 gate 判定语义。Work Item Plan 的 split JSON 流 SHALL NOT 注入该 Markdown 教学。注入点枚举语义随 F-60 P0 出口统一而升级：原「共享 author output contract」的分散注入点收敛为 `StreamingProviderInput` 构造出口的统一装配，choice 回答续跑、用户反馈修订、reviewer 返修等增量路径经同一出口获得当前负面清单，不依赖各业务分支自行追加；聚合会话的 nonce sentinel block 不计入「一个顶层完整 artifact block」约束。
 
 #### Scenario: 负面清单覆盖初次与返修
 
 - **WHEN** 构建任一 workspace type 的 author 初次 prompt 或 revision/retry prompt
 - **THEN** 输出契约包含该负面清单，且各注入点文案语义一致、无第二套独立实现
+
+#### Scenario: 增量路径经出口统一装配获得负面清单
+
+- **WHEN** 构建 choice 回答续跑、AuthorConfirm 用户反馈修订或 reviewer 返修等增量 author prompt
+- **THEN** 该 prompt 末端的输出契约由 provider 输入构造出口统一装配注入，包含与初次 brief 语义一致的负面清单；出口统一后业务分支不再各自追加合同块，无第二套独立实现
 
 #### Scenario: split JSON 流不注入
 
