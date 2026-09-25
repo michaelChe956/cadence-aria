@@ -258,6 +258,7 @@ fn override_coder_to_claude_code(store: &CodingAttemptStore, attempt: &CodingExe
 
 fn streaming_input(working_dir: PathBuf, provider_type: ProviderType) -> StreamingProviderInput {
     StreamingProviderInput {
+        baseline_tree: None,
         tool_policy: None,
         audit_sink: None,
         provider_type,

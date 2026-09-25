@@ -229,6 +229,7 @@ impl WorkspaceEngine {
             &self.routing_reference_context(),
         ));
         Ok(StreamingProviderInput {
+            baseline_tree: None,
             tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
             audit_sink: None,
             provider_type: provider_type_for_name(&provider),
@@ -425,6 +426,7 @@ impl WorkspaceEngine {
             &self.routing_reference_context(),
         ));
         Ok(StreamingProviderInput {
+            baseline_tree: None,
             tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
             audit_sink: None,
             provider_type: provider_type_for_name(&provider),
@@ -647,6 +649,7 @@ impl WorkspaceEngine {
             .clone()
             .unwrap_or(ProviderName::Codex);
         Ok(StreamingProviderInput {
+            baseline_tree: None,
             tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
             audit_sink: None,
             provider_type: provider_type_for_name(&provider),
@@ -779,6 +782,7 @@ impl WorkspaceEngine {
             .clone()
             .unwrap_or(ProviderName::Codex);
         Ok(StreamingProviderInput {
+            baseline_tree: None,
             tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
             audit_sink: None,
             provider_type: provider_type_for_name(&provider),
@@ -955,6 +959,7 @@ impl WorkspaceEngine {
             &self.routing_reference_context(),
         ));
         Ok(StreamingProviderInput {
+            baseline_tree: None,
             tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
             audit_sink: None,
             provider_type: provider_type_for_name(&provider),
@@ -1029,6 +1034,7 @@ impl WorkspaceEngine {
             .or_else(|| std::env::current_dir().ok())
             .ok_or_else(|| "working directory unavailable".to_string())?;
         Ok(StreamingProviderInput {
+            baseline_tree: None,
             tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
             audit_sink: None,
             provider_type: provider_type_for_name(&provider),
@@ -1167,6 +1173,7 @@ impl WorkspaceEngine {
             &self.routing_reference_context(),
         ));
         Ok(StreamingProviderInput {
+            baseline_tree: None,
             tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
             audit_sink: None,
             provider_type: provider_type_for_name(&provider),

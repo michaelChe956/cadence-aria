@@ -56,6 +56,7 @@ impl WorkspaceEngine {
         };
 
         Ok(StreamingProviderInput {
+            baseline_tree: None,
             tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
             audit_sink: None,
             provider_type: provider_type_for_name(&provider),

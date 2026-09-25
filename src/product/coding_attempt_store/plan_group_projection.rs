@@ -114,8 +114,7 @@ impl super::CodingAttemptStore {
         validate_relative_id(project_id)?;
         validate_relative_id(issue_id)?;
         validate_relative_id(plan_id)?;
-        // 同 compute_issue_delivery_summary：先读 issue 确认存在，避免对不存在
-        // 的 issue 返回空投影。
+        // 同 compute_issue_delivery_summary：先读 issue 确认存在，避免对不存在的 issue 返回空投影。
         IssueStore::new(self.paths()).get(project_id, issue_id)?;
 
         let attempts = self.list_attempts_for_work_item_group(project_id, issue_id, plan_id)?;
@@ -304,8 +303,8 @@ mod tests {
                 title: "issue".to_string(),
                 description: None,
                 change_id: None,
-                           base_branch: None,
- })
+                base_branch: None,
+            })
             .unwrap();
         let store = CodingAttemptStore::new(paths);
         (tmp, store)

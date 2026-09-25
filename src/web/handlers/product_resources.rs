@@ -185,11 +185,9 @@ pub async fn create_product_issue(
             // REQ-PIB-01：基准分支创建时解析并锁定（默认链 main→master；皆无且
             // 未显式选择即 fail-closed 拒绝；显式选择须本地存在）。逻辑代码库
             // issue（多仓非目标）不经此分支，保持无基线语义。
-            let base_branch = resolve_effective_base_branch(
-                &repository.path,
-                request.base_branch.as_deref(),
-            )
-            .map_err(issue_baseline_api_error)?;
+            let base_branch =
+                resolve_effective_base_branch(&repository.path, request.base_branch.as_deref())
+                    .map_err(issue_baseline_api_error)?;
             let store = IssueStore::new(app_paths);
             let issue = store
                 .create_with_repository(CreateProductIssueWithRepositoryInput {
@@ -209,7 +207,7 @@ pub async fn create_product_issue(
 
 /// REQ-PIB-01 分支列表端点：默认仓库全部本地分支（refs/heads，不隐式 fetch）
 /// + 服务端默认链（main→master→null）。供创建表单选择器消费；创建时仍按
-/// 同一解析规则重新校验（不信任页面加载时的旧列表）。
+///   同一解析规则重新校验（不信任页面加载时的旧列表）。
 pub async fn list_repository_branches(
     State(state): State<WebAppState>,
     Path((project_id, repository_id)): Path<(String, String)>,

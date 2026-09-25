@@ -27,8 +27,8 @@ pub(super) fn plan_repair_fixture_with_dependency(with_dependency: bool) -> Plan
             title: "plan repair fixture".to_string(),
             description: None,
             change_id: None,
-                   base_branch: None,
- })
+            base_branch: None,
+        })
         .expect("issue");
     assert_eq!(issue.id, "issue_0001");
     let store = CodingAttemptStore::new(paths.clone());

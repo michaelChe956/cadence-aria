@@ -24,8 +24,8 @@ async fn story_workspace_context_codex_author_requires_request_user_input() {
             title: "爬楼梯问题".to_string(),
             description: Some("使用 Python 实现 climb_stairs".to_string()),
             change_id: None,
-                   base_branch: None,
- })
+            base_branch: None,
+        })
         .expect("issue");
 
     let lifecycle = LifecycleStore::new(app_paths.clone());
@@ -88,8 +88,8 @@ async fn design_workspace_context_includes_linked_story_markdown() {
             title: "爬楼梯问题".to_string(),
             description: Some("使用 Python 实现 climb_stairs".to_string()),
             change_id: None,
-                   base_branch: None,
- })
+            base_branch: None,
+        })
         .expect("issue");
 
     let lifecycle = LifecycleStore::new(app_paths.clone());
@@ -257,8 +257,8 @@ async fn existing_generation_brief_is_refreshed_when_linked_context_changes() {
             title: "爬楼梯问题".to_string(),
             description: Some("使用 Python 实现 climb_stairs".to_string()),
             change_id: None,
-                   base_branch: None,
- })
+            base_branch: None,
+        })
         .expect("issue");
 
     let lifecycle = LifecycleStore::new(app_paths.clone());

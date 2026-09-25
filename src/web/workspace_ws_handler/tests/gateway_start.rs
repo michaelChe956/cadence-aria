@@ -159,6 +159,7 @@ fn gateway_fixture() -> GatewayFixture {
 
 fn streaming_input(working_dir: std::path::PathBuf) -> StreamingProviderInput {
     StreamingProviderInput {
+        baseline_tree: None,
         tool_policy: None,
         audit_sink: None,
         provider_type: ProviderType::ClaudeCode,
@@ -412,8 +413,8 @@ async fn logical_plan_validate_failure_is_reported_by_handler() {
             title: "Logical plan validation".to_string(),
             description: None,
             change_id: None,
-                   base_branch: None,
- })
+            base_branch: None,
+        })
         .expect("issue");
     let lifecycle = LifecycleStore::new(fixture.paths.clone());
     let story = lifecycle

@@ -259,8 +259,11 @@ fn quoted_span_reference_outside_baseline_is_blocked() {
     );
 }
 
-/// fail-safe：基线不可用（None）时不触发核对——与现状一致，三族 options
-/// 预检不受影响。
+/// `baseline_tree=None`（issue 无仓，逻辑代码库 Non-Goal 面）不触发 AC 路径
+/// 核对。注意（REQ-PIB-03 软限制 pivot）：加载器 `plan_baseline_tree` 的
+/// 「不可解析 → None 跳过」fail-safe 已废弃——基线不可解析现在为 Err
+/// fail-closed（见 workspace_engine::plan_preflight 测试），本用例仅钉住
+/// 校验器层对 None 的既有契约（三族 options 预检不受影响）。
 #[test]
 fn unavailable_baseline_skips_acceptance_path_check() {
     let ir = compile_candidate(&f56_candidate());

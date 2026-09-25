@@ -172,12 +172,21 @@ macro_rules! workspace_ws_work_item_plan_revision_arm {
                     let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
                     return;
                 };
-                let provider_input = $engine.build_work_item_plan_streaming_input(
+                let provider_input = match $engine.build_work_item_plan_streaming_input(
                     invocation.provider_type.clone(),
                     invocation.prompt.clone(),
                     invocation.worktree_path.clone(),
                     invocation.author_provider.clone(),
-                );
+                ) {
+                    Ok(provider_input) => provider_input,
+                    Err(message) => {
+                        $engine.mark_active_run_finished(&$run_label);
+                        drop($engine);
+                        let err = WsOutMessage::Error { message };
+                        let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
+                        return;
+                    }
+                };
                 let provider_input = $engine.attach_tool_policy_audit(provider_input);
                 let provider_session = start_work_item_plan_author(
                     plan_launch,
@@ -351,12 +360,22 @@ macro_rules! workspace_ws_work_item_plan_revision_arm {
                             let node_id = $engine
                                 .begin_work_item_plan_auto_revision_run(revision_iterations)
                                 .await;
-                            let provider_input = $engine.build_work_item_plan_streaming_input(
-                                invocation.provider_type.clone(),
-                                invocation.prompt.clone(),
-                                invocation.worktree_path.clone(),
-                                invocation.author_provider.clone(),
-                            );
+                            let provider_input = match $engine
+                                .build_work_item_plan_streaming_input(
+                                    invocation.provider_type.clone(),
+                                    invocation.prompt.clone(),
+                                    invocation.worktree_path.clone(),
+                                    invocation.author_provider.clone(),
+                                ) {
+                                Ok(provider_input) => provider_input,
+                                Err(message) => {
+                                    $engine.mark_active_run_finished(&$run_label);
+                                    drop($engine);
+                                    let err = WsOutMessage::Error { message };
+                                    let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
+                                    return;
+                                }
+                            };
                             let provider_input = $engine.attach_tool_policy_audit(provider_input);
                             let provider_session = start_work_item_plan_author(
                                 plan_launch,
@@ -770,7 +789,7 @@ pub(crate) async fn drive_current_work_item_plan_outline_run(
             invocation.prompt.clone(),
             invocation.worktree_path.clone(),
             invocation.author_provider.clone(),
-        );
+        )?;
         let provider_input = engine.attach_tool_policy_audit(provider_input);
         let provider_session = start_work_item_plan_author(
             plan_launch,

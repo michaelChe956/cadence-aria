@@ -390,6 +390,17 @@ pub(crate) async fn spawn_provider_run_from_handler(
                         invocation.author_provider.clone(),
                     )
                 };
+                // REQ-PIB-02（T2.3）：基线不可解析 → 终止本轮 run（可观测错误出站）。
+                let provider_input = match provider_input {
+                    Ok(provider_input) => provider_input,
+                    Err(message) => {
+                        engine.mark_active_run_finished(&run_label);
+                        drop(engine);
+                        let err = WsOutMessage::Error { message };
+                        let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                        return;
+                    }
+                };
                 let provider_input = engine.attach_tool_policy_audit(provider_input);
                 let provider_session = start_work_item_plan_author(
                     plan_launch,
@@ -552,6 +563,17 @@ pub(crate) async fn spawn_provider_run_from_handler(
                                 invocation.worktree_path.clone(),
                                 invocation.author_provider.clone(),
                             );
+                            // REQ-PIB-02（T2.3）：基线不可解析 → 终止本轮 run。
+                            let provider_input = match provider_input {
+                                Ok(provider_input) => provider_input,
+                                Err(message) => {
+                                    engine.mark_active_run_finished(&run_label);
+                                    drop(engine);
+                                    let err = WsOutMessage::Error { message };
+                                    let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                                    return;
+                                }
+                            };
                             let provider_input = engine.attach_tool_policy_audit(provider_input);
                             let provider_session = start_work_item_plan_author(
                                 plan_launch,
@@ -1006,14 +1028,34 @@ pub(crate) async fn spawn_provider_run_from_handler(
                     .as_ref()
                     .cloned()
                     .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-                let provider_input = engine.build_work_item_plan_streaming_input(
+                let provider_input = match engine.build_work_item_plan_streaming_input(
                     crate::product::work_item_split_engine::types::provider_name_to_type(
                         &author_provider,
                     ),
                     prompt.clone(),
                     worktree_path.to_string_lossy().to_string(),
                     author_provider.clone(),
-                );
+                ) {
+                    Ok(provider_input) => provider_input,
+                    Err(message) => {
+                        // REQ-PIB-02（T2.3）：基线不可解析 → 门内轮次失败（可观测）。
+                        let _ = engine
+                            .fail_human_gate_turn(&turn_id, HumanGateTurnFailureClass::ProviderErr)
+                            .await;
+                        engine.mark_active_run_finished(&run_label);
+                        drop(engine);
+                        let _ = send_json_outbound(
+                            &outbound_tx_for_task,
+                            &WsOutMessage::HumanGateTurnFailed {
+                                turn_id,
+                                failure_class: "provider_err".to_string(),
+                                message,
+                            },
+                        )
+                        .await;
+                        return;
+                    }
+                };
                 let launch = match resolve_plan_author_launch(&engine, None, None) {
                     Ok(launch) => launch,
                     Err(error) => {

@@ -34,6 +34,7 @@ fn input(resume: Option<&str>, timeout_secs: u64) -> StreamingProviderInput {
     use crate::protocol::contracts::{AdapterRole, ProviderType};
     use std::collections::BTreeMap;
     StreamingProviderInput {
+        baseline_tree: None,
         tool_policy: None,
         audit_sink: None,
         provider_type: ProviderType::KimiCode,

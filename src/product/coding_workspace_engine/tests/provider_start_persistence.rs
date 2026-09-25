@@ -1049,6 +1049,7 @@ async fn coding_coder_and_policy_runs_keep_audit_channels_strictly_separated() {
     let policy_provider = CodexProvider::new(fixture).with_version_supplier(supplier);
     let worktree = attempt.worktree_path.clone().expect("worktree path");
     let policy_input = StreamingProviderInput {
+        baseline_tree: None,
         tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
         audit_sink: None,
         provider_type: ProviderType::Codex,

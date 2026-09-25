@@ -106,7 +106,10 @@ fn prompt_sliding_window_applies_to_author_revision_and_reviewer_entrypoints() {
             .as_ref()
             .and_then(|artifact| artifact.markdown())
             .expect("current artifact"),
-        engine.latest_review_verdict.as_ref().expect("review verdict"),
+        engine
+            .latest_review_verdict
+            .as_ref()
+            .expect("review verdict"),
         &engine.routing_reference_context(),
     );
     let reviewer = engine.build_review_input().expect("review prompt").prompt;
@@ -124,11 +127,23 @@ fn prompt_sliding_window_applies_to_author_revision_and_reviewer_entrypoints() {
             !prompt.contains("ROUND-1-USER-RAW"),
             "{entrypoint} must not replay early raw rounds: {prompt}"
         );
-        assert!(prompt.contains("ROUND-3-USER-RAW"), "{entrypoint}: {prompt}");
-        assert!(prompt.contains("ROUND-4-USER-RAW"), "{entrypoint}: {prompt}");
+        assert!(
+            prompt.contains("ROUND-3-USER-RAW"),
+            "{entrypoint}: {prompt}"
+        );
+        assert!(
+            prompt.contains("ROUND-4-USER-RAW"),
+            "{entrypoint}: {prompt}"
+        );
         assert!(prompt.contains("choice_rollout"), "{entrypoint}: {prompt}");
-        assert!(prompt.contains("gradual = 分批发布"), "{entrypoint}: {prompt}");
-        assert!(prompt.contains("# Story Artifact v4"), "{entrypoint}: {prompt}");
+        assert!(
+            prompt.contains("gradual = 分批发布"),
+            "{entrypoint}: {prompt}"
+        );
+        assert!(
+            prompt.contains("# Story Artifact v4"),
+            "{entrypoint}: {prompt}"
+        );
     }
     assert!(reviewer.contains("完整 canonical inputs：不得裁剪。"));
     assert!(reviewer.contains("ROUND-1-MUST-FIX-FULL-TEXT"));
@@ -166,10 +181,7 @@ fn design_prompt_sliding_window_preserves_decision_audit_and_required_evidence()
                 "[DEC-{round:03}] Design 决策正文 {}",
                 "决策细节 ".repeat(30)
             ),
-            &format!(
-                "[API-{round:03}] API 契约正文 {}",
-                "接口细节 ".repeat(30)
-            ),
+            &format!("[API-{round:03}] API 契约正文 {}", "接口细节 ".repeat(30)),
         )
         .replace("[DEC-001]", &format!("[DEC-{round:03}]"))
         .replace("[CMP-001]", &format!("[CMP-{round:03}]"))
@@ -256,7 +268,10 @@ fn design_prompt_sliding_window_preserves_decision_audit_and_required_evidence()
     });
 
     let author = engine
-        .build_streaming_input("新的 Design author 请求", AuthorPromptMode::FullConversation)
+        .build_streaming_input(
+            "新的 Design author 请求",
+            AuthorPromptMode::FullConversation,
+        )
         .expect("author prompt")
         .prompt;
     let revision = engine.build_revision_full_prompt(
@@ -266,7 +281,10 @@ fn design_prompt_sliding_window_preserves_decision_audit_and_required_evidence()
             .as_ref()
             .and_then(|artifact| artifact.markdown())
             .expect("current Design artifact"),
-        engine.latest_review_verdict.as_ref().expect("review verdict"),
+        engine
+            .latest_review_verdict
+            .as_ref()
+            .expect("review verdict"),
         &engine.routing_reference_context(),
     );
     let reviewer = engine.build_review_input().expect("review prompt").prompt;
@@ -277,8 +295,7 @@ fn design_prompt_sliding_window_preserves_decision_audit_and_required_evidence()
         ("reviewer", &reviewer),
     ] {
         assert!(
-            prompt.contains("[历史压缩摘要 round=1]")
-                && prompt.contains("[历史压缩摘要 round=2]"),
+            prompt.contains("[历史压缩摘要 round=1]") && prompt.contains("[历史压缩摘要 round=2]"),
             "{entrypoint} must summarize early Design rounds: {prompt}"
         );
         for raw in ["DESIGN-ROUND-1-USER-RAW", "DESIGN-ROUND-2-USER-RAW"] {
@@ -390,12 +407,14 @@ fn entry_input(entry: &str) -> StreamingProviderInput {
                 event_tx,
                 session,
             );
-            engine.build_work_item_plan_streaming_input(
-                ProviderType::ClaudeCode,
-                "work item plan prompt".to_string(),
-                checkpoint_tmp.path().to_string_lossy().to_string(),
-                ProviderName::ClaudeCode,
-            )
+            engine
+                .build_work_item_plan_streaming_input(
+                    ProviderType::ClaudeCode,
+                    "work item plan prompt".to_string(),
+                    checkpoint_tmp.path().to_string_lossy().to_string(),
+                    ProviderName::ClaudeCode,
+                )
+                .expect("plan input")
         }
         "workspace_reviewer" => {
             let (event_tx, _event_rx) = mpsc::channel(8);
@@ -409,7 +428,9 @@ fn entry_input(entry: &str) -> StreamingProviderInput {
                 event_tx,
                 session,
             );
-            engine.build_review_input().expect("workspace reviewer input")
+            engine
+                .build_review_input()
+                .expect("workspace reviewer input")
         }
         "coding_coder" => {
             // provider_retry.rs Coder 锚点的真实生产构造函数：Executor，D2 禁带策略。
@@ -576,9 +597,11 @@ fn assert_role_policy_pair(
         assert!(
             matches!(
                 input.tool_policy,
-                Some(crate::cross_cutting::streaming_provider::ProviderToolPolicy {
-                    intent: ToolPolicyIntent::DenyFileWriteBuiltins
-                })
+                Some(
+                    crate::cross_cutting::streaming_provider::ProviderToolPolicy {
+                        intent: ToolPolicyIntent::DenyFileWriteBuiltins
+                    }
+                )
             ),
             "{entry} must carry exactly DenyFileWriteBuiltins"
         );
@@ -697,31 +720,37 @@ async fn workspace_builder_family_pairs_role_with_tool_policy() {
         );
         covered.push((
             "wip_author_normal".to_string(),
-            engine.build_work_item_plan_streaming_input(
-                ProviderType::ClaudeCode,
-                "plan prompt".to_string(),
-                worktree.clone(),
-                ProviderName::ClaudeCode,
-            ),
+            engine
+                .build_work_item_plan_streaming_input(
+                    ProviderType::ClaudeCode,
+                    "plan prompt".to_string(),
+                    worktree.clone(),
+                    ProviderName::ClaudeCode,
+                )
+                .expect("plan input"),
         ));
         covered.push((
             "wip_author_fresh".to_string(),
-            engine.build_work_item_plan_streaming_input_fresh(
-                ProviderType::ClaudeCode,
-                "plan prompt".to_string(),
-                worktree.clone(),
-                ProviderName::ClaudeCode,
-            ),
+            engine
+                .build_work_item_plan_streaming_input_fresh(
+                    ProviderType::ClaudeCode,
+                    "plan prompt".to_string(),
+                    worktree.clone(),
+                    ProviderName::ClaudeCode,
+                )
+                .expect("plan input"),
         ));
         covered.push((
             "wip_author_with_session".to_string(),
-            engine.build_work_item_plan_streaming_input_with_session(
-                ProviderType::ClaudeCode,
-                "plan prompt".to_string(),
-                worktree,
-                ProviderName::ClaudeCode,
-                None,
-            ),
+            engine
+                .build_work_item_plan_streaming_input_with_session(
+                    ProviderType::ClaudeCode,
+                    "plan prompt".to_string(),
+                    worktree,
+                    ProviderName::ClaudeCode,
+                    None,
+                )
+                .expect("plan input"),
         ));
     }
 
@@ -872,7 +901,11 @@ async fn workspace_builder_family_pairs_role_with_tool_policy() {
     let expected = [
         ("sc_author", AdapterRole::Orchestrator, true),
         ("sc_revision_resume", AdapterRole::Orchestrator, true),
-        ("sc_revision_without_resume", AdapterRole::Orchestrator, true),
+        (
+            "sc_revision_without_resume",
+            AdapterRole::Orchestrator,
+            true,
+        ),
         (
             "sc_revision_with_resume_false",
             AdapterRole::Orchestrator,
@@ -895,7 +928,11 @@ async fn workspace_builder_family_pairs_role_with_tool_policy() {
         ("coding_code_reviewer_retry", AdapterRole::Reviewer, true),
         ("coding_internal_pr_review", AdapterRole::Reviewer, true),
         ("coding_group_review", AdapterRole::Reviewer, true),
-        ("coding_factory_derives_Executor", AdapterRole::Executor, false),
+        (
+            "coding_factory_derives_Executor",
+            AdapterRole::Executor,
+            false,
+        ),
         (
             "coding_factory_derives_Reviewer",
             AdapterRole::Reviewer,

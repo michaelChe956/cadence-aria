@@ -246,8 +246,8 @@ fn logical_routing_fixture() -> (TempDir, CodingAttemptStore, Vec<String>) {
             title: "group split target issue".to_string(),
             description: None,
             change_id: None,
-                   base_branch: None,
- })
+            base_branch: None,
+        })
         .unwrap();
     let issue_id = issue.id;
     crate::product::logical_codebase::IssueCodebaseSelectionStore::new(paths.clone())

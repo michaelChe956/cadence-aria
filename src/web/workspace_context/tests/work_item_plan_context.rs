@@ -24,8 +24,8 @@ async fn work_item_plan_context_message_includes_plan_brief_and_workspace_type()
             title: "爬楼梯问题".to_string(),
             description: Some("使用 Python 实现 climb_stairs".to_string()),
             change_id: None,
-                   base_branch: None,
- })
+            base_branch: None,
+        })
         .expect("issue");
 
     let lifecycle = LifecycleStore::new(app_paths.clone());

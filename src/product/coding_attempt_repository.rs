@@ -661,8 +661,8 @@ mod tests {
                 title: "new lc issue".to_string(),
                 description: None,
                 change_id: None,
-                           base_branch: None,
- })
+                base_branch: None,
+            })
             .unwrap();
         crate::product::logical_codebase::IssueCodebaseSelectionStore::for_lc(
             paths.clone(),

@@ -234,9 +234,10 @@ impl WorkspaceEngine {
             .compare_and_save_single_candidate_generation(&expected, &source_ref, &ir_ref)
             .map_err(|error| format!("persist single candidate generated refs failed: {error}"))?;
 
-        // F-56（REQ-WSC-02 场景 13）：共享 worktree fork base 树作 plan 基线，
-        // AC 路径核对挂接；不可用 → None（核对不触发）。
-        let baseline_tree = plan_preflight::plan_baseline_tree(&lifecycle, &project_id, &issue_id);
+        // F-56→REQ-PIB-03：plan 基线=issue 基线分支树（按分支名取树，不依赖
+        // 共享 worktree）；不可解析 → Err 直通 fail-closed（废弃跳过——软限制
+        // 残余风险的唯一硬兜底）。
+        let baseline_tree = plan_preflight::plan_baseline_tree(&lifecycle, &project_id, &issue_id)?;
         let validation_now = chrono::Utc::now().to_rfc3339();
         let report = validate_plan_candidate_ir(
             &ir_record.ir,

@@ -61,6 +61,25 @@ fn seed_legacy_project(app_paths: &ProductAppPaths) {
         .expect("create project");
 }
 
+/// REQ-PIB-02 测试夹具 git 仓库：`main` 分支+初始空提交（与 it_core/it_web
+/// 夹具同构）。裸目录无 git 仓库会令 author/门内修订/运行期预校验的基线解析
+/// fail-closed，run 在起步即以可观测错误终止。
+pub(crate) fn init_ws_test_git_repo(repo: &std::path::Path) {
+    for args in [
+        vec!["init", "--initial-branch", "main"],
+        vec!["config", "user.email", "test@example.com"],
+        vec!["config", "user.name", "Test User"],
+        vec!["commit", "--allow-empty", "-m", "fixture baseline"],
+    ] {
+        let status = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(repo)
+            .status()
+            .unwrap_or_else(|error| panic!("git {} failed to start: {error}", args.join(" ")));
+        assert!(status.success(), "git {} failed", args.join(" "));
+    }
+}
+
 #[test]
 fn context_note_is_only_valid_in_prepare_context() {
     let msg = WsInMessage::ContextNote {
@@ -390,6 +409,8 @@ async fn start_generation_refreshes_stale_provider_guidance_before_prompting_aut
 
     let root = tempfile::tempdir().unwrap();
     let repo = tempfile::tempdir().unwrap();
+    // REQ-PIB-02：夹具对齐生产不变量（main 分支+初始提交）。
+    init_ws_test_git_repo(repo.path());
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
     seed_legacy_project(&app_paths);
     let repository = RepositoryStore::new(app_paths.clone())
@@ -410,8 +431,8 @@ async fn start_generation_refreshes_stale_provider_guidance_before_prompting_aut
             title: "Provider guidance refresh".to_string(),
             description: Some("旧 context 不能把 Codex 交互纪律注入 Claude Code run".to_string()),
             change_id: None,
-                   base_branch: None,
- })
+            base_branch: None,
+        })
         .unwrap();
     let lifecycle = LifecycleStore::new(app_paths.clone());
     let story = lifecycle
@@ -540,8 +561,8 @@ async fn provider_select_refreshes_provider_guidance_in_session_state() {
                 "prepare context should reflect selected author provider".to_string(),
             ),
             change_id: None,
-                   base_branch: None,
- })
+            base_branch: None,
+        })
         .unwrap();
     let lifecycle = LifecycleStore::new(app_paths.clone());
     let story = lifecycle
@@ -650,6 +671,8 @@ async fn provider_select_then_user_message_forces_pi_to_auto_from_stale_supervis
 
     let root = tempfile::tempdir().unwrap();
     let repo = tempfile::tempdir().unwrap();
+    // REQ-PIB-02：夹具对齐生产不变量（main 分支+初始提交）。
+    init_ws_test_git_repo(repo.path());
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
     seed_legacy_project(&app_paths);
     let repository = RepositoryStore::new(app_paths.clone())
@@ -670,8 +693,8 @@ async fn provider_select_then_user_message_forces_pi_to_auto_from_stale_supervis
             title: "Pi permission bypass".to_string(),
             description: Some("stale Supervised mode must not reach Pi".to_string()),
             change_id: None,
-                   base_branch: None,
- })
+            base_branch: None,
+        })
         .unwrap();
     let lifecycle = LifecycleStore::new(app_paths.clone());
     let story = lifecycle

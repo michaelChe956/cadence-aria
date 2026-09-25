@@ -116,6 +116,7 @@ impl ResolvedPlanningContext {
         let validated = gateway.validate(request)?;
         let provider_type = provider_type_for_dialect(validated.envelope().provider_dialect);
         let input = crate::cross_cutting::streaming_provider::StreamingProviderInput {
+            baseline_tree: None,
             tool_policy: Some(
                 crate::cross_cutting::streaming_provider::ProviderToolPolicy::deny_file_write_builtins(),
             ),

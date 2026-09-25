@@ -793,7 +793,11 @@ async fn single_candidate_revise_route_does_not_misfire_a_second_followup_review
             {
                 break;
             }
-            tokio::task::yield_now().await;
+            // sleep 而非纯 yield_now 自旋：current_thread 运行时下永真自旋会
+            // 饿死计时器，令本 timeout 永不触发（挂死而非失败）——与下方
+            // relay_started 循环同一教训（PIB 终收：夹具基线 fail-closed 提前
+            // 终止 run 时，relay 事件不出现，此处曾 300s 挂死而非 3s 失败）。
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     })
     .await;

@@ -712,6 +712,7 @@ impl GatewayFixture {
         };
         use crate::protocol::contracts::{AdapterRole, ProviderType};
         StreamingProviderInput {
+            baseline_tree: None,
             tool_policy: None,
             audit_sink: None,
             provider_type: ProviderType::ClaudeCode,

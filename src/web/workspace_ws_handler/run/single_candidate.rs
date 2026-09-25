@@ -220,13 +220,17 @@ fn prevalidate_plan_candidate_ir(
                 .get_repository_profile(&session.project_id, &session.issue_id, profile_id)
                 .ok()
         });
-    // F-56（REQ-WSC-02 场景 13）：运行期预校验与权威路径共用基线加载；
-    // 此处只预检（不产 verdict），权威收敛仍由 complete_... 路径承担。
-    let baseline_tree = crate::product::workspace_engine::plan_preflight::plan_baseline_tree(
+    // F-56→REQ-PIB-03：运行期预校验与权威路径共用基线加载（按分支名取树）。
+    // 基线不可解析 → Err 转预检诊断（经教学重驱可观测，重驱不治本，
+    // 权威路径仍以 fail-closed 终态兜底）。
+    let baseline_tree = match crate::product::workspace_engine::plan_preflight::plan_baseline_tree(
         lifecycle,
         &session.project_id,
         &session.issue_id,
-    );
+    ) {
+        Ok(baseline_tree) => baseline_tree,
+        Err(message) => return Some(vec![message]),
+    };
     let validation_now = chrono::Utc::now().to_rfc3339();
     let validation = crate::product::work_item_plan_compiler::validate_plan_candidate_ir(
         ir,
@@ -281,12 +285,14 @@ async fn drive_single_candidate_reredrive(
     reredrive_prompt: &str,
     repository_path: &std::path::Path,
 ) -> Result<String, SingleCandidateProviderRunError> {
-    let reredrive_input = engine.build_work_item_plan_streaming_input(
-        crate::product::work_item_split_engine::types::provider_name_to_type(author_provider),
-        reredrive_prompt.to_string(),
-        repository_path.to_string_lossy().to_string(),
-        author_provider.clone(),
-    );
+    let reredrive_input = engine
+        .build_work_item_plan_streaming_input(
+            crate::product::work_item_split_engine::types::provider_name_to_type(author_provider),
+            reredrive_prompt.to_string(),
+            repository_path.to_string_lossy().to_string(),
+            author_provider.clone(),
+        )
+        .map_err(SingleCandidateProviderRunError::Message)?;
     let reredrive_input = engine.attach_tool_policy_audit(reredrive_input);
     let reredrive_session = start_work_item_plan_author(
         launch.clone(),
@@ -529,12 +535,14 @@ pub(crate) async fn run_single_candidate_author(
             Some(author_provider.clone()),
         )
         .await;
-    let provider_input = engine.build_work_item_plan_streaming_input(
-        crate::product::work_item_split_engine::types::provider_name_to_type(&author_provider),
-        full_prompt.clone(),
-        repository.path.to_string_lossy().to_string(),
-        author_provider.clone(),
-    );
+    let provider_input = engine
+        .build_work_item_plan_streaming_input(
+            crate::product::work_item_split_engine::types::provider_name_to_type(&author_provider),
+            full_prompt.clone(),
+            repository.path.to_string_lossy().to_string(),
+            author_provider.clone(),
+        )
+        .map_err(SingleCandidateProviderRunError::Message)?;
     let provider_input = engine.attach_tool_policy_audit(provider_input);
     let provider_session = start_work_item_plan_author(
         launch.clone(),

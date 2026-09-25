@@ -454,8 +454,8 @@ async fn claude_code_story_context_requires_structured_ask_user_question() {
             title: "爬楼梯问题".to_string(),
             description: Some("使用 Python 实现 climb_stairs".to_string()),
             change_id: None,
-                   base_branch: None,
- })
+            base_branch: None,
+        })
         .expect("issue");
 
     let lifecycle = LifecycleStore::new(app_paths.clone());

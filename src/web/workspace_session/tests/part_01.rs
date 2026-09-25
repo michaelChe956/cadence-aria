@@ -630,6 +630,21 @@ async fn provider_run_requested_without_attachments_spawns_throwaway_run() {
             description: None,
         })
         .expect("project");
+    // REQ-PIB-02：夹具对齐生产不变量（main 分支+初始提交，裸目录无 git 仓库
+    // 会令基线解析 fail-closed，run 未及 spawn 即终止）。
+    for args in [
+        vec!["init", "--initial-branch", "main"],
+        vec!["config", "user.email", "test@example.com"],
+        vec!["config", "user.name", "Test User"],
+        vec!["commit", "--allow-empty", "-m", "fixture baseline"],
+    ] {
+        let status = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(root.path())
+            .status()
+            .expect("git fixture");
+        assert!(status.success(), "git {} failed", args.join(" "));
+    }
     let repository = RepositoryStore::new(app_paths.clone())
         .create(CreateRepositoryInput {
             project_id: project.id.clone(),

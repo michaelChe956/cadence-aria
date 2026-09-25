@@ -29,6 +29,7 @@ async fn live_claude_ask_user_question_smoke() {
     const LIVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(240);
     let provider = ClaudeCodeProvider::new(PathBuf::from("claude"));
     let input = StreamingProviderInput {
+        baseline_tree: None,
         tool_policy: None,
         audit_sink: None,
         provider_type: ProviderType::ClaudeCode,

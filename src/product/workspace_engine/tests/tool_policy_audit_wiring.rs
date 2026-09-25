@@ -325,6 +325,7 @@ async fn workspace_non_policy_input_never_receives_tool_policy_sink_wiring_only(
     let (root, engine) = persistent_policy_engine("sess_audit_non_policy_wiring").await;
 
     let executor_input = crate::cross_cutting::streaming_provider::StreamingProviderInput {
+        baseline_tree: None,
         tool_policy: None,
         audit_sink: None,
         provider_type: crate::protocol::contracts::ProviderType::Codex,

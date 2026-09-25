@@ -50,8 +50,8 @@ fn setup_store() -> (TempDir, CodingAttemptStore) {
             title: "issue".to_string(),
             description: None,
             change_id: None,
-                   base_branch: None,
- })
+            base_branch: None,
+        })
         .unwrap();
     let store = CodingAttemptStore::new(paths);
     (tmp, store)

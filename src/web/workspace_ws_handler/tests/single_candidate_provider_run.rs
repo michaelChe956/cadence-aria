@@ -105,6 +105,9 @@ impl ProviderRunFixture {
             "## 语言规则\n\n- **必须使用中文** - 所有响应、解释、注释和文档必须使用中文。\n",
         )
         .expect("write language rules");
+        // REQ-PIB-02：夹具对齐生产不变量（main 分支+初始提交，裸目录无 git
+        // 仓库会令基线解析 fail-closed，provider run 起步即终止）。
+        super::init_ws_test_git_repo(repository_root.path());
         let app_paths = ProductAppPaths::new(root.path().join(".aria"));
         seed_legacy_project(&app_paths);
         let repository = RepositoryStore::new(app_paths.clone())
@@ -125,8 +128,8 @@ impl ProviderRunFixture {
                 title: "Provider run flow dispatch".to_string(),
                 description: Some("durable flow_kind must select one provider chain".to_string()),
                 change_id: None,
-                           base_branch: None,
- })
+                base_branch: None,
+            })
             .expect("create issue");
         let lifecycle = LifecycleStore::new(app_paths.clone());
         let story = lifecycle

@@ -398,6 +398,23 @@ pub fn translate_tool_policy(
     }
 }
 
+/// Author 会话基线树锚点（per-issue-base-branch，REQ-PIB-02）。两级语义
+///（防误读，design D3）：
+/// - host-served 通道（kimi fs 桥）：通道层**硬边界**——fs 读按
+///   `git show refs/heads/<branch>:<path>` 树内容供给、terminal 一律拒绝，
+///   工作区与兄弟 worktree 路径不可达；树读取不 checkout、不触工作区。
+/// - provider 原生通道（claude/codex/pi）：**仅获 prompt 层教学（软约束）**，
+///   本字段的存在不构成其访问受限的证据——其物理可达集不受限（用户
+///   2026-09-25 裁决接受残余风险；plan 期路径形态由 REQ-PIB-03 核对
+///   fail-closed 兜底，沙箱形态见 design Deferred）。
+///
+/// `repo_path` 为仓库主检出（refs/heads 可解析）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaselineTreeRef {
+    pub repo_path: PathBuf,
+    pub branch: String,
+}
+
 #[derive(Clone)]
 pub struct StreamingProviderInput {
     pub provider_type: ProviderType,
@@ -421,6 +438,10 @@ pub struct StreamingProviderInput {
     pub structured_output_contract: Option<StructuredOutputContract>,
     pub env_vars: BTreeMap<String, String>,
     pub timeout_secs: u64,
+    /// 基线树锚点（REQ-PIB-02）：story/design/plan author 会话由 engine 解析
+    /// issue 基线后注入；`None` = 非基线会话（coder/评审/聚合 Non-Goal 面与
+    /// 全部既有路径），行为不变。
+    pub baseline_tree: Option<BaselineTreeRef>,
 }
 
 impl std::fmt::Debug for StreamingProviderInput {
@@ -447,6 +468,7 @@ impl std::fmt::Debug for StreamingProviderInput {
             )
             .field("env_vars", &self.env_vars)
             .field("timeout_secs", &self.timeout_secs)
+            .field("baseline_tree", &self.baseline_tree)
             .finish()
     }
 }
@@ -470,6 +492,7 @@ impl StreamingProviderInput {
             structured_output_contract: None,
             env_vars: BTreeMap::new(),
             timeout_secs: 60,
+            baseline_tree: None,
         }
     }
 }
@@ -872,6 +895,7 @@ pub(crate) async fn run_legacy_bridge_stream<'a>(
         structured_output_contract: None,
         env_vars: BTreeMap::new(),
         timeout_secs: input.timeout,
+        baseline_tree: None,
     };
     let bridge_cancel = cancel.clone();
     let mut session = start(provider_input, cancel).await?;

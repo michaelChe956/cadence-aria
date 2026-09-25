@@ -19,7 +19,12 @@ async fn drive_work_item_plan_provider_session_returns_output_and_persists_strea
         .await
         .expect("send text delta");
     provider_event_tx
-        .send(ProviderEvent::Completed(crate::cross_cutting::streaming_provider::ProviderCompletion::plain("Final structured output".to_string(), Some("provider-work-item-plan-author-1".to_string()))))
+        .send(ProviderEvent::Completed(
+            crate::cross_cutting::streaming_provider::ProviderCompletion::plain(
+                "Final structured output".to_string(),
+                Some("provider-work-item-plan-author-1".to_string()),
+            ),
+        ))
         .await
         .expect("send completed");
     drop(provider_event_tx);
@@ -179,7 +184,12 @@ async fn drive_work_item_plan_provider_session_hides_structured_output_from_stre
         .await
         .expect("send structured delta");
     provider_event_tx
-        .send(ProviderEvent::Completed(crate::cross_cutting::streaming_provider::ProviderCompletion::plain(full_output.clone(), None)))
+        .send(ProviderEvent::Completed(
+            crate::cross_cutting::streaming_provider::ProviderCompletion::plain(
+                full_output.clone(),
+                None,
+            ),
+        ))
         .await
         .expect("send completed");
     drop(provider_event_tx);
@@ -217,12 +227,14 @@ fn build_work_item_plan_streaming_input_uses_splitter_role() {
     let (_tmp, _checkpoint_store, _lifecycle, _plan_id, engine) =
         make_work_item_plan_engine_with_draft_candidate("sess_wip_splitter_input");
 
-    let input = engine.build_work_item_plan_streaming_input(
-        ProviderType::Fake,
-        "split prompt".to_string(),
-        "/tmp/worktree".to_string(),
-        ProviderName::Fake,
-    );
+    let input = engine
+        .build_work_item_plan_streaming_input(
+            ProviderType::Fake,
+            "split prompt".to_string(),
+            "/tmp/worktree".to_string(),
+            ProviderName::Fake,
+        )
+        .expect("plan input");
 
     assert_eq!(input.provider_type, ProviderType::Fake);
     assert_eq!(input.role, AdapterRole::WorkItemSplitter);
@@ -249,12 +261,14 @@ fn build_work_item_plan_streaming_input_reuses_author_provider_session() {
         last_node_id: Some("node-1".to_string()),
     }];
 
-    let input = engine.build_work_item_plan_streaming_input(
-        ProviderType::ClaudeCode,
-        "split prompt".to_string(),
-        "/tmp/worktree".to_string(),
-        ProviderName::ClaudeCode,
-    );
+    let input = engine
+        .build_work_item_plan_streaming_input(
+            ProviderType::ClaudeCode,
+            "split prompt".to_string(),
+            "/tmp/worktree".to_string(),
+            ProviderName::ClaudeCode,
+        )
+        .expect("plan input");
 
     assert_eq!(
         input.resume_provider_session_id,
@@ -277,12 +291,14 @@ fn build_work_item_plan_streaming_input_fresh_never_resumes_old_author_session()
     }];
 
     // legacy 正常 resume：仍携带旧会话 id（行为不变）。
-    let resumed = engine.build_work_item_plan_streaming_input(
-        ProviderType::ClaudeCode,
-        "split prompt".to_string(),
-        "/tmp/worktree".to_string(),
-        ProviderName::ClaudeCode,
-    );
+    let resumed = engine
+        .build_work_item_plan_streaming_input(
+            ProviderType::ClaudeCode,
+            "split prompt".to_string(),
+            "/tmp/worktree".to_string(),
+            ProviderName::ClaudeCode,
+        )
+        .expect("plan input");
     assert_eq!(
         resumed.resume_provider_session_id,
         Some("author-session-1".to_string()),
@@ -290,15 +306,16 @@ fn build_work_item_plan_streaming_input_fresh_never_resumes_old_author_session()
     );
 
     // StaleContext rebuild：provider 全新启动，不携带任何 resume id（不 --resume 旧会话）。
-    let fresh = engine.build_work_item_plan_streaming_input_fresh(
-        ProviderType::ClaudeCode,
-        "split prompt".to_string(),
-        "/tmp/worktree".to_string(),
-        ProviderName::ClaudeCode,
-    );
+    let fresh = engine
+        .build_work_item_plan_streaming_input_fresh(
+            ProviderType::ClaudeCode,
+            "split prompt".to_string(),
+            "/tmp/worktree".to_string(),
+            ProviderName::ClaudeCode,
+        )
+        .expect("plan input");
     assert_eq!(
-        fresh.resume_provider_session_id,
-        None,
+        fresh.resume_provider_session_id, None,
         "rebuild run must not resume the old author provider session"
     );
 }
@@ -313,7 +330,8 @@ fn work_item_plan_outline_revision_feedback_assembles_review_and_context() {
         summary: "需要细化 outline".to_string(),
         findings: vec![ReviewFinding {
             severity: ReviewFindingSeverity::MustFix,
-            message: "backend outline 缺少 exclusive_write_scope\n影响：会导致 draft 阶段写入冲突".to_string(),
+            message: "backend outline 缺少 exclusive_write_scope\n影响：会导致 draft 阶段写入冲突"
+                .to_string(),
             evidence: "outline 中 backend 项 exclusive_write_scopes 为空".to_string(),
             required_action: "为 backend outline 补充 exclusive_write_scope".to_string(),
             category: None,
@@ -502,6 +520,10 @@ fn make_work_item_plan_engine_with_draft_candidate(
     let issue_id = "issue_0001";
     let repository_path = tmp.path().join("repository");
     std::fs::create_dir(&repository_path).unwrap();
+    // REQ-PIB-02：夹具对齐生产不变量（main 分支+初始提交，裸目录无 git 仓库
+    // 会令基线解析 fail-closed——author 上下文/门内修订/运行期预校验三面共用）。
+    init_fixture_git_repo(&repository_path);
+
     let repository = crate::product::repository_store::RepositoryStore::new(lifecycle.app_paths())
         .create(crate::product::repository_store::CreateRepositoryInput {
             project_id: project_id.to_string(),
@@ -532,7 +554,7 @@ fn make_work_item_plan_engine_with_draft_candidate(
             active_binding_id: None,
             created_at: now.clone(),
             updated_at: now,
-        base_branch: None,
+            base_branch: None,
         },
     )
     .unwrap();
@@ -543,7 +565,7 @@ fn make_work_item_plan_engine_with_draft_candidate(
             issue_id: issue_id.to_string(),
             repository_id: repository_id.to_string(),
             title: "Story".to_string(),
-        aggregate_codebase: None,
+            aggregate_codebase: None,
         })
         .unwrap();
     let design = lifecycle
@@ -552,7 +574,7 @@ fn make_work_item_plan_engine_with_draft_candidate(
             issue_id: issue_id.to_string(),
             story_spec_ids: vec![story.id.clone()],
             title: "Design".to_string(),
-        aggregate_codebase: None,
+            aggregate_codebase: None,
         })
         .unwrap();
 
@@ -743,26 +765,31 @@ fn make_work_item_plan_engine_with_draft_candidate(
     // 序号扫描兼容（同 store 后续自动分配从 max+1 继续，不冲突）。
     static FIXTURE_SESSION_SEQUENCE: std::sync::atomic::AtomicU64 =
         std::sync::atomic::AtomicU64::new(1);
-    let session_sequence = FIXTURE_SESSION_SEQUENCE
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let session_sequence =
+        FIXTURE_SESSION_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let session_record = lifecycle
-        .create_workspace_session_with_id(CreateWorkspaceSessionInput { project_id: project_id.to_string(),
-        issue_id: issue_id.to_string(),
-        entity_id: plan.id.clone(),
-        workspace_type: WorkspaceType::WorkItemPlan,
-        author_provider: ProviderName::ClaudeCode,
-        reviewer_provider: ProviderName::Codex,
-        review_rounds: 1,
-        superpowers_enabled: false, openspec_enabled: false,
-        // L2 退役（T5）：staged 夹具显式钉 Legacy flow（历史在途会话形态——
-        // options 缺省值已随单路径收敛翻为 SingleCandidate）。
-        work_item_plan_options: Some(
-            crate::product::lifecycle_store::WorkItemPlanSessionOptions {
-                flow_kind: crate::product::work_item_plan_policy::WorkItemPlanFlowKind::Legacy,
-                run_policy: crate::product::work_item_plan_policy::RunPolicy::Interactive,
-                rollout_snapshot: false,
+        .create_workspace_session_with_id(
+            CreateWorkspaceSessionInput {
+                project_id: project_id.to_string(),
+                issue_id: issue_id.to_string(),
+                entity_id: plan.id.clone(),
+                workspace_type: WorkspaceType::WorkItemPlan,
+                author_provider: ProviderName::ClaudeCode,
+                reviewer_provider: ProviderName::Codex,
+                review_rounds: 1,
+                superpowers_enabled: false,
+                openspec_enabled: false,
+                // L2 退役（T5）：staged 夹具显式钉 Legacy flow（历史在途会话形态——
+                // options 缺省值已随单路径收敛翻为 SingleCandidate）。
+                work_item_plan_options: Some(
+                    crate::product::lifecycle_store::WorkItemPlanSessionOptions {
+                        flow_kind:
+                            crate::product::work_item_plan_policy::WorkItemPlanFlowKind::Legacy,
+                        run_policy: crate::product::work_item_plan_policy::RunPolicy::Interactive,
+                        rollout_snapshot: false,
+                    },
+                ),
             },
-        ), },
             format!("workspace_session_{session_sequence:06}"),
         )
         .unwrap();
@@ -779,4 +806,27 @@ fn make_work_item_plan_engine_with_draft_candidate(
     engine.session.reviewer_provider = Some(ProviderName::Codex);
 
     (tmp, checkpoint_store, lifecycle, plan.id, engine)
+}
+
+/// REQ-PIB-02 测试夹具 git 仓库：`main` 分支+初始空提交（与 it_core/it_web
+/// 夹具同构）。裸 init 无分支或无提交会令 `resolve_effective_base_branch`
+/// 走默认链 `git show-ref refs/heads/main` 得 128 → fail-closed。
+pub(crate) fn init_fixture_git_repo(repo: &std::path::Path) {
+    for args in [
+        vec!["init", "--initial-branch", "main"],
+        vec!["config", "user.email", "test@example.com"],
+        vec!["config", "user.name", "Test User"],
+        vec!["commit", "--allow-empty", "-m", "fixture baseline"],
+    ] {
+        let status = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(repo)
+            .status()
+            .unwrap_or_else(|error| panic!("git {} failed to start: {error}", args.join(" ")));
+        assert!(
+            status.success(),
+            "git {} failed",
+            args.join(" ")
+        );
+    }
 }

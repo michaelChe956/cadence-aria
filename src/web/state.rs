@@ -799,6 +799,7 @@ mod tests {
         let mut session = provider
             .start(
                 StreamingProviderInput {
+                    baseline_tree: None,
                     tool_policy: None,
                     audit_sink: None,
                     provider_type: ProviderType::Codex,

@@ -486,12 +486,13 @@ impl super::WorkspaceEngine {
                 });
             }
         };
-        // F-56（REQ-WSC-02 场景 13）：门内人工修订与 author 路径共用基线加载。
+        // F-56→REQ-PIB-03：门内人工修订与 author 路径共用基线加载（按分支名
+        // 取树）；不可解析 → Err 直通 fail-closed（废弃跳过）。
         let baseline_tree = super::plan_preflight::plan_baseline_tree(
             &lifecycle,
             &self.session.project_id,
             &self.session.issue_id,
-        );
+        )?;
         let validation_now = chrono::Utc::now().to_rfc3339();
         let report = match validate_plan_candidate_ir(
             &ir,

@@ -15,56 +15,69 @@ fn test_tool_policy_audit_sink() -> super::LifecycleStore {
 }
 
 fn provider_start_event(provider: &str) -> DurableToolPolicyEvent {
-    DurableToolPolicyEvent::ProviderStart(crate::cross_cutting::tool_policy_audit::ProviderStartAudit {
-        provider: provider.to_string(),
-        role: "orchestrator".to_string(),
-        workspace_session_id: "ws-1".to_string(),
-        provider_session_id: "thread-1".to_string(),
-        tool_policy_canonical_digest: format!("sha256:{provider}-digest"),
-        argv: vec!["--mode".to_string(), "rpc".to_string()],
-        sandbox: None,
-        approval_policy: None,
-        provider_version: "provider 1.2.3".to_string(),
-        adapter_dialect: "codex-app-server-rpc".to_string(),
-    })
+    DurableToolPolicyEvent::ProviderStart(
+        crate::cross_cutting::tool_policy_audit::ProviderStartAudit {
+            provider: provider.to_string(),
+            role: "orchestrator".to_string(),
+            workspace_session_id: "ws-1".to_string(),
+            provider_session_id: "thread-1".to_string(),
+            tool_policy_canonical_digest: format!("sha256:{provider}-digest"),
+            argv: vec!["--mode".to_string(), "rpc".to_string()],
+            sandbox: None,
+            approval_policy: None,
+            provider_version: "provider 1.2.3".to_string(),
+            adapter_dialect: "codex-app-server-rpc".to_string(),
+        },
+    )
 }
 
 fn approval_decision_event(category: &str, request_id: &str) -> DurableToolPolicyEvent {
-    DurableToolPolicyEvent::ApprovalDecision(crate::cross_cutting::tool_policy_audit::ApprovalDecisionAudit {
-        request_id: request_id.to_string(),
-        category: category.to_string(),
-        server_name: None,
-        tool_name: Some("command".to_string()),
-        decision: "decline".to_string(),
-        reason_code: "policy_denies_write_side".to_string(),
-        policy_digest: "sha256:codex-digest".to_string(),
-    })
+    DurableToolPolicyEvent::ApprovalDecision(
+        crate::cross_cutting::tool_policy_audit::ApprovalDecisionAudit {
+            request_id: request_id.to_string(),
+            category: category.to_string(),
+            server_name: None,
+            tool_name: Some("command".to_string()),
+            decision: "decline".to_string(),
+            reason_code: "policy_denies_write_side".to_string(),
+            policy_digest: "sha256:codex-digest".to_string(),
+        },
+    )
 }
 
 fn protocol_warning_event(reason_code: &str) -> DurableToolPolicyEvent {
-    DurableToolPolicyEvent::ProtocolWarning(crate::cross_cutting::tool_policy_audit::ProtocolWarningAudit {
-        reason_code: reason_code.to_string(),
-        method: "item/unknownKind/requestApproval".to_string(),
-        occurrence: 1,
-    })
+    DurableToolPolicyEvent::ProtocolWarning(
+        crate::cross_cutting::tool_policy_audit::ProtocolWarningAudit {
+            reason_code: reason_code.to_string(),
+            method: "item/unknownKind/requestApproval".to_string(),
+            occurrence: 1,
+        },
+    )
 }
 
 fn session_terminated_event(reason_code: &str) -> DurableToolPolicyEvent {
-    DurableToolPolicyEvent::SessionTerminated(crate::cross_cutting::tool_policy_audit::SessionTerminatedAudit {
-        reason_code: reason_code.to_string(),
-    })
+    DurableToolPolicyEvent::SessionTerminated(
+        crate::cross_cutting::tool_policy_audit::SessionTerminatedAudit {
+            reason_code: reason_code.to_string(),
+        },
+    )
 }
 
 #[tokio::test]
 async fn tool_policy_audit_writes_provider_start_once_then_canonical_events() {
     let sink = test_tool_policy_audit_sink();
-    sink.append("ws-1", 7, provider_start_event("codex")).unwrap();
+    sink.append("ws-1", 7, provider_start_event("codex"))
+        .unwrap();
     sink.append("ws-1", 7, approval_decision_event("fileChange", "aria-0"))
         .unwrap();
     sink.append("ws-1", 7, protocol_warning_event("unknown"))
         .unwrap();
-    sink.append("ws-1", 7, session_terminated_event("unknown_approval_storm"))
-        .unwrap();
+    sink.append(
+        "ws-1",
+        7,
+        session_terminated_event("unknown_approval_storm"),
+    )
+    .unwrap();
     let lines = sink.read_tool_policy_lines("ws-1", 7).unwrap();
     assert_eq!(lines[0].event_type(), "provider_start");
     assert_eq!(
@@ -93,7 +106,10 @@ async fn tool_policy_audit_writes_provider_start_once_then_canonical_events() {
     let serialized = serde_json::to_string(&lines[1]).unwrap();
     assert!(serialized.contains("aria-0"), "{serialized}");
     let serialized = serde_json::to_string(&lines[3]).unwrap();
-    assert!(serialized.contains("unknown_approval_storm"), "{serialized}");
+    assert!(
+        serialized.contains("unknown_approval_storm"),
+        "{serialized}"
+    );
 }
 
 // ---- F3 修复轮 P1-1：D6/D7 冻结字段名与必需字段严格性 ----
@@ -103,14 +119,22 @@ fn tool_policy_audit_schema_freezes_d6_d7_persisted_field_names() {
     // D6/D7 冻结字段名逐字对账：provider_start/approval_decision 的 durable 序列化
     // 键名必须与契约一致（不得以别名落盘）。
     let sink = test_tool_policy_audit_sink();
-    sink.append("ws-frozen", 0, provider_start_event("codex")).unwrap();
-    sink.append("ws-frozen", 0, approval_decision_event("file_change", "aria-0"))
+    sink.append("ws-frozen", 0, provider_start_event("codex"))
         .unwrap();
+    sink.append(
+        "ws-frozen",
+        0,
+        approval_decision_event("file_change", "aria-0"),
+    )
+    .unwrap();
     let lines = sink.read_tool_policy_lines("ws-frozen", 0).unwrap();
     let start = serde_json::to_value(&lines[0]).unwrap();
     assert_eq!(start["workspace_session_id"], "ws-frozen", "{start}");
     assert!(start.get("provider_session_id").is_some(), "{start}");
-    assert!(start.get("tool_policy_canonical_digest").is_some(), "{start}");
+    assert!(
+        start.get("tool_policy_canonical_digest").is_some(),
+        "{start}"
+    );
     assert!(start.get("adapter_dialect").is_some(), "{start}");
     assert!(start.get("provider_version").is_some(), "{start}");
     let decision = serde_json::to_value(&lines[1]).unwrap();
@@ -123,7 +147,10 @@ fn tool_policy_audit_schema_freezes_d6_d7_persisted_field_names() {
         "request_id",
         "decision",
     ] {
-        assert!(decision.get(field).is_some(), "approval_decision missing {field}: {decision}");
+        assert!(
+            decision.get(field).is_some(),
+            "approval_decision missing {field}: {decision}"
+        );
     }
 }
 
@@ -131,7 +158,8 @@ fn tool_policy_audit_schema_freezes_d6_d7_persisted_field_names() {
 fn tool_policy_audit_required_fields_must_be_present_when_parsing() {
     // 必需字段缺失 = 解析失败：不得以 `#[serde(default)]` 宽容出无指纹记录。
     let sink = test_tool_policy_audit_sink();
-    sink.append("ws-strict", 0, provider_start_event("codex")).unwrap();
+    sink.append("ws-strict", 0, provider_start_event("codex"))
+        .unwrap();
     let lines = sink.read_tool_policy_lines("ws-strict", 0).unwrap();
     let base = serde_json::to_string(&lines[0]).unwrap();
     for field in [
@@ -163,10 +191,10 @@ fn tool_policy_audit_required_fields_must_be_present_when_parsing() {
 #[cfg(unix)]
 fn fake_pi_rpc_fixture(dir: &std::path::Path) -> std::path::PathBuf {
     let path = dir.join("fake-pi-rpc");
-    std::fs::write(&path, "#!/bin/sh\nwhile IFS= read -r line; do :; done\n").expect("write fixture");
+    std::fs::write(&path, "#!/bin/sh\nwhile IFS= read -r line; do :; done\n")
+        .expect("write fixture");
     use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-        .expect("chmod fixture");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod fixture");
     path
 }
 
@@ -177,7 +205,9 @@ fn fake_pi_rpc_fixture(dir: &std::path::Path) -> std::path::PathBuf {
 #[cfg(unix)]
 #[tokio::test]
 async fn tool_policy_audit_resume_drift_superseded_lands_on_replaced_run_file() {
-    use crate::cross_cutting::pi_provider::{PI_POLICY_DIALECT, PiProvider, TOOL_POLICY_PROVIDER_NAME};
+    use crate::cross_cutting::pi_provider::{
+        PI_POLICY_DIALECT, PiProvider, TOOL_POLICY_PROVIDER_NAME,
+    };
     use crate::cross_cutting::streaming_provider::{
         ProviderToolPolicy, ProviderVersionSupplier, StreamingProviderAdapter as _,
     };
@@ -210,10 +240,13 @@ async fn tool_policy_audit_resume_drift_superseded_lands_on_replaced_run_file() 
     let next_seq = store.next_tool_policy_role_run_seq("ws-drift").unwrap();
     let bound_sink = RoleRunBoundAuditSink::new(store.clone(), "ws-drift", next_seq).into_sink();
 
-    let provider = PiProvider::new(fake_pi_rpc_fixture(tmp.path()))
-        .with_version_supplier(std::sync::Arc::new(|| Ok("pi 0.83.0-policy-fixture".to_string()))
-            as ProviderVersionSupplier);
+    let provider =
+        PiProvider::new(fake_pi_rpc_fixture(tmp.path()))
+            .with_version_supplier(std::sync::Arc::new(
+                || Ok("pi 0.83.0-policy-fixture".to_string()),
+            ) as ProviderVersionSupplier);
     let input = crate::cross_cutting::streaming_provider::StreamingProviderInput {
+        baseline_tree: None,
         tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
         audit_sink: Some(bound_sink),
         provider_type: ProviderType::Pi,
@@ -242,7 +275,11 @@ async fn tool_policy_audit_resume_drift_superseded_lands_on_replaced_run_file() 
         "superseded session_terminated must land on the replaced run's file"
     );
     assert_eq!(old_lines[1].event_type(), "session_terminated");
-    assert!(serde_json::to_string(&old_lines[1]).unwrap().contains("superseded_policy_drift"));
+    assert!(
+        serde_json::to_string(&old_lines[1])
+            .unwrap()
+            .contains("superseded_policy_drift")
+    );
     // 新 run 文件（seq 1）：provider_start 恰为首行，无终止事件前置。
     let new_lines = store.read_tool_policy_lines("ws-drift", 1).unwrap();
     assert_eq!(
@@ -250,9 +287,11 @@ async fn tool_policy_audit_resume_drift_superseded_lands_on_replaced_run_file() 
         "provider_start",
         "new run must start with provider_start"
     );
-    assert!(new_lines
-        .iter()
-        .all(|line| line.event_type() != "session_terminated"));
+    assert!(
+        new_lines
+            .iter()
+            .all(|line| line.event_type() != "session_terminated")
+    );
 }
 
 /// 测试内同步 append 辅助（真实 store 的 sink trait 入口）。
@@ -332,7 +371,11 @@ fn tool_policy_audit_concurrent_appends_and_allocations_are_serialized() {
     let mut unique_alloc = allocated.clone();
     unique_alloc.sort_unstable();
     unique_alloc.dedup();
-    assert_eq!(unique_alloc.len(), allocated.len(), "role_run_seq 分配不得重复");
+    assert_eq!(
+        unique_alloc.len(),
+        allocated.len(),
+        "role_run_seq 分配不得重复"
+    );
 }
 
 #[test]
@@ -348,7 +391,10 @@ fn tool_policy_audit_role_run_seq_allocation_persists_immediately_and_is_not_reu
     assert_eq!(store.next_tool_policy_role_run_seq("ws-alloc").unwrap(), 1);
     // 重开实例（同进程、同根）：进程内高水位继续单调；跨进程需部署层单写者。
     let reopened = super::LifecycleStore::new(paths);
-    assert_eq!(reopened.next_tool_policy_role_run_seq("ws-alloc").unwrap(), 2);
+    assert_eq!(
+        reopened.next_tool_policy_role_run_seq("ws-alloc").unwrap(),
+        2
+    );
     // 兼容：无 marker 的既有分区按文件 max 推导。
     store
         .append("ws-legacy", 5, provider_start_event("codex"))
@@ -361,7 +407,11 @@ fn tool_policy_audit_append_fails_closed_on_corrupted_file() {
     // P2-3：append 前校验——文件首行不可解析（或任一行坏行）→ 返回错误，
     // 不得在损坏文件上继续追加。
     let tmp = tempfile::tempdir().expect("tempdir");
-    let root = tmp.path().join(".aria").join("tool-policy-run-audit").join("ws-corrupt");
+    let root = tmp
+        .path()
+        .join(".aria")
+        .join("tool-policy-run-audit")
+        .join("ws-corrupt");
     std::fs::create_dir_all(&root).expect("partition dir");
     std::fs::write(root.join("9.jsonl"), "not-json\n").expect("corrupt fixture");
     let store = super::LifecycleStore::new(crate::product::app_paths::ProductAppPaths::new(
@@ -379,13 +429,15 @@ fn tool_policy_audit_append_fails_closed_on_corrupted_file() {
 #[test]
 fn tool_policy_audit_rejects_duplicate_or_late_provider_start() {
     let sink = test_tool_policy_audit_sink();
-    sink.append("ws-2", 0, provider_start_event("codex")).unwrap();
+    sink.append("ws-2", 0, provider_start_event("codex"))
+        .unwrap();
     // 同一 (workspace_session_id, role_run_seq) 文件内 provider_start 必须唯一且为首行。
     let duplicate = sink.append("ws-2", 0, provider_start_event("codex"));
     assert!(duplicate.is_err(), "duplicate provider_start must error");
 
     // 已有后续事件的文件不允许再补 provider_start（首行约束）。
-    sink.append("ws-2", 1, provider_start_event("codex")).unwrap();
+    sink.append("ws-2", 1, provider_start_event("codex"))
+        .unwrap();
     sink.append("ws-2", 1, approval_decision_event("fileChange", "aria-0"))
         .unwrap();
     let late = sink.append("ws-2", 1, provider_start_event("codex"));
@@ -393,7 +445,10 @@ fn tool_policy_audit_rejects_duplicate_or_late_provider_start() {
 
     // 空/不存在文件不允许以非 provider_start 开头。
     let orphan = sink.append("ws-2", 2, protocol_warning_event("unknown"));
-    assert!(orphan.is_err(), "canonical file must start with provider_start");
+    assert!(
+        orphan.is_err(),
+        "canonical file must start with provider_start"
+    );
 }
 
 // ---- F3（最终审）：读端结构校验（有效事件 vs 结构性损坏 fail-closed） ----
@@ -419,8 +474,7 @@ fn write_raw_audit_file(
         .join("tool-policy-run-audit")
         .join(workspace_session_id)
         .join(format!("{role_run_seq}.jsonl"));
-    std::fs::create_dir_all(file.parent().expect("partition dir"))
-        .expect("create partition dir");
+    std::fs::create_dir_all(file.parent().expect("partition dir")).expect("create partition dir");
     std::fs::write(&file, body).expect("write raw fixture");
     file
 }
@@ -434,7 +488,7 @@ fn raw_audit_store(tmp: &tempfile::TempDir) -> super::LifecycleStore {
 #[test]
 fn tool_policy_audit_read_fails_closed_on_unknown_schema_version() {
     // F3：schema_version≠1 的可解析行是结构性损坏——读取返回 CorruptAuditFile，
- // append 拒绝在损坏文件上继续追加，原始文件保持不变。
+    // append 拒绝在损坏文件上继续追加，原始文件保持不变。
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let body = format!(
         "{}\n{}\n",
@@ -449,7 +503,11 @@ fn tool_policy_audit_read_fails_closed_on_unknown_schema_version() {
     ));
     assert!(
         store
-            .append("ws-schema", 3, approval_decision_event("file_change", "aria-9"))
+            .append(
+                "ws-schema",
+                3,
+                approval_decision_event("file_change", "aria-9")
+            )
             .is_err(),
         "append must refuse a schema-corrupted file"
     );
@@ -488,8 +546,15 @@ fn tool_policy_audit_read_fails_closed_on_seq_regression() {
         "append must refuse a seq-regressed file (would append seq 3)"
     );
     let raw = std::fs::read_to_string(&file).unwrap();
-    assert_eq!(raw.lines().count(), 3, "corrupted file must not be appended");
-    assert!(!raw.contains("aria-2"), "no new event may land on the corrupt file");
+    assert_eq!(
+        raw.lines().count(),
+        3,
+        "corrupted file must not be appended"
+    );
+    assert!(
+        !raw.contains("aria-2"),
+        "no new event may land on the corrupt file"
+    );
 }
 
 #[test]
@@ -510,7 +575,11 @@ fn tool_policy_audit_read_fails_closed_on_duplicate_seq() {
     ));
     assert!(
         store
-            .append("ws-dup-seq", 7, approval_decision_event("file_change", "aria-2"))
+            .append(
+                "ws-dup-seq",
+                7,
+                approval_decision_event("file_change", "aria-2")
+            )
             .is_err(),
         "append must refuse a duplicate-seq file"
     );
@@ -605,7 +674,11 @@ fn tool_policy_audit_read_fails_closed_when_seq_does_not_start_at_conventional_o
 #[test]
 fn tool_policy_audit_bad_line_reader_skips_and_reports_without_writing_back() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
-    let root = tmp.path().join(".aria").join("tool-policy-run-audit").join("ws-1");
+    let root = tmp
+        .path()
+        .join(".aria")
+        .join("tool-policy-run-audit")
+        .join("ws-1");
     std::fs::create_dir_all(&root).expect("partition dir");
     let file = root.join("7.jsonl");
     // 首行为完整 provider_start（冻结字段齐全）；第二行坏 JSON。P1-1 后必需字段
@@ -628,7 +701,11 @@ fn tool_policy_audit_bad_line_reader_skips_and_reports_without_writing_back() {
     assert_eq!(result.warnings[0].reason_code, "invalid_json_line");
     // 读取告警不得写回 durable 分区：原始两行保持原样。
     let raw = std::fs::read_to_string(&file).unwrap();
-    assert_eq!(raw.lines().count(), 2, "reader must not mutate the partition");
+    assert_eq!(
+        raw.lines().count(),
+        2,
+        "reader must not mutate the partition"
+    );
     assert!(raw.contains("not-json"));
     assert!(!store.contains_tool_policy_event("ws-1", 7, "protocol_warning"));
 }
@@ -637,8 +714,12 @@ fn tool_policy_audit_bad_line_reader_skips_and_reports_without_writing_back() {
 fn tool_policy_audit_line_seq_is_monotonic_across_appends() {
     let sink = test_tool_policy_audit_sink();
     sink.append("ws-3", 4, provider_start_event("pi")).unwrap();
-    sink.append("ws-3", 4, approval_decision_event("command_execution", "aria-1"))
-        .unwrap();
+    sink.append(
+        "ws-3",
+        4,
+        approval_decision_event("command_execution", "aria-1"),
+    )
+    .unwrap();
     let lines = sink.read_tool_policy_lines("ws-3", 4).unwrap();
     assert_eq!(lines[0].seq, 0);
     assert_eq!(lines[1].seq, 1);
@@ -661,7 +742,8 @@ fn tool_policy_audit_rejects_path_escape_identifiers() {
 fn tool_policy_audit_role_run_seq_allocation_is_monotonic_per_workspace() {
     let sink = test_tool_policy_audit_sink();
     assert_eq!(sink.next_tool_policy_role_run_seq("ws-4").unwrap(), 0);
-    sink.append("ws-4", 0, provider_start_event("codex")).unwrap();
+    sink.append("ws-4", 0, provider_start_event("codex"))
+        .unwrap();
     assert_eq!(sink.next_tool_policy_role_run_seq("ws-4").unwrap(), 1);
     // 其它 workspace 互不影响。
     assert_eq!(sink.next_tool_policy_role_run_seq("ws-5").unwrap(), 0);
@@ -679,9 +761,11 @@ fn tool_policy_audit_line_exposes_event_type_for_every_canonical_event() {
     assert_eq!(line.event_type_text(), "provider_start");
     let line = ToolPolicyAuditLine::from_event(1, approval_decision_event("file_change", "aria-0"));
     assert_eq!(line.event_type_text(), "approval_decision");
-    let line = ToolPolicyAuditLine::from_event(2, protocol_warning_event("unsupported_approval_kind"));
+    let line =
+        ToolPolicyAuditLine::from_event(2, protocol_warning_event("unsupported_approval_kind"));
     assert_eq!(line.event_type_text(), "protocol_warning");
-    let line = ToolPolicyAuditLine::from_event(3, session_terminated_event("unknown_approval_storm"));
+    let line =
+        ToolPolicyAuditLine::from_event(3, session_terminated_event("unknown_approval_storm"));
     assert_eq!(line.event_type_text(), "session_terminated");
 }
 
@@ -754,15 +838,20 @@ fn tool_policy_audit_resume_lookup_finds_latest_provider_start_by_native_session
         .unwrap()
         .expect("stored provider_start must be found");
     assert_eq!(found.record.tool_policy_canonical_digest, "sha256:a2");
-    assert_eq!(found.role_run_seq, 1, "lookup must surface the run location (P1-4)");
+    assert_eq!(
+        found.role_run_seq, 1,
+        "lookup must surface the run location (P1-4)"
+    );
 
     // 其它 native id / 其它 workspace：缺失 → None（resume 决策拒绝并新建）。
-    assert!(sink
-        .find_latest_tool_policy_provider_start("ws-6", "thread-other")
-        .unwrap()
-        .is_none());
-    assert!(sink
-        .find_latest_tool_policy_provider_start("ws-7", "thread-shared")
-        .unwrap()
-        .is_none());
+    assert!(
+        sink.find_latest_tool_policy_provider_start("ws-6", "thread-other")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        sink.find_latest_tool_policy_provider_start("ws-7", "thread-shared")
+            .unwrap()
+            .is_none()
+    );
 }

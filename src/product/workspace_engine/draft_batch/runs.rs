@@ -130,12 +130,12 @@ impl WorkspaceEngine {
             .clone()
             .or_else(|| std::env::current_dir().ok())
             .ok_or_else(|| "working directory unavailable".to_string())?;
-        Ok(self.build_work_item_plan_streaming_input(
+        self.build_work_item_plan_streaming_input(
             provider_type_for_name(&self.session.author_provider),
             invocation.prompt,
             working_dir.to_string_lossy().to_string(),
             self.session.author_provider.clone(),
-        ))
+        )
     }
 
     pub(crate) fn build_current_work_item_batch_draft_streaming_input(
@@ -185,12 +185,12 @@ impl WorkspaceEngine {
             .clone()
             .or_else(|| std::env::current_dir().ok())
             .ok_or_else(|| "working directory unavailable".to_string())?;
-        Ok(self.build_work_item_plan_streaming_input(
+        self.build_work_item_plan_streaming_input(
             provider_type_for_name(&self.session.author_provider),
             invocation.prompt,
             working_dir.to_string_lossy().to_string(),
             self.session.author_provider.clone(),
-        ))
+        )
     }
 
     pub(crate) fn accepted_work_item_plan_draft_records(

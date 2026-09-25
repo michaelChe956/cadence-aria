@@ -764,8 +764,8 @@ mod tests {
                 title: "new lc issue".to_string(),
                 description: None,
                 change_id: None,
-                           base_branch: None,
- })
+                base_branch: None,
+            })
             .unwrap();
 
         let mut attempt = logical_attempt(&project_id, &issue.id, ATTEMPT_ID, &checkout_path);

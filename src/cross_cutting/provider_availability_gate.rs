@@ -445,6 +445,7 @@ mod tests {
 
     fn streaming_input() -> StreamingProviderInput {
         StreamingProviderInput {
+            baseline_tree: None,
             tool_policy: None,
             audit_sink: None,
             provider_type: ProviderType::Codex,

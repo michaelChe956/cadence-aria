@@ -376,6 +376,7 @@ async fn review_fixture_fake_provider_emits_json_contract_for_reviewer() {
     let mut session = provider
         .start(
             StreamingProviderInput {
+                baseline_tree: None,
                 tool_policy: None,
                 audit_sink: None,
                 provider_type: ProviderType::Codex,
@@ -442,6 +443,7 @@ async fn review_fixture_raw_text_preserves_structured_output_failure() {
     let mut session = provider
         .start(
             StreamingProviderInput {
+                baseline_tree: None,
                 tool_policy: None,
                 audit_sink: None,
                 provider_type: ProviderType::Codex,
@@ -513,6 +515,7 @@ async fn review_fixture_can_emit_alias_findings_and_malformed_json() {
     let mut session = provider
         .start(
             StreamingProviderInput {
+                baseline_tree: None,
                 tool_policy: None,
                 audit_sink: None,
                 provider_type: ProviderType::Codex,
@@ -552,6 +555,7 @@ async fn review_fixture_can_emit_alias_findings_and_malformed_json() {
     let mut malformed_session = provider
         .start(
             StreamingProviderInput {
+                baseline_tree: None,
                 tool_policy: None,
                 audit_sink: None,
                 provider_type: ProviderType::Codex,
@@ -620,6 +624,7 @@ async fn review_fixture_provider_consumes_queued_outputs_in_order() {
     let mut first_review_session = provider
         .start(
             StreamingProviderInput {
+                baseline_tree: None,
                 tool_policy: None,
                 audit_sink: None,
                 provider_type: ProviderType::Codex,
@@ -646,6 +651,7 @@ async fn review_fixture_provider_consumes_queued_outputs_in_order() {
     let mut review_session = provider
         .start(
             StreamingProviderInput {
+                baseline_tree: None,
                 tool_policy: None,
                 audit_sink: None,
                 provider_type: ProviderType::Codex,
@@ -733,6 +739,7 @@ async fn permission_fixture_fake_provider_emits_timeout_when_unanswered() {
 
 fn streaming_input(session_id: &str) -> StreamingProviderInput {
     StreamingProviderInput {
+        baseline_tree: None,
         tool_policy: None,
         audit_sink: None,
         provider_type: ProviderType::Fake,

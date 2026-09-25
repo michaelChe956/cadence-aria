@@ -273,6 +273,8 @@ where
         Arc::clone(&bridge),
         event_tx.clone(),
         cancel.clone(),
+        // REQ-PIB-02：基线会话锚点透传（fs 读路由基线树 / terminal 拒绝）。
+        input.baseline_tree.clone(),
     );
 
     let mut next_prompt_id = 4_u64;

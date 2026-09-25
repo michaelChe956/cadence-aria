@@ -96,6 +96,61 @@ pub fn write_text_file(root: &Path, path: &str, content: &str) -> Result<(), FsE
     Ok(())
 }
 
+/// 基线树文本读取（REQ-PIB-02 通道层路由）：`git -C <repo> show
+/// refs/heads/<branch>:<path>`——不 checkout、不触工作区（工作区脏值与
+/// `.worktrees/` 兄弟件不可见，F-57 形态根除），参数化 argv 不经 shell。
+/// 路径必须为树内相对路径（拒绝对路径/`..`/空）；树内不存在（或引用不可
+/// 解析）→ NotFound；非 utf8 → NotUtf8。
+pub(super) fn read_baseline_text_file(
+    repo_path: &Path,
+    branch: &str,
+    path: &str,
+) -> Result<String, FsError> {
+    let relative = validate_tree_relative_path(path)?;
+    let reference = format!("refs/heads/{branch}");
+    let tree_spec = format!("{reference}:{}", relative.display());
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .arg("show")
+        .arg(&tree_spec)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|error| FsError::Io(format!("git show {tree_spec}: {error}")))?;
+    if !output.status.success() {
+        return Err(FsError::NotFound(format!(
+            "not found in baseline tree {reference}: {path}"
+        )));
+    }
+    String::from_utf8(output.stdout)
+        .map_err(|error| FsError::NotUtf8(format!("baseline tree file {path}: {error}")))
+}
+
+/// 基线树路径校验：仅接受树内相对路径。与 `validate_relative` 的根锚定
+/// 校验不同——树读取无「授权根」概念，`..` 与对路径一律拒绝（git show 的
+/// `<ref>:<path>` 语法本身不接受绝对路径，此处前置拒绝给出统一错误形态）。
+fn validate_tree_relative_path(path: &str) -> Result<PathBuf, FsError> {
+    let p = Path::new(path);
+    if path.trim().is_empty() {
+        return Err(FsError::OutOfRoot(path.to_string()));
+    }
+    if p.is_absolute() {
+        return Err(FsError::OutOfRoot(path.to_string()));
+    }
+    for component in p.components() {
+        match component {
+            Component::ParentDir | Component::CurDir => {
+                return Err(FsError::SymlinkOrTraversal(path.to_string()));
+            }
+            Component::Normal(_) => {}
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(FsError::OutOfRoot(path.to_string()));
+            }
+        }
+    }
+    Ok(p.to_path_buf())
+}
+
 fn map_open_error(error: std::io::Error) -> FsError {
     match error.raw_os_error() {
         Some(libc::ELOOP) => FsError::SymlinkOrTraversal(error.to_string()),

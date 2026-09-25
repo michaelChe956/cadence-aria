@@ -198,8 +198,8 @@ mod tests {
                 title: "logical issue".to_string(),
                 description: None,
                 change_id: None,
-                           base_branch: None,
- })
+                base_branch: None,
+            })
             .unwrap();
         let lc_id = resolve_issue_logical_codebase_id(&paths, "project_0001", &issue.id).unwrap();
         assert_eq!(lc_id.as_deref(), Some("logical_codebase_0001"));
@@ -220,8 +220,8 @@ mod tests {
                 title: "logical issue".to_string(),
                 description: None,
                 change_id: None,
-                           base_branch: None,
- })
+                base_branch: None,
+            })
             .unwrap();
         // 在 lc 子树写 manifest + selection。
         let logical = LogicalCodebaseStore::for_lc(paths.clone(), lc_id);

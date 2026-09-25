@@ -23,7 +23,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::cross_cutting::approval_bridge::ApprovalBridge;
 use crate::cross_cutting::json_rpc_peer::JsonRpcPeer;
-use crate::cross_cutting::streaming_provider::{ProviderEvent, RiskLevel};
+use crate::cross_cutting::streaming_provider::{BaselineTreeRef, ProviderEvent, RiskLevel};
 use crate::protocol::contracts::AdapterRole;
 
 use self::fs_handlers::{handle_fs_read, handle_fs_write};
@@ -59,6 +59,9 @@ struct ClientServiceState {
     event_tx: mpsc::Sender<ProviderEvent>,
     terminal: TerminalManager,
     bwrap: Option<PathBuf>,
+    /// REQ-PIB-02：基线会话锚点。`Some` 时 fs 读路由基线树、terminal 一律
+    /// 拒绝（见 `evaluate_policy` 前置与 `fs_handlers`）；`None` 行为不变。
+    baseline_tree: Option<BaselineTreeRef>,
     /// Extra read-write sandbox binds for the coding role, resolved ONCE at
     /// construction — when the root is still Aria-prepared and untouched by
     /// the coder. Re-resolving per terminal command would follow a
@@ -128,6 +131,7 @@ where
         bridge: Arc<ApprovalBridge>,
         event_tx: mpsc::Sender<ProviderEvent>,
         cancel: CancellationToken,
+        baseline_tree: Option<BaselineTreeRef>,
     ) -> Self {
         let root = canonicalize_root(&working_dir).unwrap_or(working_dir);
         // Freeze the git bind face before the coder can touch the root:
@@ -150,6 +154,7 @@ where
             terminal,
             bwrap,
             writable_git_paths,
+            baseline_tree,
             cleanup_cancel: cancel.child_token(),
         });
 
@@ -261,6 +266,15 @@ async fn evaluate_policy(
     action: ClientAction,
     description: &str,
 ) -> Result<(), ClientServiceError> {
+    // REQ-PIB-02：基线会话 terminal 一律拒绝——bwrap `--ro-bind / /` 是写边界
+    // 非读边界（宿主全量只读可见，F-57 现场通道），命令语法收窄也不足以绑定
+    // 基线 ref。前置判定独立于 policy.rs 决策矩阵（24 格冻结，零改动）。
+    if state.baseline_tree.is_some() && matches!(action, ClientAction::Terminal) {
+        return Err(ClientServiceError::Rejected(
+            "baseline session: terminal access is denied (REQ-PIB-02; issue baseline tree is the only readable source)"
+                .to_string(),
+        ));
+    }
     match state.policy.evaluate(action) {
         PolicyDecision::Allow => Ok(()),
         PolicyDecision::Deny(reason) => Err(ClientServiceError::Rejected(reason.to_string())),
@@ -342,6 +356,7 @@ mod tests {
             )),
             event_tx,
             CancellationToken::new(),
+            None,
         );
         let (server_reader, mut server_writer) = tokio::io::split(server);
         let mut server_reader = tokio::io::BufReader::new(server_reader);
@@ -444,6 +459,7 @@ mod tests {
             )),
             event_tx,
             CancellationToken::new(),
+            None,
         );
         let (server_reader, mut server_writer) = tokio::io::split(server);
         let mut server_reader = tokio::io::BufReader::new(server_reader);
@@ -519,5 +535,119 @@ mod tests {
         })
         .await
         .expect("reply within timeout")
+    }
+
+    /// F-57 现场形态复现（REQ-PIB-02 场景 1/2）：基线会话（baseline_tree=
+    /// Some）的 fs 读必须返回基线树内容而非工作区检出——同路径未提交污染
+    /// 不可见、`.worktrees/` 兄弟件不可达；terminal 一律拒绝（含 Auto 档）。
+    #[tokio::test]
+    async fn baseline_session_reads_tree_content_and_denies_terminal() {
+        let repo = tempfile::tempdir().expect("repo dir");
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .stdin(std::process::Stdio::null())
+                .status()
+                .expect("git fixture command");
+            assert!(status.success(), "git {args:?}");
+        };
+        run(&["init", "-b", "main"]);
+        run(&["config", "user.email", "test@example.com"]);
+        run(&["config", "user.name", "Test User"]);
+        std::fs::write(repo.path().join("status.html"), "baseline-content\n")
+            .expect("write baseline file");
+        run(&["add", "status.html"]);
+        run(&["commit", "-m", "baseline"]);
+        // 工作区脏值（未提交污染）：若读工作区检出会返回 dirty-content。
+        std::fs::write(repo.path().join("status.html"), "dirty-content\n")
+            .expect("dirty working tree file");
+        // 兄弟 worktree 独有文件：磁盘上存在、main 树内不存在（F-57 现场）。
+        run(&[
+            "worktree",
+            "add",
+            ".worktrees/aria-issues/issue_0001",
+            "-b",
+            "sibling",
+        ]);
+        std::fs::write(
+            repo.path()
+                .join(".worktrees/aria-issues/issue_0001/sibling-only.txt"),
+            "sibling\n",
+        )
+        .expect("sibling worktree file");
+
+        let (client, server) = tokio::io::duplex(16 * 1024);
+        let (reader, writer) = tokio::io::split(client);
+        let peer = JsonRpcPeer::new(reader, writer);
+        let (event_tx, _events) = mpsc::channel(32);
+        let dispatcher = KimiClientServiceDispatcher::new(
+            peer,
+            "author-session".to_string(),
+            repo.path().to_path_buf(),
+            AdapterRole::Orchestrator,
+            ProviderPermissionMode::Auto,
+            Arc::new(ApprovalBridge::new(
+                ProviderPermissionMode::Auto,
+                event_tx.clone(),
+            )),
+            event_tx,
+            CancellationToken::new(),
+            Some(BaselineTreeRef {
+                repo_path: repo.path().to_path_buf(),
+                branch: "main".to_string(),
+            }),
+        );
+        let (server_reader, mut server_writer) = tokio::io::split(server);
+        let mut server_reader = tokio::io::BufReader::new(server_reader);
+
+        // 场景 1（所见=基线）：基线内路径 → main 树内容，≠工作区脏值。
+        assert!(dispatcher.dispatch(
+            "fs/read_text_file",
+            json!(0),
+            json!({"sessionId": "author-session", "path": "status.html"})
+        ));
+        let reply = read_reply(&mut server_reader, 0).await;
+        assert_eq!(
+            reply["result"]["content"],
+            json!("baseline-content\n"),
+            "{reply}"
+        );
+
+        // 场景 2（看不到兄弟 worktree）：磁盘存在、树内不存在 → 找不到。
+        assert!(dispatcher.dispatch(
+            "fs/read_text_file",
+            json!(1),
+            json!({
+                "sessionId": "author-session",
+                "path": ".worktrees/aria-issues/issue_0001/sibling-only.txt"
+            })
+        ));
+        let reply = read_reply(&mut server_reader, 1).await;
+        assert_eq!(reply["error"]["code"], json!(ERROR_FS), "{reply}");
+
+        // 场景 3（收不住的通道拒绝）：基线会话 terminal 一律拒绝（Auto 档
+        // 本应 Allow——bwrap 宿主只读可见是读泄漏面）。
+        assert!(dispatcher.dispatch(
+            "terminal/create",
+            json!(2),
+            json!({
+                "sessionId": "author-session",
+                "command": "git status",
+                "cwd": ""
+            })
+        ));
+        let reply = read_reply(&mut server_reader, 2).await;
+        assert_eq!(reply["error"]["code"], json!(ERROR_REJECTED), "{reply}");
+        assert!(
+            reply["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("baseline"),
+            "{reply}"
+        );
+
+        let _ = server_writer.shutdown().await;
+        drop(dispatcher);
     }
 }

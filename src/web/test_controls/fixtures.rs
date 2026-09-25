@@ -64,8 +64,8 @@ pub(super) fn create_large_workspace_fixture(
         title: "Large Workspace Memory Issue".to_string(),
         description: Some("验证大型 workspace 的按需内容加载".to_string()),
         change_id: None,
-           base_branch: None,
- })?;
+        base_branch: None,
+    })?;
     let lifecycle = LifecycleStore::new(app_paths);
     let story = lifecycle.create_story_spec(CreateStorySpecInput {
         project_id: project.id.clone(),
@@ -307,8 +307,8 @@ fn create_coding_role_run_fixture(
         title: "Coding Role Run Issue".to_string(),
         description: Some("Issue for role run history E2E".to_string()),
         change_id: None,
-           base_branch: None,
- })?;
+        base_branch: None,
+    })?;
 
     let lifecycle = LifecycleStore::new(app_paths.clone());
     let story = lifecycle.create_story_spec(CreateStorySpecInput {
