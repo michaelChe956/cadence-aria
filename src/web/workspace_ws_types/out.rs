@@ -33,8 +33,11 @@ pub enum RecoverableInterruptedOperation {
     Revision,
 }
 
-/// F-27：session_state 顶层挂起 choice 投影元素——与 `ChoiceRequest` 帧字段
-/// 同构（同一 options/questions DTO），供前端收帧对账补挂 choice 卡。
+/// F-27：session_state 顶层挂起 choice 投影元素——与 `ChoiceRequest` 帧
+/// 字段同构（同一 options/questions DTO），供前端收帧对账补挂 choice 卡。
+/// F-59 增补：`created_at_ms`（provider pending 登记时刻，epoch ms——等待
+/// 提示条已等待时长/901s 超时倒计时锚点，TextFallback 无等待界故缺省）与
+/// `role`（发问角色 author/reviewer）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WsPendingChoiceRequest {
     pub id: String,
@@ -44,6 +47,16 @@ pub struct WsPendingChoiceRequest {
     pub allow_free_text: bool,
     pub questions: Vec<ChoiceQuestion>,
     pub source: String,
+    /// F-59：挂起起始时刻（epoch ms）；TextFallback pending 不携带。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at_ms: Option<u64>,
+    /// F-59：发问角色（author/reviewer）；旧载荷缺省按 author 对账。
+    #[serde(default = "default_pending_choice_role")]
+    pub role: String,
+}
+
+fn default_pending_choice_role() -> String {
+    "author".to_string()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -355,6 +368,8 @@ mod tests {
             allow_free_text: true,
             questions: Vec::new(),
             source: "text_fallback".to_string(),
+            created_at_ms: None,
+            role: "author".to_string(),
         });
 
         let value = serde_json::to_value(message).unwrap();
@@ -369,6 +384,9 @@ mod tests {
                 "allow_free_text": true,
                 "questions": [],
                 "source": "text_fallback",
+                // F-59：role 恒序列化（旧载荷缺省 author）；created_at_ms
+                // None 时省略（TextFallback 无等待界）。
+                "role": "author",
             }])
         );
     }

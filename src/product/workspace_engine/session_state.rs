@@ -533,23 +533,27 @@ impl WorkspaceEngine {
         let mut requests: Vec<WsPendingChoiceRequest> =
             super::provider_drive::pending_choice_requests_snapshot(&self.session.session_id)
                 .into_iter()
-                .map(|data| {
-                    let questions = data.effective_questions();
+                .map(|entry| {
+                    let questions = entry.request.effective_questions();
                     WsPendingChoiceRequest {
-                        id: data.id,
-                        prompt: data.prompt.clone(),
-                        options: data
+                        id: entry.request.id,
+                        prompt: entry.request.prompt.clone(),
+                        options: entry
+                            .request
                             .options
                             .into_iter()
                             .map(crate::web::workspace_ws_handler::ws_choice_option)
                             .collect(),
-                        allow_multiple: data.allow_multiple,
-                        allow_free_text: data.allow_free_text,
+                        allow_multiple: entry.request.allow_multiple,
+                        allow_free_text: entry.request.allow_free_text,
                         questions: questions
                             .into_iter()
                             .map(crate::web::workspace_ws_handler::ws_choice_question)
                             .collect(),
-                        source: data.source.as_str().to_string(),
+                        source: entry.request.source.as_str().to_string(),
+                        // F-59：登记时刻与发问角色随投影带出（等待提示条数据源）。
+                        created_at_ms: Some(entry.created_at_ms),
+                        role: entry.role.to_string(),
                     }
                 })
                 .collect();
@@ -575,6 +579,10 @@ impl WorkspaceEngine {
                     },
                 )],
                 source: ChoiceRequestSource::TextFallback.as_str().to_string(),
+                // F-59：TextFallback 无 provider 等待界——不带 created_at_ms
+                //（前端回退首见时刻）；发问方恒为 author。
+                created_at_ms: None,
+                role: "author".to_string(),
             };
             if !requests.iter().any(|request| request.id == fallback.id) {
                 requests.push(fallback);

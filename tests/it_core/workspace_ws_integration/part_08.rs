@@ -167,6 +167,20 @@ async fn workspace_ws_session_state_projects_pending_provider_choice_during_acti
         "questions must use effective_questions like the live frame"
     );
     assert_eq!(projected["source"], json!("provider_choice"));
+    // F-59（缺陷 2）：等待提示条数据源——挂起起始时刻与发问角色随投影带出
+    //（已等待时长/901s 超时倒计时的锚点，跨刷新不失真）。
+    let created_at_ms = projected["created_at_ms"]
+        .as_u64()
+        .expect("provider pending choice must carry created_at_ms (F-59)");
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("epoch")
+        .as_millis() as u64;
+    assert!(
+        created_at_ms <= now_ms && now_ms.saturating_sub(created_at_ms) < 60_000,
+        "created_at_ms 必须是登记时刻（epoch ms），实际 {created_at_ms} vs now {now_ms}"
+    );
+    assert_eq!(projected["role"], json!("author"));
 
     drop(secondary);
     drop(primary);
@@ -235,6 +249,13 @@ async fn workspace_ws_session_state_projects_text_fallback_pending_choice() {
         .clone();
     assert_eq!(projected["source"], json!("text_fallback"));
     assert_eq!(projected["allow_multiple"], json!(false));
+    // F-59：TextFallback 发问角色同为 author；无 provider 等待界，
+    // created_at_ms 不得携带（前端回退首见时刻）。
+    assert_eq!(projected["role"], json!("author"));
+    assert!(
+        projected["created_at_ms"].is_null(),
+        "text_fallback 无等待界，投影不得携带 created_at_ms"
+    );
     assert_eq!(projected["allow_free_text"], json!(true));
     assert_eq!(
         projected["questions"][0]["id"],

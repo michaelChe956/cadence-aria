@@ -395,7 +395,7 @@ impl WorkspaceEngine {
                         choice_wait_timeout.as_secs()
                     );
                     let message = format!(
-                        "provider_choice_wait_timeout: 等待用户选择应答超过 {} 秒（choice 卡未达用户或无人应答，pending={:?}），运行已中止；可重新开始生成",
+                        "provider_choice_wait_timeout: 等待回答超时——{} 秒内未收到选择应答，运行已中止；choice 卡可能未送达（页面断线/连接降级期间丢失，刷新页面可补卡）或已送达但无人应答（pending={:?}）。请重新提交反馈重新发起本轮",
                         choice_wait_timeout.as_secs(),
                         pending_ids
                     );
@@ -613,7 +613,7 @@ impl WorkspaceEngine {
                             let questions = request.effective_questions();
                             // F-22/F-19b：pending 由空转非空时起算/重置等待界。
                             let choice_wait_started = pending_choice_requests.is_empty();
-                            pending_choice_requests.insert(request.clone());
+                            pending_choice_requests.insert(request.clone(), role.wire_label());
                             if choice_wait_started {
                                 choice_wait_timer
                                     .as_mut()

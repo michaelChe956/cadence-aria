@@ -13,18 +13,39 @@ use std::collections::HashMap;
 
 use crate::cross_cutting::streaming_provider::ChoiceRequestData;
 
+/// F-27/F-59：登记簿条目——挂起请求 + 挂起起始时刻（epoch ms）+ 发问角色。
+/// `created_at_ms` 是前端等待提示条「已等待时长 / 901s 超时倒计时」的锚点
+///（与驱动循环 choice_wait_timer 的「pending 由空转非空起算」同源：应答
+/// 清空后再次插入即新时刻）；`role` 供提示条标注发问方（author/reviewer）。
+pub(crate) struct RegisteredPendingChoice {
+    pub(crate) request: ChoiceRequestData,
+    pub(crate) created_at_ms: u64,
+    pub(crate) role: &'static str,
+}
+
+fn epoch_ms_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 static PENDING_CHOICE_REGISTRY: std::sync::LazyLock<
-    std::sync::Mutex<HashMap<String, HashMap<String, ChoiceRequestData>>>,
+    std::sync::Mutex<HashMap<String, HashMap<String, RegisteredPendingChoice>>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
-fn registry_insert(session_id: &str, request: &ChoiceRequestData) {
+fn registry_insert(session_id: &str, request: &ChoiceRequestData, role: &'static str) {
     let mut registry = PENDING_CHOICE_REGISTRY
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    registry
-        .entry(session_id.to_string())
-        .or_default()
-        .insert(request.id.clone(), request.clone());
+    registry.entry(session_id.to_string()).or_default().insert(
+        request.id.clone(),
+        RegisteredPendingChoice {
+            request: request.clone(),
+            created_at_ms: epoch_ms_now(),
+            role,
+        },
+    );
 }
 
 fn registry_remove(session_id: &str, id: &str) {
@@ -41,15 +62,22 @@ fn registry_remove(session_id: &str, id: &str) {
 
 /// F-27 只读访问器：某 session 当前挂起的 provider choice 全量快照（按 id
 /// 稳定排序），供 `build_session_state` 组装 `pending_choice_requests` 投影。
-pub(crate) fn pending_choice_requests_snapshot(session_id: &str) -> Vec<ChoiceRequestData> {
+pub(crate) fn pending_choice_requests_snapshot(session_id: &str) -> Vec<RegisteredPendingChoice> {
     let registry = PENDING_CHOICE_REGISTRY
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let Some(entries) = registry.get(session_id) else {
         return Vec::new();
     };
-    let mut requests: Vec<ChoiceRequestData> = entries.values().cloned().collect();
-    requests.sort_by(|a, b| a.id.cmp(&b.id));
+    let mut requests: Vec<RegisteredPendingChoice> = entries
+        .values()
+        .map(|entry| RegisteredPendingChoice {
+            request: entry.request.clone(),
+            created_at_ms: entry.created_at_ms,
+            role: entry.role,
+        })
+        .collect();
+    requests.sort_by(|a, b| a.request.id.cmp(&b.request.id));
     requests
 }
 
@@ -69,8 +97,9 @@ impl PendingChoiceRequests {
         }
     }
 
-    pub(crate) fn insert(&mut self, request: ChoiceRequestData) {
-        registry_insert(&self.session_id, &request);
+    /// F-59：插入时携带发问角色（wire label），登记时刻由登记簿统一取钟。
+    pub(crate) fn insert(&mut self, request: ChoiceRequestData, role: &'static str) {
+        registry_insert(&self.session_id, &request, role);
         self.entries.insert(request.id.clone(), request);
     }
 

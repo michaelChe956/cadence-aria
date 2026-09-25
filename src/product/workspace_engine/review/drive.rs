@@ -739,7 +739,7 @@ impl WorkspaceEngine {
                         choice_wait_timeout.as_secs()
                     );
                     let message = format!(
-                        "provider_choice_wait_timeout: 等待用户选择应答超过 {} 秒（choice 卡未达用户或无人应答，pending={:?}），运行已中止；可重新开始生成",
+                        "provider_choice_wait_timeout: 等待回答超时——{} 秒内未收到选择应答，运行已中止；choice 卡可能未送达（页面断线/连接降级期间丢失，刷新页面可补卡）或已送达但无人应答（pending={:?}）。请重新提交反馈重新发起本轮",
                         choice_wait_timeout.as_secs(),
                         pending_ids
                     );
@@ -935,7 +935,7 @@ impl WorkspaceEngine {
                             let choice_wait_started = pending_choice_ids.is_empty();
                             // F-27R3：登记进程级挂起集（三驱动统一登记簿，全量
                             // ChoiceRequestData）——session_state 投影经登记簿携带本卡。
-                            pending_choice_ids.insert(request.clone());
+                            pending_choice_ids.insert(request.clone(), "reviewer");
                             if choice_wait_started {
                                 choice_wait_timer
                                     .as_mut()

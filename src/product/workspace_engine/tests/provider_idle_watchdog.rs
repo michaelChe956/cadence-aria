@@ -499,6 +499,7 @@ async fn choice_wait_timeout_converts_lost_choice_into_diagnosable_rerunnable_fa
 
     let mut saw_choice_request = false;
     let mut saw_choice_timeout_error = false;
+    let mut choice_timeout_message: Option<String> = None;
     let mut saw_watchdog_error = false;
     let mut saw_prepare = false;
     while let Ok(event) = rx.try_recv() {
@@ -511,6 +512,7 @@ async fn choice_wait_timeout_converts_lost_choice_into_diagnosable_rerunnable_fa
             EngineEvent::Error { message } => {
                 if message.contains("provider_choice_wait_timeout") {
                     saw_choice_timeout_error = true;
+                    choice_timeout_message = Some(message.clone());
                 }
                 if message.contains("provider_idle_watchdog") {
                     saw_watchdog_error = true;
@@ -529,6 +531,19 @@ async fn choice_wait_timeout_converts_lost_choice_into_diagnosable_rerunnable_fa
     assert!(
         saw_choice_timeout_error,
         "choice 悬置超过等待界必须送出带 provider_choice_wait_timeout 原因码的 Error 事件"
+    );
+    // F-59（缺陷 2）：超时文案必须可行动——指路重新提交反馈，并解释
+    // 卡未送达的可能原因（issue_0002 现场：用户只看到中止不知下一步）。
+    let timeout_message = choice_timeout_message
+        .as_deref()
+        .expect("choice_wait_timeout error message");
+    assert!(
+        timeout_message.contains("请重新提交反馈"),
+        "超时文案必须指路重新提交反馈，实际：{timeout_message}"
+    );
+    assert!(
+        timeout_message.contains("可能未送达"),
+        "超时文案必须解释卡未送达的可能原因，实际：{timeout_message}"
     );
     assert!(
         !saw_watchdog_error,
@@ -743,20 +758,25 @@ async fn review_choice_wait_timeout_converts_lost_reviewer_choice_into_diagnosab
     .await
     .expect("choice 悬置的 reviewer 必须由等待界收口，不得永久悬置");
     let mut saw_choice_timeout_error = false;
+    let mut choice_timeout_message: Option<String> = None;
     while let Ok(event) = rx.try_recv() {
         if let EngineEvent::Error { message } = event
             && message.contains("provider_choice_wait_timeout")
         {
             saw_choice_timeout_error = true;
+            choice_timeout_message = Some(message);
         }
     }
     assert!(
         saw_choice_timeout_error,
         "review choice 等待界触发必须送出带 provider_choice_wait_timeout 原因码的 Error 事件"
     );
-    assert_eq!(
-        engine.session().stage,
-        WorkspaceStage::PrepareContext,
-        "reviewer choice 楔死同样回 prepare_context 可重跑"
+    // F-59（缺陷 2）：review 面同文案口径——可行动指路 + 未送达原因解释。
+    let timeout_message = choice_timeout_message
+        .as_deref()
+        .expect("review choice_wait_timeout error message");
+    assert!(
+        timeout_message.contains("请重新提交反馈") && timeout_message.contains("可能未送达"),
+        "超时文案必须可行动，实际：{timeout_message}"
     );
 }

@@ -194,7 +194,7 @@ impl WorkspaceEngine {
                             let questions = request.effective_questions();
                             // F-27R3：登记进程级挂起集（三驱动统一登记簿）——
                             // session_state 投影经登记簿携带本卡。
-                            pending_choice_requests.insert(request.clone());
+                            pending_choice_requests.insert(request.clone(), "author");
                             let _ = self
                                 .event_tx
                                 .send(EngineEvent::ChoiceRequest {
