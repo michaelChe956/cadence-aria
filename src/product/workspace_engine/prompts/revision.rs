@@ -42,7 +42,7 @@ impl WorkspaceEngine {
         // spec-design-dialog-revision T4：author 反馈修订路径（pending_revision_context 存在且无 review
         // verdict）走专用增量修订 prompt，reviewer 返修路径维持既有 delta/full 分流。
         // T5/M-1：谓词提取为共享 helper is_author_feedback_revision（decisions.rs），与 provider_drive.rs 同语义。
-        let prompt = if self.is_author_feedback_revision() {
+        let mut prompt = if self.is_author_feedback_revision() {
             let feedback = self.pending_revision_context.as_deref().unwrap_or_default();
             self.build_author_revision_prompt(feedback, resume_provider_session_id.is_some())
         } else {
@@ -55,8 +55,12 @@ impl WorkspaceEngine {
             }
         };
 
+        // REQ-PIB-02 覆盖补齐（F-58）：author 修订面与 author 两族同构——同一
+        // 基线解析链 fail-closed + 基线教学注入 + 锚点透传（修订产物同样须以
+        // 基线树为「既有事实」来源）。
+        let baseline_tree = self.append_author_baseline_teaching(&mut prompt)?;
         Ok(StreamingProviderInput {
-            baseline_tree: None,
+            baseline_tree,
             tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
             audit_sink: None,
             provider_type: provider_type_for_name(&provider),

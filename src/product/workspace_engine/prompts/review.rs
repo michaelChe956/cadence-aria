@@ -228,8 +228,9 @@ impl WorkspaceEngine {
              - `needs_human`：没有明确可自动返修内容，需要用户做产品/范围判断。\n",
             &self.routing_reference_context(),
         ));
+        let baseline_tree = self.append_reviewer_baseline_teaching(&mut prompt)?;
         Ok(StreamingProviderInput {
-            baseline_tree: None,
+            baseline_tree,
             tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
             audit_sink: None,
             provider_type: provider_type_for_name(&provider),
@@ -425,8 +426,9 @@ impl WorkspaceEngine {
              - `needs_human`：没有明确可自动返修内容，需要用户做产品/范围判断。\n",
             &self.routing_reference_context(),
         ));
+        let baseline_tree = self.append_reviewer_baseline_teaching(&mut prompt)?;
         Ok(StreamingProviderInput {
-            baseline_tree: None,
+            baseline_tree,
             tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
             audit_sink: None,
             provider_type: provider_type_for_name(&provider),
@@ -636,6 +638,7 @@ impl WorkspaceEngine {
             "\n只能在契约、依赖、供需匹配或机械校验影响发布时返回 revise；需要产品判断时返回 needs_human。",
             &self.routing_reference_context(),
         ));
+        let baseline_tree = self.append_reviewer_baseline_teaching(&mut prompt)?;
         ensure_single_candidate_review_prompt_budget(&prompt)?;
         let working_dir = self
             .session
@@ -649,7 +652,7 @@ impl WorkspaceEngine {
             .clone()
             .unwrap_or(ProviderName::Codex);
         Ok(StreamingProviderInput {
-            baseline_tree: None,
+            baseline_tree,
             tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
             audit_sink: None,
             provider_type: provider_type_for_name(&provider),
@@ -781,8 +784,9 @@ impl WorkspaceEngine {
             .reviewer_provider
             .clone()
             .unwrap_or(ProviderName::Codex);
+        let baseline_tree = self.append_reviewer_baseline_teaching(&mut prompt)?;
         Ok(StreamingProviderInput {
-            baseline_tree: None,
+            baseline_tree,
             tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
             audit_sink: None,
             provider_type: provider_type_for_name(&provider),
@@ -958,8 +962,9 @@ impl WorkspaceEngine {
              - 系统会从 findings[].target_outline_id 推导受影响 outline，不要额外输出 affects_items。\n",
             &self.routing_reference_context(),
         ));
+        let baseline_tree = self.append_reviewer_baseline_teaching(&mut prompt)?;
         Ok(StreamingProviderInput {
-            baseline_tree: None,
+            baseline_tree,
             tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
             audit_sink: None,
             provider_type: provider_type_for_name(&provider),
@@ -1033,8 +1038,9 @@ impl WorkspaceEngine {
             .clone()
             .or_else(|| std::env::current_dir().ok())
             .ok_or_else(|| "working directory unavailable".to_string())?;
+        let baseline_tree = self.append_reviewer_baseline_teaching(&mut prompt)?;
         Ok(StreamingProviderInput {
-            baseline_tree: None,
+            baseline_tree,
             tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
             audit_sink: None,
             provider_type: provider_type_for_name(&provider),
@@ -1172,8 +1178,9 @@ impl WorkspaceEngine {
              - `needs_human`：需要用户做范围或产品判断。\n",
             &self.routing_reference_context(),
         ));
+        let baseline_tree = self.append_reviewer_baseline_teaching(&mut prompt)?;
         Ok(StreamingProviderInput {
-            baseline_tree: None,
+            baseline_tree,
             tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
             audit_sink: None,
             provider_type: provider_type_for_name(&provider),
