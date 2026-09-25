@@ -685,20 +685,6 @@ pub(crate) fn is_git_repo(path: &StdPath) -> bool {
         .unwrap_or(false)
 }
 
-pub(crate) fn current_git_branch(path: &StdPath) -> Option<String> {
-    let output = Command::new("git")
-        .args(["branch", "--show-current"])
-        .current_dir(path)
-        .stdin(Stdio::null())
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (!branch.is_empty()).then_some(branch)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

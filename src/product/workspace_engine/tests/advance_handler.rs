@@ -1082,3 +1082,92 @@ async fn advance_replay_by_plan_id_precedes_changed_preconditions() {
     let outcome = engine.handle_advance(input(COMMAND_ID)).await.unwrap();
     assert_eq!(outcome, AdvanceOutcome::Replayed { record });
 }
+
+// ============================================================================
+// per-issue-base-branch REQ-PIB-03 场景 1（T3.1，k3 终审 F1 修复配套）：
+// advance 新 attempt 的 fork 基线必须读 issue.base_branch（三面同源解析链），
+// 不得回退当前检出或 HEAD。
+// ============================================================================
+
+fn lock_fixture_issue_base_branch(app_paths: &ProductAppPaths, base_branch: &str) {
+    let issue_store = crate::product::issue_store::IssueStore::new(app_paths.clone());
+    let mut issue = issue_store
+        .get("project_0001", "issue_plan_0001")
+        .expect("fixture issue");
+    issue.base_branch = Some(base_branch.to_string());
+    crate::product::json_store::write_json(
+        &app_paths
+            .issue_root("project_0001", "issue_plan_0001")
+            .join("issue.json"),
+        &issue,
+    )
+    .expect("lock fixture issue base branch");
+}
+
+#[tokio::test]
+async fn advance_initialization_forks_from_issue_base_branch() {
+    let (root, app_paths, lifecycle, mut engine) = advance_fixture().await;
+    // issue 基线锁定 feature/x（兄弟分支，当前检出仍是主干）。
+    super::advance_split_targets::run_git(&root.path().join("worktree"), &["branch", "feature/x"]);
+    lock_fixture_issue_base_branch(&app_paths, "feature/x");
+
+    let outcome = engine
+        .handle_advance(fixture_input("command_t31_feature_base"))
+        .await
+        .expect("advance completes with locked base branch");
+    assert!(matches!(outcome, AdvanceOutcome::Completed { .. }));
+
+    // journal 与共享 worktree 登记都必须按 issue 锁定基线（fork 契约），
+    // 而非仓库当前检出（旧实现回落 current_git_branch→HEAD）。
+    let journal = crate::product::coding_attempt_store::CodingAttemptStore::new(app_paths.clone())
+        .get_group_initialization("project_0001", "issue_plan_0001", "work_item_plan_0001")
+        .expect("advance group journal");
+    assert_eq!(journal.attempt.base_branch, "feature/x");
+
+    let shared = lifecycle
+        .get_issue_shared_worktree("project_0001", "issue_plan_0001")
+        .expect("read shared worktree")
+        .expect("shared worktree bound");
+    assert_eq!(shared.base_branch, "feature/x");
+}
+
+#[tokio::test]
+async fn advance_initialization_fails_closed_when_issue_base_branch_deleted() {
+    let (_root, app_paths, _lifecycle, mut engine) = advance_fixture().await;
+    // 锁定分支从未在仓库创建（等价于创建后被删）。
+    lock_fixture_issue_base_branch(&app_paths, "gone");
+
+    let error = engine
+        .handle_advance(fixture_input("command_t31_missing_base"))
+        .await
+        .expect_err("missing base branch must fail closed");
+    assert!(
+        error.contains("基准分支不存在"),
+        "unexpected advance error: {error}"
+    );
+
+    // fail-closed：不写 group journal；advance record 落 Failed + 诊断。
+    let coding_store =
+        crate::product::coding_attempt_store::CodingAttemptStore::new(app_paths.clone());
+    assert!(matches!(
+        coding_store.get_group_initialization(
+            "project_0001",
+            "issue_plan_0001",
+            "work_item_plan_0001"
+        ),
+        Err(crate::product::json_store::ProductStoreError::NotFound { .. })
+    ));
+    let record = AdvanceStore::new(app_paths)
+        .get_advance_for_plan("project_0001", "issue_plan_0001", "work_item_plan_0001")
+        .expect("read advance record")
+        .expect("advance record persisted");
+    assert_eq!(record.status, AdvanceStatus::Failed);
+    assert!(
+        record
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("基准分支不存在"),
+        "advance record error must carry the diagnosis: {record:?}"
+    );
+}

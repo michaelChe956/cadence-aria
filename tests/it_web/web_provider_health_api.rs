@@ -422,12 +422,25 @@ async fn provider_health_shared_gate_controls_lifecycle_coding_and_routing_entri
 }
 
 fn git_repo() -> TempDir {
+    // REQ-PIB-01/PIB-03：issue 创建需仓库存在本地默认分支（main/master）——
+    // 空仓（无任何提交）按 fail-closed 拒绝，issue 不落地；而 coding fork 入口
+    // 自 T3.1 起读 issue.base_branch，issue 缺失即 404 先于 provider 门返回，
+    // 会遮蔽本用例要钉的 500 provider_unavailable。夹具补初始提交对齐生产
+    // 不变量（断言语义零改动）。
     let repo = tempdir().expect("repo");
-    let status = Command::new("git")
-        .args(["init", "--quiet"])
-        .current_dir(repo.path())
-        .status()
-        .expect("git init");
-    assert!(status.success());
+    let run_git = |args: &[&str]| {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(repo.path())
+            .status()
+            .expect("run git fixture command");
+        assert!(status.success(), "git {args:?} failed");
+    };
+    run_git(&["init", "-b", "main", "--quiet"]);
+    run_git(&["config", "user.email", "test@example.com"]);
+    run_git(&["config", "user.name", "Test User"]);
+    std::fs::write(repo.path().join("README.md"), "base\n").expect("write readme");
+    run_git(&["add", "README.md"]);
+    run_git(&["commit", "-m", "base", "--quiet"]);
     repo
 }

@@ -230,7 +230,9 @@ pub async fn list_repository_branches(
     }))
 }
 
-fn issue_baseline_api_error(error: crate::product::issue_baseline::IssueBaselineError) -> ApiError {
+pub(crate) fn issue_baseline_api_error(
+    error: crate::product::issue_baseline::IssueBaselineError,
+) -> ApiError {
     match error {
         crate::product::issue_baseline::IssueBaselineError::BranchMissing { .. } => {
             ApiError::validation("issue_base_branch_not_found", error.diagnosis())

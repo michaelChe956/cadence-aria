@@ -1,4 +1,5 @@
 use super::dto::*;
+use super::product_resources::issue_baseline_api_error;
 use super::support::*;
 use super::*;
 use crate::product::coding_attempt_repository::{
@@ -7,6 +8,7 @@ use crate::product::coding_attempt_repository::{
 use crate::product::coding_attempt_store::AuthoritativeCodingUnitBinding;
 use crate::product::coding_attempt_store::target_snapshot::build_attempt_target_snapshot;
 use crate::product::coding_models::{AttemptTargetSnapshot, CodingAttemptScope};
+use crate::product::issue_store::IssueStore;
 use crate::product::logical_codebase::{
     LegacySharedWorktreeMigration, RepositoryRouting, RepositoryRoutingErrorCode,
 };
@@ -155,7 +157,10 @@ pub async fn create_coding_attempt(
     let worktree_route = IssueWorktreeRoute::from_target_snapshot(&target_snapshot);
 
     let branch_name = format!("aria/issues/{issue_id}");
-    let base_branch = current_git_branch(&repository.path).unwrap_or_else(|| "HEAD".to_string());
+    // REQ-PIB-03（T3.1）：fork 基线读 issue.base_branch 经三面同源解析链
+    //（`fork_base_branch_from_issue`）；不可解析 fail-closed 422，不回退当前检出。
+    let base_branch =
+        fork_base_branch_from_issue(&app_paths, &repository.path, &project_id, &issue_id)?;
     match &worktree_route {
         IssueWorktreeRoute::Legacy => {
             let shared_worktree_path = repository
@@ -355,6 +360,28 @@ pub async fn create_coding_attempt(
     );
 
     Ok(Json(coding_attempt_dto(&coding_store, &attempt)?))
+}
+
+/// REQ-PIB-03（T3.1）：coding fork 入口的共享基线解析——读 issue.base_branch 并经
+/// `resolve_effective_base_branch`（三面同源唯一解析链，与创建校验、author 上下文
+/// 基线同一解析点）：显式锁定分支须本地存在，存量 None 走默认链 main→master；
+/// 不可解析（分支被删/皆无/仓库不可用）→ 422 fail-closed，不回退当前检出或
+/// HEAD，防止 coder worktree 分叉点与 author 所见/C1 核对树错位。单件
+/// （create_coding_attempt）与组（create_group_coding_attempt）两入口共用。
+pub(crate) fn fork_base_branch_from_issue(
+    app_paths: &ProductAppPaths,
+    repository_path: &StdPath,
+    project_id: &str,
+    issue_id: &str,
+) -> ApiResult<String> {
+    let issue = IssueStore::new(app_paths.clone())
+        .get(project_id, issue_id)
+        .map_err(product_store_api_error)?;
+    crate::product::issue_baseline::resolve_effective_base_branch(
+        repository_path,
+        issue.base_branch.as_deref(),
+    )
+    .map_err(issue_baseline_api_error)
 }
 
 fn attempt_target_snapshot(

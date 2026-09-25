@@ -21,3 +21,4 @@ include!("web_coding_attempt_api/part_20.rs");
 include!("web_coding_attempt_api/part_21.rs");
 include!("web_coding_attempt_api/part_22.rs");
 include!("web_coding_attempt_api/part_23.rs");
+include!("web_coding_attempt_api/part_24.rs");

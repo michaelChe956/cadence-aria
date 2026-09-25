@@ -508,12 +508,16 @@ impl WorkspaceEngine {
             .as_ref()
             .map(|journal| journal.attempt.branch_name.clone())
             .unwrap_or_else(|| format!("aria/issues/{}", input.issue_id));
-        let base_branch = existing_group_journal
-            .as_ref()
-            .map(|journal| journal.attempt.base_branch.clone())
-            .unwrap_or_else(|| {
-                Self::current_git_branch(&repository.path).unwrap_or_else(|| "HEAD".to_string())
-            });
+        let base_branch = match existing_group_journal.as_ref() {
+            Some(journal) => journal.attempt.base_branch.clone(),
+            // REQ-PIB-03（T3.1）：新 attempt 的 fork 基线读 issue.base_branch 经
+            // 三面同源解析链；不可解析 fail-closed，不回退当前检出或 HEAD。
+            None => Self::resolve_advance_base_branch(
+                &advance_store.app_paths(),
+                &repository.path,
+                &input,
+            )?,
+        };
         let worktree_path = existing_group_journal
             .as_ref()
             .and_then(|journal| journal.attempt.worktree_path.clone())
@@ -848,6 +852,27 @@ impl WorkspaceEngine {
             review_rounds: session.review_rounds,
             permission_modes: session.permission_modes.clone(),
         }
+    }
+
+    /// REQ-PIB-03（T3.1）：advance 新 attempt 的 fork 基线解析——读
+    /// issue.base_branch 并经 `resolve_effective_base_branch`（三面同源唯一
+    /// 解析链，先例 `resolve_advance_repository` 同款 IssueStore 读取）：
+    /// 显式锁定分支须本地存在，存量 None 走默认链 main→master；不可解析
+    /// （分支被删/皆无/仓库不可用）→ Err(diagnosis) fail-closed，不回退当前
+    /// 检出或 HEAD，防止 coder worktree 分叉点与 author/C1 核对树错位。
+    fn resolve_advance_base_branch(
+        paths: &crate::product::app_paths::ProductAppPaths,
+        repository_path: &std::path::Path,
+        input: &AdvanceInput,
+    ) -> Result<String, String> {
+        let issue = IssueStore::new(paths.clone())
+            .get(&input.project_id, &input.issue_id)
+            .map_err(|error| format!("load advance issue failed: {error}"))?;
+        crate::product::issue_baseline::resolve_effective_base_branch(
+            repository_path,
+            issue.base_branch.as_deref(),
+        )
+        .map_err(|error| format!("resolve advance base branch failed: {error}"))
     }
 
     fn resolve_advance_repository(

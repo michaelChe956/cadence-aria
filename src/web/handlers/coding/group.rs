@@ -103,7 +103,11 @@ pub async fn create_group_coding_attempt(
         .as_ref()
         .and_then(|journal| journal.attempt.worktree_path.clone());
     let branch_name = format!("aria/issues/{issue_id}");
-    let base_branch = current_git_branch(&repository.path).unwrap_or_else(|| "HEAD".to_string());
+    // REQ-PIB-03（T3.1）：fork 基线读 issue.base_branch 经三面同源解析链（与单件
+    // 入口同源）；不可解析 fail-closed 422，不回退当前检出。journal 重放路径由
+    // journal_matches_request 对该值作全等校验（冻结值与重算值不一致即拒绝）。
+    let base_branch =
+        super::fork_base_branch_from_issue(&app_paths, &repository.path, &project_id, &issue_id)?;
     let shared_worktree_path = repository
         .path
         .join(".worktrees")
