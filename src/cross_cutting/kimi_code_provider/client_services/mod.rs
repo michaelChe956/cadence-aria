@@ -650,4 +650,155 @@ mod tests {
         let _ = server_writer.shutdown().await;
         drop(dispatcher);
     }
+
+    /// F-58 现场形态复现（issue_0002 story session_0007）：kimi 原生 Read 在
+    /// ACP 模式下经 `fs/read_text_file` 委托 host（capabilities
+    /// `fs.readTextFile`），且总发送按其 cwd 解析后的**绝对路径**——`AGENTS.md`
+    /// 以 `/…/<repo>/AGENTS.md` 形态到达，基线路由修复前一律被
+    /// `validate_tree_relative_path` 以对路径拒绝 → author 判定环境阻塞、拒写
+    /// spec。修复后：根内绝对路径归一为树内相对读基线树；根外绝对路径与
+    /// `.worktrees` 兄弟件仍不可达。
+    #[tokio::test]
+    async fn baseline_session_native_read_absolute_path_routes_tree() {
+        let repo = tempfile::tempdir().expect("repo dir");
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .stdin(std::process::Stdio::null())
+                .status()
+                .expect("git fixture command");
+            assert!(status.success(), "git {args:?}");
+        };
+        run(&["init", "-b", "main"]);
+        run(&["config", "user.email", "test@example.com"]);
+        run(&["config", "user.name", "Test User"]);
+        std::fs::write(repo.path().join("AGENTS.md"), "baseline-agents\n")
+            .expect("write baseline AGENTS.md");
+        std::fs::write(repo.path().join("CLAUDE.md"), "baseline-claude\n")
+            .expect("write baseline CLAUDE.md");
+        run(&["add", "AGENTS.md", "CLAUDE.md"]);
+        run(&["commit", "-m", "baseline"]);
+        // 工作区脏值：若读工作区检出会返回 workspace-*。
+        std::fs::write(repo.path().join("AGENTS.md"), "workspace-agents\n")
+            .expect("dirty AGENTS.md");
+        std::fs::write(repo.path().join("CLAUDE.md"), "workspace-claude\n")
+            .expect("dirty CLAUDE.md");
+        // 兄弟 worktree 独有文件：磁盘存在、main 树内不存在。
+        run(&[
+            "worktree",
+            "add",
+            ".worktrees/aria-issues/issue_0001",
+            "-b",
+            "sibling",
+        ]);
+        std::fs::write(
+            repo.path()
+                .join(".worktrees/aria-issues/issue_0001/sibling-only.txt"),
+            "sibling\n",
+        )
+        .expect("sibling worktree file");
+
+        let (client, server) = tokio::io::duplex(16 * 1024);
+        let (reader, writer) = tokio::io::split(client);
+        let peer = JsonRpcPeer::new(reader, writer);
+        let (event_tx, _events) = mpsc::channel(32);
+        let dispatcher = KimiClientServiceDispatcher::new(
+            peer,
+            "author-session".to_string(),
+            repo.path().to_path_buf(),
+            AdapterRole::Orchestrator,
+            ProviderPermissionMode::Auto,
+            Arc::new(ApprovalBridge::new(
+                ProviderPermissionMode::Auto,
+                event_tx.clone(),
+            )),
+            event_tx,
+            CancellationToken::new(),
+            Some(BaselineTreeRef {
+                repo_path: repo.path().to_path_buf(),
+                branch: "main".to_string(),
+            }),
+        );
+        let (server_reader, mut server_writer) = tokio::io::split(server);
+        let mut server_reader = tokio::io::BufReader::new(server_reader);
+
+        // 场景 1（现场形态）：绝对路径读 AGENTS.md/CLAUDE.md → 基线树内容。
+        assert!(dispatcher.dispatch(
+            "fs/read_text_file",
+            json!(0),
+            json!({
+                "sessionId": "author-session",
+                "path": repo.path().join("AGENTS.md").to_string_lossy()
+            })
+        ));
+        let reply = read_reply(&mut server_reader, 0).await;
+        assert_eq!(
+            reply["result"]["content"],
+            json!("baseline-agents\n"),
+            "{reply}"
+        );
+
+        assert!(dispatcher.dispatch(
+            "fs/read_text_file",
+            json!(1),
+            json!({
+                "sessionId": "author-session",
+                "path": repo.path().join("CLAUDE.md").to_string_lossy()
+            })
+        ));
+        let reply = read_reply(&mut server_reader, 1).await;
+        assert_eq!(
+            reply["result"]["content"],
+            json!("baseline-claude\n"),
+            "{reply}"
+        );
+
+        // 场景 2（根外绝对路径不可达）：现场干扰项 /tmp/gomoku.pid。
+        assert!(dispatcher.dispatch(
+            "fs/read_text_file",
+            json!(2),
+            json!({"sessionId": "author-session", "path": "/tmp/gomoku.pid"})
+        ));
+        let reply = read_reply(&mut server_reader, 2).await;
+        assert_eq!(reply["error"]["code"], json!(ERROR_FS), "{reply}");
+
+        // 场景 3（兄弟 worktree 根内词法、树外）：NotFound，内容不可达。
+        assert!(dispatcher.dispatch(
+            "fs/read_text_file",
+            json!(3),
+            json!({
+                "sessionId": "author-session",
+                "path": repo
+                    .path()
+                    .join(".worktrees/aria-issues/issue_0001/sibling-only.txt")
+                    .to_string_lossy()
+            })
+        ));
+        let reply = read_reply(&mut server_reader, 3).await;
+        assert_eq!(reply["error"]["code"], json!(ERROR_FS), "{reply}");
+        assert!(
+            reply["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("baseline tree"),
+            "{reply}"
+        );
+
+        // 场景 4（回归护栏）：相对路径基线读取不回退。
+        assert!(dispatcher.dispatch(
+            "fs/read_text_file",
+            json!(4),
+            json!({"sessionId": "author-session", "path": "AGENTS.md"})
+        ));
+        let reply = read_reply(&mut server_reader, 4).await;
+        assert_eq!(
+            reply["result"]["content"],
+            json!("baseline-agents\n"),
+            "{reply}"
+        );
+
+        let _ = server_writer.shutdown().await;
+        drop(dispatcher);
+    }
 }

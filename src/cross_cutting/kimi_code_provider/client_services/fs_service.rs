@@ -126,6 +126,41 @@ pub(super) fn read_baseline_text_file(
         .map_err(|error| FsError::NotUtf8(format!("baseline tree file {path}: {error}")))
 }
 
+/// 基线会话读取路径的 cwd 锚定归一（F-58）：kimi 原生 Read 在 ACP 模式下
+/// 经 `fs/read_text_file` 委托 host（capabilities `fs.readTextFile`），且
+/// 总发送按其 cwd 解析后的**绝对路径**（现场：issue_0002 session_0007 的
+/// `AGENTS.md`/`CLAUDE.md` 全部以 `/…/<repo>/AGENTS.md` 形态被
+/// `validate_tree_relative_path` 以对路径拒绝）。与 `validate_relative` 对
+/// 根内绝对路径的容忍同构：绝对路径词法位于会话根（canonical）内 → 剥前缀
+/// 得树内相对路径（worktree 检出与主树共享路径命名空间，树查找以会话根
+/// 为锚）；相对路径严格透传；根外绝对路径、`..`、空一律拒绝（fail-closed
+/// 不变：`.worktrees` 兄弟件、宿主任意路径、/tmp 均不可达）。
+pub(super) fn baseline_tree_relative_path(root: &Path, path: &str) -> Result<PathBuf, FsError> {
+    let p = Path::new(path);
+    if !p.is_absolute() {
+        return validate_tree_relative_path(path);
+    }
+    let root_canonical = root
+        .canonicalize()
+        .map_err(|_| FsError::OutOfRoot(path.to_string()))?;
+    let rel = p
+        .strip_prefix(&root_canonical)
+        .map_err(|_| FsError::OutOfRoot(path.to_string()))?;
+    for component in rel.components() {
+        match component {
+            Component::CurDir | Component::Normal(_) => {}
+            Component::ParentDir => return Err(FsError::SymlinkOrTraversal(path.to_string())),
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(FsError::OutOfRoot(path.to_string()));
+            }
+        }
+    }
+    if rel.as_os_str().is_empty() {
+        return Err(FsError::OutOfRoot(path.to_string()));
+    }
+    Ok(rel.to_path_buf())
+}
+
 /// 基线树路径校验：仅接受树内相对路径。与 `validate_relative` 的根锚定
 /// 校验不同——树读取无「授权根」概念，`..` 与对路径一律拒绝（git show 的
 /// `<ref>:<path>` 语法本身不接受绝对路径，此处前置拒绝给出统一错误形态）。
@@ -345,6 +380,75 @@ mod tests {
         assert_eq!(
             read_text_file(root.path(), "f.txt").expect("read"),
             "second"
+        );
+    }
+    #[test]
+    fn baseline_tree_relative_path_strips_absolute_paths_inside_root() {
+        let root = tempfile::tempdir().expect("root");
+        std::fs::create_dir(root.path().join("sub")).expect("mkdir");
+
+        assert_eq!(
+            baseline_tree_relative_path(
+                root.path(),
+                &root.path().join("AGENTS.md").to_string_lossy()
+            )
+            .expect("root-level absolute path"),
+            PathBuf::from("AGENTS.md")
+        );
+        assert_eq!(
+            baseline_tree_relative_path(
+                root.path(),
+                &root.path().join("sub/f.txt").to_string_lossy()
+            )
+            .expect("nested absolute path"),
+            PathBuf::from("sub/f.txt")
+        );
+    }
+
+    #[test]
+    fn baseline_tree_relative_path_rejects_absolute_paths_outside_root() {
+        let root = tempfile::tempdir().expect("root");
+        assert!(matches!(
+            baseline_tree_relative_path(root.path(), "/etc/passwd"),
+            Err(FsError::OutOfRoot(_))
+        ));
+        assert!(matches!(
+            baseline_tree_relative_path(root.path(), "/tmp/gomoku.pid"),
+            Err(FsError::OutOfRoot(_))
+        ));
+        // Prefix confusion: `/root_evil` is not beneath `/root`.
+        let parent = tempfile::tempdir().expect("parent");
+        let root = parent.path().join("xxx_root");
+        std::fs::create_dir_all(&root).expect("root mkdir");
+        let evil = parent.path().join("xxx_root_evil/secret.txt");
+        assert!(matches!(
+            baseline_tree_relative_path(&root, &evil.to_string_lossy()),
+            Err(FsError::OutOfRoot(_))
+        ));
+    }
+
+    #[test]
+    fn baseline_tree_relative_path_rejects_traversal_and_empty() {
+        let root = tempfile::tempdir().expect("root");
+        // Absolute path whose remainder escapes after prefix strip.
+        let escaping = format!("{}/sub/../outside.txt", root.path().display());
+        assert!(matches!(
+            baseline_tree_relative_path(root.path(), &escaping),
+            Err(FsError::SymlinkOrTraversal(_))
+        ));
+        // Relative `..` traversal and empty stay rejected (strict passthrough).
+        assert!(matches!(
+            baseline_tree_relative_path(root.path(), "../outside.txt"),
+            Err(FsError::SymlinkOrTraversal(_))
+        ));
+        assert!(matches!(
+            baseline_tree_relative_path(root.path(), "  "),
+            Err(FsError::OutOfRoot(_))
+        ));
+        // Plain relative paths pass through untouched.
+        assert_eq!(
+            baseline_tree_relative_path(root.path(), "sub/f.txt").expect("relative"),
+            PathBuf::from("sub/f.txt")
         );
     }
 }
