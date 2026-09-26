@@ -100,6 +100,28 @@ impl IssueAutomationStore {
                 {
                     CasResolution::Unchanged(saved.clone())
                 }
+                // REQ-WIGA-02 fail-closed：enabled 状态下异 payload 的 Enable
+                // 一律 Conflict（与是否携带当前 revision 无关）——绑定授权的
+                // source/options/target 不可被原地改写；换 payload 必须先
+                // Disable 重开（重开走 revision+1 换新授权并保留身份/绑定）。
+                (
+                    Some(saved),
+                    EnrollmentWriteCommand::Enable {
+                        selection_key,
+                        source,
+                        options,
+                        logical_repository_id,
+                    },
+                ) if saved.enabled
+                    && (saved.selection_key != *selection_key
+                        || saved.source != *source
+                        || saved.options != *options
+                        || saved.logical_repository_id != *logical_repository_id) =>
+                {
+                    CasResolution::Conflict {
+                        current_revision: Some(saved.policy_revision),
+                    }
+                }
                 (Some(saved), _) if expected_revision != Some(saved.policy_revision) => {
                     CasResolution::Conflict {
                         current_revision: Some(saved.policy_revision),
@@ -565,6 +587,98 @@ mod tests {
         assert_eq!(reopened.prepare_intent_id, created.prepare_intent_id);
         assert_eq!(reopened.plan_id.as_deref(), Some("plan_0001"));
         assert_eq!(reopened.session_id.as_deref(), Some("session_0001"));
+    }
+
+    /// REQ-WIGA-02 契约（T2 Step 3）：enabled 状态下的 Enable 只允许同键同
+    /// payload 幂等；异内容（source/options/target 任一不同）一律 Conflict——
+    /// 即使携带当前 revision 也不得改写授权内容（改 payload 必须先 Disable
+    /// 重开，重开才走 revision+1 换新授权）。
+    #[test]
+    fn issue_automation_store_rejects_enabled_payload_rewrite_with_current_revision() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = IssueAutomationStore::new(ProductAppPaths::new(tmp.path()));
+        let created = store
+            .compare_and_set(
+                "project_1",
+                "issue_1",
+                None,
+                enable("human-choice-1", logical_repo(1)),
+            )
+            .unwrap();
+        assert_eq!(created.policy_revision, 1);
+
+        // 携当前 revision 的异 options 重写必须 Conflict，且 durable 不被改写。
+        let mut other_options = options();
+        other_options.review_rounds = 2;
+        let error = store
+            .compare_and_set(
+                "project_1",
+                "issue_1",
+                Some(created.policy_revision),
+                enable_with_options("human-choice-1", logical_repo(1), other_options),
+            )
+            .unwrap_err();
+        assert_conflict(error, created.policy_revision);
+        assert_eq!(
+            store.get("project_1", "issue_1").unwrap().unwrap(),
+            created
+        );
+
+        // 异 selection_key / 异 target 携当前 revision 同样冲突。
+        let error = store
+            .compare_and_set(
+                "project_1",
+                "issue_1",
+                Some(created.policy_revision),
+                enable("human-choice-2", logical_repo(1)),
+            )
+            .unwrap_err();
+        assert_conflict(error, created.policy_revision);
+        let error = store
+            .compare_and_set(
+                "project_1",
+                "issue_1",
+                Some(created.policy_revision),
+                enable("human-choice-1", logical_repo(2)),
+            )
+            .unwrap_err();
+        assert_conflict(error, created.policy_revision);
+
+        // 对照：同键同 payload 携当前 revision 仍幂等返回原值。
+        let idempotent = store
+            .compare_and_set(
+                "project_1",
+                "issue_1",
+                Some(created.policy_revision),
+                enable("human-choice-1", logical_repo(1)),
+            )
+            .unwrap();
+        assert_eq!(idempotent, created);
+
+        // 对照：Disable 后重开（disabled 态）允许新 payload，revision+1 且保留身份。
+        let disabled = store
+            .compare_and_set(
+                "project_1",
+                "issue_1",
+                Some(created.policy_revision),
+                EnrollmentWriteCommand::Disable,
+            )
+            .unwrap();
+        assert!(!disabled.enabled);
+        let mut reopened_options = options();
+        reopened_options.review_rounds = 3;
+        let reopened = store
+            .compare_and_set(
+                "project_1",
+                "issue_1",
+                Some(disabled.policy_revision),
+                enable_with_options("human-choice-1", logical_repo(1), reopened_options),
+            )
+            .unwrap();
+        assert!(reopened.enabled);
+        assert_eq!(reopened.policy_revision, disabled.policy_revision + 1);
+        assert_eq!(reopened.enrollment_id, created.enrollment_id);
+        assert_eq!(reopened.options.review_rounds, 3);
     }
 
     #[test]
