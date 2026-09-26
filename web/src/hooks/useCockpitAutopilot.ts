@@ -6,7 +6,13 @@ import type { WorkspaceWsState } from "../state/workspace-ws-store-types";
 
 type AutopilotState = Pick<
   WorkspaceWsState,
-  "sessionId" | "sessionStatus" | "humanGateTurn" | "humanGateClosure" | "advanceCommands" | "flowKind"
+  | "sessionId"
+  | "sessionStatus"
+  | "humanGateTurn"
+  | "humanGateClosure"
+  | "advanceCommands"
+  | "flowKind"
+  | "automation"
 >;
 
 interface AutopilotAnchor {
@@ -36,6 +42,7 @@ export function useCockpitAutopilot({
     humanGateClosure,
     advanceCommands,
     flowKind,
+    automation,
   } = state;
   const humanGateStopPoint = settings.stopPoints.includes("human_gate");
   const anchorsRef = useRef(new Map<string, AutopilotAnchor>());
@@ -51,7 +58,29 @@ export function useCockpitAutopilot({
     stoppedSessionRef.current = null;
   }, [sessionId]);
 
+  // P0 1.2（REQ-WIGA-08/D6）：durable 归属切换（owner/revision/enrollment/
+  // enabled 任一变化，含未知）即清空 anchors 与停发标记——server 接管期间
+  // 本地不遗留旧命令锚点，client 回归后按新 revision 分配新 commandId。
+  // 注意：显式 client（含 enabled=false）不视为未知，保留旧行为。
+  const ownershipKey = automation
+    ? `${sessionId}:${automation.owner}:${automation.enrollment_id ?? ""}:${automation.policy_revision ?? ""}:${automation.enabled}`
+    : `${sessionId}:unknown`;
+  const ownershipKeyRef = useRef<string | null>(null);
   useEffect(() => {
+    if (ownershipKeyRef.current === ownershipKey) {
+      return;
+    }
+    ownershipKeyRef.current = ownershipKey;
+    anchorsRef.current.clear();
+    stoppedSessionRef.current = null;
+  }, [ownershipKey]);
+
+  useEffect(() => {
+    // P0 1.2：归属未知（null）或 server 时不发令也不分配 commandId——
+    // D6 退位，服务端 autopilot 负责推进。
+    if (automation?.owner !== "client") {
+      return;
+    }
     if (stoppedSessionRef.current === sessionId || stateSessionId !== sessionId) {
       return;
     }
@@ -117,6 +146,7 @@ export function useCockpitAutopilot({
     anchor.sent = true;
   }, [
     advanceCommands,
+    automation,
     flowKind,
     humanGateClosure,
     humanGateTurn,

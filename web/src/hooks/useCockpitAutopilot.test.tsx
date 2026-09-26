@@ -18,7 +18,13 @@ const defaultSettings = {
 
 type AutopilotState = Pick<
   WorkspaceWsState,
-  "sessionId" | "sessionStatus" | "humanGateTurn" | "humanGateClosure" | "advanceCommands" | "flowKind"
+  | "sessionId"
+  | "sessionStatus"
+  | "humanGateTurn"
+  | "humanGateClosure"
+  | "advanceCommands"
+  | "flowKind"
+  | "automation"
 >;
 
 function state(overrides: Partial<AutopilotState> = {}): AutopilotState {
@@ -29,6 +35,9 @@ function state(overrides: Partial<AutopilotState> = {}): AutopilotState {
     humanGateTurn: null,
     humanGateClosure: null,
     advanceCommands: {},
+    // P0 1.2（REQ-WIGA-08）：非 enrolled fixture 默认明确 client——显式 client
+    // 保留旧行为，未知（null）/server 由新场景单独覆盖。
+    automation: { owner: "client", enrollment_id: null, policy_revision: null, enabled: false },
     ...overrides,
   };
 }
@@ -227,6 +236,78 @@ describe("useCockpitAutopilot", () => {
     const view = renderAutopilot(confirmedGate("turn-7"), vi.fn(() => true), ["human_gate"]);
 
     expect(view.sendAdvance).not.toHaveBeenCalled();
+  });
+
+  it("holds advance while automation ownership is unknown", () => {
+    const randomUUID = vi.spyOn(crypto, "randomUUID");
+    const view = renderAutopilot(state({ ...confirmedGate("turn-7"), automation: null }));
+
+    expect(view.sendAdvance).not.toHaveBeenCalled();
+    expect(randomUUID).not.toHaveBeenCalled();
+    view.rerender(
+      <AutopilotHarness
+        state={state({ ...confirmedGate("turn-7"), automation: { owner: "client", enrollment_id: null, policy_revision: null, enabled: false } })}
+        sendAdvance={view.sendAdvance}
+        stopPoints={[]}
+      />,
+    );
+
+    expect(view.sendAdvance).toHaveBeenCalledTimes(1);
+    randomUUID.mockRestore();
+  });
+
+  it("retires sending under server ownership and allocates a fresh command id on client return", () => {
+    const view = renderAutopilot(state({ ...confirmedGate("turn-7") }));
+    const firstCommandId = view.sendAdvance.mock.calls[0]?.[0];
+    if (!firstCommandId) throw new Error("expected client advance command id");
+
+    view.rerender(
+      <AutopilotHarness
+        state={state({
+          ...confirmedGate("turn-7"),
+          automation: { owner: "server", enrollment_id: "en-1", policy_revision: 2, enabled: true },
+        })}
+        sendAdvance={view.sendAdvance}
+        stopPoints={[]}
+      />,
+    );
+    expect(view.sendAdvance).toHaveBeenCalledTimes(1);
+
+    view.rerender(
+      <AutopilotHarness
+        state={state({
+          ...confirmedGate("turn-7"),
+          automation: { owner: "client", enrollment_id: "en-1", policy_revision: 3, enabled: false },
+        })}
+        sendAdvance={view.sendAdvance}
+        stopPoints={[]}
+      />,
+    );
+    expect(view.sendAdvance).toHaveBeenCalledTimes(2);
+    const secondCommandId = view.sendAdvance.mock.calls[1]?.[0];
+    expect(secondCommandId).toEqual(expect.any(String));
+    expect(secondCommandId).not.toBe(firstCommandId);
+  });
+
+  it("keeps stable single send for non-enrolled client across rerenders", () => {
+    const view = renderAutopilot(state({ ...confirmedGate("turn-7") }));
+
+    view.rerender(
+      <AutopilotHarness
+        state={state({ ...confirmedGate("turn-7") })}
+        sendAdvance={view.sendAdvance}
+        stopPoints={[]}
+      />,
+    );
+    view.rerender(
+      <AutopilotHarness
+        state={state({ ...confirmedGate("turn-7") })}
+        sendAdvance={view.sendAdvance}
+        stopPoints={[]}
+      />,
+    );
+
+    expect(view.sendAdvance).toHaveBeenCalledTimes(1);
   });
 });
 
