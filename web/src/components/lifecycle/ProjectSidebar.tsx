@@ -46,6 +46,7 @@ export function ProjectSidebar({
         </div>
         <button
           type="button"
+          data-testid="onboarding-anchor-project-create"
           onClick={onCreateProject}
           className="inline-flex h-8 w-full items-center justify-center rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 text-xs font-semibold text-white"
         >
@@ -117,6 +118,7 @@ export function ProjectSidebar({
           </div>
           <button
             type="button"
+            data-testid="onboarding-anchor-codebase-add"
             disabled={!selectedProjectId}
             onClick={onAddCodebase}
             className="mb-3 inline-flex h-8 w-full items-center justify-center rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-3 text-xs font-semibold text-[var(--aria-ink)] disabled:text-[var(--aria-ink-muted)]"

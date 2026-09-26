@@ -48,6 +48,7 @@ export function IssueLifecycleWorkbenchHeader({
         </button>
         <button
           type="button"
+          data-testid="onboarding-anchor-issue-create"
           disabled={!canCreateIssue}
           onClick={onCreateIssue}
           className="inline-flex h-8 items-center rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 text-xs font-semibold text-white disabled:border-[var(--aria-line)] disabled:bg-[var(--aria-panel-muted)] disabled:text-[var(--aria-ink-muted)]"

@@ -36,7 +36,7 @@ export function CodingWorkspaceGroupProgress({
   const progressValue = activeIndex >= 0 ? activeIndex + 1 : 0;
 
   return (
-    <section className="grid min-h-11 shrink-0 grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-1 border-b border-[var(--aria-line)] bg-[var(--aria-panel)] px-4 py-2 text-xs md:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] md:items-center">
+    <section data-testid="onboarding-anchor-coding-progress" className="grid min-h-11 shrink-0 grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-1 border-b border-[var(--aria-line)] bg-[var(--aria-panel)] px-4 py-2 text-xs md:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] md:items-center">
       <div className="min-w-0">
         <div className="font-semibold text-[var(--aria-ink)]">WorkItemGroup</div>
         <div className="truncate font-mono text-[11px] text-[var(--aria-ink-muted)]">

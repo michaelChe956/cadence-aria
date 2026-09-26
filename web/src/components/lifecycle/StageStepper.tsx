@@ -32,6 +32,13 @@ const PIP_STATE_LABEL: Record<StagePipState, string> = {
   pending: "待开始",
 };
 
+// onboarding 引导锚点：三个阶段入口常驻，供引导按阶段定位（仅新增属性）。
+const STAGE_ANCHOR_TESTID: Record<WorkbenchStageKey, string> = {
+  story: "onboarding-anchor-stage-story",
+  design: "onboarding-anchor-stage-design",
+  work_item: "onboarding-anchor-stage-work-item-plan",
+};
+
 export function StageStepper(props: {
   stages: StageStepperStage[];
   activeStage: WorkbenchStageKey;
@@ -83,7 +90,7 @@ export function StageStepper(props: {
                   PIP_CLASS_BY_STATE[stage.state],
                 ].join(" ")}
               />
-              <span className="truncate">{stage.label}</span>
+              <span data-testid={STAGE_ANCHOR_TESTID[stage.key]} className="truncate">{stage.label}</span>
               <span
                 data-testid={`stage-tab-count-${stage.key}`}
                 className={[

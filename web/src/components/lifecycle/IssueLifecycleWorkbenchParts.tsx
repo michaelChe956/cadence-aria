@@ -235,6 +235,7 @@ export function IssueLifecycleDetail({
             deletingKey={deletingKey}
             onSelect={onSelect}
             onDelete={onDelete}
+            sectionTestId="onboarding-anchor-story-confirm"
             emptyAction={{
               label: STAGE_EMPTY_ACTION_LABEL.story,
               onClick: () => onGenerateForStage("story"),
@@ -250,6 +251,7 @@ export function IssueLifecycleDetail({
             deletingKey={deletingKey}
             onSelect={onSelect}
             onDelete={onDelete}
+            sectionTestId="onboarding-anchor-design-confirm"
             emptyAction={{
               label: STAGE_EMPTY_ACTION_LABEL.design,
               onClick: () => onGenerateForStage("design"),
@@ -264,6 +266,8 @@ export function IssueLifecycleDetail({
               deletingKey={deletingKey}
               onSelect={onSelect}
               onDelete={onDelete}
+              sectionTestId="onboarding-anchor-plan-review-gate"
+              bodyTestId="onboarding-anchor-plan-final-gate"
             />
           ) : (
             <LifecycleContentSection
@@ -275,6 +279,8 @@ export function IssueLifecycleDetail({
               onSelect={onSelect}
               onDelete={onDelete}
               allWorkItems={allWorkItems}
+              sectionTestId="onboarding-anchor-plan-review-gate"
+              bodyTestId="onboarding-anchor-plan-final-gate"
               emptyAction={{
                 label: STAGE_EMPTY_ACTION_LABEL.work_item,
                 onClick: () => onGenerateForStage("work_item"),
@@ -358,17 +364,23 @@ function WorkItemRepositoryGroupSection({
   deletingKey,
   onSelect,
   onDelete,
+  sectionTestId,
+  bodyTestId,
 }: {
   groups: WorkItemRepositoryGroup[];
   selectedKey: string | null;
   deletingKey: string | null;
   onSelect: (card: LifecycleCardData) => void;
   onDelete: (card: LifecycleCardData) => void;
+  // onboarding 引导锚点（仅新增属性）：容器代表计划审阅区，内容体代表计划最终确认区。
+  sectionTestId?: string;
+  bodyTestId?: string;
 }) {
   return (
     <section
       role="region"
       aria-label="Work Item 内容"
+      data-testid={sectionTestId}
       className="flex min-h-72 flex-1 flex-col rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-2"
     >
       <div className="mb-3 flex items-center justify-between gap-2">
@@ -380,11 +392,14 @@ function WorkItemRepositoryGroupSection({
         </span>
       </div>
       {groups.length === 0 ? (
-        <div className="rounded-md border border-dashed border-[var(--aria-line)] bg-[var(--aria-panel)] p-3 text-sm text-[var(--aria-ink-muted)]">
+        <div
+          data-testid={bodyTestId}
+          className="rounded-md border border-dashed border-[var(--aria-line)] bg-[var(--aria-panel)] p-3 text-sm text-[var(--aria-ink-muted)]"
+        >
           暂无内容
         </div>
       ) : (
-        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto">
+        <div data-testid={bodyTestId} className="min-h-0 flex-1 space-y-3 overflow-y-auto">
           {groups.map((group) => {
             const groupKey =
               group.target_repository_id ?? "unassigned";
@@ -453,6 +468,8 @@ function LifecycleContentSection({
   onDelete,
   allWorkItems,
   emptyAction,
+  sectionTestId,
+  bodyTestId,
 }: {
   title: string;
   ariaLabel: string;
@@ -464,11 +481,15 @@ function LifecycleContentSection({
   allWorkItems?: LifecycleWorkItem[];
   // Task 6：空阶段面板的「触发下一阶段」主按钮；缺省不渲染（抽屉等复用场景）。
   emptyAction?: { label: string; onClick: () => void };
+  // onboarding 引导锚点（仅新增属性）：容器与内容体分别承载不同引导步骤。
+  sectionTestId?: string;
+  bodyTestId?: string;
 }) {
   return (
     <section
       role="region"
       aria-label={ariaLabel}
+      data-testid={sectionTestId}
       className="flex min-h-72 flex-1 flex-col rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-2"
     >
       <div className="mb-3 flex items-center justify-between gap-2">
@@ -480,7 +501,10 @@ function LifecycleContentSection({
         </span>
       </div>
       {cards.length === 0 ? (
-        <div className="flex flex-col items-start gap-3 rounded-md border border-dashed border-[var(--aria-line)] bg-[var(--aria-panel)] p-3 text-sm text-[var(--aria-ink-muted)]">
+        <div
+          data-testid={bodyTestId}
+          className="flex flex-col items-start gap-3 rounded-md border border-dashed border-[var(--aria-line)] bg-[var(--aria-panel)] p-3 text-sm text-[var(--aria-ink-muted)]"
+        >
           <span>暂无内容</span>
           {emptyAction ? (
             <button
@@ -494,7 +518,7 @@ function LifecycleContentSection({
           ) : null}
         </div>
       ) : (
-        <ul className="min-h-0 flex-1 space-y-2 overflow-y-auto">
+        <ul data-testid={bodyTestId} className="min-h-0 flex-1 space-y-2 overflow-y-auto">
           {cards.map((card) => (
             <li key={lifecycleCardKey(card)}>
               <LifecycleCard
