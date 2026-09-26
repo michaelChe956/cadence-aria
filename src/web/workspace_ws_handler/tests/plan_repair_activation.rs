@@ -241,6 +241,33 @@ async fn zero_socket_plan_amendment_activation_resumes_attempt_with_unsent_deliv
     .expect("no live socket must leave a durable unsent fact, never Delivered");
     assert_eq!(delivery.delivered_at, None);
 
-    child_ws.close(None).await.ok();
+    // 重连补投递（REQ-WIGA-06）：迟到的观察者收到同一 event，真实写 ack 后才 Delivered。
+    let coding_url = format!(
+        "ws://{addr}/ws/projects/{}/issues/{}/coding-attempts/{}",
+        attempt.project_id, attempt.issue_id, resumed.id
+    );
+    let (mut coding_ws, _) = connect_async(coding_url).await.unwrap();
+    assert_eq!(
+        receive_json(&mut coding_ws, "attach snapshot").await["type"],
+        "coding_session_state"
+    );
+    let amendment_event = receive_type(&mut coding_ws, "plan_amendment_updated").await;
+    assert_eq!(amendment_event["event_id"], serde_json::json!(delivery.event_id));
+    let delivered = timeout(Duration::from_secs(3), async {
+        loop {
+            let current = store
+                .get_plan_amendment_delivery(&resumed, &identity.amendment_id)
+                .unwrap();
+            if current.status == CodingPlanAmendmentDeliveryStatus::Delivered {
+                return current;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("real socket write acknowledgement must mark Delivered");
+    assert!(delivered.delivered_at.is_some());
+    coding_ws.close(None).await.ok();
+
     server.abort();
 }

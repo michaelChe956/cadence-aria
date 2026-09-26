@@ -105,10 +105,10 @@ pub(crate) fn fail_plan_amendment_socket_write(message: &CodingWsOutMessage) {
     settle_plan_amendment_socket_write(message, false);
 }
 
-/// F-19/k3-P2：broadcast fan-out **发送前**登记该事件的写份额。socket 循环的
+/// REQ-WIGA-06：broadcast fan-out **发送前**登记该事件的写份额。socket 循环的
 /// 写结算（confirm/fail）只会在事件进入 channel 之后发生，登记先行即无竞态。
-/// 零份额（k3-P1：registry 无该 attempt 的 sockets entry / 全部关闭）在此
-/// 立即结算失败，恢复旧直连路径 channel 关闭的快速失败语义。
+/// 零份额（registry 无该 attempt 的 sockets entry / 全部关闭）在此立即结算
+/// 失败——观察层据此把该次投递收口为 durable Unsent，供重连/重复确认补投递。
 pub(crate) fn expect_plan_amendment_fan_out_writes(message: &CodingWsOutMessage, writes: usize) {
     let CodingWsOutMessage::PlanAmendmentUpdated { event_id, .. } = message else {
         return;

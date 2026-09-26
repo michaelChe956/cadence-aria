@@ -118,6 +118,13 @@ async fn handle_coding_socket(
         state.coding_sockets.remove(&attempt_key, socket_token);
         return;
     }
+    // REQ-WIGA-06：attach 补投递 durable 未送达的 plan amendment（快照/choice
+    // 初帧先行，保持 wire 顺序；真实写 ack 才标 Delivered，失败仍 Unsent）。
+    super::delivery_ack::spawn_undelivered_amendment_redelivery(
+        coding_store.clone(),
+        resumed_attempt.clone(),
+        event_tx.clone(),
+    );
 
     let mut event_rx = OutboundEventReceiver::new(event_rx);
     let mut runner_started = false;

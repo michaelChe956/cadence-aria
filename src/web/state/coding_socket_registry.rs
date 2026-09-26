@@ -164,8 +164,8 @@ impl CodingSocketRegistry {
     /// hub 路由 fan-out：目标按 registry 现存 socket 动态解析（与 hub 实例无关，
     /// 旧 hub 的路由同样能把事件送到新 socket）。发送前先向 delivery ack 登记
     /// 该事件的写份额：任一 socket 写成功即 confirm、全部失败才 fail；零份额
-    /// （k3-P1：无 sockets entry / 全部关闭）由登记侧立即结算失败——等价旧
-    /// 直连路径下 channel 关闭的快速失败语义，amendment waiter 不悬挂。
+    /// （REQ-WIGA-06：无 sockets entry / 全部关闭）由登记侧立即结算失败——
+    /// 观察层据此记 durable Unsent，重连/重复确认后按事实补投递。
     async fn broadcast(&self, attempt_key: &CodingAttemptRunKey, event: &CodingWsOutMessage) {
         let targets: Vec<_> = {
             let mut inner = self.inner.lock().expect("coding socket registry lock");
