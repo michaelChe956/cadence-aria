@@ -1,4 +1,5 @@
 import type {
+  ChoiceAnswer,
   ChoiceOption,
   ExecutionEvent,
   WorkspaceChoiceRequestSource,
@@ -428,6 +429,17 @@ export type CodingChoiceGateResponse = {
   selected_option_ids: string[];
   free_text?: string | null;
   responded_at: string;
+  /** P0 1.3：完整逐题答案原样落盘；旧单题 gate 缺省为空。 */
+  answers?: ChoiceAnswer[];
+};
+
+/** P0 1.3：coding choice 逐题结构（与 workspace `ChoiceQuestion` 同构）。 */
+export type CodingChoiceQuestion = {
+  id: string;
+  prompt: string;
+  options: ChoiceOption[];
+  allow_multiple: boolean;
+  allow_free_text: boolean;
 };
 
 export type CodingChoiceGate = {
@@ -445,6 +457,8 @@ export type CodingChoiceGate = {
   allow_free_text: boolean;
   status: CodingChoiceGateStatus;
   response?: CodingChoiceGateResponse | null;
+  /** P0 1.3：多问题透传；旧 gate 缺省为空（前端按单一 default 题兼容）。 */
+  questions?: CodingChoiceQuestion[];
   created_at: string;
   updated_at: string;
 };

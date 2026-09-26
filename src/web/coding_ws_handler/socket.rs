@@ -927,25 +927,19 @@ async fn handle_coding_socket(
                     id,
                     selected_option_ids,
                     free_text,
-                    ..
+                    answers,
+                    command_id,
+                    expected_run_id,
                 } = inbound
                 {
-                    if let Some(command_tx) =
-                        interactive_runner_sender(&state, &attempt_key, runner_command_tx.as_ref())
-                    {
-                        // P0 1.3：legacy WS 单题入口——T9 接线完整
-                        // answers/command_id claim；此处保持原单题等价行为。
-                        let _ = command_tx
-                            .send(CodingRunnerCommand::ChoiceResponse {
-                                id,
-                                selected_option_ids,
-                                free_text,
-                                answers: Vec::new(),
-                                receipt: None,
-                            })
-                            .await;
-                        drop(mutation_lease);
-                    } else {
+                    // P0 1.3（Task 9）：WS 与 REST 共用 registry claim 门面——
+                    // 同 attempt+run-incarnation 唯一认领；缺省 command_id/
+                    // expected_run_id 绑定当前唯一 run。旧单题入站（answers
+                    // 空、selected/free_text 形态）经 legacy 字段转单题答案。
+                    let incarnation = expected_run_id
+                        .clone()
+                        .or_else(|| state.coding_runs.active_run_incarnation(&attempt_key));
+                    let Some(expected_run_id) = incarnation else {
                         drop(mutation_lease);
                         let _ = send_coding_json(
                             &mut socket_tx,
@@ -957,6 +951,61 @@ async fn handle_coding_socket(
                             },
                         )
                         .await;
+                        continue;
+                    };
+                    let request = crate::web::choice_reply::ChoiceResponseRequest {
+                        command_id: command_id
+                            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                        expected_run_id,
+                        answers: if answers.is_empty() {
+                            vec![crate::cross_cutting::streaming_provider::ChoiceAnswerData {
+                                question_id: "default".to_string(),
+                                selected_option_ids: selected_option_ids.clone(),
+                                free_text: free_text.clone(),
+                            }]
+                        } else {
+                            answers
+                        },
+                    };
+                    match state.coding_runs.claim_choice(&attempt_key, &id, &request) {
+                        Ok((_, true)) => {
+                            if let Err(error) = state
+                                .coding_runs
+                                .submit_claimed_choice(&attempt_key, &id, &request)
+                                .await
+                            {
+                                drop(mutation_lease);
+                                let _ = send_coding_json(
+                                    &mut socket_tx,
+                                    &CodingWsOutMessage::CodingProtocolError {
+                                        code: "coding_choice_submit_failed".to_string(),
+                                        message: format!(
+                                            "ChoiceResponse id={id} claim submit failed: {error:?}"
+                                        ),
+                                    },
+                                )
+                                .await;
+                                continue;
+                            }
+                            drop(mutation_lease);
+                        }
+                        // 同 command 幂等复看：不二发，ack 由 provider_stream 发出。
+                        Ok((_, false)) => {
+                            drop(mutation_lease);
+                        }
+                        Err(error) => {
+                            drop(mutation_lease);
+                            let _ = send_coding_json(
+                                &mut socket_tx,
+                                &CodingWsOutMessage::CodingProtocolError {
+                                    code: "coding_choice_claim_rejected".to_string(),
+                                    message: format!(
+                                        "ChoiceResponse id={id} claim rejected: {error:?}"
+                                    ),
+                                },
+                            )
+                            .await;
+                        }
                     }
                 } else if let CodingWsInMessage::ContextNote { content } = inbound {
                     let note = match coding_store.create_context_note(&current_attempt, content)

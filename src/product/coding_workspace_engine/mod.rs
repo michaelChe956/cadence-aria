@@ -29,6 +29,7 @@ use crate::product::coding_evaluation_context::{
 };
 use crate::product::coding_models::{
     CodeReviewReport, CodingAgentRole, CodingAttemptStatus, CodingChatEntry, CodingChoiceOption,
+    CodingChoiceQuestion,
     CodingContextNote, CodingEntryType, CodingExecutionAttempt, CodingExecutionStage,
     CodingGateAction, CodingGateActionType, CodingGateRequired, CodingProviderPermissionMode,
     CodingProviderRole, CodingReworkInstruction, CodingRoleRun, CodingRoleRunEventType,

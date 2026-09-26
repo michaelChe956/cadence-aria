@@ -50,6 +50,10 @@ pub struct CodingChoiceGateResponse {
     #[serde(default)]
     pub free_text: Option<String>,
     pub responded_at: String,
+    /// P0 1.3（REQ-WIGA-05）：完整逐题答案（Task 6 `answers` 原样落盘）；
+    /// 旧单题 gate 仅有 selected/free_text，serde 缺省为空。
+    #[serde(default)]
+    pub answers: Vec<crate::cross_cutting::streaming_provider::ChoiceAnswerData>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,8 +75,22 @@ pub struct CodingChoiceGate {
     pub status: CodingChoiceGateStatus,
     #[serde(default)]
     pub response: Option<CodingChoiceGateResponse>,
+    /// P0 1.3：多问题透传（Task 6 完整 questions）；旧 gate serde 缺省空，
+    /// `effective_questions` 按单一 default 题兼容投影。
+    #[serde(default)]
+    pub questions: Vec<CodingChoiceQuestion>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// P0 1.3：coding choice 逐题结构（与 provider `ChoiceQuestionData` 同构）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodingChoiceQuestion {
+    pub id: String,
+    pub prompt: String,
+    pub options: Vec<CodingChoiceOption>,
+    pub allow_multiple: bool,
+    pub allow_free_text: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -151,4 +169,21 @@ pub struct QualityGateBypassAudit {
     pub reason_code: Option<String>,
     pub operator_context: String,
     pub created_at: String,
+}
+
+impl CodingChoiceGate {
+    /// 旧 gate（无 questions）按单一 default 题兼容：题干/gate 级选项透传，
+    /// 不猜测多题结构；新 gate 原样返回。
+    pub fn effective_questions(&self) -> Vec<CodingChoiceQuestion> {
+        if !self.questions.is_empty() {
+            return self.questions.clone();
+        }
+        vec![CodingChoiceQuestion {
+            id: "default".to_string(),
+            prompt: self.prompt.clone(),
+            options: self.options.clone(),
+            allow_multiple: self.allow_multiple,
+            allow_free_text: self.allow_free_text,
+        }]
+    }
 }

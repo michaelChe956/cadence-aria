@@ -256,6 +256,25 @@ impl CodingWorkspaceEngine {
                     .collect(),
                 allow_multiple: request.allow_multiple,
                 allow_free_text: request.allow_free_text,
+                questions: request
+                    .questions
+                    .iter()
+                    .map(|question| CodingChoiceQuestion {
+                        id: question.id.clone(),
+                        prompt: question.prompt.clone(),
+                        options: question
+                            .options
+                            .iter()
+                            .map(|option| CodingChoiceOption {
+                                id: option.id.clone(),
+                                label: option.label.clone(),
+                                description: option.description.clone(),
+                            })
+                            .collect(),
+                        allow_multiple: question.allow_multiple,
+                        allow_free_text: question.allow_free_text,
+                    })
+                    .collect(),
             },
         )?;
         let current =

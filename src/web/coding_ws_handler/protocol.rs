@@ -202,6 +202,14 @@ pub enum CodingWsInMessage {
         id: String,
         selected_option_ids: Vec<String>,
         free_text: Option<String>,
+        /// P0 1.3（Task 9）：完整逐题答案；旧单题客户端缺省为空。
+        #[serde(default)]
+        answers: Vec<crate::cross_cutting::streaming_provider::ChoiceAnswerData>,
+        /// P0 1.3：显式 claim 身份；缺省绑定当前唯一 run 并生成 command_id。
+        #[serde(default)]
+        command_id: Option<String>,
+        #[serde(default)]
+        expected_run_id: Option<String>,
     },
     GateResponse {
         gate_id: String,

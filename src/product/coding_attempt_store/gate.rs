@@ -401,6 +401,7 @@ impl super::CodingAttemptStore {
             gate.options = input.options;
             gate.allow_multiple = input.allow_multiple;
             gate.allow_free_text = input.allow_free_text;
+            gate.questions = input.questions;
             gate.updated_at = Utc::now().to_rfc3339();
             write_json(&existing_path, &gate)?;
             return Ok(gate);
@@ -421,6 +422,7 @@ impl super::CodingAttemptStore {
             options: input.options,
             allow_multiple: input.allow_multiple,
             allow_free_text: input.allow_free_text,
+            questions: input.questions,
             status: CodingChoiceGateStatus::Open,
             response: None,
             created_at: now.clone(),
@@ -450,6 +452,7 @@ impl super::CodingAttemptStore {
         choice_id: &str,
         selected_option_ids: Vec<String>,
         free_text: Option<String>,
+        answers: Vec<crate::cross_cutting::streaming_provider::ChoiceAnswerData>,
     ) -> Result<CodingChoiceGate, ProductStoreError> {
         let gates_root = self.choice_gates_root(project_id, issue_id, attempt_id);
         let Some(path) = matching_open_choice_gate_path(&gates_root, choice_id)? else {
@@ -465,6 +468,7 @@ impl super::CodingAttemptStore {
             selected_option_ids,
             free_text,
             responded_at: Utc::now().to_rfc3339(),
+            answers,
         });
         gate.updated_at = Utc::now().to_rfc3339();
         write_json(
@@ -863,4 +867,176 @@ fn normalize_blocked_gate(mut gate: CodingGateRequired) -> CodingGateRequired {
         },
     );
     gate
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::product::app_paths::ProductAppPaths;
+    use crate::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttemptInput};
+    use crate::product::coding_models::{CodingChoiceOption, CodingChoiceQuestion};
+    use crate::product::models::ProviderName;
+    use crate::web::workspace_ws_types::ProviderConfigSnapshot;
+
+    fn fixture_attempt() -> (tempfile::TempDir, CodingAttemptStore, CodingExecutionAttempt) {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CodingAttemptStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
+        let attempt = store
+            .create_attempt(CreateCodingAttemptInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                work_item_id: "work_item_0001".to_string(),
+                base_branch: "HEAD".to_string(),
+                branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
+                worktree_path: None,
+                provider_config_snapshot: ProviderConfigSnapshot {
+                    author: ProviderName::Fake,
+                    reviewer: Some(ProviderName::Fake),
+                    review_rounds: 1,
+                    permission_modes: Default::default(),
+                },
+                target_snapshot: None,
+                max_auto_rework: 1,
+            })
+            .unwrap();
+        (tmp, store, attempt)
+    }
+
+    fn coding_choice_option(id: &str, label: &str) -> CodingChoiceOption {
+        CodingChoiceOption {
+            id: id.to_string(),
+            label: label.to_string(),
+            description: None,
+        }
+    }
+
+    fn two_questions() -> Vec<CodingChoiceQuestion> {
+        vec![
+            CodingChoiceQuestion {
+                id: "q-1".to_string(),
+                prompt: "是否包含集成测试".to_string(),
+                options: vec![
+                    coding_choice_option("yes", "包含"),
+                    coding_choice_option("no", "不包含"),
+                ],
+                allow_multiple: false,
+                allow_free_text: false,
+            },
+            CodingChoiceQuestion {
+                id: "q-2".to_string(),
+                prompt: "评审轮数".to_string(),
+                options: vec![
+                    coding_choice_option("one", "一轮"),
+                    coding_choice_option("two", "两轮"),
+                ],
+                allow_multiple: false,
+                allow_free_text: true,
+            },
+        ]
+    }
+
+    fn choice_input(attempt: &CodingExecutionAttempt) -> CreateChoiceGateInput {
+        CreateChoiceGateInput {
+            attempt_id: attempt.id.clone(),
+            choice_id: "choice-question-1".to_string(),
+            stage: CodingExecutionStage::Coding,
+            node_id: None,
+            role: CodingProviderRole::Coder,
+            provider: ProviderName::Fake,
+            source: "provider".to_string(),
+            prompt: "拆分方案确认".to_string(),
+            options: vec![
+                coding_choice_option("a", "方案 A"),
+                coding_choice_option("b", "方案 B"),
+            ],
+            allow_multiple: false,
+            allow_free_text: false,
+            questions: two_questions(),
+        }
+    }
+
+    #[test]
+    fn coding_choice_reply_gate_persists_multi_question_and_full_answers() {
+        let (_tmp, store, attempt) = fixture_attempt();
+        let gate = store
+            .create_choice_gate(&attempt, choice_input(&attempt))
+            .unwrap();
+        assert_eq!(gate.questions.len(), 2);
+        assert_eq!(gate.questions[0].id, "q-1");
+        assert!(gate.questions[1].allow_free_text);
+
+        // durable 读回同样含 questions；open 列表投影不丢题。
+        let listed = store
+            .list_open_choice_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].questions.len(), 2);
+
+        let answers = vec![
+            crate::cross_cutting::streaming_provider::ChoiceAnswerData {
+                question_id: "q-1".to_string(),
+                selected_option_ids: vec!["yes".to_string()],
+                free_text: None,
+            },
+            crate::cross_cutting::streaming_provider::ChoiceAnswerData {
+                question_id: "q-2".to_string(),
+                selected_option_ids: vec!["one".to_string()],
+                free_text: Some("按一轮即可".to_string()),
+            },
+        ];
+        let resolved = store
+            .resolve_choice_gate(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                "choice-question-1",
+                vec!["yes".to_string()],
+                None,
+                answers,
+            )
+            .unwrap();
+        assert_eq!(resolved.status, CodingChoiceGateStatus::Resolved);
+        let response = resolved.response.unwrap();
+        assert_eq!(response.answers.len(), 2);
+        assert_eq!(response.answers[1].question_id, "q-2");
+        assert_eq!(response.answers[1].free_text.as_deref(), Some("按一轮即可"));
+
+        // resolve 后 open 列表收敛为空。
+        assert!(store
+            .list_open_choice_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn coding_choice_reply_gate_legacy_without_questions_defaults_single_question() {
+        let (_tmp, store, attempt) = fixture_attempt();
+        // 旧 gate：无 questions 字段（serde default 空）。
+        let mut input = choice_input(&attempt);
+        input.questions = Vec::new();
+        let gate = store.create_choice_gate(&attempt, input).unwrap();
+        assert!(gate.questions.is_empty());
+
+        // 兼容投影：缺 questions 的旧 gate 按单一 default 题呈现，不猜多题。
+        let effective = gate.effective_questions();
+        assert_eq!(effective.len(), 1);
+        assert_eq!(effective[0].id, "default");
+        assert_eq!(effective[0].prompt, gate.prompt);
+        assert_eq!(effective[0].options.len(), gate.options.len());
+
+        // 旧答案形态（仅 selected/free_text）仍可 resolve（answers 缺省空）。
+        let resolved = store
+            .resolve_choice_gate(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                "choice-question-1",
+                vec!["a".to_string()],
+                None,
+                Vec::new(),
+            )
+            .unwrap();
+        assert_eq!(resolved.status, CodingChoiceGateStatus::Resolved);
+        assert!(resolved.response.unwrap().answers.is_empty());
+    }
 }

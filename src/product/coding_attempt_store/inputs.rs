@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
 use crate::product::coding_models::{
-    AttemptTargetSnapshot, CodingChoiceOption, CodingExecutionStage, CodingExecutionUnitStatus,
-    CodingGateAction, CodingProviderRole,
+    AttemptTargetSnapshot, CodingChoiceOption, CodingChoiceQuestion, CodingExecutionStage,
+    CodingExecutionUnitStatus, CodingGateAction, CodingProviderRole,
 };
 use crate::product::models::ProviderName;
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
@@ -74,6 +74,7 @@ pub struct CreateChoiceGateInput {
     pub options: Vec<CodingChoiceOption>,
     pub allow_multiple: bool,
     pub allow_free_text: bool,
+    pub questions: Vec<CodingChoiceQuestion>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

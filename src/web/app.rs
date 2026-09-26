@@ -293,6 +293,14 @@ pub fn build_web_router_with_evidence(state: WebAppState, evidence_enabled: bool
             post(handlers::abort_coding_attempt),
         )
         .route(
+            "/api/projects/{project_id}/issues/{issue_id}/coding-attempts/{attempt_id}/choices/{choice_id}/response",
+            post(handlers::post_coding_choice_response),
+        )
+        .route(
+            "/api/projects/{project_id}/issues/{issue_id}/coding-attempts/{attempt_id}/choices/{choice_id}/responses/{command_id}",
+            get(handlers::get_coding_choice_response_status),
+        )
+        .route(
             "/api/projects/{project_id}/issues/{issue_id}/coding-attempts/{attempt_id}/execution-plan/confirm",
             post(handlers::confirm_work_item_execution_plan),
         )
