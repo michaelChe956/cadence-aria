@@ -46,7 +46,10 @@ impl WorkspaceSessionManager {
     /// `durable_projection_offload` 调用；`current_session_state` 的同步降级路径是
     /// 唯一的直接调用方。
     pub(crate) fn durable_projection(&self) -> (WsOutMessage, Option<WsOutMessage>) {
-        Self::durable_projection_with(self.app_paths.clone(), self.session_record.clone())
+        let (mut session_state, pending_frame) =
+            Self::durable_projection_with(self.app_paths.clone(), self.session_record.clone());
+        self.stamp_pending_choice_run_ids(&mut session_state);
+        (session_state, pending_frame)
     }
 
     fn durable_projection_with(

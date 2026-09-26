@@ -277,3 +277,66 @@ async fn workspace_choice_claim_ws_default_binding_uses_current_unique_run() {
             .is_none()
     );
 }
+
+/// P0 1.3（真实链 2026-09-26 发现）：provider run 长期持有 engine 锁时，
+/// attach/广播全部走 durable 降级投影——若降级帧不注入 run 化身，驾驶舱
+/// （无 driver）拿不到 `expected_run_id`，REST 作答恒 410。契约：降级帧的
+/// pending choice 同样携带当前 active run 化身；无活跃 run 保持 None。
+#[tokio::test]
+async fn durable_fallback_pending_choice_carries_active_run_incarnation() {
+    use crate::web::workspace_ws_types::WsPendingChoiceRequest;
+
+    let manager = claim_manager("session_durable_stamp");
+    let (_token, incarnation) = started_claim_run(&manager).await;
+
+    // 取真实 durable 降级帧（attach/current_session_state 在 run 持锁时的
+    // 数据源），手工挂一条 pending（fixture 无 provider，登记簿为空）。
+    let (mut frame, _) = manager.durable_projection();
+    frame_session_state_pending(
+        &mut frame,
+        WsPendingChoiceRequest {
+            id: "choice-durable".to_string(),
+            prompt: "降级帧也必须携带 run 化身".to_string(),
+            options: Vec::new(),
+            allow_multiple: false,
+            allow_free_text: false,
+            questions: Vec::new(),
+            source: "ask_user_question".to_string(),
+            created_at_ms: None,
+            role: "author".to_string(),
+            expected_run_id: None,
+        },
+    );
+
+    manager.stamp_pending_choice_run_ids(&mut frame);
+
+    let WsOutMessage::SessionState {
+        pending_choice_requests,
+        ..
+    } = &frame
+    else {
+        panic!("session state frame");
+    };
+    let stamped = pending_choice_requests
+        .iter()
+        .find(|request| request.id == "choice-durable")
+        .expect("pending entry survives stamping");
+    assert_eq!(
+        stamped.expected_run_id.as_deref(),
+        Some(incarnation.as_str()),
+        "durable 降级帧的 pending choice 必须携带 active run 化身（驾驶舱 REST 作答绑定）"
+    );
+}
+
+fn frame_session_state_pending(
+    frame: &mut WsOutMessage,
+    request: crate::web::workspace_ws_types::WsPendingChoiceRequest,
+) {
+    if let WsOutMessage::SessionState {
+        pending_choice_requests,
+        ..
+    } = frame
+    {
+        pending_choice_requests.push(request);
+    }
+}

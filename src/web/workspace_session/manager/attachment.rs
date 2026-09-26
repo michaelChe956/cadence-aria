@@ -97,7 +97,9 @@ impl WorkspaceSessionManager {
                 tokio::time::sleep(std::time::Duration::from_millis(250)).await;
             }
         }
-        self.durable_projection_offload().await
+        let (mut session_state, pending_frame) = self.durable_projection_offload().await;
+        self.stamp_pending_choice_run_ids(&mut session_state);
+        (session_state, pending_frame)
     }
 
     /// 初帧 attach 基线序号：snapshot 构建时刻的当前 event_seq。初帧投递时若存在

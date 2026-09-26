@@ -287,8 +287,16 @@ impl WorkspaceSessionManager {
                 *automation = None;
             }
         }
-        // P0 1.3：pending choice 投影注入当前 run 化身（引擎投影不知道
-        // manager run；无活跃 run 保持 None——旧载荷兼容，前端不猜 run）。
+        self.stamp_pending_choice_run_ids(frame);
+    }
+
+    /// P0 1.3（REQ-WIGA-05）：pending choice 投影注入当前 run 化身（引擎/
+    /// durable 投影都不知道 manager run；无活跃 run 保持 None——旧载荷兼容，
+    /// 前端不猜 run）。真实链 2026-09-26 发现：provider run 长期持有 engine
+    /// 锁时 attach/广播全部走 durable 降级帧，此前只在 engine 空闲帧注入会
+    /// 让无 driver 的驾驶舱拿不到 expected_run_id（REST 作答恒 410）——降级
+    /// 帧同样过本函数。
+    pub(crate) fn stamp_pending_choice_run_ids(&self, frame: &mut WsOutMessage) {
         if let WsOutMessage::SessionState {
             pending_choice_requests,
             ..
