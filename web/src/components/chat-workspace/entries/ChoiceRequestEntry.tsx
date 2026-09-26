@@ -11,12 +11,19 @@ interface ChoiceRequestEntryProps {
   entry: ChatEntry;
   onRespond?: (entry: ChatEntry, response: ChoiceResponsePayload) => void;
   embedded?: boolean;
+  /**
+   * P0 1.3（REQ-WIGA-05）Task 11：外部受控提交态（REST 202 保卡复查/错误重试
+   * 由父级命令状态裁决）——提供时完全取代内部一次性 submitting；缺省内用
+   * 既有行为（legacy WS 卡）。
+   */
+  submittingOverride?: boolean;
 }
 
 export function ChoiceRequestEntry({
   entry,
   onRespond,
   embedded = false,
+  submittingOverride,
 }: ChoiceRequestEntryProps) {
   const metadata = entry.metadata as Record<string, unknown> | undefined;
   const allowMultiple = metadata?.allow_multiple === true;
@@ -41,6 +48,8 @@ export function ChoiceRequestEntry({
   const [selectedByQuestion, setSelectedByQuestion] = useState<Record<string, string[]>>({});
   const [freeTextByQuestion, setFreeTextByQuestion] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
+  // Task 11：外部受控优先（202 复查期间禁改答案；错误回落后允许同命令重试）。
+  const effectiveSubmitting = submittingOverride ?? submitting;
   const [promptExpanded, setPromptExpanded] = useState(false);
 
   function selectedIdsFor(questionId: string) {
@@ -130,7 +139,7 @@ export function ChoiceRequestEntry({
                   name={`choice-${entry.id}-${question.id}`}
                   checked={selectedIds.includes(option.id)}
                   onChange={() => toggleOption(question, option.id)}
-                  disabled={submitting}
+                  disabled={effectiveSubmitting}
                 />
                 <span className="min-w-0">
                   <span className="font-medium">{option.label}</span>
@@ -152,7 +161,7 @@ export function ChoiceRequestEntry({
               aria-label={textareaLabel}
               value={freeText}
               onChange={(event) => updateFreeText(question.id, event.target.value)}
-              disabled={submitting}
+              disabled={effectiveSubmitting}
               className="mt-1 min-h-20 w-full resize-y rounded-md border border-[var(--aria-line)] bg-white px-2 py-1 text-sm font-normal text-[var(--aria-ink)]"
             />
           </label>
@@ -248,7 +257,7 @@ export function ChoiceRequestEntry({
               <button
                 type="button"
                 onClick={submitChoice}
-                disabled={submitting || !canSubmit}
+                disabled={effectiveSubmitting || !canSubmit}
                 className="inline-flex h-8 items-center gap-1 rounded-md border border-[var(--aria-primary-soft)] bg-white px-3 text-xs font-semibold text-[var(--aria-primary)] hover:bg-[var(--aria-primary-soft)] disabled:cursor-not-allowed disabled:opacity-60"
               >
                 <Check className="h-3.5 w-3.5" />

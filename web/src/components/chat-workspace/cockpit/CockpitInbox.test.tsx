@@ -36,6 +36,7 @@ const gateItem: CockpitInboxItem = {
     terminate_block_reason: null,
   },
   inlineError: null,
+  choice: null,
 };
 
 const artifactVersions = [
@@ -86,6 +87,7 @@ const authorConfirmItem = (reviewAvailable: boolean): CockpitInboxItem => ({
   createdAt: null,
   gate: { ...authorConfirmGate, review_available: reviewAvailable },
   inlineError: null,
+  choice: null,
 });
 
 // REQ-PCG-01：整组 Draft 确认门——key=`node:${node_id}`，动作面 [确认整组][终止]。
@@ -107,6 +109,7 @@ const batchConfirmItem: CockpitInboxItem = {
     opened_at: "2026-09-22T00:00:00.000Z",
   },
   inlineError: null,
+  choice: null,
 };
 
 // REQ-PCG-02：compile recovery 门——动作面 [继续][放弃并回滚][转人工]。
@@ -127,6 +130,7 @@ const recoveryItem: CockpitInboxItem = {
     opened_at: "2026-09-22T00:00:00.000Z",
   },
   inlineError: null,
+  choice: null,
 };
 
 // F-50 §4.1-1/6/7/8（第一批布局减负）：抽屉只保留顶栏「待处理」，收件箱内部
@@ -145,6 +149,7 @@ const staleLeaseErrorItem: CockpitInboxItem = {
   createdAt: null,
   gate: null,
   inlineError: null,
+      choice: null,
   protocolErrorCode: "STALE_DRIVER_LEASE",
 };
 
@@ -159,6 +164,7 @@ const advanceErrorItem: CockpitInboxItem = {
   createdAt: null,
   gate: null,
   inlineError: null,
+  choice: null,
 };
 describe("CockpitInbox F-50 layout", () => {
   it("不再内嵌「待处理」标题，按连接问题/需要人工处理分组", () => {
@@ -298,6 +304,7 @@ describe("CockpitInbox", () => {
             createdAt: null,
             gate: null,
             inlineError: null,
+            choice: null,
           },
           {
             id: "session_001:hard_error:error",
@@ -310,6 +317,7 @@ describe("CockpitInbox", () => {
             createdAt: null,
             gate: null,
             inlineError: null,
+            choice: null,
           },
         ]}
         actions={actions}
@@ -612,6 +620,7 @@ describe("CockpitInbox", () => {
     createdAt: null,
     gate: null,
     inlineError: null,
+      choice: null,
     protocolErrorCode: "STALE_DRIVER_LEASE",
   };
 
@@ -910,5 +919,121 @@ describe("CockpitInbox 视觉 v2", () => {
 
     const label = screen.getByText("选择此门以批量确认").closest("label");
     expect(label?.className).toContain("text-sm");
+  });
+});
+
+// P0 1.3（REQ-WIGA-05）Task 11：驾驶舱 choice 就地卡片——driver/coding socket
+// 缺席时待答选择不再死等 WS；REST 作答按 command 幂等，202 保卡复查。
+describe("CockpitInbox choice card (P0 1.3)", () => {
+  const choiceItem = (
+    overrides: Partial<NonNullable<CockpitInboxItem["choice"]>> = {},
+  ): CockpitInboxItem => ({
+    id: "session_001:choice:choice-1",
+    kind: "choice",
+    severity: 2,
+    title: "选择请求待作答",
+    summary: "拆分方案确认",
+    triage: false,
+    source: "choice",
+    createdAt: null,
+    gate: null,
+    inlineError: null,
+    choice: {
+      sessionId: "session_001",
+      choiceId: "choice-1",
+      prompt: "拆分方案确认",
+      expectedRunId: "run-1",
+      questions: [
+        {
+          id: "q-1",
+          prompt: "是否包含集成测试",
+          options: [
+            { id: "yes", label: "包含" },
+            { id: "no", label: "不包含" },
+          ],
+          allow_multiple: false,
+          allow_free_text: false,
+        },
+        {
+          id: "q-2",
+          prompt: "评审轮数",
+          options: [
+            { id: "one", label: "一轮" },
+            { id: "two", label: "两轮" },
+          ],
+          allow_multiple: false,
+          allow_free_text: false,
+        },
+      ],
+      allowMultiple: false,
+      allowFreeText: false,
+      source: "workspace",
+      status: "open",
+      ...overrides,
+    },
+  });
+
+  it("提交选择把两题各自独立答案交回答写通道（一个 command）", async () => {
+    const onChoiceRespond = vi.fn();
+    render(
+      <CockpitInbox
+        items={[choiceItem()]}
+        actions={mockActions()}
+        actionableSessionId="session_001"
+        onChoiceRespond={onChoiceRespond}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("radio", { name: "包含" }));
+    await userEvent.click(screen.getByRole("radio", { name: "两轮" }));
+    await userEvent.click(screen.getByRole("button", { name: "提交选择" }));
+
+    expect(onChoiceRespond).toHaveBeenCalledTimes(1);
+    const [item, payload] = onChoiceRespond.mock.calls[0];
+    expect(item.choice.choiceId).toBe("choice-1");
+    expect(payload.answers).toEqual([
+      { question_id: "q-1", selected_option_ids: ["yes"], free_text: null },
+      { question_id: "q-2", selected_option_ids: ["two"], free_text: null },
+    ]);
+  });
+
+  it("202 后保卡显示处理中并禁用重复分配答案", () => {
+    render(
+      <CockpitInbox
+        items={[choiceItem({ status: "resolving" })]}
+        actions={mockActions()}
+        actionableSessionId="session_001"
+      />,
+    );
+
+    expect(screen.getByText("处理中")).toBeVisible();
+    expect(screen.getByRole("radio", { name: "包含" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "提交选择" })).toBeDisabled();
+  });
+
+  it("旧投影无 run 信息时只提示刷新后作答，不猜 run", () => {
+    render(
+      <CockpitInbox
+        items={[choiceItem({ expectedRunId: null })]}
+        actions={mockActions()}
+        actionableSessionId="session_001"
+      />,
+    );
+
+    expect(screen.getByText(/刷新后作答/)).toBeVisible();
+    expect(screen.queryByRole("button", { name: "提交选择" })).toBeNull();
+  });
+
+  it("已失效（410）不再提供提交，不路由到新 run", () => {
+    render(
+      <CockpitInbox
+        items={[choiceItem({ status: "expired" })]}
+        actions={mockActions()}
+        actionableSessionId="session_001"
+      />,
+    );
+
+    expect(screen.getByText("已失效")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "提交选择" })).toBeNull();
   });
 });

@@ -33,6 +33,7 @@ vi.mock("../components/shared/MonacoViewer", () => ({
   MonacoViewer: ({ value }: { value: string }) => <div data-testid="monaco-viewer">{value}</div>,
 }));
 vi.mock("../components/cockpit/CockpitShell", () => ({
+  useCockpitCodingAttemptForSession: () => () => null,
   useCockpitShellInbox: () => cockpitInbox,
   useCockpitInboxPulse: () => false,
   useCockpitSessionWatch: () => watchSession,

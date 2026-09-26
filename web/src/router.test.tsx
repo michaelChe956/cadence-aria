@@ -107,6 +107,7 @@ function gateItem(sessionId: string): CockpitInboxItem {
     createdAt: null,
     gate: null,
     inlineError: null,
+      choice: null,
   };
 }
 
@@ -160,6 +161,7 @@ describe("router", () => {
       countedInbox: [],
       watchedSessionIds: [],
       watchSession: vi.fn(),
+        codingAttemptForSession: () => null,
     });
   });
 
@@ -172,6 +174,7 @@ describe("router", () => {
       countedInbox: [gateItem(sessionId)],
       watchedSessionIds: [sessionId],
       watchSession: vi.fn(),
+        codingAttemptForSession: () => null,
     });
 
     render(<RouterProvider router={createAppRouter(history)} />);

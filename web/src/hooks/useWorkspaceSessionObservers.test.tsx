@@ -59,6 +59,7 @@ function observerOptions(overrides: Partial<WorkspaceSessionObserverOptions> = {
     }),
     getIssueLifecycle: async () => ({
       workspace_sessions: [summary("s1"), summary("s2"), summary("s3")],
+      coding_attempts: [],
     }),
     ...overrides,
   } satisfies WorkspaceSessionObserverOptions;
@@ -156,6 +157,7 @@ describe("useWorkspaceSessionObservers", () => {
       watchLimit: 1,
       getIssueLifecycle: async () => ({
         workspace_sessions: [summary("watched"), summary("outside")],
+        coding_attempts: [],
       }),
       createController: () => ({
         replaceWatchedSessionIds,
@@ -186,7 +188,7 @@ describe("useWorkspaceSessionObservers", () => {
         records: () => [],
         dispose: vi.fn(),
       }),
-      getIssueLifecycle: async () => ({ workspace_sessions: sessions }),
+      getIssueLifecycle: async () => ({ workspace_sessions: sessions, coding_attempts: [] }),
       scheduleCatalogRefresh: (callback) => {
         refreshCatalog = callback;
         return 0;
@@ -210,7 +212,7 @@ describe("useWorkspaceSessionObservers", () => {
       if (getIssueLifecycle.mock.calls.length > 1) {
         throw new Error("temporary catalog failure");
       }
-      return { workspace_sessions: [summary("s1"), summary("s2")] };
+      return { workspace_sessions: [summary("s1"), summary("s2")], coding_attempts: [] as never[] };
     });
     let refreshCatalog: (() => void) | undefined;
     let onRecordsChange: ((records: readonly { sessionId: string; state: never }[]) => void) | undefined;

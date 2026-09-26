@@ -1,6 +1,7 @@
 import { gateIdentityFromState } from "./cockpit-action-routing";
 import { protocolErrorCopy, STALE_DRIVER_LEASE_CODE } from "./protocol-error-copy";
-import type { WorkItemPlanHumanGateSnapshot } from "../api/types";
+import type { ChoiceQuestion, WorkItemPlanHumanGateSnapshot } from "../api/types";
+import type { CodingAttemptAddress } from "../api/types/coding";
 import type { ChatEntry } from "./chat-entries";
 import type {
   GateClosureDecision,
@@ -456,7 +457,28 @@ export function selectGateProjection(state: WorkspaceWsState): GateProjection | 
   };
 }
 
-export type CockpitInboxKind = "gate" | "stopped" | "hard_error";
+export type CockpitInboxKind = "gate" | "stopped" | "hard_error" | "choice";
+
+/**
+ * P0 1.3（REQ-WIGA-05）Task 11：驾驶舱 choice 就地作答投影——workspace 侧
+ * 来自 session_state `pending_choice_requests`（含完整逐题结构），coding 侧
+ * 来自 attempt snapshot 的 open choice gate（页面按需拉取）。status 是本地
+ * 命令状态与服务端 pending 列表的合并视图：open=可作答；
+ * submitting/resolving=202 已受理保卡复查；delivered=回执已送达（卡片移除）；
+ * expired=410 旧 run 失效（不路由到新 run）。
+ */
+export interface ChoiceInboxProjection {
+  sessionId: string | null;
+  choiceId: string;
+  prompt: string;
+  expectedRunId: string | null;
+  questions: ChoiceQuestion[];
+  allowMultiple: boolean;
+  allowFreeText: boolean;
+  source: "workspace" | "coding";
+  attemptAddress?: CodingAttemptAddress;
+  status: "open" | "submitting" | "resolving" | "delivered" | "expired";
+}
 
 export interface CockpitInboxItem {
   id: string;
@@ -465,10 +487,12 @@ export interface CockpitInboxItem {
   title: string;
   summary: string;
   triage: boolean;
-  source: "gate" | "session_status" | "protocol_error" | "engine_error" | "advance";
+  source: "gate" | "session_status" | "protocol_error" | "engine_error" | "advance" | "choice";
   createdAt: string | null;
   gate: GateProjection | null;
   inlineError: { code: string; message: string } | null;
+  /** REQ-WIGA-05 Task 11：kind="choice" 时的作答投影；其余 kind 恒 null。 */
+  choice: ChoiceInboxProjection | null;
   /** protocol_error 来源条目的机器码（如 STALE_DRIVER_LEASE）；其余来源缺省。 */
   protocolErrorCode?: string | null;
 }
@@ -557,6 +581,7 @@ export function selectCockpitInbox(state: WorkspaceWsState): CockpitInboxItem[] 
       createdAt: gate.opened_at || null,
       gate,
       inlineError: gate.turn?.inlineError ?? null,
+      choice: null,
     });
   }
 
@@ -574,6 +599,7 @@ export function selectCockpitInbox(state: WorkspaceWsState): CockpitInboxItem[] 
       createdAt: null,
       gate: null,
       inlineError: null,
+      choice: null,
     });
   }
 
@@ -591,6 +617,7 @@ export function selectCockpitInbox(state: WorkspaceWsState): CockpitInboxItem[] 
       createdAt: null,
       gate: null,
       inlineError: null,
+      choice: null,
       protocolErrorCode: state.protocolError.code,
     });
   }
@@ -607,6 +634,7 @@ export function selectCockpitInbox(state: WorkspaceWsState): CockpitInboxItem[] 
       createdAt: null,
       gate: null,
       inlineError: null,
+      choice: null,
     });
   }
 
@@ -625,6 +653,37 @@ export function selectCockpitInbox(state: WorkspaceWsState): CockpitInboxItem[] 
       createdAt: null,
       gate: null,
       inlineError: command.inlineError,
+      choice: null,
+    });
+  }
+
+  // P0 1.3（REQ-WIGA-05）Task 11：pending choice 逐条一张卡（不可批量选择，
+  // isSelectableGate 只认 human_gate）。expected_run_id 缺失（旧投影/无活跃
+  // run）不猜 run——卡面提示刷新后作答，不给提交面。
+  for (const request of state.pendingChoiceRequests ?? []) {
+    items.push({
+      id: `choice:${request.id}`,
+      kind: "choice",
+      severity: 2,
+      title: "选择请求待作答",
+      summary: request.prompt,
+      triage: false,
+      source: "choice",
+      createdAt:
+        request.created_at_ms !== null ? new Date(request.created_at_ms).toISOString() : null,
+      gate: null,
+      inlineError: null,
+      choice: {
+        sessionId: state.sessionId,
+        choiceId: request.id,
+        prompt: request.prompt,
+        expectedRunId: request.expected_run_id,
+        questions: request.questions,
+        allowMultiple: request.allow_multiple,
+        allowFreeText: request.allow_free_text,
+        source: "workspace",
+        status: "open",
+      },
     });
   }
 

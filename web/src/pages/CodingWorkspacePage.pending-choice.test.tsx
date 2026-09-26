@@ -78,6 +78,7 @@ function stubObservers() {
     countedInbox: [],
     watchedSessionIds: [],
     watchSession: vi.fn(),
+        codingAttemptForSession: () => null,
   });
 }
 

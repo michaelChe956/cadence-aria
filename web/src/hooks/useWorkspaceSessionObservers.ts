@@ -5,6 +5,7 @@ import {
   listProjects,
 } from "../api/client";
 import type {
+  CodingAttempt,
   IssueLifecycleResponse,
   ProductIssueListResponse,
   WorkspaceSessionSummary,
@@ -35,7 +36,9 @@ export interface WorkspaceSessionObserverOptions {
   getIssueLifecycle?: (
     issueId: string,
     projectId: string,
-  ) => Promise<Pick<IssueLifecycleResponse, "workspace_sessions">>;
+  ) => Promise<
+    Pick<IssueLifecycleResponse, "workspace_sessions" | "coding_attempts">
+  >;
   createController?: WorkspaceObserverControllerFactory;
   scheduleCatalogRefresh?: (callback: () => void, delayMs: number) => CatalogRefreshTimer;
   cancelCatalogRefresh?: (timer: CatalogRefreshTimer) => void;
@@ -51,6 +54,8 @@ export interface WorkspaceSessionObserverResult {
   watchedSessionIds: readonly string[];
   countedInbox: readonly CockpitInboxItem[];
   watchSession(sessionId: string): void;
+  /** Task 11：会话所属 issue 的最新活跃 coding attempt（无则 null）。 */
+  codingAttemptForSession(sessionId: string): CodingAttempt | null;
 }
 
 export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOptions): WorkspaceSessionObserverResult {
@@ -67,8 +72,11 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
     cancelCatalogRefresh: cancelRefresh = cancelCatalogRefresh,
   } = options;
   const [sessions, setSessions] = useState<readonly WorkspaceSessionSummary[]>([]);
-  const [observerRecords, setObserverRecords] = useState<readonly WorkspaceObserverRecord[]>([]);
+  const [observerRecords, setObserverRecords] = useState<
+    readonly WorkspaceObserverRecord[]
+  >([]);
   const [extraSessionIds, setExtraSessionIds] = useState<readonly string[]>([]);
+  const [codingAttempts, setCodingAttempts] = useState<readonly CodingAttempt[]>([]);
   const controllerRef = useRef<WorkspaceObserverController | null>(null);
 
   if (controllerRef.current === null) {
@@ -130,6 +138,11 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
           );
           if (alive) {
             setSessions(lifecycles.flatMap((lifecycle) => lifecycle.workspace_sessions));
+            // P0 1.3（REQ-WIGA-05）Task 11：会话→issue→attempt 发现通道（目录
+            // 轮询副产物，无额外请求）；驾驶舱按需拉 attempt snapshot 作答 choice。
+            setCodingAttempts(
+              lifecycles.flatMap((lifecycle) => lifecycle.coding_attempts ?? []),
+            );
           }
         } catch {
           // 保留上一次成功目录，避免瞬时 REST 失败拆除整个观察窗。
@@ -173,11 +186,31 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
     );
   }, []);
 
+  // Task 11：会话归属 issue 的最新活跃（created/running）coding attempt；无会话
+  // 目录条目或无活跃 attempt 时 null（不猜、不触发 coding 首启）。
+  const codingAttemptForSession = useCallback(
+    (sessionId: string): CodingAttempt | null => {
+      const issueId =
+        sessions.find((session) => session.workspace_session_id === sessionId)?.issue_id ?? null;
+      if (issueId === null) {
+        return null;
+      }
+      const candidates = codingAttempts.filter(
+        (attempt) =>
+          attempt.issue_id === issueId &&
+          (attempt.status === "created" || attempt.status === "running"),
+      );
+      return candidates.at(-1) ?? null;
+    },
+    [codingAttempts, sessions],
+  );
+
   return {
     records,
     inbox,
     countedInbox,
     watchedSessionIds,
     watchSession,
+    codingAttemptForSession,
   };
 }

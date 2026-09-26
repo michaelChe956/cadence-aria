@@ -3,10 +3,15 @@ import type * as WorkspaceWsModule from "../hooks/useWorkspaceWs";
 import type * as ApiClient from "../api/client";
 import {
   ApiRequestError,
+  getCodingAttemptSnapshot,
+  getWorkspaceChoiceResponseStatus,
+  postCodingChoiceResponse,
+  postWorkspaceChoiceResponse,
   postWorkspaceHumanAction,
   takeoverWorkspaceSession,
 } from "../api/client";
-import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import type { CodingAttempt, CodingAttemptSnapshotResponse } from "../api/types";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -64,6 +69,10 @@ vi.mock("../api/client", async (importOriginal) => ({
   ...(await importOriginal<typeof ApiClient>()),
   takeoverWorkspaceSession: vi.fn(),
   postWorkspaceHumanAction: vi.fn(),
+  postWorkspaceChoiceResponse: vi.fn(),
+  getWorkspaceChoiceResponseStatus: vi.fn(),
+  postCodingChoiceResponse: vi.fn(),
+  getCodingAttemptSnapshot: vi.fn(),
 }));
 vi.mock("../api/workspace-content", () => ({
   fetchWorkspaceArtifactVersion: vi.fn(),
@@ -79,6 +88,10 @@ vi.mock("../components/shared/MonacoViewer", () => ({
   ),
 }));
 
+const codingAttemptHolder = vi.hoisted(() => ({
+  attempt: null as CodingAttempt | null,
+}));
+
 vi.mock("../components/cockpit/CockpitShell", () => ({
   useCockpitShellInbox: () =>
     cockpitInbox.length > 0
@@ -92,6 +105,10 @@ vi.mock("../components/cockpit/CockpitShell", () => ({
   useCockpitSettings: () => readCockpitSettings(),
   useCockpitObservedRecords: () => cockpitObservedRecords,
   useCockpitSettingsSlotRef: () => () => undefined,
+  useCockpitCodingAttemptForSession: () => (sessionId: string) =>
+    codingAttemptHolder.attempt === null || sessionId !== "session_001"
+      ? null
+      : codingAttemptHolder.attempt,
 }));
 
 describe("ChatCockpitPage", () => {
@@ -340,6 +357,7 @@ describe("ChatCockpitPage", () => {
       createdAt: null,
       gate: null,
       inlineError: null,
+      choice: null,
     });
 
     renderCockpit();
@@ -609,5 +627,243 @@ describe("ChatCockpitPage", () => {
 
     expect(await screen.findByText("门身份不匹配")).toBeInTheDocument();
     expect(workspaceWs.sendHumanGateFeedback).not.toHaveBeenCalled();
+  });
+
+  // P0 1.3（REQ-WIGA-05）Task 11：驾驶舱 choice 就地作答——REST 通道（无
+  // driver WS 也能答）；202 保卡+同 command GET 复查；409/410 就地反馈；
+  // coding choice 按 attempt 地址经 REST 作答，不依赖 Coding Workspace。
+  const CHOICE_ANSWERS = [
+    { question_id: "q-1", selected_option_ids: ["yes"], free_text: null },
+    { question_id: "q-2", selected_option_ids: ["two"], free_text: null },
+  ];
+
+  function pendingChoiceSession() {
+    useWorkspaceStore.setState({
+      sessionId: "session_001",
+      stage: "human_confirm",
+      sessionStatus: "waiting_for_human",
+      flowKind: "single_candidate",
+      singleCandidatePhase: "approval",
+      pendingChoiceRequests: [
+        {
+          id: "choice-1",
+          prompt: "拆分方案确认",
+          role: "author",
+          created_at_ms: null,
+          first_seen_at_ms: null,
+          expected_run_id: "run-1",
+          options: [],
+          allow_multiple: false,
+          allow_free_text: false,
+          questions: [
+            {
+              id: "q-1",
+              prompt: "是否包含集成测试",
+              options: [
+                { id: "yes", label: "包含" },
+                { id: "no", label: "不包含" },
+              ],
+              allow_multiple: false,
+              allow_free_text: false,
+            },
+            {
+              id: "q-2",
+              prompt: "评审轮数",
+              options: [
+                { id: "one", label: "一轮" },
+                { id: "two", label: "两轮" },
+              ],
+              allow_multiple: false,
+              allow_free_text: false,
+            },
+          ],
+          source: "ask_user_question",
+        },
+      ],
+    });
+  }
+
+  beforeEach(() => {
+    codingAttemptHolder.attempt = null;
+    vi.mocked(postWorkspaceChoiceResponse).mockReset();
+    vi.mocked(getWorkspaceChoiceResponseStatus).mockReset();
+    vi.mocked(postCodingChoiceResponse).mockReset();
+    vi.mocked(getCodingAttemptSnapshot).mockReset();
+  });
+
+  it("从收件箱就地作答 workspace choice：REST 单命令携两题独立答案", async () => {
+    const user = userEvent.setup();
+    pendingChoiceSession();
+    vi.mocked(postWorkspaceChoiceResponse).mockResolvedValue({
+      command_id: "cmd-choice-1",
+      expected_run_id: "run-1",
+      choice_id: "choice-1",
+      state: "delivered",
+    });
+    const workspaceWs = mockWorkspaceWs();
+    renderCockpitWith(workspaceWs, "session_001");
+
+    const inbox = screen.getByTestId("cockpit-inbox");
+    await user.click(within(inbox).getByRole("radio", { name: "包含" }));
+    await user.click(within(inbox).getByRole("radio", { name: "两轮" }));
+    await user.click(within(inbox).getByRole("button", { name: "提交选择" }));
+
+    expect(postWorkspaceChoiceResponse).toHaveBeenCalledTimes(1);
+    expect(postWorkspaceChoiceResponse).toHaveBeenCalledWith("session_001", "choice-1", {
+      command_id: expect.any(String),
+      expected_run_id: "run-1",
+      answers: CHOICE_ANSWERS,
+    });
+    expect(workspaceWs.sendChoiceResponse).not.toHaveBeenCalled();
+  });
+
+  it("202 后保卡显示处理中，同 command GET 复查 Delivered 后卡片消失", async () => {
+    const user = userEvent.setup();
+    pendingChoiceSession();
+    vi.mocked(postWorkspaceChoiceResponse).mockResolvedValue({
+      command_id: "cmd-rest",
+      expected_run_id: "run-1",
+      choice_id: "choice-1",
+      state: "submitting",
+    });
+    vi.mocked(getWorkspaceChoiceResponseStatus).mockResolvedValue({
+      command_id: "cmd-rest",
+      expected_run_id: "run-1",
+      choice_id: "choice-1",
+      state: "delivered",
+    });
+    renderCockpit("session_001");
+
+    const inbox = screen.getByTestId("cockpit-inbox");
+    await user.click(within(inbox).getByRole("radio", { name: "包含" }));
+    await user.click(within(inbox).getByRole("radio", { name: "两轮" }));
+    await user.click(within(inbox).getByRole("button", { name: "提交选择" }));
+
+    expect(await screen.findByText("处理中")).toBeVisible();
+    await waitFor(() => {
+      expect(getWorkspaceChoiceResponseStatus).toHaveBeenCalledWith(
+        "session_001",
+        "choice-1",
+        "cmd-rest",
+      );
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("cockpit-inbox").textContent).not.toContain("拆分方案确认");
+    });
+  });
+
+  it("409 冲突就地亮冲突码，重试复用同 command 同 payload", async () => {
+    const user = userEvent.setup();
+    pendingChoiceSession();
+    vi.mocked(postWorkspaceChoiceResponse)
+      .mockRejectedValueOnce(
+        new ApiRequestError({
+          code: "workspace_choice_conflict",
+          message: "应答与在途命令冲突",
+          details: {},
+        }),
+      )
+      .mockResolvedValueOnce({
+        command_id: "cmd-retry",
+        expected_run_id: "run-1",
+        choice_id: "choice-1",
+        state: "delivered",
+      });
+    renderCockpit("session_001");
+
+    const inbox = screen.getByTestId("cockpit-inbox");
+    await user.click(within(inbox).getByRole("radio", { name: "包含" }));
+    await user.click(within(inbox).getByRole("radio", { name: "两轮" }));
+    await user.click(within(inbox).getByRole("button", { name: "提交选择" }));
+
+    expect(await screen.findByText(/workspace_choice_conflict/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "提交选择" }));
+
+    const calls = vi.mocked(postWorkspaceChoiceResponse).mock.calls;
+    expect(calls[1][2].command_id).toBe(calls[0][2].command_id);
+    expect(calls[1][2].answers).toEqual(calls[0][2].answers);
+  });
+
+  it("coding choice 从驾驶舱按 attempt 地址经 REST 作答（无 coding socket）", async () => {
+    const user = userEvent.setup();
+    codingAttemptHolder.attempt = {
+      project_id: "project_0001",
+      issue_id: "issue_0001",
+      attempt_id: "attempt_0001",
+    } as CodingAttempt;
+    vi.mocked(getCodingAttemptSnapshot).mockResolvedValue({
+      pending_choices: [
+        {
+          gate_id: "coding_gate_1",
+          choice_id: "choice-coding",
+          attempt_id: "attempt_0001",
+          node_id: null,
+          stage: "coding",
+          role: "coder",
+          provider: "fake",
+          source: "provider",
+          prompt: "编码拆分确认",
+          options: [],
+          allow_multiple: false,
+          allow_free_text: false,
+          status: "open",
+          response: null,
+          questions: [
+            {
+              id: "q-1",
+              prompt: "是否补齐测试",
+              options: [
+                { id: "yes", label: "方案A" },
+                { id: "no", label: "方案B" },
+              ],
+              allow_multiple: false,
+              allow_free_text: false,
+            },
+            {
+              id: "q-2",
+              prompt: "评审节奏",
+              options: [
+                { id: "one", label: "先自审" },
+                { id: "two", label: "直接评审" },
+              ],
+              allow_multiple: false,
+              allow_free_text: false,
+            },
+          ],
+          created_at: "2026-09-26T00:00:00Z",
+          updated_at: "2026-09-26T00:00:00Z",
+          expected_run_id: "run-coding",
+        },
+      ],
+    } as unknown as CodingAttemptSnapshotResponse);
+    vi.mocked(postCodingChoiceResponse).mockResolvedValue({
+      command_id: "cmd-coding",
+      expected_run_id: "run-coding",
+      choice_id: "choice-coding",
+      state: "delivered",
+    });
+    const workspaceWs = mockWorkspaceWs();
+    renderCockpitWith(workspaceWs, "session_001");
+
+    const inbox = screen.getByTestId("cockpit-inbox");
+    expect((await screen.findAllByText("编码拆分确认")).length).toBeGreaterThan(0);
+    await user.click(within(inbox).getByRole("radio", { name: "方案A" }));
+    await user.click(within(inbox).getByRole("radio", { name: "直接评审" }));
+    await user.click(within(inbox).getByRole("button", { name: "提交选择" }));
+
+    expect(postCodingChoiceResponse).toHaveBeenCalledTimes(1);
+    expect(postCodingChoiceResponse).toHaveBeenCalledWith(
+      { projectId: "project_0001", issueId: "issue_0001", attemptId: "attempt_0001" },
+      "choice-coding",
+      {
+        command_id: expect.any(String),
+        expected_run_id: "run-coding",
+        answers: [
+          { question_id: "q-1", selected_option_ids: ["yes"], free_text: null },
+          { question_id: "q-2", selected_option_ids: ["two"], free_text: null },
+        ],
+      },
+    );
+    expect(workspaceWs.sendChoiceResponse).not.toHaveBeenCalled();
   });
 });

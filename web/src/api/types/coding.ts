@@ -459,6 +459,11 @@ export type CodingChoiceGate = {
   response?: CodingChoiceGateResponse | null;
   /** P0 1.3：多问题透传；旧 gate 缺省为空（前端按单一 default 题兼容）。 */
   questions?: CodingChoiceQuestion[];
+  /**
+   * P0 1.3（REQ-WIGA-05）Task 11：应答须绑定的 run 化身（REST claim 精确匹配
+   * active incarnation）；服务端 handler 层注入——无活跃 run 时缺省，不猜 run。
+   */
+  expected_run_id?: string | null;
   created_at: string;
   updated_at: string;
 };

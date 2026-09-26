@@ -1,4 +1,9 @@
-import type { AutomationOwnership, UsageReportPayload } from "../api/types/workspace";
+import type {
+  AutomationOwnership,
+  ChoiceOption,
+  ChoiceQuestion,
+  UsageReportPayload,
+} from "../api/types/workspace";
 import type {
   ProviderPermissionMode,
   WorkspaceProviderName,
@@ -425,6 +430,9 @@ export interface WorkItemPlanProviderStartLedgerEntry {
  * 数据源。`created_at_ms` 是 provider pending 登记时刻（epoch ms，跨刷新
  * 不失真的等待锚点；TextFallback/旧载荷缺省 null，回退 first_seen_at_ms）；
  * `role` 标注发问方（author/reviewer）。
+ * P0 1.3（REQ-WIGA-05）Task 11：同时是驾驶舱就地作答的数据源——完整
+ * options/questions/source/allow_* 与服务端 `WsPendingChoiceRequest` 同形
+ *（questions 严格校验：question id/选项数组畸形即置空，禁止喂 REST 提交面）。
  */
 export interface PendingChoiceRequestProjection {
   id: string;
@@ -434,6 +442,11 @@ export interface PendingChoiceRequestProjection {
   first_seen_at_ms: number | null;
   /** P0 1.3：应答须绑定的 run 化身；null=旧载荷/无活跃 run（不猜 run）。 */
   expected_run_id: string | null;
+  options: ChoiceOption[];
+  allow_multiple: boolean;
+  allow_free_text: boolean;
+  questions: ChoiceQuestion[];
+  source: string;
 }
 
 export interface WorkspaceWsState {

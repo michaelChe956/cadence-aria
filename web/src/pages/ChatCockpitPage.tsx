@@ -1,7 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Check, ClipboardCopy } from "lucide-react";
-import type { AuthorDecisionChoice } from "../api/types";
-import { takeoverWorkspaceSession } from "../api/client";
+import type {
+  AuthorDecisionChoice,
+  ChoiceAnswer,
+  ChoiceReplyStatus,
+} from "../api/types";
+import {
+  getCodingAttemptSnapshot,
+  getCodingChoiceResponseStatus,
+  getWorkspaceChoiceResponseStatus,
+  postCodingChoiceResponse,
+  postWorkspaceChoiceResponse,
+  takeoverWorkspaceSession,
+} from "../api/client";
+import { newCommandId } from "../hooks/useWorkspaceWs";
 import { fetchWorkspaceArtifactVersion } from "../api/workspace-content";
 import {
   ChatEntryList,
@@ -24,6 +36,7 @@ import {
   useCockpitSessionWatch,
   useCockpitSettings,
   useCockpitShellInbox,
+  useCockpitCodingAttemptForSession,
 } from "../components/cockpit/CockpitShell";
 import { CockpitInboxDrawer } from "../components/cockpit/CockpitInboxDrawer";
 import { HARD_ERROR_DRAWER_REFERENCE_NOTE } from "../state/protocol-error-copy";
@@ -135,6 +148,261 @@ export function ChatCockpitPage({
       : observedRecords.find((record) => record.sessionId === takeoverSessionId)?.state ?? null;
   const selectedSessionId = takeoverSessionId ?? sessionId;
   const pendingChoices = pendingChoiceEntries(selectedState?.chatEntries ?? []);
+
+  // P0 1.3（REQ-WIGA-05）Task 11：choice 就地作答命令台账——key
+  // `${scopeSessionId}:${choiceId}`；202（submitting/resolving）保卡复查、
+  // delivered 移除卡片、expired（410）不路由新 run、error（409 等）保留
+  // 同 command 重试。服务端 pending 广播收敛是权威，本台账只补 202→回执
+  // 窗口的状态面。
+  const [choiceCommands, setChoiceCommands] = useState<
+    Record<
+      string,
+      {
+        commandId: string;
+        status: "submitting" | "resolving" | "delivered" | "expired" | "error";
+        errorCode?: string;
+        errorMessage?: string;
+      }
+    >
+  >({});
+  const codingAttemptForSession = useCockpitCodingAttemptForSession();
+  const codingAttempt = codingAttemptForSession(sessionId);
+  const [codingChoiceItems, setCodingChoiceItems] = useState<readonly CockpitInboxItem[]>([]);
+
+  useEffect(() => {
+    let alive = true;
+    if (codingAttempt === null) {
+      setCodingChoiceItems([]);
+      return;
+    }
+    const address = {
+      projectId: codingAttempt.project_id,
+      issueId: codingAttempt.issue_id,
+      attemptId: codingAttempt.attempt_id,
+    };
+    // 按需拉取（挂载/抽屉打开时各一次）：只作答已存在 open gate，不触发
+    // coding 首启，也不常驻轮询。
+    void getCodingAttemptSnapshot(address)
+      .then((snapshot) => {
+        if (!alive) {
+          return;
+        }
+        setCodingChoiceItems(
+          (snapshot.pending_choices ?? [])
+            .filter((gate) => gate.status === "open")
+            .map((gate) => ({
+              id: `${sessionId}:choice:${gate.choice_id}`,
+              kind: "choice" as const,
+              severity: 2 as const,
+              title: "选择请求待作答",
+              summary: gate.prompt,
+              triage: false,
+              source: "choice" as const,
+              createdAt: gate.created_at ?? null,
+              gate: null,
+              inlineError: null,
+              choice: {
+                sessionId,
+                choiceId: gate.choice_id,
+                prompt: gate.prompt,
+                expectedRunId: gate.expected_run_id ?? null,
+                questions:
+                  gate.questions && gate.questions.length > 0
+                    ? gate.questions
+                    : [
+                        {
+                          id: "default",
+                          prompt: gate.prompt,
+                          options: gate.options,
+                          allow_multiple: gate.allow_multiple,
+                          allow_free_text: gate.allow_free_text,
+                        },
+                      ],
+                allowMultiple: gate.allow_multiple,
+                allowFreeText: gate.allow_free_text,
+                source: "coding" as const,
+                attemptAddress: address,
+                status: "open" as const,
+              },
+            })),
+        );
+      })
+      .catch(() => {
+        if (alive) {
+          setCodingChoiceItems([]);
+        }
+      });
+    return () => {
+      alive = false;
+    };
+  }, [codingAttempt?.attempt_id, codingAttempt?.issue_id, codingAttempt?.project_id, inboxDrawerOpen, sessionId]);
+
+  const inboxItems = useMemo(() => {
+    const merged: CockpitInboxItem[] = [];
+    for (const item of [...observedInbox, ...codingChoiceItems]) {
+      const choice = item.choice;
+      if (choice === null) {
+        merged.push(item);
+        continue;
+      }
+      const scopeId = choice.sessionId ?? sessionId;
+      const record = choiceCommands[`${scopeId}:${choice.choiceId}`];
+      if (record?.status === "delivered") {
+        continue;
+      }
+      if (
+        record?.status === "submitting" ||
+        record?.status === "resolving" ||
+        record?.status === "expired"
+      ) {
+        merged.push({ ...item, choice: { ...choice, status: record.status } });
+        continue;
+      }
+      if (record?.status === "error") {
+        merged.push({
+          ...item,
+          inlineError: {
+            code: record.errorCode ?? "choice_response_failed",
+            message: record.errorMessage ?? "应答未送达，可重试",
+          },
+        });
+        continue;
+      }
+      merged.push(item);
+    }
+    return merged;
+  }, [choiceCommands, codingChoiceItems, observedInbox, sessionId]);
+
+  const handleChoiceRespond = useCallback(
+    (item: CockpitInboxItem, payload: ChoiceResponsePayload) => {
+      const choice = item.choice;
+      if (choice === null || choice.expectedRunId === null) {
+        return;
+      }
+      const scopeId = choice.sessionId ?? sessionId;
+      const key = `${scopeId}:${choice.choiceId}`;
+      const prior = choiceCommands[key];
+      // 同命令重试纪律：错误/冲突后重试复用首个 command_id 与同一份 answers
+      //（服务端按 (command_id) 幂等/异 payload 409）；新作答才生成新 id。
+      const commandId = prior?.commandId ?? newCommandId();
+      const answers: ChoiceAnswer[] =
+        payload.answers && payload.answers.length > 0
+          ? payload.answers.map((answer) => ({
+              question_id: answer.question_id,
+              selected_option_ids: [...answer.selected_option_ids],
+              free_text: answer.free_text ?? null,
+            }))
+          : [
+              {
+                question_id: "default",
+                selected_option_ids: payload.selected_option_ids,
+                free_text: payload.free_text,
+              },
+            ];
+      const request = {
+        command_id: commandId,
+        expected_run_id: choice.expectedRunId,
+        answers,
+      };
+      const applyStatus = (
+        next: {
+          status: "submitting" | "resolving" | "delivered" | "expired" | "error";
+          commandId?: string;
+          errorCode?: string;
+          errorMessage?: string;
+        },
+      ) => {
+        setChoiceCommands((previous) => {
+          const current = previous[key];
+          // 竞态守卫：只更新仍属本命令谱系的台账（本地生成 id 与服务端回执
+          // 回显 id 同谱；用户已换新命令时不回写旧状态）。
+          const lineageId = next.commandId ?? commandId;
+          if (
+            current !== undefined &&
+            current.commandId !== commandId &&
+            current.commandId !== lineageId
+          ) {
+            return previous;
+          }
+          return {
+            ...previous,
+            [key]: {
+              commandId: next.commandId ?? commandId,
+              status: next.status,
+              errorCode: next.errorCode,
+              errorMessage: next.errorMessage,
+            },
+          };
+        });
+      };
+      const mapState = (
+        state: ChoiceReplyStatus["state"],
+      ): "submitting" | "resolving" | "delivered" | "expired" | "error" => {
+        if (state === "delivered") {
+          return "delivered";
+        }
+        if (state === "expired") {
+          return "expired";
+        }
+        if (state === "rejected") {
+          return "error";
+        }
+        return state === "submitting" ? "submitting" : "resolving";
+      };
+      const recheck = (attemptIndex: number, recheckCommandId: string) => {
+        const delays = [250, 500, 1000, 2000, 4000];
+        const delay = delays[attemptIndex];
+        if (delay === undefined) {
+          return;
+        }
+        window.setTimeout(() => {
+          void (choice.source === "coding" && choice.attemptAddress
+            ? getCodingChoiceResponseStatus(choice.attemptAddress, choice.choiceId, recheckCommandId)
+            : getWorkspaceChoiceResponseStatus(scopeId, choice.choiceId, recheckCommandId)
+          )
+            .then((status) => {
+              const next = mapState(status.state);
+              applyStatus({ status: next, commandId: status.command_id });
+              if (next === "submitting" || next === "resolving") {
+                recheck(attemptIndex + 1, status.command_id);
+              }
+            })
+            .catch(() => {
+              // 复查失败保留当前状态面；服务端 pending 广播是权威收敛。
+            });
+        }, delay);
+      };
+      applyStatus({ status: "submitting" });
+      void (choice.source === "coding" && choice.attemptAddress
+        ? postCodingChoiceResponse(choice.attemptAddress, choice.choiceId, request)
+        : postWorkspaceChoiceResponse(scopeId, choice.choiceId, request)
+      )
+        .then((status) => {
+          const next = mapState(status.state);
+          applyStatus({ status: next, commandId: status.command_id });
+          if (next === "submitting" || next === "resolving") {
+            recheck(0, status.command_id);
+          }
+        })
+        .catch((error: unknown) => {
+          const code =
+            typeof error === "object" && error !== null && "code" in error
+              ? String(error.code)
+              : "choice_response_failed";
+          const message =
+            error instanceof Error && error.message !== "" ? error.message : "应答请求失败";
+          applyStatus({
+            status:
+              code === "workspace_choice_expired" || code === "coding_choice_expired"
+                ? "expired"
+                : "error",
+            errorCode: code,
+            errorMessage: message,
+          });
+        });
+    },
+    [choiceCommands, sessionId],
+  );
   // F-59：等待提示条数据源——投影驱动的 pending choice（观测/takeover 态同样带）。
   const pendingChoiceRequests =
     selectedState?.pendingChoiceRequests ?? state.pendingChoiceRequests;
@@ -992,7 +1260,8 @@ export function ChatCockpitPage({
       </main>
       <CockpitInboxDrawer open={inboxDrawerOpen} onClose={() => setInboxDrawerOpen(false)}>
         <CockpitInbox
-          items={observedInbox}
+          items={inboxItems}
+          onChoiceRespond={handleChoiceRespond}
           actions={actions}
           onTakeover={handleTakeover}
           onRetry={handleRetry}

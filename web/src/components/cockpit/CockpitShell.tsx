@@ -15,6 +15,7 @@ import {
   useWorkspaceSessionObservers,
   type WorkspaceSessionObserverResult,
 } from "../../hooks/useWorkspaceSessionObservers";
+import type { CodingAttempt } from "../../api/types";
 import {
   readCockpitSettings,
   writeCockpitSettings,
@@ -34,6 +35,12 @@ type CockpitShellContextValue = {
   notificationGuidance: NotificationGuidance;
   settings: CockpitSettings;
   watchSession(sessionId: string): void;
+  /**
+   * P0 1.3（REQ-WIGA-05）Task 11：会话所属 issue 的当前活跃 coding attempt
+   * 发现（lifecycle 目录轮询副产物）——驾驶舱按需拉 attempt snapshot，不常
+   * 驻轮询、不要求打开 Coding Workspace。
+   */
+  codingAttemptForSession(sessionId: string): CodingAttempt | null;
   /** 页面顶栏登记设置入口宿主节点；未登记时 shell 兜底浮层渲染入口。 */
   registerSettingsSlot(node: HTMLElement | null): void;
 };
@@ -83,6 +90,12 @@ export function useCockpitSettings(): CockpitSettings {
 export function useCockpitSettingsSlotRef(): (node: HTMLElement | null) => void {
   return useContext(CockpitShellContext)?.registerSettingsSlot ?? (() => undefined);
 }
+
+export function useCockpitCodingAttemptForSession(): (
+  sessionId: string,
+) => CodingAttempt | null {
+  return useContext(CockpitShellContext)?.codingAttemptForSession ?? (() => null);
+}
 export function CockpitShell({
   children,
   onGoToInbox,
@@ -103,12 +116,13 @@ export function CockpitShell({
   const notificationSentRef = useRef(false);
   const previousFaviconHrefRef = useRef<string | null>(null);
   const initialTitleRef = useRef(document.title);
-  const { inbox, countedInbox, records, watchSession } = useWorkspaceSessionObservers({
-    currentSessionId,
-    currentSessionState,
-    watchLimit: settings.watchLimit,
-    refreshIntervalMs: settings.observerRefreshIntervalMs,
-  });
+  const { inbox, countedInbox, records, watchSession, codingAttemptForSession } =
+    useWorkspaceSessionObservers({
+      currentSessionId,
+      currentSessionState,
+      watchLimit: settings.watchLimit,
+      refreshIntervalMs: settings.observerRefreshIntervalMs,
+    });
   const itemIds = useMemo(() => new Set(countedInbox.map((item) => item.id)), [countedInbox]);
 
   useEffect(() => {
@@ -229,9 +243,18 @@ export function CockpitShell({
       notificationGuidance,
       settings,
       watchSession,
+      codingAttemptForSession,
       registerSettingsSlot: setSettingsSlot,
     }),
-    [inbox, notificationGuidance, pulseItemIds, records, settings, watchSession],
+    [
+      inbox,
+      notificationGuidance,
+      pulseItemIds,
+      records,
+      settings,
+      watchSession,
+      codingAttemptForSession,
+    ],
   );
   // 入口默认由 shell 兜底浮层渲染；页面登记顶栏宿主后改由 portal 注入宿主，
   // 避免 fixed 浮层压住 spec 抽屉（Artifact 审核/计划审批面板）。

@@ -90,6 +90,7 @@ function gateItem(
       ...overrides,
     },
     inlineError: null,
+    choice: null,
   };
 }
 

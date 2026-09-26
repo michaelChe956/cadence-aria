@@ -79,6 +79,7 @@ vi.mock("../components/shared/MonacoViewer", () => ({
 }));
 
 vi.mock("../components/cockpit/CockpitShell", () => ({
+  useCockpitCodingAttemptForSession: () => () => null,
   useCockpitShellInbox: () =>
     cockpitInbox.length > 0
       ? cockpitInbox

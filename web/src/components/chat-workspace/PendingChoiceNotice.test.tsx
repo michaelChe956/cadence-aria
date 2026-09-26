@@ -97,6 +97,11 @@ describe("PendingChoiceNotice wait hint (F-59)", () => {
     created_at_ms: Date.now() - 30_000,
     first_seen_at_ms: Date.now() - 30_000,
     expected_run_id: null,
+    options: [],
+    allow_multiple: false,
+    allow_free_text: false,
+    questions: [],
+    source: "text_fallback",
     ...overrides,
   });
 
@@ -167,6 +172,11 @@ describe("PendingChoiceNotice wait hint (F-59)", () => {
               created_at_ms: null,
               first_seen_at_ms: Date.now() - 5_000,
               expected_run_id: null,
+              options: [],
+              allow_multiple: false,
+              allow_free_text: false,
+              questions: [],
+              source: "text_fallback",
             }),
           ]}
           onJump={vi.fn()}

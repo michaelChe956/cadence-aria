@@ -1035,6 +1035,12 @@ describe("workspace websocket pending choice wait state projection", () => {
         role: "author",
         created_at_ms,
         first_seen_at_ms: expect.any(Number),
+        expected_run_id: null,
+        options: [],
+        allow_multiple: false,
+        allow_free_text: false,
+        questions: [],
+        source: "ask_user_question",
       },
     ]);
   });
@@ -1088,5 +1094,115 @@ describe("workspace websocket pending choice wait state projection", () => {
       handlerOptions(),
     );
     expect(projected()[0]).toMatchObject({ id: "choice_wait_c", role: "author" });
+  });
+});
+
+// P0 1.3（REQ-WIGA-05）Task 11：驾驶舱就地作答数据源——pending 投影必须保
+// 完整 options/questions/source/expected_run_id（严格校验 question id/数组；
+// 数据缺失不得给 REST 提交面喂数）。
+describe("workspace websocket pending choice answer source projection", () => {
+  installWorkspaceStoreTestHooks();
+
+  const handlerOptions = () => ({
+    invalidatedPreStageNodeIds: new Set<string>(),
+    scheduleFlush: vi.fn(),
+    streamFlushTimeouts: {},
+  });
+
+  const sessionStateMessage = (pendingChoiceRequests: unknown) => ({
+    type: "session_state",
+    session_id: "session_pending_choice_answer",
+    workspace_type: "work_item_plan",
+    stage: "human_confirm",
+    session_status: "waiting_for_human",
+    flow_kind: "single_candidate",
+    run_policy: "interactive",
+    run_history: {
+      seen_fingerprints: [],
+      repairs_used: 0,
+      manual_repairs_used: 0,
+      transitions_used: 0,
+      initial_review_count: 0,
+      verification_review_count: 0,
+    },
+    messages: [],
+    checkpoints: [],
+    artifact: null,
+    providers: { author: "claude_code", reviewer: null },
+    timeline_nodes: [],
+    active_node_id: null,
+    artifact_versions: [],
+    timeline_node_details: {},
+    human_presentation_revisions: [],
+    pending_choice_requests: pendingChoiceRequests,
+  });
+
+  const projected = () => useWorkspaceStore.getState().pendingChoiceRequests;
+
+  it("keeps the full options/questions/source/expected_run_id for in-place answering", () => {
+    handleWorkspaceWsMessage(
+      sessionStateMessage([
+        {
+          id: "choice_answer_a",
+          prompt: "拆分方案确认",
+          options: [{ id: "opt_0", label: "继续", description: "desc" }],
+          allow_multiple: true,
+          allow_free_text: false,
+          questions: [
+            {
+              id: "q-1",
+              prompt: "是否包含集成测试",
+              options: [
+                { id: "yes", label: "包含" },
+                { id: "no", label: "不包含" },
+              ],
+              allow_multiple: false,
+              allow_free_text: false,
+            },
+          ],
+          source: "ask_user_question",
+          role: "author",
+          expected_run_id: "run-9",
+        },
+      ]) as unknown as WsServerMessage,
+      handlerOptions(),
+    );
+
+    expect(projected()[0]).toMatchObject({
+      id: "choice_answer_a",
+      expected_run_id: "run-9",
+      source: "ask_user_question",
+      allow_multiple: true,
+      options: [{ id: "opt_0", label: "继续", description: "desc" }],
+      questions: [
+        {
+          id: "q-1",
+          prompt: "是否包含集成测试",
+          options: [
+            { id: "yes", label: "包含", description: null },
+            { id: "no", label: "不包含", description: null },
+          ],
+          allow_multiple: false,
+          allow_free_text: false,
+        },
+      ],
+    });
+  });
+
+  it("drops malformed question structures instead of feeding the REST submit face", () => {
+    handleWorkspaceWsMessage(
+      sessionStateMessage([
+        {
+          id: "choice_answer_bad",
+          prompt: "畸形题结构",
+          questions: [{ prompt: "缺 id 的题" }],
+          source: "ask_user_question",
+        },
+      ]) as unknown as WsServerMessage,
+      handlerOptions(),
+    );
+
+    expect(projected()[0]).toMatchObject({ id: "choice_answer_bad" });
+    expect(projected()[0].questions).toEqual([]);
   });
 });

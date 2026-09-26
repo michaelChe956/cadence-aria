@@ -123,6 +123,7 @@ export function gateItem(sessionId: string, key: string): CockpitInboxItem {
       terminate_block_reason: null,
     },
     inlineError: null,
+    choice: null,
   };
 }
 
@@ -138,6 +139,7 @@ export function stoppedItem(sessionId: string): CockpitInboxItem {
     createdAt: null,
     gate: null,
     inlineError: null,
+    choice: null,
   };
 }
 
@@ -153,5 +155,6 @@ export function hardErrorItem(sessionId: string): CockpitInboxItem {
     createdAt: null,
     gate: null,
     inlineError: null,
+    choice: null,
   };
 }

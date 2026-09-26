@@ -34,6 +34,7 @@ function gateItem(sessionId: string): CockpitInboxItem {
     createdAt: null,
     gate: null,
     inlineError: null,
+    choice: null,
   };
 }
 function stoppedItem(sessionId: string): CockpitInboxItem {
@@ -60,6 +61,7 @@ function ShellWithInbox({
     countedInbox,
     watchedSessionIds: ["s1", "s2", "s3", "s4"],
     watchSession: vi.fn(),
+    codingAttemptForSession: () => null,
   });
 
   return (
@@ -94,6 +96,7 @@ function stubEmptyObservers() {
     countedInbox: [],
     watchedSessionIds: [],
     watchSession: vi.fn(),
+    codingAttemptForSession: () => null,
   });
 }
 

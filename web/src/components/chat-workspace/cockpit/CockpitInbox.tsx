@@ -5,11 +5,14 @@ import {
   ClipboardCopy,
   ClipboardList,
   CircleAlert,
+  ListChecks,
   Play,
   RotateCcw,
   UserRound,
 } from "lucide-react";
 import { useEffect, useMemo, useState, type Ref } from "react";
+import type { ChatEntry, ChoiceResponsePayload } from "../../../state/chat-entries";
+import { ChoiceRequestEntry } from "../entries/ChoiceRequestEntry";
 import type { ArtifactVersionSummary } from "../../../state/workspace-ws-store-types";
 import type { WorkItemPlanRepairReservation } from "../../../state/workspace-ws-store-types";
 import type { CockpitActionFacade } from "../../../state/cockpit-action-routing";
@@ -51,6 +54,7 @@ const KIND_GLYPH = {
   gate: ClipboardList,
   stopped: CircleAlert,
   hard_error: AlertTriangle,
+  choice: ListChecks,
 } as const;
 
 // F-50 视觉 v2 §3：门禁条目与门卡同一视觉常量（中性底+琥珀左线）；stopped 维持
@@ -58,6 +62,7 @@ const KIND_GLYPH = {
 const KIND_CLASS = {
   gate: GATE_CARD_CLASS,
   stopped: "rounded-lg border border-slate-200 bg-gray-50 px-3 py-2",
+  choice: GATE_CARD_CLASS,
 } as const;
 
 export function CockpitInbox({
@@ -69,6 +74,7 @@ export function CockpitInbox({
   actionableSessionId,
   takeoverButtonRef,
   onBulkConfirm,
+  onChoiceRespond,
   emptyHint,
   artifactVersions = [],
   leaseEvents = null,
@@ -83,6 +89,8 @@ export function CockpitInbox({
   actionableSessionId?: string;
   takeoverButtonRef?: Ref<ConfirmTwiceButtonHandle>;
   onBulkConfirm?: (items: readonly CockpitInboxItem[]) => void;
+  /** REQ-WIGA-05 Task 11：choice 就地作答回写通道（REST 命令由页面接线）。 */
+  onChoiceRespond?: (item: CockpitInboxItem, payload: ChoiceResponsePayload) => void;
   /** 空收件箱时的引导文案；缺省渲染既有「暂无待处理项」。 */
   emptyHint?: string | null;
   artifactVersions?: readonly ArtifactVersionSummary[];
@@ -139,6 +147,7 @@ export function CockpitInbox({
   const rowProps = (item: CockpitInboxItem) => ({
     item,
     actions,
+    onChoiceRespond,
     onTakeover,
     onRetry,
     actionable: actionableSessionId === cockpitInboxItemSessionId(item.id),
@@ -222,6 +231,7 @@ export function CockpitInbox({
 function CockpitInboxRow({
   item,
   actions,
+  onChoiceRespond,
   onTakeover,
   onRetry,
   onRetakeLease,
@@ -237,6 +247,8 @@ function CockpitInboxRow({
 }: {
   item: CockpitInboxItem;
   actions?: CockpitActionFacade;
+  /** REQ-WIGA-05 Task 11：choice 就地作答回写通道（透传页面 REST 接线）。 */
+  onChoiceRespond?: (item: CockpitInboxItem, payload: ChoiceResponsePayload) => void;
   onTakeover?: (sessionId: string) => Promise<void>;
   onRetry?: (item: CockpitInboxItem) => void;
   onRetakeLease?: () => void;
@@ -317,6 +329,9 @@ function CockpitInboxRow({
             latestReviewSummary={latestReviewSummary}
             repairReservation={repairReservation}
           />
+        ) : null}
+        {item.kind === "choice" && actionable ? (
+          <ChoiceInboxCard item={item} onChoiceRespond={onChoiceRespond} />
         ) : null}
         {item.kind === "stopped" && onTakeover ? (
           <div className="mt-2 flex flex-wrap gap-2">
@@ -775,3 +790,82 @@ function isSelectableGate(item: CockpitInboxItem): boolean {
     sessionId !== null &&
     item.id === `${sessionId}:gate:${item.gate.key}`;
 }
+
+/**
+ * P0 1.3（REQ-WIGA-05）Task 11：choice 就地卡——复用 ChoiceRequestEntry 的
+ * 逐题表单（answers 原样、多题不扁平化）；状态面按命令回执渲染：
+ * submitting/resolving=处理中（禁重复分配答案），expired=已失效（不路由到
+ * 新 run），409 冲突经条目 inlineError 呈现（同命令可重试）。无
+ * expected_run_id 的旧投影只提示刷新后作答，不猜 run。
+ */
+function ChoiceInboxCard({
+  item,
+  onChoiceRespond,
+}: {
+  item: CockpitInboxItem;
+  onChoiceRespond?: (item: CockpitInboxItem, payload: ChoiceResponsePayload) => void;
+}) {
+  const choice = item.choice;
+  if (choice === null) {
+    return null;
+  }
+  const pending = choice.status === "submitting" || choice.status === "resolving";
+  const entry: ChatEntry = {
+    id: `choice:${choice.choiceId}`,
+    type: "choice_request",
+    role: "system",
+    content: choice.prompt,
+    timestamp: item.createdAt ?? "",
+    resolved: false,
+    metadata: {
+      request_id: choice.choiceId,
+      prompt: choice.prompt,
+      options: [],
+      allow_multiple: choice.allowMultiple,
+      allow_free_text: choice.allowFreeText,
+      questions: choice.questions,
+      source: choice.source,
+    },
+  } as unknown as ChatEntry;
+
+  if (choice.status === "expired") {
+    return (
+      <div className="mt-2 space-y-1">
+        <p className="text-xs font-medium text-[var(--aria-ink-muted)]">已失效</p>
+        <p className="text-xs text-slate-500">应答窗口或所属 run 已结束，刷新后按新选择作答</p>
+      </div>
+    );
+  }
+  if (choice.expectedRunId === null) {
+    return (
+      <div className="mt-2 space-y-2">
+        <p className="text-xs text-slate-500">旧会话未携带 run 信息，刷新后作答</p>
+        <ChoiceRequestEntry embedded entry={entry} submittingOverride />
+      </div>
+    );
+  }
+  if (choice.questions.length === 0) {
+    return (
+      <div className="mt-2 space-y-2">
+        <p className="text-xs text-slate-500">题目结构未同步，刷新后作答</p>
+        <ChoiceRequestEntry embedded entry={entry} submittingOverride />
+      </div>
+    );
+  }
+  return (
+    <div className="mt-3 space-y-2">
+      {pending ? (
+        <p data-testid="choice-card-status" className="text-xs font-medium text-slate-500">
+          处理中
+        </p>
+      ) : null}
+      <ChoiceRequestEntry
+        embedded
+        entry={entry}
+        submittingOverride={pending}
+        onRespond={(_entry, payload) => onChoiceRespond?.(item, payload)}
+      />
+    </div>
+  );
+}
+

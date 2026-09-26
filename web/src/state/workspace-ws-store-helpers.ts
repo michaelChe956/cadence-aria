@@ -1,4 +1,6 @@
 import type {
+  ChoiceOption,
+  ChoiceQuestion,
   PlanProjectionBundle,
   ProjectionValidationReport,
   WorkItemProjectionBundle,
@@ -532,6 +534,10 @@ function deduplicateExecutionEvents(events: ExecutionEvent[]) {
  * F-59：session_state `pending_choice_requests` 载荷归一——畸形条目（无 id）
  * 跳过；`created_at_ms` 缺省（旧载荷/TextFallback）回退 null，由调用方按
  * 首见时刻补齐。同会话同 id 的首见时刻跨帧保留（first_seen_at_ms 稳定）。
+ * P0 1.3（REQ-WIGA-05）Task 11：保完整 options/questions/source/allow_*——
+ * questions 逐题严格校验（id 非空+选项数组同规），任何一题畸形即整组置空
+ *（旧帧有有效 questions 则沿用）；不得把多题扁平化，也不给 REST 提交面
+ * 喂不完整结构。
  */
 export function pendingChoiceRequestsFromSession(
   raw: unknown,
@@ -553,6 +559,13 @@ export function pendingChoiceRequestsFromSession(
       continue;
     }
     const seen = sameSession ? previousById.get(record.id) : undefined;
+    const options = choiceOptionsFromPayload(record.options) ?? seen?.options ?? [];
+    const allowMultiple = record.allow_multiple === true || seen?.allow_multiple === true;
+    const allowFreeText = record.allow_free_text === true || seen?.allow_free_text === true;
+    const questions =
+      choiceQuestionsFromPayload(record.questions) ??
+      seen?.questions ??
+      [];
     projected.push({
       id: record.id,
       prompt:
@@ -572,7 +585,71 @@ export function pendingChoiceRequestsFromSession(
         typeof record.expected_run_id === "string" && record.expected_run_id.length > 0
           ? record.expected_run_id
           : seen?.expected_run_id ?? null,
+      options,
+      allow_multiple: allowMultiple,
+      allow_free_text: allowFreeText,
+      questions,
+      source:
+        typeof record.source === "string" && record.source.length > 0
+          ? record.source
+          : seen?.source ?? "",
     });
   }
   return projected;
+}
+
+function choiceOptionsFromPayload(raw: unknown): ChoiceOption[] | null {
+  if (!Array.isArray(raw)) {
+    return null;
+  }
+  const options: ChoiceOption[] = [];
+  for (const item of raw) {
+    if (typeof item !== "object" || item === null) {
+      return null;
+    }
+    const record = item as Record<string, unknown>;
+    if (typeof record.id !== "string" || record.id.length === 0) {
+      return null;
+    }
+    if (typeof record.label !== "string") {
+      return null;
+    }
+    options.push({
+      id: record.id,
+      label: record.label,
+      description: typeof record.description === "string" ? record.description : null,
+    });
+  }
+  return options;
+}
+
+function choiceQuestionsFromPayload(raw: unknown): ChoiceQuestion[] | null {
+  if (!Array.isArray(raw)) {
+    return null;
+  }
+  const questions: ChoiceQuestion[] = [];
+  for (const item of raw) {
+    if (typeof item !== "object" || item === null) {
+      return null;
+    }
+    const record = item as Record<string, unknown>;
+    if (typeof record.id !== "string" || record.id.length === 0) {
+      return null;
+    }
+    if (typeof record.prompt !== "string") {
+      return null;
+    }
+    const options = choiceOptionsFromPayload(record.options);
+    if (options === null) {
+      return null;
+    }
+    questions.push({
+      id: record.id,
+      prompt: record.prompt,
+      options,
+      allow_multiple: record.allow_multiple === true,
+      allow_free_text: record.allow_free_text === true,
+    });
+  }
+  return questions;
 }
