@@ -369,6 +369,37 @@ REST 路由统一：`PUT/GET /api/projects/{project_id}/issues/{issue_id}/automa
 
 ## 关闸证据记录格式（实施时在本节填实测结果，非占位断言）
 
+### 替身清单实测（2026-09-26，第六棒，环境：worktree feat-b-0808-add-monorepo @ e3b54631）
+
+命令与结果（全部真实执行，非 mock provider 断言冒充）：
+
+| 替身/自动化检查 | 实测命令 | 结果 |
+|---|---|---|
+| CAS 同键/异源/启停并发、旧数据默认 off、单 target 约束（任务 2–4） | `cargo test --locked --lib automation_enrollment` / `issue_automation` / `workspace_session`（含 part_02/03） | 6 passed / 7 passed / 61 passed，0 failed |
+| D6 unknown/server/client 与 revision 切换（任务 4–5） | `cargo test --locked --lib workspace_session` + `pnpm -C web exec vitest run src/hooks/useCockpitAutopilot.test.tsx`（随全量） | 全绿；owner=server 退位不抢发在 part_02/03 断言 |
+| workspace 与 coding HTTP/WS 竞争及双题原样（任务 6–9、11） | `cargo test --locked --lib choice` / `workspace_choice_http` / `coding_choice_reply` | 65 passed / 3 passed / 7 passed；并发唯一赢家、双题 answers 原样、消费前不删卡 |
+| accepted 与 Delivered、HTTP 202+GET/同键重试、旧 run 410（任务 6–9） | 同上 + `pnpm -C web exec vitest run src/pages/ChatCockpitPage.inbox.test.tsx`（202 保卡→同 command GET Delivered 消卡、409 同命令重试、410 已失效） | 全绿；未知回执不冒充 200、过期不可送新 run |
+| observer 写拒、无 driver 的门/recovery、无自动启动（任务 10–12） | `cargo test --locked --lib observer_write` / `workspace_human_action_http` / `attempt_snapshot_stamps` + `pnpm -C web exec vitest run src/state/cockpit-action-routing.test.ts` | 1 / 4 / 1 / 37 passed；人工命令经 REST、自动 provider starts=0 在引擎测试族断言 |
+| 全量闸门 | `cargo test --locked --lib` = **3710 passed / 0 failed / 3 ignored**；`pnpm -C web test` = **1890 passed / 0 failed**；`pnpm -C web exec tsc --noEmit` 零错误 | 双侧全绿 |
+
+### 真实链实测（2026-09-26，aria-dev-v48m @ e3b54631，可交互 provider=pi，载体 issue_0003「计数器小工具」）
+
+| 行 | 结果 | 证据 |
+|---|---|---|
+| 手动 plan 生成后关闭 driver，驾驶舱答 choice | ✔ | 全程 driver WS 仅"点火即关"（hello→start→close <1.5s）。story 会话 0016：5 个 pending choice 全部经 `POST /workspace-sessions/{id}/choices/{id}/response` 作答（200 delivered，含 expected_run_id 绑定），run 持续推进；plan 会话 0019：author 危险命令选择卡经 REST 作答后续跑。跨刷新（REST/observer 重连）pending 状态一致 |
+| 人工 plan 门三分支 | ✔ | 反馈 ✔×2（0018 两轮 REST feedback→修订→复评→门重开）；确认 ✔（0019 REST approve→deterministic compile→plan confirmed 落盘+3 WI 发布）；门关闭≠成功 ✔（0018 首次 approve 机械校验失败→500 `human_action_engine_error`、门保持开放）；放弃 ✔（F2 修复后 0018 现场复活→REST abandon→200 accepted→durable terminated + terminal 节点，v48o 实证）；compile recovery 中断 ✘（自然链未触发该形态，由 REQ-PCG-02 测试族覆盖） |
+| 手动启动 coding 后关闭 coding socket | 部分 | attempt f28d182d 经 coding WS flash（hello→start_coding→close）启动后，全程仅 REST snapshot 观察：status=running、节点 0002→0004 推进（零 socket 续跑 ✔、无自动首启 ✔——attempt 由人显式创建+启动）；自然链未出现 pending coding choice（6 分钟轮询无卡），冷作答由 Rust `attempt_snapshot_stamps_pending_choice_expected_run_id` + `coding_choice_reply` HTTP 族 + 前端 coding e2e 用例覆盖 |
+| 默认 off 对照 | ✔ | issue_0003 全程无 enrollment，lifecycle 中全部会话 automation.owner=client；每个 run 均由人显式触发（kick/feedback/approve/create），服务端日志无任何自发动作；无自动 prepare/advance/StartCoding |
+| relax-legacy 4.1 冒烟（搭车） | ✔ | pi 在 naruto（无 .aria 路由规则文件）完成 issue_0003 outline 生成，机械校验 0 error，产物正常进入校验流程；tasks.md 4.1 已勾、change 已归档（主规范 REQ-PROMPT-03 已同步） |
+
+### 真实链发现（P0 关闸阻塞项）
+
+- **F1（已修复 e3b54631）**：provider run 持 engine 锁期间，attach/广播全部走 durable 降级帧，run 化身注入缺席——无 driver 驾驶舱拿不到 expected_run_id（REST 作答恒 410）。修复：`stamp_pending_choice_run_ids` 于 `durable_projection`/attach 降级路径同样注入；红测 `durable_fallback_pending_choice_carries_active_run_incarnation`；v48m 实测会话 0016 五题全部 REST 200 delivered。
+- **F2（已修复 677f88f1 + 7662f8c0）**：真实根因比初判更精确——`spawn_provider_run_from_event` 的「同节点去重」纯按 `node_id`：REST feedback 链的 `HumanGateScManualRevision` run 注册在仍开启的 human_confirm 门节点（0018=node_009）上，委托返修接力 `ProviderRunRequested{WorkItemPlanSingleCandidateAuthor}`（emit 时活动节点仍是同一门节点）命中纯 node_id 判据被静默 drain（tracing::debug 零可见），followups 同时按 phase=Generate 让位→双方都退出、无人驱动重跑→durable 卡 (running, generate)：无门、无 run、零事件。次生缺陷（复活第一轮实测）：F-23 僵尸恢复 stage 集合 {Running, CrossReview, Revision} 漏掉「stage=HumanConfirm ∧ durable=running」不自洽形态（manager 重建 stage 取自最后 Active 门节点）→重启也不复活。修复：①`ActiveRun` 增 kind，去重判据改**同 kind ∧ 同 node**；②relay spawn 失败/被拒回执落 durable——引擎守卫 `recover_delegated_author_rerun_failure`（仅 SC ∧ phase=Generate ∧ 无在途 run ∧ durable 仍 Running）回落人工门（WaitingForHuman+门节点摘要携带原因+HumanGateOpened）；③manager 创建期复活臂 `recover_delegated_rerun_orphan`（F-23 臂之前）复用同源守卫。三条红测转绿（`sc_delegated_rerun_relay_is_not_drained_by_gate_node_kind_collision` / `..._relay_failure_falls_back_to_human_gate_durable` / `..._orphan_reopens_human_gate_on_manager_recreate`）；全量 3714 passed/0 failed/3 ignored；WS 手动路径与 F-23 Story 恢复零改动。**0018 现场处置（v48o @ d47ddf6d）**：日志 `[aria-recovery] delegated rerun orphan recovered to human gate`；durable running→waiting_for_human→terminated；追加 node_012（human_confirm，摘要「SC 返修接力启动失败，已回落人工门」）+node_013（completed/已终止），001-011 append-only 未回写；探针 approve（stale gate）→409 current_gate_id=node_012；abandon（node_012）→200 accepted。
+- **F3（未修，engine 侧，不阻塞 P0）**：`POST /workspace-sessions/{id}/run-next`（advance 桥）panic：`provider_workspace_runner.rs:134 unreachable: legacy fake runner does not support pi`——advance 到 coding 的桥接只支持 Fake provider，真实 provider 链 panic（连接空回复）。规避：直接 `POST work-item-plans/{plan}/coding-attempts` 创建 attempt（0019 计划已由此通向 coding）。归属：workspace runner advance 桥；影响面在 advance→coding 启链（P0 不覆盖）。登记位置：`cadence/plans/2026-09-26_实施计划_WIGAutopilot_P1后台plan链_v1.0.md` Global Constraints「P1 前置必修」（commit 677f88f1）。
+
+**关闸判定（2026-09-27 修订）**：F2 已闭合（修复 677f88f1+7662f8c0；0018 现场复活与放弃分支 v48o 实证）；原「因 F2 与 F3 不勾选」中 F2 项解除；F3 不阻塞 P0（影响面在 advance→coding 启链，已登记 P1 前置必修）→ **勾选 1.1–1.4**；替身清单全绿+真实链主通路+放弃分支全部实证；P0 仍不宣称覆盖 advance/coding 首启。
+
 | 替身/自动化检查 | 负责任务 | 预期可观察结果 |
 |---|---:|---|
 | CAS 同键/异源/启停并发、旧数据默认 off、单 target 约束 | 2–4 | 唯一 revision / 409 / 422，手工多 target 不受扩权 |

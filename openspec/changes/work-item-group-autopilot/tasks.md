@@ -4,10 +4,10 @@
 
 ## 1. P0 — 契约、归属与无 driver 控制面（不开放自动触发）
 
-- [ ] 1.1 固化三处既有契约例外与五条红线、单 target 限制，并同步登记 `src/product/workspace_engine/advance_split.rs:37` 注释随实施修改，不将 auto coding 启动描述为随 advance 发生（REQ-ADV-05、REQ-CG-04、REQ-MTG-03）——验收：advance 仍只到 Ready；旧多 target 逐仓人工语义和门关闭≠Confirmed 的边界一致；注释不再暗示只有人工 WS 可发 StartCoding。
-- [ ] 1.2 建立 durable enrollment/策略修订/精确源绑定与默认 off 基础，先提供服务端归属投影并使前端 `useCockpitAutopilot` 对 owner=server 退位；本阶段不发任何自动 prepare/advance/coding 动作（REQ-WIGA-01、REQ-WIGA-02、REQ-WIGA-08）——验收：旧记录缺 enrollment 按 client/manual、首帧归属未知不抢发；归属变化清理旧意图；启停并发以修订线性化，未消费许可可撤销。
-- [ ] 1.3 把 workspace 和 coding choice 的 REST 答复、WS/REST 共用认领/真实交付回执及驾驶舱就地卡片接通；保持原人工计划门、compile recovery 无 driver 入口和 observer 只读权限（REQ-WIGA-05）——验收：完整多问题答案、HTTP 200/202/404/409/410、同键重试、并发 first-wins、回执超时/旧 run 失效可见；不等 provider 长时 engine 锁，pending 卡不提前消失。
-- [ ] 1.4 P0 双清单关闸（REQ-WIGA-05、REQ-WIGA-08）——替身清单：HTTP/WS 竞争、重复/异 payload、过期/取消/重启回执及只读 observer 拒写，旧会话及原手动行为对照；真实链清单：手动启动→关闭 driver→只在驾驶舱回答 choice、处理人工计划门及 compile recovery→运行续接/刷新一致；确认**尚无自动触发**。
+- [x] 1.1 固化三处既有契约例外与五条红线、单 target 限制，并同步登记 `src/product/workspace_engine/advance_split.rs:37` 注释随实施修改，不将 auto coding 启动描述为随 advance 发生（REQ-ADV-05、REQ-CG-04、REQ-MTG-03）——验收：advance 仍只到 Ready；旧多 target 逐仓人工语义和门关闭≠Confirmed 的边界一致；注释不再暗示只有人工 WS 可发 StartCoding。（commit 3c32adba）
+- [x] 1.2 建立 durable enrollment/策略修订/精确源绑定与默认 off 基础，先提供服务端归属投影并使前端 `useCockpitAutopilot` 对 owner=server 退位；本阶段不发任何自动 prepare/advance/coding 动作（REQ-WIGA-01、REQ-WIGA-02、REQ-WIGA-08）——验收：旧记录缺 enrollment 按 client/manual、首帧归属未知不抢发；归属变化清理旧意图；启停并发以修订线性化，未消费许可可撤销。（commits 3f7a4cac/a07fac4e/49f8a1ab/877af5b4/a4c77eed）
+- [x] 1.3 把 workspace 和 coding choice 的 REST 答复、WS/REST 共用认领/真实交付回执及驾驶舱就地卡片接通；保持原人工计划门、compile recovery 无 driver 入口和 observer 只读权限（REQ-WIGA-05）——验收：完整多问题答案、HTTP 200/202/404/409/410、同键重试、并发 first-wins、回执超时/旧 run 失效可见；不等 provider 长时 engine 锁，pending 卡不提前消失。（commits 9508685c/e6e2b69b/99577ebc/fdc9c38b/4cf4758c/70f542ca/5372dc01/e3b54631/677f88f1/7662f8c0）
+- [x] 1.4 P0 双清单关闸（REQ-WIGA-05、REQ-WIGA-08）——替身清单：HTTP/WS 竞争、重复/异 payload、过期/取消/重启回执及只读 observer 拒写，旧会话及原手动行为对照；真实链清单：手动启动→关闭 driver→只在驾驶舱回答 choice、处理人工计划门及 compile recovery→运行续接/刷新一致；确认**尚无自动触发**。（T12 双清单实测见实施计划「P0 关闸」节：替身全绿+真实链主通路+放弃分支实证 v48o；F1/F2 已修、F3 登记 P1 前置；commit c4191072+关闸修订）
 
 ## 2. P1 — design 选择后后台 plan 生成、人工批准与确认信息
 
