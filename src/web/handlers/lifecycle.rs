@@ -3,7 +3,6 @@ use super::support::*;
 use super::*;
 use crate::product::lifecycle_store::{
     AggregateDesignSpecScope, AggregateStorySpecScope, ConfirmAggregateGateError,
-    WorkItemPlanSessionOptions,
 };
 use crate::product::logical_codebase::{
     LogicalRepositoryId, PlanningContextResolver, PlanningContextSetResolver, RepositoryRouting,
@@ -16,15 +15,14 @@ use crate::product::workspace_engine::group_work_items_by_target;
 use std::collections::{BTreeMap, BTreeSet};
 
 mod deletion;
+mod plan_preparation;
 pub(crate) mod preflight;
 
 pub use deletion::{
     delete_design_spec, delete_story_spec, delete_work_item, delete_work_item_plan,
 };
-use preflight::{
-    SingleCandidatePreflightDecision, logical_repository_ids_for_preflight,
-    preflight_single_repository_candidate,
-};
+pub(crate) use plan_preparation::{PreparedPlanIds, PreparedPlanRecords, prepare_plan_records};
+use preflight::{SingleCandidatePreflightDecision, preflight_single_repository_candidate};
 
 pub async fn issue_lifecycle(
     State(state): State<WebAppState>,
@@ -631,143 +629,13 @@ pub async fn prepare_work_item_plan(
     Path((project_id, issue_id)): Path<(String, String)>,
     Json(request): Json<PrepareWorkItemPlanRequest>,
 ) -> ApiResult<Json<PrepareWorkItemPlanResponse>> {
-    let workspace_config = provider_workspace_config(
-        request.author_provider.as_deref(),
-        request.reviewer_provider.as_deref(),
-        request.review_rounds,
-        request.superpowers_enabled,
-        request.openspec_enabled,
-        &*state.provider_availability,
-    )?;
-    // rollout flag 只在创建 session 前读取一次；之后所有分支仅消费这份快照。
-    let rollout_snapshot = state.work_item_plan_single_candidate;
+    // P1 WIGA Task 3：共用 prepare 数据面（manual ids=None）；异步上下文消息与
+    // 响应投影留在此 handler，契约与失败诊断语义不变。
+    let records = prepare_plan_records(&state, &project_id, &issue_id, request, None)?;
     let app_paths = product_app_paths(&state);
-    let issue = IssueStore::new(app_paths.clone())
-        .get(&project_id, &issue_id)
-        .map_err(product_store_api_error)?;
     let lifecycle = LifecycleStore::new(app_paths.clone());
-    validate_confirmed_story_specs(&lifecycle, &project_id, &issue_id, &request.story_spec_ids)?;
-    validate_confirmed_design_specs(&lifecycle, &project_id, &issue_id, &request.design_spec_ids)?;
-
-    // 在任何 plan/session/source/IR/run-history/transaction/provider 副作用之前确定 flow。
-    // Logical 路径只读 manifest + selection；不得在此调用会写 invalidation 的 resolver。
-    // L2 退役（T5/REQ-WSC-08/D3）：新会话一律 SingleCandidate——legacy fallback
-    // 分支已删除；preflight 失败不再切 flow，而是收敛为新路径 durable Failed
-    // 终态（含原因，落盘于会话创建之后处理）。
-    let routing = RepositoryRouting::load_for_issue(&app_paths, &project_id, &issue_id)
-        .map_err(product_store_api_error)?;
-    let preflight_failure_reason = match routing {
-        RepositoryRouting::Legacy { .. } => {
-            let repository_id = issue.repo_id.clone().ok_or_else(|| {
-                ApiError::validation("repository_required", "repository_id is required")
-            })?;
-            let repository = find_repository(&app_paths, &project_id, &repository_id)?;
-            // fix round 1（k3 F1/REQ-WSC-08）：preflight 恒评估，不再受 rollout
-            // flag 门控——prepare 期单路径终态收敛对 flag off 同样成立。
-            match preflight_single_repository_candidate(&[repository.id]) {
-                SingleCandidatePreflightDecision::Eligible { .. } => None,
-                SingleCandidatePreflightDecision::Ineligible { reason } => Some(reason),
-            }
-        }
-        RepositoryRouting::Logical {
-            manifest,
-            selection,
-        } => {
-            // 保留 REQ-TGT-01：确认的 Design 只能引用当前 selection 中的目标。这里
-            // 只读取已落盘的 Design/selection，不调用会写 invalidation 的 resolver。
-            let selected_ids = logical_repository_ids_for_preflight(&manifest, &selection);
-            let selected_ids = selected_ids.iter().collect::<BTreeSet<_>>();
-            let designs = lifecycle
-                .list_design_specs(&project_id, &issue_id)
-                .map_err(product_store_api_error)?;
-            let design = designs
-                .iter()
-                .find(|design| design.id == request.design_spec_ids[0])
-                .ok_or_else(|| {
-                    product_store_api_error(ProductStoreError::NotFound {
-                        kind: "design_spec",
-                        id: request.design_spec_ids[0].clone(),
-                    })
-                })?;
-            for target in &design.involved_repository_ids {
-                if !selected_ids.contains(&target.0.to_string()) {
-                    return Err(ApiError::validation(
-                        "target_not_in_selection",
-                        format!("design involved {target:?} is not in issue codebase selection"),
-                    ));
-                }
-            }
-            let repository_ids = selected_ids.into_iter().cloned().collect::<Vec<_>>();
-            // fix round 1（k3 F1/REQ-WSC-08）：同上——preflight 恒评估（去 rollout
-            // flag 门控），多仓/零仓在 prepare 期即收敛 durable Failed 终态。
-            match preflight_single_repository_candidate(&repository_ids) {
-                SingleCandidatePreflightDecision::Eligible { .. } => None,
-                SingleCandidatePreflightDecision::Ineligible { reason } => Some(reason),
-            }
-        }
-        RepositoryRouting::FailClosed { code, reason } => {
-            return Err(routing_api_error(code, &reason));
-        }
-    };
-    let flow_kind = WorkItemPlanFlowKind::SingleCandidate;
-
-    let plan = lifecycle
-        .create_issue_work_item_plan(CreateIssueWorkItemPlanInput {
-            id: None,
-            project_id: project_id.clone(),
-            issue_id: issue_id.clone(),
-            source_story_spec_ids: request.story_spec_ids,
-            source_design_spec_ids: request.design_spec_ids,
-            options: crate::product::models::IssueWorkItemPlanOptions {
-                include_integration_tests: request.include_integration_tests.unwrap_or(true),
-                include_e2e_tests: request.include_e2e_tests.unwrap_or(false),
-                force_frontend_backend_split: request.force_frontend_backend_split.unwrap_or(false),
-                require_execution_plan_confirm: request
-                    .require_execution_plan_confirm
-                    .unwrap_or(false),
-            },
-            status: IssueWorkItemPlanStatus::Draft,
-            work_item_ids: Vec::new(),
-            repository_profile_ref: None,
-            verification_plan_ids: Vec::new(),
-            dependency_graph: Vec::new(),
-            created_from_provider_run: None,
-            validator_findings: Vec::new(),
-        })
-        .map_err(product_store_api_error)?;
-
-    let session = lifecycle
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id,
-            issue_id,
-            entity_id: plan.id.clone(),
-            workspace_type: WorkspaceType::WorkItemPlan,
-            author_provider: workspace_config.author_provider,
-            reviewer_provider: workspace_config.reviewer_provider,
-            review_rounds: workspace_config.review_rounds,
-            superpowers_enabled: workspace_config.superpowers_enabled,
-            openspec_enabled: workspace_config.openspec_enabled,
-            work_item_plan_options: Some(WorkItemPlanSessionOptions {
-                flow_kind,
-                run_policy: request.run_policy.unwrap_or(RunPolicy::Interactive),
-                rollout_snapshot,
-            }),
-        })
-        .map_err(product_store_api_error)?;
+    let PreparedPlanRecords { plan, session } = records;
     let session_id = session.id.clone();
-    // L2 退役（T5/REQ-WSC-08）：确定性 preflight 失败收敛新路径 durable Failed
-    // 终态（含原因）——无 legacy 回落、无 flow_kind 切换。
-    if let Some(reason) = preflight_failure_reason {
-        mark_single_candidate_prepare_failure(
-            &lifecycle,
-            &session_id,
-            &format!("single-candidate preflight failed before session side effects: {reason}"),
-        );
-        return Err(ApiError::validation(
-            "SINGLE_CANDIDATE_PREFLIGHT_FAILED",
-            reason,
-        ));
-    }
     let session = match ensure_workspace_context_message(&app_paths, &lifecycle, session).await {
         Ok(session) => session,
         Err(error) => {

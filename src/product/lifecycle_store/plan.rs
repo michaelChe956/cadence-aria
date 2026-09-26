@@ -11,7 +11,8 @@ use crate::product::work_item_split_engine::WorkItemSplitProviderOutput;
 use super::{
     CreateIssueWorkItemPlanInput, CreateRepositoryProfileInput, CreateVerificationPlanInput,
     CreateWorkItemInput, IssueWorkItemPlanUpdate, LifecycleStore, WorkItemPlanCandidateSnapshot,
-    delete_required_file, list_json_records, remove_file_if_exists, validate_relative_ids,
+    delete_required_file, list_json_records, path_exists, remove_file_if_exists,
+    validate_relative_ids,
 };
 
 impl LifecycleStore {
@@ -56,6 +57,41 @@ impl LifecycleStore {
         };
         write_json(&root.join(format!("{id}.json")), &plan)?;
         Ok(plan)
+    }
+
+    /// P1 WIGA Task 3：绑定创建——固定 id 既存时必须与冻结身份（project/issue/
+    /// source/options）完全一致才复用；绝不覆盖。覆盖式 `create_issue_work_item_plan`
+    /// （id=Some 直接写）对 bound 路径禁用。
+    pub fn ensure_issue_work_item_plan_with_identity(
+        &self,
+        input: CreateIssueWorkItemPlanInput,
+    ) -> Result<IssueWorkItemPlan, ProductStoreError> {
+        let Some(id) = input.id.clone() else {
+            return Err(ProductStoreError::InvalidRecord {
+                kind: "issue_work_item_plan",
+                reason: "bound plan creation requires an explicit id".to_string(),
+            });
+        };
+        let path = self
+            .issue_work_item_plans_root(&input.project_id, &input.issue_id)
+            .join(format!("{id}.json"));
+        if path_exists(&path)? {
+            let existing: IssueWorkItemPlan = read_json(&path)?;
+            if existing.id == id
+                && existing.project_id == input.project_id
+                && existing.issue_id == input.issue_id
+                && existing.source_story_spec_ids == input.source_story_spec_ids
+                && existing.source_design_spec_ids == input.source_design_spec_ids
+                && existing.options == input.options
+            {
+                return Ok(existing);
+            }
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "issue_work_item_plan",
+                id,
+            });
+        }
+        self.create_issue_work_item_plan(input)
     }
 
     pub fn get_issue_work_item_plan(

@@ -284,6 +284,57 @@ impl LifecycleStore {
         Ok(session)
     }
 
+    /// P1 WIGA Task 3：绑定创建——既存 session 必须与完整创建快照一致
+    /// （基础 `create_workspace_session_with_id` 只核对五个身份字段，不足以
+    /// 作为授权校验）；bound plan session 强制 Interactive（REQ-WIGA-02）。
+    pub fn create_workspace_session_bound(
+        &self,
+        input: CreateWorkspaceSessionInput,
+        id: String,
+    ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
+        if input.workspace_type == WorkspaceType::WorkItemPlan
+            && input
+                .work_item_plan_options
+                .as_ref()
+                .is_some_and(|options| {
+                    options.run_policy
+                        != crate::product::work_item_plan_policy::RunPolicy::Interactive
+                })
+        {
+            return Err(ProductStoreError::InvalidRecord {
+                kind: "workspace_session",
+                reason: "bound work item plan session must use the interactive run policy"
+                    .to_string(),
+            });
+        }
+        let root = self.workspace_sessions_root(&input.project_id, &input.issue_id);
+        let target_path = root.join(format!("{id}.json"));
+        if path_exists(&target_path)? {
+            let existing: WorkspaceSessionRecord = read_json(&target_path)?;
+            let expected_options = input.work_item_plan_options.clone().unwrap_or_default();
+            if existing.id == id
+                && existing.project_id == input.project_id
+                && existing.issue_id == input.issue_id
+                && existing.entity_id == input.entity_id
+                && existing.workspace_type == input.workspace_type
+                && existing.author_provider == input.author_provider
+                && existing.reviewer_provider == input.reviewer_provider
+                && existing.review_rounds == input.review_rounds
+                && existing.superpowers_enabled == input.superpowers_enabled
+                && existing.openspec_enabled == input.openspec_enabled
+                && existing.flow_kind == expected_options.flow_kind
+                && existing.run_policy == expected_options.run_policy
+            {
+                return Ok(existing);
+            }
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "workspace_session",
+                id,
+            });
+        }
+        self.create_workspace_session_with_id(input, id)
+    }
+
     /// Creates the interactive successor for a resumable stopped WorkItemPlan
     /// session while leaving the terminal parent record untouched. The durable
     /// event makes a repeated explicit takeover idempotent.
