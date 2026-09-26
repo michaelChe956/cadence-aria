@@ -15,7 +15,7 @@ use crate::product::workspace_engine::group_work_items_by_target;
 use std::collections::{BTreeMap, BTreeSet};
 
 mod deletion;
-mod plan_preparation;
+pub(crate) mod plan_preparation;
 pub(crate) mod preflight;
 
 pub use deletion::{

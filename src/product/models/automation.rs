@@ -103,6 +103,41 @@ pub enum EnrollmentWriteCommand {
     },
     Disable,
 }
+/// P1 WIGA Task 4：enrollment-bound 不可变创建意图（automation-plan-intent.json）。
+///
+/// 先于 plan/session 持久化、与 enrollment 同源（`prepare_intent_id`），冻结
+/// source/options/target 与稳定 plan/session id；重开换 payload 后当前
+/// enrollment 派生的新意图与已存文件不一致即 fail-closed，绝不覆盖。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreparedPlanIntent {
+    pub enrollment_id: String,
+    pub prepare_intent_id: String,
+    pub project_id: String,
+    pub issue_id: String,
+    pub source: EnrollmentSource,
+    pub options: EnrollmentOptions,
+    pub logical_repository_id: LogicalRepositoryId,
+    pub plan_id: String,
+    pub session_id: String,
+}
+
+impl PreparedPlanIntent {
+    /// 从当前 enrollment 派生冻结意图；稳定目标 id 只来自已持久的
+    /// `prepare_intent_id`，不依赖扫描最近 plan。同 payload 重复派生幂等。
+    pub fn from_enrollment(enrollment: &IssueAutomationEnrollment) -> Self {
+        Self {
+            enrollment_id: enrollment.enrollment_id.clone(),
+            prepare_intent_id: enrollment.prepare_intent_id.clone(),
+            project_id: enrollment.project_id.clone(),
+            issue_id: enrollment.issue_id.clone(),
+            source: enrollment.source.clone(),
+            options: enrollment.options.clone(),
+            logical_repository_id: enrollment.logical_repository_id,
+            plan_id: format!("issue_work_item_plan_auto_{}", enrollment.prepare_intent_id),
+            session_id: format!("workspace_session_auto_{}", enrollment.prepare_intent_id),
+        }
+    }
+}
 
 /// enrollment 写入失败语义：HTTP 层按 Conflict→409 / InvalidScope→422 /
 /// NotFound→404 / Store→fail-closed 其余映射。

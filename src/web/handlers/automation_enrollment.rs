@@ -334,7 +334,7 @@ fn binding_target_not_found(kind: &str) -> ApiError {
     )
 }
 
-fn enrollment_api_error(error: EnrollmentError) -> ApiError {
+pub(crate) fn enrollment_api_error(error: EnrollmentError) -> ApiError {
     match error {
         EnrollmentError::Conflict { current_revision } => {
             enrollment_conflict(current_revision, "automation enrollment revision conflict")
@@ -568,5 +568,162 @@ mod tests {
         )
         .await;
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    // ---- P1 WIGA Task 4：enrollment-bound 唯一创建与半提交恢复 ----
+
+    use crate::product::issue_automation_store::IssueAutomationStore;
+    use crate::product::json_store::write_json;
+    use crate::product::lifecycle_store::{CreateIssueWorkItemPlanInput, LifecycleStore};
+    use crate::product::models::automation::{IssueAutomationEnrollment, PreparedPlanIntent};
+    use crate::product::models::{
+        IssueWorkItemPlan, IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, WorkspaceSessionRecord,
+    };
+    use crate::web::error::ApiResult;
+    use crate::web::handlers::lifecycle::plan_preparation::ensure_enrolled_plan;
+    use crate::web::runtime::WebRuntime;
+    use crate::web::state::WebAppState;
+
+    impl super::super::automation_enrollment_test_support::Fixture {
+        /// 中窗模拟：按当前 enrollment 派生并持久化真实意图文件，再执行共用
+        /// prepare 的 plan 写入步骤（无 session、无绑定）——崩溃于 plan 已写、
+        /// session 未写之间，不伪造绑定。
+        fn seed_intent_and_plan_without_session(&self, expected_plan_id: &str) {
+            let enrollment = IssueAutomationStore::new(self.paths.clone())
+                .get(PROJECT_ID, ISSUE_ID)
+                .unwrap()
+                .unwrap();
+            let intent = PreparedPlanIntent::from_enrollment(&enrollment);
+            assert_eq!(intent.plan_id, expected_plan_id);
+            write_json(
+                &self
+                    .paths
+                    .issue_root(PROJECT_ID, ISSUE_ID)
+                    .join("automation-plan-intent.json"),
+                &intent,
+            )
+            .unwrap();
+            LifecycleStore::new(self.paths.clone())
+                .ensure_issue_work_item_plan_with_identity(CreateIssueWorkItemPlanInput {
+                    id: Some(intent.plan_id.clone()),
+                    project_id: PROJECT_ID.to_string(),
+                    issue_id: ISSUE_ID.to_string(),
+                    source_story_spec_ids: intent
+                        .source
+                        .stories
+                        .iter()
+                        .map(|reference| reference.id.clone())
+                        .collect(),
+                    source_design_spec_ids: intent
+                        .source
+                        .designs
+                        .iter()
+                        .map(|reference| reference.id.clone())
+                        .collect(),
+                    options: intent.options.plan_options.clone(),
+                    status: IssueWorkItemPlanStatus::Draft,
+                    work_item_ids: Vec::new(),
+                    repository_profile_ref: None,
+                    verification_plan_ids: Vec::new(),
+                    dependency_graph: Vec::new(),
+                    created_from_provider_run: None,
+                    validator_findings: Vec::new(),
+                })
+                .unwrap();
+        }
+
+        /// 以重建的 state/store 执行后台补偿，返回补偿后的 enrollment 投影。
+        async fn ensure_enrolled_plan(&self) -> ApiResult<IssueAutomationEnrollment> {
+            let root = self._root.path();
+            let state = WebAppState::new(
+                root.to_path_buf(),
+                WebRuntime::new_fake(root.to_path_buf()),
+            );
+            let enrollment = IssueAutomationStore::new(self.paths.clone())
+                .get(PROJECT_ID, ISSUE_ID)
+                .unwrap()
+                .unwrap();
+            ensure_enrolled_plan(&state, &enrollment).await?;
+            IssueAutomationStore::new(self.paths.clone())
+                .get(PROJECT_ID, ISSUE_ID)
+                .unwrap()
+                .ok_or_else(|| {
+                    crate::web::error::ApiError::runtime(
+                        "automation_enrollment_not_found",
+                        "enrollment vanished after compensation",
+                        serde_json::json!({}),
+                    )
+                })
+        }
+
+        fn plans(&self) -> Vec<IssueWorkItemPlan> {
+            self.lifecycle
+                .list_issue_work_item_plans(PROJECT_ID, ISSUE_ID)
+                .unwrap()
+        }
+
+        fn sessions(&self) -> Vec<WorkspaceSessionRecord> {
+            self.lifecycle
+                .list_workspace_sessions(PROJECT_ID, ISSUE_ID)
+                .unwrap()
+        }
+    }
+
+    #[tokio::test]
+    async fn automation_prepare_recovers_plan_without_session_or_rebinding() {
+        let fixture = seed_fixture(1, true);
+        let enrolled =
+            response_json(put_enrollment(&fixture.router(), enrollment_body(&fixture, 1, 1)).await)
+                .await;
+        let intent_id = enrolled["prepare_intent_id"].as_str().unwrap();
+        let expected_plan_id = format!("issue_work_item_plan_auto_{intent_id}");
+        fixture.seed_intent_and_plan_without_session(&expected_plan_id);
+
+        // 重建进程后的两次补偿：绑定同一 plan/session，plan 文件不被覆盖。
+        let recovered = fixture.ensure_enrolled_plan().await.unwrap();
+        let again = fixture.ensure_enrolled_plan().await.unwrap();
+        assert_eq!(recovered.plan_id, again.plan_id);
+        assert_eq!(recovered.session_id, again.session_id);
+        assert_eq!(recovered.plan_id.as_deref(), Some(expected_plan_id.as_str()));
+        assert_eq!(recovered.session_id.as_deref(), Some(format!("workspace_session_auto_{intent_id}").as_str()));
+        assert_eq!(fixture.plans().len(), 1);
+        assert_eq!(fixture.sessions().len(), 1);
+        assert_eq!(fixture.sessions()[0].run_policy, RunPolicy::Interactive);
+    }
+
+    /// Disable → 异 payload 重开：旧 intent 冻结快照与新授权不匹配 → 补偿
+    /// fail-closed，原 plan 内容/创建时间不变。
+    #[tokio::test]
+    async fn automation_prepare_fails_closed_on_divergent_reopen() {
+        let fixture = seed_fixture(1, true);
+        let app = fixture.router();
+        put_enrollment(&app, enrollment_body(&fixture, 1, 1)).await;
+        fixture.ensure_enrolled_plan().await.unwrap();
+        let plan_before = fixture.plans().remove(0);
+
+        let revision = IssueAutomationStore::new(fixture.paths.clone())
+            .get(PROJECT_ID, ISSUE_ID)
+            .unwrap()
+            .unwrap()
+            .policy_revision;
+        let disable = serde_json::json!({
+            "expected_revision": revision,
+            "command": {"type": "disable"}
+        });
+        let response = put_enrollment(&app, disable).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut divergent = enrollment_body(&fixture, 1, 1);
+        divergent["command"]["options"]["review_rounds"] = serde_json::json!(2);
+        divergent["expected_revision"] = serde_json::json!(revision + 1);
+        let response = put_enrollment(&app, divergent).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let error = fixture.ensure_enrolled_plan().await.unwrap_err();
+        assert_eq!(error.code, "automation_enrollment_conflict");
+        let plans = fixture.plans();
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].id, plan_before.id);
+        assert_eq!(plans[0].created_at, plan_before.created_at);
+        assert_eq!(plans[0].options, plan_before.options);
     }
 }

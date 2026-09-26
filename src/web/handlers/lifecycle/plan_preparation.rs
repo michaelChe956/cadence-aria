@@ -235,3 +235,127 @@ pub fn prepare_plan_records(
 
     Ok(PreparedPlanRecords { plan, session })
 }
+
+/// P1 WIGA Task 4：后台补偿入口——enrollment 锁内唯一创建/绑定（`ensure_
+/// plan_binding`），create 回调把冻结意图转成 `PrepareWorkItemPlanRequest`
+/// 走共用 prepare 数据面（`ids=Some`，绝不覆盖既存内容）；锁外再补
+/// `ensure_workspace_context_message`（幂等，崩溃后下次补偿重试）。
+pub async fn ensure_enrolled_plan(
+    state: &WebAppState,
+    enrollment: &crate::product::models::automation::IssueAutomationEnrollment,
+) -> ApiResult<PreparedPlanRecords> {
+    let store = crate::product::issue_automation_store::IssueAutomationStore::new(
+        product_app_paths(state),
+    );
+    let (project_id, issue_id) = (enrollment.project_id.clone(), enrollment.issue_id.clone());
+    // create 回调错误类型固定为 EnrollmentError：ApiError 原样暂存、锁外还原，
+    // 不丢验证/运行错误细节。
+    let mut create_error: Option<ApiError> = None;
+    let bound = store
+        .ensure_plan_binding(&project_id, &issue_id, &enrollment.enrollment_id, |_, intent| {
+            let request = intent_request(intent);
+            match prepare_plan_records(
+                state,
+                &project_id,
+                &issue_id,
+                request,
+                Some(PreparedPlanIds {
+                    plan_id: intent.plan_id.clone(),
+                    session_id: intent.session_id.clone(),
+                }),
+            ) {
+                Ok(_) => Ok(()),
+                Err(error) => {
+                    create_error = Some(error);
+                    Err(crate::product::models::automation::EnrollmentError::InvalidScope(
+                        "bound plan creation failed".to_string(),
+                    ))
+                }
+            }
+        })
+        .map_err(|error| match create_error {
+            Some(api_error) => api_error,
+            None => crate::web::handlers::automation_enrollment::enrollment_api_error(error),
+        })?;
+
+    // 绑定已 durable；锁外加载记录并补异步上下文消息（Unchanged 幂等路径同样补）。
+    let app_paths = product_app_paths(state);
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    let Some(plan_id) = bound.plan_id.clone() else {
+        return Err(ApiError::runtime(
+            "automation_enrollment_binding_missing",
+            "enrollment has no bound plan after compensation",
+            serde_json::json!({}),
+        ));
+    };
+    let Some(session_id) = bound.session_id.clone() else {
+        return Err(ApiError::runtime(
+            "automation_enrollment_binding_missing",
+            "enrollment has no bound session after compensation",
+            serde_json::json!({}),
+        ));
+    };
+    let plan = lifecycle
+        .get_issue_work_item_plan(&project_id, &issue_id, &plan_id)
+        .map_err(product_store_api_error)?;
+    let session = lifecycle
+        .get_workspace_session(&session_id)
+        .map_err(product_store_api_error)?;
+    let session = match crate::web::workspace_context::ensure_workspace_context_message(
+        &app_paths,
+        &lifecycle,
+        session,
+    )
+    .await
+    {
+        Ok(session) => session,
+        Err(error) => {
+            // 绑定已 durable 成功：上下文消息是幂等只读补齐，失败不回滚绑定、
+            // 也不标记 Failed（那会毒化链条）；下次补偿（Unchanged 快路径）重试。
+            eprintln!("wiga bound plan context message deferred: {error}");
+            lifecycle
+                .get_workspace_session(&session_id)
+                .map_err(product_store_api_error)?
+        }
+    };
+    Ok(PreparedPlanRecords { plan, session })
+}
+
+/// 冻结意图 → 共用 prepare 请求：provider/选项只取意图冻结值（补偿时绝不
+/// 重新取环境默认）；绑定 plan session 一律 Interactive（REQ-WIGA-02）。
+fn intent_request(
+    intent: &crate::product::models::automation::PreparedPlanIntent,
+) -> PrepareWorkItemPlanRequest {
+    let options = &intent.options;
+    let provider = |name: &crate::product::models::provider::ProviderName| {
+        serde_json::to_value(name)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_string))
+            .unwrap_or_default()
+    };
+    PrepareWorkItemPlanRequest {
+        title: "Work Item Plan（自动化）".to_string(),
+        story_spec_ids: intent
+            .source
+            .stories
+            .iter()
+            .map(|reference| reference.id.clone())
+            .collect(),
+        design_spec_ids: intent
+            .source
+            .designs
+            .iter()
+            .map(|reference| reference.id.clone())
+            .collect(),
+        author_provider: Some(provider(&options.author_provider)),
+        reviewer_provider: Some(provider(&options.reviewer_provider)),
+        review_rounds: Some(options.review_rounds),
+        superpowers_enabled: Some(options.superpowers_enabled),
+        openspec_enabled: Some(options.openspec_enabled),
+        run_policy: Some(RunPolicy::Interactive),
+        include_integration_tests: Some(options.plan_options.include_integration_tests),
+        include_e2e_tests: Some(options.plan_options.include_e2e_tests),
+        force_frontend_backend_split: Some(options.plan_options.force_frontend_backend_split),
+        require_execution_plan_confirm: Some(options.plan_options.require_execution_plan_confirm),
+    }
+}

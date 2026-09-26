@@ -13,7 +13,7 @@ use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::locking::with_exclusive_lock;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::models::automation::{
-    EnrollmentError, EnrollmentWriteCommand, IssueAutomationEnrollment,
+    EnrollmentError, EnrollmentWriteCommand, IssueAutomationEnrollment, PreparedPlanIntent,
 };
 
 /// issue 级 enrollment 的唯一持久入口；所有写路径都在目标 JSON 的伴生文件锁内
@@ -165,25 +165,84 @@ impl IssueAutomationStore {
                     current_revision: Some(saved.policy_revision),
                 });
             }
-            match (saved.plan_id.as_deref(), saved.session_id.as_deref()) {
-                (Some(plan), Some(session)) if plan == plan_id && session == session_id => {
-                    Ok(CasResolution::Unchanged(saved))
-                }
-                (Some(_), _) | (_, Some(_)) => Ok(CasResolution::Conflict {
-                    current_revision: Some(saved.policy_revision),
-                }),
-                (None, None) => {
-                    let mut next = saved;
-                    next.plan_id = Some(plan_id.to_string());
-                    next.session_id = Some(session_id.to_string());
-                    next.policy_revision += 1;
-                    next.updated_at = now_rfc3339();
-                    write_json(&path, &next)?;
-                    Ok(CasResolution::Applied(next))
-                }
-            }
+            bind_plan_ids_locked(&path, saved, plan_id, session_id)
         })?;
         resolve(resolution)
+    }
+
+    /// P1 WIGA Task 4：enrollment-bound 唯一创建与绑定补偿。
+    ///
+    /// 在 `automation-enrollment.json` 的同一文件锁内：重读 current（enabled、
+    /// enrollment_id 一致）、读/写不可变 `automation-plan-intent.json`（既存
+    /// 值与当前 enrollment 派生的新意图不一致即 Conflict，绝不覆盖——换源
+    /// 重开天然 fail-closed）；完整绑定 → 幂等 Unchanged；单边/异绑定视为
+    /// 损坏 Conflict 不修补；未绑定时由注入的 `create` 回调（共用 prepare
+    /// 数据面）核对/创建 plan+session，成功后锁内绑定（revision+1）。create
+    /// 失败原样穿出锁外，意图文件保留为下次补偿锚点。
+    pub fn ensure_plan_binding<F>(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        enrollment_id: &str,
+        create: F,
+    ) -> Result<IssueAutomationEnrollment, EnrollmentError>
+    where
+        F: FnOnce(&IssueAutomationEnrollment, &PreparedPlanIntent) -> Result<(), EnrollmentError>,
+    {
+        let path = self.enrollment_path(project_id, issue_id)?;
+        // 锁内闭包错误类型固定为 ProductStoreError：create 的 EnrollmentError
+        // 以 Failed 包装穿出锁外，再由 resolve_ensure 还原。
+        let resolution = with_exclusive_lock(&path, || {
+            let Some(saved) = read_optional_enrollment(&path)? else {
+                return Ok(EnsurePlanResolution::Missing);
+            };
+            if !saved.enabled || saved.enrollment_id != enrollment_id {
+                return Ok(EnsurePlanResolution::Conflict {
+                    current_revision: Some(saved.policy_revision),
+                });
+            }
+            let intent = PreparedPlanIntent::from_enrollment(&saved);
+            let intent_path = path.with_file_name("automation-plan-intent.json");
+            if intent_path.metadata().is_ok() {
+                let existing: PreparedPlanIntent = read_json(&intent_path)?;
+                if existing != intent {
+                    return Ok(EnsurePlanResolution::Conflict {
+                        current_revision: Some(saved.policy_revision),
+                    });
+                }
+            } else {
+                write_json(&intent_path, &intent)?;
+            }
+            match (saved.plan_id.as_deref(), saved.session_id.as_deref()) {
+                (Some(plan), Some(session)) if plan == intent.plan_id && session == intent.session_id => {
+                    return Ok(EnsurePlanResolution::Unchanged(saved));
+                }
+                // 半提交（单边）或异来源绑定：损坏 fail-closed，禁止覆盖/修补。
+                (Some(_), _) | (_, Some(_)) => {
+                    return Ok(EnsurePlanResolution::Conflict {
+                        current_revision: Some(saved.policy_revision),
+                    });
+                }
+                (None, None) => {}
+            }
+            if let Err(error) = create(&saved, &intent) {
+                return Ok(EnsurePlanResolution::Failed(error));
+            }
+            // create 只写 plan/session；防御性重读并核对身份后锁内绑定。
+            let Some(reloaded) = read_optional_enrollment(&path)? else {
+                return Ok(EnsurePlanResolution::Conflict {
+                    current_revision: None,
+                });
+            };
+            if reloaded.enrollment_id != saved.enrollment_id {
+                return Ok(EnsurePlanResolution::Conflict {
+                    current_revision: Some(reloaded.policy_revision),
+                });
+            }
+            bind_plan_ids_locked(&path, reloaded, &intent.plan_id, &intent.session_id)
+                .map(ensure_resolution_from_cas)
+        })?;
+        resolve_ensure(resolution)
     }
 
     /// P0 1.2（REQ-WIGA-08）：按同一精确绑定从 durable 事实计算会话归属——
@@ -232,6 +291,67 @@ fn resolve(resolution: CasResolution) -> Result<IssueAutomationEnrollment, Enrol
             Err(EnrollmentError::Conflict { current_revision })
         }
         CasResolution::Missing => Err(EnrollmentError::NotFound),
+    }
+}
+
+/// 锁内绑定分支：同键幂等返回原值；异/半绑定 Conflict；(None,None) 才写入
+/// 并 revision+1（P0 `bind_plan` 与 P1 `ensure_plan_binding` 共用，避免嵌套锁）。
+fn bind_plan_ids_locked(
+    path: &Path,
+    saved: IssueAutomationEnrollment,
+    plan_id: &str,
+    session_id: &str,
+) -> Result<CasResolution, ProductStoreError> {
+    match (saved.plan_id.as_deref(), saved.session_id.as_deref()) {
+        (Some(plan), Some(session)) if plan == plan_id && session == session_id => {
+            Ok(CasResolution::Unchanged(saved))
+        }
+        (Some(_), _) | (_, Some(_)) => Ok(CasResolution::Conflict {
+            current_revision: Some(saved.policy_revision),
+        }),
+        (None, None) => {
+            let mut next = saved;
+            next.plan_id = Some(plan_id.to_string());
+            next.session_id = Some(session_id.to_string());
+            next.policy_revision += 1;
+            next.updated_at = now_rfc3339();
+            write_json(path, &next)?;
+            Ok(CasResolution::Applied(next))
+        }
+    }
+}
+
+/// `ensure_plan_binding` 锁内判定；`Failed` 把 create 回调的 EnrollmentError
+/// 原样穿出锁外（锁闭包错误类型固定为 ProductStoreError）。
+enum EnsurePlanResolution {
+    Unchanged(IssueAutomationEnrollment),
+    Applied(IssueAutomationEnrollment),
+    Conflict { current_revision: Option<u64> },
+    Missing,
+    Failed(EnrollmentError),
+}
+
+fn ensure_resolution_from_cas(resolution: CasResolution) -> EnsurePlanResolution {
+    match resolution {
+        CasResolution::Unchanged(saved) => EnsurePlanResolution::Unchanged(saved),
+        CasResolution::Applied(saved) => EnsurePlanResolution::Applied(saved),
+        CasResolution::Conflict { current_revision } => EnsurePlanResolution::Conflict {
+            current_revision,
+        },
+        CasResolution::Missing => EnsurePlanResolution::Missing,
+    }
+}
+
+fn resolve_ensure(
+    resolution: EnsurePlanResolution,
+) -> Result<IssueAutomationEnrollment, EnrollmentError> {
+    match resolution {
+        EnsurePlanResolution::Unchanged(saved) | EnsurePlanResolution::Applied(saved) => Ok(saved),
+        EnsurePlanResolution::Conflict { current_revision } => {
+            Err(EnrollmentError::Conflict { current_revision })
+        }
+        EnsurePlanResolution::Missing => Err(EnrollmentError::NotFound),
+        EnsurePlanResolution::Failed(error) => Err(error),
     }
 }
 
@@ -352,7 +472,7 @@ mod tests {
     use super::IssueAutomationStore;
     use crate::product::app_paths::ProductAppPaths;
     use crate::product::issue_automation_store::EnrollmentError;
-    use crate::product::json_store::read_json;
+    use crate::product::json_store::{read_json, write_json};
     use crate::product::logical_codebase::LogicalRepositoryId;
     use crate::product::models::automation::{
         EnrollmentOptions, EnrollmentSource, EnrollmentWriteCommand, IssueAutomationEnrollment,
@@ -761,5 +881,289 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(error, EnrollmentError::NotFound));
+    }
+    // ---- P1 WIGA Task 4：enrollment-bound 创建意图、唯一绑定与半提交恢复 ----
+
+    fn intent_path(paths: &ProductAppPaths) -> std::path::PathBuf {
+        paths
+            .issue_root("project_1", "issue_1")
+            .join("automation-plan-intent.json")
+    }
+
+    fn read_intent(
+        paths: &ProductAppPaths,
+    ) -> crate::product::models::automation::PreparedPlanIntent {
+        read_json(&intent_path(paths)).unwrap()
+    }
+
+    #[test]
+    fn issue_automation_store_ensure_plan_binding_binds_once_and_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(tmp.path());
+        let store = IssueAutomationStore::new(paths.clone());
+        let enrolled = store
+            .compare_and_set(
+                "project_1",
+                "issue_1",
+                None,
+                enable("human-choice-1", logical_repo(1)),
+            )
+            .unwrap();
+
+        let creates = std::sync::atomic::AtomicUsize::new(0);
+        let bound = store
+            .ensure_plan_binding("project_1", "issue_1", &enrolled.enrollment_id, |current, intent| {
+                creates.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                assert_eq!(current.enrollment_id, enrolled.enrollment_id);
+                assert_eq!(
+                    intent.plan_id,
+                    format!("issue_work_item_plan_auto_{}", current.prepare_intent_id)
+                );
+                assert_eq!(
+                    intent.session_id,
+                    format!("workspace_session_auto_{}", current.prepare_intent_id)
+                );
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(bound.policy_revision, enrolled.policy_revision + 1);
+        assert_eq!(
+            bound.plan_id.as_deref(),
+            Some(
+                format!("issue_work_item_plan_auto_{}", enrolled.prepare_intent_id).as_str()
+            )
+        );
+        assert_eq!(
+            bound.session_id.as_deref(),
+            Some(
+                format!("workspace_session_auto_{}", enrolled.prepare_intent_id).as_str()
+            )
+        );
+
+        // 重复补偿：完整绑定 → Unchanged 幂等，不再调用 create，revision 不再 +1。
+        let again = store
+            .ensure_plan_binding("project_1", "issue_1", &enrolled.enrollment_id, |_, _| {
+                panic!("bound enrollment must not re-create");
+            })
+            .unwrap();
+        assert_eq!(again.policy_revision, bound.policy_revision);
+        assert_eq!(again.plan_id, bound.plan_id);
+        assert_eq!(creates.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // 意图文件冻结且与 enrollment 派生一致。
+        let intent = read_intent(&paths);
+        assert_eq!(intent.enrollment_id, enrolled.enrollment_id);
+        assert_eq!(intent.source, enrolled.source);
+        assert_eq!(intent.options, enrolled.options);
+    }
+
+    /// 中窗恢复：create 失败（如 preflight/源校验）→ 失败原样穿出且不落绑定；
+    /// 意图已先于 create 落盘，下一次补偿按同一冻结身份重建。
+    #[test]
+    fn issue_automation_store_ensure_plan_binding_recovers_after_create_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(tmp.path());
+        let store = IssueAutomationStore::new(paths.clone());
+        let enrolled = store
+            .compare_and_set(
+                "project_1",
+                "issue_1",
+                None,
+                enable("human-choice-1", logical_repo(1)),
+            )
+            .unwrap();
+
+        let error = store
+            .ensure_plan_binding("project_1", "issue_1", &enrolled.enrollment_id, |_, _| {
+                Err(EnrollmentError::InvalidScope("create failed".into()))
+            })
+            .unwrap_err();
+        assert!(matches!(error, EnrollmentError::InvalidScope(_)));
+        let current = store.get("project_1", "issue_1").unwrap().unwrap();
+        assert!(current.plan_id.is_none());
+        assert!(current.session_id.is_none());
+        assert!(intent_path(&paths).exists());
+
+        let bound = store
+            .ensure_plan_binding("project_1", "issue_1", &enrolled.enrollment_id, |_, _| Ok(()))
+            .unwrap();
+        assert_eq!(bound.policy_revision, enrolled.policy_revision + 1);
+    }
+
+    /// Disable → 异 payload 重开（保留绑定/prepare_intent_id）：intent 文件
+    /// 仍是旧冻结快照，与当前 enrollment 派生的新意图不一致 → fail-closed，
+    /// 绝不把旧 plan/session 隐式重授权给新 payload。
+    #[test]
+    fn issue_automation_store_ensure_plan_binding_fails_closed_on_divergent_reopen() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(tmp.path());
+        let store = IssueAutomationStore::new(paths.clone());
+        let enrolled = store
+            .compare_and_set(
+                "project_1",
+                "issue_1",
+                None,
+                enable("human-choice-1", logical_repo(1)),
+            )
+            .unwrap();
+        let bound = store
+            .ensure_plan_binding("project_1", "issue_1", &enrolled.enrollment_id, |_, _| Ok(()))
+            .unwrap();
+        assert_eq!(bound.policy_revision, enrolled.policy_revision + 1);
+
+        let disabled = store
+            .compare_and_set(
+                "project_1",
+                "issue_1",
+                Some(enrolled.policy_revision + 1),
+                EnrollmentWriteCommand::Disable,
+            )
+            .unwrap();
+        let mut other_options = options();
+        other_options.review_rounds = 2;
+        let reopened = store
+            .compare_and_set(
+                "project_1",
+                "issue_1",
+                Some(disabled.policy_revision),
+                enable_with_options("human-choice-1", logical_repo(1), other_options),
+            )
+            .unwrap();
+        assert!(reopened.enabled);
+
+        let error = store
+            .ensure_plan_binding("project_1", "issue_1", &enrolled.enrollment_id, |_, _| {
+                panic!("divergent reopen must not re-create");
+            })
+            .unwrap_err();
+        assert_conflict(error, reopened.policy_revision);
+        let current = store.get("project_1", "issue_1").unwrap().unwrap();
+        assert_eq!(current.plan_id, bound.plan_id);
+        assert_eq!(read_intent(&paths).options, options());
+    }
+
+    /// 半提交损坏（单边 plan_id/session_id）与禁用/缺失/异 enrollment_id fail-closed。
+    #[test]
+    fn issue_automation_store_ensure_plan_binding_rejects_corrupt_disabled_and_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(tmp.path());
+        let store = IssueAutomationStore::new(paths.clone());
+
+        let error = store
+            .ensure_plan_binding("project_1", "issue_1", "missing", |_, _| Ok(()))
+            .unwrap_err();
+        assert!(matches!(error, EnrollmentError::NotFound));
+
+        let enrolled = store
+            .compare_and_set(
+                "project_1",
+                "issue_1",
+                None,
+                enable("human-choice-1", logical_repo(1)),
+            )
+            .unwrap();
+
+        let disabled = store
+            .compare_and_set(
+                "project_1",
+                "issue_1",
+                Some(enrolled.policy_revision),
+                EnrollmentWriteCommand::Disable,
+            )
+            .unwrap();
+        let error = store
+            .ensure_plan_binding("project_1", "issue_1", &enrolled.enrollment_id, |_, _| {
+                panic!("disabled enrollment must not create");
+            })
+            .unwrap_err();
+        assert_conflict(error, disabled.policy_revision);
+
+        store
+            .compare_and_set(
+                "project_1",
+                "issue_1",
+                Some(disabled.policy_revision),
+                enable("human-choice-1", logical_repo(1)),
+            )
+            .unwrap();
+        let enrollment_file = paths
+            .issue_root("project_1", "issue_1")
+            .join("automation-enrollment.json");
+        let mut corrupted = store.get("project_1", "issue_1").unwrap().unwrap();
+        corrupted.plan_id = Some("plan_leftover".into());
+        write_json(&enrollment_file, &corrupted).unwrap();
+        let error = store
+            .ensure_plan_binding("project_1", "issue_1", &enrolled.enrollment_id, |_, _| {
+                panic!("half-bound enrollment must not create");
+            })
+            .unwrap_err();
+        assert!(matches!(error, EnrollmentError::Conflict { .. }));
+
+        let mut other = corrupted.clone();
+        other.plan_id = None;
+        write_json(&enrollment_file, &other).unwrap();
+        let error = store
+            .ensure_plan_binding("project_1", "issue_1", "another-enrollment", |_, _| Ok(()))
+            .unwrap_err();
+        assert!(matches!(error, EnrollmentError::Conflict { .. }));
+    }
+
+    /// 双实例/双线程并发补偿同一 enrollment：恰一次 create+bind，另一侧 Unchanged。
+    #[test]
+    fn issue_automation_store_ensure_plan_binding_concurrent_workers_bind_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Arc::new(ProductAppPaths::new(tmp.path()));
+        let enrolled = IssueAutomationStore::new((*paths).clone())
+            .compare_and_set(
+                "project_1",
+                "issue_1",
+                None,
+                enable("human-choice-1", logical_repo(1)),
+            )
+            .unwrap();
+        let enrollment_id = Arc::new(enrolled.enrollment_id.clone());
+        let creates = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        for _ in 0..2 {
+            let paths = Arc::clone(&paths);
+            let enrollment_id = Arc::clone(&enrollment_id);
+            let creates = Arc::clone(&creates);
+            let barrier = Arc::clone(&barrier);
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                let store = IssueAutomationStore::new((*paths).clone());
+                let result = store.ensure_plan_binding(
+                    "project_1",
+                    "issue_1",
+                    &enrollment_id,
+                    |_, _| {
+                        creates.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        Ok(())
+                    },
+                );
+                let _ = tx.send(result);
+            });
+        }
+        drop(tx);
+        let results: Vec<_> = rx.iter().collect();
+        assert_eq!(results.len(), 2);
+        let first = results[0].as_ref().unwrap();
+        let second = results[1].as_ref().unwrap();
+        assert_eq!(first.enrollment_id, second.enrollment_id);
+        assert_eq!(first.plan_id, second.plan_id);
+        assert_eq!(first.session_id, second.session_id);
+        assert_eq!(first.policy_revision, second.policy_revision);
+        assert_eq!(creates.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let on_disk: IssueAutomationEnrollment = read_json(
+            &paths
+                .issue_root("project_1", "issue_1")
+                .join("automation-enrollment.json"),
+        )
+        .unwrap();
+        assert_eq!(on_disk.plan_id, first.plan_id);
+        assert_eq!(on_disk.session_id, first.session_id);
     }
 }
