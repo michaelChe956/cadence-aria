@@ -46,7 +46,11 @@ Work Item Plan 以「单候选计划事务」交付：LLM 与人只接触 markdo
 
 系统 SHALL 以 markdown/EARS 文档作为 work item plan 的唯一可编辑源，并提供确定性编译器将其单向编译为顶层 `PlanCandidateIr { source_revision_hash, compiler_version, items: Vec<PlanCandidateItemIr> }`；每个 item SHALL 为 `PlanCandidateItemIr { target_repository_id, contract, verification_plan: WorkItemDraftVerificationPlan, trusted_commands }`。typed IR 的 source revision hash 与 compiler version 仅位于顶层；**publish 前** hash 或版本不匹配时系统 SHALL 拒绝发布并提示重新编译，hash/version 随不可变 publication provenance 落盘。coding 段只消费已发布的 immutable runtime binding，SHALL NOT 在执行期间解析 markdown 或重新解释 compiler version；write_policy 与 trusted commands 等安全边界 SHALL 保持强类型。对 markdown 的人工或模型修改 SHALL 产生新 revision 并触发重新编译。
 
-SC 交付（author 与人工修订两条路径）进入编译前，系统 SHALL 允许对结构标题行（一级文档标题、Work Item 二级标题、三级结构 section 标题）做确定性归一化：以固定中文→英文映射表逐字映射回规范英文，仅覆盖固定词表的已知翻译变体，正文内容零触碰；表外未知标题 SHALL NOT 被猜测改写，SHALL 照旧交给编译器以 fail-closed 拒绝；归一化发生时系统 SHALL 落一条可判定该次交付被救回的诊断/事件。
+SC 交付（author 与人工修订两条路径）进入编译前，系统 SHALL 允许两类确定性归一化：其一为结构标题行（一级文档标题、Work Item 二级标题、三级结构 section 标题）归一化——以固定中文→英文映射表逐字映射回规范英文，仅覆盖固定词表的已知翻译变体；其二为 **EARS 关键字空白归一化**——当 statement 行内 `WHEN` 后或 `THE SYSTEM SHALL` 前缺失半角空格、或关键字邻位为 U+3000/NBSP 时，确定性补齐/归一为单个半角空格。两类归一化均只触碰上述空白与固定词表位置，正文其余内容（含 CJK 标点如全角引号）零触碰；表外未知标题 SHALL NOT 被猜测改写，SHALL 照旧交给编译器以 fail-closed 拒绝；任一归一化发生时系统 SHALL 落一条可判定该次交付被救回的诊断/事件。
+
+**lowering 重复字段累积语义**：同一 Outputs contract 的多行 `capabilities`（或同一 Inputs contract 的多行 `required_capabilities`）SHALL 按出现顺序累积为全体行的并集（每行 split 后的值依次 append），完全相同的 capability 值仅保留首次出现；SHALL NOT 以最后出现的行覆盖先行行（last-write-wins 禁止）。相邻 contract 的字段 SHALL 严格隔离（contract 边界 flush），不得跨 contract 归并或串项。累积与去重 SHALL 不改变 capability 值的原文形态（不排序、不改大小写/标点/内部空白）。
+
+**候选校验携带存储 options 与基线树**：SC 候选校验上下文 SHALL 携带创建计划时落库的 `IssueWorkItemPlanOptions` 与 plan 基线（worktree fork base / target ref 树），SHALL NOT 从 IR items 反推 options。options×items 一致性（integration_work_item_required / e2e_work_item_required / frontend_backend_split_required 三族）SHALL 在 generate/evaluate 期校验，Error 级结果经既有机械 ReviewVerdict 回灌修订，SHALL NOT 延迟至 Approval/Final Compile 才首次出现。验收标准（AC）/验证计划引用的仓库内文件路径 SHALL 与基线树交叉核对：引用基线中不存在的路径 SHALL 产生 Error（附路径清单与修复建议），SHALL NOT 进入人工确认后才由 coder 发现。
 
 #### Scenario: markdown 与 IR 漂移被拒绝
 
@@ -63,9 +67,59 @@ SC 交付（author 与人工修订两条路径）进入编译前，系统 SHALL 
 - **WHEN** provider 交付的 markdown 把固定词表结构标题翻成已知中文变体（如 `# 工作项计划`、`## 工作项 WI-001: x`、`### 身份`、`### 写入策略 (Write Policy)`），且正文其余部分满足语法
 - **THEN** 系统在编译前把结构标题行逐字归一化为规范英文并编译通过，正文中文逐字保留，并记录一条归一化诊断/事件；表外未知标题（如 `### 溯源清单`）不被猜测改写，仍按既有语法契约 fail-closed 拒绝
 
+#### Scenario: EARS 关键字缺空格确定性补齐后可编译
+
+- **WHEN** provider 交付的 statement 条件以 CJK 标点（如全角引号 `」`）收尾后无半角空格直接接 `THE SYSTEM SHALL`，或 `WHEN` 后缺半角空格，或关键字邻位为 U+3000/NBSP
+- **THEN** 系统在编译前确定性补齐/归一为单个半角空格后编译通过；条件文本与标点本身逐字保留，并记录一条归一化诊断/事件；除关键字邻位空白外任何正文内容不被改写
+
+#### Scenario: 归一化不救非空白语法错误
+
+- **WHEN** statement 的语法错误不是关键字空白形态（如缺 WHEN 前缀、THEN 语义缺失、顺序错误）
+- **THEN** 归一化层不修改该行，编译器照旧以 fail-closed 拒绝并返回行号诊断
+
+#### Scenario: 重复能力行累积不丢能力
+
+- **WHEN** 同一 Outputs contract 的 markdown 含 N 行 `capabilities`（如 F-52 CT-001 的 6 行复合/独立能力混排）
+- **THEN** IR 中该 contract 的 capabilities 为全部 N 行 split 值的并集（完全相同值只保留一次），coverage 校验不再因行序或行数产生缺口；真实缺能力仍报 Error
+
+#### Scenario: 重复需求行同构累积
+
+- **WHEN** 同一 Inputs contract 含多行 `required_capabilities`
+- **THEN** 与 capabilities 同构累积并集，不得 last-write-wins
+
+#### Scenario: 相邻 contract 严格隔离
+
+- **WHEN** lowering 顺序经过两个相邻 contract 且前者的字段行尚未闭合
+- **THEN** 边界 flush 使前 contract 的字段不得归并到后 contract，反向亦然
+
+#### Scenario: 累积不改写值形态
+
+- **WHEN** 累积与去重生效
+- **THEN** capability 值保持原文（顺序、大小写、标点、内部空白零改写），仅完全相同的重复元素被消除
+
+#### Scenario: 重新编译的 IR 差异仅源于重复字段语义
+
+- **WHEN** 含重复字段的相同 source 在修复前后各编译一次
+- **THEN** 新旧 IR 的差异仅体现为重复字段的累积并集，无其他字段变化；历史 publication 不被重算或迁移
+
+#### Scenario: options 缺口首轮即拦
+
+- **WHEN** 创建选项 include_integration_tests=true 而候选首轮交付不含 integration 类 Work Item
+- **THEN** generate/evaluate 期校验产出 Error 级 finding（附修复动作：新增对应 kind 或回创建选项关闭 flag），经既有回灌通道驱动修订；SHALL NOT 到 approve→Final Compile 才首次报错
+
+#### Scenario: options 三族同报
+
+- **WHEN** integration/e2e/split 三个 flag 同时启用而候选各有缺口
+- **THEN** 一次校验报告全部缺口；flag=false 时保持既有 skipped-risk warning、不产生 Error
+
+#### Scenario: AC 引用基线外路径被拦
+
+- **WHEN** 候选的验收标准或验证计划引用仓库内文件路径（如某分支才存在的文件），而该路径不存在于 plan 基线树
+- **THEN** generate/evaluate 期产出 Error（附路径清单与三种修复建议：删除该 AC / 改用基线内路径 / 显式声明基线恢复依赖并纳入写范围）；SHALL NOT 让 coder 在执行期发现并被迫越界恢复基线
+
 ### Requirement: 中央策略层与 typed outcome（REQ-WSC-03）
 
-系统 SHALL 提供中央策略层（在阶段 1 `workitem-typed-outcome-policy` 落地，本 change 复用），将每次评估结果归入四类 typed outcome：`valid`、`repairable`、`human_required`、`fatal`。reviewer 的 verdict 与 severity SHALL NOT 直接驱动状态跳转；策略层依据机械校验结果、finding 归类建议、指纹与预算做确定性裁决。
+系统 SHALL 提供中央策略层（在阶段 1 `workitem-typed-outcome-policy` 落地，本 change 复用），将每次评估结果归入四类 typed outcome：`valid`、`repairable`、`human_required`、`fatal`。reviewer 的 verdict 与 severity SHALL NOT 直接驱动状态跳转；策略层依据机械校验结果、finding 归类建议、指纹与预算做确定性裁决。机械校验 SHALL 覆盖 options×items 一致性与 AC 路径×基线树核对（REQ-WSC-02）；此类缺口 SHALL NOT 延迟至 Approval 阶段才首次出现。
 
 #### Scenario: reviewer 发现语义矛盾
 
@@ -104,7 +158,11 @@ author prompt（单候选）SHALL 教学契约能力覆盖纪律：WI `input_con
 
 author prompt（单候选）SHALL 教学 handoff 消费闭环纪律：每个 Work Item 的 `Handoff Schema` 三个字段 SHALL 显式存在；`provided_contract_refs` SHALL 仅列出会被下游 Work Item 的 `input_contracts` 以（`provider_logical_work_item_id`, `contract_id`）二元组逐字消费的契约引用，数组元素 SHALL 唯一且非空白。若该 Work Item 在合法计划依赖图中不存在任何下游 consumer edge，则 `provided_contract_refs` SHALL 保留字段并显式写为 `[]`。不得通过省略 Handoff Schema、删除必需字段、写 blocker、修改 contract ID、依赖 `depends_on` 或自然语言描述来回避校验。该纪律判定口径 SHALL 与 `unconsumed_required_handoff` 校验一致。
 
+author prompt（单候选）SHALL 教学 options 镜像纪律：创建计划选项（include_integration_tests / include_e2e_tests / 前后端拆分）的启用条件与对应 Work Item kind 要求 SHALL 与校验器口径逐字一致；教学须明示 flag 启用而缺对应 kind 时的 Error 后果与两种修复路径。author prompt 亦 SHALL 教学验收标准基线纪律：AC/验证计划引用的仓库内文件路径必须存在于 plan 基线树，不得引用其他分支才存在的文件。
+
 reviewer（单候选）SHALL 在复评前获得只读契约覆盖投影，内容 SHALL 至少包括：逐 WI→contract edge 的 required capabilities、所引契约输出 capabilities 与 compatibility_policy；节点依赖图事实（depends_on/边/环/重复边/未知 provider）；handoff 消费闭环（每个 `provided_contract_refs` 的消费者集合与消费状态，无消费者时显式空集）；跨 work item 写范围冲突事实（exclusive/forbidden 重叠）。投影数据 SHALL 复用 `src/product/work_item_contract/dependency.rs` 的确定性共享计算逻辑生成，SHALL NOT 以独立重述口径替代；reviewer SHALL 对能力覆盖缺口与未被消费的 handoff 产出 must_fix finding（归类建议 contract_gap），SHALL NOT 将 canonical 将判 `required_capability_missing` 或 `unconsumed_required_handoff` 的候选评为无 must_fix 通过。canonical 校验器保持 fail-closed 原样；reviewer 投影为其前置防线而非替代。契约覆盖投影 SHALL 仅注入单候选 reviewer 路径，legacy/story/design reviewer SHALL NOT 接收。
+
+reviewer prompt（单候选复评）SHALL 注入前轮结构化 findings：每轮注入前一轮非 advisory findings 的 canonical identity（结构化 key/fingerprint）、category、required_action 与当前候选 revision；reviewer SHALL 依据该清单执行重复判定纪律（同 identity 重现须显式标注），SHALL NOT 依赖自由文本记忆。
 
 #### Scenario: 弱模型借助判例避免已知矛盾
 
@@ -131,6 +189,21 @@ reviewer（单候选）SHALL 在复评前获得只读契约覆盖投影，内容
 - **WHEN** 构建 reviewer context 的契约覆盖投影
 - **THEN** 投影复用 `dependency.rs` 同一确定性计算逻辑（同输入同口径），覆盖能力缺口与 handoff 消费闭环两类事实；legacy/story/design reviewer 路径不接收该投影且行为不变
 
+#### Scenario: options 教学与校验口径一致
+
+- **WHEN** author 依据 options 镜像教学产出候选（flag 启用则建对应 kind Work Item）
+- **THEN** 不存在「按教学应通过而校验判 options 缺口」的口径分叉；教学文案与校验器错误信息引用同一修复路径描述
+
+#### Scenario: AC 基线教学生效
+
+- **WHEN** author 产出引用仓库文件的验收标准
+- **THEN** 引用路径均存在于 plan 基线树；引用其他分支路径的候选在教学+校验双重防线下的发生率显著低于无教学基线
+
+#### Scenario: 复评注入前轮清单
+
+- **WHEN** 单候选复评 prompt 构建
+- **THEN** 前轮非 advisory findings 的 canonical identity 与 required_action 注入为结构化清单；同一问题重现时 reviewer 输出带重复标注
+
 ### Requirement: 旧协议退役与单路径收敛（REQ-WSC-08）
 
 REQ-WSC-07 退役门已按 `legacy-protocol-retirement` REQ-RET-01 全口径重测解锁后（2026-09-19 用户终裁 B：pi 全子项达标=协议质量实证；codex Confirmed 子项登记已知例外——系统性 provider 内容缺陷与协议无关，门文本据此显式修订，属 1c 裁决预留的「后续专项裁决」路径显式行使；**后续义务：codex/claude_code/kimi_code 全部 provider 最终 SHALL 全测通过（defer-ledger DEF-PVR-ALL），在义前不得视为 provider 面收官**），旧协议（generation-mode 决策、逐段确认消息、review_decision 双选项语法、`HumanConfirmDecision` 旧枚举及其消息族、SelectRevisionPath 族及其专属 DTO）SHALL 删除。删除后：新会话 SHALL 一律走单候选流，不存在 legacy 入口；收到已删除消息类型系统 SHALL 返回 stage-specific protocol error 且零副作用；多仓 Issue 的确定性 preflight 失败 SHALL 收敛为新路径 durable fatal/recoverable 终态（含失败原因），系统 MUST NOT 存在 legacy fallback 路径，MUST NOT 静默切换 `flow_kind`（本句修订并取代 REQ-WSC-07 原「legacy fallback 只允许在确定性 preflight 失败且新路径尚未产生副作用时发生」条款）；历史 legacy session 的 durable 记录与事件前缀 SHALL 只读保留（处置细则以 `legacy-protocol-retirement` REQ-RET-03 为唯一来源）；SC 门消息面（`human_gate_feedback`/approve/abandon）以 `work-item-plan-conversational-gate` 为唯一来源。
@@ -154,3 +227,17 @@ REQ-WSC-07 退役门已按 `legacy-protocol-retirement` REQ-RET-01 全口径重�
 
 - **WHEN** 退役完成后读取历史 legacy session 的 durable 记录
 - **THEN** 记录与事件前缀原样保留可读，未被迁移或清洗
+
+### Requirement: generate 段编译语法失败的教学重驱（REQ-WSC-09）
+
+SC 候选编译（generate 段）失败时，系统 SHALL 在会话进入终态前提供恰好一次教学重驱：失败类别为可教学修复的 parse 语法类（至少含 missing_section、invalid_ears、invalid_work_item_id）时，以既有 code:line:message 错误回灌 author prompt 重驱一次；重驱后仍失败则按既有失败路径终态。每 candidate 至多一次额外驱动（既有上限不变）；非 parse 语法类失败不触发重驱、按既有路径处理。
+
+#### Scenario: invalid_ears 触发一次教学重驱
+
+- **WHEN** 候选编译产出 invalid_ears 且为该 candidate 首次编译失败
+- **THEN** 系统以行号+错误信息回灌 author 重驱一次；重驱交付通过编译则继续既有链路，仍失败则终态（不再二次重驱）
+
+#### Scenario: 重驱上限不被突破
+
+- **WHEN** 同一 candidate 的编译失败类别先后命中两个可教学类别
+- **THEN** 教学重驱总共仍至多一次，第二次失败直接按既有失败路径处理
