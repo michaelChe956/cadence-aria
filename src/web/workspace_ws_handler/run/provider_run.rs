@@ -58,11 +58,50 @@ pub(crate) async fn spawn_provider_run_from_event(
     outcome
 }
 
+/// P1 WIGA Task 5：auto 非 superseding 启动入口——manager 临界区内只认领
+/// 空闲 session（活 run 存在返回 `Ok(false)` 只观察，不取消/不 supersede）。
+pub(crate) async fn spawn_provider_run_claiming_idle(
+    run_context: ProviderRunContext,
+    run_kind: ProviderRunKind,
+    outbound_tx: mpsc::Sender<OutboundControl>,
+) -> Result<bool, String> {
+    spawn_provider_run_with_start_mode(
+        run_context,
+        run_kind,
+        outbound_tx,
+        ProviderRunStartMode::ClaimIfIdle,
+    )
+    .await
+}
+
+/// manual WS 显式重跑入口：保留既有 supersede 语义（abort 活 run 后启动）。
 pub(crate) async fn spawn_provider_run_from_handler(
     run_context: ProviderRunContext,
     run_kind: ProviderRunKind,
     outbound_tx: mpsc::Sender<OutboundControl>,
 ) -> Result<(), String> {
+    spawn_provider_run_with_start_mode(
+        run_context,
+        run_kind,
+        outbound_tx,
+        ProviderRunStartMode::SupersedeFromAttachment,
+    )
+    .await
+    .map(|_| ())
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum ProviderRunStartMode {
+    SupersedeFromAttachment,
+    ClaimIfIdle,
+}
+
+async fn spawn_provider_run_with_start_mode(
+    run_context: ProviderRunContext,
+    run_kind: ProviderRunKind,
+    outbound_tx: mpsc::Sender<OutboundControl>,
+    start_mode: ProviderRunStartMode,
+) -> Result<bool, String> {
     let run_context_clone = run_context.clone();
     let ProviderRunContext {
         provider_registry,
@@ -83,20 +122,22 @@ pub(crate) async fn spawn_provider_run_from_handler(
     // duplicates are drained, and ReviewOnly relays yield to an in-flight run
     // whose followups own the review continuation. Repair relays (WorkItemPlan
     // kinds, emitted by a run that delegated via policy routing) intentionally
-    // keep the supersede hand-off below.
-    //
-    // 诊断打点（claude×轻 握手谜团第 2 轮，不改行为）：新 run 接替取消旧 run
-    // 的唯一裁决点迁入 manager，令所有连接共享同一临界区。
-    eprintln!(
-        "[aria-cancellation] workspace handler_run_supersede trigger=handler_run_supersede session_id={} kind={:?}",
-        session_id, run_kind
-    );
+    // keep the supersede hand-off below. P1 WIGA Task 5：auto 认领
+    // （ClaimIfIdle）不走本段——supersede 只属于显式 human/driver 重跑。
+    if matches!(start_mode, ProviderRunStartMode::SupersedeFromAttachment) {
+        // 诊断打点（claude×轻 握手谜团第 2 轮，不改行为）：新 run 接替取消旧 run
+        // 的唯一裁决点迁入 manager，令所有连接共享同一临界区。
+        eprintln!(
+            "[aria-cancellation] workspace handler_run_supersede trigger=handler_run_supersede session_id={} kind={:?}",
+            session_id, run_kind
+        );
 
-    // socket 发起的 supersede 在进入 engine 锁前原子核验 attachment epoch；已被
-    // 接管的 stale driver 会在触碰 active run 前返回 STALE_DRIVER_LEASE。
-    manager
-        .abort_active_run_from_attachment(connection_id.as_deref())
-        .await?;
+        // socket 发起的 supersede 在进入 engine 锁前原子核验 attachment epoch；已被
+        // 接管的 stale driver 会在触碰 active run 前返回 STALE_DRIVER_LEASE。
+        manager
+            .abort_active_run_from_attachment(connection_id.as_deref())
+            .await?;
+    }
     let provider_name = {
         let engine = engine.lock().await;
         match &run_kind {
@@ -131,9 +172,21 @@ pub(crate) async fn spawn_provider_run_from_handler(
         let engine = engine.lock().await;
         engine.active_timeline_node_id()
     };
-    let (run_id, run_token, run_cancel, command_rx, _node_id) = manager
-        .start_run_from_attachment(connection_id.as_deref(), run_kind.clone(), target_node_id)
-        .await?;
+    let registered = match start_mode {
+        ProviderRunStartMode::SupersedeFromAttachment => manager
+            .start_run_from_attachment(connection_id.as_deref(), run_kind.clone(), target_node_id)
+            .await
+            .map(Some)?,
+        ProviderRunStartMode::ClaimIfIdle => {
+            manager
+                .try_start_run_if_idle(run_kind.clone(), target_node_id)
+                .await?
+        }
+    };
+    let Some((run_id, run_token, run_cancel, command_rx, _node_id)) = registered else {
+        // 认领窗口内活 run 已被他人启动：不 supersede，交由其持有者驱动。
+        return Ok(false);
+    };
     let run_label = format!("run-{run_id}");
     // provider drive 期标记（idle 关闭守卫扩展）：从 run 任务启动到结束，该 session
     // 的 idle 守卫都不主动关连接；run 所有权已由 manager 跨 socket 保存。
@@ -1190,5 +1243,5 @@ pub(crate) async fn spawn_provider_run_from_handler(
         manager_for_task.finish_run(run_token).await;
     });
 
-    Ok(())
+    Ok(true)
 }

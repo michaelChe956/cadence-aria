@@ -13,7 +13,8 @@ use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::locking::with_exclusive_lock;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::models::automation::{
-    EnrollmentError, EnrollmentWriteCommand, IssueAutomationEnrollment, PreparedPlanIntent,
+    EnrollmentError, EnrollmentWriteCommand, IssueAutomationEnrollment, PlanGenerationIntent,
+    PlanGenerationPhase, PreparedPlanIntent,
 };
 
 /// issue 级 enrollment 的唯一持久入口；所有写路径都在目标 JSON 的伴生文件锁内
@@ -245,6 +246,112 @@ impl IssueAutomationStore {
         resolve_ensure(resolution)
     }
 
+    /// P1 WIGA Task 5：认领 plan 生成动作检查点。在 enrollment 文件锁内从
+    /// 当前 enrollment 冻结身份（含显式绑定 plan/session），首次落盘
+    /// `automation-generation-intent.json`（phase=Claimed）；既存检查点身份
+    /// 一致按其 phase 返回，身份漂移（换源重开等）fail-closed Conflict。
+    pub fn claim_plan_generation(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        enrollment_id: &str,
+    ) -> Result<PlanGenerationIntent, EnrollmentError> {
+        let path = self.enrollment_path(project_id, issue_id)?;
+        let resolution = with_exclusive_lock(&path, || {
+            let Some(saved) = read_optional_enrollment(&path)? else {
+                return Ok(GenerationResolution::Missing);
+            };
+            if !saved.enabled || saved.enrollment_id != enrollment_id {
+                return Ok(GenerationResolution::Conflict {
+                    current_revision: Some(saved.policy_revision),
+                });
+            }
+            let (Some(plan_id), Some(session_id)) =
+                (saved.plan_id.clone(), saved.session_id.clone())
+            else {
+                return Ok(GenerationResolution::InvalidScope(
+                    "plan generation requires a fully bound enrollment".to_string(),
+                ));
+            };
+            let derived = PlanGenerationIntent {
+                enrollment_id: saved.enrollment_id.clone(),
+                action_key: PlanGenerationIntent::action_key_for(
+                    &saved.enrollment_id,
+                    &plan_id,
+                ),
+                plan_id,
+                session_id,
+                source: saved.source.clone(),
+                options: saved.options.clone(),
+                logical_repository_id: saved.logical_repository_id,
+                phase: PlanGenerationPhase::Claimed,
+            };
+            let intent_path = path.with_file_name("automation-generation-intent.json");
+            if intent_path.metadata().is_ok() {
+                let existing: PlanGenerationIntent = read_json(&intent_path)?;
+                if !existing.same_identity(&derived) {
+                    return Ok(GenerationResolution::Conflict {
+                        current_revision: Some(saved.policy_revision),
+                    });
+                }
+                return Ok(GenerationResolution::Ready(existing));
+            }
+            write_json(&intent_path, &derived)?;
+            Ok(GenerationResolution::Ready(derived))
+        })?;
+        resolve_generation(resolution)
+    }
+
+    /// P1 WIGA Task 5：推进检查点 phase（只能在身份一致的前置检查点上推进）。
+    pub fn mark_plan_generation_phase(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        enrollment_id: &str,
+        phase: PlanGenerationPhase,
+    ) -> Result<PlanGenerationIntent, EnrollmentError> {
+        let path = self.enrollment_path(project_id, issue_id)?;
+        let resolution = with_exclusive_lock(&path, || {
+            let Some(saved) = read_optional_enrollment(&path)? else {
+                return Ok(GenerationResolution::Missing);
+            };
+            if !saved.enabled || saved.enrollment_id != enrollment_id {
+                return Ok(GenerationResolution::Conflict {
+                    current_revision: Some(saved.policy_revision),
+                });
+            }
+            let intent_path = path.with_file_name("automation-generation-intent.json");
+            if intent_path.metadata().is_err() {
+                return Ok(GenerationResolution::InvalidScope(
+                    "plan generation checkpoint is missing".to_string(),
+                ));
+            }
+            let mut existing: PlanGenerationIntent = read_json(&intent_path)?;
+            let derived = PlanGenerationIntent {
+                enrollment_id: saved.enrollment_id.clone(),
+                action_key: PlanGenerationIntent::action_key_for(
+                    &saved.enrollment_id,
+                    existing.plan_id.as_str(),
+                ),
+                plan_id: existing.plan_id.clone(),
+                session_id: existing.session_id.clone(),
+                source: saved.source.clone(),
+                options: saved.options.clone(),
+                logical_repository_id: saved.logical_repository_id,
+                phase: existing.phase,
+            };
+            if !existing.same_identity(&derived) {
+                return Ok(GenerationResolution::Conflict {
+                    current_revision: Some(saved.policy_revision),
+                });
+            }
+            existing.phase = phase;
+            write_json(&intent_path, &existing)?;
+            Ok(GenerationResolution::Ready(existing))
+        })?;
+        resolve_generation(resolution)
+    }
+
     /// P0 1.2（REQ-WIGA-08）：按同一精确绑定从 durable 事实计算会话归属——
     /// 仅 enrollment 显式绑定的 session 才是 server；无 enrollment/未绑定/
     /// 已关闭一律 client，关闭的绑定保留 enrollment_id/revision 供前端退位。
@@ -352,6 +459,27 @@ fn resolve_ensure(
         }
         EnsurePlanResolution::Missing => Err(EnrollmentError::NotFound),
         EnsurePlanResolution::Failed(error) => Err(error),
+    }
+}
+
+/// `claim_plan_generation`/`mark_plan_generation_phase` 的锁内判定。
+enum GenerationResolution {
+    Ready(PlanGenerationIntent),
+    Conflict { current_revision: Option<u64> },
+    Missing,
+    InvalidScope(String),
+}
+
+fn resolve_generation(
+    resolution: GenerationResolution,
+) -> Result<PlanGenerationIntent, EnrollmentError> {
+    match resolution {
+        GenerationResolution::Ready(intent) => Ok(intent),
+        GenerationResolution::Conflict { current_revision } => {
+            Err(EnrollmentError::Conflict { current_revision })
+        }
+        GenerationResolution::Missing => Err(EnrollmentError::NotFound),
+        GenerationResolution::InvalidScope(reason) => Err(EnrollmentError::InvalidScope(reason)),
     }
 }
 
@@ -1104,6 +1232,101 @@ mod tests {
         write_json(&enrollment_file, &other).unwrap();
         let error = store
             .ensure_plan_binding("project_1", "issue_1", "another-enrollment", |_, _| Ok(()))
+            .unwrap_err();
+        assert!(matches!(error, EnrollmentError::Conflict { .. }));
+    }
+
+    /// P1 Task 5：生成检查点——首次认领 Claimed；EngineStarted 后重复认领
+    /// 原样返回（进程重建按 phase 分诊）；换源重开身份漂移 fail-closed。
+    #[test]
+    fn issue_automation_store_plan_generation_checkpoint_phases_and_conflicts() {
+        use crate::product::models::automation::{PlanGenerationPhase, PlanGenerationIntent};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(tmp.path());
+        let store = IssueAutomationStore::new(paths.clone());
+        let enrolled = store
+            .compare_and_set(
+                "project_1",
+                "issue_1",
+                None,
+                enable("human-choice-1", logical_repo(1)),
+            )
+            .unwrap();
+        store
+            .bind_plan("project_1", "issue_1", 1, "plan_bound", "session_bound")
+            .unwrap();
+
+        // 未绑定时拒绝认领。
+        let unbound_dir = tempfile::tempdir().unwrap();
+        let unbound_store = IssueAutomationStore::new(ProductAppPaths::new(unbound_dir.path()));
+        let unbound = unbound_store
+            .compare_and_set("project_2", "issue_1", None, enable("k", logical_repo(1)))
+            .unwrap();
+        let error = unbound_store
+            .claim_plan_generation("project_2", "issue_1", &unbound.enrollment_id)
+            .unwrap_err();
+        assert!(matches!(error, EnrollmentError::InvalidScope(_)));
+
+        let claimed = store
+            .claim_plan_generation("project_1", "issue_1", &enrolled.enrollment_id)
+            .unwrap();
+        assert_eq!(claimed.phase, PlanGenerationPhase::Claimed);
+        assert_eq!(claimed.plan_id, "plan_bound");
+        assert_eq!(claimed.session_id, "session_bound");
+        assert_eq!(
+            claimed.action_key,
+            PlanGenerationIntent::action_key_for(&enrolled.enrollment_id, "plan_bound")
+        );
+
+        // 重复认领幂等返回既存检查点（含已推进 phase）。
+        store
+            .mark_plan_generation_phase(
+                "project_1",
+                "issue_1",
+                &enrolled.enrollment_id,
+                PlanGenerationPhase::EngineStarted,
+            )
+            .unwrap();
+        let resumed = store
+            .claim_plan_generation("project_1", "issue_1", &enrolled.enrollment_id)
+            .unwrap();
+        assert_eq!(resumed.phase, PlanGenerationPhase::EngineStarted);
+
+        // 禁用/异 enrollment_id 拒绝推进。
+        let error = store
+            .mark_plan_generation_phase(
+                "project_1",
+                "issue_1",
+                "another-enrollment",
+                PlanGenerationPhase::ProviderDispatched,
+            )
+            .unwrap_err();
+        assert!(matches!(error, EnrollmentError::Conflict { .. }));
+
+        // Disable → 异 payload 重开：派生身份漂移 → 认领 fail-closed。
+        let bound_revision = store.get("project_1", "issue_1").unwrap().unwrap().policy_revision;
+        store
+            .compare_and_set(
+                "project_1",
+                "issue_1",
+                Some(bound_revision),
+                EnrollmentWriteCommand::Disable,
+            )
+            .unwrap();
+        let disabled_revision = store.get("project_1", "issue_1").unwrap().unwrap().policy_revision;
+        let mut other_options = options();
+        other_options.review_rounds = 2;
+        store
+            .compare_and_set(
+                "project_1",
+                "issue_1",
+                Some(disabled_revision),
+                enable_with_options("human-choice-1", logical_repo(1), other_options),
+            )
+            .unwrap();
+        let error = store
+            .claim_plan_generation("project_1", "issue_1", &enrolled.enrollment_id)
             .unwrap_err();
         assert!(matches!(error, EnrollmentError::Conflict { .. }));
     }

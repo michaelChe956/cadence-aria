@@ -87,6 +87,15 @@ pub struct ActiveRun {
     pub run_incarnation: String,
 }
 
+/// test-only：活跃 run 的可比对快照（token/run_incarnation）——P1 Task 5
+/// 自动认领不 supersede 断言专用；不进入生产接口。
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveRunRefForTest {
+    pub token: u64,
+    pub run_incarnation: String,
+}
+
 /// 一个 durable workspace session 的唯一运行期所有者。
 ///
 /// provider task 会在其整个生命周期中持有 engine 锁。因此 attach 不能等待该锁：它先

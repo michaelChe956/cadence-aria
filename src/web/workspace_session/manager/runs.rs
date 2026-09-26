@@ -206,6 +206,70 @@ impl WorkspaceSessionManager {
         }
     }
 
+    /// P1 WIGA Task 5（REQ-WIGA-03）：auto 认领专用非 superseding 启动。
+    /// 同一 manager 临界区内复核 active run：已有活 run（任何来源）返回
+    /// `None` 只观察，绝不取消既有 run/claims；空闲才登记新 run。与
+    /// `start_run_from_attachment` 的显式 supersede 语义互不影响。
+    pub async fn try_start_run_if_idle(
+        &self,
+        kind: ProviderRunKind,
+        requested_node_id: Option<String>,
+    ) -> Result<
+        Option<(
+            u64,
+            u64,
+            CancellationToken,
+            mpsc::Receiver<ProviderCommand>,
+            Option<String>,
+        )>,
+        String,
+    > {
+        let (command_tx, command_rx) = mpsc::channel(8);
+        let cancel = CancellationToken::new();
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.active_run.is_some() {
+            return Ok(None);
+        }
+        state.next_run_id += 1;
+        let run_id = state.next_run_id;
+        let token = crate::web::workspace_ws_handler::NEXT_ACTIVE_RUN_TOKEN
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let node_id = requested_node_id;
+        let lease_epoch = state.lease.epoch;
+        state.active_run = Some(ActiveRun {
+            id: run_id,
+            token,
+            node_id: node_id.clone(),
+            kind,
+            cancel: cancel.clone(),
+            command_tx,
+            pending_choices: Arc::new(StdMutex::new(Vec::new())),
+            lease_epoch,
+            run_incarnation: uuid::Uuid::new_v4().to_string(),
+        });
+        state
+            .journal
+            .mark_run_started(self.next_event_seq.load(Ordering::Relaxed));
+        Ok(Some((run_id, token, cancel, command_rx, node_id)))
+    }
+
+    /// test-only：活跃 run 的可比对快照（token/run_incarnation），供自动认领
+    /// 不 supersede 断言；不进入生产接口。
+    #[cfg(test)]
+    pub fn active_run_ref_for_test(&self) -> Option<super::ActiveRunRefForTest> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.active_run.as_ref().map(|run| super::ActiveRunRefForTest {
+            token: run.token,
+            run_incarnation: run.run_incarnation.clone(),
+        })
+    }
+
     pub fn is_active_run(&self) -> bool {
         self.state
             .lock()

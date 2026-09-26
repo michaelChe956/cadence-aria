@@ -340,3 +340,92 @@ fn frame_session_state_pending(
         pending_choice_requests.push(request);
     }
 }
+
+// ---- P1 WIGA Task 5：自动生成认领不得 supersede 活 run ----
+
+fn bound_enrollment(
+    enrollment_id: &str,
+    plan_id: &str,
+) -> crate::product::models::automation::IssueAutomationEnrollment {
+    crate::product::models::automation::IssueAutomationEnrollment {
+        enrollment_id: enrollment_id.to_string(),
+        selection_key: "human-choice-1".to_string(),
+        project_id: "project_claim".to_string(),
+        issue_id: "issue_claim".to_string(),
+        enabled: true,
+        policy_revision: 2,
+        source: crate::product::models::automation::EnrollmentSource {
+            stories: Vec::new(),
+            designs: Vec::new(),
+        },
+        options: crate::product::models::automation::EnrollmentOptions {
+            author_provider: crate::product::models::ProviderName::Fake,
+            reviewer_provider: crate::product::models::ProviderName::Fake,
+            review_rounds: 1,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+            plan_options: crate::product::models::IssueWorkItemPlanOptions {
+                include_integration_tests: true,
+                include_e2e_tests: false,
+                force_frontend_backend_split: false,
+                require_execution_plan_confirm: false,
+            },
+        },
+        logical_repository_id: crate::product::logical_codebase::LogicalRepositoryId(
+            uuid::Uuid::nil(),
+        ),
+        prepare_intent_id: enrollment_id.to_string(),
+        plan_id: Some(plan_id.to_string()),
+        session_id: Some("session_auto_live".to_string()),
+        created_at: "2026-09-27T00:00:00Z".to_string(),
+        updated_at: "2026-09-27T00:00:00Z".to_string(),
+    }
+}
+
+async fn state_with_bound_enrollment(
+    manager: &Arc<WorkspaceSessionManager>,
+    _enrollment_id: &str,
+    _plan_id: &str,
+) -> crate::web::state::WebAppState {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_path_buf();
+    FIXTURE_ROOTS.lock().unwrap().push(tmp);
+    let state = crate::web::state::WebAppState::new(
+        root.clone(),
+        crate::web::runtime::WebRuntime::new_fake(root),
+    );
+    // 预注册 claim_manager 构造的 manager：start_plan_generation_once 经同一
+    // registry 观察，不触发磁盘重建工厂。
+    let preregistered = manager.clone();
+    state
+        .workspace_sessions
+        .get_or_create("session_auto_live", || {
+            let preregistered = preregistered.clone();
+            async move { Ok(preregistered) }
+        })
+        .await
+        .unwrap();
+    state
+}
+
+/// REQ-WIGA-03：自动认领面对活 run 只观察（AlreadyActive），绝不调用会
+/// supersede 的入口；run token/化身保持不变。
+#[tokio::test]
+async fn automation_generation_does_not_supersede_live_run() {
+    let manager = claim_manager("session_auto_live");
+    let (token, run_incarnation) = started_claim_run(&manager).await;
+    let state = state_with_bound_enrollment(&manager, "enrollment_1", "plan_1").await;
+    let outcome = crate::web::plan_generation::start_plan_generation_once(
+        &state,
+        &bound_enrollment("enrollment_1", "plan_1"),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        outcome,
+        crate::web::plan_generation::PlanGenerationOutcome::AlreadyActive
+    ));
+    let active = manager.active_run_ref_for_test().unwrap();
+    assert_eq!(active.token, token);
+    assert_eq!(active.run_incarnation, run_incarnation);
+}

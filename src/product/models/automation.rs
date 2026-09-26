@@ -139,6 +139,50 @@ impl PreparedPlanIntent {
     }
 }
 
+/// P1 WIGA Task 5：plan 生成动作检查点（automation-generation-intent.json）。
+///
+/// 稳定动作键 `enrollment_id:plan_id:start_generation`；冻结 source/options/
+/// target/session。`Claimed` 尚无 node/ledger 可安全重启；`EngineStarted`/
+/// `ProviderDispatched` 之后进程重建无法证明外部 provider 未被触达时停在
+/// `NeedsHuman`，只供人显式恢复，绝不宣称 exactly-once。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanGenerationIntent {
+    pub enrollment_id: String,
+    pub plan_id: String,
+    pub session_id: String,
+    pub action_key: String,
+    pub source: EnrollmentSource,
+    pub options: EnrollmentOptions,
+    pub logical_repository_id: LogicalRepositoryId,
+    pub phase: PlanGenerationPhase,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanGenerationPhase {
+    Claimed,
+    EngineStarted,
+    ProviderDispatched,
+    NeedsHuman,
+}
+
+impl PlanGenerationIntent {
+    /// 冻结身份字段（不含 phase）是否一致。
+    pub fn same_identity(&self, other: &PlanGenerationIntent) -> bool {
+        self.enrollment_id == other.enrollment_id
+            && self.plan_id == other.plan_id
+            && self.session_id == other.session_id
+            && self.action_key == other.action_key
+            && self.source == other.source
+            && self.options == other.options
+            && self.logical_repository_id == other.logical_repository_id
+    }
+
+    pub fn action_key_for(enrollment_id: &str, plan_id: &str) -> String {
+        format!("{enrollment_id}:{plan_id}:start_generation")
+    }
+}
+
 /// enrollment 写入失败语义：HTTP 层按 Conflict→409 / InvalidScope→422 /
 /// NotFound→404 / Store→fail-closed 其余映射。
 #[derive(Debug, thiserror::Error)]
