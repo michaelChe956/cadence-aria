@@ -54,7 +54,7 @@
 - **THEN** 路由 SHALL 阻塞并返回能力缺失错误，不回落到 `danger-full-access` 或自动宽松模式
 
 ### Requirement: 配置来源隔离（REQ-ENV-06）
-系统 SHALL 使逻辑代码库流程的真实 provider 使用 Aria-owned、权限受控的 settings/MCP bundle；审计 user/project/local/env/子仓 MCP 合并优先级，隔离未批准的配置与凭据；记录最终 argv 与配置 digest 到 run 审计；托管 settings（managed-settings）优先级高于 Cadence 注入时列为已知 gap。**例外**：provider **自发现通道**——provider CLI 原生读取的项目级/用户级配置（项目 `.mcp.json`、`.kimi-code/mcp.json`、`.codex/config.toml` 等）——为受信任通道，**不受 Aria bundle 管控与配置来源隔离约束**；该通道的配置内容由用户负责，其带来的配置来源审计弱化为显式接受的边界。Aria 主动注入场景（注入 settings/MCP bundle 时）的管控、脱敏与审计要求维持不变。
+系统 SHALL 使逻辑代码库流程的真实 provider 使用 Aria-owned、权限受控的 settings/MCP bundle；审计 user/project/local/env/子仓 MCP 合并优先级，隔离未批准的配置与凭据；记录最终 argv 与配置 digest 到 run 审计；托管 settings（managed-settings）优先级高于 Cadence 注入时列为已知 gap。**例外（用户裁决 2026-09-04）**：provider **自发现通道**——provider CLI 原生读取的项目级/用户级配置（项目 `.mcp.json`、`.kimi-code/mcp.json`、`.codex/config.toml` 等）——为受信任通道，**不受 Aria bundle 管控与配置来源隔离约束**；该通道的配置内容由用户负责，其带来的配置来源审计弱化为显式接受的边界。Aria 主动注入场景（注入 settings/MCP bundle 时）的管控、脱敏与审计要求维持不变。
 
 #### Scenario: 真实 provider 启动
 - **WHEN** 逻辑代码库流程启动真实 provider 且 Aria 注入配置

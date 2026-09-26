@@ -74,3 +74,65 @@
 #### Scenario: 聚合根准入失败
 - **WHEN** 公共父目录为 git super-repo 或包含非成员目录/凭据/构建产物
 - **THEN** 系统 SHALL 拒绝登记并返回分类错误（准入 preflight 范围限于聚合根属性校验；索引范围构造见 REQ-IND-02）
+
+### Requirement: 登记生产 HTTP 入口
+
+登记批次能力通过生产 HTTP 端点可用：预检、提交、查询、恢复、取消，全部为同步短操作（请求内完成并返回最终或部分结果）。
+
+#### Scenario: 预检冻结快照
+- **WHEN** 调用登记预检端点提交聚合根与候选路径
+- **THEN** 服务端先执行聚合根准入校验（非 git 根、成员越界、symlink 逃逸、嵌套 worktree、根所有权冲突，返回对应 aggregate_root_* 稳定错误码），再执行候选分类；预检结果（含每候选的路径、git 根、来源身份、预检修订号）作为冻结快照持久化，返回 preflight_id；快照过期（24h）或不存在时提交返回 404 registration_preflight_not_found
+
+#### Scenario: 同步提交
+- **WHEN** 调用提交端点携带 preflight_id 与确认路径列表
+- **THEN** 服务端以冻结快照重建确认输入并同步执行 TOCTOU 复验与逐项成员登记，返回批次最终状态（completed 或 partial_failed）与单项结果；登记期间成员主 checkout 无 git 写副作用
+
+#### Scenario: 漂移语义
+- **WHEN** 提交或恢复时某成员仅预检修订号变化
+- **THEN** 该项标记 needs_attention 并跳过，批次继续
+- **WHEN** 提交或恢复时某成员路径、git 根或来源身份变化
+- **THEN** 整批中止并返回 409 registration_batch_conflict
+
+#### Scenario: manifest 首批原子创建与 root 一致性
+- **WHEN** 提交时 project 尚无 manifest
+- **THEN** 以提交的聚合根为 provider_context_root 原子创建 manifest 并登记首批成员
+- **WHEN** 提交的聚合根与既有 manifest 的 provider_context_root 不一致
+- **THEN** 返回 409 aggregate_root_mismatch，不产生任何成员变更
+
+#### Scenario: 恢复与取消
+- **WHEN** 对 partial_failed 批次调用 resume
+- **THEN** 同步重跑未完成项，漂移语义同上
+- **WHEN** 对 Queued/PartialFailed 批次调用 cancel
+- **THEN** 批次标记终态 cancelled；对已终态批次调用返回 409 registration_batch_not_cancelable
+
+### Requirement: 登记端点的前端入口
+
+多仓 project 的逻辑代码库页必须提供登记向导入口，覆盖预检分类展示、确认与同步提交。
+
+#### Scenario: 登记向导
+- **WHEN** 用户在多仓 project 的逻辑代码库页发起成员登记
+- **THEN** 向导引导：填写聚合根 → 展示候选分类（eligible/non_git/duplicate/nested/needs_attention/missing/outside_root）→ 勾选确认（勾选 needs_attention 项视为显式确认）→ 同步提交（带 loading）→ 展示批次结果与单项状态，partial_failed 可恢复
+
+### Requirement: 预检候选自动发现
+
+登记预检必须支持以聚合根自动发现候选：当请求携带 auto_discover=true 时，服务端以聚合根下直接子目录中的 git 仓库为候选执行预检分类，无需调用方逐一提供候选路径；auto_discover 缺省或 false 时行为不变。
+
+#### Scenario: 自动发现候选
+- **WHEN** 调用预检端点携带 aggregate_root 与 auto_discover=true
+- **THEN** 服务端扫描聚合根直接子目录，对其中发现的 git 仓库执行预检分类并返回带 class 的候选列表（快照照常冻结持久化）
+
+#### Scenario: 默认行为兼容
+- **WHEN** 调用预检端点未携带 auto_discover（或 false）
+- **THEN** 服务端按 candidate_paths 显式候选执行预检，行为与既有实现一致
+
+### Requirement: 登记向导候选自动发现交互
+
+登记向导在用户填入聚合根后必须自动拉取候选并以勾选列表展示，不要求用户手工输入候选路径。
+
+#### Scenario: 向导自动展示候选
+- **WHEN** 用户在向导中填入聚合根并进入预检步骤
+- **THEN** 前端以 auto_discover=true 请求预检，展示候选列表与分类徽标；eligible 候选默认勾选，needs_attention 候选需用户显式勾选（视为确认），其余分类默认不勾选
+
+#### Scenario: 手填兜底
+- **WHEN** 自动发现结果为空或用户选择手工模式
+- **THEN** 向导仍允许手工输入候选路径列表（既有交互保留）
