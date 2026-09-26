@@ -96,6 +96,7 @@ describe("PendingChoiceNotice wait hint (F-59)", () => {
     role: "author",
     created_at_ms: Date.now() - 30_000,
     first_seen_at_ms: Date.now() - 30_000,
+    expected_run_id: null,
     ...overrides,
   });
 
@@ -165,6 +166,7 @@ describe("PendingChoiceNotice wait hint (F-59)", () => {
             waitRequest({
               created_at_ms: null,
               first_seen_at_ms: Date.now() - 5_000,
+              expected_run_id: null,
             }),
           ]}
           onJump={vi.fn()}

@@ -559,6 +559,9 @@ impl WorkspaceEngine {
                         // F-59：登记时刻与发问角色随投影带出（等待提示条数据源）。
                         created_at_ms: Some(entry.created_at_ms),
                         role: entry.role.to_string(),
+                        // P0 1.3：引擎不知道 manager run 化身——由 manager
+                        // 在对外出口注入；None=旧载荷/无活跃 run。
+                        expected_run_id: None,
                     }
                 })
                 .collect();
@@ -588,6 +591,7 @@ impl WorkspaceEngine {
                 //（前端回退首见时刻）；发问方恒为 author。
                 created_at_ms: None,
                 role: "author".to_string(),
+                expected_run_id: None,
             };
             if !requests.iter().any(|request| request.id == fallback.id) {
                 requests.push(fallback);

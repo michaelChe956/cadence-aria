@@ -57,6 +57,12 @@ pub enum WsInMessage {
         free_text: Option<String>,
         #[serde(default)]
         answers: Vec<ChoiceAnswer>,
+        /// P0 1.3：claim 门面字段；缺省时 WS 层绑定当前唯一 run 并生成新
+        /// command_id（与 REST 同一门面仲裁）。
+        #[serde(default)]
+        command_id: Option<String>,
+        #[serde(default)]
+        expected_run_id: Option<String>,
     },
     RequestRevision {
         feedback: StructuredFeedback,

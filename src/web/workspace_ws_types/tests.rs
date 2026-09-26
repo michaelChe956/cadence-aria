@@ -415,6 +415,8 @@ fn choice_request_and_response_roundtrip() {
             selected_option_ids: vec!["continue".to_string()],
             free_text: Some("补充说明".to_string()),
         }],
+        command_id: None,
+        expected_run_id: None,
     };
     let json = serde_json::to_value(&input).unwrap();
     assert_eq!(json["type"], "choice_response");

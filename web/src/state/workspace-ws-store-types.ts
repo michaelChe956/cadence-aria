@@ -432,6 +432,8 @@ export interface PendingChoiceRequestProjection {
   role: string;
   created_at_ms: number | null;
   first_seen_at_ms: number | null;
+  /** P0 1.3：应答须绑定的 run 化身；null=旧载荷/无活跃 run（不猜 run）。 */
+  expected_run_id: string | null;
 }
 
 export interface WorkspaceWsState {

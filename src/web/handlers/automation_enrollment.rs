@@ -17,12 +17,12 @@ use crate::product::issue_store::IssueStore;
 use crate::product::json_store::{ProductStoreError, validate_relative_id};
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::logical_codebase::RepositoryRouting;
+use crate::product::models::LifecycleConfirmationStatus;
+use crate::product::models::WorkspaceType;
 use crate::product::models::automation::{
     EnrollmentError, EnrollmentSource, EnrollmentWriteCommand, IssueAutomationEnrollment,
 };
-use crate::product::models::LifecycleConfirmationStatus;
 use crate::product::work_item_plan_policy::RunPolicy;
-use crate::product::models::WorkspaceType;
 use crate::web::error::{ApiError, ApiResult};
 use crate::web::handlers::lifecycle::preflight::{
     SingleCandidatePreflightDecision, logical_repository_ids_for_preflight,
@@ -41,7 +41,12 @@ pub async fn put_automation_enrollment(
     validate_request_ids(&project_id, &issue_id)?;
     validate_enrollment_scope(&state, &project_id, &issue_id, &request.command)?;
     IssueAutomationStore::new(product_app_paths(&state))
-        .compare_and_set(&project_id, &issue_id, request.expected_revision, request.command)
+        .compare_and_set(
+            &project_id,
+            &issue_id,
+            request.expected_revision,
+            request.command,
+        )
         .map(Json)
         .map_err(enrollment_api_error)
 }
@@ -79,7 +84,10 @@ pub async fn post_automation_enrollment_binding(
         .map_err(product_store_api_error)?
         .ok_or_else(|| enrollment_not_found())?;
     if !enrollment.enabled {
-        return Err(enrollment_conflict(None, "automation enrollment is disabled"));
+        return Err(enrollment_conflict(
+            None,
+            "automation enrollment is disabled",
+        ));
     }
 
     // 绑定前复查授权 source 未漂移（精确 id+version，不猜 latest）。
@@ -173,8 +181,8 @@ fn validate_enrollment_scope(
     validate_confirmed_source_refs(&lifecycle, project_id, issue_id, source)?;
 
     // 自动授权仅恰一 logical repository/单 attempt（REQ-WIGA-01/02、REQ-MTG-03）。
-    let routing =
-        RepositoryRouting::load_for_issue(&paths, project_id, issue_id).map_err(product_store_api_error)?;
+    let routing = RepositoryRouting::load_for_issue(&paths, project_id, issue_id)
+        .map_err(product_store_api_error)?;
     let RepositoryRouting::Logical {
         manifest,
         selection,
@@ -188,7 +196,9 @@ fn validate_enrollment_scope(
     match preflight_single_repository_candidate(&candidate_ids) {
         SingleCandidatePreflightDecision::Eligible { repository_id }
             if repository_id == logical_repository_id.0.to_string() =>
-            Ok(()),
+        {
+            Ok(())
+        }
         SingleCandidatePreflightDecision::Eligible { .. } => Err(invalid_scope(
             "automation enrollment target must match the issue's single logical repository",
         )),
@@ -322,10 +332,9 @@ fn binding_target_not_found(kind: &str) -> ApiError {
 
 fn enrollment_api_error(error: EnrollmentError) -> ApiError {
     match error {
-        EnrollmentError::Conflict { current_revision } => enrollment_conflict(
-            current_revision,
-            "automation enrollment revision conflict",
-        ),
+        EnrollmentError::Conflict { current_revision } => {
+            enrollment_conflict(current_revision, "automation enrollment revision conflict")
+        }
         EnrollmentError::InvalidScope(reason) => invalid_scope(reason),
         EnrollmentError::NotFound => enrollment_not_found(),
         EnrollmentError::Store(error) => product_store_api_error(error),
@@ -345,23 +354,23 @@ mod tests {
         CreateStorySpecInput, CreateWorkspaceSessionInput, LifecycleStore,
         WorkItemPlanSessionOptions,
     };
+    use crate::product::logical_codebase::aggregate_index::{
+        AggregateIndexMemberSnapshot, AggregateIndexRecord, AggregateIndexStatus,
+        AggregateIndexStore,
+    };
+    use crate::product::logical_codebase::policy::AggregatePolicyArtifactStore;
     use crate::product::logical_codebase::{
         CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, IssueCodebaseSelection,
         IssueCodebaseSelectionStore, LogicalCodebaseManifest, LogicalCodebaseStore,
         LogicalRepositoryId, MemberStatus, RepositoryCheckoutId, RepositoryCheckoutRecord,
         RepositorySourceIdentity, RepositoryType,
     };
-    use crate::product::logical_codebase::aggregate_index::{
-        AggregateIndexMemberSnapshot, AggregateIndexRecord, AggregateIndexStatus,
-        AggregateIndexStore,
-    };
-    use crate::product::logical_codebase::policy::AggregatePolicyArtifactStore;
     use crate::product::models::{
         IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, LifecycleConfirmationStatus,
         ProviderName, RepositoryRecord, WorkspaceType,
     };
-    use crate::product::work_item_plan_policy::{RunPolicy, WorkItemPlanFlowKind};
     use crate::product::project_store::{CreateProjectInput, ProjectStore};
+    use crate::product::work_item_plan_policy::{RunPolicy, WorkItemPlanFlowKind};
     use crate::web::app::build_web_router;
     use crate::web::runtime::WebRuntime;
     use crate::web::state::WebAppState;
@@ -416,7 +425,12 @@ mod tests {
             .into_iter()
             .take(member_count)
             .enumerate()
-            .map(|(index, name)| (LogicalRepositoryId(uuid::Uuid::from_u128(index as u128 + 1)), name))
+            .map(|(index, name)| {
+                (
+                    LogicalRepositoryId(uuid::Uuid::from_u128(index as u128 + 1)),
+                    name,
+                )
+            })
             .collect::<Vec<_>>();
         if !members.is_empty() {
             seed_logical_codebase(&paths, &members);
@@ -612,7 +626,11 @@ mod tests {
             .unwrap();
     }
 
-    fn enrollment_body(fixture: &Fixture, story_version: u32, design_version: u32) -> serde_json::Value {
+    fn enrollment_body(
+        fixture: &Fixture,
+        story_version: u32,
+        design_version: u32,
+    ) -> serde_json::Value {
         serde_json::json!({
             "expected_revision": null,
             "command": {
@@ -648,7 +666,9 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri(format!("/api/projects/{PROJECT_ID}/issues/{ISSUE_ID}/automation-enrollment"))
+                    .uri(format!(
+                        "/api/projects/{PROJECT_ID}/issues/{ISSUE_ID}/automation-enrollment"
+                    ))
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -661,7 +681,9 @@ mod tests {
         app.clone()
             .oneshot(
                 Request::builder()
-                    .uri(format!("/api/projects/{PROJECT_ID}/issues/{ISSUE_ID}/automation-enrollment"))
+                    .uri(format!(
+                        "/api/projects/{PROJECT_ID}/issues/{ISSUE_ID}/automation-enrollment"
+                    ))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -669,12 +691,17 @@ mod tests {
             .unwrap()
     }
 
-    async fn post_binding(app: &axum::Router, body: serde_json::Value) -> axum::http::Response<Body> {
+    async fn post_binding(
+        app: &axum::Router,
+        body: serde_json::Value,
+    ) -> axum::http::Response<Body> {
         app.clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/api/projects/{PROJECT_ID}/issues/{ISSUE_ID}/automation-enrollment/binding"))
+                    .uri(format!(
+                        "/api/projects/{PROJECT_ID}/issues/{ISSUE_ID}/automation-enrollment/binding"
+                    ))
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -782,8 +809,7 @@ mod tests {
 
         // 未知 story id 同样拒绝。
         let mut body = enrollment_body(&fixture, 1, 1);
-        body["command"]["source"]["stories"][0]["id"] =
-            serde_json::json!("story_spec_9999");
+        body["command"]["source"]["stories"][0]["id"] = serde_json::json!("story_spec_9999");
         let response = put_enrollment(&app, body).await;
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         assert!(!enrollment_file_exists(&fixture));
@@ -866,8 +892,7 @@ mod tests {
         let revision = enrollment["policy_revision"].as_u64().unwrap();
 
         // AutoIfValid 会话不得代表授权（REQ-WIGA-02）→ 409。
-        let (auto_plan, auto_session) =
-            create_plan_and_session(&fixture, RunPolicy::AutoIfValid);
+        let (auto_plan, auto_session) = create_plan_and_session(&fixture, RunPolicy::AutoIfValid);
         let response = post_binding(
             &app,
             serde_json::json!({
@@ -907,10 +932,12 @@ mod tests {
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response_json(response).await["policy_revision"], bound_revision);
+        assert_eq!(
+            response_json(response).await["policy_revision"],
+            bound_revision
+        );
 
-        let (other_plan, other_session) =
-            create_plan_and_session(&fixture, RunPolicy::Interactive);
+        let (other_plan, other_session) = create_plan_and_session(&fixture, RunPolicy::Interactive);
         let response = post_binding(
             &app,
             serde_json::json!({
@@ -944,7 +971,9 @@ mod tests {
         let (old_plan, old_session) = create_plan_and_session(&fixture, RunPolicy::Interactive);
         let enable = put_enrollment(&app, enrollment_body(&fixture, 1, 1)).await;
         assert_eq!(enable.status(), StatusCode::OK);
-        let revision = response_json(enable).await["policy_revision"].as_u64().unwrap();
+        let revision = response_json(enable).await["policy_revision"]
+            .as_u64()
+            .unwrap();
         let response = post_binding(
             &app,
             serde_json::json!({

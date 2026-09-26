@@ -254,6 +254,8 @@ async fn handle_workspace_inbound_message_inner(
             selected_option_ids,
             free_text,
             answers,
+            command_id,
+            expected_run_id,
         } => {
             tracing::info!(choice_id = %id, "ws inbound choice response");
             eprintln!(
@@ -267,49 +269,81 @@ async fn handle_workspace_inbound_message_inner(
             );
             let active_run = run_context.manager.active_run().await;
             if let Some(run) = active_run {
-                if !run_context.manager.remove_pending_choice_frame(&id) {
-                    let _ = send_json_outbound(&outbound_tx, &choice_id_unmatched_error(&id)).await;
+                // P0 1.3（REQ-WIGA-05）：WS 与 REST 共用 claim 门面——缺省
+                // command_id/expected_run_id 只绑当前唯一 run；pending 帧在
+                // 回执 Delivered 后才由 manager 摘除（不再发送前移除）。
+                let answer_data: Vec<crate::cross_cutting::streaming_provider::ChoiceAnswerData> =
+                    answers
+                        .clone()
+                        .into_iter()
+                        .map(
+                            |answer| crate::cross_cutting::streaming_provider::ChoiceAnswerData {
+                                question_id: answer.question_id,
+                                selected_option_ids: answer.selected_option_ids,
+                                free_text: answer.free_text,
+                            },
+                        )
+                        .collect();
+                let request = match (command_id.clone(), expected_run_id.clone()) {
+                    (Some(command_id), Some(expected_run_id)) => {
+                        crate::web::choice_reply::ChoiceResponseRequest {
+                            command_id,
+                            expected_run_id,
+                            answers: answer_data,
+                        }
+                    }
+                    _ => match run_context
+                        .manager
+                        .bind_current_run_request(&id, answer_data)
+                    {
+                        Some(request) => request,
+                        None => {
+                            let _ =
+                                send_json_outbound(&outbound_tx, &choice_id_unmatched_error(&id))
+                                    .await;
+                            return;
+                        }
+                    },
+                };
+                if request.expected_run_id != run.run_incarnation {
+                    let err = WsOutMessage::ProtocolError {
+                        code: "CHOICE_RUN_EXPIRED".to_string(),
+                        message: format!(
+                            "ChoiceResponse id={id} targets a finished run; the pending choice must be re-answered on the current run"
+                        ),
+                        context: Some(serde_json::json!({ "id": id })),
+                    };
+                    let _ = send_json_outbound(&outbound_tx, &err).await;
                     return;
                 }
-
-                eprintln!(
-                    "[aria-choice-diag] ws forwarding choice_response to active run session={} id={}",
-                    session_id, id
-                );
-                if run
-                    .command_tx
-                    .send(ProviderCommand::ChoiceResponse {
-                        id: id.clone(),
-                        selected_option_ids: selected_option_ids.clone(),
-                        free_text: free_text.clone(),
-                        answers: answers
-                            .clone()
-                            .into_iter()
-                            .map(|answer| {
-                                crate::cross_cutting::streaming_provider::ChoiceAnswerData {
-                                    question_id: answer.question_id,
-                                    selected_option_ids: answer.selected_option_ids,
-                                    free_text: answer.free_text,
-                                }
-                            })
-                            .collect(),
-                        // P0 1.3：WS driver 应答暂不携回执；Task 7 接线
-                        // claim 门面后由 manager 注入。
-                        receipt: None,
-                    })
-                    .await
-                    .is_ok()
-                {
-                    eprintln!(
-                        "[aria-choice-diag] ws forwarded choice_response to active run session={} id={}",
-                        session_id, id
-                    );
-                    return;
+                match run_context.manager.claim_choice(&id, &request) {
+                    Ok((_, true)) => match run_context
+                        .manager
+                        .submit_claimed_choice(&id, &request)
+                        .await
+                    {
+                        Ok(_) => {
+                            eprintln!(
+                                "[aria-choice-diag] ws submitted claimed choice_response session={} id={}",
+                                session_id, id
+                            );
+                            return;
+                        }
+                        Err(error) => {
+                            let _ =
+                                send_json_outbound(&outbound_tx, &choice_claim_error(&id, &error))
+                                    .await;
+                            return;
+                        }
+                    },
+                    // 同 command 幂等重发：已认领不二发，等待 Delivered 收敛。
+                    Ok((_, false)) => return,
+                    Err(error) => {
+                        let _ = send_json_outbound(&outbound_tx, &choice_claim_error(&id, &error))
+                            .await;
+                        return;
+                    }
                 }
-                eprintln!(
-                    "[aria-choice-diag] ws failed to forward choice_response to active run session={} id={}; falling back",
-                    session_id, id
-                );
             } else {
                 eprintln!(
                     "[aria-choice-diag] ws has no active run for choice_response session={} id={}; trying text fallback follow-up",
@@ -735,4 +769,32 @@ async fn refresh_workspace_context_for_session(
     let mut refreshed = run_context.clone();
     refreshed.session_record = session_record;
     Ok(refreshed)
+}
+
+/// P0 1.3：claim 门面错误 → 既有 ProtocolError 码表（REQ-WIGA-05：
+/// Conflict/Expired 显式映射，不静默吞）。
+fn choice_claim_error(
+    id: &str,
+    error: &crate::web::workspace_session::ChoiceReplyError,
+) -> WsOutMessage {
+    use crate::web::workspace_session::ChoiceReplyError;
+    let (code, message) = match error {
+        ChoiceReplyError::Unknown => (
+            "CHOICE_ID_UNMATCHED",
+            "choice response has no matching pending choice on the current run",
+        ),
+        ChoiceReplyError::Conflict => (
+            "CHOICE_CLAIM_CONFLICT",
+            "choice response conflicts with an in-flight command for this choice",
+        ),
+        ChoiceReplyError::Expired => (
+            "CHOICE_RUN_EXPIRED",
+            "choice response targets a finished run and cannot be replayed",
+        ),
+    };
+    WsOutMessage::ProtocolError {
+        code: code.to_string(),
+        message: format!("{message} (id={id})"),
+        context: Some(serde_json::json!({ "id": id })),
+    }
 }

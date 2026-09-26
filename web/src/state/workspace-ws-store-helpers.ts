@@ -568,6 +568,10 @@ export function pendingChoiceRequestsFromSession(
           ? record.created_at_ms
           : seen?.created_at_ms ?? null,
       first_seen_at_ms: seen?.first_seen_at_ms ?? now,
+      expected_run_id:
+        typeof record.expected_run_id === "string" && record.expected_run_id.length > 0
+          ? record.expected_run_id
+          : seen?.expected_run_id ?? null,
     });
   }
   return projected;

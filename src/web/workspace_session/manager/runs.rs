@@ -116,6 +116,7 @@ impl WorkspaceSessionManager {
                 command_tx,
                 pending_choices: Arc::new(StdMutex::new(Vec::new())),
                 lease_epoch,
+                run_incarnation: uuid::Uuid::new_v4().to_string(),
             });
             state
                 .journal
@@ -123,6 +124,13 @@ impl WorkspaceSessionManager {
             (replaced_run, (run_id, token, cancel, command_rx, node_id))
         };
         if let Some(run) = replaced_run {
+            {
+                let mut state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                super::choices::retire_claims_for_run(&mut state, &run.run_incarnation);
+            }
             Self::cancel_run(&run);
         }
         Ok(run)
@@ -134,13 +142,14 @@ impl WorkspaceSessionManager {
                 .state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if state
-                .active_run
-                .as_ref()
-                .is_some_and(|run| run.token == token)
-            {
-                state.active_run = None;
-                state.journal.mark_run_terminal();
+            if let Some(run) = state.active_run.take() {
+                if run.token == token {
+                    super::choices::retire_claims_for_run(&mut state, &run.run_incarnation);
+                    state.journal.mark_run_terminal();
+                } else {
+                    // 非本人 token：恢复原 run，不误伤。
+                    state.active_run = Some(run);
+                }
             }
         }
         self.maybe_recycle().await;
@@ -153,7 +162,8 @@ impl WorkspaceSessionManager {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let run = state.active_run.take();
-            if run.is_some() {
+            if let Some(run) = run.as_ref() {
+                super::choices::retire_claims_for_run(&mut state, &run.run_incarnation);
                 state.journal.mark_run_terminal();
             }
             run

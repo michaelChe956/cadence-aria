@@ -53,6 +53,10 @@ pub struct WsPendingChoiceRequest {
     /// F-59：发问角色（author/reviewer）；旧载荷缺省按 author 对账。
     #[serde(default = "default_pending_choice_role")]
     pub role: String,
+    /// P0 1.3：应答须绑定的 run 化身（manager 注入；引擎投影/durable 基线
+    /// 无活跃 run 时缺省 None——旧载荷兼容，前端不猜 run）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_run_id: Option<String>,
 }
 
 fn default_pending_choice_role() -> String {
@@ -376,6 +380,7 @@ mod tests {
             source: "text_fallback".to_string(),
             created_at_ms: None,
             role: "author".to_string(),
+            expected_run_id: None,
         });
 
         let value = serde_json::to_value(message).unwrap();

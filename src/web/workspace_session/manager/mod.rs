@@ -22,6 +22,9 @@ use crate::web::workspace_ws_types::WsOutMessage;
 mod arbitration;
 mod attachment;
 mod choices;
+use choices::ChoiceClaimRecord;
+
+pub use choices::ChoiceReplyError;
 mod degraded_diagnostics;
 mod durable_projection;
 pub(crate) use lease_diagnostics::lease_diagnostics_path;
@@ -40,6 +43,12 @@ pub(super) struct Attachment {
 }
 
 pub(super) struct ManagerState {
+    /// P0 1.3：choice 应答 claim（短临界区登记；提交/回执在锁外）。
+    /// 键 = (run_incarnation, choice_id)。
+    pub(super) choice_claims: HashMap<(String, String), ChoiceClaimRecord>,
+    /// P0 1.3：run 终态后保留的有界 claim 状态（同 command 查询面）。
+    pub(super) finished_choice_status:
+        std::collections::VecDeque<crate::web::choice_reply::ChoiceReplyStatus>,
     /// 尚未由首条入站或宽限期裁决的连接不可接收直播帧，保证初帧/回放顺序。
     pending_attachments: HashMap<String, Attachment>,
     /// 已完成首帧或 cursor 回放裁决的连接接收直播帧。
@@ -65,6 +74,9 @@ pub struct ActiveRun {
     pub pending_choices: Arc<StdMutex<Vec<WsOutMessage>>>,
     /// 启动该 run 时的授权 epoch；角色仲裁在 Task 8 落地。
     pub lease_epoch: u64,
+    /// P0 1.3（REQ-WIGA-05）：run 化身——每次启动生成 UUID，绝不复用可
+    /// 重启归零的 id/token；choice 应答按它判旧（旧 run 一律 Expired）。
+    pub run_incarnation: String,
 }
 
 /// 一个 durable workspace session 的唯一运行期所有者。
@@ -114,6 +126,8 @@ impl WorkspaceSessionManager {
                 attachments: HashMap::new(),
                 next_run_id: 0,
                 active_run: None,
+                choice_claims: HashMap::new(),
+                finished_choice_status: std::collections::VecDeque::new(),
                 lease: LeaseState::default(),
                 journal: EventJournal::default(),
                 recovery_error: None,
@@ -161,6 +175,8 @@ impl WorkspaceSessionManager {
                 attachments: HashMap::new(),
                 next_run_id: 0,
                 active_run: None,
+                choice_claims: HashMap::new(),
+                finished_choice_status: std::collections::VecDeque::new(),
                 journal: EventJournal::default(),
                 lease: LeaseState::default(),
                 recovery_error: None,
@@ -201,7 +217,7 @@ impl WorkspaceSessionManager {
 }
 
 #[cfg(test)]
-fn test_session_record(session_id: &str) -> WorkspaceSessionRecord {
+pub(crate) fn test_session_record(session_id: &str) -> WorkspaceSessionRecord {
     WorkspaceSessionRecord {
         id: session_id.to_string(),
         project_id: "project_test".to_string(),
@@ -261,6 +277,20 @@ impl WorkspaceSessionManager {
             );
             if let WsOutMessage::SessionState { automation, .. } = frame {
                 *automation = None;
+            }
+        }
+        // P0 1.3：pending choice 投影注入当前 run 化身（引擎投影不知道
+        // manager run；无活跃 run 保持 None——旧载荷兼容，前端不猜 run）。
+        if let WsOutMessage::SessionState {
+            pending_choice_requests,
+            ..
+        } = frame
+            && let Some(incarnation) = self.active_run_incarnation()
+        {
+            for request in pending_choice_requests.iter_mut() {
+                if request.expected_run_id.is_none() {
+                    request.expected_run_id = Some(incarnation.clone());
+                }
             }
         }
     }
@@ -336,6 +366,8 @@ impl WorkspaceSessionManager {
                 attachments: HashMap::new(),
                 next_run_id: 0,
                 active_run: None,
+                choice_claims: HashMap::new(),
+                finished_choice_status: std::collections::VecDeque::new(),
                 lease: LeaseState::default(),
                 recovery_error: None,
                 journal: EventJournal::default(),
@@ -458,6 +490,8 @@ impl WorkspaceSessionManager {
                 attachments: HashMap::new(),
                 next_run_id: 0,
                 active_run: None,
+                choice_claims: HashMap::new(),
+                finished_choice_status: std::collections::VecDeque::new(),
                 lease: LeaseState::default(),
                 journal: EventJournal::default(),
                 recovery_error: None,

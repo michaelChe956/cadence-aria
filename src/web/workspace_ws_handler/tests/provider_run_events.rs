@@ -182,6 +182,7 @@ async fn provider_run_request_event_replaces_an_active_run_for_a_new_timeline_no
         .test_set_active_run(ActiveRun {
             id: 0,
             token: 0,
+            run_incarnation: uuid::Uuid::new_v4().to_string(),
             node_id: Some("old-timeline-node".to_string()),
             cancel: old_cancel.clone(),
             command_tx: old_command_tx,
@@ -294,6 +295,7 @@ async fn review_only_relay_event_yields_to_in_flight_run_review_handoff() {
         .test_set_active_run(ActiveRun {
             id: 1,
             token: 1,
+            run_incarnation: uuid::Uuid::new_v4().to_string(),
             node_id: Some("single-candidate-author-node".to_string()),
             cancel: in_flight_cancel.clone(),
             command_tx: in_flight_command_tx,
@@ -429,6 +431,7 @@ async fn handler_originated_spawn_still_supersedes_in_flight_run() {
         .test_set_active_run(ActiveRun {
             id: 0,
             token: 0,
+            run_incarnation: uuid::Uuid::new_v4().to_string(),
             node_id: Some("old-timeline-node".to_string()),
             cancel: old_cancel.clone(),
             command_tx: old_command_tx,
@@ -963,6 +966,7 @@ async fn single_candidate_author_relay_still_supersedes_in_flight_run() {
         .test_set_active_run(ActiveRun {
             id: 4242,
             token: 424_242,
+            run_incarnation: uuid::Uuid::new_v4().to_string(),
             node_id: Some("single-candidate-author-node".to_string()),
             cancel: old_cancel.clone(),
             command_tx: old_command_tx,
