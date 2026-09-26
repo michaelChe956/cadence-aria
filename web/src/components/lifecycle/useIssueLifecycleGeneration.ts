@@ -287,7 +287,7 @@ export function useIssueLifecycleGeneration({
     const stories = card.raw.story_spec_ids
       .map((storyId) => selectedColumns.story_spec.find((story) => story.id === storyId))
       .filter((story): story is Extract<LifecycleCard, { kind: "story_spec" }> =>
-        Boolean(story && story.raw.confirmation_status === "confirmed"),
+        story?.kind === "story_spec" && story.raw.confirmation_status === "confirmed",
       );
     if (stories.length !== card.raw.story_spec_ids.length) {
       throw new Error("自动化要求引用的 Story Spec 已全部确认");

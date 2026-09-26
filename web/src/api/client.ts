@@ -2,6 +2,7 @@ import type {
   ApiError,
   ArtifactContentResponse,
   ChoiceReplyStatus,
+  ChoiceResponseRequest,
   AutomationEnrollmentPutRequest,
   AutomationTarget,
   AutomationTargetQuery,
