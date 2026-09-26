@@ -347,6 +347,95 @@ mod tests {
                 .unwrap()
         }
 
+        /// 绑定 plan 名下的 session（无绑定时为空——崩溃现场观察用）。
+        fn sessions_for_bound_plan(&self) -> Vec<crate::product::models::WorkspaceSessionRecord> {
+            let binding = self
+                .automation_store()
+                .get(PROJECT_ID, ISSUE_ID)
+                .unwrap()
+                .unwrap();
+            match binding.plan_id {
+                Some(plan_id) => self
+                    .sessions()
+                    .into_iter()
+                    .filter(|session| session.entity_id == plan_id)
+                    .collect(),
+                None => Vec::new(),
+            }
+        }
+
+        /// 绑定 plan session 的 durable provider 启动账目条数。
+        fn provider_start_count(&self) -> usize {
+            let binding = self
+                .automation_store()
+                .get(PROJECT_ID, ISSUE_ID)
+                .unwrap()
+                .unwrap();
+            match binding.session_id {
+                Some(session_id) => self
+                    .lifecycle()
+                    .get_workspace_session(&session_id)
+                    .unwrap()
+                    .provider_start_ledger
+                    .len(),
+                None => 0,
+            }
+        }
+
+        /// 绑定自动化 session 的 durable 记录（重启后 RunPolicy 断言用）。
+        fn automation_session(&self) -> crate::product::models::WorkspaceSessionRecord {
+            let session_id = self
+                .automation_store()
+                .get(PROJECT_ID, ISSUE_ID)
+                .unwrap()
+                .unwrap()
+                .session_id
+                .expect("bound automation session");
+            self.lifecycle().get_workspace_session(&session_id).unwrap()
+        }
+
+        /// 「重启」：全新 WebAppState/runtime（进程替身）——内存态清零，
+        /// 只保留磁盘 durable 事实。
+        fn restart_state(&self) -> WebAppState {
+            let root = self.inner._root.path().to_path_buf();
+            WebAppState::new(
+                root.clone(),
+                crate::web::runtime::WebRuntime::new_fake(root),
+            )
+        }
+
+        /// 重启后两轮有界扫描补偿 + 一轮定向分诊，返回绑定 issue 的最终
+        /// reconcile 结果。
+        async fn restart_and_reconcile(&self) -> ReconcileOutcome {
+            let state = self.restart_state();
+            let worker = AutopilotOrchestrator::new(
+                state.clone(),
+                OrchestratorConfig {
+                    max_issues_per_tick: 32,
+                    ..Default::default()
+                },
+            );
+            worker.reconcile_all_once().await.expect("restart scan 1");
+            worker.reconcile_all_once().await.expect("restart scan 2");
+            worker
+                .reconcile(&state, PROJECT_ID, ISSUE_ID)
+                .await
+                .expect("restart targeted reconcile")
+        }
+
+        /// 等待重启后派发的 provider run 把启动账目落盘（reserve 先于任何
+        /// provider 交互，有界轮询即可）。
+        async fn await_provider_start(&self) {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while self.provider_start_count() == 0 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "provider start ledger never persisted after restart"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        }
+
         fn automation_store(&self) -> IssueAutomationStore {
             IssueAutomationStore::new(self.inner.paths.clone())
         }
@@ -455,6 +544,127 @@ mod tests {
             .unwrap();
         assert_eq!(outcome, ReconcileOutcome::NeedsHuman);
         assert_eq!(fixture.bound_plans().len(), 1);
+    }
+
+    /// P1 WIGA Task 10（2.4）：四中窗一次性中断——进程在 intent/plan/
+    /// session 落盘后、检查点 EngineStarted 落盘后崩溃，重启（全新
+    /// state/runtime）只凭 durable 事实补偿后：恰一绑定 plan/session、
+    /// provider 绝不重发（可证明窗口恰一次派发；EngineStarted 后不可证明
+    /// 则 fail-closed 人工分诊零派发）、RunPolicy 恒 Interactive
+    /// （REQ-WIGA-03、REQ-WIGA-02）。
+    #[tokio::test]
+    async fn automation_p1_crash_windows_keep_one_plan_and_never_reissue_provider() {
+        use crate::product::issue_automation_store::automation_crash_window::{self, CrashWindow};
+
+        for window in [
+            CrashWindow::AfterIntentSaved,
+            CrashWindow::AfterPlanSaved,
+            CrashWindow::AfterSessionSaved,
+            CrashWindow::AfterEngineStarted,
+        ] {
+            let fixture = OrchestratorFixture::new().await;
+            // 「进程」在窗口处崩溃：链路以错误中止，durable 停在中窗。
+            let interrupt = automation_crash_window::register(window);
+            let message = fixture
+                .worker()
+                .reconcile(&fixture.state, PROJECT_ID, ISSUE_ID)
+                .await
+                .expect_err("interrupt must abort the in-flight pass");
+            assert!(
+                message.contains("ensure enrolled plan failed")
+                    || message.contains("automation_crash_window"),
+                "{window:?}: crash must abort mid-chain, got: {message}"
+            );
+            drop(interrupt); // 崩溃即进程消失（含未触发的注册）。
+
+            // 崩溃现场逐窗核对（durable 事实，不带内存态）。
+            let binding_after_crash = fixture
+                .automation_store()
+                .get(PROJECT_ID, ISSUE_ID)
+                .unwrap()
+                .unwrap();
+            match window {
+                CrashWindow::AfterIntentSaved => {
+                    assert!(binding_after_crash.plan_id.is_none());
+                    assert!(fixture.bound_plans().is_empty());
+                    assert!(fixture.sessions().is_empty());
+                }
+                CrashWindow::AfterPlanSaved => {
+                    assert!(binding_after_crash.plan_id.is_none(), "绑定未写回");
+                    assert_eq!(fixture.bound_plans().len(), 1, "plan 已落盘");
+                    assert!(
+                        fixture.sessions_for_bound_plan().is_empty(),
+                        "session 尚未创建"
+                    );
+                }
+                CrashWindow::AfterSessionSaved => {
+                    assert!(binding_after_crash.plan_id.is_none(), "绑定未写回");
+                    let plans = fixture.bound_plans();
+                    assert_eq!(plans.len(), 1);
+                    let orphan_plan_id = plans[0].id.clone();
+                    assert_eq!(
+                        fixture
+                            .sessions()
+                            .into_iter()
+                            .filter(|session| session.entity_id == orphan_plan_id)
+                            .count(),
+                        1,
+                        "session 已落盘但绑定未写回"
+                    );
+                }
+                CrashWindow::AfterEngineStarted => {
+                    assert!(binding_after_crash.plan_id.is_some());
+                    assert_eq!(fixture.bound_plans().len(), 1);
+                    assert_eq!(fixture.sessions_for_bound_plan().len(), 1);
+                    assert_eq!(
+                        fixture.provider_start_count(),
+                        0,
+                        "崩溃先于 provider 派发"
+                    );
+                }
+            }
+
+            // 重启：全新 state/runtime 只凭 durable 事实补偿。
+            let outcome = fixture.restart_and_reconcile().await;
+            assert_eq!(fixture.bound_plans().len(), 1, "{window:?}: 恰一 plan");
+            assert_eq!(
+                fixture.sessions_for_bound_plan().len(),
+                1,
+                "{window:?}: 恰一 session"
+            );
+            assert_eq!(
+                fixture.automation_session().run_policy,
+                crate::product::work_item_plan_policy::RunPolicy::Interactive,
+                "{window:?}: 绑定 session 恒 Interactive"
+            );
+            match window {
+                // 可证明 provider 未被触达的窗口：重启后正常恰一次派发。
+                CrashWindow::AfterIntentSaved
+                | CrashWindow::AfterPlanSaved
+                | CrashWindow::AfterSessionSaved => {
+                    fixture.await_provider_start().await;
+                    assert_eq!(
+                        fixture.provider_start_count(),
+                        1,
+                        "{window:?}: 恰一次 provider 启动"
+                    );
+                }
+                // 越过 EngineStarted 后崩溃：无法证明 provider 未被触达，
+                // fail-closed 人工分诊，绝不重发。
+                CrashWindow::AfterEngineStarted => {
+                    assert_eq!(outcome, ReconcileOutcome::NeedsHuman);
+                    assert_eq!(
+                        fixture.provider_start_count(),
+                        0,
+                        "{window:?}: 不可证明时不重发 provider"
+                    );
+                    // 再次「重启」多轮补偿：仍不重发。
+                    let again = fixture.restart_and_reconcile().await;
+                    assert_eq!(again, ReconcileOutcome::NeedsHuman);
+                    assert_eq!(fixture.provider_start_count(), 0);
+                }
+            }
+        }
     }
 }
 

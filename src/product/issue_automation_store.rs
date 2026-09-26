@@ -214,6 +214,13 @@ impl IssueAutomationStore {
             } else {
                 write_json(&intent_path, &intent)?;
             }
+            // P1 WIGA Task 10：测试注入的 intent 落盘中窗（创建回调之前）。
+            #[cfg(test)]
+            if automation_crash_window::fire_once(automation_crash_window::CrashWindow::AfterIntentSaved) {
+                return Err(ProductStoreError::Io(
+                    "automation_crash_window: interrupted after intent saved".to_string(),
+                ));
+            }
             match (saved.plan_id.as_deref(), saved.session_id.as_deref()) {
                 (Some(plan), Some(session)) if plan == intent.plan_id && session == intent.session_id => {
                     return Ok(EnsurePlanResolution::Unchanged(saved));
@@ -239,6 +246,14 @@ impl IssueAutomationStore {
                 return Ok(EnsurePlanResolution::Conflict {
                     current_revision: Some(reloaded.policy_revision),
                 });
+            }
+            // P1 WIGA Task 10：测试注入的绑定 session 落盘中窗（enrollment
+            // 绑定写回之前）。
+            #[cfg(test)]
+            if automation_crash_window::fire_once(automation_crash_window::CrashWindow::AfterSessionSaved) {
+                return Err(ProductStoreError::Io(
+                    "automation_crash_window: interrupted after bound session saved".to_string(),
+                ));
             }
             bind_plan_ids_locked(&path, reloaded, &intent.plan_id, &intent.session_id)
                 .map(ensure_resolution_from_cas)
@@ -1388,5 +1403,63 @@ mod tests {
         .unwrap();
         assert_eq!(on_disk.plan_id, first.plan_id);
         assert_eq!(on_disk.session_id, first.session_id);
+    }
+}
+
+/// P1 WIGA Task 10（2.4）：自动化 plan 链四中窗的一次性中断替身。
+///
+/// 注册某窗口后，真实链路在该持久写落盘之后、下一步之前以错误中止
+/// （进程崩溃替身）；「重启」由测试以全新 `WebAppState` 只凭 durable
+/// 事实补偿来验证。仅测试构建编译，非测试二进制零代码。
+#[cfg(test)]
+pub(crate) mod automation_crash_window {
+    use std::collections::BTreeSet;
+    use std::sync::{LazyLock, Mutex};
+
+    /// 自动化链持久写边界：intent 落盘后（创建回调之前）/ 绑定 plan 落盘
+    /// 后（session 创建之前）/ 绑定 session 落盘后（enrollment 绑定写回
+    /// 之前）/ 生成检查点 EngineStarted 落盘后（provider 派发之前）。
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    pub(crate) enum CrashWindow {
+        AfterIntentSaved,
+        AfterPlanSaved,
+        AfterSessionSaved,
+        AfterEngineStarted,
+    }
+
+    static WINDOWS: LazyLock<Mutex<BTreeSet<CrashWindow>>> =
+        LazyLock::new(|| Mutex::new(BTreeSet::new()));
+
+    fn windows() -> &'static Mutex<BTreeSet<CrashWindow>> {
+        &WINDOWS
+    }
+
+    /// 注册守卫：drop（测试结束或「崩溃」）时清除未触发的注册，不跨测试泄漏。
+    pub(crate) struct CrashWindowGuard(CrashWindow);
+
+    impl Drop for CrashWindowGuard {
+        fn drop(&mut self) {
+            windows()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&self.0);
+        }
+    }
+
+    pub(crate) fn register(window: CrashWindow) -> CrashWindowGuard {
+        let inserted = windows()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(window);
+        assert!(inserted, "crash window already registered: {window:?}");
+        CrashWindowGuard(window)
+    }
+
+    /// 触发点：已注册则消费并返回 true（模拟进程在该持久写之后立即崩溃）。
+    pub(crate) fn fire_once(window: CrashWindow) -> bool {
+        windows()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&window)
     }
 }

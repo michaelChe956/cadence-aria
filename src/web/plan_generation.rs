@@ -108,6 +108,16 @@ pub async fn start_plan_generation_once(
         )
         .map_err(|error| format!("plan generation engine-start mark failed: {error}"))?;
 
+    // P1 WIGA Task 10：测试注入的 EngineStarted 中窗（provider 派发之前）：
+    // 检查点已越过 EngineStarted 而进程消失，重启后无法证明 provider 未被
+    // 触达——必须走 NeedsHuman 人工分诊，绝不重发 provider。
+    #[cfg(test)]
+    if crate::product::issue_automation_store::automation_crash_window::fire_once(
+        crate::product::issue_automation_store::automation_crash_window::CrashWindow::AfterEngineStarted,
+    ) {
+        return Err("automation_crash_window: interrupted after engine started".to_string());
+    }
+
     // 共用非 superseding provider drive：manager 临界区内只认领空闲 session。
     let mut run_context = manager.provider_run_context(state.workspace_runs.clone());
     run_context.connection_id = None;

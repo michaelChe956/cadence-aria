@@ -172,6 +172,21 @@ pub fn prepare_plan_records(
             .map_err(product_store_api_error)?,
     };
 
+    // P1 WIGA Task 10：测试注入的绑定 plan 落盘中窗（session 创建之前），
+    // 仅 bound 路径可触发；manual（ids=None）不经过本窗口。
+    #[cfg(test)]
+    if ids.is_some()
+        && crate::product::issue_automation_store::automation_crash_window::fire_once(
+            crate::product::issue_automation_store::automation_crash_window::CrashWindow::AfterPlanSaved,
+        )
+    {
+        return Err(ApiError::runtime(
+            "automation_crash_window",
+            "interrupted after bound plan saved",
+            serde_json::json!({}),
+        ));
+    }
+
     let session = match ids {
         Some(ids) => lifecycle
             .create_workspace_session_bound(
