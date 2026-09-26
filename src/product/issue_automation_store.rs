@@ -82,20 +82,32 @@ impl IssueAutomationStore {
         let resolution = with_exclusive_lock(&path, || {
             let existing = read_optional_enrollment(&path)?;
             let resolution = match (&existing, &command) {
-                (Some(saved), EnrollmentWriteCommand::Enable { selection_key, source, options, logical_repository_id })
-                    if saved.enabled
-                        && saved.selection_key == *selection_key
-                        && saved.source == *source
-                        && saved.options == *options
-                        && saved.logical_repository_id == *logical_repository_id
-                        && (expected_revision.is_none()
-                            || expected_revision == Some(saved.policy_revision)) =>
-                    CasResolution::Unchanged(saved.clone()),
-                (Some(saved), _)
-                    if expected_revision != Some(saved.policy_revision) =>
-                    CasResolution::Conflict { current_revision: Some(saved.policy_revision) },
-                (Some(saved), EnrollmentWriteCommand::Disable) if !saved.enabled =>
-                    CasResolution::Unchanged(saved.clone()),
+                (
+                    Some(saved),
+                    EnrollmentWriteCommand::Enable {
+                        selection_key,
+                        source,
+                        options,
+                        logical_repository_id,
+                    },
+                ) if saved.enabled
+                    && saved.selection_key == *selection_key
+                    && saved.source == *source
+                    && saved.options == *options
+                    && saved.logical_repository_id == *logical_repository_id
+                    && (expected_revision.is_none()
+                        || expected_revision == Some(saved.policy_revision)) =>
+                {
+                    CasResolution::Unchanged(saved.clone())
+                }
+                (Some(saved), _) if expected_revision != Some(saved.policy_revision) => {
+                    CasResolution::Conflict {
+                        current_revision: Some(saved.policy_revision),
+                    }
+                }
+                (Some(saved), EnrollmentWriteCommand::Disable) if !saved.enabled => {
+                    CasResolution::Unchanged(saved.clone())
+                }
                 (None, EnrollmentWriteCommand::Disable) => CasResolution::Missing,
                 _ => apply_revision_and_write(&path, existing, command)?,
             };
@@ -122,16 +134,22 @@ impl IssueAutomationStore {
                 return Ok(CasResolution::Missing);
             };
             if expected_revision != saved.policy_revision {
-                return Ok(CasResolution::Conflict { current_revision: Some(saved.policy_revision) });
+                return Ok(CasResolution::Conflict {
+                    current_revision: Some(saved.policy_revision),
+                });
             }
             if !saved.enabled {
-                return Ok(CasResolution::Conflict { current_revision: Some(saved.policy_revision) });
+                return Ok(CasResolution::Conflict {
+                    current_revision: Some(saved.policy_revision),
+                });
             }
             match (saved.plan_id.as_deref(), saved.session_id.as_deref()) {
-                (Some(plan), Some(session)) if plan == plan_id && session == session_id =>
-                    Ok(CasResolution::Unchanged(saved)),
-                (Some(_), _) | (_, Some(_)) =>
-                    Ok(CasResolution::Conflict { current_revision: Some(saved.policy_revision) }),
+                (Some(plan), Some(session)) if plan == plan_id && session == session_id => {
+                    Ok(CasResolution::Unchanged(saved))
+                }
+                (Some(_), _) | (_, Some(_)) => Ok(CasResolution::Conflict {
+                    current_revision: Some(saved.policy_revision),
+                }),
                 (None, None) => {
                     let mut next = saved;
                     next.plan_id = Some(plan_id.to_string());
@@ -145,16 +163,67 @@ impl IssueAutomationStore {
         })?;
         resolve(resolution)
     }
+
+    /// P0 1.2（REQ-WIGA-08）：按同一精确绑定从 durable 事实计算会话归属——
+    /// 仅 enrollment 显式绑定的 session 才是 server；无 enrollment/未绑定/
+    /// 已关闭一律 client，关闭的绑定保留 enrollment_id/revision 供前端退位。
+    pub fn ownership_for_session(
+        &self,
+        record: &crate::product::models::WorkspaceSessionRecord,
+    ) -> Result<crate::product::models::automation::AutomationOwnership, ProductStoreError> {
+        self.ownership_for_ids(&record.project_id, &record.issue_id, &record.id)
+    }
+
+    /// summary 投影入口（HTTP lifecycle 列表消费）：同一核心按
+    /// (project_id, issue_id, session_id) 精确绑定计算，不另建归属口径。
+    pub fn ownership_for_ids(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        session_id: &str,
+    ) -> Result<crate::product::models::automation::AutomationOwnership, ProductStoreError> {
+        Ok(match self.get(project_id, issue_id)? {
+            None => crate::product::models::automation::AutomationOwnership::client_default(),
+            Some(enrollment) => match enrollment.session_id.as_deref() {
+                Some(bound_session) if bound_session == session_id => {
+                    crate::product::models::automation::AutomationOwnership {
+                        owner: if enrollment.enabled {
+                            crate::product::models::automation::AutomationOwner::Server
+                        } else {
+                            crate::product::models::automation::AutomationOwner::Client
+                        },
+                        enrollment_id: Some(enrollment.enrollment_id),
+                        policy_revision: Some(enrollment.policy_revision),
+                        enabled: enrollment.enabled,
+                    }
+                }
+                _ => crate::product::models::automation::AutomationOwnership::client_default(),
+            },
+        })
+    }
 }
 
-fn resolve(
-    resolution: CasResolution,
-) -> Result<IssueAutomationEnrollment, EnrollmentError> {
+fn resolve(resolution: CasResolution) -> Result<IssueAutomationEnrollment, EnrollmentError> {
     match resolution {
         CasResolution::Unchanged(saved) | CasResolution::Applied(saved) => Ok(saved),
-        CasResolution::Conflict { current_revision } => Err(EnrollmentError::Conflict { current_revision }),
+        CasResolution::Conflict { current_revision } => {
+            Err(EnrollmentError::Conflict { current_revision })
+        }
         CasResolution::Missing => Err(EnrollmentError::NotFound),
     }
+}
+
+/// 将 durable 归属注入 SessionState 帧（所有 manager 对外出口统一调用）。
+/// 读取失败由调用方决定暴露方式：HTTP 明确报错；WS 帧置 None 保持未知。
+pub fn project_session_automation(
+    frame: &mut crate::web::workspace_ws_types::WsOutMessage,
+    record: &crate::product::models::WorkspaceSessionRecord,
+    store: &IssueAutomationStore,
+) -> Result<(), ProductStoreError> {
+    if let crate::web::workspace_ws_types::WsOutMessage::SessionState { automation, .. } = frame {
+        *automation = Some(store.ownership_for_session(record)?);
+    }
+    Ok(())
 }
 
 fn read_optional_enrollment(
@@ -174,7 +243,15 @@ fn apply_revision_and_write(
 ) -> Result<CasResolution, ProductStoreError> {
     let now = now_rfc3339();
     let next = match (existing, command) {
-        (None, EnrollmentWriteCommand::Enable { selection_key, source, options, logical_repository_id }) => {
+        (
+            None,
+            EnrollmentWriteCommand::Enable {
+                selection_key,
+                source,
+                options,
+                logical_repository_id,
+            },
+        ) => {
             let enrollment_id = Uuid::new_v4().to_string();
             // prepare_intent_id 与 enrollment 同源；P0 不消费该意图。
             let prepare_intent_id = enrollment_id.clone();
@@ -196,7 +273,15 @@ fn apply_revision_and_write(
             }
         }
         // 重开（或换 payload 的启用）：保留 enrollment 身份与既有绑定，仅 revision+1。
-        (Some(mut saved), EnrollmentWriteCommand::Enable { selection_key, source, options, logical_repository_id }) => {
+        (
+            Some(mut saved),
+            EnrollmentWriteCommand::Enable {
+                selection_key,
+                source,
+                options,
+                logical_repository_id,
+            },
+        ) => {
             saved.selection_key = selection_key;
             saved.source = source;
             saved.options = options;
@@ -310,10 +395,7 @@ mod tests {
         }
     }
 
-    fn assert_conflict(
-        error: crate::product::models::automation::EnrollmentError,
-        expected: u64,
-    ) {
+    fn assert_conflict(error: crate::product::models::automation::EnrollmentError, expected: u64) {
         assert!(
             matches!(
                 error,
@@ -499,21 +581,39 @@ mod tests {
             .unwrap();
 
         let bound = store
-            .bind_plan("project_1", "issue_1", created.policy_revision, "plan_0001", "session_0001")
+            .bind_plan(
+                "project_1",
+                "issue_1",
+                created.policy_revision,
+                "plan_0001",
+                "session_0001",
+            )
             .unwrap();
         assert!(bound.policy_revision > created.policy_revision);
         let bound_revision = bound.policy_revision;
 
         // 同键重试：revision 不变，返回原值。
         let retried = store
-            .bind_plan("project_1", "issue_1", bound_revision, "plan_0001", "session_0001")
+            .bind_plan(
+                "project_1",
+                "issue_1",
+                bound_revision,
+                "plan_0001",
+                "session_0001",
+            )
             .unwrap();
         assert_eq!(retried.policy_revision, bound_revision);
         assert_eq!(retried, bound);
 
         // 重绑他者 plan 失败，绑定仍唯一。
         let error = store
-            .bind_plan("project_1", "issue_1", bound_revision, "plan_0002", "session_0002")
+            .bind_plan(
+                "project_1",
+                "issue_1",
+                bound_revision,
+                "plan_0002",
+                "session_0002",
+            )
             .unwrap_err();
         assert_conflict(error, bound_revision);
         let current = store.get("project_1", "issue_1").unwrap().unwrap();
@@ -521,10 +621,18 @@ mod tests {
         assert_eq!(current.session_id.as_deref(), Some("session_0001"));
 
         // 缺失 enrollment / 旧 revision 拒绝绑定。
-        let error = store.bind_plan("project_1", "issue_9", 1, "plan_0001", "session_0001").unwrap_err();
+        let error = store
+            .bind_plan("project_1", "issue_9", 1, "plan_0001", "session_0001")
+            .unwrap_err();
         assert!(matches!(error, EnrollmentError::NotFound));
         let error = store
-            .bind_plan("project_1", "issue_1", created.policy_revision, "plan_0001", "session_0001")
+            .bind_plan(
+                "project_1",
+                "issue_1",
+                created.policy_revision,
+                "plan_0001",
+                "session_0001",
+            )
             .unwrap_err();
         assert_conflict(error, bound_revision);
     }

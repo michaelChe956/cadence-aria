@@ -1,4 +1,4 @@
-import type { UsageReportPayload } from "../api/types/workspace";
+import type { AutomationOwnership, UsageReportPayload } from "../api/types/workspace";
 import type {
   ProviderPermissionMode,
   WorkspaceProviderName,
@@ -508,6 +508,12 @@ export interface WorkspaceWsState {
   pendingReviewerSummary: { verdict: string; points: string[] } | null;
   humanGateTurn: HumanGateTurnState | null;
   planRepair: PlanRepairSessionSnapshot | null;
+  /**
+   * P0 1.2（REQ-WIGA-08）：durable automation 归属（与 REST summary 同形）。
+   * null=未知（首帧未到/服务端读取失败省略），不与 client 混淆——D6 以
+   * owner!=="client" 退位发令。
+   */
+  automation: AutomationOwnership | null;
 
   snapshotGateIdentity: string | null;
   snapshotGateOpenedAt: string | null;
@@ -555,6 +561,8 @@ export interface WorkspaceSessionStatePayload {
   plan_repair?: PlanRepairSessionSnapshot | null;
   /** F-59：挂起 choice 全量投影（含 role/created_at_ms）。 */
   pending_choice_requests?: unknown;
+  /** P0 1.2：durable automation 归属；缺省=未知（store 保持 null）。 */
+  automation?: AutomationOwnership | null;
 }
 
 export interface WorkspaceWsActions {

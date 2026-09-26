@@ -791,6 +791,7 @@ fn session_state_artifact_accepts_markdown_payload() {
         mechanical_report_ref: None,
         publication_provenance_ref: None,
         pending_choice_requests: Vec::new(),
+        automation: None,
     };
     let json = serde_json::to_value(state).unwrap();
     assert_eq!(json["artifact"]["markdown"], "# Story");

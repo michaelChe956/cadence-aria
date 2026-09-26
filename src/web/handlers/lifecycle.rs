@@ -400,10 +400,19 @@ pub async fn issue_lifecycle(
         })
         .collect::<ApiResult<Vec<_>>>()?;
 
+    // P0 1.2（REQ-WIGA-08）：summary 列表同源注入 durable automation 归属；
+    // 读取失败按 HTTP 显式错误传播，不伪 client。
+    let automation_store =
+        crate::product::issue_automation_store::IssueAutomationStore::new(app_paths.clone());
     let workspace_sessions = workspace_sessions
         .iter()
-        .map(workspace_session_summary_dto)
-        .collect();
+        .map(|summary| {
+            let automation = automation_store
+                .ownership_for_ids(&summary.project_id, &summary.issue_id, &summary.id)
+                .map_err(product_store_api_error)?;
+            Ok(workspace_session_summary_dto(summary, automation))
+        })
+        .collect::<ApiResult<Vec<_>>>()?;
 
     let delivery_summary = issue_delivery_summary_dto(
         coding_store
@@ -514,9 +523,13 @@ pub async fn generate_story_specs(
         .map_err(product_store_api_error)?;
 
     let story_dto = story_spec_dto(&lifecycle, &story, Some(session.id.as_str()))?;
+    let automation =
+        crate::product::issue_automation_store::IssueAutomationStore::new(app_paths.clone())
+            .ownership_for_session(&session)
+            .map_err(product_store_api_error)?;
     Ok(Json(GenerateStorySpecsResponse {
         story_specs: vec![story_dto],
-        workspace_session: workspace_session_dto(session),
+        workspace_session: workspace_session_dto(session, automation),
     }))
 }
 
@@ -603,9 +616,13 @@ pub async fn generate_design_specs(
         .map_err(product_store_api_error)?;
 
     let design_dto = design_spec_dto(&lifecycle, &design, Some(session.id.as_str()))?;
+    let automation =
+        crate::product::issue_automation_store::IssueAutomationStore::new(app_paths.clone())
+            .ownership_for_session(&session)
+            .map_err(product_store_api_error)?;
     Ok(Json(GenerateDesignSpecsResponse {
         design_specs: vec![design_dto],
-        workspace_session: workspace_session_dto(session),
+        workspace_session: workspace_session_dto(session, automation),
     }))
 }
 
@@ -771,6 +788,10 @@ pub async fn prepare_work_item_plan(
         .compute_plan_group_projection(&plan.project_id, &plan.issue_id, &plan.id)
         .map_err(product_store_api_error)
         .map(plan_group_projection_dto)?;
+    let automation =
+        crate::product::issue_automation_store::IssueAutomationStore::new(app_paths.clone())
+            .ownership_for_session(&session)
+            .map_err(product_store_api_error)?;
     Ok(Json(PrepareWorkItemPlanResponse {
         work_item_plan: issue_work_item_plan_detail_dto(
             &plan,
@@ -782,7 +803,7 @@ pub async fn prepare_work_item_plan(
                 Some(&session.id),
             ),
         ),
-        workspace_session: workspace_session_dto(session),
+        workspace_session: workspace_session_dto(session, automation),
     }))
 }
 

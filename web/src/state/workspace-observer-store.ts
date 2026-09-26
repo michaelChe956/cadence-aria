@@ -403,6 +403,9 @@ export function observerStateFromSessionState(
     stage: message.stage,
     sessionStatus: message.session_status,
     flowKind: message.flow_kind,
+    // P0 1.2（REQ-WIGA-08）：automation 原样透传；缺省=未知（null），D6 不从
+    // stopPoints/run_policy 猜测 owner。
+    automation: (message as { automation?: WorkspaceWsState["automation"] }).automation ?? null,
     humanGateSnapshot: message.human_gate_snapshot ?? null,
     humanGateTurn: null,
     planRepair: message.plan_repair ?? null,

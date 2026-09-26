@@ -26,6 +26,7 @@ function summary(
     review_rounds: 1,
     superpowers_enabled: false,
     openspec_enabled: false,
+    automation: { owner: "client", enrollment_id: null, policy_revision: null, enabled: false },
   };
 }
 
@@ -700,4 +701,73 @@ describe("workspace observer store", () => {
     )).toBe(false);
   });
 
+});
+
+describe("automation ownership projection (P0 1.2)", () => {
+  const baseSnapshot = {
+    type: "session_state",
+    session_id: "session_auto_1",
+    workspace_type: "work_item_plan",
+    stage: "running",
+    superpowers_enabled: false,
+    openspec_enabled: false,
+    messages: [],
+    checkpoints: [],
+    artifact: null,
+    providers: { author: "claude_code", reviewer: null },
+    timeline_nodes: [],
+    active_node_id: null,
+    artifact_versions: [],
+    timeline_node_details: {},
+    active_run_id: null,
+    human_presentation_revisions: [],
+    session_status: "running",
+    flow_kind: "single_candidate",
+    run_policy: "interactive",
+    run_history: {
+      seen_fingerprints: [],
+      repairs_used: 0,
+      manual_repairs_used: 0,
+      transitions_used: 0,
+      initial_review_count: 0,
+      verification_review_count: 0,
+    },
+  } as const;
+
+  it("projects server ownership verbatim from session_state automation", () => {
+    const state = observerStateFromSessionState({
+      ...baseSnapshot,
+      automation: {
+        owner: "server",
+        enrollment_id: "en-1",
+        policy_revision: 2,
+        enabled: true,
+      },
+    } as unknown as Parameters<typeof observerStateFromSessionState>[0]);
+    expect(state.automation?.owner).toBe("server");
+    expect(state.automation?.policy_revision).toBe(2);
+    expect(state.automation?.enabled).toBe(true);
+  });
+
+  it("keeps ownership unknown (null) when automation is absent", () => {
+    const state = observerStateFromSessionState({
+      ...baseSnapshot,
+    } as unknown as Parameters<typeof observerStateFromSessionState>[0]);
+    expect(state.automation).toBeNull();
+  });
+
+  it("projects disabled enrollment as client with revision", () => {
+    const state = observerStateFromSessionState({
+      ...baseSnapshot,
+      automation: {
+        owner: "client",
+        enrollment_id: "en-1",
+        policy_revision: 3,
+        enabled: false,
+      },
+    } as unknown as Parameters<typeof observerStateFromSessionState>[0]);
+    expect(state.automation?.owner).toBe("client");
+    expect(state.automation?.policy_revision).toBe(3);
+    expect(state.automation?.enabled).toBe(false);
+  });
 });

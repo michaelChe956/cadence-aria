@@ -4,6 +4,17 @@ use super::support::*;
 use super::*;
 use crate::product::workspace_engine::{HttpConfirmDisposition, workspace_stage_for_status};
 
+/// P0 1.2（REQ-WIGA-08）：HTTP 出口统一以 durable enrollment 计算会话归属；
+/// 读取失败显式报错（product_store_api_error），绝不伪 client。
+fn session_automation_ownership(
+    state: &WebAppState,
+    session: &crate::product::models::WorkspaceSessionRecord,
+) -> ApiResult<crate::product::models::automation::AutomationOwnership> {
+    crate::product::issue_automation_store::IssueAutomationStore::new(product_app_paths(state))
+        .ownership_for_session(session)
+        .map_err(product_store_api_error)
+}
+
 pub async fn workspace_session_message(
     State(state): State<WebAppState>,
     Path(session_id): Path<String>,
@@ -13,7 +24,8 @@ pub async fn workspace_session_message(
     let session = LifecycleStore::new(product_app_paths(&state))
         .append_workspace_message(&session_id, request.role, request.content)
         .map_err(product_store_api_error)?;
-    Ok(Json(workspace_session_dto(session)))
+    let automation = session_automation_ownership(&state, &session)?;
+    Ok(Json(workspace_session_dto(session, automation)))
 }
 
 pub async fn workspace_session_run_next(
@@ -47,7 +59,8 @@ pub async fn workspace_session_run_next(
                 json!({"details": error.details}),
             )
         })?;
-    Ok(Json(workspace_session_dto(output.session)))
+    let automation = session_automation_ownership(&state, &output.session)?;
+    Ok(Json(workspace_session_dto(output.session, automation)))
 }
 
 pub async fn workspace_session_takeover(
@@ -68,8 +81,9 @@ pub async fn workspace_session_takeover(
                 json!({"parent_session_id": session_id}),
             )
         })?;
+    let automation = session_automation_ownership(&state, &child)?;
     Ok(Json(WorkspaceSessionTakeoverDto {
-        workspace_session: workspace_session_dto(child),
+        workspace_session: workspace_session_dto(child, automation),
         parent_session_id: event.parent_session_id,
         takeover_event_id: event.id,
     }))
@@ -190,7 +204,8 @@ pub async fn workspace_session_confirm(
             let current = lifecycle
                 .get_workspace_session(&session_id)
                 .map_err(product_store_api_error)?;
-            return Ok(Json(workspace_session_dto(current)));
+            let automation = session_automation_ownership(&state, &current)?;
+            return Ok(Json(workspace_session_dto(current, automation)));
         }
         HttpConfirmDisposition::Rejected { stage } => {
             return Err(ApiError::runtime(
@@ -203,7 +218,8 @@ pub async fn workspace_session_confirm(
             let current = lifecycle
                 .get_workspace_session(&session_id)
                 .map_err(product_store_api_error)?;
-            return Ok(Json(workspace_session_dto(current)));
+            let automation = session_automation_ownership(&state, &current)?;
+            return Ok(Json(workspace_session_dto(current, automation)));
         }
         // change plan-compile-gate-visibility（Task 3）：WorkItemPlan 批次确认门由引擎在本
         // 裁决内落 Confirmed（plan 确认 + 子 WorkItem 会话 + stage→Completed + Completed
@@ -216,7 +232,8 @@ pub async fn workspace_session_confirm(
             let current = lifecycle
                 .get_workspace_session(&session_id)
                 .map_err(product_store_api_error)?;
-            return Ok(Json(workspace_session_dto(current)));
+            let automation = session_automation_ownership(&state, &current)?;
+            return Ok(Json(workspace_session_dto(current, automation)));
         }
         HttpConfirmDisposition::WorkItemPlanRejected { message } => {
             return Err(ApiError::runtime(
@@ -271,7 +288,8 @@ pub async fn workspace_session_confirm(
     if let Some(manager) = &manager {
         manager.broadcast_http_confirm(&confirmed).await;
     }
-    Ok(Json(workspace_session_dto(confirmed)))
+    let automation = session_automation_ownership(&state, &confirmed)?;
+    Ok(Json(workspace_session_dto(confirmed, automation)))
 }
 
 pub async fn workspace_session_timeline_node_detail(

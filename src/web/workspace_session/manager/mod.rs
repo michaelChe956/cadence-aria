@@ -243,6 +243,30 @@ fn test_session_record(session_id: &str) -> WorkspaceSessionRecord {
 }
 
 impl WorkspaceSessionManager {
+    /// P0 1.2（REQ-WIGA-08）：对外 SessionState 帧统一以 durable enrollment
+    /// 覆盖 automation 归属；读取失败不伪 client——置 None（前端保持未知）
+    /// 并打点（HTTP 面由 handler 显式报错）。
+    pub(crate) fn project_automation_ownership(&self, frame: &mut WsOutMessage) {
+        let store = crate::product::issue_automation_store::IssueAutomationStore::new(
+            self.app_paths.clone(),
+        );
+        if let Err(error) = crate::product::issue_automation_store::project_session_automation(
+            frame,
+            &self.session_record,
+            &store,
+        ) {
+            eprintln!(
+                "[aria-automation-ownership] projection failed session={}: {error}",
+                self.session_id
+            );
+            if let WsOutMessage::SessionState { automation, .. } = frame {
+                *automation = None;
+            }
+        }
+    }
+}
+
+impl WorkspaceSessionManager {
     /// 将原 socket-local engine 构建链迁入每 session 一次的工厂。
     pub async fn create(state: &WebAppState, session_id: &str) -> Result<Arc<Self>, String> {
         let app_paths = ProductAppPaths::new(state.workspace_root.join(".aria"));

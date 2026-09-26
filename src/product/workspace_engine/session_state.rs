@@ -520,6 +520,11 @@ impl WorkspaceEngine {
             mechanical_report_ref: self.session.mechanical_report_ref.clone(),
             publication_provenance_ref: self.session.publication_provenance_ref.clone(),
             pending_choice_requests: self.pending_choice_requests_projection(),
+            // P0 1.2：引擎自建帧默认 client/off；对外出口由 manager 以 durable
+            // enrollment 事实二次覆盖，读取失败置 None 保持未知。
+            automation: Some(
+                crate::product::models::automation::AutomationOwnership::client_default(),
+            ),
         }
     }
     /// F-27：session_state 顶层挂起 choice 全量投影，双来源统一：

@@ -68,7 +68,8 @@ impl WorkspaceSessionManager {
                         // C3/REQ-HTR-01：锁无关门开标志（Abort 矩阵在 engine 锁
                         // 被 in-flight 修订 run 持有时的非阻塞判定源）。
                         manager.set_human_confirm_gate_open(stage == "human_confirm");
-                        let session_state = manager.engine.lock().await.build_session_state();
+                        let mut session_state = manager.engine.lock().await.build_session_state();
+                        manager.project_automation_ownership(&mut session_state);
                         manager.broadcast(session_state);
                     }
                     EngineEvent::ArtifactBatchUpdate { mut updates } => {
@@ -150,7 +151,9 @@ impl WorkspaceSessionManager {
     /// 忽略未知字段；同一 stamped JSON 同时写 journal 并 fan-out 到所有 attachment。
     fn current_session_state(&self) -> WsOutMessage {
         if let Ok(engine) = self.engine.try_lock() {
-            engine.build_session_state()
+            let mut session_state = engine.build_session_state();
+            self.project_automation_ownership(&mut session_state);
+            session_state
         } else {
             self.durable_projection().0
         }
@@ -367,8 +370,9 @@ impl WorkspaceSessionManager {
     ///   闪断（choice_request 帧已先行渲染）。
     fn broadcast_choice_pending_state(self: &Arc<Self>, immediate_durable: bool) {
         if let Ok(engine) = self.engine.try_lock() {
-            let state = engine.build_session_state();
+            let mut state = engine.build_session_state();
             drop(engine);
+            self.project_automation_ownership(&mut state);
             self.broadcast(state);
             return;
         }
@@ -379,8 +383,9 @@ impl WorkspaceSessionManager {
         let manager = Arc::clone(self);
         tokio::spawn(async move {
             let engine = engine.lock().await;
-            let state = engine.build_session_state();
+            let mut state = engine.build_session_state();
             drop(engine);
+            manager.project_automation_ownership(&mut state);
             manager.broadcast(state);
         });
     }

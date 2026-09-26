@@ -483,6 +483,7 @@ describe("workspace websocket protocol types", () => {
         review_rounds: 1,
         superpowers_enabled: true,
         openspec_enabled: true,
+        automation: { owner: "client", enrollment_id: null, policy_revision: null, enabled: false },
         messages: [],
       },
     };

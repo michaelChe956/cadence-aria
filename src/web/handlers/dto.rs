@@ -641,9 +641,12 @@ pub(crate) fn active_coding_timeline_node_id(nodes: &[CodingTimelineNode]) -> Op
         .map(|node| node.id.clone())
 }
 
-pub(crate) fn workspace_session_dto(record: WorkspaceSessionRecord) -> WorkspaceSessionDto {
+pub(crate) fn workspace_session_dto(
+    record: WorkspaceSessionRecord,
+    automation: crate::product::models::automation::AutomationOwnership,
+) -> WorkspaceSessionDto {
     let summary_record = workspace_session_summary_record_from_record(&record);
-    let summary = workspace_session_summary_dto(&summary_record);
+    let summary = workspace_session_summary_dto(&summary_record, automation);
     WorkspaceSessionDto {
         workspace_session_id: summary.workspace_session_id,
         issue_id: summary.issue_id,
@@ -655,6 +658,7 @@ pub(crate) fn workspace_session_dto(record: WorkspaceSessionRecord) -> Workspace
         review_rounds: summary.review_rounds,
         superpowers_enabled: summary.superpowers_enabled,
         openspec_enabled: summary.openspec_enabled,
+        automation: summary.automation,
         messages: record
             .messages
             .into_iter()
@@ -683,6 +687,7 @@ fn workspace_session_summary_record_from_record(
 
 pub(crate) fn workspace_session_summary_dto(
     record: &WorkspaceSessionSummaryRecord,
+    automation: crate::product::models::automation::AutomationOwnership,
 ) -> WorkspaceSessionSummaryDto {
     WorkspaceSessionSummaryDto {
         workspace_session_id: record.id.clone(),
@@ -695,6 +700,7 @@ pub(crate) fn workspace_session_summary_dto(
         review_rounds: record.review_rounds,
         superpowers_enabled: record.superpowers_enabled,
         openspec_enabled: record.openspec_enabled,
+        automation,
     }
 }
 

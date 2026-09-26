@@ -78,6 +78,19 @@ pub struct AutomationOwnership {
     pub enabled: bool,
 }
 
+impl AutomationOwnership {
+    /// 无 durable enrollment 事实或缺省投影（client/manual）；引擎独立 fixture
+    /// 与测试使用——对外出口一律由 manager 以 durable 事实二次覆盖。
+    pub fn client_default() -> Self {
+        Self {
+            owner: AutomationOwner::Client,
+            enrollment_id: None,
+            policy_revision: None,
+            enabled: false,
+        }
+    }
+}
+
 /// enrollment 写入命令：Enable 携带完整授权 payload；Disable 仅关停。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -96,9 +109,7 @@ pub enum EnrollmentWriteCommand {
 #[derive(Debug, thiserror::Error)]
 pub enum EnrollmentError {
     #[error("automation_enrollment_conflict: current_revision={current_revision:?}")]
-    Conflict {
-        current_revision: Option<u64>,
-    },
+    Conflict { current_revision: Option<u64> },
     #[error("automation_enrollment_invalid_scope: {0}")]
     InvalidScope(String),
     #[error("automation_enrollment_not_found")]

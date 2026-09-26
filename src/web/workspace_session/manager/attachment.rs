@@ -86,8 +86,10 @@ impl WorkspaceSessionManager {
     pub(crate) async fn attached_session_state(&self) -> (WsOutMessage, Option<WsOutMessage>) {
         for attempt in 0..2 {
             if let Ok(engine) = self.engine.try_lock() {
+                let mut session_state = engine.build_session_state();
+                self.project_automation_ownership(&mut session_state);
                 return (
-                    engine.build_session_state(),
+                    session_state,
                     engine.pending_author_choice_request_message(),
                 );
             }

@@ -69,8 +69,26 @@ impl WorkspaceSessionManager {
         }
         let engine =
             WorkspaceEngine::new_persistent(checkpoint_store, lifecycle, projection_tx, session);
+        let mut session_state = engine.build_session_state();
+        // P0 1.2：durable 投影同样以 durable enrollment 覆盖归属；读取失败置
+        // None（未知），绝不伪 client。
+        let store =
+            crate::product::issue_automation_store::IssueAutomationStore::new(app_paths.clone());
+        if let Err(error) = crate::product::issue_automation_store::project_session_automation(
+            &mut session_state,
+            &session_record,
+            &store,
+        ) {
+            eprintln!(
+                "[aria-automation-ownership] durable projection failed session={}: {error}",
+                session_record.id
+            );
+            if let WsOutMessage::SessionState { automation, .. } = &mut session_state {
+                *automation = None;
+            }
+        }
         (
-            engine.build_session_state(),
+            session_state,
             engine.pending_author_choice_request_message(),
         )
     }

@@ -974,6 +974,10 @@ pub struct WorkspaceSessionSummaryDto {
     pub review_rounds: u32,
     pub superpowers_enabled: bool,
     pub openspec_enabled: bool,
+    /// P0 1.2（REQ-WIGA-08）：同源 durable automation 归属投影——不复制进
+    /// 持久 JSON，由 HTTP 出口按 enrollment 事实计算注入；读取失败在
+    /// handler 层显式报错，不伪 client。
+    pub automation: crate::product::models::automation::AutomationOwnership,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -989,6 +993,7 @@ pub struct WorkspaceSessionDto {
     pub review_rounds: u32,
     pub superpowers_enabled: bool,
     pub openspec_enabled: bool,
+    pub automation: crate::product::models::automation::AutomationOwnership,
     pub messages: Vec<WorkspaceMessageDto>,
 }
 

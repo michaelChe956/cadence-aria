@@ -158,6 +158,8 @@ const initialState: WorkspaceWsState = {
   pendingReviewerSummary: null,
   humanGateTurn: null,
   planRepair: null,
+  // P0 1.2：durable automation 归属；reset/首帧前保持 null（未知）。
+  automation: null,
   humanGateClosure: null,
   advanceCommands: {},
   protocolDiagnostics: [],
@@ -315,6 +317,8 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
         ...prev,
         sessionId: state.session_id,
         workspaceType: state.workspace_type,
+        // P0 1.2（REQ-WIGA-08）：服务端省略（读取失败/未知）保持 null，不猜 client。
+        automation: state.automation ?? null,
         planRepair: state.plan_repair ?? null,
         stage: state.stage,
         superpowersEnabled: state.superpowers_enabled ?? false,

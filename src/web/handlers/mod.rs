@@ -74,7 +74,7 @@ pub mod aggregate_initialization;
 mod automation_enrollment;
 mod codebases;
 mod coding;
-mod dto;
+pub(crate) mod dto;
 mod evidence_error_mapping;
 mod evidence_query;
 mod gateway_error_mapping;
@@ -100,11 +100,11 @@ pub(crate) use coding::{
     confirm_work_item_execution_plan, delete_coding_attempt, get_coding_attempt,
     request_work_item_execution_plan_change,
 };
-pub use codebases::{
-    create_logical_codebase, delete_logical_codebase, get_logical_codebase, list_codebases,
-};
 pub use automation_enrollment::{
     get_automation_enrollment, post_automation_enrollment_binding, put_automation_enrollment,
+};
+pub use codebases::{
+    create_logical_codebase, delete_logical_codebase, get_logical_codebase, list_codebases,
 };
 #[cfg(test)]
 pub(crate) use coding::scope::CodingAttemptRoutePath;

@@ -238,6 +238,11 @@ pub enum WsOutMessage {
         /// 空时省略保持 wire 兼容；元素与 choice_request 帧字段同构。
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         pending_choice_requests: Vec<WsPendingChoiceRequest>,
+        /// P0 1.2（REQ-WIGA-08）：durable automation 归属投影；None=未知
+        ///（读取失败/未注入），缺省省略保持 wire 兼容。引擎自建帧默认 client，
+        /// 对外帧由 manager 以 durable 事实覆盖。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        automation: Option<crate::product::models::automation::AutomationOwnership>,
     },
     Error {
         message: String,
@@ -309,6 +314,7 @@ mod tests {
             mechanical_report_ref: Some("report-ref".to_string()),
             publication_provenance_ref: Some("provenance-ref".to_string()),
             pending_choice_requests: Vec::new(),
+            automation: None,
         }
     }
 

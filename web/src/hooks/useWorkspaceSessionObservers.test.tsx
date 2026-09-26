@@ -17,6 +17,7 @@ function summary(workspace_session_id: string): WorkspaceSessionSummary {
     author_provider: "claude_code",
     reviewer_provider: "codex",
     review_rounds: 1,
+    automation: { owner: "client", enrollment_id: null, policy_revision: null, enabled: false },
     superpowers_enabled: false,
     openspec_enabled: false,
   };

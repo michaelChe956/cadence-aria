@@ -113,6 +113,18 @@ export type WorkItemPlanProviderStartLedgerEntry = {
   started: boolean;
 };
 
+/**
+ * P0 1.2（REQ-WIGA-08）：durable automation 归属投影——与 WS session_state
+ * `automation` 同形。HTTP 出口恒存在（读取失败在服务端显式报错）；WS 帧
+ * 可省略（未知 → 前端保持 null，不猜 client）。
+ */
+export type AutomationOwnership = {
+  owner: "client" | "server";
+  enrollment_id: string | null;
+  policy_revision: number | null;
+  enabled: boolean;
+};
+
 export type WorkspaceSessionSummary = {
   workspace_session_id: string;
   issue_id: string;
@@ -124,6 +136,7 @@ export type WorkspaceSessionSummary = {
   review_rounds: number;
   superpowers_enabled: boolean;
   openspec_enabled: boolean;
+  automation: AutomationOwnership;
 };
 
 export type WorkspaceSession = WorkspaceSessionSummary & {
@@ -663,6 +676,8 @@ export type WsOutMessage = WithEventSeq<
       repair_reservation?: WorkItemPlanRepairReservation | null;
       policy_diagnostics?: WorkItemPlanPolicyDiagnostic[];
       provider_start_ledger?: WorkItemPlanProviderStartLedgerEntry[];
+      /** P0 1.2：durable automation 归属；服务端读取失败/未知时省略。 */
+      automation?: AutomationOwnership | null;
     }
   | { type: "error"; message: string }
   | { type: "protocol_error"; code: string; message: string; context?: unknown }

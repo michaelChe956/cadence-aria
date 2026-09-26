@@ -107,6 +107,7 @@ export function workspaceSessionRecordShape(
     entity_id: entityId,
     workspace_type: workspaceType,
     status: "waiting_for_human",
+    automation: { owner: "client", enrollment_id: null, policy_revision: null, enabled: false },
     author_provider: "codex",
     reviewer_provider: "claude_code",
     review_rounds: 2,
