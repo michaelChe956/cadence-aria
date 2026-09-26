@@ -145,6 +145,10 @@ fn session_state_serde_roundtrip_preserves_work_item_plan_candidate() {
         mechanical_report_ref: None,
         publication_provenance_ref: None,
         pending_choice_requests: Vec::new(),
+        // T4 类型迁移：引擎自建帧的 automation 缺省投影（client/off）。
+        automation: Some(
+            cadence_aria::product::models::automation::AutomationOwnership::client_default(),
+        ),
     };
 
     let value = serde_json::to_value(&state).expect("serialize SessionState");
