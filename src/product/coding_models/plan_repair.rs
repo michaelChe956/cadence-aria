@@ -104,8 +104,12 @@ pub struct CodingAmendmentApplicationJournal {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// Pending=已应用、观察投递未完成（含等待 ack / 尚未结算）；
+/// Unsent=一次投递尝试以无存活订阅者/写失败/通道关闭/超时收场，等待补投递；
+/// Delivered=真实 socket 写 ack（唯一写 delivered_at 的路径）。
 pub enum CodingPlanAmendmentDeliveryStatus {
     Pending,
+    Unsent,
     Delivered,
 }
 

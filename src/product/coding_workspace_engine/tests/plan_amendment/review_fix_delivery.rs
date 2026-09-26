@@ -565,3 +565,136 @@ async fn assert_pending_delivery_and_recover_same_event(
         crate::product::coding_models::CodingPlanAmendmentDeliveryStatus::Delivered
     );
 }
+#[tokio::test]
+async fn coding_amendment_delivery_store_unsent_never_fakes_delivered() {
+    let fixture = amendment_fixture().await;
+    let attempt = fixture.attempt.clone();
+    let seeded = fixture
+        .store
+        .load_or_prepare_plan_amendment_delivery(&attempt, &fixture.manifest.id)
+        .unwrap();
+    assert_eq!(
+        seeded.status,
+        crate::product::coding_models::CodingPlanAmendmentDeliveryStatus::Pending
+    );
+
+    let unsent = fixture
+        .store
+        .mark_plan_amendment_delivery_unsent(&attempt, &fixture.manifest.id, &seeded.event_id)
+        .unwrap();
+    assert_eq!(
+        unsent.status,
+        crate::product::coding_models::CodingPlanAmendmentDeliveryStatus::Unsent
+    );
+    assert_eq!(unsent.delivered_at, None);
+    // 幂等：重复 Unsent 不改写。
+    let again = fixture
+        .store
+        .mark_plan_amendment_delivery_unsent(&attempt, &fixture.manifest.id, &seeded.event_id)
+        .unwrap();
+    assert_eq!(
+        again.status,
+        crate::product::coding_models::CodingPlanAmendmentDeliveryStatus::Unsent
+    );
+
+    // 真实 ack 后不可降级：Delivered 之上 Unsent 必须原样返回。
+    let delivered = fixture
+        .store
+        .mark_plan_amendment_delivery_delivered(&attempt, &fixture.manifest.id, &seeded.event_id)
+        .unwrap();
+    assert_eq!(
+        delivered.status,
+        crate::product::coding_models::CodingPlanAmendmentDeliveryStatus::Delivered
+    );
+    let guarded = fixture
+        .store
+        .mark_plan_amendment_delivery_unsent(&attempt, &fixture.manifest.id, &seeded.event_id)
+        .unwrap();
+    assert_eq!(
+        guarded.status,
+        crate::product::coding_models::CodingPlanAmendmentDeliveryStatus::Delivered
+    );
+    assert!(guarded.delivered_at.is_some());
+
+    // 异 event_id => IdentityMismatch。
+    let error = fixture
+        .store
+        .mark_plan_amendment_delivery_unsent(&attempt, &fixture.manifest.id, "other_event")
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        crate::product::json_store::ProductStoreError::IdentityMismatch { .. }
+    ));
+}
+
+#[tokio::test]
+async fn coding_amendment_delivery_store_lists_own_deliveries_and_rejects_foreign() {
+    let fixture = amendment_fixture().await;
+    let attempt = fixture.attempt.clone();
+    fixture
+        .store
+        .load_or_prepare_plan_amendment_delivery(&attempt, &fixture.manifest.id)
+        .unwrap();
+    let listed = fixture.store.list_plan_amendment_deliveries(&attempt).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].amendment_id, fixture.manifest.id);
+    assert_eq!(
+        listed[0].event_id,
+        format!(
+            "coding_plan_amendment_updated_{}_{}",
+            attempt.id, fixture.manifest.id
+        )
+    );
+
+    // 异 attempt 身份的文件必须 fail-closed（不静默跳过）。
+    let delivery_dir = fixture
+        .store
+        .attempt_dir(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .join("amendment-event-deliveries");
+    let foreign = serde_json::json!({
+        "id": "coding_plan_amendment_delivery_foreign_amendment_x",
+        "event_id": "coding_plan_amendment_updated_foreign_amendment_x",
+        "attempt_id": "attempt_other",
+        "amendment_id": "amendment_x",
+        "status": "pending",
+        "delivered_at": null,
+        "created_at": "2026-09-26T00:00:00Z",
+        "updated_at": "2026-09-26T00:00:00Z",
+    });
+    std::fs::write(
+        delivery_dir.join("amendment_x.json"),
+        serde_json::to_vec(&foreign).unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        fixture.store.list_plan_amendment_deliveries(&attempt).unwrap_err(),
+        crate::product::json_store::ProductStoreError::IdentityMismatch { .. }
+    ));
+}
+
+#[tokio::test]
+async fn coding_amendment_delivery_store_rejects_unsent_with_delivered_at() {
+    let fixture = amendment_fixture().await;
+    let attempt = fixture.attempt.clone();
+    fixture
+        .store
+        .load_or_prepare_plan_amendment_delivery(&attempt, &fixture.manifest.id)
+        .unwrap();
+    let marker_path = fixture
+        .store
+        .attempt_dir(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .join("amendment-event-deliveries")
+        .join(format!("{}.json", fixture.manifest.id));
+    let mut marker: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&marker_path).unwrap()).unwrap();
+    marker["status"] = "unsent".into();
+    marker["delivered_at"] = "2026-09-26T00:00:00Z".into();
+    std::fs::write(&marker_path, serde_json::to_vec(&marker).unwrap()).unwrap();
+    assert!(matches!(
+        fixture
+            .store
+            .get_plan_amendment_delivery(&attempt, &fixture.manifest.id)
+            .unwrap_err(),
+        crate::product::json_store::ProductStoreError::IdentityMismatch { .. }
+    ));
+}
