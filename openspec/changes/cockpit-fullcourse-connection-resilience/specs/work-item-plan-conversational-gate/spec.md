@@ -9,6 +9,11 @@
 - **WHEN** 人在门内发出 `approve`
 - **THEN** 系统关门并启动确定性 compile；仅当 compile 成功时 Plan 才进入 durable Confirmed；compile 失败按既有 fail-closed 路径处理
 
+#### Scenario: abandon 经 typed 命令关门
+
+- **WHEN** 人在门内发出显式 typed abandon 命令
+- **THEN** 系统关门进入终态，全程不经过 legacy `HumanConfirmDecision` 通道，事件前缀不可变语义保持
+
 #### Scenario: 人工权威升级在 Evaluate 相位同样成立
 
 - **WHEN** 会话 `status = WaitingForHuman`、phase 停留在 Evaluate（如修订置回后）且门快照在场，人发出 `approve` 或 `abandon`
