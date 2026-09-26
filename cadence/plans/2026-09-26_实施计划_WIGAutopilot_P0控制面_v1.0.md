@@ -317,6 +317,18 @@ REST 路由统一：`PUT/GET /api/projects/{project_id}/issues/{issue_id}/automa
 
 ## Task 11：1.3 驾驶舱 workspace/coding choice 卡片就地作答
 
+> **实施偏差记录（2026-09-26，Main 裁决 A）**：冷驾驶舱答 coding choice 依赖两个
+> 原计划未覆盖的上游事实，经 Main 裁决按"既有拥有者任务实现的补全"扩入本任务
+> 文件域：① `src/product/coding_models/gate.rs`、`src/product/coding_attempt_store/gate.rs`、
+> `src/web/handlers/coding.rs`（+`coding_choice.rs` 测试）——`CodingChoiceGate` 增
+> `expected_run_id` 投影字段（handler 层 stamp active run incarnation，serde
+> optional 向后兼容；claim 校验语义不变），否则 REST claim 因
+> `expected_run_id !== active_run_incarnation` 恒 410；②
+> `web/src/hooks/useWorkspaceSessionObservers.ts`、`web/src/components/cockpit/CockpitShell.tsx`
+> ——lifecycle 目录轮询副产物 `coding_attempts` + 会话→issue 映射构成 attempt
+> 发现通道（`useCockpitCodingAttemptForSession`），页面按需拉
+> `getCodingAttemptSnapshot`（挂载/抽屉打开各一次，不常驻轮询）。
+
 **Files:** Modify `web/src/state/workspace-ws-store-types.ts:429-435`、`web/src/state/workspace-ws-store-helpers.ts:536-574`、`web/src/state/workspace-cockpit-projection.ts:459-474,524-642`、`web/src/state/workspace-observer-store.ts:99-112,380-439`、`web/src/components/chat-workspace/cockpit/CockpitInbox.tsx:50-93,139-270,272-372`、`web/src/components/chat-workspace/entries/ChoiceRequestEntry.tsx:10-14,94-107`、`web/src/pages/ChatCockpitPage.tsx:128-141,253-266,983-999`、`web/src/api/client.ts:61-76,377-395`、`web/src/api/types/{workspace.ts:116-136,coding.ts:424-469}`；Test `web/src/components/chat-workspace/cockpit/CockpitInbox.test.tsx`、`web/src/pages/ChatCockpitPage.choice-notice.test.tsx`、`web/src/pages/ChatCockpitPage.inbox.test.tsx`。
 
 **Interfaces:** Consumes: Task 7 `pending_choice_requests[{id,prompt,options,questions,expected_run_id,status,source,role}]`；Task 9 coding snapshot `pending_choices`；Task 8/9 HTTP response `{command_id,expected_run_id,choice_id,state}`；Task 6 `answers` 数组。Produces: `CockpitInboxKind` 新增 `choice`，`CockpitInboxItem.choice:ChoiceInboxProjection|null`（非 choice=null），`ChoiceInboxProjection={sessionId:string,choiceId:string,expectedRunId:string,questions:ChoiceQuestion[],source:"workspace"|"coding",attemptAddress?:CodingAttemptAddress,status:"open"|"submitting"|"resolving"|"delivered"|"expired"}`；前端 `postWorkspaceChoiceResponse(sessionId,choiceId,request):Promise<ChoiceReplyStatus>`、`postCodingChoiceResponse(address,choiceId,request):Promise<ChoiceReplyStatus>`、对应 GET 查询。
