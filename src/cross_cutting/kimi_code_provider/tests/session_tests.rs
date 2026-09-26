@@ -860,6 +860,7 @@ async fn terminal_response_restarts_prompt_for_buffered_free_text_choice() {
             selected_option_ids: Vec::new(),
             free_text: Some("replacement prompt".to_string()),
             answers: Vec::new(),
+            receipt: None,
         })
         .await
         .expect("free-text choice response");

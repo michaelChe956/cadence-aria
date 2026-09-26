@@ -37,6 +37,7 @@ pub(super) async fn listen_for_permission_commands(
                 selected_option_ids,
                 free_text,
                 answers,
+                receipt,
             } => {
                 tracing::info!(choice_id = %id, "bridge received choice response");
                 eprintln!(
@@ -47,22 +48,37 @@ pub(super) async fn listen_for_permission_commands(
                         .as_ref()
                         .is_some_and(|text| !text.trim().is_empty())
                 );
+                // P0 1.3：mpsc 消费者已领取命令——回执先推进 Resolving；
+                // Delivered 只能由 request_choice waiter 解析后推进。
+                if let Some(receipt) = receipt.as_ref() {
+                    receipt.mark_resolving();
+                }
                 if let Some(decision_tx) = pending_choices.lock().await.remove(&id) {
                     eprintln!(
                         "[aria-choice-diag] bridge matched pending choice_response id={}",
                         id
                     );
-                    let _ = decision_tx.send(ChoiceDecision {
+                    // oneshot 关闭（waiter 取消）则值会返回——从中取回回执
+                    // 置 Rejected，不得悬置 Resolving。
+                    if let Err(undelivered) = decision_tx.send(ChoiceDecision {
                         selected_option_ids,
                         free_text,
                         answers,
-                    });
+                        receipt,
+                    }) {
+                        if let Some(receipt) = undelivered.receipt.as_ref() {
+                            receipt.reject();
+                        }
+                    }
                 } else {
                     tracing::warn!(choice_id = %id, "bridge: no pending choice entry for id");
                     eprintln!(
                         "[aria-choice-diag] bridge missing pending choice_response id={}",
                         id
                     );
+                    if let Some(receipt) = receipt.as_ref() {
+                        receipt.reject();
+                    }
                     let _ = event_tx
                         .send(ProviderEvent::ProtocolError {
                             code: "CHOICE_ID_UNMATCHED".to_string(),
@@ -86,6 +102,7 @@ pub(super) async fn listen_for_permission_commands(
                         selected_option_ids: Vec::new(),
                         free_text: Some("aborted".to_string()),
                         answers: Vec::new(),
+                        receipt: None,
                     });
                 }
             }

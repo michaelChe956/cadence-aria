@@ -374,6 +374,13 @@ enum PiCommand {
         id: String,
         selected_option_ids: Vec<String>,
         free_text: Option<String>,
+        // P0 1.3：answers/receipt 逐字段透传；pi extension_ui 协议只有单值
+        // 槽位（多问题为 pi 已知限制，REST 层不做 provider 分支拒绝），
+        // receipt 仍按两层语义在 pi 等待者接收时推进。pi 单值槽位不消费
+        // 多题 answers（已透传至等待点）。
+        #[allow(dead_code)]
+        answers: Vec<crate::cross_cutting::streaming_provider::ChoiceAnswerData>,
+        receipt: Option<crate::cross_cutting::choice_delivery::ChoiceDeliverySignal>,
     },
 }
 
@@ -387,8 +394,23 @@ async fn await_pi_command(
             _ = cancel.cancelled() => return PiCommand::Abort,
             command = command_rx.recv() => match command {
                 Some(ProviderCommand::Abort) | None => return PiCommand::Abort,
-                Some(ProviderCommand::ChoiceResponse { id, selected_option_ids, free_text, .. }) => {
-                    return PiCommand::ChoiceResponse { id, selected_option_ids, free_text };
+                Some(ProviderCommand::ChoiceResponse {
+                    id,
+                    selected_option_ids,
+                    free_text,
+                    answers,
+                    receipt,
+                }) => {
+                    if let Some(receipt) = receipt.as_ref() {
+                        receipt.mark_resolving();
+                    }
+                    return PiCommand::ChoiceResponse {
+                        id,
+                        selected_option_ids,
+                        free_text,
+                        answers,
+                        receipt,
+                    };
                 }
                 Some(ProviderCommand::PermissionResponse { .. } | ProviderCommand::ToolResult(_)) => {}
             }
@@ -439,11 +461,22 @@ where
                 id,
                 selected_option_ids,
                 free_text,
+                answers: _,
+                receipt,
             } if id == request_id => {
                 send_pi_choice_response(peer, &request_id, selected_option_ids, free_text).await?;
+                // P0 1.3：pi 命令等待者真正接收并回写 peer 后才 Delivered。
+                if let Some(receipt) = receipt.as_ref() {
+                    receipt.deliver();
+                }
                 return Ok(false);
             }
-            PiCommand::ChoiceResponse { id, .. } => send_choice_id_unmatched(event_tx, id).await?,
+            PiCommand::ChoiceResponse { id, receipt, .. } => {
+                if let Some(receipt) = receipt.as_ref() {
+                    receipt.reject();
+                }
+                send_choice_id_unmatched(event_tx, id).await?
+            }
         }
     }
 }

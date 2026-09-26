@@ -145,6 +145,7 @@ async fn successful_choice_completion_does_not_cancel_engine_run_token() {
             selected_option_ids: vec!["q0_opt_0".to_string()],
             free_text: None,
             answers: Vec::new(),
+            receipt: None,
         })
         .await
         .expect("selected-option choice response");

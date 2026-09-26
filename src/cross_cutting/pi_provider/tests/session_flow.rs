@@ -14,6 +14,7 @@ async fn session_select_request_maps_to_choice_request_and_forwards_response() {
             selected_option_ids: vec!["A".to_string()],
             free_text: None,
             answers: vec![],
+            receipt: None,
         })
         .await
         .expect("choice response");
@@ -39,6 +40,7 @@ async fn session_select_with_free_text_maps_to_value() {
             selected_option_ids: vec![],
             free_text: Some("自定义".to_string()),
             answers: vec![],
+            receipt: None,
         })
         .await
         .expect("choice response");
@@ -57,6 +59,7 @@ async fn session_select_empty_response_sends_full_cancelled_envelope() {
             selected_option_ids: vec![],
             free_text: None,
             answers: vec![],
+            receipt: None,
         })
         .await
         .expect("choice response");
@@ -78,6 +81,7 @@ async fn session_select_during_handshake_is_handled() {
             selected_option_ids: vec!["B".to_string()],
             free_text: None,
             answers: vec![],
+            receipt: None,
         })
         .await
         .expect("choice response");
@@ -153,6 +157,7 @@ async fn session_select_wrong_id_then_correct_id() {
             selected_option_ids: vec!["A".to_string()],
             free_text: None,
             answers: vec![],
+            receipt: None,
         })
         .await
         .expect("wrong response");
@@ -166,6 +171,7 @@ async fn session_select_wrong_id_then_correct_id() {
             selected_option_ids: vec!["A".to_string()],
             free_text: None,
             answers: vec![],
+            receipt: None,
         })
         .await
         .expect("correct response");

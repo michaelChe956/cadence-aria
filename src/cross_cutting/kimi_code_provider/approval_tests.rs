@@ -370,6 +370,7 @@ async fn askuserquestion_maps_to_choice_request() {
                         selected_option_ids: vec!["yes".to_string()],
                         free_text: None,
                         answers: vec![],
+                        receipt: None,
                     })
                     .await
                     .expect("choice response");
@@ -428,6 +429,7 @@ async fn askuserquestion_select_option_returns_selected_and_continues() {
             selected_option_ids: vec!["choice-a".to_string()],
             free_text: None,
             answers: vec![],
+            receipt: None,
         })
         .await
         .expect("choice response");
@@ -494,6 +496,7 @@ async fn askuserquestion_free_text_takes_priority_over_selected() {
             selected_option_ids: vec!["selected".to_string()],
             free_text: Some(" custom answer ".to_string()),
             answers: vec![],
+            receipt: None,
         })
         .await
         .expect("choice response");
@@ -567,6 +570,7 @@ async fn askuserquestion_free_text_only_no_selected() {
             selected_option_ids: vec![],
             free_text: Some("free text only".to_string()),
             answers: vec![],
+            receipt: None,
         })
         .await
         .expect("choice response");
@@ -625,6 +629,7 @@ async fn multiquestion_serial_one_at_a_time() {
             selected_option_ids: vec!["q1-a".to_string()],
             free_text: None,
             answers: vec![],
+            receipt: None,
         })
         .await
         .expect("first response");
@@ -645,6 +650,7 @@ async fn multiquestion_serial_one_at_a_time() {
             selected_option_ids: vec!["q2-b".to_string()],
             free_text: None,
             answers: vec![],
+            receipt: None,
         })
         .await
         .expect("second response");

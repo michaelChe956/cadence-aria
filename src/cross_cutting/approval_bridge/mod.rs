@@ -36,6 +36,9 @@ pub struct ChoiceDecision {
     pub selected_option_ids: Vec<String>,
     pub free_text: Option<String>,
     pub answers: Vec<ChoiceAnswerData>,
+    /// P0 1.3：应答提交方的回执——waiter（request_choice）成功解析后置
+    /// Delivered；bridge 侧结构拒绝时置 Rejected。
+    pub receipt: Option<crate::cross_cutting::choice_delivery::ChoiceDeliverySignal>,
 }
 
 type PendingPermissions =
@@ -213,13 +216,19 @@ impl ApprovalBridge {
             }
             decision = decision_rx => {
                 pending_guard.remove_now().await;
-                let decision = decision.map_err(|_| permission_bridge_error("choice response channel closed"))?;
+                let decision = decision.map_err(|_| {
+                    permission_bridge_error("choice response channel closed")
+                })?;
                 eprintln!(
                     "[aria-choice-diag] bridge resolved choice_request id={} selected={:?} free_text_present={}",
                     request_id,
                     decision.selected_option_ids,
                     decision.free_text.as_ref().is_some_and(|text| !text.trim().is_empty())
                 );
+                // P0 1.3：两层回执——waiter 真正解出 ChoiceDecision 才 Delivered。
+                if let Some(receipt) = decision.receipt.as_ref() {
+                    receipt.deliver();
+                }
                 Ok(decision)
             }
         }

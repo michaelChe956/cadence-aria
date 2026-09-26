@@ -111,6 +111,7 @@ impl WorkspaceEngine {
                             selected_option_ids,
                             free_text,
                             answers,
+                            receipt,
                         }) => {
                             // F-27R3：应答命中挂起 choice（登记簿同步摘除）——
                             // 通知 Web runtime 广播全量 session_state 收敛已答卡
@@ -126,6 +127,7 @@ impl WorkspaceEngine {
                                 selected_option_ids,
                                 free_text,
                                 answers,
+                            receipt,
                             }).await.is_err() {
                                 commands_open = false;
                             }

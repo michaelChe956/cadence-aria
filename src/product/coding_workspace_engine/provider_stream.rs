@@ -13,6 +13,32 @@ mod outcome_tests;
 use cancellation::warn_cancellation_site;
 use launch::launch_provider_session;
 
+/// P0 1.3：coding gate 只在回执 Delivered 后 resolve；等待 provider 等待者
+/// 接收的上限（超时不 resolve、不假 Delivered，由 run 生命周期收口）。
+const CODING_CHOICE_RECEIPT_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// 等待回执进入终态（Delivered/Rejected/Expired）；watch 关闭（信号被全部
+/// 丢弃）同样返回当前状态，由调用方按非 Delivered 处理。
+async fn wait_for_choice_receipt_terminal(
+    status: &mut tokio::sync::watch::Receiver<
+        crate::cross_cutting::choice_delivery::ChoiceReplyState,
+    >,
+) -> crate::cross_cutting::choice_delivery::ChoiceReplyState {
+    loop {
+        let current = *status.borrow();
+        if !matches!(
+            current,
+            crate::cross_cutting::choice_delivery::ChoiceReplyState::Submitting
+                | crate::cross_cutting::choice_delivery::ChoiceReplyState::Resolving
+        ) {
+            return current;
+        }
+        if status.changed().await.is_err() {
+            return *status.borrow();
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProviderStreamOutcome {
     pub(crate) full_output: String,
@@ -479,6 +505,8 @@ impl CodingWorkspaceEngine {
                                 id,
                                 selected_option_ids,
                                 free_text,
+                                answers,
+                                receipt,
                             } => {
                                 if !open_choice_ids.iter().any(|choice_id| choice_id == &id) {
                                     let _ = self
@@ -490,20 +518,56 @@ impl CodingWorkspaceEngine {
                                             ),
                                         })
                                         .await;
+                                    if let Some(receipt) = receipt.as_ref() {
+                                        receipt.reject();
+                                    }
                                     continue;
                                 }
+                                // P0 1.3（REQ-WIGA-05）：完整 answers + 回执逐字段
+                                // 透传 provider；仅当回执 Delivered（provider 等待者
+                                // 真正接收）才落盘 resolve_choice_gate。无回执的旧
+                                // WS 单题路径保持原立即 resolve 行为。
+                                let mut receipt_status =
+                                    receipt.as_ref().map(|signal| signal.subscribe());
                                 if send_provider_command_with_cancellation(
                                     &session.commands,
                                     ProviderCommand::ChoiceResponse {
                                         id: id.clone(),
                                         selected_option_ids: selected_option_ids.clone(),
                                         free_text: free_text.clone(),
-                                        answers: vec![],
+                                        answers: answers.clone(),
+                                        receipt: receipt.clone(),
                                     },
                                     &self.cancellation,
                                 )
                                 .await
                                 {
+                                    let delivered = match receipt_status.as_mut() {
+                                        None => true,
+                                        Some(status) => match tokio::time::timeout(
+                                            CODING_CHOICE_RECEIPT_WAIT,
+                                            wait_for_choice_receipt_terminal(status),
+                                        )
+                                        .await
+                                        {
+                                            Ok(
+                                                crate::cross_cutting::choice_delivery::ChoiceReplyState::Delivered,
+                                            ) => true,
+                                            Ok(_) | Err(_) => false,
+                                        },
+                                    };
+                                    if !delivered {
+                                        let _ = self
+                                            .event_tx
+                                            .send(CodingWsOutMessage::CodingProtocolError {
+                                                code: "coding_choice_not_delivered".to_string(),
+                                                message: format!(
+                                                    "ChoiceResponse id={id} was not delivered to the provider waiter"
+                                                ),
+                                            })
+                                            .await;
+                                        continue;
+                                    }
                                     let ack_selected_option_ids = selected_option_ids.clone();
                                     let ack_free_text = free_text.clone();
                                     let _ = self.store.resolve_choice_gate(
@@ -537,6 +601,9 @@ impl CodingWorkspaceEngine {
                                         })
                                         .await;
                                 } else {
+                                    if let Some(receipt) = receipt.as_ref() {
+                                        receipt.reject();
+                                    }
                                     commands_open = false;
                                 }
                             }

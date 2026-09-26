@@ -920,16 +920,21 @@ async fn handle_coding_socket(
                     id,
                     selected_option_ids,
                     free_text,
+                    ..
                 } = inbound
                 {
                     if let Some(command_tx) =
                         interactive_runner_sender(&state, &attempt_key, runner_command_tx.as_ref())
                     {
+                        // P0 1.3：legacy WS 单题入口——T9 接线完整
+                        // answers/command_id claim；此处保持原单题等价行为。
                         let _ = command_tx
                             .send(CodingRunnerCommand::ChoiceResponse {
                                 id,
                                 selected_option_ids,
                                 free_text,
+                                answers: Vec::new(),
+                                receipt: None,
                             })
                             .await;
                         drop(mutation_lease);

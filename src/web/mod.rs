@@ -1,3 +1,4 @@
+pub mod choice_reply;
 pub mod app;
 pub mod coding_ws_handler;
 pub mod error;

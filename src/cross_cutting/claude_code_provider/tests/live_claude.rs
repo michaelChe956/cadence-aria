@@ -96,6 +96,7 @@ async fn live_claude_ask_user_question_smoke() {
             selected_option_ids: vec![choice.options[0].id.clone()],
             free_text: None,
             answers: vec![],
+            receipt: None,
         })
         .await
         .expect("send choice response");

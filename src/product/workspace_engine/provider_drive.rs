@@ -485,6 +485,7 @@ impl WorkspaceEngine {
                             selected_option_ids,
                             free_text,
                             answers,
+                            receipt,
                         }) => {
                             tracing::info!(choice_id = %id, "engine forwarding choice response");
                             let choice_id = id.clone();
@@ -519,6 +520,7 @@ impl WorkspaceEngine {
                                 selected_option_ids,
                                 free_text,
                                 answers,
+                            receipt,
                             }).await.is_err() {
                                 eprintln!(
                                     "[aria-choice-diag] engine failed to forward author choice_response id={} to provider session",

@@ -158,6 +158,7 @@ async fn codex_provider_bridges_request_user_input_and_completes() {
             selected_option_ids: vec!["O(n)".to_string()],
             free_text: None,
             answers: vec![],
+            receipt: None,
         })
         .await
         .unwrap();
@@ -240,6 +241,7 @@ async fn codex_provider_bridges_all_request_user_input_questions() {
                     free_text: None,
                 },
             ],
+            receipt: None,
         })
         .await
         .unwrap();
@@ -423,6 +425,7 @@ async fn codex_provider_request_user_input_emits_protocol_error_on_write_failure
             selected_option_ids: vec!["是".to_string()],
             free_text: None,
             answers: vec![],
+            receipt: None,
         })
         .await
         .expect("send choice response");

@@ -609,6 +609,7 @@ async fn choice_wait_timeout_converts_lost_choice_into_diagnosable_rerunnable_fa
             selected_option_ids: vec!["排除".to_string()],
             free_text: None,
             answers: Vec::new(),
+            receipt: None,
         })
         .await
         .expect("send choice response");
@@ -664,6 +665,7 @@ async fn choice_response_within_wait_window_completes_run_without_choice_timeout
             selected_option_ids: vec!["排除".to_string()],
             free_text: None,
             answers: Vec::new(),
+            receipt: None,
         })
         .await
         .expect("send choice response");

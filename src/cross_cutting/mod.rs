@@ -7,6 +7,7 @@ pub mod artifact_validate;
 pub mod ast_grep_tool;
 pub mod bounded_command_runner;
 pub mod checkpoint_and_recovery;
+pub mod choice_delivery;
 pub mod claude_code_provider;
 pub mod cli_adapter;
 pub mod codex_provider;

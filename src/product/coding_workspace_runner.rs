@@ -25,6 +25,11 @@ pub enum CodingRunnerCommand {
         id: String,
         selected_option_ids: Vec<String>,
         free_text: Option<String>,
+        /// P0 1.3：完整多题答案原样透传 provider，禁止扁平化。
+        answers: Vec<crate::cross_cutting::streaming_provider::ChoiceAnswerData>,
+        /// P0 1.3：两层回执；`#[serde(skip)]` 保持命令 JSON 兼容。
+        #[serde(skip)]
+        receipt: Option<crate::cross_cutting::choice_delivery::ChoiceDeliverySignal>,
     },
     RetryPush,
     AbortAttempt,

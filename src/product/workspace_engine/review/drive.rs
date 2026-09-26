@@ -810,6 +810,7 @@ impl WorkspaceEngine {
                             selected_option_ids,
                             free_text,
                             answers,
+                            receipt,
                         }) => {
                             // F-22/F-19b：choice 应答到达——解除 pending 等待界。
                             // F-27R3：应答命中挂起 choice（登记簿同步摘除）——通知
@@ -836,6 +837,7 @@ impl WorkspaceEngine {
                                     selected_option_ids,
                                     free_text,
                                     answers,
+                                    receipt,
                                 })
                                 .await
                                 .is_err()

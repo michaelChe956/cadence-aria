@@ -293,6 +293,9 @@ async fn handle_workspace_inbound_message_inner(
                                 }
                             })
                             .collect(),
+                        // P0 1.3：WS driver 应答暂不携回执；Task 7 接线
+                        // claim 门面后由 manager 注入。
+                        receipt: None,
                     })
                     .await
                     .is_ok()

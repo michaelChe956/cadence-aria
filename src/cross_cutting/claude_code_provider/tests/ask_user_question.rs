@@ -81,6 +81,7 @@ async fn claude_provider_continues_same_session_after_ask_user_question_choice()
             selected_option_ids: vec!["opt_0".to_string()],
             free_text: None,
             answers: vec![],
+            receipt: None,
         })
         .await
         .expect("send choice response");
@@ -181,6 +182,7 @@ done
             selected_option_ids: vec!["opt_0".to_string()],
             free_text: None,
             answers: vec![],
+            receipt: None,
         })
         .await
         .expect("send choice response");
@@ -301,6 +303,7 @@ done
                     free_text: None,
                 },
             ],
+            receipt: None,
         })
         .await
         .expect("send choice response");
@@ -391,6 +394,7 @@ done
             selected_option_ids: vec!["opt_0".to_string()],
             free_text: None,
             answers: vec![],
+            receipt: None,
         })
         .await
         .expect("send choice response");
@@ -496,6 +500,7 @@ done
             selected_option_ids: vec!["opt_0".to_string()],
             free_text: None,
             answers: vec![],
+            receipt: None,
         })
         .await
         .expect("send choice response");
@@ -912,6 +917,7 @@ async fn claude_provider_ask_user_question_emits_protocol_error_on_tool_result_e
             selected_option_ids: vec!["opt_0".to_string()],
             free_text: None,
             answers: vec![],
+            receipt: None,
         })
         .await
         .expect("send choice response");

@@ -512,14 +512,14 @@ pub struct PermissionRequestData {
     pub risk_level: RiskLevel,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ChoiceOptionData {
     pub id: String,
     pub label: String,
     pub description: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ChoiceQuestionData {
     pub id: String,
     pub prompt: String,
@@ -528,7 +528,7 @@ pub struct ChoiceQuestionData {
     pub allow_free_text: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ChoiceAnswerData {
     pub question_id: String,
     pub selected_option_ids: Vec<String>,
@@ -771,6 +771,9 @@ pub enum ProviderCommand {
         selected_option_ids: Vec<String>,
         free_text: Option<String>,
         answers: Vec<ChoiceAnswerData>,
+        /// P0 1.3：两层回执（mpsc 仅 Resolving；provider 等待者接收才
+        /// Delivered）。旧调用方传 None，行为不变。
+        receipt: Option<crate::cross_cutting::choice_delivery::ChoiceDeliverySignal>,
     },
     ToolResult(ProviderToolResult),
     Abort,
@@ -950,6 +953,7 @@ pub(crate) async fn run_legacy_bridge_stream<'a>(
                             selected_option_ids: vec![],
                             free_text: Some("aborted".to_string()),
                             answers: vec![],
+                            receipt: None,
                         })
                         .await;
                     let _ = tx
