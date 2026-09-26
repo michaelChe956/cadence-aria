@@ -158,3 +158,31 @@ export function hardErrorItem(sessionId: string): CockpitInboxItem {
     choice: null,
   };
 }
+
+/** P1 WIGA Task 9：只读 plan 确认 info 条目（kind="info"，不可选/不可批量）。 */
+export function infoItem(
+  key: string,
+  planId: string,
+  sessionId = "session_001",
+): CockpitInboxItem {
+  return {
+    id: `${sessionId}:info:${key}`,
+    kind: "info",
+    severity: 1,
+    title: "Work Item Plan 已确认",
+    summary: `plan ${planId} 已确认`,
+    triage: false,
+    source: "plan_confirmed_info",
+    createdAt: null,
+    gate: null,
+    inlineError: null,
+    choice: null,
+    planInfo: {
+      key,
+      planId,
+      sessionId,
+      occurredAt: "2026-09-27T00:00:00Z",
+      title: "Work Item Plan 已确认",
+    },
+  };
+}

@@ -37,6 +37,28 @@ function gateItem(sessionId: string): CockpitInboxItem {
     choice: null,
   };
 }
+function infoItem(key: string, planId: string): CockpitInboxItem {
+  return {
+    id: `s1:info:${key}`,
+    kind: "info",
+    severity: 1,
+    title: "Work Item Plan 已确认",
+    summary: `plan ${planId} 已确认`,
+    triage: false,
+    source: "plan_confirmed_info",
+    createdAt: null,
+    gate: null,
+    inlineError: null,
+    choice: null,
+    planInfo: {
+      key,
+      planId,
+      sessionId: "s1",
+      occurredAt: "2026-09-27T00:00:00Z",
+      title: "Work Item Plan 已确认",
+    },
+  };
+}
 function stoppedItem(sessionId: string): CockpitInboxItem {
   return {
     ...gateItem(sessionId),
@@ -48,7 +70,7 @@ function stoppedItem(sessionId: string): CockpitInboxItem {
 
 function ShellWithInbox({
   inbox,
-  countedInbox = inbox,
+  countedInbox = inbox.filter((item) => item.kind !== "info"),
   onGoToInbox,
 }: {
   inbox: readonly CockpitInboxItem[];
@@ -336,5 +358,69 @@ describe("CockpitShell", () => {
     expect(fallback.className).toContain("top-16");
     expect(fallback.className).toContain("z-40");
     expect(fallback.className).not.toContain("z-[100]");
+  });
+
+  // P1 WIGA Task 9（REQ-WIGA-07）：info 只读分区可读，顶部告警条与批量面
+  // 只数 gate（info 不进待处理计数）。
+  it("shows plan confirmation without increasing actionable count", () => {
+    const info = infoItem("plan_confirmed:plan_1:compile_1", "plan_1");
+    renderShell({ inbox: [info], onGoToInbox: () => {} });
+
+    expect(screen.getByText("Work Item Plan 已确认")).toBeInTheDocument();
+    expect(screen.getByText("进度信息")).toBeInTheDocument();
+    expect(screen.queryByText(/待处理 1 项/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /批量确认 1 项/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps a gate readable next to plan confirmation info", () => {
+    renderShell({ inbox: [gateItem("s1"), infoItem("plan_confirmed:plan_1:compile_1", "plan_1")] });
+
+    expect(screen.getByTestId("cockpit-inbox-item-gate")).toBeVisible();
+    expect(screen.getByText("Work Item Plan 已确认")).toBeVisible();
+    expect(screen.getByRole("alert")).toHaveTextContent("待处理 1 项");
+  });
+
+  it("hydrates existing info keys silently and toasts each new key once", async () => {
+    const existing = infoItem("plan_confirmed:plan_1:compile_1", "plan_1");
+    const view = renderShell({ inbox: [existing] });
+
+    // 首次 hydration：只显示，不弹提示。
+    expect(screen.getByText("Work Item Plan 已确认")).toBeInTheDocument();
+    expect(screen.queryByRole("status")).toBeNull();
+
+    // 同 key 重复刷新：仍不提示。
+    view.rerender(
+      <ShellWithInbox inbox={[infoItem("plan_confirmed:plan_1:compile_1", "plan_1")]} />,
+    );
+    expect(screen.queryByRole("status")).toBeNull();
+
+    // 新 compile key：提示一次。
+    view.rerender(
+      <ShellWithInbox
+        inbox={[
+          infoItem("plan_confirmed:plan_1:compile_1", "plan_1"),
+          infoItem("plan_confirmed:plan_1:compile_2", "plan_1"),
+        ]}
+      />,
+    );
+    expect(screen.getByRole("status")).toHaveTextContent("进度信息：Work Item Plan 已确认");
+
+    await act(async () => {
+      vi.advanceTimersByTime(5_000);
+    });
+    expect(screen.queryByRole("status")).toBeNull();
+
+    // 同 key 再刷新不重复提示。
+    view.rerender(
+      <ShellWithInbox
+        inbox={[
+          infoItem("plan_confirmed:plan_1:compile_1", "plan_1"),
+          infoItem("plan_confirmed:plan_1:compile_2", "plan_1"),
+        ]}
+      />,
+    );
+    expect(screen.queryByRole("status")).toBeNull();
   });
 });

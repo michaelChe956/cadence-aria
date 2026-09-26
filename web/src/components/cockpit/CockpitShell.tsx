@@ -110,6 +110,8 @@ export function CockpitShell({
   const currentSessionState = useWorkspaceStore();
   const [pulseItemIds, setPulseItemIds] = useState<ReadonlySet<string>>(() => new Set());
   const [toast, setToast] = useState<CockpitInboxItem | null>(null);
+  const [infoToast, setInfoToast] = useState<CockpitInboxItem | null>(null);
+  const knownInfoKeysRef = useRef<Set<string> | null>(null);
   const [notificationGuidance, setNotificationGuidance] = useState<NotificationGuidance>(null);
   const knownItemIdsRef = useRef(new Set<string>());
   const inboxBecameNonEmptyAtRef = useRef<number | null>(null);
@@ -149,6 +151,35 @@ export function CockpitShell({
       setToast(newlyOpened[0]);
     }
   }, [countedInbox, itemIds]);
+
+  // P1 WIGA Task 9（REQ-WIGA-07）：info 只读事实只对新 key 提醒一次——首次
+  // hydration（首个非空批次）只登记已知不提示；重复 GET 同 key 不再提示。
+  // info 不进 countedInbox，与告警条/favicon/系统通知互不影响。
+  useEffect(() => {
+    const infoItems = inbox.filter((item) => item.kind === "info");
+    if (knownInfoKeysRef.current === null) {
+      if (infoItems.length === 0) {
+        return;
+      }
+      knownInfoKeysRef.current = new Set(infoItems.map((item) => item.id));
+      return;
+    }
+    const known = knownInfoKeysRef.current;
+    const fresh = infoItems.filter((item) => !known.has(item.id));
+    for (const item of infoItems) {
+      known.add(item.id);
+    }
+    if (fresh.length > 0) {
+      setInfoToast(fresh[0]);
+    }
+  }, [inbox]);
+
+  useEffect(() => {
+    if (!infoToast) return;
+    const timer = window.setTimeout(() => setInfoToast(null), 5_000);
+    return () => window.clearTimeout(timer);
+  }, [infoToast]);
+
 
   useEffect(() => {
     if (!toast) return;
@@ -302,6 +333,14 @@ export function CockpitShell({
             className="fixed right-4 top-28 z-[100] max-w-sm rounded-md border border-[var(--aria-line-strong)] bg-[var(--aria-panel)] px-4 py-3 text-sm font-semibold text-[var(--aria-ink)] shadow-lg"
           >
             需要处理：{toast.title}
+          </div>
+        ) : null}
+        {infoToast && !toast ? (
+          <div
+            role="status"
+            className="fixed right-4 top-28 z-[100] max-w-sm rounded-md border border-emerald-300 bg-[var(--aria-panel)] px-4 py-3 text-sm font-semibold text-[var(--aria-ink)] shadow-lg"
+          >
+            进度信息：{infoToast.title}
           </div>
         ) : null}
         {settingsSlot === null ? (

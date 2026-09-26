@@ -2,9 +2,10 @@ import {
   AlertTriangle,
   Check,
   ChevronRight,
+  CircleCheck,
+  CircleAlert,
   ClipboardCopy,
   ClipboardList,
-  CircleAlert,
   ListChecks,
   Play,
   RotateCcw,
@@ -55,6 +56,7 @@ const KIND_GLYPH = {
   stopped: CircleAlert,
   hard_error: AlertTriangle,
   choice: ListChecks,
+  info: CircleCheck,
 } as const;
 
 // F-50 视觉 v2 §3：门禁条目与门卡同一视觉常量（中性底+琥珀左线）；stopped 维持
@@ -63,6 +65,7 @@ const KIND_CLASS = {
   gate: GATE_CARD_CLASS,
   stopped: "rounded-lg border border-slate-200 bg-gray-50 px-3 py-2",
   choice: GATE_CARD_CLASS,
+  info: "rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2",
 } as const;
 
 export function CockpitInbox({
@@ -76,6 +79,7 @@ export function CockpitInbox({
   onBulkConfirm,
   onChoiceRespond,
   emptyHint,
+  onOpenInfoSession,
   artifactVersions = [],
   leaseEvents = null,
   latestReviewSummary = null,
@@ -93,6 +97,8 @@ export function CockpitInbox({
   onChoiceRespond?: (item: CockpitInboxItem, payload: ChoiceResponsePayload) => void;
   /** 空收件箱时的引导文案；缺省渲染既有「暂无待处理项」。 */
   emptyHint?: string | null;
+  /** REQ-WIGA-07 Task 9：info 条目的 plan session 下钻（只读，无批量/危险面）。 */
+  onOpenInfoSession?: (sessionId: string) => void;
   artifactVersions?: readonly ArtifactVersionSummary[];
   /** REQ-DLS-03：STALE 错误条引用的最近租约转移事件（诊断端点拉取，缺省不渲染）。 */
   leaseEvents?: readonly LeaseDiagnosticsEvent[] | null;
@@ -143,11 +149,15 @@ export function CockpitInbox({
   // 不再内嵌同名标题；滚动归抽屉 body（唯一滚动容器），本 section 不自带
   // overflow-auto。条目按「连接问题 / 需要人工处理」语义分组，空组不留壳。
   const connectionItems = items.filter((item) => item.kind === "hard_error");
-  const humanItems = items.filter((item) => item.kind !== "hard_error");
+  const humanItems = items.filter(
+    (item) => item.kind !== "hard_error" && item.kind !== "info",
+  );
+  const infoItems = items.filter((item) => item.kind === "info");
   const rowProps = (item: CockpitInboxItem) => ({
     item,
     actions,
     onChoiceRespond,
+    onOpenInfoSession,
     onTakeover,
     onRetry,
     actionable: actionableSessionId === cockpitInboxItemSessionId(item.id),
@@ -222,6 +232,16 @@ export function CockpitInbox({
               ))}
             </div>
           ) : null}
+          {infoItems.length > 0 ? (
+            <div className="space-y-1.5">
+              <h3 className="text-xs font-medium uppercase tracking-wider text-slate-500">
+                进度信息
+              </h3>
+              {infoItems.map((item) => (
+                <CockpitInboxRow key={item.id} {...rowProps(item)} />
+              ))}
+            </div>
+          ) : null}
         </div>
       )}
     </section>
@@ -232,6 +252,7 @@ function CockpitInboxRow({
   item,
   actions,
   onChoiceRespond,
+  onOpenInfoSession,
   onTakeover,
   onRetry,
   onRetakeLease,
@@ -249,6 +270,8 @@ function CockpitInboxRow({
   actions?: CockpitActionFacade;
   /** REQ-WIGA-05 Task 11：choice 就地作答回写通道（透传页面 REST 接线）。 */
   onChoiceRespond?: (item: CockpitInboxItem, payload: ChoiceResponsePayload) => void;
+  /** REQ-WIGA-07 Task 9：info 条目的 plan session 下钻（只读导航）。 */
+  onOpenInfoSession?: (sessionId: string) => void;
   onTakeover?: (sessionId: string) => Promise<void>;
   onRetry?: (item: CockpitInboxItem) => void;
   onRetakeLease?: () => void;
@@ -320,6 +343,15 @@ function CockpitInboxRow({
         ) : null}
         {takeoverError ? (
           <p className="aria-mono mt-1 text-xs text-[var(--aria-danger)]">{takeoverError}</p>
+        ) : null}
+        {item.kind === "info" && item.planInfo && onOpenInfoSession ? (
+          <button
+            type="button"
+            onClick={() => onOpenInfoSession(item.planInfo?.sessionId ?? sessionId ?? "")}
+            className="mt-2 min-h-9 rounded-md border border-emerald-300 bg-white px-2.5 py-1 text-xs font-semibold text-emerald-700 transition-colors duration-200 hover:bg-emerald-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+          >
+            查看 Plan 会话
+          </button>
         ) : null}
         {item.kind === "gate" && actions && actionable ? (
           <GateInboxActions

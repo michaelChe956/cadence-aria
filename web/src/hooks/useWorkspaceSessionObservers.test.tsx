@@ -285,4 +285,56 @@ describe("useWorkspaceSessionObservers", () => {
     await waitFor(() => expect(view.result.watchedSessionIds).toEqual(["child_001"]));
     expect(replaceWatchedSessionIds).toHaveBeenLastCalledWith(["child_001"]);
   });
+
+  // P1 WIGA Task 9（REQ-WIGA-07）：issue lifecycle 的 plan_confirmed_info 只
+  // 为 watched session 投影只读 info 条目：按 durable key 去重、新 key 追加、
+  // 不进 countedInbox（待处理计数不含 info）。
+  it("projects watched plan_confirmed_info into the display inbox only", async () => {
+    const info = (key: string, session_id: string) => ({
+      key,
+      plan_id: "plan_1",
+      session_id,
+      occurred_at: "2026-09-27T00:00:00Z",
+      title: "Work Item Plan 已确认",
+    });
+    const getIssueLifecycle = vi.fn(async () => ({
+      workspace_sessions: [summary("s1"), summary("s2"), summary("s3")],
+      coding_attempts: [],
+      // s1/s2 在 watch 窗口内（K=2 + current s1）；s9 不在。
+      plan_confirmed_info: [
+        info("plan_confirmed:plan_1:compile_1", "s1"),
+        info("plan_confirmed:plan_1:compile_1", "s1"),
+        info("plan_confirmed:plan_9:compile_9", "s9"),
+      ],
+    }));
+    const view = renderObserverHook(
+      observerOptions({ currentSessionId: "s1", watchLimit: 2, getIssueLifecycle }),
+    );
+
+    await waitFor(() => {
+      expect(view.result.inbox).toHaveLength(1);
+    });
+    expect(view.result.inbox[0]).toMatchObject({
+      id: "s1:info:plan_confirmed:plan_1:compile_1",
+      kind: "info",
+      title: "Work Item Plan 已确认",
+    });
+    expect(view.result.countedInbox).toHaveLength(0);
+
+    // 同 key 重复刷新不重复；新 key 追加为第二条。
+    getIssueLifecycle.mockResolvedValue({
+      workspace_sessions: [summary("s1"), summary("s2"), summary("s3")],
+      coding_attempts: [],
+      plan_confirmed_info: [
+        info("plan_confirmed:plan_1:compile_1", "s1"),
+        info("plan_confirmed:plan_1:compile_2", "s1"),
+        info("plan_confirmed:plan_9:compile_9", "s9"),
+      ],
+    });
+    view.rerender(observerOptions({ currentSessionId: "s1", watchLimit: 2, getIssueLifecycle }));
+    await waitFor(() => {
+      expect(view.result.inbox).toHaveLength(2);
+    });
+    expect(view.result.countedInbox).toHaveLength(0);
+  });
 });

@@ -1,6 +1,10 @@
 import { gateIdentityFromState } from "./cockpit-action-routing";
 import { protocolErrorCopy, STALE_DRIVER_LEASE_CODE } from "./protocol-error-copy";
-import type { ChoiceQuestion, WorkItemPlanHumanGateSnapshot } from "../api/types";
+import type {
+  ChoiceQuestion,
+  PlanConfirmedInfoItem,
+  WorkItemPlanHumanGateSnapshot,
+} from "../api/types";
 import type { CodingAttemptAddress } from "../api/types/coding";
 import type { ChatEntry } from "./chat-entries";
 import type {
@@ -457,7 +461,7 @@ export function selectGateProjection(state: WorkspaceWsState): GateProjection | 
   };
 }
 
-export type CockpitInboxKind = "gate" | "stopped" | "hard_error" | "choice";
+export type CockpitInboxKind = "gate" | "stopped" | "hard_error" | "choice" | "info";
 
 /**
  * P0 1.3（REQ-WIGA-05）Task 11：驾驶舱 choice 就地作答投影——workspace 侧
@@ -480,6 +484,18 @@ export interface ChoiceInboxProjection {
   status: "open" | "submitting" | "resolving" | "delivered" | "expired";
 }
 
+/**
+ * P1 WIGA Task 9（REQ-WIGA-07）：durable plan 确认 info 的只读投影——不进
+ * countedInbox/批量/危险操作，仅供「进度信息」分区显示与一次提醒。
+ */
+export interface PlanConfirmedInfoProjection {
+  key: string;
+  planId: string;
+  sessionId: string;
+  occurredAt: string;
+  title: string;
+}
+
 export interface CockpitInboxItem {
   id: string;
   kind: CockpitInboxKind;
@@ -487,7 +503,7 @@ export interface CockpitInboxItem {
   title: string;
   summary: string;
   triage: boolean;
-  source: "gate" | "session_status" | "protocol_error" | "engine_error" | "advance" | "choice";
+  source: "gate" | "session_status" | "protocol_error" | "engine_error" | "advance" | "choice" | "plan_confirmed_info",
   createdAt: string | null;
   gate: GateProjection | null;
   inlineError: { code: string; message: string } | null;
@@ -495,6 +511,8 @@ export interface CockpitInboxItem {
   choice: ChoiceInboxProjection | null;
   /** protocol_error 来源条目的机器码（如 STALE_DRIVER_LEASE）；其余来源缺省。 */
   protocolErrorCode?: string | null;
+  /** REQ-WIGA-07 Task 9：kind="info" 时的 plan 确认投影；其余 kind 缺省。 */
+  planInfo?: PlanConfirmedInfoProjection | null;
 }
 
 /** 裸 driver 抢走租约后的协议码——常量源头在 protocol-error-copy（F-50）。 */
@@ -502,6 +520,30 @@ export { STALE_DRIVER_LEASE_CODE } from "./protocol-error-copy";
 
 export function isStaleDriverLeaseItem(item: CockpitInboxItem): boolean {
   return item.source === "protocol_error" && item.protocolErrorCode === STALE_DRIVER_LEASE_CODE;
+}
+
+/** REQ-WIGA-07：durable plan_confirmed_info → 只读 info 收件箱条目。 */
+export function planConfirmedInfoItem(info: PlanConfirmedInfoItem): CockpitInboxItem {
+  return {
+    id: `${info.session_id}:info:${info.key}`,
+    kind: "info",
+    severity: 1,
+    title: info.title,
+    summary: `plan ${info.plan_id} 已确认 · 确认于 ${info.occurred_at}`,
+    triage: false,
+    source: "plan_confirmed_info",
+    createdAt: info.occurred_at,
+    gate: null,
+    inlineError: null,
+    choice: null,
+    planInfo: {
+      key: info.key,
+      planId: info.plan_id,
+      sessionId: info.session_id,
+      occurredAt: info.occurred_at,
+      title: info.title,
+    },
+  };
 }
 
 /** 收件箱条目 id（`${sessionId}:gate:${key}` 等形态）的会话归属；无会话前缀返回 null。 */

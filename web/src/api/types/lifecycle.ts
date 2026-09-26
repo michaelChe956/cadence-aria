@@ -105,6 +105,17 @@ export type IssueDeliverySummaryDto = {
   overall: "all_pushed" | "partial" | "none";
 };
 
+// P1（REQ-WIGA-07）Task 8：durable publication/compile + Confirmed 派生的只读
+// 确认信息。key 形如 plan_confirmed:{plan_id}:{compile_id}（稳定身份），
+// occurred_at 取成功事务 committed_at（不随 updated_at 变化）。
+export type PlanConfirmedInfoItem = {
+  key: string;
+  plan_id: string;
+  session_id: string;
+  occurred_at: string;
+  title: string;
+};
+
 export type IssueLifecycleResponse = {
   issue: ProductIssue;
   story_specs: StorySpec[];
@@ -117,6 +128,9 @@ export type IssueLifecycleResponse = {
   coding_attempts: CodingAttempt[];
   // 向后兼容：后端始终返回该字段；旧响应缺失时前端不渲染交付状态面板。
   delivery_summary?: IssueDeliverySummaryDto;
+  // P1（REQ-WIGA-07）：只读 plan 确认信息（0 或 1 条/issue）。additive：旧响应
+  // 缺失时前端按无 info 处理。
+  plan_confirmed_info?: PlanConfirmedInfoItem[];
 };
 
 export type GenerateStorySpecsRequest = ProviderWorkspaceConfigInput & {

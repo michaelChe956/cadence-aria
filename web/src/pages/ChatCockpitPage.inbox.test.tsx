@@ -34,15 +34,12 @@ import { ChatCockpitPage } from "./ChatCockpitPage";
 import { COCKPIT_HOTKEYS } from "../state/cockpit-operation-semantics";
 import { useOperationAuditStore } from "../state/operation-audit-store";
 import {
-  currentMockWorkspaceWs,
-  mockWorkspaceWs,
-} from "./ChatWorkspacePage.test-utils";
-import {
   bulkConfirmStart,
   cockpitInbox,
   cockpitObservedRecords,
   gateItem,
   hardErrorItem,
+  infoItem,
   installCockpitPageTestHooks,
   renderCockpit,
   renderCockpitWith,
@@ -50,6 +47,7 @@ import {
   timelineNode,
   watchSession,
 } from "./ChatCockpitPage.test-utils";
+import { currentMockWorkspaceWs, mockWorkspaceWs } from "./ChatWorkspacePage.test-utils";
 
 vi.mock("../state/bulk-confirm-store", () => ({
   useBulkConfirmStore: Object.assign(
@@ -865,5 +863,31 @@ describe("ChatCockpitPage", () => {
       },
     );
     expect(workspaceWs.sendChoiceResponse).not.toHaveBeenCalled();
+  });
+
+  // P1 WIGA Task 9（REQ-WIGA-07）：plan 确认 info 只读分区与 gate 同屏——
+  // info 不提供批量勾选/危险操作，下钻打开 plan 会话。
+  it("renders plan confirmation info read-only beside a gate with session drill-down", async () => {
+    const onOpenSession = vi.fn();
+    cockpitInbox.push(
+      gateItem("session_001", "gate_1"),
+      infoItem("plan_confirmed:plan_1:compile_1", "plan_1"),
+    );
+
+    renderCockpit("session_001", true, onOpenSession);
+
+    const inbox = screen.getByTestId("cockpit-inbox");
+    expect(await within(inbox).findByText("进度信息")).toBeInTheDocument();
+    expect(within(inbox).getByText("Work Item Plan 已确认")).toBeInTheDocument();
+    // gate 卡不被 info 遮挡，且各自在原分区。
+    expect(within(inbox).getByText("需要人工处理")).toBeInTheDocument();
+    expect(within(inbox).getAllByTestId("cockpit-inbox-item-gate").length).toBeGreaterThan(0);
+    // info 不提供批量勾选。
+    expect(
+      within(inbox).queryByLabelText("选择 Work Item Plan 已确认"),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(within(inbox).getByRole("button", { name: "查看 Plan 会话" }));
+    expect(onOpenSession).toHaveBeenCalledWith("session_001");
   });
 });

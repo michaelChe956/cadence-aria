@@ -7,6 +7,7 @@ import {
 import type {
   CodingAttempt,
   IssueLifecycleResponse,
+  PlanConfirmedInfoItem,
   ProductIssueListResponse,
   WorkspaceSessionSummary,
 } from "../api/types";
@@ -17,7 +18,10 @@ import {
   type WorkspaceObserverController,
   type WorkspaceObserverRecord,
 } from "../state/workspace-observer-store";
-import type { CockpitInboxItem } from "../state/workspace-cockpit-projection";
+import {
+  planConfirmedInfoItem,
+  type CockpitInboxItem,
+} from "../state/workspace-cockpit-projection";
 import type { WorkspaceWsState } from "../state/workspace-ws-store";
 
 export type CatalogRefreshTimer = number;
@@ -37,7 +41,10 @@ export interface WorkspaceSessionObserverOptions {
     issueId: string,
     projectId: string,
   ) => Promise<
-    Pick<IssueLifecycleResponse, "workspace_sessions" | "coding_attempts">
+    Pick<
+      IssueLifecycleResponse,
+      "workspace_sessions" | "coding_attempts" | "plan_confirmed_info"
+    >
   >;
   createController?: WorkspaceObserverControllerFactory;
   scheduleCatalogRefresh?: (callback: () => void, delayMs: number) => CatalogRefreshTimer;
@@ -77,6 +84,9 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
   >([]);
   const [extraSessionIds, setExtraSessionIds] = useState<readonly string[]>([]);
   const [codingAttempts, setCodingAttempts] = useState<readonly CodingAttempt[]>([]);
+  const [planConfirmedInfos, setPlanConfirmedInfos] = useState<readonly PlanConfirmedInfoItem[]>(
+    [],
+  );
   const controllerRef = useRef<WorkspaceObserverController | null>(null);
 
   if (controllerRef.current === null) {
@@ -111,7 +121,23 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
     }
     return observed;
   }, [currentSessionId, currentSessionState, observerRecords, watchedSessionIds]);
-  const inbox = useMemo(() => selectObservedInbox(records), [records]);
+
+  // P1 WIGA Task 9（REQ-WIGA-07）：只读 plan 确认 info——只保留当前 watched
+  // session 的条目，按 durable key 去重；不进 countedInbox（计数/批量隔离）。
+  const infoItems = useMemo(() => {
+    const byKey = new Map<string, CockpitInboxItem>();
+    for (const info of planConfirmedInfos) {
+      if (!watchedSessionIds.includes(info.session_id) || byKey.has(info.key)) {
+        continue;
+      }
+      byKey.set(info.key, planConfirmedInfoItem(info));
+    }
+    return Array.from(byKey.values());
+  }, [planConfirmedInfos, watchedSessionIds]);
+  const inbox = useMemo(
+    () => [...selectObservedInbox(records), ...infoItems],
+    [records, infoItems],
+  );
   const countedRecords = useMemo(
     () => records.filter((record) => watchedSessionIds.includes(record.sessionId)),
     [records, watchedSessionIds],
@@ -142,6 +168,10 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
             // 轮询副产物，无额外请求）；驾驶舱按需拉 attempt snapshot 作答 choice。
             setCodingAttempts(
               lifecycles.flatMap((lifecycle) => lifecycle.coding_attempts ?? []),
+            );
+            // REQ-WIGA-07 Task 9：info 只读投影源（durable key 幂等去重在 memo）。
+            setPlanConfirmedInfos(
+              lifecycles.flatMap((lifecycle) => lifecycle.plan_confirmed_info ?? []),
             );
           }
         } catch {

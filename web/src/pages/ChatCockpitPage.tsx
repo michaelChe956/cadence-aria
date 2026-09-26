@@ -1269,6 +1269,7 @@ export function ChatCockpitPage({
           actionableSessionId={sessionId}
           takeoverButtonRef={takeoverButtonRef}
           onBulkConfirm={handleBulkConfirm}
+          onOpenInfoSession={onOpenSession}
           emptyHint={inboxEmptyHint}
           artifactVersions={selectedState?.artifactVersions}
           latestReviewSummary={latestReviewReport ?? null}
