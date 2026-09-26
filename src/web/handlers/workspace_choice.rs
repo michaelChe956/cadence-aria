@@ -335,11 +335,10 @@ mod tests {
         (release, seen)
     }
 
-    // 交接注记（T8 收尾项）：202→200 收敛链在本机单测环境出现挂起（>60s），
-    // 疑点在受控 waiter 的 Notify 时序与 manager finalizer 的交互；行为断言
-    // 与其余 HTTP 映射测试均已绿，本用例交由下一棒定位后解除 ignore。
+    // T8 遗留已修复：finalizer 并发摘除 claim 后，wait_choice_receipt 终态
+    // 临界区曾嵌套调用 choice_status（二次 state.lock() → 自死锁）。该场景
+    // 正是本用例的 202→retry→200 收敛链，现作为回归测试常驻。
     #[tokio::test]
-    #[ignore = "T8 遗留：202-then-retry-200 收敛链挂起待定位（claim/finalizer 时序）"]
     async fn workspace_choice_http_202_then_retry_200_only_after_waiter_consumes() {
         let fixture = choice_http_fixture("choice_http").await;
         let (release, seen) = paused_provider_waiter(fixture.command_rx);

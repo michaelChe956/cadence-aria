@@ -483,7 +483,18 @@ impl WorkspaceSessionManager {
             }
             return Ok(reply_status(record, choice_id, &incarnation));
         }
-        self.choice_status(choice_id, command_id)
+        // T8 挂起根因修复：此处在 state 锁临界区内。finalizer 可能已并发
+        // finalize_delivered_choice 摘除 claim（本方法 get_mut 落空的场景），
+        // 若在此调用 self.choice_status（内部再次 state.lock()），std Mutex
+        // 不可重入 → 自死锁楔死整个 manager。改为在已持锁的临界区内直接
+        // 查终态登记表，语义与 choice_status 的 finished 分支一致。
+        state
+            .finished_choice_status
+            .iter()
+            .find(|status| status.command_id == command_id && status.choice_id == choice_id)
+            .cloned()
+            .map(Ok)
+            .unwrap_or(Err(ChoiceReplyError::Unknown))
     }
 }
 
