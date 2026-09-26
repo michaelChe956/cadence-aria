@@ -1083,13 +1083,14 @@ async fn sc_delegated_rerun_relay_is_not_drained_by_gate_node_kind_collision() {
     persist_review_rounds(&fixture, 1);
     // 只 drain 不接力：委托接力由本测试手动发起（确定性复现 0018 碰撞）。
     let mut engine_rx = engine_rx;
-    let drain_engine = tokio::spawn(async move {
-        while engine_rx.recv().await.is_some() {}
-    });
+    let drain_engine = tokio::spawn(async move { while engine_rx.recv().await.is_some() {} });
 
     let author_starts = Arc::new(AtomicUsize::new(0));
     let author = Arc::new(ScSequenceAuthorProvider {
-        outputs: vec![single_candidate_markdown(&fixture.story_id, &fixture.design_id)],
+        outputs: vec![single_candidate_markdown(
+            &fixture.story_id,
+            &fixture.design_id,
+        )],
         starts: author_starts.clone(),
         held: Mutex::new(Vec::new()),
     });
@@ -1233,9 +1234,7 @@ async fn sc_delegated_rerun_relay_failure_falls_back_to_human_gate_durable() {
         ProviderRunFixture::new_with_engine_rx(WorkItemPlanFlowKind::SingleCandidate);
     persist_review_rounds(&fixture, 1);
     let mut engine_rx = engine_rx;
-    let drain_engine = tokio::spawn(async move {
-        while engine_rx.recv().await.is_some() {}
-    });
+    let drain_engine = tokio::spawn(async move { while engine_rx.recv().await.is_some() {} });
 
     let author_starts = Arc::new(AtomicUsize::new(0));
     let author = Arc::new(ScSequenceAuthorProvider {
@@ -1243,8 +1242,11 @@ async fn sc_delegated_rerun_relay_failure_falls_back_to_human_gate_durable() {
             single_candidate_markdown(&fixture.story_id, &fixture.design_id),
             // 修订候选必须与首轮不同（candidate 哈希变更），否则复评落回同一
             // review cycle 触发 scope 违规（真实链的 provider 输出天然不同）。
-            single_candidate_markdown(&fixture.story_id, &fixture.design_id)
-                .replacen("### Notes", "### Notes\n- 修订轮：收紧验证计划。", 1),
+            single_candidate_markdown(&fixture.story_id, &fixture.design_id).replacen(
+                "### Notes",
+                "### Notes\n- 修订轮：收紧验证计划。",
+                1,
+            ),
         ],
         starts: author_starts.clone(),
         held: Mutex::new(Vec::new()),
@@ -1354,10 +1356,13 @@ async fn sc_delegated_rerun_relay_failure_falls_back_to_human_gate_durable() {
     // 无附件接力 spawn 失败（author provider 不在 registry）：0018 现场的
     // 「run 未启动且错误不可见」输入形态。
     let mut relay_registry = ProviderRegistry::new();
-    relay_registry.register(ProviderName::Codex, Arc::new(PendingStartProvider {
-        starts: Arc::new(AtomicUsize::new(0)),
-        held_event_senders: Arc::new(Mutex::new(Vec::new())),
-    }));
+    relay_registry.register(
+        ProviderName::Codex,
+        Arc::new(PendingStartProvider {
+            starts: Arc::new(AtomicUsize::new(0)),
+            held_event_senders: Arc::new(Mutex::new(Vec::new())),
+        }),
+    );
     let mut relay_context = ProviderRunContext::test_fixture(
         Arc::new(relay_registry),
         fixture.engine.clone(),
@@ -1392,8 +1397,7 @@ async fn sc_delegated_rerun_relay_failure_falls_back_to_human_gate_durable() {
                 .lifecycle
                 .get_workspace_session(&fixture.record.id)
                 .expect("reload session");
-            if durable.status == crate::product::models::WorkspaceSessionStatus::WaitingForHuman
-            {
+            if durable.status == crate::product::models::WorkspaceSessionStatus::WaitingForHuman {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -1542,11 +1546,12 @@ async fn sc_delegated_rerun_orphan_reopens_human_gate_on_manager_recreate() {
         ProviderRunFixture::new_with_engine_rx(WorkItemPlanFlowKind::SingleCandidate);
     persist_review_rounds(&fixture, 1);
     let mut engine_rx = engine_rx;
-    let drain = tokio::spawn(async move {
-        while engine_rx.recv().await.is_some() {}
-    });
+    let drain = tokio::spawn(async move { while engine_rx.recv().await.is_some() {} });
     let author = Arc::new(ScSequenceAuthorProvider {
-        outputs: vec![single_candidate_markdown(&fixture.story_id, &fixture.design_id)],
+        outputs: vec![single_candidate_markdown(
+            &fixture.story_id,
+            &fixture.design_id,
+        )],
         starts: Arc::new(AtomicUsize::new(0)),
         held: Mutex::new(Vec::new()),
     });
@@ -1601,13 +1606,14 @@ async fn sc_delegated_rerun_orphan_reopens_human_gate_on_manager_recreate() {
     }
 
     let root = fixture.root_path();
-    let state = WebAppState::new(root.clone(), crate::web::runtime::WebRuntime::new_fake(root));
-    let manager = crate::web::workspace_session::WorkspaceSessionManager::create(
-        &state,
-        &fixture.record.id,
-    )
-    .await
-    .expect("manager recreate must succeed");
+    let state = WebAppState::new(
+        root.clone(),
+        crate::web::runtime::WebRuntime::new_fake(root),
+    );
+    let manager =
+        crate::web::workspace_session::WorkspaceSessionManager::create(&state, &fixture.record.id)
+            .await
+            .expect("manager recreate must succeed");
     let durable = fixture
         .lifecycle
         .get_workspace_session(&fixture.record.id)

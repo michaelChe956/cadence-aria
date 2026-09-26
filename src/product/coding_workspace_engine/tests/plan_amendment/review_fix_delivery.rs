@@ -315,10 +315,9 @@ async fn coding_amendment_concurrent_recovery_reconciles_one_durable_delivery() 
         .expect("seed observation event must be enqueued")
         .unwrap();
     crate::web::coding_ws_handler::delivery_ack::confirm_plan_amendment_socket_write(&seeded_event);
-    let observer_finished =
-        tokio::time::timeout(std::time::Duration::from_secs(2), seed_rx.recv())
-            .await
-            .expect("seed observer must drain and close the delivery channel");
+    let observer_finished = tokio::time::timeout(std::time::Duration::from_secs(2), seed_rx.recv())
+        .await
+        .expect("seed observer must drain and close the delivery channel");
     assert!(observer_finished.is_none());
     drop(failpoint);
     let failed = fixture
@@ -343,13 +342,18 @@ async fn coding_amendment_concurrent_recovery_reconciles_one_durable_delivery() 
     );
     let left_attempt = failed.clone();
     let left_manifest = fixture.manifest.clone();
-    let left =
-        tokio::spawn(async move { left_engine.apply_plan_amendment(&left_attempt, &left_manifest).await });
+    let left = tokio::spawn(async move {
+        left_engine
+            .apply_plan_amendment(&left_attempt, &left_manifest)
+            .await
+    });
     let right_attempt = failed.clone();
     let right_manifest = fixture.manifest.clone();
-    let right = tokio::spawn(
-        async move { right_engine.apply_plan_amendment(&right_attempt, &right_manifest).await },
-    );
+    let right = tokio::spawn(async move {
+        right_engine
+            .apply_plan_amendment(&right_attempt, &right_manifest)
+            .await
+    });
     let event = tokio::time::timeout(std::time::Duration::from_secs(2), async {
         tokio::select! {
             event = left_event_rx.recv() => event.unwrap(),
@@ -499,7 +503,10 @@ async fn coding_amendment_delivery_store_lists_own_deliveries_and_rejects_foreig
         .store
         .load_or_prepare_plan_amendment_delivery(&attempt, &fixture.manifest.id)
         .unwrap();
-    let listed = fixture.store.list_plan_amendment_deliveries(&attempt).unwrap();
+    let listed = fixture
+        .store
+        .list_plan_amendment_deliveries(&attempt)
+        .unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].amendment_id, fixture.manifest.id);
     assert_eq!(
@@ -531,7 +538,10 @@ async fn coding_amendment_delivery_store_lists_own_deliveries_and_rejects_foreig
     )
     .unwrap();
     assert!(matches!(
-        fixture.store.list_plan_amendment_deliveries(&attempt).unwrap_err(),
+        fixture
+            .store
+            .list_plan_amendment_deliveries(&attempt)
+            .unwrap_err(),
         crate::product::json_store::ProductStoreError::IdentityMismatch { .. }
     ));
 }
@@ -592,7 +602,8 @@ async fn coding_amendment_redelivery_reuses_event_until_real_ack() {
             );
         }
     });
-    let engine2 = CodingWorkspaceEngine::new(fixture.store.clone(), GitWorkspaceService::new(), tx2);
+    let engine2 =
+        CodingWorkspaceEngine::new(fixture.store.clone(), GitWorkspaceService::new(), tx2);
     assert_eq!(
         engine2
             .redeliver_undelivered_plan_amendments(&resumed)
@@ -612,7 +623,8 @@ async fn coding_amendment_redelivery_reuses_event_until_real_ack() {
 
     // 幂等：已 Delivered 再触发 => 0 条、无新事件。
     let (tx3, mut rx3) = mpsc::channel(8);
-    let engine3 = CodingWorkspaceEngine::new(fixture.store.clone(), GitWorkspaceService::new(), tx3);
+    let engine3 =
+        CodingWorkspaceEngine::new(fixture.store.clone(), GitWorkspaceService::new(), tx3);
     assert_eq!(
         engine3
             .redeliver_undelivered_plan_amendments(&resumed)
@@ -667,7 +679,8 @@ async fn coding_amendment_redelivery_skips_orphan_records_without_manifest() {
             );
         }
     });
-    let engine2 = CodingWorkspaceEngine::new(fixture.store.clone(), GitWorkspaceService::new(), tx2);
+    let engine2 =
+        CodingWorkspaceEngine::new(fixture.store.clone(), GitWorkspaceService::new(), tx2);
     assert_eq!(
         engine2
             .redeliver_undelivered_plan_amendments(&resumed)

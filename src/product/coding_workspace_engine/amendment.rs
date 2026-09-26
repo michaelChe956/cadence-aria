@@ -755,10 +755,8 @@ impl CodingWorkspaceEngine {
                 // 其余记录的补投递。
                 continue;
             };
-            if plan.active_revision_id.as_deref()
-                != Some(manifest.new_plan_revision_id.as_str())
-            {
- // 非当前修订：amendment 已被后续修订取代，不再补投。
+            if plan.active_revision_id.as_deref() != Some(manifest.new_plan_revision_id.as_str()) {
+                // 非当前修订：amendment 已被后续修订取代，不再补投。
                 continue;
             }
             if self

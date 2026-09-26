@@ -87,7 +87,9 @@ async fn hub_zero_fanout_settles_amendment_waiter_unsent() {
         .expect("zero fan-out must settle immediately")
         .expect_err("zero fan-out must not acknowledge delivery");
     assert!(
-        error.to_string().contains("plan_amendment_socket_write_failed"),
+        error
+            .to_string()
+            .contains("plan_amendment_socket_write_failed"),
         "unexpected settlement error: {error}"
     );
 }

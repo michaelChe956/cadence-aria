@@ -252,7 +252,10 @@ async fn zero_socket_plan_amendment_activation_resumes_attempt_with_unsent_deliv
         "coding_session_state"
     );
     let amendment_event = receive_type(&mut coding_ws, "plan_amendment_updated").await;
-    assert_eq!(amendment_event["event_id"], serde_json::json!(delivery.event_id));
+    assert_eq!(
+        amendment_event["event_id"],
+        serde_json::json!(delivery.event_id)
+    );
     let delivered = timeout(Duration::from_secs(3), async {
         loop {
             let current = store

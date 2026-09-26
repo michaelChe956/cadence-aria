@@ -124,7 +124,10 @@ async fn assert_runner_recovers_amendment_before_provider(state: RunnerRecoveryS
             }
         })
         .await;
-        assert!(observed.is_ok(), "observer amendment event missing for {state:?}");
+        assert!(
+            observed.is_ok(),
+            "observer amendment event missing for {state:?}"
+        );
         amendment_updates += 1;
     }
     assert_eq!(amendment_updates, 1, "{state:?}");

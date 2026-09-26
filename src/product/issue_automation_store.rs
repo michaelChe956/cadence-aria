@@ -619,10 +619,7 @@ mod tests {
             )
             .unwrap_err();
         assert_conflict(error, created.policy_revision);
-        assert_eq!(
-            store.get("project_1", "issue_1").unwrap().unwrap(),
-            created
-        );
+        assert_eq!(store.get("project_1", "issue_1").unwrap().unwrap(), created);
 
         // 异 selection_key / 异 target 携当前 revision 同样冲突。
         let error = store

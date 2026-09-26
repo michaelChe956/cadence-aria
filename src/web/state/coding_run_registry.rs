@@ -4,10 +4,10 @@ use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
-use crate::product::coding_models::CodingExecutionAttempt;
-use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::cross_cutting::choice_delivery::{ChoiceDeliverySignal, ChoiceReplyState};
 use crate::cross_cutting::streaming_provider::ChoiceAnswerData;
+use crate::product::coding_models::CodingExecutionAttempt;
+use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::web::choice_reply::{ChoiceReplyStatus, ChoiceResponseRequest};
 use crate::web::workspace_session::ChoiceReplyError;
 
@@ -100,10 +100,7 @@ fn coding_legacy_fields_from_answers(
     (selected, free_text)
 }
 
-fn coding_claim_status(
-    record: &CodingChoiceClaimRecord,
-    choice_id: &str,
-) -> ChoiceReplyStatus {
+fn coding_claim_status(record: &CodingChoiceClaimRecord, choice_id: &str) -> ChoiceReplyStatus {
     ChoiceReplyStatus {
         command_id: record.command_id.clone(),
         expected_run_id: record.incarnation.clone(),
@@ -117,10 +114,7 @@ fn push_coding_finished_status(
     key: &CodingAttemptRunKey,
     status: ChoiceReplyStatus,
 ) {
-    let queue = inner
-        .finished_choice_status
-        .entry(key.clone())
-        .or_default();
+    let queue = inner.finished_choice_status.entry(key.clone()).or_default();
     queue.push_back(status);
     while queue.len() > CODING_FINISHED_CHOICE_STATUS_CAP {
         queue.pop_front();
@@ -137,7 +131,10 @@ fn retire_coding_choice_claims(inner: &mut CodingRunRegistryInner, key: &CodingA
         .map(|(_, choice_id)| choice_id.clone())
         .collect();
     for choice_id in keys {
-        if let Some(mut record) = inner.choice_claims.remove(&(key.clone(), choice_id.clone())) {
+        if let Some(mut record) = inner
+            .choice_claims
+            .remove(&(key.clone(), choice_id.clone()))
+        {
             record.receipt.expire();
             record.status = ChoiceReplyState::Expired;
             push_coding_finished_status(
@@ -541,10 +538,9 @@ impl CodingRunRegistry {
             .finished_choice_status
             .get(attempt_key)
             .and_then(|queue| {
-                queue
-                    .iter()
-                    .find(|status| status.command_id == request.command_id
-                        && status.choice_id == choice_id)
+                queue.iter().find(|status| {
+                    status.command_id == request.command_id && status.choice_id == choice_id
+                })
             })
         {
             if finished.expected_run_id == incarnation {
@@ -606,8 +602,7 @@ impl CodingRunRegistry {
                 record.incarnation.clone(),
             )
         };
-        let (selected_option_ids, free_text) =
-            coding_legacy_fields_from_answers(&request.answers);
+        let (selected_option_ids, free_text) = coding_legacy_fields_from_answers(&request.answers);
         let sent = command_tx
             .send(CodingRunnerCommand::ChoiceResponse {
                 id: choice_id.to_string(),
@@ -726,17 +721,15 @@ impl CodingRunRegistry {
         let Some(mut observer) = observer else {
             return self.choice_status(attempt_key, choice_id, command_id);
         };
-        let final_state = match tokio::time::timeout(
-            deadline,
-            coding_wait_terminal_choice_state(&mut observer),
-        )
-        .await
-        {
-            Ok(state) => state,
-            Err(_) => {
-                return self.choice_status(attempt_key, choice_id, command_id);
-            }
-        };
+        let final_state =
+            match tokio::time::timeout(deadline, coding_wait_terminal_choice_state(&mut observer))
+                .await
+            {
+                Ok(state) => state,
+                Err(_) => {
+                    return self.choice_status(attempt_key, choice_id, command_id);
+                }
+            };
         let mut inner = self.inner.lock().expect("coding run registry lock");
         let key = (attempt_key.clone(), choice_id.to_string());
         if let Some(record) = inner.choice_claims.get_mut(&key) {
@@ -1143,7 +1136,11 @@ mod tests {
         // 旧 expected_run_id（异 incarnation）→ Expired。
         assert_eq!(
             registry
-                .claim_choice(&key, "ch-1", &choice_request("cmd-old", "stale-incarnation"))
+                .claim_choice(
+                    &key,
+                    "ch-1",
+                    &choice_request("cmd-old", "stale-incarnation")
+                )
                 .unwrap_err(),
             ChoiceReplyError::Expired
         );
@@ -1155,13 +1152,18 @@ mod tests {
             ChoiceReplyError::Expired
         );
         assert_eq!(
-            registry.choice_status(&key, "ch-1", "cmd-one").unwrap().state,
+            registry
+                .choice_status(&key, "ch-1", "cmd-one")
+                .unwrap()
+                .state,
             ChoiceReplyState::Expired
         );
 
         // 未知 command → Unknown（404 语义）。
         assert_eq!(
-            registry.choice_status(&key, "ch-1", "cmd-unknown").unwrap_err(),
+            registry
+                .choice_status(&key, "ch-1", "cmd-unknown")
+                .unwrap_err(),
             ChoiceReplyError::Unknown
         );
     }

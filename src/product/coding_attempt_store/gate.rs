@@ -880,7 +880,11 @@ mod tests {
     use crate::product::models::ProviderName;
     use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 
-    fn fixture_attempt() -> (tempfile::TempDir, CodingAttemptStore, CodingExecutionAttempt) {
+    fn fixture_attempt() -> (
+        tempfile::TempDir,
+        CodingAttemptStore,
+        CodingExecutionAttempt,
+    ) {
         let tmp = tempfile::tempdir().unwrap();
         let store = CodingAttemptStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
         let attempt = store
@@ -1004,10 +1008,12 @@ mod tests {
         assert_eq!(response.answers[1].free_text.as_deref(), Some("按一轮即可"));
 
         // resolve 后 open 列表收敛为空。
-        assert!(store
-            .list_open_choice_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
-            .unwrap()
-            .is_empty());
+        assert!(
+            store
+                .list_open_choice_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

@@ -185,9 +185,7 @@ pub(crate) async fn apply_human_gate_termination(
         engine.handle_human_gate_termination(decision).await
     };
     match outcome {
-        Ok(HumanGateCloseOutcome::Busy { turn_id }) => {
-            HumanGateTerminationEffect::Busy { turn_id }
-        }
+        Ok(HumanGateCloseOutcome::Busy { turn_id }) => HumanGateTerminationEffect::Busy { turn_id },
         Ok(HumanGateCloseOutcome::Confirmed) => HumanGateTerminationEffect::Confirmed,
         Ok(HumanGateCloseOutcome::Abandoned) => HumanGateTerminationEffect::Abandoned,
         // F7 项 2：先到者已关门，迟到 confirm 幂等 no-op；可见提示事件由 engine
@@ -316,9 +314,7 @@ pub(crate) async fn handle_human_gate_termination_from_handler(
             message,
             context: findings_context,
         }),
-        HumanGateTerminationEffect::EngineError(message) => {
-            Some(WsOutMessage::Error { message })
-        }
+        HumanGateTerminationEffect::EngineError(message) => Some(WsOutMessage::Error { message }),
     };
     if let Some(message) = message {
         let _ = send_json_outbound(&outbound_tx, &message).await;

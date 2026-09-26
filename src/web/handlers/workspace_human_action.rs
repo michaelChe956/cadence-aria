@@ -76,7 +76,11 @@ async fn handle_request(
 ) -> ApiResult<HumanActionStatus> {
     let (command_id, expected_gate_id) = command_and_gate(&request);
     match request {
-        HumanActionRequest::Feedback { command_id, feedback, .. } => {
+        HumanActionRequest::Feedback {
+            command_id,
+            feedback,
+            ..
+        } => {
             let effect = apply_human_gate_feedback(
                 engine,
                 HumanGateFeedbackInput {
@@ -147,9 +151,8 @@ async fn handle_request(
                 } => Err(ApiError::runtime(
                     "single_candidate_approval_compile_failed",
                     message,
-                    findings_context.unwrap_or_else(|| {
-                        json!({ "command_id": command_id, "gate_id": gate_id })
-                    }),
+                    findings_context
+                        .unwrap_or_else(|| json!({ "command_id": command_id, "gate_id": gate_id })),
                 )),
                 HumanGateTerminationEffect::EngineError(message) => Err(ApiError::runtime(
                     "human_action_engine_error",
@@ -158,7 +161,12 @@ async fn handle_request(
                 )),
             }
         }
-        HumanActionRequest::CompileRecovery { command_id, action, reason, .. } => {
+        HumanActionRequest::CompileRecovery {
+            command_id,
+            action,
+            reason,
+            ..
+        } => {
             let outcome = {
                 let mut engine = engine.lock().await;
                 engine
@@ -179,14 +187,24 @@ async fn handle_request(
 
 fn command_and_gate(request: &HumanActionRequest) -> (String, String) {
     match request {
-        HumanActionRequest::Approve { command_id, expected_gate_id }
-        | HumanActionRequest::Abandon { command_id, expected_gate_id } => {
-            (command_id.clone(), expected_gate_id.clone())
+        HumanActionRequest::Approve {
+            command_id,
+            expected_gate_id,
         }
-        HumanActionRequest::Feedback { command_id, expected_gate_id, .. }
-        | HumanActionRequest::CompileRecovery { command_id, expected_gate_id, .. } => {
-            (command_id.clone(), expected_gate_id.clone())
+        | HumanActionRequest::Abandon {
+            command_id,
+            expected_gate_id,
+        } => (command_id.clone(), expected_gate_id.clone()),
+        HumanActionRequest::Feedback {
+            command_id,
+            expected_gate_id,
+            ..
         }
+        | HumanActionRequest::CompileRecovery {
+            command_id,
+            expected_gate_id,
+            ..
+        } => (command_id.clone(), expected_gate_id.clone()),
     }
 }
 

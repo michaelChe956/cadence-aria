@@ -29,13 +29,12 @@ use crate::product::coding_evaluation_context::{
 };
 use crate::product::coding_models::{
     CodeReviewReport, CodingAgentRole, CodingAttemptStatus, CodingChatEntry, CodingChoiceOption,
-    CodingChoiceQuestion,
-    CodingContextNote, CodingEntryType, CodingExecutionAttempt, CodingExecutionStage,
-    CodingGateAction, CodingGateActionType, CodingGateRequired, CodingProviderPermissionMode,
-    CodingProviderRole, CodingReworkInstruction, CodingRoleRun, CodingRoleRunEventType,
-    CodingRoleRunStatus, CodingRoleRunTrigger, CodingTimelineNode, CodingTimelineNodeStatus,
-    FindingSeverity, InternalPrReview, PushStatus, ReviewFinding, ReviewRequest, ReviewRequestKind,
-    ReviewRequestOwnerKind, ReviewVerdict,
+    CodingChoiceQuestion, CodingContextNote, CodingEntryType, CodingExecutionAttempt,
+    CodingExecutionStage, CodingGateAction, CodingGateActionType, CodingGateRequired,
+    CodingProviderPermissionMode, CodingProviderRole, CodingReworkInstruction, CodingRoleRun,
+    CodingRoleRunEventType, CodingRoleRunStatus, CodingRoleRunTrigger, CodingTimelineNode,
+    CodingTimelineNodeStatus, FindingSeverity, InternalPrReview, PushStatus, ReviewFinding,
+    ReviewRequest, ReviewRequestKind, ReviewRequestOwnerKind, ReviewVerdict,
 };
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::product::git_workspace_service::{GitWorkspaceError, GitWorkspaceService};

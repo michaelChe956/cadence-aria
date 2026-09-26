@@ -145,10 +145,7 @@ pub(crate) fn spawn_undelivered_amendment_redelivery(
             crate::product::git_workspace_service::GitWorkspaceService::new(),
             event_tx,
         );
-        if let Err(error) = engine
-            .redeliver_undelivered_plan_amendments(&attempt)
-            .await
-        {
+        if let Err(error) = engine.redeliver_undelivered_plan_amendments(&attempt).await {
             tracing::warn!(%error, "plan_amendment_delivery_redelivery_failed");
         }
     });

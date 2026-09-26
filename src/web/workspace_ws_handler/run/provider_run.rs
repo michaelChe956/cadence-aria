@@ -45,8 +45,7 @@ pub(crate) async fn spawn_provider_run_from_event(
         }
     }
 
-    let outcome =
-        spawn_provider_run_from_handler(run_context.clone(), run_kind, outbound_tx).await;
+    let outcome = spawn_provider_run_from_handler(run_context.clone(), run_kind, outbound_tx).await;
     if let Err(message) = &outcome {
         // F2（REQ-WIGA-05，0018 现场）：无附件 relay spawn 失败/被拒此前只回丢弃
         // 通道（outbound 无订阅者）——错误既不回 REST 也不落 durable，委托态会话

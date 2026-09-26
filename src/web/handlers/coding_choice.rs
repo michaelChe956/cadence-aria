@@ -121,7 +121,7 @@ mod tests {
         CodingAttemptStore, CreateChoiceGateInput, CreateCodingAttemptInput,
     };
     use crate::product::coding_models::{
-        CodingChoiceOption, CodingChoiceQuestion, CodingChoiceGateStatus, CodingExecutionStage,
+        CodingChoiceGateStatus, CodingChoiceOption, CodingChoiceQuestion, CodingExecutionStage,
         CodingProviderRole,
     };
     use crate::product::coding_workspace_runner::CodingRunnerCommand;
@@ -191,10 +191,7 @@ mod tests {
                     provider: ProviderName::Fake,
                     source: "provider".to_string(),
                     prompt: "拆分方案确认".to_string(),
-                    options: vec![
-                        choice_option("a", "方案 A"),
-                        choice_option("b", "方案 B"),
-                    ],
+                    options: vec![choice_option("a", "方案 A"), choice_option("b", "方案 B")],
                     allow_multiple: false,
                     allow_free_text: false,
                     questions: vec![
@@ -405,7 +402,13 @@ mod tests {
         // fixture 不复刻 engine 循环，此处不伪造该断言。
 
         // GET 状态查询 Delivered → 200。
-        let (get_code, get_body) = get_status(&fixture.router, fixture.attempt_id.as_str(), "choice-http-1", "cmd-one").await;
+        let (get_code, get_body) = get_status(
+            &fixture.router,
+            fixture.attempt_id.as_str(),
+            "choice-http-1",
+            "cmd-one",
+        )
+        .await;
         assert_eq!(get_code, StatusCode::OK);
         assert_eq!(get_body["state"], "delivered");
     }
@@ -425,7 +428,9 @@ mod tests {
                     .method("POST")
                     .uri(uri)
                     .header("content-type", "application/json")
-                    .body(Body::from(request_body("cmd-x", &fixture.incarnation).to_string()))
+                    .body(Body::from(
+                        request_body("cmd-x", &fixture.incarnation).to_string(),
+                    ))
                     .unwrap(),
             )
             .await
@@ -433,7 +438,13 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
         // unknown command 查询 → 404。
-        let (status, _) = get_status(&fixture.router, fixture.attempt_id.as_str(), "choice-http-1", "cmd-unknown").await;
+        let (status, _) = get_status(
+            &fixture.router,
+            fixture.attempt_id.as_str(),
+            "choice-http-1",
+            "cmd-unknown",
+        )
+        .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
 
         // 首个 claim 202；同 command 异 payload → 409；另一 command → 409。
@@ -447,7 +458,13 @@ mod tests {
         assert_eq!(status, StatusCode::ACCEPTED);
         let mut divergent = request_body("cmd-first", &fixture.incarnation);
         divergent["answers"][0]["selected_option_ids"] = serde_json::json!(["no"]);
-        let (status, body) = post_choice(&fixture.router, fixture.attempt_id.as_str(), "choice-http-1", &divergent).await;
+        let (status, body) = post_choice(
+            &fixture.router,
+            fixture.attempt_id.as_str(),
+            "choice-http-1",
+            &divergent,
+        )
+        .await;
         assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
         let (status, _) = post_choice(
             &fixture.router,
@@ -459,7 +476,10 @@ mod tests {
         assert_eq!(status, StatusCode::CONFLICT);
 
         // run 结束后同 command → 410（旧 run 许可无效，不可送新 run）。
-        fixture.state.coding_runs.remove(&fixture.attempt_key, fixture.run_id);
+        fixture
+            .state
+            .coding_runs
+            .remove(&fixture.attempt_key, fixture.run_id);
         let (status, body) = post_choice(
             &fixture.router,
             fixture.attempt_id.as_str(),
@@ -469,18 +489,20 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::GONE, "body: {body}");
         // 状态登记面：同 command 仍可见 Expired。
-        let (status, body) = get_status(&fixture.router, fixture.attempt_id.as_str(), "choice-http-1", "cmd-first").await;
+        let (status, body) = get_status(
+            &fixture.router,
+            fixture.attempt_id.as_str(),
+            "choice-http-1",
+            "cmd-first",
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["state"], "expired");
     }
 
-    async fn get_attempt_snapshot(
-        router: &axum::Router,
-        attempt_id: &str,
-    ) -> serde_json::Value {
-        let uri = format!(
-            "/api/projects/project_0001/issues/issue_0001/coding-attempts/{attempt_id}"
-        );
+    async fn get_attempt_snapshot(router: &axum::Router, attempt_id: &str) -> serde_json::Value {
+        let uri =
+            format!("/api/projects/project_0001/issues/issue_0001/coding-attempts/{attempt_id}");
         let response = router
             .clone()
             .oneshot(Request::get(uri).body(Body::empty()).unwrap())
@@ -511,7 +533,10 @@ mod tests {
         );
 
         // run 结束后快照不再携带化身（无活跃 run 不猜、不送新 run）。
-        fixture.state.coding_runs.remove(&fixture.attempt_key, fixture.run_id);
+        fixture
+            .state
+            .coding_runs
+            .remove(&fixture.attempt_key, fixture.run_id);
         let body = get_attempt_snapshot(&fixture.router, fixture.attempt_id.as_str()).await;
         assert!(
             body["pending_choices"][0].get("expected_run_id").is_none(),
