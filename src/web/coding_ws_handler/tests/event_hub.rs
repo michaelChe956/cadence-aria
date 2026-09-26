@@ -71,22 +71,24 @@ async fn hub_survives_driver_socket_disconnect_and_feeds_reconnect() {
     registry.remove(&key, reconnect_token);
 }
 
-/// plan_amendment 激活路径的 fail-closed 门：无存活 socket 时不得给出 hub。
+/// REQ-WIGA-06：plan_amendment 激活不再要求存活 socket；hub 可在零订阅者时
+/// 建立，零 fan-out 由 delivery ack 立即结算失败（观察层记 Unsent）。
 #[tokio::test]
-async fn hub_sender_if_live_requires_live_socket() {
+async fn hub_zero_fanout_settles_amendment_waiter_unsent() {
     let registry = CodingSocketRegistry::default();
-    let key = CodingAttemptRunKey::new("project_0001", "issue_0001", "attempt_c");
-    assert!(registry.hub_sender_if_live(&key).is_none());
-
-    let (tx, rx) = mpsc::channel(16);
-    let token = registry.register(&key, tx);
-    assert!(registry.hub_sender_if_live(&key).is_some());
-
-    registry.remove(&key, token);
-    drop(rx);
+    let key = CodingAttemptRunKey::new("project_0001", "issue_0001", "attempt_e");
+    let hub = registry.hub_sender(&key);
+    let waiter = register_plan_amendment_socket_write("event_zero_fanout").unwrap();
+    hub.send(plan_amendment_event("event_zero_fanout"))
+        .await
+        .unwrap();
+    let error = tokio::time::timeout(Duration::from_millis(250), waiter.wait())
+        .await
+        .expect("zero fan-out must settle immediately")
+        .expect_err("zero fan-out must not acknowledge delivery");
     assert!(
-        registry.hub_sender_if_live(&key).is_none(),
-        "已关闭 socket 不得让 fail-closed 门误放行"
+        error.to_string().contains("plan_amendment_socket_write_failed"),
+        "unexpected settlement error: {error}"
     );
 }
 

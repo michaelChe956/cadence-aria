@@ -130,6 +130,30 @@ pub(crate) fn expect_plan_amendment_fan_out_writes(message: &CodingWsOutMessage,
     entry.pending_writes = Some(writes);
 }
 
+/// amendment 族统一补投递触发器（REQ-WIGA-06）：socket attach 与激活
+/// early-return 共用，禁止各自内联第二份。以 transient
+/// CodingWorkspaceEngine spawn `redeliver_undelivered_plan_amendments`，
+/// 不阻塞调用方；失败仅 warn。
+pub(crate) fn spawn_undelivered_amendment_redelivery(
+    coding_store: crate::product::coding_attempt_store::CodingAttemptStore,
+    attempt: crate::product::coding_models::CodingExecutionAttempt,
+    event_tx: mpsc::Sender<CodingWsOutMessage>,
+) {
+    tokio::spawn(async move {
+        let engine = crate::product::coding_workspace_engine::CodingWorkspaceEngine::new(
+            coding_store,
+            crate::product::git_workspace_service::GitWorkspaceService::new(),
+            event_tx,
+        );
+        if let Err(error) = engine
+            .redeliver_undelivered_plan_amendments(&attempt)
+            .await
+        {
+            tracing::warn!(%error, "plan_amendment_delivery_redelivery_failed");
+        }
+    });
+}
+
 fn settle_plan_amendment_socket_write(message: &CodingWsOutMessage, written: bool) {
     let CodingWsOutMessage::PlanAmendmentUpdated { event_id, .. } = message else {
         return;

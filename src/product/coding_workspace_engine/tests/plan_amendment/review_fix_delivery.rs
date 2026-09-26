@@ -562,3 +562,118 @@ async fn coding_amendment_delivery_store_rejects_unsent_with_delivered_at() {
         crate::product::json_store::ProductStoreError::IdentityMismatch { .. }
     ));
 }
+
+#[tokio::test]
+async fn coding_amendment_redelivery_reuses_event_until_real_ack() {
+    let fixture = amendment_fixture().await;
+    // 种子：零订阅者 -> 业务 Running + durable Unsent。
+    let (event_tx, event_rx) = mpsc::channel(8);
+    drop(event_rx);
+    let seeded_engine =
+        CodingWorkspaceEngine::new(fixture.store.clone(), GitWorkspaceService::new(), event_tx);
+    let resumed = seeded_engine
+        .apply_plan_amendment(&fixture.attempt, &fixture.manifest)
+        .await
+        .unwrap();
+    let unsent = poll_delivery_status(
+        &fixture.store,
+        &resumed,
+        &fixture.manifest.id,
+        crate::product::coding_models::CodingPlanAmendmentDeliveryStatus::Unsent,
+    )
+    .await;
+
+    // 补投递：新订阅者 + redeliver -> 同 event_id 恰一帧 + Delivered。
+    let (tx2, mut rx2) = mpsc::channel(8);
+    let confirm_loop = tokio::spawn(async move {
+        while let Some(event) = rx2.recv().await {
+            crate::web::coding_ws_handler::delivery_ack::confirm_plan_amendment_socket_write(
+                &event,
+            );
+        }
+    });
+    let engine2 = CodingWorkspaceEngine::new(fixture.store.clone(), GitWorkspaceService::new(), tx2);
+    assert_eq!(
+        engine2
+            .redeliver_undelivered_plan_amendments(&resumed)
+            .await
+            .unwrap(),
+        1
+    );
+    let delivered = poll_delivery_status(
+        &fixture.store,
+        &resumed,
+        &fixture.manifest.id,
+        crate::product::coding_models::CodingPlanAmendmentDeliveryStatus::Delivered,
+    )
+    .await;
+    assert_eq!(delivered.event_id, unsent.event_id);
+    confirm_loop.abort();
+
+    // 幂等：已 Delivered 再触发 => 0 条、无新事件。
+    let (tx3, mut rx3) = mpsc::channel(8);
+    let engine3 = CodingWorkspaceEngine::new(fixture.store.clone(), GitWorkspaceService::new(), tx3);
+    assert_eq!(
+        engine3
+            .redeliver_undelivered_plan_amendments(&resumed)
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(rx3.try_recv().is_err());
+    drop(rx3);
+}
+
+#[tokio::test]
+async fn coding_amendment_redelivery_skips_orphan_records_without_manifest() {
+    let fixture = amendment_fixture().await;
+    let (event_tx, event_rx) = mpsc::channel(8);
+    drop(event_rx);
+    let resumed =
+        CodingWorkspaceEngine::new(fixture.store.clone(), GitWorkspaceService::new(), event_tx)
+            .apply_plan_amendment(&fixture.attempt, &fixture.manifest)
+            .await
+            .unwrap();
+    poll_delivery_status(
+        &fixture.store,
+        &resumed,
+        &fixture.manifest.id,
+        crate::product::coding_models::CodingPlanAmendmentDeliveryStatus::Unsent,
+    )
+    .await;
+    // 孤儿记录：有 delivery 文件、无 manifest（不阻塞、不计数）。
+    let orphan = serde_json::json!({
+        "id": format!("coding_plan_amendment_delivery_{}_amendment_orphan", resumed.id),
+        "event_id": format!("coding_plan_amendment_updated_{}_amendment_orphan", resumed.id),
+        "attempt_id": resumed.id,
+        "amendment_id": "amendment_orphan",
+        "status": "unsent",
+        "delivered_at": null,
+        "created_at": "2026-09-26T00:00:00Z",
+        "updated_at": "2026-09-26T00:00:00Z",
+    });
+    let orphan_path = fixture
+        .store
+        .attempt_dir(&resumed.project_id, &resumed.issue_id, &resumed.id)
+        .join("amendment-event-deliveries")
+        .join("amendment_orphan.json");
+    std::fs::write(&orphan_path, serde_json::to_vec(&orphan).unwrap()).unwrap();
+
+    let (tx2, mut rx2) = mpsc::channel(8);
+    let confirm_loop = tokio::spawn(async move {
+        while let Some(event) = rx2.recv().await {
+            crate::web::coding_ws_handler::delivery_ack::confirm_plan_amendment_socket_write(
+                &event,
+            );
+        }
+    });
+    let engine2 = CodingWorkspaceEngine::new(fixture.store.clone(), GitWorkspaceService::new(), tx2);
+    assert_eq!(
+        engine2
+            .redeliver_undelivered_plan_amendments(&resumed)
+            .await
+            .unwrap(),
+        1
+    );
+    confirm_loop.abort();
+}

@@ -728,6 +728,50 @@ impl CodingWorkspaceEngine {
         });
     }
 
+    /// 重连/重复确认补投递（REQ-WIGA-06）：list deliveries -> 跳过 Delivered ->
+    /// 取 manifest（无 manifest 的孤儿记录跳过；plan.active_revision_id !=
+    /// manifest.new_plan_revision_id 的非当前修订跳过）-> once。返回本次真实
+    /// 达成 Delivered 的条数。
+    pub(crate) async fn redeliver_undelivered_plan_amendments(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<usize, ProductStoreError> {
+        let current = self.store.validate_attempt_lineage(attempt)?;
+        let binding = self.store.get_plan_binding(&current)?;
+        let revision_store = WorkItemRevisionStore::new(self.store.paths());
+        let plan = revision_store.get_plan_lineage(
+            &current.project_id,
+            &current.issue_id,
+            &binding.plan_id,
+        )?;
+        let mut delivered = 0usize;
+        for record in self.store.list_plan_amendment_deliveries(&current)? {
+            if record.status == CodingPlanAmendmentDeliveryStatus::Delivered {
+                continue;
+            }
+            let Ok(manifest) = revision_store.get_amendment_manifest(&plan, &record.amendment_id)
+            else {
+                // 孤儿记录（有 delivery 文件、无 manifest）：跳过，不阻塞
+                // 其余记录的补投递。
+                continue;
+            };
+            if plan.active_revision_id.as_deref()
+                != Some(manifest.new_plan_revision_id.as_str())
+            {
+ // 非当前修订：amendment 已被后续修订取代，不再补投。
+                continue;
+            }
+            if self
+                .deliver_plan_amendment_observation_once(&current, &manifest)
+                .await?
+                == CodingPlanAmendmentDeliveryStatus::Delivered
+            {
+                delivered += 1;
+            }
+        }
+        Ok(delivered)
+    }
+
     fn finalize_plan_repair_session(
         &self,
         attempt: &CodingExecutionAttempt,

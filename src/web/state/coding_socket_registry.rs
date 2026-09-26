@@ -88,25 +88,6 @@ impl CodingSocketRegistry {
         hub.event_tx
     }
 
-    /// 保留「至少一个存活消费者」fail-closed 语义的发射面获取（plan_amendment
-    /// 激活等）：无存活 socket 时返回 None，有则与 `hub_sender` 同款 hub。
-    pub fn hub_sender_if_live(
-        &self,
-        attempt_key: &CodingAttemptRunKey,
-    ) -> Option<mpsc::Sender<CodingWsOutMessage>> {
-        {
-            let mut inner = self.inner.lock().expect("coding socket registry lock");
-            let has_live_socket = inner.sockets.get_mut(attempt_key).is_some_and(|sockets| {
-                sockets.retain(|_, sender| !sender.is_closed());
-                !sockets.is_empty()
-            });
-            if !has_live_socket {
-                return None;
-            }
-        }
-        Some(self.hub_sender(attempt_key))
-    }
-
     /// 因果序 barrier：阻塞到「调用时刻之前已入 hub 的事件」全部 fan-out 进
     /// 各 socket channel。socket 循环在 engine 操作后、flush/直写快照前调用，
     /// 恢复旧直连路径下「engine 事件先于快照」的 wire 顺序（hub 多了一跳异步

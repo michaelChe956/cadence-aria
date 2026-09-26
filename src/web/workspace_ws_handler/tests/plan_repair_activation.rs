@@ -99,14 +99,16 @@ async fn repeated_confirmation_recovers_delivery_mark_failure_without_duplicate_
     };
 
     child_ws.send(confirmation()).await.unwrap();
-    let first_event = receive_type(&mut coding_ws, "plan_amendment_updated").await;
+    let _first_event = receive_type(&mut coding_ws, "plan_amendment_updated").await;
+    // REQ-WIGA-06：mark failpoint 不再令业务失败——attempt 直达 Running，
+    // marker 停 Pending（Delivered 落盘被 failpoint 拦截），runner 唯一。
     timeout(Duration::from_secs(3), async {
         loop {
             let current = store
                 .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
                 .unwrap();
-            if current.status == CodingAttemptStatus::AmendmentApplyFailed
-                && state.coding_runs.runner_count(&attempt_key) == 0
+            if current.status == CodingAttemptStatus::Running
+                && state.coding_runs.runner_count(&attempt_key) == 1
             {
                 break;
             }
@@ -124,9 +126,9 @@ async fn repeated_confirmation_recovers_delivery_mark_failure_without_duplicate_
     );
     drop(failpoint);
 
+    // 重复确认：runner 已在推进（early-return 触发补投递）；首轮被拦的
+    // mark 与补投递竞争（注册互斥 + mark 幂等），最终收敛真实 Delivered。
     child_ws.send(confirmation()).await.unwrap();
-    let second_event = receive_type(&mut coding_ws, "plan_amendment_updated").await;
-    assert_eq!(second_event["event_id"], first_event["event_id"]);
     timeout(Duration::from_secs(3), async {
         loop {
             let current = store
@@ -155,6 +157,90 @@ async fn repeated_confirmation_recovers_delivery_mark_failure_without_duplicate_
     );
 
     coding_ws.close(None).await.ok();
+    child_ws.close(None).await.ok();
+    server.abort();
+}
+
+#[tokio::test]
+async fn zero_socket_plan_amendment_activation_resumes_attempt_with_unsent_delivery() {
+    let root = tempfile::tempdir().unwrap();
+    let runtime = crate::web::test_controls::PlanRepairFixtureRuntime::seed(
+        root.path(),
+        crate::web::test_controls::PlanRepairFixtureControl::default(),
+    )
+    .await
+    .unwrap();
+    let identity = runtime.drive_until_awaiting_confirmation().await.unwrap();
+    let state = WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    );
+    let app = build_web_router(state.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .get_attempt_for_work_item_group(
+            "project_0001",
+            "issue_plan_0001",
+            "work_item_plan_0001",
+            None,
+        )
+        .unwrap()
+        .unwrap();
+    let attempt_key = CodingAttemptRunKey::from_attempt(&attempt);
+
+    // 全程不连接 coding WS：只从 workspace 子会话确认。
+    let child_url = format!("ws://{addr}/api/ws/workspace/{}", identity.child_session_id);
+    let (mut child_ws, _) = connect_async(child_url).await.unwrap();
+    let initial_child = receive_json(&mut child_ws, "initial plan repair child state").await;
+    assert_eq!(initial_child["type"], "session_state");
+    child_ws
+        .send(Message::Text(
+            json!({
+                "type": "confirm_plan_amendment",
+                "amendment_id": identity.amendment_id,
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+    let resumed = timeout(Duration::from_secs(3), async {
+        loop {
+            let current = store
+                .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+                .unwrap();
+            if current.status == CodingAttemptStatus::Running
+                && state.coding_runs.runner_count(&attempt_key) == 1
+            {
+                return current;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("zero-socket activation must resume the attempt (REQ-WIGA-06)");
+
+    let delivery = timeout(Duration::from_secs(3), async {
+        loop {
+            let delivery = store
+                .get_plan_amendment_delivery(&resumed, &identity.amendment_id)
+                .unwrap();
+            if delivery.status == CodingPlanAmendmentDeliveryStatus::Unsent {
+                return delivery;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("no live socket must leave a durable unsent fact, never Delivered");
+    assert_eq!(delivery.delivered_at, None);
+
     child_ws.close(None).await.ok();
     server.abort();
 }
