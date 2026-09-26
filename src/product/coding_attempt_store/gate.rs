@@ -423,8 +423,10 @@ impl super::CodingAttemptStore {
             allow_multiple: input.allow_multiple,
             allow_free_text: input.allow_free_text,
             questions: input.questions,
-            status: CodingChoiceGateStatus::Open,
+            // Task 11：run 化身是 handler 层投影注入，durable 记录恒 None。
+            expected_run_id: None,
             response: None,
+            status: CodingChoiceGateStatus::Open,
             created_at: now.clone(),
             updated_at: now,
         };

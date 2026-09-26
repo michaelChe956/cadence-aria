@@ -79,6 +79,11 @@ pub struct CodingChoiceGate {
     /// `effective_questions` 按单一 default 题兼容投影。
     #[serde(default)]
     pub questions: Vec<CodingChoiceQuestion>,
+    /// P0 1.3（REQ-WIGA-05）Task 11：应答须绑定的 run 化身——durable 记录
+    /// 不落盘（handler 层按 active run 注入，REST 作答端到端可见）；无活跃
+    /// run 时缺省 None，消费者不得猜 run。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_run_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }

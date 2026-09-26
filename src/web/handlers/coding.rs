@@ -732,9 +732,20 @@ pub(crate) async fn get_coding_attempt(
     let group_final_readiness = coding_store
         .get_group_final_readiness_snapshot(&attempt)
         .map_err(product_store_api_error)?;
-    let pending_choices = coding_store
+    let mut pending_choices = coding_store
         .list_open_choice_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .map_err(product_store_api_error)?;
+    // P0 1.3（REQ-WIGA-05）Task 11：冷驾驶舱 REST 作答依赖快照携带应答绑定
+    // 的 run 化身（claim 要求精确匹配 active_run_incarnation）；无唯一活跃
+    // run 时不注入——消费者不得猜 run。durable 记录恒不带该字段。
+    if let Some(incarnation) = state
+        .coding_runs
+        .active_run_incarnation(&CodingAttemptRunKey::from_attempt(&attempt))
+    {
+        for gate in &mut pending_choices {
+            gate.expected_run_id = Some(incarnation.clone());
+        }
+    }
     let role_runs =
         coding_role_run_snapshots(&coding_store, &attempt).map_err(product_store_api_error)?;
     let pending_gates =

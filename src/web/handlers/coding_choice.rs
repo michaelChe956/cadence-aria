@@ -473,4 +473,49 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["state"], "expired");
     }
+
+    async fn get_attempt_snapshot(
+        router: &axum::Router,
+        attempt_id: &str,
+    ) -> serde_json::Value {
+        let uri = format!(
+            "/api/projects/project_0001/issues/issue_0001/coding-attempts/{attempt_id}"
+        );
+        let response = router
+            .clone()
+            .oneshot(Request::get(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// P0 1.3（REQ-WIGA-05）Task 11：冷驾驶舱（无 coding socket）作答依赖
+    /// GET attempt snapshot 携带应答须绑定的 run 化身——claim 要求
+    /// `expected_run_id === active_run_incarnation`，快照不暴露则 REST 永远 410。
+    #[tokio::test]
+    async fn attempt_snapshot_stamps_pending_choice_expected_run_id() {
+        let fixture = coding_choice_http_fixture().await;
+
+        let body = get_attempt_snapshot(&fixture.router, fixture.attempt_id.as_str()).await;
+        let choices = body["pending_choices"].as_array().unwrap();
+        assert_eq!(choices.len(), 1);
+        assert_eq!(choices[0]["choice_id"], "choice-http-1");
+        assert_eq!(
+            choices[0]["expected_run_id"].as_str().unwrap(),
+            fixture.incarnation,
+            "快照 open choice 必须带 active run incarnation（REST 作答绑定）"
+        );
+
+        // run 结束后快照不再携带化身（无活跃 run 不猜、不送新 run）。
+        fixture.state.coding_runs.remove(&fixture.attempt_key, fixture.run_id);
+        let body = get_attempt_snapshot(&fixture.router, fixture.attempt_id.as_str()).await;
+        assert!(
+            body["pending_choices"][0].get("expected_run_id").is_none(),
+            "无活跃 run 时不得伪造化身"
+        );
+    }
 }
