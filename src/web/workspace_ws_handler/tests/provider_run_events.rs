@@ -1530,3 +1530,110 @@ impl StreamingProviderAdapter for ScSequenceReviewProvider {
         unreachable!("workspace runs use start")
     }
 }
+
+/// F2 复活锚：0018 形态的卡死 durable 会话（status=running、门节点仍 Active、
+/// phase=Generate、无在途 run）在 manager 重建时走同源引擎守卫回落人工门——
+/// durable WaitingForHuman + 新门节点摘要携带原因（续链，人工可再反馈或放弃），
+/// 不再滞留 running。注：重建时引擎 stage 取自最后 Active 门节点（HumanConfirm），
+/// 不在 F-23 僵尸恢复的 stage 集合内，故必须由本臂覆盖。
+#[tokio::test]
+async fn sc_delegated_rerun_orphan_reopens_human_gate_on_manager_recreate() {
+    let (fixture, engine_rx) =
+        ProviderRunFixture::new_with_engine_rx(WorkItemPlanFlowKind::SingleCandidate);
+    persist_review_rounds(&fixture, 1);
+    let mut engine_rx = engine_rx;
+    let drain = tokio::spawn(async move {
+        while engine_rx.recv().await.is_some() {}
+    });
+    let author = Arc::new(ScSequenceAuthorProvider {
+        outputs: vec![single_candidate_markdown(&fixture.story_id, &fixture.design_id)],
+        starts: Arc::new(AtomicUsize::new(0)),
+        held: Mutex::new(Vec::new()),
+    });
+    let reviewer = Arc::new(ScSequenceReviewProvider {
+        outputs: vec![sc_pass_review_output()],
+        starts: Arc::new(AtomicUsize::new(0)),
+        held: Mutex::new(Vec::new()),
+    });
+    let mut registry = ProviderRegistry::new();
+    registry.register(ProviderName::ClaudeCode, author);
+    registry.register(ProviderName::Codex, reviewer);
+    let (context, _outbound_rx, _run_context, _outbound_tx) =
+        sc_context_with_registry(&fixture, registry);
+    handle_workspace_inbound_message(
+        context,
+        WsInMessage::StartGeneration {
+            provider_config: review_enabled_provider_config(),
+            reviewer_enabled: true,
+        },
+    )
+    .await;
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let stage = {
+                let engine = fixture.engine.lock().await;
+                engine.session().stage.clone()
+            };
+            if stage == WorkspaceStage::HumanConfirm {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("gate must open");
+
+    // 0018 卡死形态：durable (running, generate)、门节点仍 Active、无在途 run。
+    {
+        let mut record = fixture
+            .lifecycle
+            .get_workspace_session(&fixture.record.id)
+            .expect("reload session");
+        record.status = crate::product::models::WorkspaceSessionStatus::Running;
+        record.single_candidate_phase =
+            Some(crate::product::models::SingleCandidatePhase::Generate);
+        let path = fixture
+            .app_paths
+            .issue_root(&record.project_id, &record.issue_id)
+            .join("workspace-sessions")
+            .join(format!("{}.json", record.id));
+        crate::product::json_store::write_json(&path, &record).expect("persist zombie state");
+    }
+
+    let root = fixture.root_path();
+    let state = WebAppState::new(root.clone(), crate::web::runtime::WebRuntime::new_fake(root));
+    let manager = crate::web::workspace_session::WorkspaceSessionManager::create(
+        &state,
+        &fixture.record.id,
+    )
+    .await
+    .expect("manager recreate must succeed");
+    let durable = fixture
+        .lifecycle
+        .get_workspace_session(&fixture.record.id)
+        .expect("reload after create");
+    let nodes = fixture
+        .lifecycle
+        .load_timeline_nodes(&fixture.record.id)
+        .expect("load timeline");
+    drop(manager);
+    drain.abort();
+    assert_eq!(
+        durable.status,
+        crate::product::models::WorkspaceSessionStatus::WaitingForHuman,
+        "委托态孤儿必须在 manager 重建时回落人工门（durable WaitingForHuman）"
+    );
+    let gate_summary = nodes
+        .iter()
+        .rev()
+        .find(|node| {
+            node.node_type == crate::web::workspace_ws_types::TimelineNodeType::HumanConfirm
+                && node.status == crate::web::workspace_ws_types::TimelineNodeStatus::Active
+        })
+        .and_then(|node| node.summary.clone())
+        .unwrap_or_default();
+    assert!(
+        gate_summary.contains("返修接力"),
+        "回落门节点摘要必须携带失败原因，got: {gate_summary}"
+    );
+}

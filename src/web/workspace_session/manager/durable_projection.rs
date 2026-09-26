@@ -112,12 +112,38 @@ impl WorkspaceSessionManager {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .recovery_error = Some(message);
         }
+        // F2（0018 现场）：F-23 僵尸恢复的 stage 集合（Running/CrossReview/Revision）
+        // 漏掉「stage=HumanConfirm ∧ durable status=running」的不自洽卡死形态——
+        // 重建时引擎 stage 取自最后 Active 门节点（human_confirm），既不在集合内
+        // 也被误当正常门态。该形态只可能是 SC 委托返修接力孤儿（phase=Generate、
+        // 无在途 run），走同源引擎守卫回落人工门（durable WaitingForHuman + 门节点
+        // 摘要携带原因），令会话恢复可操作（人工可再反馈或放弃）——优先于
+        // AbortedByDisconnect 终态化。
+        self.recover_delegated_rerun_orphan().await;
         // F-23（0482 跨重启僵尸）：恢复臂（human gate resume / outline resume）之后
         // 仍停留在 Running/CrossReview/Revision 且无活跃 run 的 durable 会话，只可能是
         // 进程重启孤儿——registry 单例契约保证 manager 创建时不存在幸存 run。落
         // AbortedByDisconnect 终态并整流回 prepare_context，否则会话永久楔死在
         // running、abort 无处落地（旧架构连接关闭曾走的正是同两条引擎 API）。
         self.recover_stale_run_if_zombie().await;
+    }
+
+    async fn recover_delegated_rerun_orphan(self: &Arc<Self>) {
+        let mutated = {
+            let mut engine = self.engine.lock().await;
+            let before = engine.session().session_status.clone();
+            engine
+                .recover_delegated_author_rerun_failure("进程重启：委托返修接力未启动")
+                .await;
+            engine.session().session_status != before
+        };
+        if mutated {
+            eprintln!(
+                "[aria-recovery] delegated rerun orphan recovered to human gate session={}",
+                self.session_id
+            );
+            self.broadcast_current_session_state();
+        }
     }
 
     async fn recover_stale_run_if_zombie(self: &Arc<Self>) {

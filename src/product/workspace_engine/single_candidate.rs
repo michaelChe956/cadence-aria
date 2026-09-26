@@ -140,7 +140,12 @@ impl WorkspaceEngine {
     /// 反馈修订或放弃），不再静默滞留 running。其余任何形态零副作用：非委托态的
     /// 迟到/无关失败不改写会话状态。
     pub(crate) async fn recover_delegated_author_rerun_failure(&mut self, message: &str) {
-        if !self.sc_author_rerun_delegated() || self.active_run_id.is_some() {
+        // durable 状态必须仍在途族（Running）——已经回落到 WaitingForHuman 的会话
+        // （例如本守卫运行期已收口）不再重复开门；phase 保持 Generate 不构成重入。
+        if !self.sc_author_rerun_delegated()
+            || self.active_run_id.is_some()
+            || self.session.session_status != crate::product::models::WorkspaceSessionStatus::Running
+        {
             return;
         }
         let summary = format!("SC 返修接力启动失败，已回落人工门：{message}");
