@@ -74,6 +74,22 @@ pub struct ChoiceReplyStatus {
 // 或 pi 对应的命令等待者真正接收才 Delivered。
 ```
 
+```rust
+// EnrollmentWriteCommand 与 EnrollmentError（Task 2 产出、Task 3 消费，统一在此定义）：
+pub enum EnrollmentWriteCommand {
+    Enable { selection_key: String, source: EnrollmentSource,
+             options: EnrollmentOptions, logical_repository_id: LogicalRepositoryId },
+    Disable,
+}
+pub enum EnrollmentError {
+    Conflict { current_revision: Option<u64> },   // HTTP 409，details 带 current_revision
+    InvalidScope(String),                          // HTTP 422
+    NotFound,                                      // HTTP 404（仅 binding/状态类）
+    Store(ProductStoreError),                      // fail-closed 其余映射
+}
+```
+REST GET 语义统一：`GET .../automation-enrollment` 是读投影——不存在时返回 `200 + null`（前端需要区分「未启用」与「启用」而非报错）；`404` 仅用于 choice response 状态查询的未知 command_id（Task 8/9）与 binding 目标对象不存在（Task 3）。新建测试函数名一律以本任务红灯过滤词开头（如 `issue_automation_store_...`、`choice_delivery_...`、`automation_enrollment_...`），保证 `cargo test -- --nocapture` 过滤词可靠命中。
+
 REST 路由统一：`PUT/GET /api/projects/{project_id}/issues/{issue_id}/automation-enrollment`，`POST /api/projects/{project_id}/issues/{issue_id}/automation-enrollment/binding`；`POST /api/workspace-sessions/{session_id}/choices/{choice_id}/response`，`GET /api/workspace-sessions/{session_id}/choices/{choice_id}/responses/{command_id}`；`POST /api/projects/{project_id}/issues/{issue_id}/coding-attempts/{attempt_id}/choices/{choice_id}/response`，`GET /api/projects/{project_id}/issues/{issue_id}/coding-attempts/{attempt_id}/choices/{choice_id}/responses/{command_id}`；`POST /api/workspace-sessions/{session_id}/human-actions`。HTTP `202` 体同 `ChoiceReplyStatus`，`200` 仅 Delivered；状态查询 `200` 返回状态体而不意味着 Delivered。沿用 `src/web/error.rs:48-198` 的 `ApiError` 码表而不是让新码落默认 500。所有写 API 在当前本机 WebAppState、现有 issue/session/attempt 精确作用域校验之内；若未来引入通用用户身份鉴权，在共用路由层继承，不从 observer WS 升权，也不认为 body 中的 `issue_id` 是授权凭据。
 
 ## Task 1：1.1 advance 注释与例外矩阵
@@ -109,7 +125,7 @@ REST 路由统一：`PUT/GET /api/projects/{project_id}/issues/{issue_id}/automa
   assert_eq!(same.policy_revision, 1);
   ```
 - [ ] **Step 2: 红灯。** `cargo test --locked --lib issue_automation_store -- --nocapture`；预期未定义 store/模型。
-- [ ] **Step 3: 最小实现。** enrollment 文件放 `issue_root(...).join("automation-enrollment.json")`，以该路径上的 `with_exclusive_lock` 包住**读、比 revision、写**；`read_json` 的 `NotFound` 才解释为 None，损坏/权限错 fail-closed；同 selection_key 同 source/options/target 重试返回原值，异内容 Conflict；Disable 再 Enable revision+1 且不抹绑定/prepare_intent；首次 `Uuid::new_v4()` 生成 enrollment_id，`prepare_intent_id` 同此 ID，P0 不创建 plan/session。绑定操作相同锁内要求唯一 plan/session 或幂等原值，不允许按最新 plan 推断。示意核心：
+- [ ] **Step 3: 最小实现。** enrollment 文件放 `issue_root(...).join("automation-enrollment.json")`，以该路径上的 `with_exclusive_lock` 包住**读、比 revision、写**；缺失判定用 `path.metadata()` 预检（`read_json` 的 Io 错误已是格式化字符串、不含可判 ErrorKind，**不得**对其做 NotFound 匹配；预检与读之间存在窗口没关系——锁内无并发写），预检不存在=`None`，存在再 `read_json`，损坏/权限错 fail-closed；同 selection_key 同 source/options/target 重试返回原值，异内容 Conflict；Disable 再 Enable revision+1 且不抹绑定/prepare_intent；首次 `Uuid::new_v4()` 生成 enrollment_id，`prepare_intent_id` 同此 ID，P0 不创建 plan/session。绑定操作相同锁内要求唯一 plan/session 或幂等原值，不允许按最新 plan 推断。示意核心：
   ```rust
   with_exclusive_lock(&path, || {
       let existing = read_optional_enrollment(&path)?;
@@ -210,7 +226,7 @@ REST 路由统一：`PUT/GET /api/projects/{project_id}/issues/{issue_id}/automa
   assert_eq!(*status.borrow(), ChoiceReplyState::Delivered);
   ```
 - [ ] **Step 2: 红灯。** `cargo test --locked --lib choice_delivery -- --nocapture`；预期 shared status/receipt 字段与完整 answers 断言失败。
-- [ ] **Step 3: 最小实现。** `commands.rs` 的 pending map 保存 `{decision_tx,receipt}`：收到 `ChoiceResponse` 时先从 map 原子摘出，再向 oneshot 发送包含完整 answers/receipt 的 `ChoiceDecision`；send 失败则 `receipt.reject()`，waiter 成功解析后才 `receipt.deliver()`。mpsc 入队只调用 `mark_resolving()`。workspace 三条 drive 与 coding `provider_stream.rs`、`tool_format.rs` 逐字段透传 answers/receipt；coding 只在 signal 已 Delivered 后调用 `resolve_choice_gate`。Pi 不经过 bridge，在 `pi_provider/session.rs` 命令等待者真正匹配 `ChoiceResponse` 后调用 receipt.deliver；旧无 receipt provider 行为保持不变。
+- [ ] **Step 3: 最小实现。** `commands.rs` 的 pending map 保存 `{decision_tx,receipt}`：收到 `ChoiceResponse` 时先从 map 原子摘出，再向 oneshot 发送包含完整 answers/receipt 的 `ChoiceDecision`；send 失败则 `receipt.reject()`，waiter 成功解析后才 `receipt.deliver()`。mpsc 入队只调用 `mark_resolving()`。workspace 三条 drive 与 coding `provider_stream.rs`、`tool_format.rs` 逐字段透传 answers/receipt；coding 只在 signal 已 Delivered 后调用 `resolve_choice_gate`。Pi 不经过 bridge：实施时先核对 `pi_provider/session.rs` 的 `ChoiceResponse` 等待者结构——若其命令结构承载 `answers`（或可扩展承载）则逐字段透传并 `receipt.deliver()`；若 pi 会话类型确实无多问题槽位，则该路径仅透传单问题等价字段并在 receipt Delivered 前提下允许（在代码注释标注 pi 多问题为已知限制、REST 层不做 provider 分支拒绝）；旧无 receipt provider 行为保持不变。
   ```rust
   let decision = decision_rx.await.map_err(|_| permission_bridge_error("choice response channel closed"))?;
   if let Some(receipt) = decision.receipt.as_ref() { receipt.deliver(); }
