@@ -26,7 +26,7 @@
 | 9 | `confirm-work-item-plan-review`（第一道门） | Work Item 计划区容器 `LifecycleContentSection` / `WorkItemRepositoryGroupSection` | 无（`work-item-repository-group-*` 为分组项） | 缺失 | 新增 `onboarding-anchor-plan-review-gate`（容器级） |
 | 10 | `confirm-work-item-plan-final`（第二道门） | Work Item 计划区内容体（卡片列表 ul / 分组列表） | 无 | 缺失 | 新增 `onboarding-anchor-plan-final-gate`（内容体，**与 #9 不同元素**） |
 | 11 | `enter-coding-workspace` | `LifecycleCardDrawer` 「进入 Coding Workspace」入口按钮（`LifecycleCardDrawer.tsx:423`） | `drawer-open-coding-workspace` | **已存在，复用** | 不新增重复属性；配置直接引用既有稳定 testid |
-| 12 | `start-coding` | `CodingWorkspaceControls` 「开始 / 继续 Coding」按钮（`CodingWorkspaceControls.tsx:222,246`） | 无 | 缺失 | 新增 `onboarding-anchor-coding-start` |
+| 12 | `start-coding` | `CodingWorkspaceControls` 「开始 / 继续 Coding」按钮（`CodingWorkspaceControls.tsx:222,246`） | 无 | 缺失 | 新增 `onboarding-anchor-coding-start`；compact 底栏变体为 `onboarding-anchor-coding-start-compact`，避免双挂载重名 |
 | 13 | `coding-progress-complete` | `CodingWorkspaceGroupProgress` 组进度区（`CodingWorkspaceGroupProgress.tsx:38`） | 无 | 缺失 | 新增 `onboarding-anchor-coding-progress` |
 
 ## 3. 已有可复用锚点（勘察确认）
@@ -46,6 +46,7 @@
 3. **Story/Design 确认**：真实确认动作在会话页（`ChatCockpitPage` 内部，受保护）。工作台内以 Story/Design **阶段内容区容器**为稳定锚点，说明文案引导用户经「打开 Workspace」进入确认。
 4. **阶段生成入口**：`StageStepper` 三阶段标签常驻，锚点稳定；生成动作（空阶段主按钮 `生成 Story/Design Spec`、Issue 卡 `生成 Story Spec`）为条件渲染，故不作锚点。
 5. **零结构改动**：所有补齐均为新增属性；`LifecycleContentSection` / `WorkItemRepositoryGroupSection` 仅新增可选 `sectionTestId` / `bodyTestId` 属性透传，行为不变。
+6. **Coding 启动锚点唯一性**：`ActionButtons` 在 Coding 页挂两处（页头非 compact 主控件 + 底部 compact 变体）。非 compact 使用 `onboarding-anchor-coding-start`（引导配置引用此项），compact 使用 `onboarding-anchor-coding-start-compact`，保证同屏 testid 唯一。
 
 ## 5. 受保护边界（零改动确认）
 

@@ -221,7 +221,11 @@ export function ActionButtons({
       <div className="flex items-center gap-2">
         <button
           type="button"
-          data-testid="onboarding-anchor-coding-start"
+          data-testid={
+            compact
+              ? "onboarding-anchor-coding-start-compact"
+              : "onboarding-anchor-coding-start"
+          }
           onClick={api.startCoding}
           disabled={startupCopy !== null}
           title={startupCopy ?? undefined}
@@ -246,7 +250,11 @@ export function ActionButtons({
         <div className="flex items-center gap-2">
           <button
             type="button"
-            data-testid="onboarding-anchor-coding-start"
+            data-testid={
+              compact
+                ? "onboarding-anchor-coding-start-compact"
+                : "onboarding-anchor-coding-start"
+            }
             onClick={api.startCoding}
             disabled={startupCopy !== null}
             title={startupCopy ?? undefined}

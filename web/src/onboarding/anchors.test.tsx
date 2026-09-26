@@ -1,10 +1,13 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { IssueLifecycleWorkbenchHeader } from "../components/lifecycle/IssueLifecycleWorkbenchHeader";
+import { IssueLifecycleDetail } from "../components/lifecycle/IssueLifecycleWorkbenchParts";
 import { ProjectSidebar } from "../components/lifecycle/ProjectSidebar";
 import { StageStepper, type StageStepperStage } from "../components/lifecycle/StageStepper";
 import { ActionButtons } from "../pages/CodingWorkspaceControls";
 import { CodingWorkspaceGroupProgress } from "../pages/CodingWorkspaceGroupProgress";
+import type { LifecycleCard as LifecycleCardData } from "../state/lifecycle-workbench-store";
 import {
   AUTOMATION_MODE_ANCHOR,
   ONBOARDING_STEPS,
@@ -90,5 +93,116 @@ describe("onboarding 锚点契约（宿主组件渲染）", () => {
     expect(duplicated).toEqual([]);
     expect(ONBOARDING_STEPS.length).toBeGreaterThanOrEqual(14);
     expect(AUTOMATION_MODE_ANCHOR.length).toBeGreaterThan(0);
+  });
+
+  it("Coding 启动锚点在 compact 与非 compact 两个挂载点不重名（唯一性契约）", () => {
+    const api = {
+      startCoding: vi.fn(),
+      restartCoding: vi.fn(),
+      abortAttempt: vi.fn(),
+      finalConfirm: vi.fn(),
+    } as never;
+    render(
+      <>
+        <ActionButtons api={api} stage="prepare_context" status={null} />
+        <ActionButtons api={api} stage="prepare_context" status={null} compact />
+      </>,
+    );
+    expect(screen.getAllByTestId("onboarding-anchor-coding-start")).toHaveLength(1);
+    expect(screen.getByTestId("onboarding-anchor-coding-start-compact")).toHaveTextContent(
+      "开始 Coding",
+    );
+  });
+
+  it("IssueLifecycleDetail 暴露 Story/Design 确认与计划双门锚点，容器与内容体为不同嵌套元素", async () => {
+    const user = userEvent.setup();
+    const issue = {
+      kind: "issue",
+      issueId: "issue_0001",
+      id: "issue_0001",
+      title: "Issue 0001",
+      status: "draft",
+      version: null,
+      preview: "Issue 描述",
+      sourceIds: [],
+      raw: {},
+    } as unknown as LifecycleCardData;
+    const story = {
+      kind: "story_spec",
+      issueId: "issue_0001",
+      id: "story_spec_0001",
+      title: "会话过期提示",
+      status: "confirmed",
+      version: 1,
+      preview: null,
+      sourceIds: [],
+      artifactVersions: [],
+      raw: {},
+    } as unknown as LifecycleCardData;
+    const design = {
+      kind: "design_spec",
+      issueId: "issue_0001",
+      id: "design_spec_0001",
+      title: "前端提示设计",
+      status: "confirmed",
+      version: 1,
+      preview: null,
+      sourceIds: [],
+      artifactVersions: [],
+      raw: {},
+    } as unknown as LifecycleCardData;
+    const workItem = {
+      kind: "work_item_group",
+      issueId: "issue_0001",
+      id: "work_item_group_0001",
+      title: "Work Item Group",
+      status: "confirmed",
+      version: null,
+      preview: null,
+      sourceIds: [],
+      artifactVersions: [],
+      raw: {},
+    } as unknown as LifecycleCardData;
+
+    render(
+      <IssueLifecycleDetail
+        issue={issue}
+        storySpecs={[story]}
+        designSpecs={[design]}
+        workItems={[workItem]}
+        selectedKey={null}
+        deletingKey={null}
+        onSelect={() => {}}
+        onOpenFullIssue={() => {}}
+        onDelete={() => {}}
+        onGenerateForStage={() => {}}
+      />,
+    );
+
+    // story 与 design 均有产物 -> 默认激活 work_item 阶段，计划双门锚点同时在场。
+    const reviewGate = screen.getByTestId("onboarding-anchor-plan-review-gate");
+    const finalGate = screen.getByTestId("onboarding-anchor-plan-final-gate");
+    expect(reviewGate).not.toBe(finalGate);
+    // 内容体嵌套在容器内（同一区域两个不同元素，避免单元素承载两步）。
+    expect(within(reviewGate).getByTestId("onboarding-anchor-plan-final-gate")).toBe(finalGate);
+
+    // 切到 Story 阶段：确认锚点落在 Story 内容区容器。
+    await user.click(screen.getByTestId("stage-tab-story"));
+    const storyConfirm = screen.getByTestId("onboarding-anchor-story-confirm");
+    expect(storyConfirm).toHaveTextContent("会话过期提示");
+
+    // 切到 Design 阶段：确认锚点落在 Design 内容区容器。
+    await user.click(screen.getByTestId("stage-tab-design"));
+    const designConfirm = screen.getByTestId("onboarding-anchor-design-confirm");
+    expect(designConfirm).toHaveTextContent("前端提示设计");
+
+    // 四个锚点互不相同。
+    const distinct = new Set([
+      reviewGate.getAttribute("data-testid"),
+      finalGate.getAttribute("data-testid"),
+      storyConfirm.getAttribute("data-testid"),
+      designConfirm.getAttribute("data-testid"),
+    ]);
+    expect(distinct.size).toBe(4);
   });
 });
