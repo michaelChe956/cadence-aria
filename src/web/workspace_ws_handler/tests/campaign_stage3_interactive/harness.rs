@@ -505,6 +505,21 @@ impl CampaignStage3Harness {
             .collect()
     }
 
+    /// P0 1.3（Task 10）：脚本化 provider 暴露给 REST human-action 用例——
+    /// 注入 manager 使用的 ProviderRegistry（同一测试构造器，生产零感知）。
+    pub(super) fn scripted_provider_handle(
+        &self,
+    ) -> std::sync::Arc<dyn crate::cross_cutting::streaming_provider::StreamingProviderAdapter>
+    {
+        self.provider.clone()
+    }
+
+    /// P0 1.3（Task 10）：脚本化 provider 真实 start 计数（approve 不得启动
+    /// provider 的断言面）。
+    pub(super) fn scripted_provider_starts(&self) -> usize {
+        self.provider.start_count()
+    }
+
     pub(super) fn budget_remaining(&self) -> u32 {
         self.session_record_blocking()
             .human_gate_snapshot

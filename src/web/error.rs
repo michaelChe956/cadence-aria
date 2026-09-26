@@ -195,6 +195,14 @@ impl IntoResponse for ApiError {
             "automation_enrollment_conflict" => StatusCode::CONFLICT,
             "automation_enrollment_not_found" => StatusCode::NOT_FOUND,
             "automation_enrollment_invalid_scope" => StatusCode::UNPROCESSABLE_ENTITY,
+            // P0 1.3（Task 10）human-actions 稳定码：门 id 不匹配 409、空白
+            // command_id 400、引擎语义拒绝/compile recovery 越节点/approve
+            // compile 失败 422（失败不宣称 Confirmed）。
+            "human_action_gate_mismatch" => StatusCode::CONFLICT,
+            "invalid_command_id" => StatusCode::BAD_REQUEST,
+            "human_action_rejected" => StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_compile_recovery_action" => StatusCode::UNPROCESSABLE_ENTITY,
+            "single_candidate_approval_compile_failed" => StatusCode::UNPROCESSABLE_ENTITY,
             "invalid_pointer_request" => StatusCode::UNPROCESSABLE_ENTITY,
             // Task 7 证据查询稳定码：6 码 + evidence_io（设计 §5.2）。
             "evidence_unauthorized" => StatusCode::UNAUTHORIZED,

@@ -953,6 +953,52 @@ pub struct WorkspaceSessionConfirmRequest {
     pub with_review: bool,
 }
 
+/// P0 1.3（REQ-WIGA-05）Task 10：无 driver 的人工门命令族。`expected_gate_id`
+/// 与服务端当前 active gate/timeline node 比对；`command_id` 为幂等/审计键
+/// （与 WS HumanGateFeedback/AbandonHumanGate 同族）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum HumanActionRequest {
+    Approve {
+        command_id: String,
+        expected_gate_id: String,
+    },
+    Abandon {
+        command_id: String,
+        expected_gate_id: String,
+    },
+    Feedback {
+        command_id: String,
+        expected_gate_id: String,
+        feedback: String,
+    },
+    CompileRecovery {
+        command_id: String,
+        expected_gate_id: String,
+        action: crate::web::workspace_ws_types::WorkItemPlanCompileRecoveryActionDto,
+        reason: Option<String>,
+    },
+}
+
+/// 人工命令回执状态（snake_case wire）：Accepted=已受理（含幂等重放与
+/// AlreadyClosed）；Busy=门/轮次占用（409）；Rejected=引擎语义拒绝（422，
+/// 细节经 ApiError code/message 上抛）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HumanActionState {
+    Accepted,
+    Busy,
+    Rejected,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct HumanActionStatus {
+    pub command_id: String,
+    pub state: HumanActionState,
+    pub gate_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct WorkspaceMessageDto {

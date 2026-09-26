@@ -361,6 +361,10 @@ pub fn build_web_router_with_evidence(state: WebAppState, evidence_enabled: bool
             get(handlers::get_workspace_choice_response_status),
         )
         .route(
+            "/api/workspace-sessions/{session_id}/human-actions",
+            post(handlers::post_workspace_human_action),
+        )
+        .route(
             "/api/workspace-sessions/{session_id}/lease-diagnostics",
             get(handlers::workspace_session_lease_diagnostics),
         )

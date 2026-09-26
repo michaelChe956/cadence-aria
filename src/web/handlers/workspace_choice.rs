@@ -67,7 +67,7 @@ pub async fn get_workspace_choice_response_status(
 
 /// 先从 durable session 校验存在性（404 语义），再经 registry 取唯一
 /// manager——不挂 attachment、不抢 lease（observer 同源只读不提升）。
-async fn resolve_session_manager(
+pub(crate) async fn resolve_session_manager(
     state: &WebAppState,
     session_id: &str,
 ) -> ApiResult<Arc<WorkspaceSessionManager>> {

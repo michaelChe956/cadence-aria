@@ -155,6 +155,8 @@ pub(crate) async fn single_candidate_compile_test_lock() -> tokio::sync::MutexGu
 
 #[cfg(test)]
 pub(crate) use compile::WorkItemPlanCompileFinalizerCheckpoint;
+#[cfg(test)]
+pub(crate) use compile::SingleCandidateCompileCheckpoint;
 pub(crate) use compile_parse::*;
 pub(crate) use conversational_gate::{
     HumanGateCloseDecision, HumanGateCloseOutcome, HumanGateCommandOutcome, HumanGateFeedbackInput,
