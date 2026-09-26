@@ -8,6 +8,8 @@ import {
 } from "../../state/provider-options";
 import { useProviderAvailabilityStore } from "../../state/provider-availability-store";
 
+export type AutomationMode = "manual" | "automatic";
+
 export type WorkItemPlanOptionsFormValue = {
   include_integration_tests: boolean;
   include_e2e_tests: boolean;
@@ -17,6 +19,8 @@ export type WorkItemPlanOptionsFormValue = {
   author_provider?: WorkspaceProviderName;
   /** REQ-PPS-01：创建请求携带的 reviewer provider 快照；缺省表示沿用服务端兼容默认。 */
   reviewer_provider?: WorkspaceProviderName;
+  /** P1 WIGA：缺省「不自动化」；仅在已确认 Design 上可选 automatic。 */
+  automation_mode: AutomationMode;
 };
 
 type WorkItemPlanBooleanOptionKey =
@@ -27,10 +31,13 @@ type WorkItemPlanBooleanOptionKey =
 
 export function WorkItemPlanOptionsDialog({
   defaultOptions,
+  automationAvailable,
   onConfirm,
   onClose,
 }: {
   defaultOptions: WorkItemPlanOptionsFormValue;
+  /** P1 WIGA：仅已确认 Design 显示自动化模式选择（缺省手动，人工链路不变）。 */
+  automationAvailable: boolean;
   onConfirm: (options: WorkItemPlanOptionsFormValue) => Promise<void> | void;
   onClose: () => void;
 }) {
@@ -82,6 +89,14 @@ export function WorkItemPlanOptionsDialog({
     setOptions((current) => ({ ...current, [key]: provider }));
     setSubmitError(null);
   }
+
+  // P1 WIGA：模式切换不落 enrollment，只改本地表单；提交才走 PUT。
+  function updateAutomationMode(mode: AutomationMode) {
+    setOptions((current) => ({ ...current, automation_mode: mode }));
+    setSubmitError(null);
+  }
+
+  const automatic = options.automation_mode === "automatic";
 
   return (
     <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/35 p-4">
@@ -147,6 +162,36 @@ export function WorkItemPlanOptionsDialog({
             disabled={submitting}
             onChange={(value) => updateProvider("reviewer_provider", value)}
           />
+          {/* P1 WIGA：仅已确认 Design 提供显式自动化选择；缺省手动，人工链路原样。 */}
+          {automationAvailable ? (
+            <fieldset className="rounded-md border border-[var(--aria-line)] px-3 py-2">
+              <legend className="px-1 text-xs font-semibold text-[var(--aria-ink-muted)]">
+                生成模式
+              </legend>
+              <div className="flex gap-4">
+                <label className="flex items-center gap-1.5 text-sm text-[var(--aria-ink)]">
+                  <input
+                    type="radio"
+                    name="automation-mode"
+                    checked={!automatic}
+                    disabled={submitting}
+                    onChange={() => updateAutomationMode("manual")}
+                  />
+                  手动
+                </label>
+                <label className="flex items-center gap-1.5 text-sm text-[var(--aria-ink)]">
+                  <input
+                    type="radio"
+                    name="automation-mode"
+                    checked={automatic}
+                    disabled={submitting}
+                    onChange={() => updateAutomationMode("automatic")}
+                  />
+                  自动化
+                </label>
+              </div>
+            </fieldset>
+          ) : null}
         </div>
 
         {submitError ? (
@@ -172,7 +217,7 @@ export function WorkItemPlanOptionsDialog({
             disabled={submitting}
             className="rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 py-2 text-sm font-semibold text-white disabled:opacity-60"
           >
-            创建并打开 Workspace
+            {automatic ? "启用自动化" : "创建并打开 Workspace"}
           </button>
         </div>
       </form>

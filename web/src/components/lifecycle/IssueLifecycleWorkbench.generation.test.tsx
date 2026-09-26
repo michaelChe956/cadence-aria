@@ -367,6 +367,181 @@ describe("IssueLifecycleWorkbench generation actions", () => {
       ),
     ).toBe(false);
   });
+
+  // P1 WIGA Task 2：Design 已确认后的显式自动化 enrollment——auto 分支只
+  // PUT enrollment（provider/options 用服务端只读 target 投影），不手动 prepare。
+  it("enrolls a confirmed design without manually preparing a plan", async () => {
+    const fetchMock = lifecycleFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    const onOpenWorkspace = vi.fn();
+
+    render(<IssueLifecycleWorkbench onOpenWorkspace={onOpenWorkspace} />);
+
+    await user.click(await screen.findByTestId("stage-tab-design"));
+    await user.click(screen.getByRole("button", { name: "前端提示设计" }));
+    await user.click(screen.getByRole("button", { name: "生成 Work Item" }));
+    const dialog = await screen.findByRole("dialog", {
+      name: "Work Item Plan 配置",
+    });
+    await user.click(within(dialog).getByRole("radio", { name: "自动化" }));
+    await user.click(
+      within(dialog).getByRole("button", { name: "启用自动化" }),
+    );
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/projects/project_0001/issues/issue_0001/automation-enrollment",
+        expect.objectContaining({ method: "PUT" }),
+      ),
+    );
+    expect(
+      fetchMock.mock.calls.some(([url]) =>
+        String(url).includes("work-item-plans:prepare"),
+      ),
+    ).toBe(false);
+    expect(onOpenWorkspace).not.toHaveBeenCalled();
+
+    const putCall = fetchMock.mock.calls.find(
+      ([url, init]) =>
+        String(url).endsWith("/automation-enrollment") &&
+        (init as RequestInit | undefined)?.method === "PUT",
+    );
+    const putBody = JSON.parse(String(putCall?.[1]?.body)) as {
+      command: {
+        type: string;
+        selection_key: string;
+        logical_repository_id: string;
+        source: {
+          stories: Array<{ id: string; version: number }>;
+          designs: Array<{ id: string; version: number }>;
+        };
+      };
+    };
+    expect(putBody.command.type).toBe("enable");
+    expect(putBody.command.logical_repository_id).toBe(
+      "00000000-0000-0000-0000-000000000001",
+    );
+    expect(putBody.command.source).toEqual({
+      stories: [{ id: "story_spec_0001", version: 1 }],
+      designs: [{ id: "design_spec_0001", version: 1 }],
+    });
+    expect(putBody.command.selection_key.length).toBeGreaterThan(0);
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "Work Item Plan 配置" }),
+      ).not.toBeInTheDocument(),
+    );
+  });
+
+  it("reuses the same selection key across automation retries", async () => {
+    const fetchMock = lifecycleFetch({ automationPutFailures: 1 });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+
+    await user.click(await screen.findByTestId("stage-tab-design"));
+    await user.click(screen.getByRole("button", { name: "前端提示设计" }));
+    await user.click(screen.getByRole("button", { name: "生成 Work Item" }));
+    const dialog = await screen.findByRole("dialog", {
+      name: "Work Item Plan 配置",
+    });
+    await user.click(within(dialog).getByRole("radio", { name: "自动化" }));
+    await user.click(
+      within(dialog).getByRole("button", { name: "启用自动化" }),
+    );
+
+    // 首次 PUT 失败：弹窗保留并显示错误，不自动 Disable/重开。
+    expect(
+      await within(dialog).findByRole("alert"),
+    ).toBeInTheDocument();
+    await user.click(
+      within(dialog).getByRole("button", { name: "启用自动化" }),
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "Work Item Plan 配置" }),
+      ).not.toBeInTheDocument(),
+    );
+    const putBodies = fetchMock.mock.calls
+      .filter(
+        ([url, init]) =>
+          String(url).endsWith("/automation-enrollment") &&
+          (init as RequestInit | undefined)?.method === "PUT",
+      )
+      .map(([, init]) =>
+        JSON.parse(String((init as RequestInit).body)) as {
+          command: { selection_key: string };
+        },
+      );
+    expect(putBodies).toHaveLength(2);
+    expect(putBodies[0].command.selection_key).toBe(
+      putBodies[1].command.selection_key,
+    );
+  });
+
+  it("keeps the automation dialog open on enrollment conflict", async () => {
+    const fetchMock = lifecycleFetch({ automationEnrollmentConflict: true });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+
+    await user.click(await screen.findByTestId("stage-tab-design"));
+    await user.click(screen.getByRole("button", { name: "前端提示设计" }));
+    await user.click(screen.getByRole("button", { name: "生成 Work Item" }));
+    const dialog = await screen.findByRole("dialog", {
+      name: "Work Item Plan 配置",
+    });
+    await user.click(within(dialog).getByRole("radio", { name: "自动化" }));
+    await user.click(
+      within(dialog).getByRole("button", { name: "启用自动化" }),
+    );
+
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+      "automation enrollment revision conflict",
+    );
+    expect(
+      screen.getByRole("dialog", { name: "Work Item Plan 配置" }),
+    ).toBeInTheDocument();
+    expect(
+      fetchMock.mock.calls.some(
+        ([url, init]) =>
+          String(url).endsWith("/automation-enrollment") &&
+          JSON.stringify((init as RequestInit | undefined)?.body ?? "").includes(
+            '"disable"',
+          ),
+      ),
+    ).toBe(false);
+  });
+
+  it("hides the automation choice for an unconfirmed design", async () => {
+    const fetchMock = lifecycleFetch({
+      designDraftInitially: true,
+      workItemPlans: [],
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+
+    await user.click(await screen.findByTestId("stage-tab-work_item"));
+    await user.click(
+      screen.getByRole("button", { name: "准备 Work Item Plan" }),
+    );
+    const dialog = await screen.findByRole("dialog", {
+      name: "Work Item Plan 配置",
+    });
+
+    expect(
+      within(dialog).queryByRole("radio", { name: "自动化" }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(dialog).getByRole("button", { name: "创建并打开 Workspace" }),
+    ).toBeInTheDocument();
+  });
 });
 
 const PROVIDER_LABELS: Record<RealProviderName, string> = {

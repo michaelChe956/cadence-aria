@@ -2,8 +2,11 @@ import type {
   ApiError,
   ArtifactContentResponse,
   ChoiceReplyStatus,
-  ChoiceResponseRequest,
+  AutomationEnrollmentPutRequest,
+  AutomationTarget,
+  AutomationTargetQuery,
   CodingAttempt,
+  IssueAutomationEnrollment,
   CodingAttemptAddress,
   CodingAttemptDiffResponse,
   CodingAttemptSnapshotResponse,
@@ -449,6 +452,65 @@ export function prepareWorkItemPlan(
     `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/work-item-plans:prepare`,
     {
       method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+// P1 WIGA Task 2：Design 后自动化 enrollment 面（GET/PUT 复用 P0 REST，
+// target 是 Task 1 只读投影）。前端不从 repo_id 推断 UUID、不猜默认 provider。
+export function getAutomationTarget(
+  projectId: string,
+  issueId: string,
+  query: AutomationTargetQuery,
+): Promise<AutomationTarget> {
+  const params = new URLSearchParams();
+  if (query.author_provider) {
+    params.set("author_provider", query.author_provider);
+  }
+  if (query.reviewer_provider) {
+    params.set("reviewer_provider", query.reviewer_provider);
+  }
+  if (typeof query.review_rounds === "number") {
+    params.set("review_rounds", String(query.review_rounds));
+  }
+  for (const key of [
+    "superpowers_enabled",
+    "openspec_enabled",
+    "include_integration_tests",
+    "include_e2e_tests",
+    "force_frontend_backend_split",
+    "require_execution_plan_confirm",
+  ] as const) {
+    const value = query[key];
+    if (typeof value === "boolean") {
+      params.set(key, String(value));
+    }
+  }
+  const suffix = params.size > 0 ? `?${params.toString()}` : "";
+  return requestJson<AutomationTarget>(
+    `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/automation-target${suffix}`,
+  );
+}
+
+export function getAutomationEnrollment(
+  projectId: string,
+  issueId: string,
+): Promise<IssueAutomationEnrollment | null> {
+  return requestJson<IssueAutomationEnrollment | null>(
+    `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/automation-enrollment`,
+  );
+}
+
+export function putAutomationEnrollment(
+  projectId: string,
+  issueId: string,
+  payload: AutomationEnrollmentPutRequest,
+): Promise<IssueAutomationEnrollment> {
+  return requestJson<IssueAutomationEnrollment>(
+    `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/automation-enrollment`,
+    {
+      method: "PUT",
       body: JSON.stringify(payload),
     },
   );

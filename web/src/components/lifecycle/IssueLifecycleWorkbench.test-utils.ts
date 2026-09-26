@@ -96,6 +96,14 @@ export function lifecycleFetch(options?: {
   // F-29：初始 story 处于 draft（confirm 后 fake server 会把 durable 投影落成
   // confirmed，供 invalidation 刷新测试观察 draft→confirmed 的卡片状态迁移）。
   storyDraftInitially?: boolean;
+  // P1 WIGA Task 2：初始 design 处于 draft——自动化模式选择只对已确认 Design 开放。
+  designDraftInitially?: boolean;
+  // P1 WIGA Task 2：automation-target GET 的 mock 逻辑仓 id；null 表示目标不可用(422)。
+  automationTarget?: string | null;
+  // P1 WIGA Task 2：PUT enrollment 前 N 次返回 500（验证同 selection_key 重试）。
+  automationPutFailures?: number;
+  // P1 WIGA Task 2：PUT enrollment 一律 409（验证冲突留弹窗、不自动 Disable）。
+  automationEnrollmentConflict?: boolean;
 }): LifecycleFetchMock {
   const projects = [
     ...(options?.projects ?? [projectRecord("project_0001", "Aria")]),
@@ -226,12 +234,156 @@ export function lifecycleFetch(options?: {
         story.confirmation_status = "draft";
       }
     }
+    if (options?.designDraftInitially) {
+      for (const design of initial.design_specs) {
+        design.confirmation_status = "draft";
+      }
+    }
     lifecycleByIssue.set(issueId, initial);
     return initial;
   }
+  // P1 WIGA Task 2：durable enrollment 状态——同键同 payload 幂等返回原记录，
+  // 异 payload 409 携带当前 revision；GET 返回当前记录或 null。
+  let automationEnrollment: Record<string, unknown> | null = null;
+  let automationPutFailures = options?.automationPutFailures ?? 0;
+  const automationTargetLogicalId =
+    options?.automationTarget === undefined
+      ? "00000000-0000-0000-0000-000000000001"
+      : options.automationTarget;
+
 
   return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
+    const automationEnrollmentMatch = url.match(
+      /^\/api\/projects\/([^/]+)\/issues\/([^/]+)\/automation-enrollment$/,
+    );
+    if (automationEnrollmentMatch) {
+      const [, projectId, issueId] = automationEnrollmentMatch;
+      if (init?.method === "PUT") {
+        if (automationPutFailures > 0) {
+          automationPutFailures -= 1;
+          return new Response(
+            JSON.stringify({
+              code: "automation_put_failed",
+              message: "automation enrollment put failed",
+              details: {},
+            }),
+            { status: 500 },
+          );
+        }
+        if (options?.automationEnrollmentConflict) {
+          return new Response(
+            JSON.stringify({
+              code: "automation_enrollment_conflict",
+              message: "automation enrollment revision conflict",
+              details: { current_revision: 1 },
+            }),
+            { status: 409 },
+          );
+        }
+        const payload = JSON.parse(String(init.body)) as {
+          expected_revision: number | null;
+          command: {
+            type: string;
+            selection_key: string;
+            source: Record<string, unknown>;
+            options: Record<string, unknown>;
+            logical_repository_id: string;
+          };
+        };
+        const command = payload.command;
+        if (command?.type !== "enable") {
+          return new Response(
+            JSON.stringify({
+              code: "automation_unsupported",
+              message: "only enable is supported in the lifecycle fixture",
+              details: {},
+            }),
+            { status: 422 },
+          );
+        }
+        const frozenPayload = {
+          source: command.source,
+          options: command.options,
+          logical_repository_id: command.logical_repository_id,
+        };
+        if (automationEnrollment) {
+          const sameKey =
+            automationEnrollment.selection_key === command.selection_key;
+          const samePayload =
+            JSON.stringify(automationEnrollment.frozen_payload) ===
+            JSON.stringify(frozenPayload);
+          if (sameKey && samePayload) {
+            return jsonResponse(automationEnrollment);
+          }
+          return new Response(
+            JSON.stringify({
+              code: "automation_enrollment_conflict",
+              message: "automation enrollment revision conflict",
+              details: {
+                current_revision: automationEnrollment.policy_revision,
+              },
+            }),
+            { status: 409 },
+          );
+        }
+        automationEnrollment = {
+          enrollment_id: "enrollment_0001",
+          selection_key: command.selection_key,
+          project_id: projectId,
+          issue_id: issueId,
+          enabled: true,
+          policy_revision: 1,
+          source: command.source,
+          options: command.options,
+          logical_repository_id: command.logical_repository_id,
+          prepare_intent_id: "prepare_intent_0001",
+          plan_id: null,
+          session_id: null,
+          created_at: "2026-09-27T00:00:00Z",
+          updated_at: "2026-09-27T00:00:00Z",
+          frozen_payload: frozenPayload,
+        };
+        return jsonResponse(automationEnrollment);
+      }
+      return jsonResponse(automationEnrollment ?? null);
+    }
+    const automationTargetMatch = url.match(
+      /^\/api\/projects\/([^/]+)\/issues\/([^/]+)\/automation-target/,
+    );
+    if (automationTargetMatch) {
+      if (automationTargetLogicalId === null) {
+        return new Response(
+          JSON.stringify({
+            code: "automation_enrollment_invalid_scope",
+            message:
+              "automation target requires exactly one logical repository",
+            details: {},
+          }),
+          { status: 422 },
+        );
+      }
+      const query = new URL(url, "http://localhost").searchParams;
+      return jsonResponse({
+        logical_repository_id: automationTargetLogicalId,
+        resolved_options: {
+          author_provider: query.get("author_provider") ?? "codex",
+          reviewer_provider: query.get("reviewer_provider") ?? "claude_code",
+          review_rounds: 1,
+          superpowers_enabled: true,
+          openspec_enabled: true,
+          plan_options: {
+            include_integration_tests:
+              query.get("include_integration_tests") !== "false",
+            include_e2e_tests: query.get("include_e2e_tests") === "true",
+            force_frontend_backend_split:
+              query.get("force_frontend_backend_split") === "true",
+            require_execution_plan_confirm:
+              query.get("require_execution_plan_confirm") === "true",
+          },
+        },
+      });
+    }
     if (url === "/api/projects" && init?.method === "POST") {
       const payload = JSON.parse(String(init.body)) as {
         name: string;

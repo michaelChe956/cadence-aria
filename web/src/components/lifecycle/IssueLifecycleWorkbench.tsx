@@ -928,6 +928,11 @@ export function IssueLifecycleWorkbench({
       {pendingWorkItemPlanLaunch ? (
         <WorkItemPlanOptionsDialog
           defaultOptions={pendingWorkItemPlanLaunch.options}
+          automationAvailable={
+            pendingWorkItemPlanLaunch.card.kind === "design_spec" &&
+            pendingWorkItemPlanLaunch.card.raw.confirmation_status ===
+              "confirmed"
+          }
           onConfirm={handleConfirmWorkItemPlanOptions}
           onClose={() => setPendingWorkItemPlanLaunch(null)}
         />

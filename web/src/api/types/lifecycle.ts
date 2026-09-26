@@ -6,6 +6,7 @@ import type {
   WorkItemContextBudget,
   WorkItemExecutionPlanStatus,
   WorkItemKind,
+  WorkspaceProviderName,
 } from "./common";
 import type {
   IssueWorkItemPlanDetailDto,
@@ -135,4 +136,86 @@ export type GenerateDesignSpecsRequest = ProviderWorkspaceConfigInput & {
 export type GenerateDesignSpecsResponse = {
   design_specs: DesignSpec[];
   workspace_session: WorkspaceSession;
+};
+
+// P1 WIGA（对齐 Rust `src/product/models/automation.rs` + `automation_target.rs`
+// 的 serde snake_case JSON）：Design 确认后的显式自动化 enrollment 面。
+export type AutomationMode = "manual" | "automatic";
+
+export type EnrollmentSpecRef = {
+  id: string;
+  version: number;
+};
+
+export type EnrollmentSource = {
+  stories: EnrollmentSpecRef[];
+  designs: EnrollmentSpecRef[];
+};
+
+export type EnrollmentPlanOptions = {
+  include_integration_tests: boolean;
+  include_e2e_tests: boolean;
+  force_frontend_backend_split: boolean;
+  require_execution_plan_confirm: boolean;
+};
+
+export type EnrollmentOptions = {
+  author_provider: WorkspaceProviderName;
+  reviewer_provider: WorkspaceProviderName;
+  review_rounds: number;
+  superpowers_enabled: boolean;
+  openspec_enabled: boolean;
+  plan_options: EnrollmentPlanOptions;
+};
+
+export type IssueAutomationEnrollment = {
+  enrollment_id: string;
+  selection_key: string;
+  project_id: string;
+  issue_id: string;
+  enabled: boolean;
+  policy_revision: number;
+  source: EnrollmentSource;
+  options: EnrollmentOptions;
+  logical_repository_id: string;
+  prepare_intent_id: string;
+  plan_id: string | null;
+  session_id: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type AutomationEnrollmentEnableCommand = {
+  type: "enable";
+  selection_key: string;
+  source: EnrollmentSource;
+  options: EnrollmentOptions;
+  logical_repository_id: string;
+};
+
+export type AutomationEnrollmentDisableCommand = {
+  type: "disable";
+};
+
+export type AutomationEnrollmentPutRequest = {
+  expected_revision: number | null;
+  command: AutomationEnrollmentEnableCommand | AutomationEnrollmentDisableCommand;
+};
+
+// Task 1 只读投影：唯一逻辑仓 UUID + 服务端与 prepare 同源解析的 options。
+export type AutomationTargetQuery = {
+  author_provider?: WorkspaceProviderName;
+  reviewer_provider?: WorkspaceProviderName;
+  review_rounds?: number;
+  superpowers_enabled?: boolean;
+  openspec_enabled?: boolean;
+  include_integration_tests?: boolean;
+  include_e2e_tests?: boolean;
+  force_frontend_backend_split?: boolean;
+  require_execution_plan_confirm?: boolean;
+};
+
+export type AutomationTarget = {
+  logical_repository_id: string;
+  resolved_options: EnrollmentOptions;
 };
