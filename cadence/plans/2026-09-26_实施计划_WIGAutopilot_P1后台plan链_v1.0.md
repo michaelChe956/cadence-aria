@@ -511,6 +511,25 @@ P1 frontend 增加 `AutomationMode = "manual" | "automatic"`（默认 `manual`�
 | 人工 choice、计划门反馈/批准或放弃、compile 失败及人工 recovery | 7/10 | 无 driver 驾驶舱手动解除；停点期间未自动批准/重试 |
 | compile/publication 最终成功、plan durable Confirmed 与信息展示 | 8/9/10 | 同一事实仅一次提醒；info 不增待处理、不提供批量动作 |
 
+
+### T10 执行实录（2026-09-27，棒 ImplP1Gate，commit 200a1c33）
+
+**替身清单实测**（全绿；驱动脚本与证据 `/tmp/p1_evidence.jsonl`）：
+
+| 行 | 命令/证据 | 结果 |
+|---|---|---|
+| 四中窗（intent/plan/session/EngineStarted） | `cargo test --locked --lib automation_p1_crash_windows_keep_one_plan_and_never_reissue_provider` | 1 passed；每窗先中断（错误中止+中窗 durable 现场逐窗断言），重启（全新 state/runtime）两轮扫描+定向补偿后恰一 plan/session、Interactive；前 3 窗恰一次 provider 派发（ledger==1），EngineStarted 窗 fail-closed NeedsHuman 且零派发，二次重启仍零派发 |
+| 红灯说明 | 同上首跑 | 产品恢复路径 T4-T6 已覆盖（`ensure_issue_work_item_plan_with_identity`/`create_workspace_session_bound` 身份复用、intent 重放、EngineStarted 不可证明分诊），按 Step 2 约定不造假红灯；新增边界断言自身经历一次红（AfterSessionSaved 现场断言缺陷）后修复转绿 |
+| 定向回归 | `automation_p1`(1)/`plan_confirmed_info`(3)/`issue_automation_store`(13)/`automation_reconcile`(4)/`plan_generation`(2) + `pnpm -C web exec vitest run IssueLifecycleWorkbench.generation.test.tsx ChatCockpitPage.inbox.test.tsx`(48) | 全绿 |
+| 其余替身行（默认 off/多 target/choice/门/info） | T1-T9 既有测试族（见上文各 Task 提交） | 全绿（T10 未重复跑全量，留给集成负责人统一全量检查） |
+
+**真实链进度**（aria-dev-v48p @26dd7a4e，PID 3908597，前端 index-DBYXm42R.js，pi 0.86.1 可用——部署对账 ✔）：
+- 环境 ✔：2 成员金丝雀 LC `logical_codebase_a9c170b4…`（p1-member-alpha/beta 各含 `crossRepoGreeting`，聚合索引重建 active）；载体 issue_0004（change_id=wiga-p1-real-chain，未触碰 issue_0003）；automation-target GET 200 解析单 target=alpha。
+- 已知铺底（产品缺面的环境直写，与替身同法，须在关闸记录中如实保留）：① 选区 AllMembers→Explicit[alpha]（产品无选区编辑 REST/UI）；② aggregate-policy bootstrap 工件（planning resolver 硬要求 `NotFound`，而 `ensure_bootstrap` 只在 coding-group/gateway 路径调用——**产品缺口：新 LC 上 story generate 500**，建议登记修复）。
+- 阶段一进行中：story 会话 workspace_session_0023 已建（pi，owner=client）；flash-start/choice 应答/确认、design、enrollment→后台链→门三分支→compile→Confirmed→info→重启恢复 **未完成**（本棒预算截断）。
+- 续跑入口：`/tmp/p1_real_chain.js`（阶段一）+ `/tmp/p1_state.json`；驱动模式=观察 WS 收 pending choice→REST 作答（P0 同法）。
+
+**关闸判定：真实链未关闸——2.1-2.4 未勾选，`test(wiga): close…` 关闸提交未做。**
 **当前依赖状态：**撰写时服务器 aria **未运行**，故真实链未关闸。P0 `/human-actions` 路由及 handler 已落地（`src/web/app.rs:363-366`、`src/web/handlers/workspace_human_action.rs:24-175`），P1 复用并在真实链重验；若实施中发现真实服务端当前版本未部署 P0 面，先部署/核实，不允许 P1 发明替代门面。线 B amendment Unsent/补投递机制已落地但本计划不触碰（P2 才依赖）。
 
 ## 自审与追溯
