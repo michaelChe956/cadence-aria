@@ -418,6 +418,16 @@ pub async fn issue_lifecycle(
             .map_err(product_store_api_error)?,
     );
 
+    // P1（REQ-WIGA-07）：只读确认信息与列表同源派生；读取失败按 HTTP 显式
+    // 错误传播（不伪 client、不吞为空）。
+    let plan_confirmed_info = crate::web::plan_confirmed_info::issue_plan_confirmed_info(
+        &app_paths,
+        &project_id,
+        &issue_id,
+    )
+    .map_err(product_store_api_error)?;
+
+
     Ok(Json(IssueLifecycleResponse {
         issue: product_issue_dto_with_binding(&app_paths, issue)?,
         story_specs,
@@ -428,6 +438,7 @@ pub async fn issue_lifecycle(
         workspace_sessions,
         coding_attempts,
         delivery_summary,
+        plan_confirmed_info,
     }))
 }
 

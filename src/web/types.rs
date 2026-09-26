@@ -10,6 +10,7 @@ use crate::product::coding_models::{
 };
 use crate::product::logical_codebase::LogicalRepositoryId;
 use crate::product::work_item_plan_policy::RunPolicy;
+use crate::web::plan_confirmed_info::PlanConfirmedInfoDto;
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -491,6 +492,10 @@ pub struct IssueLifecycleResponse {
     /// 旧客户端/旧响应不携带该字段时反序列化为空聚合。
     #[serde(default)]
     pub delivery_summary: IssueDeliverySummaryDto,
+    /// P1（REQ-WIGA-07）：durable publication/compile + Confirmed 派生的只读
+    /// 确认信息（0 或 1 条）。additive：旧客户端反序列化缺省为空。
+    #[serde(default)]
+    pub plan_confirmed_info: Vec<PlanConfirmedInfoDto>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]

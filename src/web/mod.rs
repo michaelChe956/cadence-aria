@@ -8,6 +8,9 @@ pub mod handlers;
 pub mod issue_registry;
 pub mod plan_generation;
 pub mod autopilot_orchestrator;
+#[cfg(test)]
+pub(crate) mod wiga_gate_fixture;
+pub mod plan_confirmed_info;
 pub mod provider_availability;
 pub mod provider_probe;
 pub mod redaction;

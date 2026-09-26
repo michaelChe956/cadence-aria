@@ -1107,3 +1107,67 @@ fn prepare_bound_plan_reuses_identity_without_overwriting_content() {
         1
     );
 }
+
+/// P1 WIGA Task 8（REQ-WIGA-07）：issue lifecycle HTTP 投影只读携带
+/// `plan_confirmed_info`——未确认时空数组；finalizer 崩溃经人工
+/// CompileRecovery Continue + Approve 确认后有且仅有一条，重复 GET
+/// 同 key 同 `committed_at` 时间（幂等，不取会变的 updated_at）。
+#[tokio::test]
+async fn issue_lifecycle_projects_plan_confirmed_info_with_stable_key_and_time() {
+    let mut fixture = Box::new(crate::web::wiga_gate_fixture::EnrolledGateFixture::new().await);
+    let app = crate::web::app::build_web_router(fixture.state.clone());
+
+    let fetch_info = |app: axum::Router| async move {
+        let uri = format!("/api/issues/{ISSUE_ID}/lifecycle?project_id={PROJECT_ID}");
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        value["plan_confirmed_info"]
+            .as_array()
+            .expect("plan_confirmed_info array (serde default)")
+            .clone()
+    };
+
+    // 未编译/未确认：additive 字段存在且为空。
+    let before = fetch_info(app.clone()).await;
+    assert!(before.is_empty(), "未确认不得投影成功信息: {before:?}");
+
+    fixture.fail_compile_after_human_approve().await;
+    let during = fetch_info(app.clone()).await;
+    assert!(during.is_empty(), "failpoint 失败 compile 不得投影成功信息: {during:?}");
+
+    fixture.recover_and_confirm_compile().await;
+    let first = fetch_info(app.clone()).await;
+    assert_eq!(first.len(), 1, "恢复并确认后有且仅有一条: {first:?}");
+    let info = &first[0];
+    assert_eq!(info["title"].as_str(), Some("Work Item Plan 已确认"));
+    assert_eq!(
+        info["session_id"].as_str(),
+        Some(fixture.session_id.as_str())
+    );
+    let key = info["key"].as_str().expect("key");
+    assert!(key.starts_with("plan_confirmed:"), "{key}");
+    assert!(key.contains(&fixture.durable().entity_id), "{key}");
+    assert!(
+        !info["occurred_at"]
+            .as_str()
+            .unwrap_or_default()
+            .is_empty(),
+        "occurred_at 取 tx.committed_at"
+    );
+
+    // 重复 GET：同 key 同时间（幂等投影，不随读取变化）。
+    let second = fetch_info(app).await;
+    assert_eq!(first, second, "重复 GET 必须得到相同投影");
+}
