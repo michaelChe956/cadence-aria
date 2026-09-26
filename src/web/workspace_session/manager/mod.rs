@@ -259,6 +259,14 @@ pub(crate) fn test_session_record(session_id: &str) -> WorkspaceSessionRecord {
 }
 
 impl WorkspaceSessionManager {
+    /// 仅供 HTTP 预算测试：长持 engine 锁模拟 provider run 占用。
+    #[cfg(test)]
+    pub(crate) async fn lock_engine_for_test(
+        &self,
+    ) -> tokio::sync::MutexGuard<'_, WorkspaceEngine> {
+        self.engine.lock().await
+    }
+
     /// P0 1.2（REQ-WIGA-08）：对外 SessionState 帧统一以 durable enrollment
     /// 覆盖 automation 归属；读取失败不伪 client——置 None（前端保持未知）
     /// 并打点（HTTP 面由 handler 显式报错）。

@@ -345,6 +345,14 @@ pub fn build_web_router_with_evidence(state: WebAppState, evidence_enabled: bool
             post(handlers::workspace_session_takeover),
         )
         .route(
+            "/api/workspace-sessions/{session_id}/choices/{choice_id}/response",
+            post(handlers::post_workspace_choice_response),
+        )
+        .route(
+            "/api/workspace-sessions/{session_id}/choices/{choice_id}/responses/{command_id}",
+            get(handlers::get_workspace_choice_response_status),
+        )
+        .route(
             "/api/workspace-sessions/{session_id}/lease-diagnostics",
             get(handlers::workspace_session_lease_diagnostics),
         )

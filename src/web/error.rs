@@ -52,7 +52,8 @@ impl IntoResponse for ApiError {
             "checkpoint_unsafe_dirty_worktree"
             | "workspace_session_ambiguous"
             | "workspace_session_confirm_not_allowed"
-            | "workspace_session_takeover_not_allowed" => StatusCode::CONFLICT,
+            | "workspace_session_takeover_not_allowed"
+            | "workspace_choice_conflict" => StatusCode::CONFLICT,
             "coding_attempt_active"
             | "coding_attempt_ambiguous"
             | "coding_attempt_scope_mismatch"
@@ -76,7 +77,10 @@ impl IntoResponse for ApiError {
             | "workspace_session_not_found"
             | "registration_preflight_not_found"
             | "registration_batch_not_found"
-            | "logical_codebase_not_found" => StatusCode::NOT_FOUND,
+            | "logical_codebase_not_found"
+            | "workspace_choice_unknown" => StatusCode::NOT_FOUND,
+            // P0 1.3：choice 应答旧 run/结构拒绝——410 Gone（不可送新 run）。
+            "workspace_choice_expired" | "workspace_choice_rejected" => StatusCode::GONE,
             "repository_project_not_found" | "repository_routing_target_unknown" => {
                 StatusCode::NOT_FOUND
             }

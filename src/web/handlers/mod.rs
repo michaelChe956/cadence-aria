@@ -90,6 +90,7 @@ mod providers;
 mod repository_registration;
 mod runtime;
 mod support;
+mod workspace_choice;
 mod workspace_session;
 
 #[rustfmt::skip]
@@ -152,6 +153,9 @@ pub use pointer_publication::{
 pub use repository_registration::{
     RepositoryRegistrationDependencies, RepositoryRegistrationDependenciesBuilder,
     create_repository, get_repository_initialization,
+};
+pub(crate) use workspace_choice::{
+    get_workspace_choice_response_status, post_workspace_choice_response,
 };
 #[rustfmt::skip]
 pub use runtime::{advance_task, artifact_content, confirm_task, create_task, file_content, file_diff, issue_rollback, issue_rollback_preview, list_tasks, projection, provider_input_content, rollback_preview, rollback_task, stop_task};

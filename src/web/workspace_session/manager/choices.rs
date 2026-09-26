@@ -231,6 +231,18 @@ impl WorkspaceSessionManager {
         }
         let key = (run.run_incarnation.clone(), choice_id.to_string());
         let fingerprint = answers_fingerprint(&request.answers);
+        // 已终态（Delivered/Expired）的同 command：幂等返回原状态或按旧 run
+        // 拒绝——绝不重新认领、不二发。
+        if let Some(finished) = state
+            .finished_choice_status
+            .iter()
+            .find(|status| status.command_id == request.command_id && status.choice_id == choice_id)
+        {
+            if finished.expected_run_id == run.run_incarnation {
+                return Ok((finished.clone(), false));
+            }
+            return Err(ChoiceReplyError::Expired);
+        }
         if let Some(record) = state.choice_claims.get(&key) {
             if record.command_id == request.command_id && record.fingerprint == fingerprint {
                 return Ok((reply_status(record, choice_id, &run.run_incarnation), false));
