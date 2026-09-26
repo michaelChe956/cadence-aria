@@ -34,7 +34,9 @@ impl WorkspaceEngine {
     /// worktree 三件套（含 T2S3 嵌套共存检查）→ units 分组物化。外层 advance
     /// journal 用集绑定形态（`load_or_prepare_advance_initialization_for_attempts`：
     /// `attempt_id`=全局拓扑序首个+`target_attempt_ids` 全集，集合一致性比对）。
-    /// 本函数只建组——无自动跨 attempt 编排（REQ-MTG-03，StartCoding 唯一入口）。
+    /// 本函数只建组至 Ready，不发 coding provider；多 target 仍须人工逐 target
+    /// 发显式 StartCoding。仅精确绑定单 target 的 durable opt-in 可由独立服务端
+    /// StartCoding 命令单发首启；不是 advance 的副作用（REQ-ADV-05/MTG-03/CG-04）。
     pub(super) async fn initialize_advance_split(
         &mut self,
         input: AdvanceInput,

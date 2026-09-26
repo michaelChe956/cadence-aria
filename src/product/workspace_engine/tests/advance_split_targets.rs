@@ -662,11 +662,18 @@ async fn split_advance_leaves_attempts_unorchestrated_at_created_prepare_context
         .await
         .expect("split advance completes");
     let AdvanceOutcome::Completed {
-        target_attempts, ..
+        record,
+        target_attempts,
+        ..
     } = outcome
     else {
         panic!("expected Completed");
     };
+    assert_eq!(
+        record.status,
+        crate::product::advance_store::AdvanceStatus::Ready,
+        "split advance completes the group at Ready (REQ-ADV-05)"
+    );
 
     let coding_store = fixture.coding_store();
     for binding in &target_attempts {
