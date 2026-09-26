@@ -72,8 +72,11 @@ use crate::web::workspace_ws_types::{ArtifactVersion, ProviderConfigSnapshot, Re
 mod aggregate_index;
 pub mod aggregate_initialization;
 mod automation_enrollment;
+mod automation_enrollment_test_support;
+mod automation_target;
 mod codebases;
 mod coding;
+mod coding_choice;
 pub(crate) mod dto;
 mod evidence_error_mapping;
 mod evidence_query;
@@ -90,7 +93,6 @@ mod providers;
 mod repository_registration;
 mod runtime;
 mod support;
-mod coding_choice;
 mod workspace_choice;
 mod workspace_human_action;
 mod workspace_session;
@@ -106,6 +108,7 @@ pub(crate) use coding::{
 pub use automation_enrollment::{
     get_automation_enrollment, post_automation_enrollment_binding, put_automation_enrollment,
 };
+pub use automation_target::get_automation_target;
 pub use codebases::{
     create_logical_codebase, delete_logical_codebase, get_logical_codebase, list_codebases,
 };
@@ -145,6 +148,7 @@ pub use aggregate_initialization::{
     get_lc_aggregate_initialization,
 };
 pub(crate) use coding::map_advance_outcome;
+pub(crate) use coding_choice::{get_coding_choice_response_status, post_coding_choice_response};
 pub(crate) use dto::{coding_attempt_scope_text, coding_execution_unit_dto};
 pub use pointer_publication::{
     create_lc_pointer_publication, create_pointer_publication, get_lc_pointer_publication,
@@ -155,9 +159,6 @@ pub use pointer_publication::{
 pub use repository_registration::{
     RepositoryRegistrationDependencies, RepositoryRegistrationDependenciesBuilder,
     create_repository, get_repository_initialization,
-};
-pub(crate) use coding_choice::{
-    get_coding_choice_response_status, post_coding_choice_response,
 };
 pub(crate) use workspace_choice::{
     get_workspace_choice_response_status, post_workspace_choice_response,
