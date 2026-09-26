@@ -16,6 +16,7 @@ pub mod gate_store;
 pub mod git_workspace_service;
 pub mod id;
 pub mod image_create;
+pub mod issue_automation_store;
 pub mod issue_baseline;
 pub mod issue_store;
 pub mod json_store;

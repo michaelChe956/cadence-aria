@@ -1,3 +1,4 @@
+pub mod automation;
 pub mod human_gate;
 pub mod lifecycle;
 pub mod outline;
@@ -20,6 +21,7 @@ where
 #[cfg(test)]
 pub mod tests;
 
+pub use automation::*;
 pub use human_gate::*;
 pub use lifecycle::*;
 pub use outline::*;
