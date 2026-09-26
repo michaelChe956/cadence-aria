@@ -1,6 +1,8 @@
 import type {
   ApiError,
   ArtifactContentResponse,
+  ChoiceReplyStatus,
+  ChoiceResponseRequest,
   CodingAttempt,
   CodingAttemptAddress,
   CodingAttemptDiffResponse,
@@ -27,6 +29,8 @@ import type {
   RepositoryBranchListResponse,
   RepositoryListResponse,
   TakeoverResponse,
+  WorkspaceHumanAction,
+  WorkspaceHumanActionStatus,
   WorkspaceSession,
   WorkItemExecutionPlan,
 } from "./types";
@@ -124,6 +128,110 @@ export function confirmWorkspaceSession(
         ...(withReview ? { with_review: true } : {}),
       }),
     },
+  );
+}
+
+/**
+ * P0 1.3（REQ-WIGA-05）Task 10：无 driver 的人工门命令 REST 通道。
+ *
+ * `accepted`（200）与 `busy`（409，门/轮次占用）都是协议状态回执 → 原样返回；
+ * 其余 4xx（`human_action_gate_mismatch` 门身份不匹配、引擎语义拒绝 422）抛
+ * `ApiRequestError`——错误细节经 code/message 上抛，调用方负责审计/错误面。
+ */
+export async function postWorkspaceHumanAction(
+  sessionId: string,
+  action: WorkspaceHumanAction,
+): Promise<WorkspaceHumanActionStatus> {
+  const response = await fetch(
+    `/api/workspace-sessions/${encodeURIComponent(sessionId)}/human-actions`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(action),
+    },
+  );
+  const body: unknown = await response.json().catch(() => null);
+  if (isHumanActionStatus(body) && (response.ok || response.status === 409)) {
+    return body;
+  }
+  if (!response.ok) {
+    const error: unknown = body;
+    throw new ApiRequestError({
+      code:
+        isRecord(error) && typeof error.code === "string"
+          ? error.code
+          : "web_client_error",
+      message:
+        isRecord(error) && typeof error.message === "string"
+          ? error.message
+          : response.statusText,
+      details:
+        isRecord(error) && isRecord(error.details)
+          ? (error.details as ApiError["details"])
+          : {},
+    });
+  }
+  throw new ApiRequestError({
+    code: "human_action_unexpected_response",
+    message: "人工命令端点返回了无法识别的回执",
+    details: {},
+  });
+}
+
+function isHumanActionStatus(value: unknown): value is WorkspaceHumanActionStatus {
+  return (
+    isRecord(value) &&
+    typeof value.command_id === "string" &&
+    typeof value.gate_id === "string" &&
+    (value.state === "accepted" || value.state === "busy" || value.state === "rejected")
+  );
+}
+
+/**
+ * P0 1.3（REQ-WIGA-05）：workspace choice 应答 REST 通道。200=Delivered、
+ * 202=Submitting/Resolving（未承诺送达）；404/409/410 抛 ApiRequestError。
+ */
+export function postWorkspaceChoiceResponse(
+  sessionId: string,
+  choiceId: string,
+  request: ChoiceResponseRequest,
+): Promise<ChoiceReplyStatus> {
+  return requestJson<ChoiceReplyStatus>(
+    `/api/workspace-sessions/${encodeURIComponent(sessionId)}/choices/${encodeURIComponent(choiceId)}/response`,
+    { method: "POST", body: JSON.stringify(request) },
+  );
+}
+
+/** 同 command 复查（202 后保卡轮询；同一 command_id 查询不启动新 command）。 */
+export function getWorkspaceChoiceResponseStatus(
+  sessionId: string,
+  choiceId: string,
+  commandId: string,
+): Promise<ChoiceReplyStatus> {
+  return requestJson<ChoiceReplyStatus>(
+    `/api/workspace-sessions/${encodeURIComponent(sessionId)}/choices/${encodeURIComponent(choiceId)}/responses/${encodeURIComponent(commandId)}`,
+  );
+}
+
+/** P0 1.3：coding choice 应答 REST 通道（同一 claim 语义，per attempt 作用域）。 */
+export function postCodingChoiceResponse(
+  address: CodingAttemptAddress,
+  choiceId: string,
+  request: ChoiceResponseRequest,
+): Promise<ChoiceReplyStatus> {
+  return requestJson<ChoiceReplyStatus>(
+    `${codingAttemptApiPath(address)}/choices/${encodeURIComponent(choiceId)}/response`,
+    { method: "POST", body: JSON.stringify(request) },
+  );
+}
+
+export function getCodingChoiceResponseStatus(
+  address: CodingAttemptAddress,
+  choiceId: string,
+  commandId: string,
+): Promise<ChoiceReplyStatus> {
+  return requestJson<ChoiceReplyStatus>(
+    `${codingAttemptApiPath(address)}/choices/${encodeURIComponent(choiceId)}/responses/${encodeURIComponent(commandId)}`,
   );
 }
 

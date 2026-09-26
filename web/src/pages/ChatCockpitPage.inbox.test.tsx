@@ -1,8 +1,11 @@
 import { useProviderAvailabilityStore } from "../state/provider-availability-store";
 import type * as WorkspaceWsModule from "../hooks/useWorkspaceWs";
 import type * as ApiClient from "../api/client";
-import type { TakeoverResponse } from "../api/types";
-import { ApiRequestError, takeoverWorkspaceSession } from "../api/client";
+import {
+  ApiRequestError,
+  postWorkspaceHumanAction,
+  takeoverWorkspaceSession,
+} from "../api/client";
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -60,6 +63,7 @@ vi.mock("../hooks/useUnloadGuard", () => ({ useUnloadGuard: vi.fn() }));
 vi.mock("../api/client", async (importOriginal) => ({
   ...(await importOriginal<typeof ApiClient>()),
   takeoverWorkspaceSession: vi.fn(),
+  postWorkspaceHumanAction: vi.fn(),
 }));
 vi.mock("../api/workspace-content", () => ({
   fetchWorkspaceArtifactVersion: vi.fn(),
@@ -467,5 +471,143 @@ describe("ChatCockpitPage", () => {
     fireEvent.keyDown(document, { code: COCKPIT_HOTKEYS.feedback.code, ctrlKey: true });
 
     expect(editor).toHaveFocus();
+  });
+
+  // P0 1.3（REQ-WIGA-05）Task 10：durable owner=server 的观察态会话——驾驶舱
+  // 门卡 feedback/terminate/compile recovery 一律走 REST 人工命令端点
+  //（postWorkspaceHumanAction），不借 driver WS 三命令；owner=client/未知
+  //（null）保留手动 WS 语义（上方 typed 用例即对照）。
+  function serverOwnedObserverSession(overrides: Partial<WorkspaceWsState> = {}) {
+    useWorkspaceStore.setState({
+      sessionId: "session_server",
+      stage: "human_confirm",
+      flowKind: "single_candidate",
+      singleCandidatePhase: "approval",
+      sessionStatus: "waiting_for_human",
+      humanGateTurn: null,
+      humanGateSnapshot: {
+        findings: [],
+        repeated_fingerprints: [],
+        attempts_used: 1,
+        manual_repairs_remaining: 1,
+        trigger: "verification_new_findings",
+        resumable: true,
+      },
+      humanGateClosure: null,
+      activeNodeId: "node_gate",
+      timelineNodes: [
+        timelineNode({ node_id: "node_gate", stage: "human_confirm", status: "active" }),
+      ],
+      automation: {
+        owner: "server",
+        enrollment_id: "enr-1",
+        policy_revision: 1,
+        enabled: true,
+      },
+      ...overrides,
+    });
+    useWorkspaceStore.getState().rebuildChatEntries();
+  }
+
+  beforeEach(() => {
+    vi.mocked(postWorkspaceHumanAction).mockReset();
+    vi.mocked(postWorkspaceHumanAction).mockResolvedValue({
+      command_id: "cmd-rest",
+      state: "accepted",
+      gate_id: "node_gate",
+    });
+  });
+
+  it("sends observer gate feedback through the REST human action endpoint for a server-owned session", async () => {
+    const user = userEvent.setup();
+    serverOwnedObserverSession();
+    const workspaceWs = mockWorkspaceWs();
+    renderCockpitWith(workspaceWs, "session_server");
+
+    const inbox = screen.getByTestId("cockpit-inbox");
+    await user.type(within(inbox).getByLabelText("门禁反馈"), "请补齐边界");
+    await user.click(within(inbox).getByRole("button", { name: "提交反馈" }));
+
+    expect(postWorkspaceHumanAction).toHaveBeenCalledTimes(1);
+    expect(postWorkspaceHumanAction).toHaveBeenCalledWith(
+      "session_server",
+      expect.objectContaining({
+        type: "feedback",
+        expected_gate_id: "node_gate",
+        feedback: "请补齐边界",
+      }),
+    );
+    expect(workspaceWs.sendHumanGateFeedback).not.toHaveBeenCalled();
+  });
+
+  it("terminates a server-owned observer gate through the REST abandon action", async () => {
+    const user = userEvent.setup();
+    serverOwnedObserverSession();
+    const workspaceWs = mockWorkspaceWs();
+    renderCockpitWith(workspaceWs, "session_server");
+
+    const inbox = screen.getByTestId("cockpit-inbox");
+    await user.click(within(inbox).getByRole("button", { name: "终止此门" }));
+    await user.click(within(inbox).getByRole("button", { name: "确认终止此门" }));
+
+    expect(postWorkspaceHumanAction).toHaveBeenCalledTimes(1);
+    expect(postWorkspaceHumanAction).toHaveBeenCalledWith(
+      "session_server",
+      expect.objectContaining({ type: "abandon", expected_gate_id: "node_gate" }),
+    );
+    expect(workspaceWs.sendAbandonGate).not.toHaveBeenCalled();
+  });
+
+  it("recovers a server-owned compile gate through the REST human action endpoint", async () => {
+    const user = userEvent.setup();
+    serverOwnedObserverSession({
+      humanGateSnapshot: null,
+      activeNodeId: "node_recovery",
+      timelineNodes: [
+        timelineNode({
+          node_id: "node_recovery",
+          node_type: "work_item_plan_compile_recovery",
+          stage: "human_confirm",
+          status: "active",
+        }),
+      ],
+    });
+    const workspaceWs = mockWorkspaceWs();
+    renderCockpitWith(workspaceWs, "session_server");
+
+    const inbox = screen.getByTestId("cockpit-inbox");
+    await user.click(within(inbox).getByRole("button", { name: "继续" }));
+
+    expect(postWorkspaceHumanAction).toHaveBeenCalledTimes(1);
+    expect(postWorkspaceHumanAction).toHaveBeenCalledWith(
+      "session_server",
+      expect.objectContaining({
+        type: "compile_recovery",
+        expected_gate_id: "node_recovery",
+        action: "continue",
+      }),
+    );
+    expect(workspaceWs.sendWorkItemPlanCompileRecoveryAction).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a REST human action rejection as the protocol error without touching the WS channel", async () => {
+    const user = userEvent.setup();
+    serverOwnedObserverSession();
+    vi.mocked(postWorkspaceHumanAction).mockRejectedValue(
+      new ApiRequestError({
+        code: "human_action_gate_mismatch",
+        message: "门身份不匹配",
+        details: {},
+      }),
+    );
+    const workspaceWs = mockWorkspaceWs();
+    renderCockpitWith(workspaceWs, "session_server");
+
+    const inbox = screen.getByTestId("cockpit-inbox");
+    await user.type(within(inbox).getByLabelText("门禁反馈"), "请补齐边界");
+    await user.click(within(inbox).getByRole("button", { name: "提交反馈" }));
+
+    expect(await screen.findByText("门身份不匹配")).toBeInTheDocument();
+    expect(workspaceWs.sendHumanGateFeedback).not.toHaveBeenCalled();
   });
 });

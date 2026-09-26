@@ -1,5 +1,8 @@
 import { newCommandId } from "../hooks/useWorkspaceWs";
-import type { WorkItemPlanCompileRecoveryAction } from "../api/types";
+import type {
+  WorkItemPlanCompileRecoveryAction,
+  WorkspaceHumanAction,
+} from "../api/types";
 import {
   gateActionBlockReason,
   gateKindOf,
@@ -65,6 +68,14 @@ export function createCockpitActionFacade(input: {
     action: WorkItemPlanCompileRecoveryAction,
     reason?: string,
   ) => void;
+  /**
+   * P0 1.3（REQ-WIGA-05）Task 10：durable owner=server 会话的人工门 REST 发送器
+   * （页面接线 `postWorkspaceHumanAction`，含审计与错误面）。owner=server 时
+   * feedback/terminate/recoverCompile 一律走本通道——无 driver WS 也能作答；
+   * 未接线时对应动作零出站（fail-closed），不退回 WS 手动语义；owner=client
+   * 或未知（null，等重启暂停）保留既有手动 WS 语义，observer 不借 REST 扩权。
+   */
+  sendHumanAction?: (action: WorkspaceHumanAction) => boolean;
 }): CockpitActionFacade {
   return {
     confirm() {
@@ -81,11 +92,26 @@ export function createCockpitActionFacade(input: {
       return input.sendConfirm(true);
     },
     feedback(feedback) {
-      if (gateActionBlockReason(input.getState()) !== null) {
+      const state = input.getState();
+      if (gateActionBlockReason(state) !== null) {
         return false;
       }
       if (actionFacadeForFlowKind(input.flowKind) !== "typed") {
         return false;
+      }
+      const restRoute = humanActionRestRoute(state);
+      if (restRoute === "none") {
+        return false;
+      }
+      if (restRoute !== "ws") {
+        return (
+          input.sendHumanAction?.({
+            type: "feedback",
+            command_id: newCommandId(),
+            expected_gate_id: restRoute.gateId,
+            feedback,
+          }) ?? false
+        );
       }
       // 协议依据（cadence/reports/workitem-conversational-gate-advance/evidence/
       // amendment-wire-notes.md §40-42）：human_gate_feedback 的 command_id 完全由
@@ -96,13 +122,27 @@ export function createCockpitActionFacade(input: {
       return input.sendHumanGateFeedback(feedback, input.commandId ?? newCommandId());
     },
     terminate() {
+      const state = input.getState();
       // L1 typed 重承载（REQ-RET-02）：终止=显式 abandon_human_gate 命令；
       // 重连/刷新后无活 turn command_id 时凭新 id 提交（与 feedback 同款纪律）。
       // F-21：用终止专属判据——plan 会话停在 human_confirm 的 context blocker/
       // author 失败/缺相位门此前被 phase_mismatch 静默拦截（点击零 WS 出站），
       // 而矩阵与引擎对这些形态均接受 abandon（confirm/feedback 纪律不变）。
-      if (gateTerminateBlockReason(input.getState()) !== null) {
+      if (gateTerminateBlockReason(state) !== null) {
         return false;
+      }
+      const restRoute = humanActionRestRoute(state);
+      if (restRoute === "none") {
+        return false;
+      }
+      if (restRoute !== "ws") {
+        return (
+          input.sendHumanAction?.({
+            type: "abandon",
+            command_id: newCommandId(),
+            expected_gate_id: restRoute.gateId,
+          }) ?? false
+        );
       }
       return input.sendAbandonGate(input.commandId ?? newCommandId());
     },
@@ -153,12 +193,27 @@ export function createCockpitActionFacade(input: {
       await input.sendBatchConfirm();
     },
     // REQ-PCG-02：compile recovery（既有 WS action 通路，action 枚举原样透传）。
+    // P0 1.3：owner=server 时同款动作改走 REST 人工命令（无 driver WS 也能恢复）。
     async recoverCompile(action, reason) {
       const state = input.getState();
       if (
         gateKindOf(state) !== "compile_recovery" ||
         gateActionBlockReason(state) !== null
       ) {
+        return;
+      }
+      const restRoute = humanActionRestRoute(state);
+      if (restRoute === "none") {
+        return;
+      }
+      if (restRoute !== "ws") {
+        input.sendHumanAction?.({
+          type: "compile_recovery",
+          command_id: newCommandId(),
+          expected_gate_id: restRoute.gateId,
+          action,
+          reason: reason ?? null,
+        });
         return;
       }
       input.sendCompileRecovery(action, reason);
@@ -244,4 +299,22 @@ function contextString(context: unknown, key: string): string | null {
   }
   const value = (context as Record<string, unknown>)[key];
   return typeof value === "string" ? value : null;
+}
+
+/**
+ * P0 1.3（REQ-WIGA-05）Task 10：人工门命令的出站路由——durable
+ * `automation.owner==="server"` 的会话一律走 REST 人工命令端点（驾驶舱没有
+ * driver WS 也能作答）；owner=client 或未知（null，等重启暂停）保留既有手动
+ * WS 语义。`expected_gate_id` 与服务端当前 active gate/timeline node 比对：
+ * activeNodeId 优先，缺省回退最后一个节点；两者皆无时零出站（fail-closed，
+ * 不猜门身份、不退回 WS）。
+ */
+function humanActionRestRoute(
+  state: Pick<WorkspaceWsState, "automation" | "activeNodeId" | "timelineNodes">,
+): { gateId: string } | "ws" | "none" {
+  if (state.automation?.owner !== "server") {
+    return "ws";
+  }
+  const gateId = state.activeNodeId ?? state.timelineNodes.at(-1)?.node_id;
+  return typeof gateId === "string" ? { gateId } : "none";
 }

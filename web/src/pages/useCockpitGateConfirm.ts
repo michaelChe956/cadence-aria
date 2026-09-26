@@ -1,5 +1,6 @@
 import { useCallback } from "react";
-import { confirmWorkspaceSession } from "../api/client";
+import { confirmWorkspaceSession, postWorkspaceHumanAction } from "../api/client";
+import type { WorkspaceHumanAction } from "../api/types";
 import type { WorkspaceWsApi } from "../hooks/useWorkspaceWs";
 import { notifyLifecycleInvalidated } from "../state/lifecycle-workbench-store";
 import { useOperationAuditStore } from "../state/operation-audit-store";
@@ -23,8 +24,12 @@ export interface CockpitGateConfirmActions {
   confirmBatchGate: () => Promise<void>;
   routeGateConfirm: (withReview?: boolean) => boolean;
   sendRevisionFeedback: (feedback: string) => boolean;
+  /**
+   * P0 1.3（REQ-WIGA-05）Task 10：owner=server 会话的人工门命令 REST 发送器
+   * （门面已按 automation.owner/门身份完成路由，这里只负责出站+审计+错误面）。
+   */
+  sendHumanActionRest: (action: WorkspaceHumanAction) => boolean;
 }
-
 export function useCockpitGateConfirm({
   sessionId,
   workspaceWs,
@@ -173,10 +178,74 @@ export function useCockpitGateConfirm({
     return sent;
   }, [sessionId, workspaceWs.sendRequestRevision]);
 
+  // P0 1.3（REQ-WIGA-05）Task 10：无 driver 的人工门命令族出站——门面
+  //（cockpit-action-routing）已裁决 owner=server 才路由到本发送器，且
+  // expected_gate_id 由 activeNodeId/timeline 收口；此处与 sendHttpConfirm 同款
+  // 纪律：sent 先落审计，回执 accepted 补 completed，busy/4xx 落 rejected 并亮
+  // 协议错误面（拒收不得零反馈）。compile_recovery 与既有 WS 通路一致不进
+  // 操作审计（CockpitOperation 无该语义，不臆造新类目）。
+  const sendHumanActionRest = useCallback(
+    (action: WorkspaceHumanAction): boolean => {
+      const current = useWorkspaceStore.getState();
+      const targetSessionId = current.sessionId ?? sessionId;
+      if (targetSessionId === null) {
+        return false;
+      }
+      const operation =
+        action.type === "feedback" ? "feedback" : action.type === "abandon" ? "abandon_gate" : null;
+      const auditRecordId =
+        operation === null
+          ? null
+          : useOperationAuditStore.getState().record({
+              sessionId: targetSessionId,
+              gateId: selectGateProjection(current)?.key ?? null,
+              operation,
+              source: "chat",
+              outcome: "sent",
+              detail: `rest-human-action:${action.type}`,
+            });
+      void postWorkspaceHumanAction(targetSessionId, action)
+        .then((status) => {
+          if (status.state === "accepted") {
+            if (auditRecordId !== null) {
+              useOperationAuditStore.getState().markCompleted(auditRecordId);
+            }
+            return;
+          }
+          if (auditRecordId !== null) {
+            useOperationAuditStore.getState().markRejected(auditRecordId, status.state);
+          }
+          useWorkspaceStore
+            .getState()
+            .setProtocolError({
+              code: `human_action_${status.state}`,
+              message: `人工命令被服务端拒绝（${status.state}）`,
+            });
+        })
+        .catch((error: unknown) => {
+          const code =
+            typeof error === "object" && error !== null && "code" in error
+              ? String(error.code)
+              : "human_action_failed";
+          const message =
+            error instanceof Error && error.message !== ""
+              ? error.message
+              : "人工命令请求失败";
+          if (auditRecordId !== null) {
+            useOperationAuditStore.getState().markRejected(auditRecordId, code);
+          }
+          useWorkspaceStore.getState().setProtocolError({ code, message });
+        });
+      return true;
+    },
+    [sessionId],
+  );
+
   return {
     confirmHttpGate,
     confirmBatchGate,
     routeGateConfirm,
     sendRevisionFeedback,
+    sendHumanActionRest,
   };
 }

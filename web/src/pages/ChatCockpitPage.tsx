@@ -322,8 +322,16 @@ export function ChatCockpitPage({
   // 门确认/修订反馈发送族（sendHttpConfirm/confirmHttpGate/confirmBatchGate/
   // routeGateConfirm/sendRevisionFeedback，含 F-20/F-29/F-31/REQ-PCG-01/02 与
   // v38 反馈通路注释）拆至 useCockpitGateConfirm.ts，纯移动零行为变化。
-  const { confirmHttpGate, confirmBatchGate, routeGateConfirm, sendRevisionFeedback } =
-    useCockpitGateConfirm({ sessionId, workspaceWs });
+  const {
+    confirmHttpGate,
+    confirmBatchGate,
+    routeGateConfirm,
+    sendRevisionFeedback,
+    sendHumanActionRest,
+  } = useCockpitGateConfirm({
+    sessionId,
+    workspaceWs,
+  });
   // v40 复验 #3：门面 adoptReview 接线——与主区/产物审核面板「采纳 Review
   // 意见」同款行为：最新 review 报告预填为修订反馈（ChatInputBar prefill，
   // 经「发送反馈」走 sendRevisionFeedback）并切回对话视图。纯客户端动作
@@ -358,6 +366,7 @@ export function ChatCockpitPage({
         adoptReview: adoptLatestReview,
         sendBatchConfirm: confirmBatchGate,
         sendCompileRecovery: workspaceWs.sendWorkItemPlanCompileRecoveryAction,
+        sendHumanAction: sendHumanActionRest,
       }),
     [
       state.flowKind,
@@ -372,6 +381,7 @@ export function ChatCockpitPage({
       workspaceWs.sendHumanGateFeedback,
       confirmBatchGate,
       workspaceWs.sendWorkItemPlanCompileRecoveryAction,
+      sendHumanActionRest,
     ],
   );
   const auditRows = useMemo(

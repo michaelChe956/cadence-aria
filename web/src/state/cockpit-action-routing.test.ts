@@ -6,6 +6,7 @@ import {
   type ProtocolErrorDisposition,
 } from "./cockpit-action-routing";
 import { selectCockpitInbox } from "./workspace-cockpit-projection";
+import type { WorkspaceHumanAction } from "../api/types";
 import type { TimelineNode, WorkspaceWsState } from "./workspace-ws-store-types";
 import { useWorkspaceStore } from "./workspace-ws-store";
 import { installWorkspaceStoreTestHooks } from "./workspace-ws-store.test-utils";
@@ -735,4 +736,204 @@ describe("cockpit batch confirm & compile recovery facade", () => {
       }),
     );
   });
+});
+
+// P0 1.3（REQ-WIGA-05）Task 10 前端：durable owner=server 的会话在驾驶舱里
+// feedback / terminate / compile recovery 一律走 REST 人工命令端点
+//（postWorkspaceHumanAction）——无 driver WS 也能作答；owner=client 或未知
+//（null，等重启暂停）保留既有手动 WS 语义，observer 不借 REST 扩权。
+describe("cockpit REST human action routing (P0 1.3)", () => {
+  installWorkspaceStoreTestHooks();
+
+  const UUID_V4 =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+  function gateNode(
+    nodeId: string,
+    nodeType: "author_run" | "work_item_batch_confirm" | "work_item_plan_compile_recovery",
+    stage: string,
+  ): TimelineNode {
+    return {
+      node_id: nodeId,
+      node_type: nodeType,
+      agent: null,
+      stage,
+      round: null,
+      status: "active",
+      title: nodeType,
+      summary: "node summary",
+      started_at: "2026-09-26T00:00:00Z",
+      completed_at: null,
+      duration_ms: null,
+      artifact_ref: null,
+      provider_config_snapshot: { author: "claude_code", reviewer: null, review_rounds: 1 },
+      retry: null,
+    };
+  }
+
+  function serverOwnedSession(overrides: Partial<WorkspaceWsState> = {}) {
+    useWorkspaceStore.setState({
+      sessionId: "session_server",
+      stage: "human_confirm",
+      workspaceType: "work_item_plan",
+      flowKind: "single_candidate",
+      singleCandidatePhase: "approval",
+      sessionStatus: "waiting_for_human",
+      humanGateTurn: null,
+      humanGateSnapshot: null,
+      humanGateClosure: null,
+      activeNodeId: "node_gate",
+      timelineNodes: [gateNode("node_gate", "author_run", "human_confirm")],
+      automation: {
+        owner: "server",
+        enrollment_id: "enr-1",
+        policy_revision: 1,
+        enabled: true,
+      },
+      ...overrides,
+    });
+  }
+
+  function restAndWsSpies() {
+    const sendHumanAction = vi.fn((_action: WorkspaceHumanAction) => true);
+    const sendConfirm = vi.fn(() => true);
+    const sendAbandonGate = vi.fn((_commandId: string) => true);
+    const sendHumanGateFeedback = vi.fn(
+      (_feedback: string, _commandId?: string) => true,
+    );
+    const sendAdvance = vi.fn((_commandId?: string) => true);
+    const sendCompileRecovery = vi.fn();
+    const actions = createCockpitActionFacade({
+      flowKind: "single_candidate",
+      commandId: null,
+      getState: useWorkspaceStore.getState,
+      sendConfirm,
+      sendAbandonGate,
+      sendHumanGateFeedback,
+      sendAdvance,
+      adoptReview: vi.fn(),
+      sendBatchConfirm: vi.fn(async () => undefined),
+      sendCompileRecovery,
+      sendHumanAction,
+    });
+    return {
+      actions,
+      sendHumanAction,
+      sendConfirm,
+      sendAbandonGate,
+      sendHumanGateFeedback,
+      sendAdvance,
+      sendCompileRecovery,
+    };
+  }
+
+  it("routes feedback to the REST human action channel for a server-owned gate", () => {
+    serverOwnedSession();
+    const spies = restAndWsSpies();
+
+    expect(spies.actions.feedback("请补齐边界")).toBe(true);
+
+    expect(spies.sendHumanAction).toHaveBeenCalledTimes(1);
+    const action = spies.sendHumanAction.mock.calls[0]?.[0];
+    expect(action).toMatchObject({
+      type: "feedback",
+      expected_gate_id: "node_gate",
+      feedback: "请补齐边界",
+    });
+    expect(action?.command_id).toMatch(UUID_V4);
+    expect(spies.sendHumanGateFeedback).not.toHaveBeenCalled();
+  });
+
+  it("routes terminate to the REST abandon action for a server-owned gate", () => {
+    serverOwnedSession();
+    const spies = restAndWsSpies();
+
+    expect(spies.actions.terminate()).toBe(true);
+
+    expect(spies.sendHumanAction).toHaveBeenCalledTimes(1);
+    const action = spies.sendHumanAction.mock.calls[0]?.[0];
+    expect(action).toMatchObject({ type: "abandon", expected_gate_id: "node_gate" });
+    expect(action?.command_id).toMatch(UUID_V4);
+    expect(spies.sendAbandonGate).not.toHaveBeenCalled();
+  });
+
+  it("routes compile recovery to the REST channel verbatim for a server-owned gate", () => {
+    serverOwnedSession({
+      stage: "human_confirm",
+      timelineNodes: [
+        gateNode(
+          "node_recovery",
+          "work_item_plan_compile_recovery",
+          "human_confirm",
+        ),
+      ],
+      activeNodeId: "node_recovery",
+    });
+    const spies = restAndWsSpies();
+
+    void spies.actions.recoverCompile("human_triage", "需要人工判断");
+
+    expect(spies.sendHumanAction).toHaveBeenCalledTimes(1);
+    expect(spies.sendHumanAction.mock.calls[0]?.[0]).toMatchObject({
+      type: "compile_recovery",
+      expected_gate_id: "node_recovery",
+      action: "human_triage",
+      reason: "需要人工判断",
+    });
+    expect(spies.sendCompileRecovery).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the last timeline node for expected_gate_id", () => {
+    serverOwnedSession({
+      activeNodeId: null,
+      timelineNodes: [
+        gateNode("node_earlier", "author_run", "running"),
+        gateNode("node_last", "author_run", "human_confirm"),
+      ],
+    });
+    const spies = restAndWsSpies();
+
+    spies.actions.feedback("请补齐边界");
+
+    expect(spies.sendHumanAction).toHaveBeenCalledWith(
+      expect.objectContaining({ expected_gate_id: "node_last" }),
+    );
+  });
+
+  it("sends nothing when no gate identity is available on a server-owned session", () => {
+    serverOwnedSession({ activeNodeId: null, timelineNodes: [] });
+    const spies = restAndWsSpies();
+
+    expect(spies.actions.feedback("请补齐边界")).toBe(false);
+    expect(spies.actions.terminate()).toBe(false);
+
+    expect(spies.sendHumanAction).not.toHaveBeenCalled();
+    expect(spies.sendHumanGateFeedback).not.toHaveBeenCalled();
+    expect(spies.sendAbandonGate).not.toHaveBeenCalled();
+  });
+
+  it.each(["client", null] as const)(
+    "keeps the manual WS semantics when the owner is %s",
+    (owner) => {
+      serverOwnedSession({
+        automation:
+          owner === null
+            ? null
+            : {
+                owner,
+                enrollment_id: "enr-1",
+                policy_revision: 1,
+                enabled: false,
+              },
+      });
+      const spies = restAndWsSpies();
+
+      expect(spies.actions.feedback("请补齐边界")).toBe(true);
+      expect(spies.actions.terminate()).toBe(true);
+
+      expect(spies.sendHumanAction).not.toHaveBeenCalled();
+      expect(spies.sendHumanGateFeedback).toHaveBeenCalledTimes(1);
+      expect(spies.sendAbandonGate).toHaveBeenCalledTimes(1);
+    },
+  );
 });

@@ -450,6 +450,64 @@ export type ChoiceAnswer = {
   free_text?: string | null;
 };
 
+/**
+ * P0 1.3（REQ-WIGA-05）Task 10：无 driver 的人工门命令族（wire 与服务端
+ * `HumanActionRequest` 同形，serde tag="type" snake_case）。`expected_gate_id`
+ * 与服务端当前 active gate/timeline node 比对（不匹配 409 零副作用）；
+ * `command_id` 为幂等/审计键（与 WS HumanGateFeedback/AbandonHumanGate 同族）。
+ */
+export type WorkspaceHumanAction =
+  | { type: "approve"; command_id: string; expected_gate_id: string }
+  | { type: "abandon"; command_id: string; expected_gate_id: string }
+  | {
+      type: "feedback";
+      command_id: string;
+      expected_gate_id: string;
+      feedback: string;
+    }
+  | {
+      type: "compile_recovery";
+      command_id: string;
+      expected_gate_id: string;
+      action: WorkItemPlanCompileRecoveryAction;
+      reason?: string | null;
+    };
+
+/** 人工命令回执状态（snake_case wire）：accepted=已受理（含幂等重放/AlreadyClosed）；busy=门/轮次占用（409）；rejected=引擎语义拒绝（422）。 */
+export type WorkspaceHumanActionState = "accepted" | "busy" | "rejected";
+
+export type WorkspaceHumanActionStatus = {
+  command_id: string;
+  state: WorkspaceHumanActionState;
+  gate_id: string;
+};
+
+/** P0 1.3（REQ-WIGA-05）：choice 应答请求（与服务端 `ChoiceResponseRequest` 同形）。 */
+export type ChoiceResponseRequest = {
+  command_id: string;
+  expected_run_id: string;
+  answers: ChoiceAnswer[];
+};
+
+/**
+ * P0 1.3：choice 回执状态（与服务端 `ChoiceReplyStatus` / cross_cutting
+ * `ChoiceReplyState` 同形）：submitting/resolving 对应 HTTP 202（未承诺送达），
+ * delivered 才对应 200；rejected/expired 对应 4xx（失效不得路由到新 run）。
+ */
+export type ChoiceReplyState =
+  | "submitting"
+  | "resolving"
+  | "delivered"
+  | "rejected"
+  | "expired";
+
+export type ChoiceReplyStatus = {
+  command_id: string;
+  expected_run_id: string;
+  choice_id: string;
+  state: ChoiceReplyState;
+};
+
 export type WorkspaceChoiceRequestSource =
   | "ask_user_question"
   | "request_user_input"
