@@ -108,6 +108,25 @@ async fn assert_runner_recovers_amendment_before_provider(state: RunnerRecoveryS
         }
     }
 
+    // REQ-WIGA-06：观察投递解耦为 detached 任务，事件可能在 stage gate 之后
+    // 入队；不依赖两者相对顺序，gate 前未见到则有界等待恰一帧。
+    if amendment_updates == 0 {
+        let observed = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match event_rx.recv().await {
+                    Some(CodingWsOutMessage::PlanAmendmentUpdated { amendment, .. }) => {
+                        assert_eq!(amendment.id, manifest.id, "{state:?}");
+                        return;
+                    }
+                    Some(_) => continue,
+                    None => panic!("channel closed before amendment event for {state:?}"),
+                }
+            }
+        })
+        .await;
+        assert!(observed.is_ok(), "observer amendment event missing for {state:?}");
+        amendment_updates += 1;
+    }
     assert_eq!(amendment_updates, 1, "{state:?}");
     assert_eq!(provider.starts(), 0, "provider started for {state:?}");
     let recovered = fixture

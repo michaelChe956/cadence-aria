@@ -19,6 +19,12 @@ struct AmendmentApplicationAuthority {
     request: PlanRepairRequest,
 }
 
+/// 观察层投递单次尝试的有界窗口（REQ-WIGA-06，k3 审查 F1）：send（含 hub
+/// 容量满时的 reserve 阻塞）与 ack 等待包在同一 timeout 内；超时释放 ack
+/// 注册并 mark Unsent，后续补投递可重试。
+pub(crate) const PLAN_AMENDMENT_DELIVERY_ACK_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(30);
+
 impl CodingWorkspaceEngine {
     pub async fn apply_plan_amendment(
         &self,
@@ -422,8 +428,6 @@ impl CodingWorkspaceEngine {
             &authority.plan,
             &authority.request,
         )?;
-        self.reconcile_plan_amendment_delivery(attempt, manifest)
-            .await?;
         let resumed = self
             .store
             .resume_attempt_after_amendment(attempt, manifest)
@@ -437,6 +441,9 @@ impl CodingWorkspaceEngine {
             )?;
             self.close_reopened_amendment_gate_if_idle(&completed.plan_session_id)?;
         }
+        // REQ-WIGA-06：投递是观察面——业务先达 durable 检查点，真实未送达事实
+        // 留给重连/重复确认补投递；不得以投递状态阻塞或失败业务。
+        self.spawn_plan_amendment_delivery_observation(attempt, manifest);
         Ok(resumed)
     }
 
@@ -641,39 +648,84 @@ impl CodingWorkspaceEngine {
         Ok(())
     }
 
-    async fn reconcile_plan_amendment_delivery(
+    /// 观察层投递有界窗口（k3 审查 F1）：send 与 ack 等待包在同一 timeout 内
+    /// 收口——hub 容量满时 `reserve()` 不再无限等待；超时经 future Drop 释放
+    /// ack 注册并 mark Unsent，后续补投递可重试。
+    pub(crate) async fn deliver_plan_amendment_observation_once(
         &self,
         attempt: &CodingExecutionAttempt,
         manifest: &PlanAmendmentManifest,
-    ) -> Result<(), CodingWorkspaceEngineError> {
+    ) -> Result<CodingPlanAmendmentDeliveryStatus, ProductStoreError> {
         let delivery = self
             .store
             .load_or_prepare_plan_amendment_delivery(attempt, &manifest.id)?;
         if delivery.status == CodingPlanAmendmentDeliveryStatus::Delivered {
-            return Ok(());
+            return Ok(delivery.status);
         }
-        let socket_write = register_plan_amendment_socket_write(&delivery.event_id)?;
-        self.event_tx
-            .send(CodingWsOutMessage::PlanAmendmentUpdated {
-                event_id: delivery.event_id.clone(),
-                amendment: Box::new(manifest.clone()),
-            })
-            .await
-            .map_err(|_| {
-                ProductStoreError::Io("plan_amendment_delivery_send_failed".to_string())
-            })?;
-        tokio::select! {
-            result = socket_write.wait_or_channel_closed(self.event_tx.raw_sender()) => result?,
+        let Ok(socket_write) = register_plan_amendment_socket_write(&delivery.event_id) else {
+            // 他人持有该 event 注册：他路在投，本路跳过发送返回 durable 现状。
+            return Ok(delivery.status);
+        };
+        let event = CodingWsOutMessage::PlanAmendmentUpdated {
+            event_id: delivery.event_id.clone(),
+            amendment: Box::new(manifest.clone()),
+        };
+        let settled = tokio::select! {
+            biased;
+            // 引擎取消：不改 marker，返回 load 时的现状（注册经内层 future
+            // Drop 释放，waiter 不悬挂）。
             _ = self.cancellation.cancelled() => {
-                return Err(CodingWorkspaceEngineError::Aborted);
+                return Ok(delivery.status);
             }
+            outcome = tokio::time::timeout(PLAN_AMENDMENT_DELIVERY_ACK_TIMEOUT, async {
+                self.event_tx
+                    .send(event)
+                    .await
+                    .map_err(|_| {
+                        ProductStoreError::Io("plan_amendment_delivery_send_failed".to_string())
+                    })?;
+                socket_write
+                    .wait_or_channel_closed(self.event_tx.raw_sender())
+                    .await
+            }) => outcome,
+        };
+        match settled {
+            // 真实 socket 写回执：唯一写 Delivered 的路径。
+            Ok(Ok(())) => Ok(self
+                .store
+                .mark_plan_amendment_delivery_delivered(attempt, &manifest.id, &delivery.event_id)?
+                .status),
+            // 超时/写失败/通道关闭：注册已随 future Drop 释放，落 durable Unsent。
+            Ok(Err(_)) | Err(_) => Ok(self
+                .store
+                .mark_plan_amendment_delivery_unsent(attempt, &manifest.id, &delivery.event_id)?
+                .status),
         }
-        self.store.mark_plan_amendment_delivery_delivered(
-            attempt,
-            &manifest.id,
-            &delivery.event_id,
-        )?;
-        Ok(())
+    }
+
+    /// 业务路径唯一的观察发射点（REQ-WIGA-06）：detached tokio::spawn 包
+    /// once；投递是观察面，失败仅 tracing::warn，绝不反写业务错误、绝不
+    /// 阻塞或改写业务终态。
+    pub(crate) fn spawn_plan_amendment_delivery_observation(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        manifest: &PlanAmendmentManifest,
+    ) {
+        let engine = self.clone();
+        let attempt = attempt.clone();
+        let manifest = manifest.clone();
+        tokio::spawn(async move {
+            if let Err(error) = engine
+                .deliver_plan_amendment_observation_once(&attempt, &manifest)
+                .await
+            {
+                tracing::warn!(
+                    error = %error,
+                    amendment_id = %manifest.id,
+                    "plan_amendment_delivery_observation_failed"
+                );
+            }
+        });
     }
 
     fn finalize_plan_repair_session(
