@@ -875,6 +875,19 @@ pub struct PrepareWorkItemPlanRequest {
     pub require_execution_plan_confirm: Option<bool>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnrollmentPutRequest {
+    pub expected_revision: Option<u64>,
+    pub command: crate::product::models::automation::EnrollmentWriteCommand,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnrollmentBindRequest {
+    pub expected_revision: u64,
+    pub plan_id: String,
+    pub session_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct PrepareWorkItemPlanResponse {

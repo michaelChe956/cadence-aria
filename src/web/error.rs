@@ -183,6 +183,10 @@ impl IntoResponse for ApiError {
             "pointer_publish_busy" | "pointer_conflict_unresolved" => StatusCode::CONFLICT,
             "pointer_push_failed" | "pointer_revoke_failed" => StatusCode::SERVICE_UNAVAILABLE,
             "pointer_not_found" => StatusCode::NOT_FOUND,
+            // WIG Autopilot P0 enrollment 稳定码：冲突 409、缺失 404、作用域 422。
+            "automation_enrollment_conflict" => StatusCode::CONFLICT,
+            "automation_enrollment_not_found" => StatusCode::NOT_FOUND,
+            "automation_enrollment_invalid_scope" => StatusCode::UNPROCESSABLE_ENTITY,
             "invalid_pointer_request" => StatusCode::UNPROCESSABLE_ENTITY,
             // Task 7 证据查询稳定码：6 码 + evidence_io（设计 §5.2）。
             "evidence_unauthorized" => StatusCode::UNAUTHORIZED,

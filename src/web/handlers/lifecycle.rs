@@ -16,7 +16,7 @@ use crate::product::workspace_engine::group_work_items_by_target;
 use std::collections::{BTreeMap, BTreeSet};
 
 mod deletion;
-mod preflight;
+pub(crate) mod preflight;
 
 pub use deletion::{
     delete_design_spec, delete_story_spec, delete_work_item, delete_work_item_plan,

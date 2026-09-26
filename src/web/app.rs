@@ -257,6 +257,14 @@ pub fn build_web_router_with_evidence(state: WebAppState, evidence_enabled: bool
             post(handlers::prepare_work_item_plan),
         )
         .route(
+            "/api/projects/{project_id}/issues/{issue_id}/automation-enrollment",
+            get(handlers::get_automation_enrollment).put(handlers::put_automation_enrollment),
+        )
+        .route(
+            "/api/projects/{project_id}/issues/{issue_id}/automation-enrollment/binding",
+            post(handlers::post_automation_enrollment_binding),
+        )
+        .route(
             "/api/projects/{project_id}/issues/{issue_id}/work-item-plans/{plan_id}",
             delete(handlers::delete_work_item_plan),
         )

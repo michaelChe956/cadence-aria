@@ -71,6 +71,7 @@ use crate::web::workspace_ws_types::{ArtifactVersion, ProviderConfigSnapshot, Re
 
 mod aggregate_index;
 pub mod aggregate_initialization;
+mod automation_enrollment;
 mod codebases;
 mod coding;
 mod dto;
@@ -101,6 +102,9 @@ pub(crate) use coding::{
 };
 pub use codebases::{
     create_logical_codebase, delete_logical_codebase, get_logical_codebase, list_codebases,
+};
+pub use automation_enrollment::{
+    get_automation_enrollment, post_automation_enrollment_binding, put_automation_enrollment,
 };
 #[cfg(test)]
 pub(crate) use coding::scope::CodingAttemptRoutePath;
