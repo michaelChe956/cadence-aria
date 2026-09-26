@@ -133,6 +133,9 @@ pub struct WebAppState {
     provider_health_error: Arc<StdMutex<Option<String>>>,
     pub test_controls: TestControls,
     pub workspace_runs: WorkspaceRunRegistry,
+    /// P1 WIGA Task 6：autopilot 唤醒 hint（PUT 成功等事件）；有界 tick 由
+    /// `AutopilotOrchestrator::run` 持有，漏唤醒由固定间隔兜底。
+    pub autopilot_wake: tokio::sync::watch::Sender<bool>,
     pub workspace_sessions: crate::web::workspace_session::WorkspaceSessionRegistry,
     pub coding_runs: CodingRunRegistry,
     pub coding_sockets: CodingSocketRegistry,
@@ -205,6 +208,7 @@ impl WebAppState {
             provider_health_error: Arc::new(StdMutex::new(None)),
             test_controls,
             workspace_runs: WorkspaceRunRegistry::default(),
+            autopilot_wake: tokio::sync::watch::Sender::new(false),
             workspace_sessions: crate::web::workspace_session::WorkspaceSessionRegistry::default(),
             coding_runs: CodingRunRegistry::default(),
             coding_sockets: CodingSocketRegistry::default(),

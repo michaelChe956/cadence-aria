@@ -7,6 +7,7 @@ pub mod gateway_factory;
 pub mod handlers;
 pub mod issue_registry;
 pub mod plan_generation;
+pub mod autopilot_orchestrator;
 pub mod provider_availability;
 pub mod provider_probe;
 pub mod redaction;

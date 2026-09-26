@@ -1,0 +1,373 @@
+//! P1 WIGA Task 6：薄编排器——从 durable 事实 reconcile，启动扫描与有界
+//! 漏唤醒补偿（REQ-WIGA-03）。
+//!
+//! 事件（PUT 成功等）只是 wake hint；权威推进只来自每轮 `reconcile` 重读
+//! durable enrollment/intent/plan/session。有状态部分仅限公平游标；动作与
+//! 进度一律由 Task 4/5 的存储与生成面推导。
+
+use std::collections::BTreeMap;
+
+use crate::product::app_paths::ProductAppPaths;
+use crate::product::issue_automation_store::IssueAutomationStore;
+use crate::product::issue_store::IssueStore;
+use crate::product::project_store::ProjectStore;
+use crate::web::handlers::lifecycle::plan_preparation::ensure_enrolled_plan;
+use crate::web::plan_generation::{PlanGenerationOutcome, start_plan_generation_once};
+use crate::web::state::WebAppState;
+
+/// 单次 reconcile 的 durable 推导结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReconcileOutcome {
+    /// 无 enrollment / 已禁用：后台零动作。
+    NoEnrollment,
+    /// 停等人（choice/门/compile recovery/WaitingForHuman）。
+    AwaitingHuman,
+    /// 绑定链就绪（plan/session 已唯一创建并绑定）。
+    Prepared,
+    /// 生成动作在途或已派发（含活 run 只观察）。
+    Generating,
+    /// fail-closed 停点（授权漂移/损坏/不可证明的分诊），只待人。
+    NeedsHuman,
+}
+
+/// 有界 tick 配置；缺省 2s 间隔、每轮最多 32 issue。
+#[derive(Debug, Clone)]
+pub struct OrchestratorConfig {
+    pub tick_interval: std::time::Duration,
+    pub max_issues_per_tick: usize,
+}
+
+impl Default for OrchestratorConfig {
+    fn default() -> Self {
+        Self {
+            tick_interval: std::time::Duration::from_secs(2),
+            max_issues_per_tick: 32,
+        }
+    }
+}
+
+pub struct AutopilotOrchestrator {
+    state: WebAppState,
+    config: OrchestratorConfig,
+    /// 公平游标：上一轮处理到的 (project_id, issue_id)；满轮后归零重扫。
+    cursor: tokio::sync::Mutex<Option<(String, String)>>,
+}
+
+impl AutopilotOrchestrator {
+    pub fn new(state: WebAppState, config: OrchestratorConfig) -> Self {
+        Self {
+            state,
+            config,
+            cursor: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    /// 单 issue reconcile：每次读 fresh enrollment，缺失/禁用 → NoEnrollment；
+    /// 无绑定先 EnsurePreparedPlan（幂等补偿），再按 durable 停点分诊
+    /// StartPlanGeneration。授权漂移/损坏 fail-closed 为 NeedsHuman，
+    /// 不猜最近 plan。
+    pub async fn reconcile(
+        &self,
+        state: &WebAppState,
+        project_id: &str,
+        issue_id: &str,
+    ) -> Result<ReconcileOutcome, String> {
+        let paths = ProductAppPaths::new(state.workspace_root.join(".aria"));
+        let store = IssueAutomationStore::new(paths);
+        let Some(enrollment) = store
+            .get(project_id, issue_id)
+            .map_err(|error| format!("automation enrollment unreadable: {error}"))?
+        else {
+            return Ok(ReconcileOutcome::NoEnrollment);
+        };
+        if !enrollment.enabled {
+            return Ok(ReconcileOutcome::NoEnrollment);
+        }
+
+        // EnsurePreparedPlan（幂等）：锁内唯一创建/绑定；源/目标/意图漂移由
+        // web 回调与冻结 intent fail-closed（不在此重复校验）。
+        if let Err(error) = ensure_enrolled_plan(state, &enrollment).await {
+            return Ok(match error.code.as_str() {
+                "automation_enrollment_conflict" | "automation_enrollment_invalid_scope" => {
+                    ReconcileOutcome::NeedsHuman
+                }
+                _ => {
+                    return Err(format!(
+                        "ensure enrolled plan failed: {}: {}",
+                        error.code, error.message
+                    ))
+                }
+            });
+        }
+
+        // 真正发起前重读 fresh enrollment（bind revision+1；Disable 竞态收口）。
+        let fresh = store
+            .get(project_id, issue_id)
+            .map_err(|error| format!("automation enrollment unreadable: {error}"))?
+            .ok_or_else(|| "automation enrollment vanished after preparation".to_string())?;
+        if !fresh.enabled {
+            return Ok(ReconcileOutcome::NoEnrollment);
+        }
+        match start_plan_generation_once(state, &fresh).await? {
+            PlanGenerationOutcome::Running | PlanGenerationOutcome::AlreadyActive => {
+                Ok(ReconcileOutcome::Generating)
+            }
+            PlanGenerationOutcome::WaitingForHuman => Ok(ReconcileOutcome::AwaitingHuman),
+            PlanGenerationOutcome::NeedsHuman => Ok(ReconcileOutcome::NeedsHuman),
+        }
+    }
+
+    /// 一轮有界扫描：ProjectStore::list → IssueStore::list，按稳定序从公平
+    /// 游标推进，每轮最多 `max_issues_per_tick` 个 issue；单 issue 错误留下
+    /// 可见诊断并继续扫描其余 issue（不吞读取错误为 off）。返回处理数。
+    pub async fn reconcile_all_once(&self) -> Result<usize, String> {
+        let paths = ProductAppPaths::new(self.state.workspace_root.join(".aria"));
+        let projects = ProjectStore::new(paths.clone())
+            .list()
+            .map_err(|error| format!("project list unreadable: {error}"))?;
+        let mut ordered: Vec<(String, String)> = Vec::new();
+        let mut issues_by_project = BTreeMap::new();
+        for project in &projects {
+            let issues = IssueStore::new(paths.clone())
+                .list(&project.id)
+                .map_err(|error| format!("issue list unreadable for {}: {error}", project.id))?;
+            issues_by_project.insert(project.id.clone(), issues);
+        }
+        for (project_id, issues) in &issues_by_project {
+            for issue in issues {
+                ordered.push((project_id.clone(), issue.id.clone()));
+            }
+        }
+
+        let start_index = {
+            let cursor = self.cursor.lock().await;
+            match &*cursor {
+                Some((project_id, issue_id)) => ordered
+                    .iter()
+                    .position(|(p, i)| p == project_id && i == issue_id)
+                    .map(|position| position + 1)
+                    .unwrap_or(0),
+                None => 0,
+            }
+        };
+        let budget = self.config.max_issues_per_tick.min(ordered.len());
+        let mut processed = 0usize;
+        let mut last: Option<(String, String)> = None;
+        for offset in 0..budget {
+            let index = (start_index + offset) % ordered.len();
+            let (project_id, issue_id) = &ordered[index];
+            if let Err(message) = self.reconcile(&self.state, project_id, issue_id).await {
+                eprintln!("wiga autopilot reconcile failed for {project_id}/{issue_id}: {message}");
+            }
+            processed += 1;
+            last = Some((project_id.clone(), issue_id.clone()));
+        }
+        let mut cursor = self.cursor.lock().await;
+        // 满轮（本轮预算未用尽或已绕回起点）→ 游标归零重扫。
+        let wrapped = budget < self.config.max_issues_per_tick
+            || start_index + budget >= ordered.len();
+        *cursor = if wrapped { None } else { last };
+        Ok(processed)
+    }
+
+    /// 后台有界 tick：由 `serve_web` 持有，随服务器生命周期运行；PUT 成功的
+    /// 唤醒只提前触发下一轮，不提供顺序承诺（漏唤醒由固定间隔兜底）。
+    pub async fn run(self: std::sync::Arc<Self>, mut wake: tokio::sync::watch::Receiver<bool>) {
+        loop {
+            let interval = self.config.tick_interval;
+            tokio::select! {
+                _ = tokio::time::sleep(interval) => {}
+                _ = wake.changed() => {}
+            }
+            if let Err(message) = self.reconcile_all_once().await {
+                eprintln!("wiga autopilot scan round failed: {message}");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::StatusCode;
+
+    use super::*;
+    use crate::web::handlers::automation_enrollment_test_support::{
+        ISSUE_ID, PROJECT_ID, enrollment_body, put_enrollment, response_json, seed_fixture,
+    };
+    use crate::web::state::WebAppState;
+
+    struct OrchestratorFixture {
+        inner: crate::web::handlers::automation_enrollment_test_support::Fixture,
+        state: WebAppState,
+        manual_issue_id: String,
+    }
+
+    impl OrchestratorFixture {
+        /// 真实播种：project + issue + 单成员 logical codebase + 已确认
+        /// story/design + enabled enrollment；另加一个未授权手工 issue。
+        async fn new() -> Self {
+            let inner = seed_fixture(1, true);
+            let root_path = inner._root.path().to_path_buf();
+            let state = WebAppState::new(
+                root_path.clone(),
+                crate::web::runtime::WebRuntime::new_fake(root_path),
+            );
+            let app = crate::web::app::build_web_router(state.clone());
+            let enable = put_enrollment(&app, enrollment_body(&inner, 1, 1)).await;
+            assert_eq!(enable.status(), StatusCode::OK);
+            assert!(response_json(enable).await["enabled"].as_bool().unwrap());
+
+            // 未授权手工对照 issue（同 project）。
+            let manual = crate::product::issue_store::IssueStore::new(inner.paths.clone())
+                .create(crate::product::issue_store::CreateProductIssueInput {
+                    project_id: PROJECT_ID.to_string(),
+                    repo_id: Some("repo-1".to_string()),
+                    logical_codebase_id: None,
+                    title: "manual issue".to_string(),
+                    description: None,
+                    change_id: None,
+                    base_branch: None,
+                })
+                .unwrap();
+            Self {
+                inner,
+                state,
+                manual_issue_id: manual.id,
+            }
+        }
+
+        fn lifecycle(&self) -> crate::product::lifecycle_store::LifecycleStore {
+            crate::product::lifecycle_store::LifecycleStore::new(self.inner.paths.clone())
+        }
+
+        fn bound_plans(&self) -> Vec<crate::product::models::IssueWorkItemPlan> {
+            self.lifecycle()
+                .list_issue_work_item_plans(PROJECT_ID, ISSUE_ID)
+                .unwrap()
+                .into_iter()
+                .filter(|plan| plan.id.starts_with("issue_work_item_plan_auto_"))
+                .collect()
+        }
+
+        fn manual_issue_plans(&self) -> Vec<crate::product::models::IssueWorkItemPlan> {
+            self.lifecycle()
+                .list_issue_work_item_plans(PROJECT_ID, &self.manual_issue_id)
+                .unwrap()
+        }
+
+        fn sessions(&self) -> Vec<crate::product::models::WorkspaceSessionRecord> {
+            self.lifecycle()
+                .list_workspace_sessions(PROJECT_ID, ISSUE_ID)
+                .unwrap()
+        }
+
+        fn automation_store(&self) -> IssueAutomationStore {
+            IssueAutomationStore::new(self.inner.paths.clone())
+        }
+
+        fn worker(&self) -> AutopilotOrchestrator {
+            AutopilotOrchestrator::new(
+                self.state.clone(),
+                OrchestratorConfig {
+                    max_issues_per_tick: 32,
+                    ..Default::default()
+                },
+            )
+        }
+    }
+
+    #[tokio::test]
+    async fn automation_reconcile_scans_only_enrolled_issues_and_reuses_binding() {
+        let fixture = OrchestratorFixture::new().await;
+        let worker = fixture.worker();
+        // 关闭 browser/WS、不送任何事件：两轮补偿只依赖 durable 事实。
+        worker.reconcile_all_once().await.unwrap();
+        worker.reconcile_all_once().await.unwrap();
+
+        let bound = fixture
+            .automation_store()
+            .get(PROJECT_ID, ISSUE_ID)
+            .unwrap()
+            .unwrap();
+        assert!(bound.plan_id.is_some());
+        assert!(bound.session_id.is_some());
+        assert_eq!(fixture.bound_plans().len(), 1);
+        assert!(fixture.manual_issue_plans().is_empty());
+        // 绑定 session 恰一且 Interactive。
+        let sessions = fixture.sessions();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(
+            sessions[0].run_policy,
+            crate::product::work_item_plan_policy::RunPolicy::Interactive
+        );
+    }
+
+    /// Disable 先于动作认领：零启动、零 plan。
+    #[tokio::test]
+    async fn automation_reconcile_ignores_disabled_enrollment() {
+        let fixture = OrchestratorFixture::new().await;
+        let worker = fixture.worker();
+        let app = crate::web::app::build_web_router(fixture.state.clone());
+        let revision = fixture
+            .automation_store()
+            .get(PROJECT_ID, ISSUE_ID)
+            .unwrap()
+            .unwrap()
+            .policy_revision;
+        let disable = serde_json::json!({
+            "expected_revision": revision,
+            "command": {"type": "disable"}
+        });
+        let response = put_enrollment(&app, disable).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let outcome = worker
+            .reconcile(&fixture.state, PROJECT_ID, ISSUE_ID)
+            .await
+            .unwrap();
+        assert_eq!(outcome, ReconcileOutcome::NoEnrollment);
+        assert!(fixture.bound_plans().is_empty());
+    }
+
+    /// 换源重开（保留旧绑定）：fail-closed NeedsHuman，不自动生成、不另建链。
+    #[tokio::test]
+    async fn automation_reconcile_rejects_divergent_reopen_as_needs_human() {
+        let fixture = OrchestratorFixture::new().await;
+        let worker = fixture.worker();
+        worker
+            .reconcile(&fixture.state, PROJECT_ID, ISSUE_ID)
+            .await
+            .unwrap();
+        assert_eq!(fixture.bound_plans().len(), 1);
+
+        let app = crate::web::app::build_web_router(fixture.state.clone());
+        let revision = fixture
+            .automation_store()
+            .get(PROJECT_ID, ISSUE_ID)
+            .unwrap()
+            .unwrap()
+            .policy_revision;
+        let disable = serde_json::json!({
+            "expected_revision": revision,
+            "command": {"type": "disable"}
+        });
+        assert_eq!(
+            put_enrollment(&app, disable).await.status(),
+            StatusCode::OK
+        );
+        let mut divergent = enrollment_body(&fixture.inner, 1, 1);
+        divergent["command"]["options"]["review_rounds"] = serde_json::json!(2);
+        divergent["expected_revision"] = serde_json::json!(revision + 1);
+        assert_eq!(
+            put_enrollment(&app, divergent).await.status(),
+            StatusCode::OK
+        );
+
+        let outcome = worker
+            .reconcile(&fixture.state, PROJECT_ID, ISSUE_ID)
+            .await
+            .unwrap();
+        assert_eq!(outcome, ReconcileOutcome::NeedsHuman);
+        assert_eq!(fixture.bound_plans().len(), 1);
+    }
+}

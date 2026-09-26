@@ -40,15 +40,20 @@ pub async fn put_automation_enrollment(
 ) -> ApiResult<Json<IssueAutomationEnrollment>> {
     validate_request_ids(&project_id, &issue_id)?;
     validate_enrollment_scope(&state, &project_id, &issue_id, &request.command)?;
-    IssueAutomationStore::new(product_app_paths(&state))
+    let enrollment = IssueAutomationStore::new(product_app_paths(&state))
         .compare_and_set(
             &project_id,
             &issue_id,
             request.expected_revision,
             request.command,
         )
-        .map(Json)
-        .map_err(enrollment_api_error)
+        .map_err(enrollment_api_error)?;
+    if enrollment.enabled {
+        // P1 WIGA Task 6：成功启用只发唤醒 hint，不绑定运行生命周期；
+        // 有界 tick 与 durable reconcile 是权威推进。
+        let _ = state.autopilot_wake.send(true);
+    }
+    Ok(Json(enrollment))
 }
 
 pub async fn get_automation_enrollment(

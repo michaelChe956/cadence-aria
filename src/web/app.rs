@@ -577,18 +577,36 @@ pub async fn serve_web(
     refresh_provider_health_for_startup(&state).await;
     let static_service = crate::web::static_assets::static_dist_service();
     let evidence_enabled = is_loopback_host(&host);
-    let app = build_web_router_with_evidence(state, evidence_enabled).fallback(
+    let app = build_web_router_with_evidence(state.clone(), evidence_enabled).fallback(
         move |req: axum::extract::Request| {
             let static_service = static_service.clone();
             async move { crate::web::static_assets::serve_static(static_service, req).await }
         },
     );
+    // P1 WIGA Task 6：随服务器生命周期启动 autopilot 有界扫描（事件仅唤醒）。
+    let wake_rx = orchestrator_wake_subscribe(&state);
+    let orchestrator = std::sync::Arc::new(
+        crate::web::autopilot_orchestrator::AutopilotOrchestrator::new(
+            state,
+            crate::web::autopilot_orchestrator::OrchestratorConfig::default(),
+        ),
+    );
+    let orchestrator_task =
+        tokio::spawn(async move { orchestrator.run(wake_rx).await });
+
     let listener = TcpListener::bind(addr).await?;
     let bound_addr = listener.local_addr()?;
     maybe_write_web_endpoint_file(evidence_enabled, &workspace_root, bound_addr.port());
     eprintln!("{}", listening_line(&bound_addr));
     axum::serve(listener, app).await?;
+    orchestrator_task.abort();
     Ok(())
+}
+
+fn orchestrator_wake_subscribe(
+    state: &WebAppState,
+) -> tokio::sync::watch::Receiver<bool> {
+    state.autopilot_wake.subscribe()
 }
 
 fn web_app_state(

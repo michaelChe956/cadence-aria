@@ -169,6 +169,8 @@ pub(crate) fn seed_fixture(member_count: usize, confirm_design: bool) -> Fixture
 }
 
 fn seed_logical_codebase(paths: &ProductAppPaths, members: &[(LogicalRepositoryId, &str)]) {
+    // planning resolver 读取 manifest 的 provider_context_root 时要求目录存在。
+    std::fs::create_dir_all(paths.root().join("aggregate-root")).unwrap();
     let manifest = LogicalCodebaseManifest::new(
         PROJECT_ID,
         paths.root().join("aggregate-root"),
@@ -273,6 +275,11 @@ fn seed_logical_codebase(paths: &ProductAppPaths, members: &[(LogicalRepositoryI
     let index_store = AggregateIndexStore::new(paths.clone());
     index_store.create(PROJECT_ID, index.clone()).unwrap();
     index_store.replace_active(PROJECT_ID, index).unwrap();
+    // 单测环境无 git/codegraph：降级为 last-known-good（active_required 仍可读，
+    // planning resolver 的 freshness assess 不再探测真实仓库）。
+    index_store
+        .degrade_last_known_good(PROJECT_ID, "unit-test fixture: no git probing".to_string())
+        .unwrap();
     AggregatePolicyArtifactStore::new(paths.clone())
         .ensure_bootstrap(&manifest)
         .unwrap();

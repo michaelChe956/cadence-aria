@@ -72,7 +72,8 @@ use crate::web::workspace_ws_types::{ArtifactVersion, ProviderConfigSnapshot, Re
 mod aggregate_index;
 pub mod aggregate_initialization;
 mod automation_enrollment;
-mod automation_enrollment_test_support;
+#[cfg(test)]
+pub(crate) mod automation_enrollment_test_support;
 mod automation_target;
 mod codebases;
 mod coding;
@@ -83,7 +84,7 @@ mod evidence_query;
 mod gateway_error_mapping;
 mod health;
 pub mod image_create;
-mod lifecycle;
+pub(crate) mod lifecycle;
 mod logical_codebase_members;
 mod logical_codebase_registration;
 mod pointer_publication;
