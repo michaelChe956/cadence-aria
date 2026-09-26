@@ -31,7 +31,7 @@ impl WorkspaceSessionManager {
     /// 通过 `abort_active_run_from_attachment` 低延迟中止当前 run；启动前仍复检 epoch。
     pub async fn start_run(
         &self,
-        _kind: ProviderRunKind,
+        kind: ProviderRunKind,
         requested_node_id: Option<String>,
     ) -> Result<
         (
@@ -43,7 +43,7 @@ impl WorkspaceSessionManager {
         ),
         String,
     > {
-        self.start_run_from_attachment(None, requested_node_id)
+        self.start_run_from_attachment(None, kind, requested_node_id)
             .await
     }
 
@@ -80,6 +80,7 @@ impl WorkspaceSessionManager {
     pub async fn start_run_from_attachment(
         &self,
         connection_id: Option<&str>,
+        kind: ProviderRunKind,
         requested_node_id: Option<String>,
     ) -> Result<
         (
@@ -112,6 +113,7 @@ impl WorkspaceSessionManager {
                 id: run_id,
                 token,
                 node_id: node_id.clone(),
+                kind,
                 cancel: cancel.clone(),
                 command_tx,
                 pending_choices: Arc::new(StdMutex::new(Vec::new())),

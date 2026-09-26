@@ -90,6 +90,7 @@ async fn single_candidate_scope_rejection_does_not_wait_for_provider_engine_lock
         .run_context
         .manager
         .test_set_active_run(ActiveRun {
+            kind: ProviderRunKind::ReviewOnly,
             id: 1,
             token: 1,
             run_incarnation: uuid::Uuid::new_v4().to_string(),

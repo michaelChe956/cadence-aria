@@ -132,6 +132,27 @@ impl WorkspaceEngine {
                 == Some(crate::product::models::SingleCandidatePhase::Generate)
     }
 
+    /// F2（REQ-WIGA-05，workspace_session_0018 现场）：SC 委托返修接力的 spawn
+    /// 失败/被拒回执落 durable——仅当会话处于委托态（SingleCandidate 且
+    /// phase=Generate，即 followups 已让位、接力是唯一接续路径）且无引擎在途 run
+    /// 时回落人工门：`enter_human_confirm` 落 WaitingForHuman（durable）、建新门节点
+    /// （摘要携带失败原因）、广播 HumanGateOpened——会话回到可操作状态（人工可再
+    /// 反馈修订或放弃），不再静默滞留 running。其余任何形态零副作用：非委托态的
+    /// 迟到/无关失败不改写会话状态。
+    pub(crate) async fn recover_delegated_author_rerun_failure(&mut self, message: &str) {
+        if !self.sc_author_rerun_delegated() || self.active_run_id.is_some() {
+            return;
+        }
+        let summary = format!("SC 返修接力启动失败，已回落人工门：{message}");
+        let _ = self
+            .event_tx
+            .send(EngineEvent::Error {
+                message: summary.clone(),
+            })
+            .await;
+        self.enter_human_confirm(Some(summary)).await;
+    }
+
     /// 将 SingleCandidate provider 的 markdown 原文通过 compiler 与 typed source store
     /// 落盘，并在 durable Evaluate 后启动阶段 1 的 reviewer 路由。
     pub(crate) async fn complete_single_candidate_work_item_plan_author(

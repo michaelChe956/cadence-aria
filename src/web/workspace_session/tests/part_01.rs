@@ -136,7 +136,11 @@ async fn socket_supersede_resuming_after_relay_start_cancels_relay_run() {
         .await
         .expect("relay starts R2 while socket waits for engine lock");
     let (_r3_id, r3_token, _r3_cancel, _r3_rx, _) = manager
-        .start_run_from_attachment(Some("socket-holder"), Some("r3".to_string()))
+        .start_run_from_attachment(
+            Some("socket-holder"),
+            ProviderRunKind::WorkItemPlanRevision { feedback: None },
+            Some("r3".to_string()),
+        )
         .await
         .expect("socket resumes and starts R3");
 

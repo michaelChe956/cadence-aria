@@ -16,7 +16,9 @@ use crate::product::workspace_repository::workspace_repository_for_session;
 use crate::web::state::WebAppState;
 use crate::web::workspace_context::ensure_workspace_context_message;
 use crate::web::workspace_session::{ConnectionRole, LeaseState, WorkspaceSessionRegistry};
-use crate::web::workspace_ws_handler::{OutboundControl, ProviderCommand, ProviderRunContext};
+use crate::web::workspace_ws_handler::{
+    OutboundControl, ProviderCommand, ProviderRunContext, ProviderRunKind,
+};
 use crate::web::workspace_ws_types::WsOutMessage;
 
 mod arbitration;
@@ -66,6 +68,12 @@ pub struct ActiveRun {
     pub token: u64,
     /// 已登记的活动 run 所属 timeline 节点；用于拒绝同一节点的重复启动请求。
     pub node_id: Option<String>,
+    /// F2（workspace_session_0018 现场）：启动该 run 的 kind——「同节点去重」
+    /// 只对「同 kind 同节点」的重复接力生效。无附件 REST 反馈链里，门修订 run
+    /// 注册的节点仍是 human_confirm 门节点，委托返修接力请求（不同 kind）在
+    /// emit 时也解析到同一门节点；仅按 node_id 去重会把它误 drain，而 followups
+    /// 同时按 phase=Generate 让位——双方都退出，会话永久卡 running。
+    pub kind: ProviderRunKind,
     pub cancel: CancellationToken,
     pub command_tx: mpsc::Sender<ProviderCommand>,
     /// F-24：挂起 provider choice 的完整 wire 帧（保持到达顺序）。到达时注册，

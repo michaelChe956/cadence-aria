@@ -8,7 +8,14 @@ pub(crate) async fn spawn_provider_run_from_event(
     outbound_tx: mpsc::Sender<OutboundControl>,
 ) -> Result<(), String> {
     if let Some(active_run) = run_context.manager.active_run().await {
-        if active_run.node_id == requested_node_id {
+        // F2（workspace_session_0018 现场）：去重判据必须含 kind——同节点不等于
+        // 同请求。无附件 REST 反馈链的门修订 run 注册在仍开启的 human_confirm
+        // 门节点上，而委托返修接力（WorkItemPlanSingleCandidateAuthor，emit 时
+        // 活动节点仍是同一门节点）会命中纯 node_id 判据被静默 drain；followups
+        // 同时按 phase=Generate 让位，无人驱动重跑，会话永久卡 running。
+        let same_request = active_run.node_id == requested_node_id
+            && std::mem::discriminant(&active_run.kind) == std::mem::discriminant(&run_kind);
+        if same_request {
             tracing::debug!(
                 session_id = %run_context.session_id,
                 node_id = ?requested_node_id,
@@ -38,7 +45,18 @@ pub(crate) async fn spawn_provider_run_from_event(
         }
     }
 
-    spawn_provider_run_from_handler(run_context, run_kind, outbound_tx).await
+    let outcome =
+        spawn_provider_run_from_handler(run_context.clone(), run_kind, outbound_tx).await;
+    if let Err(message) = &outcome {
+        // F2（REQ-WIGA-05，0018 现场）：无附件 relay spawn 失败/被拒此前只回丢弃
+        // 通道（outbound 无订阅者）——错误既不回 REST 也不落 durable，委托态会话
+        // 永久滞留 running。此处回执到 durable：委托态回落人工门（引擎守卫，
+        // 非委托态零副作用）。
+        let engine = run_context.engine.clone();
+        let mut engine = engine.lock().await;
+        engine.recover_delegated_author_rerun_failure(message).await;
+    }
+    outcome
 }
 
 pub(crate) async fn spawn_provider_run_from_handler(
@@ -115,7 +133,7 @@ pub(crate) async fn spawn_provider_run_from_handler(
         engine.active_timeline_node_id()
     };
     let (run_id, run_token, run_cancel, command_rx, _node_id) = manager
-        .start_run_from_attachment(connection_id.as_deref(), target_node_id)
+        .start_run_from_attachment(connection_id.as_deref(), run_kind.clone(), target_node_id)
         .await?;
     let run_label = format!("run-{run_id}");
     // provider drive 期标记（idle 关闭守卫扩展）：从 run 任务启动到结束，该 session

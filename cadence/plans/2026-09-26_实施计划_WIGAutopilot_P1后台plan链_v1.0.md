@@ -18,6 +18,7 @@
 - D1/REQ-WIGA-03：编排器不能持第二个 provider drive；重复/漏唤醒、关页、manager 回收、进程重启不得复用会 supersede 活 run 的 handler 入口；外部 provider 是否收到启动无法证明时停在可诊断人工恢复，绝不宣称 exactly-once。
 - D5/REQ-WIGA-07：P1 只做绑定 plan 的成功确认 info、稳定 key 和待处理隔离；不做 P2 coding 完成信息，也不做 P3 K 窗口外近期历史补读、TTL、跨刷新/跨设备提醒策略；P0 人工门/recovery REST 与线 B Unsent 机制原样复用、不另建。
 - 文件阅读以**当前 worktree 实际源码**为准（P0 原 plan 的拟议接口不是代码）；在 `.worktrees/feat-b-0808-add-monorepo` 根执行定向 `cargo test --locked --lib <filter> -- --nocapture` / `pnpm -C web exec vitest run <file>`；最后由集成负责人统一运行全量。**本文件只是计划，未声称已运行命令或已部署**。
+- **P1 前置必修**：advance→run-next 桥对真实 provider panic（`provider_workspace_runner.rs:134` `legacy fake runner does not support pi`）——编排器 `AdvancePlan` 前必须修复，否则 enrolled 链无法经 advance 到 coding。
 
 ## Review Focus
 
