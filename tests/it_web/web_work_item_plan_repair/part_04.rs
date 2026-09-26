@@ -139,10 +139,21 @@ async fn child_confirmation_publishes_applies_and_restarts_through_real_websocke
     .await
     .expect("amendment application and runner restart timed out");
 
-    let delivery = coding_store
-        .get_plan_amendment_delivery(&resumed, &identity.amendment_id)
-        .expect("load amendment delivery");
-    assert_eq!(delivery.status, CodingPlanAmendmentDeliveryStatus::Delivered);
+    // REQ-WIGA-06：socket 写结算与 Delivered 落盘之间存在异步窗口（观察
+    // 任务 detached），有界轮询等待真实写 ack 后的 durable 收口。
+    timeout(Duration::from_secs(3), async {
+        loop {
+            let delivery = coding_store
+                .get_plan_amendment_delivery(&resumed, &identity.amendment_id)
+                .expect("load amendment delivery");
+            if delivery.status == CodingPlanAmendmentDeliveryStatus::Delivered {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("amendment delivery must settle Delivered after socket write acknowledgement");
     let child_snapshot = LifecycleStore::new(paths)
         .load_plan_repair_session_state(
             &attempt.project_id,
@@ -172,8 +183,12 @@ async fn child_confirmation_publishes_applies_and_restarts_through_real_websocke
     server.abort();
 }
 
+/// REQ-WIGA-06：无 live coding socket 的确认不再被
+/// `plan_amendment_coding_socket_unavailable` 拦截——激活照常完成
+/// （binding 切换 + runner 恢复），投递以 durable Unsent 事实收口；
+/// coding socket attach 后补投同一 event_id，真实写 ack 才标 Delivered。
 #[tokio::test]
-async fn child_confirmation_retries_activation_after_coding_socket_connects() {
+async fn child_confirmation_without_coding_socket_activates_and_redelivers_on_attach() {
     let root = tempdir().expect("fixture root");
     let runtime = PlanRepairFixtureRuntime::seed(root.path(), PlanRepairFixtureControl::default())
         .await
@@ -214,6 +229,7 @@ async fn child_confirmation_retries_activation_after_coding_socket_connects() {
     let initial_child = receive_plan_repair_ws_json(&mut child_ws).await;
     assert_eq!(initial_child["type"], "session_state");
 
+    // 全程不连接 coding WS：确认直接激活（REQ-WIGA-06，无 protocol_error）。
     child_ws
         .send(Message::Text(
             json!({
@@ -225,39 +241,7 @@ async fn child_confirmation_retries_activation_after_coding_socket_connects() {
         ))
         .await
         .expect("send confirmation without coding websocket");
-    let activation_error = receive_plan_repair_ws_type(&mut child_ws, "protocol_error").await;
-    assert_eq!(
-        activation_error["code"],
-        "PLAN_AMENDMENT_ACTIVATION_FAILED"
-    );
-    assert_eq!(state.coding_runs.runner_count(&attempt_key), 0);
-
-    let coding_url = format!(
-        "ws://{addr}/ws/projects/{}/issues/{}/coding-attempts/{}",
-        attempt.project_id, attempt.issue_id, attempt.id
-    );
-    let (mut coding_ws, _) = connect_async(coding_url).await.expect("connect coding websocket");
-    let initial_coding = receive_plan_repair_ws_json(&mut coding_ws).await;
-    assert_eq!(initial_coding["type"], "coding_session_state");
-    child_ws
-        .send(Message::Text(
-            json!({
-                "type": "confirm_plan_amendment",
-                "amendment_id": identity.amendment_id,
-            })
-            .to_string()
-            .into(),
-        ))
-        .await
-        .expect("retry amendment confirmation");
-
-    let amendment_event =
-        receive_plan_repair_ws_type(&mut coding_ws, "plan_amendment_updated").await;
-    assert_eq!(
-        amendment_event["amendment"]["id"],
-        identity.amendment_id
-    );
-    timeout(Duration::from_secs(3), async {
+    let resumed = timeout(Duration::from_secs(3), async {
         loop {
             let current = coding_store
                 .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
@@ -269,19 +253,68 @@ async fn child_confirmation_retries_activation_after_coding_socket_connects() {
                 == vec![identity.amendment_id.clone()]
                 && state.coding_runs.runner_count(&attempt_key) == 1
             {
-                break;
+                break current;
             }
             tokio::task::yield_now().await;
         }
     })
     .await
-    .expect("activation retry timed out");
+    .expect("zero-socket confirmation must activate the amendment (REQ-WIGA-06)");
+    // 零订阅者：durable 真实未送达事实 Unsent（绝不假写 Delivered）。
+    let delivery = timeout(Duration::from_secs(3), async {
+        loop {
+            let delivery = coding_store
+                .get_plan_amendment_delivery(&resumed, &identity.amendment_id)
+                .expect("load amendment delivery");
+            if delivery.status == CodingPlanAmendmentDeliveryStatus::Unsent {
+                return delivery;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("no live socket must leave a durable unsent fact, never Delivered");
+    assert_eq!(delivery.delivered_at, None);
+
+    // coding socket attach：补投同一 event_id，真实写 ack 后才标 Delivered。
+    let coding_url = format!(
+        "ws://{addr}/ws/projects/{}/issues/{}/coding-attempts/{}",
+        attempt.project_id, attempt.issue_id, resumed.id
+    );
+    let (mut coding_ws, _) = connect_async(coding_url).await.expect("connect coding websocket");
+    let initial_coding = receive_plan_repair_ws_json(&mut coding_ws).await;
+    assert_eq!(initial_coding["type"], "coding_session_state");
+    let amendment_event =
+        receive_plan_repair_ws_type(&mut coding_ws, "plan_amendment_updated").await;
+    assert_eq!(
+        amendment_event["amendment"]["id"],
+        identity.amendment_id
+    );
+    assert_eq!(
+        amendment_event["event_id"],
+        json!(delivery.event_id),
+        "attach redelivery must reuse the durable event identity"
+    );
+    timeout(Duration::from_secs(3), async {
+        loop {
+            let current = coding_store
+                .get_plan_amendment_delivery(&resumed, &identity.amendment_id)
+                .expect("reload amendment delivery");
+            if current.status == CodingPlanAmendmentDeliveryStatus::Delivered {
+                return current;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("real socket write acknowledgement must mark Delivered");
     assert_eq!(
         coding_store
             .list_amendment_application_journals(&attempt)
             .expect("list amendment applications")
             .len(),
-        1
+        1,
+        "zero-socket activation applies the amendment exactly once"
     );
 
     coding_ws.close(None).await.ok();
@@ -383,13 +416,21 @@ async fn topology_child_confirmation_applies_and_resumes_through_real_websockets
     .await
     .expect("topology amendment application and runner restart timed out");
 
-    assert_eq!(
-        coding_store
-            .get_plan_amendment_delivery(&resumed, &identity.amendment_id)
-            .expect("load topology amendment delivery")
-            .status,
-        CodingPlanAmendmentDeliveryStatus::Delivered
-    );
+    // REQ-WIGA-06：写结算与 Delivered 落盘之间存在异步窗口（观察任务
+    // detached），有界轮询等待真实写 ack 后的 durable 收口。
+    timeout(Duration::from_secs(3), async {
+        loop {
+            let delivery = coding_store
+                .get_plan_amendment_delivery(&resumed, &identity.amendment_id)
+                .expect("load topology amendment delivery");
+            if delivery.status == CodingPlanAmendmentDeliveryStatus::Delivered {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("topology amendment delivery must settle Delivered after socket write acknowledgement");
     assert_eq!(
         LifecycleStore::new(paths)
             .load_plan_repair_session_state(

@@ -28,8 +28,10 @@ fn matrix_provider_ledger_len(fixture: &CampaignAmendmentFixture) -> usize {
         .len()
 }
 
-/// 修订行统一收口断言（四窗口恢复后必须全部成立）。
-fn assert_amendment_row_final_invariants(
+/// 修订行统一收口断言（四窗口恢复后必须全部成立）。投递是 detached
+/// 观察面（REQ-WIGA-06），Delivered 以有界轮询等待落盘（fixture 自带
+/// confirm 消费者，观察任务必达 Delivered）。
+async fn assert_amendment_row_final_invariants(
     fixture: &CampaignAmendmentFixture,
     context: &crate::product::coding_models::PlanAmendmentContext,
     manifest: &PlanAmendmentManifest,
@@ -79,11 +81,21 @@ fn assert_amendment_row_final_invariants(
         .expect("application journal");
     assert_eq!(journal.phase, CodingAmendmentApplicationPhase::Completed);
     assert_eq!(journal.error, None, "恢复后 journal 错误清零");
-    let delivery = fixture
-        .store
-        .get_plan_amendment_delivery(&resumed, &manifest.id)
-        .expect("delivery marker");
-    assert_eq!(delivery.status, CodingPlanAmendmentDeliveryStatus::Delivered);
+    // REQ-WIGA-06：观察任务 detached，marker 落盘与业务返回之间有异步窗口。
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if let Ok(delivery) = fixture
+                .store
+                .get_plan_amendment_delivery(&resumed, &manifest.id)
+                && delivery.status == CodingPlanAmendmentDeliveryStatus::Delivered
+            {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("delivery marker did not reach Delivered"));
     // resume 单元状态由真实 manifest resume_target 产生（8.4a 同款自适应断言）。
     let resume_unit = fixture
         .store
@@ -462,7 +474,7 @@ async fn campaign_stage3_recovery_matrix_amendment_publication_checkpoints_resum
             .await
             .unwrap_or_else(|error| panic!("{label}: 应用必须回原 attempt: {error}"));
         assert_eq!(resumed.id, paused.id);
-        assert_amendment_row_final_invariants(&fixture, &context, &manifest, 2, 0);
+        assert_amendment_row_final_invariants(&fixture, &context, &manifest, 2, 0).await;
     }
 }
 
@@ -554,24 +566,19 @@ async fn campaign_stage3_recovery_matrix_amendment_binding_window_resumes_from_j
             .await
             .unwrap_or_else(|error| panic!("{label}: 必须从 journal 前缀恢复: {error}"));
         assert_eq!(resumed.id, paused.id, "{label}: 同 attempt");
-        assert_amendment_row_final_invariants(&fixture, &context, &manifest, 1, 1);
+        assert_amendment_row_final_invariants(&fixture, &context, &manifest, 1, 1).await;
     }
 }
 
 /// 窗口 4 —— application journal/delivery：journal Completed 后 delivery 收口
-/// 前崩溃，两种 Error 模式（socket 写失败 / delivery-mark failpoint：socket
-/// 写成功但 durable mark 前中断）。重启后生产恢复入口重投同一 event_id
-/// 恰一次，attempt 回原 id、binding/resume target/budget 终值不变。
+/// 前中断，两种模式（socket 写失败 / delivery-mark failpoint：socket 写成功
+/// 但 durable mark 前中断）。REQ-WIGA-06 起投递是 detached 观察面：两种模式
+/// 都不再中断业务——attempt/business 完整收口，仅 durable marker 留真实
+/// 未送达事实（Unsent / 悬挂 Pending），补投递入口重投同一 event_id 恰一次。
 #[tokio::test]
 async fn campaign_stage3_recovery_matrix_amendment_application_delivery_recovers_same_event() {
-    for (label, socket_write_succeeds, expected_first_error) in [
-        (
-            "socket_write_failed",
-            false,
-            "plan_amendment_socket_write_failed",
-        ),
-        ("delivery_mark_crash", true, "delivery_mark_failpoint"),
-    ] {
+    for (label, socket_write_succeeds) in [("socket_write_failed", false), ("delivery_mark_crash", true)]
+    {
         let fixture = campaign_amendment_fixture().await;
         let paused = fixture.durable_attempt();
         let context = fixture.trigger_context();
@@ -591,86 +598,92 @@ async fn campaign_stage3_recovery_matrix_amendment_application_delivery_recovers
             None
         };
 
-        // 首轮：Error 模式中断在 delivery 收口前。
+        // 首轮：观察面中断不改写业务终态（REQ-WIGA-06）。
         let observed_first: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
         let engine = matrix_coding_engine_with_socket_outcome(
             &fixture,
             socket_write_succeeds,
             observed_first.clone(),
         );
-        let error = engine
+        let resumed = engine
             .resume_group_after_plan_amendment(&paused, &context, &manifest)
             .await
-            .expect_err(&format!("{label}: delivery 窗口必须以 Error 模式中断"));
-        assert!(
-            error.to_string().contains(expected_first_error),
-            "{label}: 意外错误: {error}"
-        );
-        let failed = fixture.durable_attempt();
-        assert_eq!(failed.id, paused.id, "{label}: 同 attempt");
+            .unwrap_or_else(|error| panic!("{label}: delivery 观察失败不得中断业务 resume: {error}"));
+        assert_eq!(resumed.id, paused.id, "{label}: 同 attempt");
+        let settled = fixture.durable_attempt();
+        assert_eq!(settled.id, paused.id, "{label}: 同 attempt");
         assert_eq!(
-            failed.status,
-            CodingAttemptStatus::AmendmentApplyFailed,
-            "{label}: attempt 不可运行，等待恢复"
+            settled.status,
+            CodingAttemptStatus::AwaitingPlanAmendment,
+            "{label}: 业务照常收口到 handoff 暂停位（不再 AmendmentApplyFailed）"
         );
-        let delivery = fixture
-            .store
-            .get_plan_amendment_delivery(&failed, &manifest.id)
-            .expect("delivery marker");
-        assert_eq!(
-            delivery.status,
-            CodingPlanAmendmentDeliveryStatus::Pending,
-            "{label}: marker 悬挂待恢复"
-        );
+        // marker：真实未送达事实按模式分叉——socket 写失败收口 Unsent；
+        // mark failpoint（真实 ack 后 durable mark 被拦）悬挂 Pending。
+        let expected_marker = if socket_write_succeeds {
+            CodingPlanAmendmentDeliveryStatus::Pending
+        } else {
+            CodingPlanAmendmentDeliveryStatus::Unsent
+        };
+        let delivery = poll_delivery_marker(&fixture, &settled, &manifest.id, expected_marker).await;
         let journal = fixture
             .store
-            .get_amendment_application_journal(&failed, &manifest.id)
+            .get_amendment_application_journal(&settled, &manifest.id)
             .expect("application journal");
         assert_eq!(
             journal.phase,
             CodingAmendmentApplicationPhase::Completed,
-            "{label}: journal 已完成，只差 delivery 收口"
+            "{label}: journal 已完成（业务先于观察收口）"
         );
-        // binding 已在 delivery 之前切换（前缀校验锚点）；context 回 Open 可恢复。
+        // binding 已在 delivery 之前恰一次切换（前缀校验锚点）。
         assert_eq!(
             fixture
                 .store
-                .get_plan_binding(&failed)
+                .get_plan_binding(&settled)
                 .expect("binding")
                 .bound_plan_revision_id,
             manifest.new_plan_revision_id
         );
         assert_eq!(
             fixture.trigger_context().status,
-            PlanAmendmentContextStatus::Open,
-            "{label}: 可重试失败回到 Open"
+            PlanAmendmentContextStatus::Applied,
+            "{label}: context 随业务收口为 Applied"
         );
-        let first_event_ids = observed_first.lock().expect("observed").clone();
+        let first_event_ids = poll_observed_event_ids(observed_first.clone(), 1).await;
         assert_eq!(
             first_event_ids.len(),
             1,
             "{label}: 首轮恰一个 delivery 事件（事件身份，非计数对账）"
         );
+        assert_eq!(
+            delivery.event_id, first_event_ids[0],
+            "{label}: marker 与观察事件同一身份"
+        );
+        // 屏障：等首轮观察任务释放 event 注册，补投递才能对同一 event_id
+        // 重新注册发送（注册表进程级持有互斥）。
+        poll_socket_write_registration_released(&first_event_ids[0]).await;
         drop(failpoint);
 
-        // 重启（全新 coding 引擎 + 成功 socket 写）：生产恢复入口，同 event 补投。
+        // 重启（全新 coding 引擎 + 成功 socket 写）：Completed+未送达不再能经
+        // current_amendment_journal_id 重选（delivered_current 仅认 Delivered），
+        // 改由补投递入口重投同 event 恰一次。
         let observed_recovery: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
         let recovered_engine = matrix_coding_engine_with_socket_outcome(
             &fixture,
             true,
             observed_recovery.clone(),
         );
-        let resumed = recovered_engine
-            .recover_plan_amendment(&failed)
+        let redelivered = recovered_engine
+            .redeliver_undelivered_plan_amendments(&settled)
             .await
-            .unwrap_or_else(|error| panic!("{label}: 同 event 恢复必须完成: {error}"));
-        assert_eq!(resumed.id, paused.id, "{label}: 恢复回原 attempt");
+            .unwrap_or_else(|error| panic!("{label}: 同 event 补投必须完成: {error}"));
+        assert_eq!(redelivered, 1, "{label}: 未送达条目恰一条真实达成 Delivered");
+        // 补投返回前已等待真实写 ack（ack 在观察记录之后），同一 event_id 恰一次。
         let recovered_event_ids = observed_recovery.lock().expect("observed").clone();
         assert_eq!(
             recovered_event_ids, first_event_ids,
-            "{label}: 恢复必须重投同一 event_id（恰一次）"
+            "{label}: 补投必须重投同一 event_id（恰一次）"
         );
-        assert_amendment_row_final_invariants(&fixture, &context, &manifest, 1, 1);
+        assert_amendment_row_final_invariants(&fixture, &context, &manifest, 1, 1).await;
     }
 }
 
@@ -702,4 +715,66 @@ fn matrix_coding_engine_with_socket_outcome(
         GitWorkspaceService::new(),
         event_tx,
     )
+}
+
+/// 轮询 durable delivery marker 到期望状态（观察任务 detached，marker
+/// 落盘与业务返回之间有异步窗口；同 review_fix_delivery 轮询模式）。
+async fn poll_delivery_marker(
+    fixture: &CampaignAmendmentFixture,
+    attempt: &crate::product::coding_models::CodingExecutionAttempt,
+    amendment_id: &str,
+    expected: CodingPlanAmendmentDeliveryStatus,
+) -> crate::product::coding_models::CodingPlanAmendmentDelivery {
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if let Ok(delivery) = fixture
+                .store
+                .get_plan_amendment_delivery(attempt, amendment_id)
+                && delivery.status == expected
+            {
+                return delivery;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("delivery marker did not reach {expected:?}"))
+}
+
+/// 轮询观察侧事件记录到期望条数（首轮投递在 detached 任务中异步发射）。
+async fn poll_observed_event_ids(
+    observed: Arc<StdMutex<Vec<String>>>,
+    expected_len: usize,
+) -> Vec<String> {
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let observed = observed.lock().expect("observed").clone();
+            if observed.len() >= expected_len {
+                return observed;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("observed delivery events did not reach {expected_len}"))
+}
+
+/// 屏障：探测 socket 写注册表直到首轮观察任务释放 event 注册（waiter Drop
+/// 在 marker 收口前发生），补投递才能对同一 event_id 重新注册发送。
+async fn poll_socket_write_registration_released(event_id: &str) {
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if let Ok(probe) =
+                crate::web::coding_ws_handler::delivery_ack::register_plan_amendment_socket_write(
+                    event_id,
+                )
+            {
+                drop(probe);
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("socket write registration for {event_id} was never released"))
 }
