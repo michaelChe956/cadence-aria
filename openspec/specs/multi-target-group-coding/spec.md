@@ -50,7 +50,9 @@ mixed-target WorkItemGroup 按 target 分流执行的一期契约：每个目标
 
 ### Requirement: 手动推进与启动门（REQ-MTG-03）
 
-一期推进 SHALL 为人工显式：每个 target-attempt 的 coding provider 启动唯一入口 SHALL 保持显式 `StartCoding` 入站命令，SC admission 的 target-attempt 在经 advance 置 Ready 之前收到 StartCoding SHALL fail-closed 拒绝并返回 `SC_CODING_REQUIRES_ADVANCE`（per-attempt 适用，判定=advance record 与该 attempt 的绑定关系，未绑定或未 Ready 一律拒绝）。advance durable record SHALL 保持每 plan 恰一条（幂等不变）；其与 target-attempt 的绑定 SHALL 以 additive 方式扩展承载多 target-attempt 集（既有单 target 记录的 `attempt_id` 承载语义不变、零迁移）。系统 MUST NOT 自动顺序拉起、依赖驱动拉起或以任何编排动作隐式启动跨 target 的 target-attempts——推进顺序 SHALL 由人决定（可串行或并行对各自 Ready 的 target-attempt 发 StartCoding）。跨 target-attempt 依赖就绪门自动编排为二期 defer 项：触发条件=一期交付后的真实多仓使用证据，届时凭证据另行立项，本红线在本 change 内不被任何「简化版编排」变体突破。
+一期**多 target** 推进 SHALL 为人工显式：每个 target-attempt 的 coding provider 首启唯一入口 SHALL 保持显式 `StartCoding` 入站应用命令，SC admission 的 target-attempt 在经 advance 置 Ready 之前收到 StartCoding SHALL fail-closed 拒绝并返回 `SC_CODING_REQUIRES_ADVANCE`（per-attempt 适用，判定=advance record 与该 attempt 的绑定关系，未绑定或未 Ready 一律拒绝）。advance durable record SHALL 保持每 plan 恰一条（幂等不变）；其与 target-attempt 的绑定 SHALL 以 additive 方式扩展承载多 target-attempt 集（既有单 target 记录的 `attempt_id` 承载语义不变、零迁移）。系统 MUST NOT 自动顺序拉起、依赖驱动拉起或以任何编排动作隐式启动跨 target 的 target-attempts——多 target 的推进顺序 SHALL 由人决定（可串行或并行对各自 Ready 的 target-attempt 发 StartCoding），不能以「循环中一次仅启动一个」规避禁止批量编排。
+
+仅 `work-item-group-autopilot` 显式 opt-in enrollment **精确绑定一个 logical repository 且只对应一个 target-attempt** 时，服务端可按 `work-item-plan-advance` REQ-ADV-05 经独立共用 StartCoding 命令首次启动该唯一 attempt；这不构成多 target 自动启动的例外。enrollment 的 target 范围为零、多于一、与冻结 attempt 不符，或同一 plan 出现多个 target-attempt 时 MUST fail-closed 禁止自动首启；既有逐 target 手动操作不受影响。多 target 自动启动及跨 target-attempt 依赖就绪门自动编排仍为二期 defer 项：触发条件=一期交付后的真实多仓使用证据，届时凭证据另行立项，本红线在本 change 内不被任何「简化版编排」变体突破。
 
 #### Scenario: per-attempt 守卫零变化
 
@@ -71,6 +73,16 @@ mixed-target WorkItemGroup 按 target 分流执行的一期契约：每个目标
 
 - **WHEN** 某 target-attempt 完成、失败或进入任意状态转换
 - **THEN** 系统不据此自动启动、排队或建议启动任何其他 target-attempt（编排缺席是一期红线）
+
+#### Scenario: 单 target enrollment 的唯一例外
+
+- **WHEN** enrolled plan、权威 target 及冻结 attempt 均精确指向同一 logical repository，advance 已将该唯一 attempt 置 Ready
+- **THEN** 有效 per-attempt opt-in 可通过独立 StartCoding 单发首启；advance 本身仍不启动 provider，人工 plan 门保留
+
+#### Scenario: 多 target enrollment 不能泛化为逐个自动发送
+
+- **WHEN** enrollment/plan 中发现两个 logical repository 或两个 target-attempt，即便编排器拟逐个顺序发 StartCoding
+- **THEN** 所有自动首启均拒绝，不因单次只有一个 attempt 就突破多 target 人工决定顺序的红线
 
 ### Requirement: group 级聚合只读视图与终态（REQ-MTG-04）
 
