@@ -317,7 +317,8 @@ async fn workspace_ws_pending_choice_projection_clears_after_run_completes() {
             selected_option_ids: vec!["opt_0".to_string()],
             free_text: None,
             answers: vec![],
-            sc_recovery_claim: None,
+            command_id: None,
+            expected_run_id: None,
         },
     )
     .await;
@@ -627,7 +628,8 @@ async fn workspace_ws_choice_answer_broadcasts_session_state_without_answered_pe
             selected_option_ids: vec!["opt_0".to_string()],
             free_text: None,
             answers: vec![],
-            sc_recovery_claim: None,
+            command_id: None,
+            expected_run_id: None,
         },
     )
     .await;

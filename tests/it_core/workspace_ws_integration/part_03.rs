@@ -811,6 +811,8 @@ async fn workspace_ws_hello_during_pending_choice_does_not_block_choice_response
             selected_option_ids: vec!["opt_0".to_string()],
             free_text: None,
             answers: vec![],
+            command_id: None,
+            expected_run_id: None,
         },
     )
     .await;
@@ -885,6 +887,8 @@ async fn workspace_ws_second_connection_receives_and_answers_pending_choice() {
             selected_option_ids: vec!["opt_0".to_string()],
             free_text: None,
             answers: vec![],
+            command_id: None,
+            expected_run_id: None,
         },
     )
     .await;
@@ -946,6 +950,8 @@ async fn workspace_ws_stale_choice_response_after_new_run_is_rejected_before_pro
             selected_option_ids: vec!["opt_0".to_string()],
             free_text: None,
             answers: vec![],
+            command_id: None,
+            expected_run_id: None,
         },
     )
     .await;
@@ -965,6 +971,8 @@ async fn workspace_ws_stale_choice_response_after_new_run_is_rejected_before_pro
             selected_option_ids: vec!["opt_0".to_string()],
             free_text: None,
             answers: vec![],
+            command_id: None,
+            expected_run_id: None,
         },
     )
     .await;

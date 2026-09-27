@@ -512,11 +512,17 @@ async fn coding_chain_stage(
         }));
     }
 
-    // Ready：group journal 的唯一 attempt 分诊（不按 sibling 循环）。
+    // Ready：group journal 只用于定位唯一 attempt 身份；状态必须从 attempt
+    // store 读新鲜值——journal 内嵌快照冻结于初始化时点（恒 Created/
+    // PrepareContext），据其分诊会在 attempt 已停等人时重入首启路径，
+    // 把 durable claim 误降级 NeedsHuman。
     let journal = crate::product::coding_attempt_store::CodingAttemptStore::new(paths.clone())
         .get_group_initialization(&project_id, &issue_id, &plan_id)
         .map_err(|error| format!("group initialization journal unreadable: {error}"))?;
     let attempt = journal.attempt;
+    let attempt = crate::product::coding_attempt_store::CodingAttemptStore::new(paths.clone())
+        .get_attempt(&project_id, &issue_id, &attempt.id)
+        .map_err(|error| format!("group attempt unreadable: {error}"))?;
     match attempt.status {
         CodingAttemptStatus::Running
         | CodingAttemptStatus::AwaitingPlanAmendment
@@ -1072,6 +1078,84 @@ mod p2_coding_chain {
         );
         assert!(fixture.coding_attempts().is_empty());
         assert_eq!(fixture.coding_runner_count(), 0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// P2 Task 10（tasks.md §3.4）：跨层 campaign——人工批准 Confirmed plan 后，
+// 无页面 reconcile 独立 advance→单发首启→Fake runner 后台跑到 durable
+// `WaitingForHuman ∧ FinalConfirm`；编排器不代点，人手 handle_final_confirm
+// 才 Completed。503 失败分诊单独成证（GAP-E/G/H：durable 诊断 + 零自动重驱）。
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod p2_campaign {
+    use super::*;
+    use crate::product::coding_models::{CodingAttemptStatus, CodingExecutionStage};
+    use crate::web::wiga_gate_fixture::*;
+
+    #[tokio::test]
+    async fn p2_campaign_requires_human_final_confirm_after_socketless_run() {
+        let mut fixture = p2_enrolled_campaign_fixture().await;
+        fixture.confirm_plan_by_human().await;
+        fixture.reconcile_until_coding_waiting_for_human().await;
+        let attempt = fixture.attempt();
+        assert_eq!(attempt.stage, CodingExecutionStage::FinalConfirm);
+        assert_eq!(attempt.status, CodingAttemptStatus::WaitingForHuman);
+        assert_eq!(fixture.runner_start_claims(&attempt.id), 1);
+        // 等待期间编排器只观察（人工 Final Confirm 不被代点、不隐式重驱）。
+        let worker = AutopilotOrchestrator::new(fixture.gate.state.clone(), Default::default());
+        assert_eq!(
+            worker
+                .reconcile(&fixture.gate.state, PROJECT_ID, ISSUE_ID)
+                .await
+                .unwrap(),
+            ReconcileOutcome::AwaitingHuman
+        );
+        assert_eq!(fixture.attempt().status, CodingAttemptStatus::WaitingForHuman);
+        fixture.gate.confirm_final_by_human().await;
+        assert_eq!(fixture.attempt().status, CodingAttemptStatus::Completed);
+        assert_eq!(fixture.runner_start_claims(&attempt.id), 1);
+    }
+
+    /// GAP-E/G/H campaign 侧：reviewer 网关 503 失败 durable 收敛 + 可见诊断，
+    /// 编排器分诊 NeedsHuman 且重复唤醒零重驱（provider 账目不增）。
+    #[tokio::test]
+    async fn p2_campaign_gateway_503_reviewer_failure_is_human_triage_without_redrive() {
+        let mut fixture = p2_enrolled_campaign_fixture().await;
+        let failed_node_id = fixture.gate.fail_reviewer_with_gateway_503().await;
+        // GAP-H：分类诊断落 durable 节点摘要，脱敏（不泄凭据）。
+        let summary = fixture
+            .gate
+            .timeline_nodes()
+            .iter()
+            .find(|node| node.node_id == failed_node_id)
+            .unwrap()
+            .summary
+            .clone()
+            .unwrap_or_default();
+        assert!(
+            summary.contains("provider_gateway_503_no_accounts"),
+            "503 diagnostic must be durable: {summary}"
+        );
+        assert!(!summary.contains("secret"), "diagnostic must redact credentials");
+        let before = fixture.gate.provider_start_ledger();
+        let worker = AutopilotOrchestrator::new(fixture.gate.state.clone(), Default::default());
+        for _ in 0..3 {
+            assert_eq!(
+                worker
+                    .reconcile(&fixture.gate.state, PROJECT_ID, ISSUE_ID)
+                    .await
+                    .unwrap(),
+                ReconcileOutcome::NeedsHuman
+            );
+        }
+        assert_eq!(
+            fixture.gate.provider_start_ledger(),
+            before,
+            "repeated reconcile must not re-drive the failed reviewer"
+        );
+        assert_eq!(fixture.manual_issue_runner_start_claims(), 0);
     }
 }
 

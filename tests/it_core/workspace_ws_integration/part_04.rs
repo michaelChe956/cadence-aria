@@ -299,7 +299,8 @@ async fn workspace_ws_abort_after_choice_response_returns_prepare_context() {
             selected_option_ids: vec!["opt_0".to_string()],
             free_text: None,
             answers: vec![],
-            sc_recovery_claim: None,
+            command_id: None,
+            expected_run_id: None,
         },
     )
     .await;

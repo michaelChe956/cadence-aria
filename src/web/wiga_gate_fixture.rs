@@ -333,20 +333,11 @@
             );
         }
 
-        /// 把绑定 plan/session 铺成可编译的审批门形态（accepted contract
-        /// drafts + active index + outline 候选 + source/IR/report 三 refs，
-        /// 全部经真实 store/engine 面），随后两段 failpoint 经 P0 REST
-        /// Approve 制造「compile 崩溃后人工恢复」的 durable 现场：
-        /// 1) ProvenancePersisted 边界（落 approval+reservation，compile tx
-        ///    尚未落盘——不落 recovery 节点的 422 根因）；
-        /// 2) 按 part_03/part_09.rs:451、single_candidate_recovery.rs:700 先例
-        ///    注册 FirstChildBindingEnsured finalizer failpoint，第二次 approve
-        ///    replay 复用同 compile_id 抵达 finalizer（tx 已落盘）→ Err 分支
-        ///    自动标记 RecoveryRequired 并落 recovery 节点，供人工
-        ///    CompileRecovery Continue 恢复原事务。
-        pub(crate) async fn fail_compile_after_human_approve(&mut self) {
-            // 阶段一（durable 铺底）：accepted contract drafts + active index +
-            // source/IR/report 三 refs + 审批门快照，全部走真实 store 面。
+        /// durable 铺底（审批门与 Evaluate 相位共用）：engine outline 候选 +
+        /// accepted contract drafts + active index，全部经真实 store 面。
+        /// `single_candidate_recovery_record` 的 refs 持久化依赖 active
+        /// index 已就位，因此先铺本层再落相位记录。
+        async fn seed_accepted_plan_drafts(&mut self) {
             let engine_arc = self.manager.engine();
             let mut engine = engine_arc.lock().await;
             engine.session.artifact = Some(gate_outline_candidate_payload());
@@ -380,12 +371,31 @@
             plan_store
                 .save_active_index(&gate_active_index(&self.plan_id))
                 .expect("save accepted draft index");
+            drop(engine);
+        }
+
+        /// 把绑定 plan/session 铺成可编译的审批门形态（accepted contract
+        /// drafts + active index + outline 候选 + source/IR/report 三 refs，
+        /// 全部经真实 store/engine 面）并在「真正执行 approve 的那个引擎」
+        /// 上真实开门（时间线 HumanConfirm 节点 + durable WaitingForHuman），
+        /// 返回 gate 节点 id。阶段一落 durable 铺底；choice 应答后 run
+        /// 收尾可能触发 idle 回收，因此阶段二按 registry 解析当前 manager。
+        /// `fail_compile_after_human_approve` 与 Task 10 campaign 的
+        /// `confirm_plan_by_human` 共用同一铺底：区别只在 approve 前
+        /// 是否注册 compile failpoint。
+        async fn seed_approval_gate(&mut self) -> String {
+            // 阶段一（durable 铺底）：accepted drafts + SC Approval 相位记录 +
+            // 审批门快照。
+            self.seed_accepted_plan_drafts().await;
+            let engine_arc = self.manager.engine();
+            let mut engine = engine_arc.lock().await;
             single_candidate_recovery_record(
                 &self.lifecycle,
                 &mut engine,
                 SingleCandidatePhase::Approval,
                 RunPolicy::Interactive,
             );
+            drop(engine);
             let mut record = self.durable();
             record.status = WorkspaceSessionStatus::WaitingForHuman;
             record.human_gate_snapshot = Some(HumanGateSnapshot {
@@ -399,35 +409,127 @@
             });
             crate::product::json_store::write_json(&self.session_path(&record.id), &record)
                 .expect("persist approval session");
-            drop(engine);
 
-            // 阶段二（当前 manager）：choice 应答后 run 收尾会触发 idle 回收，
-            // HTTP 侧按 registry 解析当前 manager；outline 候选与 failpoint
-            // 必须登记在「真正执行 approve 的那个引擎」上。
-            let state = self.state.clone();
-            let session_id = self.session_id.clone();
-            let manager = state
-                .workspace_sessions
-                .get_or_create(&session_id, || {
-                    WorkspaceSessionManager::create(&state, &session_id)
-                })
-                .await
-                .expect("current registry manager");
+            // 阶段二（当前 manager）：开门必须发生在真正执行 approve 的引擎上。
+            let manager = self.current_registry_manager().await;
             let engine_arc = manager.engine();
             let mut engine = engine_arc.lock().await;
             engine.session.artifact = Some(gate_outline_candidate_payload());
             engine.session.stage = crate::product::workspace_engine::WorkspaceStage::HumanConfirm;
             engine.session.session_status = WorkspaceSessionStatus::WaitingForHuman;
-            // 真实开门（时间线 HumanConfirm 节点 + durable WaitingForHuman）。
             engine
-                .enter_human_confirm(Some("人工批准（compile 将在 finalizer 失败）".to_string()))
+                .enter_human_confirm(Some("人工批准（审批门）".to_string()))
                 .await;
             let gate_id = engine.active_timeline_node_id().expect("gate node");
+            drop(engine);
+            self.gate_id = Some(gate_id.clone());
+            gate_id
+        }
+
+        /// 当前 registry 解析的 manager（HTTP handler 同一口径）。
+        async fn current_registry_manager(&self) -> Arc<WorkspaceSessionManager> {
+            let state = self.state.clone();
+            let session_id = self.session_id.clone();
+            state
+                .workspace_sessions
+                .get_or_create(&session_id, || {
+                    WorkspaceSessionManager::create(&state, &session_id)
+                })
+                .await
+                .expect("current registry manager")
+        }
+
+        /// Task 10 campaign：人手干净批准（无 failpoint）——铺审批门后单次
+        /// P0 REST Approve 即 Confirmed + Completed + plan Confirmed。
+        pub(crate) async fn confirm_plan_by_human(&mut self) {
+            let gate_id = self.seed_approval_gate().await;
+            let app = crate::web::app::build_web_router(self.state.clone());
+            let body = serde_json::json!({
+                "type": "approve",
+                "command_id": "cmd-campaign-approve",
+                "expected_gate_id": gate_id,
+            });
+            let (status, payload) = post_human_action(&app, &self.session_id, &body).await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "clean campaign approve must succeed: {status} {payload}"
+            );
+            assert_eq!(payload["state"], "accepted", "{payload}");
+            let durable = self.durable();
+            assert_eq!(durable.status, WorkspaceSessionStatus::Confirmed);
+            assert_eq!(
+                durable.single_candidate_phase,
+                Some(SingleCandidatePhase::Completed)
+            );
+        }
+
+        /// Task 10 campaign：Evaluate 相位 reviewer 经真实引擎跑出网关 503
+        /// 失败（`drive_reviewer_provider_session` 消费 `ProviderUnavailable`
+        /// 错误会话），返回失败 timeline 节点 id。前置：先收尾 fixture 的
+        /// author run，让 manager 空闲（编排器观察面与人工重驱入口一致）。
+        pub(crate) async fn fail_reviewer_with_gateway_503(&mut self) -> String {
+            self.manager.finish_run(self.token).await;
+            // 相位记录的 refs 持久化需要 accepted drafts + active index 先就位。
+            self.seed_accepted_plan_drafts().await;
+            let engine_arc = self.manager.engine();
+            let mut engine = engine_arc.lock().await;
+            single_candidate_recovery_record(
+                &self.lifecycle,
+                &mut engine,
+                SingleCandidatePhase::Evaluate,
+                RunPolicy::Interactive,
+            );
+            engine.start_review().await;
+            let failed_node_id = engine.active_timeline_node_id().expect("reviewer node");
+            let (_tx, rx) = tokio::sync::mpsc::channel(1);
+            engine
+                .drive_reviewer_provider_session(
+                    Err(crate::cross_cutting::provider_adapter::ProviderAdapterError::provider_unavailable(
+                        "503 No available accounts; Authorization: Bearer secret",
+                    )),
+                    rx,
+                    crate::product::models::ProviderName::ClaudeCode,
+                )
+                .await;
+            drop(engine);
+            let durable = self.durable();
+            assert_eq!(durable.status, WorkspaceSessionStatus::Failed);
+            assert_eq!(
+                durable.single_candidate_phase,
+                Some(SingleCandidatePhase::Failed)
+            );
+            failed_node_id
+        }
+
+        /// 绑定 session 的全部 durable timeline 节点（503 诊断可见性断言）。
+        pub(crate) fn timeline_nodes(
+            &self,
+        ) -> Vec<crate::web::workspace_ws_types::TimelineNode> {
+            self.lifecycle
+                .load_timeline_nodes_for_issue_session(PROJECT_ID, ISSUE_ID, &self.session_id)
+                .expect("timeline nodes")
+        }
+
+        /// 制造「compile 崩溃后人工恢复」的 durable 现场并停在开着的门上：
+        /// 1) ProvenancePersisted 边界（落 approval+reservation，compile tx
+        ///    尚未落盘——不落 recovery 节点的 422 根因）；
+        /// 2) 按 part_03/part_09.rs:451、single_candidate_recovery.rs:700 先例
+        ///    注册 FirstChildBindingEnsured finalizer failpoint，第二次 approve
+        ///    replay 复用同 compile_id 抵达 finalizer（tx 已落盘）→ Err 分支
+        ///    自动标记 RecoveryRequired 并落 recovery 节点，供人工
+        ///    CompileRecovery Continue 恢复原事务。
+        pub(crate) async fn fail_compile_after_human_approve(&mut self) {
+            let gate_id = self.seed_approval_gate().await;
+            // 开门后的同一引擎上注册 ProvenancePersisted failpoint（与原始
+            // 内联版本等价：同 manager 单引擎、无并发写者）。
+            let manager = self.current_registry_manager().await;
+            let engine_arc = manager.engine();
+            let engine = engine_arc.lock().await;
             let _failpoint = engine.register_single_candidate_compile_failpoint(
                 SingleCandidateCompileCheckpoint::ProvenancePersisted,
             );
             drop(engine);
-            self.gate_id = Some(gate_id.clone());
 
             let app = crate::web::app::build_web_router(self.state.clone());
             let body = serde_json::json!({
@@ -833,6 +935,118 @@
         .await
         .expect("fake campaign reaches human FinalConfirm");
         fixture
+    }
+
+    /// P2 Task 10 campaign fixture：`EnrolledGateFixture`（真实 enrollment
+    /// 绑定 + 物理 main checkout 就位，等 advance 用）+ 同 project 未授权
+    /// 手工 issue 对照。停在人工 plan 批准前：advance→首启→Fake 运行→
+    /// FinalConfirm 等待全链由编排器 `reconcile` 驱动（测试只当人手）。
+    pub(crate) struct P2CampaignFixture {
+        pub(crate) gate: EnrolledGateFixture,
+        manual_issue_id: String,
+    }
+
+    impl P2CampaignFixture {
+        pub(crate) async fn new() -> Self {
+            let gate = EnrolledGateFixture::new().await;
+            init_real_main_checkout(&gate.inner.paths.root().join("checkout-enroll-a"));
+            normalize_checkout_revision_to_unobserved(&gate.inner.paths);
+            // 未授权手工对照 issue（同 project；编排器对其零动作）。
+            let manual = crate::product::issue_store::IssueStore::new(gate.inner.paths.clone())
+                .create(crate::product::issue_store::CreateProductIssueInput {
+                    project_id: PROJECT_ID.to_string(),
+                    repo_id: Some(
+                        crate::web::handlers::automation_enrollment_test_support::REPOSITORY_ID
+                            .to_string(),
+                    ),
+                    logical_codebase_id: None,
+                    title: "manual campaign issue".to_string(),
+                    description: None,
+                    change_id: None,
+                    base_branch: None,
+                })
+                .expect("manual campaign issue");
+            Self {
+                gate,
+                manual_issue_id: manual.id,
+            }
+        }
+
+        /// 人手干净批准绑定 plan（单次 P0 REST Approve；测试里显式可见）。
+        pub(crate) async fn confirm_plan_by_human(&mut self) {
+            self.gate.confirm_plan_by_human().await;
+        }
+
+        fn worker(&self) -> AutopilotOrchestrator {
+            AutopilotOrchestrator::new(self.gate.state.clone(), Default::default())
+        }
+
+        /// 无页面 reconcile 循环：Confirmed→advance→Ready→单发首启→Fake
+        /// runner 后台跑到 durable `WaitingForHuman ∧ FinalConfirm`。中途
+        /// Failed/Aborted/AwaitingManualRecovery 即失败（真实业务断点）。
+        pub(crate) async fn reconcile_until_coding_waiting_for_human(&self) {
+            let worker = self.worker();
+            tokio::time::timeout(std::time::Duration::from_secs(150), async {
+                loop {
+                    worker
+                        .reconcile(&self.gate.state, PROJECT_ID, ISSUE_ID)
+                        .await
+                        .expect("campaign reconcile");
+                    if let Some(attempt) = self.gate.coding_attempts().first() {
+                        use crate::product::coding_models::CodingAttemptStatus;
+                        match attempt.status {
+                            CodingAttemptStatus::WaitingForHuman
+                                if attempt.stage
+                                    == crate::product::coding_models::CodingExecutionStage::FinalConfirm =>
+                            {
+                                break;
+                            }
+                            CodingAttemptStatus::Failed
+                            | CodingAttemptStatus::Aborted
+                            | CodingAttemptStatus::AwaitingManualRecovery => panic!(
+                                "campaign stopped unexpectedly at {:?}/{:?} reason={:?}",
+                                attempt.status, attempt.stage, attempt.manual_recovery_reason
+                            ),
+                            _ => {}
+                        }
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .expect("fake campaign reaches human FinalConfirm via reconcile only");
+        }
+
+        /// attempt 的 durable 首启 claim 数（不可复位单发事实；恰 1 = 只首启过一次）。
+        pub(crate) fn runner_start_claims(&self, attempt_id: &str) -> usize {
+            self.gate
+                .coding_attempts()
+                .iter()
+                .filter(|attempt| attempt.id == attempt_id && attempt.start_claim.is_some())
+                .count()
+        }
+
+        /// 未授权手工 issue 的 coding 首启 claim 总数（对照恒 0）。
+        pub(crate) fn manual_issue_runner_start_claims(&self) -> usize {
+            crate::product::coding_attempt_store::CodingAttemptStore::new(
+                self.gate.inner.paths.clone(),
+            )
+            .list_attempts_for_issue(PROJECT_ID, &self.manual_issue_id)
+            .expect("manual issue attempts")
+            .iter()
+            .filter(|attempt| attempt.start_claim.is_some())
+            .count()
+        }
+
+        pub(crate) fn attempt(&self) -> crate::product::coding_models::CodingExecutionAttempt {
+            self.gate.attempt()
+        }
+    }
+
+    /// P2 Task 10 共享 fixture：campaign 起点＝人工批准后的 Confirmed
+    /// enrollment（真实 main checkout + 干净单次 approve，无 failpoint）。
+    pub(crate) async fn p2_enrolled_campaign_fixture() -> P2CampaignFixture {
+        P2CampaignFixture::new().await
     }
 
     /// 在 physical checkout 上初始化真实 main 分支 git 仓库（空提交即可满足
