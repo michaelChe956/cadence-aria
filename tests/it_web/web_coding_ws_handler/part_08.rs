@@ -665,7 +665,9 @@ async fn coding_ws_group_attempt_recovers_review_request_running_unit_without_re
     let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
     let (mut ws, _) = connect_async(url).await.expect("connect ws");
     let _initial = recv_json(&mut ws).await;
-    send_json(&mut ws, &CodingWsInMessage::StartCoding).await;
+    // P2 Task 5 后 WS StartCoding 只剩首启（Running→AlreadyStarted）；
+    // Running+ReviewRequest 的死 runner 由 attach 半启动恢复路径复活，
+    // 恢复只续推进——不允许重跑 review。
 
     let mut saw_second_unit = false;
     for _ in 0..80 {

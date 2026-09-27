@@ -640,3 +640,46 @@ async fn startup_reconcile_skips_terminal_and_unclaimed_but_recovers_legacy_runn
         assert_eq!(terminal.reload().status, status);
     }
 }
+
+/// P2 Task 5 迁移回归修复：Running+ReviewRequest 的死 runner 原由 WS
+/// StartCoding 直启路径隐式复活，迁移后唯一人工通道是 attach/启动扫描的
+/// 半启动恢复。启动扫描必须覆盖该阶段（review 已完成的 durable 事实，
+/// 恢复只续推进不重跑 review）；Running+PrepareContext 为过渡/异常态，
+/// 保持 fail-safe 不自动复活。
+#[tokio::test]
+async fn startup_reconcile_recovers_legacy_running_review_request_stage() {
+    let fixture = seed_startup_attempt(None, true);
+    fixture
+        .store()
+        .update_attempt_stage(
+            "project_0001",
+            "issue_0001",
+            &fixture.reload().id,
+            CodingExecutionStage::ReviewRequest,
+        )
+        .expect("seed review request stage");
+    let fresh = fixture.restart_state();
+    fixture.reconcile(&fresh).await;
+    assert_eq!(
+        fresh.coding_runs.runner_count(&fixture.attempt_key()),
+        1,
+        "startup reconcile must resume a running review-request attempt"
+    );
+    assert_eq!(fixture.reload().stage, CodingExecutionStage::ReviewRequest);
+
+    // 对照：Running+PrepareContext 是过渡/异常态，不自动复活。
+    let transitional = seed_startup_attempt(None, false);
+    let mut transitional_attempt = transitional.reload();
+    transitional_attempt.status = CodingAttemptStatus::Running;
+    transitional
+        .store()
+        .write_coding_attempt_for_test(&transitional_attempt)
+        .expect("seed running prepare-context attempt");
+    let transitional_state = transitional.restart_state();
+    transitional.reconcile(&transitional_state).await;
+    assert_eq!(
+        transitional_state.coding_runs.runner_count(&transitional.attempt_key()),
+        0,
+        "running prepare-context attempt must stay fail-safe for manual triage"
+    );
+}

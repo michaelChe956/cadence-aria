@@ -103,8 +103,12 @@ pub(crate) async fn ensure_runner_for_resumed_attempt(
     }
 }
 
-/// 半启动判定：Running + stage∈{WorktreePrepare, Coding} + 注册表既无
-/// runner 也无恢复预约（活跑中重连 / 恢复进行中均不动作）。
+/// 半启动判定：Running + stage∈{WorktreePrepare, Coding, ReviewRequest} +
+/// 注册表既无 runner 也无恢复预约（活跑中重连 / 恢复进行中均不动作）。
+/// P2 Task 5 把 WS StartCoding 迁到 typed 首启服务后，原直启路径隐式覆盖的
+/// Running+ReviewRequest 复活缺口由本谓词承接（review 已完成的 durable 事实
+/// 下恢复 runner 只续推进、不重跑 review）；Running+PrepareContext 为过渡/
+/// 异常态，保持人工分诊不自动复活。
 pub(crate) fn resumed_attempt_needs_runner(
     coding_runs: &crate::web::state::CodingRunRegistry,
     attempt_key: &CodingAttemptRunKey,
@@ -113,7 +117,9 @@ pub(crate) fn resumed_attempt_needs_runner(
     attempt.status == CodingAttemptStatus::Running
         && matches!(
             attempt.stage,
-            CodingExecutionStage::WorktreePrepare | CodingExecutionStage::Coding
+            CodingExecutionStage::WorktreePrepare
+                | CodingExecutionStage::Coding
+                | CodingExecutionStage::ReviewRequest
         )
         && !coding_runs.attempt_is_reserved_or_running(attempt_key)
 }

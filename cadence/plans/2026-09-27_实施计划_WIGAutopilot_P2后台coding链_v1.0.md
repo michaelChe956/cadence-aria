@@ -597,6 +597,19 @@ pub fn issue_coding_final_confirm_info(paths: &ProductAppPaths,
 - [ ] **Step 4: 验证绿灯。** 重跑 Step 2，并跑 `cargo test --locked --lib runner_recovery -- --nocapture`、`cargo test --locked --lib automation_reconcile -- --nocapture`。关闭所有订阅后依旧有 1 runner；Failed/Aborted/no claim 各 0。
 - [ ] **Step 5: 提交。** `git add src/web/app.rs src/web/autopilot_orchestrator.rs src/web/coding_start.rs src/web/coding_ws_handler && git commit -m "feat: recover claimed coding runs at startup without socket"`。
 
+> **实施偏差登记（2026-09-27，主控裁决）**：Task 5 把 WS StartCoding 迁到
+> typed 首启服务后，原 socket 直启路径隐式覆盖的「Running+ReviewRequest 死
+> runner 人工复活」出现缺口（RestartCoding 仅终态、RecoverCoding 仅
+> AwaitingManualRecovery、attach/启动扫描谓词仅 WorktreePrepare/Coding）。
+> 裁决：`resumed_attempt_needs_runner` 谓词扩展纳入
+> `Running+ReviewRequest`——review 已完成是 durable 事实，恢复 runner 只是
+> 续推进、不重跑 review，与 attach 恢复语义同构（回归修复而非新行为）；
+> attach 与启动扫描两条路径同时生效并各有测试覆盖
+> （`coding_ws_group_attempt_recovers_review_request_running_unit_without_rerunning_review`
+> /`startup_reconcile_recovers_legacy_running_review_request_stage`）。
+> `Running+PrepareContext` 为过渡/异常态，**不**纳入——保持人工分诊
+> fail-safe（对照测试钉定零自动复活）。
+
 ## Task 7：3.2 零 socket choice/amendment、慢观察者的业务隔离回归
 
 **Files:** Modify `src/web/state/coding_socket_registry.rs`（仅慢订阅队列满时非阻塞 fan-out；不碰已落地 amendment 业务 journal）、`src/web/coding_ws_handler/tests/event_hub.rs`、`src/web/workspace_ws_handler/tests/plan_repair_activation.rs`、`src/web/handlers/coding_choice.rs` 的测试模块；如 Task 6 暴露连接态 race，仅修 `src/web/coding_ws_handler/socket.rs` 的观察回帧，不能改 P0 choice wire/真实回执。
