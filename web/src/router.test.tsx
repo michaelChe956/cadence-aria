@@ -23,14 +23,34 @@ vi.mock("./hooks/useWorkspaceSessionObservers", () => ({
 vi.mock("./pages/ChatWorkspacePage", () => ({
   ChatWorkspacePage: ({
     onOpenSession,
+    onOpenInfoCoding,
   }: {
     onOpenSession: (sessionId: string) => void;
+    onOpenInfoCoding?: (address: {
+      projectId: string;
+      issueId: string;
+      attemptId: string;
+    }) => void;
   }) => (
     <div data-testid="chat-workspace-page">
       Chat Workspace
       <button type="button" onClick={() => onOpenSession("session_parent")}>
         返回父会话
       </button>
+      {onOpenInfoCoding ? (
+        <button
+          type="button"
+          onClick={() =>
+            onOpenInfoCoding({
+              projectId: "project_1",
+              issueId: "issue_1",
+              attemptId: "coding_attempt_001",
+            })
+          }
+        >
+          查看 Coding Workspace
+        </button>
+      ) : null}
     </div>
   ),
 }));
@@ -223,6 +243,41 @@ describe("router", () => {
     await waitFor(() => {
       expect(history.location.pathname).toBe("/workbench/workspace/session_parent");
     });
+  });
+
+  it("navigates coding final-confirm info to the scoped coding workspace route", async () => {
+    const health = {
+      ...blockedSnapshot(),
+      real_workflow_blocked: false,
+    };
+    useProviderAvailabilityStore.setState({
+      snapshot: health,
+      loadStatus: "loaded",
+      generation: health.generation,
+      stateStatus: health.state_status,
+      stateError: health.state_error,
+      realWorkflowBlocked: health.real_workflow_blocked,
+      testProviderEnabled: health.test_provider_enabled,
+    });
+    const history = createMemoryHistory({
+      initialEntries: ["/workbench/workspace/session_001"],
+    });
+
+    render(<RouterProvider router={createAppRouter(history)} />);
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: "查看 Coding Workspace" }),
+    );
+
+    await waitFor(() => {
+      expect(history.location.pathname).toBe(
+        "/workbench/projects/project_1/issues/issue_1/coding/coding_attempt_001",
+      );
+    });
+    const page = await screen.findByTestId("coding-workspace-page");
+    expect(page).toHaveAttribute("data-project-id", "project_1");
+    expect(page).toHaveAttribute("data-issue-id", "issue_1");
+    expect(page).toHaveAttribute("data-attempt-id", "coding_attempt_001");
   });
 
   it("replaces a legacy coding workspace address with the scoped address", async () => {

@@ -83,6 +83,7 @@ export function CockpitInbox({
   onChoiceRespond,
   emptyHint,
   onOpenInfoSession,
+  onOpenInfoCoding,
   artifactVersions = [],
   leaseEvents = null,
   latestReviewSummary = null,
@@ -104,6 +105,11 @@ export function CockpitInbox({
   emptyHint?: string | null;
   /** REQ-WIGA-07 Task 9：info 条目的 plan session 下钻（只读，无批量/危险面）。 */
   onOpenInfoSession?: (sessionId: string) => void;
+  onOpenInfoCoding?: (address: {
+    projectId: string;
+    issueId: string;
+    attemptId: string;
+  }) => void;
   artifactVersions?: readonly ArtifactVersionSummary[];
   /** REQ-DLS-03：STALE 错误条引用的最近租约转移事件（诊断端点拉取，缺省不渲染）。 */
   leaseEvents?: readonly LeaseDiagnosticsEvent[] | null;
@@ -163,6 +169,7 @@ export function CockpitInbox({
     actions,
     onChoiceRespond,
     onOpenInfoSession,
+    onOpenInfoCoding,
     onTakeover,
     onRetry,
     onRetryFailedSc,
@@ -259,6 +266,7 @@ function CockpitInboxRow({
   actions,
   onChoiceRespond,
   onOpenInfoSession,
+  onOpenInfoCoding,
   onTakeover,
   onRetry,
   onRetryFailedSc,
@@ -279,10 +287,17 @@ function CockpitInboxRow({
   onChoiceRespond?: (item: CockpitInboxItem, payload: ChoiceResponsePayload) => void;
   /** REQ-WIGA-07 Task 9：info 条目的 plan session 下钻（只读导航）。 */
   onOpenInfoSession?: (sessionId: string) => void;
+  /** REQ-WIGA-07/R5 Task 9：coding FinalConfirm info 的 attempt 地址下钻。 */
+  onOpenInfoCoding?: (address: {
+    projectId: string;
+    issueId: string;
+    attemptId: string;
+  }) => void;
   onTakeover?: (sessionId: string) => Promise<void>;
   onRetry?: (item: CockpitInboxItem) => void;
   /** P2 GAP-E/G（Task 0.1）：失败 SC 现场的人工显式重驱（透传页面 REST 接线）。 */
   onRetryFailedSc?: (failedNodeId: string) => void;
+  onRetakeLease?: () => void;
   actionable: boolean;
   selectable: boolean;
   selected: boolean;
@@ -351,6 +366,21 @@ function CockpitInboxRow({
         ) : null}
         {takeoverError ? (
           <p className="aria-mono mt-1 text-xs text-[var(--aria-danger)]">{takeoverError}</p>
+        ) : null}
+        {item.kind === "info" && item.codingInfo && onOpenInfoCoding ? (
+          <button
+            type="button"
+            onClick={() =>
+              onOpenInfoCoding({
+                projectId: item.codingInfo?.projectId ?? "",
+                issueId: item.codingInfo?.issueId ?? "",
+                attemptId: item.codingInfo?.attemptId ?? "",
+              })
+            }
+            className="mt-2 min-h-9 rounded-md border border-emerald-300 bg-white px-2.5 py-1 text-xs font-semibold text-emerald-700 transition-colors duration-200 hover:bg-emerald-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+          >
+            查看 Coding Workspace
+          </button>
         ) : null}
         {item.kind === "info" && item.planInfo && onOpenInfoSession ? (
           <button

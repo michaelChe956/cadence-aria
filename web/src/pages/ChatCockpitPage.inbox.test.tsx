@@ -38,6 +38,7 @@ import {
   bulkConfirmStart,
   cockpitInbox,
   cockpitObservedRecords,
+  codingInfoItem,
   gateItem,
   hardErrorItem,
   infoItem,
@@ -891,6 +892,34 @@ describe("ChatCockpitPage", () => {
 
     fireEvent.click(within(inbox).getByRole("button", { name: "查看 Plan 会话" }));
     expect(onOpenSession).toHaveBeenCalledWith("session_001");
+  });
+
+  // P2 WIGA Task 9（REQ-WIGA-07/R5）：coding FinalConfirm info 只读分区 +
+  // attempt 地址下钻 Coding Workspace（plan info 会话下钻语义不变）。
+  it("renders coding final-confirm info with attempt drill-down", async () => {
+    const onOpenSession = vi.fn();
+    const onOpenInfoCoding = vi.fn();
+    cockpitInbox.push(
+      codingInfoItem("coding_attempt_001", false),
+      infoItem("plan_confirmed:plan_1:compile_1", "plan_1"),
+    );
+
+    renderCockpit("session_001", true, onOpenSession, onOpenInfoCoding);
+
+    const inbox = screen.getByTestId("cockpit-inbox");
+    expect(await within(inbox).findByText("编码执行完成，待最终确认")).toBeInTheDocument();
+    // 不提供批量勾选。
+    expect(
+      within(inbox).queryByLabelText("选择 编码执行完成，待最终确认"),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(within(inbox).getByRole("button", { name: "查看 Coding Workspace" }));
+    expect(onOpenInfoCoding).toHaveBeenCalledWith({
+      projectId: "project_001",
+      issueId: "issue_001",
+      attemptId: "coding_attempt_001",
+    });
+    expect(onOpenSession).not.toHaveBeenCalled();
   });
 
   // P2 GAP-E/G（Task 0.1）：失败 SC 现场只投影一条「等待人工显式重驱」卡，

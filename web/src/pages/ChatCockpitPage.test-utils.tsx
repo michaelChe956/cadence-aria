@@ -44,6 +44,11 @@ export const renderCockpit = (
   sessionId = "session_001",
   mockWs = true,
   onOpenSession = vi.fn(),
+  onOpenInfoCoding?: (address: {
+    projectId: string;
+    issueId: string;
+    attemptId: string;
+  }) => void,
 ) => {
   if (mockWs) {
     mockWorkspaceWs();
@@ -54,6 +59,7 @@ export const renderCockpit = (
       sessionId={sessionId}
       onBack={vi.fn()}
       onOpenSession={onOpenSession}
+      onOpenInfoCoding={onOpenInfoCoding}
       workspaceWs={currentMockWorkspaceWs()}
     />,
   );
@@ -156,6 +162,35 @@ export function hardErrorItem(sessionId: string): CockpitInboxItem {
     gate: null,
     inlineError: null,
     choice: null,
+  };
+}
+
+/** P2 WIGA Task 9：只读 coding FinalConfirm info 条目（kind="info"，下钻 Coding Workspace）。 */
+export function codingInfoItem(
+  attemptId = "coding_attempt_001",
+  finalConfirmed = false,
+): CockpitInboxItem {
+  return {
+    id: `issue_001:info:coding_final_confirm:${attemptId}:coding_node_0004`,
+    kind: "info",
+    severity: 1,
+    title: finalConfirmed ? "已最终确认" : "编码执行完成，待最终确认",
+    summary: finalConfirmed ? "人工已完成最终确认" : "等待人工最终确认",
+    triage: false,
+    source: "coding_final_confirm_info",
+    createdAt: null,
+    gate: null,
+    inlineError: null,
+    choice: null,
+    codingInfo: {
+      projectId: "project_001",
+      issueId: "issue_001",
+      planId: "work_item_plan_0001",
+      attemptId,
+      key: `coding_final_confirm:${attemptId}:coding_node_0004`,
+      occurredAt: "2026-09-27T03:20:00Z",
+      finalConfirmed,
+    },
   };
 }
 

@@ -116,6 +116,21 @@ export type PlanConfirmedInfoItem = {
   title: string;
 };
 
+// P2（REQ-WIGA-07/R5）Task 8：enrolled 已认领 group attempt 的编码执行完成/
+// 人工最终确认信息。key 形如 coding_final_confirm:{attempt_id}:{node_id}
+// （稳定身份），occurred_at 取 FinalConfirm 节点首次 started_at（readiness
+// 重写不漂移）。
+export type CodingFinalConfirmInfoItem = {
+  key: string;
+  project_id: string;
+  issue_id: string;
+  plan_id: string;
+  attempt_id: string;
+  occurred_at: string;
+  title: string;
+  final_confirmed: boolean;
+};
+
 export type IssueLifecycleResponse = {
   issue: ProductIssue;
   story_specs: StorySpec[];
@@ -131,6 +146,9 @@ export type IssueLifecycleResponse = {
   // P1（REQ-WIGA-07）：只读 plan 确认信息（0 或 1 条/issue）。additive：旧响应
   // 缺失时前端按无 info 处理。
   plan_confirmed_info?: PlanConfirmedInfoItem[];
+  // P2（REQ-WIGA-07/R5）：enrolled 已认领 group attempt 的 FinalConfirm 等待/
+  // 已确认只读信息。additive：旧响应缺失时前端按无 info 处理。
+  coding_final_confirm_info?: CodingFinalConfirmInfoItem[];
 };
 
 export type GenerateStorySpecsRequest = ProviderWorkspaceConfigInput & {

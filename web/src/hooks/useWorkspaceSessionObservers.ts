@@ -6,6 +6,7 @@ import {
 } from "../api/client";
 import type {
   CodingAttempt,
+  CodingFinalConfirmInfoItem,
   IssueLifecycleResponse,
   PlanConfirmedInfoItem,
   ProductIssueListResponse,
@@ -19,6 +20,7 @@ import {
   type WorkspaceObserverRecord,
 } from "../state/workspace-observer-store";
 import {
+  codingFinalConfirmInfoItem,
   planConfirmedInfoItem,
   type CockpitInboxItem,
 } from "../state/workspace-cockpit-projection";
@@ -43,7 +45,10 @@ export interface WorkspaceSessionObserverOptions {
   ) => Promise<
     Pick<
       IssueLifecycleResponse,
-      "workspace_sessions" | "coding_attempts" | "plan_confirmed_info"
+      | "workspace_sessions"
+      | "coding_attempts"
+      | "plan_confirmed_info"
+      | "coding_final_confirm_info"
     >
   >;
   createController?: WorkspaceObserverControllerFactory;
@@ -87,6 +92,11 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
   const [planConfirmedInfos, setPlanConfirmedInfos] = useState<readonly PlanConfirmedInfoItem[]>(
     [],
   );
+  // P2 WIGA Task 9（REQ-WIGA-07/R5）：coding FinalConfirm info 携带其 issue 的
+  // 会话集合（过滤 watched 用），不按 attempt id 伪造 sessionId。
+  const [codingFinalConfirmInfos, setCodingFinalConfirmInfos] = useState<
+    readonly { info: CodingFinalConfirmInfoItem; sessionIds: readonly string[] }[]
+  >([]);
   const controllerRef = useRef<WorkspaceObserverController | null>(null);
 
   if (controllerRef.current === null) {
@@ -134,9 +144,24 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
     }
     return Array.from(byKey.values());
   }, [planConfirmedInfos, watchedSessionIds]);
+  // coding info 只投影 watched session 所属 issue 的完成事实，按稳定 key
+  // 去重；同样不进 countedInbox（与 plan info 同一隔离规则）。
+  const codingInfoItems = useMemo(() => {
+    const byKey = new Map<string, CockpitInboxItem>();
+    for (const { info, sessionIds } of codingFinalConfirmInfos) {
+      const watched = sessionIds.some((sessionId) =>
+        watchedSessionIds.includes(sessionId),
+      );
+      if (!watched || byKey.has(info.key)) {
+        continue;
+      }
+      byKey.set(info.key, codingFinalConfirmInfoItem(info));
+    }
+    return Array.from(byKey.values());
+  }, [codingFinalConfirmInfos, watchedSessionIds]);
   const inbox = useMemo(
-    () => [...selectObservedInbox(records), ...infoItems],
-    [records, infoItems],
+    () => [...selectObservedInbox(records), ...infoItems, ...codingInfoItems],
+    [records, infoItems, codingInfoItems],
   );
   const countedRecords = useMemo(
     () => records.filter((record) => watchedSessionIds.includes(record.sessionId)),
@@ -172,6 +197,18 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
             // REQ-WIGA-07 Task 9：info 只读投影源（durable key 幂等去重在 memo）。
             setPlanConfirmedInfos(
               lifecycles.flatMap((lifecycle) => lifecycle.plan_confirmed_info ?? []),
+            );
+            // REQ-WIGA-07/R5 Task 9：coding info 与同 lifecycle 的会话集合配对
+            //（watched 过滤按 issue 归属，不伪造 sessionId）。
+            setCodingFinalConfirmInfos(
+              lifecycles.flatMap((lifecycle) =>
+                (lifecycle.coding_final_confirm_info ?? []).map((info) => ({
+                  info,
+                  sessionIds: lifecycle.workspace_sessions.map(
+                    (session) => session.workspace_session_id,
+                  ),
+                })),
+              ),
             );
           }
         } catch {

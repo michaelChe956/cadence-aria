@@ -1,6 +1,9 @@
 import { act, render, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { WorkspaceSessionSummary } from "../api/types";
+import type {
+  CodingFinalConfirmInfoItem,
+  WorkspaceSessionSummary,
+} from "../api/types";
 import {
   useWorkspaceSessionObservers,
   type WorkspaceSessionObserverOptions,
@@ -335,6 +338,62 @@ describe("useWorkspaceSessionObservers", () => {
     await waitFor(() => {
       expect(view.result.inbox).toHaveLength(2);
     });
+    expect(view.result.countedInbox).toHaveLength(0);
+  });
+
+  // P2 WIGA Task 9（REQ-WIGA-07/R5）：durable coding FinalConfirm 等待信息
+  // 只进展示收件箱——同 key 去重、不进 countedInbox（待处理计数不含 info）。
+  it("shows one final-confirm coding info without increasing actionable count", async () => {
+    const info: CodingFinalConfirmInfoItem = {
+      key: "coding_final_confirm:coding_attempt_001:coding_node_0004",
+      project_id: "project_1",
+      issue_id: "issue_1",
+      plan_id: "work_item_plan_0001",
+      attempt_id: "coding_attempt_001",
+      occurred_at: "2026-09-27T03:20:00Z",
+      title: "编码执行完成，待最终确认",
+      final_confirmed: false,
+    };
+    const getIssueLifecycle = vi.fn(async () => ({
+      workspace_sessions: [summary("s1"), summary("s2")],
+      coding_attempts: [],
+      coding_final_confirm_info: [info, info],
+    }));
+    const view = renderObserverHook(
+      observerOptions({ currentSessionId: "s1", watchLimit: 2, getIssueLifecycle }),
+    );
+
+    await waitFor(() => {
+      expect(
+        view.result.inbox.filter((item) => item.source === "coding_final_confirm_info"),
+      ).toHaveLength(1);
+    });
+    const codingItem = view.result.inbox.find(
+      (item) => item.source === "coding_final_confirm_info",
+    );
+    expect(codingItem).toMatchObject({
+      kind: "info",
+      title: "编码执行完成，待最终确认",
+    });
+    // 不进 countedInbox（待处理计数隔离）。
+    expect(view.result.countedInbox).toHaveLength(0);
+
+    // 人工确认后同 key 改文案（final_confirmed），仍只有一条、仍不计数。
+    getIssueLifecycle.mockResolvedValue({
+      workspace_sessions: [summary("s1"), summary("s2")],
+      coding_attempts: [],
+      coding_final_confirm_info: [
+        { ...info, title: "已最终确认", final_confirmed: true },
+      ],
+    });
+    view.rerender(observerOptions({ currentSessionId: "s1", watchLimit: 2, getIssueLifecycle }));
+    await waitFor(() => {
+      expect(
+        view.result.inbox.filter((item) => item.source === "coding_final_confirm_info"),
+      ).toHaveLength(1);
+    });
+    expect(view.result.inbox.find((item) => item.source === "coding_final_confirm_info"))
+      .toMatchObject({ title: "已最终确认" });
     expect(view.result.countedInbox).toHaveLength(0);
   });
 });

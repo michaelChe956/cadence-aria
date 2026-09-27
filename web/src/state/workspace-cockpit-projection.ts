@@ -2,7 +2,7 @@ import { gateIdentityFromState } from "./cockpit-action-routing";
 import { protocolErrorCopy, STALE_DRIVER_LEASE_CODE } from "./protocol-error-copy";
 import type {
   ChoiceQuestion,
-  PlanConfirmedInfoItem,
+  CodingFinalConfirmInfoItem, PlanConfirmedInfoItem,
   WorkItemPlanHumanGateSnapshot,
 } from "../api/types";
 import type { CodingAttemptAddress } from "../api/types/coding";
@@ -502,6 +502,21 @@ export interface PlanConfirmedInfoProjection {
   title: string;
 }
 
+/**
+ * P2 WIGA Task 9（REQ-WIGA-07/R5）：durable coding FinalConfirm 等待/已确认
+ * 信息的只读投影——不进 countedInbox/批量/危险操作，仅供「进度信息」分区
+ * 显示、一次提醒与 Coding Workspace 下钻。
+ */
+export interface CodingFinalConfirmInfoProjection {
+  projectId: string;
+  issueId: string;
+  planId: string;
+  attemptId: string;
+  key: string;
+  occurredAt: string;
+  finalConfirmed: boolean;
+}
+
 export interface CockpitInboxItem {
   id: string;
   kind: CockpitInboxKind;
@@ -517,6 +532,7 @@ export interface CockpitInboxItem {
     | "advance"
     | "choice"
     | "plan_confirmed_info"
+    | "coding_final_confirm_info"
     | "sc_failed",
   createdAt: string | null;
   gate: GateProjection | null;
@@ -527,6 +543,8 @@ export interface CockpitInboxItem {
   protocolErrorCode?: string | null;
   /** REQ-WIGA-07 Task 9：kind="info" 时的 plan 确认投影；其余 kind 缺省。 */
   planInfo?: PlanConfirmedInfoProjection | null;
+  /** REQ-WIGA-07/R5 Task 9：kind="info" 时的 coding FinalConfirm 投影；其余 kind 缺省。 */
+  codingInfo?: CodingFinalConfirmInfoProjection | null;
   /** P2 GAP-E/G（Task 0.1）：kind="sc_failed" 时的人工显式重驱投影。 */
   scFailure?: { failedNodeId: string; phase: "failed" } | null;
 }
@@ -558,6 +576,36 @@ export function planConfirmedInfoItem(info: PlanConfirmedInfoItem): CockpitInbox
       sessionId: info.session_id,
       occurredAt: info.occurred_at,
       title: info.title,
+    },
+  };
+}
+
+/** REQ-WIGA-07/R5：durable coding_final_confirm_info → 只读 info 收件箱条目。 */
+export function codingFinalConfirmInfoItem(
+  info: CodingFinalConfirmInfoItem,
+): CockpitInboxItem {
+  return {
+    id: `${info.issue_id}:info:${info.key}`,
+    kind: "info",
+    severity: 1,
+    title: info.title,
+    summary: info.final_confirmed
+      ? `编码执行已完成人工最终确认 · ${info.occurred_at}`
+      : `等待人工最终确认 · ${info.occurred_at}`,
+    triage: false,
+    source: "coding_final_confirm_info",
+    createdAt: info.occurred_at,
+    gate: null,
+    inlineError: null,
+    choice: null,
+    codingInfo: {
+      projectId: info.project_id,
+      issueId: info.issue_id,
+      planId: info.plan_id,
+      attemptId: info.attempt_id,
+      key: info.key,
+      occurredAt: info.occurred_at,
+      finalConfirmed: info.final_confirmed,
     },
   };
 }

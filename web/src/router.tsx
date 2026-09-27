@@ -116,6 +116,12 @@ function WorkspaceRouteComponent() {
           params: { sessionId: parentSessionId },
         })
       }
+      onOpenInfoCoding={({ projectId, issueId, attemptId }) =>
+        void navigate({
+          to: "/workbench/projects/$projectId/issues/$issueId/coding/$attemptId",
+          params: { projectId, issueId, attemptId },
+        })
+      }
     />
   );
 }
