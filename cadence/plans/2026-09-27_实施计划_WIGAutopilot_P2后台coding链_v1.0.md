@@ -815,6 +815,34 @@ pub fn issue_coding_final_confirm_info(paths: &ProductAppPaths,
 
   不从 Step 3 新增生产兜底模式，也不回退 GAP-F 静态白名单；真实链 server 部署用现有项目部署流程/`aria-dev-v48q`，记录发布产物 revision 与服务进程版本一致。
 - [ ] **Step 4: 验证绿灯与双清单。** **替身**：定向运行本测试及 Tasks 0–9 所列测试；逐项截图/记录 Ready+精确授权、手工/自动同 attempt 并发、journal/barrier 中窗、disable/reopen、Failed/Aborted 和旧 attempt、多 target 无任何 sibling 自动 claim、零 socket choice 完整答案/真实 waiter 回执、amendment Unsent→真写 Delivered、零 socket resume、慢 observer 不反压、FinalConfirm 前一次通知与 0 计数/人工 Completed。**真实 provider/人工链（不可用 Fake 替代）**：部署本 worktree 同版产物至运行的 `aria-dev-v48q`，人工批准绑定 plan 后*不打开 coding 页*等后台独立 advance+首启；关闭全部 workspace/coding 订阅，实际覆盖一次 coding choice 的 REST 200/202→Delivered、一次人工确认 amendment→零 socket Unsent→重开真写 Delivered、一次重启后的已认领 run 续接；观察 FinalConfirm 等待时 info 出现/0 待处理增量，人手最终确认后 durable Completed；对照默认 off 和手工多 target；所有 provider 帐号/gateway 503 仅诊断+人手重驱。若环境仍 503 或 GAP-A/B/C/D/LC 阻断，逐条记阻断和已完成的替身证据，**不得勾 3.4 或声称真实链通过**。
+
+> **实施记录（2026-09-27，Task 10 关闸——Main 裁决：3.1-3.3 勾选、3.4 留白待网关）**
+> - 替身面全绿：campaign 双测试（`p2_campaign_requires_human_final_confirm_after_socketless_run`
+>   全链人手 FinalConfirm + `..._gateway_503_reviewer_failure_is_human_triage_without_redrive`
+>   503 分诊零重驱）+Tasks 0-9 全部定向测试；campaign 揭露并修复 coding_chain_stage
+>   真实断点（group journal 内嵌 attempt 快照冻结于 Created，等待期重入首启把 durable
+>   claim 误降级 NeedsHuman——改为 journal 定位 id+attempt store 新鲜读，commit 98034cfe）。
+> - it_core 存量恢复：7 处 WsInMessage 字段漂移编译修复 + stale-choice 产品 bug
+>   （bind_current_run_request 忽略 choice_id 致旧 run 应答直达 provider，按 P0 契约
+>   修复+part_07 re-pin，commit 6cc22f97）。
+> - 真实链（v48r=worktree 同版，载体 project_0002/issue_0003 单 target=alpha）：
+>   story/design 人工确认（pi，8×零 driver REST choice 200 delivered）→reviewer=pi
+>   预检 422 `automation_gateway_reviewer_unsupported`（Task 0.2 实证）→enrollment 200
+>   （author=pi/reviewer=claude_code）→编排器 tick 零人工自动 prepare+绑定+派发 author
+>   （含 1×危险命令 permission REST 答）→pi author 完成→reviewer 经 claude 网关失败
+>   （11:07-11:17 网关全窗 No available accounts）→durable Failed+人工重驱卡
+>   （timeline_node_002）→60s 零重驱对账稳定（/tmp/p2_evidence.jsonl
+>   `p2_no_redrive_reconcile`）。进程重启恢复证据待 Main 重启 v48r 后补。
+> - **3.4 留白理由（结构性）**：enrolled 链 coding 段对 claude 网关形成单点依赖链
+>   （compile_support.rs Logical 分支→advance_target_snapshot→provider_stream.rs:206
+>   `logical_provider_gateway_required` fail-closed；pi/kimi 网关硬拒、codex sandbox 禁令）；
+>   legacy 载体 enrollment 第 1 步即 422（LC-only，GAP-I 实证
+>   `p2_legacy_enrollment_422`）→真实链自动 advance/首启/coding 后台段环境不可达。
+>   与 P1（卡末段、核心段已证）实质不同，全勾将虚称 P2 招牌功能真实闭环。
+>   网关恢复安全网沿用 P1 机制：恢复后以 LC 载体 enrolled 全链补 3.4 证据。
+> - 证据流：/tmp/p2_evidence.jsonl（曾因工具误用覆盖，按 durable 重建并留
+>   `p2_journal_incident` 如实登记）；全量验证：web 197 文件/1940 测试绿一次；
+>   cargo 全量待行数守卫拆分（另 worker 在提交）落地后复跑。
 - [ ] **Step 5: 提交关闸证据。** 只在上述双清单实证后勾 §3.1–3.4、记录精确命令/服务器版本/实际状态与日志引用：`git add openspec/changes/work-item-group-autopilot/tasks.md cadence/plans/2026-09-27_实施计划_WIGAutopilot_P2后台coding链_v1.0.md src/web/autopilot_orchestrator.rs src/web/coding_ws_handler/tests src/web/workspace_ws_handler/tests/plan_repair_activation.rs web/src/pages/ChatCockpitPage.inbox.test.tsx && git commit -m "test: gate WIG autopilot P2 fake and real chains"`；真实链未通过时仅提交仍未勾选的测试/失败证据，不伪造关闸状态。
 
 ---
