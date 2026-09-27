@@ -179,6 +179,7 @@ fn validate_enrollment_scope(
     let EnrollmentWriteCommand::Enable {
         source,
         logical_repository_id,
+        options,
         ..
     } = command
     else {
@@ -206,7 +207,13 @@ fn validate_enrollment_scope(
         SingleCandidatePreflightDecision::Eligible { repository_id }
             if repository_id == logical_repository_id.0.to_string() =>
         {
-            Ok(())
+            // P2 GAP-F（Task 0.2）：唯一 logical target 确认后做静态 gateway
+            // reviewer 预检——与 GET automation-target 投影同源，Enable 前拒绝。
+            super::automation_gateway_preflight::validate_gateway_reviewer_for_enrollment(
+                &options.reviewer_provider,
+                true,
+                state.test_provider_enabled,
+            )
         }
         SingleCandidatePreflightDecision::Eligible { .. } => Err(invalid_scope(
             "automation enrollment target must match the issue's single logical repository",

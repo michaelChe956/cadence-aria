@@ -100,11 +100,18 @@ pub async fn get_automation_target(
             "automation target requires exactly one logical repository",
         ));
     };
+    let resolved_options =
+        resolve_enrollment_options_with_provider_workspace_config(&state, &query)?;
+    // P2 GAP-F（Task 0.2）：唯一 logical target 确认后做静态 gateway reviewer
+    // 预检——与最终 PUT Enable 同源，投影阶段即拒绝确定性不支持的 reviewer。
+    super::automation_gateway_preflight::validate_gateway_reviewer_for_enrollment(
+        &resolved_options.reviewer_provider,
+        true,
+        state.test_provider_enabled,
+    )?;
     Ok(Json(AutomationTargetDto {
         logical_repository_id: repository_id,
-        resolved_options: resolve_enrollment_options_with_provider_workspace_config(
-            &state, &query,
-        )?,
+        resolved_options,
     }))
 }
 
@@ -115,8 +122,8 @@ mod tests {
     use tower::ServiceExt;
 
     use super::super::automation_enrollment_test_support::{
-        ISSUE_ID, PROJECT_ID, SINGLE_LOGICAL_ID, enrollment_file_exists, response_json,
-        seed_fixture,
+        ISSUE_ID, PROJECT_ID, SINGLE_LOGICAL_ID, enrollment_body, enrollment_file_exists,
+        put_enrollment, response_json, seed_fixture,
     };
     use crate::product::models::ProviderName;
     use crate::web::app::build_web_router;
@@ -217,5 +224,91 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    // P2 GAP-F（Task 0.2）：enrollment 静态 gateway reviewer 组合预检——GET
+    // 投影与最终 PUT Enable 同源拒绝确定性不支持的 reviewer（KimiCode/Pi 无
+    // gateway dialect），可用性门先通过，红灯只来自 gateway 缺口。
+    #[tokio::test]
+    async fn automation_target_rejects_gateway_unsupported_reviewer_before_enable() {
+        let fixture = seed_fixture(1, true);
+        let root = fixture._root.path().to_path_buf();
+        let state = WebAppState::with_provider_availability(
+            root.clone(),
+            WebRuntime::new_fake(root),
+            |_| true,
+        );
+        let app = build_web_router(state);
+        let response = get_automation_target(
+            &app,
+            "?author_provider=pi&reviewer_provider=kimi_code",
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            response_json(response).await["code"],
+            "automation_gateway_reviewer_unsupported"
+        );
+        assert!(!enrollment_file_exists(&fixture));
+
+        let mut enable = enrollment_body(&fixture, 1, 1);
+        enable["command"]["options"]["reviewer_provider"] = serde_json::json!("kimi_code");
+        let response = put_enrollment(&app, enable).await;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            response_json(response).await["code"],
+            "automation_gateway_reviewer_unsupported"
+        );
+        assert!(!enrollment_file_exists(&fixture));
+    }
+
+    /// Codex reviewer 在当前固定 danger-full-access sandbox 下被 gateway 路由
+    /// 静态拒绝（与 `enforce_route_policy` 同源）；GET 与 PUT 同码。
+    #[tokio::test]
+    async fn automation_target_rejects_codex_reviewer_under_default_sandbox() {
+        let fixture = seed_fixture(1, true);
+        let root = fixture._root.path().to_path_buf();
+        let state = WebAppState::with_provider_availability(
+            root.clone(),
+            WebRuntime::new_fake(root),
+            |_| true,
+        );
+        let app = build_web_router(state);
+        let response = get_automation_target(&app, "?reviewer_provider=codex").await;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let payload = response_json(response).await;
+        assert_eq!(payload["code"], "automation_gateway_reviewer_unsupported");
+        assert!(
+            payload["message"]
+                .as_str()
+                .unwrap()
+                .contains("codex_danger_full_access_unsupported"),
+            "message should carry the stable gateway verdict code, got: {payload}"
+        );
+
+        let mut enable = enrollment_body(&fixture, 1, 1);
+        enable["command"]["options"]["reviewer_provider"] = serde_json::json!("codex");
+        let response = put_enrollment(&app, enable).await;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            response_json(response).await["code"],
+            "automation_gateway_reviewer_unsupported"
+        );
+        assert!(!enrollment_file_exists(&fixture));
+    }
+
+    /// 测试运行 `test_provider_enabled` 下 Fake reviewer 保持 fixture 可用：
+    /// 预检不误伤 Fake，仍建立原同键 enrollment。
+    #[tokio::test]
+    async fn automation_target_allows_fake_reviewer_in_fake_runtime() {
+        let fixture = seed_fixture(1, true);
+        let app = fixture.router();
+        let response = get_automation_target(&app, "?reviewer_provider=fake").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response_json(response).await["resolved_options"]["reviewer_provider"], "fake");
+
+        let enable = put_enrollment(&app, enrollment_body(&fixture, 1, 1)).await;
+        assert_eq!(enable.status(), StatusCode::OK);
+        assert!(enrollment_file_exists(&fixture));
     }
 }

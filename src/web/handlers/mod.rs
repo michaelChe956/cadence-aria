@@ -72,6 +72,7 @@ use crate::web::workspace_ws_types::{ArtifactVersion, ProviderConfigSnapshot, Re
 mod aggregate_index;
 pub mod aggregate_initialization;
 mod automation_enrollment;
+mod automation_gateway_preflight;
 #[cfg(test)]
 pub(crate) mod automation_enrollment_test_support;
 mod automation_target;
