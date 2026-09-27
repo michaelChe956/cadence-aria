@@ -3,6 +3,7 @@ use tempfile::TempDir;
 use super::*;
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_models::{
+    CodingStartRunPolicy,
     AttemptTargetSnapshot, CodingAdmissionKind, CodingAttemptScope, CodingAttemptStatus,
     CodingExecutionStage, CodingExecutionUnitStatus, CodingGateAction, CodingGateActionType,
     CodingProviderRole, FindingSeverity, GroupFinalReadinessDiagnostic,
@@ -115,6 +116,32 @@ fn provider_snapshot() -> ProviderConfigSnapshot {
     }
 }
 
+/// P2 Task 2：旧 attempt JSON 缺 `start_run_policy` 字段反序列化默认 Manual；
+/// copy-update（`update_attempt_non_status_fields`）不得覆盖已冻结 policy。
+#[test]
+fn old_attempt_json_defaults_to_manual_and_frozen_policy_survives_updates() {
+    let (_tmp, store, created) = setup();
+    let mut json = serde_json::to_value(&created).unwrap();
+    json.as_object_mut().unwrap().remove("start_run_policy");
+    let old: CodingExecutionAttempt = serde_json::from_value(json).unwrap();
+    assert_eq!(old.start_run_policy, CodingStartRunPolicy::Manual);
+
+    let mut replacement = created.clone();
+    replacement.start_run_policy = CodingStartRunPolicy::AutoStartOnce {
+        enrollment_id: "enrollment_0001".into(),
+        policy_revision: 1,
+        source_plan_revision: "work_item_plan_revision_0001".into(),
+    };
+    store.update_attempt_non_status_fields(&replacement).unwrap();
+    assert_eq!(
+        store
+            .get_attempt(&created.project_id, &created.issue_id, &created.id)
+            .unwrap()
+            .start_run_policy,
+        CodingStartRunPolicy::Manual
+    );
+}
+
 #[test]
 fn update_attempt_non_status_fields_preserves_status_and_frozen_admission_fields() {
     let (_tmp, store, attempt) = setup();
@@ -208,8 +235,9 @@ fn status_machine_rejects_direct_blocked_to_running_and_manual_recovery_only_to_
             version: 0,
             manual_recovery_reason: None,
             admission_ticket_consumed_at: None,
+                        start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
             ..running
-        })
+            })
         .expect("seed manual-recovery attempt");
 
     for status in [
@@ -262,8 +290,9 @@ fn aborting_manual_recovery_attempt_preserves_reason_for_audit() {
             version: 0,
             manual_recovery_reason: Some("attempt_awaiting_manual_recovery".to_string()),
             admission_ticket_consumed_at: None,
+                        start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
             ..running
-        })
+            })
         .expect("seed manual-recovery attempt");
 
     let aborted = store
@@ -343,6 +372,7 @@ fn provider_run_rejected_when_running_attempt_lacks_admission_marker() {
     let forged = CodingExecutionAttempt {
         status: CodingAttemptStatus::Running,
         admission_ticket_consumed_at: None,
+        start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         ..attempt.clone()
     };
     store
@@ -642,6 +672,7 @@ fn saving_group_attempt_preserves_explicit_internal_reviewer_role_config() {
             },
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
 
@@ -681,6 +712,7 @@ fn creates_group_attempt_and_units_with_single_active_unit() {
             provider_config_snapshot: provider_snapshot(),
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
 
@@ -743,6 +775,7 @@ fn rejects_creating_second_active_unit_for_same_attempt() {
             provider_config_snapshot: provider_snapshot(),
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
 
@@ -792,6 +825,7 @@ fn rejects_updating_pending_unit_to_active_when_another_unit_is_active() {
             provider_config_snapshot: provider_snapshot(),
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
 
@@ -857,6 +891,7 @@ fn rejects_group_attempt_when_active_group_attempt_already_exists_for_other_plan
             provider_config_snapshot: provider_snapshot(),
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("first group attempt");
 
@@ -872,6 +907,7 @@ fn rejects_group_attempt_when_active_group_attempt_already_exists_for_other_plan
             provider_config_snapshot: provider_snapshot(),
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect_err("should reject second active attempt");
 
@@ -900,6 +936,7 @@ fn rejects_group_attempt_when_active_work_item_attempt_exists() {
             provider_config_snapshot: provider_snapshot(),
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect_err("should reject when single attempt is active");
 
@@ -927,6 +964,7 @@ fn clears_current_work_item_when_last_active_unit_completes() {
             provider_config_snapshot: provider_snapshot(),
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
 
@@ -977,6 +1015,7 @@ fn blocked_or_waiting_units_do_not_set_started_at() {
             provider_config_snapshot: provider_snapshot(),
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
 

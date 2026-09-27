@@ -71,6 +71,25 @@ pub enum CodingAdmissionKind {
     ScAdvance,
 }
 
+/// P2 Task 2（tasks.md §3.1）：attempt 创建时冻结的首启策略快照。
+///
+/// Manual 是缺省（含旧 JSON 缺字段反序列化）；AutoStartOnce 是 enrollment
+/// 自动路径的授权事实——enrollment id/policy_revision 与**plan revision id**
+/// （非可变 latest ref）在 journal 首建时冻结，之后 enrollment 变更（含
+/// disable）不洗白、copy-update 不覆盖，Task 3/4 认领时按当前 enrollment
+/// 精确复核。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CodingStartRunPolicy {
+    #[default]
+    Manual,
+    AutoStartOnce {
+        enrollment_id: String,
+        policy_revision: u64,
+        source_plan_revision: String,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CodingProviderRole {
@@ -155,6 +174,9 @@ pub struct CodingExecutionAttempt {
     pub updated_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_snapshot: Option<AttemptTargetSnapshot>,
+    /// P2 Task 2：首启策略冻结快照；旧 JSON 缺字段默认 Manual。
+    #[serde(default)]
+    pub start_run_policy: CodingStartRunPolicy,
     pub completed_at: Option<String>,
 }
 
@@ -198,6 +220,8 @@ struct CodingExecutionAttemptSerde {
     updated_at: String,
     #[serde(default)]
     target_snapshot: Option<AttemptTargetSnapshot>,
+    #[serde(default)]
+    start_run_policy: CodingStartRunPolicy,
     completed_at: Option<String>,
 }
 
@@ -243,6 +267,7 @@ impl<'de> Deserialize<'de> for CodingExecutionAttempt {
             created_at: raw.created_at,
             updated_at: raw.updated_at,
             target_snapshot: raw.target_snapshot,
+            start_run_policy: raw.start_run_policy,
             completed_at: raw.completed_at,
         })
     }

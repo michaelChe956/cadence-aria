@@ -102,6 +102,8 @@ impl super::CodingAttemptStore {
             created_at: now.clone(),
             updated_at: now,
             target_snapshot: input.target_snapshot,
+            // P2 Task 2：legacy 单 attempt 首启策略显式 Manual。
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
             completed_at: None,
         };
 
@@ -181,6 +183,8 @@ impl super::CodingAttemptStore {
                 updated_at: attempt.updated_at.clone(),
                 target_snapshot: stored.target_snapshot,
                 completed_at: attempt.completed_at.clone(),
+                // P2 Task 2：copy-update 保留已冻结 policy，绝不取 attempt 传入值。
+                start_run_policy: stored.start_run_policy,
             };
             self.save_coding_attempt_with_status(&updated)
         })

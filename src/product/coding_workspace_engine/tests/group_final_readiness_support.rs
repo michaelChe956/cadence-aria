@@ -44,6 +44,7 @@ pub(crate) fn readiness_fixture() -> ReadinessFixture {
             },
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
     seed_schema_v2_group_attempt_fixture(&store, &attempt, true, false, &[]);

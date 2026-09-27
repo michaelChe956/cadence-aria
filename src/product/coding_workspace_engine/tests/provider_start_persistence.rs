@@ -650,6 +650,7 @@ pub(super) async fn provider_start_persistence_fixture() -> ProviderStartPersist
             },
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
     seed_group_attempt_fixture(&store, &attempt, true, false);

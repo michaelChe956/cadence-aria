@@ -720,6 +720,7 @@ async fn runtime_reader_derives_coding_unit_binding_and_rejects_run_hash_mismatc
             },
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .unwrap();
     attempt_store

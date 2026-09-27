@@ -15,6 +15,7 @@ fn rejects_second_group_attempt_after_original_completed() {
             provider_config_snapshot: provider_snapshot(),
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("first group attempt");
     persist_completed_group_uniqueness_fixture(&store, &mut first);
@@ -31,6 +32,7 @@ fn rejects_second_group_attempt_after_original_completed() {
             provider_config_snapshot: provider_snapshot(),
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect_err("same group must not create a second attempt");
 
@@ -58,6 +60,7 @@ fn allows_group_attempt_for_different_plan_after_original_completed() {
             provider_config_snapshot: provider_snapshot(),
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("first group attempt");
     persist_completed_group_uniqueness_fixture(&store, &mut first);
@@ -74,6 +77,7 @@ fn allows_group_attempt_for_different_plan_after_original_completed() {
             provider_config_snapshot: provider_snapshot(),
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("different group attempt");
 

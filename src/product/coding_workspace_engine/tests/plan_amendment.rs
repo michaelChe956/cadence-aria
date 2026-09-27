@@ -528,6 +528,7 @@ async fn amendment_fixture_with_resume_mode(resume_mode: AmendmentResumeMode) ->
             },
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .unwrap();
     seed_group_attempt_fixture(&store, &initial, true, false);

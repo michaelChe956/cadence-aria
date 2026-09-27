@@ -231,6 +231,7 @@ fn coding_plan_repair_group_reviewer_loads_authoritative_no_target_projections()
             },
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
     seed_group_attempt_fixture(&store, &attempt, true, false);
@@ -282,6 +283,7 @@ fn coding_plan_repair_group_reviewer_rejects_stale_completed_run_when_latest_is_
             },
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
     seed_group_attempt_fixture(&store, &attempt, true, false);
@@ -522,6 +524,7 @@ pub(super) fn prepared_group_review_fixture() -> (
             },
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
     seed_group_attempt_fixture(&store, &attempt, true, false);

@@ -956,6 +956,7 @@ async fn issue_lifecycle_returns_plan_group_projection_with_three_valued_overall
             },
             target_snapshot: target.map(target_snapshot),
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         }
     };
 

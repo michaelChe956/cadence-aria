@@ -204,6 +204,7 @@ pub(crate) async fn campaign_amendment_fixture() -> CampaignAmendmentFixture {
             },
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
     let mut persisted = store

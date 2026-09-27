@@ -54,6 +54,7 @@ fn seed_target_group_attempt(
             provider_config_snapshot: delivery_provider_snapshot(),
             target_snapshot: Some(snapshot),
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt")
 }

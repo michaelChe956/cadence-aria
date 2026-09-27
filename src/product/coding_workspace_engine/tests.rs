@@ -590,6 +590,7 @@ fn group_final_review_evaluation_context_omits_projection_body_but_keeps_hash() 
             },
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
     seed_group_attempt_fixture(&store, &attempt, true, false);
@@ -698,6 +699,7 @@ async fn group_attempt_records_base_head_as_first_unit_start_commit() {
             },
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
     seed_group_attempt_fixture(&store, &attempt, true, false);
@@ -769,6 +771,7 @@ async fn start_attempt_enters_running_through_admission_ticket() {
             },
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
     seed_group_attempt_fixture(&store, &attempt, true, false);
@@ -809,6 +812,7 @@ async fn coding_plan_repair_partial_group_attempt_cannot_start_coding() {
             },
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("partial group attempt");
     seed_group_attempt_fixture(&store, &attempt, false, false);
@@ -853,6 +857,7 @@ async fn coding_plan_repair_group_attempt_missing_active_pointer_cannot_start() 
             },
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
     seed_group_attempt_fixture(&store, &attempt, true, false);
@@ -1039,8 +1044,9 @@ fn test_attempt(id: &str) -> CodingExecutionAttempt {
         updated_at: "2026-06-01T00:00:00Z".to_string(),
         target_snapshot: None,
         completed_at: None,
+        start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
     }
-}
+        }
 
 pub(super) fn init_test_git_repo(repo: &Path) {
     run_test_git(repo, &["init"]);
@@ -1132,13 +1138,14 @@ fn seed_delivery_attempt(
     let attempt = CodingExecutionAttempt {
         status: CodingAttemptStatus::Completed,
         head_commit: Some(commit_sha.to_string()),
+                start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         ..created
     };
     store
         .write_coding_attempt_for_test(&attempt)
         .expect("write attempt");
     attempt
-}
+        }
 
 fn delivery_provider_snapshot() -> ProviderConfigSnapshot {
     ProviderConfigSnapshot {

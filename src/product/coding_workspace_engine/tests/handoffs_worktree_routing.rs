@@ -81,6 +81,7 @@ fn group_attempt(
             provider_config_snapshot: provider_snapshot(),
             target_snapshot: Some(snapshot(logical_id)),
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("create group attempt")
 }

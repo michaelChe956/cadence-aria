@@ -49,6 +49,7 @@ pub(super) fn plan_repair_fixture_with_dependency(with_dependency: bool) -> Plan
             },
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .unwrap();
     let revision_store = WorkItemRevisionStore::new(paths.clone());

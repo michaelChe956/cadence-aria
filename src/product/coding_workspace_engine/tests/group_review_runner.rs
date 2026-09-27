@@ -236,6 +236,7 @@ async fn group_review_runner_fixture(
             },
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
     seed_group_attempt_fixture_with_compact_routing(&store, &attempt, true, false);

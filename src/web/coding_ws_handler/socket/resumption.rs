@@ -231,8 +231,9 @@ mod tests {
             created_at: "2026-09-03T00:00:00Z".to_string(),
             updated_at: "2026-09-03T00:00:00Z".to_string(),
             completed_at: None,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         }
-    }
+            }
 
     fn attempt_key() -> CodingAttemptRunKey {
         CodingAttemptRunKey::new("project_0001", "issue_0001", "coding_attempt_0001")

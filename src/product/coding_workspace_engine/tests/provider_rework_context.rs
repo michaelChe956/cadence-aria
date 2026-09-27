@@ -26,6 +26,7 @@ async fn coding_plan_repair_group_rework_uses_bound_authoritative_coder_context(
             },
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .unwrap();
     seed_group_attempt_fixture(&store, &attempt, true, false);

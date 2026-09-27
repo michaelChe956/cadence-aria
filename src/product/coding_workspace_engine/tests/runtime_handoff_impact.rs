@@ -80,6 +80,7 @@ fn runtime_handoff_fixture(
             },
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
     let revision_store = WorkItemRevisionStore::new(store.paths());

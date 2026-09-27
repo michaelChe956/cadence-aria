@@ -113,6 +113,7 @@ async fn coding_unit_run_provider_execution_context_binds_authoritative_coder_an
             },
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .unwrap();
     seed_group_attempt_fixture(&store, &attempt, true, false);
@@ -279,6 +280,7 @@ async fn coding_plan_repair_group_final_reviewer_uses_all_authoritative_unit_con
             },
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .unwrap();
     seed_group_attempt_fixture(&store, &attempt, true, false);
@@ -572,6 +574,7 @@ async fn coding_unit_run_provider_execution_context_dependency_handoff_mismatch_
             },
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .unwrap();
     seed_group_attempt_fixture(&store, &attempt, true, true);

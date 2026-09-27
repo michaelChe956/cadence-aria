@@ -28,6 +28,7 @@ async fn schema_v2_group_final_confirm_completes_without_removed_test_artifacts(
             },
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
     let required_checks = [VerificationCheck {

@@ -285,6 +285,7 @@ async fn run_group_attempt_through_coding() -> (
             },
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .unwrap();
     seed_group_attempt_fixture(&store, &attempt, true, false);

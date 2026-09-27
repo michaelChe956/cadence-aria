@@ -121,7 +121,8 @@ fn evaluation_context_uses_compiled_work_item_without_artifact_version() {
         updated_at: "2026-07-14T00:00:00Z".to_string(),
         target_snapshot: None,
         completed_at: None,
-    };
+        start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+        };
 
     let pack = build_evaluation_context_pack(paths, &attempt, EvaluationContextRole::CodeReviewer)
         .expect("evaluation context");
@@ -295,7 +296,8 @@ fn evaluation_context_pack_includes_story_design_work_item_and_contracts() {
         updated_at: "2026-06-10T00:00:00Z".to_string(),
         target_snapshot: None,
         completed_at: None,
-    };
+        start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+        };
 
     let pack = build_evaluation_context_pack(paths, &attempt, EvaluationContextRole::CodeReviewer)
         .unwrap();
@@ -390,7 +392,8 @@ fn evaluation_context_pack_includes_attempt_diff_context() {
         updated_at: "2026-06-10T00:00:00Z".to_string(),
         target_snapshot: None,
         completed_at: None,
-    };
+        start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+        };
 
     let pack = build_evaluation_context_pack(paths, &attempt, EvaluationContextRole::CodeReviewer)
         .unwrap();
@@ -451,7 +454,8 @@ fn reviewers_do_not_require_work_item_handoff_summary() {
         updated_at: "2026-06-10T00:00:00Z".to_string(),
         target_snapshot: None,
         completed_at: None,
-    };
+        start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+        };
 
     let reviewer_pack =
         build_evaluation_context_pack(paths.clone(), &attempt, EvaluationContextRole::CodeReviewer)
@@ -526,7 +530,8 @@ fn code_reviewer_context_pack_includes_coder_evidence() {
         updated_at: "2026-06-10T00:00:00Z".to_string(),
         target_snapshot: None,
         completed_at: None,
-    };
+        start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+        };
     store
         .write_coding_attempt_for_test(&attempt)
         .expect("save attempt");
@@ -703,7 +708,8 @@ fn evaluation_context_pack_truncates_and_redacts_sensitive_lines() {
         updated_at: "2026-06-10T00:00:00Z".to_string(),
         target_snapshot: None,
         completed_at: None,
-    };
+        start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+        };
 
     let pack = build_evaluation_context_pack(paths, &attempt, EvaluationContextRole::CodeReviewer)
         .unwrap();

@@ -178,6 +178,19 @@ impl WorkspaceEngine {
     /// initialization belong to the following advance tasks; until then a valid
     /// request is deliberately rejected without durable side effects.
     pub async fn handle_advance(&mut self, input: AdvanceInput) -> Result<AdvanceOutcome, String> {
+        self.handle_advance_with_start_policy(input, crate::product::coding_models::CodingStartRunPolicy::Manual)
+            .await
+    }
+
+    /// P2 Task 2：带首启策略的 advance——仅供 Task 1 自动路径在精确核验后
+    /// 传入 AutoStartOnce；只在**新建单 target group journal** 时穿透
+    /// `CreateGroupCodingAttemptInput.start_run_policy`，已有 journal replay
+    /// 保留原 policy，不随当前 enrollment 变更覆盖。
+    pub async fn handle_advance_with_start_policy(
+        &mut self,
+        input: AdvanceInput,
+        start_policy: crate::product::coding_models::CodingStartRunPolicy,
+    ) -> Result<AdvanceOutcome, String> {
         if input.project_id != self.session.project_id
             || input.issue_id != self.session.issue_id
             || input.plan_id != self.session.entity_id
@@ -336,17 +349,25 @@ impl WorkspaceEngine {
             });
         }
 
-        self.initialize_advance(input, advance_store, coding_store, authoritative)
-            .await
-            .map_err(|error| error.to_string())
+        self.initialize_advance(
+            input,
+            advance_store,
+            coding_store,
+            authoritative,
+            start_policy,
+        )
+        .await
+        .map_err(|error| error.to_string())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn initialize_advance(
         &mut self,
         input: AdvanceInput,
         advance_store: AdvanceStore,
         coding_store: CodingAttemptStore,
         authoritative: AuthoritativeGroupPlanBinding,
+        start_policy: crate::product::coding_models::CodingStartRunPolicy,
     ) -> Result<AdvanceOutcome, String> {
         let result = self
             .initialize_advance_inner(
@@ -354,6 +375,7 @@ impl WorkspaceEngine {
                 advance_store.clone(),
                 coding_store,
                 authoritative,
+                start_policy,
             )
             .await;
         if let Err(error) = &result
@@ -425,12 +447,14 @@ impl WorkspaceEngine {
         result
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn initialize_advance_inner(
         &mut self,
         input: AdvanceInput,
         advance_store: AdvanceStore,
         coding_store: CodingAttemptStore,
         authoritative: AuthoritativeGroupPlanBinding,
+        start_policy: crate::product::coding_models::CodingStartRunPolicy,
     ) -> Result<AdvanceOutcome, String> {
         let _initialization_guard = coding_store
             .acquire_group_initialization_arbitration(&input.project_id, &input.issue_id)
@@ -547,6 +571,10 @@ impl WorkspaceEngine {
             provider_config_snapshot: provider_config,
             target_snapshot,
             max_auto_rework: 2,
+            // P2 Task 2：首启策略随 advance 穿透（Manual=旧 handle_advance
+            // 语义；AutoStartOnce 仅 Task 1 自动路径经
+            // handle_advance_with_start_policy 传入）。
+            start_run_policy: start_policy,
         };
         let mut group_journal = match existing_group_journal {
             Some(journal) => journal,

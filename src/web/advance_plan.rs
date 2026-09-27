@@ -57,6 +57,12 @@ pub async fn advance_plan(
             )
         })?;
 
+    // P2 Task 2：Enrolled origin 在精确核验后冻结 AutoStartOnce（enrollment
+    // id/revision + plan revision id）；Manual 恒为 Manual，不按 enrollment
+    // 擅自升级。
+    let mut enrolled_start_policy: Option<
+        crate::product::coding_models::CodingStartRunPolicy,
+    > = None;
     if let AdvancePlanOrigin::Enrolled {
         enrollment_id,
         policy_revision,
@@ -151,6 +157,13 @@ pub async fn advance_plan(
                 grouped.unattributed.len()
             ));
         }
+        enrolled_start_policy = Some(
+            crate::product::coding_models::CodingStartRunPolicy::AutoStartOnce {
+                enrollment_id: enrollment_id.clone(),
+                policy_revision: *policy_revision,
+                source_plan_revision: authoritative.plan_revision_id.clone(),
+            },
+        );
     }
 
     // registry 命中：取得与 socket/编排器**同一** manager（生产路径）。
@@ -161,7 +174,10 @@ pub async fn advance_plan(
         Some(manager) => {
             let engine_arc = manager.engine();
             let mut engine = engine_arc.lock().await;
-            engine.handle_advance(input).await?
+            match enrolled_start_policy {
+                Some(policy) => engine.handle_advance_with_start_policy(input, policy).await?,
+                None => engine.handle_advance(input).await?,
+            }
         }
         None => {
             let full_record = lifecycle
@@ -176,7 +192,10 @@ pub async fn advance_plan(
                 event_tx,
                 crate::product::workspace_engine::WorkspaceSession::from_record(full_record),
             );
-            engine.handle_advance(input).await?
+            match enrolled_start_policy {
+                Some(policy) => engine.handle_advance_with_start_policy(input, policy).await?,
+                None => engine.handle_advance(input).await?,
+            }
         }
     };
 
@@ -242,6 +261,102 @@ mod tests {
         assert_eq!(first_id, second_id);
         assert_eq!(fixture.coding_attempts().len(), 1);
         assert_eq!(fixture.coding_runner_count(), 0);
+
+        // P2 Task 2：enrolled advance 在新 journal attempt 上冻结
+        // AutoStartOnce（enrollment id/revision + plan revision id，非可变
+        // latest ref）；disable 后 replay 不洗白冻结 policy。
+        let expected_revision = match &first {
+            AdvanceOutcome::Completed { record, .. } => record.plan_revision_id.clone(),
+            AdvanceOutcome::Replayed { record } => record.plan_revision_id.clone(),
+            AdvanceOutcome::Rejected { .. } => unreachable!("asserted non-rejected above"),
+        };
+        let frozen = fixture
+            .coding_attempts()
+            .into_iter()
+            .find(|attempt| attempt.id == first_id)
+            .unwrap();
+        assert_eq!(
+            frozen.start_run_policy,
+            crate::product::coding_models::CodingStartRunPolicy::AutoStartOnce {
+                enrollment_id: enrollment.enrollment_id.clone(),
+                policy_revision: enrollment.policy_revision,
+                source_plan_revision: expected_revision,
+            }
+        );
+        // Disable→replay：journal 已存在，policy 保持冻结不被洗白。
+        let store = IssueAutomationStore::new(ProductAppPaths::new(
+            fixture.state.workspace_root.join(".aria"),
+        ));
+        store
+            .compare_and_set(
+                &enrollment.project_id,
+                &enrollment.issue_id,
+                Some(enrollment.policy_revision),
+                crate::product::models::automation::EnrollmentWriteCommand::Disable,
+            )
+            .expect("disable enrollment");
+        let replayed = advance_plan(
+            &fixture.state,
+            AdvanceInput {
+                command_id: format!(
+                    "wiga-advance-{}-{}",
+                    enrollment.enrollment_id,
+                    enrollment.plan_id.as_deref().unwrap()
+                ),
+                project_id: enrollment.project_id.clone(),
+                issue_id: enrollment.issue_id.clone(),
+                plan_id: enrollment.plan_id.clone().unwrap(),
+            },
+            AdvancePlanOrigin::Enrolled {
+                enrollment_id: enrollment.enrollment_id.clone(),
+                policy_revision: enrollment.policy_revision,
+            },
+        )
+        .await;
+        // Disable 后 Enrolled origin 在服务层显式拒绝（不隐式 replay）。
+        assert!(replayed.is_err());
+        let still_frozen = fixture
+            .coding_attempts()
+            .into_iter()
+            .find(|attempt| attempt.id == first_id)
+            .unwrap();
+        assert_eq!(still_frozen.start_run_policy, frozen.start_run_policy);
+    }
+
+    /// P2 Task 2：手工（Manual）advance 的新 journal attempt 显式 Manual；
+    /// 已冻结的 AutoStartOnce 不被后续手工命令偷换。
+    #[tokio::test]
+    async fn manual_advance_freezes_manual_policy_on_fresh_journal() {
+        let fixture = confirmed_enrolled_fixture().await;
+        let enrollment = fixture.enrollment();
+        let manual = advance_plan(
+            &fixture.state,
+            AdvanceInput {
+                command_id: "manual-advance-fresh-1".to_string(),
+                project_id: enrollment.project_id.clone(),
+                issue_id: enrollment.issue_id.clone(),
+                plan_id: enrollment.plan_id.clone().unwrap(),
+            },
+            AdvancePlanOrigin::Manual,
+        )
+        .await
+        .unwrap();
+        let attempt_id = match &manual {
+            AdvanceOutcome::Completed { attempt_id, .. } => attempt_id.clone(),
+            AdvanceOutcome::Replayed { record } => {
+                record.attempt_id.clone().expect("replayed attempt id")
+            }
+            AdvanceOutcome::Rejected { code, .. } => panic!("unexpected reject: {code}"),
+        };
+        let attempt = fixture
+            .coding_attempts()
+            .into_iter()
+            .find(|attempt| attempt.id == attempt_id)
+            .unwrap();
+        assert_eq!(
+            attempt.start_run_policy,
+            crate::product::coding_models::CodingStartRunPolicy::Manual
+        );
     }
 
     /// 自动身份漂移（policy_revision/enrollment id/command id）与禁用 enrollment

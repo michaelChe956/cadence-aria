@@ -693,6 +693,7 @@ impl super::CodingAttemptStore {
             created_at: now.clone(),
             updated_at: now.clone(),
             target_snapshot: input.target_snapshot.clone(),
+            start_run_policy: input.start_run_policy.clone(),
             completed_at: None,
         };
         let units = unit_bindings

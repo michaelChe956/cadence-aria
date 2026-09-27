@@ -31,6 +31,7 @@ fn group_attempt_fixture(root: &std::path::Path) -> (CodingAttemptStore, CodingE
             },
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
     super::seed_group_attempt_fixture(&store, &attempt, true, false);
@@ -191,6 +192,7 @@ async fn sc_advance_unmaterialized_worktree_falls_back_to_worktree_prepare() {
             },
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
     super::seed_group_attempt_fixture(&store, &attempt, true, false);

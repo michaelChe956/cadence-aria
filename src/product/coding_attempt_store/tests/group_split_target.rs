@@ -40,6 +40,7 @@ fn group_input(
         provider_config_snapshot: provider_snapshot(),
         target_snapshot: target.map(target_snapshot),
         max_auto_rework: 2,
+        start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
     }
 }
 
@@ -308,6 +309,7 @@ fn split_journal_lives_in_target_subpath_and_lists_back() {
         provider_config_snapshot: provider_snapshot(),
         target_snapshot: Some(target_snapshot(target_a)),
         max_auto_rework: 2,
+        start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
     };
 
     let journal_a = store
@@ -401,6 +403,7 @@ fn single_target_journal_stays_on_original_path() {
         provider_config_snapshot: provider_snapshot(),
         target_snapshot: Some(target_snapshot(target_a)),
         max_auto_rework: 2,
+        start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
     };
     store
         .prepare_group_initialization_with_admission(
@@ -442,6 +445,7 @@ fn split_journal_phase_advance_locates_subpath() {
         provider_config_snapshot: provider_snapshot(),
         target_snapshot: Some(target_snapshot(target_a)),
         max_auto_rework: 2,
+        start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
     };
     let journal = store
         .prepare_group_initialization_with_admission_for_target(
@@ -493,6 +497,7 @@ fn split_ensure_attempt_allows_other_target_active() {
         provider_config_snapshot: provider_snapshot(),
         target_snapshot: Some(target_snapshot(target_a)),
         max_auto_rework: 2,
+        start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
     };
     let journal_a = store
         .prepare_group_initialization_with_admission_for_target(

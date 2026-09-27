@@ -138,6 +138,7 @@ mod tests {
             created_at: "2026-08-11T00:00:00Z".to_string(),
             updated_at: "2026-08-11T00:00:00Z".to_string(),
             target_snapshot: None,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
             completed_at: None,
         }
     }

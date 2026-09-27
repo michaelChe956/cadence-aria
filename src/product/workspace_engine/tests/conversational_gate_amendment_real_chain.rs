@@ -166,6 +166,7 @@ async fn seed_awaiting_plan_amendment(
             },
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
     let revision_store = WorkItemRevisionStore::new(lifecycle.app_paths());

@@ -61,6 +61,7 @@ fn group_dependency_fixture(
             },
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
     super::seed_group_attempt_fixture(&store, &attempt, true, with_dependency);

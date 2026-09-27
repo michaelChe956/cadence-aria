@@ -63,6 +63,7 @@ async fn start_coding_before_advance_ready_is_rejected_with_sc_coding_requires_a
             },
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
     // SC admission：绑定 group，但 durable advance 记录缺失（缺失即 fail-closed 维度）。

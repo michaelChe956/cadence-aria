@@ -189,6 +189,9 @@ impl WorkspaceEngine {
                 provider_config_snapshot: provider_config,
                 target_snapshot,
                 max_auto_rework: 2,
+                // P2 Task 2：多 target split 是手工语义（enrolled 自动在
+                // advance_plan 服务层已按恰一 target fail-closed）。
+                start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
             };
             let journal = match existing {
                 Some(journal) => journal.clone(),

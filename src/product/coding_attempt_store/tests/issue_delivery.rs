@@ -193,6 +193,7 @@ fn seed_group_attempt_with_units(
             provider_config_snapshot: provider_snapshot(),
             target_snapshot: Some(snapshot),
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .unwrap();
     for (index, work_item_id) in bucket_work_items.iter().enumerate() {
@@ -478,6 +479,7 @@ fn seed_split_attempt_with_target(
             provider_config_snapshot: provider_snapshot(),
             target_snapshot: Some(snapshot),
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .unwrap();
     for (index, work_item_id) in bucket_work_items.iter().enumerate() {

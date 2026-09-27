@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use crate::product::coding_models::{
     AttemptTargetSnapshot, CodingChoiceOption, CodingChoiceQuestion, CodingExecutionStage,
-    CodingExecutionUnitStatus, CodingGateAction, CodingProviderRole,
+    CodingExecutionUnitStatus, CodingGateAction, CodingProviderRole, CodingStartRunPolicy,
 };
 use crate::product::models::ProviderName;
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
@@ -32,6 +32,9 @@ pub struct CreateGroupCodingAttemptInput {
     pub provider_config_snapshot: ProviderConfigSnapshot,
     pub target_snapshot: Option<AttemptTargetSnapshot>,
     pub max_auto_rework: u32,
+    /// P2 Task 2：group attempt 首建时冻结的首启策略；普通/手工/legacy/
+    /// 多 target 调用方显式 Manual，Task 1 自动服务核验后才传 AutoStartOnce。
+    pub start_run_policy: CodingStartRunPolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

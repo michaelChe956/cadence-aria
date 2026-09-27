@@ -390,7 +390,8 @@ fn create_coding_role_run_fixture(
         updated_at: now.clone(),
         target_snapshot: None,
         completed_at: None,
-    };
+        start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+        };
     write_json(
         &store.attempt_path(&attempt.project_id, &attempt.issue_id, &attempt.id),
         &attempt,

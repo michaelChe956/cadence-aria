@@ -445,6 +445,7 @@ async fn advance_checkpoint_recovery_reuses_prepared_attempt_and_unit_ids() {
                 },
                 target_snapshot: None,
                 max_auto_rework: 2,
+                start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
             },
             "plan_revision_0001",
             &authoritative.units,
@@ -583,6 +584,7 @@ async fn advance_checkpoint_recovery_reuses_materialized_units_without_duplicate
         },
         target_snapshot: None,
         max_auto_rework: 2,
+        start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
     };
     let mut group = coding_store
         .prepare_group_initialization_with_admission(

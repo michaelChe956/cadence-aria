@@ -449,6 +449,7 @@ mod tests {
             provider_config_snapshot: provider_snapshot(),
             target_snapshot: target.map(target_snapshot),
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         }
     }
 
@@ -460,7 +461,7 @@ mod tests {
         store
             .create_group_attempt(group_input(PLAN_ID, target, branch_name))
             .expect("seed target attempt")
-    }
+            }
 
     /// 直改 attempt 状态/stage 落盘（播种非 Created 形态；测试不经守卫）。
     fn force_attempt_state(
@@ -482,7 +483,7 @@ mod tests {
         }
         store.write_coding_attempt_for_test(&updated).unwrap();
         updated
-    }
+        }
 
     /// 同 target 追加第二个 attempt（attempt_no 更大，绕过建组守卫直接落盘）——
     /// 模拟 per-(plan,target) 增殖后的 durable 事实，验证「取最新」口径。
@@ -507,7 +508,7 @@ mod tests {
         }
         store.write_coding_attempt_for_test(&extra).unwrap();
         extra
-    }
+        }
 
     fn seed_review_request(
         store: &CodingAttemptStore,

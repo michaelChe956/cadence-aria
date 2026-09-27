@@ -938,6 +938,7 @@ mod tests {
                     capture_source: "test".to_string(),
                 }),
                 completed_at: Some(now),
+                start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
             };
             crate::product::json_store::write_json(
                 &self

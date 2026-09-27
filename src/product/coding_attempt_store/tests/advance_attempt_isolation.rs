@@ -12,6 +12,7 @@ fn group_input(plan_id: &str, current_work_item_id: &str) -> CreateGroupCodingAt
         provider_config_snapshot: provider_snapshot(),
         target_snapshot: None,
         max_auto_rework: 2,
+        start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
     }
 }
 

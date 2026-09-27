@@ -59,7 +59,8 @@ fn schema_v2_attempt_without_active_unit_binding_fails_closed() {
         updated_at: "2026-07-27T00:00:00Z".to_string(),
         target_snapshot: None,
         completed_at: None,
-    };
+        start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+        };
 
     let error = schema_v2_active_unit_runtime(&paths, &attempt)
         .expect_err("schema v2 runtime must not fall back when its binding is missing");

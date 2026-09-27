@@ -344,8 +344,9 @@ mod tests {
             updated_at: "2026-08-11T00:00:00Z".to_string(),
             target_snapshot,
             completed_at: None,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         }
-    }
+            }
 
     fn write_logical_authority_fixture(
         paths: &ProductAppPaths,

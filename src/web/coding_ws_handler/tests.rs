@@ -1004,7 +1004,8 @@ fn manual_continue_gate_response_does_not_auto_resume_runner() {
         updated_at: "2026-06-12T00:00:00Z".to_string(),
         target_snapshot: None,
         completed_at: None,
-    };
+        start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+        };
 
     assert!(!should_resume_runner_after_gate_response(
         "manual_continue",
@@ -1171,7 +1172,8 @@ fn seed_compiled_work_item_fixture() -> (TempDir, ProductAppPaths, CodingExecuti
         updated_at: "2026-07-02T00:00:00Z".to_string(),
         target_snapshot: None,
         completed_at: None,
-    };
+        start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+        };
 
     (tmp, app_paths, attempt)
 }

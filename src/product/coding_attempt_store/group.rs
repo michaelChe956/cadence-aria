@@ -277,6 +277,7 @@ impl super::CodingAttemptStore {
             created_at: now.clone(),
             updated_at: now,
             target_snapshot: input.target_snapshot,
+            start_run_policy: input.start_run_policy,
             completed_at: None,
         };
 

@@ -428,8 +428,9 @@ mod tests {
                 capture_source: "test".to_string(),
             }),
             completed_at: None,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         }
-    }
+            }
 
     fn baseline_path(fixture: &Fixture, run_id: &str) -> PathBuf {
         CodingAttemptStore::new(fixture.paths.clone())

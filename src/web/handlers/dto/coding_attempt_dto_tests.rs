@@ -36,6 +36,7 @@ fn manual_recovery_attempt_fixture() -> CodingExecutionAttempt {
         updated_at: "2026-06-12T00:00:00Z".to_string(),
         target_snapshot: None,
         completed_at: None,
+        start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
     }
 }
 

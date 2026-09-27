@@ -403,6 +403,7 @@ fn create_group_authority_other_attempt_run(
             provider_config_snapshot: fixture.attempt.provider_config_snapshot.clone(),
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .unwrap();
     let unit = fixture

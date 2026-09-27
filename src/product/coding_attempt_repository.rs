@@ -509,8 +509,9 @@ mod tests {
             updated_at: "2026-08-11T00:00:00Z".to_string(),
             target_snapshot: None,
             completed_at: None,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         }
-    }
+            }
 
     fn write_repository_projection(paths: &ProductAppPaths, repository_path: &Path) {
         crate::product::json_store::write_json(

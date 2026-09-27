@@ -435,6 +435,7 @@ async fn repeated_coder_failure_blocks_with_retry_gate_and_preserves_worktree() 
             },
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
     lifecycle

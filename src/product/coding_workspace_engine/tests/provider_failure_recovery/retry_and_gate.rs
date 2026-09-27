@@ -505,6 +505,7 @@ async fn code_review_provider_failure_blocks_attempt_without_cleaning_shared_wor
             },
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
     lifecycle

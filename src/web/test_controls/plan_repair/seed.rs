@@ -186,6 +186,7 @@ pub(super) fn seed_initial_fixture(root: &Path) -> Result<(), PlanRepairFixtureE
             },
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .map_err(fixture_error)?;
 

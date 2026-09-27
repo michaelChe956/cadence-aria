@@ -999,8 +999,9 @@ mod tests {
             updated_at: "2026-09-19T00:00:00Z".to_string(),
             target_snapshot,
             completed_at: None,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         }
-    }
+            }
 
     fn write_physical_repository_fixture(paths: &ProductAppPaths, root: &Path) {
         crate::product::json_store::write_json(

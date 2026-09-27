@@ -139,6 +139,7 @@ pub async fn create_group_coding_attempt(
         provider_config_snapshot,
         target_snapshot,
         max_auto_rework: 2,
+        start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
     };
 
     let _initialization_guard = coding_store
