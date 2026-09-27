@@ -464,12 +464,24 @@ export function deleteWorkItemPlan(
   );
 }
 
+// P3（REQ-WIGA-07）：不传 options 完全保持旧两参 URL；只有观察者显式携带
+// recent_since/recent_limit 才追加有界近期完成目录查询键。
 export function getIssueLifecycle(
   issueId: string,
   projectId: string,
+  options?: { recentSince: string; recentLimit?: number },
 ): Promise<IssueLifecycleResponse> {
+  let query = `project_id=${encodeURIComponent(projectId)}`;
+  if (options) {
+    const params = new URLSearchParams();
+    params.set("recent_since", options.recentSince);
+    if (options.recentLimit !== undefined) {
+      params.set("recent_limit", String(options.recentLimit));
+    }
+    query += `&${params.toString()}`;
+  }
   return requestJson<IssueLifecycleResponse>(
-    `/api/issues/${encodeURIComponent(issueId)}/lifecycle?project_id=${encodeURIComponent(projectId)}`,
+    `/api/issues/${encodeURIComponent(issueId)}/lifecycle?${query}`,
   );
 }
 

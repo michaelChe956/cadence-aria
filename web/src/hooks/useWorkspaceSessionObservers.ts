@@ -24,9 +24,21 @@ import {
   planConfirmedInfoItem,
   type CockpitInboxItem,
 } from "../state/workspace-cockpit-projection";
+import {
+  RECENT_COMPLETION_WINDOW_MS,
+  recentCompletionIdentity,
+  recentCompletionInboxItem,
+} from "../state/recent-completion";
+import { subscribeToLifecycleInvalidation } from "../state/lifecycle-workbench-store";
 import type { WorkspaceWsState } from "../state/workspace-ws-store";
 
 export type CatalogRefreshTimer = number;
+
+/** P3（REQ-WIGA-07）：invalidation/snapshot hint/轮询汇入的 trailing debounce
+ * ——只合并唤醒节流，不改变周期轮询节奏。 */
+const CATALOG_REFRESH_DEBOUNCE_MS = 250;
+/** P3（REQ-WIGA-07）：观察者请求的服务端近期目录上界（1..=32）。 */
+const RECENT_COMPLETION_REQUEST_LIMIT = 32;
 
 const scheduleCatalogRefresh = (callback: () => void, delayMs: number): CatalogRefreshTimer =>
   window.setTimeout(callback, delayMs);
@@ -42,6 +54,7 @@ export interface WorkspaceSessionObserverOptions {
   getIssueLifecycle?: (
     issueId: string,
     projectId: string,
+    options?: { recentSince: string; recentLimit?: number },
   ) => Promise<
     Pick<
       IssueLifecycleResponse,
@@ -49,6 +62,7 @@ export interface WorkspaceSessionObserverOptions {
       | "coding_attempts"
       | "plan_confirmed_info"
       | "coding_final_confirm_info"
+      | "recent_completion_info"
     >
   >;
   createController?: WorkspaceObserverControllerFactory;
@@ -58,6 +72,7 @@ export interface WorkspaceSessionObserverOptions {
 
 export type WorkspaceObserverControllerFactory = (
   onRecordsChange: (records: readonly WorkspaceObserverRecord[]) => void,
+  onSnapshotHint?: () => void,
 ) => WorkspaceObserverController;
 
 export interface WorkspaceSessionObserverResult {
@@ -68,7 +83,17 @@ export interface WorkspaceSessionObserverResult {
   watchSession(sessionId: string): void;
   /** Task 11：会话所属 issue 的最新活跃 coding attempt（无则 null）。 */
   codingAttemptForSession(sessionId: string): CodingAttempt | null;
+  /** P3（REQ-WIGA-07）：展示收件箱 = 可操作条目 + 可见完成 info（`inbox`
+   * 保留为同义别名，兼容既有调用点）。 */
+  displayItems: readonly CockpitInboxItem[];
+  /** P3（REQ-WIGA-07）：可操作（gate/choice/stopped/error/sc_failed）计数；
+   * info 恒不计数。 */
+  actionableCount: number;
+  /** P3（REQ-WIGA-07）：首次成功 hydration 之后新增的稳定身份完成事实
+   * （提示候选；once/TTL 绑定在 Task 3 落地）。 */
+  notificationCandidates: readonly CockpitInboxItem[];
 }
+
 
 export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOptions): WorkspaceSessionObserverResult {
   const {
@@ -97,14 +122,29 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
   const [codingFinalConfirmInfos, setCodingFinalConfirmInfos] = useState<
     readonly { info: CodingFinalConfirmInfoItem; sessionIds: readonly string[] }[]
   >([]);
+  // P3（REQ-WIGA-07）：K 外近期完成目录条目（含 completionIdentity）与首次
+  // hydration 之后的提示候选。
+  const [recentCompletionItems, setRecentCompletionItems] = useState<
+    readonly CockpitInboxItem[]
+  >([]);
+  const [notificationCandidates, setNotificationCandidates] = useState<
+    readonly CockpitInboxItem[]
+  >([]);
+  // 首次成功 hydration（含空目录）建立的稳定身份基线；失败不置基线。
+  // hydration 在一轮补读静默收敛（无 pending dirty）后才关闭，初始 GET
+  // 在途期间的失效唤醒归入同一静默批次。
+  const knownRecentIdentitiesRef = useRef<Set<string> | null>(null);
+  const hydrationClosedRef = useRef(false);
+  const snapshotHintRef = useRef<() => void>(() => undefined);
   const controllerRef = useRef<WorkspaceObserverController | null>(null);
 
   if (controllerRef.current === null) {
     controllerRef.current = createController
-      ? createController(setObserverRecords)
+      ? createController(setObserverRecords, () => snapshotHintRef.current())
       : createObserverController(undefined, setObserverRecords, {
           refreshIntervalMs,
           reconnectDelayMs: 1_000,
+          onSnapshotHint: () => snapshotHintRef.current(),
         });
   }
 
@@ -160,8 +200,13 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
     return Array.from(byKey.values());
   }, [codingFinalConfirmInfos, watchedSessionIds]);
   const inbox = useMemo(
-    () => [...selectObservedInbox(records), ...infoItems, ...codingInfoItems],
-    [records, infoItems, codingInfoItems],
+    () => [
+      ...selectObservedInbox(records),
+      ...infoItems,
+      ...codingInfoItems,
+      ...recentCompletionItems,
+    ],
+    [records, infoItems, codingInfoItems, recentCompletionItems],
   );
   const countedRecords = useMemo(
     () => records.filter((record) => watchedSessionIds.includes(record.sessionId)),
@@ -171,8 +216,42 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
 
   useEffect(() => {
     let alive = true;
-    let refreshTimer: CatalogRefreshTimer | null = null;
-    const refreshCatalog = () => {
+    let debounceTimer: CatalogRefreshTimer | null = null;
+    let periodicTimer: CatalogRefreshTimer | null = null;
+    let inFlight = false;
+    let dirty = false;
+
+    // P3（REQ-WIGA-07）：近期完成目录的应用——hydration 未关闭时（首轮与
+    // 初始在途期间的 dirty 重跑）只扩大静默基线；关闭后新稳定身份成为
+    // 提示候选；同 key 状态升级不重复候选。
+    const applyRecentCatalog = (
+      items: readonly CockpitInboxItem[],
+      identities: readonly string[],
+    ) => {
+      const known = knownRecentIdentitiesRef.current ?? new Set<string>();
+      knownRecentIdentitiesRef.current = known;
+      const candidates: CockpitInboxItem[] = [];
+      for (let index = 0; index < identities.length; index += 1) {
+        const identity = identities[index];
+        if (!hydrationClosedRef.current) {
+          known.add(identity);
+        } else if (!known.has(identity)) {
+          known.add(identity);
+          candidates.push(items[index]);
+        }
+      }
+      // 候选按客户端生命周期累积（每身份至多一条）；Shell 以 identity 去重
+      // 提醒，Task 3 绑定 TTL/once。
+      setNotificationCandidates((previous) => [...previous, ...candidates]);
+      setRecentCompletionItems(items);
+    };
+
+    const runCatalogRefresh = () => {
+      if (inFlight) {
+        dirty = true;
+        return;
+      }
+      inFlight = true;
       void (async () => {
         try {
           const { projects } = await getProjects();
@@ -184,7 +263,14 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
           );
           const lifecycles = await Promise.all(
             listedIssues.flatMap(({ projectId, issues }) =>
-              issues.map(async (issue) => getLifecycle(issue.issue_id, projectId)),
+              issues.map(async (issue) =>
+                getLifecycle(issue.issue_id, projectId, {
+                  recentSince: new Date(
+                    Date.now() - RECENT_COMPLETION_WINDOW_MS,
+                  ).toISOString(),
+                  recentLimit: RECENT_COMPLETION_REQUEST_LIMIT,
+                }),
+              ),
             ),
           );
           if (alive) {
@@ -194,39 +280,97 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
             setCodingAttempts(
               lifecycles.flatMap((lifecycle) => lifecycle.coding_attempts ?? []),
             );
-            // REQ-WIGA-07 Task 9：info 只读投影源（durable key 幂等去重在 memo）。
-            setPlanConfirmedInfos(
-              lifecycles.flatMap((lifecycle) => lifecycle.plan_confirmed_info ?? []),
-            );
-            // REQ-WIGA-07/R5 Task 9：coding info 与同 lifecycle 的会话集合配对
-            //（watched 过滤按 issue 归属，不伪造 sessionId）。
-            setCodingFinalConfirmInfos(
-              lifecycles.flatMap((lifecycle) =>
-                (lifecycle.coding_final_confirm_info ?? []).map((info) => ({
-                  info,
-                  sessionIds: lifecycle.workspace_sessions.map(
-                    (session) => session.workspace_session_id,
-                  ),
-                })),
-              ),
+            // P3（REQ-WIGA-07）：新服务端以有界近期目录为完成事实主源（按完整
+            // project/issue/kind/key 归一化，K 外可见）；只有旧响应（缺
+            // recent_completion_info）才回落 watched plan/coding info 投影，
+            // 绝不把旧响应认作 K 外全量。
+            const legacyPlanInfos: PlanConfirmedInfoItem[] = [];
+            const legacyCodingInfos: {
+              info: CodingFinalConfirmInfoItem;
+              sessionIds: readonly string[];
+            }[] = [];
+            const recentByIdentity = new Map<string, CockpitInboxItem>();
+            for (const lifecycle of lifecycles) {
+              if (lifecycle.recent_completion_info !== undefined) {
+                for (const entry of lifecycle.recent_completion_info) {
+                  recentByIdentity.set(
+                    recentCompletionIdentity(entry),
+                    recentCompletionInboxItem(entry),
+                  );
+                }
+              } else {
+                legacyPlanInfos.push(...(lifecycle.plan_confirmed_info ?? []));
+                legacyCodingInfos.push(
+                  ...(lifecycle.coding_final_confirm_info ?? []).map((info) => ({
+                    info,
+                    sessionIds: lifecycle.workspace_sessions.map(
+                      (session) => session.workspace_session_id,
+                    ),
+                  })),
+                );
+              }
+            }
+            setPlanConfirmedInfos(legacyPlanInfos);
+            setCodingFinalConfirmInfos(legacyCodingInfos);
+            applyRecentCatalog(
+              Array.from(recentByIdentity.values()),
+              Array.from(recentByIdentity.keys()),
             );
           }
         } catch {
-          // 保留上一次成功目录，避免瞬时 REST 失败拆除整个观察窗。
+          // 保留上一次成功目录与候选，避免瞬时 REST 失败拆除整个观察窗；
+          // 失败不置首次 hydration 基线。
         } finally {
-          if (alive && refreshIntervalMs > 0) {
-            refreshTimer = scheduleRefresh(refreshCatalog, refreshIntervalMs);
+          inFlight = false;
+          if (alive) {
+            if (dirty) {
+              // 本轮在途期间又收到唤醒：结束后立即补跑一次，以新一轮 GET
+              // 校正被唤醒期间的事实（旧 HTTP 结果不覆盖新事实）。
+              dirty = false;
+              runCatalogRefresh();
+            } else {
+              hydrationClosedRef.current = true;
+              if (refreshIntervalMs > 0) {
+                periodicTimer = scheduleRefresh(runCatalogRefresh, refreshIntervalMs);
+              }
+            }
           }
         }
       })();
     };
 
-    refreshCatalog();
+    // invalidation / WS snapshot hint 汇入 ~250ms trailing debounce；一轮
+    // catalog 请求在途时只标 dirty，不并发第二层请求。
+    const queueCatalogRefresh = () => {
+      if (!alive) {
+        return;
+      }
+      if (inFlight) {
+        dirty = true;
+        return;
+      }
+      if (debounceTimer !== null) {
+        cancelRefresh(debounceTimer);
+      }
+      debounceTimer = scheduleRefresh(() => {
+        debounceTimer = null;
+        runCatalogRefresh();
+      }, CATALOG_REFRESH_DEBOUNCE_MS);
+    };
+
+    snapshotHintRef.current = queueCatalogRefresh;
+    runCatalogRefresh();
+    const unsubscribeInvalidation = subscribeToLifecycleInvalidation(queueCatalogRefresh);
 
     return () => {
       alive = false;
-      if (refreshTimer !== null) {
-        cancelRefresh(refreshTimer);
+      snapshotHintRef.current = () => undefined;
+      unsubscribeInvalidation();
+      if (debounceTimer !== null) {
+        cancelRefresh(debounceTimer);
+      }
+      if (periodicTimer !== null) {
+        cancelRefresh(periodicTimer);
       }
     };
   }, [cancelRefresh, getLifecycle, getProductIssues, getProjects, refreshIntervalMs, scheduleRefresh]);
@@ -279,5 +423,10 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
     watchedSessionIds,
     watchSession,
     codingAttemptForSession,
+    // P3（REQ-WIGA-07）：`inbox` 保留为 displayItems 同义别名；可操作计数
+    // 与提示候选从显式三分数据取。
+    displayItems: inbox,
+    actionableCount: countedInbox.length,
+    notificationCandidates,
   };
 }

@@ -214,6 +214,43 @@ describe("workspace observer store", () => {
     expect(controller.records()).toEqual([]);
   });
 
+  // P3 WIGA Task 2（REQ-WIGA-07）：durable 业务 snapshot 帧唤醒补读（仅
+  // 排程），ping/pong/游标帧不触发——收到 WS 事件不当完成事实。
+  it("signals onSnapshotHint only for business snapshots, never for ping/pong frames", async () => {
+    type SocketCallbacks = {
+      onSnapshot: (state: WorkspaceWsState) => void;
+      onFrame: (eventSeq: number | null) => void;
+      onClose: () => void;
+      onError: () => void;
+    };
+    const sockets: SocketCallbacks[] = [];
+    const onSnapshotHint = vi.fn();
+    const controller = createObserverController(
+      (_sessionId, callbacks) => {
+        sockets.push(callbacks as SocketCallbacks);
+        return { close: () => undefined };
+      },
+      undefined,
+      { refreshIntervalMs: 0, reconnectDelayMs: 0, onSnapshotHint },
+    );
+    await controller.replaceWatchedSessionIds(["a"]);
+
+    sockets[0]?.onSnapshot(observedState("a"));
+    expect(onSnapshotHint).toHaveBeenCalledTimes(1);
+
+    // ping/pong 与游标推进只走 onFrame，不触发 hint。
+    sockets[0]?.onFrame(null);
+    sockets[0]?.onFrame(7);
+    sockets[0]?.onFrame(8);
+    expect(onSnapshotHint).toHaveBeenCalledTimes(1);
+
+    // 后续业务 snapshot 再次唤醒（每帧都只调度一次补读）。
+    sockets[0]?.onSnapshot(observedState("a", { sessionStatus: "waiting_for_human" }));
+    expect(onSnapshotHint).toHaveBeenCalledTimes(2);
+
+    controller.dispose();
+  });
+
 
   it("keeps healthy observer sockets long-lived across periodic ticks (F-06: no rebuild, no full-frame refresh)", async () => {
     type SocketCallbacks = {

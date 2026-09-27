@@ -79,6 +79,9 @@ function stubObservers() {
     watchedSessionIds: [],
     watchSession: vi.fn(),
         codingAttemptForSession: () => null,
+    displayItems: [],
+    actionableCount: 0,
+    notificationCandidates: [],
   });
 }
 

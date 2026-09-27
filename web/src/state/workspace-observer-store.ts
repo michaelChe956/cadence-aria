@@ -121,6 +121,9 @@ export interface WorkspaceObserverControllerOptions {
   schedule?(callback: () => void, delayMs: number): ObserverTimer;
   cancel?(timer: ObserverTimer): void;
   now?(): number;
+  /** P3（REQ-WIGA-07）：durable 业务 snapshot 帧到达后的唤醒回调——只用于
+   * 调度 lifecycle 目录补读，不把 WS 帧当完成事实；未提供时完全保持旧行为。 */
+  onSnapshotHint?(): void;
 }
 
 export function createObserverController(
@@ -174,6 +177,9 @@ export function createObserverController(
             if (!disposed && watchedSessionIds.has(sessionId)) {
               snapshots.set(sessionId, state);
               notifyRecordsChanged();
+              // P3（REQ-WIGA-07）：durable 业务 snapshot 帧到达——只作合并
+              // 刷新的唤醒（ping/pong 走 onFrame 不触发），事实从 REST 取。
+              options.onSnapshotHint?.();
             }
           },
           onFrame: (eventSeq) => {

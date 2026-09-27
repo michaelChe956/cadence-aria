@@ -545,6 +545,9 @@ export interface CockpitInboxItem {
   planInfo?: PlanConfirmedInfoProjection | null;
   /** REQ-WIGA-07/R5 Task 9：kind="info" 时的 coding FinalConfirm 投影；其余 kind 缺省。 */
   codingInfo?: CodingFinalConfirmInfoProjection | null;
+  /** P3（REQ-WIGA-07）：近期完成事实的稳定身份（JSON [scope,kind,key]）；
+   * 仅 recent 目录投影填写，提示去重以此为准（不取易碰撞的 item.id）。 */
+  completionIdentity?: string;
   /** P2 GAP-E/G（Task 0.1）：kind="sc_failed" 时的人工显式重驱投影。 */
   scFailure?: { failedNodeId: string; phase: "failed" } | null;
 }

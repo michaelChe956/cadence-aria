@@ -182,6 +182,9 @@ describe("router", () => {
       watchedSessionIds: [],
       watchSession: vi.fn(),
         codingAttemptForSession: () => null,
+      displayItems: [],
+      actionableCount: 0,
+      notificationCandidates: [],
     });
   });
 
@@ -195,6 +198,9 @@ describe("router", () => {
       watchedSessionIds: [sessionId],
       watchSession: vi.fn(),
         codingAttemptForSession: () => null,
+      displayItems: [gateItem(sessionId)],
+      actionableCount: 1,
+      notificationCandidates: [],
     });
 
     render(<RouterProvider router={createAppRouter(history)} />);

@@ -2,8 +2,10 @@ import { act, render, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   CodingFinalConfirmInfoItem,
+  RecentCompletionInfoItem,
   WorkspaceSessionSummary,
 } from "../api/types";
+import { notifyLifecycleInvalidated } from "../state/lifecycle-workbench-store";
 import {
   useWorkspaceSessionObservers,
   type WorkspaceSessionObserverOptions,
@@ -395,5 +397,333 @@ describe("useWorkspaceSessionObservers", () => {
     expect(view.result.inbox.find((item) => item.source === "coding_final_confirm_info"))
       .toMatchObject({ title: "已最终确认" });
     expect(view.result.countedInbox).toHaveLength(0);
+  });
+
+  // P3 WIGA Task 2（tasks.md §4.1 / REQ-WIGA-07）：K=8 观察窗外的近期
+  // 完成事实经有界目录补读展示——第 9 个会话没有 observer socket，
+  // 完成信息仍进 displayItems 且 actionableCount=0。
+  it("surfaces K-external recent completions without an observer socket or actionable count", async () => {
+    const replaceWatchedSessionIds = vi.fn();
+    const sessions = Array.from({ length: 9 }, (_, index) => summary(`s${index + 1}`));
+    const getIssueLifecycle = vi.fn(async () => ({
+      workspace_sessions: sessions,
+      coding_attempts: [],
+      plan_confirmed_info: [],
+      coding_final_confirm_info: [],
+      recent_completion_info: [
+        {
+          kind: "coding_final_confirm" as const,
+          key: "coding_final_confirm:attempt_9:node_9",
+          project_id: "project_1",
+          issue_id: "issue_1",
+          plan_id: "plan_9",
+          session_id: null,
+          attempt_id: "attempt_9",
+          occurred_at: new Date(Date.now() - 60_000).toISOString(),
+          title: "编码执行完成，待最终确认",
+          final_confirmed: false,
+        },
+      ],
+    }));
+    const view = renderObserverHook(
+      observerOptions({
+        currentSessionId: "s1",
+        watchLimit: 8,
+        getIssueLifecycle,
+        createController: () => ({
+          replaceWatchedSessionIds,
+          updateRefreshIntervalMs: vi.fn(),
+          refresh: vi.fn(),
+          records: () => [],
+          dispose: vi.fn(),
+        }),
+      }),
+    );
+
+    await waitFor(() => {
+      expect(
+        view.result.displayItems.filter((item) => item.source === "coding_final_confirm_info"),
+      ).toHaveLength(1);
+    });
+    expect(view.result.actionableCount).toBe(0);
+    expect(view.result.notificationCandidates).toHaveLength(0);
+    // 第 9 个会话（K=8 + 当前 s1）没有 observer socket。
+    expect(replaceWatchedSessionIds).toHaveBeenLastCalledWith([
+      "s2", "s3", "s4", "s5", "s6", "s7", "s8",
+    ]);
+
+    await act(async () => {
+      view.unmount();
+    });
+  });
+
+  // 同 key 跨 project/issue 不合并；同 issue 双次返回同 key 只留一条。
+  it("dedupes recent completions by full scope identity across projects and refreshes", async () => {
+    const occurredAt = new Date(Date.now() - 60_000).toISOString();
+    const entry = (projectId: string) => ({
+      kind: "plan_confirmed" as const,
+      key: "plan_confirmed:plan_x:compile_x",
+      project_id: projectId,
+      issue_id: "issue_1",
+      plan_id: "plan_x",
+      session_id: "session_x",
+      attempt_id: null,
+      occurred_at: occurredAt,
+      title: "Work Item Plan 已确认",
+      final_confirmed: null,
+    });
+    const getIssueLifecycle = vi.fn(
+      async (_issueId: string, projectId: string) => ({
+        workspace_sessions: [summary("s1")],
+        coding_attempts: [],
+        plan_confirmed_info: [],
+        coding_final_confirm_info: [],
+        recent_completion_info:
+          projectId === "project_1" ? [entry("project_1"), entry("project_1")] : [entry("project_2")],
+      }),
+    );
+    const view = renderObserverHook(
+      observerOptions({
+        currentSessionId: "s1",
+        watchLimit: 2,
+        getIssueLifecycle,
+        listProjects: async () => ({
+          projects: [
+            { project_id: "project_1", name: "P1", description: null, created_at: "2026-09-14T00:00:00Z", updated_at: "2026-09-14T00:00:00Z", last_opened_at: null },
+            { project_id: "project_2", name: "P2", description: null, created_at: "2026-09-14T00:00:00Z", updated_at: "2026-09-14T00:00:00Z", last_opened_at: null },
+          ],
+        }),
+        listProductIssues: async (projectId: string) => ({
+          issues: [{
+            issue_id: "issue_1",
+            project_id: projectId,
+            repo_id: null,
+            base_branch: null,
+            workspace_id: null,
+            task_id: null,
+            session_id: null,
+            title: "Issue",
+            description: null,
+            change_id: "change_1",
+            phase: "development" as const,
+            status: "in_progress" as const,
+            active_binding_id: null,
+            created_at: "2026-09-14T00:00:00Z",
+            updated_at: "2026-09-14T00:00:00Z",
+          }],
+        }),
+      }),
+    );
+
+    await waitFor(() => {
+      expect(view.result.displayItems.filter((item) => item.source === "plan_confirmed_info"))
+        .toHaveLength(2);
+    });
+    const identities = view.result.displayItems
+      .filter((item) => item.source === "plan_confirmed_info")
+      .map((item) => item.completionIdentity);
+    expect(new Set(identities).size).toBe(2);
+    expect(identities[0]).not.toBe(identities[1]);
+  });
+
+  // 首次 hydration（含空目录）只展示；失效唤醒补读；同 key 状态升级不
+  // 产生新候选；fetch 失败保留已知目录与候选。
+  it("keeps first hydration silent and tracks new identities after invalidation wakes", async () => {
+    const recent = (key: string, confirmed = false) => ({
+      kind: "coding_final_confirm" as const,
+      key,
+      project_id: "project_1",
+      issue_id: "issue_1",
+      plan_id: "plan_1",
+      session_id: null,
+      attempt_id: key,
+      occurred_at: new Date(Date.now() - 60_000).toISOString(),
+      title: confirmed ? "已最终确认" : "编码执行完成，待最终确认",
+      final_confirmed: confirmed,
+    });
+    const lifecyclePage = (recentItems: ReturnType<typeof recent>[]) => async () => ({
+      workspace_sessions: [summary("s1"), summary("s2")],
+      coding_attempts: [],
+      plan_confirmed_info: [],
+      coding_final_confirm_info: [],
+      recent_completion_info: recentItems,
+    });
+    const getIssueLifecycle = vi.fn(lifecyclePage([]));
+    const view = renderObserverHook(
+      observerOptions({ currentSessionId: "s1", watchLimit: 2, getIssueLifecycle }),
+    );
+
+    // 首次空成功 hydration：无展示、无候选（静默基线，失败不置基线）。
+    await waitFor(() => expect(getIssueLifecycle).toHaveBeenCalled());
+
+    // lifecycle 失效唤醒 → 补读发现新 key → 展示并成为候选。
+    getIssueLifecycle.mockImplementation(lifecyclePage([recent("k1")]));
+    await act(async () => {
+      notifyLifecycleInvalidated("issue_1");
+    });
+    await waitFor(() => {
+      expect(
+        view.result.displayItems.filter((item) => item.source === "coding_final_confirm_info"),
+      ).toHaveLength(1);
+    });
+    expect(view.result.notificationCandidates).toHaveLength(1);
+
+    // 同 key waiting→Completed：文案更新，不产生第二条候选。
+    getIssueLifecycle.mockImplementation(lifecyclePage([recent("k1", true)]));
+    await act(async () => {
+      notifyLifecycleInvalidated("issue_1");
+    });
+    await waitFor(() => {
+      expect(view.result.displayItems.find((item) => item.completionIdentity)?.title)
+        .toBe("已最终确认");
+    });
+    expect(view.result.notificationCandidates).toHaveLength(1);
+
+    // fetch 失败：不清空已知目录，不设置新候选。
+    getIssueLifecycle.mockRejectedValue(new Error("catalog unavailable"));
+    await act(async () => {
+      notifyLifecycleInvalidated("issue_1");
+    });
+    await waitFor(() => expect(getIssueLifecycle.mock.calls.length).toBeGreaterThan(3));
+    expect(
+      view.result.displayItems.filter((item) => item.source === "coding_final_confirm_info"),
+    ).toHaveLength(1);
+    expect(view.result.notificationCandidates).toHaveLength(1);
+
+    await act(async () => {
+      view.unmount();
+    });
+  });
+
+  // 初始 GET 未完成时收到 invalidation：新事实归入首次补读静默批次，
+  // 之后的 refresh 才开始产生候选。
+  it("folds facts discovered by an invalidation during the initial fetch into the silent first batch", async () => {
+    const recent = (key: string): RecentCompletionInfoItem => ({
+      kind: "plan_confirmed",
+      key,
+      project_id: "project_1",
+      issue_id: "issue_1",
+      plan_id: key,
+      session_id: `session_${key}`,
+      attempt_id: null,
+      occurred_at: new Date(Date.now() - 60_000).toISOString(),
+      title: "Work Item Plan 已确认",
+      final_confirmed: null,
+    });
+    interface LifecyclePage {
+      workspace_sessions: WorkspaceSessionSummary[];
+      coding_attempts: never[];
+      plan_confirmed_info: never[];
+      coding_final_confirm_info: never[];
+      recent_completion_info: RecentCompletionInfoItem[];
+    }
+    const page = (keys: string[]) => async (): Promise<LifecyclePage> => ({
+      workspace_sessions: [summary("s1")],
+      coding_attempts: [],
+      plan_confirmed_info: [],
+      coding_final_confirm_info: [],
+      recent_completion_info: keys.map(recent),
+    });
+    let releaseInitial: (value: LifecyclePage) => void = () => undefined;
+    const initialGate = new Promise<LifecyclePage>((resolve) => {
+      releaseInitial = resolve;
+    });
+    const getIssueLifecycle = vi.fn().mockImplementationOnce(() => initialGate);
+    const view = renderObserverHook(
+      observerOptions({ currentSessionId: "s1", watchLimit: 2, getIssueLifecycle }),
+    );
+
+    // 初始 GET 在途时收到失效唤醒（只标 dirty，不抢跑）。
+    await act(async () => {
+      notifyLifecycleInvalidated("issue_1");
+    });
+    // 初始 GET 完成时看到空目录；紧随的补读发现 k1 —— 仍在首次静默批次。
+    getIssueLifecycle.mockImplementation(page(["k1"]));
+    await act(async () => {
+      releaseInitial(await page([])());
+    });
+    await waitFor(() => {
+      expect(
+        view.result.displayItems.filter((item) => item.source === "plan_confirmed_info"),
+      ).toHaveLength(1);
+    });
+    expect(view.result.notificationCandidates).toHaveLength(0);
+
+    // 首次批次关闭后的新事实才成为候选。
+    getIssueLifecycle.mockImplementation(page(["k1", "k2"]));
+    await act(async () => {
+      notifyLifecycleInvalidated("issue_1");
+    });
+    await waitFor(() => {
+      expect(view.result.notificationCandidates).toHaveLength(1);
+      expect(view.result.notificationCandidates[0].completionIdentity).toContain("k2");
+    });
+
+    await act(async () => {
+      view.unmount();
+    });
+  });
+
+  // 观察者收到 durable snapshot 帧的唤醒回调后排队补读（仅排程，不当事实）。
+  it("queues a catalog refresh when the controller signals a snapshot hint", async () => {
+    let signalSnapshotHint: (() => void) | null = null;
+    const recent = {
+      kind: "coding_final_confirm" as const,
+      key: "coding_final_confirm:attempt_h:node_h",
+      project_id: "project_1",
+      issue_id: "issue_1",
+      plan_id: "plan_1",
+      session_id: null,
+      attempt_id: "attempt_h",
+      occurred_at: new Date(Date.now() - 60_000).toISOString(),
+      title: "编码执行完成，待最终确认",
+      final_confirmed: false,
+    };
+    const getIssueLifecycle = vi.fn(async () => ({
+      workspace_sessions: [summary("s1")],
+      coding_attempts: [],
+      plan_confirmed_info: [],
+      coding_final_confirm_info: [],
+      recent_completion_info: [] as RecentCompletionInfoItem[],
+    }));
+    const view = renderObserverHook(
+      observerOptions({
+        currentSessionId: "s1",
+        watchLimit: 2,
+        getIssueLifecycle,
+        createController: (_onRecordsChange, onSnapshotHint) => {
+          signalSnapshotHint = () => onSnapshotHint?.();
+          return {
+            replaceWatchedSessionIds: vi.fn(),
+            updateRefreshIntervalMs: vi.fn(),
+            refresh: vi.fn(),
+            records: () => [],
+            dispose: vi.fn(),
+          };
+        },
+      }),
+    );
+    await waitFor(() => expect(getIssueLifecycle).toHaveBeenCalled());
+
+    getIssueLifecycle.mockImplementation(async () => ({
+      workspace_sessions: [summary("s1")],
+      coding_attempts: [],
+      plan_confirmed_info: [],
+      coding_final_confirm_info: [],
+      recent_completion_info: [recent],
+    }));
+    // 等同 durable snapshot 帧到达后的唤醒（测试注入 factory 主动触发）。
+    await act(async () => {
+      signalSnapshotHint?.();
+    });
+    await waitFor(() => {
+      expect(
+        view.result.displayItems.filter((item) => item.source === "coding_final_confirm_info"),
+      ).toHaveLength(1);
+    });
+
+    await act(async () => {
+      view.unmount();
+    });
   });
 });

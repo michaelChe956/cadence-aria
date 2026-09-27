@@ -131,6 +131,36 @@ export type CodingFinalConfirmInfoItem = {
   final_confirmed: boolean;
 };
 
+// P3（REQ-WIGA-07）：issue 级有界近期完成目录条目（判别联合；服务端
+// snake_case，null 不可省略）。plan：session_id 有值、attempt_id/
+// final_confirmed 为 null；coding：session_id 为 null、attempt_id/
+// final_confirmed 有值。
+export type RecentCompletionInfoItem =
+  | {
+      kind: "plan_confirmed";
+      key: string;
+      project_id: string;
+      issue_id: string;
+      plan_id: string;
+      session_id: string;
+      attempt_id: null;
+      occurred_at: string;
+      title: string;
+      final_confirmed: null;
+    }
+  | {
+      kind: "coding_final_confirm";
+      key: string;
+      project_id: string;
+      issue_id: string;
+      plan_id: string;
+      session_id: null;
+      attempt_id: string;
+      occurred_at: string;
+      title: string;
+      final_confirmed: boolean;
+    };
+
 export type IssueLifecycleResponse = {
   issue: ProductIssue;
   story_specs: StorySpec[];
@@ -149,6 +179,10 @@ export type IssueLifecycleResponse = {
   // P2（REQ-WIGA-07/R5）：enrolled 已认领 group attempt 的 FinalConfirm 等待/
   // 已确认只读信息。additive：旧响应缺失时前端按无 info 处理。
   coding_final_confirm_info?: CodingFinalConfirmInfoItem[];
+  // P3（REQ-WIGA-07）：issue 级有界近期完成目录（仅在请求携带 recent_since
+  // 时计算）。additive：旧响应缺失时前端按无近期补读处理（回落 watched
+  // info 投影，绝不认作 K 外全量）。
+  recent_completion_info?: RecentCompletionInfoItem[];
 };
 
 export type GenerateStorySpecsRequest = ProviderWorkspaceConfigInput & {

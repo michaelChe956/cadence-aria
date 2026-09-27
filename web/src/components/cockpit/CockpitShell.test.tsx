@@ -84,6 +84,9 @@ function ShellWithInbox({
     watchedSessionIds: ["s1", "s2", "s3", "s4"],
     watchSession: vi.fn(),
     codingAttemptForSession: () => null,
+    displayItems: inbox,
+    actionableCount: countedInbox.length,
+    notificationCandidates: [],
   });
 
   return (
@@ -119,6 +122,9 @@ function stubEmptyObservers() {
     watchedSessionIds: [],
     watchSession: vi.fn(),
     codingAttemptForSession: () => null,
+    displayItems: [],
+    actionableCount: 0,
+    notificationCandidates: [],
   });
 }
 

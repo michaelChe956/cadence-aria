@@ -720,6 +720,9 @@ describe("ChatWorkspacePage dual track switch", () => {
       watchedSessionIds: [],
       watchSession: vi.fn(),
         codingAttemptForSession: () => null,
+      displayItems: [],
+      actionableCount: 0,
+      notificationCandidates: [],
     });
     window.localStorage.setItem("aria.chat.cockpit", "legacy");
     setWorkspaceType("work_item");
