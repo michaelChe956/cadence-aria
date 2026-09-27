@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { CodingExecutionUnit, CodingWsOutMessage } from "../api/types";
@@ -846,6 +846,43 @@ describe("CodingWorkspacePage shell and actions", () => {
 
     expect(api.finalConfirm).toHaveBeenCalled();
     expect(api.abortAttempt).toHaveBeenCalled();
+  });
+
+  // P3 WIGA Task 4（tasks.md §4.2 / D5）：readiness Complete 且
+  // waiting_for_human/final_confirm 时明确「编码执行完成，待最终确认」并
+  // 有人手确认按钮；完成横幅只在人手确认（completed）后出现，unit 全完成
+  // 不提前冒称完成。
+  it("labels the waiting final-confirm state and completes only after human confirmation", async () => {
+    mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      attemptId: "coding_attempt_0001",
+      attemptScope: "work_item_group",
+      status: "waiting_for_human",
+      stage: "final_confirm",
+      units: dashboardUnits().map((unit) => ({ ...unit, status: "completed" as const })),
+      groupFinalReadiness: {
+        attempt_id: "coding_attempt_0001",
+        status: "complete",
+        units: [],
+        diagnostics: [],
+        created_at: "2026-08-07T00:00:00Z",
+      },
+    });
+
+    render(<CodingWorkspacePage address={CODING_ATTEMPT_ADDRESS} onBack={vi.fn()} />);
+
+    expect(screen.getByText("编码执行完成，待最终确认")).toBeInTheDocument();
+    expect(screen.queryByText("组级 Coding Workspace 已完成")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "确认完成" })).toBeEnabled();
+
+    await userEvent.click(screen.getByRole("button", { name: "确认完成" }));
+
+    // 人手确认回执（status=completed）后才显示完成横幅；等待文案消失。
+    act(() => {
+      useCodingWorkspaceStore.setState({ status: "completed" });
+    });
+    expect(screen.getByText("组级 Coding Workspace 已完成")).toBeInTheDocument();
+    expect(screen.queryByText("编码执行完成，待最终确认")).not.toBeInTheDocument();
   });
 
   it("shows abort action for awaiting_manual_recovery status", async () => {

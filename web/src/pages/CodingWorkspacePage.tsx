@@ -1,6 +1,7 @@
 import {
   ArrowLeft,
   CheckCircle2,
+  Clock,
   History,
   Settings2,
   Trash2,
@@ -543,6 +544,26 @@ export function CodingWorkspacePage({
           )}
         </div>
       </header>
+      {/* P3 WIGA Task 4（§4.2 / D5）：readiness Complete 且 waiting_for_human/
+          final_confirm 的等待态——明确「编码执行完成，待最终确认」，人手
+          点击「确认完成」（驾驶舱或本页按钮）后才允许完成横幅；unit 全
+          完成不提前冒称整组已交付。 */}
+      {store.attemptScope === "work_item_group" &&
+      store.stage === "final_confirm" &&
+      store.status === "waiting_for_human" ? (
+        <div
+          role="status"
+          aria-live="polite"
+          data-testid="coding-final-confirm-waiting"
+          className="flex shrink-0 items-center gap-2 border-b border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-4 py-2 text-xs text-[var(--aria-ink)]"
+        >
+          <Clock className="h-4 w-4 shrink-0" />
+          <span className="font-semibold">编码执行完成，待最终确认</span>
+          <span className="text-[var(--aria-ink-muted)]">
+            人工点击「确认完成」后才会最终确认
+          </span>
+        </div>
+      ) : null}
       {store.attemptScope === "work_item_group" &&
       store.status === "completed" ? (
         <div

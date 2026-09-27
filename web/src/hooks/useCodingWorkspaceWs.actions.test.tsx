@@ -411,6 +411,61 @@ describe("useCodingWorkspaceWs actions and reconnect", () => {
     vi.useRealTimers();
   });
 
+  // P3 WIGA Task 4（tasks.md §4.2 / REQ-WIGA-08）：断线重进以
+  // coding_hello.last_seen_node_id 续读 timeline——携带最后已知节点，
+  // 服务端快照重放不触发第二个 start_coding（单 attempt 单 start）。
+  it("resumes the timeline after reconnect via last_seen_node_id without a second start", () => {
+    vi.useFakeTimers();
+    const resumedNode = {
+      id: "coding_node_0001",
+      attempt_id: "coding_attempt_0001",
+      stage: "code_review" as const,
+      title: "Code review",
+      status: "completed" as const,
+      agent_role: "reviewer" as const,
+      summary: null,
+      started_at: "2026-08-07T00:00:00Z",
+      completed_at: "2026-08-07T00:01:00Z",
+      artifact_refs: [],
+    };
+    const harness = renderCodingHook();
+
+    act(() => {
+      harness.ws.open();
+      useCodingWorkspaceStore.setState({ timelineNodes: [resumedNode] });
+      harness.ws.close(1006);
+    });
+
+    act(() => {
+      vi.advanceTimersByTime(1_000);
+    });
+
+    act(() => {
+      MockWebSocket.instances[1].open();
+    });
+
+    expect(useCodingWorkspaceStore.getState().connectionStatus).toBe("connected");
+    expect(MockWebSocket.instances[1].sent).toEqual([
+      JSON.stringify({
+        type: "coding_hello",
+        attempt_id: "coding_attempt_0001",
+        last_seen_node_id: "coding_node_0001",
+      }),
+    ]);
+
+    // 服务端历史重放快照到达后：不发送 start_coding（重连只续读）。
+    act(() => {
+      MockWebSocket.instances[1].receive(codingSessionState());
+    });
+    expect(
+      MockWebSocket.instances[1].sent.filter(
+        (frame) => JSON.parse(frame).type === "start_coding",
+      ),
+    ).toHaveLength(0);
+    harness.unmount();
+    vi.useRealTimers();
+  });
+
   it("hydrates work item execution plan from coding session state", () => {
     const harness = renderCodingHook();
 
