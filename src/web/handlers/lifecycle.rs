@@ -427,6 +427,16 @@ pub async fn issue_lifecycle(
     )
     .map_err(product_store_api_error)?;
 
+    // P2（REQ-WIGA-07/R5）：coding FinalConfirm 等待信息与列表同源派生；
+    // 读取失败按 HTTP 显式错误传播（不伪 client、不吞为空）。
+    let coding_final_confirm_info =
+        crate::web::coding_final_confirm_info::issue_coding_final_confirm_info(
+            &app_paths,
+            &project_id,
+            &issue_id,
+        )
+        .map_err(product_store_api_error)?;
+
 
     Ok(Json(IssueLifecycleResponse {
         issue: product_issue_dto_with_binding(&app_paths, issue)?,
@@ -439,6 +449,7 @@ pub async fn issue_lifecycle(
         coding_attempts,
         delivery_summary,
         plan_confirmed_info,
+        coding_final_confirm_info,
     }))
 }
 

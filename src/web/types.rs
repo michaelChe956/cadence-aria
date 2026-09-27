@@ -10,6 +10,7 @@ use crate::product::coding_models::{
 };
 use crate::product::logical_codebase::LogicalRepositoryId;
 use crate::product::work_item_plan_policy::RunPolicy;
+use crate::web::coding_final_confirm_info::CodingFinalConfirmInfoDto;
 use crate::web::plan_confirmed_info::PlanConfirmedInfoDto;
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 
@@ -496,6 +497,10 @@ pub struct IssueLifecycleResponse {
     /// 确认信息（0 或 1 条）。additive：旧客户端反序列化缺省为空。
     #[serde(default)]
     pub plan_confirmed_info: Vec<PlanConfirmedInfoDto>,
+    /// P2（REQ-WIGA-07/R5）：enrolled 已认领 group attempt 的 FinalConfirm
+    /// 等待/已确认只读信息。additive：旧客户端反序列化缺省为空。
+    #[serde(default)]
+    pub coding_final_confirm_info: Vec<CodingFinalConfirmInfoDto>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]

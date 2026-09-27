@@ -1,4 +1,5 @@
 pub mod advance_plan;
+pub mod coding_final_confirm_info;
 pub mod coding_start;
 pub mod app;
 pub mod choice_reply;

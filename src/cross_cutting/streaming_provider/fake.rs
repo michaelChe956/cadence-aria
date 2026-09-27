@@ -76,8 +76,17 @@ fn fake_provider_output(input: &StreamingProviderInput) -> String {
     if matches!(input.role, AdapterRole::Reviewer)
         && let Some(contract) = input.structured_output_contract.as_ref()
     {
+        // verdict 词汇按契约 schema 区分：coding 侧 code review 契约
+        // （coding_workspace_code_review）消费 approve/request_changes/blocked
+        // （ReviewVerdict snake_case，无法解析时 fail-closed 落 Blocked 门）；
+        // workspace review 契约沿用 pass 词汇。
+        let verdict = if contract.schema_name == "coding_workspace_code_review" {
+            "approve"
+        } else {
+            "pass"
+        };
         return format!(
-            "审核说明\n<ARIA_STRUCTURED_OUTPUT nonce=\"{}\">{{\"nonce\":\"{}\",\"verdict\":\"pass\",\"summary\":\"审核通过\",\"findings\":[]}}</ARIA_STRUCTURED_OUTPUT>",
+            "审核说明\n<ARIA_STRUCTURED_OUTPUT nonce=\"{}\">{{\"nonce\":\"{}\",\"verdict\":\"{verdict}\",\"summary\":\"审核通过\",\"findings\":[]}}</ARIA_STRUCTURED_OUTPUT>",
             contract.nonce, contract.nonce
         );
     }

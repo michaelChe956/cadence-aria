@@ -663,40 +663,90 @@ impl WorkspaceEngine {
                 .lifecycle_store
                 .as_ref()
                 .ok_or("lifecycle store unavailable")?;
-            lifecycle
-                .upsert_issue_shared_worktree(
-                    crate::product::lifecycle_store::UpsertIssueSharedWorktreeInput {
-                        project_id: input.project_id.clone(),
-                        issue_id: input.issue_id.clone(),
-                        repository_id: repository.id.clone(),
-                        branch_name: group_journal.attempt.branch_name.clone(),
-                        worktree_path: worktree_path.clone(),
-                        base_branch: group_journal.attempt.base_branch.clone(),
-                    },
-                )
-                .map_err(|error| format!("persist shared worktree failed: {error}"))?;
-            let lease = lifecycle
-                .try_acquire_issue_worktree_lock(
-                    &input.project_id,
-                    &input.issue_id,
-                    &group_journal.lock_work_item_id,
-                    &group_journal.worktree_lease_id,
-                )
-                .map_err(|error| format!("acquire shared worktree failed: {error}"))?;
-            if !lease.acquired
-                && lease.worktree.current_lock_owner_id.as_deref()
-                    != Some(group_journal.attempt.id.as_str())
-            {
-                return Err("shared worktree is owned by another attempt".to_string());
+            // 单 target 逻辑仓（attempt 带 target_snapshot）：worktree 事实落
+            // repo 维三元键 `shared-worktrees/{repository_id}.json`（与
+            // initialize_advance_split 同构）。不得写 legacy
+            // `issue-shared-worktree.json`——coding 引擎 §4.2.6 preflight 对带
+            // target_snapshot 的 attempt 见 legacy 文件即 fail-closed
+            // （legacy_shared_worktree_present）。纯物理单 target（无
+            // snapshot）保持原 legacy 路径零变化。
+            if let Some(snapshot) = group_journal.attempt.target_snapshot.as_ref() {
+                lifecycle
+                    .upsert_repo_shared_worktree(
+                        crate::product::lifecycle_store::UpsertRepoSharedWorktreeInput {
+                            project_id: input.project_id.clone(),
+                            issue_id: input.issue_id.clone(),
+                            repository_id: snapshot.logical_repository_id,
+                            branch_name: group_journal.attempt.branch_name.clone(),
+                            worktree_path: worktree_path.clone(),
+                            base_branch: group_journal.attempt.base_branch.clone(),
+                        },
+                    )
+                    .map_err(|error| format!("persist shared worktree failed: {error}"))?;
+                // repo 维 lease 与 issue 维 worktree_lease_id 解耦：确定性派生自
+                // journal id（重放同值幂等）；bind 语义要求
+                // `repo_worktree_lease_` 前缀或 owner 已是 attempt id。
+                let lease_id = format!("repo_worktree_lease_{}", group_journal.id);
+                let lease = lifecycle
+                    .try_acquire_repo_worktree_lock(
+                        &input.project_id,
+                        &input.issue_id,
+                        snapshot.logical_repository_id,
+                        &group_journal.lock_work_item_id,
+                        &lease_id,
+                    )
+                    .map_err(|error| format!("acquire shared worktree failed: {error}"))?;
+                if !lease.acquired
+                    && lease.worktree.current_lock_owner_id.as_deref()
+                        != Some(group_journal.attempt.id.as_str())
+                {
+                    return Err("shared worktree is owned by another attempt".to_string());
+                }
+                lifecycle
+                    .bind_repo_worktree_lock_to_attempt(
+                        &input.project_id,
+                        &input.issue_id,
+                        snapshot.logical_repository_id,
+                        &group_journal.lock_work_item_id,
+                        &group_journal.attempt.id,
+                    )
+                    .map_err(|error| format!("bind shared worktree failed: {error}"))?;
+            } else {
+                lifecycle
+                    .upsert_issue_shared_worktree(
+                        crate::product::lifecycle_store::UpsertIssueSharedWorktreeInput {
+                            project_id: input.project_id.clone(),
+                            issue_id: input.issue_id.clone(),
+                            repository_id: repository.id.clone(),
+                            branch_name: group_journal.attempt.branch_name.clone(),
+                            worktree_path: worktree_path.clone(),
+                            base_branch: group_journal.attempt.base_branch.clone(),
+                        },
+                    )
+                    .map_err(|error| format!("persist shared worktree failed: {error}"))?;
+                let lease = lifecycle
+                    .try_acquire_issue_worktree_lock(
+                        &input.project_id,
+                        &input.issue_id,
+                        &group_journal.lock_work_item_id,
+                        &group_journal.worktree_lease_id,
+                    )
+                    .map_err(|error| format!("acquire shared worktree failed: {error}"))?;
+                if !lease.acquired
+                    && lease.worktree.current_lock_owner_id.as_deref()
+                        != Some(group_journal.attempt.id.as_str())
+                {
+                    return Err("shared worktree is owned by another attempt".to_string());
+                }
+                lifecycle
+                    .bind_issue_worktree_lock_to_attempt(
+                        &input.project_id,
+                        &input.issue_id,
+                        &group_journal.lock_work_item_id,
+                        &group_journal.attempt.id,
+                    )
+                    .map_err(|error| format!("bind shared worktree failed: {error}"))?;
             }
-            lifecycle
-                .bind_issue_worktree_lock_to_attempt(
-                    &input.project_id,
-                    &input.issue_id,
-                    &group_journal.lock_work_item_id,
-                    &group_journal.attempt.id,
-                )
-                .map_err(|error| format!("bind shared worktree failed: {error}"))?;
             group_journal = coding_store
                 .advance_group_initialization_phase(
                     &group_journal,

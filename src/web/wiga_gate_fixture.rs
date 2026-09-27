@@ -52,14 +52,78 @@
         gate_id: Option<String>,
     }
 
+    /// 测试态恒健康 provider health 源：CI/测试机上探测不到 claude/codex 二进制
+    /// 时真实 `ProviderHealthService` 恒 degraded，gateway spawn 前的
+    /// `ensure_available` 会拒绝 fake registry 承接的 claude_code 方言。P2
+    /// Fake 全链的 provider 启动经 provider gateway（引擎对带
+    /// target_snapshot 的 attempt fail-closed 强制），须以恒健康 gate 重建
+    /// gateway factory（仅测试 fixture，生产路径不受影响）。
+    struct AlwaysHealthyProviderHealth;
+
+    impl crate::cross_cutting::provider_availability_gate::ProviderHealthSource
+        for AlwaysHealthyProviderHealth
+    {
+        fn snapshot(
+            &self,
+        ) -> std::sync::Arc<crate::cross_cutting::provider_health::ProviderHealthSnapshot> {
+            let checked_at = chrono::Utc::now();
+            let entry = |provider: crate::product::models::ProviderName| {
+                crate::cross_cutting::provider_health::ProviderHealthEntry {
+                    provider,
+                    command: "fake-health".to_string(),
+                    available: true,
+                    version: Some("fake".to_string()),
+                    reason_code: None,
+                    reason: None,
+                    checked_at,
+                }
+            };
+            std::sync::Arc::new(
+                crate::cross_cutting::provider_health::ProviderHealthSnapshot {
+                    schema_version: 1,
+                    generation: 1,
+                    checked_at,
+                    providers: vec![
+                        entry(crate::product::models::ProviderName::ClaudeCode),
+                        entry(crate::product::models::ProviderName::Codex),
+                        entry(crate::product::models::ProviderName::Pi),
+                        entry(crate::product::models::ProviderName::KimiCode),
+                    ],
+                },
+            )
+        }
+
+        fn degraded(&self) -> bool {
+            false
+        }
+    }
+
+    fn fake_state_with_gateway(root: std::path::PathBuf) -> WebAppState {
+        let state = WebAppState::new(
+            root.clone(),
+            crate::web::runtime::WebRuntime::new_fake(root.clone()),
+        );
+        let factory = crate::web::gateway_factory::LogicalCodebaseGatewayFactory::new(
+            crate::product::app_paths::ProductAppPaths::new(root.join(".aria")),
+            state.provider_registry.clone(),
+            state.provider_adapter.clone(),
+            std::sync::Arc::new(
+                crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate::with_host_readiness(
+                    std::sync::Arc::new(AlwaysHealthyProviderHealth),
+                    std::sync::Arc::new(
+                        crate::cross_cutting::provider_availability_gate::AlwaysReadyProviderHost,
+                    ),
+                ),
+            ),
+        );
+        state.with_gateway_factory(std::sync::Arc::new(factory))
+    }
+
     impl EnrolledGateFixture {
         pub(crate) async fn new() -> Self {
             let inner = seed_fixture(1, true);
             let root_path = inner._root.path().to_path_buf();
-            let state = WebAppState::new(
-                root_path.clone(),
-                crate::web::runtime::WebRuntime::new_fake(root_path),
-            );
+            let state = fake_state_with_gateway(root_path.clone());
             // 子 WorkItem 上下文经 issue.repo_id 解析 repo-1：补进 repos.json
             //（seed_logical_codebase 重写后仅剩 physical 成员条目）。
             {
@@ -157,8 +221,13 @@
                         "designs": [{"id": design.id, "version": 1}]
                     },
                     "options": {
-                        "author_provider": "fake",
-                        "reviewer_provider": "fake",
+                        // 逻辑单 target 的 coding 引擎对带 target_snapshot 的 attempt
+                        // 强制经 provider gateway（`logical_provider_gateway_required`
+                        // fail-closed，Fake 无 gateway 方言不可用作 attempt provider）；
+                        // 测试 provider 模式下 registry 将 claude_code 路由到
+                        // TestControlledFakeStreamingProvider，行为等同 fake。
+                        "author_provider": "claude_code",
+                        "reviewer_provider": "claude_code",
                         "review_rounds": 1,
                         "superpowers_enabled": false,
                         "openspec_enabled": false,
@@ -617,13 +686,41 @@
             }
         }
 
+        /// Task 8 共享：复用原 `prepare_group_final_confirm_from_readiness`
+        /// 重复准备（readiness 重写/节点复用由引擎真实行为决定）。
+        pub(crate) async fn prepare_group_final_confirm_again(&self) {
+            let attempt = self.attempt();
+            let event_tx = self.state.coding_sockets.hub_sender(&self.attempt_key());
+            let engine = crate::product::coding_workspace_engine::CodingWorkspaceEngine::new(
+                self.store(),
+                crate::product::git_workspace_service::GitWorkspaceService::new(),
+                event_tx,
+            );
+            engine
+                .prepare_group_final_confirm_from_readiness(&attempt)
+                .await
+                .expect("repeat group final confirm preparation");
+        }
+
+        /// Task 8 共享：人手 `handle_final_confirm`（不代点、不直改状态）。
+        pub(crate) async fn confirm_final_by_human(&self) {
+            let attempt = self.attempt();
+            let event_tx = self.state.coding_sockets.hub_sender(&self.attempt_key());
+            let engine = crate::product::coding_workspace_engine::CodingWorkspaceEngine::new(
+                self.store(),
+                crate::product::git_workspace_service::GitWorkspaceService::new(),
+                event_tx,
+            );
+            engine
+                .handle_final_confirm(&attempt.project_id, &attempt.issue_id, &attempt.id)
+                .await
+                .expect("human final confirm");
+        }
+
         /// 「重启」进程替身：同 `.aria`、全新 WebAppState/runtime（内存态清零）。
+        /// 与 new() 同源重建恒健康 gateway factory（重启后 gateway 链路同等可用）。
         pub(crate) fn restart_state(&self) -> WebAppState {
-            let root = self.inner._root.path().to_path_buf();
-            WebAppState::new(
-                root.clone(),
-                crate::web::runtime::WebRuntime::new_fake(root),
-            )
+            fake_state_with_gateway(self.inner._root.path().to_path_buf())
         }
 
         pub(crate) fn session_path(&self, session_id: &str) -> std::path::PathBuf {
@@ -681,6 +778,63 @@
         fixture
     }
 
+    /// P2 Task 8 共享 fixture：接 Task 4 已 Ready/claimed 的 attempt，经真实
+    /// typed StartCoding（AutoStartOnce origin、stable command id）放行 Fake
+    /// runner，沿实际 unit→handoff→review→readiness 业务入口跑到
+    /// `WaitingForHuman + FinalConfirm`。失败即暴露真实缺失的 group 事实，
+    /// 不手改 attempt status、不从别的 fixture 拷贝 snapshot。
+    pub(crate) async fn complete_enrolled_group_waiting_for_final_confirm() -> EnrolledGateFixture {
+        let fixture = ready_enrolled_attempt_fixture().await;
+        let attempt = fixture.attempt();
+        let outcome = crate::web::coding_start::start_coding_once(
+            &fixture.state,
+            PROJECT_ID,
+            ISSUE_ID,
+            crate::web::coding_start::StartCodingCommand {
+                attempt_id: attempt.id.clone(),
+                command_id: format!("wiga-start-{}", attempt.id),
+                origin: fixture.auto_origin(),
+            },
+        )
+        .await
+        .expect("enrolled auto first start");
+        assert!(
+            matches!(
+                outcome,
+                crate::web::coding_start::StartCodingOutcome::Started { .. }
+            ),
+            "fake campaign must first-start exactly once: {outcome:?}"
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(150), async {
+            loop {
+                let current = fixture.attempt();
+                if current.status
+                    == crate::product::coding_models::CodingAttemptStatus::WaitingForHuman
+                    && current.stage
+                        == crate::product::coding_models::CodingExecutionStage::FinalConfirm
+                {
+                    break;
+                }
+                assert!(
+                    !matches!(
+                        current.status,
+                        crate::product::coding_models::CodingAttemptStatus::Failed
+                            | crate::product::coding_models::CodingAttemptStatus::Aborted
+                            | crate::product::coding_models::CodingAttemptStatus::AwaitingManualRecovery
+                    ),
+                    "fake campaign stopped unexpectedly at {:?}/{:?} reason={:?}",
+                    current.status,
+                    current.stage,
+                    current.manual_recovery_reason
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("fake campaign reaches human FinalConfirm");
+        fixture
+    }
+
     /// 在 physical checkout 上初始化真实 main 分支 git 仓库（空提交即可满足
     /// `resolve_advance_base_branch` 的 main→master 默认链验证）。
     fn init_real_main_checkout(repo: &std::path::Path) {
@@ -703,6 +857,24 @@
         git(repo, &["config", "user.email", "aria@example.com"]);
         git(repo, &["config", "user.name", "Aria Test"]);
         git(repo, &["commit", "--allow-empty", "-m", "advance base"]);
+        // ReviewRequest 阶段对 aria/issues/{issue} 分支做 `git ls-remote origin`
+        // 并 push：配一个本地 bare origin 满足远端存在性（不触网）。
+        let origin = repo
+            .parent()
+            .map(|parent| parent.join("origin-enroll-a.git"))
+            .expect("checkout parent");
+        let _ = std::fs::remove_dir_all(&origin);
+        git(repo, &["init", "--bare", origin.to_str().expect("origin path")]);
+        git(
+            repo,
+            &[
+                "remote",
+                "add",
+                "origin",
+                origin.to_str().expect("origin path"),
+            ],
+        );
+        git(repo, &["push", "origin", "main"]);
     }
 
     /// 对齐生产不变量（snapshot_validator 文档）：repository registration 与

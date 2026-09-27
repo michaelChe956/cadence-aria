@@ -702,6 +702,30 @@ pub fn issue_coding_final_confirm_info(paths: &ProductAppPaths,
 - [ ] **Step 4: 验证绿灯。** 重跑 Step 2，另跑 `cargo test --locked --lib group_final_readiness -- --nocapture` 和 `cargo test --locked --lib plan_confirmed_info -- --nocapture`，保证 P1 plan info 不被 coding 事实覆盖。
 - [ ] **Step 5: 提交。** `git add src/web/coding_final_confirm_info.rs src/web/mod.rs src/web/types.rs src/web/handlers/lifecycle.rs src/product/coding_workspace_engine/tests/group_final_readiness.rs src/web/wiga_gate_fixture.rs && git commit -m "feat: derive final-confirm coding info from durable readiness"`。
 
+> **实施偏差登记（2026-09-27，Task 8 主测转绿诊断）**：Fake 全链
+> `complete_enrolled_group_waiting_for_final_confirm` 首启后 Coding 阶段
+> `coding_runner_failed_while_running` 共暴露三层缺口，逐层修复：
+> ①**单 target 逻辑 advance 与 §4.2.6 preflight 结构性矛盾**——
+> `handle_advance` 单 target 分支给 attempt 挂 `target_snapshot` 却写 legacy
+> `issue-shared-worktree.json`，coding 引擎 `route_issue_shared_worktree` 对带
+> snapshot 的 attempt preflight 即 `legacy_shared_worktree_present` fail-closed。
+> 修复：`advance.rs` WorktreeBound 段在 `target_snapshot.is_some()` 时改写
+> repo 维三元键（`upsert_repo_shared_worktree`+repo lease/bind，与
+> `initialize_advance_split` 同构）；纯物理单 target（无 snapshot）保持
+> legacy 路径零变化。②**Fake 无 gateway 方言**——引擎对逻辑 target 强制经
+> gateway（`logical_provider_gateway_required`，不论 provider 是否 Fake），
+> 而 `ProviderRef::from_provider_name` 按设计拒绝 Fake。fixture 的 enrollment
+> options 改用 `claude_code`（测试 provider 模式 registry 将其路由到
+> `TestControlledFakeStreamingProvider`，行为等同 fake；生产语义不变）。
+> ③**gateway availability 依赖真实健康探测**——CI 上无 claude/codex 二进制
+> 时 `ProviderAvailabilityGate` 恒 degraded，gateway spawn 前
+> `ensure_available` 拒绝。fixture 增 `AlwaysHealthyProviderHealth` +
+> `fake_state_with_gateway`（恒健康 gate 重建 gateway factory，仅测试
+> fixture）。另：36f6efac 起存量破损——`tests/it_core/workspace_ws_integration/
+> part_03.rs` 引用枚举中不存在的 `sc_recovery_claim` 字段（该提交时点
+> `WsInMessage::ChoiceResponse` 已是 command_id/expected_run_id 门面），it_core
+> 自彼时起不可编译；已移除 4 处死初始化恢复编译。
+
 ## Task 9：3.3 驾驶舱信息去重、不可计数、正确 Coding Workspace 下钻
 
 **Files:** Modify `web/src/{api/types/lifecycle.ts,hooks/useWorkspaceSessionObservers.ts,state/workspace-cockpit-projection.ts,components/chat-workspace/cockpit/CockpitInbox.tsx,pages/ChatCockpitPage.tsx,pages/ChatWorkspacePage.tsx,router.tsx}`；Test `web/src/{hooks/useWorkspaceSessionObservers.test.tsx,components/cockpit/CockpitShell.test.tsx,pages/ChatCockpitPage.inbox.test.tsx,router.test.tsx}`。
