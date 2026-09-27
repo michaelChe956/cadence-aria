@@ -84,3 +84,106 @@ async fn sc_evaluate_reviewer_failure_is_durably_failed_once() {
     assert_eq!(durable2.status, WorkspaceSessionStatus::Open);
     assert_eq!(durable2.single_candidate_phase, None);
 }
+
+/// P2 GAP-H（Task 0.3）：网关 503「No available accounts」落 durable 的仅是
+/// 固定脱敏诊断类（不含原始 stderr/Authorization 凭据），且失败不是自动
+/// 重试信号——provider_start_ledger 不因失败自增，重驱只经 Task 0.1 人工入口。
+#[tokio::test]
+async fn reviewer_gateway_503_has_durable_human_diagnostic_without_retry() {
+    use crate::cross_cutting::provider_adapter::ProviderAdapterError;
+
+    let (_tmp, lifecycle, _plan, mut engine) =
+        make_work_item_plan_engine_with_accepted_contract_drafts();
+    single_candidate_record(
+        &lifecycle,
+        &mut engine,
+        SingleCandidatePhase::Evaluate,
+        RunPolicy::Interactive,
+    );
+    engine.start_review().await;
+    let failed_node_id = engine.active_timeline_node_id().unwrap();
+    let before = lifecycle
+        .get_workspace_session(&engine.session().session_id)
+        .unwrap()
+        .provider_start_ledger
+        .len();
+    let (_tx, rx) = tokio::sync::mpsc::channel(1);
+    engine
+        .drive_reviewer_provider_session(
+            Err(ProviderAdapterError::provider_unavailable(
+                "503 No available accounts; Authorization: Bearer secret",
+            )),
+            rx,
+            crate::product::models::ProviderName::ClaudeCode,
+        )
+        .await;
+    let nodes = lifecycle
+        .load_timeline_nodes_for_issue_session(
+            &engine.session().project_id,
+            &engine.session().issue_id,
+            &engine.session().session_id,
+        )
+        .unwrap();
+    let summary = nodes
+        .iter()
+        .find(|n| n.node_id == failed_node_id)
+        .unwrap()
+        .summary
+        .as_deref()
+        .unwrap();
+    assert!(summary.contains("provider_gateway_503_no_accounts"));
+    assert!(!summary.contains("secret"));
+    assert_eq!(
+        lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .unwrap()
+            .provider_start_ledger
+            .len(),
+        before
+    );
+}
+
+/// GAP-H 边界：普通动态不可用（无 503/账号池标记）不得误报 503 类，落通用
+/// 失败类；原始错误文案不进 durable 摘要。
+#[tokio::test]
+async fn reviewer_plain_unavailable_keeps_generic_diagnostic() {
+    use crate::cross_cutting::provider_adapter::ProviderAdapterError;
+
+    let (_tmp, lifecycle, _plan, mut engine) =
+        make_work_item_plan_engine_with_accepted_contract_drafts();
+    single_candidate_record(
+        &lifecycle,
+        &mut engine,
+        SingleCandidatePhase::Evaluate,
+        RunPolicy::Interactive,
+    );
+    engine.start_review().await;
+    let failed_node_id = engine.active_timeline_node_id().unwrap();
+    let (_tx, rx) = tokio::sync::mpsc::channel(1);
+    engine
+        .drive_reviewer_provider_session(
+            Err(ProviderAdapterError::provider_unavailable(
+                "connection reset by peer SECRET_LEAK_MARKER",
+            )),
+            rx,
+            crate::product::models::ProviderName::ClaudeCode,
+        )
+        .await;
+    let nodes = lifecycle
+        .load_timeline_nodes_for_issue_session(
+            &engine.session().project_id,
+            &engine.session().issue_id,
+            &engine.session().session_id,
+        )
+        .unwrap();
+    let summary = nodes
+        .iter()
+        .find(|n| n.node_id == failed_node_id)
+        .unwrap()
+        .summary
+        .as_deref()
+        .unwrap();
+    assert!(summary.contains("provider_reviewer_failed"));
+    assert!(!summary.contains("provider_gateway_503_no_accounts"));
+    assert!(!summary.contains("SECRET_LEAK_MARKER"));
+}

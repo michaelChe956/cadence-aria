@@ -934,4 +934,46 @@ describe("ChatCockpitPage", () => {
     expect(retryMock).toHaveBeenCalledTimes(2);
     expect(retryMock).toHaveBeenLastCalledWith("session_001", "node_sc_failed");
   });
+
+  // P2 GAP-H（Task 0.3）：503「No available accounts」分类摘要经 sc_failed 卡
+  // 可见——分类与人工重驱按钮同屏，渲染不自动触发任何重试。
+  it("gateway 503 diagnostic is visible on the failed card without auto retry", async () => {
+    const user = userEvent.setup();
+    const retryMock = vi.mocked(postRetryFailedScRun);
+    retryMock.mockResolvedValue({
+      command_id: "cmd-sc-retry-node_sc_503",
+      failed_node_id: "node_sc_503",
+      state: "accepted",
+    });
+    useWorkspaceStore.setState({
+      sessionId: "session_001",
+      flowKind: "single_candidate",
+      singleCandidatePhase: "failed",
+      sessionStatus: "failed",
+    });
+    useWorkspaceStore.getState().setTimelineNodesForTest([
+      timelineNode({
+        node_id: "node_sc_503",
+        node_type: "reviewer_run",
+        status: "failed",
+        title: "Review Round 1",
+        summary:
+          "provider_gateway_503_no_accounts: 推理网关账号池不可用；检查服务后手动重驱",
+      }),
+    ]);
+
+    renderCockpit();
+
+    // 无自动重试：渲染后零 REST 调用。
+    expect(retryMock).not.toHaveBeenCalled();
+    const inbox = screen.getByTestId("cockpit-inbox");
+    expect(within(inbox).getByText("单候选评审运行失败")).toBeInTheDocument();
+    expect(
+      within(inbox).getByText(/provider_gateway_503_no_accounts: 推理网关账号池不可用/),
+    ).toBeInTheDocument();
+    const button = within(inbox).getByRole("button", { name: "人工重新驱动" });
+    await user.click(button);
+    expect(retryMock).toHaveBeenCalledTimes(1);
+    expect(retryMock).toHaveBeenCalledWith("session_001", "node_sc_503");
+  });
 });

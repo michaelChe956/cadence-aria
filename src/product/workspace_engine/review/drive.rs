@@ -601,15 +601,14 @@ impl WorkspaceEngine {
 
     async fn finish_review_provider_run_failure(&mut self, failure: ReviewProviderRunFailure) {
         match failure {
-            ReviewProviderRunFailure::Start(message) => {
+            ReviewProviderRunFailure::Start { message, code } => {
+                // GAP-H（Task 0.3）：固定脱敏摘要在 message 移动前计算——匹配
+                // 只用 code 与标记串，原始 stderr/凭据绝不进 durable 摘要。
+                let diagnostic = reviewer_failure_diagnostic(Some(code), &message);
                 let _ = self.event_tx.send(EngineEvent::Error { message }).await;
                 if let Some(node_id) = self.active_node_id.clone() {
-                    self.update_timeline_node(
-                        &node_id,
-                        TimelineNodeStatus::Failed,
-                        Some("Provider 启动失败".to_string()),
-                    )
-                    .await;
+                    self.update_timeline_node(&node_id, TimelineNodeStatus::Failed, Some(diagnostic))
+                        .await;
                 }
                 self.promote_single_candidate_review_failed();
                 self.finish_failed_run().await;
@@ -618,15 +617,12 @@ impl WorkspaceEngine {
                 self.promote_single_candidate_review_failed();
                 self.finish_empty_assistant_output().await;
             }
-            ReviewProviderRunFailure::Provider(message) => {
+            ReviewProviderRunFailure::Provider { message, code } => {
+                let diagnostic = reviewer_failure_diagnostic(code, &message);
                 let _ = self.event_tx.send(EngineEvent::Error { message }).await;
                 if let Some(node_id) = self.active_node_id.clone() {
-                    self.update_timeline_node(
-                        &node_id,
-                        TimelineNodeStatus::Failed,
-                        Some("Provider 运行失败".to_string()),
-                    )
-                    .await;
+                    self.update_timeline_node(&node_id, TimelineNodeStatus::Failed, Some(diagnostic))
+                        .await;
                 }
                 self.promote_single_candidate_review_failed();
                 self.finish_failed_run().await;
@@ -638,6 +634,11 @@ impl WorkspaceEngine {
         }
     }
 
+    /// P2 GAP-H（Task 0.3）：reviewer 失败的固定脱敏诊断摘要。仅当原 adapter
+    /// 错误码为 `ProviderUnavailable` 且有界 details/stderr 同时含 `503` 与
+    /// `No available accounts` 时落固定安全类；其余（含无 code 的 runtime
+    /// 失败、动态网络波动）一律通用失败类。原始 stderr/Authorization 不落
+    /// durable 摘要；故障不是自动重试信号，重驱只走 Task 0.1 人工入口。
     /// P2 GAP-E/G（Task 0.1）：SC Evaluate 相位的 reviewer 运行失败收敛为
     /// durable 终态 Failed（phase+status CAS），供人工显式重驱；仅作用于
     /// 当前 reviewer 节点已标 Failed 的现场，不进入其他 finish_failed_run
@@ -670,12 +671,18 @@ impl WorkspaceEngine {
                 // 尾部（有界）并入消息——claude D③ 快照未并入 details 的时刻不再
                 // 被驱动层丢弃，随 Start 失败 → EngineEvent::Error → WS error 上浮。
                 let mut message = error.details;
+                let code = error.code;
                 ProviderAdapterError::append_bounded_stderr_tail(
                     &mut message,
                     &error.stderr,
                     PROVIDER_ERROR_STDERR_TAIL_BYTES,
                 );
-                return ReviewProviderRunResult::Failed(ReviewProviderRunFailure::Start(message));
+                // GAP-H（Task 0.3）：错误码随失败透传，供节点摘要按原 code
+                // 分类，不从拼接后的文案猜。
+                return ReviewProviderRunResult::Failed(ReviewProviderRunFailure::Start {
+                    message,
+                    code,
+                });
             }
         };
 
@@ -742,9 +749,10 @@ impl WorkspaceEngine {
                     if let Some(node_id) = node_id.as_deref() {
                         let _ = self.flush_stream_buffer(node_id).await;
                     }
-                    return ReviewProviderRunResult::Failed(
-                        ReviewProviderRunFailure::Provider(message),
-                    );
+                    return ReviewProviderRunResult::Failed(ReviewProviderRunFailure::Provider {
+                        message,
+                        code: None,
+                    });
                 }
                 _ = &mut choice_wait_timer,
                 if !pending_choice_ids.is_empty() =>
@@ -767,9 +775,10 @@ impl WorkspaceEngine {
                     if let Some(node_id) = node_id.as_deref() {
                         let _ = self.flush_stream_buffer(node_id).await;
                     }
-                    return ReviewProviderRunResult::Failed(
-                        ReviewProviderRunFailure::Provider(message),
-                    );
+                    return ReviewProviderRunResult::Failed(ReviewProviderRunFailure::Provider {
+                        message,
+                        code: None,
+                    });
                 }
                 command = command_rx.recv(), if commands_open => {
                     // F-19b：任何命令活动（含人工权限/选择应答）重置看门狗。
@@ -1055,7 +1064,7 @@ impl WorkspaceEngine {
                                 let _ = self.flush_stream_buffer(node_id).await;
                             }
                             return ReviewProviderRunResult::Failed(
-                                ReviewProviderRunFailure::Provider(message),
+                                ReviewProviderRunFailure::Provider { message, code: None },
                             );
                         }
                         ProviderEvent::ProtocolError {
@@ -1111,6 +1120,20 @@ impl WorkspaceEngine {
             let completion = ProviderCompletion::plain(full_content, None);
             ReviewProviderRunResult::Completed(completion)
         }
+    }
+}
+
+fn reviewer_failure_diagnostic(
+    code: Option<crate::protocol::provider_errors::ProviderErrorCode>,
+    message: &str,
+) -> String {
+    if code == Some(crate::protocol::provider_errors::ProviderErrorCode::ProviderUnavailable)
+        && message.contains("503")
+        && message.contains("No available accounts")
+    {
+        "provider_gateway_503_no_accounts: 推理网关账号池不可用；检查服务后手动重驱".to_string()
+    } else {
+        "provider_reviewer_failed: 评审运行失败；核对 provider 后手动重驱".to_string()
     }
 }
 

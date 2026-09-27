@@ -639,9 +639,19 @@ pub(crate) enum ReviewProviderRunResult {
 }
 
 pub(crate) enum ReviewProviderRunFailure {
-    Start(String),
+    /// reviewer 会话启动失败：保留原 adapter 错误码（GAP-H Task 0.3 分类
+    /// 不从拼接后的错误文案猜 code），message 为有界 details+stderr。
+    Start {
+        message: String,
+        code: crate::protocol::provider_errors::ProviderErrorCode,
+    },
     EmptyOutput,
-    Provider(String),
+    /// reviewer 运行期失败：streaming 事件只带字符串消息，无结构化错误码，
+    /// 分类时按无 code 处理（不误报 503 类）。
+    Provider {
+        message: String,
+        code: Option<crate::protocol::provider_errors::ProviderErrorCode>,
+    },
     PermissionTimeout(String),
 }
 
