@@ -90,6 +90,22 @@ pub enum CodingStartRunPolicy {
     },
 }
 
+/// P2 Task 3（tasks.md §3.1）：首启请求的 origin 身份，product 层定义
+/// （web::coding_start 只消费同一类型，不建 web 同名类型）。
+///
+/// Manual 是人工 WS 首启；Enrolled 携带 enrollment 精确身份（id +
+/// policy_revision 快照），与 attempt 冻结的 `start_run_policy`、当前
+/// durable enrollment 三方一致才构成自动首启授权。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodingStartOrigin {
+    Manual,
+    Enrolled {
+        enrollment_id: String,
+        policy_revision: u64,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CodingProviderRole {

@@ -567,6 +567,28 @@
                 .sum()
         }
 
+        /// issue 下唯一 coding attempt（P2 Task 3+ 共享）：fixture 现场恰一
+        /// attempt，多于一条即 fixture 构造编程错误。
+        pub(crate) fn attempt(
+            &self,
+        ) -> crate::product::coding_models::CodingExecutionAttempt {
+            let attempts = self.coding_attempts();
+            assert_eq!(
+                attempts.len(),
+                1,
+                "fixture expects exactly one coding attempt"
+            );
+            attempts.into_iter().next().unwrap()
+        }
+
+        /// 指定 attempt 的进程内 runner 数（真实 registry 事实）。
+        pub(crate) fn runner_count(
+            &self,
+            key: &crate::web::state::CodingAttemptRunKey,
+        ) -> usize {
+            self.state.coding_runs.runner_count(key)
+        }
+
         pub(crate) fn session_path(&self, session_id: &str) -> std::path::PathBuf {
             self.inner
                 .paths
