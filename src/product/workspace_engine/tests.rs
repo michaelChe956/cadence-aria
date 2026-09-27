@@ -1,6 +1,7 @@
 use crate::product::cadence_skills::routing_reference::RoutingReferenceContext;
 
 include!("tests/part_01.rs");
+include!("tests/choice_delivery_receipt.rs");
 mod advance_handler;
 #[path = "tests/advance_initialization.rs"]
 mod advance_initialization;
