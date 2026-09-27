@@ -642,6 +642,7 @@
     pub(crate) async fn confirmed_enrolled_fixture() -> EnrolledGateFixture {
         let mut fixture = EnrolledGateFixture::new().await;
         init_real_main_checkout(&fixture.inner.paths.root().join("checkout-enroll-a"));
+        normalize_checkout_revision_to_unobserved(&fixture.inner.paths);
         fixture.fail_compile_after_human_approve().await;
         fixture.recover_and_confirm_compile().await;
         fixture
@@ -702,6 +703,25 @@
         git(repo, &["config", "user.email", "aria@example.com"]);
         git(repo, &["config", "user.name", "Aria Test"]);
         git(repo, &["commit", "--allow-empty", "-m", "advance base"]);
+    }
+
+    /// 对齐生产不变量（snapshot_validator 文档）：repository registration 与
+    /// identity 迁移从不持久化 `RepositoryCheckoutRecord.revision`（恒 None），
+    /// admission 只在 checkout 侧已观测（Some）时逐字比对。seed 写入的合成
+    /// `Some("abcdef")` 会与 `init_real_main_checkout` 真实 HEAD 冻结出的快照
+    /// revision 恒不一致 → admission 误判 `target_snapshot_identity_drifted`。
+    /// 真仓就位后把权威 checkout 记录 revision 归一为未观测（None）。
+    fn normalize_checkout_revision_to_unobserved(
+        paths: &crate::product::app_paths::ProductAppPaths,
+    ) {
+        let lc_store = crate::product::logical_codebase::LogicalCodebaseStore::new(paths.clone());
+        for checkout in lc_store.list_checkouts(PROJECT_ID).expect("list checkouts") {
+            let mut patched = checkout.clone();
+            patched.revision = None;
+            lc_store
+                .save_checkout(PROJECT_ID, &patched)
+                .expect("normalize checkout revision");
+        }
     }
 
     /// provider 等待者：真实消费 run command 通道，choice 应答即投递回执。

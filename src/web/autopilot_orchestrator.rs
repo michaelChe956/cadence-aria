@@ -26,8 +26,14 @@ pub enum ReconcileOutcome {
     Prepared,
     /// 生成动作在途或已派发（含活 run 只观察）。
     Generating,
-    /// fail-closed 停点（授权漂移/损坏/不可证明的分诊），只待人。
+    /// fail-closed 停点（授权漂移/损坏/不可证明的分诊），只等人。
     NeedsHuman,
+    /// P2 Task 5：Confirmed plan 本轮已请求 stable-id advance（到 Ready 即
+    /// 止，不在同轮首启 coding）。
+    Advancing,
+    /// P2 Task 5：Ready 唯一 attempt 已请求 stable-id AutoStartOnce（含已在
+    /// 途/已认领的重复唤醒，不重启）。
+    Coding,
 }
 
 /// 有界 tick 配置；缺省 2s 间隔、每轮最多 32 issue。
@@ -112,6 +118,12 @@ impl AutopilotOrchestrator {
         // RecoveryRequired、开启中的人工门轮次、provider run 挂起的 choice
         // 都不推进下一动作，只等待 P0 REST 人手解除（REQ-WIGA-02/REQ-CG-04）。
         if let Some(outcome) = human_stop_point(state, &fresh).await? {
+            return Ok(outcome);
+        }
+        // P2 Task 5：Confirmed 编排链——成功确认的 plan 先 stable-id advance
+        //（到 Ready 即止），下一轮才对 Ready 唯一 attempt 发 stable-id
+        // AutoStartOnce；其余状态仍交生成准入（原语义）。
+        if let Some(outcome) = coding_chain_stage(state, &fresh).await? {
             return Ok(outcome);
         }
         match start_plan_generation_once(state, &fresh).await? {
@@ -270,6 +282,126 @@ async fn human_stop_point(
         return Ok(Some(ReconcileOutcome::AwaitingHuman));
     }
     Ok(None)
+}
+
+/// P2 Task 5：Confirmed 编排链分诊。只在「Confirmed + `plan_confirmed_info`
+/// 可派生成功 publication/compile + 当前 enrollment 精确绑定」时接管：
+/// 未 Ready 先 stable-id `advance_plan`（本轮到 Ready 即止）；Ready 后读取
+/// group journal 唯一 attempt，按状态分诊或 stable-id AutoStartOnce
+///（`wiga-start-{attempt_id}`，同 claim 意图固定）。Failed/Aborted/漂移
+/// 一律 NeedsHuman；任何 Replayed 的 Failed/Aborted 记录也人工分诊，
+/// 不隐式新 command。其余 session 状态返回 None 交生成准入。
+async fn coding_chain_stage(
+    state: &WebAppState,
+    enrollment: &crate::product::models::automation::IssueAutomationEnrollment,
+) -> Result<Option<ReconcileOutcome>, String> {
+    use crate::product::advance_store::{AdvanceOutcome, AdvanceStatus, AdvanceStore};
+    use crate::product::coding_models::{CodingAttemptStatus, CodingStartOrigin};
+    use crate::product::models::WorkspaceSessionStatus;
+    use crate::web::advance_plan::{AdvancePlanOrigin, advance_plan};
+    use crate::web::coding_start::{StartCodingCommand, StartCodingOutcome, start_coding_once};
+
+    let Some(session_id) = enrollment.session_id.as_deref() else {
+        return Ok(None);
+    };
+    let paths = ProductAppPaths::new(state.workspace_root.join(".aria"));
+    let lifecycle = crate::product::lifecycle_store::LifecycleStore::new(paths.clone());
+    let session = lifecycle
+        .get_workspace_session(session_id)
+        .map_err(|error| format!("bound session unreadable: {error}"))?;
+    if session.status != WorkspaceSessionStatus::Confirmed {
+        return Ok(None);
+    }
+    // 成功 publication/compile 必须可由 P1 只读投影派生（含 enrollment
+    // enabled/精确绑定与 compile reservation/事务 Committed）；不可派生
+    // 即 fail-closed 人工分诊。
+    let confirmed =
+        crate::web::plan_confirmed_info::plan_confirmed_info(&paths, enrollment)
+            .map_err(|error| format!("plan confirmed info unreadable: {error}"))?;
+    if confirmed.is_none() {
+        return Ok(Some(ReconcileOutcome::NeedsHuman));
+    }
+    let Some(plan_id) = enrollment.plan_id.clone() else {
+        return Ok(Some(ReconcileOutcome::NeedsHuman));
+    };
+    let project_id = enrollment.project_id.clone();
+    let issue_id = enrollment.issue_id.clone();
+
+    let advance_ready = AdvanceStore::new(paths.clone())
+        .get_advance_for_plan(&project_id, &issue_id, &plan_id)
+        .map_err(|error| format!("advance record unreadable: {error}"))?
+        .is_some_and(|record| record.status == AdvanceStatus::Ready);
+    if !advance_ready {
+        let outcome = advance_plan(
+            state,
+            crate::product::advance_store::AdvanceInput {
+                command_id: format!("wiga-advance-{}-{plan_id}", enrollment.enrollment_id),
+                project_id: project_id.clone(),
+                issue_id: issue_id.clone(),
+                plan_id: plan_id.clone(),
+            },
+            AdvancePlanOrigin::Enrolled {
+                enrollment_id: enrollment.enrollment_id.clone(),
+                policy_revision: enrollment.policy_revision,
+            },
+        )
+        .await;
+        return Ok(Some(match outcome {
+            Ok(AdvanceOutcome::Completed { record, .. })
+                if record.status == AdvanceStatus::Ready =>
+            {
+                ReconcileOutcome::Advancing
+            }
+            Ok(AdvanceOutcome::Replayed { record })
+                if record.status == AdvanceStatus::Ready =>
+            {
+                ReconcileOutcome::Advancing
+            }
+            _ => ReconcileOutcome::NeedsHuman,
+        }));
+    }
+
+    // Ready：group journal 的唯一 attempt 分诊（不按 sibling 循环）。
+    let journal = crate::product::coding_attempt_store::CodingAttemptStore::new(paths.clone())
+        .get_group_initialization(&project_id, &issue_id, &plan_id)
+        .map_err(|error| format!("group initialization journal unreadable: {error}"))?;
+    let attempt = journal.attempt;
+    match attempt.status {
+        CodingAttemptStatus::Running
+        | CodingAttemptStatus::AwaitingPlanAmendment
+        | CodingAttemptStatus::ApplyingPlanAmendment
+        | CodingAttemptStatus::AmendmentApplyFailed
+        | CodingAttemptStatus::Completed => Ok(Some(ReconcileOutcome::Coding)),
+        CodingAttemptStatus::WaitingForHuman | CodingAttemptStatus::Blocked => {
+            Ok(Some(ReconcileOutcome::AwaitingHuman))
+        }
+        CodingAttemptStatus::Failed
+        | CodingAttemptStatus::Aborted
+        | CodingAttemptStatus::AwaitingManualRecovery => Ok(Some(ReconcileOutcome::NeedsHuman)),
+        CodingAttemptStatus::Created => {
+            let start = start_coding_once(
+                state,
+                &project_id,
+                &issue_id,
+                StartCodingCommand {
+                    attempt_id: attempt.id.clone(),
+                    command_id: format!("wiga-start-{}", attempt.id),
+                    origin: CodingStartOrigin::Enrolled {
+                        enrollment_id: enrollment.enrollment_id.clone(),
+                        policy_revision: enrollment.policy_revision,
+                    },
+                },
+            )
+            .await;
+            Ok(Some(match start {
+                Ok(StartCodingOutcome::Started { .. })
+                | Ok(StartCodingOutcome::AlreadyStarted { .. }) => ReconcileOutcome::Coding,
+                Ok(StartCodingOutcome::NeedsHuman { .. }) | Err(_) => {
+                    ReconcileOutcome::NeedsHuman
+                }
+            }))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -707,3 +839,88 @@ mod task7_gates {
         assert_eq!(fixture.provider_start_ledger(), before);
     }
 }
+
+// ---------------------------------------------------------------------------
+// P2 Task 5（tasks.md §3.1）：Confirmed plan 无 socket 独立 advance 到
+// Ready，下一轮才 stable-id AutoStartOnce；重复唤醒不重启同一 attempt。
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod p2_coding_chain {
+    use super::*;
+    use crate::web::state::CodingAttemptRunKey;
+    use crate::web::wiga_gate_fixture::*;
+
+    #[tokio::test]
+    async fn confirmed_enrollment_advances_then_starts_without_coding_socket() {
+        let fixture = confirmed_enrolled_fixture().await;
+        let worker = AutopilotOrchestrator::new(fixture.state.clone(), Default::default());
+        assert_eq!(
+            worker.reconcile(&fixture.state, PROJECT_ID, ISSUE_ID).await.unwrap(),
+            ReconcileOutcome::Advancing
+        );
+        let ready = fixture.coding_attempts().into_iter().next().unwrap();
+        assert_eq!(
+            fixture.state.coding_runs.runner_count(
+                &CodingAttemptRunKey::from_attempt(&ready)
+            ),
+            0,
+            "advance must not sneak provider start into the same transition"
+        );
+        assert_eq!(
+            worker.reconcile(&fixture.state, PROJECT_ID, ISSUE_ID).await.unwrap(),
+            ReconcileOutcome::Coding
+        );
+        assert_eq!(
+            fixture
+                .state
+                .coding_runs
+                .runner_count(&CodingAttemptRunKey::from_attempt(&ready)),
+            1
+        );
+        // 重复唤醒：同 attempt 不重启（durable claim + registry 单飞）。
+        assert_eq!(
+            worker.reconcile(&fixture.state, PROJECT_ID, ISSUE_ID).await.unwrap(),
+            ReconcileOutcome::Coding
+        );
+
+        assert_eq!(
+            fixture.coding_attempts().into_iter().next().unwrap().id,
+            ready.id
+        );
+        assert!(fixture
+            .coding_attempts()
+            .into_iter()
+            .next()
+            .unwrap()
+            .start_claim
+            .is_some());
+    }
+
+
+    /// D2：Confirmed 后 disable 先胜——未消费的 AutoStartOnce/advance 许可
+    /// 不再生效，零 provider。
+    #[tokio::test]
+    async fn disabled_after_confirm_yields_no_enrollment_before_any_start() {
+        let fixture = confirmed_enrolled_fixture().await;
+        let enrollment = fixture.enrollment();
+        crate::product::issue_automation_store::IssueAutomationStore::new(
+            fixture.inner.paths.clone(),
+        )
+        .compare_and_set(
+            PROJECT_ID,
+            ISSUE_ID,
+            Some(enrollment.policy_revision),
+            crate::product::models::automation::EnrollmentWriteCommand::Disable,
+        )
+        .expect("disable enrollment");
+        let worker = AutopilotOrchestrator::new(fixture.state.clone(), Default::default());
+        assert_eq!(
+            worker.reconcile(&fixture.state, PROJECT_ID, ISSUE_ID).await.unwrap(),
+            ReconcileOutcome::NoEnrollment
+        );
+        assert!(fixture.coding_attempts().is_empty());
+        assert_eq!(fixture.coding_runner_count(), 0);
+    }
+}
+

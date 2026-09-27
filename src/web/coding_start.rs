@@ -290,7 +290,21 @@ async fn start_coding_attempt(
             match existing.phase {
                 CodingStartPhase::Claimed | CodingStartPhase::RunnerRegistered => saved,
                 CodingStartPhase::ProviderMayHaveStarted => {
-                    if saved.status == CodingAttemptStatus::Running {
+                    // 可信在途事实：attempt 已 Running、本进程仍有 runner/预约，
+                    // 或 role run ledger 已有 provider 启动证据——交由在途 run /
+                    // 恢复协议，绝不二次首启。
+                    let ledger_started = coding_store
+                        .list_role_runs(
+                            &saved.project_id,
+                            &saved.issue_id,
+                            &saved.id,
+                        )
+                        .map(|runs| !runs.is_empty())
+                        .unwrap_or(false);
+                    if saved.status == CodingAttemptStatus::Running
+                        || ledger_started
+                        || state.coding_runs.attempt_is_reserved_or_running(&attempt_key)
+                    {
                         return Ok(StartCodingOutcome::AlreadyStarted { attempt_id: saved.id });
                     }
                     let marked = coding_store

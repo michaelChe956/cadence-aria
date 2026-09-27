@@ -365,27 +365,70 @@ async fn handle_coding_socket(
                         .await;
                         continue;
                     }
-                    let Some(command_tx) = spawn_coding_runner(
-                        state.clone(),
-                        coding_store.clone(),
-                        event_tx.clone(),
-                        current_attempt.clone(),
-                    ) else {
-                        drop(mutation_lease);
-                        let _ = send_coding_json(
-                            &mut socket_tx,
-                            &CodingWsOutMessage::CodingProtocolError {
-                                code: "coding_runner_already_started".to_string(),
-                                message: "coding runner is already active for this attempt"
-                                    .to_string(),
-                            },
-                        )
-                        .await;
-                        continue;
-                    };
-                    runner_started = true;
-                    runner_command_tx = Some(command_tx);
+                    // P2 Task 5：WS 首启与后台编排共用同一 typed service。
+                    // 先释放 mutation lease（service 自持 attempt guard 并在
+                    // 锁内重读，不得持 lease await 同名锁）；Manual origin 用
+                    // 本帧一次性随机合法 command_id。并发失败复用 durable
+                    // claim 的 attempt 状态，绝不发第二个 runner。
                     drop(mutation_lease);
+                    let start = crate::web::coding_start::start_coding_once(
+                        &state,
+                        &current_attempt.project_id,
+                        &current_attempt.issue_id,
+                        crate::web::coding_start::StartCodingCommand {
+                            attempt_id: current_attempt.id.clone(),
+                            command_id: manual_command_id_for_this_frame(),
+                            origin: crate::product::coding_models::CodingStartOrigin::Manual,
+                        },
+                    )
+                    .await;
+                    match start {
+                        Ok(
+                            crate::web::coding_start::StartCodingOutcome::Started { .. }
+                            | crate::web::coding_start::StartCodingOutcome::AlreadyStarted { .. },
+                        ) => {
+                            // registry 是 runner 权威：有本进程 runner 即回填本
+                            // 连接句柄（连接级 runner_started 只是观察值）；
+                            // AlreadyStarted 且无本进程 runner（跨进程认领/
+                            // runner 已消亡）时回发 durable 状态快照，不报错。
+                            if let Some(command_tx) =
+                                state.coding_runs.command_sender(&attempt_key)
+                            {
+                                runner_started = true;
+                                runner_command_tx = Some(command_tx);
+                            } else if let Ok(updated) = coding_store.get_attempt(
+                                &current_attempt.project_id,
+                                &current_attempt.issue_id,
+                                &current_attempt.id,
+                            ) && let Ok(snapshot) =
+                                build_coding_session_state(&coding_store, updated)
+                            {
+                                let _ = send_coding_json(&mut socket_tx, &snapshot).await;
+                            }
+                        }
+                        Ok(crate::web::coding_start::StartCodingOutcome::NeedsHuman {
+                            reason, ..
+                        }) => {
+                            let _ = send_coding_json(
+                                &mut socket_tx,
+                                &CodingWsOutMessage::CodingProtocolError {
+                                    code: "coding_start_needs_human".to_string(),
+                                    message: reason,
+                                },
+                            )
+                            .await;
+                        }
+                        Err(error) => {
+                            let _ = send_coding_json(
+                                &mut socket_tx,
+                                &CodingWsOutMessage::CodingProtocolError {
+                                    code: error.code().to_string(),
+                                    message: error.message().to_string(),
+                                },
+                            )
+                            .await;
+                        }
+                    }
                 } else if inbound == CodingWsInMessage::RestartCoding {
                     // F-44：中止/失败终态的显式「重新开始」通道——重走 admission
                     // CAS 回到 Running（重验路由/快照/policy），再复用 StartCoding/
@@ -1198,4 +1241,11 @@ pub fn is_coding_ws_message_allowed(
                 | CodingWsInMessage::AbortAttempt
         ),
     }
+}
+
+/// P2 Task 5：人工 WS StartCoding 帧的一次性 command_id——随机合法相对
+/// ID（uuid v4，过 `validate_relative_id`），每帧仅生成一次；durable claim
+/// 以 command_id 为幂等键，同帧重试复用同一身份。
+fn manual_command_id_for_this_frame() -> String {
+    uuid::Uuid::new_v4().to_string()
 }
