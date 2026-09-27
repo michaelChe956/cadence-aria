@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { readCockpitSettings } from "../../state/cockpit-settings";
+import { INFO_TTL_MS } from "../../state/recent-completion";
 import type { CockpitInboxItem } from "../../state/workspace-cockpit-projection";
 import { CockpitInbox } from "../chat-workspace/cockpit/CockpitInbox";
 import { CockpitShell, useCockpitSettingsSlotRef } from "./CockpitShell";
@@ -68,13 +69,31 @@ function stoppedItem(sessionId: string): CockpitInboxItem {
   };
 }
 
+function recentCompletionItem(key: string, title: string): CockpitInboxItem {
+  return {
+    ...infoItem(key, "plan_1"),
+    id: `issue_1:info:${key}`,
+    title,
+    summary: `等待人工最终确认 · ${key}`,
+    createdAt: new Date(Date.now() - 60_000).toISOString(),
+    completionIdentity: JSON.stringify([
+      "project_1",
+      "issue_1",
+      "coding_final_confirm",
+      key,
+    ]),
+  };
+}
+
 function ShellWithInbox({
   inbox,
   countedInbox = inbox.filter((item) => item.kind !== "info"),
+  notificationCandidates = [],
   onGoToInbox,
 }: {
   inbox: readonly CockpitInboxItem[];
   countedInbox?: readonly CockpitInboxItem[];
+  notificationCandidates?: readonly CockpitInboxItem[];
   onGoToInbox?: (sessionId: string) => void;
 }) {
   mockedUseWorkspaceSessionObservers.mockReturnValue({
@@ -86,7 +105,7 @@ function ShellWithInbox({
     codingAttemptForSession: () => null,
     displayItems: inbox,
     actionableCount: countedInbox.length,
-    notificationCandidates: [],
+    notificationCandidates,
   });
 
   return (
@@ -99,16 +118,19 @@ function ShellWithInbox({
 function renderShell({
   inbox,
   countedInbox,
+  notificationCandidates,
   onGoToInbox,
 }: {
   inbox: readonly CockpitInboxItem[];
   countedInbox?: readonly CockpitInboxItem[];
+  notificationCandidates?: readonly CockpitInboxItem[];
   onGoToInbox?: (sessionId: string) => void;
 }) {
   return render(
     <ShellWithInbox
       inbox={inbox}
       countedInbox={countedInbox}
+      notificationCandidates={notificationCandidates}
       onGoToInbox={onGoToInbox}
     />,
   );
@@ -427,6 +449,80 @@ describe("CockpitShell", () => {
         ]}
       />,
     );
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  // P3 WIGA Task 3（tasks.md §4.1 / REQ-WIGA-07）：候选驱动提示队列——
+  // 每身份（completionIdentity）至多一次、按到达顺序逐条 5s；info 不进
+  // 待处理计数/告警条/标题。
+  it("prompts recent completion candidates one by one for five seconds each and never repeats an identity", async () => {
+    const first = recentCompletionItem("k1", "完成事实一");
+    const second = recentCompletionItem("k2", "完成事实二");
+    const view = renderShell({
+      inbox: [first, second],
+      notificationCandidates: [first, second],
+    });
+
+    expect(screen.getByRole("status")).toHaveTextContent("进度信息：完成事实一");
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(document.title).toBe("Aria Web");
+
+    await act(async () => {
+      vi.advanceTimersByTime(5_000);
+    });
+    expect(screen.getByRole("status")).toHaveTextContent("进度信息：完成事实二");
+
+    await act(async () => {
+      vi.advanceTimersByTime(5_000);
+    });
+    expect(screen.queryByRole("status")).toBeNull();
+
+    // 同身份候选再次到达：不重复提示。
+    view.rerender(
+      <ShellWithInbox
+        inbox={[first, second]}
+        notificationCandidates={[first, second]}
+      />,
+    );
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  it("keeps recent completion candidates queued behind an active gate toast", async () => {
+    const gate = gateItem("s1");
+    const completion = recentCompletionItem("k1", "完成事实一");
+    renderShell({
+      inbox: [gate, completion],
+      notificationCandidates: [completion],
+    });
+
+    // gate toast 先显示，info 留队待显示。
+    expect(screen.getByRole("status")).toHaveTextContent("需要处理");
+
+    await act(async () => {
+      vi.advanceTimersByTime(5_000);
+    });
+    expect(screen.getByRole("status")).toHaveTextContent("进度信息：完成事实一");
+  });
+
+  it("drops candidates whose TTL expired before display instead of prompting", async () => {
+    const expired = {
+      ...recentCompletionItem("k-old", "过期事实"),
+      createdAt: new Date(Date.now() - INFO_TTL_MS - 1_000).toISOString(),
+    };
+    const fresh = recentCompletionItem("k-fresh", "新鲜事实");
+    renderShell({
+      inbox: [expired, fresh],
+      notificationCandidates: [expired, fresh],
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByRole("status")).toHaveTextContent("进度信息：新鲜事实");
+
+    await act(async () => {
+      vi.advanceTimersByTime(5_000);
+    });
     expect(screen.queryByRole("status")).toBeNull();
   });
 });

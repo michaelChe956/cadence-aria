@@ -25,7 +25,9 @@ import {
   type CockpitInboxItem,
 } from "../state/workspace-cockpit-projection";
 import {
+  INFO_TTL_MS,
   RECENT_COMPLETION_WINDOW_MS,
+  isRecentCompletionVisible,
   recentCompletionIdentity,
   recentCompletionInboxItem,
 } from "../state/recent-completion";
@@ -130,6 +132,9 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
   const [notificationCandidates, setNotificationCandidates] = useState<
     readonly CockpitInboxItem[]
   >([]);
+  // P3（REQ-WIGA-07）：到期 tick——最近到期单次失效定时器触发后递增，
+  // 使可见投影在无 REST 的情况下剔除过期 info。
+  const [recentExpiryTick, setRecentExpiryTick] = useState(0);
   // 首次成功 hydration（含空目录）建立的稳定身份基线；失败不置基线。
   // hydration 在一轮补读静默收敛（无 pending dirty）后才关闭，初始 GET
   // 在途期间的失效唤醒归入同一静默批次。
@@ -199,14 +204,26 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
     }
     return Array.from(byKey.values());
   }, [codingFinalConfirmInfos, watchedSessionIds]);
+  // P3（REQ-WIGA-07）：TTL 内可见的近期完成事实——未来/坏时间 fail-closed
+  // 不展示，已到期随失效 tick 剔除；展示按 occurred_at DESC（与服务端
+  // durable 排序同向），到期条目不因刷新/重连返回同 key 而复活。
+  const visibleRecentItems = useMemo(() => {
+    const nowMs = Date.now();
+    return recentCompletionItems
+      .filter((item) => isRecentCompletionVisible(item.createdAt ?? "", nowMs))
+      .sort(
+        (left, right) =>
+          Date.parse(right.createdAt ?? "") - Date.parse(left.createdAt ?? ""),
+      );
+  }, [recentCompletionItems, recentExpiryTick]);
   const inbox = useMemo(
     () => [
       ...selectObservedInbox(records),
       ...infoItems,
       ...codingInfoItems,
-      ...recentCompletionItems,
+      ...visibleRecentItems,
     ],
-    [records, infoItems, codingInfoItems, recentCompletionItems],
+    [records, infoItems, codingInfoItems, visibleRecentItems],
   );
   const countedRecords = useMemo(
     () => records.filter((record) => watchedSessionIds.includes(record.sessionId)),
@@ -230,8 +247,14 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
     ) => {
       const known = knownRecentIdentitiesRef.current ?? new Set<string>();
       knownRecentIdentitiesRef.current = known;
+      const nowMs = Date.now();
       const candidates: CockpitInboxItem[] = [];
       for (let index = 0; index < identities.length; index += 1) {
+        // P3（REQ-WIGA-07）：TTL 外条目（未来/坏时间/已到期）不进基线也
+        // 不进候选；已到期由失效定时器从展示剔除，不因同 key 返回复活。
+        if (!isRecentCompletionVisible(items[index].createdAt ?? "", nowMs)) {
+          continue;
+        }
         const identity = identities[index];
         if (!hydrationClosedRef.current) {
           known.add(identity);
@@ -374,6 +397,31 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
       }
     };
   }, [cancelRefresh, getLifecycle, getProductIssues, getProjects, refreshIntervalMs, scheduleRefresh]);
+
+  // P3（REQ-WIGA-07）：最近到期单次失效定时器——按可见条目的最早
+  // occurred_at + INFO_TTL_MS 触发一次 tick，让页面不刷新也能移除过期
+  // info；触发后由可见 memo 重排下一轮最早到期，不发起 REST。卸载清理。
+  useEffect(() => {
+    let nearestExpiryMs: number | null = null;
+    for (const item of visibleRecentItems) {
+      const occurredMs = Date.parse(item.createdAt ?? "");
+      if (!Number.isFinite(occurredMs)) {
+        continue;
+      }
+      const expiryMs = occurredMs + INFO_TTL_MS;
+      if (nearestExpiryMs === null || expiryMs < nearestExpiryMs) {
+        nearestExpiryMs = expiryMs;
+      }
+    }
+    if (nearestExpiryMs === null) {
+      return;
+    }
+    const timer = scheduleRefresh(
+      () => setRecentExpiryTick((tick) => tick + 1),
+      Math.max(0, nearestExpiryMs - Date.now()),
+    );
+    return () => cancelRefresh(timer);
+  }, [cancelRefresh, scheduleRefresh, visibleRecentItems]);
 
   useEffect(() => {
     controllerRef.current?.updateRefreshIntervalMs(refreshIntervalMs);

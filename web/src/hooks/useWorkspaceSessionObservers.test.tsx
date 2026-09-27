@@ -6,6 +6,7 @@ import type {
   WorkspaceSessionSummary,
 } from "../api/types";
 import { notifyLifecycleInvalidated } from "../state/lifecycle-workbench-store";
+import { INFO_TTL_MS } from "../state/recent-completion";
 import {
   useWorkspaceSessionObservers,
   type WorkspaceSessionObserverOptions,
@@ -720,6 +721,90 @@ describe("useWorkspaceSessionObservers", () => {
       expect(
         view.result.displayItems.filter((item) => item.source === "coding_final_confirm_info"),
       ).toHaveLength(1);
+    });
+
+    await act(async () => {
+      view.unmount();
+    });
+  });
+  // P3 WIGA Task 3（tasks.md §4.1 / REQ-WIGA-07）：TTL 边界——未来/坏时间
+  // 不展示；到期即使无新 REST 也从收件箱移除；刷新/重连返回同条目不续期；
+  // 候选同样只收 TTL 内的新身份。
+  it("expires recent completions by TTL without REST and never revives them on refresh", async () => {
+    const recent = (key: string, occurredAt: string): RecentCompletionInfoItem => ({
+      kind: "coding_final_confirm",
+      key,
+      project_id: "project_1",
+      issue_id: "issue_1",
+      plan_id: "plan_1",
+      session_id: null,
+      attempt_id: key,
+      occurred_at: occurredAt,
+      title: `完成事实 ${key}`,
+      final_confirmed: false,
+    });
+    const healthy = recent("k-healthy", new Date(Date.now() - 60_000).toISOString());
+    const expiring = recent(
+      "k-expiring",
+      new Date(Date.now() - INFO_TTL_MS + 500).toISOString(),
+    );
+    const future = recent("k-future", new Date(Date.now() + 60_000).toISOString());
+    const badTime = recent("k-bad", "not-a-time");
+    const getIssueLifecycle = vi.fn(async () => ({
+      workspace_sessions: [summary("s1")],
+      coding_attempts: [],
+      plan_confirmed_info: [],
+      coding_final_confirm_info: [],
+      recent_completion_info: [healthy, expiring, future, badTime],
+    }));
+    const view = renderObserverHook(
+      observerOptions({
+        currentSessionId: "s1",
+        watchLimit: 2,
+        refreshIntervalMs: 600_000,
+        getIssueLifecycle,
+      }),
+    );
+
+    const infoTitles = () =>
+      view.result.displayItems
+        .filter((item) => item.kind === "info")
+        .map((item) => item.title);
+    // 初始 hydration：只有 TTL 内条目展示（未来/坏时间 fail-closed 不展示）。
+    await waitFor(() => expect(infoTitles()).toEqual(["完成事实 k-healthy", "完成事实 k-expiring"]));
+    expect(getIssueLifecycle).toHaveBeenCalledTimes(1);
+
+    // 到期移除：无新 REST 也从收件箱消失（单次失效定时器）。
+    await waitFor(
+      () => expect(infoTitles()).toEqual(["完成事实 k-healthy"]),
+      { timeout: 4_000 },
+    );
+    expect(getIssueLifecycle).toHaveBeenCalledTimes(1);
+
+    // 刷新/重连不续期：同条目重新返回仍不展示，候选也不收过期身份。
+    await act(async () => {
+      notifyLifecycleInvalidated("issue_1");
+    });
+    await waitFor(() => expect(getIssueLifecycle.mock.calls.length).toBeGreaterThan(1));
+    await waitFor(() => expect(infoTitles()).toEqual(["完成事实 k-healthy"]));
+
+    // hydration 关闭后的新事实：TTL 内进候选，未来时刻不进。
+    const lateOk = recent("k-late-ok", new Date(Date.now() - 30_000).toISOString());
+    const lateFuture = recent("k-late-future", new Date(Date.now() + 30_000).toISOString());
+    getIssueLifecycle.mockImplementation(async () => ({
+      workspace_sessions: [summary("s1")],
+      coding_attempts: [],
+      plan_confirmed_info: [],
+      coding_final_confirm_info: [],
+      recent_completion_info: [healthy, expiring, lateOk, lateFuture],
+    }));
+    await act(async () => {
+      notifyLifecycleInvalidated("issue_1");
+    });
+    await waitFor(() => {
+      expect(view.result.notificationCandidates.map((item) => item.title)).toEqual([
+        "完成事实 k-late-ok",
+      ]);
     });
 
     await act(async () => {

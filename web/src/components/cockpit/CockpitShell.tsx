@@ -24,6 +24,7 @@ import {
 import type { CockpitInboxItem } from "../../state/workspace-cockpit-projection";
 import { CockpitEscalation } from "./CockpitEscalation";
 import { CockpitSettingsDialog } from "./CockpitSettingsDialog";
+import { isRecentCompletionVisible } from "../../state/recent-completion";
 import { useWorkspaceStore } from "../../state/workspace-ws-store";
 const SYSTEM_NOTIFICATION_DELAY_MS = 30_000;
 
@@ -111,6 +112,10 @@ export function CockpitShell({
   const [pulseItemIds, setPulseItemIds] = useState<ReadonlySet<string>>(() => new Set());
   const [toast, setToast] = useState<CockpitInboxItem | null>(null);
   const [infoToast, setInfoToast] = useState<CockpitInboxItem | null>(null);
+  // P3（REQ-WIGA-07）：候选驱动提示队列——每身份至多提醒一次；队列里
+  // 等待显示的候选（gate toast 优先，info 逐条 5s）。
+  const [infoQueue, setInfoQueue] = useState<readonly CockpitInboxItem[]>([]);
+  const remindedInfoIdentitiesRef = useRef<Set<string>>(new Set());
   const knownInfoKeysRef = useRef<Set<string> | null>(null);
   const [notificationGuidance, setNotificationGuidance] = useState<NotificationGuidance>(null);
   const knownItemIdsRef = useRef(new Set<string>());
@@ -118,13 +123,25 @@ export function CockpitShell({
   const notificationSentRef = useRef(false);
   const previousFaviconHrefRef = useRef<string | null>(null);
   const initialTitleRef = useRef(document.title);
-  const { inbox, countedInbox, records, watchSession, codingAttemptForSession } =
-    useWorkspaceSessionObservers({
-      currentSessionId,
-      currentSessionState,
-      watchLimit: settings.watchLimit,
-      refreshIntervalMs: settings.observerRefreshIntervalMs,
-    });
+  // P3（REQ-WIGA-07）：显式三分消费——展示收件箱 = displayItems，计数 =
+  // actionableCount（info 恒不计数），提示 = notificationCandidates（每
+  // 身份一次）；`inbox` 语义即 displayItems，countedInbox 保留为 actionable
+  // 列表（去处理/系统通知）。
+  const {
+    displayItems,
+    actionableCount,
+    notificationCandidates,
+    countedInbox,
+    records,
+    watchSession,
+    codingAttemptForSession,
+  } = useWorkspaceSessionObservers({
+    currentSessionId,
+    currentSessionState,
+    watchLimit: settings.watchLimit,
+    refreshIntervalMs: settings.observerRefreshIntervalMs,
+  });
+  const inbox = displayItems;
   const itemIds = useMemo(() => new Set(countedInbox.map((item) => item.id)), [countedInbox]);
 
   useEffect(() => {
@@ -152,11 +169,14 @@ export function CockpitShell({
     }
   }, [countedInbox, itemIds]);
 
-  // P1 WIGA Task 9（REQ-WIGA-07）：info 只读事实只对新 key 提醒一次——首次
-  // hydration（首个非空批次）只登记已知不提示；重复 GET 同 key 不再提示。
-  // info 不进 countedInbox，与告警条/favicon/系统通知互不影响。
+  // P1 WIGA Task 9（REQ-WIGA-07）legacy 静默基线：无 completionIdentity 的
+  // plan/coding info（旧服务端 watched 投影）保持首非空批次只登记、新 key
+  // 提醒一次；近期完成事实（有 completionIdentity）改走候选队列，不在此
+  // 重复提示。
   useEffect(() => {
-    const infoItems = inbox.filter((item) => item.kind === "info");
+    const infoItems = inbox.filter(
+      (item) => item.kind === "info" && item.completionIdentity === undefined,
+    );
     if (knownInfoKeysRef.current === null) {
       if (infoItems.length === 0) {
         return;
@@ -170,9 +190,50 @@ export function CockpitShell({
       known.add(item.id);
     }
     if (fresh.length > 0) {
-      setInfoToast(fresh[0]);
+      setInfoQueue((previous) => [...previous, fresh[0]]);
     }
   }, [inbox]);
+
+  // P3（REQ-WIGA-07）：候选入队——每身份（completionIdentity）至多一次，
+  // 按候选到达顺序排队；不取易跨 project 碰撞的 item.id。
+  useEffect(() => {
+    const queued = notificationCandidates.filter(
+      (item) =>
+        item.completionIdentity !== undefined &&
+        !remindedInfoIdentitiesRef.current.has(item.completionIdentity),
+    );
+    if (queued.length === 0) {
+      return;
+    }
+    setInfoQueue((previous) => [...previous, ...queued]);
+  }, [notificationCandidates]);
+
+  // P3（REQ-WIGA-07）：候选出队——gate toast 优先（info 留队待显）；队头
+  // 已过 TTL 的直接丢弃不提醒；逐条显示 5s 后取下一条。
+  useEffect(() => {
+    if (infoToast !== null || toast !== null || infoQueue.length === 0) {
+      return;
+    }
+    const nowMs = Date.now();
+    // TTL 只约束近期完成事实；legacy info（无 completionIdentity）保持
+    // P1 语义，不因 occurred_at 旧而丢提示。
+    const nextVisibleIndex = infoQueue.findIndex(
+      (item) =>
+        item.completionIdentity === undefined ||
+        isRecentCompletionVisible(item.createdAt ?? "", nowMs),
+    );
+    const expiredCount = nextVisibleIndex === -1 ? infoQueue.length : nextVisibleIndex;
+    if (expiredCount > 0) {
+      setInfoQueue((previous) => previous.slice(expiredCount));
+      return;
+    }
+    const [head, ...rest] = infoQueue;
+    setInfoQueue(rest);
+    if (head.completionIdentity !== undefined) {
+      remindedInfoIdentitiesRef.current.add(head.completionIdentity);
+    }
+    setInfoToast(head);
+  }, [infoQueue, infoToast, toast]);
 
   useEffect(() => {
     if (!infoToast) return;
@@ -180,24 +241,24 @@ export function CockpitShell({
     return () => window.clearTimeout(timer);
   }, [infoToast]);
 
-
   useEffect(() => {
     if (!toast) return;
     const timer = window.setTimeout(() => setToast(null), 5_000);
     return () => window.clearTimeout(timer);
   }, [toast]);
 
+  // P3（REQ-WIGA-07）：标题/favicon 计数语义等价替换——只随 actionableCount
+  // （可操作 gate/choice/stopped/error/sc_failed）变化，info 恒不计数。
   useEffect(() => {
-    const count = countedInbox.length;
-    if (settings.titleEmojiEnabled && count > 0) {
-      document.title = `🔴待处理×${count} · aria`;
+    if (settings.titleEmojiEnabled && actionableCount > 0) {
+      document.title = `🔴待处理×${actionableCount} · aria`;
     } else {
       document.title = initialTitleRef.current;
     }
     return () => {
       document.title = initialTitleRef.current;
     };
-  }, [countedInbox.length, settings.titleEmojiEnabled]);
+  }, [actionableCount, settings.titleEmojiEnabled]);
 
   useEffect(() => {
     const icon = document.querySelector<HTMLLinkElement>('link[rel~="icon"]');
@@ -205,13 +266,13 @@ export function CockpitShell({
     if (previousFaviconHrefRef.current === null) {
       previousFaviconHrefRef.current = icon.href;
     }
-    icon.href = countedInbox.length > 0 ? faviconHref(countedInbox.length) : previousFaviconHrefRef.current;
+    icon.href = actionableCount > 0 ? faviconHref(actionableCount) : previousFaviconHrefRef.current;
     return () => {
       if (previousFaviconHrefRef.current !== null) {
         icon.href = previousFaviconHrefRef.current;
       }
     };
-  }, [countedInbox.length]);
+  }, [actionableCount]);
 
   useEffect(() => {
     if (countedInbox.length === 0) {
@@ -312,12 +373,12 @@ export function CockpitShell({
         data-testid="cockpit-shell"
         className="flex h-screen flex-col overflow-hidden bg-[var(--aria-bg)] text-[var(--aria-ink)]"
       >
-        {countedInbox.length > 0 ? (
+        {actionableCount > 0 ? (
           <aside
             role="alert"
             className="z-[90] flex min-h-11 shrink-0 items-center justify-between gap-3 bg-[var(--aria-danger)] px-3 py-1 text-sm font-semibold text-white shadow-md"
           >
-            <span>待处理 {countedInbox.length} 项</span>
+            <span>待处理 {actionableCount} 项</span>
             <button
               type="button"
               onClick={goToInbox}
