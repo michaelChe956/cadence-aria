@@ -279,12 +279,15 @@ async fn coding_ws_semi_started_attach_with_unmaterialized_worktree_reprepares_a
 /// 组 4（幂等负向）：活 runner 存在时第二个 socket attach 不得重复 spawn——
 /// 注册表保持单一 runner，且新 socket 只收到快照（纯快照行为不变，用 Ping/Pong
 /// 证明 socket 循环未被恢复路径阻塞、也没有第二个 runner 的事件涌入）。
+/// P2 Task 5 后 WS StartCoding 只剩首启（Running→AlreadyStarted 快照），
+/// 活 runner 由 attach 半启动恢复路径建立（semi_started Running+Coding），
+/// 复活后 runner 停在 Coding 阶段门等人确认，天然稳定无竞态。
 #[tokio::test]
 async fn coding_ws_attach_with_live_runner_never_respawns_and_keeps_snapshot_only() {
     let _guard = WS_TEST_LOCK.lock().await;
     let root = tempdir().expect("root");
     let (app, state, _worktree) =
-        app_with_coding_ws_resume_fixture(root.path(), false, false, false);
+        app_with_coding_ws_resume_fixture(root.path(), true, true, true);
     let attempt_key = CodingAttemptRunKey::new("project_0001", "issue_0001", "coding_attempt_0001");
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
@@ -295,7 +298,6 @@ async fn coding_ws_attach_with_live_runner_never_respawns_and_keeps_snapshot_onl
     let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
     let (mut first_ws, _) = connect_async(&url).await.expect("connect first ws");
     let _initial = recv_json(&mut first_ws).await;
-    send_json(&mut first_ws, &CodingWsInMessage::StartCoding).await;
     let _gate = wait_for_stage_gate(&mut first_ws, CodingExecutionStage::Coding).await;
     assert_eq!(state.coding_runs.runner_count(&attempt_key), 1);
 

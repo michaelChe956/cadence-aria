@@ -62,10 +62,17 @@ impl cadence_aria::cross_cutting::streaming_provider::StreamingProviderAdapter
                     ProviderCommand::ChoiceResponse {
                         id,
                         selected_option_ids,
+                        receipt,
                         ..
                     } if id == PENDING_CHOICE_ID
                         && selected_option_ids == vec!["Yes".to_string()] =>
                     {
+                        // P0 1.3 provider 契约：等待者真正接收即推进回执
+                        // Delivered（与真实 bridge/pi adapter 同款）；否则
+                        // 引擎按 CODING_CHOICE_RECEIPT_WAIT 等 30s。
+                        if let Some(receipt) = receipt.as_ref() {
+                            receipt.deliver();
+                        }
                         let _ = event_tx
                             .send(ProviderEvent::Completed(ProviderCompletion::plain(
                                 "approved pending choice".to_string(),
