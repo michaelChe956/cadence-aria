@@ -200,6 +200,8 @@ fn coding_attempt_serializes_stage_status_and_provider_snapshot() {
         updated_at: "2026-05-23T00:00:00Z".to_string(),
         target_snapshot: None,
         completed_at: None,
+        start_claim: None,
+        start_run_policy: cadence_aria::product::coding_models::CodingStartRunPolicy::Manual,
     };
 
     let value = serde_json::to_value(&attempt).expect("serialize attempt");

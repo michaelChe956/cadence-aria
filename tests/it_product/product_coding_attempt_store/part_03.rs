@@ -168,7 +168,7 @@ fn scoped_writes_target_only_exact_legacy_attempt_identity() {
                 }],
                 allow_multiple: false,
                 allow_free_text: false,
-                sc_recovery_claim: None,
+                questions: Vec::new(),
             },
         )
         .expect("target choice gate");

@@ -405,6 +405,8 @@ fn attempt_fixture(
         updated_at: NOW.to_string(),
         target_snapshot,
         completed_at: None,
+        start_claim: None,
+        start_run_policy: cadence_aria::product::coding_models::CodingStartRunPolicy::Manual,
     }
 }
 

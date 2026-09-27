@@ -23,7 +23,7 @@ fn store_persists_and_resolves_choice_gates_in_attempt_scope() {
             }],
             allow_multiple: false,
             allow_free_text: true,
-            sc_recovery_claim: None,
+            questions: Vec::new(),
         })
         .expect("create choice gate");
 
@@ -49,6 +49,7 @@ fn store_persists_and_resolves_choice_gates_in_attempt_scope() {
             "choice_0001",
             vec!["backend_first".to_string()],
             Some("先控制范围".to_string()),
+            Vec::new(),
         )
         .expect("resolve choice gate");
 
@@ -162,6 +163,7 @@ fn group_create_input(current_work_item_id: &str) -> CreateGroupCodingAttemptInp
         },
         target_snapshot: None,
         max_auto_rework: 2,
+        start_run_policy: cadence_aria::product::coding_models::CodingStartRunPolicy::Manual,
     }
 }
 

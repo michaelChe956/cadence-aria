@@ -111,6 +111,7 @@ fn seed_advance_group_initialization(
         provider_config_snapshot,
         target_snapshot: None,
         max_auto_rework: 2,
+        start_run_policy: cadence_aria::product::coding_models::CodingStartRunPolicy::Manual,
     };
     let mut journal = coding_store
         .prepare_group_initialization_with_admission(

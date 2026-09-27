@@ -133,6 +133,7 @@ async fn delete_work_item_plan_legacy_rejected_when_group_attempt_bound() {
             },
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: cadence_aria::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("create group attempt");
 

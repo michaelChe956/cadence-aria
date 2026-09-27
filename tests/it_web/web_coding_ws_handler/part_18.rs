@@ -186,7 +186,7 @@ fn seed_pending_choice_gate(
                 ],
                 allow_multiple: false,
                 allow_free_text: true,
-                sc_recovery_claim: None,
+                questions: Vec::new(),
             },
         )
         .expect("create pending choice gate");
@@ -292,7 +292,9 @@ async fn coding_ws_new_connection_receives_and_answers_pending_choice() {
             id: PENDING_CHOICE_ID.to_string(),
             selected_option_ids: vec!["Yes".to_string()],
             free_text: None,
-            sc_recovery_claim: None,
+            answers: Vec::new(),
+            command_id: None,
+            expected_run_id: None,
         },
     )
     .await;
@@ -356,10 +358,11 @@ async fn coding_ws_new_connection_does_not_resend_answered_choice() {
         .resolve_choice_gate(
             "project_0001",
             "issue_0001",
-            &waiting.id,
+            &attempt.id,
             PENDING_CHOICE_ID,
             vec!["Yes".to_string()],
             None,
+            Vec::new(),
         )
         .expect("resolve pending choice gate");
 
@@ -412,3 +415,4 @@ async fn coding_ws_new_connection_does_not_resend_answered_choice() {
     ws.close(None).await.expect("close ws");
     server.abort();
 }
+

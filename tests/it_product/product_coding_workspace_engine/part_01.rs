@@ -331,6 +331,7 @@ fn running_group_engine_with_two_units_for_terminal_lock_tests() -> (
             },
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: cadence_aria::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("create group attempt");
     seed_authoritative_group_terminal_fixture(&store, &attempt);

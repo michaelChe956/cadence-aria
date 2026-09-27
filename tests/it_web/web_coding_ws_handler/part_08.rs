@@ -107,6 +107,7 @@ fn app_with_group_full_chain_attempt_fixture(
             },
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: cadence_aria::product::coding_models::CodingStartRunPolicy::Manual,
         },
     );
     seed_authoritative_group_plan_fixture(&store, &attempt, false);

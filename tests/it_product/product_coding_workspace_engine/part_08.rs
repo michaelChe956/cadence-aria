@@ -156,6 +156,7 @@ async fn execute_group_final_review_persists_review_and_waits_for_final_confirm(
             },
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: cadence_aria::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("create group attempt");
     seed_authoritative_group_final_review_fixture(&store, &attempt);
@@ -313,6 +314,7 @@ async fn execute_group_final_review_blocked_opens_human_gate() {
             },
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: cadence_aria::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("create group attempt");
     seed_authoritative_group_final_review_fixture(&store, &attempt);
@@ -397,6 +399,7 @@ async fn execute_group_final_review_prompt_includes_request_commit_diff_and_func
             },
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: cadence_aria::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("create group attempt");
     seed_authoritative_group_final_review_fixture(&store, &attempt);

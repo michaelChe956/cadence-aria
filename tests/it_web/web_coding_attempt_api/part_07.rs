@@ -150,6 +150,7 @@ fn partial_group_attempt(store: &CodingAttemptStore) -> CodingExecutionAttempt {
             },
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: cadence_aria::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("partial group attempt")
 }

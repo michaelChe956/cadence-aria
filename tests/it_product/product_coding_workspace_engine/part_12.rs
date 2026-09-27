@@ -45,6 +45,7 @@ fn group_engine_with_two_units() -> (
             },
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: cadence_aria::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("create group attempt");
     store
@@ -107,6 +108,7 @@ fn group_engine_with_last_running_unit() -> (
             },
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: cadence_aria::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("create group attempt");
     store
@@ -588,6 +590,7 @@ fn completed_group_attempt_with_handoff_revisions() -> (
             },
             target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: cadence_aria::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("create group attempt");
     seed_authoritative_group_final_review_fixture(&store, &attempt);
