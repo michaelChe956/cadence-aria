@@ -142,7 +142,13 @@ async fn handle_workspace_inbound_message_inner(
                 let _ = send_json_outbound(&outbound_tx, &err).await;
                 return;
             }
-            handle_advance_from_handler(run_context.clone(), outbound_tx.clone(), command_id).await;
+            handle_advance_from_handler(
+                app_state.clone(),
+                run_context.clone(),
+                outbound_tx.clone(),
+                command_id,
+            )
+            .await;
         }
         WsInMessage::AbandonHumanGate { command_id } => {
             if let Err(err) = validate_command_id(&command_id) {

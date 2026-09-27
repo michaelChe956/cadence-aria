@@ -534,6 +534,39 @@
             assert_eq!(self.durable().status, WorkspaceSessionStatus::Terminated);
         }
 
+        /// 当前 durable enrollment（真实 IssueAutomationStore 读取）。
+        pub(crate) fn enrollment(
+            &self,
+        ) -> crate::product::models::automation::IssueAutomationEnrollment {
+            IssueAutomationStore::new(self.inner.paths.clone())
+                .get(PROJECT_ID, ISSUE_ID)
+                .expect("load enrollment")
+                .expect("enrollment present")
+        }
+
+        /// issue 下全部真实 coding attempt（CodingAttemptStore 读取）。
+        pub(crate) fn coding_attempts(
+            &self,
+        ) -> Vec<crate::product::coding_models::CodingExecutionAttempt> {
+            crate::product::coding_attempt_store::CodingAttemptStore::new(
+                self.inner.paths.clone(),
+            )
+            .list_attempts_for_issue(PROJECT_ID, ISSUE_ID)
+            .expect("list coding attempts")
+        }
+
+        /// 进程内已启动 coding runner 总数（真实 registry 事实，不含注册即撤）。
+        pub(crate) fn coding_runner_count(&self) -> usize {
+            self.coding_attempts()
+                .iter()
+                .map(|attempt| {
+                    self.state.coding_runs.runner_count(
+                        &crate::web::state::CodingAttemptRunKey::from_attempt(attempt),
+                    )
+                })
+                .sum()
+        }
+
         pub(crate) fn session_path(&self, session_id: &str) -> std::path::PathBuf {
             self.inner
                 .paths
@@ -541,6 +574,42 @@
                 .join("workspace-sessions")
                 .join(format!("{session_id}.json"))
         }
+    }
+
+    /// P2 Task 1 共享 fixture：真实 enrollment 绑定 + compile 崩溃人工恢复 +
+    /// 确认链完整走完——只保证 durable Confirmed/已发布 compile，不冒称 Ready。
+    /// advance 的 fork 基线解析在唯一 logical target 的 physical checkout 上
+    /// 跑真实 git（三面同源 main→master 默认链），因此补真实 main 仓库。
+    pub(crate) async fn confirmed_enrolled_fixture() -> EnrolledGateFixture {
+        let mut fixture = EnrolledGateFixture::new().await;
+        init_real_main_checkout(&fixture.inner.paths.root().join("checkout-enroll-a"));
+        fixture.fail_compile_after_human_approve().await;
+        fixture.recover_and_confirm_compile().await;
+        fixture
+    }
+
+    /// 在 physical checkout 上初始化真实 main 分支 git 仓库（空提交即可满足
+    /// `resolve_advance_base_branch` 的 main→master 默认链验证）。
+    fn init_real_main_checkout(repo: &std::path::Path) {
+        fn git(repo: &std::path::Path, args: &[&str]) {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(repo)
+                .args(args)
+                .output()
+                .expect("spawn git");
+            assert!(
+                output.status.success(),
+                "git {args:?} in {repo:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        std::fs::create_dir_all(repo).expect("create checkout dir");
+        git(repo, &["init"]);
+        git(repo, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+        git(repo, &["config", "user.email", "aria@example.com"]);
+        git(repo, &["config", "user.name", "Aria Test"]);
+        git(repo, &["commit", "--allow-empty", "-m", "advance base"]);
     }
 
     /// provider 等待者：真实消费 run command 通道，choice 应答即投递回执。

@@ -45,6 +45,13 @@ impl WorkspaceSessionRegistry {
             .clone())
     }
 
+    /// 无副作用查找：registry 已持有则返回该 manager，未命中返回 None（不创建、
+    /// 不触发 manager 冷启副作用）。P2 Task 1 共用 advance 服务在 registry miss
+    /// 时回退裸 engine，避免重写会话上下文消息。
+    pub async fn peek(&self, session_id: &str) -> Option<Arc<WorkspaceSessionManager>> {
+        self.sessions.lock().await.get(session_id).cloned()
+    }
+
     /// 原子地获取或创建 manager 并登记 attachment。摘除使用同一互斥，从而不会把
     /// 已登记新连接的 manager 从 registry 中移走。
     pub(crate) async fn get_or_create_and_attach<F, Fut>(
