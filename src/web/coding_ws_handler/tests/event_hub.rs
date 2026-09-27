@@ -212,3 +212,68 @@ async fn plan_amendment_fan_out_one_failure_one_success_confirms() {
     registry.remove(&key, token_a);
     registry.remove(&key, token_b);
 }
+
+/// P2 Task 7（§3.2）：慢观察者业务隔离——满队列订阅不得阻塞 hub 路由的
+/// 业务推进。旧实现 `target.send(...).await` 会在慢 socket 满队列时卡死
+/// 路由任务：barrier（socket flush 前的因果序关卡）永不放行、活 socket
+/// 断流。新实现必须 try_send 非阻塞：跳过慢 socket 本帧写并结算 fail
+/// 份额（观察层记 durable Unsent，重订阅补投递），活 socket 照常接收、
+/// amendment ack 按任一成功 confirm。
+#[tokio::test]
+async fn slow_observer_does_not_block_coding_business() {
+    let registry = CodingSocketRegistry::default();
+    let key = CodingAttemptRunKey::new("project_0001", "issue_0001", "attempt_slow");
+    // 慢观察者：容量 1 且从不消费——第一条即填满。
+    let (slow_tx, _slow_rx) = mpsc::channel(1);
+    let slow_token = registry.register(&key, slow_tx);
+    let (live_tx, mut live_rx) = mpsc::channel(16);
+    let live_token = registry.register(&key, live_tx);
+    let hub = registry.hub_sender(&key);
+
+    // 第一条：填满慢队列，同时送达活 socket（此时两边都不满）。
+    hub.send(plan_amendment_event("plan_amendment_slow_first"))
+        .await
+        .expect("first broadcast must not block");
+    assert!(
+        matches!(
+            live_rx.recv().await,
+            Some(CodingWsOutMessage::PlanAmendmentUpdated { .. })
+        ),
+        "live observer must receive the first event"
+    );
+
+    // 第二条：慢队列已满——业务路由必须非阻塞推进。
+    let waiter = register_plan_amendment_socket_write("plan_amendment_slow_second")
+        .expect("delivery waiter");
+    let second = plan_amendment_event("plan_amendment_slow_second");
+    hub.send(second.clone()).await.expect("second event enqueued");
+    tokio::time::timeout(
+        Duration::from_millis(250),
+        registry.wait_until_hub_drained(&key),
+    )
+    .await
+    .expect("slow observer must not block the coding business path (barrier drained)");
+
+    // 活 socket 照常收到第二条（业务不被慢观察者拖死）。
+    assert!(
+        matches!(
+            live_rx.recv().await,
+            Some(CodingWsOutMessage::PlanAmendmentUpdated { .. })
+        ),
+        "live observer must keep receiving while the slow one is full"
+    );
+
+    // 真实 socket writer 写帧成功 → confirm 份额（slow 的 fail 份额已由
+    // broadcast 就地结算）：任一成功即 confirm，waiter 必须及时成功结算。
+    confirm_plan_amendment_socket_write(&second);
+    let outcome = tokio::time::timeout(Duration::from_millis(250), waiter.wait())
+        .await
+        .expect("delivery ack must settle without blocking");
+    assert!(
+        outcome.is_ok(),
+        "live write success must confirm the amendment despite the slow observer"
+    );
+
+    registry.remove(&key, slow_token);
+    registry.remove(&key, live_token);
+}

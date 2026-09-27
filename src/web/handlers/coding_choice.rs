@@ -543,4 +543,68 @@ mod tests {
             "无活跃 run 时不得伪造化身"
         );
     }
+
+    /// P2 Task 7（§3.2）保护性回归：零 coding socket 订阅时，choice 只投递
+    /// 给真实存活的 runner waiter（receipt 驱动 202→200），不以 mpsc 入队
+    /// 冒充 Delivered；无 waiter 的 run 一律 410，不伪造投递。
+    #[tokio::test]
+    async fn no_socket_coding_choice_is_delivered_only_to_live_waiter() {
+        let fixture = coding_choice_http_fixture().await;
+        // fixture 只登记 coding_runs command 通道，不注册任何 coding_sockets。
+        let (release, seen, answers) = paused_coding_runner(fixture.command_rx);
+
+        let body = request_body("choice-zero-socket", &fixture.incarnation);
+        let (pending, value) = post_choice(
+            &fixture.router,
+            fixture.attempt_id.as_str(),
+            "choice-http-1",
+            &body,
+        )
+        .await;
+        assert_eq!(pending, StatusCode::ACCEPTED, "{value}");
+        assert_eq!(value["state"], "resolving");
+        assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            answers.lock().unwrap().as_ref().unwrap(),
+            &answers_payload(),
+            "零 socket 下 answers 必须原样抵达唯一存活 waiter"
+        );
+
+        // 真实 provider waiter receipt 释放（而非 mpsc 入队即 Delivered）。
+        release.notify_one();
+        let (delivered, value) = post_choice(
+            &fixture.router,
+            fixture.attempt_id.as_str(),
+            "choice-http-1",
+            &body,
+        )
+        .await;
+        assert_eq!(delivered, StatusCode::OK, "{value}");
+        assert_eq!(value["state"], "delivered");
+        assert_eq!(
+            seen.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "receipt Delivered 后同 command 不得二发"
+        );
+
+        // 反例：无 waiter（run 已摘除）→ 410，不隐式新投递。
+        let bare = coding_choice_http_fixture().await;
+        let (_keep_release, _keep_seen, _keep_answers) =
+            paused_coding_runner(bare.command_rx);
+        bare.state
+            .coding_runs
+            .remove(&bare.attempt_key, bare.run_id);
+        let (status, value) = post_choice(
+            &bare.router,
+            bare.attempt_id.as_str(),
+            "choice-http-1",
+            &request_body("choice-no-waiter", &bare.incarnation),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::GONE,
+            "无 waiter 必须快速失败（{value}），不得隐式新投递"
+        );
+    }
 }

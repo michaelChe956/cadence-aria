@@ -166,6 +166,12 @@ impl CodingSocketRegistry {
     /// 该事件的写份额：任一 socket 写成功即 confirm、全部失败才 fail；零份额
     /// （REQ-WIGA-06：无 sockets entry / 全部关闭）由登记侧立即结算失败——
     /// 观察层据此记 durable Unsent，重连/重复确认后按事实补投递。
+    ///
+    /// P2 Task 7（§3.2）：慢观察者业务隔离——满/闭队列一律 `try_send` 非阻塞，
+    /// 跳过该 socket 的本帧写并就地结算 fail 份额（观察层记 Unsent，落后订阅
+    /// 须重订阅 durable snapshot/amendment 补投递）；绝不 await 慢 socket，
+    /// hub 路由、barrier 与其余 socket 的业务推进不被拖死。已成功入队者由
+    /// 真实 socket writer 的成功/失败 ack 再结算，不以入队冒充 Delivered。
     async fn broadcast(&self, attempt_key: &CodingAttemptRunKey, event: &CodingWsOutMessage) {
         let targets: Vec<_> = {
             let mut inner = self.inner.lock().expect("coding socket registry lock");
@@ -183,14 +189,10 @@ impl CodingSocketRegistry {
             }
         };
         expect_plan_amendment_fan_out_writes(event, targets.len());
-        let mut failed_sends = 0usize;
         for target in targets {
-            if target.send(event.clone()).await.is_err() {
-                failed_sends += 1;
+            if target.try_send(event.clone()).is_err() {
+                fail_plan_amendment_socket_write(event);
             }
-        }
-        for _ in 0..failed_sends {
-            fail_plan_amendment_socket_write(event);
         }
     }
 }
