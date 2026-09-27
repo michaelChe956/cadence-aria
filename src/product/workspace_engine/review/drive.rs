@@ -1195,7 +1195,6 @@ fn map_gateway_error_to_adapter(error: ProviderGatewayError) -> ProviderAdapterE
         _ => ProviderAdapterError::provider_unavailable(error.to_string()),
     }
 }
-
 #[cfg(test)]
 #[path = "drive_tests.rs"]
 mod tests;
