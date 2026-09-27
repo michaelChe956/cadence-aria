@@ -501,6 +501,10 @@ pub struct IssueLifecycleResponse {
     /// 等待/已确认只读信息。additive：旧客户端反序列化缺省为空。
     #[serde(default)]
     pub coding_final_confirm_info: Vec<CodingFinalConfirmInfoDto>,
+    /// P3（REQ-WIGA-07）：issue 级有界近期完成目录（默认空；仅在请求携带
+    /// recent_since 时计算）。additive：旧客户端反序列化缺省为空。
+    #[serde(default)]
+    pub recent_completion_info: Vec<crate::web::recent_completion_info::RecentCompletionInfoDto>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]

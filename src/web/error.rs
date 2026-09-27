@@ -211,6 +211,11 @@ impl IntoResponse for ApiError {
             "sc_recovery_conflict" => StatusCode::CONFLICT,
             "sc_recovery_rejected" => StatusCode::UNPROCESSABLE_ENTITY,
             "invalid_pointer_request" => StatusCode::UNPROCESSABLE_ENTITY,
+            // P3 WIGA 有界近期完成查询稳定码：缺 since、非 RFC3339、limit
+            // 越界均 422（ApiError::validation 不自行决定状态，须显式映射）。
+            "recent_since_required" | "invalid_recent_since" | "invalid_recent_limit" => {
+                StatusCode::UNPROCESSABLE_ENTITY
+            }
             // Task 7 证据查询稳定码：6 码 + evidence_io（设计 §5.2）。
             "evidence_unauthorized" => StatusCode::UNAUTHORIZED,
             "evidence_forbidden" => StatusCode::FORBIDDEN,

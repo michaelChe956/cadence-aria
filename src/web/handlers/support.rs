@@ -34,6 +34,10 @@ pub struct WorkspaceQuery {
 #[derive(Debug, Deserialize)]
 pub struct GateResolveQuery {
     pub project_id: Option<String>,
+    /// P3（REQ-WIGA-07）：RFC3339；不传则不请求近期完成目录。
+    pub recent_since: Option<String>,
+    /// P3（REQ-WIGA-07）：默认 32；仅允许 1..=32，孤立 limit（缺 since）报 422。
+    pub recent_limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]

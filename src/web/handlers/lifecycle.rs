@@ -437,6 +437,51 @@ pub async fn issue_lifecycle(
         )
         .map_err(product_store_api_error)?;
 
+    // P3（REQ-WIGA-07）：issue 级有界近期完成目录；仅在显式携带
+    // recent_since 时计算（旧 URL/旧两 info 数组原样保持）。parsed_since
+    // = max(RFC3339 query, now-24h)，limit 缺省 32、越界/孤立 422。
+    let recent_completion_info = match query.recent_since.as_deref() {
+        None if query.recent_limit.is_none() => Vec::new(),
+        None => {
+            return Err(ApiError::validation(
+                "recent_since_required",
+                "recent_since is required",
+            ));
+        }
+        Some(raw) => {
+            let since = chrono::DateTime::parse_from_rfc3339(raw)
+                .map_err(|_| {
+                    ApiError::validation("invalid_recent_since", "recent_since must be RFC3339")
+                })?
+                .with_timezone(&chrono::Utc);
+            let limit = query
+                .recent_limit
+                .unwrap_or(crate::web::recent_completion_info::RECENT_COMPLETION_MAX_LIMIT);
+            if !(1..=crate::web::recent_completion_info::RECENT_COMPLETION_MAX_LIMIT)
+                .contains(&limit)
+            {
+                return Err(ApiError::validation(
+                    "invalid_recent_limit",
+                    "recent_limit must be 1..=32",
+                ));
+            }
+            let since = since.max(
+                chrono::Utc::now()
+                    - chrono::Duration::hours(
+                        crate::web::recent_completion_info::RECENT_COMPLETION_WINDOW_HOURS,
+                    ),
+            );
+            crate::web::recent_completion_info::recent_completion_info(
+                &project_id,
+                &issue_id,
+                &plan_confirmed_info,
+                &coding_final_confirm_info,
+                since,
+                limit,
+            )
+            .map_err(product_store_api_error)?
+        }
+    };
 
     Ok(Json(IssueLifecycleResponse {
         issue: product_issue_dto_with_binding(&app_paths, issue)?,
@@ -450,6 +495,7 @@ pub async fn issue_lifecycle(
         delivery_summary,
         plan_confirmed_info,
         coding_final_confirm_info,
+        recent_completion_info,
     }))
 }
 
@@ -1067,4 +1113,5 @@ mod tests {
     use super::*;
 
     include!("lifecycle_tests.inc.rs");
+    include!("lifecycle_recent_completion_tests.inc.rs");
 }
