@@ -104,6 +104,7 @@ impl super::CodingAttemptStore {
             target_snapshot: input.target_snapshot,
             // P2 Task 2：legacy 单 attempt 首启策略显式 Manual。
             start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+            start_claim: None,
             completed_at: None,
         };
 
@@ -185,10 +186,97 @@ impl super::CodingAttemptStore {
                 completed_at: attempt.completed_at.clone(),
                 // P2 Task 2：copy-update 保留已冻结 policy，绝不取 attempt 传入值。
                 start_run_policy: stored.start_run_policy,
+                start_claim: stored.start_claim.clone(),
             };
             self.save_coding_attempt_with_status(&updated)
         })
     }
+
+
+}
+
+/// P2 Task 4：durable 单发首启认领结果——`Claimed` 是本次写入的新 claim；
+/// `Existing` 携带已认领的原身份（command/origin/phase），由调用方比较
+/// command 决定续启（幂等重放）或放弃（AlreadyStarted），store 不覆写。
+pub enum ClaimCodingStartOutcome {
+    Claimed(CodingExecutionAttempt),
+    Existing(CodingExecutionAttempt),
+}
+
+impl super::CodingAttemptStore {
+    /// P2 Task 4：attempt 同文件 durable 单发首启认领。attempt 文件锁内
+    /// 重读 CAS：已有 claim 一律返回 `Existing` 原身份（不覆写已认领
+    /// command）；无 claim 且状态仍 Created 才写入新 claim（不可复位身份）。
+    /// 锁内仅同步文件操作，禁止 await/provider 启动。
+    pub fn claim_coding_start(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        command_id: &str,
+        origin: &crate::product::coding_models::CodingStartOrigin,
+    ) -> Result<ClaimCodingStartOutcome, ProductStoreError> {
+        validate_relative_id(command_id)?;
+        let path = self.attempt_path(&attempt.project_id, &attempt.issue_id, &attempt.id);
+        with_exclusive_lock(&path, || {
+            let stored = self.get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+            if stored.start_claim.is_some() {
+                return Ok(ClaimCodingStartOutcome::Existing(stored));
+            }
+            if stored.status != CodingAttemptStatus::Created {
+                return Err(ProductStoreError::Conflict {
+                    kind: "coding_start_claim_not_first_start_state",
+                    id: stored.id.clone(),
+                });
+            }
+            let now = Utc::now().to_rfc3339();
+            let mut updated = stored.clone();
+            updated.start_claim = Some(crate::product::coding_models::CodingStartClaim {
+                command_id: command_id.to_string(),
+                origin: origin.clone(),
+                phase: crate::product::coding_models::CodingStartPhase::Claimed,
+                claimed_at: now.clone(),
+            });
+            updated.updated_at = now;
+            self.save_coding_attempt_with_status(&updated)?;
+            Ok(ClaimCodingStartOutcome::Claimed(updated))
+        })
+    }
+
+    /// P2 Task 4：推进首启 claim 相位（同文件锁内重读；command 必须与已
+    /// 认领身份一致，否则 fail-closed）。返回推进后的 attempt 快照。
+    pub fn advance_coding_start_phase(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        command_id: &str,
+        phase: crate::product::coding_models::CodingStartPhase,
+    ) -> Result<CodingExecutionAttempt, ProductStoreError> {
+        let path = self.attempt_path(&attempt.project_id, &attempt.issue_id, &attempt.id);
+        with_exclusive_lock(&path, || {
+            let stored = self.get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+            let Some(claim) = stored.start_claim.as_ref() else {
+                return Err(ProductStoreError::Conflict {
+                    kind: "coding_start_claim_missing",
+                    id: stored.id.clone(),
+                });
+            };
+            if claim.command_id != command_id {
+                return Err(ProductStoreError::Conflict {
+                    kind: "coding_start_claim_command_mismatch",
+                    id: command_id.to_string(),
+                });
+            }
+            let mut updated = stored.clone();
+            updated.start_claim = Some(crate::product::coding_models::CodingStartClaim {
+                phase,
+                ..claim.clone()
+            });
+            updated.updated_at = Utc::now().to_rfc3339();
+            self.save_coding_attempt_with_status(&updated)?;
+            Ok(updated)
+        })
+    }
+}
+
+impl super::CodingAttemptStore {
 
     #[cfg(test)]
     pub(crate) fn write_coding_attempt_for_test(

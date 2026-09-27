@@ -232,6 +232,7 @@ mod tests {
             updated_at: "2026-09-03T00:00:00Z".to_string(),
             completed_at: None,
             start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+            start_claim: None,
         }
             }
 

@@ -278,6 +278,7 @@ impl super::CodingAttemptStore {
             updated_at: now,
             target_snapshot: input.target_snapshot,
             start_run_policy: input.start_run_policy,
+            start_claim: None,
             completed_at: None,
         };
 

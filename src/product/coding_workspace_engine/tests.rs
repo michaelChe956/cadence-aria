@@ -1045,6 +1045,7 @@ fn test_attempt(id: &str) -> CodingExecutionAttempt {
         target_snapshot: None,
         completed_at: None,
         start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+        start_claim: None,
     }
         }
 
@@ -1139,6 +1140,7 @@ fn seed_delivery_attempt(
         status: CodingAttemptStatus::Completed,
         head_commit: Some(commit_sha.to_string()),
                 start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+                start_claim: None,
         ..created
     };
     store

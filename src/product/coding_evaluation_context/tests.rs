@@ -122,6 +122,7 @@ fn evaluation_context_uses_compiled_work_item_without_artifact_version() {
         target_snapshot: None,
         completed_at: None,
         start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+        start_claim: None,
         };
 
     let pack = build_evaluation_context_pack(paths, &attempt, EvaluationContextRole::CodeReviewer)
@@ -297,6 +298,7 @@ fn evaluation_context_pack_includes_story_design_work_item_and_contracts() {
         target_snapshot: None,
         completed_at: None,
         start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+        start_claim: None,
         };
 
     let pack = build_evaluation_context_pack(paths, &attempt, EvaluationContextRole::CodeReviewer)
@@ -393,6 +395,7 @@ fn evaluation_context_pack_includes_attempt_diff_context() {
         target_snapshot: None,
         completed_at: None,
         start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+        start_claim: None,
         };
 
     let pack = build_evaluation_context_pack(paths, &attempt, EvaluationContextRole::CodeReviewer)
@@ -455,6 +458,7 @@ fn reviewers_do_not_require_work_item_handoff_summary() {
         target_snapshot: None,
         completed_at: None,
         start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+        start_claim: None,
         };
 
     let reviewer_pack =
@@ -531,6 +535,7 @@ fn code_reviewer_context_pack_includes_coder_evidence() {
         target_snapshot: None,
         completed_at: None,
         start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+        start_claim: None,
         };
     store
         .write_coding_attempt_for_test(&attempt)
@@ -709,6 +714,7 @@ fn evaluation_context_pack_truncates_and_redacts_sensitive_lines() {
         target_snapshot: None,
         completed_at: None,
         start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+        start_claim: None,
         };
 
     let pack = build_evaluation_context_pack(paths, &attempt, EvaluationContextRole::CodeReviewer)

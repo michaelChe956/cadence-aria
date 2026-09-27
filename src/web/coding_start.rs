@@ -1,13 +1,15 @@
-//! P2 Task 3（tasks.md §3.1）：typed StartCoding 共用准入。
+//! P2 Task 3/4（tasks.md §3.1）：typed StartCoding 共用首启服务。
 //!
-//! 人工 WS 与自动编排共用同一首启临界区（D4 顺序：attempt reload → 状态
-//! 矩阵/origin → enrolled 当前许可与精确 source/plan/revision/target →
-//! `advance_is_ready_for_attempt`）。Task 3 交付只读准入：只有
-//! Created+PrepareContext 可首启，Running/Completed 回 AlreadyStarted，
-//! 等待/终态回 NeedsHuman（不重新认领）；SC 未 Ready 固定
-//! `SC_CODING_REQUIRES_ADVANCE`，身份/策略/enrollment 漂移显式无启动
-//! 错误。完整 claim+barrier 启动在 Task 4 接线；已获准的首启在此阶段
-//! 返回 wiring 未接的诚实错误，不伪装 Started。
+//! 人工 WS 与自动编排共用同一首启临界区，严格 D4 顺序：attempt reload →
+//! 首启状态矩阵/origin → enrolled 当前许可与精确 source/plan/revision/
+//! target（enrollment 文件锁内复核并消费 durable 单发 claim，锁序
+//! enrollment lock → attempt lock，锁内仅同步操作）→
+//! `advance_is_ready_for_attempt`（SC 未 Ready 固定
+//! `SC_CODING_REQUIRES_ADVANCE`）→ claim + `try_reserve_attempt` → 持久
+//! barrier（RunnerRegistered → ProviderMayHaveStarted → 放行）→ 既有
+//! runner。claim 是 attempt 同文件不可复位身份：同 command 幂等续启、异
+//! command AlreadyStarted、`ProviderMayHaveStarted` 后副作用不可证明转
+//! 人工分诊；registry reservation 丢失不回滚已消费许可。
 
 use crate::product::advance_store::{AdvanceStatus, AdvanceStore};
 use crate::product::app_paths::ProductAppPaths;
@@ -21,7 +23,7 @@ use crate::product::json_store::validate_relative_id;
 use crate::web::state::WebAppState;
 
 /// 共用首启命令：`attempt_id` 定位 durable attempt；`command_id` 是首启
-/// 幂等键（Task 4 durable claim 身份）；`origin` 决定授权链。
+/// 幂等键（durable claim 身份）；`origin` 决定授权链。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StartCodingCommand {
     pub attempt_id: String,
@@ -31,7 +33,7 @@ pub struct StartCodingCommand {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StartCodingOutcome {
-    /// 首启完成：runner 已过 barrier 放行（Task 4 起）。
+    /// 首启完成：runner 已过 barrier 放行。
     Started { attempt_id: String },
     /// 该 attempt 已有首启事实（claim/runner/终态完成），不重新认领。
     AlreadyStarted { attempt_id: String },
@@ -114,18 +116,68 @@ fn first_start_status(attempt: &CodingExecutionAttempt) -> Option<FirstStartStat
     }
 }
 
-/// 共用 typed StartCoding 服务（Task 3 只读准入面）。
+/// 状态矩阵到 outcome 的直接映射（无启动动作）：`Ok(None)` 表示可继续
+/// 首启；Created 但非首启相位是显式错误（fail-closed，不吞为 outcome）。
+fn first_start_short_circuit(
+    attempt: &CodingExecutionAttempt,
+) -> Result<Option<StartCodingOutcome>, StartCodingError> {
+    match first_start_status(attempt) {
+        Some(FirstStartStatus::Proceed) => Ok(None),
+        Some(FirstStartStatus::AlreadyStarted) => Ok(Some(StartCodingOutcome::AlreadyStarted {
+            attempt_id: attempt.id.clone(),
+        })),
+        Some(FirstStartStatus::NeedsHuman(reason)) => Ok(Some(StartCodingOutcome::NeedsHuman {
+            attempt_id: attempt.id.clone(),
+            reason: reason.to_string(),
+        })),
+        None => Err(StartCodingError::new(
+            "coding_start_not_first_start_state",
+            format!(
+                "attempt {} is Created but at stage {:?}; first start expects PrepareContext",
+                attempt.id, attempt.stage
+            ),
+        )),
+    }
+}
+
+/// 共用 typed StartCoding 服务（人工 WS 与自动编排同一入口）。
 pub async fn start_coding_once(
     state: &WebAppState,
     project_id: &str,
     issue_id: &str,
     command: StartCodingCommand,
 ) -> Result<StartCodingOutcome, StartCodingError> {
-    validate_relative_id(&command.command_id)
-        .map_err(|error| StartCodingError::new(
-            "coding_start_invalid_command_id",
-            format!("invalid start coding command id: {error}"),
-        ))?;
+    start_coding_attempt(state, project_id, issue_id, command, None).await
+}
+
+/// 测试注入口：与生产同一流程，仅在 runner 放行处挂 provider 入口 probe
+/// （控制中窗，不冒充启动）。
+#[cfg(test)]
+pub(crate) async fn start_coding_once_with_probe(
+    state: &WebAppState,
+    project_id: &str,
+    issue_id: &str,
+    command: StartCodingCommand,
+    probe: crate::web::coding_ws_handler::CodingRunnerStartProbe,
+) -> Result<StartCodingOutcome, StartCodingError> {
+    start_coding_attempt(state, project_id, issue_id, command, Some(probe)).await
+}
+
+async fn start_coding_attempt(
+    state: &WebAppState,
+    project_id: &str,
+    issue_id: &str,
+    command: StartCodingCommand,
+    probe: Option<crate::web::coding_ws_handler::CodingRunnerStartProbe>,
+) -> Result<StartCodingOutcome, StartCodingError> {
+    use crate::product::coding_attempt_store::ClaimCodingStartOutcome;
+    use crate::product::coding_models::CodingStartPhase;
+
+    validate_relative_id(&command.command_id).map_err(|error| StartCodingError::new(
+        "coding_start_invalid_command_id",
+        format!("invalid start coding command id: {error}"),
+    ))?;
+
     let paths = ProductAppPaths::new(state.workspace_root.join(".aria"));
     let coding_store = CodingAttemptStore::new(paths.clone());
     let attempt = coding_store
@@ -135,82 +187,199 @@ pub async fn start_coding_once(
             format!("load coding attempt for start failed: {error}"),
         ))?;
 
-    // 状态矩阵（Task 4 将在锁内重读后再执行一次）。
-    match first_start_status(&attempt) {
-        Some(FirstStartStatus::Proceed) => {}
-        Some(FirstStartStatus::AlreadyStarted) => {
-            return Ok(StartCodingOutcome::AlreadyStarted {
-                attempt_id: attempt.id.clone(),
-            });
-        }
-        Some(FirstStartStatus::NeedsHuman(reason)) => {
-            return Ok(StartCodingOutcome::NeedsHuman {
-                attempt_id: attempt.id.clone(),
-                reason: reason.to_string(),
-            });
-        }
-        None => {
-            return Err(StartCodingError::new(
-                "coding_start_not_first_start_state",
-                format!(
-                    "attempt {} is Created but at stage {:?}; first start expects PrepareContext",
-                    attempt.id, attempt.stage
-                ),
-            ));
-        }
+    // D4 ①（锁外快路径）：首启状态矩阵。
+    if let Some(outcome) = first_start_short_circuit(&attempt)? {
+        return Ok(outcome);
     }
 
-    // origin 准入（只读；Task 4 在 enrollment/attempt 锁内再执行一次）。
-    admit_start_origin(state, &paths, &coding_store, &attempt, &command.origin)?;
+    // D4 ①：attempt 临界区（进程内串行；跨进程由 durable claim 收口）。
+    let attempt_key = crate::web::state::CodingAttemptRunKey::from_attempt(&attempt);
+    let _attempt_guard = state.coding_runs.lock_attempt(&attempt_key).await;
+    let attempt = coding_store
+        .get_attempt(project_id, issue_id, &command.attempt_id)
+        .map_err(|error| StartCodingError::new(
+            "coding_start_attempt_load_failed",
+            format!("reload coding attempt for start failed: {error}"),
+        ))?;
+    if let Some(outcome) = first_start_short_circuit(&attempt)? {
+        return Ok(outcome);
+    }
 
-    // Task 4 在此接上 durable claim + registry reservation + 启动 barrier
-    // （本任务不留下生产可调用的裸 runner 替代入口）。
-    Err(StartCodingError::new(
-        "coding_start_wiring_pending",
-        "start admission passed but the first-start runner wiring lands in Task 4",
-    ))
-}
-
-fn admit_start_origin(
-    state: &WebAppState,
-    paths: &ProductAppPaths,
-    coding_store: &CodingAttemptStore,
-    attempt: &CodingExecutionAttempt,
-    origin: &CodingStartOrigin,
-) -> Result<(), StartCodingError> {
-    match origin {
+    // D4 ②③④：origin 准入与 durable 单发 claim——enrolled 路径在 enrollment
+    // 文件锁内复核当前许可并消费 claim（disable 竞争的单一_linear化点；
+    // 锁序 enrollment lock → attempt lock，锁内仅同步操作）。
+    let claim: ClaimCodingStartOutcome = match &command.origin {
         CodingStartOrigin::Manual => {
             // 手工保留 SC Ready 门但不强制 enrollment；非 SC legacy 判据不变。
-            sc_advance_ready_gate(state, paths, attempt)
+            sc_advance_ready_gate(&paths, &attempt)?;
+            coding_store
+                .claim_coding_start(&attempt, &command.command_id, &command.origin)
+                .map_err(|error| StartCodingError::new(
+                    "coding_start_claim_failed",
+                    format!("claim coding start failed: {error}"),
+                ))?
         }
         CodingStartOrigin::Enrolled {
             enrollment_id,
             policy_revision,
         } => {
-            admit_enrolled_start(
-                state,
-                paths,
-                coding_store,
-                attempt,
-                enrollment_id,
-                *policy_revision,
-            )?;
-            sc_advance_ready_gate(state, paths, attempt)
+            let automation = IssueAutomationStore::new(paths.clone());
+            let locked = automation
+                .with_current_enrollment_locked(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    |enrollment| {
+                        let admission =
+                            verify_frozen_policy(&attempt, enrollment_id, *policy_revision)
+                                .and_then(|plan_id| {
+                                    verify_current_enrollment(
+                                        enrollment,
+                                        &attempt,
+                                        enrollment_id,
+                                        *policy_revision,
+                                        &plan_id,
+                                    )
+                                })
+                                .and_then(|()| {
+                                    verify_journal_and_record(&paths, &coding_store, &attempt)
+                                })
+                                .and_then(|()| sc_advance_ready_gate(&paths, &attempt));
+                        let admission = admission.and_then(|()| {
+                            coding_store
+                                .claim_coding_start(
+                                    &attempt,
+                                    &command.command_id,
+                                    &command.origin,
+                                )
+                                .map_err(|error| StartCodingError::new(
+                                    "coding_start_claim_failed",
+                                    format!("claim coding start failed: {error}"),
+                                ))
+                        });
+                        Ok(admission)
+                    },
+                )
+                .map_err(|error| match error {
+                    crate::product::json_store::ProductStoreError::NotFound { .. } => {
+                        StartCodingError::new(
+                            "coding_start_enrollment_missing",
+                            "automation enrollment vanished before the coding start",
+                        )
+                    }
+                    other => StartCodingError::new(
+                        "coding_start_enrollment_unreadable",
+                        format!("load enrollment for start failed: {other}"),
+                    ),
+                })?;
+            locked?
         }
+    };
+
+    // claim 分诊：同 command 幂等续启；异 command 只见已消费事实；
+    // ProviderMayHaveStarted 后不可证明零外部副作用 → 人工分诊，不复位。
+    let claimed_attempt = match claim {
+        ClaimCodingStartOutcome::Claimed(saved) => saved,
+        ClaimCodingStartOutcome::Existing(saved) => {
+            let existing = saved
+                .start_claim
+                .clone()
+                .expect("existing coding start claim must be present");
+            if existing.command_id != command.command_id || existing.origin != command.origin {
+                return Ok(StartCodingOutcome::AlreadyStarted { attempt_id: saved.id });
+            }
+            match existing.phase {
+                CodingStartPhase::Claimed | CodingStartPhase::RunnerRegistered => saved,
+                CodingStartPhase::ProviderMayHaveStarted => {
+                    if saved.status == CodingAttemptStatus::Running {
+                        return Ok(StartCodingOutcome::AlreadyStarted { attempt_id: saved.id });
+                    }
+                    let marked = coding_store
+                        .advance_coding_start_phase(
+                            &saved,
+                            &command.command_id,
+                            CodingStartPhase::NeedsHuman,
+                        )
+                        .map_err(|error| StartCodingError::new(
+                            "coding_start_claim_phase_failed",
+                            format!("mark manual triage failed: {error}"),
+                        ))?;
+                    return Ok(StartCodingOutcome::NeedsHuman {
+                        attempt_id: marked.id,
+                        reason: "first start crossed the provider barrier with unproven \
+                                 external side effects; manual triage required"
+                            .to_string(),
+                    });
+                }
+                CodingStartPhase::NeedsHuman => {
+                    return Ok(StartCodingOutcome::NeedsHuman {
+                        attempt_id: saved.id,
+                        reason:
+                            "first start requires manual triage (durable needs-human claim phase)"
+                                .to_string(),
+                    });
+                }
+            }
+        }
+    };
+
+    // D4 ⑤：内存 registry reservation（拿不到即本进程已有 runner/预约——
+    // 不消费新许可地回 AlreadyStarted；reservation 丢失不回滚已消费 claim）。
+    let Some(reservation) = state.coding_runs.try_reserve_attempt(&attempt_key) else {
+        return Ok(StartCodingOutcome::AlreadyStarted {
+            attempt_id: claimed_attempt.id,
+        });
+    };
+
+    // D4 ⑥：持久 barrier（RunnerRegistered → ProviderMayHaveStarted → 放行）
+    // 后交既有 runner。
+    let event_tx = state.coding_sockets.hub_sender(&attempt_key);
+    let spawned = match probe {
+        #[cfg(test)]
+        Some(probe) => crate::web::coding_ws_handler::spawn_coding_runner_first_start_reserved_with_probe(
+            state.clone(),
+            coding_store.clone(),
+            event_tx,
+            claimed_attempt.clone(),
+            reservation,
+            &command.command_id,
+            probe,
+        ),
+        #[cfg(test)]
+        None => crate::web::coding_ws_handler::spawn_coding_runner_first_start_reserved(
+            state.clone(),
+            coding_store.clone(),
+            event_tx,
+            claimed_attempt.clone(),
+            reservation,
+            &command.command_id,
+        ),
+        #[cfg(not(test))]
+        _ => crate::web::coding_ws_handler::spawn_coding_runner_first_start_reserved(
+            state.clone(),
+            coding_store.clone(),
+            event_tx,
+            claimed_attempt.clone(),
+            reservation,
+            &command.command_id,
+        ),
+    };
+    match spawned {
+        Ok(_) => Ok(StartCodingOutcome::Started {
+            attempt_id: claimed_attempt.id,
+        }),
+        Err(error) => Err(StartCodingError::new(
+            "coding_start_runner_activation_failed",
+            format!("first-start runner activation failed: {error}"),
+        )),
     }
 }
 
-/// 自动首启的精确授权链：attempt 冻结 policy ↔ origin ↔ 当前 durable
-/// enrollment 三方一致，group journal 与 AdvanceRecord 的 plan/revision/
-/// attempt 身份互证，多 target fail-closed（REQ-WIGA-03/04、REQ-MTG-03）。
-fn admit_enrolled_start(
-    state: &WebAppState,
-    paths: &ProductAppPaths,
-    coding_store: &CodingAttemptStore,
+/// attempt 冻结 policy 与 origin 身份互证（不读 enrollment）。
+fn verify_frozen_policy(
     attempt: &CodingExecutionAttempt,
     enrollment_id: &str,
     policy_revision: u64,
-) -> Result<(), StartCodingError> {
+) -> Result<String, StartCodingError> {
     if attempt.admission_kind != CodingAdmissionKind::ScAdvance {
         return Err(StartCodingError::new(
             "coding_start_origin_mismatch",
@@ -223,7 +392,7 @@ fn admit_enrolled_start(
     let CodingStartRunPolicy::AutoStartOnce {
         enrollment_id: frozen_enrollment_id,
         policy_revision: frozen_policy_revision,
-        source_plan_revision,
+        source_plan_revision: _,
     } = &attempt.start_run_policy
     else {
         return Err(StartCodingError::new(
@@ -241,16 +410,24 @@ fn admit_enrolled_start(
             ),
         ));
     }
-    let enrollment = IssueAutomationStore::new(paths.clone())
-        .get(&attempt.project_id, &attempt.issue_id)
-        .map_err(|error| StartCodingError::new(
-            "coding_start_enrollment_unreadable",
-            format!("load enrollment for start failed: {error}"),
-        ))?
-        .ok_or_else(|| StartCodingError::new(
-            "coding_start_enrollment_missing",
-            "automation enrollment vanished before the coding start",
-        ))?;
+    let Some(plan_id) = attempt.work_item_group_id.clone() else {
+        return Err(StartCodingError::new(
+            "coding_start_origin_mismatch",
+            "enrolled start requires the attempt to be bound to a work item group plan",
+        ));
+    };
+    Ok(plan_id)
+}
+
+/// 当前 durable enrollment 与 origin/attempt 的精确互证（enrolled 锁内
+/// 调用；disable 后未消费的 AutoStartOnce 不再生效）。
+fn verify_current_enrollment(
+    enrollment: &crate::product::models::automation::IssueAutomationEnrollment,
+    attempt: &CodingExecutionAttempt,
+    enrollment_id: &str,
+    policy_revision: u64,
+    plan_id: &str,
+) -> Result<(), StartCodingError> {
     if !enrollment.enabled {
         return Err(StartCodingError::new(
             "coding_start_enrollment_disabled",
@@ -275,12 +452,6 @@ fn admit_enrolled_start(
             ),
         ));
     }
-    let Some(plan_id) = attempt.work_item_group_id.as_deref() else {
-        return Err(StartCodingError::new(
-            "coding_start_origin_mismatch",
-            "enrolled start requires the attempt to be bound to a work item group plan",
-        ));
-    };
     if enrollment.plan_id.as_deref() != Some(plan_id) {
         return Err(StartCodingError::new(
             "coding_start_enrollment_mismatch",
@@ -290,7 +461,6 @@ fn admit_enrolled_start(
             ),
         ));
     }
-    // target 快照与 enrollment 的 logical repository 精确一致。
     if let Some(snapshot) = &attempt.target_snapshot
         && snapshot.logical_repository_id != enrollment.logical_repository_id
     {
@@ -303,8 +473,31 @@ fn admit_enrolled_start(
             ),
         ));
     }
-    // group journal lineage：journal.attempt / plan_binding 与本 attempt 及
-    // 冻结 plan revision 互证。
+    Ok(())
+}
+
+/// group journal lineage 与 AdvanceRecord 的 plan/revision/attempt 身份
+/// 互证（多 target fail-closed，REQ-WIGA-03/04、REQ-MTG-03）。
+fn verify_journal_and_record(
+    paths: &ProductAppPaths,
+    coding_store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+) -> Result<(), StartCodingError> {
+    let CodingStartRunPolicy::AutoStartOnce {
+        source_plan_revision, ..
+    } = &attempt.start_run_policy
+    else {
+        return Err(StartCodingError::new(
+            "coding_start_origin_mismatch",
+            "enrolled start requires a frozen auto_start_once policy on the attempt",
+        ));
+    };
+    let Some(plan_id) = attempt.work_item_group_id.as_deref() else {
+        return Err(StartCodingError::new(
+            "coding_start_origin_mismatch",
+            "enrolled start requires the attempt to be bound to a work item group plan",
+        ));
+    };
     let journal = coding_store
         .get_group_initialization(&attempt.project_id, &attempt.issue_id, plan_id)
         .map_err(|error| StartCodingError::new(
@@ -333,7 +526,6 @@ fn admit_enrolled_start(
             ),
         ));
     }
-    // AdvanceRecord：Ready、唯一 attempt/target、revision 与冻结 policy 互证。
     let advance_store = AdvanceStore::new(paths.clone());
     let record = advance_store
         .get_advance_for_plan(&attempt.project_id, &attempt.issue_id, plan_id)
@@ -356,10 +548,11 @@ fn admit_enrolled_start(
             ),
         ));
     }
-    if !record
-        .target_attempts
-        .iter()
-        .any(|binding| binding.attempt_id == attempt.id)
+    if record.attempt_id.as_deref() != Some(attempt.id.as_str())
+        && !record
+            .target_attempts
+            .iter()
+            .any(|binding| binding.attempt_id == attempt.id)
     {
         return Err(StartCodingError::requires_advance(format!(
             "advance record for plan {plan_id} does not bind attempt {}",
@@ -380,7 +573,7 @@ fn admit_enrolled_start(
         return Err(StartCodingError::requires_advance(format!(
             "advance record for plan {plan_id} is {:?}, not Ready",
             record.status
- )));
+        )));
     }
     Ok(())
 }
@@ -389,7 +582,6 @@ fn admit_enrolled_start(
 /// 缺失/未 Ready/attempt 不匹配、读取失败均映射 `SC_CODING_REQUIRES_ADVANCE`
 /// 并携带真实原因；非 SC admission 恒放行（旧手工判据不变）。
 fn sc_advance_ready_gate(
-    _state: &WebAppState,
     paths: &ProductAppPaths,
     attempt: &CodingExecutionAttempt,
 ) -> Result<(), StartCodingError> {
@@ -417,7 +609,6 @@ fn sc_advance_ready_gate(
         ))),
     }
 }
-
 #[cfg(test)]
 mod tests {
     use crate::product::advance_store::AdvanceInput;
@@ -490,6 +681,268 @@ mod tests {
         fixture
     }
 
+
+    fn paused_start_probe() -> (
+        crate::web::coding_ws_handler::CodingRunnerStartProbe,
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entry_tx, entry_rx) = tokio::sync::oneshot::channel();
+        let (continue_tx, continue_rx) = tokio::sync::oneshot::channel();
+        (
+            crate::web::coding_ws_handler::CodingRunnerStartProbe {
+                events: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                provider_entry_tx: entry_tx,
+                continue_rx,
+            },
+            entry_rx,
+            continue_tx,
+        )
+    }
+
+    /// Task 4 主证据：两个「进程」（独立 registry）手工/自动并发首启同一
+    /// attempt——durable claim 单发，恰一 Started，输家 AlreadyStarted，
+/// 输家 registry 零 runner；provider 真实入口被 probe 暂停（不冒充启动）。
+    #[tokio::test]
+    async fn manual_and_auto_claim_same_attempt_once_across_registries() {
+        let fixture = crate::web::wiga_gate_fixture::ready_enrolled_attempt_fixture().await;
+        let attempt = fixture.attempt();
+        let state_a = fixture.state.clone();
+        let state_b = fixture.restart_state();
+        let (manual_probe, _manual_entry, _manual_hold) = paused_start_probe();
+        let (auto_probe, _auto_entry, _auto_hold) = paused_start_probe();
+        let manual = crate::web::coding_start::start_coding_once_with_probe(
+            &state_a,
+            &attempt.project_id,
+            &attempt.issue_id,
+            StartCodingCommand {
+                attempt_id: attempt.id.clone(),
+                command_id: "manual-1".into(),
+                origin: CodingStartOrigin::Manual,
+            },
+            manual_probe,
+        );
+        let auto = crate::web::coding_start::start_coding_once_with_probe(
+            &state_b,
+            &attempt.project_id,
+            &attempt.issue_id,
+            StartCodingCommand {
+                attempt_id: attempt.id.clone(),
+                command_id: "auto-1".into(),
+                origin: fixture.auto_origin(),
+            },
+            auto_probe,
+        );
+        let (manual, auto) = tokio::join!(manual, auto);
+        let started =
+            usize::from(matches!(manual, Ok(StartCodingOutcome::Started { .. })))
+                + usize::from(matches!(auto, Ok(StartCodingOutcome::Started { .. })));
+        assert_eq!(
+            started, 1,
+            "exactly one first start across registries: manual={manual:?} auto={auto:?}"
+        );
+        let saved = fixture
+            .store()
+            .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .unwrap();
+        let claim = saved.start_claim.as_ref().expect("durable single-flight claim");
+        let (winner_state, loser_state, winner_command, loser) =
+            if matches!(manual, Ok(StartCodingOutcome::Started { .. })) {
+                (&state_a, &state_b, "manual-1", &auto)
+            } else {
+                (&state_b, &state_a, "auto-1", &manual)
+            };
+        assert_eq!(claim.command_id, winner_command);
+        assert!(
+            matches!(loser, Ok(StartCodingOutcome::AlreadyStarted { .. })),
+            "loser must observe the durable claim: {loser:?}"
+        );
+        let key = CodingAttemptRunKey::from_attempt(&attempt);
+        assert_eq!(winner_state.coding_runs.runner_count(&key), 1);
+        assert_eq!(loser_state.coding_runs.runner_count(&key), 0);
+        assert_eq!(
+            claim.phase,
+            crate::product::coding_models::CodingStartPhase::ProviderMayHaveStarted
+        );
+    }
+
+    /// barrier 中窗一/二：claim 持久但未跨 provider barrier（Claimed /
+    /// RunnerRegistered）——同 command 重放续启同一身份，异 command 只见
+    /// AlreadyStarted，绝不二次首启。
+    #[tokio::test]
+    async fn same_command_resumes_before_provider_barrier() {
+        use crate::product::coding_attempt_store::ClaimCodingStartOutcome;
+        use crate::product::coding_models::CodingStartPhase;
+        let fixture = crate::web::wiga_gate_fixture::ready_enrolled_attempt_fixture().await;
+        let attempt = fixture.attempt();
+        let origin = fixture.auto_origin();
+        let store = fixture.store();
+        let key = CodingAttemptRunKey::from_attempt(&attempt);
+
+        // 窗口一：claim 后 / registry 激活前。
+        let ClaimCodingStartOutcome::Claimed(claimed) = store
+            .claim_coding_start(&attempt, "wiga-start-x", &origin)
+            .expect("seed claim at window one")
+        else {
+            panic!("seed claim must succeed");
+        };
+        let drift = crate::web::coding_start::start_coding_once(
+            &fixture.state,
+            &attempt.project_id,
+            &attempt.issue_id,
+            StartCodingCommand {
+                attempt_id: attempt.id.clone(),
+                command_id: "wiga-start-other".into(),
+                origin: origin.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            drift,
+            StartCodingOutcome::AlreadyStarted {
+                attempt_id: attempt.id.clone()
+            }
+        );
+        let (probe, _entry, _hold) = paused_start_probe();
+        let resumed = crate::web::coding_start::start_coding_once_with_probe(
+            &fixture.state,
+            &attempt.project_id,
+            &attempt.issue_id,
+            StartCodingCommand {
+                attempt_id: attempt.id.clone(),
+                command_id: "wiga-start-x".into(),
+                origin: origin.clone(),
+            },
+            probe,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resumed, StartCodingOutcome::Started { attempt_id: attempt.id.clone() });
+        assert_eq!(fixture.runner_count(&key), 1);
+        let saved = store
+            .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .unwrap();
+        assert_eq!(
+            saved.start_claim.unwrap().phase,
+            CodingStartPhase::ProviderMayHaveStarted
+        );
+    }
+
+    /// barrier 中窗三：ProviderMayHaveStarted 已持久但无可信 Running/ledger
+    /// 事实——外部副作用不可证明，人工分诊（NeedsHuman），claim 不复位、
+    /// 零二次放行。
+    #[tokio::test]
+    async fn provider_may_have_started_window_routes_to_manual_triage() {
+        use crate::product::coding_attempt_store::ClaimCodingStartOutcome;
+        use crate::product::coding_models::CodingStartPhase;
+        let fixture = crate::web::wiga_gate_fixture::ready_enrolled_attempt_fixture().await;
+        let attempt = fixture.attempt();
+        let origin = fixture.auto_origin();
+        let store = fixture.store();
+        let key = CodingAttemptRunKey::from_attempt(&attempt);
+        let ClaimCodingStartOutcome::Claimed(claimed) = store
+            .claim_coding_start(&attempt, "wiga-start-z", &origin)
+            .expect("seed claim")
+        else {
+            panic!("seed claim must succeed");
+        };
+        store
+            .advance_coding_start_phase(&claimed, "wiga-start-z", CodingStartPhase::ProviderMayHaveStarted)
+            .expect("seed provider-may-have-started window");
+
+        let same = crate::web::coding_start::start_coding_once(
+            &fixture.state,
+            &attempt.project_id,
+            &attempt.issue_id,
+            StartCodingCommand {
+                attempt_id: attempt.id.clone(),
+                command_id: "wiga-start-z".into(),
+                origin: origin.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            &same,
+            StartCodingOutcome::NeedsHuman { reason, .. }
+                if reason.contains("manual triage")
+        ));
+        assert_eq!(fixture.runner_count(&key), 0);
+        let saved = store
+            .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .unwrap();
+        assert_eq!(
+            saved.start_claim.unwrap().phase,
+            CodingStartPhase::NeedsHuman
+        );
+
+        // 异 command 同样只见已消费的 claim。
+        let other = crate::web::coding_start::start_coding_once(
+            &fixture.state,
+            &attempt.project_id,
+            &attempt.issue_id,
+            StartCodingCommand {
+                attempt_id: attempt.id.clone(),
+                command_id: "wiga-start-other".into(),
+                origin,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            other,
+            StartCodingOutcome::AlreadyStarted {
+                attempt_id: attempt.id.clone()
+            }
+        );
+    }
+
+    /// barrier 中窗二：RunnerRegistered 已持久——同 command 续启、异 command
+    /// AlreadyStarted（窗口二与窗口一仅 durable phase 不同）。
+    #[tokio::test]
+    async fn runner_registered_window_resumes_same_command_only() {
+        use crate::product::coding_attempt_store::ClaimCodingStartOutcome;
+        use crate::product::coding_models::CodingStartPhase;
+        let fixture = crate::web::wiga_gate_fixture::ready_enrolled_attempt_fixture().await;
+        let attempt = fixture.attempt();
+        let origin = fixture.auto_origin();
+        let store = fixture.store();
+        let ClaimCodingStartOutcome::Claimed(claimed) = store
+            .claim_coding_start(&attempt, "wiga-start-y", &origin)
+            .expect("seed claim")
+        else {
+            panic!("seed claim must succeed");
+        };
+        store
+            .advance_coding_start_phase(&claimed, "wiga-start-y", CodingStartPhase::RunnerRegistered)
+            .expect("seed runner-registered window");
+        let (probe, _entry, _hold) = paused_start_probe();
+        let resumed = crate::web::coding_start::start_coding_once_with_probe(
+            &fixture.state,
+            &attempt.project_id,
+            &attempt.issue_id,
+            StartCodingCommand {
+                attempt_id: attempt.id.clone(),
+                command_id: "wiga-start-y".into(),
+                origin: origin.clone(),
+            },
+            probe,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resumed, StartCodingOutcome::Started { attempt_id: attempt.id.clone() });
+        assert_eq!(
+            fixture.runner_count(&CodingAttemptRunKey::from_attempt(&attempt)),
+            1
+        );
+        let saved = store
+            .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .unwrap();
+        let claim = saved.start_claim.unwrap();
+        assert_eq!(claim.command_id, "wiga-start-y");
+        assert_eq!(claim.phase, CodingStartPhase::ProviderMayHaveStarted);
+    }
     fn enrolled_origin(
         fixture: &EnrolledGateFixture,
     ) -> CodingStartOrigin {

@@ -46,6 +46,7 @@ pub(crate) use admission::{
 #[cfg(test)]
 pub(crate) use amendment_delivery::register_plan_amendment_delivery_mark_failpoint;
 pub use attempt_creation::WorkItemAttemptCreationGuard;
+pub use attempt::ClaimCodingStartOutcome;
 pub use git_operation::*;
 pub use group_initialization::*;
 pub use group_validation::*;

@@ -106,6 +106,30 @@ pub enum CodingStartOrigin {
     },
 }
 
+/// P2 Task 4：首启 claim 的持久相位（不可复位，只沿启动顺序前进或转
+/// 人工分诊）。`ProviderMayHaveStarted` 先于 runner 放行持久——跨进程
+/// 重启在此窗口不保证未触达 provider，恢复只认可信 Running/role run
+/// ledger 或转 `NeedsHuman`。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodingStartPhase {
+    Claimed,
+    RunnerRegistered,
+    ProviderMayHaveStarted,
+    NeedsHuman,
+}
+
+/// P2 Task 4：attempt 同文件携带的单发首启事实——command 身份 + origin +
+/// 相位 + 认领时间。不以额外 JSON 单据与 attempt 状态相互猜测；copy-update
+/// 不覆写（与 status/admission 同款冻结字段）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodingStartClaim {
+    pub command_id: String,
+    pub origin: CodingStartOrigin,
+    pub phase: CodingStartPhase,
+    pub claimed_at: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CodingProviderRole {
@@ -193,6 +217,9 @@ pub struct CodingExecutionAttempt {
     /// P2 Task 2：首启策略冻结快照；旧 JSON 缺字段默认 Manual。
     #[serde(default)]
     pub start_run_policy: CodingStartRunPolicy,
+    /// P2 Task 4：durable 单发首启 claim（同文件事实）；旧 JSON 缺字段默认 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_claim: Option<CodingStartClaim>,
     pub completed_at: Option<String>,
 }
 
@@ -238,6 +265,8 @@ struct CodingExecutionAttemptSerde {
     target_snapshot: Option<AttemptTargetSnapshot>,
     #[serde(default)]
     start_run_policy: CodingStartRunPolicy,
+    #[serde(default)]
+    start_claim: Option<CodingStartClaim>,
     completed_at: Option<String>,
 }
 
@@ -284,6 +313,7 @@ impl<'de> Deserialize<'de> for CodingExecutionAttempt {
             updated_at: raw.updated_at,
             target_snapshot: raw.target_snapshot,
             start_run_policy: raw.start_run_policy,
+            start_claim: raw.start_claim,
             completed_at: raw.completed_at,
         })
     }

@@ -60,6 +60,7 @@ fn schema_v2_attempt_without_active_unit_binding_fails_closed() {
         target_snapshot: None,
         completed_at: None,
         start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+        start_claim: None,
         };
 
     let error = schema_v2_active_unit_runtime(&paths, &attempt)

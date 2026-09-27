@@ -510,6 +510,7 @@ mod tests {
             target_snapshot: None,
             completed_at: None,
             start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+            start_claim: None,
         }
             }
 

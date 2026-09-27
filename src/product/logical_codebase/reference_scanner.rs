@@ -939,6 +939,7 @@ mod tests {
                 }),
                 completed_at: Some(now),
                 start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+                start_claim: None,
             };
             crate::product::json_store::write_json(
                 &self

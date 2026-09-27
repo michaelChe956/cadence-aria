@@ -103,6 +103,126 @@ pub(crate) fn spawn_coding_runner_reserved_with_probe(
     )
 }
 
+/// P2 Task 4：首启专用 reserved spawn——durable claim 已在 attempt 文件，
+/// 此处完成「registry 激活 → RunnerRegistered → ProviderMayHaveStarted →
+/// 放行」的持久 barrier：任一 checkpoint 写失败即 drop oneshot、撤
+/// registry，不放 provider；`ProviderMayHaveStarted` 恒先于 `start_tx`
+/// 持久（跨进程重启此窗口不保证未触达 provider）。claim 的 command
+/// 身份在此防御性复核，不同 command 不得二次放行。
+pub(crate) fn spawn_coding_runner_first_start_reserved(
+    state: WebAppState,
+    coding_store: CodingAttemptStore,
+    event_tx: mpsc::Sender<CodingWsOutMessage>,
+    attempt: CodingExecutionAttempt,
+    reservation: CodingRunReservation,
+    command_id: &str,
+) -> Result<mpsc::Sender<CodingRunnerCommand>, CodingWorkspaceEngineError> {
+    spawn_coding_runner_first_start_reserved_inner(
+        state,
+        coding_store,
+        event_tx,
+        attempt,
+        reservation,
+        command_id,
+        None,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn spawn_coding_runner_first_start_reserved_with_probe(
+    state: WebAppState,
+    coding_store: CodingAttemptStore,
+    event_tx: mpsc::Sender<CodingWsOutMessage>,
+    attempt: CodingExecutionAttempt,
+    reservation: CodingRunReservation,
+    command_id: &str,
+    probe: CodingRunnerStartProbe,
+) -> Result<mpsc::Sender<CodingRunnerCommand>, CodingWorkspaceEngineError> {
+    spawn_coding_runner_first_start_reserved_inner(
+        state,
+        coding_store,
+        event_tx,
+        attempt,
+        reservation,
+        command_id,
+        Some(probe),
+    )
+}
+
+fn spawn_coding_runner_first_start_reserved_inner(
+    state: WebAppState,
+    coding_store: CodingAttemptStore,
+    event_tx: mpsc::Sender<CodingWsOutMessage>,
+    attempt: CodingExecutionAttempt,
+    reservation: CodingRunReservation,
+    command_id: &str,
+    probe: Option<CodingRunnerStartProbe>,
+) -> Result<mpsc::Sender<CodingRunnerCommand>, CodingWorkspaceEngineError> {
+    use crate::product::coding_models::CodingStartPhase;
+
+    let Some(claim) = attempt.start_claim.as_ref() else {
+        return Err(CodingWorkspaceEngineError::ProviderStream(
+            "coding_first_start_claim_missing".to_string(),
+        ));
+    };
+    if claim.command_id != command_id {
+        return Err(CodingWorkspaceEngineError::ProviderStream(
+            format!(
+                "coding_first_start_claim_command_mismatch: claim={}, spawn={command_id}",
+                claim.command_id
+            ),
+        ));
+    }
+    let attempt_key = CodingAttemptRunKey::from_attempt(&attempt);
+    let (command_tx, command_rx) = mpsc::channel(32);
+    let registration = reservation
+        .activate_cancellable(command_tx.clone())
+        .ok_or_else(|| {
+            CodingWorkspaceEngineError::ProviderStream(
+                "coding_first_start_reservation_lost".to_string(),
+            )
+        })?;
+    let (start_tx, start_rx) = oneshot::channel();
+    let probe_events = probe.as_ref().map(|probe| Arc::clone(&probe.events));
+    spawn_coding_runner_task(CodingRunnerTask {
+        state: state.clone(),
+        coding_store: coding_store.clone(),
+        event_tx,
+        attempt: attempt.clone(),
+        command_rx,
+        registry_run_id: registration.run_id,
+        cancellation: registration.cancellation,
+        start_rx: Some(start_rx),
+        probe,
+        #[cfg(test)]
+        panic_after_registration: None,
+    });
+    record_runner_start_event(probe_events.as_ref(), "task_created");
+    for phase in [CodingStartPhase::RunnerRegistered, CodingStartPhase::ProviderMayHaveStarted] {
+        if let Err(error) =
+            coding_store.advance_coding_start_phase(&attempt, command_id, phase.clone())
+        {
+            state.coding_runs.remove(&attempt_key, registration.run_id);
+            drop(start_tx);
+            return Err(error.into());
+        }
+        record_runner_start_event(
+            probe_events.as_ref(),
+            match phase {
+                CodingStartPhase::RunnerRegistered => "runner_registered",
+                _ => "provider_may_have_started",
+            },
+        );
+    }
+    if start_tx.send(()).is_err() {
+        state.coding_runs.remove(&attempt_key, registration.run_id);
+        return Err(CodingWorkspaceEngineError::ProviderStream(
+            "coding_first_start_runner_start_failed".to_string(),
+        ));
+    }
+    Ok(command_tx)
+}
+
 fn spawn_coding_runner_reserved_inner(
     state: WebAppState,
     coding_store: CodingAttemptStore,

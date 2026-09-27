@@ -1005,6 +1005,7 @@ fn manual_continue_gate_response_does_not_auto_resume_runner() {
         target_snapshot: None,
         completed_at: None,
         start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+        start_claim: None,
         };
 
     assert!(!should_resume_runner_after_gate_response(
@@ -1173,6 +1174,7 @@ fn seed_compiled_work_item_fixture() -> (TempDir, ProductAppPaths, CodingExecuti
         target_snapshot: None,
         completed_at: None,
         start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+        start_claim: None,
         };
 
     (tmp, app_paths, attempt)

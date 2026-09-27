@@ -589,6 +589,43 @@
             self.state.coding_runs.runner_count(key)
         }
 
+        /// 真实 attempt store（Task 4+ 共享）。
+        pub(crate) fn store(
+            &self,
+        ) -> crate::product::coding_attempt_store::CodingAttemptStore {
+            crate::product::coding_attempt_store::CodingAttemptStore::new(
+                self.inner.paths.clone(),
+            )
+        }
+
+        /// 当前唯一 attempt 的 registry key（Task 4/6 共享）。
+        pub(crate) fn attempt_key(&self) -> crate::web::state::CodingAttemptRunKey {
+            crate::web::state::CodingAttemptRunKey::from_attempt(&self.attempt())
+        }
+
+        /// 绑定 plan id（Task 4/6 共享）。
+        pub(crate) fn plan_id(&self) -> String {
+            self.enrollment().plan_id.expect("bound plan")
+        }
+
+        /// 当前 enrollment 的自动首启 origin（冻结 policy 同源身份）。
+        pub(crate) fn auto_origin(&self) -> crate::product::coding_models::CodingStartOrigin {
+            let enrollment = self.enrollment();
+            crate::product::coding_models::CodingStartOrigin::Enrolled {
+                enrollment_id: enrollment.enrollment_id.clone(),
+                policy_revision: enrollment.policy_revision,
+            }
+        }
+
+        /// 「重启」进程替身：同 `.aria`、全新 WebAppState/runtime（内存态清零）。
+        pub(crate) fn restart_state(&self) -> WebAppState {
+            let root = self.inner._root.path().to_path_buf();
+            WebAppState::new(
+                root.clone(),
+                crate::web::runtime::WebRuntime::new_fake(root),
+            )
+        }
+
         pub(crate) fn session_path(&self, session_id: &str) -> std::path::PathBuf {
             self.inner
                 .paths
@@ -607,6 +644,39 @@
         init_real_main_checkout(&fixture.inner.paths.root().join("checkout-enroll-a"));
         fixture.fail_compile_after_human_approve().await;
         fixture.recover_and_confirm_compile().await;
+        fixture
+    }
+
+    /// P2 Task 4 共享 fixture：Confirmed enrollment 经 Task 1 自动 advance
+    /// 到 durable Ready——唯一 attempt 沿真实 journal lineage 创建、冻结
+    /// AutoStartOnce policy，尚无任何 runner/provider 启动。
+    pub(crate) async fn ready_enrolled_attempt_fixture() -> EnrolledGateFixture {
+        let fixture = confirmed_enrolled_fixture().await;
+        let enrollment = fixture.enrollment();
+        let plan_id = enrollment.plan_id.clone().expect("bound plan");
+        let input = crate::product::advance_store::AdvanceInput {
+            command_id: format!("wiga-advance-{}-{plan_id}", enrollment.enrollment_id),
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            plan_id,
+        };
+        let outcome = crate::web::advance_plan::advance_plan(
+            &fixture.state,
+            input,
+            crate::web::advance_plan::AdvancePlanOrigin::Enrolled {
+                enrollment_id: enrollment.enrollment_id.clone(),
+                policy_revision: enrollment.policy_revision,
+            },
+        )
+        .await
+        .expect("enrolled advance to ready");
+        assert!(
+            matches!(
+                outcome,
+                crate::product::advance_store::AdvanceOutcome::Completed { .. }
+            ),
+            "enrolled advance must complete: {outcome:?}"
+        );
         fixture
     }
 

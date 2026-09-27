@@ -37,6 +37,7 @@ fn manual_recovery_attempt_fixture() -> CodingExecutionAttempt {
         target_snapshot: None,
         completed_at: None,
         start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+        start_claim: None,
     }
 }
 

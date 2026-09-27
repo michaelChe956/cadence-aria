@@ -171,6 +171,29 @@ impl IssueAutomationStore {
         resolve(resolution)
     }
 
+    /// P2 Task 4：enrollment 文件锁内重读当前 enrollment 并执行同步闭包
+    /// `f`（仅同步检查与 attempt 认领，禁止 await/provider 启动）。与 attempt
+    /// 文件锁的固定顺序为 enrollment lock → attempt lock；「读 enrollment 后
+    /// 放锁再写 claim」的窗口由此闭合（disable 与自动首启许可消费的单一
+    /// 线性化点）。
+    pub fn with_current_enrollment_locked<T>(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        f: impl FnOnce(&IssueAutomationEnrollment) -> Result<T, ProductStoreError>,
+    ) -> Result<T, ProductStoreError> {
+        let path = self.enrollment_path(project_id, issue_id)?;
+        with_exclusive_lock(&path, || {
+            let enrollment = read_optional_enrollment(&path)?.ok_or_else(|| {
+                ProductStoreError::NotFound {
+                    kind: "automation_enrollment",
+                    id: format!("{project_id}/{issue_id}"),
+                }
+            })?;
+            f(&enrollment)
+        })
+    }
+
     /// P1 WIGA Task 4：enrollment-bound 唯一创建与绑定补偿。
     ///
     /// 在 `automation-enrollment.json` 的同一文件锁内：重读 current（enabled、
