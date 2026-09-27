@@ -195,20 +195,30 @@ impl WorkspaceSessionManager {
 
     /// WS 缺省绑定：不带 command_id/expected_run_id 的应答只绑当前唯一 run
     /// （无活跃 run → None，调用方走既有 TextFallback 分支）。
+    /// P0 契约（REQ-WIGA-05）：旧 run 的 choice 应答必须在 claim 仲裁前拒
+    /// ——缺省门面只代表**当前 run 挂起集中真实存在**的 choice id；id 不在
+    /// 当前 run 挂起集（stale/伪造）→ None，调用方回 CHOICE_ID_UNMATCHED，
+    /// 不得把应答转发到当前 provider 会话。
     pub fn bind_current_run_request(
         &self,
         choice_id: &str,
         answers: Vec<ChoiceAnswerData>,
     ) -> Option<ChoiceResponseRequest> {
-        let incarnation = self.active_run_incarnation()?;
+        let run = self.active_run_ref()?;
+        let pending = run
+            .pending_choices
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !pending
+            .iter()
+            .any(|frame| choice_frame_id(frame) == Some(choice_id))
+        {
+            return None;
+        }
         Some(ChoiceResponseRequest {
             command_id: uuid::Uuid::new_v4().to_string(),
-            expected_run_id: incarnation,
+            expected_run_id: run.run_incarnation.clone(),
             answers,
-        })
-        .map(|request| {
-            let _ = choice_id;
-            request
         })
     }
 

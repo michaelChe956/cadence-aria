@@ -259,7 +259,26 @@ async fn workspace_choice_claim_ws_default_binding_uses_current_unique_run() {
     let manager = claim_manager("session_claim_ws_default");
     let (_token, incarnation) = started_claim_run(&manager).await;
 
-    // WS 缺省：不带 command_id/expected_run_id → 绑定当前唯一 run。
+    // 旧 run 的 choice 应答必须在 claim 仲裁前拒（REQ-WIGA-05）：
+    // 缺省绑定只认当前 run 挂起集中真实存在的 id；未登记即 None。
+    assert!(
+        manager
+            .bind_current_run_request("choice-unknown", claim_two_answers())
+            .is_none(),
+        "stale/unregistered id must not bind to the current run"
+    );
+
+    // 登记当前 run 的挂起帧后：WS 缺省（不带 command_id/expected_run_id）
+    // → 绑定当前唯一 run。
+    manager.register_pending_choice_frame(crate::web::workspace_ws_types::WsOutMessage::ChoiceRequest {
+        id: "choice-ws".to_string(),
+        prompt: "ws default binding".to_string(),
+        options: vec![],
+        allow_multiple: false,
+        allow_free_text: false,
+        questions: vec![],
+        source: "ask_user_question".to_string(),
+    });
     let request = manager
         .bind_current_run_request("choice-ws", claim_two_answers())
         .expect("current run binding");
