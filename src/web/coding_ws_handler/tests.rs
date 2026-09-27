@@ -266,6 +266,7 @@ fn falls_back_to_assistant_artifact_when_persisted_markdown_lacks_commands() {
         approval_attempt_id: None,
         approved_at: None,
         compile_reservation: None,
+        sc_recovery_claim: None,
     };
 
     let selected = select_work_item_markdown(

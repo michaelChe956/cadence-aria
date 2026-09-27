@@ -57,6 +57,7 @@ const KIND_GLYPH = {
   hard_error: AlertTriangle,
   choice: ListChecks,
   info: CircleCheck,
+  sc_failed: CircleAlert,
 } as const;
 
 // F-50 视觉 v2 §3：门禁条目与门卡同一视觉常量（中性底+琥珀左线）；stopped 维持
@@ -66,6 +67,7 @@ const KIND_CLASS = {
   stopped: "rounded-lg border border-slate-200 bg-gray-50 px-3 py-2",
   choice: GATE_CARD_CLASS,
   info: "rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2",
+  sc_failed: "rounded-lg border border-slate-200 bg-gray-50 px-3 py-2",
 } as const;
 
 export function CockpitInbox({
@@ -73,6 +75,7 @@ export function CockpitInbox({
   actions,
   onTakeover,
   onRetry,
+  onRetryFailedSc,
   onRetakeLease,
   actionableSessionId,
   takeoverButtonRef,
@@ -89,6 +92,8 @@ export function CockpitInbox({
   actions?: CockpitActionFacade;
   onTakeover?: (sessionId: string) => Promise<void>;
   onRetry?: (item: CockpitInboxItem) => void;
+  /** P2 GAP-E/G（Task 0.1）：失败 SC 现场的人工显式重驱（REST 由页面接线）。 */
+  onRetryFailedSc?: (failedNodeId: string) => void;
   onRetakeLease?: () => void;
   actionableSessionId?: string;
   takeoverButtonRef?: Ref<ConfirmTwiceButtonHandle>;
@@ -160,6 +165,7 @@ export function CockpitInbox({
     onOpenInfoSession,
     onTakeover,
     onRetry,
+    onRetryFailedSc,
     actionable: actionableSessionId === cockpitInboxItemSessionId(item.id),
     onRetakeLease,
     selectable: selectableIds.has(item.id),
@@ -255,6 +261,7 @@ function CockpitInboxRow({
   onOpenInfoSession,
   onTakeover,
   onRetry,
+  onRetryFailedSc,
   onRetakeLease,
   actionable,
   selectable,
@@ -274,7 +281,8 @@ function CockpitInboxRow({
   onOpenInfoSession?: (sessionId: string) => void;
   onTakeover?: (sessionId: string) => Promise<void>;
   onRetry?: (item: CockpitInboxItem) => void;
-  onRetakeLease?: () => void;
+  /** P2 GAP-E/G（Task 0.1）：失败 SC 现场的人工显式重驱（透传页面 REST 接线）。 */
+  onRetryFailedSc?: (failedNodeId: string) => void;
   actionable: boolean;
   selectable: boolean;
   selected: boolean;
@@ -364,6 +372,15 @@ function CockpitInboxRow({
         ) : null}
         {item.kind === "choice" && actionable ? (
           <ChoiceInboxCard item={item} onChoiceRespond={onChoiceRespond} />
+        ) : null}
+        {item.kind === "sc_failed" && item.scFailure && onRetryFailedSc ? (
+          <button
+            type="button"
+            onClick={() => onRetryFailedSc(item.scFailure?.failedNodeId ?? "")}
+            className="mt-2 min-h-9 rounded-md border border-slate-300 bg-white px-2.5 py-1 text-xs font-semibold text-slate-700 transition-colors duration-200 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-500"
+          >
+            人工重新驱动
+          </button>
         ) : null}
         {item.kind === "stopped" && onTakeover ? (
           <div className="mt-2 flex flex-wrap gap-2">

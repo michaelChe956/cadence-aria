@@ -23,6 +23,7 @@ fn store_persists_and_resolves_choice_gates_in_attempt_scope() {
             }],
             allow_multiple: false,
             allow_free_text: true,
+            sc_recovery_claim: None,
         })
         .expect("create choice gate");
 

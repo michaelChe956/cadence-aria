@@ -186,6 +186,7 @@ fn seed_pending_choice_gate(
                 ],
                 allow_multiple: false,
                 allow_free_text: true,
+                sc_recovery_claim: None,
             },
         )
         .expect("create pending choice gate");
@@ -291,6 +292,7 @@ async fn coding_ws_new_connection_receives_and_answers_pending_choice() {
             id: PENDING_CHOICE_ID.to_string(),
             selected_option_ids: vec!["Yes".to_string()],
             free_text: None,
+            sc_recovery_claim: None,
         },
     )
     .await;

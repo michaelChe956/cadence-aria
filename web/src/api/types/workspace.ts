@@ -482,6 +482,19 @@ export type WorkspaceHumanActionStatus = {
   gate_id: string;
 };
 
+/**
+ * P2 GAP-E/G（Task 0.1）：失败 SingleCandidate 评审运行的人工显式重驱回执
+ *（与服务端 `RetryFailedScRunStatus` 同形）：accepted=首次受理；
+ * replayed=同键重放读原结果；needs_human=派发副作用不明，人工分诊。
+ */
+export type RetryFailedScRunState = "accepted" | "replayed" | "needs_human";
+
+export type RetryFailedScRunStatus = {
+  command_id: string;
+  failed_node_id: string;
+  state: RetryFailedScRunState;
+};
+
 /** P0 1.3（REQ-WIGA-05）：choice 应答请求（与服务端 `ChoiceResponseRequest` 同形）。 */
 export type ChoiceResponseRequest = {
   command_id: string;

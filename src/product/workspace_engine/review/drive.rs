@@ -611,9 +611,11 @@ impl WorkspaceEngine {
                     )
                     .await;
                 }
+                self.promote_single_candidate_review_failed();
                 self.finish_failed_run().await;
             }
             ReviewProviderRunFailure::EmptyOutput => {
+                self.promote_single_candidate_review_failed();
                 self.finish_empty_assistant_output().await;
             }
             ReviewProviderRunFailure::Provider(message) => {
@@ -626,12 +628,29 @@ impl WorkspaceEngine {
                     )
                     .await;
                 }
+                self.promote_single_candidate_review_failed();
                 self.finish_failed_run().await;
             }
             ReviewProviderRunFailure::PermissionTimeout(permission_id) => {
                 self.handle_permission_timeout(permission_id, self.active_node_id.clone())
                     .await;
             }
+        }
+    }
+
+    /// P2 GAP-E/G（Task 0.1）：SC Evaluate 相位的 reviewer 运行失败收敛为
+    /// durable 终态 Failed（phase+status CAS），供人工显式重驱；仅作用于
+    /// 当前 reviewer 节点已标 Failed 的现场，不进入其他 finish_failed_run
+    /// 共用分支。非 Evaluate 相位（Generate/Approval 等）保持旧语义。
+    fn promote_single_candidate_review_failed(&mut self) {
+        if self.session.flow_kind
+            == crate::product::work_item_plan_policy::WorkItemPlanFlowKind::SingleCandidate
+            && self.session.single_candidate_phase
+                == Some(crate::product::models::SingleCandidatePhase::Evaluate)
+        {
+            self.persist_single_candidate_terminal_phase(
+                crate::product::models::SingleCandidatePhase::Failed,
+            );
         }
     }
 

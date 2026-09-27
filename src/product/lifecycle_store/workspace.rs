@@ -272,6 +272,7 @@ impl LifecycleStore {
             approval_attempt_id: None,
             approved_at: None,
             compile_reservation: None,
+            sc_recovery_claim: None,
             work_item_runtime_binding: None,
             provider_conversations: Vec::new(),
             messages: Vec::new(),

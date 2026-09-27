@@ -179,6 +179,7 @@ fn automation_test_record(
         messages: Vec::new(),
         created_at: "2026-09-26T00:00:00Z".to_string(),
         updated_at: "2026-09-26T00:00:00Z".to_string(),
+        sc_recovery_claim: None,
     }
 }
 

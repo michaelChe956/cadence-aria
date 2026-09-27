@@ -674,6 +674,7 @@ async fn execute_coding_persists_provider_choice_and_resumes_after_response() {
                             id: "choice_0001".to_string(),
                             selected_option_ids: vec!["backend_first".to_string()],
                             free_text: Some("先控制范围".to_string()),
+                            sc_recovery_claim: None,
                         })
                         .await
                         .expect("send choice response");

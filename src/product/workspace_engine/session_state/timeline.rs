@@ -19,11 +19,22 @@ impl WorkspaceEngine {
     }
 
     pub(crate) async fn finish_failed_run(&mut self) {
-        self.session.session_status = WorkspaceSessionStatus::Open;
+        // P2 GAP-E/G（Task 0.1）：SC 已收敛 durable 终态 Failed 的会话保留
+        // Failed（人工显式重驱的恢复现场），其他 flow 维持旧 Open 重置。
+        let status = if self.session.flow_kind
+            == crate::product::work_item_plan_policy::WorkItemPlanFlowKind::SingleCandidate
+            && self.session.single_candidate_phase
+                == Some(crate::product::models::SingleCandidatePhase::Failed)
+        {
+            WorkspaceSessionStatus::Failed
+        } else {
+            WorkspaceSessionStatus::Open
+        };
+        self.session.session_status = status.clone();
         if let Some(store) = &self.lifecycle_store
             && let Ok(record) = store.update_workspace_session_status(
                 &self.session.session_id,
-                WorkspaceSessionStatus::Open,
+                status,
             )
         {
             self.session.session_status = record.status;

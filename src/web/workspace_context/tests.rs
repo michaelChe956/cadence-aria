@@ -536,6 +536,7 @@ fn workspace_session_record(
         compile_reservation: None,
         created_at: "2026-06-30T00:00:00Z".to_string(),
         updated_at: "2026-06-30T00:00:00Z".to_string(),
+        sc_recovery_claim: None,
     }
 }
 

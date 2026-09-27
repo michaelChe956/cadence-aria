@@ -29,7 +29,8 @@ pub use spec::{ConfirmAggregateGateError, ConfirmGateViolation};
 pub(crate) use utils::*;
 pub use workspace_policy_route::PolicyRoutePersist;
 pub use workspace_single_candidate::{
-    CompileReservationError, single_candidate_approval_attempt_id, single_candidate_compile_id,
+    ClaimScRecoveryOutcome, CompileReservationError, single_candidate_approval_attempt_id,
+    single_candidate_compile_id,
 };
 
 #[derive(Debug, Clone)]

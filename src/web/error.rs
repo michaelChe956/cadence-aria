@@ -203,6 +203,12 @@ impl IntoResponse for ApiError {
             "human_action_rejected" => StatusCode::UNPROCESSABLE_ENTITY,
             "invalid_compile_recovery_action" => StatusCode::UNPROCESSABLE_ENTITY,
             "single_candidate_approval_compile_failed" => StatusCode::UNPROCESSABLE_ENTITY,
+            // P2 GAP-E/G（Task 0.1）failed-sc-runs retry 稳定码：前置
+            // 不满足 409（busy/非最新失败节点/认领异键）、请求非法 422。
+            "sc_recovery_busy" => StatusCode::CONFLICT,
+            "sc_recovery_node_mismatch" => StatusCode::CONFLICT,
+            "sc_recovery_conflict" => StatusCode::CONFLICT,
+            "sc_recovery_rejected" => StatusCode::UNPROCESSABLE_ENTITY,
             "invalid_pointer_request" => StatusCode::UNPROCESSABLE_ENTITY,
             // Task 7 证据查询稳定码：6 码 + evidence_io（设计 §5.2）。
             "evidence_unauthorized" => StatusCode::UNAUTHORIZED,

@@ -1004,6 +1004,25 @@ pub struct HumanActionStatus {
     pub gate_id: String,
 }
 
+/// P2 GAP-E/G（Task 0.1）：人工显式重驱失败 SingleCandidate reviewer 运行。
+/// `expected_phase` 必须与 durable 当前相位一致（当前仅受理 `failed`）；
+/// `command_id` 与路径中的 `failed_node_id` 组成幂等/审计键。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RetryFailedScRunRequest {
+    pub command_id: String,
+    pub expected_phase: crate::product::models::SingleCandidatePhase,
+}
+
+/// 受理回执：accepted=首次受理；replayed=同键重放读原结果；
+/// needs_human=派发副作用不明，人工分诊（不自动重试）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RetryFailedScRunStatus {
+    pub command_id: String,
+    pub failed_node_id: String,
+    pub state: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct WorkspaceMessageDto {

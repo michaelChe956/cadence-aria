@@ -81,6 +81,26 @@ pub struct SingleCandidateCompileReservation {
     pub publication_provenance_ref: String,
 }
 
+/// P2 GAP-E/G（Task 0.1）：失败 SingleCandidate 会话的人工显式重驱单发
+/// 认领——同 session 文件锁内冻结 `(failed_node_id, command_id)`；异键
+/// 409、同键读原结果；不可复位（重臂/再失败不清洗，只由人显式发起）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ScRecoveryClaim {
+    pub failed_node_id: String,
+    pub command_id: String,
+    pub state: ScRecoveryClaimState,
+}
+
+/// 认领的持久结果：Accepted=已受理派发；NeedsHuman=派发外部副作用是否
+/// 发生不可证明，停人工分诊（不自动重试）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScRecoveryClaimState {
+    Accepted,
+    NeedsHuman,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct WorkspaceSessionRecord {
@@ -135,6 +155,8 @@ pub struct WorkspaceSessionRecord {
     pub approved_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compile_reservation: Option<SingleCandidateCompileReservation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sc_recovery_claim: Option<ScRecoveryClaim>,
     #[serde(default)]
     pub work_item_runtime_binding: Option<WorkItemRuntimeBinding>,
     #[serde(default)]

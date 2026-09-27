@@ -136,6 +136,14 @@ fn valid_single_candidate_session(
     Ok((scope, source_ref, ir_ref, report_ref))
 }
 
+/// P2 GAP-E/G（Task 0.1）：人工显式重驱的失败 SC 单发认领结果。
+pub enum ClaimScRecoveryOutcome {
+    /// 本次认领成功写入（受理派发由调用方继续）。
+    Claimed(WorkspaceSessionRecord),
+    /// 同键重放：读回原认领（含其持久结果状态），不再派发。
+    Existing(WorkspaceSessionRecord),
+}
+
 impl LifecycleStore {
     /// 同一 CAS 持久化 Generate 阶段和 provider idempotency key；只有成功者可启动 provider。
     pub fn reserve_single_candidate_provider_start(
@@ -255,6 +263,76 @@ impl LifecycleStore {
                 write_json(&session_path, &stored)?;
             }
             Ok(stored)
+        })
+    }
+
+    /// 在 session 文件锁内冻结 `(failed_node_id, command_id)` 单发认领：
+    /// 仅受理 durable Failed 的 SingleCandidate 会话；同键返回 Existing，
+    /// 异键 Conflict（409）；认领不可复位。
+    pub fn claim_failed_sc_run_retry(
+        &self,
+        session_id: &str,
+        failed_node_id: &str,
+        command_id: &str,
+    ) -> Result<ClaimScRecoveryOutcome, ProductStoreError> {
+        let session_path = self.find_workspace_session_path(session_id)?;
+        with_exclusive_lock(&session_path, || {
+            let mut stored: WorkspaceSessionRecord = read_json(&session_path)?;
+            if stored.workspace_type != WorkspaceType::WorkItemPlan
+                || stored.flow_kind != WorkItemPlanFlowKind::SingleCandidate
+                || stored.single_candidate_phase != Some(SingleCandidatePhase::Failed)
+            {
+                return Err(ProductStoreError::InvalidRecord {
+                    kind: "sc_recovery_claim",
+                    reason: "session is not a failed SingleCandidate WorkItemPlan".to_string(),
+                });
+            }
+            if let Some(claim) = stored.sc_recovery_claim.as_ref() {
+                if claim.failed_node_id == failed_node_id && claim.command_id == command_id {
+                    return Ok(ClaimScRecoveryOutcome::Existing(stored));
+                }
+                return Err(ProductStoreError::Conflict {
+                    kind: "sc_recovery_claim",
+                    id: stored.id,
+                });
+            }
+            stored.sc_recovery_claim = Some(crate::product::models::ScRecoveryClaim {
+                failed_node_id: failed_node_id.to_string(),
+                command_id: command_id.to_string(),
+                state: crate::product::models::ScRecoveryClaimState::Accepted,
+            });
+            stored.updated_at = Utc::now().to_rfc3339();
+            write_json(&session_path, &stored)?;
+            Ok(ClaimScRecoveryOutcome::Claimed(stored))
+        })
+    }
+
+    /// 派发外部副作用是否发生不可证明时，把认领结果固化为 NeedsHuman
+    ///（保留认领、不重试、不复位；人工分诊）。
+    pub fn mark_failed_sc_recovery_needs_human(
+        &self,
+        session_id: &str,
+        failed_node_id: &str,
+        command_id: &str,
+    ) -> Result<(), ProductStoreError> {
+        let session_path = self.find_workspace_session_path(session_id)?;
+        with_exclusive_lock(&session_path, || {
+            let mut stored: WorkspaceSessionRecord = read_json(&session_path)?;
+            let matches_claim = stored.sc_recovery_claim.as_ref().is_some_and(|claim| {
+                claim.failed_node_id == failed_node_id && claim.command_id == command_id
+            });
+            if !matches_claim {
+                return Err(ProductStoreError::Conflict {
+                    kind: "sc_recovery_claim",
+                    id: stored.id,
+                });
+            }
+            if let Some(claim) = stored.sc_recovery_claim.as_mut() {
+                claim.state = crate::product::models::ScRecoveryClaimState::NeedsHuman;
+            }
+            stored.updated_at = Utc::now().to_rfc3339();
+            write_json(&session_path, &stored)?;
+            Ok(())
         })
     }
 

@@ -6,6 +6,7 @@ import {
   getCodingAttemptSnapshot,
   getWorkspaceChoiceResponseStatus,
   postCodingChoiceResponse,
+  postRetryFailedScRun,
   postWorkspaceChoiceResponse,
   postWorkspaceHumanAction,
   takeoverWorkspaceSession,
@@ -67,6 +68,7 @@ vi.mock("../api/client", async (importOriginal) => ({
   ...(await importOriginal<typeof ApiClient>()),
   takeoverWorkspaceSession: vi.fn(),
   postWorkspaceHumanAction: vi.fn(),
+  postRetryFailedScRun: vi.fn(),
   postWorkspaceChoiceResponse: vi.fn(),
   getWorkspaceChoiceResponseStatus: vi.fn(),
   postCodingChoiceResponse: vi.fn(),
@@ -889,5 +891,47 @@ describe("ChatCockpitPage", () => {
 
     fireEvent.click(within(inbox).getByRole("button", { name: "查看 Plan 会话" }));
     expect(onOpenSession).toHaveBeenCalledWith("session_001");
+  });
+
+  // P2 GAP-E/G（Task 0.1）：失败 SC 现场只投影一条「等待人工显式重驱」卡，
+  // 按钮调用新 REST（同节点稳定 command_id）；渲染本身绝不自动触发重试。
+  it("failed single-candidate node exposes manual re-drive via REST without auto retry", async () => {
+    const user = userEvent.setup();
+    const retryMock = vi.mocked(postRetryFailedScRun);
+    retryMock.mockResolvedValue({
+      command_id: "cmd-sc-retry-node_sc_failed",
+      failed_node_id: "node_sc_failed",
+      state: "accepted",
+    });
+    useWorkspaceStore.setState({
+      sessionId: "session_001",
+      flowKind: "single_candidate",
+      singleCandidatePhase: "failed",
+      sessionStatus: "failed",
+    });
+    useWorkspaceStore.getState().setTimelineNodesForTest([
+      timelineNode({
+        node_id: "node_sc_failed",
+        node_type: "reviewer_run",
+        status: "failed",
+        title: "Review Round 1",
+        summary: "Provider 运行失败",
+      }),
+    ]);
+
+    renderCockpit();
+
+    // 无自动重试：渲染后零 REST 调用。
+    expect(retryMock).not.toHaveBeenCalled();
+    const inbox = screen.getByTestId("cockpit-inbox");
+    expect(within(inbox).getByText("单候选评审运行失败")).toBeInTheDocument();
+    const button = within(inbox).getByRole("button", { name: "人工重新驱动" });
+    await user.click(button);
+    expect(retryMock).toHaveBeenCalledTimes(1);
+    expect(retryMock).toHaveBeenCalledWith("session_001", "node_sc_failed");
+    // 同节点再次点击走同一稳定 command_id（服务端同键 replayed 幂等）。
+    await user.click(button);
+    expect(retryMock).toHaveBeenCalledTimes(2);
+    expect(retryMock).toHaveBeenLastCalledWith("session_001", "node_sc_failed");
   });
 });

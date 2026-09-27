@@ -1146,3 +1146,5 @@ include!("single_candidate/contract_prerevision.rs");
 include!("single_candidate/contract_autorepair.rs");
 // C1 Task 1 options 预检回灌链用例拆分至子文件内联。
 include!("single_candidate/preflight_options_loop.rs");
+// P2 GAP-E/G/H（Task 0.1/0.3）：SC Evaluate reviewer 失败收敛与 503 诊断。
+include!("single_candidate/p2_reviewer_failure.rs");

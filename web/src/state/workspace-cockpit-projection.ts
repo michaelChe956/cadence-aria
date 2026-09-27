@@ -461,7 +461,13 @@ export function selectGateProjection(state: WorkspaceWsState): GateProjection | 
   };
 }
 
-export type CockpitInboxKind = "gate" | "stopped" | "hard_error" | "choice" | "info";
+export type CockpitInboxKind =
+  | "gate"
+  | "stopped"
+  | "hard_error"
+  | "choice"
+  | "info"
+  | "sc_failed";
 
 /**
  * P0 1.3（REQ-WIGA-05）Task 11：驾驶舱 choice 就地作答投影——workspace 侧
@@ -503,7 +509,15 @@ export interface CockpitInboxItem {
   title: string;
   summary: string;
   triage: boolean;
-  source: "gate" | "session_status" | "protocol_error" | "engine_error" | "advance" | "choice" | "plan_confirmed_info",
+  source:
+    | "gate"
+    | "session_status"
+    | "protocol_error"
+    | "engine_error"
+    | "advance"
+    | "choice"
+    | "plan_confirmed_info"
+    | "sc_failed",
   createdAt: string | null;
   gate: GateProjection | null;
   inlineError: { code: string; message: string } | null;
@@ -513,6 +527,8 @@ export interface CockpitInboxItem {
   protocolErrorCode?: string | null;
   /** REQ-WIGA-07 Task 9：kind="info" 时的 plan 确认投影；其余 kind 缺省。 */
   planInfo?: PlanConfirmedInfoProjection | null;
+  /** P2 GAP-E/G（Task 0.1）：kind="sc_failed" 时的人工显式重驱投影。 */
+  scFailure?: { failedNodeId: string; phase: "failed" } | null;
 }
 
 /** 裸 driver 抢走租约后的协议码——常量源头在 protocol-error-copy（F-50）。 */
@@ -727,6 +743,35 @@ export function selectCockpitInbox(state: WorkspaceWsState): CockpitInboxItem[] 
         status: "open",
       },
     });
+  }
+
+  // P2 GAP-E/G（Task 0.1）：durable Failed 的 SingleCandidate 现场投影——
+  // 最新 Failed timeline 节点 + phase=failed；只读事实 + 人工显式重驱动作，
+  // 绝不自动重试。非 Failed 相位/非 SC flow 不投影。
+  if (
+    state.flowKind === "single_candidate" &&
+    state.singleCandidatePhase === "failed" &&
+    state.sessionStatus === "failed"
+  ) {
+    const failedNode = [...state.timelineNodes]
+      .filter((node) => node.status === "failed")
+      .sort((left, right) => right.started_at.localeCompare(left.started_at))[0];
+    if (failedNode) {
+      items.push({
+        id: `sc_failed:${failedNode.node_id}`,
+        kind: "sc_failed",
+        severity: 2,
+        title: "单候选评审运行失败",
+        summary: `${failedNode.summary ?? "评审运行失败"} · 等待人工显式重驱`,
+        triage: false,
+        source: "sc_failed",
+        createdAt: failedNode.started_at ?? null,
+        gate: null,
+        inlineError: null,
+        choice: null,
+        scFailure: { failedNodeId: failedNode.node_id, phase: "failed" },
+      });
+    }
   }
 
   return items.sort((left, right) => {

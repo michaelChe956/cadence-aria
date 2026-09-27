@@ -32,6 +32,7 @@ import type {
   RepositoryInitializationOperationSnapshot,
   RepositoryBranchListResponse,
   RepositoryListResponse,
+  RetryFailedScRunStatus,
   TakeoverResponse,
   WorkspaceHumanAction,
   WorkspaceHumanActionStatus,
@@ -189,6 +190,62 @@ function isHumanActionStatus(value: unknown): value is WorkspaceHumanActionStatu
     typeof value.gate_id === "string" &&
     (value.state === "accepted" || value.state === "busy" || value.state === "rejected")
   );
+}
+
+/**
+ * P2 GAP-E/G（Task 0.1）：失败 SingleCandidate 评审运行的人工显式重驱。
+ *
+ * command_id 由失败节点稳定派生（`cmd-sc-retry-{failed_node_id}`）——同节点
+ * 重复点击命中服务端同键 replayed 幂等，不产生第二次 provider 启动。
+ * 200 回执（accepted/replayed/needs_human）原样返回；4xx 抛 `ApiRequestError`。
+ */
+export async function postRetryFailedScRun(
+  sessionId: string,
+  failedNodeId: string,
+): Promise<RetryFailedScRunStatus> {
+  const response = await fetch(
+    `/api/workspace-sessions/${encodeURIComponent(sessionId)}/failed-sc-runs/${encodeURIComponent(failedNodeId)}/retry`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        command_id: `cmd-sc-retry-${failedNodeId}`,
+        expected_phase: "failed",
+      }),
+    },
+  );
+  const body: unknown = await response.json().catch(() => null);
+  if (
+    response.ok &&
+    isRecord(body) &&
+    typeof body.command_id === "string" &&
+    typeof body.failed_node_id === "string" &&
+    (body.state === "accepted" || body.state === "replayed" || body.state === "needs_human")
+  ) {
+    return body as RetryFailedScRunStatus;
+  }
+  if (!response.ok) {
+    const error: unknown = body;
+    throw new ApiRequestError({
+      code:
+        isRecord(error) && typeof error.code === "string"
+          ? error.code
+          : "web_client_error",
+      message:
+        isRecord(error) && typeof error.message === "string"
+          ? error.message
+          : response.statusText,
+      details:
+        isRecord(error) && isRecord(error.details)
+          ? (error.details as ApiError["details"])
+          : {},
+    });
+  }
+  throw new ApiRequestError({
+    code: "sc_retry_unexpected_response",
+    message: "失败重驱端点返回了无法识别的回执",
+    details: {},
+  });
 }
 
 /**

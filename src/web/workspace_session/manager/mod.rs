@@ -272,6 +272,7 @@ pub(crate) fn test_session_record(session_id: &str) -> WorkspaceSessionRecord {
         messages: Vec::new(),
         created_at: "2026-01-01T00:00:00Z".to_string(),
         updated_at: "2026-01-01T00:00:00Z".to_string(),
+        sc_recovery_claim: None,
     }
 }
 

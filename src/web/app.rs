@@ -369,6 +369,10 @@ pub fn build_web_router_with_evidence(state: WebAppState, evidence_enabled: bool
             post(handlers::post_workspace_human_action),
         )
         .route(
+            "/api/workspace-sessions/{session_id}/failed-sc-runs/{failed_node_id}/retry",
+            post(handlers::post_workspace_failed_sc_run_retry),
+        )
+        .route(
             "/api/workspace-sessions/{session_id}/lease-diagnostics",
             get(handlers::workspace_session_lease_diagnostics),
         )

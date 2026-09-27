@@ -10,8 +10,8 @@ import {
   getCodingChoiceResponseStatus,
   getWorkspaceChoiceResponseStatus,
   postCodingChoiceResponse,
+  postRetryFailedScRun,
   postWorkspaceChoiceResponse,
-  takeoverWorkspaceSession,
 } from "../api/client";
 import { newCommandId } from "../hooks/useWorkspaceWs";
 import { fetchWorkspaceArtifactVersion } from "../api/workspace-content";
@@ -750,6 +750,36 @@ export function ChatCockpitPage({
     const commandId = item.id.slice(item.id.lastIndexOf(":") + 1);
     workspaceWs.sendAdvance(commandId);
   }, [workspaceWs.sendAdvance]);
+  // P2 GAP-E/G（Task 0.1）：失败 SingleCandidate 现场的人工显式重驱——
+  // command_id 由失败节点稳定派生（同键 replayed 幂等）；回执/错误就地亮
+  // 协议错误面，绝不自动重试（GAP-H 裁决：503 等故障由人决定重驱）。
+  const handleRetryFailedSc = useCallback(
+    (failedNodeId: string) => {
+      const targetSessionId = useWorkspaceStore.getState().sessionId ?? sessionId;
+      if (targetSessionId === null || failedNodeId === "") {
+        return;
+      }
+      void postRetryFailedScRun(targetSessionId, failedNodeId)
+        .then((status) => {
+          if (status.state === "needs_human") {
+            useWorkspaceStore.getState().setProtocolError({
+              code: `sc_recovery_${status.state}`,
+              message: "失败重驱派发结果不确定，已进入人工分诊（不自动重试）",
+            });
+          }
+        })
+        .catch((error: unknown) => {
+          const code =
+            typeof error === "object" && error !== null && "code" in error
+              ? String(error.code)
+              : "sc_recovery_failed";
+          const message =
+            error instanceof Error && error.message !== "" ? error.message : "人工重驱请求失败";
+          useWorkspaceStore.getState().setProtocolError({ code, message });
+        });
+    },
+    [sessionId],
+  );
   // F-11/F-28 二轮：裸 driver 抢走租约（STALE_DRIVER_LEASE）或本连接以
   // observer 身份重连（OBSERVER_WRITE_REJECTED）后写操作被拒——重发 driver
   // hello 即重新持有租约（服务端 bind_role 对既有连接同样执行 lease.acquire），
@@ -1265,6 +1295,7 @@ export function ChatCockpitPage({
           actions={actions}
           onTakeover={handleTakeover}
           onRetry={handleRetry}
+          onRetryFailedSc={handleRetryFailedSc}
           onRetakeLease={handleRetakeLease}
           actionableSessionId={sessionId}
           takeoverButtonRef={takeoverButtonRef}

@@ -57,6 +57,7 @@ async fn returns_coding_attempt_snapshot_with_persisted_execution_state() {
             }],
             allow_multiple: false,
             allow_free_text: true,
+            sc_recovery_claim: None,
         })
         .expect("create choice gate");
 
