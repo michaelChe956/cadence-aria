@@ -204,6 +204,157 @@ impl AutopilotOrchestrator {
     }
 }
 
+/// P2 Task 6（§3.2）：无 attach 启动扫描——`serve_web` 构造 state 后、进入
+/// 有界 tick 前先行一次。沿 project → issue → attempt 全量遍历，对带 Task 4
+/// durable claim 的首启现场与 legacy Running 半启动恢复 runner（事件走
+/// attempt 级 hub，零 socket 订阅者也不阻塞）；副作用不可证明的窗口
+/// fail-closed 转 AwaitingManualRecovery。返回本轮恢复的 runner 数；单
+/// attempt 失败留下可见诊断并继续扫描（不吞错误）。
+pub async fn reconcile_claimed_coding_runs_once(state: &WebAppState) -> Result<usize, String> {
+    let paths = ProductAppPaths::new(state.workspace_root.join(".aria"));
+    let store = crate::product::coding_attempt_store::CodingAttemptStore::new(paths.clone());
+    let projects = ProjectStore::new(paths.clone())
+        .list()
+        .map_err(|error| format!("startup coding scan: project list unreadable: {error}"))?;
+    let mut resumed = 0usize;
+    for project in &projects {
+        let issues = IssueStore::new(paths.clone())
+            .list(&project.id)
+            .map_err(|error| {
+                format!(
+                    "startup coding scan: issue list unreadable for {}: {error}",
+                    project.id
+                )
+            })?;
+        for issue in &issues {
+            let attempts = match store.list_attempts_for_issue(&project.id, &issue.id) {
+                Ok(attempts) => attempts,
+                Err(error) => {
+                    eprintln!(
+                        "startup coding scan: attempts unreadable for {}/{}: {error}",
+                        project.id, issue.id
+                    );
+                    continue;
+                }
+            };
+            for attempt in attempts {
+                match recover_claimed_attempt_at_startup(state, &store, &attempt).await {
+                    Ok(true) => resumed += 1,
+                    Ok(false) => {}
+                    Err(error) => {
+                        eprintln!(
+                            "startup coding scan: reconcile failed for {}: {error}",
+                            attempt.id
+                        );
+                    }
+                }
+            }
+        }
+    }
+    Ok(resumed)
+}
+
+/// 单 attempt 启动恢复分诊（P2 Task 6）：
+/// - registry 已有 runner/预约：幂等跳过（并发抢输不是失败）。
+/// - Running：可信半启动，走既有 `ensure_runner_for_resumed_attempt`
+///（SC durable-ready 门、物化判定、双启去重全在 helper 内）。
+/// - Created + claim（Claimed/RunnerRegistered）：同 command/origin 幂等
+///   续启——Task 4 单一恢复方法，不隐式新 command。
+/// - Created + claim（ProviderMayHaveStarted）且无可信 ledger：外部副作用
+///   不可证明 → durable AwaitingManualRecovery（UI 可诊断），零 runner。
+/// - Created 无 claim / 终态 / 人工停点态：零动作。
+async fn recover_claimed_attempt_at_startup(
+    state: &WebAppState,
+    store: &crate::product::coding_attempt_store::CodingAttemptStore,
+    attempt: &crate::product::coding_models::CodingExecutionAttempt,
+) -> Result<bool, String> {
+    use crate::product::coding_models::{CodingAttemptStatus, CodingStartPhase};
+    use crate::web::coding_ws_handler::{
+        ResumedAttemptRunner, ensure_runner_for_resumed_attempt,
+    };
+
+    let attempt_key = crate::web::state::CodingAttemptRunKey::from_attempt(attempt);
+    if state
+        .coding_runs
+        .attempt_is_reserved_or_running(&attempt_key)
+    {
+        return Ok(false);
+    }
+    match attempt.status {
+        CodingAttemptStatus::Running => {
+            // 零订阅者 hub：恢复事件不依赖任何存活 socket。
+            let event_tx = state.coding_sockets.hub_sender(&attempt_key);
+            match ensure_runner_for_resumed_attempt(state, store, &event_tx, &attempt_key, attempt)
+                .await
+            {
+                ResumedAttemptRunner::Restarted { .. } => Ok(true),
+                ResumedAttemptRunner::NotNeeded
+                | ResumedAttemptRunner::ManualRecovery { .. } => Ok(false),
+            }
+        }
+        CodingAttemptStatus::Created => {
+            let Some(claim) = attempt.start_claim.as_ref() else {
+                return Ok(false);
+            };
+            match claim.phase {
+                CodingStartPhase::Claimed | CodingStartPhase::RunnerRegistered => {
+                    let outcome = crate::web::coding_start::start_coding_once(
+                        state,
+                        &attempt.project_id,
+                        &attempt.issue_id,
+                        crate::web::coding_start::StartCodingCommand {
+                            attempt_id: attempt.id.clone(),
+                            command_id: claim.command_id.clone(),
+                            origin: claim.origin.clone(),
+                        },
+                    )
+                    .await;
+                    match outcome {
+                        Ok(crate::web::coding_start::StartCodingOutcome::Started { .. }) => {
+                            Ok(true)
+                        }
+                        Ok(crate::web::coding_start::StartCodingOutcome::AlreadyStarted {
+                            ..
+                        }) => Ok(false),
+                        Ok(crate::web::coding_start::StartCodingOutcome::NeedsHuman {
+                            attempt_id,
+                            reason,
+                        }) => Err(format!(
+                            "claimed first start replay triaged human for {attempt_id}: {reason}"
+                        )),
+                        Err(error) => Err(format!(
+                            "claimed first start replay failed for {}: {}",
+                            attempt.id, error
+                        )),
+                    }
+                }
+                CodingStartPhase::ProviderMayHaveStarted => {
+                    // 可信在途事实优先：role run ledger 已有 provider 启动
+                    // 证据时交由在途 run/恢复协议，不二次首启也不分诊。
+                    let ledger_started = store
+                        .list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)
+                        .map(|runs| !runs.is_empty())
+                        .unwrap_or(false);
+                    if ledger_started {
+                        return Ok(false);
+                    }
+                    store
+                        .transition_to_awaiting_manual_recovery(
+                            &attempt.id,
+                            "coding_startup_claim_side_effects_unproven",
+                        )
+                        .map_err(|error| {
+                            format!("mark manual recovery failed for {}: {error:?}", attempt.id)
+                        })?;
+                    Ok(false)
+                }
+                CodingStartPhase::NeedsHuman => Ok(false),
+            }
+        }
+        _ => Ok(false),
+    }
+}
+
 /// P1 WIGA Task 7：人工停点判定。只读 durable session/compile 事务/人工门
 /// 轮次与 manager 挂起 choice；任一停点返回 `AwaitingHuman`，后台不发下一
 /// 动作，解除只经 P0 REST 人手。终态（Confirmed/Failed/Terminated 等）不

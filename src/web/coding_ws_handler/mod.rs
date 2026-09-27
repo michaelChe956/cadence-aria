@@ -14,6 +14,7 @@ mod tests;
 pub(crate) use protocol::coding_choice_request_frame;
 pub use protocol::{CodingWsInMessage, CodingWsOutMessage};
 pub use socket::{coding_ws, is_coding_ws_message_allowed, scoped_coding_ws};
+pub(crate) use socket::{ResumedAttemptRunner, ensure_runner_for_resumed_attempt};
 
 pub(crate) use context::*;
 pub(crate) use gates::*;

@@ -579,6 +579,13 @@ pub async fn serve_web(
         work_item_plan_single_candidate,
     );
     refresh_provider_health_for_startup(&state).await;
+    // P2 Task 6（§3.2）：无 attach 启动扫描——恢复已认领/在途 coding run，
+    // 先于 autopilot 有界 tick 执行一次；失败 fail-visible，不阻塞服务。
+    if let Err(error) =
+        crate::web::autopilot_orchestrator::reconcile_claimed_coding_runs_once(&state).await
+    {
+        eprintln!("[aria-startup] coding run startup reconcile failed: {error}");
+    }
     let static_service = crate::web::static_assets::static_dist_service();
     let evidence_enabled = is_loopback_host(&host);
     let app = build_web_router_with_evidence(state.clone(), evidence_enabled).fallback(

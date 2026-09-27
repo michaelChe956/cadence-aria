@@ -4,10 +4,12 @@ use tokio::sync::mpsc;
 
 use crate::cross_cutting::provider_registry::ProviderRegistry;
 use crate::product::app_paths::ProductAppPaths;
-use crate::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttemptInput};
+use crate::product::coding_attempt_store::{
+    ClaimCodingStartOutcome, CodingAttemptStore, CreateCodingAttemptInput,
+};
 use crate::product::coding_models::{
-    CodingAttemptStatus, CodingExecutionStage, CodingProviderPermissionMode,
-    CodingRolePermissionModes, CodingRoleProviderConfigSnapshot,
+    CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage,
+    CodingProviderPermissionMode, CodingRolePermissionModes, CodingRoleProviderConfigSnapshot,
 };
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::product::models::ProviderName;
@@ -357,4 +359,284 @@ async fn recover_coding_channel_re_admits_and_restarts_runner() {
         }
     }
     assert!(saw_protocol_error, "恢复后的 runner 失败必须仍可见");
+}
+
+// ---------------------------------------------------------------------------
+// P2 Task 6（tasks.md §3.2）：无 attach 启动扫描——已认领/在途 coding run
+// 在 serve_web 构造 state 后先行恢复，不再以 socket attach 为唯一触发。
+// ---------------------------------------------------------------------------
+
+struct StartupReconcileFixture {
+    _root: tempfile::TempDir,
+    store: CodingAttemptStore,
+    attempt: CodingExecutionAttempt,
+}
+
+impl StartupReconcileFixture {
+    fn attempt_key(&self) -> CodingAttemptRunKey {
+        CodingAttemptRunKey::from_attempt(&self.attempt)
+    }
+
+    fn store(&self) -> CodingAttemptStore {
+        self.store.clone()
+    }
+
+    /// 「重启进程」替身：同 `.aria`、全新 WebAppState（内存 registry 清零）。
+    fn restart_state(&self) -> WebAppState {
+        let root = self._root.path().to_path_buf();
+        WebAppState::new(root.clone(), WebRuntime::new_fake(root))
+    }
+
+    fn reload(&self) -> crate::product::coding_models::CodingExecutionAttempt {
+        self.store()
+            .get_attempt(
+                &self.attempt.project_id,
+                &self.attempt.issue_id,
+                &self.attempt.id,
+            )
+            .expect("reload attempt")
+    }
+
+    async fn reconcile(&self, state: &WebAppState) -> usize {
+        crate::web::autopilot_orchestrator::reconcile_claimed_coding_runs_once(state)
+            .await
+            .expect("startup reconcile ok")
+    }
+}
+
+/// 播种启动扫描现场 attempt：可选 Task 4 durable claim（推进到指定 phase）、
+/// 可选 durable admission + Running + Coding stage（`seed_running_attempt_for_test`
+/// + stage 推进，模拟旧进程崩溃残留的半启动现场，不伪造外部 provider 调用）。
+fn seed_startup_attempt(
+    claim_phase: Option<crate::product::coding_models::CodingStartPhase>,
+    running: bool,
+) -> StartupReconcileFixture {
+    let root = tempfile::tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    std::fs::create_dir_all(&worktree).expect("worktree");
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    // 启动扫描沿 ProjectStore → IssueStore → attempt 遍历：补权威记录。
+    crate::product::project_store::ProjectStore::new(paths.clone())
+        .create(crate::product::project_store::CreateProjectInput {
+            name: "startup reconcile project".to_string(),
+            description: None,
+        })
+        .expect("seed project");
+    crate::product::issue_store::IssueStore::new(paths.clone())
+        .create(crate::product::issue_store::CreateProductIssueInput {
+            project_id: "project_0001".to_string(),
+            repo_id: None,
+            logical_codebase_id: None,
+            title: "startup reconcile issue".to_string(),
+            description: None,
+            change_id: None,
+            base_branch: None,
+        })
+        .expect("seed issue");
+    let store = CodingAttemptStore::new(paths.clone());
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            work_item_id: "work_item_0001".to_string(),
+            base_branch: "HEAD".to_string(),
+            branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
+            worktree_path: Some(worktree),
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Fake,
+                reviewer: Some(ProviderName::Fake),
+                review_rounds: 1,
+                permission_modes: Default::default(),
+            },
+            target_snapshot: None,
+            max_auto_rework: 2,
+        })
+        .expect("create attempt");
+    store
+        .update_role_provider_config_snapshot(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingRoleProviderConfigSnapshot {
+                coder: ProviderName::Fake,
+                code_reviewer: ProviderName::Fake,
+                internal_reviewer: ProviderName::Fake,
+                review_rounds: 1,
+                permission_modes: CodingRolePermissionModes {
+                    coder: CodingProviderPermissionMode::Auto,
+                    code_reviewer: CodingProviderPermissionMode::Auto,
+                    internal_reviewer: CodingProviderPermissionMode::Auto,
+                },
+            },
+        )
+        .expect("role config points at fake providers");
+    let mut attempt = attempt;
+    if let Some(phase) = claim_phase {
+        let command_id = format!("startup-reconcile-{}", attempt.id);
+        let claimed = store
+            .claim_coding_start(
+                &attempt,
+                &command_id,
+                &crate::product::coding_models::CodingStartOrigin::Manual,
+            )
+            .expect("task4 durable claim");
+        let claimed = match claimed {
+            ClaimCodingStartOutcome::Claimed(saved) => saved,
+            ClaimCodingStartOutcome::Existing(_) => panic!("fresh attempt must claim cleanly"),
+        };
+        if phase != crate::product::coding_models::CodingStartPhase::Claimed {
+            store
+                .advance_coding_start_phase(&claimed, &command_id, phase)
+                .expect("advance claim phase");
+        }
+        attempt = claimed;
+    }
+    if running {
+        attempt = store
+            .seed_running_attempt_for_test(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("seed durable running admission");
+        attempt = store
+            .update_attempt_stage(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                CodingExecutionStage::Coding,
+            )
+            .expect("coding stage");
+    }
+    StartupReconcileFixture {
+        _root: root,
+        store,
+        attempt,
+    }
+}
+
+/// 主线：Running + 已持久 ProviderMayHaveStarted claim 的半启动 attempt，
+/// 进程「重启」后无任何 WS attach，启动扫描即恢复 runner；幂等不双启、
+/// 不新建 attempt。
+#[tokio::test]
+async fn startup_reconciles_claimed_running_coding_without_attach() {
+    let fixture = seed_startup_attempt(
+        Some(crate::product::coding_models::CodingStartPhase::ProviderMayHaveStarted),
+        true,
+    );
+    let fresh = fixture.restart_state();
+    assert_eq!(fresh.coding_runs.runner_count(&fixture.attempt_key()), 0);
+    fixture.reconcile(&fresh).await;
+    assert_eq!(
+        fresh.coding_runs.runner_count(&fixture.attempt_key()),
+        1,
+        "startup reconcile must resume the claimed running attempt without attach"
+    );
+    assert_eq!(
+        fixture
+            .store()
+            .list_attempts_for_issue("project_0001", "issue_0001")
+            .expect("list attempts")
+            .len(),
+        1,
+        "recovery must resume the original attempt, not create a new one"
+    );
+    assert_eq!(fixture.reload().status, CodingAttemptStatus::Running);
+    // 幂等：重复扫描不得双启（registry/claim 去重）。
+    fixture.reconcile(&fresh).await;
+    assert_eq!(fresh.coding_runs.runner_count(&fixture.attempt_key()), 1);
+}
+
+/// Claimed 未跨 barrier 的安全窗：同 command/origin 幂等续启（Task 4 单一
+/// 恢复方法），不隐式新 command。
+#[tokio::test]
+async fn startup_reconcile_resumes_claimed_first_start_with_same_command() {
+    let fixture =
+        seed_startup_attempt(Some(crate::product::coding_models::CodingStartPhase::Claimed), false);
+    let fresh = fixture.restart_state();
+    fixture.reconcile(&fresh).await;
+    assert_eq!(
+        fresh.coding_runs.runner_count(&fixture.attempt_key()),
+        1,
+        "claimed-not-crossed-barrier attempt must resume via the same command"
+    );
+    let reloaded = fixture.reload();
+    assert_eq!(
+        reloaded.start_claim.as_ref().expect("claim kept").command_id,
+        format!("startup-reconcile-{}", reloaded.id),
+        "recovery must replay the durable claim command identity"
+    );
+    assert_eq!(
+        fixture
+            .store()
+            .list_attempts_for_issue("project_0001", "issue_0001")
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+/// Created + ProviderMayHaveStarted + 无可信 ledger：外部副作用不可证明 →
+/// durable AwaitingManualRecovery（UI 可诊断），零 runner。
+#[tokio::test]
+async fn startup_unproven_provider_window_moves_created_attempt_to_manual_recovery() {
+    let fixture = seed_startup_attempt(
+        Some(crate::product::coding_models::CodingStartPhase::ProviderMayHaveStarted),
+        false,
+    );
+    let fresh = fixture.restart_state();
+    fixture.reconcile(&fresh).await;
+    assert_eq!(fresh.coding_runs.runner_count(&fixture.attempt_key()), 0);
+    let reloaded = fixture.reload();
+    assert_eq!(
+        reloaded.status,
+        CodingAttemptStatus::AwaitingManualRecovery,
+        "unproven provider window must fail closed for manual triage"
+    );
+    assert!(reloaded.manual_recovery_reason.is_some());
+    // 人工恢复态二次扫描零动作。
+    fixture.reconcile(&fresh).await;
+    assert_eq!(fresh.coding_runs.runner_count(&fixture.attempt_key()), 0);
+}
+
+/// Created 无 claim 不隐式启动；legacy Running（无 claim、有既有准入证据）
+/// 按原规则恢复；Failed/Aborted/Completed 一律不恢复。
+#[tokio::test]
+async fn startup_reconcile_skips_terminal_and_unclaimed_but_recovers_legacy_running() {
+    let idle = seed_startup_attempt(None, false);
+    let fresh = idle.restart_state();
+    idle.reconcile(&fresh).await;
+    assert_eq!(
+        fresh.coding_runs.runner_count(&idle.attempt_key()),
+        0,
+        "created attempt without claim must not auto-start"
+    );
+    assert_eq!(idle.reload().status, CodingAttemptStatus::Created);
+
+    let legacy = seed_startup_attempt(None, true);
+    let legacy_state = legacy.restart_state();
+    legacy.reconcile(&legacy_state).await;
+    assert_eq!(
+        legacy_state.coding_runs.runner_count(&legacy.attempt_key()),
+        1,
+        "legacy running attempt with durable admission must recover by the original rules"
+    );
+
+    for status in [
+        CodingAttemptStatus::Failed,
+        CodingAttemptStatus::Aborted,
+        CodingAttemptStatus::Completed,
+    ] {
+        let terminal = seed_startup_attempt(None, false);
+        let mut attempt = terminal.reload();
+        attempt.status = status.clone();
+        terminal
+            .store()
+            .write_coding_attempt_for_test(&attempt)
+            .expect("seed terminal attempt");
+        let terminal_state = terminal.restart_state();
+        terminal.reconcile(&terminal_state).await;
+        assert_eq!(
+            terminal_state.coding_runs.runner_count(&terminal.attempt_key()),
+            0,
+            "{status:?} must not recover"
+        );
+        assert_eq!(terminal.reload().status, status);
+    }
 }
