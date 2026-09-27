@@ -832,7 +832,10 @@ pub fn issue_coding_final_confirm_info(paths: &ProductAppPaths,
 >   （含 1×危险命令 permission REST 答）→pi author 完成→reviewer 经 claude 网关失败
 >   （11:07-11:17 网关全窗 No available accounts）→durable Failed+人工重驱卡
 >   （timeline_node_002）→60s 零重驱对账稳定（/tmp/p2_evidence.jsonl
->   `p2_no_redrive_reconcile`）。进程重启恢复证据待 Main 重启 v48r 后补。
+>   `p2_no_redrive_reconcile`）。进程重启恢复已证（v48s PID 967175，Main 重启）：
+>   首帧即基线（failed/failed/ledger1/nodes2），60s 观察窗零变化、REST 可读、
+>   coding_attempts 0（`p2_restart_recovery_passed`）——durable Failed 保持、
+>   启动扫描零重驱、timeline 零新增节点。
 > - **3.4 留白理由（结构性）**：enrolled 链 coding 段对 claude 网关形成单点依赖链
 >   （compile_support.rs Logical 分支→advance_target_snapshot→provider_stream.rs:206
 >   `logical_provider_gateway_required` fail-closed；pi/kimi 网关硬拒、codex sandbox 禁令）；
