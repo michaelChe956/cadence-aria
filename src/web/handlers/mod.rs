@@ -89,6 +89,7 @@ pub(crate) mod lifecycle;
 mod logical_codebase_members;
 mod logical_codebase_registration;
 mod logical_codebase_bootstrap;
+mod identity_repair;
 mod pointer_publication;
 mod pointer_publish_error_mapping;
 mod product_resources;
@@ -135,6 +136,7 @@ pub use logical_codebase_bootstrap::{
     get_lc_bootstrap_projection, get_logical_codebase_bootstrap,
     post_lc_bootstrap_action, post_logical_codebase_bootstrap_action,
 };
+pub use identity_repair::{get_lc_identity_repair, post_lc_identity_repair_action};
 pub use logical_codebase_registration::{
     cancel_lc_registration, cancel_logical_codebase_registration, get_lc_registration_batch,
     get_logical_codebase_registration_batch, preflight_lc_registration,

@@ -56,6 +56,7 @@ fn fixture() -> Fixture {
                     compatibility_backfilled: true,
                 }],
                 completed_keys: Vec::new(),
+                repair_audit: Vec::new(),
                 read_mode: Some("dual".to_string()),
                 last_error: None,
                 created_at: "2026-08-14T00:00:00Z".to_string(),

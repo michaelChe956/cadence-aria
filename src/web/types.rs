@@ -419,6 +419,12 @@ pub use logical_codebase_bootstrap::{
     LogicalCodebaseBootstrapNoticeDto, LogicalCodebaseBootstrapProjectionDto,
 };
 
+mod identity_repair;
+pub use identity_repair::{
+    IdentityJournalDiagnosticDto, IdentityMappingSubmissionDto,
+    IdentityRepairActionRequestDto, RepositoryIdentityMappingDto,
+};
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct CreateRepositoryRequest {

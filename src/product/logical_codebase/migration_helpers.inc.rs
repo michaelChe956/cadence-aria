@@ -164,14 +164,14 @@ fn source_repositories_digest(
     Ok(format!("sha256:{:x}", Sha256::digest(canonical_json)))
 }
 
-fn duplicate_repository_id(repositories: &[RepositoryRecord]) -> Option<String> {
+pub(crate) fn duplicate_repository_id(repositories: &[RepositoryRecord]) -> Option<String> {
     repositories
         .windows(2)
         .find(|pair| pair[0].id == pair[1].id)
         .map(|pair| pair[0].id.clone())
 }
 
-fn duplicate_mapping_legacy_id(mappings: &[RepositoryIdentityMapping]) -> Option<String> {
+pub(crate) fn duplicate_mapping_legacy_id(mappings: &[RepositoryIdentityMapping]) -> Option<String> {
     let mut ids = HashSet::new();
     mappings.iter().find_map(|mapping| {
         (!ids.insert(&mapping.legacy_repository_id)).then(|| mapping.legacy_repository_id.clone())
@@ -183,7 +183,7 @@ fn duplicate_logical_repository_id(ids: &[LogicalRepositoryId]) -> Option<Logica
     ids.iter().find_map(|id| (!seen.insert(*id)).then_some(*id))
 }
 
-fn mapping_idempotency_key(
+pub(crate) fn mapping_idempotency_key(
     project_id: &str,
     legacy_repository_id: &str,
     source_digest: &str,
@@ -191,7 +191,7 @@ fn mapping_idempotency_key(
     format!("map:{project_id}:{legacy_repository_id}:{source_digest}")
 }
 
-fn repository_source_identity(
+pub(crate) fn repository_source_identity(
     repository: &RepositoryRecord,
 ) -> Result<RepositorySourceIdentity, ProductStoreError> {
     let canonical_path = canonicalize_repository_path(&repository.path)?;

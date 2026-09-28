@@ -27,6 +27,18 @@ pub struct RepositoryIdentityMapping {
     pub compatibility_backfilled: bool,
 }
 
+/// C4 Task 7：repair 动作在原 journal 上追加的审计事实（同 command 重放的
+/// 稳定判定键）。`#[serde(default)]` 保持旧 journal JSON 兼容。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdentityRepairAuditEntry {
+    pub command_id: String,
+    pub action: String,
+    pub outcome: String,
+    pub detail: String,
+    pub applied_at: String,
+}
+
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdentityMigrationJournal {
     pub journal_version: u16,
@@ -42,6 +54,8 @@ pub struct IdentityMigrationJournal {
     pub read_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub repair_audit: Vec<IdentityRepairAuditEntry>,
     pub created_at: String,
     pub updated_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -64,6 +78,7 @@ impl IdentityMigrationJournal {
             source_repos_digest: source_repos_digest.to_string(),
             mappings: Vec::new(),
             completed_keys: Vec::new(),
+            repair_audit: Vec::new(),
             read_mode: None,
             last_error: None,
             created_at: now.clone(),

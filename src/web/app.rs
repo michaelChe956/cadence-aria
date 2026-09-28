@@ -144,6 +144,11 @@ pub fn build_web_router_with_evidence(state: WebAppState, evidence_enabled: bool
             post(handlers::post_logical_codebase_bootstrap_action),
         )
         .route(
+            "/api/projects/{project_id}/logical-codebases/{lc_id}/identity-repair",
+            get(handlers::get_lc_identity_repair)
+                .post(handlers::post_lc_identity_repair_action),
+        )
+        .route(
             "/api/projects/{project_id}/logical-codebase/members",
             get(handlers::list_logical_codebase_members),
         )

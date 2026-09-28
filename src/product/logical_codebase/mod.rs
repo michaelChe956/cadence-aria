@@ -10,6 +10,7 @@ pub mod evidence_injection;
 pub mod evidence_mediator;
 pub mod evidence_token;
 pub mod feature;
+pub mod identity_repair;
 pub mod issue_selection;
 pub mod legacy_shared_worktree_migration;
 pub mod migration;
@@ -65,8 +66,12 @@ pub use legacy_shared_worktree_migration::{
 };
 pub use migration::{
     IdentityMigrationExecutor, IdentityMigrationJournal, IdentityMigrationJournalStore,
-    IdentityMigrationPhase, IdentityMigrationVerifier, MigrationFaultInjector,
-    RepositoryIdentityMapping,
+    IdentityMigrationPhase, IdentityMigrationVerifier, IdentityRepairAuditEntry,
+    MigrationFaultInjector, RepositoryIdentityMapping,
+};
+pub use identity_repair::{
+    IdentityJournalDiagnostic, IdentityMappingSubmission, IdentityRepairActionKind,
+    IdentityRepairActionRequest, IdentityRepairService, RepairContinuation,
 };
 pub use planning_context::{
     MemberCheckoutFingerprint, PlanningContextSnapshot, PlanningContextSnapshotStore,

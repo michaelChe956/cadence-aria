@@ -233,6 +233,17 @@ impl IntoResponse for ApiError {
             // 请求参数非法 400/422。
             "bootstrap_stale_revision" => StatusCode::CONFLICT,
             "bootstrap_action_invalid_object" => StatusCode::BAD_REQUEST,
+            // C4 Task 7：identity repair 稳定码——journal 缺失 404、
+            // stale journal/未决冲突 409、mapping 语义拒绝/参数非法 422。
+            "identity_repair_journal_not_found" => StatusCode::NOT_FOUND,
+            "identity_repair_stale_journal"
+            | "identity_repair_conflict"
+            | "identity_repair_not_failed" => StatusCode::CONFLICT,
+            "identity_repair_rejected"
+            | "identity_repair_invalid_action"
+            | "identity_repair_invalid_mapping"
+            | "identity_repair_mapping_required"
+            | "identity_repair_mapping_unexpected" => StatusCode::UNPROCESSABLE_ENTITY,
             // P3 WIGA 有界近期完成查询稳定码：缺 since、非 RFC3339、limit
             // 越界均 422（ApiError::validation 不自行决定状态，须显式映射）。
             "recent_since_required" | "invalid_recent_since" | "invalid_recent_limit" => {
