@@ -925,4 +925,207 @@ mod tests {
         );
         String::from_utf8(output.stdout).unwrap().trim().to_string()
     }
+
+    // ---- C4 Task 4：首批登记冷启动（无 active index）与 command replay ----
+
+    fn lc_first_registration_fixture() -> (
+        tempfile::TempDir,
+        ProductAppPaths,
+        LogicalCodebaseRegistrationCoordinator,
+        String,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path().join("aria-state"));
+        ProjectStore::new(paths.clone())
+            .create(CreateProjectInput {
+                name: "project".to_string(),
+                description: None,
+            })
+            .unwrap();
+        let root_path = temp.path().join("aggregate-root");
+        let first = root_path.join("first");
+        let second = root_path.join("second");
+        init_git_repository(&first);
+        init_git_repository(&second);
+        let lc = LogicalCodebaseStore::new(paths.clone())
+            .create(
+                "project_0001",
+                crate::product::logical_codebase::LogicalCodebaseCreateInput {
+                    name: "cold-start".to_string(),
+                    aggregate_root: fs::canonicalize(&root_path).unwrap(),
+                },
+            )
+            .unwrap();
+        let coordinator = LogicalCodebaseRegistrationCoordinator::for_lc(paths.clone(), &lc.id);
+        (temp, paths, coordinator, lc.id)
+    }
+
+    fn git_state_inventory(repo: &Path) -> (String, String, Vec<(String, Vec<u8>)>) {
+        let head = git_output(repo, &["rev-parse", "HEAD"]);
+        let status = git_output(repo, &["status", "--porcelain"]);
+        let mut inventory = Vec::new();
+        let mut stack = vec![repo.join(".git")];
+        while let Some(dir) = stack.pop() {
+            if let Ok(entries) = fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        stack.push(path);
+                    } else if let (Ok(rel), Ok(bytes)) = (
+                        path.strip_prefix(repo),
+                        fs::read(&path),
+                    ) {
+                        inventory.push((rel.to_string_lossy().into_owned(), bytes));
+                    }
+                }
+            }
+        }
+        inventory.sort();
+        (head, status, inventory)
+    }
+
+    #[test]
+    fn first_lc_registration_creates_manifest_and_checkouts_without_active_index_or_git_writes() {
+        let (temp, paths, coordinator, lc_id) = lc_first_registration_fixture();
+        let first_repo = temp.path().join("aggregate-root/first");
+        let second_repo = temp.path().join("aggregate-root/second");
+        let first_before = git_state_inventory(&first_repo);
+        let second_before = git_state_inventory(&second_repo);
+
+        // 无 active index、无 manifest 的冷启动：preflight → confirmed batch →
+        // resume 完成首批登记。
+        let input = ConfirmedRegistrationBatchInput::from_preflight(
+            &coordinator
+                .preflight(RegistrationPreflightInput {
+                    project_id: "project_0001".to_string(),
+                    aggregate_root: CanonicalAggregateRoot {
+                        canonical_path: fs::canonicalize(temp.path().join("aggregate-root"))
+                            .unwrap(),
+                    },
+                    paths: vec![first_repo.clone(), second_repo.clone()],
+                })
+                .unwrap(),
+            false,
+        );
+        let batch = coordinator.submit_confirmed_batch(input).unwrap();
+        let resumed = coordinator.resume_batch("project_0001", &batch.id).unwrap();
+        assert_eq!(
+            resumed.status,
+            RegistrationBatchStatus::Completed,
+            "items: {:?}",
+            resumed.items
+        );
+
+        // manifest/members/checkouts 全部落在 logical-codebases/{lc_id}/ 子树。
+        let lc_store = LogicalCodebaseStore::for_lc(paths.clone(), &lc_id);
+        let manifest = lc_store.load_manifest("project_0001").unwrap().expect(
+            "first registration must create the manifest inside the lc subtree",
+        );
+        assert_eq!(manifest.member_ids.len(), 2);
+        assert_eq!(manifest.membership_revision, 3);
+        let members = lc_store.list_members("project_0001").unwrap();
+        assert_eq!(members.len(), 2);
+        let mut digests = members
+            .iter()
+            .map(|member| member.source_identity.key_digest.clone())
+            .collect::<Vec<_>>();
+        digests.sort();
+        digests.dedup();
+        assert_eq!(digests.len(), 2, "no duplicate source identity");
+        let checkouts = lc_store.list_checkouts("project_0001").unwrap();
+        assert_eq!(checkouts.len(), 2);
+
+        // 没有 active aggregate index 也不阻塞成员登记。
+        assert!(
+            crate::product::logical_codebase::aggregate_index::AggregateIndexStore::for_lc(
+                paths.clone(),
+                &lc_id
+            )
+            .active("project_0001")
+            .unwrap()
+            .is_none()
+        );
+        // 首建 policy bootstrap 从 manifest 事实可用。
+        crate::product::logical_codebase::policy::AggregatePolicyArtifactStore::for_lc(
+            paths.clone(),
+            &lc_id,
+        )
+        .ensure_bootstrap(&manifest)
+        .unwrap();
+
+        // 成员仓零 Git 写副作用。
+        assert_eq!(git_state_inventory(&first_repo), first_before);
+        assert_eq!(git_state_inventory(&second_repo), second_before);
+    }
+
+    #[test]
+    fn bootstrap_registration_replay_same_command_returns_same_batch_and_no_duplicate_members() {
+        let (temp, paths, coordinator, lc_id) = lc_first_registration_fixture();
+        let root = CanonicalAggregateRoot {
+            canonical_path: fs::canonicalize(temp.path().join("aggregate-root")).unwrap(),
+        };
+        let input = ConfirmedRegistrationBatchInput::from_preflight(
+            &coordinator
+                .preflight(RegistrationPreflightInput {
+                    project_id: "project_0001".to_string(),
+                    aggregate_root: root,
+                    paths: vec![
+                        temp.path().join("aggregate-root/first"),
+                        temp.path().join("aggregate-root/second"),
+                    ],
+                })
+                .unwrap(),
+            false,
+        );
+
+        // 同一 command/idempotency key 重放：返回同一 durable batch。
+        let first = coordinator.submit_confirmed_batch(input.clone()).unwrap();
+        let replayed = coordinator.submit_confirmed_batch(input).unwrap();
+        assert_eq!(first.id, replayed.id);
+        assert_eq!(first.idempotency_key, replayed.idempotency_key);
+        assert_eq!(first.items.len(), replayed.items.len());
+        let first_ids = first
+            .items
+            .iter()
+            .map(|item| item.source_digest.clone())
+            .collect::<Vec<_>>();
+        let replayed_ids = replayed
+            .items
+            .iter()
+            .map(|item| item.source_digest.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(first_ids, replayed_ids);
+
+        coordinator.resume_batch("project_0001", &first.id).unwrap();
+        let lc_store = LogicalCodebaseStore::for_lc(paths.clone(), &lc_id);
+        let members = lc_store.list_members("project_0001").unwrap();
+        assert_eq!(members.len(), 2, "replay must not duplicate members");
+        let manifest = lc_store.load_manifest("project_0001").unwrap().unwrap();
+
+        // 过期 expected revision → fail-closed conflict，不产生新批次写入。
+        let error = coordinator
+            .resume_batch_checked("project_0001", &first.id, manifest.membership_revision + 1)
+            .unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                crate::product::json_store::ProductStoreError::Conflict { kind, id }
+                    if *kind == "registration_batch_manifest_revision_mismatch" && id == &first.id
+            ),
+            "unexpected error: {error:?}"
+        );
+
+        // 正确 revision 的显式 resume 幂等返回已完成批次。
+        let checked = coordinator
+            .resume_batch_checked("project_0001", &first.id, manifest.membership_revision)
+            .unwrap();
+        assert_eq!(checked.status, RegistrationBatchStatus::Completed);
+        assert_eq!(
+            LogicalCodebaseStore::for_lc(paths.clone(), &lc_id)
+                .list_members("project_0001")
+                .unwrap()
+                .len(),
+            2
+        );
+    }
 }

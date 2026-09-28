@@ -1100,4 +1100,133 @@ mod tests {
             "profile selection must not change the stable step layout"
         );
     }
+
+    // ---- C4 Task 4：member-index checkpoint 中断可重入，不重复已完成 provider turn ----
+
+    #[tokio::test]
+    async fn member_index_checkpoint_survives_interruption_and_does_not_repeat_completed_provider_turn()
+     {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path().join(".aria"));
+        let store = AggregateInitializationOperationStore::new(paths.clone());
+        let mut manifest = LogicalCodebaseManifest::new(
+            "project_0001",
+            temp.path().join("aggregate-root"),
+            Vec::new(),
+        );
+        manifest.created_at = CREATED_AT.to_string();
+        manifest.updated_at = CREATED_AT.to_string();
+        LogicalCodebaseStore::new(paths.clone())
+            .save_manifest("project_0001", &manifest)
+            .unwrap();
+
+        /// 第一个 provider turn 完成后触发 cancellation，模拟页面关闭/进程中断。
+        struct InterruptAfterFirstTurnProvider {
+            turns: Mutex<u32>,
+            token: CancellationToken,
+        }
+        #[async_trait]
+        impl AggregateProviderTurnDriver for InterruptAfterFirstTurnProvider {
+            async fn run_turn(
+                &self,
+                _project_id: &str,
+                _operation_id: &str,
+                _step: AggregateInitializationStepKind,
+                _preflight: &AggregatePreflightSnapshot,
+                _lc_id: Option<&str>,
+                _cancellation: CancellationToken,
+            ) -> Result<String, AggregateInitializationError> {
+                let mut turns = self.turns.lock().unwrap();
+                *turns += 1;
+                if *turns == 1 {
+                    self.token.cancel();
+                }
+                Ok("summary".to_string())
+            }
+        }
+
+        let skills: Arc<dyn AggregateSkillsPreparation> = Arc::new(FakeSkillsPreparation {
+            calls: Arc::new(Mutex::new(Vec::new())),
+        });
+        let preflight = Arc::new(FakePreflightService {
+            calls: Arc::new(Mutex::new(Vec::new())),
+        });
+        let preflight_driver: Arc<dyn AggregatePreflightService> = preflight.clone();
+        let token = CancellationToken::new();
+        let provider = Arc::new(InterruptAfterFirstTurnProvider {
+            turns: Mutex::new(0),
+            token: token.clone(),
+        });
+        let clock: Arc<Clock> = Arc::new(|| CREATED_AT.to_string());
+        let coordinator = AggregateInitializationCoordinator::new(
+            paths.clone(),
+            store.clone(),
+            skills.clone(),
+            preflight_driver.clone(),
+            provider.clone(),
+            clock,
+        );
+        coordinator
+            .begin(
+                "aggregate_initialization_c4".to_string(),
+                "project_0001",
+                AggregateInitializationOperationInput {
+                    idempotency_key: "c4-resume".to_string(),
+                    manifest_revision: manifest.membership_revision,
+                    policy_digest: "sha256:policy".to_string(),
+                    profile_evidence_digest: Some("sha256:profile".to_string()),
+                    provider_context_root: manifest.provider_context_root.clone(),
+                    provider: "claude_code".to_string(),
+                },
+            )
+            .unwrap();
+
+        let interrupted = coordinator
+            .execute("project_0001", "aggregate_initialization_c4", token)
+            .await;
+        assert!(matches!(
+            interrupted,
+            Err(AggregateInitializationError::Cancelled)
+        ));
+
+        // 中断现场：deterministic member-index（preflight）checkpoint 保留，
+        // 已完成的 provider turn 不重跑。
+        let operation = coordinator
+            .get("project_0001", "aggregate_initialization_c4")
+            .unwrap();
+        assert_eq!(
+            operation.status,
+            AggregateInitializationOperationStatus::Failed
+        );
+        let preflight_step = operation
+            .steps
+            .iter()
+            .find(|step| step.step_id == AggregateInitializationStepKind::AggregatePreflight)
+            .unwrap();
+        assert_eq!(
+            preflight_step.status,
+            AggregateInitializationStepStatus::Completed
+        );
+        assert!(preflight_step.output_artifact_ref.is_some());
+        assert_eq!(*provider.turns.lock().unwrap(), 1);
+
+        // 显式 Continue：execute_remaining 只执行未完成步骤。
+        let preflight_calls_before = preflight.calls.lock().unwrap().len();
+        let completed = coordinator
+            .execute_remaining(
+                "project_0001",
+                "aggregate_initialization_c4",
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            completed.status,
+            AggregateInitializationOperationStatus::Completed
+        );
+        // provider turn 计数 = 3（首次 1 + 续跑 2），已完成的 turn 不重复。
+        assert_eq!(*provider.turns.lock().unwrap(), 3);
+        // deterministic preflight 不重跑（Completed 步骤跳过）。
+        assert_eq!(preflight.calls.lock().unwrap().len(), preflight_calls_before);
+    }
 }

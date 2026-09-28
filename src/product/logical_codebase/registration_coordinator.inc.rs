@@ -107,6 +107,42 @@ impl LogicalCodebaseRegistrationCoordinator {
         })
     }
 
+    /// C4 Task 4：带显式 expected membership revision 的可重入 resume。
+    /// manifest revision 与调用方期望不符时 fail-closed（过期 revision conflict），
+    /// 不产生任何写入；已完成/取消的批次幂等返回。
+    pub fn resume_batch_checked(
+        &self,
+        project_id: &str,
+        batch_id: &str,
+        expected_manifest_revision: u64,
+    ) -> Result<RegistrationBatchRecord, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(batch_id)?;
+        let initial = self.batch_store().load(project_id, batch_id)?;
+        // 过期 revision 一律 fail-closed——即使批次已完成，也必须区分「同
+        // command 正确 revision 的 durable replay」与「过期 revision 访问」。
+        let manifest = self
+            .authority_store()
+            .load_manifest(project_id)?
+            .ok_or_else(|| ProductStoreError::NotFound {
+                kind: "logical_codebase_manifest",
+                id: project_id.to_string(),
+            })?;
+        if manifest.membership_revision != expected_manifest_revision {
+            return Err(ProductStoreError::Conflict {
+                kind: "registration_batch_manifest_revision_mismatch",
+                id: batch_id.to_string(),
+            });
+        }
+        if matches!(
+            initial.status,
+            RegistrationBatchStatus::Cancelled | RegistrationBatchStatus::Completed
+        ) {
+            return Ok(initial);
+        }
+        self.resume_batch(project_id, batch_id)
+    }
+
     pub fn get_batch(
         &self,
         project_id: &str,

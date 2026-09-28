@@ -130,15 +130,7 @@ impl AggregateInitializationCoordinator {
         operation_id: &str,
         cancellation: CancellationToken,
     ) -> Result<AggregateInitializationOperation, AggregateInitializationError> {
-        let operation =
-            self.operations
-                .get(project_id, operation_id)
-                .map_err(|error| match error {
-                    ProductStoreError::NotFound { id, .. } => {
-                        AggregateInitializationError::not_found(id)
-                    }
-                    other => AggregateInitializationError::Store(other),
-                })?;
+        let operation = self.load_operation(project_id, operation_id)?;
         if operation.status == AggregateInitializationOperationStatus::Created {
             self.operations
                 .mark_running(project_id, operation_id, (self.clock)())?;
@@ -151,13 +143,64 @@ impl AggregateInitializationCoordinator {
                 ),
             ));
         }
+        self.advance_remaining(project_id, operation_id, &cancellation)
+            .await
+    }
 
+    /// C4 Task 4：显式 Continue——从 Failed（中断/可重试失败）的 durable
+    /// operation 续跑。reopen 只重置 Failed 步骤；Completed 步骤（含
+    /// provider turn 与 checkpoint）原样保留，续跑不重复执行。这是显式
+    /// 动作，GET/投影绝不调用。
+    pub async fn execute_remaining(
+        &self,
+        project_id: &str,
+        operation_id: &str,
+        cancellation: CancellationToken,
+    ) -> Result<AggregateInitializationOperation, AggregateInitializationError> {
+        let operation = self.load_operation(project_id, operation_id)?;
+        match operation.status {
+            AggregateInitializationOperationStatus::Failed => {
+                self.operations
+                    .reopen_for_resume(project_id, operation_id, (self.clock)())?;
+            }
+            AggregateInitializationOperationStatus::Created
+            | AggregateInitializationOperationStatus::Running => {}
+            other => {
+                return Err(AggregateInitializationError::state(
+                    operation_id,
+                    format!(
+                        "operation is already {} and cannot be resumed",
+                        serialise_status(other)
+                    ),
+                ));
+            }
+        }
+        self.advance_remaining(project_id, operation_id, &cancellation)
+            .await
+    }
+
+    /// 按五步顺序推进所有未完成步骤；Completed 步骤直接跳过（幂等重入与
+    /// 续跑共用）。顺序保证仍由 `mark_step_running` 的前置完成检查执行。
+    async fn advance_remaining(
+        &self,
+        project_id: &str,
+        operation_id: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<AggregateInitializationOperation, AggregateInitializationError> {
+        let operation = self.load_operation(project_id, operation_id)?;
         let manifest = self.load_manifest(project_id, &operation)?;
+        let step_completed = |kind: AggregateInitializationStepKind| {
+            operation
+                .steps
+                .get(kind.index())
+                .is_some_and(|step| step.status == AggregateInitializationStepStatus::Completed)
+        };
 
         // machine_skills: deterministic, never a provider turn.
-        if let Err(error) = self
-            .run_machine_skills(project_id, operation_id, &cancellation)
-            .await
+        if !step_completed(AggregateInitializationStepKind::MachineSkills)
+            && let Err(error) = self
+                .run_machine_skills(project_id, operation_id, cancellation)
+                .await
         {
             tracing::warn!(
                 project_id,
@@ -171,21 +214,36 @@ impl AggregateInitializationCoordinator {
             return self.fail_interrupted(project_id, operation_id);
         }
 
-        // aggregate_preflight: deterministic, never a provider turn.
-        let preflight = match self
-            .run_aggregate_preflight(project_id, operation_id, &manifest, &cancellation)
-        {
-            Ok(preflight) => preflight,
-            Err(error) => {
-                tracing::warn!(
+        // aggregate_preflight: deterministic, never a provider turn. 续跑时
+        // 直接复用 durable checkpoint 的 member projections 快照。
+        let preflight =
+            if step_completed(AggregateInitializationStepKind::AggregatePreflight) {
+                self.load_persisted_preflight(operation_id)?
+                    .ok_or_else(|| {
+                        AggregateInitializationError::state(
+                            operation_id,
+                            "preflight checkpoint artifact is missing for resume",
+                        )
+                    })?
+            } else {
+                match self.run_aggregate_preflight(
                     project_id,
                     operation_id,
-                    error = %error,
-                    "aggregate initialization failed during aggregate preflight"
-                );
-                return Err(error);
-            }
-        };
+                    &manifest,
+                    cancellation,
+                ) {
+                    Ok(preflight) => preflight,
+                    Err(error) => {
+                        tracing::warn!(
+                            project_id,
+                            operation_id,
+                            error = %error,
+                            "aggregate initialization failed during aggregate preflight"
+                        );
+                        return Err(error);
+                    }
+                }
+            };
         if cancellation.is_cancelled() {
             return self.fail_interrupted(project_id, operation_id);
         }
@@ -196,7 +254,10 @@ impl AggregateInitializationCoordinator {
             AggregateInitializationStepKind::RuleAndMcpConfig,
             AggregateInitializationStepKind::OpenspecAndExamples,
         ] {
-            self.run_provider_turn(project_id, operation_id, step, &preflight, &cancellation)
+            if step_completed(step) {
+                continue;
+            }
+            self.run_provider_turn(project_id, operation_id, step, &preflight, cancellation)
                 .await?;
             if cancellation.is_cancelled() {
                 return self.fail_interrupted(project_id, operation_id);
@@ -213,6 +274,35 @@ impl AggregateInitializationCoordinator {
                 other => AggregateInitializationError::Store(other),
             })?;
         Ok(operation)
+    }
+
+    fn load_operation(
+        &self,
+        project_id: &str,
+        operation_id: &str,
+    ) -> Result<AggregateInitializationOperation, AggregateInitializationError> {
+        self.operations
+            .get(project_id, operation_id)
+            .map_err(|error| match error {
+                ProductStoreError::NotFound { id, .. } => {
+                    AggregateInitializationError::not_found(id)
+                }
+                other => AggregateInitializationError::Store(other),
+            })
+    }
+
+    /// 读取 aggregate_preflight 步骤 durable checkpoint 的成员投影快照。
+    fn load_persisted_preflight(
+        &self,
+        operation_id: &str,
+    ) -> Result<Option<AggregatePreflightSnapshot>, AggregateInitializationError> {
+        let path = self.artifact_path(operation_id, "preflight.json")?;
+        if !path.exists() {
+            return Ok(None);
+        }
+        crate::product::json_store::read_json(&path)
+            .map(Some)
+            .map_err(AggregateInitializationError::from)
     }
 
     pub fn cancel(

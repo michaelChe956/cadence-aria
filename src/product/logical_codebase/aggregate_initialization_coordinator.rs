@@ -40,7 +40,8 @@ use crate::product::logical_codebase::aggregate_initialization::{
     AggregateCancellationRecord, AggregateInitializationErrorRecord,
     AggregateInitializationOperation, AggregateInitializationOperationInput,
     AggregateInitializationOperationStatus, AggregateInitializationProfile,
-    AggregateInitializationStepKind, RepositoryTypeEvidence,
+    AggregateInitializationStepKind, AggregateInitializationStepStatus,
+    RepositoryTypeEvidence,
 };
 use crate::product::logical_codebase::aggregate_initialization_store::AggregateInitializationOperationStore;
 use crate::product::logical_codebase::registration::AggregateRootPreflight;

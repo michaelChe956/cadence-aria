@@ -338,6 +338,37 @@ impl AggregateInitializationOperationStore {
         Ok(operation)
     }
 
+    /// C4 Task 4：显式续跑前的 reopen——Failed operation 回到 Running，
+    /// 仅把 Failed 状态的步骤重置为 Pending；Completed 步骤（含其
+    /// checkpoint/output artifact ref）原样保留，使续跑不重复已完成
+    /// provider turn。Cancelled/Completed/非 Failed 一律拒绝。
+    pub fn reopen_for_resume(
+        &self,
+        project_id: &str,
+        operation_id: &str,
+        updated_at: String,
+    ) -> Result<AggregateInitializationOperation, ProductStoreError> {
+        self.update(project_id, operation_id, |operation| {
+            if operation.status != AggregateInitializationOperationStatus::Failed {
+                return Err(identity_mismatch(operation_id));
+            }
+            for step in operation.steps.iter_mut() {
+                if step.status == AggregateInitializationStepStatus::Failed {
+                    step.status = AggregateInitializationStepStatus::Pending;
+                    step.started_at = None;
+                    step.completed_at = None;
+                }
+            }
+            operation.status = AggregateInitializationOperationStatus::Running;
+            operation.failed_step = None;
+            operation.current_step = None;
+            operation.error = None;
+            operation.completed_at = None;
+            operation.updated_at = updated_at;
+            Ok(())
+        })
+    }
+
     pub fn recover_interrupted(
         &self,
         project_id: &str,
