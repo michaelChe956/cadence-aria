@@ -45,7 +45,12 @@ import { useCockpitAutopilot } from "../hooks/useCockpitAutopilot";
 import { useUnloadGuard } from "../hooks/useUnloadGuard";
 import type { WorkspaceWsApi } from "../hooks/useWorkspaceWs";
 import type { ChatEntry, ChoiceResponsePayload } from "../state/chat-entries";
-import { createCockpitActionFacade, type C1RecoveryActionPayload } from "../state/cockpit-action-routing";
+import {
+  createCockpitActionFacade,
+  type C1RecoveryActionPayload,
+  type LcBootstrapActionPayload,
+} from "../state/cockpit-action-routing";
+import { postLogicalCodebaseBootstrapAction } from "../api/logical-codebase-bootstrap";
 import { notifyLifecycleInvalidated } from "../state/lifecycle-workbench-store";
 import {
   cockpitInboxItemSessionId,
@@ -534,6 +539,38 @@ export function ChatCockpitPage({
       console.error("[c1] recovery action failed", payload, error);
     }
   }, []);
+  // C4 Task 9/10：LC 冷启动统一动作发送器——驾驶舱卡片只透传 bootstrap
+  // action REST（Task 6 动作面，command_id/expected 身份由卡片从 durable
+  // notice 派生）；成功/重放后经 lifecycle invalidation 总线唤醒目录观察
+  // （useWorkspaceSessionObservers 同源补读 bootstrap 纯投影）。失败如实
+  // 记录，等待项保留下轮 GET 刷新；前端不乐观改状态。
+  const sendLcBootstrapAction = useCallback(
+    async (payload: LcBootstrapActionPayload) => {
+      try {
+        await postLogicalCodebaseBootstrapAction(
+          payload.projectId,
+          payload.logicalCodebaseId,
+          {
+            command_id: payload.commandId,
+            step: payload.step as Parameters<
+              typeof postLogicalCodebaseBootstrapAction
+            >[2]["step"],
+            action: payload.action as Parameters<
+              typeof postLogicalCodebaseBootstrapAction
+            >[2]["action"],
+            expected_revision: payload.expectedRevision,
+            expected_object_id: payload.expectedObjectId,
+          },
+        );
+        notifyLifecycleInvalidated(
+          `lc_bootstrap:${payload.projectId}:${payload.logicalCodebaseId}`,
+        );
+      } catch (error) {
+        console.error("[lc-bootstrap] action failed", payload, error);
+      }
+    },
+    [],
+  );
   const actions = useMemo(
     () =>
       createCockpitActionFacade({
@@ -554,6 +591,7 @@ export function ChatCockpitPage({
         sendC1Action: (c1Payload) => {
           void sendC1Action(c1Payload);
         },
+        sendLcBootstrapAction,
       }),
     [
       state.flowKind,
@@ -570,6 +608,7 @@ export function ChatCockpitPage({
       workspaceWs.sendWorkItemPlanCompileRecoveryAction,
       sendHumanActionRest,
       sendC1Action,
+      sendLcBootstrapAction,
     ],
   );
   const auditRows = useMemo(
