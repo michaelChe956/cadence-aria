@@ -159,28 +159,13 @@ fn get_aggregate_initialization_for_lc(
     validate_operation_id(&operation_id)?;
     let dependencies =
         aggregate_initialization_dependencies(&state).for_lc(logical_codebase_id.clone());
+    // C4 Task 6：GET 纯投影——Running 但内存 run 不活跃时不再隐式
+    // `recover_interrupted`；中断事实由显式 bootstrap action（Continue/
+    // Retry）落盘，GET 只读 durable 记录与 DTO。
     let operation = dependencies
         .coordinator
         .get(&project_id, &operation_id)
         .map_err(aggregate_initialization_api_error)?;
-    let operation = if matches!(
-        operation.status,
-        AggregateInitializationOperationStatus::Running
-    ) && !dependencies
-        .runs
-        .is_active(&InitializationRunKey::aggregate(
-            &project_id,
-            &logical_codebase_id,
-            &operation_id,
-        ))
-    {
-        dependencies
-            .coordinator
-            .recover_interrupted(&project_id, &operation_id)
-            .map_err(aggregate_initialization_api_error)?
-    } else {
-        operation
-    };
     Ok(Json(aggregate_initialization_dto(operation)).into_response())
 }
 

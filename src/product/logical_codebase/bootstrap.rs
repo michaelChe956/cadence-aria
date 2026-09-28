@@ -652,11 +652,27 @@ fn project_notices(steps: &[BootstrapStepProjection]) -> Vec<LogicalCodebaseBoot
 /// 事实先落盘，GET 投影随后可补读同一结果。
 pub struct LogicalCodebaseBootstrapService {
     paths: ProductAppPaths,
+    /// C4 Task 6：member-index 步骤“Running 但内存 run 不活跃”的判定探针
+    ///（web 层注入 run registry 视角；缺省视为活跃——不知道就不动）。
+    member_index_run_active:
+        Option<std::sync::Arc<dyn Fn(&str, &str, &str) -> bool + Send + Sync>>,
 }
 
 impl LogicalCodebaseBootstrapService {
     pub fn new(paths: ProductAppPaths) -> Self {
-        Self { paths }
+        Self {
+            paths,
+            member_index_run_active: None,
+        }
+    }
+
+    /// 注入 member-index run 活跃探针（参数：project/lc/operation id）。
+    pub fn with_member_index_run_probe(
+        mut self,
+        probe: std::sync::Arc<dyn Fn(&str, &str, &str) -> bool + Send + Sync>,
+    ) -> Self {
+        self.member_index_run_active = Some(probe);
+        self
     }
 
     pub async fn apply(
@@ -725,9 +741,11 @@ impl LogicalCodebaseBootstrapService {
         }
     }
 
-    /// member index：Continue/Retry 经 `reopen_for_resume` 显式重开 Failed
-    /// operation（Completed 步骤与 checkpoint 原样保留）；已完成/取消的
-    /// operation 幂等 replay；Running 不做隐式恢复（GET 纯投影约束）。
+    /// member index：显式动作才推进——同 command 先查 operation 上的
+    /// action 审计（replay 不再推进）；Failed 经 `reopen_for_resume` 显式
+    /// 重开；Running 仅当 run 探针判定“内存 run 不活跃”（页面关闭/进程
+    /// 中断）时由显式 Continue/Retry 调 `recover_interrupted` 落盘中断
+    /// 事实；GET 从不触达本分支（纯投影约束）。
     fn dispatch_member_index_action(
         &self,
         request: &BootstrapActionRequest,
@@ -739,25 +757,76 @@ impl LogicalCodebaseBootstrapService {
             );
         let operation = store.get(&request.project_id, &request.expected_object_id)?;
         use crate::product::logical_codebase::aggregate_initialization::AggregateInitializationOperationStatus;
+        // 同 command 重放：返回同一 durable 结果，不再推进状态。
+        if operation
+            .action_records
+            .iter()
+            .any(|record| record.command_id == request.command_id)
+        {
+            return Ok(BootstrapActionOutcome::Replayed);
+        }
+        let action_applies = matches!(
+            request.action,
+            BootstrapActionKind::Continue | BootstrapActionKind::Retry
+        );
         match operation.status {
             AggregateInitializationOperationStatus::Completed => {
                 Ok(BootstrapActionOutcome::Replayed)
             }
-            AggregateInitializationOperationStatus::Failed
-                if matches!(
-                    request.action,
-                    BootstrapActionKind::Continue | BootstrapActionKind::Retry
-                ) =>
-            {
+            AggregateInitializationOperationStatus::Failed if action_applies => {
                 store.reopen_for_resume(
                     &request.project_id,
                     &request.expected_object_id,
                     chrono::Utc::now().to_rfc3339(),
                 )?;
+                self.record_member_index_action(&store, request)?;
+                Ok(BootstrapActionOutcome::Accepted)
+            }
+            AggregateInitializationOperationStatus::Running
+                if action_applies
+                    && !self.member_index_run_active(
+                        &request.project_id,
+                        &request.logical_codebase_id,
+                        &request.expected_object_id,
+                    ) =>
+            {
+                // 显式恢复：把中断事实落盘（含 staging 清理），随后 GET 投影
+                // 出 Failed + 允许 Retry。
+                store.recover_interrupted(
+                    &request.project_id,
+                    &request.expected_object_id,
+                    chrono::Utc::now().to_rfc3339(),
+                )?;
+                self.record_member_index_action(&store, request)?;
                 Ok(BootstrapActionOutcome::Accepted)
             }
             _ => Ok(BootstrapActionOutcome::WaitingForHuman),
         }
+    }
+
+    fn member_index_run_active(&self, project_id: &str, lc_id: &str, operation_id: &str) -> bool {
+        self.member_index_run_active
+            .as_ref()
+            .map(|probe| probe(project_id, lc_id, operation_id))
+            .unwrap_or(true)
+    }
+
+    fn record_member_index_action(
+        &self,
+        store: &crate::product::logical_codebase::aggregate_initialization_store::AggregateInitializationOperationStore,
+        request: &BootstrapActionRequest,
+    ) -> Result<(), ProductStoreError> {
+        store.record_action(
+            &request.project_id,
+            &request.expected_object_id,
+            crate::product::logical_codebase::aggregate_initialization::AggregateInitializationActionRecord {
+                command_id: request.command_id.clone(),
+                action: format!("{:?}", request.action).to_lowercase(),
+                outcome: "accepted".to_string(),
+                applied_at: chrono::Utc::now().to_rfc3339(),
+            },
+        )?;
+        Ok(())
     }
 
     /// aggregate index：以 Task 5 的 durable command identity 判定 replay；

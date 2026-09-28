@@ -128,6 +128,22 @@ pub fn build_web_router_with_evidence(state: WebAppState, evidence_enabled: bool
             post(handlers::cancel_lc_aggregate_initialization),
         )
         .route(
+            "/api/projects/{project_id}/logical-codebases/{lc_id}/bootstrap",
+            get(handlers::get_lc_bootstrap_projection),
+        )
+        .route(
+            "/api/projects/{project_id}/logical-codebases/{lc_id}/bootstrap/actions",
+            post(handlers::post_lc_bootstrap_action),
+        )
+        .route(
+            "/api/projects/{project_id}/logical-codebase/bootstrap",
+            get(handlers::get_logical_codebase_bootstrap),
+        )
+        .route(
+            "/api/projects/{project_id}/logical-codebase/bootstrap/actions",
+            post(handlers::post_logical_codebase_bootstrap_action),
+        )
+        .route(
             "/api/projects/{project_id}/logical-codebase/members",
             get(handlers::list_logical_codebase_members),
         )

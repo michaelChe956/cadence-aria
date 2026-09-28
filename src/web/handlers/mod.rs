@@ -88,6 +88,7 @@ pub mod image_create;
 pub(crate) mod lifecycle;
 mod logical_codebase_members;
 mod logical_codebase_registration;
+mod logical_codebase_bootstrap;
 mod pointer_publication;
 mod pointer_publish_error_mapping;
 mod product_resources;
@@ -129,6 +130,10 @@ pub use image_create::{
 };
 pub use logical_codebase_members::{
     list_lc_logical_codebase_members, list_logical_codebase_members,
+};
+pub use logical_codebase_bootstrap::{
+    get_lc_bootstrap_projection, get_logical_codebase_bootstrap,
+    post_lc_bootstrap_action, post_logical_codebase_bootstrap_action,
 };
 pub use logical_codebase_registration::{
     cancel_lc_registration, cancel_logical_codebase_registration, get_lc_registration_batch,

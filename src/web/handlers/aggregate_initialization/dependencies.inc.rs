@@ -55,4 +55,9 @@ impl AggregateInitializationDependencies {
     pub fn index(&self) -> &AggregateIndexOperation {
         &self.index
     }
+
+    /// C4 Task 6：bootstrap action 的 member-index run 活跃探针数据源。
+    pub fn runs(&self) -> &InitializationRunRegistry {
+        &self.runs
+    }
 }

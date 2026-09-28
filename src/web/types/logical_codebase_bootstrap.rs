@@ -193,3 +193,14 @@ impl From<&ServiceResult> for BootstrapActionResultDto {
         }
     }
 }
+
+/// C4 Task 6：显式 bootstrap 动作请求（canonical POST body）。step/action
+/// 直接复用 product 枚举的 snake_case 序列化，不引入第二套字符串协议。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BootstrapActionRequestDto {
+    pub command_id: String,
+    pub step: crate::product::logical_codebase::LogicalCodebaseBootstrapStep,
+    pub action: crate::product::logical_codebase::BootstrapActionKind,
+    pub expected_revision: Option<u64>,
+    pub expected_object_id: String,
+}

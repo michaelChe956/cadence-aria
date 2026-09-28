@@ -414,8 +414,8 @@ pub use logical_codebase_registration::{
 
 mod logical_codebase_bootstrap;
 pub use logical_codebase_bootstrap::{
-    BootstrapActionResultDto, BootstrapCheckpointDto, BootstrapFailureDto,
-    BootstrapPolicyReferenceDto, BootstrapStepProjectionDto,
+    BootstrapActionResultDto, BootstrapActionRequestDto, BootstrapCheckpointDto,
+    BootstrapFailureDto, BootstrapPolicyReferenceDto, BootstrapStepProjectionDto,
     LogicalCodebaseBootstrapNoticeDto, LogicalCodebaseBootstrapProjectionDto,
 };
 

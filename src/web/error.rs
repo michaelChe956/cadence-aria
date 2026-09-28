@@ -229,6 +229,10 @@ impl IntoResponse for ApiError {
             "sc_recovery_conflict" => StatusCode::CONFLICT,
             "sc_recovery_rejected" => StatusCode::UNPROCESSABLE_ENTITY,
             "invalid_pointer_request" => StatusCode::UNPROCESSABLE_ENTITY,
+            // C4 Task 6：bootstrap 动作稳定码——过期 revision/object 冲突 409，
+            // 请求参数非法 400/422。
+            "bootstrap_stale_revision" => StatusCode::CONFLICT,
+            "bootstrap_action_invalid_object" => StatusCode::BAD_REQUEST,
             // P3 WIGA 有界近期完成查询稳定码：缺 since、非 RFC3339、limit
             // 越界均 422（ApiError::validation 不自行决定状态，须显式映射）。
             "recent_since_required" | "invalid_recent_since" | "invalid_recent_limit" => {

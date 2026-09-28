@@ -399,6 +399,27 @@ impl AggregateInitializationOperationStore {
         })
     }
 
+    /// C4 Task 6：把显式 bootstrap 动作的命令审计事实追加到既有
+    /// operation 记录（同 command 重放的判定来源）。不改变步骤状态。
+    pub fn record_action(
+        &self,
+        project_id: &str,
+        operation_id: &str,
+        record: crate::product::logical_codebase::aggregate_initialization::AggregateInitializationActionRecord,
+    ) -> Result<AggregateInitializationOperation, ProductStoreError> {
+        self.update(project_id, operation_id, |operation| {
+            if operation
+                .action_records
+                .iter()
+                .any(|existing| existing.command_id == record.command_id)
+            {
+                return Ok(());
+            }
+            operation.action_records.push(record);
+            Ok(())
+        })
+    }
+
     pub fn recover_interrupted(
         &self,
         project_id: &str,
@@ -467,7 +488,7 @@ impl AggregateInitializationOperationStore {
     /// buffer partial output before it is checkpointed. It lives next to the
     /// operation record under the aggregate-initializations root and is
     /// deleted on cancel/recover so a later explicit resume starts clean.
-    fn staging_path(
+    pub fn staging_path(
         &self,
         project_id: &str,
         operation_id: &str,

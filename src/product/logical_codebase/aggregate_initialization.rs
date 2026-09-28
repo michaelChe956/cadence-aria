@@ -201,6 +201,21 @@ impl AggregateInitializationErrorRecord {
     }
 }
 
+/// C4 Task 6：显式 bootstrap 动作在既有 operation 上的可审计命令记录。
+///
+/// 同一 `command_id` 重放必须返回同一 durable 结果：动作执行后把
+/// command/action/outcome 追加到目标 operation 记录（`#[serde(default)]`
+/// 保持旧 JSON 兼容），重放时先查此列表，不再推进状态。这不是新的
+/// 状态机——它只是既有 operation 记录上的审计事实。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AggregateInitializationActionRecord {
+    pub command_id: String,
+    pub action: String,
+    pub outcome: String,
+    pub applied_at: String,
+}
+
+
 /// Input captured at create time. `idempotency_key` plus the manifest/policy
 /// digests together define the idempotency identity for `create_idempotent`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -243,6 +258,8 @@ pub struct AggregateInitializationOperation {
     pub updated_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<String>,
+    #[serde(default)]
+    pub action_records: Vec<AggregateInitializationActionRecord>,
 }
 
 /// Layout version for the persisted aggregate-initialization record shape.
@@ -286,6 +303,7 @@ impl AggregateInitializationOperation {
             updated_at: created_at.clone(),
             created_at,
             completed_at: None,
+            action_records: Vec::new(),
         }
     }
 

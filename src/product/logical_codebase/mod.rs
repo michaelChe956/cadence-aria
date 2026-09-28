@@ -34,7 +34,8 @@ pub mod types;
 
 pub use aggregate_initialization::{
     AGGREGATE_INITIALIZATION_LAYOUT_VERSION, AGGREGATE_INITIALIZATION_OPERATION_KIND,
-    AggregateCancellationRecord, AggregateInitializationErrorRecord,
+    AggregateCancellationRecord, AggregateInitializationActionRecord,
+    AggregateInitializationErrorRecord,
     AggregateInitializationIdempotencyIdentity, AggregateInitializationOperation,
     AggregateInitializationOperationInput, AggregateInitializationOperationStatus,
     AggregateInitializationProfile, AggregateInitializationStepKind,
