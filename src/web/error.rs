@@ -115,7 +115,11 @@ impl IntoResponse for ApiError {
             "cross_target_baseline_missing" | "cross_target_store_failure" => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
-            "repository_routing_inconsistent" | "repository_routing_ambiguous" => {
+            "repository_routing_inconsistent"
+            | "repository_routing_ambiguous"
+            | "repository_routing_kind_mismatch"
+            | "repository_routing_legacy_conflict"
+            | "repository_routing_source_identity_mismatch" => {
                 StatusCode::CONFLICT
             }
             "gate_ambiguous"
@@ -464,6 +468,12 @@ mod tests {
             ("repository_routing_inconsistent", StatusCode::CONFLICT),
             ("repository_routing_target_unknown", StatusCode::NOT_FOUND),
             ("repository_routing_ambiguous", StatusCode::CONFLICT),
+            ("repository_routing_kind_mismatch", StatusCode::CONFLICT),
+            ("repository_routing_legacy_conflict", StatusCode::CONFLICT),
+            (
+                "repository_routing_source_identity_mismatch",
+                StatusCode::CONFLICT,
+            ),
         ];
 
         for (code, expected_status) in cases {
