@@ -314,6 +314,7 @@ pub(crate) fn index_record(
     codegraph_root: &Path,
 ) -> AggregateIndexRecord {
     AggregateIndexRecord {
+        command_id: None,
         aggregate_index_id: id.to_string(),
         project_id: PROJECT_ID.to_string(),
         membership_revision: 1,

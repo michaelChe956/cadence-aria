@@ -259,7 +259,13 @@ mod tests {
         );
         let preserved = fixture.store().active_required("project_0001").unwrap();
         assert_eq!(preserved.aggregate_index_id, active.aggregate_index_id);
-        assert_eq!(preserved.status, AggregateIndexStatus::Active);
+        // C4 Task 5：CLI/工具面刷新失败保留 LKG 并标记 degraded（可读 + 审计 warning）。
+        assert_eq!(preserved.status, AggregateIndexStatus::Degraded);
+        assert!(preserved
+            .warning
+            .as_deref()
+            .unwrap_or_default()
+            .contains("parser crashed"));
         let records = fixture.records("project_0001");
         assert!(records.iter().any(|record| {
             record.aggregate_index_id != active.aggregate_index_id
@@ -720,5 +726,127 @@ mod tests {
                 duration_ms: 1,
             })
         }
+    }
+
+    #[test]
+    fn same_index_command_replays_active_record_and_conflicting_revision_fails_closed() {
+        let fixture = aggregate_index_fixture();
+        fixture.cli.files_return(["api/src/A.java", "web/src/B.ts"]);
+        fixture.cli.query_returns(
+            "crossRepoGreeting",
+            serde_json::json!([{"file":"api/src/A.java"}, {"file":"web/src/B.ts"}]),
+        );
+        for query in [
+            "SHOULD_NOT_INDEX_NONMEMBER",
+            "SHOULD_NOT_INDEX_WORKTREE",
+            "SHOULD_NOT_INDEX_ARIA",
+            "SHOULD_NOT_INDEX_BUILD",
+        ] {
+            fixture.cli.query_returns(query, serde_json::json!([]));
+        }
+        let command_id = "aggregate_index_cmd_boot_0002";
+
+        let first = fixture
+            .operation()
+            .build_with_command_id("project_0001", 3, command_id)
+            .unwrap();
+        assert_eq!(first.status, AggregateIndexStatus::Active);
+        assert_eq!(first.command_id.as_deref(), Some(command_id));
+
+        // 同 command 重放：返回同一 durable record，不再发任何 CLI 请求
+        // （`requests()` 为 drain 型：先清空再断言 replay 零新增）。
+        fixture.cli.requests();
+        let replayed = fixture
+            .operation()
+            .build_with_command_id("project_0001", 3, command_id)
+            .unwrap();
+        assert_eq!(replayed.aggregate_index_id, first.aggregate_index_id);
+        assert!(fixture.cli.requests().is_empty());
+
+        // 同 command 不同 expected revision → fail-closed，不落新 generation。
+        let records_before = fixture.records("project_0001").len();
+        let error = fixture
+            .operation()
+            .build_with_command_id("project_0001", 4, command_id)
+            .unwrap_err();
+        assert!(
+            matches!(&error, AggregateIndexError::Failed { code, .. }
+                if *code == "aggregate_index_command_revision_mismatch"),
+            "unexpected error: {error:?}"
+        );
+        assert_eq!(fixture.records("project_0001").len(), records_before);
+    }
+
+    #[test]
+    fn first_build_failure_persists_failed_generation_and_command_replay_returns_same_failure() {
+        let fixture = aggregate_index_fixture();
+        fixture.cli.fail_next_init("cli exploded on first build");
+        let command_id = "aggregate_index_cmd_first_0001";
+
+        let error = fixture
+            .operation()
+            .build_with_command_id("project_0001", 3, command_id)
+            .unwrap_err();
+        assert!(
+            matches!(&error, AggregateIndexError::Failed { code, .. }
+                if *code == "codegraph_init_failed"),
+            "unexpected error: {error:?}"
+        );
+
+        // durable：Building→Failed generation 带 command identity，active 指针为空。
+        let failed = fixture
+            .records("project_0001")
+            .into_iter()
+            .find(|record| record.status == AggregateIndexStatus::Failed)
+            .expect("failed first-build generation must be durable");
+        assert_eq!(failed.command_id.as_deref(), Some(command_id));
+        assert!(fixture.store().active("project_0001").unwrap().is_none());
+
+        // 同 command 重放：不再发 CLI，返回同一失败事实。
+        fixture.cli.requests();
+        let replayed = fixture
+            .operation()
+            .build_with_command_id("project_0001", 3, command_id)
+            .unwrap_err();
+        assert!(
+            matches!(&replayed, AggregateIndexError::Failed { code, .. }
+                if *code == "aggregate_index_command_replayed_failure"),
+            "unexpected replay error: {replayed:?}"
+        );
+        assert!(replayed.to_string().contains("codegraph_init_failed"));
+        assert!(fixture.cli.requests().is_empty());
+    }
+
+    #[test]
+    fn rebuild_failure_keeps_last_known_good_as_degraded() {
+        let fixture = aggregate_index_fixture();
+        let active = fixture.persist_active_index();
+        fixture.cli.fail_next_init("cli exploded during refresh");
+
+        let error = fixture.operation().rebuild("project_0001").unwrap_err();
+        assert!(
+            matches!(&error, AggregateIndexError::Failed { code, .. }
+                if *code == "codegraph_init_failed"),
+            "unexpected error: {error:?}"
+        );
+
+        // LKG 保留并标记 degraded，warning 含失败原因。
+        let preserved = fixture.store().active_required("project_0001").unwrap();
+        assert_eq!(preserved.aggregate_index_id, active.aggregate_index_id);
+        assert_eq!(preserved.status, AggregateIndexStatus::Degraded);
+        assert!(preserved
+            .warning
+            .as_deref()
+            .unwrap_or_default()
+            .contains("cli exploded during refresh"));
+        assert!(fixture.read_only_planner_can_read("project_0001"));
+
+        // freshness 不把 degraded LKG 重新评估为 active。
+        let service = crate::product::logical_codebase::aggregate_index::AggregateIndexFreshnessService::new(
+            fixture.operation(),
+        );
+        let assessed = service.assess("project_0001").unwrap();
+        assert_eq!(assessed.status, AggregateIndexStatus::Degraded);
+        assert!(assessed.reason.contains("cli exploded during refresh"));
     }
 }

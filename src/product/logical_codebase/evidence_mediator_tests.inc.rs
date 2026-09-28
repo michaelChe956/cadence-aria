@@ -274,6 +274,7 @@ mod tests {
             project_id: PROJECT_ID.to_string(),
             membership_revision: 1,
             status: AggregateIndexStatus::Active,
+            command_id: None,
             member_snapshots: vec![
                 AggregateIndexMemberSnapshot::indexed(
                     api_id,

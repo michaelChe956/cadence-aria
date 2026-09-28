@@ -133,6 +133,7 @@ impl FiftyMemberFixture {
             .create(
                 PROJECT_ID,
                 AggregateIndexRecord {
+                    command_id: None,
                     aggregate_index_id: "aggregate_index_50_members".to_string(),
                     project_id: PROJECT_ID.to_string(),
                     membership_revision: 1,

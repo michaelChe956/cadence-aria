@@ -180,7 +180,76 @@ impl AggregateIndexOperation {
         }
 
         self.with_single_writer(project_id, || {
-            self.apply_index(project_id, &manifest, IndexApplicationMode::Initialize)
+            self.apply_index(project_id, &manifest, IndexApplicationMode::Initialize, None)
+        })
+    }
+
+    /// Idempotent first build bound to a durable command identity (C4 Task 5):
+    /// replays of the same `command_id` return the recorded generation without
+    /// issuing any CodeGraph CLI request; a conflicting expected membership
+    /// revision fails closed instead of issuing a second build.
+    pub fn build_with_command_id(
+        &self,
+        project_id: &str,
+        expected_membership_revision: u64,
+        command_id: &str,
+    ) -> Result<AggregateIndexRecord, AggregateIndexError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(command_id)?;
+        self.with_single_writer(project_id, || {
+            for record in self.store.records(project_id)? {
+                if record.command_id.as_deref() != Some(command_id) {
+                    continue;
+                }
+                if record.membership_revision != expected_membership_revision {
+                    return Err(AggregateIndexError::Failed {
+                        code: "aggregate_index_command_revision_mismatch",
+                        message: format!(
+                            "command {command_id} was durably recorded against membership revision {}, expected {expected_membership_revision}",
+                            record.membership_revision
+                        ),
+                    });
+                }
+                return match record.status {
+                    AggregateIndexStatus::Active
+                    | AggregateIndexStatus::Degraded
+                    | AggregateIndexStatus::Superseded => Ok(record),
+                    AggregateIndexStatus::Building => Err(AggregateIndexError::Failed {
+                        code: "aggregate_index_rebuild_in_progress",
+                        message: format!(
+                            "command {command_id} is already building for project {project_id}"
+                        ),
+                    }),
+                    AggregateIndexStatus::Stale | AggregateIndexStatus::Failed => {
+                        Err(AggregateIndexError::Failed {
+                            code: "aggregate_index_command_replayed_failure",
+                            message: format!(
+                                "command {command_id} previously failed: {}",
+                                record.warning.as_deref().unwrap_or("unknown failure")
+                            ),
+                        })
+                    }
+                };
+            }
+            let manifest = self
+                .logical
+                .load_manifest(project_id)?
+                .ok_or_else(|| missing_manifest(project_id))?;
+            if manifest.membership_revision != expected_membership_revision {
+                return Err(AggregateIndexError::Failed {
+                    code: "aggregate_index_membership_revision_mismatch",
+                    message: format!(
+                        "project {project_id} membership revision is {}, expected {expected_membership_revision}",
+                        manifest.membership_revision
+                    ),
+                });
+            }
+            self.apply_index(
+                project_id,
+                &manifest,
+                IndexApplicationMode::Initialize,
+                Some(command_id),
+            )
         })
     }
 
@@ -198,7 +267,7 @@ impl AggregateIndexOperation {
                 .logical
                 .load_manifest(project_id)?
                 .ok_or_else(|| missing_manifest(project_id))?;
-            match self.apply_index(project_id, &manifest, IndexApplicationMode::Rebuild) {
+            match self.apply_index(project_id, &manifest, IndexApplicationMode::Rebuild, None) {
                 Ok(next) => Ok(next),
                 Err(error) => Err(error),
             }
@@ -269,7 +338,7 @@ impl AggregateIndexOperation {
                 .load_manifest(project_id)?
                 .ok_or_else(|| missing_manifest(project_id))?;
 
-            match self.apply_index(project_id, &manifest, IndexApplicationMode::Sync) {
+            match self.apply_index(project_id, &manifest, IndexApplicationMode::Sync, None) {
                 Ok(record) => Ok(record),
                 Err(error) => Err(error),
             }
@@ -285,6 +354,7 @@ impl AggregateIndexOperation {
         project_id: &str,
         manifest: &LogicalCodebaseManifest,
         mode: IndexApplicationMode,
+        command_id: Option<&str>,
     ) -> Result<AggregateIndexRecord, AggregateIndexError> {
         let members = self.logical.list_members(project_id)?;
         let checkouts = self.logical.list_checkouts(project_id)?;
@@ -303,6 +373,8 @@ impl AggregateIndexOperation {
             before,
             now,
         );
+        let mut building = building;
+        building.command_id = command_id.map(|value| value.to_string());
         let building = self.store.create(project_id, building)?;
         let index_id = building.aggregate_index_id.clone();
 
@@ -386,6 +458,22 @@ impl AggregateIndexOperation {
         };
         self.store
             .mark_status(project_id, index_id, status, Some(error.to_string()))?;
+        // Rebuild/Sync 的工具面失败（CLI/acceptance）：把 last-known-good 标记
+        // degraded（可读 + 审计 warning）。member drift 不 degrade——LKG 数据
+        // 相对现实已过时，交给 freshness 评估为 stale。
+        if matches!(
+            mode,
+            IndexApplicationMode::Rebuild | IndexApplicationMode::Sync
+        ) && !matches!(
+            &error,
+            AggregateIndexError::Failed {
+                code: "aggregate_index_member_drifted",
+                ..
+            }
+        ) {
+            self.store
+                .degrade_last_known_good(project_id, error.to_string())?;
+        }
         if !after.is_empty() {
             let mut record = self.store.get(project_id, index_id)?.ok_or_else(|| {
                 AggregateIndexError::Failed {

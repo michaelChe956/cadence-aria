@@ -138,8 +138,20 @@ fn read_active_projection(
     });
 
     let latest = records.first().cloned();
+    // degraded LKG 优先于 active/stale 投影：只要存在一个 degraded generation，
+    // 最近一次刷新已失败（成功 rebuild 会把 degraded 前代翻成 superseded）。
+    let degraded_record = records
+        .iter()
+        .find(|candidate| candidate.status == AggregateIndexStatus::Degraded)
+        .cloned();
     let response = match latest {
         None => missing_response(None),
+        Some(record) if record.status == AggregateIndexStatus::Building => {
+            projection("rebuilding", &record, None)
+        }
+        _ if degraded_record.is_some() => {
+            projection("degraded", &degraded_record.expect("checked above"), None)
+        }
         Some(record) if record.status == AggregateIndexStatus::Failed => {
             let good = records
                 .iter()
@@ -214,4 +226,147 @@ fn aggregate_index_api_error(error: AggregateIndexError) -> ApiError {
             "reason_code": code,
         }),
     )
+}
+
+#[cfg(test)]
+mod projection_tests {
+    use super::*;
+    use crate::product::app_paths::ProductAppPaths;
+    use crate::product::logical_codebase::aggregate_index::AggregateIndexStore;
+
+    fn record(
+        aggregate_index_id: &str,
+        status: AggregateIndexStatus,
+        updated_at: &str,
+    ) -> AggregateIndexRecord {
+        let mut record = AggregateIndexRecord::building(
+            aggregate_index_id.to_string(),
+            "project_0001".to_string(),
+            3,
+            Vec::new(),
+            updated_at.to_string(),
+        );
+        record.status = status;
+        record
+    }
+
+    #[test]
+    fn read_active_projection_reports_missing_when_no_generation_exists() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let response = read_active_projection(&paths, "project_0001", "logical_codebase_0001")
+            .unwrap();
+        assert_eq!(response.state, "missing");
+        assert_eq!(response.revision, None);
+    }
+
+    #[test]
+    fn read_active_projection_maps_first_build_failure_to_missing_with_warning() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let store = AggregateIndexStore::for_lc(paths.clone(), "logical_codebase_0001");
+        store
+            .create(
+                "project_0001",
+                record(
+                    "aggregate_index_failed_gen",
+                    AggregateIndexStatus::Failed,
+                    "2026-09-28T01:00:00Z",
+                ),
+            )
+            .unwrap();
+        store
+            .mark_status(
+                "project_0001",
+                "aggregate_index_failed_gen",
+                AggregateIndexStatus::Failed,
+                Some("aggregate_index_failed:codegraph_init_failed: cli exploded".to_string()),
+            )
+            .unwrap();
+
+        let response = read_active_projection(&paths, "project_0001", "logical_codebase_0001")
+            .unwrap();
+        // 无 LKG：首建失败投影 missing，但保留可操作 warning。
+        assert_eq!(response.state, "missing");
+        assert!(response
+            .warning
+            .as_deref()
+            .unwrap_or_default()
+            .contains("codegraph_init_failed"));
+    }
+
+    #[test]
+    fn read_active_projection_maps_rebuild_failure_to_degraded_last_known_good() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let store = AggregateIndexStore::for_lc(paths.clone(), "logical_codebase_0001");
+        store
+            .create(
+                "project_0001",
+                record(
+                    "aggregate_index_lkg",
+                    AggregateIndexStatus::Active,
+                    "2026-09-28T01:00:00Z",
+                ),
+            )
+            .unwrap();
+        // rebuild 失败现场：LKG 被 degrade，新 generation 以 Stale + warning 落盘。
+        store
+            .mark_status(
+                "project_0001",
+                "aggregate_index_lkg",
+                AggregateIndexStatus::Degraded,
+                Some("aggregate_index_failed:codegraph_init_failed: cli exploded".to_string()),
+            )
+            .unwrap();
+        store
+            .create(
+                "project_0001",
+                record(
+                    "aggregate_index_refresh_gen",
+                    AggregateIndexStatus::Stale,
+                    "2026-09-28T02:00:00Z",
+                ),
+            )
+            .unwrap();
+        store
+            .mark_status(
+                "project_0001",
+                "aggregate_index_refresh_gen",
+                AggregateIndexStatus::Stale,
+                Some("aggregate_index_failed:codegraph_init_failed: cli exploded".to_string()),
+            )
+            .unwrap();
+
+        let response = read_active_projection(&paths, "project_0001", "logical_codebase_0001")
+            .unwrap();
+        assert_eq!(response.state, "degraded");
+        assert_eq!(response.revision, Some(3));
+        assert!(response
+            .warning
+            .as_deref()
+            .unwrap_or_default()
+            .contains("codegraph_init_failed"));
+    }
+
+    #[test]
+    fn read_active_projection_reports_rebuilding_while_generation_is_building() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let store = AggregateIndexStore::for_lc(paths.clone(), "logical_codebase_0001");
+        store
+            .create(
+                "project_0001",
+                record(
+                    "aggregate_index_building_gen",
+                    AggregateIndexStatus::Building,
+                    "2026-09-28T01:00:00Z",
+                ),
+            )
+            .unwrap();
+
+        let response = read_active_projection(&paths, "project_0001", "logical_codebase_0001")
+            .unwrap();
+        assert_eq!(response.state, "rebuilding");
+    }
 }

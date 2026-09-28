@@ -62,6 +62,8 @@ pub struct AggregateIndexRecord {
     pub created_at: String,
     pub updated_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supersedes_aggregate_index_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
@@ -87,6 +89,7 @@ impl AggregateIndexRecord {
             config_digest: String::new(),
             updated_at: created_at.clone(),
             created_at,
+            command_id: None,
             supersedes_aggregate_index_id: None,
             warning: None,
         }
