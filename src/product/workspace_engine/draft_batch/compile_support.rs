@@ -47,13 +47,13 @@ pub(crate) fn resolve_logical_work_item_plan_repository_targets(
     plan: &IssueWorkItemPlan,
 ) -> Result<Option<std::collections::BTreeMap<LogicalRepositoryId, String>>, String> {
     let paths = lifecycle.app_paths();
-    // v1.3：按 issue 唯一归属的代码库把 manifest/selection/member 全部解析到 lc_id 子树。
-    let lc_id = crate::product::logical_codebase::resolve_issue_logical_codebase_id(
-        &paths,
-        &plan.project_id,
-        &plan.issue_id,
-    )
-    .map_err(|error| format!("resolve issue logical codebase failed: {error}"))?;
+    // C4 Task 2：issue 身份先经唯一 authority resolver 冻结（kind/来源/legacy
+    // 布局冲突 fail-closed）；无归属且无 legacy 别名 record 的旧数据保留
+    // project 级兼容分支。
+    let lc_id = crate::product::logical_codebase::RepositoryAuthorityResolver::new(paths.clone())
+        .resolve_for_issue(&plan.project_id, &plan.issue_id)
+        .map_err(|error| format!("resolve issue logical codebase failed: {error}"))?
+        .and_then(|resolution| resolution.target.logical_codebase_id);
     let (logical_store, selection_store) = match lc_id.as_deref() {
         Some(lc_id) => (
             LogicalCodebaseStore::for_lc(paths.clone(), lc_id),

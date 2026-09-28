@@ -255,7 +255,21 @@ impl super::CodingAttemptStore {
     ) -> Result<AuthoritativeGroupPlanBinding, ProductStoreError> {
         let (stored, authoritative, units) = self.validate_group_attempt_structure(attempt)?;
         let routing =
-            RepositoryRouting::load_for_issue(&self.paths, &stored.project_id, &stored.issue_id)?;
+            // C4 Task 2：issue 身份先经唯一 authority resolver 冻结（conflict
+            // fail-closed）；旧数据无归属/无别名 record 时回退 Legacy。
+            match crate::product::logical_codebase::RepositoryAuthorityResolver::new(
+                self.paths.clone(),
+            )
+            .resolve_for_issue(&stored.project_id, &stored.issue_id)?
+            {
+                None => RepositoryRouting::Legacy {
+                    repository_id: String::new(),
+                },
+                Some(resolution) => RepositoryRouting::classify(
+                    resolution.manifest,
+                    resolution.selection,
+                ),
+            };
         validate_group_single_target(
             &routing,
             &authoritative.units,

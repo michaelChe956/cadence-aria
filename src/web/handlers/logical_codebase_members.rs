@@ -3,8 +3,7 @@ use axum::extract::{Path, State};
 use serde::Serialize;
 
 use super::support::{
-    default_logical_codebase_id, product_app_paths, product_store_api_error,
-    require_logical_codebase,
+    default_logical_codebase_id, product_app_paths, product_store_api_error, resolve_lc_authority,
 };
 use crate::product::json_store::validate_relative_id;
 use crate::product::logical_codebase::{LogicalCodebaseStore, MemberStatus};
@@ -43,7 +42,9 @@ pub async fn list_lc_logical_codebase_members(
     Path((project_id, logical_codebase_id)): Path<(String, String)>,
 ) -> ApiResult<Json<LogicalCodebaseMembersResponse>> {
     let paths = product_app_paths(&state);
-    require_logical_codebase(&paths, &project_id, &logical_codebase_id)?;
+    // C4 Task 2：canonical 路由先经唯一 authority resolver 冻结 LC 身份
+    //（conflict fail-closed；只读列表不触发写入）。
+    resolve_lc_authority(&paths, &project_id, &logical_codebase_id)?;
     list_logical_codebase_members_for_lc(&state, &project_id, &logical_codebase_id)
 }
 

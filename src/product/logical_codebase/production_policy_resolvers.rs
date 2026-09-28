@@ -50,6 +50,28 @@ impl ProductionPolicyTargetResolver {
         }
     }
 
+    /// C4 Task 2：当前请求的有效 lc 作用域：显式 `for_lc` 优先；无显式作用域
+    /// 但 legacy 别名 LC record 存在（旧 project 级布局）时返回别名 id（其子树
+    /// 与旧布局字节等价），使别名路径同样经过 authority resolver 冲突校验；
+    /// 两者皆无 → `None`（单仓兼容路径）。
+    fn effective_lc_id(&self, project_id: &str) -> Option<String> {
+        if let Some(lc_id) = self.lc_id.as_deref() {
+            return Some(lc_id.to_string());
+        }
+        let alias_exists = self
+            .paths
+            .logical_codebase_record_root(
+                project_id,
+                &crate::product::logical_codebase::store::legacy_logical_codebase_id(project_id),
+            )
+            .join("record.json")
+            .try_exists()
+            .unwrap_or(false);
+        alias_exists.then(|| {
+            crate::product::logical_codebase::store::legacy_logical_codebase_id(project_id)
+        })
+    }
+
     /// checkout 目标复验:解析 logical id → 严格解析三层身份 → 比对 checkout id
     /// → canonicalize worktree → 确认 `.git` 存在。任何一步失败都 fail-closed。
     fn resolve_checkout_target(
@@ -61,6 +83,32 @@ impl ProductionPolicyTargetResolver {
             .map_err(|_| {
                 ProviderGatewayError::Target("invalid logical repository id".to_string())
             })?;
+
+        // C4 Task 2：authority 身份先经唯一 resolver 冻结——重复来源/legacy 布局
+        // 冲突在三层身份解析前 fail-closed。lc 作用域缺失且无 legacy 别名
+        // record 时保留既有 project 级兼容路径（不把物理仓伪装为 LC target）。
+        let authority_lc_id = self.effective_lc_id(&request.project_id);
+        if let Some(lc_id) = authority_lc_id.as_deref() {
+            let checkout_id = Uuid::parse_str(&request.target.checkout_id)
+                .map(crate::product::logical_codebase::RepositoryCheckoutId)
+                .map_err(|_| {
+                    ProviderGatewayError::Target("invalid checkout id".to_string())
+                })?;
+            crate::product::logical_codebase::RepositoryAuthorityResolver::new(
+                self.paths.clone(),
+            )
+            .resolve(crate::product::logical_codebase::RepositoryRoutingRequest {
+                project_id: request.project_id.clone(),
+                issue_id: None,
+                kind: crate::product::logical_codebase::RepositoryTargetKind::LogicalCodebase,
+                repository_id: None,
+                logical_codebase_id: Some(lc_id.to_string()),
+                logical_repository_id: Some(logical_id),
+                checkout_id: Some(checkout_id),
+            })
+            .map_err(|error| ProviderGatewayError::Target(error.to_string()))?;
+        }
+
 
         let (_member, checkout, _repository) = match self.lc_id.as_deref() {
             Some(lc_id) => RepositoryStore::with_logical_codebase_feature(

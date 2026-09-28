@@ -284,6 +284,40 @@ pub(crate) fn default_logical_codebase_id(
         })
 }
 
+/// C4 Task 2：canonical LC 路由的统一身份校验——经唯一 authority resolver
+/// 冻结 LC authority（kind/重复来源/legacy 布局冲突 fail-closed），未知 LC
+/// 保持与 `require_logical_codebase` 相同的 `logical_codebase_not_found` 404。
+pub(crate) fn resolve_lc_authority(
+    paths: &ProductAppPaths,
+    project_id: &str,
+    logical_codebase_id: &str,
+) -> ApiResult<crate::product::logical_codebase::RepositoryAuthorityResolution> {
+    crate::product::logical_codebase::RepositoryAuthorityResolver::new(paths.clone())
+        .resolve(crate::product::logical_codebase::RepositoryRoutingRequest {
+            project_id: project_id.to_string(),
+            issue_id: None,
+            kind: crate::product::logical_codebase::RepositoryTargetKind::LogicalCodebase,
+            repository_id: None,
+            logical_codebase_id: Some(logical_codebase_id.to_string()),
+            logical_repository_id: None,
+            checkout_id: None,
+        })
+        .map_err(|error| match error {
+            crate::product::json_store::ProductStoreError::NotFound {
+                kind: "logical_codebase",
+                ..
+            } => ApiError::runtime(
+                "logical_codebase_not_found",
+                "logical codebase not found",
+                json!({
+                    "project_id": project_id,
+                    "logical_codebase_id": logical_codebase_id,
+                }),
+            ),
+            other => product_store_api_error(other),
+        })
+}
+
 pub(crate) fn provider_workspace_config(
     author_provider: Option<&str>,
     reviewer_provider: Option<&str>,

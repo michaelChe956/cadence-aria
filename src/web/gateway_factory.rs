@@ -56,13 +56,37 @@ impl LogicalCodebaseGatewayFactory {
     }
 
     /// v1.3：按 issue 所属代码库构造 gateway——lc_id Some 时 policy/capability/
-    /// manifest 全部解析到 `logical-codebases/{lc_id}/` 子树；None 回退 project 级路径。
+    /// manifest 全部解析到 `logical-codebases/{lc_id}/` 子树。
+    ///
+    /// C4 Task 2：`None`（legacy 别名）不再自行选择 project 级 store 句柄，而是
+    /// 显式解析 legacy 别名 LC id 后统一走 `for_lc`（别名子树与旧 project 级
+    /// 布局字节等价）；无别名 record 且无显式 lc 时 fail-closed `PolicyMissing`。
     pub fn build_for_lc(
         &self,
         project_id: &str,
         lc_id: Option<&str>,
     ) -> Result<LogicalCodebaseProviderGateway, ProviderGatewayError> {
-        let logical = match lc_id {
+        let lc_id = match lc_id {
+            Some(lc_id) => Some(lc_id.to_string()),
+            None => {
+                let alias_id =
+                    crate::product::logical_codebase::store::legacy_logical_codebase_id(
+                        project_id,
+                    );
+                let alias_record_exists = self
+                    .paths
+                    .logical_codebase_record_root(project_id, &alias_id)
+                    .join("record.json")
+                    .try_exists()
+                    .map_err(|error| {
+                        ProviderGatewayError::PolicyMissing(format!(
+                            "{project_id}: read alias record: {error}"
+                        ))
+                    })?;
+                alias_record_exists.then_some(alias_id)
+            }
+        };
+        let logical = match lc_id.as_deref() {
             Some(lc_id) => LogicalCodebaseStore::for_lc(self.paths.clone(), lc_id),
             None => LogicalCodebaseStore::new(self.paths.clone()),
         };
@@ -70,13 +94,13 @@ impl LogicalCodebaseGatewayFactory {
             .load_manifest(project_id)?
             .ok_or_else(|| ProviderGatewayError::PolicyMissing(project_id.to_string()))?;
 
-        let policies = match lc_id {
+        let policies = match lc_id.as_deref() {
             Some(lc_id) => AggregatePolicyArtifactStore::for_lc(self.paths.clone(), lc_id),
             None => AggregatePolicyArtifactStore::new(self.paths.clone()),
         };
         policies.ensure_bootstrap(&manifest)?;
 
-        let capabilities = match lc_id {
+        let capabilities = match lc_id.as_deref() {
             Some(lc_id) => ProviderCapabilityStore::for_lc(self.paths.clone(), lc_id),
             None => ProviderCapabilityStore::new(self.paths.clone()),
         };
@@ -93,7 +117,7 @@ impl LogicalCodebaseGatewayFactory {
                 capabilities,
                 project_id.to_string(),
             )),
-            Arc::new(match lc_id {
+            Arc::new(match lc_id.as_deref() {
                 // R9 fix round 1【Important-1】：resolver 同步按 lc_id 作用域解析 checkout
                 // 目标，否则非 legacy 新 LC 的 coding session 启动会 fail-closed。
                 Some(lc_id) => ProductionPolicyTargetResolver::for_lc(self.paths.clone(), lc_id),

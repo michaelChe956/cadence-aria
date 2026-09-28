@@ -9,7 +9,6 @@ use crate::product::coding_models::{CodingAttemptStatus, CodingExecutionAttempt}
 use crate::product::coding_workspace_engine::{CodingWorkspaceEngine, CodingWorkspaceEngineError};
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::product::git_workspace_service::GitWorkspaceService;
-use crate::product::logical_codebase::resolve_issue_logical_codebase_id;
 use crate::web::coding_ws_handler::{CodingWsOutMessage, emit_current_session_state};
 use crate::web::state::{CodingAttemptRunKey, WebAppState};
 
@@ -125,8 +124,13 @@ async fn run_coding_runner_task_body(
         && let Some(factory) = state.gateway_factory()
     {
         let app_paths = ProductAppPaths::new(state.workspace_root.join(".aria"));
-        let resolved =
-            resolve_issue_logical_codebase_id(&app_paths, &attempt.project_id, &attempt.issue_id);
+        // C4 Task 2：lc 身份经唯一 authority resolver 冻结（conflict fail-closed，
+        // 不再直接按 issue 记录回退 project 级路径）。
+        let resolved = crate::product::logical_codebase::RepositoryAuthorityResolver::new(
+            app_paths.clone(),
+        )
+        .resolve_for_issue(&attempt.project_id, &attempt.issue_id)
+        .map(|authority| authority.and_then(|r| r.target.logical_codebase_id));
         let gateway = match resolved {
             Ok(lc_id) => factory
                 .build_for_lc(&attempt.project_id, lc_id.as_deref())

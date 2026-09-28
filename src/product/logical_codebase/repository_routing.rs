@@ -223,6 +223,84 @@ impl RepositoryAuthorityResolver {
         Self { paths }
     }
 
+    /// C4 Task 2：issue 归属驱动的显式 authority 解析（各读取入口迁移的唯一助手）。
+    ///
+    /// - issue 持久化归属 LC（`IssueRecord.logical_codebase_id = Some`）→ 显式
+    ///   `LogicalCodebase` 请求，kind/身份/重复来源/legacy 布局冲突全部由
+    ///   `resolve` fail-closed 校验。
+    /// - issue 无归属但 legacy 别名 LC record 存在（`ProjectStore::get/list`
+    ///   幂等 `migrate_legacy` 的产物）→ 显式解析 legacy 别名 LC，其子树与旧
+    ///   project 级布局字节等价；不猜“最新可用记录”。
+    /// - 两者皆无（单仓 issue、未迁移旧数据）→ `Ok(None)`：调用方保留
+    ///   single-repo/legacy 兼容路径，但不得把物理仓伪装为 LC target。
+    pub fn resolve_for_issue(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+    ) -> Result<Option<RepositoryAuthorityResolution>, ProductStoreError> {
+        // 与 `resolve_issue_logical_codebase_id` 同语义的宽容读取：issue 记录
+        // 不存在时不伪造归属（legacy 兼容：旧数据/裸 fixture 只带 issue 字符串
+        // id），其余读取错误原样传播。
+        let issue_record = crate::product::issue_store::IssueStore::new(self.paths.clone())
+            .get(project_id, issue_id);
+        let (issue_exists, attributed) = match issue_record {
+            Ok(issue) => (true, issue.logical_codebase_id),
+            Err(ProductStoreError::NotFound { .. }) => (false, None),
+            Err(error) => return Err(error),
+        };
+        // 项目记录存在时先幂等触发 `migrate_legacy`（`ProjectStore::get` 内
+        // 置，与所有既有入口一致）：legacy 布局存在则别名 LC record 必在。
+        // 无项目记录的裸 fixture/旧数据保持 `None` 兼容分支，不伪造 LC。
+        match crate::product::project_store::ProjectStore::new(self.paths.clone())
+            .get(project_id)
+        {
+            Ok(_) => {}
+            Err(ProductStoreError::NotFound { .. }) => return Ok(None),
+            Err(error) => return Err(error),
+        }
+        let alias_record_exists = self
+            .paths
+            .logical_codebase_record_root(
+                project_id,
+                &crate::product::logical_codebase::store::legacy_logical_codebase_id(
+                    project_id,
+                ),
+            )
+            .join("record.json")
+            .try_exists()
+            .map_err(|error| {
+                ProductStoreError::Io(format!("try_exists alias record: {error}"))
+            })?;
+        let lc_id = attributed.or_else(|| {
+            alias_record_exists.then(|| {
+                crate::product::logical_codebase::store::legacy_logical_codebase_id(project_id)
+            })
+        });
+        let Some(lc_id) = lc_id else {
+            return Ok(None);
+        };
+        // `resolve` 要求携带的 issue 必须存在（Task 1 语义）；issue 记录缺失的
+        // legacy 数据不带 issue_id 解析，随后从同一 LC 子树宽容补读 selection，
+        // 保持 `load_for_issue` 时代 (manifest, selection) 成对判定的兼容性。
+        let mut resolution = self.resolve(RepositoryRoutingRequest {
+            project_id: project_id.to_string(),
+            issue_id: issue_exists.then(|| issue_id.to_string()),
+            kind: RepositoryTargetKind::LogicalCodebase,
+            repository_id: None,
+            logical_codebase_id: Some(lc_id.clone()),
+            logical_repository_id: None,
+            checkout_id: None,
+        })?;
+        if !issue_exists && resolution.selection.is_none() {
+            resolution.selection = crate::product::logical_codebase::IssueCodebaseSelectionStore::for_lc(
+                self.paths.clone(),
+                &lc_id,
+            )
+            .load(project_id, issue_id)?;
+        }
+        Ok(Some(resolution))
+    }
+
     pub fn resolve(
         &self,
         request: RepositoryRoutingRequest,
@@ -309,16 +387,15 @@ impl RepositoryAuthorityResolver {
         // authority root 与 `SessionPolicyEnvelope.authority_root` 同义：LC 的
         // 聚合政策权威根 = manifest.provider_context_root（冷启动无 manifest 时
         // 取 LC record 的 aggregate_root）。manifest/record 均来自请求 LC 子树，
-        // 误读他 LC 立即产生不同 root。
-        let authority_root = std::fs::canonicalize(
-            manifest
-                .as_ref()
-                .map(|manifest| manifest.provider_context_root.clone())
-                .unwrap_or_else(|| record.aggregate_root.clone()),
-        )
-        .map_err(|error| {
-            ProductStoreError::Io(format!("canonicalize authority root: {error}"))
-        })?;
+        // 误读他 LC 立即产生不同 root。目录尚不存在（冷启动 LC）时保留原始
+        // 路径——与 `LogicalCodebaseGatewayFactory` 的构造语义一致；spawn 前
+        // 复验由 provider admission 负责，不在此 fail-closed。
+        let authority_root_path = manifest
+            .as_ref()
+            .map(|manifest| manifest.provider_context_root.clone())
+            .unwrap_or_else(|| record.aggregate_root.clone());
+        let authority_root = std::fs::canonicalize(&authority_root_path)
+            .unwrap_or(authority_root_path);
         let members = logical.list_members(&request.project_id)?;
         let checkouts = logical.list_checkouts(&request.project_id)?;
 
@@ -372,7 +449,7 @@ impl RepositoryAuthorityResolver {
         }
 
         let (canonical_path, source_identity_digest, member_id, checkout_id) =
-            resolve_logical_target(request, &manifest, &members, &checkouts)?;
+            resolve_logical_target(request, &manifest, &members, &checkouts, &record.aggregate_root)?;
 
         let selection = match request.issue_id.as_deref() {
             Some(issue_id) => IssueCodebaseSelectionStore::for_lc(
@@ -538,6 +615,7 @@ fn resolve_logical_target(
     manifest: &Option<LogicalCodebaseManifest>,
     members: &[crate::product::logical_codebase::types::CodebaseMemberRecord],
     checkouts: &[crate::product::logical_codebase::types::RepositoryCheckoutRecord],
+    record_root: &PathBuf,
 ) -> Result<(PathBuf, String, Option<LogicalRepositoryId>, Option<RepositoryCheckoutId>), ProductStoreError>
 {
     match request.logical_repository_id {
@@ -585,13 +663,12 @@ fn resolve_logical_target(
             ))
         }
         None => {
+            // 冷启动（无 manifest）LC：聚合根回退到 record.aggregate_root，
+            // 使 bootstrap/成员等 GET 投影在 manifest 尚未生成时仍可解析身份。
             let root = manifest
                 .as_ref()
                 .map(|manifest| manifest.provider_context_root.clone())
-                .ok_or_else(|| ProductStoreError::NotFound {
-                    kind: "logical_codebase_manifest",
-                    id: request.project_id.clone(),
-                })?;
+                .unwrap_or_else(|| record_root.clone());
             // 聚合 source digest：root + 排序后的成员 source digests。
             let mut digests: Vec<&str> = members
                 .iter()

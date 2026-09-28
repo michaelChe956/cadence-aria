@@ -557,15 +557,27 @@ impl CodingAttemptStore {
                 CodingAttemptStatus::Running
             )));
         }
-        let routing =
-            RepositoryRouting::load_for_issue(&self.paths, &attempt.project_id, &attempt.issue_id)?;
+        // C4 Task 2：issue 身份先经唯一 authority resolver 冻结（kind/来源/legacy
+        // 布局冲突 fail-closed）；lc 子树与 routing 判定同源。无归属且无 legacy
+        // 别名 record 的旧数据回退 Legacy 兼容分支（classify 单元语义不变）。
+        let authority = crate::product::logical_codebase::RepositoryAuthorityResolver::new(
+            self.paths.clone(),
+        )
+        .resolve_for_issue(&attempt.project_id, &attempt.issue_id)?;
+        let routing = match &authority {
+            None => RepositoryRouting::Legacy {
+                repository_id: String::new(),
+            },
+            Some(resolution) => RepositoryRouting::classify(
+                resolution.manifest.clone(),
+                resolution.selection.clone(),
+            ),
+        };
         // v1.3：policy 读取与 routing 同一 lc_id 子树（逻辑 issue 的 target snapshot
         // 政策必须来自其唯一归属的代码库，不跨 LC）。
-        let lc_id = crate::product::logical_codebase::resolve_issue_logical_codebase_id(
-            &self.paths,
-            &attempt.project_id,
-            &attempt.issue_id,
-        )?;
+        let lc_id = authority
+            .as_ref()
+            .and_then(|resolution| resolution.target.logical_codebase_id.clone());
         let snapshot_digest = match (routing, attempt.target_snapshot.as_ref()) {
             (RepositoryRouting::Legacy { .. }, None) => legacy_snapshot_digest(&attempt),
             (RepositoryRouting::Logical { .. }, None) => {

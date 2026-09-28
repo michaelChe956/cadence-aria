@@ -12,8 +12,8 @@ use crate::product::issue_store::IssueStore;
 use crate::product::json_store::ProductStoreError;
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::logical_codebase::{
-    AggregatePolicyArtifactStore, LogicalCodebaseStore, PlanningContextResolver, RepositoryRouting,
-    RepositoryRoutingErrorCode,
+    AggregatePolicyArtifactStore, LogicalCodebaseStore, PlanningContextResolver,
+    RepositoryAuthorityResolver, RepositoryRouting, RepositoryRoutingErrorCode,
 };
 use crate::product::models::{WorkspaceMessageRecord, WorkspaceSessionRecord, WorkspaceType};
 use crate::product::work_item_runtime_reader::WorkItemRuntimeReader;
@@ -127,8 +127,19 @@ async fn build_workspace_context_message(
     // logical_aggregate 标志（Design 分支不再依赖 issue.repo_id，多仓 issue 可达）。
     // Task 7 扩展：WorkItemPlan 同样走聚合视野（无单一物理仓库，entity 用空串占位，
     // prompt 注入 target 集合），解决“WorkItemPlan+Logical 仍依赖 issue.repo_id”遗留。
-    let routing =
-        RepositoryRouting::load_for_issue(app_paths, &session.project_id, &session.issue_id)?;
+    // C4 Task 2：issue 身份先经唯一 authority resolver 冻结（kind/来源/legacy 布局
+    // 冲突 fail-closed）；无归属且无 legacy 别名 record 的旧数据回退 Legacy 兼容
+    // 分支，判定仍复用 `RepositoryRouting::classify`（单元语义不变）。
+    let routing = match RepositoryAuthorityResolver::new(app_paths.clone())
+        .resolve_for_issue(&session.project_id, &session.issue_id)?
+    {
+        None => RepositoryRouting::Legacy {
+            repository_id: String::new(),
+        },
+        Some(resolution) => {
+            RepositoryRouting::classify(resolution.manifest, resolution.selection)
+        }
+    };
     let aggregate_planning = match &routing {
         RepositoryRouting::FailClosed { code, reason } => {
             return Err(routing_error_for_builder(*code, reason.clone()));

@@ -235,6 +235,20 @@ impl PlanningContextResolver {
         }
     }
 
+    /// C4 Task 2：issue 的 LC 身份经唯一 authority resolver 冻结；无归属且无
+    /// legacy 别名 record 时返回 `None`（调用方保留旧 project 级兼容分支）。
+    fn resolve_issue_authority_lc_id(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+    ) -> Result<Option<String>, ProductStoreError> {
+        Ok(crate::product::logical_codebase::RepositoryAuthorityResolver::new(
+            self.paths.clone(),
+        )
+        .resolve_for_issue(project_id, issue_id)?
+        .and_then(|resolution| resolution.target.logical_codebase_id))
+    }
+
     /// 构建 `ResolvedPlanningContext`。流程：解析参与仓库集合 → fail-closed 拒绝空有效
     /// 成员（REQ-PLN-07）→ 读 active 索引 + 政策 artifact（缺失即 blocker）→ 渲染紧凑
     /// inventory → 组装并持久化快照 → 返回唯一上下文。`cwd` 来自 manifest 的
@@ -246,11 +260,8 @@ impl PlanningContextResolver {
         issue_id: &str,
         targets: &[LogicalRepositoryId],
     ) -> Result<ResolvedPlanningContext, ProductStoreError> {
-        let lc_id = crate::product::logical_codebase::resolve_issue_logical_codebase_id(
-            &self.paths,
-            project_id,
-            issue_id,
-        )?;
+        // C4 Task 2：lc 身份经唯一 authority resolver 冻结（conflict fail-closed）。
+        let lc_id = self.resolve_issue_authority_lc_id(project_id, issue_id)?;
         let warning = self
             .refresh_index_for_read(project_id, lc_id.as_deref())
             .await?;
@@ -327,11 +338,8 @@ impl PlanningContextResolver {
         project_id: &str,
         issue_id: &str,
     ) -> Result<ResumeDecision, ProductStoreError> {
-        let lc_id = crate::product::logical_codebase::resolve_issue_logical_codebase_id(
-            &self.paths,
-            project_id,
-            issue_id,
-        )?;
+        // C4 Task 2：lc 身份经唯一 authority resolver 冻结（conflict fail-closed）。
+        let lc_id = self.resolve_issue_authority_lc_id(project_id, issue_id)?;
         let warning = self
             .refresh_index_for_read(project_id, lc_id.as_deref())
             .await?;
@@ -411,11 +419,8 @@ impl PlanningContextResolver {
         targets: &[LogicalRepositoryId],
     ) -> Result<ResolvedPlanningContext, ProductStoreError> {
         // v1.3：按 issue 唯一归属的代码库把 index/policy/manifest 全部解析到 lc_id 子树。
-        let lc_id = crate::product::logical_codebase::resolve_issue_logical_codebase_id(
-            &self.paths,
-            project_id,
-            issue_id,
-        )?;
+        // C4 Task 2：lc 身份经唯一 authority resolver 冻结（conflict fail-closed）。
+        let lc_id = self.resolve_issue_authority_lc_id(project_id, issue_id)?;
         let (logical, index_store, policy_store) = match lc_id.as_deref() {
             Some(lc_id) => (
                 LogicalCodebaseStore::for_lc(self.paths.clone(), lc_id),

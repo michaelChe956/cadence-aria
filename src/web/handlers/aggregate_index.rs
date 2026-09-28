@@ -1,6 +1,6 @@
 //! HTTP projection and synchronous rebuild endpoints for aggregate indexes.
 
-use super::support::{default_logical_codebase_id, product_app_paths, require_logical_codebase};
+use super::support::{default_logical_codebase_id, product_app_paths, resolve_lc_authority};
 use super::*;
 
 use axum::Json;
@@ -41,7 +41,9 @@ pub async fn get_lc_active_aggregate_index(
     Path((project_id, logical_codebase_id)): Path<(String, String)>,
 ) -> ApiResult<Response> {
     let paths = product_app_paths(&state);
-    require_logical_codebase(&paths, &project_id, &logical_codebase_id)?;
+    // C4 Task 2：canonical 路由先经唯一 authority resolver 冻结 LC 身份
+    //（conflict fail-closed），再读纯投影。
+    resolve_lc_authority(&paths, &project_id, &logical_codebase_id)?;
     get_active_aggregate_index_for_lc(&state, &project_id, &logical_codebase_id)
 }
 
@@ -71,7 +73,9 @@ pub async fn rebuild_lc_aggregate_index(
     Path((project_id, logical_codebase_id)): Path<(String, String)>,
 ) -> ApiResult<Response> {
     let paths = product_app_paths(&state);
-    require_logical_codebase(&paths, &project_id, &logical_codebase_id)?;
+    // C4 Task 2：canonical 路由先经唯一 authority resolver 冻结 LC 身份
+    //（conflict fail-closed），再执行显式 rebuild 动作。
+    resolve_lc_authority(&paths, &project_id, &logical_codebase_id)?;
     rebuild_aggregate_index_for_lc(state, project_id, logical_codebase_id).await
 }
 
@@ -368,5 +372,227 @@ mod projection_tests {
         let response = read_active_projection(&paths, "project_0001", "logical_codebase_0001")
             .unwrap();
         assert_eq!(response.state, "rebuilding");
+    }
+
+    // ---- C4 Task 2：旧 project 级布局不得战胜显式 LC 解析 ----
+
+    #[test]
+    fn old_project_layout_never_wins_over_explicit_lc_resolution() {
+        use crate::product::id::repo_hash_for_path;
+        use crate::product::issue_store::CreateProductIssueInput;
+        use crate::product::logical_codebase::issue_selection::IssueCodebaseSelectionStore;
+        use crate::product::logical_codebase::policy::PolicyTarget;
+        use crate::product::logical_codebase::provider_gateway::{ProviderRef, SessionLaunchRequest};
+        use crate::product::logical_codebase::types::{
+            CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, MemberStatus,
+            RepositoryCheckoutRecord, RepositoryType,
+        };
+        use crate::product::logical_codebase::{
+            IssueCodebaseSelection, LogicalCodebaseCreateInput, LogicalCodebaseManifest,
+            LogicalCodebaseStore, LogicalRepositoryId, PlanningContextSetResolver,
+            PolicyTargetResolver, ProductionPolicyTargetResolver, RepositoryCheckoutId,
+        };
+        use crate::product::project_store::{CreateProjectInput, ProjectStore};
+
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let project_id = ProjectStore::new(paths.clone())
+            .create(CreateProjectInput {
+                name: "legacy-layout-project".to_string(),
+                description: None,
+            })
+            .unwrap()
+            .id;
+
+        // 真实成员仓（git dir 身份用于 source identity）。
+        let repo = temp.path().join("workspace").join("repo-shared");
+        std::fs::create_dir_all(&repo).unwrap();
+        for arguments in [
+            vec!["init", "-b", "main"],
+            vec!["config", "user.email", "legacy@test.local"],
+            vec!["config", "user.name", "Legacy Test"],
+        ] {
+            let output = std::process::Command::new("git")
+                .current_dir(&repo)
+                .args(&arguments)
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+        }
+        std::fs::write(repo.join("README.md"), "# shared\n").unwrap();
+        let output = std::process::Command::new("git")
+            .current_dir(&repo)
+            .args(["add", "."])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let output = std::process::Command::new("git")
+            .current_dir(&repo)
+            .args(["commit", "-m", "init"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let canonical = std::fs::canonicalize(&repo).unwrap();
+        let source = crate::product::repository_store::resolve_repository_source(&canonical)
+            .unwrap();
+
+        // 旧 project 级布局：project-level manifest + 同 source 成员，并迁移出别名 LC。
+        let legacy_store = LogicalCodebaseStore::new(paths.clone());
+        let legacy_member = LogicalRepositoryId(uuid::Uuid::new_v4());
+        let mut legacy_manifest = LogicalCodebaseManifest::new(
+            &project_id,
+            temp.path().join("workspace"),
+            Vec::new(),
+        );
+        legacy_manifest.member_ids = vec![legacy_member];
+        legacy_store.save_manifest(&project_id, &legacy_manifest).unwrap();
+        legacy_store
+            .save_member(
+                &project_id,
+                &CodebaseMemberRecord {
+                    logical_repository_id: legacy_member,
+                    physical_repository_id: "repository_legacy_member".to_string(),
+                    alias: "repo-shared".to_string(),
+                    role: "member".to_string(),
+                    ordinal: 1,
+                    source_identity: source.clone(),
+                    repo_type: RepositoryType::Unknown,
+                    tech_stack: Vec::new(),
+                    owner: None,
+                    tags: Vec::new(),
+                    default_ref: None,
+                    checkout_ids: Vec::new(),
+                    status: MemberStatus::Active,
+                    created_at: "2026-09-29T00:00:00Z".to_string(),
+                    updated_at: "2026-09-29T00:00:00Z".to_string(),
+                },
+            )
+            .unwrap();
+        legacy_store.migrate_legacy(&project_id).unwrap();
+
+        // 显式新 LC：不同 root，但成员 source 与旧布局重叠。
+        let explicit_root = temp.path().join("explicit-root");
+        std::fs::create_dir_all(&explicit_root).unwrap();
+        let lc2 = LogicalCodebaseStore::new(paths.clone())
+            .create(
+                &project_id,
+                LogicalCodebaseCreateInput {
+                    name: "explicit".to_string(),
+                    aggregate_root: explicit_root.clone(),
+                },
+            )
+            .unwrap()
+            .id;
+        let lc2_store = LogicalCodebaseStore::for_lc(paths.clone(), &lc2);
+        let member2 = LogicalRepositoryId(uuid::Uuid::new_v4());
+        let checkout2 = RepositoryCheckoutId(uuid::Uuid::new_v4());
+        let mut manifest2 =
+            LogicalCodebaseManifest::new(&project_id, explicit_root.clone(), Vec::new());
+        manifest2.member_ids = vec![member2];
+        lc2_store.save_manifest(&project_id, &manifest2).unwrap();
+        lc2_store
+            .save_member(
+                &project_id,
+                &CodebaseMemberRecord {
+                    logical_repository_id: member2,
+                    physical_repository_id: "repository_explicit_member".to_string(),
+                    alias: "repo-shared".to_string(),
+                    role: "member".to_string(),
+                    ordinal: 1,
+                    source_identity: source.clone(),
+                    repo_type: RepositoryType::Unknown,
+                    tech_stack: Vec::new(),
+                    owner: None,
+                    tags: Vec::new(),
+                    default_ref: None,
+                    checkout_ids: vec![checkout2],
+                    status: MemberStatus::Active,
+                    created_at: "2026-09-29T00:00:00Z".to_string(),
+                    updated_at: "2026-09-29T00:00:00Z".to_string(),
+                },
+            )
+            .unwrap();
+        lc2_store
+            .save_checkout(
+                &project_id,
+                &RepositoryCheckoutRecord {
+                    checkout_id: checkout2,
+                    logical_repository_id: member2,
+                    physical_repository_id: "repository_explicit_member".to_string(),
+                    kind: CheckoutKind::Main,
+                    canonical_path: canonical.clone(),
+                    checkout_path_hash: repo_hash_for_path(
+                        canonical.to_string_lossy().as_ref(),
+                    ),
+                    git_dir_identity: source.git_dir_identity(),
+                    revision: None,
+                    availability: CheckoutAvailability::Available,
+                    observed_at: "2026-09-29T00:00:00Z".to_string(),
+                    created_at: "2026-09-29T00:00:00Z".to_string(),
+                    updated_at: "2026-09-29T00:00:00Z".to_string(),
+                },
+            )
+            .unwrap();
+
+        // issue 显式归属 lc2。
+        let issue = crate::product::issue_store::IssueStore::new(paths.clone())
+            .create(CreateProductIssueInput {
+                project_id: project_id.clone(),
+                repo_id: None,
+                logical_codebase_id: Some(lc2.clone()),
+                title: "explicit issue".to_string(),
+                description: None,
+                change_id: None,
+                base_branch: None,
+            })
+            .unwrap();
+        IssueCodebaseSelectionStore::for_lc(paths.clone(), &lc2)
+            .save(
+                &IssueCodebaseSelection::all_members(&project_id, &issue.id, None)
+                    .for_logical_codebase(&lc2),
+            )
+            .unwrap();
+
+        let expected_conflict = "repository_routing_legacy_conflict";
+
+        // 入口 1：规划/工作区上下文（PlanningContextSetResolver）。
+        let planning = PlanningContextSetResolver::new(paths.clone())
+            .resolve(&project_id, &issue.id);
+        match planning {
+            Err(crate::product::json_store::ProductStoreError::Conflict { kind, .. }) => {
+                assert_eq!(kind, expected_conflict);
+            }
+            other => panic!("planning must fail closed with legacy conflict, got {other:?}"),
+        }
+
+        // 入口 2：aggregate index canonical GET 的身份校验。
+        let index_error = super::super::support::resolve_lc_authority(&paths, &project_id, &lc2)
+            .expect_err("aggregate index GET identity check must fail closed");
+        assert_eq!(index_error.code, expected_conflict);
+
+        // 入口 3：policy target resolver（provider spawn 前复验）。
+        let request = SessionLaunchRequest::planning(
+            project_id.clone(),
+            ProviderRef::claude_code("cap_snapshot"),
+            PolicyTarget::checkout(
+                member2.0.to_string(),
+                checkout2.0.to_string(),
+                canonical.clone(),
+            ),
+            vec![canonical.clone()],
+            "sha256:managed-config-artifact",
+        );
+        let policy_error = ProductionPolicyTargetResolver::for_lc(paths.clone(), &lc2)
+            .resolve_and_revalidate(&request)
+            .expect_err("policy target resolver must fail closed");
+        match policy_error {
+            crate::product::logical_codebase::ProviderGatewayError::Target(reason) => {
+                assert!(
+                    reason.contains(expected_conflict),
+                    "policy resolver error must carry the stable conflict code: {reason}"
+                );
+            }
+            other => panic!("expected Target error, got {other:?}"),
+        }
     }
 }

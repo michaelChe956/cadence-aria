@@ -143,7 +143,21 @@ impl super::CodingAttemptStore {
         journal_target: Option<crate::product::logical_codebase::LogicalRepositoryId>,
     ) -> Result<CodingGroupInitializationJournal, ProductStoreError> {
         let routing =
-            RepositoryRouting::load_for_issue(&self.paths, &input.project_id, &input.issue_id)?;
+            // C4 Task 2：issue 身份先经唯一 authority resolver 冻结（conflict
+            // fail-closed）；旧数据无归属/无别名 record 时回退 Legacy。
+            match crate::product::logical_codebase::RepositoryAuthorityResolver::new(
+                self.paths.clone(),
+            )
+            .resolve_for_issue(&input.project_id, &input.issue_id)?
+            {
+                None => RepositoryRouting::Legacy {
+                    repository_id: String::new(),
+                },
+                Some(resolution) => RepositoryRouting::classify(
+                    resolution.manifest,
+                    resolution.selection,
+                ),
+            };
         let ordered_unit_bindings = if admission_kind == CodingAdmissionKind::ScAdvance {
             topologically_order_unit_bindings(unit_bindings)?
         } else {

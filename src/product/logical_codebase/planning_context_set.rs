@@ -5,7 +5,7 @@ use crate::product::logical_codebase::aggregate_index::{
 };
 use crate::product::logical_codebase::{
     CodebaseMemberRecord, IssueCodebaseSelectionStore, LogicalCodebaseStore, LogicalRepositoryId,
-    MemberStatus, RepositoryCheckoutRecord, RepositoryType,
+    MemberStatus, RepositoryAuthorityResolver, RepositoryCheckoutRecord, RepositoryType,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -49,11 +49,15 @@ impl PlanningContextSetResolver {
         project_id: &str,
         issue_id: &str,
     ) -> Result<RepositoryContextResolution, ProductStoreError> {
-        let lc_id = crate::product::logical_codebase::resolve_issue_logical_codebase_id(
-            &self.paths,
-            project_id,
-            issue_id,
-        )?;
+        // C4 Task 2：身份先经唯一 authority resolver 冻结（kind/重复来源/legacy
+        // 布局冲突 fail-closed），成员/checkout/selection 只从 resolver 确认的
+        // LC 子树读取；无归属且无 legacy 别名 record 的旧数据保留 project 级
+        // 兼容路径（不猜“最新可用记录”）。
+        let resolution = RepositoryAuthorityResolver::new(self.paths.clone())
+            .resolve_for_issue(project_id, issue_id)?;
+        let lc_id = resolution
+            .as_ref()
+            .and_then(|resolution| resolution.target.logical_codebase_id.clone());
         let (logical, selections) = match lc_id.as_deref() {
             Some(lc_id) => (
                 LogicalCodebaseStore::for_lc(self.paths.clone(), lc_id),
