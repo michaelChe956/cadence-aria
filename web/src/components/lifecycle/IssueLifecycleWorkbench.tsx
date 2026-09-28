@@ -435,6 +435,8 @@ export function IssueLifecycleWorkbench({
     setAggregateIndex,
     aggregateInitialization,
     setAggregateInitialization,
+    bootstrapProjection,
+    refreshBootstrap,
     latestPointerPublication,
     showIncrementalHint,
   } = useLogicalCodebaseScopeData({
@@ -969,6 +971,8 @@ export function IssueLifecycleWorkbench({
       lcSummaryExpanded={lcSummaryExpandedForProject}
       lcSummaryHasWarning={lcSummaryHasWarning}
       logicalCodebaseMembers={logicalCodebaseMembers}
+      bootstrapProjection={bootstrapProjection}
+      onBootstrapChanged={refreshBootstrap}
       aggregateInitialization={aggregateInitialization}
       aggregateInitializationBusy={aggregateInitializationBusy}
       aggregateIndex={aggregateIndex}

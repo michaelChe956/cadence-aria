@@ -96,6 +96,8 @@ pub async fn post_lc_identity_repair_action(
         .map_err(identity_repair_api_error)?;
 
     // 事实已先落盘；EventHub 只承担通知/补读触发，发布失败不回滚。
+    // Task 9：payload 与 bootstrap 通知同构（step/object/reason/next step），
+    // repair 只作用于 identity 步骤，字段全部来自 durable diagnostic。
     state.events.publish(
         crate::web::events::WebEventType::ProjectionUpdated.as_str(),
         None,
@@ -107,6 +109,37 @@ pub async fn post_lc_identity_repair_action(
             "phase": format!("{:?}", diagnostic.phase).to_lowercase(),
             "command_id": request.command_id,
             "conflicts": diagnostic.conflicts,
+            "notice": {
+                "key": format!(
+                    "identity_repair:{}:{}",
+                    diagnostic.migration_id,
+                    diagnostic
+                        .conflicts
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| format!("{:?}", diagnostic.phase).to_lowercase())
+                ),
+                "step": "identity",
+                "object_id": diagnostic.migration_id,
+                "reason_code": if diagnostic.phase
+                    == crate::product::logical_codebase::IdentityMigrationPhase::Failed
+                {
+                    "identity_migration_failed"
+                } else {
+                    "identity_repair_applied"
+                },
+                "external_side_effect": "none",
+                "allowed_actions": diagnostic
+                    .allowed_actions
+                    .iter()
+                    .map(|action| match action {
+                        crate::product::logical_codebase::identity_repair::IdentityRepairActionKind::ContinueSafePrefix => "continue_safe_prefix",
+                        crate::product::logical_codebase::identity_repair::IdentityRepairActionKind::SubmitMapping => "submit_mapping",
+                        crate::product::logical_codebase::identity_repair::IdentityRepairActionKind::Revalidate => "revalidate",
+                    })
+                    .collect::<Vec<_>>(),
+                "next_step": "manifest_checkout",
+            },
         }),
     );
 

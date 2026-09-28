@@ -40,6 +40,20 @@ pub enum BootstrapActionKind {
     Revalidate,
     Repair,
 }
+impl BootstrapActionKind {
+    /// 与 serde snake_case 序列化一致的稳定动作名（通知 payload/前端按钮
+    /// 语义共用，不引入第二套字符串协议）。
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Prepare => "prepare",
+            Self::Continue => "continue",
+            Self::Retry => "retry",
+            Self::Revalidate => "revalidate",
+            Self::Repair => "repair",
+        }
+    }
+}
+
 
 /// 真实 provider 将消费的成员规则文件引用（C4 Task 8）。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

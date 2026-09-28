@@ -812,3 +812,63 @@ describe("useWorkspaceSessionObservers", () => {
     });
   });
 });
+
+describe("C4 logical codebase bootstrap notice source", () => {
+  it("surfaces bootstrap waiting notices per LC and keeps them out of the error count", async () => {
+    const bootstrapNotice = {
+      key: "bootstrap:identity:migration_0001:identity_migration_failed",
+      step: "identity",
+      object_id: "migration_0001",
+      reason_code: "identity_migration_failed",
+      summary: "identity mismatch: identity_registry repository_0001",
+      external_side_effect: "none",
+      allowed_actions: ["repair"],
+      next_step: "manifest_checkout",
+      created_at: "",
+    };
+    let bootstrapReads = 0;
+    const view = renderObserverHook(observerOptions({
+      listCodebases: async () => ({
+        codebases: [
+          {
+            id: "lc_0001",
+            name: "Platform",
+            kind: "logical" as const,
+            repository_id: null,
+            logical_codebase_id: "lc_0001",
+            member_count: 2,
+          },
+        ],
+      }),
+      getLogicalCodebaseBootstrap: async () => {
+        bootstrapReads += 1;
+        return {
+          project_id: "project_1",
+          logical_codebase_id: "lc_0001",
+          authority_root: "/tmp/lc",
+          membership_revision: 1,
+          policy: null,
+          steps: [],
+          planning_ready: false,
+          notices: [bootstrapNotice],
+        };
+      },
+    }));
+
+    await waitFor(() => expect(bootstrapReads).toBeGreaterThan(0));
+    const inbox = view.result.inbox;
+    const bootstrapItems = inbox.filter((item) => item.source === "logical_codebase_bootstrap");
+    expect(bootstrapItems).toHaveLength(1);
+    expect(bootstrapItems[0].kind).toBe("lc_bootstrap");
+    expect(bootstrapItems[0].bootstrapInfo?.reasonCode).toBe("identity_migration_failed");
+    expect(bootstrapItems[0].bootstrapInfo?.nextStep).toBe("manifest_checkout");
+    // 通知不进入错误计数（与 C1/info 同一隔离规则）。
+    expect(
+      view.result.countedInbox.some((item) => item.source === "logical_codebase_bootstrap"),
+    ).toBe(false);
+
+    await act(async () => {
+      view.unmount();
+    });
+  });
+});

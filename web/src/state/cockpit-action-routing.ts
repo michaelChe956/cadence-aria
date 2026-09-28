@@ -37,6 +37,23 @@ export type C1RecoveryActionPayload =
     }
   | { kind: "rebind"; projectId: string; issueId: string };
 
+/**
+ * C4 Task 9（LC 冷启动加固）：驾驶舱 bootstrap 动作——准备/继续/重试/核验
+ * 统一走 Task 6 的 bootstrap action REST（稳定 command_id 由卡片按 notice
+ * key 派生并复用；expected revision/object 来自 durable 投影）。repair 的
+ * mapping 裁决表单在生命周期工作台，驾驶舱只触发 bootstrap 面。
+ */
+export type LcBootstrapActionPayload = {
+  kind: "lc_bootstrap";
+  projectId: string;
+  logicalCodebaseId: string;
+  step: string;
+  action: string;
+  commandId: string;
+  expectedRevision: number | null;
+  expectedObjectId: string;
+};
+
 export type C1RecoveryActionKind = C1RecoveryActionPayload["kind"];
 
 export type CockpitActionFacade = {
@@ -83,6 +100,9 @@ export type CockpitActionFacade = {
   ): Promise<void>;
   /** C1 Task 9：显式换代导航（完整 rebind 表单在 issue 生命周期页）。 */
   rebind(payload: C1RecoveryActionPayload & { kind: "rebind" }): void;
+  /** C4 Task 9：LC 冷启动统一动作（Task 6 bootstrap action REST 透传，
+   * 页面接线发送器；未接线零出站 fail-closed）。 */
+  sendBootstrapAction(payload: LcBootstrapActionPayload): Promise<void>;
 };
 
 
@@ -124,6 +144,11 @@ export function createCockpitActionFacade(input: {
    * 周期页显式 rebind 表单）。未接线时对应动作零出站（fail-closed）。
    */
   sendC1Action?: (payload: C1RecoveryActionPayload) => void;
+  /**
+   * C4 Task 9：LC 冷启动统一动作发送器（页面接线 bootstrap action REST）。
+   * 未接线时对应动作零出站（fail-closed）；前端不判定业务成功。
+   */
+  sendLcBootstrapAction?: (payload: LcBootstrapActionPayload) => Promise<void>;
 }): CockpitActionFacade {
   return {
     confirm() {
@@ -279,6 +304,11 @@ export function createCockpitActionFacade(input: {
     },
     rebind(payload) {
       input.sendC1Action?.(payload);
+    },
+    // C4 Task 9：bootstrap 动作只透传页面接线发送器（fail-closed：未接线
+    // 零出站）；稳定 command_id 由卡片按 notice key 派生并复用。
+    async sendBootstrapAction(payload) {
+      await input.sendLcBootstrapAction?.(payload);
     },
   };
 }

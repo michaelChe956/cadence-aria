@@ -1,12 +1,14 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { getActiveAggregateIndex } from "../../api/aggregate-index";
 import { getAggregateInitialization } from "../../api/aggregate-initialization";
+import { getLogicalCodebaseBootstrap } from "../../api/logical-codebase-bootstrap";
 import { listLogicalCodebaseMembers } from "../../api/logicalCodebaseMembers";
 import { listPointerPublications } from "../../api/pointer-publication";
 import type {
   AggregateIndexActiveResponse,
   AggregateInitializationOperationSnapshot,
+  LogicalCodebaseBootstrapProjection,
   LogicalCodebaseMemberDto,
   PointerPublicationDto,
 } from "../../api/types";
@@ -33,6 +35,8 @@ type LogicalCodebaseScopeData = {
   setAggregateInitialization: Dispatch<
     SetStateAction<AggregateInitializationOperationSnapshot | null>
   >;
+  bootstrapProjection: LogicalCodebaseBootstrapProjection | null;
+  refreshBootstrap: () => void;
   latestPointerPublication: PointerPublicationDto | null;
   showIncrementalHint: boolean;
 };
@@ -59,6 +63,9 @@ export function useLogicalCodebaseScopeData({
     useState<AggregateIndexActiveResponse | null>(null);
   const [aggregateInitialization, setAggregateInitialization] =
     useState<AggregateInitializationOperationSnapshot | null>(null);
+  const [bootstrapProjection, setBootstrapProjection] =
+    useState<LogicalCodebaseBootstrapProjection | null>(null);
+  const [bootstrapRefreshTick, setBootstrapRefreshTick] = useState(0);
 
   const latestPointerPublication = useMemo<PointerPublicationDto | null>(() => {
     if (pointerPublications.length === 0) {
@@ -92,6 +99,7 @@ export function useLogicalCodebaseScopeData({
 
   useEffect(() => {
     setAggregateInitialization(null);
+    setBootstrapProjection(null);
     if (!selectedProjectId || !activeLogicalCodebaseId) {
       setLogicalCodebaseMembers([]);
       setPointerPublications([]);
@@ -129,6 +137,58 @@ export function useLogicalCodebaseScopeData({
       disposed = true;
     };
   }, [selectedProjectId, activeLogicalCodebaseId]);
+
+  // C4 Task 9：选中 LC 的 bootstrap 纯投影拉取/刷新（动作成功后经
+  // refreshBootstrap 立即补读；GET 本身零副作用）。SSE/失效唤醒由全局
+  // 目录刷新汇入，这里只维护当前 LC 的等待面。
+  useEffect(() => {
+    if (!selectedProjectId || !activeLogicalCodebaseId) {
+      return;
+    }
+    let disposed = false;
+    (async () => {
+      try {
+        const projection = await getLogicalCodebaseBootstrap(
+          selectedProjectId,
+          activeLogicalCodebaseId,
+        );
+        if (!disposed && projection !== null && Array.isArray(projection.steps)) {
+          setBootstrapProjection(projection);
+        }
+      } catch {
+        // bootstrap 投影读取失败保持现状，交由轮询/全局 refresh 重试。
+      }
+    })();
+    return () => {
+      disposed = true;
+    };
+  }, [selectedProjectId, activeLogicalCodebaseId, bootstrapRefreshTick]);
+
+  // 冷启动进行中（任一步骤 Running）时按固定间隔轮询；到达稳定态
+  // （planning_ready 或全部 Failed/等待人工）即停止，等待显式动作唤醒。
+  const bootstrapPolling =
+    bootstrapProjection !== null &&
+    !bootstrapProjection.planning_ready &&
+    (bootstrapProjection.steps ?? []).some((step) => step.status === "running");
+  useEffect(() => {
+    if (
+      !selectedProjectId ||
+      !activeLogicalCodebaseId ||
+      !bootstrapPolling
+    ) {
+      return;
+    }
+    const interval = window.setInterval(() => {
+      setBootstrapRefreshTick((tick) => tick + 1);
+    }, POLL_INTERVAL_MS);
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [selectedProjectId, activeLogicalCodebaseId, bootstrapPolling]);
+
+  const refreshBootstrap = useCallback(() => {
+    setBootstrapRefreshTick((tick) => tick + 1);
+  }, []);
 
   useEffect(() => {
     if (
@@ -221,6 +281,8 @@ export function useLogicalCodebaseScopeData({
     setAggregateIndex,
     aggregateInitialization,
     setAggregateInitialization,
+    bootstrapProjection,
+    refreshBootstrap,
     latestPointerPublication,
     showIncrementalHint,
   };

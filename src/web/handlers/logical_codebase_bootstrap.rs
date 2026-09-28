@@ -148,6 +148,15 @@ async fn post_bootstrap_action_for_lc(
         })?;
 
     // 事实已先落盘；EventHub 只承担通知/补读触发，发布失败不回滚。
+    // Task 9：payload 携带 durable notice 上下文（step/object/reason/next
+    // step），全部从 action 后重新投影的 notices 派生——通知不宣称任何
+    // 未持久化的成功。
+    let acted_notice = result
+        .projection
+        .notices
+        .iter()
+        .find(|notice| notice.step == request.step)
+        .or_else(|| result.projection.notices.first());
     state.events.publish(
         crate::web::events::WebEventType::ProjectionUpdated.as_str(),
         None,
@@ -164,6 +173,20 @@ async fn post_bootstrap_action_for_lc(
                 }
                 crate::product::logical_codebase::BootstrapActionOutcome::Completed => "completed",
             },
+            "planning_ready": result.projection.planning_ready,
+            "notice": acted_notice.map(|notice| json!({
+                "key": notice.key,
+                "step": notice.step.as_str(),
+                "object_id": notice.object_id,
+                "reason_code": notice.reason_code,
+                "external_side_effect": notice.external_side_effect,
+                "allowed_actions": notice
+                    .allowed_actions
+                    .iter()
+                    .map(|action| action.as_str())
+                    .collect::<Vec<_>>(),
+                "next_step": notice.next_step.map(|step| step.as_str()),
+            })),
         }),
     );
 

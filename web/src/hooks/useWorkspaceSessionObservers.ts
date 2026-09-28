@@ -4,6 +4,8 @@ import {
   listProductIssues,
   listProjects,
 } from "../api/client";
+import { listCodebases } from "../api/codebases";
+import { getLogicalCodebaseBootstrap } from "../api/logical-codebase-bootstrap";
 import type {
   CodingAttempt,
   CodingFinalConfirmInfoItem,
@@ -12,7 +14,11 @@ import type {
   ProductIssueListResponse,
   WorkspaceSessionSummary,
 } from "../api/types";
-import { c1WaitingItem } from "../state/workspace-cockpit-projection";
+import type { CodebaseSummaryDto } from "../api/types/codebases";
+import {
+  c1WaitingItem,
+  logicalCodebaseBootstrapItem,
+} from "../state/workspace-cockpit-projection";
 import {
   createObserverController,
   selectObservedInbox,
@@ -69,6 +75,10 @@ export interface WorkspaceSessionObserverOptions {
       | "c1_waiting_items"
     >
   >;
+  /** C4 Task 9：LC 目录读取（默认真实 API；测试注入伪实现）。 */
+  listCodebases?: typeof listCodebases;
+  /** C4 Task 9：bootstrap 纯投影读取（默认真实 API；测试注入伪实现）。 */
+  getLogicalCodebaseBootstrap?: typeof getLogicalCodebaseBootstrap;
   createController?: WorkspaceObserverControllerFactory;
   scheduleCatalogRefresh?: (callback: () => void, delayMs: number) => CatalogRefreshTimer;
   cancelCatalogRefresh?: (timer: CatalogRefreshTimer) => void;
@@ -108,6 +118,8 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
     listProjects: getProjects = listProjects,
     listProductIssues: getProductIssues = listProductIssues,
     getIssueLifecycle: getLifecycle = getIssueLifecycle,
+    listCodebases: getCodebases = listCodebases,
+    getLogicalCodebaseBootstrap: getBootstrap = getLogicalCodebaseBootstrap,
     createController,
     scheduleCatalogRefresh: scheduleRefresh = scheduleCatalogRefresh,
     cancelCatalogRefresh: cancelRefresh = cancelCatalogRefresh,
@@ -138,6 +150,12 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
   // （孤儿候选/lease 三态/Failed advance/intent 停等/换代历史）——只读补读
   // 投影，动作经页面接线的 C1 REST 发送器出站。
   const [c1WaitingItems, setC1WaitingItems] = useState<readonly CockpitInboxItem[]>(
+    [],
+  );
+  // C4 Task 9（LC 冷启动加固）：LC 级 durable 冷启动等待/失败通知——与目录
+  // 同源补读（listCodebases → bootstrap GET），按稳定 notice key 去重，
+  // 不进入错误计数；动作经页面接线的 bootstrap action REST 出站。
+  const [lcBootstrapItems, setLcBootstrapItems] = useState<readonly CockpitInboxItem[]>(
     [],
   );
   // P3（REQ-WIGA-07）：到期 tick——最近到期单次失效定时器触发后递增，
@@ -231,8 +249,9 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
       ...codingInfoItems,
       ...visibleRecentItems,
       ...c1WaitingItems,
+      ...lcBootstrapItems,
     ],
-    [records, infoItems, codingInfoItems, visibleRecentItems, c1WaitingItems],
+    [records, infoItems, codingInfoItems, visibleRecentItems, c1WaitingItems, lcBootstrapItems],
   );
   const countedRecords = useMemo(
     () => records.filter((record) => watchedSessionIds.includes(record.sessionId)),
@@ -319,6 +338,36 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
               }
             });
             setC1WaitingItems(nextC1Items);
+            // C4 Task 9：LC 冷启动通知与目录同源补读——每个 project 的 LC
+            // bootstrap 纯投影 GET；SSE/失效唤醒只触发本补读，页面关闭后
+            // 重新打开仍能看到同一等待事实（按稳定 notice key 去重）。
+            // 单个 LC 读取失败只跳过该项（等待事实保留上一轮），不拆掉
+            // 整个目录观察窗。
+            const nextBootstrapItems: CockpitInboxItem[] = [];
+            await Promise.all(
+              projects.map(async (project) => {
+                let codebases: CodebaseSummaryDto[];
+                try {
+                  ({ codebases } = await getCodebases(project.project_id));
+                } catch {
+                  return;
+                }
+                for (const codebase of codebases) {
+                  const lcId = codebase.logical_codebase_id ?? codebase.id;
+                  try {
+                    const projection = await getBootstrap(project.project_id, lcId);
+                    for (const notice of projection.notices) {
+                      nextBootstrapItems.push(
+                        logicalCodebaseBootstrapItem(notice, projection),
+                      );
+                    }
+                  } catch {
+                    // 保留上一轮同 key 事实；下轮目录刷新重试。
+                  }
+                }
+              }),
+            );
+            setLcBootstrapItems(nextBootstrapItems);
             // P0 1.3（REQ-WIGA-05）Task 11：会话→issue→attempt 发现通道（目录
             // 轮询副产物，无额外请求）；驾驶舱按需拉 attempt snapshot 作答 choice。
             setCodingAttempts(
@@ -417,7 +466,7 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
         cancelRefresh(periodicTimer);
       }
     };
-  }, [cancelRefresh, getLifecycle, getProductIssues, getProjects, refreshIntervalMs, scheduleRefresh]);
+  }, [cancelRefresh, getBootstrap, getCodebases, getLifecycle, getProductIssues, getProjects, refreshIntervalMs, scheduleRefresh]);
 
   // P3（REQ-WIGA-07）：最近到期单次失效定时器——按可见条目的最早
   // occurred_at + INFO_TTL_MS 触发一次 tick，让页面不刷新也能移除过期

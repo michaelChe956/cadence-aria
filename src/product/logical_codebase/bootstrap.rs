@@ -623,13 +623,8 @@ fn project_notices(steps: &[BootstrapStepProjection]) -> Vec<LogicalCodebaseBoot
             .unwrap_or_else(|| "none".to_string());
         let next_step = LogicalCodebaseBootstrapStep::V1
             .iter()
-            .find(|candidate| **candidate == step.step)
-            .and_then(|current| {
-                LogicalCodebaseBootstrapStep::V1
-                    .iter()
-                    .position(|candidate| candidate == current)
-                    .map(|index| LogicalCodebaseBootstrapStep::V1[index + 1])
-            });
+            .position(|candidate| *candidate == step.step)
+            .and_then(|index| LogicalCodebaseBootstrapStep::V1.get(index + 1).copied());
         notices.push(LogicalCodebaseBootstrapNotice {
             key: format!("bootstrap:{}:{}:{}", step.step.as_str(), step.object_id, reason_code),
             step: step.step,

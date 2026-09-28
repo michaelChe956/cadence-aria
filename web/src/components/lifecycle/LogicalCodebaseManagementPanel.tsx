@@ -1,16 +1,21 @@
 import { AggregateIndexCard } from "./AggregateIndexCard";
 import { AggregateInitializationCard } from "./AggregateInitializationCard";
+import { LogicalCodebaseBootstrapCard } from "./LogicalCodebaseBootstrapCard";
 import { PointerPublicationPanel } from "./PointerPublicationPanel";
 import type {
   AggregateIndexActiveResponse,
   AggregateInitializationOperationSnapshot,
   CodebaseSummaryDto,
+  LogicalCodebaseBootstrapProjection,
   LogicalCodebaseMemberDto,
   PointerPublicationDto,
 } from "../../api/types";
 
 type LogicalCodebaseManagementPanelProps = {
   logicalCodebases: CodebaseSummaryDto[];
+  projectId: string | null;
+  bootstrapProjection: LogicalCodebaseBootstrapProjection | null;
+  onBootstrapChanged: () => void;
   activeLogicalCodebaseId: string | null;
   onSelectLogicalCodebase: (logicalCodebaseId: string) => void;
   onOpenRegistration: () => void;
@@ -36,6 +41,9 @@ type LogicalCodebaseManagementPanelProps = {
  * LC 切换 tab + 聚合初始化/索引卡 + 指针发布面板。
  */
 export function LogicalCodebaseManagementPanel({
+  projectId,
+  bootstrapProjection,
+  onBootstrapChanged,
   logicalCodebases,
   activeLogicalCodebaseId,
   onSelectLogicalCodebase,
@@ -99,6 +107,13 @@ export function LogicalCodebaseManagementPanel({
             );
           })}
         </div>
+      ) : null}
+      {logicalCodebases.length > 0 ? (
+        <LogicalCodebaseBootstrapCard
+          projectId={projectId}
+          projection={bootstrapProjection}
+          onChanged={onBootstrapChanged}
+        />
       ) : null}
       {logicalCodebaseMembers.length > 0 ? (
         <AggregateInitializationCard

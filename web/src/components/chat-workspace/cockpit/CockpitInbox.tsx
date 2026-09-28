@@ -59,6 +59,7 @@ const KIND_GLYPH = {
   info: CircleCheck,
   c1_recovery: RotateCcw,
   sc_failed: CircleAlert,
+  lc_bootstrap: Play,
 } as const;
 
 // F-50 视觉 v2 §3：门禁条目与门卡同一视觉常量（中性底+琥珀左线）；stopped 维持
@@ -70,6 +71,7 @@ const KIND_CLASS = {
   info: "rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2",
   c1_recovery: "rounded-lg border border-amber-200 bg-amber-50 px-3 py-2",
   sc_failed: "rounded-lg border border-slate-200 bg-gray-50 px-3 py-2",
+  lc_bootstrap: "rounded-lg border border-amber-200 bg-amber-50 px-3 py-2",
 } as const;
 
 /**
@@ -81,6 +83,18 @@ const C1_ACTION_BUTTON_LABELS: Record<string, string> = {
   retry_initialization: "重试初始化",
   confirm_takeover: "确认接管",
   rebind: "去换代",
+};
+
+/**
+ * C4 Task 9：LC 冷启动统一动作按钮文案（准备/继续/重试/核验；repair 的
+ * mapping 裁决表单在生命周期工作台，驾驶舱只导航不复制表单）。
+ */
+const LC_BOOTSTRAP_ACTION_BUTTON_LABELS: Record<string, string> = {
+  prepare: "准备",
+  continue: "继续",
+  retry: "重试",
+  revalidate: "核验",
+  repair: "去修复",
 };
 
 export function CockpitInbox({
@@ -418,6 +432,9 @@ function CockpitInboxRow({
         ) : null}
         {item.kind === "c1_recovery" && item.c1Info ? (
           <C1RecoveryCard item={item} actions={actions} />
+        ) : null}
+        {item.kind === "lc_bootstrap" && item.bootstrapInfo ? (
+          <LcBootstrapCard item={item} actions={actions} />
         ) : null}
         {item.kind === "sc_failed" && item.scFailure && onRetryFailedSc ? (
           <button
@@ -1086,6 +1103,85 @@ function C1RecoveryCard({
               确认副作用并重试
             </button>
           ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * C4 Task 9（LC 冷启动加固）：durable bootstrap 等待/失败通知卡片——展示
+ * step/object/原因/可能外部副作用/下一步，并按服务端 notice 的
+ * allowed_actions 渲染统一按钮。稳定 command_id 从 notice key 派生并复用
+ * （同命令重放幂等，不重复计数）；按钮只经 facade 透传页面接线的
+ * bootstrap action REST，前端不乐观改状态。repair 动作导航到生命周期
+ * 工作台（mapping 裁决表单在那边）。
+ */
+function LcBootstrapCard({
+  item,
+  actions,
+}: {
+  item: CockpitInboxItem;
+  actions?: CockpitActionFacade;
+}) {
+  const info = item.bootstrapInfo;
+  const [submitted, setSubmitted] = useState<string | null>(null);
+  if (!info) {
+    return null;
+  }
+  const handleAction = (action: string) => {
+    if (!actions) {
+      return;
+    }
+    // 同一 notice+action 的重复点击复用同一 command id（服务端 replay 幂等）。
+    const commandId = `cmd-lc-bootstrap-${info.noticeKey}-${action}`
+      .replace(/[^a-zA-Z0-9_-]/g, "_");
+    setSubmitted(action);
+    void actions
+      .sendBootstrapAction({
+        kind: "lc_bootstrap",
+        projectId: info.projectId,
+        logicalCodebaseId: info.logicalCodebaseId,
+        step: info.step,
+        action,
+        commandId,
+        expectedRevision: info.membershipRevision,
+        expectedObjectId: info.objectId,
+      })
+      .catch(() => {
+        // 动作失败保留 durable 等待项（下轮 bootstrap GET 刷新仍可见）；
+        // 就地恢复按钮，不吞成成功。
+        setSubmitted(null);
+      });
+  };
+  return (
+    <div className="mt-2" data-testid={`lc-bootstrap-${info.step}`}>
+      <p className="text-xs text-slate-600">
+        逻辑代码库 {info.logicalCodebaseId} · 步骤 {info.step} · 对象 {info.objectId}
+      </p>
+      <p className="aria-mono mt-1 text-xs text-[var(--aria-danger)]">{info.reasonCode}</p>
+      {info.externalSideEffect && info.externalSideEffect !== "none" ? (
+        <p className="mt-1 text-xs text-[var(--aria-danger)]">
+          可能外部副作用：{info.externalSideEffect}
+        </p>
+      ) : null}
+      {info.nextStep ? (
+        <p className="mt-1 text-xs text-slate-500">下一步：{info.nextStep}</p>
+      ) : null}
+      {info.allowedActions.length > 0 ? (
+        <div className="mt-2 flex flex-wrap gap-2">
+          {info.allowedActions.map((action) => (
+            <button
+              key={action}
+              type="button"
+              disabled={!actions || submitted === action}
+              onClick={() => handleAction(action)}
+              className={`${BTN_SECONDARY_CLASS} disabled:cursor-not-allowed disabled:opacity-60`}
+              data-testid={`lc-bootstrap-action-${action}`}
+            >
+              {LC_BOOTSTRAP_ACTION_BUTTON_LABELS[action] ?? action}
+            </button>
+          ))}
         </div>
       ) : null}
     </div>

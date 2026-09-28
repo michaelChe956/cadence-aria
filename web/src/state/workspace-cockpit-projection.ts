@@ -3,7 +3,10 @@ import { protocolErrorCopy, STALE_DRIVER_LEASE_CODE } from "./protocol-error-cop
 import type {
   C1WaitingItem,
   ChoiceQuestion,
-  CodingFinalConfirmInfoItem, PlanConfirmedInfoItem,
+  CodingFinalConfirmInfoItem,
+  LogicalCodebaseBootstrapNoticeDto,
+  LogicalCodebaseBootstrapProjection,
+  PlanConfirmedInfoItem,
   WorkItemPlanHumanGateSnapshot,
 } from "../api/types";
 import type { CodingAttemptAddress } from "../api/types/coding";
@@ -469,7 +472,8 @@ export type CockpitInboxKind =
   | "choice"
   | "info"
   | "c1_recovery"
-  | "sc_failed";
+  | "sc_failed"
+  | "lc_bootstrap";
 
 /**
  * P0 1.3（REQ-WIGA-05）Task 11：驾驶舱 choice 就地作答投影——workspace 侧
@@ -536,7 +540,8 @@ export interface CockpitInboxItem {
     | "plan_confirmed_info"
     | "coding_final_confirm_info"
     | "c1_waiting"
-    | "sc_failed",
+    | "sc_failed"
+    | "logical_codebase_bootstrap",
   createdAt: string | null;
   gate: GateProjection | null;
   inlineError: { code: string; message: string } | null;
@@ -556,6 +561,27 @@ export interface CockpitInboxItem {
   /** C1（enrollment-recovery-surface Task 9）：kind="c1_recovery" 时的
    * durable 恢复等待项投影（reason/身份/可用动作/下一阶段）。 */
   c1Info?: C1WaitingProjection | null;
+  /** C4（LC 冷启动加固 Task 9）：kind="lc_bootstrap" 时的 durable 冷启动
+   * 等待/失败通知投影（notice key/step/object/原因/副作用/动作/下一步）；
+   * 不进入错误计数，动作统一走 bootstrap action API。 */
+  bootstrapInfo?: LogicalCodebaseBootstrapInfoProjection | null;
+}
+
+/** C4 Task 9：LC 冷启动通知的收件箱投影（服务端
+ * LogicalCodebaseBootstrapNotice 的只读镜像；字段一一对应，前端不另造
+ * 事实，按钮生成稳定 command id 后经统一 action API 出站）。 */
+export interface LogicalCodebaseBootstrapInfoProjection {
+  projectId: string;
+  logicalCodebaseId: string;
+  noticeKey: string;
+  step: string;
+  objectId: string;
+  reasonCode: string;
+  summary: string;
+  externalSideEffect: string;
+  allowedActions: readonly string[];
+  nextStep: string | null;
+  membershipRevision: number | null;
 }
 
 /** C1 Task 9：durable 恢复等待项的收件箱投影（服务端 C1WaitingItem 的
@@ -643,6 +669,73 @@ export function c1WaitingItem(
       possibleSideEffect: item.possible_side_effect ?? null,
       actions: item.actions,
       nextPhase: item.next_phase ?? null,
+    },
+  };
+}
+
+/** C4 Task 9 步骤名的固定中文文案（与服务端 as_str 一一对应）。 */
+const LC_BOOTSTRAP_STEP_LABELS: Record<string, string> = {
+  identity: "身份",
+  manifest_checkout: "清单/检出",
+  rules_policy: "规则/政策",
+  member_index: "成员索引",
+  aggregate_index_active: "聚合索引激活",
+};
+
+/** C4 Task 9 步骤失败/等待原因的固定标题（未知 reason 回落到通用文案）。 */
+const LC_BOOTSTRAP_REASON_TITLES: Record<string, string> = {
+  identity_migration_failed: "逻辑代码库身份迁移失败，等待人工修复",
+  aggregate_initialization_failed: "成员索引构建失败，等待显式重试",
+  aggregate_index_failed: "聚合索引首建失败，等待显式重试",
+  bootstrap_waiting_for_human: "逻辑代码库冷启动等待人工动作",
+  member_rules_missing: "成员规则材料缺失，provider 保持零启动",
+};
+
+/** C4 Task 9：durable bootstrap notice → 只读收件箱条目（不进错误计数；
+ * id 以稳定 notice key 派生，同 key 只保留一条，重放不重复计数）。 */
+export function logicalCodebaseBootstrapItem(
+  notice: LogicalCodebaseBootstrapNoticeDto,
+  projection: Pick<
+    LogicalCodebaseBootstrapProjection,
+    "project_id" | "logical_codebase_id" | "membership_revision"
+  >,
+): CockpitInboxItem {
+  const stepLabel = LC_BOOTSTRAP_STEP_LABELS[notice.step] ?? notice.step;
+  const summaryParts = [
+    notice.summary,
+    `步骤：${stepLabel} · 对象 ${notice.object_id}`,
+    notice.external_side_effect && notice.external_side_effect !== "none"
+      ? `可能外部副作用：${notice.external_side_effect}`
+      : null,
+    notice.next_step
+      ? `下一步：${LC_BOOTSTRAP_STEP_LABELS[notice.next_step] ?? notice.next_step}`
+      : null,
+  ].filter((part): part is string => Boolean(part));
+  return {
+    id: `lc-bootstrap:${projection.project_id}:${projection.logical_codebase_id}:${notice.key}`,
+    kind: "lc_bootstrap",
+    severity: 2,
+    title: LC_BOOTSTRAP_REASON_TITLES[notice.reason_code]
+      ?? `逻辑代码库冷启动等待：${notice.reason_code}`,
+    summary: summaryParts.join(" · "),
+    triage: false,
+    source: "logical_codebase_bootstrap",
+    createdAt: notice.created_at || null,
+    gate: null,
+    inlineError: null,
+    choice: null,
+    bootstrapInfo: {
+      projectId: projection.project_id,
+      logicalCodebaseId: projection.logical_codebase_id,
+      noticeKey: notice.key,
+      step: notice.step,
+      objectId: notice.object_id,
+      reasonCode: notice.reason_code,
+      summary: notice.summary,
+      externalSideEffect: notice.external_side_effect,
+      allowedActions: notice.allowed_actions,
+      nextStep: notice.next_step ?? null,
+      membershipRevision: projection.membership_revision ?? null,
     },
   };
 }

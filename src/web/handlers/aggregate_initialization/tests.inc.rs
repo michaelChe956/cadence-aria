@@ -391,6 +391,7 @@
         app: axum::Router,
         lc_id: String,
         root: std::path::PathBuf,
+        events: crate::web::events::EventHub,
     }
 
     fn bootstrap_test_app() -> BootstrapTestApp {
@@ -416,8 +417,10 @@
             .id;
 
         let factory = fake_registry_gateway_factory(ProductAppPaths::new(root_path.join(".aria")));
+        // Task 9：EventHub 由测试持有句柄——订阅/无订阅两种投递形态都可观察。
+        let events = crate::web::events::EventHub::new();
         let state =
-            WebAppState::new(root_path.clone(), WebRuntime::new_fake(root_path.clone()))
+            WebAppState::with_events(root_path.clone(), WebRuntime::new_fake(root_path.clone()), events.clone())
                 .with_aggregate_initialization_dependencies(build_test_dependencies(
                     root_path.clone(),
                     Some(factory),
@@ -427,6 +430,7 @@
             app: build_web_router(state),
             lc_id,
             root: root_path,
+            events,
         }
     }
 
@@ -888,4 +892,155 @@
         assert_eq!(head_before, head_after);
         let dirty = git(&["status", "--porcelain"]);
         assert!(dirty.trim().is_empty(), "member repo must stay clean: {dirty}");
+    }
+
+    /// Task 9 Step 1：把 durable 的 index 首建 Failed generation 放到磁盘。
+    fn create_failed_aggregate_index(paths: &ProductAppPaths, lc_id: &str, index_id: &str) {
+        let mut record =
+            crate::product::logical_codebase::aggregate_index::AggregateIndexRecord::building(
+                index_id.to_string(),
+                "project_0001".to_string(),
+                1,
+                Vec::new(),
+                "2026-09-29T00:00:00Z".to_string(),
+            );
+        record.status = crate::product::logical_codebase::aggregate_index::AggregateIndexStatus::Failed;
+        record.warning = Some("first build failed: coverage assertion rejected".to_string());
+        record.command_id = Some(format!("cmd-index-{index_id}"));
+        crate::product::logical_codebase::aggregate_index::AggregateIndexStore::for_lc(
+            paths.clone(),
+            lc_id,
+        )
+        .create("project_0001", record)
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn durable_bootstrap_failure_is_readable_when_event_delivery_fails() {
+        let fixture = bootstrap_test_app();
+        let paths = ProductAppPaths::new(fixture.root.join(".aria"));
+        let index_id = "aggregate_index_delivery_failure_0001".to_string();
+        create_failed_aggregate_index(&paths, &fixture.lc_id, &index_id);
+
+        // EventHub 无订阅者：broadcast 投递失败。显式 Retry 动作仍必须完成
+        // durable 语义（同 command replay），事实不被投递失败回滚。
+        let action_uri = format!(
+            "/api/projects/project_0001/logical-codebases/{}/bootstrap/actions",
+            fixture.lc_id
+        );
+        let action = serde_json::json!({
+            "command_id": format!("cmd-index-{index_id}"),
+            "step": "aggregate_index_active",
+            "action": "retry",
+            "expected_object_id": index_id,
+        });
+        let (status, body) =
+            response_json(post_json(&fixture.app, &action_uri, action).await).await;
+        assert_eq!(status, StatusCode::OK, "delivery failure must not roll back: {body}");
+        let posted_notices = body["projection"]["notices"].clone();
+        assert!(
+            posted_notices.as_array().is_some_and(|notices| !notices.is_empty()),
+            "failed index must project a durable notice: {posted_notices}"
+        );
+
+        // GET 补读：与 POST 响应携带同一 notice key/reason/object/allowed
+        // actions；重复 GET 结果一致（同 durable 事实，无重执行）。
+        let bootstrap_uri = format!(
+            "/api/projects/project_0001/logical-codebases/{}/bootstrap",
+            fixture.lc_id
+        );
+        let before = aria_inventory(&fixture.root);
+        let (first_status, first_body) = get_json(&fixture.app, &bootstrap_uri).await;
+        assert_eq!(first_status, StatusCode::OK);
+        assert_eq!(first_body["notices"], posted_notices);
+        let (second_status, second_body) = get_json(&fixture.app, &bootstrap_uri).await;
+        assert_eq!(second_status, StatusCode::OK);
+        assert_eq!(second_body["notices"], first_body["notices"]);
+        assert_eq!(second_body["planning_ready"], false);
+        let after = aria_inventory(&fixture.root);
+        assert_eq!(before, after, "GET re-reads must not re-execute any step");
+
+        // durable generation 保持 Failed（通知投递失败≠可重试成功）。
+        let record = crate::product::logical_codebase::aggregate_index::AggregateIndexStore::for_lc(
+            paths,
+            &fixture.lc_id,
+        )
+        .get("project_0001", &index_id)
+        .unwrap()
+        .expect("failed generation persisted");
+        assert_eq!(
+            record.status,
+            crate::product::logical_codebase::aggregate_index::AggregateIndexStatus::Failed
+        );
+    }
+
+    #[tokio::test]
+    async fn event_is_published_after_durable_failure_and_contains_action_context() {
+        let fixture = bootstrap_test_app();
+        let paths = ProductAppPaths::new(fixture.root.join(".aria"));
+        let index_id = "aggregate_index_publish_context_0001".to_string();
+        create_failed_aggregate_index(&paths, &fixture.lc_id, &index_id);
+
+        // 先订阅，再触发失败步骤上的显式动作。
+        let mut receiver = fixture.events.subscribe();
+        let action_uri = format!(
+            "/api/projects/project_0001/logical-codebases/{}/bootstrap/actions",
+            fixture.lc_id
+        );
+        let (status, body) = response_json(
+            post_json(
+                &fixture.app,
+                &action_uri,
+                serde_json::json!({
+                    "command_id": format!("cmd-index-{index_id}"),
+                    "step": "aggregate_index_active",
+                    "action": "retry",
+                    "expected_object_id": index_id,
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        // 顺序契约：durable failure 先可读，通知后到。
+        let record = crate::product::logical_codebase::aggregate_index::AggregateIndexStore::for_lc(
+            paths.clone(),
+            &fixture.lc_id,
+        )
+        .get("project_0001", &index_id)
+        .unwrap()
+        .expect("failed generation persisted before event");
+        assert_eq!(
+            record.status,
+            crate::product::logical_codebase::aggregate_index::AggregateIndexStatus::Failed
+        );
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), receiver.recv())
+            .await
+            .expect("event must be published")
+            .expect("subscription alive");
+        assert_eq!(
+            event.event_type,
+            crate::web::events::WebEventType::ProjectionUpdated.as_str()
+        );
+        let payload = event.payload;
+        assert_eq!(payload["scope"], "logical_codebase_bootstrap");
+        assert_eq!(payload["logical_codebase_id"], fixture.lc_id);
+        assert_eq!(payload["outcome"], body["outcome"]);
+        assert_eq!(payload["planning_ready"], false);
+        let notice = &payload["notice"];
+        assert_eq!(notice["step"], "aggregate_index_active");
+        assert_eq!(notice["object_id"], index_id);
+        assert_eq!(notice["reason_code"], "aggregate_index_failed");
+        assert_eq!(
+            notice["allowed_actions"],
+            serde_json::json!(["retry"]),
+            "notice must carry the durable allowed actions"
+        );
+        // aggregate_index_active 是最后一步：没有 next_step 可宣称。
+        assert!(notice["next_step"].is_null());
+        // 通知不携带任何未持久化的成功宣称（durable 记录仍 Failed）。
+        assert_ne!(payload["outcome"], "completed");
+        assert_eq!(body["projection"]["notices"][0]["reason_code"], "aggregate_index_failed");
     }

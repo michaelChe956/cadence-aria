@@ -46,6 +46,7 @@ function actions(): CockpitActionFacade {
     retryInitialization: vi.fn(async () => undefined),
     confirmTakeover: vi.fn(async () => undefined),
     rebind: vi.fn(),
+    sendBootstrapAction: vi.fn(),
   };
 }
 

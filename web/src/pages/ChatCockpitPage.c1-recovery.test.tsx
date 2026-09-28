@@ -69,7 +69,7 @@ const BINDING = {
   reviewer_provider: "fake",
 };
 
-const TARGET = { kind: "single_repository", repository_id: "repo_physical_c1" };
+const TARGET = { kind: "single_repository", repository_id: "repo_physical_c1" } as const;
 
 const retryWaiting: C1WaitingItem = {
   id: "c1:advance_retry_failed:advance_0001",
@@ -418,9 +418,9 @@ async function waitForCalls(count: number) {
     for (let i = 0; i < 50 && c1Requests().length < count; i += 1) {
 
       // eslint-disable-next-line no-await-in-loop
-      const { promise, resolve } = Promise.withResolvers<void>();
-      setTimeout(resolve, 10);
-      await promise;
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 10);
+      });
     }
   });
 }

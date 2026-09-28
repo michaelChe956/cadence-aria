@@ -3,6 +3,8 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { CockpitActionFacade } from "../../../state/cockpit-action-routing";
 import type { CockpitInboxItem } from "../../../state/workspace-cockpit-projection";
+import { logicalCodebaseBootstrapItem } from "../../../state/workspace-cockpit-projection";
+import type { LogicalCodebaseBootstrapNoticeDto } from "../../../api/types";
 import { CockpitInbox } from "./CockpitInbox";
 
 const actions = mockActions();
@@ -288,6 +290,7 @@ function mockActions(): CockpitActionFacade {
     retryInitialization: vi.fn(async () => undefined),
     confirmTakeover: vi.fn(async () => undefined),
     rebind: vi.fn(),
+    sendBootstrapAction: vi.fn(async () => undefined),
   };
 }
 
@@ -1090,5 +1093,57 @@ describe("CockpitInbox choice card (P0 1.3)", () => {
 
     expect(screen.getByText("已失效")).toBeVisible();
     expect(screen.queryByRole("button", { name: "提交选择" })).toBeNull();
+  });
+});
+
+describe("C4 logical codebase bootstrap cards", () => {
+  it("renders waiting reason/side effect/next step and replays the same stable command without duplicating notices", async () => {
+    const facade = mockActions();
+    // 同一 notice key 两次到达（轮询重放）：投影层按稳定 key 去重为一条。
+    const notice: LogicalCodebaseBootstrapNoticeDto = {
+      key: "bootstrap:member_index:op_0001:aggregate_initialization_failed",
+      step: "member_index",
+      object_id: "op_0001",
+      reason_code: "aggregate_initialization_failed",
+      summary: "stage provider_turn: exit 1",
+      external_side_effect: "aggregate_initialization_provider_turn",
+      allowed_actions: ["retry"],
+      next_step: "aggregate_index_active",
+      created_at: "",
+    };
+    const projection = {
+      project_id: "project_0001",
+      logical_codebase_id: "lc_0001",
+      membership_revision: 3,
+    };
+    const first = logicalCodebaseBootstrapItem(notice, projection);
+    const duplicate = logicalCodebaseBootstrapItem(notice, projection);
+    expect(duplicate.id).toBe(first.id);
+    const deduped = new Map([[first.id, first]]);
+    expect(deduped.size).toBe(1);
+
+    render(<CockpitInbox items={[...deduped.values()]} actions={facade} />);
+    const card = screen.getByTestId("lc-bootstrap-member_index");
+    expect(within(card).getByText(/aggregate_initialization_failed/)).toBeVisible();
+    expect(
+      within(card).getByText(/可能外部副作用：aggregate_initialization_provider_turn/),
+    ).toBeVisible();
+    expect(within(card).getByText(/下一步：aggregate_index_active/)).toBeVisible();
+
+    const button = within(card).getByTestId("lc-bootstrap-action-retry");
+    await userEvent.click(button);
+    // 一次点击派发一个稳定 command id；提交后按钮禁用，重复点击零出站
+    //（服务端再按同 command 幂等重放，provider/action 计数不增）。
+    expect(facade.sendBootstrapAction).toHaveBeenCalledTimes(1);
+    const call = facade.sendBootstrapAction.mock.calls[0][0];
+    expect(call.commandId).toContain("bootstrap_member_index_op_0001");
+    expect(call.step).toBe("member_index");
+    expect(call.action).toBe("retry");
+    expect(call.expectedRevision).toBe(3);
+    expect(call.expectedObjectId).toBe("op_0001");
+    expect(button).toBeDisabled();
+    await userEvent.click(button);
+    expect(facade.sendBootstrapAction).toHaveBeenCalledTimes(1);
+    expect(screen.queryAllByTestId("lc-bootstrap-member_index")).toHaveLength(1);
   });
 });
