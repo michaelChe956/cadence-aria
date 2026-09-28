@@ -24,7 +24,10 @@ const INVALID_EARS_CODE: &str = grammar::DIAGNOSTIC_CODES[3];
 ///
 /// `Blockers` 存在字段时仍要求其完整的 blocker rule 字段；但它作为唯一例外允许零字段，
 /// 由 `validate_required_parts` 将空 section 解释为“无 blocker”。
-pub(super) const REQUIRED_FIELDS: [(&str, &[&str]); 13] = [
+/// C1 Task 5：`Plan Intent` 是可选 section（缺席合法——未声明意图由
+/// validator 以 `intent_undeclared` 停等修订）；在场时其字段完整性由
+/// lowering 的 fail-closed 诊断承担，不在此处声明必填字段。
+pub(super) const REQUIRED_FIELDS: [(&str, &[&str]); 14] = [
     (
         "Identity",
         &["schema_version", "logical_work_item_id", "title", "kind"],
@@ -32,6 +35,9 @@ pub(super) const REQUIRED_FIELDS: [(&str, &[&str]); 13] = [
     ("Goal", &["summary"]),
     ("Non Goals", &["non_goals"]),
     ("Dependencies", &["depends_on"]),
+    // C1 Task 5：Plan Intent 可选 section 的空必填定义（缺席由
+    // validate_required_parts 跳过，见下）。
+    ("Plan Intent", &[]),
     ("Inputs", &[]),
     ("Outputs", &["contract_id", "capabilities"]),
     (
@@ -350,6 +356,11 @@ fn parse_work_item_heading(heading: &str) -> Option<(String, String)> {
 fn validate_required_parts(items: &[ParsedItem], diagnostics: &mut Vec<CompilerDiagnostic>) {
     for item in items {
         for (section_index, section) in grammar::STRUCTURED_SECTIONS.iter().enumerate() {
+            // C1 Task 5：`Plan Intent` 缺席＝未声明意图（合法 parse）；是否
+            // 停等由 validator 按“基线外新建写面”判定（intent_undeclared）。
+            if *section == "Plan Intent" && !item.section_lines.contains_key(*section) {
+                continue;
+            }
             if !item.section_lines.contains_key(*section) {
                 let line = grammar::STRUCTURED_SECTIONS[section_index + 1..]
                     .iter()

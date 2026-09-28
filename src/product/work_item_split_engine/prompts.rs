@@ -113,7 +113,12 @@ pub(crate) const WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES: usize = 15_600;
 // 镜像行 717B 为条件渲染（outline split_option_semantics 先例，仅启用时出现），
 // 全 true fixture 实测 22,607（未纳入红线口径，硬兜底 65,536 远未触及）。红线
 // 保持 22,000 不变。
-pub(crate) const WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES: usize = 22_000;
+// 第 15 次评估（2026-09-28，C1-T5 existing/create 意图合同，REQ-C1-PLAN-01）：
+// STRUCTURED_SECTIONS 增可选 `Plan Intent`、STRUCTURED_KEYS 增 6 个 intent*
+// key、DIAGNOSTIC_CODES 增 intent_undeclared/intent_unexecutable、最小合法源
+// 增 Plan Intent 语法形状示例（grammar 注入锚点自动展开），全 false fixture
+// 实测 22,162；第 12 次提额至整百级 22,200（余 38B）。
+pub(crate) const WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES: usize = 22_200;
 
 /// SC markdown author prompt 的尾部输出指令。首轮与修订轮共享同一段字节；
 /// 修订轮（F5-A findings 回灌）仅在其之前插入 [review_revision] 返修段，

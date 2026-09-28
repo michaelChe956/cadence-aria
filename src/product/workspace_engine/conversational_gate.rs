@@ -493,6 +493,13 @@ impl super::WorkspaceEngine {
             &self.session.project_id,
             &self.session.issue_id,
         )?;
+        // C1 Task 5（REQ-C1-PLAN-01）：existing 意图的授权解析面。
+        let existing_work_item_ids = lifecycle
+            .list_work_items(&self.session.project_id, &self.session.issue_id)
+            .map_err(|error| format!("list existing work items failed: {error}"))?
+            .into_iter()
+            .map(|record| record.id)
+            .collect::<Vec<_>>();
         let validation_now = chrono::Utc::now().to_rfc3339();
         let report = match validate_plan_candidate_ir(
             &ir,
@@ -506,7 +513,9 @@ impl super::WorkspaceEngine {
                 // F-51：三生产路径之二（门内人工修订）——存储 options 显式提供。
                 plan_options: &plan.options,
                 baseline_tree: baseline_tree.as_ref(),
-                now: &validation_now,
+                existing_work_item_ids: &existing_work_item_ids,
+            enrollment_target: None,
+            now: &validation_now,
             },
         ) {
             Ok(report) => report,

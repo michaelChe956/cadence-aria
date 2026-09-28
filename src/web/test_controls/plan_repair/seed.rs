@@ -723,6 +723,7 @@ fn contract(
     blocker_rules: Vec<BlockerRule>,
 ) -> CanonicalWorkItemContract {
     CanonicalWorkItemContract {
+        intent_contract: None,
         schema_version: 1,
         identity: WorkItemContractIdentity {
             logical_work_item_id: logical_id.to_string(),

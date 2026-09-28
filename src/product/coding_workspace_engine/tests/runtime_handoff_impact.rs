@@ -457,6 +457,7 @@ fn runtime_contract(
     capabilities: Vec<&str>,
 ) -> CanonicalWorkItemContract {
     CanonicalWorkItemContract {
+        intent_contract: None,
         schema_version: 1,
         identity: WorkItemContractIdentity {
             logical_work_item_id: logical_id.to_string(),

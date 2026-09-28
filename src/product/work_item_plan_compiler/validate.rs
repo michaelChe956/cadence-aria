@@ -88,6 +88,22 @@ pub fn validate_plan_candidate_ir(
             }
         }
     }
+
+    // C1 Task 5（REQ-C1-PLAN-01）：existing/create 意图合同校验——未声明
+    //（intent_undeclared）与不能执行（intent_unexecutable）分开停等修订，
+    // 作为 preflight 族 Error 保留在报告里（不清既有 finding、不硬失败）。
+    if let Err(intent_diagnostics) =
+        validate_work_item_intent_contract(ir, context)
+    {
+        for diagnostic in intent_diagnostics {
+            findings.push(WorkItemSplitFinding {
+                severity: WorkItemSplitFindingSeverity::Error,
+                code: diagnostic.code.clone(),
+                message: diagnostic.message.clone(),
+                work_item_ids: vec![diagnostic.field.clone()],
+            });
+        }
+    }
     findings.sort_by(|left, right| {
         left.severity
             .as_str()
@@ -121,6 +137,188 @@ pub fn validate_plan_candidate_ir(
             .collect());
     }
     Ok(report)
+}
+
+/// C1 Task 5（REQ-C1-PLAN-01）：existing/create 意图合同校验。
+///
+/// - 未声明（`intent_undeclared`）：enrolled 会话（enrollment target 在场）
+///   中 item 的 exclusive 写面涉及基线外新建路径但未声明 `create` 意图——
+///   停等修订，不得自动补声明或扩大写范围；基线不可用（None）或非
+///   enrolled（enrollment target 缺席）不触发——Manual/旧路径零回归。
+/// - 不能执行（`intent_unexecutable`）：声明在场但 provider Work Item 不可
+///   解析（create→本 plan items；existing→durable 既有集）、depends_on 悬空、
+///   exclusive/forbidden scope 冲突、或 target 与 compile 上下文不符——
+///   拒绝 compile，既有 finding 不清空。
+pub fn validate_work_item_intent_contract(
+    ir: &PlanCandidateIr,
+    context: &PlanCandidateValidationContext<'_>,
+) -> Result<(), Vec<CompilerDiagnostic>> {
+    use crate::product::logical_codebase::EnrollmentTarget;
+    use crate::product::work_item_contract::{WorkItemIntent, WorkItemIntentContract};
+
+    let plan_item_ids: Vec<&str> = ir
+        .items
+        .iter()
+        .map(|item| item.contract.identity.logical_work_item_id.as_str())
+        .collect();
+    let mut diagnostics = Vec::new();
+
+    for item in &ir.items {
+        let work_item_id = item.contract.identity.logical_work_item_id.clone();
+        let intent: Option<&WorkItemIntentContract> = item.contract.intent_contract.as_ref();
+        match intent {
+            None => {
+                // C1（REQ-C1-PLAN-01）：未声明判定只对 enrolled 会话生效
+                //（enrollment target 在场）；基线不可用同样不触发。
+                if context.enrollment_target.is_none() {
+                    continue;
+                }
+                let Some(baseline_tree) = context.baseline_tree else {
+                    continue;
+                };
+                let undeclared: Vec<&str> = item
+                    .contract
+                    .write_policy
+                    .exclusive_scopes
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|scope| scope_absent_from_baseline(scope, baseline_tree))
+                    .collect();
+                if !undeclared.is_empty() {
+                    diagnostics.push(CompilerDiagnostic {
+                        code: "intent_undeclared".to_string(),
+                        line: 0,
+                        field: work_item_id.clone(),
+                        message: format!(
+                            "work item {work_item_id} 的写入面 [{}] 完全不在 plan 基线树（新建写面）但未声明 create 意图；修复动作：显式声明 Plan Intent（intent: create）或改用基线内路径，不得由系统自动补声明",
+                            undeclared.join("、")
+                        ),
+                        repair_example: format!(
+                            "### Plan Intent\n- intent: create\n- provider_work_item_id: {}\n- intent_target_kind: single_repository\n- intent_target_repo: <repo>",
+                            plan_item_ids.first().copied().unwrap_or("WI-001"),
+                        ),
+                    });
+                }
+            }
+            Some(intent) => {
+                let provider_resolves = match intent.intent {
+                    WorkItemIntent::Create => {
+                        plan_item_ids.contains(&intent.provider_work_item_id.as_str())
+                    }
+                    WorkItemIntent::Existing => context
+                        .existing_work_item_ids
+                        .iter().any(|id| *id == intent.provider_work_item_id),
+                };
+                if !provider_resolves {
+                    diagnostics.push(unexecutable(
+                        &work_item_id,
+                        format!(
+                            "provider Work Item {} 不能解析：create 必须指向本 plan 的 work item，existing 必须指向 durable 既有 work item",
+                            intent.provider_work_item_id
+                        ),
+                    ));
+                }
+                let dangling: Vec<&str> = intent
+                    .depends_on
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|dep| {
+                        !plan_item_ids.contains(dep)
+                            && !context.existing_work_item_ids.iter().any(|id| id == dep)
+                    })
+                    .collect();
+                if !dangling.is_empty() {
+                    diagnostics.push(unexecutable(
+                        &work_item_id,
+                        format!("依赖闭包悬空：[{}] 不在本 plan 也不在既有 work item 集", dangling.join("、")),
+                    ));
+                }
+                let conflict: Vec<&str> = intent
+                    .exclusive_scopes
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|scope| intent.forbidden_scopes.iter().any(|f| f == scope))
+                    .collect();
+                if !conflict.is_empty() {
+                    diagnostics.push(unexecutable(
+                        &work_item_id,
+                        format!(
+                            "exclusive/forbidden scope 冲突：[{}] 同时出现在两表",
+                            conflict.join("、")
+                        ),
+                    ));
+                }
+                // target 等值核对只在 enrollment 绑定 target 在场时执行
+                //（REQ-C1-PLAN-01 的“target 不符”属绑定层事实；非 enrolled/
+                // Manual 会话零回归）。logical target 的两级存在性由 lowering
+                // fail-closed 保证。
+                if let Some(bound) = context.enrollment_target {
+                    let target_matches = match (&intent.target, bound) {
+                        (EnrollmentTarget::SingleRepository { repository_id }, _) => {
+                            repository_id == &item.target_repository_id
+                        }
+                        (EnrollmentTarget::LogicalCodebase { logical_repository_id, .. }, _) => {
+                            logical_repository_id.0.to_string() == item.target_repository_id
+                        }
+                    };
+                    if !target_matches {
+                        diagnostics.push(unexecutable(
+                            &work_item_id,
+                            format!(
+                                "intent target 与 enrollment 绑定目标不符：期望 repository {}，实际 {}",
+                                intent_target_repository(&intent.target),
+                                item.target_repository_id
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    if diagnostics.is_empty() {
+        Ok(())
+    } else {
+        diagnostics.sort_by(|left, right| {
+            left.code.cmp(&right.code)
+                .then(left.field.cmp(&right.field))
+                .then(left.message.cmp(&right.message))
+        });
+        Err(diagnostics)
+    }
+}
+
+fn unexecutable(work_item_id: &str, message: String) -> CompilerDiagnostic {
+    CompilerDiagnostic {
+        code: "intent_unexecutable".to_string(),
+        line: 0,
+        field: work_item_id.to_string(),
+        message,
+        repair_example: "修正 Plan Intent 的 provider/依赖/scope/target 声明后重新提交".to_string(),
+    }
+}
+
+fn intent_target_repository(target: &crate::product::logical_codebase::EnrollmentTarget) -> String {
+    use crate::product::logical_codebase::EnrollmentTarget;
+    match target {
+        EnrollmentTarget::SingleRepository { repository_id } => repository_id.clone(),
+        EnrollmentTarget::LogicalCodebase {
+            logical_repository_id,
+            ..
+        } => logical_repository_id.0.to_string(),
+    }
+}
+
+/// scope（glob 如 `src/x/**`）与基线树无任何交集＝纯新建写面。
+fn scope_absent_from_baseline(scope: &str, baseline_tree: &std::collections::BTreeSet<String>) -> bool {
+    let prefix = scope.strip_suffix("/**").unwrap_or(scope);
+    if prefix.is_empty() {
+        return false;
+    }
+    !baseline_tree
+        .range(prefix.to_string()..)
+        .take_while(|path| path.starts_with(prefix))
+        .any(|path| path == scope || path.starts_with(&format!("{prefix}/")))
 }
 
 fn validator_diagnostic(finding: &WorkItemSplitFinding) -> CompilerDiagnostic {

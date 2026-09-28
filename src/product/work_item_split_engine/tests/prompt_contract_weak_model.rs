@@ -71,7 +71,7 @@ fn work_item_plan_markdown_prompt_teaches_weak_model_precision_discipline() {
     assert!(
         prompt.len()
             < crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES,
-        "增补教学后仍必须低于质量预算红线（第 11 次提额后 22,000），实测 {} bytes",
+        "增补教学后仍必须低于质量预算红线（第 12 次提额后 22,200），实测 {} bytes",
         prompt.len()
     );
 }
@@ -197,6 +197,9 @@ fn weak_model_precision_teaching_matches_contract_validator_judgement() {
                 repository_profile: None,
                 plan_options: &plan_options,
                 baseline_tree: None,
+                existing_work_item_ids: &[],
+            enrollment_target: None,
+
                 now: &now,
             },
         )
@@ -355,7 +358,7 @@ fn work_item_plan_markdown_prompt_teaches_cross_wi_paired_writing() {
     assert!(
         prompt.len()
             < crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES,
-        "成对书写教学追加后仍必须低于质量预算红线（第 11 次提额后 22,000），实测 {} bytes",
+        "成对书写教学追加后仍必须低于质量预算红线（第 12 次提额后 22,200），实测 {} bytes",
         prompt.len()
     );
     eprintln!(

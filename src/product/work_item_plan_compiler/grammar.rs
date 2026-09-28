@@ -24,11 +24,15 @@ pub const EARS_WHEN_PREFIX: &str = "WHEN ";
 pub const EARS_SHALL_PREFIX: &str = " THE SYSTEM SHALL ";
 
 /// 固定的结构化 section，顺序也是文档规范中的 canonical 顺序。
-pub const STRUCTURED_SECTIONS: [&str; 13] = [
+pub const STRUCTURED_SECTIONS: [&str; 14] = [
     "Identity",
     "Goal",
     "Non Goals",
     "Dependencies",
+    // C1 Task 5（REQ-C1-PLAN-01）：existing/create 意图声明（可选 section——
+    // 旧 plan 缺席合法，涉及基线外新建写面时由 validator 以
+    // intent_undeclared 停等修订，不在 parse 期硬失败）。
+    "Plan Intent",
     "Inputs",
     "Outputs",
     "Tasks",
@@ -49,8 +53,10 @@ pub const DEPENDENCIES_KEY: &str = "depends_on";
 /// 结构化区域允许的 key 白名单。
 ///
 /// 这些 key 与 `field-source-matrix.md` 中由 markdown 提供的字段一一对应；
-/// `target_repository_id`、trusted command 字段及编译期/runtime 字段刻意不在此列。
-pub const STRUCTURED_KEYS: [&str; 34] = [
+/// IR 级 `target_repository_id`、trusted command 字段及编译期/runtime 字段
+/// 刻意不在此列（C1 Task 5 的 intent target key 用 `intent_target_*` 前缀，
+/// 不携带 `target_repository_id` 子串）。
+pub const STRUCTURED_KEYS: [&str; 40] = [
     "schema_version",
     "logical_work_item_id",
     "title",
@@ -58,6 +64,13 @@ pub const STRUCTURED_KEYS: [&str; 34] = [
     "summary",
     "non_goals",
     DEPENDENCIES_KEY,
+    // C1 Task 5（REQ-C1-PLAN-01）：Plan Intent 的结构化 key。
+    "intent",
+    "provider_work_item_id",
+    "intent_target_kind",
+    "intent_target_repo",
+    "intent_target_codebase",
+    "intent_target_logical_repo",
     "contract_id",
     "provider_logical_work_item_id",
     "required_capabilities",

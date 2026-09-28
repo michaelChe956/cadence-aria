@@ -14,7 +14,7 @@ pub(crate) fn work_item_plan_markdown_grammar() -> String {
     format!(
         "[markdown_grammar]\n\
          输出的第一行必须精确为 `{document_heading}`；之前不得有任何前言、解释、宣布、空白行或代码围栏（```）。\n\
-         所有标题必须逐字使用上列英文名（一级 `# Work Item Plan`、二级 `## Work Item WI-<三位数字>: <title>`、三级 section 名恰为上列 13 个英文名之一）；禁止翻译标题、禁止附加中文注或括号。\n\
+         所有标题必须逐字使用上列英文名（一级 `# Work Item Plan`、二级 `## Work Item WI-<三位数字>: <title>`、三级 section 名恰为上列 14 个英文名之一）；禁止翻译标题、禁止附加中文注或括号。\n\
          输出保持精炼：每个 statement 恰好一句话；同一信息不得在多个 section 重复；不写解释性散文或总结段——机械校验只消费结构化字段。\n\
          section 按序各一次：{structured_sections}；自由文本仅 `{free_text_sections}`（`{free_text_policy}`）。\n\
          Blockers 为空时保留空 section（### Blockers 后直接下一 section）；存在 blocker 字段时须完整填写 reason_code、route、target_contract_refs。\n\
@@ -122,6 +122,11 @@ pub(crate) fn work_item_plan_minimum_legal_source() -> &'static str {
      - non_goals: x\n\
      ### Dependencies\n\
      - depends_on: []\n\
+     ### Plan Intent\n\
+     - intent: create\n\
+     - provider_work_item_id: WI-001\n\
+     - intent_target_kind: single_repository\n\
+     - intent_target_repo: x\n\
      ### Inputs\n\
      ### Outputs\n\
      - contract_id: c\n\

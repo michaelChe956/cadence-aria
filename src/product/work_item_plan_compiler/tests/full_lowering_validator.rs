@@ -51,6 +51,9 @@ fn rep4_validation_context<'a>(
         repository_profile: profile,
         plan_options: &REP4_OPTIONS,
         baseline_tree: None,
+                existing_work_item_ids: &[],
+            enrollment_target: None,
+
         now: "2026-08-27T00:00:00Z",
     }
 }

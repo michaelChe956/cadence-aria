@@ -16,6 +16,7 @@ use super::{
 
 pub(crate) fn canonical_contract_fixture(logical_work_item_id: &str) -> CanonicalWorkItemContract {
     CanonicalWorkItemContract {
+        intent_contract: None,
         schema_version: 1,
         identity: WorkItemContractIdentity {
             logical_work_item_id: logical_work_item_id.to_string(),

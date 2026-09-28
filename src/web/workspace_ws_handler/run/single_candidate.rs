@@ -232,6 +232,15 @@ fn prevalidate_plan_candidate_ir(
         Ok(baseline_tree) => baseline_tree,
         Err(message) => return Some(vec![message]),
     };
+    // C1 Task 5（REQ-C1-PLAN-01）：existing 意图的授权解析面（读失败转预检
+    // 诊断，权威路径仍 fail-closed）。
+    let existing_work_item_ids = match lifecycle.list_work_items(
+        &session.project_id,
+        &session.issue_id,
+    ) {
+        Ok(records) => records.into_iter().map(|record| record.id).collect::<Vec<_>>(),
+        Err(error) => return Some(vec![format!("list existing work items failed: {error}")]),
+    };
     let validation_now = chrono::Utc::now().to_rfc3339();
     let validation = crate::product::work_item_plan_compiler::validate_plan_candidate_ir(
         ir,
@@ -245,6 +254,8 @@ fn prevalidate_plan_candidate_ir(
             // F-51：三生产路径之三（运行期预校验）——同一 plan record options。
             plan_options: &plan.options,
             baseline_tree: baseline_tree.as_ref(),
+            existing_work_item_ids: &existing_work_item_ids,
+            enrollment_target: None,
             now: &validation_now,
         },
     );

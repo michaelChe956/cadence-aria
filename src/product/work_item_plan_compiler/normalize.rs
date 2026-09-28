@@ -35,7 +35,7 @@ const ITEM_HEADING_PREFIX_TRANSLATION: &str = "工作项 WI-";
 /// 每个规范 section 至少收录一个现场裸中文变体;同词的「裸中文」与
 /// 「中文 (English)」两种抖动形态成对收录。顺序与
 /// [`grammar::STRUCTURED_SECTIONS`] 的 canonical 顺序一致。
-const SECTION_HEADING_TRANSLATIONS: [(&str, &str); 32] = [
+const SECTION_HEADING_TRANSLATIONS: [(&str, &str); 34] = [
     // Identity
     ("身份", "Identity"),
     ("身份信息", "Identity"),
@@ -52,6 +52,9 @@ const SECTION_HEADING_TRANSLATIONS: [(&str, &str); 32] = [
     ("依赖关系", "Dependencies"),
     ("依赖 (Dependencies)", "Dependencies"),
     ("依赖关系 (Dependencies)", "Dependencies"),
+    // Plan Intent（C1 Task 5）
+    ("计划意图", "Plan Intent"),
+    ("计划意图 (Plan Intent)", "Plan Intent"),
     // Inputs
     ("输入", "Inputs"),
     ("输入 (Inputs)", "Inputs"),

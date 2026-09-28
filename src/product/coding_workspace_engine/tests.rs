@@ -179,6 +179,7 @@ fn seed_group_attempt_fixture_with_legacy_work_items(
             .put_logical_work_item(&lineage, &logical)
             .expect("logical work item");
         let contract = CanonicalWorkItemContract {
+            intent_contract: None,
             schema_version: 1,
             identity: WorkItemContractIdentity {
                 logical_work_item_id: logical.id.clone(),

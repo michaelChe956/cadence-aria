@@ -77,6 +77,7 @@ pub(super) fn plan_repair_fixture_with_dependency(with_dependency: bool) -> Plan
         &upstream,
         "work_item_revision_upstream",
         CanonicalWorkItemContract {
+            intent_contract: None,
             output_contracts: vec![PromisedOutputContract {
                 contract_id: "contract_upstream".to_string(),
                 capabilities: vec!["capability_existing".to_string()],
@@ -133,6 +134,7 @@ pub(super) fn plan_repair_fixture_with_dependency(with_dependency: bool) -> Plan
         &current,
         "work_item_revision_current",
         CanonicalWorkItemContract {
+            intent_contract: None,
             input_contracts: vec![RequiredInputContract {
                 contract_id: "contract_upstream".to_string(),
                 provider_logical_work_item_id: upstream.id.clone(),
@@ -558,6 +560,7 @@ fn logical_item(id: &str, plan_id: &str) -> LogicalWorkItem {
 
 fn contract(logical_id: &str) -> CanonicalWorkItemContract {
     CanonicalWorkItemContract {
+        intent_contract: None,
         schema_version: 1,
         identity: WorkItemContractIdentity {
             logical_work_item_id: logical_id.to_string(),

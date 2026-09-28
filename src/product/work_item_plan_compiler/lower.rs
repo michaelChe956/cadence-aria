@@ -190,6 +190,19 @@ fn lower_item(
     let input_contracts = lower_inputs(&fields, diagnostics);
     let output_contracts = lower_outputs(&fields, diagnostics);
 
+    // C1 Task 5（REQ-C1-PLAN-01）：意图合同的 scope/依赖快照取自本 item 的
+    // 单一 markdown 来源（Dependencies/Write Policy），不在 Plan Intent 重复。
+    let depends_on_snapshot = split_values(values("Dependencies", "depends_on"));
+    let exclusive_scopes_snapshot = split_values(values("Write Policy", "exclusive_scopes"));
+    let forbidden_scopes_snapshot = split_values(values("Write Policy", "forbidden_scopes"));
+    let intent_contract = lower_plan_intent(
+        &fields,
+        depends_on_snapshot,
+        exclusive_scopes_snapshot,
+        forbidden_scopes_snapshot,
+        diagnostics,
+    );
+
     let contract = match (schema_version, logical_id, title, kind, summary) {
         (Some(schema_version), Some(logical_id), Some(title), Some(kind), Some(summary)) => {
             CanonicalWorkItemContract {
@@ -227,6 +240,7 @@ fn lower_item(
                 },
                 blocker_rules,
                 design_traceability,
+                intent_contract,
             }
         }
         _ => return None,
@@ -241,6 +255,105 @@ fn lower_item(
         },
         contract,
         trusted_commands,
+    })
+}
+
+/// C1 Task 5（REQ-C1-PLAN-01）：`Plan Intent` section → `WorkItemIntentContract`。
+/// section 缺席 → None（未声明意图，校验期按基线外写面判 intent_undeclared）；
+/// 在场但字段不完整/取值非法 → fail-closed lowering 诊断（逻辑 target 缺任
+/// 一级拒绝，不猜默认）。
+fn lower_plan_intent(
+    fields: &[(&str, &WorkItemPlanFieldAst)],
+    depends_on: Vec<String>,
+    exclusive_scopes: Vec<String>,
+    forbidden_scopes: Vec<String>,
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+) -> Option<crate::product::work_item_contract::WorkItemIntentContract> {
+    use crate::product::work_item_contract::{WorkItemIntent, WorkItemIntentContract};
+    use crate::product::logical_codebase::{EnrollmentTarget, LogicalRepositoryId};
+
+    if !fields.iter().any(|(name, _)| *name == "Plan Intent") {
+        return None;
+    }
+    let value = |key: &str| {
+        fields.iter().find_map(|(name, field)| {
+            (*name == "Plan Intent" && field.key.value == key)
+                .then_some(field.value.value.as_str())
+        })
+    };
+    let line = |key: &str| {
+        fields
+            .iter()
+            .find_map(|(name, field)| {
+                (*name == "Plan Intent" && field.key.value == key).then_some(field.value.line)
+            })
+            .unwrap_or_default()
+    };
+    let mut required = |key: &str| -> Option<String> {
+        let result = value(key);
+        if result.is_none_or(str::is_empty) {
+            diagnostics.push(diagnostic(
+                &format!("contract.intent.{key}"),
+                "Plan Intent 声明在场时该字段必填。",
+                line(key),
+                &format!("- {key}: value"),
+            ));
+        }
+        result.map(str::to_string)
+    };
+
+    let intent = match value("intent") {
+        Some("create") => WorkItemIntent::Create,
+        Some("existing") => WorkItemIntent::Existing,
+        _ => {
+            diagnostics.push(diagnostic(
+                "contract.intent",
+                "intent 必须是 create 或 existing。",
+                line("intent"),
+                "- intent: create",
+            ));
+            return None;
+        }
+    };
+    let provider_work_item_id = required("provider_work_item_id")?;
+    let target = match value("intent_target_kind") {
+        Some("single_repository") => EnrollmentTarget::SingleRepository {
+            repository_id: required("intent_target_repo")?,
+        },
+        Some("logical_codebase") => {
+            let logical_codebase_id = required("intent_target_codebase")?;
+            let logical_repository_uuid = required("intent_target_logical_repo")?;
+            let Ok(uuid) = uuid::Uuid::parse_str(&logical_repository_uuid) else {
+                diagnostics.push(diagnostic(
+                    "contract.intent.intent_target_logical_repo",
+                    "逻辑 target 的 logical repository 必须是 UUID。",
+                    line("intent_target_logical_repo"),
+                    "- intent_target_logical_repo: 00000000-0000-0000-0000-000000000000",
+                ));
+                return None;
+            };
+            EnrollmentTarget::LogicalCodebase {
+                logical_codebase_id,
+                logical_repository_id: LogicalRepositoryId(uuid),
+            }
+        }
+        _ => {
+            diagnostics.push(diagnostic(
+                "contract.intent.intent_target_kind",
+                "intent_target_kind 必须是 single_repository 或 logical_codebase。",
+                line("intent_target_kind"),
+                "- intent_target_kind: single_repository",
+            ));
+            return None;
+        }
+    };
+    Some(WorkItemIntentContract {
+        intent,
+        provider_work_item_id,
+        depends_on,
+        exclusive_scopes,
+        forbidden_scopes,
+        target,
     })
 }
 

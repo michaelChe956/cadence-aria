@@ -17,6 +17,12 @@
 ### Dependencies
 - depends_on: []
 
+### Plan Intent
+- intent: create
+- provider_work_item_id: WI-001
+- intent_target_kind: single_repository
+- intent_target_repo: repo-levels
+
 ### Inputs
 
 ### Outputs
@@ -77,6 +83,12 @@
 
 ### Dependencies
 - depends_on: WI-001
+
+### Plan Intent
+- intent: create
+- provider_work_item_id: WI-001
+- intent_target_kind: single_repository
+- intent_target_repo: repo-levels
 
 ### Inputs
 - contract_id: contract.levels-api
@@ -144,6 +156,13 @@
 ### Dependencies
 - depends_on: WI-001
 - depends_on: WI-002
+
+### Plan Intent
+- intent: create
+- provider_work_item_id: WI-001
+- intent_target_kind: logical_codebase
+- intent_target_codebase: lc-levels
+- intent_target_logical_repo: 00000000-0000-4000-8000-000000000003
 
 ### Inputs
 - contract_id: contract.levels-api

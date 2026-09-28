@@ -865,7 +865,7 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
     }
     for required in [
         crate::product::work_item_plan_compiler::grammar::EARS_STATEMENT_TEMPLATE,
-        "所有标题必须逐字使用上列英文名（一级 `# Work Item Plan`、二级 `## Work Item WI-<三位数字>: <title>`、三级 section 名恰为上列 13 个英文名之一）；禁止翻译标题、禁止附加中文注或括号。",
+        "所有标题必须逐字使用上列英文名（一级 `# Work Item Plan`、二级 `## Work Item WI-<三位数字>: <title>`、三级 section 名恰为上列 14 个英文名之一）；禁止翻译标题、禁止附加中文注或括号。",
         "未知结构化 key 必须拒绝（fail_closed）",
         "值域：kind=backend、frontend、integration、e2e、docs、infra、other",
         "[design_requirements] REQ-002、NFR-001",
@@ -1026,7 +1026,7 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
     );
     assert_eq!(
         crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES,
-        22_000
+        22_200
     );
     assert!(
         prompt.len()
@@ -1178,8 +1178,8 @@ fn sc_author_prompt_tail_clamps_heading_language_and_raises_budget() {
 
     assert_eq!(
         crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES,
-        22_000,
-        "第 11 次提额：trusted command 重复拒绝后果+正反例教学后预算上调至整百级 22,000"
+        22_200,
+        "第 12 次提额：C1-T5 intent 合同 grammar 注入后预算上调至整百级 22,200"
     );
     assert!(
         prompt.len()

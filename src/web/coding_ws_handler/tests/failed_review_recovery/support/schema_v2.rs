@@ -32,6 +32,7 @@ pub(super) fn seed_group_plan_facts(store: &CodingAttemptStore, attempt: &Coding
         .put_logical_work_item(&lineage, &logical_work_item)
         .expect("logical work item");
     let contract = CanonicalWorkItemContract {
+        intent_contract: None,
         schema_version: 1,
         identity: WorkItemContractIdentity {
             logical_work_item_id: logical_work_item.id.clone(),

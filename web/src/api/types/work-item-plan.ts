@@ -670,3 +670,24 @@ export type PrepareWorkItemPlanResponse = {
   work_item_plan: IssueWorkItemPlanDetailDto;
   workspace_session: WorkspaceSession;
 };
+
+// C1 Task 5（REQ-C1-PLAN-01）：existing/create 计划意图合同（additive，
+// 旧 plan 响应缺省 undefined——不自动补声明）。
+export type WorkItemIntent = 'existing' | 'create';
+
+export type EnrollmentTargetDto =
+  | { kind: 'single_repository'; repository_id: string }
+  | {
+      kind: 'logical_codebase';
+      logical_codebase_id: string;
+      logical_repository_id: string;
+    };
+
+export type WorkItemIntentContractDto = {
+  intent: WorkItemIntent;
+  provider_work_item_id: string;
+  depends_on: string[];
+  exclusive_scopes: string[];
+  forbidden_scopes: string[];
+  target: EnrollmentTargetDto;
+};

@@ -73,14 +73,19 @@ pub struct CompilerDiagnostic {
     pub repair_example: String,
 }
 
-/// options×items 预检（三族）与 AC 路径×基线树核对的共享修复路径文案。
-/// 与 `work_item_split_validator` 的 finding 消息、`workspace_engine` 的机械
+/// options×items 预检（三族）、AC 路径×基线树核对（F-56）与 C1 Task 5 意图
+/// 合同（未声明/不能执行）的共享修复路径文案口径。与
+/// `work_item_split_validator` 的 finding 消息、`workspace_engine` 的机械
 /// verdict 适配、SC author prompt 教学逐字同源（REQ-WSC-06 口径一致纪律）。
 pub const PREFLIGHT_FINDING_CODES: &[&str] = &[
     "integration_work_item_required",
     "e2e_work_item_required",
     "frontend_backend_split_required",
     "acceptance_path_not_in_baseline",
+    // C1 Task 5（REQ-C1-PLAN-01）：意图合同两类诊断同属 preflight 族——
+    // Error 保留在报告里经既有修订轮回灌，不硬失败、不清既有 finding。
+    "intent_undeclared",
+    "intent_unexecutable",
 ];
 
 /// AC 路径×基线树核对（REQ-WSC-02 场景 13，F-56）的三条修复建议共享文案：
@@ -104,6 +109,13 @@ pub struct PlanCandidateValidationContext<'a> {
     /// plan 基线树（worktree fork base 的仓库相对路径集合，F-56）。None 表示
     /// 基线不可用：AC 路径核对不触发（与现状一致），三族 options 预检不受影响。
     pub baseline_tree: Option<&'a std::collections::BTreeSet<String>>,
+    /// C1 Task 5（REQ-C1-PLAN-01）：issue 下 durable 既有 work item id 集
+    ///（existing 意图的授权解析面；空集＝无可引用的既有目标）。
+    pub existing_work_item_ids: &'a [String],
+    /// C1 Task 5（REQ-C1-PLAN-01）：enrollment 绑定 target（仅 enrolled
+    /// 会话提供；None＝非 enrolled/Manual——intent target 等值核对不触发，
+    /// 既有 fixture/Manual 路径零回归）。
+    pub enrollment_target: Option<&'a crate::product::logical_codebase::EnrollmentTarget>,
     pub now: &'a str,
 }
 

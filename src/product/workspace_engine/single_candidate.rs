@@ -265,6 +265,14 @@ impl WorkspaceEngine {
         // 共享 worktree）；不可解析 → Err 直通 fail-closed（废弃跳过——软限制
         // 残余风险的唯一硬兜底）。
         let baseline_tree = plan_preflight::plan_baseline_tree(&lifecycle, &project_id, &issue_id)?;
+        // C1 Task 5（REQ-C1-PLAN-01）：existing 意图的授权解析面——issue
+        // 下 durable 既有 work item id 集（读失败 fail-closed 不猜）。
+        let existing_work_item_ids = lifecycle
+            .list_work_items(&project_id, &issue_id)
+            .map_err(|error| format!("list existing work items failed: {error}"))?
+            .into_iter()
+            .map(|record| record.id)
+            .collect::<Vec<_>>();
         let validation_now = chrono::Utc::now().to_rfc3339();
         let report = validate_plan_candidate_ir(
             &ir_record.ir,
@@ -279,7 +287,9 @@ impl WorkspaceEngine {
                 // 提供，候选校验不从 IR 反推。
                 plan_options: &plan.options,
                 baseline_tree: baseline_tree.as_ref(),
-                now: &validation_now,
+                existing_work_item_ids: &existing_work_item_ids,
+            enrollment_target: None,
+            now: &validation_now,
             },
         )
         .map_err(|diagnostics| {

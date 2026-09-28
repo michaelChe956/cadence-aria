@@ -20,7 +20,7 @@ pub use normalize::{
 };
 pub use parse::{lint_work_item_plan_source, parse_work_item_plan};
 pub use types::*;
-pub use validate::validate_plan_candidate_ir;
+pub use validate::{validate_plan_candidate_ir, validate_work_item_intent_contract};
 
 #[cfg(test)]
 mod tests;

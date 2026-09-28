@@ -239,6 +239,9 @@ fn conversational_gate_recovery_revision_crash_window_with_cross_round_refs_fail
             repository_profile: repository_profile.as_ref(),
             plan_options: &plan.options,
             baseline_tree: None,
+                existing_work_item_ids: &[],
+            enrollment_target: None,
+
             now: "2026-08-31T00:00:00Z",
         },
     )
@@ -470,6 +473,8 @@ fn conversational_gate_recovery_forward_evidence_completes_revision() {
             repository_profile: repository_profile.as_ref(),
             plan_options: &plan.options,
             baseline_tree: None,
+                existing_work_item_ids: &[],
+                enrollment_target: None,
             now: "2026-08-31T00:00:00Z",
         },
     )

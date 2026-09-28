@@ -6,6 +6,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 mod blockers;
+mod c1_existing_create;
 mod ears_spacing;
 mod full_lowering_validator;
 mod heading_normalization;
@@ -57,6 +58,7 @@ fn grammar_contract() {
             "Goal",
             "Non Goals",
             "Dependencies",
+            "Plan Intent",
             "Inputs",
             "Outputs",
             "Tasks",
@@ -84,6 +86,12 @@ fn grammar_contract() {
             "summary",
             "non_goals",
             "depends_on",
+            "intent",
+            "provider_work_item_id",
+            "intent_target_kind",
+            "intent_target_repo",
+            "intent_target_codebase",
+            "intent_target_logical_repo",
             "contract_id",
             "provider_logical_work_item_id",
             "required_capabilities",
@@ -576,7 +584,8 @@ fn fixtures_diagnostic_sources_have_one_static_target_error() {
         grammar::STRUCTURED_SECTIONS
             .iter()
             .copied()
-            .filter(|section| *section != "Verification")
+            // C1 Task 5：Plan Intent 为可选 section——fixture 缺席合法。
+            .filter(|section| *section != "Verification" && *section != "Plan Intent")
             .collect::<Vec<_>>(),
         "missing-verification fixture 除缺少 Verification 外不得再缺 section"
     );
@@ -595,6 +604,11 @@ fn fixtures_diagnostic_sources_have_one_static_target_error() {
     assert_eq!(
         item_sections(UNKNOWN_FIELD_FIXTURE, "## Work Item WI-001"),
         grammar::STRUCTURED_SECTIONS
+            .iter()
+            .copied()
+            // C1 Task 5：Plan Intent 为可选 section——fixture 缺席合法。
+            .filter(|section| *section != "Plan Intent")
+            .collect::<Vec<_>>(),
     );
     assert!(is_valid_item_heading(UNKNOWN_FIELD_FIXTURE));
     let unknown_keys = structured_keys(UNKNOWN_FIELD_FIXTURE)
@@ -615,6 +629,11 @@ fn fixtures_diagnostic_sources_have_one_static_target_error() {
     assert_eq!(
         item_sections(INVALID_ID_FIXTURE, "## Work Item WI-invalid"),
         grammar::STRUCTURED_SECTIONS
+            .iter()
+            .copied()
+            // C1 Task 5：Plan Intent 为可选 section——fixture 缺席合法。
+            .filter(|section| *section != "Plan Intent")
+            .collect::<Vec<_>>(),
     );
     assert!(
         !is_valid_item_heading(INVALID_ID_FIXTURE),
@@ -634,6 +653,11 @@ fn fixtures_diagnostic_sources_have_one_static_target_error() {
     assert_eq!(
         item_sections(INVALID_EARS_FIXTURE, "## Work Item WI-001"),
         grammar::STRUCTURED_SECTIONS
+            .iter()
+            .copied()
+            // C1 Task 5：Plan Intent 为可选 section——fixture 缺席合法。
+            .filter(|section| *section != "Plan Intent")
+            .collect::<Vec<_>>(),
     );
     assert!(is_valid_item_heading(INVALID_EARS_FIXTURE));
     assert!(
@@ -1053,7 +1077,7 @@ fn parse_diagnostics_are_document_scoped_spanned_and_stable() {
         (grammar::DIAGNOSTIC_CODES[0], 11, "Goal", "### Goal"),
         (
             grammar::DIAGNOSTIC_CODES[3],
-            25,
+            31,
             "statement",
             "- statement: WHEN the selector loads THE SYSTEM SHALL render returned options.",
         ),

@@ -20,6 +20,10 @@ pub struct CanonicalWorkItemContract {
     pub handoff_contract: HandoffContract,
     pub blocker_rules: Vec<BlockerRule>,
     pub design_traceability: Vec<DesignTraceabilityRef>,
+    /// C1 Task 5（REQ-C1-PLAN-01）：可选但显式的 existing/create 意图合同；
+    /// 旧 plan JSON 缺省 None——不自动补声明，走既有 Manual/旧路径。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent_contract: Option<WorkItemIntentContract>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,4 +183,30 @@ pub enum BlockerRoute {
     StoryAmendment,
     DesignAmendment,
     OperationalGate,
+}
+
+/// C1 Task 5（REQ-C1-PLAN-01）：work item 写入意图。`Existing`＝引用既有
+/// Work Item；`Create`＝本 plan 明确新建。缺失意图在涉及基线外新建写面时
+/// 以 `intent_undeclared` 停等修订，不得由系统自动补声明。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkItemIntent {
+    Existing,
+    Create,
+}
+
+/// C1 Task 5：existing/create 意图合同——provider Work Item 身份、依赖闭包、
+/// exclusive/forbidden scope 与 target 的冻结快照（scope/依赖由 lowering 从
+/// 本 item 的 Dependencies/Write Policy 单一来源快照，不在 markdown 重复）。
+/// 校验失败区分 `intent_undeclared`（未声明）与 `intent_unexecutable`
+///（不能执行），fail-closed 拒绝 compile，不清既有 finding。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkItemIntentContract {
+    pub intent: WorkItemIntent,
+    pub provider_work_item_id: String,
+    pub depends_on: Vec<String>,
+    pub exclusive_scopes: Vec<String>,
+    pub forbidden_scopes: Vec<String>,
+    pub target: crate::product::logical_codebase::EnrollmentTarget,
 }
