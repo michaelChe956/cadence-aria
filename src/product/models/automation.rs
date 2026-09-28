@@ -201,6 +201,60 @@ pub struct EnrollmentRebindResult {
     pub state: OperationState,
     pub enrollment: IssueAutomationEnrollment,
 }
+
+// ─── C1 Task 6：租约三态与确认接管（REQ-WIGA-03）───
+
+/// 租约三态判定。只从现有 lock record、attempt terminal/activity/status
+/// 证据分类；无法证明活跃或死亡时一律 `UnknownNeedsHuman`（绝不抢占）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LeaseDisposition {
+    ActiveWait,
+    DeadNeedsTakeover,
+    UnknownNeedsHuman,
+}
+
+/// 三态判定 + durable 证据（owner/attempt status/释放事实）。证据只读，
+/// 判定不写任何文件；`lease_id` 是判定时锁的当前 owner id。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeaseDecision {
+    pub disposition: LeaseDisposition,
+    pub lease_id: String,
+    pub last_activity_at: Option<String>,
+    pub evidence: Vec<String>,
+}
+
+/// C1 Task 6：死亡租约确认接管请求。携带稳定 `command_id`、当前
+/// enrollment binding（过期/异载体拒绝）与判定时的 lease/attempt 身份；
+/// 接管必须由用户显式确认，系统绝不自动 takeover。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeaseTakeoverRequest {
+    pub command_id: String,
+    pub expected_binding: EnrollmentBindingIdentity,
+    pub expected_lease_id: String,
+    pub expected_attempt_id: String,
+}
+
+impl LeaseTakeoverRequest {
+    /// 稳定 payload 摘要：同一 command 的异 payload 必然产生不同 digest
+    /// （命令账本按此 fail-closed）。
+    pub fn payload_digest(&self) -> String {
+        let payload =
+            serde_json::to_string(self).expect("lease takeover request payload is serializable");
+        format!("sha256:{:x}", Sha256::digest(payload.as_bytes()))
+    }
+}
+
+/// C1 Task 6：接管结果。`state=NeedsHuman` 表示证据不足以证明死亡（不
+/// 接管）；`Rejected` 表示租约仍活跃（只等待）；`Accepted` 表示死亡 owner
+/// 已在既有 worktree 文件锁内原子清出；`Replayed` 返回同 command 首次
+/// durable 结果的当前投影。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeaseTakeoverResult {
+    pub command_id: String,
+    pub state: OperationState,
+    pub lease: LeaseDecision,
+}
 /// P1 WIGA Task 4：enrollment-bound 不可变创建意图（automation-plan-intent.json）。
 ///
 /// 先于 plan/session 持久化、与 enrollment 同源（`prepare_intent_id`），冻结

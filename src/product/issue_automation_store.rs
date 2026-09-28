@@ -543,6 +543,107 @@ impl IssueAutomationStore {
         })?;
         resolve_rebind(resolution)
     }
+
+    /// C1 Task 6（REQ-WIGA-03）：命令账本读取——同 `command_id` 同 payload
+    /// 返回首次 durable 结果（调用方按 Replayed 投影），异 payload
+    /// Conflict（fail-closed，不猜哪个是"真的"）。只读，不改变 enrollment
+    /// 事实；enrollment 缺失返回 None。
+    pub fn find_command_result(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        command_id: &str,
+        payload_digest: &str,
+    ) -> Result<Option<EnrollmentCommandResult>, EnrollmentError> {
+        let path = self.enrollment_path(project_id, issue_id)?;
+        with_exclusive_lock(&path, || {
+            let Some(saved) = read_optional_enrollment(&path)? else {
+                return Ok(None);
+            };
+            let Some(entry) = saved
+                .command_ledger
+                .iter()
+                .find(|entry| entry.command_id == command_id)
+            else {
+                return Ok(None);
+            };
+            if entry.payload_digest != payload_digest {
+                return Err(ProductStoreError::Conflict {
+                    kind: "enrollment_command_ledger",
+                    id: command_id.to_string(),
+                });
+            }
+            Ok(Some(entry.clone()))
+        })
+            .map_err(command_ledger_error)
+    }
+
+    /// C1 Task 6（REQ-WIGA-03）：追加命令账本（lease takeover 等非换代
+    /// 动作的结果记录）。不改变 binding/policy；`binding_version` 以锁内
+    /// 当前 binding 为准（无 binding 历史的旧 enrollment 记 0）。同
+    /// command 同 payload 幂等返回既有条目，异 payload Conflict。
+    pub fn append_command_result(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        command_id: &str,
+        payload_digest: &str,
+        state: OperationState,
+    ) -> Result<EnrollmentCommandResult, EnrollmentError> {
+        let path = self.enrollment_path(project_id, issue_id)?;
+        with_exclusive_lock(&path, || {
+            let Some(mut saved) = read_optional_enrollment(&path)? else {
+                return Err(ProductStoreError::NotFound {
+                    kind: "automation_enrollment",
+                    id: format!("{project_id}/{issue_id}"),
+                });
+            };
+            if let Some(entry) = saved
+                .command_ledger
+                .iter()
+                .find(|entry| entry.command_id == command_id)
+            {
+                if entry.payload_digest == payload_digest {
+                    return Ok(entry.clone());
+                }
+                return Err(ProductStoreError::Conflict {
+                    kind: "enrollment_command_ledger",
+                    id: command_id.to_string(),
+                });
+            }
+            let binding_version = saved
+                .binding_history
+                .as_ref()
+                .map(|history| history.current.binding_version)
+                .unwrap_or(0);
+            let entry = EnrollmentCommandResult {
+                command_id: command_id.to_string(),
+                payload_digest: payload_digest.to_string(),
+                state,
+                binding_version,
+            };
+            saved.command_ledger.push(entry.clone());
+            saved.updated_at = now_rfc3339();
+            write_json(&path, &saved)?;
+            Ok(entry)
+        })
+            .map_err(command_ledger_error)
+    }
+}
+
+/// C1 Task 6：命令账本锁内 `ProductStoreError` → `EnrollmentError` 边界
+/// 转换（账本 Conflict 语义保留，其余透传 Store）。
+fn command_ledger_error(error: ProductStoreError) -> EnrollmentError {
+    match error {
+        ProductStoreError::Conflict {
+            kind: "enrollment_command_ledger",
+            ..
+        } => EnrollmentError::Conflict { current_revision: None },
+        ProductStoreError::NotFound { kind: "automation_enrollment", .. } => {
+            EnrollmentError::NotFound
+        }
+        other => EnrollmentError::Store(other),
+    }
 }
 
 fn resolve(resolution: CasResolution) -> Result<IssueAutomationEnrollment, EnrollmentError> {

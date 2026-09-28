@@ -1167,3 +1167,299 @@
     }
 
     mod admission_restart_tests;
+
+    // ─── C1 Task 6（REQ-WIGA-03）：租约三态判定与确认接管 ───
+
+    fn lease_engine(
+        fixture: &Fixture,
+    ) -> crate::product::coding_workspace_engine::CodingWorkspaceEngine {
+        let (event_tx, _event_rx) =
+            tokio::sync::mpsc::channel::<crate::web::coding_ws_handler::CodingWsOutMessage>(1);
+        crate::product::coding_workspace_engine::CodingWorkspaceEngine::new(
+            fixture.store.clone(),
+            crate::product::git_workspace_service::GitWorkspaceService::new(),
+            event_tx,
+        )
+    }
+
+    fn lease_worktree(fixture: &Fixture) -> crate::product::lifecycle_store::LifecycleStore {
+        let lifecycle = crate::product::lifecycle_store::LifecycleStore::new(fixture.paths.clone());
+        lifecycle
+            .upsert_issue_shared_worktree(
+                crate::product::lifecycle_store::UpsertIssueSharedWorktreeInput {
+                    project_id: PROJECT_ID.to_string(),
+                    issue_id: ISSUE_ID.to_string(),
+                    repository_id: "repository_0001".to_string(),
+                    branch_name: "main".to_string(),
+                    worktree_path: std::path::PathBuf::from("/tmp/lease-worktree"),
+                    base_branch: "main".to_string(),
+                },
+            )
+            .expect("seed issue shared worktree");
+        lifecycle
+    }
+
+    fn lease_worktree_and_bind_attempt(fixture: &Fixture) -> crate::product::lifecycle_store::LifecycleStore {
+        let lifecycle = lease_worktree(fixture);
+        let lease = lifecycle
+            .try_acquire_issue_worktree_lock(
+                PROJECT_ID,
+                ISSUE_ID,
+                WORK_ITEM_ID,
+                &format!("issue_worktree_lease_{}", fixture.attempt.id),
+            )
+            .expect("acquire lease");
+        assert!(lease.acquired);
+        lifecycle
+            .bind_issue_worktree_lock_to_attempt(
+                PROJECT_ID,
+                ISSUE_ID,
+                WORK_ITEM_ID,
+                &fixture.attempt.id,
+            )
+            .expect("bind lease to attempt");
+        lifecycle
+    }
+
+    /// 三态 fail-closed：活跃只等待（第二 acquire 不改 owner/attempt）；
+    /// 终态 attempt/已释放 owner → DeadNeedsTakeover（未确认不推进）；
+    /// owner 未绑定 attempt、记录缺失 → UnknownNeedsHuman（绝不抢占）。
+    #[test]
+    fn lease_disposition_active_dead_unknown_is_fail_closed() {
+        use crate::product::models::automation::LeaseDisposition;
+
+        // ── 活跃：owner attempt 活跃 → ActiveWait；第二 try_acquire 不改
+        //    owner/attempt。
+        let fixture = legacy_fixture();
+        let lifecycle = lease_worktree_and_bind_attempt(&fixture);
+        let engine = lease_engine(&fixture);
+        let decision = engine.classify_worktree_lease(PROJECT_ID, ISSUE_ID);
+        assert_eq!(decision.disposition, LeaseDisposition::ActiveWait);
+        assert_eq!(decision.lease_id, fixture.attempt.id);
+        let second = lifecycle
+            .try_acquire_issue_worktree_lock(
+                PROJECT_ID,
+                ISSUE_ID,
+                "work_item_0002",
+                "issue_worktree_lease_second",
+            )
+            .expect_err("second work item cannot steal an active lease");
+        assert!(second.to_string().contains("issue_worktree_active"));
+        let record = lifecycle
+            .get_issue_shared_worktree(PROJECT_ID, ISSUE_ID)
+            .expect("record")
+            .expect("present");
+        assert_eq!(record.current_lock_owner_id.as_deref(), Some(fixture.attempt.id.as_str()));
+        assert_eq!(
+            record.current_active_work_item_id.as_deref(),
+            Some(WORK_ITEM_ID)
+        );
+
+        // ── 死亡（终态 attempt）：owner attempt Failed → DeadNeedsTakeover；
+        //    判定只读，未确认不推进。
+        seed_attempt_status(&fixture, CodingAttemptStatus::Failed);
+        let decision = engine.classify_worktree_lease(PROJECT_ID, ISSUE_ID);
+        assert_eq!(decision.disposition, LeaseDisposition::DeadNeedsTakeover);
+        assert_eq!(decision.lease_id, fixture.attempt.id);
+        let record = lifecycle
+            .get_issue_shared_worktree(PROJECT_ID, ISSUE_ID)
+            .expect("record")
+            .expect("present");
+        assert_eq!(record.current_lock_owner_id.as_deref(), Some(fixture.attempt.id.as_str()));
+
+        // ── 死亡（已明确释放 owner）：owner/active 清空 → DeadNeedsTakeover。
+        lifecycle
+            .release_issue_worktree_lock_by_owner(PROJECT_ID, ISSUE_ID, &fixture.attempt.id)
+            .expect("release by owner");
+        let decision = engine.classify_worktree_lease(PROJECT_ID, ISSUE_ID);
+        assert_eq!(decision.disposition, LeaseDisposition::DeadNeedsTakeover);
+
+        // ── 未知（owner 是未绑定 attempt 的瞬态 lease）→ 绝不抢占。
+        let fixture = legacy_fixture();
+        let lifecycle = lease_worktree(&fixture);
+        lifecycle
+            .try_acquire_issue_worktree_lock(
+                PROJECT_ID,
+                ISSUE_ID,
+                WORK_ITEM_ID,
+                "issue_worktree_lease_transient",
+            )
+            .expect("acquire transient lease");
+        let decision = lease_engine(&fixture).classify_worktree_lease(PROJECT_ID, ISSUE_ID);
+        assert_eq!(decision.disposition, LeaseDisposition::UnknownNeedsHuman);
+
+        // ── 未知（记录缺失）：无 worktree 证据 → UnknownNeedsHuman。
+        let fixture = legacy_fixture();
+        let decision = lease_engine(&fixture).classify_worktree_lease(PROJECT_ID, ISSUE_ID);
+        assert_eq!(decision.disposition, LeaseDisposition::UnknownNeedsHuman);
+    }
+
+    fn lease_enrollment_binding(fixture: &Fixture) -> crate::product::models::automation::EnrollmentBindingIdentity {
+        use crate::product::issue_automation_store::IssueAutomationStore;
+        use crate::product::models::automation::{
+            EnrollmentOptions, EnrollmentSource, EnrollmentWriteCommand, SourceRevisionRef,
+        };
+
+        let store = IssueAutomationStore::new(fixture.paths.clone());
+        store
+            .compare_and_set(
+                PROJECT_ID,
+                ISSUE_ID,
+                None,
+                EnrollmentWriteCommand::Enable {
+                    selection_key: "selection_0001".to_string(),
+                    source: EnrollmentSource {
+                        stories: vec![SourceRevisionRef {
+                            id: "story_spec_0001".to_string(),
+                            version: 1,
+                        }],
+                        designs: vec![],
+                    },
+                    options: EnrollmentOptions {
+                        author_provider: ProviderName::Fake,
+                        reviewer_provider: ProviderName::Fake,
+                        review_rounds: 1,
+                        superpowers_enabled: false,
+                        openspec_enabled: false,
+                        plan_options: crate::product::models::IssueWorkItemPlanOptions {
+                            include_integration_tests: true,
+                            include_e2e_tests: false,
+                            force_frontend_backend_split: false,
+                            require_execution_plan_confirm: false,
+                        },
+                    },
+                    logical_repository_id: LogicalRepositoryId(Uuid::nil()),
+                    target: Some(
+                        crate::product::logical_codebase::EnrollmentTarget::SingleRepository {
+                            repository_id: "repository_0001".to_string(),
+                        },
+                    ),
+                },
+            )
+            .expect("enable enrollment");
+        store
+            .get(PROJECT_ID, ISSUE_ID)
+            .expect("read enrollment")
+            .expect("present")
+            .binding_history
+            .expect("binding history")
+            .current
+    }
+
+    /// 确认接管：死亡 owner 在 worktree 文件锁内 CAS 清出（新 acquire 成为
+    /// 新 owner）；活跃/未知不写任何文件；迟到旧 lease/旧 binding 写入
+    /// IdentityMismatch 且 current owner 不变；并发确认只有一个成功；
+    /// 同 command 重放返回首次 durable 结果。
+    #[test]
+    fn lease_takeover_confirm_writes_owner_with_cas_and_rejects_stale_writes() {
+        use crate::product::json_store::ProductStoreError;
+        use crate::product::models::automation::{
+            LeaseTakeoverRequest, LeaseTakeoverResult, OperationState,
+        };
+
+        let fixture = legacy_fixture();
+        let lifecycle = lease_worktree_and_bind_attempt(&fixture);
+        seed_attempt_status(&fixture, CodingAttemptStatus::Failed);
+        let binding = lease_enrollment_binding(&fixture);
+        let engine = lease_engine(&fixture);
+
+        let request = LeaseTakeoverRequest {
+            command_id: "lease_takeover_cmd_0001".to_string(),
+            expected_binding: binding.clone(),
+            expected_lease_id: fixture.attempt.id.clone(),
+            expected_attempt_id: fixture.attempt.id.clone(),
+        };
+
+        // 活跃租约拒绝接管（先复活 attempt 验证 Rejected 不写文件）。
+        {
+            let mut revived = fixture
+                .store
+                .get_attempt(PROJECT_ID, ISSUE_ID, &fixture.attempt.id)
+                .expect("attempt");
+            revived.status = CodingAttemptStatus::Running;
+            fixture
+                .store
+                .write_coding_attempt_for_test(&revived)
+                .expect("revive");
+            let result = engine
+                .confirm_takeover(PROJECT_ID, ISSUE_ID, &request)
+                .expect("classified without error");
+            assert_eq!(result.state, OperationState::Rejected);
+            let record = lifecycle
+                .get_issue_shared_worktree(PROJECT_ID, ISSUE_ID)
+                .expect("record")
+                .expect("present");
+            assert_eq!(
+                record.current_lock_owner_id.as_deref(),
+                Some(fixture.attempt.id.as_str())
+            );
+            seed_attempt_status(&fixture, CodingAttemptStatus::Failed);
+        }
+
+        // 合法接管：Accepted，死亡 owner 原子清出，下一次 acquire 成为
+        // 新 owner（不建第二 attempt）。
+        let LeaseTakeoverResult { command_id, state, lease } = engine
+            .confirm_takeover(PROJECT_ID, ISSUE_ID, &request)
+            .expect("takeover accepted");
+        assert_eq!(command_id, "lease_takeover_cmd_0001");
+        assert_eq!(state, OperationState::Accepted);
+        assert!(lease
+            .evidence
+            .iter()
+            .any(|line| line.contains("takeover_confirmed")));
+        let record = lifecycle
+            .get_issue_shared_worktree(PROJECT_ID, ISSUE_ID)
+            .expect("record")
+            .expect("present");
+        assert_eq!(record.current_lock_owner_id, None);
+        assert_eq!(record.current_active_work_item_id, None);
+        let next = lifecycle
+            .try_acquire_issue_worktree_lock(
+                PROJECT_ID,
+                ISSUE_ID,
+                WORK_ITEM_ID,
+                "issue_worktree_lease_next",
+            )
+            .expect("next owner acquires after takeover");
+        assert!(next.acquired);
+
+        // 同 command 同 payload 重放：Replayed（首次 durable 结果）。
+        lifecycle
+            .release_issue_worktree_lock_by_owner(PROJECT_ID, ISSUE_ID, "issue_worktree_lease_next")
+            .expect("release next");
+        let replay = engine
+            .confirm_takeover(PROJECT_ID, ISSUE_ID, &request)
+            .expect("replay");
+        assert_eq!(replay.state, OperationState::Replayed);
+
+        // 迟到旧 lease 写入：owner 已换代 → IdentityMismatch，current
+        // owner/attempt 不变。
+        let stale = lifecycle
+            .takeover_issue_worktree_lock_after_dead_owner(
+                PROJECT_ID,
+                ISSUE_ID,
+                &fixture.attempt.id,
+            )
+            .expect_err("stale owner write rejected");
+        assert!(matches!(
+            stale,
+            ProductStoreError::IdentityMismatch { kind: "issue_worktree_lock_takeover", .. }
+        ));
+
+        // 过期 binding 拒绝：expected binding 漂移 → IdentityMismatch。
+        let mut drifted = binding.clone();
+        drifted.binding_version += 1;
+        let drifted_request = LeaseTakeoverRequest {
+            command_id: "lease_takeover_cmd_0002".to_string(),
+            expected_binding: drifted,
+            expected_lease_id: fixture.attempt.id.clone(),
+            expected_attempt_id: fixture.attempt.id.clone(),
+        };
+        let error = engine
+            .confirm_takeover(PROJECT_ID, ISSUE_ID, &drifted_request)
+            .expect_err("drifted binding rejected");
+        assert!(matches!(
+            error,
+            ProductStoreError::IdentityMismatch { kind: "enrollment_binding", .. }
+        ));
+    }

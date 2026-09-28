@@ -730,6 +730,79 @@ impl LifecycleStore {
             Ok(record)
         })
     }
+
+    // ─── C1 Task 6（REQ-WIGA-03）：死亡租约确认接管 ───
+
+    /// 用户显式确认后接管 issue 维死亡租约：在既有 worktree 文件锁内
+    /// CAS（owner 必须仍是 `expected_owner_id`），原子清出死亡 owner 与
+    /// active work item，使当前 binding 下的下一次合法 acquire 成为新
+    /// owner。死亡证明（终态 attempt）由调用方应用服务先行验证；本方法
+    /// 只做 owner CAS 与清出，不写 epoch/fence/incarnation。迟到旧 owner
+    /// 写入统一 `IdentityMismatch`，current owner 不变。
+    pub fn takeover_issue_worktree_lock_after_dead_owner(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        expected_owner_id: &str,
+    ) -> Result<IssueSharedWorktree, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(expected_owner_id)?;
+
+        let path = self.issue_shared_worktree_path(project_id, issue_id);
+        with_exclusive_lock(&path, || {
+            let mut record = read_issue_worktree(&path, project_id, issue_id)?;
+            if record.current_lock_owner_id.as_deref() != Some(expected_owner_id) {
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "issue_worktree_lock_takeover",
+                    id: format!(
+                        "{project_id}/{issue_id}: expected owner {expected_owner_id}, got {:?}",
+                        record.current_lock_owner_id
+                    ),
+                });
+            }
+            record.current_active_work_item_id = None;
+            record.current_lock_owner_id = None;
+            record.status = IssueSharedWorktreeStatus::Ready;
+            record.updated_at = Utc::now().to_rfc3339();
+            write_json(&path, &record)?;
+            Ok(record)
+        })
+    }
+
+    /// 仓维（多仓三元键）同款死亡租约接管 CAS；语义与 issue 维
+    /// [`Self::takeover_issue_worktree_lock_after_dead_owner`] 一致。
+    pub fn takeover_repo_worktree_lock_after_dead_owner(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        repository_id: LogicalRepositoryId,
+        expected_owner_id: &str,
+    ) -> Result<IssueSharedWorktree, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(expected_owner_id)?;
+        let path = self.repo_shared_worktree_path(project_id, issue_id, repository_id);
+        with_exclusive_lock(&path, || {
+            let mut record = read_repo_worktree(&path, project_id, issue_id, repository_id)?;
+            if record.current_lock_owner_id.as_deref() != Some(expected_owner_id) {
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "repo_worktree_lock_takeover",
+                    id: format!(
+                        "{project_id}/{issue_id}/{}: expected owner {expected_owner_id}, got {:?}",
+                        repository_id.0,
+                        record.current_lock_owner_id
+                    ),
+                });
+            }
+            record.current_active_work_item_id = None;
+            record.current_lock_owner_id = None;
+            record.status = IssueSharedWorktreeStatus::Ready;
+            record.updated_at = Utc::now().to_rfc3339();
+            write_json(&path, &record)?;
+            Ok(record)
+        })
+    }
 }
 
 fn read_issue_worktree(

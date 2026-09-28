@@ -22,7 +22,7 @@ use crate::product::models::WorkspaceType;
 use crate::product::models::automation::{
     EnrollmentBindingIdentityInput, EnrollmentError, EnrollmentRebindRequest,
     EnrollmentRebindResult, EnrollmentSource, EnrollmentWriteCommand, IssueAutomationEnrollment,
-    OperationState,
+    LeaseTakeoverRequest, LeaseTakeoverResult, OperationState,
 };
 use crate::web::error::{ApiError, ApiResult};
 use crate::product::work_item_plan_policy::RunPolicy;
@@ -198,6 +198,57 @@ pub async fn post_automation_enrollment_rebind(
         let _ = state.autopilot_wake.send(true);
     }
     Ok(Json(result))
+}
+
+/// C1 Task 6（REQ-WIGA-03）：死亡租约确认接管薄入口。只调用
+/// `CodingWorkspaceEngine::confirm_takeover` 应用服务（分类/判定/owner
+/// CAS 全在服务内），不承载业务逻辑、不复用 workspace-session takeover
+/// 的 stopped_needs_human 语义。`Accepted` 只发唤醒 hint。
+pub async fn post_automation_enrollment_lease_takeover(
+    State(state): State<WebAppState>,
+    Path((project_id, issue_id)): Path<(String, String)>,
+    Json(request): Json<LeaseTakeoverRequest>,
+) -> ApiResult<Json<LeaseTakeoverResult>> {
+    validate_request_ids(&project_id, &issue_id)?;
+    ensure_issue_exists(&state, &project_id, &issue_id)?;
+
+    let paths = product_app_paths(&state);
+    let store = crate::product::coding_attempt_store::CodingAttemptStore::new(paths);
+    let (event_tx, _event_rx) =
+        tokio::sync::mpsc::channel::<crate::web::coding_ws_handler::CodingWsOutMessage>(1);
+    let engine = crate::product::coding_workspace_engine::CodingWorkspaceEngine::new(
+        store,
+        crate::product::git_workspace_service::GitWorkspaceService::new(),
+        event_tx,
+    );
+    let result = engine
+        .confirm_takeover(&project_id, &issue_id, &request)
+        .map_err(lease_takeover_api_error)?;
+    if result.state == OperationState::Accepted {
+        let _ = state.autopilot_wake.send(true);
+    }
+    Ok(Json(result))
+}
+
+/// C1 Task 6：接管链错误映射——过期 binding/lease/attempt 的
+/// `IdentityMismatch` → 409 稳定码；账本异 payload Conflict → 409。
+fn lease_takeover_api_error(error: ProductStoreError) -> ApiError {
+    match error {
+        ProductStoreError::IdentityMismatch { kind, id } => ApiError::validation_with_details(
+            "lease_takeover_identity_mismatch",
+            format!("lease takeover rejected: {kind} {id}"),
+            json!({ "kind": kind, "id": id }),
+        ),
+        ProductStoreError::Conflict {
+            kind: "enrollment_command_ledger",
+            id,
+        } => ApiError::validation_with_details(
+            "lease_takeover_command_conflict",
+            format!("command ledger conflict: {id}"),
+            json!({ "command_id": id }),
+        ),
+        other => product_store_api_error(other),
+    }
 }
 
 /// rebind 新代绑定目标的精确身份校验（与显式 binding 同一存在性/一致性

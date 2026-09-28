@@ -110,7 +110,8 @@ pub(crate) use coding::{
 };
 pub use automation_enrollment::{
     get_automation_enrollment, post_automation_enrollment_binding,
-    post_automation_enrollment_rebind, put_automation_enrollment,
+    post_automation_enrollment_lease_takeover, post_automation_enrollment_rebind,
+    put_automation_enrollment,
 };
 pub use automation_target::get_automation_target;
 pub use codebases::{
