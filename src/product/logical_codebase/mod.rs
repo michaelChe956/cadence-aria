@@ -2,6 +2,7 @@ pub mod aggregate_index;
 pub mod aggregate_initialization;
 pub mod aggregate_initialization_coordinator;
 pub mod aggregate_initialization_store;
+pub mod bootstrap;
 pub mod evidence_audit;
 pub mod evidence_budget;
 pub mod evidence_index;
@@ -93,6 +94,13 @@ pub use production_policy_resolvers::{
 };
 pub use provider_capability_store::{
     CapabilityEvidence, ProviderCapabilityRecord, ProviderCapabilityStore,
+};
+pub use bootstrap::{
+    BootstrapActionError, BootstrapActionOutcome, BootstrapActionRequest,
+    BootstrapActionResult, BootstrapCheckpoint, BootstrapFailure, BootstrapStepProjection,
+    LogicalCodebaseBootstrapNotice, LogicalCodebaseBootstrapProjection,
+    LogicalCodebaseBootstrapProjector, LogicalCodebaseBootstrapService,
+    LogicalCodebaseBootstrapStep, LogicalCodebaseBootstrapStepStatus,
 };
 pub use provider_admission_preflight::{
     BootstrapActionKind, LogicalCodebaseProviderAdmissionPreflight,

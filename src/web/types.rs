@@ -412,6 +412,13 @@ pub use logical_codebase_registration::{
     RegistrationPreflightRequest, RegistrationPreflightResponse, RegistrationSubmitRequest,
 };
 
+mod logical_codebase_bootstrap;
+pub use logical_codebase_bootstrap::{
+    BootstrapActionResultDto, BootstrapCheckpointDto, BootstrapFailureDto,
+    BootstrapPolicyReferenceDto, BootstrapStepProjectionDto,
+    LogicalCodebaseBootstrapNoticeDto, LogicalCodebaseBootstrapProjectionDto,
+};
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct CreateRepositoryRequest {

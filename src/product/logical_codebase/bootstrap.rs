@@ -1,0 +1,1194 @@
+//! C4 Task 3：LC 冷启动五步 durable projection 与 action contract。
+//!
+//! `LogicalCodebaseBootstrapProjection` 不落独立的 `bootstrap.json` 状态机；
+//! 它只组合既有 durable facts——LC record、identity migration journal、
+//! registration batch、manifest/checkout、聚合 policy artifact、aggregate
+//! initialization 的 checkpoint/member projections 与 aggregate index 记录。
+//! GET 投影零写入；显式 action（`LogicalCodebaseBootstrapService::apply`）才
+//! 推进或修复，并把 command replay 映射回既有 batch/initialization/index 的
+//! idempotency 身份。
+//!
+//! 注意：现有 `AggregateInitializationStepKind::V1` 的五步
+//! （machine_skills → aggregate_preflight → pre_check → rule_and_mcp_config →
+//! openspec_and_examples）是独立的 durable 协议，与本模块的 C4 冷启动五步
+//! （identity → manifest/checkout → rules/policy → member index → aggregate
+//! index active）互不冒充、不共享名称。
+
+use std::path::PathBuf;
+
+use crate::product::app_paths::ProductAppPaths;
+use crate::product::json_store::ProductStoreError;
+use crate::product::logical_codebase::aggregate_index::{
+    AggregateIndexError, AggregateIndexStore, AggregateIndexStatus,
+};
+
+fn map_index_error(error: AggregateIndexError) -> ProductStoreError {
+    ProductStoreError::InvalidRecord {
+        kind: "aggregate_index",
+        reason: error.to_string(),
+    }
+}
+use crate::product::logical_codebase::provider_admission_preflight::BootstrapActionKind;
+use crate::product::logical_codebase::repository_routing::{
+    AuthorityPolicyReference, RepositoryAuthorityResolver, RepositoryRoutingRequest,
+    RepositoryTargetKind,
+};
+
+/// C4 冷启动五步（依赖顺序固定，见计划 Global Constraints）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogicalCodebaseBootstrapStep {
+    Identity,
+    ManifestCheckout,
+    RulesPolicy,
+    MemberIndex,
+    AggregateIndexActive,
+}
+
+impl LogicalCodebaseBootstrapStep {
+    /// Canonical five-step order for the logical codebase cold-start chain.
+    pub const V1: [Self; 5] = [
+        Self::Identity,
+        Self::ManifestCheckout,
+        Self::RulesPolicy,
+        Self::MemberIndex,
+        Self::AggregateIndexActive,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Identity => "identity",
+            Self::ManifestCheckout => "manifest_checkout",
+            Self::RulesPolicy => "rules_policy",
+            Self::MemberIndex => "member_index",
+            Self::AggregateIndexActive => "aggregate_index_active",
+        }
+    }
+}
+
+/// 步骤状态投影（来自 durable facts，非独立状态机）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogicalCodebaseBootstrapStepStatus {
+    NotStarted,
+    Running,
+    Completed,
+    Failed,
+    WaitingForHuman,
+}
+
+/// 既有 durable record 上的 checkpoint 证据（input digest / output artifact /
+/// expected membership revision）。只读投影，不新写文件。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BootstrapCheckpoint {
+    pub object_id: String,
+    pub input_digest: Option<String>,
+    pub output_artifact_ref: Option<String>,
+    pub expected_membership_revision: Option<u64>,
+    pub completed_at: Option<String>,
+}
+
+/// 失败/等待原因投影：reason_code 稳定，external_side_effect 描述可能的
+/// provider/index 外部副作用（"none" 表示纯内部 durable 事实）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BootstrapFailure {
+    pub reason_code: String,
+    pub detail: String,
+    pub retryable: bool,
+    pub external_side_effect: String,
+}
+
+/// 单个冷启动步骤的只读投影。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BootstrapStepProjection {
+    pub step: LogicalCodebaseBootstrapStep,
+    pub status: LogicalCodebaseBootstrapStepStatus,
+    pub object_id: String,
+    pub checkpoint: Option<BootstrapCheckpoint>,
+    pub failure: Option<BootstrapFailure>,
+    pub allowed_actions: Vec<BootstrapActionKind>,
+}
+
+/// 通知 DTO（C4 Task 9 首定义于此，供 projection/inbox 复用）：事实先落盘、
+/// 通知后投影；notice key/object/action 稳定，前端据此去重。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LogicalCodebaseBootstrapNotice {
+    pub key: String,
+    pub step: LogicalCodebaseBootstrapStep,
+    pub object_id: String,
+    pub reason_code: String,
+    pub summary: String,
+    pub external_side_effect: String,
+    pub allowed_actions: Vec<BootstrapActionKind>,
+    pub next_step: Option<LogicalCodebaseBootstrapStep>,
+    pub created_at: String,
+}
+
+/// LC 冷启动总投影：GET `/logical-codebases/{lc_id}/bootstrap` 的唯一来源。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LogicalCodebaseBootstrapProjection {
+    pub project_id: String,
+    pub logical_codebase_id: String,
+    pub authority_root: PathBuf,
+    pub membership_revision: Option<u64>,
+    pub policy: Option<AuthorityPolicyReference>,
+    pub steps: Vec<BootstrapStepProjection>,
+    pub planning_ready: bool,
+    pub notices: Vec<LogicalCodebaseBootstrapNotice>,
+}
+
+/// 显式 bootstrap 动作请求：command_id + 目标身份 + expected
+/// revision/object identity；同一命令键重放必须返回同一 durable 结果。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BootstrapActionRequest {
+    pub command_id: String,
+    pub project_id: String,
+    pub logical_codebase_id: String,
+    pub step: LogicalCodebaseBootstrapStep,
+    pub action: BootstrapActionKind,
+    pub expected_revision: Option<u64>,
+    pub expected_object_id: String,
+}
+
+/// 动作结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BootstrapActionOutcome {
+    Accepted,
+    Replayed,
+    WaitingForHuman,
+    Completed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BootstrapActionResult {
+    pub command_id: String,
+    pub outcome: BootstrapActionOutcome,
+    pub projection: LogicalCodebaseBootstrapProjection,
+}
+
+/// bootstrap 动作错误：结构化 conflict（稳定码）或底层 store 错误。
+#[derive(Debug)]
+pub enum BootstrapActionError {
+    Conflict { code: String, detail: String },
+    Store(ProductStoreError),
+}
+
+impl std::fmt::Display for BootstrapActionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Conflict { code, detail } => write!(formatter, "{code}: {detail}"),
+            Self::Store(error) => write!(formatter, "{error}"),
+        }
+    }
+}
+
+impl From<ProductStoreError> for BootstrapActionError {
+    fn from(error: ProductStoreError) -> Self {
+        Self::Store(error)
+    }
+}
+
+/// 只读组合投影器：从既有 durable records 计算五步状态，不写任何 store。
+pub struct LogicalCodebaseBootstrapProjector {
+    paths: ProductAppPaths,
+}
+
+impl LogicalCodebaseBootstrapProjector {
+    pub fn new(paths: ProductAppPaths) -> Self {
+        Self { paths }
+    }
+
+    pub fn project(
+        &self,
+        project_id: &str,
+        logical_codebase_id: &str,
+    ) -> Result<LogicalCodebaseBootstrapProjection, ProductStoreError> {
+        // 身份经唯一 authority resolver 冻结：LC 不存在/冲突一律结构化错误，
+        // 不猜路径，不读其他 LC 子树。
+        let resolution = RepositoryAuthorityResolver::new(self.paths.clone()).resolve(
+            RepositoryRoutingRequest {
+                project_id: project_id.to_string(),
+                issue_id: None,
+                kind: RepositoryTargetKind::LogicalCodebase,
+                repository_id: None,
+                logical_codebase_id: Some(logical_codebase_id.to_string()),
+                logical_repository_id: None,
+                checkout_id: None,
+            },
+        )?;
+
+        let identity_step = self.project_identity_step(project_id, logical_codebase_id)?;
+        let manifest_step =
+            self.project_manifest_checkout_step(project_id, logical_codebase_id, &resolution)?;
+        let rules_step = self.project_rules_policy_step(project_id, &resolution);
+        let member_index_step =
+            self.project_member_index_step(project_id, logical_codebase_id)?;
+        let aggregate_step =
+            self.project_aggregate_index_step(project_id, logical_codebase_id)?;
+
+        let steps = vec![
+            identity_step,
+            manifest_step,
+            rules_step,
+            member_index_step,
+            aggregate_step,
+        ];
+        let planning_ready = steps.iter().all(|step| {
+            step.status == LogicalCodebaseBootstrapStepStatus::Completed
+        });
+        let notices = project_notices(&steps);
+
+        Ok(LogicalCodebaseBootstrapProjection {
+            project_id: project_id.to_string(),
+            logical_codebase_id: logical_codebase_id.to_string(),
+            authority_root: resolution.authority_root.clone(),
+            membership_revision: resolution
+                .manifest
+                .as_ref()
+                .map(|manifest| manifest.membership_revision),
+            policy: resolution.policy.clone(),
+            steps,
+            planning_ready,
+            notices,
+        })
+    }
+
+    /// identity：LC record + identity migration journal。Failed journal 投影
+    /// Failed（等待 Task 7 的 repair）；active 成员 ≥1 视为身份完成。
+    fn project_identity_step(
+        &self,
+        project_id: &str,
+        logical_codebase_id: &str,
+    ) -> Result<BootstrapStepProjection, ProductStoreError> {
+        let journal = crate::product::logical_codebase::IdentityMigrationJournalStore::new(
+            self.paths.clone(),
+        )
+        .load(project_id)?;
+        if let Some(journal) = journal.as_ref() {
+            if journal.phase == crate::product::logical_codebase::IdentityMigrationPhase::Failed {
+                return Ok(BootstrapStepProjection {
+                    step: LogicalCodebaseBootstrapStep::Identity,
+                    status: LogicalCodebaseBootstrapStepStatus::Failed,
+                    object_id: journal.migration_id.clone(),
+                    checkpoint: None,
+                    failure: Some(BootstrapFailure {
+                        reason_code: "identity_migration_failed".to_string(),
+                        detail: journal
+                            .last_error
+                            .clone()
+                            .unwrap_or_else(|| "identity migration failed".to_string()),
+                        retryable: false,
+                        external_side_effect: "none".to_string(),
+                    }),
+                    allowed_actions: vec![BootstrapActionKind::Repair],
+                });
+            }
+        }
+
+        let members = crate::product::logical_codebase::LogicalCodebaseStore::for_lc(
+            self.paths.clone(),
+            logical_codebase_id,
+        )
+        .list_members(project_id)?;
+        let active_members = members
+            .iter()
+            .filter(|member| {
+                member.status == crate::product::logical_codebase::types::MemberStatus::Active
+            })
+            .count();
+        let object_id = journal
+            .map(|journal| journal.migration_id)
+            .unwrap_or_else(|| logical_codebase_id.to_string());
+        if active_members == 0 {
+            return Ok(BootstrapStepProjection {
+                step: LogicalCodebaseBootstrapStep::Identity,
+                status: LogicalCodebaseBootstrapStepStatus::NotStarted,
+                object_id,
+                checkpoint: None,
+                failure: None,
+                allowed_actions: vec![BootstrapActionKind::Prepare],
+            });
+        }
+        Ok(BootstrapStepProjection {
+            step: LogicalCodebaseBootstrapStep::Identity,
+            status: LogicalCodebaseBootstrapStepStatus::Completed,
+            object_id,
+            checkpoint: Some(BootstrapCheckpoint {
+                object_id: logical_codebase_id.to_string(),
+                input_digest: None,
+                output_artifact_ref: None,
+                expected_membership_revision: None,
+                completed_at: None,
+            }),
+            failure: None,
+            allowed_actions: Vec::new(),
+        })
+    }
+
+    /// manifest/checkout：manifest 存在且 checkout ≥1 为完成；无 manifest 时
+    /// 等待登记（Prepare）。
+    fn project_manifest_checkout_step(
+        &self,
+        project_id: &str,
+        logical_codebase_id: &str,
+        resolution: &crate::product::logical_codebase::repository_routing::RepositoryAuthorityResolution,
+    ) -> Result<BootstrapStepProjection, ProductStoreError> {
+        let store = crate::product::logical_codebase::LogicalCodebaseStore::for_lc(
+            self.paths.clone(),
+            logical_codebase_id,
+        );
+        let checkouts = store.list_checkouts(project_id)?;
+        match resolution.manifest.as_ref() {
+            Some(manifest) => {
+                let object_id = manifest.logical_codebase_id.to_string();
+                Ok(BootstrapStepProjection {
+                    step: LogicalCodebaseBootstrapStep::ManifestCheckout,
+                    status: if checkouts.is_empty() {
+                        LogicalCodebaseBootstrapStepStatus::WaitingForHuman
+                    } else {
+                        LogicalCodebaseBootstrapStepStatus::Completed
+                    },
+                    object_id: object_id.clone(),
+                    checkpoint: Some(BootstrapCheckpoint {
+                        object_id,
+                        input_digest: None,
+                        output_artifact_ref: None,
+                        expected_membership_revision: Some(manifest.membership_revision),
+                        completed_at: None,
+                    }),
+                    failure: None,
+                    allowed_actions: if checkouts.is_empty() {
+                        vec![BootstrapActionKind::Continue]
+                    } else {
+                        Vec::new()
+                    },
+                })
+            }
+            None => Ok(BootstrapStepProjection {
+                step: LogicalCodebaseBootstrapStep::ManifestCheckout,
+                status: LogicalCodebaseBootstrapStepStatus::NotStarted,
+                object_id: logical_codebase_id.to_string(),
+                checkpoint: None,
+                failure: None,
+                allowed_actions: vec![BootstrapActionKind::Prepare],
+            }),
+        }
+    }
+
+    /// rules/policy：以聚合 policy artifact 的 durable 事实为准（真实规则
+    /// 文件的准入预检由 Task 8 的 admission 负责）。
+    fn project_rules_policy_step(
+        &self,
+        project_id: &str,
+        resolution: &crate::product::logical_codebase::repository_routing::RepositoryAuthorityResolution,
+    ) -> BootstrapStepProjection {
+        match resolution.policy.as_ref() {
+            Some(policy) => BootstrapStepProjection {
+                step: LogicalCodebaseBootstrapStep::RulesPolicy,
+                status: LogicalCodebaseBootstrapStepStatus::Completed,
+                object_id: policy.policy_id.clone(),
+                checkpoint: Some(BootstrapCheckpoint {
+                    object_id: policy.policy_id.clone(),
+                    input_digest: Some(policy.policy_digest.clone()),
+                    output_artifact_ref: None,
+                    expected_membership_revision: None,
+                    completed_at: None,
+                }),
+                failure: None,
+                allowed_actions: Vec::new(),
+            },
+            None => BootstrapStepProjection {
+                step: LogicalCodebaseBootstrapStep::RulesPolicy,
+                status: LogicalCodebaseBootstrapStepStatus::NotStarted,
+                object_id: logical_policy_missing_object_id(project_id),
+                checkpoint: None,
+                failure: None,
+                allowed_actions: vec![BootstrapActionKind::Prepare],
+            },
+        }
+    }
+
+    /// member index：既有 aggregate initialization 的 deterministic
+    /// preflight（AggregatePreflight 步）checkpoint 与 member projections。
+    fn project_member_index_step(
+        &self,
+        project_id: &str,
+        logical_codebase_id: &str,
+    ) -> Result<BootstrapStepProjection, ProductStoreError> {
+        let operations =
+            crate::product::logical_codebase::aggregate_initialization_store::AggregateInitializationOperationStore::for_lc(
+                self.paths.clone(),
+                logical_codebase_id,
+            )
+            .list(project_id)?;
+        let Some(latest) = operations.first() else {
+            return Ok(BootstrapStepProjection {
+                step: LogicalCodebaseBootstrapStep::MemberIndex,
+                status: LogicalCodebaseBootstrapStepStatus::NotStarted,
+                object_id: format!("member-index:{logical_codebase_id}"),
+                checkpoint: None,
+                failure: None,
+                allowed_actions: vec![BootstrapActionKind::Prepare],
+            });
+        };
+        use crate::product::logical_codebase::aggregate_initialization::{
+            AggregateInitializationOperationStatus, AggregateInitializationStepKind,
+            AggregateInitializationStepRecord, AggregateInitializationStepStatus,
+        };
+        let status = match latest.status {
+            AggregateInitializationOperationStatus::Completed => {
+                LogicalCodebaseBootstrapStepStatus::Completed
+            }
+            AggregateInitializationOperationStatus::Failed => {
+                LogicalCodebaseBootstrapStepStatus::Failed
+            }
+            AggregateInitializationOperationStatus::Cancelled => {
+                LogicalCodebaseBootstrapStepStatus::WaitingForHuman
+            }
+            AggregateInitializationOperationStatus::Created
+            | AggregateInitializationOperationStatus::Running => {
+                LogicalCodebaseBootstrapStepStatus::Running
+            }
+        };
+        let preflight_checkpoint = latest
+            .steps
+            .iter()
+            .find(|step| step.step_id == AggregateInitializationStepKind::AggregatePreflight)
+            .map(|step| BootstrapCheckpoint {
+                object_id: latest.operation_id.clone(),
+                input_digest: step.input_digest.clone(),
+                output_artifact_ref: step.output_artifact_ref.clone(),
+                expected_membership_revision: None,
+                completed_at: step.completed_at.clone(),
+            });
+        let failure = (status == LogicalCodebaseBootstrapStepStatus::Failed)
+            .then(|| BootstrapFailure {
+                reason_code: latest
+                    .error
+                    .as_ref()
+                    .map(|error| error.reason_code.clone())
+                    .unwrap_or_else(|| "aggregate_initialization_failed".to_string()),
+                detail: latest
+                    .error
+                    .as_ref()
+                    .map(|error| {
+                        format!(
+                            "stage {}: {}",
+                            error.stage,
+                            error.stderr_summary.as_deref().unwrap_or("no stderr summary")
+                        )
+                    })
+                    .unwrap_or_else(|| "aggregate initialization failed".to_string()),
+                retryable: latest
+                    .error
+                    .as_ref()
+                    .map(|error| error.retryable)
+                    .unwrap_or(true),
+                external_side_effect: "aggregate_initialization_provider_turn".to_string(),
+            });
+        let allowed_actions = match status {
+            LogicalCodebaseBootstrapStepStatus::Failed => vec![BootstrapActionKind::Retry],
+            LogicalCodebaseBootstrapStepStatus::WaitingForHuman => {
+                vec![BootstrapActionKind::Continue]
+            }
+            LogicalCodebaseBootstrapStepStatus::NotStarted => vec![BootstrapActionKind::Prepare],
+            _ => Vec::new(),
+        };
+        Ok(BootstrapStepProjection {
+            step: LogicalCodebaseBootstrapStep::MemberIndex,
+            status,
+            object_id: latest.operation_id.clone(),
+            checkpoint: preflight_checkpoint,
+            failure,
+            allowed_actions,
+        })
+    }
+
+    /// aggregate index active：Active → Completed；Building → Running；最新
+    /// Failed → Failed；Stale/Degraded → WaitingForHuman（保留 LKG 事实）；
+    /// 无记录 → NotStarted。
+    fn project_aggregate_index_step(
+        &self,
+        project_id: &str,
+        logical_codebase_id: &str,
+    ) -> Result<BootstrapStepProjection, ProductStoreError> {
+        let store = AggregateIndexStore::for_lc(self.paths.clone(), logical_codebase_id);
+        if let Some(active) = store.active(project_id).map_err(map_index_error)? {
+            return Ok(BootstrapStepProjection {
+                step: LogicalCodebaseBootstrapStep::AggregateIndexActive,
+                status: LogicalCodebaseBootstrapStepStatus::Completed,
+                object_id: active.aggregate_index_id.clone(),
+                checkpoint: Some(BootstrapCheckpoint {
+                    object_id: active.aggregate_index_id.clone(),
+                    input_digest: Some(active.config_digest.clone()),
+                    output_artifact_ref: None,
+                    expected_membership_revision: Some(active.membership_revision),
+                    completed_at: Some(active.updated_at.clone()),
+                }),
+                failure: None,
+                allowed_actions: Vec::new(),
+            });
+        }
+        let records = store.records(project_id).map_err(map_index_error)?;
+        let latest_non_superseded = records
+            .iter()
+            .find(|record| record.status != AggregateIndexStatus::Superseded);
+        let (status, object_id, failure) = match latest_non_superseded {
+            Some(record) => match record.status {
+                AggregateIndexStatus::Building => (
+                    LogicalCodebaseBootstrapStepStatus::Running,
+                    record.aggregate_index_id.clone(),
+                    None,
+                ),
+                AggregateIndexStatus::Failed => (
+                    LogicalCodebaseBootstrapStepStatus::Failed,
+                    record.aggregate_index_id.clone(),
+                    Some(BootstrapFailure {
+                        reason_code: "aggregate_index_failed".to_string(),
+                        detail: record
+                            .warning
+                            .clone()
+                            .unwrap_or_else(|| "first aggregate index build failed".to_string()),
+                        retryable: true,
+                        external_side_effect: "aggregate_index_cli".to_string(),
+                    }),
+                ),
+                AggregateIndexStatus::Stale | AggregateIndexStatus::Degraded => (
+                    LogicalCodebaseBootstrapStepStatus::WaitingForHuman,
+                    record.aggregate_index_id.clone(),
+                    None,
+                ),
+                AggregateIndexStatus::Active | AggregateIndexStatus::Superseded => (
+                    LogicalCodebaseBootstrapStepStatus::NotStarted,
+                    record.aggregate_index_id.clone(),
+                    None,
+                ),
+            },
+            None => (
+                LogicalCodebaseBootstrapStepStatus::NotStarted,
+                format!("aggregate-index:{logical_codebase_id}"),
+                None,
+            ),
+        };
+        let allowed_actions = match status {
+            LogicalCodebaseBootstrapStepStatus::Failed => vec![BootstrapActionKind::Retry],
+            LogicalCodebaseBootstrapStepStatus::WaitingForHuman => {
+                vec![BootstrapActionKind::Retry, BootstrapActionKind::Revalidate]
+            }
+            LogicalCodebaseBootstrapStepStatus::NotStarted => vec![BootstrapActionKind::Prepare],
+            _ => Vec::new(),
+        };
+        Ok(BootstrapStepProjection {
+            step: LogicalCodebaseBootstrapStep::AggregateIndexActive,
+            status,
+            object_id,
+            checkpoint: None,
+            failure,
+            allowed_actions,
+        })
+    }
+}
+
+fn logical_policy_missing_object_id(project_id: &str) -> String {
+    format!("aggregate-policy:{project_id}")
+}
+
+/// 由失败/等待步骤派生通知（key = lc:step:object 稳定去重键）。
+fn project_notices(steps: &[BootstrapStepProjection]) -> Vec<LogicalCodebaseBootstrapNotice> {
+    let mut notices = Vec::new();
+    for step in steps {
+        if step.status == LogicalCodebaseBootstrapStepStatus::Completed
+            || step.status == LogicalCodebaseBootstrapStepStatus::Running
+            || step.status == LogicalCodebaseBootstrapStepStatus::NotStarted
+        {
+            continue;
+        }
+        let reason_code = step
+            .failure
+            .as_ref()
+            .map(|failure| failure.reason_code.clone())
+            .unwrap_or_else(|| "bootstrap_waiting_for_human".to_string());
+        let summary = step
+            .failure
+            .as_ref()
+            .map(|failure| failure.detail.clone())
+            .unwrap_or_else(|| {
+                format!("step {} is waiting for an explicit action", step.step.as_str())
+            });
+        let external_side_effect = step
+            .failure
+            .as_ref()
+            .map(|failure| failure.external_side_effect.clone())
+            .unwrap_or_else(|| "none".to_string());
+        let next_step = LogicalCodebaseBootstrapStep::V1
+            .iter()
+            .find(|candidate| **candidate == step.step)
+            .and_then(|current| {
+                LogicalCodebaseBootstrapStep::V1
+                    .iter()
+                    .position(|candidate| candidate == current)
+                    .map(|index| LogicalCodebaseBootstrapStep::V1[index + 1])
+            });
+        notices.push(LogicalCodebaseBootstrapNotice {
+            key: format!("bootstrap:{}:{}:{}", step.step.as_str(), step.object_id, reason_code),
+            step: step.step,
+            object_id: step.object_id.clone(),
+            reason_code,
+            summary,
+            external_side_effect,
+            allowed_actions: step.allowed_actions.clone(),
+            next_step,
+            created_at: String::new(),
+        });
+    }
+    notices
+}
+
+/// 显式 bootstrap 动作服务（C4 Task 3 契约 + Task 4 已落地链路的接线）。
+///
+/// 动作不创建新的 durable 状态机：command replay 与推进都映射回既有
+/// registration batch / aggregate initialization / aggregate index 记录。
+/// 事实先落盘，GET 投影随后可补读同一结果。
+pub struct LogicalCodebaseBootstrapService {
+    paths: ProductAppPaths,
+}
+
+impl LogicalCodebaseBootstrapService {
+    pub fn new(paths: ProductAppPaths) -> Self {
+        Self { paths }
+    }
+
+    pub async fn apply(
+        &self,
+        request: BootstrapActionRequest,
+    ) -> Result<BootstrapActionResult, BootstrapActionError> {
+        let projection = tokio::task::spawn_blocking({
+            let paths = self.paths.clone();
+            let project_id = request.project_id.clone();
+            let logical_codebase_id = request.logical_codebase_id.clone();
+            move || {
+                LogicalCodebaseBootstrapProjector::new(paths)
+                    .project(&project_id, &logical_codebase_id)
+            }
+        })
+        .await
+        .map_err(|error| {
+            BootstrapActionError::Store(ProductStoreError::Io(format!(
+                "bootstrap projection task failed: {error}"
+            )))
+        })??;
+
+        // expected revision 门：过期 revision 一律 fail-closed，不产生新事实。
+        if let Some(expected_revision) = request.expected_revision {
+            let current = projection.membership_revision;
+            if current != Some(expected_revision) {
+                return Err(BootstrapActionError::Conflict {
+                    code: "bootstrap_stale_revision".to_string(),
+                    detail: format!(
+                        "expected membership revision {expected_revision} but durable projection carries {current:?}"
+                    ),
+                });
+            }
+        }
+
+        let outcome = self
+            .dispatch_action(&request)
+            .map_err(BootstrapActionError::Store)?;
+        // 动作后重新投影，响应携带最新 durable 事实。
+        let projection = LogicalCodebaseBootstrapProjector::new(self.paths.clone())
+            .project(&request.project_id, &request.logical_codebase_id)?;
+        Ok(BootstrapActionResult {
+            command_id: request.command_id,
+            outcome,
+            projection,
+        })
+    }
+
+    /// 把动作路由到既有 durable 链；不重跑已完成 provider turn。
+    fn dispatch_action(
+        &self,
+        request: &BootstrapActionRequest,
+    ) -> Result<BootstrapActionOutcome, ProductStoreError> {
+        match request.step {
+            LogicalCodebaseBootstrapStep::MemberIndex => {
+                self.dispatch_member_index_action(request)
+            }
+            LogicalCodebaseBootstrapStep::AggregateIndexActive => {
+                self.dispatch_aggregate_index_action(request)
+            }
+            LogicalCodebaseBootstrapStep::Identity
+            | LogicalCodebaseBootstrapStep::ManifestCheckout
+            | LogicalCodebaseBootstrapStep::RulesPolicy => {
+                self.dispatch_registration_action(request)
+            }
+        }
+    }
+
+    /// member index：Continue/Retry 经 `reopen_for_resume` 显式重开 Failed
+    /// operation（Completed 步骤与 checkpoint 原样保留）；已完成/取消的
+    /// operation 幂等 replay；Running 不做隐式恢复（GET 纯投影约束）。
+    fn dispatch_member_index_action(
+        &self,
+        request: &BootstrapActionRequest,
+    ) -> Result<BootstrapActionOutcome, ProductStoreError> {
+        let store =
+            crate::product::logical_codebase::aggregate_initialization_store::AggregateInitializationOperationStore::for_lc(
+                self.paths.clone(),
+                &request.logical_codebase_id,
+            );
+        let operation = store.get(&request.project_id, &request.expected_object_id)?;
+        use crate::product::logical_codebase::aggregate_initialization::AggregateInitializationOperationStatus;
+        match operation.status {
+            AggregateInitializationOperationStatus::Completed => {
+                Ok(BootstrapActionOutcome::Replayed)
+            }
+            AggregateInitializationOperationStatus::Failed
+                if matches!(
+                    request.action,
+                    BootstrapActionKind::Continue | BootstrapActionKind::Retry
+                ) =>
+            {
+                store.reopen_for_resume(
+                    &request.project_id,
+                    &request.expected_object_id,
+                    chrono::Utc::now().to_rfc3339(),
+                )?;
+                Ok(BootstrapActionOutcome::Accepted)
+            }
+            _ => Ok(BootstrapActionOutcome::WaitingForHuman),
+        }
+    }
+
+    /// aggregate index：以 Task 5 的 durable command identity 判定 replay；
+    /// Building 进行中不做隐式推进（等待 single-writer 完成）。
+    fn dispatch_aggregate_index_action(
+        &self,
+        request: &BootstrapActionRequest,
+    ) -> Result<BootstrapActionOutcome, ProductStoreError> {
+        let store = AggregateIndexStore::for_lc(
+            self.paths.clone(),
+            &request.logical_codebase_id,
+        );
+        for record in store.records(&request.project_id).map_err(map_index_error)? {
+            if record.command_id.as_deref() != Some(request.command_id.as_str()) {
+                continue;
+            }
+            return Ok(match record.status {
+                AggregateIndexStatus::Building => BootstrapActionOutcome::WaitingForHuman,
+                AggregateIndexStatus::Active => BootstrapActionOutcome::Completed,
+                _ => BootstrapActionOutcome::Replayed,
+            });
+        }
+        Err(ProductStoreError::NotFound {
+            kind: "aggregate_index_command",
+            id: request.command_id.clone(),
+        })
+    }
+
+    /// identity/manifest/rules：已有 registration batch 的 Continue 走
+    /// `resume_batch_checked`（显式 expected revision 幂等 resume）；终态
+    /// batch 幂等 replay；无 durable 对象时等待用户在登记链提交材料。
+    fn dispatch_registration_action(
+        &self,
+        request: &BootstrapActionRequest,
+    ) -> Result<BootstrapActionOutcome, ProductStoreError> {
+        let coordinator =
+            crate::product::logical_codebase::LogicalCodebaseRegistrationCoordinator::for_lc(
+                self.paths.clone(),
+                &request.logical_codebase_id,
+            );
+        match coordinator.get_batch(&request.project_id, &request.expected_object_id) {
+            Ok(batch) => {
+                use crate::product::logical_codebase::RegistrationBatchStatus;
+                match batch.status {
+                    RegistrationBatchStatus::Completed
+                    | RegistrationBatchStatus::Cancelled => Ok(BootstrapActionOutcome::Replayed),
+                    RegistrationBatchStatus::Queued
+                    | RegistrationBatchStatus::Running
+                    | RegistrationBatchStatus::PartialFailed
+                        if request.action == BootstrapActionKind::Continue =>
+                    {
+                        let expected = request.expected_revision.unwrap_or(0);
+                        coordinator.resume_batch_checked(
+                            &request.project_id,
+                            &request.expected_object_id,
+                            expected,
+                        )?;
+                        Ok(BootstrapActionOutcome::Accepted)
+                    }
+                    _ => Ok(BootstrapActionOutcome::WaitingForHuman),
+                }
+            }
+            Err(ProductStoreError::NotFound { .. }) => {
+                Ok(BootstrapActionOutcome::WaitingForHuman)
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::product::logical_codebase::aggregate_initialization::{
+        AggregateInitializationOperation, AggregateInitializationOperationInput,
+        AggregateInitializationStepKind,
+    };
+    use crate::product::logical_codebase::aggregate_initialization_store::AggregateInitializationOperationStore;
+    use crate::product::logical_codebase::store::LogicalCodebaseStore;
+    use crate::product::logical_codebase::types::{
+        CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, MemberStatus,
+        RepositoryCheckoutRecord, RepositoryType,
+    };
+    use crate::product::logical_codebase::{
+        IdentityMigrationPhase, IdentityMigrationJournal, IdentityMigrationJournalStore,
+        LogicalCodebaseCreateInput, LogicalCodebaseManifest, LogicalRepositoryId,
+        RepositoryCheckoutId,
+    };
+    use crate::product::project_store::{CreateProjectInput, ProjectStore};
+
+    fn git(cwd: &std::path::Path, arguments: &[&str]) {
+        let output = std::process::Command::new("git")
+            .current_dir(cwd)
+            .args(arguments)
+            .output()
+            .expect("git must start");
+        assert!(
+            output.status.success(),
+            "git {arguments:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn init_git_repository_with_commit(path: &std::path::Path) {
+        std::fs::create_dir_all(path).unwrap();
+        git(path, &["init", "-b", "main"]);
+        git(path, &["config", "user.email", "bootstrap@test.local"]);
+        git(path, &["config", "user.name", "Bootstrap Test"]);
+        std::fs::write(path.join("README.md"), "# member\n").unwrap();
+        git(path, &["add", "."]);
+        git(path, &["commit", "-m", "init"]);
+    }
+
+    fn aria_inventory(root: &std::path::Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+        let mut inventory = std::collections::BTreeMap::new();
+        let mut stack = vec![root.join(".aria")];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else {
+                    let relative = path.strip_prefix(root).unwrap().to_path_buf();
+                    inventory.insert(
+                        relative.to_string_lossy().into_owned(),
+                        std::fs::read(&path).unwrap_or_default(),
+                    );
+                }
+            }
+        }
+        inventory
+    }
+
+    fn create_project_and_lc(
+        paths: &ProductAppPaths,
+        aggregate_root: &std::path::Path,
+    ) -> String {
+        ProjectStore::new(paths.clone())
+            .create(CreateProjectInput {
+                name: "bootstrap-project".to_string(),
+                description: None,
+            })
+            .unwrap();
+        std::fs::create_dir_all(aggregate_root).unwrap();
+        LogicalCodebaseStore::new(paths.clone())
+            .create(
+                "project_0001",
+                LogicalCodebaseCreateInput {
+                    name: "bootstrap-lc".to_string(),
+                    aggregate_root: aggregate_root.to_path_buf(),
+                },
+            )
+            .unwrap()
+            .id
+    }
+
+    #[test]
+    fn bootstrap_projection_reports_missing_active_index_without_manual_seed() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let lc_id = create_project_and_lc(&paths, &temp.path().join("aggregate-root"));
+
+        let before = aria_inventory(temp.path());
+        let projection = LogicalCodebaseBootstrapProjector::new(paths.clone())
+            .project("project_0001", &lc_id)
+            .expect("empty LC must still project");
+        let after = aria_inventory(temp.path());
+
+        // 投影零写入：`.aria` durable inventory 字节不变。
+        assert_eq!(before, after);
+
+        // 五个步骤全部可投影（无手工 seed）。
+        assert_eq!(projection.steps.len(), 5);
+        let statuses: Vec<_> = projection
+            .steps
+            .iter()
+            .map(|step| (step.step, step.status))
+            .collect();
+        for (step, status) in &statuses {
+            assert_ne!(
+                *status,
+                LogicalCodebaseBootstrapStepStatus::Completed,
+                "{} must not be completed on an empty LC",
+                step.as_str()
+            );
+        }
+        // aggregate step 为 NotStarted（无任何 index 记录）。
+        let aggregate = statuses
+            .iter()
+            .find(|(step, _)| *step == LogicalCodebaseBootstrapStep::AggregateIndexActive)
+            .expect("aggregate step present");
+        assert_eq!(aggregate.1, LogicalCodebaseBootstrapStepStatus::NotStarted);
+        assert!(!projection.planning_ready);
+        assert_eq!(projection.policy, None);
+        assert_eq!(projection.membership_revision, None);
+        // 空投影的等待通知不产生（NotStarted 非等待事实）。
+        assert!(projection.notices.is_empty());
+    }
+
+    #[test]
+    fn bootstrap_projection_maps_existing_registration_and_initialization_checkpoints() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let aggregate_root = temp.path().join("aggregate-root");
+        let lc_id = create_project_and_lc(&paths, &aggregate_root);
+
+        // 真实成员仓 + manifest/member/checkout（identity 与 manifest 事实）。
+        let repo = aggregate_root.join("repo");
+        init_git_repository_with_commit(&repo);
+        let canonical = std::fs::canonicalize(&repo).unwrap();
+        let source = crate::product::repository_store::resolve_repository_source(&canonical)
+            .unwrap();
+        let member_id = LogicalRepositoryId(uuid::Uuid::new_v4());
+        let checkout_id = RepositoryCheckoutId(uuid::Uuid::new_v4());
+        let lc_store = LogicalCodebaseStore::for_lc(paths.clone(), &lc_id);
+        let mut manifest =
+            LogicalCodebaseManifest::new("project_0001", aggregate_root.clone(), Vec::new());
+        manifest.member_ids = vec![member_id];
+        lc_store.save_manifest("project_0001", &manifest).unwrap();
+        lc_store
+            .save_member(
+                "project_0001",
+                &CodebaseMemberRecord {
+                    logical_repository_id: member_id,
+                    physical_repository_id: "repository_member".to_string(),
+                    alias: "repo".to_string(),
+                    role: "member".to_string(),
+                    ordinal: 1,
+                    source_identity: source.clone(),
+                    repo_type: RepositoryType::Unknown,
+                    tech_stack: Vec::new(),
+                    owner: None,
+                    tags: Vec::new(),
+                    default_ref: None,
+                    checkout_ids: vec![checkout_id],
+                    status: MemberStatus::Active,
+                    created_at: "2026-09-29T00:00:00Z".to_string(),
+                    updated_at: "2026-09-29T00:00:00Z".to_string(),
+                },
+            )
+            .unwrap();
+        lc_store
+            .save_checkout(
+                "project_0001",
+                &RepositoryCheckoutRecord {
+                    checkout_id,
+                    logical_repository_id: member_id,
+                    physical_repository_id: "repository_member".to_string(),
+                    kind: CheckoutKind::Main,
+                    canonical_path: canonical.clone(),
+                    checkout_path_hash: crate::product::id::repo_hash_for_path(
+                        canonical.to_string_lossy().as_ref(),
+                    ),
+                    git_dir_identity: source.git_dir_identity(),
+                    revision: None,
+                    availability: CheckoutAvailability::Available,
+                    observed_at: "2026-09-29T00:00:00Z".to_string(),
+                    created_at: "2026-09-29T00:00:00Z".to_string(),
+                    updated_at: "2026-09-29T00:00:00Z".to_string(),
+                },
+            )
+            .unwrap();
+        crate::product::logical_codebase::policy::AggregatePolicyArtifactStore::for_lc(
+            paths.clone(),
+            &lc_id,
+        )
+        .save(
+            "project_0001",
+            &crate::product::logical_codebase::policy::AggregatePolicyArtifact::bootstrap(
+                "project_0001",
+                &manifest.logical_codebase_id.to_string(),
+                "2026-09-29T00:00:00Z".to_string(),
+            ),
+        )
+        .unwrap();
+
+        // 既有 aggregate initialization 五步全完成（durable checkpoint 来源）。
+        let init_store = AggregateInitializationOperationStore::for_lc(paths.clone(), &lc_id);
+        let operation = AggregateInitializationOperation::new(
+            "aggregate_initialization_bootstrap_0001".to_string(),
+            "project_0001".to_string(),
+            AggregateInitializationOperationInput {
+                idempotency_key: "bootstrap-0001".to_string(),
+                manifest_revision: manifest.membership_revision,
+                policy_digest: "sha256:policy".to_string(),
+                profile_evidence_digest: Some("sha256:profile".to_string()),
+                provider_context_root: aggregate_root.clone(),
+                provider: "claude_code".to_string(),
+            },
+            "2026-09-29T00:00:00Z".to_string(),
+        );
+        init_store.create_idempotent(operation).unwrap();
+        init_store
+            .mark_running(
+                "project_0001",
+                "aggregate_initialization_bootstrap_0001",
+                "2026-09-29T00:01:00Z".to_string(),
+            )
+            .unwrap();
+        for step in AggregateInitializationStepKind::V1 {
+            init_store
+                .mark_step_running(
+                    "project_0001",
+                    "aggregate_initialization_bootstrap_0001",
+                    step,
+                    format!("aggregate-init:project_0001:op:{}:input", step.as_str()),
+                    "2026-09-29T00:02:00Z".to_string(),
+                )
+                .unwrap();
+            init_store
+                .checkpoint_step_output(
+                    "project_0001",
+                    "aggregate_initialization_bootstrap_0001",
+                    step,
+                    format!("aggregate-initializations/op/{}.json", step.as_str()),
+                    "2026-09-29T00:03:00Z".to_string(),
+                )
+                .unwrap();
+            init_store
+                .mark_step_completed(
+                    "project_0001",
+                    "aggregate_initialization_bootstrap_0001",
+                    step,
+                    "2026-09-29T00:04:00Z".to_string(),
+                )
+                .unwrap();
+        }
+        init_store
+            .finish_completed(
+                "project_0001",
+                "aggregate_initialization_bootstrap_0001",
+                "2026-09-29T00:05:00Z".to_string(),
+            )
+            .unwrap();
+
+        let projection = LogicalCodebaseBootstrapProjector::new(paths.clone())
+            .project("project_0001", &lc_id)
+            .unwrap();
+
+        let identity = projection
+            .steps
+            .iter()
+            .find(|step| step.step == LogicalCodebaseBootstrapStep::Identity)
+            .unwrap();
+        assert_eq!(identity.status, LogicalCodebaseBootstrapStepStatus::Completed);
+
+        let manifest_step = projection
+            .steps
+            .iter()
+            .find(|step| step.step == LogicalCodebaseBootstrapStep::ManifestCheckout)
+            .unwrap();
+        assert_eq!(manifest_step.status, LogicalCodebaseBootstrapStepStatus::Completed);
+        // object id 来自 durable manifest 记录，而非新文件。
+        assert_eq!(manifest_step.object_id, manifest.logical_codebase_id.to_string());
+
+        let rules = projection
+            .steps
+            .iter()
+            .find(|step| step.step == LogicalCodebaseBootstrapStep::RulesPolicy)
+            .unwrap();
+        assert_eq!(rules.status, LogicalCodebaseBootstrapStepStatus::Completed);
+        assert!(rules.object_id.starts_with("policy/project_0001/"));
+
+        let member_index = projection
+            .steps
+            .iter()
+            .find(|step| step.step == LogicalCodebaseBootstrapStep::MemberIndex)
+            .unwrap();
+        assert_eq!(member_index.status, LogicalCodebaseBootstrapStepStatus::Completed);
+        // object/checkpoint 来自既有 operation（AggregatePreflight 步的 digest/ref）。
+        assert_eq!(member_index.object_id, "aggregate_initialization_bootstrap_0001");
+        let checkpoint = member_index.checkpoint.as_ref().unwrap();
+        assert_eq!(
+            checkpoint.output_artifact_ref.as_deref(),
+            Some("aggregate-initializations/op/aggregate_preflight.json")
+        );
+        assert!(checkpoint.input_digest.is_some());
+
+        // 无 active index：aggregate step 仍未完成，planning_ready=false。
+        let aggregate = projection
+            .steps
+            .iter()
+            .find(|step| step.step == LogicalCodebaseBootstrapStep::AggregateIndexActive)
+            .unwrap();
+        assert_eq!(aggregate.status, LogicalCodebaseBootstrapStepStatus::NotStarted);
+        assert!(!projection.planning_ready);
+    }
+
+    #[test]
+    fn aggregate_initialization_v1_steps_are_not_renamed_to_c4_steps() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let lc_id = create_project_and_lc(&paths, &temp.path().join("aggregate-root"));
+
+        let init_store = AggregateInitializationOperationStore::for_lc(paths.clone(), &lc_id);
+        let operation = AggregateInitializationOperation::new(
+            "aggregate_initialization_names_0001".to_string(),
+            "project_0001".to_string(),
+            AggregateInitializationOperationInput {
+                idempotency_key: "names-0001".to_string(),
+                manifest_revision: 1,
+                policy_digest: "sha256:policy".to_string(),
+                profile_evidence_digest: None,
+                provider_context_root: temp.path().join("aggregate-root"),
+                provider: "claude_code".to_string(),
+            },
+            "2026-09-29T00:00:00Z".to_string(),
+        );
+        init_store.create_idempotent(operation).unwrap();
+        let persisted = init_store
+            .get("project_0001", "aggregate_initialization_names_0001")
+            .unwrap();
+        // 既有五步协议保持原名（V1 顺序），未被 C4 步骤冒充。
+        let persisted_kinds: Vec<_> = persisted
+            .steps
+            .iter()
+            .map(|step| step.step_id)
+            .collect();
+        assert_eq!(persisted_kinds, AggregateInitializationStepKind::V1.to_vec());
+
+        let projection = LogicalCodebaseBootstrapProjector::new(paths.clone())
+            .project("project_0001", &lc_id)
+            .unwrap();
+        // bootstrap 投影是独立的 C4 五步，与 V1 协议不同名。
+        let bootstrap_steps: Vec<_> = projection.steps.iter().map(|step| step.step).collect();
+        assert_eq!(bootstrap_steps, LogicalCodebaseBootstrapStep::V1.to_vec());
+        let bootstrap_names: Vec<_> = bootstrap_steps.iter().map(|s| s.as_str()).collect();
+        let v1_names: Vec<String> = persisted_kinds.iter().map(|s| s.as_str().to_string()).collect();
+        assert_ne!(bootstrap_names, v1_names);
+    }
+}

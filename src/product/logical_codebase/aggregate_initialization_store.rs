@@ -72,6 +72,36 @@ impl AggregateInitializationOperationStore {
         Ok(operation)
     }
 
+    /// C4 Task 3：只读列出当前 scope 的全部 operation，按 `updated_at` 降序
+    ///（最新在前）供 bootstrap 投影组合；不写任何文件。
+    pub fn list(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<AggregateInitializationOperation>, ProductStoreError> {
+        let root = self.operations_root(project_id)?;
+        if !root.exists() {
+            return Ok(Vec::new());
+        }
+        let mut operations = Vec::new();
+        for entry in std::fs::read_dir(&root).map_err(|error| {
+            ProductStoreError::Io(format!("read {}: {error}", root.display()))
+        })? {
+            let entry = entry.map_err(|error| {
+                ProductStoreError::Io(format!("read {} entry: {error}", root.display()))
+            })?;
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            let operation: AggregateInitializationOperation = read_json(&path)?;
+            ensure_identity(&operation, project_id, &operation.operation_id)?;
+            validate_record_shape(&operation)?;
+            operations.push(operation);
+        }
+        operations.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        Ok(operations)
+    }
+
     pub fn get(
         &self,
         project_id: &str,
