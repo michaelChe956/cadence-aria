@@ -316,6 +316,8 @@ export function useIssueLifecycleGeneration({
         },
         options: target.resolved_options,
         logical_repository_id: target.logical_repository_id,
+        // C1：服务端投影的双载体 target 原样回传（不从前端拼凑/猜测）。
+        target: target.enrollment_target,
       },
     });
   }

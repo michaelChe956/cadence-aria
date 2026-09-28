@@ -265,6 +265,10 @@ pub fn build_web_router_with_evidence(state: WebAppState, evidence_enabled: bool
             post(handlers::post_automation_enrollment_binding),
         )
         .route(
+            "/api/projects/{project_id}/issues/{issue_id}/automation-enrollment/rebind",
+            post(handlers::post_automation_enrollment_rebind),
+        )
+        .route(
             "/api/projects/{project_id}/issues/{issue_id}/automation-target",
             get(handlers::get_automation_target),
         )

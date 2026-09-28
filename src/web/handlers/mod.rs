@@ -109,7 +109,8 @@ pub(crate) use coding::{
     request_work_item_execution_plan_change,
 };
 pub use automation_enrollment::{
-    get_automation_enrollment, post_automation_enrollment_binding, put_automation_enrollment,
+    get_automation_enrollment, post_automation_enrollment_binding,
+    post_automation_enrollment_rebind, put_automation_enrollment,
 };
 pub use automation_target::get_automation_target;
 pub use codebases::{

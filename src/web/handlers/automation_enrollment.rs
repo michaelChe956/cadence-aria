@@ -20,10 +20,12 @@ use crate::product::logical_codebase::RepositoryRouting;
 use crate::product::models::LifecycleConfirmationStatus;
 use crate::product::models::WorkspaceType;
 use crate::product::models::automation::{
-    EnrollmentError, EnrollmentSource, EnrollmentWriteCommand, IssueAutomationEnrollment,
+    EnrollmentBindingIdentityInput, EnrollmentError, EnrollmentRebindRequest,
+    EnrollmentRebindResult, EnrollmentSource, EnrollmentWriteCommand, IssueAutomationEnrollment,
+    OperationState,
 };
-use crate::product::work_item_plan_policy::RunPolicy;
 use crate::web::error::{ApiError, ApiResult};
+use crate::product::work_item_plan_policy::RunPolicy;
 use crate::web::handlers::lifecycle::preflight::{
     SingleCandidatePreflightDecision, logical_repository_ids_for_preflight,
     preflight_single_repository_candidate,
@@ -148,6 +150,95 @@ pub async fn post_automation_enrollment_binding(
         .map_err(enrollment_api_error)
 }
 
+/// C1 Task 2（REQ-WIGA-01）：显式重绑/换代 REST。先验证 issue/source/
+/// plan/session/target/provider 的精确身份（不猜 latest、不认 AutoIfValid），
+/// 再由 store 在 enrollment 文件锁内按 expected policy/binding CAS 换代；
+/// Accepted 只发唤醒 hint，Replayed 不再触发编排。
+pub async fn post_automation_enrollment_rebind(
+    State(state): State<WebAppState>,
+    Path((project_id, issue_id)): Path<(String, String)>,
+    Json(request): Json<EnrollmentRebindRequest>,
+) -> ApiResult<Json<EnrollmentRebindResult>> {
+    validate_request_ids(&project_id, &issue_id)?;
+    ensure_issue_exists(&state, &project_id, &issue_id)?;
+
+    let paths = product_app_paths(&state);
+    let store = IssueAutomationStore::new(paths.clone());
+    let enrollment = store
+        .get(&project_id, &issue_id)
+        .map_err(product_store_api_error)?
+        .ok_or_else(enrollment_not_found)?;
+    if !enrollment.enabled {
+        return Err(enrollment_conflict(
+            None,
+            "automation enrollment is disabled",
+        ));
+    }
+
+    // 新代 source 必须是已确认的精确事实（id+version，不猜 latest）。
+    let lifecycle = LifecycleStore::new(paths.clone());
+    validate_confirmed_source_refs(&lifecycle, &project_id, &issue_id, &request.binding.source)?;
+
+    // 新代 plan/session 精确身份：存在、同 issue、类型/实体一致且 Interactive
+    //（AutoIfValid 不代表授权，REQ-WIGA-02 同一口径；换代是用户显式提交，
+    // 不按 created_at 排除旧 plan——排除的只是隐式认领）。
+    validate_rebind_binding_target(&lifecycle, &project_id, &issue_id, &request.binding)?;
+
+    // 换代换 provider 同样过静态 gateway reviewer 预检。
+    super::automation_gateway_preflight::validate_gateway_reviewer_for_enrollment(
+        &request.binding.reviewer_provider,
+        true,
+        state.test_provider_enabled,
+    )?;
+
+    let result = store
+        .rebind(&project_id, &issue_id, request)
+        .map_err(enrollment_api_error)?;
+    if result.state == OperationState::Accepted {
+        let _ = state.autopilot_wake.send(true);
+    }
+    Ok(Json(result))
+}
+
+/// rebind 新代绑定目标的精确身份校验（与显式 binding 同一存在性/一致性
+/// 口径；不含 created_at 旧 plan 排除——那是隐式认领的门，不是显式换代的）。
+fn validate_rebind_binding_target(
+    lifecycle: &LifecycleStore,
+    project_id: &str,
+    issue_id: &str,
+    binding: &EnrollmentBindingIdentityInput,
+) -> ApiResult<()> {
+    let plan = lifecycle
+        .list_issue_work_item_plans(project_id, issue_id)
+        .map_err(product_store_api_error)?
+        .into_iter()
+        .find(|plan| plan.id == binding.plan_id)
+        .ok_or_else(|| binding_target_not_found("plan"))?;
+    let session = lifecycle
+        .list_workspace_sessions(project_id, issue_id)
+        .map_err(product_store_api_error)?
+        .into_iter()
+        .find(|session| session.id == binding.session_id)
+        .ok_or_else(|| binding_target_not_found("session"))?;
+    if session.workspace_type != WorkspaceType::WorkItemPlan {
+        return Err(invalid_scope(
+            "rebind target session must be a work item plan session",
+        ));
+    }
+    if session.entity_id != plan.id {
+        return Err(invalid_scope(
+            "rebind target session entity must match the plan",
+        ));
+    }
+    if session.run_policy != RunPolicy::Interactive {
+        return Err(enrollment_conflict(
+            None,
+            "rebind target session must use the interactive run policy",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_request_ids(project_id: &str, issue_id: &str) -> ApiResult<()> {
     validate_relative_id(project_id)
         .map_err(|_| ApiError::validation("invalid_project_id", "project id must be relative"))?;
@@ -180,6 +271,7 @@ fn validate_enrollment_scope(
         source,
         logical_repository_id,
         options,
+        target,
         ..
     } = command
     else {
@@ -207,6 +299,20 @@ fn validate_enrollment_scope(
         SingleCandidatePreflightDecision::Eligible { repository_id }
             if repository_id == logical_repository_id.0.to_string() =>
         {
+            // C1 Task 1：显式声明的 target 必须与授权域同载体同身份
+            //（logical 双级齐全且指向同一 logical repository；不猜、不降级）。
+            match target {
+                Some(crate::product::logical_codebase::EnrollmentTarget::LogicalCodebase {
+                    logical_repository_id: target_repository,
+                    ..
+                }) if *target_repository == *logical_repository_id => {}
+                Some(_) => {
+                    return Err(invalid_scope(
+                        "automation enrollment target must match the issue's single logical repository",
+                    ))
+                }
+                None => {}
+            }
             // P2 GAP-F（Task 0.2）：唯一 logical target 确认后做静态 gateway
             // reviewer 预检——与 GET automation-target 投影同源，Enable 前拒绝。
             super::automation_gateway_preflight::validate_gateway_reviewer_for_enrollment(
@@ -364,8 +470,9 @@ mod tests {
     use crate::product::work_item_plan_policy::RunPolicy;
 
     use super::super::automation_enrollment_test_support::{
-        ISSUE_ID, PROJECT_ID, create_plan_and_session, enrollment_body, enrollment_file_exists,
-        get_enrollment, post_binding, put_enrollment, response_json, seed_fixture,
+        ISSUE_ID, PROJECT_ID, create_plan_and_session, enrollment_body, enrollment_body_with_target,
+        enrollment_file_exists, get_enrollment, post_binding, post_rebind, put_enrollment,
+        rebind_body, response_json, seed_fixture,
     };
 
     #[tokio::test]
@@ -580,6 +687,165 @@ mod tests {
         )
         .await;
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    // ---- C1 Task 2：显式重绑/换代 REST（REQ-WIGA-01、REQ-C1-TARGET-01）----
+
+    #[tokio::test]
+    async fn automation_enrollment_rebind_requires_current_binding() {
+        let fixture = seed_fixture(1, true);
+        let app = fixture.router();
+
+        // 新式 enable：显式声明 target（logical 双级齐全）→ binding v1。
+        let enable = put_enrollment(&app, enrollment_body_with_target(&fixture)).await;
+        assert_eq!(enable.status(), StatusCode::OK);
+        let enrolled = response_json(enable).await;
+        assert_eq!(
+            enrolled["binding_history"]["current"]["binding_version"],
+            1
+        );
+
+        // v1 显式绑定 plan/session。
+        let revision = enrolled["policy_revision"].as_u64().unwrap();
+        let (plan_1, session_1) = create_plan_and_session(&fixture, RunPolicy::Interactive);
+        let response = post_binding(
+            &app,
+            serde_json::json!({
+                "expected_revision": revision,
+                "plan_id": plan_1,
+                "session_id": session_1,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bound_revision = response_json(response).await["policy_revision"]
+            .as_u64()
+            .unwrap();
+
+        // 合法 rebind → 200 accepted：current v2、previous 逐字保留 v1、
+        // enrollment 投影换新代、policy_revision 递增（旧回执必然失配）。
+        let (plan_2, session_2) = create_plan_and_session(&fixture, RunPolicy::Interactive);
+        let rebind = rebind_body(
+            &fixture,
+            "rebind_cmd_0001",
+            bound_revision,
+            1,
+            &plan_2,
+            &session_2,
+        );
+        let response = post_rebind(&app, rebind.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload = response_json(response).await;
+        assert_eq!(payload["command_id"], "rebind_cmd_0001");
+        assert_eq!(payload["state"], "accepted");
+        let after = payload["enrollment"].clone();
+        assert_eq!(after["binding_history"]["current"]["binding_version"], 2);
+        assert_eq!(after["binding_history"]["current"]["plan_id"], plan_2.as_str());
+        assert_eq!(
+            after["binding_history"]["previous"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            after["binding_history"]["previous"][0]["plan_id"],
+            plan_1.as_str()
+        );
+        assert_eq!(after["binding_history"]["previous"][0]["session_id"], session_1.as_str());
+        assert_eq!(after["plan_id"], plan_2.as_str());
+        assert!(after["policy_revision"].as_u64().unwrap() > bound_revision);
+
+        // durable 只有一份当前版本：GET 投影与返回一致。
+        assert_eq!(response_json(get_enrollment(&app).await).await, after);
+
+        // 同 command 同 payload 重放 → replayed，durable 不变。
+        let replay = post_rebind(&app, rebind.clone()).await;
+        assert_eq!(replay.status(), StatusCode::OK);
+        let replay_body = response_json(replay).await;
+        assert_eq!(replay_body["state"], "replayed");
+        assert_eq!(replay_body["enrollment"], after);
+        assert_eq!(response_json(get_enrollment(&app).await).await, after);
+
+        // 同 command 异 payload（完整换绑定目标）→ 409，durable 不变。
+        let mut diverged = rebind.clone();
+        diverged["binding"]["plan_id"] = serde_json::json!(plan_1);
+        diverged["binding"]["session_id"] = serde_json::json!(session_1);
+        let response = post_rebind(&app, diverged).await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(response_json(get_enrollment(&app).await).await, after);
+
+        // 旧 expected binding version（当前已是 v2）→ 409。
+        let after_revision = after["policy_revision"].as_u64().unwrap();
+        let stale_binding = rebind_body(
+            &fixture,
+            "rebind_cmd_0002",
+            after_revision,
+            1,
+            &plan_1,
+            &session_1,
+        );
+        let response = post_rebind(&app, stale_binding).await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+
+        // 旧 expected policy revision → 409。
+        let stale_policy = rebind_body(
+            &fixture,
+            "rebind_cmd_0003",
+            bound_revision,
+            2,
+            &plan_1,
+            &session_1,
+        );
+        let response = post_rebind(&app, stale_policy).await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+
+        // 跨载体 target（logical → single）→ 422，durable 不变。
+        let mut cross_carrier = rebind_body(
+            &fixture,
+            "rebind_cmd_0004",
+            after_revision,
+            2,
+            &plan_1,
+            &session_1,
+        );
+        cross_carrier["binding"]["target"] = serde_json::json!({
+            "kind": "single_repository",
+            "repository_id": "repo_physical_1",
+        });
+        let response = post_rebind(&app, cross_carrier).await;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        // 逻辑 target 缺 logical_codebase_id 一级 → 422（serde fail-closed）。
+        let mut incomplete = rebind_body(
+            &fixture,
+            "rebind_cmd_0005",
+            after_revision,
+            2,
+            &plan_1,
+            &session_1,
+        );
+        incomplete["binding"]["target"]
+            .as_object_mut()
+            .unwrap()
+            .remove("logical_codebase_id");
+        let response = post_rebind(&app, incomplete).await;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        // plan/session 不属于 issue → 404。
+        let unknown_target = rebind_body(
+            &fixture,
+            "rebind_cmd_0006",
+            after_revision,
+            2,
+            "plan_9999",
+            "session_9999",
+        );
+        let response = post_rebind(&app, unknown_target).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        // 全部拒绝后 durable 仍只有一份当前版本。
+        assert_eq!(response_json(get_enrollment(&app).await).await, after);
     }
 
     // ---- P1 WIGA Task 4：enrollment-bound 唯一创建与半提交恢复 ----

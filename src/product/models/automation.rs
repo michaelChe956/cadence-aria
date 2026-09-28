@@ -155,6 +155,7 @@ pub struct EnrollmentBindingHistory {
 /// C1 统一操作结果状态（Task 6/7/9 的 lease takeover、advance retry、
 /// Cockpit 动作复用同一状态机，不另造 Generation/RecoveryOperation）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum OperationState {
     Accepted,
     Replayed,

@@ -23,9 +23,11 @@ import {
   listRepositories,
   normalizeApiError,
   recheckProviders,
+  rebindAutomationEnrollment,
   takeoverWorkspaceSession,
 } from "./client";
 import type {
+  AutomationEnrollmentRebindRequest,
   CreateRepositoryResponse,
   RepositoryInitializationOperationSnapshot,
   RepositoryInitializationStep,
@@ -560,6 +562,103 @@ describe("api client", () => {
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/workspace-sessions/parent%2Fwith%20space/takeover",
       expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("posts enrollment rebind with exact URL and body", async () => {
+    const rebindResult = {
+      command_id: "rebind_cmd_0001",
+      state: "accepted",
+      enrollment: {
+        enrollment_id: "enrollment_0001",
+        selection_key: "human-choice-1",
+        project_id: "project_1",
+        issue_id: "issue 1",
+        enabled: true,
+        policy_revision: 4,
+        source: { stories: [], designs: [] },
+        options: {
+          author_provider: "fake",
+          reviewer_provider: "fake",
+          review_rounds: 1,
+          superpowers_enabled: false,
+          openspec_enabled: false,
+          plan_options: {
+            include_integration_tests: true,
+            include_e2e_tests: false,
+            force_frontend_backend_split: false,
+            require_execution_plan_confirm: false,
+          },
+        },
+        logical_repository_id: "00000000-0000-0000-0000-000000000001",
+        prepare_intent_id: "enrollment_0001",
+        plan_id: "plan_0002",
+        session_id: "session_0002",
+        created_at: "2026-09-28T00:00:00Z",
+        updated_at: "2026-09-28T00:00:00Z",
+        target: {
+          kind: "logical_codebase",
+          logical_codebase_id: "11111111-1111-1111-1111-111111111111",
+          logical_repository_id: "00000000-0000-0000-0000-000000000001",
+        },
+        binding_history: {
+          current: {
+            binding_version: 2,
+            enrollment_id: "enrollment_0001",
+            plan_id: "plan_0002",
+            session_id: "session_0002",
+            source: { stories: [], designs: [] },
+            target: {
+              kind: "logical_codebase",
+              logical_codebase_id: "11111111-1111-1111-1111-111111111111",
+              logical_repository_id: "00000000-0000-0000-0000-000000000001",
+            },
+            author_provider: "fake",
+            reviewer_provider: "fake",
+          },
+          previous: [],
+        },
+      },
+    };
+    const fetchMock = vi.fn(
+      async () => new Response(JSON.stringify(rebindResult), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const request: AutomationEnrollmentRebindRequest = {
+      command_id: "rebind_cmd_0001",
+      expected_policy_revision: 3,
+      expected_binding_version: 1,
+      binding: {
+        plan_id: "plan_0002",
+        session_id: "session_0002",
+        source: {
+          stories: [{ id: "story_0001", version: 1 }],
+          designs: [{ id: "design_0001", version: 1 }],
+        },
+        target: {
+          kind: "logical_codebase",
+          logical_codebase_id: "11111111-1111-1111-1111-111111111111",
+          logical_repository_id: "00000000-0000-0000-0000-000000000001",
+        },
+        author_provider: "fake",
+        reviewer_provider: "fake",
+      },
+      reason: "recover after failed generation",
+    };
+    await expect(
+      rebindAutomationEnrollment("project_1", "issue 1", request),
+    ).resolves.toMatchObject({
+      command_id: "rebind_cmd_0001",
+      state: "accepted",
+      enrollment: { binding_history: { current: { binding_version: 2 } } },
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/project_1/issues/issue%201/automation-enrollment/rebind",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify(request),
+      }),
     );
   });
 });

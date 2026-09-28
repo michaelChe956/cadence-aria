@@ -4,6 +4,8 @@ import type {
   ChoiceReplyStatus,
   ChoiceResponseRequest,
   AutomationEnrollmentPutRequest,
+  AutomationEnrollmentRebindRequest,
+  AutomationEnrollmentRebindResult,
   AutomationTarget,
   AutomationTargetQuery,
   CodingAttempt,
@@ -581,6 +583,20 @@ export function putAutomationEnrollment(
     `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/automation-enrollment`,
     {
       method: "PUT",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export function rebindAutomationEnrollment(
+  projectId: string,
+  issueId: string,
+  payload: AutomationEnrollmentRebindRequest,
+): Promise<AutomationEnrollmentRebindResult> {
+  return requestJson<AutomationEnrollmentRebindResult>(
+    `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/automation-enrollment/rebind`,
+    {
+      method: "POST",
       body: JSON.stringify(payload),
     },
   );

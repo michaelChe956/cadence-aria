@@ -327,6 +327,78 @@ pub(crate) fn enrollment_body(
     })
 }
 
+/// fixture 播种的 logical codebase id（manifest 随机生成，读取权威值）。
+pub(crate) fn fixture_logical_codebase_id(fixture: &Fixture) -> String {
+    LogicalCodebaseStore::new(fixture.paths.clone())
+        .load_manifest(PROJECT_ID)
+        .unwrap()
+        .expect("seeded logical codebase manifest")
+        .logical_codebase_id
+        .to_string()
+}
+
+/// C1 Task 2：显式声明双载体 target 的 enable body（logical 双级齐全）。
+pub(crate) fn enrollment_body_with_target(fixture: &Fixture) -> serde_json::Value {
+    let mut body = enrollment_body(fixture, 1, 1);
+    body["command"]["target"] = serde_json::json!({
+        "kind": "logical_codebase",
+        "logical_codebase_id": fixture_logical_codebase_id(fixture),
+        "logical_repository_id": SINGLE_LOGICAL_ID,
+    });
+    body
+}
+
+/// C1 Task 2：显式 rebind/换代请求 body（新代 plan/session/source/target/provider）。
+pub(crate) fn rebind_body(
+    fixture: &Fixture,
+    command_id: &str,
+    expected_policy_revision: u64,
+    expected_binding_version: u64,
+    plan_id: &str,
+    session_id: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "command_id": command_id,
+        "expected_policy_revision": expected_policy_revision,
+        "expected_binding_version": expected_binding_version,
+        "binding": {
+            "plan_id": plan_id,
+            "session_id": session_id,
+            "source": {
+                "stories": [{"id": fixture.story_id, "version": 1}],
+                "designs": [{"id": fixture.design_id, "version": 1}]
+            },
+            "target": {
+                "kind": "logical_codebase",
+                "logical_codebase_id": fixture_logical_codebase_id(fixture),
+                "logical_repository_id": SINGLE_LOGICAL_ID
+            },
+            "author_provider": "fake",
+            "reviewer_provider": "fake"
+        },
+        "reason": "recover after failed generation"
+    })
+}
+
+pub(crate) async fn post_rebind(
+    app: &axum::Router,
+    body: serde_json::Value,
+) -> axum::http::Response<Body> {
+    app.clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/projects/{PROJECT_ID}/issues/{ISSUE_ID}/automation-enrollment/rebind"
+                ))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
 pub(crate) async fn put_enrollment(
     app: &axum::Router,
     body: serde_json::Value,

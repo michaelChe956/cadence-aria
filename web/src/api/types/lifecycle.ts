@@ -234,6 +234,36 @@ export type EnrollmentOptions = {
   plan_options: EnrollmentPlanOptions;
 };
 
+export type EnrollmentTarget =
+  | { kind: "single_repository"; repository_id: string }
+  | {
+      kind: "logical_codebase";
+      logical_codebase_id: string;
+      logical_repository_id: string;
+    };
+
+export type EnrollmentBindingIdentity = {
+  binding_version: number;
+  enrollment_id: string;
+  plan_id: string;
+  session_id: string;
+  source: EnrollmentSource;
+  target: EnrollmentTarget;
+  author_provider: WorkspaceProviderName;
+  reviewer_provider: WorkspaceProviderName;
+};
+
+export type EnrollmentBindingHistory = {
+  current: EnrollmentBindingIdentity;
+  previous: EnrollmentBindingIdentity[];
+};
+
+export type AutomationEnrollmentOperationState =
+  | "accepted"
+  | "replayed"
+  | "needs_human"
+  | "rejected";
+
 export type IssueAutomationEnrollment = {
   enrollment_id: string;
   selection_key: string;
@@ -249,6 +279,9 @@ export type IssueAutomationEnrollment = {
   session_id: string | null;
   created_at: string;
   updated_at: string;
+  /** C1：enable 显式声明时在场；旧投影缺字段按 off/Manual 解释。 */
+  target?: EnrollmentTarget;
+  binding_history?: EnrollmentBindingHistory;
 };
 
 export type AutomationEnrollmentEnableCommand = {
@@ -257,6 +290,8 @@ export type AutomationEnrollmentEnableCommand = {
   source: EnrollmentSource;
   options: EnrollmentOptions;
   logical_repository_id: string;
+  /** C1：服务端 automation-target 投影原样回传，不从前端拼凑。 */
+  target?: EnrollmentTarget;
 };
 
 export type AutomationEnrollmentDisableCommand = {
@@ -266,6 +301,27 @@ export type AutomationEnrollmentDisableCommand = {
 export type AutomationEnrollmentPutRequest = {
   expected_revision: number | null;
   command: AutomationEnrollmentEnableCommand | AutomationEnrollmentDisableCommand;
+};
+
+export type AutomationEnrollmentRebindRequest = {
+  command_id: string;
+  expected_policy_revision: number;
+  expected_binding_version: number;
+  binding: {
+    plan_id: string;
+    session_id: string;
+    source: EnrollmentSource;
+    target: EnrollmentTarget;
+    author_provider: WorkspaceProviderName;
+    reviewer_provider: WorkspaceProviderName;
+  };
+  reason: string;
+};
+
+export type AutomationEnrollmentRebindResult = {
+  command_id: string;
+  state: AutomationEnrollmentOperationState;
+  enrollment: IssueAutomationEnrollment;
 };
 
 // Task 1 只读投影：唯一逻辑仓 UUID + 服务端与 prepare 同源解析的 options。
@@ -283,5 +339,7 @@ export type AutomationTargetQuery = {
 
 export type AutomationTarget = {
   logical_repository_id: string;
+  /** C1：双载体 target 投影（Enable/Rebind 原样回传）。 */
+  enrollment_target: EnrollmentTarget;
   resolved_options: EnrollmentOptions;
 };

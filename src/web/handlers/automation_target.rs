@@ -26,6 +26,9 @@ use super::support::{product_app_paths, product_store_api_error, provider_worksp
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct AutomationTargetDto {
     pub logical_repository_id: String,
+    /// C1 Task 2：双载体 target 投影——前端 Enable/Rebind 原样回传
+    ///（logical 双级齐全；单仓入口由 C5 消费同一 union）。
+    pub enrollment_target: crate::product::logical_codebase::EnrollmentTarget,
     pub resolved_options: EnrollmentOptions,
 }
 
@@ -109,8 +112,16 @@ pub async fn get_automation_target(
         true,
         state.test_provider_enabled,
     )?;
+    let target_repository = crate::product::logical_codebase::LogicalRepositoryId(
+        uuid::Uuid::parse_str(&repository_id)
+            .map_err(|_| invalid_scope("automation target logical repository id is not a valid uuid"))?,
+    );
     Ok(Json(AutomationTargetDto {
         logical_repository_id: repository_id,
+        enrollment_target: crate::product::logical_codebase::EnrollmentTarget::LogicalCodebase {
+            logical_codebase_id: manifest.logical_codebase_id.to_string(),
+            logical_repository_id: target_repository,
+        },
         resolved_options,
     }))
 }
