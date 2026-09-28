@@ -32,6 +32,8 @@ export type C1RecoveryActionPayload =
       projectId: string;
       issueId: string;
       commandId: string;
+      leaseId: string;
+      attemptId: string;
     }
   | { kind: "rebind"; projectId: string; issueId: string };
 

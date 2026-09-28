@@ -1019,6 +1019,9 @@ function C1RecoveryCard({
         projectId: info.projectId,
         issueId: info.issueId,
         commandId: `cmd-c1-takeover-${info.itemId}`,
+        // lease id 是服务端 item id 的尾段（c1:lease_takeover:{issue}:{lease}）。
+        leaseId: info.itemId.split(":").pop() ?? "",
+        attemptId: info.attemptId ?? "",
       });
       return;
     }

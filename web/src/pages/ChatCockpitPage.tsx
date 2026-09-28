@@ -512,12 +512,11 @@ export function ChatCockpitPage({
         if (!binding) {
           throw new Error("C1 takeover requires a durable enrollment binding");
         }
-        const leaseId = payload.commandId.split(":").pop() ?? "";
         await confirmLeaseTakeover(payload.projectId, payload.issueId, {
           command_id: payload.commandId,
           expected_binding: binding,
-          expected_lease_id: leaseId,
-          expected_attempt_id: "",
+          expected_lease_id: payload.leaseId,
+          expected_attempt_id: payload.attemptId,
         });
       } else {
         // rebind：显式换代表单在 Issue 生命周期工作台（useIssueLifecycleGeneration）；
