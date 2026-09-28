@@ -19,6 +19,7 @@ pub mod pointer_publication;
 pub mod pointer_publication_coordinator;
 pub mod policy;
 pub mod production_policy_resolvers;
+pub mod provider_admission_preflight;
 pub mod provider_capability_store;
 pub mod provider_gateway;
 pub mod reference_scanner;
@@ -92,6 +93,10 @@ pub use production_policy_resolvers::{
 };
 pub use provider_capability_store::{
     CapabilityEvidence, ProviderCapabilityRecord, ProviderCapabilityStore,
+};
+pub use provider_admission_preflight::{
+    BootstrapActionKind, LogicalCodebaseProviderAdmissionPreflight,
+    ProviderAdmissionError, ProviderAdmissionPreflightResult, ProviderRuleReference,
 };
 pub use provider_gateway::{
     GatewayRunAudit, GatewayRunAuditEntry, GatewayRunStack, LogicalCodebaseProviderGateway,

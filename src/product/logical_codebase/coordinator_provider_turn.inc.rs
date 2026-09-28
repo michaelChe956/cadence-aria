@@ -16,6 +16,10 @@ const AGGREGATE_CONFIG_ARTIFACT_REF: &str = "sha256:aggregate-initialization-man
 pub struct GatewayBackedAggregateProviderTurnDriver {
     gateway: Arc<crate::product::logical_codebase::LogicalCodebaseProviderGateway>,
     provider: crate::product::logical_codebase::ProviderRef,
+    /// C4 Task 8：Some(paths) 时，每个 provider turn 在 gateway validate 之前
+    /// 先经 `LogicalCodebaseProviderAdmissionPreflight`（实际成员规则、policy
+    /// digest/authority root 与 capability 谓词预检）；None 保持原行为。
+    admission_paths: Option<crate::product::app_paths::ProductAppPaths>,
 }
 
 impl GatewayBackedAggregateProviderTurnDriver {
@@ -31,6 +35,21 @@ impl GatewayBackedAggregateProviderTurnDriver {
             provider: crate::product::logical_codebase::ProviderRef::claude_code(
                 capability_snapshot_ref,
             ),
+            admission_paths: None,
+        }
+    }
+
+    /// C4 Task 8：带 admission 预检的构造——provider turn 前预检实际成员
+    /// `.claude/rules/language.md`、policy artifact 与 gateway capability，
+    /// 缺失/漂移时在 spawn 前返回 waiting 类错误，provider 保持零启动。
+    pub fn claude_code_with_admission(
+        gateway: Arc<crate::product::logical_codebase::LogicalCodebaseProviderGateway>,
+        capability_snapshot_ref: impl Into<String>,
+        paths: crate::product::app_paths::ProductAppPaths,
+    ) -> Self {
+        Self {
+            admission_paths: Some(paths),
+            ..Self::claude_code(gateway, capability_snapshot_ref)
         }
     }
 
@@ -95,6 +114,24 @@ impl AggregateProviderTurnDriver for GatewayBackedAggregateProviderTurnDriver {
         use crate::cross_cutting::session_launch::ValidatedStreamingProviderInput;
         let aggregate_root = std::path::PathBuf::from(&preflight.aggregate_root);
         let request = self.launch_request(project_id, &aggregate_root);
+        // C4 Task 8：真实材料 admission 预检先于 gateway validate——成员规则
+        // 缺失、policy 漂移或 capability 不满足时，在此 fail-closed，provider
+        // 保持零启动，而不是把缺材料暴露成运行时 Failed。
+        if let (Some(paths), Some(lc_id)) = (&self.admission_paths, _lc_id) {
+            let admission =
+                crate::product::logical_codebase::LogicalCodebaseProviderAdmissionPreflight::new(
+                    paths.clone(),
+                    lc_id,
+                    self.gateway.clone(),
+                );
+            if let Err(error) = admission.check(&request) {
+                return Err(AggregateInitializationError::ProviderTurn {
+                    step,
+                    reason: format!("provider admission preflight denied: {error:?}"),
+                    retryable: true,
+                });
+            }
+        }
         let validated = self.gateway.validate(request).map_err(|error| {
             AggregateInitializationError::ProviderTurn {
                 step,

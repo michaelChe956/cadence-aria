@@ -64,9 +64,14 @@ impl ValidatedSessionLaunchPolicy {
         &self.envelope
     }
 
-    /// 返回 resume 复验指纹。
+    /// resume 复验指纹。
     pub fn fingerprint(&self) -> &SessionResumeFingerprint {
         &self.fingerprint
+    }
+
+    /// 冻结的 capability snapshot 引用（C4 Task 8 admission 预检消费）。
+    pub fn capability_snapshot_ref(&self) -> &str {
+        &self.capability_snapshot_ref
     }
 }
 
@@ -951,7 +956,7 @@ impl LogicalCodebaseProviderGateway {
     ///
     /// 任一维度漂移都发生在 registry lookup 之前。路由级 fail-closed 不等于 OS
     /// 级隔离:本复验是 supervised 场景下的 TOCTOU 门禁,不宣称物理不可写。
-    fn revalidate_before_spawn(
+    pub(crate) fn revalidate_before_spawn(
         &self,
         validated: &ValidatedSessionLaunchPolicy,
         cwd: &Path,
