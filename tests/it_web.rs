@@ -132,6 +132,9 @@ mod web_events;
 mod web_hard_gate;
 #[path = "it_web/web_image_create_file_storage.rs"]
 mod web_image_create_file_storage;
+#[path = "it_web/web_lc_bootstrap_repair.rs"]
+mod web_lc_bootstrap_repair;
+
 #[path = "it_web/web_lc_operations_api.rs"]
 mod web_lc_operations_api;
 #[path = "it_web/web_lc_registration_api.rs"]

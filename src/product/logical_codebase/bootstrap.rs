@@ -221,7 +221,8 @@ impl LogicalCodebaseBootstrapProjector {
         let identity_step = self.project_identity_step(project_id, logical_codebase_id)?;
         let manifest_step =
             self.project_manifest_checkout_step(project_id, logical_codebase_id, &resolution)?;
-        let rules_step = self.project_rules_policy_step(project_id, &resolution);
+        let rules_step =
+            self.project_rules_policy_step(project_id, logical_codebase_id, &resolution)?;
         let member_index_step =
             self.project_member_index_step(project_id, logical_codebase_id)?;
         let aggregate_step =
@@ -376,17 +377,80 @@ impl LogicalCodebaseBootstrapProjector {
         }
     }
 
-    /// rules/policy：以聚合 policy artifact 的 durable 事实为准（真实规则
-    /// 文件的准入预检由 Task 8 的 admission 负责）。
+    /// rules/policy：聚合 policy artifact 的 durable 事实 + 只读检查每个
+    /// active 成员 main checkout 的 `.claude/rules/language.md`（与 Task 8
+    /// admission 预检同一路径）。policy 存在但成员规则缺失时投影
+    /// WaitingForHuman（reason `member_rules_missing`，Prepare/Retry），
+    /// 等用户通过产品准备动作恢复同一实际规则来源；本检查零写入。
     fn project_rules_policy_step(
         &self,
         project_id: &str,
+        logical_codebase_id: &str,
         resolution: &crate::product::logical_codebase::repository_routing::RepositoryAuthorityResolution,
-    ) -> BootstrapStepProjection {
-        match resolution.policy.as_ref() {
-            Some(policy) => BootstrapStepProjection {
+    ) -> Result<BootstrapStepProjection, ProductStoreError> {
+        let policy = match resolution.policy.as_ref() {
+            None => {
+                return Ok(BootstrapStepProjection {
+                    step: LogicalCodebaseBootstrapStep::RulesPolicy,
+                    status: LogicalCodebaseBootstrapStepStatus::NotStarted,
+                    object_id: logical_policy_missing_object_id(project_id),
+                    checkpoint: None,
+                    failure: None,
+                    allowed_actions: vec![BootstrapActionKind::Prepare],
+                });
+            }
+            Some(policy) => policy,
+        };
+
+        // 只读成员规则检查：不产生任何写入；成员/checkout 读取失败按
+        // store 错误上抛（fail-closed，不猜路径）。
+        let store = crate::product::logical_codebase::LogicalCodebaseStore::for_lc(
+            self.paths.clone(),
+            logical_codebase_id,
+        );
+        let members = store.list_members(project_id)?;
+        let checkouts = store.list_checkouts(project_id)?;
+        let mut missing_rules: Vec<String> = Vec::new();
+        for member in &members {
+            if member.status
+                != crate::product::logical_codebase::types::MemberStatus::Active
+            {
+                continue;
+            }
+            let checkout = checkouts
+                .iter()
+                .find(|checkout| {
+                    member.checkout_ids.contains(&checkout.checkout_id)
+                        && checkout.kind
+                            == crate::product::logical_codebase::types::CheckoutKind::Main
+                })
+                .or_else(|| {
+                    checkouts
+                        .iter()
+                        .find(|checkout| member.checkout_ids.contains(&checkout.checkout_id))
+                });
+            let Some(checkout) = checkout else {
+                missing_rules.push(format!(
+                    "member {} has no recorded checkout",
+                    member.alias
+                ));
+                continue;
+            };
+            let rule_path = checkout
+                .canonical_path
+                .join(".claude/rules/language.md");
+            if !rule_path.is_file() {
+                missing_rules.push(format!(
+                    "member {} missing {}",
+                    member.alias,
+                    rule_path.display()
+                ));
+            }
+        }
+        if !missing_rules.is_empty() {
+            return Ok(BootstrapStepProjection {
                 step: LogicalCodebaseBootstrapStep::RulesPolicy,
-                status: LogicalCodebaseBootstrapStepStatus::Completed,
+                status: LogicalCodebaseBootstrapStepStatus::WaitingForHuman,
                 object_id: policy.policy_id.clone(),
                 checkpoint: Some(BootstrapCheckpoint {
                     object_id: policy.policy_id.clone(),
@@ -395,18 +459,29 @@ impl LogicalCodebaseBootstrapProjector {
                     expected_membership_revision: None,
                     completed_at: None,
                 }),
-                failure: None,
-                allowed_actions: Vec::new(),
-            },
-            None => BootstrapStepProjection {
-                step: LogicalCodebaseBootstrapStep::RulesPolicy,
-                status: LogicalCodebaseBootstrapStepStatus::NotStarted,
-                object_id: logical_policy_missing_object_id(project_id),
-                checkpoint: None,
-                failure: None,
-                allowed_actions: vec![BootstrapActionKind::Prepare],
-            },
+                failure: Some(BootstrapFailure {
+                    reason_code: "member_rules_missing".to_string(),
+                    detail: missing_rules.join("; "),
+                    retryable: true,
+                    external_side_effect: "none".to_string(),
+                }),
+                allowed_actions: vec![BootstrapActionKind::Prepare, BootstrapActionKind::Retry],
+            });
         }
+        Ok(BootstrapStepProjection {
+            step: LogicalCodebaseBootstrapStep::RulesPolicy,
+            status: LogicalCodebaseBootstrapStepStatus::Completed,
+            object_id: policy.policy_id.clone(),
+            checkpoint: Some(BootstrapCheckpoint {
+                object_id: policy.policy_id.clone(),
+                input_digest: Some(policy.policy_digest.clone()),
+                output_artifact_ref: None,
+                expected_membership_revision: None,
+                completed_at: None,
+            }),
+            failure: None,
+            allowed_actions: Vec::new(),
+        })
     }
 
     /// member index：既有 aggregate initialization 的 deterministic
@@ -926,11 +1001,13 @@ mod tests {
     }
 
     fn init_git_repository_with_commit(path: &std::path::Path) {
-        std::fs::create_dir_all(path).unwrap();
+        std::fs::create_dir_all(path.join(".claude/rules")).unwrap();
         git(path, &["init", "-b", "main"]);
         git(path, &["config", "user.email", "bootstrap@test.local"]);
         git(path, &["config", "user.name", "Bootstrap Test"]);
         std::fs::write(path.join("README.md"), "# member\n").unwrap();
+        // 真实成员规则材料（Task 10 起 rules_policy 步只读检查成员规则）。
+        std::fs::write(path.join(".claude/rules/language.md"), "# rule\n").unwrap();
         git(path, &["add", "."]);
         git(path, &["commit", "-m", "init"]);
     }

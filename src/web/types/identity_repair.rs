@@ -36,6 +36,9 @@ pub struct IdentityJournalDiagnosticDto {
     pub conflicts: Vec<String>,
     pub impact: Vec<String>,
     pub allowed_actions: Vec<String>,
+    /// C4 Task 10：journal 当前 `updated_at`——POST `expected_journal_
+    /// updated_at` 的补读来源。
+    pub journal_updated_at: String,
 }
 
 impl From<&IdentityJournalDiagnostic> for IdentityJournalDiagnosticDto {
@@ -91,6 +94,7 @@ impl From<&IdentityJournalDiagnostic> for IdentityJournalDiagnosticDto {
                 })
                 .map(str::to_string)
                 .collect(),
+            journal_updated_at: diagnostic.journal_updated_at.clone(),
         }
     }
 }

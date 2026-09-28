@@ -63,12 +63,20 @@ pub async fn post_lc_identity_repair_action(
             ));
         }
     };
+    // C4 Task 10（A04 红灯发现）：`(_, Some(_))` 通配会误吞 submit_mapping
+    // 自身的 mapping——先显式匹配 submit_mapping 分支，非 submit 动作携带
+    // mapping 才是 unexpected。
     let mapping = match (&action, &request.mapping) {
         (IdentityRepairActionKind::SubmitMapping, None) => {
             return Err(ApiError::validation(
                 "identity_repair_mapping_required",
                 "submit_mapping requires a mapping submission",
             ));
+        }
+        (IdentityRepairActionKind::SubmitMapping, Some(_)) => {
+            Some(mapping_submission_from_dto(request.mapping.as_ref().expect(
+                "submit_mapping branch guarantees the mapping payload",
+            ))?)
         }
         (_, Some(_)) => {
             return Err(ApiError::validation(
@@ -77,10 +85,6 @@ pub async fn post_lc_identity_repair_action(
             ));
         }
         _ => None,
-    };
-    let mapping = match mapping {
-        None => None,
-        Some(submission) => Some(mapping_submission_from_dto(submission)?),
     };
 
     let service = IdentityRepairService::new(product_app_paths(&state));

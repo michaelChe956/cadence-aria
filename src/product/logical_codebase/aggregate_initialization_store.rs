@@ -387,6 +387,13 @@ impl AggregateInitializationOperationStore {
                     step.status = AggregateInitializationStepStatus::Pending;
                     step.started_at = None;
                     step.completed_at = None;
+                    // Pending 步骤的 durable 形状不变量不含部分 checkpoint
+                    //（`is_pending_step` 要求 input_digest/output_ref 为空）；
+                    // 重跑时由 mark_step_running 重新落盘。不清除会让真实
+                    // 协调器产生的 Failed operation（失败步必带 input_digest）
+                    // 在重开后的形状校验上 fail-closed（C4 Task 10 红灯发现）。
+                    step.input_digest = None;
+                    step.output_artifact_ref = None;
                 }
             }
             operation.status = AggregateInitializationOperationStatus::Running;

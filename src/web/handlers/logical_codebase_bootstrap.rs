@@ -131,7 +131,7 @@ async fn post_bootstrap_action_for_lc(
             step: request.step,
             action: request.action,
             expected_revision: request.expected_revision,
-            expected_object_id: request.expected_object_id,
+            expected_object_id: request.expected_object_id.clone(),
         })
         .await
         .map_err(|error| match error {
@@ -146,7 +146,88 @@ async fn post_bootstrap_action_for_lc(
             ),
             BootstrapActionError::Store(error) => product_store_api_error(error),
         })?;
-
+    // C4 Task 10（A03 续跑接缝）：member_index 的显式 Continue/Retry 被
+    // service 接受（Failed → reopen，durable 状态 Running）后，由原
+    // aggregate-initialization 编排链从 checkpoint 续跑——复用 create
+    // handler 的 run-lease + spawn + detached index build 模式；已完成
+    // provider turn 不重跑（execute_remaining 只执行未完成步骤）。
+    // recover_interrupted 分支（落盘 Failed + Retry 等待面）不在其列——
+    // 投影为 failed，续跑留给用户的下一次显式 Retry。
+    let member_index_reopened = matches!(
+        result.outcome,
+        crate::product::logical_codebase::BootstrapActionOutcome::Accepted
+    ) && request.step == crate::product::logical_codebase::LogicalCodebaseBootstrapStep::MemberIndex
+        && result
+            .projection
+            .steps
+            .iter()
+            .any(|step| {
+                step.step == crate::product::logical_codebase::LogicalCodebaseBootstrapStep::MemberIndex
+                    && step.status
+                        == crate::product::logical_codebase::LogicalCodebaseBootstrapStepStatus::Running
+            });
+    if member_index_reopened {
+        let dependencies = state
+            .aggregate_initialization_dependencies()
+            .for_lc(logical_codebase_id.clone());
+        let key = InitializationRunKey::aggregate(
+            &project_id,
+            &logical_codebase_id,
+            &request.expected_object_id,
+        );
+        let operation_id_for_worker = request.expected_object_id.clone();
+        if let Some(lease) = dependencies.runs().register(key) {
+            let token = lease.cancellation_token();
+            let coordinator = dependencies.coordinator.clone();
+            let index = dependencies.index.clone();
+            let project_id_for_worker = project_id.clone();
+            tokio::spawn(async move {
+                // 与 create handler 相同：lease 覆盖整个续跑执行。
+                let _lease = lease;
+                match coordinator
+                    .execute_remaining(&project_id_for_worker, &operation_id_for_worker, token)
+                    .await
+                {
+                    Ok(operation) => {
+                        // 续跑完成后的首建/索引推进仍走既有 detached
+                        // index build（失败独立可观测，不回滚初始化）。
+                        let manifest_revision = operation.input.manifest_revision;
+                        tokio::spawn(async move {
+                            let build = tokio::task::spawn_blocking(move || {
+                                index.build(&project_id_for_worker, manifest_revision)
+                            })
+                            .await;
+                            match build {
+                                Ok(Ok(_)) => {}
+                                Ok(Err(error)) => {
+                                    tracing::warn!(
+                                        operation_id = %operation_id_for_worker,
+                                        error = %error,
+                                        "bootstrap resume aggregate index build stopped"
+                                    );
+                                }
+                                Err(error) => {
+                                    tracing::warn!(
+                                        operation_id = %operation_id_for_worker,
+                                        error = %error,
+                                        "bootstrap resume aggregate index worker panicked"
+                                    );
+                                }
+                            }
+                        });
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            project_id = %project_id_for_worker,
+                            operation_id = %operation_id_for_worker,
+                            error = %error,
+                            "bootstrap resume worker stopped"
+                        );
+                    }
+                }
+            });
+        }
+    }
     // 事实已先落盘；EventHub 只承担通知/补读触发，发布失败不回滚。
     // Task 9：payload 携带 durable notice 上下文（step/object/reason/next
     // step），全部从 action 后重新投影的 notices 派生——通知不宣称任何

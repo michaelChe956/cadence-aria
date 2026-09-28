@@ -43,11 +43,18 @@ impl AggregateSkillsPreparation for CadenceAggregateSkillsPreparation {
 
 struct GatewayFactoryProviderTurnDriver {
     factory: Option<Arc<LogicalCodebaseGatewayFactory>>,
+    /// C4 Task 10：admission 预检所需的持久化路径（provider turn 前检查
+    /// 实际成员 `.claude/rules/language.md`、policy digest 与 capability；
+    /// 缺失时保持无预检旧行为——仅 factory 本身缺失的降级组装）。
+    paths: Option<ProductAppPaths>,
 }
 
 impl GatewayFactoryProviderTurnDriver {
-    fn new(factory: Option<Arc<LogicalCodebaseGatewayFactory>>) -> Self {
-        Self { factory }
+    fn new(
+        factory: Option<Arc<LogicalCodebaseGatewayFactory>>,
+        paths: Option<ProductAppPaths>,
+    ) -> Self {
+        Self { factory, paths }
     }
 }
 
@@ -76,12 +83,26 @@ impl AggregateProviderTurnDriver for GatewayFactoryProviderTurnDriver {
                 retryable: true,
             }
         })?;
-        GatewayBackedAggregateProviderTurnDriver::claude_code(
-            Arc::new(gateway),
-            "cap_managed_snapshot",
-        )
-        .run_turn(project_id, operation_id, step, preflight, lc_id, cancellation)
-        .await
+        // C4 Task 10：经 claude_code_with_admission 组装——provider turn 前
+        // 先做实际成员规则/policy/capability 的 admission 预检（Task 8），
+        // 缺失/漂移时 fail-closed，provider 保持零启动。lc_id 缺失（legacy
+        // 别名解析失败）时无法定位 per-LC authority，保持无预检旧路径。
+        let driver = match (lc_id, self.paths.as_ref()) {
+            (Some(_), Some(paths)) => {
+                GatewayBackedAggregateProviderTurnDriver::claude_code_with_admission(
+                    Arc::new(gateway),
+                    "cap_managed_snapshot",
+                    paths.clone(),
+                )
+            }
+            _ => GatewayBackedAggregateProviderTurnDriver::claude_code(
+                Arc::new(gateway),
+                "cap_managed_snapshot",
+            ),
+        };
+        driver
+            .run_turn(project_id, operation_id, step, preflight, lc_id, cancellation)
+            .await
     }
 }
 
@@ -103,7 +124,10 @@ impl AggregateInitializationDependencies {
         let preflight: Arc<dyn AggregatePreflightService> =
             Arc::new(DeterministicAggregatePreflightService::new(paths.clone()));
         let provider: Arc<dyn AggregateProviderTurnDriver> = Arc::new(
-            GatewayFactoryProviderTurnDriver::new(state.gateway_factory().cloned()),
+            GatewayFactoryProviderTurnDriver::new(
+                state.gateway_factory().cloned(),
+                Some(paths.clone()),
+            ),
         );
         let operations = AggregateInitializationOperationStore::new(paths.clone());
         let clock: Arc<dyn Fn() -> String + Send + Sync> =

@@ -33,6 +33,9 @@ pub struct IdentityJournalDiagnostic {
     pub conflicts: Vec<String>,
     pub impact: Vec<String>,
     pub allowed_actions: Vec<IdentityRepairActionKind>,
+    /// C4 Task 10：journal 当前 `updated_at`——显式 repair 动作 POST 的
+    /// `expected_journal_updated_at` 唯一权威来源（GET 只读补读同一值）。
+    pub journal_updated_at: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -173,6 +176,7 @@ impl IdentityRepairService {
             conflicts,
             impact,
             allowed_actions,
+            journal_updated_at: journal.updated_at.clone(),
         })
     }
 

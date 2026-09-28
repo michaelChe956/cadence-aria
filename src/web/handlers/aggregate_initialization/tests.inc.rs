@@ -68,7 +68,7 @@
         let preflight: Arc<dyn AggregatePreflightService> =
             Arc::new(DeterministicAggregatePreflightService::new(paths.clone()));
         let provider: Arc<dyn AggregateProviderTurnDriver> =
-            Arc::new(GatewayFactoryProviderTurnDriver::new(factory));
+            Arc::new(GatewayFactoryProviderTurnDriver::new(factory, None));
         let coordinator = AggregateInitializationCoordinator::new(
             paths,
             operations,
