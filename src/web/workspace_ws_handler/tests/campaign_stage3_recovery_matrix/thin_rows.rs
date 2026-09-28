@@ -206,6 +206,7 @@ async fn campaign_stage3_recovery_matrix_takeover_row_reconnect_continues_on_chi
     parent.status = WorkspaceSessionStatus::StoppedNeedsHuman;
     parent.run_policy = RunPolicy::AutoIfValid;
     parent.human_gate_snapshot = Some(HumanGateSnapshot {
+        candidate_recovery: None,
         findings: Vec::new(),
         repeated_fingerprints: Vec::new(),
         attempts_used: 0,

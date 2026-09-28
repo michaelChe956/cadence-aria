@@ -317,6 +317,7 @@ fn evaluate_gate_revision_fixture(
     record.review_rounds = review_rounds;
     record.status = WorkspaceSessionStatus::WaitingForHuman;
     record.human_gate_snapshot = Some(HumanGateSnapshot {
+        candidate_recovery: None,
         findings: Vec::new(),
         repeated_fingerprints: Vec::new(),
         attempts_used: 0,

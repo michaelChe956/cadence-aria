@@ -142,6 +142,7 @@ fn conversational_gate_recovery_revision_crash_window_with_cross_round_refs_fail
     session.single_candidate_phase = Some(SingleCandidatePhase::Approval);
     session.status = WorkspaceSessionStatus::WaitingForHuman;
     session.human_gate_snapshot = Some(HumanGateSnapshot {
+        candidate_recovery: None,
         findings: Vec::new(),
         repeated_fingerprints: Vec::new(),
         attempts_used: 0,
@@ -377,6 +378,7 @@ fn conversational_gate_recovery_forward_evidence_completes_revision() {
     session.single_candidate_phase = Some(SingleCandidatePhase::Approval);
     session.status = WorkspaceSessionStatus::WaitingForHuman;
     session.human_gate_snapshot = Some(HumanGateSnapshot {
+        candidate_recovery: None,
         findings: Vec::new(),
         repeated_fingerprints: Vec::new(),
         attempts_used: 0,
@@ -596,4 +598,377 @@ fn conversational_gate_recovery_reservation_commit_restart_keeps_budget_and_turn
             .len(),
         1
     );
+}
+
+/// C1 Task 4（REQ-C1-GATE-01/02）：孤儿候选门恢复矩阵。
+/// 场景 A：完整 candidate/source/budget/gate 事实落盘 + relay/WS consumer
+/// 缺席——零内存态重开引擎后能读同一 snapshot，恢复请求 accepted，原门
+/// approve 仍走完整 deterministic compile→Confirmed；同 command 重放返回
+/// 首次 durable 结果，不重复扣 budget/provider/turn。
+/// 场景 B：缺 source/IR/report refs 的 durable session——恢复返回
+/// needs_human（missing 可见），approve 固定 fail-closed，session
+/// phase/budget/provider ledger 全不变；旧 gate id 的恢复命令被拒。
+#[tokio::test]
+async fn orphaned_candidate_snapshot_requires_recovery_before_approve() {
+    use crate::product::checkpoint_store::CheckpointStore;
+    use crate::product::json_store::write_json;
+    use crate::product::models::{SingleCandidatePhase, WorkspaceSessionStatus};
+    use crate::product::work_item_plan_policy::{
+        HumanGateSnapshot, HumanReason, RunPolicy, WorkItemPlanFlowKind,
+    };
+    use crate::product::work_item_plan_policy::CandidateRecoveryAction;
+    use crate::product::workspace_engine::{CandidateRecoveryCommand, CandidateRecoveryOutcome};
+    use crate::product::workspace_engine::{
+        HumanGateCloseDecision, WorkspaceEngine, WorkspaceSession, WorkspaceStage,
+    };
+    use crate::web::workspace_ws_types::ArtifactPayload;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+
+    let rep4_candidate = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/product/work_item_plan_compiler/fixtures/work-item-plan-rep4.md"
+    ))
+    .replace(
+        "- provided_contract_refs: contract.levels-integration",
+        "- provided_contract_refs: []",
+    );
+
+    // —— 场景 A：完整候选事实 + relay/WS consumer 缺席 ——
+    let (root, lifecycle, _plan_id, mut engine) =
+        super::make_work_item_plan_engine_with_accepted_contract_drafts();
+    let app_paths = lifecycle.app_paths();
+    // 会话 scope 唯一化（与 campaign fixture 同款）：failpoint 注册表进程级
+    // 全局且以 durable scope 为键，避免与并发 failpoint 家族互扰。
+    {
+        static C1GATE_SESSION_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+        let mut record = lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("fixture session record");
+        let previous_session_path = app_paths
+            .issue_root(&record.project_id, &record.issue_id)
+            .join("workspace-sessions")
+            .join(format!("{}.json", record.id));
+        record.id = format!(
+            "{}-c1gate-{}",
+            record.id,
+            C1GATE_SESSION_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        let artifact = engine.session.artifact.clone();
+        write_json(
+            &app_paths
+                .issue_root(&record.project_id, &record.issue_id)
+                .join("workspace-sessions")
+                .join(format!("{}.json", record.id)),
+            &record,
+        )
+        .expect("persist c1gate-unique session");
+        std::fs::remove_file(&previous_session_path).expect("drop fixture session");
+        engine.session = WorkspaceSession::from_record(record);
+        engine.session.artifact = artifact;
+    }
+    super::single_candidate_recovery::single_candidate_recovery_record(
+        &lifecycle,
+        &mut engine,
+        SingleCandidatePhase::Approval,
+        RunPolicy::Interactive,
+    );
+    let gate_refs =
+        super::single_candidate_recovery::single_candidate_recovery_persist_candidate_artifacts(
+            &lifecycle,
+            &engine,
+            "c1gate",
+            &rep4_candidate,
+        );
+    super::single_candidate_recovery::single_candidate_recovery_update_refs(
+        &lifecycle,
+        &mut engine,
+        SingleCandidatePhase::Approval,
+        gate_refs,
+    );
+    engine
+        .update_artifact(ArtifactPayload::Markdown {
+            markdown: rep4_candidate.clone(),
+            diff: None,
+        })
+        .await;
+    let mut record = lifecycle
+        .get_workspace_session(&engine.session().session_id)
+        .expect("session record");
+    record.flow_kind = WorkItemPlanFlowKind::SingleCandidate;
+    record.run_policy = RunPolicy::Interactive;
+    record.review_rounds = 0;
+    record.single_candidate_phase = Some(SingleCandidatePhase::Approval);
+    record.status = WorkspaceSessionStatus::WaitingForHuman;
+    record.human_gate_snapshot = Some(HumanGateSnapshot {
+        candidate_recovery: None,
+        findings: Vec::new(),
+        repeated_fingerprints: Vec::new(),
+        attempts_used: 0,
+        manual_repairs_remaining: 2,
+        trigger: HumanReason::NativeHumanRequired,
+        resumable: true,
+        accepted_feedback_turns: None,
+    });
+    let session_path = app_paths
+        .issue_root(&record.project_id, &record.issue_id)
+        .join("workspace-sessions")
+        .join(format!("{}.json", record.id));
+    write_json(&session_path, &record).expect("persist c1gate gate session");
+    let artifact = engine.session.artifact.clone();
+    let mut session = WorkspaceSession::from_record(record);
+    session.stage = WorkspaceStage::HumanConfirm;
+    session.session_status = WorkspaceSessionStatus::WaitingForHuman;
+    session.artifact = artifact;
+    let (event_tx, _event_rx) = mpsc::channel(64);
+    let mut engine = WorkspaceEngine::new_persistent(
+        Arc::new(CheckpointStore::new(root.path().join("c1gate-a-checkpoints"))),
+        lifecycle.clone(),
+        event_tx,
+        session,
+    );
+    // 门开启（生产路径）：落 durable 门节点（绿色阶段同时于 relay 前持久化
+    // 候选快照完整性 label）。
+    engine
+        .enter_human_confirm(Some("C1 候选确认门".to_string()))
+        .await;
+    let gate_id = engine
+        .active_timeline_node_id()
+        .expect("durable active gate node");
+
+    // relay/WS consumer 缺席：零内存态重开。
+    let record = lifecycle
+        .get_workspace_session(&engine.session().session_id)
+        .expect("durable session after gate open");
+    let artifact = engine.session.artifact.clone();
+    let mut session = WorkspaceSession::from_record(record);
+    session.stage = WorkspaceStage::HumanConfirm;
+    session.artifact = artifact;
+    let (event_tx, _event_rx) = mpsc::channel(64);
+    let mut reopened = WorkspaceEngine::new_persistent(
+        Arc::new(CheckpointStore::new(root.path().join("c1gate-a-reopened"))),
+        lifecycle.clone(),
+        event_tx,
+        session,
+    );
+
+    // 恢复请求：accepted，完整事实可见。
+    let recovery = reopened
+        .recover_candidate_gate(CandidateRecoveryCommand {
+            command_id: "cmd-c1gate-recovery-a".to_string(),
+            expected_gate_id: gate_id.clone(),
+            action: CandidateRecoveryAction::Recover,
+        })
+        .await
+        .expect("candidate recovery accepted");
+    let CandidateRecoveryOutcome::Accepted { facts } = &recovery else {
+        panic!("expected accepted recovery, got {recovery:?}");
+    };
+    assert!(facts.complete, "missing: {:?}", facts.missing);
+    assert_eq!(facts.gate_id, gate_id);
+    assert_eq!(facts.budget_remaining, Some(2));
+
+    // durable label 已落：重开再读同一 snapshot 事实。
+    let labeled = lifecycle
+        .get_workspace_session(&reopened.session().session_id)
+        .expect("labeled session");
+    let label = labeled
+        .human_gate_snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.candidate_recovery.as_ref())
+        .expect("durable candidate recovery label");
+    assert!(label.complete);
+    assert_eq!(label.commands.len(), 1);
+
+    // 同 command 重放：返回首次 durable 结果，零预算/turn/ledger 增量。
+    let replayed = reopened
+        .recover_candidate_gate(CandidateRecoveryCommand {
+            command_id: "cmd-c1gate-recovery-a".to_string(),
+            expected_gate_id: gate_id.clone(),
+            action: CandidateRecoveryAction::Recover,
+        })
+        .await
+        .expect("replay resolves");
+    assert!(matches!(
+        &replayed,
+        CandidateRecoveryOutcome::Replayed { record, .. }
+            if record.command_id == "cmd-c1gate-recovery-a"
+    ));
+    let after_replay = lifecycle
+        .get_workspace_session(&reopened.session().session_id)
+        .expect("session after replay");
+    let replay_snapshot = after_replay.human_gate_snapshot.as_ref().unwrap();
+    assert_eq!(replay_snapshot.manual_repairs_remaining, 2);
+    assert_eq!(
+        replay_snapshot
+            .candidate_recovery
+            .as_ref()
+            .unwrap()
+            .commands
+            .len(),
+        1
+    );
+    assert!(after_replay.provider_start_ledger.is_empty());
+    assert!(
+        lifecycle
+            .list_human_gate_turns(&after_replay.id)
+            .expect("turns")
+            .is_empty()
+    );
+
+    // 原 gate 仍可用既有 approve：完整 deterministic compile → Confirmed。
+    let outcome = reopened
+        .handle_human_gate_termination(HumanGateCloseDecision::Approve)
+        .await
+        .expect("approve after recovery confirms");
+    assert!(matches!(
+        outcome,
+        crate::product::workspace_engine::HumanGateCloseOutcome::Confirmed
+    ));
+    let confirmed = lifecycle
+        .get_workspace_session(&reopened.session().session_id)
+        .expect("confirmed session");
+    assert_eq!(confirmed.status, WorkspaceSessionStatus::Confirmed);
+
+    // —— 场景 B：缺 source/IR/report refs 的孤儿门 ——
+    let (root, lifecycle, _plan_id, mut engine) =
+        super::make_work_item_plan_engine_with_accepted_contract_drafts();
+    let app_paths = lifecycle.app_paths();
+    {
+        static C1GATE_MISS_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+        let mut record = lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("fixture session record");
+        let previous_session_path = app_paths
+            .issue_root(&record.project_id, &record.issue_id)
+            .join("workspace-sessions")
+            .join(format!("{}.json", record.id));
+        record.id = format!(
+            "{}-c1gate-miss-{}",
+            record.id,
+            C1GATE_MISS_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        write_json(
+            &app_paths
+                .issue_root(&record.project_id, &record.issue_id)
+                .join("workspace-sessions")
+                .join(format!("{}.json", record.id)),
+            &record,
+        )
+        .expect("persist c1gate-miss session");
+        std::fs::remove_file(&previous_session_path).expect("drop fixture session");
+        engine.session = WorkspaceSession::from_record(record);
+    }
+    // 只落门快照与预算，故意不持久化 candidate source/IR/report refs。
+    let mut record = lifecycle
+        .get_workspace_session(&engine.session().session_id)
+        .expect("session record");
+    record.flow_kind = WorkItemPlanFlowKind::SingleCandidate;
+    record.run_policy = RunPolicy::Interactive;
+    record.review_rounds = 0;
+    record.single_candidate_phase = Some(SingleCandidatePhase::Approval);
+    record.status = WorkspaceSessionStatus::WaitingForHuman;
+    record.human_gate_snapshot = Some(HumanGateSnapshot {
+        candidate_recovery: None,
+        findings: Vec::new(),
+        repeated_fingerprints: Vec::new(),
+        attempts_used: 0,
+        manual_repairs_remaining: 2,
+        trigger: HumanReason::NativeHumanRequired,
+        resumable: true,
+        accepted_feedback_turns: None,
+    });
+    let session_path = app_paths
+        .issue_root(&record.project_id, &record.issue_id)
+        .join("workspace-sessions")
+        .join(format!("{}.json", record.id));
+    write_json(&session_path, &record).expect("persist c1gate-miss gate session");
+    let mut session = WorkspaceSession::from_record(record);
+    session.stage = WorkspaceStage::HumanConfirm;
+    session.session_status = WorkspaceSessionStatus::WaitingForHuman;
+    let (event_tx, _event_rx) = mpsc::channel(64);
+    let mut engine = WorkspaceEngine::new_persistent(
+        Arc::new(CheckpointStore::new(root.path().join("c1gate-b-checkpoints"))),
+        lifecycle.clone(),
+        event_tx,
+        session,
+    );
+    engine
+        .enter_human_confirm(Some("C1 缺事实候选门".to_string()))
+        .await;
+    let stale_gate_id = engine
+        .active_timeline_node_id()
+        .expect("durable active gate node");
+
+    // 旧 gate id 的恢复命令：零副作用拒绝（GATE_MISMATCH）。
+    let mismatch = engine
+        .recover_candidate_gate(CandidateRecoveryCommand {
+            command_id: "cmd-c1gate-recovery-b-mismatch".to_string(),
+            expected_gate_id: "timeline_node_stale".to_string(),
+            action: CandidateRecoveryAction::Recover,
+        })
+        .await
+        .expect_err("stale gate id must be rejected");
+    assert!(mismatch.contains("GATE_MISMATCH"), "got: {mismatch}");
+
+    // 恢复请求：needs_human，缺失事实可见。
+    let recovery = engine
+        .recover_candidate_gate(CandidateRecoveryCommand {
+            command_id: "cmd-c1gate-recovery-b".to_string(),
+            expected_gate_id: stale_gate_id.clone(),
+            action: CandidateRecoveryAction::Recover,
+        })
+        .await
+        .expect("assessment resolves");
+    let CandidateRecoveryOutcome::NeedsHuman { facts } = &recovery else {
+        panic!("expected needs_human recovery, got {recovery:?}");
+    };
+    assert!(!facts.complete);
+    assert!(!facts.missing.is_empty());
+
+    // 裸 approve：固定 fail-closed，不扣预算、不启动 compile/provider。
+    let rejected = engine
+        .handle_human_gate_termination(HumanGateCloseDecision::Approve)
+        .await
+        .expect_err("approve without complete snapshot must fail closed");
+    assert!(
+        rejected.contains("CANDIDATE_SNAPSHOT_INCOMPLETE"),
+        "got: {rejected}"
+    );
+    let after = lifecycle
+        .get_workspace_session(&engine.session().session_id)
+        .expect("session after reject");
+    assert_eq!(after.status, WorkspaceSessionStatus::WaitingForHuman);
+    assert_eq!(
+        after.single_candidate_phase,
+        Some(SingleCandidatePhase::Approval)
+    );
+    assert_eq!(
+        after.human_gate_snapshot.as_ref().unwrap().manual_repairs_remaining,
+        2,
+        "预算不动"
+    );
+    assert!(after.provider_start_ledger.is_empty());
+    assert!(
+        lifecycle
+            .list_human_gate_turns(&after.id)
+            .expect("turns")
+            .is_empty()
+    );
+
+    // 同 command 重放：同一 durable needs_human 结果，不二次评估改写。
+    let replayed = engine
+        .recover_candidate_gate(CandidateRecoveryCommand {
+            command_id: "cmd-c1gate-recovery-b".to_string(),
+            expected_gate_id: stale_gate_id.clone(),
+            action: CandidateRecoveryAction::Recover,
+        })
+        .await
+        .expect("replay resolves");
+    assert!(matches!(
+        &replayed,
+        CandidateRecoveryOutcome::Replayed { record, .. } if record.state
+            == crate::product::models::OperationState::NeedsHuman
+    ));
 }

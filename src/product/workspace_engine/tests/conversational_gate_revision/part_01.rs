@@ -269,6 +269,7 @@ fn durable_revision_fixture(
     record.review_rounds = 0;
     record.status = crate::product::models::WorkspaceSessionStatus::WaitingForHuman;
     record.human_gate_snapshot = Some(crate::product::work_item_plan_policy::HumanGateSnapshot {
+        candidate_recovery: None,
         findings: Vec::new(),
         repeated_fingerprints: Vec::new(),
         attempts_used: 0,

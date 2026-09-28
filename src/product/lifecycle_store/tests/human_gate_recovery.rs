@@ -7,6 +7,7 @@ fn human_gate_recovery_attempt_updates_same_turn_and_terminal_replay_reserves_ag
     let (_tmp, store) = setup();
     let mut session = create_session(&store, "work_item_plan_attempt", WorkspaceType::WorkItemPlan);
     session.human_gate_snapshot = Some(HumanGateSnapshot {
+        candidate_recovery: None,
         findings: Vec::new(),
         repeated_fingerprints: Vec::new(),
         attempts_used: 0,

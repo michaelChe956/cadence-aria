@@ -681,6 +681,7 @@ impl WorkspaceEngine {
         };
         let history = record.run_history.clone();
         let snapshot = HumanGateSnapshot {
+            candidate_recovery: None,
             findings: Vec::new(),
             repeated_fingerprints: Vec::new(),
             attempts_used: history

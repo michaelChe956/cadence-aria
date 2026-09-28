@@ -204,6 +204,12 @@ impl IntoResponse for ApiError {
             "human_action_rejected" => StatusCode::UNPROCESSABLE_ENTITY,
             "invalid_compile_recovery_action" => StatusCode::UNPROCESSABLE_ENTITY,
             "single_candidate_approval_compile_failed" => StatusCode::UNPROCESSABLE_ENTITY,
+            // C1 Task 4：候选门恢复/缺快照裸 approve 稳定码——门/命令
+            // 身份冲突 409，语义拒绝/快照不完整 422。
+            "candidate_recovery_gate_mismatch" => StatusCode::CONFLICT,
+            "candidate_recovery_command_conflict" => StatusCode::CONFLICT,
+            "candidate_recovery_rejected" => StatusCode::UNPROCESSABLE_ENTITY,
+            "candidate_snapshot_incomplete" => StatusCode::UNPROCESSABLE_ENTITY,
             // P2 GAP-E/G（Task 0.1）failed-sc-runs retry 稳定码：前置
             // 不满足 409（busy/非最新失败节点/认领异键）、请求非法 422。
             "sc_recovery_busy" => StatusCode::CONFLICT,

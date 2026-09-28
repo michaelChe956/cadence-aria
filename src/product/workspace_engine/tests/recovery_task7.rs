@@ -39,6 +39,7 @@ fn recovery_session(
 fn recovery_gate(resumable: bool) -> crate::product::work_item_plan_policy::HumanGateSnapshot {
     let class = crate::product::work_item_plan_policy::FindingClass::HumanRequired;
     crate::product::work_item_plan_policy::HumanGateSnapshot {
+        candidate_recovery: None,
         findings: vec![crate::product::work_item_plan_policy::ClassifiedFinding {
             class,
             fingerprint: crate::product::work_item_plan_policy::FindingFingerprint::for_finding(

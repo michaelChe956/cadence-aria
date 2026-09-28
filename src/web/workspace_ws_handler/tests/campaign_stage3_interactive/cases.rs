@@ -750,6 +750,7 @@ async fn campaign_stage3_takeover_auto_stopped_reuses_snapshot_budget_and_candid
     parent.status = WorkspaceSessionStatus::StoppedNeedsHuman;
     parent.run_policy = RunPolicy::AutoIfValid;
     parent.human_gate_snapshot = Some(HumanGateSnapshot {
+        candidate_recovery: None,
         findings: Vec::new(),
         repeated_fingerprints: Vec::new(),
         attempts_used: 0,

@@ -179,6 +179,7 @@ async fn amendment_chain_fixture(resume_mode: AmendmentResumeMode) -> AmendmentC
     parent.status = WorkspaceSessionStatus::Confirmed;
     parent.single_candidate_phase = Some(SingleCandidatePhase::Completed);
     parent.human_gate_snapshot = Some(HumanGateSnapshot {
+        candidate_recovery: None,
         findings: Vec::new(),
         repeated_fingerprints: Vec::new(),
         attempts_used: 0,

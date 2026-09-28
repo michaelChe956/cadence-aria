@@ -7,6 +7,7 @@
 //! Confirmed）；受理（含幂等重放与 AlreadyClosed）200。
 
 use axum::Json;
+use axum::response::IntoResponse;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use serde_json::json;
@@ -25,7 +26,7 @@ pub async fn post_workspace_human_action(
     State(state): State<WebAppState>,
     Path(session_id): Path<String>,
     Json(request): Json<HumanActionRequest>,
-) -> ApiResult<(StatusCode, Json<HumanActionStatus>)> {
+) -> ApiResult<axum::response::Response> {
     let manager = resolve_session_manager(&state, &session_id).await?;
     let (command_id, expected_gate_id) = command_and_gate(&request);
     if command_id.trim().is_empty() {
@@ -54,6 +55,13 @@ pub async fn post_workspace_human_action(
     }
     let gate_id = gate_id.unwrap_or_default();
     let engine = manager.engine();
+    // C1 Task 4：CandidateRecovery 携带专用响应体（facts/missing 投影），
+    // 与既有 HumanActionStatus 族并存于同一路由（唯一 additive variant）。
+    if matches!(request, HumanActionRequest::CandidateRecovery { .. }) {
+        let result = handle_candidate_recovery(engine, gate_id, command_id, &session_id, request)
+            .await?;
+        return Ok((StatusCode::OK, Json(result)).into_response());
+    }
     handle_request(&state, &manager, &session_id, engine, gate_id, request)
         .await
         .map(|status| {
@@ -62,8 +70,80 @@ pub async fn post_workspace_human_action(
             } else {
                 StatusCode::OK
             };
-            (code, Json(status))
+            (code, Json(status)).into_response()
         })
+}
+
+/// C1 Task 4（REQ-C1-GATE-01/02）：候选门恢复动作的薄入口——只调用引擎
+/// 应用服务 `recover_candidate_gate`，不承载判定逻辑。
+async fn handle_candidate_recovery(
+    engine: std::sync::Arc<tokio::sync::Mutex<crate::product::workspace_engine::WorkspaceEngine>>,
+    gate_id: String,
+    command_id: String,
+    session_id: &str,
+    request: HumanActionRequest,
+) -> ApiResult<crate::web::types::CandidateRecoveryResult> {
+    use crate::product::models::OperationState;
+    use crate::product::workspace_engine::CandidateRecoveryCommand;
+    use crate::web::types::CandidateRecoveryResult;
+
+    let HumanActionRequest::CandidateRecovery { action, .. } = request else {
+        return Err(ApiError::runtime(
+            "candidate_recovery_rejected",
+            "not a candidate recovery request".to_string(),
+            json!({ "command_id": command_id, "session_id": session_id }),
+        ));
+    };
+    let outcome = {
+        let mut engine = engine.lock().await;
+        engine
+            .recover_candidate_gate(CandidateRecoveryCommand {
+                command_id: command_id.clone(),
+                expected_gate_id: gate_id.clone(),
+                action: action.into(),
+            })
+            .await
+    };
+    let projection = |state: OperationState,
+                      complete: bool,
+                      missing: Vec<String>,
+                      completed_steps: Vec<String>| CandidateRecoveryResult {
+        command_id: command_id.clone(),
+        gate_id: gate_id.clone(),
+        state,
+        complete,
+        missing,
+        completed_steps,
+    };
+    match outcome {
+        Ok(crate::product::workspace_engine::CandidateRecoveryOutcome::Accepted { facts }) => {
+            Ok(projection(OperationState::Accepted, facts.complete, facts.missing, facts.completed_steps))
+        }
+        Ok(crate::product::workspace_engine::CandidateRecoveryOutcome::NeedsHuman { facts }) => {
+            Ok(projection(OperationState::NeedsHuman, facts.complete, facts.missing, facts.completed_steps))
+        }
+        Ok(crate::product::workspace_engine::CandidateRecoveryOutcome::Replayed { facts, .. }) => {
+            Ok(projection(OperationState::Replayed, facts.complete, facts.missing, facts.completed_steps))
+        }
+        Err(message) => {
+            let code = if message.contains("GATE_MISMATCH") {
+                "candidate_recovery_gate_mismatch"
+            } else if message.contains("COMMAND_CONFLICT") {
+                "candidate_recovery_command_conflict"
+            } else {
+                "candidate_recovery_rejected"
+            };
+            Err(ApiError::runtime(
+                code,
+                message,
+                json!({
+                    "command_id": command_id,
+                    "gate_id": gate_id,
+                    "session_id": session_id,
+                }),
+            ))
+        }
+    }
 }
 
 async fn handle_request(
@@ -154,11 +234,20 @@ async fn handle_request(
                     findings_context
                         .unwrap_or_else(|| json!({ "command_id": command_id, "gate_id": gate_id })),
                 )),
-                HumanGateTerminationEffect::EngineError(message) => Err(ApiError::runtime(
-                    "human_action_engine_error",
-                    message,
-                    json!({ "command_id": command_id, "session_id": session_id }),
-                )),
+                HumanGateTerminationEffect::EngineError(message) => {
+                    // C1（REQ-C1-GATE-01）：缺完整候选快照的裸 approve 以
+                    // 专用 code 上抛（422），不混入引擎噪音通道。
+                    let code = if message.contains("CANDIDATE_SNAPSHOT_INCOMPLETE") {
+                        "candidate_snapshot_incomplete"
+                    } else {
+                        "human_action_engine_error"
+                    };
+                    Err(ApiError::runtime(
+                        code,
+                        message,
+                        json!({ "command_id": command_id, "session_id": session_id }),
+                    ))
+                }
             }
         }
         HumanActionRequest::CompileRecovery {
@@ -182,6 +271,13 @@ async fn handle_request(
                 )),
             }
         }
+        // C1 Task 4：CandidateRecovery 在 post_workspace_human_action 中
+        // 先行分流到 handle_candidate_recovery（专用响应体），此处不可达。
+        HumanActionRequest::CandidateRecovery { command_id, .. } => Err(ApiError::runtime(
+            "candidate_recovery_rejected",
+            "candidate recovery is dispatched before handle_request".to_string(),
+            json!({ "command_id": command_id, "gate_id": gate_id }),
+        )),
     }
 }
 
@@ -201,6 +297,11 @@ fn command_and_gate(request: &HumanActionRequest) -> (String, String) {
             ..
         }
         | HumanActionRequest::CompileRecovery {
+            command_id,
+            expected_gate_id,
+            ..
+        }
+        | HumanActionRequest::CandidateRecovery {
             command_id,
             expected_gate_id,
             ..

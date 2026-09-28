@@ -94,6 +94,7 @@ pub fn route_outcome(
 
 fn human_gate_snapshot(context: &GateSnapshotContext, resumable: bool) -> HumanGateSnapshot {
     HumanGateSnapshot {
+        candidate_recovery: None,
         findings: context.findings.clone(),
         repeated_fingerprints: context.repeated_fingerprints.clone(),
         attempts_used: context

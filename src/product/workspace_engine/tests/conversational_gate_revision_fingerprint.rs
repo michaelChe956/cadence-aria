@@ -22,6 +22,7 @@ fn feedback(command_id: &str) -> HumanGateFeedbackInput {
 fn conversational_gate_revision_repeated_fingerprint_returns_same_gate() {
     let fingerprint = FindingFingerprint::new("a".repeat(64)).expect("fingerprint");
     let snapshot = crate::product::work_item_plan_policy::HumanGateSnapshot {
+        candidate_recovery: None,
         findings: Vec::new(),
         repeated_fingerprints: vec![fingerprint.clone()],
         attempts_used: 2,

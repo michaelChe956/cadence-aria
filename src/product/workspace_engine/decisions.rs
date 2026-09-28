@@ -327,6 +327,10 @@ impl WorkspaceEngine {
         {
             self.session.session_status = record.status;
         }
+        // C1 Task 4（REQ-C1-GATE-01）：relay/observer 广播门开启之前，先把
+        // 候选快照完整性事实随门快照原子落盘——观察面（WS/通知/inbox）失败
+        // 时驾驶舱仍能从 durable 补读完整恢复面。
+        self.persist_candidate_snapshot_before_relay().await;
         let _ = self
             .event_tx
             .send(EngineEvent::HumanGateOpened {

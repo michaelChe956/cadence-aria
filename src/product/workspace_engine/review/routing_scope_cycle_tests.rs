@@ -91,6 +91,7 @@ fn single_candidate_cycle_is_anchored_on_candidate_revision_identity() {
 #[test]
 fn single_candidate_terminal_actions_close_the_review_cycle() {
     let snapshot = crate::product::work_item_plan_policy::HumanGateSnapshot {
+        candidate_recovery: None,
         findings: Vec::new(),
         repeated_fingerprints: Vec::new(),
         attempts_used: 0,

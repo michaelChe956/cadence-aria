@@ -710,6 +710,44 @@ impl LifecycleStore {
         })
     }
 
+    /// C1 Task 4（REQ-C1-GATE-01）：候选恢复评估 label 的原子合并写。
+    /// CAS 判据与 `compare_and_save_policy_route` 一致（整记录相等，
+    /// single-flight）；只改写 `human_gate_snapshot.candidate_recovery`，
+    /// 不触碰 status/phase/预算/ledger/turn。门快照缺席时 fail-closed。
+    pub fn compare_and_save_candidate_recovery(
+        &self,
+        expected: &WorkspaceSessionRecord,
+        recovery: crate::product::work_item_plan_policy::CandidateSnapshotRecovery,
+    ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
+        if expected.human_gate_snapshot.is_none() {
+            return Err(ProductStoreError::InvalidRecord {
+                kind: "candidate_recovery",
+                reason: "human gate snapshot is missing".to_string(),
+            });
+        }
+        let session_path = self.find_workspace_session_path(&expected.id)?;
+        let locked_session_path = session_path.clone();
+        with_exclusive_lock(&session_path, move || {
+            let mut stored: WorkspaceSessionRecord = read_json(&locked_session_path)?;
+            if stored != *expected {
+                return Err(ProductStoreError::Conflict {
+                    kind: "workspace_session",
+                    id: expected.id.clone(),
+                });
+            }
+            let Some(snapshot) = stored.human_gate_snapshot.as_mut() else {
+                return Err(ProductStoreError::InvalidRecord {
+                    kind: "candidate_recovery",
+                    reason: "human gate snapshot is missing".to_string(),
+                });
+            };
+            snapshot.candidate_recovery = Some(recovery);
+            stored.updated_at = Utc::now().to_rfc3339();
+            write_json(&locked_session_path, &stored)?;
+            Ok(stored)
+        })
+    }
+
     /// Atomically claims a provider-start idempotency key. A key can be claimed
     /// only once, and the durable ledger is the source of truth during recovery.
     pub fn claim_provider_start(

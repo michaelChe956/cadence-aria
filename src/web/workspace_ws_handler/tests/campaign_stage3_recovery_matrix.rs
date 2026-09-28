@@ -68,5 +68,6 @@ use std::sync::Mutex as StdMutex;
 
 // 大文件守卫(>1200 行)按 include! 拆分:amendment_row=修订行四窗口深测;
 // thin_rows=turn reservation/takeover/advance journal 三条薄行。
-include!("campaign_stage3_recovery_matrix/amendment_row.rs");
-include!("campaign_stage3_recovery_matrix/thin_rows.rs");
+ include!("campaign_stage3_recovery_matrix/amendment_row.rs");
+ include!("campaign_stage3_recovery_matrix/thin_rows.rs");
+include!("campaign_stage3_recovery_matrix/candidate_row.rs");

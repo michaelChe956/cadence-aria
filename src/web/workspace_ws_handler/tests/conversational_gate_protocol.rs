@@ -147,6 +147,7 @@ async fn conversational_gate_feedback_reaches_service_through_socket_dispatch() 
         .expect("create gate session");
     record.status = WorkspaceSessionStatus::WaitingForHuman;
     record.human_gate_snapshot = Some(HumanGateSnapshot {
+        candidate_recovery: None,
         findings: Vec::new(),
         repeated_fingerprints: Vec::new(),
         attempts_used: 0,
@@ -258,6 +259,7 @@ async fn conversational_gate_budget_exhausted_reaches_handler_as_protocol_error(
     record.status = WorkspaceSessionStatus::WaitingForHuman;
     record.single_candidate_phase = Some(SingleCandidatePhase::Approval);
     record.human_gate_snapshot = Some(HumanGateSnapshot {
+        candidate_recovery: None,
         findings: Vec::new(),
         repeated_fingerprints: Vec::new(),
         attempts_used: 0,
@@ -473,6 +475,7 @@ async fn conversational_gate_post_approve_feedback_is_structured_protocol_error(
     record.status = WorkspaceSessionStatus::Confirmed;
     record.single_candidate_phase = Some(SingleCandidatePhase::Completed);
     record.human_gate_snapshot = Some(HumanGateSnapshot {
+        candidate_recovery: None,
         findings: Vec::new(),
         repeated_fingerprints: Vec::new(),
         attempts_used: 0,
@@ -604,6 +607,7 @@ async fn confirm_compile_failure_surfaces_findings_as_protocol_error_context() {
     record.flow_kind = WorkItemPlanFlowKind::SingleCandidate;
     record.single_candidate_phase = Some(SingleCandidatePhase::Approval);
     record.human_gate_snapshot = Some(HumanGateSnapshot {
+        candidate_recovery: None,
         findings: Vec::new(),
         repeated_fingerprints: Vec::new(),
         attempts_used: 0,
@@ -826,6 +830,7 @@ async fn late_confirm_after_gate_closed_is_silent_idempotent_noop_at_ws_boundary
     session.session_status = WorkspaceSessionStatus::WaitingForHuman;
     session.single_candidate_phase = Some(SingleCandidatePhase::Approval);
     session.human_gate_snapshot = Some(HumanGateSnapshot {
+        candidate_recovery: None,
         findings: Vec::new(),
         repeated_fingerprints: Vec::new(),
         attempts_used: 0,

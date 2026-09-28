@@ -50,6 +50,7 @@ fn human_gate_reservation_cas_writes_turn_budget_and_provider_key_atomically() {
     let (_tmp, store) = setup();
     let mut session = create_session(&store, "work_item_plan_0001", WorkspaceType::WorkItemPlan);
     session.human_gate_snapshot = Some(HumanGateSnapshot {
+        candidate_recovery: None,
         findings: Vec::new(),
         repeated_fingerprints: Vec::new(),
         attempts_used: 0,
@@ -177,6 +178,7 @@ fn human_gate_reservation_replay_repairs_torn_turn_file_without_double_debit() {
     let (_tmp, store) = setup();
     let mut session = create_session(&store, "work_item_plan_torn", WorkspaceType::WorkItemPlan);
     session.human_gate_snapshot = Some(HumanGateSnapshot {
+        candidate_recovery: None,
         findings: Vec::new(),
         repeated_fingerprints: Vec::new(),
         attempts_used: 0,

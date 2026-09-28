@@ -48,6 +48,7 @@ pub(super) fn gate_fixture_with_event_rx(
     record.status = WorkspaceSessionStatus::WaitingForHuman;
     record.single_candidate_phase = Some(SingleCandidatePhase::Approval);
     record.human_gate_snapshot = Some(HumanGateSnapshot {
+        candidate_recovery: None,
         findings: Vec::new(),
         repeated_fingerprints: Vec::new(),
         attempts_used: 0,

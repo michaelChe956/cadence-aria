@@ -163,7 +163,8 @@ pub(crate) use conversational_gate::{
     ScManualRevisionResult,
 };
 pub(crate) use conversational_gate_recovery::{
-    HUMAN_GATE_PROVIDER_MAX_ATTEMPTS, HumanGateRecoveryAction, provider_run_kind_for_human_gate,
+    HUMAN_GATE_PROVIDER_MAX_ATTEMPTS, CandidateRecoveryCommand, CandidateRecoveryOutcome,
+    HumanGateRecoveryAction, provider_run_kind_for_human_gate,
 };
 pub(crate) use lifecycle_recovery::*;
 pub(crate) use mappings::*;

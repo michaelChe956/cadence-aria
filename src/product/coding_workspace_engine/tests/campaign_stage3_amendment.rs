@@ -128,6 +128,7 @@ async fn campaign_confirmed_plan_session(budget: u32) -> (TempDir, LifecycleStor
     record.single_candidate_phase = Some(SingleCandidatePhase::Approval);
     record.status = WorkspaceSessionStatus::WaitingForHuman;
     record.human_gate_snapshot = Some(HumanGateSnapshot {
+        candidate_recovery: None,
         findings: Vec::new(),
         repeated_fingerprints: Vec::new(),
         attempts_used: 0,

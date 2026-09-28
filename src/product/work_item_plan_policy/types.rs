@@ -91,8 +91,55 @@ pub struct HumanGateSnapshot {
     /// ——gate-local 事实缺席，保守呈现「预算历史不可用」，不补计数不改历史。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accepted_feedback_turns: Option<u32>,
+    /// C1 Task 4（REQ-C1-GATE-01）：候选快照完整性评估 + 恢复命令账本；
+    /// 在 relay/observer 之前随门快照原子落盘。旧会话 durable JSON 缺省
+    /// None——不补写，approve/feedback 语义保持既有行为零回归。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_recovery: Option<CandidateSnapshotRecovery>,
     pub trigger: super::HumanReason,
     pub resumable: bool,
+}
+
+/// C1 Task 4（REQ-C1-GATE-01）：候选门恢复动作。`Recover`＝恢复原门/原轮次；
+/// `Rebuild`＝允许从权威 source/IR/report 重建呈现面（不新建候选权威）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CandidateRecoveryAction {
+    Recover,
+    Rebuild,
+}
+
+/// C1 Task 4：候选快照完整性评估事实。`complete=false` 时 `missing` 列出
+/// 缺失/不可读事实，approve 固定 fail-closed（不扣预算、不启动 provider）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CandidateSnapshotRecovery {
+    pub complete: bool,
+    pub gate_id: String,
+    pub source_revision_ref: Option<String>,
+    pub source_revision_hash: Option<String>,
+    pub plan_candidate_ir_ref: Option<String>,
+    pub mechanical_report_ref: Option<String>,
+    pub budget_remaining: Option<u32>,
+    /// 缺失/不可读事实的诊断清单（如 `source_revision_missing`、
+    /// `mechanical_report_unreadable`）；complete=true 时为空。
+    pub missing: Vec<String>,
+    /// 已完成步骤（inbox 投影：candidate_source_persisted 等）。
+    pub completed_steps: Vec<String>,
+    /// 恢复命令幂等账本：同 command 同负载重放首次 durable 结果，
+    /// 异 payload fail-closed。
+    #[serde(default)]
+    pub commands: Vec<CandidateRecoveryCommandRecord>,
+    pub assessed_at: String,
+}
+
+/// C1 Task 4（REQ-C1-GATE-02）：单条恢复命令的 durable 结果。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CandidateRecoveryCommandRecord {
+    pub command_id: String,
+    pub action: CandidateRecoveryAction,
+    pub state: crate::product::models::OperationState,
+    pub missing: Vec<String>,
+    pub recorded_at: String,
 }
 
 /// Durable provider-start idempotency record. The key is the source of truth

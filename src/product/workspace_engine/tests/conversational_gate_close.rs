@@ -23,6 +23,7 @@ fn approval_fixture() -> (tempfile::TempDir, LifecycleStore, WorkspaceEngine) {
     record.single_candidate_phase = Some(SingleCandidatePhase::Approval);
     record.status = WorkspaceSessionStatus::WaitingForHuman;
     record.human_gate_snapshot = Some(crate::product::work_item_plan_policy::HumanGateSnapshot {
+        candidate_recovery: None,
         findings: Vec::new(),
         repeated_fingerprints: Vec::new(),
         attempts_used: 0,
@@ -189,6 +190,7 @@ async fn conversational_gate_post_approve_feedback_keeps_structured_stage_reject
     record.status = WorkspaceSessionStatus::Confirmed;
     record.single_candidate_phase = Some(SingleCandidatePhase::Completed);
     record.human_gate_snapshot = Some(crate::product::work_item_plan_policy::HumanGateSnapshot {
+        candidate_recovery: None,
         findings: Vec::new(),
         repeated_fingerprints: Vec::new(),
         attempts_used: 0,
@@ -676,6 +678,7 @@ fn evaluate_gate_fixture(
     record.review_rounds = 0;
     record.status = WorkspaceSessionStatus::WaitingForHuman;
     record.human_gate_snapshot = Some(crate::product::work_item_plan_policy::HumanGateSnapshot {
+        candidate_recovery: None,
         findings: Vec::new(),
         repeated_fingerprints: Vec::new(),
         attempts_used: 0,

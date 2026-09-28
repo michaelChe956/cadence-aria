@@ -100,7 +100,7 @@ fn non_terminal(turn: &HumanGateTurn) -> bool {
     )
 }
 
-fn validate_command_id(command_id: &str) -> Result<(), String> {
+pub(crate) fn validate_command_id(command_id: &str) -> Result<(), String> {
     if command_id.trim().is_empty() {
         return Err("INVALID_COMMAND_ID: command_id must not be blank".to_string());
     }
@@ -955,6 +955,26 @@ impl super::WorkspaceEngine {
             return Ok(HumanGateCloseOutcome::Busy {
                 turn_id: turn.turn_id,
             });
+        }
+
+        // C1（REQ-C1-GATE-01）：门快照携带候选恢复评估 label 时（C1 后开启
+        // 的候选审批门），approve 前按 durable 事实重估完整性；不完整则
+        // fail-closed——不扣预算、不启动 compile/provider、不伪造已批准。
+        // label 缺席（旧会话/legacy 门）保持既有 approve 语义零回归。
+        if matches!(decision, HumanGateCloseDecision::Approve)
+            && expected
+                .human_gate_snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.candidate_recovery.as_ref())
+                .is_some()
+        {
+            let facts = self.assess_candidate_snapshot()?;
+            if !facts.complete {
+                return Err(format!(
+                    "CANDIDATE_SNAPSHOT_INCOMPLETE: missing {:?}; approve is fail-closed until the candidate gate is recovered or rebuilt",
+                    facts.missing
+                ));
+            }
         }
 
         match decision {

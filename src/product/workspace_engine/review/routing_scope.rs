@@ -858,6 +858,7 @@ impl WorkspaceEngine {
                 }
             };
         Ok(HumanGateSnapshot {
+            candidate_recovery: None,
             findings: Vec::new(),
             repeated_fingerprints: Vec::new(),
             attempts_used: history

@@ -992,6 +992,45 @@ pub enum HumanActionRequest {
         action: crate::web::workspace_ws_types::WorkItemPlanCompileRecoveryActionDto,
         reason: Option<String>,
     },
+    /// C1 Task 4（REQ-C1-GATE-01/02）：孤儿候选门恢复/重建动作（唯一
+    /// additive variant，不新增第二 candidate recovery 路由）。
+    CandidateRecovery {
+        command_id: String,
+        expected_gate_id: String,
+        action: CandidateRecoveryActionDto,
+    },
+}
+
+/// C1 Task 4：恢复动作 wire 枚举（`recover`＝恢复原门；`rebuild`＝从权威
+/// source/IR/report 重建呈现面）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CandidateRecoveryActionDto {
+    Recover,
+    Rebuild,
+}
+
+impl From<CandidateRecoveryActionDto> for crate::product::work_item_plan_policy::CandidateRecoveryAction {
+    fn from(value: CandidateRecoveryActionDto) -> Self {
+        match value {
+            CandidateRecoveryActionDto::Recover => Self::Recover,
+            CandidateRecoveryActionDto::Rebuild => Self::Rebuild,
+        }
+    }
+}
+
+/// C1 Task 4（REQ-C1-GATE-02）：候选门恢复结果（`CandidateRecovery` 变体
+/// 的专用响应体）。`state` 复用统一 `OperationState`（accepted/replayed/
+/// needs_human/rejected）；`complete=false` 时 `missing` 列出缺失事实。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct CandidateRecoveryResult {
+    pub command_id: String,
+    pub gate_id: String,
+    pub state: crate::product::models::OperationState,
+    pub complete: bool,
+    pub missing: Vec<String>,
+    pub completed_steps: Vec<String>,
 }
 
 /// 人工命令回执状态（snake_case wire）：Accepted=已受理（含幂等重放与

@@ -4,6 +4,9 @@ use crate::product::models::{
     HumanGateTurn, HumanGateTurnFailureClass, HumanGateTurnStatus, WorkspaceType,
 };
 use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
+use crate::product::work_item_plan_policy::{
+    CandidateRecoveryAction, CandidateRecoveryCommandRecord, CandidateSnapshotRecovery,
+};
 use crate::product::work_item_plan_source_store::{SourceStoreScope, WorkItemPlanSourceStore};
 
 pub(crate) use super::conversational_gate::HUMAN_GATE_PROVIDER_MAX_ATTEMPTS;
@@ -286,6 +289,282 @@ impl super::WorkspaceEngine {
         self.session.provider_start_ledger = expected.provider_start_ledger;
         self.session.human_gate_snapshot = expected.human_gate_snapshot;
         Ok(actions)
+    }
+}
+
+/// C1 Task 4：候选门恢复命令（REST/WS 共用的应用服务输入）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CandidateRecoveryCommand {
+    pub command_id: String,
+    pub expected_gate_id: String,
+    pub action: CandidateRecoveryAction,
+}
+
+/// C1 Task 4：候选门恢复结果。`Replayed` 携带首次 durable 命令记录与
+/// 当前评估事实；恢复动作本身不扣预算、不启 provider、不建第二候选权威。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CandidateRecoveryOutcome {
+    Accepted {
+        facts: CandidateSnapshotRecovery,
+    },
+    NeedsHuman {
+        facts: CandidateSnapshotRecovery,
+    },
+    Replayed {
+        record: CandidateRecoveryCommandRecord,
+        facts: CandidateSnapshotRecovery,
+    },
+}
+
+impl super::WorkspaceEngine {
+    /// C1 Task 4：durable 候选快照完整性评估（只读；refs 在场且可从权威
+    /// source store 读回、预算/门事实在场才 complete）。不可读事实计入
+    /// `missing` 诊断（fail-closed），不臆测候选内容。
+    pub(crate) fn assess_candidate_snapshot(&self) -> Result<CandidateSnapshotRecovery, String> {
+        use crate::product::models::WorkspaceSessionRecord;
+        use crate::product::work_item_plan_policy::CandidateSnapshotRecovery;
+
+        let store = self
+            .lifecycle_store
+            .as_ref()
+            .ok_or_else(|| "lifecycle_store unavailable".to_string())?;
+        let record: WorkspaceSessionRecord = store
+            .get_workspace_session(&self.session.session_id)
+            .map_err(|error| error.to_string())?;
+        let gate_id = self.active_timeline_node_id();
+        let mut missing = Vec::new();
+        let mut completed_steps = Vec::new();
+
+        if record.human_gate_snapshot.is_none() {
+            missing.push("human_gate_snapshot_missing".to_string());
+        }
+        if gate_id.is_none() {
+            missing.push("gate_node_missing".to_string());
+        } else {
+            completed_steps.push("gate_open".to_string());
+        }
+        let budget_remaining = record
+            .human_gate_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.manual_repairs_remaining);
+        match budget_remaining {
+            Some(_) => completed_steps.push("budget_recorded".to_string()),
+            None => missing.push("budget_missing".to_string()),
+        }
+
+        let scope = SourceStoreScope {
+            project_id: record.project_id.clone(),
+            issue_id: record.issue_id.clone(),
+            plan_id: record.entity_id.clone(),
+        };
+        let source_store = WorkItemPlanSourceStore::new(store.app_paths());
+        let mut source_revision_hash = None;
+        match record.work_item_plan_source_revision_ref.as_deref() {
+            Some(source_ref) => match source_store.get_source_revision(&scope, source_ref) {
+                Ok(source) => {
+                    source_revision_hash = Some(source.source_revision_hash);
+                    completed_steps.push("candidate_source_persisted".to_string());
+                }
+                Err(error) => missing.push(format!("source_revision_unreadable: {error:?}")),
+            },
+            None => missing.push("source_revision_missing".to_string()),
+        }
+        match record.plan_candidate_ir_ref.as_deref() {
+            Some(ir_ref) => match source_store.get_plan_candidate_ir(&scope, ir_ref) {
+                Ok(_) => completed_steps.push("candidate_ir_persisted".to_string()),
+                Err(error) => missing.push(format!("plan_candidate_ir_unreadable: {error:?}")),
+            },
+            None => missing.push("plan_candidate_ir_missing".to_string()),
+        }
+        match record.mechanical_report_ref.as_deref() {
+            Some(report_ref) => match source_store.get_mechanical_report(&scope, report_ref) {
+                Ok(_) => completed_steps.push("mechanical_report_persisted".to_string()),
+                Err(error) => missing.push(format!("mechanical_report_unreadable: {error:?}")),
+            },
+            None => missing.push("mechanical_report_missing".to_string()),
+        }
+
+        let complete = missing.is_empty();
+        Ok(CandidateSnapshotRecovery {
+            complete,
+            gate_id: gate_id.unwrap_or_default(),
+            source_revision_ref: record.work_item_plan_source_revision_ref.clone(),
+            source_revision_hash,
+            plan_candidate_ir_ref: record.plan_candidate_ir_ref.clone(),
+            mechanical_report_ref: record.mechanical_report_ref.clone(),
+            budget_remaining,
+            missing,
+            completed_steps,
+            commands: record
+                .human_gate_snapshot
+                .and_then(|snapshot| snapshot.candidate_recovery)
+                .map(|label| label.commands)
+                .unwrap_or_default(),
+            assessed_at: Utc::now().to_rfc3339(),
+        })
+    }
+
+    /// C1 Task 4：该会话是否处于候选审批门形态（label 只对 SC 审批门落盘，
+    /// legacy/非审批门/旧快照缺席保持既有语义零回归）。
+    fn candidate_recovery_gate_applies(&self) -> bool {
+        use crate::product::models::{SingleCandidatePhase, WorkspaceType};
+        self.session.workspace_type == WorkspaceType::WorkItemPlan
+            && self.session.flow_kind == WorkItemPlanFlowKind::SingleCandidate
+            && self.session.single_candidate_phase == Some(SingleCandidatePhase::Approval)
+            && self.session.human_gate_snapshot.is_some()
+    }
+
+    /// C1 Task 4（REQ-C1-GATE-01）：relay/observer 之前的候选快照完整性
+    /// 落盘（生产门开启路径调用）。只写 additive label；CAS 失败不阻塞
+    /// 门开启（评估可由恢复动作重导），仅发可见错误事件。
+    pub(crate) async fn persist_candidate_snapshot_before_relay(&mut self) {
+        if !self.candidate_recovery_gate_applies() {
+            return;
+        }
+        let Ok(facts) = self.assess_candidate_snapshot() else {
+            return;
+        };
+        let Some(store) = self.lifecycle_store.clone() else {
+            return;
+        };
+        let Ok(expected) = store.get_workspace_session(&self.session.session_id) else {
+            return;
+        };
+        match store.compare_and_save_candidate_recovery(&expected, facts) {
+            Ok(saved) => {
+                self.session.human_gate_snapshot = saved.human_gate_snapshot;
+            }
+            Err(error) => {
+                let _ = self
+                    .event_tx
+                    .send(super::EngineEvent::Error {
+                        message: format!(
+                            "persist candidate snapshot label lost the durable race: {error}"
+                        ),
+                    })
+                    .await;
+            }
+        }
+    }
+
+    /// C1 Task 4（REQ-C1-GATE-01/02）：候选门恢复应用服务（REST/WS 同一
+    /// 入口）。恢复/重建只恢复原门事实或从权威 source/IR/report 重建呈现，
+    /// 不扣预算、不启 provider、不建第二候选权威；同 command 同负载重放
+    /// 首次 durable 结果，异 payload fail-closed；旧 gate id 零副作用拒绝。
+    pub(crate) async fn recover_candidate_gate(
+        &mut self,
+        command: CandidateRecoveryCommand,
+    ) -> Result<CandidateRecoveryOutcome, String> {
+        use crate::product::models::{OperationState, WorkspaceSessionStatus, WorkspaceType};
+        use crate::product::work_item_plan_policy::{
+            CandidateRecoveryCommandRecord, CandidateSnapshotRecovery,
+        };
+
+        super::conversational_gate::validate_command_id(&command.command_id)?;
+        let store = self
+            .lifecycle_store
+            .clone()
+            .ok_or_else(|| "lifecycle_store unavailable".to_string())?;
+        let expected = store
+            .get_workspace_session(&self.session.session_id)
+            .map_err(|error| error.to_string())?;
+        if expected.workspace_type != WorkspaceType::WorkItemPlan
+            || expected.flow_kind != WorkItemPlanFlowKind::SingleCandidate
+            || expected.status != WorkspaceSessionStatus::WaitingForHuman
+            || expected.human_gate_snapshot.is_none()
+        {
+            return Err(
+                "CANDIDATE_RECOVERY_GATE_CLOSED: candidate recovery requires an open single-candidate human gate"
+                    .to_string(),
+            );
+        }
+        // 门身份比对在评估/落盘之前：不匹配零副作用（不误答过期门）。
+        let current_gate = self.active_timeline_node_id();
+        if current_gate.as_deref() != Some(command.expected_gate_id.as_str()) {
+            return Err(format!(
+                "CANDIDATE_RECOVERY_GATE_MISMATCH: expected gate {} but current gate is {:?}",
+                command.expected_gate_id, current_gate
+            ));
+        }
+
+        // 幂等：同 command 同负载重放首次 durable 结果，异 payload fail-closed。
+        let mut facts = self.assess_candidate_snapshot()?;
+        if let Some(record) = facts
+            .commands
+            .iter()
+            .find(|record| record.command_id == command.command_id)
+            .cloned()
+        {
+            if record.action != command.action {
+                return Err(format!(
+                    "CANDIDATE_RECOVERY_COMMAND_CONFLICT: command_id {} already recorded with a different payload",
+                    command.command_id
+                ));
+            }
+            return Ok(CandidateRecoveryOutcome::Replayed { record, facts });
+        }
+
+        // 评估 + 动作语义：complete → Accepted；Rebuild 允许在权威 refs 可读
+        // 时代重建内存呈现（durable 候选权威不动）；否则 NeedsHuman。
+        let authoritative_refs_readable = facts.source_revision_ref.is_some()
+            && facts.plan_candidate_ir_ref.is_some()
+            && facts.mechanical_report_ref.is_some()
+            && !facts
+                .missing
+                .iter()
+                .any(|item| item.starts_with("source_revision_unreadable")
+                    || item.starts_with("plan_candidate_ir_unreadable")
+                    || item.starts_with("mechanical_report_unreadable"));
+        let state = if facts.complete {
+            OperationState::Accepted
+        } else if command.action == CandidateRecoveryAction::Rebuild && authoritative_refs_readable
+        {
+            OperationState::Accepted
+        } else {
+            OperationState::NeedsHuman
+        };
+        if state == OperationState::Accepted
+            && command.action == CandidateRecoveryAction::Rebuild
+            && !facts.complete
+        {
+            // 从权威 source 重建内存呈现面（不写 durable artifact 版本，
+            // 不新建候选权威——呈现面重开进程后可再次重建）。
+            let scope = SourceStoreScope {
+                project_id: expected.project_id.clone(),
+                issue_id: expected.issue_id.clone(),
+                plan_id: expected.entity_id.clone(),
+            };
+            let source_store = WorkItemPlanSourceStore::new(store.app_paths());
+            if let Some(source_ref) = expected.work_item_plan_source_revision_ref.as_deref()
+                && let Ok(source) = source_store.get_source_revision(&scope, source_ref)
+            {
+                self.session.artifact = Some(crate::web::workspace_ws_types::ArtifactPayload::Markdown {
+                    markdown: source.source,
+                    diff: None,
+                });
+            }
+        }
+
+        let record = CandidateRecoveryCommandRecord {
+            command_id: command.command_id.clone(),
+            action: command.action,
+            state,
+            missing: facts.missing.clone(),
+            recorded_at: Utc::now().to_rfc3339(),
+        };
+        facts.commands.push(record.clone());
+        let saved = store
+            .compare_and_save_candidate_recovery(&expected, facts.clone())
+            .map_err(|error| error.to_string())?;
+        self.session.human_gate_snapshot = saved.human_gate_snapshot.clone();
+        let facts: CandidateSnapshotRecovery = saved
+            .human_gate_snapshot
+            .and_then(|snapshot| snapshot.candidate_recovery)
+            .unwrap_or(facts);
+        Ok(match state {
+            OperationState::Accepted => CandidateRecoveryOutcome::Accepted { facts },
+            _ => CandidateRecoveryOutcome::NeedsHuman { facts },
+        })
     }
 }
 

@@ -473,6 +473,7 @@ async fn human_gate_open_rebuilds_session_state_for_existing_attachments() {
         engine.session.flow_kind = WorkItemPlanFlowKind::SingleCandidate;
         engine.session.single_candidate_phase = Some(SingleCandidatePhase::Approval);
         engine.session.human_gate_snapshot = Some(HumanGateSnapshot {
+            candidate_recovery: None,
             findings: Vec::new(),
             repeated_fingerprints: Vec::new(),
             attempts_used: 0,

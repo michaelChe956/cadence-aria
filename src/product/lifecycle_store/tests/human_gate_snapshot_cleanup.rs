@@ -7,6 +7,7 @@
 fn persist_session_with_gate_snapshot(store: &LifecycleStore, session_id: &str) {
     let mut record = store.get_workspace_session(session_id).unwrap();
     record.human_gate_snapshot = Some(HumanGateSnapshot {
+        candidate_recovery: None,
         findings: Vec::new(),
         repeated_fingerprints: Vec::new(),
         attempts_used: 0,

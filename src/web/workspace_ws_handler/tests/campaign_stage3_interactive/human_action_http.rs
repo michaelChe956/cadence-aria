@@ -5,7 +5,7 @@
 // 路由；expected_gate_id 与当前 active gate/timeline node 比对。
 // ---------------------------------------------------------------------------
 
-struct WorkspaceHumanActionHttpFixture {
+pub(super) struct WorkspaceHumanActionHttpFixture {
     #[allow(dead_code)]
     harness: CampaignStage3Harness,
     router: axum::Router,
@@ -13,7 +13,7 @@ struct WorkspaceHumanActionHttpFixture {
     session_id: String,
 }
 
-async fn workspace_human_action_http_fixture(
+pub(super) async fn workspace_human_action_http_fixture(
     budget: u32,
     script: Vec<RevisionScriptStep>,
 ) -> WorkspaceHumanActionHttpFixture {
@@ -61,7 +61,8 @@ async fn workspace_human_action_http_fixture(
 }
 
 impl WorkspaceHumanActionHttpFixture {
-    async fn post_human_action(
+    // C1 Task 4：候选行复用同一 REST fixture（visibility: pub(super)）。
+    pub(super) async fn post_human_action(
         &self,
         body: serde_json::Value,
     ) -> (axum::http::StatusCode, serde_json::Value) {
@@ -88,13 +89,13 @@ impl WorkspaceHumanActionHttpFixture {
         (status, json)
     }
 
-    async fn active_gate_id(&self) -> Option<String> {
+    pub(super) async fn active_gate_id(&self) -> Option<String> {
         let engine = self.manager.engine();
         let engine = engine.lock().await;
         engine.active_timeline_node_id()
     }
 
-    async fn session_record(&self) -> WorkspaceSessionRecord {
+    pub(super) async fn session_record(&self) -> WorkspaceSessionRecord {
         self.harness.session_record().await
     }
 
@@ -141,7 +142,7 @@ impl WorkspaceHumanActionHttpFixture {
         .expect("gate rebuilds after revision round")
     }
 
-    async fn await_session_status(
+    pub(super) async fn await_session_status(
         &self,
         expected: WorkspaceSessionStatus,
     ) -> WorkspaceSessionRecord {
