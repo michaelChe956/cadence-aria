@@ -951,7 +951,7 @@ mod tests {
     async fn automation_prepare_recovers_plan_without_session_or_rebinding() {
         let fixture = seed_fixture(1, true);
         let enrolled =
-            response_json(put_enrollment(&fixture.router(), enrollment_body(&fixture, 1, 1)).await)
+            response_json(put_enrollment(&fixture.router(), enrollment_body_with_target(&fixture)).await)
                 .await;
         let intent_id = enrolled["prepare_intent_id"].as_str().unwrap();
         let expected_plan_id = format!("issue_work_item_plan_auto_{intent_id}");
@@ -975,7 +975,7 @@ mod tests {
     async fn automation_prepare_fails_closed_on_divergent_reopen() {
         let fixture = seed_fixture(1, true);
         let app = fixture.router();
-        put_enrollment(&app, enrollment_body(&fixture, 1, 1)).await;
+        put_enrollment(&app, enrollment_body_with_target(&fixture)).await;
         fixture.ensure_enrolled_plan().await.unwrap();
         let plan_before = fixture.plans().remove(0);
 
@@ -990,7 +990,7 @@ mod tests {
         });
         let response = put_enrollment(&app, disable).await;
         assert_eq!(response.status(), StatusCode::OK);
-        let mut divergent = enrollment_body(&fixture, 1, 1);
+        let mut divergent = enrollment_body_with_target(&fixture);
         divergent["command"]["options"]["review_rounds"] = serde_json::json!(2);
         divergent["expected_revision"] = serde_json::json!(revision + 1);
         let response = put_enrollment(&app, divergent).await;

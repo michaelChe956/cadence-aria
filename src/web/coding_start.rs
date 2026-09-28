@@ -222,7 +222,8 @@ async fn start_coding_attempt(
         CodingStartOrigin::Enrolled {
             enrollment_id,
             policy_revision,
-            ..
+            binding_version,
+            target,
         } => {
             let automation = IssueAutomationStore::new(paths.clone());
             let locked = automation
@@ -239,6 +240,17 @@ async fn start_coding_attempt(
                                         enrollment_id,
                                         *policy_revision,
                                         &plan_id,
+                                    )
+                                })
+                                .and_then(|()| {
+                                    // C1 Task 3：当前 binding 前置（helper 同源
+                                    // 校验）+ 回执携带身份匹配——旧代回执按
+                                    // binding version/target 显式拒绝；旧 claim
+                                    // JSON 缺字段（None）按兼容读，不猜 target。
+                                    verify_current_binding(
+                                        enrollment,
+                                        binding_version.as_ref(),
+                                        target.as_ref(),
                                     )
                                 })
                                 .and_then(|()| {
@@ -485,6 +497,45 @@ fn verify_current_enrollment(
                 "attempt target snapshot points at logical repository {:?} but enrollment \
                  authorizes {:?}",
                 snapshot.logical_repository_id, enrollment.logical_repository_id
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// C1 Task 3：Enrolled start 的当前 binding 前置——`load_current_
+/// enrollment_binding` 同源校验（版本化绑定存在且与 enrollment 投影一致），
+/// 外加回执携带身份匹配：origin 冻结的 binding_version/target 与当前
+/// durable 不一致即旧代回执，显式拒绝。
+fn verify_current_binding(
+    enrollment: &crate::product::models::automation::IssueAutomationEnrollment,
+    origin_binding_version: Option<&u64>,
+    origin_target: Option<&crate::product::logical_codebase::EnrollmentTarget>,
+) -> Result<(), StartCodingError> {
+    let binding = crate::web::advance_plan::load_current_enrollment_binding(enrollment)
+        .map_err(|reason| {
+            StartCodingError::new(
+                "coding_start_enrollment_binding_invalid",
+                reason,
+            )
+        })?;
+    if let Some(expected) = origin_binding_version
+        && *expected != binding.binding_version
+    {
+        return Err(StartCodingError::new(
+            "coding_start_enrollment_binding_mismatch",
+            format!(
+                "start origin binding version drift: expected {expected}, current {}",
+                binding.binding_version
+            ),
+        ));
+    }
+    if let Some(expected) = origin_target && expected != &binding.target {
+        return Err(StartCodingError::new(
+            "coding_start_enrollment_binding_mismatch",
+            format!(
+                "start origin target drift: expected {expected:?}, current {:?}",
+                binding.target
             ),
         ));
     }

@@ -14,8 +14,8 @@ use crate::product::issue_automation_store::IssueAutomationStore;
 use crate::product::json_store::validate_relative_id;
 use crate::product::models::{SingleCandidatePhase, WorkspaceSessionStatus, WorkspaceType};
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
+use crate::product::models::automation::{EnrollmentBindingIdentity, IssueAutomationEnrollment};
 use crate::web::state::WebAppState;
-
 /// advance 请求归属：Manual 走人工 WS 语义；Enrolled 是自动编排的精确
 /// enrollment 身份（id + policy_revision 快照），两者不得互相冒充。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -25,6 +25,42 @@ pub enum AdvancePlanOrigin {
         enrollment_id: String,
         policy_revision: u64,
     },
+}
+
+/// C1 Task 3：prepare/advance/start/reconcile 共用的当前 binding 读取/校验。
+///
+/// 从 durable enrollment 校验版本化绑定：缺失/禁用/内部投影不一致
+///（enrollment id、plan/session 与 `binding_history.current` 漂移）一律
+/// fail-closed；旧式 enrollment（无 binding）自动路径按 off/Manual 解释，
+/// 绝不从 `logical_repository_id` 猜测 target。Manual 人工路径不经过本
+/// helper，既有行为零回归。
+pub(crate) fn load_current_enrollment_binding(
+    enrollment: &IssueAutomationEnrollment,
+) -> Result<EnrollmentBindingIdentity, String> {
+    if !enrollment.enabled {
+        return Err("advance enrollment is disabled".to_string());
+    }
+    let history = enrollment.binding_history.as_ref().ok_or_else(|| {
+        "enrollment has no versioned binding; legacy enrollments cannot drive automatic \
+         chains (re-enable with an explicit target or rebind)"
+            .to_string()
+    })?;
+    let current = &history.current;
+    if current.enrollment_id != enrollment.enrollment_id {
+        return Err(format!(
+            "binding enrollment id drift: binding {}, enrollment {}",
+            current.enrollment_id, enrollment.enrollment_id
+        ));
+    }
+    if current.plan_id != enrollment.plan_id.clone().unwrap_or_default()
+        || current.session_id != enrollment.session_id.clone().unwrap_or_default()
+    {
+        return Err(format!(
+            "binding plan/session drift: binding ({}, {}), enrollment ({:?}, {:?})",
+            current.plan_id, current.session_id, enrollment.plan_id, enrollment.session_id
+        ));
+    }
+    Ok(current.clone())
 }
 
 /// 共用 advance 薄服务：`input` 按值传入，`origin` 决定 enrollment 预检。
@@ -108,6 +144,15 @@ pub async fn advance_plan(
             return Err(format!(
                 "advance enrollment session mismatch: expected {bound_session_id}, got {}",
                 session_record.id
+            ));
+        }
+        // C1 Task 3：当前 binding 前置——版本化绑定存在且与 enrollment 投影
+        // 一致；v2 换代后旧代 plan/session 在此 fail-closed。
+        let binding = load_current_enrollment_binding(&enrollment)?;
+        if binding.plan_id != input.plan_id {
+            return Err(format!(
+                "advance enrollment plan mismatch: expected plan {}, got {}",
+                binding.plan_id, input.plan_id
             ));
         }
         let expected_command_id =
@@ -321,6 +366,195 @@ mod tests {
             .find(|attempt| attempt.id == first_id)
             .unwrap();
         assert_eq!(still_frozen.start_run_policy, frozen.start_run_policy);
+    }
+
+    /// C1 Task 3：binding v1→v2 换代后，自动链每次重读当前代；v1 的
+    /// generation/advance/start 回执全部 fail-closed，无第二 attempt/provider；
+    /// 当前 binding 对应的唯一 plan/session 才可继续；Manual 不被 enrollment
+    /// 校验拦截（REQ-WIGA-03/04、REQ-C1-TARGET-01）。
+    #[tokio::test]
+    async fn enrolled_advance_reloads_current_binding_and_rejects_old_generation() {
+        use crate::product::models::automation::{
+            EnrollmentBindingIdentityInput, EnrollmentRebindRequest,
+        };
+        use crate::web::handlers::automation_enrollment_test_support::create_plan_and_session;
+        use crate::product::work_item_plan_policy::RunPolicy;
+
+        let fixture = confirmed_enrolled_fixture().await;
+        let enrollment = fixture.enrollment();
+        let plan_1 = enrollment.plan_id.clone().expect("bound plan");
+        let binding_v1 = enrollment
+            .binding_history
+            .as_ref()
+            .expect("versioned binding v1")
+            .current
+            .clone();
+        assert_eq!(binding_v1.binding_version, 1);
+
+        // v1 advance 成功：journal 冻结 v1 身份（唯一 attempt）。
+        let v1_advance = advance_plan(
+            &fixture.state,
+            AdvanceInput {
+                command_id: format!("wiga-advance-{}-{plan_1}", enrollment.enrollment_id),
+                project_id: enrollment.project_id.clone(),
+                issue_id: enrollment.issue_id.clone(),
+                plan_id: plan_1.clone(),
+            },
+            AdvancePlanOrigin::Enrolled {
+                enrollment_id: enrollment.enrollment_id.clone(),
+                policy_revision: enrollment.policy_revision,
+            },
+        )
+        .await
+        .expect("v1 advance under current binding");
+        assert!(matches!(v1_advance, AdvanceOutcome::Completed { .. }));
+        assert_eq!(fixture.coding_attempts().len(), 1);
+
+        // 显式 rebind 制造 v2：新 plan/session 属于同一 issue。
+        let (plan_2, _session_2) = create_plan_and_session(&fixture.inner, RunPolicy::Interactive);
+        let store = IssueAutomationStore::new(ProductAppPaths::new(
+            fixture.state.workspace_root.join(".aria"),
+        ));
+        let rebind = store
+            .rebind(
+                &enrollment.project_id,
+                &enrollment.issue_id,
+                EnrollmentRebindRequest {
+                    command_id: "rebind-c1-task3".to_string(),
+                    expected_policy_revision: enrollment.policy_revision,
+                    expected_binding_version: binding_v1.binding_version,
+                    binding: EnrollmentBindingIdentityInput {
+                        plan_id: plan_2.clone(),
+                        session_id: _session_2,
+                        source: enrollment.source.clone(),
+                        target: binding_v1.target.clone(),
+                        author_provider: enrollment.options.author_provider.clone(),
+                        reviewer_provider: enrollment.options.reviewer_provider.clone(),
+                    },
+                    reason: "c1 task3 generation switch".to_string(),
+                },
+            )
+            .expect("rebind to v2");
+        let after = rebind.enrollment;
+        assert_eq!(after.binding_history.as_ref().unwrap().current.binding_version, 2);
+
+        // v1 advance 回执（旧 revision + 旧 plan）→ 身份 fail-closed。
+        let v1_receipt = advance_plan(
+            &fixture.state,
+            AdvanceInput {
+                command_id: format!("wiga-advance-{}-{plan_1}", enrollment.enrollment_id),
+                project_id: enrollment.project_id.clone(),
+                issue_id: enrollment.issue_id.clone(),
+                plan_id: plan_1.clone(),
+            },
+            AdvancePlanOrigin::Enrolled {
+                enrollment_id: enrollment.enrollment_id.clone(),
+                policy_revision: enrollment.policy_revision,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            v1_receipt.contains("mismatch"),
+            "v1 advance receipt must fail closed on identity, got: {v1_receipt}"
+        );
+        assert_eq!(fixture.coding_attempts().len(), 1);
+
+        // v1 start 回执（旧 origin 身份）→ frozen/current 互证 fail-closed，
+        // 零 runner。
+        let v1_attempt = fixture.attempt();
+        let v1_start = crate::web::coding_start::start_coding_once(
+            &fixture.state,
+            &enrollment.project_id,
+            &enrollment.issue_id,
+            crate::web::coding_start::StartCodingCommand {
+                attempt_id: v1_attempt.id.clone(),
+                command_id: "wiga-start-v1-receipt".to_string(),
+                origin: crate::product::coding_models::CodingStartOrigin::Enrolled {
+                    enrollment_id: enrollment.enrollment_id.clone(),
+                    policy_revision: enrollment.policy_revision,
+                    binding_version: Some(binding_v1.binding_version),
+                    target: Some(binding_v1.target.clone()),
+                },
+            },
+        )
+        .await;
+        assert!(v1_start.is_err(), "v1 start receipt must fail closed");
+        assert_eq!(fixture.coding_runner_count(), 0);
+        assert_eq!(fixture.coding_attempts().len(), 1);
+
+        // v2 当前代：唯一可继续的 plan/session 是 binding current（plan_2）；
+        // 身份通过、停在既有门（session_2 未 Confirmed）。
+        let v2_receipt = advance_plan(
+            &fixture.state,
+            AdvanceInput {
+                command_id: format!("wiga-advance-{}-{plan_2}", enrollment.enrollment_id),
+                project_id: enrollment.project_id.clone(),
+                issue_id: enrollment.issue_id.clone(),
+                plan_id: plan_2.clone(),
+            },
+            AdvancePlanOrigin::Enrolled {
+                enrollment_id: enrollment.enrollment_id.clone(),
+                policy_revision: after.policy_revision,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            v2_receipt.contains("confirmed single-candidate"),
+            "v2 advance must pass identity and stop at the existing gate, got: {v2_receipt}"
+        );
+        assert_eq!(fixture.coding_attempts().len(), 1);
+
+        // 旧式 enrollment（无版本化 binding）自动路径 fail-closed：剥离
+        // binding 后同一 v2 身份也被拒。
+        let mut legacy = after.clone();
+        legacy.binding_history = None;
+        // 直接以 durable 文件模拟旧数据：写入剥离 binding 的 enrollment。
+        crate::product::json_store::write_json(
+            &ProductAppPaths::new(fixture.state.workspace_root.join(".aria"))
+                .issue_root(&enrollment.project_id, &enrollment.issue_id)
+                .join("automation-enrollment.json"),
+            &legacy,
+        )
+        .unwrap();
+        let legacy_error = advance_plan(
+            &fixture.state,
+            AdvanceInput {
+                command_id: format!("wiga-advance-{}-{plan_2}", enrollment.enrollment_id),
+                project_id: enrollment.project_id.clone(),
+                issue_id: enrollment.issue_id.clone(),
+                plan_id: plan_2.clone(),
+            },
+            AdvancePlanOrigin::Enrolled {
+                enrollment_id: enrollment.enrollment_id.clone(),
+                policy_revision: after.policy_revision,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            legacy_error.contains("versioned binding"),
+            "legacy enrollment without binding must fail closed, got: {legacy_error}"
+        );
+
+        // Manual 不被 enrollment 校验拦截：v1 plan 的 journal durable replay
+        // 返回同一 attempt，不创建第二 attempt。
+        let manual = advance_plan(
+            &fixture.state,
+            AdvanceInput {
+                command_id: format!("wiga-advance-{}-{plan_1}", enrollment.enrollment_id),
+                project_id: enrollment.project_id.clone(),
+                issue_id: enrollment.issue_id.clone(),
+                plan_id: plan_1.clone(),
+            },
+            AdvancePlanOrigin::Manual,
+        )
+        .await
+        .expect("manual advance must not be blocked by enrollment binding checks");
+        assert!(matches!(manual, AdvanceOutcome::Replayed { .. }));
+        assert_eq!(fixture.coding_attempts().len(), 1);
+        assert_eq!(fixture.coding_runner_count(), 0);
     }
 
     /// P2 Task 2：手工（Manual）advance 的新 journal attempt 显式 Manual；

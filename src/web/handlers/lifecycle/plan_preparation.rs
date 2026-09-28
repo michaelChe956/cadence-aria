@@ -259,6 +259,12 @@ pub async fn ensure_enrolled_plan(
     state: &WebAppState,
     enrollment: &crate::product::models::automation::IssueAutomationEnrollment,
 ) -> ApiResult<PreparedPlanRecords> {
+    // C1 Task 3：prepare 前置——自动链只接受当前版本化 binding（旧式
+    // enrollment 按 off/Manual 解释，自动路径 fail-closed）。
+    crate::web::advance_plan::load_current_enrollment_binding(enrollment).map_err(|reason| {
+        ApiError::validation("automation_enrollment_binding_invalid", reason)
+    })?;
+
     let store = crate::product::issue_automation_store::IssueAutomationStore::new(
         product_app_paths(state),
     );

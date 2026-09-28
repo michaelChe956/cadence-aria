@@ -215,6 +215,15 @@ use p2_campaign::{init_real_main_checkout, normalize_checkout_revision_to_unobse
                     crate::product::models::LifecycleConfirmationStatus::Confirmed,
                 )
                 .unwrap();
+            // C1 Task 3：enrollment 显式声明双载体 target → durable binding v1
+            //（自动链统一经 load_current_enrollment_binding 校验当前代）。
+            let logical_codebase_id =
+                crate::product::logical_codebase::LogicalCodebaseStore::new(inner.paths.clone())
+                    .load_manifest(PROJECT_ID)
+                    .unwrap()
+                    .expect("seeded logical codebase manifest")
+                    .logical_codebase_id
+                    .to_string();
             let body = serde_json::json!({
                 "expected_revision": null,
                 "command": {
@@ -243,6 +252,11 @@ use p2_campaign::{init_real_main_checkout, normalize_checkout_revision_to_unobse
                         }
                     },
                     "logical_repository_id": crate::web::handlers::automation_enrollment_test_support::SINGLE_LOGICAL_ID
+                    ,"target": {
+                        "kind": "logical_codebase",
+                        "logical_codebase_id": logical_codebase_id,
+                        "logical_repository_id": crate::web::handlers::automation_enrollment_test_support::SINGLE_LOGICAL_ID
+                    }
                 }
             });
             let app = crate::web::app::build_web_router(state.clone());
