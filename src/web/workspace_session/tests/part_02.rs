@@ -217,6 +217,7 @@ fn automation_enable_command() -> crate::product::models::automation::Enrollment
             },
         },
         logical_repository_id: LogicalRepositoryId(uuid::Uuid::nil()),
+        target: None,
     }
 }
 

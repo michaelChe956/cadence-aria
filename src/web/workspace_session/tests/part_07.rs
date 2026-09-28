@@ -398,6 +398,9 @@ fn bound_enrollment(
         session_id: Some("session_auto_live".to_string()),
         created_at: "2026-09-27T00:00:00Z".to_string(),
         updated_at: "2026-09-27T00:00:00Z".to_string(),
+        target: None,
+        binding_history: None,
+        command_ledger: Vec::new(),
     }
 }
 

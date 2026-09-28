@@ -13,8 +13,10 @@ use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::locking::with_exclusive_lock;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::models::automation::{
-    EnrollmentError, EnrollmentWriteCommand, IssueAutomationEnrollment, PlanGenerationIntent,
-    PlanGenerationPhase, PreparedPlanIntent,
+    EnrollmentBindingHistory, EnrollmentBindingIdentity, EnrollmentCommandResult, EnrollmentError,
+    EnrollmentRebindRequest, EnrollmentRebindResult, EnrollmentWriteCommand,
+    IssueAutomationEnrollment, OperationState, PlanGenerationIntent, PlanGenerationPhase,
+    PreparedPlanIntent,
 };
 
 /// issue 级 enrollment 的唯一持久入口；所有写路径都在目标 JSON 的伴生文件锁内
@@ -90,12 +92,14 @@ impl IssueAutomationStore {
                         source,
                         options,
                         logical_repository_id,
+                        target,
                     },
                 ) if saved.enabled
                     && saved.selection_key == *selection_key
                     && saved.source == *source
                     && saved.options == *options
                     && saved.logical_repository_id == *logical_repository_id
+                    && saved.target == *target
                     && (expected_revision.is_none()
                         || expected_revision == Some(saved.policy_revision)) =>
                 {
@@ -112,12 +116,14 @@ impl IssueAutomationStore {
                         source,
                         options,
                         logical_repository_id,
+                        target,
                     },
                 ) if saved.enabled
                     && (saved.selection_key != *selection_key
                         || saved.source != *source
                         || saved.options != *options
-                        || saved.logical_repository_id != *logical_repository_id) =>
+                        || saved.logical_repository_id != *logical_repository_id
+                        || saved.target != *target) =>
                 {
                     CasResolution::Conflict {
                         current_revision: Some(saved.policy_revision),
@@ -427,6 +433,116 @@ impl IssueAutomationStore {
             },
         })
     }
+
+    /// C1 Task 1（REQ-WIGA-01、REQ-C1-TARGET-01）：显式重绑/换代。在同一
+    /// enrollment 文件锁内：先查命令账本（同 command 同 payload 幂等重放
+    /// 首次 durable 结果、异 payload Conflict），再校验 enabled、expected
+    /// policy/binding 版本与 target 授权域（跨载体/身份漂移 fail-closed，
+    /// 旧 enrollment 无声明 target 不猜），最后追加 previous、写入新
+    /// current（binding_version+1）并把 enrollment 投影同步到新代——
+    /// 旧代身份只读保留，迟到旧回执按版本拒绝。
+    pub fn rebind(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        request: EnrollmentRebindRequest,
+    ) -> Result<EnrollmentRebindResult, EnrollmentError> {
+        let path = self.enrollment_path(project_id, issue_id)?;
+        validate_relative_id(&request.binding.plan_id)?;
+        validate_relative_id(&request.binding.session_id)?;
+        let digest = request.payload_digest();
+        let resolution = with_exclusive_lock(&path, || {
+            let Some(mut saved) = read_optional_enrollment(&path)? else {
+                return Ok(RebindResolution::Missing);
+            };
+            // 命令账本先判：同 command 同 payload 返回首次 durable 结果，
+            // 异 payload 一律 Conflict（fail-closed，不猜哪个是"真的"）。
+            if let Some(ledger) = saved
+                .command_ledger
+                .iter()
+                .find(|entry| entry.command_id == request.command_id)
+            {
+                if ledger.payload_digest == digest {
+                    return Ok(RebindResolution::Replayed {
+                        command_id: request.command_id.clone(),
+                        enrollment: saved,
+                    });
+                }
+                return Ok(RebindResolution::Conflict {
+                    current_revision: Some(saved.policy_revision),
+                });
+            }
+            if !saved.enabled || request.expected_policy_revision != saved.policy_revision {
+                return Ok(RebindResolution::Conflict {
+                    current_revision: Some(saved.policy_revision),
+                });
+            }
+            // target 授权域：无声明（旧 enrollment）不猜；跨载体/身份漂移拒绝。
+            let Some(declared) = saved.target.clone() else {
+                return Ok(RebindResolution::InvalidScope(
+                    "rebind requires an enrollment with an explicitly declared target; \
+                     re-enable with an explicit target first"
+                        .to_string(),
+                ));
+            };
+            if request.binding.target != declared {
+                return Ok(RebindResolution::InvalidScope(format!(
+                    "rebind target must match the enrollment's declared target \
+                     carrier and identity: expected {declared:?}, got {:?}",
+                    request.binding.target
+                )));
+            }
+            let Some(history) = saved.binding_history.clone() else {
+                return Ok(RebindResolution::InvalidScope(
+                    "rebind requires durable binding history; re-enable with an \
+                     explicit target first"
+                        .to_string(),
+                ));
+            };
+            if request.expected_binding_version != history.current.binding_version {
+                return Ok(RebindResolution::Conflict {
+                    current_revision: Some(saved.policy_revision),
+                });
+            }
+            // 追加换代：previous 只读保留旧代完整身份；current 写新代；
+            // enrollment 投影（plan/session/source/providers）同步到新代。
+            let mut previous = history.previous;
+            let binding_version = history.current.binding_version + 1;
+            previous.push(history.current);
+            saved.binding_history = Some(EnrollmentBindingHistory {
+                current: EnrollmentBindingIdentity {
+                    binding_version,
+                    enrollment_id: saved.enrollment_id.clone(),
+                    plan_id: request.binding.plan_id.clone(),
+                    session_id: request.binding.session_id.clone(),
+                    source: request.binding.source.clone(),
+                    target: request.binding.target.clone(),
+                    author_provider: request.binding.author_provider.clone(),
+                    reviewer_provider: request.binding.reviewer_provider.clone(),
+                },
+                previous,
+            });
+            saved.plan_id = Some(request.binding.plan_id.clone());
+            saved.session_id = Some(request.binding.session_id.clone());
+            saved.source = request.binding.source.clone();
+            saved.options.author_provider = request.binding.author_provider;
+            saved.options.reviewer_provider = request.binding.reviewer_provider;
+            saved.policy_revision += 1;
+            saved.updated_at = now_rfc3339();
+            saved.command_ledger.push(EnrollmentCommandResult {
+                command_id: request.command_id.clone(),
+                payload_digest: digest,
+                state: OperationState::Accepted,
+                binding_version,
+            });
+            write_json(&path, &saved)?;
+            Ok(RebindResolution::Accepted {
+                command_id: request.command_id.clone(),
+                enrollment: saved,
+            })
+        })?;
+        resolve_rebind(resolution)
+    }
 }
 
 fn resolve(resolution: CasResolution) -> Result<IssueAutomationEnrollment, EnrollmentError> {
@@ -458,6 +574,12 @@ fn bind_plan_ids_locked(
             let mut next = saved;
             next.plan_id = Some(plan_id.to_string());
             next.session_id = Some(session_id.to_string());
+            // C1 Task 1：绑定补全 durable binding current 的 plan/session
+            // 身份（enable 时以空串占位；版本不递增——绑定不是换代）。
+            if let Some(history) = next.binding_history.as_mut() {
+                history.current.plan_id = plan_id.to_string();
+                history.current.session_id = session_id.to_string();
+            }
             next.policy_revision += 1;
             next.updated_at = now_rfc3339();
             write_json(path, &next)?;
@@ -521,6 +643,51 @@ fn resolve_generation(
     }
 }
 
+/// `rebind` 锁内判定；锁外映射为 `EnrollmentRebindResult`/`EnrollmentError`。
+enum RebindResolution {
+    Accepted {
+        command_id: String,
+        enrollment: IssueAutomationEnrollment,
+    },
+    Replayed {
+        command_id: String,
+        enrollment: IssueAutomationEnrollment,
+    },
+    Conflict {
+        current_revision: Option<u64>,
+    },
+    InvalidScope(String),
+    Missing,
+}
+
+fn resolve_rebind(
+    resolution: RebindResolution,
+) -> Result<EnrollmentRebindResult, EnrollmentError> {
+    match resolution {
+        RebindResolution::Accepted {
+            command_id,
+            enrollment,
+        } => Ok(EnrollmentRebindResult {
+            command_id,
+            state: OperationState::Accepted,
+            enrollment,
+        }),
+        RebindResolution::Replayed {
+            command_id,
+            enrollment,
+        } => Ok(EnrollmentRebindResult {
+            command_id,
+            state: OperationState::Replayed,
+            enrollment,
+        }),
+        RebindResolution::Conflict { current_revision } => {
+            Err(EnrollmentError::Conflict { current_revision })
+        }
+        RebindResolution::InvalidScope(reason) => Err(EnrollmentError::InvalidScope(reason)),
+        RebindResolution::Missing => Err(EnrollmentError::NotFound),
+    }
+}
+
 /// 将 durable 归属注入 SessionState 帧（所有 manager 对外出口统一调用）。
 /// 读取失败由调用方决定暴露方式：HTTP 明确报错；WS 帧置 None 保持未知。
 pub fn project_session_automation(
@@ -558,11 +725,24 @@ fn apply_revision_and_write(
                 source,
                 options,
                 logical_repository_id,
+                target,
             },
         ) => {
             let enrollment_id = Uuid::new_v4().to_string();
             // prepare_intent_id 与 enrollment 同源；P0 不消费该意图。
             let prepare_intent_id = enrollment_id.clone();
+            // C1 Task 1：显式声明 target 时初始化 durable binding v1；
+            // plan/session 尚未绑定（绑定写入时补全 current 身份）。
+            let binding_history = target.as_ref().map(|declared| {
+                initial_binding_history(
+                    &enrollment_id,
+                    None,
+                    None,
+                    &source,
+                    declared,
+                    &options,
+                )
+            });
             IssueAutomationEnrollment {
                 enrollment_id,
                 selection_key,
@@ -578,9 +758,14 @@ fn apply_revision_and_write(
                 session_id: None,
                 created_at: now.clone(),
                 updated_at: now,
+                target,
+                binding_history,
+                command_ledger: Vec::new(),
             }
         }
-        // 重开（或换 payload 的启用）：保留 enrollment 身份与既有绑定，仅 revision+1。
+        // 重开（disabled 后换 payload 的启用）：保留 enrollment 身份与既有
+        // 绑定，仅 revision+1。C1 Task 1：target 是授权域冻结事实——已声明
+        // target 的漂移/撤销一律 fail-closed（换 target 只能走显式 rebind）。
         (
             Some(mut saved),
             EnrollmentWriteCommand::Enable {
@@ -588,12 +773,39 @@ fn apply_revision_and_write(
                 source,
                 options,
                 logical_repository_id,
+                target,
             },
         ) => {
+            let target_drifted = match (&saved.target, &target) {
+                // 旧 enrollment（无声明）重开时允许显式升级 target。
+                (None, _) => false,
+                // 撤销已声明的 target 或换 target：fail-closed（走显式 rebind）。
+                (_, None) => true,
+                (Some(declared), Some(next)) => declared != next,
+            };
+            if target_drifted {
+                return Ok(CasResolution::Conflict {
+                    current_revision: Some(saved.policy_revision),
+                });
+            }
+            // 旧 enrollment（无声明）重开时显式升级 target → 初始化 v1。
+            if saved.binding_history.is_none() {
+                if let Some(declared) = target.as_ref() {
+                    saved.binding_history = Some(initial_binding_history(
+                        &saved.enrollment_id,
+                        saved.plan_id.as_deref(),
+                        saved.session_id.as_deref(),
+                        &source,
+                        declared,
+                        &options,
+                    ));
+                }
+            }
             saved.selection_key = selection_key;
             saved.source = source;
             saved.options = options;
             saved.logical_repository_id = logical_repository_id;
+            saved.target = target;
             saved.enabled = true;
             saved.policy_revision += 1;
             saved.updated_at = now;
@@ -609,6 +821,31 @@ fn apply_revision_and_write(
     };
     write_json(path, &next)?;
     Ok(CasResolution::Applied(next))
+}
+
+/// C1 Task 1：从 durable enrollment 事实构造初始 binding v1（enable 显式
+/// 声明 target 时）。plan/session 未绑定时以空串占位，绑定写入时补全。
+fn initial_binding_history(
+    enrollment_id: &str,
+    plan_id: Option<&str>,
+    session_id: Option<&str>,
+    source: &crate::product::models::automation::EnrollmentSource,
+    target: &crate::product::logical_codebase::EnrollmentTarget,
+    options: &crate::product::models::automation::EnrollmentOptions,
+) -> EnrollmentBindingHistory {
+    EnrollmentBindingHistory {
+        current: EnrollmentBindingIdentity {
+            binding_version: 1,
+            enrollment_id: enrollment_id.to_string(),
+            plan_id: plan_id.unwrap_or_default().to_string(),
+            session_id: session_id.unwrap_or_default().to_string(),
+            source: source.clone(),
+            target: target.clone(),
+            author_provider: options.author_provider.clone(),
+            reviewer_provider: options.reviewer_provider.clone(),
+        },
+        previous: Vec::new(),
+    }
 }
 
 fn now_rfc3339() -> String {

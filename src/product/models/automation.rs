@@ -5,9 +5,10 @@
 //! 未认领许可即失效。P0 只承载授权事实，不启动任何 provider。
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::product::json_store::ProductStoreError;
-use crate::product::logical_codebase::LogicalRepositoryId;
+use crate::product::logical_codebase::{EnrollmentTarget, LogicalRepositoryId};
 use crate::product::models::lifecycle::IssueWorkItemPlanOptions;
 use crate::product::models::provider::ProviderName;
 
@@ -59,6 +60,17 @@ pub struct IssueAutomationEnrollment {
     pub session_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// C1 Task 1：enable 时显式声明的双载体 target。旧 JSON 缺字段读
+    /// `None`——读侧只按兼容读消费 `logical_repository_id`，绝不从其
+    /// 猜测 `EnrollmentTarget`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<EnrollmentTarget>,
+    /// C1 Task 1：版本化绑定历史；仅显式 rebind/换代追加，旧 JSON 读 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding_history: Option<EnrollmentBindingHistory>,
+    /// C1 Task 1：命令账本（同 command 同 payload 重放/异 payload 拒绝）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub command_ledger: Vec<EnrollmentCommandResult>,
 }
 
 /// 自动化归属：仅 server 端 enrollment 可代表授权（REQ-WIGA-08）。
@@ -100,8 +112,93 @@ pub enum EnrollmentWriteCommand {
         source: EnrollmentSource,
         options: EnrollmentOptions,
         logical_repository_id: LogicalRepositoryId,
+        /// C1 Task 1：显式双载体 target。缺省（None）保持既有仅逻辑仓授权
+        /// 语义；携带时必须与 `logical_repository_id` 同载体一致。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<EnrollmentTarget>,
     },
     Disable,
+}
+
+/// C1 Task 1：用户显式 rebind 提交的新代绑定身份输入（wire DTO）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnrollmentBindingIdentityInput {
+    pub plan_id: String,
+    pub session_id: String,
+    pub source: EnrollmentSource,
+    pub target: EnrollmentTarget,
+    pub author_provider: ProviderName,
+    pub reviewer_provider: ProviderName,
+}
+
+/// C1 Task 1：durable 绑定身份——当前代或历史代的完整授权事实。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnrollmentBindingIdentity {
+    pub binding_version: u64,
+    pub enrollment_id: String,
+    pub plan_id: String,
+    pub session_id: String,
+    pub source: EnrollmentSource,
+    pub target: EnrollmentTarget,
+    pub author_provider: ProviderName,
+    pub reviewer_provider: ProviderName,
+}
+
+/// C1 Task 1：版本化绑定历史。`binding_version` 只在显式 rebind/换代时
+/// 递增；`previous` 只追加、不改写（旧代只读可追溯）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnrollmentBindingHistory {
+    pub current: EnrollmentBindingIdentity,
+    pub previous: Vec<EnrollmentBindingIdentity>,
+}
+
+/// C1 统一操作结果状态（Task 6/7/9 的 lease takeover、advance retry、
+/// Cockpit 动作复用同一状态机，不另造 Generation/RecoveryOperation）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OperationState {
+    Accepted,
+    Replayed,
+    NeedsHuman,
+    Rejected,
+}
+
+/// C1 Task 1：enrollment 命令账目——同 `command_id` 同 payload 幂等重放
+/// 首次 durable 结果，异 payload fail-closed。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnrollmentCommandResult {
+    pub command_id: String,
+    pub payload_digest: String,
+    pub state: OperationState,
+    pub binding_version: u64,
+}
+
+/// C1 Task 1：显式重绑/换代请求（REQ-WIGA-01）。用户必须明确提供新代
+/// plan/session/source/target/provider 并携带当前 expected 版本。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnrollmentRebindRequest {
+    pub command_id: String,
+    pub expected_policy_revision: u64,
+    pub expected_binding_version: u64,
+    pub binding: EnrollmentBindingIdentityInput,
+    pub reason: String,
+}
+
+impl EnrollmentRebindRequest {
+    /// 稳定 payload 摘要：同一 command 的异 payload 必然产生不同 digest。
+    pub fn payload_digest(&self) -> String {
+        let payload =
+            serde_json::to_string(self).expect("rebind request payload is serializable");
+        format!("sha256:{:x}", Sha256::digest(payload.as_bytes()))
+    }
+}
+
+/// C1 Task 1：rebind 结果。`state=Replayed` 时返回首次 durable 结果的
+/// 当前投影（enrollment 事实不被重放改变）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnrollmentRebindResult {
+    pub command_id: String,
+    pub state: OperationState,
+    pub enrollment: IssueAutomationEnrollment,
 }
 /// P1 WIGA Task 4：enrollment-bound 不可变创建意图（automation-plan-intent.json）。
 ///

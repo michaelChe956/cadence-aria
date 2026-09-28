@@ -369,6 +369,8 @@ async fn issue_lifecycle_recent_completion_catalog_bounded_scoped_and_idempotent
         CodingStartOrigin::Enrolled {
             enrollment_id: "enrollment_recent_old".to_string(),
             policy_revision: 1,
+            binding_version: None,
+            target: None,
         },
         "2020-01-01T00:00:00+00:00",
     );

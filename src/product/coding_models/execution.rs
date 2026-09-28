@@ -2,7 +2,9 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::product::logical_codebase::{LogicalRepositoryId, RepositoryCheckoutId};
+use crate::product::logical_codebase::{
+    EnrollmentTarget, LogicalRepositoryId, RepositoryCheckoutId,
+};
 use crate::product::models::ProviderConversationRef;
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 
@@ -103,6 +105,13 @@ pub enum CodingStartOrigin {
     Enrolled {
         enrollment_id: String,
         policy_revision: u64,
+        /// C1 Task 1：claim 时刻的 enrollment binding 身份（additive）。
+        /// 旧 durable claim JSON 缺字段读 `None`——消费侧按身份不完整
+        /// fail-closed，绝不从缺字段或旧 `logical_repository_id` 猜测。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        binding_version: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<EnrollmentTarget>,
     },
 }
 

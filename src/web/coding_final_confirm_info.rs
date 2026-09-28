@@ -220,6 +220,8 @@ mod tests {
         crate::product::coding_models::CodingStartOrigin::Enrolled {
             enrollment_id: "enrollment_0001".to_string(),
             policy_revision: 1,
+            binding_version: None,
+            target: None,
         }
     }
 

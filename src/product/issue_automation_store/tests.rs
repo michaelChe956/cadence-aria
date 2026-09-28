@@ -6,10 +6,10 @@ use super::IssueAutomationStore;
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::issue_automation_store::EnrollmentError;
 use crate::product::json_store::{read_json, write_json};
-use crate::product::logical_codebase::LogicalRepositoryId;
+use crate::product::logical_codebase::{EnrollmentTarget, LogicalRepositoryId};
 use crate::product::models::automation::{
-    EnrollmentOptions, EnrollmentSource, EnrollmentWriteCommand, IssueAutomationEnrollment,
-    SourceRevisionRef,
+    EnrollmentBindingIdentityInput, EnrollmentOptions, EnrollmentRebindRequest, EnrollmentSource,
+    EnrollmentWriteCommand, IssueAutomationEnrollment, OperationState, SourceRevisionRef,
 };
 use crate::product::models::lifecycle::IssueWorkItemPlanOptions;
 use crate::product::models::provider::ProviderName;
@@ -54,6 +54,7 @@ fn enable(selection_key: &str, repository: LogicalRepositoryId) -> EnrollmentWri
         source: source(),
         options: options(),
         logical_repository_id: repository,
+        target: None,
     }
 }
 
@@ -67,6 +68,7 @@ fn enable_with_options(
         source: source(),
         options,
         logical_repository_id: repository,
+        target: None,
     }
 }
 
@@ -793,4 +795,291 @@ fn issue_automation_store_ensure_plan_binding_concurrent_workers_bind_once() {
     .unwrap();
     assert_eq!(on_disk.plan_id, first.plan_id);
     assert_eq!(on_disk.session_id, first.session_id);
+}
+
+// ---------------------------------------------------------------------------
+// C1 Task 1：双载体 target union 与版本化 enrollment binding（REQ-C1-TARGET-01）。
+// ---------------------------------------------------------------------------
+
+fn target_logical() -> EnrollmentTarget {
+    EnrollmentTarget::LogicalCodebase {
+        logical_codebase_id: "logical_codebase_0001".into(),
+        logical_repository_id: logical_repo(1),
+    }
+}
+
+fn enable_with_target(
+    selection_key: &str,
+    repository: LogicalRepositoryId,
+    target: EnrollmentTarget,
+) -> EnrollmentWriteCommand {
+    EnrollmentWriteCommand::Enable {
+        selection_key: selection_key.into(),
+        source: source(),
+        options: options(),
+        logical_repository_id: repository,
+        target: Some(target),
+    }
+}
+
+fn rebind_request(
+    command_id: &str,
+    expected_policy_revision: u64,
+    expected_binding_version: u64,
+    plan_id: &str,
+    session_id: &str,
+    target: EnrollmentTarget,
+) -> EnrollmentRebindRequest {
+    EnrollmentRebindRequest {
+        command_id: command_id.into(),
+        expected_policy_revision,
+        expected_binding_version,
+        binding: EnrollmentBindingIdentityInput {
+            plan_id: plan_id.into(),
+            session_id: session_id.into(),
+            source: source(),
+            target,
+            author_provider: ProviderName::Fake,
+            reviewer_provider: ProviderName::Fake,
+        },
+        reason: "recover after failed generation".into(),
+    }
+}
+
+/// 单仓 target 序列化保留真实 physical id，读取后不生成 logical 替身；
+/// 逻辑 target 缺任一级身份即拒绝（REQ-C1-TARGET-01）。
+#[test]
+fn issue_automation_store_target_union_roundtrip_preserves_physical_id() {
+    let single = EnrollmentTarget::SingleRepository {
+        repository_id: "repo_physical_1".into(),
+    };
+    let json = serde_json::to_value(&single).unwrap();
+    assert_eq!(json["kind"], "single_repository");
+    assert_eq!(json["repository_id"], "repo_physical_1");
+    assert!(
+        json.get("logical_repository_id").is_none(),
+        "single repository target must not grow a logical stand-in: {json}"
+    );
+    let back: EnrollmentTarget = serde_json::from_value(json).unwrap();
+    assert_eq!(back, single);
+
+    let logical = target_logical();
+    let json = serde_json::to_value(&logical).unwrap();
+    assert_eq!(json["kind"], "logical_codebase");
+    let back: EnrollmentTarget = serde_json::from_value(json).unwrap();
+    assert_eq!(back, logical);
+
+    let missing_codebase = serde_json::json!({
+        "kind": "logical_codebase",
+        "logical_repository_id": logical_repo(1).0.to_string(),
+    });
+    assert!(
+        serde_json::from_value::<EnrollmentTarget>(missing_codebase).is_err(),
+        "logical target without logical_codebase_id must be rejected"
+    );
+    let missing_repository = serde_json::json!({
+        "kind": "logical_codebase",
+        "logical_codebase_id": "logical_codebase_0001",
+    });
+    assert!(
+        serde_json::from_value::<EnrollmentTarget>(missing_repository).is_err(),
+        "logical target without logical_repository_id must be rejected"
+    );
+}
+
+/// 显式 rebind 在 enrollment 文件锁内追加版本历史：previous 逐字保留旧代、
+/// 同 command 同 payload 幂等重放、异 payload / 旧 expected version / 跨载体
+/// target fail-closed 且 durable 不变（REQ-WIGA-01、REQ-C1-TARGET-01）。
+#[test]
+fn issue_automation_store_rebind_appends_version_and_is_idempotent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = IssueAutomationStore::new(ProductAppPaths::new(tmp.path()));
+
+    // 新式 enable 显式声明 target → durable binding v1（plan/session 绑定后补全）。
+    let created = store
+        .compare_and_set(
+            "project_1",
+            "issue_1",
+            None,
+            enable_with_target("human-choice-1", logical_repo(1), target_logical()),
+        )
+        .unwrap();
+    assert_eq!(created.policy_revision, 1);
+    assert_eq!(
+        created
+            .binding_history
+            .as_ref()
+            .unwrap()
+            .current
+            .binding_version,
+        1
+    );
+    let bound = store
+        .bind_plan(
+            "project_1",
+            "issue_1",
+            created.policy_revision,
+            "plan_0001",
+            "session_0001",
+        )
+        .unwrap();
+    let v1 = bound.binding_history.as_ref().unwrap().current.clone();
+    assert_eq!(v1.plan_id, "plan_0001");
+    assert_eq!(v1.session_id, "session_0001");
+    assert_eq!(v1.target, target_logical());
+    assert_eq!(v1.author_provider, bound.options.author_provider);
+    assert!(bound.binding_history.as_ref().unwrap().previous.is_empty());
+
+    // 首次 rebind：expected policy/binding 匹配当前 → binding_version=2，
+    // previous 保留 v1 的完整 plan/session/source/target/provider。
+    let request = rebind_request(
+        "rebind_cmd_0001",
+        bound.policy_revision,
+        1,
+        "plan_0002",
+        "session_0002",
+        target_logical(),
+    );
+    let result = store
+        .rebind("project_1", "issue_1", request.clone())
+        .unwrap();
+    assert_eq!(result.command_id, "rebind_cmd_0001");
+    assert_eq!(result.state, OperationState::Accepted);
+    let after = store.get("project_1", "issue_1").unwrap().unwrap();
+    let history = after.binding_history.as_ref().unwrap();
+    assert_eq!(history.current.binding_version, 2);
+    assert_eq!(history.current.plan_id, "plan_0002");
+    assert_eq!(history.current.session_id, "session_0002");
+    assert_eq!(history.current.enrollment_id, bound.enrollment_id);
+    assert_eq!(history.previous.len(), 1);
+    assert_eq!(history.previous[0], v1);
+    // enrollment 的当前绑定投影与 current 代一致；rebind 是 CAS 修订。
+    assert_eq!(after.plan_id.as_deref(), Some("plan_0002"));
+    assert_eq!(after.session_id.as_deref(), Some("session_0002"));
+    assert!(after.policy_revision > bound.policy_revision);
+
+    // 同 command 同 payload 重放：返回同一 binding_version=2，durable 不变。
+    let replay = store
+        .rebind("project_1", "issue_1", request.clone())
+        .unwrap();
+    assert_eq!(replay.state, OperationState::Replayed);
+    assert_eq!(replay.enrollment, after);
+    assert_eq!(store.get("project_1", "issue_1").unwrap().unwrap(), after);
+
+    // 同 command 异 payload → Conflict，current/previous 不变。
+    let mut diverged = request.clone();
+    diverged.binding.plan_id = "plan_0003".into();
+    let error = store
+        .rebind("project_1", "issue_1", diverged)
+        .unwrap_err();
+    assert!(matches!(error, EnrollmentError::Conflict { .. }), "{error:?}");
+    assert_eq!(store.get("project_1", "issue_1").unwrap().unwrap(), after);
+
+    // 旧 expected binding version → Conflict。
+    let stale_binding = rebind_request(
+        "rebind_cmd_0002",
+        after.policy_revision,
+        1,
+        "plan_0003",
+        "session_0003",
+        target_logical(),
+    );
+    let error = store
+        .rebind("project_1", "issue_1", stale_binding)
+        .unwrap_err();
+    assert!(matches!(error, EnrollmentError::Conflict { .. }), "{error:?}");
+
+    // 旧 expected policy revision → Conflict。
+    let stale_policy = rebind_request(
+        "rebind_cmd_0003",
+        bound.policy_revision,
+        2,
+        "plan_0003",
+        "session_0003",
+        target_logical(),
+    );
+    let error = store
+        .rebind("project_1", "issue_1", stale_policy)
+        .unwrap_err();
+    assert!(matches!(error, EnrollmentError::Conflict { .. }), "{error:?}");
+
+    // 跨载体 target（logical → single）→ 拒绝，durable 不变。
+    let cross_carrier = rebind_request(
+        "rebind_cmd_0004",
+        after.policy_revision,
+        2,
+        "plan_0003",
+        "session_0003",
+        EnrollmentTarget::SingleRepository {
+            repository_id: "repo_physical_1".into(),
+        },
+    );
+    let error = store
+        .rebind("project_1", "issue_1", cross_carrier)
+        .unwrap_err();
+    assert!(
+        matches!(error, EnrollmentError::Conflict { .. })
+            || matches!(error, EnrollmentError::InvalidScope(_)),
+        "{error:?}"
+    );
+    assert_eq!(store.get("project_1", "issue_1").unwrap().unwrap(), after);
+}
+
+/// 缺新字段的旧 enrollment JSON 按 off/Manual 兼容读：不自动补
+/// plan/session/binding；无声明 target 的旧 enrollment rebind fail-closed。
+#[test]
+fn issue_automation_store_legacy_enrollment_json_reads_without_binding() {
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = ProductAppPaths::new(tmp.path());
+    let store = IssueAutomationStore::new(paths.clone());
+    let created = store
+        .compare_and_set(
+            "project_1",
+            "issue_1",
+            None,
+            enable_with_target("human-choice-1", logical_repo(1), target_logical()),
+        )
+        .unwrap();
+    let enrollment_file = paths
+        .issue_root("project_1", "issue_1")
+        .join("automation-enrollment.json");
+
+    // 剥离 C1 新字段模拟旧格式 durable JSON（空 command_ledger 本就
+    // skip 序列化，与旧格式逐字节一致）。
+    let mut legacy: serde_json::Value = read_json(&enrollment_file).unwrap();
+    let object = legacy.as_object_mut().unwrap();
+    assert!(object.remove("target").is_some());
+    assert!(object.remove("binding_history").is_some());
+    assert!(object.remove("command_ledger").is_none());
+    write_json(&enrollment_file, &legacy).unwrap();
+
+    let enrollment = store.get("project_1", "issue_1").unwrap().unwrap();
+    assert!(enrollment.target.is_none());
+    assert!(enrollment.binding_history.is_none());
+    assert!(enrollment.command_ledger.is_empty());
+    assert_eq!(enrollment.plan_id, None);
+    assert_eq!(enrollment.session_id, None);
+    assert_eq!(enrollment.enrollment_id, created.enrollment_id);
+    assert_eq!(
+        enrollment.logical_repository_id,
+        created.logical_repository_id
+    );
+
+    // 旧 enrollment 无声明 target：rebind 不猜 target，fail-closed。
+    let error = store
+        .rebind(
+            "project_1",
+            "issue_1",
+            rebind_request(
+                "rebind_cmd_legacy",
+                enrollment.policy_revision,
+                1,
+                "plan_0002",
+                "session_0002",
+                target_logical(),
+            ),
+        )
+        .unwrap_err();
+    assert!(matches!(error, EnrollmentError::InvalidScope(_)), "{error:?}");
+    assert_eq!(store.get("project_1", "issue_1").unwrap().unwrap(), enrollment);
 }

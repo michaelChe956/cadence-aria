@@ -546,6 +546,13 @@ async fn coding_chain_stage(
                     origin: CodingStartOrigin::Enrolled {
                         enrollment_id: enrollment.enrollment_id.clone(),
                         policy_revision: enrollment.policy_revision,
+                        // C1 Task 1：claim 携带当前 binding 身份（旧
+                        // enrollment 无声明时 None，消费侧 fail-closed）。
+                        binding_version: enrollment
+                            .binding_history
+                            .as_ref()
+                            .map(|history| history.current.binding_version),
+                        target: enrollment.target.clone(),
                     },
                 },
             )

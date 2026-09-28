@@ -126,6 +126,7 @@ pub use store::{
     LogicalCodebaseRecord, LogicalCodebaseStore,
 };
 pub use types::{
-    CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, LogicalRepositoryId, MemberStatus,
-    RepositoryCheckoutId, RepositoryCheckoutRecord, RepositorySourceIdentity, RepositoryType,
+    CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, EnrollmentTarget, LogicalRepositoryId,
+    MemberStatus, RepositoryCheckoutId, RepositoryCheckoutRecord, RepositorySourceIdentity,
+    RepositoryType,
 };

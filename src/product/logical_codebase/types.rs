@@ -14,6 +14,22 @@ pub struct LogicalRepositoryId(pub Uuid);
 #[serde(transparent)]
 pub struct RepositoryCheckoutId(pub Uuid);
 
+/// C1（enrollment-recovery-surface Task 1）：enrollment 的双载体授权 target。
+/// 单仓携带真实 physical `RepositoryRecord.id`；逻辑代码库必须同时携带
+/// logical codebase id 与 logical repository id——任一级缺失即拒绝，绝不把
+/// 单仓降级为 logical target 或从路径猜测。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum EnrollmentTarget {
+    SingleRepository {
+        repository_id: String,
+    },
+    LogicalCodebase {
+        logical_codebase_id: String,
+        logical_repository_id: LogicalRepositoryId,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepositorySourceIdentity {
     pub scheme: String,

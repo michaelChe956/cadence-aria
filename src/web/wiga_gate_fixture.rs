@@ -789,6 +789,11 @@ use p2_campaign::{init_real_main_checkout, normalize_checkout_revision_to_unobse
             crate::product::coding_models::CodingStartOrigin::Enrolled {
                 enrollment_id: enrollment.enrollment_id.clone(),
                 policy_revision: enrollment.policy_revision,
+                binding_version: enrollment
+                    .binding_history
+                    .as_ref()
+                    .map(|history| history.current.binding_version),
+                target: enrollment.target.clone(),
             }
         }
 

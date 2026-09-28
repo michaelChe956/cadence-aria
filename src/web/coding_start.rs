@@ -222,6 +222,7 @@ async fn start_coding_attempt(
         CodingStartOrigin::Enrolled {
             enrollment_id,
             policy_revision,
+            ..
         } => {
             let automation = IssueAutomationStore::new(paths.clone());
             let locked = automation
@@ -957,13 +958,16 @@ mod tests {
         assert_eq!(claim.command_id, "wiga-start-y");
         assert_eq!(claim.phase, CodingStartPhase::ProviderMayHaveStarted);
     }
-    fn enrolled_origin(
-        fixture: &EnrolledGateFixture,
-    ) -> CodingStartOrigin {
+    fn enrolled_origin(fixture: &EnrolledGateFixture) -> CodingStartOrigin {
         let enrollment = fixture.enrollment();
         CodingStartOrigin::Enrolled {
             enrollment_id: enrollment.enrollment_id.clone(),
             policy_revision: enrollment.policy_revision,
+            binding_version: enrollment
+                .binding_history
+                .as_ref()
+                .map(|history| history.current.binding_version),
+            target: enrollment.target.clone(),
         }
     }
 
@@ -1073,6 +1077,7 @@ mod tests {
                     source: before.source.clone(),
                     options: before.options.clone(),
                     logical_repository_id: before.logical_repository_id.clone(),
+                    target: before.target.clone(),
                 },
             )
             .expect("re-enable enrollment");
