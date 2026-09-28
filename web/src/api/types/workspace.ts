@@ -471,6 +471,14 @@ export type WorkspaceHumanAction =
       expected_gate_id: string;
       action: WorkItemPlanCompileRecoveryAction;
       reason?: string | null;
+    }
+  /** C1 Task 4（REQ-C1-GATE-02）：孤儿候选门恢复（recover=恢复原门/轮次，
+   * rebuild=从权威 source/IR/report 重建呈现面）；无完整快照禁 approve。 */
+  | {
+      type: "candidate_recovery";
+      command_id: string;
+      expected_gate_id: string;
+      action: "recover" | "rebuild";
     };
 
 /** 人工命令回执状态（snake_case wire）：accepted=已受理（含幂等重放/AlreadyClosed）；busy=门/轮次占用（409）；rejected=引擎语义拒绝（422）。 */

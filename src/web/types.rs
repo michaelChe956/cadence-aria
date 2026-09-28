@@ -505,6 +505,11 @@ pub struct IssueLifecycleResponse {
     /// recent_since 时计算）。additive：旧客户端反序列化缺省为空。
     #[serde(default)]
     pub recent_completion_info: Vec<crate::web::recent_completion_info::RecentCompletionInfoDto>,
+    /// C1（enrollment-recovery-surface Task 9）：durable 恢复等待项投影
+    /// （孤儿候选/lease 三态/Failed advance/intent 停等/换代历史）。
+    /// additive：旧客户端反序列化缺省为空。
+    #[serde(default)]
+    pub c1_waiting_items: Vec<crate::web::plan_confirmed_info::C1WaitingItemDto>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]

@@ -40,6 +40,9 @@ import type {
   WorkspaceHumanActionStatus,
   WorkspaceSession,
   WorkItemExecutionPlan,
+  AutomationEnrollmentLeaseTakeoverResult,
+  AutomationEnrollmentRetryInitializationResult,
+  EnrollmentBindingIdentity,
 } from "./types";
 
 export class ApiRequestError extends Error implements ApiError {
@@ -583,6 +586,50 @@ export function putAutomationEnrollment(
     `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/automation-enrollment`,
     {
       method: "PUT",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+// C1 Task 6（REQ-WIGA-03）：死亡租约确认接管（durable CAS；expected
+// binding/lease/attempt 由调用方从 durable 投影携带，前端不猜）。
+export function confirmLeaseTakeover(
+  projectId: string,
+  issueId: string,
+  payload: {
+    command_id: string;
+    expected_binding: EnrollmentBindingIdentity;
+    expected_lease_id: string;
+    expected_attempt_id: string;
+  },
+): Promise<AutomationEnrollmentLeaseTakeoverResult> {
+  return requestJson<AutomationEnrollmentLeaseTakeoverResult>(
+    `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/automation-enrollment/lease/takeover`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+// C1 Task 7（REQ-ADV-C1-RETRY）：Failed advance 显式 retry-initialization。
+// 响应固定为 RetryInitializationResult；NeedsHuman 由 state 承载。
+export function retryAdvanceInitialization(
+  projectId: string,
+  issueId: string,
+  planId: string,
+  payload: {
+    command_id: string;
+    expected_binding: EnrollmentBindingIdentity;
+    expected_attempt_id: string;
+    expected_checkpoint: string;
+    confirm_unknown_side_effect: boolean;
+  },
+): Promise<AutomationEnrollmentRetryInitializationResult> {
+  return requestJson<AutomationEnrollmentRetryInitializationResult>(
+    `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/work-item-plans/${encodeURIComponent(planId)}/advance/retry-initialization`,
+    {
+      method: "POST",
       body: JSON.stringify(payload),
     },
   );

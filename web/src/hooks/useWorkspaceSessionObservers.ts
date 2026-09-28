@@ -12,6 +12,7 @@ import type {
   ProductIssueListResponse,
   WorkspaceSessionSummary,
 } from "../api/types";
+import { c1WaitingItem } from "../state/workspace-cockpit-projection";
 import {
   createObserverController,
   selectObservedInbox,
@@ -65,6 +66,7 @@ export interface WorkspaceSessionObserverOptions {
       | "plan_confirmed_info"
       | "coding_final_confirm_info"
       | "recent_completion_info"
+      | "c1_waiting_items"
     >
   >;
   createController?: WorkspaceObserverControllerFactory;
@@ -132,6 +134,12 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
   const [notificationCandidates, setNotificationCandidates] = useState<
     readonly CockpitInboxItem[]
   >([]);
+  // C1 Task 9（enrollment-recovery-surface）：issue 级 durable 恢复等待项
+  // （孤儿候选/lease 三态/Failed advance/intent 停等/换代历史）——只读补读
+  // 投影，动作经页面接线的 C1 REST 发送器出站。
+  const [c1WaitingItems, setC1WaitingItems] = useState<readonly CockpitInboxItem[]>(
+    [],
+  );
   // P3（REQ-WIGA-07）：到期 tick——最近到期单次失效定时器触发后递增，
   // 使可见投影在无 REST 的情况下剔除过期 info。
   const [recentExpiryTick, setRecentExpiryTick] = useState(0);
@@ -222,8 +230,9 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
       ...infoItems,
       ...codingInfoItems,
       ...visibleRecentItems,
+      ...c1WaitingItems,
     ],
-    [records, infoItems, codingInfoItems, visibleRecentItems],
+    [records, infoItems, codingInfoItems, visibleRecentItems, c1WaitingItems],
   );
   const countedRecords = useMemo(
     () => records.filter((record) => watchedSessionIds.includes(record.sessionId)),
@@ -284,6 +293,9 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
               issues: (await getProductIssues(project.project_id)).issues,
             })),
           );
+          const lifecycleContexts = listedIssues.flatMap(({ projectId, issues }) =>
+            issues.map((issue) => ({ projectId, issueId: issue.issue_id })),
+          );
           const lifecycles = await Promise.all(
             listedIssues.flatMap(({ projectId, issues }) =>
               issues.map(async (issue) =>
@@ -298,6 +310,15 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
           );
           if (alive) {
             setSessions(lifecycles.flatMap((lifecycle) => lifecycle.workspace_sessions));
+            // C1 Task 9：durable 恢复等待项与列表同源投影（按 issue 归属）。
+            const nextC1Items: CockpitInboxItem[] = [];
+            lifecycles.forEach((lifecycle, index) => {
+              const { projectId, issueId } = lifecycleContexts[index];
+              for (const waiting of lifecycle.c1_waiting_items ?? []) {
+                nextC1Items.push(c1WaitingItem(waiting, projectId, issueId));
+              }
+            });
+            setC1WaitingItems(nextC1Items);
             // P0 1.3（REQ-WIGA-05）Task 11：会话→issue→attempt 发现通道（目录
             // 轮询副产物，无额外请求）；驾驶舱按需拉 attempt snapshot 作答 choice。
             setCodingAttempts(

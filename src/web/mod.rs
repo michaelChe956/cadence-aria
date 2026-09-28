@@ -14,6 +14,9 @@ pub mod autopilot_orchestrator;
 #[cfg(test)]
 pub(crate) mod wiga_gate_fixture;
 pub mod plan_confirmed_info;
+#[cfg(test)]
+#[path = "plan_confirmed_info_c1_tests.rs"]
+mod plan_confirmed_info_c1_tests;
 pub mod recent_completion_info;
 pub mod provider_availability;
 pub mod provider_probe;

@@ -284,8 +284,63 @@ function mockActions(): CockpitActionFacade {
     adoptReview: vi.fn(),
     confirmBatch: vi.fn(async () => undefined),
     recoverCompile: vi.fn(async () => undefined),
+    recoverCandidate: vi.fn(),
+    retryInitialization: vi.fn(async () => undefined),
+    confirmTakeover: vi.fn(async () => undefined),
+    rebind: vi.fn(),
   };
 }
+
+describe("C1 recovery cards", () => {
+  it("renders durable identity and dispatches retry with a stable command id", async () => {
+    const facade = mockActions();
+    const item: CockpitInboxItem = {
+      id: "c1:issue_0001:c1:advance_retry_failed:advance_0001",
+      kind: "c1_recovery",
+      severity: 2,
+      title: "Failed advance 待显式重试",
+      summary: "advance initialization failed · plan plan_0001 · attempt attempt_0001",
+      triage: false,
+      source: "c1_waiting",
+      createdAt: null,
+      gate: null,
+      inlineError: null,
+      choice: null,
+      c1Info: {
+        projectId: "project_0001",
+        issueId: "issue_0001",
+        itemId: "c1:advance_retry_failed:advance_0001",
+        kind: "advance_retry_failed",
+        reason: "advance initialization failed; original record stays failed",
+        completedSteps: ["record_persisted"],
+        targetLabel: "单仓 repo_physical_c1",
+        planId: "plan_0001",
+        sessionId: "wsp_0001",
+        attemptId: "attempt_0001",
+        gateId: null,
+        possibleSideEffect: "provider start outcome unknown",
+        actions: ["retry_initialization"],
+        nextPhase: "journal_prepared",
+      },
+    };
+    render(<CockpitInbox items={[item]} actions={facade} />);
+    const card = screen.getByTestId("c1-waiting-advance_retry_failed");
+    expect(within(card).getByText(/已完成步骤/)).toBeVisible();
+    expect(within(card).getByText(/可能副作用：provider start outcome unknown/)).toBeVisible();
+    const retryButton = within(card).getByTestId("c1-action-retry_initialization");
+    await userEvent.click(retryButton);
+    expect(facade.retryInitialization).toHaveBeenCalledWith({
+      kind: "retry_initialization",
+      projectId: "project_0001",
+      issueId: "issue_0001",
+      planId: "plan_0001",
+      commandId: "cmd-c1-retry-c1:advance_retry_failed:advance_0001",
+      attemptId: "attempt_0001",
+      checkpoint: "journal_prepared",
+      confirmUnknownSideEffect: false,
+    });
+  });
+});
 
 describe("CockpitInbox", () => {
   it("uses the shared dangerous confirmation and feedback editor for all actionable cards", () => {

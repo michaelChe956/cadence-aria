@@ -10,6 +10,33 @@ import {
 } from "./workspace-cockpit-projection";
 import type { WorkspaceWsState } from "./workspace-ws-store-types";
 
+/**
+ * C1 Task 9（enrollment-recovery-surface）：驾驶舱 C1 恢复动作——只按
+ * durable 等待项投影的 actions 名触发对应 REST（页面接线发送器），前端
+ * 不判定业务成功；失败/needs_human 由服务端 state 承载后刷新投影。
+ */
+export type C1RecoveryActionPayload =
+  | { kind: "recover_candidate"; projectId: string; issueId: string; sessionId: string; gateId: string; commandId: string }
+  | {
+      kind: "retry_initialization";
+      projectId: string;
+      issueId: string;
+      planId: string;
+      commandId: string;
+      attemptId: string;
+      checkpoint: string;
+      confirmUnknownSideEffect: boolean;
+    }
+  | {
+      kind: "confirm_takeover";
+      projectId: string;
+      issueId: string;
+      commandId: string;
+    }
+  | { kind: "rebind"; projectId: string; issueId: string };
+
+export type C1RecoveryActionKind = C1RecoveryActionPayload["kind"];
+
 export type CockpitActionFacade = {
   confirm(): boolean | void;
   /**
@@ -42,6 +69,18 @@ export type CockpitActionFacade = {
     action: WorkItemPlanCompileRecoveryAction,
     reason?: string,
   ): Promise<void>;
+  /** C1 Task 9：候选门恢复（Task 4 CandidateRecovery REST 通道）。 */
+  recoverCandidate(payload: C1RecoveryActionPayload & { kind: "recover_candidate" }): void;
+  /** C1 Task 9：Failed advance 显式 retry（Task 7 retry REST）。 */
+  retryInitialization(
+    payload: C1RecoveryActionPayload & { kind: "retry_initialization" },
+  ): Promise<void>;
+  /** C1 Task 9：死亡租约确认接管（Task 6 takeover REST）。 */
+  confirmTakeover(
+    payload: C1RecoveryActionPayload & { kind: "confirm_takeover" },
+  ): Promise<void>;
+  /** C1 Task 9：显式换代导航（完整 rebind 表单在 issue 生命周期页）。 */
+  rebind(payload: C1RecoveryActionPayload & { kind: "rebind" }): void;
 };
 
 
@@ -76,6 +115,13 @@ export function createCockpitActionFacade(input: {
    * 或未知（null，等重启暂停）保留既有手动 WS 语义，observer 不借 REST 扩权。
    */
   sendHumanAction?: (action: WorkspaceHumanAction) => boolean;
+  /**
+   * C1 Task 9：驾驶舱 C1 恢复动作发送器（页面接线对应 REST：recover_
+   * candidate→human-actions CandidateRecovery、retry_initialization→Task 7
+   * retry 路由、confirm_takeover→Task 6 takeover 路由、rebind→issue 生命
+   * 周期页显式 rebind 表单）。未接线时对应动作零出站（fail-closed）。
+   */
+  sendC1Action?: (payload: C1RecoveryActionPayload) => void;
 }): CockpitActionFacade {
   return {
     confirm() {
@@ -217,6 +263,20 @@ export function createCockpitActionFacade(input: {
         return;
       }
       input.sendCompileRecovery(action, reason);
+    },
+    // C1 Task 9：C1 恢复动作只透传页面接线的 REST 发送器（fail-closed：
+    // 未接线零出站）；稳定 command_id 由调用方（C1 卡片）生成并复用。
+    recoverCandidate(payload) {
+      input.sendC1Action?.(payload);
+    },
+    async retryInitialization(payload) {
+      input.sendC1Action?.(payload);
+    },
+    async confirmTakeover(payload) {
+      input.sendC1Action?.(payload);
+    },
+    rebind(payload) {
+      input.sendC1Action?.(payload);
     },
   };
 }

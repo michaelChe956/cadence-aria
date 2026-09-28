@@ -1,6 +1,7 @@
 import { gateIdentityFromState } from "./cockpit-action-routing";
 import { protocolErrorCopy, STALE_DRIVER_LEASE_CODE } from "./protocol-error-copy";
 import type {
+  C1WaitingItem,
   ChoiceQuestion,
   CodingFinalConfirmInfoItem, PlanConfirmedInfoItem,
   WorkItemPlanHumanGateSnapshot,
@@ -467,6 +468,7 @@ export type CockpitInboxKind =
   | "hard_error"
   | "choice"
   | "info"
+  | "c1_recovery"
   | "sc_failed";
 
 /**
@@ -533,6 +535,7 @@ export interface CockpitInboxItem {
     | "choice"
     | "plan_confirmed_info"
     | "coding_final_confirm_info"
+    | "c1_waiting"
     | "sc_failed",
   createdAt: string | null;
   gate: GateProjection | null;
@@ -550,6 +553,98 @@ export interface CockpitInboxItem {
   completionIdentity?: string;
   /** P2 GAP-E/G（Task 0.1）：kind="sc_failed" 时的人工显式重驱投影。 */
   scFailure?: { failedNodeId: string; phase: "failed" } | null;
+  /** C1（enrollment-recovery-surface Task 9）：kind="c1_recovery" 时的
+   * durable 恢复等待项投影（reason/身份/可用动作/下一阶段）。 */
+  c1Info?: C1WaitingProjection | null;
+}
+
+/** C1 Task 9：durable 恢复等待项的收件箱投影（服务端 C1WaitingItem 的
+ * 只读镜像；动作按 actions 名由 facade 触发对应 REST，前端不判定成功）。 */
+export interface C1WaitingProjection {
+  projectId: string;
+  issueId: string;
+  itemId: string;
+  kind: string;
+  reason: string;
+  completedSteps: readonly string[];
+  targetLabel: string;
+  planId: string | null;
+  sessionId: string | null;
+  attemptId: string | null;
+  gateId: string | null;
+  possibleSideEffect: string | null;
+  actions: readonly string[];
+  nextPhase: string | null;
+}
+
+/** C1 等待项标题/摘要（按 kind 固定文案；身份字段进摘要行）。 */
+const C1_WAITING_KIND_TITLES: Record<string, string> = {
+  candidate_recovery: "候选门快照待恢复",
+  lease_wait: "租约活跃，自动链等待中",
+  lease_takeover: "死亡租约待确认接管",
+  lease_unknown: "租约活性未知，停等人工",
+  advance_retry_failed: "Failed advance 待显式重试",
+  intent_blocked: "计划意图停等修订",
+  generation_history: "存在旧代绑定（只读可查）",
+};
+
+export function c1TargetLabel(target: C1WaitingItem["target"]): string {
+  if (!target) {
+    return "target 未知";
+  }
+  return target.kind === "single_repository"
+    ? `单仓 ${target.repository_id}`
+    : `逻辑代码库 ${target.logical_codebase_id}/${target.logical_repository_id}`;
+}
+
+/** durable C1WaitingItem → 收件箱条目（不进 countedInbox；动作走 C1 REST）。 */
+export function c1WaitingItem(
+  item: C1WaitingItem,
+  projectId: string,
+  issueId: string,
+): CockpitInboxItem {
+  const identityParts = [
+    item.plan_id ? `plan ${item.plan_id}` : null,
+    item.session_id ? `session ${item.session_id}` : null,
+    item.attempt_id ? `attempt ${item.attempt_id}` : null,
+    item.gate_id ? `gate ${item.gate_id}` : null,
+    c1TargetLabel(item.target),
+  ].filter((part): part is string => Boolean(part));
+  const summaryParts = [
+    item.reason,
+    identityParts.length > 0 ? identityParts.join(" · ") : null,
+    item.possible_side_effect ? `可能副作用：${item.possible_side_effect}` : null,
+    item.next_phase ? `下一阶段：${item.next_phase}` : null,
+  ].filter((part): part is string => Boolean(part));
+  return {
+    id: `c1:${issueId}:${item.id}`,
+    kind: "c1_recovery",
+    severity: item.actions.length > 0 ? 2 : 3,
+    title: C1_WAITING_KIND_TITLES[item.kind] ?? "C1 恢复等待项",
+    summary: summaryParts.join(" · "),
+    triage: false,
+    source: "c1_waiting",
+    createdAt: null,
+    gate: null,
+    inlineError: null,
+    choice: null,
+    c1Info: {
+      projectId,
+      issueId,
+      itemId: item.id,
+      kind: item.kind,
+      reason: item.reason,
+      completedSteps: item.completed_steps,
+      targetLabel: c1TargetLabel(item.target),
+      planId: item.plan_id ?? null,
+      sessionId: item.session_id ?? null,
+      attemptId: item.attempt_id ?? null,
+      gateId: item.gate_id ?? null,
+      possibleSideEffect: item.possible_side_effect ?? null,
+      actions: item.actions,
+      nextPhase: item.next_phase ?? null,
+    },
+  };
 }
 
 /** 裸 driver 抢走租约后的协议码——常量源头在 protocol-error-copy（F-50）。 */

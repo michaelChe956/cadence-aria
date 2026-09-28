@@ -42,6 +42,10 @@ function actions(): CockpitActionFacade {
     adoptReview: vi.fn(() => true),
     confirmBatch: vi.fn(async () => undefined),
     recoverCompile: vi.fn(async () => undefined),
+    recoverCandidate: vi.fn(),
+    retryInitialization: vi.fn(async () => undefined),
+    confirmTakeover: vi.fn(async () => undefined),
+    rebind: vi.fn(),
   };
 }
 

@@ -161,6 +161,25 @@ export type RecentCompletionInfoItem =
       final_confirmed: boolean;
     };
 
+// C1 Task 9（enrollment-recovery-surface）：issue 级 durable 恢复等待项
+// （孤儿候选/lease 三态/Failed advance/intent 停等/换代历史）。actions 为
+// 服务端 durable 事实派生的可用操作名（recover_candidate | confirm_takeover |
+// retry_initialization | rebind）；前端只按名触发对应 REST，不自行判定成功。
+export type C1WaitingItem = {
+  id: string;
+  kind: string;
+  reason: string;
+  completed_steps: string[];
+  target?: EnrollmentTarget | null;
+  plan_id?: string | null;
+  session_id?: string | null;
+  attempt_id?: string | null;
+  gate_id?: string | null;
+  possible_side_effect?: string | null;
+  actions: string[];
+  next_phase?: string | null;
+};
+
 export type IssueLifecycleResponse = {
   issue: ProductIssue;
   story_specs: StorySpec[];
@@ -183,6 +202,9 @@ export type IssueLifecycleResponse = {
   // 时计算）。additive：旧响应缺失时前端按无近期补读处理（回落 watched
   // info 投影，绝不认作 K 外全量）。
   recent_completion_info?: RecentCompletionInfoItem[];
+  // C1（enrollment-recovery-surface Task 9）：durable 恢复等待项。additive：
+  // 旧响应缺失时前端按无等待项处理。
+  c1_waiting_items?: C1WaitingItem[];
 };
 
 export type GenerateStorySpecsRequest = ProviderWorkspaceConfigInput & {
@@ -322,6 +344,66 @@ export type AutomationEnrollmentRebindResult = {
   command_id: string;
   state: AutomationEnrollmentOperationState;
   enrollment: IssueAutomationEnrollment;
+};
+
+// C1 Task 6（REQ-WIGA-03）：lease 三态与确认接管 DTO（服务端 snake_case）。
+export type LeaseDisposition =
+  | "active_wait"
+  | "dead_needs_takeover"
+  | "unknown_needs_human";
+
+export type LeaseDecision = {
+  disposition: LeaseDisposition;
+  lease_id: string;
+  last_activity_at?: string | null;
+  evidence: string[];
+};
+
+export type AutomationEnrollmentLeaseTakeoverRequest = {
+  command_id: string;
+  expected_binding: EnrollmentBindingIdentity;
+  expected_lease_id: string;
+  expected_attempt_id: string;
+};
+
+export type AutomationEnrollmentLeaseTakeoverResult = {
+  command_id: string;
+  state: AutomationEnrollmentOperationState;
+  lease: LeaseDecision;
+};
+
+// C1 Task 7（REQ-ADV-C1-RETRY）：Failed advance 显式 retry DTO。
+export type AdvanceInitializationCheckpoint =
+  | "record_persisted"
+  | "journal_prepared"
+  | "attempt_persisted"
+  | "worktree_bound"
+  | "plan_binding_saved"
+  | "units_materialized"
+  | "ready";
+
+export type AutomationEnrollmentRetryInitializationRequest = {
+  command_id: string;
+  expected_binding: EnrollmentBindingIdentity;
+  expected_attempt_id: string;
+  expected_checkpoint: AdvanceInitializationCheckpoint;
+  confirm_unknown_side_effect: boolean;
+};
+
+export type AutomationEnrollmentRetryInitializationResult = {
+  command_id: string;
+  state: AutomationEnrollmentOperationState;
+  retry: {
+    retry_id: string;
+    command_id: string;
+    advance_id: string;
+    attempt_id: string;
+    state: AutomationEnrollmentOperationState;
+    checkpoint: AdvanceInitializationCheckpoint;
+    created_at: string;
+    updated_at: string;
+  };
+  outcome?: unknown | null;
 };
 
 // Task 1 只读投影：唯一逻辑仓 UUID + 服务端与 prepare 同源解析的 options。

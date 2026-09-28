@@ -297,7 +297,7 @@ describe("chat workspace p1 entries", () => {
       metadata: { summary: "可以进入人工确认" },
     });
 
-    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), confirmReview: () => undefined, feedback: () => undefined, terminate: () => onDecision("terminate"), advance: () => undefined, adoptReview: () => undefined, confirmBatch: async () => undefined, recoverCompile: async () => undefined }} />);
+    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), confirmReview: () => undefined, feedback: () => undefined, terminate: () => onDecision("terminate"), advance: () => undefined, adoptReview: () => undefined, confirmBatch: async () => undefined, recoverCompile: async () => undefined, recoverCandidate: () => undefined, retryInitialization: async () => undefined, confirmTakeover: async () => undefined, rebind: () => undefined }} />);
     fireEvent.click(screen.getByRole("button", { name: "确认当前版本" }));
     fireEvent.click(screen.getByRole("button", { name: "终止此门" }));
     fireEvent.click(screen.getByRole("button", { name: "确认终止此门" }));
@@ -318,7 +318,7 @@ describe("chat workspace p1 entries", () => {
       metadata: { verdict: "needs_human", summary: "需要先确认弹窗触发时机" },
     });
 
-    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), confirmReview: () => undefined, feedback: () => undefined, terminate: () => onDecision("terminate"), advance: () => undefined, adoptReview: () => undefined, confirmBatch: async () => undefined, recoverCompile: async () => undefined }} />);
+    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), confirmReview: () => undefined, feedback: () => undefined, terminate: () => onDecision("terminate"), advance: () => undefined, adoptReview: () => undefined, confirmBatch: async () => undefined, recoverCompile: async () => undefined, recoverCandidate: () => undefined, retryInitialization: async () => undefined, confirmTakeover: async () => undefined, rebind: () => undefined }} />);
     fireEvent.click(screen.getByRole("button", { name: "确认当前版本" }));
 
     // F-50 单标题制：content 与标题同义去重，标题只出现一次；独立摘要保留。
@@ -340,7 +340,7 @@ describe("chat workspace p1 entries", () => {
       },
     });
 
-    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), confirmReview: () => undefined, feedback: () => undefined, terminate: () => onDecision("terminate"), advance: () => undefined, adoptReview: () => undefined, confirmBatch: async () => undefined, recoverCompile: async () => undefined }} />);
+    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), confirmReview: () => undefined, feedback: () => undefined, terminate: () => onDecision("terminate"), advance: () => undefined, adoptReview: () => undefined, confirmBatch: async () => undefined, recoverCompile: async () => undefined, recoverCandidate: () => undefined, retryInitialization: async () => undefined, confirmTakeover: async () => undefined, rebind: () => undefined }} />);
     fireEvent.click(screen.getByRole("button", { name: "确认当前版本" }));
 
     expect(screen.queryByRole("button", { name: "采纳建议并返修" })).not.toBeInTheDocument();
@@ -366,7 +366,7 @@ describe("chat workspace p1 entries", () => {
       },
     });
 
-    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), confirmReview: () => undefined, feedback: () => undefined, terminate: () => onDecision("terminate"), advance: () => undefined, adoptReview: () => undefined, confirmBatch: async () => undefined, recoverCompile: async () => undefined }} />);
+    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), confirmReview: () => undefined, feedback: () => undefined, terminate: () => onDecision("terminate"), advance: () => undefined, adoptReview: () => undefined, confirmBatch: async () => undefined, recoverCompile: async () => undefined, recoverCandidate: () => undefined, retryInitialization: async () => undefined, confirmTakeover: async () => undefined, rebind: () => undefined }} />);
     fireEvent.click(screen.getByRole("button", { name: "确认当前版本" }));
 
     expect(screen.getByText("需要判断 reviewer 意图")).toBeInTheDocument();
@@ -403,7 +403,7 @@ describe("chat workspace p1 entries", () => {
       },
     });
 
-    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), confirmReview: () => undefined, feedback: () => undefined, terminate: () => onDecision("terminate"), advance: () => undefined, adoptReview: () => undefined, confirmBatch: async () => undefined, recoverCompile: async () => undefined }} />);
+    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), confirmReview: () => undefined, feedback: () => undefined, terminate: () => onDecision("terminate"), advance: () => undefined, adoptReview: () => undefined, confirmBatch: async () => undefined, recoverCompile: async () => undefined, recoverCandidate: () => undefined, retryInitialization: async () => undefined, confirmTakeover: async () => undefined, rebind: () => undefined }} />);
     expect(screen.queryByRole("button", { name: "按 reviewer 意见返修" })).not.toBeInTheDocument();
     expect(onDecision).not.toHaveBeenCalled();
   });
@@ -418,6 +418,10 @@ describe("chat workspace p1 entries", () => {
       adoptReview: vi.fn(),
       confirmBatch: vi.fn(async () => undefined),
       recoverCompile: vi.fn(async () => undefined),
+      recoverCandidate: vi.fn(),
+      retryInitialization: vi.fn(async () => undefined),
+      confirmTakeover: vi.fn(async () => undefined),
+      rebind: vi.fn(),
     };
     const user = userEvent.setup();
     const entry = makeEntry({
@@ -451,6 +455,10 @@ describe("chat workspace p1 entries", () => {
       adoptReview: vi.fn(),
       confirmBatch: vi.fn(async () => undefined),
       recoverCompile: vi.fn(async () => undefined),
+      recoverCandidate: vi.fn(),
+      retryInitialization: vi.fn(async () => undefined),
+      confirmTakeover: vi.fn(async () => undefined),
+      rebind: vi.fn(),
     };
     const user = userEvent.setup();
     const entry = makeEntry({
@@ -492,7 +500,7 @@ describe("chat workspace p1 entries", () => {
       resolution,
     });
 
-    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), confirmReview: () => undefined, feedback: () => undefined, terminate: () => onDecision("terminate"), advance: () => undefined, adoptReview: () => undefined, confirmBatch: async () => undefined, recoverCompile: async () => undefined }} />);
+    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), confirmReview: () => undefined, feedback: () => undefined, terminate: () => onDecision("terminate"), advance: () => undefined, adoptReview: () => undefined, confirmBatch: async () => undefined, recoverCompile: async () => undefined, recoverCandidate: () => undefined, retryInitialization: async () => undefined, confirmTakeover: async () => undefined, rebind: () => undefined }} />);
 
     expect(screen.getByText(label)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "确认当前版本" })).not.toBeInTheDocument();
@@ -512,7 +520,7 @@ describe("chat workspace p1 entries", () => {
       },
     });
 
-    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), confirmReview: () => undefined, feedback: () => undefined, terminate: () => onDecision("terminate"), advance: () => undefined, adoptReview: () => undefined, confirmBatch: async () => undefined, recoverCompile: async () => undefined }} />);
+    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), confirmReview: () => undefined, feedback: () => undefined, terminate: () => onDecision("terminate"), advance: () => undefined, adoptReview: () => undefined, confirmBatch: async () => undefined, recoverCompile: async () => undefined, recoverCandidate: () => undefined, retryInitialization: async () => undefined, confirmTakeover: async () => undefined, rebind: () => undefined }} />);
 
     for (const confirmName of [
       "确认产物",
@@ -567,7 +575,7 @@ describe("chat workspace p1 entries", () => {
       metadata: { workspace_type: workspaceType },
     });
 
-    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), confirmReview: () => undefined, feedback: () => undefined, terminate: () => onDecision("terminate"), advance: () => undefined, adoptReview: () => undefined, confirmBatch: async () => undefined, recoverCompile: async () => undefined }} />);
+    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), confirmReview: () => undefined, feedback: () => undefined, terminate: () => onDecision("terminate"), advance: () => undefined, adoptReview: () => undefined, confirmBatch: async () => undefined, recoverCompile: async () => undefined, recoverCandidate: () => undefined, retryInitialization: async () => undefined, confirmTakeover: async () => undefined, rebind: () => undefined }} />);
 
     fireEvent.click(screen.getByRole("button", { name: "确认当前版本" }));
     expect(screen.getByRole("button", { name: "终止此门" })).toBeInTheDocument();

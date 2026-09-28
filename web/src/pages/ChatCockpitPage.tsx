@@ -4,7 +4,8 @@ import type { AuthorDecisionChoice } from "../api/types";
 import {
   getCodingAttemptSnapshot,
   postRetryFailedScRun,
-  takeoverWorkspaceSession,
+  confirmLeaseTakeover, getAutomationEnrollment, postWorkspaceHumanAction,
+  retryAdvanceInitialization, takeoverWorkspaceSession,
 } from "../api/client";
 import { fetchWorkspaceArtifactVersion } from "../api/workspace-content";
 import {
@@ -44,7 +45,8 @@ import { useCockpitAutopilot } from "../hooks/useCockpitAutopilot";
 import { useUnloadGuard } from "../hooks/useUnloadGuard";
 import type { WorkspaceWsApi } from "../hooks/useWorkspaceWs";
 import type { ChatEntry, ChoiceResponsePayload } from "../state/chat-entries";
-import { createCockpitActionFacade } from "../state/cockpit-action-routing";
+import { createCockpitActionFacade, type C1RecoveryActionPayload } from "../state/cockpit-action-routing";
+import { notifyLifecycleInvalidated } from "../state/lifecycle-workbench-store";
 import {
   cockpitInboxItemSessionId,
   gateActionBlockReason,
@@ -475,6 +477,64 @@ export function ChatCockpitPage({
   const openArtifactView = useCallback(() => {
     setDrilldownView("artifact");
   }, []);
+  // C1 Task 9：驾驶舱 C1 恢复动作发送器——只触发对应 REST/application
+  // service（recover_candidate→human-actions、retry_initialization→Task 7
+  // retry 路由、confirm_takeover→Task 6 takeover 路由），expected binding
+  // 从 durable enrollment 补读；rebind 走 Issue 生命周期工作台的显式表单
+  //（此处只广播失效并留审计，不在驾驶舱复制换代表单）。
+  const sendC1Action = useCallback(async (payload: C1RecoveryActionPayload) => {
+    try {
+      if (payload.kind === "recover_candidate") {
+        await postWorkspaceHumanAction(payload.sessionId, {
+          type: "candidate_recovery",
+          command_id: payload.commandId,
+          expected_gate_id: payload.gateId,
+          action: "recover",
+        });
+      } else if (payload.kind === "retry_initialization") {
+        const enrollment = await getAutomationEnrollment(payload.projectId, payload.issueId);
+        const binding = enrollment?.binding_history?.current ?? null;
+        if (!binding) {
+          throw new Error("C1 retry requires a durable enrollment binding");
+        }
+        await retryAdvanceInitialization(payload.projectId, payload.issueId, payload.planId, {
+          command_id: payload.commandId,
+          expected_binding: binding,
+          expected_attempt_id: payload.attemptId,
+          expected_checkpoint: payload.checkpoint as Parameters<
+            typeof retryAdvanceInitialization
+          >[3]["expected_checkpoint"],
+          confirm_unknown_side_effect: payload.confirmUnknownSideEffect,
+        });
+      } else if (payload.kind === "confirm_takeover") {
+        const enrollment = await getAutomationEnrollment(payload.projectId, payload.issueId);
+        const binding = enrollment?.binding_history?.current ?? null;
+        if (!binding) {
+          throw new Error("C1 takeover requires a durable enrollment binding");
+        }
+        const leaseId = payload.commandId.split(":").pop() ?? "";
+        await confirmLeaseTakeover(payload.projectId, payload.issueId, {
+          command_id: payload.commandId,
+          expected_binding: binding,
+          expected_lease_id: leaseId,
+          expected_attempt_id: "",
+        });
+      } else {
+        // rebind：显式换代表单在 Issue 生命周期工作台（useIssueLifecycleGeneration）；
+        // 驾驶舱只广播失效刷新，不复制换代表单。
+        console.info(
+          "[c1] explicit rebind lives in the issue lifecycle workbench",
+          payload.projectId,
+          payload.issueId,
+        );
+      }
+      notifyLifecycleInvalidated(payload.issueId);
+    } catch (error) {
+      // 动作失败保留 durable 等待项（下轮 lifecycle 刷新仍可见）；错误就地
+      // 如实记录，不吞为成功。
+      console.error("[c1] recovery action failed", payload, error);
+    }
+  }, []);
   const actions = useMemo(
     () =>
       createCockpitActionFacade({
@@ -492,6 +552,9 @@ export function ChatCockpitPage({
         sendBatchConfirm: confirmBatchGate,
         sendCompileRecovery: workspaceWs.sendWorkItemPlanCompileRecoveryAction,
         sendHumanAction: sendHumanActionRest,
+        sendC1Action: (c1Payload) => {
+          void sendC1Action(c1Payload);
+        },
       }),
     [
       state.flowKind,
@@ -507,6 +570,7 @@ export function ChatCockpitPage({
       confirmBatchGate,
       workspaceWs.sendWorkItemPlanCompileRecoveryAction,
       sendHumanActionRest,
+      sendC1Action,
     ],
   );
   const auditRows = useMemo(

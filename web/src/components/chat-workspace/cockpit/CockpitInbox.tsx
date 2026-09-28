@@ -57,6 +57,7 @@ const KIND_GLYPH = {
   hard_error: AlertTriangle,
   choice: ListChecks,
   info: CircleCheck,
+  c1_recovery: RotateCcw,
   sc_failed: CircleAlert,
 } as const;
 
@@ -67,8 +68,20 @@ const KIND_CLASS = {
   stopped: "rounded-lg border border-slate-200 bg-gray-50 px-3 py-2",
   choice: GATE_CARD_CLASS,
   info: "rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2",
+  c1_recovery: "rounded-lg border border-amber-200 bg-amber-50 px-3 py-2",
   sc_failed: "rounded-lg border border-slate-200 bg-gray-50 px-3 py-2",
 } as const;
+
+/**
+ * C1 Task 9：C1 恢复动作按钮文案（按 actions 名固定；点击只经 facade
+ * 触发对应 REST，前端不判定业务成功）。
+ */
+const C1_ACTION_BUTTON_LABELS: Record<string, string> = {
+  recover_candidate: "恢复候选门",
+  retry_initialization: "重试初始化",
+  confirm_takeover: "确认接管",
+  rebind: "去换代",
+};
 
 export function CockpitInbox({
   items,
@@ -402,6 +415,9 @@ function CockpitInboxRow({
         ) : null}
         {item.kind === "choice" && actionable ? (
           <ChoiceInboxCard item={item} onChoiceRespond={onChoiceRespond} />
+        ) : null}
+        {item.kind === "c1_recovery" && item.c1Info ? (
+          <C1RecoveryCard item={item} actions={actions} />
         ) : null}
         {item.kind === "sc_failed" && item.scFailure && onRetryFailedSc ? (
           <button
@@ -948,3 +964,127 @@ function ChoiceInboxCard({
   );
 }
 
+
+
+/**
+ * C1 Task 9（enrollment-recovery-surface）：durable 恢复等待项卡片——展示
+ * reason/已完成步骤/target/身份/可能副作用/下一阶段，并按服务端 durable
+ * 派生的 actions 渲染动作按钮（稳定 command_id 从 item id 派生，同命令重试
+ * 幂等）。按钮只经 facade 透传页面接线的 C1 REST 发送器；无 facade 时只读。
+ */
+function C1RecoveryCard({
+  item,
+  actions,
+}: {
+  item: CockpitInboxItem;
+  actions?: CockpitActionFacade;
+}) {
+  const info = item.c1Info;
+  if (!info) {
+    return null;
+  }
+  const handleAction = (action: string) => {
+    if (!actions) {
+      return;
+    }
+    if (action === "recover_candidate") {
+      actions.recoverCandidate({
+        kind: "recover_candidate",
+        projectId: info.projectId,
+        issueId: info.issueId,
+        sessionId: info.sessionId ?? "",
+        gateId: info.gateId ?? "",
+        commandId: `cmd-c1-recover-${info.itemId}`,
+      });
+      return;
+    }
+    if (action === "retry_initialization") {
+      void actions.retryInitialization({
+        kind: "retry_initialization",
+        projectId: info.projectId,
+        issueId: info.issueId,
+        planId: info.planId ?? "",
+        commandId: `cmd-c1-retry-${info.itemId}`,
+        attemptId: info.attemptId ?? "",
+        // next_phase 携带服务端 durable journal checkpoint；未知副作用
+        // 首试不确认（Task 7 NeedsHuman 语义），确认按钮单独发送。
+        checkpoint: info.nextPhase ?? "record_persisted",
+        confirmUnknownSideEffect: false,
+      });
+      return;
+    }
+    if (action === "confirm_takeover") {
+      void actions.confirmTakeover({
+        kind: "confirm_takeover",
+        projectId: info.projectId,
+        issueId: info.issueId,
+        commandId: `cmd-c1-takeover-${info.itemId}`,
+      });
+      return;
+    }
+    if (action === "rebind") {
+      actions.rebind({
+        kind: "rebind",
+        projectId: info.projectId,
+        issueId: info.issueId,
+      });
+    }
+  };
+  return (
+    <div className="mt-2" data-testid={`c1-waiting-${info.kind}`}>
+      {info.completedSteps.length > 0 ? (
+        <p className="text-xs text-slate-600">
+          已完成步骤：{info.completedSteps.join("、")}
+        </p>
+      ) : null}
+      <p className="mt-1 text-xs text-slate-500">target：{info.targetLabel}</p>
+      {info.possibleSideEffect ? (
+        <p className="mt-1 text-xs text-[var(--aria-danger)]">
+          可能副作用：{info.possibleSideEffect}
+        </p>
+      ) : null}
+      {info.nextPhase ? (
+        <p className="mt-1 text-xs text-slate-500">下一阶段：{info.nextPhase}</p>
+      ) : null}
+      {info.actions.length > 0 ? (
+        <div className="mt-2 flex flex-wrap gap-2">
+          {info.actions.map((action) => (
+            <button
+              key={action}
+              type="button"
+              disabled={!actions}
+              onClick={() => handleAction(action)}
+              className={`${BTN_SECONDARY_CLASS} disabled:cursor-not-allowed disabled:opacity-60`}
+              data-testid={`c1-action-${action}`}
+            >
+              {C1_ACTION_BUTTON_LABELS[action] ?? action}
+            </button>
+          ))}
+          {info.actions.includes("retry_initialization") && info.possibleSideEffect ? (
+            <button
+              type="button"
+              disabled={!actions}
+              onClick={() =>
+                actions?.retryInitialization({
+                  kind: "retry_initialization",
+                  projectId: info.projectId,
+                  issueId: info.issueId,
+                  planId: info.planId ?? "",
+                  // 未知副作用确认是独立命令（同 command 异 payload fail-closed）。
+                  commandId: `cmd-c1-retry-confirm-${info.itemId}`,
+                  attemptId: info.attemptId ?? "",
+                  checkpoint: info.nextPhase ?? "record_persisted",
+                  confirmUnknownSideEffect: true,
+                })
+              }
+              className={`${BTN_SECONDARY_CLASS} disabled:cursor-not-allowed disabled:opacity-60`}
+              data-testid="c1-action-retry_initialization_confirm"
+            >
+              确认副作用并重试
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
