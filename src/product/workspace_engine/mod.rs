@@ -20,7 +20,8 @@ use crate::cross_cutting::structured_output::{StructuredOutputError, StructuredO
 use crate::product::checkpoint_store::CheckpointStore;
 use crate::product::json_store::ProductStoreError;
 use crate::product::lifecycle_store::{
-    AppendSpecVersionInput, CreateWorkspaceSessionInput, IssueWorkItemPlanUpdate, LifecycleStore,
+    AppendSpecVersionInput, CreateWorkItemChildSessionInput, CreateWorkspaceSessionInput,
+    IssueWorkItemPlanUpdate, LifecycleStore,
 };
 use crate::product::models::{
     AgentRole, ArtifactRef, IssueWorkItemDependencyEdge, IssueWorkItemPlan,

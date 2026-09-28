@@ -9,7 +9,7 @@ use crate::product::work_item_plan_policy::{
 use crate::web::workspace_ws_types::{TimelineNodeStatus, TimelineNodeType};
 
 use super::provider::{ProviderConversationRef, ProviderName};
-use super::work_item_revision::WorkItemRuntimeBinding;
+use super::work_item_revision::{ChildBindingIdentity, WorkItemRuntimeBinding};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -159,11 +159,30 @@ pub struct WorkspaceSessionRecord {
     pub sc_recovery_claim: Option<ScRecoveryClaim>,
     #[serde(default)]
     pub work_item_runtime_binding: Option<WorkItemRuntimeBinding>,
+    /// C1 Task 8（REQ-C1-CHILD-01）：compile child 创建时原子写入的绑定
+    /// 身份；旧 JSON 读 `None`（只读兼容，不迁移、不补写）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_item_child_binding: Option<ChildBindingIdentity>,
     #[serde(default)]
     pub provider_conversations: Vec<ProviderConversationRef>,
     pub messages: Vec<WorkspaceMessageRecord>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// C1 Task 8（REQ-C1-CHILD-01）：compile child 精确匹配。`expected` 为
+/// `Some` 时要求 session durable child binding 全等——旧代（不同
+/// binding_version）或字段漂移的 child 不复用、不迁移、不覆盖；`expected`
+/// 为 `None`（manual/非 enrolled 链）只匹配未绑定 child，保持既有
+/// entity_id 复用语义。
+pub fn match_compile_child(
+    session: &WorkspaceSessionRecord,
+    expected: Option<&ChildBindingIdentity>,
+) -> bool {
+    match expected {
+        Some(identity) => session.work_item_child_binding.as_ref() == Some(identity),
+        None => session.work_item_child_binding.is_none(),
+    }
 }
 
 /// Durable audit event that associates an immutable stopped auto run with the

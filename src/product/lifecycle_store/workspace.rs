@@ -14,7 +14,8 @@ use crate::product::models::{
 use crate::web::workspace_ws_types::{ArtifactVersion, TimelineNode};
 
 use super::{
-    CreateWorkspaceSessionInput, LifecycleStore, child_directories, json_file_paths,
+    CreateWorkItemChildSessionInput, CreateWorkspaceSessionInput, LifecycleStore,
+    child_directories, json_file_paths,
     list_workspace_session_records, path_exists, path_is_regular_file,
     read_workspace_session_record, remove_dir_all_if_exists, remove_file_if_exists,
     workspace_session_file_paths,
@@ -206,6 +207,43 @@ impl LifecycleStore {
         input: CreateWorkspaceSessionInput,
         id: String,
     ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
+        self.create_workspace_session_with_child_binding(input, id, None)
+    }
+
+    /// C1 Task 8（REQ-C1-CHILD-01）：WorkItem compile child 专用创建入口
+    /// ——child binding 身份随 session 的同一原子写入持久化；既有同 id 文件
+    /// 按基础身份字段＋child binding 幂等重放，身份漂移 fail-closed。
+    pub fn create_workspace_child_session(
+        &self,
+        input: CreateWorkItemChildSessionInput,
+    ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
+        if input.session.workspace_type != WorkspaceType::WorkItem {
+            return Err(ProductStoreError::InvalidRecord {
+                kind: "workspace_session",
+                reason: "work item child binding requires workspace_type work_item".to_string(),
+            });
+        }
+        if input.session.entity_id != input.child_binding.logical_work_item_id {
+            return Err(ProductStoreError::InvalidRecord {
+                kind: "workspace_session",
+                reason: "work item child binding logical id must match session entity id"
+                    .to_string(),
+            });
+        }
+        let id = self.next_workspace_session_id()?;
+        self.create_workspace_session_with_child_binding(
+            input.session,
+            id,
+            Some(input.child_binding),
+        )
+    }
+
+    fn create_workspace_session_with_child_binding(
+        &self,
+        input: CreateWorkspaceSessionInput,
+        id: String,
+        child_binding: Option<crate::product::models::ChildBindingIdentity>,
+    ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
         validate_relative_id(&input.project_id)?;
         validate_relative_id(&input.issue_id)?;
         validate_relative_id(&input.entity_id)?;
@@ -228,6 +266,7 @@ impl LifecycleStore {
                 && existing.issue_id == input.issue_id
                 && existing.entity_id == input.entity_id
                 && existing.workspace_type == input.workspace_type
+                && existing.work_item_child_binding == child_binding
             {
                 return Ok(existing);
             }
@@ -274,6 +313,7 @@ impl LifecycleStore {
             compile_reservation: None,
             sc_recovery_claim: None,
             work_item_runtime_binding: None,
+            work_item_child_binding: child_binding,
             provider_conversations: Vec::new(),
             messages: Vec::new(),
             created_at: now.clone(),

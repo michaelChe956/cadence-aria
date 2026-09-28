@@ -218,6 +218,7 @@ pub(super) fn scope_test_context(
         approved_at: None,
         compile_reservation: None,
         work_item_runtime_binding: None,
+        work_item_child_binding: None,
         provider_conversations: vec![],
         messages: vec![],
         created_at: "2026-08-27T00:00:00Z".to_string(),

@@ -488,3 +488,188 @@ async fn plan_repair_real_prepare_review_publish_keeps_full_canonical_candidate_
         Some(prepared.next_plan_revision.id.as_str())
     );
 }
+
+// ---------------------------------------------------------------------------
+// C1 Task 8（REQ-C1-CHILD-01）：同代 replay 复用同一 child；身份漂移 fail-closed。
+// ---------------------------------------------------------------------------
+
+/// 当前四元身份＋binding identity 完全相同的 compile/replay 命中同一
+/// child，不创建第二 session；identity 匹配但 durable runtime binding 漂移
+/// 时 fail-closed（IdentityMismatch），不清旧历史。
+#[tokio::test]
+async fn finalizer_replays_same_binding_child_and_fails_closed_on_drift() {
+    // —— 场景 A：同代 replay 复用既有 child。
+    let (_tmp, lifecycle, plan_id, mut engine) =
+        make_work_item_plan_engine_with_accepted_contract_drafts();
+    let session_id = engine.session.session_id.clone();
+    let enrollment_store = enable_c1_child_enrollment(&lifecycle, &plan_id, &session_id);
+    let enrollment_id = enrollment_store
+        .get("project_0001", "issue_0001")
+        .unwrap()
+        .expect("enrollment fixture enabled")
+        .enrollment_id;
+
+    let compile_id = "compile_c1_child_replay";
+    let (mut compile_tx, accepted_drafts) = prepare_initial_compile_transaction(
+        &engine,
+        &lifecycle,
+        &plan_id,
+        &compile_id,
+        "2026-09-29T00:00:00Z",
+    );
+    engine
+        .work_item_plan_store()
+        .unwrap()
+        .put_compile_transaction(&compile_tx)
+        .unwrap();
+    let published = engine
+        .compile_initial_plan_revision(&accepted_drafts)
+        .unwrap();
+    let first_logical_id = published.work_items[0]
+        .work_item_revision
+        .logical_work_item_id
+        .clone();
+    let expected_identity = crate::product::models::ChildBindingIdentity {
+        plan_id: plan_id.clone(),
+        plan_revision_id: published.plan_revision.id.clone(),
+        logical_work_item_id: first_logical_id.clone(),
+        work_item_revision_id: published.work_items[0].work_item_revision.id.clone(),
+        binding_version: 1,
+        enrollment_id: enrollment_id.clone(),
+        target: c1_child_enrollment_target(),
+    };
+    let existing_child = lifecycle
+        .create_workspace_child_session(CreateWorkItemChildSessionInput {
+            session: CreateWorkspaceSessionInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                entity_id: first_logical_id.clone(),
+                workspace_type: WorkspaceType::WorkItem,
+                author_provider: ProviderName::Fake,
+                reviewer_provider: ProviderName::Fake,
+                review_rounds: 1,
+                superpowers_enabled: false,
+                openspec_enabled: false,
+                work_item_plan_options: None,
+            },
+            child_binding: expected_identity.clone(),
+        })
+        .unwrap();
+
+    run_c1_child_finalize(&mut engine, &mut compile_tx)
+        .await
+        .unwrap();
+
+    let sessions_for_first = lifecycle
+        .list_workspace_sessions("project_0001", "issue_0001")
+        .unwrap()
+        .into_iter()
+        .filter(|session| {
+            session.workspace_type == WorkspaceType::WorkItem
+                && session.entity_id == first_logical_id
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        sessions_for_first.len(),
+        1,
+        "same-generation replay must reuse the exact child"
+    );
+    assert_eq!(sessions_for_first[0].id, existing_child.id);
+    assert_eq!(
+        sessions_for_first[0].work_item_child_binding.as_ref(),
+        Some(&expected_identity)
+    );
+
+    // —— 场景 B：identity 匹配但 runtime binding 漂移 → fail-closed。
+    let (_tmp2, lifecycle2, plan_id2, mut engine2) =
+        make_work_item_plan_engine_with_accepted_contract_drafts();
+    let session_id2 = engine2.session.session_id.clone();
+    let enrollment_store2 =
+        enable_c1_child_enrollment(&lifecycle2, &plan_id2, &session_id2);
+    let enrollment_id2 = enrollment_store2
+        .get("project_0001", "issue_0001")
+        .unwrap()
+        .expect("enrollment fixture enabled")
+        .enrollment_id;
+
+    let compile_id2 = "compile_c1_child_drift";
+    let (mut compile_tx2, accepted_drafts2) = prepare_initial_compile_transaction(
+        &engine2,
+        &lifecycle2,
+        &plan_id2,
+        &compile_id2,
+        "2026-09-29T00:00:00Z",
+    );
+    engine2
+        .work_item_plan_store()
+        .unwrap()
+        .put_compile_transaction(&compile_tx2)
+        .unwrap();
+    let published2 = engine2
+        .compile_initial_plan_revision(&accepted_drafts2)
+        .unwrap();
+    let first_logical_id2 = published2.work_items[0]
+        .work_item_revision
+        .logical_work_item_id
+        .clone();
+    let expected_identity2 = crate::product::models::ChildBindingIdentity {
+        plan_id: plan_id2.clone(),
+        plan_revision_id: published2.plan_revision.id.clone(),
+        logical_work_item_id: first_logical_id2.clone(),
+        work_item_revision_id: published2.work_items[0].work_item_revision.id.clone(),
+        binding_version: 1,
+        enrollment_id: enrollment_id2.clone(),
+        target: c1_child_enrollment_target(),
+    };
+    let drifted_child = lifecycle2
+        .create_workspace_child_session(CreateWorkItemChildSessionInput {
+            session: CreateWorkspaceSessionInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                entity_id: first_logical_id2.clone(),
+                workspace_type: WorkspaceType::WorkItem,
+                author_provider: ProviderName::Fake,
+                reviewer_provider: ProviderName::Fake,
+                review_rounds: 1,
+                superpowers_enabled: false,
+                openspec_enabled: false,
+                work_item_plan_options: None,
+            },
+            child_binding: expected_identity2.clone(),
+        })
+        .unwrap();
+    // 预置漂移 runtime binding：identity 匹配复用后 ensure 必须 fail-closed。
+    lifecycle2
+        .ensure_work_item_runtime_binding(
+            &drifted_child.id,
+            &crate::product::models::WorkItemRuntimeBinding {
+                plan_id: plan_id2.clone(),
+                plan_revision_id: "plan_revision_drift".to_string(),
+                logical_work_item_id: first_logical_id2.clone(),
+                work_item_revision_id: "work_item_revision_drift".to_string(),
+                projection_bundle_id: "projection_bundle_drift".to_string(),
+                verification_plan_revision_id: "verification_plan_drift".to_string(),
+                canonical_contract_hash: "hash_drift".to_string(),
+                projection_compiler_version: "compiler_drift".to_string(),
+                human_projection_hash: "human_hash_drift".to_string(),
+                coder_projection_hash: "coder_hash_drift".to_string(),
+                reviewer_projection_hash: "reviewer_hash_drift".to_string(),
+            },
+        )
+        .unwrap();
+    let drifted_child_path = c1_child_session_path(&lifecycle2, &drifted_child.id);
+    let drifted_json_before = std::fs::read_to_string(&drifted_child_path).unwrap();
+
+    let finalize_error = run_c1_child_finalize(&mut engine2, &mut compile_tx2)
+        .await
+        .unwrap_err();
+    assert!(
+        finalize_error.contains("ensure child runtime binding failed"),
+        "identity-matched child with drifted runtime binding must fail closed: {finalize_error}"
+    );
+    let drifted_json_after = std::fs::read_to_string(&drifted_child_path).unwrap();
+    assert_eq!(
+        drifted_json_before, drifted_json_after,
+        "fail-closed must not clear or rewrite the drifted child history"
+    );
+}

@@ -1,11 +1,42 @@
 use super::*;
-use crate::product::models::WorkItemRuntimeBinding;
+use crate::product::issue_automation_store::IssueAutomationStore;
+use crate::product::models::automation::EnrollmentBindingIdentity;
+use crate::product::models::{
+    ChildBindingIdentity, WorkItemRuntimeBinding, match_compile_child,
+};
 use crate::web::workspace_context::ensure_workspace_context_message;
 use crate::web::workspace_ws_types::{
     WorkItemHistoryEntryDto, WorkItemHistoryEntryKind, WorkItemRevisionHistoryDto,
 };
 
 impl WorkspaceEngine {
+
+    /// C1 Task 8（REQ-C1-CHILD-01）：从 durable enrollment 事实派生当前
+    /// compile 的期望 child binding 身份来源。仅当 enrollment enabled 且
+    /// binding history current 精确指向本 plan/session 时返回 Some；
+    /// enrollment 缺失/关闭/指向他处一律 None（manual 链复用语义），不猜
+    /// 「最新 plan/session」。
+    fn current_enrollment_binding_for_compile(
+        &self,
+        lifecycle: &LifecycleStore,
+        plan_id: &str,
+    ) -> Result<Option<EnrollmentBindingIdentity>, ProductStoreError> {
+        let store = IssueAutomationStore::new(lifecycle.app_paths());
+        let Some(enrollment) = store.get(&self.session.project_id, &self.session.issue_id)?
+        else {
+            return Ok(None);
+        };
+        if !enrollment.enabled {
+            return Ok(None);
+        }
+        Ok(enrollment
+            .binding_history
+            .filter(|history| {
+                history.current.plan_id == plan_id
+                    && history.current.session_id == self.session.session_id
+            })
+            .map(|history| history.current))
+    }
     pub(super) fn resume_initial_plan_compile_transaction(
         &mut self,
         store: &WorkItemPlanStore,
@@ -137,6 +168,16 @@ impl WorkspaceEngine {
             WorkItemPlanCompileFinalizerCheckpoint::PlanSummaryPrepared,
         )?;
 
+        // C1 Task 8（REQ-C1-CHILD-01）：读取 durable enrollment 当前代
+        // binding——仅当 enrollment enabled 且 current binding 精确指向本
+        // plan/session 时，child 按 binding_version/enrollment_id/target
+        // 精确绑定；否则（manual/非 enrolled）expected 为 None，保持既有
+        // entity_id 复用语义。
+        let enrollment_binding = self
+            .current_enrollment_binding_for_compile(lifecycle, &tx.plan_id)
+            .map_err(|error| {
+                format!("load enrollment binding for compile children failed: {error}")
+            })?;
         let mut sessions = lifecycle
             .list_workspace_sessions(&tx.project_id, &tx.issue_id)
             .map_err(|error| format!("list child work item workspaces failed: {error}"))?;
@@ -168,36 +209,57 @@ impl WorkspaceEngine {
                     .reviewer_projection_hash
                     .clone(),
             };
+            let expected_child_binding =
+                enrollment_binding
+                    .as_ref()
+                    .map(|binding| ChildBindingIdentity {
+                        plan_id: tx.plan_id.clone(),
+                        plan_revision_id: outcome.plan_revision.id.clone(),
+                        logical_work_item_id: logical_id.clone(),
+                        work_item_revision_id: compiled.work_item_revision.id.clone(),
+                        binding_version: binding.binding_version,
+                        enrollment_id: binding.enrollment_id.clone(),
+                        target: binding.target.clone(),
+                    });
             let matched = sessions
                 .iter()
                 .filter(|session| {
                     session.workspace_type == WorkspaceType::WorkItem
                         && session.entity_id == *logical_id
+                        && match_compile_child(session, expected_child_binding.as_ref())
                 })
                 .collect::<Vec<_>>();
             let session_id = match matched.as_slice() {
                 [existing] => existing.id.clone(),
                 [] => {
-                    let created = lifecycle
-                        .create_workspace_session(CreateWorkspaceSessionInput {
-                            project_id: tx.project_id.clone(),
-                            issue_id: tx.issue_id.clone(),
-                            entity_id: logical_id.clone(),
-                            workspace_type: WorkspaceType::WorkItem,
-                            author_provider: self.session.author_provider.clone(),
-                            reviewer_provider: self
-                                .session
-                                .reviewer_provider
-                                .clone()
-                                .unwrap_or(ProviderName::Codex),
-                            review_rounds: self.session.review_rounds,
-                            superpowers_enabled: self.session.superpowers_enabled,
-                            openspec_enabled: self.session.openspec_enabled,
-                            work_item_plan_options: None,
-                        })
-                        .map_err(|error| {
-                            format!("create child work item workspace failed: {error}")
-                        })?;
+                    let input = CreateWorkspaceSessionInput {
+                        project_id: tx.project_id.clone(),
+                        issue_id: tx.issue_id.clone(),
+                        entity_id: logical_id.clone(),
+                        workspace_type: WorkspaceType::WorkItem,
+                        author_provider: self.session.author_provider.clone(),
+                        reviewer_provider: self
+                            .session
+                            .reviewer_provider
+                            .clone()
+                            .unwrap_or(ProviderName::Codex),
+                        review_rounds: self.session.review_rounds,
+                        superpowers_enabled: self.session.superpowers_enabled,
+                        openspec_enabled: self.session.openspec_enabled,
+                        work_item_plan_options: None,
+                    };
+                    let created = match expected_child_binding {
+                        Some(identity) => lifecycle.create_workspace_child_session(
+                            CreateWorkItemChildSessionInput {
+                                session: input,
+                                child_binding: identity,
+                            },
+                        ),
+                        None => lifecycle.create_workspace_session(input),
+                    }
+                    .map_err(|error| {
+                        format!("create child work item workspace failed: {error}")
+                    })?;
                     let id = created.id.clone();
                     sessions.push(created);
                     id

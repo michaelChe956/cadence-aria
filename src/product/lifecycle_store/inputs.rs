@@ -2,10 +2,10 @@ use std::path::PathBuf;
 
 use crate::product::logical_codebase::LogicalRepositoryId;
 use crate::product::models::{
-    IssueWorkItemDependencyEdge, IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, ProviderName,
-    RepositoryProfileConfidence, VerificationCommand, VerificationFallbackPolicy,
-    VerificationManualCheck, VerificationScope, WorkItemContextBudget, WorkItemKind,
-    WorkItemPlanStatus, WorkItemSplitFinding, WorkspaceType,
+    ChildBindingIdentity, IssueWorkItemDependencyEdge, IssueWorkItemPlanOptions,
+    IssueWorkItemPlanStatus, ProviderName, RepositoryProfileConfidence, VerificationCommand,
+    VerificationFallbackPolicy, VerificationManualCheck, VerificationScope, WorkItemContextBudget,
+    WorkItemKind, WorkItemPlanStatus, WorkItemSplitFinding, WorkspaceType,
 };
 use crate::product::work_item_plan_policy::{RunPolicy, WorkItemPlanFlowKind};
 
@@ -251,6 +251,15 @@ pub struct CreateWorkspaceSessionInput {
     pub superpowers_enabled: bool,
     pub openspec_enabled: bool,
     pub work_item_plan_options: Option<WorkItemPlanSessionOptions>,
+}
+
+/// C1 Task 8（REQ-C1-CHILD-01）：compile child 创建的 additive binding
+/// identity 输入——`create_workspace_child_session` 在 session 的同一原子
+/// 写入里持久化 child binding 身份，crash 后同代 replay 不建第二 child。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateWorkItemChildSessionInput {
+    pub session: CreateWorkspaceSessionInput,
+    pub child_binding: ChildBindingIdentity,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

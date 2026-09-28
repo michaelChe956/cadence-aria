@@ -899,6 +899,7 @@ fn work_item_workspace_session(
         approved_at: None,
         compile_reservation: None,
         work_item_runtime_binding,
+        work_item_child_binding: None,
         provider_conversations: Vec::new(),
         messages: Vec::new(),
         created_at: "2026-07-26T00:00:00Z".to_string(),

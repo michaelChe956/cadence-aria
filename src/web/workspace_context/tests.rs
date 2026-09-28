@@ -515,6 +515,7 @@ fn workspace_session_record(
         superpowers_enabled: true,
         openspec_enabled: true,
         work_item_runtime_binding: None,
+        work_item_child_binding: None,
         provider_conversations: Vec::new(),
         messages: Vec::new(),
         flow_kind: crate::product::work_item_plan_policy::WorkItemPlanFlowKind::Legacy,

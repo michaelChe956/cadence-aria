@@ -175,6 +175,7 @@ fn automation_test_record(
         approved_at: None,
         compile_reservation: None,
         work_item_runtime_binding: None,
+        work_item_child_binding: None,
         provider_conversations: Vec::new(),
         messages: Vec::new(),
         created_at: "2026-09-26T00:00:00Z".to_string(),

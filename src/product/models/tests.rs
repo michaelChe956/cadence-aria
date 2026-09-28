@@ -382,6 +382,7 @@ fn workspace_session_runtime_binding_is_optional_and_work_item_scoped() {
         created_at: "2026-07-26T00:00:00Z".to_string(),
         updated_at: "2026-07-26T00:00:00Z".to_string(),
         work_item_runtime_binding: Some(binding.clone()),
+        work_item_child_binding: None,
         sc_recovery_claim: None,
     };
 
