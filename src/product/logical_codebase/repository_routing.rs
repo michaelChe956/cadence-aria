@@ -1,5 +1,7 @@
+use sha2::Digest as _;
+
 use crate::product::app_paths::ProductAppPaths;
-use crate::product::json_store::ProductStoreError;
+use crate::product::json_store::{ProductStoreError, validate_relative_id};
 use crate::product::logical_codebase::issue_selection::{
     IssueCodebaseSelection, IssueCodebaseSelectionStore,
 };
@@ -132,6 +134,534 @@ impl RepositoryRouting {
     }
 }
 
+// ---- Task 1：唯一 authority resolver（显式 kind + fail-closed 冲突）----
+
+use std::path::PathBuf;
+
+use crate::product::logical_codebase::aggregate_index::{
+    AggregateIndexError, AggregateIndexStatus, AggregateIndexStore,
+};
+use crate::product::logical_codebase::policy::AggregatePolicyArtifactStore;
+use crate::product::logical_codebase::types::{LogicalRepositoryId, RepositoryCheckoutId};
+
+/// 代码库 target kind（C4）：`single_repo` 与 `logical` 同级且互斥。
+/// kind 缺失、与 issue/enrollment 不符、target 身份不一致或跨 kind 访问
+/// 一律 fail-closed，返回结构化冲突与重新选择/核验动作。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositoryTargetKind {
+    SingleRepo,
+    LogicalCodebase,
+}
+
+/// 所有选择/登记/checkout/policy/index/provider 读取的唯一入口请求。
+/// 调用方必须显式给出 kind 与目标身份；resolver 不做路径猜测或
+/// “最新可用记录”回退。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositoryRoutingRequest {
+    pub project_id: String,
+    pub issue_id: Option<String>,
+    pub kind: RepositoryTargetKind,
+    pub repository_id: Option<String>,
+    pub logical_codebase_id: Option<String>,
+    pub logical_repository_id: Option<LogicalRepositoryId>,
+    pub checkout_id: Option<RepositoryCheckoutId>,
+}
+
+/// resolver 冻结后的 target 身份：kind、ids、canonical path 与
+/// source identity digest。后续 policy/envelope 漂移断言以此为基线。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ResolvedTargetIdentity {
+    pub kind: RepositoryTargetKind,
+    pub repository_id: Option<String>,
+    pub logical_codebase_id: Option<String>,
+    pub logical_repository_id: Option<LogicalRepositoryId>,
+    pub checkout_id: Option<RepositoryCheckoutId>,
+    pub canonical_path: PathBuf,
+    pub source_identity_digest: String,
+}
+
+/// authority 子树内聚合 policy artifact 的冻结引用。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AuthorityPolicyReference {
+    pub policy_id: String,
+    pub policy_revision: u64,
+    pub policy_digest: String,
+    pub artifact_root: PathBuf,
+}
+
+/// authority 子树内 aggregate index 的只读引用；冷启动允许全空。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AuthorityAggregateIndexReference {
+    pub aggregate_index_id: Option<String>,
+    pub membership_revision: Option<u64>,
+    pub status: Option<AggregateIndexStatus>,
+}
+
+/// resolver 输出：authority root + 冻结身份 + manifest/selection/policy/index
+/// 事实。所有事实都来自 `logical-codebases/{lc_id}/` 权威子树（legacy 别名
+/// LC 除外，它保持 legacy root 字节等价）；单仓只从物理仓事实解析。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RepositoryAuthorityResolution {
+    pub authority_root: PathBuf,
+    pub target: ResolvedTargetIdentity,
+    pub manifest: Option<LogicalCodebaseManifest>,
+    pub selection: Option<IssueCodebaseSelection>,
+    pub policy: Option<AuthorityPolicyReference>,
+    pub aggregate_index: AuthorityAggregateIndexReference,
+}
+
+/// 唯一显式 kind/authority resolver。只读：任何冲突只返回结构化
+/// `ProductStoreError`，不写任何 store，也不调用 `default_logical_codebase_id`
+/// 之类的 fallback。
+pub struct RepositoryAuthorityResolver {
+    paths: ProductAppPaths,
+}
+
+impl RepositoryAuthorityResolver {
+    pub fn new(paths: ProductAppPaths) -> Self {
+        Self { paths }
+    }
+
+    pub fn resolve(
+        &self,
+        request: RepositoryRoutingRequest,
+    ) -> Result<RepositoryAuthorityResolution, ProductStoreError> {
+        validate_relative_id(&request.project_id)?;
+        crate::product::project_store::ProjectStore::new(self.paths.clone())
+            .get(&request.project_id)?;
+
+        // issue attribution：请求携带 issue 时必须存在，且其持久化的
+        // codebase 归属与请求 kind 一致；不符一律 kind_mismatch。
+        let mut attributed_lc: Option<String> = None;
+        if let Some(issue_id) = request.issue_id.as_deref() {
+            let issue =
+                crate::product::issue_store::IssueStore::new(self.paths.clone())
+                    .get(&request.project_id, issue_id)?;
+            attributed_lc = issue.logical_codebase_id.clone();
+        }
+
+        match request.kind {
+            RepositoryTargetKind::LogicalCodebase => {
+                self.resolve_logical(&request, attributed_lc.as_deref())
+            }
+            RepositoryTargetKind::SingleRepo => {
+                self.resolve_single_repo(&request, attributed_lc.as_deref())
+            }
+        }
+    }
+
+    fn resolve_logical(
+        &self,
+        request: &RepositoryRoutingRequest,
+        attributed_lc: Option<&str>,
+    ) -> Result<RepositoryAuthorityResolution, ProductStoreError> {
+        let Some(lc_id) = request.logical_codebase_id.as_deref() else {
+            return Err(ProductStoreError::Conflict {
+                kind: "repository_routing_kind_mismatch",
+                id: format!("logical_codebase_id:missing:issue:{:?}", request.issue_id),
+            });
+        };
+        validate_relative_id(lc_id)?;
+        if request.repository_id.is_some() {
+            return Err(ProductStoreError::Conflict {
+                kind: "repository_routing_kind_mismatch",
+                id: format!(
+                    "repository_id:{}:logical_codebase:{lc_id}",
+                    request.repository_id.clone().unwrap_or_default()
+                ),
+            });
+        }
+        if let Some(attributed) = attributed_lc
+            && attributed != lc_id
+        {
+            return Err(ProductStoreError::Conflict {
+                kind: "repository_routing_kind_mismatch",
+                id: format!(
+                    "issue:{}:attributed_logical_codebase:{attributed}:requested:{lc_id}",
+                    request.issue_id.clone().unwrap_or_default()
+                ),
+            });
+        }
+
+        // LC record 直读（不经 `migrate_legacy`，resolver 保持零写入）。
+        let record_root = self
+            .paths
+            .logical_codebase_record_root(&request.project_id, lc_id);
+        let record_path = record_root.join("record.json");
+        let record_exists = record_path
+            .try_exists()
+            .map_err(|error| {
+                ProductStoreError::Io(format!("try_exists {}: {error}", record_path.display()))
+            })?
+            && !record_root.join("tombstone.json").exists();
+        if !record_exists {
+            return Err(ProductStoreError::NotFound {
+                kind: "logical_codebase",
+                id: lc_id.to_string(),
+            });
+        }
+        let record: crate::product::logical_codebase::store::LogicalCodebaseRecord =
+            crate::product::json_store::read_json(&record_path)?;
+
+        let logical = LogicalCodebaseStore::for_lc(self.paths.clone(), lc_id);
+        let manifest = logical.load_manifest(&request.project_id)?;
+        // authority root 与 `SessionPolicyEnvelope.authority_root` 同义：LC 的
+        // 聚合政策权威根 = manifest.provider_context_root（冷启动无 manifest 时
+        // 取 LC record 的 aggregate_root）。manifest/record 均来自请求 LC 子树，
+        // 误读他 LC 立即产生不同 root。
+        let authority_root = std::fs::canonicalize(
+            manifest
+                .as_ref()
+                .map(|manifest| manifest.provider_context_root.clone())
+                .unwrap_or_else(|| record.aggregate_root.clone()),
+        )
+        .map_err(|error| {
+            ProductStoreError::Io(format!("canonicalize authority root: {error}"))
+        })?;
+        let members = logical.list_members(&request.project_id)?;
+        let checkouts = logical.list_checkouts(&request.project_id)?;
+
+        // 同一 git-dir/来源两个别名成员：重复候选 fail-closed。
+        let mut seen_sources = std::collections::BTreeMap::new();
+        for member in &members {
+            if member.status != crate::product::logical_codebase::types::MemberStatus::Active {
+                continue;
+            }
+            let digest = member.source_identity.key_digest.clone();
+            if seen_sources
+                .insert(digest.clone(), member.logical_repository_id)
+                .is_some()
+            {
+                return Err(ProductStoreError::Conflict {
+                    kind: "repository_routing_source_identity_mismatch",
+                    id: digest,
+                });
+            }
+        }
+
+        // 旧 project-level 布局与新 LC 子树来源身份冲突：不猜、不回退。
+        let legacy_root = self.paths.logical_codebase_root(&request.project_id);
+        let legacy_manifest_exists = legacy_root.join("manifest.json").exists();
+        if legacy_manifest_exists
+            && lc_id
+                != crate::product::logical_codebase::store::legacy_logical_codebase_id(
+                    &request.project_id,
+                )
+        {
+            let legacy_members =
+                LogicalCodebaseStore::new(self.paths.clone()).list_members(&request.project_id)?;
+            let requested_sources: std::collections::BTreeSet<&str> = members
+                .iter()
+                .filter(|member| {
+                    member.status
+                        == crate::product::logical_codebase::types::MemberStatus::Active
+                })
+                .map(|member| member.source_identity.key_digest.as_str())
+                .collect();
+            if let Some(conflict) = legacy_members.iter().find(|member| {
+                member.status
+                    == crate::product::logical_codebase::types::MemberStatus::Active
+                    && requested_sources.contains(member.source_identity.key_digest.as_str())
+            }) {
+                return Err(ProductStoreError::Conflict {
+                    kind: "repository_routing_legacy_conflict",
+                    id: conflict.source_identity.key_digest.clone(),
+                });
+            }
+        }
+
+        let (canonical_path, source_identity_digest, member_id, checkout_id) =
+            resolve_logical_target(request, &manifest, &members, &checkouts)?;
+
+        let selection = match request.issue_id.as_deref() {
+            Some(issue_id) => IssueCodebaseSelectionStore::for_lc(
+                self.paths.clone(),
+                lc_id,
+            )
+            .load(&request.project_id, issue_id)?,
+            None => None,
+        };
+
+        let policy = AggregatePolicyArtifactStore::for_lc(self.paths.clone(), lc_id)
+            .get(&request.project_id)?
+            .map(|artifact| {
+                if let Some(manifest) = manifest.as_ref()
+                    && artifact.logical_codebase_id != manifest.logical_codebase_id.to_string()
+                {
+                    return Err(ProductStoreError::InvalidRecord {
+                        kind: "repository_routing",
+                        reason: format!(
+                            "repository_routing_inconsistent: policy artifact {} does not belong to manifest {}",
+                            artifact.logical_codebase_id, manifest.logical_codebase_id
+                        ),
+                    });
+                }
+                Ok(AuthorityPolicyReference {
+                    policy_id: artifact.policy_id,
+                    policy_revision: artifact.revision,
+                    policy_digest: artifact.digest,
+                    artifact_root: authority_root.clone(),
+                })
+            })
+            .transpose()?;
+
+        let aggregate_index = read_authority_aggregate_index(&self.paths, &request.project_id, lc_id)?;
+
+        Ok(RepositoryAuthorityResolution {
+            authority_root,
+            target: ResolvedTargetIdentity {
+                kind: RepositoryTargetKind::LogicalCodebase,
+                repository_id: None,
+                logical_codebase_id: Some(lc_id.to_string()),
+                logical_repository_id: member_id,
+                checkout_id,
+                canonical_path,
+                source_identity_digest,
+            },
+            manifest,
+            selection,
+            policy,
+            aggregate_index,
+        })
+    }
+
+    fn resolve_single_repo(
+        &self,
+        request: &RepositoryRoutingRequest,
+        attributed_lc: Option<&str>,
+    ) -> Result<RepositoryAuthorityResolution, ProductStoreError> {
+        let Some(repository_id) = request.repository_id.as_deref() else {
+            return Err(ProductStoreError::Conflict {
+                kind: "repository_routing_kind_mismatch",
+                id: format!(
+                    "repository_id:missing:issue:{:?}",
+                    request.issue_id
+                ),
+            });
+        };
+        if request.logical_codebase_id.is_some()
+            || request.logical_repository_id.is_some()
+            || request.checkout_id.is_some()
+        {
+            return Err(ProductStoreError::Conflict {
+                kind: "repository_routing_kind_mismatch",
+                id: format!("repository_id:{repository_id}:logical_target_present"),
+            });
+        }
+        if let Some(attributed) = attributed_lc {
+            return Err(ProductStoreError::Conflict {
+                kind: "repository_routing_kind_mismatch",
+                id: format!(
+                    "issue:{}:attributed_logical_codebase:{attributed}:repository:{repository_id}",
+                    request.issue_id.clone().unwrap_or_default()
+                ),
+            });
+        }
+
+        let repository_store = crate::product::repository_store::RepositoryStore::new(
+            self.paths.clone(),
+        );
+        let records = repository_store.list(&request.project_id)?;
+        let record = records
+            .iter()
+            .find(|record| record.id == repository_id)
+            .ok_or_else(|| ProductStoreError::NotFound {
+                kind: "repository",
+                id: repository_id.to_string(),
+            })?;
+        let canonical_path =
+            crate::product::repository_store::canonicalize_repo_path(&record.path)?;
+
+        // 同一 git-dir 两个别名：其余物理记录解析到同一 canonical path 即冲突。
+        for other in &records {
+            if other.id == repository_id {
+                continue;
+            }
+            if let Ok(other_canonical) =
+                crate::product::repository_store::canonicalize_repo_path(&other.path)
+                && other_canonical == canonical_path
+            {
+                return Err(ProductStoreError::Conflict {
+                    kind: "repository_routing_source_identity_mismatch",
+                    id: format!("{repository_id}:{}", other.id),
+                });
+            }
+        }
+
+        let source = crate::product::repository_store::resolve_repository_source(&canonical_path)?;
+
+        // 旧 project-level 布局与物理仓来源身份冲突。
+        let legacy_root = self.paths.logical_codebase_root(&request.project_id);
+        if legacy_root.join("manifest.json").exists() {
+            let legacy_members =
+                LogicalCodebaseStore::new(self.paths.clone()).list_members(&request.project_id)?;
+            if let Some(conflict) = legacy_members.iter().find(|member| {
+                member.status
+                    == crate::product::logical_codebase::types::MemberStatus::Active
+                    && member.source_identity.key_digest == source.key_digest
+            }) {
+                return Err(ProductStoreError::Conflict {
+                    kind: "repository_routing_legacy_conflict",
+                    id: conflict.source_identity.key_digest.clone(),
+                });
+            }
+        }
+
+        Ok(RepositoryAuthorityResolution {
+            authority_root: canonical_path.clone(),
+            target: ResolvedTargetIdentity {
+                kind: RepositoryTargetKind::SingleRepo,
+                repository_id: Some(repository_id.to_string()),
+                logical_codebase_id: None,
+                logical_repository_id: None,
+                checkout_id: None,
+                canonical_path,
+                source_identity_digest: source.key_digest,
+            },
+            manifest: None,
+            selection: None,
+            policy: None,
+            aggregate_index: AuthorityAggregateIndexReference {
+                aggregate_index_id: None,
+                membership_revision: None,
+                status: None,
+            },
+        })
+    }
+}
+
+/// 解析 LC kind 的 canonical path/source digest/member/checkout 身份。
+/// 显式 member/checkout 必须在请求 LC 子树内命中，否则 target unknown。
+fn resolve_logical_target(
+    request: &RepositoryRoutingRequest,
+    manifest: &Option<LogicalCodebaseManifest>,
+    members: &[crate::product::logical_codebase::types::CodebaseMemberRecord],
+    checkouts: &[crate::product::logical_codebase::types::RepositoryCheckoutRecord],
+) -> Result<(PathBuf, String, Option<LogicalRepositoryId>, Option<RepositoryCheckoutId>), ProductStoreError>
+{
+    match request.logical_repository_id {
+        Some(member_id) => {
+            let member = members
+                .iter()
+                .find(|member| member.logical_repository_id == member_id)
+                .ok_or_else(|| ProductStoreError::NotFound {
+                    kind: "logical_repository",
+                    id: member_id.0.to_string(),
+                })?;
+            let checkout = match request.checkout_id {
+                Some(checkout_id) => {
+                    if !member.checkout_ids.contains(&checkout_id) {
+                        return Err(ProductStoreError::NotFound {
+                            kind: "repository_checkout",
+                            id: checkout_id.0.to_string(),
+                        });
+                    }
+                    checkouts
+                        .iter()
+                        .find(|checkout| checkout.checkout_id == checkout_id)
+                        .ok_or_else(|| ProductStoreError::NotFound {
+                            kind: "repository_checkout",
+                            id: checkout_id.0.to_string(),
+                        })?
+                }
+                None => checkouts
+                    .iter()
+                    .find(|checkout| {
+                        member.checkout_ids.contains(&checkout.checkout_id)
+                            && checkout.kind
+                                == crate::product::logical_codebase::types::CheckoutKind::Main
+                    })
+                    .ok_or_else(|| ProductStoreError::NotFound {
+                        kind: "repository_checkout",
+                        id: member.checkout_ids.first().map(|id| id.0.to_string()).unwrap_or_default(),
+                    })?,
+            };
+            Ok((
+                checkout.canonical_path.clone(),
+                member.source_identity.key_digest.clone(),
+                Some(member_id),
+                Some(checkout.checkout_id),
+            ))
+        }
+        None => {
+            let root = manifest
+                .as_ref()
+                .map(|manifest| manifest.provider_context_root.clone())
+                .ok_or_else(|| ProductStoreError::NotFound {
+                    kind: "logical_codebase_manifest",
+                    id: request.project_id.clone(),
+                })?;
+            // 聚合 source digest：root + 排序后的成员 source digests。
+            let mut digests: Vec<&str> = members
+                .iter()
+                .filter(|member| {
+                    member.status
+                        == crate::product::logical_codebase::types::MemberStatus::Active
+                })
+                .map(|member| member.source_identity.key_digest.as_str())
+                .collect();
+            digests.sort_unstable();
+            let mut payload = root.to_string_lossy().into_owned();
+            for digest in digests {
+                payload.push('\0');
+                payload.push_str(digest);
+            }
+            let source_identity_digest =
+                format!("sha256:{:x}", sha2::Sha256::digest(payload.as_bytes()));
+            Ok((root, source_identity_digest, None, None))
+        }
+    }
+}
+
+/// 只读读取 LC 子树的 aggregate index 引用：优先 active；无 active 时
+/// 保留最新一代非 superseded 记录的状态事实（如 Failed）；全空返回 None 组合。
+fn read_authority_aggregate_index(
+    paths: &ProductAppPaths,
+    project_id: &str,
+    lc_id: &str,
+) -> Result<AuthorityAggregateIndexReference, ProductStoreError> {
+    let store = AggregateIndexStore::for_lc(paths.clone(), lc_id);
+    let map_error = |error: AggregateIndexError| -> ProductStoreError {
+        ProductStoreError::InvalidRecord {
+            kind: "aggregate_index",
+            reason: error.to_string(),
+        }
+    };
+    if let Some(active) = store.active(project_id).map_err(map_error)? {
+        return Ok(AuthorityAggregateIndexReference {
+            aggregate_index_id: Some(active.aggregate_index_id),
+            membership_revision: Some(active.membership_revision),
+            status: Some(AggregateIndexStatus::Active),
+        });
+    }
+    let mut latest: Option<crate::product::logical_codebase::aggregate_index::AggregateIndexRecord> =
+        None;
+    for record in store.records(project_id).map_err(map_error)? {
+        if record.status == AggregateIndexStatus::Superseded {
+            continue;
+        }
+        if latest
+            .as_ref()
+            .is_none_or(|current| record.updated_at > current.updated_at)
+        {
+            latest = Some(record);
+        }
+    }
+    Ok(match latest {
+        None => AuthorityAggregateIndexReference {
+            aggregate_index_id: None,
+            membership_revision: None,
+            status: None,
+        },
+        Some(record) => AuthorityAggregateIndexReference {
+            aggregate_index_id: Some(record.aggregate_index_id),
+            membership_revision: Some(record.membership_revision),
+            status: Some(record.status),
+        },
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,5 +783,465 @@ mod tests {
             }
             _ => panic!("must resolve Logical from lc subtree"),
         }
+    }
+
+    // ---- Task 1：唯一 authority resolver（显式 kind + fail-closed 冲突）----
+
+    use std::collections::BTreeMap;
+
+    use crate::product::logical_codebase::aggregate_index::{
+        AggregateIndexRecord, AggregateIndexStatus, AggregateIndexStore,
+    };
+    use crate::product::logical_codebase::policy::{
+        AggregatePolicyArtifact, AggregatePolicyArtifactStore,
+    };
+    use crate::product::logical_codebase::types::{
+        CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, MemberStatus,
+        RepositoryCheckoutRecord, RepositoryType,
+    };
+    use crate::product::logical_codebase::{LogicalRepositoryId, RepositoryCheckoutId};
+    use crate::product::project_store::{CreateProjectInput, ProjectStore};
+
+    fn git(cwd: &std::path::Path, arguments: &[&str]) {
+        let output = std::process::Command::new("git")
+            .current_dir(cwd)
+            .args(arguments)
+            .output()
+            .expect("git command must start");
+        assert!(
+            output.status.success(),
+            "git {arguments:?} failed in {}: {}",
+            cwd.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn init_git_repository_with_commit(path: &std::path::Path) {
+        std::fs::create_dir_all(path).unwrap();
+        git(path, &["init", "-b", "main"]);
+        git(path, &["config", "user.email", "resolver@test.local"]);
+        git(path, &["config", "user.name", "Resolver Test"]);
+        std::fs::write(path.join("README.md"), "# member\n").unwrap();
+        git(path, &["add", "."]);
+        git(path, &["commit", "-m", "init"]);
+    }
+
+    /// 收集 `.aria` durable inventory（相对路径 → 文件字节），用于断言 resolver 零写入。
+    fn aria_inventory(root: &std::path::Path) -> BTreeMap<String, Vec<u8>> {
+        let mut inventory = BTreeMap::new();
+        let mut stack = vec![root.join(".aria")];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else {
+                    let relative = path.strip_prefix(root).unwrap().to_path_buf();
+                    inventory.insert(
+                        relative.to_string_lossy().into_owned(),
+                        std::fs::read(&path).unwrap_or_default(),
+                    );
+                }
+            }
+        }
+        inventory
+    }
+
+    fn create_project_fixture(paths: &crate::product::app_paths::ProductAppPaths) -> String {
+        ProjectStore::new(paths.clone())
+            .create(CreateProjectInput {
+                name: "resolver-project".to_string(),
+                description: None,
+            })
+            .unwrap()
+            .id
+    }
+
+    fn active_index_record(
+        aggregate_index_id: &str,
+        project_id: &str,
+        membership_revision: u64,
+    ) -> AggregateIndexRecord {
+        let mut record = AggregateIndexRecord::building(
+            aggregate_index_id.to_string(),
+            project_id.to_string(),
+            membership_revision,
+            Vec::new(),
+            "2026-09-28T00:00:00Z".to_string(),
+        );
+        record.status = AggregateIndexStatus::Active;
+        record
+    }
+
+    #[test]
+    fn resolver_reads_lc_manifest_selection_policy_and_index_only_from_requested_lc_subtree() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = crate::product::app_paths::ProductAppPaths::new(temp.path());
+        let project_id = create_project_fixture(&paths);
+
+        std::fs::create_dir_all(temp.path().join("alpha-root")).unwrap();
+        std::fs::create_dir_all(temp.path().join("beta-root")).unwrap();
+        let logical = LogicalCodebaseStore::new(paths.clone());
+        let lc_a = logical
+            .create(
+                &project_id,
+                crate::product::logical_codebase::LogicalCodebaseCreateInput {
+                    name: "alpha".to_string(),
+                    aggregate_root: temp.path().join("alpha-root"),
+                },
+            )
+            .unwrap();
+        let lc_b = logical
+            .create(
+                &project_id,
+                crate::product::logical_codebase::LogicalCodebaseCreateInput {
+                    name: "beta".to_string(),
+                    aggregate_root: temp.path().join("beta-root"),
+                },
+            )
+            .unwrap();
+
+        let manifest_a = LogicalCodebaseManifest::new(
+            &project_id,
+            temp.path().join("alpha-root"),
+            Vec::new(),
+        );
+        let manifest_b = LogicalCodebaseManifest::new(
+            &project_id,
+            temp.path().join("beta-root"),
+            Vec::new(),
+        );
+        LogicalCodebaseStore::for_lc(paths.clone(), &lc_a.id)
+            .save_manifest(&project_id, &manifest_a)
+            .unwrap();
+        LogicalCodebaseStore::for_lc(paths.clone(), &lc_b.id)
+            .save_manifest(&project_id, &manifest_b)
+            .unwrap();
+
+        let issue_store = crate::product::issue_store::IssueStore::new(paths.clone());
+        let issue_a = issue_store
+            .create(crate::product::issue_store::CreateProductIssueInput {
+                project_id: project_id.clone(),
+                repo_id: None,
+                logical_codebase_id: Some(lc_a.id.clone()),
+                title: "alpha issue".to_string(),
+                description: None,
+                change_id: None,
+                base_branch: None,
+            })
+            .unwrap();
+        IssueCodebaseSelectionStore::for_lc(paths.clone(), &lc_a.id)
+            .save(
+                &IssueCodebaseSelection::all_members(&project_id, &issue_a.id, None)
+                    .for_logical_codebase(&lc_a.id),
+            )
+            .unwrap();
+
+        let policy_a = AggregatePolicyArtifact::bootstrap(
+            &project_id,
+            &manifest_a.logical_codebase_id.to_string(),
+            "2026-09-28T00:00:00Z".to_string(),
+        );
+        let policy_b = AggregatePolicyArtifact::bootstrap(
+            &project_id,
+            &manifest_b.logical_codebase_id.to_string(),
+            "2026-09-28T00:00:00Z".to_string(),
+        );
+        AggregatePolicyArtifactStore::for_lc(paths.clone(), &lc_a.id)
+            .save(&project_id, &policy_a)
+            .unwrap();
+        AggregatePolicyArtifactStore::for_lc(paths.clone(), &lc_b.id)
+            .save(&project_id, &policy_b)
+            .unwrap();
+
+        AggregateIndexStore::for_lc(paths.clone(), &lc_a.id)
+            .create(
+                &project_id,
+                active_index_record("aggregate_index_alpha", &project_id, manifest_a.membership_revision),
+            )
+            .unwrap();
+        AggregateIndexStore::for_lc(paths.clone(), &lc_b.id)
+            .create(
+                &project_id,
+                active_index_record("aggregate_index_beta", &project_id, manifest_b.membership_revision),
+            )
+            .unwrap();
+
+        let resolver = RepositoryAuthorityResolver::new(paths.clone());
+        let resolution = resolver
+            .resolve(RepositoryRoutingRequest {
+                project_id: project_id.clone(),
+                issue_id: Some(issue_a.id.clone()),
+                kind: RepositoryTargetKind::LogicalCodebase,
+                repository_id: None,
+                logical_codebase_id: Some(lc_a.id.clone()),
+                logical_repository_id: None,
+                checkout_id: None,
+            })
+            .unwrap();
+
+        assert_eq!(
+            resolution.authority_root,
+            std::fs::canonicalize(temp.path().join("alpha-root")).unwrap()
+        );
+        assert_eq!(resolution.target.kind, RepositoryTargetKind::LogicalCodebase);
+        assert_eq!(
+            resolution.target.logical_codebase_id.as_deref(),
+            Some(lc_a.id.as_str())
+        );
+        let manifest = resolution.manifest.expect("manifest from requested lc subtree");
+        assert_eq!(manifest.provider_context_root, temp.path().join("alpha-root"));
+        assert_eq!(manifest.logical_codebase_id, manifest_a.logical_codebase_id);
+        let selection = resolution.selection.expect("selection from requested lc subtree");
+        assert_eq!(selection.logical_codebase_id.as_deref(), Some(lc_a.id.as_str()));
+        let policy = resolution.policy.expect("policy from requested lc subtree");
+        assert_eq!(policy.policy_id, policy_a.policy_id);
+        assert_eq!(policy.policy_digest, policy_a.digest);
+        assert_eq!(policy.policy_revision, policy_a.revision);
+        assert_eq!(
+            resolution.aggregate_index.aggregate_index_id.as_deref(),
+            Some("aggregate_index_alpha")
+        );
+        assert_eq!(
+            resolution.aggregate_index.membership_revision,
+            Some(manifest_a.membership_revision)
+        );
+        assert_eq!(
+            resolution.aggregate_index.status,
+            Some(AggregateIndexStatus::Active)
+        );
+    }
+
+    #[test]
+    fn resolver_rejects_kind_mismatch_duplicate_source_and_legacy_conflict_without_writes() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = crate::product::app_paths::ProductAppPaths::new(temp.path());
+        let project_id = create_project_fixture(&paths);
+
+        let workspace = temp.path().join("workspace");
+        let repo_a = workspace.join("repo-a");
+        init_git_repository_with_commit(&repo_a);
+        let canonical = std::fs::canonicalize(&repo_a).unwrap();
+        let source = crate::product::repository_store::resolve_repository_source(&canonical)
+            .unwrap();
+
+        let logical = LogicalCodebaseStore::new(paths.clone());
+        let lc = logical
+            .create(
+                &project_id,
+                crate::product::logical_codebase::LogicalCodebaseCreateInput {
+                    name: "gamma".to_string(),
+                    aggregate_root: workspace.clone(),
+                },
+            )
+            .unwrap();
+        let lc_store = LogicalCodebaseStore::for_lc(paths.clone(), &lc.id);
+
+        let member_id = LogicalRepositoryId(uuid::Uuid::new_v4());
+        let duplicate_member_id = LogicalRepositoryId(uuid::Uuid::new_v4());
+        let checkout_id = RepositoryCheckoutId(uuid::Uuid::new_v4());
+        let mut manifest = LogicalCodebaseManifest::new(&project_id, workspace.clone(), Vec::new());
+        manifest.member_ids = vec![member_id];
+        lc_store.save_manifest(&project_id, &manifest).unwrap();
+
+        let now = "2026-09-28T00:00:00Z".to_string();
+        let member = CodebaseMemberRecord {
+            logical_repository_id: member_id,
+            physical_repository_id: "repository_gamma_member".to_string(),
+            alias: "repo-a".to_string(),
+            role: "member".to_string(),
+            ordinal: 1,
+            source_identity: source.clone(),
+            repo_type: RepositoryType::Unknown,
+            tech_stack: Vec::new(),
+            owner: None,
+            tags: Vec::new(),
+            default_ref: None,
+            checkout_ids: vec![checkout_id],
+            status: MemberStatus::Active,
+            created_at: now.clone(),
+            updated_at: now.clone(),
+        };
+        lc_store.save_member(&project_id, &member).unwrap();
+        lc_store
+            .save_checkout(
+                &project_id,
+                &RepositoryCheckoutRecord {
+                    checkout_id,
+                    logical_repository_id: member_id,
+                    physical_repository_id: member.physical_repository_id.clone(),
+                    kind: CheckoutKind::Main,
+                    canonical_path: canonical.clone(),
+                    checkout_path_hash: crate::product::id::repo_hash_for_path(
+                        canonical.to_string_lossy().as_ref(),
+                    ),
+                    git_dir_identity: source.git_dir_identity(),
+                    revision: None,
+                    availability: CheckoutAvailability::Available,
+                    observed_at: now.clone(),
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                },
+            )
+            .unwrap();
+
+        let issue = crate::product::issue_store::IssueStore::new(paths.clone())
+            .create(crate::product::issue_store::CreateProductIssueInput {
+                project_id: project_id.clone(),
+                repo_id: None,
+                logical_codebase_id: Some(lc.id.clone()),
+                title: "gamma issue".to_string(),
+                description: None,
+                change_id: None,
+                base_branch: None,
+            })
+            .unwrap();
+
+        let resolver = RepositoryAuthorityResolver::new(paths.clone());
+
+        // (a) single-repo 身份访问 LC 绑定 issue → kind mismatch，零写入。
+        let before = aria_inventory(temp.path());
+        let error = resolver
+            .resolve(RepositoryRoutingRequest {
+                project_id: project_id.clone(),
+                issue_id: Some(issue.id.clone()),
+                kind: RepositoryTargetKind::SingleRepo,
+                repository_id: Some("repository_single".to_string()),
+                logical_codebase_id: None,
+                logical_repository_id: None,
+                checkout_id: None,
+            })
+            .unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                crate::product::json_store::ProductStoreError::Conflict { kind, id }
+                    if *kind == "repository_routing_kind_mismatch" && id.contains(&issue.id)
+            ),
+            "single-repo request for a logical issue must fail closed with kind mismatch, got: {error:?}"
+        );
+        assert_eq!(aria_inventory(temp.path()), before);
+
+        // (b) 同一 git-dir 两个别名成员 → source identity mismatch，零写入。
+        let duplicate_member = CodebaseMemberRecord {
+            logical_repository_id: duplicate_member_id,
+            physical_repository_id: "repository_gamma_duplicate".to_string(),
+            alias: "repo-a-alias".to_string(),
+            role: "member".to_string(),
+            ordinal: 2,
+            source_identity: source.clone(),
+            repo_type: RepositoryType::Unknown,
+            tech_stack: Vec::new(),
+            owner: None,
+            tags: Vec::new(),
+            default_ref: None,
+            checkout_ids: vec![RepositoryCheckoutId(uuid::Uuid::new_v4())],
+            status: MemberStatus::Active,
+            created_at: now.clone(),
+            updated_at: now.clone(),
+        };
+        lc_store.save_member(&project_id, &duplicate_member).unwrap();
+        let before = aria_inventory(temp.path());
+        let error = resolver
+            .resolve(RepositoryRoutingRequest {
+                project_id: project_id.clone(),
+                issue_id: Some(issue.id.clone()),
+                kind: RepositoryTargetKind::LogicalCodebase,
+                repository_id: None,
+                logical_codebase_id: Some(lc.id.clone()),
+                logical_repository_id: None,
+                checkout_id: None,
+            })
+            .unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                crate::product::json_store::ProductStoreError::Conflict { kind, id }
+                    if *kind == "repository_routing_source_identity_mismatch"
+                        && id.contains(&source.key_digest)
+            ),
+            "duplicate member source identity must fail closed, got: {error:?}"
+        );
+        assert_eq!(aria_inventory(temp.path()), before);
+        lc_store
+            .save_member(&project_id, &{
+                // 移除重复成员，恢复唯一成员现场供 (c) 使用。
+                let mut restored = duplicate_member;
+                restored.status = MemberStatus::Removed;
+                restored
+            })
+            .unwrap();
+
+        // (c) 旧 project-level 布局与新 LC 子树来源身份冲突 → legacy conflict，零写入。
+        let legacy_root = paths.logical_codebase_root(&project_id);
+        let legacy_store = LogicalCodebaseStore::for_lc(
+            paths.clone(),
+            crate::product::logical_codebase::store::legacy_logical_codebase_id(&project_id),
+        );
+        let mut legacy_manifest =
+            LogicalCodebaseManifest::new(&project_id, workspace.clone(), Vec::new());
+        let legacy_member_id = LogicalRepositoryId(uuid::Uuid::new_v4());
+        legacy_manifest.member_ids = vec![legacy_member_id];
+        legacy_store.save_manifest(&project_id, &legacy_manifest).unwrap();
+        legacy_store
+            .save_member(
+                &project_id,
+                &CodebaseMemberRecord {
+                    logical_repository_id: legacy_member_id,
+                    physical_repository_id: "repository_legacy_member".to_string(),
+                    alias: "repo-a-legacy".to_string(),
+                    role: "member".to_string(),
+                    ordinal: 1,
+                    source_identity: source.clone(),
+                    repo_type: RepositoryType::Unknown,
+                    tech_stack: Vec::new(),
+                    owner: None,
+                    tags: Vec::new(),
+                    default_ref: None,
+                    checkout_ids: vec![RepositoryCheckoutId(uuid::Uuid::new_v4())],
+                    status: MemberStatus::Active,
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                },
+            )
+            .unwrap();
+        let _ = legacy_root;
+
+        let before = aria_inventory(temp.path());
+        let error = resolver
+            .resolve(RepositoryRoutingRequest {
+                project_id: project_id.clone(),
+                issue_id: Some(issue.id.clone()),
+                kind: RepositoryTargetKind::LogicalCodebase,
+                repository_id: None,
+                logical_codebase_id: Some(lc.id.clone()),
+                logical_repository_id: Some(member_id),
+                checkout_id: None,
+            })
+            .unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                crate::product::json_store::ProductStoreError::Conflict { kind, id }
+                    if *kind == "repository_routing_legacy_conflict"
+                        && id.contains(&source.key_digest)
+            ),
+            "legacy project-level layout conflicting with the requested lc must fail closed, got: {error:?}"
+        );
+        assert_eq!(aria_inventory(temp.path()), before);
+
+        // 成员仓零 Git 写副作用：HEAD/dirty 不变。
+        let dirty = std::process::Command::new("git")
+            .current_dir(&repo_a)
+            .args(["status", "--porcelain"])
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&dirty.stdout).trim().is_empty(),
+            "member repository must stay clean"
+        );
     }
 }

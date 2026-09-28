@@ -53,6 +53,9 @@ fn routing_error_code_from_reason(kind: &str, reason: &str) -> Option<&'static s
             "repository_routing_inconsistent",
             "repository_routing_target_unknown",
             "repository_routing_ambiguous",
+            "repository_routing_kind_mismatch",
+            "repository_routing_legacy_conflict",
+            "repository_routing_source_identity_mismatch",
         ]
         .into_iter()
         .find(|code| {
@@ -79,6 +82,20 @@ fn routing_error_code_from_reason(kind: &str, reason: &str) -> Option<&'static s
 
 pub(crate) fn product_store_api_error(error: ProductStoreError) -> ApiError {
     match error {
+        ProductStoreError::Conflict { kind, id }
+            if matches!(
+                kind,
+                "repository_routing_kind_mismatch"
+                    | "repository_routing_legacy_conflict"
+                    | "repository_routing_source_identity_mismatch"
+            ) =>
+        {
+            ApiError::runtime(
+                kind,
+                "repository routing failed closed",
+                json!({"kind": kind, "id": id}),
+            )
+        }
         ProductStoreError::NotFound {
             kind: "registration_preflight", ..
         } => ApiError::runtime(

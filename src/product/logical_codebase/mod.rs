@@ -117,7 +117,10 @@ pub use registry::{
     IdentityRegistry, IdentityRegistryEntry, IdentityRegistryState, IdentityRegistryStore,
 };
 pub use repository_routing::{
-    RepositoryRouting, RepositoryRoutingErrorCode, resolve_issue_logical_codebase_id,
+    AuthorityAggregateIndexReference, AuthorityPolicyReference, RepositoryAuthorityResolution,
+    RepositoryAuthorityResolver, RepositoryRouting, RepositoryRoutingErrorCode,
+    RepositoryRoutingRequest, RepositoryTargetKind, ResolvedTargetIdentity,
+    resolve_issue_logical_codebase_id,
 };
 pub(crate) use store::lc_scope_root;
 pub(crate) use store::legacy_logical_codebase_id;
