@@ -255,6 +255,53 @@ pub struct LeaseTakeoverResult {
     pub state: OperationState,
     pub lease: LeaseDecision,
 }
+
+// ─── C1 Task 7：Failed advance 显式 retry-initialization（REQ-ADV-C1-RETRY）───
+
+/// 显式 retry 请求：独立产品动作（不是重复普通 advance）。携带当前
+/// enrollment binding、失败时的 attempt/checkpoint 身份与未知副作用确认
+/// 标志；checkpoint/target/binding 过期一律拒绝且 durable 不变。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetryInitializationRequest {
+    pub command_id: String,
+    pub expected_binding: EnrollmentBindingIdentity,
+    pub expected_attempt_id: String,
+    pub expected_checkpoint: crate::product::advance_store::AdvanceInitializationPhase,
+    pub confirm_unknown_side_effect: bool,
+}
+
+impl RetryInitializationRequest {
+    /// 稳定 payload 摘要（命令账本按此判同 command 异 payload）。
+    pub fn payload_digest(&self) -> String {
+        let payload =
+            serde_json::to_string(self).expect("retry initialization request is serializable");
+        format!("sha256:{:x}", Sha256::digest(payload.as_bytes()))
+    }
+}
+
+/// 独立 durable retry 事实：不改写原 Failed record/journal 的失败审计；
+/// `checkpoint` 是发起 retry 时锁定的续做起点。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetryInitializationRecord {
+    pub retry_id: String,
+    pub command_id: String,
+    pub advance_id: String,
+    pub attempt_id: String,
+    pub state: OperationState,
+    pub checkpoint: crate::product::advance_store::AdvanceInitializationPhase,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// retry 固定响应体；`NeedsHuman` 由 `state` 承载（此时 `outcome=None`，
+/// 不重跑任何步骤）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetryInitializationResult {
+    pub command_id: String,
+    pub state: OperationState,
+    pub retry: RetryInitializationRecord,
+    pub outcome: Option<crate::product::advance_store::AdvanceOutcome>,
+}
 /// P1 WIGA Task 4：enrollment-bound 不可变创建意图（automation-plan-intent.json）。
 ///
 /// 先于 plan/session 持久化、与 enrollment 同源（`prepare_intent_id`），冻结

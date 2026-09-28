@@ -258,6 +258,92 @@ pub async fn advance_plan(
     Ok(outcome)
 }
 
+/// C1 Task 7（REQ-ADV-C1-RETRY）：Failed advance 显式 retry REST 薄入口。
+/// 解析 plan 会话后调 `WorkspaceEngine::retry_initialization`（身份链/
+/// 副作用门/续做全在 engine 服务内）；响应体固定为
+/// `RetryInitializationResult`（`NeedsHuman` 由 `state` 承载）。
+pub async fn post_work_item_plan_advance_retry_initialization(
+    axum::extract::State(state): axum::extract::State<WebAppState>,
+    axum::extract::Path((project_id, issue_id, plan_id)): axum::extract::Path<(
+        String,
+        String,
+        String,
+    )>,
+    axum::Json(request): axum::Json<
+        crate::product::models::automation::RetryInitializationRequest,
+    >,
+) -> Result<
+    axum::response::Json<crate::product::models::automation::RetryInitializationResult>,
+    crate::web::error::ApiError,
+> {
+    use crate::web::error::ApiError;
+
+    for id in [&project_id, &issue_id, &plan_id, &request.command_id] {
+        validate_relative_id(id).map_err(|error| {
+            ApiError::validation("retry_initialization_invalid_id", format!("invalid id: {error}"))
+        })?;
+    }
+    let paths = ProductAppPaths::new(state.workspace_root.join(".aria"));
+    let lifecycle = crate::product::lifecycle_store::LifecycleStore::new(paths.clone());
+    let session_record = lifecycle
+        .list_workspace_sessions(&project_id, &issue_id)
+        .map_err(|error| {
+            ApiError::runtime(
+                "retry_initialization_session_lookup_failed",
+                format!("list plan workspace sessions failed: {error}"),
+                serde_json::json!({}),
+            )
+        })?
+        .into_iter()
+        .find(|record| {
+            record.workspace_type == WorkspaceType::WorkItemPlan
+                && record.entity_id == plan_id
+                && record.project_id == project_id
+                && record.issue_id == issue_id
+        })
+        .ok_or_else(|| {
+            ApiError::runtime(
+                "retry_initialization_session_not_found",
+                format!("no workspace session bound to plan {plan_id}"),
+                serde_json::json!({}),
+            )
+        })?;
+
+    let retry = async {
+        match state.workspace_sessions.peek(&session_record.id).await {
+            Some(manager) => {
+                let engine_arc = manager.engine();
+                let mut engine = engine_arc.lock().await;
+                engine.retry_initialization(&request).await
+            }
+            None => {
+                let full_record = lifecycle
+                    .get_workspace_session(&session_record.id)
+                    .map_err(|error| format!("load workspace session failed: {error}"))?;
+                let (event_tx, _event_rx) = tokio::sync::mpsc::channel(8);
+                let mut engine = crate::product::workspace_engine::WorkspaceEngine::new_persistent(
+                    std::sync::Arc::new(crate::product::checkpoint_store::CheckpointStore::new(
+                        state.workspace_root.join("advance-engine-checkpoints"),
+                    )),
+                    lifecycle,
+                    event_tx,
+                    crate::product::workspace_engine::WorkspaceSession::from_record(full_record),
+                );
+                engine.retry_initialization(&request).await
+            }
+        }
+    }
+    .await
+    .map_err(|error| {
+        ApiError::runtime(
+            "retry_initialization_rejected",
+            error,
+            serde_json::json!({}),
+        )
+    })?;
+    Ok(axum::response::Json(retry))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

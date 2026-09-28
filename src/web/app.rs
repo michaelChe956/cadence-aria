@@ -285,6 +285,10 @@ pub fn build_web_router_with_evidence(state: WebAppState, evidence_enabled: bool
             delete(handlers::delete_work_item),
         )
         .route(
+            "/api/projects/{project_id}/issues/{issue_id}/work-item-plans/{plan_id}/advance/retry-initialization",
+            post(crate::web::advance_plan::post_work_item_plan_advance_retry_initialization),
+        )
+        .route(
             "/api/projects/{project_id}/issues/{issue_id}/work-item-plans/{plan_id}/coding-attempts",
             post(handlers::create_group_coding_attempt),
         )

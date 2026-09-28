@@ -910,6 +910,227 @@ impl WorkspaceEngine {
             .unwrap_or_else(|| format!("workspace://{}", attempt.id))
     }
 
+    /// C1 Task 7（REQ-ADV-C1-RETRY）：Failed advance 显式
+    /// retry-initialization。独立产品动作、独立 durable retry 事实：
+    /// - 普通 `handle_advance` 对 Failed 一律 `Replayed`（原失败事实不动），
+    ///   本方法绝不隐式触发；
+    /// - 身份链（binding/attempt/checkpoint/plan）过期一律拒绝且 durable
+    ///   不变；
+    /// - 失败发生在 WorktreeBound 及以后（可能存在 git/worktree 外部副
+    ///   作用状态）且未携 `confirm_unknown_side_effect` → 只写 NeedsHuman
+    ///   retry 事实，不重跑步骤；
+    /// - 确认后续做：CAS 把 Failed record 置回 Initializing（失败审计字段
+    ///   保留），再走既有 checkpoint continuation 以同一 command/attempt
+    ///   续进到 Ready——不新建 record/attempt，不启动 provider。
+    pub async fn retry_initialization(
+        &mut self,
+        request: &crate::product::models::automation::RetryInitializationRequest,
+    ) -> Result<crate::product::models::automation::RetryInitializationResult, String> {
+        use crate::product::models::automation::{
+            EnrollmentError, OperationState, RetryInitializationResult,
+        };
+
+        let project_id = self.session.project_id.clone();
+        let issue_id = self.session.issue_id.clone();
+        let plan_id = self.session.entity_id.clone();
+        let app_paths = self
+            .lifecycle_store
+            .as_ref()
+            .ok_or_else(|| "lifecycle_store unavailable".to_string())?
+            .app_paths();
+        let advance_store = AdvanceStore::new(app_paths.clone());
+        let automation = crate::product::issue_automation_store::IssueAutomationStore::new(app_paths.clone());
+
+        let record = advance_store
+            .get_advance_for_plan(&project_id, &issue_id, &plan_id)
+            .map_err(|error| format!("load advance record failed: {error}"))?
+            .ok_or_else(|| "no advance record for plan".to_string())?;
+
+        // 命令幂等：enrollment 命令账本先判（同 command 异 payload
+        // fail-closed；同 payload 命中 → 幂等重放）。
+        let digest = request.payload_digest();
+        let ledger_hit = automation
+            .find_command_result(&project_id, &issue_id, &request.command_id, &digest)
+            .map_err(|error| match error {
+                EnrollmentError::Conflict { .. } => {
+                    "retry command id is already bound to a different payload".to_string()
+                }
+                other => format!("retry command ledger check failed: {other}"),
+            })?;
+        if ledger_hit.is_some() {
+            let retry = advance_store
+                .get_retry_initialization(&project_id, &issue_id, &request.command_id)
+                .map_err(|error| format!("load retry record failed: {error}"))?
+                .ok_or_else(|| {
+                    "retry command ledger entry exists but the durable retry record is missing"
+                        .to_string()
+                })?;
+            // 幂等续做投影：Ready → Replayed；仍 Initializing → 续做；
+            // 再次 Failed → Replayed(原失败事实)，不重复建 retry。
+            let outcome = self
+                .handle_advance(AdvanceInput {
+                    command_id: record.command_id.clone(),
+                    project_id,
+                    issue_id,
+                    plan_id,
+                })
+                .await?;
+            return Ok(RetryInitializationResult {
+                command_id: request.command_id.clone(),
+                state: OperationState::Replayed,
+                retry,
+                outcome: Some(outcome),
+            });
+        }
+
+        // 身份链校验（拒绝路径 durable 全不变）。
+        if record.status != AdvanceStatus::Failed {
+            return Err(format!(
+                "retry_initialization requires a failed advance record, got {:?}",
+                record.status
+            ));
+        }
+        let journal = advance_store
+            .get_advance_initialization(&record)
+            .map_err(|error| format!("load advance journal failed: {error}"))?
+            .ok_or_else(|| "failed advance has no initialization journal".to_string())?;
+        if journal.error.is_none() {
+            return Err("retry_initialization requires a journal failure fact".to_string());
+        }
+        // record.attempt_id 只在 Ready 完成时写入（单目标早期失败为 None）；
+        // 一旦写入必须与 journal 一致。
+        if journal.attempt_id != request.expected_attempt_id
+            || record
+                .attempt_id
+                .as_deref()
+                .is_some_and(|attempt| attempt != journal.attempt_id)
+        {
+            return Err(format!(
+                "retry attempt identity mismatch: expected {}, journal {}, record {:?}",
+                request.expected_attempt_id, journal.attempt_id, record.attempt_id
+            ));
+        }
+        if journal.phase != request.expected_checkpoint {
+            return Err(format!(
+                "retry checkpoint expired: expected {:?}, durable journal at {:?}",
+                request.expected_checkpoint, journal.phase
+            ));
+        }
+        let enrollment = automation
+            .get(&project_id, &issue_id)
+            .map_err(|error| format!("load enrollment for retry failed: {error}"))?
+            .ok_or_else(|| "retry requires a durable automation enrollment".to_string())?;
+        if !enrollment.enabled {
+            return Err("retry requires an enabled automation enrollment".to_string());
+        }
+        let binding = enrollment
+            .binding_history
+            .as_ref()
+            .map(|history| history.current.clone())
+            .ok_or_else(|| {
+                "retry requires a versioned enrollment binding; re-enable with an explicit \
+                 target or rebind first"
+                    .to_string()
+            })?;
+        if binding != request.expected_binding {
+            return Err(format!(
+                "retry binding expired: expected v{}, current v{}",
+                request.expected_binding.binding_version, binding.binding_version
+            ));
+        }
+        if !binding.plan_id.is_empty() && binding.plan_id != plan_id {
+            return Err(format!(
+                "retry binding plan mismatch: binding {}, plan {}",
+                binding.plan_id, plan_id
+            ));
+        }
+
+        // 未知副作用门：失败已在 WorktreeBound 及以后 → 可能存在
+        // git/worktree 外部副作用状态；未确认只写 NeedsHuman 事实。
+        let side_effect_possible =
+            journal.phase.order_for_engine() >= AdvanceInitializationPhase::WorktreeBound.order_for_engine();
+        if side_effect_possible && !request.confirm_unknown_side_effect {
+            let retry = advance_store
+                .create_retry_initialization(&record, request, OperationState::NeedsHuman)
+                .map_err(|error| format!("persist retry fact failed: {error}"))?;
+            automation
+                .append_command_result(
+                    &project_id,
+                    &issue_id,
+                    &request.command_id,
+                    &digest,
+                    OperationState::NeedsHuman,
+                )
+                .map_err(|error| format!("persist retry command failed: {error}"))?;
+            return Ok(RetryInitializationResult {
+                command_id: request.command_id.clone(),
+                state: OperationState::NeedsHuman,
+                retry,
+                outcome: None,
+            });
+        }
+
+        // 确认续做：写 Accepted retry 事实 → CAS 重开 Failed record（失败
+        // 审计字段保留）→ 既有 checkpoint continuation 同 command/attempt。
+        let retry = advance_store
+            .create_retry_initialization(&record, request, OperationState::Accepted)
+            .map_err(|error| format!("persist retry fact failed: {error}"))?;
+        automation
+            .append_command_result(
+                &project_id,
+                &issue_id,
+                &request.command_id,
+                &digest,
+                OperationState::Accepted,
+            )
+            .map_err(|error| format!("persist retry command failed: {error}"))?;
+        advance_store
+            .reopen_failed_record_for_retry(&record)
+            .map_err(|error| format!("reopen failed record for retry failed: {error}"))?;
+        let input = AdvanceInput {
+            command_id: record.command_id.clone(),
+            project_id,
+            issue_id,
+            plan_id,
+        };
+        match self.handle_advance(input).await {
+            Ok(outcome @ (AdvanceOutcome::Completed { .. } | AdvanceOutcome::Replayed { .. })) => {
+                Ok(RetryInitializationResult {
+                    command_id: request.command_id.clone(),
+                    state: OperationState::Accepted,
+                    retry,
+                    outcome: Some(outcome),
+                })
+            }
+            Ok(AdvanceOutcome::Rejected { reason, .. }) => {
+                let _ = reason;
+                let retry = advance_store
+                    .update_retry_initialization_state(
+                        &self.session.project_id,
+                        &self.session.issue_id,
+                        &retry,
+                        OperationState::NeedsHuman,
+                    )
+                    .map_err(|error| format!("mark retry needs human failed: {error}"))?;
+                Ok(RetryInitializationResult {
+                    command_id: request.command_id.clone(),
+                    state: OperationState::NeedsHuman,
+                    retry,
+                    outcome: None,
+                })
+            }
+            Err(error) => {
+                let _ = advance_store.update_retry_initialization_state(
+                    &self.session.project_id,
+                    &self.session.issue_id,
+                    &retry,
+                    OperationState::NeedsHuman,
+                );
+                Err(format!("retry continuation failed: {error}"))
+            }
+        }
+    }
+
     pub(super) fn current_git_branch(path: &std::path::Path) -> Option<String> {
         let output = Command::new("git")
             .args(["branch", "--show-current"])

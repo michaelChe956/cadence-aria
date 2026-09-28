@@ -1173,3 +1173,213 @@ async fn advance_initialization_fails_closed_when_issue_base_branch_deleted() {
         "advance record error must carry the diagnosis: {record:?}"
     );
 }
+
+/// C1 Task 7（REQ-ADV-C1-RETRY）：Failed advance 显式 retry——独立 durable
+/// retry 事实、原失败审计字段保留、同一 attempt 续做到 Ready；普通
+/// advance 对 Failed 一律 Replayed 不隐式 retry；副作用门未确认只写
+/// NeedsHuman 不重跑；过期 checkpoint 拒绝且 durable 不变；同 command
+/// 重放返回原 retry 结果。
+#[tokio::test]
+async fn retry_initialization_preserves_failed_record_and_attempt() {
+    use crate::product::issue_automation_store::IssueAutomationStore;
+    use crate::product::logical_codebase::EnrollmentTarget;
+    use crate::product::models::automation::{
+        EnrollmentOptions, EnrollmentSource, EnrollmentWriteCommand, OperationState,
+        RetryInitializationRequest, SourceRevisionRef,
+    };
+
+    let (root, app_paths, _lifecycle, mut engine) = advance_fixture().await;
+    let advance_store = AdvanceStore::new(app_paths.clone());
+    let coding_store = crate::product::coding_attempt_store::CodingAttemptStore::new(
+        app_paths.clone(),
+    );
+
+    // 在 PlanBindingSaved（≥ WorktreeBound）注入失败：可能存在外部副作用
+    // 状态，先走副作用门。
+    let request = fixture_input("command_retry_side_effect");
+    let _failpoint = register_advance_initialization_failpoint(
+        &request,
+        AdvanceInitializationFailpoint::PlanBindingSaved,
+        AdvanceInitializationFailpointMode::Error,
+    );
+    engine
+        .handle_advance(request)
+        .await
+        .expect_err("injected engine failure must be returned");
+    let record = advance_store
+        .get_advance_for_plan("project_0001", "issue_plan_0001", "work_item_plan_0001")
+        .unwrap()
+        .expect("failed record");
+    assert_eq!(record.status, AdvanceStatus::Failed);
+    let journal = advance_store
+        .get_advance_initialization(&record)
+        .unwrap()
+        .expect("failed initialization journal");
+    let failed_error = journal.error.clone().expect("journal failure fact");
+    let attempt_id = journal.attempt_id.clone();
+    let created_at_before = record.created_at.clone();
+    let attempts_before = coding_store
+        .list_attempts_for_issue("project_0001", "issue_plan_0001")
+        .unwrap()
+        .len();
+
+    // 普通 advance（异 command）对 Failed 一律 Replayed，不创建 retry/attempt。
+    let replay = engine
+        .handle_advance(fixture_input("command_retry_plain_advance"))
+        .await
+        .expect("plain advance replays the failed fact");
+    assert!(
+        matches!(replay, AdvanceOutcome::Replayed { ref record } if record.status == AdvanceStatus::Failed),
+        "plain advance must not implicitly retry: {replay:?}"
+    );
+    assert!(advance_store
+        .get_retry_initialization("project_0001", "issue_plan_0001", "retry_cmd_0001")
+        .unwrap()
+        .is_none());
+
+    // enrollment binding（store 级 Enable + 显式 target → binding v1）。
+    let automation = IssueAutomationStore::new(app_paths.clone());
+    automation
+        .compare_and_set(
+            "project_0001",
+            "issue_plan_0001",
+            None,
+            EnrollmentWriteCommand::Enable {
+                selection_key: "selection_retry".to_string(),
+                source: EnrollmentSource {
+                    stories: vec![SourceRevisionRef {
+                        id: "story_spec_0001".to_string(),
+                        version: 1,
+                    }],
+                    designs: vec![],
+                },
+                options: EnrollmentOptions {
+                    author_provider: crate::product::models::ProviderName::Fake,
+                    reviewer_provider: crate::product::models::ProviderName::Fake,
+                    review_rounds: 1,
+                    superpowers_enabled: false,
+                    openspec_enabled: false,
+                    plan_options: plan_options(),
+                },
+                logical_repository_id: crate::product::logical_codebase::LogicalRepositoryId(
+                    uuid::Uuid::nil(),
+                ),
+                target: Some(EnrollmentTarget::SingleRepository {
+                    repository_id: "repository_0001".to_string(),
+                }),
+            },
+        )
+        .expect("enable enrollment");
+    let binding = automation
+        .get("project_0001", "issue_plan_0001")
+        .unwrap()
+        .expect("enrollment")
+        .binding_history
+        .expect("binding history")
+        .current;
+
+    // 副作用门：未确认 → NeedsHuman（outcome=None），只写 retry 事实，
+    // 不重跑步骤（record 仍 Failed、失败审计保留）。
+    let unconfirmed = RetryInitializationRequest {
+        command_id: "retry_cmd_0001".to_string(),
+        expected_binding: binding.clone(),
+        expected_attempt_id: attempt_id.clone(),
+        expected_checkpoint: journal.phase,
+        confirm_unknown_side_effect: false,
+    };
+    let result = engine
+        .retry_initialization(&unconfirmed)
+        .await
+        .expect("side-effect gate answers without error");
+    assert_eq!(result.state, OperationState::NeedsHuman);
+    assert!(result.outcome.is_none());
+    let saved = advance_store
+        .get_retry_initialization("project_0001", "issue_plan_0001", "retry_cmd_0001")
+        .unwrap()
+        .expect("durable retry fact");
+    assert_eq!(saved.state, OperationState::NeedsHuman);
+    let unchanged = advance_store
+        .get_advance_for_plan("project_0001", "issue_plan_0001", "work_item_plan_0001")
+        .unwrap()
+        .expect("record");
+    assert_eq!(unchanged.status, AdvanceStatus::Failed);
+    let unchanged_journal = advance_store
+        .get_advance_initialization(&unchanged)
+        .unwrap()
+        .expect("journal");
+    assert_eq!(unchanged_journal.error.as_deref(), Some(failed_error.as_str()));
+
+    // 过期 checkpoint：拒绝且 durable 不变（不写 retry 事实）。
+    let stale = RetryInitializationRequest {
+        command_id: "retry_cmd_0003".to_string(),
+        expected_binding: binding.clone(),
+        expected_attempt_id: attempt_id.clone(),
+        expected_checkpoint: AdvanceInitializationPhase::JournalPrepared,
+        confirm_unknown_side_effect: true,
+    };
+    let error = engine
+        .retry_initialization(&stale)
+        .await
+        .expect_err("stale checkpoint rejected");
+    assert!(error.contains("checkpoint expired"), "{error}");
+    assert!(advance_store
+        .get_retry_initialization("project_0001", "issue_plan_0001", "retry_cmd_0003")
+        .unwrap()
+        .is_none());
+
+    // 确认后续做：Accepted + 同一 attempt 到 Ready；attempt 数量/id 不变；
+    // 原 created_at 不变；失败审计保留在 record.error（不改写为成功前史）。
+    let confirmed = RetryInitializationRequest {
+        command_id: "retry_cmd_0002".to_string(),
+        expected_binding: binding.clone(),
+        expected_attempt_id: attempt_id.clone(),
+        expected_checkpoint: journal.phase,
+        confirm_unknown_side_effect: true,
+    };
+    let result = engine
+        .retry_initialization(&confirmed)
+        .await
+        .expect("confirmed retry continues the same attempt");
+    assert_eq!(result.state, OperationState::Accepted);
+    let outcome = result.outcome.clone();
+    let AdvanceOutcome::Completed { record: ready, .. } =
+        outcome.expect("retry outcome")
+    else {
+        panic!("confirmed retry must complete to Ready");
+    };
+    assert_eq!(ready.status, AdvanceStatus::Ready);
+    assert_eq!(ready.attempt_id.as_deref(), Some(attempt_id.as_str()));
+    assert_eq!(ready.created_at, created_at_before);
+    assert_eq!(
+        coding_store
+            .list_attempts_for_issue("project_0001", "issue_plan_0001")
+            .unwrap()
+            .len(),
+        attempts_before
+    );
+    let saved = advance_store
+        .get_retry_initialization("project_0001", "issue_plan_0001", "retry_cmd_0002")
+        .unwrap()
+        .expect("durable retry fact");
+    assert_eq!(saved.state, OperationState::Accepted);
+    assert_eq!(saved.attempt_id, attempt_id);
+
+    // 同 command 重放：Replayed（Ready 记录幂等投影，不建第二链）。
+    let replayed = engine
+        .retry_initialization(&confirmed)
+        .await
+        .expect("same-command replay");
+    assert_eq!(replayed.state, OperationState::Replayed);
+    assert!(matches!(
+        replayed.outcome,
+        Some(AdvanceOutcome::Replayed { ref record }) if record.status == AdvanceStatus::Ready
+    ));
+    assert_eq!(
+        coding_store
+            .list_attempts_for_issue("project_0001", "issue_plan_0001")
+            .unwrap()
+            .len(),
+        attempts_before
+    );
+    let _ = root;
+}

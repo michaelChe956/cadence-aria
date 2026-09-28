@@ -5,7 +5,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::locking::with_exclusive_lock;
-use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
+use crate::product::json_store::{
+    ProductStoreError, read_json, validate_relative_id, write_json,
+};
+use crate::product::models::automation::{RetryInitializationRecord, RetryInitializationRequest};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -104,7 +107,7 @@ pub struct AdvanceInitializationJournal {
     pub updated_at: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AdvanceOutcome {
     Completed {
         record: AdvanceRecord,
@@ -590,6 +593,166 @@ impl AdvanceStore {
             created_at: now.clone(),
             updated_at: now,
         }
+    }
+
+    // ─── C1 Task 7（REQ-ADV-C1-RETRY）：显式 retry-initialization ───
+
+    fn retries_root(&self, project_id: &str, issue_id: &str) -> Result<PathBuf, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        Ok(self
+            .app_paths
+            .issue_root(project_id, issue_id)
+            .join("advance-retries"))
+    }
+
+    fn retry_path(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        command_id: &str,
+    ) -> Result<PathBuf, ProductStoreError> {
+        validate_relative_id(command_id)?;
+        Ok(self
+            .retries_root(project_id, issue_id)?
+            .join(format!("{command_id}.json")))
+    }
+
+    /// 读取独立 durable retry 记录（`advance-retries/{command_id}.json`）。
+    pub fn get_retry_initialization(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        command_id: &str,
+    ) -> Result<Option<RetryInitializationRecord>, ProductStoreError> {
+        let path = self.retry_path(project_id, issue_id, command_id)?;
+        if !path.is_file() {
+            return Ok(None);
+        }
+        let record: RetryInitializationRecord = read_json(&path)?;
+        if record.command_id != command_id {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "advance_retry_initialization",
+                id: command_id.to_string(),
+            });
+        }
+        Ok(Some(record))
+    }
+
+    /// 追加独立 retry 事实：原 Failed record/journal 的失败审计不动；同
+    /// `command_id` 已存在时幂等返回既有记录（不重写）。`state` 由调用方
+    /// 决定（NeedsHuman＝等待未知副作用确认；Accepted＝已进入安全续做）。
+    pub fn create_retry_initialization(
+        &self,
+        record: &AdvanceRecord,
+        request: &RetryInitializationRequest,
+        state: crate::product::models::automation::OperationState,
+    ) -> Result<RetryInitializationRecord, ProductStoreError> {
+        validate_relative_id(&request.command_id)?;
+        let journal = self
+            .get_advance_initialization(record)?
+            .ok_or_else(|| ProductStoreError::NotFound {
+                kind: "advance_initialization_journal",
+                id: record.id.clone(),
+            })?;
+        if journal.attempt_id != request.expected_attempt_id {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "advance_retry_attempt",
+                id: request.expected_attempt_id.clone(),
+            });
+        }
+        let path = self.retry_path(
+            &record.project_id,
+            &record.issue_id,
+            &request.command_id,
+        )?;
+        let root = self.retries_root(&record.project_id, &record.issue_id)?;
+        with_exclusive_lock(&root, || {
+            if path.is_file() {
+                let existing: RetryInitializationRecord = read_json(&path)?;
+                if existing.command_id == request.command_id {
+                    return Ok(existing);
+                }
+                return Err(ProductStoreError::Conflict {
+                    kind: "advance_retry_initialization",
+                    id: request.command_id.clone(),
+                });
+            }
+            let now = Utc::now().to_rfc3339();
+            let retry = RetryInitializationRecord {
+                retry_id: format!("advance_retry_{}", request.command_id),
+                command_id: request.command_id.clone(),
+                advance_id: record.id.clone(),
+                attempt_id: journal.attempt_id.clone(),
+                state,
+                checkpoint: journal.phase,
+                created_at: now.clone(),
+                updated_at: now,
+            };
+            write_json(&path, &retry)?;
+            Ok(retry)
+        })
+    }
+
+    /// 更新 retry 记录状态（续做失败→NeedsHuman 等）；identity 不可变。
+    pub fn update_retry_initialization_state(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        retry: &RetryInitializationRecord,
+        state: crate::product::models::automation::OperationState,
+    ) -> Result<RetryInitializationRecord, ProductStoreError> {
+        let path = self.retry_path(project_id, issue_id, &retry.command_id)?;
+        let root = self.retries_root(project_id, issue_id)?;
+        with_exclusive_lock(&root, || {
+            let mut current: RetryInitializationRecord = read_json(&path)?;
+            if current.retry_id != retry.retry_id
+                || current.advance_id != retry.advance_id
+                || current.attempt_id != retry.attempt_id
+                || current.command_id != retry.command_id
+            {
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "advance_retry_initialization",
+                    id: retry.retry_id.clone(),
+                });
+            }
+            current.state = state;
+            current.updated_at = Utc::now().to_rfc3339();
+            write_json(&path, &current)?;
+            Ok(current)
+        })
+    }
+
+    /// CAS 重开 Failed record 供显式 retry 的安全续做：仅当当前 status
+    /// 仍为 Failed 时置回 Initializing（created_at/error 失败审计保留），
+    /// 使既有 checkpoint continuation 以同一 command/attempt 续进。
+    pub fn reopen_failed_record_for_retry(
+        &self,
+        record: &AdvanceRecord,
+    ) -> Result<AdvanceRecord, ProductStoreError> {
+        validate_advance_record_identity(record)?;
+        let path = self.path_for(&record.project_id, &record.issue_id, &record.id)?;
+        let root = self.root(&record.project_id, &record.issue_id)?;
+        with_exclusive_lock(&root, || {
+            let mut current: AdvanceRecord = read_json(&path)?;
+            validate_advance_record_identity(&current)?;
+            if current.id != record.id {
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "advance_record",
+                    id: record.id.clone(),
+                });
+            }
+            if current.status != AdvanceStatus::Failed {
+                return Err(ProductStoreError::Conflict {
+                    kind: "advance_retry_reopen",
+                    id: format!("{}: status is {:?}", current.id, current.status),
+                });
+            }
+            current.status = AdvanceStatus::Initializing;
+            current.updated_at = Utc::now().to_rfc3339();
+            write_json(&path, &current)?;
+            Ok(current)
+        })
     }
 }
 
