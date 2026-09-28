@@ -214,6 +214,14 @@ impl IntoResponse for ApiError {
             "candidate_recovery_command_conflict" => StatusCode::CONFLICT,
             "candidate_recovery_rejected" => StatusCode::UNPROCESSABLE_ENTITY,
             "candidate_snapshot_incomplete" => StatusCode::UNPROCESSABLE_ENTITY,
+            // C1 Task 6/7：lease 确认接管与 Failed advance 显式 retry 稳定码
+            // ——身份/命令冲突 409、参数非法 400、会话缺失 404、语义拒绝
+            //（过期 checkpoint/binding/副作用门前的引擎拒绝）422。
+            "lease_takeover_identity_mismatch" => StatusCode::CONFLICT,
+            "lease_takeover_command_conflict" => StatusCode::CONFLICT,
+            "retry_initialization_invalid_id" => StatusCode::BAD_REQUEST,
+            "retry_initialization_session_not_found" => StatusCode::NOT_FOUND,
+            "retry_initialization_rejected" => StatusCode::UNPROCESSABLE_ENTITY,
             // P2 GAP-E/G（Task 0.1）failed-sc-runs retry 稳定码：前置
             // 不满足 409（busy/非最新失败节点/认领异键）、请求非法 422。
             "sc_recovery_busy" => StatusCode::CONFLICT,

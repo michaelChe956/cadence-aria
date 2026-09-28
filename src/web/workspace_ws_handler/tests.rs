@@ -11,6 +11,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 mod campaign_stage3_advance;
 mod campaign_stage3_interactive;
 mod campaign_stage3_recovery_matrix;
+#[path = "tests/c1_recovery_surface.rs"]
+mod c1_recovery_surface;
 #[path = "tests/conversational_gate_protocol.rs"]
 mod conversational_gate_protocol;
 #[path = "tests/conversational_gate_stage.rs"]

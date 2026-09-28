@@ -17,13 +17,13 @@
 ## 3. Advance retry 与端到端故障闭环（REQ-ADV-C1-RETRY 及 C1 §5.1 共同约束）
 
 - [x] 3.1 增加 `retry-initialization` 产品动作及 durable retry 审计：核对 plan/revision/target/attempt/checkpoint，保留 Failed 原因并在安全本地边界内续做同一 attempt；普通 advance 不隐式重试，外部副作用未知时转确认/重绑等待。
-- [ ] 3.2 将所有 C1 等待项接入统一通知/操作结果投影，证明页面或 WS 断开不取消 durable 事实，重复 command_id 不重复 provider/attempt/候选/预算，并覆盖 A07/A09/A12/A13 的“错误→通知→用户操作→自动续进”真实观察链。
+- [x] 3.2 将所有 C1 等待项接入统一通知/操作结果投影，证明页面或 WS 断开不取消 durable 事实，重复 command_id 不重复 provider/attempt/候选/预算，并覆盖 A07/A09/A12/A13 的“错误→通知→用户操作→自动续进”真实观察链。
 
 **验收映射：** A09 plan retry、A07/A12/A13 综合验收；work-item-plan-advance 与相关 capability delta。
 
 ## 4. 契约集成与兼容边界
 
-- [ ] 4.1 更新既有 capability 的受影响 requirement 与交叉引用，验证 C1 target/binding 写面被 C2/C5 消费而不复制；旧 enrollment/缺失字段按 off/Manual/手动路径解释，非 enrolled、人工 plan 门和 Final Confirm 零回归。
-- [ ] 4.2 完成 C1 合同的定向回归与方案 v1.2 §7 的验收记录，明确 C2 coding resilience、C4 LC bootstrap、C5 role-chain/pi defer 不在本 change 实现范围。
+- [x] 4.1 更新既有 capability 的受影响 requirement 与交叉引用，验证 C1 target/binding 写面被 C2/C5 消费而不复制；旧 enrollment/缺失字段按 off/Manual/手动路径解释，非 enrolled、人工 plan 门和 Final Confirm 零回归。
+- [x] 4.2 完成 C1 合同的定向回归与方案 v1.2 §7 的验收记录，明确 C2 coding resilience、C4 LC bootstrap、C5 role-chain/pi defer 不在本 change 实现范围。
 
 **验收映射：** 方案 v1.2 §5.1、§5.5、§5.6、§7；A07、A09、A12、A13。
