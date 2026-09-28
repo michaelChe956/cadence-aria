@@ -39,6 +39,7 @@ fn group_canonical_contract(logical_id: &str, title: &str) -> CanonicalWorkItemC
         },
         blocker_rules: Vec::new(),
         design_traceability: Vec::new(),
+        intent_contract: None,
     }
 }
 

@@ -68,6 +68,7 @@ fn seed_authoritative_group_plan_fixture(
                 reviewer_triggered_rework_blocker_rules_fixture()
             },
             design_traceability: Vec::new(),
+            intent_contract: None,
         };
         let revision = WorkItemRevision {
             id: revision_id.to_string(),
