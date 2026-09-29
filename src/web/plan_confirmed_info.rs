@@ -202,6 +202,31 @@ pub struct C1WaitingItemDto {
     pub superseded_by: Option<String>,
 }
 
+/// G1：candidate_recovery 引用的门是否已被处理（approve/close 后节点
+/// 落终态）。读取失败按未处理返回（fail-safe：保持等待项可见，不吞错）。
+fn candidate_recovery_gate_resolved(
+    lifecycle: &crate::product::lifecycle_store::LifecycleStore,
+    project_id: &str,
+    issue_id: &str,
+    session_id: &str,
+    gate_id: &str,
+) -> bool {
+    use crate::web::workspace_ws_types::timeline::TimelineNodeStatus;
+
+    let nodes = lifecycle
+        .load_timeline_nodes_for_issue_session(project_id, issue_id, session_id)
+        .unwrap_or_default();
+    nodes.iter().any(|node| {
+        node.node_id == gate_id
+            && matches!(
+                node.status,
+                TimelineNodeStatus::Completed
+                    | TimelineNodeStatus::Failed
+                    | TimelineNodeStatus::Skipped
+            )
+    })
+}
+
 /// 从 durable enrollment/lease/advance/compile/gate 事实派生 issue 级 C1
 /// 恢复等待项。仅当前 enabled 且已绑定 plan/session 的 enrollment 投影；
 /// 读取失败显式上抛（不吞为空列表）。
@@ -245,6 +270,18 @@ pub fn list_c1_waiting_items(
                 .human_gate_snapshot
                 .as_ref()
                 .and_then(|snapshot| snapshot.candidate_recovery.as_ref())
+                // G1（终局关闸缺口）：approve/close 不回清快照——投影派生
+                // 按当前门状态过滤：gate 节点已终态（Completed/Failed/
+                // Skipped）即视为已处理，等待项消隐（现场
+                // session_auto_bd69a84a/timeline_node_003 陈旧误报）；节点
+                // 缺失（无法证明已处理）保持投影，Active/Paused 照常投影。
+                && !candidate_recovery_gate_resolved(
+                    &lifecycle,
+                    project_id,
+                    issue_id,
+                    bound_session_id,
+                    &recovery.gate_id,
+                )
             {
                 let reason = if recovery.complete {
                     "candidate snapshot complete; awaiting human recovery".to_string()

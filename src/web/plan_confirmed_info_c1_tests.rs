@@ -1123,3 +1123,124 @@ fn project_c1_waiting_items_surface_failed_repository_initialization_once() {
     );
     assert!(items[0].diagnostics.is_none());
 }
+
+/// G1（终局关闸缺口）：plan approve（REST human-actions）成功后 session
+/// 推进 confirmed、timeline 门节点 Completed，但 human_gate_snapshot 的
+/// candidate_recovery 不随之清除——投影只看快照存在性，等待项不消隐且
+/// gate id 陈旧（现场 session_auto_bd69a84a/timeline_node_003）。
+/// 修复语义：投影派生按当前门状态过滤——gate 节点已终态
+/// （Completed/Failed/Skipped）即视为已处理不再投影；节点 Active/Paused
+/// 仍投影；节点缺失（无法证明已处理）保持投影（fail-safe）。
+#[test]
+fn c1_candidate_recovery_item_clears_once_gate_is_resolved() {
+    use crate::web::workspace_ws_types::common::ProviderConfigSnapshot as TimelineProviderSnapshot;
+    use crate::web::workspace_ws_types::stage::WorkspaceStage;
+    use crate::web::workspace_ws_types::timeline::{
+        TimelineNode, TimelineNodeStatus, TimelineNodeType,
+    };
+
+    let (_tmp, paths, lifecycle) = fixture_root();
+    let plan_id = "plan_g1";
+    let session = lifecycle
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            entity_id: plan_id.to_string(),
+            workspace_type: WorkspaceType::WorkItemPlan,
+            author_provider: ProviderName::Fake,
+            reviewer_provider: Some(ProviderName::Fake),
+            review_rounds: 1,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+            work_item_plan_options: None,
+        })
+        .unwrap();
+    enable_enrollment(&paths, plan_id, &session.id);
+    let mut durable: WorkspaceSessionRecord =
+        lifecycle.get_workspace_session(&session.id).unwrap();
+    durable.status = crate::product::models::WorkspaceSessionStatus::Confirmed;
+    durable.human_gate_snapshot = Some(HumanGateSnapshot {
+        findings: vec![],
+        repeated_fingerprints: vec![],
+        attempts_used: 0,
+        manual_repairs_remaining: 2,
+        accepted_feedback_turns: None,
+        candidate_recovery: Some(CandidateSnapshotRecovery {
+            complete: true,
+            gate_id: "timeline_node_003".to_string(),
+            source_revision_ref: None,
+            source_revision_hash: None,
+            plan_candidate_ir_ref: Some("ir_ref".to_string()),
+            mechanical_report_ref: Some("report_ref".to_string()),
+            budget_remaining: Some(3),
+            missing: vec![],
+            completed_steps: vec![
+                "candidate_source_persisted".to_string(),
+                "mechanical_report_persisted".to_string(),
+            ],
+            commands: vec![],
+            assessed_at: "2026-09-29T00:00:00Z".to_string(),
+        }),
+        trigger: crate::product::work_item_plan_policy::HumanReason::NativeHumanRequired,
+        resumable: true,
+    });
+    write_json(
+        &paths
+            .issue_lifecycle_root(PROJECT_ID, ISSUE_ID)
+            .join("workspace-sessions")
+            .join(format!("{}.json", session.id)),
+        &durable,
+    )
+    .unwrap();
+
+    let gate_node = |status: TimelineNodeStatus| TimelineNode {
+        node_id: "timeline_node_003".to_string(),
+        node_type: TimelineNodeType::HumanConfirm,
+        agent: None,
+        stage: WorkspaceStage::HumanConfirm,
+        round: None,
+        status,
+        title: "人工确认".to_string(),
+        summary: None,
+        started_at: "2026-09-29T00:00:00Z".to_string(),
+        completed_at: Some("2026-09-29T00:01:00Z".to_string()),
+        duration_ms: Some(60000),
+        artifact_ref: None,
+        provider_config_snapshot: TimelineProviderSnapshot {
+            author: ProviderName::Fake,
+            reviewer: Some(ProviderName::Fake),
+            review_rounds: 1,
+            permission_modes: Default::default(),
+        },
+        retry: None,
+    };
+    let timeline_path = paths
+        .issue_lifecycle_root(PROJECT_ID, ISSUE_ID)
+        .join("workspace-timelines")
+        .join(&session.id)
+        .join("timeline_nodes.json");
+
+    // 门已 approve（节点 Completed）：等待项必须消隐。
+    write_json(
+        &timeline_path,
+        &vec![gate_node(TimelineNodeStatus::Completed)],
+    )
+    .unwrap();
+    let items = list_c1_waiting_items(&paths, PROJECT_ID, ISSUE_ID).unwrap();
+    assert!(
+        !items.iter().any(|item| item.kind == "candidate_recovery"),
+        "resolved gate must clear the stale candidate_recovery item: {items:?}"
+    );
+
+    // 门仍开放（节点 Active）：等待项保持投影（真实等待语义不变）。
+    write_json(
+        &timeline_path,
+        &vec![gate_node(TimelineNodeStatus::Active)],
+    )
+    .unwrap();
+    let items = list_c1_waiting_items(&paths, PROJECT_ID, ISSUE_ID).unwrap();
+    assert!(
+        items.iter().any(|item| item.kind == "candidate_recovery"),
+        "open gate must keep projecting the recovery item"
+    );
+}
