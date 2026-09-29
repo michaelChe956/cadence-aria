@@ -204,6 +204,82 @@ pub(crate) fn find_repository(
         })
 }
 
+/// C5 Task 2（REQ-WIGA-01/REQ-ROUTE-C5-TARGET）：自动化载体判定结果。
+/// GET `/automation-target` 投影与 PUT Enable 共用同一判定入口，防止
+/// 两处内联分叉（Review Focus 5）。
+pub(crate) enum AutomationCarrierResolution {
+    /// 单仓 issue：target 携带真实 `RepositoryRecord.id`，绝不伪造
+    /// logical 替身身份。
+    SingleRepository {
+        target: crate::product::logical_codebase::EnrollmentTarget,
+    },
+    /// LC issue：C4 authority resolver 的完整解析结果（manifest/selection
+    /// 由调用方按既有 LC 约束消费）。
+    LogicalCodebase {
+        resolution: crate::product::logical_codebase::RepositoryAuthorityResolution,
+    },
+}
+
+/// C5 Task 2：唯一载体判定入口。先经 C4 `resolve_for_issue`——
+/// `Ok(Some)` → LC 分支透传 resolution；`Ok(None)` → 单仓分支：
+/// `issue.repo_id` 缺失→422（文案指明缺仓库身份）；经 `find_repository`
+/// 取真实 `RepositoryRecord` 后，再走 C4 显式 single-repo authority
+/// 检查（canonical git root 别名冲突、legacy active member 来源冲突均
+/// 在 `resolve_single_repo` 内 fail-closed）；`Err` 沿既有
+/// `repository_routing_*` HTTP 409/4xx 映射透传。只读，不写任何 store。
+pub(crate) fn resolve_automation_carrier(
+    app_paths: &ProductAppPaths,
+    project_id: &str,
+    issue: &crate::product::models::IssueRecord,
+) -> ApiResult<AutomationCarrierResolution> {
+    let resolver = crate::product::logical_codebase::RepositoryAuthorityResolver::new(
+        app_paths.clone(),
+    );
+    match resolver
+        .resolve_for_issue(project_id, &issue.id)
+        .map_err(product_store_api_error)?
+    {
+        Some(resolution) => Ok(AutomationCarrierResolution::LogicalCodebase { resolution }),
+        None => {
+            let repository_id = issue.repo_id.clone().ok_or_else(|| {
+                super::automation_enrollment::invalid_scope(
+                    "automation carrier requires a repository identity: the issue has no repo_id; \
+                     assign the issue to a registered repository first",
+                )
+            })?;
+            // 未登记仓：422 指明缺失仓库身份（不猜、不回退）。
+            let record = match find_repository(app_paths, project_id, &repository_id) {
+                Ok(record) => record,
+                Err(error) => {
+                    return Err(super::automation_enrollment::invalid_scope(format!(
+                        "automation carrier requires a registered repository: repo_id \
+                         {repository_id} has no repository record ({})",
+                        error.message
+                    )))
+                }
+            };
+            // C4 显式 single-repo authority/conflict 检查：同 git 根别名与
+            // legacy active member 来源冲突均在此 fail-closed（409 透传）。
+            resolver
+                .resolve(crate::product::logical_codebase::RepositoryRoutingRequest {
+                    project_id: project_id.to_string(),
+                    issue_id: Some(issue.id.clone()),
+                    kind: crate::product::logical_codebase::RepositoryTargetKind::SingleRepo,
+                    repository_id: Some(repository_id),
+                    logical_codebase_id: None,
+                    logical_repository_id: None,
+                    checkout_id: None,
+                })
+                .map_err(product_store_api_error)?;
+            Ok(AutomationCarrierResolution::SingleRepository {
+                target: crate::product::logical_codebase::EnrollmentTarget::SingleRepository {
+                    repository_id: record.id,
+                },
+            })
+        }
+    }
+}
+
 pub(crate) fn product_execution_workspace_id(project_id: &str, repository_id: &str) -> String {
     format!("product:{project_id}:{repository_id}")
 }

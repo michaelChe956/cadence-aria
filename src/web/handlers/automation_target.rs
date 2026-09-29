@@ -83,45 +83,65 @@ pub async fn get_automation_target(
     validate_request_ids(&project_id, &issue_id)?;
     ensure_issue_exists(&state, &project_id, &issue_id)?;
     let paths = product_app_paths(&state);
-    let routing = RepositoryRouting::load_for_issue(&paths, &project_id, &issue_id)
+    // C5 Task 2：载体判定收敛到唯一 resolver 入口（GET 与 PUT Enable
+    // 同一判定，Review Focus 5）；issue 记录为权威 repo_id 来源。
+    let issue = crate::product::issue_store::IssueStore::new(paths.clone())
+        .get(&project_id, &issue_id)
         .map_err(product_store_api_error)?;
-    let RepositoryRouting::Logical {
-        manifest,
-        selection,
-    } = routing
-    else {
-        return Err(invalid_scope(
-            "automation target requires a logical codebase routing",
-        ));
-    };
-    let candidates = logical_repository_ids_for_preflight(&manifest, &selection);
-    let SingleCandidatePreflightDecision::Eligible { repository_id } =
-        preflight_single_repository_candidate(&candidates)
-    else {
-        return Err(invalid_scope(
-            "automation target requires exactly one logical repository",
-        ));
-    };
+    let carrier = super::support::resolve_automation_carrier(&paths, &project_id, &issue)?;
     let resolved_options =
         resolve_enrollment_options_with_provider_workspace_config(&state, &query)?;
-    // P2 GAP-F（Task 0.2）：唯一 logical target 确认后做静态 gateway reviewer
-    // 预检——与最终 PUT Enable 同源，投影阶段即拒绝确定性不支持的 reviewer。
-    super::automation_gateway_preflight::validate_gateway_reviewer_for_enrollment(
-        &resolved_options.reviewer_provider,
-        true,
-        state.test_provider_enabled,
-    )?;
-    let target_repository = crate::product::logical_codebase::LogicalRepositoryId(
-        uuid::Uuid::parse_str(&repository_id)
-            .map_err(|_| invalid_scope("automation target logical repository id is not a valid uuid"))?,
-    );
-    Ok(Json(AutomationTargetDto {
-        enrollment_target: crate::product::logical_codebase::EnrollmentTarget::LogicalCodebase {
-            logical_codebase_id: manifest.logical_codebase_id.to_string(),
-            logical_repository_id: target_repository,
-        },
-        resolved_options,
-    }))
+    match carrier {
+        super::support::AutomationCarrierResolution::SingleRepository { target } => {
+            // 单仓载体：跳过 gateway 谓词不误拒（Review Focus 5；A10）；
+            // 投影只含单仓形态 enrollment_target + resolved_options。
+            Ok(Json(AutomationTargetDto {
+                enrollment_target: target,
+                resolved_options,
+            }))
+        }
+        super::support::AutomationCarrierResolution::LogicalCodebase { resolution } => {
+            let manifest = resolution.manifest.clone().ok_or_else(|| {
+                invalid_scope(
+                    "automation target requires a logical codebase manifest routing",
+                )
+            })?;
+            let selection = resolution.selection.as_ref().ok_or_else(|| {
+                invalid_scope(
+                    "automation target requires an explicit logical codebase selection",
+                )
+            })?;
+            let candidates = logical_repository_ids_for_preflight(&manifest, selection);
+            let SingleCandidatePreflightDecision::Eligible { repository_id } =
+                preflight_single_repository_candidate(&candidates)
+            else {
+                return Err(invalid_scope(
+                    "automation target requires exactly one logical repository",
+                ));
+            };
+            // P2 GAP-F（Task 0.2）：唯一 logical target 确认后做静态 gateway
+            // reviewer 预检——与最终 PUT Enable 同源，投影阶段即拒绝确定性
+            // 不支持的 reviewer。
+            super::automation_gateway_preflight::validate_gateway_reviewer_for_enrollment(
+                &resolved_options.reviewer_provider,
+                true,
+                state.test_provider_enabled,
+            )?;
+            let target_repository = crate::product::logical_codebase::LogicalRepositoryId(
+                uuid::Uuid::parse_str(&repository_id).map_err(|_| {
+                    invalid_scope("automation target logical repository id is not a valid uuid")
+                })?,
+            );
+            Ok(Json(AutomationTargetDto {
+                enrollment_target:
+                    crate::product::logical_codebase::EnrollmentTarget::LogicalCodebase {
+                        logical_codebase_id: manifest.logical_codebase_id.to_string(),
+                        logical_repository_id: target_repository,
+                    },
+                resolved_options,
+            }))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -325,5 +345,212 @@ mod tests {
         let enable = put_enrollment(&app, enrollment_body(&fixture, 1, 1)).await;
         assert_eq!(enable.status(), StatusCode::OK);
         assert!(enrollment_file_exists(&fixture));
+    }
+}
+
+#[cfg(test)]
+mod single_repository_tests {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    use super::super::automation_enrollment_test_support::{
+        ISSUE_ID, PROJECT_ID, REPOSITORY_ID, enrollment_file_exists, put_enrollment,
+        response_json, seed_fixture, seed_single_repository_fixture,
+        single_repository_enable_body,
+    };
+
+    async fn get_automation_target(
+        app: &axum::Router,
+        query: &str,
+    ) -> axum::http::Response<Body> {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/projects/{PROJECT_ID}/issues/{ISSUE_ID}/automation-target{query}"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    /// C5 Task 2：单仓 issue 的 GET 投影返回真实物理仓 target
+    ///（REQ-ROUTE-C5-TARGET），DTO 不含任何 logical 身份字段。
+    #[tokio::test]
+    async fn single_repository_target_projection_returns_real_repository_identity() {
+        let fixture = seed_single_repository_fixture();
+        let app = fixture.router();
+        let response =
+            get_automation_target(&app, "?author_provider=fake&reviewer_provider=fake").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["enrollment_target"]["kind"], "single_repository");
+        assert_eq!(body["enrollment_target"]["repository_id"], REPOSITORY_ID);
+        assert!(body.get("logical_repository_id").is_none());
+        assert!(
+            body["enrollment_target"]
+                .get("logical_repository_id")
+                .is_none()
+                && body["enrollment_target"]
+                    .get("logical_codebase_id")
+                    .is_none(),
+            "single repository target must not grow a logical stand-in: {body}"
+        );
+        assert_eq!(body["resolved_options"]["author_provider"], "fake");
+        assert_eq!(body["resolved_options"]["reviewer_provider"], "fake");
+    }
+
+    /// C5 Task 2：单仓 Enable 可授权——enrollment target 为该物理仓身份、
+    /// 无任何 logical repository 身份、binding v1 建立、幂等。
+    #[tokio::test]
+    async fn single_repository_enable_authorizes_physical_target() {
+        let fixture = seed_single_repository_fixture();
+        let app = fixture.router();
+        let response = put_enrollment(&app, single_repository_enable_body(&fixture)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload = response_json(response).await;
+        assert_eq!(payload["enabled"], true);
+        assert_eq!(payload["target"]["kind"], "single_repository");
+        assert_eq!(payload["target"]["repository_id"], REPOSITORY_ID);
+        assert!(payload.get("logical_repository_id").is_none());
+        assert_eq!(
+            payload["binding_history"]["current"]["binding_version"],
+            1
+        );
+
+        // 同键同 payload 幂等：返回同一 enrollment。
+        let again = put_enrollment(&app, single_repository_enable_body(&fixture)).await;
+        assert_eq!(again.status(), StatusCode::OK);
+        let replay = response_json(again).await;
+        assert_eq!(replay["enrollment_id"], payload["enrollment_id"]);
+    }
+
+    /// C5 Task 2：错仓／跨载体被拒（REQ-WIGA-01）——repository_id 不一致、
+    /// 单仓 issue 提交 LogicalCodebase target、LC issue 提交单仓 target
+    /// 均 422，零 enrollment 写入。
+    #[tokio::test]
+    async fn single_repository_enable_rejects_wrong_or_cross_carrier_target() {
+        let fixture = seed_single_repository_fixture();
+        let app = fixture.router();
+
+        // 错仓：repository_id 指向另一物理仓。
+        let mut wrong_repo = single_repository_enable_body(&fixture);
+        wrong_repo["command"]["target"]["repository_id"] = serde_json::json!("repo-other");
+        let response = put_enrollment(&app, wrong_repo).await;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let payload = response_json(response).await;
+        assert_eq!(payload["code"], "automation_enrollment_invalid_scope");
+
+        // 跨载体：单仓 issue 提交 LogicalCodebase target。
+        let mut cross = single_repository_enable_body(&fixture);
+        cross["command"]["target"] = serde_json::json!({
+            "kind": "logical_codebase",
+            "logical_codebase_id": "00000000-0000-0000-0000-0000000000c5",
+            "logical_repository_id": "00000000-0000-0000-0000-000000000001",
+        });
+        let response = put_enrollment(&app, cross).await;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        // LC issue 提交单仓 target（反向跨载体）。
+        let lc_fixture = seed_fixture(1, true);
+        let lc_app = lc_fixture.router();
+        let response = put_enrollment(&lc_app, single_repository_enable_body(&lc_fixture)).await;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            response_json(response).await["code"],
+            "automation_enrollment_invalid_scope"
+        );
+
+        assert!(!enrollment_file_exists(&fixture));
+        assert!(!enrollment_file_exists(&lc_fixture));
+    }
+
+    /// C5 Task 2（Review Focus 2）：单仓物理仓与另一登记记录解析到同一
+    /// git 根 → 409 `repository_routing_source_identity_mismatch`，
+    /// 不选择任一记录继续。
+    #[tokio::test]
+    async fn single_repository_authority_conflict_fails_closed_with_409() {
+        let fixture = seed_single_repository_fixture();
+        // 追加别名记录：与 repo-1 指向同一物理 git 根。
+        let repos_path = fixture.paths.project_root(PROJECT_ID).join("repos.json");
+        let mut repositories: Vec<crate::product::models::RepositoryRecord> =
+            crate::product::json_store::read_json(&repos_path).unwrap();
+        let alias = repositories[0].clone();
+        repositories.push(crate::product::models::RepositoryRecord {
+            id: "repo-1-alias".to_string(),
+            name: "repo-1-alias".to_string(),
+            ..alias
+        });
+        crate::product::json_store::write_json(&repos_path, &repositories).unwrap();
+
+        let app = fixture.router();
+        let response = get_automation_target(&app, "?author_provider=fake").await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let payload = response_json(response).await;
+        assert_eq!(
+            payload["code"], "repository_routing_source_identity_mismatch",
+            "authority conflict must surface the routing conflict code: {payload}"
+        );
+
+        let response = put_enrollment(&app, single_repository_enable_body(&fixture)).await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert!(!enrollment_file_exists(&fixture));
+    }
+
+    /// C5 Task 2：缺仓与仓未登记——issue 无 repo_id 或指向不存在记录
+    /// → 422 指明缺失仓库身份，不写 enrollment。
+    #[tokio::test]
+    async fn single_repository_target_requires_registered_repo_id() {
+        // issue.repo_id 指向未登记仓。
+        let fixture = seed_single_repository_fixture();
+        let issue_path = fixture
+            .paths
+            .issue_root(PROJECT_ID, ISSUE_ID)
+            .join("issue.json");
+        let mut issue: serde_json::Value =
+            crate::product::json_store::read_json(&issue_path).unwrap();
+        issue["repo_id"] = serde_json::json!("repo-unregistered");
+        crate::product::json_store::write_json(&issue_path, &issue).unwrap();
+        let app = fixture.router();
+        let response = get_automation_target(&app, "?author_provider=fake").await;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let payload = response_json(response).await;
+        assert!(
+            payload["message"]
+                .as_str()
+                .unwrap()
+                .to_lowercase()
+                .contains("repositor"),
+            "should point at the missing repository identity: {payload}"
+        );
+        let response = put_enrollment(&app, single_repository_enable_body(&fixture)).await;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(!enrollment_file_exists(&fixture));
+
+        // issue.repo_id 缺失（null）。
+        let fixture = seed_single_repository_fixture();
+        let issue_path = fixture
+            .paths
+            .issue_root(PROJECT_ID, ISSUE_ID)
+            .join("issue.json");
+        let mut issue: serde_json::Value =
+            crate::product::json_store::read_json(&issue_path).unwrap();
+        issue["repo_id"] = serde_json::Value::Null;
+        crate::product::json_store::write_json(&issue_path, &issue).unwrap();
+        let app = fixture.router();
+        let response = get_automation_target(&app, "?author_provider=fake").await;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            response_json(response).await["message"]
+                .as_str()
+                .unwrap()
+                .to_lowercase()
+                .contains("repositor"),
+            "should point at the missing repository identity"
+        );
+        assert!(!enrollment_file_exists(&fixture));
     }
 }

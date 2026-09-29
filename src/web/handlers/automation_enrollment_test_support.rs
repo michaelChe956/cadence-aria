@@ -168,6 +168,55 @@ pub(crate) fn seed_fixture(member_count: usize, confirm_design: bool) -> Fixture
     }
 }
 
+/// C5 Task 2：单仓 fixture——project + issue（repo_id 指向已登记真实 git
+/// 物理仓）+ 已确认 story/design，无 LC manifest/selection/members。
+pub(crate) fn seed_single_repository_fixture() -> Fixture {
+    let fixture = seed_fixture(0, true);
+    let repo_root = fixture._root.path().join("repo-1");
+    std::fs::create_dir_all(&repo_root).unwrap();
+    let status = std::process::Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap();
+    assert!(status.success(), "fixture repository must be a real git repo");
+    let now = "2026-09-30T00:00:00Z".to_string();
+    let repositories = vec![RepositoryRecord {
+        id: REPOSITORY_ID.to_string(),
+        project_id: PROJECT_ID.to_string(),
+        name: "repo-1".to_string(),
+        path: repo_root,
+        repo_hash: "sha256:fixture-single-repository".to_string(),
+        runtime_root: fixture
+            ._root
+            .path()
+            .join("repo-1/.aria/runtime"),
+        default_policy_preset: "manual-write".to_string(),
+        default_provider_mode: "fake".to_string(),
+        created_at: now.clone(),
+        logical_repository_id: None,
+        primary_checkout_id: None,
+        identity_schema_version: 1,
+        updated_at: now,
+    }];
+    crate::product::json_store::write_json(
+        &fixture.paths.project_root(PROJECT_ID).join("repos.json"),
+        &repositories,
+    )
+    .unwrap();
+    fixture
+}
+
+/// C5 Task 2：单仓 Enable body——target 为服务端单仓投影原样回传形态。
+pub(crate) fn single_repository_enable_body(fixture: &Fixture) -> serde_json::Value {
+    let mut body = enrollment_body(fixture, 1, 1);
+    body["command"]["target"] = serde_json::json!({
+        "kind": "single_repository",
+        "repository_id": REPOSITORY_ID,
+    });
+    body
+}
+
 fn seed_logical_codebase(paths: &ProductAppPaths, members: &[(LogicalRepositoryId, &str)]) {
     // planning resolver 读取 manifest 的 provider_context_root 时要求目录存在。
     std::fs::create_dir_all(paths.root().join("aggregate-root")).unwrap();

@@ -332,44 +332,66 @@ fn validate_enrollment_scope(
     let lifecycle = LifecycleStore::new(paths.clone());
     validate_confirmed_source_refs(&lifecycle, project_id, issue_id, source)?;
 
-    // 自动授权仅恰一 logical repository/单 attempt（REQ-WIGA-01/02、REQ-MTG-03）。
-    // C5 Task 1：Enable 必带 target；此处仍只放行 LC 载体（单仓入口由
-    // Task 2 的 resolver 接入）。
-    let routing = RepositoryRouting::load_for_issue(&paths, project_id, issue_id)
+    // C5 Task 2：载体判定与 GET 投影共用唯一 resolver 入口（Review
+    // Focus 5）；issue 记录为权威 repo_id 来源。
+    let issue = IssueStore::new(paths.clone())
+        .get(project_id, issue_id)
         .map_err(product_store_api_error)?;
-    let RepositoryRouting::Logical {
-        manifest,
-        selection,
-    } = routing
-    else {
-        return Err(invalid_scope(
-            "automation enrollment requires exactly one logical repository; issue has no logical codebase routing",
-        ));
-    };
-    let candidate_ids = logical_repository_ids_for_preflight(&manifest, &selection);
-    match preflight_single_repository_candidate(&candidate_ids) {
-        SingleCandidatePreflightDecision::Eligible { repository_id }
-            if matches!(
-                target,
-                crate::product::logical_codebase::EnrollmentTarget::LogicalCodebase {
-                    logical_repository_id: target_repository,
-                    ..
-                } if target_repository.0.to_string() == repository_id
-            ) =>
-        {
-            // C1 Task 1：显式声明的 target 必须与授权域同载体同身份
-            //（logical 双级齐全且指向同一 logical repository；不猜、不降级）。
-            // P2 GAP-F（Task 0.2）：唯一 logical target 确认后做静态 gateway
-            // reviewer 预检——与 GET automation-target 投影同源，Enable 前拒绝。
-            super::automation_gateway_preflight::validate_gateway_reviewer_for_enrollment(
-                &options.reviewer_provider,
-                true,
-                state.test_provider_enabled,
-            )
+    match super::support::resolve_automation_carrier(&paths, project_id, &issue)? {
+        super::support::AutomationCarrierResolution::SingleRepository {
+            target: authoritative,
+        } => {
+            // 单仓载体：提交 target 必须与权威解析逐字节相等（错仓/跨载体
+            // 422 重选提示，不猜、不降级）；单仓跳过 gateway reviewer 谓词
+            //（Review Focus 5，A10 单仓不误拒）。
+            if *target != authoritative {
+                return Err(invalid_scope(
+                    "automation enrollment target must match the issue's single physical \
+                     repository; re-select the automation target and retry",
+                ));
+            }
+            Ok(())
         }
-        _ => Err(invalid_scope(
-            "automation enrollment target must match the issue's single logical repository",
-        )),
+        super::support::AutomationCarrierResolution::LogicalCodebase { resolution } => {
+            // 自动授权仅恰一 logical repository/单 attempt（REQ-WIGA-01/02、
+            // REQ-MTG-03）；LC 分支保持既有单 target 约束。
+            let manifest = resolution.manifest.ok_or_else(|| {
+                invalid_scope(
+                    "automation enrollment requires a logical codebase manifest routing",
+                )
+            })?;
+            let selection = resolution.selection.as_ref().ok_or_else(|| {
+                invalid_scope(
+                    "automation enrollment requires an explicit logical codebase selection",
+                )
+            })?;
+            let candidate_ids = logical_repository_ids_for_preflight(&manifest, selection);
+            match preflight_single_repository_candidate(&candidate_ids) {
+                SingleCandidatePreflightDecision::Eligible { repository_id }
+                    if matches!(
+                        target,
+                        crate::product::logical_codebase::EnrollmentTarget::LogicalCodebase {
+                            logical_repository_id: target_repository,
+                            ..
+                        } if target_repository.0.to_string() == repository_id
+                    ) =>
+                {
+                    // C1 Task 1：显式声明的 target 必须与授权域同载体同身份
+                    //（logical 双级齐全且指向同一 logical repository）。
+                    // P2 GAP-F（Task 0.2）：唯一 logical target 确认后做静态
+                    // gateway reviewer 预检——与 GET automation-target 投影
+                    // 同源，Enable 前拒绝。
+                    super::automation_gateway_preflight::validate_gateway_reviewer_for_enrollment(
+                        &options.reviewer_provider,
+                        true,
+                        state.test_provider_enabled,
+                    )
+                }
+                _ => Err(invalid_scope(
+                    "automation enrollment target must match the issue's single logical repository",
+                )),
+            }
+        }
     }
 }
 
