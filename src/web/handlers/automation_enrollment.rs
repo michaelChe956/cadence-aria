@@ -183,13 +183,18 @@ pub async fn post_automation_enrollment_rebind(
     //（AutoIfValid 不代表授权，REQ-WIGA-02 同一口径；换代是用户显式提交，
     // 不按 created_at 排除旧 plan——排除的只是隐式认领）。
     validate_rebind_binding_target(&lifecycle, &project_id, &issue_id, &request.binding)?;
-
-    // 换代换 provider 同样过静态 gateway reviewer 预检。
-    super::automation_gateway_preflight::validate_gateway_reviewer_for_enrollment(
-        &request.binding.reviewer_provider,
-        true,
-        state.test_provider_enabled,
-    )?;
+    // 换代换 provider 同样过完整角色链静态预检（C5 Task 3）。rebind 手上
+    // 只有 enrollment 声明的 target——carrier 取声明值，不重解析 issue
+    // 权威载体；旧代 enrollment（无 target）由 store rebind 语义兜底拒绝。
+    if let Some(declared) = enrollment.target.as_ref() {
+        super::automation_gateway_preflight::validate_role_chain_for_declared_enrollment_target(
+            &request.binding.author_provider,
+            &request.binding.reviewer_provider,
+            declared,
+            true,
+            state.test_provider_enabled,
+        )?;
+    }
 
     let result = store
         .rebind(&project_id, &issue_id, request)
@@ -337,14 +342,15 @@ fn validate_enrollment_scope(
     let issue = IssueStore::new(paths.clone())
         .get(project_id, issue_id)
         .map_err(product_store_api_error)?;
-    match super::support::resolve_automation_carrier(&paths, project_id, &issue)? {
+    let carrier = super::support::resolve_automation_carrier(&paths, project_id, &issue)?;
+    match &carrier {
         super::support::AutomationCarrierResolution::SingleRepository {
             target: authoritative,
         } => {
             // 单仓载体：提交 target 必须与权威解析逐字节相等（错仓/跨载体
-            // 422 重选提示，不猜、不降级）；单仓跳过 gateway reviewer 谓词
+            // 422 重选提示，不猜、不降级）；单仓跳过 gateway 谓词
             //（Review Focus 5，A10 单仓不误拒）。
-            if *target != authoritative {
+            if *target != *authoritative {
                 return Err(invalid_scope(
                     "automation enrollment target must match the issue's single physical \
                      repository; re-select the automation target and retry",
@@ -355,7 +361,7 @@ fn validate_enrollment_scope(
         super::support::AutomationCarrierResolution::LogicalCodebase { resolution } => {
             // 自动授权仅恰一 logical repository/单 attempt（REQ-WIGA-01/02、
             // REQ-MTG-03）；LC 分支保持既有单 target 约束。
-            let manifest = resolution.manifest.ok_or_else(|| {
+            let manifest = resolution.manifest.clone().ok_or_else(|| {
                 invalid_scope(
                     "automation enrollment requires a logical codebase manifest routing",
                 )
@@ -378,11 +384,13 @@ fn validate_enrollment_scope(
                 {
                     // C1 Task 1：显式声明的 target 必须与授权域同载体同身份
                     //（logical 双级齐全且指向同一 logical repository）。
-                    // P2 GAP-F（Task 0.2）：唯一 logical target 确认后做静态
-                    // gateway reviewer 预检——与 GET automation-target 投影
-                    // 同源，Enable 前拒绝。
-                    super::automation_gateway_preflight::validate_gateway_reviewer_for_enrollment(
+                    // C5 Task 3：唯一 logical target 确认后做完整角色链静态
+                    // 预检——与 GET automation-target 投影同一 carrier、同一
+                    // 判定，Enable 前拒绝，一次列全全部违规角色。
+                    super::automation_gateway_preflight::validate_role_chain_for_enrollment(
+                        &options.author_provider,
                         &options.reviewer_provider,
+                        &carrier,
                         true,
                         state.test_provider_enabled,
                     )

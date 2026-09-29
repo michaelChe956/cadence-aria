@@ -91,12 +91,12 @@ pub async fn get_automation_target(
     let carrier = super::support::resolve_automation_carrier(&paths, &project_id, &issue)?;
     let resolved_options =
         resolve_enrollment_options_with_provider_workspace_config(&state, &query)?;
-    match carrier {
+    match &carrier {
         super::support::AutomationCarrierResolution::SingleRepository { target } => {
             // 单仓载体：跳过 gateway 谓词不误拒（Review Focus 5；A10）；
             // 投影只含单仓形态 enrollment_target + resolved_options。
             Ok(Json(AutomationTargetDto {
-                enrollment_target: target,
+                enrollment_target: target.clone(),
                 resolved_options,
             }))
         }
@@ -119,11 +119,14 @@ pub async fn get_automation_target(
                     "automation target requires exactly one logical repository",
                 ));
             };
-            // P2 GAP-F（Task 0.2）：唯一 logical target 确认后做静态 gateway
-            // reviewer 预检——与最终 PUT Enable 同源，投影阶段即拒绝确定性
-            // 不支持的 reviewer。
-            super::automation_gateway_preflight::validate_gateway_reviewer_for_enrollment(
+            // C5 Task 3：唯一 logical target 确认后做完整角色链静态预检
+            //（author→coder→reviewer 逐角色）——与最终 PUT Enable 同一
+            // carrier、同一判定，投影阶段即拒绝确定性不支持的组合，
+            // 一次列全全部违规角色。
+            super::automation_gateway_preflight::validate_role_chain_for_enrollment(
+                &resolved_options.author_provider,
                 &resolved_options.reviewer_provider,
+                &carrier,
                 true,
                 state.test_provider_enabled,
             )?;
@@ -215,12 +218,20 @@ mod tests {
     #[tokio::test]
     async fn automation_target_resolves_server_defaults_when_query_omits_them() {
         let fixture = seed_fixture(1, true);
-        let response = get_automation_target(&fixture.router(), "").await;
+        // C5 Task 3：缺省 author=codex 在 LC 载体下按角色链语义被静态拒
+        //（plan_author/coder 违规）——显式 fake author 保持缺省解析断言。
+        let refused = get_automation_target(&fixture.router(), "").await;
+        assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let payload = response_json(refused).await;
+        assert_eq!(payload["code"], "automation_role_chain_unsupported");
+
+        let response = get_automation_target(&fixture.router(), "?author_provider=fake").await;
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await;
-        // fake runtime availability 恒真：缺省与 prepare 同源（codex/claude_code、
-        // review_rounds=1、superpowers/openspec 默认开、plan 缺省同 prepare）。
-        assert_eq!(body["resolved_options"]["author_provider"], "codex");
+        // fake runtime availability 恒真：缺省与 prepare 同源（reviewer=
+        // claude_code、review_rounds=1、superpowers/openspec 默认开、
+        // plan 缺省同 prepare）。
+        assert_eq!(body["resolved_options"]["author_provider"], "fake");
         assert_eq!(body["resolved_options"]["reviewer_provider"], "claude_code");
         assert_eq!(body["resolved_options"]["review_rounds"], 1);
         assert_eq!(body["resolved_options"]["superpowers_enabled"], true);
@@ -282,7 +293,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(
             response_json(response).await["code"],
-            "automation_gateway_reviewer_unsupported"
+            "automation_role_chain_unsupported"
         );
         assert!(!enrollment_file_exists(&fixture));
 
@@ -292,7 +303,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(
             response_json(response).await["code"],
-            "automation_gateway_reviewer_unsupported"
+            "automation_role_chain_unsupported"
         );
         assert!(!enrollment_file_exists(&fixture));
     }
@@ -312,22 +323,21 @@ mod tests {
         let response = get_automation_target(&app, "?reviewer_provider=codex").await;
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         let payload = response_json(response).await;
-        assert_eq!(payload["code"], "automation_gateway_reviewer_unsupported");
+        assert_eq!(payload["code"], "automation_role_chain_unsupported");
+        let violations = payload["details"]["violations"].as_array().cloned().unwrap_or_default();
         assert!(
-            payload["message"]
-                .as_str()
-                .unwrap()
-                .contains("codex_danger_full_access_unsupported"),
-            "message should carry the stable gateway verdict code, got: {payload}"
+            violations
+                .iter()
+                .any(|violation| violation["reason_code"] == "codex_danger_full_access_unsupported"),
+            "violations should carry the stable gateway verdict code, got: {payload}"
         );
 
         let mut enable = enrollment_body(&fixture, 1, 1);
         enable["command"]["options"]["reviewer_provider"] = serde_json::json!("codex");
         let response = put_enrollment(&app, enable).await;
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(
             response_json(response).await["code"],
-            "automation_gateway_reviewer_unsupported"
+            "automation_role_chain_unsupported"
         );
         assert!(!enrollment_file_exists(&fixture));
     }
@@ -338,13 +348,72 @@ mod tests {
     async fn automation_target_allows_fake_reviewer_in_fake_runtime() {
         let fixture = seed_fixture(1, true);
         let app = fixture.router();
-        let response = get_automation_target(&app, "?reviewer_provider=fake").await;
+        // C5 Task 3：显式 fake author 避开缺省 codex 的路由禁令；测试运行
+        // test_provider_enabled 下 Fake 全链豁免，仍建立原同键 enrollment。
+        let response = get_automation_target(
+            &app,
+            "?author_provider=fake&reviewer_provider=fake",
+        )
+        .await;
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response_json(response).await["resolved_options"]["reviewer_provider"], "fake");
 
         let enable = put_enrollment(&app, enrollment_body(&fixture, 1, 1)).await;
         assert_eq!(enable.status(), StatusCode::OK);
         assert!(enrollment_file_exists(&fixture));
+    }
+
+    /// C5 Task 3（REQ-WIGA-C5-PREFLIGHT、Review Focus 5）：LC 载体下
+    /// author=Pi 使 coder 派生无 gateway 启动能力——GET 投影与 PUT Enable
+    /// 同一判定 422，payload 逐角色列出违规（含 coder 角色），零写入。
+    #[tokio::test]
+    async fn automation_target_rejects_lc_pi_coder_with_role_chain_before_enable() {
+        let fixture = seed_fixture(1, true);
+        let root = fixture._root.path().to_path_buf();
+        let state = WebAppState::with_provider_availability(
+            root.clone(),
+            WebRuntime::new_fake(root),
+            |_| true,
+        );
+        let app = build_web_router(state);
+        let response = get_automation_target(
+            &app,
+            "?author_provider=pi&reviewer_provider=claude_code",
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let payload = response_json(response).await;
+        assert_eq!(payload["code"], "automation_role_chain_unsupported");
+        let violations = payload["details"]["violations"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let roles: Vec<&str> = violations
+            .iter()
+            .map(|violation| violation["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(roles, vec!["plan_author", "coder"], "{payload}");
+        assert!(!enrollment_file_exists(&fixture));
+
+        // 同一输入走 PUT Enable：判定逐字节一致（同一函数调用）。
+        let mut enable = enrollment_body(&fixture, 1, 1);
+        enable["command"]["options"]["author_provider"] = serde_json::json!("pi");
+        let response = put_enrollment(&app, enable).await;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let payload = response_json(response).await;
+        assert_eq!(payload["code"], "automation_role_chain_unsupported");
+        let violations: Vec<serde_json::Value> = payload["details"]["violations"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let roles: Vec<String> = violations
+            .iter()
+            .map(|violation| {
+                violation["role"].as_str().unwrap_or_default().to_string()
+            })
+            .collect();
+        assert_eq!(roles, vec!["plan_author", "coder"], "{payload}");
+        assert!(!enrollment_file_exists(&fixture));
     }
 }
 
@@ -359,6 +428,9 @@ mod single_repository_tests {
         response_json, seed_fixture, seed_single_repository_fixture,
         single_repository_enable_body,
     };
+    use crate::web::app::build_web_router;
+    use crate::web::runtime::WebRuntime;
+    use crate::web::state::WebAppState;
 
     async fn get_automation_target(
         app: &axum::Router,
@@ -552,5 +624,39 @@ mod single_repository_tests {
             "should point at the missing repository identity"
         );
         assert!(!enrollment_file_exists(&fixture));
+    }
+
+    /// C5 Task 3（Review Focus 5／A10 单仓不误拒）：单仓 issue 的
+    /// author/coder/reviewer 派生为 LC gateway 不支持但本机可用的 provider
+    ///（Pi/KimiCode）→ 投影与 Enable 成功、enrollment 写入。
+    #[tokio::test]
+    async fn single_repository_allows_locally_available_gateway_unsupported_providers() {
+        let fixture = seed_single_repository_fixture();
+        let root = fixture._root.path().to_path_buf();
+        let state = WebAppState::with_provider_availability(
+            root.clone(),
+            WebRuntime::new_fake(root),
+            |_| true,
+        );
+        let app = build_web_router(state);
+        let response = get_automation_target(
+            &app,
+            "?author_provider=pi&reviewer_provider=kimi_code",
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload = response_json(response).await;
+        assert_eq!(payload["resolved_options"]["author_provider"], "pi");
+        assert_eq!(payload["resolved_options"]["reviewer_provider"], "kimi_code");
+
+        let mut enable = single_repository_enable_body(&fixture);
+        enable["command"]["options"]["author_provider"] = serde_json::json!("pi");
+        enable["command"]["options"]["reviewer_provider"] =
+            serde_json::json!("kimi_code");
+        let response = put_enrollment(&app, enable).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(enrollment_file_exists(&fixture));
+        let payload = response_json(response).await;
+        assert_eq!(payload["target"]["kind"], "single_repository");
     }
 }
