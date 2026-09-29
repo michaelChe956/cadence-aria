@@ -343,6 +343,31 @@ pub async fn restart_coding_attempt(
         }
     };
 
+    // G5（终局关闸缺口）：重开后把 WI 级工作树锁复位到该 attempt 名下
+    //（复用租约三态判定；自持/已释放/瞬态残留重绑，活跃他人、死亡他人、
+    // 未知证据停等）。失败 fail-visible 不 spawn——attempt 停在 Running，
+    // 由 attach 侧再启动转 AwaitingManualRecovery 后经 RecoverCoding 收口。
+    let (restart_event_tx, _restart_event_rx) = tokio::sync::mpsc::channel(64);
+    let restart_engine = crate::product::coding_workspace_engine::CodingWorkspaceEngine::new(
+        coding_store.clone(),
+        crate::product::git_workspace_service::GitWorkspaceService::new(),
+        restart_event_tx,
+    );
+    if let Err(lock_error) = restart_engine
+        .ensure_issue_worktree_lock_for_resumed_attempt(&restarted)
+    {
+        let result = needs_human(format!("coding_restart_worktree_lock: {lock_error}"));
+        let _ = coding_store
+            .append_attempt_command_result(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &record(OperationState::NeedsHuman),
+            )
+            .map_err(coding_restart_store_error)?;
+        return Ok(result);
+    }
+
     // spawn 新 runner（观察通道缺失不阻塞业务事实——C2 Task 1 语义）。
     let (event_tx, event_rx) = tokio::sync::mpsc::channel(64);
     drop(event_rx);

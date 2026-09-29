@@ -571,8 +571,10 @@ mod runtime_handoff_impact;
 mod sc_group_admission_isolation;
 #[path = "tests/sc_group_dependency_gate.rs"]
 mod sc_group_dependency_gate;
-mod schema_v2_runtime;
+#[path = "tests/resume_worktree_lock.rs"]
+mod resume_worktree_lock;
 
+mod schema_v2_runtime;
 
 #[tokio::test]
 async fn start_attempt_enters_running_through_admission_ticket() {

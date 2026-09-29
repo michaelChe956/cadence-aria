@@ -466,6 +466,31 @@ async fn handle_coding_socket(
                         &current_attempt.id,
                     ) {
                         Ok(updated) => {
+                            // G5（终局关闸缺口）：重开后把 WI 级工作树锁复位到该
+                            // attempt 名下（复用租约三态判定；锁已释放/自持死亡
+                            // 残留重绑，活跃他人/死亡他人/未知证据停等）。失败
+                            // fail-visible 不 spawn——attach 侧再启动会死于编码段
+                            // 校验转 AwaitingManualRecovery，由 RecoverCoding 面
+                            // 收口，不弱化 restart 语义。
+                            let restart_engine = CodingWorkspaceEngine::new(
+                                coding_store.clone(),
+                                GitWorkspaceService::new(),
+                                event_tx.clone(),
+                            );
+                            if let Err(lock_error) = restart_engine
+                                .ensure_issue_worktree_lock_for_resumed_attempt(&updated)
+                            {
+                                drop(mutation_lease);
+                                let _ = send_coding_json(
+                                    &mut socket_tx,
+                                    &CodingWsOutMessage::CodingProtocolError {
+                                        code: "coding_restart_failed".to_string(),
+                                        message: lock_error.to_string(),
+                                    },
+                                )
+                                .await;
+                                continue;
+                            }
                             let Some(command_tx) = spawn_coding_runner(
                                 state.clone(),
                                 coding_store.clone(),
@@ -514,6 +539,30 @@ async fn handle_coding_socket(
                     // 同款 spawn 路径重启 runner。失败 fail-visible
                     // （coding_recover_failed），不吞错误；状态门保证该分支只
                     // 在 AwaitingManualRecovery 下可达。
+                    // G5（终局关闸缺口）：恢复前先把 WI 级工作树锁复位到该
+                    // attempt 名下——确认接管清锁/恢复 spawn 失败遗留的残锁
+                    // 先按租约三态判别复位（自持/已释放/瞬态残留重绑；活跃
+                    // 他人、死亡他人、未知证据停等，绝不抢占）。失败时 attempt
+                    // 保持在 AwaitingManualRecovery，fail-visible 可重试。
+                    let recovery_engine = CodingWorkspaceEngine::new(
+                        coding_store.clone(),
+                        GitWorkspaceService::new(),
+                        event_tx.clone(),
+                    );
+                    if let Err(lock_error) = recovery_engine
+                        .ensure_issue_worktree_lock_for_resumed_attempt(&current_attempt)
+                    {
+                        drop(mutation_lease);
+                        let _ = send_coding_json(
+                            &mut socket_tx,
+                            &CodingWsOutMessage::CodingProtocolError {
+                                code: "coding_recover_failed".to_string(),
+                                message: lock_error.to_string(),
+                            },
+                        )
+                        .await;
+                        continue;
+                    }
                     let recovered = coding_store.recover_attempt_from_manual_recovery(
                         &current_attempt.project_id,
                         &current_attempt.issue_id,
