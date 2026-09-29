@@ -14,6 +14,18 @@ use super::*;
             let gate = EnrolledGateFixture::new().await;
             init_real_main_checkout(&gate.inner.paths.root().join("checkout-enroll-a"));
             normalize_checkout_revision_to_unobserved(&gate.inner.paths);
+            Self::with_gate(gate).await
+        }
+
+        /// C5 Task 8（A02）：单仓 campaign fixture——issue.repo_id 指向真实
+        /// git 物理仓（main checkout 由 `new_single_repository` 就位），
+        /// enrollment target 为 SingleRepository；其余与 LC campaign 同构。
+        pub(crate) async fn new_single_repository() -> Self {
+            let gate = EnrolledGateFixture::new_single_repository().await;
+            Self::with_gate(gate).await
+        }
+
+        async fn with_gate(gate: EnrolledGateFixture) -> Self {
             // 未授权手工对照 issue（同 project；编排器对其零动作）。
             let manual = crate::product::issue_store::IssueStore::new(gate.inner.paths.clone())
                 .create(crate::product::issue_store::CreateProductIssueInput {
@@ -101,6 +113,19 @@ use super::*;
             .count()
         }
 
+        /// 未授权手工 issue 名下的自动前缀 plan 数（对照恒 0——补偿扫描
+        /// 不为 manual/off issue 铺设计）。
+        pub(crate) fn manual_issue_auto_plans(&self) -> usize {
+            crate::product::lifecycle_store::LifecycleStore::new(
+                self.gate.inner.paths.clone(),
+            )
+            .list_issue_work_item_plans(PROJECT_ID, &self.manual_issue_id)
+            .expect("manual issue plans")
+            .into_iter()
+            .filter(|plan| plan.id.starts_with("issue_work_item_plan_auto_"))
+            .count()
+        }
+
         pub(crate) fn attempt(&self) -> crate::product::coding_models::CodingExecutionAttempt {
             self.gate.attempt()
         }
@@ -110,6 +135,12 @@ use super::*;
     /// enrollment（真实 main checkout + 干净单次 approve，无 failpoint）。
     pub(crate) async fn p2_enrolled_campaign_fixture() -> P2CampaignFixture {
         P2CampaignFixture::new().await
+    }
+
+    /// C5 Task 8（A02）共享 fixture：单仓 Confirmed enrollment 的无页面
+    /// campaign 起点（真实 main checkout + 干净单次 approve，无 failpoint）。
+    pub(crate) async fn c5_single_repository_campaign_fixture() -> P2CampaignFixture {
+        P2CampaignFixture::new_single_repository().await
     }
 
     /// 在 physical checkout 上初始化真实 main 分支 git 仓库（空提交即可满足

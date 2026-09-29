@@ -43,6 +43,7 @@
 
 mod p2_campaign;
 pub(crate) use p2_campaign::p2_enrolled_campaign_fixture;
+pub(crate) use p2_campaign::c5_single_repository_campaign_fixture;
 use p2_campaign::{init_real_main_checkout, normalize_checkout_revision_to_unobserved};
 
     pub(crate) struct EnrolledGateFixture {

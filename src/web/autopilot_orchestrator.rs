@@ -1166,3 +1166,77 @@ mod p2_campaign {
     }
 }
 
+// ---------------------------------------------------------------------------
+// C5 Task 8（tasks.md 5.1）：A01/A02 端到端联验。A02 主链＝单仓自动全链
+// （人确认 design 后 Enable → 编排器 reconcile 补偿 prepare（Legacy 分支）
+// → 生成 → 人工门批准 → enrolled advance（Task 4 双分支）→ typed 首启
+// （Task 5 互证）→ coding → `WaitingForHuman ∧ FinalConfirm` 停等）；
+// A01 手动对照＝未 Enable 单仓 issue 补偿扫描零动作。A05 恢复闭环由
+// `repository_initialization_resume_http_roundtrip_recovers_after_gateway_outage`
+// （tests/it_web）承载；A10 由 Task 3 实名（kimi_code_and_pi_are_statically_
+// rejected 等）与 p2_campaign 503 实名复验承载。
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod c5_acceptance {
+    use super::*;
+    use crate::product::coding_models::{CodingAttemptStatus, CodingExecutionStage};
+    use crate::web::wiga_gate_fixture::*;
+
+    #[tokio::test]
+    async fn c5_acceptance_single_repository_chain_reaches_final_confirm() {
+        let mut fixture = c5_single_repository_campaign_fixture().await;
+
+        // A01：未 Enable 的单仓 manual issue——补偿扫描零动作（无自动
+        // plan、无首启 claim；reconcile 对其返回 NoEnrollment）。
+        assert_eq!(fixture.manual_issue_auto_plans(), 0);
+        assert_eq!(fixture.manual_issue_runner_start_claims(), 0);
+
+        // A02 主链：人工门批准（模拟驾驶舱 Approve）后，仅靠无页面
+        // reconcile 推进到 FinalConfirm 停等（coding socket 关闭态驱动）。
+        fixture.confirm_plan_by_human().await;
+        fixture.reconcile_until_coding_waiting_for_human().await;
+        let attempt = fixture.attempt();
+        assert_eq!(attempt.stage, CodingExecutionStage::FinalConfirm);
+        assert_eq!(attempt.status, CodingAttemptStatus::WaitingForHuman);
+        // 全程 provider 首启恰一次（durable 单发 claim 不可复位）。
+        assert_eq!(fixture.runner_start_claims(&attempt.id), 1);
+        // 单仓红线：attempt 无 logical target snapshot，全链未创建任何
+        // LC manifest/selection/checkout 存储（无 gateway 强制面——gateway
+        // 仅对带 snapshot 的 attempt 生效，Task 5 互证实名测试守护）。
+        assert!(attempt.target_snapshot.is_none());
+        assert!(
+            !crate::product::logical_codebase::LogicalCodebaseStore::new(
+                fixture.gate.inner.paths.clone()
+            )
+            .has_any_storage(PROJECT_ID)
+            .expect("logical codebase storage probe"),
+            "single-repository chain must not create LC manifest/selection/snapshot"
+        );
+
+        // 停等期间编排器只观察：FinalConfirm 不被代点、不隐式重驱。
+        let worker = AutopilotOrchestrator::new(fixture.gate.state.clone(), Default::default());
+        assert_eq!(
+            worker
+                .reconcile(&fixture.gate.state, PROJECT_ID, ISSUE_ID)
+                .await
+                .unwrap(),
+            ReconcileOutcome::AwaitingHuman
+        );
+        assert_eq!(
+            fixture.attempt().status,
+            CodingAttemptStatus::WaitingForHuman
+        );
+        assert_eq!(fixture.runner_start_claims(&attempt.id), 1);
+
+        // 人手 FinalConfirm → 原链继续至 Completed（首启账目不增）。
+        fixture.gate.confirm_final_by_human().await;
+        assert_eq!(fixture.attempt().status, CodingAttemptStatus::Completed);
+        assert_eq!(fixture.runner_start_claims(&attempt.id), 1);
+
+        // A01（收口）：全链结束后补偿扫描对 manual issue 仍零动作。
+        assert_eq!(fixture.manual_issue_auto_plans(), 0);
+        assert_eq!(fixture.manual_issue_runner_start_claims(), 0);
+    }
+}
+
