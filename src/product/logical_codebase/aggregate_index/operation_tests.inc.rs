@@ -19,10 +19,6 @@ mod tests {
     fn build_persists_building_before_cli_and_marks_first_build_drift_failed() {
         let fixture = aggregate_index_fixture();
         fixture.cli.files_return(["api/src/A.java", "web/src/B.ts"]);
-        fixture.cli.query_returns(
-            "crossRepoGreeting",
-            serde_json::json!([{"file":"api/src/A.java"}, {"file":"web/src/B.ts"}]),
-        );
         for query in EXCLUDED_QUERIES {
             fixture.cli.query_returns(query, serde_json::json!([]));
         }
@@ -59,13 +55,9 @@ mod tests {
     }
 
     #[test]
-    fn build_requires_member_coverage_cross_member_hit_and_negative_exclusion() {
+    fn build_requires_member_coverage_and_negative_exclusion() {
         let fixture = aggregate_index_fixture();
         fixture.cli.files_return(["api/src/A.java", "web/src/B.ts"]);
-        fixture.cli.query_returns(
-            "crossRepoGreeting",
-            serde_json::json!([{"file":"api/src/A.java"}, {"file":"web/src/B.ts"}]),
-        );
         fixture
             .cli
             .query_returns("SHOULD_NOT_INDEX_WORKTREE", serde_json::json!([]));
@@ -101,10 +93,6 @@ mod tests {
         );
 
         fixture.cli.files_return(["api/src/A.java", "web/src/B.ts"]);
-        fixture.cli.query_returns(
-            "crossRepoGreeting",
-            serde_json::json!([{"file":"api/src/A.java"}, {"file":"web/src/B.ts"}]),
-        );
         fixture
             .cli
             .query_returns("SHOULD_NOT_INDEX_WORKTREE", serde_json::json!([]));
@@ -125,23 +113,86 @@ mod tests {
     }
 
     #[test]
-    fn build_rejects_missing_member_coverage_and_cross_member_miss() {
+    fn build_rejects_missing_member_coverage() {
         let fixture = aggregate_index_fixture();
         fixture.cli.files_return(["api/src/A.java"]);
         assert!(matches!(
             fixture.operation().build("project_0001", 3),
             Err(AggregateIndexError::Failed { code, .. }) if code == "aggregate_index_member_coverage_failed"
         ));
+    }
 
+    /// G4（终局关闸缺口）：真实业务仓不含 canonical fixture 预置的
+    /// `crossRepoGreeting` 语料——激活不得依赖任何硬编码符号命中。
+    /// 真实聚合语义＝成员覆盖（每个 included member 均有索引文件）＋
+    /// 负向排除查询（越界作用域零命中）；无符号语料即激活。
+    #[test]
+    fn build_succeeds_without_canonical_fixture_symbol() {
+        let fixture = aggregate_index_fixture();
         fixture.cli.files_return(["api/src/A.java", "web/src/B.ts"]);
-        fixture.cli.query_returns(
-            "crossRepoGreeting",
-            serde_json::json!([{"file":"api/src/A.java"}]),
+        for query in EXCLUDED_QUERIES {
+            fixture.cli.query_returns(query, serde_json::json!([]));
+        }
+        // 刻意不 script crossRepoGreeting（fake 对未 script 查询返回 []，
+        // 等价于真实业务仓无该符号）。
+        let record = fixture.operation().build("project_0001", 3).unwrap();
+        assert_eq!(record.status, AggregateIndexStatus::Active);
+    }
+
+    /// G4：codegraph 1.6 实证——对已存在的索引库重复 `init` 不重扫新增
+    /// 成员目录，`sync` 才做增量重扫。Initialize/Rebuild 的命令序列必须
+    /// 以增量 `sync` 收尾，保证「库已存在＋成员集变化」（补注册成员后的
+    /// rebuild / 失败后的 bootstrap retry）能把新成员纳入覆盖。
+    #[test]
+    fn build_and_rebuild_rescan_members_with_incremental_sync() {
+        fn index_commands(argvs: Vec<Vec<String>>) -> Vec<Vec<String>> {
+            argvs
+                .into_iter()
+                .filter(|argv| matches!(argv.first().map(String::as_str), Some("init" | "sync")))
+                .collect()
+        }
+
+        let fixture = aggregate_index_fixture();
+        fixture.cli.files_return(["api/src/A.java", "web/src/B.ts"]);
+        for query in EXCLUDED_QUERIES {
+            fixture.cli.query_returns(query, serde_json::json!([]));
+        }
+        let record = fixture.operation().build("project_0001", 3).unwrap();
+        assert_eq!(record.status, AggregateIndexStatus::Active);
+        let commands = index_commands(
+            fixture
+                .cli
+                .requests()
+                .into_iter()
+                .map(|request| request.argv)
+                .collect(),
         );
-        assert!(matches!(
-            fixture.operation().build("project_0001", 3),
-            Err(AggregateIndexError::Failed { code, .. }) if code == "aggregate_index_cross_member_query_failed"
-        ));
+        assert_eq!(
+            commands,
+            vec![
+                vec!["init".to_string(), ".".to_string()],
+                vec!["sync".to_string(), ".".to_string()],
+            ]
+        );
+
+        fixture.cli.files_return(["api/src/A.java", "web/src/B.ts", "zeta/src/Z.rs"]);
+        let rebuilt = fixture.operation().rebuild("project_0001").unwrap();
+        assert_eq!(rebuilt.status, AggregateIndexStatus::Active);
+        let rebuild_commands = index_commands(
+            fixture
+                .cli
+                .requests()
+                .into_iter()
+                .map(|request| request.argv)
+                .collect(),
+        );
+        assert_eq!(
+            rebuild_commands,
+            vec![
+                vec!["init".to_string(), ".".to_string()],
+                vec!["sync".to_string(), ".".to_string()],
+            ]
+        );
     }
 
     #[test]
@@ -732,10 +783,6 @@ mod tests {
     fn same_index_command_replays_active_record_and_conflicting_revision_fails_closed() {
         let fixture = aggregate_index_fixture();
         fixture.cli.files_return(["api/src/A.java", "web/src/B.ts"]);
-        fixture.cli.query_returns(
-            "crossRepoGreeting",
-            serde_json::json!([{"file":"api/src/A.java"}, {"file":"web/src/B.ts"}]),
-        );
         for query in [
             "SHOULD_NOT_INDEX_NONMEMBER",
             "SHOULD_NOT_INDEX_WORKTREE",

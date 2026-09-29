@@ -18,7 +18,6 @@ use super::{
     AggregateIndexStatus, AggregateIndexStore, CodeGraphCli, CodeGraphExcludeGenerator,
 };
 
-const REPRESENTATIVE_QUERY: &str = "crossRepoGreeting";
 const EXCLUDED_QUERIES: [&str; 4] = [
     "SHOULD_NOT_INDEX_NONMEMBER",
     "SHOULD_NOT_INDEX_WORKTREE",
@@ -27,10 +26,13 @@ const EXCLUDED_QUERIES: [&str; 4] = [
 ];
 
 /// Evidence produced only after every CodeGraph scope assertion succeeds.
+///
+/// G4（终局关闸缺口）：激活语义＝成员覆盖＋负向排除；不再要求任何
+/// 硬编码代表符号（canonical fixture 的 `crossRepoGreeting` 语料）
+/// 命中≥2 成员——真实业务仓无该符号时 planning_ready 仍可达。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AggregateIndexAcceptance {
     pub member_files: BTreeMap<String, Vec<PathBuf>>,
-    pub representative_query: Value,
     pub excluded_queries: BTreeMap<String, Vec<PathBuf>>,
 }
 
@@ -42,8 +44,6 @@ impl AggregateIndexAcceptance {
     ) -> Result<Self, AggregateIndexError> {
         let files = cli.files(root)?;
         let member_files = verify_member_coverage(&files, member_names)?;
-        let representative_query = cli.query_json(root, REPRESENTATIVE_QUERY)?;
-        verify_cross_member_hit(&representative_query, member_names)?;
 
         let mut excluded_queries = BTreeMap::new();
         for query in EXCLUDED_QUERIES {
@@ -57,7 +57,6 @@ impl AggregateIndexAcceptance {
 
         Ok(Self {
             member_files,
-            representative_query,
             excluded_queries,
         })
     }
@@ -385,14 +384,18 @@ impl AggregateIndexOperation {
                 .excludes
                 .write_atomically(&manifest.provider_context_root, &config)?;
             match mode {
-                IndexApplicationMode::Initialize => {
+                IndexApplicationMode::Initialize | IndexApplicationMode::Rebuild => {
+                    // G4（终局关闸缺口）：codegraph 1.6 实证——对已存在的
+                    // 索引库重复 `init` 不重扫新增成员目录（补注册成员后
+                    // rebuild 仍 member_coverage_failed 的现场根因），
+                    // `sync` 才做增量重扫。Initialize/Rebuild 统一以
+                    // init 建库＋sync 收尾：库不存在时 init 全量建库，
+                    // 库已存在时 sync 把成员集变化纳入覆盖。
                     self.cli.init(&manifest.provider_context_root)?;
+                    self.cli.sync(&manifest.provider_context_root)?;
                 }
                 IndexApplicationMode::Sync => {
                     self.cli.sync(&manifest.provider_context_root)?;
-                }
-                IndexApplicationMode::Rebuild => {
-                    self.cli.init(&manifest.provider_context_root)?;
                 }
             }
             Ok::<_, AggregateIndexError>(config_digest)
@@ -639,27 +642,6 @@ fn verify_member_coverage(
     Ok(result)
 }
 
-fn verify_cross_member_hit(
-    result: &Value,
-    member_names: &[String],
-) -> Result<(), AggregateIndexError> {
-    let paths = result_paths(result);
-    let hit_members = paths
-        .iter()
-        .filter_map(|path| first_path_component(path))
-        .filter(|member| member_names.iter().any(|name| name == member))
-        .collect::<BTreeSet<_>>();
-    if hit_members.len() < 2 {
-        return Err(AggregateIndexError::Failed {
-            code: "aggregate_index_cross_member_query_failed",
-            message: format!(
-                "representative query {REPRESENTATIVE_QUERY} must hit two included members; paths: {}",
-                format_paths(&paths)
-            ),
-        });
-    }
-    Ok(())
-}
 
 fn is_empty_query_result(value: &Value) -> bool {
     matches!(value, Value::Array(values) if values.is_empty())
@@ -704,9 +686,6 @@ fn collect_result_paths(value: &Value, paths: &mut Vec<PathBuf>) {
     }
 }
 
-fn first_path_component(path: &Path) -> Option<&str> {
-    path.components().next()?.as_os_str().to_str()
-}
 
 fn format_paths(paths: &[PathBuf]) -> String {
     if paths.is_empty() {
