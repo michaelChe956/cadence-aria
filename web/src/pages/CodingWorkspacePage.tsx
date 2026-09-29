@@ -11,6 +11,18 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { deleteCodingAttempt } from "../api/client";
+import {
+  enterVerificationTriage,
+  listVerificationTriageRecords,
+  readCodingPolicyText,
+  reauthorizeCodingPolicy,
+  rerunPlannedCommand,
+  getVerificationCommandEvidence,
+} from "../api/client";
+import type {
+  VerificationCommandEvidence,
+  VerificationTriageRecord,
+} from "../api/types";
 import type { CodingAttemptAddress } from "../api/types";
 import { CodingTimeline } from "../components/coding-workspace/CodingTimeline";
 import { CodingDashboard } from "../components/coding-workspace/dashboard/CodingDashboard";
@@ -53,6 +65,7 @@ import {
   CodingPanelTabs,
   GatePanel,
   errorMessage,
+  isVerificationTriageEligibleGate,
   lockedProviderRole,
   requestIdFromEntry,
 } from "./CodingWorkspaceControls";
@@ -199,6 +212,189 @@ export function CodingWorkspacePage({
     }),
     [auditRecords, auditTarget, store],
   );
+
+  // ── C2 oracle C-2a/b：GatePanel 验证处理/并列证据数据源与操作 ──
+  const pendingGateEligibleForTriage =
+    pendingGate != null && pendingGate.kind === "blocked"
+      ? isVerificationTriageEligibleGate(pendingGate)
+      : false;
+  const [triageRecords, setTriageRecords] = useState<VerificationTriageRecord[]>([]);
+  const [commandEvidenceList, setCommandEvidenceList] = useState<
+    VerificationCommandEvidence[]
+  >([]);
+  const [triageSurfaceError, setTriageSurfaceError] = useState<string | null>(null);
+  const [triageActionBusy, setTriageActionBusy] = useState(false);
+  const triageFetchGateId = pendingGate?.gate_id ?? null;
+
+  useEffect(() => {
+    if (!triageFetchGateId || !pendingGateEligibleForTriage || !storeMatchesAddress) {
+      return;
+    }
+    let cancelled = false;
+    setTriageSurfaceError(null);
+    Promise.all([
+      listVerificationTriageRecords(address),
+      getVerificationCommandEvidence(address).catch(() => ({
+        attempt_id: "",
+        rework_count: 0,
+        evidence: [] as VerificationCommandEvidence[],
+      })),
+    ])
+      .then(([records, evidence]) => {
+        if (cancelled) return;
+        setTriageRecords(records.records);
+        setCommandEvidenceList(evidence.evidence);
+      })
+      .catch((reason) => {
+        if (cancelled) return;
+        setTriageSurfaceError(errorMessage(reason, "验证处理记录读取失败"));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [triageFetchGateId, pendingGateEligibleForTriage, storeMatchesAddress, address]);
+
+  const verificationTriage =
+    triageRecords.find((record) => record.status === "pending") ??
+    triageRecords[triageRecords.length - 1] ??
+    null;
+  const selectedEvidence = useMemo(() => {
+    if (commandEvidenceList.length === 0) return null;
+    const pendingCheckId = verificationTriage?.check_id;
+    return (
+      commandEvidenceList.find(
+        (item) => pendingCheckId != null && item.check_id === pendingCheckId,
+      ) ??
+      commandEvidenceList.find((item) => item.mismatch) ??
+      commandEvidenceList[0]
+    );
+  }, [commandEvidenceList, verificationTriage?.check_id]);
+
+  async function refreshTriageSurface() {
+    try {
+      const [records, evidence] = await Promise.all([
+        listVerificationTriageRecords(address),
+        getVerificationCommandEvidence(address).catch(() => ({
+          attempt_id: "",
+          rework_count: 0,
+          evidence: [] as VerificationCommandEvidence[],
+        })),
+      ]);
+      setTriageRecords(records.records);
+      setCommandEvidenceList(evidence.evidence);
+    } catch {
+      // 刷新失败保留既有呈现；下一次门变更会重拉。
+    }
+  }
+
+  async function handleEnterVerificationTriage(gateId: string) {
+    void gateId;
+    if (!selectedEvidence) {
+      setTriageSurfaceError("无可绑定的验证 check（请刷新后重试）");
+      return;
+    }
+    const reportRef = pendingGate?.evidence_refs?.find((ref) => ref.trim().length > 0);
+    if (!reportRef) {
+      setTriageSurfaceError("门缺少 finding 绑定证据（evidence_refs 为空）");
+      return;
+    }
+    setTriageActionBusy(true);
+    setTriageSurfaceError(null);
+    try {
+      await enterVerificationTriage(address, {
+        finding_id: `${reportRef}#0`,
+        check_id: selectedEvidence.check_id,
+        original_command: selectedEvidence.planned_command ?? null,
+        alternative_command: null,
+        cwd: null,
+        outcome: null,
+        test_execution_count: null,
+        environment: null,
+      });
+      await refreshTriageSurface();
+    } catch (reason) {
+      setTriageSurfaceError(errorMessage(reason, "转入验证处理失败"));
+    } finally {
+      setTriageActionBusy(false);
+    }
+  }
+
+  async function handleRerunPlannedCommand(checkId: string) {
+    if (!pendingGate) return;
+    setTriageActionBusy(true);
+    setTriageSurfaceError(null);
+    try {
+      await rerunPlannedCommand(address, {
+        command_id: `cmd-c2-rerun-${pendingGate.gate_id}-${checkId}`,
+        gate_id: pendingGate.gate_id,
+        check_id: checkId,
+        expected_version: store.reworkCount,
+      });
+      await refreshTriageSurface();
+    } catch (reason) {
+      setTriageSurfaceError(errorMessage(reason, "重跑原计划命令失败"));
+    } finally {
+      setTriageActionBusy(false);
+    }
+  }
+
+  // ── C2 oracle C-2c：blocked／rework 等待面受限政策读取/重新授权 ──
+  const policySurfaceVisible =
+    storeMatchesAddress &&
+    (store.status === "blocked" || store.status === "waiting_for_human");
+  const [policyText, setPolicyText] = useState<{
+    policy_id: string;
+    policy_revision: number;
+    policy_digest: string;
+    text: string;
+  } | null>(null);
+  const [policyAttemptVersion, setPolicyAttemptVersion] = useState<number | null>(null);
+  const [policyError, setPolicyError] = useState<string | null>(null);
+  const [policyBusy, setPolicyBusy] = useState(false);
+  const [policyRole, setPolicyRole] = useState<"coder" | "reviewer">("coder");
+  const [policyReauthStatus, setPolicyReauthStatus] = useState<string | null>(null);
+
+  async function handleReadPolicy() {
+    setPolicyBusy(true);
+    setPolicyError(null);
+    setPolicyReauthStatus(null);
+    try {
+      const response = await readCodingPolicyText(address);
+      setPolicyText(response.policy);
+      setPolicyAttemptVersion(response.attempt_version);
+    } catch (reason) {
+      setPolicyText(null);
+      setPolicyError(errorMessage(reason, "读取政策失败（fail-closed 停等）"));
+    } finally {
+      setPolicyBusy(false);
+    }
+  }
+
+  async function handlePolicyReauthorization() {
+    if (!policyText || policyAttemptVersion == null) return;
+    setPolicyBusy(true);
+    setPolicyError(null);
+    try {
+      const result = await reauthorizeCodingPolicy(address, {
+        command_id: `cmd-c2-policy-reauth-${address.attemptId}-${policyRole}`,
+        attempt_id: address.attemptId,
+        role: policyRole,
+        policy_digest: policyText.policy_digest,
+        expected_version: policyAttemptVersion,
+      });
+      setPolicyReauthStatus(
+        result.state === "accepted"
+          ? "已重新授权（仅下一次返修 run 运行态有效）"
+          : result.state === "replayed"
+            ? "重放首次授权结果"
+            : `${result.state}${result.reason ? `：${result.reason}` : ""}`,
+      );
+    } catch (reason) {
+      setPolicyError(errorMessage(reason, "重新授权失败"));
+    } finally {
+      setPolicyBusy(false);
+    }
+  }
   useUnloadGuard({
     enabled: store.status === "running",
     message: "Coding attempt 运行中。刷新/关闭可能中断当前操作，是否继续？",
@@ -708,7 +904,80 @@ export function CodingWorkspacePage({
                 onRespond={api.respondGate}
                 onConfirmStage={api.confirmStageGate}
                 onAbort={api.abortAttempt}
+                verificationTriage={verificationTriage}
+                onEnterVerificationTriage={
+                  pendingGateEligibleForTriage && !triageActionBusy
+                    ? handleEnterVerificationTriage
+                    : undefined
+                }
+                commandEvidence={selectedEvidence}
+                onRerunPlannedCommand={
+                  !triageActionBusy ? handleRerunPlannedCommand : undefined
+                }
               />
+              {triageSurfaceError ? (
+                <div
+                  data-testid="coding-verification-surface-error"
+                  className="border-t border-amber-200 bg-amber-50 px-3 py-1 text-xs font-semibold text-[var(--aria-danger)]"
+                >
+                  {triageSurfaceError}
+                </div>
+              ) : null}
+              {policySurfaceVisible ? (
+                <div
+                  data-testid="coding-policy-surface"
+                  className="border-t border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900"
+                >
+                  <div className="font-semibold">受限政策读取／重新授权</div>
+                  <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                    <button
+                      type="button"
+                      disabled={policyBusy}
+                      onClick={handleReadPolicy}
+                      className="inline-flex h-7 items-center rounded-md border border-amber-300 bg-white px-2 font-semibold hover:bg-amber-100 disabled:opacity-60"
+                    >
+                      读取政策
+                    </button>
+                    <select
+                      aria-label="重新授权角色"
+                      value={policyRole}
+                      onChange={(event) =>
+                        setPolicyRole(event.target.value === "reviewer" ? "reviewer" : "coder")
+                      }
+                      className="h-7 rounded-md border border-amber-300 bg-white px-1"
+                    >
+                      <option value="coder">coder</option>
+                      <option value="reviewer">reviewer</option>
+                    </select>
+                    <button
+                      type="button"
+                      disabled={policyBusy || !policyText}
+                      onClick={handlePolicyReauthorization}
+                      className="inline-flex h-7 items-center rounded-md border border-amber-300 bg-white px-2 font-semibold hover:bg-amber-100 disabled:opacity-60"
+                    >
+                      重新授权
+                    </button>
+                  </div>
+                  {policyText ? (
+                    <div data-testid="coding-policy-text" className="mt-1 grid gap-0.5 font-mono">
+                      <div>policy_id：{policyText.policy_id}</div>
+                      <div>revision：{policyText.policy_revision}</div>
+                      <div>digest：{policyText.policy_digest}</div>
+                      <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-all rounded border border-amber-200 bg-white p-1">
+                        {policyText.text}
+                      </pre>
+                    </div>
+                  ) : null}
+                  {policyReauthStatus ? (
+                    <div className="mt-1 font-semibold">{policyReauthStatus}</div>
+                  ) : null}
+                  {policyError ? (
+                    <div className="mt-1 font-semibold text-[var(--aria-danger)]">
+                      {policyError}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
               <CodingComposer
                 api={api}
                 stage={store.stage}

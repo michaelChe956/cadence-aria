@@ -5,7 +5,10 @@ import type { ProviderHealthResponse } from "../api/types";
 import {
   confirmWorkItemExecutionPlan,
   deleteCodingAttempt,
+  enterVerificationTriage,
   getCodingAttemptDiff,
+  getVerificationCommandEvidence,
+  listVerificationTriageRecords,
   requestWorkItemExecutionPlanChange,
 } from "../api/client";
 import { useCodingWorkspaceWs } from "../hooks/useCodingWorkspaceWs";
@@ -26,6 +29,13 @@ vi.mock("../api/client", () => ({
   deleteCodingAttempt: vi.fn(),
   getCodingAttemptDiff: vi.fn(),
   requestWorkItemExecutionPlanChange: vi.fn(),
+  listVerificationTriageRecords: vi.fn(),
+  enterVerificationTriage: vi.fn(),
+  decideVerificationTriage: vi.fn(),
+  getVerificationCommandEvidence: vi.fn(),
+  rerunPlannedCommand: vi.fn(),
+  readCodingPolicyText: vi.fn(),
+  reauthorizeCodingPolicy: vi.fn(),
 }));
 
 vi.mock("../hooks/useCodingWorkspaceWs", () => ({
@@ -512,6 +522,112 @@ describe("CodingWorkspacePage gate panels", () => {
       "send_to_coder",
       "优先处理第 2 条 finding",
     );
+  });
+
+  it("eligible gate 点击转入验证处理经 REST 携带 finding/check 身份", async () => {
+    const api = mockCodingWs();
+    vi.mocked(listVerificationTriageRecords).mockResolvedValue({
+      attempt_id: "coding_attempt_0001",
+      attempt_version: 1,
+      records: [],
+    });
+    vi.mocked(getVerificationCommandEvidence).mockResolvedValue({
+      attempt_id: "coding_attempt_0001",
+      rework_count: 1,
+      evidence: [
+        {
+          check_id: "check_run_tests",
+          planned_command: "cargo test --lib",
+          planned_manual_instruction: null,
+          actual_command: "cargo test --lib --quiet",
+          actual_cwd: "/repo",
+          exit_code: 0,
+          test_execution_count: null,
+          environment_summary: null,
+          mismatch: true,
+        },
+      ],
+    });
+    const enterMock = vi.mocked(enterVerificationTriage).mockResolvedValue({
+      triage_id: "verification_triage_0001",
+      attempt_id: "coding_attempt_0001",
+      finding_id: "code_review_report_0001#0",
+      check_id: "check_run_tests",
+      plan_revision_id: "plan_rev_0001",
+      original_command: "cargo test --lib",
+      alternative_command: null,
+      cwd: null,
+      outcome: null,
+      test_execution_count: null,
+      environment: null,
+      scope: ["check_run_tests"],
+      expires_at: "2026-10-07T00:00:00Z",
+      status: "pending",
+      conclusion: null,
+      reason: null,
+      decided_by: null,
+      decided_at: null,
+    });
+    useCodingWorkspaceStore.setState({
+      attemptId: "coding_attempt_0001",
+      projectId: "project_0001",
+      issueId: "issue_0001",
+      status: "blocked",
+      stage: "code_review",
+      reworkCount: 1,
+      pendingGates: [
+        {
+          gate_id: "coding_blocked_gate_0001",
+          kind: "blocked",
+          title: "验证证据不完整",
+          description: "code review 验证不完整，等待人工处理",
+          stage: "code_review",
+          role: "code_reviewer",
+          reason_code: "code_review_verification_incomplete",
+          evidence_refs: ["code_review_report_0001"],
+          raw_provider_output_ref: null,
+          diagnostic: null,
+          available_actions: [
+            {
+              action_id: "send_to_coder",
+              label: "提交给 Coder 修复",
+              action_type: "send_to_coder",
+            },
+            {
+              action_id: "abort",
+              label: "终止",
+              action_type: "abort",
+            },
+          ],
+        },
+      ],
+    });
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />,
+    );
+    await waitFor(() => {
+      expect(listVerificationTriageRecords).toHaveBeenCalled();
+    });
+
+    expect(screen.getByTestId("coding-verification-triage-enter")).toBeInTheDocument();
+    expect(screen.getByTestId("coding-command-evidence-mismatch")).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("coding-verification-triage-enter"));
+    });
+    await waitFor(() => {
+      expect(enterMock).toHaveBeenCalledWith(
+        CODING_ATTEMPT_ADDRESS,
+        expect.objectContaining({
+          finding_id: "code_review_report_0001#0",
+          check_id: "check_run_tests",
+        }),
+      );
+    });
+    expect(api.respondGate).not.toHaveBeenCalled();
   });
 
 });

@@ -43,6 +43,9 @@ import type {
   AutomationEnrollmentLeaseTakeoverResult,
   AutomationEnrollmentRetryInitializationResult,
   EnrollmentBindingIdentity,
+  VerificationCommandEvidence,
+  VerificationTriageConclusion,
+  VerificationTriageRecord,
 } from "./types";
 
 export class ApiRequestError extends Error implements ApiError {
@@ -785,6 +788,140 @@ export function postCodingGateResponse(
 ): Promise<CodingGateResponseResult> {
   return requestJson<CodingGateResponseResult>(
     `${codingAttemptApiPath(address)}/gate-responses`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+// C2 oracle C-2a/b/c：验证处理／并列证据／重跑／受限政策读取 REST——
+// 与后端 verification_surface.rs 同一契约（复用既有引擎服务与命令账本）。
+export type VerificationTriageRecordsResponse = {
+  attempt_id: string;
+  attempt_version: number;
+  records: VerificationTriageRecord[];
+};
+
+export function listVerificationTriageRecords(
+  address: CodingAttemptAddress,
+): Promise<VerificationTriageRecordsResponse> {
+  return requestJson<VerificationTriageRecordsResponse>(
+    `${codingAttemptApiPath(address)}/verification-triage`,
+  );
+}
+
+export function enterVerificationTriage(
+  address: CodingAttemptAddress,
+  payload: {
+    finding_id: string;
+    check_id: string;
+    original_command?: string | null;
+    alternative_command?: string | null;
+    cwd?: string | null;
+    outcome?: string | null;
+    test_execution_count?: number | null;
+    environment?: string | null;
+  },
+): Promise<VerificationTriageRecord> {
+  return requestJson<VerificationTriageRecord>(
+    `${codingAttemptApiPath(address)}/verification-triage`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export function decideVerificationTriage(
+  address: CodingAttemptAddress,
+  triageId: string,
+  payload: {
+    conclusion: VerificationTriageConclusion;
+    decided_by: string;
+    reason: string;
+    exemption_scope?: string[];
+  },
+): Promise<VerificationTriageRecord> {
+  return requestJson<VerificationTriageRecord>(
+    `${codingAttemptApiPath(address)}/verification-triage/${encodeURIComponent(triageId)}/decision`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export type VerificationCommandEvidenceListResponse = {
+  attempt_id: string;
+  rework_count: number;
+  evidence: VerificationCommandEvidence[];
+};
+
+export function getVerificationCommandEvidence(
+  address: CodingAttemptAddress,
+): Promise<VerificationCommandEvidenceListResponse> {
+  return requestJson<VerificationCommandEvidenceListResponse>(
+    `${codingAttemptApiPath(address)}/verification-command-evidence`,
+  );
+}
+
+export type RerunPlannedCommandResponse = {
+  command_id: string;
+  attempt_id: string;
+  instruction_id: string;
+  replayed: boolean;
+};
+
+export function rerunPlannedCommand(
+  address: CodingAttemptAddress,
+  payload: {
+    command_id: string;
+    gate_id: string;
+    check_id: string;
+    expected_version: number;
+  },
+): Promise<RerunPlannedCommandResponse> {
+  return requestJson<RerunPlannedCommandResponse>(
+    `${codingAttemptApiPath(address)}/rerun-planned-command`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export type CodingPolicyTextResponse = {
+  attempt_id: string;
+  attempt_version: number;
+  policy: {
+    policy_id: string;
+    policy_revision: number;
+    policy_digest: string;
+    text: string;
+  };
+};
+
+export function readCodingPolicyText(
+  address: CodingAttemptAddress,
+): Promise<CodingPolicyTextResponse> {
+  return requestJson<CodingPolicyTextResponse>(
+    `${codingAttemptApiPath(address)}/policy-text`,
+  );
+}
+
+export function reauthorizeCodingPolicy(
+  address: CodingAttemptAddress,
+  payload: {
+    command_id: string;
+    attempt_id: string;
+    role: "coder" | "reviewer";
+    policy_digest: string;
+    expected_version: number;
+  },
+): Promise<CodingGateResponseResult> {
+  return requestJson<CodingGateResponseResult>(
+    `${codingAttemptApiPath(address)}/policy-reauthorization`,
     {
       method: "POST",
       body: JSON.stringify(payload),
