@@ -525,6 +525,16 @@ mod tests {
             self.store.replace_active(project_id, record.clone())?;
             Ok(record)
         }
+
+        fn for_lc(&self, _lc_id: &str) -> Arc<dyn PlanningIndexFreshness> {
+            // 脚本桩语义保持：共享脚本队列与计数器，store 随作用域克隆
+            //（本桩仅用于无 lc 归属的 fixture，lc 分支不会被触达）。
+            Arc::new(ScriptedFreshness {
+                store: self.store.clone(),
+                next: Arc::clone(&self.next),
+                sync_count: Arc::clone(&self.sync_count),
+            })
+        }
     }
 
     fn resolver_fixture() -> ResolverFixture {

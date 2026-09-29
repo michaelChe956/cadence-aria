@@ -369,7 +369,7 @@ async fn campaign_stage3_oversized_feedback_rejects_before_turn_reservation() {
     let WsOutMessage::ProtocolError { code, .. } = &rejected else {
         panic!("expected protocol error, got {rejected:?}");
     };
-    assert_eq!(code, "HUMAN_GATE_REVISION_PROMPT_TOO_LARGE");
+    assert_eq!(code, "HUMAN_GATE_REVISION_INPUT_OVER_HARD_LIMIT");
     assert!(
         harness.durable_turns().is_empty(),
         "turn reservation 前拒绝"

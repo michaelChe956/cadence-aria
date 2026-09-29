@@ -154,6 +154,10 @@ pub trait PlanningIndexFreshness: Send + Sync {
         crate::product::logical_codebase::aggregate_index::AggregateIndexRecord,
         AggregateIndexError,
     >;
+    /// 按唯一 authority 冻结的 lc_id 重扫 freshness 读取范围。实现必须保持自身
+    /// 语义：生产实现重扫 store 到 lc_id 子树；测试桩保持桩语义，不得借此回退
+    /// 到真实 git/codegraph 探测（lc 分支与 None 分支同享注入抽象）。
+    fn for_lc(&self, lc_id: &str) -> std::sync::Arc<dyn PlanningIndexFreshness>;
 }
 
 impl PlanningIndexFreshness for AggregateIndexFreshnessService {
@@ -170,7 +174,12 @@ impl PlanningIndexFreshness for AggregateIndexFreshnessService {
     > {
         AggregateIndexFreshnessService::sync_if_stale(self, project_id)
     }
+
+    fn for_lc(&self, lc_id: &str) -> std::sync::Arc<dyn PlanningIndexFreshness> {
+        std::sync::Arc::new(AggregateIndexFreshnessService::for_lc(self, lc_id))
+    }
 }
+
 
 pub struct PlanningContextResolver {
     paths: ProductAppPaths,
@@ -195,6 +204,7 @@ impl PlanningContextResolver {
     #[cfg(test)]
     pub fn new_without_freshness(paths: ProductAppPaths) -> Self {
         struct TestFreshness {
+            paths: ProductAppPaths,
             store: AggregateIndexStore,
         }
         impl PlanningIndexFreshness for TestFreshness {
@@ -214,10 +224,19 @@ impl PlanningContextResolver {
             > {
                 self.store.active_required(project_id)
             }
+            fn for_lc(&self, lc_id: &str) -> Arc<dyn PlanningIndexFreshness> {
+                // 桩语义保持：lc 分支只重扫读取子树，不引入真实 git/codegraph
+                // 探测（legacy 别名布局两侧等价可读，重扫到 lc 子树为准）。
+                Arc::new(TestFreshness {
+                    paths: self.paths.clone(),
+                    store: AggregateIndexStore::for_lc(self.paths.clone(), lc_id.to_string()),
+                })
+            }
         }
         Self::with_freshness_service(
             paths.clone(),
             Arc::new(TestFreshness {
+                paths: paths.clone(),
                 store: AggregateIndexStore::new(paths),
             }),
         )
@@ -282,22 +301,12 @@ impl PlanningContextResolver {
         project_id: &str,
         lc_id: Option<&str>,
     ) -> Result<Option<String>, ProductStoreError> {
+        // lc 分支经注入抽象重扫（PlanningIndexFreshness::for_lc），保持依赖
+        // 注入契约：生产实现等价于按 lc_id 子树构造真实 freshness 服务；
+        // 测试桩（new_without_freshness/with_freshness_service）保持桩语义，
+        // 不因 lc 归属回退到真实 git/codegraph 探测。
         let freshness = match lc_id {
-            Some(lc_id) => {
-                let operation = AggregateIndexOperation::new(
-                    self.paths.clone(),
-                    CodeGraphCli::new(
-                        Arc::new(
-                            crate::cross_cutting::bounded_command_runner::TokioBoundedCommandRunner,
-                        ),
-                        "codegraph".to_string(),
-                    ),
-                    CodeGraphExcludeGenerator,
-                )
-                .for_lc(lc_id);
-                Arc::new(AggregateIndexFreshnessService::new(operation))
-                    as Arc<dyn PlanningIndexFreshness>
-            }
+            Some(lc_id) => self.freshness.for_lc(lc_id),
             None => Arc::clone(&self.freshness),
         };
         let project_id = project_id.to_string();

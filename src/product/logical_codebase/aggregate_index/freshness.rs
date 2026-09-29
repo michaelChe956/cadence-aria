@@ -100,6 +100,12 @@ impl AggregateIndexFreshnessService {
         }
     }
 
+    /// Re-scopes manifest/member/index reads to one logical codebase subtree,
+    /// reusing the same CLI and snapshot command runner (D5 semantics).
+    pub fn for_lc(&self, lc_id: impl Into<String>) -> Self {
+        Self::new(self.operation.for_lc(lc_id))
+    }
+
     /// Returns a fresh assessment without mutating any durable state. The AI
     /// caller invokes this before reading the aggregate index so stale or
     /// degraded state is explicit rather than silently trusted.
