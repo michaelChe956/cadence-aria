@@ -516,26 +516,44 @@ fn c2_waiting_items_project_coding_run_facts() {
         )
         .unwrap();
 
-    // 事实 6（指令消费中断）：认领 journal 落盘但 consumed_at 缺失
-    //（认领→标记消费之间中断；重放命中同一认领）。
-    write_json(
-        &paths
-            .issue_lifecycle_root(PROJECT_ID, ISSUE_ID)
-            .join("coding-attempts")
-            .join(&attempt_b.id)
-            .join("rework-claims.json"),
-        &serde_json::json!({
-            "records": [{
-                "claim_id": "rework_claim_interrupted0001",
-                "attempt_id": attempt_b.id,
-                "instruction_ids": ["rework_instruction_0001"],
-                "rendered_prompt_digest": "9f16d0b6b1f4a2c3d5e6f708192a3b4c5d6e7f809192a3b4c5d6e7f8091a2b3",
-                "context_hash": "5a1d0b6b1f4a2c3d5e6f708192a3b4c5d6e7f809192a3b4c5d6e7f8091c2d3",
-                "consumed_at": null,
-            }],
-        }),
-    )
-    .unwrap();
+    // 事实 6（指令消费中断，C-1b 真实对账驱动）：认领事务真实落 journal
+    //（消费标记已齐、node 已绑定）而其 node 无任何 ProviderPrompt →
+    // 对账判中断、落 instruction-claim-interrupted 等待事实（消费标记后、
+    // spawn 前中断；重驱以 claim.instruction_ids 强制入渲染）。
+    let interrupted_instruction = crate::product::coding_models::CodingReworkInstruction {
+        id: "coding_rework_instruction_0001".to_string(),
+        attempt_id: attempt_b.id.clone(),
+        source_stage: CodingExecutionStage::CodeReview,
+        rework_round: 1,
+        summary: "中断认领的返修指令".to_string(),
+        fix_hints: vec!["按 finding 修复 src/lib.rs".to_string()],
+        questions: Vec::new(),
+        created_at: "2026-09-29T00:00:00Z".to_string(),
+        consumed_by_node_id: None,
+        consumed_at: None,
+    };
+    store
+        .save_rework_instruction(&attempt_b, &interrupted_instruction)
+        .unwrap();
+    store
+        .claim_and_consume_rework_instructions(
+            &attempt_b,
+            "coding_node_0009",
+            1,
+            "上一轮完整 prompt（渲染后中断，未发出）",
+            None,
+            &["coding_rework_instruction_0001".to_string()],
+        )
+        .unwrap();
+    let interrupted_renders = store
+        .reconcile_interrupted_rework_claims(PROJECT_ID, ISSUE_ID, &attempt_b.id)
+        .unwrap();
+    assert_eq!(
+        interrupted_renders.len(),
+        1,
+        "对账判中断并返回强制回放指令：{interrupted_renders:?}"
+    );
+    let interrupted_claim_id = interrupted_renders[0].claim.claim_id.clone();
 
     // 事实 7（reviewer 配置缺失）：reason_code 定格的开放 blocked gate。
     store
@@ -670,10 +688,14 @@ fn c2_waiting_items_project_coding_run_facts() {
     assert!(policy.reason.contains("policy_resolver_unavailable"));
     assert!(policy.actions.is_empty());
 
-    // 指令消费中断：认领身份与重放语义入 reason。
+    // 指令消费中断：认领身份与强制回放语义入 reason（真实对账落账的事实）。
     let claim = find("instruction_claim_interrupted");
     assert_eq!(claim.attempt_id.as_deref(), Some(attempt_b.id.as_str()));
-    assert!(claim.reason.contains("rework_claim_interrupted0001"));
+    assert!(claim.reason.contains(&interrupted_claim_id));
+    assert!(
+        claim.reason.contains("coding_rework_instruction_0001"),
+        "instruction ids surface in reason: {claim:?}"
+    );
     assert!(claim.actions.is_empty());
 
     // 大候选停等：session 身份＋预算事实入 reason。
@@ -738,7 +760,8 @@ fn c2_waiting_items_project_coding_run_facts() {
         Some((unknown.id.clone(), unknown.reason.clone())),
     );
 
-    // journal 落盘事实未被投影读取改动（只读派生）。
+    // journal 落盘事实未被投影读取改动（只读派生）；真实认领的 consumed_at
+    // 保持 Some（对账不重写 claim、不二次消费——等待事实在独立分区）。
     let raw: serde_json::Value = read_json(
         &paths
             .issue_lifecycle_root(PROJECT_ID, ISSUE_ID)
@@ -748,8 +771,11 @@ fn c2_waiting_items_project_coding_run_facts() {
     )
     .unwrap();
     assert_eq!(
-        raw["records"][0]["consumed_at"],
-        serde_json::Value::Null,
-        "projection must not mutate durable facts"
+        raw["records"][0]["claim_id"].as_str(),
+        Some(interrupted_claim_id.as_str())
+    );
+    assert!(
+        raw["records"][0]["consumed_at"].as_str().is_some(),
+        "reconciliation must not rewrite the claim journal"
     );
 }

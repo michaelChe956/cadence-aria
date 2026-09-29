@@ -104,11 +104,53 @@ impl CodingWorkspaceEngine {
         {
             resume_provider_session_id = None;
         }
-        let rework_instruction = self.store.latest_unconsumed_rework_instruction(
+        let mut rework_instruction = self.store.latest_unconsumed_rework_instruction(
             &attempt.project_id,
             &attempt.issue_id,
             &attempt.id,
         )?;
+        // C-1b（oracle 裁决）：恢复重驱对账 rework-claims journal——认领
+        // 存在而其 node 无 role run 输出（消费标记后、spawn 前中断）时，
+        // 以 claim.instruction_ids 强制入渲染并落 instruction_claim_interrupted
+        // 等待事实；不重写 claim、不二次消费（强制回放的 id 不进本次认领
+        // 集合）。
+        let interrupted_renders = self.store.reconcile_interrupted_rework_claims(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+        )?;
+        let mut forced_replay_lines: Vec<String> = Vec::new();
+        for render in &interrupted_renders {
+            for instruction in &render.instructions {
+                if rework_instruction
+                    .as_ref()
+                    .is_none_or(|current| current.id != instruction.id)
+                {
+                    forced_replay_lines.push(format!(
+                        "- [中断认领 {} 强制回放] {}（修复提示：{}）",
+                        render.claim.claim_id,
+                        instruction.summary,
+                        instruction.fix_hints.join("；")
+                    ));
+                }
+            }
+            for note in &render.notes {
+                forced_replay_lines.push(format!(
+                    "- [中断认领 {} 强制回放 ContextNote {}] {}",
+                    render.claim.claim_id,
+                    note.id,
+                    note.content.trim()
+                ));
+            }
+        }
+        let forced_replay_section = if forced_replay_lines.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\n中断认领强制回放（上一轮认领后未进入任何 prompt，本轮必须优先完成）:\n{}\n",
+                forced_replay_lines.join("\n")
+            )
+        };
         let context_notes = self.store.list_unconsumed_context_notes(
             &attempt.project_id,
             &attempt.issue_id,
@@ -135,7 +177,7 @@ impl CodingWorkspaceEngine {
                 .as_ref()
                 .map(|instruction| instruction.summary.clone()),
         )?;
-        let full_prompt = rendered_context
+        let mut full_prompt = rendered_context
             .as_ref()
             .map(|rendered| rendered.text.clone())
             .unwrap_or_else(|| {
@@ -147,6 +189,7 @@ impl CodingWorkspaceEngine {
                     &routing_context,
                 )
             });
+        full_prompt.push_str(&forced_replay_section);
         let prompt_mode = if rendered_context.is_some() || resume_provider_session_id.is_none() {
             CodingPromptMode::FullConversation
         } else {
@@ -154,13 +197,17 @@ impl CodingWorkspaceEngine {
         };
         let prompt = match prompt_mode {
             CodingPromptMode::FullConversation => full_prompt.clone(),
-            CodingPromptMode::DeltaOnly => build_coding_delta_prompt(
-                &attempt,
-                context,
-                rework_instruction.as_ref(),
-                coding_context_notes,
-                &routing_context,
-            ),
+            CodingPromptMode::DeltaOnly => {
+                let mut delta = build_coding_delta_prompt(
+                    &attempt,
+                    context,
+                    rework_instruction.as_ref(),
+                    coding_context_notes,
+                    &routing_context,
+                );
+                delta.push_str(&forced_replay_section);
+                delta
+            }
         };
         // C2 Task 7（#18／BYPASS-18）：渲染完成后的一次可重放原子认领——
         // 「认领（绑定渲染 digest／上下文 hash）→ 标记消费」在 attempt 级

@@ -229,3 +229,185 @@ impl super::CodingAttemptStore {
         Ok(())
     }
 }
+
+// ─── C-1b（oracle 裁决）：恢复重驱对账 rework-claims journal ───
+
+/// C-1b：指令消费中断等待事实（对账落账；Task 12 投影 kind
+/// `instruction_claim_interrupted` 的数据源）。
+///
+/// 语义：claim 存在（含消费标记）而其 node 无 role run 输出——消费标记
+/// 落地后、spawn 前中断（Window B），指令已消费却从未进入任何 prompt。
+/// 下一次 coder 重驱以 claim.instruction_ids 强制入渲染（不重写 claim、
+/// 不二次消费），重放完成后对账清除本事实。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstructionClaimInterruptedFact {
+    pub claim_id: String,
+    pub attempt_id: String,
+    pub instruction_ids: Vec<String>,
+    pub consumed_at: Option<String>,
+    pub detected_at: String,
+}
+
+/// C-1b：对账结果——被判定中断的认领及其指令／上下文备注内容（供重驱
+/// 强制入渲染；内容由调用方渲染，本结构不承载渲染产物）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterruptedClaimRender {
+    pub claim: ReworkInstructionClaim,
+    pub instructions: Vec<crate::product::coding_models::CodingReworkInstruction>,
+    pub notes: Vec<crate::product::coding_models::CodingContextNote>,
+}
+
+impl super::CodingAttemptStore {
+    fn instruction_claim_interrupted_root(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> Result<std::path::PathBuf, ProductStoreError> {
+        validate_relative_id(attempt_id)?;
+        Ok(self
+            .attempt_dir(project_id, issue_id, attempt_id)
+            .join("instruction-claim-interrupted"))
+    }
+
+    /// C-1b：列出指令消费中断等待事实（只读；Task 12 投影数据源）。
+    pub fn list_instruction_claim_interrupted_facts(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> Result<Vec<InstructionClaimInterruptedFact>, ProductStoreError> {
+        let root = self.instruction_claim_interrupted_root(project_id, issue_id, attempt_id)?;
+        if !root.is_dir() {
+            return Ok(Vec::new());
+        }
+        let mut facts: Vec<InstructionClaimInterruptedFact> = Vec::new();
+        for path in super::json_file_paths(&root)? {
+            facts.push(read_json(&path)?);
+        }
+        facts.sort_by(|left, right| left.claim_id.cmp(&right.claim_id));
+        Ok(facts)
+    }
+
+    /// C-1b 对账恢复：逐条审视 attempt 的认领 journal——
+    /// - claim 存在而其 node（指令 `consumed_by_node_id` 归因）无
+    ///   ProviderPrompt 事件（消费标记后、spawn 前中断），且无任何后续
+    ///   coder run 已把 prompt 发出（`started_at` 晚于 claim 消费时间且带
+    ///   ProviderPrompt）→ 落 `instruction-claim-interrupted/{claim_id}.json`
+    ///   等待事实，并返回该认领的指令／备注供重驱强制入渲染；
+    /// - 反之（认领自身的 run 或任一后续 run 已发出 prompt）→ 清除等待
+    ///   事实（若在），返回空。
+    ///
+    /// 不重写 claim journal、不做二次消费标记：强制回放的指令 id 不进入
+    /// 重驱路径的新认领集合。纯 context note 认领（无 node 可归因）不参与
+    /// 对账——备注为辅助上下文，BYPASS-18 的消费主对象是返修指令。
+    pub fn reconcile_interrupted_rework_claims(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> Result<Vec<InterruptedClaimRender>, ProductStoreError> {
+        use crate::product::coding_models::CodingRoleRunEventType;
+        use std::collections::HashMap;
+
+        let claims = self.list_rework_instruction_claims(project_id, issue_id, attempt_id)?;
+        if claims.is_empty() {
+            return Ok(Vec::new());
+        }
+        let instructions_by_id: HashMap<String, crate::product::coding_models::CodingReworkInstruction> = self
+            .list_rework_instructions(project_id, issue_id, attempt_id)?
+            .into_iter()
+            .map(|instruction| (instruction.id.clone(), instruction))
+            .collect();
+        let notes_by_id: HashMap<String, crate::product::coding_models::CodingContextNote> = self
+            .list_context_notes(project_id, issue_id, attempt_id)?
+            .into_iter()
+            .map(|note| (note.id.clone(), note))
+            .collect();
+        // 每个 role run 是否已发出 prompt（ProviderPrompt 事件在 provider
+        // 启动前落账——存在即证明 prompt 已真实发出）。
+        let mut run_prompted: HashMap<String, bool> = HashMap::new();
+        for run in self.list_role_runs(project_id, issue_id, attempt_id)? {
+            let prompted = self
+                .list_role_run_events(project_id, issue_id, attempt_id, &run.id)?
+                .iter()
+                .any(|event| event.event_type == CodingRoleRunEventType::ProviderPrompt);
+            run_prompted.insert(run.id.clone(), prompted);
+        }
+        let role_runs = self.list_role_runs(project_id, issue_id, attempt_id)?;
+        let fact_root = self.instruction_claim_interrupted_root(project_id, issue_id, attempt_id)?;
+
+        let mut renders = Vec::new();
+        for claim in claims {
+            // journal 落盘但消费标记缺失（Window A'）：重放命中同一认领时
+            // 幂等补齐标记，不走对账强制回放。
+            let Some(consumed_at) = claim.consumed_at.as_deref() else {
+                continue;
+            };
+            let claim_nodes: Vec<&str> = claim
+                .instruction_ids
+                .iter()
+                .filter_map(|id| {
+                    instructions_by_id
+                        .get(id)
+                        .and_then(|instruction| instruction.consumed_by_node_id.as_deref())
+                })
+                .collect();
+            if claim_nodes.is_empty() {
+                continue;
+            }
+            let own_prompted = role_runs.iter().any(|run| {
+                run.node_id.as_deref().is_some_and(|node| claim_nodes.contains(&node))
+                    && run_prompted.get(&run.id).copied().unwrap_or(false)
+            });
+            // 解析失败按未重放处理（重复投递优于静默丢失）。
+            let consumed_time = chrono::DateTime::parse_from_rfc3339(consumed_at).ok();
+            let later_prompted = role_runs.iter().any(|run| {
+                run_prompted.get(&run.id).copied().unwrap_or(false)
+                    && consumed_time
+                        .zip(chrono::DateTime::parse_from_rfc3339(&run.started_at).ok())
+                        .is_some_and(|(consumed, started)| started > consumed)
+            });
+            let fact_path = fact_root.join(format!("{}.json", claim.claim_id));
+            if own_prompted || later_prompted {
+                // 已发出 prompt（认领自身或后续重驱回放）：清除等待事实。
+                if fact_path.exists() {
+                    std::fs::remove_file(&fact_path).map_err(|error| {
+                        ProductStoreError::Io(format!(
+                            "remove {}: {error}",
+                            fact_path.display()
+                        ))
+                    })?;
+                }
+                continue;
+            }
+            let fact = InstructionClaimInterruptedFact {
+                claim_id: claim.claim_id.clone(),
+                attempt_id: claim.attempt_id.clone(),
+                instruction_ids: claim.instruction_ids.clone(),
+                consumed_at: claim.consumed_at.clone(),
+                detected_at: Utc::now().to_rfc3339(),
+            };
+            std::fs::create_dir_all(&fact_root).map_err(|error| {
+                ProductStoreError::Io(format!("create {}: {error}", fact_root.display()))
+            })?;
+            write_json(&fact_path, &fact)?;
+            let instructions = claim
+                .instruction_ids
+                .iter()
+                .filter_map(|id| instructions_by_id.get(id).cloned())
+                .collect::<Vec<_>>();
+            let notes = claim
+                .instruction_ids
+                .iter()
+                .filter_map(|id| notes_by_id.get(id).cloned())
+                .collect::<Vec<_>>();
+            renders.push(InterruptedClaimRender {
+                claim,
+                instructions,
+                notes,
+            });
+        }
+        Ok(renders)
+    }
+}

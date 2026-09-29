@@ -633,24 +633,28 @@ fn append_c2_waiting_items(
             items.push(item);
         }
 
-        // 指令消费中断（A15）：认领 journal 落盘但消费标记缺失；下一次
-        // coder 启动以同一认领与同一上下文 hash 重放（不二次消费）。
-        for claim in store.list_rework_instruction_claims(project_id, issue_id, &attempt.id)? {
-            if claim.consumed_at.is_some() {
-                continue;
-            }
+        // 指令消费中断（A15/C-1b）：恢复重驱对账落账的等待事实（claim
+        // 存在而其 node 无 role run 输出——消费标记后、spawn 前中断）；
+        // 下一次 coder 重驱以 claim.instruction_ids 强制入渲染（不重写
+        // claim、不二次消费），重放完成后对账清除事实。
+        for fact in store.list_instruction_claim_interrupted_facts(
+            project_id,
+            issue_id,
+            &attempt.id,
+        )? {
             let mut item = base(
                 C2_KIND_INSTRUCTION_CLAIM_INTERRUPTED,
                 format!(
                     "c2:instruction_claim_interrupted:{}:{}",
-                    attempt.id, claim.claim_id
+                    attempt.id, fact.claim_id
                 ),
             );
             item.reason = format!(
-                "rework instruction claim {} recorded but not consumed \
-                 (instructions {:?}); the next coder run replays the same \
-                 claim and context hash instead of consuming twice",
-                claim.claim_id, claim.instruction_ids
+                "rework instruction claim {} consumed but never entered any \
+                 prompt (instructions {:?}); the next coder re-drive \
+                 force-renders the claimed instructions instead of \
+                 consuming twice",
+                fact.claim_id, fact.instruction_ids
             );
             item.attempt_id = Some(attempt.id.clone());
             item.expected_version = Some(attempt.version);

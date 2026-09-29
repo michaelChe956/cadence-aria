@@ -542,3 +542,209 @@ async fn rework_instruction_claim_binds_render_before_consumption() {
         "unexpected conflict: {conflict:?}"
     );
 }
+
+/// C-1b（oracle 裁决）：消费标记后、spawn 前中断的认领在恢复重驱时被
+/// 对账强制回放——指令重新进入实际 prompt（不重写 claim、不二次消费），
+/// instruction_claim_interrupted 等待事实落账并在重放完成后清除。
+#[tokio::test]
+async fn interrupted_rework_claim_is_force_replayed_on_recovery_redrive() {
+    let (_root, store, attempt) = running_attempt_with_worktree();
+    // Window B 现场：上一轮返修已认领并标记消费（node coding_node_0001），
+    // 但 spawn 前中断——该 attempt 无任何 role run / ProviderPrompt。
+    let instruction = crate::product::coding_models::CodingReworkInstruction {
+        id: "coding_rework_instruction_0001".to_string(),
+        attempt_id: attempt.id.clone(),
+        source_stage: CodingExecutionStage::CodeReview,
+        rework_round: 1,
+        summary: "补齐缺失校验".to_string(),
+        fix_hints: vec!["src/lib.rs:42 missing validation -> add validation".to_string()],
+        questions: Vec::new(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        consumed_by_node_id: None,
+        consumed_at: None,
+    };
+    store
+        .save_rework_instruction(&attempt, &instruction)
+        .expect("seed interrupted instruction");
+    let claimed = store
+        .claim_and_consume_rework_instructions(
+            &attempt,
+            "coding_node_0001",
+            1,
+            "上一轮完整 prompt（渲染后中断，未发出）",
+            None,
+            &["coding_rework_instruction_0001".to_string()],
+        )
+        .expect("claim as the interrupted run");
+    let crate::product::coding_attempt_store::ReworkClaimOutcome::Claimed { claim } = claimed
+    else {
+        panic!("first claim must be Claimed");
+    };
+
+    // 对账：判中断 → 落等待事实＋返回强制回放指令。
+    let renders = store
+        .reconcile_interrupted_rework_claims(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("reconcile");
+    assert_eq!(renders.len(), 1, "exactly the interrupted claim: {renders:?}");
+    assert_eq!(renders[0].claim.claim_id, claim.claim_id);
+    assert_eq!(renders[0].instructions.len(), 1);
+    assert_eq!(renders[0].instructions[0].id, instruction.id);
+    let facts = store
+        .list_instruction_claim_interrupted_facts(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+        )
+        .expect("interrupted facts");
+    assert_eq!(facts.len(), 1);
+    assert_eq!(facts[0].claim_id, claim.claim_id);
+    assert_eq!(facts[0].instruction_ids, claim.instruction_ids);
+
+    // 恢复重驱（execute_rework 路径）：渲染新指令的同时，把中断认领的
+    // 指令强制回放进实际发送 prompt。
+    let attempt = store
+        .update_attempt_stage(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingExecutionStage::CodeReview,
+        )
+        .expect("code review stage");
+    let (tx, _rx) = mpsc::channel(16);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let provider = super::provider_driven::ReviewerDrivenReworkProvider::default();
+    let (_command_tx, mut command_rx) = mpsc::channel(1);
+    engine
+        .execute_coder_fix_from_review(
+            &attempt,
+            &super::provider_driven::review_report_requesting_changes(&attempt),
+            &CodingExecutionContext::default(),
+            &provider,
+            &mut command_rx,
+        )
+        .await
+        .expect("re-drive after interruption");
+
+    let input = provider.recorded_input();
+    assert!(
+        input.prompt.contains("中断认领强制回放"),
+        "forced replay section must enter the actual prompt: {}",
+        input.prompt
+    );
+    assert!(input.prompt.contains("missing validation"));
+
+    // 不重写 claim、不二次消费：中断认领原样保留；新认领只绑定新指令。
+    let claims_after = store
+        .list_rework_instruction_claims(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("claims after re-drive");
+    assert_eq!(claims_after.len(), 2, "{claims_after:?}");
+    assert!(
+        claims_after.iter().any(|record| record.claim_id == claim.claim_id
+            && record.rendered_prompt_digest == claim.rendered_prompt_digest
+            && record.context_hash == claim.context_hash),
+        "interrupted claim must not be rewritten"
+    );
+    let new_claim = claims_after
+        .iter()
+        .find(|record| record.claim_id != claim.claim_id)
+        .expect("re-drive claim");
+    assert_eq!(
+        new_claim.instruction_ids,
+        vec!["coding_rework_instruction_0002".to_string()],
+        "forced replay ids must not enter the new claim set: {new_claim:?}"
+    );
+
+    // 重放完成后（本次重驱 run 已发 ProviderPrompt）：对账清除等待事实。
+    let renders_after = store
+        .reconcile_interrupted_rework_claims(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("reconcile after replay");
+    assert!(renders_after.is_empty(), "{renders_after:?}");
+    let facts_after = store
+        .list_instruction_claim_interrupted_facts(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+        )
+        .expect("facts after replay");
+    assert!(facts_after.is_empty(), "waiting fact cleared after replay");
+}
+
+/// C-1b 对账边界：认领自身 run 已发 ProviderPrompt（正常流）→ 不判中断、
+/// 不落事实；纯 context note 认领无 node 可归因，不参与对账。
+#[tokio::test]
+async fn reconcile_skips_prompted_claims_and_note_only_claims() {
+    let (_root, store, attempt) = running_attempt_with_worktree();
+    let instruction = crate::product::coding_models::CodingReworkInstruction {
+        id: "coding_rework_instruction_0001".to_string(),
+        attempt_id: attempt.id.clone(),
+        source_stage: CodingExecutionStage::CodeReview,
+        rework_round: 1,
+        summary: "正常流指令".to_string(),
+        fix_hints: vec!["按计划修复".to_string()],
+        questions: Vec::new(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        consumed_by_node_id: None,
+        consumed_at: None,
+    };
+    store
+        .save_rework_instruction(&attempt, &instruction)
+        .expect("seed instruction");
+    store
+        .claim_and_consume_rework_instructions(
+            &attempt,
+            "coding_node_0001",
+            1,
+            "正常流完整 prompt",
+            None,
+            &["coding_rework_instruction_0001".to_string()],
+        )
+        .expect("claim");
+    // 认领 node 的 role run 已发出 prompt：正常流，非中断。
+    let run = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::Coding,
+            CodingProviderRole::Coder,
+            CodingRoleRunTrigger::Initial,
+            Some("coding_node_0001".to_string()),
+        )
+        .expect("role run");
+    store
+        .append_role_run_event(
+            &attempt,
+            &run,
+            crate::product::coding_models::CodingRoleRunEventType::ProviderPrompt,
+            serde_json::json!({ "prompt": "正常流完整 prompt" }),
+        )
+        .expect("provider prompt event");
+    let renders = store
+        .reconcile_interrupted_rework_claims(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("reconcile");
+    assert!(renders.is_empty(), "prompted claim is not interrupted");
+    assert!(store
+        .list_instruction_claim_interrupted_facts(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("facts")
+        .is_empty());
+
+    // 纯 context note 认领：无 node 归因，不参与对账（备注为辅助上下文）。
+    let note = store
+        .create_context_note(&attempt, "补充上下文备注".to_string())
+        .expect("context note");
+    store
+        .claim_and_consume_rework_instructions(
+            &attempt,
+            "coding_node_0002",
+            2,
+            &format!("含备注的完整 prompt：{}", note.content),
+            None,
+            &[note.id.clone()],
+        )
+        .expect("note-only claim");
+    let renders = store
+        .reconcile_interrupted_rework_claims(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("reconcile with note claim");
+    assert!(
+        renders.is_empty(),
+        "note-only claims have no node attribution: {renders:?}"
+    );
+}

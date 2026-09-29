@@ -151,16 +151,55 @@ impl CodingWorkspaceEngine {
             .as_ref()
             .map(routing_reference_context_from_policy)
             .unwrap_or_default();
+        // C-1b（oracle 裁决）：恢复重驱对账 rework-claims journal——认领
+        // 存在而其 node 无 role run 输出（消费标记后、spawn 前中断）时，
+        // 以 claim.instruction_ids 强制入渲染并落 instruction_claim_interrupted
+        // 等待事实；不重写 claim、不二次消费（强制回放 id 不进本次认领集合）。
+        let interrupted_renders = self.store.reconcile_interrupted_rework_claims(
+            &updated.project_id,
+            &updated.issue_id,
+            &updated.id,
+        )?;
+        let forced_replay_lines: Vec<String> = interrupted_renders
+            .iter()
+            .flat_map(|render| {
+                let instruction_lines = render.instructions.iter().map(|instruction| {
+                    format!(
+                        "- [中断认领 {} 强制回放] {}（修复提示：{}）",
+                        render.claim.claim_id,
+                        instruction.summary,
+                        instruction.fix_hints.join("；")
+                    )
+                });
+                let note_lines = render.notes.iter().map(|note| {
+                    format!(
+                        "- [中断认领 {} 强制回放 ContextNote {}] {}",
+                        render.claim.claim_id,
+                        note.id,
+                        note.content.trim()
+                    )
+                });
+                instruction_lines.chain(note_lines).collect::<Vec<_>>()
+            })
+            .collect();
+        let forced_replay_section = if forced_replay_lines.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\n中断认领强制回放（上一轮认领后未进入任何 prompt，本轮必须优先完成）:\n{}\n",
+                forced_replay_lines.join("\n")
+            )
+        };
         let rendered_context =
             self.render_coder_unit_run_context(&updated, &coder_provider_name, None)?;
-        let delta_prompt = build_coding_delta_prompt(
+        let mut delta_prompt = build_coding_delta_prompt(
             &updated,
             context,
             Some(&instruction),
             None,
             &routing_context,
         );
-        let full_prompt = rendered_context
+        let mut full_prompt = rendered_context
             .as_ref()
             .map(|rendered| format!("{}\n\n{}", rendered.text, delta_prompt))
             .unwrap_or_else(|| {
@@ -172,6 +211,9 @@ impl CodingWorkspaceEngine {
                     &routing_context,
                 )
             });
+        // 强制回放段进实际 prompt 与 fresh prompt 各恰一次（认领绑定实际
+        // prompt 全文，含强制回放内容）。
+        full_prompt.push_str(&forced_replay_section);
         let prompt_mode = if rendered_context.is_some() || resume_provider_session_id.is_none() {
             CodingPromptMode::FullConversation
         } else {
@@ -179,7 +221,10 @@ impl CodingWorkspaceEngine {
         };
         let prompt = match prompt_mode {
             CodingPromptMode::FullConversation => full_prompt.clone(),
-            CodingPromptMode::DeltaOnly => delta_prompt,
+            CodingPromptMode::DeltaOnly => {
+                delta_prompt.push_str(&forced_replay_section);
+                delta_prompt
+            }
         };
         // C2 Task 7（#18／BYPASS-18）：先渲染后消费——完整 prompt 渲染完成
         // 后，一次可重放原子写入完成「认领→绑定渲染结果→标记消费」，最后
