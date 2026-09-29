@@ -11,6 +11,9 @@ use crate::product::work_item_revision_store::WorkItemRevisionStore;
 
 use super::runtime_impact::stable_handoff_contract_hash;
 
+/// C2 Task 6（决策 6/#13）：execution 完成时起点缺失的稳定 reason 码。
+pub(crate) const UNIT_RUN_START_COMMIT_MISSING: &str = "unit_run_start_commit_missing";
+
 #[derive(Debug, Clone)]
 enum GroupUnitCompletionMode {
     Running,
@@ -62,6 +65,26 @@ impl CodingWorkspaceEngine {
                 .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
         self.validate_attempt_issue_shared_worktree_lock_if_present(&attempt)?;
         validate_group_completion_attempt_state(&attempt)?;
+        // C2 Task 6（决策 6/#13）：完成时起点缺失 MUST NOT 按 base_branch
+        // HEAD 回填——在任何完成写入前持久化诊断并停等（人工恢复后原链
+        // 继续补齐事实）。历史 UnitRun 已有 start_commit 不重算不改写。
+        if facts.run.start_commit.is_none() {
+            self.store
+                .transition_to_awaiting_manual_recovery(&attempt.id, UNIT_RUN_START_COMMIT_MISSING)
+                .map_err(|error| CodingWorkspaceEngineError::ProviderProtocol(error.to_string()))?;
+            self.store.append_manual_recovery_diagnostic(
+                &attempt,
+                UNIT_RUN_START_COMMIT_MISSING,
+                &format!(
+                    "unit run {} 完成时缺少认领前冻结的 start_commit，拒绝按 base HEAD 回填",
+                    facts.run.id
+                ),
+            )?;
+            return Err(CodingWorkspaceEngineError::ProviderStream(format!(
+                "{UNIT_RUN_START_COMMIT_MISSING}: {}",
+                facts.run.id
+            )));
+        }
         let attempt = match &facts.mode {
             GroupUnitCompletionMode::Running => {
                 self.record_current_group_unit_completion_head(&attempt, &facts.active)
@@ -84,21 +107,6 @@ impl CodingWorkspaceEngine {
         let completion_commit = attempt.head_commit.as_deref().ok_or_else(|| {
             CodingWorkspaceEngineError::CompletionCommitMissing(attempt.id.clone())
         })?;
-        if facts.run.execution_no == 1 && facts.run.start_commit.is_none() {
-            let worktree_path = attempt
-                .worktree_path
-                .as_ref()
-                .ok_or_else(|| CodingWorkspaceEngineError::MissingWorktree(attempt.id.clone()))?;
-            let base_head = self
-                ._git_service
-                .git_ref_head(worktree_path, &attempt.base_branch)
-                .await?;
-            self.store.backfill_coding_unit_run_start_commit(
-                &attempt,
-                &facts.run.id,
-                &base_head,
-            )?;
-        }
         let completed_run =
             self.store
                 .complete_coding_unit_run(&attempt, &facts.run.id, completion_commit)?;

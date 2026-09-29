@@ -50,6 +50,10 @@ impl CodingWorkspaceEngine {
                 attempt.id.clone(),
             ));
         };
+        // C2 Task 6（决策 6/#13）：admission 通过后、role run 创建前冻结
+        // 当时 worktree 真实 HEAD 为本次 execution 的 start_commit。
+        self.freeze_active_unit_run_start_commit(&attempt, worktree_path)
+            .await?;
         let attempt = self.store.update_attempt_stage(
             &attempt.project_id,
             &attempt.issue_id,
@@ -483,6 +487,35 @@ impl CodingWorkspaceEngine {
             created_at: completed_at,
         };
         self.save_and_emit_chat_entry(attempt, entry).await;
+    }
+
+    /// C2 Task 6（决策 6/#13）：认领前冻结真实 HEAD。仅组 attempt 有活跃
+    /// unit run；重试 execution 的 `start_commit` 为 None 时，把 admission
+    /// 通过后的 worktree 真实 HEAD 写为自身起点（write-if-none：同
+    /// execution 已有 start 时不覆盖，重连／恢复不改写起点）。初始
+    /// execution 的起点由 `start_attempt` 落下的 `attempt.head_commit` 在
+    /// run 物化时携带，同样是认领前事实。
+    pub(crate) async fn freeze_active_unit_run_start_commit(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        worktree_path: &std::path::Path,
+    ) -> Result<(), CodingWorkspaceEngineError> {
+        if attempt.scope != crate::product::coding_models::CodingAttemptScope::WorkItemGroup {
+            return Ok(());
+        }
+        let run = match self.store.get_active_unit_run(attempt) {
+            Ok(run) => run,
+            // 尚未物化的初始 run：起点随 render 阶段的物化写入，此处无可冻结对象。
+            Err(ProductStoreError::NotFound { .. }) => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        if run.start_commit.is_some() {
+            return Ok(());
+        }
+        let real_head = self._git_service.git_current_head(worktree_path).await?;
+        self.store
+            .backfill_coding_unit_run_start_commit(attempt, &run.id, &real_head)?;
+        Ok(())
     }
 }
 

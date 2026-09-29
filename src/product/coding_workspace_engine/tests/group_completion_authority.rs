@@ -293,8 +293,11 @@ async fn group_completion_records_existing_coder_head_without_staging_or_commit(
     );
 }
 
+/// C2 Task 6（决策 6/#13）：execution 完成时无已记录 start_commit：
+/// MUST NOT 按 base_branch HEAD 回填——attempt 转人工恢复停等并持久化
+/// 起点缺失诊断（稳定码 unit_run_start_commit_missing），run 保持未完成。
 #[tokio::test]
-async fn group_unit_completion_backfills_first_unit_start_commit_from_base_head() {
+async fn group_unit_completion_missing_start_commit_stops_with_diagnostic_without_backfill() {
     let fixture = group_completion_fixture(false, false);
     fs::write(fixture.worktree.join("unit1.txt"), "coder-owned change\n").expect("coder change");
     run_test_git(&fixture.worktree, &["add", "unit1.txt"]);
@@ -315,23 +318,62 @@ async fn group_unit_completion_backfills_first_unit_start_commit_from_base_head(
         },
     );
 
-    let updated = fixture
+    let error = fixture
         .engine
         .complete_group_unit_after_code_review(&fixture.attempt)
         .await
-        .expect("complete first group unit");
+        .expect_err("missing start_commit must stop completion");
+    assert!(
+        error.to_string().contains("unit_run_start_commit_missing"),
+        "{error}"
+    );
+    let persisted_attempt = fixture
+        .store
+        .get_attempt(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+        )
+        .expect("attempt after stop");
+    assert_eq!(
+        persisted_attempt.status,
+        CodingAttemptStatus::AwaitingManualRecovery
+    );
+    assert_eq!(
+        persisted_attempt.manual_recovery_reason.as_deref(),
+        Some("unit_run_start_commit_missing")
+    );
     let persisted_run = fixture
         .store
-        .list_coding_unit_runs(&updated, &source_run.unit_id)
+        .list_coding_unit_runs(&persisted_attempt, &source_run.unit_id)
         .expect("source runs")
         .into_iter()
         .find(|run| run.id == source_run.id)
         .expect("source run");
-
-    assert_eq!(
-        persisted_run.start_commit.as_deref(),
-        Some(fixture.original_head.as_str())
+    assert!(
+        persisted_run.start_commit.is_none(),
+        "MUST NOT 按 base HEAD 回填：{:?}",
+        persisted_run.start_commit
     );
+    assert_eq!(persisted_run.status, CodingUnitRunStatus::Running);
+    let diagnostics = fixture
+        .store
+        .list_chat_entries(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+        )
+        .expect("chat entries");
+    assert!(diagnostics.iter().any(|entry| {
+        matches!(
+            &entry.entry_type,
+            crate::product::coding_models::CodingEntryType::SystemEvent {
+                event_type,
+                message
+            } if event_type == "manual_recovery_transition"
+                && message.contains("unit_run_start_commit_missing")
+        )
+    }));
 }
 
 #[tokio::test]
@@ -846,6 +888,92 @@ async fn coding_plan_repair_group_completion_recovers_completed_run_without_new_
     assert_eq!(handoff, existing_handoff);
 }
 
+/// C2 Task 6（决策 6/#13）：重试 execution 的 start_commit 不继承旧值；
+/// 认领前以当时 worktree 真实 HEAD（含用户人工 WIP 提交）冻结为自身
+/// 起点；零提交完成＝空区间（start==completion），人工提交不归属当前
+/// Work Item；同 execution 重复冻结不改写起点。
+#[tokio::test]
+async fn retry_execution_freezes_real_head_and_empty_range_excludes_manual_wip() {
+    let fixture = group_completion_fixture(false, false);
+    let prior = create_authoritative_active_run(
+        &fixture,
+        "coding_unit_run_0001",
+        1,
+        CodingUnitRunStatus::Running,
+        None,
+        None,
+    );
+    // 前一 execution 失败后，用户在工作树留下人工提交（不属于本 Work Item）。
+    fs::write(fixture.worktree.join("manual-wip.txt"), "human wip\n").expect("manual wip");
+    run_test_git(&fixture.worktree, &["add", "manual-wip.txt"]);
+    run_test_git(
+        &fixture.worktree,
+        &["commit", "-m", "manual wip outside coding"],
+    );
+    let manual_head = git_stdout(&fixture.worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+
+    let retry = fixture
+        .store
+        .create_retry_coding_unit_run(&fixture.attempt, &prior.unit_id, &prior.id)
+        .expect("retry execution");
+    assert_eq!(retry.execution_no, 2);
+    assert!(
+        retry.start_commit.is_none(),
+        "重试 execution 不继承旧 start_commit"
+    );
+
+    // 认领前冻结真实 HEAD（包含人工 WIP 提交）。
+    fixture
+        .engine
+        .freeze_active_unit_run_start_commit(&fixture.attempt, &fixture.worktree)
+        .await
+        .expect("freeze real head before claim");
+    let frozen = fixture
+        .store
+        .list_coding_unit_runs(&fixture.attempt, &retry.unit_id)
+        .expect("unit runs")
+        .into_iter()
+        .find(|run| run.id == retry.id)
+        .expect("retry run");
+    assert_eq!(frozen.start_commit.as_deref(), Some(manual_head.as_str()));
+
+    // 重连／恢复同一 execution：起点保持不变（不覆盖为新含义）。
+    fixture
+        .engine
+        .freeze_active_unit_run_start_commit(&fixture.attempt, &fixture.worktree)
+        .await
+        .expect("re-freeze keeps the recorded start");
+    let refrozen = fixture
+        .store
+        .list_coding_unit_runs(&fixture.attempt, &retry.unit_id)
+        .expect("unit runs")
+        .into_iter()
+        .find(|run| run.id == retry.id)
+        .expect("retry run");
+    assert_eq!(
+        refrozen.start_commit.as_deref(),
+        Some(manual_head.as_str())
+    );
+
+    // 零提交完成：区间为空（start==completion），人工提交不进入当前 Work Item。
+    let completed = fixture
+        .store
+        .complete_coding_unit_run(&fixture.attempt, &retry.id, &manual_head)
+        .expect("zero-commit completion");
+    let changed_files = fixture
+        .engine
+        .changed_files_for_unit_completion_range(&fixture.attempt, &completed)
+        .await
+        .expect("empty completion range");
+    assert!(
+        changed_files.is_empty(),
+        "人工 WIP 提交不归属当前 Work Item：{changed_files:?}"
+    );
+}
+
 include!("group_completion_recovery.rs");
 include!("runtime_handoff_group_completion.rs");
 include!("runner_fallback_commit.rs");
+

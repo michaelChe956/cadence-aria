@@ -252,6 +252,10 @@ impl super::CodingAttemptStore {
             retry.execution_no = prior.execution_no.saturating_add(1);
             retry.status = CodingUnitRunStatus::Running;
             retry.completion_commit = None;
+            // C2 Task 6（决策 6/#13）：重试 execution 的起点由下一次认领前
+            // 冻结的当时真实 HEAD 派生，不继承旧值——两次 execution 之间
+            // 用户在工作树留下的人工提交不得归属当前 Work Item 区间。
+            retry.start_commit = None;
             retry.operational_retry_count = prior.operational_retry_count.saturating_add(1);
             retry.created_at = now.clone();
             retry.updated_at = now;
