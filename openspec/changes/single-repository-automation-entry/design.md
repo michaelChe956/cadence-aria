@@ -39,7 +39,7 @@ GET 投影与 PUT Enable 的载体判定从"`RepositoryRouting::load_for_issue` 
 
 - `Ok(None)`（单仓 issue、无 legacy 别名 LC）→ 单仓分支：读取 `IssueRecord.repo_id`（缺失→422 指明缺仓库身份），经 `find_repository`（`src/web/handlers/lifecycle/plan_preparation.rs:84` 同源物理仓解析）解析真实 `RepositoryRecord.id`，target 固定为 `EnrollmentTarget::SingleRepository { repository_id }`，且要求用户提交的 target 与之逐字节相等。
 - `Ok(Some(resolution))` → LC 分支：保持既有 `preflight_single_repository_candidate` 单 target 约束（`automation_enrollment.rs:348-351`），target 为 `LogicalCodebase` 双级身份。
-- resolver／routing 返回的冲突 → 沿用既有 `repository_routing_*` 稳定码与 4xx 映射（`repository_routing.rs:33-43`），不选择任一记录继续，不猜"最新"。
+- resolver／routing 返回的冲突 → 沿既有错误字符串 `repository_routing_source_identity_mismatch`／`repository_routing_legacy_conflict` 与 HTTP 409 映射（实际产生点 `repository_routing.rs:414-418`、`:446-449`、`:555-587`；映射 `src/web/handlers/support_parts/product_store_error.inc.rs:49-97`、`src/web/error.rs:122-125`），不将其误称为 `RepositoryRoutingErrorCode::stable_code` enum 变体，不选择任一记录继续，不猜“最新”。
 
 **选择理由：** authority 判定只有 C4 一个写面，C5 若在 GET/PUT 里重新按 manifest/selection 自判会重建双轨（§5.5 防撞要求）。物理仓身份只来自 `IssueRecord.repo_id → RepositoryRecord.id` 权威链，杜绝伪造 logical ID 或反向降级。
 
@@ -62,7 +62,7 @@ GET 投影与 PUT Enable 的载体判定从"`RepositoryRouting::load_for_issue` 
 
 把 `automation_gateway_preflight.rs` 的单 reviewer 谓词扩展为逐角色 role-chain 预检函数，GET 投影与 PUT Enable 调用同一函数（现状两处各自内联调用 reviewer 谓词，`automation_target.rs:108-114` 与 `automation_enrollment.rs:367-373`）：
 
-- **角色派生**：按真实 launch 路径的同一规则，不新增配置——plan author 与 coder 取 `EnrollmentOptions.author_provider`（`ProviderConfigSnapshot` 冻结的 author，coder 无独立配置项），plan reviewer 与 code reviewer 取 `reviewer_provider`，internal reviewer 为固定系统角色 `ProviderName::InternalReviewer`（`src/product/models/provider.rs:43`）。
+- **角色派生**：按真实 launch 路径的同一规则，不新增配置——plan author 与 coder 取 `EnrollmentOptions.author_provider`（`ProviderConfigSnapshot` 冻结的 author，coder 无独立配置项），plan reviewer 与 code reviewer 取 `reviewer_provider`；internal reviewer 从同一 reviewer 配置三值派生，类型为 `Option<ProviderName>`（`CodingRoleProviderConfigSnapshot.internal_reviewer`／`internal_reviewer_config()`）。存在 reviewer provider 时派生该 provider，缺失为 `None`，不参与谓词且不得回填 author。当前 `ProviderName` 没有单独的 internal-reviewer provider 枚举变体；`ProviderConversationRole::InternalReviewer`（`src/product/models/provider.rs:43`）只是会话角色标签，不是 provider。
 - **LC 载体**：每个 (角色, provider) 组合过既有静态谓词——`ProviderRef::from_provider_name`（`provider_gateway.rs:143`，无 gateway dialect 即 `provider_unsupported_for_gateway_launch`）＋ Codex 路由禁令（`CODEX_DANGER_FULL_ACCESS_*`，`provider_gateway.rs:1111`，与 `enforce_route_policy` 同源）。任一角色违规 → 422 `automation_role_chain_unsupported`，错误逐角色列出（角色、provider、原因）并提示更换配置／目标。
 - **单仓载体**：MUST NOT 施加 gateway 约束——resolver 判定为单仓时跳过 gateway 谓词，仅保留既有 provider 可用性校验（`provider_workspace_config`，`automation_target.rs:56-63`）；本机可用即授权（A10"单仓不误拒"）。
 - **静态≠动态**：预检只判确定性静态不支持，不探活、不实例化 provider；Enable 后运行期 503 走既有 `BlockedProviderUnavailable` 停等与通知（`autopilot_orchestrator.rs:379-388` 终态交生成准入分诊），不自动切换 provider、不盲重。
@@ -87,26 +87,30 @@ GET 投影与 PUT Enable 的载体判定从"`RepositoryRouting::load_for_issue` 
 
 单仓登记继续使用现有 Claude 初始化真实步骤链与 `git_finalize` 语义（`ClaudeRepositoryInitializer`，`initializer.rs:33`；步骤命令由 `RepositoryInitializationStepKind::command()` 定义，`types.rs:140`）。失败面补齐为可操作停等：
 
-- **失败事实已 durable**：worker 失败把 operation 置 `Failed` 并记录 `failed_step`／`error`（`operation.rs:220-267`），provider 不可用带 `provider_unavailable` 原因码（`initializer.rs:103`）；冻结输入持久在 `RepositoryInitializationOperation.input`（`types.rs:181-186`）。
-- **通知等待项**：扩展既有 waiting-items 投影家族（`C1WaitingItemDto` 的字段约定：kind/reason/completed_steps/actions，`plan_confirmed_info.rs:140-159`）增加 project 级 `repository_initialization_failed` 等待项——稳定事实 key（project+operation），内容含失败步骤、已完成步骤、结构化诊断（原因码、provider、changed paths、可重试性）与"恢复后继续"动作说明；由驾驶舱复用同一 inbox 投影消费。
-- **恢复后继续动作**：`POST /api/projects/{project_id}/repository-initializations/{operation_id}/resume`（路由命名沿既有 `.../resume` 约定，`app.rs:189/209`；携带 `command_id`）。handler 校验目标 operation 确为 `Failed` 终态，以冻结 `input` 构造**新的** operation——确定性 `operation_id = repository_initialization_{uuid5(sha1(原 operation_id + command_id))}`（格式与 `registration.rs:388` 一致），天然复用 `RepositoryInitializationOperationStore::create` 的同 id 幂等语义（`operation.rs:24-41`：同记录返回 existing、异记录 identity_mismatch），零新账本；随后走与 `create_repository`（`repository_registration.rs:305-360`）相同的 `begin_initialization → execute_initialization` 全步骤执行。原 Failed operation 及其证据只读保留。
-- **互斥与重放**：并发互斥复用 `repository_initialization_runs` registry（`repository_registration.rs:335-344`）；同 `command_id` 重放命中同一确定性 operation_id 返回同一 operation；同 git 根已有登记或正在初始化 → 既有冲突语义拒绝，不并发执行两个初始化。
-- **边界**：网关仍不可用时新 operation 再次以 `Failed` 终态停等并保留诊断，不伪造成功、不直写登记数据；pi recipe 本轮不做。
+- **失败事实已 durable**：worker 失败把 operation 置 `Failed` 并记录 `failed_step`／`error`（`operation.rs:220-267`），provider 不可用带 `provider_unavailable` 原因码（`initializer.rs:103`）；冻结输入持久在 `RepositoryInitializationOperation.input`（`types.rs:181-186`）。新增 `parent_operation_id`、`resume_command_id`、`superseded_by`（或等价 successor 关联）作为 durable linkage，旧 JSON 以默认值读入。
+- **通知等待项**：扩展既有 waiting-items 投影家族（`C1WaitingItemDto` 的字段约定：kind/reason/completed_steps/actions，`plan_confirmed_info.rs:140-159`）增加 project 级 `repository_initialization_failed` 等待项。`C1WaitingItemDto` 显式携带 `operation_id` 与 `RepositoryInitializationFailureDiagnostics`（failed step、reason code、provider、changed paths、retryable），project 条目 `issue_id` nullable/缺省，稳定事实 key 为 project+operation；由驾驶舱复用同一 inbox 投影消费。原 Failed 无 successor 时展示，后继 Completed 后原 waiting item 稳定消隐，后继 Failed 时展示最新失败链而不重复生成无关联条目。
+- **产品层恢复后继续动作**：`POST /api/projects/{project_id}/repository-initializations/{operation_id}/resume`（路由命名沿既有 `.../resume` 约定，`app.rs:189/209`；携带 `command_id`）只做 HTTP 映射，调用产品层 deterministic coordinator。coordinator 校验原 operation 为 `Failed`，按冻结 `input` 及固定 `Uuid::NAMESPACE_URL`、UTF-8 name `cadence/repository-initialization/v1\\0{original_operation_id}\\0{command_id}` 派生**新的** operation；Task 6 同步 `Cargo.toml` uuid `v5` feature 与 `Cargo.lock`。operation store 增加 project list，扫描 `repository_initializations_root(project_id)`，校验 id/project/shape/state 并按 `(created_at, operation_id)` 排序，损坏记录显式诊断。coordinator 以 registry/guard→create→execute 的顺序串起完整 Claude 步骤，不在 handler 调随机 `begin_initialization` 代替恢复。
+- **状态分流与互斥**：同 `(failed_operation_id, command_id)` 重放返回同一 successor；successor `Created` 只允许一次执行，`Running` 只读返回而不重复启动，`Completed` 只读返回成功事实，`Failed` 只读返回失败事实，用户必须再次使用新的 command 才能恢复。并发互斥复用 `repository_initialization_runs` registry；同 git 根已有登记或正在初始化 → 既有冲突语义拒绝。
+- **边界**：网关仍不可用时 successor 再次以 `Failed` 终态停等并保留诊断/parent 链，不伪造成功、不直写登记数据；pi recipe 本轮不做。
 
-**选择理由：** resume 是"新事实"而非复活旧记录，满足审计（A05"无假成功"）；确定性 id＋既有幂等 `create` 避免第二套 command 账本；复用完整步骤链保证恢复后仍走真实 Claude 初始化，无跳步旁路。
+**选择理由：** resume 是“新事实”而非复活旧记录，满足审计（A05“无假成功”）；产品层 coordinator 让 deterministic id、冻结 input、关联事实、operation list、互斥与执行具有单一原子入口；复用完整步骤链保证恢复后仍走真实 Claude 初始化，无跳步旁路。
 
-### 6. 前端切换与默认行为
+### 6. 前端切换、project waiting item 消费与默认行为
 
-前端同步 BREAKING 收敛：`web/src/api/types/lifecycle.ts` 删除 `logical_repository_id` 字段并按新错误码展示逐角色违规原因；`useIssueLifecycleGeneration.ts` Enable payload 只回传服务端投影的 `enrollment_target`；`WorkItemPlanOptionsDialog.tsx` 及等待项／通知夹具同步 target 展示与 init-failure 等待项操作。存量 JSON 多余字段按忽略读取。默认行为不变：未 Enable／Disable 的 issue 走手动链，补偿扫描零动作（A01 手动对照）。
+前端同步 BREAKING 收敛：`web/src/api/types/lifecycle.ts` 删除 `logical_repository_id` 字段并按新错误码展示逐角色违规原因；`useIssueLifecycleGeneration.ts` Enable payload 只回传服务端投影的 `enrollment_target`。`WorkItemPlanOptionsDialog.tsx` 打开自动模式时先获取 target projection，处理 loading/error/stale，manual 模式不受 target GET 失败阻断。
+
+project 级失败等待项走完整消费链：`GET /api/projects/{project_id}/repository-initializations/waiting-items` → `useWorkspaceSessionObservers.ts` 刷新 → `workspace-cockpit-projection.ts` 合并为无 issue 的 project item → `CockpitInbox.tsx` 展示 diagnostics 与“网关恢复后继续” → `cockpit-action-routing.ts` 的 project+operation `C1RecoveryActionPayload` 与 `CockpitActionFacade` → `ChatCockpitPage.tsx` sender → `POST /api/projects/{project_id}/repository-initializations/{operation_id}/resume`。item identity 使用结构化 `operation_id` 与 project，不从展示字符串反解析；动作成功后刷新 project，失败保留 durable waiting item，不乐观隐藏。`ApiRequestError.details` 保留或转换为结构化 role-chain view model。
+
+默认行为不变：未 Enable／Disable 的 issue 走手动链，补偿扫描零动作（A01 手动对照）。存量 JSON 多余字段按忽略读取，旧 target 缺失通过 legacy reader 转为可诊断 fail-closed，不阻断手动路径。
 
 ## Failure Handling and Migration
 
 - **载体／身份漂移**：issue 权威载体与 enrollment target 载体或身份不一致（含 issue 改属 LC、repo_id 变更、attempt 携带 LC snapshot 而单仓 enrollment）→ 相关动作 fail-closed 零副作用，等待项提示重新绑定；不自动迁移、不猜最新。
-- **authority 冲突**：resolver 返回 `repository_routing_source_identity_mismatch`／`repository_routing_legacy_conflict` 等 → 409 fail-closed，不选择任一记录继续（REQ-ROUTE-C5-TARGET）。
+- **authority 冲突**：resolver 返回实际错误字符串 `repository_routing_source_identity_mismatch`／`repository_routing_legacy_conflict`（产生于 `src/product/logical_codebase/repository_routing.rs:414-418`、`:446-449`、`:555-587`，HTTP 409 映射于 `src/web/handlers/support_parts/product_store_error.inc.rs:49-97` 与 `src/web/error.rs:122-125`）→ fail-closed，不选择任一记录继续；这些字符串不是 `RepositoryRoutingErrorCode::stable_code` enum 变体。
 - **预检拒绝**：422 稳定码逐角色列违规，零 enrollment 写入、零 provider 启动；GET 与 PUT 同判定。
-- **运行期 503**：Enable 后动态不可用走既有通知停等与"恢复后重试"，不自动切换 provider、不盲重、不回滚 enrollment。
-- **旧 durable 数据**：无 `target` 的旧 enrollment／旧意图按"旧代无版本化绑定"解释，自动链拒绝、手动链零回归；重新 Enable／rebind 携带 target 进入新链，旧记录只读。
-- **init resume 再失败**：保留新失败诊断并再次停等；原失败与历次 resume 记录均可追溯，Repository 记录只在真实完成时创建。
+- **运行期 503**：Enable 后动态不可用走既有通知停等与“恢复后重试”，不自动切换 provider、不盲重、不回滚 enrollment。
+- **旧 durable 数据**：无 `target` 的旧 enrollment／旧意图由显式 legacy reader 转为“旧代无绑定”可诊断结果，自动链拒绝、手动链零回归；重新 Enable／rebind 携带 target 进入新链，旧记录只读。
+- **init resume 再失败**：保留 successor 的最新失败诊断与 parent 链并再次停等；successor Completed 时原 waiting item 稳定消隐；原失败与历次 resume 记录均可追溯，Repository 记录只在真实完成时创建。
 - **兼容边界**：本 change 只改 C5 直接冲突的 requirement；C2 coding 侧恢复、C4 LC 冷启动不在此重复实现。
 
 ## Contract Traceability
@@ -125,7 +129,7 @@ GET 投影与 PUT Enable 的载体判定从"`RepositoryRouting::load_for_issue` 
 
 ## Risks / Trade-offs
 
-- **BREAKING wire 需前后端同步切换：** 落地顺序必须先删后端字段与错误码、同 PR 内切前端类型与 payload，联验以"Enable 必须携带 target"收口；存量 JSON 按忽略读保证读侧不炸。
+- **BREAKING wire 需前后端按顺序切换：** 先落后端 wire/model、resolver、project waiting HTTP，再切前端类型与消费链；Task 1 至 Task 7 完成前禁止前端先于后端部署。存量 JSON 由显式 legacy reader／serde default 诊断读取，保证读侧不炸。
 - **单仓无 gateway 预检意味着运行期失败只能停等：** 与手动单仓链的既有行为一致（手动链本就直连），A10 只要求"合法组合不误拒"，不承诺单仓零失败。
 - **resolver-first 增加只读判定的读取面：** GET/Enable 各多一次 issue/project 权威读；均为既有 store 只读操作，可接受。
 - **advance/StartCoding 逐门核对分支增多：** 分支只做"按 enrollment target 的载体分派＋身份相等断言"，不引入新状态；`validate_group_single_target` 与 `verify_current_binding` 两个既有核对点零改动，控制回归面。
