@@ -267,6 +267,554 @@ pub fn resolve_attempt_by_token(
     Err(EvidenceError::Unauthorized)
 }
 
+// ---- C2 Task 10（REQ-ENV-C2-POLICY，#17／BYPASS-17）：受限政策读取与重新授权 ----
+//
+// 页面读取／返修 run 读取／重新授权三个应用服务共用同一条 fail-closed 链：
+// attempt 冻结 envelope digest（target_snapshot.policy_digest）为唯一权威，
+// resolver（resolve_for_issue）必须解析出同 digest 的 AuthorityPolicyReference，
+// 正文经 read_policy_text_for_reference 复核 canonical SHA-256。resolver 不可
+// 用或 digest 不一致时读取与重新授权均 fail-closed 并落"政策核验"等待事实
+//（Task 12 投影 kind `policy_verification`），MUST NOT 回落成员仓路径／项目级
+// 历史布局／绝对路径猜测，MUST NOT 把政策绝对路径或正文写入 context note。
+
+/// 政策核验等待事实文件（attempt 分区，单文件最新事实）。
+const POLICY_VERIFICATION_WAITING_FILE: &str = "policy-verification.json";
+
+/// 重新授权有效时长（小时）。运行态约束由 `validate_evidence_token` 的
+/// Running 校验承担，墙钟过期是第二道防线（解析失败按已过期 fail-closed）。
+pub const POLICY_REAUTHORIZATION_TTL_HOURS: i64 = 24;
+
+/// C2 Task 10：受限政策读取/重新授权应用层错误（fail-closed 口径）。
+/// `ResolverUnavailable`／`DigestMismatch` 返回前已落政策核验等待事实。
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PolicyAccessError {
+    /// resolver 无法唯一解析（无 LC 归属、policy artifact 缺失等）。
+    #[error("policy_resolver_unavailable:{detail}")]
+    ResolverUnavailable { detail: String },
+    /// resolver 当前 digest 与 attempt 冻结 envelope digest 不一致。
+    #[error("policy_digest_mismatch:expected:{expected}:actual:{actual}")]
+    DigestMismatch { expected: String, actual: String },
+    /// 令牌无效或已被替换（Unauthorized 口径）。
+    #[error("policy_unauthorized")]
+    Unauthorized,
+    /// 错 role／过期／claims 缺失或 digest 不匹配——提示重新授权。
+    #[error("policy_forbidden:{reason}")]
+    Forbidden { reason: String },
+    /// 同 command 异 payload（请刷新）。
+    #[error("policy_command_conflict:{detail}")]
+    CommandConflict { detail: String },
+    /// expected 版本与 durable 版本不符（请刷新）。
+    #[error("policy_version_conflict:expected:{expected}:actual:{actual}")]
+    VersionConflict { expected: u64, actual: u64 },
+    /// 材料缺失（无 target snapshot 等）或状态不在等待面。
+    #[error("policy_not_available:{reason}")]
+    NotAvailable { reason: String },
+    /// 低层 reader fail-closed（错误详情字符串化，保 Clone/Eq）。
+    #[error("policy_read_failed:{detail}")]
+    ReadFailed { detail: String },
+    /// 服务端 IO 失败。
+    #[error("policy_io:{message}")]
+    Io { message: String },
+}
+
+impl From<EvidenceError> for PolicyAccessError {
+    fn from(error: EvidenceError) -> Self {
+        match error {
+            EvidenceError::Unauthorized => Self::Unauthorized,
+            EvidenceError::Forbidden => Self::Forbidden {
+                reason: "attempt_not_running".to_string(),
+            },
+            EvidenceError::NotAvailable => Self::NotAvailable {
+                reason: "evidence_not_available".to_string(),
+            },
+            EvidenceError::Io { message } => Self::Io { message },
+            other => Self::Io {
+                message: other.to_string(),
+            },
+        }
+    }
+}
+
+impl From<crate::product::logical_codebase::repository_routing::PolicyReadError>
+    for PolicyAccessError
+{
+    fn from(error: crate::product::logical_codebase::repository_routing::PolicyReadError) -> Self {
+        Self::ReadFailed {
+            detail: error.to_string(),
+        }
+    }
+}
+
+/// C2 Task 10：政策核验等待事实（fail-closed 落账；Task 12 投影
+/// kind `policy_verification`）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct PolicyVerificationWaitingRecord {
+    pub attempt_id: String,
+    pub reason_code: String,
+    pub detail: String,
+    pub policy_digest: Option<String>,
+    pub created_at: String,
+}
+
+fn policy_verification_waiting_path(
+    paths: &ProductAppPaths,
+    attempt: &CodingExecutionAttempt,
+) -> PathBuf {
+    paths
+        .issue_lifecycle_root(&attempt.project_id, &attempt.issue_id)
+        .join("coding-attempts")
+        .join(&attempt.id)
+        .join(POLICY_VERIFICATION_WAITING_FILE)
+}
+
+/// 读取政策核验等待事实（只读；无事实返回 `None`）。
+pub fn load_policy_verification_waiting_fact(
+    paths: &ProductAppPaths,
+    attempt: &CodingExecutionAttempt,
+) -> Result<Option<PolicyVerificationWaitingRecord>, EvidenceError> {
+    let path = policy_verification_waiting_path(paths, attempt);
+    if !path.exists() {
+        return Ok(None);
+    }
+    read_json(&path).map_err(|error| EvidenceError::Io {
+        message: format!("read policy verification waiting fact {}: {error}", path.display()),
+    })
+}
+
+fn land_policy_verification_waiting_fact(
+    paths: &ProductAppPaths,
+    attempt: &CodingExecutionAttempt,
+    reason_code: &str,
+    detail: String,
+    policy_digest: Option<String>,
+) -> Result<(), EvidenceError> {
+    let record = PolicyVerificationWaitingRecord {
+        attempt_id: attempt.id.clone(),
+        reason_code: reason_code.to_string(),
+        detail,
+        policy_digest,
+        created_at: Utc::now().to_rfc3339(),
+    };
+    write_json(&policy_verification_waiting_path(paths, attempt), &record).map_err(|error| {
+        EvidenceError::Io {
+            message: format!("write policy verification waiting fact: {error}"),
+        }
+    })
+}
+
+fn clear_policy_verification_waiting_fact(
+    paths: &ProductAppPaths,
+    attempt: &CodingExecutionAttempt,
+) {
+    let path = policy_verification_waiting_path(paths, attempt);
+    if path.exists() && let Err(error) = std::fs::remove_file(&path) {
+        tracing::warn!(
+            %error,
+            attempt_id = %attempt.id,
+            "remove policy verification waiting fact failed; stale fact stays readable"
+        );
+    }
+}
+
+fn policy_access_io(message: String) -> PolicyAccessError {
+    PolicyAccessError::Io { message }
+}
+
+fn load_policy_attempt(
+    paths: &ProductAppPaths,
+    project_id: &str,
+    issue_id: &str,
+    attempt_id: &str,
+) -> Result<CodingExecutionAttempt, PolicyAccessError> {
+    CodingAttemptStore::new(paths.clone())
+        .get_attempt(project_id, issue_id, attempt_id)
+        .map_err(|error| policy_access_io(format!("load attempt {attempt_id}: {error}")))
+}
+
+fn frozen_policy_digest(attempt: &CodingExecutionAttempt) -> Result<&str, PolicyAccessError> {
+    attempt
+        .target_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.policy_digest.as_str())
+        .ok_or_else(|| PolicyAccessError::NotAvailable {
+            reason: "target_snapshot_missing".to_string(),
+        })
+}
+
+fn resolve_frozen_reference(
+    paths: &ProductAppPaths,
+    attempt: &CodingExecutionAttempt,
+) -> Result<crate::product::logical_codebase::repository_routing::AuthorityPolicyReference, PolicyAccessError> {
+    let resolution = crate::product::logical_codebase::repository_routing::RepositoryAuthorityResolver::new(paths.clone())
+        .resolve_for_issue(&attempt.project_id, &attempt.issue_id)
+        .map_err(|error| policy_access_io(format!("resolve authority: {error}")))?
+        .ok_or_else(|| PolicyAccessError::ResolverUnavailable {
+            detail: "no_lc_authority_resolution".to_string(),
+        })?;
+    resolution.policy.ok_or_else(|| PolicyAccessError::ResolverUnavailable {
+        detail: "policy_reference_missing".to_string(),
+    })
+}
+
+/// resolver 冻结一致性读取：reference digest 必须与 attempt 冻结 envelope
+/// digest 一致，正文经低层 reader 复核。
+fn read_policy_text_checked(
+    paths: &ProductAppPaths,
+    attempt: &CodingExecutionAttempt,
+) -> Result<crate::product::logical_codebase::repository_routing::PolicyTextResult, PolicyAccessError> {
+    let frozen = frozen_policy_digest(attempt)?.to_string();
+    let reference = resolve_frozen_reference(paths, attempt)?;
+    if reference.policy_digest != frozen {
+        return Err(PolicyAccessError::DigestMismatch {
+            expected: frozen,
+            actual: reference.policy_digest,
+        });
+    }
+    crate::product::logical_codebase::repository_routing::read_policy_text_for_reference(
+        paths, &reference,
+    )
+    .map_err(|error| PolicyAccessError::ReadFailed { detail: error.to_string() })
+}
+
+/// fail-closed 统一收口：ResolverUnavailable／DigestMismatch 落政策核验等待
+/// 事实后原样返回；成功路径清除等待事实。
+fn settle_policy_read(
+    paths: &ProductAppPaths,
+    attempt: &CodingExecutionAttempt,
+) -> Result<crate::product::logical_codebase::repository_routing::PolicyTextResult, PolicyAccessError> {
+    match read_policy_text_checked(paths, attempt) {
+        Ok(result) => {
+            clear_policy_verification_waiting_fact(paths, attempt);
+            Ok(result)
+        }
+        Err(error @ (PolicyAccessError::ResolverUnavailable { .. }
+        | PolicyAccessError::DigestMismatch { .. })) => {
+            let reason_code = match &error {
+                PolicyAccessError::ResolverUnavailable { .. } => "policy_resolver_unavailable",
+                _ => "policy_digest_mismatch",
+            };
+            let frozen = attempt
+                .target_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.policy_digest.clone());
+            let detail = error.to_string();
+            land_policy_verification_waiting_fact(
+                paths,
+                attempt,
+                reason_code,
+                detail,
+                frozen,
+            )
+            .map_err(|io_error| PolicyAccessError::Io {
+                message: io_error.to_string(),
+            })?;
+            Err(error)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// C2 Task 10：页面受限政策读取（blocked／rework 等待面；REST 接线 Task 12
+/// 统一）。返回正文＋三元引用（policy_id/revision/digest），不暴露宿主绝对
+/// 路径；resolver fail-closed 已落政策核验等待事实。
+pub fn read_policy_text_for_attempt(
+    paths: &ProductAppPaths,
+    project_id: &str,
+    issue_id: &str,
+    attempt_id: &str,
+) -> Result<crate::product::logical_codebase::repository_routing::PolicyTextResult, PolicyAccessError> {
+    let attempt = load_policy_attempt(paths, project_id, issue_id, attempt_id)?;
+    if !matches!(
+        attempt.status,
+        crate::product::coding_models::CodingAttemptStatus::Blocked
+            | crate::product::coding_models::CodingAttemptStatus::WaitingForHuman
+    ) {
+        return Err(PolicyAccessError::NotAvailable {
+            reason: format!("attempt_status_not_waiting_surface: {:?}", attempt.status),
+        });
+    }
+    settle_policy_read(paths, &attempt)
+}
+
+/// C2 Task 10：返修 run 运行中受限政策读取输入（HTTP body `{token, role}`）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct PolicyTextQueryInput {
+    pub token: String,
+    pub role: EvidenceRole,
+}
+
+/// C2 Task 10：返修 run 运行中受限政策读取。校验链：令牌反查 attempt
+/// （Unauthorized）→ Running＋哈希（Forbidden/Unauthorized）→ claims 存在
+/// 且 role／attempt／digest／过期全部匹配（否则 Forbidden 提示重新授权，
+/// 旧记录无 claims 不误放行）→ resolver 冻结一致性（fail-closed 落等待
+/// 事实）。拒绝维度复用 mediator 既有拒绝链语义。
+pub fn handle_policy_text_query(
+    paths: &ProductAppPaths,
+    input: &PolicyTextQueryInput,
+) -> Result<crate::product::logical_codebase::repository_routing::PolicyTextResult, PolicyAccessError> {
+    let attempt = resolve_attempt_by_token(paths, &input.token).map_err(PolicyAccessError::from)?;
+    validate_evidence_token(paths, &attempt, &input.token).map_err(PolicyAccessError::from)?;
+
+    let claims = crate::product::logical_codebase::evidence_token::load_evidence_token_claims(
+        paths,
+        &attempt,
+    )
+    .map_err(PolicyAccessError::from)?
+    .ok_or_else(|| PolicyAccessError::Forbidden {
+        reason: "policy_reauthorization_required_missing_claims".to_string(),
+    })?;
+    if claims.attempt_id != attempt.id {
+        return Err(PolicyAccessError::Forbidden {
+            reason: "policy_claims_attempt_mismatch".to_string(),
+        });
+    }
+    if claims.role != input.role.as_str() {
+        return Err(PolicyAccessError::Forbidden {
+            reason: "policy_claims_role_mismatch".to_string(),
+        });
+    }
+    if policy_authorization_expired(&claims.expires_at) {
+        return Err(PolicyAccessError::Forbidden {
+            reason: "policy_authorization_expired".to_string(),
+        });
+    }
+    let frozen = frozen_policy_digest(&attempt)?;
+    if claims.policy_digest != frozen {
+        return Err(PolicyAccessError::Forbidden {
+            reason: "policy_claims_digest_mismatch_reauthorization_required".to_string(),
+        });
+    }
+    settle_policy_read(paths, &attempt)
+}
+
+/// 墙钟过期判定：RFC3339 解析失败按已过期 fail-closed。
+fn policy_authorization_expired(expires_at: &str) -> bool {
+    chrono::DateTime::parse_from_rfc3339(expires_at)
+        .map(|expiry| chrono::Utc::now() >= expiry)
+        .unwrap_or(true)
+}
+
+/// C2 Task 10：重新授权请求（用户确认后；REST/页面接线 Task 12 统一）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct PolicyReauthorizationRequest {
+    pub command_id: String,
+    pub attempt_id: String,
+    pub role: String,
+    pub policy_digest: String,
+    pub expected_version: u64,
+}
+
+/// C2 Task 10：重新授权结果——`state` 复用 C1 `OperationState`（Accepted 签发
+/// 成功／Replayed 同 command 同 payload 重放／Rejected 版本·身份·role 不符
+///／NeedsHuman resolver fail-closed 或签发失败），`expires_at` 仅 Accepted
+/// 携带。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyReauthorizationResult {
+    pub command_id: String,
+    pub state: crate::product::models::automation::OperationState,
+    pub attempt_id: String,
+    pub reason: Option<String>,
+    pub expires_at: Option<String>,
+}
+
+/// C2 Task 10：重新授权应用服务。校验链：命令账本幂等（同 command 同
+/// payload Replayed 且不旋转令牌，异 payload 冲突）→ expected 版本 → 等待面
+/// 状态 → role ∈ {coder, reviewer} → resolver 冻结一致性（fail-closed 落
+/// 核验等待事实）→ 签发绑定 attempt＋role＋policy digest 的授权（旋转旧
+/// 令牌，旧授权立即失效），仅下一次返修 run 运行态有效。
+pub fn handle_policy_reauthorization(
+    paths: &ProductAppPaths,
+    project_id: &str,
+    issue_id: &str,
+    request: &PolicyReauthorizationRequest,
+) -> Result<PolicyReauthorizationResult, PolicyAccessError> {
+    use crate::product::coding_attempt_store::CodingAttemptCommandRecord;
+    use crate::product::models::automation::OperationState;
+
+    let attempt = load_policy_attempt(paths, project_id, issue_id, &request.attempt_id)?;
+    let store = CodingAttemptStore::new(paths.clone());
+    let payload_digest = format!(
+        "policy_reauthorization|{}|{}|{}|{}|{}|{}",
+        attempt.project_id,
+        attempt.issue_id,
+        attempt.id,
+        request.role,
+        request.policy_digest,
+        request.expected_version
+    );
+    let result = |state: OperationState, reason: Option<String>, expires_at: Option<String>| {
+        PolicyReauthorizationResult {
+            command_id: request.command_id.clone(),
+            state,
+            attempt_id: attempt.id.clone(),
+            reason,
+            expires_at,
+        }
+    };
+    let ledger_record = |state: OperationState| CodingAttemptCommandRecord {
+        command_id: request.command_id.clone(),
+        payload_digest: payload_digest.clone(),
+        state,
+        recorded_at: Utc::now().to_rfc3339(),
+    };
+    let append_ledger =
+        |state: OperationState| -> Result<(), PolicyAccessError> {
+            store
+                .append_attempt_command_result(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    &attempt.id,
+                    &ledger_record(state),
+                )
+                .map(|_| ())
+                .map_err(|error| policy_access_io(format!("append command ledger: {error}")))
+        };
+
+    // 命令账本幂等：同 command 同 payload 重放首次 durable 结果（Accepted →
+    // Replayed，不旋转已签发令牌）；异 payload fail-closed。
+    if let Some(existing) = store
+        .find_attempt_command_result(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &request.command_id,
+        )
+        .map_err(|error| policy_access_io(format!("read command ledger: {error}")))?
+    {
+        if existing.payload_digest != payload_digest {
+            return Err(PolicyAccessError::CommandConflict {
+                detail: "同 command 异 payload，请刷新后重试".to_string(),
+            });
+        }
+        if existing.state == OperationState::Accepted {
+            return Ok(result(OperationState::Replayed, None, None));
+        }
+    }
+
+    // 版本校验：错版本 Rejected（请刷新），不改变 attempt、不签发。
+    if attempt.version != request.expected_version {
+        append_ledger(OperationState::Rejected)?;
+        return Ok(result(
+            OperationState::Rejected,
+            Some(format!(
+                "expected version {} but durable version is {}",
+                request.expected_version, attempt.version
+            )),
+            None,
+        ));
+    }
+    // 等待面状态校验：重新授权只在 blocked／rework 等待面提供。
+    if !matches!(
+        attempt.status,
+        crate::product::coding_models::CodingAttemptStatus::Blocked
+            | crate::product::coding_models::CodingAttemptStatus::WaitingForHuman
+    ) {
+        append_ledger(OperationState::Rejected)?;
+        return Ok(result(
+            OperationState::Rejected,
+            Some(format!(
+                "attempt_status_not_waiting_surface: {:?}",
+                attempt.status
+            )),
+            None,
+        ));
+    }
+    // role 校验：仅 coder／reviewer 可被授权。
+    if request.role != "coder" && request.role != "reviewer" {
+        append_ledger(OperationState::Rejected)?;
+        return Ok(result(
+            OperationState::Rejected,
+            Some(format!("invalid_role: {}", request.role)),
+            None,
+        ));
+    }
+
+    // resolver 冻结一致性：不可解析／digest 不一致（含请求 digest 与冻结
+    // envelope 不符）→ NeedsHuman fail-closed，落核验等待事实，不签发。
+    let frozen = match frozen_policy_digest(&attempt) {
+        Ok(frozen) => frozen.to_string(),
+        Err(error) => {
+            append_ledger(OperationState::NeedsHuman)?;
+            return Ok(result(OperationState::NeedsHuman, Some(error.to_string()), None));
+        }
+    };
+    match resolve_frozen_reference(paths, &attempt) {
+        Ok(reference) if reference.policy_digest == frozen && request.policy_digest == frozen => {}
+        Ok(reference) => {
+            let mismatch = if reference.policy_digest != frozen {
+                PolicyAccessError::DigestMismatch {
+                    expected: frozen.clone(),
+                    actual: reference.policy_digest,
+                }
+            } else {
+                PolicyAccessError::DigestMismatch {
+                    expected: frozen.clone(),
+                    actual: request.policy_digest.clone(),
+                }
+            };
+            land_policy_verification_waiting_fact(
+                paths,
+                &attempt,
+                "policy_digest_mismatch",
+                mismatch.to_string(),
+                Some(frozen),
+            )
+            .map_err(|error| policy_access_io(error.to_string()))?;
+            append_ledger(OperationState::NeedsHuman)?;
+            return Ok(result(OperationState::NeedsHuman, Some(mismatch.to_string()), None));
+        }
+        Err(error @ PolicyAccessError::ResolverUnavailable { .. }) => {
+            land_policy_verification_waiting_fact(
+                paths,
+                &attempt,
+                "policy_resolver_unavailable",
+                error.to_string(),
+                Some(frozen),
+            )
+            .map_err(|io_error| policy_access_io(io_error.to_string()))?;
+            append_ledger(OperationState::NeedsHuman)?;
+            return Ok(result(OperationState::NeedsHuman, Some(error.to_string()), None));
+        }
+        Err(error) => {
+            append_ledger(OperationState::NeedsHuman)?;
+            return Ok(result(OperationState::NeedsHuman, Some(error.to_string()), None));
+        }
+    }
+
+    // 签发：绑定 attempt＋role＋policy digest，仅下一次返修 run 运行态有效。
+    if attempt.worktree_path.is_none() {
+        append_ledger(OperationState::NeedsHuman)?;
+        return Ok(result(
+            OperationState::NeedsHuman,
+            Some("attempt_worktree_unknown".to_string()),
+            None,
+        ));
+    }
+    let expires_at = (Utc::now() + chrono::Duration::hours(POLICY_REAUTHORIZATION_TTL_HOURS))
+        .to_rfc3339();
+    if let Err(error) = crate::product::logical_codebase::evidence_token::issue_policy_reauthorization(
+        paths,
+        &attempt,
+        &request.role,
+        &frozen,
+        expires_at.clone(),
+    ) {
+        append_ledger(OperationState::NeedsHuman)?;
+        return Ok(result(
+            OperationState::NeedsHuman,
+            Some(format!("issue policy reauthorization failed: {error}")),
+            None,
+        ));
+    }
+
+    clear_policy_verification_waiting_fact(paths, &attempt);
+    append_ledger(OperationState::Accepted)?;
+    Ok(result(OperationState::Accepted, None, Some(expires_at)))
+}
+
 /// 列出 `root` 下全部子目录（不存在视为空；非 UTF-8 名称跳过）。
 fn child_directories(root: &Path) -> Result<Vec<PathBuf>, EvidenceError> {
     let entries = match std::fs::read_dir(root) {

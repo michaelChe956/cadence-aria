@@ -141,7 +141,9 @@ use std::path::PathBuf;
 use crate::product::logical_codebase::aggregate_index::{
     AggregateIndexError, AggregateIndexStatus, AggregateIndexStore,
 };
-use crate::product::logical_codebase::policy::AggregatePolicyArtifactStore;
+use crate::product::logical_codebase::policy::{
+    AggregatePolicyArtifact, AggregatePolicyArtifactStore,
+};
 use crate::product::logical_codebase::types::{LogicalRepositoryId, RepositoryCheckoutId};
 
 /// 代码库 target kind（C4）：`single_repo` 与 `logical` 同级且互斥。
@@ -739,6 +741,162 @@ fn read_authority_aggregate_index(
     })
 }
 
+/// C2 Task 10（REQ-ENV-C2-POLICY）：受限政策读取错误。resolver 无法唯一
+/// 解析／身份或 digest 不一致一律 fail-closed——调用方（evidence mediator
+/// 应用服务）落"政策核验"等待事实，MUST NOT 回落到成员仓路径、项目级
+/// 历史布局或绝对路径猜测。
+#[derive(Debug, thiserror::Error)]
+pub enum PolicyReadError {
+    /// policy_id 结构不可解析，或引用指向的 LC 子树无 policy artifact
+    /// （resolver 不可用口径）。
+    #[error("policy_reference_unavailable:{detail}")]
+    Unavailable { detail: String },
+    /// policy_id／revision／authority root 与 artifact 身份不一致（引用被
+    /// 串改或指向错误子树）。
+    #[error("policy_identity_mismatch:{detail}")]
+    IdentityMismatch { detail: String },
+    /// 正文 canonical SHA-256 与引用 digest 不一致（政策已升级，冻结引用
+    /// 过期）。
+    #[error("policy_digest_mismatch:expected:{expected}:actual:{actual}")]
+    DigestMismatch { expected: String, actual: String },
+    /// 底层 durable store 读失败。
+    #[error("policy_read_store_error:{0}")]
+    Store(#[from] ProductStoreError),
+}
+
+/// C2 Task 10：受限政策读取结果——与引用同 digest 的政策正文＋三元引用；
+/// 不携带宿主绝对路径。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PolicyTextResult {
+    pub policy_id: String,
+    pub policy_revision: u64,
+    pub policy_digest: String,
+    pub text: String,
+}
+
+/// C2 Task 10：以 `resolve_for_issue` 产出的 `AuthorityPolicyReference` 为
+/// 输入读取同 digest 政策正文。
+///
+/// `policy_id` 形如 `policy/{project_id}/{manifest 身份}/{revision}`
+/// （`AggregatePolicyArtifact` 构造契约；内嵌的是 manifest 身份而非子树
+/// 目录键），故解析出 project_id 后在项目全部权威 LC 子树（legacy root＋
+/// `logical-codebases/*`）中按 policy_id 恰匹配检索——恰一个匹配才继续，
+/// 零个 Unavailable、多个 IdentityMismatch，不做任何路径猜测；随后
+/// revision／authority root／digest 逐项复核，任一不一致 fail-closed。
+/// 底层 `get` 已复核 digest 是正文 canonical SHA-256。
+pub fn read_policy_text_for_reference(
+    paths: &ProductAppPaths,
+    reference: &AuthorityPolicyReference,
+) -> Result<PolicyTextResult, PolicyReadError> {
+    let segments: Vec<&str> = reference.policy_id.split('/').collect();
+    if segments.len() != 4 || segments[0] != "policy" || segments.iter().any(|s| s.is_empty()) {
+        return Err(PolicyReadError::Unavailable {
+            detail: format!("malformed policy_id: {}", reference.policy_id),
+        });
+    }
+    let project_id = segments[1];
+    validate_relative_id(project_id)?;
+
+    // 候选权威子树：legacy root（`None` scope）＋该项目全部
+    // `logical-codebases/{id}` 子树；与 legacy 同名的目录即 legacy root 本身，
+    // 跳过避免重复计数。
+    let legacy_id = crate::product::logical_codebase::store::legacy_logical_codebase_id(project_id);
+    let mut scopes: Vec<Option<String>> = vec![None];
+    if let Ok(entries) = std::fs::read_dir(paths.logical_codebases_root(project_id)) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str()
+                && name != legacy_id
+            {
+                scopes.push(Some(name.to_string()));
+            }
+        }
+    }
+
+    let mut matched: Option<(Option<String>, AggregatePolicyArtifact)> = None;
+    for scope in scopes {
+        let policy_store = match scope.as_deref() {
+            Some(lc_id) => AggregatePolicyArtifactStore::for_lc(paths.clone(), lc_id),
+            None => AggregatePolicyArtifactStore::new(paths.clone()),
+        };
+        let Some(artifact) = policy_store.get(project_id)? else {
+            continue;
+        };
+        if artifact.policy_id != reference.policy_id {
+            continue;
+        }
+        if matched.is_some() {
+            return Err(PolicyReadError::IdentityMismatch {
+                detail: format!(
+                    "policy_id {} matches multiple authority subtrees",
+                    reference.policy_id
+                ),
+            });
+        }
+        matched = Some((scope, artifact));
+    }
+    let Some((scope, artifact)) = matched else {
+        return Err(PolicyReadError::Unavailable {
+            detail: format!(
+                "no authority subtree holds policy {}",
+                reference.policy_id
+            ),
+        });
+    };
+
+    if artifact.revision != reference.policy_revision {
+        return Err(PolicyReadError::IdentityMismatch {
+            detail: format!(
+                "reference revision {} does not match artifact revision {}",
+                reference.policy_revision, artifact.revision
+            ),
+        });
+    }
+    // authority root 复核：artifact 必须来自引用冻结时的同一权威根（manifest
+    // 优先，冷启动回退 LC record.aggregate_root，与 `resolve_logical` 同口径）。
+    let logical = match scope.as_deref() {
+        Some(lc_id) => LogicalCodebaseStore::for_lc(paths.clone(), lc_id),
+        None => LogicalCodebaseStore::new(paths.clone()),
+    };
+    let manifest = logical.load_manifest(project_id)?;
+    let record_root = paths.logical_codebase_record_root(
+        project_id,
+        scope
+            .as_deref()
+            .unwrap_or(&legacy_id),
+    );
+    let record: crate::product::logical_codebase::store::LogicalCodebaseRecord =
+        crate::product::json_store::read_json(&record_root.join("record.json"))?;
+    let expected_root = manifest
+        .as_ref()
+        .map(|manifest| manifest.provider_context_root.clone())
+        .unwrap_or_else(|| record.aggregate_root.clone());
+    let expected_root = std::fs::canonicalize(&expected_root).unwrap_or(expected_root);
+    if expected_root != reference.artifact_root {
+        return Err(PolicyReadError::IdentityMismatch {
+            detail: format!(
+                "authority root {} does not match reference {}",
+                expected_root.display(),
+                reference.artifact_root.display()
+            ),
+        });
+    }
+
+    // digest 一致性：引用冻结 digest 必须等于 artifact 正文 digest（get 已
+    // 校验 digest 是正文 canonical SHA-256）。
+    if artifact.digest != reference.policy_digest {
+        return Err(PolicyReadError::DigestMismatch {
+            expected: reference.policy_digest.clone(),
+            actual: artifact.digest.clone(),
+        });
+    }
+    Ok(PolicyTextResult {
+        policy_id: artifact.policy_id,
+        policy_revision: artifact.revision,
+        policy_digest: artifact.digest,
+        text: artifact.policy_text,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1090,6 +1248,166 @@ mod tests {
             resolution.aggregate_index.status,
             Some(AggregateIndexStatus::Active)
         );
+    }
+
+    // ---- C2 Task 10：受限政策读取（REQ-ENV-C2-POLICY，#17／BYPASS-17）----
+
+    /// 最小 LC 政策 fixture：project + alpha/beta 两个 LC record + manifest +
+    /// bootstrap policy artifact + issue 归属 alpha（成员/checkout 不参与
+    /// policy 解析，policy 走 `resolve_logical` 的 None-member 分支）。
+    #[allow(clippy::type_complexity)]
+    fn policy_reader_fixture(
+        paths: &crate::product::app_paths::ProductAppPaths,
+        temp: &std::path::Path,
+    ) -> (
+        String,
+        String,
+        String,
+        AggregatePolicyArtifact,
+        std::path::PathBuf,
+    ) {
+        let project_id = create_project_fixture(paths);
+        let alpha_root = temp.join("alpha-policy-root");
+        let beta_root = temp.join("beta-policy-root");
+        std::fs::create_dir_all(&alpha_root).unwrap();
+        std::fs::create_dir_all(&beta_root).unwrap();
+        let logical = LogicalCodebaseStore::new(paths.clone());
+        let lc = logical
+            .create(
+                &project_id,
+                crate::product::logical_codebase::LogicalCodebaseCreateInput {
+                    name: "policy-alpha".to_string(),
+                    aggregate_root: alpha_root.clone(),
+                },
+            )
+            .unwrap();
+        logical
+            .create(
+                &project_id,
+                crate::product::logical_codebase::LogicalCodebaseCreateInput {
+                    name: "policy-beta".to_string(),
+                    aggregate_root: beta_root.clone(),
+                },
+            )
+            .unwrap();
+        let manifest = LogicalCodebaseManifest::new(&project_id, alpha_root, Vec::new());
+        LogicalCodebaseStore::for_lc(paths.clone(), &lc.id)
+            .save_manifest(&project_id, &manifest)
+            .unwrap();
+        let policy = AggregatePolicyArtifact::bootstrap(
+            &project_id,
+            &manifest.logical_codebase_id.to_string(),
+            "2026-09-29T00:00:00Z".to_string(),
+        );
+        AggregatePolicyArtifactStore::for_lc(paths.clone(), &lc.id)
+            .save(&project_id, &policy)
+            .unwrap();
+        let issue = crate::product::issue_store::IssueStore::new(paths.clone())
+            .create(crate::product::issue_store::CreateProductIssueInput {
+                project_id: project_id.clone(),
+                repo_id: None,
+                logical_codebase_id: Some(lc.id.clone()),
+                title: "policy read issue".to_string(),
+                description: None,
+                change_id: None,
+                base_branch: None,
+            })
+            .unwrap();
+        (
+            project_id,
+            issue.id,
+            lc.id,
+            policy,
+            beta_root,
+        )
+    }
+
+    #[test]
+    fn policy_reader_returns_same_digest_text_for_frozen_reference() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = crate::product::app_paths::ProductAppPaths::new(temp.path());
+        let (project_id, issue_id, lc_id, policy, beta_root) =
+            policy_reader_fixture(&paths, temp.path());
+
+        let frozen = RepositoryAuthorityResolver::new(paths.clone())
+            .resolve_for_issue(&project_id, &issue_id)
+            .unwrap()
+            .expect("lc resolution")
+            .policy
+            .expect("policy reference");
+
+        let result = read_policy_text_for_reference(&paths, &frozen).expect("same digest text");
+        assert_eq!(result.policy_id, policy.policy_id);
+        assert_eq!(result.policy_revision, policy.revision);
+        assert_eq!(result.policy_digest, policy.digest);
+        assert_eq!(result.text, policy.policy_text);
+        // 正文 digest 必须是返回正文的 canonical SHA-256（非自报）。
+        let recomputed = format!(
+            "sha256:{:x}",
+            sha2::Sha256::digest(result.text.as_bytes())
+        );
+        assert_eq!(recomputed, result.policy_digest);
+
+        // authority root 与引用不符（引用被串改到 beta 根）→ IdentityMismatch
+        // fail-closed，不按串改 root 猜测。
+        let tampered = AuthorityPolicyReference {
+            artifact_root: beta_root,
+            ..frozen.clone()
+        };
+        let mismatched = read_policy_text_for_reference(&paths, &tampered).unwrap_err();
+        assert!(matches!(mismatched, PolicyReadError::IdentityMismatch { .. }));
+
+        // 引用 digest 与 artifact 正文 digest 不一致（引用被串改 digest）→
+        // DigestMismatch fail-closed，不得返回正文。
+        let digest_tampered = AuthorityPolicyReference {
+            policy_digest: "sha256:tampered-digest".to_string(),
+            ..frozen.clone()
+        };
+        let digest_rejected = read_policy_text_for_reference(&paths, &digest_tampered).unwrap_err();
+        assert!(matches!(
+            digest_rejected,
+            PolicyReadError::DigestMismatch { .. }
+        ));
+
+        // 政策升级（revision 2 覆盖保存）后，旧冻结引用（revision 1）不再有
+        // 权威子树持有 → Unavailable fail-closed，不得静默返回新正文。
+        let revised =
+            policy.with_revised_policy("升级后的政策正文", "2026-09-29T01:00:00Z".to_string());
+        AggregatePolicyArtifactStore::for_lc(paths.clone(), &lc_id)
+            .save(&project_id, &revised)
+            .unwrap();
+        let stale = read_policy_text_for_reference(&paths, &frozen).unwrap_err();
+        assert!(matches!(stale, PolicyReadError::Unavailable { .. }));
+    }
+
+    #[test]
+    fn policy_reader_fail_closes_on_missing_artifact_or_malformed_reference() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = crate::product::app_paths::ProductAppPaths::new(temp.path());
+        let (project_id, _issue_id, _lc_id, _policy, _beta_root) =
+            policy_reader_fixture(&paths, temp.path());
+
+        // 引用指向不存在 artifact 的 LC → Unavailable，无路径猜测。
+        let foreign = AuthorityPolicyReference {
+            policy_id: format!("policy/{project_id}/logical_codebase_missing/1"),
+            policy_revision: 1,
+            policy_digest: "sha256:deadbeef".to_string(),
+            artifact_root: temp.path().join("alpha-policy-root"),
+        };
+        assert!(matches!(
+            read_policy_text_for_reference(&paths, &foreign),
+            Err(PolicyReadError::Unavailable { .. })
+        ));
+
+        // policy_id 结构不可解析 → Unavailable。
+        let malformed = AuthorityPolicyReference {
+            policy_id: "not-a-policy-id".to_string(),
+            ..foreign
+        };
+        assert!(matches!(
+            read_policy_text_for_reference(&paths, &malformed),
+            Err(PolicyReadError::Unavailable { .. })
+        ));
     }
 
     #[test]

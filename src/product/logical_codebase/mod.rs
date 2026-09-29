@@ -52,8 +52,12 @@ pub use aggregate_initialization_coordinator::{
 };
 pub use aggregate_initialization_store::AggregateInitializationOperationStore;
 pub use evidence_mediator::{
-    EvidenceIndexPinRecord, EvidenceQueryInput, EvidenceQueryResponse, EvidenceRole,
-    handle_evidence_query, resolve_attempt_by_token,
+    POLICY_REAUTHORIZATION_TTL_HOURS, EvidenceIndexPinRecord, EvidenceQueryInput,
+    EvidenceQueryResponse, EvidenceRole, PolicyAccessError, PolicyReauthorizationRequest,
+    PolicyReauthorizationResult, PolicyTextQueryInput, PolicyVerificationWaitingRecord,
+    handle_evidence_query, handle_policy_reauthorization, handle_policy_text_query,
+    load_policy_verification_waiting_fact, read_policy_text_for_attempt,
+    resolve_attempt_by_token,
 };
 pub use feature::LogicalCodebaseFeature;
 pub use issue_selection::{
@@ -136,10 +140,10 @@ pub use registry::{
     IdentityRegistry, IdentityRegistryEntry, IdentityRegistryState, IdentityRegistryStore,
 };
 pub use repository_routing::{
-    AuthorityAggregateIndexReference, AuthorityPolicyReference, RepositoryAuthorityResolution,
-    RepositoryAuthorityResolver, RepositoryRouting, RepositoryRoutingErrorCode,
-    RepositoryRoutingRequest, RepositoryTargetKind, ResolvedTargetIdentity,
-    resolve_issue_logical_codebase_id,
+    AuthorityAggregateIndexReference, AuthorityPolicyReference, PolicyReadError, PolicyTextResult,
+    RepositoryAuthorityResolution, RepositoryAuthorityResolver, RepositoryRouting,
+    RepositoryRoutingErrorCode, RepositoryRoutingRequest, RepositoryTargetKind,
+    ResolvedTargetIdentity, read_policy_text_for_reference, resolve_issue_logical_codebase_id,
 };
 pub(crate) use store::lc_scope_root;
 pub(crate) use store::legacy_logical_codebase_id;

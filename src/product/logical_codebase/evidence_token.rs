@@ -40,16 +40,32 @@ pub(crate) const EVIDENCE_TOKEN_RECORD_FILE: &str = "evidence-token.json";
 /// 令牌原始字节数（32 字节 → 64 位 hex）。
 const TOKEN_BYTES: usize = 32;
 
-/// Aria 侧 attempt 分区的令牌哈希记录（存 SHA-256，非明文）。
-///
-/// 字段名与设计 §4.1 一致（snake_case，serde 显式声明）。
+/// C2 Task 10（REQ-ENV-C2-POLICY）：受限政策读取授权 claims——绑定
+/// attempt＋role＋policy digest，附过期时间；仅在该次返修 run 运行态期间
+/// 有效（运行态由 `validate_evidence_token` 的 Running 校验承担）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub struct EvidenceTokenRecord {
+pub struct EvidenceTokenClaims {
     pub attempt_id: String,
-    pub token_hash: String,
-    pub created_at: String,
+    pub role: String,
+    pub policy_digest: String,
+    pub expires_at: String,
 }
+
+ /// Aria 侧 attempt 分区的令牌哈希记录（存 SHA-256，非明文）。
+ ///
+ /// 字段名与设计 §4.1 一致（snake_case，serde 显式声明）。
+ #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+ #[serde(rename_all = "snake_case")]
+ pub struct EvidenceTokenRecord {
+     pub attempt_id: String,
+     pub token_hash: String,
+     pub created_at: String,
+    /// C2 Task 10 additive：受限政策读取授权；旧记录无 claims（serde
+    /// default）→ 不支持受限读取，不得误放行。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claims: Option<EvidenceTokenClaims>,
+ }
 
 /// 生成/重写 attempt 级会话令牌：写 worktree `.aria/evidence-token`（0600）、
 /// 向仓库公共 exclude（`<repo>/.git/info/exclude`）幂等追加 `.aria/`、写 attempt 分区哈希记录，返回
@@ -73,6 +89,7 @@ pub fn issue_evidence_token(
         attempt_id: attempt.id.clone(),
         token_hash: compute_sha256(token.as_bytes()),
         created_at: Utc::now().to_rfc3339(),
+        claims: None,
     };
     write_json(&attempt_record_path(paths, attempt), &record).map_err(|error| {
         EvidenceError::Io {
@@ -124,6 +141,62 @@ fn constant_time_hash_eq(left: &str, right: &str) -> bool {
             ^ right.as_bytes().get(index).copied().unwrap_or(0)) as usize;
     }
     difference == 0
+}
+
+/// C2 Task 10：为该 attempt 的下一次返修 run 签发受限政策读取授权（旋转
+/// 旧令牌——attempt 记录被覆盖，旧授权立即失效；新记录携带 claims：绑定
+/// attempt＋role＋policy digest＋过期时间）。worktree 路径未知时只写 attempt
+/// 分区记录（worktree 令牌文件由调用方停等处理）；`.aria/` exclude 已在
+/// attempt 首次 worktree 创建时幂等追加，无需重复写入。
+pub fn issue_policy_reauthorization(
+    paths: &ProductAppPaths,
+    attempt: &CodingExecutionAttempt,
+    role: &str,
+    policy_digest: &str,
+    expires_at: String,
+) -> Result<String, EvidenceError> {
+    let token = generate_token();
+    if let Some(worktree) = attempt.worktree_path.as_deref() {
+        write_token_file(worktree, &token)?;
+    }
+    let record = EvidenceTokenRecord {
+        attempt_id: attempt.id.clone(),
+        token_hash: compute_sha256(token.as_bytes()),
+        created_at: Utc::now().to_rfc3339(),
+        claims: Some(EvidenceTokenClaims {
+            attempt_id: attempt.id.clone(),
+            role: role.to_string(),
+            policy_digest: policy_digest.to_string(),
+            expires_at,
+        }),
+    };
+    write_json(&attempt_record_path(paths, attempt), &record).map_err(|error| {
+        EvidenceError::Io {
+            message: format!("write evidence token record: {error}"),
+        }
+    })?;
+    Ok(token)
+}
+
+/// C2 Task 10：读取 attempt 分区令牌记录的受限读取授权 claims。旧记录无
+/// claims（serde default）→ `Ok(None)`：不支持受限读取，不得误放行；记录
+/// 缺失 → `Unauthorized`（与 `validate_evidence_token` 同口径）。
+pub(crate) fn load_evidence_token_claims(
+    paths: &ProductAppPaths,
+    attempt: &CodingExecutionAttempt,
+) -> Result<Option<EvidenceTokenClaims>, EvidenceError> {
+    let record_path = attempt_record_path(paths, attempt);
+    if !record_path.exists() {
+        return Err(EvidenceError::Unauthorized);
+    }
+    let record: EvidenceTokenRecord =
+        read_json(&record_path).map_err(|error| EvidenceError::Io {
+            message: format!(
+                "read evidence token record {}: {error}",
+                record_path.display()
+            ),
+        })?;
+    Ok(record.claims)
 }
 
 /// 生成 32 字节随机令牌并编码为 64 位小写 hex（两个 v4 UUID 拼接）。
