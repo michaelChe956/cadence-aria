@@ -259,6 +259,28 @@ impl IntoResponse for ApiError {
             "evidence_budget_exhausted" => StatusCode::TOO_MANY_REQUESTS,
             "evidence_query_failed" => StatusCode::SERVICE_UNAVAILABLE,
             "evidence_io" => StatusCode::INTERNAL_SERVER_ERROR,
+            // C2 oracle C-2：验证处理/重跑 REST 面引擎 reason code 直达——
+            // 验证处理 fail-closed 拒绝（422）；重跑版本/门身份过期"请刷新"
+            //（409）；其余 coding_rerun_*（不可满足 check 等）422。
+            c if c.starts_with("verification_triage_")
+                || c == "coding_rerun_gate_not_eligible"
+                || c == "coding_rerun_check_has_no_command" => {
+                StatusCode::UNPROCESSABLE_ENTITY
+            }
+            "coding_rerun_version_conflict" | "coding_rerun_gate_not_open" => {
+                StatusCode::CONFLICT
+            }
+            // C2 oracle C-2c：受限政策读取/重新授权稳定码（PolicyAccessError
+            // 直达；resolver fail-closed 停等 503，拒绝链 401/403/404/409）。
+            "policy_unauthorized" => StatusCode::UNAUTHORIZED,
+            "policy_forbidden" => StatusCode::FORBIDDEN,
+            "policy_not_available" => StatusCode::NOT_FOUND,
+            "policy_command_conflict" | "policy_version_conflict" => StatusCode::CONFLICT,
+            "policy_resolver_unavailable" | "policy_digest_mismatch" | "policy_read_failed" => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
+            // C2 oracle C-2a：验证处理记录缺失（决定面）。
+            "coding_verification_triage_not_found" => StatusCode::NOT_FOUND,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (status, Json(self)).into_response()

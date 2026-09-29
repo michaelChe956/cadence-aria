@@ -24,11 +24,11 @@ pub const WEB_ENDPOINT_FILE: &str = ".aria/web-endpoint";
 pub const EVIDENCE_QUERY_SCRIPT: &str = r#"#!/usr/bin/env bash
 # Aria C-4 跨仓只读证据查询脚本（注入到 worktree `.aria/bin/aria-evidence-query`）。
 # 用法: aria-evidence-query --role <coder|reviewer> --query <symbol>
-# 预算规则: 收到 429 即停止查询（attempt 累计配额已耗尽）。
+#      aria-evidence-query --role <coder|reviewer> --query policy   # 受限政策正文（C2）
 set -euo pipefail
 
 usage() {
-    echo "usage: $0 --role <coder|reviewer> --query <symbol>" >&2
+    echo "usage: $0 --role <coder|reviewer> --query <symbol|policy>" >&2
     exit 2
 }
 

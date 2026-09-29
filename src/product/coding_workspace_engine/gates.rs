@@ -1170,6 +1170,40 @@ impl CodingWorkspaceEngine {
             })
     }
 
+    /// C2 oracle C-2b：当前权威 plan revision 的全部绑定 check（并列证据
+    /// 数据源；复用 bound_check 同一权威解析链，不新增判定）。
+    pub(crate) fn verification_triage_bound_checks(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<Vec<crate::product::work_item_contract::VerificationCheck>, CodingWorkspaceEngineError>
+    {
+        let (_plan_revision_id, revision) = self.verification_triage_current_revision(attempt)?;
+        let revision_store =
+            crate::product::work_item_revision_store::WorkItemRevisionStore::new(self.store.paths());
+        let lineage = revision_store
+            .get_plan_lineage(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt
+                    .work_item_group_id
+                    .clone()
+                    .unwrap_or_default(),
+            )
+            .map_err(|_| {
+                CodingWorkspaceEngineError::ProviderStream(
+                    "verification_triage_check_unresolvable".to_string(),
+                )
+            })?;
+        let plan = revision_store
+            .get_verification_plan_revision(&lineage, &revision.verification_plan_revision_id)
+            .map_err(|_| {
+                CodingWorkspaceEngineError::ProviderStream(
+                    "verification_triage_check_unresolvable".to_string(),
+                )
+            })?;
+        Ok(plan.verification_checks)
+    }
+
     /// 转入验证处理（门呈现面旁入口，不进动作枚举）：要求存在开放的可
     /// 转入门（coder 输出门或 CR 三门），绑定 finding／check／plan revision
     /// 与全部证据字段；同键未决重入返回既有记录。

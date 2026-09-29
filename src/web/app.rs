@@ -340,6 +340,34 @@ pub fn build_web_router_with_evidence(state: WebAppState, evidence_enabled: bool
             post(handlers::post_coding_gate_response),
         )
         .route(
+            // C2 oracle C-2a/b/c：验证处理转入/决定、triage 记录 GET、并列
+            // 证据派生、重跑原计划命令、受限政策读取/重新授权——全部复用
+            // 既有引擎服务与 Task 2 命令账本（REST 与 WS/页面同一应用服务）。
+            "/api/projects/{project_id}/issues/{issue_id}/coding-attempts/{attempt_id}/verification-triage",
+            get(handlers::get_verification_triage_records)
+                .post(handlers::post_verification_triage_enter),
+        )
+        .route(
+            "/api/projects/{project_id}/issues/{issue_id}/coding-attempts/{attempt_id}/verification-triage/{triage_id}/decision",
+            post(handlers::post_verification_triage_decision),
+        )
+        .route(
+            "/api/projects/{project_id}/issues/{issue_id}/coding-attempts/{attempt_id}/verification-command-evidence",
+            get(handlers::get_verification_command_evidence),
+        )
+        .route(
+            "/api/projects/{project_id}/issues/{issue_id}/coding-attempts/{attempt_id}/rerun-planned-command",
+            post(handlers::post_rerun_planned_command),
+        )
+        .route(
+            "/api/projects/{project_id}/issues/{issue_id}/coding-attempts/{attempt_id}/policy-text",
+            get(handlers::get_coding_policy_text),
+        )
+        .route(
+            "/api/projects/{project_id}/issues/{issue_id}/coding-attempts/{attempt_id}/policy-reauthorization",
+            post(handlers::post_coding_policy_reauthorization),
+        )
+        .route(
             "/api/projects/{project_id}/issues/{issue_id}/coding-attempts/{attempt_id}/choices/{choice_id}/response",
             post(handlers::post_coding_choice_response),
         )

@@ -45,6 +45,36 @@ pub(crate) fn evidence_api_error(error: &EvidenceError) -> ApiError {
     }
 }
 
+/// C2 oracle C-2c：`PolicyAccessError` → 稳定码前缀表（受限政策读取/
+/// 重新授权 REST 与在跑 evidence 政策路由共用；两段式同 evidence_*）。
+pub(crate) fn policy_error_code(
+    error: &crate::product::logical_codebase::evidence_mediator::PolicyAccessError,
+) -> &'static str {
+    use crate::product::logical_codebase::evidence_mediator::PolicyAccessError;
+    match error {
+        PolicyAccessError::ResolverUnavailable { .. } => "policy_resolver_unavailable",
+        PolicyAccessError::DigestMismatch { .. } => "policy_digest_mismatch",
+        PolicyAccessError::Unauthorized => "policy_unauthorized",
+        PolicyAccessError::Forbidden { .. } => "policy_forbidden",
+        PolicyAccessError::CommandConflict { .. } => "policy_command_conflict",
+        PolicyAccessError::VersionConflict { .. } => "policy_version_conflict",
+        PolicyAccessError::NotAvailable { .. } => "policy_not_available",
+        PolicyAccessError::ReadFailed { .. } => "policy_read_failed",
+        PolicyAccessError::Io { .. } => "policy_io",
+    }
+}
+
+/// `PolicyAccessError` → 稳定码 `ApiError`（第二段在 `web/error.rs` 集中登记）。
+pub(crate) fn policy_api_error(
+    error: crate::product::logical_codebase::evidence_mediator::PolicyAccessError,
+) -> ApiError {
+    ApiError::runtime(
+        policy_error_code(&error),
+        error.to_string(),
+        json!({}),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use axum::http::StatusCode;

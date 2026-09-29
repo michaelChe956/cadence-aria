@@ -103,6 +103,15 @@ pub(crate) fn product_store_api_error(error: ProductStoreError) -> ApiError {
             "registration preflight not found or expired",
             json!({}),
         ),
+        // C2 oracle C-2a：验证处理记录缺失（决定面）→ 稳定 404 码。
+        ProductStoreError::NotFound {
+            kind: "coding_verification_triage",
+            id,
+        } => ApiError::runtime(
+            "coding_verification_triage_not_found",
+            "verification triage record not found",
+            json!({ "id": id }),
+        ),
         ProductStoreError::Conflict {
             kind: "registration_batch_candidate_identity_changed",
             ..

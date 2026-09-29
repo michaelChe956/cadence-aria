@@ -10,6 +10,7 @@
 // 取当前 ledger 值或 0）。成功路径仍由 T6 落审计，本层不重复。
 
 use axum::Json;
+use axum::response::IntoResponse;
 use axum::extract::State;
 use chrono::Utc;
 
@@ -21,19 +22,37 @@ use crate::product::logical_codebase::evidence_budget::EvidenceBudgetLedger;
 use crate::product::logical_codebase::evidence_index::EvidenceError;
 use crate::product::logical_codebase::evidence_mediator::evidence_role_label;
 use crate::product::logical_codebase::{
-    EvidenceQueryInput, EvidenceQueryResponse, handle_evidence_query, resolve_attempt_by_token,
+    EvidenceQueryInput, handle_evidence_query, resolve_attempt_by_token,
 };
 use crate::web::error::ApiResult;
 use crate::web::handlers::evidence_error_mapping::evidence_api_error;
 use crate::web::state::WebAppState;
 
+/// C2 oracle C-2（任务二）：政策正文查询保留字——在跑 coder／reviewer 经
+/// 注入脚本 `--query policy` 读取受限政策正文时，路由到
+/// `handle_policy_text_query`（Running＋claims 校验链：令牌反查→Running→
+/// claims role／attempt／digest／过期→resolver 冻结一致性），不走路由仓
+/// 证据链、不消耗 evidence 配额、不做本地路径 fallback。
+pub(crate) const POLICY_TEXT_QUERY_SENTINEL: &str = "policy";
+
 pub async fn evidence_query(
     State(state): State<WebAppState>,
     Json(input): Json<EvidenceQueryInput>,
-) -> ApiResult<Json<EvidenceQueryResponse>> {
+) -> ApiResult<axum::response::Response> {
     let paths = ProductAppPaths::new(state.workspace_root.join(".aria"));
+    if input.query.trim() == POLICY_TEXT_QUERY_SENTINEL {
+        let result = crate::product::logical_codebase::handle_policy_text_query(
+            &paths,
+            &crate::product::logical_codebase::evidence_mediator::PolicyTextQueryInput {
+                token: input.token.clone(),
+                role: input.role,
+            },
+        )
+        .map_err(crate::web::handlers::evidence_error_mapping::policy_api_error)?;
+        return Ok(axum::Json(result).into_response());
+    }
     match handle_evidence_query(&paths, &input) {
-        Ok(response) => Ok(Json(response)),
+        Ok(response) => Ok(Json(response).into_response()),
         Err(error) => {
             // 控制器裁决 1（T6 Minor-1）：被拒查询也补审计（query 留痕；
             // result_chars=0、budget_remaining 取当前 ledger 或 0）。
@@ -237,5 +256,74 @@ mod tests {
             !path.exists(),
             "unresolvable token must not append an audit entry"
         );
+    }
+
+    /// C2 oracle C-2（任务二）：在跑证据查询按政策类型路由——`--query policy`
+    /// 进入 handle_policy_text_query 的 Running＋claims 校验链：Running 且
+    /// 无 claims 时 403 policy_forbidden（提示重新授权），不落 evidence 配额。
+    #[tokio::test]
+    async fn web_evidence_policy_query_routes_to_claims_chain() {
+        let (tmp, paths, _repo, token) = fixture();
+        let state = crate::web::state::WebAppState::new(
+            tmp.path().to_path_buf(),
+            crate::web::runtime::WebRuntime::new_fake(tmp.path().to_path_buf()),
+        );
+        let response = evidence_query(
+            axum::extract::State(state),
+            axum::Json(EvidenceQueryInput {
+                token: token.clone(),
+                role: EvidenceRole::Coder,
+                query: "policy".to_string(),
+            }),
+        )
+        .await
+        .expect_err("policy query without claims must fail closed into the claims chain");
+        assert_eq!(
+            response.code, "policy_forbidden",
+            "policy sentinel must reach the claims verification chain"
+        );
+        assert!(
+            response
+                .message
+                .contains("policy_reauthorization_required_missing_claims"),
+            "rejection must point to reauthorization, got: {}",
+            response.message
+        );
+        // 不消耗 evidence 配额（政策读取不在 budget ledger 内）。
+        let budget =
+            crate::product::logical_codebase::evidence_budget::EvidenceBudgetLedger::new(
+                paths.clone(),
+            )
+            .remaining(
+                &crate::product::logical_codebase::resolve_attempt_by_token(&paths, &token)
+                    .expect("attempt resolves"),
+            )
+            .expect("budget read");
+        assert_eq!(
+            budget,
+            crate::product::logical_codebase::evidence_budget::EVIDENCE_ATTEMPT_CHAR_QUOTA
+        );
+    }
+
+    /// 非 policy 查询保持既有路由仓证据链（无 target snapshot → 404
+    /// evidence_not_available），不进入政策校验链。
+    #[tokio::test]
+    async fn web_evidence_non_policy_query_stays_on_evidence_chain() {
+        let (tmp, _paths, _repo, token) = fixture();
+        let state = crate::web::state::WebAppState::new(
+            tmp.path().to_path_buf(),
+            crate::web::runtime::WebRuntime::new_fake(tmp.path().to_path_buf()),
+        );
+        let response = evidence_query(
+            axum::extract::State(state),
+            axum::Json(EvidenceQueryInput {
+                token,
+                role: EvidenceRole::Coder,
+                query: "policy_text_for_other_symbol".to_string(),
+            }),
+        )
+        .await
+        .expect_err("non-policy query without target snapshot fails on the evidence chain");
+        assert_eq!(response.code, "evidence_not_available");
     }
 }

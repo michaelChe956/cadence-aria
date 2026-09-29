@@ -20,6 +20,14 @@ mod group;
 mod progress;
 pub(crate) mod repository_resolution;
 pub(crate) mod scope;
+mod verification_surface;
+
+pub(crate) use verification_surface::{
+    get_coding_policy_text, get_verification_command_evidence,
+    get_verification_triage_records, post_coding_policy_reauthorization,
+    post_rerun_planned_command, post_verification_triage_decision,
+    post_verification_triage_enter,
+};
 mod worktree_route;
 #[allow(unused_imports)]
 pub(crate) use advance::map_advance_outcome;

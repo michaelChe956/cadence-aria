@@ -110,6 +110,10 @@ pub(crate) use coding::{
     restart_coding_attempt,
     confirm_work_item_execution_plan, delete_coding_attempt, get_coding_attempt,
     post_coding_gate_response,
+    get_coding_policy_text, get_verification_command_evidence,
+    get_verification_triage_records, post_coding_policy_reauthorization,
+    post_rerun_planned_command, post_verification_triage_decision,
+    post_verification_triage_enter,
     request_work_item_execution_plan_change,
 };
 pub use automation_enrollment::{
