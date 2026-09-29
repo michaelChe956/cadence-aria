@@ -859,6 +859,55 @@ pub(crate) async fn abort_coding_attempt(
     Ok(Json(coding_attempt_dto(&coding_store, &aborted)?))
 }
 
+/// C2 Task 3（REQ-CRO-03）：abort 后显式 restart 的 REST 薄入口——与 WS
+/// `RestartCoding` 同一应用服务语义（命令账本→版本/终态门→租约非活跃→
+/// 清退役标记→重开 admission→spawn 新 runner）。状态映射：
+/// Accepted／Replayed→200，NeedsHuman（停等）→202，Rejected（版本／终态
+/// 不符）→409；错对象（body attempt_id 与路径不符）→400。
+pub(crate) async fn restart_coding_attempt(
+    State(state): State<WebAppState>,
+    Path(path): Path<CodingAttemptRoutePath>,
+    Json(request): Json<crate::web::coding_start::RestartCodingAttemptRequest>,
+) -> ApiResult<(axum::http::StatusCode, Json<crate::web::coding_start::RestartCodingAttemptResult>)> {
+    use axum::http::StatusCode;
+    use crate::product::models::automation::OperationState;
+
+    let app_paths = product_app_paths(&state);
+    let coding_store = CodingAttemptStore::new(app_paths.clone());
+    let attempt = resolve_coding_attempt(
+        &coding_store,
+        path.project_id.as_deref(),
+        path.issue_id.as_deref(),
+        &path.attempt_id,
+    )?;
+    if request.attempt_id != attempt.id {
+        return Err(ApiError::validation(
+            "coding_restart_attempt_mismatch",
+            "request attempt_id does not match the routed coding attempt",
+        ));
+    }
+    let result = crate::web::coding_start::restart_coding_attempt(
+        &state,
+        &attempt.project_id,
+        &attempt.issue_id,
+        request,
+    )
+    .await
+    .map_err(|error| {
+        ApiError::runtime(
+            "coding_restart_failed",
+            "coding attempt restart failed",
+            serde_json::json!({ "code": error.code(), "message": error.message() }),
+        )
+    })?;
+    let code = match result.state {
+        OperationState::NeedsHuman => StatusCode::ACCEPTED,
+        OperationState::Rejected => StatusCode::CONFLICT,
+        _ => StatusCode::OK,
+    };
+    Ok((code, Json(result)))
+}
+
 pub(crate) async fn delete_coding_attempt(
     State(state): State<WebAppState>,
     Path(path): Path<CodingAttemptRoutePath>,

@@ -20,7 +20,7 @@ use crate::product::coding_models::{
 };
 use crate::product::issue_automation_store::IssueAutomationStore;
 use crate::product::json_store::validate_relative_id;
-use crate::web::state::WebAppState;
+use crate::web::state::{CodingAttemptRunKey, WebAppState};
 
 /// 共用首启命令：`attempt_id` 定位 durable attempt；`command_id` 是首启
 /// 幂等键（durable claim 身份）；`origin` 决定授权链。
@@ -29,6 +29,25 @@ pub struct StartCodingCommand {
     pub attempt_id: String,
     pub command_id: String,
     pub origin: CodingStartOrigin,
+}
+
+/// C2 Task 3（REQ-CRO-03）：abort 后显式 restart 请求——携带稳定
+/// `command_id` 与 expected attempt 版本（幂等与 fail-closed 判据）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct RestartCodingAttemptRequest {
+    pub command_id: String,
+    pub attempt_id: String,
+    pub expected_attempt_version: u64,
+}
+
+/// C2 Task 3：restart 结果——`state` 复用 C1 `OperationState`
+/// （Accepted／Replayed／NeedsHuman 停等／Rejected 版本身份不符）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RestartCodingAttemptResult {
+    pub command_id: String,
+    pub state: crate::product::models::automation::OperationState,
+    pub attempt_id: String,
+    pub reason: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -141,6 +160,235 @@ fn first_start_short_circuit(
 }
 
 /// 共用 typed StartCoding 服务（人工 WS 与自动编排同一入口）。
+/// C2 Task 3（REQ-CRO-03）：abort 后显式 restart 应用服务（REST／WS 共用
+/// 薄入口的后端）。前置链：命令账本（同 command 同 payload 重放首次
+/// durable 结果，异 payload fail-closed）→ 版本／终态校验（Rejected 不改
+/// attempt、不启动 provider）→ 租约非活跃（Task 2 判定；活跃他人
+/// NeedsHuman）→ registry 无活跃 runner 清退役标记（StillStopping 停等）
+/// → 既有 `restart_terminal_attempt_for_execution` 重开 admission → spawn
+/// 新 runner。全程复用 Task 2 命令账本；不依赖重启服务。
+pub async fn restart_coding_attempt(
+    state: &WebAppState,
+    project_id: &str,
+    issue_id: &str,
+    request: RestartCodingAttemptRequest,
+) -> Result<RestartCodingAttemptResult, StartCodingError> {
+    use crate::product::coding_attempt_store::{
+        CodingAttemptCommandRecord, CodingAttemptStore,
+    };
+    use crate::product::coding_models::CodingAttemptStatus;
+    use crate::product::models::automation::{LeaseDisposition, OperationState};
+
+    validate_relative_id(&request.command_id).map_err(|error| StartCodingError::new(
+        "coding_restart_invalid_command_id",
+        format!("invalid restart command id: {error}"),
+    ))?;
+    let paths = ProductAppPaths::new(state.workspace_root.join(".aria"));
+    let coding_store = CodingAttemptStore::new(paths.clone());
+    let attempt = coding_store
+        .get_attempt(project_id, issue_id, &request.attempt_id)
+        .map_err(|error| StartCodingError::new(
+            "coding_restart_attempt_load_failed",
+            format!("load coding attempt for restart failed: {error}"),
+        ))?;
+
+    let payload_digest = format!(
+        "restart|{}|{}|{}|{}",
+        attempt.project_id, attempt.issue_id, attempt.id, request.expected_attempt_version
+    );
+    let rejected = |reason: String| RestartCodingAttemptResult {
+        command_id: request.command_id.clone(),
+        state: OperationState::Rejected,
+        attempt_id: attempt.id.clone(),
+        reason: Some(reason),
+    };
+    let needs_human =
+        |reason: String| RestartCodingAttemptResult {
+            command_id: request.command_id.clone(),
+            state: OperationState::NeedsHuman,
+            attempt_id: attempt.id.clone(),
+            reason: Some(reason),
+        };
+    let record = |state: OperationState| CodingAttemptCommandRecord {
+        command_id: request.command_id.clone(),
+        payload_digest: payload_digest.clone(),
+        state,
+        recorded_at: chrono::Utc::now().to_rfc3339(),
+    };
+
+    // 命令账本：同 command 同 payload 重放首次 durable 结果（Accepted 直接
+    // Replayed，不重复副作用）；异 payload fail-closed。
+    if let Some(existing) = coding_store
+        .find_attempt_command_result(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &request.command_id,
+        )
+        .map_err(coding_restart_store_error)?
+    {
+        if existing.payload_digest != payload_digest {
+            return Err(StartCodingError::new(
+                "coding_restart_command_conflict",
+                "同 command 异 payload，请刷新后重试".to_string(),
+            ));
+        }
+        if existing.state == OperationState::Accepted {
+            return Ok(RestartCodingAttemptResult {
+                command_id: request.command_id.clone(),
+                state: OperationState::Replayed,
+                attempt_id: attempt.id.clone(),
+                reason: None,
+            });
+        }
+        // 首次结果 NeedsHuman／Rejected：允许携带同 command 重试（如
+        // StillStopping 解除后），继续走完整校验链。
+    }
+
+    // 版本／终态校验：错版本或错对象 Rejected，不改变 attempt、不启动
+    // provider。
+    if attempt.version != request.expected_attempt_version {
+        let result = rejected(format!(
+            "expected version {} but durable version is {}",
+            request.expected_attempt_version, attempt.version
+        ));
+        let _ = coding_store
+            .append_attempt_command_result(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &record(OperationState::Rejected),
+            )
+            .map_err(coding_restart_store_error)?;
+        return Ok(result);
+    }
+    if !matches!(
+        attempt.status,
+        CodingAttemptStatus::Aborted | CodingAttemptStatus::Failed
+    ) {
+        let result = rejected(format!(
+            "coding_attempt_not_terminal_for_restart: {:?}",
+            attempt.status
+        ));
+        let _ = coding_store
+            .append_attempt_command_result(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &record(OperationState::Rejected),
+            )
+            .map_err(coding_restart_store_error)?;
+        return Ok(result);
+    }
+
+    // 租约非活跃：活跃他人 → 停等（已在运行／请等待）；未知 → 停等。
+    let lease = coding_store.classify_worktree_lease(project_id, issue_id);
+    if lease.disposition == LeaseDisposition::ActiveWait && lease.lease_id != attempt.id {
+        let result = needs_human(format!(
+            "coding_run_already_running: lease {} 已在运行，请等待",
+            lease.lease_id
+        ));
+        let _ = coding_store
+            .append_attempt_command_result(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &record(OperationState::NeedsHuman),
+            )
+            .map_err(coding_restart_store_error)?;
+        return Ok(result);
+    }
+
+    // registry：无活跃 runner 才清退役标记；仍在停止不可 restart。
+    let attempt_key = CodingAttemptRunKey::from_attempt(&attempt);
+    let _mutation_lease = state.coding_runs.lock_attempt_mutation(&attempt_key).await;
+    match state.coding_runs.restart_attempt(&attempt_key) {
+        crate::web::state::AttemptRestartOutcome::StillStopping => {
+            let result = needs_human(
+                "coding_restart_still_stopping: 旧运行尚未退出，请稍后重试".to_string(),
+            );
+            let _ = coding_store
+                .append_attempt_command_result(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    &attempt.id,
+                    &record(OperationState::NeedsHuman),
+                )
+                .map_err(coding_restart_store_error)?;
+            return Ok(result);
+        }
+        _ => {}
+    }
+
+    // durable 重开 admission（既有显式 restart 通道，重验路由/快照/policy）。
+    let restarted = match coding_store.restart_terminal_attempt_for_execution(
+        &attempt.project_id,
+        &attempt.issue_id,
+        &attempt.id,
+    ) {
+        Ok(updated) => updated,
+        Err(error) => {
+            // 补偿：恢复退役围栏，失败路径不弱化 abort 语义。
+            state.coding_runs.retire_attempt(&attempt_key);
+            let result = needs_human(format!("coding_restart_failed: {error}"));
+            let _ = coding_store
+                .append_attempt_command_result(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    &attempt.id,
+                    &record(OperationState::NeedsHuman),
+                )
+                .map_err(coding_restart_store_error)?;
+            return Ok(result);
+        }
+    };
+
+    // spawn 新 runner（观察通道缺失不阻塞业务事实——C2 Task 1 语义）。
+    let (event_tx, event_rx) = tokio::sync::mpsc::channel(64);
+    drop(event_rx);
+    if crate::web::coding_ws_handler::spawn_coding_runner(
+        state.clone(),
+        coding_store.clone(),
+        event_tx,
+        restarted.clone(),
+    )
+    .is_none()
+    {
+        let result = needs_human("coding_restart_runner_spawn_failed".to_string());
+        let _ = coding_store
+            .append_attempt_command_result(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &record(OperationState::NeedsHuman),
+            )
+            .map_err(coding_restart_store_error)?;
+        return Ok(result);
+    }
+
+    coding_store
+        .append_attempt_command_result(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &record(OperationState::Accepted),
+        )
+        .map_err(coding_restart_store_error)?;
+    Ok(RestartCodingAttemptResult {
+        command_id: request.command_id.clone(),
+        state: OperationState::Accepted,
+        attempt_id: attempt.id.clone(),
+        reason: None,
+    })
+}
+
+fn coding_restart_store_error(error: crate::product::json_store::ProductStoreError) -> StartCodingError {
+    StartCodingError::new(
+        "coding_restart_store_failed",
+        format!("coding restart command ledger failed: {error}"),
+    )
+}
+
 pub async fn start_coding_once(
     state: &WebAppState,
     project_id: &str,
@@ -1210,5 +1458,134 @@ mod tests {
             fixture.runner_count(&CodingAttemptRunKey::from_attempt(&attempt)),
             0
         );
+    }
+
+    /// C2 Task 3（REQ-CRO-03）：abort 置 retired 后，显式 restart 在同进程内
+    /// 清退役标记→重开 admission→spawn 新 runner，无需重启服务；同 command
+    /// 同 payload 重放首次 durable 结果（Replayed，不二次 spawn）；错版本
+    /// Rejected（不改 attempt、不启动 provider）。断言全部同步执行，被
+    /// spawn 的 runner 任务在单线程 runtime 下于测试结束前不推进。
+    #[tokio::test]
+    async fn restart_after_abort_readmits_attempt_in_same_process() {
+        use crate::product::app_paths::ProductAppPaths;
+        use crate::product::coding_attempt_store::CodingAttemptStore;
+        use crate::product::coding_models::CodingAttemptStatus;
+        use crate::product::issue_store::{CreateProductIssueInput, IssueStore};
+        use crate::product::models::automation::OperationState;
+        use crate::web::coding_start::{
+            RestartCodingAttemptRequest, restart_coding_attempt,
+        };
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().to_path_buf();
+        let state = crate::web::state::WebAppState::new(
+            root.clone(),
+            crate::web::runtime::WebRuntime::new_fake(root.clone()),
+        );
+        let paths = ProductAppPaths::new(root.join(".aria"));
+        let store = CodingAttemptStore::new(paths.clone());
+        IssueStore::new(paths.clone())
+            .create(CreateProductIssueInput {
+                project_id: "project_0001".to_string(),
+                repo_id: Some("repository_0001".to_string()),
+                logical_codebase_id: None,
+                title: "restart issue".to_string(),
+                description: None,
+                change_id: None,
+                base_branch: None,
+            })
+            .expect("issue");
+        let attempt = store
+            .create_attempt(crate::product::coding_attempt_store::CreateCodingAttemptInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                work_item_id: "work_item_0001".to_string(),
+                base_branch: "main".to_string(),
+                branch_name: "aria/restart-attempt".to_string(),
+                worktree_path: None,
+                provider_config_snapshot: crate::web::workspace_ws_types::ProviderConfigSnapshot {
+                    author: crate::product::models::ProviderName::Fake,
+                    reviewer: None,
+                    review_rounds: 0,
+                    permission_modes: Default::default(),
+                },
+                target_snapshot: None,
+                max_auto_rework: 0,
+            })
+            .expect("attempt");
+        let running = store
+            .seed_running_attempt_for_test(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+            )
+            .expect("running attempt");
+
+        // abort：registry retired ＋ durable 终态（Aborted）。
+        let key = CodingAttemptRunKey::from_attempt(&running);
+        state.coding_runs.abort_attempt(&key).await;
+        let mut aborted = running.clone();
+        aborted.status = CodingAttemptStatus::Aborted;
+        // 真实 abort 链（transition_to_terminal）清 admission ticket（admission.rs:223）。
+        aborted.admission_ticket_consumed_at = None;
+        store.write_coding_attempt_for_test(&aborted).expect("aborted");
+
+        let request = RestartCodingAttemptRequest {
+            command_id: "cmd-restart-1".to_string(),
+            attempt_id: attempt.id.clone(),
+            expected_attempt_version: aborted.version,
+        };
+        let result = restart_coding_attempt(
+            &state,
+            &attempt.project_id,
+            &attempt.issue_id,
+            request.clone(),
+        )
+        .await
+        .expect("restart service");
+        assert_eq!(result.state, OperationState::Accepted);
+        assert_eq!(result.attempt_id, attempt.id);
+
+        // durable 重开为 Running；退役围栏已清——新 runner 已在 registry 注册
+        // （spawn 成功即 retired 不再拦截 insert_cancellable）。
+        let current = store
+            .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("attempt");
+        assert_eq!(current.status, CodingAttemptStatus::Running);
+        assert_eq!(
+            state.coding_runs.runner_count(&key),
+            1,
+            "new runner must be registered in the same process"
+        );
+
+        // 同 command 同 payload：重放首次 durable 结果，不改变状态。
+        let replay = restart_coding_attempt(
+            &state,
+            &attempt.project_id,
+            &attempt.issue_id,
+            request,
+        )
+        .await
+        .expect("replay");
+        assert_eq!(replay.state, OperationState::Replayed);
+
+        // 错版本（错对象）：Rejected，不改变当前 attempt。
+        let wrong = restart_coding_attempt(
+            &state,
+            &attempt.project_id,
+            &attempt.issue_id,
+            RestartCodingAttemptRequest {
+                command_id: "cmd-restart-2".to_string(),
+                attempt_id: attempt.id.clone(),
+                expected_attempt_version: current.version + 999,
+            },
+        )
+        .await
+        .expect("wrong version maps to Rejected result");
+        assert_eq!(wrong.state, OperationState::Rejected);
+        let after = store
+            .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("attempt");
+        assert_eq!(after.status, CodingAttemptStatus::Running);
     }
 }

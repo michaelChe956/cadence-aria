@@ -107,6 +107,7 @@ pub use coding::{create_coding_attempt, create_group_coding_attempt};
 #[rustfmt::skip]
 pub(crate) use coding::{
     abort_coding_attempt, build_group_work_item_progress, coding_attempt_artifact_content, coding_attempt_diff,
+    restart_coding_attempt,
     confirm_work_item_execution_plan, delete_coding_attempt, get_coding_attempt,
     request_work_item_execution_plan_change,
 };

@@ -11,6 +11,16 @@ use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::web::choice_reply::{ChoiceReplyStatus, ChoiceResponseRequest};
 use crate::web::workspace_session::ChoiceReplyError;
 
+/// C2 Task 3（REQ-CRO-03）：显式 restart 的进程内结果。`Restarted`＝退役
+/// 标记已清（或本就无标记，幂等）；`StillStopping`＝旧 run 未退出；
+/// `VersionConflict` 由应用服务在 durable 版本／身份校验失败时映射。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttemptRestartOutcome {
+    Restarted,
+    StillStopping,
+    VersionConflict,
+}
+
 #[derive(Clone, Default)]
 pub struct CodingRunRegistry {
     inner: Arc<StdMutex<CodingRunRegistryInner>>,
@@ -384,6 +394,26 @@ impl CodingRunRegistry {
             1 => runs.values().next().map(|entry| entry.command_tx.clone()),
             _ => None,
         }
+    }
+
+    /// C2 Task 3（REQ-CRO-03）：abort 后显式 restart 的 registry 侧入口——
+    /// 确认该 attempt 无活跃 runner 后原子移除 retired 标记；旧 run 尚未
+    /// 退出（仍在停止）不可 restart。不触碰 durable 状态（应用服务负责）；
+    /// 非退役 attempt 幂等视为已重开。
+    pub fn restart_attempt(&self, attempt_key: &CodingAttemptRunKey) -> AttemptRestartOutcome {
+        let mut inner = self.inner.lock().expect("coding run registry lock");
+        if inner.runs.get(attempt_key).is_some_and(|runs| !runs.is_empty()) {
+            return AttemptRestartOutcome::StillStopping;
+        }
+        inner.retired_attempts.remove(attempt_key);
+        AttemptRestartOutcome::Restarted
+    }
+
+    /// C2 Task 3：补偿写——durable 重开失败时恢复退役围栏（与
+    /// `abort_attempt` 同一标记，保证失败路径不弱化 abort 语义）。
+    pub fn retire_attempt(&self, attempt_key: &CodingAttemptRunKey) {
+        let mut inner = self.inner.lock().expect("coding run registry lock");
+        inner.retired_attempts.insert(attempt_key.clone());
     }
 
     pub fn runner_count(&self, attempt_key: &CodingAttemptRunKey) -> usize {

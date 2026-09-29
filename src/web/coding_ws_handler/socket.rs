@@ -441,6 +441,25 @@ async fn handle_coding_socket(
                     // RecoverCoding 同款 spawn 路径重启 runner，由 runner 既有阶段链
                     // 从当前 stage 续跑。失败 fail-visible（coding_restart_failed），
                     // 不吞错误；状态门保证该分支只在 Aborted/Failed 下可达。
+                    // C2 Task 3（REQ-CRO-03）：同进程显式 restart——先确认无活跃
+                    // runner 后清退役围栏（仍在停止 fail-visible），durable 重开失败
+                    // 时补偿恢复围栏；spawn 不再被 retired 拦截，无需重启服务。
+                    let restart_key = CodingAttemptRunKey::from_attempt(&current_attempt);
+                    if matches!(
+                        state.coding_runs.restart_attempt(&restart_key),
+                        crate::web::state::AttemptRestartOutcome::StillStopping
+                    ) {
+                        drop(mutation_lease);
+                        let _ = send_coding_json(
+                            &mut socket_tx,
+                            &CodingWsOutMessage::CodingProtocolError {
+                                code: "coding_restart_still_stopping".to_string(),
+                                message: "旧运行尚未退出，请稍后重试".to_string(),
+                            },
+                        )
+                        .await;
+                        continue;
+                    }
                     match coding_store.restart_terminal_attempt_for_execution(
                         &current_attempt.project_id,
                         &current_attempt.issue_id,
@@ -476,6 +495,8 @@ async fn handle_coding_socket(
                             }
                         }
                         Err(error) => {
+                            // 补偿：durable 重开失败时恢复退役围栏，不弱化 abort 语义。
+                            state.coding_runs.retire_attempt(&restart_key);
                             drop(mutation_lease);
                             let _ = send_coding_json(
                                 &mut socket_tx,

@@ -330,6 +330,10 @@ pub fn build_web_router_with_evidence(state: WebAppState, evidence_enabled: bool
             post(handlers::abort_coding_attempt),
         )
         .route(
+            "/api/projects/{project_id}/issues/{issue_id}/coding-attempts/{attempt_id}/restart",
+            post(handlers::restart_coding_attempt),
+        )
+        .route(
             "/api/projects/{project_id}/issues/{issue_id}/coding-attempts/{attempt_id}/choices/{choice_id}/response",
             post(handlers::post_coding_choice_response),
         )

@@ -32,7 +32,9 @@ use tokio_util::sync::CancellationToken;
 
 mod coding_run_registry;
 pub(crate) use coding_run_registry::CodingAttemptMutationLease;
-pub use coding_run_registry::{CodingAttemptRunKey, CodingRunRegistry, CodingRunReservation};
+pub use coding_run_registry::{
+    AttemptRestartOutcome, CodingAttemptRunKey, CodingRunRegistry, CodingRunReservation,
+};
 mod coding_socket_registry;
 pub use coding_socket_registry::CodingSocketRegistry;
 mod repository_initialization_run_registry;
