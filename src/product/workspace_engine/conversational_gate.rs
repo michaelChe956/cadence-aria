@@ -914,7 +914,7 @@ impl super::WorkspaceEngine {
                 payload: self.session.artifact.clone().expect("artifact set above"),
             })
             .await;
-        self.session = super::WorkspaceSession::from_record(saved);
+        self.reload_session_from_record(saved);
         if let Some(current_version) = self
             .artifact_versions
             .iter()

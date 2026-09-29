@@ -134,7 +134,7 @@ impl WorkspaceEngine {
         let (saved, should_start) = lifecycle
             .reserve_single_candidate_provider_start(&expected, &key)
             .map_err(|error| format!("persist provider reservation failed: {error}"))?;
-        self.session = WorkspaceSession::from_record(saved);
+        self.reload_session_from_record(saved);
         Ok(should_start)
     }
 

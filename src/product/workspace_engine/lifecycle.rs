@@ -442,6 +442,24 @@ impl WorkspaceEngine {
         Some((self.session.project_id.clone(), cwd))
     }
 
+    /// C-1 集成修复：以 durable record 重建 session 时保留引擎外注入的内存态锚点。
+    ///
+    /// `repository_path` 由 manager/factory 在引擎构造时注入（durable record 不含
+    /// 该字段，`from_record` 恒置 None）。引擎内持久化后的 session 整体替换
+    /// （start_generation SC 重臂、provider start 预留、人工门修订保存）若不保留
+    /// 该字段，`logical_planning_launch`（LC planning launch 与 C-1 admission 预检的
+    /// 共同谓词输入）会在运行中途变为 None，真实 LC 会话被静默降级回 legacy 直启
+    /// 路径、admission 预检被跳过。引擎内的 session 整体重建 MUST 走本方法，不得
+    /// 直接 `self.session = WorkspaceSession::from_record(..)`。
+    pub(crate) fn reload_session_from_record(
+        &mut self,
+        record: crate::product::models::WorkspaceSessionRecord,
+    ) {
+        let repository_path = self.session.repository_path.clone();
+        self.session = WorkspaceSession::from_record(record);
+        self.session.repository_path = repository_path;
+    }
+
     /// Story/Design author/revision/review prompt 注入用的路由引用上下文。
     ///
     /// 逻辑会话(已注入 gateway 且有 planning cwd)时经 gateway `validate` 冻结
@@ -793,7 +811,7 @@ impl WorkspaceEngine {
             let saved = store
                 .rearm_failed_single_candidate_for_start_generation(&expected)
                 .map_err(|error| format!("reopen SingleCandidate session rejected: {error}"))?;
-            self.session = WorkspaceSession::from_record(saved);
+            self.reload_session_from_record(saved);
         }
 
         let mut locked_snapshot = provider_config;
