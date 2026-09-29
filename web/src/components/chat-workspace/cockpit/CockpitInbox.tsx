@@ -85,6 +85,8 @@ const C1_ACTION_BUTTON_LABELS: Record<string, string> = {
   rebind: "去换代",
   // C2 Task 12：coding 链等待项动作（restart／gate 动作经 REST 作答）。
   restart_coding: "重启 Coding",
+  // C5 Task 6：project 级 repository 初始化失败“网关恢复后继续”。
+  resume_repository_initialization: "网关恢复后继续",
   manual_continue: "人工继续",
   retry_coding: "重试编码",
   retry_review: "重试代码审查",
@@ -1019,7 +1021,7 @@ function C1RecoveryCard({
       actions.recoverCandidate({
         kind: "recover_candidate",
         projectId: info.projectId,
-        issueId: info.issueId,
+        issueId: info.issueId ?? "",
         sessionId: info.sessionId ?? "",
         gateId: info.gateId ?? "",
         commandId: `cmd-c1-recover-${info.itemId}`,
@@ -1030,7 +1032,7 @@ function C1RecoveryCard({
       void actions.retryInitialization({
         kind: "retry_initialization",
         projectId: info.projectId,
-        issueId: info.issueId,
+        issueId: info.issueId ?? "",
         planId: info.planId ?? "",
         commandId: `cmd-c1-retry-${info.itemId}`,
         attemptId: info.attemptId ?? "",
@@ -1045,7 +1047,7 @@ function C1RecoveryCard({
       void actions.confirmTakeover({
         kind: "confirm_takeover",
         projectId: info.projectId,
-        issueId: info.issueId,
+        issueId: info.issueId ?? "",
         commandId: `cmd-c1-takeover-${info.itemId}`,
         // lease id 是服务端 item id 的尾段（c1:lease_takeover:{issue}:{lease}）。
         leaseId: info.itemId.split(":").pop() ?? "",
@@ -1063,7 +1065,7 @@ function C1RecoveryCard({
       void actions.restartCoding?.({
         kind: "restart_coding",
         projectId: info.projectId,
-        issueId: info.issueId,
+        issueId: info.issueId ?? "",
         attemptId: info.attemptId,
         commandId: context.commandId,
         expectedVersion: context.expectedVersion,
@@ -1080,7 +1082,7 @@ function C1RecoveryCard({
       void actions.respondGate?.({
         kind: "gate_response",
         projectId: info.projectId,
-        issueId: info.issueId,
+        issueId: info.issueId ?? "",
         attemptId: info.attemptId,
         gateId: info.gateId,
         actionId: action,
@@ -1089,11 +1091,25 @@ function C1RecoveryCard({
       });
       return;
     }
+    if (action === "resume_repository_initialization") {
+      // C5 Task 6：resume 按 operation_id 出站，command id 稳定派生
+      //（同命令重放幂等）；不要求 issueId（project 等待项无 issue 归属）。
+      if (!info.operationId) {
+        return;
+      }
+      void actions.resumeRepositoryInitialization?.({
+        kind: "resume_repository_initialization",
+        projectId: info.projectId,
+        operationId: info.operationId,
+        commandId: `cmd-repo-init-resume-${info.operationId}`,
+      });
+      return;
+    }
     if (action === "rebind") {
       actions.rebind({
         kind: "rebind",
         projectId: info.projectId,
-        issueId: info.issueId,
+        issueId: info.issueId ?? "",
       });
     }
   };
@@ -1113,6 +1129,27 @@ function C1RecoveryCard({
       {info.nextPhase ? (
         <p className="mt-1 text-xs text-slate-500">下一阶段：{info.nextPhase}</p>
       ) : null}
+      {info.diagnostics ? (
+        // C5 Task 6：repository 初始化失败的结构化诊断（原因/步骤/路径）。
+        <div className="mt-1" data-testid="repo-init-failure-diagnostics">
+          <p className="aria-mono text-xs text-[var(--aria-danger)]">
+            失败步骤 {info.diagnostics.failedStep} · 原因{" "}
+            {info.diagnostics.reasonCode}
+            {info.diagnostics.provider ? ` · provider ${info.diagnostics.provider}` : ""}
+            {info.diagnostics.retryable ? " · 可重试" : ""}
+          </p>
+          {info.diagnostics.stderrSummary ? (
+            <p className="mt-1 break-words text-xs text-slate-500">
+              {info.diagnostics.stderrSummary}
+            </p>
+          ) : null}
+          {info.diagnostics.changedPaths.length > 0 ? (
+            <p className="mt-1 break-words text-xs text-slate-500">
+              已改动路径：{info.diagnostics.changedPaths.join("、")}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
       {info.actions.length > 0 ? (
         <div className="mt-2 flex flex-wrap gap-2">
           {info.actions.map((action) => (
@@ -1122,7 +1159,11 @@ function C1RecoveryCard({
               disabled={!actions}
               onClick={() => handleAction(action)}
               className={`${BTN_SECONDARY_CLASS} disabled:cursor-not-allowed disabled:opacity-60`}
-              data-testid={`c1-action-${action}`}
+              data-testid={
+                action === "resume_repository_initialization"
+                  ? "repo-init-resume-action"
+                  : `c1-action-${action}`
+              }
             >
               {C1_ACTION_BUTTON_LABELS[action] ?? action}
             </button>
@@ -1135,7 +1176,7 @@ function C1RecoveryCard({
                 actions?.retryInitialization({
                   kind: "retry_initialization",
                   projectId: info.projectId,
-                  issueId: info.issueId,
+                  issueId: info.issueId ?? "",
                   planId: info.planId ?? "",
                   // 未知副作用确认是独立命令（同 command 异 payload fail-closed）。
                   commandId: `cmd-c1-retry-confirm-${info.itemId}`,

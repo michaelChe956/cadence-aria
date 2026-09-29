@@ -593,10 +593,12 @@ export interface WaitingItemActionProjection {
 
 /** C1 Task 9：durable 恢复等待项的收件箱投影（服务端 C1WaitingItem 的
  * 只读镜像；动作按 actions 名由 facade 触发对应 REST，前端不判定成功）。
- * C2 Task 12 additive：expectedVersion／actionContext（C2 kind 同通道）。 */
+ * C2 Task 12 additive：expectedVersion／actionContext（C2 kind 同通道）。
+ * C5 Task 6 additive：project 级条目无 issue（issueId 为 null），身份用
+ * 后端 operation_id（id 即后端稳定 id，不从展示字符串反解析）。 */
 export interface C1WaitingProjection {
   projectId: string;
-  issueId: string;
+  issueId: string | null;
   itemId: string;
   kind: string;
   reason: string;
@@ -611,6 +613,19 @@ export interface C1WaitingProjection {
   nextPhase: string | null;
   expectedVersion: number | null;
   actionContext: readonly WaitingItemActionProjection[];
+  // C5 Task 6 additive：repository 初始化失败等待项的操作身份与诊断。
+  operationId: string | null;
+  diagnostics: RepositoryInitFailureDiagnosticsProjection | null;
+}
+
+/** C5 Task 6：repository 初始化失败诊断的只读镜像（结构化原因/步骤/路径）。 */
+export interface RepositoryInitFailureDiagnosticsProjection {
+  failedStep: string;
+  reasonCode: string;
+  provider: string | null;
+  stderrSummary: string | null;
+  changedPaths: readonly string[];
+  retryable: boolean;
 }
 
 /** C1/C2 等待项标题（按 kind 固定文案；身份字段进摘要行）。 */
@@ -622,6 +637,8 @@ const C1_WAITING_KIND_TITLES: Record<string, string> = {
   advance_retry_failed: "Failed advance 待显式重试",
   intent_blocked: "计划意图停等修订",
   generation_history: "存在旧代绑定（只读可查）",
+  // C5 Task 6：project 级 repository 初始化失败等待项（网关恢复后可续）。
+  repository_initialization_failed: "仓库初始化失败，等待恢复",
   // C2 Task 12：coding 链十类等待项。
   coding_completion_unconfirmed: "Coding 完成状态待确认",
   coding_already_running: "Coding 已在运行，请等待",
@@ -644,11 +661,14 @@ export function c1TargetLabel(target: C1WaitingItem["target"]): string {
     : `逻辑代码库 ${target.logical_codebase_id}/${target.logical_repository_id}`;
 }
 
-/** durable C1WaitingItem → 收件箱条目（不进 countedInbox；动作走 C1 REST）。 */
+/** durable C1WaitingItem → 收件箱条目（不进 countedInbox；动作走 C1 REST）。
+ * C5 Task 6：project 级条目不传 issueId——id 直接采用后端稳定 id
+ *（c1:project:{project_id}:repository_init:{operation_id}），不拼接
+ * undefined issueId；issue 级条目维持 `c1:{issueId}:{item.id}` 前缀。 */
 export function c1WaitingItem(
   item: C1WaitingItem,
   projectId: string,
-  issueId: string,
+  issueId?: string,
 ): CockpitInboxItem {
   const identityParts = [
     item.plan_id ? `plan ${item.plan_id}` : null,
@@ -664,7 +684,7 @@ export function c1WaitingItem(
     item.next_phase ? `下一阶段：${item.next_phase}` : null,
   ].filter((part): part is string => Boolean(part));
   return {
-    id: `c1:${issueId}:${item.id}`,
+    id: issueId !== undefined ? `c1:${issueId}:${item.id}` : item.id,
     kind: "c1_recovery",
     severity: item.actions.length > 0 ? 2 : 3,
     title: C1_WAITING_KIND_TITLES[item.kind] ?? "C1 恢复等待项",
@@ -677,7 +697,7 @@ export function c1WaitingItem(
     choice: null,
     c1Info: {
       projectId,
-      issueId,
+      issueId: issueId ?? null,
       itemId: item.id,
       kind: item.kind,
       reason: item.reason,
@@ -697,6 +717,18 @@ export function c1WaitingItem(
         commandId: action.command_id,
         expectedVersion: action.expected_version,
       })),
+      // C5 Task 6 additive：project 级条目操作身份（后端稳定 operation_id）。
+      operationId: item.operation_id ?? null,
+      diagnostics: item.diagnostics
+        ? {
+            failedStep: item.diagnostics.failed_step,
+            reasonCode: item.diagnostics.reason_code,
+            provider: item.diagnostics.provider ?? null,
+            stderrSummary: item.diagnostics.stderr_summary ?? null,
+            changedPaths: item.diagnostics.changed_paths ?? [],
+            retryable: item.diagnostics.retryable ?? false,
+          }
+        : null,
     },
   };
 }

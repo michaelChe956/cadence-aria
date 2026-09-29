@@ -71,6 +71,13 @@ export type LifecycleFetchOptions = {
   designDraftInitially?: boolean;
   // P1 WIGA Task 2：automation-target GET 的 mock 逻辑仓 id；null 表示目标不可用(422)。
   automationTarget?: string | null;
+  // C5 Task 3：PUT enrollment 一律 422 automation_role_chain_unsupported，
+  // details.violations 逐角色携带该值（验证弹窗逐角色渲染）。
+  automationRoleChainViolations?: Array<{
+    role: string;
+    provider: string;
+    reason_code: string;
+  }>;
   // P1 WIGA Task 2：PUT enrollment 前 N 次返回 500（验证同 selection_key 重试）。
   automationPutFailures?: number;
   // P1 WIGA Task 2：PUT enrollment 一律 409（验证冲突留弹窗、不自动 Disable）。

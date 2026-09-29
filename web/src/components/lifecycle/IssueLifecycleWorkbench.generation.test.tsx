@@ -385,6 +385,11 @@ describe("IssueLifecycleWorkbench generation actions", () => {
       name: "Work Item Plan 配置",
     });
     await user.click(within(dialog).getByRole("radio", { name: "自动化" }));
+    // C5 Task 7：automatic 打开即取 target 投影（loading 期间提交被禁用）。
+    const projection = await within(dialog).findByTestId(
+      "automation-target-projection",
+    );
+    expect(projection).toHaveTextContent("logical_codebase");
     await user.click(
       within(dialog).getByRole("button", { name: "启用自动化" }),
     );
@@ -411,7 +416,12 @@ describe("IssueLifecycleWorkbench generation actions", () => {
       command: {
         type: string;
         selection_key: string;
-        logical_repository_id: string;
+        target: {
+          kind: string;
+          logical_codebase_id: string;
+          logical_repository_id: string;
+        };
+        logical_repository_id?: string;
         source: {
           stories: Array<{ id: string; version: number }>;
           designs: Array<{ id: string; version: number }>;
@@ -419,9 +429,14 @@ describe("IssueLifecycleWorkbench generation actions", () => {
       };
     };
     expect(putBody.command.type).toBe("enable");
-    expect(putBody.command.logical_repository_id).toBe(
-      "00000000-0000-0000-0000-000000000001",
-    );
+    // C5 Task 1：Enable 只带 target（服务端投影原样回传），不再发送
+    // logical_repository_id 冗余字段。
+    expect(putBody.command.target).toEqual({
+      kind: "logical_codebase",
+      logical_codebase_id: "11111111-1111-1111-1111-111111111111",
+      logical_repository_id: "00000000-0000-0000-0000-000000000001",
+    });
+    expect("logical_repository_id" in putBody.command).toBe(false);
     expect(putBody.command.source).toEqual({
       stories: [{ id: "story_spec_0001", version: 1 }],
       designs: [{ id: "design_spec_0001", version: 1 }],
@@ -432,6 +447,59 @@ describe("IssueLifecycleWorkbench generation actions", () => {
         screen.queryByRole("dialog", { name: "Work Item Plan 配置" }),
       ).not.toBeInTheDocument(),
     );
+  });
+
+  // C5 Task 3：role-chain 预检 422——ApiRequestError.details 逐角色渲染
+  // role/provider/reason，弹窗保留（不自动 Disable/重开）。
+  it("renders every role-chain violation when the enable preflight rejects", async () => {
+    const fetchMock = lifecycleFetch({
+      automationRoleChainViolations: [
+        {
+          role: "plan_author",
+          provider: "pi",
+          reason_code: "provider_unsupported_for_gateway_launch",
+        },
+        {
+          role: "internal_reviewer",
+          provider: "kimi_code",
+          reason_code: "gateway_route_blocked",
+        },
+      ],
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+
+    await user.click(await screen.findByTestId("stage-tab-design"));
+    await user.click(screen.getByRole("button", { name: "前端提示设计" }));
+    await user.click(screen.getByRole("button", { name: "生成 Work Item" }));
+    const dialog = await screen.findByRole("dialog", {
+      name: "Work Item Plan 配置",
+    });
+    await user.click(within(dialog).getByRole("radio", { name: "自动化" }));
+    await within(dialog).findByTestId("automation-target-projection");
+    await user.click(
+      within(dialog).getByRole("button", { name: "启用自动化" }),
+    );
+
+    const alert = await within(dialog).findByRole("alert");
+    expect(
+      within(alert).getAllByTestId("role-chain-violation"),
+    ).toHaveLength(2);
+    expect(alert).toHaveTextContent("plan_author");
+    expect(alert).toHaveTextContent("pi");
+    expect(alert).toHaveTextContent(
+      "provider_unsupported_for_gateway_launch",
+    );
+    expect(alert).toHaveTextContent("internal_reviewer");
+    expect(alert).toHaveTextContent("kimi_code");
+    expect(alert).toHaveTextContent("gateway_route_blocked");
+    expect(alert).toHaveTextContent(/更换 provider 配置或更换目标/);
+    // 弹窗保留等待用户更换 provider 配置或目标。
+    expect(
+      screen.getByRole("dialog", { name: "Work Item Plan 配置" }),
+    ).toBeInTheDocument();
   });
 
   it("reuses the same selection key across automation retries", async () => {
@@ -448,6 +516,7 @@ describe("IssueLifecycleWorkbench generation actions", () => {
       name: "Work Item Plan 配置",
     });
     await user.click(within(dialog).getByRole("radio", { name: "自动化" }));
+    await within(dialog).findByTestId("automation-target-projection");
     await user.click(
       within(dialog).getByRole("button", { name: "启用自动化" }),
     );
@@ -496,6 +565,7 @@ describe("IssueLifecycleWorkbench generation actions", () => {
       name: "Work Item Plan 配置",
     });
     await user.click(within(dialog).getByRole("radio", { name: "自动化" }));
+    await within(dialog).findByTestId("automation-target-projection");
     await user.click(
       within(dialog).getByRole("button", { name: "启用自动化" }),
     );

@@ -195,6 +195,26 @@ export type C1WaitingItem = {
   next_phase?: string | null;
   expected_version?: number | null;
   action_context?: WaitingItemAction[];
+  // C5 Task 6 additive：project 级 repository 初始化失败等待项身份与诊断。
+  // project 条目 project_id 必有、issue_id 缺省（serde skip）；恢复关联字段
+  // 为 None 时 JSON 缺省（#[serde(default)]，前端按缺省解释）。
+  operation_id?: string | null;
+  diagnostics?: RepositoryInitializationFailureDiagnostics | null;
+  project_id?: string;
+  issue_id?: string | null;
+  parent_operation_id?: string | null;
+  superseded_by?: string | null;
+};
+
+// C5 Task 6（REQ-INIT-C5-RESUME）：repository 初始化失败的结构化诊断
+//（服务端 RepositoryInitializationFailureDiagnostics snake_case 镜像）。
+export type RepositoryInitializationFailureDiagnostics = {
+  failed_step: string;
+  reason_code: string;
+  provider: string | null;
+  stderr_summary: string | null;
+  changed_paths: string[];
+  retryable: boolean;
 };
 
 export type IssueLifecycleResponse = {
@@ -312,13 +332,13 @@ export type IssueAutomationEnrollment = {
   policy_revision: number;
   source: EnrollmentSource;
   options: EnrollmentOptions;
-  logical_repository_id: string;
   prepare_intent_id: string;
   plan_id: string | null;
   session_id: string | null;
   created_at: string;
   updated_at: string;
-  /** C1：enable 显式声明时在场；旧投影缺字段按 off/Manual 解释。 */
+  /** C1：双载体 enrollment target（Enable 写入后必在；旧投影缺字段按
+   * 旧代无绑定解释，前端不回填替身身份）。 */
   target?: EnrollmentTarget;
   binding_history?: EnrollmentBindingHistory;
 };
@@ -328,9 +348,8 @@ export type AutomationEnrollmentEnableCommand = {
   selection_key: string;
   source: EnrollmentSource;
   options: EnrollmentOptions;
-  logical_repository_id: string;
-  /** C1：服务端 automation-target 投影原样回传，不从前端拼凑。 */
-  target?: EnrollmentTarget;
+  /** C1：服务端 automation-target 投影原样回传（必填，前端不拼凑）。 */
+  target: EnrollmentTarget;
 };
 
 export type AutomationEnrollmentDisableCommand = {
@@ -423,7 +442,8 @@ export type AutomationEnrollmentRetryInitializationResult = {
   outcome?: unknown | null;
 };
 
-// Task 1 只读投影：唯一逻辑仓 UUID + 服务端与 prepare 同源解析的 options。
+// C5 Task 1：只读投影——双载体 enrollment target + 服务端与 prepare
+// 同源解析的 options（响应不再携带顶层 logical_repository_id 冗余字段）。
 export type AutomationTargetQuery = {
   author_provider?: WorkspaceProviderName;
   reviewer_provider?: WorkspaceProviderName;
@@ -437,7 +457,6 @@ export type AutomationTargetQuery = {
 };
 
 export type AutomationTarget = {
-  logical_repository_id: string;
   /** C1：双载体 target 投影（Enable/Rebind 原样回传）。 */
   enrollment_target: EnrollmentTarget;
   resolved_options: EnrollmentOptions;

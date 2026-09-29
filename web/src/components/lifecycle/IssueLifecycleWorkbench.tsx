@@ -935,6 +935,15 @@ export function IssueLifecycleWorkbench({
             pendingWorkItemPlanLaunch.card.raw.confirmation_status ===
               "confirmed"
           }
+          automationTargetScope={
+            selectedProjectId &&
+            pendingWorkItemPlanLaunch.card.kind === "design_spec"
+              ? {
+                  projectId: selectedProjectId,
+                  issueId: pendingWorkItemPlanLaunch.card.issueId,
+                }
+              : null
+          }
           onConfirm={handleConfirmWorkItemPlanOptions}
           onClose={() => setPendingWorkItemPlanLaunch(null)}
         />

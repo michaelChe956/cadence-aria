@@ -53,6 +53,7 @@ import {
   type LcBootstrapActionPayload,
 } from "../state/cockpit-action-routing";
 import { postLogicalCodebaseBootstrapAction } from "../api/logical-codebase-bootstrap";
+import { postRepositoryInitializationResume } from "../api/repository-initialization";
 import { notifyLifecycleInvalidated } from "../state/lifecycle-workbench-store";
 import {
   cockpitInboxItemSessionId,
@@ -556,6 +557,15 @@ export function ChatCockpitPage({
             expected_version: payload.expectedVersion,
           },
         );
+      } else if (payload.kind === "resume_repository_initialization") {
+        // C5 Task 6：project 级 repository 初始化失败“网关恢复后继续”——
+        // 不要求 issueId，按 operation_id 调 Task 6 resume REST；成功后经
+        // project invalidation 唤醒目录观察器重读 project 等待项。
+        await postRepositoryInitializationResume(
+          payload.projectId,
+          payload.operationId,
+          payload.commandId,
+        );
       } else {
         // rebind：显式换代表单在 Issue 生命周期工作台（useIssueLifecycleGeneration）；
         // 驾驶舱只广播失效刷新，不复制换代表单。
@@ -565,10 +575,16 @@ export function ChatCockpitPage({
           payload.issueId,
         );
       }
-      notifyLifecycleInvalidated(payload.issueId);
+      if (payload.kind === "resume_repository_initialization") {
+        notifyLifecycleInvalidated(
+          `repository_initialization:${payload.projectId}`,
+        );
+      } else {
+        notifyLifecycleInvalidated(payload.issueId);
+      }
     } catch (error) {
-      // 动作失败保留 durable 等待项（下轮 lifecycle 刷新仍可见）；错误就地
-      // 如实记录，不吞为成功。
+      // 动作失败保留 durable 等待项（下轮 lifecycle/project 刷新仍可见）；
+      // 错误就地如实记录，不吞为成功、不乐观隐藏等待项。
       console.error("[c1] recovery action failed", payload, error);
     }
   }, []);

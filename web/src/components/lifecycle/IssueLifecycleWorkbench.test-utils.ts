@@ -200,6 +200,7 @@ export function lifecycleFetch(
     options?.automationTarget === undefined
       ? "00000000-0000-0000-0000-000000000001"
       : options.automationTarget;
+  const automationRoleChainViolations = options?.automationRoleChainViolations;
 
 
   return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -238,7 +239,9 @@ export function lifecycleFetch(
             selection_key: string;
             source: Record<string, unknown>;
             options: Record<string, unknown>;
-            logical_repository_id: string;
+            target?: {
+              kind: string;
+            } & Record<string, unknown>;
           };
         };
         const command = payload.command;
@@ -252,10 +255,31 @@ export function lifecycleFetch(
             { status: 422 },
           );
         }
+        if (automationRoleChainViolations) {
+          // C5 Task 3：role-chain 预检 422——details.violations 逐角色列出。
+          return new Response(
+            JSON.stringify({
+              code: "automation_role_chain_unsupported",
+              message: "automation role chain is not supported for this carrier",
+              details: { violations: automationRoleChainViolations },
+            }),
+            { status: 422 },
+          );
+        }
+        if (!command.target) {
+          return new Response(
+            JSON.stringify({
+              code: "automation_target_required",
+              message: "enable command requires an enrollment target",
+              details: {},
+            }),
+            { status: 422 },
+          );
+        }
         const frozenPayload = {
           source: command.source,
           options: command.options,
-          logical_repository_id: command.logical_repository_id,
+          target: command.target,
         };
         if (automationEnrollment) {
           const sameKey =
@@ -286,7 +310,7 @@ export function lifecycleFetch(
           policy_revision: 1,
           source: command.source,
           options: command.options,
-          logical_repository_id: command.logical_repository_id,
+          target: command.target,
           prepare_intent_id: "prepare_intent_0001",
           plan_id: null,
           session_id: null,
@@ -315,7 +339,13 @@ export function lifecycleFetch(
       }
       const query = new URL(url, "http://localhost").searchParams;
       return jsonResponse({
-        logical_repository_id: automationTargetLogicalId,
+        // C5 Task 1：响应只含 enrollment_target + resolved_options（不再
+        // 携带顶层 logical_repository_id 冗余字段）。
+        enrollment_target: {
+          kind: "logical_codebase",
+          logical_codebase_id: "11111111-1111-1111-1111-111111111111",
+          logical_repository_id: automationTargetLogicalId,
+        },
         resolved_options: {
           author_provider: query.get("author_provider") ?? "codex",
           reviewer_provider: query.get("reviewer_provider") ?? "claude_code",

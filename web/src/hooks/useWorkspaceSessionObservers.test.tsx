@@ -872,3 +872,117 @@ describe("C4 logical codebase bootstrap notice source", () => {
     });
   });
 });
+
+// C5 Task 6：project 级 repository 初始化失败等待项与目录同源补读——
+// 无 issue_id 条目进入收件箱（id 即后端稳定 id）；读取失败保留上一轮
+// durable 快照，不清空既有等待项。
+describe("C5 project repository initialization waiting items", () => {
+  const projectWaitingItem = {
+    id: "c1:project:project_1:repository_init:op_init_0001",
+    kind: "repository_initialization_failed",
+    reason:
+      "repository initialization failed at pre_check (provider_unavailable); awaiting gateway recovery",
+    completed_steps: ["cadence_skills"],
+    target: null,
+    plan_id: null,
+    session_id: null,
+    attempt_id: null,
+    gate_id: null,
+    possible_side_effect: null,
+    actions: ["resume_repository_initialization"],
+    next_phase: "repository_registered",
+    action_context: [],
+    operation_id: "op_init_0001",
+    diagnostics: {
+      failed_step: "pre_check",
+      reason_code: "provider_unavailable",
+      provider: "claude_code",
+      stderr_summary: null,
+      changed_paths: [],
+      retryable: true,
+    },
+    project_id: "project_1",
+  };
+
+  it("merges issue-less project waiting items into the inbox during catalog refresh", async () => {
+    const reads: string[] = [];
+    const view = renderObserverHook(
+      observerOptions({
+        listProjectRepositoryInitializationWaitingItems: async (projectId) => {
+          reads.push(projectId);
+          return [projectWaitingItem];
+        },
+      }),
+    );
+
+    await waitFor(() => expect(reads).toEqual(["project_1"]));
+    const inbox = view.result.inbox;
+    const waiting = inbox.filter(
+      (item) =>
+        item.source === "c1_waiting" &&
+        item.c1Info?.kind === "repository_initialization_failed",
+    );
+    expect(waiting).toHaveLength(1);
+    expect(waiting[0].id).toBe("c1:project:project_1:repository_init:op_init_0001");
+    expect(waiting[0].id).not.toContain("undefined");
+    expect(waiting[0].c1Info?.issueId).toBeNull();
+    expect(waiting[0].c1Info?.operationId).toBe("op_init_0001");
+    // 等待项不进入错误计数（与 C1/info 同一隔离规则）。
+    expect(
+      view.result.countedInbox.some(
+        (item) => item.c1Info?.kind === "repository_initialization_failed",
+      ),
+    ).toBe(false);
+
+    await act(async () => {
+      view.unmount();
+    });
+  });
+
+  it("keeps the previous project waiting snapshot when the refresh read fails", async () => {
+    let failReads = false;
+    let refreshes = 0;
+    const view = renderObserverHook(
+      observerOptions({
+        getIssueLifecycle: async () => {
+          refreshes += 1;
+          return { workspace_sessions: [], coding_attempts: [] };
+        },
+        listProjectRepositoryInitializationWaitingItems: async () => {
+          if (failReads) {
+            throw new Error("project waiting-items unavailable");
+          }
+          return [projectWaitingItem];
+        },
+      }),
+    );
+
+    await waitFor(() =>
+      expect(
+        view.result.inbox.some(
+          (item) =>
+            item.c1Info?.kind === "repository_initialization_failed",
+        ),
+      ).toBe(true),
+    );
+
+    failReads = true;
+    await act(async () => {
+      notifyLifecycleInvalidated("issue_1");
+    });
+    await waitFor(() => expect(refreshes).toBeGreaterThanOrEqual(2));
+    // 失败轮保留上一轮 durable 快照，不清空既有等待项。
+    await waitFor(() =>
+      expect(
+        view.result.inbox.some(
+          (item) =>
+            item.c1Info?.kind === "repository_initialization_failed",
+        ),
+      ).toBe(true),
+    );
+
+    await act(async () => {
+      view.unmount();
+    });
+  });
+});

@@ -6,6 +6,9 @@ import {
 } from "../api/client";
 import { listCodebases } from "../api/codebases";
 import { getLogicalCodebaseBootstrap } from "../api/logical-codebase-bootstrap";
+import {
+  listProjectRepositoryInitializationWaitingItems,
+} from "../api/repository-initialization";
 import type {
   CodingAttempt,
   CodingFinalConfirmInfoItem,
@@ -79,6 +82,9 @@ export interface WorkspaceSessionObserverOptions {
   listCodebases?: typeof listCodebases;
   /** C4 Task 9：bootstrap 纯投影读取（默认真实 API；测试注入伪实现）。 */
   getLogicalCodebaseBootstrap?: typeof getLogicalCodebaseBootstrap;
+  /** C5 Task 6：project 级 repository 初始化失败等待项读取（默认真实
+   * API；测试注入伪实现；失败保留上一轮 durable 快照）。 */
+  listProjectRepositoryInitializationWaitingItems?: typeof listProjectRepositoryInitializationWaitingItems;
   createController?: WorkspaceObserverControllerFactory;
   scheduleCatalogRefresh?: (callback: () => void, delayMs: number) => CatalogRefreshTimer;
   cancelCatalogRefresh?: (timer: CatalogRefreshTimer) => void;
@@ -120,6 +126,8 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
     getIssueLifecycle: getLifecycle = getIssueLifecycle,
     listCodebases: getCodebases = listCodebases,
     getLogicalCodebaseBootstrap: getBootstrap = getLogicalCodebaseBootstrap,
+    listProjectRepositoryInitializationWaitingItems: getProjectWaitingItems =
+      listProjectRepositoryInitializationWaitingItems,
     createController,
     scheduleCatalogRefresh: scheduleRefresh = scheduleCatalogRefresh,
     cancelCatalogRefresh: cancelRefresh = cancelCatalogRefresh,
@@ -158,6 +166,12 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
   const [lcBootstrapItems, setLcBootstrapItems] = useState<readonly CockpitInboxItem[]>(
     [],
   );
+  // C5 Task 6：project 级 repository 初始化失败等待项（无 issue 归属，
+  // id 即后端稳定 id）——与 issue 级等待项同源合并展示；读取失败时保留
+  // 上一轮 durable 快照，不清空既有等待项。
+  const [projectC1WaitingItems, setProjectC1WaitingItems] = useState<
+    readonly CockpitInboxItem[]
+  >([]);
   // P3（REQ-WIGA-07）：到期 tick——最近到期单次失效定时器触发后递增，
   // 使可见投影在无 REST 的情况下剔除过期 info。
   const [recentExpiryTick, setRecentExpiryTick] = useState(0);
@@ -166,6 +180,8 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
   // 在途期间的失效唤醒归入同一静默批次。
   const knownRecentIdentitiesRef = useRef<Set<string> | null>(null);
   const hydrationClosedRef = useRef(false);
+  // C5 Task 6：上一轮 project 等待项 durable 快照（GET 失败时保留）。
+  const projectC1ItemsRef = useRef<readonly CockpitInboxItem[]>([]);
   const snapshotHintRef = useRef<() => void>(() => undefined);
   const controllerRef = useRef<WorkspaceObserverController | null>(null);
 
@@ -242,16 +258,25 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
           Date.parse(right.createdAt ?? "") - Date.parse(left.createdAt ?? ""),
       );
   }, [recentCompletionItems, recentExpiryTick]);
+  // C5 Task 6：project 级等待项与 issue 级等待项按稳定 id 合并去重
+  //（project 条目 id 即后端稳定 id，不与 issue 级前缀 id 冲突）。
+  const waitingInbox = useMemo(() => {
+    const seen = new Set(c1WaitingItems.map((item) => item.id));
+    return [
+      ...c1WaitingItems,
+      ...projectC1WaitingItems.filter((item) => !seen.has(item.id)),
+    ];
+  }, [c1WaitingItems, projectC1WaitingItems]);
   const inbox = useMemo(
     () => [
       ...selectObservedInbox(records),
       ...infoItems,
       ...codingInfoItems,
       ...visibleRecentItems,
-      ...c1WaitingItems,
+      ...waitingInbox,
       ...lcBootstrapItems,
     ],
-    [records, infoItems, codingInfoItems, visibleRecentItems, c1WaitingItems, lcBootstrapItems],
+    [records, infoItems, codingInfoItems, visibleRecentItems, waitingInbox, lcBootstrapItems],
   );
   const countedRecords = useMemo(
     () => records.filter((record) => watchedSessionIds.includes(record.sessionId)),
@@ -338,6 +363,37 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
               }
             });
             setC1WaitingItems(nextC1Items);
+            // C5 Task 6：project 级 repository 初始化失败等待项与目录同源
+            // 补读（每轮 refresh/失效唤醒都重读）；单个 project 读取失败
+            // 只保留上一轮该 project 的 durable 快照，不清空既有等待项。
+            const previousProjectItems = projectC1ItemsRef.current;
+            const nextProjectItems: CockpitInboxItem[] = [];
+            await Promise.all(
+              projects.map(async (project) => {
+                try {
+                  const waitingItems = await getProjectWaitingItems(
+                    project.project_id,
+                  );
+                  for (const waiting of waitingItems) {
+                    nextProjectItems.push(
+                      c1WaitingItem(
+                        waiting,
+                        project.project_id,
+                        waiting.issue_id ?? undefined,
+                      ),
+                    );
+                  }
+                } catch {
+                  for (const previous of previousProjectItems) {
+                    if (previous.c1Info?.projectId === project.project_id) {
+                      nextProjectItems.push(previous);
+                    }
+                  }
+                }
+              }),
+            );
+            projectC1ItemsRef.current = nextProjectItems;
+            setProjectC1WaitingItems(nextProjectItems);
             // C4 Task 9：LC 冷启动通知与目录同源补读——每个 project 的 LC
             // bootstrap 纯投影 GET；SSE/失效唤醒只触发本补读，页面关闭后
             // 重新打开仍能看到同一等待事实（按稳定 notice key 去重）。
@@ -466,7 +522,7 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
         cancelRefresh(periodicTimer);
       }
     };
-  }, [cancelRefresh, getBootstrap, getCodebases, getLifecycle, getProductIssues, getProjects, refreshIntervalMs, scheduleRefresh]);
+  }, [cancelRefresh, getBootstrap, getCodebases, getLifecycle, getProductIssues, getProjectWaitingItems, getProjects, refreshIntervalMs, scheduleRefresh]);
 
   // P3（REQ-WIGA-07）：最近到期单次失效定时器——按可见条目的最早
   // occurred_at + INFO_TTL_MS 触发一次 tick，让页面不刷新也能移除过期

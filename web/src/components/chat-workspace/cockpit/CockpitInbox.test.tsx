@@ -2,9 +2,15 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { CockpitActionFacade } from "../../../state/cockpit-action-routing";
-import type { CockpitInboxItem } from "../../../state/workspace-cockpit-projection";
+import {
+  c1WaitingItem,
+  type CockpitInboxItem,
+} from "../../../state/workspace-cockpit-projection";
 import { logicalCodebaseBootstrapItem } from "../../../state/workspace-cockpit-projection";
-import type { LogicalCodebaseBootstrapNoticeDto } from "../../../api/types";
+import type {
+  C1WaitingItem,
+  LogicalCodebaseBootstrapNoticeDto,
+} from "../../../api/types";
 import { CockpitInbox } from "./CockpitInbox";
 
 const actions = mockActions();
@@ -290,6 +296,7 @@ function mockActions(): CockpitActionFacade {
     retryInitialization: vi.fn(async () => undefined),
     confirmTakeover: vi.fn(async () => undefined),
     rebind: vi.fn(),
+    resumeRepositoryInitialization: vi.fn(async () => undefined),
     sendBootstrapAction: vi.fn(async () => undefined),
   };
 }
@@ -327,6 +334,9 @@ describe("C1 recovery cards", () => {
         // C2 Task 12 additive（旧等待项缺省为空）。
         expectedVersion: null,
         actionContext: [],
+        // C5 Task 6 additive（issue 级等待项无 operation/diagnostics）。
+        operationId: null,
+        diagnostics: null,
       },
     };
     render(<CockpitInbox items={[item]} actions={facade} />);
@@ -398,6 +408,9 @@ describe("C2 waiting cards", () => {
             expectedVersion: 3,
           },
         ],
+      // C5 Task 6 additive（issue 级等待项无 operation/diagnostics）。
+      operationId: null,
+      diagnostics: null,
     },
   });
 
@@ -1275,5 +1288,86 @@ describe("C4 logical codebase bootstrap cards", () => {
     await userEvent.click(button);
     expect(facade.sendBootstrapAction).toHaveBeenCalledTimes(1);
     expect(screen.queryAllByTestId("lc-bootstrap-member_index")).toHaveLength(1);
+  });
+});
+
+// C5 Task 6/7：project 级 repository 初始化失败等待项——经 c1WaitingItem
+// 投影（无 issueId，id 即后端稳定 id）渲染结构化 diagnostics 与
+// “网关恢复后继续”动作（稳定 command id cmd-repo-init-resume-{operationId}）。
+describe("repository initialization waiting cards", () => {
+  const failedProjectItem: C1WaitingItem = {
+    id: "c1:project:project_0001:repository_init:op_init_0001",
+    kind: "repository_initialization_failed",
+    reason:
+      "repository initialization failed at pre_check (provider_unavailable); awaiting gateway recovery",
+    completed_steps: ["cadence_skills"],
+    target: null,
+    plan_id: null,
+    session_id: null,
+    attempt_id: null,
+    gate_id: null,
+    possible_side_effect: null,
+    actions: ["resume_repository_initialization"],
+    next_phase: "repository_registered",
+    action_context: [],
+    operation_id: "op_init_0001",
+    diagnostics: {
+      failed_step: "pre_check",
+      reason_code: "provider_unavailable",
+      provider: "claude_code",
+      stderr_summary: "claude code gateway refused connection",
+      changed_paths: ["repo-a/.claude/settings.json"],
+      retryable: true,
+    },
+    project_id: "project_0001",
+  };
+
+  it("renders structured diagnostics and dispatches resume with a stable command id", async () => {
+    const facade = mockActions();
+    render(
+      <CockpitInbox
+        items={[c1WaitingItem(failedProjectItem, "project_0001")]}
+        actions={facade}
+      />,
+    );
+    const card = screen.getByTestId("c1-waiting-repository_initialization_failed");
+    const diagnostics = within(card).getByTestId("repo-init-failure-diagnostics");
+    expect(diagnostics).toHaveTextContent("pre_check");
+    expect(diagnostics).toHaveTextContent("provider_unavailable");
+    expect(diagnostics).toHaveTextContent("claude_code");
+    expect(diagnostics).toHaveTextContent("claude code gateway refused connection");
+    expect(diagnostics).toHaveTextContent("repo-a/.claude/settings.json");
+
+    const button = within(card).getByTestId("repo-init-resume-action");
+    expect(button).toHaveTextContent("网关恢复后继续");
+    await userEvent.click(button);
+    expect(facade.resumeRepositoryInitialization).toHaveBeenCalledWith({
+      kind: "resume_repository_initialization",
+      projectId: "project_0001",
+      operationId: "op_init_0001",
+      commandId: "cmd-repo-init-resume-op_init_0001",
+    });
+  });
+
+  it("keeps the successor running item read-only without diagnostics", () => {
+    const runningItem: C1WaitingItem = {
+      ...failedProjectItem,
+      id: "c1:project:project_0001:repository_init:op_init_0002",
+      reason: "repository initialization resumed; successor operation running",
+      actions: [],
+      operation_id: "op_init_0002",
+      diagnostics: null,
+    };
+    render(
+      <CockpitInbox
+        items={[c1WaitingItem(runningItem, "project_0001")]}
+        actions={mockActions()}
+      />,
+    );
+    const card = screen.getByTestId("c1-waiting-repository_initialization_failed");
+    expect(card.querySelector("button")).toBeNull();
+    expect(
+      within(card).queryByTestId("repo-init-failure-diagnostics"),
+    ).toBeNull();
   });
 });

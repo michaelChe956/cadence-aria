@@ -55,7 +55,15 @@ export type C1RecoveryActionPayload =
       leaseId: string;
       attemptId: string;
     }
-  | { kind: "rebind"; projectId: string; issueId: string };
+  | { kind: "rebind"; projectId: string; issueId: string }
+  | {
+      // C5 Task 6：project 级 repository 初始化失败“网关恢复后继续”——
+      // 不要求 issueId（project 等待项无 issue 归属），按 operation_id 出站。
+      kind: "resume_repository_initialization";
+      projectId: string;
+      operationId: string;
+      commandId: string;
+    };
 
 /**
  * C4 Task 9（LC 冷启动加固）：驾驶舱 bootstrap 动作——准备/继续/重试/核验
@@ -128,6 +136,13 @@ export type CockpitActionFacade = {
    * 可选面——旧接线不提供时卡片按钮只读 fail-closed）。 */
   respondGate?(
     payload: C1RecoveryActionPayload & { kind: "gate_response" },
+  ): Promise<void>;
+  /** C5 Task 6：project 级 repository 初始化 resume（Task 6 resume REST；
+   * 可选面——旧接线不提供时卡片按钮只读 fail-closed）。 */
+  resumeRepositoryInitialization?(
+    payload: C1RecoveryActionPayload & {
+      kind: "resume_repository_initialization";
+    },
   ): Promise<void>;
   /** C4 Task 9：LC 冷启动统一动作（Task 6 bootstrap action REST 透传，
    * 页面接线发送器；未接线零出站 fail-closed）。 */
@@ -339,6 +354,11 @@ export function createCockpitActionFacade(input: {
       input.sendC1Action?.(payload);
     },
     async respondGate(payload) {
+      input.sendC1Action?.(payload);
+    },
+    // C5 Task 6：repository 初始化 resume 同款透传（fail-closed：
+    // 未接线零出站）；成功后的 project 刷新由页面发送器接线。
+    async resumeRepositoryInitialization(payload) {
       input.sendC1Action?.(payload);
     },
     // C4 Task 9：bootstrap 动作只透传页面接线发送器（fail-closed：未接线

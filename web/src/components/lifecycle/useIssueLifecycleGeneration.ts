@@ -6,6 +6,7 @@ import {
   getAutomationTarget,
   prepareWorkItemPlan,
   putAutomationEnrollment,
+  ApiRequestError,
 } from "../../api/client";
 import type { ProductIssue } from "../../api/types";
 import type {
@@ -315,8 +316,8 @@ export function useIssueLifecycleGeneration({
           ],
         },
         options: target.resolved_options,
-        logical_repository_id: target.logical_repository_id,
-        // C1：服务端投影的双载体 target 原样回传（不从前端拼凑/猜测）。
+        // C5 Task 1：Enable 只回传服务端投影的 enrollment target（必带、
+        // 不再发送 logical_repository_id 冗余字段，不从前端拼凑）。
         target: target.enrollment_target,
       },
     });
@@ -347,6 +348,11 @@ export function useIssueLifecycleGeneration({
           options,
         );
       } catch (reason) {
+        // C5 Task 3：ApiRequestError（code/details）原样上抛——role-chain
+        // 预检等结构化错误由弹窗逐角色渲染，不降级为普通 Error 语义。
+        if (reason instanceof ApiRequestError) {
+          throw reason;
+        }
         throw new Error(
           errorMessage(reason, AUTOMATION_ENROLL_FAILURE_MESSAGE),
         );

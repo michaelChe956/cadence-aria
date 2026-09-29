@@ -4,6 +4,7 @@ import type { WorkspaceWsState } from "./workspace-ws-store-types";
 import { useWorkspaceStore, type TimelineNode } from "./workspace-ws-store";
 import { installWorkspaceStoreTestHooks } from "./workspace-ws-store.test-utils";
 import {
+  c1WaitingItem,
   formatFlowElapsed,
   gateActionBlockCopy,
   gateActionBlockReason,
@@ -15,6 +16,7 @@ import {
   selectGateProjection,
   topologyTokenName,
 } from "./workspace-cockpit-projection";
+import type { C1WaitingItem } from "../api/types";
 
 function timelineNode(overrides: Partial<TimelineNode> = {}): TimelineNode {
   return {
@@ -1116,5 +1118,67 @@ describe("F-49 gate budget authority", () => {
       key: "turn_1",
       remaining_budget: 2,
     });
+  });
+});
+
+describe("C5 project repository initialization waiting projection", () => {
+  const projectWaiting: C1WaitingItem = {
+    id: "c1:project:project_0001:repository_init:op_init_0001",
+    kind: "repository_initialization_failed",
+    reason:
+      "repository initialization failed at pre_check (provider_unavailable); awaiting gateway recovery",
+    completed_steps: ["cadence_skills"],
+    target: null,
+    plan_id: null,
+    session_id: null,
+    attempt_id: null,
+    gate_id: null,
+    possible_side_effect: null,
+    actions: ["resume_repository_initialization"],
+    next_phase: "repository_registered",
+    action_context: [],
+    operation_id: "op_init_0001",
+    diagnostics: {
+      failed_step: "pre_check",
+      reason_code: "provider_unavailable",
+      provider: "claude_code",
+      stderr_summary: null,
+      changed_paths: [],
+      retryable: true,
+    },
+    project_id: "project_0001",
+  };
+
+  it("projects a project-level item with the backend id and no issue identity", () => {
+    const item = c1WaitingItem(projectWaiting, "project_0001");
+    expect(item.id).toBe("c1:project:project_0001:repository_init:op_init_0001");
+    expect(item.id).not.toContain("undefined");
+    expect(item.kind).toBe("c1_recovery");
+    expect(item.c1Info?.issueId).toBeNull();
+    expect(item.c1Info?.projectId).toBe("project_0001");
+    expect(item.c1Info?.operationId).toBe("op_init_0001");
+    expect(item.c1Info?.diagnostics?.failedStep).toBe("pre_check");
+    expect(item.c1Info?.diagnostics?.reasonCode).toBe("provider_unavailable");
+    expect(item.c1Info?.diagnostics?.provider).toBe("claude_code");
+    expect(item.c1Info?.diagnostics?.retryable).toBe(true);
+    expect(item.title).toBe("仓库初始化失败，等待恢复");
+  });
+
+  it("keeps the issue-level id prefix and tolerates missing diagnostics", () => {
+    const item = c1WaitingItem(
+      {
+        ...projectWaiting,
+        id: "c1:advance_retry_failed:advance_0001",
+        kind: "advance_retry_failed",
+        operation_id: null,
+        diagnostics: null,
+      },
+      "project_0001",
+      "issue_0001",
+    );
+    expect(item.id).toBe("c1:issue_0001:c1:advance_retry_failed:advance_0001");
+    expect(item.c1Info?.issueId).toBe("issue_0001");
+    expect(item.c1Info?.operationId).toBeNull();
+    expect(item.c1Info?.diagnostics).toBeNull();
   });
 });

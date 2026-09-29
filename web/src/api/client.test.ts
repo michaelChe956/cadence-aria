@@ -592,6 +592,8 @@ describe("api client", () => {
             require_execution_plan_confirm: false,
           },
         },
+        // C5 Task 1：旧代响应快照仍含已删除的顶层 logical_repository_id——
+        // 宽解析必须容忍多余字段（新契约以 target 为准）。
         logical_repository_id: "00000000-0000-0000-0000-000000000001",
         prepare_intent_id: "enrollment_0001",
         plan_id: "plan_0002",

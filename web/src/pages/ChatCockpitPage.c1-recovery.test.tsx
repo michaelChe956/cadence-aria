@@ -1,5 +1,5 @@
 import type * as WorkspaceWsModule from "../hooks/useWorkspaceWs";
-import { act, render, screen, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CockpitInboxItem } from "../state/workspace-cockpit-projection";
@@ -9,6 +9,7 @@ import { useWorkspaceWs } from "../hooks/useWorkspaceWs";
 import { useUnloadGuard } from "../hooks/useUnloadGuard";
 import { useWorkspaceStore } from "../state/workspace-ws-store";
 import { useOperationAuditStore } from "../state/operation-audit-store";
+import { subscribeToLifecycleInvalidation } from "../state/lifecycle-workbench-store";
 import { ChatCockpitPage } from "./ChatCockpitPage";
 import { readCockpitSettings } from "../state/cockpit-settings";
 import { currentMockWorkspaceWs, mockWorkspaceWs } from "./ChatWorkspacePage.test-utils";
@@ -131,6 +132,33 @@ const rebindWaiting: C1WaitingItem = {
   next_phase: null,
 };
 
+const repoInitFailedWaiting: C1WaitingItem = {
+  id: "c1:project:project_0001:repository_init:op_init_0001",
+  kind: "repository_initialization_failed",
+  reason:
+    "repository initialization failed at pre_check (provider_unavailable); awaiting gateway recovery",
+  completed_steps: ["cadence_skills"],
+  target: null,
+  plan_id: null,
+  session_id: null,
+  attempt_id: null,
+  gate_id: null,
+  possible_side_effect: null,
+  actions: ["resume_repository_initialization"],
+  next_phase: "repository_registered",
+  action_context: [],
+  operation_id: "op_init_0001",
+  diagnostics: {
+    failed_step: "pre_check",
+    reason_code: "provider_unavailable",
+    provider: "claude_code",
+    stderr_summary: "claude code gateway refused connection",
+    changed_paths: ["repo-a/.claude/settings.json"],
+    retryable: true,
+  },
+  project_id: PROJECT_ID,
+};
+
 type CapturedRequest = { url: string; method: string; body: unknown };
 let captured: CapturedRequest[];
 
@@ -215,6 +243,27 @@ function installFetchRouter() {
         gate_id: "gate_0001",
       });
     }
+    if (
+      method === "POST" &&
+      url === `/api/projects/${PROJECT_ID}/repository-initializations/op_init_0001/resume`
+    ) {
+      // C5 Task 6：resume 返回 RepositoryInitializationOperationSnapshot。
+      return jsonResponse(
+        {
+          operation_id: "op_init_0002",
+          status: "created",
+          steps: [{ step_id: "cadence_skills", status: "pending" }],
+          current_step: null,
+          failed_step: null,
+          result: null,
+          error: null,
+          created_at: "2026-09-30T00:00:00Z",
+          updated_at: "2026-09-30T00:00:00Z",
+          completed_at: null,
+        },
+        202,
+      );
+    }
     return jsonResponse({ code: "not_found", message: `no route for ${method} ${url}` }, 404);
   };
   vi.stubGlobal("fetch", vi.fn(router));
@@ -227,6 +276,7 @@ function c1Requests(): CapturedRequest[] {
       `/api/projects/${PROJECT_ID}/issues/${ISSUE_ID}/work-item-plans/plan_0001/advance/retry-initialization`,
       `/api/projects/${PROJECT_ID}/issues/${ISSUE_ID}/automation-enrollment/lease/takeover`,
       "/api/workspace-sessions/wsp_0001/human-actions",
+      `/api/projects/${PROJECT_ID}/repository-initializations/op_init_0001/resume`,
     ].includes(url),
   );
 }
@@ -411,7 +461,52 @@ describe("ChatCockpitPage C1 recovery REST wiring", () => {
     expect(c1Requests()).toEqual([]);
     expect(captured).toEqual([]);
   });
+
+  // C5 Task 6/7：project 级 resume——真实 URL/body（cmd-repo-init-resume-
+  // {operationId}），成功后按 project invalidation 唤醒观察器；无 issueId
+  // 参与（project 等待项不要求 issue 归属）。
+  it("dispatches repository initialization resume via the project REST route", async () => {
+    const invalidations: string[] = [];
+    const unsubscribe = subscribeToLifecycleInvalidation((event) =>
+      invalidations.push(event.issueId),
+    );
+    installFetchRouter();
+    cockpitInbox.push(c1WaitingItem(repoInitFailedWaiting, PROJECT_ID));
+    useWorkspaceStore.getState().setSessionIdForTest("session_001");
+    render(
+      <ChatCockpitPage
+        sessionId="session_001"
+        onBack={vi.fn()}
+        onOpenSession={vi.fn()}
+        workspaceWs={currentMockWorkspaceWs()}
+      />,
+    );
+
+    const card = screen.getByTestId("c1-waiting-repository_initialization_failed");
+    expect(
+      within(card).getByTestId("repo-init-resume-action"),
+    ).toHaveTextContent("网关恢复后继续");
+    await userEvent.click(
+      within(card).getByTestId("repo-init-resume-action"),
+    );
+
+    await waitForCalls(1);
+    expect(c1Requests()).toEqual([
+      {
+        url: `/api/projects/${PROJECT_ID}/repository-initializations/op_init_0001/resume`,
+        method: "POST",
+        body: { command_id: "cmd-repo-init-resume-op_init_0001" },
+      },
+    ]);
+    await waitFor(() =>
+      expect(invalidations).toContain(
+        `repository_initialization:${PROJECT_ID}`,
+      ),
+    );
+    unsubscribe();
+  });
 });
+
 
 async function waitForCalls(count: number) {
   await act(async () => {

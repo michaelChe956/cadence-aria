@@ -520,6 +520,60 @@ describe("cockpit gate action facade", () => {
   });
 });
 
+// C5 Task 6：project 级 repository 初始化 resume 只透传页面接线的
+// sendC1Action 发送器（不要求 issueId；未接线零出站 fail-closed）。
+describe("cockpit repository initialization resume facade", () => {
+  installWorkspaceStoreTestHooks();
+
+  it("passes the project resume payload through to the page sender", async () => {
+    const sendC1Action = vi.fn();
+    const facade = createCockpitActionFacade({
+      flowKind: "single_candidate",
+      commandId: null,
+      getState: useWorkspaceStore.getState,
+      sendConfirm: vi.fn(() => true),
+      sendAbandonGate: vi.fn(() => true),
+      sendHumanGateFeedback: vi.fn(() => true),
+      sendAdvance: vi.fn(() => true),
+      adoptReview: vi.fn(),
+      sendBatchConfirm: vi.fn(async () => undefined),
+      sendCompileRecovery: vi.fn(),
+      sendC1Action,
+    });
+    const payload = {
+      kind: "resume_repository_initialization",
+      projectId: "project_0001",
+      operationId: "op_init_0001",
+      commandId: "cmd-repo-init-resume-op_init_0001",
+    } as const;
+    await facade.resumeRepositoryInitialization?.(payload);
+    expect(sendC1Action).toHaveBeenCalledWith(payload);
+  });
+
+  it("stays fail-closed (no outbound call) when no sender is wired", async () => {
+    const facade = createCockpitActionFacade({
+      flowKind: "single_candidate",
+      commandId: null,
+      getState: useWorkspaceStore.getState,
+      sendConfirm: vi.fn(() => true),
+      sendAbandonGate: vi.fn(() => true),
+      sendHumanGateFeedback: vi.fn(() => true),
+      sendAdvance: vi.fn(() => true),
+      adoptReview: vi.fn(),
+      sendBatchConfirm: vi.fn(async () => undefined),
+      sendCompileRecovery: vi.fn(),
+    });
+    await expect(
+      facade.resumeRepositoryInitialization?.({
+        kind: "resume_repository_initialization",
+        projectId: "project_0001",
+        operationId: "op_init_0001",
+        commandId: "cmd-repo-init-resume-op_init_0001",
+      }),
+    ).resolves.toBeUndefined();
+  });
+});
+
 // REQ-PCG-01/02（plan-compile-gate-visibility）：批次确认与 compile recovery 是两条
 // 独立操作——它们不得被转换成 Confirm / HumanGateFeedback / AbandonHumanGate 三命令
 // （REQ-RET-02/REQ-CG-02），发送前查新 kind 的阻断判据（F-30 终态守卫不放宽）。
