@@ -127,20 +127,11 @@ impl CodingWorkspaceEngine {
             }
             return Err(error.into());
         }
-        self.emit_code_review_chat_entry(
-            &attempt,
-            &node.id,
-            &report,
-            plan_defect_source.label(),
-            plan_defect_route.label(),
-        )
-        .await;
-        let _ = self
-            .event_tx
-            .send(CodingWsOutMessage::CodeReviewComplete {
-                report: Box::new(report.clone()),
-            })
-            .await;
+        // C2 Task 1（REQ-CRO-01）durable-first：完成事实（role run 状态、timeline
+        // 完成、分诊门禁、chat entry）全部先经既有 store 写面落盘，之后才发射
+        // `CodeReviewComplete` 观察事件——断连／观察通道失效不回滚业务事实，
+        // 驾驶舱重连经 GET 补读到同一结果。范式对齐 coder 侧 coding.rs 的
+        // save_provider_raw_output→role_run refs→status→timeline→emit 次序。
         let (node_status, summary, role_run_status, reason_code) = match report.verdict {
             ReviewVerdict::Approve => (
                 CodingTimelineNodeStatus::Completed,
@@ -232,6 +223,20 @@ impl CodingWorkspaceEngine {
                 .await?;
             }
         }
+        self.emit_code_review_chat_entry(
+            &attempt,
+            &node.id,
+            &report,
+            plan_defect_source.label(),
+            plan_defect_route.label(),
+        )
+        .await;
+        let _ = self
+            .event_tx
+            .send(CodingWsOutMessage::CodeReviewComplete {
+                report: Box::new(report.clone()),
+            })
+            .await;
         Ok(report)
     }
 }

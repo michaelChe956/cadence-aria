@@ -499,3 +499,168 @@ async fn triage_gate_send_to_coder_without_operator_context_is_rejected() {
         "must stay blocked"
     );
 }
+
+/// C2 Task 1（REQ-CRO-01）：完成收尾 durable-first。`CodeReviewComplete`
+/// 观察事件必须在全部完成事实（artifact／report／snapshot／role run 状态／
+/// timeline 完成）落盘**之后**才能发射——`complete_timeline_node` 先写
+/// `update_timeline_node_status` 再发自己的事件，因此观察者先收到
+/// `CodingTimelineNodeUpdated{Completed}` 即证明 durable 写面已成功。
+///
+/// 容量 1 的通道让引擎在每次 `reserve()` 处停等，观察者逐事件消费；当前
+/// 实现（事件先于 `complete_timeline_node`/`update_role_run_status`）会在
+/// `CodeReviewComplete` 到达时仍未见过 Completed 事件，断言失败。
+#[tokio::test]
+async fn code_review_complete_persists_facts_before_emitting_events() {
+    let (root, store, attempt) = running_attempt_with_worktree();
+    init_test_git_repo(attempt.worktree_path.as_ref().unwrap());
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    let engine = CodingWorkspaceEngine::new(
+        store.clone(),
+        crate::product::git_workspace_service::GitWorkspaceService::new(),
+        tx,
+    );
+    let provider = super::provider_execution_context::CapturingProjectionProvider::new(
+        serde_json::json!({
+            "verdict": "approve",
+            "summary": "断连窗口补读",
+            "findings": []
+        })
+        .to_string(),
+    );
+    let (_cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel(1);
+
+    let store_for_observer = store.clone();
+    let identity = (
+        attempt.project_id.clone(),
+        attempt.issue_id.clone(),
+        attempt.id.clone(),
+    );
+    let handle = tokio::spawn(async move {
+        engine
+            .execute_code_review_with_commands(&attempt, &provider, &mut cmd_rx)
+            .await
+            .expect("review completes while observer drains slowly")
+    });
+
+    let mut saw_node_completed_before_complete = false;
+    while let Some(event) = rx.recv().await {
+        match event {
+            CodingWsOutMessage::CodingTimelineNodeUpdated {
+                node_id, status, ..
+            } => {
+                if status == CodingTimelineNodeStatus::Completed {
+                    // 事件仅在 store 写面成功后发射；直接复核 durable 状态。
+                    let nodes = store_for_observer
+                        .get_timeline_nodes(&identity.0, &identity.1, &identity.2)
+                        .expect("timeline nodes");
+                    let node = nodes
+                        .iter()
+                        .find(|node| node.id == node_id)
+                        .expect("persisted node");
+                    assert_eq!(node.status, CodingTimelineNodeStatus::Completed);
+                    saw_node_completed_before_complete = true;
+                }
+            }
+            CodingWsOutMessage::CodeReviewComplete { .. } => {
+                assert!(
+                    saw_node_completed_before_complete,
+                    "CodeReviewComplete 只能在 timeline 完成事实持久化之后发射"
+                );
+                // 观察点复核：role run 状态与 completion checkpoint（报告＋原始输出）
+                // 均已 durable，驾驶舱重连可补读到同一结果。
+                let run = store_for_observer
+                    .latest_role_run(
+                        &identity.0,
+                        &identity.1,
+                        &identity.2,
+                        CodingExecutionStage::CodeReview,
+                        CodingProviderRole::CodeReviewer,
+                    )
+                    .expect("role runs")
+                    .expect("role run exists");
+                assert_eq!(run.status, CodingRoleRunStatus::Completed);
+                assert!(!run.raw_provider_output_refs.is_empty());
+                let reports = store_for_observer
+                    .list_code_review_reports(&identity.0, &identity.1, &identity.2)
+                    .expect("reports");
+                assert_eq!(
+                    reports.len(),
+                    1,
+                    "completion checkpoint persisted exactly once"
+                );
+                assert!(reports[0]
+                    .raw_provider_output_ref
+                    .as_deref()
+                    .is_some_and(|reference| !reference.is_empty()));
+            }
+            _ => {}
+        }
+    }
+    let report = handle.await.expect("engine task joins");
+    assert_eq!(report.verdict, ReviewVerdict::Approve);
+
+    // 全量复核：断连观察不改变业务事实，恰好一次 reviewer 运行。
+    let runs = store
+        .list_role_runs(&identity.0, &identity.1, &identity.2)
+        .expect("role runs");
+    assert_eq!(
+        runs.iter()
+            .filter(|run| run.role == CodingProviderRole::CodeReviewer)
+            .count(),
+        1,
+        "disconnection must not spawn a second reviewer run"
+    );
+    drop(root);
+}
+
+/// C2 Task 1（REQ-CRO-01）：观察通道全失效（无任何 WS 订阅者，发送侧
+/// reserve 立即失败）时，业务结果与 attempt 状态照常持久化——不产生失败
+/// 或中止终态，驾驶舱经 GET 补读到同一结果。
+#[tokio::test]
+async fn code_review_completion_survives_disconnected_observers() {
+    let (root, store, attempt) = running_attempt_with_worktree();
+    init_test_git_repo(attempt.worktree_path.as_ref().unwrap());
+    let (tx, rx) = tokio::sync::mpsc::channel(64);
+    drop(rx);
+    let engine = CodingWorkspaceEngine::new(
+        store.clone(),
+        crate::product::git_workspace_service::GitWorkspaceService::new(),
+        tx,
+    );
+    let provider = super::provider_execution_context::CapturingProjectionProvider::new(
+        serde_json::json!({
+            "verdict": "approve",
+            "summary": "无订阅者补读",
+            "findings": []
+        })
+        .to_string(),
+    );
+    let (_cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel(1);
+
+    let report = engine
+        .execute_code_review_with_commands(&attempt, &provider, &mut cmd_rx)
+        .await
+        .expect("business result must not depend on observers");
+
+    let persisted = store
+        .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("attempt persisted");
+    assert_eq!(persisted.status, CodingAttemptStatus::Running);
+    let reports = store
+        .list_code_review_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("reports");
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0].id, report.id);
+    let run = store
+        .latest_role_run(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingExecutionStage::CodeReview,
+            CodingProviderRole::CodeReviewer,
+        )
+        .expect("role runs")
+        .expect("role run exists");
+    assert_eq!(run.status, CodingRoleRunStatus::Completed);
+    drop(root);
+}
