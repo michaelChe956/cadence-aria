@@ -13,7 +13,29 @@ use crate::cross_cutting::bounded_command_runner::{
 use super::AggregateIndexBudget;
 use crate::product::json_store::ProductStoreError;
 
-pub const CODEGRAPH_EXACT_VERSION: &str = "1.6.0";
+/// G2（终局关闸缺口）：受支持的 CodeGraph 兼容区间——语义 `^1.6`
+///（`>=1.6.0, <2.0.0`）。
+///
+/// 原精确钉版 `1.6.0` 使环境补丁升级（如 1.6.1）即击断 LC 冷启动
+///（`codegraph_version_mismatch`）。1.x 内 CLI 契约（denylist 范围等）
+/// 稳定；2.0 起可能破坏 CLI 行为，届时需重新验证后上调区间。
+pub const CODEGRAPH_MIN_VERSION: (u64, u64, u64) = (1, 6, 0);
+pub const CODEGRAPH_MAX_VERSION_EXCLUSIVE: (u64, u64, u64) = (2, 0, 0);
+
+/// 解析 `codegraph --version` 输出为三元组：取最后一个空白分隔 token，
+/// 要求恰为 `major.minor.patch` 三段数字；其余形态（含前后缀噪声、缺段）
+/// 一律 `None`（fail-closed，不静默放行）。
+pub fn parse_codegraph_version(output: &str) -> Option<(u64, u64, u64)> {
+    let token = output.trim().split_whitespace().next_back()?;
+    let mut segments = token.split('.');
+    let major = segments.next()?.parse().ok()?;
+    let minor = segments.next()?.parse().ok()?;
+    let patch = segments.next()?.parse().ok()?;
+    if segments.next().is_some() {
+        return None;
+    }
+    Some((major, minor, patch))
+}
 const OUTPUT_LIMIT_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -85,12 +107,17 @@ impl CodeGraphCli {
             "codegraph_version_failed",
         )?;
         let actual = output.stdout.trim();
-        if actual == CODEGRAPH_EXACT_VERSION {
+        let in_range = parse_codegraph_version(actual).is_some_and(|version| {
+            version >= CODEGRAPH_MIN_VERSION && version < CODEGRAPH_MAX_VERSION_EXCLUSIVE
+        });
+        if in_range {
             Ok(())
         } else {
             Err(AggregateIndexError::Degraded {
                 code: "codegraph_version_mismatch",
-                message: format!("expected {CODEGRAPH_EXACT_VERSION}, got {actual}"),
+                message: format!(
+                    "expected >=1.6.0, <2.0.0 (compatible ^1.6 range), got {actual}"
+                ),
             })
         }
     }
@@ -372,7 +399,10 @@ mod tests {
     }
 
     #[test]
-    fn exact_version_is_required_and_missing_binary_becomes_degraded_error() {
+    fn version_gate_accepts_compatible_range_and_rejects_out_of_range() {
+        // G2（终局关闸缺口）：环境升级（如 1.6.0→1.6.1）不应击断 LC 冷启动。
+        // 版本门接受 ^1.6 语义兼容区间（>=1.6.0，<2.0.0）；区间外与不可解析
+        // 输出仍 fail-closed（codegraph_version_mismatch，不静默放行）。
         let runner = Arc::new(ScriptedCodeGraphRunner::from_results(vec![
             CommandCapture::success("1.6.0\n"),
             CommandCapture::success("Indexed 6 files\n"),
@@ -406,16 +436,35 @@ mod tests {
             Err(AggregateIndexError::Degraded { code, .. }) if code == "codegraph_missing"
         ));
 
-        let mismatched = CodeGraphCli::new(
-            Arc::new(ScriptedCodeGraphRunner::from_results(vec![
-                CommandCapture::success("1.6.1\\n"),
-            ])),
-            "codegraph".into(),
-        );
-        assert!(matches!(
-            mismatched.verify_version(),
-            Err(AggregateIndexError::Degraded { code, .. }) if code == "codegraph_version_mismatch"
-        ));
+        // 同区间补丁版（G2 现场：1.6.1）必须放行。
+        for compatible in ["1.6.1\n", "1.7.3\n"] {
+            let cli = CodeGraphCli::new(
+                Arc::new(ScriptedCodeGraphRunner::from_results(vec![
+                    CommandCapture::success(compatible),
+                ])),
+                "codegraph".into(),
+            );
+            cli.verify_version()
+                .unwrap_or_else(|error| panic!("compatible {compatible:?} rejected: {error}"));
+        }
+
+        // 区间外与不可解析：fail-closed 拒绝。
+        for rejected in ["1.5.9\n", "2.0.0\n", "2.1.0\n", "not-a-version\n", "1.6\n"] {
+            let cli = CodeGraphCli::new(
+                Arc::new(ScriptedCodeGraphRunner::from_results(vec![
+                    CommandCapture::success(rejected),
+                ])),
+                "codegraph".into(),
+            );
+            assert!(
+                matches!(
+                    cli.verify_version(),
+                    Err(AggregateIndexError::Degraded { code, .. })
+                        if code == "codegraph_version_mismatch"
+                ),
+                "version {rejected:?} must be rejected"
+            );
+        }
     }
 
     #[tokio::test]
