@@ -13,6 +13,15 @@ pub(crate) enum SingleCandidateProviderRunError {
     /// 节点、不广播 Error、不改写 durable phase。
     Superseded,
     Message(String),
+    /// C-1：LC admission waiting——成员规则缺失/政策漂移是可操作的持久等待
+    /// 事实（durable phase 已回落 Prepare 面），不是终态失败。携带预检的
+    /// 判别码、缺失材料与允许动作供上浮投影；运行以无 failed 节点收尾。
+    AdmissionWaiting {
+        reason_code: String,
+        detail: String,
+        missing_materials: Vec<String>,
+        allowed_actions: Vec<crate::product::logical_codebase::BootstrapActionKind>,
+    },
 }
 
 /// SC author 终态失败消息的显式重开指引后缀：Failed 相位有显式恢复入口
@@ -351,6 +360,77 @@ async fn drive_single_candidate_reredrive(
     Ok(reredrive_delivery.source)
 }
 
+/// C-1：LC 会话的 admission 预检——在读取 `.claude/rules/language.md` 之前
+/// 经 `LogicalCodebaseProviderAdmissionPreflight` 校验实际成员规则、聚合
+/// policy 与 gateway capability。
+///
+/// - waiting（材料缺失/漂移/capability 不满足）：durable phase 回落
+///   Prepare/Open 等待面，返回 `AdmissionWaiting`（不落终态 Failed、
+///   不产生 failed 节点）；
+/// - 存储/路由错误：与其它 pre-run 装载失败同形（`Message`，不改写
+///   durable phase）；
+/// - LC 归属缺失（gateway 已注入但 issue 无 logical_codebase_id）：持久
+///   状态不一致，fail-closed `Message`，绝不静默跳过预检回落 legacy 行为。
+///
+/// 预检通过返回 `Ok(())`：后续仍由调用方读取同一实际文件（无 fallback）。
+fn preflight_lc_member_rules_before_author_run(
+    engine: &mut WorkspaceEngine,
+    run_context: &ProviderRunContext,
+    launch: &super::gateway_start::LogicalPlanLaunch,
+) -> Result<(), SingleCandidateProviderRunError> {
+    let lc_id =
+        crate::product::logical_codebase::resolve_issue_logical_codebase_id(
+            &run_context.app_paths,
+            &run_context.session_record.project_id,
+            &run_context.session_record.issue_id,
+        )
+        .map_err(|error| {
+            SingleCandidateProviderRunError::Message(format!(
+                "resolve logical codebase for admission preflight failed: {error}"
+            ))
+        })?
+        .ok_or_else(|| {
+            SingleCandidateProviderRunError::Message(
+                "logical session has no logical codebase attribution; admission preflight cannot run"
+                    .to_string(),
+            )
+        })?;
+    let request = launch.planning_request().map_err(|error| {
+        SingleCandidateProviderRunError::Message(format!(
+            "build admission preflight request failed: {error}"
+        ))
+    })?;
+    let preflight = crate::product::logical_codebase::LogicalCodebaseProviderAdmissionPreflight::new(
+        run_context.app_paths.clone(),
+        lc_id,
+        launch.gateway.clone(),
+    );
+    match preflight.check(&request) {
+        Ok(_) => Ok(()),
+        Err(
+            crate::product::logical_codebase::ProviderAdmissionError::Waiting {
+                reason_code,
+                detail,
+                missing_materials,
+                allowed_actions,
+            },
+        ) => {
+            engine.persist_single_candidate_waiting_phase();
+            Err(SingleCandidateProviderRunError::AdmissionWaiting {
+                reason_code,
+                detail,
+                missing_materials,
+                allowed_actions,
+            })
+        }
+        Err(crate::product::logical_codebase::ProviderAdmissionError::Store(error)) => {
+            Err(SingleCandidateProviderRunError::Message(format!(
+                "provider admission preflight store error: {error}"
+            )))
+        }
+    }
+}
+
 pub(crate) async fn run_single_candidate_author(
     engine: &mut WorkspaceEngine,
     provider_for_run: Arc<dyn StreamingProviderAdapter>,
@@ -407,6 +487,26 @@ pub(crate) async fn run_single_candidate_author(
         .map_err(|error| {
             SingleCandidateProviderRunError::Message(format!("load issue failed: {error}"))
         })?;
+    // C-1：LC 会话在读取 language rules 之前先过 provider admission preflight
+    // ——成员规则缺失、policy 漂移或 capability 不满足时转 waiting/Prepare 面
+    // （可操作等待事实），不再把缺材料暴露成运行时终态 Failed；单仓 legacy
+    // 会话（无 gateway 注入或无 planning launch，判定与下方
+    // `resolve_plan_author_launch` 同谓词）零变化。预检通过后仍由下方同一
+    // 实际文件读取消费 language rules（不新增 fallback 路径）。
+    let lc_plan_launch = super::gateway_start::logical_plan_launch_for(
+        engine,
+        repository
+            .logical_repository_id
+            .as_ref()
+            .map(|id| id.0.to_string()),
+        repository
+            .primary_checkout_id
+            .as_ref()
+            .map(|id| id.0.to_string()),
+    );
+    if let Some(lc_plan_launch) = lc_plan_launch {
+        preflight_lc_member_rules_before_author_run(engine, run_context, &lc_plan_launch)?;
+    }
     let language_rules_path = repository.path.join(".claude/rules/language.md");
     let language_rules = match std::fs::read_to_string(&language_rules_path) {
         Ok(rules) => rules,

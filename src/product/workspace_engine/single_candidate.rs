@@ -70,6 +70,42 @@ impl WorkspaceEngine {
         }
     }
 
+    /// C-1：LC admission waiting 投影——非终态相位回落 Prepare + Open（可操作
+    /// 等待面，与 `rearm_failed_single_candidate_for_start_generation` 的重开
+    /// 形态同族：用户补齐成员材料后可直接再次发起生成）。waiting 不是失败：
+    /// 终态（Completed/Failed）保持自身不可重放；CAS 失败静默（迟到 run 让位
+    /// 持有者，不产生虚假投影）。
+    pub(crate) fn persist_single_candidate_waiting_phase(&mut self) {
+        if self.session.flow_kind != WorkItemPlanFlowKind::SingleCandidate {
+            return;
+        }
+        let Some(lifecycle) = self.lifecycle_store.as_ref() else {
+            self.session.single_candidate_phase =
+                Some(crate::product::models::SingleCandidatePhase::Prepare);
+            return;
+        };
+        let Ok(expected) = lifecycle.get_workspace_session(&self.session.session_id) else {
+            return;
+        };
+        if matches!(
+            expected.single_candidate_phase,
+            Some(
+                crate::product::models::SingleCandidatePhase::Completed
+                    | crate::product::models::SingleCandidatePhase::Failed
+            )
+        ) {
+            return;
+        }
+        if let Ok(saved) = lifecycle.compare_and_save_single_candidate_phase(
+            &expected,
+            crate::product::models::SingleCandidatePhase::Prepare,
+            crate::product::models::WorkspaceSessionStatus::Open,
+        ) {
+            self.session.single_candidate_phase = saved.single_candidate_phase;
+            self.session.session_status = saved.status;
+        }
+    }
+
     /// 先以 durable ledger 保留 provider start，再允许 SingleCandidate author 启动。
     pub(crate) fn reserve_single_candidate_author_start(&mut self) -> Result<bool, String> {
         if self.session.flow_kind != WorkItemPlanFlowKind::SingleCandidate {

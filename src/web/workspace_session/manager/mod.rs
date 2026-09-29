@@ -370,6 +370,13 @@ impl WorkspaceSessionManager {
             engine_tx.clone(),
             session,
         );
+        // C-2（与 C-1 的关系）：本 factory 注入点只负责组装 gateway（policy/
+        // capability bootstrap + 注册表接线），不承担 admission 判定。LC 会话
+        // 规划 author 运行链路的 admission 预检由 C-1 在
+        // `run_single_candidate_author` 读取 language rules 之前统一前置
+        // （`LogicalCodebaseProviderAdmissionPreflight`：成员规则缺失/漂移转
+        // waiting/Prepare 面，单仓 legacy 零变化）；此处不重复设卡，避免二次
+        // 判定产生漂移面。
         if repository.logical_repository_id.is_some() {
             let lc_id = resolve_issue_logical_codebase_id(
                 &app_paths,

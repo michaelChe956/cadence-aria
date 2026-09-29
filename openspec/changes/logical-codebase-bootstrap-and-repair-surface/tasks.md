@@ -19,6 +19,7 @@
 ## 4. Rules/policy/capability 准入
 
 - [x] 4.1 在真实 provider/index/规划准入前校验实际消费的规则材料、聚合 policy revision/digest 与 capability/gateway 条件，产出可审计等待项和准备/重试动作（对应 `logical-codebase-registration` REQ-REG-12、`project-rule-aware-prompts` REQ-PROMPT-01/02）。
+  - 追记（2026-09-30，C4 遗留 C-1/C-2 补实施）：`run_single_candidate_author` 的 LC 会话现已在读取 `.claude/rules/language.md` 之前统一前置 `LogicalCodebaseProviderAdmissionPreflight`（与 Task 8 同一 check）——成员规则缺失/漂移/capability 不满足转 waiting/Prepare 面（durable phase 回落 Prepare+Open、无 failed 节点、消息携带判别码/缺失材料/允许动作），不再是运行时终态 Failed；单仓 legacy 路径零变化（终态 Failed 语义保留）。同源 C-2（planning gateway factory 缺 admission）经裁决以注释注明关系收口：factory 注入点仅组装 gateway，规划 author 运行链路的 admission 由上述 C-1 前置统一承载，不重复设卡。验收记录见 `cadence/reports/2026-09-30_终局关闸_缺口修复迭代验收_v1.0.md` §7。
 - [x] 4.2 将唯一 resolver 的 authority/policy 引用接入 SessionPolicyEnvelope，缺失或不一致时在 spawn 前 fail-closed；禁止伪造 capability、回落旧路径或绕过 gateway，准备完成后回到原链（对应 `session-policy-envelope` REQ-ENV-01）。
 
 ## 5. 通知、恢复与验收

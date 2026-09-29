@@ -71,12 +71,45 @@ pub(super) struct ProviderRunFixture {
     pub(super) design_id: String,
 }
 
+/// 夹具路由形态：Legacy=单仓物理仓；LogicalAlias=legacy 别名逻辑代码库
+/// （成员 checkout 锚定 `repository_root`，C-1 admission 预检测试用）。
+enum FixtureRoute {
+    Legacy,
+    LogicalAlias {
+        write_member_language_rules: bool,
+        gateway_author: Arc<dyn StreamingProviderAdapter>,
+    },
+}
+
+
 impl ProviderRunFixture {
     pub(super) fn new(flow_kind: WorkItemPlanFlowKind) -> Self {
         // 既有语义：engine 事件接收端在 fixture 返回前释放，engine 侧 `send` 立即
         // 失败且不阻塞。需要观测 engine 事件的用例改用 `new_with_engine_rx`。
         let (engine_tx, engine_rx) = mpsc::channel(64);
-        let fixture = Self::build(flow_kind, engine_tx);
+        let fixture = Self::build_routed(flow_kind, FixtureRoute::Legacy, engine_tx);
+        drop(engine_rx);
+        fixture
+    }
+
+    /// C-1：LC（legacy 别名逻辑代码库）SingleCandidate 夹具——成员 checkout 即
+    /// `repository_root`，engine 注入 gateway。`write_member_language_rules=false`
+    /// 构造成员缺 `.claude/rules/language.md` 的 admission waiting 场景；
+    /// `gateway_author` 注册进 gateway registry（LC author 经 gateway 启动）。
+    /// 权威记录登记细节见 `single_candidate_lc_admission.rs`。
+    pub(super) fn new_logical(
+        write_member_language_rules: bool,
+        gateway_author: Arc<dyn StreamingProviderAdapter>,
+    ) -> Self {
+        let (engine_tx, engine_rx) = mpsc::channel(64);
+        let fixture = Self::build_routed(
+            WorkItemPlanFlowKind::SingleCandidate,
+            FixtureRoute::LogicalAlias {
+                write_member_language_rules,
+                gateway_author,
+            },
+            engine_tx,
+        );
         drop(engine_rx);
         fixture
     }
@@ -95,16 +128,50 @@ impl ProviderRunFixture {
         self.root.path().to_path_buf()
     }
 
+    /// C-1：LC 成员 checkout 根（=repository_root），供测试写入/删除
+    /// `.claude/rules/language.md`。
+    pub(super) fn member_checkout_root(&self) -> std::path::PathBuf {
+        self.repository_root.path().to_path_buf()
+    }
+
     fn build(flow_kind: WorkItemPlanFlowKind, engine_tx: mpsc::Sender<EngineEvent>) -> Self {
+        Self::build_routed(flow_kind, FixtureRoute::Legacy, engine_tx)
+    }
+
+    fn build_routed(
+        flow_kind: WorkItemPlanFlowKind,
+        route: FixtureRoute,
+        engine_tx: mpsc::Sender<EngineEvent>,
+    ) -> Self {
         let root = tempfile::tempdir().expect("temporary workspace root");
-        let repository_root = tempfile::tempdir().expect("temporary repository root");
+        // LogicalAlias：成员 checkout 必须是聚合根的直接子目录（聚合索引布局
+        // 校验），故 repository_root 落在 root/aggregate-root/ 之下。
+        let repository_root = match &route {
+            FixtureRoute::Legacy => tempfile::tempdir().expect("temporary repository root"),
+            FixtureRoute::LogicalAlias { .. } => {
+                let aggregate_root = root.path().join("aggregate-root");
+                std::fs::create_dir_all(&aggregate_root)
+                    .expect("create aggregate root directory");
+                tempfile::tempdir_in(&aggregate_root)
+                    .expect("temporary member checkout under aggregate root")
+            }
+        };
         std::fs::create_dir_all(repository_root.path().join(".claude/rules"))
             .expect("create language rules directory");
-        std::fs::write(
-            repository_root.path().join(".claude/rules/language.md"),
-            "## 语言规则\n\n- **必须使用中文** - 所有响应、解释、注释和文档必须使用中文。\n",
-        )
-        .expect("write language rules");
+        let write_language_rules = match &route {
+            FixtureRoute::Legacy => true,
+            FixtureRoute::LogicalAlias {
+                write_member_language_rules,
+                ..
+            } => *write_member_language_rules,
+        };
+        if write_language_rules {
+            std::fs::write(
+                repository_root.path().join(".claude/rules/language.md"),
+                "## 语言规则\n\n- **必须使用中文** - 所有响应、解释、注释和文档必须使用中文。\n",
+            )
+            .expect("write language rules");
+        }
         // REQ-PIB-02：夹具对齐生产不变量（main 分支+初始提交，裸目录无 git
         // 仓库会令基线解析 fail-closed，provider run 起步即终止）。
         super::init_ws_test_git_repo(repository_root.path());
@@ -120,17 +187,54 @@ impl ProviderRunFixture {
                 idempotency_key: format!("provider-run-fixture-{flow_kind:?}"),
             })
             .expect("create repository");
+        // C-1：LogicalAlias 路由的 issue 归属用确定性 legacy 别名 id（登记前后
+        // 同值）；LC 权威记录在 issue 之后登记——selection 写入
+        // issues/issue_0001/ 会占用顺序 id 目录名，必须让 issue 先落 issue_0001。
+        let alias_lc_id = match &route {
+            FixtureRoute::Legacy => None,
+            FixtureRoute::LogicalAlias { .. } => Some(
+                crate::product::logical_codebase::store::legacy_logical_codebase_id("project_0001"),
+            ),
+        };
         IssueStore::new(app_paths.clone())
             .create(CreateProductIssueInput {
                 project_id: "project_0001".to_string(),
                 repo_id: Some(repository.id.clone()),
-                logical_codebase_id: None,
+                logical_codebase_id: alias_lc_id,
                 title: "Provider run flow dispatch".to_string(),
                 description: Some("durable flow_kind must select one provider chain".to_string()),
                 change_id: None,
                 base_branch: None,
             })
             .expect("create issue");
+        // C-1：LogicalAlias 路由在物理仓之上登记 LC 权威记录（record/manifest/
+        // member/checkout/selection/policy + gateway），并把兼容投影升级为已登记
+        // 形态（strict 三层身份解析要求 logical_repository_id/primary_checkout_id/
+        // identity_schema_version 对齐）。
+        let logical = match &route {
+            FixtureRoute::Legacy => None,
+            FixtureRoute::LogicalAlias { gateway_author, .. } => {
+                let registered =
+                    super::single_candidate_lc_admission::register_alias_logical_codebase(
+                        &app_paths,
+                        repository_root.path(),
+                        &repository,
+                        Arc::clone(gateway_author),
+                    );
+                let mut projection = repository.clone();
+                projection.logical_repository_id = Some(registered.member_id);
+                projection.primary_checkout_id = Some(registered.checkout_id);
+                projection.identity_schema_version = 1;
+                let repos_json = app_paths.project_root("project_0001").join("repos.json");
+                std::fs::write(
+                    &repos_json,
+                    serde_json::to_vec_pretty(&vec![projection])
+                        .expect("serialize registered repository projection"),
+                )
+                .expect("rewrite repos.json with registered projection");
+                Some(registered)
+            }
+        };
         let lifecycle = LifecycleStore::new(app_paths.clone());
         let story = lifecycle
             .create_story_spec(CreateStorySpecInput {
@@ -230,12 +334,18 @@ impl ProviderRunFixture {
         );
         let mut session = WorkspaceSession::from_record(record.clone());
         session.repository_path = Some(repository_root.path().to_path_buf());
-        let engine = Arc::new(Mutex::new(WorkspaceEngine::new_persistent(
+        let engine = WorkspaceEngine::new_persistent(
             Arc::new(CheckpointStore::new(root.path().join("checkpoints"))),
             lifecycle.clone(),
             engine_tx.clone(),
             session,
-        )));
+        );
+        // C-1：LogicalAlias 会话注入 gateway（与生产 manager 的注入谓词同源）。
+        let engine = match logical {
+            Some(registered) => engine.with_logical_provider_gateway(registered.gateway),
+            None => engine,
+        };
+        let engine = Arc::new(Mutex::new(engine));
         assert_eq!(
             lifecycle
                 .get_workspace_session(&record.id)
