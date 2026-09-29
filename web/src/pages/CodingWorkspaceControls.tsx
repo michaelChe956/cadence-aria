@@ -6,6 +6,7 @@ import type {
   GroupFinalReadinessDiagnostic,
   GroupFinalReadinessStatus,
   CodingProviderRole,
+  VerificationTriageRecord,
 } from "../api/types";
 import { StageGateEntry } from "../components/coding-workspace/StageGateEntry";
 import { ConfirmTwiceButton } from "../components/chat-workspace/cockpit/ConfirmTwiceButton";
@@ -337,11 +338,16 @@ export function GatePanel({
   onRespond,
   onConfirmStage,
   onAbort,
+  verificationTriage = null,
+  onEnterVerificationTriage,
 }: {
   gate: CodingPendingGate | null;
   onRespond: ReturnType<typeof useCodingWorkspaceWs>["respondGate"];
   onConfirmStage: ReturnType<typeof useCodingWorkspaceWs>["confirmStageGate"];
   onAbort: ReturnType<typeof useCodingWorkspaceWs>["abortAttempt"];
+  /** C2 Task 8：验证处理旁路面板（不进 action 枚举与 available_actions）。 */
+  verificationTriage?: VerificationTriageRecord | null;
+  onEnterVerificationTriage?: (gateId: string) => void;
 }) {
   const [reason, setReason] = useState("");
   const [localError, setLocalError] = useState<string | null>(null);
@@ -411,6 +417,35 @@ export function GatePanel({
               人工放行会记录质量豁免；请说明跳过该门禁的原因和后续风险处理
             </div>
           ) : null}
+          {isVerificationTriageEligibleGate(activeGate) ? (
+            <div data-testid="coding-verification-triage" className="mt-1 text-xs text-amber-900">
+              <div className="font-semibold">验证处理</div>
+              {verificationTriage ? (
+                <div data-testid="coding-verification-triage-status">
+                  状态：
+                  {verificationTriage.status === "approved"
+                    ? "已批准"
+                    : verificationTriage.status === "rejected"
+                      ? "已拒绝"
+                      : "待处理"}
+                  {verificationTriage.status === "approved" &&
+                  verificationTriage.conclusion !== "approve_plan_revision"
+                    ? "（finding 已由验证处理覆盖）"
+                    : null}
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  data-testid="coding-verification-triage-enter"
+                  disabled={!onEnterVerificationTriage}
+                  onClick={() => onEnterVerificationTriage?.(activeGate.gate_id)}
+                  className="mt-1 inline-flex h-7 items-center rounded-md border border-amber-300 bg-white px-2 font-semibold hover:bg-amber-100 disabled:opacity-60"
+                >
+                  转入验证处理
+                </button>
+              )}
+            </div>
+          ) : null}
           <GateMetadata gate={activeGate} />
           {needsReason ? (
             <div className="mt-2 grid gap-1">
@@ -467,6 +502,21 @@ function actionRequiresContext(action: CodingGateRequired["available_actions"][n
 
 function actionIsQualityBypass(action: CodingGateRequired["available_actions"][number]) {
   return action.action_type === "manual_continue" || action.action_type === "accept_risk";
+}
+
+const VERIFICATION_TRIAGE_ELIGIBLE_REASON_CODES = [
+  "code_review_output_human_triage",
+  "code_review_verification_incomplete",
+  "code_review_operational_blocker",
+  "coding_output_human_triage",
+] as const;
+
+/** C2 Task 8（#19）：可转入独立验证处理的门（coder 输出门＋CR 三门）。 */
+export function isVerificationTriageEligibleGate(gate: CodingGateRequired): boolean {
+  return (
+    gate.reason_code != null &&
+    (VERIFICATION_TRIAGE_ELIGIBLE_REASON_CODES as readonly string[]).includes(gate.reason_code)
+  );
 }
 
 function GateMetadata({ gate }: { gate: CodingPendingGate }) {

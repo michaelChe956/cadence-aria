@@ -8,6 +8,31 @@ mod schema_v2;
 
 pub(crate) const CODING_OUTPUT_HUMAN_TRIAGE_REASON_CODE: &str = "coding_output_human_triage";
 
+/// C2 Task 8（REQ-CVT-03/04，#19）：转入验证处理请求（REST／页面同一
+/// 应用服务，路由 Task 12 统一接线）。plan_revision／scope／expiry 由
+/// 应用服务按 attempt 权威绑定派生。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerificationTriageEntryRequest {
+    pub finding_id: String,
+    pub check_id: String,
+    pub original_command: Option<String>,
+    pub alternative_command: Option<String>,
+    pub cwd: Option<String>,
+    pub outcome: Option<String>,
+    pub test_execution_count: Option<u64>,
+    pub environment: Option<String>,
+}
+
+/// C2 Task 8：验证处理决定请求（三类结论均需用户明确批准）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerificationTriageDecisionRequest {
+    pub triage_id: String,
+    pub conclusion: crate::product::coding_attempt_store::VerificationTriageConclusion,
+    pub decided_by: String,
+    pub reason: String,
+    pub exemption_scope: Vec<String>,
+}
+
 pub(crate) fn coding_gate_action_for_id(action_id: &str) -> Option<CodingGateAction> {
     match action_id {
         "provide_context" => Some(CodingGateAction {
@@ -979,25 +1004,7 @@ impl CodingWorkspaceEngine {
                             "coding_gate_extra_context_required".to_string(),
                         )
                     })?;
-                self.store
-                    .create_context_note(&current, operator_context.clone())?;
-                self.store.create_quality_bypass_audit(
-                    &current,
-                    CreateQualityBypassAuditInput {
-                        attempt_id: current.id.clone(),
-                        gate_id: gate.gate_id.clone(),
-                        stage: gate.stage.clone().unwrap_or_else(|| current.stage.clone()),
-                        reason_code: gate.reason_code.clone(),
-                        operator_context,
-                    },
-                )?;
-                if current.status == CodingAttemptStatus::Blocked {
-                    self.store.admit_and_transition_attempt_to_executable(
-                        project_id, issue_id, attempt_id,
-                    )?
-                } else {
-                    current
-                }
+                self.continue_attempt_with_manual_context(&current, &gate, operator_context)?
             }
             _ => {
                 return Err(CodingWorkspaceEngineError::ProviderStream(
@@ -1045,6 +1052,353 @@ impl CodingWorkspaceEngine {
             )?;
         }
         Ok(updated)
+    }
+
+    // ─── C2 Task 8（REQ-CVT-03/04，#19／BYPASS-19）：验证处理旁路入口 ───
+
+    /// manual_continue 语义共享续跑效果：context note＋质量豁免审计＋
+    /// admission CAS 回 Running（门解决由调用侧统一执行）。Task 4 门动作
+    /// 与 Task 8 验证处理结论批准复用同一应用效果。
+    pub(crate) fn continue_attempt_with_manual_context(
+        &self,
+        current: &CodingExecutionAttempt,
+        gate: &CodingGateRequired,
+        operator_context: String,
+    ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
+        self.store
+            .create_context_note(current, operator_context.clone())?;
+        self.store.create_quality_bypass_audit(
+            current,
+            CreateQualityBypassAuditInput {
+                attempt_id: current.id.clone(),
+                gate_id: gate.gate_id.clone(),
+                stage: gate.stage.clone().unwrap_or_else(|| current.stage.clone()),
+                reason_code: gate.reason_code.clone(),
+                operator_context,
+            },
+        )?;
+        if current.status == CodingAttemptStatus::Blocked {
+            Ok(self.store.admit_and_transition_attempt_to_executable(
+                &current.project_id,
+                &current.issue_id,
+                &current.id,
+            )?)
+        } else {
+            Ok(current.clone())
+        }
+    }
+
+    /// 解析 attempt 当前权威 plan 绑定：活动 coding unit → work item
+    /// revision。解析失败一律 fail-closed（验证处理必须绑定可证明的
+    /// plan revision）。
+    fn verification_triage_current_revision(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<(String, crate::product::models::WorkItemRevision), CodingWorkspaceEngineError>
+    {
+        let unit = self
+            .store
+            .get_active_coding_unit(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+            .ok_or_else(|| {
+                CodingWorkspaceEngineError::ProviderStream(
+                    "verification_triage_plan_revision_unresolvable".to_string(),
+                )
+            })?;
+        let plan_id = attempt.work_item_group_id.clone().ok_or_else(|| {
+            CodingWorkspaceEngineError::ProviderStream(
+                "verification_triage_plan_revision_unresolvable".to_string(),
+            )
+        })?;
+        let revision_store =
+            crate::product::work_item_revision_store::WorkItemRevisionStore::new(self.store.paths());
+        let lineage = revision_store
+            .get_plan_lineage(&attempt.project_id, &attempt.issue_id, &plan_id)
+            .map_err(|_| {
+                CodingWorkspaceEngineError::ProviderStream(
+                    "verification_triage_plan_revision_unresolvable".to_string(),
+                )
+            })?;
+        let revision = revision_store
+            .get_work_item_revision(&lineage, &unit.logical_work_item_id, &unit.work_item_revision_id)
+            .map_err(|_| {
+                CodingWorkspaceEngineError::ProviderStream(
+                    "verification_triage_plan_revision_unresolvable".to_string(),
+                )
+            })?;
+        Ok((unit.work_item_revision_id, revision))
+    }
+
+    /// 解析绑定 check（从 revision 的 verification plan revision 读取，
+    /// 不信任调用方自报的 check 语义）。
+    fn verification_triage_bound_check(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        revision: &crate::product::models::WorkItemRevision,
+        check_id: &str,
+    ) -> Result<crate::product::work_item_contract::VerificationCheck, CodingWorkspaceEngineError>
+    {
+        let revision_store =
+            crate::product::work_item_revision_store::WorkItemRevisionStore::new(self.store.paths());
+        let lineage = revision_store
+            .get_plan_lineage(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt
+                    .work_item_group_id
+                    .clone()
+                    .unwrap_or_default(),
+            )
+            .map_err(|_| {
+                CodingWorkspaceEngineError::ProviderStream(
+                    "verification_triage_check_unresolvable".to_string(),
+                )
+            })?;
+        let plan = revision_store
+            .get_verification_plan_revision(&lineage, &revision.verification_plan_revision_id)
+            .map_err(|_| {
+                CodingWorkspaceEngineError::ProviderStream(
+                    "verification_triage_check_unresolvable".to_string(),
+                )
+            })?;
+        plan.verification_checks
+            .into_iter()
+            .find(|check| check.check_id == check_id)
+            .ok_or_else(|| {
+                CodingWorkspaceEngineError::ProviderStream(
+                    "verification_triage_check_unresolvable".to_string(),
+                )
+            })
+    }
+
+    /// 转入验证处理（门呈现面旁入口，不进动作枚举）：要求存在开放的可
+    /// 转入门（coder 输出门或 CR 三门），绑定 finding／check／plan revision
+    /// 与全部证据字段；同键未决重入返回既有记录。
+    pub async fn enter_verification_triage(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        request: VerificationTriageEntryRequest,
+    ) -> Result<
+        crate::product::coding_attempt_store::VerificationTriageRecord,
+        CodingWorkspaceEngineError,
+    > {
+        let attempt = self.store.get_attempt(project_id, issue_id, attempt_id)?;
+        let open_gates = self.store.list_open_blocked_gates(project_id, issue_id, attempt_id)?;
+        let eligible: Vec<CodingGateRequired> = open_gates
+            .into_iter()
+            .filter(|gate| super::provider_failure::is_verification_triage_eligible_gate(gate))
+            .collect();
+        if eligible.is_empty() {
+            return Err(CodingWorkspaceEngineError::ProviderStream(
+                "verification_triage_no_eligible_gate".to_string(),
+            ));
+        }
+        let (plan_revision_id, revision) = self.verification_triage_current_revision(&attempt)?;
+        let check =
+            self.verification_triage_bound_check(&attempt, &revision, &request.check_id)?;
+
+        // finding 绑定校验："<report_id>#<index>" 必须命中持久化 code review
+        // report 的 finding；coder 输出门路径（开放 coding_output_human_triage
+        // 门）绑定该门 plan defect finding 引用；其余 fail-closed。
+        let finding_resolvable = request
+            .finding_id
+            .rsplit_once('#')
+            .and_then(|(report_id, index)| {
+                let index: usize = index.parse().ok()?;
+                let reports = self
+                    .store
+                    .list_code_review_reports(project_id, issue_id, attempt_id)
+                    .ok()?;
+                reports
+                    .iter()
+                    .find(|report| report.id == report_id)
+                    .and_then(|report| report.findings.get(index))
+                    .map(|_| ())
+            })
+            .is_some()
+            || eligible.iter().any(|gate| {
+                gate.reason_code.as_deref() == Some(CODING_OUTPUT_HUMAN_TRIAGE_REASON_CODE)
+            });
+        if !finding_resolvable {
+            return Err(CodingWorkspaceEngineError::ProviderStream(
+                "verification_triage_finding_unresolvable".to_string(),
+            ));
+        }
+
+        let input = crate::product::coding_attempt_store::EnterVerificationTriageInput {
+            attempt_id: attempt.id.clone(),
+            finding_id: request.finding_id,
+            check_id: request.check_id,
+            plan_revision_id,
+            original_command: request.original_command.or(check.command.clone()),
+            alternative_command: request.alternative_command,
+            cwd: request.cwd,
+            outcome: request.outcome,
+            test_execution_count: request.test_execution_count,
+            environment: request.environment,
+            scope: vec![check.check_id],
+            expires_at: (chrono::Utc::now() + chrono::Duration::days(7)).to_rfc3339(),
+        };
+        Ok(self
+            .store
+            .enter_verification_triage(&attempt, input)?)
+    }
+
+    /// 决定验证处理（三类结论均需用户明确批准；拒绝条件 fail-closed 返回
+    /// 具体 reason code）。批准"等价证据"／"限域例外"后原门按
+    /// manual_continue 语义续跑；批准"计划修订"转 AwaitingPlanAmendment
+    /// 由既有 amendment 链接管。
+    pub async fn decide_verification_triage(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        request: VerificationTriageDecisionRequest,
+    ) -> Result<
+        crate::product::coding_attempt_store::VerificationTriageRecord,
+        CodingWorkspaceEngineError,
+    > {
+        let attempt = self.store.get_attempt(project_id, issue_id, attempt_id)?;
+        let record = self.store.get_verification_triage_record(
+            project_id,
+            issue_id,
+            attempt_id,
+            &request.triage_id,
+        )?;
+        let decided_by = request.decided_by.trim().to_string();
+        let reason = request.reason.trim().to_string();
+        let decision = crate::product::coding_attempt_store::VerificationTriageDecision::Approve {
+            conclusion: request.conclusion,
+            decided_by: decided_by.clone(),
+            reason: reason.clone(),
+        };
+        // 幂等重放：已决同义决定直接返回首次 durable 结果（含续跑效果
+        // 已落账的场合不再重复校验可能已推进的 plan revision）。
+        if record.status != crate::product::coding_attempt_store::VerificationTriageStatus::Pending
+        {
+            let replayed = self.store.apply_verification_triage_decision(
+                &attempt,
+                &request.triage_id,
+                &decision,
+            )?;
+            return Ok(replayed);
+        }
+        if decided_by.is_empty() || reason.is_empty() {
+            return Err(CodingWorkspaceEngineError::ProviderStream(
+                "verification_triage_approval_context_required".to_string(),
+            ));
+        }
+        let expires_at = chrono::DateTime::parse_from_rfc3339(&record.expires_at)
+            .map_err(|_| CodingWorkspaceEngineError::ProviderStream(
+                "verification_triage_expiry_unreadable".to_string(),
+            ))?;
+        if chrono::Utc::now() > expires_at {
+            return Err(CodingWorkspaceEngineError::ProviderStream(
+                "verification_triage_expired".to_string(),
+            ));
+        }
+        let (plan_revision_id, revision) = self.verification_triage_current_revision(&attempt)?;
+        if plan_revision_id != record.plan_revision_id {
+            return Err(CodingWorkspaceEngineError::ProviderStream(
+                "verification_triage_plan_revision_expired".to_string(),
+            ));
+        }
+        let check =
+            self.verification_triage_bound_check(&attempt, &revision, &record.check_id)?;
+        match request.conclusion {
+            crate::product::coding_attempt_store::VerificationTriageConclusion::AcceptEquivalentEvidence => {
+                let evidence_complete = [
+                    record.alternative_command.as_deref(),
+                    record.cwd.as_deref(),
+                    record.outcome.as_deref(),
+                ]
+                .into_iter()
+                .all(|field| field.is_some_and(|value| !value.trim().is_empty()));
+                if !evidence_complete {
+                    return Err(CodingWorkspaceEngineError::ProviderStream(
+                        "verification_triage_evidence_incomplete".to_string(),
+                    ));
+                }
+                if check.non_zero_test_execution_required
+                    && !record
+                        .test_execution_count
+                        .is_some_and(|count| count > 0)
+                {
+                    return Err(CodingWorkspaceEngineError::ProviderStream(
+                        "verification_triage_non_zero_test_required".to_string(),
+                    ));
+                }
+            }
+            crate::product::coding_attempt_store::VerificationTriageConclusion::GrantScopedEnvironmentException => {
+                if request
+                    .exemption_scope
+                    .iter()
+                    .any(|scope_entry| !record.scope.contains(scope_entry))
+                {
+                    return Err(CodingWorkspaceEngineError::ProviderStream(
+                        "verification_triage_scope_exceeds_bound_check".to_string(),
+                    ));
+                }
+            }
+            crate::product::coding_attempt_store::VerificationTriageConclusion::ApprovePlanRevision => {}
+        }
+
+        // durable-first：先落决定（审计随记录），再执行结论续跑。
+        let decided = self.store.apply_verification_triage_decision(
+            &attempt,
+            &request.triage_id,
+            &decision,
+        )?;
+        match request.conclusion {
+            crate::product::coding_attempt_store::VerificationTriageConclusion::ApprovePlanRevision => {
+                let current = self.store.get_attempt(project_id, issue_id, attempt_id)?;
+                if current.status != CodingAttemptStatus::AwaitingPlanAmendment {
+                    self.store.update_attempt_status(
+                        project_id,
+                        issue_id,
+                        attempt_id,
+                        CodingAttemptStatus::AwaitingPlanAmendment,
+                    )?;
+                }
+                // 经既有 amendment 链发起：linked plan repair 存在时幂等开门；
+                // 不存在时记录与 AwaitingPlanAmendment 状态即为 durable 等待
+                // 事实（Task 12 投影），不强造修订。
+                let paused = self.store.get_attempt(project_id, issue_id, attempt_id)?;
+                if matches!(
+                    self.store.linked_active_plan_repair_snapshot(&paused),
+                    Ok(Some(_))
+                ) {
+                    self.store.reconcile_linked_plan_repair_pause(&paused)?;
+                }
+            }
+            crate::product::coding_attempt_store::VerificationTriageConclusion::AcceptEquivalentEvidence
+            | crate::product::coding_attempt_store::VerificationTriageConclusion::GrantScopedEnvironmentException => {
+                let current = self.store.get_attempt(project_id, issue_id, attempt_id)?;
+                let open_gate = self
+                    .store
+                    .list_open_blocked_gates(project_id, issue_id, attempt_id)?
+                    .into_iter()
+                    .find(|gate| {
+                        super::provider_failure::is_verification_triage_eligible_gate(gate)
+                    });
+                if let Some(gate) = open_gate {
+                    let operator_context = format!(
+                        "验证处理 {} 由 {} 批准：{}",
+                        record.triage_id, decided_by, reason
+                    );
+                    self.continue_attempt_with_manual_context(&current, &gate, operator_context)?;
+                    self.store.resolve_blocked_gate_with_action(
+                        project_id,
+                        issue_id,
+                        attempt_id,
+                        &gate.gate_id,
+                        Some("manual_continue"),
+                    )?;
+                }
+            }
+        }
+        Ok(decided)
     }
 
     // ─── C1 Task 6（REQ-WIGA-03）：租约三态判定与确认接管 ───

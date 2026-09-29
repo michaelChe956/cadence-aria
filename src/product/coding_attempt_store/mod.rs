@@ -32,6 +32,7 @@ mod role_run;
 mod run_exclusion;
 mod role_run_event;
 mod split_audit;
+mod verification_triage;
 pub use split_audit::*;
 pub mod target_snapshot;
 mod timeline;
@@ -51,6 +52,10 @@ pub use attempt_creation::WorkItemAttemptCreationGuard;
 pub use attempt::ClaimCodingStartOutcome;
 pub use rework_claim::{ReworkClaimOutcome, ReworkInstructionClaim};
 pub use run_exclusion::{CodingAttemptCommandRecord, CodingRunExclusionDecision};
+pub use verification_triage::{
+    EnterVerificationTriageInput, VerificationTriageConclusion, VerificationTriageDecision,
+    VerificationTriageRecord, VerificationTriageStatus,
+};
 pub use git_operation::*;
 pub use group_initialization::*;
 pub use group_validation::*;

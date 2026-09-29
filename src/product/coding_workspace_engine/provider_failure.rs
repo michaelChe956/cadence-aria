@@ -12,6 +12,23 @@ pub(crate) struct ReviewBlockedGateInput<'a> {
     pub(crate) raw_provider_output_ref: Option<String>,
 }
 
+/// C2 Task 8（REQ-CVT-03/04，#19）：可转入独立验证处理的门呈现面——
+/// Code Review 三门（人工分诊／验证不完整／运营阻塞）＋ coder 输出人工
+/// 分诊门。验证处理是这些门的旁路 DTO／面板入口，不进动作枚举、不改
+/// available_actions。
+pub(crate) const VERIFICATION_TRIAGE_ELIGIBLE_REASON_CODES: [&str; 4] = [
+    "code_review_output_human_triage",
+    "code_review_verification_incomplete",
+    "code_review_operational_blocker",
+    super::gates::CODING_OUTPUT_HUMAN_TRIAGE_REASON_CODE,
+];
+
+pub(crate) fn is_verification_triage_eligible_gate(gate: &CodingGateRequired) -> bool {
+    gate.reason_code
+        .as_deref()
+        .is_some_and(|code| VERIFICATION_TRIAGE_ELIGIBLE_REASON_CODES.contains(&code))
+}
+
 impl CodingWorkspaceEngine {
     /// C2 Task 5（REQ-CRO-05）：reviewer 配置缺失停等——进入需要 Code Reviewer／
     /// Internal Reviewer 的阶段而快照该角色为空时，在建 role run／timeline node

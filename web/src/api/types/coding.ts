@@ -423,6 +423,35 @@ export type CodingGateDiagnostic = {
   run_failure_code: string;
 };
 
+/** C2 Task 8（#19）：attempt-scoped 验证处理记录（旁路 DTO，不进门动作枚举）。 */
+export type VerificationTriageStatus = "pending" | "approved" | "rejected";
+
+export type VerificationTriageConclusion =
+  | "approve_plan_revision"
+  | "accept_equivalent_evidence"
+  | "grant_scoped_environment_exception";
+
+export type VerificationTriageRecord = {
+  triage_id: string;
+  attempt_id: string;
+  finding_id: string;
+  check_id: string;
+  plan_revision_id: string;
+  original_command?: string | null;
+  alternative_command?: string | null;
+  cwd?: string | null;
+  outcome?: string | null;
+  test_execution_count?: number | null;
+  environment?: string | null;
+  scope: string[];
+  expires_at: string;
+  status: VerificationTriageStatus;
+  conclusion?: VerificationTriageConclusion | null;
+  reason?: string | null;
+  decided_by?: string | null;
+  decided_at?: string | null;
+};
+
 export type CodingChoiceGateStatus = "open" | "resolved" | "stale" | "cancelled";
 
 export type CodingChoiceGateResponse = {
