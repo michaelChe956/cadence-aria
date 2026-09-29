@@ -116,7 +116,46 @@ pub(crate) fn validate_command_id(command_id: &str) -> Result<(), String> {
 fn validate_feedback(feedback: &str) -> Result<(), String> {
     super::prompts::validate_sc_manual_revision_feedback(feedback)
 }
+/// C2 Task 11：SC 修订组装记录文件（session 分区；"组装 digest 记录"）。
+pub(crate) const SC_REVISION_ASSEMBLY_FILE: &str = "sc-revision-assembly.json";
+/// C2 Task 11：大候选停等等待事实文件（session 分区；Task 12 投影
+/// kind `large_candidate_blocked`）。
+pub(crate) const SC_REVISION_BLOCKED_FILE: &str = "sc-revision-blocked.json";
 
+// C2 Task 11：分块交付与静态预算表供 WS/REST 层与测试消费（同模块再导出）。
+pub(crate) use super::prompts::{render_sc_revision_delivery, sc_provider_input_budget};
+
+/// C2 Task 11：SC 修订组装记录（inline 交付不落账——零新增持久化）。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ScRevisionAssemblyRecord {
+    pub session_id: String,
+    pub command_id: String,
+    pub total_bytes: usize,
+    pub transport: super::prompts::ScCandidateTransport,
+    pub created_at: String,
+}
+
+/// C2 Task 11：大候选停等等待事实（CAS 前拒绝时落账；操作面
+/// segmented_revision／retry 由用户点击后才开新回合）。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ScRevisionBlockedRecord {
+    pub session_id: String,
+    pub command_id: String,
+    pub reason_code: String,
+    pub detail: String,
+    pub total_bytes: usize,
+    pub hard_limit_bytes: usize,
+    pub actions: Vec<String>,
+    pub created_at: String,
+}
+
+/// "CODE: reason" 稳定码拆分（无前缀时整串作 code）。
+fn split_stable_error(error: &str) -> (String, &str) {
+    match error.split_once(':') {
+        Some((code, reason)) => (code.to_string(), reason.trim()),
+        None => (error.to_string(), ""),
+    }
+}
 impl super::WorkspaceEngine {
     /// 校验当前 session 是否可在 amendment 上下文下重开原对话门（REQ-GCE-03）。
     /// 仅当：本 session 是单候选 WorkItemPlan、已过首次 approve（Confirmed +
@@ -195,6 +234,184 @@ impl super::WorkspaceEngine {
                 language_rule: super::prompts::LANGUAGE_RULE_FILE_CONTENT,
             },
         )
+    }
+
+    /// C2 Task 11（REQ-CG-03，#15）：SC 修订完整预算组装与交付（HumanGateTurn
+    /// CAS 之前）。≤inline 返回原 prompt（零新增持久化，现行为）；超 inline 但
+    /// 硬限内持久化完整组装 artifact（readback digest 校验）并以 ArtifactRef
+    /// 传输记录组装 digest；超硬限或 artifact 不可读返回稳定码（调用方
+    /// rejected，此前已落 sc-revision-blocked.json 大候选停等等待事实）。
+    fn assemble_sc_revision_delivery(
+        &self,
+        command_id: &str,
+        prompt: String,
+    ) -> Result<String, (String, String)> {
+        use super::prompts::ScCandidateTransport;
+
+        let provider = self.session.author_provider.clone();
+        let budget = super::prompts::sc_provider_input_budget(&provider);
+        let assembled = match super::prompts::assemble_sc_revision_input(&prompt, &budget) {
+            Ok(assembled) => assembled,
+            Err(error) => {
+                let (code, reason) = split_stable_error(&error);
+                self.land_sc_revision_blocked(
+                    command_id,
+                    &code,
+                    &error,
+                    prompt.len(),
+                    budget.hard_limit_bytes,
+                );
+                return Err((code, reason.to_string()));
+            }
+        };
+        match assembled.transport {
+            ScCandidateTransport::Inlined => Ok(prompt),
+            ScCandidateTransport::OrderedChunks {
+                assembly_digest, ..
+            } => {
+                let artifact_ref = format!(
+                    "sc-revision-inputs/{}.md",
+                    assembly_digest.trim_start_matches("sha256:")
+                );
+                if let Err(io_error) =
+                    self.persist_sc_revision_artifact(&artifact_ref, &prompt, &assembly_digest)
+                {
+                    let code = "HUMAN_GATE_REVISION_INPUT_ARTIFACT_UNREADABLE".to_string();
+                    let reason = format!("persisted assembly artifact is unreadable: {io_error}");
+                    self.land_sc_revision_blocked(
+                        command_id,
+                        &code,
+                        &reason,
+                        prompt.len(),
+                        budget.hard_limit_bytes,
+                    );
+                    return Err((code, reason));
+                }
+                self.land_sc_revision_assembly(
+                    command_id,
+                    assembled.total_bytes,
+                    ScCandidateTransport::ArtifactRef {
+                        artifact_ref,
+                        assembly_digest,
+                    },
+                );
+                Ok(prompt)
+            }
+            ScCandidateTransport::ArtifactRef { .. } => Ok(prompt),
+        }
+    }
+
+    /// session 分区目录（`workspace-sessions/{session_id}/`，与
+    /// human-gate-turns 同层）。
+    fn sc_revision_partition_root(&self) -> Result<std::path::PathBuf, String> {
+        let store = self
+            .lifecycle_store
+            .as_ref()
+            .ok_or_else(|| "lifecycle_store unavailable".to_string())?;
+        Ok(store
+            .app_paths()
+            .issue_root(&self.session.project_id, &self.session.issue_id)
+            .join("workspace-sessions")
+            .join(&self.session.session_id))
+    }
+
+    /// 持久化完整组装 artifact 并 readback 校验（写失败/读回缺失/digest 不一致
+    /// 均 fail-closed——交付不降级、不猜测）。
+    fn persist_sc_revision_artifact(
+        &self,
+        artifact_ref: &str,
+        prompt: &str,
+        assembly_digest: &str,
+    ) -> Result<(), String> {
+        let path = self
+            .sc_revision_partition_root()?
+            .join(artifact_ref);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        std::fs::write(&path, prompt).map_err(|error| error.to_string())?;
+        let readback = std::fs::read_to_string(&path).map_err(|error| error.to_string())?;
+        if readback != prompt
+            || super::prompts::assembly_digest_of(&readback) != assembly_digest
+        {
+            return Err("readback digest mismatch".to_string());
+        }
+        Ok(())
+    }
+
+    /// 组装记录（"组装 digest 记录"；Task 12 消费）。inline 交付不落账
+    /// （零新增持久化，现行为零回归）。
+    fn land_sc_revision_assembly(
+        &self,
+        command_id: &str,
+        total_bytes: usize,
+        transport: super::prompts::ScCandidateTransport,
+    ) {
+        let record = ScRevisionAssemblyRecord {
+            session_id: self.session.session_id.clone(),
+            command_id: command_id.to_string(),
+            total_bytes,
+            transport,
+            created_at: Utc::now().to_rfc3339(),
+        };
+        let path = match self.sc_revision_partition_root() {
+            Ok(root) => root.join(SC_REVISION_ASSEMBLY_FILE),
+            Err(error) => {
+                tracing::warn!(%error, "sc revision assembly record path unavailable");
+                return;
+            }
+        };
+        if let Err(error) =
+            crate::product::json_store::write_json(&path, &record)
+        {
+            tracing::warn!(%error, "sc revision assembly record write failed");
+        }
+    }
+
+    /// 大候选停等等待事实（Task 12 投影 kind `large_candidate_blocked`）。
+    /// 携带"分段返修／重试"操作；成功开回合后由 land_sc_revision_assembly
+    /// 分区的新事实覆盖等待语义（blocked 文件删除见 clear）。
+    fn land_sc_revision_blocked(
+        &self,
+        command_id: &str,
+        reason_code: &str,
+        detail: &str,
+        total_bytes: usize,
+        hard_limit_bytes: usize,
+    ) {
+        let record = ScRevisionBlockedRecord {
+            session_id: self.session.session_id.clone(),
+            command_id: command_id.to_string(),
+            reason_code: reason_code.to_string(),
+            detail: detail.to_string(),
+            total_bytes,
+            hard_limit_bytes,
+            actions: vec!["segmented_revision".to_string(), "retry".to_string()],
+            created_at: Utc::now().to_rfc3339(),
+        };
+        let path = match self.sc_revision_partition_root() {
+            Ok(root) => root.join(SC_REVISION_BLOCKED_FILE),
+            Err(error) => {
+                tracing::warn!(%error, "sc revision blocked record path unavailable");
+                return;
+            }
+        };
+        if let Err(error) =
+            crate::product::json_store::write_json(&path, &record)
+        {
+            tracing::warn!(%error, "sc revision blocked record write failed");
+        }
+    }
+
+    /// 成功开回合清除停等等待事实（等待项闭合）。
+    fn clear_sc_revision_blocked(&self) {
+        let Ok(root) = self.sc_revision_partition_root() else {
+            return;
+        };
+        let path = root.join(SC_REVISION_BLOCKED_FILE);
+        if path.exists() && let Err(error) = std::fs::remove_file(&path) {
+            tracing::warn!(%error, "remove sc revision blocked record failed");
+        }
     }
 }
 
@@ -787,16 +1004,28 @@ impl super::WorkspaceEngine {
         }
 
         // 构造完整 SC revision prompt 必须发生在 HumanGateTurn CAS 之前。这样候选或
-        // 固定契约超出独立预算时，反馈请求只返回 bounded error，不消耗预算/ledger。
+        // 固定契约超出预算时，反馈请求只返回 bounded error，不消耗预算/ledger。
         let prompt = match self.build_sc_manual_revision_prompt_for_turn(&input.feedback) {
             Ok(prompt) => prompt,
             Err(error) => {
                 let (code, reason) = error.split_once(':').map_or(
-                    ("HUMAN_GATE_REVISION_PROMPT_TOO_LARGE", error.as_str()),
+                    ("HUMAN_GATE_REVISION_CANDIDATE_MISSING", error.as_str()),
                     |(code, reason)| (code, reason.trim()),
                 );
                 return Ok(rejected(code, reason));
             }
+        };
+
+        // C2 Task 11（REQ-CG-03，#15）：完整预算口径——扣回合前以 UTF-8 字节
+        // 计算完整组装输入并与所选 provider 静态预算比较：≤inline 整体内联
+        // （零新增持久化，现行为）；超 inline 但硬限内先持久化组装 artifact
+        // （readback digest 校验）经 ArtifactRef 传输完整原文并记录组装 digest；
+        // artifact 不可读或完整输入超硬限在 turn CAS 之前拒绝停等（门状态、
+        // manual_repairs_remaining 与 provider 启动计数不变），落大候选停等
+        // 等待事实（Task 12 投影 large_candidate_blocked）。
+        let prompt = match self.assemble_sc_revision_delivery(&input.command_id, prompt) {
+            Ok(prompt) => prompt,
+            Err((code, reason)) => return Ok(rejected(&code, reason)),
         };
 
         let now = Utc::now().to_rfc3339();
@@ -892,6 +1121,8 @@ impl super::WorkspaceEngine {
             };
         self.session.human_gate_snapshot = saved.human_gate_snapshot;
         self.session.provider_start_ledger = saved.provider_start_ledger;
+        // C2 Task 11：成功开回合闭合大候选停等等待事实（如有）。
+        self.clear_sc_revision_blocked();
         Ok(HumanGateCommandOutcome::TurnOpened {
             turn: saved_turn,
             remaining_budget: remaining_budget - 1,
