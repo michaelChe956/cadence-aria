@@ -174,8 +174,54 @@ pub async fn advance_plan(
                 session_record.status, session_record.single_candidate_phase
             ));
         }
+        // C5 Task 4（决策 4 前半）：Ready/AutoStartOnce 写入前重读 issue 最新
+        // authority 载体，与 binding target 漂移（错仓/跨载体）即 fail-closed
+        // ——先比载体，后做单仓/LC group 判定，全部只读、全部在 attempt
+        // 状态写入与 provider 启动之前。
+        let carrier_issue = crate::product::issue_store::IssueStore::new(paths.clone())
+            .get(&input.project_id, &input.issue_id)
+            .map_err(|error| format!("load issue for enrolled advance failed: {error}"))?;
+        let carrier = crate::web::handlers::resolve_automation_carrier(
+            &paths,
+            &input.project_id,
+            &carrier_issue,
+        )
+        .map_err(|error| {
+            format!(
+                "resolve automation carrier for enrolled advance failed: {} [{}]",
+                error.message, error.code
+            )
+        })?;
+        let carrier_matches_binding = match (&carrier, &binding.target) {
+            (
+                crate::web::handlers::AutomationCarrierResolution::SingleRepository {
+                    target:
+                        crate::product::logical_codebase::EnrollmentTarget::SingleRepository {
+                            repository_id: current_repository,
+                        },
+                },
+                crate::product::logical_codebase::EnrollmentTarget::SingleRepository {
+                    repository_id: bound_repository,
+                },
+            ) => current_repository == bound_repository,
+            (
+                crate::web::handlers::AutomationCarrierResolution::LogicalCodebase {
+                    ..
+                },
+                crate::product::logical_codebase::EnrollmentTarget::LogicalCodebase { .. },
+            ) => true,
+            _ => false,
+        };
+        if !carrier_matches_binding {
+            return Err(format!(
+                "enrolled advance carrier drift: binding target {:?} no longer matches the \
+                 issue's authoritative automation carrier",
+                binding.target
+            ));
+        }
         // 自动路径恰一 target fail-closed：engine 支持 split，但 enrolled 自动
-        // 授权只对恰一 logical repository 生效（REQ-MTG-03），无唯一目标也拒。
+        // 授权的 target 判定按 enrollment 载体分派（C5 Task 4，REQ-MTG-03
+        // 单仓唯一例外）。
         let revision_store = WorkItemRevisionStore::new(paths.clone());
         let lineage = revision_store
             .get_plan_lineage(&input.project_id, &input.issue_id, &input.plan_id)
@@ -194,13 +240,60 @@ pub async fn advance_plan(
                 format!("resolve authoritative group plan binding failed: {error}")
             })?;
         let grouped = crate::product::coding_attempt_store::units_by_target(&authoritative);
-        if grouped.by_target.len() != 1 || !grouped.unattributed.is_empty() {
-            return Err(format!(
-                "enrolled advance requires exactly one logical target, got {} target(s) \
-                 and {} unattributed unit(s)",
-                grouped.by_target.len(),
-                grouped.unattributed.len()
-            ));
+        match &binding.target {
+            crate::product::logical_codebase::EnrollmentTarget::SingleRepository { .. } => {
+                // 单仓分支：by_target 空 ∧ unattributed 非空 ∧ 现存 attempt 无
+                // target_snapshot；出现任何 logical 归属或 snapshot 即跨载体
+                // 污染（多 target 红线不被「单次只有一个」突破）。
+                if !grouped.by_target.is_empty() || grouped.unattributed.is_empty() {
+                    return Err(format!(
+                        "single-repository enrolled advance requires every plan unit \
+                         unattributed, got {} logical target(s) and {} unattributed unit(s)",
+                        grouped.by_target.len(),
+                        grouped.unattributed.len()
+                    ));
+                }
+                let snapshot_pollution = CodingAttemptStore::new(paths.clone())
+                    .list_attempts_for_issue(&input.project_id, &input.issue_id)
+                    .map_err(|error| {
+                        format!("list coding attempts for enrolled advance failed: {error}")
+                    })?
+                    .iter()
+                    .any(|attempt| attempt.target_snapshot.is_some());
+                if snapshot_pollution {
+                    return Err(
+                        "single-repository enrolled advance found an attempt carrying a \
+                         logical target snapshot; cross-carrier pollution is rejected"
+                            .to_string(),
+                    );
+                }
+            }
+            crate::product::logical_codebase::EnrollmentTarget::LogicalCodebase {
+                logical_repository_id: binding_repository,
+                ..
+            } => {
+                // LC 分支：恰一 logical target 且必须等于 enrollment binding
+                // target（attempt 唯一 target 与 enrollment 不符即 fail-closed）。
+                if grouped.by_target.len() != 1 || !grouped.unattributed.is_empty() {
+                    return Err(format!(
+                        "enrolled advance requires exactly one logical target, got {} \
+                         target(s) and {} unattributed unit(s)",
+                        grouped.by_target.len(),
+                        grouped.unattributed.len()
+                    ));
+                }
+                let unique_target = grouped
+                    .by_target
+                    .keys()
+                    .next()
+                    .expect("by_target is validated to hold exactly one entry");
+                if unique_target != binding_repository {
+                    return Err(format!(
+                        "enrolled advance logical target drift: enrollment targets \
+                         {binding_repository:?} but the plan uniquely targets {unique_target:?}"
+                    ));
+                }
+            }
         }
         enrolled_start_policy = Some(
             crate::product::coding_models::CodingStartRunPolicy::AutoStartOnce {
@@ -349,7 +442,7 @@ mod tests {
     use super::*;
     use crate::product::advance_store::AdvanceOutcome;
     use crate::web::wiga_gate_fixture::{
-        ISSUE_ID, PROJECT_ID, confirmed_enrolled_fixture,
+        ISSUE_ID, PROJECT_ID, confirmed_enrolled_fixture, confirmed_single_repository_enrolled_fixture,
     };
 
     /// P2 Task 1：Enrolled origin 经真实 Confirmed fixture advance 到稳定
@@ -803,6 +896,225 @@ mod tests {
             }
         }
         assert_eq!(fixture.coding_attempts().len(), 1);
+        assert_eq!(fixture.coding_runner_count(), 0);
+    }
+
+    /// C5 Task 4 红测：单仓 enrollment（binding.target 为 SingleRepository）的
+    /// Confirmed plan——全部工作项无 logical target 归属、attempt 无
+    /// target_snapshot——经 enrolled advance 沿单仓路径把唯一 attempt 置
+    /// Ready 并冻结 AutoStartOnce；不要求 logical target、不启动任何
+    /// runner/provider、不创建 LC selection/snapshot（REQ-ADV-05）。
+    #[tokio::test]
+    async fn enrolled_advance_single_repository_plan_reaches_ready() {
+        let fixture = confirmed_single_repository_enrolled_fixture().await;
+        let enrollment = fixture.enrollment();
+        assert!(
+            matches!(
+                enrollment.target.as_ref(),
+                Some(crate::product::logical_codebase::EnrollmentTarget::SingleRepository { .. })
+            ),
+            "fixture must enroll a single-repository target, got {:?}",
+            enrollment.target
+        );
+        let input = AdvanceInput {
+            command_id: format!(
+                "wiga-advance-{}-{}",
+                enrollment.enrollment_id,
+                enrollment.plan_id.as_deref().unwrap()
+            ),
+            project_id: enrollment.project_id.clone(),
+            issue_id: enrollment.issue_id.clone(),
+            plan_id: enrollment.plan_id.clone().unwrap(),
+        };
+        let origin = AdvancePlanOrigin::Enrolled {
+            enrollment_id: enrollment.enrollment_id.clone(),
+            policy_revision: enrollment.policy_revision,
+        };
+        let first = advance_plan(&fixture.state, input.clone(), origin.clone())
+            .await
+            .expect("single-repository enrolled advance must reach ready");
+        let (first_id, expected_revision) = match &first {
+            AdvanceOutcome::Completed {
+                attempt_id,
+                record,
+                ..
+            } => (attempt_id.clone(), record.plan_revision_id.clone()),
+            AdvanceOutcome::Replayed { record } => (
+                record.attempt_id.clone().expect("replayed attempt id"),
+                record.plan_revision_id.clone(),
+            ),
+            AdvanceOutcome::Rejected { code, reason, .. } => {
+                panic!("unexpected reject: {code} {reason}")
+            }
+        };
+
+        // 同 command 幂等 replay：同一 attempt，不产生第二身份。
+        let second = advance_plan(&fixture.state, input, origin).await.unwrap();
+        let second_id = match &second {
+            AdvanceOutcome::Completed { attempt_id, .. } => attempt_id.clone(),
+            AdvanceOutcome::Replayed { record } => {
+                record.attempt_id.clone().expect("replayed attempt id")
+            }
+            AdvanceOutcome::Rejected { code, reason, .. } => {
+                panic!("unexpected replay reject: {code} {reason}")
+            }
+        };
+        assert_eq!(first_id, second_id);
+        assert_eq!(fixture.coding_attempts().len(), 1);
+        assert_eq!(fixture.coding_runner_count(), 0);
+
+        let attempt = fixture.attempt();
+        // 单仓链红线：attempt 绝不携带 logical target snapshot。
+        assert!(
+            attempt.target_snapshot.is_none(),
+            "single-repository attempt must not carry a logical target snapshot"
+        );
+        assert_eq!(
+            attempt.start_run_policy,
+            crate::product::coding_models::CodingStartRunPolicy::AutoStartOnce {
+                enrollment_id: enrollment.enrollment_id.clone(),
+                policy_revision: enrollment.policy_revision,
+                source_plan_revision: expected_revision,
+            }
+        );
+    }
+
+    /// C5 Task 4：LC enrollment 的 plan 唯一 logical target 与 enrollment
+    /// target 不同 → fail-closed 拒绝（补齐的核对），零 attempt、零 provider。
+    #[tokio::test]
+    async fn enrolled_advance_rejects_plan_target_drift_from_enrollment() {
+        let fixture = confirmed_enrolled_fixture().await;
+        let enrollment = fixture.enrollment();
+        let plan_id = enrollment.plan_id.clone().expect("bound plan");
+        // 制造 durable 漂移：编译产物的 accepted draft target 改指另一 logical 仓
+        //（binding target 仍为原 logical repository）。
+        let drifted = crate::product::logical_codebase::LogicalRepositoryId(uuid::Uuid::new_v4());
+        let plan_store =
+            crate::product::work_item_plan_store::WorkItemPlanStore::new(ProductAppPaths::new(
+                fixture.state.workspace_root.join(".aria"),
+            ));
+        for draft in plan_store
+            .list_draft_records(&enrollment.project_id, &enrollment.issue_id, &plan_id)
+            .expect("list compiled drafts")
+        {
+            let mut patched = draft.clone();
+            patched.candidate.target_repository_id = Some(drifted);
+            plan_store.put_draft_record(&patched).expect("patch draft");
+        }
+
+        let error = advance_plan(
+            &fixture.state,
+            AdvanceInput {
+                command_id: format!(
+                    "wiga-advance-{}-{plan_id}",
+                    enrollment.enrollment_id
+                ),
+                project_id: enrollment.project_id.clone(),
+                issue_id: enrollment.issue_id.clone(),
+                plan_id: plan_id.clone(),
+            },
+            AdvancePlanOrigin::Enrolled {
+                enrollment_id: enrollment.enrollment_id.clone(),
+                policy_revision: enrollment.policy_revision,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.contains("logical target drift") || error.contains("exactly one logical target"),
+            "unexpected rejection reason: {error}"
+        );
+        assert_eq!(fixture.coding_attempts().len(), 0);
+        assert_eq!(fixture.coding_runner_count(), 0);
+    }
+
+    /// C5 Task 4（Review Focus 3）：单仓 enrollment 的 plan 出现任一 logical
+    /// target 归属、或现存 attempt 携带 target_snapshot → 跨载体污染拒绝
+    ///（多 target 红线不被「单次只有一个」突破），零 attempt 写入、零启动。
+    #[tokio::test]
+    async fn enrolled_advance_rejects_cross_carrier_pollution_under_single_repository() {
+        let fixture = confirmed_single_repository_enrolled_fixture().await;
+        let enrollment = fixture.enrollment();
+        let plan_id = enrollment.plan_id.clone().expect("bound plan");
+        let polluted =
+            crate::product::logical_codebase::LogicalRepositoryId(uuid::Uuid::new_v4());
+        let plan_store =
+            crate::product::work_item_plan_store::WorkItemPlanStore::new(ProductAppPaths::new(
+                fixture.state.workspace_root.join(".aria"),
+            ));
+        for draft in plan_store
+            .list_draft_records(&enrollment.project_id, &enrollment.issue_id, &plan_id)
+            .expect("list compiled drafts")
+        {
+            let mut patched = draft.clone();
+            patched.candidate.target_repository_id = Some(polluted);
+            plan_store.put_draft_record(&patched).expect("patch draft");
+        }
+
+        let origin = AdvancePlanOrigin::Enrolled {
+            enrollment_id: enrollment.enrollment_id.clone(),
+            policy_revision: enrollment.policy_revision,
+        };
+        let input = AdvanceInput {
+            command_id: format!(
+                "wiga-advance-{}-{plan_id}",
+                enrollment.enrollment_id
+            ),
+            project_id: enrollment.project_id.clone(),
+            issue_id: enrollment.issue_id.clone(),
+            plan_id: plan_id.clone(),
+        };
+        let error = advance_plan(&fixture.state, input.clone(), origin.clone())
+            .await
+            .unwrap_err();
+        assert!(
+            error.contains("single-repository"),
+            "cross-carrier pollution must be rejected by the single-repository branch: {error}"
+        );
+        assert_eq!(fixture.coding_attempts().len(), 0);
+        assert_eq!(fixture.coding_runner_count(), 0);
+
+        // 还原 draft 归属后正常 advance 到 Ready，再把 attempt 污染为携带
+        // LC target snapshot：replay 路径同样 fail-closed。
+        for draft in plan_store
+            .list_draft_records(&enrollment.project_id, &enrollment.issue_id, &plan_id)
+            .expect("list compiled drafts again")
+        {
+            let mut patched = draft.clone();
+            patched.candidate.target_repository_id = None;
+            plan_store.put_draft_record(&patched).expect("restore draft");
+        }
+        advance_plan(&fixture.state, input.clone(), origin.clone())
+            .await
+            .expect("clean single-repository advance reaches ready");
+        let attempt = fixture.attempt();
+        let attempt_path = fixture
+            .inner
+            .paths
+            .issue_root(&enrollment.project_id, &enrollment.issue_id)
+            .join("coding-attempts")
+            .join(format!("{}.json", attempt.id));
+        let mut attempt_json: serde_json::Value =
+            crate::product::json_store::read_json(&attempt_path).expect("read attempt json");
+        attempt_json["target_snapshot"] = serde_json::json!({
+            "logical_repository_id": uuid::Uuid::new_v4().to_string(),
+            "checkout_id": uuid::Uuid::new_v4().to_string(),
+            "physical_repository_id": "physical-polluted".to_string(),
+            "canonical_path": "/tmp/polluted",
+            "git_dir_identity": "sha256:polluted".to_string(),
+            "policy_digest": "polluted".to_string(),
+            "membership_revision": 1,
+            "captured_at": "2026-09-30T00:00:00Z".to_string(),
+            "capture_source": "test".to_string(),
+        });
+        crate::product::json_store::write_json(&attempt_path, &attempt_json)
+            .expect("pollute attempt snapshot");
+
+        let error = advance_plan(&fixture.state, input, origin).await.unwrap_err();
+        assert!(
+            error.contains("cross-carrier pollution") || error.contains("target snapshot"),
+            "snapshot pollution must fail closed: {error}"
+        );
         assert_eq!(fixture.coding_runner_count(), 0);
     }
 }

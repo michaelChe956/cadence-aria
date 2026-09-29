@@ -26,6 +26,7 @@
     use crate::web::state::WebAppState;
     use crate::web::handlers::automation_enrollment_test_support::{
         enrollment_body, put_enrollment, response_json, seed_fixture,
+        seed_single_repository_fixture, single_repository_enable_body,
     };
     pub(crate) use crate::web::handlers::automation_enrollment_test_support::{ISSUE_ID, PROJECT_ID};
     use crate::web::handlers::lifecycle::plan_preparation::ensure_enrolled_plan;
@@ -286,6 +287,61 @@ use p2_campaign::{init_real_main_checkout, normalize_checkout_revision_to_unobse
                 .expect("bound session manager");
             // 已派发的生成 run：manager 唯一 run 面真实注册；provider 等待者
             // 持续消费 command 通道（choice 应答 Delivered 的真实对端）。
+            let (_run_id, token, _cancel, command_rx, _node) = manager
+                .start_run(ProviderRunKind::WorkItemPlanSingleCandidateAuthor, None)
+                .await
+                .expect("in-flight generation run");
+            let incarnation = manager.active_run_incarnation().expect("run incarnation");
+            tokio::spawn(deliver_choice_receipts(command_rx));
+            Self {
+                inner,
+                state,
+                lifecycle,
+                plan_id,
+                session_id,
+                manager,
+                token,
+                incarnation,
+                gate_id: None,
+            }
+        }
+
+        /// C5 Task 4：单仓 enrolled 链 fixture——issue.repo_id 指向真实 git
+        /// 物理仓（main 基线 + 空提交 + 本地 origin，满足 advance fork 基线
+        /// 三面同源解析），enrollment target 为 SingleRepository；plan/session
+        /// 绑定与生成 run 注册与 `new` 同源（仅载体与 Enable body 不同）。
+        pub(crate) async fn new_single_repository() -> Self {
+            let inner = seed_single_repository_fixture();
+            init_real_main_checkout(&inner._root.path().join("repo-1"));
+            let root_path = inner._root.path().to_path_buf();
+            let state = fake_state_with_gateway(root_path.clone());
+            let app = crate::web::app::build_web_router(state.clone());
+            let mut body = single_repository_enable_body(&inner);
+            // gate outline 无 integration 工作项：与 LC fixture 同口径关闭
+            // include_integration_tests（编译严格校验会拒绝缺项计划）。
+            body["command"]["options"]["plan_options"]["include_integration_tests"] =
+                serde_json::json!(false);
+            let enable = put_enrollment(&app, body).await;
+            assert_eq!(enable.status(), StatusCode::OK);
+            assert!(response_json(enable).await["enabled"].as_bool().unwrap());
+
+            let lifecycle = LifecycleStore::new(inner.paths.clone());
+            let store = IssueAutomationStore::new(inner.paths.clone());
+            let enrollment = store.get(PROJECT_ID, ISSUE_ID).unwrap().unwrap();
+            ensure_enrolled_plan(&state, &enrollment)
+                .await
+                .expect("ensure enrolled plan");
+            let bound = store.get(PROJECT_ID, ISSUE_ID).unwrap().unwrap();
+            let plan_id = bound.plan_id.expect("bound plan");
+            let session_id = bound.session_id.expect("bound session");
+
+            let manager = state
+                .workspace_sessions
+                .get_or_create(&session_id, || {
+                    WorkspaceSessionManager::create(&state, &session_id)
+                })
+                .await
+                .expect("bound session manager");
             let (_run_id, token, _cancel, command_rx, _node) = manager
                 .start_run(ProviderRunKind::WorkItemPlanSingleCandidateAuthor, None)
                 .await
@@ -868,6 +924,15 @@ use p2_campaign::{init_real_main_checkout, normalize_checkout_revision_to_unobse
         normalize_checkout_revision_to_unobserved(&fixture.inner.paths);
         fixture.fail_compile_after_human_approve().await;
         fixture.recover_and_confirm_compile().await;
+        fixture
+    }
+
+    /// C5 Task 4 共享 fixture：单仓 Confirmed enrollment——干净人工批准
+    ///（无 failpoint，与 campaign 确认链同源）；Legacy compile 使全部 plan
+    /// 单位无 logical target 归属，attempt 天然无 target_snapshot。
+    pub(crate) async fn confirmed_single_repository_enrolled_fixture() -> EnrolledGateFixture {
+        let mut fixture = EnrolledGateFixture::new_single_repository().await;
+        fixture.confirm_plan_by_human().await;
         fixture
     }
 
