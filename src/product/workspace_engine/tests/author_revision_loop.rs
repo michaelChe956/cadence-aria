@@ -134,6 +134,69 @@ async fn start_generation_enabled_review_sets_provisional_and_reviewer() {
     assert_eq!(session.reviewer_enabled_at_start, Some(true));
 }
 
+// C2 Task 5（REQ-CRO-05）：reviewer 三值——reviewer 缺失时 start_generation
+// 持久化空 effective（绝不回填 author），from_record 恢复保持空。
+#[tokio::test]
+async fn start_generation_missing_reviewer_persists_empty_effective_not_author() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let app_paths = crate::product::app_paths::ProductAppPaths::new(tmp.path().join(".aria"));
+    let store = crate::product::lifecycle_store::LifecycleStore::new(app_paths.clone());
+    let record = store
+        .create_workspace_session(crate::product::lifecycle_store::CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: "story_spec_0001".to_string(),
+            workspace_type: crate::product::models::WorkspaceType::Story,
+            author_provider: ProviderName::ClaudeCode,
+            reviewer_provider: None,
+            review_rounds: 1,
+            superpowers_enabled: true,
+            openspec_enabled: true,
+            work_item_plan_options: None,
+        })
+        .expect("create session record");
+    let session = WorkspaceSession::from_record(record);
+    let (tx, _rx) = mpsc::channel(64);
+    let mut engine = WorkspaceEngine::new_persistent(
+        std::sync::Arc::new(crate::product::checkpoint_store::CheckpointStore::new(
+            tmp.path().to_path_buf(),
+        )),
+        crate::product::lifecycle_store::LifecycleStore::new(app_paths.clone()),
+        tx,
+        session,
+    );
+    let snapshot = ProviderConfigSnapshot {
+        author: ProviderName::Codex,
+        reviewer: None,
+        review_rounds: 1,
+        permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
+    };
+
+    engine
+        .start_generation(snapshot, true)
+        .await
+        .expect("start generation");
+
+    let session = engine.session();
+    assert_eq!(session.reviewer_provider, None);
+    assert_eq!(session.reviewer_enabled_at_start, Some(true));
+
+    // 重读 durable 记录（create_workspace_session 以 entity 派生 id）。
+    let records = store
+        .list_workspace_sessions("project_0001", "issue_0001")
+        .expect("list sessions");
+    let persisted = records
+        .iter()
+        .find(|r| r.entity_id == "story_spec_0001")
+        .expect("persisted record");
+    assert_eq!(
+        persisted.reviewer_provider, None,
+        "must not backfill the author provider as reviewer"
+    );
+    let restored = WorkspaceSession::from_record(persisted.clone());
+    assert_eq!(restored.reviewer_provider, None);
+}
+
 // spec-design-dialog-revision T3：AuthorConfirm 对话式修订循环 + 确认双出口决策用例。
 // 引擎构造：Story/AuthorConfirm + artifact + 不同 provisional / enabled_at_start / rounds 组合。
 
@@ -481,7 +544,8 @@ async fn legacy_record_with_review_decision_restores_to_author_confirm_via_persi
             entity_id: "story_spec_0001".to_string(),
             workspace_type: WorkspaceType::Story,
             author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
+            reviewer_provider: Some(ProviderName::Codex),
+
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,

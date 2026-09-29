@@ -174,7 +174,8 @@ mod baseline_teaching_fixture {
                     entity_id: "story_spec_0001".to_string(),
                     workspace_type: workspace_type.clone(),
                     author_provider: ProviderName::ClaudeCode,
-                    reviewer_provider: ProviderName::Codex,
+                    reviewer_provider: Some(ProviderName::Codex),
+
                     review_rounds: 1,
                     superpowers_enabled: false,
                     openspec_enabled: false,

@@ -54,8 +54,8 @@ pub(super) async fn run_coding_provider_roles(
             &attempt.id,
             CodingRoleProviderConfigSnapshot {
                 coder: provider.clone(),
-                code_reviewer: provider.clone(),
-                internal_reviewer: provider,
+                code_reviewer: Some(provider.clone()),
+                internal_reviewer: Some(provider),
                 review_rounds: 1,
                 permission_modes: CodingRolePermissionModes::default(),
             },

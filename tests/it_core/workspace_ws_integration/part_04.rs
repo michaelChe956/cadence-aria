@@ -60,7 +60,8 @@ async fn workspace_ws_sc_human_gate_feedback_reaches_dispatch_after_socket_stage
                 entity_id: plan.id,
                 workspace_type: cadence_aria::product::models::WorkspaceType::WorkItemPlan,
                 author_provider: ProviderName::Fake,
-                reviewer_provider: ProviderName::Fake,
+                reviewer_provider: Some(ProviderName::Fake),
+
                 review_rounds: 0,
                 superpowers_enabled: false,
                 openspec_enabled: false,
@@ -91,6 +92,7 @@ async fn workspace_ws_sc_human_gate_feedback_reaches_dispatch_after_socket_stage
             trigger: cadence_aria::product::work_item_plan_policy::HumanReason::NativeHumanRequired,
             resumable: false,
             accepted_feedback_turns: None,
+            candidate_recovery: None,
         },
     );
     session_record.messages.push(cadence_aria::product::models::WorkspaceMessageRecord {

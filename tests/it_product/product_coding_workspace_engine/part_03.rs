@@ -121,8 +121,8 @@ async fn coding_code_reviewer_run_resumes_persisted_provider_session() {
         .expect("create attempt");
     let config = CodingRoleProviderConfigSnapshot {
         coder: ProviderName::Pi,
-        code_reviewer: ProviderName::Pi,
-        internal_reviewer: ProviderName::Pi,
+        code_reviewer: Some(ProviderName::Pi),
+        internal_reviewer: Some(ProviderName::Pi),
         review_rounds: 1,
         permission_modes: CodingRolePermissionModes {
             coder: CodingProviderPermissionMode::Supervised,
@@ -216,8 +216,8 @@ async fn coding_internal_reviewer_uses_fresh_provider_session() {
         .expect("create attempt");
     let config = CodingRoleProviderConfigSnapshot {
         coder: ProviderName::Pi,
-        code_reviewer: ProviderName::Pi,
-        internal_reviewer: ProviderName::Pi,
+        code_reviewer: Some(ProviderName::Pi),
+        internal_reviewer: Some(ProviderName::Pi),
         review_rounds: 1,
         permission_modes: CodingRolePermissionModes {
             coder: CodingProviderPermissionMode::Supervised,

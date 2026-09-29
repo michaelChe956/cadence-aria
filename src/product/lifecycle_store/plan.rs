@@ -270,7 +270,8 @@ impl LifecycleStore {
                 entity_id: wi_id.clone(),
                 workspace_type: WorkspaceType::WorkItem,
                 author_provider: author_provider.clone(),
-                reviewer_provider: reviewer_provider.clone().unwrap_or(ProviderName::Codex),
+                // C2 Task 5（REQ-CRO-05）：不回填 Codex——reviewer 缺失保持空 effective。
+                reviewer_provider: reviewer_provider.clone(),
                 review_rounds,
                 superpowers_enabled,
                 openspec_enabled,

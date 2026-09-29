@@ -157,7 +157,8 @@ fn persists_workspace_session_and_project_provider_defaults() {
         entity_id: "story_spec_0001".to_string(),
         workspace_type: WorkspaceType::Story,
         author_provider: ProviderName::Codex,
-        reviewer_provider: ProviderName::ClaudeCode,
+        reviewer_provider: Some(ProviderName::ClaudeCode),
+
         review_rounds: 1,
         superpowers_enabled: true, openspec_enabled: false, work_item_plan_options: None, })
         .expect("session");
@@ -184,7 +185,8 @@ fn workspace_session_provider_conversations_default_for_legacy_json() {
         entity_id: "story_0001".to_string(),
         workspace_type: WorkspaceType::Story,
         author_provider: ProviderName::ClaudeCode,
-        reviewer_provider: ProviderName::Codex,
+        reviewer_provider: Some(ProviderName::Codex),
+
         review_rounds: 1,
         superpowers_enabled: false, openspec_enabled: false, work_item_plan_options: None, })
         .expect("create workspace session");
@@ -218,7 +220,8 @@ fn updates_workspace_session_provider_conversations() {
         entity_id: "story_0001".to_string(),
         workspace_type: WorkspaceType::Story,
         author_provider: ProviderName::ClaudeCode,
-        reviewer_provider: ProviderName::Codex,
+        reviewer_provider: Some(ProviderName::Codex),
+
         review_rounds: 1,
         superpowers_enabled: false, openspec_enabled: false, work_item_plan_options: None, })
         .expect("create workspace session");
@@ -252,7 +255,8 @@ fn persists_workspace_timeline_nodes_and_artifact_versions() {
         entity_id: "story_spec_0001".to_string(),
         workspace_type: WorkspaceType::Story,
         author_provider: ProviderName::ClaudeCode,
-        reviewer_provider: ProviderName::Codex,
+        reviewer_provider: Some(ProviderName::Codex),
+
         review_rounds: 2,
         superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
         .expect("session");
@@ -316,7 +320,8 @@ fn save_and_load_node_detail() {
         entity_id: "story_spec_0001".to_string(),
         workspace_type: WorkspaceType::Story,
         author_provider: ProviderName::ClaudeCode,
-        reviewer_provider: ProviderName::Codex,
+        reviewer_provider: Some(ProviderName::Codex),
+
         review_rounds: 1,
         superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
         .expect("session");
@@ -371,7 +376,8 @@ fn load_missing_node_detail_returns_not_found() {
         entity_id: "story_spec_0001".to_string(),
         workspace_type: WorkspaceType::Story,
         author_provider: ProviderName::ClaudeCode,
-        reviewer_provider: ProviderName::Codex,
+        reviewer_provider: Some(ProviderName::Codex),
+
         review_rounds: 1,
         superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
         .expect("session");
@@ -536,7 +542,8 @@ fn workspace_session_ids_are_unique_across_issues() {
         entity_id: "story_spec_0001".to_string(),
         workspace_type: WorkspaceType::Story,
         author_provider: ProviderName::Codex,
-        reviewer_provider: ProviderName::ClaudeCode,
+        reviewer_provider: Some(ProviderName::ClaudeCode),
+
         review_rounds: 1,
         superpowers_enabled: true, openspec_enabled: false, work_item_plan_options: None, })
         .expect("first session");
@@ -546,7 +553,8 @@ fn workspace_session_ids_are_unique_across_issues() {
         entity_id: "story_spec_0002".to_string(),
         workspace_type: WorkspaceType::Story,
         author_provider: ProviderName::Codex,
-        reviewer_provider: ProviderName::ClaudeCode,
+        reviewer_provider: Some(ProviderName::ClaudeCode),
+
         review_rounds: 1,
         superpowers_enabled: true, openspec_enabled: false, work_item_plan_options: None, })
         .expect("second session");
@@ -556,7 +564,8 @@ fn workspace_session_ids_are_unique_across_issues() {
         entity_id: "story_spec_0003".to_string(),
         workspace_type: WorkspaceType::Story,
         author_provider: ProviderName::Codex,
-        reviewer_provider: ProviderName::ClaudeCode,
+        reviewer_provider: Some(ProviderName::ClaudeCode),
+
         review_rounds: 1,
         superpowers_enabled: true, openspec_enabled: false, work_item_plan_options: None, })
         .expect("third session");
@@ -578,7 +587,8 @@ fn workspace_session_lookup_ignores_unrelated_json_files() {
         entity_id: "story_spec_0001".to_string(),
         workspace_type: WorkspaceType::Story,
         author_provider: ProviderName::Codex,
-        reviewer_provider: ProviderName::ClaudeCode,
+        reviewer_provider: Some(ProviderName::ClaudeCode),
+
         review_rounds: 1,
         superpowers_enabled: true, openspec_enabled: false, work_item_plan_options: None, })
         .expect("first session");
@@ -603,7 +613,8 @@ fn workspace_session_lookup_ignores_unrelated_json_files() {
         entity_id: "story_spec_0002".to_string(),
         workspace_type: WorkspaceType::Story,
         author_provider: ProviderName::Codex,
-        reviewer_provider: ProviderName::ClaudeCode,
+        reviewer_provider: Some(ProviderName::ClaudeCode),
+
         review_rounds: 1,
         superpowers_enabled: true, openspec_enabled: false, work_item_plan_options: None, })
         .expect("second session");
@@ -623,7 +634,8 @@ fn workspace_session_lookup_ignores_malformed_unrelated_session_files() {
         entity_id: "story_spec_0001".to_string(),
         workspace_type: WorkspaceType::Story,
         author_provider: ProviderName::Codex,
-        reviewer_provider: ProviderName::ClaudeCode,
+        reviewer_provider: Some(ProviderName::ClaudeCode),
+
         review_rounds: 1,
         superpowers_enabled: true, openspec_enabled: false, work_item_plan_options: None, })
         .expect("session");
@@ -657,7 +669,8 @@ fn workspace_session_summaries_do_not_parse_messages() {
         entity_id: "story_spec_0001".to_string(),
         workspace_type: WorkspaceType::Story,
         author_provider: ProviderName::Codex,
-        reviewer_provider: ProviderName::ClaudeCode,
+        reviewer_provider: Some(ProviderName::ClaudeCode),
+
         review_rounds: 1,
         superpowers_enabled: true, openspec_enabled: false, work_item_plan_options: None, })
         .expect("session");

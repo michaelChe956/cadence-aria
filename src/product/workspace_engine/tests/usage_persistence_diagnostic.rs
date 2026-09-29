@@ -32,7 +32,8 @@ fn usage_probe_engine() -> (
             entity_id: "story_spec_0001".to_string(),
             workspace_type: WorkspaceType::Story,
             author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
+            reviewer_provider: Some(ProviderName::Codex),
+
             review_rounds: 2,
             superpowers_enabled: true,
             openspec_enabled: true,

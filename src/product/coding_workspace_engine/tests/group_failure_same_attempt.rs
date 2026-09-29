@@ -132,9 +132,10 @@ fn seed_run_for_unit_with_id(
         coder_provider_renderer_version: renderer_for(&providers.coder)
             .renderer_version()
             .to_string(),
-        reviewer_provider_renderer_version: renderer_for(&providers.code_reviewer)
-            .renderer_version()
-            .to_string(),
+        reviewer_provider_renderer_version: renderer_version_for_optional_provider(
+            providers.code_reviewer.as_ref(),
+        )
+        .to_string(),
         internal_reviewer_provider_renderer_version: None,
         coder_projection_hash: bundle.coder_projection_hash,
         reviewer_projection_hash: bundle.reviewer_projection_hash,

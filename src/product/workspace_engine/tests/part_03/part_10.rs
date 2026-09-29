@@ -570,7 +570,8 @@ fn workspace_artifact_version_binding_recovers_for_story_design_and_work_item() 
             entity_id: entity_id.to_string(),
             workspace_type: workspace_type.clone(),
             author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
+            reviewer_provider: Some(ProviderName::Codex),
+
             review_rounds: 1,
             superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
             .unwrap();

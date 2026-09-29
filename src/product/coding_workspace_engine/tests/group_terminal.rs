@@ -457,8 +457,7 @@ fn seed_completed_group_final_review_runtime(
     let coder_renderer_version = renderer_for(&providers.coder)
         .renderer_version()
         .to_string();
-    let reviewer_renderer_version = renderer_for(&providers.code_reviewer)
-        .renderer_version()
+    let reviewer_renderer_version = renderer_version_for_optional_provider(providers.code_reviewer.as_ref())
         .to_string();
     for (index, unit) in store
         .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)

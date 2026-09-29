@@ -31,6 +31,7 @@ use crate::product::work_item_projection::{
     CoderGroupContext, CompiledPlanProjections, HumanGroupProjection, HumanGroupWorkItemSummary,
     ReviewerGroupMatrix, ReviewerGroupMatrixEntry, WorkItemProjectionCompiler,
     plan_projection_hashes, projection_hashes, renderer_for,
+    renderer_version_for_optional_provider,
 };
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
@@ -561,6 +562,7 @@ mod provider_start_persistence;
 mod provider_stream_cancellation_diag;
 mod provider_usage_event;
 mod retry_push;
+mod reviewer_configuration_gate;
 mod reviewer_retry_diagnostic_teaching;
 mod runtime_handoff_compatibility;
 mod runtime_handoff_delta;

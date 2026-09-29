@@ -114,7 +114,8 @@ async fn work_item_plan_context_message_includes_plan_brief_and_workspace_type()
             entity_id: plan.id.clone(),
             workspace_type: WorkspaceType::WorkItemPlan,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,

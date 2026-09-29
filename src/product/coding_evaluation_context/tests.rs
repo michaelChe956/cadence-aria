@@ -174,7 +174,8 @@ fn evaluation_context_pack_includes_story_design_work_item_and_contracts() {
             entity_id: story.id.clone(),
             workspace_type: WorkspaceType::Story,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
@@ -209,7 +210,8 @@ fn evaluation_context_pack_includes_story_design_work_item_and_contracts() {
             entity_id: design.id.clone(),
             workspace_type: WorkspaceType::Design,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
@@ -235,7 +237,8 @@ fn evaluation_context_pack_includes_story_design_work_item_and_contracts() {
             entity_id: work_item.id.clone(),
             workspace_type: WorkspaceType::WorkItem,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
@@ -641,7 +644,8 @@ fn evaluation_context_pack_truncates_and_redacts_sensitive_lines() {
             entity_id: work_item.id.clone(),
             workspace_type: WorkspaceType::WorkItem,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 1,
             superpowers_enabled: false,
             openspec_enabled: false,

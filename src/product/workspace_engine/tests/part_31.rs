@@ -541,7 +541,8 @@ async fn start_generation_locks_selected_modes_into_store() {
         entity_id: "e1".to_string(),
         workspace_type: WorkspaceType::Story,
         author_provider: ProviderName::ClaudeCode,
-        reviewer_provider: ProviderName::Codex,
+        reviewer_provider: Some(ProviderName::Codex),
+
         review_rounds: 1,
         superpowers_enabled: false, openspec_enabled: false, work_item_plan_options: None, })
         .expect("create session");
@@ -584,7 +585,8 @@ async fn start_generation_normalizes_pi_role_to_auto_and_keeps_disabled_reviewer
         entity_id: "e1".to_string(),
         workspace_type: WorkspaceType::Story,
         author_provider: ProviderName::Pi,
-        reviewer_provider: ProviderName::Codex,
+        reviewer_provider: Some(ProviderName::Codex),
+
         review_rounds: 1,
         superpowers_enabled: false, openspec_enabled: false, work_item_plan_options: None, })
         .expect("create session");
@@ -1128,7 +1130,8 @@ async fn workspace_author_policy_run_receives_run_bound_durable_audit_sink() {
             entity_id: "e1".to_string(),
             workspace_type: WorkspaceType::Story,
             author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
+            reviewer_provider: Some(ProviderName::Codex),
+
             review_rounds: 1,
             superpowers_enabled: false,
             openspec_enabled: false,

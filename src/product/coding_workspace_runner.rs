@@ -70,8 +70,8 @@ pub fn apply_provider_selection_to_snapshots(
         }
         "reviewer" => {
             legacy_snapshot.reviewer = Some(provider.clone());
-            role_snapshot.code_reviewer = provider.clone();
-            role_snapshot.internal_reviewer = provider;
+            role_snapshot.code_reviewer = Some(provider.clone());
+            role_snapshot.internal_reviewer = Some(provider);
             Ok(CodingProviderRole::CodeReviewer)
         }
         "coder" => {
@@ -81,11 +81,11 @@ pub fn apply_provider_selection_to_snapshots(
         }
         "code_reviewer" => {
             legacy_snapshot.reviewer = Some(provider.clone());
-            role_snapshot.code_reviewer = provider;
+            role_snapshot.code_reviewer = Some(provider);
             Ok(CodingProviderRole::CodeReviewer)
         }
         "internal_reviewer" => {
-            role_snapshot.internal_reviewer = provider;
+            role_snapshot.internal_reviewer = Some(provider);
             Ok(CodingProviderRole::InternalReviewer)
         }
         _ => Err(format!("unsupported_coding_provider_role: {role}")),

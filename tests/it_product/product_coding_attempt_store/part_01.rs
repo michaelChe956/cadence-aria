@@ -663,12 +663,12 @@ fn store_persists_role_provider_config_snapshot_in_attempt_scope() {
         .get_role_provider_config_snapshot("project_0001", "issue_0001", &attempt.id)
         .expect("initial role provider snapshot");
     assert_eq!(initial.coder, ProviderName::Fake);
-    assert_eq!(initial.code_reviewer, ProviderName::Fake);
+    assert_eq!(initial.code_reviewer, Some(ProviderName::Fake));
 
     let updated = CodingRoleProviderConfigSnapshot {
         coder: ProviderName::Fake,
-        code_reviewer: ProviderName::Codex,
-        internal_reviewer: ProviderName::Fake,
+        code_reviewer: Some(ProviderName::Codex),
+        internal_reviewer: Some(ProviderName::Fake),
         review_rounds: 1,
         permission_modes: CodingRolePermissionModes::default(),
     };

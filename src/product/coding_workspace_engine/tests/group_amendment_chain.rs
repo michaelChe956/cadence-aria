@@ -164,7 +164,8 @@ async fn amendment_chain_fixture(resume_mode: AmendmentResumeMode) -> AmendmentC
             entity_id: plan.id.clone(),
             workspace_type: WorkspaceType::WorkItemPlan,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,

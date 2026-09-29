@@ -113,8 +113,7 @@ pub(super) fn seed_completed_run(
     let coder_renderer = renderer_for(&providers.coder)
         .renderer_version()
         .to_string();
-    let reviewer_renderer = renderer_for(&providers.code_reviewer)
-        .renderer_version()
+    let reviewer_renderer = renderer_version_for_optional_provider(providers.code_reviewer.as_ref())
         .to_string();
     let run = CodingUnitRun {
         id: format!("coding_unit_run_{}", unit.order_index + 1),
@@ -229,7 +228,8 @@ pub(super) fn seed_runner_revision_history(fixture: &ReadinessFixture) {
                 .expect("group plan id"),
             workspace_type: WorkspaceType::WorkItemPlan,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,

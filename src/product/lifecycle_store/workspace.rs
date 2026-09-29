@@ -875,7 +875,7 @@ impl LifecycleStore {
         &self,
         session_id: &str,
         author_provider: crate::product::models::ProviderName,
-        reviewer_provider: crate::product::models::ProviderName,
+        reviewer_provider: Option<crate::product::models::ProviderName>,
     ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
         validate_relative_id(session_id)?;
         let session_path = self.find_workspace_session_path(session_id)?;

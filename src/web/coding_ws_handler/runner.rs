@@ -5,7 +5,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::CodingAttemptStore;
 use crate::product::coding_models::{
-    CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage,
+    CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage, CodingProviderRole,
 };
 pub(crate) use crate::product::coding_workspace_engine::{
     CodeReviewFlowDecision, code_review_flow_decision,
@@ -587,11 +587,24 @@ pub(crate) async fn execute_start_coding_flow(
                     &current.id,
                 )?
                 .internal_reviewer;
-            let internal_reviewer_provider = provider_for(
-                state,
-                &internal_reviewer_provider_name,
-                "coding internal reviewer provider",
-            )?;
+            let internal_reviewer_provider = match internal_reviewer_provider_name {
+                Some(provider_name) => provider_for(
+                    state,
+                    &provider_name,
+                    "coding internal reviewer provider",
+                )?,
+                // C2 Task 5（REQ-CRO-05）：缺 internal reviewer → 落缺配置门后停止
+                // 推进，绝不以 author 顶替启动 reviewer。
+                None => {
+                    return Err(engine
+                        .block_missing_reviewer_configuration(
+                            &current,
+                            CodingExecutionStage::InternalPrReview,
+                            CodingProviderRole::InternalReviewer,
+                        )
+                        .await);
+                }
+            };
             let internal_review = engine
                 .execute_internal_pr_review_with_commands(
                     &current,
@@ -655,8 +668,21 @@ pub(crate) async fn execute_start_coding_flow(
                 )?;
                 continue 'pipeline;
             }
-            let reviewer_provider =
-                provider_for(state, &reviewer_provider_name, "coding reviewer provider")?;
+            let reviewer_provider = match reviewer_provider_name {
+                Some(provider_name) => {
+                    provider_for(state, &provider_name, "coding reviewer provider")?
+                }
+                // C2 Task 5（REQ-CRO-05）：缺 code reviewer → 落缺配置门后停止推进。
+                None => {
+                    return Err(engine
+                        .block_missing_reviewer_configuration(
+                            &current,
+                            CodingExecutionStage::CodeReview,
+                            CodingProviderRole::CodeReviewer,
+                        )
+                        .await);
+                }
+            };
             let review_report = engine
                 .execute_code_review_with_commands(
                     &current,

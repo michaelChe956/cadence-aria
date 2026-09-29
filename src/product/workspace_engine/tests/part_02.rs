@@ -374,7 +374,8 @@ fn persistent_test_engine() -> (TempDir, LifecycleStore, WorkspaceEngine) {
         entity_id: "story_spec_0001".to_string(),
         workspace_type: WorkspaceType::Story,
         author_provider: ProviderName::ClaudeCode,
-        reviewer_provider: ProviderName::Codex,
+        reviewer_provider: Some(ProviderName::Codex),
+
         review_rounds: 2,
         superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
         .unwrap();
@@ -494,7 +495,8 @@ async fn permission_timeout_marks_node_detail_and_returns_to_prepare_context() {
         entity_id: "story_spec_0001".to_string(),
         workspace_type: WorkspaceType::Story,
         author_provider: ProviderName::ClaudeCode,
-        reviewer_provider: ProviderName::Codex,
+        reviewer_provider: Some(ProviderName::Codex),
+
         review_rounds: 2,
         superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
         .unwrap();
@@ -754,7 +756,8 @@ async fn provider_drive_story_run_writes_back_involved_from_structured_output() 
         entity_id: story.id.clone(),
         workspace_type: WorkspaceType::Story,
         author_provider: ProviderName::ClaudeCode,
-        reviewer_provider: ProviderName::Codex,
+        reviewer_provider: Some(ProviderName::Codex),
+
         review_rounds: 2,
         superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
         .unwrap();
@@ -833,7 +836,8 @@ async fn provider_drive_design_run_writes_back_involved_and_change_order_from_st
         entity_id: design.id.clone(),
         workspace_type: WorkspaceType::Design,
         author_provider: ProviderName::ClaudeCode,
-        reviewer_provider: ProviderName::Codex,
+        reviewer_provider: Some(ProviderName::Codex),
+
         review_rounds: 2,
         superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
         .unwrap();
@@ -894,7 +898,8 @@ async fn provider_drive_single_repo_story_run_does_not_write_back_aggregate() {
         entity_id: story.id.clone(),
         workspace_type: WorkspaceType::Story,
         author_provider: ProviderName::ClaudeCode,
-        reviewer_provider: ProviderName::Codex,
+        reviewer_provider: Some(ProviderName::Codex),
+
         review_rounds: 2,
         superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
         .unwrap();
@@ -963,7 +968,8 @@ async fn provider_drive_aggregate_story_missing_structured_output_records_diagno
         entity_id: story.id.clone(),
         workspace_type: WorkspaceType::Story,
         author_provider: ProviderName::ClaudeCode,
-        reviewer_provider: ProviderName::Codex,
+        reviewer_provider: Some(ProviderName::Codex),
+
         review_rounds: 2,
         superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
         .unwrap();

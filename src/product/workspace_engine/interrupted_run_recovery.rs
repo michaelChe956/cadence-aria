@@ -90,12 +90,8 @@ impl WorkspaceEngine {
                 self.create_timeline_node_with_retry(
                     TimelineNodeDraft {
                         node_type: source_node.node_type,
-                        agent: Some(
-                            self.session
-                                .reviewer_provider
-                                .clone()
-                                .unwrap_or(ProviderName::Codex),
-                        ),
+                        // C2 Task 5（REQ-CRO-05）：三值透传——缺失记 None。
+                        agent: self.session.reviewer_provider.clone(),
                         stage: WorkspaceStage::CrossReview,
                         round: source_node.round,
                         title: source_node.title,

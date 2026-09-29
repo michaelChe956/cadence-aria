@@ -295,7 +295,8 @@ async fn provider_session_forwards_tool_call_and_result_events() {
         entity_id: "story_spec_0001".to_string(),
         workspace_type: WorkspaceType::Story,
         author_provider: ProviderName::ClaudeCode,
-        reviewer_provider: ProviderName::Codex,
+        reviewer_provider: Some(ProviderName::Codex),
+
         review_rounds: 2,
         superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
         .unwrap();
@@ -720,7 +721,8 @@ async fn provider_session_maps_usage_report_to_usage_execution_event() {
         entity_id: "story_spec_0001".to_string(),
         workspace_type: WorkspaceType::Story,
         author_provider: ProviderName::ClaudeCode,
-        reviewer_provider: ProviderName::Codex,
+        reviewer_provider: Some(ProviderName::Codex),
+
         review_rounds: 2,
         superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
         .unwrap();

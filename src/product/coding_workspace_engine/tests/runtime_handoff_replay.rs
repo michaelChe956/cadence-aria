@@ -77,11 +77,10 @@ fn seed_runtime_source_handoff_runs(
                         crate::product::work_item_projection::renderer_for(&providers.coder)
                         .renderer_version()
                         .to_string(),
-                    reviewer_provider_renderer_version:
-                        crate::product::work_item_projection::renderer_for(
-                            &providers.code_reviewer,
+                    reviewer_provider_renderer_version: crate::product::
+                        work_item_projection::renderer_version_for_optional_provider(
+                            providers.code_reviewer.as_ref(),
                         )
-                        .renderer_version()
                         .to_string(),
                     internal_reviewer_provider_renderer_version: None,
                     coder_projection_hash: bundle.coder_projection_hash.clone(),

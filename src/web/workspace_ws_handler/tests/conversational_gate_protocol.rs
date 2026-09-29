@@ -134,7 +134,8 @@ async fn conversational_gate_feedback_reaches_service_through_socket_dispatch() 
             entity_id: "plan_socket_gate".to_string(),
             workspace_type: crate::product::models::WorkspaceType::WorkItemPlan,
             author_provider: ProviderName::Fake,
-            reviewer_provider: ProviderName::Fake,
+            reviewer_provider: Some(ProviderName::Fake),
+
             review_rounds: 0,
             superpowers_enabled: false,
             openspec_enabled: false,
@@ -245,7 +246,8 @@ async fn conversational_gate_budget_exhausted_reaches_handler_as_protocol_error(
             entity_id: "plan_socket_budget_exhausted".to_string(),
             workspace_type: WorkspaceType::WorkItemPlan,
             author_provider: ProviderName::Fake,
-            reviewer_provider: ProviderName::Fake,
+            reviewer_provider: Some(ProviderName::Fake),
+
             review_rounds: 0,
             superpowers_enabled: false,
             openspec_enabled: false,
@@ -458,7 +460,8 @@ async fn conversational_gate_post_approve_feedback_is_structured_protocol_error(
             entity_id: "plan_post_approve_feedback".to_string(),
             workspace_type: WorkspaceType::WorkItemPlan,
             author_provider: ProviderName::Fake,
-            reviewer_provider: ProviderName::Fake,
+            reviewer_provider: Some(ProviderName::Fake),
+
             review_rounds: 0,
             superpowers_enabled: false,
             openspec_enabled: false,
@@ -592,7 +595,8 @@ async fn confirm_compile_failure_surfaces_findings_as_protocol_error_context() {
             entity_id: "plan_gate_findings".to_string(),
             workspace_type: WorkspaceType::WorkItemPlan,
             author_provider: ProviderName::Fake,
-            reviewer_provider: ProviderName::Fake,
+            reviewer_provider: Some(ProviderName::Fake),
+
             review_rounds: 0,
             superpowers_enabled: false,
             openspec_enabled: false,
@@ -799,7 +803,8 @@ async fn late_confirm_after_gate_closed_is_silent_idempotent_noop_at_ws_boundary
             entity_id: "plan_late_confirm".to_string(),
             workspace_type: WorkspaceType::WorkItemPlan,
             author_provider: ProviderName::Fake,
-            reviewer_provider: ProviderName::Fake,
+            reviewer_provider: Some(ProviderName::Fake),
+
             review_rounds: 0,
             superpowers_enabled: false,
             openspec_enabled: false,
@@ -912,7 +917,8 @@ async fn story_author_gate_abandon_terminates_session_through_socket_dispatch() 
             entity_id: "story_spec_0001".to_string(),
             workspace_type: WorkspaceType::Story,
             author_provider: ProviderName::Fake,
-            reviewer_provider: ProviderName::Fake,
+            reviewer_provider: Some(ProviderName::Fake),
+
             review_rounds: 0,
             superpowers_enabled: false,
             openspec_enabled: false,

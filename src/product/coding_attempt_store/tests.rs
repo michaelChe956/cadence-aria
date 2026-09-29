@@ -680,9 +680,9 @@ fn saving_group_attempt_preserves_explicit_internal_reviewer_role_config() {
     let mut role_config = store
         .get_role_provider_config_snapshot(PROJECT_ID, ISSUE_ID, &group_attempt.id)
         .expect("bootstrap role config");
-    assert_eq!(role_config.internal_reviewer, ProviderName::Codex);
+    assert_eq!(role_config.internal_reviewer, Some(ProviderName::Codex));
 
-    role_config.internal_reviewer = ProviderName::ClaudeCode;
+    role_config.internal_reviewer = Some(ProviderName::ClaudeCode);
     store
         .update_role_provider_config_snapshot(PROJECT_ID, ISSUE_ID, &group_attempt.id, role_config)
         .expect("select internal reviewer");
@@ -694,7 +694,7 @@ fn saving_group_attempt_preserves_explicit_internal_reviewer_role_config() {
     let persisted = store
         .get_role_provider_config_snapshot(PROJECT_ID, ISSUE_ID, &group_attempt.id)
         .expect("persisted role config");
-    assert_eq!(persisted.internal_reviewer, ProviderName::ClaudeCode);
+    assert_eq!(persisted.internal_reviewer, Some(ProviderName::ClaudeCode));
 }
 
 #[test]

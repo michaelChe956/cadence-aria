@@ -18,11 +18,19 @@ impl WorkspaceEngine {
         provider: Arc<dyn StreamingProviderAdapter>,
         command_rx: mpsc::Receiver<ProviderCommand>,
     ) {
-        let reviewer = self
-            .session
-            .reviewer_provider
-            .clone()
-            .unwrap_or(ProviderName::Codex);
+        // C2 Task 5（REQ-CRO-05）：reviewer 缺失（空 effective）不驱动 review
+        // run——错误事件＋失败收尾，绝不以 Codex 顶替。
+        let Some(reviewer) = self.session.reviewer_provider.clone() else {
+            let _ = self
+                .event_tx
+                .send(EngineEvent::Error {
+                    message: "reviewer_configuration_missing: review run not started"
+                        .to_string(),
+                })
+                .await;
+            self.finish_failed_run().await;
+            return;
+        };
         let input = match self
             .ensure_review_invocation_scope()
             .await
@@ -259,11 +267,19 @@ impl WorkspaceEngine {
             .clone()
             .expect("drive_review_session_via_gateway requires a logical provider gateway");
 
-        let reviewer = self
-            .session
-            .reviewer_provider
-            .clone()
-            .unwrap_or(ProviderName::Codex);
+        // C2 Task 5（REQ-CRO-05）：reviewer 缺失（空 effective）不驱动 review
+        // run——错误事件＋失败收尾，绝不以 Codex 顶替。
+        let Some(reviewer) = self.session.reviewer_provider.clone() else {
+            let _ = self
+                .event_tx
+                .send(EngineEvent::Error {
+                    message: "reviewer_configuration_missing: review run not started"
+                        .to_string(),
+                })
+                .await;
+            self.finish_failed_run().await;
+            return;
+        };
         let input = match self
             .ensure_review_invocation_scope()
             .await

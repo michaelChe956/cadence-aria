@@ -243,7 +243,8 @@ pub(crate) fn test_session_record(session_id: &str) -> WorkspaceSessionRecord {
         workspace_type: crate::product::models::WorkspaceType::Story,
         status: crate::product::models::WorkspaceSessionStatus::Open,
         author_provider: crate::product::models::ProviderName::Fake,
-        reviewer_provider: crate::product::models::ProviderName::Fake,
+        reviewer_provider: Some(crate::product::models::ProviderName::Fake),
+
         review_rounds: 0,
         permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
         provisional_reviewer_provider: None,

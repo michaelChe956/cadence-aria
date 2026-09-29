@@ -19,7 +19,8 @@ fn single_candidate_provider_start_reservation_is_one_shot_and_durable() {
             entity_id: "entity_0001".to_string(),
             workspace_type: WorkspaceType::WorkItemPlan,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 1,
             superpowers_enabled: false,
             openspec_enabled: false,
@@ -58,7 +59,8 @@ fn preclaimed_single_candidate_repair_key_starts_provider_once() {
             entity_id: "entity_0001".to_string(),
             workspace_type: WorkspaceType::WorkItemPlan,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 1,
             superpowers_enabled: false,
             openspec_enabled: false,
@@ -145,7 +147,8 @@ fn explicit_start_generation_rearms_failed_single_candidate_but_rejects_complete
             entity_id: "entity_0001".to_string(),
             workspace_type: WorkspaceType::WorkItemPlan,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 1,
             superpowers_enabled: false,
             openspec_enabled: false,
@@ -199,7 +202,8 @@ fn single_candidate_evaluation_persists_report_without_upgrading_invocation_scop
             entity_id: "entity_0001".to_string(),
             workspace_type: WorkspaceType::WorkItemPlan,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 1,
             superpowers_enabled: false,
             openspec_enabled: false,
@@ -270,7 +274,8 @@ fn single_candidate_approval_and_reservation_are_cas_bound_to_durable_refs() {
             entity_id: "entity_0001".to_string(),
             workspace_type: WorkspaceType::WorkItemPlan,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 1,
             superpowers_enabled: false,
             openspec_enabled: false,
@@ -384,7 +389,8 @@ fn repair_generation_rotation_invalidates_stale_approval_tuple() {
             entity_id: "entity_0001".to_string(),
             workspace_type: WorkspaceType::WorkItemPlan,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 1,
             superpowers_enabled: false,
             openspec_enabled: false,

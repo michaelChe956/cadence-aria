@@ -212,7 +212,8 @@ async fn work_item_plan_delete_partial_failure_still_evicts_deleted_work_item_ma
             entity_id: "work_item_0001".to_string(),
             workspace_type: WorkspaceType::WorkItem,
             author_provider: ProviderName::Fake,
-            reviewer_provider: ProviderName::Fake,
+            reviewer_provider: Some(ProviderName::Fake),
+
             review_rounds: 1,
             superpowers_enabled: false,
             openspec_enabled: false,
@@ -229,7 +230,8 @@ async fn work_item_plan_delete_partial_failure_still_evicts_deleted_work_item_ma
             entity_id: "issue_work_item_plan_0001".to_string(),
             workspace_type: WorkspaceType::WorkItemPlan,
             author_provider: ProviderName::Fake,
-            reviewer_provider: ProviderName::Fake,
+            reviewer_provider: Some(ProviderName::Fake),
+
             review_rounds: 1,
             superpowers_enabled: false,
             openspec_enabled: false,

@@ -150,7 +150,8 @@ fn automation_test_record(
         workspace_type: WorkspaceType::Story,
         status: WorkspaceSessionStatus::Open,
         author_provider: ProviderName::Fake,
-        reviewer_provider: ProviderName::Fake,
+        reviewer_provider: Some(ProviderName::Fake),
+
         review_rounds: 1,
         permission_modes: WorkspaceRolePermissionModes::default(),
         provisional_reviewer_provider: None,
@@ -444,7 +445,8 @@ async fn automation_ownership_injected_into_manager_session_state_frames() {
         workspace_type: crate::product::models::WorkspaceType::WorkItemPlan,
         status: crate::product::models::WorkspaceSessionStatus::Open,
         author_provider: crate::product::models::ProviderName::Fake,
-        reviewer_provider: crate::product::models::ProviderName::Fake,
+        reviewer_provider: Some(crate::product::models::ProviderName::Fake),
+
         review_rounds: 1,
         superpowers_enabled: false,
         openspec_enabled: false,

@@ -37,7 +37,8 @@ fn engine_fixture(root: &TempDir, lifecycle: LifecycleStore) -> WorkspaceEngine 
             entity_id: PLAN_ID.to_string(),
             workspace_type: WorkspaceType::WorkItemPlan,
             author_provider: ProviderName::Fake,
-            reviewer_provider: ProviderName::Fake,
+            reviewer_provider: Some(ProviderName::Fake),
+
             review_rounds: 0,
             superpowers_enabled: false,
             openspec_enabled: false,

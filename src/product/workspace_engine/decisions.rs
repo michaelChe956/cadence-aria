@@ -32,13 +32,16 @@ impl WorkspaceEngine {
     /// 只进 CrossReview 不再跳 HumanConfirm 的评审启动（跳过路径已由 AcceptFinalize 显式覆盖）。
     /// Fake provider 快速路径保留：标记 Skipped 并进入 HumanConfirm。
     pub(crate) async fn start_review(&mut self) {
+        // C2 Task 5（REQ-CRO-05）：reviewer 缺失（空 effective）不进入评审——
+        // 落人工确认停等，绝不以 Codex 顶替启动 reviewer。
+        let Some(reviewer) = self.session.reviewer_provider.clone() else {
+            self.transition_stage(WorkspaceStage::CrossReview).await;
+            self.enter_human_confirm(Some("评审配置缺失，等待人工确认".to_string()))
+                .await;
+            return;
+        };
         self.transition_stage(WorkspaceStage::CrossReview).await;
         let round = self.next_review_round();
-        let reviewer = self
-            .session
-            .reviewer_provider
-            .clone()
-            .unwrap_or(ProviderName::Codex);
         let review_node_id = self
             .create_timeline_node(TimelineNodeDraft {
                 node_type: TimelineNodeType::ReviewerRun,

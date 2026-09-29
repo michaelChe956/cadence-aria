@@ -63,7 +63,8 @@ fn workspace_runner_calls_provider_and_records_configured_review_rounds() {
             entity_id: story.id.clone(),
             workspace_type: WorkspaceType::Story,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 3,
             superpowers_enabled: true,
             openspec_enabled: true,
@@ -109,7 +110,7 @@ fn workspace_runner_calls_provider_and_records_configured_review_rounds() {
     assert_eq!(output.review_rounds[0].author_provider, ProviderName::Codex);
     assert_eq!(
         output.review_rounds[0].reviewer_provider,
-        ProviderName::ClaudeCode
+        Some(ProviderName::ClaudeCode)
     );
     assert_eq!(
         output.version.review_refs,

@@ -99,7 +99,8 @@ fn create_linked_amendment_child(
             entity_id: entity_id.to_string(),
             workspace_type,
             author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
+            reviewer_provider: Some(ProviderName::Codex),
+
             review_rounds: 2,
             superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, },
             child_session_id.to_string(),
@@ -275,7 +276,8 @@ async fn linked_workspace_timeline_and_artifact_binding_restore_for_all_artifact
             entity_id: "work_item_plan_0001".to_string(),
             workspace_type: WorkspaceType::WorkItemPlan,
             author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
+            reviewer_provider: Some(ProviderName::Codex),
+
             review_rounds: 2,
             superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, },
             "workspace_session_parent_0001".to_string(),
@@ -288,7 +290,8 @@ async fn linked_workspace_timeline_and_artifact_binding_restore_for_all_artifact
             entity_id: "work_item_0001".to_string(),
             workspace_type: WorkspaceType::WorkItem,
             author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
+            reviewer_provider: Some(ProviderName::Codex),
+
             review_rounds: 2,
             superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, },
             "workspace_session_linked_work_item".to_string(),
@@ -493,7 +496,8 @@ async fn linked_workspace_amendment_rejects_persisted_child_with_wrong_target_en
             entity_id: "story_spec_wrong".to_string(),
             workspace_type: WorkspaceType::Story,
             author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
+            reviewer_provider: Some(ProviderName::Codex),
+
             review_rounds: 2,
             superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, },
             child_session_id.clone(),

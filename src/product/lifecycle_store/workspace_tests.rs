@@ -16,7 +16,8 @@ fn create_input(
         entity_id: "entity_0001".to_string(),
         workspace_type,
         author_provider: ProviderName::Codex,
-        reviewer_provider: ProviderName::ClaudeCode,
+        reviewer_provider: Some(ProviderName::ClaudeCode),
+
         review_rounds: 1,
         superpowers_enabled: false,
         openspec_enabled: false,

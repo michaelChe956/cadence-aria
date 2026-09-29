@@ -6,7 +6,7 @@ use crate::product::coding_models::{
 use crate::product::models::{
     HandoffRevision, WorkItemPlanLineage, WorkItemProjectionBundle, WorkItemRevision,
 };
-use crate::product::work_item_projection::renderer_for;
+use crate::product::work_item_projection::{renderer_for, renderer_version_for_optional_provider};
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 
 use super::runtime_impact::stable_handoff_contract_hash;
@@ -288,7 +288,7 @@ impl CodingWorkspaceEngine {
             || run.coder_provider_renderer_version
                 != renderer_for(&providers.coder).renderer_version()
             || run.reviewer_provider_renderer_version
-                != renderer_for(&providers.code_reviewer).renderer_version()
+                != renderer_version_for_optional_provider(providers.code_reviewer.as_ref())
         {
             return Err(CodingWorkspaceEngineError::ProviderStream(format!(
                 "group_completion_unit_run_binding_mismatch: {}",

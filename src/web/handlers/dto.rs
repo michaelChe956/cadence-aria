@@ -696,7 +696,12 @@ pub(crate) fn workspace_session_summary_dto(
         workspace_type: workspace_type_text(&record.workspace_type).to_string(),
         status: workspace_session_status_text(&record.status).to_string(),
         author_provider: provider_name_text(&record.author_provider).to_string(),
-        reviewer_provider: provider_name_text(&record.reviewer_provider).to_string(),
+        reviewer_provider: record
+            .reviewer_provider
+            .as_ref()
+            .map(provider_name_text)
+            .unwrap_or("reviewer_unconfigured")
+            .to_string(),
         review_rounds: record.review_rounds,
         superpowers_enabled: record.superpowers_enabled,
         openspec_enabled: record.openspec_enabled,

@@ -231,7 +231,8 @@ async fn create_logical_confirm_fixture_with_spec_path(
         entity_id: story.id.clone(),
         workspace_type: WorkspaceType::Story,
         author_provider: ProviderName::Fake,
-        reviewer_provider: ProviderName::Codex,
+        reviewer_provider: Some(ProviderName::Codex),
+
         review_rounds: 1,
         superpowers_enabled: false, openspec_enabled: false, work_item_plan_options: None, })
         .expect("workspace session");

@@ -30,14 +30,11 @@ impl WorkspaceEngine {
     pub async fn begin_work_item_plan_outline_review_run(&mut self) -> String {
         self.transition_stage(WorkspaceStage::CrossReview).await;
         let round = self.next_review_round();
-        let reviewer = self
-            .session
-            .reviewer_provider
-            .clone()
-            .unwrap_or(ProviderName::Codex);
+        // C2 Task 5（REQ-CRO-05）：三值透传——节点 agent 为 Option，缺失记 None。
+        let reviewer = self.session.reviewer_provider.clone();
         self.create_timeline_node(TimelineNodeDraft {
             node_type: TimelineNodeType::WorkItemPlanOutlineReview,
-            agent: Some(reviewer),
+            agent: reviewer,
             stage: WorkspaceStage::CrossReview,
             round: Some(round),
             title: format!("WorkItemPlan Outline Review Round {round}"),

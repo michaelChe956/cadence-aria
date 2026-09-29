@@ -25,7 +25,8 @@ async fn revision_input_uses_persisted_codex_author_session_when_engine_session_
         entity_id: "story_spec_0001".to_string(),
         workspace_type: WorkspaceType::Story,
         author_provider: ProviderName::Codex,
-        reviewer_provider: ProviderName::ClaudeCode,
+        reviewer_provider: Some(ProviderName::ClaudeCode),
+
         review_rounds: 1,
         superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
         .unwrap();

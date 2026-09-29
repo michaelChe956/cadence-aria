@@ -465,7 +465,8 @@ mod tests {
                 entity_id: design.id.clone(),
                 workspace_type: WorkspaceType::Design,
                 author_provider: ProviderName::ClaudeCode,
-                reviewer_provider: ProviderName::Codex,
+                reviewer_provider: Some(ProviderName::Codex),
+
                 review_rounds: 1,
                 superpowers_enabled: false,
                 openspec_enabled: false,
@@ -516,7 +517,8 @@ mod tests {
                 entity_id: "story_spec_0001".to_string(),
                 workspace_type: WorkspaceType::Story,
                 author_provider: ProviderName::ClaudeCode,
-                reviewer_provider: ProviderName::Codex,
+                reviewer_provider: Some(ProviderName::Codex),
+
                 review_rounds: 1,
                 superpowers_enabled: false,
                 openspec_enabled: false,

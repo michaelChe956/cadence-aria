@@ -409,7 +409,8 @@ async fn campaign_stage3_group_projection_reads_every_work_item_result() {
                 entity_id: pending.logical_work_item_id.clone(),
                 workspace_type: WorkspaceType::WorkItem,
                 author_provider: crate::product::models::ProviderName::Fake,
-                reviewer_provider: crate::product::models::ProviderName::Fake,
+                reviewer_provider: Some(crate::product::models::ProviderName::Fake),
+
                 review_rounds: 1,
                 superpowers_enabled: false,
                 openspec_enabled: false,

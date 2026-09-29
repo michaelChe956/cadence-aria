@@ -48,8 +48,8 @@ fn coding_role_provider_config_snapshot_derives_from_legacy_provider_snapshot() 
     });
 
     assert_eq!(snapshot.coder, ProviderName::Codex);
-    assert_eq!(snapshot.code_reviewer, ProviderName::Fake);
-    assert_eq!(snapshot.internal_reviewer, ProviderName::Fake);
+    assert_eq!(snapshot.code_reviewer, Some(ProviderName::Fake));
+    assert_eq!(snapshot.internal_reviewer, Some(ProviderName::Fake));
     assert_eq!(snapshot.review_rounds, 2);
 
     let value = serde_json::to_value(snapshot).expect("serialize role provider snapshot");
@@ -69,8 +69,10 @@ fn coding_role_provider_config_snapshot_derives_from_legacy_provider_snapshot() 
     );
 }
 
+// C2 Task 5（REQ-CRO-05）：reviewer 三值——原 author 回填 pin 毒测试已删，
+// 换为空 effective 语义断言。
 #[test]
-fn coding_role_provider_config_snapshot_falls_back_to_author_when_reviewer_is_missing() {
+fn coding_role_provider_config_snapshot_without_reviewer_stays_empty_effective() {
     let snapshot = CodingRoleProviderConfigSnapshot::from(ProviderConfigSnapshot {
         author: ProviderName::ClaudeCode,
         reviewer: None,
@@ -79,8 +81,20 @@ fn coding_role_provider_config_snapshot_falls_back_to_author_when_reviewer_is_mi
     });
 
     assert_eq!(snapshot.coder, ProviderName::ClaudeCode);
-    assert_eq!(snapshot.code_reviewer, ProviderName::ClaudeCode);
-    assert_eq!(snapshot.internal_reviewer, ProviderName::ClaudeCode);
+    assert_eq!(snapshot.code_reviewer, None);
+    assert_eq!(snapshot.internal_reviewer, None);
+
+    let value = serde_json::to_value(&snapshot).expect("serialize role provider snapshot");
+    assert_eq!(value["code_reviewer"], serde_json::Value::Null);
+    assert_eq!(value["internal_reviewer"], serde_json::Value::Null);
+
+    // 旧 role-provider-config.json 缺三值字段：按空 effective 解释。
+    let legacy: CodingRoleProviderConfigSnapshot = serde_json::from_value(serde_json::json!({
+        "coder": "claude_code", "review_rounds": 1
+    }))
+    .expect("deserialize legacy snapshot");
+    assert_eq!(legacy.code_reviewer, None);
+    assert_eq!(legacy.internal_reviewer, None);
 }
 
 #[test]
@@ -141,8 +155,10 @@ fn coding_stage_gate_state_serializes_open_gate_contract() {
         expires_at: "2026-05-28T00:00:05Z".to_string(),
         provider_snapshot: CodingRoleProviderConfigSnapshot {
             coder: ProviderName::Codex,
-            code_reviewer: ProviderName::Fake,
-            internal_reviewer: ProviderName::Fake,
+            code_reviewer: Some(ProviderName::Fake),
+
+            internal_reviewer: Some(ProviderName::Fake),
+
             review_rounds: 1,
             permission_modes: CodingRolePermissionModes::default(),
         },

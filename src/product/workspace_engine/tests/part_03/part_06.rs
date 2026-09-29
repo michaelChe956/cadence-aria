@@ -172,7 +172,8 @@ async fn persistent_queued_review_engine_for(
         entity_id: entity_id.to_string(),
         workspace_type,
         author_provider: ProviderName::ClaudeCode,
-        reviewer_provider: ProviderName::Codex,
+        reviewer_provider: Some(ProviderName::Codex),
+
         review_rounds: 2,
         superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
         .expect("persistent review session");

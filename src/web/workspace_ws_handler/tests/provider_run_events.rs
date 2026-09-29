@@ -20,7 +20,8 @@ async fn provider_run_request_event_starts_and_registers_provider_run_once() {
             entity_id: "story_0001".to_string(),
             workspace_type: WorkspaceType::Story,
             author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
+            reviewer_provider: Some(ProviderName::Codex),
+
             review_rounds: 0,
             superpowers_enabled: false,
             openspec_enabled: false,
@@ -142,7 +143,8 @@ async fn provider_run_request_event_replaces_an_active_run_for_a_new_timeline_no
             entity_id: "story_0001".to_string(),
             workspace_type: WorkspaceType::Story,
             author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
+            reviewer_provider: Some(ProviderName::Codex),
+
             review_rounds: 0,
             superpowers_enabled: false,
             openspec_enabled: false,
@@ -254,7 +256,8 @@ async fn review_only_relay_event_yields_to_in_flight_run_review_handoff() {
             entity_id: "story_0001".to_string(),
             workspace_type: WorkspaceType::Story,
             author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
+            reviewer_provider: Some(ProviderName::Codex),
+
             review_rounds: 1,
             superpowers_enabled: false,
             openspec_enabled: false,
@@ -393,7 +396,8 @@ async fn handler_originated_spawn_still_supersedes_in_flight_run() {
             entity_id: "story_0001".to_string(),
             workspace_type: WorkspaceType::Story,
             author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
+            reviewer_provider: Some(ProviderName::Codex),
+
             review_rounds: 0,
             superpowers_enabled: false,
             openspec_enabled: false,

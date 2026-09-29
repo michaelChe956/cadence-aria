@@ -12,6 +12,7 @@ use crate::product::plan_repair::{
 use crate::product::work_item_projection::{
     CoderExecutionEnvelope, CompiledWorkItemProjections, RenderedExecutionContext,
     ReviewerExecutionEnvelope, ReviewerWorkItemProjection, projection_hashes, renderer_for,
+    renderer_version_for_optional_provider,
 };
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 
@@ -547,9 +548,10 @@ impl CodingWorkspaceEngine {
         let coder_renderer_version = renderer_for(&providers.coder)
             .renderer_version()
             .to_string();
-        let reviewer_renderer_version = renderer_for(&providers.code_reviewer)
-            .renderer_version()
-            .to_string();
+        let reviewer_renderer_version = renderer_version_for_optional_provider(
+            providers.code_reviewer.as_ref(),
+        )
+        .to_string();
         let run = match self.store.get_active_unit_run(attempt) {
             Ok(run) => run,
             Err(ProductStoreError::NotFound {

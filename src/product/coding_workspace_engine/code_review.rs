@@ -23,6 +23,24 @@ impl CodingWorkspaceEngine {
                 attempt.id.clone(),
             ));
         };
+        // C2 Task 5（REQ-CRO-05）：reviewer 三值——进入 Code Reviewer 阶段而快照
+        // 该角色为空时，在建 role run／timeline node 之前落缺配置门，绝不以 author 顶替。
+        let reviewer = match self
+            .store
+            .get_role_provider_config_snapshot(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+            .code_reviewer
+        {
+            Some(reviewer) => reviewer,
+            None => {
+                return Err(self
+                    .block_missing_reviewer_configuration(
+                        &attempt,
+                        CodingExecutionStage::CodeReview,
+                        CodingProviderRole::CodeReviewer,
+                    )
+                    .await)
+            }
+        };
         let attempt = self.store.update_attempt_stage(
             &attempt.project_id,
             &attempt.issue_id,
@@ -60,10 +78,6 @@ impl CodingWorkspaceEngine {
             )?,
         };
 
-        let reviewer = self
-            .store
-            .get_role_provider_config_snapshot(&attempt.project_id, &attempt.issue_id, &attempt.id)?
-            .code_reviewer;
         let initial_resume_provider_session_id = attempt
             .provider_conversations
             .iter()

@@ -123,7 +123,8 @@ async fn retry_interrupted_review_starts_reviewer_provider() {
             entity_id: story.id,
             workspace_type: WorkspaceType::Story,
             author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
+            reviewer_provider: Some(ProviderName::Codex),
+
             review_rounds: 1,
             superpowers_enabled: false,
             openspec_enabled: false,

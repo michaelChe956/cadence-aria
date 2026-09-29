@@ -124,7 +124,8 @@ pub async fn post_workspace_failed_sc_run_retry(
     // 现有 start_generation（SC Failed 重臂）+ 非 superseding 派发。
     let provider_config = ProviderConfigSnapshot {
         author: record.author_provider.clone(),
-        reviewer: Some(record.reviewer_provider.clone()),
+        // C2 Task 5（REQ-CRO-05）：三值透传——缺失保持空 effective。
+        reviewer: record.reviewer_provider.clone(),
         review_rounds: record.review_rounds,
         permission_modes: record.permission_modes.clone(),
     };

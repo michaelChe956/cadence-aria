@@ -477,7 +477,7 @@ async fn amendment_revision_chain_prefix(
     let mut record = lifecycle
         .get_workspace_session(&plan_session_id)
         .expect("plan session record");
-    record.reviewer_provider = ProviderName::ClaudeCode;
+    record.reviewer_provider = Some(ProviderName::ClaudeCode);
     record.review_rounds = review_rounds;
     crate::product::json_store::write_json(
         &lifecycle
@@ -693,7 +693,7 @@ async fn forged_reopen_signature_prefix(
     record = lifecycle
         .get_workspace_session(&plan_session_id)
         .expect("forged record");
-    record.reviewer_provider = ProviderName::ClaudeCode;
+    record.reviewer_provider = Some(ProviderName::ClaudeCode);
     record.review_rounds = review_rounds;
     crate::product::json_store::write_json(
         &lifecycle

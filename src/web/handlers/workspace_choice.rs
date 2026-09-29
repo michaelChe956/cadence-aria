@@ -200,7 +200,8 @@ mod tests {
                 entity_id: story.id.clone(),
                 workspace_type: WorkspaceType::Story,
                 author_provider: ProviderName::Fake,
-                reviewer_provider: ProviderName::Fake,
+                reviewer_provider: Some(ProviderName::Fake),
+
                 review_rounds: 1,
                 superpowers_enabled: false,
                 openspec_enabled: false,

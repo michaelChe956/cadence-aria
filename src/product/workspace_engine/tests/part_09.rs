@@ -779,7 +779,8 @@ fn make_work_item_plan_engine_with_draft_candidate(
                 entity_id: plan.id.clone(),
                 workspace_type: WorkspaceType::WorkItemPlan,
                 author_provider: ProviderName::ClaudeCode,
-                reviewer_provider: ProviderName::Codex,
+                reviewer_provider: Some(ProviderName::Codex),
+
                 review_rounds: 1,
                 superpowers_enabled: false,
                 openspec_enabled: false,

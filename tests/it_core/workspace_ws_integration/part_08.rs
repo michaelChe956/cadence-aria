@@ -708,7 +708,8 @@ async fn workspace_ws_plan_subdrive_choice_pending_projects_into_session_state()
                 entity_id: plan.id,
                 workspace_type: cadence_aria::product::models::WorkspaceType::WorkItemPlan,
                 author_provider: ProviderName::Fake,
-                reviewer_provider: ProviderName::Fake,
+                reviewer_provider: Some(ProviderName::Fake),
+
                 review_rounds: 0,
                 superpowers_enabled: false,
                 openspec_enabled: false,

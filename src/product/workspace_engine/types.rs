@@ -135,7 +135,9 @@ impl WorkspaceSession {
                 .collect(),
             artifact,
             author_provider: record.author_provider,
-            reviewer_provider: Some(record.reviewer_provider),
+            // C2 Task 5（REQ-CRO-05）：reviewer 三值透传——不再无条件 Some()，
+            // 缺失记录恢复后保持空 effective。
+            reviewer_provider: record.reviewer_provider,
             review_rounds: record.review_rounds,
             permission_modes: record.permission_modes.clone(),
             provisional_reviewer_provider: record.provisional_reviewer_provider,

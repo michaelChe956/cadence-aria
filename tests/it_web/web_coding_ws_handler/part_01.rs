@@ -379,7 +379,7 @@ async fn coding_ws_sends_session_state_on_connect_and_responds_to_ping() {
             assert_eq!(role_provider_config_snapshot.coder, ProviderName::Fake);
             assert_eq!(
                 role_provider_config_snapshot.code_reviewer,
-                ProviderName::Fake
+                Some(ProviderName::Fake)
             );
             assert!(timeline_nodes.is_empty());
         }

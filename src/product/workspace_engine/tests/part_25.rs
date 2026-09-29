@@ -242,7 +242,8 @@ async fn plan_repair_reuse_rejects_child_session_lineage_mismatch_before_reconci
         entity_id: plan.id.clone(),
         workspace_type: WorkspaceType::WorkItemPlan,
         author_provider: ProviderName::ClaudeCode,
-        reviewer_provider: ProviderName::Codex,
+        reviewer_provider: Some(ProviderName::Codex),
+
         review_rounds: 2,
         superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, };
         mutate(&mut input);

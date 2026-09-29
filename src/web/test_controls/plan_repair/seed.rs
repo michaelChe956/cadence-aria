@@ -455,7 +455,7 @@ pub(super) fn seed_initial_fixture(root: &Path) -> Result<(), PlanRepairFixtureE
             entity_id: PLAN_ID.to_string(),
             workspace_type: WorkspaceType::WorkItemPlan,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,

@@ -99,8 +99,8 @@ async fn coding_pi_start_failure_does_not_start_registered_alternate_provider() 
             &attempt.id,
             CodingRoleProviderConfigSnapshot {
                 coder: ProviderName::Pi,
-                code_reviewer: ProviderName::ClaudeCode,
-                internal_reviewer: ProviderName::ClaudeCode,
+                code_reviewer: Some(ProviderName::ClaudeCode),
+                internal_reviewer: Some(ProviderName::ClaudeCode),
                 review_rounds: 1,
                 permission_modes: CodingRolePermissionModes {
                     coder: CodingProviderPermissionMode::Supervised,
@@ -222,7 +222,8 @@ fn falls_back_to_assistant_artifact_when_persisted_markdown_lacks_commands() {
         workspace_type: WorkspaceType::WorkItem,
         status: WorkspaceSessionStatus::Confirmed,
         author_provider: ProviderName::Codex,
-        reviewer_provider: ProviderName::ClaudeCode,
+        reviewer_provider: Some(ProviderName::ClaudeCode),
+
         review_rounds: 1,
         permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
         provisional_reviewer_provider: None,
@@ -467,7 +468,8 @@ fn coding_execution_context_prefers_final_compile_over_workspace_artifact() {
             entity_id: "work_item_compile_20260702063721302_001".to_string(),
             workspace_type: WorkspaceType::WorkItem,
             author_provider: ProviderName::Fake,
-            reviewer_provider: ProviderName::Fake,
+            reviewer_provider: Some(ProviderName::Fake),
+
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
@@ -524,7 +526,8 @@ fn coding_execution_context_uses_workspace_artifact_when_final_compile_is_missin
             entity_id: legacy_work_item_id.to_string(),
             workspace_type: WorkspaceType::WorkItem,
             author_provider: ProviderName::Fake,
-            reviewer_provider: ProviderName::Fake,
+            reviewer_provider: Some(ProviderName::Fake),
+
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,

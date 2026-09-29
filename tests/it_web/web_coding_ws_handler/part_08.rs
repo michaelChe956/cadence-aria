@@ -82,7 +82,8 @@ fn app_with_group_full_chain_attempt_fixture(
         entity_id: "work_item_plan_0001".to_string(),
         workspace_type: WorkspaceType::WorkItemPlan,
         author_provider: ProviderName::Fake,
-        reviewer_provider: ProviderName::Fake,
+        reviewer_provider: Some(ProviderName::Fake),
+
         review_rounds: 1,
         superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
         .expect("create work item plan session");

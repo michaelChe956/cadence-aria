@@ -25,7 +25,8 @@ fn work_item_plan_session_input(flow_kind: WorkItemPlanFlowKind) -> CreateWorksp
         entity_id: "plan_0001".to_string(),
         workspace_type: WorkspaceType::WorkItemPlan,
         author_provider: ProviderName::ClaudeCode,
-        reviewer_provider: ProviderName::Codex,
+        reviewer_provider: Some(ProviderName::Codex),
+
         review_rounds: 0,
         superpowers_enabled: false,
         openspec_enabled: false,

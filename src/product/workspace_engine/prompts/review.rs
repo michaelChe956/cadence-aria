@@ -141,11 +141,13 @@ impl WorkspaceEngine {
             .clone()
             .map(|payload| payload.into_markdown().unwrap_or_default())
             .unwrap_or_default();
+        // C2 Task 5（REQ-CRO-05）：reviewer 缺失（空 effective）fail-closed——
+        // 绝不以 Codex 顶替构建 reviewer prompt。
         let provider = self
             .session
             .reviewer_provider
             .clone()
-            .unwrap_or(ProviderName::Codex);
+            .ok_or_else(|| "reviewer_configuration_missing".to_string())?;
         let mut prompt = String::new();
         prompt.push_str("请作为 reviewer 审核当前 Workspace 产物。\n\n");
         prompt.push_str(&format!(
@@ -272,11 +274,13 @@ impl WorkspaceEngine {
             None => std::env::current_dir()
                 .map_err(|error| format!("working directory error: {error}"))?,
         };
+        // C2 Task 5（REQ-CRO-05）：reviewer 缺失（空 effective）fail-closed——
+        // 绝不以 Codex 顶替构建 reviewer prompt。
         let provider = self
             .session
             .reviewer_provider
             .clone()
-            .unwrap_or(ProviderName::Codex);
+            .ok_or_else(|| "reviewer_configuration_missing".to_string())?;
         let generation_round_id = self
             .work_item_plan_store()?
             .load_active_index(
@@ -628,11 +632,13 @@ impl WorkspaceEngine {
             .clone()
             .map(Ok)
             .unwrap_or_else(|| std::env::current_dir().map_err(|error| error.to_string()))?;
+        // C2 Task 5（REQ-CRO-05）：reviewer 缺失（空 effective）fail-closed——
+        // 绝不以 Codex 顶替构建 reviewer prompt。
         let provider = self
             .session
             .reviewer_provider
             .clone()
-            .unwrap_or(ProviderName::Codex);
+            .ok_or_else(|| "reviewer_configuration_missing".to_string())?;
         Ok(StreamingProviderInput {
             baseline_tree,
             tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
@@ -761,11 +767,13 @@ impl WorkspaceEngine {
             .clone()
             .map(Ok)
             .unwrap_or_else(|| std::env::current_dir().map_err(|error| error.to_string()))?;
+        // C2 Task 5（REQ-CRO-05）：reviewer 缺失（空 effective）fail-closed——
+        // 绝不以 Codex 顶替构建 reviewer prompt。
         let provider = self
             .session
             .reviewer_provider
             .clone()
-            .unwrap_or(ProviderName::Codex);
+            .ok_or_else(|| "reviewer_configuration_missing".to_string())?;
         let baseline_tree = self.append_reviewer_baseline_teaching(&mut prompt)?;
         Ok(StreamingProviderInput {
             baseline_tree,
@@ -796,11 +804,13 @@ impl WorkspaceEngine {
             None => std::env::current_dir()
                 .map_err(|error| format!("working directory error: {error}"))?,
         };
+        // C2 Task 5（REQ-CRO-05）：reviewer 缺失（空 effective）fail-closed——
+        // 绝不以 Codex 顶替构建 reviewer prompt。
         let provider = self
             .session
             .reviewer_provider
             .clone()
-            .unwrap_or(ProviderName::Codex);
+            .ok_or_else(|| "reviewer_configuration_missing".to_string())?;
         let generation_round_id = self
             .work_item_plan_store()?
             .load_active_index(
@@ -983,11 +993,13 @@ impl WorkspaceEngine {
         let draft_json =
             serde_json::to_string_pretty(&draft_records).unwrap_or_else(|_| "[]".to_string());
         let outline_ids = self.current_work_item_plan_outline_ids();
+        // C2 Task 5（REQ-CRO-05）：reviewer 缺失（空 effective）fail-closed——
+        // 绝不以 Codex 顶替构建 reviewer prompt。
         let provider = self
             .session
             .reviewer_provider
             .clone()
-            .unwrap_or(ProviderName::Codex);
+            .ok_or_else(|| "reviewer_configuration_missing".to_string())?;
         let nonce = structured_output_nonce();
         let structured_output_contract = StructuredOutputContract {
             nonce: nonce.clone(),
@@ -1050,11 +1062,13 @@ impl WorkspaceEngine {
             None => std::env::current_dir()
                 .map_err(|error| format!("working directory error: {error}"))?,
         };
+        // C2 Task 5（REQ-CRO-05）：reviewer 缺失（空 effective）fail-closed——
+        // 绝不以 Codex 顶替构建 reviewer prompt。
         let provider = self
             .session
             .reviewer_provider
             .clone()
-            .unwrap_or(ProviderName::Codex);
+            .ok_or_else(|| "reviewer_configuration_missing".to_string())?;
         let outline_candidate = self.latest_work_item_plan_outline_candidate()?;
         let current_outline = outline_candidate
             .outline

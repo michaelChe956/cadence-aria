@@ -400,7 +400,8 @@ async fn provider_health_shared_gate_controls_lifecycle_coding_and_routing_entri
             entity_id: "work_item_0001".to_string(),
             workspace_type: WorkspaceType::WorkItem,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 1,
             superpowers_enabled: false,
             openspec_enabled: false,

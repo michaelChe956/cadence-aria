@@ -34,7 +34,8 @@ pub(super) fn gate_fixture_with_event_rx(
             entity_id: "plan_0001".to_string(),
             workspace_type: WorkspaceType::WorkItemPlan,
             author_provider: ProviderName::Fake,
-            reviewer_provider: ProviderName::Fake,
+            reviewer_provider: Some(ProviderName::Fake),
+
             review_rounds: 0,
             superpowers_enabled: false,
             openspec_enabled: false,
@@ -507,7 +508,8 @@ fn compile_failure_gate_fixture(
             entity_id: "plan_0001".to_string(),
             workspace_type: WorkspaceType::WorkItemPlan,
             author_provider: ProviderName::Fake,
-            reviewer_provider: ProviderName::Fake,
+            reviewer_provider: Some(ProviderName::Fake),
+
             review_rounds: 0,
             superpowers_enabled: false,
             openspec_enabled: false,

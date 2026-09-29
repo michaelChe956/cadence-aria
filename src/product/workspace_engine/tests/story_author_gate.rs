@@ -38,7 +38,8 @@ async fn story_gate_fixture(
                 entity_id: "story_spec_0001".to_string(),
                 workspace_type,
                 author_provider: ProviderName::Fake,
-                reviewer_provider: ProviderName::Fake,
+                reviewer_provider: Some(ProviderName::Fake),
+
                 review_rounds: 0,
                 superpowers_enabled: false,
                 openspec_enabled: false,

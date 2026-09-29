@@ -82,8 +82,8 @@ async fn pi_role_with_supervised_mode_normalized_to_auto() {
 
     let config = CodingRoleProviderConfigSnapshot {
         coder: ProviderName::Pi,
-        code_reviewer: ProviderName::ClaudeCode,
-        internal_reviewer: ProviderName::ClaudeCode,
+        code_reviewer: Some(ProviderName::ClaudeCode),
+        internal_reviewer: Some(ProviderName::ClaudeCode),
         review_rounds: 1,
         permission_modes: CodingRolePermissionModes {
             coder: CodingProviderPermissionMode::Supervised,
@@ -129,8 +129,8 @@ async fn pi_failure_does_not_trigger_fresh_retry() {
     };
     let config = CodingRoleProviderConfigSnapshot {
         coder: ProviderName::Pi,
-        code_reviewer: ProviderName::ClaudeCode,
-        internal_reviewer: ProviderName::ClaudeCode,
+        code_reviewer: Some(ProviderName::ClaudeCode),
+        internal_reviewer: Some(ProviderName::ClaudeCode),
         review_rounds: 1,
         permission_modes: CodingRolePermissionModes::default(),
     };
@@ -284,8 +284,8 @@ async fn execute_coding_emits_prompt_for_coder_provider() {
             &attempt.id,
             CodingRoleProviderConfigSnapshot {
                 coder: ProviderName::Codex,
-                code_reviewer: ProviderName::Fake,
-                internal_reviewer: ProviderName::Fake,
+                code_reviewer: Some(ProviderName::Fake),
+                internal_reviewer: Some(ProviderName::Fake),
                 review_rounds: 1,
                 permission_modes: CodingRolePermissionModes::default(),
             },
@@ -339,8 +339,8 @@ async fn execute_coding_forwards_provider_execution_and_tool_events() {
             &attempt.id,
             CodingRoleProviderConfigSnapshot {
                 coder: ProviderName::Codex,
-                code_reviewer: ProviderName::Fake,
-                internal_reviewer: ProviderName::Fake,
+                code_reviewer: Some(ProviderName::Fake),
+                internal_reviewer: Some(ProviderName::Fake),
                 review_rounds: 1,
                 permission_modes: CodingRolePermissionModes::default(),
             },

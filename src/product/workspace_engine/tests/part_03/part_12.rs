@@ -546,7 +546,8 @@ async fn finalizer_replays_same_binding_child_and_fails_closed_on_drift() {
                 entity_id: first_logical_id.clone(),
                 workspace_type: WorkspaceType::WorkItem,
                 author_provider: ProviderName::Fake,
-                reviewer_provider: ProviderName::Fake,
+                reviewer_provider: Some(ProviderName::Fake),
+
                 review_rounds: 1,
                 superpowers_enabled: false,
                 openspec_enabled: false,
@@ -629,7 +630,8 @@ async fn finalizer_replays_same_binding_child_and_fails_closed_on_drift() {
                 entity_id: first_logical_id2.clone(),
                 workspace_type: WorkspaceType::WorkItem,
                 author_provider: ProviderName::Fake,
-                reviewer_provider: ProviderName::Fake,
+                reviewer_provider: Some(ProviderName::Fake),
+
                 review_rounds: 1,
                 superpowers_enabled: false,
                 openspec_enabled: false,

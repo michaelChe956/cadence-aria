@@ -72,11 +72,20 @@ impl CodingWorkspaceEngine {
             &attempt.issue_id,
             &attempt.id,
         )?;
+        // C2 Task 5（REQ-CRO-05）：reviewer 缺失（空 effective）时该角色无 provider
+        // 可推导——launch policy 无从 resolve，fail-closed（缺配置门已在 execute 入口拦截，
+        // 此处是防御性兜底，绝不以 author 顶替）。
         let provider_name = match role {
-            CodingProviderRole::Coder => role_config.coder,
+            CodingProviderRole::Coder => Some(role_config.coder),
             CodingProviderRole::CodeReviewer => role_config.code_reviewer,
             CodingProviderRole::InternalReviewer => role_config.internal_reviewer,
-        };
+        }
+        .ok_or_else(|| {
+            ProviderGatewayError::PolicyMissing(format!(
+                "reviewer_configuration_missing: role={role:?} attempt={}",
+                attempt.id
+            ))
+        })?;
         let request = SessionLaunchRequest {
             project_id: attempt.project_id.clone(),
             provider: provider_ref_for_name(&provider_name)?,

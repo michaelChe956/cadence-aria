@@ -51,7 +51,8 @@ fn persistent_engine_accepts_complete_revision_artifact_misclassified_as_text_fa
             entity_id: entity_id.clone(),
             workspace_type: workspace_type.clone(),
             author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
+            reviewer_provider: Some(ProviderName::Codex),
+
             review_rounds: 1,
             superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
             .expect("workspace session");

@@ -234,7 +234,8 @@ mod http_confirm_batch_gate {
                 entity_id: plan.id.clone(),
                 workspace_type: WorkspaceType::WorkItemPlan,
                 author_provider: ProviderName::Fake,
-                reviewer_provider: ProviderName::Fake,
+                reviewer_provider: Some(ProviderName::Fake),
+
                 review_rounds: 0,
                 superpowers_enabled: false,
                 openspec_enabled: false,

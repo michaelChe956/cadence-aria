@@ -256,16 +256,12 @@ impl WorkspaceEngine {
         }?;
 
         if let Some(store) = &self.lifecycle_store {
-            let reviewer_provider = self
-                .session
-                .reviewer_provider
-                .clone()
-                .unwrap_or(ProviderName::Codex);
+            // C2 Task 5（REQ-CRO-05）：三值透传——缺 reviewer 持久化空 effective。
             store
                 .update_workspace_session_providers(
                     &self.session.session_id,
                     self.session.author_provider.clone(),
-                    reviewer_provider,
+                    self.session.reviewer_provider.clone(),
                 )
                 .map_err(|error| format!("persist provider selection failed: {error}"))?;
             store

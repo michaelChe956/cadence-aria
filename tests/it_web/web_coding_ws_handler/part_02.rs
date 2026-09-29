@@ -380,7 +380,7 @@ async fn coding_ws_provider_select_during_stage_gate_updates_roles_and_refreshes
         refreshed_gate
             .provider_snapshot
             .as_ref()
-            .map(|snapshot| snapshot.provider_for_role(&CodingProviderRole::CodeReviewer)),
+            .and_then(|snapshot| snapshot.provider_for_role(&CodingProviderRole::CodeReviewer)),
         Some(&ProviderName::Codex)
     );
     assert_eq!(
@@ -388,7 +388,7 @@ async fn coding_ws_provider_select_during_stage_gate_updates_roles_and_refreshes
             .get_role_provider_config_snapshot("project_0001", "issue_0001", "coding_attempt_0001")
             .expect("role provider snapshot")
             .code_reviewer,
-        ProviderName::Codex
+        Some(ProviderName::Codex)
     );
 
     ws.close(None).await.expect("close ws");

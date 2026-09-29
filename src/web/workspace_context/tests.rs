@@ -475,7 +475,8 @@ async fn claude_code_story_context_requires_structured_ask_user_question() {
             entity_id: story.id,
             workspace_type: WorkspaceType::Story,
             author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
+            reviewer_provider: Some(ProviderName::Codex),
+
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
@@ -507,7 +508,8 @@ fn workspace_session_record(
         workspace_type,
         status: WorkspaceSessionStatus::Open,
         author_provider,
-        reviewer_provider: ProviderName::Codex,
+        reviewer_provider: Some(ProviderName::Codex),
+
         review_rounds: 1,
         permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
         provisional_reviewer_provider: None,

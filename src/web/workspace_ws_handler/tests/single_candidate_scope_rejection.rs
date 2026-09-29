@@ -193,7 +193,8 @@ pub(super) fn scope_test_context(
         workspace_type: WorkspaceType::WorkItemPlan,
         status: WorkspaceSessionStatus::Open,
         author_provider: ProviderName::Codex,
-        reviewer_provider: ProviderName::Codex,
+        reviewer_provider: Some(ProviderName::Codex),
+
         review_rounds: 0,
         permission_modes: WorkspaceRolePermissionModes::default(),
         provisional_reviewer_provider: None,

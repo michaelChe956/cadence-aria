@@ -80,7 +80,7 @@ pub(super) fn create_large_workspace_fixture(
         entity_id: story.id,
         workspace_type: WorkspaceType::Story,
         author_provider: ProviderName::Codex,
-        reviewer_provider: ProviderName::ClaudeCode,
+        reviewer_provider: Some(ProviderName::ClaudeCode),
         review_rounds: 5,
         superpowers_enabled: false,
         openspec_enabled: true,

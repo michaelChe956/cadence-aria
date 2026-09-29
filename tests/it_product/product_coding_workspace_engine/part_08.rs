@@ -410,8 +410,8 @@ async fn execute_group_final_review_prompt_includes_request_commit_diff_and_func
             &attempt.id,
             CodingRoleProviderConfigSnapshot {
                 coder: ProviderName::Fake,
-                code_reviewer: ProviderName::Fake,
-                internal_reviewer: ProviderName::Codex,
+                code_reviewer: Some(ProviderName::Fake),
+                internal_reviewer: Some(ProviderName::Codex),
                 review_rounds: 1,
                 permission_modes: CodingRolePermissionModes::default(),
             },
@@ -660,7 +660,8 @@ fn seed_work_item_markdown(app_paths: &ProductAppPaths, markdown: &str) {
         entity_id: "work_item_0001".to_string(),
         workspace_type: WorkspaceType::WorkItem,
         author_provider: ProviderName::Fake,
-        reviewer_provider: ProviderName::Fake,
+        reviewer_provider: Some(ProviderName::Fake),
+
         review_rounds: 1,
         superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
         .expect("create workspace session");

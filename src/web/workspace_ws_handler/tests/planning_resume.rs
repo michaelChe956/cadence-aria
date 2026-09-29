@@ -594,7 +594,8 @@ async fn stale_context_rebuild_starts_new_outline_run_with_rebuilt_context() {
             entity_id: plan.id,
             workspace_type: ProductWorkspaceType::WorkItemPlan,
             author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
+            reviewer_provider: Some(ProviderName::Codex),
+
             review_rounds: 1,
             superpowers_enabled: false,
             openspec_enabled: false,

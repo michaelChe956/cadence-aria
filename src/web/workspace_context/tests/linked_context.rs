@@ -45,7 +45,8 @@ async fn story_workspace_context_codex_author_requires_request_user_input() {
             entity_id: story.id,
             workspace_type: WorkspaceType::Story,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
@@ -137,7 +138,8 @@ async fn design_workspace_context_includes_linked_story_markdown() {
             entity_id: design.id,
             workspace_type: WorkspaceType::Design,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
@@ -170,7 +172,8 @@ async fn work_item_workspace_context_rejects_a_missing_runtime_binding() {
             entity_id: "wi_library_export".to_string(),
             workspace_type: WorkspaceType::WorkItem,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
@@ -204,7 +207,8 @@ async fn work_item_workspace_context_does_not_create_a_legacy_context_on_binding
             entity_id: "wi_library_export".to_string(),
             workspace_type: WorkspaceType::WorkItem,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
@@ -306,7 +310,8 @@ async fn existing_generation_brief_is_refreshed_when_linked_context_changes() {
             entity_id: design.id,
             workspace_type: WorkspaceType::Design,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,

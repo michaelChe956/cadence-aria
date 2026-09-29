@@ -13,6 +13,13 @@ pub enum CodingWorkspaceEngineError {
     ProviderAdapter(#[from] ProviderAdapterError),
     #[error("coding_provider_stream_failed: {0}")]
     ProviderStream(String),
+    /// C2 Task 5（REQ-CRO-05）：reviewer 配置缺失——blocked gate 已落盘
+    /// （reason_code `reviewer_configuration_missing`），绝不以 author 顶替。
+    #[error("reviewer_configuration_missing: attempt={attempt_id}")]
+    ReviewerConfigurationMissing {
+        attempt_id: String,
+        role: CodingProviderRole,
+    },
     #[error("coding_provider_protocol_error: {0}")]
     ProviderProtocol(String),
     #[error("group_review_blocked: {reason_code}; gate_id={gate_id:?}")]
@@ -151,6 +158,18 @@ pub(crate) fn coding_permission_mode_for_provider(
     coding_permission_mode_for_provider_type(&provider_type_for_name(provider), configured_mode)
 }
 
+/// C2 Task 5：reviewer 缺失（空 effective）时不做 provider 类型归一，
+/// 按配置值直映射——provider 不会在该形态下启动（缺失门先拦）。
+pub(crate) fn coding_permission_mode_for_optional_provider(
+    provider: Option<&ProviderName>,
+    configured_mode: CodingProviderPermissionMode,
+) -> ProviderPermissionMode {
+    match provider {
+        Some(provider) => coding_permission_mode_for_provider(provider, configured_mode),
+        None => coding_provider_permission_mode(configured_mode),
+    }
+}
+
 pub(crate) fn normalize_coding_permission_mode_for_provider(
     provider: &ProviderName,
     configured_mode: CodingProviderPermissionMode,
@@ -158,6 +177,18 @@ pub(crate) fn normalize_coding_permission_mode_for_provider(
     match coding_permission_mode_for_provider(provider, configured_mode) {
         ProviderPermissionMode::Auto => CodingProviderPermissionMode::Auto,
         ProviderPermissionMode::Supervised => CodingProviderPermissionMode::Supervised,
+    }
+}
+
+/// C2 Task 5：reviewer 缺失（空 effective）时权限模式按配置直存——该角色不会
+/// 在缺失形态下启动（缺配置门先拦），不虚构 provider 类型归一。
+pub(crate) fn normalize_coding_permission_mode_for_optional_provider(
+    provider: Option<&ProviderName>,
+    configured_mode: CodingProviderPermissionMode,
+) -> CodingProviderPermissionMode {
+    match provider {
+        Some(provider) => normalize_coding_permission_mode_for_provider(provider, configured_mode),
+        None => configured_mode,
     }
 }
 
@@ -171,7 +202,7 @@ pub(crate) fn role_permission_mode_for_attempt(
         &attempt.issue_id,
         &attempt.id,
     )?;
-    Ok(coding_permission_mode_for_provider(
+    Ok(coding_permission_mode_for_optional_provider(
         snapshot.provider_for_role(&role),
         snapshot.permission_mode_for_role(&role),
     ))

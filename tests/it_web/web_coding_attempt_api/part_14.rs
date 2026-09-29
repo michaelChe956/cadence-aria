@@ -37,7 +37,8 @@ fn seed_bound_work_item_session(
         entity_id: work_item_id.to_string(),
         workspace_type: WorkspaceType::WorkItem,
         author_provider: ProviderName::Fake,
-        reviewer_provider: ProviderName::Fake,
+        reviewer_provider: Some(ProviderName::Fake),
+
         review_rounds: 1,
         superpowers_enabled: false, openspec_enabled: false, work_item_plan_options: None, })
         .expect("create work item session");

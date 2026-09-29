@@ -98,7 +98,8 @@ fn plan_repair_parent_engine(
         entity_id: plan.id,
         workspace_type: WorkspaceType::WorkItemPlan,
         author_provider: ProviderName::ClaudeCode,
-        reviewer_provider: ProviderName::Codex,
+        reviewer_provider: Some(ProviderName::Codex),
+
         review_rounds: 2,
         superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
         .unwrap();
@@ -245,7 +246,8 @@ async fn plan_repair_child_session_recovers_orphan_without_creating_second_sessi
             entity_id: plan.id.clone(),
             workspace_type: WorkspaceType::WorkItemPlan,
             author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
+            reviewer_provider: Some(ProviderName::Codex),
+
             review_rounds: 2,
             superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, },
             format!("workspace_session_{amendment_id}"),
@@ -325,7 +327,8 @@ fn plan_repair_workspace_session_link_is_absent_for_ordinary_workspace_types() {
             entity_id: "entity_0001".to_string(),
             workspace_type,
             author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
+            reviewer_provider: Some(ProviderName::Codex),
+
             review_rounds: 2,
             superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
             .unwrap();

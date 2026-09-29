@@ -141,7 +141,8 @@ async fn complete_work_item_plan_author_pushes_candidate_and_enters_author_confi
         entity_id: plan.id.clone(),
         workspace_type: WorkspaceType::WorkItemPlan,
         author_provider: ProviderName::Codex,
-        reviewer_provider: ProviderName::ClaudeCode,
+        reviewer_provider: Some(ProviderName::ClaudeCode),
+
         review_rounds: 0,
         superpowers_enabled: false, openspec_enabled: false, work_item_plan_options: None, })
         .unwrap();

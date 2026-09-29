@@ -111,7 +111,9 @@ pub struct WorkspaceSessionRecord {
     pub workspace_type: WorkspaceType,
     pub status: WorkspaceSessionStatus,
     pub author_provider: ProviderName,
-    pub reviewer_provider: ProviderName,
+    /// C2 Task 5（REQ-CRO-05）reviewer 三值：缺失即 None（旧 JSON 恒有值→Some），
+    /// MUST NOT 回填 author。
+    pub reviewer_provider: Option<ProviderName>,
     pub review_rounds: u32,
     #[serde(default)]
     pub permission_modes: WorkspaceRolePermissionModes,
@@ -205,7 +207,8 @@ pub struct WorkspaceSessionSummaryRecord {
     pub workspace_type: WorkspaceType,
     pub status: WorkspaceSessionStatus,
     pub author_provider: ProviderName,
-    pub reviewer_provider: ProviderName,
+    /// C2 Task 5：reviewer 三值——与 session record 同形。
+    pub reviewer_provider: Option<ProviderName>,
     pub review_rounds: u32,
     pub superpowers_enabled: bool,
     pub openspec_enabled: bool,
@@ -279,7 +282,8 @@ pub struct ProviderReviewRoundRecord {
     pub session_id: String,
     pub round_index: u32,
     pub author_provider: ProviderName,
-    pub reviewer_provider: ProviderName,
+    /// C2 Task 5：reviewer 三值——缺失轮次记 None。
+    pub reviewer_provider: Option<ProviderName>,
     pub review_result: String,
     pub revision_result: String,
     pub created_at: String,

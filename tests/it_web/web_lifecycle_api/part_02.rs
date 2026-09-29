@@ -476,7 +476,7 @@ async fn bootstrap_confirmed_work_item_session(
             entity_id: "work_item_0001".to_string(),
             workspace_type: WorkspaceType::WorkItem,
             author_provider,
-            reviewer_provider,
+            reviewer_provider: Some(reviewer_provider),
             review_rounds: 1,
             superpowers_enabled: false,
             openspec_enabled: false,

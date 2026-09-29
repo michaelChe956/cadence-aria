@@ -494,11 +494,11 @@ macro_rules! workspace_ws_provider_run_followups {
                 );
                 break;
             }
-            let reviewer_name = $engine
-                .session()
-                .reviewer_provider
-                .clone()
-                .unwrap_or(ProviderName::Codex);
+            // C2 Task 5（REQ-CRO-05）：reviewer 缺失（空 effective）不起 review
+            // followup——绝不以 Codex 顶替。
+            let Some(reviewer_name) = $engine.session().reviewer_provider.clone() else {
+                break;
+            };
             let Some(provider_for_review) = $provider_registry_for_run.get(&reviewer_name) else {
                 break;
             };

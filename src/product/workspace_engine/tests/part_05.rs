@@ -140,14 +140,15 @@ async fn persistent_engine_keeps_open_stage_after_failed_running_node() {
         entity_id: "story_spec_0001".to_string(),
         workspace_type: WorkspaceType::Story,
         author_provider: ProviderName::ClaudeCode,
-        reviewer_provider: ProviderName::Codex,
+        reviewer_provider: Some(ProviderName::Codex),
+
         review_rounds: 1,
         superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
         .unwrap();
     let session_id = session_record.id.clone();
     let provider_config_snapshot = ProviderConfigSnapshot {
         author: session_record.author_provider.clone(),
-        reviewer: Some(session_record.reviewer_provider.clone()),
+        reviewer: session_record.reviewer_provider.clone(),
         review_rounds: session_record.review_rounds,
         permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
     };
@@ -256,7 +257,8 @@ async fn build_session_state_omits_unneeded_work_item_plan_details_and_keeps_act
         entity_id: "issue_work_item_plan_0001".to_string(),
         workspace_type: WorkspaceType::WorkItemPlan,
         author_provider: ProviderName::ClaudeCode,
-        reviewer_provider: ProviderName::Codex,
+        reviewer_provider: Some(ProviderName::Codex),
+
         review_rounds: 2,
         superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
         .unwrap();
@@ -392,7 +394,8 @@ async fn build_session_state_keeps_story_details_out_of_inline_payload() {
         entity_id: "story_spec_0001".to_string(),
         workspace_type: WorkspaceType::Story,
         author_provider: ProviderName::ClaudeCode,
-        reviewer_provider: ProviderName::Codex,
+        reviewer_provider: Some(ProviderName::Codex),
+
         review_rounds: 2,
         superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
         .unwrap();

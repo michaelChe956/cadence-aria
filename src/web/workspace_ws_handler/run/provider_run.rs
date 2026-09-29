@@ -56,11 +56,19 @@ pub(super) async fn spawn_provider_run_with_start_mode(
             ProviderRunKind::Author { .. }
             | ProviderRunKind::AuthorChoiceFollowup { .. }
             | ProviderRunKind::Revision => engine.session().author_provider.clone(),
-            ProviderRunKind::ReviewOnly => engine
-                .session()
-                .reviewer_provider
-                .clone()
-                .unwrap_or(ProviderName::Codex),
+            ProviderRunKind::ReviewOnly => {
+                // C2 Task 5（REQ-CRO-05）：reviewer 缺失（空 effective）不启动
+                // ReviewOnly run——绝不以 Codex 顶替。
+                let reviewer = engine.session().reviewer_provider.clone();
+                match reviewer {
+                    Some(reviewer) => reviewer,
+                    None => {
+                        return Err(
+                            "reviewer_configuration_missing: review run not started".to_string(),
+                        )
+                    }
+                }
+            }
             ProviderRunKind::WorkItemPlanLegacyAuthor
             | ProviderRunKind::WorkItemPlanSingleCandidateAuthor
             | ProviderRunKind::WorkItemPlanOutlineRevision { .. }

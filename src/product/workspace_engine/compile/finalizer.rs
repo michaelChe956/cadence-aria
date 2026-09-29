@@ -238,11 +238,8 @@ impl WorkspaceEngine {
                         entity_id: logical_id.clone(),
                         workspace_type: WorkspaceType::WorkItem,
                         author_provider: self.session.author_provider.clone(),
-                        reviewer_provider: self
-                            .session
-                            .reviewer_provider
-                            .clone()
-                            .unwrap_or(ProviderName::Codex),
+                        // C2 Task 5（REQ-CRO-05）：三值透传——不回填 Codex。
+                        reviewer_provider: self.session.reviewer_provider.clone(),
                         review_rounds: self.session.review_rounds,
                         superpowers_enabled: self.session.superpowers_enabled,
                         openspec_enabled: self.session.openspec_enabled,

@@ -252,7 +252,8 @@ async fn finalizer_rejects_old_binding_child() {
                 entity_id: first_logical_id.clone(),
                 workspace_type: WorkspaceType::WorkItem,
                 author_provider: ProviderName::Fake,
-                reviewer_provider: ProviderName::Fake,
+                reviewer_provider: Some(ProviderName::Fake),
+
                 review_rounds: 1,
                 superpowers_enabled: false,
                 openspec_enabled: false,

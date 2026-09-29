@@ -143,8 +143,8 @@ async fn execute_code_review_prompt_includes_diff_work_item_rules_and_role_provi
             &attempt.id,
             CodingRoleProviderConfigSnapshot {
                 coder: ProviderName::Fake,
-                code_reviewer: ProviderName::Codex,
-                internal_reviewer: ProviderName::Fake,
+                code_reviewer: Some(ProviderName::Codex),
+                internal_reviewer: Some(ProviderName::Fake),
                 review_rounds: 1,
                 permission_modes: CodingRolePermissionModes::default(),
             },

@@ -457,7 +457,8 @@ async fn start_generation_refreshes_stale_provider_guidance_before_prompting_aut
             entity_id: story.id,
             workspace_type: WorkspaceType::Story,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
@@ -587,7 +588,8 @@ async fn provider_select_refreshes_provider_guidance_in_session_state() {
             entity_id: story.id,
             workspace_type: WorkspaceType::Story,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
@@ -719,7 +721,8 @@ async fn provider_select_then_user_message_forces_pi_to_auto_from_stale_supervis
             entity_id: story.id,
             workspace_type: WorkspaceType::Story,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
@@ -964,7 +967,8 @@ async fn assert_pi_failure_does_not_start_alternate(mode: PiFailureMode) {
             entity_id: "story_0001".to_string(),
             workspace_type: WorkspaceType::Story,
             author_provider: ProviderName::Pi,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 0,
             superpowers_enabled: false,
             openspec_enabled: false,
@@ -1109,7 +1113,8 @@ fn build_work_item_plan_generate_request_includes_validator_findings_as_revision
             entity_id: plan.id,
             workspace_type: WorkspaceType::WorkItemPlan,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 0,
             superpowers_enabled: false,
             openspec_enabled: false,

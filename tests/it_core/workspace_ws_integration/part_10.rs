@@ -129,7 +129,8 @@ async fn create_sc_compile_recovery_fixture(
                 entity_id: plan.id.clone(),
                 workspace_type: cadence_aria::product::models::WorkspaceType::WorkItemPlan,
                 author_provider: ProviderName::Fake,
-                reviewer_provider: ProviderName::Fake,
+                reviewer_provider: Some(ProviderName::Fake),
+
                 review_rounds: 0,
                 superpowers_enabled: false,
                 openspec_enabled: false,

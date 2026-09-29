@@ -344,7 +344,8 @@ async fn create_logical_confirm_fixture(
             entity_id,
             workspace_type: kind,
             author_provider: ProviderName::Fake,
-            reviewer_provider: ProviderName::Codex,
+            reviewer_provider: Some(ProviderName::Codex),
+
             review_rounds: 1,
             superpowers_enabled: false,
             openspec_enabled: false,
@@ -472,7 +473,8 @@ async fn confirm_legacy_single_repo_story_without_involved_succeeds() {
             entity_id: story.id,
             workspace_type: WorkspaceType::Story,
             author_provider: ProviderName::Fake,
-            reviewer_provider: ProviderName::Codex,
+            reviewer_provider: Some(ProviderName::Codex),
+
             review_rounds: 1,
             superpowers_enabled: false,
             openspec_enabled: false,
@@ -564,7 +566,8 @@ async fn lifecycle_projects_review_status_from_workspace_timeline_reviewer_runs(
             entity_id: story.id,
             workspace_type: WorkspaceType::Story,
             author_provider: ProviderName::Fake,
-            reviewer_provider: ProviderName::Codex,
+            reviewer_provider: Some(ProviderName::Codex),
+
             review_rounds: 1,
             superpowers_enabled: false,
             openspec_enabled: false,

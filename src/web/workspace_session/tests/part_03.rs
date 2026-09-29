@@ -103,7 +103,8 @@ async fn manager_creation_recovers_stale_running_session_after_process_restart()
             entity_id: story.id,
             workspace_type: WorkspaceType::Story,
             author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
+            reviewer_provider: Some(ProviderName::Codex),
+
             review_rounds: 0,
             superpowers_enabled: false,
             openspec_enabled: false,

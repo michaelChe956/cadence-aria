@@ -834,15 +834,13 @@ impl WorkspaceEngine {
         }
 
         if let Some(store) = &self.lifecycle_store {
-            let reviewer_provider = locked_snapshot
-                .reviewer
-                .clone()
-                .unwrap_or_else(|| locked_snapshot.author.clone());
+            // C2 Task 5（REQ-CRO-05）：reviewer 缺失持久化空 effective——
+            // MUST NOT 回填 author（重启重建后 from_record 保持空，不意外启动 reviewer）。
             store
                 .update_workspace_session_providers(
                     &self.session.session_id,
                     locked_snapshot.author.clone(),
-                    reviewer_provider,
+                    locked_snapshot.reviewer.clone(),
                 )
                 .map_err(|error| format!("persist provider lock failed: {error}"))?;
             store

@@ -353,7 +353,8 @@ fn workspace_session_runtime_binding_is_optional_and_work_item_scoped() {
         workspace_type: WorkspaceType::WorkItem,
         status: WorkspaceSessionStatus::Open,
         author_provider: ProviderName::Codex,
-        reviewer_provider: ProviderName::ClaudeCode,
+        reviewer_provider: Some(ProviderName::ClaudeCode),
+
         review_rounds: 2,
         permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
         provisional_reviewer_provider: None,

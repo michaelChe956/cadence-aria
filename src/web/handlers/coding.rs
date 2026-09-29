@@ -592,14 +592,17 @@ pub(crate) fn coding_provider_config_snapshot(
             provider_availability,
         )?
         .provider;
-        let reviewer = resolve_explicit_provider_name(
-            provider_name_key(&session.reviewer_provider),
-            provider_availability,
-        )?
-        .provider;
+        // C2 Task 5（REQ-CRO-05）：reviewer 三值透传——Confirmed WorkItem 会话缺
+        // reviewer 时保持空 effective（coding 侧 review 阶段落缺配置门）。
+        let reviewer = session
+            .reviewer_provider
+            .as_ref()
+            .map(|reviewer| resolve_explicit_provider_name(provider_name_key(reviewer), provider_availability))
+            .transpose()?
+            .map(|resolved| resolved.provider);
         return Ok(ProviderConfigSnapshot {
             author,
-            reviewer: Some(reviewer),
+            reviewer,
             review_rounds: session.review_rounds,
             permission_modes: session.permission_modes.clone(),
         });
@@ -608,9 +611,11 @@ pub(crate) fn coding_provider_config_snapshot(
     let author =
         resolve_default_coding_provider(repository_default_provider, provider_availability)?
             .provider;
+    // C2 Task 5（REQ-CRO-05）：无会话可引用时不再以 author 顶替 reviewer——
+    // 空 effective，coding 侧 review 阶段落缺配置门等待用户配置。
     Ok(ProviderConfigSnapshot {
         author: author.clone(),
-        reviewer: Some(author),
+        reviewer: None,
         review_rounds: 1,
         permission_modes: WorkspaceRolePermissionModes::default(),
     })
@@ -646,14 +651,17 @@ pub(crate) fn coding_provider_config_snapshot_for_runtime_binding(
             provider_availability,
         )?
         .provider;
-        let reviewer = resolve_explicit_provider_name(
-            provider_name_key(&session.reviewer_provider),
-            provider_availability,
-        )?
-        .provider;
+        // C2 Task 5（REQ-CRO-05）：reviewer 三值透传——Confirmed WorkItem 会话缺
+        // reviewer 时保持空 effective（coding 侧 review 阶段落缺配置门）。
+        let reviewer = session
+            .reviewer_provider
+            .as_ref()
+            .map(|reviewer| resolve_explicit_provider_name(provider_name_key(reviewer), provider_availability))
+            .transpose()?
+            .map(|resolved| resolved.provider);
         return Ok(ProviderConfigSnapshot {
             author,
-            reviewer: Some(reviewer),
+            reviewer,
             review_rounds: session.review_rounds,
             permission_modes: session.permission_modes.clone(),
         });
@@ -662,9 +670,10 @@ pub(crate) fn coding_provider_config_snapshot_for_runtime_binding(
     let author =
         resolve_default_coding_provider(input.repository_default_provider, provider_availability)?
             .provider;
+    // C2 Task 5（REQ-CRO-05）：同上——不回填 author。
     Ok(ProviderConfigSnapshot {
         author: author.clone(),
-        reviewer: Some(author),
+        reviewer: None,
         review_rounds: 1,
         permission_modes: WorkspaceRolePermissionModes::default(),
     })

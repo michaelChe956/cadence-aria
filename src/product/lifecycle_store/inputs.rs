@@ -214,7 +214,8 @@ pub struct AppendProviderReviewRoundInput {
     pub session_id: String,
     pub round_index: u32,
     pub author_provider: ProviderName,
-    pub reviewer_provider: ProviderName,
+    /// C2 Task 5：reviewer 三值——缺失传 None。
+    pub reviewer_provider: Option<ProviderName>,
     pub review_result: String,
     pub revision_result: String,
 }
@@ -246,7 +247,8 @@ pub struct CreateWorkspaceSessionInput {
     pub entity_id: String,
     pub workspace_type: WorkspaceType,
     pub author_provider: ProviderName,
-    pub reviewer_provider: ProviderName,
+    /// C2 Task 5：reviewer 三值——缺失传 None，持久化空 effective。
+    pub reviewer_provider: Option<ProviderName>,
     pub review_rounds: u32,
     pub superpowers_enabled: bool,
     pub openspec_enabled: bool,

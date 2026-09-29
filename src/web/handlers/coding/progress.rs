@@ -303,7 +303,8 @@ mod tests {
                 entity_id: "work_item_0001".to_string(),
                 workspace_type: WorkspaceType::WorkItem,
                 author_provider: ProviderName::Fake,
-                reviewer_provider: ProviderName::Fake,
+                reviewer_provider: Some(ProviderName::Fake),
+
                 review_rounds: 1,
                 superpowers_enabled: false,
                 openspec_enabled: false,

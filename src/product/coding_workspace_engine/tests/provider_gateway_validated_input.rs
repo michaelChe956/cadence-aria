@@ -247,8 +247,8 @@ fn override_coder_to_claude_code(store: &CodingAttemptStore, attempt: &CodingExe
             &attempt.id,
             CodingRoleProviderConfigSnapshot {
                 coder: ProviderName::ClaudeCode,
-                code_reviewer: ProviderName::ClaudeCode,
-                internal_reviewer: ProviderName::ClaudeCode,
+                code_reviewer: Some(ProviderName::ClaudeCode),
+                internal_reviewer: Some(ProviderName::ClaudeCode),
                 review_rounds: 1,
                 permission_modes: CodingRolePermissionModes::default(),
             },

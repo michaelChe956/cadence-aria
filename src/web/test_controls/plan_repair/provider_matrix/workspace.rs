@@ -52,7 +52,7 @@ pub(super) async fn run_workspace_provider_roles(
                 entity_id: "work_item_plan_0001".to_string(),
                 workspace_type: WorkspaceType::WorkItemPlan,
                 author_provider: provider.clone(),
-                reviewer_provider: provider.clone(),
+                reviewer_provider: Some(provider.clone()),
                 review_rounds: 1,
                 superpowers_enabled: true,
                 openspec_enabled: true,

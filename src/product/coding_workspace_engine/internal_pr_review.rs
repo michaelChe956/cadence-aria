@@ -234,6 +234,24 @@ impl CodingWorkspaceEngine {
                 attempt.id.clone(),
             ));
         };
+        // C2 Task 5（REQ-CRO-05）：reviewer 三值——进入 Internal Reviewer 阶段而
+        // 快照该角色为空时，在建 role run／timeline node 之前落缺配置门。
+        let reviewer = match self
+            .store
+            .get_role_provider_config_snapshot(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+            .internal_reviewer
+        {
+            Some(reviewer) => reviewer,
+            None => {
+                return Err(self
+                    .block_missing_reviewer_configuration(
+                        &attempt,
+                        CodingExecutionStage::InternalPrReview,
+                        CodingProviderRole::InternalReviewer,
+                    )
+                    .await)
+            }
+        };
         let review_request = self
             .store
             .list_review_requests(&attempt.project_id, &attempt.issue_id, &attempt.id)?
@@ -277,10 +295,6 @@ impl CodingWorkspaceEngine {
             )?,
         };
 
-        let reviewer = self
-            .store
-            .get_role_provider_config_snapshot(&attempt.project_id, &attempt.issue_id, &attempt.id)?
-            .internal_reviewer;
         let retry_diagnostic = self.retry_diagnostic_for_previous_run(&attempt, &role_run)?;
         let is_group_final_review = attempt.scope == CodingAttemptScope::WorkItemGroup;
         let prepared_group_context = if is_group_final_review {
@@ -605,6 +619,21 @@ impl CodingWorkspaceEngine {
                     )
                     .await;
             }
+        };
+        // C2 Task 5（REQ-CRO-05）：internal reviewer 缺失（空 effective）fail-closed——
+        // group final review 不以任何默认 reviewer 继续编排。
+        let Some(reviewer) = reviewer else {
+            return self
+                .finalize_group_review_failure(
+                    &attempt,
+                    &node.id,
+                    &role_run.id,
+                    CodingWorkspaceEngineError::ReviewerConfigurationMissing {
+                        attempt_id: attempt.id.clone(),
+                        role: CodingProviderRole::InternalReviewer,
+                    },
+                )
+                .await;
         };
         let executor = RealGroupReviewExecutor::new(
             self,

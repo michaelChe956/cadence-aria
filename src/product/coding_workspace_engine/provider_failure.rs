@@ -13,6 +13,74 @@ pub(crate) struct ReviewBlockedGateInput<'a> {
 }
 
 impl CodingWorkspaceEngine {
+    /// C2 Task 5（REQ-CRO-05）：reviewer 配置缺失停等——进入需要 Code Reviewer／
+    /// Internal Reviewer 的阶段而快照该角色为空时，在建 role run／timeline node
+    /// 之前落 reason_code `reviewer_configuration_missing` 的 blocked gate
+    /// （重试＋终止动作），attempt 转 Blocked，绝不以 author 顶替。
+    /// 幂等：同 attempt/stage 的 open gate 命中既有记录（store 去重）。
+    pub(crate) async fn block_missing_reviewer_configuration(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        stage: CodingExecutionStage,
+        role: CodingProviderRole,
+    ) -> CodingWorkspaceEngineError {
+        let retry_action = if stage == CodingExecutionStage::InternalPrReview {
+            coding_gate_action_for_id("retry_internal_review")
+                .expect("retry internal review action")
+        } else {
+            coding_gate_action_for_id("retry_review").expect("retry review action")
+        };
+        let updated = match self.store.update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingAttemptStatus::Blocked,
+        ) {
+            Ok(updated) => updated,
+            Err(error) => {
+                return CodingWorkspaceEngineError::Store(error);
+            }
+        };
+        let role_label = match role {
+            CodingProviderRole::CodeReviewer => "Code Reviewer",
+            CodingProviderRole::InternalReviewer => "Internal Reviewer",
+            CodingProviderRole::Coder => "Coder",
+        };
+        let gate = match self.store.create_blocked_gate(
+            &updated,
+            CreateBlockedGateInput {
+                attempt_id: attempt.id.clone(),
+                stage,
+                node_id: None,
+                role: Some(role.clone()),
+                title: "评审配置缺失".to_string(),
+                description: format!(
+                    "{role_label} provider 未配置（reviewer 有效值为空）；请在等待项配置合法 reviewer 后重试。系统不会以 author 顶替启动 reviewer。"
+                ),
+                reason_code: Some("reviewer_configuration_missing".to_string()),
+                evidence_refs: Vec::new(),
+                raw_provider_output_ref: None,
+                available_actions: vec![
+                    retry_action,
+                    coding_gate_action_for_id("abort").expect("abort action"),
+                ],
+            },
+        ) {
+            Ok(gate) => gate,
+            Err(error) => {
+                return CodingWorkspaceEngineError::Store(error);
+            }
+        };
+        let _ = self
+            .event_tx
+            .send(CodingWsOutMessage::CodingGateRequired { gate })
+            .await;
+        CodingWorkspaceEngineError::ReviewerConfigurationMissing {
+            attempt_id: attempt.id.clone(),
+            role,
+        }
+    }
+
     pub(crate) async fn create_review_blocked_gate(
         &self,
         input: ReviewBlockedGateInput<'_>,

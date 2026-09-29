@@ -36,7 +36,8 @@ fn create_session(
             entity_id: entity_id.to_string(),
             workspace_type,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 2,
             superpowers_enabled: true,
             openspec_enabled: true,

@@ -12,7 +12,8 @@ async fn coding_runtime_handoff_revision_history_refresh_uses_real_run_and_hando
             entity_id: "work_item_plan_0001".to_string(),
             workspace_type: crate::product::models::WorkspaceType::WorkItemPlan,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 1,
             superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, },
         )
@@ -312,7 +313,8 @@ async fn plan_repair_history_bootstrap_fixture(
             entity_id: "work_item_plan_0001".to_string(),
             workspace_type: crate::product::models::WorkspaceType::WorkItemPlan,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 1,
             superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, },
         )
@@ -417,7 +419,8 @@ async fn plan_repair_history_bootstrap_fixture(
                 entity_id: "work_item_plan_0001".to_string(),
                 workspace_type: crate::product::models::WorkspaceType::WorkItemPlan,
                 author_provider: ProviderName::Codex,
-                reviewer_provider: ProviderName::ClaudeCode,
+                reviewer_provider: Some(ProviderName::ClaudeCode),
+
                 review_rounds: 1,
                 superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, },
             )
@@ -474,7 +477,8 @@ fn create_prior_repair_child(
             entity_id: "work_item_plan_0001".to_string(),
             workspace_type: crate::product::models::WorkspaceType::WorkItemPlan,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 1,
             superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, },
         )

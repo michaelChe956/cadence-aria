@@ -72,8 +72,8 @@ async fn runner_dying_before_provider_moves_running_attempt_to_manual_recovery()
             &attempt.id,
             CodingRoleProviderConfigSnapshot {
                 coder: ProviderName::KimiCode,
-                code_reviewer: ProviderName::KimiCode,
-                internal_reviewer: ProviderName::KimiCode,
+                code_reviewer: Some(ProviderName::KimiCode),
+                internal_reviewer: Some(ProviderName::KimiCode),
                 review_rounds: 1,
                 permission_modes: CodingRolePermissionModes {
                     coder: CodingProviderPermissionMode::Auto,
@@ -211,8 +211,8 @@ async fn recover_coding_channel_re_admits_and_restarts_runner() {
             &attempt.id,
             CodingRoleProviderConfigSnapshot {
                 coder: ProviderName::KimiCode,
-                code_reviewer: ProviderName::KimiCode,
-                internal_reviewer: ProviderName::KimiCode,
+                code_reviewer: Some(ProviderName::KimiCode),
+                internal_reviewer: Some(ProviderName::KimiCode),
                 review_rounds: 1,
                 permission_modes: CodingRolePermissionModes {
                     coder: CodingProviderPermissionMode::Auto,
@@ -459,8 +459,8 @@ fn seed_startup_attempt(
             &attempt.id,
             CodingRoleProviderConfigSnapshot {
                 coder: ProviderName::Fake,
-                code_reviewer: ProviderName::Fake,
-                internal_reviewer: ProviderName::Fake,
+                code_reviewer: Some(ProviderName::Fake),
+                internal_reviewer: Some(ProviderName::Fake),
                 review_rounds: 1,
                 permission_modes: CodingRolePermissionModes {
                     coder: CodingProviderPermissionMode::Auto,

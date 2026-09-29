@@ -312,6 +312,7 @@ fn seed_authoritative_group_terminal_fixture(
             },
             blocker_rules: Vec::new(),
             design_traceability: Vec::new(),
+            intent_contract: None,
         };
         let revision = WorkItemRevision {
             id: revision_id.to_string(),

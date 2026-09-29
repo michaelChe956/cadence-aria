@@ -194,6 +194,18 @@ pub fn renderer_for(provider: &ProviderName) -> Box<dyn ProviderProjectionRender
     }
 }
 
+/// C2 Task 5（REQ-CRO-05）：reviewer 缺失（空 effective）时的绑定比对 token。
+/// 该角色未配置就没有可派生的 renderer——记录/比对 `reviewer_unconfigured`
+/// 使既有等值校验自然 fail-closed（绝不虚构 reviewer 身份）。
+pub fn renderer_version_for_optional_provider(
+    provider: Option<&ProviderName>,
+) -> &'static str {
+    match provider {
+        Some(provider) => renderer_for(provider).renderer_version(),
+        None => "reviewer_unconfigured",
+    }
+}
+
 fn validate_mandatory_sections(
     role: ProjectionRenderRole,
     sections: &[ProjectionSection],
