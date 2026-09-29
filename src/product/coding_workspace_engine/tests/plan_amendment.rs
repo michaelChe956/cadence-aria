@@ -583,6 +583,18 @@ async fn amendment_fixture_with_resume_mode(resume_mode: AmendmentResumeMode) ->
         CodingUnitRunStatus::Running,
         None,
     );
+    // T6 起点事实：unit-0 已以 commit_completed 完成，组 attempt 的 head
+    // 即修订前事实；amendment run 物化经 journal 的
+    // materialization_head_commit 携带 start_commit，缺失即触发
+    // unit_run_start_commit_missing 停等（真缺失才停等，此处非真缺失）。
+    attempt = store
+        .update_attempt_head_commit(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            Some("commit_completed".to_string()),
+        )
+        .unwrap();
     attempt = store
         .update_attempt_stage(
             &attempt.project_id,

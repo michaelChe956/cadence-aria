@@ -400,7 +400,7 @@ impl CodingWorkspaceEngine {
         let updated = if journal.phase
             == crate::product::coding_attempt_store::CodingGitOperationPhase::WorktreeCreated
         {
-            let updated = self.store.update_attempt_worktree_path(
+            let mut updated = self.store.update_attempt_worktree_path(
                 &attempt.project_id,
                 &attempt.issue_id,
                 &attempt.id,
@@ -454,6 +454,26 @@ impl CodingWorkspaceEngine {
             .map_err(|error| {
                 CodingWorkspaceEngineError::EvidenceScriptInjection(error.to_string())
             })?;
+            // C2 Task 6 补齐（决策 6/#13）：sc_advance 延迟物化路径不经
+            // `start_attempt` 的已物化短路，group attempt 认领前的
+            // `head_commit` 在 worktree 创建完成处冻结（write-if-none，与
+            // `start_attempt` 短路同语义）——初始 unit run 物化时以此携带
+            // start_commit；置于 journal 推进 Completed 前，崩溃重放重入
+            // 本分支即补冻结，不留「Completed 但 head 缺失」窗口。
+            if updated.scope == CodingAttemptScope::WorkItemGroup
+                && updated.head_commit.is_none()
+            {
+                let claim_head = self
+                    ._git_service
+                    .git_current_head(&journal.worktree_path)
+                    .await?;
+                updated = self.store.update_attempt_head_commit(
+                    &updated.project_id,
+                    &updated.issue_id,
+                    &updated.id,
+                    Some(claim_head),
+                )?;
+            }
             self.store.advance_coding_git_operation(
                 &updated,
                 &journal,

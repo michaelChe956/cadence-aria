@@ -9,6 +9,7 @@ import type {
   VerificationCommandEvidence,
   VerificationTriageRecord,
 } from "../api/types";
+import { StageGateEntry } from "../components/coding-workspace/StageGateEntry";
 import { ConfirmTwiceButton } from "../components/chat-workspace/cockpit/ConfirmTwiceButton";
 import { useCodingWorkspaceWs } from "../hooks/useCodingWorkspaceWs";
 import type { ChatEntry } from "../state/chat-entries";
