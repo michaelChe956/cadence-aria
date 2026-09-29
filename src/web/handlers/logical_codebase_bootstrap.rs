@@ -118,11 +118,30 @@ async fn post_bootstrap_action_for_lc(
         .for_lc(logical_codebase_id.clone())
         .runs()
         .clone();
-    let service = LogicalCodebaseBootstrapService::new(paths).with_member_index_run_probe(Arc::new(
-        move |project_id: &str, lc_id: &str, operation_id: &str| {
-            runs.is_active(&InitializationRunKey::aggregate(project_id, lc_id, operation_id))
-        },
-    ));
+    // G3（终局关闸缺口）：注入 aggregate_index_active 步 Retry 的重建
+    // 派发器（LC 隔离 index operation 的 build_with_command_id——同
+    // command 幂等、revision 冲突 fail-closed），替代「仅查重放记录、
+    // 找不到即 NotFound 恒 500」的断链。
+    let index_operation = state
+        .aggregate_initialization_dependencies()
+        .for_lc(logical_codebase_id.clone())
+        .index
+        .clone();
+    let service = LogicalCodebaseBootstrapService::new(paths)
+        .with_member_index_run_probe(Arc::new(
+            move |project_id: &str, lc_id: &str, operation_id: &str| {
+                runs.is_active(&InitializationRunKey::aggregate(project_id, lc_id, operation_id))
+            },
+        ))
+        .with_aggregate_index_rebuild(Arc::new(
+            move |project_id: &str, command_id: &str, expected_revision: u64| {
+                index_operation.build_with_command_id(
+                    project_id,
+                    expected_revision,
+                    command_id,
+                )
+            },
+        ));
     let result = service
         .apply(BootstrapActionRequest {
             command_id: request.command_id.clone(),

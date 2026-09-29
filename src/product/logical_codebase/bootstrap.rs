@@ -719,20 +719,40 @@ fn project_notices(steps: &[BootstrapStepProjection]) -> Vec<LogicalCodebaseBoot
 ///
 /// 动作不创建新的 durable 状态机：command replay 与推进都映射回既有
 /// registration batch / aggregate initialization / aggregate index 记录。
-/// 事实先落盘，GET 投影随后可补读同一结果。
+#[derive(Clone)]
 pub struct LogicalCodebaseBootstrapService {
     paths: ProductAppPaths,
     /// C4 Task 6：member-index 步骤“Running 但内存 run 不活跃”的判定探针
     ///（web 层注入 run registry 视角；缺省视为活跃——不知道就不动）。
     member_index_run_active:
         Option<std::sync::Arc<dyn Fn(&str, &str, &str) -> bool + Send + Sync>>,
+    /// G3（终局关闸缺口）：aggregate_index_active 步 Retry 的重建派发器
+    ///（web 层注入 LC 隔离的 `AggregateIndexOperation::build_with_command_id`
+    /// 闭包；缺省 None 保持既有仅重放语义——NotFound fail-closed）。
+    aggregate_index_rebuild: Option<AggregateIndexRebuildDispatcher>,
 }
+
+/// G3：重建派发器契约——`(project_id, command_id,
+/// expected_membership_revision)` → 落盘后的聚合索引记录。生产实现是
+/// `build_with_command_id`（同 command 幂等重放、revision 冲突 fail-closed）。
+pub type AggregateIndexRebuildDispatcher = std::sync::Arc<
+    dyn Fn(
+            &str,
+            &str,
+            u64,
+        ) -> Result<
+            crate::product::logical_codebase::aggregate_index::AggregateIndexRecord,
+            AggregateIndexError,
+        > + Send
+        + Sync,
+>;
 
 impl LogicalCodebaseBootstrapService {
     pub fn new(paths: ProductAppPaths) -> Self {
         Self {
             paths,
             member_index_run_active: None,
+            aggregate_index_rebuild: None,
         }
     }
 
@@ -742,6 +762,15 @@ impl LogicalCodebaseBootstrapService {
         probe: std::sync::Arc<dyn Fn(&str, &str, &str) -> bool + Send + Sync>,
     ) -> Self {
         self.member_index_run_active = Some(probe);
+        self
+    }
+
+    /// 注入 aggregate_index_active 步 Retry 的重建派发器（G3）。
+    pub fn with_aggregate_index_rebuild(
+        mut self,
+        dispatcher: AggregateIndexRebuildDispatcher,
+    ) -> Self {
+        self.aggregate_index_rebuild = Some(dispatcher);
         self
     }
 
@@ -778,9 +807,24 @@ impl LogicalCodebaseBootstrapService {
             }
         }
 
-        let outcome = self
-            .dispatch_action(&request)
-            .map_err(BootstrapActionError::Store)?;
+        // G3：aggregate_index_active 的 Retry 重建派发会同步执行 CodeGraph
+        // CLI（有界预算内可达数分钟）——放 blocking 线程池，不占 async
+        // worker；其余步骤保持同步派发（重放判定只读，无长阻塞）。
+        let outcome = if request.step == LogicalCodebaseBootstrapStep::AggregateIndexActive {
+            let service = self.clone();
+            let dispatch_request = request.clone();
+            tokio::task::spawn_blocking(move || service.dispatch_action(&dispatch_request))
+                .await
+                .map_err(|error| {
+                    BootstrapActionError::Store(ProductStoreError::Io(format!(
+                        "bootstrap aggregate index dispatch task failed: {error}"
+                    )))
+                })?
+                .map_err(BootstrapActionError::Store)?
+        } else {
+            self.dispatch_action(&request)
+                .map_err(BootstrapActionError::Store)?
+        };
         // 动作后重新投影，响应携带最新 durable 事实。
         let projection = LogicalCodebaseBootstrapProjector::new(self.paths.clone())
             .project(&request.project_id, &request.logical_codebase_id)?;
@@ -901,6 +945,13 @@ impl LogicalCodebaseBootstrapService {
 
     /// aggregate index：以 Task 5 的 durable command identity 判定 replay；
     /// Building 进行中不做隐式推进（等待 single-writer 完成）。
+    ///
+    /// G3（终局关闸缺口）：无同 command 重放记录时不再直接 NotFound——
+    /// 注入重建派发器（生产实现 `build_with_command_id`）后按请求
+    /// command_id 派发重建（同 command 幂等、membership revision 冲突
+    /// fail-closed、Building 并发拒绝），修复「retry 仅查重放、恒 500、
+    /// 唯一恢复路径退化为 canonical rebuild 端点」的断链。未注入派发器
+    /// 保持既有 NotFound（不假成功）。
     fn dispatch_aggregate_index_action(
         &self,
         request: &BootstrapActionRequest,
@@ -919,9 +970,35 @@ impl LogicalCodebaseBootstrapService {
                 _ => BootstrapActionOutcome::Replayed,
             });
         }
-        Err(ProductStoreError::NotFound {
-            kind: "aggregate_index_command",
-            id: request.command_id.clone(),
+        let Some(rebuild) = self.aggregate_index_rebuild.clone() else {
+            return Err(ProductStoreError::NotFound {
+                kind: "aggregate_index_command",
+                id: request.command_id.clone(),
+            });
+        };
+        // 期望 revision：优先请求显式携带；缺省从当前 durable manifest
+        // 解析（重试请求必经投影面，正常都带 revision；解析不到 fail-closed）。
+        let expected_revision = request.expected_revision.or_else(|| {
+            crate::product::logical_codebase::store::LogicalCodebaseStore::for_lc(
+                self.paths.clone(),
+                &request.logical_codebase_id,
+            )
+            .load_manifest(&request.project_id)
+            .ok()
+            .flatten()
+            .map(|manifest| manifest.membership_revision)
+        });
+        let Some(expected_revision) = expected_revision else {
+            return Err(ProductStoreError::NotFound {
+                kind: "aggregate_index_manifest",
+                id: request.logical_codebase_id.clone(),
+            });
+        };
+        let record = rebuild(&request.project_id, &request.command_id, expected_revision)
+            .map_err(map_index_error)?;
+        Ok(match record.status {
+            AggregateIndexStatus::Active => BootstrapActionOutcome::Completed,
+            _ => BootstrapActionOutcome::Replayed,
         })
     }
 
@@ -974,6 +1051,7 @@ mod tests {
         AggregateInitializationOperation, AggregateInitializationOperationInput,
         AggregateInitializationStepKind,
     };
+    use crate::product::logical_codebase::aggregate_index::AggregateIndexRecord;
     use crate::product::logical_codebase::aggregate_initialization_store::AggregateInitializationOperationStore;
     use crate::product::logical_codebase::store::LogicalCodebaseStore;
     use crate::product::logical_codebase::types::{
@@ -1331,5 +1409,126 @@ mod tests {
         let bootstrap_names: Vec<_> = bootstrap_steps.iter().map(|s| s.as_str()).collect();
         let v1_names: Vec<String> = persisted_kinds.iter().map(|s| s.as_str().to_string()).collect();
         assert_ne!(bootstrap_names, v1_names);
+    }
+
+    fn seed_failed_aggregate_index_record(
+        paths: &ProductAppPaths,
+        lc_id: &str,
+        command_id: &str,
+    ) -> String {
+        let store = AggregateIndexStore::for_lc(paths.clone(), lc_id);
+        let mut record = AggregateIndexRecord::building(
+            "aggregate_index_g3_failed_0001".to_string(),
+            "project_0001".to_string(),
+            2,
+            Vec::new(),
+            chrono::Utc::now().to_rfc3339(),
+        );
+        record.command_id = Some(command_id.to_string());
+        store.create("project_0001", record).unwrap();
+        store
+            .mark_status(
+                "project_0001",
+                "aggregate_index_g3_failed_0001",
+                AggregateIndexStatus::Failed,
+                Some("codegraph_version_mismatch: expected 1.6.0, got 1.6.1".to_string()),
+            )
+            .unwrap();
+        "aggregate_index_g3_failed_0001".to_string()
+    }
+
+    fn g3_retry_request(lc_id: &str, command_id: &str) -> BootstrapActionRequest {
+        BootstrapActionRequest {
+            command_id: command_id.to_string(),
+            project_id: "project_0001".to_string(),
+            logical_codebase_id: lc_id.to_string(),
+            step: LogicalCodebaseBootstrapStep::AggregateIndexActive,
+            action: BootstrapActionKind::Retry,
+            expected_revision: Some(2),
+            expected_object_id: "aggregate_index_g3_failed_0001".to_string(),
+        }
+    }
+
+    /// G3（终局关闸缺口）：aggregate_index_active 步失败后，bootstrap
+    /// actions retry 此前仅按 command_id 查重放记录——找不到即 NotFound
+    /// 恒 500，无重建触发分支（现场 cmd-gapfix-a03-retry-1/2）。修复：
+    /// 注入重建派发器（复用 `build_with_command_id` 的幂等命令语义）后，
+    /// retry 用新 command_id 派发重建；同 command 重放不重复派发。
+    #[test]
+    fn aggregate_index_retry_dispatches_rebuild_and_replays_same_command() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let lc_id = create_project_and_lc(&paths, &temp.path().join("aggregate-root"));
+        seed_failed_aggregate_index_record(&paths, &lc_id, "cmd-gapfix-a03-first");
+
+        let dispatches = std::sync::Arc::new(AtomicUsize::new(0));
+        let store_for_rebuild = AggregateIndexStore::for_lc(paths.clone(), &lc_id);
+        let dispatches_for_rebuild = dispatches.clone();
+        let dispatcher = std::sync::Arc::new(
+            move |project_id: &str, command_id: &str, revision: u64| {
+                dispatches_for_rebuild.fetch_add(1, Ordering::SeqCst);
+                // 复刻 build_with_command_id 成功效果：落一条携带该命令
+                // 身份的 Active 记录（membership_revision 对齐请求）。
+                let mut record = AggregateIndexRecord::building(
+                    format!("aggregate_index_retry_{command_id}"),
+                    project_id.to_string(),
+                    revision,
+                    Vec::new(),
+                    chrono::Utc::now().to_rfc3339(),
+                );
+                record.status = AggregateIndexStatus::Active;
+                record.command_id = Some(command_id.to_string());
+                store_for_rebuild
+                    .create(project_id, record.clone())
+                    .map(|_| record)
+            },
+        );
+        let service = LogicalCodebaseBootstrapService::new(paths.clone())
+            .with_aggregate_index_rebuild(dispatcher);
+
+        // 修复前现场：NotFound 恒 500（无重建分支）。
+        let request = g3_retry_request(&lc_id, "cmd-gapfix-a03-retry-1");
+        let outcome = service.dispatch_action(&request).expect("retry rebuilds");
+        assert_eq!(outcome, BootstrapActionOutcome::Completed);
+        assert_eq!(dispatches.load(Ordering::SeqCst), 1);
+        // 重建派发参数经 durable 事实复核（project/command/revision）。
+        let rebuilt = AggregateIndexStore::for_lc(paths.clone(), &lc_id)
+            .get("project_0001", "aggregate_index_retry_cmd-gapfix-a03-retry-1")
+            .expect("rebuilt record")
+            .expect("rebuilt record present");
+        assert_eq!(rebuilt.status, AggregateIndexStatus::Active);
+        assert_eq!(rebuilt.command_id.as_deref(), Some("cmd-gapfix-a03-retry-1"));
+        assert_eq!(rebuilt.membership_revision, 2);
+
+        // 同 command 重放：返回同一 Active 事实（Completed），不再派发。
+        let replay = service
+            .dispatch_action(&request)
+            .expect("replay returns durable result");
+        assert_eq!(replay, BootstrapActionOutcome::Completed);
+        assert_eq!(dispatches.load(Ordering::SeqCst), 1);
+    }
+
+    /// G3 语义收口：未注入重建派发器（旧构造）时保持既有 NotFound——
+    /// 不静默假成功；由 web 层生产注入收口。
+    #[test]
+    fn aggregate_index_retry_without_dispatcher_keeps_not_found() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let lc_id = create_project_and_lc(&paths, &temp.path().join("aggregate-root"));
+        seed_failed_aggregate_index_record(&paths, &lc_id, "cmd-gapfix-a03-first");
+
+        let service = LogicalCodebaseBootstrapService::new(paths);
+        let error = service
+            .dispatch_action(&g3_retry_request(&lc_id, "cmd-gapfix-a03-retry-2"))
+            .expect_err("no dispatcher keeps fail-closed NotFound");
+        assert!(matches!(
+            error,
+            ProductStoreError::NotFound {
+                kind: "aggregate_index_command",
+                ..
+            }
+        ));
     }
 }
