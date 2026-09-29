@@ -486,3 +486,92 @@ fn operation_finish_failed_without_step_preserves_completed_steps() {
         read_json(&fixture.operation_path()).unwrap();
     assert_eq!(persisted, failed);
 }
+
+#[test]
+fn operation_list_scopes_project_sorts_stably_and_rejects_corrupt_records() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = ProductAppPaths::new(temp.path().join(".aria"));
+    let store = RepositoryInitializationOperationStore::new(paths.clone());
+
+    let input = || RepositoryInitializationOperationInput {
+        name: "Aria".to_string(),
+        git_root: PathBuf::from("/tmp/aria"),
+        default_policy_preset: None,
+        default_provider_mode: None,
+    };
+
+    // 文件写入顺序与期望排序不一致：晚创建的先落盘，排序不依赖文件系统顺序。
+    store
+        .create(RepositoryInitializationOperation::new(
+            "repository_initialization_b".to_string(),
+            "project_0001".to_string(),
+            input(),
+            "2026-07-22T01:00:00Z".to_string(),
+        ))
+        .unwrap();
+    store
+        .create(RepositoryInitializationOperation::new(
+            "repository_initialization_zeta".to_string(),
+            "project_0001".to_string(),
+            input(),
+            "2026-07-22T00:00:00Z".to_string(),
+        ))
+        .unwrap();
+    store
+        .create(RepositoryInitializationOperation::new(
+            "repository_initialization_a".to_string(),
+            "project_0001".to_string(),
+            input(),
+            "2026-07-22T00:00:00Z".to_string(),
+        ))
+        .unwrap();
+    store
+        .create(RepositoryInitializationOperation::new(
+            "repository_initialization_other".to_string(),
+            "project_0002".to_string(),
+            input(),
+            "2026-07-22T00:00:00Z".to_string(),
+        ))
+        .unwrap();
+
+    let listed = store.list("project_0001").unwrap();
+    let ids: Vec<&str> = listed.iter().map(|op| op.operation_id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec![
+            "repository_initialization_a",
+            "repository_initialization_zeta",
+            "repository_initialization_b",
+        ],
+        "sorted by (created_at, operation_id): {listed:?}"
+    );
+
+    // 无目录 project → 空列表（不报错）。
+    assert!(store.list("project_9999").unwrap().is_empty());
+
+    // 损坏记录：显式可诊断错误，不静默丢弃。
+    let corrupt = paths
+        .repository_initializations_root("project_0001")
+        .join("repository_initialization_corrupt.json");
+    std::fs::write(&corrupt, "{ not json").unwrap();
+    let error = store.list("project_0001").unwrap_err();
+    assert!(
+        matches!(error, ProductStoreError::Json(_)),
+        "corrupt record must surface diagnostics: {error:?}"
+    );
+
+    // 越权记录（record.project_id 与目录不符）→ identity mismatch。
+    std::fs::remove_file(&corrupt).unwrap();
+    let cross_source = paths
+        .repository_initializations_root("project_0002")
+        .join("repository_initialization_other.json");
+    let cross_dest = paths
+        .repository_initializations_root("project_0001")
+        .join("repository_initialization_other.json");
+    std::fs::copy(&cross_source, &cross_dest).unwrap();
+    let error = store.list("project_0001").unwrap_err();
+    assert!(
+        matches!(error, ProductStoreError::IdentityMismatch { .. }),
+        "cross-project record must be rejected: {error:?}"
+    );
+}

@@ -1,5 +1,6 @@
 use super::dto::repository_initialization_operation_dto;
 use super::support::{product_app_paths, product_store_api_error};
+use crate::web::types::ResumeRepositoryInitializationRequest;
 use super::*;
 
 use std::collections::BTreeMap;
@@ -117,6 +118,23 @@ impl RepositoryRegistrationDependencies {
     ) -> Result<RepositoryInitializationOperation, RepositoryRegistrationError> {
         self.coordinator
             .execute_initialization(launch, cancellation)
+            .await
+    }
+
+    // C5 Task 6（REQ-INIT-C5-RESUME）：产品层 resume 入口的 HTTP 侧包装。
+    #[allow(clippy::result_large_err)]
+    async fn resume_initialization(
+        &self,
+        project_id: &str,
+        failed_operation_id: &str,
+        command_id: &str,
+        cancellation: CancellationToken,
+    ) -> Result<
+        crate::product::repository_store::RepositoryInitializationResume,
+        RepositoryRegistrationError,
+    > {
+        self.coordinator
+            .resume_initialization(project_id, failed_operation_id, command_id, cancellation)
             .await
     }
 
@@ -385,6 +403,80 @@ pub async fn get_repository_initialization(
         operation
     };
     Ok(Json(repository_initialization_operation_dto(operation)).into_response())
+}
+
+/// C5 Task 6（REQ-INIT-C5-RESUME）：project 级初始化失败等待项只读投影。
+/// handler 只做 HTTP/DTO 映射，事实派生在
+/// `plan_confirmed_info::list_project_c1_waiting_items`。
+pub async fn get_project_repository_initialization_waiting_items(
+    State(state): State<WebAppState>,
+    Path(project_id): Path<String>,
+) -> ApiResult<Response> {
+    let items = crate::web::plan_confirmed_info::list_project_c1_waiting_items(
+        &product_app_paths(&state),
+        &project_id,
+    )
+    .map_err(product_store_api_error)?;
+    Ok(Json(items).into_response())
+}
+
+/// C5 Task 6：POST resume——只做 DTO/HTTP 映射并调用产品层 resume
+/// coordinator（不在 handler 拼接随机 begin）。successor 处于
+/// Running/Completed/Failed 时 200 只读返回；Created/新建交由 worker
+/// 执行并 202 返回快照。run registry 互斥失败时 launch（含 guard）随
+/// 错误路径 drop，不留可执行孤儿。
+pub async fn post_repository_initialization_resume(
+    State(state): State<WebAppState>,
+    Path((project_id, operation_id)): Path<(String, String)>,
+    request: Result<Json<ResumeRepositoryInitializationRequest>, JsonRejection>,
+) -> ApiResult<Response> {
+    let Json(request) = match request {
+        Ok(request) => request,
+        Err(error) => return Ok(error.into_response()),
+    };
+    let dependencies = match state.repository_registration_dependencies() {
+        Some(dependencies) => dependencies,
+        None => default_dependencies(&state).map_err(|error| ApiError::from(*error))?,
+    };
+    let resume = dependencies
+        .resume_initialization(
+            &project_id,
+            &operation_id,
+            &request.command_id,
+            CancellationToken::new(),
+        )
+        .await
+        .map_err(ApiError::from)?;
+    if !resume.execute {
+        return Ok(Json(repository_initialization_operation_dto(resume.snapshot)).into_response());
+    }
+    let launch = resume.launch.expect("executable resume carries launch");
+    let snapshot = launch.snapshot().clone();
+    let lease = state
+        .repository_initialization_runs
+        .register(launch.operation_id().to_string())
+        .ok_or_else(|| {
+            ApiError::runtime(
+                "repository_initialization_in_progress",
+                "repository initialization is already in progress",
+                serde_json::json!({}),
+            )
+        })?;
+    let worker_dependencies = dependencies.clone();
+    tokio::spawn(async move {
+        let _lease = lease;
+        if let Err(error) = worker_dependencies
+            .execute_initialization(launch, CancellationToken::new())
+            .await
+        {
+            tracing::error!(reason_code = %error.reason_code, "repository initialization resume worker failed");
+        }
+    });
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(repository_initialization_operation_dto(snapshot)),
+    )
+        .into_response())
 }
 
 fn default_dependencies(

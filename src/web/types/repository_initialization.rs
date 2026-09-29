@@ -42,3 +42,11 @@ pub struct RepositoryInitializationOperationDto {
     pub updated_at: String,
     pub completed_at: Option<String>,
 }
+
+/// C5 Task 6（REQ-INIT-C5-RESUME）：初始化恢复请求体——用户显式
+/// `command_id`（确定性 successor id 的派生输入；空/控制字符 422）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ResumeRepositoryInitializationRequest {
+    pub command_id: String,
+}

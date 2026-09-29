@@ -202,6 +202,12 @@ impl IntoResponse for ApiError {
             "automation_enrollment_not_found" => StatusCode::NOT_FOUND,
             "automation_enrollment_invalid_scope" => StatusCode::UNPROCESSABLE_ENTITY,
             "automation_role_chain_unsupported" => StatusCode::UNPROCESSABLE_ENTITY,
+            // C5 Task 6（REQ-INIT-C5-RESUME）：resume 前置校验稳定码——
+            // 非 Failed 终态与非法 command_id 均 422（不创建 successor）。
+            "repository_initialization_resume_not_failed" => StatusCode::UNPROCESSABLE_ENTITY,
+            "repository_initialization_resume_invalid_command" => {
+                StatusCode::UNPROCESSABLE_ENTITY
+            }
             // P0 1.3（Task 10）human-actions 稳定码：门 id 不匹配 409、空白
             // command_id 400、引擎语义拒绝/compile recovery 越节点/approve
             // compile 失败 422（失败不宣称 Confirmed）。

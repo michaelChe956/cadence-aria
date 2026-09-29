@@ -55,6 +55,70 @@ impl RepositoryInitializationOperationStore {
         Ok(operation)
     }
 
+    /// C5 Task 6（REQ-INIT-C5-RESUME）：按 `repository_initializations_root(project_id)`
+    /// 扫描全量 operation。逐条校验 project/operation 身份与 record shape，
+    /// 按 `(created_at, operation_id)` 升序稳定排序；损坏/越权记录显式返回
+    /// 可诊断错误，不静默丢弃；目录不存在返回空列表。
+    pub fn list(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<RepositoryInitializationOperation>, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        let root = self.paths.repository_initializations_root(project_id);
+        if !root.exists() {
+            return Ok(Vec::new());
+        }
+        let mut file_names: Vec<String> = std::fs::read_dir(&root)
+            .map_err(|error| {
+                ProductStoreError::Io(format!("open {}: {error}", root.display()))
+            })?
+            .filter_map(|entry| {
+                let path = entry.ok()?.path();
+                let name = path.file_name()?.to_string_lossy().into_owned();
+                (name.ends_with(".json")).then_some(name)
+            })
+            .collect();
+        // 读取顺序与文件系统顺序解耦：先按文件名稳定枚举，再按记录字段排序。
+        file_names.sort();
+
+        let mut operations = Vec::with_capacity(file_names.len());
+        for file_name in file_names {
+            let operation_id = file_name
+                .strip_suffix(".json")
+                .unwrap_or(file_name.as_str())
+                .to_string();
+            let operation: RepositoryInitializationOperation =
+                read_json(&root.join(&file_name))?;
+            ensure_identity(&operation, project_id, &operation_id)?;
+            validate_record_shape(&operation)?;
+            operations.push(operation);
+        }
+        operations.sort_by(|left, right| {
+            (&left.created_at, &left.operation_id).cmp(&(&right.created_at, &right.operation_id))
+        });
+        Ok(operations)
+    }
+
+    /// C5 Task 6：原 Failed operation 记录后继接续关系（幂等；同一 successor
+    /// 重复标记是 no-op，不同 successor 冲突按 identity mismatch 拒绝）。
+    pub fn mark_superseded(
+        &self,
+        project_id: &str,
+        operation_id: &str,
+        superseded_by: String,
+    ) -> Result<RepositoryInitializationOperation, ProductStoreError> {
+        self.update(project_id, operation_id, |operation| {
+            match operation.superseded_by.as_ref() {
+                Some(existing) if existing == &superseded_by => Ok(()),
+                Some(_) => Err(identity_mismatch(operation_id)),
+                None => {
+                    operation.superseded_by = Some(superseded_by);
+                    Ok(())
+                }
+            }
+        })
+    }
+
     pub fn mark_running(
         &self,
         project_id: &str,

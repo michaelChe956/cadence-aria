@@ -180,6 +180,26 @@ pub struct C1WaitingItemDto {
     /// C2 additive：与 `actions` 一一对应的操作上下文（command_id＋版本）。
     #[serde(default)]
     pub action_context: Vec<WaitingItemAction>,
+    /// C5 Task 6 additive：repository_initialization_failed 等待项指向的
+    /// 稳定 operation id（其余 kind 为 `None`，wire 缺省）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    /// C5 Task 6 additive：初始化失败的结构化诊断（步骤/原因/provider/
+    /// 变更路径/可重试），只在 `repository_initialization_failed` 在场。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<RepositoryInitializationFailureDiagnostics>,
+    /// C5 Task 6 additive：project 级等待项必填；issue 级条目缺省。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    /// C5 Task 6 additive：issue 级关联（project 级条目缺省）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_id: Option<String>,
+    /// C5 Task 6 additive：resume 链条的后继指回（最新失败链叶保留关联）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_operation_id: Option<String>,
+    /// C5 Task 6 additive：被后继接续的原 Failed operation（只读关联投影）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
 }
 
 /// 从 durable enrollment/lease/advance/compile/gate 事实派生 issue 级 C1
@@ -252,6 +272,12 @@ pub fn list_c1_waiting_items(
                     next_phase: Some("candidate_recovered".to_string()),
                     expected_version: None,
                     action_context: Vec::new(),
+                    operation_id: None,
+                    diagnostics: None,
+                    project_id: None,
+                    issue_id: None,
+                    parent_operation_id: None,
+                    superseded_by: None,
                 });
             }
         }
@@ -302,6 +328,12 @@ pub fn list_c1_waiting_items(
             next_phase: next_phase.map(str::to_string),
             expected_version: None,
             action_context: Vec::new(),
+            operation_id: None,
+            diagnostics: None,
+            project_id: None,
+            issue_id: None,
+            parent_operation_id: None,
+            superseded_by: None,
         }
     };
     match disposition {
@@ -366,6 +398,12 @@ pub fn list_c1_waiting_items(
                     next_phase: journal_phase.map(str::to_string),
                     expected_version: None,
                     action_context: Vec::new(),
+                    operation_id: None,
+                    diagnostics: None,
+                    project_id: None,
+                    issue_id: None,
+                    parent_operation_id: None,
+                    superseded_by: None,
                 });
             }
         }
@@ -403,6 +441,12 @@ pub fn list_c1_waiting_items(
                 next_phase: Some("plan_revision".to_string()),
                 expected_version: None,
                 action_context: Vec::new(),
+                operation_id: None,
+                diagnostics: None,
+                project_id: None,
+                issue_id: None,
+                parent_operation_id: None,
+                superseded_by: None,
             });
         }
     }
@@ -428,6 +472,12 @@ pub fn list_c1_waiting_items(
                 next_phase: Some("rebind".to_string()),
                 expected_version: None,
                 action_context: Vec::new(),
+                operation_id: None,
+                diagnostics: None,
+                project_id: None,
+                issue_id: None,
+                parent_operation_id: None,
+                superseded_by: None,
             });
         }
     }
@@ -442,6 +492,168 @@ pub fn list_c1_waiting_items(
         &binding_target,
         &mut items,
     )?;
+    Ok(items)
+}
+
+// ---------------------------------------------------------------------------
+// C5 Task 6（REQ-INIT-C5-RESUME）：project 级 repository 初始化失败等待项
+// 投影。事实只从 operation store 派生；按 parent→后继链计算展示/消隐：
+// 无后继的 Failed 链叶展示带 resume 动作的等待项，Completed 后继使原
+// 等待项稳定消隐（记录只读可查），Failed 后继展示最新链叶并保留 parent
+// 关联，Created/Running 后继显示运行中只读项（避免重复执行）。
+// ---------------------------------------------------------------------------
+
+/// C5 Task 6：Claude 初始化失败等待项 kind（前端 kind 宽 string 兼容）。
+pub const WAITING_KIND_REPOSITORY_INITIALIZATION_FAILED: &str =
+    "repository_initialization_failed";
+
+/// C5 Task 6：初始化失败的结构化诊断（由 operation 冻结的 error 派生）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RepositoryInitializationFailureDiagnostics {
+    pub failed_step: String,
+    pub reason_code: String,
+    pub provider: Option<String>,
+    pub stderr_summary: Option<String>,
+    pub changed_paths: Vec<String>,
+    pub retryable: bool,
+}
+
+fn repository_initialization_step_slug(
+    step: crate::product::repository_store::RepositoryInitializationStepKind,
+) -> &'static str {
+    use crate::product::repository_store::RepositoryInitializationStepKind;
+    match step {
+        RepositoryInitializationStepKind::CadenceSkills => "cadence_skills",
+        RepositoryInitializationStepKind::PreCheck => "pre_check",
+        RepositoryInitializationStepKind::RuleConfig => "rule_config",
+        RepositoryInitializationStepKind::McpConfiguration => "mcp_configuration",
+        RepositoryInitializationStepKind::ProjectRulesExamples => "project_rules_examples",
+        RepositoryInitializationStepKind::GitFinalize => "git_finalize",
+    }
+}
+
+fn repository_initialization_failure_item(
+    project_id: &str,
+    operation: &crate::product::repository_store::RepositoryInitializationOperation,
+) -> C1WaitingItemDto {
+    use crate::product::repository_store::RepositoryInitializationStepStatus;
+
+    let completed_steps: Vec<String> = operation
+        .steps
+        .iter()
+        .filter(|step| step.status == RepositoryInitializationStepStatus::Completed)
+        .map(|step| repository_initialization_step_slug(step.step_id).to_string())
+        .collect();
+    let failed_step = operation
+        .failed_step
+        .map(repository_initialization_step_slug)
+        .unwrap_or_default()
+        .to_string();
+    let diagnostics = operation.error.as_ref().map(|error| {
+        RepositoryInitializationFailureDiagnostics {
+            reason_code: error.reason_code.clone(),
+            provider: error.provider.clone(),
+            stderr_summary: error.stderr_summary.clone(),
+            changed_paths: error.changed_paths.clone().unwrap_or_default(),
+            retryable: error.retryable,
+            failed_step: failed_step.clone(),
+        }
+    });
+    C1WaitingItemDto {
+        id: format!(
+            "c1:project:{project_id}:repository_init:{}",
+            operation.operation_id
+        ),
+        kind: WAITING_KIND_REPOSITORY_INITIALIZATION_FAILED.to_string(),
+        reason: format!(
+            "repository initialization failed at {failed_step} ({}); awaiting gateway recovery",
+            operation
+                .error
+                .as_ref()
+                .map(|error| error.reason_code.as_str())
+                .unwrap_or("unknown")
+        ),
+        completed_steps,
+        target: None,
+        plan_id: None,
+        session_id: None,
+        attempt_id: None,
+        gate_id: None,
+        possible_side_effect: None,
+        actions: vec!["resume_repository_initialization".to_string()],
+        next_phase: Some("repository_registered".to_string()),
+        expected_version: None,
+        action_context: Vec::new(),
+        operation_id: Some(operation.operation_id.clone()),
+        diagnostics,
+        project_id: Some(project_id.to_string()),
+        issue_id: None,
+        parent_operation_id: operation.parent_operation_id.clone(),
+        superseded_by: None,
+    }
+}
+
+/// C5 Task 6：project 级初始化失败等待项（issue 级
+/// [`list_c1_waiting_items`] 签名与消费零变化）。读取失败显式上抛。
+pub fn list_project_c1_waiting_items(
+    paths: &ProductAppPaths,
+    project_id: &str,
+) -> Result<Vec<C1WaitingItemDto>, ProductStoreError> {
+    use crate::product::repository_store::RepositoryInitializationOperationStatus;
+    use crate::product::repository_store::RepositoryInitializationOperationStore;
+    use std::collections::HashSet;
+
+    let operations = RepositoryInitializationOperationStore::new(paths.clone()).list(project_id)?;
+    let superseded: HashSet<&str> = operations
+        .iter()
+        .filter_map(|operation| operation.parent_operation_id.as_deref())
+        .collect();
+
+    let mut items = Vec::new();
+    for operation in &operations {
+        let has_successor = superseded.contains(operation.operation_id.as_str());
+        match operation.status {
+            // 链叶 Failed：唯一可 resume 的展示项。
+            RepositoryInitializationOperationStatus::Failed if !has_successor => {
+                items.push(repository_initialization_failure_item(project_id, operation));
+            }
+            // Created/Running 后继：运行中只读项（无动作、无诊断），避免重复执行。
+            RepositoryInitializationOperationStatus::Created
+            | RepositoryInitializationOperationStatus::Running
+                if operation.parent_operation_id.is_some() =>
+            {
+                items.push(C1WaitingItemDto {
+                    id: format!(
+                        "c1:project:{project_id}:repository_init:{}",
+                        operation.operation_id
+                    ),
+                    kind: WAITING_KIND_REPOSITORY_INITIALIZATION_FAILED.to_string(),
+                    reason: "repository initialization resume is running; read-only until terminal"
+                        .to_string(),
+                    completed_steps: Vec::new(),
+                    target: None,
+                    plan_id: None,
+                    session_id: None,
+                    attempt_id: None,
+                    gate_id: None,
+                    possible_side_effect: None,
+                    actions: Vec::new(),
+                    next_phase: Some("repository_registered".to_string()),
+                    expected_version: None,
+                    action_context: Vec::new(),
+                    operation_id: Some(operation.operation_id.clone()),
+                    diagnostics: None,
+                    project_id: Some(project_id.to_string()),
+                    issue_id: None,
+                    parent_operation_id: operation.parent_operation_id.clone(),
+                    superseded_by: None,
+                });
+            }
+            // Completed 后继：原等待项稳定消隐（记录仍可查）。
+            _ => {}
+        }
+    }
+    items.sort_by(|left, right| left.operation_id.cmp(&right.operation_id));
     Ok(items)
 }
 
@@ -497,6 +709,12 @@ fn append_c2_waiting_items(
         next_phase: None,
         expected_version: None,
         action_context: Vec::new(),
+        operation_id: None,
+        diagnostics: None,
+        project_id: None,
+        issue_id: None,
+        parent_operation_id: None,
+        superseded_by: None,
     };
 
     for attempt in &attempts {

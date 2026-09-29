@@ -10,9 +10,10 @@ use uuid::Uuid;
 use super::initializer::ClaudeRepositoryInitializer;
 use super::types::{
     RepositoryInitializationCommandSummary, RepositoryInitializationOperation,
-    RepositoryInitializationOperationInput, RepositoryInitializationProgress,
-    RepositoryInitializationStepKind, RepositoryInitializationSummary, RepositoryRegistrationError,
-    RepositoryRegistrationInput, RepositoryRegistrationSuccess,
+    RepositoryInitializationOperationInput, RepositoryInitializationOperationStatus,
+    RepositoryInitializationProgress, RepositoryInitializationStepKind,
+    RepositoryInitializationSummary, RepositoryRegistrationError, RepositoryRegistrationInput,
+    RepositoryRegistrationSuccess,
 };
 use super::{
     CreateRepositoryInput, RepositoryInitializationOperationStore, RepositoryStore,
@@ -264,6 +265,52 @@ pub struct RepositoryRegistrationCoordinator {
     git_environment: BTreeMap<String, String>,
 }
 
+/// C5 Task 6（REQ-INIT-C5-RESUME）：`resume_initialization` 的解析结果。
+/// `execute=false` 表示 successor 已处于 Running/Completed/Failed——只读
+/// 返回，不得再次执行；`launch` 仅在需要执行时持有 guard。
+pub(crate) struct RepositoryInitializationResume {
+    pub snapshot: RepositoryInitializationOperation,
+    pub execute: bool,
+    pub launch: Option<RepositoryInitializationLaunch>,
+}
+
+impl std::fmt::Debug for RepositoryInitializationResume {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RepositoryInitializationResume")
+            .field("snapshot", &self.snapshot)
+            .field("execute", &self.execute)
+            .field("launch_held", &self.launch.is_some())
+            .finish()
+    }
+}
+
+/// 契约固定的 resume successor 确定性 id：`Uuid::NAMESPACE_URL` + UTF-8 名称
+/// `cadence/repository-initialization/v1\0{failed_operation_id}\0{command_id}`，
+/// 再加 `repository_initialization_` 前缀。
+fn resume_operation_id(failed_operation_id: &str, command_id: &str) -> String {
+    let name = format!(
+        "cadence/repository-initialization/v1\0{failed_operation_id}\0{command_id}"
+    );
+    format!(
+        "repository_initialization_{}",
+        Uuid::new_v5(&Uuid::NAMESPACE_URL, name.as_bytes()).simple()
+    )
+}
+
+/// command_id 为空或含控制字符 → 422 语义（稳定码
+/// `repository_initialization_resume_invalid_command`）。
+fn validate_resume_command_id(command_id: &str) -> Result<(), RepositoryRegistrationError> {
+    if command_id.is_empty() || command_id.chars().any(char::is_control) {
+        return Err(registration_error(
+            "resume_command",
+            "repository_initialization_resume_invalid_command",
+            "command_id must be non-empty and free of control characters",
+            false,
+            "Provide a fresh explicit command_id, then resume again.",
+        ));
+    }
+    Ok(())
+}
 impl RepositoryRegistrationCoordinator {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -408,6 +455,127 @@ impl RepositoryRegistrationCoordinator {
             git_root,
             snapshot,
             _guard: guard,
+        })
+    }
+
+
+    /// C5 Task 6（REQ-INIT-C5-RESUME）：GAP-J 产品层恢复入口——先校验原
+    /// operation 为 Failed 终态，再以**原 operation.input 的冻结值**与确定性
+    /// id 构造 Created 后继（不重读用户输入、不走随机 begin）。顺序：
+    /// project+git_root 运行互斥（`reject_duplicate`）→ `InitializationGuard`
+    /// → durable Created create → 交由调用方执行既有全步骤；任一步失败释放
+    /// guard/registry，不留下可执行孤儿。同 `(failed_operation_id, command_id)`
+    /// 重放命中同一 successor：Created 仍可执行一次，Running/Completed/Failed
+    /// 只读返回；再次恢复必须携带新的显式 command_id。
+    #[allow(clippy::result_large_err)]
+    pub(crate) async fn resume_initialization(
+        &self,
+        project_id: &str,
+        failed_operation_id: &str,
+        command_id: &str,
+        _cancellation: CancellationToken,
+    ) -> Result<RepositoryInitializationResume, RepositoryRegistrationError> {
+        validate_resume_command_id(command_id)?;
+        let original = self
+            .operations
+            .get(project_id, failed_operation_id)
+            .map_err(|error| match error {
+                ProductStoreError::NotFound { .. } => registration_error(
+                    "resume_lookup",
+                    "repository_initialization_operation_not_found",
+                    &error.to_string(),
+                    false,
+                    "Query the repository initialization operation, then resume.",
+                ),
+                error => OperationProgressReporter::operation_store_error(error),
+            })?;
+        if original.status != RepositoryInitializationOperationStatus::Failed {
+            return Err(registration_error(
+                "resume_precondition",
+                "repository_initialization_resume_not_failed",
+                &format!(
+                    "operation status is {:?}; only a failed terminal operation can be resumed",
+                    original.status
+                ),
+                false,
+                "Resume the latest failed operation in the chain with a fresh command.",
+            ));
+        }
+
+        let successor_id = resume_operation_id(failed_operation_id, command_id);
+        // 同 command 重放：既有 successor 按状态分流，不重复 acquire/execute。
+        let existing_created = match self.operations.get(project_id, &successor_id) {
+            Ok(existing) => match existing.status {
+                RepositoryInitializationOperationStatus::Created => Some(existing),
+                RepositoryInitializationOperationStatus::Running
+                | RepositoryInitializationOperationStatus::Completed
+                | RepositoryInitializationOperationStatus::Failed => {
+                    return Ok(RepositoryInitializationResume {
+                        snapshot: existing,
+                        execute: false,
+                        launch: None,
+                    });
+                }
+            },
+            Err(ProductStoreError::NotFound { .. }) => None,
+            Err(error) => return Err(OperationProgressReporter::operation_store_error(error)),
+        };
+
+        let git_root = original.input.git_root.clone();
+        self.reject_duplicate(project_id, &git_root)
+            .map_err(|error| *error)?;
+        let guard = InitializationGuard::try_acquire(git_root.clone()).map_err(|error| *error)?;
+        self.reject_duplicate(project_id, &git_root)
+            .map_err(|error| *error)?;
+
+        let snapshot = match existing_created {
+            Some(existing) => {
+                // 既有 Created successor 的重放路径：superseded 关联幂等补齐。
+                self.operations
+                    .mark_superseded(project_id, failed_operation_id, successor_id.clone())
+                    .map_err(OperationProgressReporter::operation_store_error)?;
+                existing
+            }
+            None => {
+                let mut successor = RepositoryInitializationOperation::new(
+                    successor_id.clone(),
+                    project_id.to_string(),
+                    original.input.clone(),
+                    (self.clock)(),
+                );
+                successor.parent_operation_id = Some(original.operation_id.clone());
+                successor.resume_command_id = Some(command_id.to_string());
+                self.operations
+                    .create(successor)
+                    .map_err(OperationProgressReporter::operation_store_error)?;
+                let created = self
+                    .operations
+                    .get(project_id, &successor_id)
+                    .map_err(OperationProgressReporter::operation_store_error)?;
+                self.operations
+                    .mark_superseded(project_id, failed_operation_id, successor_id.clone())
+                    .map_err(OperationProgressReporter::operation_store_error)?;
+                created
+            }
+        };
+
+        Ok(RepositoryInitializationResume {
+            snapshot: snapshot.clone(),
+            execute: true,
+            launch: Some(RepositoryInitializationLaunch {
+                operation_id: successor_id,
+                project_id: project_id.to_string(),
+                input: RepositoryRegistrationInput {
+                    project_id: project_id.to_string(),
+                    name: snapshot.input.name.clone(),
+                    path: snapshot.input.git_root.clone(),
+                    default_policy_preset: snapshot.input.default_policy_preset.clone(),
+                    default_provider_mode: snapshot.input.default_provider_mode.clone(),
+                },
+                git_root,
+                snapshot,
+                _guard: guard,
+            }),
         })
     }
 

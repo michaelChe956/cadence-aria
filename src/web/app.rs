@@ -92,6 +92,14 @@ pub fn build_web_router_with_evidence(state: WebAppState, evidence_enabled: bool
             get(handlers::get_repository_initialization),
         )
         .route(
+            "/api/projects/{project_id}/repository-initializations/waiting-items",
+            get(handlers::get_project_repository_initialization_waiting_items),
+        )
+        .route(
+            "/api/projects/{project_id}/repository-initializations/{operation_id}/resume",
+            post(handlers::post_repository_initialization_resume),
+        )
+        .route(
             "/api/projects/{project_id}/codebases",
             get(handlers::list_codebases),
         )

@@ -397,6 +397,7 @@ mod repository_initialization;
 pub use repository_initialization::{
     RepositoryInitializationOperationDto, RepositoryInitializationResultDto,
     RepositoryInitializationStepDto, RepositoryRegistrationInitializationDto,
+    ResumeRepositoryInitializationRequest,
 };
 
 mod aggregate_initialization;

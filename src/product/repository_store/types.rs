@@ -196,6 +196,16 @@ pub struct RepositoryInitializationOperation {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_finalize_checkpoint: Option<RepositoryRegistrationSuccess>,
     pub error: Option<RepositoryRegistrationError>,
+    /// C5 Task 6（REQ-INIT-C5-RESUME）additive durable linkage：resume 产生的
+    /// 后继 operation 指回原 Failed operation；旧 JSON 缺字段视为无 parent。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_operation_id: Option<String>,
+    /// 触发本次 resume 的用户显式 command_id（与确定性 id 派生同源）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_command_id: Option<String>,
+    /// 原 Failed operation 被哪个后继接续（投影按 parent→后继链消隐）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub completed_at: Option<String>,
@@ -227,6 +237,9 @@ impl RepositoryInitializationOperation {
             result: None,
             git_finalize_checkpoint: None,
             error: None,
+            parent_operation_id: None,
+            resume_command_id: None,
+            superseded_by: None,
             updated_at: created_at.clone(),
             created_at,
             completed_at: None,

@@ -176,7 +176,8 @@ pub use pointer_publication::{
 };
 pub use repository_registration::{
     RepositoryRegistrationDependencies, RepositoryRegistrationDependenciesBuilder,
-    create_repository, get_repository_initialization,
+    create_repository, get_project_repository_initialization_waiting_items,
+    get_repository_initialization, post_repository_initialization_resume,
 };
 pub(crate) use workspace_choice::{
     get_workspace_choice_response_status, post_workspace_choice_response,
