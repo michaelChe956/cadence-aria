@@ -131,15 +131,19 @@ impl CodingWorkspaceEngine {
                 &candidate.issue_id,
                 &candidate.id,
             )?;
-            let current = match self.store.ensure_provider_run_allowed(&current) {
+            let current = match self.admit_provider_run(
+                &current,
+                &current.stage,
+                "failed_review_recovery",
+            ) {
                 Ok(current) => current,
-                Err(ProductStoreError::Io(message))
+                Err(CodingWorkspaceEngineError::Store(ProductStoreError::Io(message)))
                     if message == "plan_amendment_blocks_provider_run" =>
                 {
                     amendment_blocked.push(current);
                     continue;
                 }
-                Err(error) => return Err(error.into()),
+                Err(error) => return Err(error),
             };
             if matches!(
                 recoverable_failed_code_review(&self.store, &current)?,
@@ -171,7 +175,11 @@ impl CodingWorkspaceEngine {
         gate_id: &str,
     ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
         validate_relative_id(gate_id)?;
-        let current = self.store.ensure_provider_run_allowed(attempt)?;
+        let current = self.admit_provider_run(
+            attempt,
+            &CodingExecutionStage::CodeReview,
+            "failed_review_recovery",
+        )?;
         let Some(recovery) = recoverable_failed_code_review(&self.store, &current)? else {
             return Err(recovery_state_changed());
         };

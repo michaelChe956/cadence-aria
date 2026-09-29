@@ -28,6 +28,7 @@ pub(crate) mod plan_repair_reconcile;
 mod recovery;
 mod report;
 mod role_run;
+mod run_exclusion;
 mod role_run_event;
 mod split_audit;
 pub use split_audit::*;
@@ -47,6 +48,7 @@ pub(crate) use admission::{
 pub(crate) use amendment_delivery::register_plan_amendment_delivery_mark_failpoint;
 pub use attempt_creation::WorkItemAttemptCreationGuard;
 pub use attempt::ClaimCodingStartOutcome;
+pub use run_exclusion::{CodingAttemptCommandRecord, CodingRunExclusionDecision};
 pub use git_operation::*;
 pub use group_initialization::*;
 pub use group_validation::*;

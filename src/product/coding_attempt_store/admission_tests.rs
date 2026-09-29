@@ -1463,3 +1463,212 @@
             ProductStoreError::IdentityMismatch { kind: "enrollment_binding", .. }
         ));
     }
+
+    // ─── C2 Task 2（REQ-CRO-02）：最小编码互斥、接管判别与 attempt 命令账本 ───
+
+    /// 第二个 kick 撞上活跃租约（另一活跃 attempt 持有）：admission 必须
+    /// `AlreadyRunning`（通知"已在运行／请等待"），不抢租约、不启动 provider；
+    /// 命令账本记录首次 durable 结果，同 command 同 payload 重放同一结论，
+    /// 同 command 异 payload fail-closed。
+    #[test]
+    fn second_kick_on_active_lease_returns_already_running() {
+        use crate::product::coding_attempt_store::CodingRunExclusionDecision;
+        use crate::product::models::automation::LeaseDisposition;
+
+        let fixture = legacy_fixture();
+        // 第二个 kick 的目标：同 issue 下另一 attempt B。B 必须在 A 活跃前
+        // 创建（active_coding_attempt 不变式），创建后停留在 Created——双 kick
+        // 撞活跃租约的现场形态。
+        let attempt_b = fixture
+            .store
+            .create_attempt(CreateCodingAttemptInput {
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                work_item_id: "work_item_0002".to_string(),
+                base_branch: "main".to_string(),
+                branch_name: "aria/attempt-b".to_string(),
+                worktree_path: None,
+                provider_config_snapshot: provider_snapshot(),
+                target_snapshot: None,
+                max_auto_rework: 0,
+            })
+            .unwrap();
+        // 活跃持有者：attempt A（Running）绑定 issue worktree 租约。
+        seed_attempt_status(&fixture, CodingAttemptStatus::Running);
+        let lifecycle = lease_worktree_and_bind_attempt(&fixture);
+        let decision = fixture
+            .store
+            .admit_coding_run_exclusive(&attempt_b, "cmd-kick-b-1", "digest-b-1")
+            .expect("admission must classify instead of failing");
+        match &decision {
+            CodingRunExclusionDecision::AlreadyRunning { lease } => {
+                assert_eq!(lease.disposition, LeaseDisposition::ActiveWait);
+                assert_eq!(lease.lease_id, fixture.attempt.id);
+            }
+            other => panic!("expected AlreadyRunning, got {other:?}"),
+        }
+        // 租约事实未被抢占：owner 仍是 attempt A。
+        let record = lifecycle
+            .get_issue_shared_worktree(PROJECT_ID, ISSUE_ID)
+            .expect("record")
+            .expect("present");
+        assert_eq!(
+            record.current_lock_owner_id.as_deref(),
+            Some(fixture.attempt.id.as_str())
+        );
+        // 不启动 provider：attempt B 无任何 role run。
+        assert!(
+            fixture
+                .store
+                .list_role_runs(PROJECT_ID, ISSUE_ID, &attempt_b.id)
+                .expect("role runs")
+                .is_empty()
+        );
+        // 命令账本已记录首次 durable 结果（NeedsHuman 停等）。
+        let recorded = fixture
+            .store
+            .find_attempt_command_result(PROJECT_ID, ISSUE_ID, &attempt_b.id, "cmd-kick-b-1")
+            .expect("ledger read")
+            .expect("ledger entry recorded");
+        assert_eq!(
+            recorded,
+            crate::product::coding_attempt_store::CodingAttemptCommandRecord {
+                command_id: "cmd-kick-b-1".to_string(),
+                payload_digest: "digest-b-1".to_string(),
+                state: crate::product::models::automation::OperationState::NeedsHuman,
+                recorded_at: recorded.recorded_at.clone(),
+            }
+        );
+        // 同 command 同 payload 重放首次 durable 结果（仍 AlreadyRunning）。
+        let replay = fixture
+            .store
+            .admit_coding_run_exclusive(&attempt_b, "cmd-kick-b-1", "digest-b-1")
+            .expect("replay must not fail");
+        assert!(matches!(
+            replay,
+            CodingRunExclusionDecision::AlreadyRunning { .. }
+        ));
+        // 同 command 异 payload fail-closed（请刷新）。
+        let conflict = fixture
+            .store
+            .admit_coding_run_exclusive(&attempt_b, "cmd-kick-b-1", "digest-b-OTHER")
+            .expect_err("payload drift must fail closed");
+        assert!(matches!(
+            conflict,
+            crate::product::json_store::ProductStoreError::Conflict { .. }
+        ));
+    }
+
+    /// 死亡租约 → `TakeoverRequired`（未确认不继续）；接管清出后同请求
+    /// 继续 → `Allowed`；证据缺失/瞬态 owner → `LeaseUnknown` 停等。
+    #[test]
+    fn coding_run_admission_takeover_and_unknown_lease() {
+        use crate::product::coding_attempt_store::CodingRunExclusionDecision;
+        use crate::product::models::automation::LeaseDisposition;
+
+        // ── 死亡（owner attempt 终态）：TakeoverRequired，未确认不继续。
+        let fixture = legacy_fixture();
+        let attempt_b = fixture
+            .store
+            .create_attempt(CreateCodingAttemptInput {
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                work_item_id: "work_item_0002".to_string(),
+                base_branch: "main".to_string(),
+                branch_name: "aria/attempt-b".to_string(),
+                worktree_path: None,
+                provider_config_snapshot: provider_snapshot(),
+                target_snapshot: None,
+                max_auto_rework: 0,
+            })
+            .unwrap();
+        seed_attempt_status(&fixture, CodingAttemptStatus::Running);
+        let lifecycle = lease_worktree_and_bind_attempt(&fixture);
+        // 持有者 attempt A 转终态 → 租约死亡。
+        seed_attempt_status(&fixture, CodingAttemptStatus::Failed);
+        let decision = fixture
+            .store
+            .admit_coding_run_exclusive(&attempt_b, "cmd-takeover-1", "digest-t-1")
+            .expect("classify");
+        match &decision {
+            CodingRunExclusionDecision::TakeoverRequired { lease } => {
+                assert_eq!(lease.disposition, LeaseDisposition::DeadNeedsTakeover);
+            }
+            other => panic!("expected TakeoverRequired, got {other:?}"),
+        }
+        // 用户确认接管（复用 C1 owner CAS 清出）后，同请求继续 → Allowed。
+        lifecycle
+            .release_issue_worktree_lock_by_owner(PROJECT_ID, ISSUE_ID, &fixture.attempt.id)
+            .expect("takeover cleared the dead owner");
+        let decision = fixture
+            .store
+            .admit_coding_run_exclusive(&attempt_b, "cmd-takeover-1", "digest-t-1")
+            .expect("classify after takeover");
+        assert!(matches!(
+            decision,
+            CodingRunExclusionDecision::Allowed(ref admitted)
+                if admitted.id == attempt_b.id
+        ));
+
+        // ── 未知（瞬态 lease owner，未绑定 attempt）：LeaseUnknown 停等。
+        let fixture = legacy_fixture();
+        let attempt_b = fixture
+            .store
+            .create_attempt(CreateCodingAttemptInput {
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                work_item_id: "work_item_0002".to_string(),
+                base_branch: "main".to_string(),
+                branch_name: "aria/attempt-b2".to_string(),
+                worktree_path: None,
+                provider_config_snapshot: provider_snapshot(),
+                target_snapshot: None,
+                max_auto_rework: 0,
+            })
+            .unwrap();
+        seed_attempt_status(&fixture, CodingAttemptStatus::Running);
+        let lifecycle = lease_worktree(&fixture);
+        lifecycle
+            .try_acquire_issue_worktree_lock(
+                PROJECT_ID,
+                ISSUE_ID,
+                WORK_ITEM_ID,
+                "issue_worktree_lease_transient",
+            )
+            .expect("acquire transient lease");
+        let decision = fixture
+            .store
+            .admit_coding_run_exclusive(&attempt_b, "cmd-unknown-1", "digest-u-1")
+            .expect("classify");
+        match &decision {
+            CodingRunExclusionDecision::LeaseUnknown { lease } => {
+                assert_eq!(lease.disposition, LeaseDisposition::UnknownNeedsHuman);
+            }
+            other => panic!("expected LeaseUnknown, got {other:?}"),
+        }
+        // 无租约事实（未启动过 worktree 锁）不得拦截既有链路：自持活跃租约的
+        // 阶段续跑（self re-entry）照常 Allowed。
+        let fixture = legacy_fixture();
+        let running = fixture
+            .store
+            .seed_running_attempt_for_test(PROJECT_ID, ISSUE_ID, &fixture.attempt.id)
+            .unwrap();
+        let decision = fixture
+            .store
+            .admit_coding_run_exclusive(&running, "cmd-self-1", "digest-s-1")
+            .expect("no lease facts must not block legacy attempts");
+        assert!(matches!(
+            decision,
+            CodingRunExclusionDecision::Allowed(ref admitted) if admitted.id == running.id
+        ));
+        // 自持活跃租约（owner == 本 attempt）也是合法续跑。
+        lease_worktree_and_bind_attempt(&fixture);
+        let decision = fixture
+            .store
+            .admit_coding_run_exclusive(&running, "cmd-self-2", "digest-s-2")
+            .expect("self-held active lease is legitimate re-entry");
+        assert!(matches!(
+            decision,
+            CodingRunExclusionDecision::Allowed(ref admitted) if admitted.id == running.id
+        ));
+    }

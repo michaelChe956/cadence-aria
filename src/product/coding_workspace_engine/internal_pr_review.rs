@@ -224,7 +224,11 @@ impl CodingWorkspaceEngine {
         provider: &dyn StreamingProviderAdapter,
         command_rx: &mut mpsc::Receiver<CodingRunnerCommand>,
     ) -> Result<InternalPrReview, CodingWorkspaceEngineError> {
-        let attempt = self.store.ensure_provider_run_allowed(attempt)?;
+        let attempt = self.admit_provider_run(
+            attempt,
+            &CodingExecutionStage::InternalPrReview,
+            "execute",
+        )?;
         let Some(worktree_path) = attempt.worktree_path.as_ref() else {
             return Err(CodingWorkspaceEngineError::MissingWorktree(
                 attempt.id.clone(),
@@ -543,7 +547,11 @@ impl CodingWorkspaceEngine {
         use super::group_review_orchestrator::{GroupReviewOrchestrator, RealGroupReviewExecutor};
         use super::group_review_prompts::GroupReviewPromptBuilder;
 
-        let attempt = self.store.ensure_provider_run_allowed(attempt)?;
+        let attempt = self.admit_provider_run(
+            attempt,
+            &CodingExecutionStage::InternalPrReview,
+            "group_final_review",
+        )?;
         if attempt.scope != CodingAttemptScope::WorkItemGroup {
             return Err(CodingWorkspaceEngineError::FinalConfirmNotReady(
                 attempt.id.clone(),

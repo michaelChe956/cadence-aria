@@ -44,7 +44,7 @@ impl CodingWorkspaceEngine {
         context: &CodingExecutionContext,
         command_rx: &mut mpsc::Receiver<CodingRunnerCommand>,
     ) -> Result<CoderExecutionOutcome, CodingWorkspaceEngineError> {
-        let attempt = self.store.ensure_provider_run_allowed(attempt)?;
+        let attempt = self.admit_provider_run(attempt, &CodingExecutionStage::Coding, "execute")?;
         let Some(worktree_path) = attempt.worktree_path.as_ref() else {
             return Err(CodingWorkspaceEngineError::MissingWorktree(
                 attempt.id.clone(),

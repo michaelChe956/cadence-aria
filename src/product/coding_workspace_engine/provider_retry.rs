@@ -668,7 +668,7 @@ impl CodingWorkspaceEngine {
                 expected.id
             )));
         }
-        let current = self.store.ensure_provider_run_allowed(&current)?;
+        let current = self.admit_provider_run(&current, &expected.stage, "provider_retry")?;
         if current.status != CodingAttemptStatus::Running || current.stage != expected.stage {
             return Err(CodingWorkspaceEngineError::ProviderStream(format!(
                 "provider_retry_attempt_state_changed: {}",

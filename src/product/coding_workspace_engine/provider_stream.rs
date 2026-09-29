@@ -195,7 +195,7 @@ impl CodingWorkspaceEngine {
             suppress_failure_side_effects,
             validated_input,
         } = run;
-        self.store.ensure_provider_run_allowed(attempt)?;
+        self.admit_provider_run(attempt, &attempt.stage, "provider_stream")?;
         // Task 12:逻辑代码库 target(`attempt.target_snapshot.is_some()`)的 provider
         // 必须经 `LogicalCodebaseProviderGateway`(表现为 `validated_input` 非空)。禁止:
         // 1. 在无 gateway(`validated_input` 为 `None`)时直接启动 provider(不论是否为

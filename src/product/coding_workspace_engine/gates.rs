@@ -1042,166 +1042,62 @@ impl CodingWorkspaceEngine {
 
     // ─── C1 Task 6（REQ-WIGA-03）：租约三态判定与确认接管 ───
 
-    /// 租约三态判定（应用服务，只读）。只从现有 durable 证据分类：
-    /// `IssueSharedWorktree.current_lock_owner_id`/`current_active_work_item_id`
-    /// 与 owner attempt 的 status；issue 维老路径优先，多仓按仓维确定性
-    /// 顺序检查。活跃→`ActiveWait`（等待，不抢占）；owner 是终态 attempt
-    /// 或锁已明确释放→`DeadNeedsTakeover`（需用户确认才接管）；owner 未
-    /// 绑定 attempt（`*_worktree_lease_*` 瞬态）、证据缺失或读失败→
-    /// `UnknownNeedsHuman`（绝不抢占）。不写任何文件、不启动 provider。
+    /// C2 Task 2（REQ-CRO-02）：engine 侧统一 admission 入口——把 store 的
+    /// `admit_coding_run_exclusive`（命令账本 → 租约三态 → 既有
+    /// `ensure_provider_run_allowed`）映射为既有错误面；互斥停等以稳定
+    /// reason code 呈现（已在运行／需确认接管／租约未知），不启动 provider。
+    pub(crate) fn admit_provider_run(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        stage: &CodingExecutionStage,
+        purpose: &str,
+    ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
+        use crate::product::coding_attempt_store::CodingRunExclusionDecision;
+
+        let command_id = format!("admit-{}-{:?}-{}", attempt.id, stage, purpose);
+        let payload_digest = format!(
+            "{}|{}|{}|{:?}|{}",
+            attempt.project_id, attempt.issue_id, attempt.id, stage, purpose
+        );
+        match self
+            .store
+            .admit_coding_run_exclusive(attempt, &command_id, &payload_digest)?
+        {
+            CodingRunExclusionDecision::Allowed(authoritative) => Ok(authoritative),
+            CodingRunExclusionDecision::AlreadyRunning { lease } => {
+                Err(CodingWorkspaceEngineError::ProviderStream(format!(
+                    "coding_run_already_running: lease {} 已在运行，请等待",
+                    lease.lease_id
+                )))
+            }
+            CodingRunExclusionDecision::TakeoverRequired { lease } => {
+                Err(CodingWorkspaceEngineError::ProviderStream(format!(
+                    "coding_run_takeover_required: lease {} 持有者已终止，需确认接管后继续",
+                    lease.lease_id
+                )))
+            }
+            CodingRunExclusionDecision::LeaseUnknown { lease } => {
+                Err(CodingWorkspaceEngineError::ProviderStream(format!(
+                    "coding_run_lease_unknown: 租约状态未知，已停等：{}",
+                    lease.evidence.join("; ")
+                )))
+            }
+        }
+    }
+
+    /// 租约三态判定（应用服务，只读；实现移至 `CodingAttemptStore`，此处
+    /// 委托保持既有公共签名，单一实现见 run_exclusion.rs）。只从现有
+    /// durable 证据分类：活跃→`ActiveWait`（等待，不抢占）；owner 终态或
+    /// 锁已明确释放→`DeadNeedsTakeover`（需确认才接管）；瞬态 owner、
+    /// 证据缺失或读失败→`UnknownNeedsHuman`（绝不抢占）。
     pub fn classify_worktree_lease(
         &self,
         project_id: &str,
         issue_id: &str,
     ) -> crate::product::models::automation::LeaseDecision {
-        use crate::product::lifecycle_store::LifecycleStore;
-        use crate::product::models::automation::{LeaseDecision, LeaseDisposition};
-        use crate::product::models::IssueSharedWorktree;
-
-        let lifecycle = LifecycleStore::new(self.store.paths());
-        match lifecycle.get_issue_shared_worktree(project_id, issue_id) {
-            Ok(Some(record)) => self.classify_worktree_record(&record),
-            Ok(None) => {
-                let repo_ids = match lifecycle.list_repo_shared_worktrees(project_id, issue_id) {
-                    Ok(ids) => ids,
-                    Err(error) => {
-                        return LeaseDecision {
-                            disposition: LeaseDisposition::UnknownNeedsHuman,
-                            lease_id: String::new(),
-                            last_activity_at: None,
-                            evidence: vec![format!("list repo worktrees failed: {error}")],
-                        };
-                    }
-                };
-                let mut free_records = 0usize;
-                for repository_id in repo_ids {
-                    match lifecycle.get_repo_shared_worktree(
-                        project_id,
-                        issue_id,
-                        repository_id,
-                    ) {
-                        Ok(Some(record)) => {
-                            if record.current_lock_owner_id.is_some() {
-                                return self.classify_worktree_record(&record);
-                            }
-                            free_records += 1;
-                        }
-                        Ok(None) => {}
-                        Err(error) => {
-                            return LeaseDecision {
-                                disposition: LeaseDisposition::UnknownNeedsHuman,
-                                lease_id: String::new(),
-                                last_activity_at: None,
-                                evidence: vec![format!(
-                                    "repo worktree {} read failed: {error}",
-                                    repository_id.0
-                                )],
-                            };
-                        }
-                    }
-                }
-                if free_records > 0 {
-                    return LeaseDecision {
-                        disposition: LeaseDisposition::DeadNeedsTakeover,
-                        lease_id: String::new(),
-                        last_activity_at: None,
-                        evidence: vec![
-                            "worktree lock explicitly released".to_string(),
-                            "no repo worktree holds an owner".to_string(),
-                        ],
-                    };
-                }
-                LeaseDecision {
-                    disposition: LeaseDisposition::UnknownNeedsHuman,
-                    lease_id: String::new(),
-                    last_activity_at: None,
-                    evidence: vec!["worktree record not found for issue".to_string()],
-                }
-            }
-            Err(error) => LeaseDecision {
-                disposition: LeaseDisposition::UnknownNeedsHuman,
-                lease_id: String::new(),
-                last_activity_at: None,
-                evidence: vec![format!("issue worktree read failed: {error}")],
-            },
-        }
+        self.store.classify_worktree_lease(project_id, issue_id)
     }
 
-    /// 单条 worktree 记录的三态分类：owner 缺失按证据一致性分流（无
-    /// active item＝已释放；有 active item＝证据不一致→Unknown）；owner
-    /// 在场时按 owner attempt 的 status 判活跃/死亡，owner 不是本 issue
-    /// 的 attempt（瞬态 lease 前缀或漂移）一律 Unknown（fail-closed）。
-    fn classify_worktree_record(
-        &self,
-        record: &crate::product::models::IssueSharedWorktree,
-    ) -> crate::product::models::automation::LeaseDecision {
-        use crate::product::models::automation::{LeaseDecision, LeaseDisposition};
-
-        let unknown = |messages: Vec<String>| LeaseDecision {
-            disposition: LeaseDisposition::UnknownNeedsHuman,
-            lease_id: record.current_lock_owner_id.clone().unwrap_or_default(),
-            last_activity_at: Some(record.updated_at.clone()),
-            evidence: messages,
-        };
-        match (&record.current_lock_owner_id, &record.current_active_work_item_id) {
-            (None, None) => LeaseDecision {
-                disposition: LeaseDisposition::DeadNeedsTakeover,
-                lease_id: String::new(),
-                last_activity_at: Some(record.updated_at.clone()),
-                evidence: vec![
-                    "worktree lock explicitly released".to_string(),
-                    format!("last completed item: {:?}", record.last_completed_work_item_id),
-                ],
-            },
-            (None, Some(active)) => unknown(vec![
-                "lock owner missing while active work item present".to_string(),
-                format!("active work item: {active}"),
-            ]),
-            (Some(owner), active) => {
-                let mut evidence = vec![
-                    format!("worktree lock owner: {owner}"),
-                    format!("active work item: {active:?}"),
-                ];
-                match self.store.get_attempt(&record.project_id, &record.issue_id, owner) {
-                    Ok(attempt) if attempt.status.is_active() => {
-                        evidence.push(format!(
-                            "owner attempt {} is active ({:?})",
-                            attempt.id, attempt.status
-                        ));
-                        LeaseDecision {
-                            disposition: LeaseDisposition::ActiveWait,
-                            lease_id: owner.clone(),
-                            last_activity_at: Some(record.updated_at.clone()),
-                            evidence,
-                        }
-                    }
-                    Ok(attempt) => {
-                        evidence.push(format!(
-                            "owner attempt {} is terminal ({:?})",
-                            attempt.id, attempt.status
-                        ));
-                        LeaseDecision {
-                            disposition: LeaseDisposition::DeadNeedsTakeover,
-                            lease_id: owner.clone(),
-                            last_activity_at: Some(record.updated_at.clone()),
-                            evidence,
-                        }
-                    }
-                    Err(crate::product::json_store::ProductStoreError::NotFound { .. }) => {
-                        evidence.push(format!(
-                            "owner {owner} does not resolve to an attempt of this issue; \
-                             liveness cannot be proven"
-                        ));
-                        unknown(evidence)
-                    }
-                    Err(error) => {
-                        evidence.push(format!("owner attempt read failed: {error}"));
-                        unknown(evidence)
-                    }
-                }
-            }
-        }
-    }
 
     /// 死亡租约确认接管（应用服务）。前置链：命令账本幂等（同 command
     /// 同 payload Replayed、异 payload fail-closed）→ 当前 enrollment

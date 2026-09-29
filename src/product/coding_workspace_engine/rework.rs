@@ -31,7 +31,7 @@ impl CodingWorkspaceEngine {
         provider: &dyn StreamingProviderAdapter,
         command_rx: &mut mpsc::Receiver<CodingRunnerCommand>,
     ) -> Result<CoderExecutionOutcome, CodingWorkspaceEngineError> {
-        let current = self.store.ensure_provider_run_allowed(attempt)?;
+        let current = self.admit_provider_run(attempt, &CodingExecutionStage::Coding, "rework")?;
         let rework_round = current.rework_count + 1;
         if current.rework_count >= current.max_auto_rework {
             let actions = vec![
