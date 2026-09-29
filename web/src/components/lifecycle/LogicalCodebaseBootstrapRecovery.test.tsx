@@ -11,7 +11,12 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LogicalCodebaseBootstrapCard } from "./LogicalCodebaseBootstrapCard";
-import type { LogicalCodebaseBootstrapProjection } from "../../api/types";
+import type {
+  BootstrapStepProjectionDto,
+  LogicalCodebaseBootstrapProjection,
+  LogicalCodebaseBootstrapStepName,
+  LogicalCodebaseBootstrapStepStatus,
+} from "../../api/types";
 
 const PROJECT_ID = "project_0001";
 const LC_ID = "logical_codebase_0001";
@@ -68,10 +73,10 @@ function installFetchRouter(): void {
 }
 
 const step = (
-  name: string,
-  status: string,
-  extra: Record<string, unknown> = {},
-) => ({
+  name: LogicalCodebaseBootstrapStepName,
+  status: LogicalCodebaseBootstrapStepStatus,
+  extra: Partial<BootstrapStepProjectionDto> = {},
+): BootstrapStepProjectionDto => ({
   step: name,
   status,
   object_id: `${name}-object`,

@@ -1278,7 +1278,7 @@ describe("C4 logical codebase bootstrap cards", () => {
     // 一次点击派发一个稳定 command id；提交后按钮禁用，重复点击零出站
     //（服务端再按同 command 幂等重放，provider/action 计数不增）。
     expect(facade.sendBootstrapAction).toHaveBeenCalledTimes(1);
-    const call = facade.sendBootstrapAction.mock.calls[0][0];
+    const call = vi.mocked(facade.sendBootstrapAction).mock.calls[0][0];
     expect(call.commandId).toContain("bootstrap_member_index_op_0001");
     expect(call.step).toBe("member_index");
     expect(call.action).toBe("retry");

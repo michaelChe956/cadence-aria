@@ -2,6 +2,7 @@ import { act, render, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   CodingFinalConfirmInfoItem,
+  LogicalCodebaseBootstrapNoticeDto,
   RecentCompletionInfoItem,
   WorkspaceSessionSummary,
 } from "../api/types";
@@ -815,7 +816,7 @@ describe("useWorkspaceSessionObservers", () => {
 
 describe("C4 logical codebase bootstrap notice source", () => {
   it("surfaces bootstrap waiting notices per LC and keeps them out of the error count", async () => {
-    const bootstrapNotice = {
+    const bootstrapNotice: LogicalCodebaseBootstrapNoticeDto = {
       key: "bootstrap:identity:migration_0001:identity_migration_failed",
       step: "identity",
       object_id: "migration_0001",
