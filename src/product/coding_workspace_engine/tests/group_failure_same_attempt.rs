@@ -57,6 +57,10 @@ fn sc_advance_fixture() -> (
     let (root, store, attempt) = fixture();
     let worktree = root.path().join("worktree");
     std::fs::create_dir_all(&worktree).expect("worktree directory");
+    // C2 Task 6 起,execute 认领前会对活跃 unit run 冻结 worktree 真实
+    // HEAD(`freeze_active_unit_run_start_commit` → `rev-parse HEAD`,
+    // fail-closed),fixture 必须提供真实 git 仓库而非空目录。
+    init_test_git_repo(&worktree);
     let mut attempt = store
         .update_attempt_worktree_path(
             &attempt.project_id,

@@ -106,7 +106,20 @@ impl ProductionPolicyTargetResolver {
                 logical_repository_id: Some(logical_id),
                 checkout_id: Some(checkout_id),
             })
-            .map_err(|error| ProviderGatewayError::Target(error.to_string()))?;
+            .map_err(|error| match error {
+                // 请求 checkout 未在 LC 子树命中＝请求身份与权威身份在
+                // checkout_id 字段上漂移:保持与 project 级路径同形的
+                // `TargetMismatch { field: "checkout_id" }`(R9「lc 寻址
+                // 不放松身份复验」契约);其余 authority 冲突(重复来源/
+                // legacy 布局/成员未知等)仍按 Target fail-closed。
+                crate::product::json_store::ProductStoreError::NotFound {
+                    kind: "repository_checkout",
+                    ..
+                } => ProviderGatewayError::TargetMismatch {
+                    field: "checkout_id".to_string(),
+                },
+                error => ProviderGatewayError::Target(error.to_string()),
+            })?;
         }
 
 
