@@ -409,3 +409,136 @@ async fn send_to_coder_after_review_limit_accepts_actionable_blocked_code_review
         vec!["src/lib.rs:42 missing validation -> add validation"]
     );
 }
+
+/// C2 Task 7（#18／BYPASS-18，REQ-GCE-C2-INSTR）：返修指令单次消费事务。
+/// rework 落地新指令后启动返修 Coder：provider 收到的 prompt 含指令全文，
+/// 认领 journal 绑定渲染 digest 与上下文 hash；中断后重放同一认领命中
+/// 同一结果（Replayed），指令不被消费第二次；异渲染 fail-closed。
+#[tokio::test]
+async fn rework_instruction_claim_binds_render_before_consumption() {
+    let (_root, store, attempt) = running_attempt_with_worktree();
+    let attempt = store
+        .replace_attempt_provider_conversations(
+            &attempt,
+            vec![ProviderConversationRef {
+                role: ProviderConversationRole::Coder,
+                provider: ProviderName::Codex,
+                provider_session_id: "coder-session-before-rework".to_string(),
+                updated_at: "2026-06-01T00:00:00Z".to_string(),
+                last_node_id: Some("coding_node_0001".to_string()),
+            }],
+        )
+        .expect("record coder conversation");
+    let attempt = store
+        .update_attempt_stage(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingExecutionStage::CodeReview,
+        )
+        .expect("code review stage");
+    let (tx, _rx) = mpsc::channel(16);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let provider = super::provider_driven::ReviewerDrivenReworkProvider::default();
+    let (_command_tx, mut command_rx) = mpsc::channel(1);
+
+    let updated = engine
+        .execute_coder_fix_from_review(
+            &attempt,
+            &super::provider_driven::review_report_requesting_changes(&attempt),
+            &CodingExecutionContext::default(),
+            &provider,
+            &mut command_rx,
+        )
+        .await
+        .expect("coder fix from review");
+
+    // 实际发送给 provider 的 prompt 包含指令全文（摘要与修复提示，非摘要）。
+    let input = provider.recorded_input();
+    assert!(input.prompt.contains("本轮修复要求"));
+    assert!(input.prompt.contains("missing validation"));
+    assert!(input.prompt.contains("add validation"));
+
+    // 认领 journal：绑定实际 prompt 的渲染 digest 与执行上下文 hash。
+    let claims = store
+        .list_rework_instruction_claims(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+        )
+        .expect("rework instruction claims");
+    assert_eq!(claims.len(), 1, "一次 role run 恰一条认领：{claims:?}");
+    let claim = claims[0].clone();
+    assert_eq!(claim.attempt_id, attempt.id);
+    let instructions = store
+        .list_rework_instructions(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("rework instructions");
+    assert_eq!(instructions.len(), 1);
+    let instruction = &instructions[0];
+    assert!(instruction.consumed_at.is_some(), "指令被该次 role run 消费");
+    assert!(instruction.consumed_by_node_id.is_some());
+    assert_eq!(claim.instruction_ids, vec![instruction.id.clone()]);
+    let expected_digest = {
+        use sha2::Digest as _;
+        hex::encode(sha2::Sha256::digest(input.prompt.as_bytes()))
+    };
+    assert_eq!(claim.rendered_prompt_digest, expected_digest);
+    // 单 Work Item attempt 无 unit-run 渲染上下文：执行上下文 hash 即实际 prompt。
+    assert_eq!(claim.context_hash, expected_digest);
+    assert!(claim.consumed_at.is_some());
+
+    // 中断后重放：同一认领同一渲染结果 → Replayed，同一 claim 不变、不二次消费。
+    let node_id = instruction
+        .consumed_by_node_id
+        .clone()
+        .expect("consumed node");
+    let replay = store
+        .claim_and_consume_rework_instructions(
+            &updated,
+            &node_id,
+            1,
+            &input.prompt,
+            None,
+            &[instruction.id.clone()],
+        )
+        .expect("replay the same claim");
+    assert_eq!(
+        replay,
+        crate::product::coding_attempt_store::ReworkClaimOutcome::Replayed {
+            claim: claim.clone()
+        }
+    );
+    let claims_after = store
+        .list_rework_instruction_claims(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+        )
+        .expect("claims after replay");
+    assert_eq!(claims_after, vec![claim.clone()], "重放命中同一认领");
+    let instructions_after = store
+        .list_rework_instructions(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("instructions after replay");
+    assert_eq!(instructions_after.len(), 1, "指令不被消费第二次");
+
+    // 已记录执行上下文 hash 不被覆盖为新含义：异渲染重放 fail-closed。
+    let tampered_prompt = format!("{}\n额外内容", input.prompt);
+    let conflict = store
+        .claim_and_consume_rework_instructions(
+            &updated,
+            &node_id,
+            1,
+            &tampered_prompt,
+            None,
+            &[instruction.id.clone()],
+        )
+        .expect_err("different render must fail closed");
+    assert!(
+        matches!(
+            conflict,
+            crate::product::json_store::ProductStoreError::IdentityMismatch { ref kind, .. }
+                if *kind == "coding_rework_instruction_claim"
+        ),
+        "unexpected conflict: {conflict:?}"
+    );
+}

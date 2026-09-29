@@ -135,14 +135,6 @@ impl CodingWorkspaceEngine {
             .send(CodingWsOutMessage::CodingTimelineNodeCreated { node: node.clone() })
             .await;
 
-        self.store.mark_rework_instruction_consumed(
-            &updated.project_id,
-            &updated.issue_id,
-            &updated.id,
-            &instruction.id,
-            &node.id,
-        )?;
-
         let coder_provider_name = self
             .store
             .get_role_provider_config_snapshot(&updated.project_id, &updated.issue_id, &updated.id)?
@@ -189,6 +181,27 @@ impl CodingWorkspaceEngine {
             CodingPromptMode::FullConversation => full_prompt.clone(),
             CodingPromptMode::DeltaOnly => delta_prompt,
         };
+        // C2 Task 7（#18／BYPASS-18）：先渲染后消费——完整 prompt 渲染完成
+        // 后，一次可重放原子写入完成「认领→绑定渲染结果→标记消费」，最后
+        // spawn；渲染失败（含空渲染）禁消费，指令保持可读取、可重试。
+        use crate::product::coding_attempt_store::ReworkClaimOutcome;
+        match self.store.claim_and_consume_rework_instructions(
+            &updated,
+            &node.id,
+            rework_round,
+            &prompt,
+            rendered_context
+                .as_ref()
+                .map(|rendered| rendered.content_hash.as_str()),
+            &[instruction.id.clone()],
+        )? {
+            ReworkClaimOutcome::Claimed { .. } | ReworkClaimOutcome::Replayed { .. } => {}
+            ReworkClaimOutcome::RenderFailed => {
+                return Err(CodingWorkspaceEngineError::ProviderStream(
+                    "rework_render_failed_empty_prompt".to_string(),
+                ));
+            }
+        }
         let role_run = self.store.create_role_run(
             &updated,
             CodingExecutionStage::Coding,

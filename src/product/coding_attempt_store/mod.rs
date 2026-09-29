@@ -27,6 +27,7 @@ mod plan_group_projection;
 pub(crate) mod plan_repair_reconcile;
 mod recovery;
 mod report;
+mod rework_claim;
 mod role_run;
 mod run_exclusion;
 mod role_run_event;
@@ -48,6 +49,7 @@ pub(crate) use admission::{
 pub(crate) use amendment_delivery::register_plan_amendment_delivery_mark_failpoint;
 pub use attempt_creation::WorkItemAttemptCreationGuard;
 pub use attempt::ClaimCodingStartOutcome;
+pub use rework_claim::{ReworkClaimOutcome, ReworkInstructionClaim};
 pub use run_exclusion::{CodingAttemptCommandRecord, CodingRunExclusionDecision};
 pub use git_operation::*;
 pub use group_initialization::*;

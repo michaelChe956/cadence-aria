@@ -162,23 +162,32 @@ impl CodingWorkspaceEngine {
                 &routing_context,
             ),
         };
+        // C2 Task 7（#18／BYPASS-18）：渲染完成后的一次可重放原子认领——
+        // 「认领（绑定渲染 digest／上下文 hash）→ 标记消费」在 attempt 级
+        // 锁内一次落盘；中断后重放命中同一认领，指令不被消费第二次。
+        let mut claim_instruction_ids = context_note_ids;
         if let Some(instruction) = rework_instruction.as_ref() {
-            self.store.mark_rework_instruction_consumed(
-                &attempt.project_id,
-                &attempt.issue_id,
-                &attempt.id,
-                &instruction.id,
-                &node.id,
-            )?;
+            claim_instruction_ids.push(instruction.id.clone());
         }
-        if !context_note_ids.is_empty() {
-            self.store.mark_context_notes_consumed(
-                &attempt.project_id,
-                &attempt.issue_id,
-                &attempt.id,
-                &context_note_ids,
+        if !claim_instruction_ids.is_empty() {
+            use crate::product::coding_attempt_store::ReworkClaimOutcome;
+            match self.store.claim_and_consume_rework_instructions(
+                &attempt,
+                &node.id,
                 attempt.rework_count,
-            )?;
+                &prompt,
+                rendered_context
+                    .as_ref()
+                    .map(|rendered| rendered.content_hash.as_str()),
+                &claim_instruction_ids,
+            )? {
+                ReworkClaimOutcome::Claimed { .. } | ReworkClaimOutcome::Replayed { .. } => {}
+                ReworkClaimOutcome::RenderFailed => {
+                    return Err(CodingWorkspaceEngineError::ProviderStream(
+                        "rework_render_failed_empty_prompt".to_string(),
+                    ));
+                }
+            }
         }
 
         let retry_success = self
