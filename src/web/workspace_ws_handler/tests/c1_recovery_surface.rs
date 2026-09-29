@@ -305,10 +305,9 @@ async fn a09_lease_three_states_and_confirmed_takeover_chain() {
                     designs: vec![],
                 },
                 options: serial_enrollment_options(),
-                logical_repository_id: LogicalRepositoryId(uuid::Uuid::nil()),
-                target: Some(EnrollmentTarget::SingleRepository {
+                target: EnrollmentTarget::SingleRepository {
                     repository_id: "repository_0001".to_string(),
-                }),
+                },
             },
         )
         .unwrap();
@@ -621,10 +620,9 @@ async fn a09_failed_advance_explicit_retry_chain() {
                     designs: vec![],
                 },
                 options: serial_enrollment_options(),
-                logical_repository_id: LogicalRepositoryId(uuid::Uuid::nil()),
-                target: Some(EnrollmentTarget::SingleRepository {
+                target: EnrollmentTarget::SingleRepository {
                     repository_id: "repository_0001".to_string(),
-                }),
+                },
             },
         )
         .unwrap();

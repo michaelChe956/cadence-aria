@@ -390,15 +390,14 @@ fn bound_enrollment(
                 require_execution_plan_confirm: false,
             },
         },
-        logical_repository_id: crate::product::logical_codebase::LogicalRepositoryId(
-            uuid::Uuid::nil(),
-        ),
+        target: Some(crate::product::logical_codebase::EnrollmentTarget::SingleRepository {
+            repository_id: "repository_0001".to_string(),
+        }),
         prepare_intent_id: enrollment_id.to_string(),
         plan_id: Some(plan_id.to_string()),
         session_id: Some("session_auto_live".to_string()),
         created_at: "2026-09-27T00:00:00Z".to_string(),
         updated_at: "2026-09-27T00:00:00Z".to_string(),
-        target: None,
         binding_history: None,
         command_ledger: Vec::new(),
     }

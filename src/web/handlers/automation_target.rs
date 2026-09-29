@@ -25,9 +25,8 @@ use super::support::{product_app_paths, product_store_api_error, provider_worksp
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct AutomationTargetDto {
-    pub logical_repository_id: String,
-    /// C1 Task 2：双载体 target 投影——前端 Enable/Rebind 原样回传
-    ///（logical 双级齐全；单仓入口由 C5 消费同一 union）。
+    /// C5 Task 1：载体身份唯一投影——冗余的顶层 `logical_repository_id`
+    /// 已删除（前端 Enable/Rebind 原样回传；单仓入口由 C5 消费同一 union）。
     pub enrollment_target: crate::product::logical_codebase::EnrollmentTarget,
     pub resolved_options: EnrollmentOptions,
 }
@@ -117,7 +116,6 @@ pub async fn get_automation_target(
             .map_err(|_| invalid_scope("automation target logical repository id is not a valid uuid"))?,
     );
     Ok(Json(AutomationTargetDto {
-        logical_repository_id: repository_id,
         enrollment_target: crate::product::logical_codebase::EnrollmentTarget::LogicalCodebase {
             logical_codebase_id: manifest.logical_codebase_id.to_string(),
             logical_repository_id: target_repository,
@@ -165,7 +163,13 @@ mod tests {
         .await;
         assert_eq!(ok.status(), StatusCode::OK);
         let body = response_json(ok).await;
-        assert_eq!(body["logical_repository_id"], SINGLE_LOGICAL_ID);
+        // C5 Task 1：DTO 不再暴露冗余顶层 logical 身份。
+        assert!(body.get("logical_repository_id").is_none());
+        assert_eq!(body["enrollment_target"]["kind"], "logical_codebase");
+        assert_eq!(
+            body["enrollment_target"]["logical_repository_id"],
+            SINGLE_LOGICAL_ID
+        );
         assert_eq!(body["resolved_options"]["author_provider"], "fake");
         assert_eq!(body["resolved_options"]["reviewer_provider"], "fake");
         assert_eq!(body["resolved_options"]["review_rounds"], 1);

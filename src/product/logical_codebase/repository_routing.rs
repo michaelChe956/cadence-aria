@@ -47,6 +47,12 @@ impl RepositoryRoutingErrorCode {
 /// 以 (manifest, selection) 成对状态为唯一权威信号，返回显式三态。
 pub enum RepositoryRouting {
     /// (None, None)：无 manifest 且无 selection → 物理 RepositoryRecord.id 解析（改动前行为）。
+    ///
+    /// C5（single-repository-automation-entry）口径澄清：`Legacy` 即
+    /// **单仓（single-repository）** 语义——issue 未持久归属逻辑代码库时，
+    /// 权威载体是其 `repo_id` 指向的真实物理仓。命名保留 `Legacy`
+    /// （不改名，见 Non-Goals）：它描述的是先于逻辑代码库分流存在的
+    /// 物理仓解析路径，而非 deprecated 分支。
     Legacy { repository_id: String },
     /// (Some, Some)：有 manifest 且有有效 selection → 逻辑解析（由调用方按 target/snapshot 定具体成员）。
     Logical {

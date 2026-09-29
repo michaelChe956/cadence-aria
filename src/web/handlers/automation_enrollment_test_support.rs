@@ -322,7 +322,11 @@ pub(crate) fn enrollment_body(
                     "require_execution_plan_confirm": false
                 }
             },
-            "logical_repository_id": SINGLE_LOGICAL_ID
+            "target": {
+                "kind": "logical_codebase",
+                "logical_codebase_id": fixture.logical_codebase_id_or_default(),
+                "logical_repository_id": SINGLE_LOGICAL_ID
+            }
         }
     })
 }
@@ -335,6 +339,20 @@ pub(crate) fn fixture_logical_codebase_id(fixture: &Fixture) -> String {
         .expect("seeded logical codebase manifest")
         .logical_codebase_id
         .to_string()
+}
+
+impl Fixture {
+    /// 有 manifest 时取权威 logical codebase id；无 manifest 的 0 成员
+    /// fixture 返回占位（该场景在 routing 载体判定处即被 422 拒绝，
+    /// target 内容不参与判定）。
+    fn logical_codebase_id_or_default(&self) -> String {
+        LogicalCodebaseStore::new(self.paths.clone())
+            .load_manifest(PROJECT_ID)
+            .ok()
+            .flatten()
+            .map(|manifest| manifest.logical_codebase_id.to_string())
+            .unwrap_or_else(|| "00000000-0000-0000-0000-0000000000c5".to_string())
+    }
 }
 
 /// C1 Task 2：显式声明双载体 target 的 enable body（logical 双级齐全）。

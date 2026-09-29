@@ -1328,12 +1328,9 @@
                             require_execution_plan_confirm: false,
                         },
                     },
-                    logical_repository_id: LogicalRepositoryId(Uuid::nil()),
-                    target: Some(
-                        crate::product::logical_codebase::EnrollmentTarget::SingleRepository {
-                            repository_id: "repository_0001".to_string(),
-                        },
-                    ),
+                    target: crate::product::logical_codebase::EnrollmentTarget::SingleRepository {
+                        repository_id: "repository_0001".to_string(),
+                    },
                 },
             )
             .expect("enable enrollment");

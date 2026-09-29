@@ -320,7 +320,6 @@ fn validate_enrollment_scope(
     ensure_issue_exists(state, project_id, issue_id)?;
     let EnrollmentWriteCommand::Enable {
         source,
-        logical_repository_id,
         options,
         target,
         ..
@@ -334,6 +333,8 @@ fn validate_enrollment_scope(
     validate_confirmed_source_refs(&lifecycle, project_id, issue_id, source)?;
 
     // 自动授权仅恰一 logical repository/单 attempt（REQ-WIGA-01/02、REQ-MTG-03）。
+    // C5 Task 1：Enable 必带 target；此处仍只放行 LC 载体（单仓入口由
+    // Task 2 的 resolver 接入）。
     let routing = RepositoryRouting::load_for_issue(&paths, project_id, issue_id)
         .map_err(product_store_api_error)?;
     let RepositoryRouting::Logical {
@@ -348,22 +349,16 @@ fn validate_enrollment_scope(
     let candidate_ids = logical_repository_ids_for_preflight(&manifest, &selection);
     match preflight_single_repository_candidate(&candidate_ids) {
         SingleCandidatePreflightDecision::Eligible { repository_id }
-            if repository_id == logical_repository_id.0.to_string() =>
+            if matches!(
+                target,
+                crate::product::logical_codebase::EnrollmentTarget::LogicalCodebase {
+                    logical_repository_id: target_repository,
+                    ..
+                } if target_repository.0.to_string() == repository_id
+            ) =>
         {
             // C1 Task 1：显式声明的 target 必须与授权域同载体同身份
             //（logical 双级齐全且指向同一 logical repository；不猜、不降级）。
-            match target {
-                Some(crate::product::logical_codebase::EnrollmentTarget::LogicalCodebase {
-                    logical_repository_id: target_repository,
-                    ..
-                }) if *target_repository == *logical_repository_id => {}
-                Some(_) => {
-                    return Err(invalid_scope(
-                        "automation enrollment target must match the issue's single logical repository",
-                    ))
-                }
-                None => {}
-            }
             // P2 GAP-F（Task 0.2）：唯一 logical target 确认后做静态 gateway
             // reviewer 预检——与 GET automation-target 投影同源，Enable 前拒绝。
             super::automation_gateway_preflight::validate_gateway_reviewer_for_enrollment(
@@ -372,12 +367,9 @@ fn validate_enrollment_scope(
                 state.test_provider_enabled,
             )
         }
-        SingleCandidatePreflightDecision::Eligible { .. } => Err(invalid_scope(
+        _ => Err(invalid_scope(
             "automation enrollment target must match the issue's single logical repository",
         )),
-        SingleCandidatePreflightDecision::Ineligible { reason } => Err(invalid_scope(format!(
-            "automation enrollment requires exactly one logical repository: {reason}"
-        ))),
     }
 }
 
@@ -521,9 +513,9 @@ mod tests {
     use crate::product::work_item_plan_policy::RunPolicy;
 
     use super::super::automation_enrollment_test_support::{
-        ISSUE_ID, PROJECT_ID, create_plan_and_session, enrollment_body, enrollment_body_with_target,
-        enrollment_file_exists, get_enrollment, post_binding, post_rebind, put_enrollment,
-        rebind_body, response_json, seed_fixture,
+        ISSUE_ID, PROJECT_ID, SINGLE_LOGICAL_ID, create_plan_and_session, enrollment_body,
+        enrollment_body_with_target, enrollment_file_exists, get_enrollment, post_binding,
+        post_rebind, put_enrollment, rebind_body, response_json, seed_fixture,
     };
 
     #[tokio::test]
@@ -614,6 +606,28 @@ mod tests {
         let payload = response_json(response).await;
         assert_eq!(payload["enabled"], false);
         assert_eq!(payload["policy_revision"], 2);
+    }
+
+    /// C5 Task 1：Enable 必带 target——缺 target 的请求在反序列化层即
+    /// 422 拒绝（旧 `logical_repository_id` 字段被忽略、不能替代），
+    /// 零 enrollment 写入。
+    #[tokio::test]
+    async fn automation_enrollment_http_put_requires_target() {
+        let fixture = seed_fixture(1, true);
+        let app = fixture.router();
+        let mut body = enrollment_body(&fixture, 1, 1);
+        assert!(
+            body["command"]
+                .as_object_mut()
+                .unwrap()
+                .remove("target")
+                .is_some()
+        );
+        // 旧字段存在也不能替代 target。
+        body["command"]["logical_repository_id"] = serde_json::json!(SINGLE_LOGICAL_ID);
+        let response = put_enrollment(&app, body).await;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(!enrollment_file_exists(&fixture));
     }
 
     #[tokio::test]
@@ -922,7 +936,11 @@ mod tests {
                 .get(PROJECT_ID, ISSUE_ID)
                 .unwrap()
                 .unwrap();
-            let intent = PreparedPlanIntent::from_enrollment(&enrollment);
+            let target = enrollment
+                .target
+                .clone()
+                .expect("fixture enrollment declares a target");
+            let intent = PreparedPlanIntent::from_enrollment(&enrollment, &target);
             assert_eq!(intent.plan_id, expected_plan_id);
             write_json(
                 &self

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::product::json_store::ProductStoreError;
-use crate::product::logical_codebase::{EnrollmentTarget, LogicalRepositoryId};
+use crate::product::logical_codebase::EnrollmentTarget;
 use crate::product::models::lifecycle::IssueWorkItemPlanOptions;
 use crate::product::models::provider::ProviderName;
 
@@ -53,18 +53,17 @@ pub struct IssueAutomationEnrollment {
     pub policy_revision: u64,
     pub source: EnrollmentSource,
     pub options: EnrollmentOptions,
-    pub logical_repository_id: LogicalRepositoryId,
+    /// C5 Task 1：enable 时显式声明的双载体 target。旧 JSON 缺字段读
+    /// `None`——旧代无绑定，自动链经 `load_current_enrollment_binding`
+    /// fail-closed，绝不从冗余字段猜测 `EnrollmentTarget`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<EnrollmentTarget>,
     /// 首启意图身份：与 `enrollment_id` 同源生成，P0 不消费。
     pub prepare_intent_id: String,
     pub plan_id: Option<String>,
     pub session_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
-    /// C1 Task 1：enable 时显式声明的双载体 target。旧 JSON 缺字段读
-    /// `None`——读侧只按兼容读消费 `logical_repository_id`，绝不从其
-    /// 猜测 `EnrollmentTarget`。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target: Option<EnrollmentTarget>,
     /// C1 Task 1：版本化绑定历史；仅显式 rebind/换代追加，旧 JSON 读 None。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binding_history: Option<EnrollmentBindingHistory>,
@@ -107,15 +106,14 @@ impl AutomationOwnership {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EnrollmentWriteCommand {
+    /// C5 Task 1（BREAKING）：`EnrollmentTarget` 是 enrollment 载体身份的
+    /// 唯一权威——冗余的顶层 `logical_repository_id` 已删除；缺 `target`
+    /// 的请求在反序列化层即被拒绝（HTTP 422、零写入）。
     Enable {
         selection_key: String,
         source: EnrollmentSource,
         options: EnrollmentOptions,
-        logical_repository_id: LogicalRepositoryId,
-        /// C1 Task 1：显式双载体 target。缺省（None）保持既有仅逻辑仓授权
-        /// 语义；携带时必须与 `logical_repository_id` 同载体一致。
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        target: Option<EnrollmentTarget>,
+        target: EnrollmentTarget,
     },
     Disable,
 }
@@ -302,6 +300,7 @@ pub struct RetryInitializationResult {
     pub retry: RetryInitializationRecord,
     pub outcome: Option<crate::product::advance_store::AdvanceOutcome>,
 }
+
 /// P1 WIGA Task 4：enrollment-bound 不可变创建意图（automation-plan-intent.json）。
 ///
 /// 先于 plan/session 持久化、与 enrollment 同源（`prepare_intent_id`），冻结
@@ -315,7 +314,10 @@ pub struct PreparedPlanIntent {
     pub issue_id: String,
     pub source: EnrollmentSource,
     pub options: EnrollmentOptions,
-    pub logical_repository_id: LogicalRepositoryId,
+    /// C5 Task 1：冻结载体身份唯一来自 enrollment 声明的 target；旧意图
+    /// 文件（仅含已废弃 `logical_repository_id`、无 `target`）经显式
+    /// legacy reader 读为「旧代无绑定」，调用者 fail-closed。
+    pub target: EnrollmentTarget,
     pub plan_id: String,
     pub session_id: String,
 }
@@ -323,7 +325,12 @@ pub struct PreparedPlanIntent {
 impl PreparedPlanIntent {
     /// 从当前 enrollment 派生冻结意图；稳定目标 id 只来自已持久的
     /// `prepare_intent_id`，不依赖扫描最近 plan。同 payload 重复派生幂等。
-    pub fn from_enrollment(enrollment: &IssueAutomationEnrollment) -> Self {
+    /// C5 Task 1：target 由调用方从 `enrollment.target` 显式传入（旧代
+    /// enrollment 无 target，调用者须先 fail-closed）。
+    pub fn from_enrollment(
+        enrollment: &IssueAutomationEnrollment,
+        target: &EnrollmentTarget,
+    ) -> Self {
         Self {
             enrollment_id: enrollment.enrollment_id.clone(),
             prepare_intent_id: enrollment.prepare_intent_id.clone(),
@@ -331,7 +338,7 @@ impl PreparedPlanIntent {
             issue_id: enrollment.issue_id.clone(),
             source: enrollment.source.clone(),
             options: enrollment.options.clone(),
-            logical_repository_id: enrollment.logical_repository_id,
+            target: target.clone(),
             plan_id: format!("issue_work_item_plan_auto_{}", enrollment.prepare_intent_id),
             session_id: format!("workspace_session_auto_{}", enrollment.prepare_intent_id),
         }
@@ -352,7 +359,9 @@ pub struct PlanGenerationIntent {
     pub action_key: String,
     pub source: EnrollmentSource,
     pub options: EnrollmentOptions,
-    pub logical_repository_id: LogicalRepositoryId,
+    /// C5 Task 1：冻结载体身份唯一来自 enrollment 声明的 target；
+    /// `same_identity` 以 target 全等参与漂移判定。
+    pub target: EnrollmentTarget,
     pub phase: PlanGenerationPhase,
 }
 
@@ -374,7 +383,7 @@ impl PlanGenerationIntent {
             && self.action_key == other.action_key
             && self.source == other.source
             && self.options == other.options
-            && self.logical_repository_id == other.logical_repository_id
+            && self.target == other.target
     }
 
     pub fn action_key_for(enrollment_id: &str, plan_id: &str) -> String {

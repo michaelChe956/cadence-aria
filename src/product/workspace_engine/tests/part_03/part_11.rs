@@ -165,10 +165,7 @@ fn enable_c1_child_enrollment(
                 selection_key: "c1_child_binding_fixture".to_string(),
                 source: c1_child_enrollment_source(),
                 options: c1_child_enrollment_options(),
-                logical_repository_id: crate::product::logical_codebase::LogicalRepositoryId(
-                    uuid::Uuid::nil(),
-                ),
-                target: Some(c1_child_enrollment_target()),
+                target: c1_child_enrollment_target(),
             },
         )
         .unwrap();

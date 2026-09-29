@@ -736,15 +736,29 @@ fn verify_current_enrollment(
             ),
         ));
     }
+    // C5 Task 1：enrollment 载体身份唯一权威是声明的 target（冗余的顶层
+    // logical_repository_id 已删除）。LC target 比较 attempt 快照的 logical
+    // repository；单仓 target 与旧代（无 target）enrollment 对 LC 快照一律
+    // 视为漂移拒绝（snapshot None 时保持既有通过语义，载体互证由
+    // verify_current_binding 的 origin target 断言承载）。
+    let enrollment_logical_repository = enrollment.target.as_ref().and_then(
+        |target| match target {
+            crate::product::logical_codebase::EnrollmentTarget::LogicalCodebase {
+                logical_repository_id,
+                ..
+            } => Some(*logical_repository_id),
+            crate::product::logical_codebase::EnrollmentTarget::SingleRepository { .. } => None,
+        },
+    );
     if let Some(snapshot) = &attempt.target_snapshot
-        && snapshot.logical_repository_id != enrollment.logical_repository_id
+        && Some(snapshot.logical_repository_id) != enrollment_logical_repository
     {
         return Err(StartCodingError::new(
             "coding_start_enrollment_mismatch",
             format!(
                 "attempt target snapshot points at logical repository {:?} but enrollment \
                  authorizes {:?}",
-                snapshot.logical_repository_id, enrollment.logical_repository_id
+                snapshot.logical_repository_id, enrollment_logical_repository
             ),
         ));
     }
@@ -1375,8 +1389,10 @@ mod tests {
                     selection_key: before.selection_key.clone(),
                     source: before.source.clone(),
                     options: before.options.clone(),
-                    logical_repository_id: before.logical_repository_id.clone(),
-                    target: before.target.clone(),
+                    target: before
+                        .target
+                        .clone()
+                        .expect("fixture enrollment declares a target"),
                 },
             )
             .expect("re-enable enrollment");

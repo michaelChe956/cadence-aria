@@ -91,15 +91,13 @@ impl IssueAutomationStore {
                         selection_key,
                         source,
                         options,
-                        logical_repository_id,
                         target,
                     },
                 ) if saved.enabled
                     && saved.selection_key == *selection_key
                     && saved.source == *source
                     && saved.options == *options
-                    && saved.logical_repository_id == *logical_repository_id
-                    && saved.target == *target
+                    && saved.target.as_ref() == Some(target)
                     && (expected_revision.is_none()
                         || expected_revision == Some(saved.policy_revision)) =>
                 {
@@ -115,15 +113,13 @@ impl IssueAutomationStore {
                         selection_key,
                         source,
                         options,
-                        logical_repository_id,
                         target,
                     },
                 ) if saved.enabled
                     && (saved.selection_key != *selection_key
                         || saved.source != *source
                         || saved.options != *options
-                        || saved.logical_repository_id != *logical_repository_id
-                        || saved.target != *target) =>
+                        || saved.target.as_ref() != Some(target)) =>
                 {
                     CasResolution::Conflict {
                         current_revision: Some(saved.policy_revision),
@@ -231,14 +227,32 @@ impl IssueAutomationStore {
                     current_revision: Some(saved.policy_revision),
                 });
             }
-            let intent = PreparedPlanIntent::from_enrollment(&saved);
+            // C5 Task 1：旧代 enrollment（无显式 target）不能驱动自动链——
+            // 冻结意图的身份唯一来自 enrollment 声明的 target。
+            let Some(declared) = saved.target.clone() else {
+                return Ok(EnsurePlanResolution::InvalidScope(
+                    "enrollment has no explicit target; legacy enrollments cannot drive \
+                     automatic chains (re-enable with an explicit target)"
+                        .to_string(),
+                ));
+            };
+            let intent = PreparedPlanIntent::from_enrollment(&saved, &declared);
             let intent_path = path.with_file_name("automation-plan-intent.json");
             if intent_path.metadata().is_ok() {
-                let existing: PreparedPlanIntent = read_json(&intent_path)?;
-                if existing != intent {
-                    return Ok(EnsurePlanResolution::Conflict {
-                        current_revision: Some(saved.policy_revision),
-                    });
+                match read_prepared_plan_intent(&intent_path)? {
+                    // 旧格式意图（无 target）与新派生意图永不一致：fail-closed
+                    // Conflict，绝不覆盖、不迁移。
+                    PreparedPlanIntentRead::LegacyUnbound { .. } => {
+                        return Ok(EnsurePlanResolution::Conflict {
+                            current_revision: Some(saved.policy_revision),
+                        })
+                    }
+                    PreparedPlanIntentRead::Current(existing) if existing != intent => {
+                        return Ok(EnsurePlanResolution::Conflict {
+                            current_revision: Some(saved.policy_revision),
+                        })
+                    }
+                    PreparedPlanIntentRead::Current(_) => {}
                 }
             } else {
                 write_json(&intent_path, &intent)?;
@@ -317,6 +331,15 @@ impl IssueAutomationStore {
                     "plan generation requires a fully bound enrollment".to_string(),
                 ));
             };
+            // C5 Task 1：冻结身份唯一来自 enrollment 声明的 target；旧代
+            // enrollment 无 target，自动链 fail-closed。
+            let Some(declared) = saved.target.clone() else {
+                return Ok(GenerationResolution::InvalidScope(
+                    "enrollment has no explicit target; legacy enrollments cannot drive \
+                     automatic chains (re-enable with an explicit target)"
+                        .to_string(),
+                ));
+            };
             let derived = PlanGenerationIntent {
                 enrollment_id: saved.enrollment_id.clone(),
                 action_key: PlanGenerationIntent::action_key_for(
@@ -327,18 +350,28 @@ impl IssueAutomationStore {
                 session_id,
                 source: saved.source.clone(),
                 options: saved.options.clone(),
-                logical_repository_id: saved.logical_repository_id,
+                target: declared,
                 phase: PlanGenerationPhase::Claimed,
             };
             let intent_path = path.with_file_name("automation-generation-intent.json");
             if intent_path.metadata().is_ok() {
-                let existing: PlanGenerationIntent = read_json(&intent_path)?;
-                if !existing.same_identity(&derived) {
-                    return Ok(GenerationResolution::Conflict {
-                        current_revision: Some(saved.policy_revision),
-                    });
+                match read_plan_generation_intent(&intent_path)? {
+                    // 旧格式检查点（无 target）与新派生身份永不一致：
+                    // fail-closed Conflict，绝不覆盖、不迁移。
+                    PlanGenerationIntentRead::LegacyUnbound { .. } => {
+                        return Ok(GenerationResolution::Conflict {
+                            current_revision: Some(saved.policy_revision),
+                        })
+                    }
+                    PlanGenerationIntentRead::Current(existing) => {
+                        if !existing.same_identity(&derived) {
+                            return Ok(GenerationResolution::Conflict {
+                                current_revision: Some(saved.policy_revision),
+                            });
+                        }
+                        return Ok(GenerationResolution::Ready(existing));
+                    }
                 }
-                return Ok(GenerationResolution::Ready(existing));
             }
             write_json(&intent_path, &derived)?;
             Ok(GenerationResolution::Ready(derived))
@@ -370,7 +403,25 @@ impl IssueAutomationStore {
                     "plan generation checkpoint is missing".to_string(),
                 ));
             }
-            let mut existing: PlanGenerationIntent = read_json(&intent_path)?;
+            // C5 Task 1：旧格式检查点（无 target）不可推进：fail-closed。
+            let mut existing = match read_plan_generation_intent(&intent_path)? {
+                PlanGenerationIntentRead::Current(existing) => existing,
+                PlanGenerationIntentRead::LegacyUnbound { .. } => {
+                    return Ok(GenerationResolution::InvalidScope(
+                        "plan generation checkpoint is a legacy intent without a target; \
+                         it cannot drive automatic chains"
+                            .to_string(),
+                    ))
+                }
+            };
+            // C5 Task 1：旧代 enrollment（无显式 target）不能驱动自动链。
+            let Some(declared) = saved.target.clone() else {
+                return Ok(GenerationResolution::InvalidScope(
+                    "enrollment has no explicit target; legacy enrollments cannot drive \
+                     automatic chains (re-enable with an explicit target)"
+                        .to_string(),
+                ));
+            };
             let derived = PlanGenerationIntent {
                 enrollment_id: saved.enrollment_id.clone(),
                 action_key: PlanGenerationIntent::action_key_for(
@@ -381,7 +432,7 @@ impl IssueAutomationStore {
                 session_id: existing.session_id.clone(),
                 source: saved.source.clone(),
                 options: saved.options.clone(),
-                logical_repository_id: saved.logical_repository_id,
+                target: declared,
                 phase: existing.phase,
             };
             if !existing.same_identity(&derived) {
@@ -696,6 +747,8 @@ enum EnsurePlanResolution {
     Applied(IssueAutomationEnrollment),
     Conflict { current_revision: Option<u64> },
     Missing,
+    /// C5 Task 1：旧代 enrollment（无显式 target）不能驱动自动链。
+    InvalidScope(String),
     Failed(EnrollmentError),
 }
 
@@ -719,6 +772,7 @@ fn resolve_ensure(
             Err(EnrollmentError::Conflict { current_revision })
         }
         EnsurePlanResolution::Missing => Err(EnrollmentError::NotFound),
+        EnsurePlanResolution::InvalidScope(reason) => Err(EnrollmentError::InvalidScope(reason)),
         EnsurePlanResolution::Failed(error) => Err(error),
     }
 }
@@ -742,6 +796,77 @@ fn resolve_generation(
         GenerationResolution::Missing => Err(EnrollmentError::NotFound),
         GenerationResolution::InvalidScope(reason) => Err(EnrollmentError::InvalidScope(reason)),
     }
+}
+
+/// C5 Task 1：`automation-plan-intent.json` 的版本化读侧。旧格式文件
+///（仅含已废弃的 `logical_repository_id`、无 `target`）读入为
+/// `LegacyUnbound`（旧代无绑定，可诊断 fail-closed），不把 serde 缺字段
+/// 错误泄漏为普通 JSON 读取失败；新格式完整校验后返回。
+pub(crate) enum PreparedPlanIntentRead {
+    Current(PreparedPlanIntent),
+    /// 旧代意图：无 target。携带身份字段供诊断；绝不驱动自动链。
+    LegacyUnbound {
+        enrollment_id: String,
+        prepare_intent_id: String,
+    },
+}
+
+pub(crate) fn read_prepared_plan_intent(
+    path: &Path,
+) -> Result<PreparedPlanIntentRead, ProductStoreError> {
+    let value: serde_json::Value = read_json(path)?;
+    if value.get("target").map(serde_json::Value::is_null).unwrap_or(true) {
+        return Ok(PreparedPlanIntentRead::LegacyUnbound {
+            enrollment_id: value
+                .get("enrollment_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            prepare_intent_id: value
+                .get("prepare_intent_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        });
+    }
+    let intent: PreparedPlanIntent = serde_json::from_value(value).map_err(|error| {
+        ProductStoreError::Json(format!("prepared plan intent parse failed: {error}"))
+    })?;
+    Ok(PreparedPlanIntentRead::Current(intent))
+}
+
+/// C5 Task 1：`automation-generation-intent.json` 的版本化读侧（语义同
+/// [`PreparedPlanIntentRead`]：旧格式无 target → 旧代无绑定 fail-closed）。
+pub(crate) enum PlanGenerationIntentRead {
+    Current(PlanGenerationIntent),
+    LegacyUnbound {
+        enrollment_id: String,
+        plan_id: String,
+    },
+}
+
+pub(crate) fn read_plan_generation_intent(
+    path: &Path,
+) -> Result<PlanGenerationIntentRead, ProductStoreError> {
+    let value: serde_json::Value = read_json(path)?;
+    if value.get("target").map(serde_json::Value::is_null).unwrap_or(true) {
+        return Ok(PlanGenerationIntentRead::LegacyUnbound {
+            enrollment_id: value
+                .get("enrollment_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            plan_id: value
+                .get("plan_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        });
+    }
+    let intent: PlanGenerationIntent = serde_json::from_value(value).map_err(|error| {
+        ProductStoreError::Json(format!("plan generation intent parse failed: {error}"))
+    })?;
+    Ok(PlanGenerationIntentRead::Current(intent))
 }
 
 /// `rebind` 锁内判定；锁外映射为 `EnrollmentRebindResult`/`EnrollmentError`。
@@ -825,25 +950,16 @@ fn apply_revision_and_write(
                 selection_key,
                 source,
                 options,
-                logical_repository_id,
                 target,
             },
         ) => {
             let enrollment_id = Uuid::new_v4().to_string();
             // prepare_intent_id 与 enrollment 同源；P0 不消费该意图。
             let prepare_intent_id = enrollment_id.clone();
-            // C1 Task 1：显式声明 target 时初始化 durable binding v1；
+            // C5 Task 1：target 必填——Enable 即建立 durable binding v1；
             // plan/session 尚未绑定（绑定写入时补全 current 身份）。
-            let binding_history = target.as_ref().map(|declared| {
-                initial_binding_history(
-                    &enrollment_id,
-                    None,
-                    None,
-                    &source,
-                    declared,
-                    &options,
-                )
-            });
+            let binding_history =
+                initial_binding_history(&enrollment_id, None, None, &source, &target, &options);
             IssueAutomationEnrollment {
                 enrollment_id,
                 selection_key,
@@ -853,37 +969,31 @@ fn apply_revision_and_write(
                 policy_revision: 1,
                 source,
                 options,
-                logical_repository_id,
                 prepare_intent_id,
                 plan_id: None,
                 session_id: None,
                 created_at: now.clone(),
                 updated_at: now,
-                target,
-                binding_history,
+                target: Some(target),
+                binding_history: Some(binding_history),
                 command_ledger: Vec::new(),
             }
         }
         // 重开（disabled 后换 payload 的启用）：保留 enrollment 身份与既有
         // 绑定，仅 revision+1。C1 Task 1：target 是授权域冻结事实——已声明
-        // target 的漂移/撤销一律 fail-closed（换 target 只能走显式 rebind）。
+        // target 的漂移一律 fail-closed（换 target 只能走显式 rebind）。
         (
             Some(mut saved),
             EnrollmentWriteCommand::Enable {
                 selection_key,
                 source,
                 options,
-                logical_repository_id,
                 target,
             },
         ) => {
-            let target_drifted = match (&saved.target, &target) {
-                // 旧 enrollment（无声明）重开时允许显式升级 target。
-                (None, _) => false,
-                // 撤销已声明的 target 或换 target：fail-closed（走显式 rebind）。
-                (_, None) => true,
-                (Some(declared), Some(next)) => declared != next,
-            };
+            // 旧 enrollment（无声明）重开时允许显式升级 target；已声明
+            // target 的漂移：fail-closed（走显式 rebind）。
+            let target_drifted = saved.target.as_ref().is_some_and(|declared| *declared != target);
             if target_drifted {
                 return Ok(CasResolution::Conflict {
                     current_revision: Some(saved.policy_revision),
@@ -891,22 +1001,19 @@ fn apply_revision_and_write(
             }
             // 旧 enrollment（无声明）重开时显式升级 target → 初始化 v1。
             if saved.binding_history.is_none() {
-                if let Some(declared) = target.as_ref() {
-                    saved.binding_history = Some(initial_binding_history(
-                        &saved.enrollment_id,
-                        saved.plan_id.as_deref(),
-                        saved.session_id.as_deref(),
-                        &source,
-                        declared,
-                        &options,
-                    ));
-                }
+                saved.binding_history = Some(initial_binding_history(
+                    &saved.enrollment_id,
+                    saved.plan_id.as_deref(),
+                    saved.session_id.as_deref(),
+                    &source,
+                    &target,
+                    &options,
+                ));
             }
             saved.selection_key = selection_key;
             saved.source = source;
             saved.options = options;
-            saved.logical_repository_id = logical_repository_id;
-            saved.target = target;
+            saved.target = Some(target);
             saved.enabled = true;
             saved.policy_revision += 1;
             saved.updated_at = now;

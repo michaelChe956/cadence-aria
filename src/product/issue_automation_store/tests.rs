@@ -49,13 +49,7 @@ fn options() -> EnrollmentOptions {
 }
 
 fn enable(selection_key: &str, repository: LogicalRepositoryId) -> EnrollmentWriteCommand {
-    EnrollmentWriteCommand::Enable {
-        selection_key: selection_key.into(),
-        source: source(),
-        options: options(),
-        logical_repository_id: repository,
-        target: None,
-    }
+    enable_with_target(selection_key, target_logical_at(repository))
 }
 
 fn enable_with_options(
@@ -63,12 +57,12 @@ fn enable_with_options(
     repository: LogicalRepositoryId,
     options: EnrollmentOptions,
 ) -> EnrollmentWriteCommand {
+    let target = target_logical_at(repository);
     EnrollmentWriteCommand::Enable {
         selection_key: selection_key.into(),
         source: source(),
         options,
-        logical_repository_id: repository,
-        target: None,
+        target,
     }
 }
 
@@ -801,24 +795,23 @@ fn issue_automation_store_ensure_plan_binding_concurrent_workers_bind_once() {
 // C1 Task 1：双载体 target union 与版本化 enrollment binding（REQ-C1-TARGET-01）。
 // ---------------------------------------------------------------------------
 
-fn target_logical() -> EnrollmentTarget {
+fn target_logical_at(repository: LogicalRepositoryId) -> EnrollmentTarget {
     EnrollmentTarget::LogicalCodebase {
         logical_codebase_id: "logical_codebase_0001".into(),
-        logical_repository_id: logical_repo(1),
+        logical_repository_id: repository,
     }
 }
 
-fn enable_with_target(
-    selection_key: &str,
-    repository: LogicalRepositoryId,
-    target: EnrollmentTarget,
-) -> EnrollmentWriteCommand {
+fn target_logical() -> EnrollmentTarget {
+    target_logical_at(logical_repo(1))
+}
+
+fn enable_with_target(selection_key: &str, target: EnrollmentTarget) -> EnrollmentWriteCommand {
     EnrollmentWriteCommand::Enable {
         selection_key: selection_key.into(),
         source: source(),
         options: options(),
-        logical_repository_id: repository,
-        target: Some(target),
+        target,
     }
 }
 
@@ -901,7 +894,7 @@ fn issue_automation_store_rebind_appends_version_and_is_idempotent() {
             "project_1",
             "issue_1",
             None,
-            enable_with_target("human-choice-1", logical_repo(1), target_logical()),
+            enable_with_target("human-choice-1", target_logical()),
         )
         .unwrap();
     assert_eq!(created.policy_revision, 1);
@@ -1037,7 +1030,7 @@ fn issue_automation_store_legacy_enrollment_json_reads_without_binding() {
             "project_1",
             "issue_1",
             None,
-            enable_with_target("human-choice-1", logical_repo(1), target_logical()),
+            enable_with_target("human-choice-1", target_logical()),
         )
         .unwrap();
     let enrollment_file = paths
@@ -1060,10 +1053,8 @@ fn issue_automation_store_legacy_enrollment_json_reads_without_binding() {
     assert_eq!(enrollment.plan_id, None);
     assert_eq!(enrollment.session_id, None);
     assert_eq!(enrollment.enrollment_id, created.enrollment_id);
-    assert_eq!(
-        enrollment.logical_repository_id,
-        created.logical_repository_id
-    );
+    // C5 Task 1：冗余顶层 logical 身份已删除；旧 JSON 中该字段被忽略读取。
+    assert_eq!(enrollment.policy_revision, created.policy_revision);
 
     // 旧 enrollment 无声明 target：rebind 不猜 target，fail-closed。
     let error = store
@@ -1082,4 +1073,235 @@ fn issue_automation_store_legacy_enrollment_json_reads_without_binding() {
         .unwrap_err();
     assert!(matches!(error, EnrollmentError::InvalidScope(_)), "{error:?}");
     assert_eq!(store.get("project_1", "issue_1").unwrap().unwrap(), enrollment);
+}
+
+// ---------------------------------------------------------------------------
+// C5 Task 1：Enable 收敛必填 target；旧 JSON／旧冻结意图读侧 fail-closed
+//（REQ-WIGA-01、Review Focus 1）。
+// ---------------------------------------------------------------------------
+
+/// Enable 缺 target 的 JSON 反序列化直接拒绝（HTTP 层即 422、零写入）；
+/// 旧 enrollment JSON（含已废弃 `logical_repository_id`、无 `target`）读入
+/// 不炸：`target` 读为 `None`（自动链经 `load_current_enrollment_binding`
+/// 按旧代拒绝），Disable→重新 Enable 携带 target 后进入新链；幂等与
+/// 序列化不含冗余 logical 身份零回归。
+#[test]
+fn enable_requires_target_and_old_enrollment_json_reads_fail_closed() {
+    // 1) Enable 必带 target：缺字段 JSON 反序列化失败，多余旧字段被忽略。
+    let missing_target = serde_json::json!({
+        "type": "enable",
+        "selection_key": "human-choice-1",
+        "source": serde_json::to_value(source()).unwrap(),
+        "options": serde_json::to_value(options()).unwrap(),
+        "logical_repository_id": logical_repo(1).0.to_string(),
+    });
+    let error = serde_json::from_value::<EnrollmentWriteCommand>(missing_target)
+        .expect_err("enable without target must fail deserialization");
+    assert!(error.to_string().contains("target"), "{error}");
+
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = ProductAppPaths::new(tmp.path());
+    let store = IssueAutomationStore::new(paths.clone());
+    let created = store
+        .compare_and_set(
+            "project_1",
+            "issue_1",
+            None,
+            enable("human-choice-1", logical_repo(1)),
+        )
+        .unwrap();
+
+    // 2) 旧 enrollment JSON：剥离 target/binding 后注入已废弃的
+    //    logical_repository_id，模拟旧代 durable 记录——读入不炸，target None。
+    let enrollment_file = paths
+        .issue_root("project_1", "issue_1")
+        .join("automation-enrollment.json");
+    let mut legacy: serde_json::Value = read_json(&enrollment_file).unwrap();
+    let object = legacy.as_object_mut().unwrap();
+    assert!(object.remove("target").is_some());
+    assert!(object.remove("binding_history").is_some());
+    object.insert(
+        "logical_repository_id".to_string(),
+        serde_json::json!(logical_repo(1).0.to_string()),
+    );
+    write_json(&enrollment_file, &legacy).unwrap();
+    let enrollment = store.get("project_1", "issue_1").unwrap().unwrap();
+    assert_eq!(enrollment.target, None);
+    assert_eq!(enrollment.binding_history, None);
+    assert_eq!(enrollment.enrollment_id, created.enrollment_id);
+    assert_eq!(enrollment.policy_revision, created.policy_revision);
+
+    // 3) 旧记录只读、不迁移；Disable 后重新 Enable 携带 target 进入新链。
+    assert_eq!(
+        read_json::<serde_json::Value>(&enrollment_file).unwrap(),
+        legacy
+    );
+    store
+        .compare_and_set(
+            "project_1",
+            "issue_1",
+            Some(enrollment.policy_revision),
+            EnrollmentWriteCommand::Disable,
+        )
+        .unwrap();
+    let disabled = store.get("project_1", "issue_1").unwrap().unwrap();
+    assert!(!disabled.enabled);
+    let reopened = store
+        .compare_and_set(
+            "project_1",
+            "issue_1",
+            Some(disabled.policy_revision),
+            enable("human-choice-1", logical_repo(1)),
+        )
+        .unwrap();
+    assert!(reopened.enabled);
+    assert_eq!(reopened.target.as_ref(), Some(&target_logical()));
+    assert_eq!(
+        reopened
+            .binding_history
+            .as_ref()
+            .unwrap()
+            .current
+            .binding_version,
+        1
+    );
+    assert_eq!(reopened.enrollment_id, created.enrollment_id);
+
+    // 4) 幂等零回归：同选择键重复 Enable 返回同一 enrollment；序列化 JSON
+    //    不再含 logical_repository_id。
+    let replay = store
+        .compare_and_set(
+            "project_1",
+            "issue_1",
+            None,
+            enable("human-choice-1", logical_repo(1)),
+        )
+        .unwrap();
+    assert_eq!(replay, reopened);
+    let serialized = serde_json::to_value(&replay).unwrap();
+    assert!(
+        serialized.get("logical_repository_id").is_none(),
+        "enrollment JSON must not carry a redundant logical identity: {serialized}"
+    );
+    assert_eq!(serialized["target"]["kind"], "logical_codebase");
+    assert_eq!(
+        serialized["target"]["logical_repository_id"],
+        logical_repo(1).0.to_string()
+    );
+}
+
+/// 旧冻结意图（仅有 `logical_repository_id`、无 `target`）从 store 读入
+/// 不炸：ensure/claim 一律 fail-closed 拒绝且绝不覆盖既有文件；新格式
+/// 意图 target 与 enrollment target 不一致同样拒绝（身份漂移）。
+#[test]
+fn legacy_frozen_intents_read_fail_closed_without_target() {
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = ProductAppPaths::new(tmp.path());
+    let store = IssueAutomationStore::new(paths.clone());
+    let enrolled = store
+        .compare_and_set(
+            "project_1",
+            "issue_1",
+            None,
+            enable("human-choice-1", logical_repo(1)),
+        )
+        .unwrap();
+    let issue_root = paths.issue_root("project_1", "issue_1");
+
+    // 1) 旧格式 prepared intent：读入不炸，ensure fail-closed、不覆盖。
+    let legacy_prepared = serde_json::json!({
+        "enrollment_id": enrolled.enrollment_id,
+        "prepare_intent_id": enrolled.prepare_intent_id,
+        "project_id": "project_1",
+        "issue_id": "issue_1",
+        "source": serde_json::to_value(source()).unwrap(),
+        "options": serde_json::to_value(options()).unwrap(),
+        "logical_repository_id": logical_repo(1).0.to_string(),
+        "plan_id": format!("issue_work_item_plan_auto_{}", enrolled.prepare_intent_id),
+        "session_id": format!("workspace_session_auto_{}", enrolled.prepare_intent_id),
+    });
+    let prepared_path = issue_root.join("automation-plan-intent.json");
+    write_json(&prepared_path, &legacy_prepared).unwrap();
+    let creates = std::cell::Cell::new(0u32);
+    let error = store
+        .ensure_plan_binding("project_1", "issue_1", &enrolled.enrollment_id, |_, _| {
+            creates.set(creates.get() + 1);
+            Ok(())
+        })
+        .unwrap_err();
+    assert!(
+        matches!(error, EnrollmentError::Conflict { .. })
+            || matches!(error, EnrollmentError::InvalidScope(_)),
+        "legacy prepared intent must fail closed: {error:?}"
+    );
+    assert_eq!(creates.get(), 0, "create callback must not run for legacy intents");
+    assert_eq!(
+        read_json::<serde_json::Value>(&prepared_path).unwrap(),
+        legacy_prepared,
+        "legacy intent file must stay untouched"
+    );
+
+    // 2) 旧格式 generation intent：读入不炸，claim fail-closed、不覆盖。
+    store
+        .bind_plan(
+            "project_1",
+            "issue_1",
+            enrolled.policy_revision,
+            "plan_bound",
+            "session_bound",
+        )
+        .unwrap();
+    let legacy_generation = serde_json::json!({
+        "enrollment_id": enrolled.enrollment_id,
+        "plan_id": "plan_bound",
+        "session_id": "session_bound",
+        "action_key": crate::product::models::automation::PlanGenerationIntent::action_key_for(
+            &enrolled.enrollment_id,
+            "plan_bound",
+        ),
+        "source": serde_json::to_value(source()).unwrap(),
+        "options": serde_json::to_value(options()).unwrap(),
+        "logical_repository_id": logical_repo(1).0.to_string(),
+        "phase": "claimed",
+    });
+    let generation_path = issue_root.join("automation-generation-intent.json");
+    write_json(&generation_path, &legacy_generation).unwrap();
+    let error = store
+        .claim_plan_generation("project_1", "issue_1", &enrolled.enrollment_id)
+        .unwrap_err();
+    assert!(
+        matches!(error, EnrollmentError::Conflict { .. })
+            || matches!(error, EnrollmentError::InvalidScope(_)),
+        "legacy generation intent must fail closed: {error:?}"
+    );
+    assert_eq!(
+        read_json::<serde_json::Value>(&generation_path).unwrap(),
+        legacy_generation,
+        "legacy generation intent must stay untouched"
+    );
+
+    // 3) 新格式意图 target 与 enrollment target 不一致：身份漂移拒绝。
+    let mut drifted = legacy_generation.clone();
+    let drifted_object = drifted.as_object_mut().unwrap();
+    assert!(drifted_object.remove("logical_repository_id").is_some());
+    drifted_object.insert(
+        "target".to_string(),
+        serde_json::json!({
+            "kind": "logical_codebase",
+            "logical_codebase_id": "logical_codebase_0001",
+            "logical_repository_id": logical_repo(2).0.to_string(),
+        }),
+    );
+    write_json(&generation_path, &drifted).unwrap();
+    let error = store
+        .claim_plan_generation("project_1", "issue_1", &enrolled.enrollment_id)
+        .unwrap_err();
+    assert!(
+        matches!(error, EnrollmentError::Conflict { .. }),
+        "drifted intent target must be rejected: {error:?}"
+    );
+    assert_eq!(
+        read_json::<serde_json::Value>(&generation_path).unwrap(),
+        drifted
+    );
 }

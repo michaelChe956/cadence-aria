@@ -114,8 +114,7 @@ fn enable_enrollment_only(paths: &ProductAppPaths) {
                 selection_key: "c1_waiting_fixture".to_string(),
                 source: enrollment_source(),
                 options: enrollment_options(),
-                logical_repository_id: LogicalRepositoryId(uuid::Uuid::nil()),
-                target: Some(c1_target()),
+                target: c1_target(),
             },
         )
         .unwrap();

@@ -186,7 +186,6 @@ fn automation_test_record(
 }
 
 fn automation_enable_command() -> crate::product::models::automation::EnrollmentWriteCommand {
-    use crate::product::logical_codebase::LogicalRepositoryId;
     use crate::product::models::automation::{
         EnrollmentOptions, EnrollmentSource, EnrollmentWriteCommand, SourceRevisionRef,
     };
@@ -218,8 +217,9 @@ fn automation_enable_command() -> crate::product::models::automation::Enrollment
                 require_execution_plan_confirm: false,
             },
         },
-        logical_repository_id: LogicalRepositoryId(uuid::Uuid::nil()),
-        target: None,
+        target: crate::product::logical_codebase::EnrollmentTarget::SingleRepository {
+            repository_id: "repository_0001".to_string(),
+        },
     }
 }
 

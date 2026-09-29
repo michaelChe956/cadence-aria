@@ -172,11 +172,17 @@ fn admission_outcome(session: &WorkspaceSessionRecord) -> Option<PlanGenerationO
     }
 }
 
-/// 检查点只读投影（编排器/诊断用）。
+/// 检查点只读投影（编排器/诊断用）。C5 Task 1：经版本化读侧——旧格式
+/// 检查点（仅含已废弃 `logical_repository_id`、无 `target`）读入为
+/// `LegacyUnbound`（旧代无绑定），调用者据此停止自动链；不因 serde 缺
+/// 字段直接反序列化失败。
 pub fn generation_intent(
     state: &WebAppState,
     enrollment: &IssueAutomationEnrollment,
-) -> Result<Option<PlanGenerationIntent>, String> {
+) -> Result<
+    Option<crate::product::issue_automation_store::PlanGenerationIntentRead>,
+    String,
+> {
     let paths =
         crate::product::app_paths::ProductAppPaths::new(state.workspace_root.join(".aria"));
     let intent_path = paths
@@ -185,7 +191,7 @@ pub fn generation_intent(
     if intent_path.metadata().is_err() {
         return Ok(None);
     }
-    crate::product::json_store::read_json::<PlanGenerationIntent>(&intent_path)
+    crate::product::issue_automation_store::read_plan_generation_intent(&intent_path)
         .map(Some)
         .map_err(|error| format!("plan generation checkpoint unreadable: {error}"))
 }

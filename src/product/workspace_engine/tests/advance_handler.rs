@@ -1262,12 +1262,9 @@ async fn retry_initialization_preserves_failed_record_and_attempt() {
                     openspec_enabled: false,
                     plan_options: plan_options(),
                 },
-                logical_repository_id: crate::product::logical_codebase::LogicalRepositoryId(
-                    uuid::Uuid::nil(),
-                ),
-                target: Some(EnrollmentTarget::SingleRepository {
+                target: EnrollmentTarget::SingleRepository {
                     repository_id: "repository_0001".to_string(),
-                }),
+                },
             },
         )
         .expect("enable enrollment");
