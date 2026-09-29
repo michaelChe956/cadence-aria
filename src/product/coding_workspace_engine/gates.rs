@@ -1006,8 +1006,15 @@ impl CodingWorkspaceEngine {
             }
         };
         if should_resolve_gate {
-            self.store
-                .resolve_blocked_gate(project_id, issue_id, attempt_id, gate_id)?;
+            // C2 Task 4：记录解决动作——manual_continue／accept_risk 是续跑
+            // runner 跳过已完成 reviewer 的持久化证据。
+            self.store.resolve_blocked_gate_with_action(
+                project_id,
+                issue_id,
+                attempt_id,
+                gate_id,
+                Some(action_id),
+            )?;
         }
         Ok(updated)
     }

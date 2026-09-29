@@ -279,10 +279,44 @@ fn spawn_coding_runner_reserved_inner(
     Ok(command_tx)
 }
 
+/// C2 Task 4（REQ-CRO-04）：manual_continue／accept_risk 已确认结论时，
+/// 续跑 runner 跳过已完成的 Code Reviewer（复用最新持久化报告，不重跑）。
+/// 判据：最新报告存在，且同 stage 的已解决门以 manual_continue／accept_risk
+/// 解决并引用了该报告（retry_* 解决的门不构成跳过——重跑是预期）。
+pub(crate) fn reviewer_conclusion_already_confirmed(
+    coding_store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+) -> Result<bool, crate::product::json_store::ProductStoreError> {
+    use crate::product::coding_models::CodingExecutionStage;
+
+    if attempt.stage != CodingExecutionStage::CodeReview {
+        return Ok(false);
+    }
+    let Some(latest_report_id) = coding_store
+        .list_code_review_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+        .into_iter()
+        .map(|report| report.id)
+        .max()
+    else {
+        return Ok(false);
+    };
+    coding_store.has_resolved_gate_confirming_report(
+        &attempt.project_id,
+        &attempt.issue_id,
+        &attempt.id,
+        CodingExecutionStage::CodeReview,
+        &latest_report_id,
+    )
+}
+
 pub(crate) fn should_resume_runner_after_gate_response(
     action_id: &str,
     previous_attempt: &CodingExecutionAttempt,
 ) -> bool {
+    // C2 Task 4（REQ-CRO-04，A08）：manual_continue／accept_risk（允许的
+    // 质量绕过）加入续跑白名单——门响应先落 durable gate 记录再唤回 runner
+    // continuation，续跑不依赖提交动作的连接保持打开；状态仍限
+    // Blocked｜WaitingForHuman。
     matches!(
         action_id,
         "retry_coding"
@@ -291,6 +325,8 @@ pub(crate) fn should_resume_runner_after_gate_response(
             | "retry_internal_review"
             | "retry_group_review_shard"
             | "retry_group_reduction"
+            | "manual_continue"
+            | "accept_risk"
     ) && matches!(
         previous_attempt.status,
         CodingAttemptStatus::Blocked | CodingAttemptStatus::WaitingForHuman
@@ -607,6 +643,18 @@ pub(crate) async fn execute_start_coding_flow(
                     &current.id,
                 )?
                 .code_reviewer;
+            // C2 Task 4：manual_continue／accept_risk 已确认结论 → 跳过已
+            // 完成的 Code Reviewer（不重跑、role run 数不增加），从原阶段
+            // 之后继续推进（等价 ContinueAfterApprove 的阶段流转）。
+            if reviewer_conclusion_already_confirmed(coding_store, &current)? {
+                current = coding_store.update_attempt_stage(
+                    &current.project_id,
+                    &current.issue_id,
+                    &current.id,
+                    CodingExecutionStage::ReviewRequest,
+                )?;
+                continue 'pipeline;
+            }
             let reviewer_provider =
                 provider_for(state, &reviewer_provider_name, "coding reviewer provider")?;
             let review_report = engine

@@ -33,6 +33,10 @@ struct BlockedGateRecord {
     status: BlockedGateStatus,
     created_at: String,
     updated_at: String,
+    /// C2 Task 4（REQ-CRO-04）：解决该门的动作 id（manual_continue／
+    /// accept_risk／retry_review 等）。旧记录缺字段按 None 解释。
+    #[serde(default)]
+    resolved_action: Option<String>,
 }
 
 impl super::CodingAttemptStore {
@@ -322,6 +326,20 @@ impl super::CodingAttemptStore {
         attempt_id: &str,
         gate_id: &str,
     ) -> Result<CodingGateRequired, ProductStoreError> {
+        self.resolve_blocked_gate_with_action(project_id, issue_id, attempt_id, gate_id, None)
+    }
+
+    /// C2 Task 4（REQ-CRO-04）：解决门并记录触发动作——manual_continue／
+    /// accept_risk 等续跑动作被持久化为「已确认结论」的证据，续跑 runner
+    /// 据此跳过已完成的 reviewer（复用持久化结论，不重跑）。
+    pub fn resolve_blocked_gate_with_action(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        gate_id: &str,
+        resolved_action: Option<&str>,
+    ) -> Result<CodingGateRequired, ProductStoreError> {
         validate_relative_id(gate_id)?;
         let gates_root = self.blocked_gates_root(project_id, issue_id, attempt_id);
         let path = gates_root.join(format!("{gate_id}.json"));
@@ -335,6 +353,7 @@ impl super::CodingAttemptStore {
         let mut record: BlockedGateRecord = read_json(&path)?;
         record.status = BlockedGateStatus::Resolved;
         record.updated_at = Utc::now().to_rfc3339();
+        record.resolved_action = resolved_action.map(str::to_string);
         let gate = normalize_blocked_gate(record.gate.clone());
         write_json(
             &gates_root.join("resolved").join(format!("{gate_id}.json")),
@@ -342,6 +361,33 @@ impl super::CodingAttemptStore {
         )?;
         super::remove_file_if_exists(&path)?;
         Ok(gate)
+    }
+
+    /// C2 Task 4（REQ-CRO-04）：指定 stage 的已解决门中，是否存在以
+    /// manual_continue／accept_risk 解决且证据引用了给定报告 id 的记录
+    /// ——续跑 runner 跳过已完成 reviewer 的唯一判据（retry_* 解决的门
+    /// 不构成跳过：重跑评审是预期行为）。
+    pub fn has_resolved_gate_confirming_report(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        stage: CodingExecutionStage,
+        report_id: &str,
+    ) -> Result<bool, ProductStoreError> {
+        let resolved_root = self
+            .blocked_gates_root(project_id, issue_id, attempt_id)
+            .join("resolved");
+        let records: Vec<BlockedGateRecord> = super::list_json_records(&resolved_root)?;
+        let confirmed_stage = Some(stage);
+        Ok(records.iter().any(|record| {
+            record.gate.stage == confirmed_stage
+                && matches!(
+                    record.resolved_action.as_deref(),
+                    Some("manual_continue") | Some("accept_risk")
+                )
+                && record.gate.evidence_refs.iter().any(|evidence| evidence == report_id)
+        }))
     }
 
     pub(crate) fn reopen_failed_code_review_gate_for_plan_repair(
@@ -788,6 +834,7 @@ fn create_blocked_gate_unlocked(
         attempt_id: attempt.id.clone(),
         node_id: input.node_id,
         status: BlockedGateStatus::Open,
+        resolved_action: None,
         created_at: now.clone(),
         updated_at: now,
     };
