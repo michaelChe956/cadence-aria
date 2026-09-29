@@ -11,9 +11,11 @@ import {
 import type { WorkspaceWsState } from "./workspace-ws-store-types";
 
 /**
- * C1 Task 9（enrollment-recovery-surface）：驾驶舱 C1 恢复动作——只按
- * durable 等待项投影的 actions 名触发对应 REST（页面接线发送器），前端
- * 不判定业务成功；失败/needs_human 由服务端 state 承载后刷新投影。
+ * C1 Task 9（enrollment-recovery-surface）＋C2 Task 12（REQ-CRO-06）：
+ * 驾驶舱等待项恢复动作——只按 durable 等待项投影的 actions 名触发对应
+ * REST（页面接线发送器），前端不判定业务成功；失败/needs_human 由服务端
+ * state 承载后刷新投影。C2 新增 restart_coding（Task 3 restart REST）与
+ * gate_response（Task 12 gate-responses REST，与 WS 同一应用服务）。
  */
 export type C1RecoveryActionPayload =
   | { kind: "recover_candidate"; projectId: string; issueId: string; sessionId: string; gateId: string; commandId: string }
@@ -26,6 +28,24 @@ export type C1RecoveryActionPayload =
       attemptId: string;
       checkpoint: string;
       confirmUnknownSideEffect: boolean;
+    }
+  | {
+      kind: "restart_coding";
+      projectId: string;
+      issueId: string;
+      attemptId: string;
+      commandId: string;
+      expectedVersion: number;
+    }
+  | {
+      kind: "gate_response";
+      projectId: string;
+      issueId: string;
+      attemptId: string;
+      gateId: string;
+      actionId: string;
+      commandId: string;
+      expectedVersion: number;
     }
   | {
       kind: "confirm_takeover";
@@ -98,8 +118,17 @@ export type CockpitActionFacade = {
   confirmTakeover(
     payload: C1RecoveryActionPayload & { kind: "confirm_takeover" },
   ): Promise<void>;
-  /** C1 Task 9：显式换代导航（完整 rebind 表单在 issue 生命周期页）。 */
   rebind(payload: C1RecoveryActionPayload & { kind: "rebind" }): void;
+  /** C2 Task 12：终态 coding attempt 显式 restart（Task 3 restart REST；
+   * 可选面——旧接线不提供时卡片按钮只读 fail-closed）。 */
+  restartCoding?(
+    payload: C1RecoveryActionPayload & { kind: "restart_coding" },
+  ): Promise<void>;
+  /** C2 Task 12：gate response（gate-responses REST，与 WS 同一应用服务；
+   * 可选面——旧接线不提供时卡片按钮只读 fail-closed）。 */
+  respondGate?(
+    payload: C1RecoveryActionPayload & { kind: "gate_response" },
+  ): Promise<void>;
   /** C4 Task 9：LC 冷启动统一动作（Task 6 bootstrap action REST 透传，
    * 页面接线发送器；未接线零出站 fail-closed）。 */
   sendBootstrapAction(payload: LcBootstrapActionPayload): Promise<void>;
@@ -303,6 +332,13 @@ export function createCockpitActionFacade(input: {
       input.sendC1Action?.(payload);
     },
     rebind(payload) {
+      input.sendC1Action?.(payload);
+    },
+    // C2 Task 12：restart／gate response 同款透传（fail-closed：未接线零出站）。
+    async restartCoding(payload) {
+      input.sendC1Action?.(payload);
+    },
+    async respondGate(payload) {
       input.sendC1Action?.(payload);
     },
     // C4 Task 9：bootstrap 动作只透传页面接线发送器（fail-closed：未接线

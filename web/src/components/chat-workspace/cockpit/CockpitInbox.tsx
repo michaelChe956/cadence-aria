@@ -83,6 +83,17 @@ const C1_ACTION_BUTTON_LABELS: Record<string, string> = {
   retry_initialization: "重试初始化",
   confirm_takeover: "确认接管",
   rebind: "去换代",
+  // C2 Task 12：coding 链等待项动作（restart／gate 动作经 REST 作答）。
+  restart_coding: "重启 Coding",
+  manual_continue: "人工继续",
+  retry_coding: "重试编码",
+  retry_review: "重试代码审查",
+  retry_internal_review: "重试内部评审",
+  retry_group_review_shard: "重试组评审分片",
+  retry_group_reduction: "重试组归并",
+  send_to_coder: "发回 Coder",
+  accept_risk: "接受风险继续",
+  abort: "中止",
 };
 
 /**
@@ -1039,6 +1050,42 @@ function C1RecoveryCard({
         // lease id 是服务端 item id 的尾段（c1:lease_takeover:{issue}:{lease}）。
         leaseId: info.itemId.split(":").pop() ?? "",
         attemptId: info.attemptId ?? "",
+      });
+      return;
+    }
+    if (action === "restart_coding") {
+      // C2 Task 12：action_context 携带服务端派生的稳定 command_id＋
+      // expected 版本；前端不自行生成、不判定成功。
+      const context = info.actionContext.find((entry) => entry.action === action);
+      if (!context || !info.attemptId) {
+        return;
+      }
+      void actions.restartCoding?.({
+        kind: "restart_coding",
+        projectId: info.projectId,
+        issueId: info.issueId,
+        attemptId: info.attemptId,
+        commandId: context.commandId,
+        expectedVersion: context.expectedVersion,
+      });
+      return;
+    }
+    if (info.gateId && info.actionContext.some((entry) => entry.action === action)) {
+      // C2 Task 12：gate 动作经 gate-responses REST 作答（与 coding WS
+      // 同一应用服务）；仅 action_context 内携带版本的动作可出站。
+      const context = info.actionContext.find((entry) => entry.action === action);
+      if (!context || !info.attemptId) {
+        return;
+      }
+      void actions.respondGate?.({
+        kind: "gate_response",
+        projectId: info.projectId,
+        issueId: info.issueId,
+        attemptId: info.attemptId,
+        gateId: info.gateId,
+        actionId: action,
+        commandId: context.commandId,
+        expectedVersion: context.expectedVersion,
       });
       return;
     }

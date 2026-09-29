@@ -161,10 +161,25 @@ export type RecentCompletionInfoItem =
       final_confirmed: boolean;
     };
 
+// C2 Task 12（coding-execution-resilience-and-product-triage）：等待项操作
+// 上下文——与服务端 WaitingItemAction 一一对应（稳定 command_id＋expected
+// 对象版本）；驾驶舱动作按 action 名路由到对应 REST，前端不判定业务成功。
+export type WaitingItemAction = {
+  action: string;
+  command_id: string;
+  expected_version: number;
+};
+
 // C1 Task 9（enrollment-recovery-surface）：issue 级 durable 恢复等待项
-// （孤儿候选/lease 三态/Failed advance/intent 停等/换代历史）。actions 为
+//（孤儿候选/lease 三态/Failed advance/intent 停等/换代历史）。actions 为
 // 服务端 durable 事实派生的可用操作名（recover_candidate | confirm_takeover |
-// retry_initialization | rebind）；前端只按名触发对应 REST，不自行判定成功。
+// retry_initialization | rebind | C2: restart_coding | gate action_id）；
+// 前端只按名触发对应 REST，不自行判定成功。C2 additive：kind 扩展
+// coding_completion_unconfirmed / coding_already_running / coding_takeover_required /
+// coding_lease_unknown / coding_restart_available / reviewer_configuration_missing /
+// verification_triage / policy_verification / instruction_claim_interrupted /
+// large_candidate_blocked（宽 string 直传），expected_version／action_context
+// 为 additive 字段（旧响应缺失按缺省解释）。
 export type C1WaitingItem = {
   id: string;
   kind: string;
@@ -178,6 +193,8 @@ export type C1WaitingItem = {
   possible_side_effect?: string | null;
   actions: string[];
   next_phase?: string | null;
+  expected_version?: number | null;
+  action_context?: WaitingItemAction[];
 };
 
 export type IssueLifecycleResponse = {

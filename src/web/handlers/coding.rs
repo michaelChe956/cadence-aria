@@ -917,6 +917,213 @@ pub(crate) async fn restart_coding_attempt(
     Ok((code, Json(result)))
 }
 
+/// C2 Task 12（REQ-CRO-06）：驾驶舱 gate response REST 请求——与 WS
+/// `GateResponse` 同一应用服务（`handle_blocked_gate_response`），外加
+/// REST 契约的稳定 `command_id`＋expected 版本（同 command 同 payload
+/// 重放首次 durable 结果，异 payload fail-closed；旧版本 Rejected
+/// "请刷新"，不启动 provider）。
+#[derive(Debug, serde::Deserialize)]
+pub struct CodingGateResponseRestRequest {
+    pub command_id: String,
+    pub gate_id: String,
+    pub action_id: String,
+    #[serde(default)]
+    pub extra_context: Option<String>,
+    pub expected_version: u64,
+}
+
+/// C2 Task 12：gate response REST 结果（状态语义同 restart：Accepted／
+/// Replayed→200，NeedsHuman→202，Rejected→409）。
+#[derive(Debug, serde::Serialize)]
+pub struct CodingGateResponseRestResult {
+    pub command_id: String,
+    pub state: crate::product::models::automation::OperationState,
+    pub attempt_id: String,
+    pub gate_id: String,
+    pub action_id: String,
+    pub reason: Option<String>,
+}
+
+/// C2 Task 12：POST /coding-attempts/{attempt_id}/gate-responses——无
+/// coding socket 也能作答（复用 C1 "coding choice 从驾驶舱按 attempt
+/// 地址经 REST 作答"模式）；`manual_continue` 等白名单动作在 durable
+/// 落门后按 WS 同款续跑判定唤回 runner。
+pub(crate) async fn post_coding_gate_response(
+    State(state): State<WebAppState>,
+    Path(path): Path<CodingAttemptRoutePath>,
+    Json(request): Json<CodingGateResponseRestRequest>,
+) -> ApiResult<(
+    axum::http::StatusCode,
+    Json<CodingGateResponseRestResult>,
+)> {
+    use crate::product::coding_attempt_store::CodingAttemptCommandRecord;
+    use crate::product::json_store::validate_relative_id;
+    use crate::product::models::automation::OperationState;
+    use crate::web::coding_ws_handler::{
+        should_resume_runner_after_gate_response, spawn_coding_runner,
+    };
+    use axum::http::StatusCode;
+
+    let app_paths = product_app_paths(&state);
+    let coding_store = CodingAttemptStore::new(app_paths.clone());
+    let attempt = resolve_coding_attempt(
+        &coding_store,
+        path.project_id.as_deref(),
+        path.issue_id.as_deref(),
+        &path.attempt_id,
+    )?;
+    validate_relative_id(&request.command_id).map_err(|error| {
+        ApiError::validation(
+            "coding_gate_response_invalid_command_id",
+            format!("invalid gate response command id: {error}"),
+        )
+    })?;
+    if request.gate_id.trim().is_empty() || request.action_id.trim().is_empty() {
+        return Err(ApiError::validation(
+            "coding_gate_response_invalid_identity",
+            "gate_id and action_id must not be blank",
+        ));
+    }
+
+    // 命令账本（Task 2）：payload digest 覆盖对象身份＋gate／action／版本
+    //＋extra_context（同 command 异 payload fail-closed"请刷新"）。
+    let extra_digest = {
+        use sha2::Digest;
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(request.extra_context.as_deref().unwrap_or("").as_bytes());
+        hex::encode(hasher.finalize())
+    };
+    let payload_digest = format!(
+        "gate-response|{}|{}|{}|{}|{}|{}|{extra_digest}",
+        attempt.project_id,
+        attempt.issue_id,
+        attempt.id,
+        request.gate_id,
+        request.action_id,
+        request.expected_version
+    );
+    let record = |cmd_state: OperationState| CodingAttemptCommandRecord {
+        command_id: request.command_id.clone(),
+        payload_digest: payload_digest.clone(),
+        state: cmd_state,
+        recorded_at: chrono::Utc::now().to_rfc3339(),
+    };
+    let result = |cmd_state: OperationState, reason: Option<String>| {
+        CodingGateResponseRestResult {
+            command_id: request.command_id.clone(),
+            state: cmd_state,
+            attempt_id: attempt.id.clone(),
+            gate_id: request.gate_id.clone(),
+            action_id: request.action_id.clone(),
+            reason,
+        }
+    };
+    let store_error = |error: crate::product::json_store::ProductStoreError| {
+        ApiError::runtime(
+            "coding_gate_response_ledger_failed",
+            "coding gate response command ledger failed",
+            serde_json::json!({ "details": error.to_string() }),
+        )
+    };
+
+    if let Some(existing) = coding_store
+        .find_attempt_command_result(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &request.command_id,
+        )
+        .map_err(store_error)?
+    {
+        if existing.payload_digest != payload_digest {
+            return Err(ApiError::runtime(
+                "coding_gate_response_command_conflict",
+                "同 command 异 payload，请刷新后重试",
+                serde_json::json!({}),
+            ));
+        }
+        // 同 command 同 payload：重放首次 durable 结果，不重复副作用。
+        let cmd_state = if existing.state == OperationState::Accepted {
+            OperationState::Replayed
+        } else {
+            existing.state
+        };
+        return Ok((StatusCode::OK, Json(result(cmd_state, None))));
+    }
+
+    // 版本门（旧页面"请刷新"，不启动 provider、不改 attempt）。
+    if attempt.version != request.expected_version {
+        let _ = coding_store
+            .append_attempt_command_result(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &record(OperationState::Rejected),
+            )
+            .map_err(store_error)?;
+        return Ok((
+            StatusCode::CONFLICT,
+            Json(result(
+                OperationState::Rejected,
+                Some(format!(
+                    "expected version {} but durable version is {}; 请刷新",
+                    request.expected_version, attempt.version
+                )),
+            )),
+        ));
+    }
+
+    // 与 WS 同一应用服务（mutation lease 下 durable 落门）。
+    let attempt_key = CodingAttemptRunKey::from_attempt(&attempt);
+    let mutation_lease = state.coding_runs.lock_attempt_mutation(&attempt_key).await;
+    let engine = coding_workspace_engine_with_dummy_events(coding_store.clone());
+    let updated = match engine
+        .handle_blocked_gate_response(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &request.gate_id,
+            &request.action_id,
+            request.extra_context.clone(),
+        )
+        .await
+    {
+        Ok(updated) => updated,
+        Err(error) => {
+            drop(mutation_lease);
+            return Err(ApiError::runtime(
+                "coding_gate_response_failed",
+                "coding gate response failed",
+                serde_json::json!({ "details": error.to_string() }),
+            ));
+        }
+    };
+    // WS 同款续跑判定：白名单动作且门后 attempt 回到 Running 时唤回
+    // runner（观察通道缺失不阻塞业务事实——C2 Task 1 语义）。
+    if should_resume_runner_after_gate_response(&request.action_id, &attempt)
+        && updated.status == crate::product::coding_models::CodingAttemptStatus::Running
+    {
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(64);
+        drop(_event_rx);
+        let _ = spawn_coding_runner(
+            state.clone(),
+            coding_store.clone(),
+            event_tx,
+            updated.clone(),
+        );
+    }
+    drop(mutation_lease);
+    coding_store
+        .append_attempt_command_result(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &record(OperationState::Accepted),
+        )
+        .map_err(store_error)?;
+    Ok((StatusCode::OK, Json(result(OperationState::Accepted, None))))
+}
+
 pub(crate) async fn delete_coding_attempt(
     State(state): State<WebAppState>,
     Path(path): Path<CodingAttemptRoutePath>,
@@ -1117,3 +1324,164 @@ pub(crate) async fn request_work_item_execution_plan_change(
 
 mod artifact_content;
 pub(crate) use artifact_content::coding_attempt_artifact_content;
+
+/// C2 Task 12（REQ-CRO-06）：gate-responses REST 契约——同 command 同
+/// payload 重放首次 durable 结果（不重复副作用）、同 command 异 payload
+/// fail-closed"请刷新"、旧版本 Rejected 不改 attempt 不启动 provider；
+/// 与 WS `GateResponse` 同一应用服务（`handle_blocked_gate_response`）。
+#[cfg(test)]
+mod c2_gate_response_rest_tests {
+    use axum::extract::{Path, State};
+    use axum::Json;
+
+    use crate::product::app_paths::ProductAppPaths;
+    use crate::product::coding_attempt_store::CodingAttemptStore;
+    use crate::product::coding_attempt_store::CreateCodingAttemptInput;
+    use crate::product::issue_store::{CreateProductIssueInput, IssueStore};
+    use crate::product::models::automation::OperationState;
+    use crate::web::handlers::coding::scope::CodingAttemptRoutePath;
+    use crate::web::handlers::coding::{
+        CodingGateResponseRestRequest, post_coding_gate_response,
+    };
+    use crate::web::state::WebAppState;
+    use crate::web::workspace_ws_types::ProviderConfigSnapshot;
+
+    async fn fixture() -> (tempfile::TempDir, WebAppState, CodingAttemptStore, crate::product::coding_models::CodingExecutionAttempt) {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().to_path_buf();
+        let state = WebAppState::new(
+            root.clone(),
+            crate::web::runtime::WebRuntime::new_fake(root.clone()),
+        );
+        let paths = ProductAppPaths::new(root.join(".aria"));
+        IssueStore::new(paths.clone())
+            .create(CreateProductIssueInput {
+                project_id: "project_0001".to_string(),
+                repo_id: Some("repository_0001".to_string()),
+                logical_codebase_id: None,
+                title: "gate response issue".to_string(),
+                description: None,
+                change_id: None,
+                base_branch: None,
+            })
+            .expect("issue");
+        let store = CodingAttemptStore::new(paths.clone());
+        let attempt = store
+            .create_attempt(CreateCodingAttemptInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                work_item_id: "work_item_0001".to_string(),
+                base_branch: "main".to_string(),
+                branch_name: "aria/c2-gate-response".to_string(),
+                worktree_path: None,
+                provider_config_snapshot: ProviderConfigSnapshot {
+                    author: crate::product::models::ProviderName::Fake,
+                    reviewer: None,
+                    review_rounds: 0,
+                    permission_modes: Default::default(),
+                },
+                target_snapshot: None,
+                max_auto_rework: 0,
+            })
+            .expect("attempt");
+        (temp, state, store, attempt)
+    }
+
+    fn request(
+        command_id: &str,
+        gate_id: &str,
+        action_id: &str,
+        expected_version: u64,
+        extra_context: Option<&str>,
+    ) -> Json<CodingGateResponseRestRequest> {
+        Json(CodingGateResponseRestRequest {
+            command_id: command_id.to_string(),
+            gate_id: gate_id.to_string(),
+            action_id: action_id.to_string(),
+            extra_context: extra_context.map(str::to_string),
+            expected_version,
+        })
+    }
+
+    fn route(attempt: &crate::product::coding_models::CodingExecutionAttempt) -> Path<CodingAttemptRoutePath> {
+        Path(CodingAttemptRoutePath {
+            project_id: Some(attempt.project_id.clone()),
+            issue_id: Some(attempt.issue_id.clone()),
+            attempt_id: attempt.id.clone(),
+        })
+    }
+
+    #[tokio::test]
+    async fn c2_gate_response_rest_replays_same_command_and_rejects_stale_version() {
+        let (_tmp, state, store, attempt) = fixture().await;
+
+        // 旧页面过期版本：Rejected"请刷新"，不改 attempt、不启动 provider。
+        let (status, body) = post_coding_gate_response(
+            State(state.clone()),
+            route(&attempt),
+            request("cmd-gate-0001", "gate_missing", "manual_continue", 99, None),
+        )
+        .await
+        .expect("stale version handled as conflict body");
+        assert_eq!(status, axum::http::StatusCode::CONFLICT);
+        assert_eq!(body.state, OperationState::Rejected);
+        assert!(body.reason.as_deref().unwrap_or("").contains("请刷新"));
+        let after = store
+            .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .unwrap();
+        assert_eq!(after.version, attempt.version, "stale version must not mutate");
+        assert_eq!(after.status, attempt.status, "stale version must not advance status");
+        let ledger = store
+            .find_attempt_command_result(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                "cmd-gate-0001",
+            )
+            .unwrap()
+            .expect("rejected result recorded");
+        assert_eq!(ledger.state, OperationState::Rejected);
+
+        // 正确版本（门不存在 → 引擎按 WS 语义 no-op 返回 attempt）：
+        // Accepted 落账，200。
+        let (status, body) = post_coding_gate_response(
+            State(state.clone()),
+            route(&attempt),
+            request("cmd-gate-0002", "gate_missing", "manual_continue", attempt.version, None),
+        )
+        .await
+        .expect("accepted");
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(body.state, OperationState::Accepted);
+
+        // 同 command 同 payload：重放首次 durable 结果（Replayed），零副作用。
+        let (status, replay) = post_coding_gate_response(
+            State(state.clone()),
+            route(&attempt),
+            request("cmd-gate-0002", "gate_missing", "manual_continue", attempt.version, None),
+        )
+        .await
+        .expect("replayed");
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(replay.state, OperationState::Replayed);
+
+        // 同 command 异 payload（extra_context 变更）：fail-closed"请刷新"。
+        let conflict = post_coding_gate_response(
+            State(state.clone()),
+            route(&attempt),
+            request(
+                "cmd-gate-0002",
+                "gate_missing",
+                "manual_continue",
+                attempt.version,
+                Some("different payload"),
+            ),
+        )
+        .await
+        .expect_err("same command with different payload must fail closed");
+        assert_eq!(
+            conflict.code, "coding_gate_response_command_conflict",
+            "conflict surfaces a refresh prompt, not a provider start"
+        );
+    }
+}

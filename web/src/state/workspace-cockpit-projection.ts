@@ -584,8 +584,16 @@ export interface LogicalCodebaseBootstrapInfoProjection {
   membershipRevision: number | null;
 }
 
+/** C2 Task 12：等待项操作上下文的只读镜像（服务端 WaitingItemAction）。 */
+export interface WaitingItemActionProjection {
+  action: string;
+  commandId: string;
+  expectedVersion: number;
+}
+
 /** C1 Task 9：durable 恢复等待项的收件箱投影（服务端 C1WaitingItem 的
- * 只读镜像；动作按 actions 名由 facade 触发对应 REST，前端不判定成功）。 */
+ * 只读镜像；动作按 actions 名由 facade 触发对应 REST，前端不判定成功）。
+ * C2 Task 12 additive：expectedVersion／actionContext（C2 kind 同通道）。 */
 export interface C1WaitingProjection {
   projectId: string;
   issueId: string;
@@ -601,9 +609,11 @@ export interface C1WaitingProjection {
   possibleSideEffect: string | null;
   actions: readonly string[];
   nextPhase: string | null;
+  expectedVersion: number | null;
+  actionContext: readonly WaitingItemActionProjection[];
 }
 
-/** C1 等待项标题/摘要（按 kind 固定文案；身份字段进摘要行）。 */
+/** C1/C2 等待项标题（按 kind 固定文案；身份字段进摘要行）。 */
 const C1_WAITING_KIND_TITLES: Record<string, string> = {
   candidate_recovery: "候选门快照待恢复",
   lease_wait: "租约活跃，自动链等待中",
@@ -612,6 +622,17 @@ const C1_WAITING_KIND_TITLES: Record<string, string> = {
   advance_retry_failed: "Failed advance 待显式重试",
   intent_blocked: "计划意图停等修订",
   generation_history: "存在旧代绑定（只读可查）",
+  // C2 Task 12：coding 链十类等待项。
+  coding_completion_unconfirmed: "Coding 完成状态待确认",
+  coding_already_running: "Coding 已在运行，请等待",
+  coding_takeover_required: "Coding 死亡租约待确认接管",
+  coding_lease_unknown: "Coding 租约活性未知，停等人工",
+  coding_restart_available: "Coding 终态可显式重启",
+  reviewer_configuration_missing: "Reviewer 配置缺失，停等补齐",
+  verification_triage: "验证处理待人工裁决",
+  policy_verification: "政策核验停等（fail-closed）",
+  instruction_claim_interrupted: "返修指令消费中断，待同认领重放",
+  large_candidate_blocked: "大候选超预算，停等分段返修",
 };
 
 export function c1TargetLabel(target: C1WaitingItem["target"]): string {
@@ -669,6 +690,13 @@ export function c1WaitingItem(
       possibleSideEffect: item.possible_side_effect ?? null,
       actions: item.actions,
       nextPhase: item.next_phase ?? null,
+      // C2 Task 12 additive：expected 版本与操作上下文（旧响应缺失按空）。
+      expectedVersion: item.expected_version ?? null,
+      actionContext: (item.action_context ?? []).map((action) => ({
+        action: action.action,
+        commandId: action.command_id,
+        expectedVersion: action.expected_version,
+      })),
     },
   };
 }

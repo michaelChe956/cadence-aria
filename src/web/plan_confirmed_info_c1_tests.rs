@@ -388,3 +388,368 @@ fn c1_waiting_items_stay_silent_without_enrollment_or_lease_facts() {
         "no plan binding → no waiting items at all: {items:?}"
     );
 }
+/// C2 Task 12（REQ-CRO-06）：十类 coding durable 等待事实必须经
+/// `list_c1_waiting_items` additive 投影（kind 前缀 `coding_`／C2 常量），
+/// 携带 attempt／gate／session 身份、expected 版本与 action_context
+/// （稳定 command_id）；C1 既有七种 kind 与字段零变化（additive 缺省）。
+/// 只读派生可重复补读（通知失败不回滚业务事实）。
+#[test]
+fn c2_waiting_items_project_coding_run_facts() {
+    use crate::product::coding_attempt_store::{
+        CodingAttemptCommandRecord, CreateBlockedGateInput, CreateCodingAttemptInput,
+        EnterVerificationTriageInput,
+    };
+    use crate::product::coding_models::{
+        CodingExecutionStage, CodingGateAction, CodingGateActionType, CodingProviderRole,
+    };
+    use crate::product::json_store::read_json;
+    use crate::product::models::automation::OperationState;
+    use crate::product::models::project::IssueSharedWorktreeStatus;
+    use crate::web::workspace_ws_types::ProviderConfigSnapshot;
+
+    let (_tmp, paths, lifecycle) = fixture_root();
+    let plan_id = "plan_0001";
+    let session = lifecycle
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            entity_id: plan_id.to_string(),
+            workspace_type: WorkspaceType::WorkItemPlan,
+            author_provider: ProviderName::Fake,
+            reviewer_provider: Some(ProviderName::Fake),
+            review_rounds: 1,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+            work_item_plan_options: None,
+        })
+        .unwrap();
+    enable_enrollment(&paths, plan_id, &session.id);
+    let store = CodingAttemptStore::new(paths.clone());
+    let snapshot = ProviderConfigSnapshot {
+        author: ProviderName::Fake,
+        reviewer: None,
+        review_rounds: 0,
+        permission_modes: Default::default(),
+    };
+    let create = |work_item_id: &str, branch: &str| {
+        store
+            .create_attempt(CreateCodingAttemptInput {
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                work_item_id: work_item_id.to_string(),
+                base_branch: "main".to_string(),
+                branch_name: branch.to_string(),
+                worktree_path: None,
+                provider_config_snapshot: snapshot.clone(),
+                target_snapshot: None,
+                max_auto_rework: 0,
+            })
+            .unwrap()
+    };
+
+    // 事实 1（restart 可用）：终态 Aborted attempt（版本已推进到 3）。
+    let attempt_a = create("work_item_0001", "aria/c2-restart");
+    let mut aborted = attempt_a.clone();
+    aborted.status = crate::product::coding_models::CodingAttemptStatus::Aborted;
+    aborted.version = 3;
+    store.write_coding_attempt_for_test(&aborted).unwrap();
+
+    // 事实 2（完成状态待确认）：AwaitingManualRecovery＋manual_recovery_reason。
+    let attempt_b = create("work_item_0002", "aria/c2-unconfirmed");
+    let mut unconfirmed = attempt_b.clone();
+    unconfirmed.status = crate::product::coding_models::CodingAttemptStatus::AwaitingManualRecovery;
+    unconfirmed.manual_recovery_reason = Some("runner_died_before_provider_start".to_string());
+    unconfirmed.version = 7;
+    store.write_coding_attempt_for_test(&unconfirmed).unwrap();
+
+    // 事实 3（admission 停等账本）：attempt_b 被 Task 2 互斥拦下（NeedsHuman）。
+    store
+        .append_attempt_command_result(
+            PROJECT_ID,
+            ISSUE_ID,
+            &attempt_b.id,
+            &CodingAttemptCommandRecord {
+                command_id: "cmd-c2-kick-0001".to_string(),
+                payload_digest: "kick|coding".to_string(),
+                state: OperationState::NeedsHuman,
+                recorded_at: "2026-09-29T00:00:00Z".to_string(),
+            },
+        )
+        .unwrap();
+
+    // 事实 4（政策核验等待事实）：attempt_b 分区 policy-verification.json。
+    let policy_fact = serde_json::json!({
+        "attempt_id": attempt_b.id,
+        "reason_code": "policy_resolver_unavailable",
+        "detail": "resolver cannot uniquely resolve the frozen policy envelope",
+        "policy_digest": null,
+        "created_at": "2026-09-29T00:00:00Z",
+    });
+    write_json(
+        &paths
+            .issue_lifecycle_root(PROJECT_ID, ISSUE_ID)
+            .join("coding-attempts")
+            .join(&attempt_b.id)
+            .join("policy-verification.json"),
+        &policy_fact,
+    )
+    .unwrap();
+
+    // 事实 5（验证处理未决）：store 级转入（finding 沿 report_id#index 约定）。
+    store
+        .enter_verification_triage(
+            &unconfirmed,
+            EnterVerificationTriageInput {
+                attempt_id: attempt_b.id.clone(),
+                finding_id: "code_review_report_0001#2".to_string(),
+                check_id: "check_run_tests".to_string(),
+                plan_revision_id: "plan_rev_0001".to_string(),
+                original_command: Some("pnpm -C web exec vitest run".to_string()),
+                alternative_command: None,
+                cwd: None,
+                outcome: None,
+                test_execution_count: None,
+                environment: None,
+                scope: vec!["check_run_tests".to_string()],
+                expires_at: "2026-10-06T00:00:00Z".to_string(),
+            },
+        )
+        .unwrap();
+
+    // 事实 6（指令消费中断）：认领 journal 落盘但 consumed_at 缺失
+    //（认领→标记消费之间中断；重放命中同一认领）。
+    write_json(
+        &paths
+            .issue_lifecycle_root(PROJECT_ID, ISSUE_ID)
+            .join("coding-attempts")
+            .join(&attempt_b.id)
+            .join("rework-claims.json"),
+        &serde_json::json!({
+            "records": [{
+                "claim_id": "rework_claim_interrupted0001",
+                "attempt_id": attempt_b.id,
+                "instruction_ids": ["rework_instruction_0001"],
+                "rendered_prompt_digest": "9f16d0b6b1f4a2c3d5e6f708192a3b4c5d6e7f809192a3b4c5d6e7f8091a2b3",
+                "context_hash": "5a1d0b6b1f4a2c3d5e6f708192a3b4c5d6e7f809192a3b4c5d6e7f8091c2d3",
+                "consumed_at": null,
+            }],
+        }),
+    )
+    .unwrap();
+
+    // 事实 7（reviewer 配置缺失）：reason_code 定格的开放 blocked gate。
+    store
+        .create_blocked_gate_with_diagnostic(
+            &unconfirmed,
+            CreateBlockedGateInput {
+                attempt_id: attempt_b.id.clone(),
+                stage: CodingExecutionStage::CodeReview,
+                node_id: None,
+                role: Some(CodingProviderRole::CodeReviewer),
+                title: "reviewer 未配置".to_string(),
+                description: "reviewer provider is missing; pick a reviewer and retry"
+                    .to_string(),
+                reason_code: Some("reviewer_configuration_missing".to_string()),
+                evidence_refs: vec![],
+                raw_provider_output_ref: None,
+                available_actions: vec![CodingGateAction {
+                    action_id: "retry_review".to_string(),
+                    label: "重试代码审查".to_string(),
+                    action_type: CodingGateActionType::RetryReview,
+                }],
+            },
+            None,
+        )
+        .unwrap();
+
+    // 事实 8（大候选停等）：绑定 plan session 分区 sc-revision-blocked.json。
+    write_json(
+        &paths
+            .issue_lifecycle_root(PROJECT_ID, ISSUE_ID)
+            .join("workspace-sessions")
+            .join(&session.id)
+            .join("sc-revision-blocked.json"),
+        &serde_json::json!({
+            "session_id": session.id,
+            "command_id": "cmd-sc-revision-0001",
+            "reason_code": "HUMAN_GATE_REVISION_INPUT_OVER_HARD_LIMIT",
+            "detail": "assembled revision input 48000 bytes exceeds hard limit 32000",
+            "total_bytes": 48_000,
+            "hard_limit_bytes": 32_000,
+            "actions": ["segmented_revision", "retry"],
+            "created_at": "2026-09-29T00:00:00Z",
+        }),
+    )
+    .unwrap();
+
+    // 事实 9（已在运行）：活跃 attempt_c 持有 issue worktree 锁。
+    let attempt_c = create("work_item_0003", "aria/c2-running");
+    let mut running = attempt_c.clone();
+    running.status = crate::product::coding_models::CodingAttemptStatus::Running;
+    running.admission_ticket_consumed_at = Some("2026-09-29T00:00:00Z".to_string());
+    running.version = 11;
+    store.write_coding_attempt_for_test(&running).unwrap();
+    let worktree_path = paths
+        .issue_lifecycle_root(PROJECT_ID, ISSUE_ID)
+        .join("issue-shared-worktree.json");
+    let lock_worktree = |owner: &str, active_item: Option<&str>| {
+        write_json(
+            &worktree_path,
+            &crate::product::models::lifecycle::IssueSharedWorktree {
+                id: "issue_shared_worktree_0001".to_string(),
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                repository_id: "repo_physical_c1".to_string(),
+                target_repository_id: None,
+                checkout_id: None,
+                path_schema_version: 0,
+                branch_name: "aria/issue-shared".to_string(),
+                worktree_path: std::path::PathBuf::from("/tmp/c2-shared-worktree"),
+                base_branch: "main".to_string(),
+                status: IssueSharedWorktreeStatus::Running,
+                current_active_work_item_id: active_item.map(str::to_string),
+                current_lock_owner_id: Some(owner.to_string()),
+                last_completed_work_item_id: None,
+                created_at: "2026-09-29T00:00:00Z".to_string(),
+                updated_at: "2026-09-29T00:00:00Z".to_string(),
+            },
+        )
+        .unwrap();
+    };
+    lock_worktree(&attempt_c.id, Some("work_item_0003"));
+
+    let items = list_c1_waiting_items(&paths, PROJECT_ID, ISSUE_ID).unwrap();
+    let find = |kind: &str| {
+        items
+            .iter()
+            .find(|item| item.kind == kind)
+            .unwrap_or_else(|| panic!("{kind} must project from durable facts: {items:?}"))
+    };
+
+    // 完成状态待确认：AwaitingManualRecovery＋诊断 reason；无 REST 动作
+    //（恢复操作在 coding workspace 的显式 RecoverCoding 面）。
+    let completion = find("coding_completion_unconfirmed");
+    assert_eq!(completion.attempt_id.as_deref(), Some(attempt_b.id.as_str()));
+    assert!(
+        completion.reason.contains("runner_died_before_provider_start"),
+        "completion reason carries the durable diagnostic: {completion:?}"
+    );
+    assert!(completion.actions.is_empty());
+    assert_eq!(completion.expected_version, Some(7));
+    assert!(completion.action_context.is_empty());
+
+    // restart 可用：expected 版本＋action_context（稳定 command_id）。
+    let restart = find("coding_restart_available");
+    assert_eq!(restart.attempt_id.as_deref(), Some(attempt_a.id.as_str()));
+    assert_eq!(restart.actions, vec!["restart_coding".to_string()]);
+    assert_eq!(restart.expected_version, Some(3));
+    assert_eq!(restart.action_context.len(), 1);
+    assert_eq!(restart.action_context[0].action, "restart_coding");
+    assert_eq!(restart.action_context[0].expected_version, 3);
+    assert!(!restart.action_context[0].command_id.is_empty());
+
+    // reviewer 配置缺失：gate 身份＋gate 动作经 action_context 携带版本。
+    let reviewer = find("reviewer_configuration_missing");
+    assert_eq!(reviewer.attempt_id.as_deref(), Some(attempt_b.id.as_str()));
+    assert!(reviewer.gate_id.is_some());
+    assert_eq!(reviewer.actions, vec!["retry_review".to_string()]);
+    assert_eq!(reviewer.expected_version, Some(7));
+    assert_eq!(reviewer.action_context[0].action, "retry_review");
+    assert_eq!(reviewer.action_context[0].expected_version, 7);
+
+    // 验证处理：未决记录投影（finding/report#index、check 绑定入 reason）。
+    let triage = find("verification_triage");
+    assert_eq!(triage.attempt_id.as_deref(), Some(attempt_b.id.as_str()));
+    assert!(triage.reason.contains("code_review_report_0001#2"));
+    assert!(triage.reason.contains("check_run_tests"));
+    assert!(triage.actions.is_empty());
+
+    // 政策核验：reason_code＋detail 直达（停等呈现，动作面在重新授权链）。
+    let policy = find("policy_verification");
+    assert_eq!(policy.attempt_id.as_deref(), Some(attempt_b.id.as_str()));
+    assert!(policy.reason.contains("policy_resolver_unavailable"));
+    assert!(policy.actions.is_empty());
+
+    // 指令消费中断：认领身份与重放语义入 reason。
+    let claim = find("instruction_claim_interrupted");
+    assert_eq!(claim.attempt_id.as_deref(), Some(attempt_b.id.as_str()));
+    assert!(claim.reason.contains("rework_claim_interrupted0001"));
+    assert!(claim.actions.is_empty());
+
+    // 大候选停等：session 身份＋预算事实入 reason。
+    let large = find("large_candidate_blocked");
+    assert_eq!(large.session_id.as_deref(), Some(session.id.as_str()));
+    assert!(large.reason.contains("48000"));
+    assert!(large.reason.contains("HUMAN_GATE_REVISION_INPUT_OVER_HARD_LIMIT"));
+
+    // 已在运行：活跃持有者身份；无抢占动作。
+    let already = find("coding_already_running");
+    assert_eq!(already.attempt_id.as_deref(), Some(attempt_c.id.as_str()));
+    assert!(already.actions.is_empty());
+    assert_eq!(already.next_phase.as_deref(), Some("coding_run_settles"));
+
+    // C1 既有投影零变化：lease_wait 仍在且不携带 C2 additive 字段。
+    let lease_wait = items
+        .iter()
+        .find(|item| item.kind == "lease_wait")
+        .expect("C1 lease_wait stays unchanged");
+    assert_eq!(lease_wait.expected_version, None);
+    assert!(lease_wait.action_context.is_empty());
+
+    // 阶段 2（确认接管）：持有者终态 → coding_takeover_required＋confirm_takeover。
+    let mut dead = running.clone();
+    dead.status = crate::product::coding_models::CodingAttemptStatus::Aborted;
+    store.write_coding_attempt_for_test(&dead).unwrap();
+    let items = list_c1_waiting_items(&paths, PROJECT_ID, ISSUE_ID).unwrap();
+    let takeover = items
+        .iter()
+        .find(|item| item.kind == "coding_takeover_required")
+        .unwrap_or_else(|| panic!("dead foreign holder must project takeover: {items:?}"));
+    assert_eq!(takeover.attempt_id.as_deref(), Some(attempt_c.id.as_str()));
+    assert_eq!(takeover.actions, vec!["confirm_takeover".to_string()]);
+    assert_eq!(takeover.expected_version, Some(11));
+    assert_eq!(takeover.action_context[0].action, "confirm_takeover");
+    assert_eq!(takeover.action_context[0].expected_version, 11);
+    assert!(
+        !items.iter().any(|item| item.kind == "coding_already_running"),
+        "dead holder no longer projects already_running"
+    );
+
+    // 阶段 3（活性未知）：owner 无法解析为 issue attempt → 停等。
+    lock_worktree("coding_attempt_ghost_9999", Some("work_item_0003"));
+    let items = list_c1_waiting_items(&paths, PROJECT_ID, ISSUE_ID).unwrap();
+    let unknown = items
+        .iter()
+        .find(|item| item.kind == "coding_lease_unknown")
+        .unwrap_or_else(|| panic!("unresolvable owner must project lease_unknown: {items:?}"));
+    assert!(unknown.actions.is_empty());
+    assert!(
+        !items.iter().any(|item| item.kind == "coding_takeover_required"),
+        "unknown holder no longer projects takeover"
+    );
+
+    // 只读补读幂等：同事实再次 GET 得到同形条目（通知失败不回滚业务事实）。
+    let reread = list_c1_waiting_items(&paths, PROJECT_ID, ISSUE_ID).unwrap();
+    assert_eq!(
+        reread
+            .iter()
+            .find(|item| item.kind == "coding_lease_unknown")
+            .map(|item| (item.id.clone(), item.reason.clone())),
+        Some((unknown.id.clone(), unknown.reason.clone())),
+    );
+
+    // journal 落盘事实未被投影读取改动（只读派生）。
+    let raw: serde_json::Value = read_json(
+        &paths
+            .issue_lifecycle_root(PROJECT_ID, ISSUE_ID)
+            .join("coding-attempts")
+            .join(&attempt_b.id)
+            .join("rework-claims.json"),
+    )
+    .unwrap();
+    assert_eq!(
+        raw["records"][0]["consumed_at"],
+        serde_json::Value::Null,
+        "projection must not mutate durable facts"
+    );
+}

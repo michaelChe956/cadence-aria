@@ -82,6 +82,23 @@ impl super::CodingAttemptStore {
         })
     }
 
+    /// C2 Task 12：列出 attempt 命令账本全部条目（只读；投影据此识别
+    /// admission 停等事实，如 NeedsHuman 的双 kick／restart 拒绝记录）。
+    pub fn list_attempt_command_records(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> Result<Vec<CodingAttemptCommandRecord>, ProductStoreError> {
+        let path = self.attempt_command_ledger_path(project_id, issue_id, attempt_id)?;
+        with_exclusive_lock(&path, || {
+            if !path.is_file() {
+                return Ok(Vec::new());
+            }
+            Ok(read_json::<CodingAttemptCommandLedger>(&path)?.records)
+        })
+    }
+
     /// C2 Task 2：追加 attempt 命令账本（同 C1 幂等语义）：同 command 同
     /// payload 返回既有条目（不重复记录），同 command 异 payload Conflict。
     pub fn append_attempt_command_result(

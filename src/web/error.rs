@@ -54,6 +54,8 @@ impl IntoResponse for ApiError {
             | "workspace_session_confirm_not_allowed"
             | "workspace_session_takeover_not_allowed"
             | "workspace_choice_conflict"
+            // C2 Task 12：gate response 同 command 异 payload 冲突（请刷新）。
+            | "coding_gate_response_command_conflict"
             // P0 1.3（Task 9）：coding choice 应答同映射语义。
             | "coding_choice_conflict" => StatusCode::CONFLICT,
             "coding_attempt_active"

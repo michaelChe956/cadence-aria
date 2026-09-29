@@ -22,7 +22,9 @@ import {
   listProjects,
   listRepositories,
   normalizeApiError,
+  postCodingGateResponse,
   recheckProviders,
+  restartCodingAttempt,
   rebindAutomationEnrollment,
   takeoverWorkspaceSession,
 } from "./client";
@@ -658,6 +660,60 @@ describe("api client", () => {
       expect.objectContaining({
         method: "POST",
         body: JSON.stringify(request),
+      }),
+    );
+  });
+
+  // C2 Task 12（REQ-CRO-06）：驾驶舱 coding REST 的真实 URL／body 断言
+  //（restart／gate-responses；command_id＋expected 版本随 body 出站）。
+  it("posts coding restart and gate response with exact URLs and bodies", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ command_id: "c", state: "accepted" }), {
+          status: 200,
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const address = {
+      projectId: "project_1",
+      issueId: "issue 1",
+      attemptId: "attempt_9",
+    };
+
+    await restartCodingAttempt(address, {
+      command_id: "cmd-c2-restart-attempt_9",
+      attempt_id: "attempt_9",
+      expected_attempt_version: 3,
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/project_1/issues/issue%201/coding-attempts/attempt_9/restart",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          command_id: "cmd-c2-restart-attempt_9",
+          attempt_id: "attempt_9",
+          expected_attempt_version: 3,
+        }),
+      }),
+    );
+
+    fetchMock.mockClear();
+    await postCodingGateResponse(address, {
+      command_id: "cmd-c2-gate-gate_0007-retry_review",
+      gate_id: "gate_0007",
+      action_id: "retry_review",
+      expected_version: 7,
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/project_1/issues/issue%201/coding-attempts/attempt_9/gate-responses",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          command_id: "cmd-c2-gate-gate_0007-retry_review",
+          gate_id: "gate_0007",
+          action_id: "retry_review",
+          expected_version: 7,
+        }),
       }),
     );
   });

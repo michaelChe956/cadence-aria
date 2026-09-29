@@ -728,6 +728,70 @@ export function abortCodingAttempt(
   );
 }
 
+// C2 Task 3/12（REQ-CRO-03/06）：终态 coding attempt 显式 restart——
+// Accepted／Replayed→200，NeedsHuman（停等）→202，Rejected（版本／身份
+// 不符"请刷新"）→409；同 command 同 payload 幂等重放。
+export type CodingAttemptOperationState =
+  | "accepted"
+  | "replayed"
+  | "needs_human"
+  | "rejected";
+
+export type RestartCodingAttemptResponse = {
+  command_id: string;
+  state: CodingAttemptOperationState;
+  attempt_id: string;
+  reason?: string | null;
+};
+
+export function restartCodingAttempt(
+  address: CodingAttemptAddress,
+  payload: {
+    command_id: string;
+    attempt_id: string;
+    expected_attempt_version: number;
+  },
+): Promise<RestartCodingAttemptResponse> {
+  return requestJson<RestartCodingAttemptResponse>(
+    `${codingAttemptApiPath(address)}/restart`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+// C2 Task 12（REQ-CRO-06）：驾驶舱 gate response REST——与 coding WS
+// `GateResponse` 同一应用服务（无 coding socket 也能作答）；携带稳定
+// command_id＋expected 版本（旧版本 fail-closed"请刷新"）。
+export type CodingGateResponseResult = {
+  command_id: string;
+  state: CodingAttemptOperationState;
+  attempt_id: string;
+  gate_id: string;
+  action_id: string;
+  reason?: string | null;
+};
+
+export function postCodingGateResponse(
+  address: CodingAttemptAddress,
+  payload: {
+    command_id: string;
+    gate_id: string;
+    action_id: string;
+    extra_context?: string | null;
+    expected_version: number;
+  },
+): Promise<CodingGateResponseResult> {
+  return requestJson<CodingGateResponseResult>(
+    `${codingAttemptApiPath(address)}/gate-responses`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
 export function getCodingAttemptArtifact(
   address: CodingAttemptAddress,
   artifactId: string,

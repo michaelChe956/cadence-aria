@@ -324,6 +324,9 @@ describe("C1 recovery cards", () => {
         possibleSideEffect: "provider start outcome unknown",
         actions: ["retry_initialization"],
         nextPhase: "journal_prepared",
+        // C2 Task 12 additive（旧等待项缺省为空）。
+        expectedVersion: null,
+        actionContext: [],
       },
     };
     render(<CockpitInbox items={[item]} actions={facade} />);
@@ -342,6 +345,133 @@ describe("C1 recovery cards", () => {
       checkpoint: "journal_prepared",
       confirmUnknownSideEffect: false,
     });
+  });
+});
+
+// C2 Task 12（REQ-CRO-06）：coding 链等待项卡片——动作按钮从服务端
+// action_context（稳定 command_id＋expected 版本）出站，经 facade 透传
+// REST 发送器；前端不自行生成 command_id、不判定业务成功。
+describe("C2 waiting cards", () => {
+  const c2Item = (
+    overrides: Partial<{
+      kind: string;
+      actions: string[];
+      actionContext: { action: string; commandId: string; expectedVersion: number }[];
+      gateId: string | null;
+      attemptId: string;
+      nextPhase: string;
+    }>,
+  ): CockpitInboxItem => ({
+    id: "c1:issue_0001:c2:coding_restart_available:attempt_0002",
+    kind: "c1_recovery",
+    severity: 2,
+    title: "Coding 终态可显式重启",
+    summary: "coding attempt reached terminal state · attempt attempt_0002",
+    triage: false,
+    source: "c1_waiting",
+    createdAt: null,
+    gate: null,
+    inlineError: null,
+    choice: null,
+    c1Info: {
+      projectId: "project_0001",
+      issueId: "issue_0001",
+      itemId: "c2:coding_restart_available:attempt_0002",
+      kind: overrides.kind ?? "coding_restart_available",
+      reason: "coding attempt reached terminal state Aborted",
+      completedSteps: [],
+      targetLabel: "单仓 repo_physical_c1",
+      planId: "plan_0001",
+      sessionId: null,
+      attemptId: overrides.attemptId ?? "attempt_0002",
+      gateId: overrides.gateId ?? null,
+      possibleSideEffect: null,
+      actions: overrides.actions ?? ["restart_coding"],
+      nextPhase: overrides.nextPhase ?? "coding_restarted",
+      expectedVersion: 3,
+      actionContext:
+        overrides.actionContext ??
+        [
+          {
+            action: "restart_coding",
+            commandId: "cmd-c2-restart-attempt_0002",
+            expectedVersion: 3,
+          },
+        ],
+    },
+  });
+
+  it("dispatches restart_coding with the server-issued command id and version", async () => {
+    const facade = { ...mockActions(), restartCoding: vi.fn(async () => undefined) };
+    render(<CockpitInbox items={[c2Item({})]} actions={facade} />);
+    const card = screen.getByTestId("c1-waiting-coding_restart_available");
+    const button = within(card).getByTestId("c1-action-restart_coding");
+    expect(button).toHaveTextContent("重启 Coding");
+    await userEvent.click(button);
+    expect(facade.restartCoding).toHaveBeenCalledWith({
+      kind: "restart_coding",
+      projectId: "project_0001",
+      issueId: "issue_0001",
+      attemptId: "attempt_0002",
+      commandId: "cmd-c2-restart-attempt_0002",
+      expectedVersion: 3,
+    });
+  });
+
+  it("answers gate actions from action_context via the gate REST facade", async () => {
+    const facade = { ...mockActions(), respondGate: vi.fn(async () => undefined) };
+    render(
+      <CockpitInbox
+        items={[
+          c2Item({
+            kind: "reviewer_configuration_missing",
+            gateId: "gate_0007",
+            actions: ["retry_review"],
+            actionContext: [
+              {
+                action: "retry_review",
+                commandId: "cmd-c2-gate-gate_0007-retry_review",
+                expectedVersion: 7,
+              },
+            ],
+          }),
+        ]}
+        actions={facade}
+      />,
+    );
+    const card = screen.getByTestId("c1-waiting-reviewer_configuration_missing");
+    const button = within(card).getByTestId("c1-action-retry_review");
+    expect(button).toHaveTextContent("重试代码审查");
+    await userEvent.click(button);
+    expect(facade.respondGate).toHaveBeenCalledWith({
+      kind: "gate_response",
+      projectId: "project_0001",
+      issueId: "issue_0001",
+      attemptId: "attempt_0002",
+      gateId: "gate_0007",
+      actionId: "retry_review",
+      commandId: "cmd-c2-gate-gate_0007-retry_review",
+      expectedVersion: 7,
+    });
+  });
+
+  it("keeps read-only waiting kinds actionless (completion unconfirmed)", () => {
+    render(
+      <CockpitInbox
+        items={[
+          c2Item({
+            kind: "coding_completion_unconfirmed",
+            actions: [],
+            actionContext: [],
+            nextPhase: "manual_recovery",
+          }),
+        ]}
+        actions={mockActions()}
+      />,
+    );
+    const card = screen.getByTestId("c1-waiting-coding_completion_unconfirmed");
+    expect(card.querySelector("button")).toBeNull();
+    expect(within(card).getByText(/下一阶段：manual_recovery/)).toBeVisible();
   });
 });
 

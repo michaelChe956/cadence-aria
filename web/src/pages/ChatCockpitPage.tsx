@@ -6,6 +6,8 @@ import {
   postRetryFailedScRun,
   confirmLeaseTakeover, getAutomationEnrollment, postWorkspaceHumanAction,
   retryAdvanceInitialization, takeoverWorkspaceSession,
+  // C2 Task 12：等待项动作的 coding REST（restart／gate-responses）。
+  postCodingGateResponse, restartCodingAttempt,
 } from "../api/client";
 import { fetchWorkspaceArtifactVersion } from "../api/workspace-content";
 import {
@@ -523,6 +525,37 @@ export function ChatCockpitPage({
           expected_lease_id: payload.leaseId,
           expected_attempt_id: payload.attemptId,
         });
+      } else if (payload.kind === "restart_coding") {
+        // C2 Task 12：终态 attempt 显式 restart（Task 3 REST；同 command
+        // 同 payload 幂等，旧版本 Rejected"请刷新"由服务端承载）。
+        await restartCodingAttempt(
+          {
+            projectId: payload.projectId,
+            issueId: payload.issueId,
+            attemptId: payload.attemptId,
+          },
+          {
+            command_id: payload.commandId,
+            attempt_id: payload.attemptId,
+            expected_attempt_version: payload.expectedVersion,
+          },
+        );
+      } else if (payload.kind === "gate_response") {
+        // C2 Task 12：gate response REST（与 coding WS 同一应用服务）——
+        // 驾驶舱无 coding socket 也能作答。
+        await postCodingGateResponse(
+          {
+            projectId: payload.projectId,
+            issueId: payload.issueId,
+            attemptId: payload.attemptId,
+          },
+          {
+            command_id: payload.commandId,
+            gate_id: payload.gateId,
+            action_id: payload.actionId,
+            expected_version: payload.expectedVersion,
+          },
+        );
       } else {
         // rebind：显式换代表单在 Issue 生命周期工作台（useIssueLifecycleGeneration）；
         // 驾驶舱只广播失效刷新，不复制换代表单。

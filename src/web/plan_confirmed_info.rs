@@ -136,12 +136,30 @@ pub fn issue_plan_confirmed_info(
 // 补读本投影。不建通知表，不以事件当权威（tasks.md §3.2/§4.1）。
 // ---------------------------------------------------------------------------
 
+/// C2 Task 12（REQ-CRO-06）：等待项操作上下文——与 DTO `actions` 字符串
+/// 一一对应，携带稳定 `command_id` 与 expected 对象版本；REST／页面动作
+/// 同源携带（旧页面过期版本 fail-closed 返回"请刷新"）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WaitingItemAction {
+    pub action: String,
+    pub command_id: String,
+    pub expected_version: u64,
+}
+
 /// C1 恢复等待项 DTO（`IssueLifecycleResponse.c1_waiting_items` 条目）。
+/// C2 Task 12 additive：`expected_version`／`action_context` 两字段
+/// （`#[serde(default)]`，旧响应缺失按缺省解释）；C1 既有七种 kind 的
+/// 投影内容零变化。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct C1WaitingItemDto {
     pub id: String,
     /// candidate_recovery | lease_wait | lease_takeover | lease_unknown |
-    /// advance_retry_failed | intent_blocked | generation_history
+    /// advance_retry_failed | intent_blocked | generation_history |
+    /// C2：coding_completion_unconfirmed | coding_already_running |
+    /// coding_takeover_required | coding_lease_unknown | coding_restart_available |
+    /// reviewer_configuration_missing | verification_triage |
+    /// policy_verification | instruction_claim_interrupted |
+    /// large_candidate_blocked
     pub kind: String,
     pub reason: String,
     pub completed_steps: Vec<String>,
@@ -151,9 +169,17 @@ pub struct C1WaitingItemDto {
     pub attempt_id: Option<String>,
     pub gate_id: Option<String>,
     pub possible_side_effect: Option<String>,
-    /// recover_candidate | confirm_takeover | retry_initialization | rebind
+    /// recover_candidate | confirm_takeover | retry_initialization | rebind |
+    /// C2：restart_coding | confirm_takeover | gate action_id（经 REST 作答）
     pub actions: Vec<String>,
     pub next_phase: Option<String>,
+    /// C2 additive：操作目标对象的 expected durable 版本（无 REST 动作面
+    /// 的条目为 `None`）。
+    #[serde(default)]
+    pub expected_version: Option<u64>,
+    /// C2 additive：与 `actions` 一一对应的操作上下文（command_id＋版本）。
+    #[serde(default)]
+    pub action_context: Vec<WaitingItemAction>,
 }
 
 /// 从 durable enrollment/lease/advance/compile/gate 事实派生 issue 级 C1
@@ -224,6 +250,8 @@ pub fn list_c1_waiting_items(
                     possible_side_effect: None,
                     actions: vec!["recover_candidate".to_string()],
                     next_phase: Some("candidate_recovered".to_string()),
+                    expected_version: None,
+                    action_context: Vec::new(),
                 });
             }
         }
@@ -272,6 +300,8 @@ pub fn list_c1_waiting_items(
             possible_side_effect: last_activity_at.clone(),
             actions: actions.into_iter().map(str::to_string).collect(),
             next_phase: next_phase.map(str::to_string),
+            expected_version: None,
+            action_context: Vec::new(),
         }
     };
     match disposition {
@@ -334,6 +364,8 @@ pub fn list_c1_waiting_items(
                     possible_side_effect: record.error.clone(),
                     actions: vec!["retry_initialization".to_string()],
                     next_phase: journal_phase.map(str::to_string),
+                    expected_version: None,
+                    action_context: Vec::new(),
                 });
             }
         }
@@ -369,6 +401,8 @@ pub fn list_c1_waiting_items(
                 possible_side_effect: None,
                 actions: Vec::new(),
                 next_phase: Some("plan_revision".to_string()),
+                expected_version: None,
+                action_context: Vec::new(),
             });
         }
     }
@@ -392,13 +426,367 @@ pub fn list_c1_waiting_items(
                 possible_side_effect: None,
                 actions: vec!["rebind".to_string()],
                 next_phase: Some("rebind".to_string()),
+                expected_version: None,
+                action_context: Vec::new(),
             });
         }
     }
-
+    // C2 Task 12（REQ-CRO-06）：coding 链十类 durable 等待事实 additive 投影
+    //（不新建 DTO、不以事件当权威；读取失败显式上抛）。
+    append_c2_waiting_items(
+        paths,
+        project_id,
+        issue_id,
+        plan_id.as_deref(),
+        session_id.as_deref(),
+        &binding_target,
+        &mut items,
+    )?;
     Ok(items)
 }
 
+
+// ---------------------------------------------------------------------------
+// C2 Task 12（REQ-CRO-06）：coding 链十类 durable 等待事实的 additive
+// 投影。只从 durable store 派生（attempt 状态／诊断、Task 2 命令账本
+// 停等记录、租约三态、blocked gate reason_code、验证处理记录、政策核验
+// 等待事实、返修指令认领、SC 大候选停等）；通知／WS 投递失败不回滚
+// 业务事实，驾驶舱经 GET 补读本投影。动作只暴露 REST 可达面
+// （restart_coding／confirm_takeover／gate action_id）；无 REST 面的
+// 等待项只读呈现（操作在既有 coding workspace 面）。
+// ---------------------------------------------------------------------------
+
+/// C2 十类 kind 常量（前端 kind 宽 string 直接兼容）。
+pub const C2_KIND_CODING_COMPLETION_UNCONFIRMED: &str = "coding_completion_unconfirmed";
+pub const C2_KIND_CODING_ALREADY_RUNNING: &str = "coding_already_running";
+pub const C2_KIND_CODING_TAKEOVER_REQUIRED: &str = "coding_takeover_required";
+pub const C2_KIND_CODING_LEASE_UNKNOWN: &str = "coding_lease_unknown";
+pub const C2_KIND_CODING_RESTART_AVAILABLE: &str = "coding_restart_available";
+pub const C2_KIND_REVIEWER_CONFIGURATION_MISSING: &str = "reviewer_configuration_missing";
+pub const C2_KIND_VERIFICATION_TRIAGE: &str = "verification_triage";
+pub const C2_KIND_POLICY_VERIFICATION: &str = "policy_verification";
+pub const C2_KIND_INSTRUCTION_CLAIM_INTERRUPTED: &str = "instruction_claim_interrupted";
+pub const C2_KIND_LARGE_CANDIDATE_BLOCKED: &str = "large_candidate_blocked";
+
+fn append_c2_waiting_items(
+    paths: &ProductAppPaths,
+    project_id: &str,
+    issue_id: &str,
+    plan_id: Option<&str>,
+    session_id: Option<&str>,
+    binding_target: &Option<crate::product::logical_codebase::EnrollmentTarget>,
+    items: &mut Vec<C1WaitingItemDto>,
+) -> Result<(), ProductStoreError> {
+    use crate::product::coding_models::CodingAttemptStatus;
+    use crate::product::models::automation::{LeaseDisposition, OperationState};
+
+    let store = crate::product::coding_attempt_store::CodingAttemptStore::new(paths.clone());
+    let attempts = store.list_attempts_for_issue(project_id, issue_id)?;
+    let base = |kind: &str, id: String| C1WaitingItemDto {
+        id,
+        kind: kind.to_string(),
+        reason: String::new(),
+        completed_steps: Vec::new(),
+        target: binding_target.clone(),
+        plan_id: plan_id.map(str::to_string),
+        session_id: session_id.map(str::to_string),
+        attempt_id: None,
+        gate_id: None,
+        possible_side_effect: None,
+        actions: Vec::new(),
+        next_phase: None,
+        expected_version: None,
+        action_context: Vec::new(),
+    };
+
+    for attempt in &attempts {
+        // 完成状态待确认（A06）：AwaitingManualRecovery＋诊断 reason；恢复
+        // 操作在 coding workspace 显式 RecoverCoding 面（驾驶舱只读呈现）。
+        if attempt.status == CodingAttemptStatus::AwaitingManualRecovery {
+            let reason = attempt
+                .manual_recovery_reason
+                .clone()
+                .unwrap_or_else(|| "completion outcome unconfirmed".to_string());
+            let mut item = base(
+                C2_KIND_CODING_COMPLETION_UNCONFIRMED,
+                format!("c2:coding_completion_unconfirmed:{}", attempt.id),
+            );
+            item.reason = format!(
+                "coding run completion outcome unconfirmed ({reason}); \
+                 awaiting manual recovery; provider side effects may exist"
+            );
+            item.attempt_id = Some(attempt.id.clone());
+            item.possible_side_effect = Some(format!("provider outcome unconfirmed: {reason}"));
+            item.expected_version = Some(attempt.version);
+            item.next_phase = Some("manual_recovery".to_string());
+            items.push(item);
+        }
+
+        // restart 可用（A08）：终态 attempt 显式 restart（REST 与 WS 同一
+        // 应用服务；旧版本 Rejected"请刷新"）。
+        if matches!(
+            attempt.status,
+            CodingAttemptStatus::Aborted | CodingAttemptStatus::Failed
+        ) {
+            let mut item = base(
+                C2_KIND_CODING_RESTART_AVAILABLE,
+                format!("c2:coding_restart_available:{}", attempt.id),
+            );
+            item.reason = format!(
+                "coding attempt reached terminal state {:?}; explicit restart \
+                 re-admits the attempt and spawns a new runner",
+                attempt.status
+            );
+            item.attempt_id = Some(attempt.id.clone());
+            item.actions = vec!["restart_coding".to_string()];
+            item.expected_version = Some(attempt.version);
+            item.action_context = vec![WaitingItemAction {
+                action: "restart_coding".to_string(),
+                command_id: format!("cmd-c2-restart-{}", attempt.id),
+                expected_version: attempt.version,
+            }];
+            item.next_phase = Some("coding_restarted".to_string());
+            items.push(item);
+        }
+
+        // reviewer 配置缺失（A10）：reason_code 定格的开放 blocked gate；
+        // gate 动作经 gate-responses REST 作答（与 WS 同一应用服务）。
+        for gate in store.list_open_blocked_gates(project_id, issue_id, &attempt.id)? {
+            if gate.reason_code.as_deref() != Some("reviewer_configuration_missing") {
+                continue;
+            }
+            let mut item = base(
+                C2_KIND_REVIEWER_CONFIGURATION_MISSING,
+                format!(
+                    "c2:reviewer_configuration_missing:{}:{}",
+                    attempt.id, gate.gate_id
+                ),
+            );
+            item.reason = format!(
+                "reviewer provider is missing ({}): {}; configuring a reviewer \
+                 or a gate retry resumes the chain without falling back to author",
+                gate.title, gate.description
+            );
+            item.attempt_id = Some(attempt.id.clone());
+            item.gate_id = Some(gate.gate_id.clone());
+            item.actions = gate
+                .available_actions
+                .iter()
+                .map(|action| action.action_id.clone())
+                .collect();
+            item.expected_version = Some(attempt.version);
+            item.action_context = gate
+                .available_actions
+                .iter()
+                .map(|action| WaitingItemAction {
+                    action: action.action_id.clone(),
+                    command_id: format!("cmd-c2-gate-{}-{}", gate.gate_id, action.action_id),
+                    expected_version: attempt.version,
+                })
+                .collect();
+            item.next_phase = Some("reviewer_configured_or_gate_resolved".to_string());
+            items.push(item);
+        }
+
+        // 验证处理未决（A11）：决定面在 coding workspace 验证处理面板
+        //（三类结论均需用户明确批准），驾驶舱只读呈现。
+        for triage in store.list_verification_triage_records(project_id, issue_id, &attempt.id)? {
+            if triage.status
+                != crate::product::coding_attempt_store::VerificationTriageStatus::Pending
+            {
+                continue;
+            }
+            let mut item = base(
+                C2_KIND_VERIFICATION_TRIAGE,
+                format!("c2:verification_triage:{}:{}", attempt.id, triage.triage_id),
+            );
+            item.reason = format!(
+                "verification triage pending: check {} finding {} \
+                 (plan revision {}); the decision requires explicit human approval",
+                triage.check_id, triage.finding_id, triage.plan_revision_id
+            );
+            item.attempt_id = Some(attempt.id.clone());
+            item.expected_version = Some(attempt.version);
+            item.next_phase = Some("verification_triage_decided".to_string());
+            items.push(item);
+        }
+
+        // 政策核验停等（A15）：fail-closed 等待事实直达；重新授权面随
+        // C4 resolver 联验接线（MUST NOT 本地 fallback）。
+        if let Some(record) =
+            crate::product::logical_codebase::load_policy_verification_waiting_fact(paths, attempt)
+                .map_err(|error| {
+                    ProductStoreError::Io(format!(
+                        "read policy verification waiting fact: {error}"
+                    ))
+                })?
+        {
+            let mut item = base(
+                C2_KIND_POLICY_VERIFICATION,
+                format!("c2:policy_verification:{}", attempt.id),
+            );
+            item.reason = format!("{}: {}", record.reason_code, record.detail);
+            item.attempt_id = Some(attempt.id.clone());
+            item.possible_side_effect = record.policy_digest.clone();
+            item.expected_version = Some(attempt.version);
+            item.next_phase = Some("policy_reauthorized".to_string());
+            items.push(item);
+        }
+
+        // 指令消费中断（A15）：认领 journal 落盘但消费标记缺失；下一次
+        // coder 启动以同一认领与同一上下文 hash 重放（不二次消费）。
+        for claim in store.list_rework_instruction_claims(project_id, issue_id, &attempt.id)? {
+            if claim.consumed_at.is_some() {
+                continue;
+            }
+            let mut item = base(
+                C2_KIND_INSTRUCTION_CLAIM_INTERRUPTED,
+                format!(
+                    "c2:instruction_claim_interrupted:{}:{}",
+                    attempt.id, claim.claim_id
+                ),
+            );
+            item.reason = format!(
+                "rework instruction claim {} recorded but not consumed \
+                 (instructions {:?}); the next coder run replays the same \
+                 claim and context hash instead of consuming twice",
+                claim.claim_id, claim.instruction_ids
+            );
+            item.attempt_id = Some(attempt.id.clone());
+            item.expected_version = Some(attempt.version);
+            item.next_phase = Some("claim_replayed".to_string());
+            items.push(item);
+        }
+    }
+
+    // 租约三态（A06／A09）：只在存在真实 admission 停等事实（Task 2 命令
+    // 账本 NeedsHuman 记录）且停等者非租约持有者时投影 coding 视图；
+    // 分类复用 C1 classify_worktree_lease（不新建判定），不抢占任何
+    // 无法证明死亡的租约。
+    let mut stop_wait_attempt_ids: Vec<String> = Vec::new();
+    for attempt in &attempts {
+        let records = store.list_attempt_command_records(project_id, issue_id, &attempt.id)?;
+        if records
+            .iter()
+            .any(|record| record.state == OperationState::NeedsHuman)
+        {
+            stop_wait_attempt_ids.push(attempt.id.clone());
+        }
+    }
+    if !stop_wait_attempt_ids.is_empty() {
+        let lease = store.classify_worktree_lease(project_id, issue_id);
+        let foreign_wait = stop_wait_attempt_ids
+            .iter()
+            .any(|attempt_id| Some(attempt_id.as_str()) != Some(lease.lease_id.as_str()));
+        if foreign_wait {
+            match lease.disposition {
+                LeaseDisposition::ActiveWait => {
+                    let mut item = base(
+                        C2_KIND_CODING_ALREADY_RUNNING,
+                        format!(
+                            "c2:coding_already_running:{}:{}",
+                            issue_id, lease.lease_id
+                        ),
+                    );
+                    item.reason = format!(
+                        "coding run {} already holds the worktree lease; \
+                         kicks for {:?} stay rejected; wait for it to settle \
+                         or confirm takeover after it ends",
+                        lease.lease_id, stop_wait_attempt_ids
+                    );
+                    item.attempt_id = Some(lease.lease_id.clone());
+                    item.possible_side_effect = lease.last_activity_at.clone();
+                    item.next_phase = Some("coding_run_settles".to_string());
+                    items.push(item);
+                }
+                LeaseDisposition::DeadNeedsTakeover
+                    if !lease.lease_id.is_empty()
+                        && let Ok(holder) = store.get_attempt(project_id, issue_id, &lease.lease_id) =>
+                {
+                    let mut item = base(
+                        C2_KIND_CODING_TAKEOVER_REQUIRED,
+                        format!(
+                            "c2:coding_takeover_required:{}:{}",
+                            issue_id, lease.lease_id
+                        ),
+                    );
+                    item.reason = format!(
+                        "coding lease {} is dead (holder terminal {:?}); \
+                         takeover requires human confirmation: {}",
+                        lease.lease_id,
+                        holder.status,
+                        lease.evidence.join("; ")
+                    );
+                    item.attempt_id = Some(holder.id.clone());
+                    item.actions = vec!["confirm_takeover".to_string()];
+                    item.expected_version = Some(holder.version);
+                    item.action_context = vec![WaitingItemAction {
+                        action: "confirm_takeover".to_string(),
+                        command_id: format!("cmd-c2-takeover-{}-{}", issue_id, lease.lease_id),
+                        expected_version: holder.version,
+                    }];
+                    item.next_phase = Some("takeover_confirmed".to_string());
+                    items.push(item);
+                }
+                LeaseDisposition::UnknownNeedsHuman
+                    if !lease
+                        .evidence
+                        .iter()
+                        .any(|fact| fact.contains("worktree record not found")) =>
+                {
+                    let mut item = base(
+                        C2_KIND_CODING_LEASE_UNKNOWN,
+                        format!("c2:coding_lease_unknown:{}:{}", issue_id, lease.lease_id),
+                    );
+                    item.reason = format!(
+                        "coding lease liveness unknown; stopped for human: {}",
+                        lease.evidence.join("; ")
+                    );
+                    item.attempt_id = stop_wait_attempt_ids.first().cloned();
+                    item.possible_side_effect = lease.last_activity_at.clone();
+                    item.next_phase = Some("lease_clarified".to_string());
+                    items.push(item);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // 大候选停等（A14）：绑定 plan session 分区的 SC 组装拒绝事实；
+    // "分段返修／重试"在计划会话门面（用户点击后才开新回合）。
+    if let Some(bound_session_id) = session_id {
+        let lifecycle = LifecycleStore::new(paths.clone());
+        if let Ok(bound_session) = lifecycle.get_workspace_session(bound_session_id)
+            && bound_session.workspace_type
+                == crate::product::models::WorkspaceType::WorkItemPlan
+            && let Some(blocked) =
+                crate::product::workspace_engine::conversational_gate::read_sc_revision_blocked_fact(
+                    paths,
+                    project_id,
+                    issue_id,
+                    bound_session_id,
+                )?
+        {
+            let mut item = base(
+                C2_KIND_LARGE_CANDIDATE_BLOCKED,
+                format!("c2:large_candidate_blocked:{bound_session_id}"),
+            );
+            item.reason = format!(
+                "{}: {} ({} bytes exceeds hard limit {}); segmented \
+                 revision or retry opens a new turn after a human click",
+                blocked.reason_code,
+                blocked.detail,
+                blocked.total_bytes,
+                blocked.hard_limit_bytes
+            );
+            item.session_id = Some(bound_session_id.to_string());
+            item.next_phase = Some("segmented_revision_or_retry".to_string());
+            items.push(item);
+        }
+    }
+
+    Ok(())
+}
 /// Advance journal checkpoint 的 wire slug（serde snake_case 同形）。
 fn checkpoint_slug(
     phase: crate::product::advance_store::AdvanceInitializationPhase,

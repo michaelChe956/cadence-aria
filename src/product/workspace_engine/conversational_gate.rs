@@ -415,6 +415,26 @@ impl super::WorkspaceEngine {
     }
 }
 
+/// C2 Task 12（REQ-CG-03 收口）：只读读取 session 分区的大候选停等等待
+/// 事实（`large_candidate_blocked` 投影数据源）。无文件返回 `None`；
+/// 文件存在但不可读按 Io 错误上抛（不吞为无事实）。
+pub(crate) fn read_sc_revision_blocked_fact(
+    paths: &crate::product::app_paths::ProductAppPaths,
+    project_id: &str,
+    issue_id: &str,
+    session_id: &str,
+) -> Result<Option<ScRevisionBlockedRecord>, ProductStoreError> {
+    let path = paths
+        .issue_lifecycle_root(project_id, issue_id)
+        .join("workspace-sessions")
+        .join(session_id)
+        .join(SC_REVISION_BLOCKED_FILE);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    crate::product::json_store::read_json(&path).map(Some)
+}
+
 pub(crate) fn trim_provider_preamble(source: &str) -> &str {
     let document_heading = format!("{}\n", grammar::DOCUMENT_HEADING);
     source

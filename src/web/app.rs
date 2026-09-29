@@ -334,6 +334,12 @@ pub fn build_web_router_with_evidence(state: WebAppState, evidence_enabled: bool
             post(handlers::restart_coding_attempt),
         )
         .route(
+            // C2 Task 12（REQ-CRO-06）：驾驶舱 gate response REST（与 WS
+            // GateResponse 同一应用服务）。
+            "/api/projects/{project_id}/issues/{issue_id}/coding-attempts/{attempt_id}/gate-responses",
+            post(handlers::post_coding_gate_response),
+        )
+        .route(
             "/api/projects/{project_id}/issues/{issue_id}/coding-attempts/{attempt_id}/choices/{choice_id}/response",
             post(handlers::post_coding_choice_response),
         )
