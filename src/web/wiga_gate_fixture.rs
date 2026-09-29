@@ -936,6 +936,43 @@ use p2_campaign::{init_real_main_checkout, normalize_checkout_revision_to_unobse
         fixture
     }
 
+    /// C5 Task 5 共享 fixture：单仓 Confirmed enrollment 经 Task 4 双分支
+    /// enrolled advance 到 durable Ready——唯一 attempt 无 target_snapshot、
+    /// 冻结 AutoStartOnce，尚无任何 runner/provider 启动。
+    pub(crate) async fn ready_single_repository_attempt_fixture() -> EnrolledGateFixture {
+        let fixture = confirmed_single_repository_enrolled_fixture().await;
+        let enrollment = fixture.enrollment();
+        let plan_id = enrollment.plan_id.clone().expect("bound plan");
+        let input = crate::product::advance_store::AdvanceInput {
+            command_id: format!("wiga-advance-{}-{plan_id}", enrollment.enrollment_id),
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            plan_id,
+        };
+        let outcome = crate::web::advance_plan::advance_plan(
+            &fixture.state,
+            input,
+            crate::web::advance_plan::AdvancePlanOrigin::Enrolled {
+                enrollment_id: enrollment.enrollment_id.clone(),
+                policy_revision: enrollment.policy_revision,
+            },
+        )
+        .await
+        .expect("single-repository enrolled advance to ready");
+        assert!(
+            matches!(
+                outcome,
+                crate::product::advance_store::AdvanceOutcome::Completed { .. }
+            ),
+            "single-repository enrolled advance must complete: {outcome:?}"
+        );
+        assert!(
+            fixture.attempt().target_snapshot.is_none(),
+            "single-repository ready attempt must not carry a logical target snapshot"
+        );
+        fixture
+    }
+
     /// P2 Task 4 共享 fixture：Confirmed enrollment 经 Task 1 自动 advance
     /// 到 durable Ready——唯一 attempt 沿真实 journal lineage 创建、冻结
     /// AutoStartOnce policy，尚无任何 runner/provider 启动。

@@ -479,32 +479,48 @@ async fn start_coding_attempt(
                     &attempt.project_id,
                     &attempt.issue_id,
                     |enrollment| {
+                        // C5 Task 5：claim 前在 enrollment 锁内解析 issue 当前
+                        // authority 载体（错仓/跨载体即 fail-closed，零 claim
+                        // 零启动；resolver 错误保留稳定错误码不折叠）。
                         let admission =
-                            verify_frozen_policy(&attempt, enrollment_id, *policy_revision)
-                                .and_then(|plan_id| {
-                                    verify_current_enrollment(
-                                        enrollment,
+                            resolve_current_carrier(&paths, &attempt).and_then(
+                                |current_carrier| {
+                                    verify_frozen_policy(
                                         &attempt,
                                         enrollment_id,
                                         *policy_revision,
-                                        &plan_id,
                                     )
-                                })
-                                .and_then(|()| {
-                                    // C1 Task 3：当前 binding 前置（helper 同源
-                                    // 校验）+ 回执携带身份匹配——旧代回执按
-                                    // binding version/target 显式拒绝；旧 claim
-                                    // JSON 缺字段（None）按兼容读，不猜 target。
-                                    verify_current_binding(
-                                        enrollment,
-                                        binding_version.as_ref(),
-                                        target.as_ref(),
-                                    )
-                                })
-                                .and_then(|()| {
-                                    verify_journal_and_record(&paths, &coding_store, &attempt)
-                                })
-                                .and_then(|()| sc_advance_ready_gate(&paths, &attempt));
+                                    .and_then(|plan_id| {
+                                        verify_current_enrollment(
+                                            enrollment,
+                                            &attempt,
+                                            enrollment_id,
+                                            *policy_revision,
+                                            &plan_id,
+                                            &current_carrier,
+                                        )
+                                    })
+                                    .and_then(|()| {
+                                        // C1 Task 3：当前 binding 前置（helper 同源
+                                        // 校验）+ 回执携带身份匹配——旧代回执按
+                                        // binding version/target 显式拒绝；旧 claim
+                                        // JSON 缺字段（None）按兼容读，不猜 target。
+                                        verify_current_binding(
+                                            enrollment,
+                                            binding_version.as_ref(),
+                                            target.as_ref(),
+                                        )
+                                    })
+                                    .and_then(|()| {
+                                        verify_journal_and_record(
+                                            &paths,
+                                            &coding_store,
+                                            &attempt,
+                                        )
+                                    })
+                                    .and_then(|()| sc_advance_ready_gate(&paths, &attempt))
+                                },
+                            );
                         let admission = admission.and_then(|()| {
                             coding_store
                                 .claim_coding_start(
@@ -694,14 +710,35 @@ fn verify_frozen_policy(
     Ok(plan_id)
 }
 
+/// C5 Task 5：claim 前解析 issue 当前 authority 载体（caller 在 enrollment
+/// 锁内、`claim_coding_start` 之前调用）。issue 读失败与 resolver 错误均
+/// 映射为结构化 `StartCodingError`——保留 routing 冲突等稳定错误码，
+/// 不折叠为普通字符串；任何失败都不得 claim、启动 provider 或写 attempt。
+fn resolve_current_carrier(
+    paths: &ProductAppPaths,
+    attempt: &CodingExecutionAttempt,
+) -> Result<crate::web::handlers::AutomationCarrierResolution, StartCodingError> {
+    let issue = crate::product::issue_store::IssueStore::new(paths.clone())
+        .get(&attempt.project_id, &attempt.issue_id)
+        .map_err(|error| StartCodingError::new(
+            "coding_start_issue_load_failed",
+            format!("load issue for coding start carrier resolution failed: {error}"),
+        ))?;
+    crate::web::handlers::resolve_automation_carrier(paths, &attempt.project_id, &issue)
+        .map_err(|error| StartCodingError::new(&error.code, error.message))
+}
+
 /// 当前 durable enrollment 与 origin/attempt 的精确互证（enrolled 锁内
-/// 调用；disable 后未消费的 AutoStartOnce 不再生效）。
+/// 调用；disable 后未消费的 AutoStartOnce 不再生效）。C5 Task 5：载体
+/// 互证按 enrollment 声明 target 分派，caller 传入锁内解析的当前
+/// authority 载体（不另造第二次 issue/repository 读取）。
 fn verify_current_enrollment(
     enrollment: &crate::product::models::automation::IssueAutomationEnrollment,
     attempt: &CodingExecutionAttempt,
     enrollment_id: &str,
     policy_revision: u64,
     plan_id: &str,
+    current_carrier: &crate::web::handlers::AutomationCarrierResolution,
 ) -> Result<(), StartCodingError> {
     if !enrollment.enabled {
         return Err(StartCodingError::new(
@@ -736,31 +773,77 @@ fn verify_current_enrollment(
             ),
         ));
     }
-    // C5 Task 1：enrollment 载体身份唯一权威是声明的 target（冗余的顶层
-    // logical_repository_id 已删除）。LC target 比较 attempt 快照的 logical
-    // repository；单仓 target 与旧代（无 target）enrollment 对 LC 快照一律
-    // 视为漂移拒绝（snapshot None 时保持既有通过语义，载体互证由
-    // verify_current_binding 的 origin target 断言承载）。
-    let enrollment_logical_repository = enrollment.target.as_ref().and_then(
-        |target| match target {
-            crate::product::logical_codebase::EnrollmentTarget::LogicalCodebase {
-                logical_repository_id,
-                ..
-            } => Some(*logical_repository_id),
-            crate::product::logical_codebase::EnrollmentTarget::SingleRepository { .. } => None,
-        },
-    );
-    if let Some(snapshot) = &attempt.target_snapshot
-        && Some(snapshot.logical_repository_id) != enrollment_logical_repository
-    {
-        return Err(StartCodingError::new(
-            "coding_start_enrollment_mismatch",
-            format!(
-                "attempt target snapshot points at logical repository {:?} but enrollment \
-                 authorizes {:?}",
-                snapshot.logical_repository_id, enrollment_logical_repository
-            ),
-        ));
+    // C5 Task 5：载体互证按 enrollment 声明 target 分派。
+    match enrollment.target.as_ref() {
+        Some(crate::product::logical_codebase::EnrollmentTarget::SingleRepository {
+            repository_id,
+        }) => {
+            // 单仓 enrollment：attempt 携带任何 LC target snapshot 即跨载体
+            // 漂移拒绝；无 snapshot 时要求当前 authority 载体仍解析为同一
+            // 物理仓（错仓/改属 LC 即 fail-closed，等待项提示重新绑定）。
+            if let Some(snapshot) = &attempt.target_snapshot {
+                return Err(StartCodingError::new(
+                    "coding_start_enrollment_mismatch",
+                    format!(
+                        "attempt target snapshot points at logical repository {:?} but the \
+                         enrollment authorizes the single physical repository {repository_id}",
+                        snapshot.logical_repository_id
+                    ),
+                ));
+            }
+            let carrier_matches = match current_carrier {
+                crate::web::handlers::AutomationCarrierResolution::SingleRepository {
+                    target:
+                        crate::product::logical_codebase::EnrollmentTarget::SingleRepository {
+                            repository_id: current_repository,
+                        },
+                } => current_repository == repository_id,
+                _ => false,
+            };
+            if !carrier_matches {
+                return Err(StartCodingError::new(
+                    "coding_start_enrollment_mismatch",
+                    format!(
+                        "single-repository enrollment carrier drift: enrollment authorizes \
+                         repository {repository_id} but the issue's current authority resolves \
+                         elsewhere; re-bind the automation target"
+                    ),
+                ));
+            }
+        }
+        Some(crate::product::logical_codebase::EnrollmentTarget::LogicalCodebase {
+            logical_repository_id,
+            ..
+        }) => {
+            // LC enrollment：attempt 快照 logical repository 与 binding target
+            // 全等（snapshot 缺失保持既有通过语义，载体互证由
+            // verify_current_binding 的 origin target 断言承载）。
+            if let Some(snapshot) = &attempt.target_snapshot
+                && snapshot.logical_repository_id != *logical_repository_id
+            {
+                return Err(StartCodingError::new(
+                    "coding_start_enrollment_mismatch",
+                    format!(
+                        "attempt target snapshot points at logical repository {:?} but the \
+                         enrollment authorizes {logical_repository_id:?}",
+                        snapshot.logical_repository_id
+                    ),
+                ));
+            }
+        }
+        None => {
+            // 旧代无 target：任何 LC snapshot 均视为漂移拒绝（既有语义）。
+            if let Some(snapshot) = &attempt.target_snapshot {
+                return Err(StartCodingError::new(
+                    "coding_start_enrollment_mismatch",
+                    format!(
+                        "attempt target snapshot points at logical repository {:?} but the \
+                         legacy enrollment declares no target",
+                        snapshot.logical_repository_id
+                    ),
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -952,6 +1035,7 @@ mod tests {
     use crate::web::state::CodingAttemptRunKey;
     use crate::web::wiga_gate_fixture::{
         EnrolledGateFixture, ISSUE_ID, PROJECT_ID, confirmed_enrolled_fixture,
+        ready_single_repository_attempt_fixture,
     };
 
     /// Task 3 共享 fixture：Confirmed enrollment 经真实 advance 链取得
@@ -1473,6 +1557,152 @@ mod tests {
         assert_eq!(
             fixture.runner_count(&CodingAttemptRunKey::from_attempt(&attempt)),
             0
+        );
+    }
+
+    /// C5 Task 5 红测：单仓 enrollment 的 typed StartCoding 互证 fail-closed——
+    /// attempt 携带 LC target_snapshot（身份漂移）或 issue 换仓/改属 LC 后
+    /// 载体互证失败，均以 coding_start_enrollment_mismatch 拒绝，零 claim、
+    /// 零 runner（Review Focus 3）。
+    #[tokio::test]
+    async fn single_repository_start_coding_rejects_logical_snapshot_and_wrong_repository() {
+        // ① snapshot 漂移：单仓 enrollment + attempt 携带 LC target_snapshot。
+        let fixture = ready_single_repository_attempt_fixture().await;
+        let attempt = fixture.attempt();
+        let store = fixture.store();
+        let mut polluted = attempt.clone();
+        polluted.target_snapshot = Some(crate::product::coding_models::AttemptTargetSnapshot {
+            logical_repository_id: crate::product::logical_codebase::LogicalRepositoryId(
+                uuid::Uuid::new_v4(),
+            ),
+            checkout_id: crate::product::logical_codebase::RepositoryCheckoutId(
+                uuid::Uuid::new_v4(),
+            ),
+            physical_repository_id: "physical-polluted".to_string(),
+            canonical_path: std::path::PathBuf::from("/tmp/polluted"),
+            git_dir_identity: "sha256:polluted".to_string(),
+            revision: None,
+            policy_digest: "polluted".to_string(),
+            membership_revision: 1,
+            captured_at: "2026-09-30T00:00:00Z".to_string(),
+            capture_source: "test".to_string(),
+        });
+        store.write_coding_attempt_for_test(&polluted).unwrap();
+        let error = start_coding_once(
+            &fixture.state,
+            &attempt.project_id,
+            &attempt.issue_id,
+            StartCodingCommand {
+                attempt_id: attempt.id.clone(),
+                command_id: "single-repo-start-snapshot".into(),
+                origin: fixture.auto_origin(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code(), "coding_start_enrollment_mismatch", "{error:?}");
+        assert!(
+            error.message().contains("single physical repository")
+                || error.message().contains("snapshot"),
+            "rejection must describe the cross-carrier drift: {error:?}"
+        );
+        let saved = store
+            .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .unwrap();
+        assert!(saved.start_claim.is_none(), "rejection must not consume a claim");
+        assert_eq!(
+            fixture.runner_count(&CodingAttemptRunKey::from_attempt(&attempt)),
+            0
+        );
+
+        // ② 错仓：issue.repo_id 改指另一已登记物理仓（不同 git 根，不触发
+        // authority 409）→ 载体互证失败，等待项语义（重新绑定提示）。
+        let fixture = ready_single_repository_attempt_fixture().await;
+        let attempt = fixture.attempt();
+        let repo_root = fixture.inner._root.path().join("repo-2");
+        std::fs::create_dir_all(&repo_root).unwrap();
+        let status = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&repo_root)
+            .status()
+            .unwrap();
+        assert!(status.success(), "repo-2 must be a real git repo");
+        let repos_path = fixture.inner.paths.project_root(PROJECT_ID).join("repos.json");
+        let mut repositories: Vec<crate::product::models::RepositoryRecord> =
+            crate::product::json_store::read_json(&repos_path).unwrap();
+        let repo_two = crate::product::models::RepositoryRecord {
+            id: "repo-2".to_string(),
+            name: "repo-2".to_string(),
+            path: repo_root,
+            repo_hash: "sha256:fixture-repo-2".to_string(),
+            runtime_root: fixture.inner._root.path().join("repo-2/.aria/runtime"),
+            ..repositories[0].clone()
+        };
+        repositories.push(repo_two);
+        crate::product::json_store::write_json(&repos_path, &repositories).unwrap();
+        let issue_path = fixture
+            .inner
+            .paths
+            .issue_root(PROJECT_ID, ISSUE_ID)
+            .join("issue.json");
+        let mut issue: serde_json::Value =
+            crate::product::json_store::read_json(&issue_path).unwrap();
+        issue["repo_id"] = serde_json::json!("repo-2");
+        crate::product::json_store::write_json(&issue_path, &issue).unwrap();
+
+        let error = start_coding_once(
+            &fixture.state,
+            &attempt.project_id,
+            &attempt.issue_id,
+            StartCodingCommand {
+                attempt_id: attempt.id.clone(),
+                command_id: "single-repo-start-wrong-repo".into(),
+                origin: fixture.auto_origin(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code(), "coding_start_enrollment_mismatch", "{error:?}");
+        assert!(
+            error.message().contains("carrier drift")
+                || error.message().contains("re-bind")
+                || error.message().contains("repository"),
+            "rejection must point at the carrier drift: {error:?}"
+        );
+        assert_eq!(
+            fixture.runner_count(&CodingAttemptRunKey::from_attempt(&attempt)),
+            0
+        );
+    }
+
+    /// C5 Task 5：单仓互证通过——attempt 无 target_snapshot 且 issue 当前
+    /// authority 载体解析为 enrollment 同一物理仓 → typed 首启可发生
+    ///（provider 真实入口被 probe 暂停，不冒充启动）。
+    #[tokio::test]
+    async fn single_repository_start_coding_passes_mutual_verification() {
+        let fixture = ready_single_repository_attempt_fixture().await;
+        let attempt = fixture.attempt();
+        let (probe, _entry, _hold) = paused_start_probe();
+        let outcome = crate::web::coding_start::start_coding_once_with_probe(
+            &fixture.state,
+            &attempt.project_id,
+            &attempt.issue_id,
+            StartCodingCommand {
+                attempt_id: attempt.id.clone(),
+                command_id: "single-repo-start-ok".into(),
+                origin: fixture.auto_origin(),
+            },
+            probe,
+        )
+        .await
+        .expect("single-repository mutual verification passes");
+        assert!(
+            matches!(outcome, StartCodingOutcome::Started { .. }),
+            "unexpected outcome: {outcome:?}"
+        );
+        assert_eq!(
+            fixture.runner_count(&CodingAttemptRunKey::from_attempt(&attempt)),
+            1
         );
     }
 
