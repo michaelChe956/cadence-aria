@@ -251,3 +251,114 @@ impl super::CodingAttemptStore {
         Ok(artifact_ref)
     }
 }
+
+// ─── C2 Task 9（#2/#9，REQ-CVT-01/02/05）：计划命令与实际命令并列证据 ───
+
+/// 计划命令与实际命令并列证据（DTO）。actual_* 全部来自 role-run JSONL 的
+/// ExecutionEvent；缺失字段保持 None（前端显示"未记录"），不推断补写。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct VerificationCommandEvidence {
+    pub check_id: String,
+    /// 计划合同字面命令。
+    pub planned_command: Option<String>,
+    /// 无命令 check 的人工说明。
+    pub planned_manual_instruction: Option<String>,
+    /// role-run JSONL 派生的实际执行命令；None → 前端显示"未记录"。
+    pub actual_command: Option<String>,
+    pub actual_cwd: Option<String>,
+    pub exit_code: Option<i32>,
+    pub test_execution_count: Option<u64>,
+    pub environment_summary: Option<String>,
+    /// "实际执行命令与计划不一致"（同一可执行族下参数差异也算）。
+    pub mismatch: bool,
+}
+
+/// C2 Task 9：三类文案 reason code（验证类等待面与前端共用）。
+pub const VERIFICATION_EVIDENCE_ACTUAL_COMMAND_MISMATCH: &str = "actual_command_mismatch";
+pub const VERIFICATION_EVIDENCE_PLAN_UNDECLARED: &str = "plan_undeclared_path_or_command";
+pub const VERIFICATION_EVIDENCE_PLAN_PATH_UNEXECUTABLE: &str = "plan_path_unexecutable";
+
+/// 三类文案（全新中文口径）：不一致→指向重跑原计划命令；计划未声明→
+/// 指向计划反馈；计划路径不可执行→指向计划修订或验证处理。文案不建议
+/// 升级运行时版本、泛化重试或"忽略 finding"。
+pub fn verification_evidence_copy(reason_code: &str) -> Option<&'static str> {
+    match reason_code {
+        VERIFICATION_EVIDENCE_ACTUAL_COMMAND_MISMATCH => Some(
+            "实际执行命令与计划不一致：coder 未按计划命令执行。可在并列证据下方点击\"重跑原计划命令\"，以计划合同字面命令发起返修。",
+        ),
+        VERIFICATION_EVIDENCE_PLAN_UNDECLARED => Some(
+            "计划未声明该路径或命令：coder 执行了计划合同之外的路径或命令。请通过计划反馈修订计划，使合同声明与实际执行面一致。",
+        ),
+        VERIFICATION_EVIDENCE_PLAN_PATH_UNEXECUTABLE => Some(
+            "计划路径不可执行：计划命令引用的路径在仓库中不存在或不可执行。请发起计划修订，或转入验证处理记录受限豁免。",
+        ),
+        _ => None,
+    }
+}
+
+impl super::CodingAttemptStore {
+    /// 派生并列证据：planned 来自计划合同 VerificationCheck；actual 取
+    /// attempt 全部 role-run JSONL 中与计划命令同可执行族（首 token 相同）
+    /// 的最新一条 ExecutionEvent；无匹配 → actual 为 None（"未记录"），
+    /// 不推断补写、不归类计划缺陷。
+    pub fn verification_command_evidence(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        check: &crate::product::work_item_contract::VerificationCheck,
+    ) -> Result<VerificationCommandEvidence, ProductStoreError> {
+        let mut evidence = VerificationCommandEvidence {
+            check_id: check.check_id.clone(),
+            planned_command: check.command.clone(),
+            planned_manual_instruction: check.manual_instruction.clone(),
+            actual_command: None,
+            actual_cwd: None,
+            exit_code: None,
+            test_execution_count: None,
+            environment_summary: None,
+            mismatch: false,
+        };
+        let Some(planned_command) = check.command.as_deref() else {
+            return Ok(evidence);
+        };
+        let planned_head = first_command_token(planned_command);
+        let mut matched: Option<(String, serde_json::Value)> = None;
+        for role_run in self.list_role_runs(project_id, issue_id, attempt_id)? {
+            for event in
+                self.list_role_run_events(project_id, issue_id, attempt_id, &role_run.id)?
+            {
+                if event.event_type != CodingRoleRunEventType::ExecutionEvent {
+                    continue;
+                }
+                let Some(command) = event.payload.get("command").and_then(|value| value.as_str())
+                else {
+                    continue;
+                };
+                if first_command_token(command) != planned_head {
+                    continue;
+                }
+                // list_role_run_events 按 sequence 升序，role_runs 按 id 升序：
+                // 后写者覆盖，最终保留同族最新一条。
+                matched = Some((command.to_string(), event.payload.clone()));
+            }
+        }
+        if let Some((command, payload)) = matched {
+            evidence.actual_command = Some(command.clone());
+            evidence.actual_cwd = payload
+                .get("cwd")
+                .and_then(|value| value.as_str())
+                .map(str::to_string);
+            evidence.exit_code = payload
+                .get("exit_code")
+                .and_then(|value| value.as_i64())
+                .map(|code| code as i32);
+            evidence.mismatch = command != planned_command;
+        }
+        Ok(evidence)
+    }
+}
+
+fn first_command_token(command: &str) -> &str {
+    command.split_whitespace().next().unwrap_or_default()
+}

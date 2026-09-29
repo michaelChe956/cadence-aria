@@ -1,6 +1,9 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import type { VerificationTriageRecord } from "../api/types";
+import type {
+  VerificationCommandEvidence,
+  VerificationTriageRecord,
+} from "../api/types";
 import type { CodingPendingGate } from "../state/coding-workspace-store";
 import { GatePanel } from "./CodingWorkspaceControls";
 const fourActionGate: CodingPendingGate = {
@@ -29,6 +32,8 @@ function renderGatePanel(
   props?: {
     verificationTriage?: VerificationTriageRecord | null;
     onEnterVerificationTriage?: (gateId: string) => void;
+    commandEvidence?: VerificationCommandEvidence | null;
+    onRerunPlannedCommand?: (checkId: string) => void;
   },
 ) {
   return render(
@@ -39,6 +44,8 @@ function renderGatePanel(
       onAbort={vi.fn()}
       verificationTriage={props?.verificationTriage ?? null}
       onEnterVerificationTriage={props?.onEnterVerificationTriage}
+      commandEvidence={props?.commandEvidence ?? null}
+      onRerunPlannedCommand={props?.onRerunPlannedCommand}
     />,
   );
 }
@@ -104,5 +111,56 @@ describe("CodingWorkspaceControls verification triage panel（C2 Task 8/#19）",
       reason_code: "reviewer_rework_limit_reached",
     });
     expect(screen.queryByTestId("coding-verification-triage")).toBeNull();
+  });
+});
+
+describe("CodingWorkspaceControls command evidence panel（C2 Task 9/#2）", () => {
+  it("并列显示计划与实际命令，mismatch 标注不一致并给出重跑入口携带 check_id", () => {
+    const onRerun = vi.fn();
+    renderGatePanel(fourActionGate, {
+      commandEvidence: {
+        check_id: "check_plain",
+        planned_command: "cargo test --lib",
+        planned_manual_instruction: null,
+        actual_command: "cargo test --lib --features strict",
+        actual_cwd: "/repo/worktree",
+        exit_code: 1,
+        test_execution_count: null,
+        environment_summary: null,
+        mismatch: true,
+      },
+      onRerunPlannedCommand: onRerun,
+    });
+
+    const panel = screen.getByTestId("coding-command-evidence");
+    expect(panel.textContent).toContain("cargo test --lib");
+    expect(panel.textContent).toContain("cargo test --lib --features strict");
+    expect(panel.textContent).toContain("/repo/worktree");
+    expect(
+      screen.getByTestId("coding-command-evidence-mismatch").textContent,
+    ).toContain("实际执行命令与计划不一致");
+
+    fireEvent.click(screen.getByTestId("coding-rerun-planned-command"));
+    expect(onRerun).toHaveBeenCalledWith("check_plain");
+  });
+
+  it("无实际命令记录显示未记录且不提供重跑入口", () => {
+    renderGatePanel(fourActionGate, {
+      commandEvidence: {
+        check_id: "check_plain",
+        planned_command: "cargo test --lib",
+        planned_manual_instruction: null,
+        actual_command: null,
+        actual_cwd: null,
+        exit_code: null,
+        test_execution_count: null,
+        environment_summary: null,
+        mismatch: false,
+      },
+    });
+    const panel = screen.getByTestId("coding-command-evidence");
+    expect(panel.textContent).toContain("实际命令：未记录");
+    expect(screen.queryByTestId("coding-command-evidence-mismatch")).toBeNull();
+    expect(screen.queryByTestId("coding-rerun-planned-command")).toBeNull();
   });
 });

@@ -567,3 +567,200 @@ fn review_report_evidence_refs(review_report: &CodeReviewReport) -> Vec<String> 
     refs.dedup();
     refs
 }
+
+// ─── C2 Task 9（#2/#9，REQ-CVT-01/02/05）：重跑原计划命令 ───
+
+/// 重跑请求（携带稳定 command_id＋gate/check 身份＋expected 版本；
+/// expected 版本绑定 attempt.rework_count，旧页面 fail-closed 请刷新）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RerunPlannedCommandRequest {
+    pub command_id: String,
+    pub gate_id: String,
+    pub check_id: String,
+    pub expected_version: u64,
+}
+
+/// 重跑结果：`replayed=true` 表示命中 Task 2 命令账本重放首次 durable
+/// 结果（同一指令，不触发第二次返修）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RerunPlannedCommandOutcome {
+    pub attempt: CodingExecutionAttempt,
+    pub instruction_id: String,
+    pub replayed: bool,
+}
+
+impl CodingWorkspaceEngine {
+    /// 以计划合同字面命令与 cwd 作明确返修指令走既有 rework 落地面：
+    /// 落 rework instruction（字面命令全文进 fix_hints）＋admission 回
+    /// Running＋返修计数推进；指令由下一次 coder run 经 Task 7 认领消费
+    /// 事务进入实际 prompt。幂等经 Task 2 attempt 命令账本：同 command
+    /// 同 payload 重放首次结果，异 payload fail-closed；不改写计划合同、
+    /// 不清 finding、不跳过 Code Review。
+    pub async fn rerun_planned_command(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        request: &RerunPlannedCommandRequest,
+    ) -> Result<RerunPlannedCommandOutcome, CodingWorkspaceEngineError> {
+        let attempt = self.store.get_attempt(project_id, issue_id, attempt_id)?;
+        let payload_digest =
+            format!("rerun|{}|{}|{}", request.command_id, request.gate_id, request.check_id);
+        // ① 命令账本重放：同 command 同 payload 返回首次 durable 结果。
+        if let Some(existing) = self.store.find_attempt_command_result(
+            project_id,
+            issue_id,
+            attempt_id,
+            &request.command_id,
+        )? {
+            if existing.payload_digest != payload_digest {
+                return Err(CodingWorkspaceEngineError::Store(
+                    ProductStoreError::Conflict {
+                        kind: "coding_attempt_command_ledger",
+                        id: request.command_id.clone(),
+                    },
+                ));
+            }
+            let current = self.store.get_attempt(project_id, issue_id, attempt_id)?;
+            // 重放：按稳定派生定位首次落地的指令（账本防重保证唯一）。
+            let (_, revision) = self.verification_triage_current_revision(&current)?;
+            let check =
+                self.verification_triage_bound_check(&current, &revision, &request.check_id)?;
+            let planned_command = check.command.clone().unwrap_or_default();
+            let instruction = self
+                .store
+                .list_rework_instructions(project_id, issue_id, attempt_id)?
+                .into_iter()
+                .find(|instruction| {
+                    instruction.summary == "重跑原计划命令"
+                        && instruction
+                            .fix_hints
+                            .iter()
+                            .any(|hint| hint.contains(&planned_command))
+                })
+                .ok_or_else(|| {
+                    CodingWorkspaceEngineError::ProviderStream(
+                        "coding_rerun_replay_instruction_missing".to_string(),
+                    )
+                })?;
+            return Ok(RerunPlannedCommandOutcome {
+                attempt: current,
+                instruction_id: instruction.id,
+                replayed: true,
+            });
+        }
+        // ② expected 版本校验：错版本 fail-closed（请刷新），不触发返修。
+        if request.expected_version != attempt.rework_count as u64 {
+            return Err(CodingWorkspaceEngineError::ProviderStream(
+                "coding_rerun_version_conflict: 请刷新后重试".to_string(),
+            ));
+        }
+        // ③ 身份解析：开放验证类门＋绑定 check（复用 Task 8 权威解析）。
+        let open_gate = self
+            .store
+            .list_open_blocked_gates(project_id, issue_id, attempt_id)?
+            .into_iter()
+            .find(|gate| gate.gate_id == request.gate_id)
+            .ok_or_else(|| {
+                CodingWorkspaceEngineError::ProviderStream(
+                    "coding_rerun_gate_not_open: 请刷新".to_string(),
+                )
+            })?;
+        if !super::provider_failure::is_verification_triage_eligible_gate(&open_gate) {
+            return Err(CodingWorkspaceEngineError::ProviderStream(
+                "coding_rerun_gate_not_eligible".to_string(),
+            ));
+        }
+        let (_plan_revision_id, revision) =
+            self.verification_triage_current_revision(&attempt)?;
+        let check =
+            self.verification_triage_bound_check(&attempt, &revision, &request.check_id)?;
+        let planned_command = check.command.clone().ok_or_else(|| {
+            CodingWorkspaceEngineError::ProviderStream(
+                "coding_rerun_check_has_no_command".to_string(),
+            )
+        })?;
+        let worktree_cwd = attempt
+            .worktree_path
+            .as_ref()
+            .map(|path| path.display().to_string());
+
+        // ④ 落返修指令：计划合同字面命令全文＋worktree cwd（既有 rework
+        //    写面；消费由下一次 coder run 的 Task 7 事务完成）。
+        let existing_instructions = self.store.list_rework_instructions(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+        )?;
+        let mut fix_hints = vec![format!("按计划合同字面命令执行：{planned_command}")];
+        if let Some(cwd) = worktree_cwd {
+            fix_hints.push(format!("工作目录：{cwd}"));
+        }
+        let instruction = CodingReworkInstruction {
+            id: next_sequential_id_from_existing(
+                "coding_rework_instruction",
+                existing_instructions
+                    .iter()
+                    .map(|instruction| instruction.id.as_str()),
+            ),
+            attempt_id: attempt.id.clone(),
+            source_stage: CodingExecutionStage::CodeReview,
+            rework_round: attempt.rework_count + 1,
+            summary: "重跑原计划命令".to_string(),
+            fix_hints,
+            questions: Vec::new(),
+            created_at: Utc::now().to_rfc3339(),
+            consumed_by_node_id: None,
+            consumed_at: None,
+        };
+        self.store.save_rework_instruction(&attempt, &instruction)?;
+
+        let running = if attempt.status == CodingAttemptStatus::Running {
+            attempt.clone()
+        } else {
+            self.store.admit_and_transition_attempt_to_executable(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+            )?
+        };
+        let coding_attempt = self.store.update_attempt_stage(
+            &running.project_id,
+            &running.issue_id,
+            &running.id,
+            CodingExecutionStage::Coding,
+        )?;
+        let updated = self.store.increment_attempt_rework_count(
+            &coding_attempt.project_id,
+            &coding_attempt.issue_id,
+            &coding_attempt.id,
+        )?;
+
+        // ⑤ 原门收口（send_to_coder 同义动作），避免与 Running 态并存双操作面。
+        self.store.resolve_blocked_gate_with_action(
+            project_id,
+            issue_id,
+            attempt_id,
+            &request.gate_id,
+            Some("send_to_coder"),
+        )?;
+
+        // ⑥ durable-first：命令账本随指令落盘。
+        self.store.append_attempt_command_result(
+            project_id,
+            issue_id,
+            attempt_id,
+            &crate::product::coding_attempt_store::CodingAttemptCommandRecord {
+                command_id: request.command_id.clone(),
+                payload_digest,
+                state: crate::product::models::automation::OperationState::Accepted,
+                recorded_at: Utc::now().to_rfc3339(),
+            },
+        )?;
+        Ok(RerunPlannedCommandOutcome {
+            attempt: updated,
+            instruction_id: instruction.id,
+            replayed: false,
+        })
+    }
+}

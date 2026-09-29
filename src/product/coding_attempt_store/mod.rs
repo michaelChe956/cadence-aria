@@ -57,6 +57,11 @@ pub use verification_triage::{
     VerificationTriageRecord, VerificationTriageStatus,
 };
 pub use git_operation::*;
+pub use role_run_event::{
+    VerificationCommandEvidence, VERIFICATION_EVIDENCE_ACTUAL_COMMAND_MISMATCH,
+    VERIFICATION_EVIDENCE_PLAN_PATH_UNEXECUTABLE, VERIFICATION_EVIDENCE_PLAN_UNDECLARED,
+    verification_evidence_copy,
+};
 pub use group_initialization::*;
 pub use group_validation::*;
 pub use inputs::*;

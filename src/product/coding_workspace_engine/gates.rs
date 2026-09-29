@@ -1091,7 +1091,7 @@ impl CodingWorkspaceEngine {
     /// 解析 attempt 当前权威 plan 绑定：活动 coding unit → work item
     /// revision。解析失败一律 fail-closed（验证处理必须绑定可证明的
     /// plan revision）。
-    fn verification_triage_current_revision(
+    pub(crate) fn verification_triage_current_revision(
         &self,
         attempt: &CodingExecutionAttempt,
     ) -> Result<(String, crate::product::models::WorkItemRevision), CodingWorkspaceEngineError>
@@ -1130,7 +1130,7 @@ impl CodingWorkspaceEngine {
 
     /// 解析绑定 check（从 revision 的 verification plan revision 读取，
     /// 不信任调用方自报的 check 语义）。
-    fn verification_triage_bound_check(
+    pub(crate) fn verification_triage_bound_check(
         &self,
         attempt: &CodingExecutionAttempt,
         revision: &crate::product::models::WorkItemRevision,

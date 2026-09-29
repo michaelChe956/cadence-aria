@@ -452,6 +452,19 @@ export type VerificationTriageRecord = {
   decided_at?: string | null;
 };
 
+/** C2 Task 9（#2/#9）：计划命令与实际命令并列证据。actual 缺失 → "未记录"。 */
+export type VerificationCommandEvidence = {
+  check_id: string;
+  planned_command?: string | null;
+  planned_manual_instruction?: string | null;
+  actual_command?: string | null;
+  actual_cwd?: string | null;
+  exit_code?: number | null;
+  test_execution_count?: number | null;
+  environment_summary?: string | null;
+  mismatch: boolean;
+};
+
 export type CodingChoiceGateStatus = "open" | "resolved" | "stale" | "cancelled";
 
 export type CodingChoiceGateResponse = {

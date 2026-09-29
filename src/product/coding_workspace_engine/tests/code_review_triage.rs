@@ -1330,3 +1330,244 @@ async fn approved_plan_revision_routes_into_amendment_chain() {
         None
     );
 }
+
+// ─── C2 Task 9（#2/#9，REQ-CVT-01/02/05）：计划命令与实际命令并列证据、
+// 重跑原计划命令与三类文案 ───
+
+/// 计划命令合法、coder 在不同参数下执行失败：并列显示计划 check 命令与
+/// 实际命令、cwd、退出码，标注"实际执行命令与计划不一致"；无对应命令
+/// 记录时实际命令栏"未记录"（None），不推断补写。
+#[tokio::test]
+async fn verification_evidence_panel_marks_actual_command_mismatch() {
+    let (_root, store, _engine, attempt) = verification_triage_group_fixture();
+    let checks = vec![
+        VerificationCheck {
+            check_id: TRIAGE_CHECK_PLAIN.to_string(),
+            command: Some("cargo test --lib".to_string()),
+            manual_instruction: None,
+            required: true,
+            non_zero_test_execution_required: false,
+        },
+        VerificationCheck {
+            check_id: "check_manual".to_string(),
+            command: None,
+            manual_instruction: Some("人工核对迁移脚本输出".to_string()),
+            required: false,
+            non_zero_test_execution_required: false,
+        },
+    ];
+    let plain = checks[0].clone();
+
+    // 无任何 role-run 命令记录：实际命令"未记录"（None），不推断补写。
+    let unrecorded = store
+        .verification_command_evidence(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &plain,
+        )
+        .expect("evidence without runs");
+    assert_eq!(unrecorded.planned_command.as_deref(), Some("cargo test --lib"));
+    assert_eq!(unrecorded.actual_command, None, "未记录不得推断补写");
+    assert_eq!(unrecorded.actual_cwd, None);
+    assert_eq!(unrecorded.exit_code, None);
+    assert!(!unrecorded.mismatch);
+
+    // coder 在不同参数执行失败：role-run JSONL 的 ExecutionEvent 派生并列证据。
+    let role_run = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::Coding,
+            CodingProviderRole::Coder,
+            CodingRoleRunTrigger::Initial,
+            None,
+        )
+        .expect("role run");
+    store
+        .append_role_run_event(
+            &attempt,
+            &role_run,
+            crate::product::coding_models::CodingRoleRunEventType::ExecutionEvent,
+            serde_json::json!({
+                "event_id": "exec_0001",
+                "kind": "Command",
+                "status": "Failed",
+                "title": "cargo test",
+                "command": "cargo test --lib --features strict",
+                "cwd": "/repo/worktree",
+                "output": "1 failed",
+                "exit_code": 1
+            }),
+        )
+        .expect("execution event");
+
+    let evidence = store
+        .verification_command_evidence(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &plain,
+        )
+        .expect("evidence");
+    assert_eq!(evidence.check_id, TRIAGE_CHECK_PLAIN);
+    assert_eq!(evidence.planned_command.as_deref(), Some("cargo test --lib"));
+    assert_eq!(
+        evidence.actual_command.as_deref(),
+        Some("cargo test --lib --features strict")
+    );
+    assert_eq!(evidence.actual_cwd.as_deref(), Some("/repo/worktree"));
+    assert_eq!(evidence.exit_code, Some(1));
+    assert!(evidence.mismatch, "不同参数执行必须标注与计划不一致");
+
+    // 无命令的 manual check：planned_manual_instruction 并列，不误标 mismatch。
+    let manual = checks[1].clone();
+    let manual_evidence = store
+        .verification_command_evidence(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &manual,
+        )
+        .expect("manual evidence");
+    assert_eq!(manual_evidence.planned_command, None);
+    assert_eq!(
+        manual_evidence.planned_manual_instruction.as_deref(),
+        Some("人工核对迁移脚本输出")
+    );
+    assert!(!manual_evidence.mismatch);
+
+    // 三类文案：全新中文口径，指向对应操作；MUST NOT 建议升级运行时版本、
+    // 泛化重试或"忽略 finding"。
+    let mismatch_copy = crate::product::coding_attempt_store::verification_evidence_copy(
+        "actual_command_mismatch",
+    )
+    .expect("mismatch copy");
+    assert!(mismatch_copy.contains("实际执行命令与计划不一致"));
+    assert!(mismatch_copy.contains("重跑原计划命令"));
+    let undeclared_copy = crate::product::coding_attempt_store::verification_evidence_copy(
+        "plan_undeclared_path_or_command",
+    )
+    .expect("undeclared copy");
+    assert!(undeclared_copy.contains("计划未声明"));
+    assert!(undeclared_copy.contains("计划反馈"));
+    let unexecutable_copy = crate::product::coding_attempt_store::verification_evidence_copy(
+        "plan_path_unexecutable",
+    )
+    .expect("unexecutable copy");
+    assert!(unexecutable_copy.contains("计划路径不可执行"));
+    assert!(unexecutable_copy.contains("计划修订") || unexecutable_copy.contains("验证处理"));
+    for copy in [mismatch_copy, undeclared_copy, unexecutable_copy] {
+        assert!(!copy.contains("升级"), "文案不得建议升级运行时版本：{copy}");
+        assert!(!copy.contains("重试一切"), "文案不得建议泛化重试：{copy}");
+        assert!(!copy.contains("忽略"), "文案不得建议忽略 finding：{copy}");
+    }
+    assert!(
+        crate::product::coding_attempt_store::verification_evidence_copy("unknown_reason")
+            .is_none()
+    );
+}
+
+/// 重跑原计划命令：以计划合同字面命令与 cwd 作明确返修指令走既有 rework
+/// 落地面（后续 coder run 经 Task 7 事务消费）；同 command_id 重复点击只
+/// 触发一次返修并返回同一结果；错 expected 版本 fail-closed；不改写计划
+/// 合同、不清 finding。
+#[tokio::test]
+async fn rerun_planned_command_routes_via_rework_once_per_command() {
+    let (_root, store, engine, attempt) = verification_triage_group_fixture();
+    seed_code_review_report_with_finding(&store, &attempt);
+    seed_verification_incomplete_gate(&store, &attempt);
+
+    let request = crate::product::coding_workspace_engine::RerunPlannedCommandRequest {
+        command_id: "rerun-cmd-0001".to_string(),
+        gate_id: store
+            .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("gates")[0]
+            .gate_id
+            .clone(),
+        check_id: TRIAGE_CHECK_PLAIN.to_string(),
+        expected_version: attempt.rework_count as u64,
+    };
+    let outcome = engine
+        .rerun_planned_command(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &request,
+        )
+        .await
+        .expect("rerun planned command");
+    assert!(!outcome.replayed, "首次执行");
+    assert_eq!(outcome.attempt.status, CodingAttemptStatus::Running);
+    assert_eq!(outcome.attempt.stage, CodingExecutionStage::Coding);
+
+    // 返修指令携带计划合同字面命令全文与 worktree cwd，尚未被消费
+    //（消费发生在下一次 coder run 的 Task 7 事务）。
+    let instructions = store
+        .list_rework_instructions(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("instructions");
+    assert_eq!(instructions.len(), 1);
+    assert!(instructions[0].consumed_at.is_none());
+    assert!(
+        instructions[0]
+            .fix_hints
+            .iter()
+            .any(|hint| hint.contains("cargo test --lib")),
+        "计划字面命令必须全文进入返修指令：{:?}",
+        instructions[0].fix_hints
+    );
+
+    // 同 command_id 重复点击：幂等返回同一结果，不产生第二条指令。
+    let replay = engine
+        .rerun_planned_command(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &request,
+        )
+        .await
+        .expect("replay rerun");
+    assert!(replay.replayed, "同 command 同 payload 必须重放首次结果");
+    assert_eq!(replay.instruction_id, outcome.instruction_id);
+    assert_eq!(
+        store
+            .list_rework_instructions(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("instructions")
+            .len(),
+        1
+    );
+
+    // 错 expected 版本 fail-closed：提示刷新，不触发返修、不启动 provider。
+    let conflict = engine
+        .rerun_planned_command(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &crate::product::coding_workspace_engine::RerunPlannedCommandRequest {
+                command_id: "rerun-cmd-0002".to_string(),
+                gate_id: request.gate_id.clone(),
+                check_id: TRIAGE_CHECK_PLAIN.to_string(),
+                expected_version: 99,
+            },
+        )
+        .await
+        .expect_err("stale version must fail closed");
+    assert!(
+        conflict.to_string().contains("coding_rerun_version_conflict"),
+        "{conflict}"
+    );
+    assert_eq!(
+        store
+            .list_rework_instructions(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("instructions")
+            .len(),
+        1
+    );
+
+    // 不改写计划合同、不清 finding：code review report findings 保持原样。
+    let reports = store
+        .list_code_review_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("reports");
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0].findings.len(), 1);
+    assert_eq!(reports[0].findings[0].message, "missing validation");
+}

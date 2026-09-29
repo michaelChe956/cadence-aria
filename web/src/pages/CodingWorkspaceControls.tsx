@@ -6,9 +6,9 @@ import type {
   GroupFinalReadinessDiagnostic,
   GroupFinalReadinessStatus,
   CodingProviderRole,
+  VerificationCommandEvidence,
   VerificationTriageRecord,
 } from "../api/types";
-import { StageGateEntry } from "../components/coding-workspace/StageGateEntry";
 import { ConfirmTwiceButton } from "../components/chat-workspace/cockpit/ConfirmTwiceButton";
 import { useCodingWorkspaceWs } from "../hooks/useCodingWorkspaceWs";
 import type { ChatEntry } from "../state/chat-entries";
@@ -340,6 +340,8 @@ export function GatePanel({
   onAbort,
   verificationTriage = null,
   onEnterVerificationTriage,
+  commandEvidence = null,
+  onRerunPlannedCommand,
 }: {
   gate: CodingPendingGate | null;
   onRespond: ReturnType<typeof useCodingWorkspaceWs>["respondGate"];
@@ -348,6 +350,9 @@ export function GatePanel({
   /** C2 Task 8：验证处理旁路面板（不进 action 枚举与 available_actions）。 */
   verificationTriage?: VerificationTriageRecord | null;
   onEnterVerificationTriage?: (gateId: string) => void;
+  /** C2 Task 9：计划命令与实际命令并列证据＋重跑入口。 */
+  commandEvidence?: VerificationCommandEvidence | null;
+  onRerunPlannedCommand?: (checkId: string) => void;
 }) {
   const [reason, setReason] = useState("");
   const [localError, setLocalError] = useState<string | null>(null);
@@ -444,6 +449,45 @@ export function GatePanel({
                   转入验证处理
                 </button>
               )}
+            </div>
+          ) : null}
+          {commandEvidence ? (
+            <div
+              data-testid="coding-command-evidence"
+              className="mt-1 grid gap-0.5 text-xs text-amber-900"
+            >
+              <div className="font-semibold">命令证据</div>
+              <div className="font-mono">
+                计划命令：
+                {commandEvidence.planned_command ??
+                  commandEvidence.planned_manual_instruction ??
+                  "未记录"}
+              </div>
+              <div className="font-mono">
+                实际命令：{commandEvidence.actual_command ?? "未记录"}
+              </div>
+              <div className="font-mono">
+                实际 cwd：{commandEvidence.actual_cwd ?? "未记录"}
+              </div>
+              <div className="font-mono">
+                退出码：{commandEvidence.exit_code ?? "未记录"}
+              </div>
+              {commandEvidence.mismatch ? (
+                <div data-testid="coding-command-evidence-mismatch" className="font-semibold">
+                  实际执行命令与计划不一致
+                </div>
+              ) : null}
+              {commandEvidence.mismatch ? (
+                <button
+                  type="button"
+                  data-testid="coding-rerun-planned-command"
+                  disabled={!onRerunPlannedCommand}
+                  onClick={() => onRerunPlannedCommand?.(commandEvidence.check_id)}
+                  className="mt-1 inline-flex h-7 w-fit items-center rounded-md border border-amber-300 bg-white px-2 font-semibold hover:bg-amber-100 disabled:opacity-60"
+                >
+                  重跑原计划命令
+                </button>
+              ) : null}
             </div>
           ) : null}
           <GateMetadata gate={activeGate} />
