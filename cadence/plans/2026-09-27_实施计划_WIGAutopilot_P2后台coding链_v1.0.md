@@ -1,5 +1,7 @@
 # WIG Autopilot P2 后台 Coding 链 Implementation Plan
 
+> **完成状态：已实施完成（2026-09-30 打标）：对应 change `work-item-group-autopilot` 已于 2026-09-28 归档（`openspec/changes/archive/2026-09-28-work-item-group-autopilot`），归档报告 `cadence/notes/2026-09-28_归档报告_WIG自动化与引导迭代_v1.0.md`。**
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 交付 `work-item-group-autopilot` 的 tasks.md §3.1–3.4：经人工确认的唯一单 target plan 在无页面时独立 advance 到 Ready、共用 typed StartCoding 单发首启并恢复，编码执行结束时通知人做 Final Confirm；先解除 GAP-E/G/F/H 的真实链阻断，最后分别关替身与真实链。
@@ -164,7 +166,7 @@ pub fn issue_coding_final_confirm_info(paths: &ProductAppPaths,
 
 **Interfaces:** Consumes `WorkspaceEngine::start_generation(ProviderConfigSnapshot,bool)`、`LifecycleStore::rearm_failed_single_candidate_for_start_generation`、`WorkspaceSessionManager::create`、`spawn_provider_run_claiming_idle`；produces 上述 `RetryFailedScRunRequest/Status` 和 failed reviewer 节点身份/诊断。仅 latest Failed、无活 run、SingleCandidate+Interactive+当前相位 Failed 受理；现有断连 `retry_interrupted_run`/人工门 `human-actions` 零改动。同 session 文件锁中冻结 `(failed_node_id,command_id)`，异键 409、同键读原结果；manager `ClaimIfIdle` 与 durable ledger 双防二次 provider start，认领已写但派发未知时停人工分诊。
 
-- [ ] **Step 1: 写失败测试。** 引擎测试复用该文件已有 `make_work_item_plan_engine_with_accepted_contract_drafts`、`single_candidate_record`：
+- [x] **Step 1: 写失败测试。** 引擎测试复用该文件已有 `make_work_item_plan_engine_with_accepted_contract_drafts`、`single_candidate_record`：
 
   ```rust
   #[tokio::test]
@@ -190,8 +192,8 @@ pub fn issue_coding_final_confirm_info(paths: &ProductAppPaths,
 
   同任务 HTTP 测试以 `EnrolledGateFixture::new` 创建真实 enrollment/session，在 manager engine 复用 `start_review`→上述 reviewer 失败构造现场；向新增 endpoint 发送 `{command_id,expected_phase:"failed"}`，测错误节点 409、无活 run 前置、正确节点 200，再重复同键不增加 `provider_start_ledger`；前端用 failed node + phase=failed 的当前观察 state 测「人工重新驱动」按钮调用新 REST，而非 auto retry。
 
-- [ ] **Step 2: 验证红灯。** `cargo test --locked --lib sc_evaluate_reviewer_failure_is_durably_failed_once -- --nocapture`；新增 HTTP 测试 `cargo test --locked --lib retry_failed_sc_run_requires_latest_failed_node -- --nocapture`；`pnpm -C web exec vitest run src/pages/ChatCockpitPage.inbox.test.tsx`。预期第一条旧 `Evaluate` 不会变 Failed，其他缺路由/恢复卡。
-- [ ] **Step 3: 最小实现。** `finish_review_provider_run_failure` 在 Start/Provider/EmptyOutput 的 ReviewerRun 已 durable Failed 后推进 `persist_single_candidate_terminal_phase(Failed)`；`finish_failed_run` 当前会重置 Open，需在 SC Failed 分支保留 `WorkspaceSessionStatus::Failed`，其他 flow 保持旧 Open。REST handler 先查 session/status/phase/最新失败节点/manager 空闲，再在 session 文件锁内认领 `(failed_node_id,command_id)`，调用现有 `start_generation` 与 `spawn_provider_run_claiming_idle`（不使用 superseding 入口），返回受理/原同键结果；如果派发外部副作用是否发生不明，保留认领并给人工分诊。刷新真实 manager 上下文，失败可见而非日志；不得让同键重复从 Failed 再重臂。相位分支示例：
+- [x] **Step 2: 验证红灯。** `cargo test --locked --lib sc_evaluate_reviewer_failure_is_durably_failed_once -- --nocapture`；新增 HTTP 测试 `cargo test --locked --lib retry_failed_sc_run_requires_latest_failed_node -- --nocapture`；`pnpm -C web exec vitest run src/pages/ChatCockpitPage.inbox.test.tsx`。预期第一条旧 `Evaluate` 不会变 Failed，其他缺路由/恢复卡。
+- [x] **Step 3: 最小实现。** `finish_review_provider_run_failure` 在 Start/Provider/EmptyOutput 的 ReviewerRun 已 durable Failed 后推进 `persist_single_candidate_terminal_phase(Failed)`；`finish_failed_run` 当前会重置 Open，需在 SC Failed 分支保留 `WorkspaceSessionStatus::Failed`，其他 flow 保持旧 Open。REST handler 先查 session/status/phase/最新失败节点/manager 空闲，再在 session 文件锁内认领 `(failed_node_id,command_id)`，调用现有 `start_generation` 与 `spawn_provider_run_claiming_idle`（不使用 superseding 入口），返回受理/原同键结果；如果派发外部副作用是否发生不明，保留认领并给人工分诊。刷新真实 manager 上下文，失败可见而非日志；不得让同键重复从 Failed 再重臂。相位分支示例：
 
   ```rust
   if self.session.flow_kind == WorkItemPlanFlowKind::SingleCandidate
@@ -203,8 +205,8 @@ pub fn issue_coding_final_confirm_info(paths: &ProductAppPaths,
   ```
 
   该判断只用于**已经标 Failed 的当前 reviewer 节点**，不放到所有 `finish_failed_run` 共用分支；人工入口必须确认 `failed_node_id` 最新且与 durable timeline 一致，生成动作由人显式发起，`human-actions` 的 gate_id 守卫绝不能放松。
-- [ ] **Step 4: 验证绿灯。** 重跑 Step 2 三条并跑 `cargo test --locked --lib single_candidate_recovery -- --nocapture`；同键重复和未授权/非 Failed 均不增加 provider ledger，测试读取 durable session/节点而非仅 mock 回调。
-- [ ] **Step 5: 提交。** `git add src/product/workspace_engine src/web/handlers src/web/app.rs src/web/types.rs web/src/api web/src/pages/ChatCockpitPage.tsx web/src/pages/ChatCockpitPage.inbox.test.tsx web/src/components/chat-workspace/cockpit/CockpitInbox.tsx && git commit -m "fix: expose explicit failed single-candidate recovery"`。
+- [x] **Step 4: 验证绿灯。** 重跑 Step 2 三条并跑 `cargo test --locked --lib single_candidate_recovery -- --nocapture`；同键重复和未授权/非 Failed 均不增加 provider ledger，测试读取 durable session/节点而非仅 mock 回调。
+- [x] **Step 5: 提交。** `git add src/product/workspace_engine src/web/handlers src/web/app.rs src/web/types.rs web/src/api web/src/pages/ChatCockpitPage.tsx web/src/pages/ChatCockpitPage.inbox.test.tsx web/src/components/chat-workspace/cockpit/CockpitInbox.tsx && git commit -m "fix: expose explicit failed single-candidate recovery"`。
 
 ## Task 0.2：前置 GAP-F——enrollment 静态 gateway reviewer 组合预检
 
@@ -212,7 +214,7 @@ pub fn issue_coding_final_confirm_info(paths: &ProductAppPaths,
 
 **Interfaces:** Produces 统一 `validate_gateway_reviewer_for_enrollment(&ProviderName,bool,bool) -> ApiResult<()>`；GET `automation-target` 和最终 PUT Enable 共用，均先按现有 routing 确认 logical target、再检查 reviewer gateway 静态映射；Disable 不重验。只判**确定性**静态不支持（Pi、KimiCode、真实 Fake；Codex 当前固定 sandbox 禁令 `CODEX_DANGER_FULL_ACCESS_UNSUPPORTED`），动态账号/版本/网络波动不误判为白名单；测试运行 `test_provider_enabled` 下 Fake 保持 fixture 可用，不假装 Fake 能真实 gateway。
 
-- [ ] **Step 1: 写失败测试。** 在 `automation_target.rs` 现有测试模块加：
+- [x] **Step 1: 写失败测试。** 在 `automation_target.rs` 现有测试模块加：
 
   ```rust
   #[tokio::test]
@@ -239,8 +241,8 @@ pub fn issue_coding_final_confirm_info(paths: &ProductAppPaths,
   ```
 
   同样测试 Codex 配置在当前固定 sandbox 下拒绝，Fake 在 fake runtime fixture 可通过；分别证明投影与最终 Enable 同源、不写错 enrollment。
-- [ ] **Step 2: 验证红灯。** `cargo test --locked --lib automation_target_rejects_gateway_unsupported_reviewer_before_enable -- --nocapture`，预期旧 GET/PUT 允许 KimiCode。
-- [ ] **Step 3: 最小实现。** `automation_gateway_preflight.rs` 调用现有 `ProviderRef::from_provider_name`；Codex 额外按 `CODEX_DANGER_FULL_ACCESS_SANDBOX_MODE == CODEX_DEFAULT_SANDBOX_MODE` 做与 `LogicalCodebaseProviderGateway` 私有方法 `enforce_route_policy`（provider_gateway.rs:773-791）同源的静态拒绝。GET 与 PUT 各先按原逻辑核唯一 logical target 再调用同 helper，统一映射稳定错误码 `automation_gateway_reviewer_unsupported`；Disable 不经过 reviewer 检查，不实例化真实 provider、不探活账号、不改用户选项：
+- [x] **Step 2: 验证红灯。** `cargo test --locked --lib automation_target_rejects_gateway_unsupported_reviewer_before_enable -- --nocapture`，预期旧 GET/PUT 允许 KimiCode。
+- [x] **Step 3: 最小实现。** `automation_gateway_preflight.rs` 调用现有 `ProviderRef::from_provider_name`；Codex 额外按 `CODEX_DANGER_FULL_ACCESS_SANDBOX_MODE == CODEX_DEFAULT_SANDBOX_MODE` 做与 `LogicalCodebaseProviderGateway` 私有方法 `enforce_route_policy`（provider_gateway.rs:773-791）同源的静态拒绝。GET 与 PUT 各先按原逻辑核唯一 logical target 再调用同 helper，统一映射稳定错误码 `automation_gateway_reviewer_unsupported`；Disable 不经过 reviewer 检查，不实例化真实 provider、不探活账号、不改用户选项：
 
   ```rust
   if gateway_required && !(test_provider_enabled && *reviewer == ProviderName::Fake) {
@@ -250,8 +252,8 @@ pub fn issue_coding_final_confirm_info(paths: &ProductAppPaths,
   ```
 
   复用原 gateway 常量与既有 `provider_gateway_tests.rs::codex_danger_full_access_is_blocked_at_gateway_route_even_outside_ui` 对照；若拆共享判据，只抽出静态谓词，原 gateway launch 检查保持一致。`test_provider_enabled` 只允许 Fake 测试模式，不允许 Pi/KimiCode 绕行。
-- [ ] **Step 4: 验证绿灯。** 重跑 Step 2 与 `cargo test --locked --lib automation_enrollment -- --nocapture`；Fake fixture 仍建立原同键 enrollment，动态账号 503 不在 GET 静态预检伪报。
-- [ ] **Step 5: 提交。** `git add src/web/handlers src/product/logical_codebase/provider_gateway.rs && git commit -m "fix: reject unsupported gateway reviewers at enrollment"`（若复用原 gateway 静态判据而无须改该文件，只提交实际改动）。
+- [x] **Step 4: 验证绿灯。** 重跑 Step 2 与 `cargo test --locked --lib automation_enrollment -- --nocapture`；Fake fixture 仍建立原同键 enrollment，动态账号 503 不在 GET 静态预检伪报。
+- [x] **Step 5: 提交。** `git add src/web/handlers src/product/logical_codebase/provider_gateway.rs && git commit -m "fix: reject unsupported gateway reviewers at enrollment"`（若复用原 gateway 静态判据而无须改该文件，只提交实际改动）。
 
 ## Task 0.3：前置 GAP-H——503 可见诊断，仍由人决定重驱
 
@@ -259,7 +261,7 @@ pub fn issue_coding_final_confirm_info(paths: &ProductAppPaths,
 
 **Interfaces:** Consumes Task 0.1 Failed 节点/显式重驱卡；仅在 `ProviderAdapterError.code == ProviderErrorCode::ProviderUnavailable` 且其有界 `details`/`stderr` 同时含 `503` 与 `No available accounts` 时投影 `provider_gateway_503_no_accounts`，其他错误用通用失败类；落 durable 的仅是固定脱敏摘要，不保存原始 stderr/Authorization。不加重试定时器、不在编排器认领新 provider run。
 
-- [ ] **Step 1: 写失败测试。** 加在 Task 0.1 的 reviewer failure fixture 后：
+- [x] **Step 1: 写失败测试。** 加在 Task 0.1 的 reviewer failure fixture 后：
 
   ```rust
   #[tokio::test]
@@ -290,8 +292,8 @@ pub fn issue_coding_final_confirm_info(paths: &ProductAppPaths,
   ```
 
   前端将上述 summary 的 Failed 节点交给 cockpit，测同时显示分类和 Task 0.1 的人工重驱按钮、无自动 invoke。
-- [ ] **Step 2: 验证红灯。** `cargo test --locked --lib reviewer_gateway_503_has_durable_human_diagnostic_without_retry -- --nocapture`；`pnpm -C web exec vitest run src/pages/ChatCockpitPage.inbox.test.tsx`，预期当前节点仅通用「Provider 运行失败」。
-- [ ] **Step 3: 最小实现。** reviewer Start/Provider 失败保留 `ProviderAdapterError.code` 至节点摘要分类：仅 `ProviderUnavailable` 且有界 details/stderr 同时表明 `503` 与 `No available accounts` 时落固定安全类，普通动态网络不可用仍写通用失败；通过 `update_timeline_node` 保留原失败节点身份，不写裸 stderr 或凭据。引擎已有字符串 `ReviewProviderRunFailure` 的构造处需携带原 `ProviderErrorCode` 或安全分类枚举，不能从拼接后的错误文案猜 code。示意：
+- [x] **Step 2: 验证红灯。** `cargo test --locked --lib reviewer_gateway_503_has_durable_human_diagnostic_without_retry -- --nocapture`；`pnpm -C web exec vitest run src/pages/ChatCockpitPage.inbox.test.tsx`，预期当前节点仅通用「Provider 运行失败」。
+- [x] **Step 3: 最小实现。** reviewer Start/Provider 失败保留 `ProviderAdapterError.code` 至节点摘要分类：仅 `ProviderUnavailable` 且有界 details/stderr 同时表明 `503` 与 `No available accounts` 时落固定安全类，普通动态网络不可用仍写通用失败；通过 `update_timeline_node` 保留原失败节点身份，不写裸 stderr 或凭据。引擎已有字符串 `ReviewProviderRunFailure` 的构造处需携带原 `ProviderErrorCode` 或安全分类枚举，不能从拼接后的错误文案猜 code。示意：
 
   ```rust
   let diagnostic = if code == ProviderErrorCode::ProviderUnavailable
@@ -305,8 +307,8 @@ pub fn issue_coding_final_confirm_info(paths: &ProductAppPaths,
   ```
 
   让错误分类同时覆盖 reviewer start/runtime 两支，不把断连中止/人工取消混成 503；故障不是自动重试信号。
-- [ ] **Step 4: 验证绿灯。** 重跑 Step 2 与 Task 0.1 Failed/恢复测试；确认只因人工调用 Task 0.1 endpoint ledger 才增长。
-- [ ] **Step 5: 提交。** `git add src/product/workspace_engine/review/drive.rs web/src/state/workspace-cockpit-projection.ts web/src/pages/ChatCockpitPage.inbox.test.tsx && git commit -m "fix: surface gateway 503 in failed reviewer recovery"`。
+- [x] **Step 4: 验证绿灯。** 重跑 Step 2 与 Task 0.1 Failed/恢复测试；确认只因人工调用 Task 0.1 endpoint ledger 才增长。
+- [x] **Step 5: 提交。** `git add src/product/workspace_engine/review/drive.rs web/src/state/workspace-cockpit-projection.ts web/src/pages/ChatCockpitPage.inbox.test.tsx && git commit -m "fix: surface gateway 503 in failed reviewer recovery"`。
 
 ## Task 1：3.1 单一 `AdvancePlan` 共用入口、稳定 replay 与自动多 target 阻断
 
@@ -314,7 +316,7 @@ pub fn issue_coding_final_confirm_info(paths: &ProductAppPaths,
 
 **Interfaces:** Produces `advance_plan(state: &WebAppState, input: AdvanceInput, origin: AdvancePlanOrigin) -> Result<AdvanceOutcome,String>`（`input` 按值）；WS Manual 与 Task 5 自动消费。自动仅在 enabled enrollment 精确 session/plan/source、durable `Confirmed + Completed SC + 成功 publication/compile` 时发固定 `command_id`（同 enrollment+plan，字符符合 `validate_relative_id`）；Ready 不在此调 StartCoding；自动初次请求前检查权威绑定恰一 target、回放后还核 `AdvanceRecord.target_attempts` 不超过一条，不能因为 engine 支持 split 就放行。任何 `AdvanceOutcome::Replayed` Failed/Aborted 都返回人工分诊，不隐式新 command。
 
-- [ ] **Step 1: 写失败测试。** 扩展 `confirmed_campaign_harness()` 的真实 Confirm→advance fixture，以 `harness.send(WsInMessage::Advance { ... })` 的既有测试作手工对照；新模块测试：
+- [x] **Step 1: 写失败测试。** 扩展 `confirmed_campaign_harness()` 的真实 Confirm→advance fixture，以 `harness.send(WsInMessage::Advance { ... })` 的既有测试作手工对照；新模块测试：
 
   ```rust
   #[tokio::test]
@@ -351,8 +353,8 @@ pub fn issue_coding_final_confirm_info(paths: &ProductAppPaths,
   ```
 
   本任务在现有 `src/web/wiga_gate_fixture.rs` 新增共享 `pub(crate) async fn confirmed_enrolled_fixture() -> EnrolledGateFixture`，调用顺序为 `EnrolledGateFixture::new().await` → `fail_compile_after_human_approve().await` → `recover_and_confirm_compile().await`；只保证 durable Confirmed/已发布 compile，不冒称 Ready。`EnrolledGateFixture.state` 已是 `pub(crate)`，不增同名方法；新增 `pub(crate) fn enrollment(&self) -> IssueAutomationEnrollment`（用 `IssueAutomationStore::new(self.inner.paths.clone()).get(PROJECT_ID,ISSUE_ID)`）、`coding_attempts()/coding_runner_count()` 从 `inner.paths`/`CodingAttemptStore`/`state.coding_runs` 读真实事实。**后续任务用到的其余访问器**——`attempt()`（Task 3/4/8）、`runner_count(&CodingAttemptRunKey)`（Task 3/4）、`attempt_key()/plan_id()`（Task 4/6）、`worker()`（Task 10）、`auto_origin()/restart_state()/store()`（Task 4/6）——均由各自所属任务在 `wiga_gate_fixture.rs` 追加 `pub(crate)` 声明，签名与本计划测试使用逐字一致，禁止各任务分叉出同名异形实现；测试直接以 `confirmed_enrolled_fixture().await` 为起点，advance 完成后才验证 Ready。多 target 自动整体拒绝，人工 split 路径仍可回放，Ready 前 provider 计数为零。
-- [ ] **Step 2: 验证红灯。** `cargo test --locked --lib enrolled_advance_replays_one_ready_attempt_without_starting_runner -- --nocapture`，预期共用符号尚不存在；`cargo test --locked --lib campaign_stage3_advance -- --nocapture` 为人工基线。
-- [ ] **Step 3: 最小实现。** `advance_plan` 从 enrollment 和 manager `get_or_create` 读绑定且**再次**验证 enabled/精确身份，人工 origin 不按 enrollment 擅自升级；借 `WorkspaceEngine::handle_advance(AdvanceInput)` 的单一实现及其 record/journal 重放。自动在 engine 前根据 `resolve_authoritative_group_plan_binding_for_revision` 的 unit target 集 fail-closed（无唯一目标也拒），engine 后核 Ready 记录/attempt 精确一致；`advance_completed` 仅状态，不派 coding。人工 `handle_advance_from_handler` 调新服务并继续 `map_advance_outcome`，维持原 WS code/多 target 输出。
+- [x] **Step 2: 验证红灯。** `cargo test --locked --lib enrolled_advance_replays_one_ready_attempt_without_starting_runner -- --nocapture`，预期共用符号尚不存在；`cargo test --locked --lib campaign_stage3_advance -- --nocapture` 为人工基线。
+- [x] **Step 3: 最小实现。** `advance_plan` 从 enrollment 和 manager `get_or_create` 读绑定且**再次**验证 enabled/精确身份，人工 origin 不按 enrollment 擅自升级；借 `WorkspaceEngine::handle_advance(AdvanceInput)` 的单一实现及其 record/journal 重放。自动在 engine 前根据 `resolve_authoritative_group_plan_binding_for_revision` 的 unit target 集 fail-closed（无唯一目标也拒），engine 后核 Ready 记录/attempt 精确一致；`advance_completed` 仅状态，不派 coding。人工 `handle_advance_from_handler` 调新服务并继续 `map_advance_outcome`，维持原 WS code/多 target 输出。
 
   ```rust
   let outcome = advance_plan(&state, AdvanceInput {
@@ -362,8 +364,8 @@ pub fn issue_coding_final_confirm_info(paths: &ProductAppPaths,
   ```
 
   `WorkspaceInboundContext` 已持有 `app_state: WebAppState`：将 `handle_advance_from_handler` 增加 `app_state: WebAppState` 参数，在 `src/web/workspace_ws_handler/decisions/inbound.rs` 的 Advance 分支传 `app_state.clone()`，由新 service 通过 `state.workspace_sessions.get_or_create` 取得同一 manager；保留 `map_advance_outcome`，不重建 engine、不启动 coding。
-- [ ] **Step 4: 验证绿灯。** 重跑 Step 2 两条；补 `cargo test --locked --lib advance_split_recovery_matrix -- --nocapture` 和 `cargo test --locked --lib campaign_stage3_advance -- --nocapture`，持久 journal replay 与手工多 target 对照。
-- [ ] **Step 5: 提交。** `git add src/web/advance_plan.rs src/web/mod.rs src/web/workspace_ws_handler src/product/workspace_engine/tests/advance_split_recovery_matrix.rs && git commit -m "feat: share guarded advance plan entry"`（只加实际变更）。
+- [x] **Step 4: 验证绿灯。** 重跑 Step 2 两条；补 `cargo test --locked --lib advance_split_recovery_matrix -- --nocapture` 和 `cargo test --locked --lib campaign_stage3_advance -- --nocapture`，持久 journal replay 与手工多 target 对照。
+- [x] **Step 5: 提交。** `git add src/web/advance_plan.rs src/web/mod.rs src/web/workspace_ws_handler src/product/workspace_engine/tests/advance_split_recovery_matrix.rs && git commit -m "feat: share guarded advance plan entry"`（只加实际变更）。
 
 ## Task 2：3.1 attempt `CodingStartRunPolicy` 冻结、兼容旧记录
 
@@ -371,7 +373,7 @@ pub fn issue_coding_final_confirm_info(paths: &ProductAppPaths,
 
 **Interfaces:** Produces `CodingStartRunPolicy` + `attempt.start_run_policy`；`CreateGroupCodingAttemptInput` 新增 `start_run_policy: CodingStartRunPolicy`。普通/手工/legacy group/多 target 输入显式 Manual；Task 1 的自动服务精确核 enabled/source/plan revision/唯一 target 后传 `AutoStartOnce`，产品层仅持久化快照不读 web enrollment。`prepare_group_initialization_with_admission_for_target` 首次准备时经 `build_group_initialization_journal` 写入 `journal.attempt`，已有 journal 保留原 policy，不把重读的新 policy 偷换；旧 JSON 缺字段默认 Manual，`update_attempt_non_status_fields` 从 stored 保留 policy，Task 3/4 认领时重核 enrollment。
 
-- [ ] **Step 1: 写失败测试。** 在现有 `src/product/coding_attempt_store/tests.rs` 使用 `setup()` fixture，测试旧 JSON 缺字段、copy-update 禁止覆盖冻结 policy、手工 group 与已绑定 enrollment 的新 advance journal：
+- [x] **Step 1: 写失败测试。** 在现有 `src/product/coding_attempt_store/tests.rs` 使用 `setup()` fixture，测试旧 JSON 缺字段、copy-update 禁止覆盖冻结 policy、手工 group 与已绑定 enrollment 的新 advance journal：
 
   ```rust
   #[test]
@@ -392,8 +394,8 @@ pub fn issue_coding_final_confirm_info(paths: &ProductAppPaths,
   ```
 
   `setup()` 在 `src/product/coding_attempt_store/tests.rs:47-68` 已有；上述测试同时覆盖旧 serde 缺字段及 caller 试图替换冻 policy，另在 Task 1 的 Confirmed→advance fixture 读取新 journal attempt 断言 policy_revision/plan revision/target 冻结，disable 不洗白；普通、历史、多 target 手工路径均 Manual。
-- [ ] **Step 2: 验证红灯。** `cargo test --locked --lib old_attempt_json_defaults_to_manual_and_frozen_policy_survives_updates -- --nocapture`，预期缺字段类型；编译必须覆盖所有显式 attempt fixture。
-- [ ] **Step 3: 最小实现。** `CodingExecutionAttempt`、`CodingExecutionAttemptSerde`、手写 `Deserialize` 三处同步 `#[serde(default)] start_run_policy`，普通/group/journal 构造和所有显式 fixture 加新输入字段；`update_attempt_non_status_fields` 保留 `stored.start_run_policy`。`WorkspaceEngine::handle_advance(input)` 保留 Manual 签名与行为，新增 `handle_advance_with_start_policy(input, policy)` 仅给 Task 1 自动路径并只在新建单 target group journal 时穿透 `CreateGroupCodingAttemptInput.start_run_policy`；已有 journal replay 无论当前 enrollment 如何变更都不覆盖。新增字段示意：
+- [x] **Step 2: 验证红灯。** `cargo test --locked --lib old_attempt_json_defaults_to_manual_and_frozen_policy_survives_updates -- --nocapture`，预期缺字段类型；编译必须覆盖所有显式 attempt fixture。
+- [x] **Step 3: 最小实现。** `CodingExecutionAttempt`、`CodingExecutionAttemptSerde`、手写 `Deserialize` 三处同步 `#[serde(default)] start_run_policy`，普通/group/journal 构造和所有显式 fixture 加新输入字段；`update_attempt_non_status_fields` 保留 `stored.start_run_policy`。`WorkspaceEngine::handle_advance(input)` 保留 Manual 签名与行为，新增 `handle_advance_with_start_policy(input, policy)` 仅给 Task 1 自动路径并只在新建单 target group journal 时穿透 `CreateGroupCodingAttemptInput.start_run_policy`；已有 journal replay 无论当前 enrollment 如何变更都不覆盖。新增字段示意：
 
   ```rust
   #[serde(default)]
@@ -403,8 +405,8 @@ pub fn issue_coding_final_confirm_info(paths: &ProductAppPaths,
   ```
 
   类型序列化采用已存在 snake_case 约定；`source_plan_revision` 保持 revision **id**，不可用 mutable latest ref 替代；历史 JSON、普通 attempt、手工多 target replay 测试均覆盖。
-- [ ] **Step 4: 验证绿灯。** 重跑 Step 2，加 `cargo test --locked --lib group_initialization -- --nocapture`；Ready 前自动仍零 provider。
-- [ ] **Step 5: 提交。** `git add src/product/coding_models src/product/coding_attempt_store src/product/workspace_engine/advance.rs && git commit -m "feat: freeze coding auto-start policy on new attempt"`。
+- [x] **Step 4: 验证绿灯。** 重跑 Step 2，加 `cargo test --locked --lib group_initialization -- --nocapture`；Ready 前自动仍零 provider。
+- [x] **Step 5: 提交。** `git add src/product/coding_models src/product/coding_attempt_store src/product/workspace_engine/advance.rs && git commit -m "feat: freeze coding auto-start policy on new attempt"`。
 
 ## Task 3：3.1 typed StartCoding 共用准入：状态、精确授权、Ready、无批量
 
@@ -412,7 +414,7 @@ pub fn issue_coding_final_confirm_info(paths: &ProductAppPaths,
 
 **Interfaces:** Produces `StartCodingCommand/Outcome/Error`、`start_coding_once` 和 product `CodingStartOrigin`（不定义 web 同名类型）；本任务先写只读准入：只有 Created+PrepareContext 可首启，现存 claim 只返回原身份状态；Running/WaitingForHuman/Completed/Failed/Aborted/AwaitingManualRecovery 不重新认领。自动核冻结 policy、current enrollment.enabled/id/source/plan/session/target、group journal 的 `plan_id` 与 `plan_binding` revision、`AdvanceRecord` Ready/唯一 attempt/target。手工仍保留 SC Ready 门但不强制 enrollment；非 SC legacy 旧手工判据不变。完整启动在 Task 4 实现，缺/坏 record fail-closed。
 
-- [ ] **Step 1: 写失败测试。** 沿 Task 1 的共享 `wiga_gate_fixture::confirmed_enrolled_fixture()` 建 Confirmed，使用 `advance_handler.rs::advance_initialization_replay_resumes_same_record_attempt_and_units` 的 `JournalPrepared` failpoint 在相同 project/issue/plan 下取得**真实 journal lineage**、尚未 Ready 的 attempt；将该 fixture helper 命名 `enrolled_attempt_before_ready()` 并在本任务 `coding_start.rs` 的 `#[cfg(test)]` 首次定义；现有 `sc_start_guard.rs::start_coding_before_advance_ready_is_rejected_with_sc_coding_requires_advance` 作 WS 守卫对照：
+- [x] **Step 1: 写失败测试。** 沿 Task 1 的共享 `wiga_gate_fixture::confirmed_enrolled_fixture()` 建 Confirmed，使用 `advance_handler.rs::advance_initialization_replay_resumes_same_record_attempt_and_units` 的 `JournalPrepared` failpoint 在相同 project/issue/plan 下取得**真实 journal lineage**、尚未 Ready 的 attempt；将该 fixture helper 命名 `enrolled_attempt_before_ready()` 并在本任务 `coding_start.rs` 的 `#[cfg(test)]` 首次定义；现有 `sc_start_guard.rs::start_coding_before_advance_ready_is_rejected_with_sc_coding_requires_advance` 作 WS 守卫对照：
 
   ```rust
   #[tokio::test]
@@ -433,8 +435,8 @@ pub fn issue_coding_final_confirm_info(paths: &ProductAppPaths,
   ```
 
   `enrolled_attempt_before_ready` 使用真实 `AdvanceInitializationPhase::JournalPrepared` 中窗、绝不注入无 lineage 的 Created 壳；新增禁用/重开、旧版本/源/target 漂移、`target_attempts.len()>1` 测试，断言全部 sibling claim/run 均空，人工单 target 与显式 Restart 为独立路径。
-- [ ] **Step 2: 验证红灯。** `cargo test --locked --lib start_coding_rejects_sc_before_durable_ready -- --nocapture`；`cargo test --locked --lib start_coding_before_advance_ready_is_rejected_with_sc_coding_requires_advance -- --nocapture`，新服务缺失/无共用调用。
-- [ ] **Step 3: 最小实现。** 复用已有 `coding_message_admission` 的状态矩阵与 `socket.rs:304-353` 中 `SC_CODING_REQUIRES_ADVANCE` 的错误码，但不改旧 WS 守卫直到 Task 5 一次迁接。typed service 根据 current enrollment 与 attempt 冻结 policy 实施只读 guard；Ready 查询 `plan_id` 从 `CodingGroupInitializationJournal.plan_id` 读取，同时核其 `plan_binding` 与 `AdvanceRecord.plan_revision_id`、attempt.id，**不假定** `work_item_group_id` 可作 plan_id。Task 4 将在 enrollment 文件锁内重验并消费；多 target 判据同时看权威 binding、`AdvanceRecord.target_attempts`、attempt 快照与 enrollment logical id，不按 sibling 循环。
+- [x] **Step 2: 验证红灯。** `cargo test --locked --lib start_coding_rejects_sc_before_durable_ready -- --nocapture`；`cargo test --locked --lib start_coding_before_advance_ready_is_rejected_with_sc_coding_requires_advance -- --nocapture`，新服务缺失/无共用调用。
+- [x] **Step 3: 最小实现。** 复用已有 `coding_message_admission` 的状态矩阵与 `socket.rs:304-353` 中 `SC_CODING_REQUIRES_ADVANCE` 的错误码，但不改旧 WS 守卫直到 Task 5 一次迁接。typed service 根据 current enrollment 与 attempt 冻结 policy 实施只读 guard；Ready 查询 `plan_id` 从 `CodingGroupInitializationJournal.plan_id` 读取，同时核其 `plan_binding` 与 `AdvanceRecord.plan_revision_id`、attempt.id，**不假定** `work_item_group_id` 可作 plan_id。Task 4 将在 enrollment 文件锁内重验并消费；多 target 判据同时看权威 binding、`AdvanceRecord.target_attempts`、attempt 快照与 enrollment logical id，不按 sibling 循环。
 
   ```rust
   let journal = coding_store.get_group_initialization(project_id, issue_id, &bound_plan_id)?;
@@ -448,8 +450,8 @@ pub fn issue_coding_final_confirm_info(paths: &ProductAppPaths,
   ```
 
   `RequiresAdvance.code()` 恒 `SC_CODING_REQUIRES_ADVANCE`；无法读取 Ready 也映射该码附真实错误原因，不吞为 OK。Manual 首启不会因为有人 enroll 后被误认成自动 permission；Task 4 负责 claim+runner 接线，不在本任务留下可在生产路径裸调的替代入口。
-- [ ] **Step 4: 验证绿灯。** 重跑 Step 2 与 `cargo test --locked --lib sc_start_guard -- --nocapture`；测试同时涵盖缺 plan binding、非 Ready 与多 target 的零 claim/零 runner。
-- [ ] **Step 5: 提交。** `git add src/web/coding_start.rs src/web/mod.rs src/web/coding_ws_handler && git commit -m "feat: unify typed coding start admission"`。
+- [x] **Step 4: 验证绿灯。** 重跑 Step 2 与 `cargo test --locked --lib sc_start_guard -- --nocapture`；测试同时涵盖缺 plan binding、非 Ready 与多 target 的零 claim/零 runner。
+- [x] **Step 5: 提交。** `git add src/web/coding_start.rs src/web/mod.rs src/web/coding_ws_handler && git commit -m "feat: unify typed coding start admission"`。
 
 ## Task 4：3.1 durable 单发 claim、registry reservation 与启动 barrier
 
@@ -457,7 +459,7 @@ pub fn issue_coding_final_confirm_info(paths: &ProductAppPaths,
 
 **Interfaces:** Produces `CodingStartClaim/Phase`、`CodingAttemptStore::claim_coding_start/advance_coding_start_phase`、`IssueAutomationStore::with_current_enrollment_locked(project_id,issue_id,f)`（同 enrollment 文件锁重读，`f: FnOnce(&IssueAutomationEnrollment)->Result<T,ProductStoreError>`，闭包内仅同步检查并认领 attempt）、首启专用 `spawn_coding_runner_first_start_reserved(state,store,event_tx,attempt,reservation,command_id)`；原 `spawn_coding_runner` 仅显式 Restart/Recover。锁序 enrollment file → attempt file；entry 前可用 `CodingRunRegistry::lock_attempt` 排串行，但不得持 await 锁跨同步文件锁闭包。任何锁内禁止 await/provider 启动。claim 是 attempt 同文件不可复位身份；reservation 丢失不回滚已消费许可。
 
-- [ ] **Step 1: 写失败测试。** 在新首启测试模块使用 Task 3 的真实 Ready fixture 和两个 `WebAppState` 指向同一 `.aria`（模拟跨进程不同 registry）：
+- [x] **Step 1: 写失败测试。** 在新首启测试模块使用 Task 3 的真实 Ready fixture 和两个 `WebAppState` 指向同一 `.aria`（模拟跨进程不同 registry）：
 
   ```rust
   #[tokio::test]
@@ -484,8 +486,8 @@ pub fn issue_coding_final_confirm_info(paths: &ProductAppPaths,
   ```
 
   本任务在 `src/web/wiga_gate_fixture.rs` 新增共享 `ready_enrolled_attempt_fixture()` 与 `auto_origin()/restart_state()/store()`，由该文件现有 `EnrolledGateFixture` 建 Confirmed 并调用 Task 1 服务到 Ready，真实角色 run 只统计首启（如果 stage gate 尚未产生 provider role run，用既有 provider-start durable ledger/claim 与**已启动 runner 总数**双断言；测试须以 provider 真实入口 probe 控制中窗，不用固定 sleep）。另写 barrier failpoint：claim 后/registry 激活前、激活后/放行前、放行后/provider 事实不明三窗；首两窗重启只恢复同 command，最后人工分诊。
-- [ ] **Step 2: 验证红灯。** `cargo test --locked --lib manual_and_auto_claim_same_attempt_once_across_registries -- --nocapture`，预期两个内存 registry 旧路径可各自启动；runner probe 用例按名字同目录定向运行。
-- [ ] **Step 3: 最小实现。** Claim 状态写 attempt 文件、CAS/reload 后比对 command 与 origin；读取错误/不匹配 fail-closed。`Claimed` 在未给 runner 放行前可复用相同身份；激活 reservation 后持久 `RunnerRegistered`，写失败即 drop oneshot、撤 registry，不放 provider；持久 `ProviderMayHaveStarted` **先于** start_tx.send(()): 跨进程重启此窗口不保证未触达 provider，只能从可信 Running/role run ledger 复用既有 resumption 或标 `NeedsHuman`。Task 3 守卫还须在锁内再执行一次（自动许可/disable 的单一线性化点）；**不允许**「读 enrollment 后放锁再写 claim」。runner 使用 `CodingRunnerTask {start_rx:Some(...)}` 已有结构，首启专用屏障不复用 recovery journal：
+- [x] **Step 2: 验证红灯。** `cargo test --locked --lib manual_and_auto_claim_same_attempt_once_across_registries -- --nocapture`，预期两个内存 registry 旧路径可各自启动；runner probe 用例按名字同目录定向运行。
+- [x] **Step 3: 最小实现。** Claim 状态写 attempt 文件、CAS/reload 后比对 command 与 origin；读取错误/不匹配 fail-closed。`Claimed` 在未给 runner 放行前可复用相同身份；激活 reservation 后持久 `RunnerRegistered`，写失败即 drop oneshot、撤 registry，不放 provider；持久 `ProviderMayHaveStarted` **先于** start_tx.send(()): 跨进程重启此窗口不保证未触达 provider，只能从可信 Running/role run ledger 复用既有 resumption 或标 `NeedsHuman`。Task 3 守卫还须在锁内再执行一次（自动许可/disable 的单一线性化点）；**不允许**「读 enrollment 后放锁再写 claim」。runner 使用 `CodingRunnerTask {start_rx:Some(...)}` 已有结构，首启专用屏障不复用 recovery journal：
 
   ```rust
   let reservation = state.coding_runs.try_reserve_attempt(&attempt_key)
@@ -503,8 +505,8 @@ pub fn issue_coding_final_confirm_info(paths: &ProductAppPaths,
   ```
 
   这是同一 service 的片段，实际 claim/registry 次序在持有同 attempt guard 内实现；拿不到 registry 而无 claim 时不消费许可。`runner/task.rs` 在放行前后持久 checkpoint；禁止 `spawn_coding_runner_first_start_reserved` 对不同 command 二次放行。真实 provider 入口与 claim 中窗的测试 probe 使用已有 `CodingRunnerStartProbe` 机制，指定三点状态及 restart 期望，不以单次 runner 注册等同 provider 启动。
-- [ ] **Step 4: 验证绿灯。** 重跑 Step 2 与 `cargo test --locked --lib runner_cleanup -- --nocapture`、`cargo test --locked --lib runner_recovery -- --nocapture`；禁用先胜无 claim、claim 先胜不中断且重开不复位、Failed/Aborted 不触发首启均由 durable store 对账。
-- [ ] **Step 5: 提交。** `git add src/product/coding_models/execution.rs src/product/coding_attempt_store src/product/issue_automation_store.rs src/web/coding_start.rs src/web/coding_ws_handler/runner.rs src/web/coding_ws_handler/runner/task.rs src/web/coding_ws_handler/tests src/web/wiga_gate_fixture.rs && git commit -m "feat: claim coding first start durably before runner barrier"`。
+- [x] **Step 4: 验证绿灯。** 重跑 Step 2 与 `cargo test --locked --lib runner_cleanup -- --nocapture`、`cargo test --locked --lib runner_recovery -- --nocapture`；禁用先胜无 claim、claim 先胜不中断且重开不复位、Failed/Aborted 不触发首启均由 durable store 对账。
+- [x] **Step 5: 提交。** `git add src/product/coding_models/execution.rs src/product/coding_attempt_store src/product/issue_automation_store.rs src/web/coding_start.rs src/web/coding_ws_handler/runner.rs src/web/coding_ws_handler/runner/task.rs src/web/coding_ws_handler/tests src/web/wiga_gate_fixture.rs && git commit -m "feat: claim coding first start durably before runner barrier"`。
 
 ## Task 5：3.1 人工 WS 与后台 reconcile 共用服务，严格两动作分开
 
@@ -512,7 +514,7 @@ pub fn issue_coding_final_confirm_info(paths: &ProductAppPaths,
 
 **Interfaces:** Consumes Task 1 `advance_plan`、Task 3/4 `start_coding_once`；扩展现有 `ReconcileOutcome` 增加 `Advancing`、`Coding`（保留已落地五个变体语义）。`Confirmed` 只在 `plan_confirmed_info` 可派生成功 publication/compile、current enrollment 精确匹配且**无人门/choice/compile recovery**时，请求 stable-id advance；本轮到 Ready 即止。下一轮读取 Ready 唯一 attempt 后才请求 stable-id AutoStartOnce；重复唤醒不重启。WS StartCoding 抽掉原 `spawn_coding_runner` 首启直调，改走同一个 typed service；人工 Restart/Recover 分支仍显式、保留原 socket wire 错误与状态更新。
 
-- [ ] **Step 1: 写失败测试。** 从 Task 1 `confirmed_enrolled_fixture()`（Confirmed 尚未 advance）起步，连续两轮真实 reconcile；Task 4 的 runner probe 负责统计同 attempt 首启，不得先用已 Ready fixture 使第一轮 `Advancing` 断言假失败：
+- [x] **Step 1: 写失败测试。** 从 Task 1 `confirmed_enrolled_fixture()`（Confirmed 尚未 advance）起步，连续两轮真实 reconcile；Task 4 的 runner probe 负责统计同 attempt 首启，不得先用已 Ready fixture 使第一轮 `Advancing` 断言假失败：
 
   ```rust
   #[tokio::test]
@@ -536,8 +538,8 @@ pub fn issue_coding_final_confirm_info(paths: &ProductAppPaths,
   ```
 
   Task 1 共享 fixture 在第一轮之前保证 Confirmed、零 attempt；第一次 reconcile 后 assert 新 Ready attempt，第二轮后用 `CodingRunRegistry::runner_count` + Task 4 durable claim 核一份首启；补 disable→重开、源 drift、人工 WS `StartCoding` 并发、Failed/Aborted/旧 attempt 不重启，WS 用 `sc_start_guard.rs` 真实服务验证 Ready 错码。
-- [ ] **Step 2: 验证红灯。** `cargo test --locked --lib confirmed_enrollment_advances_then_starts_without_coding_socket -- --nocapture`，预期 P1 Confirmed 仅 NeedsHuman；`cargo test --locked --lib sc_start_guard -- --nocapture` 为旧手工行为基线。
-- [ ] **Step 3: 最小实现。** `AutopilotOrchestrator::reconcile` 中先检查终态 session：仅 Confirmed+Complete 且 compile publication `plan_confirmed_info` 成功时按 durable advance record 判断；先单独调用 `advance_plan`，其返回 Ready 才在后**一次 tick**调用 `start_coding_once`；不能从 `advance_completed` 事件直接 spawn。Stable command `wiga-start-{attempt.id}`（同 claim 意图固定，id 验证合规）；终态 Failed/Aborted/NeedsHuman 一律返回 NeedsHuman。WS `prepare_coding_message` 在 `StartCoding` 上仍完成基本前置，但在进入共用 service 前释放其 mutation lease，让 service 自持 attempt guard 并重读，**不能持 lease 后再 await 同名锁**；保留连接级 runner_started 状态作观察值而非准入唯一事实：
+- [x] **Step 2: 验证红灯。** `cargo test --locked --lib confirmed_enrollment_advances_then_starts_without_coding_socket -- --nocapture`，预期 P1 Confirmed 仅 NeedsHuman；`cargo test --locked --lib sc_start_guard -- --nocapture` 为旧手工行为基线。
+- [x] **Step 3: 最小实现。** `AutopilotOrchestrator::reconcile` 中先检查终态 session：仅 Confirmed+Complete 且 compile publication `plan_confirmed_info` 成功时按 durable advance record 判断；先单独调用 `advance_plan`，其返回 Ready 才在后**一次 tick**调用 `start_coding_once`；不能从 `advance_completed` 事件直接 spawn。Stable command `wiga-start-{attempt.id}`（同 claim 意图固定，id 验证合规）；终态 Failed/Aborted/NeedsHuman 一律返回 NeedsHuman。WS `prepare_coding_message` 在 `StartCoding` 上仍完成基本前置，但在进入共用 service 前释放其 mutation lease，让 service 自持 attempt guard 并重读，**不能持 lease 后再 await 同名锁**；保留连接级 runner_started 状态作观察值而非准入唯一事实：
 
   ```rust
   if inbound == CodingWsInMessage::StartCoding {
@@ -553,8 +555,8 @@ pub fn issue_coding_final_confirm_info(paths: &ProductAppPaths,
   ```
 
   `manual_command_id_for_this_frame` 由本任务实现为合法随机 ID（仅第一次帧生成，同帧处理不二次生成）；并发失败复用 durable claim 的 attempt 状态而非发第二个 runner。Restart/Recover 仍走原明示独立入口；归属未知的旧 client advance 由现有服务端幂等兜底，不改 P1 `useCockpitAutopilot` 的 server 退位。
-- [ ] **Step 4: 验证绿灯。** 重跑 Step 2 两条与 `cargo test --locked --lib automation_reconcile -- --nocapture`、`cargo test --locked --lib sc_start_guard -- --nocapture`；不需要任何 coding WS 的测试才算后台首启证据。
-- [ ] **Step 5: 提交。** `git add src/web/autopilot_orchestrator.rs src/web/advance_plan.rs src/web/coding_ws_handler src/web/wiga_gate_fixture.rs && git commit -m "feat: drive confirmed plan to ready and coding without sockets"`。
+- [x] **Step 4: 验证绿灯。** 重跑 Step 2 两条与 `cargo test --locked --lib automation_reconcile -- --nocapture`、`cargo test --locked --lib sc_start_guard -- --nocapture`；不需要任何 coding WS 的测试才算后台首启证据。
+- [x] **Step 5: 提交。** `git add src/web/autopilot_orchestrator.rs src/web/advance_plan.rs src/web/coding_ws_handler src/web/wiga_gate_fixture.rs && git commit -m "feat: drive confirmed plan to ready and coding without sockets"`。
 
 ## Task 6：3.2 无 attach 启动扫描与已认领原 run 恢复
 
@@ -562,7 +564,7 @@ pub fn issue_coding_final_confirm_info(paths: &ProductAppPaths,
 
 **Interfaces:** Consumes `list_attempts_for_issue`、既有 `ensure_runner_for_resumed_attempt`（仅 Running + WorktreePrepare/Coding、SC Ready 仍复核）和 Task 4 `CodingStartClaim`；produces `reconcile_claimed_coding_runs_once(state: &WebAppState) -> Result<usize,String>`，在 `serve_web` 构造 state 后**先**做可观察启动扫描（可分批，不阻塞永久运行），再进入既有 2 秒有界 tick。Created + 没 claim 不启动；`Claimed` 未 barrier 可按同一 command/origin恢复；`RunnerRegistered/ProviderMayHaveStarted` 仅凭足够的 Running/ledger 事实走旧 resumption；副作用不明标 NeedsHuman、attempt `AwaitingManualRecovery`，给 UI durable 诊断；Failed/Aborted/Completed 不恢复。
 
-- [ ] **Step 1: 写失败测试。** 两份 `WebAppState` 指同一 tempdir：先让 Task 4 首启 probe 卡在已持久 `ProviderMayHaveStarted` 且 attempt 已进入可安全恢复的 Running/WorktreePrepare，模拟进程销毁，再不连接任何 WS 执行启动扫描：
+- [x] **Step 1: 写失败测试。** 两份 `WebAppState` 指同一 tempdir：先让 Task 4 首启 probe 卡在已持久 `ProviderMayHaveStarted` 且 attempt 已进入可安全恢复的 Running/WorktreePrepare，模拟进程销毁，再不连接任何 WS 执行启动扫描：
 
   ```rust
   #[tokio::test]
@@ -580,8 +582,8 @@ pub fn issue_coding_final_confirm_info(paths: &ProductAppPaths,
   ```
 
   `claimed_running_attempt_fixture` 在 `runner_recovery.rs` 本任务新增：调用 `CodingAttemptStore` 既有 `pub(crate)` 方法 `seed_running_attempt_for_test`（定义于 attempt.rs:203-214，runner_recovery.rs 是其调用方）造 durable admission，加 Task 4 claim 与 pause probe，不直接伪造 Started external 调用；另一用例停在可能已触达 provider 的 Created 无可信 ledger，期望 `AwaitingManualRecovery` 且 0 runner；legacy Running 有既有准入证据也按原规则恢复。
-- [ ] **Step 2: 验证红灯。** `cargo test --locked --lib startup_reconciles_claimed_running_coding_without_attach -- --nocapture`；预期没有 startup reconcile，旧恢复必须 socket attach。
-- [ ] **Step 3: 最小实现。** 启动扫描沿 `ProjectStore::list`→`IssueStore::list`→`CodingAttemptStore::list_attempts_for_issue`，对 attempt 带 Task 4 claim 或旧 Running+可信 admission，建立 `coding_sockets.hub_sender`（**不登记 fake socket**），用相同 attempt lock 调已有 `ensure_runner_for_resumed_attempt`；当前 attach 不再担当*唯一*恢复触发，保留其补快照/choice/amendment 功能，attach 与 startup/tick 同 claim/registry 去重。`ensure_runner_for_resumed_attempt` 进入新失败分诊要区别“已有 runner/预约＝NotNeeded”和“确实检查失败＝manual recovery”，不把抢输者标失败。启动修复必须不会等待 socket 事件 ack。
+- [x] **Step 2: 验证红灯。** `cargo test --locked --lib startup_reconciles_claimed_running_coding_without_attach -- --nocapture`；预期没有 startup reconcile，旧恢复必须 socket attach。
+- [x] **Step 3: 最小实现。** 启动扫描沿 `ProjectStore::list`→`IssueStore::list`→`CodingAttemptStore::list_attempts_for_issue`，对 attempt 带 Task 4 claim 或旧 Running+可信 admission，建立 `coding_sockets.hub_sender`（**不登记 fake socket**），用相同 attempt lock 调已有 `ensure_runner_for_resumed_attempt`；当前 attach 不再担当*唯一*恢复触发，保留其补快照/choice/amendment 功能，attach 与 startup/tick 同 claim/registry 去重。`ensure_runner_for_resumed_attempt` 进入新失败分诊要区别“已有 runner/预约＝NotNeeded”和“确实检查失败＝manual recovery”，不把抢输者标失败。启动修复必须不会等待 socket 事件 ack。
 
   ```rust
   let event_tx = state.coding_sockets.hub_sender(&attempt_key);
@@ -594,8 +596,8 @@ pub fn issue_coding_final_confirm_info(paths: &ProductAppPaths,
   ```
 
   对 `Claimed` 未跨 barrier 的安全窗用 Task 4 单一恢复方法，不能把所有 `Created` 都交上述只收 Running 的 helper；对外部是否收到 provider 无法证明的窗直接 NeedsHuman 而非再跑 start_attempt。
-- [ ] **Step 4: 验证绿灯。** 重跑 Step 2，并跑 `cargo test --locked --lib runner_recovery -- --nocapture`、`cargo test --locked --lib automation_reconcile -- --nocapture`。关闭所有订阅后依旧有 1 runner；Failed/Aborted/no claim 各 0。
-- [ ] **Step 5: 提交。** `git add src/web/app.rs src/web/autopilot_orchestrator.rs src/web/coding_start.rs src/web/coding_ws_handler && git commit -m "feat: recover claimed coding runs at startup without socket"`。
+- [x] **Step 4: 验证绿灯。** 重跑 Step 2，并跑 `cargo test --locked --lib runner_recovery -- --nocapture`、`cargo test --locked --lib automation_reconcile -- --nocapture`。关闭所有订阅后依旧有 1 runner；Failed/Aborted/no claim 各 0。
+- [x] **Step 5: 提交。** `git add src/web/app.rs src/web/autopilot_orchestrator.rs src/web/coding_start.rs src/web/coding_ws_handler && git commit -m "feat: recover claimed coding runs at startup without socket"`。
 
 > **实施偏差登记（2026-09-27，主控裁决）**：Task 5 把 WS StartCoding 迁到
 > typed 首启服务后，原 socket 直启路径隐式覆盖的「Running+ReviewRequest 死
@@ -616,7 +618,7 @@ pub fn issue_coding_final_confirm_info(paths: &ProductAppPaths,
 
 **Interfaces:** 复用已有 `CodingRunRegistry::claim_choice/submit_claimed_choice/wait_choice_receipt`、`coding_choice` REST 200/202/410、`CodingPlanAmendmentDeliveryStatus::{Pending,Unsent,Delivered}` 和 zero-socket amendment 既有用例 `zero_socket_plan_amendment_activation_resumes_attempt_with_unsent_delivery`；不新增投递协议。Registry fan-out 满队列不 await 慢 socket：跳过当前 socket 的本帧写入机会并向 amendment ack 注册表报告这份写失败，强制该观察者重订阅补 durable；其他 socket 可继续，零订阅者 Unsent。
 
-- [ ] **Step 1: 写失败测试。** `event_hub.rs` 用已有 socket registry fixture 与容量 1 的慢接收端；`plan_repair_activation.rs` 在零 socket confirm 后核 status 已 Running + Unsent，再 attach 仅真实写 ack 能转 Delivered。`coding_choice.rs` 已有 `coding_choice_reply_http_202_then_retry_200_with_full_answers` 的真实 `coding_choice_http_fixture`、`request_body/post_choice/paused_coding_runner/get_status`，扩成显式「zero socket」回归而非新造 waiter：
+- [x] **Step 1: 写失败测试。** `event_hub.rs` 用已有 socket registry fixture 与容量 1 的慢接收端；`plan_repair_activation.rs` 在零 socket confirm 后核 status 已 Running + Unsent，再 attach 仅真实写 ack 能转 Delivered。`coding_choice.rs` 已有 `coding_choice_reply_http_202_then_retry_200_with_full_answers` 的真实 `coding_choice_http_fixture`、`request_body/post_choice/paused_coding_runner/get_status`，扩成显式「zero socket」回归而非新造 waiter：
 
   ```rust
   #[tokio::test]
@@ -641,8 +643,8 @@ pub fn issue_coding_final_confirm_info(paths: &ProductAppPaths,
   ```
 
   已有 fixture 可直接完成零 socket 多问题 202→receipt→200 验证；同模块加无 waiter 反例仍为 202/410，不以 mpsc 入队冒充 Delivered。慢队列测试 `timeout(Duration::from_millis(250), hub_tx.send(event))` 必须同时核 durable amendment Unsent，不以断开 socket 规避反压。
-- [ ] **Step 2: 验证红灯。** `cargo test --locked --lib no_socket_coding_choice_is_delivered_only_to_live_waiter -- --nocapture` 与 `cargo test --locked --lib slow_observer_does_not_block_coding_business -- --nocapture`，预期第二条在旧 `broadcast` 的 `target.send(...).await` 卡满队列；首条若已由 P0 满足仍为保护性回归。
-- [ ] **Step 3: 最小实现。** 仅修改 `CodingSocketRegistry::broadcast`：保留现有 `expect_plan_amendment_fan_out_writes(event, targets.len())` **先登记**，遍历每目标 `try_send(event.clone())`；Full/Closed 同步调用现有 `fail_plan_amendment_socket_write(event)` 各结算一份，已成功入队者由真实 socket writer 成功或失败 ack 再结算。慢 socket 不阻塞业务，落后订阅须重订阅 durable snapshot/Unsent；不能以队列入队视为 Delivered，也不重复调用期待份额。实现片段：
+- [x] **Step 2: 验证红灯。** `cargo test --locked --lib no_socket_coding_choice_is_delivered_only_to_live_waiter -- --nocapture` 与 `cargo test --locked --lib slow_observer_does_not_block_coding_business -- --nocapture`，预期第二条在旧 `broadcast` 的 `target.send(...).await` 卡满队列；首条若已由 P0 满足仍为保护性回归。
+- [x] **Step 3: 最小实现。** 仅修改 `CodingSocketRegistry::broadcast`：保留现有 `expect_plan_amendment_fan_out_writes(event, targets.len())` **先登记**，遍历每目标 `try_send(event.clone())`；Full/Closed 同步调用现有 `fail_plan_amendment_socket_write(event)` 各结算一份，已成功入队者由真实 socket writer 成功或失败 ack 再结算。慢 socket 不阻塞业务，落后订阅须重订阅 durable snapshot/Unsent；不能以队列入队视为 Delivered，也不重复调用期待份额。实现片段：
 
   ```rust
   expect_plan_amendment_fan_out_writes(event, targets.len());
@@ -654,8 +656,8 @@ pub fn issue_coding_final_confirm_info(paths: &ProductAppPaths,
   ```
 
   注意 `expect_plan_amendment_fan_out_writes(event, targets.len())` 先登记份额，失败每份恰一次，已入队但写失败仍由 socket writer 的既有 ack 机制结算。业务 amendment 解耦已完成，不重复改引擎或回执模型。
-- [ ] **Step 4: 验证绿灯。** 重跑 Step 2，再跑 `cargo test --locked --lib zero_socket_plan_amendment_activation_resumes_attempt_with_unsent_delivery -- --nocapture`、`cargo test --locked --lib coding_choice -- --nocapture`、`cargo test --locked --lib event_hub -- --nocapture`；核重连见同一业务终态、只在真写成功后 Delivered、未重复 application。
-- [ ] **Step 5: 提交。** `git add src/web/state/coding_socket_registry.rs src/web/coding_ws_handler/tests/event_hub.rs src/web/workspace_ws_handler/tests/plan_repair_activation.rs src/web/handlers/coding_choice.rs && git commit -m "fix: keep slow coding observers off business path"`。
+- [x] **Step 4: 验证绿灯。** 重跑 Step 2，再跑 `cargo test --locked --lib zero_socket_plan_amendment_activation_resumes_attempt_with_unsent_delivery -- --nocapture`、`cargo test --locked --lib coding_choice -- --nocapture`、`cargo test --locked --lib event_hub -- --nocapture`；核重连见同一业务终态、只在真写成功后 Delivered、未重复 application。
+- [x] **Step 5: 提交。** `git add src/web/state/coding_socket_registry.rs src/web/coding_ws_handler/tests/event_hub.rs src/web/workspace_ws_handler/tests/plan_repair_activation.rs src/web/handlers/coding_choice.rs && git commit -m "fix: keep slow coding observers off business path"`。
 
 ## Task 8：3.3 durable FinalConfirm 等待信息后端投影
 
@@ -663,7 +665,7 @@ pub fn issue_coding_final_confirm_info(paths: &ProductAppPaths,
 
 **Interfaces:** Produces `CodingFinalConfirmInfoDto` 与 `issue_coding_final_confirm_info`，增量 `IssueLifecycleResponse.coding_final_confirm_info`。只读从 enrolled 且**已认领**的单 target group attempt 的持久 `WaitingForHuman+FinalConfirm`、`GroupFinalReadinessStatus::Complete`、无 diagnostics/完整 units、同 attempt 的 FinalConfirm pending 节点推导；`Completed` 后查同节点已完成，复用**同 key/原 `started_at`** 把标题改「已最终确认」且 `final_confirmed=true`，不产生新提醒。禁用 enrollment 后，**已经成功认领**的 run 仍能显示结果；未认领的旧 Manual attempt 不冒充自动完成。缺节点/identity 不匹配/坏 snapshot fail-closed，读取错误传播 HTTP，不吞作空。
 
-- [ ] **Step 1: 写失败测试。** 生产 `src/web/coding_final_confirm_info.rs` 内仅测试模块使用 Task 4 的 `ready_enrolled_attempt_fixture()`、`EnrolledGateFixture`、原 `CodingWorkspaceEngine::prepare_group_final_confirm_from_readiness` 与 `handle_final_confirm`。`src/product/coding_workspace_engine/tests/group_final_readiness_support.rs::readiness_fixture/seed_complete_group_readiness` 作用于**独立临时 repo**，不可跨模块调用也不可把其 snapshot 复制到 enrolled attempt；在同一个 enrolled group attempt 上通过 Fake 真实 runner 产生 unit/handoff/review/readiness，再断言投影与重复准备。正反例：
+- [x] **Step 1: 写失败测试。** 生产 `src/web/coding_final_confirm_info.rs` 内仅测试模块使用 Task 4 的 `ready_enrolled_attempt_fixture()`、`EnrolledGateFixture`、原 `CodingWorkspaceEngine::prepare_group_final_confirm_from_readiness` 与 `handle_final_confirm`。`src/product/coding_workspace_engine/tests/group_final_readiness_support.rs::readiness_fixture/seed_complete_group_readiness` 作用于**独立临时 repo**，不可跨模块调用也不可把其 snapshot 复制到 enrolled attempt；在同一个 enrolled group attempt 上通过 Fake 真实 runner 产生 unit/handoff/review/readiness，再断言投影与重复准备。正反例：
 
   ```rust
   #[tokio::test]
@@ -687,8 +689,8 @@ pub fn issue_coding_final_confirm_info(paths: &ProductAppPaths,
   ```
 
   Task 8 在 `src/web/wiga_gate_fixture.rs` 新增共享 `pub(crate) async fn complete_enrolled_group_waiting_for_final_confirm() -> EnrolledGateFixture`：接 Task 4 已 Ready/claimed Fake attempt，令 Fake runner 沿实际 unit→handoff→readiness 的业务入口运行至 `WaitingForHuman+FinalConfirm`，从同一 attempt 的 `CodingAttemptStore` 读取完整 snapshot/节点；`prepare_group_final_confirm_again()` 复用原 `prepare_group_final_confirm_from_readiness`，`confirm_final_by_human()` 使用原 `handle_final_confirm`。失败即暴露真实缺失的 group 事实，不通过另一个 fixture 拷贝 snapshot 或手改 attempt status。缺 readiness/Incomplete/Completed 但无人工节点/非 enrolled/错 plan 各为反例。
-- [ ] **Step 2: 验证红灯。** `cargo test --locked --lib coding_info_stays_stable_when_readiness_is_rewritten -- --nocapture`，预期尚无投影；`cargo test --locked --lib preparing_group_final_confirm_twice_reuses_pending_timeline_node -- --nocapture` 为既有事实基线。
-- [ ] **Step 3: 最小实现。** `issue_coding_final_confirm_info` 枚举同 issue 有 durable claim 的 group attempts，检查 claim.origin=Enrolled、冻结 plan/单 target、readiness snapshot identity/status/diagnostics/units，找到匹配 `attempt.id` 的当前 FinalConfirm Pending 节点；`Completed` 分支只认同一个节点 `Completed` 和 attempt 已人工 Completed。稳定 `key=format!("coding_final_confirm:{}:{}",attempt.id,node.id)`、`occurred_at=node.started_at.clone()`；不得取 snapshot.created_at。lifecycle.rs 跟 `plan_confirmed_info` 同源挂只读字段，错误直传。
+- [x] **Step 2: 验证红灯。** `cargo test --locked --lib coding_info_stays_stable_when_readiness_is_rewritten -- --nocapture`，预期尚无投影；`cargo test --locked --lib preparing_group_final_confirm_twice_reuses_pending_timeline_node -- --nocapture` 为既有事实基线。
+- [x] **Step 3: 最小实现。** `issue_coding_final_confirm_info` 枚举同 issue 有 durable claim 的 group attempts，检查 claim.origin=Enrolled、冻结 plan/单 target、readiness snapshot identity/status/diagnostics/units，找到匹配 `attempt.id` 的当前 FinalConfirm Pending 节点；`Completed` 分支只认同一个节点 `Completed` 和 attempt 已人工 Completed。稳定 `key=format!("coding_final_confirm:{}:{}",attempt.id,node.id)`、`occurred_at=node.started_at.clone()`；不得取 snapshot.created_at。lifecycle.rs 跟 `plan_confirmed_info` 同源挂只读字段，错误直传。
 
   ```rust
   let ready = store.get_group_final_readiness_snapshot(&attempt)?;
@@ -699,8 +701,8 @@ pub fn issue_coding_final_confirm_info(paths: &ProductAppPaths,
   // 再核等待态/人工已确认态及 FinalConfirm 节点，二者同 id/time。
   ```
 
-- [ ] **Step 4: 验证绿灯。** 重跑 Step 2，另跑 `cargo test --locked --lib group_final_readiness -- --nocapture` 和 `cargo test --locked --lib plan_confirmed_info -- --nocapture`，保证 P1 plan info 不被 coding 事实覆盖。
-- [ ] **Step 5: 提交。** `git add src/web/coding_final_confirm_info.rs src/web/mod.rs src/web/types.rs src/web/handlers/lifecycle.rs src/product/coding_workspace_engine/tests/group_final_readiness.rs src/web/wiga_gate_fixture.rs && git commit -m "feat: derive final-confirm coding info from durable readiness"`。
+- [x] **Step 4: 验证绿灯。** 重跑 Step 2，另跑 `cargo test --locked --lib group_final_readiness -- --nocapture` 和 `cargo test --locked --lib plan_confirmed_info -- --nocapture`，保证 P1 plan info 不被 coding 事实覆盖。
+- [x] **Step 5: 提交。** `git add src/web/coding_final_confirm_info.rs src/web/mod.rs src/web/types.rs src/web/handlers/lifecycle.rs src/product/coding_workspace_engine/tests/group_final_readiness.rs src/web/wiga_gate_fixture.rs && git commit -m "feat: derive final-confirm coding info from durable readiness"`。
 
 > **实施偏差登记（2026-09-27，Task 8 主测转绿诊断）**：Fake 全链
 > `complete_enrolled_group_waiting_for_final_confirm` 首启后 Coding 阶段
@@ -732,7 +734,7 @@ pub fn issue_coding_final_confirm_info(paths: &ProductAppPaths,
 
 **Interfaces:** Consumes Task 8 `coding_final_confirm_info?: CodingFinalConfirmInfoItem[]`（TS snake_case 与 Rust DTO 同字段）；produces `codingFinalConfirmInfoItem` 的 `CockpitInboxItem {kind:"info", source:"coding_final_confirm_info", codingInfo:{projectId,issueId,planId,attemptId,key,occurredAt,finalConfirmed}}`；`CockpitInbox` 增 `onOpenInfoCoding?: (address: CodingAttemptAddress)=>void`，`ChatCockpitPage`/`ChatWorkspacePage`/`router.tsx` 传递真正 coding route 导航；Plan info 继续用 `onOpenInfoSession`。只投影当前 watched plan session 所属 issue 的完成事实、按稳定 key 去重；不把 attempt id 当 session id，不进 countedInbox/选择/批量。
 
-- [ ] **Step 1: 写失败测试。** `useWorkspaceSessionObservers.test.tsx` 已有 dependency injection `getIssueLifecycle`，注入同 key 两轮与等待→Completed；断言：
+- [x] **Step 1: 写失败测试。** `useWorkspaceSessionObservers.test.tsx` 已有 dependency injection `getIssueLifecycle`，注入同 key 两轮与等待→Completed；断言：
 
   ```tsx
   it("shows one final-confirm info without increasing actionable count", async () => {
@@ -756,8 +758,8 @@ pub fn issue_coding_final_confirm_info(paths: &ProductAppPaths,
   ```
 
   `renderObserverHook(observerOptions({getIssueLifecycle: async () => (...) }))` 为该测试文件现有 helper；`summary("s1")` 的 issue_id=`issue_1` 与内建 listProductIssues 的 project_id=`project_1` 匹配，不另造不存在的 render helper。路由测试点击 info 按钮后断言 `/workbench/projects/project_1/issues/issue_1/coding/coding_attempt_001`（`web/src/router.test.tsx:259-260` 与 `IssueLifecycleWorkbenchParts.tsx:563-564` 已有此 scoped 路由），Completed 后同 key 显示「已最终确认」、不出现第二 toast，Plan info 仍走原会话目标。
-- [ ] **Step 2: 验证红灯。** `pnpm -C web exec vitest run src/hooks/useWorkspaceSessionObservers.test.tsx src/pages/ChatCockpitPage.inbox.test.tsx src/router.test.tsx`，预期不存在 coding 信息投影/下钻。
-- [ ] **Step 3: 最小实现。** TS 生命周期类型 additive optional，目录刷新沿现有 `planConfirmedInfos` 收集 codingInfos；用 watched session 的 `projectId/issueId` 索引过滤（从对应 issue lifecycle 的 workspace_sessions 获取，不按 coding attempt id 伪造 `sessionId`），dedup key；只往 `inbox` 加，`countedInbox` 不加。新 row 类型 `codingInfo` 并用独立 `onOpenInfoCoding`，`CockpitShell` 现有 `knownInfoKeysRef` 按 `item.id` 只提醒新增 key、同 key Completed 改文案不再 toast；导航回调来自现有 `router.tsx` coding route，而非当前只传 `onOpenSession` 的 plan callback：
+- [x] **Step 2: 验证红灯。** `pnpm -C web exec vitest run src/hooks/useWorkspaceSessionObservers.test.tsx src/pages/ChatCockpitPage.inbox.test.tsx src/router.test.tsx`，预期不存在 coding 信息投影/下钻。
+- [x] **Step 3: 最小实现。** TS 生命周期类型 additive optional，目录刷新沿现有 `planConfirmedInfos` 收集 codingInfos；用 watched session 的 `projectId/issueId` 索引过滤（从对应 issue lifecycle 的 workspace_sessions 获取，不按 coding attempt id 伪造 `sessionId`），dedup key；只往 `inbox` 加，`countedInbox` 不加。新 row 类型 `codingInfo` 并用独立 `onOpenInfoCoding`，`CockpitShell` 现有 `knownInfoKeysRef` 按 `item.id` 只提醒新增 key、同 key Completed 改文案不再 toast；导航回调来自现有 `router.tsx` coding route，而非当前只传 `onOpenSession` 的 plan callback：
 
   ```tsx
   {item.kind === "info" && item.codingInfo && onOpenInfoCoding ? (
@@ -770,8 +772,8 @@ pub fn issue_coding_final_confirm_info(paths: &ProductAppPaths,
   ```
 
   当用户尚未人工确认，标题不得称「已完成全部交付」；真正整组 all delivered 若需额外展示，只用后端现有 `PlanGroupOverall::AllDelivered`，本任务不新增第二通知。
-- [ ] **Step 4: 验证绿灯。** 重跑 Step 2，加 `pnpm -C web exec vitest run src/components/cockpit/CockpitShell.test.tsx`；保证 info 不改角标、toast 同键一次、Coding Workspace 点击实际 navigate。
-- [ ] **Step 5: 提交。** `git add web/src/api/types/lifecycle.ts web/src/hooks/useWorkspaceSessionObservers.ts web/src/hooks/useWorkspaceSessionObservers.test.tsx web/src/state/workspace-cockpit-projection.ts web/src/components/chat-workspace/cockpit/CockpitInbox.tsx web/src/pages/ChatCockpitPage.tsx web/src/pages/ChatWorkspacePage.tsx web/src/pages/ChatCockpitPage.inbox.test.tsx web/src/components/cockpit/CockpitShell.test.tsx web/src/router.tsx web/src/router.test.tsx && git commit -m "feat: show coding final-confirm info with attempt navigation"`。
+- [x] **Step 4: 验证绿灯。** 重跑 Step 2，加 `pnpm -C web exec vitest run src/components/cockpit/CockpitShell.test.tsx`；保证 info 不改角标、toast 同键一次、Coding Workspace 点击实际 navigate。
+- [x] **Step 5: 提交。** `git add web/src/api/types/lifecycle.ts web/src/hooks/useWorkspaceSessionObservers.ts web/src/hooks/useWorkspaceSessionObservers.test.tsx web/src/state/workspace-cockpit-projection.ts web/src/components/chat-workspace/cockpit/CockpitInbox.tsx web/src/pages/ChatCockpitPage.tsx web/src/pages/ChatWorkspacePage.tsx web/src/pages/ChatCockpitPage.inbox.test.tsx web/src/components/cockpit/CockpitShell.test.tsx web/src/router.tsx web/src/router.test.tsx && git commit -m "feat: show coding final-confirm info with attempt navigation"`。
 
 ## Task 10：3.4 P2 双清单关闸、部署真实链实证
 
@@ -779,7 +781,7 @@ pub fn issue_coding_final_confirm_info(paths: &ProductAppPaths,
 
 **Interfaces:** 只消费 Task 0.1–9；不新增生产契约。替身 checklist 与真实链 checklist **分别**列样本 issue/plan/attempt、状态前后、provider start ledger、journal/claim/runner 数、REST 回执与 FinalConfirm 人工动作；前置 GAP-F/H 失败时不可拿 legacy/manual/Fake 替代 enrolled 真链。
 
-- [ ] **Step 1: 写最后一条跨层行为测试。** 使用已有 `EnrolledGateFixture` + Task 4 Ready fixture（测试 helper 在 `src/web/wiga_gate_fixture.rs` 完整定义），无页面运行两轮 reconcile，停于 coding choice 和人工 FinalConfirm，对照非 enrolled issue：
+- [x] **Step 1: 写最后一条跨层行为测试。** 使用已有 `EnrolledGateFixture` + Task 4 Ready fixture（测试 helper 在 `src/web/wiga_gate_fixture.rs` 完整定义），无页面运行两轮 reconcile，停于 coding choice 和人工 FinalConfirm，对照非 enrolled issue：
 
   ```rust
   #[tokio::test]
@@ -799,8 +801,8 @@ pub fn issue_coding_final_confirm_info(paths: &ProductAppPaths,
   ```
 
   `p2_enrolled_campaign_fixture` 在此测试任务**完整实现**，串起现有 `EnrolledGateFixture` 人工 approve、Task 1 Ready、Task 4 StartCoding、fake provider 真实 runner、P0 coding choice waiter 与原 `handle_final_confirm`；控制器只能人手调用 confirm，不以直接文件 status mutation 冒充完成；非 enrolled issue 使用 `OrchestratorFixture` 的手工 issue fixture 对照。补 503 失败分诊与 Fake 完成两份不同证据，避免一条 happy path 覆盖多行同义断言。
-- [ ] **Step 2: 验证红灯。** `cargo test --locked --lib p2_campaign_requires_human_final_confirm_after_socketless_run -- --nocapture`，先观察真实业务失败/缺条件（不能只因 helper 不存在称红灯）。
-- [ ] **Step 3: 修最小跨层断点。** 只修本测试揭露的已有接口错接/顺序竞态；如揭露新范围或要修改 OpenSpec 的准入/人工门语义，停止并请主控先更新契约，再更新本计划。测试场景写入 campaign fixture 的真正 helper，例如：
+- [x] **Step 2: 验证红灯。** `cargo test --locked --lib p2_campaign_requires_human_final_confirm_after_socketless_run -- --nocapture`，先观察真实业务失败/缺条件（不能只因 helper 不存在称红灯）。
+- [x] **Step 3: 修最小跨层断点。** 只修本测试揭露的已有接口错接/顺序竞态；如揭露新范围或要修改 OpenSpec 的准入/人工门语义，停止并请主控先更新契约，再更新本计划。测试场景写入 campaign fixture 的真正 helper，例如：
 
   ```rust
   async fn reconcile_until_coding_waiting_for_human(&self) {
@@ -814,7 +816,7 @@ pub fn issue_coding_final_confirm_info(paths: &ProductAppPaths,
   ```
 
   不从 Step 3 新增生产兜底模式，也不回退 GAP-F 静态白名单；真实链 server 部署用现有项目部署流程/`aria-dev-v48q`，记录发布产物 revision 与服务进程版本一致。
-- [ ] **Step 4: 验证绿灯与双清单。** **替身**：定向运行本测试及 Tasks 0–9 所列测试；逐项截图/记录 Ready+精确授权、手工/自动同 attempt 并发、journal/barrier 中窗、disable/reopen、Failed/Aborted 和旧 attempt、多 target 无任何 sibling 自动 claim、零 socket choice 完整答案/真实 waiter 回执、amendment Unsent→真写 Delivered、零 socket resume、慢 observer 不反压、FinalConfirm 前一次通知与 0 计数/人工 Completed。**真实 provider/人工链（不可用 Fake 替代）**：部署本 worktree 同版产物至运行的 `aria-dev-v48q`，人工批准绑定 plan 后*不打开 coding 页*等后台独立 advance+首启；关闭全部 workspace/coding 订阅，实际覆盖一次 coding choice 的 REST 200/202→Delivered、一次人工确认 amendment→零 socket Unsent→重开真写 Delivered、一次重启后的已认领 run 续接；观察 FinalConfirm 等待时 info 出现/0 待处理增量，人手最终确认后 durable Completed；对照默认 off 和手工多 target；所有 provider 帐号/gateway 503 仅诊断+人手重驱。若环境仍 503 或 GAP-A/B/C/D/LC 阻断，逐条记阻断和已完成的替身证据，**不得勾 3.4 或声称真实链通过**。
+- [x] **Step 4: 验证绿灯与双清单。** **替身**：定向运行本测试及 Tasks 0–9 所列测试；逐项截图/记录 Ready+精确授权、手工/自动同 attempt 并发、journal/barrier 中窗、disable/reopen、Failed/Aborted 和旧 attempt、多 target 无任何 sibling 自动 claim、零 socket choice 完整答案/真实 waiter 回执、amendment Unsent→真写 Delivered、零 socket resume、慢 observer 不反压、FinalConfirm 前一次通知与 0 计数/人工 Completed。**真实 provider/人工链（不可用 Fake 替代）**：部署本 worktree 同版产物至运行的 `aria-dev-v48q`，人工批准绑定 plan 后*不打开 coding 页*等后台独立 advance+首启；关闭全部 workspace/coding 订阅，实际覆盖一次 coding choice 的 REST 200/202→Delivered、一次人工确认 amendment→零 socket Unsent→重开真写 Delivered、一次重启后的已认领 run 续接；观察 FinalConfirm 等待时 info 出现/0 待处理增量，人手最终确认后 durable Completed；对照默认 off 和手工多 target；所有 provider 帐号/gateway 503 仅诊断+人手重驱。若环境仍 503 或 GAP-A/B/C/D/LC 阻断，逐条记阻断和已完成的替身证据，**不得勾 3.4 或声称真实链通过**。
 
 > **实施记录（2026-09-27，Task 10 关闸——Main 裁决：3.1-3.3 勾选、3.4 留白待网关）**
 > - 替身面全绿：campaign 双测试（`p2_campaign_requires_human_final_confirm_after_socketless_run`
@@ -846,7 +848,7 @@ pub fn issue_coding_final_confirm_info(paths: &ProductAppPaths,
 > - 证据流：/tmp/p2_evidence.jsonl（曾因工具误用覆盖，按 durable 重建并留
 >   `p2_journal_incident` 如实登记）；全量验证：web 197 文件/1940 测试绿一次；
 >   cargo 全量待行数守卫拆分（另 worker 在提交）落地后复跑。
-- [ ] **Step 5: 提交关闸证据。** 只在上述双清单实证后勾 §3.1–3.4、记录精确命令/服务器版本/实际状态与日志引用：`git add openspec/changes/work-item-group-autopilot/tasks.md cadence/plans/2026-09-27_实施计划_WIGAutopilot_P2后台coding链_v1.0.md src/web/autopilot_orchestrator.rs src/web/coding_ws_handler/tests src/web/workspace_ws_handler/tests/plan_repair_activation.rs web/src/pages/ChatCockpitPage.inbox.test.tsx && git commit -m "test: gate WIG autopilot P2 fake and real chains"`；真实链未通过时仅提交仍未勾选的测试/失败证据，不伪造关闸状态。
+- [x] **Step 5: 提交关闸证据。** 只在上述双清单实证后勾 §3.1–3.4、记录精确命令/服务器版本/实际状态与日志引用：`git add openspec/changes/work-item-group-autopilot/tasks.md cadence/plans/2026-09-27_实施计划_WIGAutopilot_P2后台coding链_v1.0.md src/web/autopilot_orchestrator.rs src/web/coding_ws_handler/tests src/web/workspace_ws_handler/tests/plan_repair_activation.rs web/src/pages/ChatCockpitPage.inbox.test.tsx && git commit -m "test: gate WIG autopilot P2 fake and real chains"`；真实链未通过时仅提交仍未勾选的测试/失败证据，不伪造关闸状态。
 
 ---
 

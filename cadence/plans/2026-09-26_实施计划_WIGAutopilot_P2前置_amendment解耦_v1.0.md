@@ -1,5 +1,7 @@
 # WIG Autopilot P2 前置（线 B）amendment 解除 live socket 承重 Implementation Plan
 
+> **完成状态：已实施完成（2026-09-30 打标）：对应 change `work-item-group-autopilot` 已于 2026-09-28 归档（`openspec/changes/archive/2026-09-28-work-item-group-autopilot`），归档报告 `cadence/notes/2026-09-28_归档报告_WIG自动化与引导迭代_v1.0.md`。**
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 交付 tasks.md 3.2 中「解除 amendment 业务应用/恢复对 live coding socket/事件写回执的承重依赖」的前置拆解（REQ-WIGA-06）：业务 amendment 应用/恢复（journal→finalize→resume）在零 coding socket 时照常推进到 durable 检查点；观察投递独立记录真实未送达事实（Unsent/Pending），socket 重连或重复确认后按 durable 事实补投递，只有真实 socket 写 ack 才标 Delivered。本计划**不**实现 3.2 的其余部分（无人打开 Coding Workspace 的首启、已认领 run 恢复的 journal/barrier 中窗）——那些属线 A/C；本计划完成后 `tasks.md` 3.2 **不勾选**。
@@ -130,7 +132,7 @@ pub(crate) fn spawn_undelivered_amendment_redelivery(
 
 **Interfaces:** Consumes: `amendment_fixture()`（`tests/plan_amendment.rs:507-870`）、`load_or_prepare_plan_amendment_delivery`、`mark_plan_amendment_delivery_delivered`、`with_exclusive_lock`、`attempt_dir`。Produces: 统一接口块第一、二段符号。旧调用路径本轮不变更语义（现有写入仍只有 Pending/Delivered 两态）。
 
-- [ ] **Step 1: 写失败测试。** 在 `review_fix_delivery.rs` 尾部新增（沿用该文件既有的 marker_path 直读模式 L115-127）：
+- [x] **Step 1: 写失败测试。** 在 `review_fix_delivery.rs` 尾部新增（沿用该文件既有的 marker_path 直读模式 L115-127）：
   ```rust
   #[tokio::test]
   async fn coding_amendment_delivery_store_unsent_never_fakes_delivered() {
@@ -266,8 +268,8 @@ pub(crate) fn spawn_undelivered_amendment_redelivery(
       ));
   }
   ```
-- [ ] **Step 2: 红灯。** `cargo test --locked --lib coding_amendment_delivery_store -- --nocapture`；预期 `Unsent`/`mark_plan_amendment_delivery_unsent`/`list_plan_amendment_deliveries` 未定义、断言失败。
-- [ ] **Step 3: 最小实现。** ① `plan_repair.rs:105-110` 加 `Unsent` 变体与语义注释（统一接口块逐字）；② `amendment_delivery.rs` 在 `mark_plan_amendment_delivery_delivered` 后新增 `mark_plan_amendment_delivery_unsent`：`with_exclusive_lock(&path, ...)` 内 `read_json`→`validate_delivery`→event_id 比对→已 `Delivered` 原样返回→否则置 `Unsent`、`updated_at=now`（`delivered_at` 保持 `None`）、`write_json`；③ 新增 `list_plan_amendment_deliveries`：`validate_attempt_lineage`→目录不存在返回空 `Vec`、存在则逐文件 `read_json`+`validate_delivery`（任一不符即 `IdentityMismatch`）→按 `created_at`/`event_id` 排序返回；④ `validate_delivery` L194-197 状态守卫改为：`delivered_at.is_some() ⟺ status == Delivered`（即 `Pending|Unsent` 携带 `delivered_at` 或 `Delivered` 缺 `delivered_at` 均拒）。示意核心：
+- [x] **Step 2: 红灯。** `cargo test --locked --lib coding_amendment_delivery_store -- --nocapture`；预期 `Unsent`/`mark_plan_amendment_delivery_unsent`/`list_plan_amendment_deliveries` 未定义、断言失败。
+- [x] **Step 3: 最小实现。** ① `plan_repair.rs:105-110` 加 `Unsent` 变体与语义注释（统一接口块逐字）；② `amendment_delivery.rs` 在 `mark_plan_amendment_delivery_delivered` 后新增 `mark_plan_amendment_delivery_unsent`：`with_exclusive_lock(&path, ...)` 内 `read_json`→`validate_delivery`→event_id 比对→已 `Delivered` 原样返回→否则置 `Unsent`、`updated_at=now`（`delivered_at` 保持 `None`）、`write_json`；③ 新增 `list_plan_amendment_deliveries`：`validate_attempt_lineage`→目录不存在返回空 `Vec`、存在则逐文件 `read_json`+`validate_delivery`（任一不符即 `IdentityMismatch`）→按 `created_at`/`event_id` 排序返回；④ `validate_delivery` L194-197 状态守卫改为：`delivered_at.is_some() ⟺ status == Delivered`（即 `Pending|Unsent` 携带 `delivered_at` 或 `Delivered` 缺 `delivered_at` 均拒）。示意核心：
   ```rust
   if /* ...既有身份比对不变... */ ||
       (delivery.delivered_at.is_some()
@@ -276,8 +278,8 @@ pub(crate) fn spawn_undelivered_amendment_redelivery(
       return Err(identity_mismatch(amendment_id));
   }
   ```
-- [ ] **Step 4: 绿灯。** 同一过滤命令；再跑 `cargo test --locked --lib coding_amendment_delivery -- --nocapture` 确认既有 8 个用例零回归（旧路径仍只写 Pending/Delivered）。
-- [ ] **Step 5: 提交。** `git add src/product/coding_models/plan_repair.rs src/product/coding_attempt_store/amendment_delivery.rs src/product/coding_workspace_engine/tests/plan_amendment/review_fix_delivery.rs && git commit -m "feat: extend amendment delivery marker with unsent facts"`。
+- [x] **Step 4: 绿灯。** 同一过滤命令；再跑 `cargo test --locked --lib coding_amendment_delivery -- --nocapture` 确认既有 8 个用例零回归（旧路径仍只写 Pending/Delivered）。
+- [x] **Step 5: 提交。** `git add src/product/coding_models/plan_repair.rs src/product/coding_attempt_store/amendment_delivery.rs src/product/coding_workspace_engine/tests/plan_amendment/review_fix_delivery.rs && git commit -m "feat: extend amendment delivery marker with unsent facts"`。
 
 ## Task 2：引擎业务/观察解耦（apply 顺序翻转 + detached 观察任务）
 
@@ -285,7 +287,7 @@ pub(crate) fn spawn_undelivered_amendment_redelivery(
 
 **Interfaces:** Consumes: Task 1 全部符号、`register_plan_amendment_socket_write`/`wait_or_channel_closed`（`delivery_ack.rs:29-83`）、`CancellableCodingEventSender::{send, raw_sender}`（`types.rs:231-273`）、`self.cancellation`。Produces: 统一接口块第三段的 `deliver_plan_amendment_observation_once`/`spawn_plan_amendment_delivery_observation`/常量。删除 `reconcile_plan_amendment_delivery`（唯一调用点即本任务改写）。`current_amendment_journal_id` L266-302 与 `record_amendment_application_failure` L784 **不动**（前者仅在读到 Delivered 时把 Completed journal 视作可幂等重放，语义不变；后者从不再收到投递类错误，自然只记真实业务失败）。
 
-- [ ] **Step 1: 重写失败测试。** 对 `review_fix_delivery.rs` 做如下 re-pin（文件头部 import 增补 `use crate::product::coding_attempt_store::CodingAttemptStore;`，如缺）：
+- [x] **Step 1: 重写失败测试。** 对 `review_fix_delivery.rs` 做如下 re-pin（文件头部 import 增补 `use crate::product::coding_attempt_store::CodingAttemptStore;`，如缺）：
   - 新 helper（放 L512 `plan_amendment_event_id` 旁）：
     ```rust
     async fn poll_delivery_status(
@@ -400,8 +402,8 @@ pub(crate) fn spawn_undelivered_amendment_redelivery(
         .await;
     }
     ```
-- [ ] **Step 2: 红灯。** `cargo test --locked --lib coding_amendment_delivery -- --nocapture`；预期新语义断言（apply Ok/Running、Unsent、`deliver_plan_amendment_observation_once` 未定义）失败。
-- [ ] **Step 3: 最小实现。** ① `amendment.rs` L644-677 重写为统一接口块的 `PLAN_AMENDMENT_DELIVERY_ACK_TIMEOUT` + `deliver_plan_amendment_observation_once` + `spawn_plan_amendment_delivery_observation`（骨架逐字按接口块；`Ok(Some(Ok(())))→mark_delivered`、`Ok(Some(Err(_)))|Err(_)(超时)→mark_unsent`、`Ok(None)(取消)→返回 load 时的现状`；`register` 失败按「他路在投」跳过发送返回现状）；② L419-441 顺序翻转：
+- [x] **Step 2: 红灯。** `cargo test --locked --lib coding_amendment_delivery -- --nocapture`；预期新语义断言（apply Ok/Running、Unsent、`deliver_plan_amendment_observation_once` 未定义）失败。
+- [x] **Step 3: 最小实现。** ① `amendment.rs` L644-677 重写为统一接口块的 `PLAN_AMENDMENT_DELIVERY_ACK_TIMEOUT` + `deliver_plan_amendment_observation_once` + `spawn_plan_amendment_delivery_observation`（骨架逐字按接口块；`Ok(Some(Ok(())))→mark_delivered`、`Ok(Some(Err(_)))|Err(_)(超时)→mark_unsent`、`Ok(None)(取消)→返回 load 时的现状`；`register` 失败按「他路在投」跳过发送返回现状）；② L419-441 顺序翻转：
   ```rust
   self.finalize_completed_amendment_application(attempt, manifest, &authority.plan, &authority.request)?;
   let resumed = self
@@ -419,8 +421,8 @@ pub(crate) fn spawn_undelivered_amendment_redelivery(
   self.spawn_plan_amendment_delivery_observation(attempt, manifest);
   Ok(resumed)
   ```
-- [ ] **Step 4: 绿灯。** 同一过滤命令（含 Task 1 store 用例）；注意本任务提交后 `src/web/workspace_ws_handler/tests/plan_repair_activation.rs` 与 campaign 矩阵/it_web 的旧语义用例预期转红，由 Task 3/5 收口——**不得**为使其变绿回退本任务语义。
-- [ ] **Step 5: 提交。** `git add src/product/coding_workspace_engine/amendment.rs src/product/coding_workspace_engine/tests/plan_amendment/review_fix_delivery.rs && git commit -m "feat: decouple amendment business resume from delivery acknowledgement"`。
+- [x] **Step 4: 绿灯。** 同一过滤命令（含 Task 1 store 用例）；注意本任务提交后 `src/web/workspace_ws_handler/tests/plan_repair_activation.rs` 与 campaign 矩阵/it_web 的旧语义用例预期转红，由 Task 3/5 收口——**不得**为使其变绿回退本任务语义。
+- [x] **Step 5: 提交。** `git add src/product/coding_workspace_engine/amendment.rs src/product/coding_workspace_engine/tests/plan_amendment/review_fix_delivery.rs && git commit -m "feat: decouple amendment business resume from delivery acknowledgement"`。
 
 ## Task 3：激活解除 live socket 承重 + engine 补投递 + 重复确认触发
 
@@ -428,7 +430,7 @@ pub(crate) fn spawn_undelivered_amendment_redelivery(
 
 **Interfaces:** Consumes: Task 1/2 全部符号、`state.coding_sockets.hub_sender`（`coding_socket_registry.rs:77-89`）、`state.coding_runs.{lock_attempt,runner_count,try_reserve_attempt}`、`spawn_plan_amendment_runner_reserved`、`WorkItemRevisionStore::{get_plan_lineage,get_amendment_manifest}`、`get_plan_binding`。Produces: `spawn_undelivered_amendment_redelivery` 与 `redeliver_undelivered_plan_amendments`（统一接口块）。删除 `hub_sender_if_live` 及其 doc（生产唯一调用方即本任务改写点）。
 
-- [ ] **Step 1: 写失败测试。**
+- [x] **Step 1: 写失败测试。**
   - 引擎层（`review_fix_delivery.rs` 尾部）：
     ```rust
     #[tokio::test]
@@ -647,10 +649,10 @@ pub(crate) fn spawn_undelivered_amendment_redelivery(
         );
     }
     ```
-- [ ] **Step 2: 红灯。** `cargo test --locked --lib coding_amendment_redelivery -- --nocapture`；`cargo test --locked --lib zero_socket_plan_amendment -- --nocapture`；`cargo test --locked --lib hub_zero_fanout -- --nocapture`。预期 `redeliver_undelivered_plan_amendments` 未定义、零 socket 激活被 `plan_amendment_coding_socket_unavailable` 拦截（resumed 轮询超时）、if_live 用例待删。
-- [ ] **Step 3: 最小实现。** ① `amendment.rs` 新增 `redeliver_undelivered_plan_amendments`（统一接口块逐字：list→跳过 Delivered→`get_amendment_manifest` 失败跳过→`plan.active_revision_id != manifest.new_plan_revision_id` 跳过→`deliver_plan_amendment_observation_once`，计数 Delivered）；② `delivery_ack.rs` 新增 `spawn_undelivered_amendment_redelivery`（接口块逐字）；③ `plan_repair_activation.rs`：L22-31 的 `hub_sender_if_live`+`ok_or_else(...)` 改为 `let event_tx = state.coding_sockets.hub_sender(&attempt_key);`（注释改述：REQ-WIGA-06 零 socket 也激活；hub 保活与清理规则见 `coding_socket_registry.rs:62-75`——零 socket 激活后若 runner 退出且无 socket 周期，hub entry 有界滞留、无正确性影响）；L19-21 early-return 分支（runner_count>0）在 `return Ok(())` 前调用 `spawn_undelivered_amendment_redelivery(coding_store, attempt, event_tx)`——`event_tx` 获取移到分支判断之前（对两分支共用）；④ `coding_socket_registry.rs` 删除 `hub_sender_if_live` L91-108。
-- [ ] **Step 4: 绿灯。** 上述三条过滤命令；复跑 `cargo test --locked --lib repeated_confirmation -- --nocapture`（既有用例经 early-return 补投递后应保持绿；首轮不再出现 `PLAN_AMENDMENT_ACTIVATION_FAILED`，如断言该错误则按新语义删改该断言）与 `cargo test --locked --lib coding_amendment -- --nocapture`。
-- [ ] **Step 5: 提交。** `git add src/product/coding_workspace_engine/amendment.rs src/web/coding_ws_handler/delivery_ack.rs src/web/workspace_ws_handler/plan_repair_activation.rs src/web/state/coding_socket_registry.rs src/product/coding_workspace_engine/tests/plan_amendment/review_fix_delivery.rs src/web/workspace_ws_handler/tests/plan_repair_activation.rs src/web/coding_ws_handler/tests/event_hub.rs && git commit -m "feat: activate published amendment without live coding socket"`。
+- [x] **Step 2: 红灯。** `cargo test --locked --lib coding_amendment_redelivery -- --nocapture`；`cargo test --locked --lib zero_socket_plan_amendment -- --nocapture`；`cargo test --locked --lib hub_zero_fanout -- --nocapture`。预期 `redeliver_undelivered_plan_amendments` 未定义、零 socket 激活被 `plan_amendment_coding_socket_unavailable` 拦截（resumed 轮询超时）、if_live 用例待删。
+- [x] **Step 3: 最小实现。** ① `amendment.rs` 新增 `redeliver_undelivered_plan_amendments`（统一接口块逐字：list→跳过 Delivered→`get_amendment_manifest` 失败跳过→`plan.active_revision_id != manifest.new_plan_revision_id` 跳过→`deliver_plan_amendment_observation_once`，计数 Delivered）；② `delivery_ack.rs` 新增 `spawn_undelivered_amendment_redelivery`（接口块逐字）；③ `plan_repair_activation.rs`：L22-31 的 `hub_sender_if_live`+`ok_or_else(...)` 改为 `let event_tx = state.coding_sockets.hub_sender(&attempt_key);`（注释改述：REQ-WIGA-06 零 socket 也激活；hub 保活与清理规则见 `coding_socket_registry.rs:62-75`——零 socket 激活后若 runner 退出且无 socket 周期，hub entry 有界滞留、无正确性影响）；L19-21 early-return 分支（runner_count>0）在 `return Ok(())` 前调用 `spawn_undelivered_amendment_redelivery(coding_store, attempt, event_tx)`——`event_tx` 获取移到分支判断之前（对两分支共用）；④ `coding_socket_registry.rs` 删除 `hub_sender_if_live` L91-108。
+- [x] **Step 4: 绿灯。** 上述三条过滤命令；复跑 `cargo test --locked --lib repeated_confirmation -- --nocapture`（既有用例经 early-return 补投递后应保持绿；首轮不再出现 `PLAN_AMENDMENT_ACTIVATION_FAILED`，如断言该错误则按新语义删改该断言）与 `cargo test --locked --lib coding_amendment -- --nocapture`。
+- [x] **Step 5: 提交。** `git add src/product/coding_workspace_engine/amendment.rs src/web/coding_ws_handler/delivery_ack.rs src/web/workspace_ws_handler/plan_repair_activation.rs src/web/state/coding_socket_registry.rs src/product/coding_workspace_engine/tests/plan_amendment/review_fix_delivery.rs src/web/workspace_ws_handler/tests/plan_repair_activation.rs src/web/coding_ws_handler/tests/event_hub.rs && git commit -m "feat: activate published amendment without live coding socket"`。
 
 ## Task 4：socket 重连补投递（attach 钩子）
 
@@ -658,7 +660,7 @@ pub(crate) fn spawn_undelivered_amendment_redelivery(
 
 **Interfaces:** Consumes: Task 3 `spawn_undelivered_amendment_redelivery`。Produces: attach 路径补投递接线；无新符号。
 
-- [ ] **Step 1: 写失败测试。** 在 Task 3 的 `zero_socket_plan_amendment_activation_resumes_attempt_with_unsent_delivery` 的 Unsent 断言之后、`child_ws.close()` 之前插入：
+- [x] **Step 1: 写失败测试。** 在 Task 3 的 `zero_socket_plan_amendment_activation_resumes_attempt_with_unsent_delivery` 的 Unsent 断言之后、`child_ws.close()` 之前插入：
   ```rust
   // 重连补投递（REQ-WIGA-06）：迟到的观察者收到同一 event，真实写 ack 后才 Delivered。
   let coding_url = format!(
@@ -688,8 +690,8 @@ pub(crate) fn spawn_undelivered_amendment_redelivery(
   assert!(delivered.delivered_at.is_some());
   coding_ws.close(None).await.ok();
   ```
-- [ ] **Step 2: 红灯。** `cargo test --locked --lib zero_socket_plan_amendment -- --nocapture`；预期 late-connect 段在 `receive_type(...)` 超时（无补投递触发）。
-- [ ] **Step 3: 最小实现。** `socket.rs` 在 L117-120 的 choice 补帧成功后插入（不内联 await，避免与主循环写结算互相等待）：
+- [x] **Step 2: 红灯。** `cargo test --locked --lib zero_socket_plan_amendment -- --nocapture`；预期 late-connect 段在 `receive_type(...)` 超时（无补投递触发）。
+- [x] **Step 3: 最小实现。** `socket.rs` 在 L117-120 的 choice 补帧成功后插入（不内联 await，避免与主循环写结算互相等待）：
   ```rust
   // REQ-WIGA-06：attach 补投递 durable 未送达的 plan amendment（快照/choice
   // 初帧先行，保持 wire 顺序；真实写 ack 才标 Delivered，失败仍 Unsent）。
@@ -700,8 +702,8 @@ pub(crate) fn spawn_undelivered_amendment_redelivery(
   );
   ```
   （`resumed_attempt` 即 L105 既有克隆；helper 内部 spawn，不阻塞 attach 主循环；快照与 choice 帧已于 L106-120 直写 socket，事件经 hub 在其后到达，顺序不变。）同步更新两处 doc 注释（Files 所列）。
-- [ ] **Step 4: 绿灯。** `cargo test --locked --lib zero_socket_plan_amendment -- --nocapture`；复跑 `cargo test --locked --lib plan_repair -- --nocapture`（覆盖 `coding_ws_handler/tests/plan_repair/*` attach/恢复/身份用例与 workspace 激活用例）与 `cargo test --locked --lib hub_ -- --nocapture`。
-- [ ] **Step 5: 提交。** `git add src/web/coding_ws_handler/socket.rs src/web/state/coding_socket_registry.rs src/web/coding_ws_handler/delivery_ack.rs src/web/workspace_ws_handler/tests/plan_repair_activation.rs && git commit -m "feat: redeliver undelivered amendments on coding socket attach"`。
+- [x] **Step 4: 绿灯。** `cargo test --locked --lib zero_socket_plan_amendment -- --nocapture`；复跑 `cargo test --locked --lib plan_repair -- --nocapture`（覆盖 `coding_ws_handler/tests/plan_repair/*` attach/恢复/身份用例与 workspace 激活用例）与 `cargo test --locked --lib hub_ -- --nocapture`。
+- [x] **Step 5: 提交。** `git add src/web/coding_ws_handler/socket.rs src/web/state/coding_socket_registry.rs src/web/coding_ws_handler/delivery_ack.rs src/web/workspace_ws_handler/tests/plan_repair_activation.rs && git commit -m "feat: redeliver undelivered amendments on coding socket attach"`。
 
 ## Task 5：矩阵/集成旧语义用例收口与全组复跑
 
@@ -709,14 +711,14 @@ pub(crate) fn spawn_undelivered_amendment_redelivery(
 
 **Interfaces:** Consumes: Task 1-4 全部语义。Produces: 旧「delivery 收口失败=业务失败」用例按 REQ-WIGA-06 re-pin；无新符号。
 
-- [ ] **Step 1: 写失败/重定向测试。**
+- [x] **Step 1: 写失败/重定向测试。**
   - `amendment_row.rs` 窗口 4（L565-675）re-pin：首轮（L601-608）由 `expect_err` 改为 `expect`（socket 写失败与 mark failpoint 两模式都**不再产生业务错误**）；L609-615 断言 `AmendmentApplyFailed` → 改 `Running`；L616-624 marker：`socket_write_failed` 模式期望 `Unsent`（`delivery_mark_crash` 模式仍 `Pending`，按 `socket_write_succeeds` 分支断言）；L643-647 `context == Open` → 改 `Applied`（业务已完整收口）；L648-653 `first_event_ids.len()==1` 保留。第二轮（L656-673）由 `recovered_engine.recover_plan_amendment(&failed)` 改为 `recovered_engine.redeliver_undelivered_plan_amendments(&failed)`（Running+Completed+未送达不再能经 `current_amendment_journal_id` 重选，见 `amendment.rs:277-293`——`delivered_current` 仅认 Delivered）；`recovered_event_ids == first_event_ids` 保留（同 event_id 恰一次）。
   - `assert_amendment_row_final_invariants`（L82-86 delivery 断言）与其调用点（L557、L673）：Delivered 断言改为有界轮询（2s timeout + `yield_now` 循环，同 `poll_delivery_status` 模式；该文件 fixture 自带 confirm 消费者，观察任务必达 Delivered）。
   - `part_04.rs` L142-145 与 L386-392：`Delivered` 直接断言改为 3s 有界轮询（两处 coding WS 均已连接并收到 `plan_amendment_updated`，写结算与 Delivered 落盘之间存在异步窗口）。
-- [ ] **Step 2: 红灯。** `cargo test --locked --lib campaign_stage3_recovery_matrix_amendment -- --nocapture`（若 Step 1 已先行改断言则先红后实现无生产改动，红因 Task 2 起语义翻转——本任务以「改完断言即绿」为准）；`cargo test --locked --test it_web web_work_item_plan_repair -- --nocapture`。
-- [ ] **Step 3: 最小实现。** 无生产代码改动；仅当 Step 1 断言与实际语义有出入时修断言本身（如 failpoint 模式下 marker 停 `Pending` 而非 `Unsent`——mark 在真实 ack 后被 failpoint 拦截）。**禁止**为实现绿灯改生产语义。
-- [ ] **Step 4: 绿灯（本计划关闸复跑清单）。** 依次：`cargo test --locked --lib coding_amendment -- --nocapture`；`cargo test --locked --lib plan_repair -- --nocapture`；`cargo test --locked --lib hub_ -- --nocapture`；`cargo test --locked --lib campaign_stage3 -- --nocapture`；`cargo test --locked --lib group_amendment -- --nocapture`（`tests/group_amendment_chain.rs:891-895` 恢复链零回归）；`cargo test --locked --test it_web web_work_item_plan_repair -- --nocapture`。全量套件仍由集成负责人统一执行。
-- [ ] **Step 5: 提交。** `git add src/web/workspace_ws_handler/tests/campaign_stage3_recovery_matrix/amendment_row.rs tests/it_web/web_work_item_plan_repair/part_04.rs && git commit -m "test: repin amendment recovery matrix for unsent delivery semantics"`。
+- [x] **Step 2: 红灯。** `cargo test --locked --lib campaign_stage3_recovery_matrix_amendment -- --nocapture`（若 Step 1 已先行改断言则先红后实现无生产改动，红因 Task 2 起语义翻转——本任务以「改完断言即绿」为准）；`cargo test --locked --test it_web web_work_item_plan_repair -- --nocapture`。
+- [x] **Step 3: 最小实现。** 无生产代码改动；仅当 Step 1 断言与实际语义有出入时修断言本身（如 failpoint 模式下 marker 停 `Pending` 而非 `Unsent`——mark 在真实 ack 后被 failpoint 拦截）。**禁止**为实现绿灯改生产语义。
+- [x] **Step 4: 绿灯（本计划关闸复跑清单）。** 依次：`cargo test --locked --lib coding_amendment -- --nocapture`；`cargo test --locked --lib plan_repair -- --nocapture`；`cargo test --locked --lib hub_ -- --nocapture`；`cargo test --locked --lib campaign_stage3 -- --nocapture`；`cargo test --locked --lib group_amendment -- --nocapture`（`tests/group_amendment_chain.rs:891-895` 恢复链零回归）；`cargo test --locked --test it_web web_work_item_plan_repair -- --nocapture`。全量套件仍由集成负责人统一执行。
+- [x] **Step 5: 提交。** `git add src/web/workspace_ws_handler/tests/campaign_stage3_recovery_matrix/amendment_row.rs tests/it_web/web_work_item_plan_repair/part_04.rs && git commit -m "test: repin amendment recovery matrix for unsent delivery semantics"`。
 
 ## 自审
 

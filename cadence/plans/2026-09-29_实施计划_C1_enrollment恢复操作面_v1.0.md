@@ -1,5 +1,7 @@
 # C1 Enrollment 恢复操作面实施计划
 
+> **完成状态：已实施完成（2026-09-30 打标）：对应 change `enrollment-recovery-surface` 已于 2026-09-30 归档（`openspec/changes/archive/2026-09-30-enrollment-recovery-surface`），终局关闸三轮予关闸（`cadence/reports/2026-09-30_终局关闸_缺口修复迭代验收_v1.0.md`），归档报告 `cadence/notes/2026-09-30_归档报告_缺口修复迭代_v1.0.md`。**
+
 > **For agentic workers:** REQUIRED SUB-SKILL: 使用 `subagent-driven-development`（推荐）或 `executing-plans` 逐任务实施。任务步骤使用 checkbox（`- [ ]`）跟踪；本计划只定义实现，不代表代码已经完成。
 
 **Goal：** 交付 `enrollment-recovery-surface`：以统一双载体 target、版本化 enrollment binding、候选门恢复、租约三态、Failed advance 显式 retry、existing/create 计划意图、compile child 精确绑定和 Cockpit 通知操作面，形成可观察的“错误→通知→人操作→原链自动续进”闭环，并满足 A07/A09/A12/A13。
@@ -263,21 +265,21 @@ pub struct C1InboxItem {
 - Consumes: 既有 `IssueAutomationEnrollment`、`EnrollmentSource`、`EnrollmentOptions`、`compare_and_set` 和 `with_current_enrollment_locked`。
 - Produces: `EnrollmentTarget`、`EnrollmentBindingIdentity`、`EnrollmentBindingHistory`、`EnrollmentRebindRequest`/`EnrollmentRebindResult` 以及 `IssueAutomationStore::rebind(...)`（参数含 project/issue/request，返回 result）。`IssueAutomationEnrollment` 新增 `#[serde(default)] pub binding_history: Option<EnrollmentBindingHistory>` 与 `#[serde(default)] pub command_ledger: Vec<EnrollmentCommandResult>`；command ledger 与 current/previous 一并写入 issue 下现有 `automation-enrollment.json`，同 `command_id` 同 payload replay、异 payload reject；旧 JSON 缺字段按 `None`/空列表读取。
 
-- [ ] **Step 1：写真实失败测试。** 在真实临时 `.aria` root 写 enrollment，断言：
+- [x] **Step 1：写真实失败测试。** 在真实临时 `.aria` root 写 enrollment，断言：
   - `SingleRepository { repository_id: "repo_physical_1" }` 序列化后仍是 physical id，读取后不生成 `logical_repository_id` 替身；逻辑 target 缺 `logical_codebase_id` 或 `logical_repository_id` 时拒绝。
   - 首次 rebind 以当前 `expected_policy_revision=1`、`expected_binding_version=1` 写入 `binding_version=2`，`previous` 保留版本 1 的完整 plan/session/source/target/provider；旧版本字段逐字相等。
   - 同 `command_id`＋同 payload 重放返回同一 `binding_version=2` 且 durable 文件只有一份当前版本；同 command 异 payload、旧 expected version、跨载体 target 均返回 Conflict/Rejected，`get` 读取的 current/previous 不变。
   - 缺失新字段的旧 enrollment JSON 反序列化为 disabled/off 或 Manual-compatible projection，不自动补 plan/session/binding。
 
-- [ ] **Step 2：运行定向命令确认红灯。**
+- [x] **Step 2：运行定向命令确认红灯。**
   `cargo test --locked --lib issue_automation_store_rebind_appends_version_and_is_idempotent -- --nocapture`
   预期：FAIL，缺少 `EnrollmentTarget`/`rebind` 或版本历史字段。
 
-- [ ] **Step 3：最小实现。** 在 enrollment 文件同一 exclusive lock 内重读 current，验证 enabled、expected policy/binding、command ledger（同键同 payload replay、同键异 payload reject）和 target union；append previous、递增 binding version、只写新的 current/command result。所有既有 Enable/Disable caller 保持原 CAS 语义，存量缺字段只按 off/Manual 读侧处理。不要创建 generation service、扫描旧 session 或覆盖旧 binding。
+- [x] **Step 3：最小实现。** 在 enrollment 文件同一 exclusive lock 内重读 current，验证 enabled、expected policy/binding、command ledger（同键同 payload replay、同键异 payload reject）和 target union；append previous、递增 binding version、只写新的 current/command result。所有既有 Enable/Disable caller 保持原 CAS 语义，存量缺字段只按 off/Manual 读侧处理。不要创建 generation service、扫描旧 session 或覆盖旧 binding。
 
-- [ ] **Step 4：运行定向命令确认绿灯。** 重跑 Step 2，并运行 `cargo test --locked --lib issue_automation_store_ -- --nocapture`；预期新增版本/CAS 测试 PASS，既有 enable/disable/concurrent tests PASS。
+- [x] **Step 4：运行定向命令确认绿灯。** 重跑 Step 2，并运行 `cargo test --locked --lib issue_automation_store_ -- --nocapture`；预期新增版本/CAS 测试 PASS，既有 enable/disable/concurrent tests PASS。
 
-- [ ] **Step 5：提交。**
+- [x] **Step 5：提交。**
   ```bash
   git add src/product/logical_codebase src/product/models/automation.rs src/product/models/mod.rs src/product/issue_automation_store.rs src/product/issue_automation_store/tests.rs src/product/coding_models/execution.rs
   git commit -m "feat: add versioned enrollment target bindings"
@@ -296,15 +298,15 @@ pub struct C1InboxItem {
 - Consumes: Task 1 的 `EnrollmentTarget`、`EnrollmentBindingIdentity`、`EnrollmentRebindRequest`/`Result`、`IssueAutomationStore::rebind`。
 - Produces: `POST /api/projects/{project_id}/issues/{issue_id}/automation-enrollment/rebind`；前端 `rebindAutomationEnrollment(...)`；所有 enrolled `AdvancePlanOrigin`/StartCoding/通知投影的当前 binding 预检。
 
-- [ ] **Step 1：写真实失败测试。** 通过 Axum router 和 fixture 发送真实 JSON：合法单仓 rebind 返回 200/current version 2；逻辑 target 缺一级、多个候选、plan/session 不属于 issue、source/provider 漂移或旧 expected version 返回 409/422，且读取 enrollment/old binding 不变；同 command 同 payload 重放不触发第二 wake/编排，异 payload reject。增加旧 generation 回执调用 `advance_plan`/typed `start_coding_once` 的 durable no-start 断言。
+- [x] **Step 1：写真实失败测试。** 通过 Axum router 和 fixture 发送真实 JSON：合法单仓 rebind 返回 200/current version 2；逻辑 target 缺一级、多个候选、plan/session 不属于 issue、source/provider 漂移或旧 expected version 返回 409/422，且读取 enrollment/old binding 不变；同 command 同 payload 重放不触发第二 wake/编排，异 payload reject。增加旧 generation 回执调用 `advance_plan`/typed `start_coding_once` 的 durable no-start 断言。
 
-- [ ] **Step 2：运行定向命令确认红灯。** `cargo test --locked --lib automation_enrollment_rebind_requires_current_binding -- --nocapture`；`pnpm -C web exec vitest run src/api/client.test.ts`。预期：FAIL，路由/DTO/客户端函数不存在，旧单仓 target 仍被 routing 拒绝或旧回执未校验 binding。
+- [x] **Step 2：运行定向命令确认红灯。** `cargo test --locked --lib automation_enrollment_rebind_requires_current_binding -- --nocapture`；`pnpm -C web exec vitest run src/api/client.test.ts`。预期：FAIL，路由/DTO/客户端函数不存在，旧单仓 target 仍被 routing 拒绝或旧回执未校验 binding。
 
-- [ ] **Step 3：最小实现。** REST 仅调用 Task 1 store 应用服务；先验证 issue/source/plan/session/target/provider 的精确身份，再带 expected policy/binding CAS。将 `automation_target`、`advance_plan`、`autopilot_orchestrator`、`plan_confirmed_info` 和 StartCoding enrolled preflight 改为读取当前 binding；不要从“最新 plan/session”恢复。前端 lifecycle DTO/client/按钮发送稳定 command_id 和完整 target/provider/source；保持 Enable 默认 off 和旧 Manual 路径。
+- [x] **Step 3：最小实现。** REST 仅调用 Task 1 store 应用服务；先验证 issue/source/plan/session/target/provider 的精确身份，再带 expected policy/binding CAS。将 `automation_target`、`advance_plan`、`autopilot_orchestrator`、`plan_confirmed_info` 和 StartCoding enrolled preflight 改为读取当前 binding；不要从“最新 plan/session”恢复。前端 lifecycle DTO/client/按钮发送稳定 command_id 和完整 target/provider/source；保持 Enable 默认 off 和旧 Manual 路径。
 
-- [ ] **Step 4：运行定向命令确认绿灯。** 重跑 Rust handler 测试、`cargo test --locked --lib advance_plan -- --nocapture`（经模块路径 `web::advance_plan::tests::*` 命中该文件全部测试）与 `pnpm -C web exec vitest run src/api/client.test.ts`；预期 REST、过期回执和客户端 payload 测试 PASS。
+- [x] **Step 4：运行定向命令确认绿灯。** 重跑 Rust handler 测试、`cargo test --locked --lib advance_plan -- --nocapture`（经模块路径 `web::advance_plan::tests::*` 命中该文件全部测试）与 `pnpm -C web exec vitest run src/api/client.test.ts`；预期 REST、过期回执和客户端 payload 测试 PASS。
 
-- [ ] **Step 5：提交。**
+- [x] **Step 5：提交。**
   ```bash
   git add src/web/types.rs src/web/handlers/automation_enrollment.rs src/web/handlers/automation_target.rs src/web/handlers/mod.rs src/web/app.rs src/web/advance_plan.rs src/web/autopilot_orchestrator.rs src/web/plan_confirmed_info.rs web/src/api/types/lifecycle.ts web/src/api/client.ts web/src/api/client.test.ts web/src/components/lifecycle/useIssueLifecycleGeneration.ts src/web/handlers/automation_enrollment_test_support.rs
   git commit -m "feat: expose enrollment rebind action"
@@ -322,15 +324,15 @@ pub struct C1InboxItem {
 **Interfaces：**
 - Produces: `load_current_enrollment_binding(...) -> Result<EnrollmentBindingIdentity, String>`（单一读取/校验 helper）；现有 prepare/advance/start/reconcile 只接受该 helper 的结果。
 
-- [ ] **Step 1：写真实失败测试。** fixture 先写当前 binding v1，再制造 v2；验证自动 reconcile/restart/new advance 每次重读 v2，v1 的 generation/advance/start 回执均 fail-closed，`CodingAttemptStore::list_attempts_for_issue` 数量不增加；当前 binding 对应的唯一 plan/session 才可继续。验证人工 `AdvancePlanOrigin::Manual` 不被 enrollment 自动升级。
+- [x] **Step 1：写真实失败测试。** fixture 先写当前 binding v1，再制造 v2；验证自动 reconcile/restart/new advance 每次重读 v2，v1 的 generation/advance/start 回执均 fail-closed，`CodingAttemptStore::list_attempts_for_issue` 数量不增加；当前 binding 对应的唯一 plan/session 才可继续。验证人工 `AdvancePlanOrigin::Manual` 不被 enrollment 自动升级。
 
-- [ ] **Step 2：运行定向命令确认红灯。** `cargo test --locked --lib enrolled_advance_reloads_current_binding_and_rejects_old_generation -- --nocapture`；预期：FAIL，当前 advance 仍只核对 policy_revision/plan/session 或按旧 logical 字段。
+- [x] **Step 2：运行定向命令确认红灯。** `cargo test --locked --lib enrolled_advance_reloads_current_binding_and_rejects_old_generation -- --nocapture`；预期：FAIL，当前 advance 仍只核对 policy_revision/plan/session 或按旧 logical 字段。
 
-- [ ] **Step 3：最小实现。** 在每次 prepare/advance/start/reconcile 前经同一 helper 重读 enrollment，核对 binding version、enrollment id、plan/session/source/provider/target；将 binding identity 传给既有 typed StartCoding，不新增 runner/provider 入口。仅在 confirmed+completed+Ready 等已有门满足时继续；Manual、人工门和 Final Confirm 不变。
+- [x] **Step 3：最小实现。** 在每次 prepare/advance/start/reconcile 前经同一 helper 重读 enrollment，核对 binding version、enrollment id、plan/session/source/provider/target；将 binding identity 传给既有 typed StartCoding，不新增 runner/provider 入口。仅在 confirmed+completed+Ready 等已有门满足时继续；Manual、人工门和 Final Confirm 不变。
 
-- [ ] **Step 4：运行定向命令确认绿灯。** 重跑 Step 2，运行 `cargo test --locked --lib start_coding -- --nocapture`（`src/web/coding_start.rs` 现有测试名为 `start_coding_*` 前缀）与 `cargo test --locked --lib enrolled_advance_rejects_identity_drift_and_disabled_enrollment -- --nocapture`（`src/web/advance_plan.rs` 既有身份漂移回归；`src/web/wiga_gate_fixture.rs` 是 fixture 模块、无 `#[test]`，不作过滤器）；预期无第二 attempt/provider start，旧回执拒绝。
+- [x] **Step 4：运行定向命令确认绿灯。** 重跑 Step 2，运行 `cargo test --locked --lib start_coding -- --nocapture`（`src/web/coding_start.rs` 现有测试名为 `start_coding_*` 前缀）与 `cargo test --locked --lib enrolled_advance_rejects_identity_drift_and_disabled_enrollment -- --nocapture`（`src/web/advance_plan.rs` 既有身份漂移回归；`src/web/wiga_gate_fixture.rs` 是 fixture 模块、无 `#[test]`，不作过滤器）；预期无第二 attempt/provider start，旧回执拒绝。
 
-- [ ] **Step 5：提交。**
+- [x] **Step 5：提交。**
   ```bash
   git add src/product/models/automation.rs src/product/issue_automation_store.rs src/web/handlers/lifecycle/plan_preparation.rs src/web/advance_plan.rs src/web/autopilot_orchestrator.rs src/web/coding_start.rs src/web/wiga_gate_fixture.rs
   git commit -m "fix: enforce current enrollment binding across autopilot"
@@ -355,15 +357,15 @@ pub struct C1InboxItem {
 - Consumes: `HumanGateSnapshot`、`HumanGateTurn`、`SourceRevisionRecord`/`WorkItemPlanSourceStore`、`recover_human_gate_turn`、既有 typed feedback/approve/abandon。
 - Produces: Task 1 binding 校验下的 `CandidateRecoveryAction`、`CandidateRecoveryRequest/Result`；`persist_candidate_snapshot_before_relay(...)` 和 `recover_candidate_gate(...)`；无完整 snapshot 时 `approve` 固定 fail-closed。
 
-- [ ] **Step 1：写真实失败测试。** 通过真实 LifecycleStore session 写入完整 candidate/source/budget/gate/diagnostics，再模拟 relay/WS consumer 不存在：重开 engine 后能读同一 snapshot，恢复请求返回 accepted，原 gate 仍可用既有 feedback/approve/abandon；同 command 重放不重复扣 budget/provider/turn。另写缺 snapshot/source/budget 的 durable session：Cockpit/REST 不可 approve，recovery/rebuild 可见，session phase/budget/provider ledger 不变；旧 gate/version 返回 conflict。
+- [x] **Step 1：写真实失败测试。** 通过真实 LifecycleStore session 写入完整 candidate/source/budget/gate/diagnostics，再模拟 relay/WS consumer 不存在：重开 engine 后能读同一 snapshot，恢复请求返回 accepted，原 gate 仍可用既有 feedback/approve/abandon；同 command 重放不重复扣 budget/provider/turn。另写缺 snapshot/source/budget 的 durable session：Cockpit/REST 不可 approve，recovery/rebuild 可见，session phase/budget/provider ledger 不变；旧 gate/version 返回 conflict。
 
-- [ ] **Step 2：运行定向命令确认红灯。** `cargo test --locked --lib orphaned_candidate_snapshot_requires_recovery_before_approve -- --nocapture`；预期：FAIL，缺少完整性判定/恢复动作，当前裸 approve 或无恢复入口。
+- [x] **Step 2：运行定向命令确认红灯。** `cargo test --locked --lib orphaned_candidate_snapshot_requires_recovery_before_approve -- --nocapture`；预期：FAIL，缺少完整性判定/恢复动作，当前裸 approve 或无恢复入口。
 
-- [ ] **Step 3：最小实现。** 在 relay/observer 之前用 session/gate/source store 的同一持久路径原子写 candidate 全文、source revision ref/hash、budget、gate id/version、diagnostics；恢复动作只恢复原 turn/phase或从权威 source/IR/report 重建，不新建候选权威、不扣预算、不启动 provider。REST/WS 均调用同一应用服务，携 command_id、expected gate/binding；通知投递失败仅靠 durable 补读。保留既有 typed feedback/approve/abandon 矩阵。
+- [x] **Step 3：最小实现。** 在 relay/observer 之前用 session/gate/source store 的同一持久路径原子写 candidate 全文、source revision ref/hash、budget、gate id/version、diagnostics；恢复动作只恢复原 turn/phase或从权威 source/IR/report 重建，不新建候选权威、不扣预算、不启动 provider。REST/WS 均调用同一应用服务，携 command_id、expected gate/binding；通知投递失败仅靠 durable 补读。保留既有 typed feedback/approve/abandon 矩阵。
 
-- [ ] **Step 4：运行定向命令确认绿灯。** 重跑 Step 2，运行 `cargo test --locked --lib conversational_gate_ -- --nocapture` 和 `cargo test --locked --lib campaign_stage3_recovery_matrix -- --nocapture`；预期 A07 场景证据完整、无裸 approve/重复 turn。
+- [x] **Step 4：运行定向命令确认绿灯。** 重跑 Step 2，运行 `cargo test --locked --lib conversational_gate_ -- --nocapture` 和 `cargo test --locked --lib campaign_stage3_recovery_matrix -- --nocapture`；预期 A07 场景证据完整、无裸 approve/重复 turn。
 
-- [ ] **Step 5：提交。**
+- [x] **Step 5：提交。**
   ```bash
   git add src/product/work_item_plan_policy/types.rs src/product/models/workspace.rs src/product/lifecycle_store/workspace.rs src/product/workspace_engine/conversational_gate.rs src/product/workspace_engine/conversational_gate_recovery.rs src/product/work_item_plan_source_store.rs src/web/types.rs src/web/handlers/workspace_human_action.rs src/web/app.rs src/product/workspace_engine/tests src/web/workspace_ws_handler/tests/campaign_stage3_recovery_matrix.rs
   git commit -m "feat: persist candidate gate recovery facts"
@@ -382,18 +384,18 @@ pub struct C1InboxItem {
 - Consumes: `CanonicalWorkItemContract`、`RequiredInputContract.provider_logical_work_item_id`、`depends_on`、`WorkItemWritePolicy`、`validate_plan_candidate_ir`。
 - Produces: Task 1 `WorkItemIntent`/`WorkItemIntentContract` 的 canonical contract fields；`validate_work_item_intent_contract(...) -> Result<(), Vec<CompilerDiagnostic>>`；diagnostic reason code `intent_undeclared`（未声明）与 `intent_unexecutable`（不能执行）。
 
-- [ ] **Step 1：写真实失败测试。** 用真实 plan source/IR/contract 编译：
+- [x] **Step 1：写真实失败测试。** 用真实 plan source/IR/contract 编译：
   - explicit `Create` + provider Work Item + dependency + allowed/exclusive scope + forbidden scope + target 可通过，保存后的 revision/binding 可读且保留意图；
   - provider 输出不存在路径但未声明 create 返回 `intent_undeclared`，进入 feedback/revision wait，不产生 work item/compile child；
   - 错 provider Work Item、缺 dependency、exclusive/forbidden scope 冲突、target 不符返回 `intent_unexecutable`，旧 findings/contract durable 不变。
 
-- [ ] **Step 2：运行定向命令确认红灯。** `cargo test --locked --lib work_item_plan_compiler::tests::c1_existing_create -- --nocapture`；预期：FAIL，canonical contract/grammar 尚无 intent 字段和 diagnostics。
+- [x] **Step 2：运行定向命令确认红灯。** `cargo test --locked --lib work_item_plan_compiler::tests::c1_existing_create -- --nocapture`；预期：FAIL，canonical contract/grammar 尚无 intent 字段和 diagnostics。
 
-- [ ] **Step 3：最小实现。** 用现有 canonical contract/IR/validation 链添加可选但在 C1 compile 路径必须显式的 intent contract；existing 解析授权目标后才通过，create 逐项校验 provider id、依赖闭包、target 和 scope，禁止从 git 基线推导授权。validator 把两类错误分开，写入既有 findings 并停到 feedback/revision，不清除既有 finding、不扩大 scope；旧缺字段数据走 Manual/旧路径但不被自动 enrollment 采用。
+- [x] **Step 3：最小实现。** 用现有 canonical contract/IR/validation 链添加可选但在 C1 compile 路径必须显式的 intent contract；existing 解析授权目标后才通过，create 逐项校验 provider id、依赖闭包、target 和 scope，禁止从 git 基线推导授权。validator 把两类错误分开，写入既有 findings 并停到 feedback/revision，不清除既有 finding、不扩大 scope；旧缺字段数据走 Manual/旧路径但不被自动 enrollment 采用。
 
-- [ ] **Step 4：运行定向命令确认绿灯。** 重跑 Step 2，运行 `cargo test --locked --lib full_lowering_validator -- --nocapture` 和 `cargo test --locked --lib blockers -- --nocapture`；预期合法 create 与四类反例 durable 断言 PASS。
+- [x] **Step 4：运行定向命令确认绿灯。** 重跑 Step 2，运行 `cargo test --locked --lib full_lowering_validator -- --nocapture` 和 `cargo test --locked --lib blockers -- --nocapture`；预期合法 create 与四类反例 durable 断言 PASS。
 
-- [ ] **Step 5：提交。**
+- [x] **Step 5：提交。**
   ```bash
   git add src/product/work_item_contract/model.rs src/product/work_item_plan_compiler src/product/work_item_revision_store src/product/workspace_engine/compile.rs web/src/api/types/work-item-plan.ts
   git commit -m "feat: validate explicit existing and create intents"
@@ -419,15 +421,15 @@ pub struct C1InboxItem {
 - Consumes: `IssueWorktreeLockLease`、`RepoWorktreeLockLease`、`try_acquire_issue_worktree_lock`/`try_acquire_repo_worktree_lock`、`CodingAttemptStatus::is_active`、attempt version/claim、`route_issue_shared_worktree`（`src/product/coding_workspace_engine/gates.rs:91-114`，`pub(crate)`）。
 - Produces: Task 1 identity 下 `LeaseDisposition::{ActiveWait,DeadNeedsTakeover,UnknownNeedsHuman}`、`LeaseDecision`、`LeaseTakeoverRequest`/`LeaseTakeoverResult`；`classify_worktree_lease(...)`；`confirm_takeover(LeaseTakeoverRequest) -> LeaseTakeoverResult`（expected binding/lease/attempt CAS；应用服务落在 `src/product/coding_workspace_engine/gates.rs`，与 `route_issue_shared_worktree` 同模块，在既有 worktree 文件锁与 attempt claim CAS 内写新 owner）；REST 新路由见 Files；迟到旧 owner 写入统一 IdentityMismatch。
 
-- [ ] **Step 1：写真实失败测试。** durable fixture 分别写：active owner/active attempt（返回 ActiveWait，通知等待且第二 `try_acquire` 不改变 owner/attempt）；terminal attempt 或已明确释放 owner（返回 DeadNeedsTakeover，未确认不能继续，确认后原子写新 owner）；缺 last activity/owner 证据或读失败（UnknownNeedsHuman，绝不抢占）。确认后用旧 lease/旧 binding 写 lock/attempt，断言 `IdentityMismatch` 且 current owner/attempt 不变；并发确认只有一个成功。
+- [x] **Step 1：写真实失败测试。** durable fixture 分别写：active owner/active attempt（返回 ActiveWait，通知等待且第二 `try_acquire` 不改变 owner/attempt）；terminal attempt 或已明确释放 owner（返回 DeadNeedsTakeover，未确认不能继续，确认后原子写新 owner）；缺 last activity/owner 证据或读失败（UnknownNeedsHuman，绝不抢占）。确认后用旧 lease/旧 binding 写 lock/attempt，断言 `IdentityMismatch` 且 current owner/attempt 不变；并发确认只有一个成功。
 
-- [ ] **Step 2：运行定向命令确认红灯。** `cargo test --locked --lib lease_disposition_active_dead_unknown_is_fail_closed -- --nocapture`；预期：FAIL，尚无三态分类和确认接管应用服务。
+- [x] **Step 2：运行定向命令确认红灯。** `cargo test --locked --lib lease_disposition_active_dead_unknown_is_fail_closed -- --nocapture`；预期：FAIL，尚无三态分类和确认接管应用服务。
 
-- [ ] **Step 3：最小实现。** 只从现有 lock record、attempt terminal/activity/status 和 journal 证据分类：活跃→通知等待；死亡→只产生 needs-confirm，确认时在既有文件锁/CAS 内写新的合法 owner；未知→停等/重新绑定提示。不得引入 epoch/fence/owner incarnation；禁止自动 takeover/重启 provider。所有 restart/recover/new advance 先重新分类再调用原 advance/StartCoding。新 REST takeover 路由仅是 `confirm_takeover` 应用服务的薄入口，不承载分类/判定逻辑。
+- [x] **Step 3：最小实现。** 只从现有 lock record、attempt terminal/activity/status 和 journal 证据分类：活跃→通知等待；死亡→只产生 needs-confirm，确认时在既有文件锁/CAS 内写新的合法 owner；未知→停等/重新绑定提示。不得引入 epoch/fence/owner incarnation；禁止自动 takeover/重启 provider。所有 restart/recover/new advance 先重新分类再调用原 advance/StartCoding。新 REST takeover 路由仅是 `confirm_takeover` 应用服务的薄入口，不承载分类/判定逻辑。
 
-- [ ] **Step 4：运行定向命令确认绿灯。** 重跑 Step 2，运行 `cargo test --locked --lib admission_ -- --nocapture` 与 `cargo test --locked --lib campaign_stage3_recovery_matrix -- --nocapture`；预期三态、并发、旧写拒绝 PASS。
+- [x] **Step 4：运行定向命令确认绿灯。** 重跑 Step 2，运行 `cargo test --locked --lib admission_ -- --nocapture` 与 `cargo test --locked --lib campaign_stage3_recovery_matrix -- --nocapture`；预期三态、并发、旧写拒绝 PASS。
 
-- [ ] **Step 5：提交。**
+- [x] **Step 5：提交。**
   ```bash
   git add src/product/lifecycle_store/worktree.rs src/product/coding_attempt_store/attempt.rs src/product/coding_attempt_store/group.rs src/product/coding_attempt_store/admission.rs src/product/coding_workspace_engine/gates.rs src/web/autopilot_orchestrator.rs src/web/advance_plan.rs src/web/coding_start.rs src/product/coding_attempt_store/admission_tests.rs src/web/workspace_ws_handler/tests/campaign_stage3_recovery_matrix.rs
   git commit -m "feat: classify enrollment lease recovery safely"
@@ -445,18 +447,18 @@ pub struct C1InboxItem {
 - Consumes: existing `AdvanceRecord`/`AdvanceInitializationJournal`、`AdvanceInitializationPhase`、`mark_advance_initialization_error`、`advance_initialization_phase`、Task 1 binding and Task 6 `LeaseDecision`。
 - Produces: Task 7 `RetryInitializationRequest`/`RetryInitializationRecord`/`RetryInitializationResult`；`AdvanceStore::create_retry_initialization(...)`（same command replay/异 payload conflict）；`retry_initialization(RetryInitializationRequest) -> Result<RetryInitializationResult, String>`——`RetryInitializationResult` 固定为 retry REST 路由的响应体，`NeedsHuman` 由 `state: OperationState` 承载（此时 `outcome=None`）；REST `POST /api/projects/{project_id}/issues/{issue_id}/work-item-plans/{plan_id}/advance/retry-initialization`。
 
-- [ ] **Step 1：写真实失败测试。** 注入现有 failpoint 使真实 advance record/journal 在 `JournalPrepared`、`AttemptPersisted` 或 `UnitsMaterialized` 后 Failed，保存 attempt id/checkpoint/error；调用 retry endpoint/service：
+- [x] **Step 1：写真实失败测试。** 注入现有 failpoint 使真实 advance record/journal 在 `JournalPrepared`、`AttemptPersisted` 或 `UnitsMaterialized` 后 Failed，保存 attempt id/checkpoint/error；调用 retry endpoint/service：
   - 同 binding/plan revision/target/attempt/checkpoint 写一条独立 retry record，原 `AdvanceRecord.status=Failed`、error、journal failure、created_at 保持不变，安全本地 prefix 续做同一 attempt 到 Ready；attempt 文件数量和 id 不变；
   - 普通 `advance` 同/异 command 返回原 Failed 和 error，不创建 retry/attempt/provider；
   - checkpoint/target/binding 过期拒绝且 durable 全不变；未知副作用未携 `confirm_unknown_side_effect` 时返回 `RetryInitializationResult { state: NeedsHuman, outcome: None }`，不重跑步骤；同 retry command 重放返回原 retry result。
 
-- [ ] **Step 2：运行定向命令确认红灯。** `cargo test --locked --lib retry_initialization_preserves_failed_record_and_attempt -- --nocapture`；预期：FAIL，只有原 record/journal，没有独立 retry action/record。
+- [x] **Step 2：运行定向命令确认红灯。** `cargo test --locked --lib retry_initialization_preserves_failed_record_and_attempt -- --nocapture`；预期：FAIL，只有原 record/journal，没有独立 retry action/record。
 
-- [ ] **Step 3：最小实现。** 在 `AdvanceStore` 同一 issue lock 下 append retry record，以 advance id、plan/revision、target、attempt、checkpoint、binding identity 作为不可变键；retry 仅调用现有 checkpoint continuation，不调用“重新创建 record/attempt”的普通入口。未知副作用 phase 必须先返回 NeedsHuman；用户确认后才进入既有安全恢复/重新绑定路径。普通 `handle_advance` 遇 Failed 保持 `Rejected/Replayed` 原事实，绝不 reset journal 或改 Failed 为 Ready。
+- [x] **Step 3：最小实现。** 在 `AdvanceStore` 同一 issue lock 下 append retry record，以 advance id、plan/revision、target、attempt、checkpoint、binding identity 作为不可变键；retry 仅调用现有 checkpoint continuation，不调用“重新创建 record/attempt”的普通入口。未知副作用 phase 必须先返回 NeedsHuman；用户确认后才进入既有安全恢复/重新绑定路径。普通 `handle_advance` 遇 Failed 保持 `Rejected/Replayed` 原事实，绝不 reset journal 或改 Failed 为 Ready。
 
-- [ ] **Step 4：运行定向命令确认绿灯。** 重跑 Step 2，运行 `cargo test --locked --lib advance_handler -- --nocapture` 和 `cargo test --locked --lib campaign_stage3_advance -- --nocapture`；预期原 Failed、retry record、同 attempt Ready 和普通 advance no-op 均 PASS。
+- [x] **Step 4：运行定向命令确认绿灯。** 重跑 Step 2，运行 `cargo test --locked --lib advance_handler -- --nocapture` 和 `cargo test --locked --lib campaign_stage3_advance -- --nocapture`；预期原 Failed、retry record、同 attempt Ready 和普通 advance no-op 均 PASS。
 
-- [ ] **Step 5：提交。**
+- [x] **Step 5：提交。**
   ```bash
   git add src/product/advance_store.rs src/product/workspace_engine/advance.rs src/product/workspace_engine/advance_split.rs src/web/advance_plan.rs src/web/types.rs src/web/handlers/mod.rs src/web/app.rs src/product/workspace_engine/tests/advance_handler.rs src/web/workspace_ws_handler/tests/campaign_stage3_advance.rs
   git commit -m "feat: add explicit advance initialization retry"
@@ -475,18 +477,18 @@ pub struct C1InboxItem {
 - Consumes: Task 1 `EnrollmentBindingIdentity`、Task 5 validated contract/provider intent、现有 `WorkItemRuntimeBinding`、`LifecycleStore::ensure_work_item_runtime_binding`。
 - Produces: `ChildBindingIdentity { plan_id, plan_revision_id, logical_work_item_id, work_item_revision_id, binding_version, enrollment_id, target }`；`match_compile_child(session, expected) -> bool`；`create_workspace_session` 的 additive binding identity 输入。
 
-- [ ] **Step 1：写真实失败测试。** 通过真实 finalizer fixture：
+- [x] **Step 1：写真实失败测试。** 通过真实 finalizer fixture：
   - 旧 child 仅 entity_id 相同但 plan/revision/work-item revision/binding v1 不同，当前 v2 compile 不复用，创建一个 v2 child；旧 child/session binding JSON 逐字段不变；
   - 当前四元身份＋binding identity 完全相同的 compile/replay 命中同一 child，不创建第二 session；
   - 任一 plan/revision/work-item/target/binding 不匹配时 fail-closed（不能静默复用，也不能清旧历史）。
 
-- [ ] **Step 2：运行定向命令确认红灯。** `cargo test --locked --lib finalizer_rejects_old_binding_child -- --nocapture`；预期：FAIL，当前 finalizer 按 entity_id 复用旧 child。
+- [x] **Step 2：运行定向命令确认红灯。** `cargo test --locked --lib finalizer_rejects_old_binding_child -- --nocapture`；预期：FAIL，当前 finalizer 按 entity_id 复用旧 child。
 
-- [ ] **Step 3：最小实现。** 先把 `ChildBindingIdentity` 作为 session/runtime binding 的 additive durable 字段写入，再在 `finalize_initial_plan_compile` 中按 plan id、plan revision id、logical work item id、work item revision id、当前 enrollment binding version/enrollment id/target 全匹配。零或仅旧 child 时创建新 child；多个精确匹配仍报 identity conflict；同代 ensure 保持幂等。旧 child 不迁移、不覆盖、不删除。
+- [x] **Step 3：最小实现。** 先把 `ChildBindingIdentity` 作为 session/runtime binding 的 additive durable 字段写入，再在 `finalize_initial_plan_compile` 中按 plan id、plan revision id、logical work item id、work item revision id、当前 enrollment binding version/enrollment id/target 全匹配。零或仅旧 child 时创建新 child；多个精确匹配仍报 identity conflict；同代 ensure 保持幂等。旧 child 不迁移、不覆盖、不删除。
 
-- [ ] **Step 4：运行定向命令确认绿灯。** 重跑 Step 2，运行 `cargo test --locked --lib work_item_plan_reviewer_prompt -- --nocapture`、`cargo test --locked --lib plan_repair_reviewer_orchestration -- --nocapture` 与 `cargo test --locked --lib plan_repair_real_prepare_review_publish -- --nocapture`（`part_03/part_11.rs`、`part_03/part_12.rs` 经 `include!` 展开进 `part_03` 模块，`part_03::part_11` 不是有效过滤器，须用实际测试函数名）；预期跨代新 child、同代 replay 和旧历史保留 PASS。
+- [x] **Step 4：运行定向命令确认绿灯。** 重跑 Step 2，运行 `cargo test --locked --lib work_item_plan_reviewer_prompt -- --nocapture`、`cargo test --locked --lib plan_repair_reviewer_orchestration -- --nocapture` 与 `cargo test --locked --lib plan_repair_real_prepare_review_publish -- --nocapture`（`part_03/part_11.rs`、`part_03/part_12.rs` 经 `include!` 展开进 `part_03` 模块，`part_03::part_11` 不是有效过滤器，须用实际测试函数名）；预期跨代新 child、同代 replay 和旧历史保留 PASS。
 
-- [ ] **Step 5：提交。**
+- [x] **Step 5：提交。**
   ```bash
   git add src/product/models/work_item_revision.rs src/product/lifecycle_store/inputs.rs src/product/models/workspace.rs src/product/lifecycle_store/workspace.rs src/product/workspace_engine/compile/finalizer.rs src/product/workspace_engine/tests/part_03/part_11.rs src/product/workspace_engine/tests/part_03/part_12.rs
   git commit -m "fix: bind compile children to current enrollment generation"
@@ -512,15 +514,15 @@ pub struct C1InboxItem {
 - Consumes: `C1InboxItem`/`OperationState`、candidate recovery、`LeaseTakeoverRequest`/`LeaseTakeoverResult`（Task 6 新 takeover 路由）、`RetryInitializationResult`（Task 7 retry 路由固定响应体，`NeedsHuman` 由 `state` 承载）、rebind REST contracts、既有 `CockpitInboxItem`、`CockpitActionFacade`、`postWorkspaceHumanAction`/`takeoverWorkspaceSession` patterns。
 - Produces: durable waiting projection `list_c1_waiting_items(...)`、C1 action result projection；Cockpit actions `rebind/switchGeneration`、`recoverCandidate`、`retryInitialization`、`confirmTakeover`，每个只调用对应 REST/application service（`confirmTakeover`→Task 6 新 lease takeover 路由；`retryInitialization`→Task 7 retry 路由，按 `RetryInitializationResult.state` 投影等待/结果），不在前端判定业务成功。
 
-- [ ] **Step 1：写真实失败测试。** 使用真实 fixture 先制造四类 durable waiting facts：孤儿 candidate、active/dead/unknown lease、Failed advance、intent undeclared/unexecutable、旧代 child；重开 router/页面后 inbox 必展示 reason、completed steps、target、plan/session/attempt/gate、possible side effect、可用按钮和下一阶段。点击按钮发送稳定 command_id；返回未知后同 command 重试只得到同一 durable result，旧/错 version 显示刷新/重新绑定，UI 不自行推进状态。前端测试断言按钮文本和 `requestJson` 的真实 URL/body，不只测 mock callback 次数。
+- [x] **Step 1：写真实失败测试。** 使用真实 fixture 先制造四类 durable waiting facts：孤儿 candidate、active/dead/unknown lease、Failed advance、intent undeclared/unexecutable、旧代 child；重开 router/页面后 inbox 必展示 reason、completed steps、target、plan/session/attempt/gate、possible side effect、可用按钮和下一阶段。点击按钮发送稳定 command_id；返回未知后同 command 重试只得到同一 durable result，旧/错 version 显示刷新/重新绑定，UI 不自行推进状态。前端测试断言按钮文本和 `requestJson` 的真实 URL/body，不只测 mock callback 次数。
 
-- [ ] **Step 2：运行定向命令确认红灯。** `cargo test --locked --lib c1_waiting_items_include_identity_and_actions -- --nocapture`；`pnpm -C web exec vitest run src/components/chat-workspace/cockpit/CockpitInbox.test.tsx src/pages/ChatCockpitPage.inbox.test.tsx`。预期：FAIL，尚无统一 C1 projection/action props/DTO。
+- [x] **Step 2：运行定向命令确认红灯。** `cargo test --locked --lib c1_waiting_items_include_identity_and_actions -- --nocapture`；`pnpm -C web exec vitest run src/components/chat-workspace/cockpit/CockpitInbox.test.tsx src/pages/ChatCockpitPage.inbox.test.tsx`。预期：FAIL，尚无统一 C1 projection/action props/DTO。
 
-- [ ] **Step 3：最小实现。** 从各既有 durable store 派生 waiting item，写入既有 inbox/system notification 投影；通知失败不影响业务事实，GET/页面 hydration 可补读。CockpitInbox 仅展示/触发 REST，`CockpitActionFacade` 添加 additive actions 并保留 `confirm/feedback/terminate/advance/confirmBatch/recoverCompile`；active gate、Final Confirm、Manual 仍按原矩阵拦截。动作成功后由 autopilot wake/reconcile 继续原链，失败/needs_human 显示真实状态和下一按钮。
+- [x] **Step 3：最小实现。** 从各既有 durable store 派生 waiting item，写入既有 inbox/system notification 投影；通知失败不影响业务事实，GET/页面 hydration 可补读。CockpitInbox 仅展示/触发 REST，`CockpitActionFacade` 添加 additive actions 并保留 `confirm/feedback/terminate/advance/confirmBatch/recoverCompile`；active gate、Final Confirm、Manual 仍按原矩阵拦截。动作成功后由 autopilot wake/reconcile 继续原链，失败/needs_human 显示真实状态和下一按钮。
 
-- [ ] **Step 4：运行定向命令确认绿灯。** 重跑 Step 2，运行 `pnpm -C web exec vitest run src/state/cockpit-action-routing.test.ts src/components/chat-workspace/cockpit/CockpitInbox.test.tsx`（若 action routing 测试并入既有页面测试，则运行实际承载该测试的文件）和 `cargo test --locked --lib campaign_stage3_recovery_matrix -- --nocapture`；预期 A07/A09/A12/A13 的通知→动作→durable 结果闭环 PASS。
+- [x] **Step 4：运行定向命令确认绿灯。** 重跑 Step 2，运行 `pnpm -C web exec vitest run src/state/cockpit-action-routing.test.ts src/components/chat-workspace/cockpit/CockpitInbox.test.tsx`（若 action routing 测试并入既有页面测试，则运行实际承载该测试的文件）和 `cargo test --locked --lib campaign_stage3_recovery_matrix -- --nocapture`；预期 A07/A09/A12/A13 的通知→动作→durable 结果闭环 PASS。
 
-- [ ] **Step 5：提交。**
+- [x] **Step 5：提交。**
   ```bash
   git add src/web/types.rs src/web/error.rs src/web/handlers src/web/autopilot_orchestrator.rs src/web/plan_confirmed_info.rs src/web/workspace_ws_handler/tests/campaign_stage3_recovery_matrix.rs web/src/state/workspace-cockpit-projection.ts web/src/state/cockpit-action-routing.ts web/src/components/chat-workspace/cockpit/CockpitInbox.tsx web/src/pages/ChatCockpitPage.tsx web/src/api/client.ts web/src/api/types/lifecycle.ts web/src/components/chat-workspace/cockpit/CockpitInbox.test.tsx web/src/pages/ChatCockpitPage.inbox.test.tsx
   git commit -m "feat: close C1 recovery actions in cockpit"
@@ -539,7 +541,7 @@ pub struct C1InboxItem {
 - Consumes: Tasks 1–9 全部契约；既有 `HumanActionRequest`、`StartCoding`、advance journal、gate/lease/child stores。
 - Produces: C1 定向验收测试/记录和兼容边界断言；不产生新生产接口。
 
-- [ ] **Step 1：写失败测试。** 用真实产品 fixture（不直接编辑权威 JSON 作为解法）覆盖：
+- [x] **Step 1：写失败测试。** 用真实产品 fixture（不直接编辑权威 JSON 作为解法）覆盖：
   1. A07：无 WS consumer/relay 失败→完整 snapshot durable→inbox 恢复/重建→既有 feedback/approve→自动继续，issue 不 abandon；
   2. A09：活 lease 等待、死 lease 用户确认 takeover、未知 lease 停等；Failed advance 显式 retry 到 Ready；原 Failed/attempt/审计保留、无第二 attempt/provider；
   3. A12：合法 create compile；未声明、错拼、缺依赖、forbidden/越权 create 分别停等/失败且不扩大 scope；
@@ -547,13 +549,13 @@ pub struct C1InboxItem {
   5. 兼容：缺新字段的 enrollment/child/session 按 off/Manual 解释；非 enrolled、Manual、人工 plan gate、Final Confirm 的旧测试仍观察原结果。
   每个断言读取真实 durable enrollment/history/session/source/gate/advance retry/attempt/lease/child/通知结果，而非只读 mock 回调或字段非空。
 
-- [ ] **Step 2：运行定向命令确认红灯。** `cargo test --locked --lib c1_a07_a09_a12_a13_recovery_surface -- --nocapture`；`pnpm -C web exec vitest run src/pages/ChatCockpitPage.inbox.test.tsx src/components/chat-workspace/cockpit/CockpitInbox.test.tsx`。预期：FAIL，综合链尚未覆盖全部 C1 action。
+- [x] **Step 2：运行定向命令确认红灯。** `cargo test --locked --lib c1_a07_a09_a12_a13_recovery_surface -- --nocapture`；`pnpm -C web exec vitest run src/pages/ChatCockpitPage.inbox.test.tsx src/components/chat-workspace/cockpit/CockpitInbox.test.tsx`。预期：FAIL，综合链尚未覆盖全部 C1 action。
 
-- [ ] **Step 3：最小实现。** 只补齐任务间 wiring、DTO/route 交叉引用和测试 fixture；若测试揭示接口冲突，回到负责 Task 的唯一契约修正并迁移所有 caller，不新增同义类型/旁路。保持 capability delta 与 C2/C4/C5 边界；不以修改测试期望、删除旧记录、重启服务或直接改 JSON 通过。
+- [x] **Step 3：最小实现。** 只补齐任务间 wiring、DTO/route 交叉引用和测试 fixture；若测试揭示接口冲突，回到负责 Task 的唯一契约修正并迁移所有 caller，不新增同义类型/旁路。保持 capability delta 与 C2/C4/C5 边界；不以修改测试期望、删除旧记录、重启服务或直接改 JSON 通过。
 
-- [ ] **Step 4：运行定向命令确认绿灯。** 重跑两条定向命令，逐行记录 A07/A09/A12/A13 的 durable IDs、错误→通知→command_id→结果→下一阶段证据；另运行受影响现有 scoped regression（各任务已有命令）和前端 Cockpit action tests。此任务只做定向 C1 复验，不在任务内运行项目级全量 build/lint/formatter。
+- [x] **Step 4：运行定向命令确认绿灯。** 重跑两条定向命令，逐行记录 A07/A09/A12/A13 的 durable IDs、错误→通知→command_id→结果→下一阶段证据；另运行受影响现有 scoped regression（各任务已有命令）和前端 Cockpit action tests。此任务只做定向 C1 复验，不在任务内运行项目级全量 build/lint/formatter。
 
-- [ ] **Step 5：提交。**
+- [x] **Step 5：提交。**
   ```bash
   # 仅添加本任务实际修改的 openspec 目录与 fixture/测试文件；禁止 git add src/product、src/web、web/src 整目录
   git add openspec/changes/enrollment-recovery-surface/specs openspec/changes/enrollment-recovery-surface/tasks.md src/web/wiga_gate_fixture.rs src/web/handlers/automation_enrollment_test_support.rs src/product/issue_automation_store/tests.rs src/product/coding_attempt_store/admission_tests.rs src/web/workspace_ws_handler/tests/campaign_stage3_recovery_matrix.rs src/web/workspace_ws_handler/tests/campaign_stage3_advance.rs web/src/components/chat-workspace/cockpit/CockpitInbox.test.tsx web/src/pages/ChatCockpitPage.inbox.test.tsx
