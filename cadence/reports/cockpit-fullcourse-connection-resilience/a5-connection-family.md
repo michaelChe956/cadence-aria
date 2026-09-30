@@ -120,3 +120,69 @@ cd <worktree> && ARIA_PROJECT_ID=project_0003 ARIA_REPOSITORY_ID=repository_0001
   ARIA_EXPECTED_FLOW_KIND=single_candidate ARIA_RUN_POLICY=interactive \
   node cadence/reports/workitem-coding-campaign/workitem_run_campaign.mjs pi 5 /tmp/a5_campaign2
 ```
+
+## 8. 第二段：③ 四种 close durable terminal reason + 回退读验证（2026-09-30，A5Seg2）
+
+载体全部在 project_0003（issue_0018–0023 / workspace_session_0097–0102），主服务器 aria-dev-v49a 未重启未扰动；日志证据窗 = `/tmp/aria-dev-v49a.log` 基线行 8129 之后。断连终态检查为**引擎字段级**（node_type=aborted_by_disconnect / 节点 summary 断连文案 / retry_reason 恢复 hint / last_active_run_id: stale-connection）——provider 流式内容会引用仓库文档文案，不作标记判据。
+
+### 8.1 ③ 五场景结论表
+
+| 场景 | 载体 | close 时在飞 run | 服务端归因（唯一） | run 结局（durable） | 会话终态 | 断连终态标记 |
+|---|---|---|---|---|---|---|
+| 前端 4000 | 0098/issue_0019 | ✓ 16 流块（run=1, depth=1, token=12） | `close_frame code=4000 reason=stale_socket_silence_sim idle=false`（08:12:50） | 首照跑完（结构化 gate 业务拒绝）→6 轮业务重跑全业务归因 failed→第 7 轮完成过门 | **confirmed** | 零命中 |
+| 卸载 1000 | 0099/issue_0020 | ✓ 16 流块（run=1, depth=1） | `close_frame code=1000 idle=false`（08:17:29） | 5412 流块续跑；首跑业务拒绝、二跑完成过门 | **confirmed** | 零命中 |
+| TCP drop | 0100/issue_0021 | ✓ 20 流块（FIN 无 close 帧，run=1, depth=1） | `eof close_code=null idle=false`（08:23:43） | 5600+ 流块续跑完成；**零 failed 节点** | **confirmed** | 零命中 |
+| server idle | 0101/issue_0022 | 静默 observer（hello 后零出站）全程挂载 215s/收 3240 流块 | `server_idle idle_timeout_triggered=true`（08:35:41 = 终态后精确 +90s；run 期被守卫阻止关闭） | 3240 流块，重跑后完成过门 | **confirmed** | 零命中 |
+| 反例：显式 abort | 0102/issue_0023 | ✓ 15 流块，driver 发 `{"type":"abort"}` | （无 close 归因诉求）`[aria-cancellation] ws_abort_message` → `provider_drive select_cancelled trigger=engine_cancelled_observed` | node_002 **Failed + summary「运行已中止」** | open（prepare_context 可重跑） | **显式取消终态照旧写入**（与断连标记互斥，符合 4.4「真实取消照旧」） |
+
+### 8.2 关键证据与代码面对照
+
+- **代码面钉子**：`append_aborted_by_disconnect`/`transition_to_prepare_context_after_disconnect`（lifecycle.rs:905/935，注释明示 REQ-WCR-03）唯一调用点 = `durable_projection.rs:163`（进程重启后的 stale run 诚实恢复链）；WS 连接关闭路径零调用——四场景 durable 零断连终态与代码契约一致。
+- **idle 守卫语义实证**：`workspace_idle_activity_guard` = `manager.is_active_run() || provider_drive_in_progress`（socket.rs:206）——run 期阻止一切 idle 关闭。0101 静默 observer 跨整个多 run 链存活 215s，最后服务端活性 = 08:34:11（终态事件），08:35:41 被关（=+90s 整）；归因 `server_idle + idle=true`，与「门等待期/终态后静默才关」的设计语义吻合（GAP-2 备忘同一语义）。
+- **加成证据（连接全灭 run 持续）**：0098 于 08:13:22 因驱动脚本死亡（仪器侧）全部连接消失（服务端记 eof），author run 在服务端继续跑完（08:17:53 provider completed + 业务 gate 判定）——session-owned run manager 的零连接存活面。
+- **接管与重放**：victim close 后 0.5s 内新 driver 重连即接管 lease；接管连接收到 journal 重放（provider_status seq=5/7）+ 积压 choice 补发并应答（0098 两个 choice_request 补发即答，run 继续）。
+- **supersede 照旧**：0098 全程 7 次 `[aria-cancellation] handler_run_supersede`（业务重跑/用户消息触发），全部显式触发、可归因——与 ③ 反例共同覆盖「显式 abort/supersede 仍照旧」。
+- **表述精度**（避免误读）：0098 有 6 个 failed author_run 节点，**全部业务 gate 阻断**（缺必需 heading / 待确认项未过 AskUserQuestion 交互，execution_events 的 blocking_reasons 可查）——不是"零 failed 节点"；零 failed 的是 0100。两者的 failed 均与连接关闭无关。
+- **流程口径备注**：本轮 story 会话经 plain `POST /confirm {confirmed_by}` 直接定稿（未触发评审接管），与 0081（「确认并评审」路径带 reviewer_run）为两条均合法的业务路径；③ 的断言对象（run 终态不被连接关闭改写）不受影响。
+
+### 8.3 回退读验证（旧二进制读新数据）
+
+- **旧版本选择**：`1b77cbff`（2026-09-17 19:22，P2 计划文档提交；= WP4.2 首个代码提交 `1a62d435`（session-owned manager）的直接父）——WP4.2/4.3/4.4/4.5（run/lease/close 语义/cursor+event_seq 广播）全部未落地。
+- **构建**：`git worktree add --detach /tmp/a5_oldbin 1b77cbff` + 从当前 worktree 复制 `web/dist` + `cargo build --locked`（OLD_BUILD_OK）。
+- **数据副本**：`cp -a .aria /tmp/a5_rb_seg2_data/.aria`（3156 文件，92M，含本轮 0097–0102 与 GAP-1 修复复跑的全部新数据；只拷不改原数据）；旧二进制以 `--workspace /tmp/a5_rb_seg2_data --port 4321` 隔离启动（主服务器 4317 全程未动）。
+- **读验证矩阵（全绿，零 500/零 panic/零误判）**：
+
+```text
+200 15B     /api/health
+200 1059B   /api/projects
+200 23367B  /api/projects/project_0003/issues            # 23 条，含本轮 issue_0018–0023
+200 11972B  /api/issues/issue_0019/lifecycle?project_id=project_0003   # workspace_sessions[0098]=confirmed
+200 161695B /api/workspace-sessions/workspace_session_0098/timeline-node-details/timeline_node_013
+200 24862B  /api/workspace-sessions/workspace_session_0102/timeline-node-details/timeline_node_002   # 显式取消终态正确读出
+200 3071B   /api/coding-attempts/coding_attempt_354713e9…（GAP-1 修复复跑的新 attempt）
+WS hello 0098 (driver)               → session_state completed/confirmed，15 节点全渲染
+WS hello 0102 (observer, after_event_seq=5 —— P2 新 wire 字段) → 首帧 session_state prepare_context/open 完整送达（旧版 serde 容忍未知字段；无 cursor 回放=预期降级，非断裂）
+```
+
+- **新增 durable 面容忍**：`degraded-diagnostics.jsonl`（含 `event_seq`/中性归因事件）、`lease-diagnostics.jsonl`、`.workspace_session_*.json.lock` 均为 P2 新增文件，旧二进制不读取不解析——加法面无断裂。
+- **写面发现（如实登记）**：纯读轮 3156 文件哈希前后对比，仅 2 个变化 = 被 WS hello 的会话记录（0098/0102）——**旧二进制 WS attach 路径会回写 session 记录**；REST 纯 GET 零写入。字段级复现（4322 迷你轮，hello 后 diff）：attach 写入面 = `messages`（旧版 attach 重准备 workspace context 消息）+ `provider_start_ledger`（按旧模型重投影幂等台账）+ `updated_at` bump——即回退期读不断裂，但客户端 attach 会在旧语义下改写会话记录（回退演练须知）；首轮污染轮同型（被探针连接的 0098/0100 恰为变化集）。
+- **平行旁证（A5Seg2B 初轮，污染前读数）**：7 个会话（0081/0093/0098–0101=completed/confirmed、0102=prepare_context/open）WS 回读全 ok；issue 详情 GET 405 为旧路由固有方法面（非 serde 断裂）。
+- **清理**：旧二进制已停（4321/4318 均释放）、`git worktree remove /tmp/a5_oldbin`、数据副本已删除；主仓根误启动产生的引导文件（.aria/schema.json 等 3 文件）已即时清除（16:01 事故，未触碰 worktree 真实数据面）。
+
+### 8.4 4.7 全矩阵汇总
+
+| 4.7 验证面 | 状态 | 证据 |
+|---|---|---|
+| ① intensive-throttling 隐藏 tab | ✅ | 本报告 §1 |
+| ② human-gate 静默 >60s | ✅ | §2 |
+| ③ 四种 close 唯一归因 + durable terminal reason 各自正确 | ✅ | §4（归因）+ §8.1（durable，本段） |
+| ④ driver+observer 多连接 | ✅ | §3 |
+| 回退读（旧二进制读新数据无断裂） | ✅ | §8.3（读面全绿；attach 回写 2 文件如实登记） |
+| 存量处置记录（4.1） | ✅ | defer-ledger.md §4.1（6/6 可诊断终态化） |
+| 1.3 readback 真实复跑 | ✅ 已收口 | GAP-1 已修复（`a732c44f`：requestJson/parseResponse 契约对齐+hoist/finally 收尾，根因为契约不一致非 TDZ 崩溃）；issue_0017/session_0093/attempt 354713e9… 复跑 stage3_group_snapshot_readback 零错（证据 `/tmp/a5_gap1_campaign2/pi/rep6/`，70/70 测试绿） |
+
+### 8.5 过程登记
+
+- **双派工碰撞披露**：Main 曾误判本 agent 中断而派 A5Seg2B 续作同任务；其 probe 流量（close reason "probe-done"）打入我在 4318 的旧二进制服务器，导致首轮隔离副本中 0098/0100 两个会话记录被写入（写入源自 B 的探针触达旧服 attach 面，非旧二进制自发现）。首轮副本按裁决弃用，全部结论以 `/tmp/a5_rb_seg2_data`+4321 干净轮为准；B 已终止，其残留 `/tmp/a5_rollback_read.*` 由 Main 处置。
+- **红线自查**：零直写真实数据（全程产品 API/WS + 隔离副本两轮）；主服务器 aria-dev-v49a 未停未重启（另一 worker campaign 并行无冲突）；载体全部 project_0003。
+- **脚本产物**（/tmp，供复核）：`a5_seg2_run.mjs`（五场景驱动）、`a5_seg2_adopt.mjs`/`a5_seg2_idlepair.mjs`（接管/idle 配对）、`a5_seg2_verify.py`（durable 引擎字段级校验）；证据日志 `a5_seg2_*.log`、哈希清单 `a5_rb_seg2_{pre,post}.sha`。
