@@ -36,12 +36,16 @@ use cadence_aria::product::coding_models::{
     CodingAttemptStatus, CodingExecutionStage, CodingGateKind,
 };
 use cadence_aria::product::issue_store::{CreateProductIssueInput, IssueStore};
-use cadence_aria::product::lifecycle_store::{CreateWorkItemInput, LifecycleStore};
+use cadence_aria::product::lifecycle_store::{
+    CreateWorkItemInput, CreateWorkspaceSessionInput, LifecycleStore,
+};
 use cadence_aria::product::logical_codebase::{
     IdentityMigrationExecutor, IssueCodebaseSelection, IssueCodebaseSelectionStore,
     LogicalCodebaseStore, LogicalRepositoryId,
 };
-use cadence_aria::product::models::{IssueStatus, ProviderName, WorkItemPlanStatus};
+use cadence_aria::product::models::{
+    IssueStatus, ProviderName, WorkItemPlanStatus, WorkspaceSessionStatus, WorkspaceType,
+};
 use cadence_aria::product::project_store::{CreateProjectInput, ProjectStore};
 use cadence_aria::product::repository_store::{CreateRepositoryInput, RepositoryStore};
 use cadence_aria::protocol::contracts::{AdapterInput, AdapterOutput, AdapterRole, TimeoutStatus};
@@ -130,7 +134,8 @@ struct DeliveryFixture {
     _root: TempDir,
     app: axum::Router,
     store: CodingAttemptStore,
-    attempt_ids: Vec<String>,
+    work_item_ids: Vec<String>,
+    first_attempt_id: String,
 }
 
 /// 交付全链 fixture 构建器。
@@ -202,6 +207,26 @@ async fn build_delivery_fixture(
                 ..Default::default()
             })
             .expect("create work item");
+        // C2 Task 5（REQ-CRO-05）：无会话时 reviewer 空 effective 会在
+        // CodeReview 阶段落 reviewer_configuration_missing 停等门；交付链
+        // fixture 必须为每个 WorkItem 配置 Confirmed 会话（含 reviewer）。
+        let session = lifecycle
+            .create_workspace_session(CreateWorkspaceSessionInput {
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                entity_id: work_item_id.to_string(),
+                workspace_type: WorkspaceType::WorkItem,
+                author_provider: ProviderName::ClaudeCode,
+                reviewer_provider: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+                superpowers_enabled: false,
+                openspec_enabled: false,
+                work_item_plan_options: None,
+            })
+            .expect("create work item session");
+        lifecycle
+            .update_workspace_session_status(&session.id, WorkspaceSessionStatus::Confirmed)
+            .expect("confirm work item session");
     }
 
     if migrate {
@@ -256,30 +281,48 @@ async fn build_delivery_fixture(
     )));
     let app = build_web_router(state);
 
-    let mut attempt_ids = Vec::new();
-    for work_item_id in work_item_ids {
-        let (status, body) = crate::web_coding_attempt_api::request_json(
-            app.clone(),
-            Method::POST,
-            &format!(
-                "/api/projects/{PROJECT_ID}/issues/{ISSUE_ID}/work-items/{work_item_id}/coding-attempts"
-            ),
-            json!({}),
-        )
-        .await;
-        assert_eq!(
-            status,
-            StatusCode::OK,
-            "create coding attempt for {work_item_id}: {body}"
-        );
-        attempt_ids.push(body["attempt_id"].as_str().expect("attempt id").to_string());
-    }
+    // issue 级单 active attempt 语义：仓维 worktree 锁在 attempt 创建时即被
+    // 持有（owner=活跃 attempt），若一次性预建全部 attempt，第一个的
+    // StartCoding admission 会命中他仓活跃 owner（coding_run_already_running）。
+    // fixture 只建首个 attempt，后续在前一个完成释放锁后串行创建。
+    let first_attempt_id = create_work_item_attempt(&app, work_item_ids[0]).await;
 
     DeliveryFixture {
         _root: root,
         app,
         store: CodingAttemptStore::new(app_paths),
-        attempt_ids,
+        work_item_ids: work_item_ids.iter().map(|id| id.to_string()).collect(),
+        first_attempt_id,
+    }
+}
+
+/// 经真实 POST 路由为 work item 创建 coding attempt，返回 attempt id。
+async fn create_work_item_attempt(app: &axum::Router, work_item_id: &str) -> String {
+    let (status, body) = crate::web_coding_attempt_api::request_json(
+        app.clone(),
+        Method::POST,
+        &format!(
+            "/api/projects/{PROJECT_ID}/issues/{ISSUE_ID}/work-items/{work_item_id}/coding-attempts"
+        ),
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "create coding attempt for {work_item_id}: {body}"
+    );
+    body["attempt_id"].as_str().expect("attempt id").to_string()
+}
+
+/// 串行驱动全部 WorkItem attempt 到完成：前一个完成（释放仓维锁）后才
+/// 创建并驱动下一个。
+async fn drive_all_work_items(fixture: &DeliveryFixture) {
+    let mut attempt_id = fixture.first_attempt_id.clone();
+    drive_work_item_attempt_to_completion(fixture.app.clone(), &attempt_id).await;
+    for work_item_id in &fixture.work_item_ids[1..] {
+        attempt_id = create_work_item_attempt(&fixture.app, work_item_id).await;
+        drive_work_item_attempt_to_completion(fixture.app.clone(), &attempt_id).await;
     }
 }
 
@@ -368,9 +411,7 @@ async fn multi_repo_all_work_items_pushed_marks_issue_completed_all_pushed() {
     )
     .await;
 
-    for attempt_id in &fixture.attempt_ids {
-        drive_work_item_attempt_to_completion(fixture.app.clone(), attempt_id).await;
-    }
+    drive_all_work_items(&fixture).await;
 
     let issue = IssueStore::new(fixture.store.paths())
         .get(PROJECT_ID, ISSUE_ID)
@@ -402,9 +443,7 @@ async fn multi_repo_partial_push_failure_keeps_issue_open_and_reports_partial() 
     )
     .await;
 
-    for attempt_id in &fixture.attempt_ids {
-        drive_work_item_attempt_to_completion(fixture.app.clone(), attempt_id).await;
-    }
+    drive_all_work_items(&fixture).await;
 
     let issue = IssueStore::new(fixture.store.paths())
         .get(PROJECT_ID, ISSUE_ID)
@@ -441,9 +480,7 @@ async fn legacy_single_repo_all_pushed_marks_issue_completed() {
     let _guard = DELIVERY_WS_TEST_LOCK.lock().await;
     let fixture = build_delivery_fixture(&["repo_alpha"], &["work_item_0001"], false, None).await;
 
-    for attempt_id in &fixture.attempt_ids {
-        drive_work_item_attempt_to_completion(fixture.app.clone(), attempt_id).await;
-    }
+    drive_all_work_items(&fixture).await;
 
     let issue = IssueStore::new(fixture.store.paths())
         .get(PROJECT_ID, ISSUE_ID)

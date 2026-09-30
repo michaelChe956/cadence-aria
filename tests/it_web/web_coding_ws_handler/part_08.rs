@@ -346,6 +346,22 @@ fn materialize_running_unit_run_for_logical(store: &CodingAttemptStore, logical_
     let attempt = store
         .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
         .expect("attempt");
+    // C2 Task 6（决策 6/#13）：认领前冻结的 start_commit 是 Running run 的
+    // 必备事实——完成路径对真缺失停等（unit_run_start_commit_missing，
+    // 绝不按 base HEAD 回填）。fixture 从 worktree 真实 HEAD 物化起点，
+    // run.start_commit 经 attempt.head_commit 携带落盘。
+    let start_head = attempt
+        .worktree_path
+        .as_ref()
+        .map(|worktree| git_stdout(worktree, &["rev-parse", "HEAD"]).trim().to_string());
+    let attempt = store
+        .update_attempt_head_commit(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            start_head,
+        )
+        .expect("freeze fixture head commit");
     let unit = store
         .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("units")

@@ -26,6 +26,21 @@ impl FiftyMemberFixture {
         let app_paths = ProductAppPaths::new(root.path().join(".aria"));
         let aggregate_root = root.path().join("aggregate-root");
         fs::create_dir_all(&aggregate_root).expect("aggregate root");
+        // LC 子树落盘前先播种 project record：id 分配按目录条目计数，
+        // 若 project_0001 子树先建，POST /api/projects 会顺延分配
+        // project_0002，破坏按 PROJECT_ID 的稳定寻址。
+        write_json(
+            &app_paths.project_root(PROJECT_ID).join("project.json"),
+            &cadence_aria::product::models::ProjectRecord {
+                id: PROJECT_ID.to_string(),
+                name: "50 member planning".to_string(),
+                description: None,
+                created_at: NOW.to_string(),
+                updated_at: NOW.to_string(),
+                last_opened_at: None,
+            },
+        )
+        .expect("seed project record");
 
         let member_ids: Vec<_> = (0..MEMBER_COUNT)
             .map(|index| LogicalRepositoryId(uuid::Uuid::from_u128((index + 1) as u128)))
@@ -299,14 +314,8 @@ async fn fifty_member_planning_query_returns_all_unique_member_ids_and_aliases()
     // the Web query path that consumes the authoritative member listing and returns it in its
     // planning context. It must expose all 50 (not an arbitrarily truncated subset) here.
     let app = fx.app();
-    let (status, project) = crate::web_coding_attempt_api::request_json(
-        app.clone(),
-        Method::POST,
-        "/api/projects",
-        json!({"name": "50 member planning", "description": null}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "create project: {project}");
+    // project record 已由 fixture 预播种（LC 子树先占 project_0001 时，
+    // POST /api/projects 会顺延分配 project_0002，破坏 PROJECT_ID 寻址）。
     cadence_aria::product::issue_store::IssueStore::new(fx.app_paths.clone())
         .create(cadence_aria::product::issue_store::CreateProductIssueInput {
             project_id: PROJECT_ID.to_string(),

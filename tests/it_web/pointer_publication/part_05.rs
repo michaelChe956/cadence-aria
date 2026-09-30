@@ -150,7 +150,20 @@ fn find_generation_context_message(response: &Value) -> String {
 async fn pointer_publication_scenario_f_logical_context_injects_authority_reference() {
     let root = tempdir().expect("root");
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
-    // 先建多仓 issue（repo_id=None，成为 issue_0001），再写 selection。
+    // id 分配按目录条目计数：LC 子树落盘前必须先播种 project record，
+    // 否则 generate 链的 project 校验 404（project_not_found）。
+    cadence_aria::product::json_store::write_json(
+        &app_paths.project_root(PROJECT_ID).join("project.json"),
+        &cadence_aria::product::models::ProjectRecord {
+            id: PROJECT_ID.to_string(),
+            name: "pointer publication".to_string(),
+            description: None,
+            created_at: "2026-08-14T00:00:00Z".to_string(),
+            updated_at: "2026-08-14T00:00:00Z".to_string(),
+            last_opened_at: None,
+        },
+    )
+    .expect("seed project record");
     IssueStore::new(app_paths.clone())
         .create(CreateProductIssueInput {
             project_id: PROJECT_ID.to_string(),

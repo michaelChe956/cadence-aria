@@ -172,13 +172,17 @@ async fn creates_coding_attempt_falls_back_from_unavailable_default_codex_to_cla
     let persisted = store
         .get_attempt("project_0001", "issue_0001", &attempt_id)
         .expect("persisted attempt");
+    // C2 Task 5（REQ-CRO-05）：无会话可引用时 reviewer 不再回填 author——
+    // 空 effective 停等（coding 侧 review 阶段落缺配置门等待用户配置）；
+    // 本测试只钉 author 侧 fallback 链（默认 codex 不可用 → ClaudeCode）。
     assert_eq!(
         persisted.provider_config_snapshot.author,
         ProviderName::ClaudeCode
     );
     assert_eq!(
         persisted.provider_config_snapshot.reviewer,
-        Some(ProviderName::ClaudeCode)
+        None,
+        "reviewer must stay empty-effective instead of backfilling the author"
     );
 }
 #[tokio::test]
