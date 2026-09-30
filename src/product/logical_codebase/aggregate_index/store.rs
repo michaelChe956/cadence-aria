@@ -184,6 +184,13 @@ impl AggregateIndexStore {
     /// persists the successor as the new active record. The failure path never
     /// calls this method, so a failed rebuild cannot leave a half-written or
     /// superseded active pointer.
+    ///
+    /// G6（终局关闸缺口）：成功 rebuild 不只翻 active 前代——rebuild 失败期
+    /// 经 [`Self::degrade_last_known_good`] 降级的 degraded（及 freshness 评
+    /// 估出的 stale）LKG 前代一并翻 superseded。否则 degraded 代在成功重建
+    /// 后永久滞留，`read_active_projection` 的「degraded LKG 优先」契约
+    ///（成功 rebuild 会把 degraded 前代翻 superseded）恒命中，active 投影
+    /// 恒 degraded、只读面永久误导（现场 d868 恒 degraded）。
     pub fn replace_active(
         &self,
         project_id: &str,
@@ -198,14 +205,27 @@ impl AggregateIndexStore {
             });
         }
 
+        let now = Utc::now().to_rfc3339();
         let current = self.active(project_id)?;
         if let Some(mut previous) = current
             && previous.aggregate_index_id != next.aggregate_index_id
         {
             previous.status = AggregateIndexStatus::Superseded;
-            previous.updated_at = Utc::now().to_rfc3339();
+            previous.updated_at = now.clone();
             self.save(project_id, &previous)?;
             next.supersedes_aggregate_index_id = Some(previous.aggregate_index_id);
+        }
+        for mut record in self.records(project_id)? {
+            if record.aggregate_index_id != next.aggregate_index_id
+                && matches!(
+                    record.status,
+                    AggregateIndexStatus::Degraded | AggregateIndexStatus::Stale
+                )
+            {
+                record.status = AggregateIndexStatus::Superseded;
+                record.updated_at = now.clone();
+                self.save(project_id, &record)?;
+            }
         }
         self.save(project_id, &next)?;
         Ok(next)
@@ -449,6 +469,59 @@ mod tests {
         let readable = store.active_required("project_0001").unwrap();
         assert_eq!(readable.aggregate_index_id, "aggregate_index_first");
         assert_eq!(readable.status, AggregateIndexStatus::Degraded);
+    }
+
+    // G6（终局关闸缺口）：rebuild 失败期降级的 degraded LKG 代在成功重建后
+    // 必须一并翻 superseded——否则 active 投影（degraded LKG 优先契约：成功
+    // rebuild 会把 degraded 前代翻 superseded）恒命中 degraded，只读面永久
+    // 误导（现场 d868 恒 degraded）。
+    #[test]
+    fn replace_active_supersedes_degraded_and_stale_lkg_generations() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = AggregateIndexStore::new(ProductAppPaths::new(temp.path()));
+        store
+            .replace_active("project_0001", record("aggregate_index_first"))
+            .unwrap();
+        // rebuild 失败：active LKG 降级 degraded；另留一代 stale。
+        store
+            .degrade_last_known_good("project_0001", "codegraph_version_mismatch".to_string())
+            .unwrap()
+            .expect("active record degraded");
+        let stale = {
+            let mut stale = record("aggregate_index_stale");
+            stale.status = AggregateIndexStatus::Stale;
+            stale
+        };
+        store.create("project_0001", stale).unwrap();
+
+        // 恢复后成功 rebuild（bootstrap retry / canonical rebuild / revalidate
+        // 三路径同收敛于 replace_active）。
+        store
+            .replace_active("project_0001", record("aggregate_index_second"))
+            .unwrap();
+
+        assert_eq!(
+            store
+                .get("project_0001", "aggregate_index_first")
+                .unwrap()
+                .unwrap()
+                .status,
+            AggregateIndexStatus::Superseded
+        );
+        assert_eq!(
+            store
+                .get("project_0001", "aggregate_index_stale")
+                .unwrap()
+                .unwrap()
+                .status,
+            AggregateIndexStatus::Superseded
+        );
+        let active = store.active("project_0001").unwrap().unwrap();
+        assert_eq!(active.aggregate_index_id, "aggregate_index_second");
+        // 规划读侧不再被 degraded LKG 遮蔽。
+        let readable = store.active_required("project_0001").unwrap();
+        assert_eq!(readable.aggregate_index_id, "aggregate_index_second");
+        assert_eq!(readable.status, AggregateIndexStatus::Active);
     }
 
     #[test]
