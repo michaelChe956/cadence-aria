@@ -185,8 +185,22 @@ export function gateActionBlockReason(state: WorkspaceWsState): GateActionBlockR
   if (isStoryDesignAuthorConfirm(state)) {
     return state.sessionStatus === "confirmed" ? "closed" : null;
   }
-  if (state.stage === "completed" && state.humanGateSnapshot) {
-    return null;
+  // A1 方案 A（用户 2026-09-30 裁决，REQ-CFC-05 修订为 amendment-aware）：completed
+  // stage 的终态守卫只锁「可无歧义判定为陈旧」的形态。「completed+snapshot」是
+  // REQ-GCE-03 amendment 重开的合法载体形态——work_item_plan + single_candidate +
+  // 相位 completed + 快照在场（镜像引擎 probe_amendment_gate_context 的前端可见
+  // 前置谓词，conversational_gate.rs:165-201；amendment 上下文事实 build_session_state
+  // 未暴露，前端不可无歧义判定陈旧）——维持放行，真实陈旧由引擎既有拒绝
+  // （INVALID_MESSAGE_FOR_STAGE 系）兜底，本守卫不得改引擎拒绝语义。不构成载体
+  // 形态（非 plan/非 SC 流/相位非 completed/无快照凭据的残留 turn）在引擎侧不存在
+  // 任何合法重开路径 = 0017 形态的可无歧义陈旧门，锁死并给出原因说明。
+  if (state.stage === "completed") {
+    const amendmentCarrierShape =
+      state.workspaceType === "work_item_plan" &&
+      state.flowKind === "single_candidate" &&
+      state.singleCandidatePhase === "completed" &&
+      state.humanGateSnapshot !== null;
+    return amendmentCarrierShape ? null : "terminal_stage";
   }
   if (TERMINAL_GATE_STAGES[state.stage]) {
     return "terminal_stage";

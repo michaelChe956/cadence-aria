@@ -339,6 +339,10 @@ describe("ChatCockpitPage", () => {
     const sendAbandonGate = vi.fn(() => true);
     mockWorkspaceWs({ sendConfirmGate: sendHumanConfirm, sendAbandonGate });
     useWorkspaceStore.setState({
+      // A1 迁移（方案 A，REQ-CFC-05 amendment-aware）：completed 行 = amendment
+      // 载体形态，按引擎谓词补齐 workspaceType（真实 session_state 帧中快照与
+      // workspace_type 同帧到达）；human_confirm 两行不受影响。
+      workspaceType: "work_item_plan",
       stage,
       flowKind: "single_candidate",
       singleCandidatePhase,

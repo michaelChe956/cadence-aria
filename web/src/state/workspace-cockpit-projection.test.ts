@@ -281,15 +281,87 @@ describe("workspace cockpit gate projection", () => {
     expect(gateActionBlockReason(useWorkspaceStore.getState())).toBeNull();
   });
 
+  // A1 迁移（方案 A）：用例保留——completed 载体形态维持放行；夹具按修订后
+  // 契约补齐 workspaceType（引擎谓词要求 WorkItemPlan；真实 session_state 帧
+  // 中快照与 workspace_type 同帧到达，不存在「有快照无类型」的中间态）。
   it("keeps a completed-stage gate operable for the amendment reopen shape (0017-indistinguishable)", () => {
     useWorkspaceStore.setState({
+      workspaceType: "work_item_plan",
       stage: "completed",
       flowKind: "single_candidate",
       singleCandidatePhase: "completed",
       humanGateSnapshot: humanGateSnapshotFixture(),
+      humanGateClosure: null,
     });
 
     expect(gateActionBlockReason(useWorkspaceStore.getState())).toBeNull();
+  });
+
+  // A1 方案 A（用户 2026-09-30 裁决，REQ-CFC-05 修订为 amendment-aware）：completed
+  // stage 的终态守卫只放行「可构成 REQ-GCE-03 amendment 重开合法载体」的形态——
+  // work_item_plan + single_candidate + 相位 completed + 快照在场（镜像引擎
+  // probe_amendment_gate_context 的前端可见前置谓词，conversational_gate.rs:165-201；
+  // amendment 上下文事实 build_session_state 未暴露，前端不可无歧义判定陈旧，交由
+  // 引擎既有拒绝兜底）。其余 completed 形态引擎侧不存在任何合法重开路径 = 可无歧义
+  // 判定的陈旧门（0017 形态），锁死并给出原因说明。
+  it.each([
+    [
+      "非 plan 会话",
+      { workspaceType: "story", flowKind: "single_candidate", singleCandidatePhase: "completed" },
+    ],
+    [
+      "非 SC 流",
+      { workspaceType: "work_item_plan", flowKind: "legacy", singleCandidatePhase: "completed" },
+    ],
+    [
+      "SC 相位非 completed",
+      { workspaceType: "work_item_plan", flowKind: "single_candidate", singleCandidatePhase: "evaluate" },
+    ],
+    [
+      "旧会话缺相位字段",
+      { workspaceType: "work_item_plan", flowKind: "single_candidate", singleCandidatePhase: null },
+    ],
+  ] as const)("locks a stale completed-stage snapshot gate for %s (0017 形态)", (_label, overrides) => {
+    useWorkspaceStore.setState({
+      stage: "completed",
+      humanGateSnapshot: humanGateSnapshotFixture(),
+      humanGateClosure: null,
+      ...overrides,
+    } as Partial<WorkspaceWsState>);
+
+    const state = useWorkspaceStore.getState();
+    expect(gateActionBlockReason(state)).toBe("terminal_stage");
+    expect(gateActionBlockCopy("terminal_stage")).toContain("已离开人工确认门");
+    // 投影面贯通：门卡仍渲染（陈旧门可见）但动作/终止判据双双锁定。
+    expect(selectGateProjection(state)).toMatchObject({
+      kind: "human_gate",
+      action_block_reason: "terminal_stage",
+      terminate_block_reason: "terminal_stage",
+    });
+  });
+
+  it("locks a residual completed-stage turn without a gate snapshot (no amendment carrier)", () => {
+    useWorkspaceStore.setState({
+      workspaceType: "work_item_plan",
+      stage: "completed",
+      flowKind: "single_candidate",
+      singleCandidatePhase: "completed",
+      humanGateSnapshot: null,
+      humanGateTurn: {
+        turn_id: "turn_stale",
+        command_id: "cmd_stale",
+        remaining_budget: 1,
+        status: "open",
+        artifact_ref: null,
+        failure_class: null,
+        failure_message: null,
+        opened_at: "2026-09-14T00:00:00.000Z",
+        inlineError: null,
+      },
+      humanGateClosure: null,
+    });
+
+    expect(gateActionBlockReason(useWorkspaceStore.getState())).toBe("terminal_stage");
   });
 
   // F-21（v28 监控）：plan 会话（SC 流）除 approval/evaluate 终审门外，还会停在

@@ -163,6 +163,87 @@ describe("cockpit gate action facade", () => {
     expect(sendHumanGateFeedback).not.toHaveBeenCalled();
   });
 
+  // A1 方案 A（REQ-CFC-05 修订为 amendment-aware，用户 2026-09-30 裁决）：0017
+  // 形态的陈旧 completed 门不留任何可达发送路径——不构成 amendment 载体形态
+  // （引擎 probe_amendment_gate_context 无命中可能）时 confirm/feedback/terminate
+  // 全部零出站；合法载体形态（SC+相位 completed+快照）保持放行，真实陈旧由
+  // 引擎既有拒绝（INVALID_MESSAGE_FOR_STAGE 系）兜底，守卫不改引擎拒绝语义。
+  it("blocks every gate send path on a stale completed-stage snapshot gate (0017 形态)", () => {
+    useWorkspaceStore.setState({
+      workspaceType: "work_item_plan",
+      stage: "completed",
+      flowKind: "single_candidate",
+      singleCandidatePhase: "evaluate",
+      humanGateSnapshot: {
+        findings: [],
+        repeated_fingerprints: [],
+        attempts_used: 1,
+        manual_repairs_remaining: 1,
+        trigger: "verification_new_findings",
+        resumable: true,
+      },
+      humanGateClosure: null,
+    } as Partial<WorkspaceWsState>);
+
+    const sendConfirm = vi.fn(() => true);
+    const sendAbandonGate = vi.fn(() => true);
+    const sendHumanGateFeedback = vi.fn((_feedback: string, _commandId?: string) => true);
+    const actions = createCockpitActionFacade({
+      flowKind: "single_candidate",
+      commandId: null,
+      getState: useWorkspaceStore.getState,
+      sendConfirm,
+      sendAbandonGate,
+      sendHumanGateFeedback,
+      sendAdvance: vi.fn(() => true),
+      adoptReview: vi.fn(),
+      sendBatchConfirm: vi.fn(async () => undefined),
+      sendCompileRecovery: vi.fn(),
+    });
+
+    expect(actions.confirm()).toBe(false);
+    expect(actions.feedback("请补齐边界")).toBe(false);
+    expect(actions.terminate()).toBe(false);
+    expect(sendConfirm).not.toHaveBeenCalled();
+    expect(sendAbandonGate).not.toHaveBeenCalled();
+    expect(sendHumanGateFeedback).not.toHaveBeenCalled();
+  });
+
+  it("keeps typed feedback dispatchable on the amendment carrier shape (REQ-GCE-03 重开载体)", () => {
+    useWorkspaceStore.setState({
+      workspaceType: "work_item_plan",
+      stage: "completed",
+      flowKind: "single_candidate",
+      singleCandidatePhase: "completed",
+      humanGateSnapshot: {
+        findings: [],
+        repeated_fingerprints: [],
+        attempts_used: 1,
+        manual_repairs_remaining: 3,
+        trigger: "native_human_required",
+        resumable: true,
+      },
+      humanGateClosure: null,
+    } as Partial<WorkspaceWsState>);
+
+    const sendHumanGateFeedback = vi.fn((_feedback: string, _commandId?: string) => true);
+    const actions = createCockpitActionFacade({
+      flowKind: "single_candidate",
+      commandId: null,
+      getState: useWorkspaceStore.getState,
+      sendConfirm: vi.fn(() => true),
+      sendAbandonGate: vi.fn(() => true),
+      sendHumanGateFeedback,
+      sendAdvance: vi.fn(() => true),
+      adoptReview: vi.fn(),
+      sendBatchConfirm: vi.fn(async () => undefined),
+      sendCompileRecovery: vi.fn(),
+    });
+
+    expect(actions.feedback("plan 需补充边界约束")).toBe(true);
+    expect(sendHumanGateFeedback).toHaveBeenCalledTimes(1);
+  });
+
   // F-31（v37 复验 #2）：待处理抽屉动作面与主区门卡对齐——confirmReview 复用
   // confirm 通道携带 with_review=true（HTTP confirm 端点语义）；confirm() 维持
   // 定稿缺省（不带该字段），阻断判据与 confirm 同源。
