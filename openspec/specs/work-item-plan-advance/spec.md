@@ -89,7 +89,7 @@ SC 初始计划编译 SHALL 在任何 work item revision 可见之前，将编�
 
 ### Requirement: advance 到 Ready 即止与 coding 启动唯一入口（REQ-ADV-05）
 
-`advance` 的完成态 SHALL 为 `Ready`（group workspace 就绪），advance 本身及 `advance_completed` 事件 SHALL NOT 启动任何 coding provider。coding provider **首次启动**的唯一入口 SHALL 为显式 typed `StartCoding` 入站应用命令，发起者 SHALL 为人工 WS 命令，或本 change 中经 issue enrollment 与该 attempt 的有效 opt-in 授权的服务端编排器；已认领启动的恢复只续接原启动，不构成另一条首启通道。SC admission 的 coding attempt 在经 advance 置 `Ready` 之前收到 `StartCoding` SHALL fail-closed 拒绝并返回错误码 `SC_CODING_REQUIRES_ADVANCE`，attempt 与 session 状态不变；状态/绑定读取失败亦 SHALL fail-closed。此处把原条件 defer 的显式 opt-in auto 启动通道在 `work-item-group-autopilot` 中定义，不允许把自动首启实现为 advance 随附副作用，也不得绕过原 runner 的准入校验。新通道 MUST 满足以下全部五条红线：**opt-in 持久化 run_policy、默认 off、per-attempt 单发、绝不批量、不动唯一人工门**。其中 opt-in 持久化 run_policy SHALL 为 issue 级 durable enrollment 与绑定 attempt 的 `CodingStartRunPolicy=Manual|AutoStartOnce`，并非 plan session 的 `RunPolicy::AutoIfValid`；plan session SHALL 保持 Interactive。授权关闭后尚未消费的启动许可可撤销；仅恰一 logical repository 的 enrolled plan 可自动首启，多 target 的逐 target 人工 StartCoding 与 `multi-target-group-coding` REQ-MTG-03 不变。
+`advance` 的完成态 SHALL 为 `Ready`（group workspace 就绪），advance 本身及 `advance_completed` 事件 SHALL NOT 启动任何 coding provider。coding provider **首次启动**的唯一入口 SHALL 为显式 typed `StartCoding` 入站应用命令，发起者 SHALL 为人工 WS 命令，或本 change 中经 issue enrollment 与该 attempt 的有效 opt-in 授权的服务端编排器；已认领启动的恢复只续接原启动，不构成另一条首启通道。SC admission 的 coding attempt 在经 advance 置 `Ready` 之前收到 `StartCoding` SHALL fail-closed 拒绝并返回错误码 `SC_CODING_REQUIRES_ADVANCE`，attempt 与 session 状态不变；状态/绑定读取失败亦 SHALL fail-closed。此处把原条件 defer 的显式 opt-in auto 启动通道在 `work-item-group-autopilot` 中定义，不允许把自动首启实现为 advance 随附副作用，也不得绕过原 runner 的准入校验。新通道 MUST 满足以下全部五条红线：**opt-in 持久化 run_policy、默认 off、per-attempt 单发、绝不批量、不动唯一人工门**。其中 opt-in 持久化 run_policy SHALL 为 issue 级 durable enrollment 与绑定 attempt 的 `CodingStartRunPolicy=Manual|AutoStartOnce`，并非 plan session 的 `RunPolicy::AutoIfValid`；plan session SHALL 保持 Interactive。授权关闭后尚未消费的启动许可可撤销；仅恰一精确 target（一个单仓物理仓，或一个 logical repository）且与 enrollment target 一致的 enrolled plan 可自动首启，多 target 的逐 target 人工 StartCoding 与 `multi-target-group-coding` REQ-MTG-03 不变。
 
 #### Scenario: advance 完成不启动 provider
 
@@ -111,7 +111,36 @@ SC 初始计划编译 SHALL 在任何 work item revision 可见之前，将编�
 - **WHEN** issue 选择自动化并批准 plan，编排器准备对绑定单 target attempt 首次启动 coding
 - **THEN** 仅当 opt-in 持久化 run_policy 有效、缺省 off 的许可被明确开启时允许 per-attempt 单发；绝不批量启动、不代点唯一人工计划门及人工 Final Confirm
 
+#### Scenario: 单仓 enrolled advance 到 Ready
+
+- **WHEN** 单仓 enrollment 绑定的 plan 已 Confirmed，其全部工作项无 logical target 归属，target 等于 issue 所属物理仓
+- **THEN** Enrolled advance 沿单仓路径把唯一 attempt 置 Ready 并冻结 AutoStartOnce，不要求 logical target，不启动 provider
+
 #### Scenario: 授权关闭与多 target 禁止自动首启
 
-- **WHEN** enrollment 在首启许可消费前关闭，或计划包含两个以上 logical repository
+- **WHEN** enrollment 在首启许可消费前关闭，计划包含两个以上 target，或计划 target 与 enrollment target 载体/身份不一致
 - **THEN** 服务端不自动启动任何 coding provider；原人工逐 target StartCoding 不受此例外扩权
+
+### Requirement: Failed advance 的显式初始化重试（REQ-ADV-C1-RETRY）
+
+当 advance 初始化进入 Failed 时，系统 SHALL 提供明确的 `retry-initialization` 产品操作；重复原 advance 命令本身 MUST NOT 被解释为重试。retry MUST 核对当前 plan、plan revision、target、attempt 身份及已完成 checkpoint，并保留原 Failed 记录、原因和审计事实。系统 SHALL 为用户操作创建独立 retry 事实；仅可证明未产生外部副作用的本地步骤可自动续做，外部副作用状态未知时 SHALL 先通知并等待用户确认。安全重试 SHALL 继续同一 attempt，不创建第二 attempt，也不得把原失败记录改写成成功。
+
+#### Scenario: 用户重试 Failed advance 并到 Ready
+
+- **WHEN** 当前 plan/target 的 advance attempt 为 Failed，用户从驾驶舱点击 `retry-initialization` 且对象版本、绑定和 checkpoint 仍匹配
+- **THEN** 系统保留原 Failed 审计，写入独立 retry 事实，安全本地步骤从 checkpoint 续做并将同一 attempt 推进到 Ready
+
+#### Scenario: 普通 advance 不隐式重试
+
+- **WHEN** 某 plan/target 已有 Failed attempt，客户端再次发送原 `advance`（同或不同 command_id）但未提交 retry-initialization
+- **THEN** 系统返回原 attempt 与失败原因，不创建新 attempt、不清除失败审计、不启动 provider
+
+#### Scenario: 外部副作用未知时先确认
+
+- **WHEN** retry 检查发现初始化步骤可能已触发但无法证明外部副作用是否完成
+- **THEN** 系统通知用户当前未知事实并展示确认后重试/重新绑定操作；在用户确认前不盲目重放该步骤
+
+#### Scenario: retry 版本过期拒绝
+
+- **WHEN** retry 携带的 plan/revision/target/attempt 版本已过期或绑定不匹配
+- **THEN** 系统 fail-closed 返回刷新/重新绑定提示，原 Failed 事实与 attempt 均不变

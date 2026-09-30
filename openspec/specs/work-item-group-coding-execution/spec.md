@@ -82,3 +82,46 @@ group coding workspace 是 coding 的唯一观察面；系统 SHALL 提供每个
 
 - **WHEN** 修订出版在 work item revision 已发布、plan revision 未发布的中间窗口崩溃，客户端重启后重发同一确认命令
 - **THEN** 系统发现既有出版 journal 即按重放分支校验并继续完成出版，group attempt 保持同一身份恢复
+
+### Requirement: 换代后的 compile child 精确绑定（REQ-C1-CHILD-01）
+
+compile child/session 的选择 SHALL 同时匹配当前 plan 身份、plan revision、work item revision 与当前 enrollment binding version/身份；仅按 work item 类型、实体编号或“最新 session”猜测 SHALL 不被接受。用户明确换代/重新绑定后，系统 SHALL 创建属于新绑定版本的新 child；旧 child 与旧 binding SHALL 保持只读可查，不清空、不覆盖、不迁移其历史事实。
+
+#### Scenario: 同 Work Item 编号跨代创建新 child
+
+- **WHEN** 同一 Work Item 编号在旧代失败后，用户明确选择新 plan/session/source/target/provider 并提交换代
+- **THEN** compile 为新绑定版本创建新 child 并成功匹配当前 plan/revision，旧 child 仍可按旧绑定查询且不被改写
+
+#### Scenario: 旧 child 不冒充当前代
+
+- **WHEN** 当前代 compile 查找时仅存在旧 plan/revision/binding 的 child
+- **THEN** 系统拒绝复用旧 child，返回需要绑定/重建的等待操作，不清理旧 binding，不把旧成功回执写入当前代
+
+#### Scenario: 同代重放不创建第二 child
+
+- **WHEN** 当前绑定版本、plan/revision/work item 身份均相同的 compile 命令以相同或重复 command_id 重放
+- **THEN** 系统命中同一 child 和 durable 结果，不创建第二 child，不修改旧历史
+
+### Requirement: 返修指令与上下文注记单次消费（REQ-GCE-C2-INSTR）
+
+Coder 首次 spawn 与 rework 两条路径 SHALL 使用同一消费口径：系统 SHALL 先以待消费的 rework instruction 与 context note 渲染完整 prompt 与执行上下文，再在一次可重放的原子写入中认领这些指令、绑定渲染结果并标记消费，最后 spawn provider。实际发送给 provider 的 prompt SHALL 包含被消费的指令内容；以指令为空渲染后再标记消费的行为 MUST NOT 发生。标记消费 MUST NOT 早于完整 prompt 渲染完成。同一指令 SHALL 至多被一次 role run 消费；中断后重放同一次认领 SHALL 命中同一结果而非生成新的上下文 hash。已记录的执行上下文 hash MUST NOT 被覆盖为新含义。
+
+#### Scenario: rework 实际 prompt 含新指令
+
+- **WHEN** Code Review 要求返修并落地新的 rework instruction，系统启动返修 Coder
+- **THEN** provider 收到的 prompt 包含该指令，指令被该次 role run 消费一次，执行上下文 hash 与实际 prompt 一致
+
+#### Scenario: spawn 路径与 rework 路径口径一致
+
+- **WHEN** 首次 spawn 时存在未消费的 rework instruction 或 context note
+- **THEN** 渲染出的执行上下文与实际 prompt 均包含其完整内容，而不仅是摘要
+
+#### Scenario: 认领后 spawn 前中断
+
+- **WHEN** 指令已认领并绑定上下文，但在 provider spawn 前发生中断
+- **THEN** 系统落地可操作等待项并通知用户；用户点击继续后以同一认领与同一上下文 hash 启动，不产生 hash 冲突，指令不被消费第二次
+
+#### Scenario: 渲染失败不消费
+
+- **WHEN** 完整 prompt 渲染失败
+- **THEN** 指令保持未消费，attempt 进入可操作等待，用户重试时仍能读取该指令

@@ -7,19 +7,35 @@
 ## Requirements
 
 ### Requirement: 两层政策结构（REQ-ENV-01）
+
 系统 SHALL 持久化 `AggregatePolicyArtifact`（集中政策正文 + digest + revision）作为事实来源；每次 provider run 生成不可变 `SessionPolicyEnvelope`（policy_id/revision/digest、action、target、read/write roots、provider dialect、config artifact 引用）。本契约覆盖逻辑代码库流程的**全部真实 provider 启动入口**：同步栈 `ProviderAdapter::run(AdapterInput)`（含 work-item split 引擎直接调用）与流式栈 `StreamingProviderAdapter::start(StreamingProviderInput)`（含聚合初始化、聚合规划 provider_drive、coding provider_stream、review）。**例外（显式过渡例外；范围=流式栈）**：既有 legacy 直连入口——流式栈 workspace/coding 引擎的 author/revision/review 直连 `provider.start`（Story/Design/SingleCandidate(SC) 首轮与修订、WorkItemPlan legacy、coding reviewer 直连）**与 coding Coder(Executor) 直连**——允许保留现状拓扑；此类启动必须满足：（a）输入由 engine builder 工厂构造并按角色携带 REQ-ENV-09 工具策略（Reviewer 角色带策略，Executor/Coder 不带）；（b）受 adapter 层双向角色守卫保护；（c）接受按角色适用的启动审计——**策略角色（作者/评审）的 pi/claude/codex 启动接 REQ-ENV-09 的 durable_tool_policy_audit 分区；Executor/Coder 与非策略路径、kimi（全部角色）以既有 execution_event_audit 通道为等价审计（role/provider-specific 既有形态豁免，kimi 零改动为用户裁决）**。**同步栈（AdapterInput 直连）不适用本例外**，维持本 requirement 原文要求（逻辑仓既有 gateway guard fail-closed；非逻辑仓保留 API 无生产调用方，重激活前置=REQ-ENV-09 策略绑定）。全量 gateway 迁移为后续独立 change 的路线项，完成前本例外持续有效。
 
+逻辑代码库任一真实 provider run（规划、编码、评审或初始化）使用的 policy/target 引用 SHALL 由唯一 LC authority resolver 解析并校验，且 SessionPolicyEnvelope SHALL 冻结 policy_id、revision、digest、target identity 与 provider capability 快照。resolver 无法唯一解析、policy 材料缺失、digest/revision 不一致或目标跨 kind 时，启动 SHALL 在 provider spawn 前 fail-closed，返回可诊断、可操作的核验/准备/重试等待项；不得回落到成员仓路径、项目级历史布局、旧 pointer 或裸 provider input。用户完成允许操作后，系统 SHALL 复用原始登记/编排链继续，不创建第二套 durable operation 状态机。
+
 #### Scenario: 启动逻辑代码库 provider run
+
 - **WHEN** 逻辑代码库流程启动任何真实 provider run（规划/编码/评审/初始化；本 requirement 例外入口除外）
 - **THEN** envelope SHALL 由 resolver 从 policy artifact 解析并校验，缺省或不一致时 fail-closed 拒绝启动
 
 #### Scenario: legacy 直连例外启动
+
 - **WHEN** workspace 引擎 author/revision/review 以 legacy 直连启动 provider
 - **THEN** 该启动 SHALL 携带经 builder 工厂设置的角色工具策略（REQ-ENV-09），通过 adapter 守卫，并写入 durable 启动审计；不得以裸输入绕过策略
 
 #### Scenario: coding Coder 直连例外启动
+
 - **WHEN** coding Coder（Executor）以 legacy 直连启动 provider
 - **THEN** 该启动 SHALL 经 engine builder 工厂构造（Executor 禁带工具策略，REQ-ENV-09；携带策略即拒），通过 adapter 双向守卫，并以既有 execution_event_audit 通道接受按角色适用的等价启动审计（非 durable_tool_policy_audit 分区）；不得以裸输入绕过 builder 工厂
+
+#### Scenario: LC 冷启动生成有效 envelope
+
+- **WHEN** 逻辑代码库完成 authority、manifest/checkout、rules/policy 与成员 index 所需材料并请求 provider run
+- **THEN** resolver SHALL 生成包含稳定目标、政策 revision/digest 和 capability 快照的 envelope，provider 仅能以该校验过的 envelope 启动
+
+#### Scenario: policy 或 authority 不一致时拒绝启动
+
+- **WHEN** policy digest 变化、authority 与 target 不一致、规则引用无法解析或 capability 尚未通过实际 gateway 预检
+- **THEN** provider SHALL 零启动并返回可审计等待项；用户确认前不得自动重试未知外部副作用、不得写入假 capability、不得从备用路径读取
 
 ### Requirement: 适配器只接受 validated launch policy（REQ-ENV-02）
 系统 SHALL 使逻辑代码库流程的真实 provider adapter 只接受经 `LogicalCodebaseProviderGateway` 构造的 `ValidatedSessionLaunchPolicy` 启动；关闭真实 provider 的无政策 fallback（legacy `run_streaming` 默认 bridge、coding retry `allow_legacy_stream_fallback: true`）与裸 `StreamingProviderInput`/`AdapterInput` 直接启动，逻辑代码库调用固定 `allow_legacy_stream_fallback=false`；Fake/测试路径经 registry 分层或编译期构造限制隔离，不依赖运行时 `if provider != Fake`。**例外**：REQ-ENV-01 定义的 legacy 直连入口不受「必须经 gateway 构造 ValidatedSessionLaunchPolicy」约束，但必须满足 REQ-ENV-01 例外条款的（a）（b）（c）三项替代约束；除该例外外，禁止任何裸 input 直启与 legacy fallback。
@@ -122,3 +138,27 @@
 #### Scenario: kimi 既有对齐维持
 - **WHEN** kimi 作为任意角色 provider 启动
 - **THEN** 其 client services 策略 SHALL 保持现状；本 change SHALL NOT 收紧或放宽 kimi 任何既有工具面（kimi 不接 tool-policy 审计分区与 argv 注入，为 provider-specific 既有形态例外）
+
+### Requirement: blocked／rework 下的受限政策读取与重新授权（REQ-ENV-C2-POLICY）
+
+当逻辑代码库 coding attempt 处于 blocked 或 rework 等待面时，产品面 SHALL 提供“读取政策”与“重新授权”操作。读取政策 SHALL 仅通过唯一 LC authority resolver 解析该 attempt 当前 SessionPolicyEnvelope 冻结的 policy_id、revision 与 digest，返回与 digest 一致的政策正文；resolver 无法唯一解析、digest 不一致或材料缺失时 SHALL fail-closed 并返回可诊断等待项，MUST NOT 回落到成员仓路径、项目级历史布局或绝对路径猜测。重新授权 SHALL 仅在用户确认后为该 attempt 的下一次 Coder／Reviewer 返修 run 签发 evidence 授权，授权 SHALL 绑定 attempt、role 与 policy digest，并仅在该 run 处于运行态期间有效。错误 role、过期或已替换的授权、错 attempt、digest 不匹配或越出 manifest 成员范围的读取 SHALL 继续被拒绝。系统 MUST NOT 把政策绝对路径或正文写入 context note 作为授权手段。
+
+#### Scenario: 返修 coder 读取同 digest 政策
+
+- **WHEN** 用户在 blocked 页面点击“重新授权”后发起返修，返修 Coder 在运行中读取政策
+- **THEN** Coder 读到的政策正文 digest 与 envelope 冻结的 digest 一致，返修继续
+
+#### Scenario: 页面读取政策
+
+- **WHEN** 用户在 rework 等待面点击“读取政策”
+- **THEN** 页面显示 resolver 返回的政策正文及其 policy_id、revision、digest，不暴露宿主绝对路径
+
+#### Scenario: 错 role 或过期授权被拒
+
+- **WHEN** 非被授权 role 的 run 或授权已过期／已被新授权替换的 run 发起读取
+- **THEN** 读取被拒绝，attempt 保持停等并提示重新授权
+
+#### Scenario: resolver 无法解析时停等
+
+- **WHEN** resolver 无法唯一解析 policy 或 digest 与 envelope 不一致
+- **THEN** 读取与重新授权均 fail-closed，系统落地核验等待项，不回落任何备用路径

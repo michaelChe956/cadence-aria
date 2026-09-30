@@ -77,7 +77,9 @@
 
 ### Requirement: SC manual revision 专属路径（REQ-CG-03）
 
-人工反馈触发的单候选修订 SHALL 走 SC 专属路径：以反馈文本、当前候选 markdown 全文与必要 grammar 边界构造独立预算的 revision prompt；provider SHALL 输出完整修订版 markdown（非 diff/patch），输出经确定性前言修剪后进入 SC compiler 与 canonical validator。该路径 SHALL NOT 经过 legacy 中文标题 artifact 约束链；SHALL NOT 复用或扩张 SC author prompt 的 19,000 字节预算；修订 prompt  SHALL 注入 `.claude/rules/language.md` 全文与结构字面量优先规则句以维持中文 plan 与 grammar 字面量纪律，SHALL NOT 注入 code-usage/code-reading 摘要。该路径的反馈文本与构造的 revision prompt SHALL 受确定性 bounded-field 长度限制；超限 SHALL 在创建 turn 前拒绝，零预算消耗、零 provider 启动。每个 `turn_id` 的 `attempt_no` SHALL 有固定上限；每次真实 provider start SHALL 写入 provider-start ledger，但逻辑预算每个回合只消耗一次，SHALL NOT 以 WebSocket 事件推断启动次数。修订教学 SHALL 写死「只改反馈点名的内容，其余逐字保留」及反面清单（禁止删字段、清空 Outputs、省略 Handoff Schema 三字段）。修订后 findings 与既有指纹重复时 SHALL 按阶段 1 契约回到同一人工门。
+人工反馈触发的单候选修订 SHALL 走 SC 专属路径：以反馈文本、当前候选 markdown 全文与必要 grammar 边界构造独立预算的 revision prompt；provider SHALL 输出完整修订版 markdown（非 diff/patch），输出经确定性前言修剪后进入 SC compiler 与 canonical validator。该路径 SHALL NOT 经过 legacy 中文标题 artifact 约束链；SHALL NOT 复用或扩张 SC author prompt 的 19,000 字节预算；修订 prompt SHALL 注入 `.claude/rules/language.md` 全文与结构字面量优先规则句以维持中文 plan 与 grammar 字面量纪律，SHALL NOT 注入 code-usage/code-reading 摘要。
+
+反馈文本 SHALL 受确定性 bounded-field 长度限制；超限 SHALL 在创建 turn 前拒绝，零预算消耗、零 provider 启动。创建 turn 与扣减回合预算之前，系统 SHALL 以 UTF-8 字节计算完整组装输入（当前候选全文＋固定合同＋feedback＋上下文）并与所选 provider 的真实输入预算比较：不超过 inline 预算时整体内联发送；超过 inline 预算但在 provider 硬限内时 SHALL 通过既有 artifact 读取能力或完整有序分块传输完整候选原文，并记录组装 digest；候选 SHALL NOT 被截断、摘要替代或以“模型可自行读取本地路径”为前提，SHALL NOT 新增第二个候选权威。artifact 不可读、分块缺失或超过 provider 硬限时，系统 SHALL 在 turn CAS 之前拒绝并通知用户，门状态与预算不变；用户点击“分段返修／重试”后才开启新回合。每个 `turn_id` 的 `attempt_no` SHALL 有固定上限；每次真实 provider start SHALL 写入 provider-start ledger，但逻辑预算每个回合只消耗一次，SHALL NOT 以 WebSocket 事件推断启动次数。修订教学 SHALL 写死「只改反馈点名的内容，其余逐字保留」及反面清单（禁止删字段、清空 Outputs、省略 Handoff Schema 三字段）。修订后 findings 与既有指纹重复时 SHALL 按阶段 1 契约回到同一人工门。
 
 #### Scenario: 修订成功回呈
 
@@ -91,8 +93,18 @@
 
 #### Scenario: 反馈超长零副作用拒绝
 
-- **WHEN** 反馈文本或构造的 revision prompt 超过 bounded-field 上限
+- **WHEN** 反馈文本超过 bounded-field 上限
 - **THEN** 系统拒绝创建 turn，预算与 provider 启动计数不变；人收到超限原因后可改短重发（新 `command_id`）
+
+#### Scenario: 大候选完整返修
+
+- **WHEN** 当前候选为 28,695 字节，与固定合同和 feedback 组装后超过 inline 预算但在 provider 硬限内
+- **THEN** 系统以 artifact 或完整有序分块传输完整候选原文，provider 基于完整候选返修，组装 digest 被记录，候选未被截断
+
+#### Scenario: 分块缺失或超硬限在 CAS 前停等
+
+- **WHEN** 组装时 artifact 不可读、任一分块缺失，或完整输入超过 provider 硬限
+- **THEN** 系统在创建 turn 与扣减预算前拒绝并通知用户，门保持等待态、预算与 provider 启动计数不变；用户点击“分段返修／重试”后才开启新回合
 
 #### Scenario: 同指纹重现回同一门
 
@@ -189,3 +201,36 @@ SC 计划批准的 durable Confirmed 终态 SHALL 保留 human gate snapshot 与
 
 - **WHEN** 修订回合构建 prompt 时当前 artifact 版本无 markdown（如已被投影版本覆盖）
 - **THEN** 系统 SHALL 回落取最近一个 Markdown artifact version（批准时的计划文本）作为修订基线；版本列表完全无 Markdown 时按候选缺失拒绝
+
+### Requirement: 候选快照驱动的 plan 门恢复（REQ-C1-GATE-01）
+
+当 plan 的候选门因 relay 失败、无 WS consumer、慢 observer 或其他观察面故障进入可恢复等待时，系统 SHALL 先将完整 candidate snapshot、source revision、budget、gate 身份与诊断事实持久化，再展示恢复操作。驾驶舱和系统通知 MUST 提供“恢复运行”或“从权威候选重建”按钮；没有完整候选快照时 SHALL 禁止裸 approve。恢复/重建成功后 SHALL 回到现有 typed feedback/approve/abandon 协议，不创建第二候选权威或自动代替用户关门。
+
+#### Scenario: relay 失败后恢复原门
+
+- **WHEN** relay 失败且 candidate snapshot、source revision、budget 和 gate 事实已完整持久化
+- **THEN** 驾驶舱显示失败原因与“恢复运行”操作；用户点击后系统恢复原反馈/批准面并由既有编排继续，issue 不被 abandon
+
+#### Scenario: 缺失快照禁止裸批准
+
+- **WHEN** plan 门处于恢复等待但缺少完整 candidate snapshot 或其 source/budget 事实不可读
+- **THEN** 系统不显示或拒绝 approve，显示“从权威候选重建/恢复运行”操作和缺失原因；不扣预算、不启动 provider、不伪造门已批准
+
+#### Scenario: 无 WS consumer 仍可从驾驶舱恢复
+
+- **WHEN** observer/WS consumer 不存在或投递失败但 durable 候选和门转换已落盘
+- **THEN** 系统通过 inbox/系统通知呈现可恢复卡片，用户经 REST/驾驶舱操作提交反馈或批准后继续原门；观察面失败不被当作候选业务失败
+
+### Requirement: plan 门操作结果通知（REQ-C1-GATE-02）
+
+每个恢复等待项 SHALL 向驾驶舱 inbox/系统通知提供失败原因、已完成步骤、目标身份、plan/session/gate 身份、可能外部副作用、按钮动作及成功后的下一阶段。恢复操作 MUST 携带稳定 `command_id`、gate/绑定身份和 expected version；同键同负载重放 SHALL 返回同一结果，过期对象 SHALL fail-closed。
+
+#### Scenario: 重复恢复命令幂等
+
+- **WHEN** 客户端在首次响应未知时以同一 `command_id` 重试恢复操作
+- **THEN** 系统返回首次操作结果，不重复重建候选、不重复扣预算、不启动第二 provider
+
+#### Scenario: 旧 gate 操作被拒
+
+- **WHEN** 用户以过期 gate/version 或不同 plan/session 身份提交恢复、feedback 或 approve
+- **THEN** 系统返回需刷新/重新绑定提示，门、候选、预算和历史均不变

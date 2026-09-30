@@ -71,7 +71,7 @@
 
 ### Requirement: Group Work Item completion 只记录 Coder 已创建的提交
 
-Group Work Item 在通过其单项 Code Review 后，编排服务 MUST NOT 对共享 worktree 执行自动暂存或自动创建 Git commit。服务 MUST 仅读取该 worktree 当前 `HEAD` 并将其记录为该 Work Item 的 terminal completion commit；该 Work Item 的完整 Git 证据为其 UnitRun `start_commit..completion_commit` 区间，不能以该末尾 commit 的单次父提交 diff 代替。
+Group Work Item 在通过其单项 Code Review 后，编排服务 MUST NOT 对共享 worktree 执行自动暂存或自动创建 Git commit。服务 MUST 仅读取该 worktree 当前 `HEAD` 并将其记录为该 Work Item 的 terminal completion commit；该 Work Item 的完整 Git 证据为其各 UnitRun execution 的 `start_commit..completion_commit` 区间，不能以该末尾 commit 的单次父提交 diff 代替。每个 execution 的 `start_commit` MUST 取自该 execution 在 provider 认领前记录的真实 `HEAD`；completion 阶段 MUST NOT 以基线分支 `HEAD` 或首次 execution 起点回填缺失的起点，缺失时 MUST 持久化可诊断的不一致并停等，而不是猜测区间。
 
 该行为 MUST NOT 依据文件或目录名称额外拒绝 Coder 的提交；提交范围责任由 Coder 使用当前 Work Item 的 `write_policy` 决定。该行为也 MUST NOT 新增服务端文件范围门禁或由服务端替 Coder 补做提交。
 
@@ -89,3 +89,8 @@ Group Work Item 在通过其单项 Code Review 后，编排服务 MUST NOT 对�
 
 - **WHEN** 同一 UnitRun 中 Coder 已创建首次提交，且在 Code Review rework 后又创建一个新的最终 HEAD
 - **THEN** 编排服务 MUST 将最终 HEAD 记录为 completion commit，但后续范围、diff 和人工证据 MUST 覆盖该 UnitRun 的起始提交至最终 HEAD 的完整区间
+
+#### Scenario: execution 起点缺失不回填
+
+- **WHEN** 某 execution 完成时没有已记录的 `start_commit`
+- **THEN** 编排服务 MUST NOT 以基线分支 `HEAD` 回填，MUST 持久化起点缺失诊断并停等用户处理
