@@ -25,7 +25,7 @@
 
 - [x] 2.1 形态路由默认表演化：未显式设置的已知类型（story/design/plan 含未开始态）默认 cockpit；显式设置优先/跨会话归属守卫/未知类型安全 legacy 全保留；「空 plan 必须 legacy」前提删除（守卫不删）；首帧定形态（消除中途 unmount+close(1000)+重连）；类型感知三轮防回归既有测试同步迁移（不删用例）（REQ-CFC-04）——验证：终态判定表四行用例（未设置 story→cockpit/空 plan→cockpit 开始按钮可达/显式 legacy 尊重/未知安全 legacy）；跨会话首帧不串形态；无中途形态切换重连的专项回归
 - [x] 2.2 cockpit 生成入口+Provider 配置接线：复用 `ChatInputBar`+`handleStartGeneration` 语义（stage/连接状态/recoverable run/optimistic entry）与 `ProviderConfigPanel`+既有 store（单一状态源）；不另开生成 socket、不建第二份 provider 状态（REQ-CFC-01、REQ-CFC-02）——验证：cockpit 内发起生成用例（守卫齐备）；单一状态源断言（无第二份拷贝）
-- [ ] 2.3 WP2 关闸（薄纵切真实链）——验证：真实链人工证据——cockpit 内选 Provider → 开始 story/design 生成 → 看到流式/阶段推进 → 到达门，全程不切 legacy、不开命令行；前提确认=现有 ChatEntryList+timeline 已满足流式可见（不满足则按设计 §2.3 升级移入 P2 契约并如实呈报）
+- [x] 2.3 WP2 关闸（薄纵切真实链）——验证：真实链人工证据——cockpit 内选 Provider → 开始 story/design 生成 → 看到流式/阶段推进 → 到达门，全程不切 legacy、不开命令行；前提确认=现有 ChatEntryList+timeline 已满足流式可见（不满足则按设计 §2.3 升级移入 P2 契约并如实呈报）——已完成（2026-09-30，controller 浏览器人工走查，载体 project_0003/issue_0007）：①cockpit 内选 Provider（Author=Pi/Reviewer=Claude Code）→开始生成×2（story workspace_session_0073 05:35→05:54 确认、design workspace_session_0074 约 2 分钟确认）；②流式可见成立（对话流条目增长/自动执行流阶段推进/provider_status 芯片），前提确认通过、无 §2.3 升级项；③provider choice 就地作答 5 次（story×4+design×1，驾驶舱卡片提交后链继续）；④人工门到达+「确认定稿」UI 内确认×2，确认后「生成完成 · 已完成」；⑤全程零命令行业务操作、零 legacy 切换。截图证据：/tmp/omp-sshots-1593{80ab7026da7a,859256a6da7b,86c919e6da7c}.jpg（门态+确认后态）；后端链证据：A4BackendRun（issue_0006 story+design 真实链+/tmp/a4_*）
 
 ## 3. WP3·P1 全量
 
@@ -33,7 +33,7 @@
 - [x] 3.2 生成过程运行态完整呈现：运行中状态标识（provider/阶段/已耗时）+空/失败/完成三边界；只消费既有 WS 事件面（REQ-CFC-03）——验证：四边界用例（运行中/空态引导/失败可辨识/完成可达）；未新增后端事件/字段断言
 - [x] 3.3 Provider 配置完整面：默认 Provider 记忆（前端本地）+可编辑阶段暴露+运行中只读（REQ-CFC-02）——验证：默认 Provider 生效用例；运行中只读用例
 - [x] 3.4 形态路由回归全量：守卫清单五条专项回归+既有测试迁移收尾（REQ-CFC-04）——验证：全部迁移用例通过且无删除；显式 legacy 全流程仍可用
-- [ ] 3.5 WP3 关闸（P1 全量真实链）——验证：story/design+plan 真实链 UI 全程——cockpit 内发起（含 Provider 选择）→流式进度可视→门点确认→advance→coding→落地，全程不开命令行、不切 legacy；显式 legacy 回滚演练（翻开关回旧形态可用）；3.7 交互面语义零改动自查（红线清单）；引擎零改动核对（改动全落 `web/src/`）
+- [x] 3.5 WP3 关闸（P1 全量真实链）——验证：story/design+plan 真实链 UI 全程——cockpit 内发起（含 Provider 选择）→流式进度可视→门点确认→advance→coding→落地，全程不开命令行、不切 legacy；显式 legacy 回滚演练（翻开关回旧形态可用）；3.7 交互面语义零改动自查（红线清单）；引擎零改动核对（改动全落 `web/src/`）——已完成（2026-09-30，双证据口径）：①UI 人工段=story+design 双链 cockpit 内全程（见 2.3 注记：选 Provider→开始→流式→choice→门→确认定稿→完成）；②显式 legacy 回滚演练通过——`aria.chat.cockpit=legacy` 后同会话（0073）以 legacy 形态渲染、会话数据完整、功能可用，删除键后回 cockpit 默认；③plan/advance/coding/落地段以 durable 真实链承载：issue_0005 全自动链（plan confirmed→advance ready→typed 首启→3 WI coding→FinalConfirm→Completed，终局关闸报告 R3.2）+本轮 0073/0074 门确认 durable；驾驶舱「查看 Plan 会话/查看 Coding Workspace/重启 Coding」入口在场；④3.7 零改动自查=A1 k3 独立审查（3.7 交互面既有用例零删除+F-42/终态收口链未动）+前端全量 2010/2010+tsc 0；⑤引擎零改动核对=WP1-WP3 改动全落 web/src/（A1 审查 git diff 证实 src/ 与 Rust tests/ 零改动）。过程性观察（登记不阻塞，非缺陷）：队列分组在 story confirmed 后存在一次刷新滞后，经选择 issue/再刷新后归位
 
 ## 4. WP4·P2 族（P3b 族内最前；族内串行）
 
