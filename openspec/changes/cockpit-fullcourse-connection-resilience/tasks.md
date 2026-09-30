@@ -38,7 +38,7 @@
 ## 4. WP4·P2 族（P3b 族内最前；族内串行）
 
 - [x] 4.0 P3b phase 回门节点 + REQ-CG-04 补句（**族内最前**）：approval compile 失败/修订中止后 phase/active_node 回滚到门节点（新状态写，不改事件前缀）；REQ-CG-04 人工权威升级语义显式化补句（契约化 4f34ba58，零行为变更）（REQ-CG-04、REQ-CG-05）——验证：0429 形态复现（断连中止快照门 confirm 后门真实关闭或明确可诊断拒绝，非 STAGE_INVALID 死拒）；compile 失败后 confirm 可达用例；事件前缀不可变断言；既有 REQ-CG-04/05 场景全数保持；承接 3.7 挂账「C 正向门关闭」（Q5 移交）
-- [ ] 4.1 存量卡死 session 复活验证（随 4.0 落地）：0166/0167/0168/0199/0277/0429 逐个复活验证（复活续链或可诊断终态化），登记 defer-ledger，不回写历史（REQ-WCR-06）——验证：每个 session 有登记结果；无 durable 历史改写
+- [x] 4.1 存量卡死 session 复活验证（随 4.0 落地）：0166/0167/0168/0199/0277/0429 逐个复活验证（复活续链或可诊断终态化），登记 defer-ledger，不回写历史（REQ-WCR-06）——验证：每个 session 有登记结果；无 durable 历史改写——已完成（2026-09-30）：6/6 可诊断终态化（记录已随用户 2026-09-21 数据面清理物理消亡，复活对原始记录不可执行，如实登记）；形态测试复跑 5/5（0429 形态/断连零终态/并发唯一终态）；零历史改写（对照探针副作用已字节级还原）。登记册：`cadence/reports/cockpit-fullcourse-connection-resilience/defer-ledger.md`
 - [x] 4.2 session-owned run manager 骨架：`ActiveRun`（token/cancellation/command 通道/state/lease epoch）+单一 engine 实例+单一原子临界区（token+epoch 判等）+内存回收点+进程重启诚实恢复（REQ-WCR-01）——验证：连接关闭 run 持续；重连无第二 engine 实例；生命周期交错并发用例；重启恢复口径用例
 - [x] 4.3 driver/observer 角色与 lease：Hello 可选 `role` 字段双字段容忍+服务端缺席归一内部常量+仲裁只认内部角色；observer 写服务端拒绝+可诊断错误；会话级单活性 lease（关闭撤销不取消 run/显式接管 epoch 递增/旧 epoch 迟到写被拒）；driver 脚本族零强制升级（REQ-WCR-02）——验证：缺席归一用例；observer 拒写用例；driver close 只撤 lease 用例；接管与旧 epoch 拒绝用例；新旧 wire 双向兼容用例；6 处脚本 hello 发送点零改动核对
 - [x] 4.4 close 终态语义：连接关闭不写 `aborted_by_disconnect`/不标 Failed/不整流回 prepare_context；真实取消（显式 abort/supersede）照旧；完成与关闭并发唯一 terminal（REQ-WCR-03）——验证：0437 形态复现（门开 104ms 窗口断连不覆盖）；0429 业务终态不被改写复现；真实取消路径既有测试全绿；并发唯一 terminal 用例；过渡期归因关联随架构消失的切换核对
