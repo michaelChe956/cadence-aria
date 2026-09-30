@@ -19,7 +19,7 @@
 - [x] 1.1 连接级中性归因日志：服务端 connection_id + receiver 退出类型（close code/reason/EOF/error/idle 标记）+ session/run token/drive depth/最后双向活性时间；前端 onclose code/reason/wasClean/visibilityState/最后 pong 时间进诊断面；过渡期同 connection_id 写入既有 `aborted_by_disconnect` detail 供关联（REQ-WCR-05）——验证：人为制造四种 close（server idle/前端 4000/卸载 1000/TCP drop）各一次，中性记录唯一归因（RCA §6-③ 归因半链）；断言载体中性（未编码为业务终态）；过渡期关联字段在场
 - [x] 1.2 快照门投影终态守卫：引擎 stage 终态或门相位失配时门控件锁定+原因说明，无 confirm 可达发送路径（0017 形态）（REQ-CFC-05）——验证：0017 形态复现（终态会话门不可操作、无 `INVALID_MESSAGE_FOR_STAGE` 可撞）；引擎真实门开（stage=human_confirm 且相位一致）不受误伤的反例；守卫不改引擎拒绝语义（引擎侧既有拒绝测试不变）——已完成（2026-09-30，方案 A／用户裁决 Q5）：REQ-CFC-05 delta 修订为 amendment-aware（0017 形态=「可无歧义判定的陈旧门」锁死+原因说明；「completed+snapshot」为 REQ-GCE-03 amendment 重开合法载体形态验收化保留，歧义面由引擎既有拒绝兜底）；红绿证据=workspace-cockpit-projection/cockpit-action-routing 新增 7 用例（4 非载体形态锁死+残留 turn 锁死+载体形态放行+发送路径零出站），既有用例零删除（amendment 形态用例补齐 workspaceType 夹具迁移）；引擎零改动（diff 无 `src/`）
 - [x] 1.3 driver readback 修复：`stage3_group_snapshot_readback` `elapsedMs is not a function`（driver 脚本 JS bug）修复+复跑（M5-4，Q4 必做且前置）——验证：readback 复跑零错（RCA §6 矩阵 driver 种子效率恢复）
-- [ ] 1.4 WP1 关闸——验证：1.1-1.3 证据齐备；R-2 口径检查（全部文案无「根治」宣称）；改动面=服务端连接日志（增量诊断）+前端守卫+driver 脚本，无 P2 半成品混入
+- [x] 1.4 WP1 关闸——验证：1.1-1.3 证据齐备；R-2 口径检查（全部文案无「根治」宣称）；改动面=服务端连接日志（增量诊断）+前端守卫+driver 脚本，无 P2 半成品混入——已完成（2026-09-30，k3 独立审查通过 correct/零 findings）：R-2 通过（用户可见文案零「根治」，change 文档 5 处均为形态级表述或纪律自引用）；改动面通过（WP1 五提交均为 HEAD 祖先，P2 排除项检索零命中）；1.2 证据齐备（125 测试绿+validate+引擎零 diff）。**降级口径注记（R-2 先例，矩阵期补证）**：1.1 四种 close 真实浏览器走查按 R-2 显式 defer 至 WP4.7 矩阵③；1.3 readback 真实 campaign 复跑未执行（自动化证据=单元契约 20 tests+09-17 定向全过），复跑并入 WP4.7 矩阵期（4.7 未勾前本 change 不归档，缺口不丢失）
 
 ## 2. WP2 首批·P1 薄纵切（明早用户可验证）
 
