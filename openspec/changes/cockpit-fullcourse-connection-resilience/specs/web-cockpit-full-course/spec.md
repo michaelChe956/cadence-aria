@@ -112,12 +112,17 @@ cockpit SHALL 在会话创建/发起入口处提供 Provider 选择（含默认 
 
 ### Requirement: 快照门投影终态守卫（REQ-CFC-05）
 
-投影层 SHALL 对引擎 stage/相位做终态守卫：当引擎 stage 已处于终态（如 completed/failed 等非门等待态）或门相位与快照投影失配时，快照门控件 MUST 呈现为不可操作（锁定呈现 + 原因说明），MUST NOT 提供 confirm/反馈的可达发送路径——前端 MUST NOT 再以「投影存在未关闭门」为判据放行可操作门。该守卫是前端投影行为：MUST NOT 改变引擎拒绝语义（引擎照旧拒绝），其作用是不再制造用户可撞的协议错误路径。引擎真实门开（stage 为门等待态且相位一致）MUST NOT 被守卫误伤。
+投影层 SHALL 对引擎 stage/相位做终态守卫，且守卫 MUST 为 amendment-aware：只锁「前端可无歧义判定为陈旧」的门形态——引擎 stage 已处于终态且该会话不构成 REQ-GCE-03 amendment 重开的合法载体形态（`work_item_plan` + `single_candidate` 流 + 相位 completed + 门快照仍在场），或门相位与快照投影失配。锁定时快照门控件 MUST 呈现为不可操作（锁定呈现 + 原因说明），MUST NOT 提供 confirm/反馈的可达发送路径。「completed+snapshot」是 REQ-GCE-03 amendment 重开的合法载体形态，验收化保留：本守卫 MUST NOT 要求前端锁死该形态——amendment 上下文事实不在 wire 面（`session_state` 未暴露该判别，引擎 `probe_amendment_gate_context` 能判而前端不可见），前端无法无歧义判定其陈旧；真实陈旧由引擎既有 stage 拒绝（`INVALID_MESSAGE_FOR_STAGE` 系）兜底。该守卫是前端投影行为：MUST NOT 改变引擎拒绝语义（引擎照旧拒绝）。引擎真实门开（stage 为门等待态且相位一致）MUST NOT 被守卫误伤。
 
-#### Scenario: 终态会话的门锁定（0017 形态）
+#### Scenario: 陈旧快照门锁定（0017 形态·可无歧义判定）
 
-- **WHEN** 引擎 stage=completed 的停摆会话，其前端快照门投影仍存在
-- **THEN** 门控件锁定不可操作并附原因说明，不存在可发出并撞 `INVALID_MESSAGE_FOR_STAGE` 的路径
+- **WHEN** 引擎 stage=completed 的会话其前端快照门投影仍存在，且不构成 amendment 载体形态（非 `work_item_plan`/`single_candidate` 流，或 single_candidate 相位非 completed，或仅残留无快照凭据的 turn）
+- **THEN** 门控件锁定不可操作并附原因说明，不存在可发出并撞 `INVALID_MESSAGE_FOR_STAGE` 的路径（confirm/反馈/终止均零出站）
+
+#### Scenario: amendment 载体形态放行（REQ-GCE-03 重开载体）
+
+- **WHEN** `work_item_plan`/`single_candidate` 会话 stage=completed、相位 completed 且门快照仍在场——REQ-GCE-03 amendment 重开的合法载体形态，前端不可无歧义判定为陈旧
+- **THEN** 守卫不以「引擎 stage 终态」为由锁定该形态，门控件维持可操作；若实际无 amendment 上下文，发送由引擎既有拒绝兜底（可诊断协议错误），守卫不改变该拒绝语义
 
 #### Scenario: 相位失配锁定
 

@@ -49,6 +49,17 @@
 - **WHEN** `PlanAmendmentContext` 已先行 Open→Applying 而 group attempt 已离开 AwaitingPlanAmendment（应用窗口内）时，迟到 review verdict 或 Evaluate 重建到达该 Completed+WaitingForHuman 会话
 - **THEN** 终态评审守卫照常丢弃该 verdict（不重路由）；Evaluate 重建走普通门重置公式，不接续快照预算——判别与 probe 放行重开的完整谓词同源
 
+
+#### Scenario: enrolled plan 仅在确认落盘后独立推进
+
+- **WHEN** 人关门批准了 enrollment 精确绑定的 plan，但 compile/recovery 尚未成功落下 durable Confirmed
+- **THEN** 不自动 advance；只有随后成功出版且当前仍 enrolled 时编排器才可独立请求 advance，不另建人工门
+
+#### Scenario: 普通 plan 关门仍不自动推进
+
+- **WHEN** 未 enrolled plan durable Confirmed 或曾 enrollment 但已关闭
+- **THEN** 原有客户端显式 advance 语义不变，服务器不因门关闭或确认而自动 advance
+
 ### Requirement: 门与回合的 durable 恢复（REQ-CG-05）
 
 人工门快照与人工门预算扣减、`HumanGateTurn` 预留、provider 幂等键 SHALL 作为同一 durable reservation 原子提交（在 session record 上以 CAS 写入，复用阶段 1 快照原子写入契约）；恢复时按 reservation 状态决定释放、等待或继续，保证「预算只扣一次」与「同 `command_id` 不重复启动 provider」可被严格证明。`HumanGateTurn` SHALL 为独立 durable 记录（`turn_id`、`command_id`、`feedback_text`、状态、`attempt_no`、预算预留记账、结果引用、失败分类），其 `Reserved` 状态只在与上述原子事务同提交时生效。断线重连后系统 SHALL 从 durable 状态重建门与 in-flight turn：provider 仍在运行则等待其完成；provider 已终止则以同 `turn_id` 恢复。**phase 回门节点**：approval compile 失败与修订中止（含断连中止）后，系统 SHALL 将 phase / active_node 回滚到门节点——快照门呈现与 human_confirm 消息判定重新一致，confirm / feedback SHALL 可达且 MUST NOT 被以 `WORK_ITEM_PLAN_HUMAN_GATE_STAGE_INVALID` 拒绝（消除「stage=human_confirm 却拒 human_confirm」的相位死锁，0429 形态）；该回滚 SHALL 以新的状态写实现，MUST NOT 改写已持久化事件前缀。门相关事件 SHALL 保持事件前缀不可变，恢复不得删除或改写已持久化事件。
