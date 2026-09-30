@@ -18,8 +18,9 @@ v1.x 的十项铁律中约七成是跨项目恒真内容，已提为**用户级�
 | `rule://subagent-grounding` | 规则与工具的渐进式发现协议 | 所有 agent |
 | `rule://subagent-protocol` | 编排铁律、并行细则、派工纪律、git 安全、报告契约 | 所有 agent |
 | `rule://subagent-roster` | 角色指派与派工规则、通道运维 | **仅主会话**（`agents: main`） |
+| `rule://subagent-routing-bridge` | 内置角色名映射与设计派工硬规则（alwaysApply 常驻） | **仅主会话**（`agents: main`） |
 
-> 🔴 **前置依赖：上表三条规则不随本仓库分发。** 未安装时 `rule://` 引用无法解析，
+> 🔴 **前置依赖：上表四条规则不随本仓库分发。** 未安装时 `rule://` 引用无法解析，
 > 本文件第 0 节以外的协作纪律将全部缺失。首次在本仓库工作前执行一次：
 >
 > ```bash
@@ -28,9 +29,9 @@ v1.x 的十项铁律中约七成是跨项目恒真内容，已提为**用户级�
 > # 装完需重启 omp 或 /clear——规则快照在会话启动时固定
 > ```
 >
-> 校验：`./install-agents.sh status` 应列出 3 条 `[本脚本管理]` 规则与 8 个 agent 定义。
-> 该仓库同时分发 8 个 agent 定义（ds-task、glm53-task、max-task、ter-task、
-> k3-reviewer、glm5.3-f-scout、oracle、researcher）——未安装则派工时找不到这些角色。
+> 校验：`./install-agents.sh status` 应列出 4 条 `[本脚本管理]` 规则与 11 个 agent 定义。
+> 该仓库同时分发 11 个 agent 定义（anthropic-task、glm53-task、ds-task、fe-fix-task、max-task、
+> design-task、design-task-max、k3-reviewer、scout、oracle、researcher）——未安装则派工时找不到这些角色。
 
 **本文件只保留本项目专属内容。** 通用纪律不在此重复——需要时读上表对应规则。
 项目专属约束的活动索引见 `cadence/project-rules/subagent-project-index.md`。
