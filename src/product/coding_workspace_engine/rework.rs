@@ -190,8 +190,7 @@ impl CodingWorkspaceEngine {
                 forced_replay_lines.join("\n")
             )
         };
-        let rendered_context =
-            self.render_coder_unit_run_context(&updated, &coder_provider_name, None)?;
+        let rendered_context = self.render_coder_unit_run_context(&updated, &coder_provider_name)?;
         let mut delta_prompt = build_coding_delta_prompt(
             &updated,
             context,

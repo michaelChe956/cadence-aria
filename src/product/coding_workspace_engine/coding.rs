@@ -170,13 +170,13 @@ impl CodingWorkspaceEngine {
             .as_ref()
             .map(routing_reference_context_from_policy)
             .unwrap_or_default();
-        let rendered_context = self.render_coder_unit_run_context(
-            &attempt,
-            &coder_provider,
-            rework_instruction
-                .as_ref()
-                .map(|instruction| instruction.summary.clone()),
-        )?;
+        // G7（终局关闸缺口，#18 原族 rerun 路径残留）：未消费 rework 指令
+        // 不得进入绑定渲染上下文——首启已冻结 coder_execution_context_hash
+        //（render→bind），rerun 指令后 runner 续起若把指令摘要带进 envelope
+        // 会与冻结哈希恒失配（coding_unit_run_execution_context 死循环）。
+        // 与 execute_coder_fix_from_review_outcome 同构：绑定上下文稳定，
+        // 指令经增量段进入实际 prompt，由 Task 7 认领事务消费。
+        let rendered_context = self.render_coder_unit_run_context(&attempt, &coder_provider)?;
         let mut full_prompt = rendered_context
             .as_ref()
             .map(|rendered| rendered.text.clone())
@@ -189,6 +189,21 @@ impl CodingWorkspaceEngine {
                     &routing_context,
                 )
             });
+        // group 路径（rendered_context 在场）此前只把指令摘要放进 envelope、
+        // fix_hints/questions 与 ContextNote 全文被丢弃——以增量段补进实际
+        // prompt（与 rework 路径同构）；无新增内容时保持原 prompt 形态。
+        if rendered_context.is_some()
+            && (rework_instruction.is_some() || coding_context_notes.is_some())
+        {
+            full_prompt.push_str("\n\n");
+            full_prompt.push_str(&build_coding_delta_prompt(
+                &attempt,
+                context,
+                rework_instruction.as_ref(),
+                coding_context_notes,
+                &routing_context,
+            ));
+        }
         full_prompt.push_str(&forced_replay_section);
         let prompt_mode = if rendered_context.is_some() || resume_provider_session_id.is_none() {
             CodingPromptMode::FullConversation

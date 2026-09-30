@@ -533,7 +533,7 @@ pub(super) fn current_plan_defect_finding() -> serde_json::Value {
     })
 }
 
-fn current_plan_defect_output() -> String {
+pub(super) fn current_plan_defect_output() -> String {
     serde_json::json!({
         "plan_defect_findings": [current_plan_defect_finding()]
     })

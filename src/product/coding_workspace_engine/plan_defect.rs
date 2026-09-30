@@ -371,11 +371,15 @@ impl CodingWorkspaceEngine {
         Ok(bundle.reviewer_projection)
     }
 
+    /// 绑定渲染上下文（render→bind）：envelope 的
+    /// `previous_actionable_review` 恒为 None——未消费 rework 指令摘要进
+    /// 入 envelope 会与 unit run 已冻结的 coder_execution_context_hash 恒
+    /// 失配（G7，#18 原族）；指令内容由调用方经增量段进入实际 prompt。
+    /// 渲染 section（PreviousReview=null）保持在场，维持既有绑定哈希稳定。
     pub(crate) fn render_coder_unit_run_context(
         &self,
         attempt: &CodingExecutionAttempt,
         provider: &ProviderName,
-        previous_actionable_review: Option<String>,
     ) -> Result<Option<RenderedExecutionContext>, CodingWorkspaceEngineError> {
         let Some((run, bundle)) = self.active_unit_run_projection(attempt)? else {
             return Ok(None);
@@ -391,7 +395,7 @@ impl CodingWorkspaceEngine {
                     repository_state_ref,
                     resolved_handoff_revision_ids: run.resolved_handoff_revision_ids.clone(),
                     unit_run_id: run.id.clone(),
-                    previous_actionable_review,
+                    previous_actionable_review: None,
                     start_commit: run.start_commit.clone(),
                 },
             )

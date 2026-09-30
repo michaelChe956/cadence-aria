@@ -603,7 +603,7 @@ async fn coding_plan_repair_group_completion_publishes_dependency_handoff_for_ne
         .expect("canonical handoff pointer");
     let rendered = fixture
         .engine
-        .render_coder_unit_run_context(&updated, &ProviderName::Codex, None)
+        .render_coder_unit_run_context(&updated, &ProviderName::Codex)
         .expect("next unit context")
         .expect("group context");
     let next_run = fixture

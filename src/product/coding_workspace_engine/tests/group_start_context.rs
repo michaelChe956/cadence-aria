@@ -165,7 +165,7 @@ async fn group_attempt_records_base_head_as_first_unit_start_commit() {
     assert!(rx.try_recv().is_err());
 
     engine
-        .render_coder_unit_run_context(&updated, &ProviderName::Codex, None)
+        .render_coder_unit_run_context(&updated, &ProviderName::Codex)
         .expect("create first unit run");
     let first_unit_run = store.get_active_unit_run(&updated).expect("first unit run");
     assert_eq!(
