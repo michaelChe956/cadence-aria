@@ -789,7 +789,8 @@ test('campaign_stage3_group_snapshot_readback_passes_elapsed_callback_to_request
     snapshotUrl: 'http://127.0.0.1:4317/snapshot',
     requestJson: async (_url, _headers, elapsedMs) => {
       receivedElapsed = elapsedMs;
-      return { body: stage3GroupAttemptSnapshotFixture() };
+      // 与真实 requestJson 同契约：parseResponse 返回解析后的 body 本身（无 { body } 包装）。
+      return stage3GroupAttemptSnapshotFixture();
     },
     elapsedMs: () => 321,
     attemptId: 'attempt_fixture_0001',
@@ -798,6 +799,58 @@ test('campaign_stage3_group_snapshot_readback_passes_elapsed_callback_to_request
 
   assert.equal(typeof receivedElapsed, 'function');
   assert.equal(receivedElapsed(), 321);
+});
+
+// GAP-1 回归（真实 run rep5 实证）：调用点必须按 requestJson/parseResponse 的真实契约
+// 取快照字段（返回 body 本身，无 { body } 包装），否则 evidence 恒 null 且只落
+// 不带 error 的 stage3_group_snapshot_readback_failed。
+test('campaign_stage3_group_snapshot_readback_consumes_request_layer_body_contract', async () => {
+  const { stage3GroupAttemptSnapshotFixture } = await import('./stage3_campaign_fixtures.mjs');
+  const { stage3GroupSnapshotReadback } = await import('./workitem_run_campaign.mjs');
+  const logs = [];
+  let recorded = null;
+  let handoffs = 0;
+
+  await stage3GroupSnapshotReadback({
+    snapshotUrl: 'http://127.0.0.1:4317/snapshot',
+    requestJson: async () => stage3GroupAttemptSnapshotFixture(),
+    elapsedMs: () => 0,
+    attemptId: 'attempt_fixture_0001',
+    commandId: 'cmd-adv-0',
+    readDurableAdvanceForAttempt: () => ({ id: 'advance_fixture_0001', status: 'ready' }),
+    readDurableIssueWorktree: () => ({ current_lock_owner_id: 'attempt_fixture_0001' }),
+    recordEvidence: (evidence) => { recorded = evidence; },
+    writeLog: (entry) => logs.push(entry),
+    writeHandoffAndFinish: () => { handoffs += 1; },
+  });
+
+  assert.equal(recorded?.attempt_id, 'attempt_fixture_0001', '真实 body 契约下必须产出 evidence');
+  assert.deepEqual(logs.map((entry) => entry.event), ['stage3_group_snapshot_readback']);
+  assert.equal(logs[0].source, 'group_attempt_snapshot_readback');
+  assert.equal(logs[0].binding_revision_sources, 2);
+  assert.equal(handoffs, 1);
+});
+
+// GAP-1 回归：readback 的 await 在取到快照前中断时，原始错误必须原样落账
+// （不被收尾路径的二次异常掩盖），且 handoff 收尾在任何路径都执行且只执行一次。
+test('campaign_stage3_group_snapshot_readback_preserves_original_error_and_always_finishes', async () => {
+  const { stage3GroupSnapshotReadback } = await import('./workitem_run_campaign.mjs');
+  const logs = [];
+  let handoffs = 0;
+
+  await stage3GroupSnapshotReadback({
+    snapshotUrl: 'http://127.0.0.1:4317/snapshot',
+    requestJson: async () => { throw new Error('readback transport down'); },
+    elapsedMs: () => 0,
+    attemptId: 'attempt_fixture_0001',
+    commandId: 'cmd-adv-0',
+    writeLog: (entry) => logs.push(entry),
+    writeHandoffAndFinish: () => { handoffs += 1; },
+  });
+
+  assert.deepEqual(logs.map((entry) => entry.event), ['stage3_group_snapshot_readback_failed']);
+  assert.match(logs[0].error, /readback transport down/u, '原始错误原样保留，不被二次异常掩盖');
+  assert.equal(handoffs, 1, '收尾在任何路径都执行一次');
 });
 
 test('campaign_stage3_group_snapshot_evidence_fails_closed_on_mismatched_attempt', async () => {

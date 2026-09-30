@@ -758,11 +758,15 @@ export async function stage3GroupSnapshotReadback({
   writeLog = () => {},
   writeHandoffAndFinish = () => {},
 }) {
+  // requestJson 经 parseResponse 直接返回解析后的 body 本身（无 { body } 包装）：快照字段
+  // 直接来自该对象。变量 hoist 到 try 外并预置 null——异常/中断路径下收尾不会读到
+  // try 内未初始化的绑定（TDZ），也不会用二次异常盖掉真实结局；null 兜底维持 fail-closed。
+  let snapshotResponse = null;
   try {
-    const snapshotResponse = await requestJson(snapshotUrl, {}, elapsedMs);
+    snapshotResponse = await requestJson(snapshotUrl, {}, elapsedMs);
     const evidence = stage3GroupSnapshotEvidence({
       snapshot: {
-        ...snapshotResponse.body,
+        ...(snapshotResponse ?? {}),
         advance_record: readDurableAdvanceForAttempt(attemptId),
         issue_shared_worktree: readDurableIssueWorktree(),
       },
@@ -783,8 +787,10 @@ export async function stage3GroupSnapshotReadback({
     }
   } catch (readbackError) {
     writeLog({ event: 'stage3_group_snapshot_readback_failed', error: errorText(readbackError) });
+  } finally {
+    // 收尾与 readback 结局解耦：任何路径（成功/evidence null/取快照中断）都恰好执行一次。
+    writeHandoffAndFinish();
   }
-  writeHandoffAndFinish();
 }
 
 // advance 等待期的收尾决策（task 8.1 修复轮 M2）：rejected 不消费脚本动作，但对 rejected
