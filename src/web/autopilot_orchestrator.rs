@@ -15,6 +15,12 @@ use crate::web::handlers::lifecycle::plan_preparation::ensure_enrolled_plan;
 use crate::web::plan_generation::{PlanGenerationOutcome, start_plan_generation_once};
 use crate::web::state::WebAppState;
 
+
+/// crash-window 注入（automation_crash_window）是进程级全局：驱动
+/// ensure_enrolled_plan/reconcile 且涉及窗口武装的测试经此锁互斥
+///（p1 四中窗测试 × g8 孤儿重驱测试，并行会互偷窗口）。
+#[cfg(test)]
+static CRASH_WINDOW_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// 单次 reconcile 的 durable 推导结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReconcileOutcome {
@@ -852,6 +858,14 @@ mod tests {
     async fn automation_p1_crash_windows_keep_one_plan_and_never_reissue_provider() {
         use crate::product::issue_automation_store::automation_crash_window::{self, CrashWindow};
 
+        // crash-window 注入是进程级全局：与同样驱动 ensure_enrolled_plan /
+        // reconcile 的 g8_delegated_orphan 测试互斥（并行会互偷窗口）。
+        let _crash_window_serial = super::CRASH_WINDOW_SERIAL
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+
+
         for window in [
             CrashWindow::AfterIntentSaved,
             CrashWindow::AfterPlanSaved,
@@ -1240,3 +1254,161 @@ mod c5_acceptance {
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// G8（终局关闸缺口）：enrolled 自动链 generate 相位委托返修接力孤儿重驱。
+// 现场（issue_0005）：review 裁决返修 → TriggerAggregateRepair 原子预领
+// （repair_reservation=Reserved＋ledger 追加）→ 进程重启，接力 spawn 未
+// 落地 → manager 重建回落 generate 相位人工门（无快照无轮次）→ REST/WS
+// 批准面按相位门语义 fail-closed（409 正确），编排器 admission
+// WaitingForHuman 恒不作答＝自动链死锁。Reserved 未被接力消费＝provider
+// 可证明未启动：编排器重驱 WorkItemPlanSingleCandidateAuthor，预留 CAS
+//（Reserved→ProviderStarted 恰一次）保证不二次启动。
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod g8_delegated_orphan {
+    use super::*;
+    use crate::product::models::SingleCandidatePhase;
+    use crate::product::models::WorkspaceSessionStatus;
+    use crate::product::work_item_plan_policy::{
+        ProviderStartLedgerEntry, RepairReservation, RepairReservationState,
+    };
+    use crate::web::handlers::automation_enrollment_test_support::{
+        ISSUE_ID, PROJECT_ID, enrollment_body, put_enrollment, response_json, seed_fixture,
+    };
+
+    fn seed_delegated_orphan_record(paths: &crate::product::app_paths::ProductAppPaths) -> String {
+        let store = IssueAutomationStore::new(paths.clone());
+        let session_id = store
+            .get(PROJECT_ID, ISSUE_ID)
+            .unwrap()
+            .expect("enrollment bound")
+            .session_id
+            .expect("bound session");
+        let session_path = paths
+            .issue_root(PROJECT_ID, ISSUE_ID)
+            .join("workspace-sessions")
+            .join(format!("{session_id}.json"));
+        let mut session: crate::product::models::WorkspaceSessionRecord =
+            crate::product::json_store::read_json(&session_path).unwrap();
+        // 现场 orphan 形态（issue_0005/auto_a2738e2b 落盘口径）：初代已启动、
+        // 返修预领 Reserved 未消费、相位 Generate、durable Running
+        //（重建 manager 后由 F2 恢复回落人工门）。
+        session.single_candidate_phase = Some(SingleCandidatePhase::Generate);
+        session.status = WorkspaceSessionStatus::Running;
+        session.provider_start_ledger = vec![
+            ProviderStartLedgerEntry {
+                provider_start_idempotency_key: format!("single_candidate_author:{session_id}:0"),
+                started: true,
+                provider: None,
+                started_at: None,
+            },
+            ProviderStartLedgerEntry {
+                provider_start_idempotency_key: format!("single_candidate_author:{session_id}:1"),
+                started: true,
+                provider: None,
+                started_at: None,
+            },
+        ];
+        session.repair_reservation = Some(RepairReservation {
+            token: format!("single_candidate_author_repair:{session_id}:1"),
+            owner_session_id: session_id.clone(),
+            owner_run_id: "review_scope_v1:g8-fixture".to_string(),
+            provider_start_idempotency_key: format!("single_candidate_author:{session_id}:1"),
+            state: RepairReservationState::Reserved,
+            commit_id: None,
+        });
+        crate::product::json_store::write_json(&session_path, &session).unwrap();
+        session_id
+    }
+
+    fn durable_reservation_state(
+        paths: &crate::product::app_paths::ProductAppPaths,
+        session_id: &str,
+    ) -> RepairReservationState {
+        let session_path = paths
+            .issue_root(PROJECT_ID, ISSUE_ID)
+            .join("workspace-sessions")
+            .join(format!("{session_id}.json"));
+        let session: crate::product::models::WorkspaceSessionRecord =
+            crate::product::json_store::read_json(&session_path).unwrap();
+        session
+            .repair_reservation
+            .expect("reservation persists")
+            .state
+    }
+
+    #[tokio::test]
+    async fn enrolled_delegated_rerun_orphan_is_redriven_exactly_once_by_reconcile() {
+        // 与 p1 四中窗测试互斥（本测试驱动 ensure_enrolled_plan/reconcile，
+        // 并行会互偷进程级 crash-window 注册）。
+        let _crash_window_serial = super::CRASH_WINDOW_SERIAL
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let inner = seed_fixture(1, true);
+        let root_path = inner._root.path().to_path_buf();
+        let state = WebAppState::new(
+            root_path.clone(),
+            crate::web::runtime::WebRuntime::new_fake(root_path.clone()),
+        );
+        let app = crate::web::app::build_web_router(state.clone());
+        let enable = put_enrollment(&app, enrollment_body(&inner, 1, 1)).await;
+        assert_eq!(enable.status(), axum::http::StatusCode::OK);
+        assert!(response_json(enable).await["enabled"].as_bool().unwrap());
+        let store = IssueAutomationStore::new(inner.paths.clone());
+        let enrollment = store.get(PROJECT_ID, ISSUE_ID).unwrap().unwrap();
+        crate::web::handlers::lifecycle::plan_preparation::ensure_enrolled_plan(
+            &state,
+            &enrollment,
+        )
+        .await
+        .expect("ensure enrolled plan");
+        let session_id = seed_delegated_orphan_record(&inner.paths);
+
+        // 重启替身：全新 state（无 manager/无 run），编排器按 durable 事实分诊。
+        let restart = WebAppState::new(
+            root_path.clone(),
+            crate::web::runtime::WebRuntime::new_fake(root_path.clone()),
+        );
+        let worker = AutopilotOrchestrator::new(
+            restart.clone(),
+            OrchestratorConfig {
+                max_issues_per_tick: 32,
+                ..Default::default()
+            },
+        );
+        let outcome = worker.reconcile(&restart, PROJECT_ID, ISSUE_ID).await.unwrap();
+        assert_eq!(outcome, ReconcileOutcome::Generating);
+
+        // 预留 CAS 被接力消费：Reserved → ProviderStarted（provider 启动
+        // 判据；ledger 不追加新代＝不二次启动）。
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if matches!(
+                durable_reservation_state(&inner.paths, &session_id),
+                RepairReservationState::ProviderStarted
+            ) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "delegated rerun reservation was never consumed by the re-drive"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let session = crate::product::lifecycle_store::LifecycleStore::new(inner.paths.clone())
+            .get_workspace_session(&session_id)
+            .unwrap();
+        assert_eq!(session.provider_start_ledger.len(), 2);
+
+        // 预留已消费后不再重驱（Reserved 判据幂等收口）。
+        let second = worker.reconcile(&restart, PROJECT_ID, ISSUE_ID).await.unwrap();
+        assert_eq!(second, ReconcileOutcome::Generating);
+        let session_after = crate::product::lifecycle_store::LifecycleStore::new(
+            inner.paths.clone(),
+        )
+        .get_workspace_session(&session_id)
+        .unwrap();
+        assert_eq!(session_after.provider_start_ledger.len(), 2);
+    }
+}

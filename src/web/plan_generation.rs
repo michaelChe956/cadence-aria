@@ -59,6 +59,31 @@ pub async fn start_plan_generation_once(
     let session = lifecycle
         .get_workspace_session(&session_id)
         .map_err(|error| format!("bound session unreadable: {error}"))?;
+    // G8（终局关闸缺口）：generate 相位委托返修接力孤儿——review 裁决返修
+    // 后 TriggerAggregateRepair 已原子预领（repair_reservation=Reserved＋
+    // ledger 追加），但接力 spawn 未落地（进程重启→manager 重建回落
+    // generate 相位人工门，无快照无轮次；REST/WS 批准面按相位门语义
+    // fail-closed 正确拒绝）。Reserved 未被接力消费＝provider 可证明未启动：
+    // enrolled 自动链在此直接重驱 WorkItemPlanSingleCandidateAuthor（唯一
+    // 接续路径），预留 CAS（Reserved→ProviderStarted 恰一次）保证不二次
+    // 启动；已消费（ProviderStarted/Committed/Released）不重驱，交由
+    // admission 停等分诊。
+    if delegated_rerun_orphan(&session) {
+        let mut run_context = manager.provider_run_context(state.workspace_runs.clone());
+        run_context.connection_id = None;
+        let (outbound_tx, _dropped_outbound_rx) = tokio::sync::mpsc::channel(1);
+        let started = crate::web::workspace_ws_handler::spawn_provider_run_claiming_idle(
+            run_context,
+            ProviderRunKind::WorkItemPlanSingleCandidateAuthor,
+            outbound_tx,
+        )
+        .await?;
+        return Ok(if started {
+            PlanGenerationOutcome::Running
+        } else {
+            PlanGenerationOutcome::AlreadyActive
+        });
+    }
     match admission_outcome(&session) {
         Some(outcome) => return Ok(outcome),
         None => {}
@@ -172,6 +197,24 @@ fn admission_outcome(session: &WorkspaceSessionRecord) -> Option<PlanGenerationO
     }
 }
 
+/// G8（终局关闸缺口）：generate 相位委托返修接力孤儿判据。TriggerAggregateRepair
+/// 为 SC 返修原子预领 `repair_reservation`（Reserved＋ledger 追加），接力 run 的
+/// reserve 恰一次消费它（Reserved→ProviderStarted）。Reserved 残留且无活 run
+///（调用方已观察）＝接力 spawn 从未落地＝外部 provider 可证明未启动，重驱安全；
+/// 其余状态（已启动/已提交/已释放）均不重驱。
+fn delegated_rerun_orphan(session: &WorkspaceSessionRecord) -> bool {
+    session.single_candidate_phase == Some(SingleCandidatePhase::Generate)
+        && session
+            .repair_reservation
+            .as_ref()
+            .is_some_and(|reservation| {
+                matches!(
+                    reservation.state,
+                    crate::product::work_item_plan_policy::RepairReservationState::Reserved
+                )
+            })
+}
+
 /// 检查点只读投影（编排器/诊断用）。C5 Task 1：经版本化读侧——旧格式
 /// 检查点（仅含已废弃 `logical_repository_id`、无 `target`）读入为
 /// `LegacyUnbound`（旧代无绑定），调用者据此停止自动链；不因 serde 缺
@@ -244,5 +287,41 @@ mod tests {
             admission_outcome(&session),
             Some(PlanGenerationOutcome::NeedsHuman)
         );
+    }
+
+    // G8：委托返修接力孤儿判据——仅 Generate 相位＋Reserved 预领未被消费
+    //（provider 可证明未启动）才可重驱；已消费/已释放与其余相位不重驱。
+    #[test]
+    fn delegated_rerun_orphan_requires_generate_phase_with_unconsumed_reservation() {
+        use crate::product::work_item_plan_policy::{RepairReservation, RepairReservationState};
+
+        let mut session = crate::web::workspace_session::test_session_record("s");
+        session.workspace_type = WorkspaceType::WorkItemPlan;
+        session.run_policy = RunPolicy::Interactive;
+        session.single_candidate_phase = Some(SingleCandidatePhase::Generate);
+        let reservation = |state| {
+            Some(RepairReservation {
+                token: "single_candidate_author_repair:s:1".to_string(),
+                owner_session_id: "s".to_string(),
+                owner_run_id: "review_scope_v1:test".to_string(),
+                provider_start_idempotency_key: "single_candidate_author:s:1".to_string(),
+                state,
+                commit_id: None,
+            })
+        };
+
+        session.repair_reservation = reservation(RepairReservationState::Reserved);
+        assert!(delegated_rerun_orphan(&session));
+
+        session.repair_reservation = reservation(RepairReservationState::ProviderStarted);
+        assert!(!delegated_rerun_orphan(&session));
+        session.repair_reservation = reservation(RepairReservationState::Released);
+        assert!(!delegated_rerun_orphan(&session));
+        session.repair_reservation = None;
+        assert!(!delegated_rerun_orphan(&session));
+
+        session.single_candidate_phase = Some(SingleCandidatePhase::Prepare);
+        session.repair_reservation = reservation(RepairReservationState::Reserved);
+        assert!(!delegated_rerun_orphan(&session));
     }
 }
