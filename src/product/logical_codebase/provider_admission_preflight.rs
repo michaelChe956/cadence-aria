@@ -14,6 +14,13 @@ use std::sync::Arc;
 
 use sha2::Digest as _;
 
+use crate::product::logical_codebase::aggregate_initialization::{
+    AggregateInitializationOperation, AggregateInitializationOperationStatus,
+    AggregateInitializationStepKind, AggregateInitializationStepRecord,
+    AggregateInitializationStepStatus,
+};
+use crate::product::logical_codebase::aggregate_initialization_store::AggregateInitializationOperationStore;
+use crate::product::logical_codebase::policy::SessionPolicyAction;
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::json_store::ProductStoreError;
 use crate::product::logical_codebase::provider_gateway::{
@@ -62,6 +69,343 @@ pub struct ProviderRuleReference {
     pub checkout_id: RepositoryCheckoutId,
     pub path: PathBuf,
     pub digest: Option<String>,
+}
+
+/// REQ-BOOT-04：自举相位凭据——「根规则尚未生成」的唯一自举例外证明。
+///
+/// 内部不透明：只能经 [`BootstrapPhaseCredential::from_running_operation`]
+/// 从当前 durable Running aggregate initialization operation 派生（不公开
+/// 普通构造器）；字段在 provider spawn 前由 admission `check` 重新核验，
+/// 普通 provider session 不得自行声明该相位。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BootstrapPhaseCredential {
+    project_id: String,
+    logical_codebase_id: String,
+    operation_id: String,
+    step: AggregateInitializationStepKind,
+    input_digest: String,
+    canonical_root: PathBuf,
+}
+
+/// admission 相位（Task 1.2）：`Normal` = 普通 session（根规则必须存在）；
+/// `AggregateBootstrap` = LC 根 recipe 自举 turn——凭据只豁免「根规则尚未
+/// 生成」的存在性检查，authority/policy/capability/gateway/cwd/target 与
+/// availability 全部照常必检。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderAdmissionPhase {
+    Normal,
+    AggregateBootstrap(BootstrapPhaseCredential),
+}
+
+impl BootstrapPhaseCredential {
+    /// 唯一构造入口：从 durable Running operation 派生凭据。要求 operation
+    /// 处于 `Running`、目标 step 是 provider turn 且正在运行并已记录
+    /// input digest、`canonical_root` 与 operation 的
+    /// `provider_context_root` 一致；任一不满足即 fail-closed waiting。
+    pub fn from_running_operation(
+        store: &AggregateInitializationOperationStore,
+        project_id: &str,
+        operation_id: &str,
+        step: AggregateInitializationStepKind,
+        lc_id: &str,
+        canonical_root: &Path,
+    ) -> Result<Self, ProviderAdmissionError> {
+        let operation = store.get(project_id, operation_id)?;
+        ensure_bootstrap_operation_running(&operation)?;
+        ensure_bootstrap_step_is_provider_turn(step)?;
+        let record = bootstrap_step_record(&operation, step)?;
+        let input_digest = record.input_digest.clone().ok_or_else(|| {
+            bootstrap_waiting(
+                "bootstrap_step_input_digest_missing",
+                format!(
+                    "bootstrap step {step:?} of operation {operation_id} has no input digest"
+                ),
+            )
+        })?;
+        if !bootstrap_roots_match(canonical_root, &operation.input.provider_context_root) {
+            return Err(bootstrap_waiting(
+                "bootstrap_root_drift",
+                format!(
+                    "credential root {} does not match operation provider context root {}",
+                    canonical_root.display(),
+                    operation.input.provider_context_root.display()
+                ),
+            ));
+        }
+        Ok(Self {
+            project_id: project_id.to_string(),
+            logical_codebase_id: lc_id.to_string(),
+            operation_id: operation_id.to_string(),
+            step,
+            input_digest,
+            canonical_root: canonical_root.to_path_buf(),
+        })
+    }
+
+    /// spawn 前重核验（admission `check` 在 `AggregateBootstrap` 相位调用）：
+    /// 重新读取 durable operation，比对 status/step/input digest/LC/root。
+    /// 任一漂移（operation 已 Completed/Failed/Cancelled、step 已推进、
+    /// digest 变化、LC 不符）即 fail-closed waiting，凭据不可复用。
+    pub fn reverify_against_running_operation(
+        &self,
+        store: &AggregateInitializationOperationStore,
+        lc_id: &str,
+    ) -> Result<(), ProviderAdmissionError> {
+        if self.logical_codebase_id != lc_id {
+            return Err(bootstrap_waiting(
+                "bootstrap_logical_codebase_mismatch",
+                format!(
+                    "credential logical codebase {} does not match admission scope {lc_id}",
+                    self.logical_codebase_id
+                ),
+            ));
+        }
+        let operation = store.get(&self.project_id, &self.operation_id)?;
+        ensure_bootstrap_operation_running(&operation)?;
+        let record = bootstrap_step_record(&operation, self.step)?;
+        let current_digest = record.input_digest.as_deref().ok_or_else(|| {
+            bootstrap_waiting(
+                "bootstrap_step_input_digest_missing",
+                format!(
+                    "bootstrap step {:?} of operation {} has no input digest",
+                    self.step, self.operation_id
+                ),
+            )
+        })?;
+        if current_digest != self.input_digest {
+            return Err(bootstrap_waiting(
+                "bootstrap_input_digest_drift",
+                format!(
+                    "credential input digest {} does not match durable digest {current_digest}",
+                    self.input_digest
+                ),
+            ));
+        }
+        if !bootstrap_roots_match(&self.canonical_root, &operation.input.provider_context_root) {
+            return Err(bootstrap_waiting(
+                "bootstrap_root_drift",
+                format!(
+                    "credential root {} does not match operation provider context root {}",
+                    self.canonical_root.display(),
+                    operation.input.provider_context_root.display()
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// 凭据绑定的 durable operation id（receipt 审计关联用）。
+    pub fn operation_id(&self) -> &str {
+        &self.operation_id
+    }
+
+    /// 凭据绑定的自举 step。
+    pub fn step(&self) -> AggregateInitializationStepKind {
+        self.step
+    }
+
+    /// 凭据冻结的 canonical 聚合根。
+    pub fn canonical_root(&self) -> &Path {
+        &self.canonical_root
+    }
+
+    /// 测试专用构造器（`cfg(test)`）：生产面凭据只能经
+    /// `from_running_operation` 派生；跨模块单测（如 kimi 通道判定）仅用此
+    /// 满足类型面，不进入 admission/spawn 判定路径。
+    #[cfg(test)]
+    pub fn for_test(
+        project_id: &str,
+        logical_codebase_id: &str,
+        operation_id: &str,
+        step: AggregateInitializationStepKind,
+        input_digest: &str,
+        canonical_root: PathBuf,
+    ) -> Self {
+        Self {
+            project_id: project_id.to_string(),
+            logical_codebase_id: logical_codebase_id.to_string(),
+            operation_id: operation_id.to_string(),
+            step,
+            input_digest: input_digest.to_string(),
+            canonical_root,
+        }
+    }
+}
+
+/// D1：BootstrapExecutor 联合证明标记——「有写权限的 Executor」在
+/// `ProviderToolPolicy` 通道上的唯一显式载体，由 credential（durable
+/// Running operation 派生）、bootstrap action（写权限）、canonical root 与
+/// receipt context 四要素共同证明；任一缺失即不成立。三 adapter 在真实
+/// spawn 前经 `validate_tool_policy_for_role` 消费并复核本标记；普通
+/// Executor/Coder 仍不得携带任何 tool policy。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BootstrapExecutorMarker {
+    credential: BootstrapPhaseCredential,
+    action: SessionPolicyAction,
+    canonical_root: PathBuf,
+    receipt_context: String,
+}
+
+/// marker 构造失败（fail-closed）：四要素缺一不可。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BootstrapExecutorMarkerError {
+    EmptyReceiptContext,
+    EmptyCanonicalRoot,
+    /// 自举执行器必须携带写权限 action（`CodingTargetWrite`）。
+    InvalidAction(SessionPolicyAction),
+}
+
+impl std::fmt::Display for BootstrapExecutorMarkerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptyReceiptContext => {
+                write!(f, "bootstrap executor marker requires a receipt context")
+            }
+            Self::EmptyCanonicalRoot => {
+                write!(f, "bootstrap executor marker requires a canonical root")
+            }
+            Self::InvalidAction(action) => write!(
+                f,
+                "bootstrap executor marker requires CodingTargetWrite, got {action:?}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for BootstrapExecutorMarkerError {}
+
+impl BootstrapExecutorMarker {
+    /// 联合证明构造：credential + 写权限 action + canonical root + receipt
+    /// context 齐备才成立；任一缺失/非法返回错误而非退化标记。
+    pub fn new(
+        credential: BootstrapPhaseCredential,
+        action: SessionPolicyAction,
+        canonical_root: impl Into<PathBuf>,
+        receipt_context: impl Into<String>,
+    ) -> Result<Self, BootstrapExecutorMarkerError> {
+        let canonical_root = canonical_root.into();
+        let receipt_context = receipt_context.into();
+        if !matches!(action, SessionPolicyAction::CodingTargetWrite) {
+            return Err(BootstrapExecutorMarkerError::InvalidAction(action));
+        }
+        if canonical_root.as_os_str().is_empty() {
+            return Err(BootstrapExecutorMarkerError::EmptyCanonicalRoot);
+        }
+        if receipt_context.trim().is_empty() {
+            return Err(BootstrapExecutorMarkerError::EmptyReceiptContext);
+        }
+        Ok(Self {
+            credential,
+            action,
+            canonical_root,
+            receipt_context,
+        })
+    }
+
+    /// spawn 前结构复核（guard 消费点）：结构完整返回 `None`，否则返回
+    /// 缺失要素说明。credential 由类型面保证必带（工厂唯一构造）。
+    pub fn incomplete_reason(&self) -> Option<&'static str> {
+        if !matches!(self.action, SessionPolicyAction::CodingTargetWrite) {
+            Some("bootstrap executor action must be CodingTargetWrite")
+        } else if self.canonical_root.as_os_str().is_empty() {
+            Some("bootstrap executor canonical root is empty")
+        } else if self.receipt_context.trim().is_empty() {
+            Some("bootstrap executor receipt context is empty")
+        } else {
+            None
+        }
+    }
+
+    /// marker 携带的自举相位凭据。
+    pub fn credential(&self) -> &BootstrapPhaseCredential {
+        &self.credential
+    }
+
+    /// marker 冻结的 canonical 聚合根（写边界锚点）。
+    pub fn canonical_root(&self) -> &Path {
+        &self.canonical_root
+    }
+
+    /// receipt 审计上下文（root recipe 命令/step 关联键）。
+    pub fn receipt_context(&self) -> &str {
+        &self.receipt_context
+    }
+}
+
+fn bootstrap_waiting(reason_code: &str, detail: String) -> ProviderAdmissionError {
+    ProviderAdmissionError::Waiting {
+        reason_code: reason_code.to_string(),
+        detail,
+        missing_materials: Vec::new(),
+        allowed_actions: vec![BootstrapActionKind::Revalidate, BootstrapActionKind::Retry],
+    }
+}
+
+fn ensure_bootstrap_operation_running(
+    operation: &AggregateInitializationOperation,
+) -> Result<(), ProviderAdmissionError> {
+    if operation.status != AggregateInitializationOperationStatus::Running {
+        return Err(bootstrap_waiting(
+            "bootstrap_operation_not_running",
+            format!(
+                "aggregate initialization operation {} is {:?}, not Running",
+                operation.operation_id, operation.status
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_bootstrap_step_is_provider_turn(
+    step: AggregateInitializationStepKind,
+) -> Result<(), ProviderAdmissionError> {
+    if !step.is_provider_turn() {
+        return Err(bootstrap_waiting(
+            "bootstrap_step_not_provider_turn",
+            format!(
+                "bootstrap step {step:?} is deterministic and must not derive a provider credential"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn bootstrap_step_record<'a>(
+    operation: &'a AggregateInitializationOperation,
+    step: AggregateInitializationStepKind,
+) -> Result<&'a AggregateInitializationStepRecord, ProviderAdmissionError> {
+    let record = operation
+        .steps
+        .get(step.index())
+        .ok_or_else(|| {
+            bootstrap_waiting(
+                "bootstrap_step_not_running",
+                format!("operation {} has no record for step {step:?}", operation.operation_id),
+            )
+        })?;
+    if record.status != AggregateInitializationStepStatus::Running {
+        return Err(bootstrap_waiting(
+            "bootstrap_step_not_running",
+            format!(
+                "bootstrap step {step:?} of operation {} is {:?}, not Running",
+                operation.operation_id, record.status
+            ),
+        ));
+    }
+    Ok(record)
+}
+
+fn bootstrap_roots_match(credential_root: &Path, durable_root: &Path) -> bool {
+    if credential_root == durable_root {
+        return true;
+    }
+    match (
+        std::fs::canonicalize(credential_root),
+        std::fs::canonicalize(durable_root),
+    ) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
 }
 
 /// 准入预检结果：材料齐备且 gateway validate 通过时 `ready == true`。
@@ -119,10 +463,39 @@ impl LogicalCodebaseProviderAdmissionPreflight {
     /// 预检一次 provider 启动请求。只读 durable 事实 + gateway `validate`
     /// （validate 不启动 provider）；任何缺失/漂移都返回 waiting 事实而非
     /// 让运行时 Failed。
+    ///
+    /// `phase`（Task 1.2，REQ-BOOT-04）：`AggregateBootstrap` 携带有效凭据时
+    /// **只豁免「根规则尚未生成」的存在性检查**——凭据先对 durable Running
+    /// operation 重核验（status/step/input digest/LC/root），漂移即 waiting；
+    /// authority/policy/capability/gateway/cwd/target 全部照常必检。
     pub fn check(
         &self,
         request: &SessionLaunchRequest,
+        phase: &ProviderAdmissionPhase,
     ) -> Result<ProviderAdmissionPreflightResult, ProviderAdmissionError> {
+        // 0. 相位凭据先核验（REQ-BOOT-04）：AggregateBootstrap 凭据必须仍与
+        //    durable Running operation 一致；失效/漂移凭据 fail-closed，
+        //    绝不降级为普通 session 或放宽其他维度。
+        let waive_missing_root_rules = match phase {
+            ProviderAdmissionPhase::Normal => false,
+            ProviderAdmissionPhase::AggregateBootstrap(credential) => {
+                if credential.project_id != request.project_id {
+                    return Err(bootstrap_waiting(
+                        "bootstrap_project_mismatch",
+                        format!(
+                            "credential project {} does not match launch request project {}",
+                            credential.project_id, request.project_id
+                        ),
+                    ));
+                }
+                let operations = AggregateInitializationOperationStore::for_lc(
+                    self.paths.clone(),
+                    self.lc_id.clone(),
+                );
+                credential.reverify_against_running_operation(&operations, &self.lc_id)?;
+                true
+            }
+        };
         let resolution = RepositoryAuthorityResolver::new(self.paths.clone()).resolve(
             RepositoryRoutingRequest {
                 project_id: request.project_id.clone(),
@@ -137,6 +510,9 @@ impl LogicalCodebaseProviderAdmissionPreflight {
 
         let mut missing_materials = Vec::new();
         let mut allowed_actions = Vec::new();
+        // 根规则存在性缺失（Task 1.2 与其他材料分离：自举相位凭据是唯一
+        // 豁免面，其余维度永不豁免）。
+        let mut missing_rules = Vec::new();
 
         // 1. manifest：冷启动未登记时投影 waiting（Prepare）。
         let manifest = resolution
@@ -197,7 +573,7 @@ impl LogicalCodebaseProviderAdmissionPreflight {
                     digest: Some(format!("sha256:{:x}", sha2::Sha256::digest(&bytes))),
                 }),
                 Err(_) => {
-                    missing_materials.push(format!(
+                    missing_rules.push(format!(
                         "member {} missing {}",
                         member.alias,
                         rule_path.display()
@@ -211,7 +587,12 @@ impl LogicalCodebaseProviderAdmissionPreflight {
                 }
             }
         }
-        if !missing_materials.is_empty() {
+        if waive_missing_root_rules {
+            // BOOT-04（Task 1.2）：有效自举凭据只豁免「根规则尚未生成」——
+            // 缺失规则保持为记录事实（digest=None），不构成阻断材料，也
+            // 不污染后续维度的 missing_materials；其余维度照常必检。
+        } else if !missing_rules.is_empty() {
+            missing_materials.extend(missing_rules.clone());
             allowed_actions.push(BootstrapActionKind::Prepare);
             allowed_actions.push(BootstrapActionKind::Retry);
         }
@@ -539,6 +920,16 @@ mod tests {
     }
 
     fn admission_fixture() -> AdmissionFixture {
+        admission_fixture_with_policy(true)
+    }
+
+    /// Task 1.2：跳过 aggregate policy artifact 的变体（证明自举豁免不
+    /// 覆盖 policy 维度）。
+    fn admission_fixture_without_policy() -> AdmissionFixture {
+        admission_fixture_with_policy(false)
+    }
+
+    fn admission_fixture_with_policy(with_policy: bool) -> AdmissionFixture {
         let temp = tempfile::tempdir().expect("tempdir");
         let paths = ProductAppPaths::new(temp.path());
         let project = ProjectStore::new(paths.clone())
@@ -625,9 +1016,11 @@ mod tests {
             .unwrap();
 
         let policy_store = AggregatePolicyArtifactStore::for_lc(paths.clone(), &lc.id);
-        policy_store
-            .ensure_bootstrap(&manifest)
-            .expect("bootstrap policy");
+        if with_policy {
+            policy_store
+                .ensure_bootstrap(&manifest)
+                .expect("bootstrap policy");
+        }
 
         let capabilities = Arc::new(StaticCapabilitySource::allowing());
         let streaming_adapter = Arc::new(CountingStreamingAdapter::new());
@@ -728,7 +1121,7 @@ mod tests {
         // 成员 checkout 缺 .claude/rules/language.md。
         let error = fixture
             .preflight()
-            .check(&fixture.launch_request())
+            .check(&fixture.launch_request(), &ProviderAdmissionPhase::Normal)
             .unwrap_err();
         match error {
             ProviderAdmissionError::Waiting {
@@ -759,7 +1152,7 @@ mod tests {
         fixture.capabilities.deny();
         let error = fixture
             .preflight()
-            .check(&fixture.launch_request())
+            .check(&fixture.launch_request(), &ProviderAdmissionPhase::Normal)
             .unwrap_err();
         match error {
             ProviderAdmissionError::Waiting {
@@ -809,7 +1202,9 @@ mod tests {
 
         // 之后的 admission 预检同样 waiting（resolver 与 store 的 policy 引用
         // 一致，但 envelope 由最新 validate 产出；漂移事实由复验路径证明）。
-        let result = fixture.preflight().check(&fixture.launch_request());
+        let result = fixture
+            .preflight()
+            .check(&fixture.launch_request(), &ProviderAdmissionPhase::Normal);
         assert!(result.is_ok() || matches!(result, Err(ProviderAdmissionError::Waiting { .. })));
     }
 
@@ -820,7 +1215,7 @@ mod tests {
 
         let result = fixture
             .preflight()
-            .check(&fixture.launch_request())
+            .check(&fixture.launch_request(), &ProviderAdmissionPhase::Normal)
             .unwrap();
         assert!(result.ready, "missing: {:?}", result.missing_materials);
         assert_eq!(result.rules.len(), 1);
@@ -834,5 +1229,514 @@ mod tests {
         assert!(result.policy.policy_digest.starts_with("sha256:"));
         // 预检本身零启动。
         assert_eq!(fixture.streaming_adapter.start_count(), 0);
+    }
+
+    // ---- Task 1.2（REQ-BOOT-04/D1）：phase credential 与 BootstrapExecutor ----
+
+    use crate::cross_cutting::streaming_provider::{
+        ProviderToolPolicy, ToolPolicyGuardError, ToolPolicyIntent, canonical_tool_policy,
+        validate_tool_policy_for_role,
+    };
+    use crate::product::logical_codebase::aggregate_initialization::{
+        AggregateCancellationRecord, AggregateInitializationErrorRecord,
+        AggregateInitializationOperation, AggregateInitializationOperationInput,
+        AggregateInitializationStepKind,
+    };
+    use crate::product::logical_codebase::aggregate_initialization_store::
+        AggregateInitializationOperationStore;
+    use crate::protocol::contracts::AdapterRole;
+
+    const BOOTSTRAP_TS: &str = "2026-10-01T00:01:00Z";
+
+    /// 构造 durable Running operation：MachineSkills/AggregatePreflight 已
+    /// 完成，目标 step（默认 PreCheck）运行中并带 input digest——这是
+    /// `BootstrapPhaseCredential` 的唯一合法派生面。
+    fn running_bootstrap_operation(
+        fixture: &AdmissionFixture,
+    ) -> (AggregateInitializationOperationStore, String) {
+        running_bootstrap_operation_at_step(fixture, AggregateInitializationStepKind::PreCheck)
+    }
+
+    fn running_bootstrap_operation_at_step(
+        fixture: &AdmissionFixture,
+        step: AggregateInitializationStepKind,
+    ) -> (AggregateInitializationOperationStore, String) {
+        let store = AggregateInitializationOperationStore::for_lc(
+            fixture.paths.clone(),
+            fixture.lc_id.clone(),
+        );
+        let operation_id = format!("op-{}", uuid::Uuid::new_v4().simple());
+        let input = AggregateInitializationOperationInput {
+            idempotency_key: format!("bootstrap-{operation_id}"),
+            manifest_revision: 1,
+            policy_digest: "sha256:bootstrap-fixture-policy".to_string(),
+            profile_evidence_digest: None,
+            provider_context_root: std::fs::canonicalize(&fixture.aggregate_root).unwrap(),
+            provider: "claude_code".to_string(),
+        };
+        store
+            .create_idempotent(AggregateInitializationOperation::new(
+                operation_id.clone(),
+                fixture.project_id.clone(),
+                input,
+                BOOTSTRAP_TS.to_string(),
+            ))
+            .expect("create bootstrap operation");
+        store
+ .mark_running(&fixture.project_id, &operation_id, BOOTSTRAP_TS.to_string())
+            .expect("mark operation running");
+        // 前置步骤按 V1 顺序完成，直到目标 step 可以运行。
+        for predecessor in AggregateInitializationStepKind::V1 {
+            if predecessor == step {
+                break;
+            }
+            complete_bootstrap_step(&store, &fixture.project_id, &operation_id, predecessor);
+        }
+        store
+            .mark_step_running(
+                &fixture.project_id,
+                &operation_id,
+                step,
+                format!("sha256:input-{}", step.as_str()),
+                BOOTSTRAP_TS.to_string(),
+            )
+            .expect("mark bootstrap step running");
+        (store, operation_id)
+    }
+
+    fn complete_bootstrap_step(
+        store: &AggregateInitializationOperationStore,
+        project_id: &str,
+        operation_id: &str,
+        step: AggregateInitializationStepKind,
+    ) {
+        store
+            .mark_step_running(
+                project_id,
+                operation_id,
+                step,
+                format!("sha256:input-{}", step.as_str()),
+                BOOTSTRAP_TS.to_string(),
+            )
+            .expect("mark predecessor running");
+        store
+            .checkpoint_step_output(
+                project_id,
+                operation_id,
+                step,
+                format!("artifact-{step:?}"),
+                BOOTSTRAP_TS.to_string(),
+            )
+            .expect("checkpoint predecessor");
+        store
+            .mark_step_completed(project_id, operation_id, step, BOOTSTRAP_TS.to_string())
+            .expect("complete predecessor");
+    }
+
+    /// 完成剩余全部步骤并 `finish_completed`（Completed 终态夹具）。
+    fn finish_bootstrap_operation(
+        store: &AggregateInitializationOperationStore,
+        fixture: &AdmissionFixture,
+        operation_id: &str,
+    ) {
+        let operation = store
+            .get(&fixture.project_id, operation_id)
+            .expect("load operation for completion");
+        for (index, step) in AggregateInitializationStepKind::V1.into_iter().enumerate() {
+            // 已 Completed 的步骤不可重复 mark_step_running（store 拒绝非
+            // Pending 起始状态）；只推进尚未完成的步骤。
+            if operation.steps[index].status
+                == crate::product::logical_codebase::aggregate_initialization::AggregateInitializationStepStatus::Completed
+            {
+                continue;
+            }
+            complete_bootstrap_step(store, &fixture.project_id, operation_id, step);
+        }
+        store
+            .finish_completed(&fixture.project_id, operation_id, BOOTSTRAP_TS.to_string())
+            .expect("finish completed");
+    }
+
+    fn derived_credential(
+        fixture: &AdmissionFixture,
+    ) -> (AggregateInitializationOperationStore, String, BootstrapPhaseCredential) {
+        let (store, operation_id) = running_bootstrap_operation(fixture);
+        let credential = BootstrapPhaseCredential::from_running_operation(
+            &store,
+            &fixture.project_id,
+            &operation_id,
+            AggregateInitializationStepKind::PreCheck,
+            &fixture.lc_id,
+            &std::fs::canonicalize(&fixture.aggregate_root).unwrap(),
+        )
+        .expect("derive bootstrap credential from running operation");
+        (store, operation_id, credential)
+    }
+
+    fn assert_bootstrap_waiting<T: std::fmt::Debug>(
+        result: Result<T, ProviderAdmissionError>,
+        expected_reason: &str,
+    ) {
+        match result {
+            Err(ProviderAdmissionError::Waiting { reason_code, .. }) => {
+                assert_eq!(reason_code, expected_reason);
+            }
+            other => panic!("expected waiting {expected_reason}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bootstrap_phase_credential_rejects_completed_or_drifted_operation() {
+        let fixture = admission_fixture();
+        let canonical_root = std::fs::canonicalize(&fixture.aggregate_root).unwrap();
+
+        // 基线：Running + step 运行中 + digest/root/LC 匹配 → 唯一可派生面。
+        let (_store, _operation_id, credential) = derived_credential(&fixture);
+        assert_eq!(credential.step, AggregateInitializationStepKind::PreCheck);
+
+        // Completed 终态 → 拒绝。
+        let (store, operation_id) = running_bootstrap_operation(&fixture);
+        finish_bootstrap_operation(&store, &fixture, &operation_id);
+        assert_bootstrap_waiting(
+            BootstrapPhaseCredential::from_running_operation(
+                &store,
+                &fixture.project_id,
+                &operation_id,
+                AggregateInitializationStepKind::PreCheck,
+                &fixture.lc_id,
+                &canonical_root,
+            ),
+            "bootstrap_operation_not_running",
+        );
+
+        // Failed 终态 → 拒绝。
+        let (store, operation_id) = running_bootstrap_operation(&fixture);
+        store
+            .finish_failed(
+                &fixture.project_id,
+                &operation_id,
+                Some(AggregateInitializationStepKind::PreCheck),
+                AggregateInitializationErrorRecord::interrupted(),
+                BOOTSTRAP_TS.to_string(),
+            )
+            .expect("finish failed");
+        assert_bootstrap_waiting(
+            BootstrapPhaseCredential::from_running_operation(
+                &store,
+                &fixture.project_id,
+                &operation_id,
+                AggregateInitializationStepKind::PreCheck,
+                &fixture.lc_id,
+                &canonical_root,
+            ),
+            "bootstrap_operation_not_running",
+        );
+
+        // Cancelled 终态 → 拒绝。
+        let (store, operation_id) = running_bootstrap_operation(&fixture);
+        store
+            .cancel(
+                &fixture.project_id,
+                &operation_id,
+                AggregateCancellationRecord {
+                    reason_code: "test_cancelled".to_string(),
+                    cancelled_at: BOOTSTRAP_TS.to_string(),
+                    detail: None,
+                },
+                BOOTSTRAP_TS.to_string(),
+            )
+            .expect("cancel operation");
+        assert_bootstrap_waiting(
+            BootstrapPhaseCredential::from_running_operation(
+                &store,
+                &fixture.project_id,
+                &operation_id,
+                AggregateInitializationStepKind::PreCheck,
+                &fixture.lc_id,
+                &canonical_root,
+            ),
+            "bootstrap_operation_not_running",
+        );
+
+        // step 漂移：durable 运行中的是 RuleAndMcpConfig，凭据声明 PreCheck → 拒绝。
+        let (store, operation_id) = running_bootstrap_operation_at_step(
+            &fixture,
+            AggregateInitializationStepKind::RuleAndMcpConfig,
+        );
+        assert_bootstrap_waiting(
+            BootstrapPhaseCredential::from_running_operation(
+                &store,
+                &fixture.project_id,
+                &operation_id,
+                AggregateInitializationStepKind::PreCheck,
+                &fixture.lc_id,
+                &canonical_root,
+            ),
+            "bootstrap_step_not_running",
+        );
+
+        // 非 provider turn step（MachineSkills 运行中）→ 拒绝：确定性步骤
+        // 不得派生 spawn 凭据。
+        let (store, operation_id) = running_bootstrap_operation_at_step(
+            &fixture,
+            AggregateInitializationStepKind::MachineSkills,
+        );
+        assert_bootstrap_waiting(
+            BootstrapPhaseCredential::from_running_operation(
+                &store,
+                &fixture.project_id,
+                &operation_id,
+                AggregateInitializationStepKind::MachineSkills,
+                &fixture.lc_id,
+                &canonical_root,
+            ),
+            "bootstrap_step_not_provider_turn",
+        );
+
+        // root 漂移：凭据 root 与 operation 的 provider_context_root 不一致 → 拒绝。
+        let (store, operation_id) = running_bootstrap_operation(&fixture);
+        let member_root = std::fs::canonicalize(&fixture.member_root).unwrap();
+        assert_bootstrap_waiting(
+            BootstrapPhaseCredential::from_running_operation(
+                &store,
+                &fixture.project_id,
+                &operation_id,
+                AggregateInitializationStepKind::PreCheck,
+                &fixture.lc_id,
+                &member_root,
+            ),
+            "bootstrap_root_drift",
+        );
+
+        // input digest 漂移：已派生凭据与当前 durable 记录 digest 不一致 →
+        // spawn 前重核验拒绝（fail-closed，不可复用旧凭据）。
+        let (store, _operation_id, credential) = derived_credential(&fixture);
+        let drifted_digest = BootstrapPhaseCredential {
+            input_digest: "sha256:drifted-input".to_string(),
+            ..credential.clone()
+        };
+        assert_bootstrap_waiting(
+            drifted_digest.reverify_against_running_operation(&store, &fixture.lc_id),
+            "bootstrap_input_digest_drift",
+        );
+
+        // LC 漂移：凭据 LC 身份与核验 scope 不一致 → 拒绝。
+        let drifted_lc = BootstrapPhaseCredential {
+            logical_codebase_id: uuid::Uuid::new_v4().to_string(),
+            ..credential
+        };
+        assert_bootstrap_waiting(
+            drifted_lc.reverify_against_running_operation(&store, &fixture.lc_id),
+            "bootstrap_logical_codebase_mismatch",
+        );
+
+        // 伪造 operation id → durable 缺失走 Store 错误（fail-closed）。
+        assert!(matches!(
+            BootstrapPhaseCredential::from_running_operation(
+                &store,
+                &fixture.project_id,
+                "op-missing",
+                AggregateInitializationStepKind::PreCheck,
+                &fixture.lc_id,
+                &canonical_root,
+            ),
+            Err(ProviderAdmissionError::Store(_))
+        ));
+    }
+
+    #[test]
+    fn bootstrap_phase_only_waives_missing_root_rules() {
+        // 成员规则缺失 = 根 recipe 尚未生成的正常自举事实。
+        let fixture = admission_fixture();
+        let (_store, _operation_id, credential) = derived_credential(&fixture);
+
+        // AggregateBootstrap：只豁免规则存在性；其余维度全过 → ready。
+        let result = fixture
+            .preflight()
+            .check(
+                &fixture.launch_request(),
+                &ProviderAdmissionPhase::AggregateBootstrap(credential.clone()),
+            )
+            .expect("bootstrap phase must waive only missing root rules");
+        assert!(result.ready, "missing: {:?}", result.missing_materials);
+        // 缺失规则仍作为事实记录（digest=None），不构成阻断材料。
+        assert_eq!(result.rules.len(), 1);
+        assert!(result.rules[0].digest.is_none());
+        assert!(result.missing_materials.is_empty());
+        assert_eq!(fixture.streaming_adapter.start_count(), 0);
+
+        // Normal 对照组：同样材料下规则缺失仍阻断（既有语义零变化）。
+        assert_bootstrap_waiting(
+            fixture
+                .preflight()
+                .check(&fixture.launch_request(), &ProviderAdmissionPhase::Normal)
+                .map(|_| ()),
+            "member_language_rules_missing",
+        );
+
+        // 豁免不覆盖 policy：aggregate policy artifact 缺失仍 waiting。
+        let fixture_no_policy = admission_fixture_without_policy();
+        let (_store_no_policy, _op_no_policy, credential_no_policy) =
+            derived_credential(&fixture_no_policy);
+        assert_bootstrap_waiting(
+            fixture_no_policy
+                .preflight()
+                .check(
+                    &fixture_no_policy.launch_request(),
+                    &ProviderAdmissionPhase::AggregateBootstrap(credential_no_policy),
+                )
+                .map(|_| ()),
+            "aggregate_policy_artifact_missing",
+        );
+
+        // 豁免不覆盖 capability：gateway capability 谓词拒绝仍 waiting。
+        let fixture_denied = admission_fixture();
+        fixture_denied.capabilities.deny();
+        let (_store_denied, _op_denied, credential_denied) = derived_credential(&fixture_denied);
+        assert_bootstrap_waiting(
+            fixture_denied
+                .preflight()
+                .check(
+                    &fixture_denied.launch_request(),
+                    &ProviderAdmissionPhase::AggregateBootstrap(credential_denied),
+                )
+                .map(|_| ()),
+            "provider_capability_not_satisfied",
+        );
+
+        // 凭据失效优先于豁免：operation Completed 后，凭据重核验失败——
+        // 绝不降级为普通 session 或带病放行。
+        let fixture_stale = admission_fixture();
+        let (store_stale, _op_stale, stale_credential) = derived_credential(&fixture_stale);
+        finish_bootstrap_operation(&store_stale, &fixture_stale, stale_credential.operation_id());
+        assert_bootstrap_waiting(
+            fixture_stale
+                .preflight()
+                .check(
+                    &fixture_stale.launch_request(),
+                    &ProviderAdmissionPhase::AggregateBootstrap(stale_credential),
+                )
+                .map(|_| ()),
+            "bootstrap_operation_not_running",
+        );
+        assert_eq!(fixture_stale.streaming_adapter.start_count(), 0);
+    }
+
+    #[test]
+    fn bootstrap_executor_marker_rejects_ordinary_executor_policy_in_lc_root_recipe() {
+        let fixture = admission_fixture();
+        let canonical_root = std::fs::canonicalize(&fixture.aggregate_root).unwrap();
+        let (_store, _operation_id, credential) = derived_credential(&fixture);
+        let marker = BootstrapExecutorMarker::new(
+            credential,
+            SessionPolicyAction::CodingTargetWrite,
+            canonical_root,
+            "root-recipe:pre_check:command-1",
+        )
+        .expect("complete bootstrap executor marker");
+        let marker_policy = ProviderToolPolicy {
+            intent: ToolPolicyIntent::BootstrapExecutorMarker(marker),
+        };
+
+        // LC root recipe 的自举通道：Executor + 完整 marker 是唯一放行形态。
+        assert!(validate_tool_policy_for_role(&AdapterRole::Executor, Some(&marker_policy)).is_ok());
+
+        // 普通 Executor 策略（deny）仍被拒绝——marker 通道不是给普通
+        // Executor/Coder 带策略的豁免口。
+        let deny = ProviderToolPolicy::deny_file_write_builtins();
+        assert!(validate_tool_policy_for_role(&AdapterRole::Executor, Some(&deny)).is_err());
+
+        // 策略角色携带 marker：marker 不是策略（PolicyRequired）。
+        for role in [
+            AdapterRole::Orchestrator,
+            AdapterRole::Reviewer,
+            AdapterRole::WorkItemSplitter,
+        ] {
+            let rejected = matches!(
+                validate_tool_policy_for_role(&role, Some(&marker_policy)),
+                Err(ToolPolicyGuardError::PolicyRequired { .. })
+            );
+            assert!(
+                rejected,
+                "policy role {role:?} must not substitute the marker for its policy"
+            );
+        }
+
+        // Handoff 不得使用自举通道。
+        assert!(matches!(
+            validate_tool_policy_for_role(&AdapterRole::Handoff, Some(&marker_policy)),
+            Err(ToolPolicyGuardError::PolicyForbidden { .. })
+        ));
+
+        // marker 不投影为 canonical deny 策略：不进入策略会话 argv/审计通道。
+        assert!(canonical_tool_policy("claude-code", &marker_policy).is_err());
+        // 普通 Executor/Coder 无策略照常放行（既有双向语义零变化）。
+        assert!(validate_tool_policy_for_role(&AdapterRole::Executor, None).is_ok());
+    }
+
+    #[test]
+    fn bootstrap_executor_without_credential_or_receipt_context_is_rejected() {
+        let fixture = admission_fixture();
+        let canonical_root = std::fs::canonicalize(&fixture.aggregate_root).unwrap();
+        let (_store, _operation_id, credential) = derived_credential(&fixture);
+
+        // 凭据是 marker 的必带字段（类型面）：不存在「无凭据 marker」的
+        // 构造形态——`BootstrapExecutorMarker::new` 只接受由 durable
+        // Running operation 派生的 credential。
+        // receipt context 缺失（空白）→ 构造即拒绝。
+        assert_eq!(
+            BootstrapExecutorMarker::new(
+                credential.clone(),
+                SessionPolicyAction::CodingTargetWrite,
+                canonical_root.clone(),
+                "   ",
+            ),
+            Err(BootstrapExecutorMarkerError::EmptyReceiptContext)
+        );
+
+        // canonical root 缺失 → 构造即拒绝。
+        assert_eq!(
+            BootstrapExecutorMarker::new(
+                credential.clone(),
+                SessionPolicyAction::CodingTargetWrite,
+                std::path::PathBuf::new(),
+                "root-recipe:pre_check:command-1",
+            ),
+            Err(BootstrapExecutorMarkerError::EmptyCanonicalRoot)
+        );
+
+        // 非写权限 action → 拒绝：BootstrapExecutor = 有写权限的 Executor。
+        assert_eq!(
+            BootstrapExecutorMarker::new(
+                credential.clone(),
+                SessionPolicyAction::PlanningReadOnly,
+                canonical_root.clone(),
+                "root-recipe:pre_check:command-1",
+            ),
+            Err(BootstrapExecutorMarkerError::InvalidAction(
+                SessionPolicyAction::PlanningReadOnly
+            ))
+        );
+
+        // spawn 前守卫对结构不完整 marker 再次拒绝（纵深防御：即使绕过
+        // validating constructor，三 adapter 真实子进程前仍 fail-closed）。
+        let complete = BootstrapExecutorMarker::new(
+            credential,
+            SessionPolicyAction::CodingTargetWrite,
+            canonical_root,
+            "root-recipe:pre_check:command-1",
+        )
+        .expect("complete marker");
+        let degenerate = BootstrapExecutorMarker {
+            receipt_context: String::new(),
+            ..complete
+        };
+        let degenerate_policy = ProviderToolPolicy {
+            intent: ToolPolicyIntent::BootstrapExecutorMarker(degenerate),
+        };
+        assert!(matches!(
+            validate_tool_policy_for_role(&AdapterRole::Executor, Some(&degenerate_policy)),
+            Err(ToolPolicyGuardError::BootstrapMarkerInvalid { .. })
+        ));
     }
 }

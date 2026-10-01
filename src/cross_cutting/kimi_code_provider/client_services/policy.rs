@@ -37,6 +37,31 @@ impl ClientServicePolicy {
         }
     }
 
+    /// BOOT-04/D1（Task 1.2）：kimi 侧 bootstrap marker 消费判定。LC 根
+    /// recipe 的自举执行器固定由 Claude Code 承担（REQ-BOOT-03 recipe
+    /// provider 固定；REQ-ENV-06 kimi 不读 tool_policy 字段），kimi 不是
+    /// bootstrap provider——marker 通道到达 kimi 会话装配时必须在真实
+    /// spawn 前拒绝（fail-closed），使其无法成为第二条「带写权限
+    /// Executor」物理路径。无 marker 的普通会话（None/deny 意图）零变化
+    ///（deny 意图归三 adapter 的双向守卫裁决，本判定不重复）。
+    pub fn evaluate_bootstrap_executor_marker(
+        tool_policy: Option<&crate::cross_cutting::streaming_provider::ProviderToolPolicy>,
+    ) -> PolicyDecision {
+        let carries_marker = tool_policy.is_some_and(|policy| {
+            matches!(
+                policy.intent,
+                crate::cross_cutting::streaming_provider::ToolPolicyIntent::BootstrapExecutorMarker(_)
+            )
+        });
+        if carries_marker {
+            PolicyDecision::Deny(
+                "kimi does not host the lc bootstrap executor; the root recipe provider is fixed to Claude Code",
+            )
+        } else {
+            PolicyDecision::Allow
+        }
+    }
+
     pub fn evaluate(&self, action: ClientAction) -> PolicyDecision {
         match self.role {
             AdapterRole::Reviewer => match action {
@@ -78,6 +103,64 @@ impl ClientServicePolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Task 1.2（BOOT-04/D1）：kimi 不承载 LC 根 recipe 自举执行器。
+    #[test]
+    fn bootstrap_executor_marker_is_denied_for_kimi_client_services() {
+        use crate::cross_cutting::streaming_provider::{
+            ProviderToolPolicy, ToolPolicyIntent,
+        };
+
+        // marker 通道（任意角色装配面）→ Deny：kimi 不是 bootstrap provider。
+        let marker_intent = ToolPolicyIntent::BootstrapExecutorMarker(test_marker());
+        let marker_policy = ProviderToolPolicy {
+            intent: marker_intent,
+        };
+        // 判定与 role 无关：通道级拒绝（任意角色装配面一律 Deny）。
+        assert!(matches!(
+            ClientServicePolicy::evaluate_bootstrap_executor_marker(Some(&marker_policy)),
+            PolicyDecision::Deny(_)
+        ));
+
+        // 普通会话零变化：None → Allow；deny 意图归三 adapter 守卫，不在此裁决。
+        assert_eq!(
+            ClientServicePolicy::evaluate_bootstrap_executor_marker(None),
+            PolicyDecision::Allow
+        );
+        let deny_policy = ProviderToolPolicy::deny_file_write_builtins();
+        assert_eq!(
+            ClientServicePolicy::evaluate_bootstrap_executor_marker(Some(&deny_policy)),
+            PolicyDecision::Allow
+        );
+    }
+
+    /// 构造测试用 marker：kimi 判定只看通道形态，不依赖凭据有效性
+    ///（凭据/相位核验在 admission 层；此处仅证明通道被拒绝）。
+    fn test_marker() -> crate::product::logical_codebase::provider_admission_preflight::BootstrapExecutorMarker
+    {
+        use crate::product::logical_codebase::provider_admission_preflight::{
+            BootstrapExecutorMarker, BootstrapPhaseCredential,
+        };
+        use crate::product::logical_codebase::aggregate_initialization::AggregateInitializationStepKind;
+
+        // 测试内构造：凭据字段在同模块树外不可见，此处经结构体字面量仅用于
+        // kimi 通道判定（不进入 admission/spawn 判定路径）。
+        let credential = BootstrapPhaseCredential::for_test(
+            "project-kimi-test",
+            "lc-kimi-test",
+            "op-kimi-test",
+            AggregateInitializationStepKind::PreCheck,
+            "sha256:kimi-test-input",
+            std::path::PathBuf::from("/tmp/kimi-test-root"),
+        );
+        BootstrapExecutorMarker::new(
+            credential,
+            crate::product::logical_codebase::policy::SessionPolicyAction::CodingTargetWrite,
+            std::path::PathBuf::from("/tmp/kimi-test-root"),
+            "kimi-channel-test",
+        )
+        .expect("test marker must be constructible")
+    }
 
     #[test]
     fn reviewer_denies_terminal_and_fs_write_but_allows_fs_read() {

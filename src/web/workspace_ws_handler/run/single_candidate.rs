@@ -405,7 +405,9 @@ fn preflight_lc_member_rules_before_author_run(
         lc_id,
         launch.gateway.clone(),
     );
-    match preflight.check(&request) {
+    // Task 1.2：LC 作者会话是普通 session（根规则必须存在）——Normal 相位；
+    // AggregateBootstrap 仅由聚合 root recipe 的凭据流程使用。
+    match preflight.check(&request, &crate::product::logical_codebase::provider_admission_preflight::ProviderAdmissionPhase::Normal) {
         Ok(_) => Ok(()),
         Err(
             crate::product::logical_codebase::ProviderAdmissionError::Waiting {

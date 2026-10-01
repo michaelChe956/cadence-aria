@@ -117,6 +117,10 @@ impl AggregateProviderTurnDriver for GatewayBackedAggregateProviderTurnDriver {
         // C4 Task 8：真实材料 admission 预检先于 gateway validate——成员规则
         // 缺失、policy 漂移或 capability 不满足时，在此 fail-closed，provider
         // 保持零启动，而不是把缺材料暴露成运行时 Failed。
+        // Task 1.2：admission 相位参数接线——当前以 Normal 相位预检（与既有
+        // 行为逐字一致）；AggregateBootstrap(BootstrapPhaseCredential) 由 root
+        // recipe 接线（Task 1.4 run_turn(..., bootstrap, ...)）切入，此前聚合
+        // turn 不豁免根规则存在性。
         if let (Some(paths), Some(lc_id)) = (&self.admission_paths, _lc_id) {
             let admission =
                 crate::product::logical_codebase::LogicalCodebaseProviderAdmissionPreflight::new(
@@ -124,7 +128,10 @@ impl AggregateProviderTurnDriver for GatewayBackedAggregateProviderTurnDriver {
                     lc_id,
                     self.gateway.clone(),
                 );
-            if let Err(error) = admission.check(&request) {
+            if let Err(error) = admission.check(
+                &request,
+                &crate::product::logical_codebase::provider_admission_preflight::ProviderAdmissionPhase::Normal,
+            ) {
                 return Err(AggregateInitializationError::ProviderTurn {
                     step,
                     reason: format!("provider admission preflight denied: {error:?}"),

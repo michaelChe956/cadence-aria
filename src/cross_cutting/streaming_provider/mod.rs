@@ -77,22 +77,32 @@ pub(crate) const TOOL_POLICY_CANONICAL_VERSION: &str = "tp-v1";
 /// Codex 审批分类规则的版本后缀（digest 规范冻结：`"ap-v1"`；审批规则变化必须升级）。
 pub(crate) const TOOL_POLICY_APPROVAL_POLICY_VERSION: &str = "ap-v1";
 
-/// Tool-policy 语义意图。本期唯一合法意图为 `DenyFileWriteBuiltins`：
-/// 保护范围是 built-in 文件写工具（黑名单），不是全工具 allowlist。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Tool-policy 语义意图。`DenyFileWriteBuiltins`：保护范围是 built-in 文件写
+/// 工具（黑名单），不是全工具 allowlist；`BootstrapExecutorMarker`
+/// （REQ-BOOT-04/D1，Task 1.2）不是 deny 投影，而是「有写权限的 Executor」
+/// 的唯一显式自举通道——由 admission 从 durable Running operation 派生的
+/// marker 装载，spawn 前经双向守卫复核，不进入策略会话 argv/审计机制。
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolPolicyIntent {
     DenyFileWriteBuiltins,
+    /// LC 根 recipe 自举执行器标记（BOOT-04/D1）。
+    BootstrapExecutorMarker(
+        crate::product::logical_codebase::provider_admission_preflight::BootstrapExecutorMarker,
+    ),
 }
 
 /// Provider 无关的语义工具策略。只表达语义意图，不携带 provider 物理片段；
-/// 物理片段由各 provider translator（`translate_tool_policy`）按 provider 名冻结。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// 物理片段由各 provider translator（`translate_tool_policy`）按 provider 名冻结
+///（`BootstrapExecutorMarker` 意图没有物理 deny 片段，translator fail-closed）。
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderToolPolicy {
     pub intent: ToolPolicyIntent,
 }
 
 impl ProviderToolPolicy {
-    /// 唯一合法意图构造器：拒绝 built-in 文件写工具。后续 Task 统一用此构造器。
+    /// 唯一合法 deny 意图构造器：拒绝 built-in 文件写工具。策略角色统一用此
+    /// 构造器；`BootstrapExecutorMarker` 意图只能经 `BootstrapExecutorMarker::new`
+    ///（联合证明构造）装入。
     pub fn deny_file_write_builtins() -> Self {
         Self {
             intent: ToolPolicyIntent::DenyFileWriteBuiltins,
@@ -100,14 +110,19 @@ impl ProviderToolPolicy {
     }
 }
 
-/// 双向 spawn 前守卫错误（REQ-ENV-09 Task 3.1）。策略角色缺失策略与
-/// 非策略角色误带策略都在创建子进程之前拒绝，不 fallback 到无策略 argv。
+/// 双向 spawn 前守卫错误（REQ-ENV-09 Task 3.1 + Task 1.2 BOOT-04）。策略
+/// 角色缺失策略、非策略角色误带策略与 BootstrapExecutor marker 结构不完整
+/// 都在创建子进程之前拒绝，不 fallback 到无策略 argv。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolPolicyGuardError {
     /// 策略角色（Orchestrator/WorkItemSplitter/Reviewer）缺失或非法策略。
     PolicyRequired { role: String },
     /// 非策略角色（Executor/Handoff，含 Coder 与聚合初始化 turns）误带策略。
     PolicyForbidden { role: String },
+    /// BootstrapExecutor marker 结构不完整/非法（BOOT-04/D1，Task 1.2）：
+    /// credential、写权限 action、canonical root 与 receipt context 四要素
+    /// 缺一不可，退化 marker 在创建子进程之前拒绝。
+    BootstrapMarkerInvalid { role: String, detail: String },
 }
 
 impl std::fmt::Display for ToolPolicyGuardError {
@@ -120,6 +135,10 @@ impl std::fmt::Display for ToolPolicyGuardError {
             ToolPolicyGuardError::PolicyForbidden { role } => write!(
                 f,
                 "tool policy guard: non-policy role {role} must not carry a tool policy"
+            ),
+            ToolPolicyGuardError::BootstrapMarkerInvalid { role, detail } => write!(
+                f,
+                "tool policy guard: bootstrap executor marker rejected for {role}: {detail}"
             ),
         }
     }
@@ -191,16 +210,20 @@ pub(crate) async fn cached_cli_version(
 }
 
 /// 双向角色×策略守卫：Orchestrator/WorkItemSplitter/Reviewer 必须携带
-/// `DenyFileWriteBuiltins`；Executor/Handoff 必须不携带策略。非法组合在
-/// provider 创建子进程之前拒绝（三 adapter `start` 首步调用）。
+/// `DenyFileWriteBuiltins`；Executor/Handoff 必须不携带策略；唯一例外是
+/// Executor 携带结构完整的 `BootstrapExecutorMarker`（REQ-BOOT-04/D1，
+/// Task 1.2）——「有写权限的 Executor」的显式自举通道。非法组合在
+/// provider 创建子进程之前拒绝（三 adapter `start` 首步调用）；普通
+/// Executor/Coder 仍不得携带任何 tool policy。
 pub fn validate_tool_policy_for_role(
     role: &AdapterRole,
     policy: Option<&ProviderToolPolicy>,
 ) -> Result<(), ToolPolicyGuardError> {
     match role {
         AdapterRole::Orchestrator | AdapterRole::WorkItemSplitter | AdapterRole::Reviewer => {
-            // 缺失或未来非法意图均拒绝：`matches!` 对新增 intent 变体默认不命中，
-            // fail-closed（本期唯一合法意图为 DenyFileWriteBuiltins）。
+            // 缺失或未来非法意图均拒绝：`matches!` 对新增 intent 变体默认不
+            // 命中，fail-closed（策略角色唯一合法意图为 DenyFileWriteBuiltins；
+            // marker 不是策略，不得替代）。
             if policy.is_some_and(|policy| {
                 matches!(policy.intent, ToolPolicyIntent::DenyFileWriteBuiltins)
             }) {
@@ -211,14 +234,27 @@ pub fn validate_tool_policy_for_role(
                 })
             }
         }
-        AdapterRole::Executor | AdapterRole::Handoff => {
-            if policy.is_some() {
-                return Err(ToolPolicyGuardError::PolicyForbidden {
-                    role: adapter_role_text(role).to_string(),
-                });
+        AdapterRole::Executor | AdapterRole::Handoff => match policy.map(|policy| &policy.intent)
+        {
+            None => Ok(()),
+            // BOOT-04/D1：Executor 的唯一自举通道——marker 四要素（credential、
+            // 写权限 action、canonical root、receipt context）联合完整才放行。
+            Some(ToolPolicyIntent::BootstrapExecutorMarker(marker))
+                if role == &AdapterRole::Executor =>
+            {
+                marker.incomplete_reason().map_or(Ok(()), |detail| {
+                    Err(ToolPolicyGuardError::BootstrapMarkerInvalid {
+                        role: adapter_role_text(role).to_string(),
+                        detail: detail.to_string(),
+                    })
+                })
             }
-            Ok(())
-        }
+            // 普通 Executor/Coder 带 deny 策略、Handoff 带任何策略（含 marker）
+            // 均拒绝：marker 不是给普通编码/交接角色的豁免口。
+            Some(_) => Err(ToolPolicyGuardError::PolicyForbidden {
+                role: adapter_role_text(role).to_string(),
+            }),
+        },
     }
 }
 
@@ -314,9 +350,13 @@ pub fn superseded_policy_record_missing_warning() -> ProviderEvent {
 }
 
 /// Tool-policy 翻译/canonical 化错误。未知 provider 名 fail-closed（kimi 不接策略）。
+/// `BootstrapExecutorMarker` 意图没有物理 deny 片段，不投影为策略会话。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolPolicyError {
     UnsupportedProvider(String),
+    /// bootstrap marker 不翻译/canonical 化（Task 1.2，BOOT-04）：自举执行器
+    /// 带写权限，不是 deny 策略会话；进入本分支即调用方接线错误，fail-closed。
+    BootstrapMarkerNotTranslatable,
 }
 
 impl std::fmt::Display for ToolPolicyError {
@@ -324,6 +364,9 @@ impl std::fmt::Display for ToolPolicyError {
         match self {
             ToolPolicyError::UnsupportedProvider(provider) => {
                 write!(f, "unsupported tool-policy provider: {provider}")
+            }
+            ToolPolicyError::BootstrapMarkerNotTranslatable => {
+                write!(f, "bootstrap executor marker has no tool policy translation")
             }
         }
     }
@@ -374,7 +417,7 @@ pub fn canonical_tool_policy(
     provider: &str,
     policy: &ProviderToolPolicy,
 ) -> Result<CanonicalToolPolicy, ToolPolicyError> {
-    match policy.intent {
+    match &policy.intent {
         ToolPolicyIntent::DenyFileWriteBuiltins => {
             let tokens = deny_file_write_builtins_tokens(provider)?;
             Ok(CanonicalToolPolicy {
@@ -383,6 +426,11 @@ pub fn canonical_tool_policy(
                 tokens,
                 approval_policy_version: TOOL_POLICY_APPROVAL_POLICY_VERSION.to_string(),
             })
+        }
+        // marker 不是 deny 策略会话：不产出 canonical digest/tokens（自举
+        // 执行器的 durable 审计由 root recipe receipt 承担，Task 1.5）。
+        ToolPolicyIntent::BootstrapExecutorMarker(_) => {
+            Err(ToolPolicyError::BootstrapMarkerNotTranslatable)
         }
     }
 }
@@ -393,8 +441,13 @@ pub fn translate_tool_policy(
     provider: &str,
     policy: &ProviderToolPolicy,
 ) -> Result<Vec<String>, ToolPolicyError> {
-    match policy.intent {
+    match &policy.intent {
         ToolPolicyIntent::DenyFileWriteBuiltins => deny_file_write_builtins_tokens(provider),
+        // marker 意图没有物理 deny 片段：自举执行器保持完整工具面（写权限
+        // 来自 credential 的 admission 判定，而非 argv 黑名单）。
+        ToolPolicyIntent::BootstrapExecutorMarker(_) => {
+            Err(ToolPolicyError::BootstrapMarkerNotTranslatable)
+        }
     }
 }
 
@@ -426,9 +479,12 @@ pub struct StreamingProviderInput {
     /// Provider 原生 session ID，用于续接 Claude Code / Codex 会话。
     pub resume_provider_session_id: Option<String>,
     pub permission_mode: ProviderPermissionMode,
-    /// 语义工具策略（REQ-ENV-09）。策略角色（Orchestrator/WorkItemSplitter/Reviewer
-    /// 的作者/评审链）携带 `DenyFileWriteBuiltins`；Executor/Coder、聚合初始化与
-    /// 非策略路径必须传 `None`（kimi 零改动，不读此字段）。
+    /// 语义工具策略（REQ-ENV-09 + BOOT-04）。策略角色（Orchestrator/
+    /// WorkItemSplitter/Reviewer 的作者/评审链）携带 `DenyFileWriteBuiltins`；
+    /// 普通 Executor/Coder 与非策略路径必须传 `None`（kimi 零改动，不读此
+    /// 字段）；唯一例外是 LC 根 recipe 的 BootstrapExecutor marker（Task 1.2）：
+    /// Executor 携带结构完整的 marker 作为「有写权限的 Executor」显式自举
+    /// 通道，spawn 前由双向守卫复核。
     pub tool_policy: Option<ProviderToolPolicy>,
     /// durable tool-policy 审计 sink（REQ-ENV-09 Task 3.2/D7）。策略会话由 engine
     /// 按 provider run 绑定 `(workspace_session_id, role_run_seq)` 后注入；缺失时

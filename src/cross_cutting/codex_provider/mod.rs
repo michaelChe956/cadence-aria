@@ -159,7 +159,15 @@ impl StreamingProviderAdapter for CodexProvider {
             String,
             String,
         )> = None;
-        if let Some(policy) = input.tool_policy.as_ref() {
+        // Task 1.2（BOOT-04）：策略会话机制只服务 deny 意图；BootstrapExecutor
+        // marker 已在上方守卫完成结构复核，不进入策略握手/审计（自举执行器
+        // 的 durable 审计由 root recipe receipt 承担）。
+        if let Some(
+            policy @ crate::cross_cutting::streaming_provider::ProviderToolPolicy {
+                intent: crate::cross_cutting::streaming_provider::ToolPolicyIntent::DenyFileWriteBuiltins,
+            },
+        ) = input.tool_policy.as_ref()
+        {
             let sink = input.audit_sink.clone().ok_or_else(|| {
                 ProviderAdapterError::parse_error(
                     "codex policy session: audit sink is required for policy sessions",
