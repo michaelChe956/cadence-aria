@@ -126,11 +126,33 @@ async fn aggregate_initialization_provider_turns_validate_envelope_and_audit_thr
         .expect("operation_id")
         .to_string();
 
-    dependencies
+    // Task 1.4 起 provider turn 真实消费会话事件（存在等待完成的真实挂起
+    // 点），POST 后台 worker 与显式 execute 双跑会在 durable step 上竞争；
+    // 测试改为观察后台 worker 收敛——provider 仍经同一 gateway factory 启动。
+    let mut operation = dependencies
         .coordinator()
-        .execute("project_0001", &operation_id, CancellationToken::new())
-        .await
-        .expect("aggregate initialization executes through gateway factory");
+        .get("project_0001", &operation_id)
+        .expect("operation is durable");
+    for _ in 0..200 {
+        if !matches!(
+            operation.status,
+            cadence_aria::product::logical_codebase::AggregateInitializationOperationStatus::Created
+                | cadence_aria::product::logical_codebase::AggregateInitializationOperationStatus::Running
+        ) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        operation = dependencies
+            .coordinator()
+            .get("project_0001", &operation_id)
+            .expect("operation is durable");
+    }
+    assert_eq!(
+        operation.status,
+        cadence_aria::product::logical_codebase::AggregateInitializationOperationStatus::Completed,
+        "background worker must finish the five-step operation: {:?}",
+        operation.error
+    );
 
     // 三个 provider turn 经 factory 组装的 gateway 启动（machine_skills /
     // aggregate_preflight 是确定性 Cadence 代码，不产生启动）。
@@ -538,6 +560,7 @@ impl AggregateProviderTurnDriver for FactoryBackedProviderTurnDriver {
         step: AggregateInitializationStepKind,
         preflight: &AggregatePreflightSnapshot,
         lc_id: Option<&str>,
+        bootstrap: cadence_aria::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
         cancellation: CancellationToken,
     ) -> Result<String, AggregateInitializationError> {
         let factory =
@@ -565,6 +588,7 @@ impl AggregateProviderTurnDriver for FactoryBackedProviderTurnDriver {
             step,
             preflight,
             lc_id,
+            bootstrap,
             cancellation,
         )
         .await

@@ -372,11 +372,34 @@
             .expect("operation_id")
             .to_string();
 
-        dependencies
+        // Task 1.4 起 provider turn 会真实消费会话事件（等待完成的真实
+        // 挂起点），POST 的后台 worker 与显式 execute 不再可能是同任务内
+        // 的串行双跑——测试改为观察 durable operation 收敛，provider 启动
+        // 仍由同一 gateway factory 驱动并经 audit 断言。
+        let mut operation = dependencies
             .coordinator()
-            .execute("project_0001", &operation_id, CancellationToken::new())
-            .await
-            .expect("aggregate initialization should execute through the gateway factory");
+            .get("project_0001", &operation_id)
+            .expect("operation is durable");
+        for _ in 0..200 {
+            if !matches!(
+                operation.status,
+                crate::product::logical_codebase::AggregateInitializationOperationStatus::Created
+                    | crate::product::logical_codebase::AggregateInitializationOperationStatus::Running
+            ) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            operation = dependencies
+                .coordinator()
+                .get("project_0001", &operation_id)
+                .expect("operation is durable");
+        }
+        assert_eq!(
+            operation.status,
+            crate::product::logical_codebase::AggregateInitializationOperationStatus::Completed,
+            "background worker must finish the five-step operation: {:?}",
+            operation.error
+        );
 
         // 三个 provider turn 经 factory 组装出的 gateway 启动,audit 计数为 3;
         // machine_skills / aggregate_preflight 是确定性 Cadence 代码,不产生启动。

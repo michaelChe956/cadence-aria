@@ -1,13 +1,29 @@
 /// 默认托管配置 artifact 引用,经 gateway envelope 的 config_digest 复验。
 const AGGREGATE_CONFIG_ARTIFACT_REF: &str = "sha256:aggregate-initialization-managed-config";
 
-/// Task 16:gateway-backed provider turn 驱动。
+/// Task 1.4（REQ-BOOT-03）：root recipe 每条命令的超时预算默认值。与单仓
+/// registration 生产初始化超时（web handler 的 1800s）对齐——每个 provider
+/// turn（一或两条命令）一个独立预算，启动与事件消费共享。
+pub(crate) const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 1800;
+
+/// 单个 provider turn 输出摘要的累积上限（字节）：durable checkpoint 引用只
+/// 保留有界摘要，完整输出仍归属 provider 会话侧（与单仓 `LimitedOutput`
+/// 同一截断语义的聚合侧实现）。
+const AGGREGATE_TURN_OUTPUT_LIMIT: usize = 4096;
+
+/// Task 16 + Task 1.4:gateway-backed root recipe provider turn 驱动。
 ///
 /// 三个 provider turn(`pre_check`/`rule_and_mcp_config`/`openspec_and_examples`)
 /// 经 [`LogicalCodebaseProviderGateway::start_streaming`] 启动(feature gate):
 /// 当注入此驱动作为 coordinator 的 `AggregateProviderTurnDriver` 时,每个 turn
 /// 都会在共享的 [`GatewayRunAudit`] 累加一次 `stream_launches()` 记录,使「聚合
 /// provider turn 唯一经 gateway 启动」成为可审计事实而非仅靠代码审查。
+///
+/// Task 1.4 起每个 turn 携带真实 root recipe 命令(四条无中断命令的固定映射,
+/// 文本唯一来源 `RepositoryInitializationStepKind::command()`),并以单仓初始化
+/// 同款的取消/超时/输出摘要语义消费会话事件直到 Completed;命令失败、取消或
+/// 超时都转为可重试 provider turn 失败,由 coordinator 保留 durable 事实并让
+/// 后续命令保持 Pending。
 ///
 /// 聚合根是 canonical non-Git aggregate root(聚合初始化 envelope 配置);三个
 /// turn 的 cwd 均为该根,配置来自托管配置 artifact。该驱动绝不依赖单仓持久化
@@ -20,9 +36,13 @@ pub struct GatewayBackedAggregateProviderTurnDriver {
     /// 先经 `LogicalCodebaseProviderAdmissionPreflight`（实际成员规则、policy
     /// digest/authority root 与 capability 谓词预检）；None 保持原行为。
     admission_paths: Option<crate::product::app_paths::ProductAppPaths>,
+    /// Task 1.4：每条 root recipe 命令的超时预算。
+    command_timeout: std::time::Duration,
 }
 
 impl GatewayBackedAggregateProviderTurnDriver {
+    pub(crate) const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 1800;
+
     /// 用 Claude Code dialect 与给定 capability snapshot ref 构造驱动。聚合
     /// 初始化当前固定使用 Claude Code 作为唯一逻辑 provider(Codex 在
     /// `danger-full-access` 下被 gateway 路由级阻断)。
@@ -36,6 +56,7 @@ impl GatewayBackedAggregateProviderTurnDriver {
                 capability_snapshot_ref,
             ),
             admission_paths: None,
+            command_timeout: std::time::Duration::from_secs(Self::DEFAULT_COMMAND_TIMEOUT_SECS),
         }
     }
 
@@ -50,6 +71,41 @@ impl GatewayBackedAggregateProviderTurnDriver {
         Self {
             admission_paths: Some(paths),
             ..Self::claude_code(gateway, capability_snapshot_ref)
+        }
+    }
+
+    /// Task 1.4：注入每条命令的超时预算（测试用短超时；生产保持
+    /// [`DEFAULT_COMMAND_TIMEOUT_SECS`]）。
+    pub fn with_command_timeout(mut self, command_timeout: std::time::Duration) -> Self {
+        self.command_timeout = command_timeout;
+        self
+    }
+
+    /// Task 1.4（REQ-BOOT-03）：五步 root recipe 的三个 provider turn 到四条
+    /// 无中断命令的固定映射。命令文本唯一来源是
+    /// `RepositoryInitializationStepKind::command()`（Task 1.1 隔离锁显式豁免
+    /// 该消费）：`PreCheck`=命令 1，`RuleAndMcpConfig`=命令 2+3（同一 Claude
+    /// turn 内顺序执行），`OpenspecAndExamples`=命令 4。确定性 step 不映射任何
+    /// 命令（空表=fail-closed，调用方拒绝该 turn）。
+    fn recipe_commands(step: AggregateInitializationStepKind) -> Vec<&'static str> {
+        use crate::product::repository_store::RepositoryInitializationStepKind as RepoStep;
+        match step {
+            AggregateInitializationStepKind::PreCheck => [RepoStep::PreCheck]
+                .into_iter()
+                .filter_map(|kind| kind.command())
+                .collect(),
+            AggregateInitializationStepKind::RuleAndMcpConfig => [
+                RepoStep::RuleConfig,
+                RepoStep::McpConfiguration,
+            ]
+            .into_iter()
+            .filter_map(|kind| kind.command())
+            .collect(),
+            AggregateInitializationStepKind::OpenspecAndExamples => [RepoStep::ProjectRulesExamples]
+                .into_iter()
+                .filter_map(|kind| kind.command())
+                .collect(),
+            _ => Vec::new(),
         }
     }
 
@@ -88,14 +144,138 @@ impl GatewayBackedAggregateProviderTurnDriver {
             audit_sink: None,
             provider_type: ProviderType::ClaudeCode,
             role: AdapterRole::Executor,
-            prompt: format!("aggregate initialization turn: {}", step.as_str()),
+            // Task 1.4：真实 root recipe 命令（固定顺序，来源
+            // `RepositoryInitializationStepKind::command()`），替换占位串。
+            prompt: Self::recipe_commands(step).join("\n"),
             working_dir: aggregate_root.to_path_buf(),
             workspace_session_id: None,
             resume_provider_session_id: None,
             permission_mode: ProviderPermissionMode::Auto,
             structured_output_contract: None,
             env_vars: std::collections::BTreeMap::new(),
-            timeout_secs: 1,
+            // Task 1.4：真实命令超时，替换 1s 占位。
+            timeout_secs: self.command_timeout.as_secs().max(1),
+        }
+    }
+
+    /// Task 1.4：以单仓初始化命令同款语义消费会话——取消/超时共用命令预算，
+    /// 事件流累积有界输出摘要；Completed 返回摘要，Failed/ProtocolError/
+    /// 超时/取消/流提前关闭转为可重试失败（交互请求除外：fail-closed 不可
+    /// 自动重试）。
+    async fn consume_turn(
+        &self,
+        mut session: crate::cross_cutting::streaming_provider::ProviderSession,
+        step: AggregateInitializationStepKind,
+        remaining: std::time::Duration,
+        cancellation: CancellationToken,
+    ) -> Result<String, AggregateInitializationError> {
+        use crate::cross_cutting::streaming_provider::ProviderEvent::Completed;
+        use crate::cross_cutting::streaming_provider::{ProviderEvent, ProviderStatus};
+
+        let mut output = BoundedOutput::new();
+        let timeout = tokio::time::sleep(remaining);
+        tokio::pin!(timeout);
+        loop {
+            let event = tokio::select! {
+                _ = cancellation.cancelled() => {
+                    best_effort_abort(&session);
+                    return Err(AggregateInitializationError::ProviderTurn {
+                        step,
+                        reason: "aggregate recipe command cancelled".to_string(),
+                        retryable: true,
+                    });
+                }
+                _ = &mut timeout => {
+                    best_effort_abort(&session);
+                    return Err(AggregateInitializationError::ProviderTurn {
+                        step,
+                        reason: "aggregate recipe command timed out".to_string(),
+                        retryable: true,
+                    });
+                }
+                event = session.events.recv() => event,
+            };
+            match event {
+                Some(ProviderEvent::TextDelta { content }) => output.push(&content),
+                Some(ProviderEvent::Execution(execution)) => {
+                    if let Some(event_output) = execution.output {
+                        output.push(&event_output);
+                    }
+                }
+                Some(ProviderEvent::ToolResult(result)) => output.push(&result.output),
+                Some(Completed(completion)) => {
+                    if output.is_empty() {
+                        output.push(&completion.full_output);
+                    }
+                    return Ok(output.summary());
+                }
+                Some(ProviderEvent::Failed { message }) => {
+                    output.push(&message);
+                    return Err(AggregateInitializationError::ProviderTurn {
+                        step,
+                        reason: format!(
+                            "provider reported failure: {}",
+                            output.summary()
+                        ),
+                        retryable: true,
+                    });
+                }
+                Some(ProviderEvent::ProtocolError { code, message, .. }) => {
+                    output.push(&format!("{code}: {message}"));
+                    return Err(AggregateInitializationError::ProviderTurn {
+                        step,
+                        reason: format!("provider protocol error: {}", output.summary()),
+                        retryable: true,
+                    });
+                }
+                Some(ProviderEvent::PermissionTimeout { permission_id }) => {
+                    output.push(&format!("permission request {permission_id} timed out"));
+                    return Err(AggregateInitializationError::ProviderTurn {
+                        step,
+                        reason: "provider permission timeout".to_string(),
+                        retryable: true,
+                    });
+                }
+                Some(ProviderEvent::StatusChanged(ProviderStatus::Failed)) => {
+                    return Err(AggregateInitializationError::ProviderTurn {
+                        step,
+                        reason: "provider status failed".to_string(),
+                        retryable: true,
+                    });
+                }
+                Some(ProviderEvent::StatusChanged(ProviderStatus::Aborted)) => {
+                    return Err(AggregateInitializationError::ProviderTurn {
+                        step,
+                        reason: "provider status aborted".to_string(),
+                        retryable: true,
+                    });
+                }
+                Some(ProviderEvent::PermissionRequest(_))
+                | Some(ProviderEvent::ChoiceRequest(_)) => {
+                    best_effort_abort(&session);
+                    return Err(AggregateInitializationError::ProviderTurn {
+                        step,
+                        reason: format!(
+                            "provider interaction required: {}",
+                            output.summary()
+                        ),
+                        retryable: false,
+                    });
+                }
+                Some(ProviderEvent::StatusChanged(_))
+                | Some(ProviderEvent::ToolCall(_))
+                | Some(ProviderEvent::UsageReport(_))
+                | Some(ProviderEvent::ToolPolicyDecision(_))
+                | Some(ProviderEvent::ToolPolicyWarning(_))
+                | Some(ProviderEvent::ToolPolicyTerminated(_)) => {}
+                None => {
+                    return Err(AggregateInitializationError::ProviderTurn {
+                        step,
+                        reason: "provider event stream closed before completion".to_string(),
+                        retryable: true,
+                    });
+                }
+            }
         }
     }
 }
@@ -109,18 +289,28 @@ impl AggregateProviderTurnDriver for GatewayBackedAggregateProviderTurnDriver {
         step: AggregateInitializationStepKind,
         preflight: &AggregatePreflightSnapshot,
         _lc_id: Option<&str>,
+        bootstrap: crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
         cancellation: CancellationToken,
     ) -> Result<String, AggregateInitializationError> {
         use crate::cross_cutting::session_launch::ValidatedStreamingProviderInput;
+
+        // 确定性 step 不得进入 provider turn：固定映射为空即 fail-closed。
+        let commands = Self::recipe_commands(step);
+        if commands.is_empty() {
+            return Err(AggregateInitializationError::ProviderTurn {
+                step,
+                reason: "deterministic aggregate steps must not run a provider turn".to_string(),
+                retryable: false,
+            });
+        }
         let aggregate_root = std::path::PathBuf::from(&preflight.aggregate_root);
         let request = self.launch_request(project_id, &aggregate_root);
-        // C4 Task 8：真实材料 admission 预检先于 gateway validate——成员规则
-        // 缺失、policy 漂移或 capability 不满足时，在此 fail-closed，provider
-        // 保持零启动，而不是把缺材料暴露成运行时 Failed。
-        // Task 1.2：admission 相位参数接线——当前以 Normal 相位预检（与既有
-        // 行为逐字一致）；AggregateBootstrap(BootstrapPhaseCredential) 由 root
-        // recipe 接线（Task 1.4 run_turn(..., bootstrap, ...)）切入，此前聚合
-        // turn 不豁免根规则存在性。
+        // C4 Task 8 / Task 1.4：真实材料 admission 预检先于 gateway validate——
+        // 成员规则缺失、policy 漂移或 capability 不满足时，在此 fail-closed，
+        // provider 保持零启动，而不是把缺材料暴露成运行时 Failed。Task 1.4 起
+        // root recipe turn 一律以 AggregateBootstrap 相位预检：凭据先对 durable
+        // Running operation 重核验，仅豁免「根规则尚未生成」存在性检查，
+        // authority/policy/capability/gateway/cwd/target 照常必检。
         if let (Some(paths), Some(lc_id)) = (&self.admission_paths, _lc_id) {
             let admission =
                 crate::product::logical_codebase::LogicalCodebaseProviderAdmissionPreflight::new(
@@ -128,10 +318,8 @@ impl AggregateProviderTurnDriver for GatewayBackedAggregateProviderTurnDriver {
                     lc_id,
                     self.gateway.clone(),
                 );
-            if let Err(error) = admission.check(
-                &request,
-                &crate::product::logical_codebase::provider_admission_preflight::ProviderAdmissionPhase::Normal,
-            ) {
+            let phase = crate::product::logical_codebase::provider_admission_preflight::ProviderAdmissionPhase::AggregateBootstrap(bootstrap);
+            if let Err(error) = admission.check(&request, &phase) {
                 return Err(AggregateInitializationError::ProviderTurn {
                     step,
                     reason: format!("provider admission preflight denied: {error:?}"),
@@ -148,18 +336,87 @@ impl AggregateProviderTurnDriver for GatewayBackedAggregateProviderTurnDriver {
         })?;
         let input = self.streaming_input(step, &aggregate_root);
         let launch = ValidatedStreamingProviderInput::new(input, validated);
-        self.gateway
-            .start_streaming(launch, cancellation)
+        // Task 1.4：复用单仓初始化命令的取消/超时/摘要语义——启动与事件
+        // 消费共享同一命令超时预算。
+        let command_timeout = self.command_timeout;
+        let started = std::time::Instant::now();
+        let start = self.gateway.start_streaming(launch, cancellation.clone());
+        tokio::pin!(start);
+        let timeout = tokio::time::sleep(command_timeout);
+        tokio::pin!(timeout);
+        let session = tokio::select! {
+            _ = cancellation.cancelled() => {
+                return Err(AggregateInitializationError::ProviderTurn {
+                    step,
+                    reason: "aggregate recipe command cancelled".to_string(),
+                    retryable: true,
+                });
+            }
+            _ = &mut timeout => {
+                return Err(AggregateInitializationError::ProviderTurn {
+                    step,
+                    reason: "aggregate recipe command timed out before session start".to_string(),
+                    retryable: true,
+                });
+            }
+            result = &mut start => result.map_err(|error| {
+                AggregateInitializationError::ProviderTurn {
+                    step,
+                    reason: format!("gateway start_streaming failed: {error}"),
+                    retryable: true,
+                }
+            })?,
+        };
+        let remaining = command_timeout.saturating_sub(started.elapsed());
+        self.consume_turn(session, step, remaining, cancellation)
             .await
-            .map_err(|error| AggregateInitializationError::ProviderTurn {
-                step,
-                reason: format!("gateway start_streaming failed: {error}"),
-                retryable: true,
-            })?;
-        Ok(format!("{} via gateway", step.as_str()))
     }
 }
 
+/// 有界输出累积：超限截断（UTF-8 字符边界安全），语义对齐单仓初始化的
+/// `LimitedOutput`——durable 面只落有界摘要。
+struct BoundedOutput {
+    buffer: String,
+}
+
+impl BoundedOutput {
+    fn new() -> Self {
+        Self {
+            buffer: String::new(),
+        }
+    }
+
+    fn push(&mut self, value: &str) {
+        if self.buffer.len() >= AGGREGATE_TURN_OUTPUT_LIMIT {
+            return;
+        }
+        if self.buffer.len() + value.len() <= AGGREGATE_TURN_OUTPUT_LIMIT {
+            self.buffer.push_str(value);
+            return;
+        }
+        let mut end = AGGREGATE_TURN_OUTPUT_LIMIT - self.buffer.len();
+        while end > 0 && !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        self.buffer.push_str(&value[..end]);
+    }
+
+    fn is_empty(&self) -> bool {
+        self.buffer.is_empty()
+    }
+
+    fn summary(&self) -> String {
+        self.buffer.clone()
+    }
+}
+
+/// 复用单仓初始化的 best-effort 中止：取消/超时/交互请求时向 provider 会话
+/// 发送 Abort；失败不阻塞失败路径。
+fn best_effort_abort(session: &crate::cross_cutting::streaming_provider::ProviderSession) {
+    let _ = session
+        .commands
+        .try_send(crate::cross_cutting::streaming_provider::ProviderCommand::Abort);
+}
 /// Task 16:聚合 asset 发布器。三个 provider turn 产出的聚合 artifact 只允许发布到
 /// `.aria/aggregate/**`,禁止任何成员仓路径,使「聚合模式不进成员仓 git」成为可
 /// 验证契约。发布的相对路径以正斜杠分隔;`published_paths()` 返回发布顺序供审计。

@@ -106,6 +106,7 @@ impl AggregateProviderTurnDriver for NoopProvider {
         _step: AggregateInitializationStepKind,
         _preflight: &AggregatePreflightSnapshot,
         _lc_id: Option<&str>,
+        _bootstrap: cadence_aria::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
         cancellation: CancellationToken,
     ) -> Result<String, AggregateInitializationError> {
         if cancellation.is_cancelled() {

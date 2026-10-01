@@ -121,6 +121,7 @@ impl AggregateProviderTurnDriver for RecordingProviderTurnDriver {
         step: AggregateInitializationStepKind,
         preflight: &AggregatePreflightSnapshot,
         _lc_id: Option<&str>,
+        _bootstrap: cadence_aria::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
         _cancellation: CancellationToken,
     ) -> Result<String, cadence_aria::product::logical_codebase::AggregateInitializationError> {
         // 聚合 provider turn 只在聚合根读 / 写 `.aria/aggregate/**`;它绝不 spawn

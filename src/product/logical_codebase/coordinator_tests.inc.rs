@@ -50,6 +50,7 @@ mod tests {
             step: AggregateInitializationStepKind,
             _preflight: &AggregatePreflightSnapshot,
             _lc_id: Option<&str>,
+            _bootstrap: BootstrapPhaseCredential,
             _cancellation: CancellationToken,
         ) -> Result<String, AggregateInitializationError> {
             self.calls.lock().unwrap().push(step.as_str().to_string());
@@ -84,6 +85,19 @@ mod tests {
 
     struct FakePreflightService {
         calls: Arc<Mutex<Vec<String>>>,
+        /// Task 1.4：snapshot 的聚合根必须与 manifest/operation 的
+        /// provider_context_root 同源——bootstrap phase credential 派生会
+        /// 比对该根，占位 "/aggregate-root" 会被判 root 漂移。
+        aggregate_root: String,
+    }
+
+    impl FakePreflightService {
+        fn new(calls: Arc<Mutex<Vec<String>>>, aggregate_root: impl Into<String>) -> Self {
+            Self {
+                calls,
+                aggregate_root: aggregate_root.into(),
+            }
+        }
     }
 
     impl AggregatePreflightService for FakePreflightService {
@@ -98,7 +112,7 @@ mod tests {
                 .unwrap()
                 .push("aggregate_preflight".to_string());
             Ok(AggregatePreflightSnapshot {
-                aggregate_root: "/aggregate-root".to_string(),
+                aggregate_root: self.aggregate_root.clone(),
                 index_excludes_assets: true,
                 members: Vec::new(),
                 manifest_revision: 1,
@@ -155,9 +169,10 @@ mod tests {
         let skills: Arc<dyn AggregateSkillsPreparation> = Arc::new(FakeSkillsPreparation {
             calls: skills_calls.clone(),
         });
-        let preflight: Arc<dyn AggregatePreflightService> = Arc::new(FakePreflightService {
-            calls: preflight_calls.clone(),
-        });
+        let preflight: Arc<dyn AggregatePreflightService> = Arc::new(FakePreflightService::new(
+            preflight_calls.clone(),
+            manifest.provider_context_root.to_string_lossy().into_owned(),
+        ));
         let clock: Arc<Clock> = Arc::new(|| CREATED_AT.to_string());
         let coordinator = AggregateInitializationCoordinator::new(
             paths.clone(),
@@ -264,6 +279,7 @@ mod tests {
                 step: AggregateInitializationStepKind,
                 _preflight: &AggregatePreflightSnapshot,
                 _lc_id: Option<&str>,
+                _bootstrap: BootstrapPhaseCredential,
                 _cancellation: CancellationToken,
             ) -> Result<String, AggregateInitializationError> {
                 if step == AggregateInitializationStepKind::RuleAndMcpConfig {
@@ -294,9 +310,10 @@ mod tests {
         let skills: Arc<dyn AggregateSkillsPreparation> = Arc::new(FakeSkillsPreparation {
             calls: Arc::new(Mutex::new(Vec::new())),
         });
-        let preflight: Arc<dyn AggregatePreflightService> = Arc::new(FakePreflightService {
-            calls: Arc::new(Mutex::new(Vec::new())),
-        });
+        let preflight: Arc<dyn AggregatePreflightService> = Arc::new(FakePreflightService::new(
+            Arc::new(Mutex::new(Vec::new())),
+            manifest.provider_context_root.to_string_lossy().into_owned(),
+        ));
         let provider: Arc<dyn AggregateProviderTurnDriver> = Arc::new(FailingProvider);
         let clock: Arc<Clock> = Arc::new(|| CREATED_AT.to_string());
         let coordinator = AggregateInitializationCoordinator::new(
@@ -382,6 +399,7 @@ mod tests {
                 _step: AggregateInitializationStepKind,
                 _preflight: &AggregatePreflightSnapshot,
                 _lc_id: Option<&str>,
+                _bootstrap: BootstrapPhaseCredential,
                 _cancellation: CancellationToken,
             ) -> Result<String, AggregateInitializationError> {
                 let mut count = self.count.lock().unwrap();
@@ -393,9 +411,10 @@ mod tests {
         let skills: Arc<dyn AggregateSkillsPreparation> = Arc::new(FakeSkillsPreparation {
             calls: Arc::new(Mutex::new(Vec::new())),
         });
-        let preflight: Arc<dyn AggregatePreflightService> = Arc::new(FakePreflightService {
-            calls: Arc::new(Mutex::new(Vec::new())),
-        });
+        let preflight: Arc<dyn AggregatePreflightService> = Arc::new(FakePreflightService::new(
+            Arc::new(Mutex::new(Vec::new())),
+            manifest.provider_context_root.to_string_lossy().into_owned(),
+        ));
         let provider: Arc<dyn AggregateProviderTurnDriver> = Arc::new(CountingProvider {
             count: Mutex::new(0),
         });
@@ -497,18 +516,33 @@ mod tests {
         }
     }
 
+    /// 测试用 streaming adapter 行为开关（Task 1.4）：
+    /// - `Complete`：立即发一条 Completed 事件（既有默认，保持原测试语义）；
+    /// - `Hang`：事件流保持打开且永不发事件——驱动 select 只能靠超时臂收口；
+    /// - `Fail`：立即发 Failed 事件——驱动按 provider 报告失败收口；
+    /// - `CancelWhileHanging`：先取消共享 token 再保持挂起——驱动取消臂确定性触发。
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum StreamingBehavior {
+        Complete,
+        Hang,
+        Fail,
+        CancelWhileHanging,
+    }
+
     /// 测试用 streaming adapter:记录 start 调用次数并立即完成会话。
     /// Task 1.1 seam:同时按启动顺序捕获 `StreamingProviderInput` 快照,
     /// 供「固定 Claude recipe / root-cwd」隔离断言消费;计数语义不变。
     /// (parking_lot 非本 crate 依赖,沿用本文件 std Mutex 约定。)
     struct CountingStreamingAdapter {
+        behavior: StreamingBehavior,
         start_count: std::sync::atomic::AtomicUsize,
         inputs: Mutex<Vec<crate::cross_cutting::streaming_provider::StreamingProviderInput>>,
     }
 
     impl CountingStreamingAdapter {
-        fn new() -> Self {
+        fn new(behavior: StreamingBehavior) -> Self {
             Self {
+                behavior,
                 start_count: std::sync::atomic::AtomicUsize::new(0),
                 inputs: Mutex::new(Vec::new()),
             }
@@ -541,8 +575,37 @@ mod tests {
             self.start_count
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             self.inputs.lock().unwrap().push(input);
-            let (_event_tx, events) = tokio::sync::mpsc::channel(1);
+            let (event_tx, events) = tokio::sync::mpsc::channel(1);
             let (commands, _command_rx) = tokio::sync::mpsc::channel(1);
+            match self.behavior {
+                StreamingBehavior::Complete => {
+                    let _ = event_tx.try_send(
+                        crate::cross_cutting::streaming_provider::ProviderEvent::Completed(
+                            crate::cross_cutting::streaming_provider::ProviderCompletion::plain(
+                                "aggregate turn complete",
+                                None,
+                            ),
+                        ),
+                    );
+                }
+                StreamingBehavior::Fail => {
+                    let _ = event_tx.try_send(
+                        crate::cross_cutting::streaming_provider::ProviderEvent::Failed {
+                            message: "simulated aggregate recipe failure".to_string(),
+                        },
+                    );
+                }
+                StreamingBehavior::CancelWhileHanging => {
+                    _cancel.cancel();
+                    // 事件流保持打开：取消臂必须是唯一可决议的 select 分支。
+                    std::mem::forget(event_tx);
+                }
+                StreamingBehavior::Hang => {
+                    // 事件流保持打开且永不完成：超时臂是唯一出口。
+                    std::mem::forget(event_tx);
+                }
+            }
+            // 挂起行为依赖事件流保持打开：不关闭接收端。
             Ok(crate::cross_cutting::streaming_provider::ProviderSession { events, commands, native_session_id: None })
         }
     }
@@ -617,6 +680,9 @@ mod tests {
         audit: Arc<GatewayRunAudit>,
         streaming_adapter: Arc<CountingStreamingAdapter>,
         coordinator: AggregateInitializationCoordinator,
+        /// Task 1.4：与 fixture 内已 begin 的 operation 完全同形的 input，
+        /// 供 `execute_with_trust` 幂等重放（begin 命中既有 operation）。
+        recipe_input: AggregateInitializationOperationInput,
     }
 
     impl GatewayAggregateFixture {
@@ -643,9 +709,25 @@ mod tests {
         ) -> Vec<crate::cross_cutting::streaming_provider::StreamingProviderInput> {
             self.streaming_adapter.started_inputs()
         }
+
+        /// Task 1.4：与 fixture 已 begin 的 operation 同形的 recipe input。
+        fn recipe_input(&self) -> AggregateInitializationOperationInput {
+            self.recipe_input.clone()
+        }
     }
 
     fn gateway_aggregate_fixture() -> GatewayAggregateFixture {
+        gateway_aggregate_fixture_with(StreamingBehavior::Complete, None)
+    }
+
+    /// Task 1.4：可参数化的 gateway fixture——streaming 行为与 provider turn
+    /// 命令超时可注入，供取消/超时/失败 durable 事实测试消费；trust 门使用
+    /// 真实 `HomeBackedProviderTrustRegistry`（fake home 目录，Claude-only
+    /// recipe 下 gate 无需登记即 Ready）。
+    fn gateway_aggregate_fixture_with(
+        behavior: StreamingBehavior,
+        command_timeout: Option<std::time::Duration>,
+    ) -> GatewayAggregateFixture {
         let temp = tempfile::tempdir().unwrap();
         let paths = ProductAppPaths::new(temp.path().join(".aria"));
         let store = AggregateInitializationOperationStore::new(paths.clone());
@@ -667,7 +749,7 @@ mod tests {
         .unwrap();
 
         let audit = Arc::new(GatewayRunAudit::new());
-        let streaming_adapter = Arc::new(CountingStreamingAdapter::new());
+        let streaming_adapter = Arc::new(CountingStreamingAdapter::new(behavior));
         let mut registry = ProviderRegistry::new();
         registry.register(ProviderName::ClaudeCode, streaming_adapter.clone());
         let gateway = Arc::new(LogicalCodebaseProviderGateway::with_audit(
@@ -688,10 +770,32 @@ mod tests {
         // 使 gateway spawn 前 cwd 复验能通过。
         let preflight: Arc<dyn AggregatePreflightService> =
             Arc::new(DeterministicAggregatePreflightService::new(paths.clone()));
-        let provider: Arc<dyn AggregateProviderTurnDriver> = Arc::new(
-            GatewayBackedAggregateProviderTurnDriver::claude_code(gateway, "cap_claude_code_1_4_0"),
+        let driver = GatewayBackedAggregateProviderTurnDriver::claude_code(
+            gateway,
+            "cap_claude_code_1_4_0",
         );
+        let provider: Arc<dyn AggregateProviderTurnDriver> = Arc::new(match command_timeout {
+            Some(timeout) => driver.with_command_timeout(timeout),
+            None => driver,
+        });
         let clock: Arc<Clock> = Arc::new(|| CREATED_AT.to_string());
+        let trust_home = temp.path().join("trust-home");
+        std::fs::create_dir_all(&trust_home).unwrap();
+        let trust_registry = crate::product::logical_codebase::HomeBackedProviderTrustRegistry::new(
+            paths.clone(),
+            vec![
+                std::sync::Arc::new(
+                    crate::product::logical_codebase::provider_trust_adapters::CodexTrustAdapter::for_home(
+                        &trust_home,
+                    ),
+                ),
+                std::sync::Arc::new(
+                    crate::product::logical_codebase::provider_trust_adapters::KimiTrustAdapter::for_home(
+                        &trust_home,
+                    ),
+                ),
+            ],
+        );
         let coordinator = AggregateInitializationCoordinator::new(
             paths.clone(),
             store.clone(),
@@ -699,7 +803,8 @@ mod tests {
             preflight,
             provider,
             clock,
-        );
+        )
+        .with_trust(Arc::new(trust_registry));
 
         let input = AggregateInitializationOperationInput {
             idempotency_key: "0001".to_string(),
@@ -713,7 +818,7 @@ mod tests {
             .begin(
                 "aggregate_initialization_0001".to_string(),
                 "project_0001",
-                input,
+                input.clone(),
             )
             .unwrap();
 
@@ -723,6 +828,7 @@ mod tests {
             audit,
             streaming_adapter,
             coordinator,
+            recipe_input: input,
         }
     }
 
@@ -1095,7 +1201,8 @@ mod tests {
             lc_store.save_checkout("project_0001", &checkout).unwrap();
         }
 
-        let manifest = LogicalCodebaseManifest::new("project_0001", aggregate_root, member_ids);
+        let manifest =
+            LogicalCodebaseManifest::new("project_0001", aggregate_root.clone(), member_ids);
         lc_store.save_manifest("project_0001", &manifest).unwrap();
 
         let skills_calls = Arc::new(Mutex::new(Vec::new()));
@@ -1103,9 +1210,10 @@ mod tests {
         let skills: Arc<dyn AggregateSkillsPreparation> = Arc::new(FakeSkillsPreparation {
             calls: skills_calls,
         });
-        let preflight: Arc<dyn AggregatePreflightService> = Arc::new(FakePreflightService {
-            calls: preflight_calls,
-        });
+        let preflight: Arc<dyn AggregatePreflightService> = Arc::new(FakePreflightService::new(
+            preflight_calls,
+            aggregate_root.to_string_lossy().into_owned(),
+        ));
         let provider = Arc::new(FakeProviderTurnDriver::new());
         let clock: Arc<Clock> = Arc::new(|| CREATED_AT.to_string());
         let coordinator = AggregateInitializationCoordinator::new(
@@ -1274,6 +1382,7 @@ mod tests {
                 _step: AggregateInitializationStepKind,
                 _preflight: &AggregatePreflightSnapshot,
                 _lc_id: Option<&str>,
+                _bootstrap: BootstrapPhaseCredential,
                 _cancellation: CancellationToken,
             ) -> Result<String, AggregateInitializationError> {
                 let mut turns = self.turns.lock().unwrap();
@@ -1288,9 +1397,10 @@ mod tests {
         let skills: Arc<dyn AggregateSkillsPreparation> = Arc::new(FakeSkillsPreparation {
             calls: Arc::new(Mutex::new(Vec::new())),
         });
-        let preflight = Arc::new(FakePreflightService {
-            calls: Arc::new(Mutex::new(Vec::new())),
-        });
+        let preflight = Arc::new(FakePreflightService::new(
+            Arc::new(Mutex::new(Vec::new())),
+            manifest.provider_context_root.to_string_lossy().into_owned(),
+        ));
         let preflight_driver: Arc<dyn AggregatePreflightService> = preflight.clone();
         let token = CancellationToken::new();
         let provider = Arc::new(InterruptAfterFirstTurnProvider {
@@ -1368,5 +1478,400 @@ mod tests {
         assert_eq!(*provider.turns.lock().unwrap(), 3);
         // deterministic preflight 不重跑（Completed 步骤跳过）。
         assert_eq!(preflight.calls.lock().unwrap().len(), preflight_calls_before);
+    }
+
+    // ---- Task 1.4（REQ-REG-14/REQ-BOOT-03/BOOT-04）：trust 硬前置门 + 真实四命令 root recipe ----
+
+    use crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential;
+    use crate::product::logical_codebase::provider_trust::{
+        ProviderTrustPrecondition, ProviderTrustPreparationResult, ProviderTrustWaiting,
+    };
+
+    /// 可切换 trust gate fake：`fail` 为真时返回稳定 reason_code 的可重试
+    /// Waiting；翻绿后同一调用面返回 Ready。
+    struct SwitchableTrustGate {
+        fail: std::sync::atomic::AtomicBool,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl SwitchableTrustGate {
+        fn new(fail: bool) -> Self {
+            Self {
+                fail: std::sync::atomic::AtomicBool::new(fail),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn set_ready(&self) {
+            self.fail.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl ProviderTrustPrecondition for SwitchableTrustGate {
+        fn ensure_before_recipe(
+            &self,
+            _project_id: &str,
+            _operation_id: &str,
+            _lc_id: &str,
+            canonical_root: &Path,
+            _providers: &[ProviderName],
+        ) -> ProviderTrustPreparationResult {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
+                return ProviderTrustPreparationResult::Waiting {
+                    waiting: ProviderTrustWaiting {
+                        provider: ProviderName::KimiCode,
+                        canonical_root: canonical_root.to_path_buf(),
+                        trust_key: "wd_test_root_abc123def456".to_string(),
+                        reason_code: "kimi_trust_blocked_for_test".to_string(),
+                        message: "workspace trust entry is blocked for test".to_string(),
+                        retry_action:
+                            "Resolve the blocked workspace trust entry, then retry aggregate initialization."
+                                .to_string(),
+                        recorded_at: CREATED_AT.to_string(),
+                    },
+                };
+            }
+            ProviderTrustPreparationResult::Ready {
+                registrations: Vec::new(),
+            }
+        }
+    }
+
+    /// trust 门 + FakeProviderTurnDriver 的 coordinator 级 fixture：preflight
+    /// snapshot 根与 manifest/operation 的 provider_context_root 同源，使
+    /// bootstrap phase credential 可从 durable Running operation 派生。
+    struct TrustRecipeFixture {
+        _temp: tempfile::TempDir,
+        skills_calls: Arc<Mutex<Vec<String>>>,
+        provider: Arc<FakeProviderTurnDriver>,
+        gate: Arc<SwitchableTrustGate>,
+        store: AggregateInitializationOperationStore,
+        coordinator: AggregateInitializationCoordinator,
+        input: AggregateInitializationOperationInput,
+    }
+
+    fn trust_recipe_fixture(gate_fail: bool) -> TrustRecipeFixture {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path().join(".aria"));
+        let store = AggregateInitializationOperationStore::new(paths.clone());
+        let aggregate_root = temp.path().join("aggregate-root");
+        std::fs::create_dir_all(&aggregate_root).unwrap();
+        let manifest =
+            LogicalCodebaseManifest::new("project_0001", aggregate_root.clone(), Vec::new());
+        LogicalCodebaseStore::new(paths.clone())
+            .save_manifest("project_0001", &manifest)
+            .unwrap();
+
+        let skills_calls = Arc::new(Mutex::new(Vec::new()));
+        let skills: Arc<dyn AggregateSkillsPreparation> = Arc::new(FakeSkillsPreparation {
+            calls: skills_calls.clone(),
+        });
+        let preflight: Arc<dyn AggregatePreflightService> = Arc::new(FakePreflightService::new(
+            Arc::new(Mutex::new(Vec::new())),
+            aggregate_root.to_string_lossy().into_owned(),
+        ));
+        let provider = Arc::new(FakeProviderTurnDriver::new());
+        let gate = Arc::new(SwitchableTrustGate::new(gate_fail));
+        let clock: Arc<Clock> = Arc::new(|| CREATED_AT.to_string());
+        let coordinator = AggregateInitializationCoordinator::new(
+            paths.clone(),
+            store.clone(),
+            skills,
+            preflight,
+            provider.clone(),
+            clock,
+        )
+        .with_trust(gate.clone());
+
+        let input = AggregateInitializationOperationInput {
+            idempotency_key: "trust-0001".to_string(),
+            manifest_revision: manifest.membership_revision,
+            policy_digest: "sha256:policy".to_string(),
+            profile_evidence_digest: Some("sha256:profile".to_string()),
+            provider_context_root: manifest.provider_context_root.clone(),
+            provider: "claude_code".to_string(),
+        };
+        TrustRecipeFixture {
+            _temp: temp,
+            skills_calls,
+            provider,
+            gate,
+            store,
+            coordinator,
+            input,
+        }
+    }
+
+    #[tokio::test]
+    async fn trust_failure_blocks_recipe_and_keeps_operation_uncreated() {
+        let fixture = trust_recipe_fixture(true);
+        let result = fixture
+            .coordinator
+            .execute_with_trust(
+                "aggregate_initialization_trust_0001".to_string(),
+                "project_0001",
+                fixture.input.clone(),
+                &[ProviderName::Codex, ProviderName::KimiCode],
+                CancellationToken::new(),
+            )
+            .await;
+
+        // 任一 trust 未 Ready：可重试 waiting 面（稳定 reason_code + 重试动作）。
+        let Err(AggregateInitializationError::TrustWaiting { waiting }) = result else {
+            panic!("trust failure must surface a retryable waiting error before any recipe start");
+        };
+        assert_eq!(waiting.reason_code, "kimi_trust_blocked_for_test");
+        assert!(!waiting.retry_action.is_empty());
+
+        // 五步 operation 不创建：coordinator 与 durable store 双面均 NotFound。
+        assert!(matches!(
+            fixture
+                .coordinator
+                .get("project_0001", "aggregate_initialization_trust_0001"),
+            Err(AggregateInitializationError::NotFound { .. })
+        ));
+        assert!(fixture
+            .store
+            .get("project_0001", "aggregate_initialization_trust_0001")
+            .is_err());
+
+        // provider 启动计数为 0，确定性 step 也未运行。
+        assert_eq!(fixture.provider.turn_count(), 0);
+        assert!(fixture.skills_calls.lock().unwrap().is_empty());
+        assert_eq!(fixture.gate.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn trust_retry_success_starts_claude_recipe() {
+        let fixture = trust_recipe_fixture(true);
+        let first = fixture
+            .coordinator
+            .execute_with_trust(
+                "aggregate_initialization_trust_0001".to_string(),
+                "project_0001",
+                fixture.input.clone(),
+                &[ProviderName::Codex, ProviderName::KimiCode],
+                CancellationToken::new(),
+            )
+            .await;
+        assert!(matches!(
+            first,
+            Err(AggregateInitializationError::TrustWaiting { .. })
+        ));
+        assert_eq!(fixture.provider.turn_count(), 0);
+
+        // 等待面可重试：同一 operation id 再来一次，gate Ready 后五步 recipe
+        // 按固定顺序启动并完成。
+        fixture.gate.set_ready();
+        let operation = fixture
+            .coordinator
+            .execute_with_trust(
+                "aggregate_initialization_trust_0001".to_string(),
+                "project_0001",
+                fixture.input.clone(),
+                &[ProviderName::Codex, ProviderName::KimiCode],
+                CancellationToken::new(),
+            )
+            .await
+            .expect("retry after trust readiness must start the five-step recipe");
+        assert_eq!(
+            operation.status,
+            AggregateInitializationOperationStatus::Completed
+        );
+        assert_eq!(
+            operation
+                .steps
+                .iter()
+                .map(|step| step.step_id)
+                .collect::<Vec<_>>(),
+            AggregateInitializationStepKind::V1.to_vec()
+        );
+        assert_eq!(fixture.provider.turn_count(), 3);
+        assert_eq!(fixture.gate.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn lc_claude_recipe_runs_four_commands_once_in_fixed_root_order() {
+        let fixture = gateway_aggregate_fixture();
+        let operation = fixture
+            .coordinator()
+            .execute_with_trust(
+                "aggregate_initialization_0001".to_string(),
+                "project_0001",
+                fixture.recipe_input(),
+                &[ProviderName::ClaudeCode],
+                CancellationToken::new(),
+            )
+            .await
+            .expect("claude-only recipe must pass the trust gate and complete");
+        assert_eq!(
+            operation.status,
+            AggregateInitializationOperationStatus::Completed
+        );
+
+        let inputs = fixture.streaming_inputs();
+        assert_eq!(inputs.len(), 3);
+
+        // 四命令文本唯一来源：RepositoryInitializationStepKind::command()。
+        use crate::product::repository_store::RepositoryInitializationStepKind as RepoStep;
+        let pre_check = RepoStep::PreCheck.command().unwrap();
+        let rule_config = RepoStep::RuleConfig.command().unwrap();
+        let mcp_config = RepoStep::McpConfiguration.command().unwrap();
+        let rules_examples = RepoStep::ProjectRulesExamples.command().unwrap();
+
+        // 固定顺序：PreCheck=命令1；RuleAndMcpConfig=命令2+3（同一 Claude
+        // turn）；OpenspecAndExamples=命令4。
+        assert_eq!(inputs[0].prompt, pre_check);
+        assert_eq!(inputs[1].prompt, format!("{rule_config}\n{mcp_config}"));
+        assert_eq!(inputs[2].prompt, rules_examples);
+
+        // 每条命令在根上恰好执行一次。
+        let joined = inputs
+            .iter()
+            .map(|input| input.prompt.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        for command in [pre_check, rule_config, mcp_config, rules_examples] {
+            assert_eq!(
+                joined.matches(command).count(),
+                1,
+                "root recipe command must run exactly once: {command}"
+            );
+        }
+
+        // 固定 Claude Code、真实命令超时（非 1s 占位）、canonical 聚合根 cwd。
+        assert!(
+            inputs.iter().all(|input| input.provider_type
+                == crate::protocol::contracts::ProviderType::ClaudeCode),
+            "aggregate recipe provider must stay fixed to Claude Code"
+        );
+        assert_eq!(
+            inputs[0].timeout_secs,
+            GatewayBackedAggregateProviderTurnDriver::DEFAULT_COMMAND_TIMEOUT_SECS
+        );
+        let canonical_root = std::fs::canonicalize(fixture.aggregate_root()).unwrap();
+        assert!(
+            inputs.iter().all(|input| input.working_dir == canonical_root),
+            "every root recipe command must run with cwd = canonical aggregate root"
+        );
+        assert_eq!(fixture.streaming_start_count(), 3);
+        assert_eq!(fixture.gateway_audit().stream_launches(), 3);
+    }
+
+    /// 失败 step 之后的全部步骤保持 Pending（REQ-BOOT-03「任一命令失败停止
+    /// 后续命令并保留失败事实」）。
+    fn assert_later_steps_pending(
+        operation: &AggregateInitializationOperation,
+        failed: AggregateInitializationStepKind,
+    ) {
+        let mut after_failed = false;
+        for step in &operation.steps {
+            if step.step_id == failed {
+                after_failed = true;
+                continue;
+            }
+            if after_failed {
+                assert_eq!(
+                    step.status.as_str(),
+                    "pending",
+                    "step {} must stay pending after {:?} failed",
+                    step.step_id.as_str(),
+                    failed
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn recipe_cancellation_timeout_and_failure_leave_durable_facts() {
+        // a) provider 报告失败：首 turn 失败 → operation Failed，后续命令 Pending。
+        let failure = gateway_aggregate_fixture_with(StreamingBehavior::Fail, None);
+        let result = failure
+            .coordinator()
+            .execute(
+                "project_0001",
+                "aggregate_initialization_0001",
+                CancellationToken::new(),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(AggregateInitializationError::ProviderTurn { .. })
+        ));
+        let operation = failure
+            .coordinator()
+            .get("project_0001", "aggregate_initialization_0001")
+            .unwrap();
+        assert_eq!(
+            operation.status,
+            AggregateInitializationOperationStatus::Failed
+        );
+        assert_eq!(
+            operation.failed_step,
+            Some(AggregateInitializationStepKind::PreCheck)
+        );
+        assert_eq!(failure.streaming_start_count(), 1);
+        assert_later_steps_pending(&operation, AggregateInitializationStepKind::PreCheck);
+
+        // b) 命令超时：真实 per-command 超时（50ms）内无完成事件 → 失败事实
+        //    durable 保留，后续命令 Pending。
+        let timeout = gateway_aggregate_fixture_with(
+            StreamingBehavior::Hang,
+            Some(std::time::Duration::from_millis(50)),
+        );
+        let result = timeout
+            .coordinator()
+            .execute(
+                "project_0001",
+                "aggregate_initialization_0001",
+                CancellationToken::new(),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(AggregateInitializationError::ProviderTurn { .. })
+        ));
+        let operation = timeout
+            .coordinator()
+            .get("project_0001", "aggregate_initialization_0001")
+            .unwrap();
+        assert_eq!(
+            operation.status,
+            AggregateInitializationOperationStatus::Failed
+        );
+        assert_eq!(
+            operation.failed_step,
+            Some(AggregateInitializationStepKind::PreCheck)
+        );
+        assert_eq!(timeout.streaming_start_count(), 1);
+        assert_later_steps_pending(&operation, AggregateInitializationStepKind::PreCheck);
+
+        // c) turn 挂起中取消：durable 失败事实保留，后续命令 Pending。
+        let cancelled = gateway_aggregate_fixture_with(StreamingBehavior::CancelWhileHanging, None);
+        let result = cancelled
+            .coordinator()
+            .execute(
+                "project_0001",
+                "aggregate_initialization_0001",
+                CancellationToken::new(),
+            )
+            .await;
+        assert!(result.is_err());
+        let operation = cancelled
+            .coordinator()
+            .get("project_0001", "aggregate_initialization_0001")
+            .unwrap();
+        assert!(matches!(
+            operation.status,
+            AggregateInitializationOperationStatus::Failed
+                | AggregateInitializationOperationStatus::Cancelled
+        ));
+        assert_eq!(cancelled.streaming_start_count(), 1);
+        assert_later_steps_pending(&operation, AggregateInitializationStepKind::PreCheck);
     }
 }

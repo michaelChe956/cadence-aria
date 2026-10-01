@@ -39,7 +39,19 @@ impl AggregateInitializationCoordinator {
             provider,
             detector,
             clock,
+            trust: None,
         }
+    }
+
+    /// Task 1.4（REQ-REG-14）：注入五步 recipe 的 trust 硬前置门。registry
+    /// 的 durable facts 按 (project_id, lc_id) 调用点 scope，故实例可安全
+    /// 进入 state 级依赖图并在 `for_lc` 派生时原样复用。
+    pub fn with_trust(
+        mut self,
+        trust: Arc<dyn crate::product::logical_codebase::ProviderTrustPrecondition>,
+    ) -> Self {
+        self.trust = Some(trust);
+        self
     }
 
     /// Re-scopes the durable operation store, manifest/member reads and the
@@ -63,6 +75,7 @@ impl AggregateInitializationCoordinator {
             provider: Arc::clone(&self.provider),
             detector: Arc::clone(&self.detector),
             clock: Arc::clone(&self.clock),
+            trust: self.trust.clone(),
         }
     }
 
@@ -176,6 +189,61 @@ impl AggregateInitializationCoordinator {
             }
         }
         self.advance_remaining(project_id, operation_id, &cancellation)
+            .await
+    }
+
+    /// Task 1.4（REQ-REG-14/REQ-BOOT-03）：trust 硬前置门 + 五步 root recipe
+    /// 启动。先执行全部所选 trust gate（durable waiting 事实与审计由 gate
+    /// 自行落盘）；任一 trust 未 Ready 即返回可重试 [`TrustWaiting`] 且绝不
+    /// `begin`/`execute`——五步 operation 保持未创建、provider 零启动。全部
+    /// Ready 后才创建/推进固定 Claude Code 的五步 recipe。
+    ///
+    /// [`TrustWaiting`]: AggregateInitializationError::TrustWaiting
+    pub async fn execute_with_trust(
+        &self,
+        operation_id: String,
+        project_id: &str,
+        input: AggregateInitializationOperationInput,
+        providers: &[crate::product::models::ProviderName],
+        cancellation: CancellationToken,
+    ) -> Result<AggregateInitializationOperation, AggregateInitializationError> {
+        let Some(trust) = self.trust.clone() else {
+            return Err(AggregateInitializationError::state(
+                operation_id,
+                "trust precondition is not configured for this coordinator",
+            ));
+        };
+        // registry 的 durable facts 按 (project_id, lc_id) 调用点 scope：
+        // 未 scope 的 coordinator 使用 legacy 别名 LC 标签（与
+        // `AggregateInitializationOperationStore::new` 的落盘布局一致）。
+        let lc_id = self
+            .lc_id
+            .clone()
+            .unwrap_or_else(|| legacy_logical_codebase_id(project_id));
+        // LC 根准入冻结的 canonical 聚合根：优先 canonicalize，根暂不可得时
+        // 保持原样（后续 aggregate_preflight 会 fail-closed 拦截无效根）。
+        let canonical_root = std::fs::canonicalize(&input.provider_context_root)
+            .unwrap_or_else(|_| input.provider_context_root.clone());
+        match trust.ensure_before_recipe(
+            project_id,
+            &operation_id,
+            &lc_id,
+            &canonical_root,
+            providers,
+        ) {
+            crate::product::logical_codebase::ProviderTrustPreparationResult::Ready { .. } => {}
+            crate::product::logical_codebase::ProviderTrustPreparationResult::Waiting { waiting } => {
+                tracing::warn!(
+                    project_id,
+                    operation_id = %operation_id,
+                    reason_code = %waiting.reason_code,
+                    "aggregate initialization trust gate waiting; five-step recipe stays unstarted"
+                );
+                return Err(AggregateInitializationError::TrustWaiting { waiting });
+            }
+        }
+        let operation = self.begin(operation_id, project_id, input)?;
+        self.execute(project_id, &operation.operation_id, cancellation)
             .await
     }
 
@@ -469,6 +537,53 @@ impl AggregateInitializationCoordinator {
     ) -> Result<(), AggregateInitializationError> {
         let input_digest = self.input_digest(project_id, operation_id, step, "provider:v1");
         self.start_step(project_id, operation_id, step, &input_digest)?;
+        // Task 1.4（REQ-BOOT-04）：root recipe 的每个 provider turn 都在自举
+        // 相位运行。凭据必须从「与 coordinator 同一 lc scope 构造的 durable
+        // store」派生（footgun 防线）：start_step 之后目标 step 已 Running 并
+        // 记录 input digest，from_running_operation 据此做全维校验；任何漂移
+        // 都 fail-closed 为可重试 provider turn 失败并保留 durable 失败事实。
+        let canonical_root = PathBuf::from(&preflight.aggregate_root);
+        let lc_label = self
+            .lc_id
+            .clone()
+            .unwrap_or_else(|| legacy_logical_codebase_id(project_id));
+        let bootstrap = match BootstrapPhaseCredential::from_running_operation(
+            &self.operations,
+            project_id,
+            operation_id,
+            step,
+            &lc_label,
+            &canonical_root,
+        ) {
+            Ok(credential) => credential,
+            Err(
+                crate::product::logical_codebase::provider_admission_preflight::ProviderAdmissionError::Store(store_error),
+            ) => return Err(AggregateInitializationError::Store(store_error)),
+            Err(waiting) => {
+                let reason = format!("bootstrap phase credential denied: {waiting:?}");
+                let record = AggregateInitializationError::ProviderTurn {
+                    step,
+                    reason: reason.clone(),
+                    retryable: true,
+                }
+                .into_error_record();
+                let failed = self.operations.finish_failed(
+                    project_id,
+                    operation_id,
+                    Some(step),
+                    record,
+                    (self.clock)(),
+                );
+                if let Err(store_error) = failed {
+                    return Err(store_error.into());
+                }
+                return Err(AggregateInitializationError::ProviderTurn {
+                    step,
+                    reason,
+                    retryable: true,
+                });
+            }
+        };
         let cancellation_token = cancellation.clone();
         let turn_result = match self
             .provider
@@ -478,6 +593,7 @@ impl AggregateInitializationCoordinator {
                 step,
                 preflight,
                 self.lc_id.as_deref(),
+                bootstrap,
                 cancellation_token,
             )
             .await

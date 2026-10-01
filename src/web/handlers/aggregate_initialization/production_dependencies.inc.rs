@@ -67,6 +67,7 @@ impl AggregateProviderTurnDriver for GatewayFactoryProviderTurnDriver {
         step: AggregateInitializationStepKind,
         preflight: &AggregatePreflightSnapshot,
         lc_id: Option<&str>,
+        bootstrap: crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
         cancellation: CancellationToken,
     ) -> Result<String, AggregateInitializationError> {
         let Some(factory) = self.factory.as_ref() else {
@@ -107,6 +108,7 @@ impl AggregateProviderTurnDriver for GatewayFactoryProviderTurnDriver {
                 step,
                 preflight,
                 lc_id,
+                bootstrap,
                 cancellation,
             )
             .await
@@ -180,20 +182,25 @@ impl AggregateInitializationDependencies {
         let operations = AggregateInitializationOperationStore::new(paths.clone());
         let clock: Arc<dyn Fn() -> String + Send + Sync> =
             Arc::new(|| chrono::Utc::now().to_rfc3339());
-        let coordinator = Arc::new(AggregateInitializationCoordinator::new(
-            paths.clone(),
-            operations,
-            skills,
-            preflight,
-            provider,
-            clock,
-        ));
+        let trust = production_provider_trust_precondition(state, &paths)?;
+        let coordinator = Arc::new(
+            AggregateInitializationCoordinator::new(
+                paths.clone(),
+                operations,
+                skills,
+                preflight,
+                provider,
+                clock,
+            )
+            // Task 1.4：生产 coordinator 携带 trust 硬前置门，使
+            // `execute_with_trust` 在生产依赖图可用（handler 接线见 Task 1.8）。
+            .with_trust(trust.clone()),
+        );
         let index = Arc::new(AggregateIndexOperation::new(
             paths.clone(),
             CodeGraphCli::new(state.command_runner.clone(), "codegraph".to_string()),
             CodeGraphExcludeGenerator,
         ));
-        let trust = production_provider_trust_precondition(state, &paths)?;
         Ok(
             Self::with_index(coordinator, InitializationRunRegistry::default(), index)
                 .with_trust(trust),

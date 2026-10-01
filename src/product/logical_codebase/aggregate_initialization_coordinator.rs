@@ -46,6 +46,11 @@ use crate::product::logical_codebase::aggregate_initialization_store::AggregateI
 use crate::product::logical_codebase::registration::AggregateRootPreflight;
 use crate::product::logical_codebase::store::{LogicalCodebaseManifest, LogicalCodebaseStore};
 use crate::product::logical_codebase::types::{CodebaseMemberRecord, RepositoryCheckoutRecord};
+use crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential;
+use crate::product::logical_codebase::legacy_logical_codebase_id;
+use crate::product::logical_codebase::provider_trust::{
+    ProviderTrustPrecondition, ProviderTrustWaiting,
+};
 
 /// Errors surfaced by aggregate-initialization coordinator operations. Every
 /// variant carries enough context for the operation record to be marked failed
@@ -69,6 +74,10 @@ pub enum AggregateInitializationError {
         step: AggregateInitializationStepKind,
         reason: String,
         retryable: bool,
+    },
+    #[error("provider trust gate is waiting before the recipe may start")]
+    TrustWaiting {
+        waiting: ProviderTrustWaiting,
     },
     #[error("cancellation requested")]
     Cancelled,
@@ -121,6 +130,11 @@ impl AggregateInitializationError {
                 format!("aggregate_{}_failed", step.as_str()),
                 retryable,
                 reason,
+            ),
+            Self::TrustWaiting { waiting } => (
+                "aggregate_initialization_trust_waiting".to_string(),
+                true,
+                waiting.retry_action.clone(),
             ),
             Self::Cancelled => (
                 "aggregate_initialization_cancelled".to_string(),
@@ -202,7 +216,11 @@ pub trait AggregatePreflightService: Send + Sync {
 /// Drives a single provider turn for one of `pre_check`, `rule_and_mcp_config`
 /// or `openspec_and_examples`. Each call is one Claude turn rooted at the
 /// aggregate root; the driver must not run for `machine_skills` or
-/// `aggregate_preflight`.
+/// `aggregate_preflight`. Task 1.4 (REQ-BOOT-04): every root-recipe turn runs
+/// in the aggregate bootstrap phase — the coordinator derives the
+/// [`BootstrapPhaseCredential`] from the durable Running operation (same-lc
+/// store) and hands it to the driver so admission can waive only the
+/// "root rules not generated yet" check.
 #[async_trait]
 pub trait AggregateProviderTurnDriver: Send + Sync {
     async fn run_turn(
@@ -212,6 +230,7 @@ pub trait AggregateProviderTurnDriver: Send + Sync {
         step: AggregateInitializationStepKind,
         preflight: &AggregatePreflightSnapshot,
         lc_id: Option<&str>,
+        bootstrap: BootstrapPhaseCredential,
         cancellation: CancellationToken,
     ) -> Result<String, AggregateInitializationError>;
 }
@@ -253,6 +272,10 @@ pub struct AggregateInitializationCoordinator {
     provider: Arc<dyn AggregateProviderTurnDriver>,
     detector: Arc<dyn RepositoryTypeDetector>,
     clock: Arc<Clock>,
+    /// Task 1.4（REQ-REG-14）：五步 recipe 的 trust 硬前置门。`None` 表示该
+    /// coordinator 未装配 trust 门——`execute_with_trust` 对此 fail-closed；
+    /// 既有 `execute` 路径不受影响（handler 接线由 Task 1.8 完成）。
+    trust: Option<Arc<dyn ProviderTrustPrecondition>>,
 }
 
 // 以下各职责模块通过文本包含(`include!`)进入此文件,保持模块命名空间与公开 API 不变。
