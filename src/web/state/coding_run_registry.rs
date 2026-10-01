@@ -402,7 +402,11 @@ impl CodingRunRegistry {
     /// 非退役 attempt 幂等视为已重开。
     pub fn restart_attempt(&self, attempt_key: &CodingAttemptRunKey) -> AttemptRestartOutcome {
         let mut inner = self.inner.lock().expect("coding run registry lock");
-        if inner.runs.get(attempt_key).is_some_and(|runs| !runs.is_empty()) {
+        if inner
+            .runs
+            .get(attempt_key)
+            .is_some_and(|runs| !runs.is_empty())
+        {
             return AttemptRestartOutcome::StillStopping;
         }
         inner.retired_attempts.remove(attempt_key);
