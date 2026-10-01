@@ -180,7 +180,6 @@ impl PlanningIndexFreshness for AggregateIndexFreshnessService {
     }
 }
 
-
 pub struct PlanningContextResolver {
     paths: ProductAppPaths,
     sets: PlanningContextSetResolver,
@@ -261,11 +260,11 @@ impl PlanningContextResolver {
         project_id: &str,
         issue_id: &str,
     ) -> Result<Option<String>, ProductStoreError> {
-        Ok(crate::product::logical_codebase::RepositoryAuthorityResolver::new(
-            self.paths.clone(),
+        Ok(
+            crate::product::logical_codebase::RepositoryAuthorityResolver::new(self.paths.clone())
+                .resolve_for_issue(project_id, issue_id)?
+                .and_then(|resolution| resolution.target.logical_codebase_id),
         )
-        .resolve_for_issue(project_id, issue_id)?
-        .and_then(|resolution| resolution.target.logical_codebase_id))
     }
 
     /// 构建 `ResolvedPlanningContext`。流程：解析参与仓库集合 → fail-closed 拒绝空有效

@@ -13,8 +13,8 @@ use crate::product::json_store::{ProductStoreError, validate_relative_id};
 use crate::product::logical_codebase::migration::IdentityMigrationExecutor;
 use crate::product::logical_codebase::{
     IdentityMigrationJournal, IdentityMigrationJournalStore, IdentityMigrationPhase,
-    IdentityRegistryEntry, IdentityRegistryState, IdentityRegistryStore,
-    IdentityRepairAuditEntry, RepositoryIdentityMapping,
+    IdentityRegistryEntry, IdentityRegistryState, IdentityRegistryStore, IdentityRepairAuditEntry,
+    RepositoryIdentityMapping,
 };
 
 /// Failed journal 的只读诊断（GET 投影的唯一来源）。
@@ -97,7 +97,9 @@ impl IdentityRepairService {
         let mut candidates = Vec::new();
         let mut conflicts = Vec::new();
         for repository in &repositories {
-            let source = crate::product::logical_codebase::migration::repository_source_identity(repository)?;
+            let source = crate::product::logical_codebase::migration::repository_source_identity(
+                repository,
+            )?;
             if let Some(entry) = registry.find_by_source(project_id, &source)? {
                 if entry.state == IdentityRegistryState::Tombstoned {
                     conflicts.push(format!(
@@ -133,7 +135,10 @@ impl IdentityRepairService {
                     mapping.legacy_repository_id
                 )),
                 Some(repository) => {
-                    let source = crate::product::logical_codebase::migration::repository_source_identity(repository)?;
+                    let source =
+                        crate::product::logical_codebase::migration::repository_source_identity(
+                            repository,
+                        )?;
                     if source.key_digest != mapping.source_identity_digest {
                         conflicts.push(format!(
                             "mapping_source_identity_mismatch:{}",
@@ -264,10 +269,7 @@ impl IdentityRepairService {
                 }
                 // 核验（失败零写入）：digest/physical/候选一致、幂等键
                 // canonical；tombstone 候选在用户确认后复活（原链操作）。
-                let mapping = executor.repair_validate_mapping(
-                    &request.project_id,
-                    submission,
-                )?;
+                let mapping = executor.repair_validate_mapping(&request.project_id, submission)?;
                 let audit = IdentityRepairAuditEntry {
                     command_id: request.command_id.clone(),
                     action: "submit_mapping".to_string(),
@@ -286,9 +288,11 @@ impl IdentityRepairService {
                 if diagnostic.phase != IdentityMigrationPhase::Failed {
                     // 非 Failed 状态：journal 无需 repair，原链自身幂等。
                     executor.ensure_identity_schema(&request.project_id)?;
-                } else if diagnostic.conflicts.iter().all(|conflict| {
-                    conflict.starts_with("registry_source_tombstoned")
-                }) && !diagnostic.mappings.is_empty()
+                } else if diagnostic
+                    .conflicts
+                    .iter()
+                    .all(|conflict| conflict.starts_with("registry_source_tombstoned"))
+                    && !diagnostic.mappings.is_empty()
                 {
                     // mapping 已 staged 且无未决冲突：显式继续原链（含核验
                     // 后的读切换）。
@@ -315,7 +319,10 @@ impl IdentityRepairService {
         self.diagnostic(&request.project_id, &request.logical_codebase_id)
     }
 
-    fn load_journal(&self, project_id: &str) -> Result<IdentityMigrationJournal, ProductStoreError> {
+    fn load_journal(
+        &self,
+        project_id: &str,
+    ) -> Result<IdentityMigrationJournal, ProductStoreError> {
         IdentityMigrationJournalStore::new(self.paths.clone())
             .load(project_id)?
             .ok_or_else(|| ProductStoreError::NotFound {
@@ -360,9 +367,15 @@ fn candidate_mapping(
 }
 
 fn impact_scope(journal: &IdentityMigrationJournal) -> Vec<String> {
-    let mut impact = vec![format!("read_mode:{}", journal.read_mode.clone().unwrap_or_default())];
+    let mut impact = vec![format!(
+        "read_mode:{}",
+        journal.read_mode.clone().unwrap_or_default()
+    )];
     for mapping in &journal.mappings {
-        impact.push(format!("authority_member:{}", mapping.logical_repository_id.0));
+        impact.push(format!(
+            "authority_member:{}",
+            mapping.logical_repository_id.0
+        ));
         impact.push(format!("checkout:{}", mapping.primary_checkout_id.0));
     }
     impact
@@ -420,14 +433,22 @@ mod tests {
         let repository_path = root.path().join("repository");
         std::fs::create_dir_all(&repository_path).unwrap();
         git(&repository_path, &["init", "-q", "-b", "main"]);
-        git(&repository_path, &["config", "user.email", "repair@test.local"]);
+        git(
+            &repository_path,
+            &["config", "user.email", "repair@test.local"],
+        );
         git(&repository_path, &["config", "user.name", "Repair Test"]);
         std::fs::write(repository_path.join("README.md"), "# member\n").unwrap();
         git(&repository_path, &["add", "."]);
         git(&repository_path, &["commit", "-q", "-m", "init"]);
         git(
             &repository_path,
-            &["remote", "add", "origin", "ssh://git@example.test/acme/api.git"],
+            &[
+                "remote",
+                "add",
+                "origin",
+                "ssh://git@example.test/acme/api.git",
+            ],
         );
 
         let paths = ProductAppPaths::new(root.path());
@@ -518,12 +539,19 @@ mod tests {
             diagnostic.observed_source_repos_digest.as_deref(),
             Some(diagnostic.source_repos_digest.as_str())
         );
-        assert_eq!(diagnostic.completed_keys, journal(&fixture.paths).completed_keys);
+        assert_eq!(
+            diagnostic.completed_keys,
+            journal(&fixture.paths).completed_keys
+        );
         assert_eq!(diagnostic.mappings.len(), 1);
         assert!(!diagnostic.candidates.is_empty());
         assert!(diagnostic.conflicts.is_empty());
         assert!(!diagnostic.impact.is_empty());
-        assert!(diagnostic.allowed_actions.contains(&IdentityRepairActionKind::ContinueSafePrefix));
+        assert!(
+            diagnostic
+                .allowed_actions
+                .contains(&IdentityRepairActionKind::ContinueSafePrefix)
+        );
     }
 
     #[test]
@@ -542,7 +570,11 @@ mod tests {
         let inventory_before = aria_inventory(fixture._root.path());
         let diagnostic = service.diagnostic("project_0001", &lc).unwrap();
         assert_eq!(before, journal(&fixture.paths));
-        assert!(diagnostic.allowed_actions.contains(&IdentityRepairActionKind::ContinueSafePrefix));
+        assert!(
+            diagnostic
+                .allowed_actions
+                .contains(&IdentityRepairActionKind::ContinueSafePrefix)
+        );
 
         // 过期 expected_journal_updated_at：拒绝且零写入。
         let rejected = service.apply(IdentityRepairActionRequest {
@@ -617,7 +649,10 @@ mod tests {
             .expect("seed authority facts first");
         mark_journal_failed(&fixture.paths);
         write_json(
-            &fixture.paths.project_root("project_0001").join("repos.json"),
+            &fixture
+                .paths
+                .project_root("project_0001")
+                .join("repos.json"),
             &vec![
                 legacy_record("repository_0001", &fixture.repository_path),
                 legacy_record(
@@ -631,7 +666,12 @@ mod tests {
         let service = IdentityRepairService::new(fixture.paths.clone());
         let lc = lc_id();
         let diagnostic = service.diagnostic("project_0001", &lc).unwrap();
-        assert!(diagnostic.conflicts.iter().any(|c| c == "source_repos_digest_drift"));
+        assert!(
+            diagnostic
+                .conflicts
+                .iter()
+                .any(|c| c == "source_repos_digest_drift")
+        );
         assert!(
             !diagnostic
                 .allowed_actions
@@ -663,7 +703,12 @@ mod tests {
         )
         .unwrap();
         registry
-            .tombstone("project_0001", &source, "delete_op_0001", "2026-09-29T01:00:00Z")
+            .tombstone(
+                "project_0001",
+                &source,
+                "delete_op_0001",
+                "2026-09-29T01:00:00Z",
+            )
             .unwrap();
         // 重置 journal 为未映射状态并触发原链失败。
         let store = IdentityMigrationJournalStore::new(fixture_b.paths.clone());
@@ -690,12 +735,16 @@ mod tests {
             "tombstone candidate must be visible: {:?}",
             diagnostic.conflicts
         );
-        assert!(!diagnostic
-            .allowed_actions
-            .contains(&IdentityRepairActionKind::ContinueSafePrefix));
-        assert!(diagnostic
-            .allowed_actions
-            .contains(&IdentityRepairActionKind::SubmitMapping));
+        assert!(
+            !diagnostic
+                .allowed_actions
+                .contains(&IdentityRepairActionKind::ContinueSafePrefix)
+        );
+        assert!(
+            diagnostic
+                .allowed_actions
+                .contains(&IdentityRepairActionKind::SubmitMapping)
+        );
         let candidate = diagnostic.candidates[0].clone();
 
         // 提交错误 mapping（digest 不匹配）：仍拒绝，registry/journal 不变。
@@ -743,7 +792,11 @@ mod tests {
                 }),
             })
             .expect("fully matching mapping stages");
-        assert_eq!(staged.phase, IdentityMigrationPhase::Failed, "staging must not advance the chain");
+        assert_eq!(
+            staged.phase,
+            IdentityMigrationPhase::Failed,
+            "staging must not advance the chain"
+        );
         assert_eq!(journal(&fixture_b.paths).mappings.len(), 1);
         assert_eq!(journal(&fixture_b.paths).repair_audit.len(), 1);
 

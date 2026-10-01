@@ -14,6 +14,8 @@ use std::sync::Arc;
 
 use sha2::Digest as _;
 
+use crate::product::app_paths::ProductAppPaths;
+use crate::product::json_store::ProductStoreError;
 use crate::product::logical_codebase::aggregate_initialization::{
     AggregateInitializationOperation, AggregateInitializationOperationStatus,
     AggregateInitializationStepKind, AggregateInitializationStepRecord,
@@ -21,8 +23,6 @@ use crate::product::logical_codebase::aggregate_initialization::{
 };
 use crate::product::logical_codebase::aggregate_initialization_store::AggregateInitializationOperationStore;
 use crate::product::logical_codebase::policy::SessionPolicyAction;
-use crate::product::app_paths::ProductAppPaths;
-use crate::product::json_store::ProductStoreError;
 use crate::product::logical_codebase::provider_gateway::{
     LogicalCodebaseProviderGateway, ProviderGatewayError, SessionLaunchRequest,
     ValidatedSessionLaunchPolicy,
@@ -60,7 +60,6 @@ impl BootstrapActionKind {
         }
     }
 }
-
 
 /// 真实 provider 将消费的成员规则文件引用（C4 Task 8）。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -117,9 +116,7 @@ impl BootstrapPhaseCredential {
         let input_digest = record.input_digest.clone().ok_or_else(|| {
             bootstrap_waiting(
                 "bootstrap_step_input_digest_missing",
-                format!(
-                    "bootstrap step {step:?} of operation {operation_id} has no input digest"
-                ),
+                format!("bootstrap step {step:?} of operation {operation_id} has no input digest"),
             )
         })?;
         if !bootstrap_roots_match(canonical_root, &operation.input.provider_context_root) {
@@ -374,15 +371,15 @@ fn bootstrap_step_record<'a>(
     operation: &'a AggregateInitializationOperation,
     step: AggregateInitializationStepKind,
 ) -> Result<&'a AggregateInitializationStepRecord, ProviderAdmissionError> {
-    let record = operation
-        .steps
-        .get(step.index())
-        .ok_or_else(|| {
-            bootstrap_waiting(
-                "bootstrap_step_not_running",
-                format!("operation {} has no record for step {step:?}", operation.operation_id),
-            )
-        })?;
+    let record = operation.steps.get(step.index()).ok_or_else(|| {
+        bootstrap_waiting(
+            "bootstrap_step_not_running",
+            format!(
+                "operation {} has no record for step {step:?}",
+                operation.operation_id
+            ),
+        )
+    })?;
     if record.status != AggregateInitializationStepStatus::Running {
         return Err(bootstrap_waiting(
             "bootstrap_step_not_running",
@@ -515,21 +512,22 @@ impl LogicalCodebaseProviderAdmissionPreflight {
         let mut missing_rules = Vec::new();
 
         // 1. manifest：冷启动未登记时投影 waiting（Prepare）。
-        let manifest = resolution
-            .manifest
-            .as_ref()
-            .ok_or_else(|| ProviderAdmissionError::Waiting {
-                reason_code: "logical_codebase_manifest_missing".to_string(),
-                detail: format!(
-                    "logical codebase {} has no manifest; register members first",
-                    self.lc_id
-                ),
-                missing_materials: vec![format!(
-                    "logical-codebases/{}/manifest.json",
-                    self.lc_id
-                )],
-                allowed_actions: vec![BootstrapActionKind::Prepare],
-            })?;
+        let manifest =
+            resolution
+                .manifest
+                .as_ref()
+                .ok_or_else(|| ProviderAdmissionError::Waiting {
+                    reason_code: "logical_codebase_manifest_missing".to_string(),
+                    detail: format!(
+                        "logical codebase {} has no manifest; register members first",
+                        self.lc_id
+                    ),
+                    missing_materials: vec![format!(
+                        "logical-codebases/{}/manifest.json",
+                        self.lc_id
+                    )],
+                    allowed_actions: vec![BootstrapActionKind::Prepare],
+                })?;
 
         // 2. 实际成员规则：每个 active 成员的 main checkout 必须有
         //    `.claude/rules/language.md`（与 single_candidate_author 同一路径）。
@@ -550,21 +548,16 @@ impl LogicalCodebaseProviderAdmissionPreflight {
                 .or_else(|| {
                     checkouts
                         .iter()
-                        .find(|checkout| {
-                            member.checkout_ids.contains(&checkout.checkout_id)
-                        })
+                        .find(|checkout| member.checkout_ids.contains(&checkout.checkout_id))
                 })
             else {
                 missing_materials.push(format!(
                     "member {} ({}) has no recorded checkout",
-                    member.alias,
-                    member.logical_repository_id.0
+                    member.alias, member.logical_repository_id.0
                 ));
                 continue;
             };
-            let rule_path = checkout
-                .canonical_path
-                .join(".claude/rules/language.md");
+            let rule_path = checkout.canonical_path.join(".claude/rules/language.md");
             match std::fs::read(&rule_path) {
                 Ok(bytes) => rules.push(ProviderRuleReference {
                     member_id: member.logical_repository_id,
@@ -678,7 +671,9 @@ impl LogicalCodebaseProviderAdmissionPreflight {
         let cwd = if request.target.worktree.is_absolute() {
             request.target.worktree.clone()
         } else {
-            manifest.provider_context_root.join(&request.target.worktree)
+            manifest
+                .provider_context_root
+                .join(&request.target.worktree)
         };
         self.gateway
             .revalidate_before_spawn(&validated, &cwd, false)
@@ -715,15 +710,11 @@ impl LogicalCodebaseProviderAdmissionPreflight {
 }
 
 fn parse_member_id(value: &str) -> Option<LogicalRepositoryId> {
-    uuid::Uuid::parse_str(value)
-        .ok()
-        .map(LogicalRepositoryId)
+    uuid::Uuid::parse_str(value).ok().map(LogicalRepositoryId)
 }
 
 fn parse_checkout_id(value: &str) -> Option<RepositoryCheckoutId> {
-    uuid::Uuid::parse_str(value)
-        .ok()
-        .map(RepositoryCheckoutId)
+    uuid::Uuid::parse_str(value).ok().map(RepositoryCheckoutId)
 }
 
 #[cfg(test)]
@@ -755,15 +746,19 @@ mod tests {
             let canonical = std::fs::canonicalize(&request.target.worktree)
                 .map_err(|_| ProviderGatewayError::Target("worktree missing".to_string()))?;
             if request.target.logical_repository_id.is_empty() {
-                Ok(crate::product::logical_codebase::policy::PolicyTarget::aggregate_root(
-                    canonical,
-                ))
+                Ok(
+                    crate::product::logical_codebase::policy::PolicyTarget::aggregate_root(
+                        canonical,
+                    ),
+                )
             } else {
-                Ok(crate::product::logical_codebase::policy::PolicyTarget::checkout(
-                    request.target.logical_repository_id.clone(),
-                    request.target.checkout_id.clone(),
-                    canonical,
-                ))
+                Ok(
+                    crate::product::logical_codebase::policy::PolicyTarget::checkout(
+                        request.target.logical_repository_id.clone(),
+                        request.target.checkout_id.clone(),
+                        canonical,
+                    ),
+                )
             }
         }
     }
@@ -1131,9 +1126,11 @@ mod tests {
                 ..
             } => {
                 assert_eq!(reason_code, "member_language_rules_missing");
-                assert!(missing_materials
-                    .iter()
-                    .any(|item| item.contains("language.md")));
+                assert!(
+                    missing_materials
+                        .iter()
+                        .any(|item| item.contains("language.md"))
+                );
                 assert!(allowed_actions.contains(&BootstrapActionKind::Prepare));
                 assert!(allowed_actions.contains(&BootstrapActionKind::Retry));
             }
@@ -1175,7 +1172,11 @@ mod tests {
         // validate 冻结 envelope 后升级 policy revision/digest → spawn 前复验
         // （pub(crate) 拓宽后的 revalidate_before_spawn）拒绝，provider 零启动。
         let validated = fixture.gateway.validate(fixture.launch_request()).unwrap();
-        let existing = fixture.policy_store.get(&fixture.project_id).unwrap().unwrap();
+        let existing = fixture
+            .policy_store
+            .get(&fixture.project_id)
+            .unwrap()
+            .unwrap();
         let revised = existing.with_revised_policy("upgrade", "2026-09-28T01:00:00Z".to_string());
         fixture
             .policy_store
@@ -1242,8 +1243,7 @@ mod tests {
         AggregateInitializationOperation, AggregateInitializationOperationInput,
         AggregateInitializationStepKind,
     };
-    use crate::product::logical_codebase::aggregate_initialization_store::
-        AggregateInitializationOperationStore;
+    use crate::product::logical_codebase::aggregate_initialization_store::AggregateInitializationOperationStore;
     use crate::protocol::contracts::AdapterRole;
 
     const BOOTSTRAP_TS: &str = "2026-10-01T00:01:00Z";
@@ -1283,7 +1283,7 @@ mod tests {
             ))
             .expect("create bootstrap operation");
         store
- .mark_running(&fixture.project_id, &operation_id, BOOTSTRAP_TS.to_string())
+            .mark_running(&fixture.project_id, &operation_id, BOOTSTRAP_TS.to_string())
             .expect("mark operation running");
         // 前置步骤按 V1 顺序完成，直到目标 step 可以运行。
         for predecessor in AggregateInitializationStepKind::V1 {
@@ -1359,7 +1359,11 @@ mod tests {
 
     fn derived_credential(
         fixture: &AdmissionFixture,
-    ) -> (AggregateInitializationOperationStore, String, BootstrapPhaseCredential) {
+    ) -> (
+        AggregateInitializationOperationStore,
+        String,
+        BootstrapPhaseCredential,
+    ) {
         let (store, operation_id) = running_bootstrap_operation(fixture);
         let credential = BootstrapPhaseCredential::from_running_operation(
             &store,
@@ -1608,7 +1612,11 @@ mod tests {
         // 绝不降级为普通 session 或带病放行。
         let fixture_stale = admission_fixture();
         let (store_stale, _op_stale, stale_credential) = derived_credential(&fixture_stale);
-        finish_bootstrap_operation(&store_stale, &fixture_stale, stale_credential.operation_id());
+        finish_bootstrap_operation(
+            &store_stale,
+            &fixture_stale,
+            stale_credential.operation_id(),
+        );
         assert_bootstrap_waiting(
             fixture_stale
                 .preflight()
@@ -1639,7 +1647,9 @@ mod tests {
         };
 
         // LC root recipe 的自举通道：Executor + 完整 marker 是唯一放行形态。
-        assert!(validate_tool_policy_for_role(&AdapterRole::Executor, Some(&marker_policy)).is_ok());
+        assert!(
+            validate_tool_policy_for_role(&AdapterRole::Executor, Some(&marker_policy)).is_ok()
+        );
 
         // 普通 Executor 策略（deny）仍被拒绝——marker 通道不是给普通
         // Executor/Coder 带策略的豁免口。

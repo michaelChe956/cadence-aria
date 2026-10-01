@@ -52,20 +52,20 @@ pub struct EvidenceTokenClaims {
     pub expires_at: String,
 }
 
- /// Aria 侧 attempt 分区的令牌哈希记录（存 SHA-256，非明文）。
- ///
- /// 字段名与设计 §4.1 一致（snake_case，serde 显式声明）。
- #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
- #[serde(rename_all = "snake_case")]
- pub struct EvidenceTokenRecord {
-     pub attempt_id: String,
-     pub token_hash: String,
-     pub created_at: String,
+/// Aria 侧 attempt 分区的令牌哈希记录（存 SHA-256，非明文）。
+///
+/// 字段名与设计 §4.1 一致（snake_case，serde 显式声明）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct EvidenceTokenRecord {
+    pub attempt_id: String,
+    pub token_hash: String,
+    pub created_at: String,
     /// C2 Task 10 additive：受限政策读取授权；旧记录无 claims（serde
     /// default）→ 不支持受限读取，不得误放行。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claims: Option<EvidenceTokenClaims>,
- }
+}
 
 /// 生成/重写 attempt 级会话令牌：写 worktree `.aria/evidence-token`（0600）、
 /// 向仓库公共 exclude（`<repo>/.git/info/exclude`）幂等追加 `.aria/`、写 attempt 分区哈希记录，返回

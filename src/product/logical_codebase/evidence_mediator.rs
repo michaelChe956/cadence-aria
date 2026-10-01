@@ -378,7 +378,10 @@ pub fn load_policy_verification_waiting_fact(
         return Ok(None);
     }
     read_json(&path).map_err(|error| EvidenceError::Io {
-        message: format!("read policy verification waiting fact {}: {error}", path.display()),
+        message: format!(
+            "read policy verification waiting fact {}: {error}",
+            path.display()
+        ),
     })
 }
 
@@ -408,7 +411,9 @@ fn clear_policy_verification_waiting_fact(
     attempt: &CodingExecutionAttempt,
 ) {
     let path = policy_verification_waiting_path(paths, attempt);
-    if path.exists() && let Err(error) = std::fs::remove_file(&path) {
+    if path.exists()
+        && let Err(error) = std::fs::remove_file(&path)
+    {
         tracing::warn!(
             %error,
             attempt_id = %attempt.id,
@@ -445,16 +450,24 @@ fn frozen_policy_digest(attempt: &CodingExecutionAttempt) -> Result<&str, Policy
 fn resolve_frozen_reference(
     paths: &ProductAppPaths,
     attempt: &CodingExecutionAttempt,
-) -> Result<crate::product::logical_codebase::repository_routing::AuthorityPolicyReference, PolicyAccessError> {
-    let resolution = crate::product::logical_codebase::repository_routing::RepositoryAuthorityResolver::new(paths.clone())
+) -> Result<
+    crate::product::logical_codebase::repository_routing::AuthorityPolicyReference,
+    PolicyAccessError,
+> {
+    let resolution =
+        crate::product::logical_codebase::repository_routing::RepositoryAuthorityResolver::new(
+            paths.clone(),
+        )
         .resolve_for_issue(&attempt.project_id, &attempt.issue_id)
         .map_err(|error| policy_access_io(format!("resolve authority: {error}")))?
         .ok_or_else(|| PolicyAccessError::ResolverUnavailable {
             detail: "no_lc_authority_resolution".to_string(),
         })?;
-    resolution.policy.ok_or_else(|| PolicyAccessError::ResolverUnavailable {
-        detail: "policy_reference_missing".to_string(),
-    })
+    resolution
+        .policy
+        .ok_or_else(|| PolicyAccessError::ResolverUnavailable {
+            detail: "policy_reference_missing".to_string(),
+        })
 }
 
 /// resolver 冻结一致性读取：reference digest 必须与 attempt 冻结 envelope
@@ -462,7 +475,8 @@ fn resolve_frozen_reference(
 fn read_policy_text_checked(
     paths: &ProductAppPaths,
     attempt: &CodingExecutionAttempt,
-) -> Result<crate::product::logical_codebase::repository_routing::PolicyTextResult, PolicyAccessError> {
+) -> Result<crate::product::logical_codebase::repository_routing::PolicyTextResult, PolicyAccessError>
+{
     let frozen = frozen_policy_digest(attempt)?.to_string();
     let reference = resolve_frozen_reference(paths, attempt)?;
     if reference.policy_digest != frozen {
@@ -474,7 +488,9 @@ fn read_policy_text_checked(
     crate::product::logical_codebase::repository_routing::read_policy_text_for_reference(
         paths, &reference,
     )
-    .map_err(|error| PolicyAccessError::ReadFailed { detail: error.to_string() })
+    .map_err(|error| PolicyAccessError::ReadFailed {
+        detail: error.to_string(),
+    })
 }
 
 /// fail-closed 统一收口：ResolverUnavailable／DigestMismatch 落政策核验等待
@@ -482,14 +498,17 @@ fn read_policy_text_checked(
 fn settle_policy_read(
     paths: &ProductAppPaths,
     attempt: &CodingExecutionAttempt,
-) -> Result<crate::product::logical_codebase::repository_routing::PolicyTextResult, PolicyAccessError> {
+) -> Result<crate::product::logical_codebase::repository_routing::PolicyTextResult, PolicyAccessError>
+{
     match read_policy_text_checked(paths, attempt) {
         Ok(result) => {
             clear_policy_verification_waiting_fact(paths, attempt);
             Ok(result)
         }
-        Err(error @ (PolicyAccessError::ResolverUnavailable { .. }
-        | PolicyAccessError::DigestMismatch { .. })) => {
+        Err(
+            error @ (PolicyAccessError::ResolverUnavailable { .. }
+            | PolicyAccessError::DigestMismatch { .. }),
+        ) => {
             let reason_code = match &error {
                 PolicyAccessError::ResolverUnavailable { .. } => "policy_resolver_unavailable",
                 _ => "policy_digest_mismatch",
@@ -499,16 +518,10 @@ fn settle_policy_read(
                 .as_ref()
                 .map(|snapshot| snapshot.policy_digest.clone());
             let detail = error.to_string();
-            land_policy_verification_waiting_fact(
-                paths,
-                attempt,
-                reason_code,
-                detail,
-                frozen,
-            )
-            .map_err(|io_error| PolicyAccessError::Io {
-                message: io_error.to_string(),
-            })?;
+            land_policy_verification_waiting_fact(paths, attempt, reason_code, detail, frozen)
+                .map_err(|io_error| PolicyAccessError::Io {
+                    message: io_error.to_string(),
+                })?;
             Err(error)
         }
         Err(error) => Err(error),
@@ -523,7 +536,8 @@ pub fn read_policy_text_for_attempt(
     project_id: &str,
     issue_id: &str,
     attempt_id: &str,
-) -> Result<crate::product::logical_codebase::repository_routing::PolicyTextResult, PolicyAccessError> {
+) -> Result<crate::product::logical_codebase::repository_routing::PolicyTextResult, PolicyAccessError>
+{
     let attempt = load_policy_attempt(paths, project_id, issue_id, attempt_id)?;
     if !matches!(
         attempt.status,
@@ -553,13 +567,13 @@ pub struct PolicyTextQueryInput {
 pub fn handle_policy_text_query(
     paths: &ProductAppPaths,
     input: &PolicyTextQueryInput,
-) -> Result<crate::product::logical_codebase::repository_routing::PolicyTextResult, PolicyAccessError> {
+) -> Result<crate::product::logical_codebase::repository_routing::PolicyTextResult, PolicyAccessError>
+{
     let attempt = resolve_attempt_by_token(paths, &input.token).map_err(PolicyAccessError::from)?;
     validate_evidence_token(paths, &attempt, &input.token).map_err(PolicyAccessError::from)?;
 
     let claims = crate::product::logical_codebase::evidence_token::load_evidence_token_claims(
-        paths,
-        &attempt,
+        paths, &attempt,
     )
     .map_err(PolicyAccessError::from)?
     .ok_or_else(|| PolicyAccessError::Forbidden {
@@ -660,18 +674,17 @@ pub fn handle_policy_reauthorization(
         state,
         recorded_at: Utc::now().to_rfc3339(),
     };
-    let append_ledger =
-        |state: OperationState| -> Result<(), PolicyAccessError> {
-            store
-                .append_attempt_command_result(
-                    &attempt.project_id,
-                    &attempt.issue_id,
-                    &attempt.id,
-                    &ledger_record(state),
-                )
-                .map(|_| ())
-                .map_err(|error| policy_access_io(format!("append command ledger: {error}")))
-        };
+    let append_ledger = |state: OperationState| -> Result<(), PolicyAccessError> {
+        store
+            .append_attempt_command_result(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &ledger_record(state),
+            )
+            .map(|_| ())
+            .map_err(|error| policy_access_io(format!("append command ledger: {error}")))
+    };
 
     // 命令账本幂等：同 command 同 payload 重放首次 durable 结果（Accepted →
     // Replayed，不旋转已签发令牌）；异 payload fail-closed。
@@ -738,7 +751,11 @@ pub fn handle_policy_reauthorization(
         Ok(frozen) => frozen.to_string(),
         Err(error) => {
             append_ledger(OperationState::NeedsHuman)?;
-            return Ok(result(OperationState::NeedsHuman, Some(error.to_string()), None));
+            return Ok(result(
+                OperationState::NeedsHuman,
+                Some(error.to_string()),
+                None,
+            ));
         }
     };
     match resolve_frozen_reference(paths, &attempt) {
@@ -764,7 +781,11 @@ pub fn handle_policy_reauthorization(
             )
             .map_err(|error| policy_access_io(error.to_string()))?;
             append_ledger(OperationState::NeedsHuman)?;
-            return Ok(result(OperationState::NeedsHuman, Some(mismatch.to_string()), None));
+            return Ok(result(
+                OperationState::NeedsHuman,
+                Some(mismatch.to_string()),
+                None,
+            ));
         }
         Err(error @ PolicyAccessError::ResolverUnavailable { .. }) => {
             land_policy_verification_waiting_fact(
@@ -776,11 +797,19 @@ pub fn handle_policy_reauthorization(
             )
             .map_err(|io_error| policy_access_io(io_error.to_string()))?;
             append_ledger(OperationState::NeedsHuman)?;
-            return Ok(result(OperationState::NeedsHuman, Some(error.to_string()), None));
+            return Ok(result(
+                OperationState::NeedsHuman,
+                Some(error.to_string()),
+                None,
+            ));
         }
         Err(error) => {
             append_ledger(OperationState::NeedsHuman)?;
-            return Ok(result(OperationState::NeedsHuman, Some(error.to_string()), None));
+            return Ok(result(
+                OperationState::NeedsHuman,
+                Some(error.to_string()),
+                None,
+            ));
         }
     }
 
@@ -793,15 +822,17 @@ pub fn handle_policy_reauthorization(
             None,
         ));
     }
-    let expires_at = (Utc::now() + chrono::Duration::hours(POLICY_REAUTHORIZATION_TTL_HOURS))
-        .to_rfc3339();
-    if let Err(error) = crate::product::logical_codebase::evidence_token::issue_policy_reauthorization(
-        paths,
-        &attempt,
-        &request.role,
-        &frozen,
-        expires_at.clone(),
-    ) {
+    let expires_at =
+        (Utc::now() + chrono::Duration::hours(POLICY_REAUTHORIZATION_TTL_HOURS)).to_rfc3339();
+    if let Err(error) =
+        crate::product::logical_codebase::evidence_token::issue_policy_reauthorization(
+            paths,
+            &attempt,
+            &request.role,
+            &frozen,
+            expires_at.clone(),
+        )
+    {
         append_ledger(OperationState::NeedsHuman)?;
         return Ok(result(
             OperationState::NeedsHuman,

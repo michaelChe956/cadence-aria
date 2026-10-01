@@ -259,9 +259,7 @@ impl RepositoryAuthorityResolver {
         // 项目记录存在时先幂等触发 `migrate_legacy`（`ProjectStore::get` 内
         // 置，与所有既有入口一致）：legacy 布局存在则别名 LC record 必在。
         // 无项目记录的裸 fixture/旧数据保持 `None` 兼容分支，不伪造 LC。
-        match crate::product::project_store::ProjectStore::new(self.paths.clone())
-            .get(project_id)
-        {
+        match crate::product::project_store::ProjectStore::new(self.paths.clone()).get(project_id) {
             Ok(_) => {}
             Err(ProductStoreError::NotFound { .. }) => return Ok(None),
             Err(error) => return Err(error),
@@ -270,15 +268,11 @@ impl RepositoryAuthorityResolver {
             .paths
             .logical_codebase_record_root(
                 project_id,
-                &crate::product::logical_codebase::store::legacy_logical_codebase_id(
-                    project_id,
-                ),
+                &crate::product::logical_codebase::store::legacy_logical_codebase_id(project_id),
             )
             .join("record.json")
             .try_exists()
-            .map_err(|error| {
-                ProductStoreError::Io(format!("try_exists alias record: {error}"))
-            })?;
+            .map_err(|error| ProductStoreError::Io(format!("try_exists alias record: {error}")))?;
         let lc_id = attributed.or_else(|| {
             alias_record_exists.then(|| {
                 crate::product::logical_codebase::store::legacy_logical_codebase_id(project_id)
@@ -300,11 +294,12 @@ impl RepositoryAuthorityResolver {
             checkout_id: None,
         })?;
         if !issue_exists && resolution.selection.is_none() {
-            resolution.selection = crate::product::logical_codebase::IssueCodebaseSelectionStore::for_lc(
-                self.paths.clone(),
-                &lc_id,
-            )
-            .load(project_id, issue_id)?;
+            resolution.selection =
+                crate::product::logical_codebase::IssueCodebaseSelectionStore::for_lc(
+                    self.paths.clone(),
+                    &lc_id,
+                )
+                .load(project_id, issue_id)?;
         }
         Ok(Some(resolution))
     }
@@ -321,9 +316,8 @@ impl RepositoryAuthorityResolver {
         // codebase 归属与请求 kind 一致；不符一律 kind_mismatch。
         let mut attributed_lc: Option<String> = None;
         if let Some(issue_id) = request.issue_id.as_deref() {
-            let issue =
-                crate::product::issue_store::IssueStore::new(self.paths.clone())
-                    .get(&request.project_id, issue_id)?;
+            let issue = crate::product::issue_store::IssueStore::new(self.paths.clone())
+                .get(&request.project_id, issue_id)?;
             attributed_lc = issue.logical_codebase_id.clone();
         }
 
@@ -375,12 +369,9 @@ impl RepositoryAuthorityResolver {
             .paths
             .logical_codebase_record_root(&request.project_id, lc_id);
         let record_path = record_root.join("record.json");
-        let record_exists = record_path
-            .try_exists()
-            .map_err(|error| {
-                ProductStoreError::Io(format!("try_exists {}: {error}", record_path.display()))
-            })?
-            && !record_root.join("tombstone.json").exists();
+        let record_exists = record_path.try_exists().map_err(|error| {
+            ProductStoreError::Io(format!("try_exists {}: {error}", record_path.display()))
+        })? && !record_root.join("tombstone.json").exists();
         if !record_exists {
             return Err(ProductStoreError::NotFound {
                 kind: "logical_codebase",
@@ -402,8 +393,8 @@ impl RepositoryAuthorityResolver {
             .as_ref()
             .map(|manifest| manifest.provider_context_root.clone())
             .unwrap_or_else(|| record.aggregate_root.clone());
-        let authority_root = std::fs::canonicalize(&authority_root_path)
-            .unwrap_or(authority_root_path);
+        let authority_root =
+            std::fs::canonicalize(&authority_root_path).unwrap_or(authority_root_path);
         let members = logical.list_members(&request.project_id)?;
         let checkouts = logical.list_checkouts(&request.project_id)?;
 
@@ -439,14 +430,12 @@ impl RepositoryAuthorityResolver {
             let requested_sources: std::collections::BTreeSet<&str> = members
                 .iter()
                 .filter(|member| {
-                    member.status
-                        == crate::product::logical_codebase::types::MemberStatus::Active
+                    member.status == crate::product::logical_codebase::types::MemberStatus::Active
                 })
                 .map(|member| member.source_identity.key_digest.as_str())
                 .collect();
             if let Some(conflict) = legacy_members.iter().find(|member| {
-                member.status
-                    == crate::product::logical_codebase::types::MemberStatus::Active
+                member.status == crate::product::logical_codebase::types::MemberStatus::Active
                     && requested_sources.contains(member.source_identity.key_digest.as_str())
             }) {
                 return Err(ProductStoreError::Conflict {
@@ -457,14 +446,17 @@ impl RepositoryAuthorityResolver {
         }
 
         let (canonical_path, source_identity_digest, member_id, checkout_id) =
-            resolve_logical_target(request, &manifest, &members, &checkouts, &record.aggregate_root)?;
+            resolve_logical_target(
+                request,
+                &manifest,
+                &members,
+                &checkouts,
+                &record.aggregate_root,
+            )?;
 
         let selection = match request.issue_id.as_deref() {
-            Some(issue_id) => IssueCodebaseSelectionStore::for_lc(
-                self.paths.clone(),
-                lc_id,
-            )
-            .load(&request.project_id, issue_id)?,
+            Some(issue_id) => IssueCodebaseSelectionStore::for_lc(self.paths.clone(), lc_id)
+                .load(&request.project_id, issue_id)?,
             None => None,
         };
 
@@ -491,7 +483,8 @@ impl RepositoryAuthorityResolver {
             })
             .transpose()?;
 
-        let aggregate_index = read_authority_aggregate_index(&self.paths, &request.project_id, lc_id)?;
+        let aggregate_index =
+            read_authority_aggregate_index(&self.paths, &request.project_id, lc_id)?;
 
         Ok(RepositoryAuthorityResolution {
             authority_root,
@@ -519,10 +512,7 @@ impl RepositoryAuthorityResolver {
         let Some(repository_id) = request.repository_id.as_deref() else {
             return Err(ProductStoreError::Conflict {
                 kind: "repository_routing_kind_mismatch",
-                id: format!(
-                    "repository_id:missing:issue:{:?}",
-                    request.issue_id
-                ),
+                id: format!("repository_id:missing:issue:{:?}", request.issue_id),
             });
         };
         if request.logical_codebase_id.is_some()
@@ -544,9 +534,8 @@ impl RepositoryAuthorityResolver {
             });
         }
 
-        let repository_store = crate::product::repository_store::RepositoryStore::new(
-            self.paths.clone(),
-        );
+        let repository_store =
+            crate::product::repository_store::RepositoryStore::new(self.paths.clone());
         let records = repository_store.list(&request.project_id)?;
         let record = records
             .iter()
@@ -582,8 +571,7 @@ impl RepositoryAuthorityResolver {
             let legacy_members =
                 LogicalCodebaseStore::new(self.paths.clone()).list_members(&request.project_id)?;
             if let Some(conflict) = legacy_members.iter().find(|member| {
-                member.status
-                    == crate::product::logical_codebase::types::MemberStatus::Active
+                member.status == crate::product::logical_codebase::types::MemberStatus::Active
                     && member.source_identity.key_digest == source.key_digest
             }) {
                 return Err(ProductStoreError::Conflict {
@@ -624,8 +612,15 @@ fn resolve_logical_target(
     members: &[crate::product::logical_codebase::types::CodebaseMemberRecord],
     checkouts: &[crate::product::logical_codebase::types::RepositoryCheckoutRecord],
     record_root: &PathBuf,
-) -> Result<(PathBuf, String, Option<LogicalRepositoryId>, Option<RepositoryCheckoutId>), ProductStoreError>
-{
+) -> Result<
+    (
+        PathBuf,
+        String,
+        Option<LogicalRepositoryId>,
+        Option<RepositoryCheckoutId>,
+    ),
+    ProductStoreError,
+> {
     match request.logical_repository_id {
         Some(member_id) => {
             let member = members
@@ -660,7 +655,11 @@ fn resolve_logical_target(
                     })
                     .ok_or_else(|| ProductStoreError::NotFound {
                         kind: "repository_checkout",
-                        id: member.checkout_ids.first().map(|id| id.0.to_string()).unwrap_or_default(),
+                        id: member
+                            .checkout_ids
+                            .first()
+                            .map(|id| id.0.to_string())
+                            .unwrap_or_default(),
                     })?,
             };
             Ok((
@@ -681,8 +680,7 @@ fn resolve_logical_target(
             let mut digests: Vec<&str> = members
                 .iter()
                 .filter(|member| {
-                    member.status
-                        == crate::product::logical_codebase::types::MemberStatus::Active
+                    member.status == crate::product::logical_codebase::types::MemberStatus::Active
                 })
                 .map(|member| member.source_identity.key_digest.as_str())
                 .collect();
@@ -720,8 +718,9 @@ fn read_authority_aggregate_index(
             status: Some(AggregateIndexStatus::Active),
         });
     }
-    let mut latest: Option<crate::product::logical_codebase::aggregate_index::AggregateIndexRecord> =
-        None;
+    let mut latest: Option<
+        crate::product::logical_codebase::aggregate_index::AggregateIndexRecord,
+    > = None;
     for record in store.records(project_id).map_err(map_error)? {
         if record.status == AggregateIndexStatus::Superseded {
             continue;
@@ -842,10 +841,7 @@ pub fn read_policy_text_for_reference(
     }
     let Some((scope, artifact)) = matched else {
         return Err(PolicyReadError::Unavailable {
-            detail: format!(
-                "no authority subtree holds policy {}",
-                reference.policy_id
-            ),
+            detail: format!("no authority subtree holds policy {}", reference.policy_id),
         });
     };
 
@@ -864,12 +860,8 @@ pub fn read_policy_text_for_reference(
         None => LogicalCodebaseStore::new(paths.clone()),
     };
     let manifest = logical.load_manifest(project_id)?;
-    let record_root = paths.logical_codebase_record_root(
-        project_id,
-        scope
-            .as_deref()
-            .unwrap_or(&legacy_id),
-    );
+    let record_root =
+        paths.logical_codebase_record_root(project_id, scope.as_deref().unwrap_or(&legacy_id));
     let record: crate::product::logical_codebase::store::LogicalCodebaseRecord =
         crate::product::json_store::read_json(&record_root.join("record.json"))?;
     let expected_root = manifest
@@ -1145,16 +1137,10 @@ mod tests {
             )
             .unwrap();
 
-        let manifest_a = LogicalCodebaseManifest::new(
-            &project_id,
-            temp.path().join("alpha-root"),
-            Vec::new(),
-        );
-        let manifest_b = LogicalCodebaseManifest::new(
-            &project_id,
-            temp.path().join("beta-root"),
-            Vec::new(),
-        );
+        let manifest_a =
+            LogicalCodebaseManifest::new(&project_id, temp.path().join("alpha-root"), Vec::new());
+        let manifest_b =
+            LogicalCodebaseManifest::new(&project_id, temp.path().join("beta-root"), Vec::new());
         LogicalCodebaseStore::for_lc(paths.clone(), &lc_a.id)
             .save_manifest(&project_id, &manifest_a)
             .unwrap();
@@ -1201,13 +1187,21 @@ mod tests {
         AggregateIndexStore::for_lc(paths.clone(), &lc_a.id)
             .create(
                 &project_id,
-                active_index_record("aggregate_index_alpha", &project_id, manifest_a.membership_revision),
+                active_index_record(
+                    "aggregate_index_alpha",
+                    &project_id,
+                    manifest_a.membership_revision,
+                ),
             )
             .unwrap();
         AggregateIndexStore::for_lc(paths.clone(), &lc_b.id)
             .create(
                 &project_id,
-                active_index_record("aggregate_index_beta", &project_id, manifest_b.membership_revision),
+                active_index_record(
+                    "aggregate_index_beta",
+                    &project_id,
+                    manifest_b.membership_revision,
+                ),
             )
             .unwrap();
 
@@ -1228,16 +1222,29 @@ mod tests {
             resolution.authority_root,
             std::fs::canonicalize(temp.path().join("alpha-root")).unwrap()
         );
-        assert_eq!(resolution.target.kind, RepositoryTargetKind::LogicalCodebase);
+        assert_eq!(
+            resolution.target.kind,
+            RepositoryTargetKind::LogicalCodebase
+        );
         assert_eq!(
             resolution.target.logical_codebase_id.as_deref(),
             Some(lc_a.id.as_str())
         );
-        let manifest = resolution.manifest.expect("manifest from requested lc subtree");
-        assert_eq!(manifest.provider_context_root, temp.path().join("alpha-root"));
+        let manifest = resolution
+            .manifest
+            .expect("manifest from requested lc subtree");
+        assert_eq!(
+            manifest.provider_context_root,
+            temp.path().join("alpha-root")
+        );
         assert_eq!(manifest.logical_codebase_id, manifest_a.logical_codebase_id);
-        let selection = resolution.selection.expect("selection from requested lc subtree");
-        assert_eq!(selection.logical_codebase_id.as_deref(), Some(lc_a.id.as_str()));
+        let selection = resolution
+            .selection
+            .expect("selection from requested lc subtree");
+        assert_eq!(
+            selection.logical_codebase_id.as_deref(),
+            Some(lc_a.id.as_str())
+        );
         let policy = resolution.policy.expect("policy from requested lc subtree");
         assert_eq!(policy.policy_id, policy_a.policy_id);
         assert_eq!(policy.policy_digest, policy_a.digest);
@@ -1319,13 +1326,7 @@ mod tests {
                 base_branch: None,
             })
             .unwrap();
-        (
-            project_id,
-            issue.id,
-            lc.id,
-            policy,
-            beta_root,
-        )
+        (project_id, issue.id, lc.id, policy, beta_root)
     }
 
     #[test]
@@ -1348,10 +1349,7 @@ mod tests {
         assert_eq!(result.policy_digest, policy.digest);
         assert_eq!(result.text, policy.policy_text);
         // 正文 digest 必须是返回正文的 canonical SHA-256（非自报）。
-        let recomputed = format!(
-            "sha256:{:x}",
-            sha2::Sha256::digest(result.text.as_bytes())
-        );
+        let recomputed = format!("sha256:{:x}", sha2::Sha256::digest(result.text.as_bytes()));
         assert_eq!(recomputed, result.policy_digest);
 
         // authority root 与引用不符（引用被串改到 beta 根）→ IdentityMismatch
@@ -1361,7 +1359,10 @@ mod tests {
             ..frozen.clone()
         };
         let mismatched = read_policy_text_for_reference(&paths, &tampered).unwrap_err();
-        assert!(matches!(mismatched, PolicyReadError::IdentityMismatch { .. }));
+        assert!(matches!(
+            mismatched,
+            PolicyReadError::IdentityMismatch { .. }
+        ));
 
         // 引用 digest 与 artifact 正文 digest 不一致（引用被串改 digest）→
         // DigestMismatch fail-closed，不得返回正文。
@@ -1426,8 +1427,8 @@ mod tests {
         let repo_a = workspace.join("repo-a");
         init_git_repository_with_commit(&repo_a);
         let canonical = std::fs::canonicalize(&repo_a).unwrap();
-        let source = crate::product::repository_store::resolve_repository_source(&canonical)
-            .unwrap();
+        let source =
+            crate::product::repository_store::resolve_repository_source(&canonical).unwrap();
 
         let logical = LogicalCodebaseStore::new(paths.clone());
         let lc = logical
@@ -1544,7 +1545,9 @@ mod tests {
             created_at: now.clone(),
             updated_at: now.clone(),
         };
-        lc_store.save_member(&project_id, &duplicate_member).unwrap();
+        lc_store
+            .save_member(&project_id, &duplicate_member)
+            .unwrap();
         let before = aria_inventory(temp.path());
         let error = resolver
             .resolve(RepositoryRoutingRequest {
@@ -1586,7 +1589,9 @@ mod tests {
             LogicalCodebaseManifest::new(&project_id, workspace.clone(), Vec::new());
         let legacy_member_id = LogicalRepositoryId(uuid::Uuid::new_v4());
         legacy_manifest.member_ids = vec![legacy_member_id];
-        legacy_store.save_manifest(&project_id, &legacy_manifest).unwrap();
+        legacy_store
+            .save_manifest(&project_id, &legacy_manifest)
+            .unwrap();
         legacy_store
             .save_member(
                 &project_id,

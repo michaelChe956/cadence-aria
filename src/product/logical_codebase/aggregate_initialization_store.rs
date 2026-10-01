@@ -83,9 +83,9 @@ impl AggregateInitializationOperationStore {
             return Ok(Vec::new());
         }
         let mut operations = Vec::new();
-        for entry in std::fs::read_dir(&root).map_err(|error| {
-            ProductStoreError::Io(format!("read {}: {error}", root.display()))
-        })? {
+        for entry in std::fs::read_dir(&root)
+            .map_err(|error| ProductStoreError::Io(format!("read {}: {error}", root.display())))?
+        {
             let entry = entry.map_err(|error| {
                 ProductStoreError::Io(format!("read {} entry: {error}", root.display()))
             })?;
@@ -1038,8 +1038,14 @@ mod tests {
 
         // 四条无中断命令字节级冻结;两个确定性步骤(CadenceSkills/GitFinalize)
         // 没有命令——GitFinalize 仍是单仓专属终结点,聚合 recipe 不得复用。
-        assert_eq!(RepositoryInitializationStepKind::CadenceSkills.command(), None);
-        assert_eq!(RepositoryInitializationStepKind::GitFinalize.command(), None);
+        assert_eq!(
+            RepositoryInitializationStepKind::CadenceSkills.command(),
+            None
+        );
+        assert_eq!(
+            RepositoryInitializationStepKind::GitFinalize.command(),
+            None
+        );
         assert_eq!(
             RepositoryInitializationStepKind::PreCheck.command(),
             Some("/pre-check --no-interrupt --upgrade 用大陆镜像")
@@ -1058,7 +1064,10 @@ mod tests {
         );
 
         // command_index 双向映射冻结:1..=4 依序映射四命令步骤,0 与越界无映射。
-        assert_eq!(RepositoryInitializationStepKind::from_command_index(0), None);
+        assert_eq!(
+            RepositoryInitializationStepKind::from_command_index(0),
+            None
+        );
         assert_eq!(
             (1..=4)
                 .map(RepositoryInitializationStepKind::from_command_index)
@@ -1070,7 +1079,10 @@ mod tests {
                 Some(RepositoryInitializationStepKind::ProjectRulesExamples),
             ]
         );
-        assert_eq!(RepositoryInitializationStepKind::from_command_index(5), None);
+        assert_eq!(
+            RepositoryInitializationStepKind::from_command_index(5),
+            None
+        );
 
         // 聚合侧不占用单仓读取面:legacy operation store 仍拒绝聚合布局。
         let fixture = aggregate_init_fixture();

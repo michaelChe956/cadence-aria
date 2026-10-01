@@ -215,7 +215,6 @@ pub struct AggregateInitializationActionRecord {
     pub applied_at: String,
 }
 
-
 /// Input captured at create time. `idempotency_key` plus the manifest/policy
 /// digests together define the idempotency identity for `create_idempotent`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

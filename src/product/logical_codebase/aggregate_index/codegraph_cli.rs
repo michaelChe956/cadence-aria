@@ -115,9 +115,7 @@ impl CodeGraphCli {
         } else {
             Err(AggregateIndexError::Degraded {
                 code: "codegraph_version_mismatch",
-                message: format!(
-                    "expected >=1.6.0, <2.0.0 (compatible ^1.6 range), got {actual}"
-                ),
+                message: format!("expected >=1.6.0, <2.0.0 (compatible ^1.6 range), got {actual}"),
             })
         }
     }

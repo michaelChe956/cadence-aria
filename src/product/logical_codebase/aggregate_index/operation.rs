@@ -179,7 +179,12 @@ impl AggregateIndexOperation {
         }
 
         self.with_single_writer(project_id, || {
-            self.apply_index(project_id, &manifest, IndexApplicationMode::Initialize, None)
+            self.apply_index(
+                project_id,
+                &manifest,
+                IndexApplicationMode::Initialize,
+                None,
+            )
         })
     }
 
@@ -642,7 +647,6 @@ fn verify_member_coverage(
     Ok(result)
 }
 
-
 fn is_empty_query_result(value: &Value) -> bool {
     matches!(value, Value::Array(values) if values.is_empty())
 }
@@ -685,7 +689,6 @@ fn collect_result_paths(value: &Value, paths: &mut Vec<PathBuf>) {
         _ => {}
     }
 }
-
 
 fn format_paths(paths: &[PathBuf]) -> String {
     if paths.is_empty() {
