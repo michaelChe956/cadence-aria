@@ -482,3 +482,68 @@ export function deferred<T>() {
   });
   return { promise, resolve, reject };
 }
+
+// 从 IssueLifecycleWorkbench.test-utils.ts 拆出（large_file_guard 1200 行上限，纯移动零行为变化）：
+// sharedLifecycleIdsAcrossIssues 选项共用的跨 issue 同 id lifecycle 数据工厂。
+export function sharedIdLifecycleData(issueId: string): MockLifecycleData {
+    const planId = "issue_work_item_plan_0001";
+    const data = initialLifecycleData(
+      issueId,
+      false,
+      false,
+      true,
+      false,
+      [
+        issueWorkItemPlanRecord({
+          id: planId,
+          issue_id: issueId,
+          status: "confirmed",
+          work_item_ids: ["work_item_0001"],
+        }),
+      ],
+      false,
+    );
+    data.story_specs[0] = {
+      ...data.story_specs[0],
+      issue_id: issueId,
+      title: `${issueId} Story`,
+    };
+    data.design_specs[0] = {
+      ...data.design_specs[0],
+      issue_id: issueId,
+      title: `${issueId} Design`,
+    };
+    data.work_items[0] = {
+      ...data.work_items[0],
+      issue_id: issueId,
+      title: `${issueId} Child`,
+    };
+    data.work_item_repository_groups = [];
+    data.workspace_sessions = [
+      workspaceSessionRecord(
+        "story",
+        "story_spec_0001",
+        `workspace_session_${issueId}_story`,
+        { issue_id: issueId },
+      ),
+      workspaceSessionRecord(
+        "design",
+        "design_spec_0001",
+        `workspace_session_${issueId}_design`,
+        { issue_id: issueId },
+      ),
+      workspaceSessionRecord(
+        "work_item",
+        "work_item_0001",
+        `workspace_session_${issueId}_work_item`,
+        { issue_id: issueId },
+      ),
+      workspaceSessionRecord(
+        "work_item_plan",
+        planId,
+        `workspace_session_${issueId}_work_item_plan`,
+        { issue_id: issueId },
+      ),
+    ];
+    return data;
+}

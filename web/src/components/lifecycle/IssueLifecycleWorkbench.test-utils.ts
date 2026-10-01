@@ -21,6 +21,7 @@ import {
   jsonResponse,
   projectRecord,
   repositoryRecord,
+  sharedIdLifecycleData,
   workspaceSessionRecord,
   type MockLifecycleData,
 } from "./IssueLifecycleWorkbench.test-data";
@@ -94,69 +95,6 @@ export function lifecycleFetch(
       created_at: "2026-05-16T00:00:00Z",
       updated_at: "2026-05-16T00:00:00Z",
     };
-  }
-
-  function sharedIdLifecycleData(issueId: string): MockLifecycleData {
-    const planId = "issue_work_item_plan_0001";
-    const data = initialLifecycleData(
-      issueId,
-      false,
-      false,
-      true,
-      false,
-      [
-        issueWorkItemPlanRecord({
-          id: planId,
-          issue_id: issueId,
-          status: "confirmed",
-          work_item_ids: ["work_item_0001"],
-        }),
-      ],
-      false,
-    );
-    data.story_specs[0] = {
-      ...data.story_specs[0],
-      issue_id: issueId,
-      title: `${issueId} Story`,
-    };
-    data.design_specs[0] = {
-      ...data.design_specs[0],
-      issue_id: issueId,
-      title: `${issueId} Design`,
-    };
-    data.work_items[0] = {
-      ...data.work_items[0],
-      issue_id: issueId,
-      title: `${issueId} Child`,
-    };
-    data.work_item_repository_groups = [];
-    data.workspace_sessions = [
-      workspaceSessionRecord(
-        "story",
-        "story_spec_0001",
-        `workspace_session_${issueId}_story`,
-        { issue_id: issueId },
-      ),
-      workspaceSessionRecord(
-        "design",
-        "design_spec_0001",
-        `workspace_session_${issueId}_design`,
-        { issue_id: issueId },
-      ),
-      workspaceSessionRecord(
-        "work_item",
-        "work_item_0001",
-        `workspace_session_${issueId}_work_item`,
-        { issue_id: issueId },
-      ),
-      workspaceSessionRecord(
-        "work_item_plan",
-        planId,
-        `workspace_session_${issueId}_work_item_plan`,
-        { issue_id: issueId },
-      ),
-    ];
-    return data;
   }
 
   function lifecycleData(issueId: string) {
