@@ -3,6 +3,11 @@ use crate::cross_cutting::session_launch::ValidatedStreamingProviderInput;
 use crate::cross_cutting::structured_output::StructuredOutputContract;
 use crate::product::coding_models::{CodingAdmissionKind, CodingAttemptScope};
 use crate::product::coding_workspace_engine::group::GroupUnitFailureOutcome;
+use crate::product::logical_codebase::policy::{PolicyTarget, SessionPolicyAction};
+use crate::product::logical_codebase::provider_gateway::{
+    ProviderGatewayError, SessionLaunchRequest, ValidatedSessionLaunchPolicy,
+};
+use crate::product::work_item_split_engine::engine::provider_ref_for_name;
 use crate::protocol::provider_errors::ProviderErrorCode;
 
 pub(crate) const MAX_PROVIDER_INVOCATIONS_PER_CYCLE: u32 = 3;
@@ -307,13 +312,28 @@ impl CodingWorkspaceEngine {
             // 裁决 A 两阶段:validate 前移,在 coding.rs/rework.rs 已完成 prompt 构建
             // (并注入 routing reference);此处仅 resolve policy 再捆绑 validated input,
             // provider_input 仍 clone-then-move(validated 包裹 clone,原值 move 进 run 结构)。
-            let policy = self
-                .resolve_launch_policy_for_role(
+            // Task 2.6（REQ-ENV-10/11）：LC attempt 走 root launch（cwd=canonical
+            // root、target/writable root=attempt worktree）；单仓/legacy 保持既有
+            // `resolve_launch_policy_for_role` 分流（None → 直连，零行为变化）。
+            let policy = if invocation_attempt.target_snapshot.is_some() {
+                self.resolve_coder_root_launch_policy(&invocation_attempt, worktree_path)
+            } else {
+                self.resolve_launch_policy_for_role(
                     &invocation_attempt,
                     CodingProviderRole::Coder,
                     worktree_path,
                 )
-                .map_err(|error| CodingWorkspaceEngineError::ProviderStream(error.to_string()))?;
+            }
+            .map_err(|error| CodingWorkspaceEngineError::ProviderStream(error.to_string()))?;
+            // 设计决策 1「launch 层按 validated envelope 重绑 cwd」：policy 存在时
+            // input 显式携带 envelope 冻结的 canonical cwd（LC Coder=root；Task 2.5
+            // 复验在 spawn 前消费该字段）。单仓/无政策路径保持 None（回填
+            // working_dir，零行为变化）。
+            let mut provider_input = provider_input;
+            if let Some(policy) = policy.as_ref() {
+                provider_input.working_directory =
+                    Some(policy.envelope().working_directory.clone());
+            }
             let validated_input = policy
                 .map(|policy| ValidatedStreamingProviderInput::new(provider_input.clone(), policy));
             let outcome = self
@@ -461,6 +481,15 @@ impl CodingWorkspaceEngine {
             };
             // 裁决 A 两阶段:policy 已 resolve,routing reference 已注入 prompt;
             // 此处仅把 policy 与 provider_input 捆绑(同源 clone-then-move)。
+            // Task 2.6：launch 层 envelope 重绑（设计决策 1）——reviewer 现状
+            // envelope cwd==target worktree（effective 零变化）；reviewer 角色
+            // 的 root envelope 接线（Task 2.7）后本重绑自动跟随，spawn 前复验
+            // 不因字段分离而漂移。无政策路径保持 None（回填，零行为变化）。
+            let mut provider_input = provider_input;
+            if let Some(policy) = policy.as_ref() {
+                provider_input.working_directory =
+                    Some(policy.envelope().working_directory.clone());
+            }
             let validated_input = policy
                 .map(|policy| ValidatedStreamingProviderInput::new(provider_input.clone(), policy));
             let outcome = self
@@ -1148,3 +1177,7 @@ fn non_retryable(reason_code: &str, interaction_wait: bool) -> ProviderFailureCl
         interaction_wait,
     }
 }
+
+// Task 2.6：LC Coder root launch 解析（物理拆分满足 large_file_guard 1200 行
+// 上限；include! 后与本文件同模块域）。
+include!("provider_retry_parts/coder_root_launch.inc.rs");

@@ -6,7 +6,13 @@ use super::*;
 ///
 /// - 两者均存在:经 `LogicalCodebaseProviderGateway::start_streaming` 启动,使政策
 ///   校验、canonical 复验、resume fail-closed 都在 gateway 内完成并留 audit。
-/// - 否则(传统/非逻辑 issue):直接 `provider.start`,保留既有行为。
+///   Task 2.6（REQ-ENV-10）起 LC Coder/retry 的 validated input 携带独立
+///   `working_directory`（=envelope 冻结的 canonical root，调用侧
+///   `resolve_coder_root_launch_policy` + envelope 重绑产出），gateway 在
+///   `revalidate_before_spawn` 以 effective cwd 消费该字段并做 canonical/authority
+///   复验——本分流不重建该校验，fail-closed 语义全部留在 gateway。
+/// - 否则(传统/非逻辑 issue):直接 `provider.start`,保留既有行为（单仓 cwd
+///   仍取 `working_dir`，`working_directory` 为 None 的回填语义不变）。
 ///
 /// 返回 boxed future 以便外层 `tokio::select!` 统一内联。gateway 错误映射为
 /// `ProviderAdapterError`,使其与直接 adapter 错误在 stream 层等价处理。

@@ -976,3 +976,211 @@ async fn logical_coding_run_blocks_member_main_checkout_drift() {
         other => panic!("expected CrossTargetDeliveryBlocked, got {other:?}"),
     }
 }
+
+// ================= Task 2.6：LC Coder/retry root cwd 重绑（REQ-ENV-10/ENV-11） =================
+
+/// spawn 探针：记录每次 spawn 时点的 effective cwd 并计数；会话立即完成
+/// （与 D4 探针同构，聚焦 cwd/计数两个观测维度）。
+struct RootCwdProbeAdapter {
+    spawns: Arc<std::sync::atomic::AtomicUsize>,
+    cwd_at_spawns: Arc<std::sync::Mutex<Vec<PathBuf>>>,
+}
+
+impl RootCwdProbeAdapter {
+    fn new() -> Self {
+        Self {
+            spawns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            cwd_at_spawns: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for RootCwdProbeAdapter {
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        self.spawns
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.cwd_at_spawns
+            .lock()
+            .expect("root cwd probe mutex")
+            .push(input.effective_working_directory().to_path_buf());
+        let (event_tx, event_rx) = mpsc::channel(4);
+        let (command_tx, _command_rx) = mpsc::channel(4);
+        tokio::spawn(async move {
+            let _ = event_tx
+                .send(ProviderEvent::Completed(
+                    crate::cross_cutting::streaming_provider::ProviderCompletion::from_output(
+                        "root cwd probe output".to_string(),
+                        None,
+                        None,
+                    ),
+                ))
+                .await;
+        });
+        Ok(ProviderSession {
+            native_session_id: None,
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+}
+
+/// 以 LC Coder 角色驱动一次真实 coder retry cycle（生产入口
+/// `run_coder_with_retry_cycle`）：policy 在 cycle 内 resolve，input 经生产
+/// 工厂 `coder_retry_cycle_streaming_input` 构造，spawn 唯一经 gateway。
+/// `gateway` 传 `None` 复现「LC attempt 未注入 gateway」的 fail-closed 面。
+async fn drive_coder_retry_cycle(
+    store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+    gateway: Option<Arc<LogicalCodebaseProviderGateway>>,
+    probe: &RootCwdProbeAdapter,
+) -> Result<ProviderRetryCycleSuccess, CodingWorkspaceEngineError> {
+    override_coder_to_claude_code(store, attempt);
+    let (event_tx, _event_rx) = mpsc::channel(16);
+    let mut engine =
+        CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx);
+    if let Some(gateway) = gateway {
+        engine = engine.with_logical_provider_gateway(gateway);
+    }
+    // 生产链在进入 coder cycle 前把 stage 推进到 Coding（coding.rs 同款）。
+    let attempt = store
+        .update_attempt_stage(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingExecutionStage::Coding,
+        )
+        .expect("stage to Coding");
+    let node = engine
+        .create_coding_timeline_node(&attempt)
+        .expect("timeline node");
+    let role_run = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::Coding,
+            CodingProviderRole::Coder,
+            CodingRoleRunTrigger::Initial,
+            Some(node.id.clone()),
+        )
+        .expect("role run");
+    let worktree = attempt.worktree_path.clone().expect("worktree");
+    let (_command_tx, mut command_rx) = mpsc::channel::<CodingRunnerCommand>(1);
+    drop(_command_tx);
+    engine
+        .run_coder_with_retry_cycle(CoderRetryCycleInput {
+            attempt: &attempt,
+            initial_node: node,
+            initial_role_run: role_run,
+            provider: probe,
+            provider_name: &ProviderName::ClaudeCode,
+            worktree_path: &worktree,
+            initial_prompt: "root cwd probe".to_string(),
+            fresh_prompt: "root cwd probe fresh".to_string(),
+            initial_prompt_mode: CodingPromptMode::FullConversation,
+            initial_resume_provider_session_id: None,
+            command_rx: &mut command_rx,
+        })
+        .await
+}
+
+/// Task 2.6（REQ-ENV-10/ENV-11）：LC Coder/retry 的 cwd 重绑 canonical root
+/// ——spawn 时点 provider 进程 cwd == gateway 冻结的 authority root（manifest
+/// `provider_context_root`），恰一次 spawn 经 gateway；writable root 不随 cwd
+/// 扩大（恒=attempt target worktree，REQ-ENV-03）。
+#[tokio::test]
+async fn logical_coder_rebinds_root_cwd_without_expanding_writable_root() {
+    let (root, store, attempt) = running_attempt_with_worktree();
+    let _root = root;
+    init_test_git_repo(attempt.worktree_path.as_ref().unwrap());
+    seed_logical_codebase_checkout(&store, &attempt);
+    let logical_attempt = with_target_snapshot(&store, &attempt);
+    override_coder_to_claude_code(&store, &logical_attempt);
+
+    let probe = Arc::new(RootCwdProbeAdapter::new());
+    let mut registry = ProviderRegistry::new();
+    registry.register(ProviderName::ClaudeCode, probe.clone());
+    let gateway = build_gateway_with_registry(
+        &store.paths(),
+        &logical_attempt.project_id,
+        Arc::new(registry),
+        Arc::new(GatewayRunAudit::new()),
+    );
+    let canonical_root = gateway.authority_root().to_path_buf();
+    let gateway = Arc::new(gateway);
+
+    // writable root 不随 cwd 扩大：root launch 解析出的 envelope 保持
+    // cwd=canonical root、唯一 writable root=target worktree（target 来自
+    // attempt snapshot）。
+    let (policy_tx, _policy_rx) = mpsc::channel(32);
+    let policy_engine = CodingWorkspaceEngine::new(
+        store.clone(),
+        GitWorkspaceService::new(),
+        policy_tx,
+    )
+    .with_logical_provider_gateway(gateway.clone());
+    let worktree = logical_attempt.worktree_path.clone().expect("worktree");
+    let policy = policy_engine
+        .resolve_coder_root_launch_policy(&logical_attempt, &worktree)
+        .expect("root policy resolve returns Ok")
+        .expect("logical attempt + gateway must produce root policy");
+    assert_eq!(policy.envelope().working_directory, canonical_root);
+    assert_eq!(policy.envelope().writable_roots, vec![worktree]);
+
+    let success = drive_coder_retry_cycle(&store, &logical_attempt, Some(gateway), probe.as_ref())
+        .await
+        .expect("logical coder retry cycle must complete through the gateway");
+
+
+    assert_eq!(
+        success.outcome.full_output, "root cwd probe output",
+        "probe output must round-trip through the coder retry cycle"
+    );
+    assert_eq!(
+        probe.spawns.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "exactly one provider spawn for the lc coder run"
+    );
+    let cwd_at_spawns = probe
+        .cwd_at_spawns
+        .lock()
+        .expect("root cwd probe mutex")
+        .clone();
+    assert_eq!(
+        cwd_at_spawns,
+        vec![canonical_root.clone()],
+        "provider process cwd must be rebound to the canonical lc root"
+    );
+
+
+}
+
+/// Task 2.6：LC attempt 未注入 gateway（无 validated launch）时 coder retry
+/// cycle fail-closed——零 spawn，错误携带 `logical_provider_gateway_required`
+/// 稳定码，绝不回落 legacy 直连（Task 12 门在 cycle 内保持关闭）。
+#[tokio::test]
+async fn logical_coder_without_validated_gateway_zero_spawns() {
+    let (root, store, attempt) = running_attempt_with_worktree();
+    let _root = root;
+    let logical_attempt = with_target_snapshot(&store, &attempt);
+
+    let probe = Arc::new(RootCwdProbeAdapter::new());
+    let error = match drive_coder_retry_cycle(&store, &logical_attempt, None, probe.as_ref()).await
+    {
+        Err(error) => error,
+        Ok(_) => panic!("logical coder cycle must fail closed without an injected gateway"),
+    };
+
+    assert!(
+        error.to_string().contains("logical_provider_gateway_required"),
+        "expected logical_provider_gateway_required error, got: {error:?}"
+    );
+    assert_eq!(
+        probe.spawns.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "zero provider spawns without a validated gateway launch"
+    );
+}
