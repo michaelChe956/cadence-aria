@@ -192,12 +192,7 @@ impl WorkspaceEngine {
         ));
         let baseline_tree = self.append_reviewer_baseline_teaching(&mut prompt)?;
         ensure_single_candidate_review_prompt_budget(&prompt)?;
-        let working_dir = self
-            .session
-            .repository_path
-            .clone()
-            .map(Ok)
-            .unwrap_or_else(|| std::env::current_dir().map_err(|error| error.to_string()))?;
+        let (working_dir, working_directory) = self.review_launch_target_and_cwd()?;
         // C2 Task 5（REQ-CRO-05）：reviewer 缺失（空 effective）fail-closed——
         // 绝不以 Codex 顶替构建 reviewer prompt。
         let provider = self
@@ -206,7 +201,7 @@ impl WorkspaceEngine {
             .clone()
             .ok_or_else(|| "reviewer_configuration_missing".to_string())?;
         Ok(StreamingProviderInput {
-            working_directory: None,
+            working_directory,
             baseline_tree,
             tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
             audit_sink: None,

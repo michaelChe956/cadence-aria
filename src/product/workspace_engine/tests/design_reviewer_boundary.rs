@@ -347,3 +347,289 @@ fn design_reviewer_boundary_candidates_stay_out_of_the_deterministic_gate() {
         );
     }
 }
+
+// ============================================================================
+// Task 2.4（lc-root-initialization，REQ-PLN-01/PLN-07、REQ-ENV-09/ENV-10）：
+// WorkItemPlan review 全分支 builder 的 LC root-cwd 迁移。
+//
+// `all_logical_plan_review_builders_keep_reviewer_write_guard`：LC 会话下
+// legacy 整组候选 / outline / draft / batch / single-candidate / projection
+// 六个 plan review builder 与 ReviewOnly 泛型分支均以 canonical LC root 为
+// cwd（消费 Task 2.5 `working_directory` 字段合同）、成员 checkout 为显式
+// review target（不从 cwd 推导）；Reviewer 写工具策略（DenyFileWriteBuiltins）
+// 不放宽。伴随断言：LC 缺显式 target fail-closed（绝不回退进程 cwd/成员
+// cwd）；单仓（无 gateway）builder 原值不变（`working_directory=None`、
+// cwd 语义仍由 `working_dir` 承载）。
+// ============================================================================
+
+/// 最小 LC gateway 夹具：authority root = canonical manifest root，成员
+/// checkout 位于 root 子树（与 Task 2.3 revision 夹具同构，去掉与本测试
+/// 无关的登记/selection 链——builder 面只消费 `authority_root`，不触
+/// gateway validate）。
+fn logical_plan_review_gateway_fixture() -> (
+    tempfile::TempDir,
+    Arc<LogicalCodebaseProviderGateway>,
+    std::path::PathBuf,
+    std::path::PathBuf,
+) {
+    use crate::cross_cutting::provider_registry::ProviderRegistry;
+    use crate::product::logical_codebase::{
+        AggregatePolicyArtifactStore, GatewayRunAudit, LogicalCodebaseProviderGateway,
+    };
+
+    let root = tempfile::tempdir().expect("temporary logical root");
+    let manifest_root = root.path().join("lc-root");
+    let member_root = manifest_root.join("member-checkout");
+    std::fs::create_dir_all(&member_root).expect("create member checkout");
+    // REQ-PIB-02：baseline 解析对裸目录 fail-closed——成员 checkout 需 main
+    // 分支 + 初始提交（builder 的 baseline teaching 经 repository_path 解析）。
+    init_fixture_git_repo(&member_root);
+    let authority_root = std::fs::canonicalize(&manifest_root).expect("canonical root");
+    let registry = ProviderRegistry::new();
+    let gateway = Arc::new(LogicalCodebaseProviderGateway::with_audit(
+        AggregatePolicyArtifactStore::new(ProductAppPaths::new(root.path().join(".aria-lc"))),
+        Arc::new(ReviewStaticCapabilitySource::default()),
+        Arc::new(ReviewPassThroughTargetResolver),
+        Arc::new(registry),
+        Arc::new(ReviewStubSyncAdapter),
+        review_always_available_gate(),
+        Arc::new(GatewayRunAudit::new()),
+        authority_root.clone(),
+    ));
+    (root, gateway, authority_root, member_root)
+}
+
+/// LC 分支 builder 输出的统一断言：root cwd + 显式成员 target + Reviewer
+/// 写工具策略保持。
+fn assert_logical_plan_review_input(
+    input: &StreamingProviderInput,
+    case: &str,
+    authority_root: &std::path::Path,
+    member_root: &std::path::Path,
+) {
+    use crate::cross_cutting::streaming_provider::ProviderToolPolicy;
+
+    assert_eq!(input.role, AdapterRole::Reviewer, "{case}: reviewer role");
+    assert_eq!(
+        input.tool_policy,
+        Some(ProviderToolPolicy::deny_file_write_builtins()),
+        "{case}: ReviewOnly 写工具策略不得放宽（DenyFileWriteBuiltins 保持）"
+    );
+    assert_eq!(
+        input.working_directory.as_deref(),
+        Some(authority_root),
+        "{case}: LC cwd 必须是 canonical root——不得回退成员 worktree 或进程 cwd"
+    );
+    assert_eq!(
+        input.working_dir, member_root,
+        "{case}: review target 保持显式成员 checkout（不从 cwd 推导）"
+    );
+}
+
+#[tokio::test]
+async fn all_logical_plan_review_builders_keep_reviewer_write_guard() {
+    use crate::product::work_item_plan_compiler::{
+        PlanCandidateIr, PlanCandidateItemIr, PlanCandidateMechanicalReport,
+        WORK_ITEM_PLAN_COMPILER_VERSION,
+    };
+    use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
+    use crate::product::work_item_plan_source_store::{
+        PlanCandidateIrRecord, PlanCandidateMechanicalReportRecord, SourceRevisionRecord,
+        WorkItemPlanSourceStore,
+    };
+    use sha2::{Digest, Sha256};
+
+    let (_lc_root, gateway, authority_root, member_root) = logical_plan_review_gateway_fixture();
+
+    // —— WorkItemPlan 面：legacy + delegated builders 共用一台 LC engine ——
+    let (_tmp, _checkpoint_store, lifecycle, plan_id, engine) =
+        make_work_item_plan_engine_with_draft_candidate("sess_logical_plan_review_builders");
+    let mut engine = engine.with_logical_provider_gateway(gateway.clone());
+    engine.session.repository_path = Some(member_root.clone());
+
+    // legacy 整组拆分候选分支。
+    let input = engine
+        .build_work_item_plan_review_input()
+        .expect("legacy plan review input");
+    assert_logical_plan_review_input(&input, "legacy", &authority_root, &member_root);
+
+    // outline 分支。
+    let outline_payload = work_item_plan_outline_artifact();
+    let ArtifactPayload::WorkItemPlanOutlineCandidate { outline_candidate } = outline_payload
+    else {
+        panic!("expected outline candidate artifact");
+    };
+    let input = engine
+        .build_work_item_plan_outline_review_input(&outline_candidate)
+        .expect("outline review input");
+    assert_logical_plan_review_input(&input, "outline", &authority_root, &member_root);
+
+    // draft 分支。
+    prepare_work_item_plan_outline_artifact(&mut engine).await;
+    save_serial_work_item_plan_index(&engine, &plan_id, "outline_a");
+    let draft_payload = work_item_draft_artifact_payload(
+        &plan_id,
+        "outline_a",
+        "draft_a",
+        WorkItemDraftStatus::Draft,
+    );
+    let ArtifactPayload::WorkItemDraftCandidate { draft_candidate } = draft_payload else {
+        panic!("expected draft candidate artifact");
+    };
+    let input = engine
+        .build_work_item_draft_review_input(&draft_candidate)
+        .expect("draft review input");
+    assert_logical_plan_review_input(&input, "draft", &authority_root, &member_root);
+
+    // batch 分支。
+    save_batch_work_item_plan_index_with_accepted_drafts(&engine, &plan_id);
+    let input = engine
+        .build_work_item_batch_review_input()
+        .expect("batch review input");
+    assert_logical_plan_review_input(&input, "batch", &authority_root, &member_root);
+
+    // single-candidate 分支（durable IR + mechanical report）。
+    let source_store = WorkItemPlanSourceStore::new(lifecycle.app_paths());
+    let source = "# logical plan review builders source\n";
+    let mut source_revision = SourceRevisionRecord {
+        id: "source-logical-plan-review".to_string(),
+        source: source.to_string(),
+        source_revision_hash: hex::encode(Sha256::digest(source.as_bytes())),
+        content_hash: String::new(),
+    };
+    source_revision.content_hash = source_revision.content_hash().expect("source content hash");
+    source_store
+        .put_source_revision("project_0001", "issue_0001", &plan_id, &source_revision)
+        .expect("persist source revision");
+    let contract_a = crate::product::work_item_contract::canonical_contract_fixture("wi-a");
+    let mut contract_b = crate::product::work_item_contract::canonical_contract_fixture("wi-b");
+    contract_b.depends_on = vec!["wi-a".to_string()];
+    let ir = PlanCandidateIr {
+        source_revision_hash: source_revision.source_revision_hash.clone(),
+        compiler_version: WORK_ITEM_PLAN_COMPILER_VERSION.to_string(),
+        items: vec![
+            PlanCandidateItemIr {
+                target_repository_id: "repository_0001".to_string(),
+                contract: contract_a,
+                verification_plan: crate::product::models::WorkItemDraftVerificationPlan {
+                    checks: Vec::new(),
+                },
+                trusted_commands: Vec::new(),
+            },
+            PlanCandidateItemIr {
+                target_repository_id: "repository_0001".to_string(),
+                contract: contract_b,
+                verification_plan: crate::product::models::WorkItemDraftVerificationPlan {
+                    checks: Vec::new(),
+                },
+                trusted_commands: Vec::new(),
+            },
+        ],
+    };
+    let mut ir_record = PlanCandidateIrRecord {
+        id: "ir-logical-plan-review".to_string(),
+        source_revision_id: source_revision.id.clone(),
+        ir,
+        content_hash: String::new(),
+    };
+    ir_record.content_hash = ir_record.content_hash().expect("IR content hash");
+    let ir_ref = source_store
+        .put_plan_candidate_ir("project_0001", "issue_0001", &plan_id, &ir_record)
+        .expect("persist compiled IR");
+    let mut report = PlanCandidateMechanicalReportRecord {
+        id: "report-logical-plan-review".to_string(),
+        source_revision_id: source_revision.id,
+        ir_id: ir_record.id,
+        report: PlanCandidateMechanicalReport {
+            source_revision_hash: ir_record.ir.source_revision_hash.clone(),
+            compiler_version: ir_record.ir.compiler_version.clone(),
+            findings: Vec::new(),
+        },
+        content_hash: String::new(),
+    };
+    report.content_hash = report.content_hash().expect("report content hash");
+    let report_ref = source_store
+        .put_mechanical_report("project_0001", "issue_0001", &plan_id, &report)
+        .expect("persist mechanical report");
+    engine.session.flow_kind = WorkItemPlanFlowKind::SingleCandidate;
+    engine.session.plan_candidate_ir_ref = Some(ir_ref);
+    engine.session.mechanical_report_ref = Some(report_ref);
+    engine.session.artifact = Some(ArtifactPayload::Markdown {
+        markdown: "compiled markdown is not authoritative".to_string(),
+        diff: None,
+    });
+    let input = engine
+        .build_work_item_plan_review_input()
+        .expect("single-candidate review input");
+    assert_logical_plan_review_input(&input, "single-candidate", &authority_root, &member_root);
+
+    // projection 分支（accepted-contract 夹具 + 初始编译产物；编译在 LC 覆盖
+    // 前完成，避免 repository_path 参与编译链）。
+    let (_projection_tmp, _projection_lifecycle, _projection_plan_id, mut projection_engine) =
+        make_work_item_plan_engine_with_accepted_contract_drafts();
+    let outcome = projection_engine
+        .run_work_item_plan_compile()
+        .await
+        .expect("initial plan compile");
+    projection_engine = projection_engine.with_logical_provider_gateway(gateway.clone());
+    projection_engine.session.repository_path = Some(member_root.clone());
+    projection_engine.session.artifact = Some(ArtifactPayload::WorkItemPlanProjection {
+        projection: Box::new(outcome.plan_projection_bundle),
+    });
+    let input = projection_engine
+        .build_work_item_plan_review_input()
+        .expect("projection review input");
+    assert_logical_plan_review_input(&input, "projection", &authority_root, &member_root);
+
+    // ReviewOnly 泛型分支（Design review）同规则。
+    let (_design_tmp, design_store) = setup();
+    let (design_tx, _design_rx) = mpsc::channel(16);
+    let mut design_session = make_session("sess_logical_review_only_cwd");
+    design_session.workspace_type = WorkspaceType::Design;
+    design_session.artifact = Some(artifact_payload(&complete_design_artifact(
+        "删除采用软删除并保留审计字段。",
+        "删除后查询不再返回该记录。",
+    )));
+    design_session.repository_path = Some(member_root.clone());
+    let design_engine = WorkspaceEngine::new(design_store, design_tx, design_session)
+        .with_logical_provider_gateway(gateway.clone());
+    let input = design_engine
+        .build_review_input()
+        .expect("review-only input");
+    assert_logical_plan_review_input(&input, "review-only", &authority_root, &member_root);
+
+    // —— LC 缺显式 target：fail-closed，绝不回退进程 cwd / 成员 cwd ——
+    engine.session.repository_path = None;
+    let error = engine
+        .build_work_item_plan_review_input()
+        .expect_err("logical review without explicit target must fail closed");
+    assert!(
+        error.contains("explicit member target"),
+        "unexpected fail-closed message: {error}"
+    );
+
+    // —— 单仓零变化：无 gateway 时 builder 原值不变 ——
+    let (_single_tmp, _single_checkpoint, _single_lifecycle, _single_plan, mut single_engine) =
+        make_work_item_plan_engine_with_draft_candidate("sess_single_repo_plan_review_unchanged");
+    // repository_path 缺省：保留进程 cwd 回退（legacy 语义原值）。
+    let input = single_engine
+        .build_work_item_plan_review_input()
+        .expect("single-repo plan review input");
+    assert_eq!(input.working_directory, None, "单仓 builder 不注入 LC cwd");
+    assert_eq!(
+        input.working_dir,
+        std::env::current_dir().expect("process cwd"),
+        "单仓 repository_path 缺省仍回退进程 cwd（原值不变）"
+    );
+    // repository_path 显式：cwd = target 原值（单仓 cwd==target 等式保持）。
+    single_engine.session.repository_path = Some(_single_tmp.path().join("repository"));
+    let input = single_engine
+        .build_work_item_plan_review_input()
+        .expect("single-repo plan review input with explicit path");
+    assert_eq!(input.working_directory, None);
+    assert_eq!(
+        input.working_dir,
+        _single_tmp.path().join("repository"),
+        "单仓 repository_path 显式时 cwd=target（原值不变）"
+    );
+}

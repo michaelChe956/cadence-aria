@@ -3,11 +3,7 @@ impl WorkspaceEngine {
         &self,
         draft_candidate: &WorkItemDraftCandidatePayload,
     ) -> Result<StreamingProviderInput, String> {
-        let working_dir = match &self.session.repository_path {
-            Some(path) => path.clone(),
-            None => std::env::current_dir()
-                .map_err(|error| format!("working directory error: {error}"))?,
-        };
+        let (working_dir, working_directory) = self.review_launch_target_and_cwd()?;
         // C2 Task 5（REQ-CRO-05）：reviewer 缺失（空 effective）fail-closed——
         // 绝不以 Codex 顶替构建 reviewer prompt。
         let provider = self
@@ -122,7 +118,7 @@ impl WorkspaceEngine {
         ));
         let baseline_tree = self.append_reviewer_baseline_teaching(&mut prompt)?;
         Ok(StreamingProviderInput {
-            working_directory: None,
+            working_directory,
             baseline_tree,
             tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
             audit_sink: None,

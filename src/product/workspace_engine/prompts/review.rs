@@ -130,11 +130,7 @@ impl WorkspaceEngine {
             }
             return Ok(input);
         }
-        let working_dir = match &self.session.repository_path {
-            Some(path) => path.clone(),
-            None => std::env::current_dir()
-                .map_err(|error| format!("working directory error: {error}"))?,
-        };
+        let (working_dir, working_directory) = self.review_launch_target_and_cwd()?;
         let artifact = self
             .session
             .artifact
@@ -214,7 +210,7 @@ impl WorkspaceEngine {
         ));
         let baseline_tree = self.append_reviewer_baseline_teaching(&mut prompt)?;
         Ok(StreamingProviderInput {
-            working_directory: None,
+            working_directory,
             baseline_tree,
             tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
             audit_sink: None,
@@ -270,11 +266,7 @@ impl WorkspaceEngine {
             &self.session.entity_id,
         )
         .map_err(|error| format!("build work_item_plan candidate dto failed: {error}"))?;
-        let working_dir = match &self.session.repository_path {
-            Some(path) => path.clone(),
-            None => std::env::current_dir()
-                .map_err(|error| format!("working directory error: {error}"))?,
-        };
+        let (working_dir, working_directory) = self.review_launch_target_and_cwd()?;
         // C2 Task 5（REQ-CRO-05）：reviewer 缺失（空 effective）fail-closed——
         // 绝不以 Codex 顶替构建 reviewer prompt。
         let provider = self
@@ -415,7 +407,7 @@ impl WorkspaceEngine {
         ));
         let baseline_tree = self.append_reviewer_baseline_teaching(&mut prompt)?;
         Ok(StreamingProviderInput {
-            working_directory: None,
+            working_directory,
             baseline_tree,
             tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
             audit_sink: None,
@@ -541,12 +533,7 @@ impl WorkspaceEngine {
             "\n只能在契约、依赖或 Projection 覆盖影响发布时返回 revise；需要产品判断时返回 needs_human。",
             &self.routing_reference_context(),
         ));
-        let working_dir = self
-            .session
-            .repository_path
-            .clone()
-            .map(Ok)
-            .unwrap_or_else(|| std::env::current_dir().map_err(|error| error.to_string()))?;
+        let (working_dir, working_directory) = self.review_launch_target_and_cwd()?;
         // C2 Task 5（REQ-CRO-05）：reviewer 缺失（空 effective）fail-closed——
         // 绝不以 Codex 顶替构建 reviewer prompt。
         let provider = self
@@ -556,7 +543,7 @@ impl WorkspaceEngine {
             .ok_or_else(|| "reviewer_configuration_missing".to_string())?;
         let baseline_tree = self.append_reviewer_baseline_teaching(&mut prompt)?;
         Ok(StreamingProviderInput {
-            working_directory: None,
+            working_directory,
             baseline_tree,
             tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
             audit_sink: None,
@@ -580,11 +567,7 @@ impl WorkspaceEngine {
         &self,
         outline_candidate: &WorkItemPlanOutlineCandidateDto,
     ) -> Result<StreamingProviderInput, String> {
-        let working_dir = match &self.session.repository_path {
-            Some(path) => path.clone(),
-            None => std::env::current_dir()
-                .map_err(|error| format!("working directory error: {error}"))?,
-        };
+        let (working_dir, working_directory) = self.review_launch_target_and_cwd()?;
         // C2 Task 5（REQ-CRO-05）：reviewer 缺失（空 effective）fail-closed——
         // 绝不以 Codex 顶替构建 reviewer prompt。
         let provider = self
@@ -737,7 +720,7 @@ impl WorkspaceEngine {
         ));
         let baseline_tree = self.append_reviewer_baseline_teaching(&mut prompt)?;
         Ok(StreamingProviderInput {
-            working_directory: None,
+            working_directory,
             baseline_tree,
             tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
             audit_sink: None,
@@ -808,15 +791,10 @@ impl WorkspaceEngine {
             "\n[valid_outline_ids]\n{}\n",
             outline_ids.join("\n")
         ));
-        let working_dir = self
-            .session
-            .repository_path
-            .clone()
-            .or_else(|| std::env::current_dir().ok())
-            .ok_or_else(|| "working directory unavailable".to_string())?;
+        let (working_dir, working_directory) = self.review_launch_target_and_cwd()?;
         let baseline_tree = self.append_reviewer_baseline_teaching(&mut prompt)?;
         Ok(StreamingProviderInput {
-            working_directory: None,
+            working_directory,
             baseline_tree,
             tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
             audit_sink: None,

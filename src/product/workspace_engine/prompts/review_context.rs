@@ -599,3 +599,37 @@ pub(crate) fn ensure_single_candidate_review_prompt_budget(prompt: &str) -> Resu
         ))
     }
 }
+
+impl WorkspaceEngine {
+    /// Task 2.4（REQ-ENV-10、REQ-PLN-01/PLN-07）：review builder 的
+    /// cwd/target 分离合同（返回 `(target_worktree, session_cwd)`）。
+    ///
+    /// LC 分支（注入 logical gateway）：cwd = gateway 冻结的 canonical
+    /// authority root（经 Task 2.5 `working_directory` 字段合同下发；不从
+    /// target/worktree/进程 cwd 推导）；target = 显式成员 checkout
+    ///（`session.repository_path`，缺失 fail-closed，绝不回退进程 cwd）。
+    /// legacy 直连面继续以 `working_dir` 表达 target——gateway 启动侧
+    ///（`start_review_session_via_gateway`）以它锚 `PolicyTarget`，spawn 前
+    /// effective cwd 复验以 envelope 冻结值为准。
+    ///
+    /// 单仓分支（无 gateway）：原值不变——cwd 语义仍由 `working_dir` 承载
+    ///（`repository_path`，缺省回退进程 cwd），`working_directory` 保持
+    /// `None`（存量构造零行为变化）。
+    pub(super) fn review_launch_target_and_cwd(
+        &self,
+    ) -> Result<(std::path::PathBuf, Option<std::path::PathBuf>), String> {
+        if let Some(gateway) = self.logical_provider_gateway() {
+            let target = self.session.repository_path.clone().ok_or_else(|| {
+                "logical plan review requires an explicit member target worktree".to_string()
+            })?;
+            let cwd = gateway.authority_root().to_path_buf();
+            return Ok((target, Some(cwd)));
+        }
+        let working_dir = match &self.session.repository_path {
+            Some(path) => path.clone(),
+            None => std::env::current_dir()
+                .map_err(|error| format!("working directory error: {error}"))?,
+        };
+        Ok((working_dir, None))
+    }
+}
