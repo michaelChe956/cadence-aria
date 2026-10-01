@@ -108,6 +108,7 @@ fn run_error(
 
 fn adapter_input(timeout: u64) -> AdapterInput {
     AdapterInput {
+        working_directory: None,
         provider_type: ProviderType::Fake,
         role: AdapterRole::Orchestrator,
         worktree_path: None,

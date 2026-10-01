@@ -94,17 +94,18 @@ impl GatewayBackedAggregateProviderTurnDriver {
                 .into_iter()
                 .filter_map(|kind| kind.command())
                 .collect(),
-            AggregateInitializationStepKind::RuleAndMcpConfig => [
-                RepoStep::RuleConfig,
-                RepoStep::McpConfiguration,
-            ]
-            .into_iter()
-            .filter_map(|kind| kind.command())
-            .collect(),
-            AggregateInitializationStepKind::OpenspecAndExamples => [RepoStep::ProjectRulesExamples]
-                .into_iter()
-                .filter_map(|kind| kind.command())
-                .collect(),
+            AggregateInitializationStepKind::RuleAndMcpConfig => {
+                [RepoStep::RuleConfig, RepoStep::McpConfiguration]
+                    .into_iter()
+                    .filter_map(|kind| kind.command())
+                    .collect()
+            }
+            AggregateInitializationStepKind::OpenspecAndExamples => {
+                [RepoStep::ProjectRulesExamples]
+                    .into_iter()
+                    .filter_map(|kind| kind.command())
+                    .collect()
+            }
             _ => Vec::new(),
         }
     }
@@ -123,6 +124,8 @@ impl GatewayBackedAggregateProviderTurnDriver {
             provider: self.provider.clone(),
             action: SessionPolicyAction::PlanningReadOnly,
             target,
+            // Task 2.5：独立 cwd 字段；recipe 命令的 cwd 固定聚合根（=target）。
+            working_directory: aggregate_root.to_path_buf(),
             readable_roots: vec![aggregate_root.to_path_buf()],
             writable_roots: Vec::new(),
             config_artifact_ref: AGGREGATE_CONFIG_ARTIFACT_REF.to_string(),
@@ -139,6 +142,7 @@ impl GatewayBackedAggregateProviderTurnDriver {
         };
         use crate::protocol::contracts::{AdapterRole, ProviderType};
         StreamingProviderInput {
+            working_directory: None,
             baseline_tree: None,
             tool_policy: None,
             audit_sink: None,
@@ -213,10 +217,7 @@ impl GatewayBackedAggregateProviderTurnDriver {
                     output.push(&message);
                     return Err(AggregateInitializationError::ProviderTurn {
                         step,
-                        reason: format!(
-                            "provider reported failure: {}",
-                            output.summary()
-                        ),
+                        reason: format!("provider reported failure: {}", output.summary()),
                         retryable: true,
                     });
                 }
@@ -255,10 +256,7 @@ impl GatewayBackedAggregateProviderTurnDriver {
                     best_effort_abort(&session);
                     return Err(AggregateInitializationError::ProviderTurn {
                         step,
-                        reason: format!(
-                            "provider interaction required: {}",
-                            output.summary()
-                        ),
+                        reason: format!("provider interaction required: {}", output.summary()),
                         retryable: false,
                     });
                 }

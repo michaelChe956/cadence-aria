@@ -703,6 +703,7 @@ fn provider_invocation_inputs(
 ) -> (AdapterInput, StreamingProviderInput) {
     let worktree = attempt.worktree_path.clone().expect("worktree path");
     let legacy_input = AdapterInput {
+        working_directory: None,
         provider_type: ProviderType::Codex,
         role: AdapterRole::Executor,
         worktree_path: Some(worktree.to_string_lossy().to_string()),
@@ -1052,6 +1053,7 @@ async fn coding_coder_and_policy_runs_keep_audit_channels_strictly_separated() {
     let policy_provider = CodexProvider::new(fixture).with_version_supplier(supplier);
     let worktree = attempt.worktree_path.clone().expect("worktree path");
     let policy_input = StreamingProviderInput {
+        working_directory: None,
         baseline_tree: None,
         tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
         audit_sink: None,
@@ -1067,6 +1069,7 @@ async fn coding_coder_and_policy_runs_keep_audit_channels_strictly_separated() {
         timeout_secs: 60,
     };
     let policy_legacy_input = AdapterInput {
+        working_directory: None,
         provider_type: ProviderType::Codex,
         role: AdapterRole::Reviewer,
         worktree_path: policy_input

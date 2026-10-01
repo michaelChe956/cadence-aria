@@ -29,6 +29,7 @@ pub(crate) fn fixture_command(name: &str) -> PathBuf {
 
 pub(crate) fn input(resume: Option<&str>, timeout_secs: u64) -> StreamingProviderInput {
     StreamingProviderInput {
+        working_directory: None,
         baseline_tree: None,
         tool_policy: None,
         audit_sink: None,
@@ -51,6 +52,7 @@ fn input_with_env(
     env_vars: BTreeMap<String, String>,
 ) -> StreamingProviderInput {
     StreamingProviderInput {
+        working_directory: None,
         env_vars,
         ..input(resume, timeout_secs)
     }

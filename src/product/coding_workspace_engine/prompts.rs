@@ -551,6 +551,7 @@ pub(crate) fn streaming_input_from_adapter(
     permission_mode: ProviderPermissionMode,
 ) -> StreamingProviderInput {
     StreamingProviderInput {
+        working_directory: None,
         baseline_tree: None,
         tool_policy: coding_tool_policy_for_role(&input.role),
         audit_sink: None,

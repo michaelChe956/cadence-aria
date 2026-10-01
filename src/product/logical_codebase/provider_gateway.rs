@@ -82,6 +82,10 @@ pub struct SessionLaunchRequest {
     pub provider: ProviderRef,
     pub action: SessionPolicyAction,
     pub target: PolicyTarget,
+    /// 会话 cwd（canonical LC root，Task 2.5 cwd/target 分离合同）。单仓/
+    /// 现状入口与 target worktree 同值（零行为变化）；LC 入口注入 root，
+    /// 禁止回退 member cwd。gateway 冻结进 envelope 并纳入 resume fingerprint。
+    pub working_directory: PathBuf,
     pub readable_roots: Vec<PathBuf>,
     pub writable_roots: Vec<PathBuf>,
     /// 托管配置 artifact 引用(envelope 冻结其 digest);非空否则 envelope 校验失败。
@@ -90,6 +94,11 @@ pub struct SessionLaunchRequest {
 
 impl SessionLaunchRequest {
     /// 构造一个 planning 只读启动请求:read-only action 必须没有 writable roots。
+    ///
+    /// Task 2.5 兼容策略:`working_directory` 默认映射 target worktree——现状
+    /// 所有 planning 入口 cwd==target(单仓两字段映射旧目录,零行为变化)。
+    /// LC 根 cwd(root≠member target)由调用方经结构体字面量显式提供
+    /// (Task 2.2/2.8 接线),不经本构造函数静默派生。
     pub fn planning(
         project_id: impl Into<String>,
         provider: ProviderRef,
@@ -97,11 +106,13 @@ impl SessionLaunchRequest {
         readable_roots: Vec<PathBuf>,
         config_artifact_ref: impl Into<String>,
     ) -> Self {
+        let working_directory = target.worktree.clone();
         Self {
             project_id: project_id.into(),
             provider,
             action: SessionPolicyAction::PlanningReadOnly,
             target,
+            working_directory,
             readable_roots,
             writable_roots: Vec::new(),
             config_artifact_ref: config_artifact_ref.into(),
@@ -220,8 +231,9 @@ pub struct ProviderCapability {
     pub resume_evidence: ResumeEvidenceState,
 }
 
-/// resume 复验指纹:覆盖 policy digest、target、provider exact version、dialect 与
-/// capability snapshot。spawn 前(Task 10)与 provider 上报状态重新比对。
+/// resume 复验指纹:覆盖 policy digest、target、canonical working_directory(cwd,
+/// Task 2.5)、provider exact version、dialect 与 capability snapshot。spawn 前
+///(Task 10)与 provider 上报状态重新比对。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionResumeFingerprint {
     pub digest: String,
@@ -229,7 +241,8 @@ pub struct SessionResumeFingerprint {
 
 impl SessionResumeFingerprint {
     /// 由 envelope、provider exact version、adapter dialect 与 capability snapshot
-    /// 计算 canonical SHA-256。任一维度漂移都会产生不同 digest。
+    /// 计算 canonical SHA-256。任一维度漂移(含 canonical working_directory/cwd,
+    /// Task 2.5)都会产生不同 digest。
     pub fn from_envelope(
         envelope: &SessionPolicyEnvelope,
         version: &str,
@@ -244,6 +257,8 @@ impl SessionResumeFingerprint {
         hasher.update(envelope.target.logical_repository_id.as_bytes());
         hasher.update(envelope.target.checkout_id.as_bytes());
         hasher.update(envelope.target.worktree.to_string_lossy().as_bytes());
+        // Task 2.5：cwd 独立维度——canonical working_directory 漂移即 supersede。
+        hasher.update(envelope.working_directory.to_string_lossy().as_bytes());
         hasher.update(version.as_bytes());
         hasher.update(format!("{adapter_dialect:?}").as_bytes());
         hasher.update(capability_snapshot_ref.as_bytes());
@@ -746,6 +761,8 @@ impl LogicalCodebaseProviderGateway {
             &artifact,
             request.action,
             target,
+            // Task 2.5：冻结请求的独立 canonical cwd（单仓现状=target worktree）。
+            request.working_directory.clone(),
             request.readable_roots,
             request.writable_roots,
             capability.adapter_dialect,
@@ -842,11 +859,12 @@ impl LogicalCodebaseProviderGateway {
     }
 
     /// 启动 streaming provider 会话。只接受绑定 validated policy 的 input;
-    /// spawn 前基于 validated policy 与 `input.working_dir` 重新复验政策指纹
-    /// (policy revision/digest、provider version/dialect/capability snapshot、
-    /// config digest)、canonical cwd/git-dir/worktree identity、provider 可用性
-    /// 与 resume 能力。任一复验失败都发生在 registry lookup/真实 adapter start
-    /// 之前(fail-closed)。
+    /// spawn 前基于 validated policy 与 input 的 effective working directory
+    /// (Task 2.5:优先独立 `working_directory`,否则回填 `working_dir`)重新
+    /// 复验政策指纹(policy revision/digest、provider version/dialect/capability
+    /// snapshot、config digest)、canonical cwd/git-dir/worktree identity、
+    /// provider 可用性与 resume 能力。任一复验失败都发生在 registry lookup/
+    /// 真实 adapter start 之前(fail-closed)。
     pub async fn start_streaming(
         &self,
         launch: ValidatedStreamingProviderInput,
@@ -854,7 +872,8 @@ impl LogicalCodebaseProviderGateway {
     ) -> Result<ProviderSession, ProviderGatewayError> {
         let (input, validated) = launch.into_parts();
         let is_resume = input.resume_provider_session_id.is_some();
-        if let Err(error) = self.revalidate_before_spawn(&validated, &input.working_dir, is_resume)
+        if let Err(error) =
+            self.revalidate_before_spawn(&validated, input.effective_working_directory(), is_resume)
         {
             tracing::warn!(
                 project_id = %validated.project_id,
@@ -892,21 +911,20 @@ impl LogicalCodebaseProviderGateway {
     }
 
     /// 同步运行 adapter。只接受绑定 validated policy 的 input;spawn 前基于
-    /// validated policy 与 `input.worktree_path` 重新复验政策指纹、canonical
-    /// cwd/git-dir/worktree identity、provider 可用性与 resume 能力。任一复验
-    /// 失败都发生在真实 adapter run 之前(fail-closed)。
+    /// validated policy 与 input 的 effective working directory(Task 2.5:优先
+    /// 独立 `working_directory`,否则回填 `worktree_path`)重新复验政策指纹、
+    /// canonical cwd/git-dir/worktree identity、provider 可用性与 resume 能力。
+    /// 任一复验失败都发生在真实 adapter run 之前(fail-closed)。
     pub fn run_sync(
         &self,
         launch: ValidatedAdapterInput,
     ) -> Result<AdapterOutput, ProviderGatewayError> {
         let (input, validated) = launch.into_parts();
         let cwd = input
-            .worktree_path
-            .as_deref()
-            .map(Path::new)
+            .effective_working_directory()
             .ok_or(ProviderGatewayError::MissingCwd)?;
         // 同步 adapter input 不携带 resume session id;同步路径默认非 resume。
-        if let Err(error) = self.revalidate_before_spawn(&validated, cwd, false) {
+        if let Err(error) = self.revalidate_before_spawn(&validated, cwd.as_path(), false) {
             tracing::warn!(
                 project_id = %validated.project_id,
                 error = %error,
@@ -1056,6 +1074,9 @@ impl LogicalCodebaseProviderGateway {
             provider: validated.provider.clone(),
             action: validated.action,
             target: envelope.target.clone(),
+            // Task 2.5：重建请求携带 envelope 冻结的同一 canonical cwd
+            //（resume request 必须携带同一 cwd，见设计 §2.4）。
+            working_directory: envelope.working_directory.clone(),
             readable_roots: envelope.readable_roots.clone(),
             writable_roots: envelope.writable_roots.clone(),
             config_artifact_ref: envelope.config_artifact_ref.clone(),

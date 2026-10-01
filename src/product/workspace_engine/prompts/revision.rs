@@ -71,6 +71,7 @@ impl WorkspaceEngine {
             resume_provider_session_id.is_none(),
         ));
         Ok(StreamingProviderInput {
+            working_directory: None,
             baseline_tree,
             tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
             audit_sink: None,

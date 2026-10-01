@@ -644,6 +644,7 @@ mod tests {
         let error = runtime
             .provider_adapter()
             .run(&AdapterInput {
+                working_directory: None,
                 provider_type: ProviderType::ClaudeCode,
                 role: AdapterRole::Executor,
                 worktree_path: None,

@@ -155,6 +155,9 @@ impl WorkItemSplitEngine {
         let adapter_input = AdapterInput {
             provider_type,
             role: AdapterRole::WorkItemSplitter,
+            // Legacy 单仓直连路径：不注入独立 cwd（None → 沿用 worktree_path，
+            // Task 2.5 单仓两字段映射旧目录，零行为变化）。
+            working_directory: None,
             worktree_path: Some(worktree_path),
             // work item split 阶段无 coding attempt 上下文，按契约缺省不写流日志。
             provider_stream_log_dir: None,
@@ -227,6 +230,10 @@ impl WorkItemSplitEngine {
         let adapter_input = AdapterInput {
             provider_type,
             role: AdapterRole::WorkItemSplitter,
+            // Task 2.5 cwd/target 分离（LC 入口矩阵 Split sync 行）：注入独立
+            // cwd 字段；当前映射旧目录（==target，cwd==target 复验等式不变，
+            // 拆除归 Task 2.2/2.8），canonical LC root 由后续接线替换。
+            working_directory: Some(repository.path.clone()),
             worktree_path: Some(worktree_path),
             provider_stream_log_dir: None,
             prompt: prompt.to_string(),

@@ -29,6 +29,7 @@ use crate::protocol::contracts::{AdapterRole, ProviderType};
 
 fn kimi_input(role: AdapterRole) -> StreamingProviderInput {
     StreamingProviderInput {
+        working_directory: None,
         baseline_tree: None,
         tool_policy: None,
         audit_sink: None,

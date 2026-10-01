@@ -85,6 +85,9 @@ impl LogicalPlanLaunch {
             )?,
             action: SessionPolicyAction::PlanningReadOnly,
             target,
+            // Task 2.5：独立 cwd 字段；现状映射 run cwd（==target，等式不变），
+            // LC root≠target 的注入归 Task 2.2。
+            working_directory: self.working_dir.clone(),
             readable_roots: vec![self.working_dir.clone()],
             writable_roots: Vec::new(),
             config_artifact_ref: "sha256:managed-config-artifact".to_string(),

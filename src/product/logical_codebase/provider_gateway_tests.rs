@@ -256,6 +256,7 @@ fn run_sync_fails_closed_when_policy_upgraded_between_validate_and_spawn() {
     );
     let validated = fixture.gateway().validate(request).unwrap();
     let input = crate::protocol::contracts::AdapterInput {
+        working_directory: None,
         provider_type: crate::protocol::contracts::ProviderType::ClaudeCode,
         role: crate::protocol::contracts::AdapterRole::Executor,
         worktree_path: Some(worktree.to_string_lossy().to_string()),
@@ -678,6 +679,7 @@ impl GatewayFixture {
             provider: ProviderRef::claude_code("cap_claude_code_1_4_0"),
             action: SessionPolicyAction::CodingTargetWrite,
             target,
+            working_directory: worktree.clone(),
             readable_roots: vec![self.paths.root().to_path_buf()],
             writable_roots: vec![worktree],
             config_artifact_ref: "sha256:managed-config-artifact".to_string(),
@@ -712,6 +714,7 @@ impl GatewayFixture {
         };
         use crate::protocol::contracts::{AdapterRole, ProviderType};
         StreamingProviderInput {
+            working_directory: None,
             baseline_tree: None,
             tool_policy: None,
             audit_sink: None,
@@ -737,6 +740,7 @@ impl GatewayFixture {
             project_id: manifest.project_id,
             provider: ProviderRef::claude_code("cap_claude_code_1_4_0"),
             action: SessionPolicyAction::ReviewReadOnly,
+            working_directory: target.worktree.clone(),
             target,
             readable_roots: vec![self.paths.root().to_path_buf()],
             writable_roots: Vec::new(),
@@ -752,6 +756,7 @@ impl GatewayFixture {
         let request = self.planning_request_for_manifest_with_worktree(worktree.clone());
         let validated = self.gateway().validate(request)?;
         let adapter_input = AdapterInput {
+            working_directory: None,
             provider_type: crate::protocol::contracts::ProviderType::ClaudeCode,
             role: crate::protocol::contracts::AdapterRole::WorkItemSplitter,
             worktree_path: Some(worktree.to_string_lossy().to_string()),
@@ -906,6 +911,7 @@ mod task13_gateway_hardening {
             provider: ProviderRef::codex("cap_codex_1_0_0"),
             action: SessionPolicyAction::CodingTargetWrite,
             target,
+            working_directory: worktree.clone(),
             readable_roots: vec![fixture.paths.root().to_path_buf()],
             writable_roots: vec![worktree],
             config_artifact_ref: "sha256:managed-config-artifact".to_string(),

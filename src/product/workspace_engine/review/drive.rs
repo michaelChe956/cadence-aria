@@ -24,8 +24,7 @@ impl WorkspaceEngine {
             let _ = self
                 .event_tx
                 .send(EngineEvent::Error {
-                    message: "reviewer_configuration_missing: review run not started"
-                        .to_string(),
+                    message: "reviewer_configuration_missing: review run not started".to_string(),
                 })
                 .await;
             self.finish_failed_run().await;
@@ -228,6 +227,7 @@ impl WorkspaceEngine {
             // 对 attempted&&!succeeded 的降级轮零计数）。
             Err(first_error) if first_error.is_output_parse_failure() => {
                 let retry_input = StreamingProviderInput {
+                    working_directory: None,
                     resume_provider_session_id: first_completion
                         .provider_session_id
                         .clone()
@@ -273,8 +273,7 @@ impl WorkspaceEngine {
             let _ = self
                 .event_tx
                 .send(EngineEvent::Error {
-                    message: "reviewer_configuration_missing: review run not started"
-                        .to_string(),
+                    message: "reviewer_configuration_missing: review run not started".to_string(),
                 })
                 .await;
             self.finish_failed_run().await;
@@ -491,6 +490,7 @@ impl WorkspaceEngine {
             // 一次静默重试」契约（同一 input、静默、零记账）。
             Err(first_error) if first_error.is_output_parse_failure() => {
                 let retry_input = StreamingProviderInput {
+                    working_directory: None,
                     resume_provider_session_id: first_completion
                         .provider_session_id
                         .clone()
@@ -623,8 +623,12 @@ impl WorkspaceEngine {
                 let diagnostic = reviewer_failure_diagnostic(Some(code), &message);
                 let _ = self.event_tx.send(EngineEvent::Error { message }).await;
                 if let Some(node_id) = self.active_node_id.clone() {
-                    self.update_timeline_node(&node_id, TimelineNodeStatus::Failed, Some(diagnostic))
-                        .await;
+                    self.update_timeline_node(
+                        &node_id,
+                        TimelineNodeStatus::Failed,
+                        Some(diagnostic),
+                    )
+                    .await;
                 }
                 self.promote_single_candidate_review_failed();
                 self.finish_failed_run().await;
@@ -637,8 +641,12 @@ impl WorkspaceEngine {
                 let diagnostic = reviewer_failure_diagnostic(code, &message);
                 let _ = self.event_tx.send(EngineEvent::Error { message }).await;
                 if let Some(node_id) = self.active_node_id.clone() {
-                    self.update_timeline_node(&node_id, TimelineNodeStatus::Failed, Some(diagnostic))
-                        .await;
+                    self.update_timeline_node(
+                        &node_id,
+                        TimelineNodeStatus::Failed,
+                        Some(diagnostic),
+                    )
+                    .await;
                 }
                 self.promote_single_candidate_review_failed();
                 self.finish_failed_run().await;
@@ -1176,6 +1184,9 @@ async fn start_review_session_via_gateway(
             .map_err(map_gateway_error_to_adapter)?,
         action: SessionPolicyAction::ReviewReadOnly,
         target: PolicyTarget::aggregate_root(input.working_dir.clone()),
+        // Task 2.5：独立 cwd 字段；现状映射 target（aggregate root）worktree，
+        // cwd==target 复验等式不变。
+        working_directory: input.working_dir.clone(),
         readable_roots: vec![input.working_dir.clone()],
         writable_roots: Vec::new(),
         config_artifact_ref: "sha256:managed-config-artifact".to_string(),

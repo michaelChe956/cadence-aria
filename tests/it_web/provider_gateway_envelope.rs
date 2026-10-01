@@ -487,6 +487,7 @@ async fn non_default_lc_coding_gateway_validate_resolves_lc_scoped_checkout_targ
             checkout_id.0.to_string(),
             worktree.clone(),
         ),
+        working_directory: worktree.clone(),
         readable_roots: vec![worktree.clone()],
         writable_roots: vec![worktree],
         config_artifact_ref: "sha256:managed-config-artifact".to_string(),

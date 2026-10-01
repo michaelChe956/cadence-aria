@@ -214,6 +214,7 @@ impl WorkspaceEngine {
         ));
         let baseline_tree = self.append_reviewer_baseline_teaching(&mut prompt)?;
         Ok(StreamingProviderInput {
+            working_directory: None,
             baseline_tree,
             tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
             audit_sink: None,
@@ -414,6 +415,7 @@ impl WorkspaceEngine {
         ));
         let baseline_tree = self.append_reviewer_baseline_teaching(&mut prompt)?;
         Ok(StreamingProviderInput {
+            working_directory: None,
             baseline_tree,
             tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
             audit_sink: None,
@@ -640,6 +642,7 @@ impl WorkspaceEngine {
             .clone()
             .ok_or_else(|| "reviewer_configuration_missing".to_string())?;
         Ok(StreamingProviderInput {
+            working_directory: None,
             baseline_tree,
             tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
             audit_sink: None,
@@ -776,6 +779,7 @@ impl WorkspaceEngine {
             .ok_or_else(|| "reviewer_configuration_missing".to_string())?;
         let baseline_tree = self.append_reviewer_baseline_teaching(&mut prompt)?;
         Ok(StreamingProviderInput {
+            working_directory: None,
             baseline_tree,
             tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
             audit_sink: None,
@@ -956,6 +960,7 @@ impl WorkspaceEngine {
         ));
         let baseline_tree = self.append_reviewer_baseline_teaching(&mut prompt)?;
         Ok(StreamingProviderInput {
+            working_directory: None,
             baseline_tree,
             tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
             audit_sink: None,
@@ -1034,6 +1039,7 @@ impl WorkspaceEngine {
             .ok_or_else(|| "working directory unavailable".to_string())?;
         let baseline_tree = self.append_reviewer_baseline_teaching(&mut prompt)?;
         Ok(StreamingProviderInput {
+            working_directory: None,
             baseline_tree,
             tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
             audit_sink: None,
@@ -1176,6 +1182,7 @@ impl WorkspaceEngine {
         ));
         let baseline_tree = self.append_reviewer_baseline_teaching(&mut prompt)?;
         Ok(StreamingProviderInput {
+            working_directory: None,
             baseline_tree,
             tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
             audit_sink: None,

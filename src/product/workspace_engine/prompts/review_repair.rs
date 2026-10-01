@@ -45,6 +45,7 @@ impl WorkspaceEngine {
             nonce,
         );
         Ok(StreamingProviderInput {
+            working_directory: None,
             baseline_tree: None,
             tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
             audit_sink: None,

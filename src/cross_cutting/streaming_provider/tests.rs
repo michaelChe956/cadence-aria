@@ -19,6 +19,7 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(1);
 
 fn make_input(prompt: &str) -> AdapterInput {
     AdapterInput {
+        working_directory: None,
         prompt: prompt.to_string(),
         provider_type: crate::protocol::contracts::ProviderType::Fake,
         role: crate::protocol::contracts::AdapterRole::Orchestrator,
@@ -33,6 +34,7 @@ fn make_input(prompt: &str) -> AdapterInput {
 
 fn make_provider_input(prompt: &str) -> StreamingProviderInput {
     StreamingProviderInput {
+        working_directory: None,
         baseline_tree: None,
         tool_policy: None,
         audit_sink: None,
@@ -113,6 +115,7 @@ fn provider_completion_plain_marks_structured_output_not_requested() {
 #[test]
 fn streaming_provider_input_distinguishes_workspace_and_resume_sessions() {
     let input = StreamingProviderInput {
+        working_directory: None,
         baseline_tree: None,
         tool_policy: None,
         audit_sink: None,
@@ -308,6 +311,7 @@ async fn fake_streaming_provider_parses_requested_structured_output() {
 async fn fake_streaming_provider_outputs_work_item_split_sentinel() {
     let provider = FakeStreamingProvider;
     let input = StreamingProviderInput {
+        working_directory: None,
         baseline_tree: None,
         tool_policy: None,
         audit_sink: None,
@@ -891,6 +895,7 @@ async fn tool_policy_guard_rejects_invalid_role_policy_before_spawn() {
                       role: AdapterRole,
                       tool_policy: Option<ProviderToolPolicy>| {
         StreamingProviderInput {
+            working_directory: None,
             baseline_tree: None,
             tool_policy,
             audit_sink: None,

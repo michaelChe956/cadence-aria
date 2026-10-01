@@ -29,14 +29,15 @@ async fn live_claude_ask_user_question_smoke() {
     const LIVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(240);
     let provider = ClaudeCodeProvider::new(PathBuf::from("claude"));
     let input = StreamingProviderInput {
+        working_directory: None,
         baseline_tree: None,
         tool_policy: None,
         audit_sink: None,
         provider_type: ProviderType::ClaudeCode,
         role: AdapterRole::Executor,
         prompt: "Use the AskUserQuestion tool to ask me which color I prefer, \
-                 offering at least two options. Wait for my answer, then reply \
-                 with exactly: smoke-ok"
+             offering at least two options. Wait for my answer, then reply \
+             with exactly: smoke-ok"
             .to_string(),
         working_dir: std::env::temp_dir(),
         workspace_session_id: None,

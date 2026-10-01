@@ -383,6 +383,7 @@ mod tests {
 
     fn adapter_input() -> AdapterInput {
         AdapterInput {
+            working_directory: None,
             provider_type: ProviderType::ClaudeCode,
             role: AdapterRole::Executor,
             worktree_path: None,
@@ -445,6 +446,7 @@ mod tests {
 
     fn streaming_input() -> StreamingProviderInput {
         StreamingProviderInput {
+            working_directory: None,
             baseline_tree: None,
             tool_policy: None,
             audit_sink: None,

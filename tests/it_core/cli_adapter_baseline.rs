@@ -589,6 +589,7 @@ fn runtime_unit_adapter_input_carries_no_provider_stream_log_dir() {
 
 fn adapter_input(worktree_path: &std::path::Path) -> AdapterInput {
     AdapterInput {
+        working_directory: None,
         provider_type: ProviderType::Fake,
         role: AdapterRole::Orchestrator,
         worktree_path: Some(worktree_path.to_string_lossy().to_string()),
@@ -606,6 +607,7 @@ fn adapter_input_with_stream_log_dir(
     stream_log_dir: &std::path::Path,
 ) -> AdapterInput {
     AdapterInput {
+        working_directory: None,
         provider_stream_log_dir: Some(stream_log_dir.to_string_lossy().to_string()),
         ..adapter_input(worktree_path)
     }

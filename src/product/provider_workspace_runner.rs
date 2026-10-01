@@ -48,6 +48,7 @@ impl ProviderWorkspaceRunner {
             workspace_repository_for_session(&self.paths, &store, &session).map_err(store_error)?;
         let prompt = build_prompt(&session, &input.user_prompt);
         let adapter_input = AdapterInput {
+            working_directory: None,
             provider_type: provider_type_for_name(&session.author_provider)?,
             role: AdapterRole::Orchestrator,
             worktree_path: Some(repository.path.to_string_lossy().to_string()),

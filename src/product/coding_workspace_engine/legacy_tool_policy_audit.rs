@@ -190,6 +190,7 @@ mod tests {
 
     fn policy_role_input() -> AdapterInput {
         AdapterInput {
+            working_directory: None,
             prompt: "legacy policy run".to_string(),
             provider_type: crate::protocol::contracts::ProviderType::Fake,
             role: AdapterRole::Reviewer,

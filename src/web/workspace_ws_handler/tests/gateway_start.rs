@@ -159,6 +159,7 @@ fn gateway_fixture() -> GatewayFixture {
 
 fn streaming_input(working_dir: std::path::PathBuf) -> StreamingProviderInput {
     StreamingProviderInput {
+        working_directory: None,
         baseline_tree: None,
         tool_policy: None,
         audit_sink: None,

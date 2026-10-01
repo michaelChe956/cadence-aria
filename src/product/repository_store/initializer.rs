@@ -109,6 +109,7 @@ impl ClaudeRepositoryInitializer {
                     )
                 })?;
             let input = StreamingProviderInput {
+                working_directory: None,
                 baseline_tree: None,
                 tool_policy: None,
                 audit_sink: None,

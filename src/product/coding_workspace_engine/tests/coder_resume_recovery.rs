@@ -102,6 +102,7 @@ async fn coder_resume_stall_maps_to_retryable_transport_without_same_role_run_re
     let (_command_tx, mut command_rx) = mpsc::channel(1);
     let worktree = attempt.worktree_path.clone().expect("worktree path");
     let legacy_input = AdapterInput {
+        working_directory: None,
         provider_type: ProviderType::Codex,
         role: AdapterRole::Executor,
         worktree_path: Some(worktree.to_string_lossy().to_string()),

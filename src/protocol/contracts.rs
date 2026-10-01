@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use crate::protocol::artifacts::{ArtifactKind, ProjectionKind};
 use crate::protocol::enums::{
     AdapterCompatibilityId, AdapterInputRefId, AdapterOutputRefId, ConstraintCheckId,
@@ -218,6 +220,12 @@ pub struct AdapterInput {
     pub provider_type: ProviderType,
     pub role: AdapterRole,
     pub worktree_path: Option<String>,
+    /// 独立会话 cwd（Task 2.5 cwd/target 分离合同）：LC 入口注入 canonical
+    /// LC root（`Some`）；`None` 时回填既有 `worktree_path`（存量调用零行为
+    /// 变化）。`worktree_path` 仍表达 target（成员 checkout/worktree），语义
+    /// 不因本字段改变。
+    #[serde(default)]
+    pub working_directory: Option<PathBuf>,
     /// 流日志落盘目录。由调用方提供 Aria 侧目录；为 None 时不写流日志。
     ///
     /// MUST NOT 由 adapter 从 `worktree_path` 推导：那会把流日志写进被开发的
@@ -229,6 +237,16 @@ pub struct AdapterInput {
     pub output_schema: String,
     pub timeout: u64,
     pub max_retries: u32,
+}
+
+impl AdapterInput {
+    /// 复验用 effective cwd（Task 2.5）：优先独立 `working_directory`（canonical
+    /// LC root），否则回填既有 `worktree_path`（legacy/单仓路径，零行为变化）。
+    pub fn effective_working_directory(&self) -> Option<PathBuf> {
+        self.working_directory
+            .clone()
+            .or_else(|| self.worktree_path.as_deref().map(PathBuf::from))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

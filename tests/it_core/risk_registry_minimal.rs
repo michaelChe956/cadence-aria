@@ -217,6 +217,7 @@ fn builder_input_without_risk_registry_ref() -> ProviderContextBuilderInput {
 
 fn adapter_input(canonical_inputs: Value) -> AdapterInput {
     AdapterInput {
+        working_directory: None,
         provider_type: ProviderType::Fake,
         role: AdapterRole::Reviewer,
         worktree_path: None,

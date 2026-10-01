@@ -182,6 +182,12 @@ pub struct SessionPolicyEnvelope {
     pub policy_digest: String,
     pub action: SessionPolicyAction,
     pub target: PolicyTarget,
+    /// 会话 cwd（canonical LC root，Task 2.5 cwd/target 分离合同）。envelope
+    /// 冻结它并纳入 resume fingerprint；与 `target.worktree`（成员
+    /// checkout/worktree）语义不同，不得回退 member cwd。存量记录无此键，
+    /// serde 缺省为 `PathBuf::default()`（与 `authority_root` 同策略）。
+    #[serde(default)]
+    pub working_directory: PathBuf,
     pub readable_roots: Vec<PathBuf>,
     pub writable_roots: Vec<PathBuf>,
     pub provider_dialect: ProviderDialect,
@@ -203,6 +209,9 @@ impl SessionPolicyEnvelope {
         artifact: &AggregatePolicyArtifact,
         action: SessionPolicyAction,
         target: PolicyTarget,
+        // 会话 cwd（canonical LC root）。与 target（成员 checkout）独立传递，
+        // 由 envelope 冻结并纳入 resume fingerprint（Task 2.5）。
+        working_directory: PathBuf,
         readable_roots: Vec<PathBuf>,
         writable_roots: Vec<PathBuf>,
         provider_dialect: ProviderDialect,
@@ -228,6 +237,7 @@ impl SessionPolicyEnvelope {
             policy_digest: artifact.digest.clone(),
             action,
             target,
+            working_directory,
             readable_roots,
             writable_roots,
             provider_dialect,
@@ -486,6 +496,7 @@ mod tests {
                 "checkout",
                 "/work/api/.worktrees/aria-issues/issue_1",
             ),
+            PathBuf::from("/lc-root"),
             vec![std::path::PathBuf::from("/aggregate")],
             vec![std::path::PathBuf::from(
                 "/work/api/.worktrees/aria-issues/issue_1",
@@ -530,6 +541,7 @@ mod tests {
             &artifact,
             SessionPolicyAction::PlanningReadOnly,
             target.clone(),
+            PathBuf::from("/lc-root"),
             vec![PathBuf::from("/work/repo")],
             vec![PathBuf::from("/work/repo")],
             ProviderDialect::CodexCliV1,
@@ -546,6 +558,7 @@ mod tests {
             &artifact,
             SessionPolicyAction::ReviewReadOnly,
             target,
+            PathBuf::from("/lc-root"),
             vec![PathBuf::from("/work/repo")],
             vec![],
             ProviderDialect::CodexCliV1,
@@ -567,6 +580,7 @@ mod tests {
             &artifact,
             SessionPolicyAction::CodingTargetWrite,
             target.clone(),
+            PathBuf::from("/lc-root"),
             vec![],
             vec![PathBuf::from("/elsewhere")],
             ProviderDialect::ClaudeCodeCliV1,
@@ -584,6 +598,7 @@ mod tests {
             &artifact,
             SessionPolicyAction::CodingTargetWrite,
             target.clone(),
+            PathBuf::from("/lc-root"),
             vec![],
             vec![PathBuf::from("/work/repo"), PathBuf::from("/other")],
             ProviderDialect::ClaudeCodeCliV1,
@@ -601,6 +616,7 @@ mod tests {
             &artifact,
             SessionPolicyAction::CodingTargetWrite,
             target,
+            PathBuf::from("/lc-root"),
             vec![],
             vec![PathBuf::from("/work/repo")],
             ProviderDialect::ClaudeCodeCliV1,
@@ -619,6 +635,7 @@ mod tests {
             &artifact,
             SessionPolicyAction::PlanningReadOnly,
             PolicyTarget::checkout("repo", "co", "/work/repo"),
+            PathBuf::from("/lc-root"),
             vec![],
             vec![],
             ProviderDialect::ClaudeCodeCliV1,
@@ -723,6 +740,7 @@ mod tests {
             &artifact,
             SessionPolicyAction::PlanningReadOnly,
             PolicyTarget::aggregate_root(PathBuf::from("/aggregate")),
+            PathBuf::from("/lc-root"),
             vec![PathBuf::from("/aggregate")],
             vec![],
             ProviderDialect::ClaudeCodeCliV1,
@@ -752,6 +770,7 @@ mod tests {
             &artifact,
             SessionPolicyAction::PlanningReadOnly,
             PolicyTarget::checkout("repo", "co", "/work/repo"),
+            PathBuf::from("/lc-root"),
             vec![],
             vec![],
             ProviderDialect::ClaudeCodeCliV1,

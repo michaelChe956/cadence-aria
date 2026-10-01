@@ -59,6 +59,7 @@ fn usage_test_invocation_inputs(
 ) -> (AdapterInput, StreamingProviderInput) {
     let worktree = attempt.worktree_path.clone().expect("worktree path");
     let legacy_input = AdapterInput {
+        working_directory: None,
         provider_type: ProviderType::Codex,
         role: AdapterRole::Executor,
         worktree_path: Some(worktree.to_string_lossy().to_string()),

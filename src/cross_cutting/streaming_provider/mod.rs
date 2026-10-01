@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -234,8 +234,7 @@ pub fn validate_tool_policy_for_role(
                 })
             }
         }
-        AdapterRole::Executor | AdapterRole::Handoff => match policy.map(|policy| &policy.intent)
-        {
+        AdapterRole::Executor | AdapterRole::Handoff => match policy.map(|policy| &policy.intent) {
             None => Ok(()),
             // BOOT-04/D1：Executor 的唯一自举通道——marker 四要素（credential、
             // 写权限 action、canonical root、receipt context）联合完整才放行。
@@ -366,7 +365,10 @@ impl std::fmt::Display for ToolPolicyError {
                 write!(f, "unsupported tool-policy provider: {provider}")
             }
             ToolPolicyError::BootstrapMarkerNotTranslatable => {
-                write!(f, "bootstrap executor marker has no tool policy translation")
+                write!(
+                    f,
+                    "bootstrap executor marker has no tool policy translation"
+                )
             }
         }
     }
@@ -474,6 +476,11 @@ pub struct StreamingProviderInput {
     pub role: AdapterRole,
     pub prompt: String,
     pub working_dir: PathBuf,
+    /// 独立会话 cwd（Task 2.5 cwd/target 分离合同）：LC 入口注入 canonical
+    /// LC root（`Some`）；`None` 时回填既有 `working_dir`（存量构造零行为
+    /// 变化）。`working_dir` 继续表达 provider 实际 spawn cwd（legacy/单仓
+    /// 语义不变）；gateway spawn 前复验按 `effective_working_directory` 取值。
+    pub working_directory: Option<PathBuf>,
     /// 产品/工作区 session ID，用于日志追踪和关联，不用于 provider 续接。
     pub workspace_session_id: Option<String>,
     /// Provider 原生 session ID，用于续接 Claude Code / Codex 会话。
@@ -507,6 +514,7 @@ impl std::fmt::Debug for StreamingProviderInput {
             .field("role", &self.role)
             .field("prompt", &self.prompt)
             .field("working_dir", &self.working_dir)
+            .field("working_directory", &self.working_directory)
             .field("workspace_session_id", &self.workspace_session_id)
             .field(
                 "resume_provider_session_id",
@@ -530,6 +538,14 @@ impl std::fmt::Debug for StreamingProviderInput {
 }
 
 impl StreamingProviderInput {
+    /// 复验用 effective cwd（Task 2.5）：优先独立 `working_directory`（canonical
+    /// LC root），否则回填既有 `working_dir`（legacy/单仓路径，零行为变化）。
+    pub fn effective_working_directory(&self) -> &Path {
+        self.working_directory
+            .as_deref()
+            .unwrap_or(&self.working_dir)
+    }
+
     /// 测试专用构造函数:产出一个 `ProviderType::Fake` 的隔离 input。生产代码不得
     /// 调用本方法;它仅供 `FakeStreamingProviderInput::for_test` 复用,使 Fake
     /// 启动路径与真实 provider 启动路径在构造上完全分离。
@@ -540,6 +556,7 @@ impl StreamingProviderInput {
             role: AdapterRole::Orchestrator,
             prompt: prompt.to_string(),
             working_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            working_directory: None,
             workspace_session_id: None,
             resume_provider_session_id: None,
             permission_mode: ProviderPermissionMode::Auto,
@@ -948,6 +965,9 @@ pub(crate) async fn run_legacy_bridge_stream<'a>(
         role: input.role.clone(),
         prompt: input.prompt.clone(),
         working_dir,
+        // Task 2.5 cwd/target 分离：跨层透传 AdapterInput 的独立 cwd（None 时
+        // effective 回填 working_dir，legacy 零行为变化）。
+        working_directory: input.working_directory.clone(),
         workspace_session_id: None,
         resume_provider_session_id: None,
         permission_mode: ProviderPermissionMode::Auto,

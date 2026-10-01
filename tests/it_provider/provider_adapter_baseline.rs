@@ -192,6 +192,7 @@ fn provider_router_records_completed_run_with_external_raw_output_refs() {
 
 fn adapter_input(prompt: &str) -> AdapterInput {
     AdapterInput {
+        working_directory: None,
         provider_type: ProviderType::Fake,
         role: AdapterRole::Orchestrator,
         worktree_path: None,

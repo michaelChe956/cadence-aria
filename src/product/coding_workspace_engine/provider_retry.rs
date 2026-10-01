@@ -171,6 +171,7 @@ pub(crate) fn coder_retry_cycle_streaming_input(
     permission_mode: ProviderPermissionMode,
 ) -> (AdapterInput, StreamingProviderInput) {
     let legacy_input = AdapterInput {
+        working_directory: None,
         provider_type: provider_type_for_name(provider_name),
         role: AdapterRole::Executor,
         worktree_path: Some(worktree_path.to_string_lossy().to_string()),
@@ -206,6 +207,7 @@ pub(crate) fn code_reviewer_retry_cycle_streaming_input(
     permission_mode: ProviderPermissionMode,
 ) -> (AdapterInput, StreamingProviderInput) {
     let legacy_input = AdapterInput {
+        working_directory: None,
         provider_type: provider_type_for_name(reviewer),
         role: AdapterRole::Reviewer,
         worktree_path: Some(worktree_path.to_string_lossy().to_string()),

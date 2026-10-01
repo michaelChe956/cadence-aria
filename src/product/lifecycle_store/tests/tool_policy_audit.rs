@@ -246,6 +246,7 @@ async fn tool_policy_audit_resume_drift_superseded_lands_on_replaced_run_file() 
                 || Ok("pi 0.83.0-policy-fixture".to_string()),
             ) as ProviderVersionSupplier);
     let input = crate::cross_cutting::streaming_provider::StreamingProviderInput {
+        working_directory: None,
         baseline_tree: None,
         tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
         audit_sink: Some(bound_sink),

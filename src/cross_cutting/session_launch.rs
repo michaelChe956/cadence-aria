@@ -21,7 +21,8 @@ use crate::protocol::contracts::AdapterInput;
 
 /// 已绑定 validated policy 的 streaming provider input。spawn 前复验在
 /// `LogicalCodebaseProviderGateway::start_streaming` 内基于其中的 validated
-/// policy 与 `input.working_dir` 重新执行。
+/// policy 与 input 的 effective working directory(Task 2.5:优先独立
+/// `working_directory`,否则回填 `working_dir`)重新执行。
 #[derive(Debug, Clone)]
 pub struct ValidatedStreamingProviderInput {
     input: StreamingProviderInput,
@@ -40,7 +41,8 @@ impl ValidatedStreamingProviderInput {
 
 /// 已绑定 validated policy 的同步 adapter input。spawn 前复验在
 /// `LogicalCodebaseProviderGateway::run_sync` 内基于其中的 validated policy 与
-/// `input.worktree_path` 重新执行。
+/// input 的 effective working directory(Task 2.5:优先独立 `working_directory`,
+/// 否则回填 `worktree_path`)重新执行;`worktree_path` 仍是 target。
 #[derive(Debug, Clone)]
 pub struct ValidatedAdapterInput {
     input: AdapterInput,

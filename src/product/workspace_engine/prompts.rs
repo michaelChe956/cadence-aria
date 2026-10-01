@@ -330,6 +330,7 @@ impl WorkspaceEngine {
         ));
 
         Ok(StreamingProviderInput {
+            working_directory: None,
             baseline_tree,
             tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
             audit_sink: None,
@@ -430,6 +431,7 @@ impl WorkspaceEngine {
             ));
         }
         Ok(StreamingProviderInput {
+            working_directory: None,
             baseline_tree,
             tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
             audit_sink: None,

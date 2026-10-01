@@ -106,6 +106,7 @@ pub fn build_provider_context(
     };
 
     let adapter_input = AdapterInput {
+        working_directory: None,
         provider_type: context_package.provider_type.clone(),
         role: context_package.adapter_role.clone(),
         worktree_path: context_package.worktree_path.clone(),

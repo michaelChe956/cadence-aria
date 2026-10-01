@@ -75,6 +75,7 @@ pub(crate) fn internal_pr_review_streaming_input(
     permission_mode: ProviderPermissionMode,
 ) -> (AdapterInput, StreamingProviderInput) {
     let legacy_input = AdapterInput {
+        working_directory: None,
         provider_type: provider_type_for_name(reviewer),
         role: AdapterRole::Reviewer,
         worktree_path: Some(worktree_path.to_string_lossy().to_string()),
@@ -224,11 +225,8 @@ impl CodingWorkspaceEngine {
         provider: &dyn StreamingProviderAdapter,
         command_rx: &mut mpsc::Receiver<CodingRunnerCommand>,
     ) -> Result<InternalPrReview, CodingWorkspaceEngineError> {
-        let attempt = self.admit_provider_run(
-            attempt,
-            &CodingExecutionStage::InternalPrReview,
-            "execute",
-        )?;
+        let attempt =
+            self.admit_provider_run(attempt, &CodingExecutionStage::InternalPrReview, "execute")?;
         let Some(worktree_path) = attempt.worktree_path.as_ref() else {
             return Err(CodingWorkspaceEngineError::MissingWorktree(
                 attempt.id.clone(),
@@ -249,7 +247,7 @@ impl CodingWorkspaceEngine {
                         CodingExecutionStage::InternalPrReview,
                         CodingProviderRole::InternalReviewer,
                     )
-                    .await)
+                    .await);
             }
         };
         let review_request = self

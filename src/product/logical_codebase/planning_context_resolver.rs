@@ -115,24 +115,22 @@ impl ResolvedPlanningContext {
         let request = self.launch_request(provider, config_artifact_ref);
         let validated = gateway.validate(request)?;
         let provider_type = provider_type_for_dialect(validated.envelope().provider_dialect);
-        let input = crate::cross_cutting::streaming_provider::StreamingProviderInput {
-            baseline_tree: None,
-            tool_policy: Some(
-                crate::cross_cutting::streaming_provider::ProviderToolPolicy::deny_file_write_builtins(),
-            ),
-            audit_sink: None,
-            provider_type,
-            role: crate::protocol::contracts::AdapterRole::Orchestrator,
-            prompt,
-            working_dir: self.cwd.clone(),
-            workspace_session_id: None,
-            resume_provider_session_id: None,
-            permission_mode:
-                crate::cross_cutting::streaming_provider::ProviderPermissionMode::Supervised,
-            structured_output_contract: None,
-            env_vars: std::collections::BTreeMap::new(),
-            timeout_secs: 0,
-        };
+        let input = crate::cross_cutting::streaming_provider::StreamingProviderInput { working_directory: None, baseline_tree: None,
+        tool_policy: Some(
+            crate::cross_cutting::streaming_provider::ProviderToolPolicy::deny_file_write_builtins(),
+        ),
+        audit_sink: None,
+        provider_type,
+        role: crate::protocol::contracts::AdapterRole::Orchestrator,
+        prompt,
+        working_dir: self.cwd.clone(),
+        workspace_session_id: None,
+        resume_provider_session_id: None,
+        permission_mode:
+            crate::cross_cutting::streaming_provider::ProviderPermissionMode::Supervised,
+        structured_output_contract: None,
+        env_vars: std::collections::BTreeMap::new(),
+        timeout_secs: 0, };
         Ok(
             crate::cross_cutting::session_launch::ValidatedStreamingProviderInput::new(
                 input, validated,

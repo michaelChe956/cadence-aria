@@ -98,6 +98,9 @@ impl CodingWorkspaceEngine {
                 snapshot.checkout_id.0.to_string(),
                 working_dir.to_path_buf(),
             ),
+            // Task 2.5：独立 cwd 字段；现状映射 target worktree（cwd==target
+            // 复验等式不变，LC root 接线归 Task 2.6/2.8）。
+            working_directory: working_dir.to_path_buf(),
             readable_roots: vec![working_dir.to_path_buf()],
             writable_roots,
             config_artifact_ref: "sha256:managed-config-artifact".to_string(),
@@ -460,9 +463,7 @@ impl CodingWorkspaceEngine {
             // `start_attempt` 短路同语义）——初始 unit run 物化时以此携带
             // start_commit；置于 journal 推进 Completed 前，崩溃重放重入
             // 本分支即补冻结，不留「Completed 但 head 缺失」窗口。
-            if updated.scope == CodingAttemptScope::WorkItemGroup
-                && updated.head_commit.is_none()
-            {
+            if updated.scope == CodingAttemptScope::WorkItemGroup && updated.head_commit.is_none() {
                 let claim_head = self
                     ._git_service
                     .git_current_head(&journal.worktree_path)
