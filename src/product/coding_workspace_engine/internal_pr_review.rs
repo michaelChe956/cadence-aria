@@ -65,6 +65,7 @@ use crate::product::coding_models::CodingAttemptScope;
 /// `DenyFileWriteBuiltins`，D2 必带），再绑定 attempt 的 workspace/resume 会话
 /// 上下文。InternalReviewer streaming 入口禁止绕过本函数裸构造
 /// `StreamingProviderInput`——绕过工厂即绕过 D2 角色矩阵，矩阵测试将失败。
+/// LC root cwd 由 execute 侧 envelope 重绑注入（Task 2.7），工厂本身保持 D2 锚点。
 pub(crate) fn internal_pr_review_streaming_input(
     reviewer: &ProviderName,
     prompt: String,
@@ -368,6 +369,14 @@ impl CodingWorkspaceEngine {
         );
         // 裁决 A 两阶段:policy 已 resolve,routing reference 已注入 prompt;
         // 此处仅把 policy 与 provider_input 捆绑(同源 clone-then-move)。
+        // Task 2.7（REQ-ENV-10）：launch 层 envelope 重绑（设计决策 1，与 2.6 的
+        // coder/reviewer cycle 同款）——policy 在场时 input 显式携带 envelope 冻结
+        // 的 canonical cwd（LC=root），spawn 前复验消费；无政策路径保持 None
+        // （回填 working_dir，单仓零变化）。
+        let mut provider_input = provider_input;
+        if let Some(policy) = policy.as_ref() {
+            provider_input.working_directory = Some(policy.envelope().working_directory.clone());
+        }
         let validated_input = policy
             .map(|policy| ValidatedStreamingProviderInput::new(provider_input.clone(), policy));
         let full_output = self

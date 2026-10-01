@@ -859,6 +859,11 @@ async fn drive_logical_coding_run(
         .resolve_launch_policy_for_role(attempt, CodingProviderRole::Coder, &worktree)
         .expect("policy resolves")
         .expect("logical attempt + gateway must produce policy");
+    // Task 2.7 re-pin：envelope cwd 已迁 canonical root（lifecycle.rs LC 分支），
+    // 生产 cycle（run_coder_with_retry_cycle）在捆绑前把 envelope 冻结 cwd 回填
+    // 进 input（spawn 前复验消费 Task 2.5 冻结字段）；本 harness 同步该接线。
+    let mut provider_input = provider_input;
+    provider_input.working_directory = Some(policy.envelope().working_directory.clone());
     let validated_input = ValidatedStreamingProviderInput::new(provider_input.clone(), policy);
     let (_command_tx, mut command_rx) = mpsc::channel::<CodingRunnerCommand>(1);
     drop(_command_tx);

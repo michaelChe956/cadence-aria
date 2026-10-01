@@ -65,7 +65,8 @@ const GROUP_REVIEW_MAX_ATTEMPTS: usize = 3;
 /// `DenyFileWriteBuiltins`，D2 必带），再绑定 attempt 的 workspace 会话上下文
 /// （group review 每次 execute 均新起会话，resume 恒 `None`）。group review
 /// streaming 入口禁止绕过本函数裸构造 `StreamingProviderInput`——绕过工厂即
-/// 绕过 D2 角色矩阵，矩阵测试将失败。
+/// 绕过 D2 角色矩阵，矩阵测试将失败。LC root cwd 由 execute 侧 envelope
+/// 重绑注入（Task 2.7），工厂本身保持 D2 锚点。
 pub(crate) fn group_review_streaming_input(
     reviewer: &ProviderName,
     prompt: String,
@@ -991,6 +992,14 @@ impl GroupReviewExecutor for RealGroupReviewExecutor<'_> {
             )
             .map_err(|error| CodingWorkspaceEngineError::ProviderStream(error.to_string()))
             .map_err(map_group_review_engine_error)?;
+        // Task 2.7（REQ-ENV-10）：launch 层 envelope 重绑（设计决策 1，与 2.6 的
+        // coder/reviewer cycle 同款）——policy 在场时 input 显式携带 envelope 冻结
+        // 的 canonical cwd（LC=root），spawn 前复验消费；无政策路径保持 None
+        // （回填 working_dir，单仓零变化）。
+        let mut provider_input = provider_input;
+        if let Some(policy) = policy.as_ref() {
+            provider_input.working_directory = Some(policy.envelope().working_directory.clone());
+        }
         let validated_input = policy
             .map(|policy| ValidatedStreamingProviderInput::new(provider_input.clone(), policy));
         let (command_tx, mut command_rx) = mpsc::channel::<CodingRunnerCommand>(1);

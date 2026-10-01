@@ -86,6 +86,7 @@ impl CodingWorkspaceEngine {
                 attempt.id
             ))
         })?;
+        let root = gateway.authority_root().to_path_buf();
         let request = SessionLaunchRequest {
             project_id: attempt.project_id.clone(),
             provider: provider_ref_for_name(&provider_name)?,
@@ -98,10 +99,13 @@ impl CodingWorkspaceEngine {
                 snapshot.checkout_id.0.to_string(),
                 working_dir.to_path_buf(),
             ),
-            // Task 2.5：独立 cwd 字段；现状映射 target worktree（cwd==target
-            // 复验等式不变，LC root 接线归 Task 2.6/2.8）。
-            working_directory: working_dir.to_path_buf(),
-            readable_roots: vec![working_dir.to_path_buf()],
+            // Task 2.7（REQ-ENV-10）：LC 分支 cwd=canonical root（gateway 冻结的
+            // authority root，与 2.1/2.3/2.6 的 author/revision/coder launch 同源），
+            // 独立于 target；readable roots 随 cwd root 化；writable roots 不随
+            // cwd 扩大（Coder=target worktree，REQ-ENV-11；reviewer 角色恒空）。
+            // 单仓/legacy 在早门前已返回 Ok(None)，cwd==worktree 直连零变化。
+            working_directory: root.clone(),
+            readable_roots: vec![root],
             writable_roots,
             config_artifact_ref: "sha256:managed-config-artifact".to_string(),
         };
