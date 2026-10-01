@@ -242,6 +242,7 @@ impl WorkspaceEngine {
             #[cfg(test)]
             policy_route_before_persist: None,
             logical_provider_gateway: None,
+            logical_launch_fingerprints: HashMap::new(),
             last_gate_close_compile_failure: None,
         }
     }
@@ -387,6 +388,7 @@ impl WorkspaceEngine {
             #[cfg(test)]
             policy_route_before_persist: None,
             logical_provider_gateway: None,
+            logical_launch_fingerprints: HashMap::new(),
             last_gate_close_compile_failure: None,
         }
     }

@@ -165,6 +165,13 @@ impl WorkspaceEngine {
             // worktree（input.working_dir）保持成员 checkout；经 gateway
             // validate→start_streaming 启动并留 audit（tool-policy 审计接线在
             // via_gateway 内部对 validated input 施加）。Legacy 直连路径不受影响。
+            // Task 2.3：记忆本次 launch 的 cwd-inclusive 指纹——revision resume
+            // 决策据此比对 cwd 漂移（同 root 续接一致、漂移 supersede，见
+            // review/drive.rs）。
+            self.logical_launch_fingerprints.insert(
+                self.session.author_provider.clone(),
+                launch.fingerprint().clone(),
+            );
             let mut input = input;
             input.working_directory = Some(launch.envelope().working_directory.clone());
             let validated_input =

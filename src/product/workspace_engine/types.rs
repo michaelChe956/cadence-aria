@@ -557,6 +557,16 @@ pub struct WorkspaceEngine {
     /// 逻辑代码库 issue 注入真实 gateway。
     pub(crate) logical_provider_gateway:
         Option<Arc<crate::product::logical_codebase::LogicalCodebaseProviderGateway>>,
+    /// Task 2.3（REQ-ENV-04 cwd 维度）：LC gateway launch 冻结的 resume 指纹记忆
+    /// （author provider → 最近一次 author 面 launch 的 cwd-inclusive
+    /// fingerprint；author 首轮/choice follow-up/revision 的 envelope 同源）。
+    /// revision resume 决策据此比对 cwd 漂移：指纹漂移 → supersede 旧 native
+    /// session 并新建；记忆缺失（跨连接重建 engine）→ fail-closed 新会话，
+    /// 不静默续接旧 thread。
+    pub(crate) logical_launch_fingerprints: HashMap<
+        crate::product::models::ProviderName,
+        crate::product::logical_codebase::SessionResumeFingerprint,
+    >,
     /// F7 项 1：最近一次 close_human_gate 中 confirm 后 compile 失败的结构化
     /// 详情（每次 close 入口清空，仅当次失败时非空）。
     pub(crate) last_gate_close_compile_failure:

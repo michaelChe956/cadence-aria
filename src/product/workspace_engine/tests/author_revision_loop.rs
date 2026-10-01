@@ -142,18 +142,20 @@ async fn start_generation_missing_reviewer_persists_empty_effective_not_author()
     let app_paths = crate::product::app_paths::ProductAppPaths::new(tmp.path().join(".aria"));
     let store = crate::product::lifecycle_store::LifecycleStore::new(app_paths.clone());
     let record = store
-        .create_workspace_session(crate::product::lifecycle_store::CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: "story_spec_0001".to_string(),
-            workspace_type: crate::product::models::WorkspaceType::Story,
-            author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: None,
-            review_rounds: 1,
-            superpowers_enabled: true,
-            openspec_enabled: true,
-            work_item_plan_options: None,
-        })
+        .create_workspace_session(
+            crate::product::lifecycle_store::CreateWorkspaceSessionInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                entity_id: "story_spec_0001".to_string(),
+                workspace_type: crate::product::models::WorkspaceType::Story,
+                author_provider: ProviderName::ClaudeCode,
+                reviewer_provider: None,
+                review_rounds: 1,
+                superpowers_enabled: true,
+                openspec_enabled: true,
+                work_item_plan_options: None,
+            },
+        )
         .expect("create session record");
     let session = WorkspaceSession::from_record(record);
     let (tx, _rx) = mpsc::channel(64);
@@ -780,3 +782,5 @@ async fn completed_revision_run_reconnects_to_author_confirm_with_revised_artifa
 // 退役留档（T5/REQ-RET-02）：`retried_author_feedback_revision_completes_after_real_reconnect` 直接驱动已删除的 legacy 决策面，
 // 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
 // （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
+
+include!("author_revision_loop_parts/root_cwd_revision.inc.rs");

@@ -3,9 +3,12 @@ use crate::cross_cutting::provider_adapter::{
     PROVIDER_ERROR_STDERR_TAIL_BYTES, ProviderAdapterError,
 };
 use crate::cross_cutting::session_launch::ValidatedStreamingProviderInput;
+use crate::product::logical_codebase::provider_gateway::{
+    GatewaySessionDisposition, ResumeSessionLaunchRequest,
+};
 use crate::product::logical_codebase::{
     LogicalCodebaseProviderGateway, PolicyTarget, ProviderGatewayError, ProviderRef,
-    SessionLaunchRequest, SessionPolicyAction,
+    SessionLaunchRequest, SessionPolicyAction, ValidatedSessionLaunchPolicy,
 };
 use crate::product::workspace_engine::provider_drive::{
     PROVIDER_CHOICE_WAIT_TIMEOUT, PROVIDER_IDLE_WATCHDOG_TIMEOUT, PendingChoiceRequests,
@@ -528,7 +531,15 @@ impl WorkspaceEngine {
     ) {
         let author = self.session.author_provider.clone();
         let node_id = self.active_node_id.clone();
-        let input = match self.build_revision_input() {
+        // Task 2.3（REQ-PLN-03/PLN-07、REQ-ENV-04/ENV-10）：LC revision 的 root
+        // launch + resume 决策先于 input 构建——delta/full prompt 分流依赖 resume
+        // 决策（cwd 漂移 supersede 后不得再以 delta 续写旧 thread）。`None` = 非
+        // 逻辑会话（未注入 gateway）→ 下方 Legacy 直连原样（单仓零变化）。
+        let logical_launch = self.resolve_revision_root_launch();
+        let allow_resume = logical_launch
+            .as_ref()
+            .is_none_or(|decision| decision.as_ref().map(|d| d.resume_allowed) == Ok(true));
+        let input = match self.build_revision_input_with_resume(allow_resume) {
             Ok(input) => input,
             Err(message) => {
                 let _ = self.event_tx.send(EngineEvent::Error { message }).await;
@@ -550,6 +561,54 @@ impl WorkspaceEngine {
                 Some(author.clone()),
             )
             .await;
+        }
+        // Task 2.3：LC 分支——cwd 重绑 root（envelope 冻结的 canonical
+        // working_directory），target worktree（input.working_dir）保持成员 checkout；
+        // 经 gateway start_streaming 启动（validate→spawn 复验 + audit）。解析/
+        // 校验 fail-closed 与 input 构建失败同形收口，绝不静默回落 member cwd
+        // 直连。artifact retry 与 Codex resume fallback 属直连专用路径，LC 下真实
+        // 启动唯一经 gateway——两者不接线（失败可见收口，不静默换道）。
+        if let Some(decision) = logical_launch {
+            let decision = match decision {
+                Ok(decision) => decision,
+                Err(message) => {
+                    let _ = self.event_tx.send(EngineEvent::Error { message }).await;
+                    self.finish_failed_run().await;
+                    return;
+                }
+            };
+            let gateway = self
+                .logical_provider_gateway
+                .clone()
+                .expect("logical revision launch requires a logical provider gateway");
+            self.logical_launch_fingerprints.insert(
+                self.session.author_provider.clone(),
+                decision.launch.fingerprint().clone(),
+            );
+            let mut input = input;
+            input.working_directory = Some(decision.launch.envelope().working_directory.clone());
+            let input = self.attach_tool_policy_audit(input);
+            // F-19：LC revision run 拉起前登记 provider start（诊断面，best-effort）。
+            self.register_provider_start_in_ledger(
+                ProviderConversationRole::Author,
+                author.clone(),
+            );
+            let validated_input = ValidatedStreamingProviderInput::new(input, decision.launch);
+            let session = gateway
+                .start_streaming(validated_input, self.cancel.clone())
+                .await
+                .map_err(map_gateway_error_to_adapter);
+            self.drive_provider_session(ProviderSessionDriveInput {
+                session,
+                command_rx,
+                node_id,
+                agent: Some(author),
+                role: ProviderConversationRole::Author,
+                artifact_retry: None,
+                revision_resume_fallback: None,
+            })
+            .await;
+            return;
         }
         // 第一阶段不实证 Kimi resume 稳定性，排除 artifact retry（同 Pi）
         let retry_context =
@@ -586,6 +645,107 @@ impl WorkspaceEngine {
         })
         .await;
     }
+
+    /// Task 2.3：LC revision 的 root launch + resume 决策（`drive_revision_session`
+    /// 的 LC 分支消费）。launch 与 Task 2.1 author 首轮同源（cwd = authority
+    /// manifest `provider_context_root`；target = 唯一成员 checkout；
+    /// `PlanningReadOnly` + author provider ref），envelope/resume 面一致。
+    ///
+    /// resume 决策（REQ-ENV-04 cwd 维度）：input 携带旧 native session 且引擎
+    /// 记有其发行 launch 的 cwd-inclusive 指纹时，经 `gateway.resume_or_start`
+    /// 全维度比对——指纹一致（cwd 未漂移）→ `resume_allowed=true`，native
+    /// session identity 原样续接；漂移 → supersede 审计 + StartNew
+    ///（`resume_allowed=false`，丢 resume id 走 full prompt 新 thread）。指纹
+    /// 记忆缺失（跨连接重建 engine）→ fail-closed 新会话：无法证明旧 thread 与
+    /// 当前 launch 全维度一致，绝不静默续接。
+    fn resolve_revision_root_launch(&self) -> Option<Result<RevisionLaunchDecision, String>> {
+        let gateway = self.logical_provider_gateway()?;
+        let Some(lifecycle) = self.lifecycle_store.as_ref() else {
+            return Some(Err(
+                "logical revision launch requires a persistent lifecycle store".to_string(),
+            ));
+        };
+        let Some(record) = lifecycle
+            .get_workspace_session(&self.session.session_id)
+            .ok()
+        else {
+            return Some(Err(format!(
+                "logical revision launch cannot load workspace session record {}",
+                self.session.session_id
+            )));
+        };
+        let provider = self.session.author_provider.clone();
+        let request = match self.build_root_launch_request(
+            &record,
+            &provider,
+            SessionPolicyAction::PlanningReadOnly,
+        )? {
+            Ok(request) => request,
+            Err(message) => return Some(Err(message)),
+        };
+        let resume_session_id = self
+            .provider_resume_session_id(ProviderConversationRole::Author, &provider)
+            .filter(|id| !id.trim().is_empty());
+        let decision = match (
+            resume_session_id,
+            self.logical_launch_fingerprints.get(&provider),
+        ) {
+            (Some(previous_session_id), Some(previous_fingerprint)) => {
+                match gateway.resume_or_start(ResumeSessionLaunchRequest {
+                    launch: request,
+                    previous_fingerprint: previous_fingerprint.clone(),
+                    previous_session_id,
+                }) {
+                    Ok(GatewaySessionDisposition::Resume(launch)) => RevisionLaunchDecision {
+                        launch,
+                        resume_allowed: true,
+                    },
+                    Ok(GatewaySessionDisposition::StartNew { validated, .. }) => {
+                        RevisionLaunchDecision {
+                            launch: validated,
+                            resume_allowed: false,
+                        }
+                    }
+                    Err(error) => {
+                        return Some(Err(format!(
+                            "logical revision gateway validation failed: {error}"
+                        )));
+                    }
+                }
+            }
+            // 指纹记忆缺失（跨连接重建）：fail-closed 新会话。
+            (Some(_), None) => match gateway.validate(request) {
+                Ok(launch) => RevisionLaunchDecision {
+                    launch,
+                    resume_allowed: false,
+                },
+                Err(error) => {
+                    return Some(Err(format!(
+                        "logical revision gateway validation failed: {error}"
+                    )));
+                }
+            },
+            (None, _) => match gateway.validate(request) {
+                Ok(launch) => RevisionLaunchDecision {
+                    launch,
+                    resume_allowed: true,
+                },
+                Err(error) => {
+                    return Some(Err(format!(
+                        "logical revision gateway validation failed: {error}"
+                    )));
+                }
+            },
+        };
+        Some(Ok(decision))
+    }
+}
+
+/// Task 2.3：LC revision launch 决策结果——validated launch（cwd=root、
+/// target=成员 checkout）+ resume 是否放行（supersede/fresh 时 false）。
+struct RevisionLaunchDecision {
+    launch: ValidatedSessionLaunchPolicy,
+    resume_allowed: bool,
 }
 
 include!("drive_parts/reviewer_provider_session.inc.rs");
@@ -614,6 +774,13 @@ fn provider_allows_review_repair(provider: &ProviderName) -> bool {
 /// (C-2:不再硬编码 ClaudeCode;不支持的 provider 显式失败)。gateway 错误映射为
 /// `ProviderAdapterError`(与 `drive_reviewer_provider_session_once` 的 `Start`
 /// 失败路径对齐)。
+///
+/// Task 2.3（REQ-ENV-10）：cwd 与 target 分离——cwd 取 gateway 冻结的 canonical
+/// authority root（manifest `provider_context_root`，双工厂 canonical 一致性由
+/// Task 2.8 断言），不再与 target 同源；target 保持独立 `aggregate_root` 锚
+/// （成员 worktree，即 review 对象），readable roots 随 cwd root 化（成员位于
+/// root 子树内的聚合布局）。validated 后 input 显式回填独立 cwd——spawn 前
+/// effective cwd 复验以 envelope 冻结值为准。
 async fn start_review_session_via_gateway(
     gateway: &Arc<LogicalCodebaseProviderGateway>,
     reviewer: &ProviderName,
@@ -621,22 +788,24 @@ async fn start_review_session_via_gateway(
     project_id: String,
     cancel: CancellationToken,
 ) -> Result<ProviderSession, ProviderAdapterError> {
+    let root = gateway.authority_root().to_path_buf();
     let request = SessionLaunchRequest {
         project_id,
         provider: ProviderRef::from_provider_name(reviewer, "cap_managed_snapshot")
             .map_err(map_gateway_error_to_adapter)?,
         action: SessionPolicyAction::ReviewReadOnly,
         target: PolicyTarget::aggregate_root(input.working_dir.clone()),
-        // Task 2.5：独立 cwd 字段；现状映射 target（aggregate root）worktree，
-        // cwd==target 复验等式不变。
-        working_directory: input.working_dir.clone(),
-        readable_roots: vec![input.working_dir.clone()],
+        // Task 2.3：cwd=canonical root（独立于 target）；target 保持成员锚。
+        working_directory: root.clone(),
+        readable_roots: vec![root],
         writable_roots: Vec::new(),
         config_artifact_ref: "sha256:managed-config-artifact".to_string(),
     };
     let validated = gateway
         .validate(request)
         .map_err(map_gateway_error_to_adapter)?;
+    let mut input = input;
+    input.working_directory = Some(validated.envelope().working_directory.clone());
     let validated_input = ValidatedStreamingProviderInput::new(input, validated);
     gateway
         .start_streaming(validated_input, cancel)

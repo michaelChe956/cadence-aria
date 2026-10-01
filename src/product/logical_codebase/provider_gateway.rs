@@ -718,6 +718,14 @@ impl LogicalCodebaseProviderGateway {
         self.audit.clone()
     }
 
+    /// Task 2.3：gateway 冻结的 canonical authority root（构造时自 manifest
+    /// `provider_context_root` canonicalize；与 aggregate 生产 driver 的 root
+    /// canonical 一致性由工厂断言，Task 2.8）。review 等 launch 组装方以此
+    /// 作为独立 cwd 来源——cwd 不再从 target/worktree 推导。
+    pub fn authority_root(&self) -> &Path {
+        &self.authority_root
+    }
+
     /// 校验启动请求并产出不可缺省的 validated policy。fail-closed:缺失政策返回
     /// `PolicyMissing`,绝不退化到无政策 fallback。
     pub fn validate(

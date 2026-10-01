@@ -140,6 +140,34 @@ impl WorkspaceEngine {
         session_record: &crate::product::models::WorkspaceSessionRecord,
     ) -> Option<Result<ValidatedSessionLaunchPolicy, String>> {
         let gateway = self.logical_provider_gateway()?;
+        let request = match self.build_root_launch_request(
+            session_record,
+            &self.session.author_provider.clone(),
+            SessionPolicyAction::PlanningReadOnly,
+        )? {
+            Ok(request) => request,
+            Err(message) => return Some(Err(message)),
+        };
+        Some(
+            gateway
+                .validate(request)
+                .map_err(|error| format!("logical author gateway validation failed: {error}")),
+        )
+    }
+
+    /// Task 2.3：`resolve_author_root_launch` 的参数化内核——provider ref 与
+    /// action 随角色注入（author/revision 共用 `PlanningReadOnly`；错误文案保持
+    /// 2.1 的「author」口径，revision 即 author 角色修订面）。解析链（lifecycle
+    /// store、repository 唯一成员 checkout、authority manifest root、C-2 集中
+    /// provider ref 映射）与 2.1 完全同源；返回未校验的 launch request，供
+    /// `validate`（author）或 `resume_or_start`（revision resume 决策）消费。
+    pub(crate) fn build_root_launch_request(
+        &self,
+        session_record: &crate::product::models::WorkspaceSessionRecord,
+        provider: &crate::product::models::ProviderName,
+        action: SessionPolicyAction,
+    ) -> Option<Result<SessionLaunchRequest, String>> {
+        self.logical_provider_gateway()?;
         let Some(lifecycle) = self.lifecycle_store.as_ref() else {
             return Some(Err(
                 "logical author launch requires a persistent lifecycle store".to_string(),
@@ -193,10 +221,7 @@ impl WorkspaceEngine {
                 )));
             }
         };
-        let provider_ref = match ProviderRef::from_provider_name(
-            &self.session.author_provider,
-            "cap_managed_snapshot",
-        ) {
+        let provider_ref = match ProviderRef::from_provider_name(provider, "cap_managed_snapshot") {
             Ok(provider_ref) => provider_ref,
             // C-2：session 配置的 provider 无 gateway 真实 dialect（Pi/KimiCode
             // 等）时显式失败，不静默回退 Claude，也不降级直连。
@@ -216,10 +241,10 @@ impl WorkspaceEngine {
             // 锚（cwd/target 分离语义不受影响：cwd 恒为 root）。
             None => PolicyTarget::aggregate_root(repository.path.clone()),
         };
-        let request = SessionLaunchRequest {
+        Some(Ok(SessionLaunchRequest {
             project_id: session_record.project_id.clone(),
             provider: provider_ref,
-            action: SessionPolicyAction::PlanningReadOnly,
+            action,
             target,
             // root cwd 与成员 target 显式分离（Task 2.5 字段合同；`planning()`
             // 构造器的 cwd==target 默认不适用于 LC root 形态）。
@@ -227,12 +252,7 @@ impl WorkspaceEngine {
             readable_roots: vec![root],
             writable_roots: Vec::new(),
             config_artifact_ref: "sha256:managed-config-artifact".to_string(),
-        };
-        Some(
-            gateway
-                .validate(request)
-                .map_err(|error| format!("logical author gateway validation failed: {error}")),
-        )
+        }))
     }
 
     /// Task 2.1：web run 臂的 Author 首轮入口——LC 会话先解析 root launch（cwd=
