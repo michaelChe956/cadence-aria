@@ -118,6 +118,18 @@ impl ProductAppPaths {
             .join("aggregate-initializations")
     }
 
+    /// v1.3/Task 1.5：root recipe receipt 的 legacy 别名 scope 常量
+    ///（per-LC 布局由 `RootRecipeReceiptStore` 的 scope root 决定）。
+    pub fn aggregate_recipe_receipts_root(&self, project_id: &str) -> PathBuf {
+        self.logical_codebase_root(project_id)
+            .join("aggregate-recipe-receipts")
+    }
+
+    pub fn aggregate_recipe_receipt_lock_path(&self, project_id: &str) -> PathBuf {
+        self.logical_codebase_root(project_id)
+            .join(".aggregate-recipe-receipt.lock")
+    }
+
     /// v1.3/REQ-REG-14：per-LC trust durable facts 的 legacy 别名 scope
     /// 常量（per-LC 布局由 `ProviderTrustStore` 的 `lc_scope_root` 决定）。
     pub fn provider_trust_root(&self, project_id: &str) -> PathBuf {
@@ -225,6 +237,18 @@ mod tests {
             paths.provider_trust_waiting_root("project_0001"),
             std::path::PathBuf::from(
                 "/tmp/aria/projects/project_0001/logical-codebase/provider-trust/waiting"
+            )
+        );
+        assert_eq!(
+            paths.aggregate_recipe_receipts_root("project_0001"),
+            std::path::PathBuf::from(
+                "/tmp/aria/projects/project_0001/logical-codebase/aggregate-recipe-receipts"
+            )
+        );
+        assert_eq!(
+            paths.aggregate_recipe_receipt_lock_path("project_0001"),
+            std::path::PathBuf::from(
+                "/tmp/aria/projects/project_0001/logical-codebase/.aggregate-recipe-receipt.lock"
             )
         );
         assert_eq!(

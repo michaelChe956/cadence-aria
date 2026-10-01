@@ -528,6 +528,46 @@ impl AggregateInitializationOperationStore {
     }
 }
 
+/// Task 1.5（REQ-BOOT-03）：五步 aggregate operation 的 root recipe 命令
+/// 索引——provider-turn 步骤到四条无中断命令的固定扁平序（全局
+/// `command_index` 1..=4）。命令文本唯一来源仍是
+/// [`crate::product::repository_store::RepositoryInitializationStepKind::command`]
+///（Task 1.1 隔离锁显式豁免的消费点），映射与 Task 1.4 驱动器的
+/// `recipe_commands` 一致：`PreCheck`=命令 1，`RuleAndMcpConfig`=命令 2+3，
+/// `OpenspecAndExamples`=命令 4；确定性步骤不映射任何命令。receipt/
+/// auditor（`root_recipe_receipt`）按此索引校验命令身份与「四命令全部
+/// 审计通过」。
+pub fn root_recipe_command_index() -> Vec<(AggregateInitializationStepKind, usize, &'static str)> {
+    use crate::product::repository_store::RepositoryInitializationStepKind as RepoStep;
+
+    let provider_turn_steps: [(AggregateInitializationStepKind, &[RepoStep]); 3] = [
+        (
+            AggregateInitializationStepKind::PreCheck,
+            &[RepoStep::PreCheck],
+        ),
+        (
+            AggregateInitializationStepKind::RuleAndMcpConfig,
+            &[RepoStep::RuleConfig, RepoStep::McpConfiguration],
+        ),
+        (
+            AggregateInitializationStepKind::OpenspecAndExamples,
+            &[RepoStep::ProjectRulesExamples],
+        ),
+    ];
+
+    let mut index = Vec::new();
+    let mut command_index = 1usize;
+    for (step, repo_steps) in provider_turn_steps {
+        for repo_step in repo_steps {
+            if let Some(command) = repo_step.command() {
+                index.push((step, command_index, command));
+                command_index += 1;
+            }
+        }
+    }
+    index
+}
+
 fn validate_initial_operation(
     operation: &AggregateInitializationOperation,
 ) -> Result<(), ProductStoreError> {
@@ -750,6 +790,42 @@ mod tests {
     const CREATED_AT: &str = "2026-08-09T00:00:00Z";
     const RUNNING_AT: &str = "2026-08-09T00:00:01Z";
     const STEP_AT: &str = "2026-08-09T00:00:10Z";
+
+    #[test]
+    fn root_recipe_command_index_freezes_four_commands_in_order() {
+        let index = super::root_recipe_command_index();
+        let flattened: Vec<(String, usize, &str)> = index
+            .into_iter()
+            .map(|(step, command_index, command)| {
+                (step.as_str().to_string(), command_index, command)
+            })
+            .collect();
+        assert_eq!(
+            flattened,
+            vec![
+                (
+                    "pre_check".to_string(),
+                    1,
+                    "/pre-check --no-interrupt --upgrade 用大陆镜像"
+                ),
+                (
+                    "rule_and_mcp_config".to_string(),
+                    2,
+                    "/rule-config --no-interrupt"
+                ),
+                (
+                    "rule_and_mcp_config".to_string(),
+                    3,
+                    "/mcp-configuration --no-interrupt"
+                ),
+                (
+                    "openspec_and_examples".to_string(),
+                    4,
+                    "/project-rules-examples --no-interrupt"
+                ),
+            ]
+        );
+    }
 
     struct AggregateInitFixture {
         _temp: tempfile::TempDir,

@@ -32,6 +32,7 @@ pub mod registration;
 pub mod registration_preflight_snapshot_store;
 pub mod registry;
 pub mod repository_routing;
+pub mod root_recipe_receipt;
 pub mod snapshot_validator;
 pub mod store;
 pub mod types;
@@ -53,7 +54,16 @@ pub use aggregate_initialization_coordinator::{
     MachineSkillsPreparation, RepositoryTypeDetector, profile_preflight_commands,
     resolve_aggregate_profile,
 };
-pub use aggregate_initialization_store::AggregateInitializationOperationStore;
+pub use aggregate_initialization_store::{
+    AggregateInitializationOperationStore, root_recipe_command_index,
+};
+pub use root_recipe_receipt::{
+    ROOT_RECIPE_ALLOWLIST, RootRecipeChangeClass, RootRecipeChangeKind, RootRecipeCommandReceipt,
+    RootRecipeCommandSummary, RootRecipeCommandVerdict, RootRecipeCommandWatch,
+    RootRecipeFilesystemAuditor, RootRecipeFilesystemSnapshot, RootRecipeObservedChange,
+    RootRecipeReceipt, RootRecipeReceiptStore, RootRecipeSnapshotEntry,
+    RootRecipeSnapshotEntryKind,
+};
 pub use evidence_mediator::{
     POLICY_REAUTHORIZATION_TTL_HOURS, EvidenceIndexPinRecord, EvidenceQueryInput,
     EvidenceQueryResponse, EvidenceRole, PolicyAccessError, PolicyReauthorizationRequest,
