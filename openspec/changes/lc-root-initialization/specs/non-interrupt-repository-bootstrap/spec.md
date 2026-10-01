@@ -20,12 +20,12 @@
 
 ### Requirement: 聚合根 recipe 与 readiness 事实闭环（REQ-BOOT-03）
 
-逻辑代码库的 root-cwd recipe SHALL 复用四条无中断命令的取消、超时、输出摘要与步骤恢复语义，并将其映射到既有五步聚合初始化 operation；AggregatePreflight 冻结 canonical root 后、首个 provider turn 前 SHALL 完成所需 Codex/Kimi trust 登记与核验，不新增第六步。命令成功、根级产物 receipt、根 policy/rule 摘要和 bootstrap 投影 SHALL 独立记录。recipe 完成本身 MUST NOT 被视为 `planning_ready`，直到规则/policy、成员索引和聚合索引 active 等投影事实均完成。
+逻辑代码库的 root-cwd recipe SHALL 复用四条无中断命令的取消、超时、输出摘要与步骤恢复语义，并将其映射到既有五步聚合初始化 operation；recipe provider SHALL 固定为 Claude Code。LC 根准入冻结 canonical root 后、Claude Code recipe operation 启动前 SHALL 完成/记录面向后续 Codex/Kimi session 的独立 trust preparation 与核验。该事实不属于五步 operation、不插入步骤之间且不新增第六步；它不是 Claude Code recipe 的执行前提，Claude recipe 按五步启动。命令成功、根级产物 receipt、根 policy/rule 摘要和 bootstrap 投影 SHALL 独立记录。recipe 完成本身 MUST NOT 被视为 `planning_ready`，直到规则/policy、成员索引和聚合索引 active 等投影事实均完成。
 
 #### Scenario: 四命令按根顺序执行
 
-- **WHEN** 新 LC 的聚合初始化完成 AggregatePreflight 并进入 provider recipe
-- **THEN** 所选 provider 所需 trust SHALL 在首个真实 provider turn 前已登记并核验，随后 `/pre-check --no-interrupt --upgrade 用大陆镜像`、`/rule-config --no-interrupt`、`/mcp-configuration --no-interrupt`、`/project-rules-examples --no-interrupt` SHALL 按固定顺序在根执行；trust 或任何命令失败、取消或输出不可审计时 SHALL 停止后续命令并保留失败事实
+- **WHEN** LC 根准入已确定并冻结 canonical root，trust preparation 已记录后启动新 LC 的 Claude Code 五步聚合初始化 recipe
+- **THEN** 随后 SHALL 按 MachineSkills→AggregatePreflight→PreCheck→RuleAndMcpConfig→OpenspecAndExamples 原样推进；四条 `/pre-check --no-interrupt --upgrade 用大陆镜像`、`/rule-config --no-interrupt`、`/mcp-configuration --no-interrupt`、`/project-rules-examples --no-interrupt` SHALL 按固定顺序在根执行；任一命令失败、取消或输出不可审计时 SHALL 停止 recipe/后续命令并保留失败事实。Codex/Kimi trust preparation 的失败只阻断依赖该 trust 的后续 session，不阻断固定 Claude Code recipe。
 
 #### Scenario: recipe 成功但 readiness 材料未齐
 

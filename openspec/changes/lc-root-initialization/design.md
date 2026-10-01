@@ -2,7 +2,7 @@
 
 ## Context
 
-权威设计为 [`cadence/designs/2026-09-30_方案设计_LC根初始化_v1.0.md`](../../../cadence/designs/2026-09-30_方案设计_LC根初始化_v1.0.md) v1.2；本文件只记录实现决策摘要，不复制全文。预研证据为 [`cadence/reports/2026-10-01_预研报告_LC根初始化provider实测_v1.0.md`](../../../cadence/reports/2026-10-01_预研报告_LC根初始化provider实测_v1.0.md)。
+权威设计为 [`cadence/designs/2026-09-30_方案设计_LC根初始化_v1.0.md`](../../../cadence/designs/2026-09-30_方案设计_LC根初始化_v1.0.md) v1.3；本文件只记录实现决策摘要，不复制全文。预研证据为 `cadence/reports/2026-10-01_预研报告_LC根初始化provider实测_v1.0.md`。
 
 当前 `AggregateInitializationCoordinator` 已有五步 durable operation 与 `AggregateProviderTurnDriver` 接口，但聚合 provider turn 仍需接入真实四命令循环；`LogicalCodebaseProviderAdmissionPreflight` 的规则来源需要从 active member checkout 切换到 canonical LC root。`SessionPolicyEnvelope` 已冻结 policy/target/writable roots，需增补独立 `working_directory`；现有 gateway/resolver 测试中存在 cwd 与 target 相同的 fixture，不能替代分离形态证据。
 
@@ -12,10 +12,10 @@
 
 **Goals:**
 
-- 在 canonical LC root 执行一次可恢复、可审计的四命令 root recipe，并闭合 recipe operation 与 bootstrap readiness 两套五步事实。
-- 让所有 LC provider session 使用 root cwd，同时保留 member/checkout/worktree target、逻辑 writable roots、target resolver 与 D4 基线的独立约束。
+- 在 canonical LC root 执行一次可恢复、可审计的四命令 root recipe，并闭合 recipe operation 与 bootstrap readiness 两套五步事实；recipe provider 固定为 Claude Code。
+- 让本 change 冻结所有 LC provider session 的 root cwd、独立 target、逻辑 writable roots、target resolver 与 D4 基线合同；Codex/Pi/KimiCode 的实际 LC gateway launch 由后续 `lc-gateway-multi-provider` change 交付。
 - 以 durable Running operation 派生唯一 bootstrap phase credential，解决根规则冷启动死锁而不放宽 policy、gateway、capability、cwd 或 target 校验。
-- 将 Codex/Kimi trust 登记作为 recipe ① 冻结 canonical root 后、首个 provider turn 前的确定性、幂等、可撤销、可审计步骤；失败时 fail-closed。
+- 将 Codex/Kimi trust 登记作为 LC 根准入冻结 canonical root 后、Claude Code recipe 启动前的独立、确定性、幂等、可撤销、可审计 preparation；它不是 Claude recipe 的 gate，仅为后续 Codex/Kimi session 原生根配置读取准备前提；失败时依赖该 trust 的后续 session fail-closed。
 - 保留 provider 原生 root discovery、AGENTS.md 通用入口、CLAUDE.md 兼容副本和机器级 skills 安装零改造结论。
 
 **Non-Goals:**
@@ -34,7 +34,7 @@
 
 ### 2. 两套状态机与 bootstrap credential
 
-保留 recipe operation 的 MachineSkills → AggregatePreflight → PreCheck → RuleAndMcpConfig → OpenspecAndExamples，以及 bootstrap projection 的 Identity → ManifestCheckout → RulesPolicy → MemberIndex → AggregateIndexActive。AggregatePreflight 冻结 canonical root 后、PreCheck 前登记所选 Codex/Kimi 的 trust，不新增第六个 step；recipe 完成不直接等价于 `planning_ready`，RulesPolicy、索引和摘要/receipt 必须闭环。
+保留 recipe operation 的 MachineSkills → AggregatePreflight → PreCheck → RuleAndMcpConfig → OpenspecAndExamples，以及 bootstrap projection 的 Identity → ManifestCheckout → RulesPolicy → MemberIndex → AggregateIndexActive。LC 根准入（REQ-REG-09）冻结 canonical root 后记录所选 Codex/Kimi 的 trust preparation；该事实不属于 recipe operation 五步、不插入步骤之间，随后固定由 Claude Code 启动五步 recipe；recipe 完成不直接等价于 `planning_ready`，RulesPolicy、索引和摘要/receipt 必须闭环。
 
 bootstrap phase credential 只由当前 Running operation 的 LC/root/step/input digest 派生，provider/admission 在 spawn 前重新读取并比对。它只跳过“根规则尚未生成”，不能跳过 policy、authority、capability、gateway、canonical cwd、target 或 availability。普通 session 不能自报 credential。
 
@@ -44,7 +44,7 @@ bootstrap phase credential 只由当前 Running operation 的 LC/root/step/input
 
 ### 4. Provider trust 与自发现边界
 
-Codex 在用户级 `~/.codex/config.toml` 的 projects trust 登记当前 canonical root，并在 LC root 启动追加 `--skip-git-repo-check`；Kimi 以 `wd_<basename>_<sha256(canonical_root)[:12]>` 写 workspace-trust 记录。根 provider turn 前完成所需登记，普通 session 前继续复验；登记只影响当前 root，重复执行幂等，仅撤销本 LC 管理的记录，用户原有 trust 不被误删，LC 删除/解绑可撤销，写入失败停等，审计不记录无关 trust 或凭据。pi/Claude 不增加用户级 trust 写入。
+Codex 在用户级 `~/.codex/config.toml` 的 projects trust 登记当前 canonical root，并在后续 LC session 启动适配中追加 `--skip-git-repo-check`；Kimi 以 `wd_<basename>_<sha256(canonical_root)[:12]>` 写 workspace-trust 记录。trust preparation 在 Claude recipe 前记录，普通 Codex/Kimi session 前继续复验；登记只影响当前 root，重复执行幂等，仅撤销本 LC 管理的记录，用户原有 trust 不被误删，LC 删除/解绑可撤销，写入失败使依赖该 trust 的后续 session 停等，审计不记录无关 trust 或凭据。Codex/Pi/KimiCode 的实际 LC gateway launch 由 `lc-gateway-multi-provider` 承担。
 
 AGENTS.md 是四家通用入口，CLAUDE.md 是兼容副本；既有机器级 `CadenceSkillsManager::prepare()` 与 managed links 不因 cwd 变化而重装、复制或重链。provider 原生自发现与 Aria 注入 bundle 是独立通道：前者沿用 ENV-06/08 的受信任边界，后者继续原有 allowlist、digest、脱敏和审计。
 
@@ -72,7 +72,7 @@ Normal admission 检查 canonical root rules/policy；bootstrap admission 使用
 ## Migration Plan
 
 1. 新 LC 先完成 identity、manifest/checkout 与 canonical root preflight；root recipe 运行前不启动普通 provider。
-2. AggregatePreflight 冻结 canonical root 后先完成所需 Codex/Kimi trust 登记、核验与副作用审计；失败即等待、禁止首个根 provider turn。随后 recipe 按原 durable step 生成根规则/policy/MCP/receipt，不新增 step ID。
+2. LC 根准入冻结 canonical root 后先完成/记录所需 Codex/Kimi trust preparation、核验与副作用审计；这是 recipe operation 之外的独立事实，不插入步骤之间，也不是 Claude Code recipe gate。随后固定由 Claude Code 执行 recipe；trust preparation 失败时依赖该 trust 的后续 session 等待，Claude recipe 按原 durable step 启动。
 3. bootstrap projection 仅在 RulesPolicy、MemberIndex、AggregateIndexActive 与摘要一致后进入 `planning_ready`；之后所有 LC session 使用 root cwd + 独立 target。
 4. 已有旧 per-member digest 的 LC 不静默切换：进入 waiting → Prepare → root recipe → 新 root policy/rule receipt 冻结；单仓完全走旧路径。
 5. 任一阶段失败保留 checkpoint/receipt/外部副作用事实，执行原链 retry/continue；若发现 root identity、未知写入或 trust 撤销不确定，保持 fail-closed，不自动回滚用户文件。
@@ -85,3 +85,4 @@ Normal admission 检查 canonical root rules/policy；bootstrap admission 使用
 - 数十成员 LC 的上下文、token、启动时延预算与阻断阈值。
 - 各 provider/OS 对非 target 成员写尝试的 evidence gate 证据与支持矩阵。
 - 祖先 Git 污染、Codex 项目级 MCP 限制和多版本 CLI 的最终报告口径。
+本 change 的 recipe provider 固定为 Claude Code；后续 Story/Design/Plan/Coding/Review 的 Codex/Pi/KimiCode LC gateway launch 由后续 `lc-gateway-multi-provider` change 承担。本 change 只锁定 root-cwd/target/envelope 合同、根配置发现证据与 Claude Code recipe，不新增其他 provider gateway dialect。

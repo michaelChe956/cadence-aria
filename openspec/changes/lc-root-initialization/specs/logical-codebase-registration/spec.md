@@ -4,7 +4,7 @@
 
 ### Requirement: 规则与 capability 缺失的准入预检（REQ-REG-12）
 
-逻辑代码库首次登记、root recipe、索引或 provider 准入前，系统 SHALL 预检实际 provider 将消费的 canonical LC root 规则材料、聚合 policy 引用、provider trust 前提和 capability/gateway 条件。材料缺失、不一致、过期、信任登记失败或 provider 能力不满足时，系统 SHALL 在 provider 启动前返回可诊断等待项，通知原因、目标、缺失材料、外部副作用和准备/重试/撤销操作；准备完成后 SHALL 回到原步骤继续。系统 MUST NOT 通过写入一条 capability 记录、复制成员规则、绕过 gateway、改用备用 cwd 或以未登记 trust 将缺失能力视为可用。
+逻辑代码库首次登记、root recipe、索引或 provider 准入前，系统 SHALL 预检实际 provider 将消费的 canonical LC root 规则材料、聚合 policy 引用、面向后续 Codex/Kimi session 的 provider trust preparation 和 capability/gateway 条件。材料缺失、不一致、过期、信任登记失败或 provider 能力不满足时，系统 SHALL 在依赖该材料的 provider 启动前返回可诊断等待项，通知原因、目标、缺失材料、外部副作用和准备/重试/撤销操作；准备完成后 SHALL 回到原步骤继续。系统 MUST NOT 通过写入一条 capability 记录、复制成员规则、绕过 gateway、改用备用 cwd 或以未登记 trust 将缺失能力视为可用；固定 Claude Code root recipe 不因 Codex/Kimi trust preparation 失败而改用降级 provider。
 
 #### Scenario: 成员规则缺失
 
@@ -35,17 +35,15 @@
 
 ### Requirement: LC provider 信任登记生命周期（REQ-REG-14）
 
-系统 SHALL 为需要 workspace trust 的 LC provider 提供按 canonical `provider_context_root` 绑定的登记与撤销。AggregatePreflight 冻结根身份后、`PreCheck` 等首个 root recipe provider turn 前 SHALL 登记所需 trust，普通 LC session 启动前 SHALL 再次核验；不得等根配置生成后才登记。Codex SHALL 使用用户级 projects trust 配置，Kimi SHALL 使用由 basename 与 canonical root SHA-256 前缀确定的 workspace-trust 记录；登记 SHALL 幂等、只影响当前 LC 根、有归属证明时在 LC 删除或解绑撤销本 LC 管理且未被外部修改的条目，不得覆盖或撤销已有的用户自建 trust，并生成不含敏感凭据的审计事实。
+系统 SHALL 为需要 workspace trust 的后续 LC provider 提供按 canonical `provider_context_root` 绑定的登记与撤销。LC 根准入（REQ-REG-09）确定并冻结 root identity 后、Claude Code recipe 启动前 SHALL 完成/记录所需 trust preparation；该事实不属于五步 recipe、不插入步骤之间，普通 Codex/Kimi LC session 启动前 SHALL 再次核验；不得等根配置生成后才准备。Codex SHALL 使用用户级 projects trust 配置，Kimi SHALL 使用由 basename 与 canonical root SHA-256 前缀确定的 workspace-trust 记录；登记 SHALL 幂等、只影响当前 LC 根、有归属证明时在 LC 删除或解绑撤销本 LC 管理且未被外部修改的条目，不得覆盖或撤销已有的用户自建 trust，并生成不含敏感凭据的审计事实。Codex/Pi/KimiCode 的实际 LC gateway launch 由后续 `lc-gateway-multi-provider` change 交付。
 
 #### Scenario: Codex trust 登记
 
-- **WHEN** AggregatePreflight 为 Codex root recipe 冻结 canonical LC root
-- **THEN** 系统 SHALL 在首个 Codex provider turn 前于用户级 Codex projects trust 中登记该 canonical root 为 trusted，并在该 LC root 启动参数中包含 `--skip-git-repo-check`；登记失败 SHALL 不启动 provider
+- **WHEN** LC 根准入已冻结 Codex 所用 canonical root、且尚未启动 Claude Code recipe
+- **THEN** 系统 SHALL 在后续 Codex provider turn 前于用户级 Codex projects trust 中登记该 canonical root 为 trusted，并在后续 LC root 启动参数中包含 `--skip-git-repo-check`；登记失败 SHALL 阻止依赖该 trust 的 Codex session，且不得阻断固定 Claude Code recipe；实际 Codex LC gateway launch 由 `lc-gateway-multi-provider` 解锁
 
-#### Scenario: Kimi trust 登记
-
-- **WHEN** AggregatePreflight 为 Kimi root recipe 冻结 canonical LC root
-- **THEN** 系统 SHALL 在首个 Kimi provider turn 前写入 `wd_<basename>_<sha256(canonical_root)[:12]>` 对应的 workspace-trust 记录，记录 root 与登记时间，并在后续启动前复验记录与 canonical root 一致；登记失败 SHALL 不启动 provider
+- **WHEN** LC 根准入已冻结 Kimi 所用 canonical root、且尚未启动 Claude Code recipe
+- **THEN** 系统 SHALL 在后续 Kimi provider turn 前写入 `wd_<basename>_<sha256(canonical_root)[:12]>` 对应的 workspace-trust 记录，记录 root 与登记时间，并在后续启动前复验记录与 canonical root 一致；登记失败 SHALL 阻止依赖该 trust 的 Kimi session，且不得阻断固定 Claude Code recipe；实际 Kimi LC gateway launch 由 `lc-gateway-multi-provider` 解锁
 
 #### Scenario: 重试与多 LC 隔离
 

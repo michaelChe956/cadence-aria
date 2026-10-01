@@ -7,7 +7,7 @@ LC 聚合初始化目前仍有 provider turn 占位实现，且 admission 在 pr
 ## What Changes
 
 - 将 LC 初始化定义为聚合根上的 root-cwd recipe：保留既有五步 durable operation，以四条无中断命令生成根规则与配置，不进入单仓注册、持久化或 GitFinalize 外层流程。
-- 为 Codex/Kimi 在 AggregatePreflight 冻结 LC root 后、首个 recipe provider turn 前建立精确、幂等、可撤销的 provider trust 登记；Codex LC root 启动追加 `--skip-git-repo-check`。用户级 trust 写入失败时 fail-closed 并进入等待面，保留可审计记录。
+- 为后续 LC 会话中需要原生读取根配置的 Codex/Kimi provider，在 LC 根准入已冻结 canonical root 后、Claude Code root recipe 启动前建立独立的、精确、幂等、可撤销的 provider trust 登记准备；该准备不作为 Claude Code recipe 的执行前提，Codex LC root 启动适配追加 `--skip-git-repo-check`。用户级 trust 写入失败时，依赖该 trust 的后续会话 fail-closed 并进入等待面，保留可审计记录。
 - 将 admission 与 bootstrap readiness 规则源统一切至 canonical LC root；新增由 durable Running operation 派生的 bootstrap phase credential，仅豁免根规则尚未生成，不豁免 policy、authority、capability、gateway、target 与 cwd 校验。
 - 冻结 LC provider cwd 为 canonical root，同时保持 member/checkout/worktree target 独立；扩展 envelope、adapter input、resume fingerprint 与 spawn 前复验。逻辑 writable roots 不宣称 OS 沙箱，保留 provider-specific 写权限证据门及 D4 cross-target baseline。
 - 保留两套五步状态机并建立 readiness 闭环；为四锁 D1–D4 更新行为回归，补充 cwd≠target 专用 fixture 与端到端验收。
@@ -35,7 +35,8 @@ LC 聚合初始化目前仍有 provider turn 占位实现，且 admission 在 pr
 - 不新增 Aria prompt、环境变量、adapter sidecar 等 provider 配置注入通道；ENV-06 原生自发现边界与 ENV-08 Kimi 受控注入边界维持原契约。
 - 不把逻辑 writable roots 或 git status 证据宣称为 OS 级隔离；大 LC 成本、非 target 写边界和多版本 CLI 作为实施期验收，不由已有预研替代。
 - 不扩展为自动发现任意外部目录/嵌套 monorepo，不新增 provider fallback、成员 cwd 回退或宽泛路径授权。
+- codex/pi/kimi 的 LC gateway 接入（包括后续 Story/Design/Plan/Coding/Review 的真实 provider launch）由后续 change `lc-gateway-multi-provider` 承担，不在本 change 范围内；本 change 只交付 Claude Code recipe 与四家 provider 根配置发现的证据。
 
 ## Impact
 
-修改的契约 capability 为 `non-interrupt-repository-bootstrap`、`logical-codebase-registration`、`logical-codebase-aggregate-planning`、`session-policy-envelope`；权威设计为 `cadence/designs/2026-09-30_方案设计_LC根初始化_v1.0.md` v1.2。预研证据见 `cadence/reports/2026-10-01_预研报告_LC根初始化provider实测_v1.0.md`。实现预计 11–15 人日，含信任登记与 Codex 启动旗标的约 0.5–1 人日增量。
+修改的契约 capability 为 `non-interrupt-repository-bootstrap`、`logical-codebase-registration`、`logical-codebase-aggregate-planning`、`session-policy-envelope`；权威设计为 `cadence/designs/2026-09-30_方案设计_LC根初始化_v1.0.md` v1.3。预研证据见 `cadence/reports/2026-10-01_预研报告_LC根初始化provider实测_v1.0.md`。实现预计 11–15 人日，含信任登记与 Codex 启动旗标的约 0.5–1 人日增量。
