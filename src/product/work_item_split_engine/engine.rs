@@ -4,7 +4,7 @@ use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::session_launch::ValidatedAdapterInput;
 use crate::product::cadence_skills::routing_reference::RoutingReferenceContext;
 use crate::product::lifecycle_store::LifecycleStore;
-use crate::product::logical_codebase::policy::PolicyTarget;
+use crate::product::logical_codebase::policy::{PolicyTarget, SessionPolicyAction};
 use crate::product::logical_codebase::provider_gateway::{
     LogicalCodebaseProviderGateway, ProviderGatewayError, SessionLaunchRequest,
 };
@@ -230,10 +230,10 @@ impl WorkItemSplitEngine {
         let adapter_input = AdapterInput {
             provider_type,
             role: AdapterRole::WorkItemSplitter,
-            // Task 2.5 cwd/target 分离（LC 入口矩阵 Split sync 行）：注入独立
-            // cwd 字段；当前映射旧目录（==target，cwd==target 复验等式不变，
-            // 拆除归 Task 2.2/2.8），canonical LC root 由后续接线替换。
-            working_directory: Some(repository.path.clone()),
+            // Task 2.6（REQ-ENV-10，split sync 行）：cwd 重绑 canonical root——
+            // gateway 冻结的 manifest `provider_context_root`；worktree_path 仍
+            // 是 target 成员路径（Task 2.5 字段合同：两字段分离，单仓回填不变）。
+            working_directory: Some(gateway.authority_root().to_path_buf()),
             worktree_path: Some(worktree_path),
             provider_stream_log_dir: None,
             prompt: prompt.to_string(),
@@ -349,13 +349,21 @@ pub(crate) fn prepare_sync_launch(
     );
     let provider_ref =
         provider_ref_for_name(author_provider).map_err(map_provider_gateway_error)?;
-    let request = SessionLaunchRequest::planning(
-        project_id.to_string(),
-        provider_ref,
+    let root = gateway.authority_root().to_path_buf();
+    let request = SessionLaunchRequest {
+        project_id: project_id.to_string(),
+        provider: provider_ref,
+        action: SessionPolicyAction::PlanningReadOnly,
         target,
-        vec![repository.path.clone()],
-        "sha256:managed-config-artifact",
-    );
+        // Task 2.6（REQ-ENV-10）：cwd=canonical root（与 invoke_provider_via_gateway
+        // 的 AdapterInput.working_directory 同源），envelope 冻结后由 run_sync 的
+        // spawn 前复验消费；readable roots 随 cwd root 化（成员位于 root 子树内的
+        // 聚合布局），writable roots 为空（planning 只读）。
+        working_directory: root.clone(),
+        readable_roots: vec![root],
+        writable_roots: Vec::new(),
+        config_artifact_ref: "sha256:managed-config-artifact".to_string(),
+    };
     let validated = gateway
         .validate(request)
         .map_err(map_provider_gateway_error)?;

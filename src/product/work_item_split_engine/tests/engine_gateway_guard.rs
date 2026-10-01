@@ -8,7 +8,7 @@
 // 仍走直接 adapter 路径。
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::cross_cutting::provider_adapter::{ProviderAdapter, ProviderAdapterError};
 use crate::product::app_paths::ProductAppPaths;
@@ -346,5 +346,221 @@ fn logical_input_explicit_working_directory_overrides_legacy_fallback() {
     assert_eq!(
         adapter.worktree_path.as_deref(),
         Some(legacy_dir.to_string_lossy().to_string().as_str())
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Task 2.6：split sync 经 gateway 启动的 LC root cwd 重绑（REQ-ENV-10/11）。
+//
+// 断言语义：LC 分支 `invoke_provider_via_gateway` 的 AdapterInput 独立
+// cwd=canonical root（gateway 冻结的 manifest provider_context_root），
+// worktree_path 仍是 target 成员路径；恰一次 sync adapter spawn。单仓
+// `invoke_provider` 的直连/回填（None → worktree_path）由上方既有测试锁定。
+// ---------------------------------------------------------------------------
+
+use std::sync::Mutex;
+
+use crate::cross_cutting::provider_availability_gate::{
+    ProviderAvailabilityGate, ProviderHealthSource,
+};
+use crate::cross_cutting::provider_health::{ProviderHealthEntry, ProviderHealthSnapshot};
+use crate::cross_cutting::provider_registry::ProviderRegistry;
+use crate::product::logical_codebase::AggregatePolicyArtifactStore;
+use crate::product::logical_codebase::GatewayRunAudit;
+use crate::product::logical_codebase::LogicalCodebaseManifest;
+use crate::product::logical_codebase::LogicalCodebaseProviderGateway;
+use crate::product::logical_codebase::PolicyTarget;
+use crate::product::logical_codebase::PolicyTargetResolver;
+use crate::product::logical_codebase::ProviderCapability;
+use crate::product::logical_codebase::ProviderCapabilitySource;
+use crate::product::logical_codebase::ProviderDialect;
+use crate::product::logical_codebase::SessionPolicyAction;
+use crate::product::logical_codebase::ProviderRef;
+use crate::product::logical_codebase::ProviderRefType;
+use crate::product::logical_codebase::RepositoryCheckoutId;
+use crate::product::logical_codebase::SessionLaunchRequest;
+
+/// sync 探针：记录 spawn 时 input 的独立 cwd 与 worktree target 并计数，
+/// 返回最小 structured output。
+struct SplitRootCwdSyncProbe {
+    runs: Arc<AtomicUsize>,
+    cwd_at_runs: Arc<Mutex<Option<PathBuf>>>,
+    worktree_at_runs: Arc<Mutex<Option<String>>>,
+}
+
+impl SplitRootCwdSyncProbe {
+    fn new() -> Self {
+        Self {
+            runs: Arc::new(AtomicUsize::new(0)),
+            cwd_at_runs: Arc::new(Mutex::new(None)),
+            worktree_at_runs: Arc::new(Mutex::new(None)),
+        }
+    }
+}
+
+impl ProviderAdapter for SplitRootCwdSyncProbe {
+    fn run(&self, input: &AdapterInput) -> Result<AdapterOutput, ProviderAdapterError> {
+        self.runs.fetch_add(1, Ordering::SeqCst);
+        *self.cwd_at_runs.lock().expect("split cwd probe") = input.working_directory.clone();
+        *self.worktree_at_runs.lock().expect("split worktree probe") =
+            input.worktree_path.clone();
+        Ok(AdapterOutput {
+            exit_code: Some(0),
+            stdout: String::new(),
+            stderr: String::new(),
+            structured_output: Some(serde_json::json!({"work_items": []})),
+            files_modified: Vec::new(),
+            duration_ms: 0,
+            timeout_status: crate::protocol::contracts::TimeoutStatus::NotTimedOut,
+        })
+    }
+}
+
+/// gateway 测试 capability source：按 provider ref 返回对应 dialect。
+struct SplitRootCwdCapabilitySource;
+
+impl ProviderCapabilitySource for SplitRootCwdCapabilitySource {
+    fn require_supported(
+        &self,
+        provider: &ProviderRef,
+        _action: SessionPolicyAction,
+    ) -> Result<ProviderCapability, ProviderGatewayError> {
+        let adapter_dialect = match provider.provider_type {
+            ProviderRefType::ClaudeCode => ProviderDialect::ClaudeCodeCliV1,
+            ProviderRefType::Codex => ProviderDialect::CodexCliV1,
+        };
+        Ok(ProviderCapability {
+            provider_type: provider.provider_type,
+            version: "1.0.0".to_string(),
+            adapter_dialect,
+            capability_snapshot_ref: provider.capability_snapshot_ref.clone(),
+            resume_evidence:
+                crate::product::logical_codebase::provider_gateway::ResumeEvidenceState::Confirmed,
+        })
+    }
+}
+
+/// pass-through target resolver：直接返回请求冻结的 target（git-dir 校验由
+/// 生产 resolver 承担，本测试只验证 cwd 重绑分流）。
+struct SplitRootCwdPassThroughResolver;
+
+impl PolicyTargetResolver for SplitRootCwdPassThroughResolver {
+    fn resolve_and_revalidate(
+        &self,
+        request: &SessionLaunchRequest,
+    ) -> Result<PolicyTarget, ProviderGatewayError> {
+        Ok(request.target.clone())
+    }
+}
+
+fn split_root_cwd_availability_gate() -> Arc<ProviderAvailabilityGate> {
+    struct AlwaysHealthy(Arc<ProviderHealthSnapshot>);
+
+    impl ProviderHealthSource for AlwaysHealthy {
+        fn snapshot(&self) -> Arc<ProviderHealthSnapshot> {
+            self.0.clone()
+        }
+
+        fn degraded(&self) -> bool {
+            false
+        }
+    }
+
+    let checked_at = chrono::Utc::now();
+    let snapshot = Arc::new(ProviderHealthSnapshot {
+        schema_version: 1,
+        generation: 1,
+        checked_at,
+        providers: [ProviderName::ClaudeCode, ProviderName::Codex]
+            .into_iter()
+            .map(|provider| ProviderHealthEntry {
+                provider,
+                command: "stub".to_string(),
+                available: true,
+                version: Some("1.0".to_string()),
+                reason_code: None,
+                reason: None,
+                checked_at,
+            })
+            .collect(),
+    });
+    Arc::new(ProviderAvailabilityGate::new(Arc::new(AlwaysHealthy(
+        snapshot,
+    ))))
+}
+
+fn split_root_cwd_gateway(
+    paths: &ProductAppPaths,
+    canonical_root: &std::path::Path,
+    project_id: &str,
+    sync_probe: Arc<SplitRootCwdSyncProbe>,
+) -> LogicalCodebaseProviderGateway {
+    let manifest = LogicalCodebaseManifest::new(project_id, canonical_root.to_path_buf(), vec![]);
+    let policies = AggregatePolicyArtifactStore::new(paths.clone());
+    policies.ensure_bootstrap(&manifest).expect("bootstrap policy");
+    LogicalCodebaseProviderGateway::with_audit(
+        policies,
+        Arc::new(SplitRootCwdCapabilitySource),
+        Arc::new(SplitRootCwdPassThroughResolver),
+        Arc::new(ProviderRegistry::new()),
+        sync_probe,
+        split_root_cwd_availability_gate(),
+        Arc::new(GatewayRunAudit::new()),
+        manifest.provider_context_root.clone(),
+    )
+}
+
+/// Task 2.6：LC split sync 的 AdapterInput 独立 cwd=canonical root、
+/// worktree_path=target 成员；恰一次 sync spawn 经 gateway（run_sync 的 spawn
+/// 前复验以 envelope 冻结 root 为 canonical cwd 权威）。
+#[tokio::test]
+async fn split_sync_gateway_launch_rebinds_cwd_to_canonical_root() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let canonical_root = root.path().to_path_buf();
+    let member = canonical_root.join("member_repo");
+    std::fs::create_dir_all(&member).expect("member dir");
+    let paths = ProductAppPaths::new(canonical_root.join(".aria"));
+    let probe = Arc::new(SplitRootCwdSyncProbe::new());
+    let gateway = split_root_cwd_gateway(&paths, &canonical_root, "project_0001", probe.clone());
+
+    let mut repository = logical_repository();
+    repository.path = member.clone();
+    repository.primary_checkout_id = Some(RepositoryCheckoutId(uuid::Uuid::nil()));
+    let (_, issue, _) = split_prompt_fixture();
+
+    let engine = WorkItemSplitEngine::new(Arc::new(RecordingAdapter::new(Arc::new(
+        AtomicBool::new(false),
+    ))));
+    let lifecycle = LifecycleStore::new(paths.clone());
+    let result = engine
+        .invoke_provider_via_gateway(
+            "root cwd probe",
+            &repository,
+            ProviderName::ClaudeCode,
+            &lifecycle,
+            &issue,
+            &gateway,
+        )
+        .await
+        .expect("split sync gateway launch must complete with the root cwd");
+
+    assert!(
+        !result.run_ref.trim().is_empty(),
+        "provider run must be persisted"
+    );
+    assert_eq!(
+        probe.runs.load(Ordering::SeqCst),
+        1,
+        "exactly one sync adapter spawn through the gateway"
+    );
+    assert_eq!(
+        *probe.cwd_at_runs.lock().expect("split cwd probe"),
+        Some(canonical_root),
+        "sync adapter cwd must be rebound to the canonical lc root"
+    );
+    assert_eq!(
+        *probe.worktree_at_runs.lock().expect("split worktree probe"),
+        Some(member.to_string_lossy().to_string()),
+        "worktree_path must stay the target member checkout"
     );
 }
