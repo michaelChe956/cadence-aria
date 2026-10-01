@@ -1,9 +1,11 @@
 //! post-hoc 越界检测子系统（REQ-COD-01 分层 c 的 Scenario 2 检测部分）。
 //!
 //! 多仓 issue 的每个 provider role run（Coder/Reviewer/rework/auto-retry）启动前，
-//! 采集该 attempt 涉及的**所有成员主 checkout** 的 `git rev-parse HEAD` 与
+//! 采集该 attempt 涉及的**所有 active 成员主 checkout** 的 `git rev-parse HEAD` 与
 //! `git status --porcelain` 快照并持久化；run 结束后（Task 15 统一门）重采比对，
-//! 任一成员主 checkout 的 HEAD 或工作区发生变化即视为越界。
+//! 任一基线内成员主 checkout 的 HEAD 或工作区发生变化即视为越界。D4 检测窗口
+//! = 基线内的 active 成员；manifest 保留的 Removed/Tombstoned 成员身份不进窗口
+//! （其主 checkout 可能已随移除清理），跳过它们不构成对它们的隔离宣称。
 //!
 //! 诚实边界：只监控成员主 checkout 的 HEAD/status。symlink 跳出仓外、`/tmp` 等
 //! 绝对路径写入、provider 运行中的实时越界不属于本模块检测范围（交 C-2 的
@@ -24,7 +26,7 @@ use crate::product::coding_attempt_store::{CodingAttemptStore, StableCode};
 use crate::product::coding_models::CodingExecutionAttempt;
 use crate::product::json_store::{read_json, write_json};
 use crate::product::logical_codebase::{
-    CheckoutAvailability, CheckoutKind, LogicalCodebaseStore, LogicalRepositoryId,
+    CheckoutAvailability, CheckoutKind, LogicalCodebaseStore, LogicalRepositoryId, MemberStatus,
 };
 
 /// 单个成员主 checkout 的不可变快照（HEAD + 工作区 porcelain 状态）。
@@ -45,10 +47,11 @@ pub(crate) struct CrossTargetBaseline {
     pub(crate) member_checkouts: Vec<MemberCheckoutSnapshot>,
 }
 
-/// provider role run 启动前采集并持久化所有成员主 checkout 的越界基线。
+/// provider role run 启动前采集并持久化所有 **active** 成员主 checkout 的越界
+/// 基线（D4 窗口 = active 成员；Removed/Tombstoned 成员不在窗口内）。
 ///
 /// Legacy attempt（`target_snapshot` 为 `None`）不采 baseline，返回空基线且不落盘，
-/// 保持单仓路径现状。
+/// 保持单仓路径现状（单仓跳过 D4）。
 pub(crate) fn capture_cross_target_baseline(
     paths: &ProductAppPaths,
     attempt: &CodingExecutionAttempt,
@@ -86,6 +89,22 @@ pub(crate) fn capture_cross_target_baseline(
 
     let mut member_checkouts = Vec::with_capacity(manifest.member_ids.len());
     for member_id in &manifest.member_ids {
+        // Task 1.7（D4 生产 seam，root-cwd 迁移面）：基线窗口 = 全部 active
+        // 成员的主 checkout。manifest.member_ids 永久保留 Removed/Tombstoned
+        // 成员身份（身份不可抹除），其主 checkout 记录可能已随移除清理——把
+        // 非 active 成员纳入基线既无检测意义（不在本次授权面内），又会把
+        // 「成员已移除」误判为 cross_target_store_failure 使 spawn 前硬失败。
+        // 跳过非 active 成员不是对它的隔离宣称：D4 检测窗口只覆盖基线内的
+        // active 成员。active 成员证据不足（成员记录缺失、Main checkout 不
+        // 唯一、不可用、git 采样失败）依旧 fail-closed——证据不足只能进入
+        // 等待/阻断，绝不折算成「无越界」。
+        let member = authority
+            .load_member(&attempt.project_id, *member_id)
+            .map_err(|_| StableCode::CrossTargetStoreFailure)?
+            .ok_or(StableCode::CrossTargetStoreFailure)?;
+        if member.status != MemberStatus::Active {
+            continue;
+        }
         let main_checkouts: Vec<_> = checkouts
             .iter()
             .filter(|checkout| {
@@ -124,10 +143,12 @@ pub(crate) fn capture_cross_target_baseline(
     Ok(baseline)
 }
 
-/// provider role run 结束后重采各成员主 checkout 并与基线比对。
+/// provider role run 结束后重采各成员主 checkout 并与基线比对（窗口 = 基线内
+/// 的 active 成员快照，capture 时冻结）。
 ///
-/// - 任一成员主 checkout 的 HEAD 或工作区变更 → `cross_target_violation_detected`
-/// - baseline 文件缺失（崩溃重启/丢失）→ `cross_target_baseline_missing`
+/// - 任一基线内成员主 checkout 的 HEAD 或工作区变更 → `cross_target_violation_detected`
+/// - baseline 文件缺失（崩溃重启/丢失）→ `cross_target_baseline_missing`：
+///   证据不足映射为交付等待/阻断，绝不折算成「已隔离、可交付」
 /// - Legacy attempt 不检测，直接放行。
 pub(crate) fn detect_cross_target_violation(
     paths: &ProductAppPaths,
@@ -431,7 +452,7 @@ mod tests {
             start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
             start_claim: None,
         }
-            }
+    }
 
     fn baseline_path(fixture: &Fixture, run_id: &str) -> PathBuf {
         CodingAttemptStore::new(fixture.paths.clone())

@@ -26,11 +26,12 @@ use crate::product::coding_models::provider_config::{
 };
 use crate::product::logical_codebase::provider_gateway::ResumeEvidenceState;
 use crate::product::logical_codebase::{
-    AggregatePolicyArtifactStore, CheckoutAvailability, CheckoutKind, GatewayRunAudit,
-    LogicalCodebaseManifest, LogicalCodebaseProviderGateway, LogicalCodebaseStore,
-    LogicalRepositoryId, PolicyTarget, PolicyTargetResolver, ProviderCapability,
+    AggregatePolicyArtifactStore, CheckoutAvailability, CheckoutKind, CodebaseMemberRecord,
+    GatewayRunAudit, LogicalCodebaseManifest, LogicalCodebaseProviderGateway, LogicalCodebaseStore,
+    LogicalRepositoryId, MemberStatus, PolicyTarget, PolicyTargetResolver, ProviderCapability,
     ProviderCapabilitySource, ProviderDialect, ProviderGatewayError, ProviderRef, ProviderRefType,
-    RepositoryCheckoutId, RepositoryCheckoutRecord, SessionLaunchRequest, SessionPolicyAction,
+    RepositoryCheckoutId, RepositoryCheckoutRecord, RepositorySourceIdentity, RepositoryType,
+    SessionLaunchRequest, SessionPolicyAction,
 };
 use crate::protocol::contracts::{AdapterInput, AdapterOutput, TimeoutStatus};
 
@@ -204,6 +205,34 @@ fn seed_logical_codebase_checkout(store: &CodingAttemptStore, attempt: &CodingEx
     logical_store
         .save_manifest(&attempt.project_id, &manifest)
         .expect("save manifest");
+    // Task 1.7：D4 窗口按成员状态取 active 主 checkout——fixture 补齐 member
+    // 记录（真实流程 manifest 与 member 记录同写；缺失即证据不足 fail-closed）。
+    logical_store
+        .save_member(
+            &attempt.project_id,
+            &CodebaseMemberRecord {
+                logical_repository_id: repository_id,
+                physical_repository_id: "repository_0001".to_string(),
+                alias: "repo".to_string(),
+                role: "repository".to_string(),
+                ordinal: 1,
+                source_identity: RepositorySourceIdentity::from_git_parts(
+                    &worktree,
+                    worktree.join(".git"),
+                    None,
+                ),
+                repo_type: RepositoryType::Unknown,
+                tech_stack: Vec::new(),
+                owner: None,
+                tags: Vec::new(),
+                default_ref: None,
+                checkout_ids: vec![RepositoryCheckoutId(uuid::Uuid::nil())],
+                status: MemberStatus::Active,
+                created_at: "2026-08-09T00:00:00Z".to_string(),
+                updated_at: "2026-08-09T00:00:00Z".to_string(),
+            },
+        )
+        .expect("save member");
     logical_store
         .save_checkout(
             &attempt.project_id,
@@ -591,5 +620,351 @@ fn routing_reference_context_from_policy_maps_envelope_fields() {
             );
         }
         RoutingReferenceContext::Legacy => panic!("expected Logical routing reference context"),
+    }
+}
+
+// ================= Task 1.7：D4 生产 seam（LC coding run 全员基线） =================
+
+/// Task 1.7 fixture：三成员 LC——A（active，target 成员）、B（active，非 target
+/// 成员）、C（Removed，身份仍保留在 manifest.member_ids）。`removed_keeps_checkout`
+/// 控制 C 是否仍留有主 checkout 记录（true=移除后清理前的过渡态，
+/// false=清理后的常态）。
+struct D4MemberFixture {
+    target_checkout: PathBuf,
+    other_active_checkout: PathBuf,
+}
+
+fn seed_d4_member_codebase(
+    store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+    root: &Path,
+    removed_keeps_checkout: bool,
+) -> D4MemberFixture {
+    let logical_store = LogicalCodebaseStore::new(store.paths());
+    let member_a = LogicalRepositoryId(uuid::Uuid::new_v4());
+    let member_b = LogicalRepositoryId(uuid::Uuid::new_v4());
+    let removed_member = LogicalRepositoryId(uuid::Uuid::new_v4());
+    let repo_a = root.join("repo_a");
+    let repo_b = root.join("repo_b");
+    let repo_c = root.join("repo_c");
+    std::fs::create_dir_all(&repo_a).expect("repo_a dir");
+    std::fs::create_dir_all(&repo_b).expect("repo_b dir");
+    std::fs::create_dir_all(&repo_c).expect("repo_c dir");
+    init_test_git_repo(&repo_a);
+    init_test_git_repo(&repo_b);
+    init_test_git_repo(&repo_c);
+
+    logical_store
+        .save_manifest(
+            &attempt.project_id,
+            &LogicalCodebaseManifest::new(
+                &attempt.project_id,
+                store.paths().root().to_path_buf(),
+                vec![member_a, member_b, removed_member],
+            ),
+        )
+        .expect("save manifest");
+
+    let now = "2026-10-01T00:00:00Z".to_string();
+    for (member_id, status, alias, checkout_path) in [
+        (member_a, MemberStatus::Active, "repo_a", &repo_a),
+        (member_b, MemberStatus::Active, "repo_b", &repo_b),
+        (removed_member, MemberStatus::Removed, "repo_c", &repo_c),
+    ] {
+        let source_identity = RepositorySourceIdentity::from_git_parts(
+            checkout_path,
+            checkout_path.join(".git"),
+            None,
+        );
+        let checkout_id = RepositoryCheckoutId(uuid::Uuid::new_v4());
+        let keeps_checkout = removed_keeps_checkout || member_id != removed_member;
+        logical_store
+            .save_member(
+                &attempt.project_id,
+                &CodebaseMemberRecord {
+                    logical_repository_id: member_id,
+                    physical_repository_id: "repository_0001".to_string(),
+                    alias: alias.to_string(),
+                    role: "repository".to_string(),
+                    ordinal: 1,
+                    source_identity,
+                    repo_type: RepositoryType::Unknown,
+                    tech_stack: Vec::new(),
+                    owner: None,
+                    tags: Vec::new(),
+                    default_ref: None,
+                    checkout_ids: if keeps_checkout {
+                        vec![checkout_id]
+                    } else {
+                        Vec::new()
+                    },
+                    status,
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                },
+            )
+            .expect("save member");
+        if !keeps_checkout {
+            continue;
+        }
+        logical_store
+            .save_checkout(
+                &attempt.project_id,
+                &RepositoryCheckoutRecord {
+                    checkout_id,
+                    logical_repository_id: member_id,
+                    physical_repository_id: "repository_0001".to_string(),
+                    kind: CheckoutKind::Main,
+                    canonical_path: checkout_path.clone(),
+                    checkout_path_hash: "sha256:checkout".to_string(),
+                    git_dir_identity: "sha256:git-dir".to_string(),
+                    revision: None,
+                    availability: CheckoutAvailability::Available,
+                    observed_at: now.clone(),
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                },
+            )
+            .expect("save checkout");
+    }
+
+    D4MemberFixture {
+        target_checkout: repo_a,
+        other_active_checkout: repo_b,
+    }
+}
+
+/// D4 seam 探针 adapter：spawn 瞬间读取本次 role run 的 cross-target baseline
+/// （存在性 + 内容快照）并计数 spawn；可选在会话期间向 `drift_target` 写入
+/// 一次越界文件，模拟 provider 写非 target 成员主 checkout。
+struct D4BaselineProbeAdapter {
+    baseline_path: PathBuf,
+    spawns: Arc<std::sync::atomic::AtomicUsize>,
+    baseline_at_spawn: Arc<std::sync::Mutex<Option<serde_json::Value>>>,
+    drift_target: Option<PathBuf>,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for D4BaselineProbeAdapter {
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        self.spawns
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let baseline = std::fs::read_to_string(&self.baseline_path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+        *self.baseline_at_spawn.lock().expect("baseline probe mutex") = baseline;
+        if let Some(drift_target) = &self.drift_target {
+            std::fs::write(drift_target, "out of worktree write\n")
+                .expect("simulated non-target member drift");
+        }
+        let (event_tx, event_rx) = mpsc::channel(4);
+        let (command_tx, _command_rx) = mpsc::channel(4);
+        tokio::spawn(async move {
+            let _ = event_tx
+                .send(ProviderEvent::Completed(
+                    crate::cross_cutting::streaming_provider::ProviderCompletion::from_output(
+                        "d4 probe output".to_string(),
+                        None,
+                        None,
+                    ),
+                ))
+                .await;
+        });
+        Ok(ProviderSession {
+            native_session_id: None,
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+}
+
+/// 以 LC Coder 角色驱动一次真实 provider stream：policy 经
+/// `resolve_launch_policy_for_role` resolve，input 经生产工厂
+/// `coder_retry_cycle_streaming_input` 构造，spawn 唯一经 gateway
+/// （`run_provider_stream_invocation` = coding/retry cycle 的流入口）。
+#[allow(clippy::type_complexity)]
+async fn drive_logical_coding_run(
+    store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+    drift_target: Option<PathBuf>,
+) -> (
+    ProviderInvocationOutcome,
+    Arc<std::sync::atomic::AtomicUsize>,
+    Arc<std::sync::Mutex<Option<serde_json::Value>>>,
+    Arc<GatewayRunAudit>,
+) {
+    override_coder_to_claude_code(store, attempt);
+    let audit = Arc::new(GatewayRunAudit::new());
+    let role_run = store
+        .create_role_run(
+            attempt,
+            CodingExecutionStage::Coding,
+            CodingProviderRole::Coder,
+            CodingRoleRunTrigger::Initial,
+            None,
+        )
+        .expect("create role run");
+    let baseline_path = CodingAttemptStore::new(store.paths())
+        .attempt_cross_target_baselines_path(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &role_run.id,
+        )
+        .expect("baseline path");
+    let probe = Arc::new(D4BaselineProbeAdapter {
+        baseline_path,
+        spawns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        baseline_at_spawn: Arc::new(std::sync::Mutex::new(None)),
+        drift_target,
+    });
+    let mut registry = ProviderRegistry::new();
+    registry.register(ProviderName::ClaudeCode, probe.clone());
+    let gateway = build_gateway_with_registry(
+        &store.paths(),
+        &attempt.project_id,
+        Arc::new(registry),
+        audit.clone(),
+    );
+    let (event_tx, _event_rx) = mpsc::channel(16);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx)
+        .with_logical_provider_gateway(Arc::new(gateway));
+
+    let worktree = attempt.worktree_path.clone().expect("worktree");
+    let permission_mode =
+        role_permission_mode_for_attempt(store, attempt, CodingProviderRole::Coder)
+            .expect("permission mode");
+    let (legacy_input, provider_input) = coder_retry_cycle_streaming_input(
+        &ProviderName::ClaudeCode,
+        "d4 seam probe".to_string(),
+        &worktree,
+        engine.attempt_provider_stream_log_dir(attempt),
+        &attempt.id,
+        None,
+        permission_mode,
+    );
+    let policy = engine
+        .resolve_launch_policy_for_role(attempt, CodingProviderRole::Coder, &worktree)
+        .expect("policy resolves")
+        .expect("logical attempt + gateway must produce policy");
+    let validated_input = ValidatedStreamingProviderInput::new(provider_input.clone(), policy);
+    let (_command_tx, mut command_rx) = mpsc::channel::<CodingRunnerCommand>(1);
+    drop(_command_tx);
+    let outcome = engine
+        .run_provider_stream_invocation(CodingProviderStreamRun {
+            attempt,
+            node_id: "d4-seam-probe-node",
+            role_run: Some(&role_run),
+            provider: probe.as_ref(),
+            legacy_input: &legacy_input,
+            input: provider_input,
+            provider_name: &ProviderName::ClaudeCode,
+            provider_role: CodingProviderRole::Coder,
+            command_rx: &mut command_rx,
+            allow_legacy_stream_fallback: false,
+            timeout: None,
+            timeout_reason_code: None,
+            suppress_failure_side_effects: false,
+            validated_input: Some(validated_input),
+        })
+        .await;
+    (
+        outcome,
+        probe.spawns.clone(),
+        probe.baseline_at_spawn.clone(),
+        audit,
+    )
+}
+
+#[tokio::test]
+async fn logical_coding_run_captures_all_member_main_baselines_before_spawn() {
+    let (root, store, attempt) = running_attempt_with_worktree();
+    // Removed 成员仍保留主 checkout（移除后清理前的过渡态）。
+    seed_d4_member_codebase(&store, &attempt, root.path(), true);
+    let logical_attempt = with_target_snapshot(&store, &attempt);
+
+    let (outcome, spawns, baseline_at_spawn, audit) =
+        drive_logical_coding_run(&store, &logical_attempt, None).await;
+
+    assert!(
+        matches!(outcome, ProviderInvocationOutcome::Completed(_)),
+        "logical coding run must complete through the gateway seam, got {outcome:?}"
+    );
+    assert_eq!(
+        spawns.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "exactly one provider spawn for the coding run"
+    );
+    assert_eq!(
+        audit.stream_launches(),
+        1,
+        "the spawn must be counted by the gateway run audit"
+    );
+    let baseline = baseline_at_spawn
+        .lock()
+        .expect("baseline probe mutex")
+        .clone()
+        .expect("cross-target baseline must be persisted before the provider spawns");
+    let snapshots = baseline["member_checkouts"]
+        .as_array()
+        .expect("baseline member_checkouts array");
+    assert_eq!(
+        snapshots.len(),
+        2,
+        "baseline window = 全部 active 成员主 checkout（Removed 成员不在 D4 窗口）"
+    );
+    for snapshot in snapshots {
+        let head = snapshot["head_revision"].as_str().unwrap_or_default();
+        assert!(
+            !head.trim().is_empty(),
+            "each active member snapshot must carry a real HEAD revision"
+        );
+        assert_eq!(
+            snapshot["porcelain_status"].as_str(),
+            Some(""),
+            "clean member checkout must record an empty porcelain status"
+        );
+    }
+}
+
+#[tokio::test]
+async fn logical_coding_run_blocks_member_main_checkout_drift() {
+    let (root, store, attempt) = running_attempt_with_worktree();
+    // Removed 成员的主 checkout 记录已清理（移除后的常态）。
+    let members = seed_d4_member_codebase(&store, &attempt, root.path(), false);
+    let logical_attempt = with_target_snapshot(&store, &attempt);
+
+    // 会话期间向非 target active 成员主 checkout 写入一次（模拟越界写）。
+    let (outcome, spawns, _baseline, _audit) = drive_logical_coding_run(
+        &store,
+        &logical_attempt,
+        Some(members.other_active_checkout.join("trespass.txt")),
+    )
+    .await;
+
+    assert!(
+        matches!(outcome, ProviderInvocationOutcome::Completed(_)),
+        "coding run must spawn and complete despite removed-member checkout cleanup, got {outcome:?}"
+    );
+    assert_eq!(
+        spawns.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "drift must happen inside a real spawned run, not a pre-spawn capture failure"
+    );
+
+    let (event_tx, _event_rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx);
+    let result = engine
+        .execute_review_request(&logical_attempt, "origin", "feat: d4 drift")
+        .await;
+    match result {
+        Err(CodingWorkspaceEngineError::CrossTargetDeliveryBlocked(code)) => {
+            assert_eq!(code, "cross_target_violation_detected");
+        }
+        other => panic!("expected CrossTargetDeliveryBlocked, got {other:?}"),
     }
 }
