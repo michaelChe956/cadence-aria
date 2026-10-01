@@ -56,10 +56,12 @@ use cadence_aria::product::logical_codebase::{
     AggregateInitializationOperationStore, AggregateInitializationStepKind,
     AggregatePolicyArtifactStore, AggregatePreflightService, AggregatePreflightSnapshot,
     AggregateProviderTurnDriver, AggregateSkillsPreparation, CheckoutAvailability, CheckoutKind,
+    CodebaseMemberRecord,
     GatewayRunAudit, LogicalCodebaseManifest, LogicalCodebaseProviderGateway, LogicalCodebaseStore,
-    LogicalRepositoryId, MachineSkillsPreparation, PolicyTarget, PolicyTargetResolver,
+    LogicalRepositoryId, MachineSkillsPreparation, MemberStatus, PolicyTarget, PolicyTargetResolver,
     ProviderCapability, ProviderCapabilitySource, ProviderDialect, ProviderGatewayError,
     ProviderRef, ProviderRefType, RepositoryCheckoutId, RepositoryCheckoutRecord,
+    RepositorySourceIdentity, RepositoryType,
     SessionLaunchRequest,
 };
 use cadence_aria::product::models::{ProviderName, WorkspaceRolePermissionModes};
@@ -908,7 +910,8 @@ fn with_target_snapshot(
     logical
 }
 
-/// 播种 logical manifest + 主 checkout（供 `capture_cross_target_baseline`）。
+/// 播种 logical manifest + active 成员记录 + 主 checkout（供
+/// `capture_cross_target_baseline` 的 D4 成员基线窗口判定）。
 fn seed_logical_codebase_checkout(store: &CodingAttemptStore, attempt: &CodingExecutionAttempt) {
     let target = attempt.target_snapshot.as_ref().expect("target snapshot");
     let logical_store = LogicalCodebaseStore::new(store.paths());
@@ -920,6 +923,37 @@ fn seed_logical_codebase_checkout(store: &CodingAttemptStore, attempt: &CodingEx
     logical_store
         .save_manifest(&attempt.project_id, &manifest)
         .expect("save manifest");
+    // Task 1.7（D4 生产 seam）：基线窗口按成员状态取 active 主 checkout。
+    // 真实流程 manifest 与 member 记录同写（coding_attempt_repository /
+    // migration_executor）；fixture 缺失 member 记录会被 seam 判为证据不足
+    // fail-closed（cross_target_store_failure），与 lib 侧
+    // `provider_gateway_validated_input` 的 fixture 播种保持同构。
+    logical_store
+        .save_member(
+            &attempt.project_id,
+            &CodebaseMemberRecord {
+                logical_repository_id: target.logical_repository_id,
+                physical_repository_id: target.physical_repository_id.clone(),
+                alias: "repo".to_string(),
+                role: "repository".to_string(),
+                ordinal: 1,
+                source_identity: RepositorySourceIdentity::from_git_parts(
+                    &target.canonical_path,
+                    target.canonical_path.join(".git"),
+                    None,
+                ),
+                repo_type: RepositoryType::Unknown,
+                tech_stack: Vec::new(),
+                owner: None,
+                tags: Vec::new(),
+                default_ref: None,
+                checkout_ids: vec![target.checkout_id],
+                status: MemberStatus::Active,
+                created_at: "2026-08-13T00:00:00Z".to_string(),
+                updated_at: "2026-08-13T00:00:00Z".to_string(),
+            },
+        )
+        .expect("save member");
     logical_store
         .save_checkout(
             &attempt.project_id,
