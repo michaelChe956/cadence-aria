@@ -116,6 +116,14 @@ struct GatewayFixture {
 }
 
 fn gateway_fixture() -> GatewayFixture {
+    gateway_fixture_with_adapter(Arc::new(CountingStreamingAdapter {
+        starts: Arc::new(AtomicUsize::new(0)),
+    }))
+}
+
+/// Task 2.8：允许注入自定义 streaming adapter（捕获 input 断言 cwd）的
+/// gateway fixture 变体；权威记录拓扑与 `gateway_fixture` 一致。
+fn gateway_fixture_with_adapter(adapter: Arc<dyn StreamingProviderAdapter>) -> GatewayFixture {
     let root = tempfile::tempdir().expect("temporary product root");
     let paths = ProductAppPaths::new(root.path().join(".aria"));
     crate::product::project_store::ProjectStore::new(paths.clone())
@@ -126,12 +134,7 @@ fn gateway_fixture() -> GatewayFixture {
         .expect("create project");
 
     let mut registry = ProviderRegistry::new();
-    registry.register(
-        ProviderName::ClaudeCode,
-        Arc::new(CountingStreamingAdapter {
-            starts: Arc::new(AtomicUsize::new(0)),
-        }),
-    );
+    registry.register(ProviderName::ClaudeCode, adapter);
 
     let factory = LogicalCodebaseGatewayFactory::new(
         paths.clone(),
@@ -214,6 +217,155 @@ fn workspace_session(repository_path: std::path::PathBuf) -> WorkspaceSession {
         provider_conversations: vec![],
         repository_path: Some(repository_path),
     }
+}
+
+/// Task 2.8：指定成员 checkout 作为 `session.repository_path`（target 锚）的
+/// engine 构造——LC 会话 cwd/root 断言用。
+fn workspace_engine_with_repository_path(
+    fixture: &GatewayFixture,
+    repository_path: std::path::PathBuf,
+) -> WorkspaceEngine {
+    let (event_tx, _event_rx) = mpsc::channel::<crate::product::workspace_engine::EngineEvent>(8);
+    let session = workspace_session(repository_path);
+    WorkspaceEngine::new(
+        Arc::new(CheckpointStore::new(
+            fixture.paths.root().join("checkpoints"),
+        )),
+        event_tx,
+        session,
+    )
+    .with_logical_provider_gateway(fixture.gateway.clone())
+}
+
+/// Task 2.8：记录启动 input 并立即完成的 capture adapter（gateway registry 内）。
+struct CapturingStreamingAdapter {
+    inputs: mpsc::UnboundedSender<StreamingProviderInput>,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for CapturingStreamingAdapter {
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let _ = self.inputs.send(input);
+        let (event_tx, event_rx) = mpsc::channel(4);
+        let (command_tx, _command_rx) = mpsc::channel(1);
+        tokio::spawn(async move {
+            let _ = event_tx
+                .send(crate::cross_cutting::streaming_provider::ProviderEvent::Completed(
+                    crate::cross_cutting::streaming_provider::ProviderCompletion::plain(
+                        "{}".to_string(),
+                        None,
+                    ),
+                ))
+                .await;
+        });
+        Ok(ProviderSession {
+            native_session_id: None,
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+}
+
+/// Task 2.8（REQ-PLN-03，planning snapshot 贯穿）：StaleContext 重建（B3）把
+/// input worktree 换成 rebuilt.cwd（聚合根）——`start_work_item_plan_author`
+/// 必须把 input 的独立 cwd 重绑 envelope 冻结的 root，spawn 前复验不得因
+/// 「input root vs envelope 成员 cwd」漂移而拒绝重建 run；worktree 字段
+/// 原样透传（target 语义）。
+#[tokio::test]
+async fn start_work_item_plan_author_rebinds_input_cwd_to_envelope_root_for_rebuild() {
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let fixture = gateway_fixture_with_adapter(Arc::new(CapturingStreamingAdapter {
+        inputs: input_tx,
+    }));
+    let member = fixture.aggregate_root.join("member-checkout");
+    std::fs::create_dir_all(&member).expect("member checkout under aggregate root");
+    let engine = workspace_engine_with_repository_path(&fixture, member.clone());
+    let launch = resolve_plan_author_launch(&engine, None, None).expect("resolve logical launch");
+
+    // rebuild 形态：worktree=rebuilt.cwd=聚合根（provider_run.rs B3 分支），
+    // working_directory 未注入（None → 旧字段回填 worktree）。
+    let input = streaming_input(fixture.aggregate_root.clone());
+    let session = start_work_item_plan_author(
+        launch,
+        Arc::new(CapturingStreamingAdapter {
+            inputs: mpsc::unbounded_channel().0,
+        }),
+        input,
+        CancellationToken::new(),
+    )
+    .await;
+
+    assert!(
+        session.is_ok(),
+        "rebuild 形态启动不得被 cwd 漂移拒绝: {:?}",
+        session.as_ref().err()
+    );
+    let captured = tokio::time::timeout(std::time::Duration::from_secs(1), input_rx.recv())
+        .await
+        .expect("capture adapter input")
+        .expect("captured input");
+    let canonical_root = std::fs::canonicalize(&fixture.aggregate_root).unwrap();
+    assert_eq!(
+        captured.working_directory.as_deref(),
+        Some(canonical_root.as_path()),
+        "spawn cwd 必须重绑 envelope 冻结的 canonical root，got: {:?}",
+        captured.working_directory
+    );
+    assert_eq!(
+        captured.working_dir, fixture.aggregate_root,
+        "rebuild worktree（rebuilt.cwd）原样透传（target 语义）"
+    );
+}
+
+/// Task 2.8（REQ-PLN-01/07）：正常（非重建）plan author input 的 worktree 是
+/// 成员 checkout——`start_work_item_plan_author` 同样必须把独立 cwd 冻结到
+/// envelope root，provider 不得以成员 checkout 为 cwd 启动。
+#[tokio::test]
+async fn start_work_item_plan_author_binds_normal_input_cwd_to_envelope_root() {
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let fixture = gateway_fixture_with_adapter(Arc::new(CapturingStreamingAdapter {
+        inputs: input_tx,
+    }));
+    let member = fixture.aggregate_root.join("member-checkout");
+    std::fs::create_dir_all(&member).expect("member checkout under aggregate root");
+    let engine = workspace_engine_with_repository_path(&fixture, member.clone());
+    let launch = resolve_plan_author_launch(&engine, None, None).expect("resolve logical launch");
+
+    let input = streaming_input(member.clone());
+    let session = start_work_item_plan_author(
+        launch,
+        Arc::new(CapturingStreamingAdapter {
+            inputs: mpsc::unbounded_channel().0,
+        }),
+        input,
+        CancellationToken::new(),
+    )
+    .await;
+
+    assert!(
+        session.is_ok(),
+        "normal 形态启动失败: {:?}",
+        session.as_ref().err()
+    );
+    let captured = tokio::time::timeout(std::time::Duration::from_secs(1), input_rx.recv())
+        .await
+        .expect("capture adapter input")
+        .expect("captured input");
+    let canonical_root = std::fs::canonicalize(&fixture.aggregate_root).unwrap();
+    assert_eq!(
+        captured.working_directory.as_deref(),
+        Some(canonical_root.as_path()),
+        "spawn cwd 必须冻结 canonical root（非成员 checkout），got: {:?}",
+        captured.working_directory
+    );
+    assert_eq!(
+        captured.working_dir, member,
+        "正常形态 worktree 保持成员 checkout"
+    );
 }
 
 fn workspace_engine(fixture: &GatewayFixture, with_gateway: bool) -> WorkspaceEngine {
@@ -541,4 +693,34 @@ async fn logical_plan_validate_failure_is_reported_by_handler() {
         WsOutMessage::Error { ref message }
             if message.starts_with("logical plan launch failed:")
     ));
+}
+
+/// Task 2.8（REQ-PLN-07）：planning author launch 的 cwd 必须是 gateway 冻结的
+/// canonical 聚合根，成员 checkout（`session.repository_path`）只作 target——
+/// 禁止以 target worktree 覆盖 root cwd，也不得回退成员 cwd。
+#[test]
+fn logical_plan_launch_uses_root_cwd_not_member_repository_path() {
+    let fixture = gateway_fixture();
+    let member = fixture.aggregate_root.join("member-checkout");
+    std::fs::create_dir_all(&member).expect("member checkout under aggregate root");
+    let engine = workspace_engine_with_repository_path(&fixture, member.clone());
+
+    let launch = resolve_plan_author_launch(&engine, None, None).expect("resolve logical launch");
+    let PlanAuthorLaunch::Logical(plan) = &launch else {
+        panic!("logical session must resolve a Logical launch");
+    };
+    let canonical_root = std::fs::canonicalize(&fixture.aggregate_root).unwrap();
+    assert_eq!(
+        plan.launch.working_dir, canonical_root,
+        "cwd 必须是 gateway 冻结的 canonical 聚合根"
+    );
+    assert_eq!(
+        plan.launch.target_worktree, member,
+        "target worktree 独立保持成员 checkout"
+    );
+    let request = plan.launch.planning_request().expect("planning request");
+    assert_eq!(request.working_directory, canonical_root, "envelope cwd 冻结 root");
+    assert_eq!(request.target.worktree, member, "target 锚定成员 checkout");
+    assert_eq!(request.readable_roots, vec![canonical_root], "readable roots=root");
+    assert!(request.writable_roots.is_empty(), "planning 只读写根为空");
 }

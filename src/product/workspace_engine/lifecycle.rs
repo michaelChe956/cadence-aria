@@ -433,11 +433,12 @@ impl WorkspaceEngine {
         self.logical_provider_gateway.clone()
     }
 
-    /// 逻辑会话的 planning launch 标识:(project_id, run cwd)。
+    /// 逻辑会话的 planning launch 标识:(project_id, target worktree 锚)。
     ///
     /// 仅当注入 `logical_provider_gateway` 且 `session.repository_path` 存在时返回
-    /// `Some`。`cwd` 取既有字段 `session.repository_path`(不新造数据源)——对逻辑
-    /// WorkItemPlan 该字段是选中成员 checkout(见 gateway_start.rs 的 deferred 说明)。
+    /// `Some`。第二元素是成员 checkout（target 锚）——Task 2.8 起 provider cwd
+    /// 不再取该值，恒由 gateway 冻结的 canonical root（`authority_root()`）提供
+    /// （见 gateway_start.rs）；本方法保留为「是否逻辑会话」谓词与 target 锚来源。
     pub fn logical_planning_launch(&self) -> Option<(String, std::path::PathBuf)> {
         self.logical_provider_gateway.as_ref()?;
         let cwd = self.session.repository_path.clone()?;
@@ -462,66 +463,6 @@ impl WorkspaceEngine {
         self.session.repository_path = repository_path;
     }
 
-    /// Story/Design author/revision/review prompt 注入用的路由引用上下文。
-    ///
-    /// 逻辑会话(已注入 gateway 且有 planning cwd)时经 gateway `validate` 冻结
-    /// `PlanningReadOnly` envelope 后派生 `Logical`;无 gateway/无 cwd/validate 失败
-    /// 一律回落 `Legacy`(与改造前 `_legacy()` 字节一致)。C-2:投影 request 的
-    /// provider ref 由 `session.author_provider` 经集中映射派生——author 配置
-    /// Codex 时以 Codex ref 校验(被 REQ-ENV-05 路由级硬门阻断后回落 Legacy)，
-    /// Pi/KimiCode 等无 gateway dialect 的 provider直接回落 Legacy(prompt 路由
-    /// 引用不假装 Logical；真实启动在 gateway 集中映射处 fail-closed)。
-    ///
-    /// 只用于 prompt 路由引用分流,不改变 provider 启动路径(Task 4 范围)。
-    pub(crate) fn routing_reference_context(
-        &self,
-    ) -> crate::product::cadence_skills::routing_reference::RoutingReferenceContext {
-        use crate::product::cadence_skills::routing_reference::{
-            RoutingReferenceContext, routing_reference_context_from_policy,
-        };
-        use crate::product::logical_codebase::{PolicyTarget, ProviderRef, SessionLaunchRequest};
-
-        let Some(gateway) = self.logical_provider_gateway() else {
-            return RoutingReferenceContext::Legacy;
-        };
-        let Some((project_id, working_dir)) = self.logical_planning_launch() else {
-            return RoutingReferenceContext::Legacy;
-        };
-        // 镜像 factory 的 canonicalize 语义:aggregate_root target worktree 用
-        // canonicalize 后形态,失败回退原值(resolver 会再 canonicalize 复核)。
-        let target_worktree =
-            std::fs::canonicalize(&working_dir).unwrap_or_else(|_| working_dir.clone());
-        // C-2:provider ref 随 session.author_provider;不支持的 provider 回落
-        // Legacy(启动路径在集中映射处 fail-closed,此处仅 prompt 路由引用)。
-        let provider =
-            ProviderRef::from_provider_name(&self.session.author_provider, "cap_managed_snapshot");
-        let request = match provider {
-            Ok(provider) => SessionLaunchRequest::planning(
-                project_id,
-                provider,
-                PolicyTarget::aggregate_root(target_worktree),
-                vec![working_dir],
-                "sha256:managed-config-artifact",
-            ),
-            Err(error) => {
-                tracing::warn!(
-                    %error,
-                    "workspace_engine routing_reference_context: author provider has no gateway dialect, falling back to Legacy"
-                );
-                return RoutingReferenceContext::Legacy;
-            }
-        };
-        match gateway.validate(request) {
-            Ok(policy) => routing_reference_context_from_policy(&policy),
-            Err(error) => {
-                tracing::warn!(
-                    %error,
-                    "workspace_engine routing_reference_context: gateway validate failed, falling back to Legacy"
-                );
-                RoutingReferenceContext::Legacy
-            }
-        }
-    }
 
     pub fn pending_author_choice_request_message(&self) -> Option<WsOutMessage> {
         let pending = self.pending_author_choice.as_ref()?;
@@ -1196,3 +1137,4 @@ impl WorkspaceEngine {
         Ok(())
     }
 }
+include!("lifecycle/routing_reference.inc.rs");

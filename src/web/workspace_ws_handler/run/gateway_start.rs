@@ -4,14 +4,14 @@
 //! gateway `validate` + `start_streaming` 启动并留 audit;传统单仓/未注入 gateway
 //! 时保持原 `provider.start` 路径(Legacy 零变化)。
 //!
-//! 关于 target 语义(controller 裁决 3,deferred 说明):
-//! - 正常逻辑 WorkItemPlan run 的 cwd 是选中成员 checkout(不是 `provider_context_root`
-//!   聚合根)——这是 B 阶段既有行为。gateway spawn 前复验强制 `input.working_dir ==
-//!   target.worktree`,因此 launch target 必须锚定 run 的实际 working_dir。
-//! - 能便捷取得 resolved 逻辑仓库身份(logical_repository_id + checkout_id)时用
-//!   `PolicyTarget::checkout`(带真实身份的成员 checkout 锚定,享受 git-dir identity
-//!   防护);否则用 `PolicyTarget::aggregate_root(working_dir)`。
-//! - 「聚合根只读启动」的契约语义偏差是 B 阶段遗留,不在 T10a 范围纠正,记 deferred。
+//! Task 2.8（REQ-PLN-01/07，planning snapshot 贯穿）——原 B 阶段 deferred 的
+//! 「run cwd=成员 checkout」已裁决纠正:
+//! - provider spawn cwd 恒为 gateway 冻结的 canonical 聚合根（manifest
+//!   `provider_context_root`，双工厂 root assertion 保证与登记/聚合投影一致）；
+//! - target 独立传递:resolved 逻辑身份(logical_repository_id + checkout_id)成对
+//!   时用 `PolicyTarget::checkout`(带真实身份的成员 checkout 锚定,享受 git-dir
+//!   identity 防护);否则用 `PolicyTarget::aggregate_root(target_worktree)`。
+//!   禁止以 target worktree 覆盖 root cwd,也不得回退成员 cwd。
 //!
 //! T3(裁决 A):planning author 的 `ValidatedSessionLaunchPolicy` 前移到 prompt 构建
 //! 之前 resolve(`resolve_plan_author_launch`),使 work_item_split_engine 的 outline/
@@ -53,8 +53,12 @@ use crate::product::workspace_engine::WorkspaceEngine;
 pub(crate) struct LogicalPlanLaunch {
     pub gateway: Arc<LogicalCodebaseProviderGateway>,
     pub project_id: String,
-    /// run 的实际 cwd(也是 `input.working_dir`)。gateway target 必须等于它。
+    /// provider spawn cwd：gateway 冻结的 canonical 聚合根（Task 2.8，
+    /// REQ-PLN-07 唯一来源；禁止以成员 checkout/target worktree 覆盖）。
     pub working_dir: PathBuf,
+    /// target worktree（成员 checkout，`session.repository_path` 注入）。
+    /// cwd 与 target 显式分离；身份不可得时 target 锚仍取该路径。
+    pub target_worktree: PathBuf,
     /// resolved 逻辑仓库身份(可选)。两者都有时用 checkout target,否则 aggregate_root。
     pub logical_repository_id: Option<String>,
     pub checkout_id: Option<String>,
@@ -64,17 +68,17 @@ pub(crate) struct LogicalPlanLaunch {
 }
 
 impl LogicalPlanLaunch {
-    /// 组装 planning 只读 `SessionLaunchRequest`。target 语义见文件头说明;
-    /// provider ref 由 `author_provider` 经集中映射派生,不支持的 provider 显式
-    /// 返回 `UnsupportedCapability` 而非静默回退 Claude(C-2)。
+    /// 组装 planning 只读 `SessionLaunchRequest`（cwd=root、target=成员锚定，
+    /// 见文件头 Task 2.8 说明）;provider ref 由 `author_provider` 经集中映射派生,
+    /// 不支持的 provider 显式返回 `UnsupportedCapability` 而非静默回退 Claude(C-2)。
     pub(crate) fn planning_request(&self) -> Result<SessionLaunchRequest, ProviderGatewayError> {
         let target = match (&self.logical_repository_id, &self.checkout_id) {
             (Some(logical_repository_id), Some(checkout_id)) => PolicyTarget::checkout(
                 logical_repository_id.clone(),
                 checkout_id.clone(),
-                self.working_dir.clone(),
+                self.target_worktree.clone(),
             ),
-            _ => PolicyTarget::aggregate_root(self.working_dir.clone()),
+            _ => PolicyTarget::aggregate_root(self.target_worktree.clone()),
         };
 
         Ok(SessionLaunchRequest {
@@ -85,8 +89,9 @@ impl LogicalPlanLaunch {
             )?,
             action: SessionPolicyAction::PlanningReadOnly,
             target,
-            // Task 2.5：独立 cwd 字段；现状映射 run cwd（==target，等式不变），
-            // LC root≠target 的注入归 Task 2.2。
+            // Task 2.8（REQ-PLN-01/07）：cwd 恒为 canonical root（≠成员
+            // target），由结构体字面量显式提供——`SessionLaunchRequest::planning`
+            // 的 cwd==target 默认仅适用单仓形态。
             working_directory: self.working_dir.clone(),
             readable_roots: vec![self.working_dir.clone()],
             writable_roots: Vec::new(),
@@ -129,23 +134,28 @@ impl PlanAuthorLaunch {
 }
 
 /// 组装逻辑会话 launch(gateway 已注入时);非逻辑会话/未注入 gateway 时 `None`。
+/// Task 2.8：cwd 取 gateway 冻结的 canonical root（`authority_root()`，与
+/// manifest/登记投影 canonical 一致由双工厂 assertion 保证），成员 checkout
+/// （`logical_planning_launch` 的 repository_path）只作 target 锚。
 pub(crate) fn logical_plan_launch_for(
     engine: &WorkspaceEngine,
     logical_repository_id: Option<String>,
     checkout_id: Option<String>,
 ) -> Option<LogicalPlanLaunch> {
-    engine.logical_provider_gateway().and_then(|gateway| {
-        engine
-            .logical_planning_launch()
-            .map(|(project_id, working_dir)| LogicalPlanLaunch {
-                gateway,
-                project_id,
-                working_dir,
-                logical_repository_id,
-                checkout_id,
-                // C-2:provider 身份唯一来源于 session 配置。
-                author_provider: engine.session().author_provider.clone(),
-            })
+    let gateway = engine.logical_provider_gateway()?;
+    let (project_id, target_worktree) = engine.logical_planning_launch()?;
+    Some(LogicalPlanLaunch {
+        // Task 2.8：cwd 唯一来源是 gateway 冻结的 canonical root——不读
+        // session.repository_path（成员 checkout 只作 target），杜绝成员 cwd
+        // fallback（REQ-PLN-07）。
+        working_dir: gateway.authority_root().to_path_buf(),
+        gateway,
+        project_id,
+        target_worktree,
+        logical_repository_id,
+        checkout_id,
+        // C-2:provider 身份唯一来源于 session 配置。
+        author_provider: engine.session().author_provider.clone(),
     })
 }
 
@@ -178,7 +188,7 @@ pub(crate) fn resolve_plan_author_launch(
 pub(crate) async fn start_work_item_plan_author(
     launch: PlanAuthorLaunch,
     provider: Arc<dyn StreamingProviderAdapter>,
-    input: StreamingProviderInput,
+    mut input: StreamingProviderInput,
     cancel: CancellationToken,
 ) -> Result<ProviderSession, ProviderAdapterError> {
     let PlanAuthorLaunch::Logical(plan) = launch else {
@@ -186,6 +196,12 @@ pub(crate) async fn start_work_item_plan_author(
     };
     let plan = *plan;
 
+    // Task 2.8（REQ-PLN-03，planning snapshot 贯穿）：input 的独立 cwd 重绑
+    // envelope 冻结的 canonical root——cwd/target 分离贯穿正常 run（worktree=
+    // 成员 checkout）与 B3 StaleContext 重建 run（worktree=rebuilt.cwd=root），
+    // spawn 前复验恒以 envelope root 为准，`input.working_dir` 保持 target
+    // 语义原样透传（与 2.1 author 链 `provider_drive.rs` 的重绑同型）。
+    input.working_directory = Some(plan.validated.envelope().working_directory.clone());
     let validated_input = ValidatedStreamingProviderInput::new(input, plan.validated);
 
     plan.launch

@@ -291,6 +291,17 @@ mod tests {
             index_store.replace_active("project_0001", index).unwrap();
         }
 
+        /// Task 2.8（REQ-PLN-03）：模拟聚合根迁移——manifest
+        /// `provider_context_root` 换新根（成员/索引/政策 digest 全不变）。
+        /// cwd 维度冻结进 planning snapshot 并参与 access fingerprint，
+        /// 根漂移必须触发 StaleContext 重建，不得以旧 cwd 续接旧 session。
+        fn change_manifest_root(&self) {
+            let store = LogicalCodebaseStore::new(self.paths.clone());
+            let mut manifest = store.load_manifest("project_0001").unwrap().unwrap();
+            manifest.provider_context_root = self.temp.path().join("moved-aggregate-root");
+            store.save_manifest("project_0001", &manifest).unwrap();
+        }
+
         fn member_record(
             &self,
             id: LogicalRepositoryId,
@@ -892,5 +903,38 @@ mod tests {
         // 与语义 tool_policy 叠加共存）。
         assert_eq!(launch.envelope().action, SessionPolicyAction::PlanningReadOnly);
         assert!(launch.envelope().writable_roots.is_empty());
+    }
+
+    #[test]
+    fn manifest_root_change_triggers_fingerprint_drift() {
+        // Task 2.8（REQ-PLN-03）：canonical working directory 冻结进 planning
+        // snapshot 并参与 access fingerprint——聚合根迁移（成员/checkout/policy/
+        // index 全不变）也必须拒绝沿用旧 session（StaleContext），不得继续以
+        // 旧 cwd resume 或静默换根续接。
+        let mut fixture = resolver_fixture();
+        fixture.write_active_manifest_index_and_policy();
+        let first = fixture
+            .resolver()
+            .build("project_0001", "issue_0001", &[])
+            .unwrap();
+        assert_eq!(first.cwd, fixture.aggregate_root());
+        // Task 2.8（REQ-PLN-03）：cwd 冻结进 snapshot（context 的唯一事实来源）。
+        assert_eq!(first.snapshot.working_directory, fixture.aggregate_root());
+
+        let same = fixture
+            .resolver()
+            .resume("project_0001", "issue_0001")
+            .unwrap();
+        assert!(matches!(same, ResumeDecision::SameContext(_)));
+
+        fixture.change_manifest_root();
+        let stale = fixture
+            .resolver()
+            .resume("project_0001", "issue_0001")
+            .unwrap();
+        assert!(
+            matches!(stale, ResumeDecision::StaleContext { .. }),
+            "聚合根迁移必须触发 planning snapshot 重建"
+        );
     }
 }

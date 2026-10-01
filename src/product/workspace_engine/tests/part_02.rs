@@ -683,6 +683,7 @@ fn save_planning_snapshot(app_paths: &ProductAppPaths, project_id: &str, issue_i
             aggregate_index_id: "agg_index_0001".to_string(),
             index_revision: 1,
             policy_digest: "policy_0001".to_string(),
+            working_directory: std::path::PathBuf::new(),
             access_fingerprint: String::new(),
             invalidation: None,
             captured_at: "2026-07-01T00:00:00Z".to_string(),

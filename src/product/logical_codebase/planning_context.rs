@@ -26,6 +26,12 @@ pub struct PlanningContextSnapshot {
     pub aggregate_index_id: String,
     pub index_revision: u64,
     pub policy_digest: String,
+    /// canonical working directory（manifest `provider_context_root`）——
+    /// Task 2.8（REQ-PLN-03）：cwd 维度冻结进快照并参与 access fingerprint，
+    /// 聚合根迁移触发 StaleContext 重建。serde 允许缺失（旧快照读取后为空
+    /// 路径，与重算指纹不等 → 一次性 supersede，与 cwd 维度升级语义一致）。
+    #[serde(default)]
+    pub working_directory: std::path::PathBuf,
     /// 冻结后由 access_fingerprint_value() 写入；serde 允许缺失以便旧文件读取后补齐。
     #[serde(default)]
     pub access_fingerprint: String,
@@ -36,10 +42,12 @@ pub struct PlanningContextSnapshot {
 }
 
 impl PlanningContextSnapshot {
-    /// 确定性指纹：membership/index revision + policy digest + 成员指纹 canonical 序列化。
+    /// 确定性指纹：membership/index revision + policy digest + canonical
+    /// working directory + 成员指纹 canonical 序列化。
     /// 每个成员的哈希输入包含 `logical_repository_id`、`checkout_id`、`revision`、`dirty`
     /// 与 `available`（B2 修复：checkout identity 更换也必须触发漂移，不能仅靠
-    /// revision/dirty/availability 不变而绕过）。
+    /// revision/dirty/availability 不变而绕过）。cwd 维度（Task 2.8，REQ-PLN-03）
+    /// 同理：聚合根迁移不得被其余维度全不变而绕过。
     pub fn access_fingerprint_value(&self) -> String {
         let mut members: Vec<_> = self.member_fingerprints.iter().collect();
         members.sort_by_key(|fingerprint| fingerprint.logical_repository_id);
@@ -49,6 +57,8 @@ impl PlanningContextSnapshot {
         hasher.update(self.index_revision.to_string().as_bytes());
         hasher.update(b"\0");
         hasher.update(self.policy_digest.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(self.working_directory.to_string_lossy().as_bytes());
         for fingerprint in members {
             hasher.update(b"\0");
             hasher.update(fingerprint.logical_repository_id.0.to_string().as_bytes());
@@ -170,6 +180,7 @@ mod tests {
             aggregate_index_id: "aggregate_index_0001".into(),
             index_revision: 3,
             policy_digest: "sha256:policy".into(),
+            working_directory: std::path::PathBuf::from("/lc-root"),
             access_fingerprint: String::new(),
             invalidation: None,
             captured_at: "2026-08-10T00:00:00Z".into(),
@@ -207,6 +218,7 @@ mod tests {
             aggregate_index_id: "aggregate_index_0001".into(),
             index_revision: 3,
             policy_digest: "sha256:policy".into(),
+            working_directory: std::path::PathBuf::from("/lc-root"),
             access_fingerprint: String::new(),
             invalidation: None,
             captured_at: "2026-08-10T00:00:00Z".into(),
@@ -233,5 +245,41 @@ mod tests {
             Some("member_removed")
         );
         assert_eq!(loaded.access_fingerprint, snapshot.access_fingerprint);
+    }
+
+    #[test]
+    fn access_fingerprint_changes_when_working_directory_drifts() {
+        // Task 2.8（REQ-PLN-03）：cwd 维度参与 access fingerprint——聚合根迁移
+        // 不能被 membership/index/policy/checkout 全不变而绕过。
+        let member = LogicalRepositoryId(Uuid::from_u128(1));
+        let checkout = RepositoryCheckoutId(Uuid::from_u128(2));
+        let mut snapshot = PlanningContextSnapshot {
+            schema_version: 1,
+            project_id: "project_0001".into(),
+            issue_id: "issue_0001".into(),
+            membership_revision: 7,
+            effective_member_ids: vec![member],
+            member_fingerprints: vec![MemberCheckoutFingerprint {
+                logical_repository_id: member,
+                checkout_id: checkout,
+                revision: "0123456789012345678901234567890123456789".into(),
+                dirty: false,
+                available: true,
+            }],
+            aggregate_index_id: "aggregate_index_0001".into(),
+            index_revision: 3,
+            policy_digest: "sha256:policy".into(),
+            working_directory: std::path::PathBuf::from("/lc-root"),
+            access_fingerprint: String::new(),
+            invalidation: None,
+            captured_at: "2026-08-10T00:00:00Z".into(),
+        };
+        let baseline = snapshot.access_fingerprint_value();
+        snapshot.working_directory = std::path::PathBuf::from("/moved-lc-root");
+        assert_ne!(
+            snapshot.access_fingerprint_value(),
+            baseline,
+            "聚合根迁移必须改变 access fingerprint"
+        );
     }
 }

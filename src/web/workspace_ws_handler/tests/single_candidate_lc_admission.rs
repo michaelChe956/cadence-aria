@@ -557,3 +557,52 @@ async fn lc_run_with_member_rules_present_starts_author_directly() {
         "author prompt must consume the same on-disk language rules"
     );
 }
+
+/// Task 2.8（REQ-PLN-01/07，planning snapshot 贯穿）：LC plan author（SC
+/// markdown 链与 WorkItemPlan outline 链共用同一 launch/start 通道）provider
+/// spawn cwd 必须是 canonical 聚合根（manifest `provider_context_root`），
+/// target worktree 保持成员 checkout——cwd/target 分离贯穿 prompt→launch→
+/// spawn 全链，不得以成员 checkout 兼任 cwd。
+#[tokio::test]
+async fn lc_plan_author_run_spawns_from_root_cwd_with_member_target() {
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let provider = Arc::new(LcRecordingAuthorProvider {
+        output: single_candidate_markdown("story_0001", "design_0001"),
+        inputs: input_tx,
+    });
+    let fixture = ProviderRunFixture::new_logical(true, provider.clone());
+    let (context, _outbound_rx) = single_candidate_context(&fixture, provider);
+
+    handle_workspace_inbound_message(
+        context,
+        WsInMessage::StartGeneration {
+            provider_config: provider_config(),
+            reviewer_enabled: false,
+        },
+    )
+    .await;
+
+    let full_input = tokio::time::timeout(std::time::Duration::from_secs(2), input_rx.recv())
+        .await
+        .expect("LC plan author run must start the provider")
+        .expect("author provider input");
+    let canonical_root = std::fs::canonicalize(
+        fixture
+            .member_checkout_root()
+            .parent()
+            .expect("member checkout lives under the aggregate root"),
+    )
+    .expect("canonical aggregate root");
+    let canonical_member =
+        std::fs::canonicalize(fixture.member_checkout_root()).expect("canonical member root");
+    assert_eq!(
+        full_input.working_directory.as_deref(),
+        Some(canonical_root.as_path()),
+        "LC plan author spawn cwd 必须是 canonical 聚合根（root cwd），got: {:?}",
+        full_input.working_directory
+    );
+    assert_eq!(
+        full_input.working_dir, canonical_member,
+        "target worktree 保持成员 checkout（cwd/target 分离）"
+    );
+}

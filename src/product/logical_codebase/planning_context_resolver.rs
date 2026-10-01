@@ -487,6 +487,9 @@ impl PlanningContextResolver {
             aggregate_index_id: index.aggregate_index_id.clone(),
             index_revision: index.membership_revision,
             policy_digest: policy.digest.clone(),
+            // Task 2.8（REQ-PLN-03）：canonical working directory（manifest
+            // provider_context_root）冻结进快照并参与指纹——root 漂移触发重建。
+            working_directory: cwd.clone(),
             access_fingerprint: String::new(),
             invalidation: None,
             captured_at: chrono::Utc::now().to_rfc3339(),
