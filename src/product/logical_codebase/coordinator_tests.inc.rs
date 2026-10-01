@@ -498,19 +498,31 @@ mod tests {
     }
 
     /// 测试用 streaming adapter:记录 start 调用次数并立即完成会话。
+    /// Task 1.1 seam:同时按启动顺序捕获 `StreamingProviderInput` 快照,
+    /// 供「固定 Claude recipe / root-cwd」隔离断言消费;计数语义不变。
+    /// (parking_lot 非本 crate 依赖,沿用本文件 std Mutex 约定。)
     struct CountingStreamingAdapter {
         start_count: std::sync::atomic::AtomicUsize,
+        inputs: Mutex<Vec<crate::cross_cutting::streaming_provider::StreamingProviderInput>>,
     }
 
     impl CountingStreamingAdapter {
         fn new() -> Self {
             Self {
                 start_count: std::sync::atomic::AtomicUsize::new(0),
+                inputs: Mutex::new(Vec::new()),
             }
         }
 
         fn start_count(&self) -> usize {
             self.start_count.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        /// 每次成功 start 的输入快照,按启动顺序返回。
+        fn started_inputs(
+            &self,
+        ) -> Vec<crate::cross_cutting::streaming_provider::StreamingProviderInput> {
+            self.inputs.lock().unwrap().clone()
         }
     }
 
@@ -520,7 +532,7 @@ mod tests {
     {
         async fn start(
             &self,
-            _input: crate::cross_cutting::streaming_provider::StreamingProviderInput,
+            input: crate::cross_cutting::streaming_provider::StreamingProviderInput,
             _cancel: CancellationToken,
         ) -> Result<
             crate::cross_cutting::streaming_provider::ProviderSession,
@@ -528,6 +540,7 @@ mod tests {
         > {
             self.start_count
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inputs.lock().unwrap().push(input);
             let (_event_tx, events) = tokio::sync::mpsc::channel(1);
             let (commands, _command_rx) = tokio::sync::mpsc::channel(1);
             Ok(crate::cross_cutting::streaming_provider::ProviderSession { events, commands, native_session_id: None })
@@ -600,6 +613,7 @@ mod tests {
     /// `GatewayRunAudit` 与 `CountingStreamingAdapter` 供断言。
     struct GatewayAggregateFixture {
         _temp: tempfile::TempDir,
+        aggregate_root: PathBuf,
         audit: Arc<GatewayRunAudit>,
         streaming_adapter: Arc<CountingStreamingAdapter>,
         coordinator: AggregateInitializationCoordinator,
@@ -610,12 +624,24 @@ mod tests {
             &self.coordinator
         }
 
+        /// Task 1.1 seam:聚合根路径,供 root-cwd 断言 canonicalize 比对。
+        fn aggregate_root(&self) -> PathBuf {
+            self.aggregate_root.clone()
+        }
+
         fn gateway_audit(&self) -> Arc<GatewayRunAudit> {
             self.audit.clone()
         }
 
         fn streaming_start_count(&self) -> usize {
             self.streaming_adapter.start_count()
+        }
+
+        /// Task 1.1 seam:按启动顺序返回 provider turn 的流式输入快照。
+        fn streaming_inputs(
+            &self,
+        ) -> Vec<crate::cross_cutting::streaming_provider::StreamingProviderInput> {
+            self.streaming_adapter.started_inputs()
         }
     }
 
@@ -693,6 +719,7 @@ mod tests {
 
         GatewayAggregateFixture {
             _temp: temp,
+            aggregate_root,
             audit,
             streaming_adapter,
             coordinator,
@@ -758,21 +785,27 @@ mod tests {
     #[test]
     fn aggregate_coordinator_isolation_locked_against_single_repository_persistence_and_git_finalize()
      {
-        // 隔离回归门:coordinator 生产代码(非测试、非 doc comment)不得引用
-        // 单仓持久化层或单仓 git 终结点,保证聚合模式不进入成员仓 git 调用图。
-        // 主文件与按职责拆出的 `.inc.rs` 生产模块都在扫描范围内;测试模块
-        // 与 doc comment 行被跳过以避免自指。
+        // 隔离回归门:聚合初始化生产代码(非测试、非 doc comment)不得引用
+        // 单仓持久化层、单仓 git 终结点或单仓六步 operation 机器,保证聚合
+        // root recipe 不进入成员仓 git 调用图,也不复用 registration/GitFinalize
+        // 外层(BOOT-01 后半句、D3)。Task 1.1 起扫描面从 coordinator `.inc.rs`
+        // 扩大到聚合 operation 类型与 durable store;测试模块与 doc comment
+        // 行被跳过以避免自指。单仓六步命令源 `RepositoryInitializationStepKind`
+        // 不在禁用之列——root recipe 显式复用它的 `command()` 事实。
         let production_sources = [
             include_str!("aggregate_initialization_coordinator.rs"),
             include_str!("coordinator_lifecycle.inc.rs"),
             include_str!("coordinator_provider_turn.inc.rs"),
             include_str!("coordinator_preflight.inc.rs"),
             include_str!("coordinator_profile.inc.rs"),
+            include_str!("aggregate_initialization.rs"),
+            include_str!("aggregate_initialization_store.rs"),
         ];
         let forbidden = [
             "RepositoryPersistence",
             "git_finalize",
             "RepositoryRegistrationCoordinator",
+            "RepositoryInitializationOperation",
         ];
         for source in production_sources {
             let mut in_test_module = false;
@@ -795,6 +828,113 @@ mod tests {
                 }
             }
         }
+
+        // 固定 Claude recipe 隔离门(REQ-BOOT-03「recipe provider SHALL 固定为
+        // Claude Code」):聚合 turn 驱动生产面不得出现任何非 Claude provider
+        // dialect 或按配置选择 provider 的工厂——那是新增 fallback 通道,
+        // 本 change 明确不做。
+        let forbidden_provider_channels = [
+            "ProviderRef::codex",
+            "from_provider_name",
+            "ProviderRefType::Codex",
+            "ProviderType::Codex",
+            "ProviderType::Pi",
+            "ProviderType::KimiCode",
+        ];
+        for source in production_sources {
+            let mut in_test_module = false;
+            for line in source.lines() {
+                if line.trim_start().starts_with("#[cfg(test)]") {
+                    in_test_module = true;
+                }
+                if in_test_module {
+                    continue;
+                }
+                let trimmed = line.trim_start();
+                if trimmed.starts_with("//") {
+                    continue;
+                }
+                for token in forbidden_provider_channels {
+                    assert!(
+                        !line.contains(token),
+                        "aggregate recipe is fixed to Claude Code and must not add provider fallback {token}: {line}"
+                    );
+                }
+            }
+        }
+
+        // 迁移边界说明(Task 1.1):真实四命令/超时契约不在本锁内断言——当前
+        // `pre_check` 等 turn 的 streaming_input 仍是占位 prompt 与 1s 占位
+        // 超时(本任务 Step 2 已用红证记录该缺口:prompt 为
+        // "aggregate initialization turn: pre_check" 而非真实命令)。真实四命令
+        // 行为锁由 lc-root-initialization Task 1.4 的
+        // `lc_claude_recipe_runs_four_commands_once_in_fixed_root_order` 交付;
+        // 本测试只固定迁移边界:不新增 step、不进单仓 registration/GitFinalize、
+        // recipe 固定 Claude Code(上方扫描门)。
+    }
+
+    /// Task 1.1 迁移边界回归锁:LC root-cwd 契约(BOOT-01/REQ-BOOT-03)下的
+    /// 聚合根 recipe 隔离事实——五步布局零变化(trust 前置门/四命令不得成为
+    /// 第六步)、三个 provider turn 唯一经 gateway 启动且全部为固定 Claude
+    /// Code、每个 turn 的 cwd 都是 canonical 聚合根(绝不为成员 checkout 根)。
+    /// 供后续 recipe/receipt 任务消费:任何复用单仓 registration/GitFinalize、
+    /// 新增 provider fallback 或把 turn cwd 挪进成员仓的改动都会在此先红。
+    #[tokio::test]
+    async fn aggregate_root_contract_does_not_reuse_repository_registration_or_git_finalize() {
+        let fixture = gateway_aggregate_fixture();
+        let operation = fixture
+            .coordinator()
+            .execute(
+                "project_0001",
+                "aggregate_initialization_0001",
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        // 五步布局零变化:步骤 id 顺序 == V1 且全部 Completed;operation kind
+        // 仍是聚合专属判别码,不与单仓六步 operation 混流。
+        assert_eq!(
+            operation
+                .steps
+                .iter()
+                .map(|step| step.step_id)
+                .collect::<Vec<_>>(),
+            AggregateInitializationStepKind::V1.to_vec(),
+            "root recipe must map onto the existing five steps; no sixth step may appear"
+        );
+        assert!(operation
+            .steps
+            .iter()
+            .all(|step| step.status.as_str() == "completed"));
+        assert_eq!(operation.operation_kind, "aggregate_initialization");
+
+        // 三个 provider turn 唯一经 gateway 流式启动,无同步栈旁路,且每次
+        // 启动都携带 policy digest——聚合根路径上不存在不经 gateway 的单仓
+        // registration/GitFinalize 式 provider 启动。
+        assert_eq!(fixture.gateway_audit().stream_launches(), 3);
+        assert_eq!(fixture.gateway_audit().sync_launches(), 0);
+        assert!(fixture.gateway_audit().all_have_policy_digest());
+
+        // 固定 Claude recipe:每次启动的 provider_type 都是 ClaudeCode,
+        // 不存在 Codex/Pi/KimiCode fallback 通道。
+        let inputs = fixture.streaming_inputs();
+        assert_eq!(inputs.len(), 3);
+        assert!(
+            inputs
+                .iter()
+                .all(|input| input.provider_type
+                    == crate::protocol::contracts::ProviderType::ClaudeCode),
+            "aggregate recipe provider must stay fixed to Claude Code"
+        );
+
+        // root-cwd 契约:每个 provider turn 的 cwd 都是 canonical 聚合根本身,
+        // 绝不是任何成员 checkout 根(单仓 cwd 契约不被聚合复用)。
+        let canonical_root = std::fs::canonicalize(fixture.aggregate_root()).unwrap();
+        assert!(
+            inputs.iter().all(|input| input.working_dir == canonical_root),
+            "every provider turn must run with cwd = canonical aggregate root"
+        );
     }
 
     #[test]

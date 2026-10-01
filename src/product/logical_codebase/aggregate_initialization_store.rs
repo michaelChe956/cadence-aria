@@ -743,7 +743,9 @@ mod tests {
         AggregateInitializationIdempotencyIdentity, AggregateInitializationOperationInput,
         AggregateInitializationStepKind,
     };
-    use crate::product::repository_store::RepositoryInitializationOperationStore;
+    use crate::product::repository_store::{
+        RepositoryInitializationOperationStore, RepositoryInitializationStepKind,
+    };
 
     const CREATED_AT: &str = "2026-08-09T00:00:00Z";
     const RUNNING_AT: &str = "2026-08-09T00:00:01Z";
@@ -982,6 +984,101 @@ mod tests {
         assert_eq!(first.steps.len(), 5);
         assert_eq!(first.operation_kind, "aggregate_initialization");
         assert!(fixture.repository_operation_store_rejects_aggregate_layout(&first));
+
+        // Task 1.1 迁移边界:LC root recipe 的四条命令只能映射进既有五步/
+        // 三个 provider turn,不得新增 step(REQ-BOOT-03「不新增第六步」),
+        // recipe provider 仍是记录在 operation input 里的固定 claude_code。
+        assert_eq!(
+            first
+                .steps
+                .iter()
+                .map(|step| step.step_id)
+                .collect::<Vec<_>>(),
+            AggregateInitializationStepKind::V1.to_vec(),
+            "aggregate step layout must stay exactly V1; no sixth step may appear"
+        );
+        let provider_turns: Vec<AggregateInitializationStepKind> =
+            AggregateInitializationStepKind::V1
+                .iter()
+                .copied()
+                .filter(|kind| kind.is_provider_turn())
+                .collect();
+        assert_eq!(
+            provider_turns,
+            vec![
+                AggregateInitializationStepKind::PreCheck,
+                AggregateInitializationStepKind::RuleAndMcpConfig,
+                AggregateInitializationStepKind::OpenspecAndExamples,
+            ],
+            "four root recipe commands must map onto the existing three provider turns"
+        );
+        assert_eq!(first.input.provider, "claude_code");
+    }
+
+    /// Task 1.1 迁移边界回归锁:LC root-cwd 契约落地前后,单仓六步初始化
+    /// 契约快照零语义变化(BOOT-01 后半句「传统单仓登记 SHALL 保持现有逐仓
+    /// 四命令与 git_finalize 契约不变」、D1–D4 单仓不变声明)。六步布局与
+    /// 顺序、四条无中断命令的字节内容、command_index 双向映射全部冻结;
+    /// 聚合侧也不占用单仓读取面。任何把聚合 recipe 命令、step 或 cwd 语义
+    /// 混进单仓契约的改动都会在此先红。
+    #[test]
+    fn legacy_repository_initialization_contract_remains_unchanged_after_lc_root_contract() {
+        // 六步布局与顺序冻结:CadenceSkills → … → GitFinalize。
+        assert_eq!(
+            RepositoryInitializationStepKind::ALL,
+            [
+                RepositoryInitializationStepKind::CadenceSkills,
+                RepositoryInitializationStepKind::PreCheck,
+                RepositoryInitializationStepKind::RuleConfig,
+                RepositoryInitializationStepKind::McpConfiguration,
+                RepositoryInitializationStepKind::ProjectRulesExamples,
+                RepositoryInitializationStepKind::GitFinalize,
+            ]
+        );
+
+        // 四条无中断命令字节级冻结;两个确定性步骤(CadenceSkills/GitFinalize)
+        // 没有命令——GitFinalize 仍是单仓专属终结点,聚合 recipe 不得复用。
+        assert_eq!(RepositoryInitializationStepKind::CadenceSkills.command(), None);
+        assert_eq!(RepositoryInitializationStepKind::GitFinalize.command(), None);
+        assert_eq!(
+            RepositoryInitializationStepKind::PreCheck.command(),
+            Some("/pre-check --no-interrupt --upgrade 用大陆镜像")
+        );
+        assert_eq!(
+            RepositoryInitializationStepKind::RuleConfig.command(),
+            Some("/rule-config --no-interrupt")
+        );
+        assert_eq!(
+            RepositoryInitializationStepKind::McpConfiguration.command(),
+            Some("/mcp-configuration --no-interrupt")
+        );
+        assert_eq!(
+            RepositoryInitializationStepKind::ProjectRulesExamples.command(),
+            Some("/project-rules-examples --no-interrupt")
+        );
+
+        // command_index 双向映射冻结:1..=4 依序映射四命令步骤,0 与越界无映射。
+        assert_eq!(RepositoryInitializationStepKind::from_command_index(0), None);
+        assert_eq!(
+            (1..=4)
+                .map(RepositoryInitializationStepKind::from_command_index)
+                .collect::<Vec<_>>(),
+            vec![
+                Some(RepositoryInitializationStepKind::PreCheck),
+                Some(RepositoryInitializationStepKind::RuleConfig),
+                Some(RepositoryInitializationStepKind::McpConfiguration),
+                Some(RepositoryInitializationStepKind::ProjectRulesExamples),
+            ]
+        );
+        assert_eq!(RepositoryInitializationStepKind::from_command_index(5), None);
+
+        // 聚合侧不占用单仓读取面:legacy operation store 仍拒绝聚合布局。
+        let fixture = aggregate_init_fixture();
+        let operation = fixture
+            .store()
+            .create_idempotent(fixture.new_operation("legacy-lock"))
+            .unwrap();
+        assert!(fixture.repository_operation_store_rejects_aggregate_layout(&operation));
     }
 
     #[test]

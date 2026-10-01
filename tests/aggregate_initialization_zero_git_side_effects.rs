@@ -5,6 +5,10 @@
 //! 文件列表、untracked 文件列表与 `.git` 引用完全一致;聚合流程既不向成员仓
 //! 写入 `.aria/aggregate`,也不发出任何 `git add -A` / `git commit` / `git push`
 //! 调用。聚合根允许写 `.aria/aggregate/**`,但成员根一字节不得改变。
+//!
+//! Task 1.1(lc-root-initialization)迁移边界扩展:五步布局零变化(不新增
+//! step)、provider turn 恰好三次且顺序固定、每个 turn 的 cwd 都是 canonical
+//! 聚合根——root recipe 后续接入真实四命令时不得破坏这些边界。
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -84,13 +88,27 @@ impl AggregateInitializationGitSnapshot {
 /// 记录型 provider turn 驱动:把每个 turn 当作一次「启动了 provider 进程」的
 /// 合成 argv 记录进共享 command log,但不发出任何 git 调用。turn_count 反映
 /// provider 实际被请求的次数,供断言使用。
+///
+/// Task 1.1 seam:同时按顺序捕获每个 turn 的生产事实(step + coordinator 传入
+/// 的 canonical 聚合根),供「不新增 step / root-cwd 隔离」断言消费。
 struct RecordingProviderTurnDriver {
     calls: Arc<Mutex<Vec<RecordedCall>>>,
+    turns: Arc<Mutex<Vec<ProviderTurnFact>>>,
+}
+
+/// 每个 provider turn 的生产事实快照。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProviderTurnFact {
+    step: AggregateInitializationStepKind,
+    aggregate_root: String,
 }
 
 impl RecordingProviderTurnDriver {
     fn new(calls: Arc<Mutex<Vec<RecordedCall>>>) -> Self {
-        Self { calls }
+        Self {
+            calls,
+            turns: Arc::new(Mutex::new(Vec::new())),
+        }
     }
 }
 
@@ -101,7 +119,7 @@ impl AggregateProviderTurnDriver for RecordingProviderTurnDriver {
         _project_id: &str,
         _operation_id: &str,
         step: AggregateInitializationStepKind,
-        _preflight: &AggregatePreflightSnapshot,
+        preflight: &AggregatePreflightSnapshot,
         _lc_id: Option<&str>,
         _cancellation: CancellationToken,
     ) -> Result<String, cadence_aria::product::logical_codebase::AggregateInitializationError> {
@@ -117,6 +135,13 @@ impl AggregateProviderTurnDriver for RecordingProviderTurnDriver {
                     "--print".to_string(),
                     format!("aggregate-initialization:{}", step.as_str()),
                 ],
+            });
+        self.turns
+            .lock()
+            .expect("provider turn log mutex poisoned")
+            .push(ProviderTurnFact {
+                step,
+                aggregate_root: preflight.aggregate_root.clone(),
             });
         Ok(format!("{} summary", step.as_str()))
     }
@@ -169,8 +194,10 @@ impl AggregateSkillsPreparation for RecordingSkillsPreparation {
 /// 供断言无 git add/commit/push。
 struct AggregateInitializationGitFixture {
     _temp: tempfile::TempDir,
+    aggregate_root: PathBuf,
     member_roots: Vec<PathBuf>,
     command_log: Arc<Mutex<Vec<RecordedCall>>>,
+    provider_turns: Arc<Mutex<Vec<ProviderTurnFact>>>,
     coordinator: AggregateInitializationCoordinator,
 }
 
@@ -179,10 +206,23 @@ impl AggregateInitializationGitFixture {
         self.member_roots.clone()
     }
 
+    /// Task 1.1 seam:聚合根路径,供 root-cwd 断言 canonicalize 比对。
+    fn aggregate_root(&self) -> PathBuf {
+        self.aggregate_root.clone()
+    }
+
     fn command_log(&self) -> Vec<RecordedCall> {
         self.command_log
             .lock()
             .expect("command log mutex poisoned")
+            .clone()
+    }
+
+    /// Task 1.1 seam:按顺序返回 provider turn 的生产事实快照。
+    fn provider_turns(&self) -> Vec<ProviderTurnFact> {
+        self.provider_turns
+            .lock()
+            .expect("provider turn log mutex poisoned")
             .clone()
     }
 
@@ -273,18 +313,20 @@ fn two_member_repositories() -> AggregateInitializationGitFixture {
         lc_store.save_checkout("project_0001", &checkout).unwrap();
     }
 
-    let manifest = LogicalCodebaseManifest::new("project_0001", aggregate_root, member_ids);
+    let manifest =
+        LogicalCodebaseManifest::new("project_0001", aggregate_root.clone(), member_ids);
     lc_store.save_manifest("project_0001", &manifest).unwrap();
 
     let command_log: Arc<Mutex<Vec<RecordedCall>>> = Arc::new(Mutex::new(Vec::new()));
+    let recording_provider = RecordingProviderTurnDriver::new(command_log.clone());
+    let provider_turns = recording_provider.turns.clone();
     let skills: Arc<dyn AggregateSkillsPreparation> =
         Arc::new(RecordingSkillsPreparation::new(command_log.clone()));
     // 使用真实 DeterministicAggregatePreflightService,使其 canonicalize 真实聚合根。
     let preflight: Arc<dyn AggregatePreflightService> = Arc::new(
         cadence_aria::product::logical_codebase::aggregate_initialization_coordinator::DeterministicAggregatePreflightService::new(paths.clone()),
     );
-    let provider: Arc<dyn AggregateProviderTurnDriver> =
-        Arc::new(RecordingProviderTurnDriver::new(command_log.clone()));
+    let provider: Arc<dyn AggregateProviderTurnDriver> = Arc::new(recording_provider);
     let clock: Arc<dyn Fn() -> String + Send + Sync> = Arc::new(|| CREATED_AT.to_string());
     let store = cadence_aria::product::logical_codebase::AggregateInitializationOperationStore::new(
         paths.clone(),
@@ -316,8 +358,10 @@ fn two_member_repositories() -> AggregateInitializationGitFixture {
 
     AggregateInitializationGitFixture {
         _temp: temp,
+        aggregate_root,
         member_roots,
         command_log,
+        provider_turns,
         coordinator,
     }
 }
@@ -394,6 +438,45 @@ fn aggregate_initialization_never_changes_member_git_or_worktree_state() {
             .member_roots()
             .iter()
             .all(|root| !root.join(".aria/aggregate").exists())
+    );
+
+    // Task 1.1 迁移边界:五步布局零变化——步骤 id 顺序 == V1 且全部完成,
+    // trust 前置门/四命令不得成为第六步(REQ-BOOT-03)。
+    assert_eq!(
+        operation
+            .steps
+            .iter()
+            .map(|step| step.step_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "machine_skills",
+            "aggregate_preflight",
+            "pre_check",
+            "rule_and_mcp_config",
+            "openspec_and_examples",
+        ],
+        "root recipe must map onto the existing five steps; no sixth step may appear"
+    );
+
+    // provider turn 恰好三次、顺序固定:四命令只能映射进这三个既有 turn。
+    let turns = fixture.provider_turns();
+    assert_eq!(
+        turns
+            .iter()
+            .map(|turn| turn.step.as_str())
+            .collect::<Vec<_>>(),
+        vec!["pre_check", "rule_and_mcp_config", "openspec_and_examples"],
+        "provider turns must stay exactly the three existing turns in fixed order"
+    );
+
+    // root-cwd 隔离:每个 provider turn 的 cwd 都是 canonical 聚合根本身,
+    // 绝不为任何成员 checkout 根(单仓 cwd 契约不被聚合复用)。
+    let canonical_root = std::fs::canonicalize(fixture.aggregate_root()).unwrap();
+    assert!(
+        turns
+            .iter()
+            .all(|turn| Path::new(&turn.aggregate_root) == canonical_root),
+        "every provider turn must run with cwd = canonical aggregate root"
     );
 }
 
