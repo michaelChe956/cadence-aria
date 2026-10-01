@@ -32,6 +32,11 @@ use super::aggregate_initialization_store::root_recipe_command_index;
 /// 脚手架目录），绝不扩大为整个 root，也绝不放行成员仓路径（D2）。
 pub const ROOT_RECIPE_ALLOWLIST: &[&str] = &[".aria/aggregate"];
 
+/// 根规则通用入口文件（Task 1.6，REQ-BOOT-03）：AGENTS.md 是四家 provider
+/// 的通用入口；CLAUDE.md 仅是兼容副本，不进入 readiness 身份（副本策略
+/// 差异不得制造伪漂移）。
+pub const ROOT_RULE_ENTRY_FILE: &str = "AGENTS.md";
+
 fn default_allowlist() -> Vec<String> {
     ROOT_RECIPE_ALLOWLIST
         .iter()
@@ -1070,6 +1075,22 @@ fn digest_snapshot_entries(entries: &[RootRecipeSnapshotEntry]) -> String {
 
 fn digest_bytes(content: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(content))
+}
+
+/// Task 1.6（REQ-BOOT-03）：canonical root 根规则材料的只读摘要——receipt
+/// `finalize`（生产接线 Task 1.8）与 bootstrap readiness 投影共用此函数，
+/// 保证两侧 rule digest 语义唯一。`Ok(None)` 表示根规则入口尚不存在
+///（recipe 未生成或被移除）；不可读 fail-closed，绝不静默当作缺失。
+pub fn root_rule_digest(canonical_root: &Path) -> Result<Option<String>, ProductStoreError> {
+    let entry = canonical_root.join(ROOT_RULE_ENTRY_FILE);
+    match std::fs::read(&entry) {
+        Ok(bytes) => Ok(Some(digest_bytes(&bytes))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(ProductStoreError::Io(format!(
+            "read root rule {}: {error}",
+            entry.display()
+        ))),
+    }
 }
 
 fn receipt_conflict(operation_id: &str, command_index: usize) -> ProductStoreError {

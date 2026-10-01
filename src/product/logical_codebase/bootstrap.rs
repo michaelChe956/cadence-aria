@@ -375,17 +375,25 @@ impl LogicalCodebaseBootstrapProjector {
         }
     }
 
-    /// rules/policy：聚合 policy artifact 的 durable 事实 + 只读检查每个
-    /// active 成员 main checkout 的 `.claude/rules/language.md`（与 Task 8
-    /// admission 预检同一路径）。policy 存在但成员规则缺失时投影
-    /// WaitingForHuman（reason `member_rules_missing`，Prepare/Retry），
-    /// 等用户通过产品准备动作恢复同一实际规则来源；本检查零写入。
+    /// rules/policy（Task 1.6，REQ-BOOT-03/REQ-REG-10）：只读 canonical root
+    /// 的 root authority 三源谓词——最终 policy artifact 可解析且与 resolver
+    /// 冻结引用一致、最新 recipe operation 的最终 receipt 在场、receipt 冻结
+    /// 的 canonical root/policy digest/rule digest 与当前事实一致。成员
+    /// checkout 的 `.claude/rules/language.md` 遍历已移除：成员规则检查归属
+    /// provider admission 预检（Task 8），readiness 不再读成员仓。
+    ///
+    /// recipe operation Completed 但任一材料缺失/漂移时投影 WaitingForHuman
+    /// （稳定 reason_code + 可操作 Prepare/Retry/Revalidate），绝不静默视为
+    /// 就绪；MemberIndex/AggregateIndexActive 步保持独立 checkpoint 判定，
+    /// 两套五步状态机互不冒充。本检查零写入、零 provider 启动。
     fn project_rules_policy_step(
         &self,
         project_id: &str,
         logical_codebase_id: &str,
         resolution: &crate::product::logical_codebase::repository_routing::RepositoryAuthorityResolution,
     ) -> Result<BootstrapStepProjection, ProductStoreError> {
+        use crate::product::logical_codebase::aggregate_initialization::AggregateInitializationOperationStatus;
+
         let policy = match resolution.policy.as_ref() {
             None => {
                 return Ok(BootstrapStepProjection {
@@ -399,76 +407,226 @@ impl LogicalCodebaseBootstrapProjector {
             }
             Some(policy) => policy,
         };
-
-        // 只读成员规则检查：不产生任何写入；成员/checkout 读取失败按
-        // store 错误上抛（fail-closed，不猜路径）。
-        let store = crate::product::logical_codebase::LogicalCodebaseStore::for_lc(
-            self.paths.clone(),
-            logical_codebase_id,
-        );
-        let members = store.list_members(project_id)?;
-        let checkouts = store.list_checkouts(project_id)?;
-        let mut missing_rules: Vec<String> = Vec::new();
-        for member in &members {
-            if member.status != crate::product::logical_codebase::types::MemberStatus::Active {
-                continue;
-            }
-            let checkout = checkouts
-                .iter()
-                .find(|checkout| {
-                    member.checkout_ids.contains(&checkout.checkout_id)
-                        && checkout.kind
-                            == crate::product::logical_codebase::types::CheckoutKind::Main
-                })
-                .or_else(|| {
-                    checkouts
-                        .iter()
-                        .find(|checkout| member.checkout_ids.contains(&checkout.checkout_id))
-                });
-            let Some(checkout) = checkout else {
-                missing_rules.push(format!("member {} has no recorded checkout", member.alias));
-                continue;
-            };
-            let rule_path = checkout.canonical_path.join(".claude/rules/language.md");
-            if !rule_path.is_file() {
-                missing_rules.push(format!(
-                    "member {} missing {}",
-                    member.alias,
-                    rule_path.display()
-                ));
-            }
-        }
-        if !missing_rules.is_empty() {
-            return Ok(BootstrapStepProjection {
+        let policy_checkpoint = BootstrapCheckpoint {
+            object_id: policy.policy_id.clone(),
+            input_digest: Some(policy.policy_digest.clone()),
+            output_artifact_ref: None,
+            expected_membership_revision: None,
+            completed_at: None,
+        };
+        let waiting = |reason_code: &str,
+                       detail: String,
+                       allowed_actions: Vec<BootstrapActionKind>|
+         -> BootstrapStepProjection {
+            BootstrapStepProjection {
                 step: LogicalCodebaseBootstrapStep::RulesPolicy,
                 status: LogicalCodebaseBootstrapStepStatus::WaitingForHuman,
                 object_id: policy.policy_id.clone(),
-                checkpoint: Some(BootstrapCheckpoint {
-                    object_id: policy.policy_id.clone(),
-                    input_digest: Some(policy.policy_digest.clone()),
-                    output_artifact_ref: None,
-                    expected_membership_revision: None,
-                    completed_at: None,
-                }),
+                checkpoint: Some(policy_checkpoint.clone()),
                 failure: Some(BootstrapFailure {
-                    reason_code: "member_rules_missing".to_string(),
-                    detail: missing_rules.join("; "),
+                    reason_code: reason_code.to_string(),
+                    detail,
                     retryable: true,
                     external_side_effect: "none".to_string(),
                 }),
-                allowed_actions: vec![BootstrapActionKind::Prepare, BootstrapActionKind::Retry],
-            });
+                allowed_actions,
+            }
+        };
+
+        // 源 1（最终 policy 可解析）：identity/digest 由 store 落盘边界校验，
+        // 不可解析的 durable 事实按 store 错误 fail-closed 上抛；引用与正文
+        // 漂移（并发修订窗口）核验为等待而非就绪。
+        let artifact =
+            match crate::product::logical_codebase::policy::AggregatePolicyArtifactStore::for_lc(
+                self.paths.clone(),
+                logical_codebase_id,
+            )
+            .get(project_id)?
+            {
+                Some(artifact) => artifact,
+                None => {
+                    return Ok(waiting(
+                        "aggregate_policy_artifact_missing",
+                        format!(
+                            "authority reference froze policy {} but the artifact is gone",
+                            policy.policy_id
+                        ),
+                        vec![
+                            BootstrapActionKind::Prepare,
+                            BootstrapActionKind::Revalidate,
+                        ],
+                    ));
+                }
+            };
+        if artifact.digest != policy.policy_digest {
+            return Ok(waiting(
+                "policy_reference_digest_drift",
+                format!(
+                    "authority reference froze digest {} but the current artifact digest is {}",
+                    policy.policy_digest, artifact.digest
+                ),
+                vec![BootstrapActionKind::Revalidate],
+            ));
         }
+
+        // 源 2（recipe operation 生命周期）：与 MemberIndex 步同一 durable
+        // 源、独立判定。
+        let operations =
+            crate::product::logical_codebase::aggregate_initialization_store::AggregateInitializationOperationStore::for_lc(
+                self.paths.clone(),
+                logical_codebase_id,
+            )
+            .list(project_id)?;
+        let Some(latest) = operations.first() else {
+            return Ok(waiting(
+                "root_recipe_operation_missing",
+                format!(
+                    "policy {} is ready but no root recipe operation has run under \
+                     logical codebase {logical_codebase_id}",
+                    policy.policy_id
+                ),
+                vec![BootstrapActionKind::Prepare],
+            ));
+        };
+        match latest.status {
+            AggregateInitializationOperationStatus::Completed => {}
+            AggregateInitializationOperationStatus::Created
+            | AggregateInitializationOperationStatus::Running => {
+                return Ok(BootstrapStepProjection {
+                    step: LogicalCodebaseBootstrapStep::RulesPolicy,
+                    status: LogicalCodebaseBootstrapStepStatus::Running,
+                    object_id: latest.operation_id.clone(),
+                    checkpoint: Some(policy_checkpoint.clone()),
+                    failure: None,
+                    allowed_actions: Vec::new(),
+                });
+            }
+            AggregateInitializationOperationStatus::Failed => {
+                return Ok(BootstrapStepProjection {
+                    step: LogicalCodebaseBootstrapStep::RulesPolicy,
+                    status: LogicalCodebaseBootstrapStepStatus::Failed,
+                    object_id: latest.operation_id.clone(),
+                    checkpoint: Some(policy_checkpoint.clone()),
+                    failure: Some(BootstrapFailure {
+                        reason_code: latest
+                            .error
+                            .as_ref()
+                            .map(|error| error.reason_code.clone())
+                            .unwrap_or_else(|| "root_recipe_failed".to_string()),
+                        detail: latest
+                            .error
+                            .as_ref()
+                            .map(|error| {
+                                format!(
+                                    "stage {}: {}",
+                                    error.stage,
+                                    error
+                                        .stderr_summary
+                                        .as_deref()
+                                        .unwrap_or("no stderr summary")
+                                )
+                            })
+                            .unwrap_or_else(|| {
+                                "the latest root recipe operation failed".to_string()
+                            }),
+                        retryable: latest
+                            .error
+                            .as_ref()
+                            .map(|error| error.retryable)
+                            .unwrap_or(true),
+                        external_side_effect: "aggregate_initialization_provider_turn".to_string(),
+                    }),
+                    allowed_actions: vec![BootstrapActionKind::Retry],
+                });
+            }
+            AggregateInitializationOperationStatus::Cancelled => {
+                return Ok(waiting(
+                    "root_recipe_cancelled",
+                    format!(
+                        "the latest root recipe operation {} was cancelled before \
+                         readiness materials were frozen",
+                        latest.operation_id
+                    ),
+                    vec![BootstrapActionKind::Continue],
+                ));
+            }
+        }
+
+        // 源 3（最终 receipt 三重身份一致）：receipt 缺失即 BOOT-03 的
+        // 「recipe 成功但 readiness 材料未齐」。
+        let receipt_store = crate::product::logical_codebase::RootRecipeReceiptStore::for_lc(
+            self.paths.clone(),
+            logical_codebase_id,
+        );
+        let Some(receipt) = receipt_store.get(project_id, &latest.operation_id)? else {
+            return Ok(waiting(
+                "root_receipt_missing",
+                format!(
+                    "root recipe operation {} completed without a finalized root receipt",
+                    latest.operation_id
+                ),
+                vec![BootstrapActionKind::Retry, BootstrapActionKind::Revalidate],
+            ));
+        };
+        if receipt.canonical_root != resolution.authority_root {
+            return Ok(waiting(
+                "root_receipt_authority_drift",
+                format!(
+                    "receipt froze canonical root {} but the current authority root is {}",
+                    receipt.canonical_root.display(),
+                    resolution.authority_root.display()
+                ),
+                vec![BootstrapActionKind::Revalidate],
+            ));
+        }
+        if receipt.policy_digest != artifact.digest {
+            return Ok(waiting(
+                "policy_digest_drift",
+                format!(
+                    "receipt froze policy digest {} but the current artifact digest is {}",
+                    receipt.policy_digest, artifact.digest
+                ),
+                vec![BootstrapActionKind::Retry, BootstrapActionKind::Revalidate],
+            ));
+        }
+        let rule_digest = crate::product::logical_codebase::root_recipe_receipt::root_rule_digest(
+            &resolution.authority_root,
+        )?;
+        let Some(rule_digest) = rule_digest else {
+            return Ok(waiting(
+                "root_rule_missing",
+                format!(
+                    "{} is absent under the canonical root {}",
+                    crate::product::logical_codebase::root_recipe_receipt::ROOT_RULE_ENTRY_FILE,
+                    resolution.authority_root.display()
+                ),
+                vec![BootstrapActionKind::Retry, BootstrapActionKind::Revalidate],
+            ));
+        };
+        if receipt.rule_digest != rule_digest {
+            return Ok(waiting(
+                "rule_digest_drift",
+                format!(
+                    "receipt froze rule digest {} but the current root rule digest is {}",
+                    receipt.rule_digest, rule_digest
+                ),
+                vec![BootstrapActionKind::Retry, BootstrapActionKind::Revalidate],
+            ));
+        }
+
         Ok(BootstrapStepProjection {
             step: LogicalCodebaseBootstrapStep::RulesPolicy,
             status: LogicalCodebaseBootstrapStepStatus::Completed,
             object_id: policy.policy_id.clone(),
             checkpoint: Some(BootstrapCheckpoint {
                 object_id: policy.policy_id.clone(),
-                input_digest: Some(policy.policy_digest.clone()),
-                output_artifact_ref: None,
-                expected_membership_revision: None,
-                completed_at: None,
+                input_digest: Some(receipt.policy_digest.clone()),
+                output_artifact_ref: Some(format!(
+                    "aggregate-recipe-receipts/{}.json",
+                    latest.operation_id
+                )),
+                expected_membership_revision: Some(latest.input.manifest_revision),
+                completed_at: Some(receipt.finalized_at.clone()),
             }),
             failure: None,
             allowed_actions: Vec::new(),
@@ -1237,18 +1395,16 @@ mod tests {
                 },
             )
             .unwrap();
+        let policy = crate::product::logical_codebase::policy::AggregatePolicyArtifact::bootstrap(
+            "project_0001",
+            &manifest.logical_codebase_id.to_string(),
+            "2026-09-29T00:00:00Z".to_string(),
+        );
         crate::product::logical_codebase::policy::AggregatePolicyArtifactStore::for_lc(
             paths.clone(),
             &lc_id,
         )
-        .save(
-            "project_0001",
-            &crate::product::logical_codebase::policy::AggregatePolicyArtifact::bootstrap(
-                "project_0001",
-                &manifest.logical_codebase_id.to_string(),
-                "2026-09-29T00:00:00Z".to_string(),
-            ),
-        )
+        .save("project_0001", &policy)
         .unwrap();
 
         // 既有 aggregate initialization 五步全完成（durable checkpoint 来源）。
@@ -1310,6 +1466,24 @@ mod tests {
             )
             .unwrap();
 
+        // Task 1.6（REQ-BOOT-03）：readiness 三源材料——根规则 + 最终 receipt
+        //（真实 auditor 四命令审计后 finalize）。
+        std::fs::write(aggregate_root.join("AGENTS.md"), "# aggregate root rules\n").unwrap();
+        let rule_digest = crate::product::logical_codebase::root_recipe_receipt::root_rule_digest(
+            &std::fs::canonicalize(&aggregate_root).unwrap(),
+        )
+        .unwrap()
+        .expect("root rule digest");
+        let receipt = finalize_root_receipt(
+            &paths,
+            &lc_id,
+            "aggregate_initialization_bootstrap_0001",
+            &aggregate_root,
+            &policy.digest,
+            &rule_digest,
+        );
+        assert_eq!(receipt.policy_digest, policy.digest);
+
         let projection = LogicalCodebaseBootstrapProjector::new(paths.clone())
             .project("project_0001", &lc_id)
             .unwrap();
@@ -1346,6 +1520,21 @@ mod tests {
             .unwrap();
         assert_eq!(rules.status, LogicalCodebaseBootstrapStepStatus::Completed);
         assert!(rules.object_id.starts_with("policy/project_0001/"));
+        // Task 1.6：完成 checkpoint 锚定最终 receipt（冻结 digest 与 finalize
+        // 时间），receipt 是本步的 durable 输出物。
+        let rules_checkpoint = rules.checkpoint.as_ref().unwrap();
+        assert_eq!(
+            rules_checkpoint.input_digest.as_deref(),
+            Some(policy.digest.as_str())
+        );
+        assert_eq!(
+            rules_checkpoint.output_artifact_ref.as_deref(),
+            Some("aggregate-recipe-receipts/aggregate_initialization_bootstrap_0001.json")
+        );
+        assert_eq!(
+            rules_checkpoint.completed_at.as_deref(),
+            Some(receipt.finalized_at.as_str())
+        );
 
         let member_index = projection
             .steps
@@ -1379,6 +1568,42 @@ mod tests {
             LogicalCodebaseBootstrapStepStatus::NotStarted
         );
         assert!(!projection.planning_ready);
+
+        // Task 1.6（REQ-REG-10）：AggregateIndexActive 独立完成后 readiness
+        // 闭环——五步全部 Completed，planning_ready=true。
+        let index_store = AggregateIndexStore::for_lc(paths.clone(), &lc_id);
+        index_store
+            .create(
+                "project_0001",
+                AggregateIndexRecord::building(
+                    "aggregate_index_bootstrap_0001".to_string(),
+                    "project_0001".to_string(),
+                    manifest.membership_revision,
+                    Vec::new(),
+                    "2026-09-29T00:06:00Z".to_string(),
+                ),
+            )
+            .unwrap();
+        index_store
+            .mark_status(
+                "project_0001",
+                "aggregate_index_bootstrap_0001",
+                AggregateIndexStatus::Active,
+                None,
+            )
+            .unwrap();
+        let ready = LogicalCodebaseBootstrapProjector::new(paths.clone())
+            .project("project_0001", &lc_id)
+            .unwrap();
+        assert!(ready.planning_ready);
+        for step in &ready.steps {
+            assert_eq!(
+                step.status,
+                LogicalCodebaseBootstrapStepStatus::Completed,
+                "step {} must complete for the readiness loop",
+                step.step.as_str()
+            );
+        }
     }
 
     #[test]
@@ -1424,6 +1649,473 @@ mod tests {
             .map(|s| s.as_str().to_string())
             .collect();
         assert_ne!(bootstrap_names, v1_names);
+    }
+
+    // ---- Task 1.6（REQ-BOOT-03/REQ-REG-10）：recipe/readiness 双状态机闭环 ----
+
+    struct ReadinessFixture {
+        temp: tempfile::TempDir,
+        paths: ProductAppPaths,
+        lc_id: String,
+        aggregate_root: std::path::PathBuf,
+        manifest: LogicalCodebaseManifest,
+        policy: crate::product::logical_codebase::policy::AggregatePolicyArtifact,
+        operation_id: String,
+    }
+
+    impl ReadinessFixture {
+        fn project(&self) -> LogicalCodebaseBootstrapProjection {
+            LogicalCodebaseBootstrapProjector::new(self.paths.clone())
+                .project("project_0001", &self.lc_id)
+                .expect("readiness projection must stay read-only and total")
+        }
+
+        fn rules_step(projection: &LogicalCodebaseBootstrapProjection) -> &BootstrapStepProjection {
+            projection
+                .steps
+                .iter()
+                .find(|step| step.step == LogicalCodebaseBootstrapStep::RulesPolicy)
+                .expect("rules_policy step present")
+        }
+    }
+
+    /// 登记成员 + bootstrap policy + 五步全 Completed 的 recipe operation：
+    /// readiness 三源谓词的全部 durable 前置（最终 receipt 除外）。
+    fn readiness_fixture(operation_id: &str) -> ReadinessFixture {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let aggregate_root = temp.path().join("aggregate-root");
+        let lc_id = create_project_and_lc(&paths, &aggregate_root);
+
+        let repo = aggregate_root.join("repo");
+        init_git_repository_with_commit(&repo);
+        let canonical = std::fs::canonicalize(&repo).unwrap();
+        let source =
+            crate::product::repository_store::resolve_repository_source(&canonical).unwrap();
+        let member_id = LogicalRepositoryId(uuid::Uuid::new_v4());
+        let checkout_id = RepositoryCheckoutId(uuid::Uuid::new_v4());
+        let lc_store = LogicalCodebaseStore::for_lc(paths.clone(), &lc_id);
+        let mut manifest =
+            LogicalCodebaseManifest::new("project_0001", aggregate_root.clone(), Vec::new());
+        manifest.member_ids = vec![member_id];
+        lc_store.save_manifest("project_0001", &manifest).unwrap();
+        lc_store
+            .save_member(
+                "project_0001",
+                &CodebaseMemberRecord {
+                    logical_repository_id: member_id,
+                    physical_repository_id: "repository_member".to_string(),
+                    alias: "repo".to_string(),
+                    role: "member".to_string(),
+                    ordinal: 1,
+                    source_identity: source.clone(),
+                    repo_type: RepositoryType::Unknown,
+                    tech_stack: Vec::new(),
+                    owner: None,
+                    tags: Vec::new(),
+                    default_ref: None,
+                    checkout_ids: vec![checkout_id],
+                    status: MemberStatus::Active,
+                    created_at: "2026-09-29T00:00:00Z".to_string(),
+                    updated_at: "2026-09-29T00:00:00Z".to_string(),
+                },
+            )
+            .unwrap();
+        lc_store
+            .save_checkout(
+                "project_0001",
+                &RepositoryCheckoutRecord {
+                    checkout_id,
+                    logical_repository_id: member_id,
+                    physical_repository_id: "repository_member".to_string(),
+                    kind: CheckoutKind::Main,
+                    canonical_path: canonical.clone(),
+                    checkout_path_hash: crate::product::id::repo_hash_for_path(
+                        canonical.to_string_lossy().as_ref(),
+                    ),
+                    git_dir_identity: source.git_dir_identity(),
+                    revision: None,
+                    availability: CheckoutAvailability::Available,
+                    observed_at: "2026-09-29T00:00:00Z".to_string(),
+                    created_at: "2026-09-29T00:00:00Z".to_string(),
+                    updated_at: "2026-09-29T00:00:00Z".to_string(),
+                },
+            )
+            .unwrap();
+
+        let policy = crate::product::logical_codebase::policy::AggregatePolicyArtifact::bootstrap(
+            "project_0001",
+            &manifest.logical_codebase_id.to_string(),
+            "2026-10-01T00:00:00Z".to_string(),
+        );
+        crate::product::logical_codebase::policy::AggregatePolicyArtifactStore::for_lc(
+            paths.clone(),
+            &lc_id,
+        )
+        .save("project_0001", &policy)
+        .unwrap();
+
+        let init_store = AggregateInitializationOperationStore::for_lc(paths.clone(), &lc_id);
+        init_store
+            .create_idempotent(AggregateInitializationOperation::new(
+                operation_id.to_string(),
+                "project_0001".to_string(),
+                AggregateInitializationOperationInput {
+                    idempotency_key: format!("readiness-{operation_id}"),
+                    manifest_revision: manifest.membership_revision,
+                    policy_digest: policy.digest.clone(),
+                    profile_evidence_digest: Some("sha256:profile".to_string()),
+                    provider_context_root: aggregate_root.clone(),
+                    provider: "claude_code".to_string(),
+                },
+                "2026-10-01T00:01:00Z".to_string(),
+            ))
+            .unwrap();
+        init_store
+            .mark_running(
+                "project_0001",
+                operation_id,
+                "2026-10-01T00:02:00Z".to_string(),
+            )
+            .unwrap();
+        for step in AggregateInitializationStepKind::V1 {
+            init_store
+                .mark_step_running(
+                    "project_0001",
+                    operation_id,
+                    step,
+                    format!("readiness:{operation_id}:{}", step.as_str()),
+                    "2026-10-01T00:03:00Z".to_string(),
+                )
+                .unwrap();
+            init_store
+                .checkpoint_step_output(
+                    "project_0001",
+                    operation_id,
+                    step,
+                    format!("aggregate-initializations/op/{}.json", step.as_str()),
+                    "2026-10-01T00:04:00Z".to_string(),
+                )
+                .unwrap();
+            init_store
+                .mark_step_completed(
+                    "project_0001",
+                    operation_id,
+                    step,
+                    "2026-10-01T00:05:00Z".to_string(),
+                )
+                .unwrap();
+        }
+        init_store
+            .finish_completed(
+                "project_0001",
+                operation_id,
+                "2026-10-01T00:06:00Z".to_string(),
+            )
+            .unwrap();
+
+        ReadinessFixture {
+            temp,
+            paths,
+            lc_id,
+            aggregate_root,
+            manifest,
+            policy,
+            operation_id: operation_id.to_string(),
+        }
+    }
+
+    /// 用真实 auditor 走完四条命令审计并 `finalize` 最终 receipt（Task 1.5
+    /// 生产链路的同构 fixture：命令无副作用 → 四条全部 Allowed）。
+    fn finalize_root_receipt(
+        paths: &ProductAppPaths,
+        lc_id: &str,
+        operation_id: &str,
+        aggregate_root: &std::path::Path,
+        policy_digest: &str,
+        rule_digest: &str,
+    ) -> crate::product::logical_codebase::RootRecipeReceipt {
+        let store =
+            crate::product::logical_codebase::RootRecipeReceiptStore::for_lc(paths.clone(), lc_id);
+        let auditor = crate::product::logical_codebase::RootRecipeFilesystemAuditor::new();
+        let canonical_root = std::fs::canonicalize(aggregate_root).unwrap();
+        for (index, (step, command_index, command)) in
+            crate::product::logical_codebase::root_recipe_command_index()
+                .into_iter()
+                .enumerate()
+        {
+            let watch = auditor
+                .before_command(operation_id, &canonical_root, step, command_index, command)
+                .unwrap();
+            let receipt = auditor
+                .after_command(watch, format!("2026-10-01T00:10:{index:02}Z"))
+                .unwrap();
+            assert_eq!(
+                receipt.verdict,
+                crate::product::logical_codebase::RootRecipeCommandVerdict::Allowed
+            );
+            store.append_command("project_0001", receipt).unwrap();
+        }
+        store
+            .finalize(
+                "project_0001",
+                operation_id,
+                policy_digest,
+                rule_digest,
+                "2026-10-01T00:20:00Z".to_string(),
+            )
+            .unwrap()
+    }
+
+    /// 全树字节快照（含成员 `.git` 与 app-data）：readiness GET 零写入的
+    /// 强断言面——不只限 `.aria`。
+    fn full_tree_inventory(root: &std::path::Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+        let mut inventory = std::collections::BTreeMap::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else {
+                    let relative = path.strip_prefix(root).unwrap().to_path_buf();
+                    inventory.insert(
+                        relative.to_string_lossy().into_owned(),
+                        std::fs::read(&path).unwrap_or_default(),
+                    );
+                }
+            }
+        }
+        inventory
+    }
+
+    /// Task 1.6（REQ-BOOT-03）：recipe operation Completed 但最终 root
+    /// receipt 缺失时，RulesPolicy 保持可操作等待（root_receipt_missing）、
+    /// `planning_ready == false`；MemberIndex 步仍独立由五步 checkpoint 判定
+    /// Completed——两套五步状态机互不冒充。
+    #[test]
+    fn recipe_completed_without_root_receipt_keeps_planning_not_ready() {
+        let fixture = readiness_fixture("aggregate_initialization_readiness_0001");
+        // 根规则在场：隔离「receipt 缺失」这一唯一 readiness 缺口。
+        std::fs::write(
+            fixture.aggregate_root.join("AGENTS.md"),
+            "# aggregate root rules\n",
+        )
+        .unwrap();
+
+        let projection = fixture.project();
+        let rules = ReadinessFixture::rules_step(&projection);
+        assert_eq!(
+            rules.status,
+            LogicalCodebaseBootstrapStepStatus::WaitingForHuman
+        );
+        let failure = rules.failure.as_ref().expect("failure reason");
+        assert_eq!(failure.reason_code, "root_receipt_missing");
+        assert!(!rules.allowed_actions.is_empty());
+        assert!(rules.allowed_actions.contains(&BootstrapActionKind::Retry));
+        assert!(
+            rules
+                .allowed_actions
+                .contains(&BootstrapActionKind::Revalidate)
+        );
+
+        let member_index = projection
+            .steps
+            .iter()
+            .find(|step| step.step == LogicalCodebaseBootstrapStep::MemberIndex)
+            .expect("member_index step present");
+        assert_eq!(
+            member_index.status,
+            LogicalCodebaseBootstrapStepStatus::Completed
+        );
+
+        assert!(!projection.planning_ready);
+        let notice = projection
+            .notices
+            .iter()
+            .find(|notice| notice.step == LogicalCodebaseBootstrapStep::RulesPolicy)
+            .expect("waiting rules_policy step must surface an actionable notice");
+        assert_eq!(notice.reason_code, "root_receipt_missing");
+        assert!(!notice.allowed_actions.is_empty());
+    }
+
+    /// Task 1.6（REQ-BOOT-03）：receipt 冻结的 canonical root/policy/rule
+    /// 身份与当前事实漂移（或根规则缺失）时，RulesPolicy 逐项给出稳定
+    /// reason_code 且 `planning_ready == false`；材料恢复一致后谓词可重入
+    /// 地回到 Completed（不是单向锁）。
+    #[test]
+    fn policy_rule_digest_drift_keeps_planning_not_ready() {
+        let fixture = readiness_fixture("aggregate_initialization_readiness_0002");
+        let entry = fixture.aggregate_root.join("AGENTS.md");
+        let root_rule_text = "# aggregate root rules\n";
+        std::fs::write(&entry, root_rule_text).unwrap();
+        let rule_digest = crate::product::logical_codebase::root_recipe_receipt::root_rule_digest(
+            &std::fs::canonicalize(&fixture.aggregate_root).unwrap(),
+        )
+        .unwrap()
+        .expect("root rule digest");
+        let receipt = finalize_root_receipt(
+            &fixture.paths,
+            &fixture.lc_id,
+            &fixture.operation_id,
+            &fixture.aggregate_root,
+            &fixture.policy.digest,
+            &rule_digest,
+        );
+        assert_eq!(receipt.policy_digest, fixture.policy.digest);
+        assert_eq!(receipt.rule_digest, rule_digest);
+
+        // 基线：三源一致 → RulesPolicy Completed；planning_ready 仍受
+        // AggregateIndexActive 独立门控（无 active index）。
+        let ready = fixture.project();
+        assert_eq!(
+            ReadinessFixture::rules_step(&ready).status,
+            LogicalCodebaseBootstrapStepStatus::Completed
+        );
+        assert!(
+            !ready.planning_ready,
+            "aggregate index gate must stay independent"
+        );
+
+        // 根规则内容漂移 → rule_digest_drift。
+        std::fs::write(&entry, "# aggregate root rules (drifted)\n").unwrap();
+        let drifted = fixture.project();
+        let rules = ReadinessFixture::rules_step(&drifted);
+        assert_eq!(
+            rules.status,
+            LogicalCodebaseBootstrapStepStatus::WaitingForHuman
+        );
+        assert_eq!(
+            rules.failure.as_ref().unwrap().reason_code,
+            "rule_digest_drift"
+        );
+        assert!(!drifted.planning_ready);
+
+        // 根规则缺失 → root_rule_missing。
+        std::fs::remove_file(&entry).unwrap();
+        let missing = fixture.project();
+        assert_eq!(
+            ReadinessFixture::rules_step(&missing)
+                .failure
+                .as_ref()
+                .unwrap()
+                .reason_code,
+            "root_rule_missing"
+        );
+        assert!(!missing.planning_ready);
+
+        // 恢复一致 → Completed（可重入谓词）。
+        std::fs::write(&entry, root_rule_text).unwrap();
+        assert_eq!(
+            ReadinessFixture::rules_step(&fixture.project()).status,
+            LogicalCodebaseBootstrapStepStatus::Completed
+        );
+
+        // policy 升级（digest 前移）→ receipt 冻结摘要漂移。
+        let revised = fixture.policy.with_revised_policy(
+            "# Aggregate policy (revised)\n",
+            "2026-10-01T00:30:00Z".to_string(),
+        );
+        crate::product::logical_codebase::policy::AggregatePolicyArtifactStore::for_lc(
+            fixture.paths.clone(),
+            &fixture.lc_id,
+        )
+        .save("project_0001", &revised)
+        .unwrap();
+        let policy_drift = fixture.project();
+        let rules = ReadinessFixture::rules_step(&policy_drift);
+        assert_eq!(
+            rules.status,
+            LogicalCodebaseBootstrapStepStatus::WaitingForHuman
+        );
+        assert_eq!(
+            rules.failure.as_ref().unwrap().reason_code,
+            "policy_digest_drift"
+        );
+        assert!(!policy_drift.planning_ready);
+
+        // authority root 漂移（manifest 指向别的 root）→ receipt 冻结的
+        // canonical root 失配。
+        let other_root = fixture.temp.path().join("other-root");
+        std::fs::create_dir_all(&other_root).unwrap();
+        let mut moved = fixture.manifest.clone();
+        moved.provider_context_root = other_root;
+        LogicalCodebaseStore::for_lc(fixture.paths.clone(), &fixture.lc_id)
+            .save_manifest("project_0001", &moved)
+            .unwrap();
+        let authority_drift = fixture.project();
+        let rules = ReadinessFixture::rules_step(&authority_drift);
+        assert_eq!(
+            rules.failure.as_ref().unwrap().reason_code,
+            "root_receipt_authority_drift"
+        );
+        assert!(!authority_drift.planning_ready);
+    }
+
+    /// Task 1.6（REQ-REG-10）：readiness GET 投影零写入、可重复读、零副作用
+    /// 通道——不启动 provider/index/checkout；等待项给出可操作 allowed
+    /// actions；bootstrap 服务侧的 run 探针/重建派发计数保持不变。
+    #[test]
+    fn readiness_projection_is_read_only() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let fixture = readiness_fixture("aggregate_initialization_readiness_0003");
+        std::fs::write(
+            fixture.aggregate_root.join("AGENTS.md"),
+            "# aggregate root rules\n",
+        )
+        .unwrap();
+
+        let inventory_before = full_tree_inventory(fixture.temp.path());
+
+        let probe_calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let rebuilds = std::sync::Arc::new(AtomicUsize::new(0));
+        let _service = LogicalCodebaseBootstrapService::new(fixture.paths.clone())
+            .with_member_index_run_probe({
+                let probe_calls = probe_calls.clone();
+                std::sync::Arc::new(move |_project: &str, _lc: &str, _operation: &str| {
+                    probe_calls.fetch_add(1, Ordering::SeqCst);
+                    true
+                })
+            })
+            .with_aggregate_index_rebuild({
+                let rebuilds = rebuilds.clone();
+                std::sync::Arc::new(move |_project: &str, _command: &str, _revision: u64| {
+                    rebuilds.fetch_add(1, Ordering::SeqCst);
+                    Err(AggregateIndexError::Failed {
+                        code: "unexpected_rebuild",
+                        message: "readiness GET must not dispatch rebuilds".to_string(),
+                    })
+                })
+            });
+
+        let first = fixture.project();
+        let second = fixture.project();
+        assert_eq!(
+            first, second,
+            "repeated GET must re-read the same durable facts without side effects"
+        );
+        assert!(!first.planning_ready);
+        let rules = ReadinessFixture::rules_step(&first);
+        assert_eq!(
+            rules.status,
+            LogicalCodebaseBootstrapStepStatus::WaitingForHuman
+        );
+        assert!(!rules.allowed_actions.is_empty());
+        for action in &rules.allowed_actions {
+            assert!(
+                ["prepare", "continue", "retry", "revalidate", "repair"].contains(&action.as_str()),
+                "allowed actions must stay operable product verbs"
+            );
+        }
+
+        let inventory_after = full_tree_inventory(fixture.temp.path());
+        assert_eq!(
+            inventory_before, inventory_after,
+            "readiness GET must not write any durable fact (app data or aggregate root)"
+        );
+        assert_eq!(probe_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(rebuilds.load(Ordering::SeqCst), 0);
     }
 
     fn seed_failed_aggregate_index_record(
