@@ -9,7 +9,7 @@
 //!
 //! 任一复验失败都 fail-closed 为 `ProviderGatewayError::{Target, TargetMismatch}`。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use uuid::Uuid;
 
@@ -244,6 +244,62 @@ impl ProviderCapabilitySource for StoreBackedProviderCapabilitySource {
             resume_evidence: record.resume_evidence,
         })
     }
+}
+
+/// Task 2.8（映射 tasks.md 2.2；REQ-ENV-10 双工厂 root assertion）：四路
+/// canonical LC root 投影的一致性断言。
+///
+/// - `registration_root`：登记工厂投影（`LogicalCodebaseRecord.aggregate_root`）；
+/// - `aggregate_root`：aggregate 生产 driver 投影（root recipe receipt 冻结
+///   的 canonical root，源自 preflight snapshot root）；
+/// - `authority_root`：gateway 工厂投影（manifest `provider_context_root`）；
+/// - `envelope_working_directory`：envelope 冻结的会话 cwd（root-cwd 契约：
+///   LC 会话 cwd 即 canonical LC root，REQ-ENV-01/10）。
+///
+/// 全部在场投影必须 canonical 相等（含空格/symlink 形态差异），任一不一致
+/// 或 canonicalize 失败都 fail-closed 为 `TargetMismatch`/`Target`
+/// （zero spawn），绝不允许「一个 root 生成配置、另一个 root 消费配置」。
+/// `registration_root`/`aggregate_root` 为 `None` 表示该投影尚未落盘
+/// （bootstrap 早期/legacy 无 receipt），不视为不一致。返回一致的
+/// canonical root 供调用方复用。
+pub fn assert_canonical_lc_root_consistent(
+    registration_root: Option<&Path>,
+    aggregate_root: Option<&Path>,
+    authority_root: &Path,
+    envelope_working_directory: &Path,
+) -> Result<PathBuf, ProviderGatewayError> {
+    fn canonical(
+        label: &str,
+        path: &Path,
+    ) -> Result<PathBuf, ProviderGatewayError> {
+        path.canonicalize().map_err(|error| {
+            ProviderGatewayError::Target(format!(
+                "canonicalize {label} {}: {error}",
+                path.display()
+            ))
+        })
+    }
+
+    let canonical_authority = canonical("authority root", authority_root)?;
+    let canonical_cwd = canonical("working directory", envelope_working_directory)?;
+    if canonical_cwd != canonical_authority {
+        return Err(ProviderGatewayError::TargetMismatch {
+            field: "lc_root".to_string(),
+        });
+    }
+    for (field, root) in [
+        ("registration_root", registration_root),
+        ("aggregate_root", aggregate_root),
+    ] {
+        if let Some(root) = root
+            && canonical(field, root)? != canonical_authority
+        {
+            return Err(ProviderGatewayError::TargetMismatch {
+                field: field.to_string(),
+            });
+        }
+    }
+    Ok(canonical_authority)
 }
 
 /// 校验 worktree 的 `.git` 归属(REQ-ENV-03 的 git-dir identity 复验)。

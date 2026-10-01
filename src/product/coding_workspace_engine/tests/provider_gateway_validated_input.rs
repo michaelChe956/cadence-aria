@@ -142,7 +142,14 @@ fn build_gateway_with_registry(
     registry: Arc<ProviderRegistry>,
     audit: Arc<GatewayRunAudit>,
 ) -> LogicalCodebaseProviderGateway {
-    let manifest = LogicalCodebaseManifest::new(project_id, paths.root().to_path_buf(), vec![]);
+    // Task 2.8（cwd authority 契约）：真实拓扑成员 worktree 位于聚合根之下；
+    // 本 fixture 的 worktree 在 workspace root（.aria 的父目录），manifest
+    // root 取该公共父目录，否则 cwd 会被 gateway authority 早门拒绝。
+    let manifest = LogicalCodebaseManifest::new(
+        project_id,
+        paths.root().parent().unwrap().to_path_buf(),
+        vec![],
+    );
     let policies = AggregatePolicyArtifactStore::new(paths.clone());
     policies
         .ensure_bootstrap(&manifest)

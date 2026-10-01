@@ -114,6 +114,7 @@ pub use policy::{
 };
 pub use production_policy_resolvers::{
     ProductionPolicyTargetResolver, StoreBackedProviderCapabilitySource,
+    assert_canonical_lc_root_consistent,
 };
 pub use provider_capability_store::{
     CapabilityEvidence, ProviderCapabilityRecord, ProviderCapabilityStore,

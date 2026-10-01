@@ -375,14 +375,17 @@ async fn non_default_lc_coding_gateway_validate_resolves_lc_scoped_checkout_targ
             description: None,
         })
         .expect("create project");
-    let aggregate_root = root.path().join("aggregate-root");
+    // Task 2.8（cwd authority 契约）：真实拓扑成员 checkout 位于聚合根之下；
+    // 本 fixture 的 worktree 是 root/api（root 直接子目录），聚合根取
+    // root.path()（真实公共父目录），否则 cwd 会被 gateway 拒绝。
+    let aggregate_root = root.path().to_path_buf();
     std::fs::create_dir_all(&aggregate_root).expect("create aggregate root");
     let record = LogicalCodebaseStore::new(paths.clone())
         .create(
             &project.id,
             cadence_aria::product::logical_codebase::LogicalCodebaseCreateInput {
                 name: "new-lc".to_string(),
-                aggregate_root,
+                aggregate_root: aggregate_root.clone(),
             },
         )
         .expect("create logical codebase record");
@@ -409,7 +412,7 @@ async fn non_default_lc_coding_gateway_validate_resolves_lc_scoped_checkout_targ
             &project.id,
             &LogicalCodebaseManifest::new(
                 &project.id,
-                root.path().join("aggregate-root"),
+                aggregate_root.clone(),
                 vec![logical_id],
             ),
         )
@@ -752,7 +755,13 @@ fn build_gateway_with_registry(
         Arc::new(StubSyncAdapter),
         always_available_gate(),
         audit,
-        paths.root().to_path_buf(),
+        // Task 2.8（cwd authority 契约）：authority = workspace root（.aria
+        // 的父目录）——coding cwd（成员 worktree）位于其下。
+        paths
+            .root()
+            .parent()
+            .expect("workspace root parent")
+            .to_path_buf(),
     )
 }
 
@@ -915,9 +924,17 @@ fn with_target_snapshot(
 fn seed_logical_codebase_checkout(store: &CodingAttemptStore, attempt: &CodingExecutionAttempt) {
     let target = attempt.target_snapshot.as_ref().expect("target snapshot");
     let logical_store = LogicalCodebaseStore::new(store.paths());
+    // Task 2.8（cwd authority 契约）：worktree 位于 workspace root（.aria 的
+    // 父目录）之下；manifest 根取该真实公共父目录，否则 coding cwd 会被
+    // gateway authority 门拒绝。
     let manifest = LogicalCodebaseManifest::new(
         &attempt.project_id,
-        store.paths().root().to_path_buf(),
+        store
+            .paths()
+            .root()
+            .parent()
+            .expect("workspace root parent")
+            .to_path_buf(),
         vec![target.logical_repository_id],
     );
     logical_store

@@ -218,11 +218,15 @@ pub(crate) fn single_repository_enable_body(fixture: &Fixture) -> serde_json::Va
 }
 
 fn seed_logical_codebase(paths: &ProductAppPaths, members: &[(LogicalRepositoryId, &str)]) {
-    // planning resolver 读取 manifest 的 provider_context_root 时要求目录存在。
-    std::fs::create_dir_all(paths.root().join("aggregate-root")).unwrap();
+    // Task 2.8（cwd authority 契约）：真实 LC 拓扑里成员 checkout 位于
+    // canonical 聚合根（CommonNonGitParent）之下。本 seed 的 checkout 是
+    // paths.root() 的直接子目录，故 manifest.provider_context_root 取
+    // paths.root()（真实公共父目录）——cwd 越出 authority 会被 gateway
+    // fail-closed。planning resolver 要求 provider_context_root 目录存在
+    // （workspace root 本身存在）。
     let manifest = LogicalCodebaseManifest::new(
         PROJECT_ID,
-        paths.root().join("aggregate-root"),
+        paths.root().to_path_buf(),
         members.iter().map(|(id, _)| *id).collect(),
     );
     LogicalCodebaseStore::new(paths.clone())

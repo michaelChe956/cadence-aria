@@ -1,5 +1,6 @@
 //! Web 层 `LogicalCodebaseGatewayFactory`:为指定 project 组装 gateway。
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::cross_cutting::provider_adapter::ProviderAdapter;
@@ -111,6 +112,24 @@ impl LogicalCodebaseGatewayFactory {
         let authority_root = std::fs::canonicalize(&manifest.provider_context_root)
             .unwrap_or_else(|_| manifest.provider_context_root.clone());
 
+        // Task 2.8（映射 tasks.md 2.2；REQ-ENV-10 双工厂 root assertion）：
+        // manifest authority root 与登记工厂（record.aggregate_root）、
+        // aggregate 生产 driver（root recipe receipt 冻结的 canonical root）
+        // 的投影 canonical 一致才组装 gateway；任一不一致 fail-closed
+        // （zero spawn——gateway 不产出，后续所有启动为零）。投影缺失
+        // （bootstrap 早期/legacy 无 receipt/纯单仓无 LC 作用域）不视为
+        // 不一致；envelope cwd 投影 = manifest root（LC 会话 cwd 契约）。
+        let registration_root = self.load_registration_root(project_id, lc_id.as_deref())?;
+        let aggregate_root = self.load_aggregate_driver_root(project_id, lc_id.as_deref())?;
+        if registration_root.is_some() || aggregate_root.is_some() {
+            crate::product::logical_codebase::assert_canonical_lc_root_consistent(
+                registration_root.as_deref(),
+                aggregate_root.as_deref(),
+                &authority_root,
+                &manifest.provider_context_root,
+            )?;
+        }
+
         Ok(LogicalCodebaseProviderGateway::with_audit(
             policies,
             Arc::new(StoreBackedProviderCapabilitySource::with_store(
@@ -129,6 +148,101 @@ impl LogicalCodebaseGatewayFactory {
             self.audit.clone(),
             authority_root,
         ))
+    }
+}
+
+impl LogicalCodebaseGatewayFactory {
+    /// 登记工厂的 root 投影：LC 作用域内 `record.json` 的
+    /// `aggregate_root`（登记时冻结）。record 缺失/无 LC 作用域 → `Ok(None)`
+    /// （不视为不一致）；record 在场但不可读/损坏 → fail-closed（不把损坏
+    /// 投影当缺失放行）。
+    fn load_registration_root(
+        &self,
+        project_id: &str,
+        lc_id: Option<&str>,
+    ) -> Result<Option<PathBuf>, ProviderGatewayError> {
+        let Some(lc_id) = lc_id else {
+            return Ok(None);
+        };
+        let record_path = self
+            .paths
+            .logical_codebase_record_root(project_id, lc_id)
+            .join("record.json");
+        if !record_path
+            .try_exists()
+            .map_err(|error| ProviderGatewayError::PolicyMissing(format!(
+                "{project_id}: read registration record existence: {error}"
+            )))?
+        {
+            return Ok(None);
+        }
+        let record = crate::product::json_store::read_json::<
+            crate::product::logical_codebase::store::LogicalCodebaseRecord,
+        >(&record_path)
+        .map_err(ProviderGatewayError::policy)?;
+        Ok(Some(record.aggregate_root))
+    }
+
+    /// aggregate 生产 driver 的 root 投影：LC 作用域内全部已 finalize 的
+    /// root recipe receipt 冻结的 `canonical_root`（源自 aggregate
+    /// preflight snapshot root）。receipt 缺失/无 LC 作用域 → `Ok(None)`；
+    /// 在场 receipt 不可读/损坏，或多个 receipt 根彼此不一致（LC 换根残留）
+    /// → fail-closed。
+    fn load_aggregate_driver_root(
+        &self,
+        project_id: &str,
+        lc_id: Option<&str>,
+    ) -> Result<Option<PathBuf>, ProviderGatewayError> {
+        let Some(lc_id) = lc_id else {
+            return Ok(None);
+        };
+        let scope = crate::product::logical_codebase::store::lc_scope_root(
+            &self.paths,
+            project_id,
+            &Some(lc_id.to_string()),
+        )
+        .map_err(ProviderGatewayError::policy)?;
+        let receipts_dir = scope.join("aggregate-recipe-receipts");
+        if !receipts_dir
+            .try_exists()
+            .map_err(|error| ProviderGatewayError::PolicyMissing(format!(
+                "{project_id}: read aggregate receipts existence: {error}"
+            )))?
+        {
+            return Ok(None);
+        }
+        let entries = std::fs::read_dir(&receipts_dir).map_err(|error| {
+            ProviderGatewayError::Target(format!(
+                "read aggregate receipts {}: {error}",
+                receipts_dir.display()
+            ))
+        })?;
+        let mut roots: Vec<PathBuf> = Vec::new();
+        for entry in entries {
+            let path = entry
+                .map_err(|error| {
+                    ProviderGatewayError::Target(format!(
+                        "read aggregate receipt entry: {error}"
+                    ))
+                })?
+                .path();
+            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            let receipt: crate::product::logical_codebase::RootRecipeReceipt =
+                crate::product::json_store::read_json(&path)
+                    .map_err(ProviderGatewayError::policy)?;
+            if !roots.contains(&receipt.canonical_root) {
+                roots.push(receipt.canonical_root);
+            }
+        }
+        match roots.len() {
+            0 => Ok(None),
+            1 => Ok(roots.into_iter().next()),
+            _ => Err(ProviderGatewayError::TargetMismatch {
+                field: "aggregate_root".to_string(),
+            }),
+        }
     }
 }
 

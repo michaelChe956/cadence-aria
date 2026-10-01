@@ -772,6 +772,17 @@ impl LogicalCodebaseProviderGateway {
         )
         .map_err(ProviderGatewayError::policy)?;
 
+        // Task 2.8（REQ-ENV-11 cwd authority 早门）：envelope 冻结的独立 cwd
+        // 必须位于 authority root 允许范围。此处为词法前缀早门（validate 时
+        // 点 cwd 目录允许尚不存在）；canonical 复验（symlink 逃逸/外来根）
+        // 在 `revalidate_before_spawn` 强制——spawn 不可能绕过。越界即
+        // fail-closed，绝不回落 target cwd。
+        if !envelope.working_directory.starts_with(&self.authority_root) {
+            return Err(ProviderGatewayError::TargetMismatch {
+                field: "cwd_authority".to_string(),
+            });
+        }
+
         let fingerprint = SessionResumeFingerprint::from_envelope(
             &envelope,
             &capability.version,
@@ -968,8 +979,11 @@ impl LogicalCodebaseProviderGateway {
     ///    与 envelope 冻结的 `config_digest` 一致(防托管配置被篡改)。
     /// 4. **resume 能力**(B-2):若启动为 resume,provider 的 `resume_evidence` 必须
     ///    `Confirmed`,否则 fail-closed 为 `ResumeNotSupported`。
-    /// 5. **canonical cwd/worktree identity**:重新 canonicalize cwd 与 target
-    ///    worktree,不一致返回 `TargetMismatch { field: "cwd" }`。
+    /// 5. **canonical cwd 权威**(Task 2.8):重新 canonicalize spawn cwd 与
+    ///    envelope 冻结的独立 `working_directory`,不一致返回
+    ///    `TargetMismatch { field: "cwd" }`;冻结 cwd 越出 authority root
+    ///    返回 `TargetMismatch { field: "cwd_authority" }`。cwd 与 target 是
+    ///    独立维度,cwd≠target 的合法分离形态放行;target identity 由 5b 复验。
     /// 6. **availability**:调用 availability gate,不可用返回 `ProviderUnavailable`。
     ///
     /// 任一维度漂移都发生在 registry lookup 之前。路由级 fail-closed 不等于 OS
@@ -1050,19 +1064,39 @@ impl LogicalCodebaseProviderGateway {
             });
         }
 
-        // 5. canonical cwd/worktree identity。
+        // 5. canonical cwd 权威复验（Task 2.8：拆除「canonical cwd ==
+        //    canonical target」错误等式——cwd 与 target 是两个独立维度，
+        //    cwd≠target 的合法分离形态放行）。
+        //    a) spawn 时点 cwd 必须仍与 envelope 冻结的独立 canonical
+        //       working_directory 一致（validate→spawn 间被调包 →
+        //       fail-closed；Task 2.5 冻结字段在此消费）；
+        //    b) 冻结 cwd canonicalize 后必须位于 authority root 允许范围
+        //       （REQ-ENV-11）——symlink 逃逸/外来根（root factory 不一致）
+        //       零 spawn。target 的 canonical/git identity 复验由 5b 独立
+        //       保留，不受 cwd 维度影响。
         let canonical_cwd = cwd.canonicalize().map_err(|error| {
             ProviderGatewayError::Target(format!("canonicalize cwd {}: {error}", cwd.display()))
         })?;
-        let canonical_target = envelope.target.worktree.canonicalize().map_err(|error| {
+        let canonical_frozen_cwd = envelope.working_directory.canonicalize().map_err(|error| {
             ProviderGatewayError::Target(format!(
-                "canonicalize target {}: {error}",
-                envelope.target.worktree.display()
+                "canonicalize working directory {}: {error}",
+                envelope.working_directory.display()
             ))
         })?;
-        if canonical_cwd != canonical_target {
+        if canonical_cwd != canonical_frozen_cwd {
             return Err(ProviderGatewayError::TargetMismatch {
                 field: "cwd".to_string(),
+            });
+        }
+        let canonical_authority = self.authority_root.canonicalize().map_err(|error| {
+            ProviderGatewayError::Target(format!(
+                "canonicalize authority root {}: {error}",
+                self.authority_root.display()
+            ))
+        })?;
+        if !canonical_frozen_cwd.starts_with(&canonical_authority) {
+            return Err(ProviderGatewayError::TargetMismatch {
+                field: "cwd_authority".to_string(),
             });
         }
 
