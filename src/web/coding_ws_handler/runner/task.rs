@@ -120,6 +120,7 @@ async fn run_coding_runner_task_body(
         event_tx.clone(),
     )
     .with_cancellation(cancellation.clone());
+    let mut gateway_build_failure: Option<CodingWorkspaceEngineError> = None;
     if attempt.target_snapshot.is_some()
         && let Some(factory) = state.gateway_factory()
     {
@@ -132,9 +133,25 @@ async fn run_coding_runner_task_body(
         .resolve_for_issue(&attempt.project_id, &attempt.issue_id)
         .map(|authority| authority.and_then(|r| r.target.logical_codebase_id));
         let gateway = match resolved {
-            Ok(lc_id) => factory
-                .build_for_lc(&attempt.project_id, lc_id.as_deref())
-                .ok(),
+            // Task 2.8 fix round 1（P1）：LC 作用域的 gateway 组装失败（含
+            // 双工厂 root 投影不一致 fail-closed）必须中止启动——`.ok()`
+            // 静默降级会把「root 不一致 zero spawn」反转成无门禁窗口。
+            // 错误短路 start 流程（provider 零启动），经下方 F-14 失败路径
+            // 双通道可见化（manual-recovery diagnostic + protocol error）。
+            Ok(Some(lc_id)) => {
+                match factory.build_for_lc(&attempt.project_id, Some(lc_id.as_str())) {
+                    Ok(gateway) => Some(gateway),
+                    Err(error) => {
+                        gateway_build_failure =
+                            Some(CodingWorkspaceEngineError::ProviderStream(format!(
+                                "logical gateway factory build failed: {error}"
+                            )));
+                        None
+                    }
+                }
+            }
+            // 无 LC 作用域（单仓/legacy 直连契约）：保持既有降级，不阻断。
+            Ok(None) => factory.build_for_lc(&attempt.project_id, None).ok(),
             Err(error) => {
                 tracing::warn!(
                     project_id = attempt.project_id.as_str(),
@@ -149,15 +166,22 @@ async fn run_coding_runner_task_body(
             engine = engine.with_logical_provider_gateway(Arc::new(gateway));
         }
     }
-    let result = execute_start_coding_flow(
-        &state,
-        &coding_store,
-        &engine,
-        &event_tx,
-        command_rx,
-        &attempt,
-    )
-    .await;
+    // 工厂组装失败即中止：不进入 start 流程（零 provider 启动），错误走
+    // 与 runner 死亡同款的 fail-closed 可见化路径。
+    let result = match gateway_build_failure {
+        Some(error) => Err(error),
+        None => {
+            execute_start_coding_flow(
+                &state,
+                &coding_store,
+                &engine,
+                &event_tx,
+                command_rx,
+                &attempt,
+            )
+            .await
+        }
+    };
     if cancellation.is_cancelled() {
         return;
     }

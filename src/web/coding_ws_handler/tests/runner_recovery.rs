@@ -162,6 +162,181 @@ async fn runner_dying_before_provider_moves_running_attempt_to_manual_recovery()
     );
 }
 
+/// Task 2.8 fix round 1（P1）：LC 作用域 attempt 的 gateway 工厂组装失败
+/// （此处以双工厂 root 投影漂移触发：record.aggregate_root ≠ manifest
+/// provider_context_root）必须 fail-closed 中止启动——不得 `.ok()` 静默
+/// 降级成「无 gateway 继续」，那会把「root 不一致 zero spawn」反转成无
+/// 门禁窗口。断言：runner 零 provider 启动即退出、attempt 转
+/// AwaitingManualRecovery（稳定 reason 码）、死因经 manual-recovery
+/// diagnostic 与 coding_start_failed protocol error 双通道可见（携带工厂
+/// 失败原文）。对照面：另两个消费方（workspace manager / aggregate
+/// driver）同错误 map_err 传播。
+#[tokio::test]
+async fn lc_gateway_factory_build_failure_fails_closed_before_provider_spawn() {
+    use crate::product::issue_store::{CreateProductIssueInput, IssueStore};
+    use crate::product::logical_codebase::store::LogicalCodebaseRecord;
+    use crate::product::logical_codebase::{
+        LogicalCodebaseManifest, LogicalCodebaseStore, LogicalRepositoryId,
+        RepositoryCheckoutId,
+    };
+    use crate::product::project_store::{CreateProjectInput, ProjectStore};
+
+    let root = tempfile::tempdir().expect("root");
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let project = ProjectStore::new(paths.clone())
+        .create(CreateProjectInput {
+            name: "gateway root drift project".to_string(),
+            description: None,
+        })
+        .expect("create project");
+    let lc_id = "lc_drift".to_string();
+
+    // 双工厂 root 投影漂移：登记工厂冻结根 A，manifest 权威根 B（A≠B 且都
+    // 真实存在）——resolver 解析成功，工厂组装在 root assertion 处失败。
+    let registration_root = root.path().join("authority a");
+    let manifest_root = root.path().join("authority b");
+    std::fs::create_dir_all(&registration_root).expect("create registration root");
+    std::fs::create_dir_all(&manifest_root).expect("create manifest root");
+    let record_dir = paths.logical_codebase_record_root(&project.id, &lc_id);
+    std::fs::create_dir_all(&record_dir).expect("create lc record dir");
+    crate::product::json_store::write_json(
+        &record_dir.join("record.json"),
+        &LogicalCodebaseRecord {
+            id: lc_id.clone(),
+            name: "lc_drift".to_string(),
+            aggregate_root: registration_root,
+            created_at: "2026-10-02T00:00:00Z".to_string(),
+        },
+    )
+    .expect("write lc record");
+    LogicalCodebaseStore::for_lc(paths.clone(), lc_id.clone())
+        .save_manifest(
+            &project.id,
+            &LogicalCodebaseManifest::new(&project.id, manifest_root, vec![]),
+        )
+        .expect("save lc manifest");
+    let issue = IssueStore::new(paths.clone())
+        .create(CreateProductIssueInput {
+            project_id: project.id.clone(),
+            repo_id: None,
+            logical_codebase_id: Some(lc_id.clone()),
+            title: "gateway drift issue".to_string(),
+            description: None,
+            change_id: None,
+            base_branch: None,
+        })
+        .expect("create lc-attributed issue");
+
+    // LC 作用域 running attempt（target_snapshot 冻结逻辑 target）。
+    let worktree = root.path().join("worktree");
+    std::fs::create_dir_all(&worktree).expect("worktree");
+    let store = CodingAttemptStore::new(paths.clone());
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            project_id: project.id.clone(),
+            issue_id: issue.id.clone(),
+            work_item_id: "work_item_0001".to_string(),
+            base_branch: "HEAD".to_string(),
+            branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
+            worktree_path: Some(worktree.clone()),
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+                permission_modes: Default::default(),
+            },
+            target_snapshot: Some(crate::product::coding_models::AttemptTargetSnapshot {
+                logical_repository_id: LogicalRepositoryId(uuid::Uuid::new_v4()),
+                checkout_id: RepositoryCheckoutId(uuid::Uuid::new_v4()),
+                physical_repository_id: "repository_0001".to_string(),
+                canonical_path: worktree,
+                git_dir_identity: "git-dir-identity".to_string(),
+                revision: None,
+                policy_digest: String::new(),
+                membership_revision: 1,
+                captured_at: "2026-10-02T00:00:00Z".to_string(),
+                capture_source: "runner_recovery".to_string(),
+            }),
+            max_auto_rework: 2,
+        })
+        .expect("create attempt");
+    let attempt = store
+        .seed_running_attempt_for_test(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("admitted running attempt");
+
+    let state = WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    );
+    assert!(
+        state.gateway_factory().is_some(),
+        "default app state must carry the logical gateway factory"
+    );
+
+    let attempt_key = CodingAttemptRunKey::from_attempt(&attempt);
+    let attempt_id = attempt.id.clone();
+    let (event_tx, event_rx) = mpsc::channel(64);
+    let mut event_rx = OutboundEventReceiver::new(event_rx);
+    let _command_tx = spawn_coding_runner(state.clone(), store.clone(), event_tx, attempt)
+        .expect("runner spawned");
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while state.coding_runs.runner_count(&attempt_key) != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("runner must exit after the fail-closed factory error");
+
+    // 零 provider 启动 + fail-closed 状态：attempt 不留 Running（否则 attach
+    // 侧重启形成无门禁窗口循环），转人工恢复并持久稳定 reason 码。
+    let final_attempt = store
+        .get_attempt(&project.id, &issue.id, &attempt_id)
+        .expect("final attempt");
+    assert_eq!(
+        final_attempt.status,
+        CodingAttemptStatus::AwaitingManualRecovery,
+        "LC gateway factory build failure must abort before provider spawn"
+    );
+    assert_eq!(
+        final_attempt.manual_recovery_reason.as_deref(),
+        Some("coding_runner_failed_while_running")
+    );
+
+    // 错误可见（通道 1）：manual-recovery diagnostic 携带工厂失败原文与
+    // 漂移字段，而非退化为含糊的 gateway-missing 错误。
+    let entries = store
+        .list_chat_entries(&project.id, &issue.id, &attempt_id)
+        .expect("chat entries");
+    let diagnostic_visible = entries.iter().any(|entry| {
+        matches!(
+            &entry.entry_type,
+            crate::product::coding_models::CodingEntryType::SystemEvent { message, .. }
+ if message.contains("logical gateway factory build failed")
+                && message.contains("registration_root")
+        )
+    });
+    assert!(
+        diagnostic_visible,
+        "manual-recovery diagnostic must carry the factory failure detail"
+    );
+
+    // 错误可见（通道 2）：protocol error 事件不吞没，且消息含失败原文。
+    let mut saw_protocol_error = false;
+    while let Ok(event) = event_rx.try_recv() {
+        if let CodingWsOutMessage::CodingProtocolError { code, message } = &event
+            && code == "coding_start_failed"
+            && message.contains("logical gateway factory build failed")
+        {
+            saw_protocol_error = true;
+        }
+    }
+    assert!(
+        saw_protocol_error,
+        "factory build failure must surface as coding_start_failed protocol error"
+    );
+}
+
 /// F-16：`awaiting_manual_recovery` 的显式恢复通道。F-14 fail-closed 后
 /// attempt 停在人工恢复态（abort-only），此前无任何 retry/recover 通道
 /// （KimiUpgrade v25 wire 三探测全拒、源码四重印证）。恢复链 = 状态门放行

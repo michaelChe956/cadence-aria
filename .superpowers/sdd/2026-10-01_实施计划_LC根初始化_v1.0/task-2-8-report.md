@@ -51,3 +51,15 @@
 - `provider_admission_check.inc.rs` 步骤 6 仍以 `request.target.worktree` 作复验 cwd——当前全消费方（聚合 driver）cwd==target 零影响；Task 2.1-2.7 接线 root cwd 启动时需改为 `request.working_directory`（已在其 brief 语义内）。
 - 工厂 receipt 扫描取「目录内全部 receipt 根一致」强于「最新一条」；LC 换根残留的旧 receipt 会持续 fail-closed（fail-closed 同向，登记留档）。
 - 生产 wiring（2.1-2.7 调用方迁移到 root cwd）不在本任务；本任务交付门与复验语义。
+
+## Fix round 1（审查 P1）：coding runner LC 作用域工厂组装错误 fail-closed
+
+**Finding（P1）**：`src/web/coding_ws_handler/runner/task.rs:135-138`——LC 作用域 attempt 以 `.ok()` 静默吞掉 `factory.build_for_lc(...)` 错误：无日志无传播，把本任务「root 投影不一致 fail-closed」反转成 fail-open 窗口（gateway=None 时逻辑 attempt 依赖引擎第二道防线拒绝，死因退化为含糊的 gateway-missing，且错误不可见）。另两个消费方（workspace manager、aggregate driver）均正确 map_err 传播。
+
+**修法**：
+- `Ok(Some(lc_id))` 分支：build 错误转 `CodingWorkspaceEngineError::ProviderStream("logical gateway factory build failed: {error}")` 并短路 `execute_start_coding_flow`（**零 provider 启动**），经既有 F-14 失败路径双通道可见化（AwaitingManualRecovery + manual-recovery diagnostic 携带工厂失败原文 + `coding_start_failed` protocol error 事件）。
+- `Ok(None)`（无 LC 作用域/单仓 legacy 直连契约）保持既有降级；resolver `Err` 分支原样（warn + 降级）。
+
+**覆盖测试**：`runner_recovery.rs` 新增 `lc_gateway_factory_build_failure_fails_closed_before_provider_spawn`——record 根≠manifest 根（双工厂 root 漂移）的 LC 作用域 running attempt：断言 runner 零启动即退出、attempt 转 AwaitingManualRecovery（稳定 reason 码）、diagnostic 含「logical gateway factory build failed」+「registration_root」、protocol error 事件含失败原文。先红（旧行为 `.ok()` 降级）→ 后绿。
+
+**验证**：新测试 1 passed；`runner_recovery` 8/8、`coding_ws_handler` 127/127；全量 lib **3963/0**；it_web **354/0**；it_core large_file_guard 绿（task.rs 318 行/runner_recovery.rs 860 行均低于上限）；it_product 仍为同 2 例**预存在**失败（基线 stash 已复现，非本修复引入）。
