@@ -101,9 +101,58 @@ impl AggregateProviderTurnDriver for GatewayFactoryProviderTurnDriver {
             ),
         };
         driver
-            .run_turn(project_id, operation_id, step, preflight, lc_id, cancellation)
+            .run_turn(
+                project_id,
+                operation_id,
+                step,
+                preflight,
+                lc_id,
+                cancellation,
+            )
             .await
     }
+}
+
+/// Task 1.3（REQ-REG-14）：生产 trust 前置门装配。真实 home 只作为
+/// adapter 默认参数进入（CodexTrustAdapter/KimiTrustAdapter 的
+/// `production()`）；fake runtime 下指向 workspace 内安全根，绝不触碰
+/// 真实用户 home（与 `aggregate_skills_home` 同一防护语义）。
+fn production_provider_trust_precondition(
+    state: &WebAppState,
+    paths: &ProductAppPaths,
+) -> Result<Arc<dyn crate::product::logical_codebase::ProviderTrustPrecondition>, ApiError> {
+    let fake_runtime = !state
+        .runtime
+        .lock()
+        .expect("web runtime lock")
+        .enforces_real_provider_availability();
+    let home = if fake_runtime {
+        state.workspace_root.clone()
+    } else {
+        std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(std::path::PathBuf::from)
+            .filter(|home| home.is_absolute())
+            .ok_or_else(|| {
+                ApiError::runtime(
+                    "provider_trust_home_unavailable",
+                    "HOME or USERPROFILE must be an absolute path",
+                    serde_json::json!({}),
+                )
+            })?
+    };
+    let registry = crate::product::logical_codebase::HomeBackedProviderTrustRegistry::new(
+        paths.clone(),
+        vec![
+            std::sync::Arc::new(
+                crate::product::logical_codebase::CodexTrustAdapter::for_home(&home),
+            ),
+            std::sync::Arc::new(
+                crate::product::logical_codebase::KimiTrustAdapter::for_home(&home),
+            ),
+        ],
+    );
+    Ok(Arc::new(registry))
 }
 
 impl AggregateInitializationDependencies {
@@ -123,12 +172,11 @@ impl AggregateInitializationDependencies {
             Arc::new(CadenceAggregateSkillsPreparation { manager });
         let preflight: Arc<dyn AggregatePreflightService> =
             Arc::new(DeterministicAggregatePreflightService::new(paths.clone()));
-        let provider: Arc<dyn AggregateProviderTurnDriver> = Arc::new(
-            GatewayFactoryProviderTurnDriver::new(
+        let provider: Arc<dyn AggregateProviderTurnDriver> =
+            Arc::new(GatewayFactoryProviderTurnDriver::new(
                 state.gateway_factory().cloned(),
                 Some(paths.clone()),
-            ),
-        );
+            ));
         let operations = AggregateInitializationOperationStore::new(paths.clone());
         let clock: Arc<dyn Fn() -> String + Send + Sync> =
             Arc::new(|| chrono::Utc::now().to_rfc3339());
@@ -141,15 +189,15 @@ impl AggregateInitializationDependencies {
             clock,
         ));
         let index = Arc::new(AggregateIndexOperation::new(
-            paths,
+            paths.clone(),
             CodeGraphCli::new(state.command_runner.clone(), "codegraph".to_string()),
             CodeGraphExcludeGenerator,
         ));
-        Ok(Self::with_index(
-            coordinator,
-            InitializationRunRegistry::default(),
-            index,
-        ))
+        let trust = production_provider_trust_precondition(state, &paths)?;
+        Ok(
+            Self::with_index(coordinator, InitializationRunRegistry::default(), index)
+                .with_trust(trust),
+        )
     }
 }
 

@@ -24,6 +24,9 @@ pub mod production_policy_resolvers;
 pub mod provider_admission_preflight;
 pub mod provider_capability_store;
 pub mod provider_gateway;
+pub mod provider_trust;
+pub mod provider_trust_adapters;
+pub mod provider_trust_store;
 pub mod reference_scanner;
 pub mod registration;
 pub mod registration_preflight_snapshot_store;
@@ -121,6 +124,21 @@ pub use provider_gateway::{
     PolicyTargetResolver, ProviderCapability, ProviderCapabilitySource, ProviderGatewayError,
     ProviderRef, ProviderRefType, SessionLaunchRequest, SessionResumeFingerprint,
     ValidatedSessionLaunchPolicy,
+};
+pub use provider_trust::{
+    HomeBackedProviderTrustRegistry, ProviderTrustAction, ProviderTrustError,
+    ProviderTrustOwnership, ProviderTrustPrecondition, ProviderTrustPreparationResult,
+    ProviderTrustRegistration, ProviderTrustRegistrationResult, ProviderTrustRegistry,
+    ProviderTrustRevocation, ProviderTrustRevocationOutcome, ProviderTrustVerification,
+    ProviderTrustWaiting, requires_workspace_trust,
+};
+pub use provider_trust_adapters::{
+    CodexTrustAdapter, KimiTrustAdapter, ProviderTrustEntryState, ProviderTrustHomeAdapter,
+    ProviderTrustWriteOutcome,
+};
+pub use provider_trust_store::{
+    ProviderTrustAuditRecord, ProviderTrustOwnershipRecord, ProviderTrustStore,
+    ProviderTrustWaitingRecord,
 };
 pub use reference_scanner::{
     RepositoryReference, RepositoryReferenceReport, RepositoryReferenceScanner,

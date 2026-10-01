@@ -118,6 +118,30 @@ impl ProductAppPaths {
             .join("aggregate-initializations")
     }
 
+    /// v1.3/REQ-REG-14：per-LC trust durable facts 的 legacy 别名 scope
+    /// 常量（per-LC 布局由 `ProviderTrustStore` 的 `lc_scope_root` 决定）。
+    pub fn provider_trust_root(&self, project_id: &str) -> PathBuf {
+        self.logical_codebase_root(project_id)
+            .join("provider-trust")
+    }
+
+    pub fn provider_trust_registrations_root(&self, project_id: &str) -> PathBuf {
+        self.provider_trust_root(project_id).join("registrations")
+    }
+
+    pub fn provider_trust_waiting_root(&self, project_id: &str) -> PathBuf {
+        self.provider_trust_root(project_id).join("waiting")
+    }
+
+    pub fn provider_trust_audit_root(&self, project_id: &str) -> PathBuf {
+        self.provider_trust_root(project_id).join("audit")
+    }
+
+    pub fn provider_trust_lock_path(&self, project_id: &str) -> PathBuf {
+        self.logical_codebase_root(project_id)
+            .join(".provider-trust.lock")
+    }
+
     pub fn codebase_selection_path(&self, project_id: &str, issue_id: &str) -> PathBuf {
         self.issue_root(project_id, issue_id)
             .join("codebase-selection.json")
@@ -183,6 +207,36 @@ mod tests {
             paths.identity_migration_lock_path("project_0001"),
             std::path::PathBuf::from(
                 "/tmp/aria/projects/project_0001/logical-codebase/.identity-migration.lock"
+            )
+        );
+        assert_eq!(
+            paths.provider_trust_root("project_0001"),
+            std::path::PathBuf::from(
+                "/tmp/aria/projects/project_0001/logical-codebase/provider-trust"
+            )
+        );
+        assert_eq!(
+            paths.provider_trust_registrations_root("project_0001"),
+            std::path::PathBuf::from(
+                "/tmp/aria/projects/project_0001/logical-codebase/provider-trust/registrations"
+            )
+        );
+        assert_eq!(
+            paths.provider_trust_waiting_root("project_0001"),
+            std::path::PathBuf::from(
+                "/tmp/aria/projects/project_0001/logical-codebase/provider-trust/waiting"
+            )
+        );
+        assert_eq!(
+            paths.provider_trust_audit_root("project_0001"),
+            std::path::PathBuf::from(
+                "/tmp/aria/projects/project_0001/logical-codebase/provider-trust/audit"
+            )
+        );
+        assert_eq!(
+            paths.provider_trust_lock_path("project_0001"),
+            std::path::PathBuf::from(
+                "/tmp/aria/projects/project_0001/logical-codebase/.provider-trust.lock"
             )
         );
     }

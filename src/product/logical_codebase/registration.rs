@@ -3,10 +3,9 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 #[cfg(test)]
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
-};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use std::sync::Arc;
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -18,10 +17,10 @@ use crate::product::coding_attempt_store::locking::with_exact_exclusive_lock;
 use crate::product::id::repo_hash_for_path;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::logical_codebase::{
-    CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, IdentityRegistryEntry,
-    IdentityRegistryState, IdentityRegistryStore, LogicalCodebaseStore, LogicalRepositoryId,
-    MemberStatus, RepositoryCheckoutId, RepositoryCheckoutRecord, RepositorySourceIdentity,
-    RepositoryType,
+    CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, HomeBackedProviderTrustRegistry,
+    IdentityRegistryEntry, IdentityRegistryState, IdentityRegistryStore, LogicalCodebaseStore,
+    LogicalRepositoryId, MemberStatus, ProviderTrustHomeAdapter, RepositoryCheckoutId,
+    RepositoryCheckoutRecord, RepositorySourceIdentity, RepositoryType,
 };
 use crate::product::repository_store::{canonicalize_repo_path, resolve_repository_source};
 
@@ -277,6 +276,21 @@ pub struct LogicalCodebaseRegistrationCoordinator {
     lc_id: Option<String>,
     #[cfg(test)]
     failure_after_completed_items: Arc<AtomicUsize>,
+}
+
+impl LogicalCodebaseRegistrationCoordinator {
+    /// REQ-REG-09 → REQ-REG-14 接线：LC 根准入冻结 canonical root 后、
+    /// Claude Code 五步 recipe 启动前的 provider trust 硬前置门装配
+    /// seam。registration 链本身不承载任何用户 home 文件写入——Codex
+    /// config.toml 与 Kimi workspace-trust 的写入/撤销全部由
+    /// provider_trust_adapters 的用户级 adapter 独立完成，registry 方法
+    /// 按 (project_id, lc_id) 调用点 scope durable facts。
+    pub fn provider_trust_registry(
+        &self,
+        adapters: Vec<Arc<dyn ProviderTrustHomeAdapter>>,
+    ) -> HomeBackedProviderTrustRegistry {
+        HomeBackedProviderTrustRegistry::new(self.paths.clone(), adapters)
+    }
 }
 
 include!("registration_batch.inc.rs");
