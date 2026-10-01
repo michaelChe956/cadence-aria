@@ -31,6 +31,8 @@ const IDENTITY_MIGRATION_JOURNAL_FILE: &str = "identity-migration.json";
 
 include!("migration_types.inc.rs");
 include!("migration_executor.inc.rs");
+include!("migration_executor_backfill.inc.rs");
+include!("migration_executor_repair.inc.rs");
 include!("migration_verifier.inc.rs");
 include!("migration_helpers.inc.rs");
 include!("migration_tests.inc.rs");
