@@ -277,19 +277,61 @@ async fn aggregate_initialization_cancel_stops_at_provider_step_boundary() {
 async fn aggregate_initialization_get_recovers_running_operation_without_lease() {
     let fixture = AggregateInitializationHttpFixture::new().await;
     fixture.seed_running_without_lease("operation_interrupted");
+    // 中断残留 staging：显式恢复动作应清理，GET 不得清理。
+    let store = AggregateInitializationOperationStore::new(ProductAppPaths::new(
+        fixture.root.join(".aria"),
+    ));
+    let staging_root = store
+        .staging_path("project_0001", "operation_interrupted")
+        .expect("staging path");
+    std::fs::create_dir_all(&staging_root).expect("staging dir");
+    std::fs::write(staging_root.join("partial-member-projection.json"), "{}")
+        .expect("staging residue");
+
+    let uri = "/api/projects/project_0001/logical-codebase/initializations/operation_interrupted";
+    // 两段式 (a)：连续两次 GET（legacy 两段路由）是纯投影——status 保持
+    // running，staging 原样保留（C4 Task 6 起 GET 禁止 recovery）。
+    for _ in 0..2 {
+        let (status, body) =
+            super::request(&fixture.app, Method::GET, &uri, serde_json::Value::Null).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            body["status"], "running",
+            "GET must not recover the operation"
+        );
+    }
+    assert!(staging_root.join("partial-member-projection.json").exists());
+
+    // 两段式 (b)：显式 POST bootstrap action continue 才落盘中断事实——
+    // projection member_index=failed + failure.reason_code=
+    // aggregate_initialization_interrupted + staging 已清除。
     let (status, body) = super::request(
         &fixture.app,
-        Method::GET,
-        "/api/projects/project_0001/logical-codebase/initializations/operation_interrupted",
-        serde_json::Value::Null,
+        Method::POST,
+        "/api/projects/project_0001/logical-codebase/bootstrap/actions",
+        serde_json::json!({
+            "command_id": "cmd-get-interrupted-continue-1",
+            "step": "member_index",
+            "action": "continue",
+            "expected_revision": null,
+            "expected_object_id": "operation_interrupted",
+        }),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["status"], "failed");
+    assert_eq!(status, StatusCode::OK, "explicit continue action: {body}");
+    let member_index = body["projection"]["steps"]
+        .as_array()
+        .expect("projection steps")
+        .iter()
+        .find(|step| step["step"] == "member_index")
+        .expect("member_index step")
+        .clone();
+    assert_eq!(member_index["status"], "failed");
     assert_eq!(
-        body["error"]["code"],
+        member_index["failure"]["reason_code"],
         "aggregate_initialization_interrupted"
     );
+    assert!(!staging_root.exists(), "explicit recovery clears staging");
 }
 
 #[tokio::test]

@@ -375,13 +375,18 @@ impl WebAppState {
             .aggregate_initialization_dependencies
             .take()
             .expect("aggregate initialization dependencies are initialized");
-        self.aggregate_initialization_dependencies = Some(
-            crate::web::handlers::AggregateInitializationDependencies::with_index(
-                dependencies.coordinator,
-                dependencies.runs,
-                index,
-            ),
+        // Task 1.8：`with_index` 会重置 trust 字段——换 index 不得丢生产
+        // trust 前置门（route gate 在 begin 前依赖该字段）。
+        let rebuilt = crate::web::handlers::AggregateInitializationDependencies::with_index(
+            dependencies.coordinator,
+            dependencies.runs,
+            index,
         );
+        let rebuilt = match dependencies.trust.clone() {
+            Some(trust) => rebuilt.with_trust(trust),
+            None => rebuilt,
+        };
+        self.aggregate_initialization_dependencies = Some(rebuilt);
         self
     }
 

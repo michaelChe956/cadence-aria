@@ -12,9 +12,12 @@
 //!   journal；GET identity-repair 不经普通成员列表（Task 7 HTTP 断言）；mapping
 //!   未确认前 read mode/authority JSON/member count/provider 启动计数全不变；
 //!   错误 mapping 拒绝、正确 mapping staged 后 Revalidate 才切读（journal 保留
-//!   repair audit）；删除实际成员 `.claude/rules/language.md` 后 provider/index
-//!   admission 零启动（生产 driver 的 admission 预检接线），恢复同一规则来源后
-//!   原链继续并冻结 policy digest。
+//!   repair audit）；删除实际成员 `.claude/rules/language.md` 后 readiness 停在
+//!   `root_recipe_operation_missing` 等待面（Task 1.6 起成员规则谓词归属
+//!   provider admission；Task 1.2/1.4 起 bootstrap 相位凭据豁免「根规则尚未
+//!   生成」，recipe 不再因成员规则缺失被 admission 拒绝——改由注入的
+//!   pre_check 中断保留 Failed 检查点）；恢复同一规则来源后原链经显式
+//!   Retry 继续并冻结 policy digest。
 //!
 //! 全程同一 `WebAppState`：无服务重启、无 registry 清理、无 journal 删除、无
 //! `repos.json`/权威 JSON 编辑脱困（repos.json 仅作为 legacy 存量布局在场景
@@ -94,12 +97,7 @@ async fn request_json(
     (status, value)
 }
 
-async fn poll_until<F>(
-    app: &axum::Router,
-    uri: &str,
-    predicate: F,
-    description: &str,
-) -> Value
+async fn poll_until<F>(app: &axum::Router, uri: &str, predicate: F, description: &str) -> Value
 where
     F: Fn(&Value) -> bool,
 {
@@ -301,10 +299,14 @@ impl StreamingProviderAdapter for FaultOncePreCheckStreamingProvider {
         cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
         // deterministic checkpoint：首个 pre_check turn 在真实 gateway 启动路径
-        // 内被注入一次中断（audit 只记录成功启动，中断不计 launch）。
-        if input.prompt.contains("aggregate initialization turn: pre_check")
-            && !self.fired.swap(true, Ordering::SeqCst)
-        {
+        // 内被注入一次中断（audit 只记录成功启动，中断不计 launch）。Task
+        // 1.4 起 prompt 为真实 root recipe 命令文本（来源
+        // `RepositoryInitializationStepKind::command()`），按固定命令匹配。
+        let pre_check =
+            cadence_aria::product::repository_store::RepositoryInitializationStepKind::PreCheck
+                .command()
+                .expect("pre_check command");
+        if input.prompt.contains(pre_check) && !self.fired.swap(true, Ordering::SeqCst) {
             return Err(ProviderAdapterError::execution_failed(
                 None,
                 String::new(),
@@ -355,7 +357,10 @@ fn always_available_gate() -> Arc<ProviderAvailabilityGate> {
 struct StubSyncAdapter;
 
 impl ProviderAdapter for StubSyncAdapter {
-    fn run(&self, _input: &cadence_aria::protocol::contracts::AdapterInput) -> Result<cadence_aria::protocol::contracts::AdapterOutput, ProviderAdapterError> {
+    fn run(
+        &self,
+        _input: &cadence_aria::protocol::contracts::AdapterInput,
+    ) -> Result<cadence_aria::protocol::contracts::AdapterOutput, ProviderAdapterError> {
         Ok(cadence_aria::protocol::contracts::AdapterOutput {
             exit_code: Some(0),
             stdout: String::new(),
@@ -411,9 +416,17 @@ fn a04_app(root_path: &Path) -> (axum::Router, Arc<LogicalCodebaseGatewayFactory
     let paths = ProductAppPaths::new(root_path.join(".aria"));
     // 与生产 driver 相同的 admission 接线（with_gateway_factory 重建生产依赖），
     // registry 用恒可用 fake streaming provider——默认 factory 的 provider
-    // gate 会做真实 ClaudeCode 健康探测，测试环境不可用。
+    // gate 会做真实 ClaudeCode 健康探测，测试环境不可用。Task 1.8 重钉：
+    // 注入 pre_check 一次中断（Task 1.2/1.4 起 bootstrap 相位凭据豁免
+    // 「根规则（成员 language.md）尚未生成」，成员规则缺失不再阻断
+    // admission），为「恢复→显式 Retry→readiness 闭环」保留 Failed 检查点。
     let mut registry = ProviderRegistry::new();
-    registry.register(ProviderName::ClaudeCode, Arc::new(FakeStreamingProvider));
+    registry.register(
+        ProviderName::ClaudeCode,
+        Arc::new(FaultOncePreCheckStreamingProvider {
+            fired: AtomicBool::new(false),
+        }),
+    );
     let factory = Arc::new(LogicalCodebaseGatewayFactory::new(
         paths.clone(),
         Arc::new(registry),
@@ -426,7 +439,10 @@ fn a04_app(root_path: &Path) -> (axum::Router, Arc<LogicalCodebaseGatewayFactory
         EventHub::new(),
     )
     .with_gateway_factory(factory.clone())
-    .with_aggregate_index_operation(fake_index_operation(paths, &["repository", "repository_0002"]));
+    .with_aggregate_index_operation(fake_index_operation(
+        paths,
+        &["repository", "repository_0002"],
+    ));
     (build_web_router(state), factory)
 }
 
@@ -458,9 +474,7 @@ async fn register_lc_members(
     let (status, preflight) = request_json(
         app,
         Method::POST,
-        &format!(
-            "/api/projects/project_0001/logical-codebases/{lc_id}/registrations/preflight"
-        ),
+        &format!("/api/projects/project_0001/logical-codebases/{lc_id}/registrations/preflight"),
         json!({"aggregate_root":aggregate_root,"candidate_paths":[],"auto_discover":true}),
     )
     .await;
@@ -508,18 +522,30 @@ async fn a03_new_lc_reaches_planning_ready_without_manual_seed_or_duplicate_prov
     let head_b = git_head(&member_b);
 
     // 零手工 seed：全部事实经 REST 产品动作产生。
-    let lc_id = register_lc_members(&app, &aggregate_root, &[member_a.clone(), member_b.clone()]).await;
+    let lc_id =
+        register_lc_members(&app, &aggregate_root, &[member_a.clone(), member_b.clone()]).await;
 
     // 冷启动投影：identity/manifest 完成（登记产物），rules_policy 尚无
     // policy artifact（未开始），member_index/aggregate 未开始。
     let uri = bootstrap_uri(&lc_id);
-    let initial = poll_until(&app, &uri, |projection| {
-        bootstrap_step(projection, "identity")["status"] == "completed"
-            && bootstrap_step(projection, "manifest_checkout")["status"] == "completed"
-    }, "initial registration facts")
+    let initial = poll_until(
+        &app,
+        &uri,
+        |projection| {
+            bootstrap_step(projection, "identity")["status"] == "completed"
+                && bootstrap_step(projection, "manifest_checkout")["status"] == "completed"
+        },
+        "initial registration facts",
+    )
     .await;
-    assert_eq!(bootstrap_step(&initial, "rules_policy")["status"], "not_started");
-    assert_eq!(bootstrap_step(&initial, "member_index")["status"], "not_started");
+    assert_eq!(
+        bootstrap_step(&initial, "rules_policy")["status"],
+        "not_started"
+    );
+    assert_eq!(
+        bootstrap_step(&initial, "member_index")["status"],
+        "not_started"
+    );
     assert_eq!(
         bootstrap_step(&initial, "aggregate_index_active")["status"],
         "not_started"
@@ -578,6 +604,19 @@ async fn a03_new_lc_reaches_planning_ready_without_manual_seed_or_duplicate_prov
         "failed"
     );
     assert_eq!(factory.audit().stream_launches(), 0);
+
+    // Task 1.8（中断窗口写入根规则入口）：真实链路中根规则 AGENTS.md 由
+    // provider recipe 生成（预研结论：四家 provider 均经根 AGENTS.md 引用
+    // .claude/rules）；fake streaming provider 不产生文件副作用，故在
+    // operation Failed、无 worker 活跃的确定性窗口落盘——重试的命令审计
+    // 窗口将其作为既有材料冻结（aggregate preflight 已 Completed 不重跑，
+    // 不会触发 aggregate_root_ownership_conflict），最终 receipt 与
+    // readiness 投影经共享 root_rule_digest 冻结其 digest。
+    std::fs::write(
+        aggregate_root.join("AGENTS.md"),
+        "# aggregate root rules\n\n- Members follow their .claude/rules language rules.\n",
+    )
+    .expect("seed root rule entry in the interruption window");
 
     // 从 REST 点击带 expected revision 的显式 Retry：原编排链从 checkpoint
     // 续跑（已完成 machine_skills/aggregate_preflight 不重跑，pre_check 及其
@@ -667,7 +706,7 @@ async fn a03_new_lc_reaches_planning_ready_without_manual_seed_or_duplicate_prov
 }
 
 // ---------------------------------------------------------------------------
-// A04：Failed identity journal 修复 + 成员规则缺失的 admission 零启动。
+// A04：Failed identity journal 修复 + 成员规则缺失的 readiness 等待面与恢复链。
 // ---------------------------------------------------------------------------
 
 /// 场景构造：legacy 布局 + 既有 fault injector 在 authority 写后中断一次；
@@ -745,9 +784,7 @@ async fn a04_failed_identity_and_missing_rules_require_product_repair_before_rea
     .await;
     assert_eq!(status, StatusCode::OK);
     write_json(
-        &paths
-            .project_root(PROJECT_ID)
-            .join("repos.json"),
+        &paths.project_root(PROJECT_ID).join("repos.json"),
         &vec![
             legacy_record("repository_0001", &repository),
             legacy_record("repository_0002", &repository_b),
@@ -768,20 +805,22 @@ async fn a04_failed_identity_and_missing_rules_require_product_repair_before_rea
     // Failed journal（产品路径，非 JSON 编辑）。
     run_git(
         &repository,
-        &["remote", "set-url", "origin", "ssh://git@example.test/acme/renamed.git"],
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "ssh://git@example.test/acme/renamed.git",
+        ],
     );
     IdentityMigrationExecutor::new(paths.clone())
         .ensure_identity_schema(PROJECT_ID)
         .expect_err("drifted source identity must fail closed");
 
     let lc_id = legacy_lc_id(PROJECT_ID);
-    let repair_uri = format!(
-        "/api/projects/{PROJECT_ID}/logical-codebases/{lc_id}/identity-repair"
-    );
+    let repair_uri =
+        format!("/api/projects/{PROJECT_ID}/logical-codebases/{lc_id}/identity-repair");
     let bootstrap = bootstrap_uri(&lc_id);
-    let members_uri = format!(
-        "/api/projects/{PROJECT_ID}/logical-codebases/{lc_id}/members"
-    );
+    let members_uri = format!("/api/projects/{PROJECT_ID}/logical-codebases/{lc_id}/members");
 
     // Task 7 HTTP 断言：GET repair 直读 journal/registry/repos.json 低层事实，
     // 不经普通成员列表；digest/候选/影响范围可见。
@@ -789,7 +828,12 @@ async fn a04_failed_identity_and_missing_rules_require_product_repair_before_rea
     assert_eq!(status, StatusCode::OK, "{diagnostic}");
     assert_eq!(diagnostic["phase"], "failed");
     assert_eq!(diagnostic["project_id"], PROJECT_ID);
-    assert!(diagnostic["source_repos_digest"].as_str().unwrap_or("").starts_with("sha256:"));
+    assert!(
+        diagnostic["source_repos_digest"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("sha256:")
+    );
     assert_eq!(
         diagnostic["observed_source_repos_digest"],
         diagnostic["source_repos_digest"]
@@ -797,9 +841,10 @@ async fn a04_failed_identity_and_missing_rules_require_product_repair_before_rea
     assert_eq!(diagnostic["mappings"].as_array().map(Vec::len), Some(2));
     let conflicts = diagnostic["conflicts"].as_array().expect("conflicts");
     assert!(
-        conflicts
-            .iter()
-            .any(|conflict| conflict.as_str().unwrap_or("").starts_with("mapping_source_identity_mismatch")),
+        conflicts.iter().any(|conflict| conflict
+            .as_str()
+            .unwrap_or("")
+            .starts_with("mapping_source_identity_mismatch")),
         "digest drift must be visible: {diagnostic}"
     );
     assert!(!diagnostic["impact"].as_array().unwrap().is_empty());
@@ -845,7 +890,12 @@ async fn a04_failed_identity_and_missing_rules_require_product_repair_before_rea
     // 恢复同一实际来源（origin remote 改回）→ 冲突清空、候选可见。
     run_git(
         &repository,
-        &["remote", "set-url", "origin", "ssh://git@example.test/acme/api.git"],
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "ssh://git@example.test/acme/api.git",
+        ],
     );
     let (status, clean) = request_json(&app, Method::GET, &repair_uri, json!({})).await;
     assert_eq!(status, StatusCode::OK, "{clean}");
@@ -919,24 +969,32 @@ async fn a04_failed_identity_and_missing_rules_require_product_repair_before_rea
     );
     assert_eq!(factory.audit().stream_launches(), 0);
 
-    // ---- 缺失成员规则：admission 零启动 → 产品准备动作恢复 → 原链继续 ----
+    // ---- 缺失成员规则：readiness 等待面 → 注入中断检查点 → 恢复 → 原链继续 ----
     let rules_path = repository.join(".claude/rules/language.md");
     std::fs::remove_file(&rules_path).expect("delete the actual member rules");
 
-    // bootstrap 投影的 rules_policy 步只读检查：waiting_for_human +
-    // member_rules_missing，提供 Prepare/Retry。
+    // bootstrap 投影的 rules_policy 步只读检查（Task 1.6 起为 root
+    // authority 三源谓词，成员规则检查归属 provider admission 预检）：
+    // waiting_for_human + root_recipe_operation_missing（policy 可解析但
+    // 本 LC 尚无 root recipe operation），提供 Prepare。
     let (status, waiting) = request_json(&app, Method::GET, &bootstrap, json!({})).await;
     assert_eq!(status, StatusCode::OK, "{waiting}");
     let rules_step = bootstrap_step(&waiting, "rules_policy");
     assert_eq!(rules_step["status"], "waiting_for_human");
-    assert_eq!(rules_step["failure"]["reason_code"], "member_rules_missing");
+    assert_eq!(
+        rules_step["failure"]["reason_code"],
+        "root_recipe_operation_missing"
+    );
     let allowed = rules_step["allowed_actions"].as_array().expect("actions");
-    assert!(allowed.contains(&json!("prepare")) && allowed.contains(&json!("retry")));
+    assert!(allowed.contains(&json!("prepare")));
 
     // identity 修复完成后（marker 终态非 Failed、成员在册）冷启动身份步完成。
     assert_eq!(bootstrap_step(&waiting, "identity")["status"], "completed");
 
-    // 触发 provider/index admission：成员规则缺失 → provider 零启动。
+    // 触发 root recipe（成员规则仍缺失）：Task 1.2/1.4 起 bootstrap 相位
+    // 凭据豁免「根规则尚未生成」，admission 不再因成员规则缺失拒绝；
+    // 本段由注入的 pre_check 中断制造 Failed 检查点（中断先于成功启动，
+    // provider 保持零启动）。
     let (status, accepted) = request_json(
         &app,
         Method::POST,
@@ -953,11 +1011,11 @@ async fn a04_failed_identity_and_missing_rules_require_product_repair_before_rea
         &app,
         &bootstrap,
         |projection| bootstrap_step(projection, "member_index")["status"] == "failed",
-        "admission denies the provider turn while member rules are missing",
+        "the injected pre_check interruption fails the operation",
     )
     .await;
-    // 拒绝原因落在 durable operation 记录的 error.message（投影 detail 只带
-    // stage 摘要）：admission 预检拒绝必须可补读。
+    // 中断事实落在 durable operation 记录的 error（投影 detail 只带 stage
+    // 摘要）：注入的中断必须可补读。
     let (_, operation_denied) = request_json(
         &app,
         Method::GET,
@@ -967,19 +1025,25 @@ async fn a04_failed_identity_and_missing_rules_require_product_repair_before_rea
         json!({}),
     )
     .await;
-    let denial_message = operation_denied["error"]["message"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
-    assert!(
-        denial_message.contains("admission"),
-        "durable error must name the admission denial: {operation_denied}"
+    assert_eq!(
+        operation_denied["error"]["code"], "aggregate_pre_check_failed",
+        "durable error must name the interrupted turn: {operation_denied}"
     );
     assert_eq!(
         factory.audit().stream_launches(),
         0,
-        "missing member rules must keep the provider at zero launches"
+        "the injected interruption must fire before a successful launch"
     );
+
+    // Task 1.8（中断窗口写入根规则入口，与 a03 同款取舍）：真实链路中
+    // AGENTS.md 由 provider recipe 生成；fake provider 场景在 operation
+    // Failed、无 worker 活跃的确定性窗口落盘，重试的命令审计窗口将其
+    // 作为既有材料冻结（aggregate preflight 已 Completed 不重跑）。
+    std::fs::write(
+        legacy_root.join("AGENTS.md"),
+        "# aggregate root rules\n\n- Members follow their .claude/rules language rules.\n",
+    )
+    .expect("seed root rule entry in the interruption window");
 
     // 通过产品准备动作恢复同一实际规则来源（真实成员仓规则文件），等待面
     // 随 GET 补读消失。
@@ -987,7 +1051,7 @@ async fn a04_failed_identity_and_missing_rules_require_product_repair_before_rea
     std::fs::write(&rules_path, "# language rule\n\n- Use Rust 2024 edition.\n")
         .expect("restore language.md");
 
-    // 显式 Retry：原链继续（admission 通过，三个 provider turn 各启动一次，
+    // 显式 Retry：原链继续（三个 provider turn 各启动一次，
     // detached index build 落 active）。
     let (status, ready_result) = request_json(
         &app,
@@ -1025,7 +1089,9 @@ async fn a04_failed_identity_and_missing_rules_require_product_repair_before_rea
     assert!(digest.starts_with("sha256:"));
     let (status, reread) = request_json(&app, Method::GET, &bootstrap, json!({})).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(reread["policy"]["policy_digest"].as_str(), Some(digest.as_str()));
+    assert_eq!(
+        reread["policy"]["policy_digest"].as_str(),
+        Some(digest.as_str())
+    );
     assert_eq!(reread["planning_ready"], true);
 }
-

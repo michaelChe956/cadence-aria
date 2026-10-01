@@ -43,17 +43,24 @@ async fn create_aggregate_initialization_for_lc(
         provider_context_root: manifest.provider_context_root.clone(),
         provider: "claude_code".to_string(),
     };
+    // Task 1.8（REQ-REG-14）：trust 硬前置门——生产依赖图（`production`/
+    // `for_lc` 透传）注入 gate 时在 begin 之前评估；未 Ready 只保留 gate
+    // 自行落盘的 waiting/审计事实，五步 operation 不创建、worker 不启动。
+    ensure_recipe_trust_ready(
+        &dependencies,
+        &project_id,
+        &operation_id,
+        &logical_codebase_id,
+        &manifest.provider_context_root,
+    )?;
     let operation = dependencies
         .coordinator
         .begin(operation_id, &project_id, input)
         .map_err(aggregate_initialization_api_error)?;
     // `begin` returns only a newly-created operation: an existing terminal
     // operation with the same key is reported as an idempotency conflict.
-    let key = InitializationRunKey::aggregate(
-        &project_id,
-        &logical_codebase_id,
-        &operation.operation_id,
-    );
+    let key =
+        InitializationRunKey::aggregate(&project_id, &logical_codebase_id, &operation.operation_id);
     let lease = dependencies.runs.register(key).ok_or_else(|| {
         ApiError::runtime(
             "aggregate_initialization_in_progress",
@@ -65,6 +72,8 @@ async fn create_aggregate_initialization_for_lc(
     let coordinator = dependencies.coordinator.clone();
     let index = dependencies.index.clone();
     let manifest_revision = operation.input.manifest_revision;
+    let worker_paths = project_paths.clone();
+    let lc_id_for_worker = logical_codebase_id.clone();
     let project_id_for_worker = project_id.clone();
     let operation_id_for_worker = operation.operation_id.clone();
     tokio::spawn(async move {
@@ -76,7 +85,17 @@ async fn create_aggregate_initialization_for_lc(
             .execute(&project_id_for_worker, &operation_id_for_worker, token)
             .await
         {
-            Ok(_) => {
+            Ok(completed) => {
+                // Task 1.8（BOOT-03）：末命令 turn 后生产 driver 已 finalize；
+                // 此处幂等补一次，覆盖「末 turn 完成于早前尝试、本次仅收尾」
+                // 的窗口。失败只留等待面（readiness 投影可见），不回滚。
+                try_finalize_root_recipe_receipt(
+                    &worker_paths,
+                    &lc_id_for_worker,
+                    &project_id_for_worker,
+                    &operation_id_for_worker,
+                    &completed.input.provider_context_root,
+                );
                 // Index creation is deliberately detached from initialization
                 // durability. A failed index build is observable in its own
                 // operation and must not roll back a completed initialization.
@@ -124,7 +143,11 @@ async fn create_aggregate_initialization_for_lc(
             }
         }
     });
-    Ok((StatusCode::ACCEPTED, Json(aggregate_initialization_dto(operation))).into_response())
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(aggregate_initialization_dto(operation)),
+    )
+        .into_response())
 }
 
 /// Legacy `/logical-codebase/initializations/{operation_id}` compatibility
@@ -178,7 +201,13 @@ pub async fn cancel_aggregate_initialization(
 ) -> ApiResult<Response> {
     let paths = product_app_paths(&state);
     let logical_codebase_id = default_logical_codebase_id(&paths, &project_id)?;
-    cancel_aggregate_initialization_for_lc(state, project_id, logical_codebase_id, operation_id, request)
+    cancel_aggregate_initialization_for_lc(
+        state,
+        project_id,
+        logical_codebase_id,
+        operation_id,
+        request,
+    )
 }
 
 /// v1.3 canonical endpoint: cancellation is resolved per logical codebase.
@@ -189,7 +218,13 @@ pub async fn cancel_lc_aggregate_initialization(
 ) -> ApiResult<Response> {
     let paths = product_app_paths(&state);
     require_logical_codebase(&paths, &project_id, &logical_codebase_id)?;
-    cancel_aggregate_initialization_for_lc(state, project_id, logical_codebase_id, operation_id, request)
+    cancel_aggregate_initialization_for_lc(
+        state,
+        project_id,
+        logical_codebase_id,
+        operation_id,
+        request,
+    )
 }
 
 fn cancel_aggregate_initialization_for_lc(
@@ -215,14 +250,16 @@ fn cancel_aggregate_initialization_for_lc(
     // Persist the cancellation first, then signal the in-memory worker. The
     // worker checks this token at every step boundary and will not advance
     // after the provider turn currently in flight completes.
-    dependencies
-        .runs
-        .cancel(&InitializationRunKey::aggregate(
-            &project_id,
-            &logical_codebase_id,
-            &operation_id,
-        ));
-    Ok((StatusCode::OK, Json(aggregate_initialization_dto(operation))).into_response())
+    dependencies.runs.cancel(&InitializationRunKey::aggregate(
+        &project_id,
+        &logical_codebase_id,
+        &operation_id,
+    ));
+    Ok((
+        StatusCode::OK,
+        Json(aggregate_initialization_dto(operation)),
+    )
+        .into_response())
 }
 
 fn aggregate_initialization_dependencies(
@@ -236,8 +273,10 @@ fn load_manifest_for_profile(
     project_id: &str,
     logical_codebase_id: &str,
 ) -> ApiResult<crate::product::logical_codebase::store::LogicalCodebaseManifest> {
-    let store =
-        crate::product::logical_codebase::LogicalCodebaseStore::for_lc(paths.clone(), logical_codebase_id);
+    let store = crate::product::logical_codebase::LogicalCodebaseStore::for_lc(
+        paths.clone(),
+        logical_codebase_id,
+    );
     store
         .load_manifest(project_id)
         .map_err(product_store_api_error)?
@@ -291,6 +330,20 @@ fn aggregate_initialization_api_error(error: AggregateInitializationError) -> Ap
             "aggregate initialization operation not found",
             json!({}),
         ),
+        AggregateInitializationError::TrustWaiting { waiting } => ApiError::runtime(
+            "aggregate_initialization_trust_waiting",
+            waiting.message.clone(),
+            json!({
+                "provider": crate::product::logical_codebase::provider_trust::provider_wire_label(
+                    &waiting.provider,
+                ),
+                "reason_code": waiting.reason_code,
+                "retry_action": waiting.retry_action,
+                "trust_key": waiting.trust_key,
+                "canonical_root": waiting.canonical_root.to_string_lossy(),
+                "retryable": true,
+            }),
+        ),
         AggregateInitializationError::StateRejected { detail, .. } => {
             ApiError::runtime("aggregate_initialization_state_rejected", detail, json!({}))
         }
@@ -300,5 +353,45 @@ fn aggregate_initialization_api_error(error: AggregateInitializationError) -> Ap
             other.to_string(),
             json!({}),
         ),
+    }
+}
+
+/// Task 1.8（REQ-REG-14）：route 面 trust 硬前置门——与 coordinator 的
+/// `execute_with_trust` 同一语义（registry durable facts 按
+/// (project_id, lc_id) 调用点 scope，根暂不可得时保持原样、由后续
+/// aggregate_preflight fail-closed 拦截）。未装配 gate 的依赖图（测试
+/// 默认）保持旧行为；Waiting 以稳定 code 的可重试等待面拒绝，绝不
+/// begin/execute。
+fn ensure_recipe_trust_ready(
+    dependencies: &AggregateInitializationDependencies,
+    project_id: &str,
+    operation_id: &str,
+    logical_codebase_id: &str,
+    provider_context_root: &std::path::Path,
+) -> ApiResult<()> {
+    use crate::product::logical_codebase::provider_trust::{
+        ProviderTrustPrecondition, ProviderTrustPreparationResult,
+    };
+
+    let Some(trust) = dependencies.trust() else {
+        return Ok(());
+    };
+    let canonical_root = std::fs::canonicalize(provider_context_root)
+        .unwrap_or_else(|_| provider_context_root.to_path_buf());
+    match trust.ensure_before_recipe(
+        project_id,
+        operation_id,
+        logical_codebase_id,
+        &canonical_root,
+        // 五步 recipe 固定 Claude Code；`requires_workspace_trust` 过滤后
+        // 仅 Codex/Kimi 进入登记（多 provider 入口由 Phase 2/3 扩展）。
+        &[crate::product::models::ProviderName::ClaudeCode],
+    ) {
+        ProviderTrustPreparationResult::Ready { .. } => Ok(()),
+        ProviderTrustPreparationResult::Waiting { waiting } => {
+            Err(aggregate_initialization_api_error(
+                AggregateInitializationError::TrustWaiting { waiting },
+            ))
+        }
     }
 }
