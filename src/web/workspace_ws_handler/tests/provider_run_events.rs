@@ -1068,3 +1068,4 @@ async fn single_candidate_followup_review_guard_only_breaks_on_delegated_generat
 }
 #[path = "provider_run_events/sc_delegated_rerun.rs"]
 mod sc_delegated_rerun;
+include!("provider_run_events_parts/root_cwd_launch.inc.rs");

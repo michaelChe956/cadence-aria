@@ -334,15 +334,15 @@ impl LogicalCodebaseProviderAdmissionPreflight {
             });
         }
 
-        // 6. spawn 前复验（pub(crate) 拓宽后由 admission 显式调用）：policy
-        //    revision/digest、capability、config digest、target cwd 的 TOCTOU
-        //    全维度复核；失败转 waiting，provider 保持零启动。
-        let cwd = if request.target.worktree.is_absolute() {
-            request.target.worktree.clone()
+        // 6. cwd 复验（pub(crate) 拓宽后由 admission 显式调用）：policy
+        //    revision/digest、capability、config digest、cwd 的 TOCTOU 全维度
+        //    复核；复验 cwd 取请求的独立 `working_directory`（Task 2.5 字段，
+        //    Task 2.1 接线——cwd≠target 的 LC root 形态由此复验，现状消费方
+        //    cwd==target 零变化）。失败转 waiting，provider 保持零启动。
+        let cwd = if request.working_directory.is_absolute() {
+            request.working_directory.clone()
         } else {
-            manifest
-                .provider_context_root
-                .join(&request.target.worktree)
+            manifest.provider_context_root.join(&request.working_directory)
         };
         self.gateway
             .revalidate_before_spawn(&validated, &cwd, false)

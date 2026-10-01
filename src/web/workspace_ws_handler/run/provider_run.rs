@@ -26,16 +26,15 @@ pub(super) async fn spawn_provider_run_with_start_mode(
         session_record: _,
     } = run_context;
 
-    // Handler-originated starts always supersede the active provider run. In
-    // particular, a user message must cancel a streaming run before waiting
-    // for the engine mutex, which the stream owner holds while driving its
-    // provider session. Engine-originated relays are filtered by
-    // `spawn_provider_run_from_event` before reaching this handler: same-node
-    // duplicates are drained, and ReviewOnly relays yield to an in-flight run
-    // whose followups own the review continuation. Repair relays (WorkItemPlan
-    // kinds, emitted by a run that delegated via policy routing) intentionally
-    // keep the supersede hand-off below. P1 WIGA Task 5：auto 认领
-    // （ClaimIfIdle）不走本段——supersede 只属于显式 human/driver 重跑。
+    // Handler-originated starts always supersede the active provider run: a user
+    // message must cancel a streaming run before waiting for the engine mutex
+    // (held by the stream owner while driving its provider session). Engine-
+    // originated relays are filtered by `spawn_provider_run_from_event`: same-
+    // node duplicates drained; ReviewOnly relays yield to an in-flight run whose
+    // followups own the review continuation; repair relays (WorkItemPlan kinds,
+    // emitted by a run that delegated via policy routing) keep the supersede
+    // hand-off. P1 WIGA Task 5：auto 认领（ClaimIfIdle）不走本段——supersede
+    // 只属于显式 human/driver 重跑。
     if matches!(start_mode, ProviderRunStartMode::SupersedeFromAttachment) {
         // 诊断打点（claude×轻 握手谜团第 2 轮，不改行为）：新 run 接替取消旧 run
         // 的唯一裁决点迁入 manager，令所有连接共享同一临界区。
@@ -142,15 +141,21 @@ pub(super) async fn spawn_provider_run_with_start_mode(
         match run_kind {
             ProviderRunKind::Author { content } => {
                 engine
-                    .handle_user_message(content, provider_for_run.clone(), command_rx)
+                    .handle_user_message_from_run(
+                        content,
+                        provider_for_run.clone(),
+                        command_rx,
+                        &run_context_clone.session_record,
+                    )
                     .await;
             }
             ProviderRunKind::AuthorChoiceFollowup { content } => {
                 engine
-                    .handle_author_choice_followup_message(
+                    .handle_author_choice_followup_from_run(
                         content,
                         provider_for_run.clone(),
                         command_rx,
+                        &run_context_clone.session_record,
                     )
                     .await;
             }
