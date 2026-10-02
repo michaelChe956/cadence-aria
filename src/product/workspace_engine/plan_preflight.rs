@@ -140,7 +140,7 @@ pub(crate) fn plan_baseline_tree(
     let Some(repo_id) = issue.repo_id.as_deref() else {
         return Ok(None);
     };
-    let repo_path = plan_baseline_repository_path(&paths, project_id, repo_id)?;
+    let repo_path = plan_baseline_repository_path(&paths, project_id, issue_id, repo_id)?;
     let branch = crate::product::issue_baseline::resolve_effective_base_branch(
         &repo_path,
         issue.base_branch.as_deref(),
@@ -182,8 +182,49 @@ pub(crate) fn plan_baseline_tree(
 fn plan_baseline_repository_path(
     paths: &crate::product::app_paths::ProductAppPaths,
     project_id: &str,
+    issue_id: &str,
     repo_id: &str,
 ) -> Result<std::path::PathBuf, String> {
+    // v1.3（缺陷 #6 同族第四点，Task 3.5 E2E 现场 session_0005）：issue 属
+    // 非 legacy LC 时，物理 repo 权威记录在 per-LC 子树（新登记不写 legacy
+    // repos.json 投影），legacy scope 解析必 NotFound（「plan baseline
+    // repository not found」）。先按 issue 所属 codebase 的 member 权威记录
+    // 匹配 physical_repository_id，经统一解析链取主 checkout 路径；legacy
+    // 语义原样保留（既有调用面字节级不变）。
+    let lc_id = crate::product::logical_codebase::resolve_issue_logical_codebase_id(
+        paths,
+        project_id,
+        issue_id,
+    )
+    .map_err(|error| format!("resolve plan baseline codebase failed: {error}"))?;
+    if let Some(lc) = lc_id.as_deref() {
+        if lc != crate::product::logical_codebase::legacy_logical_codebase_id(project_id) {
+            let authority = crate::product::logical_codebase::LogicalCodebaseStore::for_lc(
+                paths.clone(),
+                lc,
+            );
+            if let Ok(Some(manifest)) = authority.load_manifest(project_id) {
+                for member_id in &manifest.member_ids {
+                    if let Ok(Some(member)) = authority.load_member(project_id, *member_id) {
+                        if member.physical_repository_id == repo_id {
+                            let store = crate::product::repository_store::RepositoryStore::new(
+                                paths.clone(),
+                            );
+                            if let Ok((_, checkout, _)) = store
+                                .resolve_logical_repository_for_issue_codebase(
+                                    project_id,
+                                    lc_id.as_deref(),
+                                    *member_id,
+                                )
+                            {
+                                return Ok(checkout.canonical_path);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     let project = crate::product::project_store::ProjectStore::new(paths.clone())
         .get(project_id)
         .map_err(|error| format!("load project for plan baseline failed: {error}"))?;
