@@ -226,15 +226,27 @@ pub(crate) fn aggregate_author_schema_name_for(workspace_type: &WorkspaceType) -
 /// 聚合 Story/Design author 的 nonce sentinel 输出指令。 The envelope nonce
 /// is authenticated by the single structured-output parser, then removed before
 /// aggregate business schema deserialization.
+///
+/// 缺陷（2026-10-02 E2E story/design 首跑标签形态）：真实 AI 首跑常回显模板
+/// 占位值或省 nonce 属性（E2E 靠反馈样板才收敛）。与 reviewer 契约同款，注入
+/// 「完整示例（占位 nonce，绝不可照抄）+ 实际输出模板（本请求 nonce）+
+/// 替换占位值说明」三段，首跑即钉死标签格式。
 pub(crate) fn aggregate_author_output_contract(nonce: &str, schema: &str) -> String {
     format!(
         "\n\n聚合视野结构化输出（aggregate Story/Design 必须提供）：\n\
          artifact 之外必须额外输出一个 nonce sentinel block 承载聚合视野 JSON，\
          不得用 Markdown code fence 包裹该 JSON；involved_repository_ids 只能取成员清单中的 \
-         logical_repository_id，不确定即声明 blocker。JSON 顶层 nonce 必须与开始标签一致。schema：\n\
+         logical_repository_id，不确定即声明 blocker。JSON 顶层 nonce 必须与开始标签一致。\n\
+         完整示例（仅用于理解结构；EXAMPLE_NONCE 是占位值，绝不可照抄）：\n\
+         <ARIA_STRUCTURED_OUTPUT nonce=\"EXAMPLE_NONCE\">\n\
+         {}\n\
+         </ARIA_STRUCTURED_OUTPUT>\n\
+         实际输出模板（把占位值 EXAMPLE_NONCE 替换为本请求 nonce，开始标签属性与 \
+         JSON 顶层必须同为该 nonce）：\n\
          <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">\n\
          {}\n\
          </ARIA_STRUCTURED_OUTPUT>\n",
+        schema_with_nonce("EXAMPLE_NONCE", schema),
         schema_with_nonce(nonce, schema),
     )
 }

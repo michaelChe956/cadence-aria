@@ -795,6 +795,118 @@ async fn provider_drive_story_run_writes_back_involved_from_structured_output() 
     }
 }
 
+/// 缺陷（2026-10-02 E2E story/design 首跑标签形态）：聚合回写要求
+/// ARIA_STRUCTURED_OUTPUT 标签，真实 AI 首跑常回显模板占位值或省 nonce 属性
+///（E2E 靠反馈样板才收敛）。author prompt 必须自带「完整标签样板（含 nonce
+/// 属性）+ 占位 nonce 示例 + 实际 nonce 模板 + 替换占位值说明」。
+#[test]
+fn aggregate_author_prompt_pins_complete_nonce_tag_template() {
+    for workspace_type in [WorkspaceType::Story, WorkspaceType::Design] {
+        let (tmp, checkpoint_store) = setup();
+        let app_paths = ProductAppPaths::new(tmp.path().join(".aria"));
+        let lifecycle_store = LifecycleStore::new(app_paths.clone());
+        let member_a = LogicalRepositoryId(Uuid::from_u128(0xaaaa));
+
+        match workspace_type {
+            WorkspaceType::Story => {
+                lifecycle_store
+                    .create_story_spec(CreateStorySpecInput {
+                        project_id: "project_0001".to_string(),
+                        issue_id: "issue_0001".to_string(),
+                        repository_id: "repository_0001".to_string(),
+                        title: "Story".to_string(),
+                        aggregate_codebase: Some(AggregateStorySpecScope {
+                            logical_codebase_ref: Uuid::from_u128(0x0100),
+                            effective_member_ids: vec![member_a],
+                            involved_repository_ids: Vec::new(),
+                            focus_repository_id: None,
+                        }),
+                    })
+                    .unwrap();
+            }
+            WorkspaceType::Design => {
+                lifecycle_store
+                    .create_design_spec(CreateDesignSpecInput {
+                        project_id: "project_0001".to_string(),
+                        issue_id: "issue_0001".to_string(),
+                        story_spec_ids: Vec::new(),
+                        title: "Design".to_string(),
+                        aggregate_codebase: Some(AggregateDesignSpecScope {
+                            logical_codebase_ref: Uuid::from_u128(0x0100),
+                            effective_member_ids: vec![member_a],
+                            involved_repository_ids: Vec::new(),
+                            change_order: Vec::new(),
+                        }),
+                    })
+                    .unwrap();
+            }
+            _ => unreachable!("仅聚合 Story/Design"),
+        }
+        save_planning_snapshot(&app_paths, "project_0001", "issue_0001", vec![member_a]);
+
+        let session_record = lifecycle_store
+            .create_workspace_session(CreateWorkspaceSessionInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                entity_id: format!("spec_{workspace_type:?}"),
+                workspace_type: workspace_type.clone(),
+                author_provider: ProviderName::ClaudeCode,
+                reviewer_provider: Some(ProviderName::Codex),
+                review_rounds: 2,
+                superpowers_enabled: true,
+                openspec_enabled: true,
+                work_item_plan_options: None,
+            })
+            .unwrap();
+        let mut session = WorkspaceSession::from_record(session_record);
+        // 聚合视野上下文（生产由 ensure_workspace_context_message 在 Logical
+        // routing 下注入同 marker 系统消息）。
+        session.messages.push(SessionMessage {
+            id: "msg_aggregate_scope".to_string(),
+            role: "system".to_string(),
+            content: "## 聚合代码库成员清单\n- member-a".to_string(),
+            checkpoint_id: None,
+            created_at: "2026-10-02T00:00:00Z".to_string(),
+        });
+        let (tx, _rx) = mpsc::channel(64);
+        let engine =
+            WorkspaceEngine::new_persistent(checkpoint_store, lifecycle_store.clone(), tx, session);
+
+        let input = engine
+            .build_streaming_input("开始生成", AuthorPromptMode::FullConversation)
+            .expect("aggregate author streaming input");
+        let contract = input
+            .structured_output_contract
+            .expect("aggregate Story/Design 必须设置 structured_output_contract");
+        let prompt = input.prompt;
+
+        // 完整示例：nonce 属性样板 + 占位值不可照抄说明。
+        assert!(
+            prompt.contains("<ARIA_STRUCTURED_OUTPUT nonce=\"EXAMPLE_NONCE\">"),
+            "{workspace_type:?} prompt 必须含完整示例标签（含 nonce 属性）：{prompt}"
+        );
+        assert!(
+            prompt.contains("EXAMPLE_NONCE 是占位值，绝不可照抄"),
+            "{workspace_type:?} prompt 必须说明占位 nonce 不可照抄：{prompt}"
+        );
+        // 实际输出模板：本请求真实 nonce（标签属性与 JSON 顶层一致）。
+        let real_tag = format!("<ARIA_STRUCTURED_OUTPUT nonce=\"{}\">", contract.nonce);
+        assert!(
+            prompt.contains(&real_tag),
+            "{workspace_type:?} prompt 必须含本请求 nonce 的实际输出模板：{prompt}"
+        );
+        assert!(
+            prompt.contains(&format!("\"nonce\":\"{}\"", contract.nonce)),
+            "{workspace_type:?} prompt 模板 JSON 顶层必须携带本请求 nonce：{prompt}"
+        );
+        // 替换占位值说明。
+        assert!(
+            prompt.contains("把占位值 EXAMPLE_NONCE 替换为本请求 nonce"),
+            "{workspace_type:?} prompt 必须给出占位值替换指引：{prompt}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn provider_drive_aggregate_story_writes_back_tag_outside_artifact_fence() {
     // 缺陷 #4（2026-10-02 E2E）回归：aggregate_author_output_contract 要求 sentinel
