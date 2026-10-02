@@ -6,6 +6,17 @@
     use crate::product::logical_codebase::{
         LogicalCodebaseStore, RootRecipeReceipt, assert_canonical_lc_root_consistent,
     };
+    // Task 3.1（cwd≠target 专用回归锁 fixture）追加依赖。
+    use crate::product::logical_codebase::policy::AggregatePolicyArtifactStore;
+    use crate::product::logical_codebase::production_policy_resolvers::ProductionPolicyTargetResolver;
+    use crate::product::logical_codebase::{
+        CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, GatewayRunAudit,
+        IdentityRegistryEntry, IdentityRegistryStore, LogicalCodebaseCreateInput,
+        LogicalRepositoryId, MemberStatus, RepositoryCheckoutId, RepositoryCheckoutRecord,
+        RepositorySourceIdentity, RepositoryType,
+    };
+    use crate::product::project_store::{CreateProjectInput, ProjectStore};
+    use uuid::Uuid;
     use crate::web::gateway_factory::LogicalCodebaseGatewayFactory;
 
     /// 构造生产形态的 gateway 工厂（ClaudeCode registry + stub adapter +
@@ -417,4 +428,419 @@
             writable_roots: vec![worktree.to_path_buf()],
             config_artifact_ref: "sha256:managed-config-artifact".to_string(),
         }
+    }
+
+    // ---- Task 3.1（REQ-ENV-10/11/BOOT-04 映射）：cwd≠target 专用回归锁
+    // fixture 与 resume 指纹维度锁。生产逻辑已由 Phase 2 全量落地，此处
+    // 只以真实形态钉住契约，不引入新生产代码。----
+
+    fn run_git(cwd: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .current_dir(cwd)
+            .args(args)
+            .output()
+            .expect("git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// 分离形态专用 deterministic fixture：非 Git canonical LC root（路径含
+    /// 空格，登记/manifest 投影经 symlink alias 字面）+ 成员主仓真实 Git
+    /// checkout（.git 目录）+ 真实 `git worktree add` 链接工作树（.git 文件
+    /// 形态，作为 member target）。gateway 注入生产
+    /// `ProductionPolicyTargetResolver::for_lc`——成员三层身份与 git-dir
+    /// identity 复验走真实生产路径，不用成员 fallback。
+    struct SeparatedRootMemberFixture {
+        _root: tempfile::TempDir,
+        project_id: String,
+        /// canonical LC root（含空格；非 Git）。
+        lc_root: PathBuf,
+        /// 成员主仓（真实 Git checkout）。
+        member_main: PathBuf,
+        /// 成员主仓的真实链接 worktree（member target）。
+        member_worktree: PathBuf,
+        member_id: String,
+        checkout_id: String,
+        streaming_adapter: Arc<CountingStreamingAdapter>,
+        gateway: LogicalCodebaseProviderGateway,
+    }
+
+    fn separated_root_member_fixture() -> SeparatedRootMemberFixture {
+        let root = tempfile::tempdir().expect("temporary product root");
+        let paths = ProductAppPaths::new(root.path().join(".aria"));
+        let project = ProjectStore::new(paths.clone())
+            .create(CreateProjectInput {
+                name: "separated-form-project".to_string(),
+                description: None,
+            })
+            .expect("create project");
+
+        // 非 Git LC root（含空格）+ symlink alias（登记/manifest 投影字面，
+        // 权威判据 canonical 相等）。
+        let lc_root = root.path().join("lc root");
+        std::fs::create_dir_all(&lc_root).expect("create lc root");
+        let lc_root_alias = root.path().join("lc-root-alias");
+        std::os::unix::fs::symlink(&lc_root, &lc_root_alias).expect("symlink lc root alias");
+
+        // 成员主仓：真实 Git checkout；再挂真实链接 worktree（.git 文件）。
+        let member_main = root.path().join("member main");
+        std::fs::create_dir_all(&member_main).expect("create member main");
+        run_git(&member_main, &["init", "--quiet", "-b", "main"]);
+        run_git(&member_main, &["config", "user.email", "member@example.test"]);
+        run_git(&member_main, &["config", "user.name", "Separated Form Member"]);
+        std::fs::write(member_main.join("README.md"), "# member\n").expect("write member file");
+        run_git(&member_main, &["add", "README.md"]);
+        run_git(&member_main, &["commit", "--quiet", "-m", "initial commit"]);
+        let member_worktree = root.path().join("member wt");
+        run_git(
+            &member_main,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                member_worktree.to_str().expect("utf-8 member worktree path"),
+                "-b",
+                "wt_0001",
+            ],
+        );
+
+        // LC 子树权威记录（member/checkout/identity registry 三层身份）。
+        let record = LogicalCodebaseStore::new(paths.clone())
+            .create(
+                &project.id,
+                LogicalCodebaseCreateInput {
+                    name: "separated-lc".to_string(),
+                    aggregate_root: lc_root_alias.clone(),
+                },
+            )
+            .expect("create lc record");
+        let lc_id = record.id;
+        let authority = LogicalCodebaseStore::for_lc(paths.clone(), &lc_id);
+        let member_id = LogicalRepositoryId(Uuid::new_v4());
+        let checkout_id = RepositoryCheckoutId(Uuid::new_v4());
+        let manifest = LogicalCodebaseManifest::new(&project.id, lc_root_alias, vec![member_id]);
+        authority
+            .save_manifest(&project.id, &manifest)
+            .expect("save lc manifest");
+        let now = "2026-10-02T00:00:00Z".to_string();
+        let canonical_member_main =
+            std::fs::canonicalize(&member_main).expect("canonical member main");
+        let physical_repository_id = format!("repository_{}", Uuid::new_v4().simple());
+        let source_identity =
+            RepositorySourceIdentity::from_git_parts(&member_main, member_main.join(".git"), None);
+        authority
+            .save_member(
+                &project.id,
+                &CodebaseMemberRecord {
+                    logical_repository_id: member_id,
+                    physical_repository_id: physical_repository_id.clone(),
+                    alias: "member".to_string(),
+                    role: "repository".to_string(),
+                    ordinal: 0,
+                    source_identity: source_identity.clone(),
+                    repo_type: RepositoryType::Unknown,
+                    tech_stack: Vec::new(),
+                    owner: None,
+                    tags: Vec::new(),
+                    default_ref: None,
+                    checkout_ids: vec![checkout_id],
+                    status: MemberStatus::Active,
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                },
+            )
+            .expect("save lc member");
+        authority
+            .save_checkout(
+                &project.id,
+                &RepositoryCheckoutRecord {
+                    checkout_id,
+                    logical_repository_id: member_id,
+                    physical_repository_id: physical_repository_id.clone(),
+                    kind: CheckoutKind::Main,
+                    canonical_path: canonical_member_main,
+                    checkout_path_hash: "sha256:separated-checkout".to_string(),
+                    git_dir_identity: source_identity.git_dir_identity(),
+                    revision: None,
+                    availability: CheckoutAvailability::Available,
+                    observed_at: now.clone(),
+                    created_at: now.clone(),
+                    updated_at: now,
+                },
+            )
+            .expect("save lc checkout");
+        IdentityRegistryStore::new(paths.clone())
+            .upsert_active(
+                &project.id,
+                IdentityRegistryEntry::active(
+                    source_identity,
+                    member_id,
+                    physical_repository_id,
+                    checkout_id,
+                    "separated-form-fixture".to_string(),
+                ),
+            )
+            .expect("register identity");
+
+        let policy_store = AggregatePolicyArtifactStore::for_lc(paths.clone(), &lc_id);
+        policy_store
+            .ensure_bootstrap(&manifest)
+            .expect("bootstrap policy");
+
+        let streaming_adapter = Arc::new(CountingStreamingAdapter::new());
+        let mut registry = ProviderRegistry::new();
+        registry.register(ProviderName::ClaudeCode, streaming_adapter.clone());
+        let gateway = LogicalCodebaseProviderGateway::with_audit(
+            policy_store,
+            Arc::new(StaticCapabilitySource::new("1.4.0")),
+            Arc::new(ProductionPolicyTargetResolver::for_lc(paths.clone(), &lc_id)),
+            Arc::new(registry),
+            Arc::new(StubSyncAdapter),
+            always_available_gate(),
+            Arc::new(GatewayRunAudit::new()),
+            std::fs::canonicalize(&lc_root).expect("canonical authority root"),
+        );
+
+        SeparatedRootMemberFixture {
+            _root: root,
+            project_id: project.id,
+            lc_root,
+            member_main,
+            member_worktree,
+            member_id: member_id.0.to_string(),
+            checkout_id: checkout_id.0.to_string(),
+            streaming_adapter,
+            gateway,
+        }
+    }
+
+    impl SeparatedRootMemberFixture {
+        /// planning 只读请求：cwd=canonical LC root（非 Git，≠member target）。
+        fn separated_planning_request(&self) -> SessionLaunchRequest {
+            SessionLaunchRequest {
+                project_id: self.project_id.clone(),
+                provider: ProviderRef::claude_code("cap_claude_1_4_0"),
+                action: SessionPolicyAction::PlanningReadOnly,
+                target: PolicyTarget::checkout(
+                    self.member_id.clone(),
+                    self.checkout_id.clone(),
+                    self.member_worktree.clone(),
+                ),
+                working_directory: self.lc_root.clone(),
+                readable_roots: vec![self.lc_root.clone()],
+                writable_roots: Vec::new(),
+                config_artifact_ref: "sha256:managed-config-artifact".to_string(),
+            }
+        }
+    }
+
+    /// streaming 探针 input（cwd 显式传 working_dir；与主文件
+    /// GatewayFixture::streaming_input 同型）。
+    fn streaming_probe(
+        working_dir: PathBuf,
+        resume_id: Option<String>,
+    ) -> crate::cross_cutting::streaming_provider::StreamingProviderInput {
+        use crate::cross_cutting::streaming_provider::{
+            ProviderPermissionMode, StreamingProviderInput,
+        };
+        use crate::protocol::contracts::{AdapterRole, ProviderType};
+        StreamingProviderInput {
+            working_directory: None,
+            baseline_tree: None,
+            tool_policy: None,
+            audit_sink: None,
+            provider_type: ProviderType::ClaudeCode,
+            role: AdapterRole::Executor,
+            prompt: "probe".to_string(),
+            working_dir,
+            workspace_session_id: None,
+            resume_provider_session_id: resume_id,
+            permission_mode: ProviderPermissionMode::Auto,
+            structured_output_contract: None,
+            env_vars: Default::default(),
+            timeout_secs: 1,
+        }
+    }
+
+    /// Task 3.1（REQ-ENV-10/11）：合法 cwd≠target 分离形态回归锁——root cwd
+    ///（非 Git、路径含空格、经 symlink alias 登记）+ member target（真实
+    /// Git 链接 worktree）经生产 resolver 全链放行：validate 冻结 canonical
+    /// cwd 与 canonical target，spawn 复验后真实启动；spawn input cwd 回退
+    /// member target 则 spawn 前 fail-closed（禁止回退 member cwd）。
+    #[test]
+    fn logical_root_cwd_member_target_fixture_is_allowed() {
+        let fixture = separated_root_member_fixture();
+        let canonical_root =
+            std::fs::canonicalize(&fixture.lc_root).expect("canonical lc root");
+        let canonical_worktree = std::fs::canonicalize(&fixture.member_worktree)
+            .expect("canonical member worktree");
+
+        // (a) validate 放行：envelope 冻结 canonical cwd（root≠target）与经
+        // 生产 resolver 复验（三层身份 + 真实 git-dir identity：.git 文件
+        // 指向成员主仓 .git/worktrees）的 canonical member target。
+        let validated = fixture
+            .gateway
+            .validate(fixture.separated_planning_request())
+            .expect("root cwd with real git member target must validate");
+        assert_eq!(validated.envelope().working_directory, canonical_root);
+        assert_eq!(validated.envelope().target.worktree, canonical_worktree);
+        assert_ne!(
+            validated.envelope().working_directory,
+            validated.envelope().target.worktree
+        );
+
+        // spawn 放行：input cwd=冻结 root → 真实启动（合法分离形态）。
+        let launch = ValidatedStreamingProviderInput::new(
+            streaming_probe(fixture.lc_root.clone(), None),
+            validated,
+        );
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime
+            .block_on(
+                fixture
+                    .gateway
+                    .start_streaming(launch, CancellationToken::new()),
+            )
+            .expect("legal separated form must spawn through real git identity revalidation");
+        assert_eq!(fixture.streaming_adapter.start_count(), 1);
+
+        // (b) spawn input cwd 回退 member target（≠冻结 root cwd）→ spawn 前
+        // fail-closed，零新增启动。
+        let validated = fixture
+            .gateway
+            .validate(fixture.separated_planning_request())
+            .expect("second validate for cwd fallback probe");
+        let launch = ValidatedStreamingProviderInput::new(
+            streaming_probe(fixture.member_worktree.clone(), None),
+            validated,
+        );
+        let error = match runtime.block_on(
+            fixture
+                .gateway
+                .start_streaming(launch, CancellationToken::new()),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("member cwd fallback must fail closed"),
+        };
+        assert!(
+            matches!(&error, ProviderGatewayError::TargetMismatch { field } if field == "cwd"),
+            "expected cwd mismatch, got {error:?}"
+        );
+        assert_eq!(fixture.streaming_adapter.start_count(), 1);
+    }
+
+    /// Task 3.1（REQ-ENV-10/11）：分离形态下 resume 指纹的 root/target 两
+    /// 维度漂移都拒绝续接——仅 root cwd 漂移（target 不变）或仅 member
+    /// target 漂移（cwd 不变）均 supersede 旧会话并 StartNew（审计记
+    /// resume_fingerprint_mismatch）；全维度一致才 Resume，全程零 spawn。
+    #[test]
+    fn logical_root_or_target_fingerprint_drift_is_rejected() {
+        let fixture = gateway_fixture();
+        fixture.install_bootstrap_policy();
+        let project_id = fixture.manifest().project_id;
+        let authority = fixture.paths.root().to_path_buf();
+        let member_a = authority.join("member wt a");
+        let member_b = authority.join("member wt b");
+        // 旧会话的 root cwd 字面（authority 内另一目录）：与当前 root 恰只
+        // 差 cwd 一个维度，用于隔离指纹的 root 维度。
+        let legacy_root = authority.join("legacy root");
+        for dir in [&member_a, &member_b, &legacy_root] {
+            std::fs::create_dir_all(dir).expect("create fixture dir");
+        }
+        let gateway = fixture.gateway();
+
+        // 旧会话 A：cwd=legacy root、target=member a。
+        let legacy_fingerprint = gateway
+            .validate(planning_request_with_cwd(
+                &project_id,
+                legacy_root.clone(),
+                member_a.clone(),
+                authority.clone(),
+            ))
+            .expect("validate legacy root session")
+            .fingerprint()
+            .clone();
+
+        // 当前会话：cwd=authority root（root 迁移后形态），target 不变。
+        let current = planning_request_with_cwd(
+            &project_id,
+            authority.clone(),
+            member_a.clone(),
+            authority.clone(),
+        );
+
+        // 仅 root cwd 维度漂移 → 拒绝 resume：supersede 旧会话并 StartNew。
+        match gateway
+            .resume_or_start(ResumeSessionLaunchRequest {
+                launch: current.clone(),
+                previous_fingerprint: legacy_fingerprint,
+                previous_session_id: "sess_root_drift".to_string(),
+            })
+            .expect("root drift resume decision")
+        {
+            GatewaySessionDisposition::StartNew {
+                superseded_session_id,
+                ..
+            } => {
+                assert_eq!(superseded_session_id, "sess_root_drift");
+            }
+            other => panic!("root cwd drift must supersede, got {other:?}"),
+        }
+        assert_eq!(fixture.gateway_audit().supersede_count(), 1);
+        assert!(fixture
+            .gateway_audit()
+            .last_supersede_reason()
+            .is_some_and(|reason| reason == "resume_fingerprint_mismatch"));
+
+        // 仅 target 维度漂移（cwd 与当前一致，旧会话 target=member b）→
+        // 拒绝 resume。
+        let member_b_fingerprint = gateway
+            .validate(planning_request_with_cwd(
+                &project_id,
+                authority.clone(),
+                member_b.clone(),
+                authority.clone(),
+            ))
+            .expect("validate member b session")
+            .fingerprint()
+            .clone();
+        match gateway
+            .resume_or_start(ResumeSessionLaunchRequest {
+                launch: current.clone(),
+                previous_fingerprint: member_b_fingerprint,
+                previous_session_id: "sess_target_drift".to_string(),
+            })
+            .expect("target drift resume decision")
+        {
+            GatewaySessionDisposition::StartNew {
+                superseded_session_id,
+                ..
+            } => {
+                assert_eq!(superseded_session_id, "sess_target_drift");
+            }
+            other => panic!("member target drift must supersede, got {other:?}"),
+        }
+        assert_eq!(fixture.gateway_audit().supersede_count(), 2);
+
+        // 对照：root cwd 与 target 全维度一致 → Resume，零新增 supersede。
+        let current_fingerprint = gateway
+            .validate(current.clone())
+            .expect("validate current session")
+            .fingerprint()
+            .clone();
+        let disposition = gateway
+            .resume_or_start(ResumeSessionLaunchRequest {
+                launch: current,
+                previous_fingerprint: current_fingerprint,
+                previous_session_id: "sess_current".to_string(),
+            })
+            .expect("consistent resume decision");
+        assert!(matches!(disposition, GatewaySessionDisposition::Resume(_)));
+        assert_eq!(fixture.gateway_audit().supersede_count(), 2);
+
+        // resume 判定全程零 spawn（拒绝续接 ≠ 启动新 provider）。
+        assert_eq!(fixture.registry_start_count(), 0);
     }

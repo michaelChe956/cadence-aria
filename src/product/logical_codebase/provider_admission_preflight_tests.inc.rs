@@ -1030,4 +1030,79 @@ mod tests {
             Err(ToolPolicyGuardError::BootstrapMarkerInvalid { .. })
         ));
     }
+
+    /// Task 3.1（REQ-ENV-10/11/BOOT-04）：cwd≠target 分离形态下的普通缺根
+    /// admission 回归锁——普通 session（Normal 相位，无自举凭据）以
+    /// root cwd + 成员 Git checkout target 发起时，成员缺根规则
+    ///（.claude/rules/language.md）照样 waiting、provider 零启动；cwd 经
+    /// root 内自引用 symlink alias 字面传入，钉住 admission 复验判据是
+    /// canonical 相等而非字面相等。补齐根规则后同一分离形态请求 ready，
+    /// 证明分离形态本身不是阻断源。
+    #[test]
+    fn ordinary_missing_root_session_zero_spawns() {
+        let fixture = admission_fixture();
+        // cwd=root 的自引用 symlink alias（词法上位于 authority 内，canonical
+        // 解析回 root 本体）。
+        let cwd_alias = fixture.aggregate_root.join("root-alias");
+        std::os::unix::fs::symlink(&fixture.aggregate_root, &cwd_alias).unwrap();
+        // 成员身份从 LC 子树权威 store 读取（fixture 未保留 id 字段）。
+        let lc = LogicalCodebaseStore::for_lc(fixture.paths.clone(), &fixture.lc_id);
+        let members = lc.list_members(&fixture.project_id).unwrap();
+        let member = members.first().expect("fixture seeds one member");
+        let checkouts = lc.list_checkouts(&fixture.project_id).unwrap();
+        let checkout = checkouts
+            .iter()
+            .find(|checkout| member.checkout_ids.contains(&checkout.checkout_id))
+            .expect("member has a recorded checkout");
+        let canonical_member = std::fs::canonicalize(&fixture.member_root).unwrap();
+
+        let separated_request = SessionLaunchRequest {
+            project_id: fixture.project_id.clone(),
+            provider: ProviderRef::claude_code("snapshot-admission-test"),
+            action: SessionPolicyAction::PlanningReadOnly,
+            target: crate::product::logical_codebase::policy::PolicyTarget::checkout(
+                member.logical_repository_id.0.to_string(),
+                checkout.checkout_id.0.to_string(),
+                canonical_member.clone(),
+            ),
+            working_directory: cwd_alias.clone(),
+            readable_roots: vec![fixture.aggregate_root.clone()],
+            writable_roots: Vec::new(),
+            config_artifact_ref: "sha256:admission-managed-config".to_string(),
+        };
+
+        // 普通相位 + 成员缺根规则 → waiting（member_language_rules_missing），
+        // provider 零启动。等待判据优先钉根规则缺失（若 cwd alias 复验失
+        // 败会以 spawn_revalidation_drift 出现，reason_code 断言可捕捉）。
+        let error = fixture
+            .preflight()
+            .check(&separated_request, &ProviderAdmissionPhase::Normal)
+            .unwrap_err();
+        match error {
+            ProviderAdmissionError::Waiting {
+                reason_code,
+                missing_materials,
+                ..
+            } => {
+                assert_eq!(reason_code, "member_language_rules_missing");
+                assert!(
+                    missing_materials
+                        .iter()
+                        .any(|item| item.contains("language.md"))
+                );
+            }
+            other => panic!("expected waiting fact, got {other:?}"),
+        }
+        assert_eq!(fixture.streaming_adapter.start_count(), 0);
+
+        // 对照：补齐根规则后同一分离形态请求 ready——分离形态（root cwd ≠
+        // member target、symlink alias cwd）不是阻断源；admission 本身仍零启动。
+        fixture.write_language_rules("# language\n");
+        let result = fixture
+            .preflight()
+            .check(&separated_request, &ProviderAdmissionPhase::Normal)
+            .expect("separated form with rules present must be ready");
+        assert!(result.ready, "missing: {:?}", result.missing_materials);
+        assert_eq!(fixture.streaming_adapter.start_count(), 0);
+    }
 }
