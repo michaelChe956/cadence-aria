@@ -491,6 +491,25 @@ fn single_candidate_markdown_with_duplicate_command(story_id: &str, design_id: &
     )
 }
 
+/// Task 3.5 E2E 现场（session_0004 node_004/node_006，真实 claude_code 稳定复现）：
+/// author 输出「多 source_type + 批量 requirement_id」的 Traceability 形态——
+/// parse 全过、lower 在首个 source flush 时报
+/// `lowering_error:traceability 缺少 requirement_id`。
+fn single_candidate_markdown_with_batched_traceability(
+    story_id: &str,
+    design_id: &str,
+) -> String {
+    single_candidate_markdown(story_id, design_id).replacen(
+        &format!(
+            "### Traceability\n- source_type: design_spec\n- source_id: {design_id}\n- requirement_id: REQ-001"
+        ),
+        &format!(
+            "### Traceability\n- source_type: story_spec\n- source_id: {story_id}\n- source_type: design_spec\n- source_id: {design_id}\n- requirement_id: REQ-001"
+        ),
+        1,
+    )
+}
+
 #[tokio::test]
 async fn single_candidate_repairs_duplicate_trusted_command_before_terminal_failure() {
     let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
@@ -638,6 +657,89 @@ async fn single_candidate_mixed_duplicate_and_missing_section_uses_one_teaching_
     })
     .await
     .expect("mixed compile failure error");
+    assert!(
+        error["message"]
+            .as_str()
+            .expect("error message")
+            .contains("compile markdown source failed")
+    );
+    wait_for_single_candidate_phase(
+        &fixture,
+        crate::product::models::SingleCandidatePhase::Failed,
+    )
+    .await;
+}
+
+/// Task 3.5 E2E 现场的回归网：lowering 结构错误（Traceability 多源批量
+/// requirement_id）与 parse 语法错误同为「输出形态不合规」，教学重驱是其
+/// 唯一自愈面；不进白名单则真实链确定性终态失败且无重驱事件（现场实证：
+/// node_004/node_006 两轮同形态失败、execution_events 无 reredrive 条目）。
+#[tokio::test]
+async fn single_candidate_batched_traceability_lowering_error_uses_one_teaching_reredrive() {
+    let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let output = single_candidate_markdown_with_batched_traceability(
+        &fixture.story_id,
+        &fixture.design_id,
+    );
+    let provider = Arc::new(RecordingOutputProvider {
+        output,
+        inputs: input_tx,
+    });
+    let (context, mut outbound_rx) = single_candidate_context(&fixture, provider);
+
+    handle_workspace_inbound_message(
+        context,
+        WsInMessage::StartGeneration {
+            provider_config: provider_config(),
+            reviewer_enabled: false,
+        },
+    )
+    .await;
+
+    let _full_input = tokio::time::timeout(std::time::Duration::from_secs(1), input_rx.recv())
+        .await
+        .expect("full author provider must receive input")
+        .expect("full author provider input");
+    let reredrive_input = tokio::time::timeout(std::time::Duration::from_secs(1), input_rx.recv())
+        .await
+        .expect("lowering_error must receive one teaching re-drive")
+        .expect("teaching re-drive input");
+    assert!(
+        reredrive_input
+            .prompt
+            .contains("立即输出完整 work-item-plan markdown source")
+    );
+    assert!(
+        reredrive_input.prompt.contains("traceability 缺少 requirement_id"),
+        "teaching re-drive must carry the lowering error verbatim: {}",
+        reredrive_input.prompt
+    );
+    assert!(
+        !matches!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), input_rx.recv()).await,
+            Ok(Some(_))
+        ),
+        "lowering_error must consume at most one teaching re-drive"
+    );
+
+    let error = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let outbound = outbound_rx
+                .recv()
+                .await
+                .expect("lowering failure outbound");
+            let OutboundControl::Text(json) = outbound else {
+                continue;
+            };
+            let value: serde_json::Value = serde_json::from_str(&json).expect("outbound json");
+            if value["type"] == "error" {
+                return value;
+            }
+        }
+    })
+    .await
+    .expect("lowering failure error");
     assert!(
         error["message"]
             .as_str()

@@ -48,6 +48,26 @@ fn is_teachable_parse_failure(code: &str) -> bool {
     TEACHABLE_PARSE_FAILURE_CODES.contains(&code)
 }
 
+/// lowering 结构错误中的「缺席类」（必需字段/行缺失，message 以 lower 的
+/// 缺席措辞标记）：与 `missing_section` 同族——必需元素缺席、无自动返修面，
+/// 教学重驱是其唯一自愈机会。
+///
+/// Task 3.5 E2E 现场（session_0004 node_004/006，真实 claude_code 稳定复现）：
+/// 「Traceability 多 source_type + 批量 requirement_id」的合法语义形态触发
+/// 首个 source flush 缺 requirement_id（`traceability 缺少 requirement_id`）。
+/// 不入教学面则确定性终态失败且无重驱（两轮同形态失败、execution_events 无
+/// reredrive 条目佐证）。值域类（枚举值非法等「必须是…」措辞）维持 F-48 的
+/// 零重驱裁决不动。
+fn is_lowering_absence_message(message: &str) -> bool {
+    message.contains("缺少") || message.contains("缺失")
+}
+
+/// 该 compile 诊断是否可教学重驱（parse 语法类 ∪ lowering 缺席类）。
+fn is_teachable_compile_failure(code: &str, message: &str) -> bool {
+    is_teachable_parse_failure(code)
+        || (code == "lowering_error" && is_lowering_absence_message(message))
+}
+
 /// 丢弃 provider 在 markdown 文档标题前输出的前言，保留既有 parser 的失败语义。
 ///
 /// 定位首个固定文档标题的字节偏移并从该处修剪；找不到标题时原样返回，避免把
@@ -725,9 +745,9 @@ pub(crate) async fn run_single_candidate_author(
                 Err(diagnostics) => {
                     let reasons = format_compile_failure_reasons(&diagnostics);
                     if first_round_failure.is_none()
-                        && diagnostics
-                            .iter()
-                            .any(|diagnostic| is_teachable_parse_failure(&diagnostic.code))
+                        && diagnostics.iter().any(|diagnostic| {
+                            is_teachable_compile_failure(&diagnostic.code, &diagnostic.message)
+                        })
                     {
                         first_round_failure = Some(reasons.join("; "));
                         let reredrive_prompt =
@@ -962,7 +982,7 @@ mod tests {
         );
     }
 
-    /// Task 0 实查结论的代码化:可教学集合 = parse 语法类全集
+    /// Task 0 实查结论的代码化:parse 语法类白名单 = parse 语法类全集
     /// (`grammar::DIAGNOSTIC_CODES`) 减去 `contract_autorepair` 已确定性收敛的码
     /// (`unknown_structured_key` 按诊断行号确定性删行,F-41)。语法层新增诊断码时
     /// 本断言会失败,迫使同步审视白名单。
@@ -983,6 +1003,39 @@ mod tests {
         assert_eq!(
             TEACHABLE_PARSE_FAILURE_CODES.len(),
             grammar::DIAGNOSTIC_CODES.len() - converged_codes.len()
+        );
+    }
+
+    /// Task 3.5 E2E 现场裁决的代码化:lowering 结构错误按「缺席类 vs 值域类」
+    /// 分流——缺席类（必需字段/行缺失,如 Traceability 多源 triple 缺
+    /// requirement_id,node_004/006 真实链稳定复现）与 missing_section 同族,
+    /// 可教学重驱;值域类（枚举值非法等）维持 F-48 零重驱裁决。
+    #[test]
+    fn teachable_lowering_failures_split_absence_from_value_domain() {
+        use super::is_teachable_compile_failure;
+
+        assert!(
+            is_teachable_compile_failure(
+                "lowering_error",
+                "traceability 缺少 requirement_id。"
+            ),
+            "缺席类 lowering 错误必须可教学重驱"
+        );
+        assert!(
+            is_teachable_compile_failure("lowering_error", "必填 markdown 字段缺失。"),
+            "缺席类 lowering 错误必须可教学重驱"
+        );
+        assert!(
+            !is_teachable_compile_failure("lowering_error", "intent 必须是 create 或 existing。"),
+            "值域类 lowering 错误维持 F-48 零重驱裁决"
+        );
+        assert!(
+            !is_teachable_compile_failure("lowering_error", "字段必须是 true 或 false。"),
+            "值域类 lowering 错误维持 F-48 零重驱裁决"
+        );
+        assert!(
+            is_teachable_compile_failure("missing_section", "文档必须包含固定一级标题。"),
+            "parse 语法类不受分流影响"
         );
     }
 
