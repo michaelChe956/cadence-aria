@@ -33,8 +33,6 @@ pub(crate) use lease_diagnostics::lease_diagnostics_path;
 mod lease_diagnostics;
 mod runs;
 
-pub use runs::RunRegistrationGuard;
-
 pub(super) struct Attachment {
     pub(super) outbound_tx: mpsc::Sender<OutboundControl>,
     /// 一旦直播通道溢出，该连接只能通过重连回到一致状态；此后 router 不再向其投递。

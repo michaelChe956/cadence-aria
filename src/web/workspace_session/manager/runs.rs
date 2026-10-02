@@ -138,27 +138,22 @@ impl WorkspaceSessionManager {
         Ok(run)
     }
 
-    /// run 注册释放的同步核（缺陷 #10）：token 匹配的活跃 run 退场（claims
-    /// 退场 + journal 终态标记）；token 不匹配（已被新 run 替换）不动注册。
-    /// `finish_run` 与 run 任务退场兜底 guard 共用，保证任意退场路径都释放。
-    pub fn release_run_registration_if_owned(&self, token: u64) {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(run) = state.active_run.take() {
-            if run.token == token {
-                super::choices::retire_claims_for_run(&mut state, &run.run_incarnation);
-                state.journal.mark_run_terminal();
-            } else {
-                // 非本人 token：恢复原 run，不误伤。
-                state.active_run = Some(run);
+    pub async fn finish_run(self: &Arc<Self>, token: u64) {
+        {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(run) = state.active_run.take() {
+                if run.token == token {
+                    super::choices::retire_claims_for_run(&mut state, &run.run_incarnation);
+                    state.journal.mark_run_terminal();
+                } else {
+                    // 非本人 token：恢复原 run，不误伤。
+                    state.active_run = Some(run);
+                }
             }
         }
-    }
-
-    pub async fn finish_run(self: &Arc<Self>, token: u64) {
-        self.release_run_registration_if_owned(token);
         self.maybe_recycle().await;
     }
 
@@ -289,33 +284,5 @@ impl WorkspaceSessionManager {
         );
         let _ = run.command_tx.try_send(ProviderCommand::Abort);
         run.cancel.cancel();
-    }
-}
-
-/// 缺陷 #10 兜底：provider run 任务以任意路径退场（提前 return、panic 解卷、
-/// 外部取消）时释放 manager 的 run 注册。修复前，run 任务内多个提前退场路径
-/// 跳过 `finish_run`——provider 进程已死但 `active_run` 永驻，`is_active_run()`
-/// 持续误报 `sc_recovery_busy`，显式恢复面被僵死注册阻塞，需人工 WS Abort。
-/// 显式 `finish_run` 先行释放后，guard 退场为幂等 no-op（token 已不匹配或注册
-/// 已空）；token 已被新 run 替换时同样不误伤新注册。
-pub struct RunRegistrationGuard {
-    manager: Option<Arc<WorkspaceSessionManager>>,
-    token: u64,
-}
-
-impl RunRegistrationGuard {
-    pub fn new(manager: Arc<WorkspaceSessionManager>, token: u64) -> Self {
-        Self {
-            manager: Some(manager),
-            token,
-        }
-    }
-}
-
-impl Drop for RunRegistrationGuard {
-    fn drop(&mut self) {
-        if let Some(manager) = self.manager.take() {
-            manager.release_run_registration_if_owned(self.token);
-        }
     }
 }

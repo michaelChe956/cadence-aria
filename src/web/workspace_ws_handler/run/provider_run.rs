@@ -130,13 +130,6 @@ pub(super) async fn spawn_provider_run_with_start_mode(
     );
     tokio::spawn(async move {
         let mut provider_drive_guard = Some(provider_drive_guard);
-        // 缺陷 #10：run 任务退场兜底——任意退场路径（提前 return / panic 解卷 /
-        // 外部取消）都释放 manager run 注册，杜绝 provider 死亡后 active_run
-        // 永驻导致 is_active_run() 误报 sc_recovery_busy 阻塞恢复面。
-        let _run_registration_guard = crate::web::workspace_session::RunRegistrationGuard::new(
-            manager_for_task.clone(),
-            run_token,
-        );
         let mut engine = engine_for_run.lock().await;
         engine.use_run_token(run_cancel.clone());
         // B3：StaleContext 重建携带的 rebuilt planning context（provider run 构造新会话
@@ -658,6 +651,14 @@ pub(super) async fn spawn_provider_run_with_start_mode(
                             .finish_active_run_with_failed_node(message.clone())
                             .await;
                         drop(engine);
+                        // 缺陷 #10：终态失败路径必须释放 run 注册——对齐同族
+                        // AlreadyFinished/Superseded/AdmissionWaiting 分支的既有
+                        // finish_run 惯例。修复前提前 return 跳过释放——provider
+                        // 已死但 active_run 永驻，is_active_run() 误报
+                        // sc_recovery_busy，显式恢复面被僵死注册阻塞
+                        //（E2E v1.1 §3.3，曾需人工 WS Abort 清除）。
+                        drop(provider_drive_guard.take());
+                        manager_for_task.finish_run(run_token).await;
                         let _ = send_json_outbound(
                             &outbound_tx_for_task,
                             &WsOutMessage::Error { message },
