@@ -11,6 +11,24 @@ fn create_active_coding_unit_run(
             CodingExecutionStage::ReviewRequest,
         )
         .expect("review request stage before group completion");
+    // 805f0d84（C2 Task 6 决策 6/#13）：认领前冻结的 start_commit 是 Running
+    // run 的必备事实——完成路径对真缺失停等（unit_run_start_commit_missing），
+    // 绝不按 base HEAD 回填。fixture 绕过真实认领路径直接物化 run，故从
+    // worktree 真实 HEAD 冻结 attempt.head_commit（对齐 it_web part_08 的
+    // materialize_running_unit_run_for_logical），run.start_commit 经
+    // attempt.head_commit 携带落盘。
+    let start_head = attempt
+        .worktree_path
+        .as_ref()
+        .map(|worktree| git_head(worktree));
+    let attempt = &store
+        .update_attempt_head_commit(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            start_head,
+        )
+        .expect("freeze fixture head commit");
     let unit = store
         .get_active_coding_unit(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("active unit lookup")

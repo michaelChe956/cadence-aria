@@ -313,6 +313,24 @@ async fn execute_code_review_persists_report_and_emits_review_events() {
             node_id: Some("coding_node_0001".to_string()),
         }
     );
+    // dc54ffb8（C2 Task 1 REQ-CRO-01 durable-first）：完成事实先落盘再发射
+    // 观察事件——complete_timeline_node 的 CodingTimelineNodeUpdated 先于
+    // chat entry 与 CodeReviewComplete（src 侧契约测试
+    // code_review_complete_persists_facts_before_emitting_events 同序钉死）。
+    match rx.recv().await.expect("code review node completed") {
+        CodingWsOutMessage::CodingTimelineNodeUpdated {
+            node_id,
+            status,
+            summary,
+            completed_at,
+        } => {
+            assert_eq!(node_id, "coding_node_0001");
+            assert_eq!(status, CodingTimelineNodeStatus::Completed);
+            assert_eq!(summary.as_deref(), Some("code review 通过"));
+            assert!(completed_at.is_some());
+        }
+        other => panic!("expected code review node completed, got {other:?}"),
+    }
     match rx.recv().await.expect("code review chat entry") {
         CodingWsOutMessage::CodingChatEntryCreated { entry } => {
             assert_eq!(entry.node_id.as_deref(), Some("coding_node_0001"));
@@ -338,20 +356,6 @@ async fn execute_code_review_persists_report_and_emits_review_events() {
             assert_eq!(event_report.verdict, ReviewVerdict::Approve);
         }
         other => panic!("expected code review complete, got {other:?}"),
-    }
-    match rx.recv().await.expect("code review node completed") {
-        CodingWsOutMessage::CodingTimelineNodeUpdated {
-            node_id,
-            status,
-            summary,
-            completed_at,
-        } => {
-            assert_eq!(node_id, "coding_node_0001");
-            assert_eq!(status, CodingTimelineNodeStatus::Completed);
-            assert_eq!(summary.as_deref(), Some("code review 通过"));
-            assert!(completed_at.is_some());
-        }
-        other => panic!("expected code review node completed, got {other:?}"),
     }
 }
 
