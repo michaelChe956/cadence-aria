@@ -321,13 +321,18 @@ mod tests {
     /// canonical root 的实测落盘前缀（2026-10-02 spike，claude 2.1.283，
     /// 见 cadence/reports/2026-10-02_验收报告_LC根初始化全链E2E）。
     /// 逐项冻结、绝不扩大为整个 root；成员目录不进 allowlist（成员 `.git`
-    /// 分类优先于 allowlist 的既有锁继续生效）。
+    /// 分类优先于 allowlist 的既有锁继续生效）。2026-10-02 E2E 增补：
+    /// `.codegraph`/`codegraph.json` 为产品自管聚合索引面（exclude.rs 根
+    /// 扫描白名单同款），spike 冻结时无 codegraph daemon 在场属信息不全，
+    /// 按真实部署事实（索引建立后 daemon 与 recipe 共存）补齐。
     #[test]
     fn root_recipe_allowlist_freezes_real_provider_root_artifacts() {
         assert_eq!(
             ROOT_RECIPE_ALLOWLIST,
             &[
                 ".aria/aggregate",
+                ".codegraph",
+                "codegraph.json",
                 "AGENTS.md",
                 "CLAUDE.md",
                 ".mcp.json",
@@ -436,6 +441,92 @@ mod tests {
             receipt.verdict,
             RootRecipeCommandVerdict::Rejected,
             "any unknown-path write keeps the command rejected"
+        );
+    }
+
+    /// 缺陷回归（2026-10-02 全链 E2E，op aggregate_initialization_873c…同因）：
+    /// 产品自身 sanction 的聚合索引面（`.codegraph`/`codegraph.json`，见
+    /// aggregate_index/exclude.rs 根扫描白名单）在 recipe 期间承载 codegraph
+    /// daemon 的 IPC 产物（Unix socket 等）。审计必须可观测地记录非常规
+    /// 条目（special：路径+类型、无内容 digest），不得 fail-closed 断审；
+    /// `.codegraph`/`codegraph.json` 变更按产品自管聚合面放行；未知路径
+    /// 的 special 条目仍拒绝（可观测≠放行）。
+    #[test]
+    fn receipt_auditor_observes_special_entries_and_allows_codegraph_surface() {
+        let fixture = ReceiptFixture::new();
+        let auditor = RootRecipeFilesystemAuditor::new();
+
+        // daemon 在场：before 快照前已存在的稳定 IPC 面目。
+        std::fs::create_dir_all(fixture.root.join(".codegraph")).unwrap();
+        let _daemon = std::os::unix::net::UnixListener::bind(
+            fixture.root.join(".codegraph/listener.sock"),
+        )
+        .unwrap();
+
+        let (step, command) = command_spec(4);
+        let watch = auditor
+            .before_command(OPERATION_ID, &fixture.root, step, 4, command)
+            .unwrap();
+
+        // 命令窗内的真实 daemon 副作用形态：IPC socket 新增 + pid/log 文件、
+        // codegraph.json（exclude.rs 根扫描白名单的根级配置）。
+        let _sock2 = std::os::unix::net::UnixListener::bind(
+            fixture.root.join(".codegraph/daemon.sock"),
+        )
+        .unwrap();
+        std::fs::write(fixture.root.join(".codegraph/daemon.pid"), "42\n").unwrap();
+        std::fs::write(fixture.root.join(".codegraph/daemon.log"), "listening\n").unwrap();
+        std::fs::write(fixture.root.join("codegraph.json"), "{\"exclude\":[]}\n").unwrap();
+        // 越界对照：未知根级 socket 必须仍被拒绝。
+        let _rogue = std::os::unix::net::UnixListener::bind(fixture.root.join("rogue.sock"))
+            .unwrap();
+
+        let receipt = auditor
+            .after_command(watch, RECORDED_AT.to_string())
+            .unwrap();
+
+        // special 条目可观测：路径+类型入快照，无内容 digest。
+        let sock = receipt
+            .after_snapshot
+            .entries
+            .iter()
+            .find(|entry| entry.path == ".codegraph/daemon.sock")
+            .expect("daemon.sock must be observed in the after snapshot");
+        assert_eq!(sock.kind, RootRecipeSnapshotEntryKind::Special);
+        assert_eq!(sock.special_type.as_deref(), Some("socket"));
+        assert!(sock.content_digest.is_none());
+        // before 面里预先存在的 listener.sock 同为稳定 special 条目。
+        assert!(receipt
+            .before_snapshot
+            .entries
+            .iter()
+            .any(|entry| entry.path == ".codegraph/listener.sock"
+                && entry.kind == RootRecipeSnapshotEntryKind::Special));
+
+        // 产品自管聚合面变更：逐项 AllowlistedArtifact。
+        for path in [
+            ".codegraph/daemon.sock",
+            ".codegraph/daemon.pid",
+            ".codegraph/daemon.log",
+            "codegraph.json",
+        ] {
+            let (class, allowed) = change_of(&receipt, path);
+            assert_eq!(
+                class,
+                &RootRecipeChangeClass::AllowlistedArtifact,
+                "{path} must be an allowlisted product-managed aggregate artifact"
+            );
+            assert!(allowed, "{path} must be allowed");
+        }
+
+        // 未知路径 special 条目：拒绝边界不变。
+        let (class, allowed) = change_of(&receipt, "rogue.sock");
+        assert_eq!(class, &RootRecipeChangeClass::UnknownPath);
+        assert!(!allowed, "unknown-path special entry must stay rejected");
+        assert_eq!(
+            receipt.verdict,
+            RootRecipeCommandVerdict::Rejected,
+            "rogue special entry keeps the command rejected"
         );
     }
 

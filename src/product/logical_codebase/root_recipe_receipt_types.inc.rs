@@ -8,9 +8,14 @@
 /// /`.omp`/`cadence`；`/mcp-configuration` 写 `.mcp.json`/`.codex`/`.gitignore`；
 /// `/project-rules-examples` 写 `cadence/project-rules/examples`。聚合
 /// artifact 只允许落在 `.aria/aggregate/**`。绝不扩大为整个 root，也绝不
-/// 放行成员仓路径（D2；成员 `.git` 分类优先于 allowlist）。
+/// 放行成员仓路径（D2；成员 `.git` 分类优先于 allowlist）。2026-10-02
+/// E2E 增补：`.codegraph`/`codegraph.json` 为产品自管聚合索引面
+/// （aggregate_index/exclude.rs 根扫描白名单同款），索引建立后 codegraph
+/// daemon 与 recipe 共存属真实部署事实，按此补齐。
 pub const ROOT_RECIPE_ALLOWLIST: &[&str] = &[
     ".aria/aggregate",
+    ".codegraph",
+    "codegraph.json",
     "AGENTS.md",
     "CLAUDE.md",
     ".mcp.json",
@@ -65,12 +70,17 @@ fn default_allowlist() -> Vec<String> {
 // ---------------------------------------------------------------------------
 
 /// 快照条目类型。symlink 只记录链接目标，绝不跟随（防逃逸/防循环）。
+/// special 记录非常规条目（Unix socket/fifo/device 等）：路径+类型可
+/// 观测、无内容 digest——IPC 产物是产品自管索引面（`.codegraph` daemon
+/// 等）的运行时面目，可观测但不 fail-closed 断审（2026-10-02 E2E 缺陷
+/// 回归：audit cannot observe unsupported entry type）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RootRecipeSnapshotEntryKind {
     File,
     Dir,
     Symlink,
+    Special,
 }
 
 impl RootRecipeSnapshotEntryKind {
@@ -79,6 +89,7 @@ impl RootRecipeSnapshotEntryKind {
             Self::File => "file",
             Self::Dir => "dir",
             Self::Symlink => "symlink",
+            Self::Special => "special",
         }
     }
 }
@@ -93,6 +104,10 @@ pub struct RootRecipeSnapshotEntry {
     pub content_digest: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link_target: Option<String>,
+    /// special 条目的具体类型（socket/fifo/char_device/block_device/other）；
+    /// 其余条目为 None。旧 receipt 反序列化缺省 None（向后兼容）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub special_type: Option<String>,
     /// symlink 词法解析后逃出 canonical root 时为 `true`（快照时判定）。
     #[serde(default)]
     pub escapes_root: bool,

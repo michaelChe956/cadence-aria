@@ -509,6 +509,7 @@ fn entries_equivalent(before: &RootRecipeSnapshotEntry, after: &RootRecipeSnapsh
     before.kind == after.kind
         && before.content_digest == after.content_digest
         && before.link_target == after.link_target
+        && before.special_type == after.special_type
 }
 
 fn rejection_summary(
@@ -610,9 +611,12 @@ impl SnapshotScale {
     }
 }
 
-/// 全量递归快照：不跟随 symlink；目录不可读、文件不可读、特殊文件类型
-/// 均视为不可观测而 fail-closed 报错（绝不静默跳过）。快照规模受预算门
-/// 约束（Task 1.5 carry → Task 3.4），超限同样 fail-closed。
+/// 全量递归快照：不跟随 symlink；目录不可读、文件不可读均视为不可观测
+/// 而 fail-closed 报错（绝不静默跳过）。非常规条目（Unix socket/fifo/
+/// device）是产品自管索引面（`.codegraph` daemon 等）的运行时 IPC 产物：
+/// 记为 special（路径+类型、无内容 digest）保持可观测，不 fail-closed
+/// 断审（2026-10-02 E2E 缺陷回归）。快照规模受预算门约束（Task 1.5
+/// carry → Task 3.4），超限同样 fail-closed。
 fn walk_root(
     root: &Path,
     dir: &Path,
@@ -641,6 +645,7 @@ fn walk_root(
                 kind: RootRecipeSnapshotEntryKind::Symlink,
                 content_digest: None,
                 link_target: Some(target.to_string_lossy().into_owned()),
+                special_type: None,
                 escapes_root: symlink_escapes_root(root, &path, &target),
             });
         } else if file_type.is_dir() {
@@ -649,6 +654,7 @@ fn walk_root(
                 kind: RootRecipeSnapshotEntryKind::Dir,
                 content_digest: None,
                 link_target: None,
+                special_type: None,
                 escapes_root: false,
             });
             walk_root(root, &path, entries, budget, scale)?;
@@ -662,16 +668,45 @@ fn walk_root(
                 kind: RootRecipeSnapshotEntryKind::File,
                 content_digest: Some(digest_bytes(&bytes)),
                 link_target: None,
+                special_type: None,
                 escapes_root: false,
             });
         } else {
-            return Err(ProductStoreError::Io(format!(
-                "audit cannot observe unsupported entry type at {} (fail-closed)",
-                path.display()
-            )));
+            // 非常规条目（socket/fifo/device）：可观测记录，不断审。
+            // 类型来自已成功 stat 的 dir entry file_type（无额外 syscall）。
+            entries.push(RootRecipeSnapshotEntry {
+                path: relative,
+                kind: RootRecipeSnapshotEntryKind::Special,
+                content_digest: None,
+                link_target: None,
+                special_type: Some(special_entry_kind(&file_type).to_string()),
+                escapes_root: false,
+            });
         }
     }
     Ok(())
+}
+
+/// special 条目的具体类型名（来自 dir entry 的 file_type，无额外 IO）。
+#[cfg(unix)]
+fn special_entry_kind(file_type: &std::fs::FileType) -> &'static str {
+    use std::os::unix::fs::FileTypeExt;
+    if file_type.is_socket() {
+        "socket"
+    } else if file_type.is_fifo() {
+        "fifo"
+    } else if file_type.is_char_device() {
+        "char_device"
+    } else if file_type.is_block_device() {
+        "block_device"
+    } else {
+        "other"
+    }
+}
+
+#[cfg(not(unix))]
+fn special_entry_kind(_file_type: &std::fs::FileType) -> &'static str {
+    "other"
 }
 
 fn relative_audit_path(root: &Path, path: &Path) -> Result<String, ProductStoreError> {
@@ -734,6 +769,8 @@ fn digest_snapshot_entries(entries: &[RootRecipeSnapshotEntry]) -> String {
         hasher.update(entry.content_digest.as_deref().unwrap_or("-").as_bytes());
         hasher.update([0]);
         hasher.update(entry.link_target.as_deref().unwrap_or("-").as_bytes());
+        hasher.update([0]);
+        hasher.update(entry.special_type.as_deref().unwrap_or("-").as_bytes());
         hasher.update([0]);
         hasher.update(if entry.escapes_root { b"1" } else { b"0" });
         hasher.update(b"\n");
