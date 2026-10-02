@@ -964,3 +964,147 @@ async fn tool_policy_guard_rejects_invalid_role_policy_before_spawn() {
     )
     .await;
 }
+
+/// Task 3.2（D1/REQ-BOOT-04）：三 adapter spawn 边界的 BootstrapExecutor
+/// marker 消费锁。marker 四要素（credential、bootstrap action、canonical
+/// root、receipt context）联合证明的完整自举通道在真实 adapter `start`
+/// 首步被消费：
+/// - Executor + 完整 marker：唯一放行面——守卫通过，失败转移到子进程
+///   启动（错误不再是 tool-policy guard 文案）；
+/// - Reviewer + marker：marker 不是策略替代品，spawn 前 PolicyRequired；
+/// - Handoff + marker：非策略角色不得使用自举通道，spawn 前
+///   PolicyForbidden。
+/// 构造面（空 receipt context/空 root/非写 action）与退化 marker 的
+/// guard 函数级拒绝已由
+/// `bootstrap_executor_without_credential_or_receipt_context_is_rejected`
+/// 锁定，此处只锁三 adapter 的真实 spawn 边界面。
+#[tokio::test]
+async fn bootstrap_executor_requires_credential_and_receipt_context() {
+    use crate::cross_cutting::claude_code_provider::ClaudeCodeProvider;
+    use crate::cross_cutting::codex_provider::CodexProvider;
+    use crate::cross_cutting::pi_provider::PiProvider;
+    use crate::product::logical_codebase::aggregate_initialization::AggregateInitializationStepKind;
+    use crate::product::logical_codebase::policy::SessionPolicyAction;
+    use crate::product::logical_codebase::provider_admission_preflight::{
+        BootstrapExecutorMarker, BootstrapPhaseCredential,
+    };
+    use crate::protocol::contracts::{AdapterRole, ProviderType};
+    use std::sync::Arc;
+
+    use super::ToolPolicyIntent;
+
+    let canonical_root = std::path::PathBuf::from("/tmp/aria-bootstrap-marker-root");
+    let credential = BootstrapPhaseCredential::for_test(
+        "project_0001",
+        "logical_codebase_0001",
+        "aggregate_initialization_0001",
+        AggregateInitializationStepKind::PreCheck,
+        "sha256:test-input-digest",
+        canonical_root.clone(),
+    );
+    let marker = BootstrapExecutorMarker::new(
+        credential,
+        SessionPolicyAction::CodingTargetWrite,
+        canonical_root,
+        "root-recipe:pre_check:command-1",
+    )
+    .expect("complete bootstrap executor marker");
+    let marker_policy = ProviderToolPolicy {
+        intent: ToolPolicyIntent::BootstrapExecutorMarker(marker),
+    };
+
+    let missing_cli = std::path::PathBuf::from("/nonexistent/aria-bootstrap-marker-probe-cli");
+    let adapters: [(&str, Arc<dyn StreamingProviderAdapter>, ProviderType); 3] = [
+        (
+            "claude",
+            Arc::new(ClaudeCodeProvider::new(missing_cli.clone())),
+            ProviderType::ClaudeCode,
+        ),
+        (
+            "codex",
+            Arc::new(CodexProvider::new(missing_cli.clone())),
+            ProviderType::Codex,
+        ),
+        (
+            "pi",
+            Arc::new(PiProvider::new(missing_cli)),
+            ProviderType::Pi,
+        ),
+    ];
+
+    let input = |provider_type: &ProviderType, role: AdapterRole| StreamingProviderInput {
+        working_directory: None,
+        baseline_tree: None,
+        tool_policy: Some(marker_policy.clone()),
+        audit_sink: None,
+        provider_type: provider_type.clone(),
+        role,
+        prompt: "bootstrap marker probe".to_string(),
+        working_dir: std::env::temp_dir(),
+        workspace_session_id: None,
+        resume_provider_session_id: None,
+        permission_mode: crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
+        structured_output_contract: None,
+        env_vars: std::collections::BTreeMap::new(),
+        timeout_secs: 5,
+    };
+
+    for (provider, adapter, provider_type) in adapters
+        .iter()
+        .map(|(name, adapter, provider_type)| (*name, adapter.clone(), provider_type.clone()))
+    {
+        // Executor + 完整 marker：守卫放行，失败必须是子进程启动而非守卫拒绝。
+        match adapter
+            .start(
+                input(&provider_type, AdapterRole::Executor),
+                CancellationToken::new(),
+            )
+            .await
+        {
+            Ok(_) => panic!("{provider}: missing CLI must fail the spawn after the guard"),
+            Err(error) => {
+                assert!(
+                    !error.details.contains("tool policy guard"),
+                    "{provider}: complete marker must pass the spawn guard, got: {}",
+                    error.details
+                );
+            }
+        }
+
+        // 策略角色（Reviewer）携带 marker：spawn 前 PolicyRequired。
+        match adapter
+            .start(
+                input(&provider_type, AdapterRole::Reviewer),
+                CancellationToken::new(),
+            )
+            .await
+        {
+            Ok(_) => panic!("{provider}: reviewer with marker must be rejected before spawn"),
+            Err(error) => {
+                assert!(
+                    error.details.contains("tool policy guard"),
+                    "{provider}: reviewer must not substitute the marker for its policy, got: {}",
+                    error.details
+                );
+            }
+        }
+
+        // Handoff 携带 marker：spawn 前 PolicyForbidden。
+        match adapter
+            .start(
+                input(&provider_type, AdapterRole::Handoff),
+                CancellationToken::new(),
+            )
+            .await
+        {
+            Ok(_) => panic!("{provider}: handoff with marker must be rejected before spawn"),
+            Err(error) => {
+                assert!(
+                    error.details.contains("tool policy guard"),
+                    "{provider}: handoff must not use the bootstrap channel, got: {}",
+                    error.details
+                );
+            }
+        }
+    }
+}

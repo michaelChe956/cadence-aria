@@ -6,9 +6,12 @@
 //! 走独立的 `GatewayBackedAggregateProviderTurnDriver` + `AggregateAssetPublisher`,
 //! **不**复用本初始化器,也不调用单仓 `git_finalize` 切点——聚合 provider turn
 //! 经 `LogicalCodebaseProviderGateway` 启动,产出只发布到 `.aria/aggregate/**`。
-//! 该隔离由 `aggregate_initialization_coordinator::tests::
-//! aggregate_coordinator_isolation_locked_against_single_repository_persistence_and_git_finalize`
-//! 锁定回归。
+//! 该隔离由两条行为/可达性回归锁锁定（Task 3.2 起替代原源码 token
+//! 扫描）：`aggregate_initialization_coordinator::tests::
+//! aggregate_root_contract_does_not_reuse_repository_registration_or_git_finalize`
+//! （coordinator 级）与 `web::handlers::aggregate_initialization::tests::
+//! shared_executor_cannot_reach_repository_registration_or_git_finalize`
+//! （生产接线可达性级）。
 
 use std::collections::BTreeMap;
 use std::path::Path;

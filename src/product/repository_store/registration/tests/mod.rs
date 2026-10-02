@@ -777,10 +777,13 @@ impl BoundedCommandRunner for ScriptedGitRunner {
 /// 聚合初始化走独立的 `AggregateInitializationCoordinator` +
 /// `GatewayBackedAggregateProviderTurnDriver`,不构造也不调用
 /// `RepositoryRegistrationCoordinator`、`ClaudeRepositoryInitializer` 或
-/// `git_finalize`。主隔离断言在 `aggregate_initialization_coordinator::tests::
-/// aggregate_coordinator_isolation_locked_against_single_repository_persistence_and_git_finalize`
-/// 中以源码扫描锁定;本测试补充类型层面证明:聚合 coordinator 不驻留于
-/// `repository_store` 模块树(单仓 registration/git finalize 的归属地)。
+/// `git_finalize`。主隔离断言（Task 3.2 起为行为/可达性锁，替代原源码
+/// token 扫描）在两处:`aggregate_initialization_coordinator::tests::
+/// aggregate_root_contract_does_not_reuse_repository_registration_or_git_finalize`
+/// 与 `web::handlers::aggregate_initialization::tests::
+/// shared_executor_cannot_reach_repository_registration_or_git_finalize`;
+/// 本测试补充类型层面证明:聚合 coordinator 不驻留于 `repository_store`
+/// 模块树(单仓 registration/git finalize 的归属地)。
 #[test]
 fn aggregate_initialization_is_isolated_from_single_repository_registration_and_git_finalize() {
     use crate::product::logical_codebase::aggregate_initialization_coordinator::AggregateInitializationCoordinator;

@@ -1099,3 +1099,4 @@ async fn event_is_published_after_durable_failure_and_contains_action_context() 
 }
 
 include!("tests_parts/trust_route.inc.rs");
+include!("tests_parts/root_safety.inc.rs");

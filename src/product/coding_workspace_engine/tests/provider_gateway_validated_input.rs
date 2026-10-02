@@ -982,6 +982,153 @@ async fn logical_coding_run_blocks_member_main_checkout_drift() {
     }
 }
 
+// ================= Task 3.2：D4 全角色——CodeReviewer rework cycle =================
+
+/// D4 reviewer-cycle 探针：spawn 时点从 attempt 的 cross-target baselines
+/// 目录发现**本次 role run** 刚落盘的基线（capture 先于 spawn，故 spawn 时
+/// 目录内恰一份）并读取内容；可选在会话期间向非 target 成员主 checkout
+/// 写一次越界文件。会话本体委托 `FakeStreamingProvider`（Reviewer 角色
+/// structured output 走真实解析链）。
+struct D4ReviewCycleProbeAdapter {
+    baselines_root: PathBuf,
+    spawns: Arc<std::sync::atomic::AtomicUsize>,
+    baseline_at_spawn: Arc<std::sync::Mutex<Option<serde_json::Value>>>,
+    drift_target: Option<PathBuf>,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for D4ReviewCycleProbeAdapter {
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        self.spawns
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let baseline = std::fs::read_dir(&self.baselines_root)
+            .ok()
+            .and_then(|entries| {
+                entries
+                    .filter_map(|entry| entry.ok())
+                    .find(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+            })
+            .and_then(|entry| std::fs::read_to_string(entry.path()).ok())
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+        *self.baseline_at_spawn.lock().expect("baseline probe mutex") = baseline;
+        if let Some(drift_target) = &self.drift_target {
+            std::fs::write(drift_target, "reviewer out of worktree write\n")
+                .expect("simulated non-target member drift during review run");
+        }
+        crate::cross_cutting::streaming_provider::FakeStreamingProvider
+            .start(input, cancel)
+            .await
+    }
+}
+
+/// Task 3.2（D4 全角色，REQ-ENV-03/REQ-PLN-06）：CodeReviewer rework cycle
+/// （生产入口 `execute_code_review` → `run_code_reviewer_with_retry_cycle`）
+/// 与 Coder 同享 D4 基线语义：review role run 启动前基线已落盘且窗口=全部
+/// active 成员主 checkout；review 会话期间对非 target 成员主 checkout 的
+/// 越界写入在交付统一门被检测并阻断（`cross_target_violation_detected`）。
+#[tokio::test]
+async fn logical_coding_review_baseline_detects_cross_target_mutation() {
+    let (root, store, attempt) = running_attempt_with_worktree();
+    init_test_git_repo(attempt.worktree_path.as_ref().expect("worktree"));
+    // Removed 成员主 checkout 已清理（移除后常态）：窗口恰为 2 个 active 成员。
+    let members = seed_d4_member_codebase(&store, &attempt, root.path(), false);
+    let logical_attempt = with_target_snapshot(&store, &attempt);
+
+    let baselines_root = CodingAttemptStore::new(store.paths())
+        .attempt_cross_target_baselines_root(
+            &logical_attempt.project_id,
+            &logical_attempt.issue_id,
+            &logical_attempt.id,
+        );
+    let probe = Arc::new(D4ReviewCycleProbeAdapter {
+        baselines_root,
+        spawns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        baseline_at_spawn: Arc::new(std::sync::Mutex::new(None)),
+        drift_target: Some(members.other_active_checkout.join("trespass.txt")),
+    });
+    let mut registry = ProviderRegistry::new();
+    registry.register(ProviderName::ClaudeCode, probe.clone());
+    let audit = Arc::new(GatewayRunAudit::new());
+    let gateway = build_gateway_with_registry(
+        &store.paths(),
+        &logical_attempt.project_id,
+        Arc::new(registry),
+        audit.clone(),
+    );
+    let (event_tx, _event_rx) = mpsc::channel(16);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx)
+        .with_logical_provider_gateway(Arc::new(gateway));
+
+    let report = engine
+        .execute_code_review(&logical_attempt, probe.as_ref())
+        .await
+        .expect("reviewer cycle must run through the gateway seam");
+    assert_eq!(
+        report.verdict,
+        crate::product::coding_models::ReviewVerdict::Approve,
+        "review cycle must complete (drift detection is post-hoc, not in-run)"
+    );
+    assert_eq!(
+        probe.spawns.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "exactly one reviewer spawn for the rework cycle"
+    );
+    assert_eq!(
+        audit.stream_launches(),
+        1,
+        "the reviewer spawn must be audited by the gateway"
+    );
+
+    // D4 全角色：review role run 的基线同样先于 spawn 落盘，窗口=2 个
+    // active 成员（Removed 成员不在窗口）。
+    let baseline = probe
+        .baseline_at_spawn
+        .lock()
+        .expect("baseline probe mutex")
+        .clone()
+        .expect("cross-target baseline must be persisted before the reviewer spawns");
+    let snapshots = baseline["member_checkouts"]
+        .as_array()
+        .expect("baseline member_checkouts array");
+    assert_eq!(
+        snapshots.len(),
+        2,
+        "review-role baseline window = 全部 active 成员主 checkout"
+    );
+    for snapshot in snapshots {
+        assert!(
+            !snapshot["head_revision"]
+                .as_str()
+                .unwrap_or_default()
+                .trim()
+                .is_empty(),
+            "each active member snapshot must carry a real HEAD revision"
+        );
+    }
+    assert!(
+        members.other_active_checkout.join("trespass.txt").exists(),
+        "probe 漂移写必须真实发生在 review run 内"
+    );
+
+    // 交付统一门：review run 内的越界写阻断交付。
+    let (delivery_tx, _delivery_rx) = mpsc::channel(8);
+    let delivery_engine =
+        CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), delivery_tx);
+    match delivery_engine
+        .execute_review_request(&logical_attempt, "origin", "feat: d4 reviewer drift")
+        .await
+    {
+        Err(CodingWorkspaceEngineError::CrossTargetDeliveryBlocked(code)) => {
+            assert_eq!(code, "cross_target_violation_detected");
+        }
+        other => panic!("expected CrossTargetDeliveryBlocked, got {other:?}"),
+    }
+}
+
 // ================= Task 2.6：LC Coder/retry root cwd 重绑（REQ-ENV-10/ENV-11） =================
 
 /// spawn 探针：记录每次 spawn 时点的 effective cwd 并计数；会话立即完成

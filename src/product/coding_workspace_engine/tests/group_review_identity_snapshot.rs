@@ -974,3 +974,49 @@ async fn logical_reviewer_keeps_empty_writable_roots_and_d4_baseline() {
         other => panic!("expected CrossTargetDeliveryBlocked, got {other:?}"),
     }
 }
+
+/// Task 3.2（D4 全角色）：group review shard/reduction executor（生产入口
+/// `RealGroupReviewExecutor::execute`）的 D4 基线锁——与 InternalReviewer/
+/// Coder 同享 spawn 前基线语义：group review role run 启动前基线已落盘、
+/// 非 target 成员主 checkout 的越界写（review run 内）在交付统一门被检测
+/// 并阻断。补齐 2.7 group face 仅锁 cwd 的缺口，使 D4 覆盖
+/// coder/reviewer/group/internal 全角色。
+#[tokio::test]
+async fn group_review_shard_keeps_d4_baseline_and_blocks_cross_target_drift() {
+    let launch =
+        drive_reviewer_root_launch(ReviewerRootCwdFace::GroupReviewShard, true, true).await;
+    assert_eq!(
+        launch.spawns.load(Ordering::SeqCst),
+        1,
+        "group review shard executor 恰一次 spawn"
+    );
+    assert_eq!(
+        *launch.baseline_files_at_spawns.lock().expect("baseline probe mutex"),
+        vec![1],
+        "cross-target baseline 必须先于 group review spawn 落盘"
+    );
+    assert!(
+        launch.envelope_writable_roots.is_empty(),
+        "group review writable roots 必须恒空（review 角色零写根）"
+    );
+    let non_target = launch
+        .non_target_member_checkout
+        .as_ref()
+        .expect("non-target member fixture");
+    assert!(
+        non_target.join("trespass.txt").exists(),
+        "probe 漂移写必须真实发生在 group review run 内"
+    );
+
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(launch.store.clone(), GitWorkspaceService::new(), tx);
+    match engine
+        .execute_review_request(&launch.attempt, "origin", "feat: group d4 drift probe")
+        .await
+    {
+        Err(CodingWorkspaceEngineError::CrossTargetDeliveryBlocked(code)) => {
+            assert_eq!(code, "cross_target_violation_detected");
+        }
+        other => panic!("expected CrossTargetDeliveryBlocked, got {other:?}"),
+    }
+}
