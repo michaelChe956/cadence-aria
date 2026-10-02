@@ -122,6 +122,32 @@ pub fn parse_last_structured_output(
     }
 }
 
+/// 解析 output 中**全部** `<ARIA_STRUCTURED_OUTPUT` 标签块（按出现序）。
+///
+/// 缺陷 #3（2026-10-02 全链 E2E）：真实 AI 常在产物中回显提示词模板（同
+/// nonce、占位值），「只取最后一个标签」在模板位于真值之后时必然失败，且
+/// 失败会被 `extract_structured_json` 的围栏兜底掩蔽成语义失真的错误。逐块
+/// 解析让聚合调用方择「最后一个可用块」，并保留真实标签错误供上报。
+pub fn parse_all_structured_output_blocks(
+    output: &str,
+) -> Vec<Result<(String, Value), StructuredOutputError>> {
+    let mut blocks = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(offset) = output[cursor..].find(START_PREFIX) {
+        let start = cursor + offset;
+        let parsed = parse_block_at(output, start, None);
+        match parsed.state {
+            StructuredOutputState::Parsed(value) => {
+                blocks.push(Ok((parsed.readable_output, value)));
+            }
+            StructuredOutputState::Failed(error) => blocks.push(Err(error)),
+            StructuredOutputState::NotRequested => {}
+        }
+        cursor = start + START_PREFIX.len();
+    }
+    blocks
+}
+
 pub fn parse_last_structured_output_value(
     output: &str,
 ) -> Result<Option<Value>, StructuredOutputError> {
