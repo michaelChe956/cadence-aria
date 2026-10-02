@@ -36,9 +36,10 @@ impl RepositoryStore {
             default_policy_preset: input
                 .default_policy_preset
                 .unwrap_or_else(|| "manual-write".to_string()),
+            // 缺陷 #13 层 1：未显式配置落空串（未配置），生产解析链 fail-closed。
             default_provider_mode: input
                 .default_provider_mode
-                .unwrap_or_else(|| "fake".to_string()),
+                .unwrap_or_default(),
             created_at: now.clone(),
             updated_at: now,
             logical_repository_id: None,

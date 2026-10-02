@@ -58,6 +58,7 @@ pub(crate) fn resolve_enrollment_options_with_provider_workspace_config(
         query.review_rounds,
         query.superpowers_enabled,
         query.openspec_enabled,
+        state.test_provider_enabled,
         &*state.provider_availability,
     )?;
     Ok(EnrollmentOptions {

@@ -139,6 +139,7 @@ pub async fn create_group_coding_attempt(
                 unit: current_unit,
                 repository_default_provider: &repository.default_provider_mode,
             },
+            state.test_provider_enabled,
             &*state.provider_availability,
         )?,
     };

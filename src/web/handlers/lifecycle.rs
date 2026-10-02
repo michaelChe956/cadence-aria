@@ -520,6 +520,7 @@ pub async fn generate_story_specs(
         request.review_rounds,
         request.superpowers_enabled,
         request.openspec_enabled,
+        state.test_provider_enabled,
         &*state.provider_availability,
     )?;
     let app_paths = product_app_paths(&state);
@@ -620,6 +621,7 @@ pub async fn generate_design_specs(
         request.review_rounds,
         request.superpowers_enabled,
         request.openspec_enabled,
+        state.test_provider_enabled,
         &*state.provider_availability,
     )?;
     let app_paths = product_app_paths(&state);

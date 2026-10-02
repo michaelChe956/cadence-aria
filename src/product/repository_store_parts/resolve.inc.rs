@@ -565,7 +565,9 @@ fn synthesize_repository_record_from_authority(
         runtime_root: canonical_path.join(".aria/runtime"),
         path: canonical_path,
         default_policy_preset: "manual-write".to_string(),
-        default_provider_mode: "fake".to_string(),
+        // 缺陷 #13 层 1：LC 权威合成不伪造 fake 占位默认；未配置由解析链
+        // fail-closed（default_provider_not_configured）。
+        default_provider_mode: String::new(),
         created_at: member.created_at.clone(),
         updated_at: member.updated_at.clone(),
         logical_repository_id: Some(member.logical_repository_id),

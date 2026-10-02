@@ -40,13 +40,53 @@ where
 
 pub fn resolve_default_coding_provider<F>(
     repository_default_provider: &str,
+    test_provider_enabled: bool,
     is_available: F,
 ) -> ApiResult<ResolvedProvider<ProviderName>>
 where
     F: Fn(&ProviderName) -> bool,
 {
+    // 缺陷 #13 层 1（2026-10-02 E2E）：登记期占位默认 `fake` 与未配置（空串）
+    // 不再无条件放行——生产解析链 fail-closed（稳定错误码 + 可诊断 detail），
+    // 杜绝 runner provider_for(Fake) → product_store_not_found → F-14
+    // awaiting_manual_recovery 的迟发死亡。test_provider_enabled 既有豁免路径
+    // 保留不动（测试面 fake registry 在场，fake/未配置默认照旧解析 Fake）。
+    if repository_default_provider.trim().is_empty() {
+        if test_provider_enabled {
+            return Ok(ResolvedProvider {
+                provider: ProviderName::Fake,
+                selection: ProviderSelection::Default(ProviderName::Fake),
+                status_code: "provider_available",
+            });
+        }
+        return Err(ApiError::runtime(
+            "default_provider_not_configured",
+            "repository default provider is not configured; set an explicit provider at              request time or re-register the repository with a real default provider",
+            json!({
+                "repository_default_provider": repository_default_provider,
+                "action": "pass an explicit provider or set default_provider_mode to a real provider (claude_code, codex, pi, kimi_code)"
+            }),
+        ));
+    }
     let requested = parse_provider_name(repository_default_provider)?;
-    if requested == ProviderName::Fake || is_available(&requested) {
+    if requested == ProviderName::Fake {
+        if test_provider_enabled {
+            return Ok(ResolvedProvider {
+                provider: ProviderName::Fake,
+                selection: ProviderSelection::Default(ProviderName::Fake),
+                status_code: "provider_available",
+            });
+        }
+        return Err(ApiError::runtime(
+            "default_provider_fake_blocked",
+            "repository default provider is `fake`, which is a registration placeholder              and cannot drive real coding runs",
+            json!({
+                "repository_default_provider": "fake",
+                "action": "pass an explicit provider or re-register the repository with default_provider_mode set to a real provider (claude_code, codex, pi, kimi_code)"
+            }),
+        ));
+    }
+    if is_available(&requested) {
         return Ok(ResolvedProvider {
             provider: requested.clone(),
             selection: ProviderSelection::Default(requested),
@@ -264,5 +304,78 @@ mod tests {
     fn parse_provider_type_still_rejects_pi() {
         let err = parse_provider_type("pi").unwrap_err();
         assert!(err.message.contains("pi") || format!("{err:?}").contains("pi"));
+    }
+
+    mod default_provider_policy {
+        use super::super::resolve_default_coding_provider;
+        use crate::product::models::ProviderName;
+
+        /// 生产 availability 形态：gate 对 Fake 恒放行（既有豁免
+        /// `provider_availability_gate_always_allows_fake_for_tests`），真实
+        /// provider 按探针——仅 claude 可用。
+        fn production_availability(provider: &ProviderName) -> bool {
+            matches!(provider, ProviderName::ClaudeCode | ProviderName::Fake)
+        }
+
+        /// 缺陷 #13 层 1（2026-10-02 E2E）：登记期占位默认 `fake` 曾被
+        /// `resolve_default_coding_provider` 显式放行（可用性门旁路），生产
+        /// registry 无 Fake → runner provider_for(Fake) → product_store_not_found
+        /// → F-14 awaiting_manual_recovery。生产解析链必须 fail-closed。
+        #[test]
+        fn resolve_default_fail_closes_fake_placeholder_in_production() {
+            let error = resolve_default_coding_provider("fake", false, production_availability)
+                .err()
+                .expect("生产 fake 占位默认必须 fail-closed");
+            assert_eq!(
+                error.code, "default_provider_fake_blocked",
+                "稳定错误码 + detail：{error:?}"
+            );
+            assert!(error.message.contains("fake"));
+        }
+
+        #[test]
+        fn resolve_default_fail_closes_unset_default_in_production() {
+            for unset in ["", "  "] {
+                let error = resolve_default_coding_provider(unset, false, production_availability)
+                    .err()
+                    .expect("未配置默认必须 fail-closed");
+                assert_eq!(
+                    error.code, "default_provider_not_configured",
+                    "稳定错误码 + detail：{error:?}"
+                );
+            }
+        }
+
+        /// test_provider_enabled 既有豁免路径保留不动：测试面 fake/未配置默认
+        /// 仍解析 Fake（fake registry 在场）。
+        #[test]
+        fn resolve_default_keeps_test_surface_fake_exemption() {
+            for default in ["fake", ""] {
+                let resolved =
+                    resolve_default_coding_provider(default, true, production_availability)
+                        .unwrap_or_else(|error| panic!("测试豁免面必须保留：{error:?}"));
+                assert_eq!(resolved.provider, ProviderName::Fake);
+                assert_eq!(resolved.status_code, "provider_available");
+            }
+        }
+
+        /// 真实默认与回退链语义不变（红线）。
+        #[test]
+        fn resolve_default_real_provider_semantics_unchanged() {
+            let direct = resolve_default_coding_provider(
+                "claude_code",
+                false,
+                production_availability,
+            )
+            .expect("可用真实默认直接命中");
+            assert_eq!(direct.provider, ProviderName::ClaudeCode);
+            assert_eq!(direct.status_code, "provider_available");
+
+            let fallback =
+                resolve_default_coding_provider("codex", false, production_availability)
+                    .expect("不可用真实默认走回退链");
+            assert_eq!(fallback.provider, ProviderName::ClaudeCode);
+            assert_eq!(fallback.status_code, "provider_fallback");
+        }
     }
 }

@@ -51,10 +51,11 @@ impl RepositoryIdentityAllocation {
                 .default_policy_preset
                 .clone()
                 .unwrap_or_else(|| "manual-write".to_string()),
+            // 缺陷 #13 层 1：未显式配置落空串（未配置），生产解析链 fail-closed。
             default_provider_mode: input
                 .default_provider_mode
                 .clone()
-                .unwrap_or_else(|| "fake".to_string()),
+                .unwrap_or_default(),
             created_at: self.created_at.clone(),
             updated_at: self.created_at.clone(),
             logical_repository_id: Some(self.logical_repository_id),

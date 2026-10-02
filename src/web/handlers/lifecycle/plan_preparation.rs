@@ -60,6 +60,7 @@ pub fn prepare_plan_records(
         request.review_rounds,
         request.superpowers_enabled,
         request.openspec_enabled,
+        state.test_provider_enabled,
         &*state.provider_availability,
     )?;
     // rollout flag 只在创建 session 前读取一次；之后所有分支仅消费这份快照。

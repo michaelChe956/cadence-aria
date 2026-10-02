@@ -75,9 +75,10 @@ impl WorkspaceRegistry {
             default_policy_preset: input
                 .default_policy_preset
                 .unwrap_or_else(|| "manual-write".to_string()),
+            // 缺陷 #13 层 1：未显式配置落空串（未配置），生产解析链 fail-closed。
             default_provider_mode: input
                 .default_provider_mode
-                .unwrap_or_else(|| "fake".to_string()),
+                .unwrap_or_default(),
             created_at: now,
             updated_at: now,
         };
@@ -223,7 +224,8 @@ mod tests {
         assert_eq!(created.workspace_id, "workspace_0001");
         assert_eq!(created.name, "Aria");
         assert_eq!(created.default_policy_preset, "manual-write");
-        assert_eq!(created.default_provider_mode, "fake");
+        // 缺陷 #13 层 1：默认不再伪造 fake 占位——未配置落空串。
+        assert_eq!(created.default_provider_mode, "");
 
         let reloaded = WorkspaceRegistry::new(app.path().to_path_buf())
             .list()

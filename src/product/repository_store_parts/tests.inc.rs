@@ -69,6 +69,23 @@ mod tests {
         }
     }
 
+    /// 缺陷 #13 层 1（2026-10-02 E2E）：登记期不再伪造 `fake` 占位默认——
+    /// 未显式配置 default_provider_mode 的记录落空串（未配置），生产解析链
+    /// 对其 fail-closed；test_provider_enabled 豁免面不变。
+    #[test]
+    fn create_without_default_provider_mode_leaves_it_unset() {
+        let fixture = repository_fixture();
+        let project = fixture.create_project("project_unset_default");
+        let record = RepositoryStore::new(fixture.paths.clone())
+            .create(fixture.input(&project, "api"))
+            .expect("create repository");
+
+        assert_eq!(
+            record.default_provider_mode, "",
+            "未显式配置时不得伪造 fake 占位默认（缺陷 #13 层 1）"
+        );
+    }
+
     #[test]
     fn for_project_enables_identity_only_when_logical_codebase_storage_exists() {
         let fixture = repository_fixture();

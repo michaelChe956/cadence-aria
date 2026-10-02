@@ -213,6 +213,7 @@ pub async fn create_coding_attempt(
         &lifecycle,
         work_item,
         &repository.default_provider_mode,
+        state.test_provider_enabled,
         &*state.provider_availability,
     ) {
         Ok(snapshot) => snapshot,

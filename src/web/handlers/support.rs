@@ -400,6 +400,7 @@ pub(crate) fn provider_workspace_config(
     review_rounds: Option<u32>,
     superpowers_enabled: Option<bool>,
     openspec_enabled: Option<bool>,
+    test_provider_enabled: bool,
     provider_availability: &dyn Fn(&ProviderName) -> bool,
 ) -> ApiResult<ProviderWorkspaceConfig> {
     let review_rounds = review_rounds.unwrap_or(1);
@@ -412,11 +413,15 @@ pub(crate) fn provider_workspace_config(
 
     let author = match author_provider {
         Some(provider) => resolve_explicit_provider_name(provider, provider_availability)?,
-        None => resolve_default_coding_provider("codex", provider_availability)?,
+        None => resolve_default_coding_provider("codex", test_provider_enabled, provider_availability)?,
     };
     let reviewer = match reviewer_provider {
         Some(provider) => resolve_explicit_provider_name(provider, provider_availability)?,
-        None => resolve_default_coding_provider("claude_code", provider_availability)?,
+        None => resolve_default_coding_provider(
+            "claude_code",
+            test_provider_enabled,
+            provider_availability,
+        )?,
     };
 
     Ok(ProviderWorkspaceConfig {
@@ -587,7 +592,15 @@ mod tests {
 
     #[test]
     fn provider_workspace_config_rejects_explicit_unavailable_provider() {
-        let error = provider_workspace_config(Some("codex"), None, None, None, None, &availability)
+        let error = provider_workspace_config(
+            Some("codex"),
+            None,
+            None,
+            None,
+            None,
+            false,
+            &availability,
+        )
             .expect_err("explicit unavailable provider must fail");
 
         assert_eq!(error.code, "provider_unavailable");
@@ -596,7 +609,8 @@ mod tests {
 
     #[test]
     fn provider_workspace_config_records_default_fallback_status() {
-        let config = provider_workspace_config(None, None, None, None, None, &availability)
+        let config =
+            provider_workspace_config(None, None, None, None, None, false, &availability)
             .expect("default provider config");
 
         assert_eq!(config.author_provider, ProviderName::ClaudeCode);

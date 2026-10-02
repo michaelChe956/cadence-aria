@@ -268,6 +268,7 @@ pub(crate) fn coding_provider_config_snapshot(
     lifecycle: &LifecycleStore,
     work_item: &LifecycleWorkItemRecord,
     repository_default_provider: &str,
+    test_provider_enabled: bool,
     provider_availability: &dyn Fn(&ProviderName) -> bool,
 ) -> ApiResult<ProviderConfigSnapshot> {
     let sessions = lifecycle
@@ -299,9 +300,12 @@ pub(crate) fn coding_provider_config_snapshot(
         });
     }
 
-    let author =
-        resolve_default_coding_provider(repository_default_provider, provider_availability)?
-            .provider;
+    let author = resolve_default_coding_provider(
+        repository_default_provider,
+        test_provider_enabled,
+        provider_availability,
+    )?
+    .provider;
     // C2 Task 5（REQ-CRO-05）：无会话可引用时不再以 author 顶替 reviewer——
     // 空 effective，coding 侧 review 阶段落缺配置门等待用户配置。
     Ok(ProviderConfigSnapshot {
@@ -315,6 +319,7 @@ pub(crate) fn coding_provider_config_snapshot(
 pub(crate) fn coding_provider_config_snapshot_for_runtime_binding(
     lifecycle: &LifecycleStore,
     input: RuntimeBindingProviderConfigInput<'_>,
+    test_provider_enabled: bool,
     provider_availability: &dyn Fn(&ProviderName) -> bool,
 ) -> ApiResult<ProviderConfigSnapshot> {
     let sessions = lifecycle
@@ -358,9 +363,12 @@ pub(crate) fn coding_provider_config_snapshot_for_runtime_binding(
         });
     }
 
-    let author =
-        resolve_default_coding_provider(input.repository_default_provider, provider_availability)?
-            .provider;
+    let author = resolve_default_coding_provider(
+        input.repository_default_provider,
+        test_provider_enabled,
+        provider_availability,
+    )?
+    .provider;
     // C2 Task 5（REQ-CRO-05）：同上——不回填 author。
     Ok(ProviderConfigSnapshot {
         author: author.clone(),
