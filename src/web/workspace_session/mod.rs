@@ -6,7 +6,7 @@ mod router;
 pub use lease::{ConnectionRole, LeaseState, is_write_message};
 pub(crate) use manager::ChoiceReplyError;
 pub(crate) use manager::lease_diagnostics_path;
-pub use manager::{ActiveRun, WorkspaceSessionManager};
+pub use manager::{ActiveRun, RunRegistrationGuard, WorkspaceSessionManager};
 
 #[cfg(test)]
 pub(crate) use manager::test_session_record;

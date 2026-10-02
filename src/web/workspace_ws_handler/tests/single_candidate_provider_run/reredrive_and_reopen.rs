@@ -728,3 +728,71 @@ async fn single_candidate_terminal_failed_start_reports_visible_recovery_error()
     let _ = fixture.manager.abort_active_run().await;
     drop(outbound_rx);
 }
+
+/// 缺陷 #10（2026-10-02 E2E §3.3）回归：SC author 终态失败路径
+/// （`SingleCandidateProviderRunError::Message` → failed node → 提前 return）
+/// 曾跳过 `manager.finish_run`——provider 已死但 `active_run` 永驻，
+/// `is_active_run()` 持续误报，`failed-sc-runs retry` 恒 409 `sc_recovery_busy`，
+/// 只能人工 WS Abort 清除。run 任务以任意路径退场都必须释放注册。
+#[tokio::test]
+async fn single_candidate_terminal_failure_releases_manager_run_registration() {
+    let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let provider = Arc::new(RecordingOutputProvider {
+        output: "# Work Item Plan\n\n## Work Item WI-001: malformed\n".to_string(),
+        inputs: input_tx,
+    });
+    let (context, mut outbound_rx) = single_candidate_context(&fixture, provider);
+
+    handle_workspace_inbound_message(
+        context,
+        WsInMessage::StartGeneration {
+            provider_config: provider_config(),
+            reviewer_enabled: false,
+        },
+    )
+    .await;
+
+    // 首轮失败触发教学重驱，重驱同输出再败 → 终态 Message 错误
+    //（finish_active_run_with_failed_node 提前退场——E2E 僵死注册现场形态）。
+    for _ in 0..2 {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), input_rx.recv()).await;
+    }
+    let error = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let outbound = outbound_rx
+                .recv()
+                .await
+                .expect("terminal failure outbound");
+            let OutboundControl::Text(json) = outbound else {
+                continue;
+            };
+            let value: serde_json::Value = serde_json::from_str(&json).expect("outbound json");
+            if value["type"] == "error" {
+                return value;
+            }
+        }
+    })
+    .await
+    .expect("terminal failure error outbound");
+    assert!(
+        error["message"].as_str().unwrap_or_default().contains("compile markdown source failed"),
+        "terminal failure must surface compile diagnostics: {error}"
+    );
+    wait_for_single_candidate_phase(
+        &fixture,
+        crate::product::models::SingleCandidatePhase::Failed,
+    )
+    .await;
+
+    // 注册必须已释放：修复前 active_run 永驻 → is_active_run() 恒 true。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    while fixture.manager.is_active_run() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        !fixture.manager.is_active_run(),
+        "终态失败后 run 注册必须自动释放，不得遗留僵死注册阻塞 sc_recovery（缺陷 #10）"
+    );
+    drop(outbound_rx);
+}
