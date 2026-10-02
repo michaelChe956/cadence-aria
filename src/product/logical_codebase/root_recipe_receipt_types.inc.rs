@@ -8,6 +8,29 @@ pub const ROOT_RECIPE_ALLOWLIST: &[&str] = &[".aria/aggregate"];
 /// 差异不得制造伪漂移）。
 pub const ROOT_RULE_ENTRY_FILE: &str = "AGENTS.md";
 
+/// Task 1.5 carry → Task 3.4：全量递归快照的规模预算（条目/字节上限）。
+/// 超限 fail-closed 报错——绝不静默截断观测面，也绝不让 receipt 体积随
+/// root 规模无界增长；预算内的审计语义与无预算时完全一致。
+///
+/// 默认值钉定依据 Task 3.4 大 LC 实测（36 成员 fixture：1776 条目/
+/// 1.02 MiB），按 ≥10× 条目/≥60× 字节余量取整：数十成员 LC 及其常规
+/// 打包历史远在预算内；失控规模（海量 loose 对象/巨型文件）在审计前
+/// 即被阻断（见验收报告 2026-10-01_验收报告_LC根初始化大LC与写边界）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RootRecipeSnapshotBudget {
+    /// 快照条目（目录/文件/symlink）总数上限。
+    pub max_entries: usize,
+    /// 快照累计读取字节上限（仅按被哈希的文件内容计）。
+    pub max_bytes: u64,
+}
+
+impl RootRecipeSnapshotBudget {
+    pub const DEFAULT: Self = Self {
+        max_entries: 20_000,
+        max_bytes: 64 * 1024 * 1024,
+    };
+}
+
 fn default_allowlist() -> Vec<String> {
     ROOT_RECIPE_ALLOWLIST
         .iter()

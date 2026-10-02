@@ -543,9 +543,19 @@ fn rejection_summary(
     summary
 }
 
-fn snapshot_root(canonical_root: &Path) -> Result<RootRecipeFilesystemSnapshot, ProductStoreError> {
+fn snapshot_root(
+    canonical_root: &Path,
+    budget: &RootRecipeSnapshotBudget,
+) -> Result<RootRecipeFilesystemSnapshot, ProductStoreError> {
     let mut entries = Vec::new();
-    walk_root(canonical_root, canonical_root, &mut entries)?;
+    let mut scale = SnapshotScale::default();
+    walk_root(
+        canonical_root,
+        canonical_root,
+        &mut entries,
+        budget,
+        &mut scale,
+    )?;
     entries.sort_by(|left, right| left.path.cmp(&right.path));
     let snapshot_digest = digest_snapshot_entries(&entries);
     Ok(RootRecipeFilesystemSnapshot {
@@ -555,12 +565,60 @@ fn snapshot_root(canonical_root: &Path) -> Result<RootRecipeFilesystemSnapshot, 
     })
 }
 
+/// 快照规模的累计计数（条目/字节），由 [`RootRecipeSnapshotBudget`] 施加
+/// 上限：超限即 fail-closed，绝不静默截断观测面。
+#[derive(Default)]
+struct SnapshotScale {
+    entries: usize,
+    bytes: u64,
+}
+
+impl SnapshotScale {
+    fn charge_entry(
+        &mut self,
+        budget: &RootRecipeSnapshotBudget,
+        path: &Path,
+    ) -> Result<(), ProductStoreError> {
+        self.entries += 1;
+        if self.entries > budget.max_entries {
+            return Err(ProductStoreError::Io(format!(
+                "audit snapshot budget exceeded at {}: {} entries > max_entries {} (fail-closed)",
+                path.display(),
+                self.entries,
+                budget.max_entries
+            )));
+        }
+        Ok(())
+    }
+
+    fn charge_bytes(
+        &mut self,
+        budget: &RootRecipeSnapshotBudget,
+        path: &Path,
+        len: u64,
+    ) -> Result<(), ProductStoreError> {
+        self.bytes = self.bytes.saturating_add(len);
+        if self.bytes > budget.max_bytes {
+            return Err(ProductStoreError::Io(format!(
+                "audit snapshot budget exceeded at {}: {} cumulative bytes > max_bytes {} (fail-closed)",
+                path.display(),
+                self.bytes,
+                budget.max_bytes
+            )));
+        }
+        Ok(())
+    }
+}
+
 /// 全量递归快照：不跟随 symlink；目录不可读、文件不可读、特殊文件类型
-/// 均视为不可观测而 fail-closed 报错（绝不静默跳过）。
+/// 均视为不可观测而 fail-closed 报错（绝不静默跳过）。快照规模受预算门
+/// 约束（Task 1.5 carry → Task 3.4），超限同样 fail-closed。
 fn walk_root(
     root: &Path,
     dir: &Path,
     entries: &mut Vec<RootRecipeSnapshotEntry>,
+    budget: &RootRecipeSnapshotBudget,
+    scale: &mut SnapshotScale,
 ) -> Result<(), ProductStoreError> {
     let reader = std::fs::read_dir(dir)
         .map_err(|error| ProductStoreError::Io(format!("audit read {}: {error}", dir.display())))?;
@@ -573,6 +631,7 @@ fn walk_root(
         let file_type = entry.file_type().map_err(|error| {
             ProductStoreError::Io(format!("audit stat {}: {error}", path.display()))
         })?;
+        scale.charge_entry(budget, &path)?;
         if file_type.is_symlink() {
             let target = std::fs::read_link(&path).map_err(|error| {
                 ProductStoreError::Io(format!("audit readlink {}: {error}", path.display()))
@@ -592,11 +651,12 @@ fn walk_root(
                 link_target: None,
                 escapes_root: false,
             });
-            walk_root(root, &path, entries)?;
+            walk_root(root, &path, entries, budget, scale)?;
         } else if file_type.is_file() {
             let bytes = std::fs::read(&path).map_err(|error| {
                 ProductStoreError::Io(format!("audit read {}: {error}", path.display()))
             })?;
+            scale.charge_bytes(budget, &path, bytes.len() as u64)?;
             entries.push(RootRecipeSnapshotEntry {
                 path: relative,
                 kind: RootRecipeSnapshotEntryKind::File,

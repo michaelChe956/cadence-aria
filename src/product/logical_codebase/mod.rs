@@ -61,7 +61,7 @@ pub use root_recipe_receipt::{
     ROOT_RECIPE_ALLOWLIST, RootRecipeChangeClass, RootRecipeChangeKind, RootRecipeCommandReceipt,
     RootRecipeCommandSummary, RootRecipeCommandVerdict, RootRecipeCommandWatch,
     RootRecipeFilesystemAuditor, RootRecipeFilesystemSnapshot, RootRecipeObservedChange,
-    RootRecipeReceipt, RootRecipeReceiptStore, RootRecipeSnapshotEntry,
+    RootRecipeReceipt, RootRecipeReceiptStore, RootRecipeSnapshotBudget, RootRecipeSnapshotEntry,
     RootRecipeSnapshotEntryKind,
 };
 pub use evidence_mediator::{

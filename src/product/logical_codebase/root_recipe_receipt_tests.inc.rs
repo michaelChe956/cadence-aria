@@ -418,4 +418,70 @@ mod tests {
             .unwrap();
         assert_eq!(current.policy_digest, "sha256:user-edited");
     }
+
+    /// Task 1.5 carry → Task 3.4：快照全量递归规模预算门。条目/字节超限
+    /// 必须 fail-closed 报错（绝不静默截断观测面），且对 before/after 两次
+    /// 快照对称生效；预算内不改变审计语义。
+    #[test]
+    fn receipt_snapshot_budget_gate_fails_closed_beyond_entry_and_byte_caps() {
+        let fixture = ReceiptFixture::new();
+        let (step, command) = command_spec(1);
+
+        // 条目上限：预算 4 条 < fixture 实际条目数（root/.aria/members 与
+        // 成员仓文件等）→ before_command fail-closed。
+        let tight_entries =
+            RootRecipeFilesystemAuditor::with_snapshot_budget(RootRecipeSnapshotBudget {
+                max_entries: 4,
+                max_bytes: u64::MAX,
+            });
+        let error = tight_entries
+            .before_command(OPERATION_ID, &fixture.root, step, 1, command)
+            .unwrap_err();
+        let message = format!("{error:?}");
+        assert!(message.contains("snapshot budget"), "{message}");
+        assert!(message.contains("max_entries"), "{message}");
+
+        // 字节上限：预算 8 字节 < 成员 .git/HEAD（17 字节）→ fail-closed。
+        let tight_bytes =
+            RootRecipeFilesystemAuditor::with_snapshot_budget(RootRecipeSnapshotBudget {
+                max_entries: usize::MAX,
+                max_bytes: 8,
+            });
+        let error = tight_bytes
+            .before_command(OPERATION_ID, &fixture.root, step, 1, command)
+            .unwrap_err();
+        let message = format!("{error:?}");
+        assert!(message.contains("snapshot budget"), "{message}");
+        assert!(message.contains("max_bytes"), "{message}");
+
+        // 预算内：同一 fixture 上默认 auditor 正常产出 Allowed receipt，
+        // 预算门不改变观测语义；默认预算非零可经 snapshot_budget() 复核。
+        let auditor = RootRecipeFilesystemAuditor::new();
+        let budget = auditor.snapshot_budget();
+        assert!(budget.max_entries > 0, "default budget must pin entries");
+        assert!(budget.max_bytes > 0, "default budget must pin bytes");
+        let receipt = fixture.run_allowed_command(&auditor, 2, "budget-ok.txt", "ok\n");
+        assert_eq!(receipt.verdict, RootRecipeCommandVerdict::Allowed);
+
+        // 命令前预算内、命令后超出（写入超预算大文件）→ after_command 同样
+        // fail-closed——预算门对前后两次快照对称生效。
+        let growing = RootRecipeFilesystemAuditor::with_snapshot_budget(RootRecipeSnapshotBudget {
+            max_entries: usize::MAX,
+            max_bytes: 64,
+        });
+        let watch = growing
+            .before_command(OPERATION_ID, &fixture.root, step, 1, command)
+            .unwrap();
+        std::fs::write(
+            fixture.root.join(".aria/aggregate/oversize.txt"),
+            vec![b'x'; 128],
+        )
+        .unwrap();
+        let error = growing
+            .after_command(watch, RECORDED_AT.to_string())
+            .unwrap_err();
+        let message = format!("{error:?}");
+        assert!(message.contains("snapshot budget"), "{message}");
+        assert!(message.contains("max_bytes"), "{message}");
+    }
 }

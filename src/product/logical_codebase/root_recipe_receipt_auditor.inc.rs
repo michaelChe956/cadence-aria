@@ -7,6 +7,7 @@
 #[derive(Debug, Clone)]
 pub struct RootRecipeFilesystemAuditor {
     allowlist: Vec<String>,
+    budget: RootRecipeSnapshotBudget,
 }
 
 impl Default for RootRecipeFilesystemAuditor {
@@ -19,12 +20,27 @@ impl RootRecipeFilesystemAuditor {
     pub fn new() -> Self {
         Self {
             allowlist: default_allowlist(),
+            budget: RootRecipeSnapshotBudget::DEFAULT,
         }
     }
 
     /// 本次审计使用的 allowlist（canonical 相对路径前缀）。
     pub fn allowlist(&self) -> &[String] {
         &self.allowlist
+    }
+
+    /// Task 1.5 carry → Task 3.4：以显式快照规模预算构造（测试/运维面）；
+    /// 生产接线走 [`Self::new`] 的默认预算。
+    pub fn with_snapshot_budget(budget: RootRecipeSnapshotBudget) -> Self {
+        Self {
+            allowlist: default_allowlist(),
+            budget,
+        }
+    }
+
+    /// 本次审计的快照规模预算（条目/字节上限，超限 fail-closed）。
+    pub fn snapshot_budget(&self) -> RootRecipeSnapshotBudget {
+        self.budget
     }
 
     /// 命令执行前：冻结 canonical root 并做全量快照。root 不存在、不可
@@ -51,7 +67,7 @@ impl RootRecipeFilesystemAuditor {
                 canonical.display()
             )));
         }
-        let before = snapshot_root(&canonical)?;
+        let before = snapshot_root(&canonical, &self.budget)?;
         Ok(RootRecipeCommandWatch {
             operation_id: operation_id.to_string(),
             canonical_root: canonical,
@@ -93,7 +109,7 @@ impl RootRecipeFilesystemAuditor {
                 ),
             });
         }
-        let after = snapshot_root(&canonical)?;
+        let after = snapshot_root(&canonical, &self.budget)?;
 
         let before_map: BTreeMap<&str, &RootRecipeSnapshotEntry> = watch
             .before
