@@ -796,6 +796,80 @@ async fn provider_drive_story_run_writes_back_involved_from_structured_output() 
 }
 
 #[tokio::test]
+async fn provider_drive_aggregate_story_writes_back_tag_outside_artifact_fence() {
+    // 缺陷 #4（2026-10-02 E2E）回归：aggregate_author_output_contract 要求 sentinel
+    // 标签输出在 artifact 围栏**之外**，真实 provider 输出即此形态。回写解析源必须
+    // 是 provider 全量输出——围栏内产物正文不含标签，修复前恒 MissingStructuredOutput、
+    // involved 恒空、终确认恒 involved_repositories_undetermined。
+    let (tmp, checkpoint_store) = setup();
+    let app_paths = ProductAppPaths::new(tmp.path().join(".aria"));
+    let lifecycle_store = LifecycleStore::new(app_paths.clone());
+    let member_a = LogicalRepositoryId(Uuid::from_u128(0xaaaa));
+    let member_b = LogicalRepositoryId(Uuid::from_u128(0xbbbb));
+    let effective_member_ids = vec![member_a, member_b];
+
+    let story = lifecycle_store
+        .create_story_spec(CreateStorySpecInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            title: "Story".to_string(),
+            aggregate_codebase: Some(AggregateStorySpecScope {
+                logical_codebase_ref: Uuid::from_u128(0x0100),
+                effective_member_ids: effective_member_ids.clone(),
+                involved_repository_ids: Vec::new(),
+                focus_repository_id: None,
+            }),
+        })
+        .unwrap();
+    save_planning_snapshot(&app_paths, "project_0001", "issue_0001", effective_member_ids.clone());
+
+    let session_record = lifecycle_store
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        entity_id: story.id.clone(),
+        workspace_type: WorkspaceType::Story,
+        author_provider: ProviderName::ClaudeCode,
+        reviewer_provider: Some(ProviderName::Codex),
+
+        review_rounds: 2,
+        superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
+        .unwrap();
+    let session = WorkspaceSession::from_record(session_record);
+    let (tx, _rx) = mpsc::channel(64);
+    let mut engine =
+        WorkspaceEngine::new_persistent(checkpoint_store, lifecycle_store.clone(), tx, session);
+
+    // 真实形态：artifact 在围栏内，sentinel 标签紧跟围栏之后（之外）。
+    let structured = format!(
+        "<ARIA_STRUCTURED_OUTPUT nonce=\"abcd1234\">{{\"nonce\":\"abcd1234\",\"involved_repository_ids\":[\"{a}\",\"{b}\"],\"focus_repository_id\":\"{b}\"}}</ARIA_STRUCTURED_OUTPUT>",
+        a = member_a.0,
+        b = member_b.0,
+    );
+    let artifact_markdown =
+        complete_story_artifact("生成候选草稿。", "候选草稿可进入人工确认。");
+    drive_author_completed(
+        &mut engine,
+        format!("```artifact\n{artifact_markdown}\n```\n\n{structured}"),
+    )
+    .await;
+
+    let updated = lifecycle_store
+        .load_existing_spec("project_0001", "issue_0001", &story.id)
+        .unwrap();
+    match updated {
+        ExistingSpecRecord::Story { record, .. } => {
+            assert_eq!(
+                record.involved_repository_ids, effective_member_ids,
+                "围栏外 sentinel 标签也应回写 involved（缺陷 #4）"
+            );
+            assert_eq!(record.focus_repository_id, Some(member_b));
+        }
+        _ => panic!("expected story spec"),
+    }
+}
+
+#[tokio::test]
 async fn provider_drive_design_run_writes_back_involved_and_change_order_from_structured_output() {
     let (tmp, checkpoint_store) = setup();
     let app_paths = ProductAppPaths::new(tmp.path().join(".aria"));

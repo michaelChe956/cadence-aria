@@ -160,12 +160,20 @@ pub(crate) fn resolve_logical_work_item_plan_repository_targets(
 
     let repository_store =
         RepositoryStore::with_logical_codebase_feature(paths, LogicalCodebaseFeature::enabled());
+    // 缺陷 #6（同族第三处）：per-LC（v1.3）成员/checkouts 在 LC 子树，无 legacy
+    // repos.json 投影；`resolve_logical_repository` 走 legacy scope 权威恒
+    // NotFound/IdentityMismatch。按 issue lc_id 走 for_issue_codebase 分流
+    // （for_lc 合成 / legacy 语义不变）。
     resolution
         .effective_member_ids
         .into_iter()
         .map(|target_repository_id| {
             repository_store
-                .resolve_logical_repository(&plan.project_id, target_repository_id)
+                .resolve_logical_repository_for_issue_codebase(
+                    &plan.project_id,
+                    lc_id.as_deref(),
+                    target_repository_id,
+                )
                 .map(|(_, _, repository)| (target_repository_id, repository.id))
                 .map_err(|error| {
                     format!(
@@ -195,6 +203,25 @@ pub(crate) fn load_change_order_from_confirmed_design(
     });
     Ok(confirmed
         .map(|design| design.change_order.clone())
+        .unwrap_or_default())
+}
+
+/// 加载 plan 源 confirmed Design 的 involved 集（缺陷 #7 同族：聚合 plan 的
+/// 会话 target 以此过滤——LC selection 恒 all_members，不过滤则 plan 会话
+/// 路由恒 TargetAmbiguous）。无聚合视野/无 confirmed design → 空。
+pub(crate) fn load_involved_from_confirmed_design(
+    lifecycle: &LifecycleStore,
+    plan: &IssueWorkItemPlan,
+) -> Result<Vec<LogicalRepositoryId>, String> {
+    let designs = lifecycle
+        .list_design_specs(&plan.project_id, &plan.issue_id)
+        .map_err(|error| format!("list design specs failed: {error}"))?;
+    let confirmed = designs.iter().find(|design| {
+        plan.source_design_spec_ids.contains(&design.id)
+            && design.confirmation_status == LifecycleConfirmationStatus::Confirmed
+    });
+    Ok(confirmed
+        .map(|design| design.involved_repository_ids.clone())
         .unwrap_or_default())
 }
 

@@ -7,6 +7,10 @@ impl WorkspaceEngine {
     /// 方案X阶段2：AI run 完成后解析 structured output，将 AI 声明的 involved/change_order
     /// 回写到 Spec record（Task 4 集成点，复用 Task 3 的 parse_* 与 Task 2 的 update_*）。
     ///
+    /// 解析源是 provider **全量输出**（缺陷 #4）：prompt 要求 sentinel 标签在 artifact
+    /// 围栏之外，产物选择后的围栏正文必然不含标签；围栏内标签（历史形态）亦被
+    /// 全量解析覆盖。
+    ///
     /// 仅对**聚合代码库** Story/Design 生效（record.logical_codebase_ref 非空）；传统单仓
     /// （logical_codebase_ref 为 None）不执行回写，保持既有 append_version 行为不变。
     ///
@@ -19,7 +23,7 @@ impl WorkspaceEngine {
     pub(super) fn write_back_aggregate_output(
         &self,
         store: &LifecycleStore,
-        artifact_markdown: &str,
+        provider_output: &str,
     ) -> Result<Option<String>, ProductStoreError> {
         if !matches!(
             self.session.workspace_type,
@@ -56,7 +60,7 @@ impl WorkspaceEngine {
 
         match self.session.workspace_type {
             WorkspaceType::Story => {
-                let output = match parse_story_aggregate_output(artifact_markdown) {
+                let output = match parse_story_aggregate_output(provider_output) {
                     Ok(output) => output,
                     Err(error) => {
                         return Ok(Some(format!(
@@ -73,7 +77,7 @@ impl WorkspaceEngine {
                 store.update_story_spec_aggregate(project_id, issue_id, entity_id, &scope)?;
             }
             WorkspaceType::Design => {
-                let output = match parse_design_aggregate_output(artifact_markdown) {
+                let output = match parse_design_aggregate_output(provider_output) {
                     Ok(output) => output,
                     Err(error) => {
                         return Ok(Some(format!(

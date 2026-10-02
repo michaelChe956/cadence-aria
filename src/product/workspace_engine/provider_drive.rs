@@ -1006,9 +1006,13 @@ impl WorkspaceEngine {
             ) {
             // 方案X阶段2：AI run 后解析 structured output，回写 involved/change_order
             // 到 Spec record（复用 Task 3 parse_* 与 Task 2 update_*）。
+            // 缺陷 #4（2026-10-02 E2E）：prompt 要求 sentinel 标签输出在 artifact
+            // 围栏**之外**（「artifact 之外必须额外输出」），而产物选择只取围栏内
+            // 正文——解析源必须是 provider 全量输出 full_content，否则标签永远
+            // 不可见（MissingStructuredOutput），involved 恒空、终确认恒 4xx。
             // 约束4：回写失败/缺 tag 不沿用 `let _ =` 静默吞，转为可见诊断；
             // 单仓（logical_codebase_ref 为 None）回写跳过，append_version 行为不变。
-            let diagnostic = match self.write_back_aggregate_output(store, &artifact_markdown) {
+            let diagnostic = match self.write_back_aggregate_output(store, &full_content) {
                 Ok(Some(message)) => Some(message),
                 Ok(None) => None,
                 Err(error) => Some(format!("聚合代码库 involved 回写失败：{error}")),

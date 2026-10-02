@@ -11,7 +11,9 @@ use crate::product::models::{RepositoryRecord, WorkspaceSessionRecord, Workspace
 use crate::product::project_store::ProjectStore;
 use crate::product::repository_store::RepositoryStore;
 use crate::product::work_item_runtime_reader::WorkItemRuntimeReader;
-use crate::product::workspace_engine::draft_batch::compile_support::resolve_logical_work_item_plan_repository_targets;
+use crate::product::workspace_engine::draft_batch::compile_support::{
+    load_involved_from_confirmed_design, resolve_logical_work_item_plan_repository_targets,
+};
 
 pub fn workspace_repository_for_session(
     app_paths: &ProductAppPaths,
@@ -52,6 +54,7 @@ fn workspace_repository(
                         Some(logical_id) => resolve_selected_logical_repository(
                             app_paths,
                             &session.project_id,
+                            &session.issue_id,
                             logical_id,
                             &manifest,
                             &selection,
@@ -89,10 +92,17 @@ fn workspace_repository(
                     selection,
                 } => {
                     let target_ids = unique_ids(design.involved_repository_ids);
+                    // 方案X草稿态（缺陷 #5，同缺陷 #2 修法 A 口径）：involved 空 =
+                    // AI 自决之前，目标锚定 LC 聚合根视图；回写 involved 后恢复
+                    // 唯一成员解析；≥2 成员保持 TargetAmbiguous fail-closed 不变。
+                    if target_ids.is_empty() {
+                        return Ok(aggregate_root_view(&manifest));
+                    }
                     let logical_id = unique_target(target_ids, &design.id)?;
                     resolve_selected_logical_repository(
                         app_paths,
                         &session.project_id,
+                        &session.issue_id,
                         logical_id,
                         &manifest,
                         &selection,
@@ -116,12 +126,28 @@ fn workspace_repository(
                     let targets =
                         resolve_logical_work_item_plan_repository_targets(lifecycle, &plan)
                             .map_err(|reason| routing_error_for_target_error(&reason))?;
-                    let target_ids = targets.unwrap_or_default().keys().copied().collect();
+                    let mut target_ids = targets
+                        .unwrap_or_default()
+                        .keys()
+                        .copied()
+                        .collect::<BTreeSet<LogicalRepositoryId>>();
+                    // 缺陷 #7（同族）：聚合 plan 会话 target 以源 Design involved 集
+                    // 过滤（LC selection 恒 all_members，不过滤恒 Ambiguous）；无聚合
+                    // 视野（involved 空）保持原 target 集不变。
+                    let design_involved =
+                        load_involved_from_confirmed_design(lifecycle, &plan)
+                            .map_err(|reason| routing_error_for_target_error(&reason))?;
+                    if !design_involved.is_empty() {
+                        let involved: std::collections::BTreeSet<LogicalRepositoryId> =
+                            design_involved.into_iter().collect();
+                        target_ids.retain(|id| involved.contains(id));
+                    }
                     let logical_id =
                         plan_session_repository_target(target_ids, &plan.id, &selection)?;
                     resolve_selected_logical_repository(
                         app_paths,
                         &session.project_id,
+                        &session.issue_id,
                         logical_id,
                         &manifest,
                         &selection,
@@ -176,6 +202,7 @@ fn workspace_repository(
                     resolve_selected_logical_repository(
                         app_paths,
                         &session.project_id,
+                        &session.issue_id,
                         logical_id,
                         &manifest,
                         &selection,
@@ -190,6 +217,7 @@ fn workspace_repository(
 fn resolve_selected_logical_repository(
     app_paths: &ProductAppPaths,
     project_id: &str,
+    issue_id: &str,
     logical_id: LogicalRepositoryId,
     manifest: &crate::product::logical_codebase::LogicalCodebaseManifest,
     selection: &crate::product::logical_codebase::IssueCodebaseSelection,
@@ -216,9 +244,20 @@ fn resolve_selected_logical_repository(
             format!("logical repository target {logical_id:?} is not in the effective selection"),
         ));
     }
+    // 缺陷 #6（2026-10-02 E2E）：per-LC（v1.3 布局）成员/checkouts 位于
+    // logical-codebases/{lc}/ 子树且不写 legacy repos.json 投影，直接 strict
+    // 解析恒 IdentityMismatch（design 会话回写 involved 后 WS 重连即撞）。
+    // 按 issue 持久化 lc_id 走 for_lc 权威解析（合成投影），legacy LC 语义
+    // 由 for_issue_codebase 内部分流保持不变。
+    let lc_id =
+        crate::product::logical_codebase::resolve_issue_logical_codebase_id(
+            app_paths,
+            project_id,
+            issue_id,
+        )?;
     let project = ProjectStore::new(app_paths.clone()).get(project_id)?;
     RepositoryStore::for_project(app_paths.clone(), &project)
-        .resolve_logical_repository_strict(project_id, logical_id)
+        .resolve_logical_repository_for_issue_codebase(project_id, lc_id.as_deref(), logical_id)
         .map(|(_, _, repository)| repository)
 }
 
@@ -506,21 +545,17 @@ mod tests {
         paths: ProductAppPaths,
         manifest: LogicalCodebaseManifest,
         member_logical_id: LogicalRepositoryId,
+        member_b_logical_id: LogicalRepositoryId,
         member_path: std::path::PathBuf,
     }
 
     impl LcStoryRoutingFixture {
-        fn new() -> Self {
-            let temp = tempfile::tempdir().unwrap();
-            let paths = ProductAppPaths::new(temp.path().join(".aria"));
-            crate::product::project_store::ProjectStore::new(paths.clone())
-                .create(crate::product::project_store::CreateProjectInput {
-                    name: "lc-routing".to_string(),
-                    description: None,
-                })
-                .unwrap();
-            let root = temp.path().join("aggregate-root");
-            let member_path = root.join("member-a");
+        fn register_member(
+            paths: &ProductAppPaths,
+            root: &std::path::Path,
+            name: &str,
+        ) -> (LogicalRepositoryId, std::path::PathBuf) {
+            let member_path = root.join(name);
             std::fs::create_dir_all(&member_path).unwrap();
             for args in [
                 vec!["init", "--quiet"],
@@ -534,7 +569,7 @@ mod tests {
                     .unwrap();
                 assert!(status.success(), "git {:?} failed", args);
             }
-            std::fs::write(member_path.join("README.md"), "# member-a\n").unwrap();
+            std::fs::write(member_path.join("README.md"), format!("# {name}\n")).unwrap();
             for args in [
                 vec!["add", "README.md"],
                 vec!["commit", "--quiet", "-m", "initial commit"],
@@ -553,14 +588,31 @@ mod tests {
                 )
                 .create(crate::product::repository_store::CreateRepositoryInput {
                     project_id: "project_0001".to_string(),
-                    name: "member-a".to_string(),
+                    name: name.to_string(),
                     path: member_path.clone(),
                     default_policy_preset: None,
                     default_provider_mode: None,
-                    idempotency_key: "lc-story-routing-member-a".to_string(),
+                    idempotency_key: format!("lc-routing-{name}"),
                 })
                 .unwrap();
-            let member_logical_id = repository.logical_repository_id.expect("logical id");
+            (
+                repository.logical_repository_id.expect("logical id"),
+                member_path,
+            )
+        }
+
+        fn new() -> Self {
+            let temp = tempfile::tempdir().unwrap();
+            let paths = ProductAppPaths::new(temp.path().join(".aria"));
+            crate::product::project_store::ProjectStore::new(paths.clone())
+                .create(crate::product::project_store::CreateProjectInput {
+                    name: "lc-routing".to_string(),
+                    description: None,
+                })
+                .unwrap();
+            let root = temp.path().join("aggregate-root");
+            let (member_logical_id, member_path) = Self::register_member(&paths, &root, "member-a");
+            let (member_b_logical_id, _) = Self::register_member(&paths, &root, "member-b");
             let manifest = LogicalCodebaseStore::new(paths.clone())
                 .load_manifest("project_0001")
                 .unwrap()
@@ -577,6 +629,7 @@ mod tests {
                 paths,
                 manifest,
                 member_logical_id,
+                member_b_logical_id,
                 member_path,
             }
         }
@@ -610,6 +663,94 @@ mod tests {
                         issue_id: "issue_0001".to_string(),
                         entity_id: story.id,
                         workspace_type: crate::product::models::WorkspaceType::Story,
+                        author_provider: crate::product::models::ProviderName::ClaudeCode,
+                        reviewer_provider: Some(crate::product::models::ProviderName::ClaudeCode),
+                        review_rounds: 1,
+                        superpowers_enabled: false,
+                        openspec_enabled: false,
+                        work_item_plan_options: None,
+                    },
+                )
+                .unwrap()
+        }
+
+        fn design_session(
+            &self,
+            involved: Vec<LogicalRepositoryId>,
+        ) -> crate::product::models::WorkspaceSessionRecord {
+            self.design_session_for("issue_0001", involved)
+        }
+
+        fn design_session_for(
+            &self,
+            issue_id: &str,
+            involved: Vec<LogicalRepositoryId>,
+        ) -> crate::product::models::WorkspaceSessionRecord {
+            let lifecycle = crate::product::lifecycle_store::LifecycleStore::new(self.paths.clone());
+            let design = lifecycle
+                .create_design_spec(crate::product::lifecycle_store::CreateDesignSpecInput {
+                    project_id: "project_0001".to_string(),
+                    issue_id: issue_id.to_string(),
+                    story_spec_ids: Vec::new(),
+                    title: "lc draft design".to_string(),
+                    aggregate_codebase: Some(
+                        crate::product::lifecycle_store::AggregateDesignSpecScope {
+                            logical_codebase_ref: self.manifest.logical_codebase_id,
+                            effective_member_ids: self.manifest.member_ids.clone(),
+                            involved_repository_ids: involved,
+                            change_order: Vec::new(),
+                        },
+                    ),
+                })
+                .unwrap();
+            lifecycle
+                .create_workspace_session(
+                    crate::product::lifecycle_store::CreateWorkspaceSessionInput {
+                        project_id: "project_0001".to_string(),
+                        issue_id: issue_id.to_string(),
+                        entity_id: design.id,
+                        workspace_type: crate::product::models::WorkspaceType::Design,
+                        author_provider: crate::product::models::ProviderName::ClaudeCode,
+                        reviewer_provider: Some(crate::product::models::ProviderName::ClaudeCode),
+                        review_rounds: 1,
+                        superpowers_enabled: false,
+                        openspec_enabled: false,
+                        work_item_plan_options: None,
+                    },
+                )
+                .unwrap()
+        }
+
+        fn design_session_for_lc(
+            &self,
+            issue_id: &str,
+            involved: Vec<LogicalRepositoryId>,
+            effective_member_ids: Vec<LogicalRepositoryId>,
+        ) -> crate::product::models::WorkspaceSessionRecord {
+            let lifecycle = crate::product::lifecycle_store::LifecycleStore::new(self.paths.clone());
+            let design = lifecycle
+                .create_design_spec(crate::product::lifecycle_store::CreateDesignSpecInput {
+                    project_id: "project_0001".to_string(),
+                    issue_id: issue_id.to_string(),
+                    story_spec_ids: Vec::new(),
+                    title: "lc draft design".to_string(),
+                    aggregate_codebase: Some(
+                        crate::product::lifecycle_store::AggregateDesignSpecScope {
+                            logical_codebase_ref: self.manifest.logical_codebase_id,
+                            effective_member_ids,
+                            involved_repository_ids: involved,
+                            change_order: Vec::new(),
+                        },
+                    ),
+                })
+                .unwrap();
+            lifecycle
+                .create_workspace_session(
+                    crate::product::lifecycle_store::CreateWorkspaceSessionInput {
+                        project_id: "project_0001".to_string(),
+                        issue_id: issue_id.to_string(),
+                        entity_id: design.id,
+                        workspace_type: crate::product::models::WorkspaceType::Design,
                         author_provider: crate::product::models::ProviderName::ClaudeCode,
                         reviewer_provider: Some(crate::product::models::ProviderName::ClaudeCode),
                         review_rounds: 1,
@@ -675,5 +816,210 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(stable_routing_code(&error), "repository_routing_target_missing");
+    }
+
+    /// 缺陷 #5（2026-10-02 全链 E2E）红→绿主锁：草稿 LC Design（involved 空）
+    /// attach 期解析不再 TargetMissing，锚定聚合根视图（同缺陷 #2 Story 口径）。
+    #[test]
+    fn draft_lc_design_anchors_at_aggregate_root_until_involved_determined() {
+        let fixture = LcStoryRoutingFixture::new();
+        let session = fixture.design_session(Vec::new());
+        let repository = workspace_repository_for_session(
+            &fixture.paths,
+            &LifecycleStore::new(fixture.paths.clone()),
+            &session,
+        )
+        .expect("draft LC design must anchor at the aggregate root view");
+        assert_eq!(repository.path, fixture.manifest.provider_context_root);
+        assert!(repository.logical_repository_id.is_some());
+        assert!(repository.primary_checkout_id.is_none());
+    }
+
+    /// 边界：involved 唯一（回写后）→ 恢复成员解析；≥2 保持 TargetAmbiguous。
+    #[test]
+    fn lc_design_with_single_involved_resolves_member_unchanged() {
+        let fixture = LcStoryRoutingFixture::new();
+        let session = fixture.design_session(vec![fixture.member_logical_id]);
+        let repository = workspace_repository_for_session(
+            &fixture.paths,
+            &LifecycleStore::new(fixture.paths.clone()),
+            &session,
+        )
+        .expect("single-involved LC design resolves the member checkout");
+        assert_eq!(repository.path, fixture.member_path);
+        assert_eq!(
+            repository.logical_repository_id,
+            Some(fixture.member_logical_id)
+        );
+    }
+
+    #[test]
+    fn lc_design_with_multiple_involved_stays_target_ambiguous() {
+        let fixture = LcStoryRoutingFixture::new();
+        let session = fixture.design_session(vec![
+            fixture.member_logical_id,
+            fixture.member_b_logical_id,
+        ]);
+        let error = workspace_repository_for_session(
+            &fixture.paths,
+            &LifecycleStore::new(fixture.paths.clone()),
+            &session,
+        )
+        .unwrap_err();
+        assert_eq!(stable_routing_code(&error), "repository_routing_ambiguous");
+    }
+
+    /// 缺陷 #6（2026-10-02 全链 E2E）红→绿主锁：per-LC（v1.3）布局——成员/
+    /// checkouts/selection 全在 logical-codebases/{lc}/ 子树、无 legacy
+    /// repos.json 投影——involved 回写后的成员解析必须经 for_lc authority
+    /// 合成 RepositoryRecord（path=成员 canonical checkout）；修复前直连
+    /// strict 解析恒 IdentityMismatch（design_spec_0001 现场）。
+    #[test]
+    fn per_lc_issue_member_resolution_synthesizes_record_from_lc_authority() {
+        let fixture = LcStoryRoutingFixture::new();
+        // 显式 LC record + per-LC 子树权威数据（不复用 legacy manifest）。
+        let record = LogicalCodebaseStore::new(fixture.paths.clone())
+            .create(
+                "project_0001",
+                crate::product::logical_codebase::LogicalCodebaseCreateInput {
+                    name: "per-lc".to_string(),
+                    aggregate_root: fixture.manifest.provider_context_root.clone(),
+                },
+            )
+            .unwrap();
+        let authority = LogicalCodebaseStore::for_lc(fixture.paths.clone(), record.id.clone());
+        // 隔离成员 member-c：仅存在于 per-LC 子树 + identity registry，
+        // 不写 legacy manifest/repos.json 投影（真实 E2E 形态）。
+        let member_c_path = fixture.manifest.provider_context_root.join("member-c");
+        std::fs::create_dir_all(&member_c_path).unwrap();
+        for args in [
+            vec!["init", "--quiet"],
+            vec!["config", "user.email", "per-lc@example.test"],
+            vec!["config", "user.name", "Per LC Fixture"],
+        ] {
+            let status = std::process::Command::new("git")
+                .args(&args)
+                .current_dir(&member_c_path)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {:?} failed", args);
+        }
+        std::fs::write(member_c_path.join("README.md"), "# member-c\n").unwrap();
+        for args in [vec!["add", "README.md"], vec!["commit", "--quiet", "-m", "init"]] {
+            let status = std::process::Command::new("git")
+                .args(&args)
+                .current_dir(&member_c_path)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {:?} failed", args);
+        }
+        let member_c = LogicalRepositoryId(uuid::Uuid::new_v4());
+        let checkout_id =
+            crate::product::logical_codebase::RepositoryCheckoutId(uuid::Uuid::new_v4());
+        let source_identity = crate::product::logical_codebase::RepositorySourceIdentity::from_git_parts(
+            &member_c_path,
+            member_c_path.join(".git"),
+            None,
+        );
+        let manifest = LogicalCodebaseManifest::new(
+            "project_0001",
+            fixture.manifest.provider_context_root.clone(),
+            vec![member_c],
+        );
+        authority.save_manifest("project_0001", &manifest).unwrap();
+        authority
+            .save_checkout(
+                "project_0001",
+                &crate::product::logical_codebase::RepositoryCheckoutRecord {
+                    checkout_id,
+                    logical_repository_id: member_c,
+                    physical_repository_id: "repository_per_lc_member_c".to_string(),
+                    kind: crate::product::logical_codebase::CheckoutKind::Main,
+                    canonical_path: member_c_path.clone(),
+                    checkout_path_hash: String::new(),
+                    git_dir_identity: String::new(),
+                    revision: None,
+                    availability: crate::product::logical_codebase::CheckoutAvailability::Available,
+                    observed_at: "2026-10-02T00:00:00Z".to_string(),
+                    created_at: "2026-10-02T00:00:00Z".to_string(),
+                    updated_at: "2026-10-02T00:00:00Z".to_string(),
+                },
+            )
+            .unwrap();
+        authority
+            .save_member(
+                "project_0001",
+                &crate::product::logical_codebase::CodebaseMemberRecord {
+                    logical_repository_id: member_c,
+                    physical_repository_id: "repository_per_lc_member_c".to_string(),
+                    alias: "member-c".to_string(),
+                    role: "repository".to_string(),
+                    ordinal: 0,
+                    source_identity: source_identity.clone(),
+                    repo_type: crate::product::logical_codebase::RepositoryType::Unknown,
+                    tech_stack: Vec::new(),
+                    owner: None,
+                    tags: Vec::new(),
+                    default_ref: None,
+                    checkout_ids: vec![checkout_id],
+                    status: crate::product::logical_codebase::MemberStatus::Active,
+                    created_at: "2026-10-02T00:00:00Z".to_string(),
+                    updated_at: "2026-10-02T00:00:00Z".to_string(),
+                },
+            )
+            .unwrap();
+        crate::product::logical_codebase::IdentityRegistryStore::new(fixture.paths.clone())
+            .upsert_active(
+                "project_0001",
+                crate::product::logical_codebase::IdentityRegistryEntry {
+                    source_identity: source_identity.clone(),
+                    logical_repository_id: member_c,
+                    physical_repository_id: "repository_per_lc_member_c".to_string(),
+                    primary_checkout_id: checkout_id,
+                    state: crate::product::logical_codebase::IdentityRegistryState::Active,
+                    created_by_key: "test:per-lc-member-c".to_string(),
+                    deleted_at: None,
+                    delete_operation_id: None,
+                    reactivated_at: None,
+                },
+            )
+            .unwrap();
+        // issue 持久化 lc 归属 + per-LC selection。
+        let issue = crate::product::issue_store::IssueStore::new(fixture.paths.clone())
+            .create(crate::product::issue_store::CreateProductIssueInput {
+                project_id: "project_0001".to_string(),
+                repo_id: None,
+                logical_codebase_id: Some(record.id.clone()),
+                title: "per-lc issue".to_string(),
+                description: None,
+                change_id: None,
+                base_branch: None,
+            })
+            .unwrap();
+        crate::product::logical_codebase::IssueCodebaseSelectionStore::for_lc(
+            fixture.paths.clone(),
+            record.id.clone(),
+        )
+        .save(&IssueCodebaseSelection::all_members(
+            "project_0001",
+            &issue.id,
+            Some(record.id.clone()),
+        ))
+        .unwrap();
+
+        let session = fixture.design_session_for_lc(
+            &issue.id,
+            vec![member_c],
+            vec![member_c],
+        );
+        let repository = workspace_repository_for_session(
+            &fixture.paths,
+            &LifecycleStore::new(fixture.paths.clone()),
+            &session,
+        )
+        .expect("per-LC design must resolve the member from LC authority");
+        assert_eq!(repository.path, member_c_path);
+        assert_eq!(repository.logical_repository_id, Some(member_c));
+        assert_eq!(repository.primary_checkout_id, Some(checkout_id));
     }
 }

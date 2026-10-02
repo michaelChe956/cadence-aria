@@ -116,7 +116,20 @@ pub fn prepare_plan_records(
                     ));
                 }
             }
-            let repository_ids = selected_ids.into_iter().cloned().collect::<Vec<_>>();
+            // 缺陷 #7（2026-10-02 E2E）：聚合 Design（involved 非空）的单候选
+            // 计数以其 involved 集为准（上方已校验 ⊆ selection，REQ-TGT-01）；
+            // LC issue 的 selection 恒 all_members，按 selection 计数会把任何
+            // 单成员 Design 的 plan 准备死锁在 preflight（issue_0001 现场
+            // found 2）。无聚合视野的 Design（involved 空）保持 selection 口径。
+            let repository_ids = if design.involved_repository_ids.is_empty() {
+                selected_ids.into_iter().cloned().collect::<Vec<_>>()
+            } else {
+                design
+                    .involved_repository_ids
+                    .iter()
+                    .map(|target| target.0.to_string())
+                    .collect::<Vec<_>>()
+            };
             match preflight_single_repository_candidate(&repository_ids) {
                 SingleCandidatePreflightDecision::Eligible { .. } => None,
                 SingleCandidatePreflightDecision::Ineligible { reason } => Some(reason),
