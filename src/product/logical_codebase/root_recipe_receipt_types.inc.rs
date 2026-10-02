@@ -1,7 +1,29 @@
-/// Root recipe 副作用审计的固定 allowlist（相对 canonical root）：聚合
-/// artifact 只允许落在 `.aria/aggregate/**`（含 allowlist 前缀自身的
-/// 脚手架目录），绝不扩大为整个 root，也绝不放行成员仓路径（D2）。
-pub const ROOT_RECIPE_ALLOWLIST: &[&str] = &[".aria/aggregate"];
+/// Root recipe 副作用审计的固定 allowlist（相对 canonical root）。
+///
+/// Task 3.5 carry ②（Task 1.8 §五.2）：按真实 Claude Code（2.1.283）四命令
+/// recipe 在空的非 Git canonical root 的实测落盘证据逐项冻结（spike 与
+/// 全链 E2E，见 cadence/reports/2026-10-02_验收报告_LC根初始化全链E2E）：
+/// `/pre-check` 写 `.agents`/`.claude`/`.kimi-code`/`.pi`/`openspec`；
+/// `/rule-config` 写 `AGENTS.md`/`CLAUDE.md`/`.claude/rules`/`.agents/rules`
+/// /`.omp`/`cadence`；`/mcp-configuration` 写 `.mcp.json`/`.codex`/`.gitignore`；
+/// `/project-rules-examples` 写 `cadence/project-rules/examples`。聚合
+/// artifact 只允许落在 `.aria/aggregate/**`。绝不扩大为整个 root，也绝不
+/// 放行成员仓路径（D2；成员 `.git` 分类优先于 allowlist）。
+pub const ROOT_RECIPE_ALLOWLIST: &[&str] = &[
+    ".aria/aggregate",
+    "AGENTS.md",
+    "CLAUDE.md",
+    ".mcp.json",
+    ".gitignore",
+    ".claude",
+    ".agents",
+    ".omp",
+    ".codex",
+    ".kimi-code",
+    ".pi",
+    "cadence",
+    "openspec",
+];
 
 /// 根规则通用入口文件（Task 1.6，REQ-BOOT-03）：AGENTS.md 是四家 provider
 /// 的通用入口；CLAUDE.md 仅是兼容副本，不进入 readiness 身份（副本策略

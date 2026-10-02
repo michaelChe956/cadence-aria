@@ -103,7 +103,7 @@ mod tests {
         )
         .unwrap();
         // 根级未知路径（allowlist 之外）。
-        std::fs::write(fixture.root.join("AGENTS.md"), "# user file\n").unwrap();
+        std::fs::write(fixture.root.join("rogue-root-file.md"), "# user file\n").unwrap();
         // 成员 `.git` 变化。
         std::fs::write(
             fixture.root.join("members/repo-a/.git/HEAD"),
@@ -137,7 +137,7 @@ mod tests {
         assert_eq!(class, &RootRecipeChangeClass::AllowlistedArtifact);
         assert!(allowed, "allowlisted artifact change must be allowed");
 
-        let (class, allowed) = change_of(&receipt, "AGENTS.md");
+        let (class, allowed) = change_of(&receipt, "rogue-root-file.md");
         assert_eq!(class, &RootRecipeChangeClass::UnknownPath);
         assert!(!allowed, "unknown root-level path must be rejected");
 
@@ -163,13 +163,16 @@ mod tests {
         );
 
         // allowlist 不扩大为整个 root。
-        assert_eq!(receipt.allowlist, vec![".aria/aggregate".to_string()]);
+        assert_eq!(
+            receipt.allowlist,
+            ROOT_RECIPE_ALLOWLIST.iter().map(|s| s.to_string()).collect::<Vec<_>>()
+        );
         // auditor 只读：用户/成员文件原样保留。
         assert_eq!(
             std::fs::read_to_string(fixture.root.join("members/repo-a/README.md")).unwrap(),
             "# member\n"
         );
-        assert!(fixture.root.join("AGENTS.md").exists());
+        assert!(fixture.root.join("rogue-root-file.md").exists());
 
         // 拒绝事实 durable 保留（允许记录，不允许静默）。
         fixture
@@ -216,7 +219,10 @@ mod tests {
             assert_eq!(receipt.step, expected_step);
             assert_eq!(receipt.command, expected_command);
             assert_eq!(receipt.command_index, command_index);
-            assert_eq!(receipt.allowlist, vec![".aria/aggregate".to_string()]);
+            assert_eq!(
+                receipt.allowlist,
+                ROOT_RECIPE_ALLOWLIST.iter().map(|s| s.to_string()).collect::<Vec<_>>()
+            );
 
             // before/after 快照 + digest 均被冻结。
             assert!(!receipt.before_snapshot.entries.is_empty());
@@ -308,6 +314,129 @@ mod tests {
             )
             .unwrap();
         assert_eq!(replay, finalized);
+    }
+
+    /// Task 3.5 carry ②（Task 1.8 §五.2，design Open Question「provider-native
+    /// 根文件 allowlist」）：真实 Claude Code 四命令 recipe 在空的非 Git
+    /// canonical root 的实测落盘前缀（2026-10-02 spike，claude 2.1.283，
+    /// 见 cadence/reports/2026-10-02_验收报告_LC根初始化全链E2E）。
+    /// 逐项冻结、绝不扩大为整个 root；成员目录不进 allowlist（成员 `.git`
+    /// 分类优先于 allowlist 的既有锁继续生效）。
+    #[test]
+    fn root_recipe_allowlist_freezes_real_provider_root_artifacts() {
+        assert_eq!(
+            ROOT_RECIPE_ALLOWLIST,
+            &[
+                ".aria/aggregate",
+                "AGENTS.md",
+                "CLAUDE.md",
+                ".mcp.json",
+                ".gitignore",
+                ".claude",
+                ".agents",
+                ".omp",
+                ".codex",
+                ".kimi-code",
+                ".pi",
+                "cadence",
+                "openspec",
+            ]
+        );
+    }
+
+    /// 行为锁：冻结前缀内的真实根产物写入判 `AllowlistedArtifact`；
+    /// 前缀外的未知路径仍 `UnknownPath` 拒绝；成员 `.git` 分类优先于
+    /// allowlist（前缀内出现 `.git` 段仍拒绝）。
+    #[test]
+    fn receipt_auditor_allows_real_root_artifacts_and_keeps_boundaries() {
+        let fixture = ReceiptFixture::new();
+        let auditor = RootRecipeFilesystemAuditor::new();
+
+        let (step, command) = command_spec(2);
+        let watch = auditor
+            .before_command(OPERATION_ID, &fixture.root, step, 2, command)
+            .unwrap();
+
+        // 真实 recipe 的代表性根产物（每前缀至少一条实测形态）。
+        std::fs::write(fixture.root.join("AGENTS.md"), "# entry\n").unwrap();
+        std::fs::write(fixture.root.join("CLAUDE.md"), "# entry\n").unwrap();
+        std::fs::write(fixture.root.join(".mcp.json"), "{}").unwrap();
+        std::fs::write(fixture.root.join(".gitignore"), ".worktrees/\n").unwrap();
+        std::fs::create_dir_all(fixture.root.join(".claude/rules")).unwrap();
+        std::fs::write(fixture.root.join(".claude/rules/language.md"), "# lang\n").unwrap();
+        std::fs::create_dir_all(fixture.root.join(".agents/rules")).unwrap();
+        std::os::unix::fs::symlink(
+            "../../.claude/rules/language.md",
+            fixture.root.join(".agents/rules/language.md"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(fixture.root.join(".omp")).unwrap();
+        std::fs::write(fixture.root.join(".omp/AGENTS.md"), "# bridge\n").unwrap();
+        std::fs::create_dir_all(fixture.root.join(".codex")).unwrap();
+        std::fs::write(fixture.root.join(".codex/config.toml"), "[mcp_servers.x]\n").unwrap();
+        std::fs::create_dir_all(fixture.root.join(".kimi-code/skills/a")).unwrap();
+        std::fs::write(fixture.root.join(".kimi-code/skills/a/SKILL.md"), "# a\n").unwrap();
+        std::fs::create_dir_all(fixture.root.join(".pi/prompts")).unwrap();
+        std::fs::write(fixture.root.join(".pi/prompts/opsx-apply.md"), "# p\n").unwrap();
+        std::fs::create_dir_all(fixture.root.join("cadence/project-rules")).unwrap();
+        std::fs::write(fixture.root.join("cadence/project-rules/README.md"), "# r\n").unwrap();
+        std::fs::create_dir_all(fixture.root.join("openspec")).unwrap();
+        std::fs::write(fixture.root.join("openspec/config.yaml"), "scope: root\n").unwrap();
+        std::fs::create_dir_all(fixture.root.join(".aria/aggregate")).unwrap();
+        std::fs::write(fixture.root.join(".aria/aggregate/mcp.json"), "{}").unwrap();
+        // 未知根级路径（实测 recipe 从不产出）：拒绝。
+        std::fs::write(fixture.root.join("rogue-root-file.md"), "# rogue\n").unwrap();
+        // 成员目录（非 allowlist 前缀）：拒绝。
+        std::fs::write(fixture.root.join("members/repo-a/rogue.txt"), "x").unwrap();
+
+        let receipt = auditor
+            .after_command(watch, RECORDED_AT.to_string())
+            .unwrap();
+
+        for path in [
+            "AGENTS.md",
+            "CLAUDE.md",
+            ".mcp.json",
+            ".gitignore",
+            ".claude/rules/language.md",
+            ".agents/rules/language.md",
+            ".omp/AGENTS.md",
+            ".codex/config.toml",
+            ".kimi-code/skills/a/SKILL.md",
+            ".pi/prompts/opsx-apply.md",
+            "cadence/project-rules/README.md",
+            "openspec/config.yaml",
+            ".aria/aggregate/mcp.json",
+            ".claude",
+            ".agents",
+            ".omp",
+            ".codex",
+            ".kimi-code",
+            ".pi",
+            "cadence",
+            "openspec",
+        ] {
+            let (class, allowed) = change_of(&receipt, path);
+            assert_eq!(
+                class,
+                &RootRecipeChangeClass::AllowlistedArtifact,
+                "{path} must be an allowlisted real root artifact"
+            );
+            assert!(allowed, "{path} must be allowed");
+        }
+
+        let (class, allowed) = change_of(&receipt, "rogue-root-file.md");
+        assert_eq!(class, &RootRecipeChangeClass::UnknownPath);
+        assert!(!allowed, "unknown root-level path must stay rejected");
+        let (class, allowed) = change_of(&receipt, "members/repo-a/rogue.txt");
+        assert_eq!(class, &RootRecipeChangeClass::UnknownPath);
+        assert!(!allowed, "member paths must stay outside the allowlist");
+
+        assert_eq!(
+            receipt.verdict,
+            RootRecipeCommandVerdict::Rejected,
+            "any unknown-path write keeps the command rejected"
+        );
     }
 
     #[test]
