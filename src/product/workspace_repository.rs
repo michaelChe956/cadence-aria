@@ -48,19 +48,27 @@ fn workspace_repository(
                     manifest,
                     selection,
                 } => {
-                    let logical_id = story.focus_repository_id.ok_or_else(|| {
-                        routing_error(
+                    match story.focus_repository_id {
+                        Some(logical_id) => resolve_selected_logical_repository(
+                            app_paths,
+                            &session.project_id,
+                            logical_id,
+                            &manifest,
+                            &selection,
+                        ),
+                        // 方案X草稿态（缺陷 #2 修法 A，controller 裁决 2026-10-02）：
+                        // focus=None ∧ involved 空 = AI 自决 involved 之前，目标即
+                        // LC 聚合根本身（ENV-10/11 cwd≠target 合法形态；author_root_launch
+                        // 的 PolicyTarget::aggregate_root 锚同口径）。回写 focus 后
+                        // 恢复成员解析；involved 非空仍 fail-closed（下方 None 臂）。
+                        None if story.involved_repository_ids.is_empty() => {
+                            Ok(aggregate_root_view(&manifest))
+                        }
+                        None => Err(routing_error(
                             RepositoryRoutingErrorCode::TargetMissing,
                             format!("story {} has no focus repository", story.id),
-                        )
-                    })?;
-                    resolve_selected_logical_repository(
-                        app_paths,
-                        &session.project_id,
-                        logical_id,
-                        &manifest,
-                        &selection,
-                    )
+                        )),
+                    }
                 }
                 RepositoryRouting::FailClosed { code, reason } => Err(routing_error(code, reason)),
             }
@@ -234,6 +242,34 @@ fn resolve_legacy_physical_repository(
             kind: "repository",
             id: physical_repository_id.to_string(),
         })
+}
+
+/// 草稿 Story（Logical 路由、focus 未定、involved 空）的聚合根锚视图：
+/// cwd 仍由唯一 authority resolver 冻结为 canonical root；target 锚定
+/// `PolicyTarget::aggregate_root(provider_context_root)`（primary_checkout_id
+/// =None → author_root_launch 走 aggregate_root 臂）。视图仅供 attach/launch
+/// 目标锚定，不落盘、不参与写根授权（PlanningReadOnly 空 writable_roots
+/// 不变）；logical_repository_id 取 manifest 逻辑身份（确定性，仅作 LC
+/// 会话 gateway 注入谓词之用，不进入 PolicyTarget/成员解析）。
+fn aggregate_root_view(
+    manifest: &crate::product::logical_codebase::LogicalCodebaseManifest,
+) -> RepositoryRecord {
+    let root = manifest.provider_context_root.clone();
+    RepositoryRecord {
+        id: format!("lc_aggregate_root_view_{}", manifest.logical_codebase_id),
+        project_id: manifest.project_id.clone(),
+        name: "lc-aggregate-root".to_string(),
+        path: root.clone(),
+        repo_hash: String::new(),
+        runtime_root: root,
+        default_policy_preset: String::new(),
+        default_provider_mode: String::new(),
+        created_at: String::new(),
+        logical_repository_id: Some(LogicalRepositoryId(manifest.logical_codebase_id)),
+        primary_checkout_id: None,
+        identity_schema_version: 0,
+        updated_at: String::new(),
+    }
 }
 
 fn resolve_issue_repository(
@@ -461,5 +497,183 @@ mod tests {
             panic!("expected repository_routing InvalidRecord, got {error:?}");
         };
         reason.split(':').next().unwrap_or_default()
+    }
+
+    /// 缺陷 #2（2026-10-02 全链 E2E）回归夹具：LC 路由（manifest+selection+
+    /// 成员 git 仓）下的 Story 会话解析。
+    struct LcStoryRoutingFixture {
+        _temp: tempfile::TempDir,
+        paths: ProductAppPaths,
+        manifest: LogicalCodebaseManifest,
+        member_logical_id: LogicalRepositoryId,
+        member_path: std::path::PathBuf,
+    }
+
+    impl LcStoryRoutingFixture {
+        fn new() -> Self {
+            let temp = tempfile::tempdir().unwrap();
+            let paths = ProductAppPaths::new(temp.path().join(".aria"));
+            crate::product::project_store::ProjectStore::new(paths.clone())
+                .create(crate::product::project_store::CreateProjectInput {
+                    name: "lc-routing".to_string(),
+                    description: None,
+                })
+                .unwrap();
+            let root = temp.path().join("aggregate-root");
+            let member_path = root.join("member-a");
+            std::fs::create_dir_all(&member_path).unwrap();
+            for args in [
+                vec!["init", "--quiet"],
+                vec!["config", "user.email", "routing@example.test"],
+                vec!["config", "user.name", "Routing Fixture"],
+            ] {
+                let status = std::process::Command::new("git")
+                    .args(&args)
+                    .current_dir(&member_path)
+                    .status()
+                    .unwrap();
+                assert!(status.success(), "git {:?} failed", args);
+            }
+            std::fs::write(member_path.join("README.md"), "# member-a\n").unwrap();
+            for args in [
+                vec!["add", "README.md"],
+                vec!["commit", "--quiet", "-m", "initial commit"],
+            ] {
+                let status = std::process::Command::new("git")
+                    .args(&args)
+                    .current_dir(&member_path)
+                    .status()
+                    .unwrap();
+                assert!(status.success(), "git {:?} failed", args);
+            }
+            let repository =
+                crate::product::repository_store::RepositoryStore::with_logical_codebase_feature(
+                    paths.clone(),
+                    crate::product::logical_codebase::LogicalCodebaseFeature::enabled(),
+                )
+                .create(crate::product::repository_store::CreateRepositoryInput {
+                    project_id: "project_0001".to_string(),
+                    name: "member-a".to_string(),
+                    path: member_path.clone(),
+                    default_policy_preset: None,
+                    default_provider_mode: None,
+                    idempotency_key: "lc-story-routing-member-a".to_string(),
+                })
+                .unwrap();
+            let member_logical_id = repository.logical_repository_id.expect("logical id");
+            let manifest = LogicalCodebaseStore::new(paths.clone())
+                .load_manifest("project_0001")
+                .unwrap()
+                .expect("manifest auto-created by member registration");
+            crate::product::logical_codebase::IssueCodebaseSelectionStore::new(paths.clone())
+                .save(&IssueCodebaseSelection::all_members(
+                    "project_0001",
+                    "issue_0001",
+                    None,
+                ))
+                .unwrap();
+            Self {
+                _temp: temp,
+                paths,
+                manifest,
+                member_logical_id,
+                member_path,
+            }
+        }
+
+        fn story_session(
+            &self,
+            involved: Vec<LogicalRepositoryId>,
+            focus: Option<LogicalRepositoryId>,
+        ) -> crate::product::models::WorkspaceSessionRecord {
+            let lifecycle = crate::product::lifecycle_store::LifecycleStore::new(self.paths.clone());
+            let story = lifecycle
+                .create_story_spec(crate::product::lifecycle_store::CreateStorySpecInput {
+                    project_id: "project_0001".to_string(),
+                    issue_id: "issue_0001".to_string(),
+                    repository_id: String::new(),
+                    title: "lc draft story".to_string(),
+                    aggregate_codebase: Some(
+                        crate::product::lifecycle_store::AggregateStorySpecScope {
+                            logical_codebase_ref: self.manifest.logical_codebase_id,
+                            effective_member_ids: self.manifest.member_ids.clone(),
+                            involved_repository_ids: involved,
+                            focus_repository_id: focus,
+                        },
+                    ),
+                })
+                .unwrap();
+            lifecycle
+                .create_workspace_session(
+                    crate::product::lifecycle_store::CreateWorkspaceSessionInput {
+                        project_id: "project_0001".to_string(),
+                        issue_id: "issue_0001".to_string(),
+                        entity_id: story.id,
+                        workspace_type: crate::product::models::WorkspaceType::Story,
+                        author_provider: crate::product::models::ProviderName::ClaudeCode,
+                        reviewer_provider: Some(crate::product::models::ProviderName::ClaudeCode),
+                        review_rounds: 1,
+                        superpowers_enabled: false,
+                        openspec_enabled: false,
+                        work_item_plan_options: None,
+                    },
+                )
+                .unwrap()
+        }
+    }
+
+    /// 红→绿主锁：草稿 LC Story（focus=None ∧ involved 空）attach 期解析不再
+    /// TargetMissing，锚定聚合根视图（path=provider_context_root、无 checkout、
+    /// logical 身份在场供 gateway 注入谓词）。
+    #[test]
+    fn draft_lc_story_anchors_at_aggregate_root_until_focus_determined() {
+        let fixture = LcStoryRoutingFixture::new();
+        let session = fixture.story_session(Vec::new(), None);
+        let repository = workspace_repository_for_session(
+            &fixture.paths,
+            &LifecycleStore::new(fixture.paths.clone()),
+            &session,
+        )
+        .expect("draft LC story must anchor at the aggregate root view");
+        assert_eq!(repository.path, fixture.manifest.provider_context_root);
+        assert!(repository.logical_repository_id.is_some());
+        assert!(repository.primary_checkout_id.is_none());
+    }
+
+    /// 边界 1：focus 已定（回写后）→ 恢复既有成员解析，路径=成员 canonical
+    /// checkout、logical 身份=成员。
+    #[test]
+    fn lc_story_with_focus_resolves_member_unchanged() {
+        let fixture = LcStoryRoutingFixture::new();
+        let session = fixture.story_session(
+            vec![fixture.member_logical_id],
+            Some(fixture.member_logical_id),
+        );
+        let repository = workspace_repository_for_session(
+            &fixture.paths,
+            &LifecycleStore::new(fixture.paths.clone()),
+            &session,
+        )
+        .expect("focused LC story resolves the member checkout");
+        assert_eq!(repository.path, fixture.member_path);
+        assert_eq!(
+            repository.logical_repository_id,
+            Some(fixture.member_logical_id)
+        );
+    }
+
+    /// 边界 2：focus=None 但 involved 非空（回写异常半态）→ 保持 TargetMissing
+    /// fail-closed，不锚聚合根（防放宽）。
+    #[test]
+    fn lc_story_without_focus_but_involved_stays_target_missing() {
+        let fixture = LcStoryRoutingFixture::new();
+        let session = fixture.story_session(vec![fixture.member_logical_id], None);
+        let error = workspace_repository_for_session(
+            &fixture.paths,
+            &LifecycleStore::new(fixture.paths.clone()),
+            &session,
+        )
+        .unwrap_err();
+        assert_eq!(stable_routing_code(&error), "repository_routing_target_missing");
     }
 }
