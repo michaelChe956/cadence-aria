@@ -717,6 +717,9 @@ pub struct CodingAttemptDto {
     pub review_request_url: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// 终态回填时刻（Completed/Failed/Aborted 转换处落盘）。非终态与
+    /// 缺失该字段的旧记录（历史只读，不回写）投影为 None。
+    pub completed_at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

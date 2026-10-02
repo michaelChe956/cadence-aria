@@ -80,6 +80,34 @@ fn coding_attempt_dto_exposes_manual_recovery_reason() {
     );
 }
 
+/// 缺陷（2026-10-02 E2E v1.2 附记）：coding attempt Completed 终态但聚合投影
+/// completed_at 未回填（REST 聚合面观察为 null）。durable 记录在终态转换处
+/// 已回填（update_attempt_status / group_terminal）；投影 DTO 必须携带该值。
+/// 旧记录无 completed_at（历史只读，不回写）投影为 None。
+#[test]
+fn coding_attempt_dto_projects_terminal_completed_at() {
+    let (_tmp, store) = store_fixture();
+
+    // 终态记录：completed_at 已回填 → 投影透出。
+    let mut completed = manual_recovery_attempt_fixture();
+    completed.status = CodingAttemptStatus::Completed;
+    completed.completed_at = Some("2026-10-02T09:09:46Z".to_string());
+    let dto = coding_attempt_dto(&store, &completed).unwrap();
+    assert_eq!(dto.completed_at.as_deref(), Some("2026-10-02T09:09:46Z"));
+
+    // 非终态记录：completed_at 为 None → 投影 None。
+    let running = manual_recovery_attempt_fixture();
+    let dto = coding_attempt_dto(&store, &running).unwrap();
+    assert_eq!(dto.completed_at, None);
+
+    // 历史只读：终态但旧记录缺 completed_at → 投影 None（不回写不推算）。
+    let mut legacy = manual_recovery_attempt_fixture();
+    legacy.status = CodingAttemptStatus::Completed;
+    legacy.completed_at = None;
+    let dto = coding_attempt_dto(&store, &legacy).unwrap();
+    assert_eq!(dto.completed_at, None);
+}
+
 #[test]
 fn coding_attempt_dto_manual_recovery_reason_is_none_when_absent() {
     let (_tmp, store) = store_fixture();

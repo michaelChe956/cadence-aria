@@ -512,6 +512,7 @@ pub(crate) fn coding_attempt_dto(
         review_request_url: None,
         created_at: attempt.created_at.clone(),
         updated_at: attempt.updated_at.clone(),
+        completed_at: attempt.completed_at.clone(),
     })
 }
 
