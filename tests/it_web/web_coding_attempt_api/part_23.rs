@@ -47,9 +47,14 @@ fn endpoint_replay_provider_snapshot(
         .into_iter()
         .next()
         .expect("fixture repository");
-    let author = resolve_default_coding_provider(&repository.default_provider_mode, |_| true)
-        .expect("default coding provider")
-        .provider;
+    // fixture 仓库未显式配置 default_provider_mode（落空串），且本测试跑 fake
+    // runtime（state.test_provider_enabled=true）——复刻端点侧
+    // coding_provider_config_snapshot(..., state.test_provider_enabled, ...) 的
+    // 同一豁免面，第二参必须传 true 才能得出端点将重算出的 Fake 快照。
+    let author =
+        resolve_default_coding_provider(&repository.default_provider_mode, true, |_| true)
+            .expect("default coding provider")
+            .provider;
     ProviderConfigSnapshot {
         author: author.clone(),
         reviewer: Some(author),

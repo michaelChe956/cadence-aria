@@ -7,7 +7,8 @@ use cadence_aria::web::provider_availability::{
 
 #[test]
 fn default_coding_provider_falls_back_from_unavailable_codex_to_claude_code() {
-    let selected = resolve_default_coding_provider("codex", |provider| {
+    // 真实 provider 名（codex）下的回退链语义，无 fake/未配置豁免面：false。
+    let selected = resolve_default_coding_provider("codex", false, |provider| {
         matches!(provider, ProviderName::ClaudeCode)
     })
     .expect("fallback provider");

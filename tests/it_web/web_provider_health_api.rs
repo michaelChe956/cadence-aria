@@ -315,7 +315,8 @@ async fn provider_health_shared_gate_controls_lifecycle_coding_and_routing_entri
         .await
         .expect("persist health");
     let gate = state.provider_gate.clone();
-    let fallback = resolve_default_coding_provider("codex", |provider| {
+    // 真实 provider 名（codex）走真实 gate 判定，未配置豁免面不参与：false。
+    let fallback = resolve_default_coding_provider("codex", false, |provider| {
         gate.ensure_available(provider).is_ok()
     })
     .expect("healthy fallback");
