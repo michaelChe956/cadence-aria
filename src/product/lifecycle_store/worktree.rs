@@ -549,7 +549,13 @@ impl LifecycleStore {
             }
             match record.current_lock_owner_id.as_deref() {
                 Some(owner) if owner == attempt_id => return Ok(record),
-                Some(owner) if owner.starts_with("repo_worktree_lease_") => {}
+                // 租约前缀仅命名约定：仓维锁历史上可由组 journal 派生的
+                // issue_worktree_lease_（缺陷 #13 层2 分流修复前的存量）或
+                // repo_worktree_lease_ 持有；实质契约是「owner 为未绑定租约
+                // 方可 bind 到 attempt」，两类前缀均放行。
+                Some(owner)
+                    if owner.starts_with("repo_worktree_lease_")
+                        || owner.starts_with("issue_worktree_lease_") => {}
                 _ => return Err(repo_lock_owner_mismatch(repository_id, work_item_id)),
             }
             record.current_lock_owner_id = Some(attempt_id.to_string());

@@ -752,7 +752,18 @@ impl super::CodingAttemptStore {
             issue_id: input.issue_id.clone(),
             plan_id: input.plan_id.clone(),
             lock_work_item_id: input.current_work_item_id.clone(),
-            worktree_lease_id: format!("issue_worktree_lease_{}", uuid::Uuid::new_v4().simple()),
+            // 缺陷 #13 层2（组入口路由分流配套）：仓维锁 bind 只接受
+            // `repo_worktree_lease_` 前缀租约；Logical 路由（journal_target
+            // 存在）必须派生仓维前缀，Legacy 路由维持 issue 维前缀不变。
+            worktree_lease_id: format!(
+                "{}{}",
+                if journal_target.is_some() {
+                    "repo_worktree_lease_"
+                } else {
+                    "issue_worktree_lease_"
+                },
+                uuid::Uuid::new_v4().simple()
+            ),
             provider_config: CodingRoleProviderConfigSnapshot::from(
                 &input.provider_config_snapshot,
             ),

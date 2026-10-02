@@ -316,20 +316,35 @@ impl CodingWorkspaceEngine {
         let active_work_item_id = self.active_work_item_id_for_attempt(&current).to_string();
         match current.scope {
             CodingAttemptScope::WorkItemGroup => {
-                self.validate_attempt_issue_shared_worktree_owner_if_present(&current)?;
                 let lifecycle = LifecycleStore::new(self.store.paths());
-                let shared_active_work_item_id =
-                    match self.route_issue_shared_worktree(&current)? {
-                        IssueSharedWorktreeRoute::Legacy => lifecycle
-                            .get_issue_shared_worktree(project_id, issue_id)?
-                            .and_then(|shared| shared.current_active_work_item_id),
-                        IssueSharedWorktreeRoute::Repository { repository_id } => lifecycle
-                            .get_repo_shared_worktree(project_id, issue_id, repository_id)?
-                            .and_then(|shared| shared.current_active_work_item_id),
-                    }
-                    .unwrap_or_else(|| active_work_item_id.clone());
-                self.ensure_issue_shared_worktree_clean(&current, &shared_active_work_item_id)
+                // 缺陷 #13 层2：Logical 路由 group create（分流修复前）误写的
+                // 自持 legacy 布局会让 delete 链的每次 route 分流都
+                // fail-closed（legacy_shared_worktree_present），删除被拦死
+                //（与恢复/重启同为死锁出口）。删除是错误布局的产品面清理
+                // 出口：矛盾形态（target_snapshot 存在 + issue 维 legacy record
+                // 自持，owner == 本 attempt）下三步（owner 校验 / active item
+                // 读取 / clean 检查）整体跳过——归属已由自持判别证明，
+                // worktree 的 git 清理由删除链 cleanup_coding_attempt_workspace
+                // 负责。Legacy 路由正常形态与他人/无主残留均不受影响
+                //（迁移契约 §4.2.6 语义不变）。
+                if !Self::delete_tolerates_self_owned_legacy_layout(&lifecycle, &current) {
+                    self.validate_attempt_issue_shared_worktree_owner_if_present(&current)?;
+                    let shared_active_work_item_id =
+                        match self.route_issue_shared_worktree(&current)? {
+                            IssueSharedWorktreeRoute::Legacy => lifecycle
+                                .get_issue_shared_worktree(project_id, issue_id)?
+                                .and_then(|shared| shared.current_active_work_item_id),
+                            IssueSharedWorktreeRoute::Repository { repository_id } => lifecycle
+                                .get_repo_shared_worktree(project_id, issue_id, repository_id)?
+                                .and_then(|shared| shared.current_active_work_item_id),
+                        }
+                        .unwrap_or_else(|| active_work_item_id.clone());
+                    self.ensure_issue_shared_worktree_clean(
+                        &current,
+                        &shared_active_work_item_id,
+                    )
                     .await?;
+                }
             }
             CodingAttemptScope::WorkItem => {
                 self.validate_attempt_issue_shared_worktree_lock_if_present(&current)?;
@@ -345,9 +360,18 @@ impl CodingWorkspaceEngine {
         }
         match current.scope {
             CodingAttemptScope::WorkItemGroup => {
-                self.release_issue_shared_worktree_lock_for_attempt(
-                    project_id, issue_id, attempt_id,
-                )?;
+                // 同一容忍面（缺陷 #13 层2）：自持矛盾布局下 release 内部的
+                // route 分流同样会撞 preflight——按 owner 直接释放 issue 维
+                // legacy 锁（正是该布局的锁所在），不绕路 route。
+                let lifecycle = LifecycleStore::new(self.store.paths());
+                if Self::delete_tolerates_self_owned_legacy_layout(&lifecycle, &current) {
+                    lifecycle
+                        .release_issue_worktree_lock_by_owner(project_id, issue_id, attempt_id)?;
+                } else {
+                    self.release_issue_shared_worktree_lock_for_attempt(
+                        project_id, issue_id, attempt_id,
+                    )?;
+                }
             }
             CodingAttemptScope::WorkItem => {
                 self.release_issue_shared_worktree_lock_if_holder(
@@ -360,6 +384,24 @@ impl CodingWorkspaceEngine {
         }
         Ok(())
     }
+
+/// 删除链的「自持矛盾布局」判别：`target_snapshot` 存在（Logical 路由）且
+/// issue 维 legacy record 的锁 owner 正是本 attempt。仅此形态（缺陷 #13 层2
+/// 分流修复前 group create 误写）在删除时整体跳过 owner 校验 / active item
+/// 读取 / clean 检查；Legacy 路由正常形态（snapshot 缺席）与他人/无主残留
+/// 一律返回 false 走原校验链。
+fn delete_tolerates_self_owned_legacy_layout(
+    lifecycle: &LifecycleStore,
+    attempt: &CodingExecutionAttempt,
+) -> bool {
+    attempt.target_snapshot.is_some()
+        && lifecycle
+            .get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)
+            .ok()
+            .flatten()
+            .and_then(|shared| shared.current_lock_owner_id)
+            .is_some_and(|owner| owner == attempt.id)
+}
 
     /// 记录 work item 的完成 commit。
     ///

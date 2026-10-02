@@ -1,7 +1,13 @@
+use std::path::PathBuf;
+
 use crate::product::coding_models::AttemptTargetSnapshot;
 use crate::product::json_store::ProductStoreError;
 use crate::product::lifecycle_store::LifecycleStore;
+use crate::product::lifecycle_store::UpsertIssueSharedWorktreeInput;
+use crate::product::lifecycle_store::UpsertRepoSharedWorktreeInput;
+use crate::product::logical_codebase::LegacySharedWorktreeMigration;
 use crate::product::logical_codebase::LogicalRepositoryId;
+use crate::product::app_paths::ProductAppPaths;
 use crate::web::error::ApiError;
 use serde_json::json;
 
@@ -79,4 +85,130 @@ pub(crate) fn release_worktree_lock(
             .map(|_| ()),
     };
     let _ = result;
+}
+
+#[derive(Debug)]
+pub(crate) struct GroupWorktreeLease {
+    pub(crate) acquired: bool,
+    pub(crate) owner_attempt_id: Option<String>,
+}
+
+/// 按 worktree 路由分流执行「upsert shared worktree + 取 WI 级租约」
+/// （REQ-COD-03 §4.2，与单件入口 `create_coding_attempt` 同一模式）。
+///
+/// Logical 路由（`target_snapshot=Some`）下 issue 维 legacy 布局与运行期
+/// `preflight_repo_shared_worktree_absent` 契约相反（恢复 / handoff / 完成门
+/// 均以 `legacy_shared_worktree_present` fail-closed），因此组入口 Logical 分支
+/// 写仓维 record 并在发现旧布局残留时 fail-closed 422——不静默覆盖、不从旧
+/// 文件推导 repository（迁移契约 §4.2.6 红线在组入口同样生效）。
+pub(crate) fn upsert_worktree_and_acquire_lease(
+    app_paths: &ProductAppPaths,
+    lifecycle: &LifecycleStore,
+    route: &IssueWorktreeRoute,
+    project_id: &str,
+    issue_id: &str,
+    physical_repository_id: &str,
+    lock_work_item_id: &str,
+    worktree_lease_id: &str,
+    branch_name: &str,
+    base_branch: &str,
+    worktree_path: PathBuf,
+) -> Result<GroupWorktreeLease, ApiError> {
+    match route {
+        IssueWorktreeRoute::Legacy => {
+            lifecycle
+                .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
+                    project_id: project_id.to_string(),
+                    issue_id: issue_id.to_string(),
+                    repository_id: physical_repository_id.to_string(),
+                    branch_name: branch_name.to_string(),
+                    worktree_path,
+                    base_branch: base_branch.to_string(),
+                })
+                .map_err(product_store_api_error)?;
+            let lease = lifecycle
+                .try_acquire_issue_worktree_lock(
+                    project_id,
+                    issue_id,
+                    lock_work_item_id,
+                    worktree_lease_id,
+                )
+                .map_err(issue_worktree_active_api_error)?;
+            Ok(GroupWorktreeLease {
+                acquired: lease.acquired,
+                owner_attempt_id: lease.worktree.current_lock_owner_id,
+            })
+        }
+        IssueWorktreeRoute::Repository { repository_id } => {
+            let legacy_error =
+                match LegacySharedWorktreeMigration::load_legacy_shared_worktree(
+                    app_paths,
+                    project_id,
+                    issue_id,
+                ) {
+                    Ok(None) => None,
+                    Ok(Some(_)) => Some("legacy_shared_worktree_present"),
+                    Err(ProductStoreError::InvalidRecord { reason, .. })
+                        if reason.starts_with("legacy_shared_worktree_inconsistent:") =>
+                    {
+                        Some("legacy_shared_worktree_inconsistent")
+                    }
+                    Err(error) => return Err(product_store_api_error(error)),
+                };
+            if let Some(code) = legacy_error {
+                return Err(ApiError::validation(
+                    code,
+                    "legacy issue shared worktree blocks the repository worktree route",
+                ));
+            }
+            lifecycle
+                .upsert_repo_shared_worktree(UpsertRepoSharedWorktreeInput {
+                    project_id: project_id.to_string(),
+                    issue_id: issue_id.to_string(),
+                    repository_id: *repository_id,
+                    branch_name: branch_name.to_string(),
+                    worktree_path,
+                    base_branch: base_branch.to_string(),
+                })
+                .map_err(product_store_api_error)?;
+            let lease = lifecycle
+                .try_acquire_repo_worktree_lock(
+                    project_id,
+                    issue_id,
+                    *repository_id,
+                    lock_work_item_id,
+                    worktree_lease_id,
+                )
+                .map_err(repo_worktree_active_api_error)?;
+            Ok(GroupWorktreeLease {
+                acquired: lease.acquired,
+                owner_attempt_id: lease.worktree.current_lock_owner_id,
+            })
+        }
+    }
+}
+
+/// 按分流把 worktree 锁绑定到 attempt 名下（组入口与单件入口同一语义）。
+pub(crate) fn bind_worktree_lock_to_attempt_routed(
+    lifecycle: &LifecycleStore,
+    route: &IssueWorktreeRoute,
+    project_id: &str,
+    issue_id: &str,
+    work_item_id: &str,
+    attempt_id: &str,
+) -> Result<(), ProductStoreError> {
+    match route {
+        IssueWorktreeRoute::Legacy => lifecycle
+            .bind_issue_worktree_lock_to_attempt(project_id, issue_id, work_item_id, attempt_id)
+            .map(|_| ()),
+        IssueWorktreeRoute::Repository { repository_id } => lifecycle
+            .bind_repo_worktree_lock_to_attempt(
+                project_id,
+                issue_id,
+                *repository_id,
+                work_item_id,
+                attempt_id,
+            )
+            .map(|_| ()),
+    }
 }

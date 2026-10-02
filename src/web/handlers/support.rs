@@ -680,13 +680,19 @@ pub(crate) fn finalize_coding_attempt_deletion(
             &attempt.issue_id,
             snapshot.logical_repository_id,
         )?,
-        None => cleanup_issue_shared_worktree_if_no_attempts(
-            coding_store,
-            app_paths,
-            &attempt.project_id,
-            &attempt.issue_id,
-        )?,
+        None => {}
     }
+    // 缺陷 #13 层2 存量出口：组入口路由分流修复前，Logical 路由的 group
+    // create 会误写 issue 维 legacy 布局（与运行期 preflight 契约相反，恢复/
+    // 完成门 fail-closed legacy_shared_worktree_present）。删除该 issue 的
+    // attempt 后条件清理 issue 维布局文件，恢复迁移契约一致性；正常仓维
+    // 布局下该文件不存在，清理幂等（NotFound=OK）。
+    cleanup_issue_shared_worktree_if_no_attempts(
+        coding_store,
+        app_paths,
+        &attempt.project_id,
+        &attempt.issue_id,
+    )?;
     Ok(())
 }
 
@@ -1075,6 +1081,85 @@ mod tests {
         assert_eq!(error.code, "product_store_error");
         assert_eq!(error.details["message"], "remove tmp: broken pipe");
     }
+
+    #[test]
+    fn finalize_deletion_cleans_miswritten_legacy_issue_layout_for_snapshot_attempts() {
+        use crate::product::coding_attempt_store::CreateCodingAttemptInput;
+        use crate::product::coding_models::AttemptTargetSnapshot;
+        use crate::product::logical_codebase::RepositoryCheckoutId;
+        use crate::product::lifecycle_store::UpsertIssueSharedWorktreeInput;
+        use crate::web::workspace_ws_types::ProviderConfigSnapshot;
+
+        // 缺陷 #13 层2 存量出口：组入口路由分流修复前，Logical 路由的 group
+        // create 误写 issue 维 legacy 布局（与 preflight 契约相反）。删除该
+        // issue 最后一个 attempt 时必须条件清掉该文件，恢复迁移契约一致性。
+        let root = tempfile::tempdir().expect("root");
+        let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+        let coding_store = CodingAttemptStore::new(app_paths.clone());
+        let lifecycle = LifecycleStore::new(app_paths.clone());
+        let attempt = coding_store
+            .create_attempt(CreateCodingAttemptInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                work_item_id: "work_item_0001".to_string(),
+                base_branch: "main".to_string(),
+                branch_name: "aria/issues/issue_0001".to_string(),
+                worktree_path: None,
+                provider_config_snapshot: ProviderConfigSnapshot {
+                    author: ProviderName::Fake,
+                    reviewer: None,
+                    review_rounds: 0,
+                    permission_modes: Default::default(),
+                },
+                target_snapshot: None,
+                max_auto_rework: 2,
+            })
+            .expect("attempt");
+        // 落盘带 target_snapshot 的形态（Logical 路由 attempt；照
+        // group_review_identity_snapshot 测试的 with_target_snapshot 模式直写）。
+        let mut logical = attempt.clone();
+        logical.target_snapshot = Some(AttemptTargetSnapshot {
+            logical_repository_id: LogicalRepositoryId(uuid::Uuid::nil()),
+            checkout_id: RepositoryCheckoutId(uuid::Uuid::nil()),
+            physical_repository_id: "repository_0001".to_string(),
+            canonical_path: root.path().join("repo"),
+            git_dir_identity: "git-dir-identity".to_string(),
+            revision: None,
+            policy_digest: String::new(),
+            membership_revision: 1,
+            captured_at: "2026-10-02T00:00:00Z".to_string(),
+            capture_source: "test".to_string(),
+        });
+        let attempt_path = app_paths
+            .issue_lifecycle_root(&logical.project_id, &logical.issue_id)
+            .join("coding-attempts")
+            .join(format!("{}.json", logical.id));
+        crate::product::json_store::write_json(&attempt_path, &logical)
+            .expect("write attempt with target snapshot");
+        // 模拟分流修复前误写的 issue 维 legacy 布局。
+        lifecycle
+            .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
+                project_id: logical.project_id.clone(),
+                issue_id: logical.issue_id.clone(),
+                repository_id: "repository_0001".to_string(),
+                branch_name: "aria/issues/issue_0001".to_string(),
+                worktree_path: root.path().join("wt"),
+                base_branch: "main".to_string(),
+            })
+            .expect("seed miswritten legacy layout");
+
+        finalize_coding_attempt_deletion(&coding_store, &app_paths, &logical)
+            .expect("finalize deletion");
+
+        assert!(
+            !app_paths
+                .issue_root(&logical.project_id, &logical.issue_id)
+                .join("issue-shared-worktree.json")
+                .exists(),
+            "miswritten legacy issue layout must be cleaned once the last attempt is deleted"
+        );
+    }
+
 
     #[test]
     fn aggregate_root_api_error_fallback_maps_unknown_code_to_internal_error() {

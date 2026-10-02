@@ -3,9 +3,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::super::dto::*;
 use super::super::support::*;
 use super::super::*;
-use super::{
-    RuntimeBindingProviderConfigInput, coding_provider_config_snapshot_for_runtime_binding,
-};
+use super::RuntimeBindingProviderConfigInput;
+use super::coding_provider_config_snapshot_for_runtime_binding;
+use super::worktree_route::IssueWorktreeRoute;
+use super::worktree_route::bind_worktree_lock_to_attempt_routed;
+use super::worktree_route::upsert_worktree_and_acquire_lease;
 use crate::product::coding_attempt_store::target_snapshot::build_attempt_target_snapshot;
 use crate::product::coding_attempt_store::{
     AuthoritativeGroupPlanBinding, CodingGroupInitializationPhase,
@@ -108,11 +110,23 @@ pub async fn create_group_coding_attempt(
     // journal_matches_request 对该值作全等校验（冻结值与重算值不一致即拒绝）。
     let base_branch =
         super::fork_base_branch_from_issue(&app_paths, &repository.path, &project_id, &issue_id)?;
-    let shared_worktree_path = repository
-        .path
-        .join(".worktrees")
-        .join("aria-issues")
-        .join(&issue_id);
+    // REQ-COD-03 路由分流（与单件入口同一模式）：Logical 路由的 worktree 布局
+    // 走仓维 record；issue 维 legacy 布局仅限 Legacy 路由（红线）。
+    let worktree_route = IssueWorktreeRoute::from_target_snapshot(&target_snapshot);
+    let shared_worktree_path = match worktree_route {
+        IssueWorktreeRoute::Repository { .. } => target_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.canonical_path.clone())
+            .unwrap_or_else(|| repository.path.clone())
+            .join(".worktrees")
+            .join("aria-issues")
+            .join(&issue_id),
+        IssueWorktreeRoute::Legacy => repository
+            .path
+            .join(".worktrees")
+            .join("aria-issues")
+            .join(&issue_id),
+    };
     let provider_config_snapshot = match pending_journal.as_ref() {
         Some(journal) => journal.attempt.provider_config_snapshot.clone(),
         None => coding_provider_config_snapshot_for_runtime_binding(
@@ -176,29 +190,23 @@ pub async fn create_group_coding_attempt(
         return Ok(Json(coding_attempt_dto(&coding_store, &existing)?));
     }
 
-    lifecycle
-        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
-            project_id: project_id.clone(),
-            issue_id: issue_id.clone(),
-            repository_id: repository.id.clone(),
-            branch_name,
-            worktree_path: shared_worktree_path,
-            base_branch,
-        })
-        .map_err(product_store_api_error)?;
-    let worktree_lease = lifecycle
-        .try_acquire_issue_worktree_lock(
-            &project_id,
-            &issue_id,
-            &journal.lock_work_item_id,
-            &journal.worktree_lease_id,
-        )
-        .map_err(issue_worktree_active_api_error)?;
+    let worktree_lease = upsert_worktree_and_acquire_lease(
+        &app_paths,
+        &lifecycle,
+        &worktree_route,
+        &project_id,
+        &issue_id,
+        &repository.id,
+        &journal.lock_work_item_id,
+        &journal.worktree_lease_id,
+        &branch_name,
+        &base_branch,
+        shared_worktree_path,
+    )?;
     let replay_already_bound = journal
         .phase
         .has_reached(CodingGroupInitializationPhase::AttemptPersisted)
-        && worktree_lease.worktree.current_lock_owner_id.as_deref()
-            == Some(journal.attempt.id.as_str());
+        && worktree_lease.owner_attempt_id.as_deref() == Some(journal.attempt.id.as_str());
     if !worktree_lease.acquired && !replay_already_bound {
         return Err(coding_group_attempt_incomplete_api_error(
             ProductStoreError::IdentityMismatch {
@@ -231,14 +239,15 @@ pub async fn create_group_coding_attempt(
         crate::web::test_controls::GroupAttemptInitializationCheckpoint::PersistedBeforeBind,
     )?;
 
-    lifecycle
-        .bind_issue_worktree_lock_to_attempt(
-            &project_id,
-            &issue_id,
-            &journal.lock_work_item_id,
-            &attempt.id,
-        )
-        .map_err(product_store_api_error)?;
+    bind_worktree_lock_to_attempt_routed(
+        &lifecycle,
+        &worktree_route,
+        &project_id,
+        &issue_id,
+        &journal.lock_work_item_id,
+        &attempt.id,
+    )
+    .map_err(product_store_api_error)?;
     maybe_interrupt_group_initialization(
         &state,
         crate::web::test_controls::GroupAttemptInitializationCheckpoint::BoundBeforePhaseAdvance,
@@ -751,18 +760,6 @@ fn validate_logical_group_selection(
     }
 }
 
-fn issue_worktree_active_api_error(error: ProductStoreError) -> ApiError {
-    match error {
-        ProductStoreError::Io(message) if message.contains("issue_worktree_active") => {
-            ApiError::runtime(
-                "issue_worktree_active",
-                "another work item is already active on the issue shared worktree",
-                json!({}),
-            )
-        }
-        other => product_store_api_error(other),
-    }
-}
 
 fn group_initialization_api_error(error: ProductStoreError) -> ApiError {
     match error {
@@ -1118,5 +1115,129 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error.code, "repository_routing_inconsistent");
+    }
+
+    #[test]
+    fn group_worktree_layout_repository_route_writes_repo_scoped_record() {
+        // 缺陷 #13 层2（组入口路由分流缺口）：Logical 路由（target_snapshot
+        // 存在）的组 worktree 布局必须写仓维 record，不得写 issue 维 legacy
+        // 布局——后者与运行期 preflight_repo_shared_worktree_absent 契约相反
+        // （恢复 / handoff / 完成门均 legacy_shared_worktree_present fail-closed）。
+        let fixture = split_resolution_fixture();
+        let [api, _] = fixture.targets.as_slice() else {
+            panic!("fixture must register two targets");
+        };
+        let lifecycle = crate::product::lifecycle_store::LifecycleStore::new(fixture.paths.clone());
+        let route = IssueWorktreeRoute::Repository { repository_id: *api };
+
+        let lease = upsert_worktree_and_acquire_lease(
+            &fixture.paths,
+            &lifecycle,
+            &route,
+            &fixture.project_id,
+            &fixture.issue_id,
+            "repository_physical_0001",
+            "work_item_0001",
+            "issue_worktree_lease_layout_test",
+            "aria/issues/issue_0001",
+            "main",
+            fixture.paths.issue_root(&fixture.project_id, &fixture.issue_id).join("wt"),
+        )
+        .expect("repository route worktree layout binding");
+
+        assert!(lease.acquired, "first acquisition on a fresh repo record");
+        let issue_root = fixture
+            .paths
+            .issue_root(&fixture.project_id, &fixture.issue_id);
+        assert!(
+            !issue_root.join("issue-shared-worktree.json").exists(),
+            "repository route must not write the legacy issue-scoped layout"
+        );
+        let repo_record = issue_root
+            .join("shared-worktrees")
+            .join(format!("{}.json", api.0));
+        assert!(
+            repo_record.exists(),
+            "repository route must write the repo-scoped shared worktree record"
+        );
+    }
+
+    #[test]
+    fn group_worktree_layout_repository_route_fails_closed_on_legacy_record() {
+        // 迁移契约 §4.2.6 在组入口同样生效：旧 issue 维 record 存在 →
+        // 422 legacy_shared_worktree_present，绝不静默覆盖、绝不从旧文件推导。
+        let fixture = split_resolution_fixture();
+        let [api, _] = fixture.targets.as_slice() else {
+            panic!("fixture must register two targets");
+        };
+        let lifecycle = crate::product::lifecycle_store::LifecycleStore::new(fixture.paths.clone());
+        lifecycle
+            .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
+                project_id: fixture.project_id.clone(),
+                issue_id: fixture.issue_id.clone(),
+                repository_id: "repository_physical_legacy".to_string(),
+                branch_name: "aria/issues/issue_0001".to_string(),
+                worktree_path: fixture
+                    .paths
+                    .issue_root(&fixture.project_id, &fixture.issue_id)
+                    .join("legacy-wt"),
+                base_branch: "main".to_string(),
+            })
+            .unwrap();
+
+        let error = upsert_worktree_and_acquire_lease(
+            &fixture.paths,
+            &lifecycle,
+            &IssueWorktreeRoute::Repository { repository_id: *api },
+            &fixture.project_id,
+            &fixture.issue_id,
+            "repository_physical_0001",
+            "work_item_0001",
+            "issue_worktree_lease_layout_test",
+            "aria/issues/issue_0001",
+            "main",
+            fixture
+                .paths
+                .issue_root(&fixture.project_id, &fixture.issue_id)
+                .join("wt"),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "legacy_shared_worktree_present");
+    }
+
+    #[test]
+    fn group_worktree_layout_legacy_route_keeps_issue_scoped_record() {
+        // Legacy 路由（无 target_snapshot）回归红线：issue 维布局行为不变。
+        let fixture = split_resolution_fixture();
+        let lifecycle = crate::product::lifecycle_store::LifecycleStore::new(fixture.paths.clone());
+
+        let lease = upsert_worktree_and_acquire_lease(
+            &fixture.paths,
+            &lifecycle,
+            &IssueWorktreeRoute::Legacy,
+            &fixture.project_id,
+            &fixture.issue_id,
+            "repository_physical_legacy",
+            "work_item_0001",
+            "issue_worktree_lease_legacy_test",
+            "aria/issues/issue_0001",
+            "main",
+            fixture
+                .paths
+                .issue_root(&fixture.project_id, &fixture.issue_id)
+                .join("legacy-wt"),
+        )
+        .expect("legacy route worktree layout binding");
+
+        assert!(lease.acquired);
+        assert!(
+            fixture
+                .paths
+                .issue_root(&fixture.project_id, &fixture.issue_id)
+                .join("issue-shared-worktree.json")
+                .exists(),
+            "legacy route keeps the issue-scoped layout"
+        );
     }
 }
