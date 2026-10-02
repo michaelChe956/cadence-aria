@@ -421,9 +421,35 @@ mod g8_delegated_orphan {
             .unwrap();
         assert_eq!(session.provider_start_ledger.len(), 2);
 
-        // 预留已消费后不再重驱（Reserved 判据幂等收口）。
+        // #10 语义（终态失败 run 释放注册，3be1aa49）：重驱 run 以 Message
+        // 终态失败退场后必须释放 manager 注册；无附着的 manager 随
+        // finish_run 自回收出 registry。等释放可观察后再断言后续分诊，
+        // 避免与 run 任务尾部 finish_run 竞态。
+        let release_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let released = restart
+                .workspace_sessions
+                .peek(&session_id)
+                .await
+                .is_none_or(|manager| !manager.is_active_run());
+            if released {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < release_deadline,
+                "failed re-drive run never released its registration"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        // 预留已消费（ProviderStarted）后不再重驱（Reserved 判据幂等收口；
+        // 恰一次仍由下方 ledger 断言保证）。期望值按 #10 新语义重钉：终态
+        // 失败 run 已释放注册，二次 reconcile 无活 run——旧断言 Generating
+        // 依赖的正是泄漏注册造成的 AlreadyActive 幻象（is_active_run 把死
+        // run 误报在途）；durable 现状＝phase Generate＋终态失败回落 status
+        // Open，孤儿判据不再命中，admission 停等人工 → AwaitingHuman。
         let second = worker.reconcile(&restart, PROJECT_ID, ISSUE_ID).await.unwrap();
-        assert_eq!(second, ReconcileOutcome::Generating);
+        assert_eq!(second, ReconcileOutcome::AwaitingHuman);
         let session_after = crate::product::lifecycle_store::LifecycleStore::new(
             inner.paths.clone(),
         )
