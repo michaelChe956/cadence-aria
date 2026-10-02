@@ -119,6 +119,97 @@
         );
     }
 
+    /// Task 3.5 carry ①（BOOT-04/D1，Task 1.8 §五.1 接线）：真实 provider
+    /// turn 必须经 `ProviderToolPolicy` 通道携带结构完整的
+    /// `BootstrapExecutorMarker`——credential（durable Running operation
+    /// 派生）、CodingTargetWrite action、canonical root 与 receipt context
+    /// 四要素在 spawn 输入上可见，供三 adapter 双向守卫复核。接线前
+    /// `tool_policy=None`（marker 只存在于 admission 相位），本测试先红。
+    #[tokio::test]
+    async fn aggregate_recipe_turns_carry_bootstrap_executor_marker() {
+        use crate::cross_cutting::streaming_provider::ToolPolicyIntent;
+        use crate::product::logical_codebase::policy::SessionPolicyAction;
+        use crate::product::logical_codebase::provider_admission_preflight::BootstrapExecutorMarker;
+        use crate::protocol::contracts::AdapterRole;
+
+        let fixture = gateway_aggregate_fixture();
+        fixture
+            .coordinator()
+            .execute(
+                "project_0001",
+                "aggregate_initialization_0001",
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        let inputs = fixture.streaming_inputs();
+        assert_eq!(inputs.len(), 3, "three provider turns must launch");
+        let canonical_root = std::fs::canonicalize(fixture.aggregate_root()).unwrap();
+        for input in &inputs {
+            assert_eq!(input.role, AdapterRole::Executor);
+            let Some(crate::cross_cutting::streaming_provider::ProviderToolPolicy {
+                intent: ToolPolicyIntent::BootstrapExecutorMarker(marker),
+            }) = input.tool_policy.as_ref()
+            else {
+                panic!(
+                    "aggregate recipe turn must carry a BootstrapExecutorMarker, got {:?}",
+                    input.tool_policy
+                );
+            };
+            assert_bootstrap_marker_complete(marker, &canonical_root);
+        }
+    }
+
+    /// marker 四要素共用断言：结构完整、credential 绑定 fixture 的 durable
+    /// operation、action 为写权限、root 为 canonical 聚合根、receipt
+    /// context 携带 operation/命令关联键。
+    fn assert_bootstrap_marker_complete(
+        marker: &crate::product::logical_codebase::provider_admission_preflight::BootstrapExecutorMarker,
+        canonical_root: &std::path::Path,
+    ) {
+        use crate::product::logical_codebase::provider_admission_preflight::BootstrapExecutorMarker;
+        use crate::product::logical_codebase::policy::SessionPolicyAction;
+
+        assert!(marker.incomplete_reason().is_none());
+        assert_eq!(
+            marker.credential().operation_id(),
+            "aggregate_initialization_0001",
+            "marker credential must bind the durable running operation"
+        );
+        assert_eq!(marker.canonical_root(), canonical_root);
+        assert_eq!(
+            marker.receipt_context(),
+            format!(
+                "root-recipe:{}:commands-{}",
+                marker.credential().operation_id(),
+                expected_command_indices(marker.credential().step())
+                    .iter()
+                    .map(usize::to_string)
+                    .collect::<Vec<_>>()
+                    .join("+")
+            ),
+            "receipt context must associate the turn with its root recipe commands"
+        );
+        assert_eq!(
+            marker.action(),
+            SessionPolicyAction::CodingTargetWrite,
+            "bootstrap executor marker action must stay write-permissioned"
+        );
+    }
+
+    /// fixture step → 全局固定命令索引（`root_recipe_command_index` 同源：
+    /// PreCheck=1，RuleAndMcpConfig=2+3，OpenspecAndExamples=4）。
+    fn expected_command_indices(
+        step: crate::product::logical_codebase::aggregate_initialization::AggregateInitializationStepKind,
+    ) -> Vec<usize> {
+        crate::product::logical_codebase::aggregate_initialization_store::root_recipe_command_index()
+            .into_iter()
+            .filter(|(command_step, _, _)| *command_step == step)
+            .map(|(_, index, _)| index)
+            .collect()
+    }
+
     #[test]
     fn aggregate_asset_publisher_only_accepts_aria_aggregate_paths() {
         let publisher = AggregateAssetPublisher::new();

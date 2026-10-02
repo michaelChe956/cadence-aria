@@ -280,6 +280,11 @@ impl BootstrapExecutorMarker {
         &self.credential
     }
 
+    /// marker 携带的写权限 action（guard/审计消费点）。
+    pub fn action(&self) -> crate::product::logical_codebase::policy::SessionPolicyAction {
+        self.action
+    }
+
     /// marker 冻结的 canonical 聚合根（写边界锚点）。
     pub fn canonical_root(&self) -> &Path {
         &self.canonical_root

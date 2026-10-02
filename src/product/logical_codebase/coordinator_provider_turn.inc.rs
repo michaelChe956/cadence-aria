@@ -132,10 +132,60 @@ impl GatewayBackedAggregateProviderTurnDriver {
         }
     }
 
+    /// Task 3.5 carry ①（BOOT-04/D1，Task 1.8 §五.1）：把 admission 凭据升格
+    /// 为 spawn 输入上的 `BootstrapExecutorMarker`——「有写权限的 Executor」
+    /// 在 `ProviderToolPolicy` 通道上的唯一显式载体。receipt context 冻结
+    /// operation 与固定命令索引的关联键（与 receipt auditor 的
+    /// `root_recipe_command_index` 同源）；四要素缺一即 fail-closed，绝不
+    /// 退化为无 marker 的普通 Executor。
+    fn bootstrap_executor_tool_policy(
+        bootstrap: crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
+        operation_id: &str,
+        step: AggregateInitializationStepKind,
+        aggregate_root: &std::path::Path,
+    ) -> Result<
+        crate::cross_cutting::streaming_provider::ProviderToolPolicy,
+        AggregateInitializationError,
+    > {
+        use crate::cross_cutting::streaming_provider::{ProviderToolPolicy, ToolPolicyIntent};
+        use crate::product::logical_codebase::policy::SessionPolicyAction;
+        use crate::product::logical_codebase::provider_admission_preflight::BootstrapExecutorMarker;
+
+        let commands: Vec<usize> =
+            crate::product::logical_codebase::aggregate_initialization_store::root_recipe_command_index()
+                .into_iter()
+                .filter(|(command_step, _, _)| *command_step == step)
+                .map(|(_, index, _)| index)
+                .collect();
+        let receipt_context = format!(
+            "root-recipe:{operation_id}:commands-{}",
+            commands
+                .iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join("+")
+        );
+        let marker = BootstrapExecutorMarker::new(
+            bootstrap,
+            SessionPolicyAction::CodingTargetWrite,
+            aggregate_root.to_path_buf(),
+            receipt_context,
+        )
+        .map_err(|error| AggregateInitializationError::ProviderTurn {
+            step,
+            reason: format!("bootstrap executor marker rejected: {error}"),
+            retryable: false,
+        })?;
+        Ok(ProviderToolPolicy {
+            intent: ToolPolicyIntent::BootstrapExecutorMarker(marker),
+        })
+    }
+
     pub(crate) fn streaming_input(
         &self,
         step: AggregateInitializationStepKind,
         aggregate_root: &std::path::Path,
+        tool_policy: Option<crate::cross_cutting::streaming_provider::ProviderToolPolicy>,
     ) -> crate::cross_cutting::streaming_provider::StreamingProviderInput {
         use crate::cross_cutting::streaming_provider::{
             ProviderPermissionMode, StreamingProviderInput,
@@ -144,7 +194,10 @@ impl GatewayBackedAggregateProviderTurnDriver {
         StreamingProviderInput {
             working_directory: None,
             baseline_tree: None,
-            tool_policy: None,
+            // Task 3.5 carry ①：LC 根 recipe 自举 turn 携带
+            // BootstrapExecutorMarker（Executor 的唯一自举通道）；无凭据的
+            // 调用面保持 `None`（普通 Executor 不得携带任何 tool policy）。
+            tool_policy,
             audit_sink: None,
             provider_type: ProviderType::ClaudeCode,
             role: AdapterRole::Executor,
@@ -283,7 +336,7 @@ impl AggregateProviderTurnDriver for GatewayBackedAggregateProviderTurnDriver {
     async fn run_turn(
         &self,
         project_id: &str,
-        _operation_id: &str,
+        operation_id: &str,
         step: AggregateInitializationStepKind,
         preflight: &AggregatePreflightSnapshot,
         _lc_id: Option<&str>,
@@ -302,6 +355,14 @@ impl AggregateProviderTurnDriver for GatewayBackedAggregateProviderTurnDriver {
             });
         }
         let aggregate_root = std::path::PathBuf::from(&preflight.aggregate_root);
+        // Task 3.5 carry ①：spawn 输入携带 BootstrapExecutorMarker（credential
+        // 副本升格；原凭据仍供下方 admission 相位重核验消费）。
+        let tool_policy = Self::bootstrap_executor_tool_policy(
+            bootstrap.clone(),
+            operation_id,
+            step,
+            &aggregate_root,
+        )?;
         let request = self.launch_request(project_id, &aggregate_root);
         // C4 Task 8 / Task 1.4：真实材料 admission 预检先于 gateway validate——
         // 成员规则缺失、policy 漂移或 capability 不满足时，在此 fail-closed，
@@ -332,7 +393,7 @@ impl AggregateProviderTurnDriver for GatewayBackedAggregateProviderTurnDriver {
                 retryable: true,
             }
         })?;
-        let input = self.streaming_input(step, &aggregate_root);
+        let input = self.streaming_input(step, &aggregate_root, Some(tool_policy));
         let launch = ValidatedStreamingProviderInput::new(input, validated);
         // Task 1.4：复用单仓初始化命令的取消/超时/摘要语义——启动与事件
         // 消费共享同一命令超时预算。

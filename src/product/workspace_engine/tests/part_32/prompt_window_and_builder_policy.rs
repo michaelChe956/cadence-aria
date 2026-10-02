@@ -499,17 +499,37 @@ fn entry_input(entry: &str) -> StreamingProviderInput {
             input
         }
         "aggregate_turn" => {
-            // coordinator_provider_turn.inc.rs:57-77 真实构造：聚合初始化 provider turn
-            // = Executor，需写配置文件，D2 禁带策略（None 是正确值）。
+            // coordinator_provider_turn.inc.rs 真实构造：聚合初始化 provider
+            // turn = Executor + BootstrapExecutorMarker（Task 3.5 carry ①：
+            // 「有写权限的 Executor」唯一自举通道；非 deny 策略，全工具档
+            // 保持——marker 无物理 deny 片段）。
             let fixture = review_gateway_fixture();
             let driver =
                 crate::product::logical_codebase::aggregate_initialization_coordinator::GatewayBackedAggregateProviderTurnDriver::claude_code(
                     fixture.gateway.clone(),
                     "cap_claude_code_1_4_0",
                 );
+            let marker =
+                crate::product::logical_codebase::provider_admission_preflight::BootstrapExecutorMarker::new(
+                    crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential::for_test(
+                        "project_0001",
+                        "logical_codebase_0001",
+                        "aggregate_initialization_0001",
+                        crate::product::logical_codebase::AggregateInitializationStepKind::RuleAndMcpConfig,
+                        "sha256:test-input-digest",
+                        fixture.worktree.clone(),
+                    ),
+                    crate::product::logical_codebase::policy::SessionPolicyAction::CodingTargetWrite,
+                    fixture.worktree.clone(),
+                    "root-recipe:aggregate_initialization_0001:commands-2+3",
+                )
+                .expect("complete bootstrap executor marker");
             driver.streaming_input(
                 crate::product::logical_codebase::AggregateInitializationStepKind::RuleAndMcpConfig,
                 &fixture.worktree,
+                Some(crate::cross_cutting::streaming_provider::ProviderToolPolicy {
+                    intent: crate::cross_cutting::streaming_provider::ToolPolicyIntent::BootstrapExecutorMarker(marker),
+                }),
             )
         }
         other => panic!("unknown matrix entry: {other}"),
@@ -531,7 +551,6 @@ fn builder_factory_applies_role_policy_matrix_per_entry() {
         ("coding_reviewer", AdapterRole::Reviewer, true),
         ("coding_code_reviewer", AdapterRole::Reviewer, true),
         ("coding_group_reviewer", AdapterRole::Reviewer, true),
-        ("aggregate_turn", AdapterRole::Executor, false),
     ] {
         let input = entry_input(entry);
         assert_eq!(input.role, role, "{entry}");
@@ -549,6 +568,21 @@ fn builder_factory_applies_role_policy_matrix_per_entry() {
             );
         }
     }
+
+    // Task 3.5 carry ①：聚合 turn 是唯一例外——Executor 携带
+    // BootstrapExecutorMarker（「有写权限的 Executor」显式自举通道），
+    // 既非 None 也非 deny 策略。
+    let aggregate = entry_input("aggregate_turn");
+    assert_eq!(aggregate.role, AdapterRole::Executor);
+    assert!(
+        matches!(
+            aggregate.tool_policy,
+            Some(ProviderToolPolicy {
+                intent: PolicyIntent::BootstrapExecutorMarker(_)
+            })
+        ),
+        "aggregate turn must carry exactly a BootstrapExecutorMarker"
+    );
 }
 
 /// F3 Task 4.1 零变化回归：Coder 与聚合初始化 provider turn 保持既有全工具
@@ -573,18 +607,28 @@ fn coder_and_aggregate_executor_keep_existing_full_tool_launch() {
         "Coder must keep the existing full-tool sandbox"
     );
 
-    // 聚合初始化同 Executor 档：经 coordinator_provider_turn.inc.rs:57-77 真实
-    // 构造路径断言（同 Task 1.2 builder 全集断言），同样禁带策略、维持全工具档；
-    // 该 input 是 Claude Code 档，不喂 codex_launch_params（类型不匹配的弱断言）。
+    // 聚合初始化同 Executor 档：经 coordinator_provider_turn.inc.rs 真实
+    // 构造路径断言（同 Task 1.2 builder 全集断言）。Task 3.5 carry ① 起
+    // 携带 BootstrapExecutorMarker（唯一自举通道）——marker 无物理 deny
+    // 片段，全工具档（无 denylist）保持；该 input 是 Claude Code 档，不喂
+    // codex_launch_params（类型不匹配的弱断言）。
     let aggregate = entry_input("aggregate_turn");
     assert_eq!(aggregate.provider_type, ProviderType::ClaudeCode);
     assert_eq!(aggregate.role, AdapterRole::Executor);
-    assert_eq!(aggregate.tool_policy, None);
+    assert!(
+        matches!(
+            aggregate.tool_policy,
+            Some(crate::cross_cutting::streaming_provider::ProviderToolPolicy {
+                intent: crate::cross_cutting::streaming_provider::ToolPolicyIntent::BootstrapExecutorMarker(_)
+            })
+        ),
+        "aggregate turn must carry a complete BootstrapExecutorMarker"
+    );
     assert_eq!(aggregate.permission_mode, ProviderPermissionMode::Auto);
 }
 
 /// 断言 role 与 tool_policy 成对一致（D2：作者/评审必带 DenyFileWriteBuiltins，
-/// Executor/Coder/聚合初始化禁带）。
+/// Executor/Coder 禁带；聚合初始化的 marker 例外由各测试单独断言）。
 fn assert_role_policy_pair(
     input: &StreamingProviderInput,
     entry: &str,
@@ -900,8 +944,24 @@ async fn workspace_builder_family_pairs_role_with_tool_policy() {
         ));
     }
 
-    // —— 聚合初始化 provider turn（gateway validated，需写配置文件，禁带）——
-    covered.push(("aggregate_turn".to_string(), entry_input("aggregate_turn")));
+    // —— 聚合初始化 provider turn（gateway validated，需写配置文件）——
+    // Task 3.5 carry ①：携带 BootstrapExecutorMarker（Executor 唯一自举
+    // 通道），先于 deny 成对表单独断言。
+    let aggregate_input = entry_input("aggregate_turn");
+    assert_eq!(
+        aggregate_input.role,
+        AdapterRole::Executor,
+        "aggregate_turn"
+    );
+    assert!(
+        matches!(
+            aggregate_input.tool_policy,
+            Some(crate::cross_cutting::streaming_provider::ProviderToolPolicy {
+                intent: crate::cross_cutting::streaming_provider::ToolPolicyIntent::BootstrapExecutorMarker(_)
+            })
+        ),
+        "aggregate_turn must carry a complete BootstrapExecutorMarker"
+    );
 
     let expected = [
         ("sc_author", AdapterRole::Orchestrator, true),
@@ -958,7 +1018,8 @@ async fn workspace_builder_family_pairs_role_with_tool_policy() {
             AdapterRole::Handoff,
             false,
         ),
-        ("aggregate_turn", AdapterRole::Executor, false),
+        // aggregate_turn 携带 BootstrapExecutorMarker（Task 3.5 carry ①），
+        // 由 builder_matrix 测试单独断言，不入 deny 成对表。
     ];
     assert_eq!(
         covered.len(),
