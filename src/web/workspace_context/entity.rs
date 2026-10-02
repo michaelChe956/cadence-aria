@@ -289,8 +289,25 @@ fn format_linked_spec_context(
 pub(super) fn repository_for(
     app_paths: &ProductAppPaths,
     project_id: &str,
+    issue_id: &str,
     repository_id: &str,
 ) -> Result<RepositoryRecord, ProductStoreError> {
+    // v1.3（缺陷 #6 同族第五点，Task 3.5 E2E 现场 session_0005 child context）：
+    // issue 属非 legacy LC 时物理仓在 per-LC 子树，先按 member 权威记录匹配；
+    // 无匹配回落 legacy list/find（原语义不变）。
+    let lc_id = crate::product::logical_codebase::resolve_issue_logical_codebase_id(
+        app_paths,
+        project_id,
+        issue_id,
+    )?;
+    let store = crate::product::repository_store::RepositoryStore::new(app_paths.clone());
+    if let Some(record) = store.resolve_physical_repository_in_issue_codebase(
+        project_id,
+        lc_id.as_deref(),
+        repository_id,
+    )? {
+        return Ok(record);
+    }
     let project = ProjectStore::new(app_paths.clone()).get(project_id)?;
     RepositoryStore::for_project(app_paths.clone(), &project)
         .list(project_id)?

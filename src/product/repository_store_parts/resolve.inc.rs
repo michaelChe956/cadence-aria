@@ -34,6 +34,45 @@ impl RepositoryStore {
         }
     }
 
+    /// v1.3（缺陷 #6 同族，Task 3.5 E2E 现场）：issue 属非 legacy LC 时，按
+    /// member 权威记录的 `physical_repository_id` 匹配解析物理仓——新 LC 登记
+    /// 不写 legacy repos.json 投影，legacy scope list/find 必 NotFound（plan
+    /// 基线树、child workspace context 两现场）。无匹配/非 LC/legacy 返回
+    /// `None`，由调用方回落既有 legacy 语义（原路径字节级不变）。
+    pub fn resolve_physical_repository_in_issue_codebase(
+        &self,
+        project_id: &str,
+        lc_id: Option<&str>,
+        physical_repo_id: &str,
+    ) -> Result<Option<RepositoryRecord>, ProductStoreError> {
+        let Some(lc) = lc_id else {
+            return Ok(None);
+        };
+        if lc == crate::product::logical_codebase::legacy_logical_codebase_id(project_id) {
+            return Ok(None);
+        }
+        let authority = LogicalCodebaseStore::for_lc(self.paths.clone(), lc);
+        let Some(manifest) = authority.load_manifest(project_id)? else {
+            return Ok(None);
+        };
+        for member_id in &manifest.member_ids {
+            let Ok(Some(member)) = authority.load_member(project_id, *member_id) else {
+                continue;
+            };
+            if member.physical_repository_id != physical_repo_id {
+                continue;
+            }
+            if let Ok((_, _, repository)) = self.resolve_logical_repository_for_issue_codebase(
+                project_id,
+                lc_id,
+                *member_id,
+            ) {
+                return Ok(Some(repository));
+            }
+        }
+        Ok(None)
+    }
+
     fn resolve_logical_repository_in_lc(
         &self,
         project_id: &str,

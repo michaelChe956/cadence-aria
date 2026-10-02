@@ -203,25 +203,13 @@ fn plan_baseline_repository_path(
                 paths.clone(),
                 lc,
             );
-            if let Ok(Some(manifest)) = authority.load_manifest(project_id) {
-                for member_id in &manifest.member_ids {
-                    if let Ok(Some(member)) = authority.load_member(project_id, *member_id) {
-                        if member.physical_repository_id == repo_id {
-                            let store = crate::product::repository_store::RepositoryStore::new(
-                                paths.clone(),
-                            );
-                            if let Ok((_, checkout, _)) = store
-                                .resolve_logical_repository_for_issue_codebase(
-                                    project_id,
-                                    lc_id.as_deref(),
-                                    *member_id,
-                                )
-                            {
-                                return Ok(checkout.canonical_path);
-                            }
-                        }
-                    }
-                }
+            let store = crate::product::repository_store::RepositoryStore::new(paths.clone());
+            if let Ok(Some(record)) = store.resolve_physical_repository_in_issue_codebase(
+                project_id,
+                lc_id.as_deref(),
+                repo_id,
+            ) {
+                return Ok(record.path);
             }
         }
     }

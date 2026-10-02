@@ -174,7 +174,7 @@ async fn build_workspace_context_message(
                 resolved.cwd.display().to_string(),
             )
         } else {
-            let repository = repository_for(app_paths, &session.project_id, &entity.repository_id)?;
+            let repository = repository_for(app_paths, &session.project_id, &session.issue_id, &entity.repository_id)?;
             (
                 repository.name,
                 repository.id,
