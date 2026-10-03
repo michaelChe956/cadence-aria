@@ -22,6 +22,7 @@ pub mod pointer_publication_coordinator;
 pub mod policy;
 pub mod production_policy_resolvers;
 pub mod provider_admission_preflight;
+pub mod provider_capability_probe;
 pub mod provider_capability_store;
 pub mod provider_gateway;
 pub mod provider_projection;
@@ -120,6 +121,7 @@ pub use provider_admission_preflight::{
     BootstrapActionKind, LogicalCodebaseProviderAdmissionPreflight, ProviderAdmissionError,
     ProviderAdmissionPreflightResult, ProviderRuleReference,
 };
+pub use provider_capability_probe::{ProviderCapabilityProbeError, ProviderCapabilityProbeService};
 pub use provider_capability_store::{
     CapabilityEvidence, ProviderActionCapability, ProviderActionMatrix, ProviderCapabilityRecord,
     ProviderCapabilityStore, RootRecipeEvidence,
