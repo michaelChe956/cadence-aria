@@ -552,10 +552,11 @@ async fn run_probe_script(
     Ok(attempts)
 }
 fn push_mount(argv: &mut Vec<OsString>, flag: &str, source: &Path) {
-    let mount = source.as_os_str().to_str().expect("utf8 mount path");
-    for value in [flag, mount, mount] {
-        argv.push(OsString::from(value));
-    }
+    // 非 UTF-8 路径不做 panic:argv 本就是 OsString,挂载源原样直传
+    // (flag/dest 与源同值)。
+    argv.push(OsString::from(flag));
+    argv.push(source.as_os_str().to_os_string());
+    argv.push(source.as_os_str().to_os_string());
 }
 
 /// plan 形状校验:mode 与 target 一致、路径绝对且存在、cwd 与 target 分离。
