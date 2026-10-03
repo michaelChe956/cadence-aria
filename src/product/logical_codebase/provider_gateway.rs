@@ -71,6 +71,11 @@ pub struct ValidatedSessionLaunchPolicy {
     /// validate 未消费发布链(自举桩/RootRecipe 相位/未注入只读事实源),
     /// spawn 前复验跳过正文重读。
     policy_locator: Option<PolicyLocatorDigests>,
+    /// Task 1b:prepare 阶段冻结的 run-bound launch audit 上下文。`None` =
+    /// 未经 `prepare_*_launch` 的存量构造(1b 之前/测试 fixture);`Some` =
+    /// 已在 prepare 前绑定 run-bound sink 的 prepared launch(gateway 同步
+    /// 分发与 sync bridge 消费)。
+    launch_audit: Option<ProviderLaunchAuditContext>,
 }
 
 /// #8 发布链在 validate 时点冻结的 digest 事实(spawn 前复验重读比对)。
@@ -78,6 +83,30 @@ pub struct ValidatedSessionLaunchPolicy {
 pub(crate) struct PolicyLocatorDigests {
     pub(crate) policy_digest: String,
     pub(crate) rule_digest: String,
+}
+
+/// Task 1b 冻结接口「准备与同步」:LC launch 的 run-bound audit 上下文。
+///
+/// `prepare_*_launch` 在 validate 之后、启动之前把它冻结进 validated policy:
+/// 所有 LC 角色(含无通用 tool_policy 的 Coder/Kimi)都先绑定 run-bound sink
+/// 再启动,统一写 launch audit。`audit_sink` 是 `LifecycleStore` 等生产 sink;
+/// `(workspace_session_id, role_run_seq)` 与 durable tool-policy 审计分区的
+/// 文件 key 同源。
+#[derive(Clone)]
+pub struct ProviderLaunchAuditContext {
+    pub workspace_session_id: String,
+    pub role_run_seq: u64,
+    pub audit_sink: Arc<dyn crate::cross_cutting::tool_policy_audit::ToolPolicyAuditSink>,
+}
+
+impl std::fmt::Debug for ProviderLaunchAuditContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderLaunchAuditContext")
+            .field("workspace_session_id", &self.workspace_session_id)
+            .field("role_run_seq", &self.role_run_seq)
+            .field("audit_sink", &"<run-bound tool policy audit sink>")
+            .finish()
+    }
 }
 
 /// Task 3b:early action 资格判定的返回面——只携带两枚不可伪造的引用
@@ -117,6 +146,19 @@ impl ValidatedSessionLaunchPolicy {
     /// 是否 root-recipe 相位(crate 内观测面;普通 validate 恒 false)。
     pub(crate) fn is_root_recipe_phase(&self) -> bool {
         matches!(self.phase, ValidatedSessionLaunchPhase::RootRecipe(_))
+    }
+
+    /// Task 1b:冻结 prepare 阶段绑定的 run-bound launch audit 上下文(仅供
+    /// gateway 的 `prepare_*_launch` 使用,模块外不可构造 prepared policy)。
+    pub(crate) fn with_launch_audit(mut self, context: ProviderLaunchAuditContext) -> Self {
+        self.launch_audit = Some(context);
+        self
+    }
+
+    /// prepared launch 的 audit 上下文(sync bridge 消费 sink/身份;未 prepare
+    /// 的存量构造为 `None`)。
+    pub(crate) fn launch_audit(&self) -> Option<&ProviderLaunchAuditContext> {
+        self.launch_audit.as_ref()
     }
 }
 
@@ -992,6 +1034,7 @@ impl LogicalCodebaseProviderGateway {
             capability_snapshot_ref: capability.capability_snapshot_ref,
             phase,
             policy_locator,
+            launch_audit: None,
         })
     }
 
@@ -1120,6 +1163,11 @@ impl LogicalCodebaseProviderGateway {
     /// 独立 `working_directory`,否则回填 `worktree_path`)重新复验政策指纹、
     /// canonical cwd/git-dir/worktree identity、provider 可用性与 resume 能力。
     /// 任一复验失败都发生在真实 adapter run 之前(fail-closed)。
+    ///
+    /// Task 1b:经 `prepare_sync_launch` 绑定 run-bound audit 上下文的
+    /// prepared launch 只调用 validated trait(`run_validated`——生产侧为
+    /// `GatewaySyncProvider` streaming→sync bridge);未经 prepare 的存量构造
+    /// (既有测试 fixture)暂走原 raw `run`,Task 7 收口为 validated-only。
     pub fn run_sync(
         &self,
         launch: ValidatedAdapterInput,
@@ -1138,10 +1186,20 @@ impl LogicalCodebaseProviderGateway {
             return Err(error);
         }
         let policy_digest = validated.envelope().policy_digest.clone();
-        let output = self
-            .sync_adapter
-            .run(&input)
-            .map_err(ProviderGatewayError::Adapter)?;
+        let config_artifact_ref = validated.envelope().config_artifact_ref.clone();
+        let prepared_launch = validated.launch_audit().is_some();
+        let output = if prepared_launch {
+            // prepared launch(1b 入口):validated trait——生产 sync_adapter 为
+            // LC sync bridge,只经 streaming `start_validated` 桥接。
+            let prepared = ValidatedAdapterInput::new(input, validated);
+            self.sync_adapter
+                .run_validated(prepared)
+                .map_err(ProviderGatewayError::Adapter)?
+        } else {
+            self.sync_adapter
+                .run(&input)
+                .map_err(ProviderGatewayError::Adapter)?
+        };
         // Task 11 审计聚合:同 start_streaming,sources/argv 为空(无真实注入源),config
         // digest 由 envelope 冻结的 config_artifact_ref 重算。
         let ConfigSourceAudit {
@@ -1150,7 +1208,7 @@ impl LogicalCodebaseProviderGateway {
             ..
         } = ConfigSourceAudit::from_launch(
             &[],
-            &validated.envelope().config_artifact_ref,
+            &config_artifact_ref,
             ConfigSourceProvenance::detect_from_setting_sources(&[]),
         );
         self.audit.record(
@@ -1160,6 +1218,23 @@ impl LogicalCodebaseProviderGateway {
             argv,
         );
         Ok(output)
+    }
+
+    /// Task 1b 冻结接口「准备与同步」:同步栈的 prepare 入口。validate 请求并
+    /// 把 `ProviderLaunchAuditContext` 冻结进 validated policy——所有 LC 角色
+    /// 在 prepare 前绑定 run-bound sink(含无通用 tool_policy 的 Coder/Kimi,
+    /// 统一写 launch audit);`run_sync` 据此分流到 validated trait。
+    pub fn prepare_sync_launch(
+        &self,
+        input: crate::protocol::contracts::AdapterInput,
+        request: SessionLaunchRequest,
+        context: ProviderLaunchAuditContext,
+    ) -> Result<ValidatedAdapterInput, ProviderGatewayError> {
+        let validated = self.validate(request)?;
+        Ok(ValidatedAdapterInput::new(
+            input,
+            validated.with_launch_audit(context),
+        ))
     }
 
     /// spawn 前完整复验(B-1)。逐维度比对 envelope 冻结值与 spawn 时点的真实值,

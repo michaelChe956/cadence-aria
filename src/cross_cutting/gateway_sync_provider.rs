@@ -42,19 +42,344 @@ impl ProviderAdapter for GatewaySyncProvider {
         ))
     }
 
-    /// 段① RED 占位:validated 桥接行为由 `lcg_t01_sync_bridge_*` 测试锁定,
-    /// 绿阶段实现专用 OS 线程 + 自有 Tokio runtime + completion/sentinel parser。
+    /// validated 同步桥接:把 `ValidatedAdapterInput` 适配为 streaming
+    /// `start_validated` 并驱动到终态,产出 `AdapterOutput`。
+    ///
+    /// - **专用 OS 线程 + 自有 current-thread runtime**:本方法在调用方线程
+    ///   同步阻塞(join,与既有 `ProviderAdapter::run` 阻塞语义一致),但
+    ///   绝不嵌套调用方线程的 `block_on`;
+    /// - **run-bound sink**:prepared launch 冻结的 `ProviderLaunchAuditContext`
+    ///   在此物化为 `RoleRunBoundAuditSink` 注入 streaming input(无通用
+    ///   tool_policy 的角色同样绑定);
+    /// - **工具策略按角色矩阵派生**(与 legacy bridge 同源):策略角色带
+    ///   `DenyFileWriteBuiltins`,Executor/Handoff 为 `None`;
+    /// - **不借 streaming fresh 推导 resume**:同步 input 无 resume id,
+    ///   桥接恒 fresh;
+    /// - 终态映射:Completed → structured output 经现有 sentinel parser
+    ///   (`parse_last_structured_output`,与 `CliProviderAdapter` 同源)提取;
+    ///   Failed/ProtocolError/流提前关闭/交互请求 → 既有错误;超时 →
+    ///   `ProviderAdapterError::timeout`;PermissionTimeout → 超时族错误;
+    ///   malformed structured output → parse/incompatible 错误。不用空
+    ///   JSON/exit 0 兜底。
     fn run_validated(
         &self,
-        _launch: ValidatedAdapterInput,
+        launch: ValidatedAdapterInput,
     ) -> Result<AdapterOutput, ProviderAdapterError> {
-        Err(ProviderAdapterError::execution_failed(
-            None,
-            String::new(),
-            "gateway sync bridge validated run is not implemented yet",
-            0,
-        ))
+        let (input, policy) = launch.into_parts();
+        let provider_name = provider_name_for_type(input.provider_type.clone())?;
+        let adapter = self.registry.get(&provider_name).ok_or_else(|| {
+            ProviderAdapterError::provider_unavailable(format!(
+                "gateway sync bridge: no streaming adapter registered for {provider_name:?}"
+            ))
+        })?;
+        let streaming_input = bridge_streaming_input(&input, policy.launch_audit());
+        let validated_streaming =
+            crate::cross_cutting::session_launch::ValidatedStreamingProviderInput::new(
+                streaming_input,
+                policy,
+            );
+        let timeout = std::time::Duration::from_secs(input.timeout.max(1));
+
+        // 专用 OS 线程 + 自有 current-thread runtime:与调用方 runtime 完全
+        // 隔离,join 前不触碰任何 ambient handle。
+        let worker = std::thread::Builder::new()
+            .name("lc-gateway-sync-bridge".to_string())
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|error| {
+                        ProviderAdapterError::execution_failed(
+                            None,
+                            String::new(),
+                            format!("gateway sync bridge runtime build failed: {error}"),
+                            0,
+                        )
+                    })?;
+                runtime.block_on(drive_validated_session(
+                    adapter,
+                    validated_streaming,
+                    timeout,
+                ))
+            })
+            .map_err(|error| {
+                ProviderAdapterError::execution_failed(
+                    None,
+                    String::new(),
+                    format!("gateway sync bridge spawn failed: {error}"),
+                    0,
+                )
+            })?;
+        worker.join().map_err(|_| {
+            ProviderAdapterError::execution_failed(
+                None,
+                String::new(),
+                "gateway sync bridge worker panicked",
+                0,
+            )
+        })?
     }
+}
+
+/// 同步 `AdapterInput` → streaming input 桥接(与 legacy bridge 的字段映射
+/// 同源):cwd 独立透传,`working_dir` 仍是 target;prepared launch 的 audit
+/// 上下文物化为 run-bound sink;工具策略按角色矩阵派生;恒 fresh。
+fn bridge_streaming_input(
+    input: &AdapterInput,
+    launch_audit: Option<
+        &crate::product::logical_codebase::provider_gateway::ProviderLaunchAuditContext,
+    >,
+) -> crate::cross_cutting::streaming_provider::StreamingProviderInput {
+    use crate::cross_cutting::streaming_provider::{
+        ProviderPermissionMode, ProviderToolPolicy, StreamingProviderInput,
+    };
+
+    let working_dir = input
+        .worktree_path
+        .as_deref()
+        .map(std::path::PathBuf::from)
+        .or_else(|| input.working_directory.clone())
+        .unwrap_or_else(||
+            // 与 legacy bridge 同语义:无 target 时回填进程 cwd。
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")));
+    let tool_policy = match input.role {
+        crate::protocol::contracts::AdapterRole::Orchestrator
+        | crate::protocol::contracts::AdapterRole::WorkItemSplitter
+        | crate::protocol::contracts::AdapterRole::Reviewer => {
+            Some(ProviderToolPolicy::deny_file_write_builtins())
+        }
+        crate::protocol::contracts::AdapterRole::Executor
+        | crate::protocol::contracts::AdapterRole::Handoff => None,
+    };
+    let (workspace_session_id, audit_sink) = match launch_audit {
+        Some(context) => (
+            Some(context.workspace_session_id.clone()),
+            Some(
+                crate::cross_cutting::tool_policy_audit::RoleRunBoundAuditSink::new(
+                    std::sync::Arc::clone(&context.audit_sink),
+                    context.workspace_session_id.clone(),
+                    context.role_run_seq,
+                )
+                .into_sink(),
+            ),
+        ),
+        None => (None, None),
+    };
+    StreamingProviderInput {
+        provider_type: input.provider_type.clone(),
+        role: input.role.clone(),
+        prompt: input.prompt.clone(),
+        working_dir,
+        working_directory: input.working_directory.clone(),
+        workspace_session_id,
+        // 同步栈不携带 resume id;不借 streaming fresh 推导 resume。
+        resume_provider_session_id: None,
+        permission_mode: ProviderPermissionMode::Auto,
+        tool_policy,
+        audit_sink,
+        structured_output_contract: None,
+        env_vars: std::collections::BTreeMap::new(),
+        timeout_secs: input.timeout,
+        baseline_tree: None,
+    }
+}
+
+/// 协议 `ProviderType` → registry `ProviderName`(Fail 一律 fail-closed,
+/// 不回退其它 provider)。
+fn provider_name_for_type(
+    provider_type: crate::protocol::contracts::ProviderType,
+) -> Result<crate::product::models::ProviderName, ProviderAdapterError> {
+    use crate::product::models::ProviderName;
+    use crate::protocol::contracts::ProviderType;
+    match provider_type {
+        ProviderType::ClaudeCode => Ok(ProviderName::ClaudeCode),
+        ProviderType::Codex => Ok(ProviderName::Codex),
+        ProviderType::Pi => Ok(ProviderName::Pi),
+        ProviderType::KimiCode => Ok(ProviderName::KimiCode),
+        other => Err(ProviderAdapterError::provider_unavailable(format!(
+            "gateway sync bridge: provider {other:?} has no real streaming adapter"
+        ))),
+    }
+}
+
+/// 在 bridge 专用 runtime 内驱动 validated 会话到终态并折叠为
+/// `AdapterOutput`。事件消费与 coordinator `consume_turn` 同族,但终态映射
+/// 沿 `ProviderAdapterError` 既有错误(同步栈契约)。
+async fn drive_validated_session(
+    adapter: std::sync::Arc<dyn crate::cross_cutting::streaming_provider::StreamingProviderAdapter>,
+    validated: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+    timeout: std::time::Duration,
+) -> Result<AdapterOutput, ProviderAdapterError> {
+    use crate::cross_cutting::streaming_provider::{
+        ProviderCommand, ProviderCompletion, ProviderEvent, ProviderStatus,
+    };
+    use crate::cross_cutting::structured_output::parse_last_structured_output;
+
+    let started = std::time::Instant::now();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let mut session = adapter.start_validated(validated, cancel.clone()).await?;
+    let mut stdout = String::new();
+    let deadline = tokio::time::sleep(timeout);
+    tokio::pin!(deadline);
+
+    let finish_output = |full_output: String,
+                         completion: ProviderCompletion|
+     -> Result<AdapterOutput, ProviderAdapterError> {
+        let structured_output =
+            if let crate::cross_cutting::structured_output::StructuredOutputState::Parsed(value) =
+                completion.structured_output
+            {
+                value
+            } else {
+                // 现有 sentinel parser(与 CliProviderAdapter 同源):缺失
+                // sentinel → parse_error,不用空 JSON 兜底。
+                parse_last_structured_output(&full_output)
+                    .map_err(|error| {
+                        ProviderAdapterError::parse_error(
+                            format!("structured output sentinel parse failed: {}", error.message),
+                            full_output.clone(),
+                            String::new(),
+                        )
+                    })?
+                    .map(|(_, value)| value)
+                    .ok_or_else(|| {
+                        ProviderAdapterError::parse_error(
+                            "missing structured output sentinel",
+                            full_output.clone(),
+                            String::new(),
+                        )
+                    })?
+            };
+        Ok(AdapterOutput {
+            exit_code: Some(0),
+            stdout: full_output,
+            stderr: String::new(),
+            structured_output: Some(structured_output),
+            files_modified: Vec::new(),
+            duration_ms: started.elapsed().as_millis() as u64,
+            timeout_status: crate::protocol::contracts::TimeoutStatus::NotTimedOut,
+        })
+    };
+
+    loop {
+        let event = tokio::select! {
+            _ = &mut deadline => {
+                best_effort_abort(&mut session).await;
+                return Err(ProviderAdapterError::timeout(
+                    std::mem::take(&mut stdout),
+                    String::new(),
+                    started.elapsed().as_millis() as u64,
+                ));
+            }
+            _ = cancel.cancelled() => {
+                best_effort_abort(&mut session).await;
+                return Err(ProviderAdapterError::execution_failed(
+                    None,
+                    std::mem::take(&mut stdout),
+                    "gateway sync bridge session cancelled".to_string(),
+                    started.elapsed().as_millis() as u64,
+                ));
+            }
+            event = session.events.recv() => event,
+        };
+        match event {
+            Some(ProviderEvent::TextDelta { content }) => stdout.push_str(&content),
+            Some(ProviderEvent::Execution(execution)) => {
+                if let Some(output) = execution.output {
+                    stdout.push_str(&output);
+                }
+            }
+            Some(ProviderEvent::ToolResult(result)) => stdout.push_str(&result.output),
+            Some(ProviderEvent::Completed(completion)) => {
+                // completion.full_output 是 adapter 的权威全文(sentinel 所在);
+                // 仅有增量流的 adapter(full_output 为空)回退累计增量。
+                let full_output = if completion.full_output.is_empty() {
+                    stdout
+                } else {
+                    completion.full_output.clone()
+                };
+                return finish_output(full_output, completion);
+            }
+            Some(ProviderEvent::Failed { message }) => {
+                return Err(ProviderAdapterError::execution_failed(
+                    None,
+                    std::mem::take(&mut stdout),
+                    format!("provider reported failure: {message}"),
+                    started.elapsed().as_millis() as u64,
+                ));
+            }
+            Some(ProviderEvent::ProtocolError { code, message, .. }) => {
+                return Err(ProviderAdapterError::parse_error(
+                    format!("provider protocol error {code}: {message}"),
+                    std::mem::take(&mut stdout),
+                    String::new(),
+                ));
+            }
+            Some(ProviderEvent::PermissionTimeout { permission_id }) => {
+                return Err(ProviderAdapterError::timeout_with_details(
+                    format!("permission request {permission_id} timed out"),
+                    std::mem::take(&mut stdout),
+                    String::new(),
+                    started.elapsed().as_millis() as u64,
+                ));
+            }
+            Some(ProviderEvent::StatusChanged(ProviderStatus::Failed)) => {
+                return Err(ProviderAdapterError::execution_failed(
+                    None,
+                    std::mem::take(&mut stdout),
+                    "provider status failed".to_string(),
+                    started.elapsed().as_millis() as u64,
+                ));
+            }
+            Some(ProviderEvent::StatusChanged(ProviderStatus::Aborted)) => {
+                return Err(ProviderAdapterError::execution_failed(
+                    None,
+                    std::mem::take(&mut stdout),
+                    "provider status aborted".to_string(),
+                    started.elapsed().as_millis() as u64,
+                ));
+            }
+            // 同步桥无法承载交互请求:fail-closed,尽力发出 Abort。
+            Some(ProviderEvent::PermissionRequest(_)) | Some(ProviderEvent::ChoiceRequest(_)) => {
+                best_effort_abort(&mut session).await;
+                return Err(ProviderAdapterError::execution_failed(
+                    None,
+                    std::mem::take(&mut stdout),
+                    "provider interaction required; sync bridge cannot serve requests".to_string(),
+                    started.elapsed().as_millis() as u64,
+                ));
+            }
+            Some(
+                ProviderEvent::StatusChanged(_)
+                | ProviderEvent::ToolCall(_)
+                | ProviderEvent::UsageReport(_)
+                | ProviderEvent::ToolPolicyDecision(_)
+                | ProviderEvent::ToolPolicyWarning(_)
+                | ProviderEvent::ToolPolicyTerminated(_),
+            ) => {}
+            None => {
+                return Err(ProviderAdapterError::execution_failed(
+                    None,
+                    std::mem::take(&mut stdout),
+                    "provider event stream closed before completion".to_string(),
+                    started.elapsed().as_millis() as u64,
+                ));
+            }
+        }
+    }
+}
+
+/// 尽力向会话发送 Abort(发送失败/超时静默——错误语义由返回的终态错误承载)。
+async fn best_effort_abort(
+    session: &mut crate::cross_cutting::streaming_provider::ProviderSession,
+) {
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_millis(200),
+        session
+            .commands
+            .send(crate::cross_cutting::streaming_provider::ProviderCommand::Abort),
+    )
+    .await;
 }
 
 #[cfg(test)]
@@ -421,7 +746,7 @@ mod tests {
 
         let adapter = BridgeCountingStreamingAdapter::new(
             Duration::from_millis(30),
-            "工作项拆分结果\n<ARIA_STRUCTURED_OUTPUT>{\"work_items\":[]}</ARIA_STRUCTURED_OUTPUT>"
+            "工作项拆分结果\n<ARIA_STRUCTURED_OUTPUT nonce=\"bridge00001\">{\"nonce\":\"bridge00001\",\"work_items\":[]}</ARIA_STRUCTURED_OUTPUT>"
                 .to_string(),
         );
         let mut registry = ProviderRegistry::new();
@@ -474,7 +799,8 @@ mod tests {
 
         let adapter = BridgeCountingStreamingAdapter::new(
             Duration::from_millis(400),
-            "<ARIA_STRUCTURED_OUTPUT>{\"work_items\":[]}</ARIA_STRUCTURED_OUTPUT>".to_string(),
+            "<ARIA_STRUCTURED_OUTPUT nonce=\"bridge00002\">{\"nonce\":\"bridge00002\",\"work_items\":[]}</ARIA_STRUCTURED_OUTPUT>"
+                .to_string(),
         );
         let mut registry = ProviderRegistry::new();
         registry.register(ProviderName::ClaudeCode, adapter.clone());

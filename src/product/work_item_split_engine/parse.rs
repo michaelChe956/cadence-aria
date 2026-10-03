@@ -634,11 +634,35 @@ pub struct SplitProviderRunSnapshot {
     pub status: String,
 }
 
+/// split run 身份分区名(handle 定位的 durable 存储)。
+const WORK_ITEM_SPLIT_PROVIDER_RUN_PARTITION: &str = "work-item-split-runs";
+
+fn io_error(error: impl std::fmt::Display) -> crate::product::json_store::ProductStoreError {
+    crate::product::json_store::ProductStoreError::Io(error.to_string())
+}
+
 impl LifecycleStore {
-    /// 开始一次 split provider run:分配 `provider-runs/` 下的 run 目录与
-    /// run-bound `role_run_seq`,写入 status=running 的 run 记录并返回句柄。
-    /// 后续的 run-bound audit sink 以 `(workspace_session_id, role_run_seq)`
-    /// 绑定,provider_start 恰为审计文件首行。
+    /// split run 分区根:按 handle 冻结的 `(workspace_session_id,
+    /// role_run_seq)` 定位——complete/fail 仅凭 handle 即可收口,不需要
+    /// 调用方重复传 project/issue(begin 已把它们写入 run.json 溯源)。
+    fn work_item_split_provider_run_dir(
+        &self,
+        handle: &WorkItemSplitProviderRunHandle,
+    ) -> Result<std::path::PathBuf, crate::product::json_store::ProductStoreError> {
+        crate::product::json_store::validate_relative_id(&handle.workspace_session_id)
+            .map_err(io_error)?;
+        Ok(self
+            .app_paths()
+            .root()
+            .join(WORK_ITEM_SPLIT_PROVIDER_RUN_PARTITION)
+            .join(&handle.workspace_session_id)
+            .join(handle.role_run_seq.to_string()))
+    }
+
+    /// 开始一次 split provider run:分配 run-bound `role_run_seq`(与
+    /// tool-policy 审计分区同一分配器),写入 status=running 的 run 记录并
+    /// 返回句柄。后续 run-bound audit sink 以 `(workspace_session_id,
+    /// role_run_seq)` 绑定,provider_start 恰为审计文件首行。
     pub fn begin_work_item_split_provider_run(
         &self,
         project_id: &str,
@@ -646,14 +670,39 @@ impl LifecycleStore {
         provider: &ProviderName,
         workspace_session_id: &str,
     ) -> Result<WorkItemSplitProviderRunHandle, crate::product::json_store::ProductStoreError> {
-        let _ = (project_id, issue_id, provider, workspace_session_id);
-        // 段① RED 占位:begin/complete/fail 由 lcg_t01 split run handle 测试锁定。
-        Err(crate::product::json_store::ProductStoreError::Io(
-            "begin_work_item_split_provider_run is not implemented yet".to_string(),
-        ))
+        crate::product::json_store::validate_relative_id(project_id).map_err(io_error)?;
+        crate::product::json_store::validate_relative_id(issue_id).map_err(io_error)?;
+        crate::product::json_store::validate_relative_id(workspace_session_id).map_err(io_error)?;
+
+        let role_run_seq = self
+            .next_tool_policy_role_run_seq(workspace_session_id)
+            .map_err(|error| {
+                crate::product::json_store::ProductStoreError::Io(error.to_string())
+            })?;
+        let handle = WorkItemSplitProviderRunHandle {
+            run_ref: format!("ws-{workspace_session_id}-split-run-{role_run_seq}"),
+            workspace_session_id: workspace_session_id.to_string(),
+            role_run_seq,
+        };
+        let dir = self.work_item_split_provider_run_dir(&handle)?;
+        std::fs::create_dir_all(&dir).map_err(io_error)?;
+        crate::product::json_store::write_json(
+            &dir.join("run.json"),
+            &json!({
+                "provider_run_id": handle.run_ref,
+                "project_id": project_id,
+                "issue_id": issue_id,
+                "provider_type": provider,
+                "status": "running",
+                "workspace_session_id": workspace_session_id,
+                "role_run_seq": role_run_seq,
+                "created_at": chrono::Utc::now().to_rfc3339(),
+            }),
+        )?;
+        Ok(handle)
     }
 
-    /// 收口成功的 split provider run:写 status=completed 的 run 记录与
+    /// 收口成功的 split provider run:run 记录改写为 status=completed 并落
     /// structured output,不再走 `save_work_item_split_provider_run` 的旧路径。
     pub fn complete_work_item_split_provider_run(
         &self,
@@ -661,22 +710,82 @@ impl LifecycleStore {
         prompt: &str,
         structured_output: &serde_json::Value,
     ) -> Result<(), crate::product::json_store::ProductStoreError> {
-        let _ = (handle, prompt, structured_output);
-        Err(crate::product::json_store::ProductStoreError::Io(
-            "complete_work_item_split_provider_run is not implemented yet".to_string(),
-        ))
+        let dir = self.work_item_split_provider_run_dir(handle)?;
+        let run_path = dir.join("run.json");
+        if !run_path.exists() {
+            return Err(crate::product::json_store::ProductStoreError::Io(format!(
+                "split provider run {} was never begun",
+                handle.run_ref
+            )));
+        }
+        crate::product::json_store::write_json(
+            &run_path,
+            &json!({
+                "provider_run_id": handle.run_ref,
+                "status": "completed",
+                "workspace_session_id": handle.workspace_session_id,
+                "role_run_seq": handle.role_run_seq,
+                "prompt_chars": prompt.chars().count(),
+                "structured_output_ref": format!("{}_structured_output", handle.run_ref),
+                "completed_at": chrono::Utc::now().to_rfc3339(),
+            }),
+        )?;
+        crate::product::json_store::write_json(
+            &dir.join("structured_output.json"),
+            structured_output,
+        )?;
+        Ok(())
     }
 
-    /// 收口失败的 split provider run:写 status=failed 的 run 记录与 reason。
+    /// 收口失败的 split provider run:run 记录改写为 status=failed 与 reason。
     pub fn fail_work_item_split_provider_run(
         &self,
         handle: &WorkItemSplitProviderRunHandle,
         reason: &str,
     ) -> Result<(), crate::product::json_store::ProductStoreError> {
-        let _ = (handle, reason);
-        Err(crate::product::json_store::ProductStoreError::Io(
-            "fail_work_item_split_provider_run is not implemented yet".to_string(),
-        ))
+        let dir = self.work_item_split_provider_run_dir(handle)?;
+        let run_path = dir.join("run.json");
+        if !run_path.exists() {
+            return Err(crate::product::json_store::ProductStoreError::Io(format!(
+                "split provider run {} was never begun",
+                handle.run_ref
+            )));
+        }
+        crate::product::json_store::write_json(
+            &run_path,
+            &json!({
+                "provider_run_id": handle.run_ref,
+                "status": "failed",
+                "workspace_session_id": handle.workspace_session_id,
+                "role_run_seq": handle.role_run_seq,
+                "reason": reason,
+                "failed_at": chrono::Utc::now().to_rfc3339(),
+            }),
+        )?;
+        Ok(())
+    }
+
+    /// read-back:按 handle 读取 run 记录的收口状态(complete/fail 后断言用)。
+    pub fn read_work_item_split_provider_run_status(
+        &self,
+        handle: &WorkItemSplitProviderRunHandle,
+    ) -> Result<SplitProviderRunSnapshot, crate::product::json_store::ProductStoreError> {
+        let run_path = self
+            .work_item_split_provider_run_dir(handle)?
+            .join("run.json");
+        let value: serde_json::Value = crate::product::json_store::read_json(&run_path)?;
+        Ok(SplitProviderRunSnapshot {
+            provider_run_ref: value
+                .get("provider_run_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            status: value
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        })
     }
 }
 
@@ -689,13 +798,10 @@ pub fn complete_split_provider_run(
     prompt: &str,
     structured_output: &serde_json::Value,
 ) -> ApiResult<SplitProviderRunSnapshot> {
-    let _ = (prompt, structured_output);
     lifecycle
         .complete_work_item_split_provider_run(handle, prompt, structured_output)
         .map_err(product_store_api_error)?;
-    Err(ApiError::runtime(
-        "work_item_split_run_readback_not_implemented",
-        "complete_split_provider_run read-back is not implemented yet",
-        json!({}),
-    ))
+    lifecycle
+        .read_work_item_split_provider_run_status(handle)
+        .map_err(product_store_api_error)
 }
