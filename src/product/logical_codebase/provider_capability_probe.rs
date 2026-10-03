@@ -78,15 +78,188 @@ impl ProviderCapabilityProbeService {
     /// fail-closed。
     pub fn validate_probe_shape(
         &self,
-        _record: &ProviderCapabilityRecord,
-        _evidence: &ProviderBoundaryEvidence,
-        _projection: &ProviderPolicyProjection,
+        record: &ProviderCapabilityRecord,
+        evidence: &ProviderBoundaryEvidence,
+        projection: &ProviderPolicyProjection,
     ) -> Result<(), ProviderCapabilityProbeError> {
-        // TODO(task-2c 阶段 2):实现真实三方形状比对;当前恒拒(fail-closed
-        // 桩),保证阶段 1 红测试可编译且必然失败。
-        Err(ProviderCapabilityProbeError::RecordShapeInvalid(
-            "task-2c 阶段 1 编译桩:形状校验未实现".to_string(),
-        ))
+        // 1) record 形状:probe 校验只接受当前 v2 schema(v1 旧行仅解码为
+        //    全 Unknown,不得作为 probe 导入目标)。
+        if record.schema_version != PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION {
+            return Err(ProviderCapabilityProbeError::RecordShapeInvalid(format!(
+                "schema_version={:?},期望 {:?}",
+                record.schema_version, PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION
+            )));
+        }
+
+        // 2) provider 身份三方可比对:evidence 的 provider 名必须经 1a 冻结
+        //    映射解析为真实 provider ref(Fake/未来 provider fail-closed,
+        //    不回退),且 type/adapter/wire 与 record、projection 一致。
+        let evidence_ref = ProviderRef::from_provider_name(evidence.provider(), String::new())
+            .map_err(|err| {
+                ProviderCapabilityProbeError::ProviderMismatch(format!(
+                    "evidence provider {:?} 无法映射为真实 provider ref: {err}",
+                    evidence.provider()
+                ))
+            })?;
+        if evidence_ref.provider_type != record.provider_type {
+            return Err(ProviderCapabilityProbeError::ProviderMismatch(format!(
+                "provider_type: evidence={:?} record={:?}",
+                evidence_ref.provider_type, record.provider_type
+            )));
+        }
+        if record.provider_type != projection.provider_type() {
+            return Err(ProviderCapabilityProbeError::ProviderMismatch(format!(
+                "provider_type: record={:?} projection={:?}",
+                record.provider_type,
+                projection.provider_type()
+            )));
+        }
+        if record.adapter_dialect != projection.provider_dialect() {
+            return Err(ProviderCapabilityProbeError::ProviderMismatch(format!(
+                "adapter_dialect: record={:?} projection={:?}",
+                record.adapter_dialect,
+                projection.provider_dialect()
+            )));
+        }
+        if record.wire_dialect != projection.wire_dialect() {
+            return Err(ProviderCapabilityProbeError::ProviderMismatch(format!(
+                "wire_dialect: record={:?} projection={:?}",
+                record.wire_dialect,
+                projection.wire_dialect()
+            )));
+        }
+
+        // 3) exact version 三方一致且非空(CLI 版本漂移后旧证据不可导入)。
+        let (record_version, evidence_version, projection_version) = (
+            record.version.as_str(),
+            evidence.exact_version(),
+            projection.exact_version(),
+        );
+        if record_version.is_empty() || evidence_version.is_empty() || projection_version.is_empty()
+        {
+            return Err(ProviderCapabilityProbeError::VersionMismatch(format!(
+                "exact version 为空: record={record_version:?} evidence={evidence_version:?} projection={projection_version:?}"
+            )));
+        }
+        if record_version != evidence_version || evidence_version != projection_version {
+            return Err(ProviderCapabilityProbeError::VersionMismatch(format!(
+                "exact version 不一致: record={record_version:?} evidence={evidence_version:?} projection={projection_version:?}"
+            )));
+        }
+
+        // 4) digest 形状(先形状后比对;三方锚点先校 projection 与 evidence)。
+        ensure_digest_shape(
+            projection.projection_digest(),
+            "projection.projection_digest",
+        )?;
+        ensure_digest_shape(evidence.projection_digest(), "evidence.projection_digest")?;
+
+        // 5) action/profile 类型:projection action 必须有对应 record 行(缺行
+        //    = 未探测,不可导入),行 digest 形状合法且三方相等;evidence
+        //    boundary 模式与 action 读写语义一致。
+        let action = projection.action();
+        let row = record
+            .action_matrix
+            .rows()
+            .iter()
+            .find(|row| row.action == action)
+            .ok_or_else(|| {
+                ProviderCapabilityProbeError::ActionMismatch(format!(
+                    "record action_matrix 缺少 action 行: {action:?}"
+                ))
+            })?;
+        ensure_digest_shape(
+            &row.projection_digest,
+            "record.action_row.projection_digest",
+        )?;
+        if projection.projection_digest() != evidence.projection_digest() {
+            return Err(ProviderCapabilityProbeError::DigestMismatch(format!(
+                "projection={:?} evidence={:?}",
+                projection.projection_digest(),
+                evidence.projection_digest()
+            )));
+        }
+        if projection.projection_digest() != row.projection_digest {
+            return Err(ProviderCapabilityProbeError::DigestMismatch(format!(
+                "projection={:?} record_row={:?}",
+                projection.projection_digest(),
+                row.projection_digest
+            )));
+        }
+        if evidence.boundary_mode() != boundary_mode_for_action(action) {
+            return Err(ProviderCapabilityProbeError::ActionMismatch(format!(
+                "action {action:?} 期望 boundary 模式 {:?},evidence 为 {:?}",
+                boundary_mode_for_action(action),
+                evidence.boundary_mode()
+            )));
+        }
+
+        // 6) evidence 引用一致:record 级 probe_artifact_ref 与行级
+        //    evidence_ref 都必须指向同一 probe 工件,且工件引用非空(不得自造)。
+        let artifact_ref = evidence.artifact_ref();
+        if artifact_ref.is_empty() {
+            return Err(ProviderCapabilityProbeError::EvidenceRefMismatch(
+                "evidence artifact_ref 为空".to_string(),
+            ));
+        }
+        if record.probe_artifact_ref.as_deref() != Some(artifact_ref) {
+            return Err(ProviderCapabilityProbeError::EvidenceRefMismatch(format!(
+                "record.probe_artifact_ref={:?} evidence.artifact_ref={artifact_ref:?}",
+                record.probe_artifact_ref
+            )));
+        }
+        if row.evidence_ref != artifact_ref {
+            return Err(ProviderCapabilityProbeError::EvidenceRefMismatch(format!(
+                "record action_row.evidence_ref={:?} evidence.artifact_ref={artifact_ref:?}",
+                row.evidence_ref
+            )));
+        }
+
+        // 7) probe 元数据:record.probed_at 必须与 evidence 描述同一探测时间。
+        if evidence.probed_at().is_empty() {
+            return Err(ProviderCapabilityProbeError::ProbeMetadataMismatch(
+                "evidence probed_at 为空".to_string(),
+            ));
+        }
+        if record.probed_at.as_deref() != Some(evidence.probed_at()) {
+            return Err(ProviderCapabilityProbeError::ProbeMetadataMismatch(
+                format!(
+                    "record.probed_at={:?} evidence.probed_at={:?}",
+                    record.probed_at,
+                    evidence.probed_at()
+                ),
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+/// digest 形状:与 `SessionResumeFingerprint` 同构的 `sha256:` 前缀 + 64 位
+/// 小写十六进制(SHA-256 的规范 hex 形态)。evidence/record 行/projection
+/// 三方 digest 都必须满足该形态后才做相等比对。
+fn ensure_digest_shape(digest: &str, field: &str) -> Result<(), ProviderCapabilityProbeError> {
+    let Some(hex) = digest.strip_prefix("sha256:") else {
+        return Err(ProviderCapabilityProbeError::DigestInvalid(format!(
+            "{field}: 缺 `sha256:` 前缀: {digest:?}"
+        )));
+    };
+    if hex.len() != 64 || !hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        return Err(ProviderCapabilityProbeError::DigestInvalid(format!(
+            "{field}: 期望 `sha256:` + 64 位小写十六进制,实际 {digest:?}"
+        )));
+    }
+    Ok(())
+}
+
+/// action 的读写语义 → 边界模式(Global Constraints 冻结映射):
+/// Planning/Review 只读,Coding 恰一个 canonical target 可写。
+fn boundary_mode_for_action(action: SessionPolicyAction) -> ProviderBoundaryMode {
+    match action {
+        SessionPolicyAction::PlanningReadOnly | SessionPolicyAction::ReviewReadOnly => {
+            ProviderBoundaryMode::ReadOnly
+        }
+        SessionPolicyAction::CodingTargetWrite => ProviderBoundaryMode::TargetWriteOnly,
     }
 }
 
