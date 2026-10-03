@@ -353,6 +353,86 @@ fn lcg_t02_gateway_fresh_requires_write_boundary_cell() {
         .unwrap();
 }
 
+/// Task 2b 第二段:root-recipe 相位私有冻结 + 不误套 normal action 门。
+/// - 普通 validate 产出恒 Normal 相位;唯一 RootRecipe 相位只能经 gateway
+///   内部 validate_root_recipe_request(携带凭据)产出,普通调用不可构造
+///   (phase 字段私有、无 public constructor)。
+/// - normal write_boundary Denied 时,同一形状请求:普通 validate 拒绝且零
+///   spawn;recipe 相位放行并完成 spawn(revalidate 走 recipe 分支,不消费
+///   normal launch/write/resume 分格)。
+#[tokio::test]
+async fn lcg_t02_root_recipe_phase_not_constructible_by_normal_caller() {
+    use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
+    use crate::product::logical_codebase::aggregate_initialization::AggregateInitializationStepKind;
+    use crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential;
+    let fixture = gateway_fixture();
+    fixture.install_bootstrap_policy();
+    let root = fixture.real_worktree();
+    let credential = BootstrapPhaseCredential::for_test(
+        "project_0001",
+        "lc_0001",
+        "op_recipe_0001",
+        AggregateInitializationStepKind::PreCheck,
+        "sha256:recipe-input",
+        root.clone(),
+    );
+    fixture
+        .capabilities()
+        .set_write_boundary_cell(ProviderCapabilityEvidence::Denied {
+            reason: "boundary probe denied".to_string(),
+        });
+
+    let request = SessionLaunchRequest {
+        project_id: "project_0001".to_string(),
+        provider: ProviderRef::claude_code("cap_claude_code_1_4_0"),
+        action: SessionPolicyAction::CodingTargetWrite,
+        target: PolicyTarget::aggregate_root(root.clone()),
+        working_directory: root.clone(),
+        readable_roots: vec![root.clone()],
+        writable_roots: vec![root.clone()],
+        config_artifact_ref: "sha256:managed-config-artifact".to_string(),
+    };
+
+    // 普通 validate:write_boundary Denied → 拒绝,零 spawn;产出恒 Normal。
+    let ordinary_request_using_recipe_evidence = fixture.gateway().validate(request.clone());
+    assert!(ordinary_request_using_recipe_evidence.is_err());
+    assert_eq!(fixture.registry_start_count(), 0);
+
+    // recipe 相位:同一请求经 gateway 内部入口放行,phase 冻结为 RootRecipe。
+    let validated = fixture
+        .gateway()
+        .validate_root_recipe_request(request, &credential)
+        .expect("recipe phase must validate with fixed Claude recipe facts");
+    assert!(validated.is_root_recipe_phase());
+
+    // 对照:普通 validate 的产出永远不是 recipe 相位(分格恢复 Confirmed 后
+    // 放行,phase 仍为 Normal)。
+    fixture
+        .capabilities()
+        .set_write_boundary_cell(ProviderCapabilityEvidence::Confirmed);
+    let normal_validated = fixture
+        .gateway()
+        .validate(fixture.coding_request(root.clone()))
+        .unwrap();
+    assert!(!normal_validated.is_root_recipe_phase());
+
+    // recipe 相位 spawn:再次置 Denied 后 revalidate 仍走 recipe 分支(不消
+    // 费 normal 分格),启动成功——root recipe 契约在 normal 门拒绝时保持。
+    fixture
+        .capabilities()
+        .set_write_boundary_cell(ProviderCapabilityEvidence::Denied {
+            reason: "boundary probe denied again".to_string(),
+        });
+    let input = fixture.streaming_input(root, None);
+    let launch = ValidatedStreamingProviderInput::new(input, validated);
+    let _session = fixture
+        .gateway()
+        .start_streaming(launch, CancellationToken::new())
+        .await
+        .expect("recipe phase must spawn despite denied normal write cell");
+    assert_eq!(fixture.registry_start_count(), 1);
+}
+
 /// resume 能力放行路径(B-2):`resume_evidence` 为 `Confirmed` 时 resume 启动通过复验
 /// 并触达 registry(start_count == 1),确认消费者只在非 Confirmed 时阻断。
 #[tokio::test]

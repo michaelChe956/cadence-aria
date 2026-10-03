@@ -1333,4 +1333,91 @@ mod tests {
             }
         );
     }
+
+    // ===== Task 2b 第二段(lcg_t02):root-recipe 凭据 durable 重验/漂移 =====
+
+    /// 以三态记录 + 指定 Delivered 版本构造 lc 作用域 source fixture。
+    fn t02_recipe_source_with_delivered_version(
+        fixture: &AdmissionFixture,
+        delivered_version: &str,
+    ) -> T02Source {
+        let store = T02Store::for_lc(fixture.paths.clone(), &fixture.lc_id);
+        store.ensure_bootstrap(&fixture.project_id).unwrap();
+        let mut record = t02_recipe_contract_record();
+        record.root_recipe_evidence = T02RecipeEvidence::Delivered {
+            evidence_ref: "recipe://evidence-0001".to_string(),
+            version: delivered_version.to_string(),
+        };
+        store.upsert(&fixture.project_id, &record).unwrap();
+        T02Source::for_lc(
+            fixture.paths.clone(),
+            fixture.project_id.clone(),
+            fixture.lc_id.clone(),
+        )
+    }
+
+    /// 凭据每次对 durable Running 重验:Running 放行;operation 完成后
+    /// (非 Running)拒绝,稳定码 root_recipe_credential_recheck_denied;
+    /// 无重核验通道的 source(with_store,即使记录在场)fail-closed 拒绝,
+    /// 稳定码 root_recipe_credential_recheck_unavailable。
+    #[test]
+    fn lcg_t02_root_recipe_credential_revalidated_against_durable_running() {
+        let fixture = admission_fixture();
+        let (operations, operation_id, credential) = derived_credential(&fixture);
+
+        let source = t02_recipe_source_with_delivered_version(&fixture, "1.4.0");
+        let provider_ref = ProviderRef::claude_code("cap_managed_snapshot");
+
+        // durable Running → 固定 recipe 事实放行。
+        source
+            .require_root_recipe_supported(&provider_ref, &credential)
+            .expect("running operation must keep the recipe contract");
+
+        // operation 终态(Completed)→ 每次重验 fail-closed。
+        finish_bootstrap_operation(&operations, &fixture, &operation_id);
+        let error = source
+            .require_root_recipe_supported(&provider_ref, &credential)
+            .unwrap_err();
+        assert!(
+            matches!(&error, ProviderGatewayError::UnsupportedCapability(reason)
+                if reason.starts_with("root_recipe_credential_recheck_denied")),
+            "completed operation must fail the recheck: {error:?}"
+        );
+
+        // 无 durable 重核验通道(with_store 构造):即使记录在场也拒绝。
+        let channelless = T02Source::with_store(
+            T02Store::for_lc(fixture.paths.clone(), &fixture.lc_id),
+            fixture.project_id.clone(),
+        );
+        let error = channelless
+            .require_root_recipe_supported(&provider_ref, &credential)
+            .unwrap_err();
+        assert!(
+            matches!(&error, ProviderGatewayError::UnsupportedCapability(reason)
+                if reason.starts_with("root_recipe_credential_recheck_unavailable")),
+            "channel-less source must fail closed: {error:?}"
+        );
+    }
+
+    /// 已交付 recipe 证据钉定版本与记录版本漂移 → fail-closed,稳定码
+    /// root_recipe_evidence_version_drift(凭据有效也不例外)。
+    #[test]
+    fn lcg_t02_root_recipe_evidence_version_drift_rejected() {
+        let fixture = admission_fixture();
+        let (_operations, _operation_id, credential) = derived_credential(&fixture);
+
+        // t02_recipe_contract_record 的记录版本为 1.4.0;Delivered 钉 9.9.9。
+        let source = t02_recipe_source_with_delivered_version(&fixture, "9.9.9");
+        let error = source
+            .require_root_recipe_supported(
+                &ProviderRef::claude_code("cap_managed_snapshot"),
+                &credential,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(&error, ProviderGatewayError::UnsupportedCapability(reason)
+                if reason.starts_with("root_recipe_evidence_version_drift")),
+            "delivered evidence version drift must fail closed: {error:?}"
+        );
+    }
 }

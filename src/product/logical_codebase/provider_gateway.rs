@@ -58,6 +58,20 @@ pub struct ValidatedSessionLaunchPolicy {
     action: SessionPolicyAction,
     version: String,
     capability_snapshot_ref: String,
+    /// Task 2b 第二段:私有冻结相位。`Normal` 由普通 `validate` 产出;
+    /// `RootRecipe` 只能由 gateway 内部 `validate_root_recipe_request`
+    /// (durable Running 派生凭据)产出并携带冻结凭据供 spawn 前重验——
+    /// 枚举与字段私有、无 public constructor,普通调用不可构造。
+    phase: ValidatedSessionLaunchPhase,
+}
+
+/// validated policy 的私有冻结相位(Task 2b 第二段,模块外不可见)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ValidatedSessionLaunchPhase {
+    Normal,
+    RootRecipe(
+        crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
+    ),
 }
 
 impl ValidatedSessionLaunchPolicy {
@@ -74,6 +88,11 @@ impl ValidatedSessionLaunchPolicy {
     /// 冻结的 capability snapshot 引用（C4 Task 8 admission 预检消费）。
     pub fn capability_snapshot_ref(&self) -> &str {
         &self.capability_snapshot_ref
+    }
+
+    /// 是否 root-recipe 相位(crate 内观测面;普通 validate 恒 false)。
+    pub(crate) fn is_root_recipe_phase(&self) -> bool {
+        matches!(self.phase, ValidatedSessionLaunchPhase::RootRecipe(_))
     }
 }
 
@@ -857,7 +876,29 @@ impl LogicalCodebaseProviderGateway {
             action: request.action,
             version: capability.version,
             capability_snapshot_ref: capability.capability_snapshot_ref,
+            phase: ValidatedSessionLaunchPhase::Normal,
         })
+    }
+
+    /// Task 2b 第二段:root-recipe 相位的 gateway 内部校验入口(pub(crate),
+    /// 不对普通调用开放)。capability 只消费固定 Claude recipe 事实
+    /// (`require_root_recipe_supported`,凭据每次对 durable Running 重验),
+    /// 不套 normal action row 的 launch/write-boundary 分格门;policy/target/
+    /// envelope 形状/cwd authority/availability 与普通链一致(不误套 normal
+    /// target-only/read-only action 门——envelope 只做形状冻结,recipe 的写
+    /// 面由 BootstrapExecutorMarker/receipt 链持有)。产出的 policy 冻结
+    /// `RootRecipe(credential)` 相位,revalidate 据此走 recipe 分支。
+    pub(crate) fn validate_root_recipe_request(
+        &self,
+        request: SessionLaunchRequest,
+        credential: &crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
+    ) -> Result<ValidatedSessionLaunchPolicy, ProviderGatewayError> {
+        let _ = (request, credential);
+        // RED 编译桩:GREEN 段实现 recipe 相位装配(recipe 事实 + envelope
+        // + RootRecipe phase)。
+        Err(ProviderGatewayError::UnsupportedCapability(
+            "root_recipe_validate_not_migrated".to_string(),
+        ))
     }
 
     /// 路由级硬门(Task 13):对解析出的 provider capability 施加 gateway-owned
