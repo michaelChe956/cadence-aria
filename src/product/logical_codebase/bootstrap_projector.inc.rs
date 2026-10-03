@@ -423,6 +423,30 @@ impl LogicalCodebaseBootstrapProjector {
             ));
         }
 
+        // Task 2（REQ-BOOT-06）：唯一桩等待 guard,位于原 Completed 返回
+        // 之前、上方全部既有检查（缺件/漂移/生命周期分流）之后——三源
+        // 一致但当前权威正文仍是已知自举桩时,Completed 让位于显式迁移
+        // 等待。等待零写入、零 provider 启动：不写迁移标记、不改旧
+        // receipt/checkpoint 身份;detail 指引唯一的存量迁移入口（初始
+        // 化 API + 新 idempotency_key）,Completed 无可见启动按钮,
+        // RulesPolicy 通用 Retry 不是根配方入口。
+        if artifact.is_bootstrap_placeholder() {
+            return Ok(waiting(
+                "aggregate_policy_bootstrap_placeholder",
+                format!(
+                    "当前聚合政策仍是已知自举桩正文（digest {}）,不能冒充根配方权威\
+                     正文,readiness 等待显式迁移：请调用 POST \
+                     /api/projects/{project_id}/logical-codebases/{logical_codebase_id}/initializations \
+                     并携带新的 idempotency_key 重新跑真实根配方；Completed 状态没有\
+                     可见的启动按钮,RulesPolicy 的通用 Retry 不是根配方入口,不会自动\
+                     重跑。旧 operation/receipt 事实原样保留,本检查零写入、零 provider \
+                     启动。",
+                    artifact.digest
+                ),
+                vec![BootstrapActionKind::Retry, BootstrapActionKind::Revalidate],
+            ));
+        }
+
         Ok(BootstrapStepProjection {
             step: LogicalCodebaseBootstrapStep::RulesPolicy,
             status: LogicalCodebaseBootstrapStepStatus::Completed,

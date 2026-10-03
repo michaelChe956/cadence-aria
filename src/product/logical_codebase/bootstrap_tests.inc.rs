@@ -3,6 +3,7 @@ mod tests {
     use super::*;
     use crate::product::logical_codebase::aggregate_index::AggregateIndexRecord;
     use crate::product::logical_codebase::aggregate_initialization::{
+        AggregateCancellationRecord, AggregateInitializationErrorRecord,
         AggregateInitializationOperation, AggregateInitializationOperationInput,
         AggregateInitializationStepKind,
     };
@@ -193,10 +194,12 @@ mod tests {
                 },
             )
             .unwrap();
-        let policy = crate::product::logical_codebase::policy::AggregatePolicyArtifact::bootstrap(
+        // Task 2:本对照分支原先必须 Completed/ready,显式准备真正文
+        //（revision 1,非自举桩）——桩正文的等待语义由
+        // bootstrap_tests_placeholder.inc.rs 的专用测试钉定。
+        let policy = real_root_policy_revision_one(
             "project_0001",
             &manifest.logical_codebase_id.to_string(),
-            "2026-09-29T00:00:00Z".to_string(),
         );
         crate::product::logical_codebase::policy::AggregatePolicyArtifactStore::for_lc(
             paths.clone(),
@@ -479,7 +482,28 @@ mod tests {
 
     /// 登记成员 + bootstrap policy + 五步全 Completed 的 recipe operation：
     /// readiness 三源谓词的全部 durable 前置（最终 receipt 除外）。
-    fn readiness_fixture(operation_id: &str) -> ReadinessFixture {
+    /// `real_policy` 选择自举桩正文（false，Task 2 前语义）或真正文
+    /// revision 1（true，对照分支显式准备）。
+    fn readiness_fixture(operation_id: &str, real_policy: bool) -> ReadinessFixture {
+        readiness_fixture_with_outcome(operation_id, real_policy, FixtureOutcome::Completed)
+    }
+
+    /// readiness fixture 的 recipe operation 终态：Task 2 起用于在桩正文
+    /// 上分流生命周期负例，验证唯一桩 guard 不遮盖既有检查的优先级。
+    enum FixtureOutcome {
+        Running,
+        Failed,
+        Cancelled,
+        Completed,
+    }
+
+    /// readiness_fixture 的参数化内核：组装成员/manifest/policy 与
+    /// operation，按 `outcome` 推进到对应终态（最终 receipt 除外）。
+    fn readiness_fixture_with_outcome(
+        operation_id: &str,
+        real_policy: bool,
+        outcome: FixtureOutcome,
+    ) -> ReadinessFixture {
         let temp = tempfile::tempdir().unwrap();
         let paths = ProductAppPaths::new(temp.path());
         let aggregate_root = temp.path().join("aggregate-root");
@@ -541,11 +565,15 @@ mod tests {
             )
             .unwrap();
 
-        let policy = crate::product::logical_codebase::policy::AggregatePolicyArtifact::bootstrap(
-            "project_0001",
-            &manifest.logical_codebase_id.to_string(),
-            "2026-10-01T00:00:00Z".to_string(),
-        );
+        let policy = if real_policy {
+            real_root_policy_revision_one("project_0001", &manifest.logical_codebase_id.to_string())
+        } else {
+            crate::product::logical_codebase::policy::AggregatePolicyArtifact::bootstrap(
+                "project_0001",
+                &manifest.logical_codebase_id.to_string(),
+                "2026-10-01T00:00:00Z".to_string(),
+            )
+        };
         crate::product::logical_codebase::policy::AggregatePolicyArtifactStore::for_lc(
             paths.clone(),
             &lc_id,
@@ -576,41 +604,77 @@ mod tests {
                 "2026-10-01T00:02:00Z".to_string(),
             )
             .unwrap();
-        for step in AggregateInitializationStepKind::V1 {
-            init_store
-                .mark_step_running(
-                    "project_0001",
-                    operation_id,
-                    step,
-                    format!("readiness:{operation_id}:{}", step.as_str()),
-                    "2026-10-01T00:03:00Z".to_string(),
-                )
-                .unwrap();
-            init_store
-                .checkpoint_step_output(
-                    "project_0001",
-                    operation_id,
-                    step,
-                    format!("aggregate-initializations/op/{}.json", step.as_str()),
-                    "2026-10-01T00:04:00Z".to_string(),
-                )
-                .unwrap();
-            init_store
-                .mark_step_completed(
-                    "project_0001",
-                    operation_id,
-                    step,
-                    "2026-10-01T00:05:00Z".to_string(),
-                )
-                .unwrap();
+        match outcome {
+            FixtureOutcome::Running => {}
+            FixtureOutcome::Failed => {
+                init_store
+                    .finish_failed(
+                        "project_0001",
+                        operation_id,
+                        None,
+                        AggregateInitializationErrorRecord {
+                            stage: "root_recipe".to_string(),
+                            reason_code: "root_recipe_probe_failed".to_string(),
+                            stderr_summary: Some("provider probe failed".to_string()),
+                            retryable: true,
+                            action: "retry_provider_turn".to_string(),
+                        },
+                        "2026-10-01T00:02:30Z".to_string(),
+                    )
+                    .unwrap();
+            }
+            FixtureOutcome::Cancelled => {
+                init_store
+                    .cancel(
+                        "project_0001",
+                        operation_id,
+                        AggregateCancellationRecord {
+                            reason_code: "user_cancelled".to_string(),
+                            cancelled_at: "2026-10-01T00:02:30Z".to_string(),
+                            detail: Some("user requested cancellation".to_string()),
+                        },
+                        "2026-10-01T00:02:30Z".to_string(),
+                    )
+                    .unwrap();
+            }
+            FixtureOutcome::Completed => {
+                for step in AggregateInitializationStepKind::V1 {
+                    init_store
+                        .mark_step_running(
+                            "project_0001",
+                            operation_id,
+                            step,
+                            format!("readiness:{operation_id}:{}", step.as_str()),
+                            "2026-10-01T00:03:00Z".to_string(),
+                        )
+                        .unwrap();
+                    init_store
+                        .checkpoint_step_output(
+                            "project_0001",
+                            operation_id,
+                            step,
+                            format!("aggregate-initializations/op/{}.json", step.as_str()),
+                            "2026-10-01T00:04:00Z".to_string(),
+                        )
+                        .unwrap();
+                    init_store
+                        .mark_step_completed(
+                            "project_0001",
+                            operation_id,
+                            step,
+                            "2026-10-01T00:05:00Z".to_string(),
+                        )
+                        .unwrap();
+                }
+                init_store
+                    .finish_completed(
+                        "project_0001",
+                        operation_id,
+                        "2026-10-01T00:06:00Z".to_string(),
+                    )
+                    .unwrap();
+            }
         }
-        init_store
-            .finish_completed(
-                "project_0001",
-                operation_id,
-                "2026-10-01T00:06:00Z".to_string(),
-            )
-            .unwrap();
 
         ReadinessFixture {
             temp,
@@ -693,7 +757,7 @@ mod tests {
     /// Completed——两套五步状态机互不冒充。
     #[test]
     fn recipe_completed_without_root_receipt_keeps_planning_not_ready() {
-        let fixture = readiness_fixture("aggregate_initialization_readiness_0001");
+        let fixture = readiness_fixture("aggregate_initialization_readiness_0001", false);
         // 根规则在场：隔离「receipt 缺失」这一唯一 readiness 缺口。
         std::fs::write(
             fixture.aggregate_root.join("AGENTS.md"),
@@ -743,7 +807,11 @@ mod tests {
     /// 地回到 Completed（不是单向锁）。
     #[test]
     fn policy_rule_digest_drift_keeps_planning_not_ready() {
-        let fixture = readiness_fixture("aggregate_initialization_readiness_0002");
+        // Task 2:基线/恢复分支原先必须 Completed,本 fixture 显式准备
+        // 真正文;漂移负例共用同一 fixture,原 reason 不被桩 guard 遮盖
+        //（由 bootstrap_placeholder_preserves_existing_failure_precedence
+        // 在桩正文上独立钉定）。
+        let fixture = readiness_fixture("aggregate_initialization_readiness_0002", true);
         let entry = fixture.aggregate_root.join("AGENTS.md");
         let root_rule_text = "# aggregate root rules\n";
         std::fs::write(&entry, root_rule_text).unwrap();
@@ -857,7 +925,7 @@ mod tests {
     fn readiness_projection_is_read_only() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        let fixture = readiness_fixture("aggregate_initialization_readiness_0003");
+        let fixture = readiness_fixture("aggregate_initialization_readiness_0003", false);
         std::fs::write(
             fixture.aggregate_root.join("AGENTS.md"),
             "# aggregate root rules\n",
@@ -1041,4 +1109,9 @@ mod tests {
             }
         ));
     }
+
+    // Task 2（aggregate-policy-root-publication）：桩等待谓词专用测试。
+    // 按既有 .inc 拆分先例（tests_parts）把本主题测试拆入独立 part,
+    // 保持本文件低于 large_file_guard 的 1200 行上限。
+    include!("bootstrap_tests_placeholder.inc.rs");
 }
