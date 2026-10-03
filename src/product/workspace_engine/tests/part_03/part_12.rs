@@ -514,7 +514,7 @@ async fn finalizer_replays_same_binding_child_and_fails_closed_on_drift() {
         &engine,
         &lifecycle,
         &plan_id,
-        &compile_id,
+        compile_id,
         "2026-09-29T00:00:00Z",
     );
     engine
@@ -598,7 +598,7 @@ async fn finalizer_replays_same_binding_child_and_fails_closed_on_drift() {
         &engine2,
         &lifecycle2,
         &plan_id2,
-        &compile_id2,
+        compile_id2,
         "2026-09-29T00:00:00Z",
     );
     engine2

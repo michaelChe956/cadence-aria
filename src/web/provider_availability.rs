@@ -324,8 +324,7 @@ mod tests {
         #[test]
         fn resolve_default_fail_closes_fake_placeholder_in_production() {
             let error = resolve_default_coding_provider("fake", false, production_availability)
-                .err()
-                .expect("生产 fake 占位默认必须 fail-closed");
+                .expect_err("生产 fake 占位默认必须 fail-closed");
             assert_eq!(
                 error.code, "default_provider_fake_blocked",
                 "稳定错误码 + detail：{error:?}"
@@ -337,8 +336,7 @@ mod tests {
         fn resolve_default_fail_closes_unset_default_in_production() {
             for unset in ["", "  "] {
                 let error = resolve_default_coding_provider(unset, false, production_availability)
-                    .err()
-                    .expect("未配置默认必须 fail-closed");
+                    .expect_err("未配置默认必须 fail-closed");
                 assert_eq!(
                     error.code, "default_provider_not_configured",
                     "稳定错误码 + detail：{error:?}"

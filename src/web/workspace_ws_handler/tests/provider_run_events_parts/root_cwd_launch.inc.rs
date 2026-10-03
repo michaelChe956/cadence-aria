@@ -163,7 +163,7 @@ async fn logical_author_and_choice_followup_keep_root_cwd_and_target_separate() 
     assert_eq!(envelope.target.worktree, canonical_member);
     let lc_store = crate::product::logical_codebase::LogicalCodebaseStore::for_lc(
         fixture.app_paths.clone(),
-        &crate::product::logical_codebase::store::legacy_logical_codebase_id("project_0001"),
+        crate::product::logical_codebase::store::legacy_logical_codebase_id("project_0001"),
     );
     let member = &lc_store
         .list_members("project_0001")

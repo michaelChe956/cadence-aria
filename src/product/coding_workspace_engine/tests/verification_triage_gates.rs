@@ -673,7 +673,7 @@ async fn approved_plan_revision_routes_into_amendment_chain() {
 #[tokio::test]
 async fn verification_evidence_panel_marks_actual_command_mismatch() {
     let (_root, store, _engine, attempt) = verification_triage_group_fixture();
-    let checks = vec![
+    let checks = [
         VerificationCheck {
             check_id: TRIAGE_CHECK_PLAIN.to_string(),
             command: Some("cargo test --lib".to_string()),

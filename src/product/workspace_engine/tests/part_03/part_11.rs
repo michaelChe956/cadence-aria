@@ -224,7 +224,7 @@ async fn finalizer_rejects_old_binding_child() {
         &engine,
         &lifecycle,
         &plan_id,
-        &compile_id,
+        compile_id,
         "2026-09-29T00:00:00Z",
     );
     engine

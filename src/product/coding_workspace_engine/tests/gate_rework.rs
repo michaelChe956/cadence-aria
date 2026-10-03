@@ -498,7 +498,7 @@ async fn rework_instruction_claim_binds_render_before_consumption() {
             1,
             &input.prompt,
             None,
-            &[instruction.id.clone()],
+            std::slice::from_ref(&instruction.id),
         )
         .expect("replay the same claim");
     assert_eq!(
@@ -525,14 +525,14 @@ async fn rework_instruction_claim_binds_render_before_consumption() {
             1,
             &tampered_prompt,
             None,
-            &[instruction.id.clone()],
+            std::slice::from_ref(&instruction.id),
         )
         .expect_err("different render must fail closed");
     assert!(
         matches!(
             conflict,
-            crate::product::json_store::ProductStoreError::IdentityMismatch { ref kind, .. }
-                if *kind == "coding_rework_instruction_claim"
+            crate::product::json_store::ProductStoreError::IdentityMismatch { kind, .. }
+                if kind == "coding_rework_instruction_claim"
         ),
         "unexpected conflict: {conflict:?}"
     );
@@ -744,7 +744,7 @@ async fn reconcile_skips_prompted_claims_and_note_only_claims() {
             2,
             &format!("含备注的完整 prompt：{}", note.content),
             None,
-            &[note.id.clone()],
+            std::slice::from_ref(&note.id),
         )
         .expect("note-only claim");
     let renders = store

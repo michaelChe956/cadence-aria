@@ -237,7 +237,7 @@ fn c1_context_with_target<'a>(
         source_story_spec_ids: c1_spec_ids().0,
         source_design_spec_ids: c1_spec_ids().1,
         repository_profile: Some(c1_profile_ref()),
-        plan_options: &c1_options(),
+        plan_options: c1_options(),
         baseline_tree: baseline,
         existing_work_item_ids: existing_ids,
         enrollment_target,

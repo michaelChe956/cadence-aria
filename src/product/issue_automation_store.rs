@@ -1112,6 +1112,9 @@ pub(crate) mod automation_crash_window {
     /// 后（session 创建之前）/ 绑定 session 落盘后（enrollment 绑定写回
     /// 之前）/ 生成检查点 EngineStarted 落盘后（provider 派发之前）。
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    // `After*` 前缀是语义本身（「某持久化落盘之后」的崩溃窗口），20 处
+    // 使用点跨 4 文件共享该命名口径，不做去前缀改名。
+    #[allow(clippy::enum_variant_names)]
     pub(crate) enum CrashWindow {
         AfterIntentSaved,
         AfterPlanSaved,
