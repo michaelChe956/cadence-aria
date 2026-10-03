@@ -135,8 +135,11 @@ impl BoundaryFixture {
         session_label: &str,
     ) -> Result<Self, ProviderBoundaryError> {
         let root = base.join("lc-root");
-        let member = base.join("member-a");
-        let member_b = base.join("member-b");
+        // 成员 checkout 是 canonical root 的子目录(真实 LC 拓扑与 6a 先例
+        // 同构):launcher 只 ro-bind root 即覆盖成员写面,负向探针得到真实
+        // EROFS 拒绝,而非 tmpfs 遮蔽下的 ENOENT。
+        let member = root.join("member-a");
+        let member_b = root.join("member-b");
         let home = base.join("home");
         fs::create_dir_all(root.join(".aria"))
             .and_then(|()| fs::write(root.join(".aria").join("state.json"), "{}"))
@@ -824,11 +827,10 @@ fn planned_negative_writes(fixture: &BoundaryFixture) -> Vec<PlannedBoundaryWrit
 
 /// 受保护面(root/成员树 + target `.aria` 与 `.git` 指针)。
 fn protected_face_roots(fixture: &BoundaryFixture) -> Vec<PathBuf> {
-    let mut faces = vec![
-        fixture.root().to_path_buf(),
-        fixture.member().to_path_buf(),
-        fixture.member_b().to_path_buf(),
-    ];
+    // 成员 checkout 是 root 子目录:root 树快照已覆盖成员与全部元数据
+    // (`.git`/`.aria`/AGENTS.md/.mcp.json);Coding target 的 `.aria` 与
+    // `.git` 指针在 rw bind 之外,单独入面。
+    let mut faces = vec![fixture.root().to_path_buf()];
     if let Some(target) = fixture.target() {
         faces.push(target.join(".aria"));
         faces.push(target.join(".git"));
