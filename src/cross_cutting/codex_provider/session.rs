@@ -74,30 +74,28 @@ pub(crate) fn codex_launch_params(input: &StreamingProviderInput) -> serde_json:
 /// 只能来自已投影的 `CodexSandboxProjection`——`cwd`=投影冻结的协议 cwd
 /// (Coding=target,只读=root),不以 raw 输入的 working_dir 覆盖。direct
 /// `codex_launch_params` 原签名/分支保留,仅供 direct 启动消费。
-///
-/// Task 5a 阶段 1 RED 桩:阶段 2 实现真实参数。
 pub(crate) fn codex_lc_launch_params(
-    _lc: &super::projection::CodexSandboxProjection,
+    lc: &super::projection::CodexSandboxProjection,
 ) -> serde_json::Value {
-    serde_json::json!({})
+    json!({
+        "cwd": lc.protocol_cwd(),
+        "approvalPolicy": lc.approval_policy(),
+        "sandbox": lc.mode().wire_text(),
+    })
 }
 
 /// LC 会话握手(Task 5):initialize/initialized + thread/resume|thread/start,
 /// 启动参数来自受限投影(与 direct 握手共用 thread/start|resume 流程与
-/// F1 resume id 确认语义)。
-///
-/// Task 5a 阶段 1 RED 桩:阶段 2 实现真实握手。
+/// F1 resume id 确认语义;thread/start 与 thread/resume 共享同投影)。
 pub(crate) async fn codex_lc_session_handshake<W>(
-    _peer: &JsonRpcPeer<W>,
-    _input: &StreamingProviderInput,
-    _lc: &super::projection::CodexSandboxProjection,
+    peer: &JsonRpcPeer<W>,
+    input: &StreamingProviderInput,
+    lc: &super::projection::CodexSandboxProjection,
 ) -> Result<CodexSessionHandshake, ProviderAdapterError>
 where
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    Err(provider_error(
-        "codex lc session handshake is not implemented yet (task 5a red stub)",
-    ))
+    codex_handshake_with_launch_params(peer, input, codex_lc_launch_params(lc)).await
 }
 
 /// 策略会话即时审批决策（GC6 冻结）：commandExecution/fileChange 一律拒绝并
@@ -262,12 +260,28 @@ fn response_thread_id(response: &Value) -> Option<String> {
         .map(ToString::to_string)
 }
 
-/// codex 会话握手：`initialize`/`initialized` + `thread/resume`|`thread/start`，
-/// 由 `run_codex_session`（非策略/直接调用）与 `CodexProvider::start`（策略路径，
-/// 有界前置）共用。启动参数始终经 `codex_launch_params`（三联动冻结）。
+/// codex 会话握手（direct）：`initialize`/`initialized` +
+/// `thread/resume`|`thread/start`，由 `run_codex_session`（非策略/直接调用）
+/// 与 `CodexProvider::start`（策略路径，有界前置）共用。启动参数始终经
+/// `codex_launch_params`（三联动冻结）。
 pub(crate) async fn codex_session_handshake<W>(
     peer: &JsonRpcPeer<W>,
     input: &StreamingProviderInput,
+) -> Result<CodexSessionHandshake, ProviderAdapterError>
+where
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    codex_handshake_with_launch_params(peer, input, codex_launch_params(input)).await
+}
+
+/// 握手共享内核（Task 5）：initialize/initialized + thread/resume|thread/start
+/// 的流程与 F1 resume id 确认语义在 direct/LC 两条路径间唯一；唯一差异是
+/// 启动参数来源（direct=`codex_launch_params(input)`；LC=受限投影 params，
+/// thread/start 与 thread/resume 共享同投影）。
+async fn codex_handshake_with_launch_params<W>(
+    peer: &JsonRpcPeer<W>,
+    input: &StreamingProviderInput,
+    launch_params: serde_json::Value,
 ) -> Result<CodexSessionHandshake, ProviderAdapterError>
 where
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -302,7 +316,7 @@ where
         .map(ToString::to_string);
 
     let thread_id = if let Some(session_id) = resume_session_id.as_deref() {
-        let mut resume_params = codex_launch_params(input);
+        let mut resume_params = launch_params;
         resume_params
             .as_object_mut()
             .expect("codex launch params are a JSON object")
@@ -335,7 +349,7 @@ where
                 json!({
                     "jsonrpc": "2.0",
                     "method": "thread/start",
-                    "params": codex_launch_params(input),
+                    "params": launch_params,
                 }),
                 CODEX_RPC_REQUEST_TIMEOUT,
             )

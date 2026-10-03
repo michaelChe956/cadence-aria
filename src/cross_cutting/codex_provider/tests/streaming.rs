@@ -322,8 +322,12 @@ fn lcg_t05_version_or_protocol_cwd_drift_invalidates_projection() {
     let target_b = fixture.root.join("member-worktree-b");
 
     let projection_input = |target: PathBuf| {
-        let envelope =
+        let mut envelope =
             fixture.envelope(SessionPolicyAction::CodingTargetWrite, vec![target.clone()]);
+        // 协议 cwd 漂移变体:envelope target 跟随漂移 target(保持 target-only
+        // 形状,只变 target 本身)。
+        envelope.target =
+            PolicyTarget::checkout("logical_repo_0001", "checkout_0001", target.clone());
         ProviderProjectionInput::new(
             envelope.clone(),
             ProviderRef::codex("cap_codex_lc_fixture"),
@@ -379,4 +383,10 @@ fn lcg_t05_version_or_protocol_cwd_drift_invalidates_projection() {
         drifted_sandbox.process_cwd(),
         fixture.canonical_root().as_path()
     );
+    // sandbox 投影冻结面逐字段:mode=workspace-write,target_root 跟随漂移
+    // target,Coding 的 boundary 引用非空(计划内容引用;真实 probe evidence
+    // 归 6c/2d)。
+    assert_eq!(drifted_sandbox.mode().wire_text(), "workspace-write");
+    assert_eq!(drifted_sandbox.target_root(), target_b.as_path());
+    assert!(!drifted_sandbox.boundary_evidence_ref().is_empty());
 }

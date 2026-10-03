@@ -15,7 +15,10 @@ use crate::cross_cutting::streaming_provider::{
     StreamingProviderAdapter, StreamingProviderInput, canonical_tool_policy,
     validate_tool_policy_for_role,
 };
-use crate::cross_cutting::tool_policy_audit::{DurableToolPolicyEvent, ProviderStartAudit};
+use crate::cross_cutting::tool_policy_audit::{
+    DurableToolPolicyEvent, LcProjectionAudit, ProviderStartAudit,
+};
+use crate::product::logical_codebase::provider_projection::ProviderPolicyProjector as _;
 
 mod parse;
 mod projection;
@@ -137,20 +140,272 @@ impl CodexProvider {
     /// projection 判定归 Task 3/8;此前真实 gateway validate 无法为 Codex
     /// 产出 validated policy,tests 子模块直接驱动本私有方法锁定受限分支)。
     ///
-    /// Task 5a 阶段 1 RED 桩:阶段 2 实现受限启动链。
+    /// 顺序契约(REQ-LCG-04):角色守卫 → adapter 匹配 → 危险门(零 child)
+    /// → audit sink → exact version → 受限投影 → 以 canonical root 为进程
+    /// cwd spawn → LC 握手(协议 params 来自投影)→ provider_start 统一审计
+    /// (`lc_projection` 必填)→ 会话循环。
     async fn start_lc_validated(
         &self,
-        _input: StreamingProviderInput,
-        _envelope: &crate::product::logical_codebase::policy::SessionPolicyEnvelope,
-        _capability_snapshot_ref: &str,
-        _cancel: CancellationToken,
+        mut input: StreamingProviderInput,
+        envelope: &crate::product::logical_codebase::policy::SessionPolicyEnvelope,
+        capability_snapshot_ref: &str,
+        cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
-        Err(ProviderAdapterError::execution_failed(
-            None,
-            String::new(),
-            "codex lc validated start is not implemented yet (task 5a red stub)",
-            0,
-        ))
+        let lc_error = |details: String| {
+            ProviderAdapterError::parse_error(details, String::new(), String::new())
+        };
+
+        // 1) 双向 spawn 前守卫(与 direct `start` 同源;LC 同样非法即拒)。
+        validate_tool_policy_for_role(&input.role, input.tool_policy.as_ref())
+            .map_err(|error| lc_error(format!("codex lc validated start: {error}")))?;
+
+        // 2) adapter 匹配:validated input 必须是 Codex app-server(不匹配即拒,
+        //    不回退其它 provider/dialect)。
+        if input.provider_type != crate::protocol::contracts::ProviderType::Codex
+            || envelope.provider_dialect
+                != crate::product::logical_codebase::policy::ProviderDialect::CodexCliV1
+        {
+            return Err(lc_error(
+                "codex lc validated start: only Codex app-server launches are accepted by this adapter"
+                    .to_string(),
+            ));
+        }
+
+        // 3) REQ-LCG-04 危险门(在任何 spawn 之前,零 child):Coder 形态
+        //    (Coding action + 无通用 tool policy)若受限写面未冻结,启动后
+        //    direct 映射只能是 danger-full-access——永久拒绝,details 即
+        //    稳定码(与 gateway 路由门同源字节)。
+        if let Some(reason) = projection::lc_danger_refusal(envelope, input.tool_policy.as_ref()) {
+            return Err(ProviderAdapterError::parse_error(
+                reason,
+                String::new(),
+                String::new(),
+            ));
+        }
+
+        // 4) 统一 launch audit sink:LC 会话必须绑定 run-bound sink,缺失
+        //    fail-closed(1b 的 prepare 契约之前由本路径强制)。
+        let sink = input.audit_sink.clone().ok_or_else(|| {
+            lc_error("codex lc validated start: audit sink is required for LC launches".to_string())
+        })?;
+
+        // 5) exact version(supplier seam 优先,默认真实 `--version` 探测+进程内
+        //    缓存;不可得 fail-closed)。全 LC 路径必填,非仅策略角色。
+        let provider_version = match self.version_supplier.clone() {
+            Some(supplier) => supplier()
+                .map_err(|error| lc_error(format!("codex lc validated start: {error}")))?,
+            None => crate::cross_cutting::streaming_provider::cached_cli_version(
+                &self.command,
+                probe_codex_version(&self.command, CODEX_VERSION_PROBE_TIMEOUT),
+            )
+            .await
+            .map_err(|error| lc_error(format!("codex lc validated start: {error}")))?,
+        };
+
+        // 6) 受限投影(REQ-LCG-04):envelope 派生不可伪造 boundary plan;
+        //    trust/MCP bundle digest 的 gateway 侧装配归 1b/1c(空串同样纳入
+        //    session digest,装配后任一漂移都会改变 projection_digest)。
+        //    approval 由投影从 action×permission 派生,gateway 不预冻结。
+        let boundary = projection::lc_boundary_plan(envelope)
+            .map_err(|error| lc_error(format!("codex lc validated start: {error}")))?;
+        let projection_input =
+            crate::product::logical_codebase::provider_projection::ProviderProjectionInput::new(
+                envelope.clone(),
+                crate::product::logical_codebase::provider_gateway::ProviderRef::codex(
+                    capability_snapshot_ref,
+                ),
+                envelope.action,
+                input.role.clone(),
+                input.permission_mode.clone(),
+                input.tool_policy.clone(),
+                String::new(),
+                String::new(),
+                envelope.config_artifact_ref.clone(),
+                String::new(),
+                Some(boundary),
+            );
+        let projector = CodexPolicyProjector::new(provider_version.clone());
+        let lc_projection = projector
+            .project(&projection_input)
+            .map_err(|error| lc_error(format!("codex lc validated start: {error}")))?;
+        let sandbox = projector.sandbox_projection(&lc_projection);
+
+        // 派生一致性防线:投影冻结的 target_root 必须等于 envelope 冻结
+        // target(不一致即内部错误,fail-closed,不静默采纳)。
+        if sandbox.target_root() != envelope.target.worktree.as_path() {
+            return Err(lc_error(
+                "codex lc validated start: projection target root disagrees with the frozen envelope target"
+                    .to_string(),
+            ));
+        }
+
+        // 7) spawn:进程 cwd=投影冻结的 canonical LC root(双 cwd 合同,协议
+        //    target 只进 wire params,不进进程 cwd)。
+        let args = self.build_args();
+        let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+        let command = self.command.to_string_lossy().to_string();
+        let process_cwd = sandbox.process_cwd().to_path_buf();
+        let process = ProcessManager::spawn(
+            &command,
+            &arg_refs,
+            &process_cwd,
+            &input.env_vars,
+            cancel.clone(),
+        )
+        .await?;
+
+        // GC7:与 direct 路径同源的出站 request id typed namespace。
+        let peer = JsonRpcPeer::new(process.stdout, process.stdin)
+            .with_outbound_id_namespace(OutboundIdNamespace::Aria);
+        let stderr = process.stderr;
+        let mut child = process.child;
+
+        // 8) LC 握手:thread/start|thread/resume 共用受限投影 params(协议
+        //    cwd=投影冻结面,不以 raw 输入覆盖);失败终止子进程 fail-closed;
+        //    LC 路径必得非空 thread id(与 direct 策略路径同源兜底)。
+        let handshake = match session::codex_lc_session_handshake(&peer, &input, &sandbox).await {
+            Ok(handshake) => handshake,
+            Err(error) => {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                return Err(error);
+            }
+        };
+        let Some(thread_id) = handshake.thread_id.clone() else {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            return Err(lc_error(
+                "codex lc validated start: thread/start response missing or blank thread id"
+                    .to_string(),
+            ));
+        };
+
+        // 9) provider_start 统一审计:sandbox/approvalPolicy 与 wire 同源;
+        //    lc_projection 必填(LC 会话不因 tool_policy=None 跳过统一 audit);
+        //    boundary 引用同样从 sandbox 投影单一来源取值。
+        let tool_policy_digest =
+            projection::lc_tool_policy_canonical_digest(input.tool_policy.as_ref())
+                .map_err(|error| lc_error(format!("codex lc validated start: {error}")))?;
+        let audit_event = DurableToolPolicyEvent::ProviderStart(ProviderStartAudit {
+            provider: session::TOOL_POLICY_PROVIDER_NAME.to_string(),
+            role: crate::cross_cutting::streaming_provider::adapter_role_text(&input.role)
+                .to_string(),
+            workspace_session_id: input.workspace_session_id.clone().unwrap_or_default(),
+            provider_session_id: thread_id.clone(),
+            tool_policy_canonical_digest: tool_policy_digest,
+            argv: args.clone(),
+            sandbox: Some(sandbox.mode().wire_text().to_string()),
+            approval_policy: Some(sandbox.approval_policy().to_string()),
+            provider_version,
+            adapter_dialect: session::CODEX_POLICY_DIALECT.to_string(),
+            lc_projection: Some(LcProjectionAudit {
+                action: projection::action_text(envelope.action).to_string(),
+                wire_dialect: projection::wire_dialect_text(lc_projection.wire_dialect())
+                    .to_string(),
+                capability_projection_digest: lc_projection
+                    .capability_projection_digest()
+                    .to_string(),
+                projection_digest: lc_projection.projection_digest().to_string(),
+                boundary_evidence_ref: sandbox.boundary_evidence_ref().to_string(),
+            }),
+        });
+        if let Err(error) = sink.append_bound(audit_event) {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            return Err(lc_error(format!(
+                "codex lc validated start: provider_start audit append failed: {error}"
+            )));
+        }
+
+        // 10) 事件通道 + 会话循环(与 direct 策略路径同构):会话事件的 cwd
+        //     报告进程 cwd=canonical root,raw working_dir 不泄漏;审批行为
+        //     沿既有循环(策略会话 exec/fileChange 即时拒绝,Coder 沿
+        //     ApprovalBridge 映射 Auto/Supervised)。
+        input.working_dir = process_cwd.clone();
+        let (event_tx, event_rx) = mpsc::channel(32);
+        let bridge = ApprovalBridge::new(input.permission_mode.clone(), event_tx.clone());
+        let commands = bridge.command_sender();
+        let _ = event_tx
+            .send(ProviderEvent::StatusChanged(ProviderStatus::Starting))
+            .await;
+        let _ = event_tx
+            .send(ProviderEvent::Execution(ProviderExecutionEvent {
+                event_id: "provider".to_string(),
+                kind: ProviderExecutionEventKind::Provider,
+                status: ProviderExecutionEventStatus::Started,
+                title: "Codex provider started".to_string(),
+                detail: None,
+                command: None,
+                cwd: Some(process_cwd.display().to_string()),
+                output: None,
+                exit_code: None,
+            }))
+            .await;
+
+        tokio::spawn(async move {
+            let stderr_output = std::sync::Arc::new(tokio::sync::Mutex::new(String::new()));
+            let stderr_output_for_task = std::sync::Arc::clone(&stderr_output);
+            let stderr_task = tokio::spawn(async move {
+                let mut lines = tokio::io::BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let mut output = stderr_output_for_task.lock().await;
+                    if !output.is_empty() {
+                        output.push('\n');
+                    }
+                    output.push_str(&line);
+                }
+            });
+
+            let result = session::run_codex_session_loop(
+                peer,
+                bridge,
+                event_tx.clone(),
+                input,
+                cancel.clone(),
+                handshake,
+            )
+            .await;
+            if result.is_err() {
+                let _ = child.start_kill();
+            }
+            let status = child.wait().await;
+            let _ = stderr_task.await;
+            if let Err(error) = result {
+                let stderr =
+                    support::combine_stderr(stderr_output.lock().await.clone(), error.stderr);
+                let _ = event_tx
+                    .send(ProviderEvent::StatusChanged(ProviderStatus::Failed))
+                    .await;
+                let _ = event_tx
+                    .send(ProviderEvent::Execution(ProviderExecutionEvent {
+                        event_id: "provider".to_string(),
+                        kind: ProviderExecutionEventKind::Provider,
+                        status: ProviderExecutionEventStatus::Failed,
+                        title: "Codex provider failed".to_string(),
+                        detail: Some(error.details.clone()),
+                        command: None,
+                        cwd: None,
+                        output: if stderr.trim().is_empty() {
+                            None
+                        } else {
+                            Some(stderr.clone())
+                        },
+                        exit_code: None,
+                    }))
+                    .await;
+                let _ = event_tx
+                    .send(ProviderEvent::Failed {
+                        message: support::format_codex_failure(error.details, status, stderr),
+                    })
+                    .await;
+            }
+        });
+
+        Ok(ProviderSession {
+            native_session_id: Some(thread_id),
+            events: event_rx,
+            commands,
+        })
     }
 }
 
