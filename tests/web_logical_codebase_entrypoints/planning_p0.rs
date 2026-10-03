@@ -14,11 +14,17 @@ use cadence_aria::cross_cutting::bounded_command_runner::{
     BoundedCommandError, BoundedCommandRequest, BoundedCommandResult, BoundedCommandRunner,
     TokioBoundedCommandRunner,
 };
+use cadence_aria::cross_cutting::provider_adapter::ProviderAdapterError;
 use cadence_aria::cross_cutting::provider_availability_gate::ProviderAvailabilityGate;
 use cadence_aria::cross_cutting::provider_health::{
     ProviderHealthService, SystemProviderHealthClock,
 };
+use cadence_aria::cross_cutting::provider_registry::ProviderRegistry;
+use cadence_aria::cross_cutting::streaming_provider::{
+    ProviderSession, StreamingProviderAdapter, StreamingProviderInput,
+};
 use cadence_aria::product::app_paths::ProductAppPaths;
+use cadence_aria::product::models::ProviderName;
 use cadence_aria::web::app::build_web_router;
 use cadence_aria::web::gateway_factory::LogicalCodebaseGatewayFactory;
 use cadence_aria::web::runtime::WebRuntime;
@@ -94,6 +100,50 @@ impl BoundedCommandRunner for P0CommandRunner {
     }
 }
 
+/// 生产同构的根规则材料（只需合法 UTF-8 正文；内容不影响发布契约）。
+const ROOT_POLICY_TEST_AGENTS: &str =
+    "# aggregate root rules\n\n- 根入口规则：成员仓统一遵守语言与工程规范。\n";
+const ROOT_POLICY_TEST_LANGUAGE: &str = "# 语言规则\n\n- 必须使用中文回答。\n";
+
+/// #8（aggregate-policy-root-publication）Task 5：P0 链路的生产同构 provider。
+///
+/// 末命令（`OpenspecAndExamples`）发布收口要求聚合根落盘根政策正文
+/// （根 `AGENTS.md` + `.claude/rules/language.md`）；P0 fixture 的 fake
+/// provider 不生成材料会使 publication fail-closed（operation Failed）。
+/// 这里照 `trust_route`/`root_safety` 先例，在真正执行 RuleAndMcpConfig
+/// 命令的时机（prompt 含 `/rule-config --no-interrupt`）向聚合根落盘规则
+/// 材料，其余行为原样委托默认 fake streaming provider——注入口只存在于
+/// 测试依赖图。
+struct RootRecipePublishingProvider {
+    inner: Arc<dyn StreamingProviderAdapter>,
+}
+
+#[async_trait]
+impl StreamingProviderAdapter for RootRecipePublishingProvider {
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        use cadence_aria::product::repository_store::RepositoryInitializationStepKind as RepoStep;
+        if RepoStep::RuleConfig
+            .command()
+            .is_some_and(|command| input.prompt.contains(command))
+        {
+            let root = input.working_dir.clone();
+            fs::write(root.join("AGENTS.md"), ROOT_POLICY_TEST_AGENTS)
+                .expect("write root AGENTS.md");
+            fs::create_dir_all(root.join(".claude").join("rules")).expect("create root rules dir");
+            fs::write(
+                root.join(".claude").join("rules").join("language.md"),
+                ROOT_POLICY_TEST_LANGUAGE,
+            )
+            .expect("write root language rule");
+        }
+        self.inner.start(input, cancel).await
+    }
+}
+
 /// P0 production-entrypoint fixture: after the real filesystem/Git setup every
 /// business operation goes through the web router. It deliberately does not
 /// seed registration, initialization, index, issue, selection, or lifecycle
@@ -165,9 +215,28 @@ impl P0HttpFixture {
         let provider_gate = Arc::new(ProviderAvailabilityGate::new(provider_health.clone()));
         let state = WebAppState::new(root.clone(), WebRuntime::new_fake(root.clone()))
             .with_provider_health(provider_health, provider_gate.clone(), command_runner);
+        // #8 Task 5：root recipe 的聚合根政策发布收口要求 provider 在
+        // RuleAndMcpConfig 时机生成根规则材料。默认 fake registry 的
+        // Claude Code 入口按生产同构语义换成发布 provider（其余 provider
+        // 名称原样保留，避免影响同 target 其他链路）。
+        let mut registry = ProviderRegistry::new();
+        for name in state.provider_registry.available_names() {
+            let provider = state
+                .provider_registry
+                .get(&name)
+                .expect("fake registry exposes every advertised provider");
+            if name == ProviderName::ClaudeCode {
+                registry.register(
+                    name,
+                    Arc::new(RootRecipePublishingProvider { inner: provider }),
+                );
+            } else {
+                registry.register(name, provider);
+            }
+        }
         let gateway_factory = Arc::new(LogicalCodebaseGatewayFactory::new(
             ProductAppPaths::new(root.join(".aria")),
-            state.provider_registry.clone(),
+            Arc::new(registry),
             state.provider_adapter.clone(),
             provider_gate,
         ));
