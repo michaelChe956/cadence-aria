@@ -6,6 +6,9 @@
 //! 任一基线内成员主 checkout 的 HEAD 或工作区发生变化即视为越界。D4 检测窗口
 //! = 基线内的 active 成员；manifest 保留的 Removed/Tombstoned 成员身份不进窗口
 //! （其主 checkout 可能已随移除清理），跳过它们不构成对它们的隔离宣称。
+//! Task 6b 起另以 [`revalidate_cross_target_baseline`] 做 baseline freshness
+//! 只读复检：重采全部 active 主 checkout 与冻结基线比对，差异/缺失在 spawn
+//! 前与交付前 fail-closed 阻断。
 //!
 //! 诚实边界：只监控成员主 checkout 的 HEAD/status。symlink 跳出仓外、`/tmp` 等
 //! 绝对路径写入、provider 运行中的实时越界不属于本模块检测范围（交 C-2 的
@@ -50,6 +53,10 @@ pub(crate) struct CrossTargetBaseline {
 /// provider role run 启动前采集并持久化所有 **active** 成员主 checkout 的越界
 /// 基线（D4 窗口 = active 成员；Removed/Tombstoned 成员不在窗口内）。
 ///
+/// Task 6b（baseline freshness）：本 role run 已有冻结基线（冻结早于本次
+/// spawn——准入/验证时冻结或失败重入）时，先只读复检再复用：漂移/证据缺失
+/// fail-closed 阻断，绝不静默重冻结把漂移洗白成新基线。
+///
 /// Legacy attempt（`target_snapshot` 为 `None`）不采 baseline，返回空基线且不落盘，
 /// 保持单仓路径现状（单仓跳过 D4）。
 pub(crate) fn capture_cross_target_baseline(
@@ -67,6 +74,50 @@ pub(crate) fn capture_cross_target_baseline(
         });
     }
 
+    let baseline_path = CodingAttemptStore::new(paths.clone())
+        .attempt_cross_target_baselines_path(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            run_id,
+        )
+        .map_err(|_| StableCode::CrossTargetStoreFailure)?;
+    // Task 6b（baseline freshness）：本 role run 已有冻结基线（冻结早于本次
+    // spawn——准入/验证时冻结或失败重入）时，先只读复检冻结基线与当前世界
+    // 的一致性：漂移/证据缺失 fail-closed（provider_stream 的 spawn 前置门以
+    // 本函数错误阻断整个 run，provider 进程启动计数为 0）；复检通过则保留
+    // 首采冻结直接复用，绝不静默重冻结把漂移洗白成新基线。
+    if baseline_path.exists() {
+        revalidate_cross_target_baseline(paths, attempt, run_id)?;
+        return read_json(&baseline_path).map_err(|_| StableCode::CrossTargetStoreFailure);
+    }
+
+    let member_checkouts = resolve_active_member_main_checkouts(paths, attempt)?;
+    let baseline = CrossTargetBaseline {
+        run_id: run_id.to_string(),
+        captured_at: now,
+        member_checkouts,
+    };
+    write_json(&baseline_path, &baseline).map_err(|_| StableCode::CrossTargetStoreFailure)?;
+
+    Ok(baseline)
+}
+
+/// 解析 attempt 所属 LC 的全部 **active** 成员主 checkout 并采样 HEAD/status
+/// （D4 重采窗口；capture 与 revalidate 共用同一窗口解析，均为只读 git 采样）。
+///
+/// Task 1.7（D4 生产 seam，root-cwd 迁移面）：基线窗口 = 全部 active 成员的
+/// 主 checkout。manifest.member_ids 永久保留 Removed/Tombstoned 成员身份
+/// （身份不可抹除），其主 checkout 记录可能已随移除清理——把非 active 成员
+/// 纳入基线既无检测意义（不在本次授权面内），又会把「成员已移除」误判为
+/// cross_target_store_failure 使 spawn 前硬失败。跳过非 active 成员不是对
+/// 它的隔离宣称：D4 检测窗口只覆盖 active 成员。active 成员证据不足（成员
+/// 记录缺失、Main checkout 不唯一、不可用、git 采样失败）fail-closed——
+/// 证据不足只能进入等待/阻断，绝不折算成「无越界」。
+fn resolve_active_member_main_checkouts(
+    paths: &ProductAppPaths,
+    attempt: &CodingExecutionAttempt,
+) -> Result<Vec<MemberCheckoutSnapshot>, StableCode> {
     // v1.3：按 attempt 所属 issue 的 lc_id 寻址（R9 编码/交付链切换点）；
     // 单仓/无 LC 回退 legacy project 级路径。
     let lc_id = crate::product::logical_codebase::resolve_issue_logical_codebase_id(
@@ -89,15 +140,6 @@ pub(crate) fn capture_cross_target_baseline(
 
     let mut member_checkouts = Vec::with_capacity(manifest.member_ids.len());
     for member_id in &manifest.member_ids {
-        // Task 1.7（D4 生产 seam，root-cwd 迁移面）：基线窗口 = 全部 active
-        // 成员的主 checkout。manifest.member_ids 永久保留 Removed/Tombstoned
-        // 成员身份（身份不可抹除），其主 checkout 记录可能已随移除清理——把
-        // 非 active 成员纳入基线既无检测意义（不在本次授权面内），又会把
-        // 「成员已移除」误判为 cross_target_store_failure 使 spawn 前硬失败。
-        // 跳过非 active 成员不是对它的隔离宣称：D4 检测窗口只覆盖基线内的
-        // active 成员。active 成员证据不足（成员记录缺失、Main checkout 不
-        // 唯一、不可用、git 采样失败）依旧 fail-closed——证据不足只能进入
-        // 等待/阻断，绝不折算成「无越界」。
         let member = authority
             .load_member(&attempt.project_id, *member_id)
             .map_err(|_| StableCode::CrossTargetStoreFailure)?
@@ -124,23 +166,7 @@ pub(crate) fn capture_cross_target_baseline(
             porcelain_status: git_status(&checkout.canonical_path)?,
         });
     }
-
-    let baseline = CrossTargetBaseline {
-        run_id: run_id.to_string(),
-        captured_at: now,
-        member_checkouts,
-    };
-    let baseline_path = CodingAttemptStore::new(paths.clone())
-        .attempt_cross_target_baselines_path(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            run_id,
-        )
-        .map_err(|_| StableCode::CrossTargetStoreFailure)?;
-    write_json(&baseline_path, &baseline).map_err(|_| StableCode::CrossTargetStoreFailure)?;
-
-    Ok(baseline)
+    Ok(member_checkouts)
 }
 
 /// provider role run 结束后重采各成员主 checkout 并与基线比对（窗口 = 基线内
@@ -185,13 +211,74 @@ pub(crate) fn detect_cross_target_violation(
     Ok(())
 }
 
+/// Task 6b（REQ-LCG-03/07）：D4 基线 freshness 只读复检 seam——重采**全部
+/// active 成员主 checkout**（与 [`capture_cross_target_baseline`] 同一窗口解析）
+/// 并与 run_id 的冻结基线比对；只读零副作用（不写任何 durable 状态）。
+///
+/// 复检不是用户 normal action 的 Unknown 旁路，仅作 spawn 前/交付前的硬门：
+/// - baseline 文件缺失（崩溃重启/丢失）→ `cross_target_baseline_missing`；
+/// - 重采窗口与冻结基线的任一差异（成员集合增减、canonical path、HEAD、
+///   工作区 porcelain 状态）→ `cross_target_violation_detected`；
+/// - 证据不足（成员记录缺失、Main checkout 不唯一/不可用、git 采样失败、
+///   基线文件损坏）→ `cross_target_store_failure`——绝不折算成「无漂移」。
+/// - Legacy attempt（`target_snapshot` 为 `None`）不复检，保持单仓现状。
+pub(crate) fn revalidate_cross_target_baseline(
+    paths: &ProductAppPaths,
+    attempt: &CodingExecutionAttempt,
+    run_id: &str,
+) -> Result<(), StableCode> {
+    if attempt.target_snapshot.is_none() {
+        // 单仓红线：Legacy attempt 不复检，行为不变。
+        return Ok(());
+    }
+
+    let baseline_path = CodingAttemptStore::new(paths.clone())
+        .attempt_cross_target_baselines_path(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            run_id,
+        )
+        .map_err(|_| StableCode::CrossTargetStoreFailure)?;
+    if !baseline_path.exists() {
+        return Err(StableCode::CrossTargetBaselineMissing);
+    }
+    let baseline: CrossTargetBaseline =
+        read_json(&baseline_path).map_err(|_| StableCode::CrossTargetStoreFailure)?;
+
+    // 重采全部 active main checkout（fresh 窗口而非冻结窗口）：现窗口与冻结
+    // 窗口的集合或内容差异都构成漂移证据。
+    let fresh = resolve_active_member_main_checkouts(paths, attempt)?;
+    if fresh.len() != baseline.member_checkouts.len() {
+        return Err(StableCode::CrossTargetViolationDetected);
+    }
+    for snapshot in &fresh {
+        let frozen = baseline
+            .member_checkouts
+            .iter()
+            .find(|frozen| frozen.logical_repository_id == snapshot.logical_repository_id)
+            .ok_or(StableCode::CrossTargetViolationDetected)?;
+        if snapshot.canonical_path != frozen.canonical_path
+            || snapshot.head_revision != frozen.head_revision
+            || snapshot.porcelain_status != frozen.porcelain_status
+        {
+            return Err(StableCode::CrossTargetViolationDetected);
+        }
+    }
+
+    Ok(())
+}
+
 /// 交付前统一门（Task 15）：对 attempt 的全部 provider role run 逐个重采比对。
 ///
 /// - Legacy attempt（`target_snapshot` 为 `None`）→ 单仓红线，直接放行；
 /// - 无 role run（未跑 provider run）→ 按无越界放行；
 /// - 每个 role run 经 [`detect_cross_target_violation`] 比对：任一越界 →
 ///   `cross_target_violation_detected`，基线文件缺失（崩溃重启/丢失）→
-///   `cross_target_baseline_missing`，均阻断交付。
+///   `cross_target_baseline_missing`，均阻断交付；
+/// - Task 6b：每个 role run 再经 [`revalidate_cross_target_baseline`] 复检
+///   （重采全部 active main checkout 与冻结基线比对），窗口/内容差异或证据
+///   缺失同样阻断交付。
 pub(crate) fn detect_cross_target_violation_for_delivery(
     paths: &ProductAppPaths,
     attempt: &CodingExecutionAttempt,
@@ -206,6 +293,9 @@ pub(crate) fn detect_cross_target_violation_for_delivery(
         .map_err(|_| StableCode::CrossTargetStoreFailure)?;
     for role_run in &role_runs {
         detect_cross_target_violation(paths, attempt, &role_run.id)?;
+        // Task 6b：交付前 freshness 复检——重采全部 active main checkout 与该
+        // role run 的冻结基线比对（窗口增减/漂移/缺失均阻断）。
+        revalidate_cross_target_baseline(paths, attempt, &role_run.id)?;
     }
     Ok(())
 }

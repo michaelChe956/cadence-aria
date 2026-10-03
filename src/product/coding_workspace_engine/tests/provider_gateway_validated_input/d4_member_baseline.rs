@@ -11,8 +11,6 @@ struct D4MemberFixture {
     #[allow(dead_code)]
     target_checkout: PathBuf,
     other_active_checkout: PathBuf,
-    /// manifest 成员身份（Task 6b 窗口变化用例需要重签 manifest）。
-    member_ids: Vec<LogicalRepositoryId>,
 }
 
 fn seed_d4_member_codebase(
@@ -112,7 +110,6 @@ fn seed_d4_member_codebase(
     D4MemberFixture {
         target_checkout: repo_a,
         other_active_checkout: repo_b,
-        member_ids: vec![member_a, member_b, removed_member],
     }
 }
 
@@ -918,18 +915,16 @@ async fn lcg_t06_revalidate_resamples_full_active_main_window() {
     init_test_git_repo(&repo_d);
     let member_d = LogicalRepositoryId(uuid::Uuid::new_v4());
     let logical_store = LogicalCodebaseStore::new(store.paths());
-    let mut member_ids = members.member_ids.clone();
-    member_ids.push(member_d);
+    // 成员变更走 manifest membership_revision 递增的合法路径（identity 不变）。
+    let mut manifest = logical_store
+        .load_manifest(&logical_attempt.project_id)
+        .expect("load manifest")
+        .expect("seeded manifest");
+    manifest.member_ids.push(member_d);
+    manifest.membership_revision += 1;
     logical_store
-        .save_manifest(
-            &logical_attempt.project_id,
-            &LogicalCodebaseManifest::new(
-                &logical_attempt.project_id,
-                store.paths().root().to_path_buf(),
-                member_ids,
-            ),
-        )
-        .expect("re-sign manifest with the new active member");
+        .save_manifest(&logical_attempt.project_id, &manifest)
+        .expect("advance manifest membership with the new active member");
     let now = "2026-10-01T00:00:00Z".to_string();
     let source_identity =
         RepositorySourceIdentity::from_git_parts(&repo_d, repo_d.join(".git"), None);
