@@ -158,6 +158,8 @@ pub enum ProviderBoundaryError {
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 
+use crate::cross_cutting::process_manager::ProcessManager;
+use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
 
 /// 可信二进制目录(launcher 自身解析 bwrap/git 用;子进程环境由调用方决定)。
@@ -272,6 +274,12 @@ impl ProviderBoundaryLauncher {
         for runtime_root in provider_runtime_writable_roots(env_vars) {
             push_mount(&mut argv, "--bind", &runtime_root);
         }
+        // 后置只读挂载保护:target `.git` 指针(linked-worktree 文件形态)与
+        // 所有 `.aria`(及 plan 受保护根)在 rw bind 之后重新遮蔽为只读
+        // ——bwrap 按 argv 顺序应用挂载,后挂载遮蔽先挂载。
+        for protected in protected_shadow_roots(plan) {
+            push_mount(&mut argv, "--ro-bind", &protected);
+        }
         // cwd 保持 root 原路径(不照搬 Kimi terminal 的 /tmp/work 改写)。
         argv.push(OsString::from("--chdir"));
         argv.push(working_dir.as_os_str().to_os_string());
@@ -285,6 +293,177 @@ impl ProviderBoundaryLauncher {
     }
 }
 
+/// 后置只读挂载保护集合(段 2):plan 受保护根 + 自动派生的 target 元数据
+/// ——linked worktree 的 `.git` 指针(文件形态;plain repo 的 `.git` 目录
+/// 沿 target 写面=既有授权,不遮蔽,Main 裁决不新增整个 `.git` 写授权)与
+/// target `.aria`(root/成员 `.aria` 已由只读 host 覆盖)。仅保留存在的
+/// 路径(bwrap bind 缺失源会失败),排序去重。
+pub(crate) fn protected_shadow_roots(plan: &ProviderBoundaryPlan) -> Vec<PathBuf> {
+    let mut shadows: Vec<PathBuf> = plan.protected_roots().to_vec();
+    if let Some(target) = plan.target_root() {
+        let git_pointer = target.join(".git");
+        if std::fs::symlink_metadata(&git_pointer)
+            .map(|metadata| metadata.is_file())
+            .unwrap_or(false)
+        {
+            shadows.push(git_pointer);
+        }
+        shadows.push(target.join(".aria"));
+    }
+    shadows.retain(|path| path.exists());
+    shadows.sort();
+    shadows.dedup();
+    shadows
+}
+
+// ============================================================================
+// Task 6a:写面探针(受控隔离 fixture 的探测通道;6c 真实 probe 与验收复用)
+// ============================================================================
+
+/// 单次写探针结果:拒绝必须带证据(errno/shell 报文),未观测到证据的
+/// 「拒绝」不可计入支持面。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundaryWriteAttempt {
+    path: PathBuf,
+    refused: bool,
+    evidence: String,
+}
+
+impl BoundaryWriteAttempt {
+    fn refused_with(path: PathBuf, evidence: String) -> Self {
+        Self {
+            path,
+            refused: true,
+            evidence,
+        }
+    }
+
+    fn allowed(path: PathBuf) -> Self {
+        Self {
+            path,
+            refused: false,
+            evidence: String::new(),
+        }
+    }
+
+    /// 拒绝且带证据(可审计):`was_refused_with_evidence` 是写边界验收的
+    /// 唯一「拒绝」口径。
+    pub fn was_refused_with_evidence(&self) -> bool {
+        self.refused && !self.evidence.trim().is_empty()
+    }
+
+    /// 写结果:Ok(())= 写成功并真实落盘;Err(evidence)= 被拒并带证据。
+    pub fn result(&self) -> Result<(), String> {
+        if self.refused {
+            Err(self.evidence.clone())
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn evidence(&self) -> &str {
+        &self.evidence
+    }
+}
+
+/// shell 单引号转义(探针路径/脚本片段嵌入用)。
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// 内置通道写探针(provider 进程自身直接写):在真实产品写边界沙箱内逐
+/// 路径尝试写入并结构化回报结果。进程退出非 0(如 bwrap 无法建
+/// namespace/mount)直接报错——不把「沙箱起不来」当拒绝或成功。
+pub async fn run_builtin_write_probe(
+    launcher: &ProviderBoundaryLauncher,
+    plan: &ProviderBoundaryPlan,
+    env_vars: &BTreeMap<String, String>,
+    paths: &[PathBuf],
+) -> Result<Vec<BoundaryWriteAttempt>, ProviderAdapterError> {
+    let mut script = String::new();
+    for (index, path) in paths.iter().enumerate() {
+        let quoted = shell_quote(&path.to_string_lossy());
+        let error_file = format!("/tmp/.aria-boundary-probe-{index}.err");
+        script.push_str(&format!(
+            "if ( printf aria-boundary-probe >{quoted} ) 2>{error_file}; then printf 'A {index} ok\\n'; \
+             else printf 'A {index} refused %s\\n' \"$(tr '\\n' ' ' <{error_file} | cut -c1-160)\"; fi\n"
+        ));
+    }
+    run_probe_script(launcher, plan, env_vars, &script, paths).await
+}
+
+/// 在写边界沙箱内执行探针脚本并解析 `A <i> ok|refused <evidence>` 哨兵。
+async fn run_probe_script(
+    launcher: &ProviderBoundaryLauncher,
+    plan: &ProviderBoundaryPlan,
+    env_vars: &BTreeMap<String, String>,
+    script: &str,
+    paths: &[PathBuf],
+) -> Result<Vec<BoundaryWriteAttempt>, ProviderAdapterError> {
+    use tokio::io::AsyncReadExt;
+    use tokio_util::sync::CancellationToken;
+
+    let mut process = ProcessManager::spawn_with_boundary_resolved(
+        launcher.clone(),
+        "sh",
+        &["-c", script],
+        plan.working_directory(),
+        env_vars,
+        plan,
+        CancellationToken::new(),
+    )
+    .await?;
+    drop(process.stdin);
+    let (mut stdout, mut stderr) = (process.stdout, process.stderr);
+    let mut child = process.child;
+    let (status, mut stdout_text, mut stderr_text) =
+        tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            let mut stdout_text = String::new();
+            let mut stderr_text = String::new();
+            stdout.read_to_string(&mut stdout_text).await.ok();
+            stderr.read_to_string(&mut stderr_text).await.ok();
+            let status = child.wait().await;
+            (status, stdout_text, stderr_text)
+        })
+        .await
+        .map_err(|_| ProviderAdapterError::timeout(String::new(), String::new(), 60_000))?;
+    let status = status.map_err(|error| {
+        ProviderAdapterError::execution_failed(None, String::new(), error.to_string(), 0)
+    })?;
+    if !status.success() {
+        // 沙箱自身失败(bwrap/namespace/mount):显式报错,不产生 attempt。
+        stderr_text.truncate(400);
+        return Err(ProviderAdapterError::execution_failed(
+            status.code(),
+            stdout_text,
+            stderr_text,
+            0,
+        ));
+    }
+    let mut attempts = Vec::with_capacity(paths.len());
+    for (index, path) in paths.iter().enumerate() {
+        let sentinel = stdout_text
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("A {index} ")));
+        let attempt = match sentinel {
+            Some(rest) if rest.starts_with("ok") => BoundaryWriteAttempt::allowed(path.clone()),
+            Some(rest) => BoundaryWriteAttempt::refused_with(
+                path.clone(),
+                rest.trim_start_matches("refused").trim().to_string(),
+            ),
+            None => BoundaryWriteAttempt::refused_with(
+                path.clone(),
+                "probe sentinel missing (write unobserved)".to_string(),
+            ),
+        };
+        attempts.push(attempt);
+    }
+    Ok(attempts)
+}
 fn push_mount(argv: &mut Vec<OsString>, flag: &str, source: &Path) {
     let mount = source.as_os_str().to_str().expect("utf8 mount path");
     for value in [flag, mount, mount] {
