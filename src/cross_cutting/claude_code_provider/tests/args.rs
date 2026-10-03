@@ -103,3 +103,38 @@ done
         );
     }
 }
+
+/// Task 4a Step 1(断言组 296-297 逐字):LC validated argv 必须携带冻结的
+/// deny token 片段与 headless MCP allowlist;无通用 tool policy 的 Coding
+/// 角色无 deny token 但 allowlist 仍在。
+#[test]
+fn lcg_t04_claude_projection_has_headless_mcp_allowlist_and_deny_tokens() {
+    let provider = ClaudeCodeProvider::new(PathBuf::from("claude"));
+    let deny = ProviderToolPolicy::deny_file_write_builtins();
+
+    // 策略角色(Planning/Review):deny token 冻结片段逐字 + allowlist。
+    let claude_args = provider.build_lc_validated_args(Some("sess-lc-7"), Some(&deny));
+    assert!(
+        claude_args
+            .windows(2)
+            .any(|p| p == ["--disallowedTools", "Edit,Write,NotebookEdit"])
+    );
+    assert!(claude_args.iter().any(|arg| arg == "--allowedTools"));
+    // allowlist 值成对跟随,且只列既有合法只读内建工具(不含写通道/MCP 写工具)。
+    assert!(claude_args.windows(2).any(|p| p
+        == [
+            "--allowedTools",
+            crate::cross_cutting::claude_code_provider::projection::CLAUDE_LC_ALLOWED_TOOLS
+        ]));
+
+    // resume 片段沿用;deny/allowlist 互不干扰。
+    assert!(claude_args.contains(&"--resume".to_string()));
+    assert!(claude_args.contains(&"sess-lc-7".to_string()));
+
+    // 无通用策略的 Coding 角色:无 deny token,allowlist 仍在。
+    let coding_args = provider.build_lc_validated_args(None, None);
+    assert!(coding_args.iter().any(|arg| arg == "--allowedTools"));
+    assert!(!coding_args.contains(&"--disallowedTools".to_string()));
+    assert!(!coding_args.contains(&"--resume".to_string()));
+    assert!(coding_args.contains(&"--permission-prompt-tool=stdio".to_string()));
+}

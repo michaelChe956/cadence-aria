@@ -325,6 +325,7 @@ impl StreamingProviderAdapter for CodexProvider {
                     .map(ToString::to_string),
                 provider_version,
                 adapter_dialect: session::CODEX_POLICY_DIALECT.to_string(),
+                lc_projection: None,
             });
             if let Err(error) = sink.append_bound(audit_event) {
                 let _ = child.start_kill();

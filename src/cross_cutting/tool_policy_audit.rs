@@ -74,6 +74,29 @@ impl std::fmt::Display for ToolPolicyAuditError {
 
 impl std::error::Error for ToolPolicyAuditError {}
 
+/// LC validated 启动统一落盘的权限投影摘要(Task 4,REQ-LCG-03)。
+///
+/// 与 `ProviderPolicyProjection` 的冻结 getter 同源:`capability_projection_
+/// digest` 是该 provider+version+action 的完整权限 profile 摘要(action row
+/// 的 projection_digest 同源,不随单次 role 变化),`projection_digest` 是当前
+/// 会话全投影摘要(含 role/root/target/authority/trust/config)——两者分层
+/// 记录;wire dialect/action/boundary 引用随行,供 2c/2d 三方一致性校验与
+/// Task 9 的 resume 漂移比对消费。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+pub struct LcProjectionAudit {
+    /// 投影 action 的稳定文本(`planning_read_only`/`coding_target_write`/
+    /// `review_read_only`)。
+    pub action: String,
+    /// wire dialect 序列化值(如 `claude-stream-json`)。
+    pub wire_dialect: String,
+    /// 完整权限 profile 摘要(`sha256:` 前缀 + 64 位小写 hex;不随单次 role 变化)。
+    pub capability_projection_digest: String,
+    /// 当前会话全投影摘要(`sha256:` 前缀 + 64 位小写 hex)。
+    pub projection_digest: String,
+    /// boundary 计划/证据引用(read-only action 为空串)。
+    pub boundary_evidence_ref: String,
+}
+
 /// `provider_start`（D7/GC9）：一次策略 provider run 的启动指纹。
 /// D6 冻结持久化字段：`workspace_session_id`、`provider_session_id`、
 /// `tool_policy_canonical_digest`、`provider_version`、`adapter_dialect`、
@@ -105,6 +128,12 @@ pub struct ProviderStartAudit {
     pub provider_version: String,
     /// adapter dialect 常量（如 `codex-app-server-rpc`/`claude-stream-json`/`pi-rpc`）。
     pub adapter_dialect: String,
+    /// LC 权限投影摘要(Task 4 统一落盘)。direct/legacy 策略路径恒为 `None`
+    /// 且序列化省略(旧 durable 审计字节不变、旧文件经 serde 缺省仍可解析);
+    /// LC validated 启动必填——无通用 tool policy 的角色同样落盘,不以
+    /// `tool_policy=None` 跳过统一 launch audit。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lc_projection: Option<LcProjectionAudit>,
 }
 
 impl ProviderStartAudit {
@@ -288,6 +317,8 @@ pub fn provider_start_record(
         approval_policy: Some("on-request".to_string()),
         provider_version: provider_version.to_string(),
         adapter_dialect: adapter_dialect.to_string(),
+        // direct 策略会话 fixture:无 LC 投影(仅 LC validated 启动落盘)。
+        lc_projection: None,
     }
 }
 

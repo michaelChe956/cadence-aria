@@ -598,6 +598,7 @@ fn matching_resume_record(
         provider_version: "codex 0.124.0-policy-fixture".to_string(),
         adapter_dialect: "codex-app-server-rpc".to_string(),
         provider_session_id: provider_session_id.to_string(),
+        lc_projection: None,
     }
 }
 

@@ -27,6 +27,7 @@ fn provider_start_event(provider: &str) -> DurableToolPolicyEvent {
             approval_policy: None,
             provider_version: "provider 1.2.3".to_string(),
             adapter_dialect: "codex-app-server-rpc".to_string(),
+            lc_projection: None,
         },
     )
 }
@@ -235,6 +236,7 @@ async fn tool_policy_audit_resume_drift_superseded_lands_on_replaced_run_file() 
         approval_policy: None,
         provider_version: "pi 9.9.9-stale".to_string(),
         adapter_dialect: PI_POLICY_DIALECT.to_string(),
+        lc_projection: None,
     };
     sink_append(store.as_ref(), "ws-drift", 0, stale);
     let next_seq = store.next_tool_policy_role_run_seq("ws-drift").unwrap();

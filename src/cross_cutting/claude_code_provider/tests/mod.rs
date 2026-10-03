@@ -244,3 +244,275 @@ async fn capture_choice_control_response(
         .expect("cat status");
     serde_json::from_str(&line).expect("choice control response json")
 }
+
+// ==== Task 4a:LC validated launch 测试 fixture ====
+// 经真实 `LogicalCodebaseProviderGateway::validate` 链产出
+// `ValidatedStreamingProviderInput`(envelope 由 bootstrap 政策冻结),
+// 供 `start_validated` 的 LC 审计/原生会话测试消费。
+
+use crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate;
+use crate::cross_cutting::provider_registry::ProviderRegistry;
+use crate::cross_cutting::session_launch::ValidatedStreamingProviderInput;
+use crate::cross_cutting::streaming_provider::StreamingProviderAdapter;
+use crate::cross_cutting::tool_policy_audit::ToolPolicyAuditSink;
+use crate::product::app_paths::ProductAppPaths;
+use crate::product::logical_codebase::policy::{
+    AggregatePolicyArtifactStore, PolicyTarget, ProviderDialect, ProviderWireDialect,
+    SessionPolicyAction,
+};
+use crate::product::logical_codebase::provider_capability_store::ProviderActionCapability;
+use crate::product::logical_codebase::provider_gateway::{
+    GatewayRunAudit, LogicalCodebaseProviderGateway, PolicyTargetResolver, ProviderCapability,
+    ProviderCapabilitySource, ProviderGatewayError, ProviderRef, ProviderRefType,
+    SessionLaunchRequest,
+};
+use crate::product::logical_codebase::store::LogicalCodebaseManifest;
+use crate::product::models::ProviderName;
+use crate::protocol::contracts::{AdapterOutput, TimeoutStatus};
+
+/// LC fixture 的 capability 源:仅返回 Claude Code 的已实测快照(三格
+/// Confirmed 的 fixture 事实;真实 probe/evidence 归 6c/2d)。
+struct LcStaticCapabilitySource;
+
+fn lc_claude_capability() -> ProviderCapability {
+    ProviderCapability {
+        provider_type: ProviderRefType::ClaudeCode,
+        version: "claude 2.0.4-lc-fixture".to_string(),
+        adapter_dialect: ProviderDialect::ClaudeCodeCliV1,
+        wire_dialect: ProviderWireDialect::ClaudeCodeStreamJson,
+        capability_snapshot_ref: "cap_claude_code_lc_fixture".to_string(),
+        action_capability: ProviderActionCapability {
+            action: SessionPolicyAction::CodingTargetWrite,
+            launch:
+                crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence::Confirmed,
+            resume:
+                crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence::Confirmed,
+            write_boundary:
+                crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence::Confirmed,
+            projection_digest: String::new(),
+            evidence_ref: String::new(),
+        },
+        trust: crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence::Confirmed,
+    }
+}
+
+impl ProviderCapabilitySource for LcStaticCapabilitySource {
+    fn require_supported(
+        &self,
+        _provider: &ProviderRef,
+        _action: SessionPolicyAction,
+    ) -> Result<ProviderCapability, ProviderGatewayError> {
+        Ok(lc_claude_capability())
+    }
+
+    fn require_resume_supported(
+        &self,
+        _provider: &ProviderRef,
+        _action: SessionPolicyAction,
+    ) -> Result<ProviderCapability, ProviderGatewayError> {
+        Ok(lc_claude_capability())
+    }
+
+    fn require_write_boundary(
+        &self,
+        _provider: &ProviderRef,
+        _action: SessionPolicyAction,
+    ) -> Result<ProviderCapability, ProviderGatewayError> {
+        Ok(lc_claude_capability())
+    }
+
+    fn require_root_recipe_supported(
+        &self,
+        _provider: &ProviderRef,
+        _credential: &crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
+    ) -> Result<ProviderCapability, ProviderGatewayError> {
+        Err(ProviderGatewayError::UnsupportedCapability(
+            "lc fixture has no root recipe facts".to_string(),
+        ))
+    }
+}
+
+/// LC fixture 的 target resolver:直接返回请求冻结的 target(validate 链
+/// 的 target 复验语义由 gateway 域测试覆盖)。
+struct LcTargetResolver;
+
+impl PolicyTargetResolver for LcTargetResolver {
+    fn resolve_and_revalidate(
+        &self,
+        request: &SessionLaunchRequest,
+    ) -> Result<PolicyTarget, ProviderGatewayError> {
+        Ok(request.target.clone())
+    }
+}
+
+/// 占位 streaming adapter:validate 不触 registry,仅为 gateway 构造提供槽位。
+struct LcNoopStreamingAdapter;
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for LcNoopStreamingAdapter {}
+
+/// 占位 sync adapter:gateway 构造参数,LC validated 测试不调用。
+struct LcNoopSyncAdapter;
+
+impl crate::cross_cutting::provider_adapter::ProviderAdapter for LcNoopSyncAdapter {
+    fn run(
+        &self,
+        _input: &crate::protocol::contracts::AdapterInput,
+    ) -> Result<AdapterOutput, crate::cross_cutting::provider_adapter::ProviderAdapterError> {
+        Ok(AdapterOutput {
+            exit_code: Some(0),
+            stdout: "ok".to_string(),
+            stderr: String::new(),
+            structured_output: None,
+            files_modified: Vec::new(),
+            duration_ms: 0,
+            timeout_status: TimeoutStatus::NotTimedOut,
+        })
+    }
+}
+
+fn lc_available_gate() -> Arc<ProviderAvailabilityGate> {
+    use crate::cross_cutting::provider_availability_gate::ProviderHealthSource;
+    use crate::cross_cutting::provider_health::{ProviderHealthEntry, ProviderHealthSnapshot};
+    use chrono::Utc;
+
+    struct AlwaysHealthy(Arc<ProviderHealthSnapshot>);
+    impl ProviderHealthSource for AlwaysHealthy {
+        fn snapshot(&self) -> Arc<ProviderHealthSnapshot> {
+            self.0.clone()
+        }
+        fn degraded(&self) -> bool {
+            false
+        }
+    }
+
+    let checked_at = Utc::now();
+    let snapshot = Arc::new(ProviderHealthSnapshot {
+        schema_version: 1,
+        generation: 1,
+        checked_at,
+        providers: [ProviderName::ClaudeCode]
+            .into_iter()
+            .map(|provider| ProviderHealthEntry {
+                provider,
+                command: "stub".to_string(),
+                available: true,
+                version: Some("1.0".to_string()),
+                reason_code: None,
+                reason: None,
+                checked_at,
+            })
+            .collect(),
+    });
+    Arc::new(ProviderAvailabilityGate::new(Arc::new(AlwaysHealthy(
+        snapshot,
+    ))))
+}
+
+struct LcLaunchFixture {
+    _root: tempfile::TempDir,
+    paths: ProductAppPaths,
+    audit: Arc<GatewayRunAudit>,
+}
+
+impl LcLaunchFixture {
+    fn new() -> Self {
+        let root = tempfile::tempdir().expect("lc fixture root");
+        let paths = ProductAppPaths::new(root.path());
+        let manifest =
+            LogicalCodebaseManifest::new("project_0001", root.path().to_path_buf(), vec![]);
+        AggregatePolicyArtifactStore::new(paths.clone())
+            .ensure_bootstrap(&manifest)
+            .expect("install lc bootstrap policy");
+        let fixture = Self {
+            _root: root,
+            paths,
+            audit: Arc::new(GatewayRunAudit::new()),
+        };
+        fixture.target_worktree();
+        fixture
+    }
+
+    /// canonical LC root(= manifest provider_context_root)。
+    fn canonical_root(&self) -> PathBuf {
+        std::fs::canonicalize(self.paths.root()).expect("lc fixture root exists")
+    }
+
+    /// 唯一可写 target(成员 worktree;与 canonical root 分离)。
+    fn target_worktree(&self) -> PathBuf {
+        let worktree = self.paths.root().join("member-worktree");
+        std::fs::create_dir_all(&worktree).expect("create member worktree");
+        worktree
+    }
+
+    fn gateway(&self) -> LogicalCodebaseProviderGateway {
+        let mut registry = ProviderRegistry::new();
+        registry.register(ProviderName::ClaudeCode, Arc::new(LcNoopStreamingAdapter));
+        LogicalCodebaseProviderGateway::with_audit(
+            AggregatePolicyArtifactStore::new(self.paths.clone()),
+            Arc::new(LcStaticCapabilitySource),
+            Arc::new(LcTargetResolver),
+            Arc::new(registry),
+            Arc::new(LcNoopSyncAdapter),
+            lc_available_gate(),
+            self.audit.clone(),
+            self.canonical_root(),
+        )
+    }
+
+    /// LC coding 请求:cwd=canonical root,target=成员 worktree,恰一个
+    /// 可写 root=target(read-only 语义由 planning 请求变体覆盖)。
+    fn coding_request(&self) -> SessionLaunchRequest {
+        let manifest =
+            LogicalCodebaseManifest::new("project_0001", self.paths.root().to_path_buf(), vec![]);
+        let worktree = self.target_worktree();
+        SessionLaunchRequest {
+            project_id: manifest.project_id,
+            provider: ProviderRef::claude_code("cap_claude_code_lc_fixture"),
+            action: SessionPolicyAction::CodingTargetWrite,
+            target: PolicyTarget::checkout("logical_repo_0001", "checkout_0001", worktree.clone()),
+            working_directory: self.canonical_root(),
+            readable_roots: vec![self.canonical_root()],
+            writable_roots: vec![worktree],
+            config_artifact_ref: "sha256:managed-config-artifact".to_string(),
+        }
+    }
+
+    /// LC streaming input(Executor/Coder 形态默认无通用 tool policy)。
+    fn lc_streaming_input(
+        &self,
+        role: AdapterRole,
+        tool_policy: Option<crate::cross_cutting::streaming_provider::ProviderToolPolicy>,
+        audit_sink: Option<Arc<dyn ToolPolicyAuditSink>>,
+        resume_id: Option<String>,
+    ) -> StreamingProviderInput {
+        StreamingProviderInput {
+            working_directory: Some(self.canonical_root()),
+            baseline_tree: None,
+            tool_policy,
+            audit_sink,
+            provider_type: ProviderType::ClaudeCode,
+            role,
+            prompt: "Run the LC fixture provider".to_string(),
+            working_dir: self.target_worktree(),
+            workspace_session_id: Some("ws-lc-fixture-1".to_string()),
+            resume_provider_session_id: resume_id,
+            permission_mode: crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
+            structured_output_contract: None,
+            env_vars: BTreeMap::new(),
+            timeout_secs: 60,
+        }
+    }
+
+    /// 经真实 gateway validate 产出 coding validated input。
+    fn validated_coding_input(
+        &self,
+        raw: StreamingProviderInput,
+    ) -> ValidatedStreamingProviderInput {
+        let validated = self
+            .gateway()
+            .validate(self.coding_request())
+            .expect("lc coding launch validates");
+        ValidatedStreamingProviderInput::new(raw, validated)
+    }
+}

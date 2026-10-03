@@ -210,6 +210,7 @@ async fn pi_policy_start_reuses_resume_session_id_as_native_id() {
             provider_version: "pi 0.83.0-policy-fixture".to_string(),
             adapter_dialect: PI_POLICY_DIALECT.to_string(),
             provider_session_id: "pi-session-resume-policy".to_string(),
+            lc_projection: None,
         },
     );
     let provider =
@@ -294,6 +295,7 @@ async fn pi_policy_resume_compares_frozen_triple_and_supersedes_on_drift() {
             provider_version: "pi 0.83.0-policy-fixture".to_string(),
             adapter_dialect: PI_POLICY_DIALECT.to_string(),
             provider_session_id: "pi-session-resume-policy".to_string(),
+            lc_projection: None,
         };
 
     // 匹配：resume id 保留为 native id，无 superseded 审计。

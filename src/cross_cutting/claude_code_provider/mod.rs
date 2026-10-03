@@ -25,8 +25,11 @@ use crate::cross_cutting::tool_policy_audit::{
 };
 
 mod ask_user_question;
+mod projection;
 mod stream;
 mod tool;
+
+pub use projection::ClaudePolicyProjector;
 
 #[cfg(test)]
 pub mod tests;
@@ -201,6 +204,19 @@ impl ClaudeCodeProvider {
         args.push("--permission-prompt-tool=stdio".to_string());
 
         args
+    }
+
+    /// LC validated 启动的 argv(Task 4a):在 headless 基础片段上追加冻结的
+    /// MCP/内建工具 allowlist(`--allowedTools`);策略角色(Planning/Review)
+    /// 追加 deny token 冻结片段。direct `build_args` 保持逐字节不变。
+    ///
+    /// Task 4a 阶段 1 RED 桩:阶段 2 实现真实 argv。
+    fn build_lc_validated_args(
+        &self,
+        _resume_provider_session_id: Option<&str>,
+        _tool_policy: Option<&crate::cross_cutting::streaming_provider::ProviderToolPolicy>,
+    ) -> Vec<String> {
+        Vec::new()
     }
 
     fn parse_stream_text_delta(value: &Value) -> Option<String> {
@@ -840,6 +856,8 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
                     approval_policy: None,
                     provider_version: provider_version.clone(),
                     adapter_dialect: CLAUDE_POLICY_DIALECT.to_string(),
+                    // direct 策略会话:无 LC 投影(仅 LC validated 启动落盘)。
+                    lc_projection: None,
                 });
                 // F2（最终审）：审计写入前再验 provider_session_id 非空——空白
                 // 原生会话 id 不得进入 durable 审计（fresh/resume 两路同验）。
@@ -1015,5 +1033,24 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
             events: event_rx,
             commands,
         })
+    }
+
+    /// LC validated 启动(Task 4a):只接受 gateway 产出的 validated input,
+    /// 消费冻结 envelope/boundary plan 并统一落盘 `ProviderStartAudit.
+    /// lc_projection`;无通用 tool policy 的角色同样执行 version 解析、
+    /// 原生握手与统一 launch audit,不以 `tool_policy=None` 早退。
+    ///
+    /// Task 4a 阶段 1 RED 桩:阶段 2 实现真实启动链。
+    async fn start_validated(
+        &self,
+        _input: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        Err(ProviderAdapterError::execution_failed(
+            None,
+            String::new(),
+            "claude lc validated start is not implemented yet (task 4a red stub)",
+            0,
+        ))
     }
 }
