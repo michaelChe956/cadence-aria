@@ -469,3 +469,294 @@ fn pi_policy_input_fixture_keeps_env_vars_bounded() {
     assert_eq!(input.provider_type, ProviderType::Pi);
     let _ = Ordering::SeqCst;
 }
+
+// ==== Task 4b:Pi LC 权限投影与统一 launch audit ====
+
+use crate::cross_cutting::pi_provider::{PiPolicyProjector, projection};
+use crate::product::logical_codebase::policy::{
+    PolicyTarget, ProviderDialect, ProviderWireDialect, SessionPolicyAction, SessionPolicyEnvelope,
+};
+use crate::product::logical_codebase::provider_gateway::ProviderRef;
+use crate::product::logical_codebase::provider_projection::{
+    ProviderPolicyProjector, ProviderProjectionInput,
+};
+
+fn lc_projection_envelope(
+    action: SessionPolicyAction,
+    target_worktree: PathBuf,
+    config_artifact_ref: &str,
+    config_digest: &str,
+) -> SessionPolicyEnvelope {
+    let writable_roots = match action {
+        SessionPolicyAction::CodingTargetWrite => vec![target_worktree.clone()],
+        SessionPolicyAction::PlanningReadOnly | SessionPolicyAction::ReviewReadOnly => Vec::new(),
+    };
+    SessionPolicyEnvelope {
+        policy_id: "policy-lc-0001".to_string(),
+        policy_revision: 1,
+        policy_digest: "sha256:policy-lc-0001".to_string(),
+        action,
+        target: PolicyTarget::checkout("logical_repo_0001", "checkout_0001", target_worktree),
+        working_directory: PathBuf::from("/lc/lc-root"),
+        readable_roots: vec![PathBuf::from("/lc/lc-root")],
+        writable_roots,
+        provider_dialect: ProviderDialect::PiRpcV1,
+        config_artifact_ref: config_artifact_ref.to_string(),
+        config_digest: config_digest.to_string(),
+        created_at: "2026-10-03T00:00:00Z".to_string(),
+        authority_root: PathBuf::from("/lc/lc-root"),
+    }
+}
+
+fn lc_projection_input(
+    envelope: SessionPolicyEnvelope,
+    role: AdapterRole,
+    tool_policy: Option<ProviderToolPolicy>,
+    trust_digest: &str,
+) -> ProviderProjectionInput {
+    ProviderProjectionInput::new(
+        envelope.clone(),
+        ProviderRef::pi("cap_pi_lc_fixture"),
+        envelope.action,
+        role,
+        crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
+        tool_policy,
+        projection::PI_LC_APPROVAL_POLICY.to_string(),
+        String::new(),
+        "sha256:cfg-a".to_string(),
+        trust_digest.to_string(),
+        None,
+    )
+}
+
+/// Task 4b Step 1(断言组 305 逐字 + 300-301 写面):target/role/tool/config
+/// 任一漂移都会改变会话全投影 digest;capability profile 摘要按「证据摘要
+/// 分层」不随单次 role/config 变化。Coding 投影恰一个可写 target(root/
+/// 其它成员不可写);read-only action 无任何可写根。
+#[test]
+fn lcg_t04_projection_digest_changes_on_target_role_tool_or_config() {
+    let projector = PiPolicyProjector::new("pi 0.83.0-lc-fixture");
+    let deny = ProviderToolPolicy::deny_file_write_builtins();
+
+    let baseline_input = lc_projection_input(
+        lc_projection_envelope(
+            SessionPolicyAction::PlanningReadOnly,
+            PathBuf::from("/lc/member-a"),
+            "sha256:cfg-a",
+            "sha256:cfg-digest-a",
+        ),
+        AdapterRole::Reviewer,
+        Some(deny.clone()),
+        "sha256:trust-1",
+    );
+    let baseline = projector
+        .project(&baseline_input)
+        .expect("pi lc planning projection is produced");
+    let original_projection_digest = baseline.projection_digest().to_string();
+    let original_capability_digest = baseline.capability_projection_digest().to_string();
+
+    // digest 形状:sha256: 前缀 + 64 位小写 hex(与 2c shape validator 同构)。
+    assert_eq!(original_projection_digest.len(), 71);
+    assert!(original_projection_digest.starts_with("sha256:"));
+    assert_eq!(original_capability_digest.len(), 71);
+    assert!(original_capability_digest.starts_with("sha256:"));
+
+    // read-only action:cwd 冻结为 canonical root,无任何可写根。
+    assert_eq!(
+        baseline.working_directory(),
+        std::path::Path::new("/lc/lc-root")
+    );
+    assert!(baseline.writable_roots().is_empty());
+    assert_eq!(baseline.wire_dialect(), ProviderWireDialect::PiRpc);
+    assert_eq!(baseline.exact_version(), "pi 0.83.0-lc-fixture");
+    assert_eq!(
+        baseline.approval_policy(),
+        projection::PI_LC_APPROVAL_POLICY
+    );
+
+    // 1) target 漂移 → 会话 digest 变化。
+    let changed = projector
+        .project(&lc_projection_input(
+            lc_projection_envelope(
+                SessionPolicyAction::PlanningReadOnly,
+                PathBuf::from("/lc/member-b"),
+                "sha256:cfg-a",
+                "sha256:cfg-digest-a",
+            ),
+            AdapterRole::Reviewer,
+            Some(deny.clone()),
+            "sha256:trust-1",
+        ))
+        .expect("projection with drifted target");
+    assert_ne!(original_projection_digest, changed.projection_digest());
+
+    // 2) role 漂移 → 会话 digest 变化;profile 摘要不随单次 role 变化。
+    let changed = projector
+        .project(&lc_projection_input(
+            lc_projection_envelope(
+                SessionPolicyAction::PlanningReadOnly,
+                PathBuf::from("/lc/member-a"),
+                "sha256:cfg-a",
+                "sha256:cfg-digest-a",
+            ),
+            AdapterRole::Orchestrator,
+            Some(deny.clone()),
+            "sha256:trust-1",
+        ))
+        .expect("projection with drifted role");
+    assert_ne!(original_projection_digest, changed.projection_digest());
+    assert_eq!(
+        original_capability_digest,
+        changed.capability_projection_digest()
+    );
+
+    // 3) tool policy 漂移(Some→None)→ 会话 digest 变化。
+    let changed = projector
+        .project(&lc_projection_input(
+            lc_projection_envelope(
+                SessionPolicyAction::PlanningReadOnly,
+                PathBuf::from("/lc/member-a"),
+                "sha256:cfg-a",
+                "sha256:cfg-digest-a",
+            ),
+            AdapterRole::Reviewer,
+            None,
+            "sha256:trust-1",
+        ))
+        .expect("projection without generic tool policy");
+    assert_ne!(original_projection_digest, changed.projection_digest());
+    assert!(changed.tool_policy().is_none());
+
+    // 4) config 漂移 → 会话 digest 变化;profile 摘要不含 config,保持不变。
+    let changed = projector
+        .project(&lc_projection_input(
+            lc_projection_envelope(
+                SessionPolicyAction::PlanningReadOnly,
+                PathBuf::from("/lc/member-a"),
+                "sha256:cfg-b",
+                "sha256:cfg-digest-b",
+            ),
+            AdapterRole::Reviewer,
+            Some(deny.clone()),
+            "sha256:trust-1",
+        ))
+        .expect("projection with drifted config");
+    assert_ne!(original_projection_digest, changed.projection_digest());
+    assert_eq!(
+        original_capability_digest,
+        changed.capability_projection_digest()
+    );
+
+    // Coding 投影(断言组 300-301):恰一个可写 root=target worktree;
+    // root 与其它成员均不可写;boundary 引用非空。
+    let coding = projector
+        .project(&lc_projection_input(
+            lc_projection_envelope(
+                SessionPolicyAction::CodingTargetWrite,
+                PathBuf::from("/lc/member-a"),
+                "sha256:cfg-a",
+                "sha256:cfg-digest-a",
+            ),
+            AdapterRole::Executor,
+            None,
+            "sha256:trust-1",
+        ))
+        .expect("pi lc coding projection is produced");
+    assert_eq!(coding.writable_roots(), [PathBuf::from("/lc/member-a")]);
+    assert!(!coding.writable_roots().iter().any(
+        |root| root == &PathBuf::from("/lc/lc-root") || root == &PathBuf::from("/lc/member-b")
+    ));
+    assert!(!coding.boundary_evidence_ref().is_empty());
+    assert_eq!(coding.sandbox(), "target-write-only");
+    assert_eq!(baseline.sandbox(), "read-only");
+
+    // profile 摘要随 tool 控制规范整体变化(exclude-tools 序列属于 profile)。
+    let coding_capability = coding.capability_projection_digest();
+    assert_ne!(original_capability_digest, coding_capability);
+}
+
+/// Task 4b Step 1(断言组 299-303 的 Pi 对照形态):无通用 tool policy 的
+/// LC Coding 启动(Executor)同样执行 exact version 解析、原生会话(id
+/// 预生成)与统一 `ProviderStartAudit.lc_projection` 落盘;进程 cwd=
+/// canonical root。
+#[cfg(unix)]
+#[tokio::test]
+async fn lcg_t04_no_generic_tool_policy_still_records_version_audit_and_native_session() {
+    let fixture = LcLaunchFixture::new();
+    let sink = RecordingToolPolicyAuditSink::new();
+    let marker = fixture.paths.root().join("lc-cwd-marker");
+    let mut raw = fixture.lc_streaming_input(
+        AdapterRole::Executor,
+        None,
+        Some(sink.clone().bound()),
+        None,
+    );
+    raw.env_vars
+        .insert("LC_CWD_MARKER".to_string(), marker.display().to_string());
+
+    let provider = PiProvider::new(lc_cwd_pi_fixture(&marker))
+        .with_version_supplier(policy_version_supplier());
+
+    let session = provider
+        .start_validated(
+            fixture.validated_coding_input(raw),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("lc validated start succeeds without generic tool policy");
+
+    // 原生会话 id 来自预生成握手(无 tool_policy 也不跳过)。
+    let native_id = session
+        .native_session_id
+        .clone()
+        .expect("pi lc validated session must carry a pre-generated native session id");
+    assert!(!native_id.trim().is_empty());
+
+    let events = sink.events();
+    assert_eq!(events.len(), 1, "exactly one provider_start is written");
+    let DurableToolPolicyEvent::ProviderStart(record) = &events[0] else {
+        panic!("expected provider_start");
+    };
+    assert_eq!(record.provider, "pi");
+    assert_eq!(record.provider_version, "pi 0.83.0-policy-fixture");
+    assert_eq!(record.adapter_dialect, PI_POLICY_DIALECT);
+    assert_eq!(record.provider_session_id, native_id);
+    assert_eq!(record.role, "executor");
+    assert_eq!(record.workspace_session_id, "ws-lc-fixture-1");
+    // 无通用 tool policy 也有 canonical digest(空 token 序列的 canonical 形态)。
+    assert!(!record.tool_policy_canonical_digest.is_empty());
+    // argv:rpc 模式与 extension 在;exclude-tools 不在(Executor/Coding 无
+    // 通用策略)。
+    assert!(record.argv.windows(2).any(|p| p == ["--mode", "rpc"]));
+    assert!(record.argv.iter().any(|arg| arg == "-e"));
+    assert!(!record.argv.contains(&"--exclude-tools".to_string()));
+    assert!(
+        record
+            .argv
+            .windows(2)
+            .any(|p| p == ["--session-id", native_id.as_str()])
+    );
+
+    // 统一 lc_projection 落盘:分层双 digest + wire/action/boundary 引用。
+    let lc_projection = record
+        .lc_projection
+        .as_ref()
+        .expect("lc projection audit is recorded even without generic tool policy");
+    assert_eq!(lc_projection.action, "coding_target_write");
+    assert_eq!(lc_projection.wire_dialect, "pi-rpc");
+    assert!(lc_projection.projection_digest.starts_with("sha256:"));
+    assert!(
+        lc_projection
+            .capability_projection_digest
+            .starts_with("sha256:")
+    );
+    assert!(!lc_projection.boundary_evidence_ref.is_empty());
+
+    // 进程 cwd = canonical LC root(envelope 冻结,不是 target worktree)。
+    let observed_cwd = std::fs::read_to_string(&marker).expect("cwd marker is written");
+    assert_eq!(
+        observed_cwd.trim(),
+        fixture.canonical_root().to_string_lossy(),
+        "provider process must spawn at the canonical LC root"
+    );
+}

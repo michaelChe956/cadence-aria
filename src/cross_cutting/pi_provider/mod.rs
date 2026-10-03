@@ -32,7 +32,10 @@ use crate::cross_cutting::tool_policy_audit::{
 };
 
 mod parse;
+mod projection;
 mod session;
+
+pub use projection::PiPolicyProjector;
 
 /// pi 在 tool-policy canonical 序列中的 provider 名（CLI 名常量）。
 pub const TOOL_POLICY_PROVIDER_NAME: &str = "pi";
@@ -318,6 +321,21 @@ impl PiProvider {
         }
         args
     }
+
+    /// LC validated 启动的 argv(Task 4b):与 direct `build_args` 同形态
+    /// (rpc 模式 + aria-ask extension + `--session-id` + 策略角色的
+    /// exclude-tools 冻结片段),独立方法显式冻结 LC 语义,后续 LC 特化
+    /// 不污染 direct argv。direct `build_args` 保持逐字节不变。
+    ///
+    /// Task 4b 阶段 1 RED 桩:阶段 2 实现真实 argv。
+    pub(crate) fn build_lc_validated_args(
+        &self,
+        _resume_session_id: Option<&str>,
+        _extension_path: &Path,
+        _tool_policy: Option<&crate::cross_cutting::streaming_provider::ProviderToolPolicy>,
+    ) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 #[async_trait::async_trait]
@@ -567,5 +585,26 @@ impl StreamingProviderAdapter for PiProvider {
             events: event_rx,
             commands: command_tx,
         })
+    }
+
+    /// LC validated 启动(Task 4b):只接受 gateway 产出的 validated input,
+    /// 消费冻结 envelope 派生的不可伪造 boundary plan 与 LC 权限投影,以
+    /// canonical LC root 为进程 cwd 启动,统一落盘 `ProviderStartAudit.
+    /// lc_projection`;无通用 tool policy 的角色(Coding/Executor)同样执行
+    /// exact version 解析、原生会话(id 预生成/传入)与统一 launch audit,
+    /// 不以 `tool_policy=None` 早退。
+    ///
+    /// Task 4b 阶段 1 RED 桩:阶段 2 实现真实启动链。
+    async fn start_validated(
+        &self,
+        _validated: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        Err(ProviderAdapterError::execution_failed(
+            None,
+            String::new(),
+            "pi lc validated start is not implemented yet (task 4b red stub)",
+            0,
+        ))
     }
 }

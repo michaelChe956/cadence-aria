@@ -825,3 +825,105 @@ async fn pi_outbound_ids_and_auto_permission_mapping_stay_unchanged() {
         "pi is Auto-only: Supervised input must never surface permission requests"
     );
 }
+
+// ==== Task 4b:Pi LC validated argv 与 root cwd ====
+
+use crate::cross_cutting::streaming_provider::StreamingProviderAdapter;
+use crate::cross_cutting::tool_policy_audit::test_support::RecordingToolPolicyAuditSink;
+
+/// Task 4b Step 1(断言组 298-299 逐字):LC validated argv 必须携带冻结的
+/// exclude-tools 片段(策略角色;`--exclude-tools edit,write` 逐字)与
+/// rpc/extension/session-id 基础片段;无通用 tool policy 的 Coding 角色无
+/// exclude-tools。进程 cwd = canonical LC root(299)。
+#[cfg(unix)]
+#[tokio::test]
+async fn lcg_t04_pi_projection_has_exclude_write_tokens_and_root_cwd() {
+    let provider = PiProvider::new(PathBuf::from("pi"));
+    let deny = ProviderToolPolicy::deny_file_write_builtins();
+    let extension = PathBuf::from("/lc/aria-ask.ts");
+
+    // 策略角色(Planning/Review):exclude-tools 冻结片段逐字(298)+
+    // rpc 模式 + extension + session-id 基础片段。
+    let pi_args = provider.build_lc_validated_args(Some("pi-sess-lc-7"), &extension, Some(&deny));
+    assert!(
+        pi_args
+            .windows(2)
+            .any(|p| p == ["--exclude-tools", "edit,write"])
+    );
+    assert!(pi_args.windows(2).any(|p| p == ["--mode", "rpc"]));
+    assert!(pi_args.windows(2).any(|p| p == ["-e", "/lc/aria-ask.ts"]));
+    assert!(
+        pi_args
+            .windows(2)
+            .any(|p| p == ["--session-id", "pi-sess-lc-7"])
+    );
+
+    // 无通用策略的 Coding 角色:无 exclude-tools,无 session-id(fresh)。
+    let coding_args = provider.build_lc_validated_args(None, &extension, None);
+    assert!(!coding_args.contains(&"--exclude-tools".to_string()));
+    assert!(!coding_args.contains(&"--session-id".to_string()));
+    assert!(coding_args.windows(2).any(|p| p == ["--mode", "rpc"]));
+
+    // 299:策略角色的真实 LC validated 启动,进程 cwd = canonical root。
+    let fixture = LcLaunchFixture::new();
+    let sink = RecordingToolPolicyAuditSink::new();
+    let marker = fixture.paths.root().join("lc-cwd-marker");
+    let mut raw = fixture.lc_streaming_input(
+        AdapterRole::Orchestrator,
+        Some(deny),
+        Some(sink.clone().bound()),
+        None,
+    );
+    raw.env_vars
+        .insert("LC_CWD_MARKER".to_string(), marker.display().to_string());
+
+    let lc_provider = PiProvider::new(lc_cwd_pi_fixture(&marker)).with_version_supplier(
+        std::sync::Arc::new(|| Ok("pi 0.83.0-policy-fixture".to_string())),
+    );
+    let session = lc_provider
+        .start_validated(
+            fixture.validated_coding_input(raw),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("lc validated start with deny policy spawns at the canonical root");
+
+    // audit argv 与静态形态同源:exclude-tools 逐字在列。
+    let events = sink.events();
+    assert_eq!(events.len(), 1, "exactly one provider_start is written");
+    let crate::cross_cutting::tool_policy_audit::DurableToolPolicyEvent::ProviderStart(record) =
+        &events[0]
+    else {
+        panic!("expected provider_start");
+    };
+    assert!(
+        record
+            .argv
+            .windows(2)
+            .any(|p| p == ["--exclude-tools", "edit,write"])
+    );
+    assert!(record.lc_projection.is_some());
+
+    // 299 逐字:进程 cwd = canonical LC root(不是 target worktree)。
+    let provider_cwd = std::fs::read_to_string(&marker)
+        .expect("cwd marker is written")
+        .trim()
+        .to_string();
+    let canonical_root = fixture.canonical_root().to_string_lossy().into_owned();
+    assert_eq!(
+        provider_cwd, canonical_root,
+        "provider process must spawn at the canonical LC root"
+    );
+
+    // 会话携带预生成 native id(argv --session-id 同值)。
+    let native_id = session
+        .native_session_id
+        .clone()
+        .expect("lc validated session carries a pre-generated native id");
+    assert!(
+        record
+            .argv
+            .windows(2)
+            .any(|p| p == ["--session-id", native_id.as_str()])
+    );
+}
