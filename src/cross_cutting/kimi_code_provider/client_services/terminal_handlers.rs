@@ -435,6 +435,7 @@ mod tests {
             writable_git_paths: Vec::new(),
             cleanup_cancel: CancellationToken::new().child_token(),
             baseline_tree: None,
+            target_boundary: None,
         });
         (state, events)
     }
@@ -536,6 +537,7 @@ mod tests {
             writable_git_paths: writable_git_paths_for(&AdapterRole::Executor, &root),
             cleanup_cancel: CancellationToken::new().child_token(),
             baseline_tree: None,
+            target_boundary: None,
         })
     }
 
@@ -560,6 +562,7 @@ mod tests {
             writable_git_paths: writable_git_paths_for(&role, &root),
             cleanup_cancel: CancellationToken::new().child_token(),
             baseline_tree: None,
+            target_boundary: None,
         })
     }
 

@@ -338,3 +338,89 @@ async fn without_bundle_mcp_servers_stay_empty_on_new_and_load() {
     assert!(run.await.expect("run join").is_ok());
     server_task.await.expect("server task");
 }
+
+// ==== Task 4c:LC 投影的 MCP 来源分层 ====
+
+use std::path::PathBuf;
+
+use crate::cross_cutting::kimi_code_provider::projection::{
+    KIMI_LC_APPROVAL_POLICY, KIMI_NATIVE_MCP_SOURCE, KimiPolicyProjector,
+};
+use crate::product::logical_codebase::policy::{
+    PolicyTarget, ProviderDialect, SessionPolicyAction, SessionPolicyEnvelope,
+};
+use crate::product::logical_codebase::provider_gateway::ProviderRef;
+use crate::product::logical_codebase::provider_projection::{
+    ProviderPolicyProjector, ProviderProjectionInput,
+};
+
+/// Task 4c Step 1:`mcp_bundle_digest` 只对应 Aria 注入 bundle——native 项目
+/// 配置以来源标记单独进投影(不冒充 Aria bundle digest);两层 digest 随
+/// 来源漂移变化;空串来源 fail-closed。
+#[test]
+fn lcg_t04_kimi_native_mcp_is_not_aria_bundle() {
+    let projector = KimiPolicyProjector::new("kimi 0.34.0-lc-fixture");
+    let bundle = codegraph_bundle();
+    let envelope = SessionPolicyEnvelope {
+        policy_id: "policy-lc-0001".to_string(),
+        policy_revision: 1,
+        policy_digest: "sha256:policy-lc-0001".to_string(),
+        action: SessionPolicyAction::CodingTargetWrite,
+        target: PolicyTarget::checkout(
+            "logical_repo_0001",
+            "checkout_0001",
+            PathBuf::from("/lc/member-a"),
+        ),
+        working_directory: PathBuf::from("/lc/lc-root"),
+        readable_roots: vec![PathBuf::from("/lc/lc-root")],
+        writable_roots: vec![PathBuf::from("/lc/member-a")],
+        provider_dialect: ProviderDialect::KimiAcpV1,
+        config_artifact_ref: "sha256:cfg-a".to_string(),
+        config_digest: "sha256:cfg-digest-a".to_string(),
+        created_at: "2026-10-03T00:00:00Z".to_string(),
+        authority_root: PathBuf::from("/lc/lc-root"),
+    };
+    let input_with_mcp = |mcp_source: &str| {
+        ProviderProjectionInput::new(
+            envelope.clone(),
+            ProviderRef::kimi_code("cap_kimi_lc_fixture"),
+            envelope.action,
+            AdapterRole::Executor,
+            ProviderPermissionMode::Auto,
+            None,
+            KIMI_LC_APPROVAL_POLICY.to_string(),
+            mcp_source.to_string(),
+            "sha256:cfg-a".to_string(),
+            "sha256:trust-1".to_string(),
+            None,
+        )
+    };
+
+    // native:来源标记非 digest——不冒充 Aria bundle。
+    let native = projector
+        .project(&input_with_mcp(KIMI_NATIVE_MCP_SOURCE))
+        .expect("native-source projection is produced");
+    assert_eq!(native.mcp_bundle_digest(), KIMI_NATIVE_MCP_SOURCE);
+    assert!(!native.mcp_bundle_digest().starts_with("sha256:"));
+
+    // aria:注入 bundle digest 原样进投影。
+    let aria = projector
+        .project(&input_with_mcp(bundle.digest()))
+        .expect("aria-bundle projection is produced");
+    assert_eq!(aria.mcp_bundle_digest(), bundle.digest());
+    assert!(aria.mcp_bundle_digest().starts_with("sha256:"));
+
+    // 来源漂移两层 digest 都变(可检)。
+    assert_ne!(native.projection_digest(), aria.projection_digest());
+    assert_ne!(
+        native.capability_projection_digest(),
+        aria.capability_projection_digest()
+    );
+
+    // 空串来源 fail-closed:必须显式标记 Aria digest 或 native 来源。
+    let empty = projector.project(&input_with_mcp(""));
+    assert!(
+        empty.is_err(),
+        "empty mcp source must not project as either aria or native"
+    );
+}

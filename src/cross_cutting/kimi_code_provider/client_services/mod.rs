@@ -17,6 +17,8 @@ mod terminal_handlers;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::cross_cutting::provider_boundary::ProviderBoundaryPlan;
+
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -68,6 +70,13 @@ struct ClientServiceState {
     /// coder-rewritten `.git` pointer at an arbitrary valid host git dir and
     /// aim the next extra rw bind at it (F-17 fix round 2).
     writable_git_paths: Vec<PathBuf>,
+    /// LC target 写边界(Task 4c):`Some` 时宿主 fs read/write 与 terminal
+    /// 消费同一不可伪造 boundary plan——host root 保持 ro、target root rw,
+    /// linked-worktree git-dir 沿冻结授权;terminal 实际 cwd 不改变
+    /// provider 进程 cwd。`None`(direct 会话)行为不变,原 24 格
+    /// ClientServicePolicy 决策表保持原值。
+    #[allow(dead_code)] // Task 4c 阶段 1 RED 桩:阶段 2 由 fs/terminal handler 消费。
+    target_boundary: Option<ProviderBoundaryPlan>,
     /// 会话私有清理 token：随引擎 run token（父）取消而取消；dispatcher Drop 时
     /// 只取消它，绝不反噬父 token——否则 kimi 正常完成后会 cancel 引擎 run，
     /// biased select 的 cancel 分支会吞掉已入队的 Completed 事件（真机 issue_0035）。
@@ -119,7 +128,8 @@ impl<W> KimiClientServiceDispatcher<W>
 where
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    /// 8 个参数均为构造期一次性注入的运行时依赖（peer/session/working_dir/role/permission_mode/bridge/event_tx/cancel），
+    /// 9 个参数均为构造期一次性注入的运行时依赖（peer/session/working_dir/role/
+    /// permission_mode/bridge/event_tx/cancel/baseline_tree/target_boundary），
     /// 无自然聚合语义且仅在 `new` 使用一次，重构为 struct 会引入额外间接层，故允许 clippy::too_many_arguments。
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -132,6 +142,7 @@ where
         event_tx: mpsc::Sender<ProviderEvent>,
         cancel: CancellationToken,
         baseline_tree: Option<BaselineTreeRef>,
+        target_boundary: Option<ProviderBoundaryPlan>,
     ) -> Self {
         let root = canonicalize_root(&working_dir).unwrap_or(working_dir);
         // Freeze the git bind face before the coder can touch the root:
@@ -154,6 +165,7 @@ where
             terminal,
             bwrap,
             writable_git_paths,
+            target_boundary,
             baseline_tree,
             cleanup_cancel: cancel.child_token(),
         });
@@ -357,6 +369,7 @@ mod tests {
             event_tx,
             CancellationToken::new(),
             None,
+            None,
         );
         let (server_reader, mut server_writer) = tokio::io::split(server);
         let mut server_reader = tokio::io::BufReader::new(server_reader);
@@ -459,6 +472,7 @@ mod tests {
             )),
             event_tx,
             CancellationToken::new(),
+            None,
             None,
         );
         let (server_reader, mut server_writer) = tokio::io::split(server);
@@ -597,6 +611,7 @@ mod tests {
                 repo_path: repo.path().to_path_buf(),
                 branch: "main".to_string(),
             }),
+            None,
         );
         let (server_reader, mut server_writer) = tokio::io::split(server);
         let mut server_reader = tokio::io::BufReader::new(server_reader);
@@ -719,6 +734,7 @@ mod tests {
                 repo_path: repo.path().to_path_buf(),
                 branch: "main".to_string(),
             }),
+            None,
         );
         let (server_reader, mut server_writer) = tokio::io::split(server);
         let mut server_reader = tokio::io::BufReader::new(server_reader);
@@ -797,6 +813,168 @@ mod tests {
             json!("baseline-agents\n"),
             "{reply}"
         );
+
+        let _ = server_writer.shutdown().await;
+        drop(dispatcher);
+    }
+
+    /// Task 4c Step 1(`lcg_t04_kimi_host_fs_and_terminal_share_target_boundary`):
+    /// LC 会话(host root ro / target root rw)的宿主 fs read/write 与
+    /// terminal 消费同一不可伪造 target boundary plan——fs 读保持 host root
+    /// 只读面;fs 写与 terminal 的可写面唯一锚定 plan 的 target root;terminal
+    /// 实际 cwd 可为 target,不改变宿主读根(provider 进程 cwd 由
+    /// start_validated 冻结,另由启动测试钉住)。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn lcg_t04_kimi_host_fs_and_terminal_share_target_boundary() {
+        if probe_bwrap().is_none() {
+            // Auto 模式 terminal 依赖 bubblewrap;未安装时无法验证共享边界。
+            return;
+        }
+        use crate::cross_cutting::provider_boundary::{ProviderBoundaryMode, ProviderBoundaryPlan};
+
+        let dir = tempfile::tempdir().expect("lc root dir");
+        let host_root = canonicalize_root(dir.path()).expect("canonical host root");
+        let target = host_root.join("member-worktree");
+        std::fs::create_dir_all(&target).expect("create target worktree");
+        std::fs::write(host_root.join("host-note.txt"), "host-read-only-face\n")
+            .expect("seed host note");
+
+        let plan = ProviderBoundaryPlan::new(
+            ProviderBoundaryMode::TargetWriteOnly,
+            host_root.clone(),
+            Some(target.clone()),
+            Vec::new(),
+        );
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let (reader, writer) = tokio::io::split(client);
+        let peer = JsonRpcPeer::new(reader, writer);
+        let (event_tx, _events) = mpsc::channel(32);
+        let dispatcher = KimiClientServiceDispatcher::new(
+            peer,
+            "executor-lc".to_string(),
+            host_root.clone(),
+            AdapterRole::Executor,
+            ProviderPermissionMode::Auto,
+            Arc::new(ApprovalBridge::new(
+                ProviderPermissionMode::Auto,
+                event_tx.clone(),
+            )),
+            event_tx,
+            CancellationToken::new(),
+            None,
+            Some(plan),
+        );
+        let (server_reader, mut server_writer) = tokio::io::split(server);
+        let mut server_reader = tokio::io::BufReader::new(server_reader);
+
+        // 1) fs 读:host root 只读面不变(plan 的进程 cwd = 会话根)。
+        assert!(dispatcher.dispatch(
+            "fs/read_text_file",
+            json!(20),
+            json!({"sessionId": "executor-lc", "path": "host-note.txt"})
+        ));
+        let reply = read_reply(&mut server_reader, 20).await;
+        assert_eq!(
+            reply["result"]["content"],
+            json!("host-read-only-face\n"),
+            "{reply}"
+        );
+
+        // 2) fs 写:target 内允许(相对路径锚定 plan target)。
+        assert!(dispatcher.dispatch(
+            "fs/write_text_file",
+            json!(21),
+            json!({
+                "sessionId": "executor-lc",
+                "path": "target-note.txt",
+                "content": "written inside target"
+            })
+        ));
+        let reply = read_reply(&mut server_reader, 21).await;
+        assert!(reply.get("result").is_some(), "{reply}");
+        assert_eq!(
+            std::fs::read_to_string(target.join("target-note.txt"))
+                .expect("target write landed inside the target root"),
+            "written inside target"
+        );
+
+        // 3) fs 写:target 外(host root 内)必须拒绝,文件不落盘。
+        let host_escape = host_root.join("host-escape.txt");
+        assert!(dispatcher.dispatch(
+            "fs/write_text_file",
+            json!(22),
+            json!({
+                "sessionId": "executor-lc",
+                "path": host_escape.to_string_lossy().as_ref(),
+                "content": "must not land"
+            })
+        ));
+        let reply = read_reply(&mut server_reader, 22).await;
+        assert_eq!(reply["error"]["code"], json!(ERROR_FS), "{reply}");
+        assert!(!host_escape.exists());
+
+        // 4) terminal:同一 plan 的 target 写面——target 内写允许。
+        assert!(dispatcher.dispatch(
+            "terminal/create",
+            json!(23),
+            json!({
+                "sessionId": "executor-lc",
+                "command": "/bin/bash",
+                "args": ["-c", "echo terminal-ok > terminal-inside.txt"],
+                "cwd": target.to_string_lossy().as_ref(),
+                "outputByteLimit": 4194304
+            })
+        ));
+        let reply = read_reply(&mut server_reader, 23).await;
+        let terminal_id = reply["result"]["terminalId"]
+            .as_str()
+            .expect("terminalId")
+            .to_string();
+        assert!(dispatcher.dispatch(
+            "terminal/wait_for_exit",
+            json!(24),
+            json!({"sessionId": "executor-lc", "terminalId": terminal_id})
+        ));
+        let reply = read_reply(&mut server_reader, 24).await;
+        assert_eq!(reply["result"]["exitCode"], json!(0), "{reply}");
+        assert!(target.join("terminal-inside.txt").exists());
+
+        // 5) terminal:host root 写必须被共享边界拒绝(bwrap 只读面),
+        //    host 文件不落盘;terminal 实际 cwd 在 target 内,宿主读根
+        //    仍是 host root(读写面分离,terminal cwd 不改读根/进程 cwd)。
+        let host_write = host_root.join("host-write.txt");
+        assert!(dispatcher.dispatch(
+            "terminal/create",
+            json!(25),
+            json!({
+                "sessionId": "executor-lc",
+                "command": "/bin/bash",
+                "args": [
+                    "-c",
+                    &format!("echo host > {}", host_write.to_string_lossy())
+                ],
+                "cwd": target.to_string_lossy().as_ref(),
+                "outputByteLimit": 4194304
+            })
+        ));
+        let reply = read_reply(&mut server_reader, 25).await;
+        let denied_terminal = reply["result"]["terminalId"]
+            .as_str()
+            .expect("terminalId")
+            .to_string();
+        assert!(dispatcher.dispatch(
+            "terminal/wait_for_exit",
+            json!(26),
+            json!({"sessionId": "executor-lc", "terminalId": denied_terminal})
+        ));
+        let reply = read_reply(&mut server_reader, 26).await;
+        assert_ne!(
+            reply["result"]["exitCode"],
+            json!(0),
+            "host-root write must be refused by the shared target boundary: {reply}"
+        );
+        assert!(!host_write.exists());
 
         let _ = server_writer.shutdown().await;
         drop(dispatcher);

@@ -18,7 +18,10 @@ use tokio_util::sync::CancellationToken;
 mod client_services;
 pub mod mcp_bundle;
 mod parse;
+mod projection;
 mod session;
+
+pub use projection::KimiPolicyProjector;
 
 use mcp_bundle::KimiMcpInjection;
 pub use mcp_bundle::{McpBundleError, McpServerConfig, ValidatedMcpServerBundle};
@@ -32,6 +35,11 @@ pub mod tests;
 pub(crate) use session::run_kimi_session;
 
 pub const KIMI_COMMAND: &str = "kimi";
+/// kimi 在 tool-policy canonical 序列中的 provider 名(LC 统一 launch audit
+/// `ProviderStartAudit.provider` 与 4a/4b 的 claude-code/pi 同形)。
+pub const TOOL_POLICY_PROVIDER_NAME: &str = "kimi-code";
+/// kimi LC 会话的 adapter dialect(wire dialect 序列化值同形 `kimi-acp`)。
+pub const KIMI_POLICY_DIALECT: &str = "kimi-acp";
 pub const MIN_KIMI_VERSION: &str = "0.34.0";
 const KIMI_VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const KIMI_LOGIN_GUIDANCE: &str = "Kimi Code is not logged in; run `kimi login` and retry.";
@@ -299,5 +307,29 @@ impl StreamingProviderAdapter for KimiCodeProvider {
             events: event_rx,
             commands: command_tx,
         })
+    }
+
+    /// LC validated 启动(Task 4c):只接受 gateway 产出的 validated input。
+    /// Kimi 通用 tool 为 `None`——非空通用策略在 version/child 之前拒绝
+    /// (稳定码 `provider_generic_tool_policy_forbidden`);`None` 不早退,
+    /// 仍执行 exact version probe、native session/handshake 与统一
+    /// `ProviderStartAudit.lc_projection` 落盘。进程 cwd 与 ACP 协议 cwd
+    /// 都保持 canonical LC root;target 写面由宿主 fs/terminal handler
+    /// 消费不可伪造 boundary plan(不进协议 cwd)。`mcp_bundle_digest`
+    /// 只对应 Aria 注入,无注入时标记 native 项目配置来源。direct
+    /// `start` 保持逐字节不变。
+    ///
+    /// Task 4c 阶段 1 RED 桩:阶段 2 实现真实启动链。
+    async fn start_validated(
+        &self,
+        _validated: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        Err(ProviderAdapterError::execution_failed(
+            None,
+            String::new(),
+            "kimi lc validated start is not implemented yet (task 4c red stub)",
+            0,
+        ))
     }
 }

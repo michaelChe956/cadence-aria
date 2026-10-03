@@ -275,6 +275,9 @@ where
         cancel.clone(),
         // REQ-PIB-02：基线会话锚点透传（fs 读路由基线树 / terminal 拒绝）。
         input.baseline_tree.clone(),
+        // LC target 边界(Task 4c):direct 入口无 boundary plan;LC
+        // validated 路径经 `run_kimi_session_validated` 传入。
+        None,
     );
 
     let mut next_prompt_id = 4_u64;
