@@ -356,7 +356,10 @@ mod tests {
         /// `write_active_manifest_index_and_policy` 写入，validate 可直接冻结
         /// envelope。authority_root 取 manifest 的 provider_context_root
         /// （aggregate-root，canonicalize 前需真实存在）。
-        fn planning_gateway(&self) -> crate::product::logical_codebase::provider_gateway::LogicalCodebaseProviderGateway {
+        fn planning_gateway(
+            &self,
+        ) -> crate::product::logical_codebase::provider_gateway::LogicalCodebaseProviderGateway
+        {
             use crate::cross_cutting::provider_registry::ProviderRegistry;
             use crate::product::logical_codebase::provider_gateway::{
                 GatewayRunAudit, LogicalCodebaseProviderGateway,
@@ -401,6 +404,8 @@ mod tests {
             let adapter_dialect = match provider.provider_type {
                 ProviderRefType::ClaudeCode => ProviderDialect::ClaudeCodeCliV1,
                 ProviderRefType::Codex => ProviderDialect::CodexCliV1,
+                ProviderRefType::Pi => ProviderDialect::PiRpcV1,
+                ProviderRefType::KimiCode => ProviderDialect::KimiAcpV1,
             };
             Ok(ProviderCapability {
                 provider_type: provider.provider_type,
@@ -422,8 +427,10 @@ mod tests {
         fn resolve_and_revalidate(
             &self,
             request: &crate::product::logical_codebase::provider_gateway::SessionLaunchRequest,
-        ) -> Result<PolicyTarget, crate::product::logical_codebase::provider_gateway::ProviderGatewayError>
-        {
+        ) -> Result<
+            PolicyTarget,
+            crate::product::logical_codebase::provider_gateway::ProviderGatewayError,
+        > {
             Ok(request.target.clone())
         }
     }
@@ -454,8 +461,8 @@ mod tests {
 
     /// planning gateway 测试用 availability gate：所有 provider 恒可用（与
     /// workspace_engine part_32 的 `review_always_available_gate` 同构）。
-    fn planning_always_available_gate(
-    ) -> Arc<crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate> {
+    fn planning_always_available_gate()
+    -> Arc<crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate> {
         use crate::cross_cutting::provider_availability_gate::ProviderHealthSource;
         use crate::cross_cutting::provider_health::{ProviderHealthEntry, ProviderHealthSnapshot};
         use crate::product::models::ProviderName;
@@ -488,9 +495,11 @@ mod tests {
                 })
                 .collect(),
         });
-        Arc::new(crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate::new(
-            Arc::new(AlwaysHealthy(snapshot)),
-        ))
+        Arc::new(
+            crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate::new(
+                Arc::new(AlwaysHealthy(snapshot)),
+            ),
+        )
     }
 
     fn active_index_record(
@@ -528,7 +537,10 @@ mod tests {
             Ok(AggregateIndexFreshness::active(record))
         }
 
-        fn sync_if_stale(&self, project_id: &str) -> Result<AggregateIndexRecord, AggregateIndexError> {
+        fn sync_if_stale(
+            &self,
+            project_id: &str,
+        ) -> Result<AggregateIndexRecord, AggregateIndexError> {
             *self.sync_count.lock().unwrap() += 1;
             let mut record = self.store.active_required(project_id)?;
             record.aggregate_index_id = "aggregate_index_fresh".to_string();
@@ -601,8 +613,7 @@ mod tests {
             Arc::new(ScriptedFreshness {
                 store: store.clone(),
                 next: Arc::new(Mutex::new(vec![AggregateIndexFreshness::degraded(
-                    degraded,
-                    warning,
+                    degraded, warning,
                 )])),
                 sync_count: sync_count.clone(),
             }),
@@ -611,10 +622,12 @@ mod tests {
             .build_with_fresh_index("project_0001", "issue_0001", &[])
             .await
             .unwrap();
-        assert!(degraded_context
-            .inventory_injection
-            .rendered
-            .contains("aggregate index warning: sync command failed"));
+        assert!(
+            degraded_context
+                .inventory_injection
+                .rendered
+                .contains("aggregate index warning: sync command failed")
+        );
         assert_eq!(*sync_count.lock().unwrap(), 1);
     }
 
@@ -901,7 +914,10 @@ mod tests {
         );
         // envelope 的 PlanningReadOnly 语义不动（空 writable_roots 的只读 action
         // 与语义 tool_policy 叠加共存）。
-        assert_eq!(launch.envelope().action, SessionPolicyAction::PlanningReadOnly);
+        assert_eq!(
+            launch.envelope().action,
+            SessionPolicyAction::PlanningReadOnly
+        );
         assert!(launch.envelope().writable_roots.is_empty());
     }
 

@@ -432,6 +432,8 @@ impl ProviderCapabilitySource for StaticCapabilitySource {
         let adapter_dialect = match provider.provider_type {
             ProviderRefType::ClaudeCode => ProviderDialect::ClaudeCodeCliV1,
             ProviderRefType::Codex => ProviderDialect::CodexCliV1,
+            ProviderRefType::Pi => ProviderDialect::PiRpcV1,
+            ProviderRefType::KimiCode => ProviderDialect::KimiAcpV1,
         };
         Ok(ProviderCapability {
             provider_type: provider.provider_type,
@@ -1171,4 +1173,11 @@ mod task13_gateway_hardening {
 ///    sandbox）。
 mod task28_gateway_root_authority {
     include!("provider_gateway_tests/task28_root_authority.inc.rs");
+}
+
+/// Task 1a(lcg_t01):四家显式 provider 映射与 Fake/未知不回退
+/// (REQ-LCG-01;映射、纯 projection/boundary DTO、validated 承载与 registry
+/// 基础合同的映射切片)。
+mod lcg_t01_provider_mapping {
+    include!("provider_gateway_tests/mapping.inc.rs");
 }

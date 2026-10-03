@@ -22,6 +22,7 @@ use crate::product::app_paths::ProductAppPaths;
 use crate::product::image_create::{
     ImageCreateEngine, ImageCreateRunRegistry, SessionStore, SettingsStore,
 };
+use crate::product::logical_codebase::provider_projection::UnprovisionedProviderPolicyProjector;
 use crate::product::models::ProviderName;
 use crate::web::events::EventHub;
 use crate::web::gateway_factory::LogicalCodebaseGatewayFactory;
@@ -472,21 +473,33 @@ fn real_provider_registry(provider_gate: Arc<ProviderAvailabilityGate>) -> Provi
     registry.register_gated(
         ProviderName::ClaudeCode,
         Arc::new(ClaudeCodeProvider::new(PathBuf::from("claude"))),
+        // 1a 合同期占位(裁决 A1):四参原子 register_gated 的未接入
+        // projector,恒拒绝投影;1c-factory 落真实 projector 时整体替换。
+        Arc::new(UnprovisionedProviderPolicyProjector),
         provider_gate.clone(),
     );
     registry.register_gated(
         ProviderName::Codex,
         Arc::new(CodexProvider::new(PathBuf::from("codex"))),
+        // 1a 合同期占位(裁决 A1):四参原子 register_gated 的未接入
+        // projector,恒拒绝投影;1c-factory 落真实 projector 时整体替换。
+        Arc::new(UnprovisionedProviderPolicyProjector),
         provider_gate.clone(),
     );
     registry.register_gated(
         ProviderName::Pi,
         Arc::new(PiProvider::new(PathBuf::from("pi"))),
+        // 1a 合同期占位(裁决 A1):四参原子 register_gated 的未接入
+        // projector,恒拒绝投影;1c-factory 落真实 projector 时整体替换。
+        Arc::new(UnprovisionedProviderPolicyProjector),
         provider_gate.clone(),
     );
     registry.register_gated(
         ProviderName::KimiCode,
         Arc::new(KimiCodeProvider::new(PathBuf::from("kimi"))),
+        // 1a 合同期占位(裁决 A1):四参原子 register_gated 的未接入
+        // projector,恒拒绝投影;1c-factory 落真实 projector 时整体替换。
+        Arc::new(UnprovisionedProviderPolicyProjector),
         provider_gate,
     );
     registry

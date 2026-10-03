@@ -64,6 +64,8 @@ impl ProviderCapabilitySource for ReviewStaticCapabilitySource {
         let adapter_dialect = match provider.provider_type {
             ProviderRefType::ClaudeCode => ProviderDialect::ClaudeCodeCliV1,
             ProviderRefType::Codex => ProviderDialect::CodexCliV1,
+            ProviderRefType::Pi => ProviderDialect::PiRpcV1,
+            ProviderRefType::KimiCode => ProviderDialect::KimiAcpV1,
         };
         Ok(ProviderCapability {
             provider_type: provider.provider_type,
@@ -220,7 +222,8 @@ async fn drive_review_session_via_gateway_records_audit_and_completes() {
         "gateway must consult capability for the session-configured reviewer provider"
     );
     assert!(
-        seen.iter().all(|r| r == &ProviderRef::claude_code("cap_managed_snapshot")),
+        seen.iter()
+            .all(|r| r == &ProviderRef::claude_code("cap_managed_snapshot")),
         "every gateway validate/revalidate must use the session-configured reviewer, got {seen:?}"
     );
     assert_eq!(
@@ -512,8 +515,9 @@ fn routing_reference_context_projects_session_codex_author_not_hardcoded_claude(
     ));
     let seen = capabilities.seen_provider_refs();
     assert!(
-        seen.iter().any(|r| r.provider_type == ProviderRefType::Codex
-            && r.capability_snapshot_ref == "cap_managed_snapshot"),
+        seen.iter()
+            .any(|r| r.provider_type == ProviderRefType::Codex
+                && r.capability_snapshot_ref == "cap_managed_snapshot"),
         "projection must validate the session-configured Codex author, got {seen:?}"
     );
 }

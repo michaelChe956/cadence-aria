@@ -630,7 +630,7 @@ fn map_index_error(error: AggregateIndexError) -> ProductStoreError {
 
 /// 据 validated envelope 冻结的 provider dialect 映射到 streaming input 的
 /// `ProviderType`。dialect 与 provider 类型一一对应,与 gateway 路由级解析一致。
-/// Fake/测试 provider 不经 gateway,故此处只映射两种真实 dialect。
+/// Fake/测试 provider 不经 gateway,故此处不映射 Fake。
 fn provider_type_for_dialect(
     dialect: crate::product::logical_codebase::policy::ProviderDialect,
 ) -> crate::protocol::contracts::ProviderType {
@@ -638,6 +638,8 @@ fn provider_type_for_dialect(
     match dialect {
         ProviderDialect::ClaudeCodeCliV1 => crate::protocol::contracts::ProviderType::ClaudeCode,
         ProviderDialect::CodexCliV1 => crate::protocol::contracts::ProviderType::Codex,
+        ProviderDialect::PiRpcV1 => crate::protocol::contracts::ProviderType::Pi,
+        ProviderDialect::KimiAcpV1 => crate::protocol::contracts::ProviderType::KimiCode,
     }
 }
 

@@ -167,11 +167,15 @@ impl ProviderRef {
     }
 }
 
-/// gateway 知晓的真实 provider 类型。Fake/测试路径不经此 gateway,故此处不含 Fake。
+/// gateway 知晓的真实 provider 类型。四家真实 provider(Task 1a,
+/// REQ-LCG-01):Claude Code、Codex、Pi、Kimi Code。Fake/测试路径不经
+/// 此 gateway,故此处不含 Fake。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderRefType {
     ClaudeCode,
     Codex,
+    Pi,
+    KimiCode,
 }
 
 /// resume 能力的可审计三态,与 `cross_cutting::provider_capabilities::
@@ -1157,6 +1161,8 @@ fn provider_name_for_dialect(dialect: ProviderDialect) -> ProviderName {
     match dialect {
         ProviderDialect::ClaudeCodeCliV1 => ProviderName::ClaudeCode,
         ProviderDialect::CodexCliV1 => ProviderName::Codex,
+        ProviderDialect::PiRpcV1 => ProviderName::Pi,
+        ProviderDialect::KimiAcpV1 => ProviderName::KimiCode,
     }
 }
 

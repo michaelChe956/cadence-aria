@@ -184,12 +184,37 @@ impl SessionPolicyAction {
     }
 }
 
-/// 已知的 provider dialect,envelope 冻结它以便复验。
+/// 已知的 provider dialect,envelope 冻结它以便复验。四家真实 provider
+/// (Task 1a,REQ-LCG-01):Claude Code、Codex、Pi、Kimi Code 各有唯一
+/// adapter dialect;Fake/测试路径不经 gateway,故此处不含 Fake。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderDialect {
     ClaudeCodeCliV1,
     CodexCliV1,
+    PiRpcV1,
+    KimiAcpV1,
+}
+
+/// provider 的 wire(传输)dialect,与 adapter dialect(`ProviderDialect`,
+/// 进程/会话语义)正交:同一 provider 的 adapter dialect 只有一种演进
+/// 版本,而 wire dialect 冻结实际传输编码。四家序列化字符串为
+/// `claude-stream-json`/`codex-app-server-rpc`/`pi-rpc`/`kimi-acp`
+/// (Task 1a 冻结,REQ-LCG-01)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProviderWireDialect {
+    /// Claude Code CLI 的 stream-json 逐行 JSON 事件流。
+    #[serde(rename = "claude-stream-json")]
+    ClaudeCodeStreamJson,
+    /// Codex 的 app-server JSON-RPC 通道。
+    #[serde(rename = "codex-app-server-rpc")]
+    CodexAppServerRpc,
+    /// Pi 的 RPC 通道(extension 经由宿主进程通信)。
+    #[serde(rename = "pi-rpc")]
+    PiRpc,
+    /// Kimi Code 的 Agent Client Protocol。
+    #[serde(rename = "kimi-acp")]
+    KimiAcp,
 }
 
 /// envelope 钉定的目标 worktree 快照。gateway 在 spawn 前重新 canonicalize

@@ -374,11 +374,11 @@ use crate::product::logical_codebase::PolicyTargetResolver;
 use crate::product::logical_codebase::ProviderCapability;
 use crate::product::logical_codebase::ProviderCapabilitySource;
 use crate::product::logical_codebase::ProviderDialect;
-use crate::product::logical_codebase::SessionPolicyAction;
 use crate::product::logical_codebase::ProviderRef;
 use crate::product::logical_codebase::ProviderRefType;
 use crate::product::logical_codebase::RepositoryCheckoutId;
 use crate::product::logical_codebase::SessionLaunchRequest;
+use crate::product::logical_codebase::SessionPolicyAction;
 
 /// sync 探针：记录 spawn 时 input 的独立 cwd 与 worktree target 并计数，
 /// 返回最小 structured output。
@@ -402,8 +402,7 @@ impl ProviderAdapter for SplitRootCwdSyncProbe {
     fn run(&self, input: &AdapterInput) -> Result<AdapterOutput, ProviderAdapterError> {
         self.runs.fetch_add(1, Ordering::SeqCst);
         *self.cwd_at_runs.lock().expect("split cwd probe") = input.working_directory.clone();
-        *self.worktree_at_runs.lock().expect("split worktree probe") =
-            input.worktree_path.clone();
+        *self.worktree_at_runs.lock().expect("split worktree probe") = input.worktree_path.clone();
         Ok(AdapterOutput {
             exit_code: Some(0),
             stdout: String::new(),
@@ -428,6 +427,8 @@ impl ProviderCapabilitySource for SplitRootCwdCapabilitySource {
         let adapter_dialect = match provider.provider_type {
             ProviderRefType::ClaudeCode => ProviderDialect::ClaudeCodeCliV1,
             ProviderRefType::Codex => ProviderDialect::CodexCliV1,
+            ProviderRefType::Pi => ProviderDialect::PiRpcV1,
+            ProviderRefType::KimiCode => ProviderDialect::KimiAcpV1,
         };
         Ok(ProviderCapability {
             provider_type: provider.provider_type,
@@ -497,7 +498,9 @@ fn split_root_cwd_gateway(
 ) -> LogicalCodebaseProviderGateway {
     let manifest = LogicalCodebaseManifest::new(project_id, canonical_root.to_path_buf(), vec![]);
     let policies = AggregatePolicyArtifactStore::new(paths.clone());
-    policies.ensure_bootstrap(&manifest).expect("bootstrap policy");
+    policies
+        .ensure_bootstrap(&manifest)
+        .expect("bootstrap policy");
     LogicalCodebaseProviderGateway::with_audit(
         policies,
         Arc::new(SplitRootCwdCapabilitySource),

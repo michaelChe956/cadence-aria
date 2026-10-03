@@ -24,6 +24,7 @@ pub mod production_policy_resolvers;
 pub mod provider_admission_preflight;
 pub mod provider_capability_store;
 pub mod provider_gateway;
+pub mod provider_projection;
 pub mod provider_trust;
 pub mod provider_trust_adapters;
 pub mod provider_trust_store;

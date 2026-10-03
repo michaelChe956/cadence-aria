@@ -166,7 +166,10 @@ mod tests {
         });
         let preflight: Arc<dyn AggregatePreflightService> = Arc::new(FakePreflightService::new(
             preflight_calls.clone(),
-            manifest.provider_context_root.to_string_lossy().into_owned(),
+            manifest
+                .provider_context_root
+                .to_string_lossy()
+                .into_owned(),
         ));
         let clock: Arc<Clock> = Arc::new(|| CREATED_AT.to_string());
         let coordinator = AggregateInitializationCoordinator::new(
@@ -302,7 +305,10 @@ mod tests {
         });
         let preflight: Arc<dyn AggregatePreflightService> = Arc::new(FakePreflightService::new(
             Arc::new(Mutex::new(Vec::new())),
-            manifest.provider_context_root.to_string_lossy().into_owned(),
+            manifest
+                .provider_context_root
+                .to_string_lossy()
+                .into_owned(),
         ));
         let provider: Arc<dyn AggregateProviderTurnDriver> = Arc::new(FailingProvider);
         let clock: Arc<Clock> = Arc::new(|| CREATED_AT.to_string());
@@ -397,7 +403,10 @@ mod tests {
         });
         let preflight: Arc<dyn AggregatePreflightService> = Arc::new(FakePreflightService::new(
             Arc::new(Mutex::new(Vec::new())),
-            manifest.provider_context_root.to_string_lossy().into_owned(),
+            manifest
+                .provider_context_root
+                .to_string_lossy()
+                .into_owned(),
         ));
         let provider: Arc<dyn AggregateProviderTurnDriver> = Arc::new(CountingProvider {
             count: Mutex::new(0),
@@ -480,6 +489,8 @@ mod tests {
                 adapter_dialect: match provider.provider_type {
                     ProviderRefType::ClaudeCode => ProviderDialect::ClaudeCodeCliV1,
                     ProviderRefType::Codex => ProviderDialect::CodexCliV1,
+                    ProviderRefType::Pi => ProviderDialect::PiRpcV1,
+                    ProviderRefType::KimiCode => ProviderDialect::KimiAcpV1,
                 },
                 capability_snapshot_ref: provider.capability_snapshot_ref.clone(),
                 resume_evidence: *self.resume.lock().unwrap(),
@@ -590,7 +601,11 @@ mod tests {
                 }
             }
             // 挂起行为依赖事件流保持打开：不关闭接收端。
-            Ok(crate::cross_cutting::streaming_provider::ProviderSession { events, commands, native_session_id: None })
+            Ok(crate::cross_cutting::streaming_provider::ProviderSession {
+                events,
+                commands,
+                native_session_id: None,
+            })
         }
     }
 
@@ -754,10 +769,8 @@ mod tests {
         // 使 gateway spawn 前 cwd 复验能通过。
         let preflight: Arc<dyn AggregatePreflightService> =
             Arc::new(DeterministicAggregatePreflightService::new(paths.clone()));
-        let driver = GatewayBackedAggregateProviderTurnDriver::claude_code(
-            gateway,
-            "cap_claude_code_1_4_0",
-        );
+        let driver =
+            GatewayBackedAggregateProviderTurnDriver::claude_code(gateway, "cap_claude_code_1_4_0");
         let provider: Arc<dyn AggregateProviderTurnDriver> = Arc::new(match command_timeout {
             Some(timeout) => driver.with_command_timeout(timeout),
             None => driver,

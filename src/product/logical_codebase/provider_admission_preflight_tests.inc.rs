@@ -71,6 +71,8 @@ mod tests {
             let adapter_dialect = match provider.provider_type {
                 ProviderRefType::ClaudeCode => ProviderDialect::ClaudeCodeCliV1,
                 ProviderRefType::Codex => ProviderDialect::CodexCliV1,
+                ProviderRefType::Pi => ProviderDialect::PiRpcV1,
+                ProviderRefType::KimiCode => ProviderDialect::KimiAcpV1,
             };
             Ok(ProviderCapability {
                 provider_type: provider.provider_type,

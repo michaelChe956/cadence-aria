@@ -130,6 +130,8 @@ fn provider_type_to_string(provider_type: ProviderRefType) -> &'static str {
     match provider_type {
         ProviderRefType::ClaudeCode => "claude_code",
         ProviderRefType::Codex => "codex",
+        ProviderRefType::Pi => "pi",
+        ProviderRefType::KimiCode => "kimi_code",
     }
 }
 
@@ -137,6 +139,8 @@ fn provider_type_from_string(value: &str) -> Option<ProviderRefType> {
     match value {
         "claude_code" => Some(ProviderRefType::ClaudeCode),
         "codex" => Some(ProviderRefType::Codex),
+        "pi" => Some(ProviderRefType::Pi),
+        "kimi_code" => Some(ProviderRefType::KimiCode),
         _ => None,
     }
 }
