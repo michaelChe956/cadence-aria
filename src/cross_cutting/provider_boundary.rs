@@ -145,6 +145,347 @@ pub enum ProviderBoundaryError {
     ProbeFailed(String),
 }
 
+// ============================================================================
+// Task 6a:产品拥有的写边界 launcher/helper(REQ-LCG-03/07)
+//
+// Linux 上以 bubblewrap 构建产品 owned 沙箱:只读 host + 冻结 target(原路径
+// rw)+ 既有授权 git-dir(identity 链冻结)+ 自然 session/runtime 窄面 +
+// 隔离 temp。保持网络(provider API/MCP 需要)与 root 原路径/既有配置发现,
+// 不照搬 Kimi terminal 先例的 `--unshare-net` 与 cwd fd 改 `/tmp/work`。
+// 缺 bwrap/user namespace 或 plan 非法一律失败关闭,绝不回退无隔离 spawn。
+// ============================================================================
+
+use std::collections::BTreeMap;
+use std::ffi::OsString;
+
+use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
+
+/// 可信二进制目录(launcher 自身解析 bwrap/git 用;子进程环境由调用方决定)。
+const BOUNDARY_TRUSTED_PATH_DIRS: [&str; 5] =
+    ["/usr/bin", "/bin", "/usr/local/bin", "/usr/sbin", "/sbin"];
+
+/// 各 provider 自然 session/runtime 可写目录(HOME 下窄面;只列存在的)。
+/// 用途(沿 2026-10-01 写边界实测):
+/// - `.claude`、`.claude.json`:Claude Code 会话/项目状态;
+/// - `.codex`:Codex sessions、projects trust、config;
+/// - `.pi`:Pi agent 会话(`~/.pi/agent/sessions`);
+/// - `.kimi-code`:Kimi sessions 与 workspace-trust。
+///
+/// 不得整 HOME、整 root 或 MCP 目录宽写:Aria 注入的 MCP 由 gateway 经
+/// argv/env 控制并落在沙箱内;不可隔离的外部 MCP 写通道只能命中只读挂载面
+/// 而被阻断,本集合永不为其开洞。
+pub const PROVIDER_RUNTIME_WRITABLE_DIRS: [&str; 5] =
+    [".claude", ".claude.json", ".codex", ".pi", ".kimi-code"];
+
+/// 解析当前会话的自然 session/runtime 可写目录集合(窄面)。HOME 取
+/// `env_vars`(gateway 冻结值)优先、进程环境兜底;缺 HOME 或目录不存在
+/// 时返回更小集合——不预创建、不扩大写面。
+pub fn provider_runtime_writable_roots(env_vars: &BTreeMap<String, String>) -> Vec<PathBuf> {
+    let home = env_vars
+        .get("HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from));
+    let Some(home) = home else {
+        return Vec::new();
+    };
+    PROVIDER_RUNTIME_WRITABLE_DIRS
+        .iter()
+        .map(|dir| home.join(dir))
+        .filter(|path| path.exists())
+        .collect()
+}
+
+/// 产品写边界 launcher:持有已验证的 bwrap 路径;`None` = 本机不可用
+/// (缺 bwrap 或 user namespace/mount 实测失败)。
+#[derive(Debug, Clone)]
+pub struct ProviderBoundaryLauncher {
+    bwrap: Option<PathBuf>,
+}
+
+impl ProviderBoundaryLauncher {
+    /// 探测环境:可信目录中的 bwrap + 真实最小沙箱运行验证 user
+    /// namespace/mount 可用。任一步失败即不可用(不猜测、不放宽)。
+    pub fn probe_environment() -> Self {
+        Self {
+            bwrap: probe_bwrap_with_namespace(),
+        }
+    }
+
+    /// 注入式构造(测试/装配 seam;`None` 模拟缺 sandbox/namespace 机器)。
+    #[cfg(test)]
+    pub(crate) fn from_bwrap(bwrap: Option<PathBuf>) -> Self {
+        Self { bwrap }
+    }
+
+    pub fn is_available(&self) -> bool {
+        self.bwrap.is_some()
+    }
+
+    pub fn bwrap_path(&self) -> Option<&Path> {
+        self.bwrap.as_deref()
+    }
+
+    /// 能力视角:launcher 自身永不签发 Confirmed/Denied——缺 bwrap/user
+    /// namespace 的机器与「可用但未经 6c 真实正负探针」都返回 Unknown;
+    /// 真实 Confirmed 只能由 probe evidence 经 2d 三方一致性导入。不可用
+    /// 时 spawn 失败关闭,绝不 skip→pass 或退回无隔离 spawn。
+    pub fn write_boundary_state(&self) -> ProviderCapabilityEvidence {
+        ProviderCapabilityEvidence::Unknown
+    }
+
+    /// 构造 bwrap argv(不含 bwrap 程序自身)。挂载顺序是安全语义:
+    /// `--ro-bind / /` 最早;`--tmpfs /tmp` 之后的所有 bind 恢复被 tmpfs
+    /// 遮蔽的原路径可见性(root 原路径不变);后置只读挂载(段 2)再遮蔽
+    /// rw 面内的受保护位置。
+    pub(crate) fn build_boundary_argv(
+        &self,
+        command: &str,
+        args: &[&str],
+        working_dir: &Path,
+        env_vars: &BTreeMap<String, String>,
+        plan: &ProviderBoundaryPlan,
+    ) -> Result<Vec<OsString>, ProviderBoundaryError> {
+        validate_boundary_plan(plan)?;
+        let mut argv = Vec::<OsString>::new();
+        // 只读 host(root 原路径;一切未显式授权的写面默认拒绝)。
+        for value in ["--ro-bind", "/", "/"] {
+            argv.push(OsString::from(value));
+        }
+        for value in ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"] {
+            argv.push(OsString::from(value));
+        }
+        argv.push(OsString::from("--die-with-parent"));
+        // root(进程 cwd)只读,原路径;后置于 tmpfs 以在 root 位于 /tmp 下时
+        // 仍可见。
+        push_mount(&mut argv, "--ro-bind", working_dir);
+        // 冻结 target:Coding 唯一宽写 bind,原路径 rw(read-only 无 target)。
+        if let Some(target) = plan.target_root() {
+            push_mount(&mut argv, "--bind", target);
+            // 既有授权 git-dir:linked worktree 的 git 元数据在 target 外,沿
+            // identity 链冻结(plain repo `.git` 在 target 内,无额外 bind,
+            // 即已交付授权,不新增整个 `.git` 宽写)。
+            for git_path in frozen_git_dir_binds(target) {
+                push_mount(&mut argv, "--bind", &git_path);
+            }
+        }
+        // 自然 session/runtime 窄面(用途见 PROVIDER_RUNTIME_WRITABLE_DIRS)。
+        for runtime_root in provider_runtime_writable_roots(env_vars) {
+            push_mount(&mut argv, "--bind", &runtime_root);
+        }
+        // cwd 保持 root 原路径(不照搬 Kimi terminal 的 /tmp/work 改写)。
+        argv.push(OsString::from("--chdir"));
+        argv.push(working_dir.as_os_str().to_os_string());
+        // payload:环境经继承 + ProcessManager overlay(不 --clearenv,
+        // 保持既有配置发现)。
+        argv.push(OsString::from(command));
+        for arg in args {
+            argv.push(OsString::from(*arg));
+        }
+        Ok(argv)
+    }
+}
+
+fn push_mount(argv: &mut Vec<OsString>, flag: &str, source: &Path) {
+    let mount = source.as_os_str().to_str().expect("utf8 mount path");
+    for value in [flag, mount, mount] {
+        argv.push(OsString::from(value));
+    }
+}
+
+/// plan 形状校验:mode 与 target 一致、路径绝对且存在、cwd 与 target 分离。
+fn validate_boundary_plan(plan: &ProviderBoundaryPlan) -> Result<(), ProviderBoundaryError> {
+    let invalid = |details: &str| Err(ProviderBoundaryError::InvalidPlan(details.to_string()));
+    if !plan.working_directory().is_absolute() || !plan.working_directory().is_dir() {
+        return invalid("working directory must be an absolute existing directory");
+    }
+    if plan
+        .protected_roots()
+        .iter()
+        .any(|root| !root.is_absolute())
+    {
+        return invalid("protected roots must be absolute");
+    }
+    match plan.mode() {
+        ProviderBoundaryMode::ReadOnly => {
+            if plan.target_root().is_some() {
+                return invalid("read-only plan must not carry a writable target");
+            }
+        }
+        ProviderBoundaryMode::TargetWriteOnly => {
+            let Some(target) = plan.target_root() else {
+                return invalid("target-write-only plan requires a target root");
+            };
+            if !target.is_absolute() || !target.is_dir() {
+                return invalid("target root must be an absolute existing directory");
+            }
+            if target == plan.working_directory() {
+                return invalid("target must stay independent of the process cwd");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// bwrap 探测:可信目录定位 + `--version` + 真实最小沙箱(`ro-bind / /` 下
+/// 执行 `/bin/true`)验证 user namespace/mount。失败返回 None(不可用)。
+fn probe_bwrap_with_namespace() -> Option<PathBuf> {
+    let candidate = BOUNDARY_TRUSTED_PATH_DIRS
+        .iter()
+        .map(|dir| Path::new(dir).join("bwrap"))
+        .find(|candidate| candidate.is_file())?;
+    let version = std::process::Command::new(&candidate)
+        .arg("--version")
+        .output()
+        .ok()?;
+    if !version.status.success() {
+        return None;
+    }
+    let namespace_check = std::process::Command::new(&candidate)
+        .args([
+            "--ro-bind",
+            "/",
+            "/",
+            "--proc",
+            "/proc",
+            "--dev",
+            "/dev",
+            "--",
+            "/bin/true",
+        ])
+        .output()
+        .ok()?;
+    if !namespace_check.status.success() {
+        return None;
+    }
+    Some(candidate)
+}
+
+/// git-dir 授权链冻结:与 Kimi client services 共用同一冻结面(`.provider-
+/// session-cache/<key>/writable_git_paths.json`,host 领土)。linked
+/// worktree 解析 git/common dir 并做 round-trip 校验(`<gitdir>/gitdir` 指回
+/// 字面 `<target>/.git`),plain repo 返回空(target 内 `.git` 即既有授权);
+/// 校验失败安全降级为空。首解析持久化,后续轮次信任冻结面——coder 改写
+/// `.git` 指针不能把下一轮的 rw bind 指向任意 host git dir。
+pub(crate) fn frozen_git_dir_binds(target: &Path) -> Vec<PathBuf> {
+    let cache_dir = target
+        .parent()
+        .unwrap_or(target)
+        .join(".provider-session-cache")
+        .join(provider_cache_key(target));
+    let cache_file = cache_dir.join("writable_git_paths.json");
+    if let Ok(content) = std::fs::read_to_string(&cache_file)
+        && let Ok(paths) = serde_json::from_str::<Vec<String>>(&content)
+    {
+        return paths.into_iter().map(PathBuf::from).collect();
+    }
+    let resolved = resolve_writable_git_dir_binds(target);
+    let persisted: Vec<String> = resolved
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect();
+    if std::fs::create_dir_all(&cache_dir).is_ok()
+        && let Ok(json) = serde_json::to_string(&persisted)
+    {
+        let _ = std::fs::write(&cache_file, json);
+    }
+    resolved
+}
+
+fn resolve_writable_git_dir_binds(target: &Path) -> Vec<PathBuf> {
+    let Some(git) = BOUNDARY_TRUSTED_PATH_DIRS
+        .iter()
+        .map(|dir| Path::new(dir).join("git"))
+        .find(|candidate| candidate.is_file())
+    else {
+        return Vec::new();
+    };
+    let Ok(output) = std::process::Command::new(git)
+        .arg("-C")
+        .arg(target)
+        .args(["rev-parse", "--absolute-git-dir", "--git-common-dir"])
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let mut dirs: Vec<PathBuf> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let path = Path::new(line);
+            let absolute = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                target.join(path)
+            };
+            absolute.canonicalize().unwrap_or(absolute)
+        })
+        .collect();
+    if dirs.len() != 2 {
+        return Vec::new();
+    }
+    let common = dirs.pop().expect("common dir");
+    let gitdir = dirs.pop().expect("git dir");
+    if gitdir.starts_with(target) {
+        // plain repo(或 gitdir 在 target 内的链):target rw bind 已覆盖。
+        return Vec::new();
+    }
+    // round-trip 校验:合法 linked worktree 的 `<gitdir>/gitdir` 指回字面
+    // `<canonical-target>/.git`;期望侧不做 `.git` 穿透 canonicalize。
+    let points_back = std::fs::read_to_string(gitdir.join("gitdir"))
+        .ok()
+        .and_then(|content| {
+            let back = PathBuf::from(content.trim());
+            let back = if back.is_absolute() {
+                back
+            } else {
+                gitdir.join(back)
+            };
+            std::fs::canonicalize(&back)
+                .ok()
+                .zip(
+                    std::fs::canonicalize(target)
+                        .map(|canonical| canonical.join(".git"))
+                        .ok(),
+                )
+                .map(|(back, expected)| back == expected)
+        })
+        .unwrap_or(false);
+    if !points_back {
+        return Vec::new();
+    }
+    let mut outside: Vec<PathBuf> = [gitdir, common]
+        .into_iter()
+        .filter(|path| !path.starts_with(target))
+        .collect();
+    outside.sort();
+    outside.dedup();
+    // git dir 位于 common dir 之下:common bind 一个即覆盖两者。
+    outside
+        .iter()
+        .filter(|path| {
+            !outside
+                .iter()
+                .any(|other| other != *path && path.starts_with(other))
+        })
+        .cloned()
+        .collect()
+}
+
+/// 冻结面缓存子目录 key(worktree 路径的跨进程稳定 FNV-1a 64 位,与 Kimi
+/// 先例同算法:同一 target 的产品 launcher 与 Kimi terminal 共享一个冻结面)。
+fn provider_cache_key(root: &Path) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in root.as_os_str().as_encoded_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,9 +599,19 @@ mod launcher_tests {
         std::fs::create_dir_all(&target).expect("target");
         let plan = coding_plan(&root, &target);
         let launcher = ProviderBoundaryLauncher::from_bwrap(Some(PathBuf::from("/usr/sbin/bwrap")));
+        // 显式空 HOME:runtime 集合为空,target 才是唯一 rw bind(不依赖
+        // 测试进程的真实 HOME)。
+        let mut env = BTreeMap::new();
+        env.insert(
+            "HOME".to_string(),
+            base.path()
+                .join("empty-home")
+                .to_string_lossy()
+                .into_owned(),
+        );
 
         let argv = launcher
-            .build_boundary_argv("sh", &["-c", "true"], &root, &BTreeMap::new(), &plan)
+            .build_boundary_argv("sh", &["-c", "true"], &root, &env, &plan)
             .expect("boundary argv");
         let text = argv_text(&argv);
 
@@ -273,11 +624,14 @@ mod launcher_tests {
         );
         // 冻结 target 以原路径 rw 挂载,且是唯一 rw bind。
         let target_text = target.to_string_lossy().into_owned();
-        assert!(
-            text.windows(3).any(|window| {
-                window == ["--bind".to_string(), target_text.clone(), target_text]
-            })
-        );
+        assert!(text.windows(3).any(|window| {
+            window
+                == [
+                    "--bind".to_string(),
+                    target_text.clone(),
+                    target_text.clone(),
+                ]
+        }));
         assert_eq!(
             text.iter().filter(|arg| *arg == "--bind").count(),
             1,
@@ -288,7 +642,7 @@ mod launcher_tests {
         let root_text = root.to_string_lossy().into_owned();
         assert!(
             text.windows(2)
-                .any(|window| window == ["--chdir".to_string(), root_text])
+                .any(|window| window == ["--chdir".to_string(), root_text.clone()])
         );
         // 既有配置发现保持:不 --clearenv,环境经继承+overlay(非 bwrap --setenv)。
         assert!(!text.iter().any(|arg| arg == "--clearenv"));
@@ -298,8 +652,12 @@ mod launcher_tests {
             text.windows(2)
                 .any(|window| window == ["--tmpfs".to_string(), "/tmp".to_string()])
         );
-        // payload 命令收尾。
-        assert_eq!(text.last().map(String::as_str), Some("sh"));
+        // payload 命令与参数原样收尾。
+        let tail: Vec<String> = text[text.len() - 3..].to_vec();
+        assert_eq!(
+            tail,
+            ["sh".to_string(), "-c".to_string(), "true".to_string()]
+        );
     }
 
     /// read-only action:无任何 rw bind,root/成员/元数据全部落在只读挂载面。
@@ -315,19 +673,31 @@ mod launcher_tests {
             Vec::new(),
         );
         let launcher = ProviderBoundaryLauncher::from_bwrap(Some(PathBuf::from("/usr/sbin/bwrap")));
+        // 显式空 HOME:runtime 集合为空,read-only 面 zero rw bind。
+        let mut env = BTreeMap::new();
+        env.insert(
+            "HOME".to_string(),
+            base.path()
+                .join("empty-home")
+                .to_string_lossy()
+                .into_owned(),
+        );
 
         let argv = launcher
-            .build_boundary_argv("sh", &["-c", "true"], &root, &BTreeMap::new(), &plan)
+            .build_boundary_argv("sh", &["-c", "true"], &root, &env, &plan)
             .expect("readonly boundary argv");
         let text = argv_text(&argv);
 
         assert!(!text.iter().any(|arg| arg == "--bind"));
         let root_text = root.to_string_lossy().into_owned();
-        assert!(
-            text.windows(3).any(|window| {
-                window == ["--ro-bind".to_string(), root_text.clone(), root_text]
-            })
-        );
+        assert!(text.windows(3).any(|window| {
+            window
+                == [
+                    "--ro-bind".to_string(),
+                    root_text.clone(),
+                    root_text.clone(),
+                ]
+        }));
     }
 
     /// 各 provider 自然 session/runtime 可写集合:HOME 下窄面目录,用途固定;

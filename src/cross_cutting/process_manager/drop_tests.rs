@@ -376,7 +376,7 @@ async fn lcg_t06_missing_sandbox_or_namespace_keeps_unknown() {
     )
     .await
     .expect("fake bwrap still yields a managed child");
-    drop(process.stdin.take());
+    drop(process.stdin);
     let status = process.child.wait().await.expect("wait fake bwrap child");
     assert!(
         !status.success(),

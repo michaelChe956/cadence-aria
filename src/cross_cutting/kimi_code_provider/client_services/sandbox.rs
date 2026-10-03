@@ -329,7 +329,13 @@ pub fn resolve_writable_git_paths(root: &Path) -> Vec<PathBuf> {
 /// the worktree path, so every later dispatcher of the same attempt shares
 /// one face) and every later construction trusts the persisted face
 /// instead of re-resolving from the worktree.
-pub fn frozen_writable_git_paths(root: &Path) -> Vec<PathBuf> {
+///
+/// Task 6a note: the product write-boundary launcher
+/// (`cross_cutting::provider_boundary`) freezes the SAME face (same cache
+/// path, key and format) for LC provider spawns, so the Kimi host terminal
+/// and the product launcher always share one authorization face; visibility
+/// narrowed to `pub(crate)` to mark it crate-internal API.
+pub(crate) fn frozen_writable_git_paths(root: &Path) -> Vec<PathBuf> {
     let cache_dir = root
         .parent()
         .unwrap_or(root)

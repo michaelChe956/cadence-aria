@@ -16,6 +16,9 @@ use tokio::process::{ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio_util::sync::CancellationToken;
 
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
+use crate::cross_cutting::provider_boundary::{
+    ProviderBoundaryError, ProviderBoundaryLauncher, ProviderBoundaryPlan,
+};
 
 const TRANSIENT_SPAWN_RETRY_COUNT: usize = 2;
 const TRANSIENT_SPAWN_RETRY_DELAY: Duration = Duration::from_millis(10);
@@ -215,52 +218,121 @@ impl ProcessManager {
             return Err(command_missing(command));
         }
 
-        let mut retry_count = 0;
-        let mut child = loop {
-            let mut command_builder = Command::new(command);
-            if !inherit_environment {
-                command_builder.env_clear();
-            }
-            command_builder
-                .args(args)
-                .current_dir(working_dir)
-                .envs(env_vars)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
-
-            match ManagedProcessChild::spawn(&mut command_builder) {
-                Ok(child) => break child,
-                Err(error)
-                    if is_retryable_spawn_error(&error)
-                        && retry_count < TRANSIENT_SPAWN_RETRY_COUNT =>
-                {
-                    retry_count += 1;
-                    tokio::time::sleep(TRANSIENT_SPAWN_RETRY_DELAY).await;
-                }
-                Err(error) => return Err(map_spawn_error(command, error)),
-            }
-        };
-
-        let stdin = child.inner().stdin.take().ok_or_else(missing_stdin_pipe)?;
-        let stdout = child
-            .inner()
-            .stdout
-            .take()
-            .ok_or_else(missing_stdout_pipe)?;
-        let stderr = child
-            .inner()
-            .stderr
-            .take()
-            .ok_or_else(missing_stderr_pipe)?;
-
-        Ok(ManagedProcess {
-            stdin,
-            stdout,
-            stderr,
-            child,
-        })
+        let mut command_builder = Command::new(command);
+        if !inherit_environment {
+            command_builder.env_clear();
+        }
+        command_builder
+            .args(args)
+            .current_dir(working_dir)
+            .envs(env_vars);
+        spawn_prepared(command, command_builder).await
     }
+
+    /// Task 6a(冻结签名):产品写边界 spawn。validated launch 的 provider
+    /// 进程必须经此入口携带不可伪造 `ProviderBoundaryPlan`;plan 非法或本机
+    /// 无 bwrap/user namespace 时失败关闭,绝不回退无隔离 spawn。
+    pub async fn spawn_with_boundary(
+        command: &str,
+        args: &[&str],
+        working_dir: &Path,
+        env_vars: &BTreeMap<String, String>,
+        plan: &ProviderBoundaryPlan,
+        _cancel: CancellationToken,
+    ) -> Result<ManagedProcess, ProviderAdapterError> {
+        Self::spawn_with_boundary_resolved(
+            ProviderBoundaryLauncher::probe_environment(),
+            command,
+            args,
+            working_dir,
+            env_vars,
+            plan,
+            _cancel,
+        )
+        .await
+    }
+
+    /// 注入 launcher 的写边界 spawn(测试/装配 seam):行为与
+    /// `spawn_with_boundary` 一致,仅 bwrap 解析可注入。
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn spawn_with_boundary_resolved(
+        launcher: ProviderBoundaryLauncher,
+        command: &str,
+        args: &[&str],
+        working_dir: &Path,
+        env_vars: &BTreeMap<String, String>,
+        plan: &ProviderBoundaryPlan,
+        _cancel: CancellationToken,
+    ) -> Result<ManagedProcess, ProviderAdapterError> {
+        // 失败关闭:缺 bwrap/namespace 直接拒绝(判别码原样透传),调用方
+        // 能力状态必须记 Unknown,不得回退 plain spawn。
+        let bwrap = launcher.bwrap_path().ok_or_else(|| {
+            ProviderAdapterError::provider_unavailable(
+                ProviderBoundaryError::Unsupported(
+                    "no usable bwrap/user namespace; refusing unisolated provider spawn".into(),
+                )
+                .to_string(),
+            )
+        })?;
+        if !command_is_resolvable(command, working_dir, env_vars) {
+            return Err(command_missing(command));
+        }
+        let argv = launcher
+            .build_boundary_argv(command, args, working_dir, env_vars, plan)
+            .map_err(|error| ProviderAdapterError::provider_unavailable(error.to_string()))?;
+        let mut command_builder = Command::new(bwrap);
+        command_builder
+            .args(argv)
+            .current_dir(working_dir)
+            // 环境继承 + overlay:bwrap 不 --clearenv,保持既有配置发现。
+            .envs(env_vars);
+        spawn_prepared(command, command_builder).await
+    }
+}
+
+/// 已构造好的 Command 统一走瞬态重试 + 管道提取(spawn 与写边界 spawn
+/// 共用;`command` 仅用于错误归因)。
+async fn spawn_prepared(
+    command: &str,
+    mut command_builder: Command,
+) -> Result<ManagedProcess, ProviderAdapterError> {
+    command_builder
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut retry_count = 0;
+    let mut child = loop {
+        match ManagedProcessChild::spawn(&mut command_builder) {
+            Ok(child) => break child,
+            Err(error)
+                if is_retryable_spawn_error(&error)
+                    && retry_count < TRANSIENT_SPAWN_RETRY_COUNT =>
+            {
+                retry_count += 1;
+                tokio::time::sleep(TRANSIENT_SPAWN_RETRY_DELAY).await;
+            }
+            Err(error) => return Err(map_spawn_error(command, error)),
+        }
+    };
+
+    let stdin = child.inner().stdin.take().ok_or_else(missing_stdin_pipe)?;
+    let stdout = child
+        .inner()
+        .stdout
+        .take()
+        .ok_or_else(missing_stdout_pipe)?;
+    let stderr = child
+        .inner()
+        .stderr
+        .take()
+        .ok_or_else(missing_stderr_pipe)?;
+
+    Ok(ManagedProcess {
+        stdin,
+        stdout,
+        stderr,
+        child,
+    })
 }
 
 fn map_spawn_error(command: &str, error: std::io::Error) -> ProviderAdapterError {

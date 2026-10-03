@@ -347,16 +347,25 @@ fn writable_git_paths_for(
     match boundary {
         // LC 会话(Task 4c):git bind 面唯一锚定 plan 的 target root
         // (linked-worktree git-dir 沿冻结授权);read-only plan 无写面。
-        Some(plan) => match plan.mode() {
-            crate::cross_cutting::provider_boundary::ProviderBoundaryMode::TargetWriteOnly => plan
-                .target_root()
-                .map(frozen_writable_git_paths)
-                .unwrap_or_default(),
-            crate::cross_cutting::provider_boundary::ProviderBoundaryMode::ReadOnly => Vec::new(),
-        },
+        Some(plan) => frozen_git_mount_binds_for_boundary(plan),
         // direct 会话:保持原值(仅 Executor 解析,其余角色为空)。
         None if matches!(role, AdapterRole::Executor) => frozen_writable_git_paths(root),
         None => Vec::new(),
+    }
+}
+
+/// 只读 mount-plan 先行接口(Task 6a):LC boundary plan → 冻结授权 git-dir
+/// 挂载面。纯读取(不 spawn、不产生额外副作用),使 Kimi 宿主 terminal/fs
+/// 与产品写边界 launcher 对齐同一冻结授权链;既有 direct/LC 方法行为不变。
+pub(crate) fn frozen_git_mount_binds_for_boundary(plan: &ProviderBoundaryPlan) -> Vec<PathBuf> {
+    match plan.mode() {
+        // TargetWriteOnly:linked-worktree git-dir 沿冻结授权;plain repo 的
+        // `.git` 在 target 内,无需额外 bind。
+        crate::cross_cutting::provider_boundary::ProviderBoundaryMode::TargetWriteOnly => plan
+            .target_root()
+            .map(frozen_writable_git_paths)
+            .unwrap_or_default(),
+        crate::cross_cutting::provider_boundary::ProviderBoundaryMode::ReadOnly => Vec::new(),
     }
 }
 
