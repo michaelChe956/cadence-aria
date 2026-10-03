@@ -19,7 +19,10 @@ use crate::product::logical_codebase::policy::{PolicyTarget, SessionPolicyAction
 use crate::product::logical_codebase::provider_capability_store::ProviderCapabilityStore;
 use crate::product::logical_codebase::provider_gateway::{
     CODEX_DANGER_FULL_ACCESS_UNSUPPORTED, PROVIDER_CAPABILITY_LAUNCH_NOT_CONFIRMED,
-    PROVIDER_CAPABILITY_WRITE_BOUNDARY_NOT_CONFIRMED, PROVIDER_ROOT_RECIPE_REQUIRES_FIXED_CLAUDE,
+    PROVIDER_CAPABILITY_WRITE_BOUNDARY_NOT_CONFIRMED,
+    PROVIDER_ROOT_RECIPE_CREDENTIAL_RECHECK_DENIED,
+    PROVIDER_ROOT_RECIPE_CREDENTIAL_RECHECK_UNAVAILABLE,
+    PROVIDER_ROOT_RECIPE_EVIDENCE_VERSION_DRIFT, PROVIDER_ROOT_RECIPE_REQUIRES_FIXED_CLAUDE,
 };
 use crate::product::logical_codebase::{
     LogicalCodebaseFeature, LogicalRepositoryId, PolicyTargetResolver, ProviderCapability,
@@ -365,14 +368,45 @@ impl ProviderCapabilitySource for StoreBackedProviderCapabilitySource {
         provider: &ProviderRef,
         credential: &crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
     ) -> Result<ProviderCapability, ProviderGatewayError> {
-        let _ = credential;
         if provider.provider_type != ProviderRefType::ClaudeCode {
             return Err(ProviderGatewayError::UnsupportedCapability(format!(
                 "{PROVIDER_ROOT_RECIPE_REQUIRES_FIXED_CLAUDE}: got {:?}",
                 provider.provider_type
             )));
         }
+        // 凭据重核验通道:durable Running 重验是 recipe 相位的硬前置;
+        // 无通道(new/with_store 构造)fail-closed,绝不在无凭据重验下放行。
+        let Some(recheck) = &self.recipe_recheck else {
+            return Err(ProviderGatewayError::UnsupportedCapability(
+                PROVIDER_ROOT_RECIPE_CREDENTIAL_RECHECK_UNAVAILABLE.to_string(),
+            ));
+        };
         let record = self.load_record(provider)?;
+        // 已交付 recipe 证据钉定版本与记录版本漂移 → fail-closed(旧证据
+        // 不跨 CLI 版本沿用,等待重新交付)。
+        if let crate::product::logical_codebase::provider_capability_store::RootRecipeEvidence::Delivered { version, .. } =
+            &record.root_recipe_evidence
+        {
+            if version != &record.version {
+                return Err(ProviderGatewayError::UnsupportedCapability(format!(
+                    "{PROVIDER_ROOT_RECIPE_EVIDENCE_VERSION_DRIFT}: evidence pins {version}, record has {}",
+                    record.version
+                )));
+            }
+        }
+        // 凭据每次重验 durable Running:operation 终态/step 推进/digest 或
+        // root 漂移 → 凭据失效,fail-closed(稳定码 + admission reason_code)。
+        if let Err(denied) =
+            credential.reverify_against_running_operation(&recheck.operations, &recheck.lc_id)
+        {
+            let detail = match &denied {
+                crate::product::logical_codebase::provider_admission_preflight::ProviderAdmissionError::Waiting { reason_code, .. } => reason_code.clone(),
+                other => format!("{other:?}"),
+            };
+            return Err(ProviderGatewayError::UnsupportedCapability(format!(
+                "{PROVIDER_ROOT_RECIPE_CREDENTIAL_RECHECK_DENIED}: {detail}"
+            )));
+        }
         Ok(Self::capability_from_record(
             &record,
             record

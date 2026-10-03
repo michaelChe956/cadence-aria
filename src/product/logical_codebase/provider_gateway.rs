@@ -814,13 +814,6 @@ impl LogicalCodebaseProviderGateway {
         &self,
         request: SessionLaunchRequest,
     ) -> Result<ValidatedSessionLaunchPolicy, ProviderGatewayError> {
-        let artifact = self
-            .policies
-            .get(&request.project_id)
-            .map_err(ProviderGatewayError::policy)?
-            .ok_or_else(|| ProviderGatewayError::PolicyMissing(request.project_id.clone()))?;
-
-        let target = self.targets.resolve_and_revalidate(&request)?;
         let capability = self
             .capabilities
             .require_supported(&request.provider, request.action)?;
@@ -833,6 +826,50 @@ impl LogicalCodebaseProviderGateway {
         // 不论 UI 是否选择该 provider。该阻断发生在 envelope 冻结之前,使 Codex
         // 无法进入逻辑 route。
         self.enforce_route_policy(&capability)?;
+
+        self.assemble_validated(request, capability, ValidatedSessionLaunchPhase::Normal)
+    }
+
+    /// Task 2b 第二段:root-recipe 相位的 gateway 内部校验入口(pub(crate),
+    /// 不对普通调用开放)。capability 只消费固定 Claude recipe 事实
+    /// (`require_root_recipe_supported`,凭据每次对 durable Running 重验),
+    /// 不套 normal action row 的 launch/write-boundary 分格门;policy/target/
+    /// envelope 形状/cwd authority 与普通链一致(不误套 normal
+    /// target-only/read-only action 门——envelope 只做形状冻结,recipe 的写
+    /// 面由 BootstrapExecutorMarker/receipt 链持有)。产出的 policy 冻结
+    /// `RootRecipe(credential)` 相位,revalidate 据此走 recipe 分支。
+    pub(crate) fn validate_root_recipe_request(
+        &self,
+        request: SessionLaunchRequest,
+        credential: &crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
+    ) -> Result<ValidatedSessionLaunchPolicy, ProviderGatewayError> {
+        let capability = self
+            .capabilities
+            .require_root_recipe_supported(&request.provider, credential)?;
+        self.enforce_route_policy(&capability)?;
+        self.assemble_validated(
+            request,
+            capability,
+            ValidatedSessionLaunchPhase::RootRecipe(credential.clone()),
+        )
+    }
+
+    /// policy artifact 解析 + target 复验 + envelope 冻结 + cwd authority 早门
+    /// + fingerprint 计算的共享装配(Normal/RootRecipe 两相位共用;分格门在
+    /// 各自入口先行施加)。
+    fn assemble_validated(
+        &self,
+        request: SessionLaunchRequest,
+        capability: ProviderCapability,
+        phase: ValidatedSessionLaunchPhase,
+    ) -> Result<ValidatedSessionLaunchPolicy, ProviderGatewayError> {
+        let artifact = self
+            .policies
+            .get(&request.project_id)
+            .map_err(ProviderGatewayError::policy)?
+            .ok_or_else(|| ProviderGatewayError::PolicyMissing(request.project_id.clone()))?;
+
+        let target = self.targets.resolve_and_revalidate(&request)?;
 
         let now = chrono::Utc::now().to_rfc3339();
         let envelope = SessionPolicyEnvelope::new(
@@ -876,29 +913,8 @@ impl LogicalCodebaseProviderGateway {
             action: request.action,
             version: capability.version,
             capability_snapshot_ref: capability.capability_snapshot_ref,
-            phase: ValidatedSessionLaunchPhase::Normal,
+            phase,
         })
-    }
-
-    /// Task 2b 第二段:root-recipe 相位的 gateway 内部校验入口(pub(crate),
-    /// 不对普通调用开放)。capability 只消费固定 Claude recipe 事实
-    /// (`require_root_recipe_supported`,凭据每次对 durable Running 重验),
-    /// 不套 normal action row 的 launch/write-boundary 分格门;policy/target/
-    /// envelope 形状/cwd authority/availability 与普通链一致(不误套 normal
-    /// target-only/read-only action 门——envelope 只做形状冻结,recipe 的写
-    /// 面由 BootstrapExecutorMarker/receipt 链持有)。产出的 policy 冻结
-    /// `RootRecipe(credential)` 相位,revalidate 据此走 recipe 分支。
-    pub(crate) fn validate_root_recipe_request(
-        &self,
-        request: SessionLaunchRequest,
-        credential: &crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
-    ) -> Result<ValidatedSessionLaunchPolicy, ProviderGatewayError> {
-        let _ = (request, credential);
-        // RED 编译桩:GREEN 段实现 recipe 相位装配(recipe 事实 + envelope
-        // + RootRecipe phase)。
-        Err(ProviderGatewayError::UnsupportedCapability(
-            "root_recipe_validate_not_migrated".to_string(),
-        ))
     }
 
     /// 路由级硬门(Task 13):对解析出的 provider capability 施加 gateway-owned
@@ -1115,10 +1131,30 @@ impl LogicalCodebaseProviderGateway {
             });
         }
 
-        // 2. 重新查询能力,比对 version/dialect/snapshot,并重算指纹。
-        let capability = self
-            .capabilities
-            .require_supported(&validated.provider, validated.action)?;
+        // 2. 重新查询能力,按冻结相位分流(Task 2b 第二段):
+        //    - RootRecipe:重新消费固定 recipe 事实——冻结凭据再次对 durable
+        //      Running 重验(每次重验),不消费 normal launch/write/resume 分格
+        //      (root-recipe 不误套 normal action 门);
+        //    - Normal:fresh 复验 write_boundary 分格,明确 resume 复验 resume
+        //      分格(仅 Confirmed 放行,不静默转 fresh)。
+        let capability = match &validated.phase {
+            ValidatedSessionLaunchPhase::RootRecipe(credential) => self
+                .capabilities
+                .require_root_recipe_supported(&validated.provider, credential)?,
+            ValidatedSessionLaunchPhase::Normal => {
+                let capability = self
+                    .capabilities
+                    .require_supported(&validated.provider, validated.action)?;
+                if is_resume {
+                    self.capabilities
+                        .require_resume_supported(&validated.provider, validated.action)?;
+                } else {
+                    self.capabilities
+                        .require_write_boundary(&validated.provider, validated.action)?;
+                }
+                capability
+            }
+        };
         // 路由级硬门在 spawn 前复验中同样施加:防 validate→spawn 间 capability
         // source 被替换为 Codex(防 TOCTOU)。
         self.enforce_route_policy(&capability)?;
@@ -1147,17 +1183,6 @@ impl LogicalCodebaseProviderGateway {
             return Err(ProviderGatewayError::PolicyDrift {
                 dimension: "resume_fingerprint".to_string(),
             });
-        }
-
-        // 4. fresh/resume 分格门 fail-closed(Task 2b):spawn 前经 source 重新
-        //    消费对应分格——fresh 复验 write_boundary,明确 resume 复验 resume
-        //    分格(仅 Confirmed 放行,不静默转 fresh)。
-        if is_resume {
-            self.capabilities
-                .require_resume_supported(&validated.provider, validated.action)?;
-        } else {
-            self.capabilities
-                .require_write_boundary(&validated.provider, validated.action)?;
         }
 
         // 3. config digest 重算(防托管配置被篡改)。
