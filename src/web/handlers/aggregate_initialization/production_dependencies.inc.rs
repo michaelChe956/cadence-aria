@@ -119,13 +119,13 @@ impl AggregateProviderTurnDriver for GatewayFactoryProviderTurnDriver {
                 );
             }
         }
-        let gateway = factory.build_for_lc(project_id, lc_id).map_err(|error| {
-            AggregateInitializationError::ProviderTurn {
+        let gateway = factory
+            .build_for_lc_material_prep(project_id, lc_id)
+            .map_err(|error| AggregateInitializationError::ProviderTurn {
                 step,
                 reason: format!("logical codebase gateway factory build failed: {error}"),
                 retryable: true,
-            }
-        })?;
+            })?;
         // C4 Task 10 / Task 1.4：经 claude_code_with_admission 组装——
         // provider turn 前先做实际成员规则/policy/capability 的 admission
         // 预检（Task 8），缺失/漂移时 fail-closed，provider 保持零启动。

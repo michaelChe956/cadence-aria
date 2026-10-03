@@ -138,7 +138,7 @@ async fn run_coding_runner_task_body(
             // 错误短路 start 流程（provider 零启动），经下方 F-14 失败路径
             // 双通道可见化（manual-recovery diagnostic + protocol error）。
             Ok(Some(lc_id)) => {
-                match factory.build_for_lc(&attempt.project_id, Some(lc_id.as_str())) {
+                match factory.build_readonly_for_lc(&attempt.project_id, Some(lc_id.as_str())) {
                     Ok(gateway) => Some(gateway),
                     Err(error) => {
                         gateway_build_failure = Some(CodingWorkspaceEngineError::ProviderStream(
@@ -149,7 +149,9 @@ async fn run_coding_runner_task_body(
                 }
             }
             // 无 LC 作用域（单仓/legacy 直连契约）：保持既有降级，不阻断。
-            Ok(None) => factory.build_for_lc(&attempt.project_id, None).ok(),
+            Ok(None) => factory
+                .build_readonly_for_lc(&attempt.project_id, None)
+                .ok(),
             Err(error) => {
                 tracing::warn!(
                     project_id = attempt.project_id.as_str(),

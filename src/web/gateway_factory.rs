@@ -46,26 +46,59 @@ impl LogicalCodebaseGatewayFactory {
         self.audit.clone()
     }
 
-    /// 为指定 project 构造 gateway:ensure_bootstrap(policy + capability) 后
-    /// `with_audit` 组装。缺失 manifest 时 fail-closed 为 `PolicyMissing`。
-    /// 兼容别名：等价 `build_for_lc(project_id, None)`（默认首个逻辑代码库/project 级路径）。
+    /// 为指定 project 构造 gateway(兼容别名):等价
+    /// `build_for_lc_material_prep(project_id, None)`。normal admission 调用方
+    /// 应迁移 `build_readonly_for_lc`(Task 3b)。
     pub fn build(
         &self,
         project_id: &str,
     ) -> Result<LogicalCodebaseProviderGateway, ProviderGatewayError> {
-        self.build_for_lc(project_id, None)
+        self.build_for_lc_material_prep(project_id, None)
     }
 
-    /// v1.3：按 issue 所属代码库构造 gateway——lc_id Some 时 policy/capability/
-    /// manifest 全部解析到 `logical-codebases/{lc_id}/` 子树。
-    ///
-    /// C4 Task 2：`None`（legacy 别名）不再自行选择 project 级 store 句柄，而是
-    /// 显式解析 legacy 别名 LC id 后统一走 `for_lc`（别名子树与旧 project 级
-    /// 布局字节等价）；无别名 record 且无显式 lc 时 fail-closed `PolicyMissing`。
+    /// v1.3 legacy 兼容别名:等价 `build_for_lc_material_prep`。#8/recipe
+    /// material prep 之外的调用方(normal admission/GET/early)必须迁移
+    /// `build_readonly_for_lc`,禁止借用 material prep 的写入语义。
     pub fn build_for_lc(
         &self,
         project_id: &str,
         lc_id: Option<&str>,
+    ) -> Result<LogicalCodebaseProviderGateway, ProviderGatewayError> {
+        self.build_for_lc_material_prep(project_id, lc_id)
+    }
+
+    /// Task 3b:**只读组装**——early/GET/action eligibility 读取面专用。
+    /// 不调用 `ensure_bootstrap`、不写 policy/capability/trust/audit;缺
+    /// #8 发布材料时由 admission/check 返回可操作 waiting,而不是在读取
+    /// 路径上静默物化自举桩。
+    pub fn build_readonly_for_lc(
+        &self,
+        project_id: &str,
+        lc_id: Option<&str>,
+    ) -> Result<LogicalCodebaseProviderGateway, ProviderGatewayError> {
+        self.build_scoped(project_id, lc_id, false)
+    }
+
+    /// Task 3b:**material prep 组装**——仅供 #8/recipe material prep 的
+    /// 显式调用(`ensure_bootstrap` 写 recipe 材料),normal admission
+    /// 不能借用。
+    pub fn build_for_lc_material_prep(
+        &self,
+        project_id: &str,
+        lc_id: Option<&str>,
+    ) -> Result<LogicalCodebaseProviderGateway, ProviderGatewayError> {
+        self.build_scoped(project_id, lc_id, true)
+    }
+
+    /// v1.3:按 issue 所属代码库构造 gateway——lc_id Some 时 policy/
+    /// capability/manifest 全部解析到 `logical-codebases/{lc_id}/` 子树
+    /// (C4 Task 2 legacy 别名统一走 `for_lc`)。Task 3b:`ensure_stores`
+    /// 区分只读组装与 material prep(写 ensure_bootstrap)。
+    fn build_scoped(
+        &self,
+        project_id: &str,
+        lc_id: Option<&str>,
+        ensure_stores: bool,
     ) -> Result<LogicalCodebaseProviderGateway, ProviderGatewayError> {
         let lc_id = self.resolve_lc_scope(project_id, lc_id)?;
         let logical = match lc_id.as_deref() {
@@ -80,13 +113,19 @@ impl LogicalCodebaseGatewayFactory {
             Some(lc_id) => AggregatePolicyArtifactStore::for_lc(self.paths.clone(), lc_id),
             None => AggregatePolicyArtifactStore::new(self.paths.clone()),
         };
-        policies.ensure_bootstrap(&manifest)?;
+        if ensure_stores {
+            // material prep(#8/recipe):允许写 recipe 材料;readonly 组装
+            // 绝不在读取路径上物化自举桩。
+            policies.ensure_bootstrap(&manifest)?;
+        }
 
         let capabilities = match lc_id.as_deref() {
             Some(lc_id) => ProviderCapabilityStore::for_lc(self.paths.clone(), lc_id),
             None => ProviderCapabilityStore::new(self.paths.clone()),
         };
-        capabilities.ensure_bootstrap(project_id)?;
+        if ensure_stores {
+            capabilities.ensure_bootstrap(project_id)?;
+        }
 
         // 权威根 = manifest.provider_context_root(聚合根 cwd)。若为相对路径,
         // 构造时 canonicalize;失败回退原值(生产 manifest 应已指向存在目录)。
@@ -128,6 +167,26 @@ impl LogicalCodebaseGatewayFactory {
             self.availability_gate.clone(),
             self.audit.clone(),
             authority_root,
+        )
+        .with_readonly_lc_facts(
+            match lc_id.as_deref() {
+                Some(lc_id) => {
+                    crate::product::logical_codebase::RootRecipeReceiptStore::for_lc(
+                        self.paths.clone(),
+                        lc_id,
+                    )
+                }
+                None => crate::product::logical_codebase::RootRecipeReceiptStore::new(
+                    self.paths.clone(),
+                ),
+            },
+            Arc::new(
+                crate::product::logical_codebase::provider_trust::ReadonlyProviderTrustSource::production_for_scope(
+                    self.paths.clone(),
+                    lc_id.clone(),
+                ),
+            ),
+            lc_id.clone(),
         ))
     }
 

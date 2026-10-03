@@ -1032,7 +1032,9 @@
                     canonical_root: canonical_root.to_path_buf(),
                     trust_key: "flippable-fixture".to_string(),
                     trusted: true,
-                    ownership: crate::product::logical_codebase::provider_trust::ProviderTrustOwnership::LcManaged,
+                    ownership: Some(
+                        crate::product::logical_codebase::provider_trust::ProviderTrustOwnership::LcManaged,
+                    ),
                     detail: "fixture trusted".to_string(),
                     verified_at: "2026-10-03T00:00:00Z".to_string(),
                 },
@@ -1073,7 +1075,7 @@
             crate::product::logical_codebase::provider_gateway::ProviderCapability,
             ProviderGatewayError,
         > {
-            self.retag(self.inner.require_supported(provider, action)?)
+            Ok(self.retag(self.inner.require_supported(provider, action)?))
         }
 
         fn require_resume_supported(
@@ -1084,7 +1086,7 @@
             crate::product::logical_codebase::provider_gateway::ProviderCapability,
             ProviderGatewayError,
         > {
-            self.retag(self.inner.require_resume_supported(provider, action)?)
+            Ok(self.retag(self.inner.require_resume_supported(provider, action)?))
         }
 
         fn require_write_boundary(
@@ -1095,7 +1097,7 @@
             crate::product::logical_codebase::provider_gateway::ProviderCapability,
             ProviderGatewayError,
         > {
-            self.retag(self.inner.require_write_boundary(provider, action)?)
+            Ok(self.retag(self.inner.require_write_boundary(provider, action)?))
         }
 
         fn require_root_recipe_supported(
@@ -1106,7 +1108,7 @@
             crate::product::logical_codebase::provider_gateway::ProviderCapability,
             ProviderGatewayError,
         > {
-            self.retag(self.inner.require_root_recipe_supported(provider, credential)?)
+            Ok(self.retag(self.inner.require_root_recipe_supported(provider, credential)?))
         }
     }
 
@@ -1216,6 +1218,7 @@
                     &self.lc_id,
                 ),
                 self.trust.clone(),
+                Some(self.lc_id.clone()),
             )
         }
 
@@ -1341,9 +1344,10 @@
             validated,
         );
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        let error = runtime
-            .block_on(gateway_b.start_streaming(launch, CancellationToken::new()))
-            .unwrap_err();
+        let error = match runtime.block_on(gateway_b.start_streaming(launch, CancellationToken::new())) {
+            Err(error) => error,
+            Ok(_) => panic!("drifted dimension must not spawn"),
+        };
         assert!(matches!(error, ProviderGatewayError::PolicyDrift { .. } | ProviderGatewayError::ProviderUnavailable(_)));
         assert_eq!(fixture.start_count(), 0);
 
@@ -1387,9 +1391,10 @@
             validated,
         );
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        let error = runtime
-            .block_on(gateway.start_streaming(launch, CancellationToken::new()))
-            .unwrap_err();
+        let error = match runtime.block_on(gateway.start_streaming(launch, CancellationToken::new())) {
+            Err(error) => error,
+            Ok(_) => panic!("drifted dimension must not spawn"),
+        };
         assert!(
             matches!(&error, ProviderGatewayError::TargetMismatch { field } if field == "cwd")
         );
@@ -1447,9 +1452,10 @@
             validated,
         );
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        let error = runtime
-            .block_on(gateway.start_streaming(launch, CancellationToken::new()))
-            .unwrap_err();
+        let error = match runtime.block_on(gateway.start_streaming(launch, CancellationToken::new())) {
+            Err(error) => error,
+            Ok(_) => panic!("drifted dimension must not spawn"),
+        };
         assert!(
             matches!(&error, ProviderGatewayError::UnsupportedCapability(reason) if reason.contains("write_boundary"))
         );
@@ -1496,12 +1502,7 @@
             )
             .unwrap();
         let input = AdapterInput {
-            working_directory: Some(
-                fixture
-                    .canonical_root()
-                    .to_string_lossy()
-                    .to_string(),
-            ),
+            working_directory: Some(fixture.canonical_root()),
             provider_type: crate::protocol::contracts::ProviderType::ClaudeCode,
             role: crate::protocol::contracts::AdapterRole::Executor,
             worktree_path: None,

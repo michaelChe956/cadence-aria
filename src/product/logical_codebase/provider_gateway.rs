@@ -34,6 +34,7 @@ use crate::product::logical_codebase::policy::{
     AggregatePolicyArtifactStore, PolicyTarget, ProviderDialect, ProviderWireDialect,
     SessionPolicyAction, SessionPolicyEnvelope,
 };
+use crate::product::logical_codebase::provider_admission_preflight::ProviderAdmissionError;
 use crate::product::logical_codebase::provider_capability_store::ProviderActionCapability;
 use crate::product::logical_codebase::store::LogicalCodebaseManifest;
 use crate::product::models::ProviderName;
@@ -57,12 +58,35 @@ pub struct ValidatedSessionLaunchPolicy {
     provider: ProviderRef,
     action: SessionPolicyAction,
     version: String,
+    /// Task 3b:action row 的 evidence profile 摘要(冻结已实测
+    /// version/action 的完整权限画像,不能随单次 role 变化)。
+    projection_digest: String,
     capability_snapshot_ref: String,
     /// Task 2b 第二段:私有冻结相位。`Normal` 由普通 `validate` 产出;
     /// `RootRecipe` 只能由 gateway 内部 `validate_root_recipe_request`
     /// (durable Running 派生凭据)产出并携带冻结凭据供 spawn 前重验——
     /// 枚举与字段私有、无 public constructor,普通调用不可构造。
     phase: ValidatedSessionLaunchPhase,
+    /// Task 3a/3b:#8 发布链冻结的 locator digest 事实;`None` = 本次
+    /// validate 未消费发布链(自举桩/RootRecipe 相位/未注入只读事实源),
+    /// spawn 前复验跳过正文重读。
+    policy_locator: Option<PolicyLocatorDigests>,
+}
+
+/// #8 发布链在 validate 时点冻结的 digest 事实(spawn 前复验重读比对)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PolicyLocatorDigests {
+    pub(crate) policy_digest: String,
+    pub(crate) rule_digest: String,
+}
+
+/// Task 3b:early action 资格判定的返回面——只携带两枚不可伪造的引用
+/// (capability snapshot 与 action row 的 evidence profile 摘要),不携带
+/// 未来 target/worktree 或 D4 事实。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderActionAdmission {
+    pub capability_snapshot_ref: String,
+    pub projection_ref: String,
 }
 
 /// validated policy 的私有冻结相位(Task 2b 第二段,模块外不可见)。
@@ -726,6 +750,14 @@ pub struct LogicalCodebaseProviderGateway {
     /// 聚合政策权威根 locator(= manifest.provider_context_root,构造时 canonicalize)。
     /// 冻结后供 `validate` 写入 envelope.authority_root。
     authority_root: PathBuf,
+    /// Task 3b:LC 作用域的 #8 receipt 只读事实源(factory 装配);未注入
+    /// 时 validate/verdict 不消费发布链(裸 gateway 测试/旧链零回归)。
+    receipts: Option<crate::product::logical_codebase::RootRecipeReceiptStore>,
+    /// Task 3b:只读 trust source(GET/early 与 spawn 复验共用同一 source;
+    /// 禁止 durable 副作用的 registry verify)。未注入时不检查 trust 维度。
+    trust: Option<Arc<dyn crate::product::logical_codebase::provider_trust::ProviderTrustSource>>,
+    /// trust source 调用所需的 LC 作用域(与 receipts 同源装配)。
+    lc_scope: Option<String>,
 }
 
 impl LogicalCodebaseProviderGateway {
@@ -740,16 +772,16 @@ impl LogicalCodebaseProviderGateway {
         availability_gate: Arc<ProviderAvailabilityGate>,
         authority_root: PathBuf,
     ) -> Self {
-        Self {
+        Self::with_audit(
             policies,
             capabilities,
             targets,
             registry,
             sync_adapter,
             availability_gate,
-            audit: Arc::new(GatewayRunAudit::new()),
+            Arc::new(GatewayRunAudit::new()),
             authority_root,
-        }
+        )
     }
 
     /// 共享同一份启动审计构造 gateway。测试 fixture 用同一 `Arc<GatewayRunAudit>`
@@ -776,7 +808,25 @@ impl LogicalCodebaseProviderGateway {
             availability_gate,
             audit,
             authority_root,
+            receipts: None,
+            trust: None,
+            lc_scope: None,
         }
+    }
+
+    /// Task 3b:注入 LC 只读事实源(#8 receipt store + 只读 trust source
+    /// + LC 作用域)。factory 生产装配恒注入;未注入的裸 gateway 保持
+    /// 既有语义(既有测试/旧链零回归)。
+    pub fn with_readonly_lc_facts(
+        mut self,
+        receipts: crate::product::logical_codebase::RootRecipeReceiptStore,
+        trust: Arc<dyn crate::product::logical_codebase::provider_trust::ProviderTrustSource>,
+        lc_scope: Option<String>,
+    ) -> Self {
+        self.receipts = Some(receipts);
+        self.trust = Some(trust);
+        self.lc_scope = lc_scope;
+        self
     }
 
     /// 返回启动审计的共享句柄。供外部(测试 fixture、未来生产侧)观测启动计数与
@@ -905,6 +955,31 @@ impl LogicalCodebaseProviderGateway {
             capability.adapter_dialect,
             &capability.capability_snapshot_ref,
         );
+        // Task 3a/3b:#8 发布链消费(factory 注入 receipt store、Normal 相位
+        // 且 artifact 非自举桩时):校验 locator 正文/digest 链并冻结
+        // policy_locator 事实,供 spawn 前复验重读。自举桩(存量迁移前)
+        // 与 RootRecipe 相位(沿自身 receipt auditor 合同)不在此消费。
+        let policy_locator = match (&self.receipts, &phase) {
+            (Some(receipts), ValidatedSessionLaunchPhase::Normal)
+                if !artifact.is_bootstrap_placeholder() =>
+            {
+                receipts
+                    .latest_finalized(&request.project_id)
+                    .map_err(ProviderGatewayError::policy)?
+                    .map(|receipt| {
+                        verify_published_policy_body(&self.authority_root, &artifact, &receipt)?;
+                        Ok::<_, ProviderGatewayError>(PolicyLocatorDigests {
+                            policy_digest: receipt.policy_digest,
+                            rule_digest: receipt.rule_digest,
+                        })
+                    })
+                    .transpose()?
+            }
+            _ => None,
+        };
+
+        // Task 3b:冻结 action row 的 evidence profile 摘要。
+        let projection_digest = capability.action_capability.projection_digest.clone();
 
         Ok(ValidatedSessionLaunchPolicy {
             envelope,
@@ -913,8 +988,10 @@ impl LogicalCodebaseProviderGateway {
             provider: request.provider,
             action: request.action,
             version: capability.version,
+            projection_digest,
             capability_snapshot_ref: capability.capability_snapshot_ref,
             phase,
+            policy_locator,
         })
     }
 
@@ -1085,24 +1162,40 @@ impl LogicalCodebaseProviderGateway {
         Ok(output)
     }
 
-    /// spawn 前完整复验(B-1)。逐维度比对 envelope 冻结值与 spawn 时点的真实值:
+    /// spawn 前完整复验(B-1)。逐维度比对 envelope 冻结值与 spawn 时点的真实值,
+    /// 阶段顺序遵循 Task 3 冻结合同:identity/manifest(authority root)→
+    /// policy body/artifact/receipt → provider mapping/version/action
+    /// capability(含 write_boundary(D4)与 resume 追加分格)→ trust source →
+    /// config digest → canonical cwd/logical roots → target/git identity →
+    /// availability。role/tool 策略 guard 由 Task 7 统一接线:
     ///
-    /// 1. **policy 指纹**:重新加载 store 中的 `AggregatePolicyArtifact`,比对
-    ///    `policy_revision` 与 `policy_digest`(防 validate→spawn 间政策被升级)。
-    /// 2. **provider 能力指纹**:重新查询 capability source,比对 `version`、
-    ///    `adapter_dialect` 与 `capability_snapshot_ref`,并据当前 artifact+capability
-    ///    重算 `SessionResumeFingerprint` 与冻结值逐字一致(防 provider 被替换)。
-    /// 3. **config digest**:据 envelope 的 `config_artifact_ref` 重算 digest,
+    /// 1. **authority root**(Task 3b):envelope 冻结的 authority 与 gateway
+    ///    冻结的 manifest root canonical 相等(防 validate→spawn 间换根/跨
+    ///    gateway 投影漂移)。
+    /// 2. **policy 指纹**:重新加载 store 中的 `AggregatePolicyArtifact`,比对
+    ///    `policy_revision` 与 `policy_digest`(防 validate→spawn 间政策被升级);
+    ///    validate 冻结了 #8 发布链 locator digest 时,重读 locator/AGENTS
+    ///    原字节比对(正文/规则篡改 → `PolicyDrift`)。
+    /// 3. **provider 能力指纹**:重新查询 capability source,比对 `version`、
+    ///    `adapter_dialect`、`capability_snapshot_ref` 与 action row 的
+    ///    evidence profile 摘要(`projection_digest`),并据当前
+    ///    artifact+capability 重算 `SessionResumeFingerprint` 与冻结值逐字
+    ///    一致(防 provider 被替换)。
+    /// 4. **config digest**:据 envelope 的 `config_artifact_ref` 重算 digest,
     ///    与 envelope 冻结的 `config_digest` 一致(防托管配置被篡改)。
-    /// 4. **resume 能力**(Task 2b B-2):若启动为 resume,action row 的 resume
-    ///    分格必须 `Confirmed`(`require_resume_supported`),否则 fail-closed 为
-    ///    `ResumeNotSupported`。
-    /// 5. **canonical cwd 权威**(Task 2.8):重新 canonicalize spawn cwd 与
+    /// 5. **resume 追加**(Task 2b B-2 + Task 3b):fresh 与 resume 都施加
+    ///    write_boundary(D4)分格;resume 在此之上追加 resume 分格
+    ///    (`require_resume_supported`),否则 fail-closed 为
+    ///    `ResumeNotSupported`(不得静默转 fresh)。
+    /// 6. **trust source**(Task 3b):factory 注入只读 source 且 provider
+    ///    需要用户级 workspace trust 时重验;绝不 ensure/revoke。
+    /// 7. **canonical cwd 权威**(Task 2.8):重新 canonicalize spawn cwd 与
     ///    envelope 冻结的独立 `working_directory`,不一致返回
     ///    `TargetMismatch { field: "cwd" }`;冻结 cwd 越出 authority root
     ///    返回 `TargetMismatch { field: "cwd_authority" }`。cwd 与 target 是
-    ///    独立维度,cwd≠target 的合法分离形态放行;target identity 由 5b 复验。
-    /// 6. **availability**:调用 availability gate,不可用返回 `ProviderUnavailable`。
+    ///    独立维度,cwd≠target 的合法分离形态放行;target identity 由 8 复验。
+    /// 8. **target/git identity**(REQ-ENV-03):resolver 重新解析复验。
+    /// 9. **availability**:调用 availability gate,不可用返回 `ProviderUnavailable`。
     ///
     /// 任一维度漂移都发生在 registry lookup 之前。路由级 fail-closed 不等于 OS
     /// 级隔离:本复验是 supervised 场景下的 TOCTOU 门禁,不宣称物理不可写。
@@ -1113,6 +1206,26 @@ impl LogicalCodebaseProviderGateway {
         is_resume: bool,
     ) -> Result<(), ProviderGatewayError> {
         let envelope = validated.envelope();
+
+        // 0. authority root 复验(Task 3b:identity/manifest 阶段)。
+        let canonical_envelope_authority =
+            envelope.authority_root.canonicalize().map_err(|error| {
+                ProviderGatewayError::Target(format!(
+                    "canonicalize envelope authority root {}: {error}",
+                    envelope.authority_root.display()
+                ))
+            })?;
+        let canonical_authority = self.authority_root.canonicalize().map_err(|error| {
+            ProviderGatewayError::Target(format!(
+                "canonicalize authority root {}: {error}",
+                self.authority_root.display()
+            ))
+        })?;
+        if canonical_envelope_authority != canonical_authority {
+            return Err(ProviderGatewayError::PolicyDrift {
+                dimension: "authority_root".to_string(),
+            });
+        }
 
         // 1. 重新加载政策 artifact,比对 revision/digest。
         let artifact = self
@@ -1133,12 +1246,43 @@ impl LogicalCodebaseProviderGateway {
             });
         }
 
+        // 1b. #8 发布链正文复验(Task 3a/3b):validate 冻结了 locator digest
+        //     事实时,spawn 前重读 locator/AGENTS 原字节比对。
+        if let Some(locator) = &validated.policy_locator {
+            let raw_body =
+                std::fs::read(canonical_authority.join(&artifact.policy_id)).map_err(|error| {
+                    ProviderGatewayError::Target(format!(
+                        "re-read policy locator {}: {error}",
+                        artifact.policy_id
+                    ))
+                })?;
+            let body_digest = format!("sha256:{:x}", Sha256::digest(&raw_body));
+            if body_digest != locator.policy_digest || body_digest != artifact.digest {
+                return Err(ProviderGatewayError::PolicyDrift {
+                    dimension: "policy_body".to_string(),
+                });
+            }
+            let rule_bytes =
+                std::fs::read(canonical_authority.join(
+                    crate::product::logical_codebase::root_recipe_receipt::ROOT_RULE_ENTRY_FILE,
+                ))
+                .map_err(|error| {
+                    ProviderGatewayError::Target(format!("re-read root rule entry: {error}"))
+                })?;
+            let rule_digest = format!("sha256:{:x}", Sha256::digest(&rule_bytes));
+            if rule_digest != locator.rule_digest {
+                return Err(ProviderGatewayError::PolicyDrift {
+                    dimension: "rule_digest".to_string(),
+                });
+            }
+        }
+
         // 2. 重新查询能力,按冻结相位分流(Task 2b 第二段):
         //    - RootRecipe:重新消费固定 recipe 事实——冻结凭据再次对 durable
         //      Running 重验(每次重验),不消费 normal launch/write/resume 分格
         //      (root-recipe 不误套 normal action 门);
-        //    - Normal:fresh 复验 write_boundary 分格,明确 resume 复验 resume
-        //      分格(仅 Confirmed 放行,不静默转 fresh)。
+        //    - Normal:fresh 与 resume 都施加 write_boundary(D4)分格;resume
+        //      在此之上追加 resume 分格(仅 Confirmed 放行,不静默转 fresh)。
         let capability = match &validated.phase {
             ValidatedSessionLaunchPhase::RootRecipe(credential) => self
                 .capabilities
@@ -1147,12 +1291,11 @@ impl LogicalCodebaseProviderGateway {
                 let capability = self
                     .capabilities
                     .require_supported(&validated.provider, validated.action)?;
+                self.capabilities
+                    .require_write_boundary(&validated.provider, validated.action)?;
                 if is_resume {
                     self.capabilities
                         .require_resume_supported(&validated.provider, validated.action)?;
-                } else {
-                    self.capabilities
-                        .require_write_boundary(&validated.provider, validated.action)?;
                 }
                 capability
             }
@@ -1175,6 +1318,11 @@ impl LogicalCodebaseProviderGateway {
                 dimension: "capability_snapshot_ref".to_string(),
             });
         }
+        if capability.action_capability.projection_digest != validated.projection_digest {
+            return Err(ProviderGatewayError::PolicyDrift {
+                dimension: "projection_digest".to_string(),
+            });
+        }
         let current_fingerprint = SessionResumeFingerprint::from_envelope(
             envelope,
             &capability.version,
@@ -1195,6 +1343,32 @@ impl LogicalCodebaseProviderGateway {
             return Err(ProviderGatewayError::PolicyDrift {
                 dimension: "config_digest".to_string(),
             });
+        }
+
+        // 4b. 只读 trust 复验(Task 3b:trust source 阶段)。factory 注入
+        //     source 且 provider 需要用户级 workspace trust 时重验;同一
+        //     source 供 GET/early 与 spawn 复验,绝不 ensure/revoke、不写
+        //     durable audit。RootRecipe 相位的 trust 硬前置由
+        //     ensure_before_recipe 合同持有,不在此重复施加。
+        let provider_name = provider_name_for_dialect(envelope.provider_dialect);
+        if let Some(trust) = &self.trust
+            && crate::product::logical_codebase::provider_trust::requires_workspace_trust(
+                &provider_name,
+            )
+            && matches!(validated.phase, ValidatedSessionLaunchPhase::Normal)
+        {
+            let verification = trust.verify_trusted(
+                &validated.project_id,
+                self.lc_scope.as_deref().unwrap_or(""),
+                &provider_name,
+                &self.authority_root,
+            )?;
+            if !verification.trusted {
+                return Err(ProviderGatewayError::ProviderUnavailable(format!(
+                    "provider trust not established for {provider_name:?}: {}",
+                    verification.detail
+                )));
+            }
         }
 
         // 5. canonical cwd 权威复验（Task 2.8：拆除「canonical cwd ==
@@ -1255,12 +1429,221 @@ impl LogicalCodebaseProviderGateway {
             });
         }
 
-        // 6. availability gate。
+        // 9. availability gate。
         let provider_name = provider_name_for_dialect(envelope.provider_dialect);
         self.availability_gate
             .ensure_available(&provider_name)
             .map_err(|error| ProviderGatewayError::unavailable(error.to_string()))?;
         Ok(())
+    }
+
+    /// Task 3b:统一无副作用 admission verdict——按冻结阶段顺序对
+    /// (request, projection) 对完整复验当前 durable 事实。GET/early/
+    /// 复验面消费;不写 audit、不 ensure/revoke、不 spawn。
+    ///
+    /// 阶段顺序:identity/manifest(cwd canonical 必须等于 manifest root,
+    /// 不能仅 prefix 允许子目录)→ policy body/artifact/receipt(+config
+    /// digest 重算比对)→ provider mapping/version/action capability(含
+    /// write_boundary(D4)与 resume 追加分格)→ trust source(只读)→
+    /// role/tool(Task 7 统一 guard 接线,本层不另造第二套判定)→
+    /// logical roots → projection/adapter(registry 存在性)→ availability
+    /// → boundary/D4(coding projection 必须携带 boundary evidence 引用)。
+    pub fn admission_verdict(
+        &self,
+        request: &SessionLaunchRequest,
+        projection: &crate::product::logical_codebase::provider_projection::ProviderPolicyProjection,
+        is_resume: bool,
+    ) -> Result<(), ProviderGatewayError> {
+        // (projection getter 均 pub(crate),直接消费冻结字段。)
+
+        // 1. identity/manifest:provider 映射与 action 一致。
+        if request.provider.provider_type != projection.provider_type() {
+            return Err(ProviderGatewayError::PolicyDrift {
+                dimension: "provider_identity".to_string(),
+            });
+        }
+        if request.action != projection.action() {
+            return Err(ProviderGatewayError::PolicyDrift {
+                dimension: "action".to_string(),
+            });
+        }
+        // cwd canonical 全等:projection cwd == manifest root canonical,
+        // 且请求 cwd 与 projection cwd canonical 相等。
+        crate::product::logical_codebase::assert_canonical_lc_root_consistent(
+            None,
+            None,
+            &self.authority_root,
+            projection.working_directory(),
+        )?;
+        let canonical_request_cwd = request.working_directory.canonicalize().map_err(|error| {
+            ProviderGatewayError::Target(format!(
+                "canonicalize request cwd {}: {error}",
+                request.working_directory.display()
+            ))
+        })?;
+        let canonical_projection_cwd =
+            projection
+                .working_directory()
+                .canonicalize()
+                .map_err(|error| {
+                    ProviderGatewayError::Target(format!(
+                        "canonicalize projection cwd {}: {error}",
+                        projection.working_directory().display()
+                    ))
+                })?;
+        if canonical_request_cwd != canonical_projection_cwd {
+            return Err(ProviderGatewayError::PolicyDrift {
+                dimension: "cwd".to_string(),
+            });
+        }
+
+        // 2. policy body/artifact/receipt + config/MCP 通道。
+        let artifact = self
+            .policies
+            .get(&request.project_id)
+            .map_err(ProviderGatewayError::policy)?
+            .ok_or_else(|| ProviderGatewayError::PolicyMissing(request.project_id.clone()))?;
+        if let Some(receipts) = &self.receipts
+            && let Some(receipt) = receipts
+                .latest_finalized(&request.project_id)
+                .map_err(ProviderGatewayError::policy)?
+            && !artifact.is_bootstrap_placeholder()
+        {
+            verify_published_policy_body(&self.authority_root, &artifact, &receipt)?;
+        }
+        let config_digest =
+            SessionPolicyEnvelope::recompute_config_digest(&request.config_artifact_ref)
+                .map_err(ProviderGatewayError::policy)?;
+        if config_digest != projection.config_digest() {
+            return Err(ProviderGatewayError::PolicyDrift {
+                dimension: "config_digest".to_string(),
+            });
+        }
+
+        // 3. provider mapping/version/action capability(+resume 追加)。
+        let capability = self
+            .capabilities
+            .require_supported(&request.provider, request.action)?;
+        self.capabilities
+            .require_write_boundary(&request.provider, request.action)?;
+        if is_resume {
+            self.capabilities
+                .require_resume_supported(&request.provider, request.action)?;
+        }
+        self.enforce_route_policy(&capability)?;
+        if capability.version != projection.exact_version() {
+            return Err(ProviderGatewayError::PolicyDrift {
+                dimension: "provider_version".to_string(),
+            });
+        }
+        if capability.adapter_dialect != projection.provider_dialect() {
+            return Err(ProviderGatewayError::PolicyDrift {
+                dimension: "provider_dialect".to_string(),
+            });
+        }
+        if capability.wire_dialect != projection.wire_dialect() {
+            return Err(ProviderGatewayError::PolicyDrift {
+                dimension: "wire_dialect".to_string(),
+            });
+        }
+        if capability.action_capability.projection_digest
+            != projection.capability_projection_digest()
+        {
+            return Err(ProviderGatewayError::PolicyDrift {
+                dimension: "projection_digest".to_string(),
+            });
+        }
+
+        // 4. trust source(只读;需要 workspace trust 的 provider)。
+        let provider_name = provider_name_for_dialect(capability.adapter_dialect);
+        if let Some(trust) = &self.trust
+            && crate::product::logical_codebase::provider_trust::requires_workspace_trust(
+                &provider_name,
+            )
+        {
+            let verification = trust.verify_trusted(
+                &request.project_id,
+                self.lc_scope.as_deref().unwrap_or(""),
+                &provider_name,
+                &self.authority_root,
+            )?;
+            if !verification.trusted {
+                return Err(ProviderGatewayError::ProviderUnavailable(format!(
+                    "provider trust not established for {provider_name:?}: {}",
+                    verification.detail
+                )));
+            }
+        }
+
+        // 5. role/tool:Task 7 统一 guard 接线,本层无独立事实源。
+
+        // 6. logical roots:projection 冻结的读写根与请求一致(canonical)。
+        let canonical_roots = |roots: &[PathBuf]| -> Result<Vec<PathBuf>, ProviderGatewayError> {
+            roots
+                .iter()
+                .map(|root| {
+                    root.canonicalize().map_err(|error| {
+                        ProviderGatewayError::Target(format!(
+                            "canonicalize logical root {}: {error}",
+                            root.display()
+                        ))
+                    })
+                })
+                .collect()
+        };
+        if canonical_roots(&request.readable_roots)?
+            != canonical_roots(projection.readable_roots())?
+            || canonical_roots(&request.writable_roots)?
+                != canonical_roots(projection.writable_roots())?
+        {
+            return Err(ProviderGatewayError::PolicyDrift {
+                dimension: "logical_roots".to_string(),
+            });
+        }
+
+        // 7. projection/adapter:registry 必须有该 provider 的真实 adapter。
+        self.registry
+            .get(&provider_name)
+            .ok_or_else(|| ProviderGatewayError::RegistryLookup(format!("{provider_name:?}")))?;
+
+        // 8. availability。
+        self.availability_gate
+            .ensure_available(&provider_name)
+            .map_err(|error| ProviderGatewayError::unavailable(error.to_string()))?;
+
+        // 9. boundary/D4:coding projection 必须携带 boundary evidence 引用。
+        if matches!(request.action, SessionPolicyAction::CodingTargetWrite)
+            && projection.boundary_evidence_ref().is_empty()
+        {
+            return Err(ProviderGatewayError::PolicyDrift {
+                dimension: "boundary_evidence".to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Task 3b:early action 资格判定——只消费 durable capability 证据
+    /// (launch 分格),返回不携未来 target/worktree 或 D4 事实的两枚引用;
+    /// attempt 未创建(无 worktree/target/D4 事实)即可判定,全程零写入
+    /// (不写 policy/capability/trust/audit,不 ensure/revoke)。
+    ///
+    /// `role`/`permission_mode` 随冻结签名保留:role/tool 策略 guard 由
+    /// Task 7 统一接线,本层不另造第二套判定。
+    pub fn action_admission_verdict(
+        &self,
+        provider: &ProviderRef,
+        action: SessionPolicyAction,
+        _role: &crate::protocol::contracts::AdapterRole,
+        _permission_mode: &crate::cross_cutting::streaming_provider::ProviderPermissionMode,
+    ) -> Result<ProviderActionAdmission, ProviderAdmissionError> {
+        let capability = self
+            .capabilities
+            .require_supported(provider, action)
+            .map_err(admission_waiting_from_gateway)?;
+        Ok(ProviderActionAdmission {
+            capability_snapshot_ref: capability.capability_snapshot_ref.clone(),
+            projection_ref: capability.action_capability.projection_digest.clone(),
+        })
     }
 
     /// 在 registry 中查找 streaming adapter。registry.get 返回 gated adapter,
@@ -1329,6 +1712,23 @@ pub const PROVIDER_ROOT_RECIPE_CREDENTIAL_RECHECK_UNAVAILABLE: &str =
 
 /// 已交付 recipe evidence 钉定版本与当前记录版本漂移时的稳定判别码。
 pub const PROVIDER_ROOT_RECIPE_EVIDENCE_VERSION_DRIFT: &str = "root_recipe_evidence_version_drift";
+
+/// 把 gateway 校验错误映射为 admission waiting 事实(与 preflight `check`
+/// 的映射同型;early verdict 只读,不产生 store 错误面)。
+fn admission_waiting_from_gateway(error: ProviderGatewayError) -> ProviderAdmissionError {
+    use crate::product::logical_codebase::provider_admission_preflight::BootstrapActionKind;
+    let reason_code = match &error {
+        ProviderGatewayError::UnsupportedCapability(_) => "provider_capability_not_satisfied",
+        ProviderGatewayError::PolicyMissing(_) => "aggregate_policy_artifact_missing",
+        _ => "provider_gateway_denied",
+    };
+    ProviderAdmissionError::Waiting {
+        reason_code: reason_code.to_string(),
+        detail: error.to_string(),
+        missing_materials: Vec::new(),
+        allowed_actions: vec![BootstrapActionKind::Revalidate, BootstrapActionKind::Retry],
+    }
+}
 
 /// gateway 对 `ensure_bootstrap` 的桥接:暴露给需要在 gateway 之外触发 bootstrap
 /// 的调用方(如 migration)。实际实现复用 `AggregatePolicyArtifactStore::ensure_bootstrap`。

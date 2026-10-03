@@ -388,7 +388,7 @@ impl WorkspaceSessionManager {
                 .gateway_factory()
                 .ok_or_else(|| "logical gateway factory unavailable".to_string())?;
             let gateway = factory
-                .build_for_lc(&session_record.project_id, lc_id.as_deref())
+                .build_readonly_for_lc(&session_record.project_id, lc_id.as_deref())
                 .map_err(|error| format!("logical gateway build failed: {error}"))?;
             engine_workspace = engine_workspace.with_logical_provider_gateway(Arc::new(gateway));
         }

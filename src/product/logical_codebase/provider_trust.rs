@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::json_store::ProductStoreError;
+use crate::product::logical_codebase::provider_gateway::ProviderGatewayError;
 use crate::product::logical_codebase::provider_trust_adapters::{
     ProviderTrustEntryState, ProviderTrustHomeAdapter, ProviderTrustWriteOutcome,
 };
@@ -88,6 +89,147 @@ pub trait ProviderTrustRegistry: Send + Sync {
         provider: &ProviderName,
         canonical_root: &Path,
     ) -> Result<ProviderTrustRevocation, ProviderTrustError>;
+}
+
+/// Task 3b(REQ-LCG-02/03):只读 trust source——GET/early eligibility 与
+/// spawn 前复验共用的零副作用通道。
+///
+/// 与 [`ProviderTrustRegistry::verify_trusted`] 的区别:后者会向 durable
+/// `ProviderTrustStore` 追加 verify audit 记录(副作用),不得用于
+/// GET/early 或 spawn 复验;本 trait 的实现只允许经
+/// [`ProviderTrustHomeAdapter::read_state`]/[`ProviderTrustHomeAdapter::digest`]
+/// 读取用户级工件事实,禁止 ensure/revoke、禁止写 audit/ownership。
+pub trait ProviderTrustSource: Send + Sync {
+    fn verify_trusted(
+        &self,
+        project_id: &str,
+        lc_id: &str,
+        provider: &ProviderName,
+        canonical_root: &Path,
+    ) -> Result<ProviderTrustVerification, ProviderGatewayError>;
+}
+
+/// 只读 home 背书实现:factory 生产装配(只读 home adapter + 只读
+/// ownership 查询,绝不写入)。
+pub struct ReadonlyProviderTrustSource {
+    paths: ProductAppPaths,
+    lc_id: Option<String>,
+    adapters: Vec<Arc<dyn ProviderTrustHomeAdapter>>,
+}
+
+impl ReadonlyProviderTrustSource {
+    pub fn new(
+        paths: ProductAppPaths,
+        lc_id: Option<String>,
+        adapters: Vec<Arc<dyn ProviderTrustHomeAdapter>>,
+    ) -> Self {
+        Self {
+            paths,
+            lc_id,
+            adapters,
+        }
+    }
+
+    /// 按 LC 作用域装配;lc 作用域未知(legacy 无别名)时 ownership 查询
+    /// 跳过(只读事实缺失不构成伪造)。
+    pub fn for_lc(paths: ProductAppPaths, lc_id: &str) -> Self {
+        Self::new(paths, Some(lc_id.to_string()), Self::production_adapters())
+    }
+
+    /// factory 生产装配:按 LC 作用域(可空,legacy 无别名)注入生产
+    /// trust adapters(Codex/Kimi——需要 workspace trust 的两家;Claude/Pi
+    /// 无用户级 trust 工件,不进入本 source)。
+    pub fn production_for_scope(paths: ProductAppPaths, lc_id: Option<String>) -> Self {
+        Self::new(paths, lc_id, Self::production_adapters())
+    }
+
+    fn production_adapters() -> Vec<Arc<dyn ProviderTrustHomeAdapter>> {
+        // production() 在 HOME 缺失(无用户级 home 可读)时返回 None——
+        // 该 provider 无只读 trust 工件可查,不进入本 source。
+        let codex =
+            crate::product::logical_codebase::provider_trust_adapters::CodexTrustAdapter::production()
+                .map(|adapter| Arc::new(adapter) as Arc<dyn ProviderTrustHomeAdapter>);
+        let kimi =
+            crate::product::logical_codebase::provider_trust_adapters::KimiTrustAdapter::production()
+                .map(|adapter| Arc::new(adapter) as Arc<dyn ProviderTrustHomeAdapter>);
+        codex.into_iter().chain(kimi).collect()
+    }
+
+    fn adapter_for(
+        &self,
+        provider: &ProviderName,
+    ) -> Result<Arc<dyn ProviderTrustHomeAdapter>, ProviderGatewayError> {
+        self.adapters
+            .iter()
+            .find(|adapter| adapter.provider() == *provider)
+            .cloned()
+            .ok_or_else(|| {
+                ProviderGatewayError::ProviderUnavailable(format!(
+                    "no read-only trust adapter is configured for {provider:?}"
+                ))
+            })
+    }
+}
+
+impl ProviderTrustSource for ReadonlyProviderTrustSource {
+    fn verify_trusted(
+        &self,
+        project_id: &str,
+        lc_id: &str,
+        provider: &ProviderName,
+        canonical_root: &Path,
+    ) -> Result<ProviderTrustVerification, ProviderGatewayError> {
+        let trust_error = |error: ProviderTrustError| {
+            ProviderGatewayError::ProviderUnavailable(format!("{}: {}", error.code, error.message))
+        };
+        let adapter = self.adapter_for(provider)?;
+        if !canonical_root.is_absolute() || canonical_root.file_name().is_none() {
+            return Err(ProviderGatewayError::ProviderUnavailable(format!(
+                "invalid canonical root for read-only trust check: {}",
+                canonical_root.display()
+            )));
+        }
+        let trust_key = adapter.trust_key(canonical_root);
+        let state = adapter.read_state(canonical_root).map_err(trust_error)?;
+        let trusted = matches!(state, ProviderTrustEntryState::Trusted);
+        let detail = match state {
+            ProviderTrustEntryState::Trusted => "entry present and trusted".to_string(),
+            ProviderTrustEntryState::Untrusted { .. } => {
+                "key holds a non-trusted value".to_string()
+            }
+            ProviderTrustEntryState::Missing => "entry absent".to_string(),
+        };
+        let ownership = match &self.lc_id {
+            Some(scope) => {
+                let store = ProviderTrustStore::for_lc(self.paths.clone(), scope);
+                store
+                    .load_ownership(project_id, provider_wire_label(provider), &trust_key)
+                    .map_err(|error| {
+                        ProviderGatewayError::ProviderUnavailable(format!(
+                            "read trust ownership: {error}"
+                        ))
+                    })?
+                    .map(|record| {
+                        if record.owned {
+                            ProviderTrustOwnership::LcManaged
+                        } else {
+                            ProviderTrustOwnership::UserOwned
+                        }
+                    })
+            }
+            None => None,
+        };
+        let _ = lc_id;
+        Ok(ProviderTrustVerification {
+            provider: provider.clone(),
+            canonical_root: canonical_root.to_path_buf(),
+            trust_key,
+            trusted,
+            ownership,
+            detail,
+            verified_at: trust_now(),
+        })
+    }
 }
 
 /// 五步 recipe 的 trust 硬前置门：全部所选 trust Ready 才放行。

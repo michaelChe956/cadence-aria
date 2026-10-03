@@ -138,7 +138,16 @@ mod tests {
             provider: &ProviderRef,
             action: SessionPolicyAction,
         ) -> Result<ProviderCapability, ProviderGatewayError> {
-            self.capability(provider, action)
+            let capability = self.capability(provider, action)?;
+            if capability.action_capability.write_boundary
+                != crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence::Confirmed
+            {
+                return Err(ProviderGatewayError::UnsupportedCapability(
+                    crate::product::logical_codebase::provider_gateway::PROVIDER_CAPABILITY_WRITE_BOUNDARY_NOT_CONFIRMED
+                        .to_string(),
+                ));
+            }
+            Ok(capability)
         }
 
         fn require_root_recipe_supported(
@@ -927,10 +936,7 @@ mod tests {
         assert!(
             fixture
                 .preflight()
-                .check(
-                    &fixture.launch_request(),
-                    &ProviderAdmissionPhase::Normal
-                )
+                .check(&fixture.launch_request(), &ProviderAdmissionPhase::Normal)
                 .expect("placeholder policy keeps legacy normal admission")
                 .ready
         );
@@ -945,7 +951,7 @@ mod tests {
                 .preflight()
                 .check(
                     &fixture_published.launch_request(),
-                    &ProviderAdmissionPhase::Normal
+                    &ProviderAdmissionPhase::Normal,
                 )
                 .map(|_| ()),
             "root_rules_missing",
@@ -1454,8 +1460,9 @@ mod tests {
                     canonical_root: canonical_root.to_path_buf(),
                     trust_key: "file-backed-fixture".to_string(),
                     trusted: true,
-                    ownership:
+                    ownership: Some(
                         crate::product::logical_codebase::provider_trust::ProviderTrustOwnership::LcManaged,
+                    ),
                     detail: "fixture trusted".to_string(),
                     verified_at: "2026-10-03T00:00:00Z".to_string(),
                 },
@@ -1503,6 +1510,7 @@ mod tests {
             Arc::new(FileBackedTrustSource {
                 artifact: trust_artifact.clone(),
             }),
+            Some(fixture.lc_id.clone()),
         );
 
         // attempt 尚未创建(无 worktree/target/D4 事实):early 判定只看
@@ -1558,7 +1566,6 @@ mod tests {
         assert_eq!(fixture.streaming_adapter.start_count(), 0);
         assert_eq!(std::fs::read(&trust_artifact).unwrap(), trust_before);
     }
-
 
     // ===== Task 2b(lcg_t02):unknown normal 矩阵下既有 root recipe 契约保持 =====
 
