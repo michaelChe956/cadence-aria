@@ -214,20 +214,22 @@ impl PlanSplitRunContext {
         }
     }
 
-    /// 成功收口:complete 消费已有 handle(RED 占位)。
+    /// 成功收口:complete 消费已有 handle,不再 `save_work_item_split_provider_run`。
     pub(crate) fn complete(
         &self,
         prompt: &str,
         structured_output: &serde_json::Value,
     ) -> Result<(), String> {
-        let _ = (prompt, structured_output);
-        Err("plan split run complete is not implemented yet".to_string())
+        self.lifecycle
+            .complete_work_item_split_provider_run(&self.handle, prompt, structured_output)
+            .map_err(|error| error.to_string())
     }
 
-    /// 失败收口(RED 占位)。
+    /// 失败收口:handle 以 status=failed 落盘(reason 可观测)。
     pub(crate) fn fail(&self, reason: &str) -> Result<(), String> {
-        let _ = reason;
-        Err("plan split run fail is not implemented yet".to_string())
+        self.lifecycle
+            .fail_work_item_split_provider_run(&self.handle, reason)
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -250,16 +252,30 @@ pub(crate) async fn start_work_item_plan_author(
         return provider.start(input, cancel).await;
     };
     let plan = *plan;
-    // 段② RED 占位:plan_split_run 的 prepare 前 sink 绑定由
-    // lcg_t01_ws_plan_split_* 测试锁定后实现。
-    let _ = plan_split_run;
-    // Task 2.8（REQ-PLN-03，planning snapshot 贯穿）：input 的独立 cwd 重绑
-    // envelope 冻结的 canonical root——cwd/target 分离贯穿正常 run（worktree=
-    // 成员 checkout）与 B3 StaleContext 重建 run（worktree=rebuilt.cwd=root），
-    // spawn 前复验恒以 envelope root 为准，`input.working_dir` 保持 target
-    // 语义原样透传（与 2.1 author 链 `provider_drive.rs` 的重绑同型）。
+    // Task 2.8(REQ-PLN-03,planning snapshot 贯穿):input 的独立 cwd 重绑
+    // envelope 冻结的 canonical root——cwd/target 分离贯穿正常 run(worktree=
+    // 成员 checkout)与 B3 StaleContext 重建 run(worktree=rebuilt.cwd=root),
+    // spawn 前复验恒以 envelope root 为准,`input.working_dir` 保持 target
+    // 语义原样透传(与 2.1 author 链 `provider_drive.rs` 的重绑同型)。
     input.working_directory = Some(plan.validated.envelope().working_directory.clone());
-    let validated_input = ValidatedStreamingProviderInput::new(input, plan.validated);
+    // Task 1b 段②:WS plan/split caller 携 run handle 时,经 gateway
+    // `prepare_streaming_launch` 在 prepare 前绑定 run-bound sink(含无通用
+    // tool_policy 角色)并以冻结接口组装 validated input;无 handle 的存量
+    // 调用面保持原 validate 复用路径(后续 caller 迁移逐步收敛)。
+    let validated_input = match plan_split_run {
+        Some(run_ctx) => plan
+            .launch
+            .gateway
+            .prepare_streaming_launch(
+                input,
+                plan.launch
+                    .planning_request()
+                    .map_err(map_gateway_error_to_adapter)?,
+                run_ctx.audit_context(),
+            )
+            .map_err(map_gateway_error_to_adapter)?,
+        None => ValidatedStreamingProviderInput::new(input, plan.validated),
+    };
 
     plan.launch
         .gateway

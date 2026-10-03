@@ -1237,6 +1237,52 @@ impl LogicalCodebaseProviderGateway {
         ))
     }
 
+    /// Task 1b 冻结接口「准备与同步」:流式栈的 prepare 入口。所有 LC 角色
+    /// 在 prepare 前绑定 run-bound sink(无通用 tool_policy 的 Coder/Kimi 同样
+    /// 统一写 launch audit);非法外来 `Some(policy)` 直接拒绝(双向守卫语义,
+    /// 不偷清、不回退裸 start——Task 7 统一 guard 顺序)。
+    pub fn prepare_streaming_launch(
+        &self,
+        mut input: crate::cross_cutting::streaming_provider::StreamingProviderInput,
+        request: SessionLaunchRequest,
+        context: ProviderLaunchAuditContext,
+    ) -> Result<ValidatedStreamingProviderInput, ProviderGatewayError> {
+        // 策略角色缺策略时按角色矩阵派生 DenyFileWriteBuiltins(与 legacy
+        // bridge 同源,gateway-owned);外来非法 Some(policy) 由下方守卫直接
+        // 拒绝——不偷清、不回退裸 start。
+        if input.tool_policy.is_none()
+            && matches!(
+                input.role,
+                crate::protocol::contracts::AdapterRole::Orchestrator
+                    | crate::protocol::contracts::AdapterRole::WorkItemSplitter
+                    | crate::protocol::contracts::AdapterRole::Reviewer
+            )
+        {
+            input.tool_policy = Some(
+                crate::cross_cutting::streaming_provider::ProviderToolPolicy::deny_file_write_builtins(),
+            );
+        }
+        crate::cross_cutting::streaming_provider::validate_tool_policy_for_role(
+            &input.role,
+            input.tool_policy.as_ref(),
+        )
+        .map_err(|error| ProviderGatewayError::UnsupportedCapability(error.to_string()))?;
+        let validated = self.validate(request)?;
+        input.workspace_session_id = Some(context.workspace_session_id.clone());
+        input.audit_sink = Some(
+            crate::cross_cutting::tool_policy_audit::RoleRunBoundAuditSink::new(
+                context.audit_sink.clone(),
+                context.workspace_session_id.clone(),
+                context.role_run_seq,
+            )
+            .into_sink(),
+        );
+        Ok(ValidatedStreamingProviderInput::new(
+            input,
+            validated.with_launch_audit(context),
+        ))
+    }
+
     /// spawn 前完整复验(B-1)。逐维度比对 envelope 冻结值与 spawn 时点的真实值,
     /// 阶段顺序遵循 Task 3 冻结合同:identity/manifest(authority root)→
     /// policy body/artifact/receipt → provider mapping/version/action

@@ -749,7 +749,6 @@ fn logical_plan_launch_uses_root_cwd_not_member_repository_path() {
 async fn lcg_t01_ws_plan_split_run_handle_closes_on_success_and_failure() {
     use crate::product::lifecycle_store::LifecycleStore;
     use crate::product::models::ProviderName;
-    use crate::product::work_item_split_engine::parse::WorkItemSplitProviderRunHandle;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static SEQ: AtomicUsize = AtomicUsize::new(0);
