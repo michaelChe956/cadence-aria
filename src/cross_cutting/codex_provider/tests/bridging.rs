@@ -482,3 +482,110 @@ async fn codex_provider_request_user_input_emits_protocol_error_on_write_failure
         "write failure must terminate the session loop with an error"
     );
 }
+
+use crate::cross_cutting::tool_policy_audit::test_support::RecordingToolPolicyAuditSink;
+
+/// Task 5b approval 深化:LC read-only 会话沿用策略审批冻结(GC6)——
+/// fileChange/commandExecution 在真实 wire 上得到即时 decline(不经
+/// ApprovalBridge 上抛),MCP accept;thread/start 三联动 read-only +
+/// on-request 复用既有 policy fixture 校验。
+#[cfg(unix)]
+#[tokio::test]
+async fn lcg_t05_read_only_lc_session_declines_write_approvals_on_wire() {
+    let fixture = LcCodexFixture::new();
+    let sink = RecordingToolPolicyAuditSink::new();
+    let raw = fixture.lc_input(
+        AdapterRole::Orchestrator,
+        Some(ProviderToolPolicy::deny_file_write_builtins()),
+        ProviderPermissionMode::Auto,
+        None,
+        Some(sink.clone().bound()),
+        fixture.target_worktree(),
+    );
+    let provider = CodexProvider::new(executable_fixture(
+        "tests/fixtures/provider/codex_app_server_policy_approval_fixture.sh",
+    ))
+    .with_version_supplier(lc_version_supplier());
+
+    let mut session = provider
+        .start_lc_validated(
+            raw,
+            &fixture.envelope(SessionPolicyAction::PlanningReadOnly, Vec::new()),
+            "cap_codex_lc_fixture",
+            CancellationToken::new(),
+        )
+        .await
+        .expect("lc read-only policy session launches");
+
+    // fixture 对任何未 decline/accept 的审批直接退出失败——完成即证明
+    // fileChange/commandExecution=decline、MCP=accept 在 wire 上成立。
+    assert_eq!(
+        recv_completed(&mut session.events).await,
+        "policy approvals done"
+    );
+
+    // 统一审计:LC 会话的 provider_start 带 lc_projection(只读无写面)。
+    let events = sink.events();
+    let crate::cross_cutting::tool_policy_audit::DurableToolPolicyEvent::ProviderStart(record) =
+        &events[0]
+    else {
+        panic!("expected provider_start");
+    };
+    assert_eq!(record.sandbox.as_deref(), Some("read-only"));
+    assert_eq!(record.approval_policy.as_deref(), Some("on-request"));
+    let lc_projection = record.lc_projection.as_ref().expect("lc projection audit");
+    assert_eq!(lc_projection.action, "planning_read_only");
+}
+
+/// Task 5b approval 映射深化:LC Coding 的 Supervised 档在真实 wire 与
+/// 统一审计上都是 approvalPolicy=on-request(REQ-LCG-04 冻结映射;
+/// Auto=never 已由 coding 主测试锁定)。
+#[cfg(unix)]
+#[tokio::test]
+async fn lcg_t05_coding_supervised_maps_on_request_approval_on_wire() {
+    let fixture = LcCodexFixture::new();
+    let target = fixture.target_worktree();
+    let sink = RecordingToolPolicyAuditSink::new();
+    let marker_root = tempfile::tempdir().expect("supervised marker dir").keep();
+    let mut raw = fixture.lc_input(
+        AdapterRole::Executor,
+        None,
+        ProviderPermissionMode::Supervised,
+        None,
+        Some(sink.clone().bound()),
+        fixture.canonical_root(),
+    );
+    let (_cwd, wire_marker, _spawn_marker) = lc_markers(&mut raw, &marker_root);
+    let provider =
+        CodexProvider::new(lc_app_server_fixture()).with_version_supplier(lc_version_supplier());
+
+    let mut session = provider
+        .start_lc_validated(
+            raw,
+            &fixture.envelope(SessionPolicyAction::CodingTargetWrite, vec![target.clone()]),
+            "cap_codex_lc_fixture",
+            CancellationToken::new(),
+        )
+        .await
+        .expect("lc coding supervised launch succeeds");
+
+    assert_eq!(
+        recv_completed(&mut session.events).await,
+        "lc restricted done"
+    );
+
+    let coding_params = lc_wire_params(&wire_marker);
+    assert_eq!(coding_params["sandbox"], "workspace-write");
+    assert_eq!(
+        coding_params["approvalPolicy"], "on-request",
+        "Supervised→on-request 冻结映射"
+    );
+    let events = sink.events();
+    let crate::cross_cutting::tool_policy_audit::DurableToolPolicyEvent::ProviderStart(record) =
+        &events[0]
+    else {
+        panic!("expected provider_start");
+    };
+    assert_eq!(record.approval_policy.as_deref(), Some("on-request"));
+    assert_eq!(record.sandbox.as_deref(), Some("workspace-write"));
+}

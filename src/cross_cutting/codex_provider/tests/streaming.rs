@@ -390,3 +390,158 @@ fn lcg_t05_version_or_protocol_cwd_drift_invalidates_projection() {
     assert_eq!(drifted_sandbox.target_root(), target_b.as_path());
     assert!(!drifted_sandbox.boundary_evidence_ref().is_empty());
 }
+
+/// Task 5b 受限门深化:Coder 形态的 Coding 启动在 exact version 不可得时
+/// 同样以稳定码 `codex_danger_full_access_unsupported` 拒绝(受限投影无法
+/// 认证,唯一替代是永久拒绝的 danger-full-access),零 child——版本错误
+/// 不得以泛化错误放行或改走其它路径。
+#[cfg(unix)]
+#[tokio::test]
+async fn lcg_t05_coder_shape_unknown_version_refuses_danger_zero_child() {
+    let fixture = LcCodexFixture::new();
+    let sink = RecordingToolPolicyAuditSink::new();
+    let marker_root = tempfile::tempdir().expect("version marker dir").keep();
+    let mut raw = fixture.lc_input(
+        AdapterRole::Executor,
+        None,
+        ProviderPermissionMode::Auto,
+        None,
+        Some(sink.clone().bound()),
+        fixture.canonical_root(),
+    );
+    let (_cwd, _wire, spawn_marker) = lc_markers(&mut raw, &marker_root);
+    // supplier 失败:exact version 不可得(supplier seam 优先于真实探测)。
+    let provider =
+        CodexProvider::new(lc_app_server_fixture()).with_version_supplier(std::sync::Arc::new(
+            || Err(crate::cross_cutting::streaming_provider::VersionProbeError::Unavailable),
+        ));
+
+    let Err(error) = provider
+        .start_lc_validated(
+            raw,
+            &fixture.envelope(
+                SessionPolicyAction::CodingTargetWrite,
+                vec![fixture.target_worktree()],
+            ),
+            "cap_codex_lc_fixture",
+            CancellationToken::new(),
+        )
+        .await
+    else {
+        panic!("coder-shaped launch with unknown version must be rejected");
+    };
+    assert_eq!(
+        error.details, "codex_danger_full_access_unsupported",
+        "version-uncertified coder launch must surface the stable danger refusal"
+    );
+    assert!(
+        !spawn_marker.exists(),
+        "no codex child may spawn when the restricted projection is uncertifiable"
+    );
+    assert!(sink.events().is_empty());
+}
+
+/// Task 5b 受限门深化:gateway 提供的 boundary plan 与 envelope 冻结面不符
+/// 时,投影以稳定码 `codex_target_boundary_unverified` 拒绝(不静默采纳
+/// 外部 plan,不回退 danger/换 cwd/换 provider)。
+#[test]
+fn lcg_t05_mismatched_boundary_plan_reports_target_boundary_unverified() {
+    let fixture = LcCodexFixture::new();
+    let target = fixture.target_worktree();
+    let mut envelope =
+        fixture.envelope(SessionPolicyAction::CodingTargetWrite, vec![target.clone()]);
+    envelope.target = PolicyTarget::checkout("logical_repo_0001", "checkout_0001", target.clone());
+
+    // 形状不符的 provided plan:mode 不是 target-write-only(read-only plan
+    // 携带 target),不得替代 envelope 派生。
+    let mismatched = crate::cross_cutting::provider_boundary::ProviderBoundaryPlan::new(
+        crate::cross_cutting::provider_boundary::ProviderBoundaryMode::ReadOnly,
+        fixture.canonical_root(),
+        Some(target.clone()),
+        Vec::new(),
+    );
+    let projection_input = ProviderProjectionInput::new(
+        envelope.clone(),
+        ProviderRef::codex("cap_codex_lc_fixture"),
+        SessionPolicyAction::CodingTargetWrite,
+        AdapterRole::Executor,
+        ProviderPermissionMode::Auto,
+        None,
+        String::new(),
+        String::new(),
+        "sha256:managed-config-artifact".to_string(),
+        "sha256:trust-lc-fixture".to_string(),
+        Some(mismatched),
+    );
+
+    let error = LcProjector::new("codex 0.124.0-lc-fixture")
+        .project(&projection_input)
+        .expect_err("mismatched boundary plan must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("codex_target_boundary_unverified"),
+        "boundary mismatch must carry the stable reason, got: {error}"
+    );
+}
+
+/// Task 5b wire 深化:LC read-only 的 thread/resume 与 thread/start 共享同
+/// 一受限投影——resume 请求在真实 wire 上携带同 sandbox/approvalPolicy/
+/// cwd 与原 threadId,并由应答确认(F1)。
+#[cfg(unix)]
+#[tokio::test]
+async fn lcg_t05_thread_resume_shares_restricted_projection_on_wire() {
+    let fixture = LcCodexFixture::new();
+    let canonical_root = fixture.canonical_root();
+    let sink = RecordingToolPolicyAuditSink::new();
+    let marker_root = tempfile::tempdir().expect("resume marker dir").keep();
+    let mut raw = fixture.lc_input(
+        AdapterRole::Reviewer,
+        Some(ProviderToolPolicy::deny_file_write_builtins()),
+        ProviderPermissionMode::Auto,
+        Some("codex-thread-lc".to_string()),
+        Some(sink.clone().bound()),
+        fixture.target_worktree(),
+    );
+    let (_cwd, wire_marker, _spawn_marker) = lc_markers(&mut raw, &marker_root);
+    let provider =
+        CodexProvider::new(lc_app_server_fixture()).with_version_supplier(lc_version_supplier());
+
+    let mut session = provider
+        .start_lc_validated(
+            raw,
+            &fixture.envelope(SessionPolicyAction::PlanningReadOnly, Vec::new()),
+            "cap_codex_lc_fixture",
+            CancellationToken::new(),
+        )
+        .await
+        .expect("lc read-only resume launch succeeds");
+
+    // F1:原生 thread id 只能来自 thread/resume 应答确认。
+    assert_eq!(
+        session.native_session_id.as_deref(),
+        Some("codex-thread-lc")
+    );
+    assert_eq!(
+        recv_completed(&mut session.events).await,
+        "lc restricted done"
+    );
+
+    // 真实 wire:thread/resume 与 thread/start 共享同投影 params。
+    let resume_request = std::fs::read_to_string(&wire_marker).expect("wire marker is written");
+    assert!(
+        resume_request.contains("thread/resume"),
+        "resume launch must use thread/resume on the wire"
+    );
+    let resume_params = lc_wire_params(&wire_marker);
+    assert_eq!(resume_params["sandbox"], "read-only");
+    assert_eq!(resume_params["approvalPolicy"], "on-request");
+    assert_eq!(
+        resume_params["cwd"].as_str(),
+        Some(canonical_root.to_string_lossy().as_ref())
+    );
+    assert!(
+        resume_request.contains("\"threadId\":\"codex-thread-lc\""),
+        "thread/resume must carry the original thread id: {resume_request}"
+    );
+}
