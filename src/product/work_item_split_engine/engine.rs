@@ -226,17 +226,26 @@ impl WorkItemSplitEngine {
         gateway: &LogicalCodebaseProviderGateway,
         workspace_session_id: &str,
     ) -> ApiResult<ProviderInvocationResult> {
-        // 段①尾 RED 占位:参数已冻结,handle 流(begin→bind→start→parse→
-        // complete/fail)由 lcg_t01 split run handle 收口测试锁定后实现。
-        let _ = workspace_session_id;
+        // Task 1b 段①尾:sync split 的真实 caller 收口流——
+        // begin handle → bind sink(prepare 冻结 audit 上下文)→ start(gateway
+        // run_sync,prepared launch 只走 validated trait)→ parse(complete
+        // 消费已有 handle)→ complete/fail。
+        let handle = lifecycle
+            .begin_work_item_split_provider_run(
+                &issue.project_id,
+                &issue.id,
+                &author_provider,
+                workspace_session_id,
+            )
+            .map_err(product_store_api_error)?;
         let provider_type = provider_name_to_type(&author_provider);
         let worktree_path = repository.path.to_string_lossy().to_string();
         let adapter_input = AdapterInput {
             provider_type,
             role: AdapterRole::WorkItemSplitter,
-            // Task 2.6（REQ-ENV-10，split sync 行）：cwd 重绑 canonical root——
-            // gateway 冻结的 manifest `provider_context_root`；worktree_path 仍
-            // 是 target 成员路径（Task 2.5 字段合同：两字段分离，单仓回填不变）。
+            // Task 2.6(REQ-ENV-10,split sync 行):cwd 重绑 canonical root——
+            // gateway 冻结的 manifest `provider_context_root`;worktree_path 仍
+            // 是 target 成员路径(Task 2.5 字段合同:两字段分离,单仓回填不变)。
             working_directory: Some(gateway.authority_root().to_path_buf()),
             worktree_path: Some(worktree_path),
             provider_stream_log_dir: None,
@@ -246,6 +255,14 @@ impl WorkItemSplitEngine {
             timeout: 3 * 60 * 60,
             max_retries: 1,
         };
+        // prepare 前绑定 run-bound sink:所有 LC 角色(含无通用 tool_policy)
+        // 统一写 launch audit;audit_sink 即 LifecycleStore(生产 sink)。
+        let context =
+            crate::product::logical_codebase::provider_gateway::ProviderLaunchAuditContext {
+                workspace_session_id: workspace_session_id.to_string(),
+                role_run_seq: handle.role_run_seq,
+                audit_sink: std::sync::Arc::new(lifecycle.clone()),
+            };
 
         let launch = prepare_sync_launch(
             gateway,
@@ -253,36 +270,46 @@ impl WorkItemSplitEngine {
             repository,
             &author_provider,
             adapter_input,
-        )?;
+            context,
+        );
         // gateway 持有的 sync_adapter 不是 `Send`(registry 内的真实 adapter 未约束
         // Send+Sync),因此无法 `spawn_blocking` 出当前线程;改为在当前 async 任务内
         // 同步调用 `run_sync`。这与同步 adapter run 的阻塞语义一致,调用方负责确保
         // gateway 已在该 runtime 构造。
-        let output = gateway
-            .run_sync(launch)
-            .map_err(map_provider_gateway_error)?;
+        let run_result =
+            launch.and_then(|launch| gateway.run_sync(launch).map_err(map_provider_gateway_error));
+        let output = match run_result {
+            Ok(output) => output,
+            Err(error) => {
+                let _ = lifecycle.fail_work_item_split_provider_run(&handle, &error.message);
+                return Err(error);
+            }
+        };
 
-        let structured_output = output.structured_output.ok_or_else(|| {
-            ApiError::runtime(
-                "work_item_split_provider_output_invalid",
-                "provider did not return structured output",
-                json!({}),
-            )
+        let structured_output = match output.structured_output {
+            Some(structured_output) => structured_output,
+            None => {
+                let message = "provider did not return structured output".to_string();
+                let _ = lifecycle.fail_work_item_split_provider_run(&handle, &message);
+                return Err(ApiError::runtime(
+                    "work_item_split_provider_output_invalid",
+                    message,
+                    json!({}),
+                ));
+            }
+        };
+
+        // parse.rs 的 complete 函数消费已有 handle,不再重新
+        // `save_work_item_split_provider_run`。
+        super::parse::complete_split_provider_run(lifecycle, &handle, prompt, &structured_output)
+            .map_err(|error| {
+            let _ = lifecycle.fail_work_item_split_provider_run(&handle, &error.message);
+            error
         })?;
-
-        let run_ref = lifecycle
-            .save_work_item_split_provider_run(
-                &issue.project_id,
-                &issue.id,
-                &author_provider,
-                prompt,
-                &structured_output,
-            )
-            .map_err(product_store_api_error)?;
 
         Ok(ProviderInvocationResult {
             structured_output,
-            run_ref,
+            run_ref: handle.run_ref,
         })
     }
 }
@@ -327,6 +354,7 @@ pub(crate) fn prepare_sync_launch(
     repository: &RepositoryRecord,
     author_provider: &ProviderName,
     adapter_input: AdapterInput,
+    context: crate::product::logical_codebase::provider_gateway::ProviderLaunchAuditContext,
 ) -> ApiResult<ValidatedAdapterInput> {
     let logical_repository_id = repository
         .logical_repository_id
@@ -368,10 +396,9 @@ pub(crate) fn prepare_sync_launch(
         writable_roots: Vec::new(),
         config_artifact_ref: "sha256:managed-config-artifact".to_string(),
     };
-    let validated = gateway
-        .validate(request)
-        .map_err(map_provider_gateway_error)?;
-    Ok(ValidatedAdapterInput::new(adapter_input, validated))
+    gateway
+        .prepare_sync_launch(adapter_input, request, context)
+        .map_err(map_provider_gateway_error)
 }
 
 /// 把 registry/availability gate 使用的 `ProviderName` 映射到 gateway 的 `ProviderRef`。

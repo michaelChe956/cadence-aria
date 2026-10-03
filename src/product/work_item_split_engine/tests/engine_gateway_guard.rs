@@ -756,8 +756,8 @@ async fn split_sync_gateway_launch_closes_run_handle_on_success_and_failure() {
         .await
         .expect_err("injected adapter failure must propagate");
     assert!(
-        failure.message.contains("split probe injected failure"),
-        "failure must carry the adapter reason, got {}",
+        failure.message.contains("ProviderExecutionFailed"),
+        "failure must propagate the adapter error kind, got {}",
         failure.message
     );
     assert_eq!(
