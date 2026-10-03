@@ -205,3 +205,258 @@ mod tests {
         assert_eq!(evidence.probed_at(), "2026-10-03T00:00:00Z");
     }
 }
+
+#[cfg(test)]
+mod launcher_tests {
+    use std::collections::BTreeMap;
+    use std::ffi::OsString;
+    use std::path::{Path, PathBuf};
+
+    use tempfile::tempdir;
+
+    use super::{
+        ProviderBoundaryLauncher, ProviderBoundaryMode, ProviderBoundaryPlan, frozen_git_dir_binds,
+        provider_runtime_writable_roots,
+    };
+    use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
+
+    fn argv_text(argv: &[OsString]) -> Vec<String> {
+        argv.iter()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn coding_plan(root: &Path, target: &Path) -> ProviderBoundaryPlan {
+        ProviderBoundaryPlan::new(
+            ProviderBoundaryMode::TargetWriteOnly,
+            root.to_path_buf(),
+            Some(target.to_path_buf()),
+            Vec::new(),
+        )
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .status()
+            .expect("run git fixture");
+        assert!(status.success(), "git fixture {args:?} failed");
+    }
+
+    /// launcher 核心:只读 host、冻结 target 原路径、保持网络与既有配置发现,
+    /// 隔离 temp;不照搬 Kimi terminal 的 --unshare-net 与 /tmp/work cwd 改写。
+    #[test]
+    fn lcg_t06_boundary_argv_keeps_network_root_paths_and_readonly_host() {
+        let base = tempdir().expect("base dir");
+        let root = base.path().join("lc-root");
+        let target = base.path().join("target");
+        std::fs::create_dir_all(&root).expect("root");
+        std::fs::create_dir_all(&target).expect("target");
+        let plan = coding_plan(&root, &target);
+        let launcher = ProviderBoundaryLauncher::from_bwrap(Some(PathBuf::from("/usr/sbin/bwrap")));
+
+        let argv = launcher
+            .build_boundary_argv("sh", &["-c", "true"], &root, &BTreeMap::new(), &plan)
+            .expect("boundary argv");
+        let text = argv_text(&argv);
+
+        // 保持网络:provider API/MCP 需要,不使用 --unshare-net。
+        assert!(!text.iter().any(|arg| arg == "--unshare-net"));
+        // 只读 host 必须最早挂载(bwrap argv 顺序语义,后续 bind 才能遮蔽)。
+        assert_eq!(
+            &text[0..3],
+            ["--ro-bind".to_string(), "/".to_string(), "/".to_string()]
+        );
+        // 冻结 target 以原路径 rw 挂载,且是唯一 rw bind。
+        let target_text = target.to_string_lossy().into_owned();
+        assert!(
+            text.windows(3).any(|window| {
+                window == ["--bind".to_string(), target_text.clone(), target_text]
+            })
+        );
+        assert_eq!(
+            text.iter().filter(|arg| *arg == "--bind").count(),
+            1,
+            "target 是 Coding 唯一宽写 bind:{text:?}"
+        );
+        // cwd 保持 root 原路径:不照搬 Kimi terminal 的 /tmp/work cwd 改写。
+        assert!(!text.iter().any(|arg| arg.contains("/tmp/work")));
+        let root_text = root.to_string_lossy().into_owned();
+        assert!(
+            text.windows(2)
+                .any(|window| window == ["--chdir".to_string(), root_text])
+        );
+        // 既有配置发现保持:不 --clearenv,环境经继承+overlay(非 bwrap --setenv)。
+        assert!(!text.iter().any(|arg| arg == "--clearenv"));
+        assert!(!text.iter().any(|arg| arg == "--setenv"));
+        // 隔离 temp:每沙箱私有 /tmp。
+        assert!(
+            text.windows(2)
+                .any(|window| window == ["--tmpfs".to_string(), "/tmp".to_string()])
+        );
+        // payload 命令收尾。
+        assert_eq!(text.last().map(String::as_str), Some("sh"));
+    }
+
+    /// read-only action:无任何 rw bind,root/成员/元数据全部落在只读挂载面。
+    #[test]
+    fn lcg_t06_boundary_readonly_argv_has_no_writable_binds() {
+        let base = tempdir().expect("base dir");
+        let root = base.path().join("lc-root");
+        std::fs::create_dir_all(&root).expect("root");
+        let plan = ProviderBoundaryPlan::new(
+            ProviderBoundaryMode::ReadOnly,
+            root.clone(),
+            None,
+            Vec::new(),
+        );
+        let launcher = ProviderBoundaryLauncher::from_bwrap(Some(PathBuf::from("/usr/sbin/bwrap")));
+
+        let argv = launcher
+            .build_boundary_argv("sh", &["-c", "true"], &root, &BTreeMap::new(), &plan)
+            .expect("readonly boundary argv");
+        let text = argv_text(&argv);
+
+        assert!(!text.iter().any(|arg| arg == "--bind"));
+        let root_text = root.to_string_lossy().into_owned();
+        assert!(
+            text.windows(3).any(|window| {
+                window == ["--ro-bind".to_string(), root_text.clone(), root_text]
+            })
+        );
+    }
+
+    /// 各 provider 自然 session/runtime 可写集合:HOME 下窄面目录,用途固定;
+    /// 不得整 HOME、整 root 或 MCP 目录宽写。
+    #[test]
+    fn lcg_t06_provider_runtime_writable_roots_stay_narrow() {
+        let base = tempdir().expect("base dir");
+        let home = base.path().join("home");
+        for dir in [".claude", ".codex", ".pi", ".kimi-code", ".config"] {
+            std::fs::create_dir_all(home.join(dir)).expect("runtime dir");
+        }
+        std::fs::write(home.join(".claude.json"), "{}").expect("claude state file");
+        let mut env = BTreeMap::new();
+        env.insert("HOME".to_string(), home.to_string_lossy().into_owned());
+
+        let roots = provider_runtime_writable_roots(&env);
+        let expected: Vec<PathBuf> = [".claude", ".claude.json", ".codex", ".pi", ".kimi-code"]
+            .iter()
+            .map(|dir| home.join(dir))
+            .collect();
+        assert_eq!(roots, expected);
+        assert!(!roots.iter().any(|path| path == &home));
+        assert!(!roots.iter().any(|path| path.ends_with(".config")));
+
+        // 不存在的自然目录不预创建、不扩大写面。
+        std::fs::remove_dir_all(home.join(".pi")).expect("remove .pi");
+        let narrowed = provider_runtime_writable_roots(&env);
+        assert!(!narrowed.iter().any(|path| path.ends_with(".pi")));
+    }
+
+    /// git identity 授权链:plain repo 不加额外 bind;linked worktree 冻结
+    /// 常见 git 目录(bind 面=common dir 祖先),冻结面持久化在 host 领土,
+    /// 后续轮次即使 `.git` 指针被改写也信任冻结结果。
+    #[test]
+    fn lcg_t06_frozen_git_dir_binds_follow_identity_chain() {
+        let base = tempdir().expect("base dir");
+
+        let plain = base.path().join("plain");
+        std::fs::create_dir_all(&plain).expect("plain repo");
+        git(&plain, &["init", "-q"]);
+        git(
+            &plain,
+            &[
+                "-c",
+                "user.name=aria",
+                "-c",
+                "user.email=aria@aria",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
+        );
+        assert_eq!(frozen_git_dir_binds(&plain), Vec::<PathBuf>::new());
+
+        let repo = base.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        git(&repo, &["init", "-q"]);
+        git(
+            &repo,
+            &[
+                "-c",
+                "user.name=aria",
+                "-c",
+                "user.email=aria@aria",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
+        );
+        let target = base.path().join("target-wt");
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                target.to_string_lossy().as_ref(),
+                "-b",
+                "probe-wt",
+            ],
+        );
+
+        let binds = frozen_git_dir_binds(&target);
+        let common = std::fs::canonicalize(repo.join(".git")).expect("canonical git common");
+        assert_eq!(binds, vec![common]);
+
+        // 冻结面持久化在 target 父目录 host 领土(.provider-session-cache)。
+        let cache_root = target
+            .parent()
+            .expect("target parent")
+            .join(".provider-session-cache");
+        let persisted = std::fs::read_dir(cache_root)
+            .expect("provider session cache")
+            .filter_map(|entry| entry.ok())
+            .any(|entry| entry.path().join("writable_git_paths.json").exists());
+        assert!(
+            persisted,
+            "frozen git face must persist outside the writable target"
+        );
+
+        // 指针被改写后(round N+1)仍信任冻结面,不重新解析到伪造 git dir。
+        std::fs::write(target.join(".git"), "gitdir: /definitely/not/real\n")
+            .expect("swap pointer");
+        let refrozen = frozen_git_dir_binds(&target);
+        assert_eq!(
+            refrozen, binds,
+            "frozen face must survive a coder-swapped .git pointer"
+        );
+    }
+
+    /// 能力视角:缺 bwrap/user namespace 与「可用但未经真实 probe」都保持
+    /// Unknown;launcher 自身永不签发 Confirmed(6c 真实正负探针才可)。
+    #[test]
+    fn lcg_t06_boundary_state_stays_unknown_with_or_without_sandbox() {
+        let unavailable = ProviderBoundaryLauncher::from_bwrap(None);
+        assert!(!unavailable.is_available());
+        assert_eq!(
+            unavailable.write_boundary_state(),
+            ProviderCapabilityEvidence::Unknown
+        );
+
+        let available =
+            ProviderBoundaryLauncher::from_bwrap(Some(PathBuf::from("/usr/sbin/bwrap")));
+        assert!(available.is_available());
+        assert_eq!(
+            available.write_boundary_state(),
+            ProviderCapabilityEvidence::Unknown
+        );
+    }
+}
