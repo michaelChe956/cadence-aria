@@ -929,6 +929,7 @@ mod tests {
                     evidence: CapabilityEvidence::FixtureVerified,
                     resume_evidence: ResumeEvidenceState::Confirmed,
                     supported_actions: vec![SessionPolicyAction::ReviewReadOnly],
+                    ..ProviderCapabilityRecord::legacy_transition_claude_code()
                 },
             )
             .unwrap();
