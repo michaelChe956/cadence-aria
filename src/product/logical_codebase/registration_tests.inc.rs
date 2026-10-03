@@ -1128,4 +1128,8 @@ mod tests {
             2
         );
     }
+
+    // Task 3（aggregate-policy-root-publication）：首次登记冲突检查不被
+    // recipe 重跑证明放宽的专用测试（large_file_guard 1200 行上限，纯新增）。
+    include!("registration_tests_recipe_replay.inc.rs");
 }

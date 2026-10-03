@@ -762,3 +762,7 @@
         assert_eq!(cancelled.streaming_start_count(), 1);
         assert_later_steps_pending(&operation, AggregateInitializationStepKind::PreCheck);
     }
+
+    // Task 3（aggregate-policy-root-publication）：receipt 证明的重跑预检
+    // 测试按主题拆入子 include（large_file_guard 1200 行上限，纯新增）。
+    include!("coordinator_tests_recipe_replay.inc.rs");
