@@ -73,8 +73,8 @@ impl LogicalCodebaseBootstrapProjector {
             self.paths.clone(),
         )
         .load(project_id)?;
-        if let Some(journal) = journal.as_ref() {
-            if journal.phase == crate::product::logical_codebase::IdentityMigrationPhase::Failed {
+        if let Some(journal) = journal.as_ref()
+            && journal.phase == crate::product::logical_codebase::IdentityMigrationPhase::Failed {
                 return Ok(BootstrapStepProjection {
                     step: LogicalCodebaseBootstrapStep::Identity,
                     status: LogicalCodebaseBootstrapStepStatus::Failed,
@@ -92,7 +92,6 @@ impl LogicalCodebaseBootstrapProjector {
                     allowed_actions: vec![BootstrapActionKind::Repair],
                 });
             }
-        }
 
         let members = crate::product::logical_codebase::LogicalCodebaseStore::for_lc(
             self.paths.clone(),
@@ -491,7 +490,6 @@ impl LogicalCodebaseBootstrapProjector {
         };
         use crate::product::logical_codebase::aggregate_initialization::{
             AggregateInitializationOperationStatus, AggregateInitializationStepKind,
-            AggregateInitializationStepRecord, AggregateInitializationStepStatus,
         };
         let status = match latest.status {
             AggregateInitializationOperationStatus::Completed => {

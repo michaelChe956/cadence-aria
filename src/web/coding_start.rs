@@ -303,22 +303,20 @@ pub async fn restart_coding_attempt(
     // registry：无活跃 runner 才清退役标记；仍在停止不可 restart。
     let attempt_key = CodingAttemptRunKey::from_attempt(&attempt);
     let _mutation_lease = state.coding_runs.lock_attempt_mutation(&attempt_key).await;
-    match state.coding_runs.restart_attempt(&attempt_key) {
-        crate::web::state::AttemptRestartOutcome::StillStopping => {
-            let result = needs_human(
-                "coding_restart_still_stopping: 旧运行尚未退出，请稍后重试".to_string(),
-            );
-            let _ = coding_store
-                .append_attempt_command_result(
-                    &attempt.project_id,
-                    &attempt.issue_id,
-                    &attempt.id,
-                    &record(OperationState::NeedsHuman),
-                )
-                .map_err(coding_restart_store_error)?;
-            return Ok(result);
-        }
-        _ => {}
+    if state.coding_runs.restart_attempt(&attempt_key)
+        == crate::web::state::AttemptRestartOutcome::StillStopping
+    {
+        let result =
+            needs_human("coding_restart_still_stopping: 旧运行尚未退出，请稍后重试".to_string());
+        let _ = coding_store
+            .append_attempt_command_result(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &record(OperationState::NeedsHuman),
+            )
+            .map_err(coding_restart_store_error)?;
+        return Ok(result);
     }
 
     // durable 重开 admission（既有显式 restart 通道，重验路由/快照/policy）。

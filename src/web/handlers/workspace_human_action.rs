@@ -169,7 +169,7 @@ async fn handle_request(
     gate_id: String,
     request: HumanActionRequest,
 ) -> ApiResult<HumanActionStatus> {
-    let (command_id, expected_gate_id) = command_and_gate(&request);
+    let (command_id, _expected_gate_id) = command_and_gate(&request);
     match request {
         HumanActionRequest::Feedback {
             command_id,

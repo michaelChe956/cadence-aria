@@ -276,7 +276,6 @@ impl super::CodingAttemptStore {
     /// `UnknownNeedsHuman`（绝不抢占）。不写任何文件、不启动 provider。
     pub fn classify_worktree_lease(&self, project_id: &str, issue_id: &str) -> LeaseDecision {
         use crate::product::lifecycle_store::LifecycleStore;
-        use crate::product::models::IssueSharedWorktree;
 
         let lifecycle = LifecycleStore::new(self.paths());
         match lifecycle.get_issue_shared_worktree(project_id, issue_id) {

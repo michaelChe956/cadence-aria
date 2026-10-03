@@ -293,7 +293,7 @@ async fn aggregate_initialization_get_recovers_running_operation_without_lease()
     // running，staging 原样保留（C4 Task 6 起 GET 禁止 recovery）。
     for _ in 0..2 {
         let (status, body) =
-            super::request(&fixture.app, Method::GET, &uri, serde_json::Value::Null).await;
+            super::request(&fixture.app, Method::GET, uri, serde_json::Value::Null).await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(
             body["status"], "running",

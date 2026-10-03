@@ -26,7 +26,7 @@ pub const CODEGRAPH_MAX_VERSION_EXCLUSIVE: (u64, u64, u64) = (2, 0, 0);
 /// 要求恰为 `major.minor.patch` 三段数字；其余形态（含前后缀噪声、缺段）
 /// 一律 `None`（fail-closed，不静默放行）。
 pub fn parse_codegraph_version(output: &str) -> Option<(u64, u64, u64)> {
-    let token = output.trim().split_whitespace().next_back()?;
+    let token = output.split_whitespace().next_back()?;
     let mut segments = token.split('.');
     let major = segments.next()?.parse().ok()?;
     let minor = segments.next()?.parse().ok()?;

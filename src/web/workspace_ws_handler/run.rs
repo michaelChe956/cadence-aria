@@ -22,7 +22,7 @@ mod provider_run;
 #[path = "run/single_candidate.rs"]
 mod single_candidate;
 pub(crate) use provider_run::{
-    ProviderRunStartMode, spawn_provider_run_claiming_idle, spawn_provider_run_from_event,
+    spawn_provider_run_claiming_idle, spawn_provider_run_from_event,
     spawn_provider_run_from_handler,
 };
 

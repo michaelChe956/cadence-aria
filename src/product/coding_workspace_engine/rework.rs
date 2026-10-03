@@ -238,7 +238,7 @@ impl CodingWorkspaceEngine {
             rendered_context
                 .as_ref()
                 .map(|rendered| rendered.content_hash.as_str()),
-            &[instruction.id.clone()],
+            std::slice::from_ref(&instruction.id),
         )? {
             ReworkClaimOutcome::Claimed { .. } | ReworkClaimOutcome::Replayed { .. } => {}
             ReworkClaimOutcome::RenderFailed => {

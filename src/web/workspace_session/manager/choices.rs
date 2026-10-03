@@ -279,7 +279,7 @@ impl WorkspaceSessionManager {
         request: &ChoiceResponseRequest,
     ) -> Result<ChoiceReplyStatus, ChoiceReplyError> {
         let (command_tx, receipt, incarnation) = {
-            let mut state = self
+            let state = self
                 .state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());

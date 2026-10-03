@@ -32,9 +32,9 @@ use crate::product::git_workspace_service::{GitWorkspaceError, GitWorkspaceServi
 use crate::product::issue_store::{CreateProductIssueWithRepositoryInput, IssueStore};
 use crate::product::json_store::{ProductStoreError, validate_relative_id};
 use crate::product::lifecycle_store::{
-    AppendSpecVersionInput, CreateDesignSpecInput, CreateIssueWorkItemPlanInput,
-    CreateStorySpecInput, CreateWorkspaceSessionInput, LifecycleStore,
-    UpsertIssueSharedWorktreeInput, UpsertRepoSharedWorktreeInput,
+    AppendSpecVersionInput, CreateDesignSpecInput, CreateStorySpecInput,
+    CreateWorkspaceSessionInput, LifecycleStore, UpsertIssueSharedWorktreeInput,
+    UpsertRepoSharedWorktreeInput,
 };
 use crate::product::models::{
     DesignSpecRecord, GateStatus, IssuePhase as ProductIssuePhase,

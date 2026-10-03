@@ -8,7 +8,6 @@ use crate::product::logical_codebase::{
     LogicalRepositoryId, PlanningContextResolver, PlanningContextSetResolver, RepositoryRouting,
 };
 use crate::product::models::WorkItemRuntimeBinding;
-use crate::product::work_item_plan_policy::{RunPolicy, WorkItemPlanFlowKind};
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 use crate::product::work_item_runtime_reader::WorkItemRuntimeReader;
 use crate::product::workspace_engine::group_work_items_by_target;
@@ -21,8 +20,7 @@ pub(crate) mod preflight;
 pub use deletion::{
     delete_design_spec, delete_story_spec, delete_work_item, delete_work_item_plan,
 };
-pub(crate) use plan_preparation::{PreparedPlanIds, PreparedPlanRecords, prepare_plan_records};
-use preflight::{SingleCandidatePreflightDecision, preflight_single_repository_candidate};
+pub(crate) use plan_preparation::{PreparedPlanRecords, prepare_plan_records};
 
 pub async fn issue_lifecycle(
     State(state): State<WebAppState>,

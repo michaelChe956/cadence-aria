@@ -65,10 +65,9 @@ pub(super) async fn listen_for_permission_commands(
                         free_text,
                         answers,
                         receipt,
-                    }) {
-                        if let Some(receipt) = undelivered.receipt.as_ref() {
-                            receipt.reject();
-                        }
+                    }) && let Some(receipt) = undelivered.receipt.as_ref()
+                    {
+                        receipt.reject();
                     }
                 } else {
                     tracing::warn!(choice_id = %id, "bridge: no pending choice entry for id");

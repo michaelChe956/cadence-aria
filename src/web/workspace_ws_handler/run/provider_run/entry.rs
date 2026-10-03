@@ -1,5 +1,4 @@
 use super::*;
-use crate::product::workspace_engine::PlanAuthorOutputContract;
 
 pub(crate) async fn spawn_provider_run_from_event(
     run_context: ProviderRunContext,

@@ -265,8 +265,8 @@ pub fn list_c1_waiting_items(
     let lifecycle = LifecycleStore::new(paths.clone());
     if let Some(bound_session_id) = session_id.as_deref() {
         let bound_session = lifecycle.get_workspace_session(bound_session_id)?;
-        if bound_session.workspace_type == crate::product::models::WorkspaceType::WorkItemPlan {
-            if let Some(recovery) = bound_session
+        if bound_session.workspace_type == crate::product::models::WorkspaceType::WorkItemPlan
+            && let Some(recovery) = bound_session
                 .human_gate_snapshot
                 .as_ref()
                 .and_then(|snapshot| snapshot.candidate_recovery.as_ref())
@@ -282,41 +282,40 @@ pub fn list_c1_waiting_items(
                     bound_session_id,
                     &recovery.gate_id,
                 )
-            {
-                let reason = if recovery.complete {
-                    "candidate snapshot complete; awaiting human recovery".to_string()
-                } else {
-                    format!(
-                        "candidate snapshot incomplete: {}",
-                        recovery.missing.join(",")
-                    )
-                };
-                items.push(C1WaitingItemDto {
-                    id: format!(
-                        "c1:candidate_recovery:{}:{}",
-                        bound_session.id, recovery.gate_id
-                    ),
-                    kind: "candidate_recovery".to_string(),
-                    reason,
-                    completed_steps: recovery.completed_steps.clone(),
-                    target: binding_target.clone(),
-                    plan_id: plan_id.clone(),
-                    session_id: Some(bound_session.id.clone()),
-                    attempt_id: None,
-                    gate_id: Some(recovery.gate_id.clone()),
-                    possible_side_effect: None,
-                    actions: vec!["recover_candidate".to_string()],
-                    next_phase: Some("candidate_recovered".to_string()),
-                    expected_version: None,
-                    action_context: Vec::new(),
-                    operation_id: None,
-                    diagnostics: None,
-                    project_id: None,
-                    issue_id: None,
-                    parent_operation_id: None,
-                    superseded_by: None,
-                });
-            }
+        {
+            let reason = if recovery.complete {
+                "candidate snapshot complete; awaiting human recovery".to_string()
+            } else {
+                format!(
+                    "candidate snapshot incomplete: {}",
+                    recovery.missing.join(",")
+                )
+            };
+            items.push(C1WaitingItemDto {
+                id: format!(
+                    "c1:candidate_recovery:{}:{}",
+                    bound_session.id, recovery.gate_id
+                ),
+                kind: "candidate_recovery".to_string(),
+                reason,
+                completed_steps: recovery.completed_steps.clone(),
+                target: binding_target.clone(),
+                plan_id: plan_id.clone(),
+                session_id: Some(bound_session.id.clone()),
+                attempt_id: None,
+                gate_id: Some(recovery.gate_id.clone()),
+                possible_side_effect: None,
+                actions: vec!["recover_candidate".to_string()],
+                next_phase: Some("candidate_recovered".to_string()),
+                expected_version: None,
+                action_context: Vec::new(),
+                operation_id: None,
+                diagnostics: None,
+                project_id: None,
+                issue_id: None,
+                parent_operation_id: None,
+                superseded_by: None,
+            });
         }
     }
 
@@ -411,36 +410,35 @@ pub fn list_c1_waiting_items(
     // next_phase 携带 durable journal checkpoint（重试从该检查点续做）。
     if let Some(plan_id) = plan_id.as_deref() {
         let advance_store = AdvanceStore::new(paths.clone());
-        if let Some(record) = advance_store.get_advance_for_plan(project_id, issue_id, plan_id)? {
-            if record.status == AdvanceStatus::Failed {
-                let journal_phase = advance_store
-                    .get_advance_initialization(&record)?
-                    .filter(|journal| journal.error.is_some())
-                    .map(|journal| checkpoint_slug(journal.phase));
-                items.push(C1WaitingItemDto {
-                    id: format!("c1:advance_retry_failed:{}", record.id),
-                    kind: "advance_retry_failed".to_string(),
-                    reason: "advance initialization failed; original record stays failed"
-                        .to_string(),
-                    completed_steps: Vec::new(),
-                    target: binding_target.clone(),
-                    plan_id: Some(record.plan_id.clone()),
-                    session_id: session_id.clone(),
-                    attempt_id: record.attempt_id.clone(),
-                    gate_id: None,
-                    possible_side_effect: record.error.clone(),
-                    actions: vec!["retry_initialization".to_string()],
-                    next_phase: journal_phase.map(str::to_string),
-                    expected_version: None,
-                    action_context: Vec::new(),
-                    operation_id: None,
-                    diagnostics: None,
-                    project_id: None,
-                    issue_id: None,
-                    parent_operation_id: None,
-                    superseded_by: None,
-                });
-            }
+        if let Some(record) = advance_store.get_advance_for_plan(project_id, issue_id, plan_id)?
+            && record.status == AdvanceStatus::Failed
+        {
+            let journal_phase = advance_store
+                .get_advance_initialization(&record)?
+                .filter(|journal| journal.error.is_some())
+                .map(|journal| checkpoint_slug(journal.phase));
+            items.push(C1WaitingItemDto {
+                id: format!("c1:advance_retry_failed:{}", record.id),
+                kind: "advance_retry_failed".to_string(),
+                reason: "advance initialization failed; original record stays failed".to_string(),
+                completed_steps: Vec::new(),
+                target: binding_target.clone(),
+                plan_id: Some(record.plan_id.clone()),
+                session_id: session_id.clone(),
+                attempt_id: record.attempt_id.clone(),
+                gate_id: None,
+                possible_side_effect: record.error.clone(),
+                actions: vec!["retry_initialization".to_string()],
+                next_phase: journal_phase.map(str::to_string),
+                expected_version: None,
+                action_context: Vec::new(),
+                operation_id: None,
+                diagnostics: None,
+                project_id: None,
+                issue_id: None,
+                parent_operation_id: None,
+                superseded_by: None,
+            });
         }
 
         // A12：intent 未声明/不能执行的 compile 停等（最新 Failed 事务）。
@@ -486,34 +484,34 @@ pub fn list_c1_waiting_items(
     }
 
     // A13：换代历史只读可查 + 显式 rebind 操作面。
-    if let Some(history) = enrollment.binding_history.as_ref() {
-        if !history.previous.is_empty() {
-            items.push(C1WaitingItemDto {
-                id: format!("c1:generation_history:{issue_id}"),
-                kind: "generation_history".to_string(),
-                reason: format!(
-                    "{} previous binding generation(s) kept read-only",
-                    history.previous.len()
-                ),
-                completed_steps: Vec::new(),
-                target: binding_target.clone(),
-                plan_id: plan_id.clone(),
-                session_id: session_id.clone(),
-                attempt_id: None,
-                gate_id: None,
-                possible_side_effect: None,
-                actions: vec!["rebind".to_string()],
-                next_phase: Some("rebind".to_string()),
-                expected_version: None,
-                action_context: Vec::new(),
-                operation_id: None,
-                diagnostics: None,
-                project_id: None,
-                issue_id: None,
-                parent_operation_id: None,
-                superseded_by: None,
-            });
-        }
+    if let Some(history) = enrollment.binding_history.as_ref()
+        && !history.previous.is_empty()
+    {
+        items.push(C1WaitingItemDto {
+            id: format!("c1:generation_history:{issue_id}"),
+            kind: "generation_history".to_string(),
+            reason: format!(
+                "{} previous binding generation(s) kept read-only",
+                history.previous.len()
+            ),
+            completed_steps: Vec::new(),
+            target: binding_target.clone(),
+            plan_id: plan_id.clone(),
+            session_id: session_id.clone(),
+            attempt_id: None,
+            gate_id: None,
+            possible_side_effect: None,
+            actions: vec!["rebind".to_string()],
+            next_phase: Some("rebind".to_string()),
+            expected_version: None,
+            action_context: Vec::new(),
+            operation_id: None,
+            diagnostics: None,
+            project_id: None,
+            issue_id: None,
+            parent_operation_id: None,
+            superseded_by: None,
+        });
     }
     // C2 Task 12（REQ-CRO-06）：coding 链十类 durable 等待事实 additive 投影
     //（不新建 DTO、不以事件当权威；读取失败显式上抛）。

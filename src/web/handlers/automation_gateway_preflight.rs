@@ -94,7 +94,7 @@ fn validate_role_chain(
         if test_provider_enabled && matches!(provider, ProviderName::Fake) {
             continue;
         }
-        if let Err((reason_code, message)) = static_gateway_verdict(provider) {
+        if let Err((reason_code, _message)) = static_gateway_verdict(provider) {
             violations.push(AutomationRoleChainViolation {
                 role: role.to_string(),
                 provider: provider_name(provider),

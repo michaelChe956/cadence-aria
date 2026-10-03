@@ -102,23 +102,23 @@ pub fn parse_story_aggregate_output(
     if let Some(message) = last_block_error {
         return Err(AggregateOutputError::InvalidSchema(message));
     }
-    if let Some((_, json)) = extract_markdown_fence_json(content) {
-        if let Ok(parsed) = serde_json::from_str::<Schema>(&json) {
-            let involved = parsed
-                .involved_repository_ids
-                .iter()
-                .map(|value| parse_repository_id(value))
-                .collect::<Result<Vec<_>, _>>()?;
-            let focus = parsed
-                .focus_repository_id
-                .as_deref()
-                .map(parse_repository_id)
-                .transpose()?;
-            return Ok(StoryAggregateOutput {
-                involved_repository_ids: involved,
-                focus_repository_id: focus,
-            });
-        }
+    if let Some((_, json)) = extract_markdown_fence_json(content)
+        && let Ok(parsed) = serde_json::from_str::<Schema>(&json)
+    {
+        let involved = parsed
+            .involved_repository_ids
+            .iter()
+            .map(|value| parse_repository_id(value))
+            .collect::<Result<Vec<_>, _>>()?;
+        let focus = parsed
+            .focus_repository_id
+            .as_deref()
+            .map(parse_repository_id)
+            .transpose()?;
+        return Ok(StoryAggregateOutput {
+            involved_repository_ids: involved,
+            focus_repository_id: focus,
+        });
     }
     Err(AggregateOutputError::MissingStructuredOutput)
 }
@@ -181,23 +181,23 @@ pub fn parse_design_aggregate_output(
     if let Some(message) = last_block_error {
         return Err(AggregateOutputError::InvalidSchema(message));
     }
-    if let Some((_, json)) = extract_markdown_fence_json(content) {
-        if let Ok(parsed) = serde_json::from_str::<Schema>(&json) {
-            let involved = parsed
-                .involved_repository_ids
-                .iter()
-                .map(|value| parse_repository_id(value))
-                .collect::<Result<Vec<_>, _>>()?;
-            let change_order = parsed
-                .change_order
-                .iter()
-                .map(|value| parse_repository_id(value))
-                .collect::<Result<Vec<_>, _>>()?;
-            return Ok(DesignAggregateOutput {
-                involved_repository_ids: involved,
-                change_order,
-            });
-        }
+    if let Some((_, json)) = extract_markdown_fence_json(content)
+        && let Ok(parsed) = serde_json::from_str::<Schema>(&json)
+    {
+        let involved = parsed
+            .involved_repository_ids
+            .iter()
+            .map(|value| parse_repository_id(value))
+            .collect::<Result<Vec<_>, _>>()?;
+        let change_order = parsed
+            .change_order
+            .iter()
+            .map(|value| parse_repository_id(value))
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok(DesignAggregateOutput {
+            involved_repository_ids: involved,
+            change_order,
+        });
     }
     Err(AggregateOutputError::MissingStructuredOutput)
 }

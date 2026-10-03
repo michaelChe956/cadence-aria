@@ -16,7 +16,6 @@ use crate::product::issue_automation_store::IssueAutomationStore;
 use crate::product::issue_store::IssueStore;
 use crate::product::json_store::{ProductStoreError, validate_relative_id};
 use crate::product::lifecycle_store::LifecycleStore;
-use crate::product::logical_codebase::RepositoryRouting;
 use crate::product::models::LifecycleConfirmationStatus;
 use crate::product::models::WorkspaceType;
 use crate::product::models::automation::{
@@ -89,7 +88,7 @@ pub async fn post_automation_enrollment_binding(
     let enrollment = store
         .get(&project_id, &issue_id)
         .map_err(product_store_api_error)?
-        .ok_or_else(|| enrollment_not_found())?;
+        .ok_or_else(enrollment_not_found)?;
     if !enrollment.enabled {
         return Err(enrollment_conflict(
             None,

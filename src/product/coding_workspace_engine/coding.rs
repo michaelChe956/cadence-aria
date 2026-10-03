@@ -104,7 +104,7 @@ impl CodingWorkspaceEngine {
         {
             resume_provider_session_id = None;
         }
-        let mut rework_instruction = self.store.latest_unconsumed_rework_instruction(
+        let rework_instruction = self.store.latest_unconsumed_rework_instruction(
             &attempt.project_id,
             &attempt.issue_id,
             &attempt.id,

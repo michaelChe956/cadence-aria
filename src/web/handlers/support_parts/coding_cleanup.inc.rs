@@ -205,16 +205,13 @@ pub(crate) fn finalize_coding_attempt_deletion(
         .delete_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .map_err(product_store_api_error)?;
     purge_coding_attempt_lock_residue(app_paths, attempt, &attempt_work_item_ids);
-    match &attempt.target_snapshot {
-        Some(snapshot) => cleanup_repo_shared_worktree_if_no_active_attempts(
-            coding_store,
-            app_paths,
-            &attempt.project_id,
-            &attempt.issue_id,
-            snapshot.logical_repository_id,
-        )?,
-        None => {}
-    }
+    if let Some(snapshot) = &attempt.target_snapshot { cleanup_repo_shared_worktree_if_no_active_attempts(
+        coding_store,
+        app_paths,
+        &attempt.project_id,
+        &attempt.issue_id,
+        snapshot.logical_repository_id,
+    )? }
     // 缺陷 #13 层2 存量出口：组入口路由分流修复前，Logical 路由的 group
     // create 会误写 issue 维 legacy 布局（与运行期 preflight 契约相反，恢复/
     // 完成门 fail-closed legacy_shared_worktree_present）。删除该 issue 的

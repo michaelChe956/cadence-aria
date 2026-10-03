@@ -330,7 +330,7 @@ impl CodingWorkspaceEngine {
             // 带 target_snapshot 的 attempt 锁事实在 repo 维三元键，缺转移会让
             // 后续 retry/completion 的 owner 校验 fail-closed；Legacy 单仓保持
             // 原路径零变化。
-            match self.route_issue_shared_worktree(&attempt)? {
+            match self.route_issue_shared_worktree(attempt)? {
                 IssueSharedWorktreeRoute::Legacy => {
                     if lifecycle
                         .get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)?

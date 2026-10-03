@@ -142,7 +142,7 @@ pub async fn post_workspace_failed_sc_run_retry(
             run_context.connection_id = None;
             let (outbound_tx, _detached_outbound_rx) = tokio::sync::mpsc::channel(1);
             let run_kind =
-                ProviderRunKind::work_item_plan_author_for_durable_flow(record.flow_kind.clone());
+                ProviderRunKind::work_item_plan_author_for_durable_flow(record.flow_kind);
             spawn_provider_run_claiming_idle(run_context, run_kind, outbound_tx).await
         }
     };
@@ -165,7 +165,7 @@ pub async fn post_workspace_failed_sc_run_retry(
                 Json(retry_status(&request, &failed_node_id, "needs_human")),
             ))
         }
-        Err(message) => {
+        Err(_message) => {
             // 派发外部副作用是否发生不可证明：保留认领、停人工分诊。
             mark_needs_human(
                 &lifecycle,

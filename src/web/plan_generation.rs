@@ -8,9 +8,7 @@
 //! 触达时持久 `NeedsHuman`，只供人显式恢复——绝不宣称 exactly-once。
 
 use crate::product::issue_automation_store::IssueAutomationStore;
-use crate::product::models::automation::{
-    IssueAutomationEnrollment, PlanGenerationIntent, PlanGenerationPhase,
-};
+use crate::product::models::automation::{IssueAutomationEnrollment, PlanGenerationPhase};
 use crate::product::models::{
     SingleCandidatePhase, WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceType,
 };
@@ -86,9 +84,8 @@ pub async fn start_plan_generation_once(
             PlanGenerationOutcome::AlreadyActive
         });
     }
-    match admission_outcome(&session) {
-        Some(outcome) => return Ok(outcome),
-        None => {}
+    if let Some(outcome) = admission_outcome(&session) {
+        return Ok(outcome);
     }
 
     // enrollment 锁内认领稳定检查点；按 phase 分诊。

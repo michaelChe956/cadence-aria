@@ -189,7 +189,7 @@ impl WorkspaceEngine {
             };
         // gateway 注入谓词即 `repository.logical_repository_id.is_some()`（manager
         // 工厂）；此处不一致属持久状态漂移——fail-closed，绝不回落 legacy 直连。
-        let Some(logical_repository_id) = repository.logical_repository_id.clone() else {
+        let Some(logical_repository_id) = repository.logical_repository_id else {
             return Some(Err(
                 "logical session repository has no logical identity; refusing legacy direct fallback"
                     .to_string(),
@@ -231,7 +231,7 @@ impl WorkspaceEngine {
                 )));
             }
         };
-        let target = match repository.primary_checkout_id.clone() {
+        let target = match repository.primary_checkout_id {
             Some(checkout_id) => PolicyTarget::checkout(
                 logical_repository_id.0.to_string(),
                 checkout_id.0.to_string(),

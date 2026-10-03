@@ -121,7 +121,7 @@ pub(crate) enum ScCandidateTransport {
     /// ≤ inline：整体内联（现行为，零新增持久化）。
     Inlined,
     /// > inline 且硬限内：完整组装输入已持久化为 artifact 且 readback digest
-    /// 校验通过；`artifact_ref` 为 session 分区相对路径。
+    /// > 校验通过；`artifact_ref` 为 session 分区相对路径。
     ArtifactRef {
         artifact_ref: String,
         assembly_digest: String,
@@ -170,10 +170,7 @@ pub(crate) fn assemble_sc_revision_input(
         ));
     }
     let assembly_digest = assembly_digest_of(prompt);
-    let chunk_count = prompt
-        .as_bytes()
-        .len()
-        .div_ceil(SC_REVISION_CHUNK_TARGET_BYTES);
+    let chunk_count = prompt.len().div_ceil(SC_REVISION_CHUNK_TARGET_BYTES);
     Ok(ScRevisionAssembledInput {
         total_bytes,
         transport: ScCandidateTransport::OrderedChunks {

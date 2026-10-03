@@ -36,10 +36,10 @@ fn ensure_bootstrap_step_is_provider_turn(
     Ok(())
 }
 
-fn bootstrap_step_record<'a>(
-    operation: &'a AggregateInitializationOperation,
+fn bootstrap_step_record(
+    operation: &AggregateInitializationOperation,
     step: AggregateInitializationStepKind,
-) -> Result<&'a AggregateInitializationStepRecord, ProviderAdmissionError> {
+) -> Result<&AggregateInitializationStepRecord, ProviderAdmissionError> {
     let record = operation.steps.get(step.index()).ok_or_else(|| {
         bootstrap_waiting(
             "bootstrap_step_not_running",

@@ -19,8 +19,7 @@ use history_compaction::{HistoryCompactionInput, HistoryCompactionMode, compact_
 
 pub(crate) use human_gate_revision::{
     LANGUAGE_RULE_FILE_CONTENT, ScCandidateTransport, ScManualRevisionPromptInput,
-    ScProviderInputBudget, ScRevisionAssembledInput, assemble_sc_revision_input,
-    assembly_digest_of, build_sc_manual_revision_prompt, reassemble_sc_revision_delivery,
+    assemble_sc_revision_input, assembly_digest_of, build_sc_manual_revision_prompt,
     render_sc_revision_delivery, sc_provider_input_budget, validate_sc_manual_revision_feedback,
 };
 #[cfg(test)]

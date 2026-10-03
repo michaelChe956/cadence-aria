@@ -660,7 +660,7 @@ impl CodingRunRegistry {
         record.receipt.mark_resolving();
         if !sent {
             // 入队失败：结构拒绝，立即终态化并登记。
-            let mut finished = inner.choice_claims.remove(&key).unwrap();
+            let finished = inner.choice_claims.remove(&key).unwrap();
             finished.receipt.reject();
             let status = ChoiceReplyStatus {
                 command_id: finished.command_id,
@@ -702,20 +702,19 @@ impl CodingRunRegistry {
                         | ChoiceReplyState::Rejected
                         | ChoiceReplyState::Expired
                 ) && inner.choice_claims.contains_key(&key)
+                    && let Some(mut removed) = inner.choice_claims.remove(&key)
                 {
-                    if let Some(mut removed) = inner.choice_claims.remove(&key) {
-                        removed.status = live;
-                        push_coding_finished_status(
-                            &mut inner,
-                            attempt_key,
-                            ChoiceReplyStatus {
-                                command_id: removed.command_id,
-                                expected_run_id: removed.incarnation,
-                                choice_id: choice_id.to_string(),
-                                state: live,
-                            },
-                        );
-                    }
+                    removed.status = live;
+                    push_coding_finished_status(
+                        &mut inner,
+                        attempt_key,
+                        ChoiceReplyStatus {
+                            command_id: removed.command_id,
+                            expected_run_id: removed.incarnation,
+                            choice_id: choice_id.to_string(),
+                            state: live,
+                        },
+                    );
                 }
                 return Ok(status);
             }

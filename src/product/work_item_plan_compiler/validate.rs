@@ -205,8 +205,7 @@ pub fn validate_work_item_intent_contract(
                     }
                     WorkItemIntent::Existing => context
                         .existing_work_item_ids
-                        .iter()
-                        .any(|id| *id == intent.provider_work_item_id),
+                        .contains(&intent.provider_work_item_id),
                 };
                 if !provider_resolves {
                     diagnostics.push(unexecutable(

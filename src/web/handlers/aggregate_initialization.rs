@@ -25,6 +25,7 @@ use tokio_util::sync::CancellationToken;
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::cadence_skills::{CadenceSkillsManager, CadenceSkillsPaths};
 use crate::product::json_store::validate_relative_id;
+use crate::product::logical_codebase::AggregateInitializationStepKind;
 use crate::product::logical_codebase::aggregate_index::{
     AggregateIndexOperation, CodeGraphCli, CodeGraphExcludeGenerator,
 };
@@ -35,9 +36,6 @@ use crate::product::logical_codebase::aggregate_initialization_coordinator::{
     MachineSkillsPreparation,
 };
 use crate::product::logical_codebase::aggregate_initialization_store::AggregateInitializationOperationStore;
-use crate::product::logical_codebase::{
-    AggregateInitializationOperationStatus, AggregateInitializationStepKind,
-};
 use crate::web::error::ApiError;
 use crate::web::gateway_factory::LogicalCodebaseGatewayFactory;
 use crate::web::state::{InitializationRunKey, InitializationRunRegistry, WebAppState};

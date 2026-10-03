@@ -7,7 +7,6 @@
 //! 零/多 target、Legacy/FailClosed、provider 不可用、跨 issue 返回明确错误；
 //! 只读，不写 enrollment。
 
-use crate::product::logical_codebase::RepositoryRouting;
 use crate::product::models::IssueWorkItemPlanOptions;
 use crate::product::models::automation::EnrollmentOptions;
 use crate::web::error::ApiResult;

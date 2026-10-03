@@ -204,7 +204,7 @@ impl super::CodingAttemptStore {
                 id: triage_id.to_string(),
             });
         }
-        Ok(read_json(&path)?)
+        read_json(&path)
     }
 
     /// 落决定（审计字段随记录落账）：未决记录写入结论；同结论同操作者同

@@ -132,7 +132,7 @@ impl CodingWorkspaceEngine {
         let open_gates = self.store.list_open_blocked_gates(project_id, issue_id, attempt_id)?;
         let eligible: Vec<CodingGateRequired> = open_gates
             .into_iter()
-            .filter(|gate| super::provider_failure::is_verification_triage_eligible_gate(gate))
+            .filter(super::provider_failure::is_verification_triage_eligible_gate)
             .collect();
         if eligible.is_empty() {
             return Err(CodingWorkspaceEngineError::ProviderStream(
@@ -422,7 +422,7 @@ impl CodingWorkspaceEngine {
         use crate::product::json_store::validate_relative_id;
         use crate::product::lifecycle_store::LifecycleStore;
         use crate::product::models::automation::{
-            EnrollmentError, LeaseTakeoverResult, OperationState,
+            LeaseTakeoverResult, OperationState,
         };
 
         validate_relative_id(project_id)?;
