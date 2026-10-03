@@ -598,6 +598,7 @@ fn matching_resume_record(
         provider_version: "codex 0.124.0-policy-fixture".to_string(),
         adapter_dialect: "codex-app-server-rpc".to_string(),
         provider_session_id: provider_session_id.to_string(),
+        // direct 策略会话的存档记录:无 LC 投影(仅 LC validated 启动落盘)。
         lc_projection: None,
     }
 }

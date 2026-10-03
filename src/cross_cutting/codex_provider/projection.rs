@@ -52,6 +52,9 @@ pub const CODEX_LC_SANDBOX_WORKSPACE_WRITE: &str = "workspace-write";
 pub const CODEX_LC_APPROVAL_ON_REQUEST: &str = "on-request";
 /// LC Coding Auto 档的 approval 冻结值。
 pub const CODEX_LC_APPROVAL_NEVER: &str = "never";
+/// gateway 提供的 boundary plan 与 envelope 冻结面不符时的稳定拒绝码
+/// (Task 5b;计划 Step 3:native/plan 未证实不得放行)。
+pub const CODEX_TARGET_BOUNDARY_UNVERIFIED: &str = "codex_target_boundary_unverified";
 
 /// capability profile 摘要的 schema 前缀(字段序变化必须换 schema 版本)。
 const PROFILE_DIGEST_SCHEMA: &str = "lc-codex-profile-v1";
@@ -337,16 +340,27 @@ pub(crate) fn lc_boundary_plan(
     }
 }
 
-/// REQ-LCG-04 危险门:Coder 形态(Coding action + 无通用 tool policy)的
-/// LC 启动若受限写面未冻结(非 target-only),启动后的 direct 映射只能是
-/// danger-full-access——永久拒绝,details 即稳定码(与 gateway 路由门
-/// 同源字节)。返回 `Some(稳定码)` 表示必须以该 reason 拒绝(spawn 之前,
-/// 零 child);`lc_boundary_plan` 的 Coding 形状分支复用本错误。
+/// Coder 形态判定(Coding action + 无通用 tool policy):该形态的 direct
+/// 映射是 danger-full-access——其一切预认证失败(写面未冻结、exact
+/// version 不可得等)都以 `CODEX_DANGER_FULL_ACCESS_UNSUPPORTED` 稳定码
+/// 拒绝,不放行泛化错误(Task 5b 受限门深化)。
+pub(crate) fn lc_coder_danger_shape(
+    envelope: &SessionPolicyEnvelope,
+    tool_policy: Option<&ProviderToolPolicy>,
+) -> bool {
+    envelope.action == SessionPolicyAction::CodingTargetWrite && tool_policy.is_none()
+}
+
+/// REQ-LCG-04 危险门:Coder 形态的 LC 启动若受限写面未冻结(非
+/// target-only),启动后的 direct 映射只能是 danger-full-access——永久
+/// 拒绝,details 即稳定码(与 gateway 路由门同源字节)。返回 `Some(稳定码)`
+/// 表示必须以该 reason 拒绝(spawn 之前,零 child);`lc_boundary_plan`
+/// 的 Coding 形状分支复用本错误。
 pub(crate) fn lc_danger_refusal(
     envelope: &SessionPolicyEnvelope,
     tool_policy: Option<&ProviderToolPolicy>,
 ) -> Option<&'static str> {
-    if envelope.action != SessionPolicyAction::CodingTargetWrite || tool_policy.is_some() {
+    if !lc_coder_danger_shape(envelope, tool_policy) {
         return None;
     }
     let target_only = envelope.writable_roots.len() == 1
@@ -382,20 +396,18 @@ fn verify_boundary_shape(
             if plan.mode() != ProviderBoundaryMode::TargetWriteOnly
                 || plan.target_root() != Some(envelope.target.worktree.as_path())
             {
-                return Err(ProviderProjectionError::Invalid(
-                    "codex lc projection: coding boundary plan must be target-write-only with \
-                     the envelope target"
-                        .to_string(),
-                ));
+                return Err(ProviderProjectionError::Invalid(format!(
+                    "{CODEX_TARGET_BOUNDARY_UNVERIFIED}: coding boundary plan must be \
+                     target-write-only with the envelope target"
+                )));
             }
         }
         SessionPolicyAction::PlanningReadOnly | SessionPolicyAction::ReviewReadOnly => {
             if plan.mode() != ProviderBoundaryMode::ReadOnly || plan.target_root().is_some() {
-                return Err(ProviderProjectionError::Invalid(
-                    "codex lc projection: read-only boundary plan must be read-only without a \
-                     target root"
-                        .to_string(),
-                ));
+                return Err(ProviderProjectionError::Invalid(format!(
+                    "{CODEX_TARGET_BOUNDARY_UNVERIFIED}: read-only boundary plan must be \
+                     read-only without a target root"
+                )));
             }
         }
     }

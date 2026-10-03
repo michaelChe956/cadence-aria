@@ -190,16 +190,35 @@ impl CodexProvider {
         })?;
 
         // 5) exact version(supplier seam 优先,默认真实 `--version` 探测+进程内
-        //    缓存;不可得 fail-closed)。全 LC 路径必填,非仅策略角色。
+        //    缓存;不可得 fail-closed)。全 LC 路径必填,非仅策略角色。Coder
+        //    形态(direct 映射=danger-full-access)的预认证失败同以危险
+        //    稳定码拒绝(Task 5b):版本未知即受限投影不可认证,唯一替代是
+        //    永久拒绝的 danger-full-access。
+        let version_failure =
+            |error: crate::cross_cutting::streaming_provider::VersionProbeError| {
+                if projection::lc_coder_danger_shape(envelope, input.tool_policy.as_ref()) {
+                    tracing::warn!(
+                        target: "codex_provider",
+                        %error,
+                        "codex lc coder launch uncertifiable: exact version unknown"
+                    );
+                    ProviderAdapterError::parse_error(
+                    crate::product::logical_codebase::provider_gateway::CODEX_DANGER_FULL_ACCESS_UNSUPPORTED,
+                    String::new(),
+                    String::new(),
+                )
+                } else {
+                    lc_error(format!("codex lc validated start: {error}"))
+                }
+            };
         let provider_version = match self.version_supplier.clone() {
-            Some(supplier) => supplier()
-                .map_err(|error| lc_error(format!("codex lc validated start: {error}")))?,
+            Some(supplier) => supplier().map_err(version_failure)?,
             None => crate::cross_cutting::streaming_provider::cached_cli_version(
                 &self.command,
                 probe_codex_version(&self.command, CODEX_VERSION_PROBE_TIMEOUT),
             )
             .await
-            .map_err(|error| lc_error(format!("codex lc validated start: {error}")))?,
+            .map_err(version_failure)?,
         };
 
         // 6) 受限投影(REQ-LCG-04):envelope 派生不可伪造 boundary plan;
@@ -603,6 +622,7 @@ impl StreamingProviderAdapter for CodexProvider {
                     .map(ToString::to_string),
                 provider_version,
                 adapter_dialect: session::CODEX_POLICY_DIALECT.to_string(),
+                // direct 策略会话:无 LC 投影(仅 LC validated 启动落盘)。
                 lc_projection: None,
             });
             if let Err(error) = sink.append_bound(audit_event) {
