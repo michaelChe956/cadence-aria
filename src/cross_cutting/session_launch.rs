@@ -30,7 +30,10 @@ pub struct ValidatedStreamingProviderInput {
 }
 
 impl ValidatedStreamingProviderInput {
-    pub fn new(input: StreamingProviderInput, launch: ValidatedSessionLaunchPolicy) -> Self {
+    /// Task 1b 段③(裁决 A):构造入口收紧为 crate 内——生产 caller 一律经
+    /// gateway `prepare_streaming_launch`(prepare 前 bind run-bound sink);
+    /// crate 外不可再凭空组装 validated input(raw `start` 仅保留单仓 direct)。
+    pub(crate) fn new(input: StreamingProviderInput, launch: ValidatedSessionLaunchPolicy) -> Self {
         Self { input, launch }
     }
 
@@ -50,7 +53,9 @@ pub struct ValidatedAdapterInput {
 }
 
 impl ValidatedAdapterInput {
-    pub fn new(input: AdapterInput, launch: ValidatedSessionLaunchPolicy) -> Self {
+    /// Task 1b 段③(裁决 A):同 streaming 侧收紧——生产 caller 经 gateway
+    /// `prepare_sync_launch`;crate 外无构造入口。
+    pub(crate) fn new(input: AdapterInput, launch: ValidatedSessionLaunchPolicy) -> Self {
         Self { input, launch }
     }
 
