@@ -17,9 +17,11 @@ use crate::web::state::WebAppState;
 
 /// crash-window 注入（automation_crash_window）是进程级全局：驱动
 /// ensure_enrolled_plan/reconcile 且涉及窗口武装的测试经此锁互斥
-///（p1 四中窗测试 × g8 孤儿重驱测试，并行会互偷窗口）。
+///（p1 四中窗测试 × g8 孤儿重驱测试，并行会互偷窗口）。守卫需跨
+/// await 持有整个测试体，故用 tokio 异步锁（std 锁跨 await 会触发
+/// await_holding_lock，且多线程 runtime 下有同线程重入死锁风险）。
 #[cfg(test)]
-static CRASH_WINDOW_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static CRASH_WINDOW_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// 单次 reconcile 的 durable 推导结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReconcileOutcome {
@@ -848,9 +850,7 @@ mod tests {
 
         // crash-window 注入是进程级全局：与同样驱动 ensure_enrolled_plan /
         // reconcile 的 g8_delegated_orphan 测试互斥（并行会互偷窗口）。
-        let _crash_window_serial = super::CRASH_WINDOW_SERIAL
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _crash_window_serial = super::CRASH_WINDOW_SERIAL.lock().await;
 
         for window in [
             CrashWindow::AfterIntentSaved,

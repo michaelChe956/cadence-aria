@@ -362,9 +362,7 @@ mod g8_delegated_orphan {
     async fn enrolled_delegated_rerun_orphan_is_redriven_exactly_once_by_reconcile() {
         // 与 p1 四中窗测试互斥（本测试驱动 ensure_enrolled_plan/reconcile，
         // 并行会互偷进程级 crash-window 注册）。
-        let _crash_window_serial = super::CRASH_WINDOW_SERIAL
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _crash_window_serial = super::CRASH_WINDOW_SERIAL.lock().await;
         let inner = seed_fixture(1, true);
         let root_path = inner._root.path().to_path_buf();
         let state = WebAppState::new(
