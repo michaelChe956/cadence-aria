@@ -224,7 +224,11 @@ impl WorkItemSplitEngine {
         lifecycle: &LifecycleStore,
         issue: &IssueRecord,
         gateway: &LogicalCodebaseProviderGateway,
+        workspace_session_id: &str,
     ) -> ApiResult<ProviderInvocationResult> {
+        // 段①尾 RED 占位:参数已冻结,handle 流(begin→bind→start→parse→
+        // complete/fail)由 lcg_t01 split run handle 收口测试锁定后实现。
+        let _ = workspace_session_id;
         let provider_type = provider_name_to_type(&author_provider);
         let worktree_path = repository.path.to_string_lossy().to_string();
         let adapter_input = AdapterInput {

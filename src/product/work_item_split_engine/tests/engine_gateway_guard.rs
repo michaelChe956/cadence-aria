@@ -380,10 +380,13 @@ use crate::product::logical_codebase::RepositoryCheckoutId;
 use crate::product::logical_codebase::SessionLaunchRequest;
 use crate::product::logical_codebase::SessionPolicyAction;
 
-/// sync 探针：记录 spawn 时 input 的独立 cwd 与 worktree target 并计数，
-/// 返回最小 structured output。
+/// sync 探针:记录 spawn 时 input 的独立 cwd 与 worktree target 并计数,
+/// 返回最小 structured output。`run_validated` 独立计数(段①:prepared
+/// launch 必须走 validated trait);可注入一次失败供 fail 收口断言。
 struct SplitRootCwdSyncProbe {
     runs: Arc<AtomicUsize>,
+    validated_runs: Arc<AtomicUsize>,
+    fail_validated: Arc<AtomicBool>,
     cwd_at_runs: Arc<Mutex<Option<PathBuf>>>,
     worktree_at_runs: Arc<Mutex<Option<String>>>,
 }
@@ -392,17 +395,14 @@ impl SplitRootCwdSyncProbe {
     fn new() -> Self {
         Self {
             runs: Arc::new(AtomicUsize::new(0)),
+            validated_runs: Arc::new(AtomicUsize::new(0)),
+            fail_validated: Arc::new(AtomicBool::new(false)),
             cwd_at_runs: Arc::new(Mutex::new(None)),
             worktree_at_runs: Arc::new(Mutex::new(None)),
         }
     }
-}
 
-impl ProviderAdapter for SplitRootCwdSyncProbe {
-    fn run(&self, input: &AdapterInput) -> Result<AdapterOutput, ProviderAdapterError> {
-        self.runs.fetch_add(1, Ordering::SeqCst);
-        *self.cwd_at_runs.lock().expect("split cwd probe") = input.working_directory.clone();
-        *self.worktree_at_runs.lock().expect("split worktree probe") = input.worktree_path.clone();
+    fn minimal_output() -> Result<AdapterOutput, ProviderAdapterError> {
         Ok(AdapterOutput {
             exit_code: Some(0),
             stdout: String::new(),
@@ -412,6 +412,36 @@ impl ProviderAdapter for SplitRootCwdSyncProbe {
             duration_ms: 0,
             timeout_status: crate::protocol::contracts::TimeoutStatus::NotTimedOut,
         })
+    }
+}
+
+impl ProviderAdapter for SplitRootCwdSyncProbe {
+    fn run(&self, input: &AdapterInput) -> Result<AdapterOutput, ProviderAdapterError> {
+        self.runs.fetch_add(1, Ordering::SeqCst);
+        *self.cwd_at_runs.lock().expect("split cwd probe") = input.working_directory.clone();
+        *self.worktree_at_runs.lock().expect("split worktree probe") = input.worktree_path.clone();
+        Self::minimal_output()
+    }
+
+    fn run_validated(
+        &self,
+        launch: crate::cross_cutting::session_launch::ValidatedAdapterInput,
+    ) -> Result<AdapterOutput, ProviderAdapterError> {
+        let (input, _policy) = launch.into_parts();
+        self.runs.fetch_add(1, Ordering::SeqCst);
+        self.validated_runs.fetch_add(1, Ordering::SeqCst);
+        *self.cwd_at_runs.lock().expect("split cwd probe") = input.working_directory.clone();
+        *self.worktree_at_runs.lock().expect("split worktree probe") = input.worktree_path.clone();
+        if self.fail_validated.load(Ordering::SeqCst) {
+            self.fail_validated.store(false, Ordering::SeqCst);
+            return Err(ProviderAdapterError::execution_failed(
+                None,
+                String::new(),
+                "split probe injected failure".to_string(),
+                0,
+            ));
+        }
+        Self::minimal_output()
     }
 }
 
@@ -600,6 +630,7 @@ async fn split_sync_gateway_launch_rebinds_cwd_to_canonical_root() {
             &lifecycle,
             &issue,
             &gateway,
+            "ws_probe_0001",
         )
         .await
         .expect("split sync gateway launch must complete with the root cwd");
@@ -622,6 +653,117 @@ async fn split_sync_gateway_launch_rebinds_cwd_to_canonical_root() {
         *probe.worktree_at_runs.lock().expect("split worktree probe"),
         Some(member.to_string_lossy().to_string()),
         "worktree_path must stay the target member checkout"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Task 1b 段①尾(lcg_t01):sync split caller 的 handle 收口。
+//
+// 断言语义(计划冻结「WS streaming Plan/split 的每个真实 caller 依次 begin
+// handle、bind sink、start、parse、complete/fail」;sync split 走同一 gateway
+// bridge):invoke_provider_via_gateway 经 begin handle→bind sink(prepare)→
+// start(validated trait)→parse(complete 消费 handle)收口;失败路径 fail
+// 收口 status=failed。
+// ---------------------------------------------------------------------------
+
+/// 读取 split run 身份分区里指定 workspace 的全部 run.json status。
+fn split_run_statuses(paths: &ProductAppPaths, workspace_session_id: &str) -> Vec<String> {
+    let root = paths
+        .root()
+        .join("work-item-split-runs")
+        .join(workspace_session_id);
+    let mut statuses = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&root) {
+        for entry in entries.flatten() {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(
+                &std::fs::read_to_string(entry.path().join("run.json")).unwrap_or_default(),
+            ) else {
+                continue;
+            };
+            if let Some(status) = value.get("status").and_then(|v| v.as_str()) {
+                statuses.push(status.to_string());
+            }
+        }
+    }
+    statuses.sort();
+    statuses
+}
+
+/// sync split caller 的 handle 流:成功收口 completed、失败收口 failed,
+/// 且 prepared launch 只走 validated trait(validated_runs==1)。
+#[tokio::test]
+async fn split_sync_gateway_launch_closes_run_handle_on_success_and_failure() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let canonical_root = root.path().to_path_buf();
+    let member = canonical_root.join("member_repo");
+    std::fs::create_dir_all(&member).expect("member dir");
+    let paths = ProductAppPaths::new(canonical_root.join(".aria"));
+    let probe = Arc::new(SplitRootCwdSyncProbe::new());
+    let gateway = split_root_cwd_gateway(&paths, &canonical_root, "project_0001", probe.clone());
+
+    let mut repository = logical_repository();
+    repository.path = member.clone();
+    repository.primary_checkout_id = Some(RepositoryCheckoutId(uuid::Uuid::nil()));
+    let (_, issue, _) = split_prompt_fixture();
+
+    let engine = WorkItemSplitEngine::new(Arc::new(RecordingAdapter::new(Arc::new(
+        AtomicBool::new(false),
+    ))));
+    let lifecycle = LifecycleStore::new(paths.clone());
+
+    // 成功路径:handle 收口 completed,prepared launch 只走 validated trait。
+    let result = engine
+        .invoke_provider_via_gateway(
+            "handle success probe",
+            &repository,
+            ProviderName::ClaudeCode,
+            &lifecycle,
+            &issue,
+            &gateway,
+            "ws_handle_0001",
+        )
+        .await
+        .expect("split sync gateway launch must close the run handle");
+
+    assert_eq!(
+        probe.validated_runs.load(Ordering::SeqCst),
+        1,
+        "prepared launch must dispatch to the validated trait"
+    );
+    assert!(
+        result.run_ref.starts_with("ws-ws_handle_0001-split-run-"),
+        "run_ref must carry the workspace-scoped handle identity, got {}",
+        result.run_ref
+    );
+    assert_eq!(
+        split_run_statuses(&paths, "ws_handle_0001"),
+        vec!["completed".to_string()],
+        "success must close the split run handle as completed"
+    );
+
+    // 失败路径:adapter 失败时 handle 收口 failed,错误向上传播。
+    probe.fail_validated.store(true, Ordering::SeqCst);
+    let failure = engine
+        .invoke_provider_via_gateway(
+            "handle failure probe",
+            &repository,
+            ProviderName::ClaudeCode,
+            &lifecycle,
+            &issue,
+            &gateway,
+            "ws_handle_0002",
+        )
+        .await
+        .expect_err("injected adapter failure must propagate");
+    assert!(
+        failure.message.contains("split probe injected failure"),
+        "failure must carry the adapter reason, got {}",
+        failure.message
+    );
+    assert_eq!(
+        split_run_statuses(&paths, "ws_handle_0002"),
+        vec!["failed".to_string()],
+        "adapter failure must close the split run handle as failed"
     );
 }
 
