@@ -2,17 +2,19 @@
 // Task 3.2（D2/D3，BOOT-03）：生产接线的 root recipe 安全回归锁。
 //
 // 与 `trust_route_fixture` 同形的生产依赖图（gateway factory 驱动携带
-// `Some(paths)`：admission 预检 + per-LC root recipe 命令审计），但聚合根内
-// 含真实成员 Git 仓，供两类断言消费：
+// `Some(paths)`：admission 预检 + per-LC root recipe 命令审计 + Task 4
+// 末命令发布收口），但聚合根内含真实成员 Git 仓，供两类断言消费：
 // - D2 `root_receipt_rejects_member_git_and_unknown_changes`：provider 在
 //   pre_check 命令窗口内写成员 `.git` 与根级未知路径 → 命令 receipt 拒绝
-//   （证据 durable 保留）、finalize fail-closed、readiness 以
-//   root_receipt_missing 等待，且 auditor 只读不回滚用户/成员字节。
+//   （证据 durable 保留）；Task 4 起被拒命令使最终 receipt 无法签发，
+//   末命令收口失败传播（operation Failed，readiness 以 provider-turn
+//   失败面呈现），且 auditor 只读不回滚用户/成员字节。
 // - D3 `shared_executor_cannot_reach_repository_registration_or_git_finalize`：
 //   共享四命令 executor（root recipe 命令源 + gateway 驱动）完整跑通五步
-//   operation 的同时，成员 Git 状态、根文件清单、单仓 registration/
-//   GitFinalize 持久化指纹全部零变化——以可观测调用图边界（文件系统、
-//   进程审计、store 记录）证明不可达单仓调用图，替代源码 token 扫描。
+//   operation 的同时，成员 Git 状态、根清单变化=精确 recipe 自有产物 +
+//   发布 locator、单仓 registration/GitFinalize 持久化指纹全部零变化
+//   ——以可观测调用图边界（文件系统、进程审计、store 记录）证明不可达
+//   单仓调用图，替代源码 token 扫描。
 // -------------------------------------------------------------------
 
 /// 聚合根内真实成员 Git 仓的不可变指纹。`git add -A` + `git commit`
@@ -104,12 +106,14 @@ fn aggregate_root_inventory(root: &std::path::Path) -> std::collections::BTreeMa
 
 /// D2 探针：首个 pre_check turn（命令 1 审计窗口内）向成员 `.git/HEAD`
 /// 写入篡改字节、向根级写一个 allowlist 外未知文件——模拟 provider 越界
-/// 写；随后委托 `FakeStreamingProvider` 正常完成会话（turn 本身成功，
-/// receipt 层拒绝）。
+/// 写；其余命令行为与真实 recipe 同构（RuleAndMcpConfig 时机生成根规则
+/// 材料，Task 4 生产同构），随后委托 recipe provider 正常完成会话
+/// （turn 本身成功，receipt 层拒绝）。
 struct RogueRootWriteStreamingProvider {
     fired: std::sync::atomic::AtomicBool,
     member_git_head: PathBuf,
     rogue_path: PathBuf,
+    recipe: RootPolicyRecipeStreamingProvider,
 }
 
 #[async_trait::async_trait]
@@ -136,9 +140,7 @@ impl crate::cross_cutting::streaming_provider::StreamingProviderAdapter
             std::fs::write(&self.rogue_path, "out of root recipe write\n")
                 .expect("simulated unknown root path write");
         }
-        crate::cross_cutting::streaming_provider::FakeStreamingProvider
-            .start(input, cancel)
-            .await
+        self.recipe.start(input, cancel).await
     }
 }
 
@@ -202,9 +204,14 @@ fn root_safety_fixture(rogue: bool) -> RootSafetyFixture {
                 fired: std::sync::atomic::AtomicBool::new(false),
                 member_git_head: member_repo.join(".git").join("HEAD"),
                 rogue_path: aggregate_root.join("rogue.txt"),
+                recipe: RootPolicyRecipeStreamingProvider::new(RecipeFixtureOptions::default()),
             })
         } else {
-            Arc::new(crate::cross_cutting::streaming_provider::FakeStreamingProvider)
+            // Task 4：干净基线同样由 provider 在 RuleAndMcpConfig 时机生成
+            // 根规则材料（生产同构），使末命令发布收口有真实材料。
+            Arc::new(RootPolicyRecipeStreamingProvider::new(
+                RecipeFixtureOptions::default(),
+            ))
         };
     let factory = fake_registry_gateway_factory_with(streaming, paths.clone());
     let gate = Arc::new(RouteTrustGate::new(false));
@@ -222,9 +229,21 @@ fn root_safety_fixture(rogue: bool) -> RootSafetyFixture {
         clock,
     )
     .with_trust(gate.clone());
-    let dependencies = AggregateInitializationDependencies::new(
+    // Task 4：index op 指向本 fixture 的 LC scope 并以必缺 codegraph 二进制
+    // 确定性失败——不与并行测试共享 temp 根，也不让真实 codegraph 在
+    // 聚合根写 `.codegraph/**` 破坏根清单对照。
+    let index = Arc::new(AggregateIndexOperation::new(
+        paths.clone(),
+        CodeGraphCli::new(
+            Arc::new(TokioBoundedCommandRunner),
+            "codegraph-missing-binary-for-root-policy-tests".to_string(),
+        ),
+        CodeGraphExcludeGenerator,
+    ));
+    let dependencies = AggregateInitializationDependencies::with_index(
         Arc::new(coordinator),
         InitializationRunRegistry::default(),
+        index,
     )
     .with_trust(gate.clone());
     let state = WebAppState::new(root_path.clone(), WebRuntime::new_fake(root_path.clone()))
@@ -286,9 +305,11 @@ async fn root_safety_run_recipe_to_terminal(
 /// pre_check 命令窗口内篡改成员 `.git/HEAD` 并写根级未知路径：
 /// - 命令 receipt `Rejected`，变更证据按 MemberGit/UnknownPath 分类
 ///   durable 保留（允许记录，不允许静默）；
-/// - 后续命令窗口无新写入 → `Allowed`（窗口按命令隔离）；
-/// - finalize fail-closed：最终 receipt 缺席；
-/// - readiness 以 `root_receipt_missing` 等待（planning_ready=false）；
+/// - 后续命令窗口无越界新写入 → `Allowed`（窗口按命令隔离；命令 2/3 的
+///   规则材料生成属 allowlisted 变更）；
+/// - Task 4（REQ-BOOT-05）起被拒命令使最终 receipt 无法签发 → 末命令
+///   收口失败传播：operation Failed 于 OpenspecAndExamples、最终 receipt
+///   缺席、readiness 以 provider-turn 失败面呈现（planning_ready=false）；
 /// - auditor 只读：越界字节与成员 Git 篡改原样保留，绝不回滚用户文件。
 #[tokio::test]
 async fn root_receipt_rejects_member_git_and_unknown_changes() {
@@ -296,9 +317,16 @@ async fn root_receipt_rejects_member_git_and_unknown_changes() {
     let operation = root_safety_run_recipe_to_terminal(&fixture, "d2-reject-1").await;
     assert_eq!(
         operation.status,
-        crate::product::logical_codebase::AggregateInitializationOperationStatus::Completed,
-        "provider turn 本身成功；拒绝只发生在 receipt 审计层: {:?}",
+        crate::product::logical_codebase::AggregateInitializationOperationStatus::Failed,
+        "a rejected command must fail the final-command publication closure: {:?}",
         operation.error
+    );
+    assert_eq!(
+        operation.failed_step,
+        Some(
+            crate::product::logical_codebase::AggregateInitializationStepKind::OpenspecAndExamples
+        ),
+        "the closure failure lands on the final command's step"
     );
 
     let receipts = crate::product::logical_codebase::RootRecipeReceiptStore::for_lc(
@@ -361,7 +389,9 @@ async fn root_receipt_rejects_member_git_and_unknown_changes() {
         "finalize must refuse when any command receipt is rejected"
     );
 
-    // readiness 等待面：planning_ready=false 且 root_receipt_missing。
+    // readiness 失败面：planning_ready=false，末命令收口失败以
+    // provider-turn 失败 reason 呈现（Task 4 契约替代旧 root_receipt_missing
+    // 等待面——被拒命令不再允许 warn-only 补发）。
     let (status, projection) = get_json(
         &fixture.app,
         &format!(
@@ -379,8 +409,8 @@ async fn root_receipt_rejects_member_git_and_unknown_changes() {
         .filter_map(|notice| notice["reason_code"].as_str())
         .collect();
     assert!(
-        reason_codes.contains(&"root_receipt_missing"),
-        "readiness must surface the receipt waiting face, got {reason_codes:?}"
+        reason_codes.contains(&"aggregate_openspec_and_examples_failed"),
+        "readiness must surface the final-command closure failure, got {reason_codes:?}"
     );
 
     // auditor 只读：越界字节与成员 Git 篡改原样在盘（不覆盖、不回滚）。
@@ -402,14 +432,16 @@ async fn root_receipt_rejects_member_git_and_unknown_changes() {
 /// 证明单仓 registration/GitFinalize 不可达：
 /// 1. 成员 Git 状态指纹零变化（`git add -A`/`git commit` 会改写
 ///    head_revision/porcelain/tracked）；
-/// 2. canonical 根文件清单零变化（根级 git_finalize/未知写入暴露为
-///    `.git` 树或新路径）；
+/// 2. canonical 根文件清单变化恰为 recipe 自有产物（allowlisted 规则
+///    材料）+ Task 4 发布 locator——根级 git_finalize/未知写入暴露为
+///    `.git` 树或清单外新路径；
 /// 3. 单仓持久化指纹零残留：`RepositoryStore` 无 Repository 记录、
 ///    `repository-initializations/` 无单仓六步 operation 记录
 ///    （`RepositoryRegistrationCoordinator` 的两条落盘边）；
 /// 4. 三个 provider turn 全部经 gateway 启动且携带 policy digest
 ///    （`ClaudeRepositoryInitializer` 的 registry 直连启动不留审计），
-///    四条命令 receipt 的命令文本与冻结命令索引一致（共享命令源真实执行）。
+///    四条命令 receipt 的命令文本与冻结命令索引一致（共享命令源真实
+///    执行），最终 receipt 冻结真正文 digest。
 #[tokio::test]
 async fn shared_executor_cannot_reach_repository_registration_or_git_finalize() {
     let fixture = root_safety_fixture(false);
@@ -431,11 +463,51 @@ async fn shared_executor_cannot_reach_repository_registration_or_git_finalize() 
         "member git state must stay byte-identical (no git_finalize edge)"
     );
 
-    // 2. 根清单：根级任何写入（含根 `.git` 树）零痕迹。
+    // 2. 根清单：新增路径必须恰为 recipe 自有产物（AGENTS/.claude 规则
+    //    材料）与发布 locator 树（Task 4），无任何删除/改写——根级
+    //    git_finalize（`.git` 树）或未知写入会暴露为清单外路径。
+    let policy_artifact =
+        crate::product::logical_codebase::policy::AggregatePolicyArtifactStore::for_lc(
+            fixture.paths.clone(),
+            fixture.lc_id.clone(),
+        )
+        .get("project_0001")
+        .expect("policy artifact read")
+        .expect("published policy artifact");
+    let mut recipe_owned: Vec<String> = vec![
+        "AGENTS.md".to_string(),
+        ".claude".to_string(),
+        ".claude/rules".to_string(),
+        ".claude/rules/language.md".to_string(),
+    ];
+    let mut prefix = String::new();
+    for segment in policy_artifact.policy_id.split('/') {
+        if !prefix.is_empty() {
+            prefix.push('/');
+        }
+        prefix.push_str(segment);
+        recipe_owned.push(prefix.clone());
+    }
+    let root_after = aggregate_root_inventory(&fixture.aggregate_root);
+    for (path, before) in &root_before {
+        assert_eq!(
+            root_after.get(path),
+            Some(before),
+            "pre-existing root entry {path} must stay byte-identical"
+        );
+    }
+    let added: std::collections::BTreeSet<&String> = root_after
+        .keys()
+        .filter(|path| !root_before.contains_key(*path))
+        .collect();
+    let expected_added: std::collections::BTreeSet<String> = recipe_owned.into_iter().collect();
     assert_eq!(
-        aggregate_root_inventory(&fixture.aggregate_root),
-        root_before,
-        "canonical root inventory must stay identical (no root-level writes)"
+        added
+            .into_iter()
+            .map(|path| (*path).clone())
+            .collect::<std::collections::BTreeSet<String>>(),
+        expected_added,
+        "root inventory delta must be exactly the recipe-owned artifacts plus the published locator"
     );
 
     // 3. 单仓 registration 持久化指纹：零 Repository 记录、零单仓 operation。
@@ -487,9 +559,28 @@ async fn shared_executor_cannot_reach_repository_registration_or_git_finalize() 
             receipt.verdict,
             crate::product::logical_codebase::root_recipe_receipt::RootRecipeCommandVerdict::Allowed
         );
-        assert!(
-            receipt.observed_changes.is_empty(),
-            "clean run must not touch anything outside its own audit window"
-        );
+        match receipt.command_index {
+            // 命令 2/3 共享同一 RuleAndMcpConfig turn（两条 watch 都在 turn
+            // 前开启）——窗口包含规则材料生成（AGENTS/.claude 规则），全部
+            // allowlisted；命令 1/4 窗口零写入（发布发生在全部审计窗口
+            // 关闭之后，不进任何窗口）。
+            2 | 3 => assert!(
+                receipt.observed_changes.iter().all(|change| change.allowed),
+                "rule-material generation must be allowlisted evidence: {:?}",
+                receipt.observed_changes
+            ),
+            _ => assert!(
+                receipt.observed_changes.is_empty(),
+                "command {} must not touch anything outside its own audit window",
+                receipt.command_index
+            ),
+        }
     }
+    // 最终 receipt 冻结真正文 digest（Task 4 末命令收口）。
+    let receipt = receipts
+        .get("project_0001", &operation.operation_id)
+        .expect("final receipt read")
+        .expect("finalized root receipt");
+    assert_eq!(receipt.policy_digest, policy_artifact.digest);
+    assert!(!policy_artifact.is_bootstrap_placeholder());
 }

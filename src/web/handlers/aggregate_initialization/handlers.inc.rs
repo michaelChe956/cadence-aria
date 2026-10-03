@@ -72,8 +72,6 @@ async fn create_aggregate_initialization_for_lc(
     let coordinator = dependencies.coordinator.clone();
     let index = dependencies.index.clone();
     let manifest_revision = operation.input.manifest_revision;
-    let worker_paths = project_paths.clone();
-    let lc_id_for_worker = logical_codebase_id.clone();
     let project_id_for_worker = project_id.clone();
     let operation_id_for_worker = operation.operation_id.clone();
     tokio::spawn(async move {
@@ -85,20 +83,14 @@ async fn create_aggregate_initialization_for_lc(
             .execute(&project_id_for_worker, &operation_id_for_worker, token)
             .await
         {
-            Ok(completed) => {
-                // Task 1.8（BOOT-03）：末命令 turn 后生产 driver 已 finalize；
-                // 此处幂等补一次，覆盖「末 turn 完成于早前尝试、本次仅收尾」
-                // 的窗口。失败只留等待面（readiness 投影可见），不回滚。
-                try_finalize_root_recipe_receipt(
-                    &worker_paths,
-                    &lc_id_for_worker,
-                    &project_id_for_worker,
-                    &operation_id_for_worker,
-                    &completed.input.provider_context_root,
-                );
-                // Index creation is deliberately detached from initialization
-                // durability. A failed index build is observable in its own
-                // operation and must not roll back a completed initialization.
+            Ok(_completed) => {
+                // Task 4（REQ-BOOT-05）：最终政策发布与 receipt 签发已由
+                // 生产 driver 在末命令收口唯一完成（发布失败强制传播为
+                // ProviderTurn 失败，operation 不 Completed）——此处不再
+                // warn-only 补发。Index creation is deliberately detached
+                // from initialization durability. A failed index build is
+                // observable in its own operation and must not roll back a
+                // completed initialization.
                 let project_id = project_id_for_worker.clone();
                 let operation_id = operation_id_for_worker.clone();
                 // Do not extend the initialization lease over the follow-up

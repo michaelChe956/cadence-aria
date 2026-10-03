@@ -76,16 +76,68 @@ impl AggregateSkillsPreparation for RouteTestSkills {
         })
     }
 }
-/// 首个 pre_check turn 注入一次中断的流式 provider（与 it_web
-/// `FaultOncePreCheckStreamingProvider` 同构）：中断先于成功启动，audit
-/// 不计 launch；后续 turn 委托 `FakeStreamingProvider`。
-struct FaultOncePreCheckStreamingProvider {
-    fired: std::sync::atomic::AtomicBool,
+/// Task 4：测试 recipe 的根规则材料（provider 在 RuleAndMcpConfig 命令
+/// 时机落盘，与真实 Claude 生成根规则同构）。
+const ROOT_POLICY_TEST_AGENTS: &str =
+    "# aggregate root rules\n\n- 根入口规则：成员仓统一遵守语言与工程规范。\n";
+const ROOT_POLICY_TEST_LANGUAGE: &str = "# 语言规则\n\n- 必须使用中文回答。\n";
+
+/// `trust_route_fixture` 的可调选项（Task 4）。
+#[derive(Debug, Clone)]
+struct RecipeFixtureOptions {
+    /// 首个 pre_check turn 注入一次中断（保留既有 trust retry 弧的确定性
+    /// 无 worker 观察窗口；中断先于成功启动，audit 不计 launch）。
+    fault_first_pre_check: bool,
+    /// 首个末命令（openspec_and_examples）turn 注入一次中断（末命令审计
+    /// 前的确定性观察窗口）。
+    fault_first_final_turn: bool,
+    /// RuleAndMcpConfig turn 是否落盘 `.claude/rules/language.md`
+    ///（缺 language 的发布负例置 false）。
+    write_language_rule: bool,
+}
+
+impl Default for RecipeFixtureOptions {
+    fn default() -> Self {
+        Self {
+            fault_first_pre_check: false,
+            fault_first_final_turn: false,
+            write_language_rule: true,
+        }
+    }
+}
+
+/// Task 4 生产同构 provider：在真正执行 RuleAndMcpConfig 命令的时机向
+/// 聚合根落盘 AGENTS/language 规则材料（替代旧的「预写 AGENTS 后 fake
+/// 成功」），并可按选项在首个 pre_check / 末命令 turn 注入一次中断。
+/// 该 seam 只存在于测试依赖图，绝不扩大到真实 E2E。
+struct RootPolicyRecipeStreamingProvider {
+    options: RecipeFixtureOptions,
+    pre_check_fault_fired: std::sync::atomic::AtomicBool,
+    final_turn_fault_fired: std::sync::atomic::AtomicBool,
+}
+
+impl RootPolicyRecipeStreamingProvider {
+    fn new(options: RecipeFixtureOptions) -> Self {
+        Self {
+            options,
+            pre_check_fault_fired: std::sync::atomic::AtomicBool::new(false),
+            final_turn_fault_fired: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    fn interruption(message: &str) -> crate::cross_cutting::provider_adapter::ProviderAdapterError {
+        crate::cross_cutting::provider_adapter::ProviderAdapterError::execution_failed(
+            None,
+            String::new(),
+            message.to_string(),
+            0,
+        )
+    }
 }
 
 #[async_trait::async_trait]
 impl crate::cross_cutting::streaming_provider::StreamingProviderAdapter
-    for FaultOncePreCheckStreamingProvider
+    for RootPolicyRecipeStreamingProvider
 {
     async fn start(
         &self,
@@ -95,21 +147,48 @@ impl crate::cross_cutting::streaming_provider::StreamingProviderAdapter
         crate::cross_cutting::streaming_provider::ProviderSession,
         crate::cross_cutting::provider_adapter::ProviderAdapterError,
     > {
-        let pre_check =
-            crate::product::repository_store::RepositoryInitializationStepKind::PreCheck
-                .command()
-                .expect("pre_check command");
-        if input.prompt.contains(pre_check)
-            && !self.fired.swap(true, std::sync::atomic::Ordering::SeqCst)
+        use crate::product::repository_store::RepositoryInitializationStepKind as RepoStep;
+        let pre_check = RepoStep::PreCheck.command().expect("pre_check command");
+        let rule_config = RepoStep::RuleConfig.command().expect("rule-config command");
+        let project_rules_examples = RepoStep::ProjectRulesExamples
+            .command()
+            .expect("project-rules-examples command");
+        if self.options.fault_first_pre_check
+            && input.prompt.contains(pre_check)
+            && !self
+                .pre_check_fault_fired
+                .swap(true, std::sync::atomic::Ordering::SeqCst)
         {
-            return Err(
-                crate::cross_cutting::provider_adapter::ProviderAdapterError::execution_failed(
-                    None,
-                    String::new(),
-                    "test-injected interruption during the pre_check provider turn",
-                    0,
-                ),
-            );
+            return Err(Self::interruption(
+                "test-injected interruption during the pre_check provider turn",
+            ));
+        }
+        // RuleAndMcpConfig 命令时机：真实 provider 生成根规则的位置——
+        // 测试 provider 在 working_dir（聚合根）落盘 AGENTS 入口与
+        // language 规则，使末命令发布收口有真实材料可聚合。
+        if input.prompt.contains(rule_config) {
+            let root = input.working_dir.clone();
+            std::fs::write(root.join("AGENTS.md"), ROOT_POLICY_TEST_AGENTS)
+                .expect("write root AGENTS.md");
+            if self.options.write_language_rule {
+                std::fs::create_dir_all(root.join(".claude").join("rules"))
+                    .expect("create root rules dir");
+                std::fs::write(
+                    root.join(".claude").join("rules").join("language.md"),
+                    ROOT_POLICY_TEST_LANGUAGE,
+                )
+                .expect("write root language rule");
+            }
+        }
+        if self.options.fault_first_final_turn
+            && input.prompt.contains(project_rules_examples)
+            && !self
+                .final_turn_fault_fired
+                .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(Self::interruption(
+                "test-injected interruption during the final command provider turn",
+            ));
         }
         crate::cross_cutting::streaming_provider::FakeStreamingProvider
             .start(input, cancel)
@@ -118,8 +197,10 @@ impl crate::cross_cutting::streaming_provider::StreamingProviderAdapter
 }
 
 /// Task 1.8 fixture：与 `production()` 同形的依赖图——gateway factory 驱动
-/// 携带 `Some(paths)`（admission 预检 + per-LC root recipe 命令审计），
-/// coordinator 与 dependencies 双面注入可切换信任门。
+/// 携带 `Some(paths)`（admission 预检 + per-LC root recipe 命令审计 +
+/// Task 4 末命令发布收口），coordinator 与 dependencies 双面注入可切换
+/// 信任门。Task 4 起根规则材料由 provider 在 RuleAndMcpConfig 命令时机
+/// 生成（生产同构），不再手工预写 AGENTS。
 struct TrustRouteFixture {
     app: axum::Router,
     lc_id: String,
@@ -131,6 +212,12 @@ struct TrustRouteFixture {
 }
 
 fn trust_route_fixture(gate_fail: bool) -> TrustRouteFixture {
+    trust_route_fixture_with(gate_fail, RecipeFixtureOptions::default())
+}
+
+/// Task 4：`trust_route_fixture` 的参数化版本——规则材料与一次性中断
+/// 按 [`RecipeFixtureOptions`] 注入。
+fn trust_route_fixture_with(gate_fail: bool, options: RecipeFixtureOptions) -> TrustRouteFixture {
     let root = tempdir().expect("root");
     let root_path = root.path().to_path_buf();
     let paths = ProductAppPaths::new(root_path.join(".aria"));
@@ -144,7 +231,7 @@ fn trust_route_fixture(gate_fail: bool) -> TrustRouteFixture {
     std::fs::create_dir_all(&aggregate_root).unwrap();
     // 注意：此处不预置根规则入口 AGENTS.md——aggregate preflight 会拒绝
     // 已含 AGENTS.md 的聚合根（aggregate_root_ownership_conflict）；
-    // 根规则材料在测试内的中断窗口写入（见各用例）。
+    // 根规则材料由测试 provider 在 RuleAndMcpConfig 命令时机生成。
     let lc_id = crate::product::logical_codebase::LogicalCodebaseStore::new(paths.clone())
         .create(
             "project_0001",
@@ -166,13 +253,8 @@ fn trust_route_fixture(gate_fail: bool) -> TrustRouteFixture {
         )
         .unwrap();
 
-    // 与 it_web a03 同构：首个 pre_check turn 注入一次中断（audit 只记
-    // 录成功启动，中断不计 launch），为「中断窗口写入根规则入口」留出
-    // 无 worker 活跃的确定性时机。
     let factory = fake_registry_gateway_factory_with(
-        Arc::new(FaultOncePreCheckStreamingProvider {
-            fired: std::sync::atomic::AtomicBool::new(false),
-        }),
+        Arc::new(RootPolicyRecipeStreamingProvider::new(options)),
         paths.clone(),
     );
     let gate = Arc::new(RouteTrustGate::new(gate_fail));
@@ -190,9 +272,22 @@ fn trust_route_fixture(gate_fail: bool) -> TrustRouteFixture {
         clock,
     )
     .with_trust(gate.clone());
-    let dependencies = AggregateInitializationDependencies::new(
+    // Task 4：index op 指向本 fixture 的 LC scope，并以必缺的 codegraph
+    // 二进制令 detached build 确定性失败——不与并行测试共享 temp 根，
+    // 也不依赖宿主是否安装 codegraph（recipe 完成后的索引门独立性可
+    // 确定性断言，见 root_policy_recipe_completed_keeps_index_gate_independent）。
+    let index = Arc::new(AggregateIndexOperation::new(
+        paths.clone(),
+        CodeGraphCli::new(
+            Arc::new(TokioBoundedCommandRunner),
+            "codegraph-missing-binary-for-root-policy-tests".to_string(),
+        ),
+        CodeGraphExcludeGenerator,
+    ));
+    let dependencies = AggregateInitializationDependencies::with_index(
         Arc::new(coordinator),
         InitializationRunRegistry::default(),
+        index,
     )
     .with_trust(gate.clone());
     let state = WebAppState::new(root_path.clone(), WebRuntime::new_fake(root_path.clone()))
@@ -262,7 +357,16 @@ async fn production_root_initialization_trust_failure_keeps_recipe_unstarted() {
 
 #[tokio::test]
 async fn production_root_initialization_trust_retry_starts_claude_recipe() {
-    let fixture = trust_route_fixture(true);
+    // Task 4：保留首个 pre_check turn 一次中断（trust retry 弧的确定性
+    // Failed 检查点）；根规则材料由 provider 在 RuleAndMcpConfig 命令
+    // 时机生成（生产同构），不再手工预写 AGENTS。
+    let fixture = trust_route_fixture_with(
+        true,
+        RecipeFixtureOptions {
+            fault_first_pre_check: true,
+            ..RecipeFixtureOptions::default()
+        },
+    );
     let uri = format!(
         "/api/projects/project_0001/logical-codebases/{}/initializations",
         fixture.lc_id
@@ -330,15 +434,9 @@ async fn production_root_initialization_trust_retry_starts_claude_recipe() {
     );
     assert_eq!(fixture.factory.audit().stream_launches(), 0);
 
-    // 中断窗口（无 worker 活跃）写入根规则入口：真实链路由 provider
-    // recipe 生成根规则材料；fake provider 场景在此窗口落盘，重试的
-    // 命令审计窗口将其作为既有材料冻结（receipt 与 readiness 投影共用
-    // root_rule_digest 冻结其 digest）。
-    std::fs::write(
-        fixture.root.join("aggregate-root").join("AGENTS.md"),
-        "# aggregate root rules\n",
-    )
-    .unwrap();
+    // 中断窗口无需落盘任何根规则材料：真实链路中根规则由 provider 在
+    // RuleAndMcpConfig 命令时机生成，重试的命令审计窗口将其作为本命令
+    // 的 allowlisted 变更冻结（Task 4 生产同构）。
 
     // 显式 Retry（member_index continue 面）从 checkpoint 续跑。
     let action_uri = format!(
@@ -384,8 +482,8 @@ async fn production_root_initialization_trust_retry_starts_claude_recipe() {
                 == crate::product::logical_codebase::root_recipe_receipt::RootRecipeCommandVerdict::Allowed
         }));
 
-    // 最终 receipt 冻结 canonical root/policy/rule 三重身份（rule digest
-    // 经与 readiness 投影共享的 root_rule_digest 计算）。
+    // 最终 receipt 冻结 canonical root/policy/rule 三重身份（Task 4 起
+    // policy digest 是末命令发布的真正文 digest，不再是自举桩）。
     let receipt = receipts
         .get("project_0001", &operation_id)
         .expect("final receipt read")
@@ -398,18 +496,22 @@ async fn production_root_initialization_trust_retry_starts_claude_recipe() {
         &receipt.canonical_root,
     )
     .expect("root rule digest read")
-    .expect("seeded root rule entry");
+    .expect("provider-generated root rule entry");
     assert_eq!(receipt.rule_digest, rule_digest);
-    let policy_digest =
+    let policy_artifact =
         crate::product::logical_codebase::policy::AggregatePolicyArtifactStore::for_lc(
             fixture.paths.clone(),
             fixture.lc_id.clone(),
         )
         .get("project_0001")
         .expect("policy artifact read")
-        .expect("bootstrap policy artifact")
-        .digest;
-    assert_eq!(receipt.policy_digest, policy_digest);
+        .expect("published policy artifact");
+    assert!(
+        !policy_artifact.is_bootstrap_placeholder(),
+        "the final command must publish the real aggregate policy, not keep the bootstrap stub"
+    );
+    assert_eq!(receipt.policy_digest, policy_artifact.digest);
+    assert_eq!(receipt.finalized_at, policy_artifact.created_at);
 
     // 三个 provider turn 经 gateway factory 启动；gate 第二次评估即 Ready。
     assert_eq!(fixture.factory.audit().stream_launches(), 3);

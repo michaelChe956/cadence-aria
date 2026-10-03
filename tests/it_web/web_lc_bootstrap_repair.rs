@@ -285,11 +285,18 @@ fn fake_index_operation(
 
 // ---------------------------------------------------------------------------
 // A03：一次性 pre_check provider turn 中断的流式 provider（test-only）。
+// Task 4（aggregate-policy-root-publication）起在 RuleAndMcpConfig 命令
+// 时机向聚合根生成 AGENTS/language 规则材料（与 lib 侧生产同构 fixture
+// 同款），使末命令发布收口有真实材料可聚合。
 // ---------------------------------------------------------------------------
 
 struct FaultOncePreCheckStreamingProvider {
     fired: AtomicBool,
 }
+
+const A03_ROOT_AGENTS: &str =
+    "# aggregate root rules\n\n- Members follow their .claude/rules language rules.\n";
+const A03_ROOT_LANGUAGE: &str = "# language rule\n\n- Use Rust 2024 edition.\n";
 
 #[async_trait]
 impl StreamingProviderAdapter for FaultOncePreCheckStreamingProvider {
@@ -306,6 +313,10 @@ impl StreamingProviderAdapter for FaultOncePreCheckStreamingProvider {
             cadence_aria::product::repository_store::RepositoryInitializationStepKind::PreCheck
                 .command()
                 .expect("pre_check command");
+        let rule_config =
+            cadence_aria::product::repository_store::RepositoryInitializationStepKind::RuleConfig
+                .command()
+                .expect("rule-config command");
         if input.prompt.contains(pre_check) && !self.fired.swap(true, Ordering::SeqCst) {
             return Err(ProviderAdapterError::execution_failed(
                 None,
@@ -313,6 +324,20 @@ impl StreamingProviderAdapter for FaultOncePreCheckStreamingProvider {
                 "test-injected interruption during the pre_check provider turn",
                 0,
             ));
+        }
+        // RuleAndMcpConfig 命令时机：真实 provider 生成根规则的位置——
+        // 测试 provider 在 working_dir（聚合根）落盘 AGENTS 入口与
+        // language 规则，使末命令发布收口有真实材料可聚合。
+        if input.prompt.contains(rule_config) {
+            let root = input.working_dir.clone();
+            std::fs::write(root.join("AGENTS.md"), A03_ROOT_AGENTS).expect("write root AGENTS.md");
+            std::fs::create_dir_all(root.join(".claude").join("rules"))
+                .expect("create root rules dir");
+            std::fs::write(
+                root.join(".claude").join("rules").join("language.md"),
+                A03_ROOT_LANGUAGE,
+            )
+            .expect("write root language rule");
         }
         FakeStreamingProvider.start(input, cancel).await
     }
@@ -605,18 +630,10 @@ async fn a03_new_lc_reaches_planning_ready_without_manual_seed_or_duplicate_prov
     );
     assert_eq!(factory.audit().stream_launches(), 0);
 
-    // Task 1.8（中断窗口写入根规则入口）：真实链路中根规则 AGENTS.md 由
-    // provider recipe 生成（预研结论：四家 provider 均经根 AGENTS.md 引用
-    // .claude/rules）；fake streaming provider 不产生文件副作用，故在
-    // operation Failed、无 worker 活跃的确定性窗口落盘——重试的命令审计
-    // 窗口将其作为既有材料冻结（aggregate preflight 已 Completed 不重跑，
-    // 不会触发 aggregate_root_ownership_conflict），最终 receipt 与
-    // readiness 投影经共享 root_rule_digest 冻结其 digest。
-    std::fs::write(
-        aggregate_root.join("AGENTS.md"),
-        "# aggregate root rules\n\n- Members follow their .claude/rules language rules.\n",
-    )
-    .expect("seed root rule entry in the interruption window");
+    // Task 4（生产同构）：根规则材料（AGENTS + .claude/rules/language.md）
+    // 由 provider 在 RuleAndMcpConfig 命令时机生成——中断窗口无需再手工
+    // 预写 AGENTS；重试的命令审计窗口将其作为 allowlisted 变更冻结，末
+    // 命令收口发布真正文并冻结最终 receipt。
 
     // 从 REST 点击带 expected revision 的显式 Retry：原编排链从 checkpoint
     // 续跑（已完成 machine_skills/aggregate_preflight 不重跑，pre_check 及其
@@ -1035,15 +1052,8 @@ async fn a04_failed_identity_and_missing_rules_require_product_repair_before_rea
         "the injected interruption must fire before a successful launch"
     );
 
-    // Task 1.8（中断窗口写入根规则入口，与 a03 同款取舍）：真实链路中
-    // AGENTS.md 由 provider recipe 生成；fake provider 场景在 operation
-    // Failed、无 worker 活跃的确定性窗口落盘，重试的命令审计窗口将其
-    // 作为既有材料冻结（aggregate preflight 已 Completed 不重跑）。
-    std::fs::write(
-        legacy_root.join("AGENTS.md"),
-        "# aggregate root rules\n\n- Members follow their .claude/rules language rules.\n",
-    )
-    .expect("seed root rule entry in the interruption window");
+    // Task 4（生产同构，与 a03 同款）：根规则材料由 provider 在
+    // RuleAndMcpConfig 命令时机生成，中断窗口无需再手工预写 AGENTS。
 
     // 通过产品准备动作恢复同一实际规则来源（真实成员仓规则文件），等待面
     // 随 GET 补读消失。
