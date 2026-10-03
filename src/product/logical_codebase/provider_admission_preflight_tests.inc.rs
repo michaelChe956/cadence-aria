@@ -46,15 +46,22 @@ mod tests {
 
     struct StaticCapabilitySource {
         deny: std::sync::atomic::AtomicBool,
+        /// Task 3b:仅翻转 write_boundary 分格(缺 D4 证据的 early 场景)。
+        write_boundary_denied: std::sync::atomic::AtomicBool,
     }
     impl StaticCapabilitySource {
         fn allowing() -> Self {
             Self {
                 deny: std::sync::atomic::AtomicBool::new(false),
+                write_boundary_denied: std::sync::atomic::AtomicBool::new(false),
             }
         }
         fn deny(&self) {
             self.deny.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        fn deny_write_boundary(&self) {
+            self.write_boundary_denied
+                .store(true, std::sync::atomic::Ordering::SeqCst);
         }
 
         fn capability(
@@ -94,7 +101,14 @@ mod tests {
                     action,
                     launch: ProviderCapabilityEvidence::Confirmed,
                     resume: ProviderCapabilityEvidence::Confirmed,
-                    write_boundary: ProviderCapabilityEvidence::Confirmed,
+                    write_boundary: if self
+                        .write_boundary_denied
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                    {
+                        ProviderCapabilityEvidence::Unknown
+                    } else {
+                        ProviderCapabilityEvidence::Confirmed
+                    },
                     projection_digest: format!("projection-digest-{action:?}"),
                     evidence_ref: format!("probe://{action:?}"),
                 },
@@ -1401,6 +1415,150 @@ mod tests {
             "member rule missing must block with its own reason, got {error:?}"
         );
     }
+
+    // ===== Task 3b(lcg_t03):early 资格面与 spawn 前 D4 门 =====
+
+    /// 文件背书的只读 trust source:判定前后快照同一 artifact 字节,
+    /// 证明 gateway 判定路径对用户级 trust 工件零写入。
+    struct FileBackedTrustSource {
+        artifact: PathBuf,
+    }
+
+    impl crate::product::logical_codebase::provider_trust::ProviderTrustSource
+        for FileBackedTrustSource
+    {
+        fn verify_trusted(
+            &self,
+            _project_id: &str,
+            _lc_id: &str,
+            provider: &crate::product::models::ProviderName,
+            canonical_root: &Path,
+        ) -> Result<
+            crate::product::logical_codebase::provider_trust::ProviderTrustVerification,
+            ProviderGatewayError,
+        > {
+            let bytes = std::fs::read(&self.artifact).map_err(|error| {
+                ProviderGatewayError::ProviderUnavailable(format!(
+                    "read trust artifact {}: {error}",
+                    self.artifact.display()
+                ))
+            })?;
+            if bytes != b"trusted\n" {
+                return Err(ProviderGatewayError::ProviderUnavailable(
+                    "trust artifact no longer trusted".to_string(),
+                ));
+            }
+            Ok(
+                crate::product::logical_codebase::provider_trust::ProviderTrustVerification {
+                    provider: provider.clone(),
+                    canonical_root: canonical_root.to_path_buf(),
+                    trust_key: "file-backed-fixture".to_string(),
+                    trusted: true,
+                    ownership:
+                        crate::product::logical_codebase::provider_trust::ProviderTrustOwnership::LcManaged,
+                    detail: "fixture trusted".to_string(),
+                    verified_at: "2026-10-03T00:00:00Z".to_string(),
+                },
+            )
+        }
+    }
+
+    /// Task 3b(lcg_t03):early 资格判定只消费合法 capability 证据,
+    /// 不需要未来 target/worktree 或 D4;判定全程零写入(policy/capability/
+    /// trust 的 durable 字节前后不变);实际 spawn 缺 D4(write_boundary
+    /// 分格未 Confirmed)在 validate 即拒绝,provider 零启动。
+    #[test]
+    fn lcg_t03_early_eligibility_needs_no_future_d4_and_writes_nothing() {
+        let fixture = admission_fixture();
+        fixture.write_language_rules("# language\n");
+        // 用户级 trust 工件在场且 trusted;判定前后字节必须不变。
+        let trust_artifact = fixture._temp.path().join("trust-home").join("config.toml");
+        std::fs::create_dir_all(trust_artifact.parent().unwrap()).unwrap();
+        std::fs::write(&trust_artifact, b"trusted\n").unwrap();
+        // early 场景:launch 分格 Confirmed,write_boundary(D4)缺证据。
+        fixture.capabilities.deny_write_boundary();
+
+        let gateway = LogicalCodebaseProviderGateway::with_audit(
+            fixture.policy_store.clone(),
+            fixture.capabilities.clone(),
+            Arc::new(PassThroughTargetResolver),
+            {
+                let mut registry = ProviderRegistry::new();
+                registry.register(
+                    crate::product::models::ProviderName::ClaudeCode,
+                    fixture.streaming_adapter.clone(),
+                );
+                Arc::new(registry)
+            },
+            Arc::new(StubSyncAdapter),
+            always_available_gate(),
+            Arc::new(crate::product::logical_codebase::GatewayRunAudit::new()),
+            std::fs::canonicalize(&fixture.aggregate_root).unwrap(),
+        )
+        .with_readonly_lc_facts(
+            crate::product::logical_codebase::RootRecipeReceiptStore::for_lc(
+                fixture.paths.clone(),
+                &fixture.lc_id,
+            ),
+            Arc::new(FileBackedTrustSource {
+                artifact: trust_artifact.clone(),
+            }),
+        );
+
+        // attempt 尚未创建(无 worktree/target/D4 事实):early 判定只看
+        // capability 证据,返回不携未来 target/worktree 或 D4 的两枚引用。
+        let aria_before = sorted_tree_files(&fixture.paths.root());
+        let trust_before = std::fs::read(&trust_artifact).unwrap();
+        let early = gateway
+            .action_admission_verdict(
+                &ProviderRef::claude_code("snapshot-admission-test"),
+                SessionPolicyAction::CodingTargetWrite,
+                &crate::protocol::contracts::AdapterRole::Executor,
+                &crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
+            )
+            .expect("early eligibility must not require future D4 facts");
+        assert_eq!(early.capability_snapshot_ref, "snapshot-admission-test");
+        assert_eq!(early.projection_ref, "projection-digest-CodingTargetWrite");
+        let aria_after = sorted_tree_files(&fixture.paths.root());
+        assert_eq!(aria_before, aria_after);
+        assert_eq!(std::fs::read(&trust_artifact).unwrap(), trust_before);
+        assert_eq!(fixture.streaming_adapter.start_count(), 0);
+
+        // 实际 spawn 缺 D4:同一 provider/action 的 coding validate 在
+        // write_boundary 分格门 fail-closed,provider 零启动。
+        let lc = LogicalCodebaseStore::for_lc(fixture.paths.clone(), &fixture.lc_id);
+        let members = lc.list_members(&fixture.project_id).unwrap();
+        let member = members.first().expect("fixture seeds one member");
+        let checkouts = lc.list_checkouts(&fixture.project_id).unwrap();
+        let checkout = checkouts
+            .iter()
+            .find(|checkout| member.checkout_ids.contains(&checkout.checkout_id))
+            .expect("member has a recorded checkout");
+        let canonical_member = std::fs::canonicalize(&fixture.member_root).unwrap();
+        let canonical_root = std::fs::canonicalize(&fixture.aggregate_root).unwrap();
+        let coding = SessionLaunchRequest {
+            project_id: fixture.project_id.clone(),
+            provider: ProviderRef::claude_code("snapshot-admission-test"),
+            action: SessionPolicyAction::CodingTargetWrite,
+            target: crate::product::logical_codebase::policy::PolicyTarget::checkout(
+                member.logical_repository_id.0.to_string(),
+                checkout.checkout_id.0.to_string(),
+                canonical_member.clone(),
+            ),
+            working_directory: canonical_root,
+            readable_roots: vec![fixture.aggregate_root.clone()],
+            writable_roots: vec![canonical_member],
+            config_artifact_ref: "sha256:admission-managed-config".to_string(),
+        };
+        let error = gateway.validate(coding).unwrap_err();
+        assert!(
+            matches!(&error, ProviderGatewayError::UnsupportedCapability(reason) if reason.contains("write_boundary")),
+            "spawn without D4 evidence must fail closed, got {error:?}"
+        );
+        assert_eq!(fixture.streaming_adapter.start_count(), 0);
+        assert_eq!(std::fs::read(&trust_artifact).unwrap(), trust_before);
+    }
+
 
     // ===== Task 2b(lcg_t02):unknown normal 矩阵下既有 root recipe 契约保持 =====
 

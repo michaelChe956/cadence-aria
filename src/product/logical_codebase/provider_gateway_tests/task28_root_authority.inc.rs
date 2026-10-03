@@ -926,3 +926,625 @@
             )
             .expect("separated root cwd form stays ready");
     }
+
+    // ===== Task 3b(lcg_t03):spawn 前逐维冻结事实复验 =====
+
+    use crate::cross_cutting::provider_adapter::ProviderAdapter;
+    use crate::cross_cutting::provider_availability_gate::ProviderHealthSource;
+    use crate::cross_cutting::provider_health::{ProviderHealthEntry, ProviderHealthSnapshot};
+    use crate::protocol::contracts::{AdapterOutput, TimeoutStatus};
+
+    /// 计数 sync adapter:断言 run 路径零触达(断言组 adapter_run_count)。
+    struct CountingSyncAdapter(std::sync::atomic::AtomicUsize);
+
+    impl ProviderAdapter for CountingSyncAdapter {
+        fn run(
+            &self,
+            _input: &AdapterInput,
+        ) -> Result<AdapterOutput, crate::cross_cutting::provider_adapter::ProviderAdapterError>
+        {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(AdapterOutput {
+                exit_code: Some(0),
+                stdout: "ok".to_string(),
+                stderr: String::new(),
+                structured_output: None,
+                files_modified: Vec::new(),
+                duration_ms: 0,
+                timeout_status: TimeoutStatus::NotTimedOut,
+            })
+        }
+    }
+
+    /// 可翻转健康源:驱动 availability 维度漂移。
+    struct FlippableHealth {
+        available: std::sync::atomic::AtomicBool,
+        checked_at: chrono::DateTime<chrono::Utc>,
+    }
+
+    impl ProviderHealthSource for FlippableHealth {
+        fn snapshot(&self) -> Arc<ProviderHealthSnapshot> {
+            let available = self.available.load(std::sync::atomic::Ordering::SeqCst);
+            Arc::new(ProviderHealthSnapshot {
+                schema_version: 1,
+                generation: 1,
+                checked_at: self.checked_at,
+                providers: [ProviderName::ClaudeCode, ProviderName::KimiCode]
+                    .into_iter()
+                    .map(|provider| ProviderHealthEntry {
+                        provider,
+                        command: "stub".to_string(),
+                        available,
+                        version: Some("1.0".to_string()),
+                        reason_code: None,
+                        reason: None,
+                        checked_at: self.checked_at,
+                    })
+                    .collect(),
+            })
+        }
+
+        fn degraded(&self) -> bool {
+            false
+        }
+    }
+
+    /// 可翻转只读 trust source(Task 3b 契约面):validate→spawn 间把
+    /// 用户级 trust 状态从 Trusted 翻为非 Trusted,复验必须拒绝。
+    struct FlippableTrustSource {
+        trusted: std::sync::atomic::AtomicBool,
+    }
+
+    impl FlippableTrustSource {
+        fn new() -> Self {
+            Self {
+                trusted: std::sync::atomic::AtomicBool::new(true),
+            }
+        }
+
+        fn revoke(&self) {
+            self.trusted.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    impl crate::product::logical_codebase::provider_trust::ProviderTrustSource
+        for FlippableTrustSource
+    {
+        fn verify_trusted(
+            &self,
+            _project_id: &str,
+            _lc_id: &str,
+            provider: &ProviderName,
+            canonical_root: &Path,
+        ) -> Result<
+            crate::product::logical_codebase::provider_trust::ProviderTrustVerification,
+            ProviderGatewayError,
+        > {
+            let trusted = self.trusted.load(std::sync::atomic::Ordering::SeqCst);
+            if !trusted {
+                return Err(ProviderGatewayError::ProviderUnavailable(
+                    "provider trust entry is no longer trusted (flippable fixture)".to_string(),
+                ));
+            }
+            Ok(
+                crate::product::logical_codebase::provider_trust::ProviderTrustVerification {
+                    provider: provider.clone(),
+                    canonical_root: canonical_root.to_path_buf(),
+                    trust_key: "flippable-fixture".to_string(),
+                    trusted: true,
+                    ownership: crate::product::logical_codebase::provider_trust::ProviderTrustOwnership::LcManaged,
+                    detail: "fixture trusted".to_string(),
+                    verified_at: "2026-10-03T00:00:00Z".to_string(),
+                },
+            )
+        }
+    }
+
+    /// 包装 StaticCapabilitySource:允许翻转 action row 的
+    /// projection_digest(evidence profile 摘要维度,Task 3b 复验面)。
+    struct DriftRowProjectionSource {
+        inner: Arc<StaticCapabilitySource>,
+        projection_digest: std::sync::Mutex<String>,
+    }
+
+    impl DriftRowProjectionSource {
+        fn drift_projection_digest(&self, digest: &str) {
+            *self.projection_digest.lock().unwrap() = digest.to_string();
+        }
+
+        fn retag(
+            &self,
+            mut capability: crate::product::logical_codebase::provider_gateway::ProviderCapability,
+        ) -> crate::product::logical_codebase::provider_gateway::ProviderCapability {
+            capability.action_capability.projection_digest =
+                self.projection_digest.lock().unwrap().clone();
+            capability
+        }
+    }
+
+    impl crate::product::logical_codebase::provider_gateway::ProviderCapabilitySource
+        for DriftRowProjectionSource
+    {
+        fn require_supported(
+            &self,
+            provider: &ProviderRef,
+            action: SessionPolicyAction,
+        ) -> Result<
+            crate::product::logical_codebase::provider_gateway::ProviderCapability,
+            ProviderGatewayError,
+        > {
+            self.retag(self.inner.require_supported(provider, action)?)
+        }
+
+        fn require_resume_supported(
+            &self,
+            provider: &ProviderRef,
+            action: SessionPolicyAction,
+        ) -> Result<
+            crate::product::logical_codebase::provider_gateway::ProviderCapability,
+            ProviderGatewayError,
+        > {
+            self.retag(self.inner.require_resume_supported(provider, action)?)
+        }
+
+        fn require_write_boundary(
+            &self,
+            provider: &ProviderRef,
+            action: SessionPolicyAction,
+        ) -> Result<
+            crate::product::logical_codebase::provider_gateway::ProviderCapability,
+            ProviderGatewayError,
+        > {
+            self.retag(self.inner.require_write_boundary(provider, action)?)
+        }
+
+        fn require_root_recipe_supported(
+            &self,
+            provider: &ProviderRef,
+            credential: &crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
+        ) -> Result<
+            crate::product::logical_codebase::provider_gateway::ProviderCapability,
+            ProviderGatewayError,
+        > {
+            self.retag(self.inner.require_root_recipe_supported(provider, credential)?)
+        }
+    }
+
+    /// Task 3b 逐维漂移 fixture:全部事实源可变(parking_lot 非本 crate
+    /// 依赖,沿用本文件 std Mutex 约定),registry 同时注册
+    /// ClaudeCode/KimiCode(trust 维度消费 requires_workspace_trust)。
+    struct DriftFixture {
+        _root: tempfile::TempDir,
+        paths: ProductAppPaths,
+        project_id: String,
+        lc_id: String,
+        lc_root: PathBuf,
+        capabilities: Arc<StaticCapabilitySource>,
+        row_source: Arc<DriftRowProjectionSource>,
+        targets: Arc<MutableTargetResolver>,
+        health: Arc<FlippableHealth>,
+        trust: Arc<FlippableTrustSource>,
+        streaming_adapter: Arc<CountingStreamingAdapter>,
+        sync_adapter: Arc<CountingSyncAdapter>,
+        policy_store: AggregatePolicyArtifactStore,
+    }
+
+    fn drift_fixture() -> DriftFixture {
+        let root = tempfile::tempdir().expect("temporary product root");
+        let paths = ProductAppPaths::new(root.path().join(".aria"));
+        let project = ProjectStore::new(paths.clone())
+            .create(CreateProjectInput {
+                name: "drift-fixture-project".to_string(),
+                description: None,
+            })
+            .expect("create project");
+        let lc_root = root.path().join("drift lc root");
+        std::fs::create_dir_all(&lc_root).expect("create lc root");
+        let record = LogicalCodebaseStore::new(paths.clone())
+            .create(
+                &project.id,
+                LogicalCodebaseCreateInput {
+                    name: "drift-lc".to_string(),
+                    aggregate_root: lc_root.clone(),
+                },
+            )
+            .expect("create drift lc");
+        let manifest = LogicalCodebaseManifest::new(&project.id, lc_root.clone(), vec![]);
+        LogicalCodebaseStore::for_lc(paths.clone(), &record.id)
+            .save_manifest(&project.id, &manifest)
+            .expect("save drift manifest");
+        let policy_store = AggregatePolicyArtifactStore::for_lc(paths.clone(), &record.id);
+        policy_store.ensure_bootstrap(&manifest).expect("policy");
+
+        let capabilities = Arc::new(StaticCapabilitySource::new("1.4.0"));
+        let row_source = Arc::new(DriftRowProjectionSource {
+            inner: capabilities.clone(),
+            projection_digest: std::sync::Mutex::new(
+                "projection-digest-PlanningReadOnly".to_string(),
+            ),
+        });
+        let targets = Arc::new(MutableTargetResolver::new(paths.root().join("baseline.git")));
+        let health = Arc::new(FlippableHealth {
+            available: std::sync::atomic::AtomicBool::new(true),
+            checked_at: chrono::Utc::now(),
+        });
+        let trust = Arc::new(FlippableTrustSource::new());
+        let streaming_adapter = Arc::new(CountingStreamingAdapter::new());
+        let sync_adapter = Arc::new(CountingSyncAdapter(
+            std::sync::atomic::AtomicUsize::new(0),
+        ));
+
+        DriftFixture {
+            _root: root,
+            paths,
+            project_id: project.id,
+            lc_id: record.id,
+            lc_root,
+            capabilities,
+            row_source,
+            targets,
+            health,
+            trust,
+            streaming_adapter,
+            sync_adapter,
+            policy_store,
+        }
+    }
+
+    impl DriftFixture {
+        fn gateway(&self) -> LogicalCodebaseProviderGateway {
+            self.gateway_with_authority(std::fs::canonicalize(&self.lc_root).unwrap())
+        }
+
+        fn gateway_with_authority(&self, authority_root: PathBuf) -> LogicalCodebaseProviderGateway {
+            let mut registry = ProviderRegistry::new();
+            registry.register(ProviderName::ClaudeCode, self.streaming_adapter.clone());
+            registry.register(ProviderName::KimiCode, self.streaming_adapter.clone());
+            LogicalCodebaseProviderGateway::with_audit(
+                self.policy_store.clone(),
+                self.row_source.clone(),
+                self.targets.clone(),
+                Arc::new(registry),
+                self.sync_adapter.clone(),
+                Arc::new(ProviderAvailabilityGate::new(self.health.clone())),
+                Arc::new(GatewayRunAudit::new()),
+                authority_root,
+            )
+            .with_readonly_lc_facts(
+                crate::product::logical_codebase::RootRecipeReceiptStore::for_lc(
+                    self.paths.clone(),
+                    &self.lc_id,
+                ),
+                self.trust.clone(),
+            )
+        }
+
+        fn canonical_root(&self) -> PathBuf {
+            std::fs::canonicalize(&self.lc_root).unwrap()
+        }
+
+        fn planning_request(&self, cwd: PathBuf) -> SessionLaunchRequest {
+            let worktree = self._root.path().join("member wt");
+            std::fs::create_dir_all(&worktree).expect("create member worktree");
+            SessionLaunchRequest {
+                project_id: self.project_id.clone(),
+                provider: ProviderRef::claude_code("cap_claude_1_4_0"),
+                action: SessionPolicyAction::PlanningReadOnly,
+                target: PolicyTarget::checkout("logical_repo_0001", "checkout_0001", worktree),
+                working_directory: cwd,
+                readable_roots: vec![self.lc_root.clone()],
+                writable_roots: Vec::new(),
+                config_artifact_ref: "sha256:managed-config-artifact".to_string(),
+            }
+        }
+
+        /// validate → 施加漂移 → spawn(共用同一 gateway)的驱动 helper。
+        fn spawn_after_drift(
+            &self,
+            gateway: &LogicalCodebaseProviderGateway,
+            request: SessionLaunchRequest,
+            drift: impl FnOnce(),
+        ) -> Result<(), ProviderGatewayError> {
+            let validated = gateway.validate(request)?;
+            drift();
+            let launch = ValidatedStreamingProviderInput::new(
+                streaming_probe(self.canonical_root(), None),
+                validated,
+            );
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime
+                .block_on(gateway.start_streaming(launch, CancellationToken::new()))
+                .map(|_| ())
+        }
+
+        fn start_count(&self) -> usize {
+            self.streaming_adapter.start_count()
+        }
+
+        fn run_count(&self) -> usize {
+            self.sync_adapter.0.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    /// Task 3b(lcg_t03):validate 成功后,逐个冻结维度在 spawn 前漂移——
+    /// policy revision、provider version、action row projection digest、
+    /// authority root、trust、availability 任一漂移都返回可审计的
+    /// PolicyDrift/ProviderUnavailable 且真实 adapter 零启动(含 sync 栈
+    /// 零 run);cwd/target/git 身份漂移 fail-closed 为 TargetMismatch;缺
+    /// D4(write_boundary 分格)与 resume 追加分格未 Confirmed 同样零启动;
+    /// config/MCP 维度经统一无副作用 verdict 的 config digest 通道复验。
+    #[test]
+    fn lcg_t03_validate_then_each_frozen_dimension_drifts_zero_spawn() {
+        // 1. policy revision 漂移:validate→spawn 间政策升级。
+        let fixture = drift_fixture();
+        let gateway = fixture.gateway();
+        let request = fixture.planning_request(fixture.canonical_root());
+        let error = fixture
+            .spawn_after_drift(&gateway, request, || {
+                let current = fixture
+                    .policy_store
+                    .get(&fixture.project_id)
+                    .unwrap()
+                    .unwrap();
+                fixture
+                    .policy_store
+                    .save(
+                        &fixture.project_id,
+                        &current.with_revised_policy(
+                            "# Aggregate policy (revision 2)\n",
+                            "2026-10-03T00:00:00Z".to_string(),
+                        ),
+                    )
+                    .unwrap();
+            })
+            .unwrap_err();
+        assert!(matches!(error, ProviderGatewayError::PolicyDrift { .. } | ProviderGatewayError::ProviderUnavailable(_)));
+        let adapter_start_count = fixture.start_count();
+        let adapter_run_count = fixture.run_count();
+        assert_eq!(adapter_start_count, 0);
+        assert_eq!(adapter_run_count, 0);
+
+        // 2. provider version 漂移。
+        let fixture = drift_fixture();
+        let gateway = fixture.gateway();
+        let error = fixture
+            .spawn_after_drift(&gateway, fixture.planning_request(fixture.canonical_root()), || {
+                fixture.capabilities.set_version("9.9.9");
+            })
+            .unwrap_err();
+        assert!(matches!(error, ProviderGatewayError::PolicyDrift { .. } | ProviderGatewayError::ProviderUnavailable(_)));
+        assert_eq!(fixture.start_count(), 0);
+
+        // 3. action row projection digest 漂移(evidence profile 摘要)。
+        let fixture = drift_fixture();
+        let gateway = fixture.gateway();
+        let error = fixture
+            .spawn_after_drift(&gateway, fixture.planning_request(fixture.canonical_root()), || {
+                fixture.row_source.drift_projection_digest("sha256:drifted-profile");
+            })
+            .unwrap_err();
+        assert!(matches!(error, ProviderGatewayError::PolicyDrift { .. } | ProviderGatewayError::ProviderUnavailable(_)));
+        assert_eq!(fixture.start_count(), 0);
+
+        // 4. authority root 漂移:validate 在 root A,spawn 网关冻结 root B
+        //    (同 store/同源不同 authority 投影)。
+        let fixture = drift_fixture();
+        let other_root = fixture._root.path().join("other authority root");
+        std::fs::create_dir_all(&other_root).unwrap();
+        let gateway_a = fixture.gateway();
+        let gateway_b = fixture.gateway_with_authority(std::fs::canonicalize(&other_root).unwrap());
+        let validated = gateway_a
+            .validate(fixture.planning_request(fixture.canonical_root()))
+            .unwrap();
+        let launch = ValidatedStreamingProviderInput::new(
+            streaming_probe(fixture.canonical_root(), None),
+            validated,
+        );
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let error = runtime
+            .block_on(gateway_b.start_streaming(launch, CancellationToken::new()))
+            .unwrap_err();
+        assert!(matches!(error, ProviderGatewayError::PolicyDrift { .. } | ProviderGatewayError::ProviderUnavailable(_)));
+        assert_eq!(fixture.start_count(), 0);
+
+        // 5. trust 漂移(KimiCode:requires_workspace_trust 消费只读 source)。
+        let fixture = drift_fixture();
+        let gateway = fixture.gateway();
+        let mut request = fixture.planning_request(fixture.canonical_root());
+        request.provider = ProviderRef::kimi_code("cap_kimi_drift");
+        let error = fixture
+            .spawn_after_drift(&gateway, request, || {
+                fixture.trust.revoke();
+            })
+            .unwrap_err();
+        assert!(matches!(error, ProviderGatewayError::PolicyDrift { .. } | ProviderGatewayError::ProviderUnavailable(_)));
+        assert_eq!(fixture.start_count(), 0);
+
+        // 6. availability 漂移。
+        let fixture = drift_fixture();
+        let gateway = fixture.gateway();
+        let error = fixture
+            .spawn_after_drift(&gateway, fixture.planning_request(fixture.canonical_root()), || {
+                fixture
+                    .health
+                    .available
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
+            })
+            .unwrap_err();
+        assert!(matches!(error, ProviderGatewayError::PolicyDrift { .. } | ProviderGatewayError::ProviderUnavailable(_)));
+        assert_eq!(fixture.start_count(), 0);
+
+        // 7. cwd 漂移:spawn input cwd 回退 member worktree。
+        let fixture = drift_fixture();
+        let gateway = fixture.gateway();
+        let validated = gateway
+            .validate(fixture.planning_request(fixture.canonical_root()))
+            .unwrap();
+        let worktree = fixture._root.path().join("member wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let launch = ValidatedStreamingProviderInput::new(
+            streaming_probe(worktree, None),
+            validated,
+        );
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let error = runtime
+            .block_on(gateway.start_streaming(launch, CancellationToken::new()))
+            .unwrap_err();
+        assert!(
+            matches!(&error, ProviderGatewayError::TargetMismatch { field } if field == "cwd")
+        );
+        assert_eq!(fixture.start_count(), 0);
+
+        // 8. target/git identity 漂移。
+        let fixture = drift_fixture();
+        let gateway = fixture.gateway();
+        let error = fixture
+            .spawn_after_drift(&gateway, fixture.planning_request(fixture.canonical_root()), || {
+                fixture
+                    .targets
+                    .change_git_dir_after_request(fixture.paths.root().join("moved.git"));
+            })
+            .unwrap_err();
+        assert!(
+            matches!(&error, ProviderGatewayError::TargetMismatch { field } if field == "git_dir")
+        );
+        assert_eq!(fixture.start_count(), 0);
+
+        // 9. 缺 D4(write_boundary 分格非 Confirmed):fresh spawn 拒绝。
+        let fixture = drift_fixture();
+        let gateway = fixture.gateway();
+        let error = fixture
+            .spawn_after_drift(&gateway, fixture.planning_request(fixture.canonical_root()), || {
+                fixture.capabilities.set_write_boundary_cell(
+                    crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence::Denied {
+                        reason: "boundary probe denied".to_string(),
+                    },
+                );
+            })
+            .unwrap_err();
+        assert!(
+            matches!(&error, ProviderGatewayError::UnsupportedCapability(reason) if reason.contains("write_boundary"))
+        );
+        assert_eq!(fixture.start_count(), 0);
+
+        // 10. resume 追加:resume 会话在 resume 分格 Confirmed 但
+        //     write_boundary 分格漂移时同样拒绝(不得静默降级 fresh)。
+        let fixture = drift_fixture();
+        let gateway = fixture.gateway();
+        let validated = gateway
+            .validate(fixture.planning_request(fixture.canonical_root()))
+            .unwrap();
+        fixture.capabilities.set_write_boundary_cell(
+            crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence::Denied {
+                reason: "boundary probe denied".to_string(),
+            },
+        );
+        let launch = ValidatedStreamingProviderInput::new(
+            streaming_probe(
+                fixture.canonical_root(),
+                Some("sess_resume_drift".to_string()),
+            ),
+            validated,
+        );
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let error = runtime
+            .block_on(gateway.start_streaming(launch, CancellationToken::new()))
+            .unwrap_err();
+        assert!(
+            matches!(&error, ProviderGatewayError::UnsupportedCapability(reason) if reason.contains("write_boundary"))
+        );
+        assert_eq!(fixture.start_count(), 0);
+
+        // 11. config/MCP/projection 维度经统一无副作用 verdict:与请求
+        //     重算 config digest 不一致的 projection 拒绝,一致时放行。
+        let fixture = drift_fixture();
+        let gateway = fixture.gateway();
+        let request = fixture.planning_request(fixture.canonical_root());
+        let validated = gateway.validate(request.clone()).unwrap();
+        let mut drifted_request = request.clone();
+        drifted_request.config_artifact_ref = "sha256:drifted-config-artifact".to_string();
+        let error = gateway
+            .admission_verdict(&drifted_request, &projection_from(&validated), false)
+            .unwrap_err();
+        assert!(matches!(error, ProviderGatewayError::PolicyDrift { .. } | ProviderGatewayError::ProviderUnavailable(_)));
+        assert!(
+            gateway
+                .admission_verdict(&request, &projection_from(&validated), false)
+                .is_ok()
+        );
+        assert_eq!(fixture.start_count(), 0);
+
+        // 12. sync 路径零触达:run_sync 复验失败不触达真实 sync adapter。
+        let fixture = drift_fixture();
+        let gateway = fixture.gateway();
+        let validated = gateway
+            .validate(fixture.planning_request(fixture.canonical_root()))
+            .unwrap();
+        let current = fixture
+            .policy_store
+            .get(&fixture.project_id)
+            .unwrap()
+            .unwrap();
+        fixture
+            .policy_store
+            .save(
+                &fixture.project_id,
+                &current.with_revised_policy(
+                    "# Aggregate policy (revision 2)\n",
+                    "2026-10-03T00:00:00Z".to_string(),
+                ),
+            )
+            .unwrap();
+        let input = AdapterInput {
+            working_directory: Some(
+                fixture
+                    .canonical_root()
+                    .to_string_lossy()
+                    .to_string(),
+            ),
+            provider_type: crate::protocol::contracts::ProviderType::ClaudeCode,
+            role: crate::protocol::contracts::AdapterRole::Executor,
+            worktree_path: None,
+            provider_stream_log_dir: None,
+            prompt: "probe".to_string(),
+            context_files: Vec::new(),
+            output_schema: String::new(),
+            timeout: 1,
+            max_retries: 0,
+        };
+        let launch = ValidatedAdapterInput::new(input, validated);
+        let error = gateway.run_sync(launch).unwrap_err();
+        assert!(matches!(error, ProviderGatewayError::PolicyDrift { .. } | ProviderGatewayError::ProviderUnavailable(_)));
+        let adapter_run_count = fixture.run_count();
+        assert_eq!(adapter_run_count, 0);
+    }
+
+    /// 从 validated policy 构造一致的 projection(verdict 消费面)。
+    fn projection_from(
+        validated: &ValidatedSessionLaunchPolicy,
+    ) -> crate::product::logical_codebase::provider_projection::ProviderPolicyProjection {
+        let envelope = validated.envelope();
+        crate::product::logical_codebase::provider_projection::ProviderPolicyProjection::new(
+            crate::product::logical_codebase::provider_gateway::ProviderRefType::ClaudeCode,
+            envelope.provider_dialect,
+            crate::product::logical_codebase::policy::ProviderWireDialect::ClaudeCodeStreamJson,
+            "1.4.0".to_string(),
+            envelope.action,
+            crate::protocol::contracts::AdapterRole::Executor,
+            crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
+            None,
+            "on-request".to_string(),
+            "read-only".to_string(),
+            envelope.working_directory.clone(),
+            envelope.working_directory.clone(),
+            envelope.target.clone(),
+            envelope.readable_roots.clone(),
+            envelope.writable_roots.clone(),
+            "sha256:trust-fixture".to_string(),
+            envelope.config_digest.clone(),
+            "sha256:mcp-fixture".to_string(),
+            "probe://boundary".to_string(),
+            "projection-digest-PlanningReadOnly".to_string(),
+            "sha256:full-projection-fixture".to_string(),
+        )
+    }
