@@ -441,3 +441,216 @@ async fn lcg_t06_boundary_child_tree_is_killed_on_drop() {
     drop(process);
     assert_process_tree_stopped(&fixture).await;
 }
+
+/// 递归快照(rel path → bytes);受保护面 pre/post 对比用。
+fn snapshot_tree(root: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    fn walk(dir: &Path, base: &Path, snapshot: &mut std::collections::BTreeMap<String, Vec<u8>>) {
+        for entry in fs::read_dir(dir).expect("snapshot read dir") {
+            let entry = entry.expect("snapshot entry");
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, base, snapshot);
+            } else {
+                let rel = path
+                    .strip_prefix(base)
+                    .expect("snapshot prefix")
+                    .to_string_lossy()
+                    .into_owned();
+                snapshot.insert(rel, fs::read(&path).unwrap_or_default());
+            }
+        }
+    }
+    let mut snapshot = std::collections::BTreeMap::new();
+    walk(root, root, &mut snapshot);
+    snapshot
+}
+
+/// Task 6a 段 2:Coding target-only 写边界——target 写成功、target 内受控
+/// git commit 成功(git identity 沿授权链),root/成员/target `.git` 指针与
+/// 所有 `.aria` 的写尝试全部被后置只读挂载拒绝,pre==post 快照零漂移。
+#[tokio::test]
+async fn lcg_t06_coding_allows_target_commit_and_denies_protected_roots() {
+    use crate::cross_cutting::provider_boundary::{
+        ProviderBoundaryLauncher, ProviderBoundaryMode, ProviderBoundaryPlan,
+        run_builtin_write_probe,
+    };
+
+    let base = tempdir().expect("base dir");
+    let root = base.path().join("lc-root");
+    fs::create_dir_all(root.join(".aria")).expect("root aria");
+    fs::write(root.join("AGENTS.md"), "# lc root\n").expect("agents");
+    fs::write(root.join(".aria").join("state.json"), "{}").expect("root aria state");
+    let member = root.join("member-a");
+    fs::create_dir_all(&member).expect("member");
+    fs::write(member.join("README.md"), "member\n").expect("member readme");
+    let repo = base.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo");
+    let target = base.path().join("target-wt");
+    let home = base.path().join("home");
+    fs::create_dir_all(home.join(".claude")).expect("runtime home");
+
+    let git = |dir: &Path, args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .status()
+            .expect("git fixture");
+        assert!(status.success(), "git fixture {args:?} failed");
+    };
+    git(&root, &["init", "-q"]);
+    git(&member, &["init", "-q"]);
+    git(
+        &member,
+        &[
+            "-c",
+            "user.name=aria",
+            "-c",
+            "user.email=aria@aria",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "init",
+        ],
+    );
+    git(&repo, &["init", "-q"]);
+    git(
+        &repo,
+        &[
+            "-c",
+            "user.name=aria",
+            "-c",
+            "user.email=aria@aria",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "init",
+        ],
+    );
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            target.to_string_lossy().as_ref(),
+            "-b",
+            "t6a-coding",
+        ],
+    );
+    fs::create_dir_all(target.join(".aria")).expect("target aria");
+    fs::write(target.join(".aria").join("state.json"), "{}").expect("target aria state");
+
+    let launcher = ProviderBoundaryLauncher::probe_environment();
+    assert!(
+        launcher.is_available(),
+        "environment blocked: mandatory coding write-boundary case needs bwrap + user namespace"
+    );
+    let plan = ProviderBoundaryPlan::new(
+        ProviderBoundaryMode::TargetWriteOnly,
+        root.clone(),
+        Some(target.clone()),
+        Vec::new(),
+    );
+    let mut env = BTreeMap::new();
+    env.insert("HOME".to_string(), home.to_string_lossy().into_owned());
+    env.insert("PATH".to_string(), "/usr/bin:/bin".to_string());
+    env.insert("GIT_CONFIG_GLOBAL".to_string(), "/dev/null".to_string());
+    env.insert("GIT_CONFIG_NOSYSTEM".to_string(), "1".to_string());
+    env.insert("GIT_AUTHOR_NAME".to_string(), "aria".to_string());
+    env.insert("GIT_AUTHOR_EMAIL".to_string(), "aria@aria".to_string());
+    env.insert("GIT_COMMITTER_NAME".to_string(), "aria".to_string());
+    env.insert("GIT_COMMITTER_EMAIL".to_string(), "aria@aria".to_string());
+
+    let protected_pre_snapshot = (
+        snapshot_tree(&root),
+        fs::read(target.join(".git")).expect("target git pointer"),
+        snapshot_tree(&target.join(".aria")),
+    );
+
+    // 正向:target 内写(provider 内置通道)成功且真实落盘。
+    let probe_file = target.join("aria-write-probe.txt");
+    let target_attempts = run_builtin_write_probe(&launcher, &plan, &env, &[probe_file.clone()])
+        .await
+        .expect("target write probe");
+    let write_target_result = target_attempts
+        .first()
+        .expect("target write attempt")
+        .result();
+    assert_eq!(write_target_result, Ok(()));
+    assert_eq!(
+        fs::read(&probe_file).expect("target probe file"),
+        b"aria-boundary-probe".to_vec()
+    );
+
+    // 正向:target 内受控 git commit(git identity 沿冻结授权链)成功。
+    let target_text = target.to_string_lossy().into_owned();
+    let commit_script = format!(
+        "git -C '{target_text}' add aria-write-probe.txt && \
+         git -C '{target_text}' -c commit.gpgsign=false commit -q -m aria-boundary-probe-commit"
+    );
+    let mut commit_process = ProcessManager::spawn_with_boundary_resolved(
+        launcher.clone(),
+        "sh",
+        &["-c", &commit_script],
+        &root,
+        &env,
+        &plan,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("controlled commit spawn");
+    drop(commit_process.stdin);
+    let commit_status = commit_process
+        .child
+        .wait()
+        .await
+        .expect("controlled commit wait");
+    let committed_subject = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&target)
+        .args(["log", "-1", "--pretty=%s"])
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .expect("host log verify");
+    let controlled_target_commit_succeeded = commit_status.success()
+        && String::from_utf8_lossy(&committed_subject.stdout).trim()
+            == "aria-boundary-probe-commit";
+    assert!(controlled_target_commit_succeeded);
+
+    // 负向:受保护根(root/成员 `.git`、`.aria`、target `.git` 指针)全拒绝。
+    let protected_paths = [
+        root.join(".git").join("rogue"),
+        root.join(".aria").join("rogue"),
+        member.join(".git").join("rogue"),
+        member.join("rogue"),
+        target.join(".aria").join("rogue"),
+        target.join(".git"),
+    ];
+    let protected_attempts = run_builtin_write_probe(&launcher, &plan, &env, &protected_paths)
+        .await
+        .expect("protected write probe");
+    assert!(
+        protected_attempts
+            .iter()
+            .all(|attempt| attempt.was_refused_with_evidence())
+    );
+    for path in &protected_paths {
+        assert!(
+            !path.exists() || path == &target.join(".git"),
+            "rogue write landed at {}",
+            path.display()
+        );
+    }
+
+    // 受保护面 pre==post:零漂移(root 快照 + target `.git` 指针 + `.aria`)。
+    let protected_post_snapshot = (
+        snapshot_tree(&root),
+        fs::read(target.join(".git")).expect("target git pointer post"),
+        snapshot_tree(&target.join(".aria")),
+    );
+    assert_eq!(protected_pre_snapshot, protected_post_snapshot);
+}

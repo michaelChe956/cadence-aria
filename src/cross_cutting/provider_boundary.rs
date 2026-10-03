@@ -557,7 +557,7 @@ mod launcher_tests {
 
     use super::{
         ProviderBoundaryLauncher, ProviderBoundaryMode, ProviderBoundaryPlan, frozen_git_dir_binds,
-        provider_runtime_writable_roots,
+        protected_shadow_roots, provider_runtime_writable_roots,
     };
     use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
 
@@ -808,6 +808,102 @@ mod launcher_tests {
             refrozen, binds,
             "frozen face must survive a coder-swapped .git pointer"
         );
+    }
+
+    /// 后置只读挂载保护派生:linked worktree 的 target `.git` 指针(文件
+    /// 形态)与 target `.aria` 被遮蔽;plain repo 的 `.git` 目录不遮蔽(沿
+    /// target 写面=既有授权,Main 裁决不新增整个 `.git` 写授权);plan
+    /// 受保护根并入;不存在的路径过滤,去重排序。
+    #[test]
+    fn lcg_t06_protected_shadow_roots_cover_git_pointer_and_aria() {
+        let base = tempdir().expect("base dir");
+
+        // linked worktree target:`.git` 是文件指针 → 遮蔽;`.aria` 遮蔽。
+        let repo = base.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        let linked = base.path().join("linked-wt");
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["init", "-q"])
+            .status()
+            .expect("git init");
+        assert!(status.success());
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args([
+                "-c",
+                "user.name=aria",
+                "-c",
+                "user.email=aria@aria",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ])
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .status()
+            .expect("git commit");
+        assert!(status.success());
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args([
+                "worktree",
+                "add",
+                "-q",
+                linked.to_string_lossy().as_ref(),
+                "-b",
+                "shadow-wt",
+            ])
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .status()
+            .expect("git worktree add");
+        assert!(status.success());
+        std::fs::create_dir_all(linked.join(".aria")).expect("linked aria");
+        let root = base.path().join("lc-root");
+        std::fs::create_dir_all(&root).expect("root");
+        let declared = root.join(".aria");
+        std::fs::create_dir_all(&declared).expect("declared protected root");
+        let linked_plan = ProviderBoundaryPlan::new(
+            ProviderBoundaryMode::TargetWriteOnly,
+            root.clone(),
+            Some(linked.clone()),
+            vec![declared.clone()],
+        );
+        let shadows = protected_shadow_roots(&linked_plan);
+        assert!(shadows.contains(&linked.join(".git")));
+        assert!(shadows.contains(&linked.join(".aria")));
+        assert!(shadows.contains(&declared));
+
+        // plain repo target:`.git` 目录不进遮蔽面(沿 target 既有授权)。
+        let plain = base.path().join("plain");
+        std::fs::create_dir_all(&plain).expect("plain");
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&plain)
+            .args(["init", "-q"])
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .status()
+            .expect("plain git init");
+        assert!(status.success());
+        std::fs::create_dir_all(plain.join(".aria")).expect("plain aria");
+        let plain_plan = ProviderBoundaryPlan::new(
+            ProviderBoundaryMode::TargetWriteOnly,
+            root,
+            Some(plain.clone()),
+            Vec::new(),
+        );
+        let plain_shadows = protected_shadow_roots(&plain_plan);
+        assert!(plain_shadows.contains(&plain.join(".aria")));
+        assert!(!plain_shadows.contains(&plain.join(".git")));
+
+        // 不存在的受保护根过滤,不进 bwrap bind(缺失源会失败)。
+        assert!(!plain_shadows.contains(&plain.join(".aria").join("missing")));
     }
 
     /// 能力视角:缺 bwrap/user namespace 与「可用但未经真实 probe」都保持
