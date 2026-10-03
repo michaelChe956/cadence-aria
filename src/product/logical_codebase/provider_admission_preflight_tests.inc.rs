@@ -56,32 +56,84 @@ mod tests {
         fn deny(&self) {
             self.deny.store(true, std::sync::atomic::Ordering::SeqCst);
         }
-    }
-    impl ProviderCapabilitySource for StaticCapabilitySource {
-        fn require_supported(
+
+        fn capability(
             &self,
             provider: &ProviderRef,
-            _action: SessionPolicyAction,
+            action: SessionPolicyAction,
         ) -> Result<ProviderCapability, ProviderGatewayError> {
+            use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
+            use crate::product::logical_codebase::policy::ProviderWireDialect;
+            use crate::product::logical_codebase::provider_capability_store::ProviderActionCapability;
             if self.deny.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err(ProviderGatewayError::UnsupportedCapability(
                     "capability record missing".to_string(),
                 ));
             }
-            let adapter_dialect = match provider.provider_type {
-                ProviderRefType::ClaudeCode => ProviderDialect::ClaudeCodeCliV1,
-                ProviderRefType::Codex => ProviderDialect::CodexCliV1,
-                ProviderRefType::Pi => ProviderDialect::PiRpcV1,
-                ProviderRefType::KimiCode => ProviderDialect::KimiAcpV1,
+            let (adapter_dialect, wire_dialect) = match provider.provider_type {
+                ProviderRefType::ClaudeCode => (
+                    ProviderDialect::ClaudeCodeCliV1,
+                    ProviderWireDialect::ClaudeCodeStreamJson,
+                ),
+                ProviderRefType::Codex => (
+                    ProviderDialect::CodexCliV1,
+                    ProviderWireDialect::CodexAppServerRpc,
+                ),
+                ProviderRefType::Pi => (ProviderDialect::PiRpcV1, ProviderWireDialect::PiRpc),
+                ProviderRefType::KimiCode => {
+                    (ProviderDialect::KimiAcpV1, ProviderWireDialect::KimiAcp)
+                }
             };
             Ok(ProviderCapability {
                 provider_type: provider.provider_type,
                 version: "1.4.0".to_string(),
                 adapter_dialect,
+                wire_dialect,
                 capability_snapshot_ref: provider.capability_snapshot_ref.clone(),
-                resume_evidence:
-                    crate::product::logical_codebase::provider_gateway::ResumeEvidenceState::Confirmed,
+                action_capability: ProviderActionCapability {
+                    action,
+                    launch: ProviderCapabilityEvidence::Confirmed,
+                    resume: ProviderCapabilityEvidence::Confirmed,
+                    write_boundary: ProviderCapabilityEvidence::Confirmed,
+                    projection_digest: format!("projection-digest-{action:?}"),
+                    evidence_ref: format!("probe://{action:?}"),
+                },
+                trust: ProviderCapabilityEvidence::Confirmed,
             })
+        }
+    }
+    impl ProviderCapabilitySource for StaticCapabilitySource {
+        fn require_supported(
+            &self,
+            provider: &ProviderRef,
+            action: SessionPolicyAction,
+        ) -> Result<ProviderCapability, ProviderGatewayError> {
+            self.capability(provider, action)
+        }
+
+        fn require_resume_supported(
+            &self,
+            provider: &ProviderRef,
+            action: SessionPolicyAction,
+        ) -> Result<ProviderCapability, ProviderGatewayError> {
+            self.capability(provider, action)
+        }
+
+        fn require_write_boundary(
+            &self,
+            provider: &ProviderRef,
+            action: SessionPolicyAction,
+        ) -> Result<ProviderCapability, ProviderGatewayError> {
+            self.capability(provider, action)
+        }
+
+        fn require_root_recipe_supported(
+            &self,
+            provider: &ProviderRef,
+            credential: &crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
+        ) -> Result<ProviderCapability, ProviderGatewayError> {
+            let _ = credential;
+            self.capability(provider, SessionPolicyAction::PlanningReadOnly)
         }
     }
 
@@ -1106,5 +1158,179 @@ mod tests {
             .expect("separated form with rules present must be ready");
         assert!(result.ready, "missing: {:?}", result.missing_materials);
         assert_eq!(fixture.streaming_adapter.start_count(), 0);
+    }
+
+    // ===== Task 2b(lcg_t02):unknown normal 矩阵下既有 root recipe 契约保持 =====
+
+    use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence as T02Evidence;
+    use crate::product::logical_codebase::policy::ProviderWireDialect as T02WireDialect;
+    use crate::product::logical_codebase::production_policy_resolvers::StoreBackedProviderCapabilitySource as T02Source;
+    use crate::product::logical_codebase::provider_capability_store::{
+        CapabilityEvidence as T02Provenance,
+        PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION as T02SchemaVersion,
+        ProviderActionCapability as T02Row, ProviderActionMatrix as T02Matrix,
+        ProviderCapabilityRecord as T02Record, ProviderCapabilityStore as T02Store,
+        RootRecipeEvidence as T02RecipeEvidence,
+    };
+
+    /// root recipe 契约记录:v2 三态矩阵(Planning: Confirmed/Denied/Confirmed;
+    /// Coding: Confirmed/Unknown/Denied{root write probe rejected}; Review: 全
+    /// Unknown)+ 已交付 recipe 证据;legacy allow 列表仍列出全部 action——
+    /// 证明旧列表与 recipe 证据都无法为 Denied 负向分格放行正常会话。
+    fn t02_recipe_contract_record() -> T02Record {
+        let matrix = T02Matrix::from_rows(vec![
+            T02Row {
+                action: SessionPolicyAction::PlanningReadOnly,
+                launch: T02Evidence::Confirmed,
+                resume: T02Evidence::Denied {
+                    reason: "boundary probe denied".to_string(),
+                },
+                write_boundary: T02Evidence::Confirmed,
+                projection_digest: "projection-digest-PlanningReadOnly".to_string(),
+                evidence_ref: "probe://PlanningReadOnly".to_string(),
+            },
+            T02Row {
+                action: SessionPolicyAction::CodingTargetWrite,
+                launch: T02Evidence::Confirmed,
+                resume: T02Evidence::Unknown,
+                write_boundary: T02Evidence::Denied {
+                    reason: "root write probe rejected".to_string(),
+                },
+                projection_digest: "projection-digest-CodingTargetWrite".to_string(),
+                evidence_ref: "probe://CodingTargetWrite".to_string(),
+            },
+            T02Row {
+                action: SessionPolicyAction::ReviewReadOnly,
+                launch: T02Evidence::Unknown,
+                resume: T02Evidence::Unknown,
+                write_boundary: T02Evidence::Unknown,
+                projection_digest: "projection-digest-ReviewReadOnly".to_string(),
+                evidence_ref: "probe://ReviewReadOnly".to_string(),
+            },
+        ])
+        .unwrap();
+        T02Record {
+            provider_type: ProviderRefType::ClaudeCode,
+            schema_version: T02SchemaVersion,
+            version: "1.4.0".to_string(),
+            adapter_dialect: ProviderDialect::ClaudeCodeCliV1,
+            wire_dialect: T02WireDialect::ClaudeCodeStreamJson,
+            capability_snapshot_ref: "cap_managed_snapshot".to_string(),
+            evidence: T02Provenance::ProductionVerified,
+            resume_evidence:
+                crate::product::logical_codebase::provider_gateway::ResumeEvidenceState::Confirmed,
+            supported_actions: vec![
+                SessionPolicyAction::PlanningReadOnly,
+                SessionPolicyAction::CodingTargetWrite,
+                SessionPolicyAction::ReviewReadOnly,
+            ],
+            action_matrix: matrix,
+            trust: T02Evidence::Confirmed,
+            probed_at: Some("2026-10-03T00:00:00Z".to_string()),
+            probe_artifact_ref: Some("probe://artifact-0001".to_string()),
+            root_recipe_evidence: T02RecipeEvidence::Delivered {
+                evidence_ref: "recipe://evidence-0001".to_string(),
+                version: "1.4.0".to_string(),
+            },
+        }
+    }
+
+    /// 计划断言组(计划 Step 1 244-245 行):normal 全 Unknown/Denied 时,
+    /// recipe 相位凭有效凭据 + 已交付 recipe 证据放行;普通请求不得借用
+    /// recipe 证据放行,且拒绝发生在 spawn 前(provider 零启动)。recipe 事实
+    /// 不回写 normal 矩阵(隔离契约)。
+    #[test]
+    fn lcg_t02_unknown_normal_matrix_keeps_existing_root_recipe_contract() {
+        let fixture = admission_fixture();
+        let (_operations, _operation_id, credential) = derived_credential(&fixture);
+
+        // 记录写入 lc 子树;source 走 for_lc(recipe 凭据 durable 重核验通道)。
+        let store = T02Store::for_lc(fixture.paths.clone(), &fixture.lc_id);
+        store.ensure_bootstrap(&fixture.project_id).unwrap();
+        store
+            .upsert(&fixture.project_id, &t02_recipe_contract_record())
+            .unwrap();
+        let source = T02Source::for_lc(
+            fixture.paths.clone(),
+            fixture.project_id.clone(),
+            fixture.lc_id.clone(),
+        );
+
+        // recipe 相位:同一记录的已交付 recipe 证据 + 有效凭据(durable
+        // Running 派生)→ 固定 Claude recipe 事实放行(先于 source 移入 gateway)。
+        let valid_credential_existing_recipe_evidence = source.require_root_recipe_supported(
+            &ProviderRef::claude_code("cap_managed_snapshot"),
+            &credential,
+        );
+        assert!(
+            valid_credential_existing_recipe_evidence.is_ok(),
+            "valid credential + delivered recipe evidence must keep the recipe contract: {:?}",
+            valid_credential_existing_recipe_evidence
+        );
+
+        // store-backed gateway(独立计数 adapter)承载普通会话请求。
+        let streaming = Arc::new(CountingStreamingAdapter::new());
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            crate::product::models::ProviderName::ClaudeCode,
+            streaming.clone(),
+        );
+        let authority_root = std::fs::canonicalize(&fixture.aggregate_root).unwrap();
+        let gateway = LogicalCodebaseProviderGateway::with_audit(
+            fixture.policy_store.clone(),
+            Arc::new(source),
+            Arc::new(PassThroughTargetResolver),
+            Arc::new(registry),
+            Arc::new(StubSyncAdapter),
+            always_available_gate(),
+            Arc::new(crate::product::logical_codebase::GatewayRunAudit::new()),
+            authority_root.clone(),
+        );
+
+        // ordinary(正常会话)请求:CodingTargetWrite 的 write_boundary 为
+        // Denied{root write probe rejected}——即使旧 supported_actions 列出该
+        // action、record 携带已交付 recipe 证据,正常会话也不得借用它们放行。
+        let request = SessionLaunchRequest {
+            project_id: fixture.project_id.clone(),
+            provider: ProviderRef::claude_code("cap_managed_snapshot"),
+            action: SessionPolicyAction::CodingTargetWrite,
+            target: crate::product::logical_codebase::policy::PolicyTarget::aggregate_root(
+                authority_root.clone(),
+            ),
+            working_directory: authority_root.clone(),
+            readable_roots: vec![authority_root.clone()],
+            writable_roots: vec![authority_root.clone()],
+            config_artifact_ref: "sha256:recipe-config-artifact".to_string(),
+        };
+        let ordinary_request_using_recipe_evidence = gateway.validate(request);
+        assert!(
+            ordinary_request_using_recipe_evidence.is_err(),
+            "ordinary request must not ride on recipe evidence: {:?}",
+            ordinary_request_using_recipe_evidence
+        );
+        // 拒绝发生在 spawn 前:provider 零启动。
+        assert_eq!(streaming.start_count(), 0);
+
+        // recipe 事实不回写 normal 矩阵:行保持原三态,不产生 Confirmed。
+        let reloaded = store
+            .get(&fixture.project_id, ProviderRefType::ClaudeCode)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            reloaded
+                .action_matrix
+                .row(&SessionPolicyAction::ReviewReadOnly)
+                .launch,
+            T02Evidence::Unknown
+        );
+        assert_eq!(
+            reloaded
+                .action_matrix
+                .row(&SessionPolicyAction::CodingTargetWrite)
+                .write_boundary,
+            T02Evidence::Denied {
+                reason: "root write probe rejected".to_string()
+            }
+        );
     }
 }

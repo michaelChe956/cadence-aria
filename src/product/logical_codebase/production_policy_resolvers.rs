@@ -182,11 +182,24 @@ impl PolicyTargetResolver for ProductionPolicyTargetResolver {
 }
 
 /// 生产 capability source:store-backed,持有 `ProviderCapabilityStore` 与目标
-/// project id。`require_supported` 按记录缺失 → Codex 阻断 → snapshot 不一致 →
-/// action 不受支持 → 通过的顺序 fail-closed。
+/// project id。Task 2b 起 capability 组装消费 record v2(wire dialect、逐 action
+/// 三态行、trust),并按相位分流:正常会话走 action row 分格门(`require_supported`
+/// launch / `require_write_boundary` / `require_resume_supported`),root-recipe
+/// 相位走 `require_root_recipe_supported`(凭据每次重验 durable Running,不推
+/// normal Confirmed)。顺序 fail-closed:记录缺失 → Codex 硬阻断 → snapshot
+/// 不一致 → 分格不满足。
 pub struct StoreBackedProviderCapabilitySource {
     store: ProviderCapabilityStore,
     project_id: String,
+    /// root-recipe 凭据的 durable Running 重核验通道(`for_lc` 构造时可用;
+    /// `new`/`with_store` 无通道,root-recipe 相位 fail-closed 拒绝)。
+    recipe_recheck: Option<RootRecipeCredentialRecheck>,
+}
+
+/// root-recipe 凭据重核验通道:durable operation store(lc 作用域)+ 核验 LC。
+struct RootRecipeCredentialRecheck {
+    operations: crate::product::logical_codebase::aggregate_initialization_store::AggregateInitializationOperationStore,
+    lc_id: String,
 }
 
 impl StoreBackedProviderCapabilitySource {
@@ -194,22 +207,44 @@ impl StoreBackedProviderCapabilitySource {
         Self {
             store: ProviderCapabilityStore::new(paths),
             project_id,
+            recipe_recheck: None,
         }
     }
 
-    /// v1.3：接受已按 lc_id 作用域的 `ProviderCapabilityStore`，使 gateway 的
+    /// v1.3:接受已按 lc_id 作用域的 `ProviderCapabilityStore`,使 gateway 的
     /// capability 读取落在 issue 所属代码库子树。
     pub fn with_store(store: ProviderCapabilityStore, project_id: String) -> Self {
-        Self { store, project_id }
+        Self {
+            store,
+            project_id,
+            recipe_recheck: None,
+        }
     }
-}
 
-impl ProviderCapabilitySource for StoreBackedProviderCapabilitySource {
-    fn require_supported(
+    /// Task 2b:按 lc 作用域构造,并同时建立 root-recipe 凭据的 durable
+    /// Running 重核验通道(capability store 与 operation store 同一 lc 子树)。
+    pub fn for_lc(paths: ProductAppPaths, project_id: String, lc_id: String) -> Self {
+        Self {
+            store: ProviderCapabilityStore::for_lc(paths.clone(), &lc_id),
+            project_id,
+            recipe_recheck: Some(RootRecipeCredentialRecheck {
+                operations:
+                    crate::product::logical_codebase::aggregate_initialization_store::AggregateInitializationOperationStore::for_lc(
+                        paths, &lc_id,
+                    ),
+                lc_id,
+            }),
+        }
+    }
+
+    /// 载入记录并施加公共硬门(缺记录 → Codex 阻断 → snapshot 不一致)。
+    fn load_record(
         &self,
         provider: &ProviderRef,
-        action: SessionPolicyAction,
-    ) -> Result<ProviderCapability, ProviderGatewayError> {
+    ) -> Result<
+        crate::product::logical_codebase::provider_capability_store::ProviderCapabilityRecord,
+        ProviderGatewayError,
+    > {
         let record = self
             .store
             .get(&self.project_id, provider.provider_type)
@@ -230,19 +265,75 @@ impl ProviderCapabilitySource for StoreBackedProviderCapabilitySource {
             ));
         }
 
+        Ok(record)
+    }
+
+    /// 以 record v2 字段组装 capability 快照(wire dialect/action row/trust)。
+    fn capability_from_record(
+        record: &crate::product::logical_codebase::provider_capability_store::ProviderCapabilityRecord,
+        action: SessionPolicyAction,
+    ) -> ProviderCapability {
+        let row = record.action_matrix.row(&action);
+        ProviderCapability {
+            provider_type: record.provider_type,
+            version: record.version.clone(),
+            adapter_dialect: record.adapter_dialect,
+            wire_dialect: record.wire_dialect,
+            capability_snapshot_ref: record.capability_snapshot_ref.clone(),
+            action_capability: row,
+            trust: record.trust.clone(),
+        }
+    }
+}
+
+impl ProviderCapabilitySource for StoreBackedProviderCapabilitySource {
+    fn require_supported(
+        &self,
+        provider: &ProviderRef,
+        action: SessionPolicyAction,
+    ) -> Result<ProviderCapability, ProviderGatewayError> {
+        // RED 编译桩:门保持 v1 supported_actions 语义;GREEN 段迁移为
+        // v2 正常 action row 的 launch 分格门(v1 列表仅作过渡桥,不铸 Confirmed)。
+        let record = self.load_record(provider)?;
         if !record.supported_actions.contains(&action) {
             return Err(ProviderGatewayError::UnsupportedCapability(format!(
                 "{action:?} not supported"
             )));
         }
+        Ok(Self::capability_from_record(&record, action))
+    }
 
-        Ok(ProviderCapability {
-            provider_type: record.provider_type,
-            version: record.version,
-            adapter_dialect: record.adapter_dialect,
-            capability_snapshot_ref: record.capability_snapshot_ref,
-            resume_evidence: record.resume_evidence,
-        })
+    fn require_resume_supported(
+        &self,
+        provider: &ProviderRef,
+        action: SessionPolicyAction,
+    ) -> Result<ProviderCapability, ProviderGatewayError> {
+        let _ = (provider, action);
+        Err(ProviderGatewayError::UnsupportedCapability(
+            "provider_capability_resume_not_migrated".to_string(),
+        ))
+    }
+
+    fn require_write_boundary(
+        &self,
+        provider: &ProviderRef,
+        action: SessionPolicyAction,
+    ) -> Result<ProviderCapability, ProviderGatewayError> {
+        let _ = (provider, action);
+        Err(ProviderGatewayError::UnsupportedCapability(
+            "provider_capability_write_boundary_not_migrated".to_string(),
+        ))
+    }
+
+    fn require_root_recipe_supported(
+        &self,
+        provider: &ProviderRef,
+        credential: &crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
+    ) -> Result<ProviderCapability, ProviderGatewayError> {
+        let _ = (provider, credential);
+        Err(ProviderGatewayError::UnsupportedCapability(
+            "root_recipe_capability_not_migrated".to_string(),
+        ))
     }
 }
 
@@ -364,12 +455,18 @@ fn revalidate_git_dir_identity(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
     use crate::product::logical_codebase::policy::ProviderDialect;
+    use crate::product::logical_codebase::policy::ProviderWireDialect;
     use crate::product::logical_codebase::policy::SessionPolicyAction;
     use crate::product::logical_codebase::provider_capability_store::{
-        CapabilityEvidence, ProviderCapabilityRecord,
+        CapabilityEvidence, PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION, ProviderActionCapability,
+        ProviderActionMatrix, ProviderCapabilityRecord, RootRecipeEvidence,
     };
     use crate::product::logical_codebase::provider_gateway::ResumeEvidenceState;
+    use crate::product::logical_codebase::provider_gateway::{
+        PROVIDER_CAPABILITY_LAUNCH_NOT_CONFIRMED, PROVIDER_CAPABILITY_WRITE_BOUNDARY_NOT_CONFIRMED,
+    };
     use crate::product::logical_codebase::{
         LogicalCodebaseFeature, ProviderRef, RepositoryCheckoutId,
     };
@@ -858,8 +955,21 @@ mod tests {
         assert_eq!(capability.provider_type, ProviderRefType::ClaudeCode);
         assert_eq!(capability.version, "0.0.0-managed");
         assert_eq!(capability.adapter_dialect, ProviderDialect::ClaudeCodeCliV1);
+        assert_eq!(
+            capability.wire_dialect,
+            ProviderWireDialect::ClaudeCodeStreamJson
+        );
         assert_eq!(capability.capability_snapshot_ref, "cap_managed_snapshot");
-        assert_eq!(capability.resume_evidence, ResumeEvidenceState::Confirmed);
+        // bootstrap 记录的 v2 行全 Unknown:过渡桥不因旧 allow 列表铸造任何
+        // Confirmed(launch/resume 分格保持 Unknown)。
+        assert_eq!(
+            capability.action_capability.launch,
+            ProviderCapabilityEvidence::Unknown
+        );
+        assert_eq!(
+            capability.action_capability.resume,
+            ProviderCapabilityEvidence::Unknown
+        );
     }
 
     #[test]
@@ -945,5 +1055,283 @@ mod tests {
         assert!(
             matches!(&error, ProviderGatewayError::UnsupportedCapability(reason) if reason == "CodingTargetWrite not supported")
         );
+    }
+
+    // ===== Task 2b(lcg_t02):StoreBacked source 消费 record v2 的分格门/形状 =====
+
+    /// 构造指定三态的矩阵行。
+    fn lcg_t02_row(
+        action: SessionPolicyAction,
+        launch: ProviderCapabilityEvidence,
+        resume: ProviderCapabilityEvidence,
+        write_boundary: ProviderCapabilityEvidence,
+    ) -> ProviderActionCapability {
+        ProviderActionCapability {
+            action,
+            launch,
+            resume,
+            write_boundary,
+            projection_digest: format!("projection-digest-{action:?}"),
+            evidence_ref: format!("probe://{action:?}"),
+        }
+    }
+
+    /// 构造 v2 Claude 记录(非 bootstrap 版本;legacy allow 列表可空)。
+    fn lcg_t02_v2_record(
+        matrix: ProviderActionMatrix,
+        supported_actions: Vec<SessionPolicyAction>,
+    ) -> ProviderCapabilityRecord {
+        ProviderCapabilityRecord {
+            provider_type: ProviderRefType::ClaudeCode,
+            schema_version: PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION,
+            version: "1.4.0".to_string(),
+            adapter_dialect: ProviderDialect::ClaudeCodeCliV1,
+            wire_dialect: ProviderWireDialect::ClaudeCodeStreamJson,
+            capability_snapshot_ref: "cap_managed_snapshot".to_string(),
+            evidence: CapabilityEvidence::ProductionVerified,
+            resume_evidence: ResumeEvidenceState::Confirmed,
+            supported_actions,
+            action_matrix: matrix,
+            trust: ProviderCapabilityEvidence::Confirmed,
+            probed_at: Some("2026-10-03T00:00:00Z".to_string()),
+            probe_artifact_ref: Some("probe://artifact-0001".to_string()),
+            root_recipe_evidence: RootRecipeEvidence::None,
+        }
+    }
+
+    /// 以指定矩阵 + legacy allow 列表 upsert Claude 记录并返回 source。
+    fn lcg_t02_source_with_record(
+        root: &TempDir,
+        matrix: ProviderActionMatrix,
+        supported_actions: Vec<SessionPolicyAction>,
+    ) -> StoreBackedProviderCapabilitySource {
+        let paths = ProductAppPaths::new(root.path().join(".aria"));
+        let store = ProviderCapabilityStore::new(paths.clone());
+        store.ensure_bootstrap("project_0001").unwrap();
+        store
+            .upsert(
+                "project_0001",
+                &lcg_t02_v2_record(matrix, supported_actions),
+            )
+            .unwrap();
+        StoreBackedProviderCapabilitySource::new(paths, "project_0001".to_string())
+    }
+
+    #[test]
+    fn lcg_t02_require_supported_reads_launch_cell_from_normal_action_row() {
+        let root = tempfile::tempdir().expect("temporary product root");
+        // Coding 行 launch Confirmed/resume Unknown/write_boundary Confirmed;
+        // legacy allow 列表留空——正常会话只由 v2 行放行,不依赖旧列表。
+        let source = lcg_t02_source_with_record(
+            &root,
+            ProviderActionMatrix::from_rows(vec![lcg_t02_row(
+                SessionPolicyAction::CodingTargetWrite,
+                ProviderCapabilityEvidence::Confirmed,
+                ProviderCapabilityEvidence::Unknown,
+                ProviderCapabilityEvidence::Confirmed,
+            )])
+            .unwrap(),
+            Vec::new(),
+        );
+
+        let capability = source
+            .require_supported(
+                &ProviderRef::claude_code("cap_managed_snapshot"),
+                SessionPolicyAction::CodingTargetWrite,
+            )
+            .unwrap();
+
+        // capability 组装消费 record v2 冻结字段:wire dialect/action row/trust。
+        assert_eq!(capability.provider_type, ProviderRefType::ClaudeCode);
+        assert_eq!(capability.version, "1.4.0");
+        assert_eq!(capability.adapter_dialect, ProviderDialect::ClaudeCodeCliV1);
+        assert_eq!(
+            capability.wire_dialect,
+            ProviderWireDialect::ClaudeCodeStreamJson
+        );
+        assert_eq!(capability.trust, ProviderCapabilityEvidence::Confirmed);
+        assert_eq!(
+            capability.action_capability.action,
+            SessionPolicyAction::CodingTargetWrite
+        );
+        assert_eq!(
+            capability.action_capability.launch,
+            ProviderCapabilityEvidence::Confirmed
+        );
+
+        // launch 分格 Unknown(legacy 未列出)→ fail-closed,稳定判别码。
+        let source = lcg_t02_source_with_record(
+            &root,
+            ProviderActionMatrix::from_rows(vec![lcg_t02_row(
+                SessionPolicyAction::ReviewReadOnly,
+                ProviderCapabilityEvidence::Unknown,
+                ProviderCapabilityEvidence::Unknown,
+                ProviderCapabilityEvidence::Confirmed,
+            )])
+            .unwrap(),
+            Vec::new(),
+        );
+        let error = source
+            .require_supported(
+                &ProviderRef::claude_code("cap_managed_snapshot"),
+                SessionPolicyAction::ReviewReadOnly,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(&error, ProviderGatewayError::UnsupportedCapability(reason) if reason.starts_with(PROVIDER_CAPABILITY_LAUNCH_NOT_CONFIRMED)),
+            "unexpected launch-cell error: {error:?}"
+        );
+    }
+
+    #[test]
+    fn lcg_t02_require_write_boundary_reads_boundary_cell() {
+        let root = tempfile::tempdir().expect("temporary product root");
+        // write_boundary Denied 是真实负向证据:legacy 列表列出该 action 也不放行。
+        let source = lcg_t02_source_with_record(
+            &root,
+            ProviderActionMatrix::from_rows(vec![lcg_t02_row(
+                SessionPolicyAction::CodingTargetWrite,
+                ProviderCapabilityEvidence::Confirmed,
+                ProviderCapabilityEvidence::Unknown,
+                ProviderCapabilityEvidence::Denied {
+                    reason: "boundary probe denied".to_string(),
+                },
+            )])
+            .unwrap(),
+            vec![SessionPolicyAction::CodingTargetWrite],
+        );
+        let error = source
+            .require_write_boundary(
+                &ProviderRef::claude_code("cap_managed_snapshot"),
+                SessionPolicyAction::CodingTargetWrite,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(&error, ProviderGatewayError::UnsupportedCapability(reason)
+                if reason.starts_with(PROVIDER_CAPABILITY_WRITE_BOUNDARY_NOT_CONFIRMED)
+                    && reason.contains("boundary probe denied")),
+            "unexpected write-boundary error: {error:?}"
+        );
+
+        // write_boundary Confirmed → 放行。
+        let source = lcg_t02_source_with_record(
+            &root,
+            ProviderActionMatrix::from_rows(vec![lcg_t02_row(
+                SessionPolicyAction::CodingTargetWrite,
+                ProviderCapabilityEvidence::Confirmed,
+                ProviderCapabilityEvidence::Unknown,
+                ProviderCapabilityEvidence::Confirmed,
+            )])
+            .unwrap(),
+            Vec::new(),
+        );
+        let capability = source
+            .require_write_boundary(
+                &ProviderRef::claude_code("cap_managed_snapshot"),
+                SessionPolicyAction::CodingTargetWrite,
+            )
+            .unwrap();
+        assert_eq!(
+            capability.action_capability.write_boundary,
+            ProviderCapabilityEvidence::Confirmed
+        );
+    }
+
+    #[test]
+    fn lcg_t02_require_resume_supported_reads_resume_cell() {
+        let root = tempfile::tempdir().expect("temporary product root");
+        // resume 分格 Unknown:旧 resume_evidence 二态(lcg_t02_v2_record 内为
+        // Confirmed)不得放行 v2 行——明确 resume fail-closed,不静默转 fresh。
+        let source = lcg_t02_source_with_record(
+            &root,
+            ProviderActionMatrix::from_rows(vec![lcg_t02_row(
+                SessionPolicyAction::CodingTargetWrite,
+                ProviderCapabilityEvidence::Confirmed,
+                ProviderCapabilityEvidence::Unknown,
+                ProviderCapabilityEvidence::Confirmed,
+            )])
+            .unwrap(),
+            Vec::new(),
+        );
+        let error = source
+            .require_resume_supported(
+                &ProviderRef::claude_code("cap_managed_snapshot"),
+                SessionPolicyAction::CodingTargetWrite,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(&error, ProviderGatewayError::ResumeNotSupported),
+            "unexpected resume-cell error: {error:?}"
+        );
+
+        // resume Confirmed → 放行。
+        let source = lcg_t02_source_with_record(
+            &root,
+            ProviderActionMatrix::from_rows(vec![lcg_t02_row(
+                SessionPolicyAction::CodingTargetWrite,
+                ProviderCapabilityEvidence::Confirmed,
+                ProviderCapabilityEvidence::Confirmed,
+                ProviderCapabilityEvidence::Confirmed,
+            )])
+            .unwrap(),
+            Vec::new(),
+        );
+        let capability = source
+            .require_resume_supported(
+                &ProviderRef::claude_code("cap_managed_snapshot"),
+                SessionPolicyAction::CodingTargetWrite,
+            )
+            .unwrap();
+        assert_eq!(
+            capability.action_capability.resume,
+            ProviderCapabilityEvidence::Confirmed
+        );
+    }
+
+    /// v1 旧记录(无 schema/matrix)的过渡语义:launch/write 分格经桥放行
+    /// (既有 root recipe 契约零回归),但 capability 行保持全 Unknown——
+    /// 旧 supported_actions/provenance 不产生正常会话 Confirmed。
+    #[test]
+    fn lcg_t02_v1_legacy_actions_keep_launching_without_confirmed_cells() {
+        let root = tempfile::tempdir().expect("temporary product root");
+        let dir = root.path().join("projects/project_0001/logical-codebase");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("capabilities.json"),
+            r#"[{
+                "provider_type": "claude_code",
+                "version": "0.0.0-managed",
+                "adapter_dialect": "claude_code_cli_v1",
+                "capability_snapshot_ref": "cap_managed_snapshot",
+                "evidence": "fixture_verified",
+                "resume_evidence": "confirmed",
+                "supported_actions": ["planning_read_only", "coding_target_write", "review_read_only"]
+            }]"#,
+        )
+        .unwrap();
+        let paths = ProductAppPaths::new(root.path().join(".aria"));
+        let source = StoreBackedProviderCapabilitySource::new(paths, "project_0001".to_string());
+
+        let capability = source
+            .require_supported(
+                &ProviderRef::claude_code("cap_managed_snapshot"),
+                SessionPolicyAction::PlanningReadOnly,
+            )
+            .unwrap();
+        assert_eq!(
+            capability.action_capability.launch,
+            ProviderCapabilityEvidence::Unknown
+        );
+        assert_eq!(
+            capability.wire_dialect,
+            ProviderWireDialect::ClaudeCodeStreamJson
+        );
+        // write 分格同样经桥放行(root recipe 聚合链的 spawn 依赖)。
+        source
+            .require_write_boundary(
+                &ProviderRef::claude_code("cap_managed_snapshot"),
+                SessionPolicyAction::PlanningReadOnly,
+            )
+            .unwrap();
     }
 }

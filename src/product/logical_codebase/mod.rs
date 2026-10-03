@@ -110,7 +110,7 @@ pub use pointer_publication_coordinator::{
 };
 pub use policy::{
     AggregatePolicyArtifact, AggregatePolicyArtifactStore, PolicyTarget, ProviderDialect,
-    SessionPolicyAction, SessionPolicyEnvelope,
+    ProviderWireDialect, SessionPolicyAction, SessionPolicyEnvelope,
 };
 pub use production_policy_resolvers::{
     ProductionPolicyTargetResolver, StoreBackedProviderCapabilitySource,
@@ -121,7 +121,8 @@ pub use provider_admission_preflight::{
     ProviderAdmissionPreflightResult, ProviderRuleReference,
 };
 pub use provider_capability_store::{
-    CapabilityEvidence, ProviderCapabilityRecord, ProviderCapabilityStore,
+    CapabilityEvidence, ProviderActionCapability, ProviderActionMatrix, ProviderCapabilityRecord,
+    ProviderCapabilityStore, RootRecipeEvidence,
 };
 pub use provider_gateway::{
     GatewayRunAudit, GatewayRunAuditEntry, GatewayRunStack, LogicalCodebaseProviderGateway,

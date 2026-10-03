@@ -12,7 +12,6 @@ use crate::cross_cutting::provider_availability_gate::{
 };
 use crate::cross_cutting::provider_health::{ProviderHealthEntry, ProviderHealthSnapshot};
 use crate::cross_cutting::provider_registry::ProviderRegistry;
-use crate::product::logical_codebase::provider_gateway::ResumeEvidenceState;
 use crate::product::logical_codebase::{
     AggregatePolicyArtifactStore, GatewayRunAudit, LogicalCodebaseManifest,
     LogicalCodebaseProviderGateway, PolicyTarget, PolicyTargetResolver, ProviderCapability,
@@ -38,10 +37,10 @@ impl ProviderAdapter for ReviewStubSyncAdapter {
     }
 }
 
-/// 测试用 capability source:返回固定 capability,resume 证据恒为 `Confirmed`,
-/// 使 review repair 的 resume 启动也能通过 spawn 前复验。同时记录每次
-/// `require_supported` 收到的 `ProviderRef`,供断言「launch request 的 provider
-/// ref 随 session.reviewer_provider 透传」(C-2 身份契约)。
+/// 测试用 capability source:返回固定 capability,launch/resume/write_boundary
+/// 分格恒为 `Confirmed`,使 review repair 的 resume 启动也能通过 spawn 前复验。
+/// 同时记录每次 `require_supported` 收到的 `ProviderRef`,供断言「launch
+/// request 的 provider ref 随 session.reviewer_provider 透传」(C-2 身份契约)。
 #[derive(Default)]
 struct ReviewStaticCapabilitySource {
     seen: Arc<Mutex<Vec<ProviderRef>>>,
@@ -52,28 +51,84 @@ impl ReviewStaticCapabilitySource {
     fn seen_provider_refs(&self) -> Vec<ProviderRef> {
         self.seen.lock().unwrap().clone()
     }
+
+    fn capability(
+        &self,
+        provider: &ProviderRef,
+        action: SessionPolicyAction,
+    ) -> ProviderCapability {
+        use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
+        use crate::product::logical_codebase::policy::ProviderWireDialect;
+        use crate::product::logical_codebase::provider_capability_store::ProviderActionCapability;
+        self.seen.lock().unwrap().push(provider.clone());
+        let (adapter_dialect, wire_dialect) = match provider.provider_type {
+            ProviderRefType::ClaudeCode => (
+                ProviderDialect::ClaudeCodeCliV1,
+                ProviderWireDialect::ClaudeCodeStreamJson,
+            ),
+            ProviderRefType::Codex => (
+                ProviderDialect::CodexCliV1,
+                ProviderWireDialect::CodexAppServerRpc,
+            ),
+            ProviderRefType::Pi => (ProviderDialect::PiRpcV1, ProviderWireDialect::PiRpc),
+            ProviderRefType::KimiCode => (ProviderDialect::KimiAcpV1, ProviderWireDialect::KimiAcp),
+        };
+        ProviderCapability {
+            provider_type: provider.provider_type,
+            version: "1.4.0".to_string(),
+            adapter_dialect,
+            wire_dialect,
+            capability_snapshot_ref: provider.capability_snapshot_ref.clone(),
+            action_capability: ProviderActionCapability {
+                action,
+                launch: ProviderCapabilityEvidence::Confirmed,
+                resume: ProviderCapabilityEvidence::Confirmed,
+                write_boundary: ProviderCapabilityEvidence::Confirmed,
+                projection_digest: format!("projection-digest-{action:?}"),
+                evidence_ref: format!("probe://{action:?}"),
+            },
+            trust: ProviderCapabilityEvidence::Confirmed,
+        }
+    }
 }
 
 impl ProviderCapabilitySource for ReviewStaticCapabilitySource {
     fn require_supported(
         &self,
         provider: &ProviderRef,
-        _action: SessionPolicyAction,
+        action: SessionPolicyAction,
     ) -> Result<ProviderCapability, ProviderGatewayError> {
-        self.seen.lock().unwrap().push(provider.clone());
-        let adapter_dialect = match provider.provider_type {
-            ProviderRefType::ClaudeCode => ProviderDialect::ClaudeCodeCliV1,
-            ProviderRefType::Codex => ProviderDialect::CodexCliV1,
-            ProviderRefType::Pi => ProviderDialect::PiRpcV1,
-            ProviderRefType::KimiCode => ProviderDialect::KimiAcpV1,
-        };
-        Ok(ProviderCapability {
-            provider_type: provider.provider_type,
-            version: "1.4.0".to_string(),
-            adapter_dialect,
-            capability_snapshot_ref: provider.capability_snapshot_ref.clone(),
-            resume_evidence: ResumeEvidenceState::Confirmed,
-        })
+        Ok(self.capability(provider, action))
+    }
+
+    fn require_resume_supported(
+        &self,
+        provider: &ProviderRef,
+        action: SessionPolicyAction,
+    ) -> Result<ProviderCapability, ProviderGatewayError> {
+        Ok(self.capability(provider, action))
+    }
+
+    fn require_write_boundary(
+        &self,
+        provider: &ProviderRef,
+        action: SessionPolicyAction,
+    ) -> Result<ProviderCapability, ProviderGatewayError> {
+        Ok(self.capability(provider, action))
+    }
+
+    fn require_root_recipe_supported(
+        &self,
+        provider: &ProviderRef,
+        _credential: &crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
+    ) -> Result<ProviderCapability, ProviderGatewayError> {
+        if provider.provider_type != ProviderRefType::ClaudeCode {
+            return Err(ProviderGatewayError::UnsupportedCapability(
+                crate::product::logical_codebase::provider_gateway::PROVIDER_ROOT_RECIPE_REQUIRES_FIXED_CLAUDE
+                    .to_string(),
+            ));
+        }
+        Ok(self.capability(provider, SessionPolicyAction::PlanningReadOnly))
     }
 }
 

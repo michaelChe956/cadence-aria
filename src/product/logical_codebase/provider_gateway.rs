@@ -24,15 +24,17 @@ use tokio_util::sync::CancellationToken;
 
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate;
+use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
 use crate::cross_cutting::provider_registry::ProviderRegistry;
 use crate::cross_cutting::session_launch::{
     ValidatedAdapterInput, ValidatedStreamingProviderInput,
 };
 use crate::cross_cutting::streaming_provider::{ProviderSession, StreamingProviderAdapter};
 use crate::product::logical_codebase::policy::{
-    AggregatePolicyArtifactStore, PolicyTarget, ProviderDialect, SessionPolicyAction,
-    SessionPolicyEnvelope,
+    AggregatePolicyArtifactStore, PolicyTarget, ProviderDialect, ProviderWireDialect,
+    SessionPolicyAction, SessionPolicyEnvelope,
 };
+use crate::product::logical_codebase::provider_capability_store::ProviderActionCapability;
 use crate::product::logical_codebase::store::LogicalCodebaseManifest;
 use crate::product::models::ProviderName;
 use crate::protocol::contracts::AdapterOutput;
@@ -218,39 +220,30 @@ impl ResumeEvidenceState {
         }
     }
 
-    /// 从 `cross_cutting::ProviderCapabilityEvidence` 三态桥接到 gateway 侧状态。
-    /// 仅 `Confirmed` 放行 resume;`Denied`/`Unknown` 归为 `Unsupported`(fail-closed)。
-    /// 这是 `cross_cutting::ProviderCapability.resume_evidence` 进入 gateway 消费路径
-    /// 的唯一映射点,使该三态字段不再是无消费者的 dead field(B-2)。
-    pub fn from_cross_cutting_evidence(
-        evidence: &crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence,
-    ) -> Self {
-        use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
-        match evidence {
-            ProviderCapabilityEvidence::Confirmed => Self::Confirmed,
-            ProviderCapabilityEvidence::Denied { .. } | ProviderCapabilityEvidence::Unknown => {
-                Self::Unsupported
-            }
-        }
-    }
-
     /// 该状态是否允许 resume 启动。仅 `Confirmed` 为真。
     pub fn allows_resume(self) -> bool {
         matches!(self, Self::Confirmed)
     }
 }
 
-/// gateway 解析出的 provider capability 快照。冻结 exact version、adapter dialect
-/// 与 resume 能力,供 envelope 与 fingerprint 复验。Task 10 把它与既有
-/// `cross_cutting::ProviderCapability` 桥接(含 `resume_evidence` 三态)。
+/// gateway 解析出的 provider capability 快照(Task 2b,冻结接口):承载
+/// record v2 的逐 action 三态行与 trust,供 envelope/fingerprint 复验与
+/// phase-aware 门禁消费。`resume_evidence` 旧二态字段已移除——resume 判定
+/// 只消费 `action_capability.resume` 分格(`require_resume_supported`)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderCapability {
     pub provider_type: ProviderRefType,
     pub version: String,
     pub adapter_dialect: ProviderDialect,
+    /// wire(传输)dialect(record v2;与 adapter dialect 正交)。
+    pub wire_dialect: ProviderWireDialect,
     pub capability_snapshot_ref: String,
-    /// resume 能力三态。spawn 前 resume 启动据此 fail-closed(B-2)。
-    pub resume_evidence: ResumeEvidenceState,
+    /// 正常会话的逐 action 三态行(launch/resume/write_boundary 分格)。
+    /// root-recipe 相位返回的行仅镜像 durable normal 状态,不因 recipe 事实
+    /// 铸造 Confirmed(隔离契约)。
+    pub action_capability: ProviderActionCapability,
+    /// provider trust 证据(三态)。
+    pub trust: ProviderCapabilityEvidence,
 }
 
 /// resume 复验指纹:覆盖 policy digest、target、canonical working_directory(cwd,
@@ -495,13 +488,45 @@ pub trait PolicyTargetResolver: Send + Sync {
     ) -> Result<PolicyTarget, ProviderGatewayError>;
 }
 
-/// 解析 provider capability 并校验 action 是否被支持。Task 10 的实现会校验
-/// `ProviderCapability` 的三态 evidence;Task 9 的测试实现返回固定 capability。
+/// 解析 provider capability 并按相位校验(Task 2b 冻结接口)。
+///
+/// - [`Self::require_supported`]:保留名,走**正常 action row** 的 launch 分格
+///   (fresh 门的一半;write_boundary 由 [`Self::require_write_boundary`] 把关);
+/// - [`Self::require_resume_supported`]/[`Self::require_write_boundary`]:同参
+///   返回型,分别消费 resume/write_boundary 分格;
+/// - [`Self::require_root_recipe_supported`]:仅现有固定 Claude recipe 事实
+///   (credential 每次重验 durable Running),不推 normal Confirmed。
+///
+/// 旧 `supported_actions`/provenance 不得产生正常会话 Confirmed;Denied 是
+/// 真实负向证据,fail-closed 拒绝。
 pub trait ProviderCapabilitySource: Send + Sync {
     fn require_supported(
         &self,
         provider: &ProviderRef,
         action: SessionPolicyAction,
+    ) -> Result<ProviderCapability, ProviderGatewayError>;
+
+    /// 明确 resume 门:仅 resume 分格 `Confirmed` 放行;Unknown/Denied 一律
+    /// 拒绝(不得静默改 fresh)。
+    fn require_resume_supported(
+        &self,
+        provider: &ProviderRef,
+        action: SessionPolicyAction,
+    ) -> Result<ProviderCapability, ProviderGatewayError>;
+
+    /// fresh 门的 write-boundary 半边:仅 write_boundary 分格 `Confirmed` 放行。
+    fn require_write_boundary(
+        &self,
+        provider: &ProviderRef,
+        action: SessionPolicyAction,
+    ) -> Result<ProviderCapability, ProviderGatewayError>;
+
+    /// root-recipe 相位:仅现有固定 Claude recipe 事实放行,凭据每次重验
+    /// durable Running;返回的 capability 不携带任何 normal Confirmed 事实。
+    fn require_root_recipe_supported(
+        &self,
+        provider: &ProviderRef,
+        credential: &crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
     ) -> Result<ProviderCapability, ProviderGatewayError>;
 }
 
@@ -1079,8 +1104,11 @@ impl LogicalCodebaseProviderGateway {
             });
         }
 
-        // 4. resume 能力 fail-closed(B-2 消费者)。
-        if is_resume && !capability.resume_evidence.allows_resume() {
+        // 4. resume 能力 fail-closed(B-2 消费者,Task 2b 迁移为 resume 分格):
+        //    RED 编译桩——resume 门读 action_capability.resume 分格;
+        //    GREEN 段替换为 source 的 `require_resume_supported`。
+        if is_resume && capability.action_capability.resume != ProviderCapabilityEvidence::Confirmed
+        {
             return Err(ProviderGatewayError::ResumeNotSupported);
         }
 
@@ -1201,6 +1229,35 @@ pub const CODEX_DANGER_FULL_ACCESS_UNSUPPORTED: &str = "codex_danger_full_access
 /// ClaudeCode/Codex 真实 dialect 时,`ProviderRef::from_provider_name` 返回的
 /// `UnsupportedCapability` 错误以此为前缀,后接 provider 名。
 pub const PROVIDER_UNSUPPORTED_FOR_GATEWAY_LAUNCH: &str = "provider_unsupported_for_gateway_launch";
+
+// ---- Task 2b(lcg_t02):capability 分格门与 root-recipe 相位的稳定错误码 ----
+
+/// 正常 action row 的 launch 分格非 `Confirmed` 时的稳定判别码。
+pub const PROVIDER_CAPABILITY_LAUNCH_NOT_CONFIRMED: &str =
+    "provider_capability_launch_not_confirmed";
+
+/// 正常 action row 的 write_boundary 分格非 `Confirmed` 时的稳定判别码。
+pub const PROVIDER_CAPABILITY_WRITE_BOUNDARY_NOT_CONFIRMED: &str =
+    "provider_capability_write_boundary_not_confirmed";
+
+/// 正常 action row 的 resume 分格非 `Confirmed` 时的稳定判别码。
+pub const PROVIDER_CAPABILITY_RESUME_NOT_CONFIRMED: &str =
+    "provider_capability_resume_not_confirmed";
+
+/// root-recipe 相位仅接受固定 Claude recipe provider 的稳定判别码。
+pub const PROVIDER_ROOT_RECIPE_REQUIRES_FIXED_CLAUDE: &str =
+    "root_recipe_requires_fixed_claude_provider";
+
+/// root-recipe 凭据对 durable Running operation 重核验失败时的稳定判别码。
+pub const PROVIDER_ROOT_RECIPE_CREDENTIAL_RECHECK_DENIED: &str =
+    "root_recipe_credential_recheck_denied";
+
+/// source 未携带 durable 重核验通道(无 paths/lc scope)时的稳定判别码。
+pub const PROVIDER_ROOT_RECIPE_CREDENTIAL_RECHECK_UNAVAILABLE: &str =
+    "root_recipe_credential_recheck_unavailable";
+
+/// 已交付 recipe evidence 钉定版本与当前记录版本漂移时的稳定判别码。
+pub const PROVIDER_ROOT_RECIPE_EVIDENCE_VERSION_DRIFT: &str = "root_recipe_evidence_version_drift";
 
 /// gateway 对 `ensure_bootstrap` 的桥接:暴露给需要在 gateway 之外触发 bootstrap
 /// 的调用方(如 migration)。实际实现复用 `AggregatePolicyArtifactStore::ensure_bootstrap`。

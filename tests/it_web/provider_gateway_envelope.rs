@@ -50,7 +50,6 @@ use cadence_aria::product::coding_workspace_engine::{
 };
 use cadence_aria::product::git_workspace_service::GitWorkspaceService;
 use cadence_aria::product::logical_codebase::aggregate_initialization_coordinator::GatewayBackedAggregateProviderTurnDriver;
-use cadence_aria::product::logical_codebase::provider_gateway::ResumeEvidenceState;
 use cadence_aria::product::logical_codebase::{
     AggregateInitializationCoordinator, AggregateInitializationError,
     AggregateInitializationOperationStore, AggregatePolicyArtifactStore, AggregatePreflightService,
@@ -705,28 +704,89 @@ impl PolicyTargetResolver for PassThroughTargetResolver {
     }
 }
 
-/// 静态 capability source：按 provider ref 返回对应 dialect，version 固定 1.0.0。
+/// 静态 capability source：按 provider ref 返回对应 dialect，version 固定 1.0.0
+/// (Task 2b 分格形状:launch/resume/write_boundary 恒 Confirmed)。
 struct StaticCapabilitySource;
+
+impl StaticCapabilitySource {
+    fn capability(
+        provider: &ProviderRef,
+        action: cadence_aria::product::logical_codebase::SessionPolicyAction,
+    ) -> ProviderCapability {
+        use cadence_aria::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
+        use cadence_aria::product::logical_codebase::policy::ProviderWireDialect;
+        use cadence_aria::product::logical_codebase::provider_capability_store::ProviderActionCapability;
+        let (adapter_dialect, wire_dialect) = match provider.provider_type {
+            ProviderRefType::ClaudeCode => (
+                ProviderDialect::ClaudeCodeCliV1,
+                ProviderWireDialect::ClaudeCodeStreamJson,
+            ),
+            ProviderRefType::Codex => (
+                ProviderDialect::CodexCliV1,
+                ProviderWireDialect::CodexAppServerRpc,
+            ),
+            ProviderRefType::Pi => (ProviderDialect::PiRpcV1, ProviderWireDialect::PiRpc),
+            ProviderRefType::KimiCode => (ProviderDialect::KimiAcpV1, ProviderWireDialect::KimiAcp),
+        };
+        ProviderCapability {
+            provider_type: provider.provider_type,
+            version: "1.0.0".to_string(),
+            adapter_dialect,
+            wire_dialect,
+            capability_snapshot_ref: provider.capability_snapshot_ref.clone(),
+            action_capability: ProviderActionCapability {
+                action,
+                launch: ProviderCapabilityEvidence::Confirmed,
+                resume: ProviderCapabilityEvidence::Confirmed,
+                write_boundary: ProviderCapabilityEvidence::Confirmed,
+                projection_digest: format!("projection-digest-{action:?}"),
+                evidence_ref: format!("probe://{action:?}"),
+            },
+            trust: ProviderCapabilityEvidence::Confirmed,
+        }
+    }
+}
 
 impl ProviderCapabilitySource for StaticCapabilitySource {
     fn require_supported(
         &self,
         provider: &ProviderRef,
-        _action: cadence_aria::product::logical_codebase::SessionPolicyAction,
+        action: cadence_aria::product::logical_codebase::SessionPolicyAction,
     ) -> Result<ProviderCapability, ProviderGatewayError> {
-        let adapter_dialect = match provider.provider_type {
-            ProviderRefType::ClaudeCode => ProviderDialect::ClaudeCodeCliV1,
-            ProviderRefType::Codex => ProviderDialect::CodexCliV1,
-            ProviderRefType::Pi => ProviderDialect::PiRpcV1,
-            ProviderRefType::KimiCode => ProviderDialect::KimiAcpV1,
-        };
-        Ok(ProviderCapability {
-            provider_type: provider.provider_type,
-            version: "1.0.0".to_string(),
-            adapter_dialect,
-            capability_snapshot_ref: provider.capability_snapshot_ref.clone(),
-            resume_evidence: ResumeEvidenceState::Confirmed,
-        })
+        Ok(Self::capability(provider, action))
+    }
+
+    fn require_resume_supported(
+        &self,
+        provider: &ProviderRef,
+        action: cadence_aria::product::logical_codebase::SessionPolicyAction,
+    ) -> Result<ProviderCapability, ProviderGatewayError> {
+        Ok(Self::capability(provider, action))
+    }
+
+    fn require_write_boundary(
+        &self,
+        provider: &ProviderRef,
+        action: cadence_aria::product::logical_codebase::SessionPolicyAction,
+    ) -> Result<ProviderCapability, ProviderGatewayError> {
+        Ok(Self::capability(provider, action))
+    }
+
+    fn require_root_recipe_supported(
+        &self,
+        provider: &ProviderRef,
+        _credential: &cadence_aria::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
+    ) -> Result<ProviderCapability, ProviderGatewayError> {
+        if provider.provider_type != ProviderRefType::ClaudeCode {
+            return Err(ProviderGatewayError::UnsupportedCapability(
+                cadence_aria::product::logical_codebase::provider_gateway::PROVIDER_ROOT_RECIPE_REQUIRES_FIXED_CLAUDE
+                    .to_string(),
+            ));
+        }
+        Ok(Self::capability(
+            provider,
+            cadence_aria::product::logical_codebase::SessionPolicyAction::PlanningReadOnly,
+        ))
     }
 }
 

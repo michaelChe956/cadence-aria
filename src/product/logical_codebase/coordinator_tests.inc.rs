@@ -5,7 +5,6 @@ mod tests {
     use crate::cross_cutting::provider_registry::ProviderRegistry;
     use crate::product::app_paths::ProductAppPaths;
     use crate::product::logical_codebase::aggregate_initialization::AggregateInitializationOperationInput;
-    use crate::product::logical_codebase::provider_gateway::ResumeEvidenceState;
     use crate::product::logical_codebase::types::LogicalRepositoryId;
     use crate::product::logical_codebase::{
         CodebaseMemberRecord, GatewayRunAudit, LogicalCodebaseProviderGateway,
@@ -461,18 +460,62 @@ mod tests {
     // ---- Task 16: provider step 经 gateway 启动 + GitFinalize 调用图切断 ----
 
     /// 测试用 capability source:固定 Claude Code capability,version 与 resume
-    /// 能力可调,用于 gateway 复验。聚合 provider turn 固定 Claude Code(Codex
+    /// 分格可调,用于 gateway 复验。聚合 provider turn 固定 Claude Code(Codex
     /// danger-full-access 被 gateway 路由级阻断)。
     struct StaticCapabilitySource {
         version: Mutex<String>,
-        resume: Mutex<ResumeEvidenceState>,
+        resume: Mutex<crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence>,
     }
 
     impl StaticCapabilitySource {
         fn new(version: &str) -> Self {
             Self {
                 version: Mutex::new(version.to_string()),
-                resume: Mutex::new(ResumeEvidenceState::Confirmed),
+                resume: Mutex::new(
+                    crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence::Confirmed,
+                ),
+            }
+        }
+
+        fn capability(
+            &self,
+            provider: &ProviderRef,
+            action: SessionPolicyAction,
+        ) -> ProviderCapability {
+            let (adapter_dialect, wire_dialect) = match provider.provider_type {
+                ProviderRefType::ClaudeCode => (
+                    ProviderDialect::ClaudeCodeCliV1,
+                    crate::product::logical_codebase::policy::ProviderWireDialect::ClaudeCodeStreamJson,
+                ),
+                ProviderRefType::Codex => (
+                    ProviderDialect::CodexCliV1,
+                    crate::product::logical_codebase::policy::ProviderWireDialect::CodexAppServerRpc,
+                ),
+                ProviderRefType::Pi => (
+                    ProviderDialect::PiRpcV1,
+                    crate::product::logical_codebase::policy::ProviderWireDialect::PiRpc,
+                ),
+                ProviderRefType::KimiCode => (
+                    ProviderDialect::KimiAcpV1,
+                    crate::product::logical_codebase::policy::ProviderWireDialect::KimiAcp,
+                ),
+            };
+            ProviderCapability {
+                provider_type: provider.provider_type,
+                version: self.version.lock().unwrap().clone(),
+                adapter_dialect,
+                wire_dialect,
+                capability_snapshot_ref: provider.capability_snapshot_ref.clone(),
+                action_capability:
+                    crate::product::logical_codebase::provider_capability_store::ProviderActionCapability {
+                        action,
+                        launch: crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence::Confirmed,
+                        resume: self.resume.lock().unwrap().clone(),
+                        write_boundary: crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence::Confirmed,
+                        projection_digest: format!("projection-digest-{action:?}"),
+                        evidence_ref: format!("probe://{action:?}"),
+                    },
+                trust: crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence::Confirmed,
             }
         }
     }
@@ -481,20 +524,45 @@ mod tests {
         fn require_supported(
             &self,
             provider: &ProviderRef,
-            _action: SessionPolicyAction,
+            action: SessionPolicyAction,
         ) -> Result<ProviderCapability, ProviderGatewayError> {
-            Ok(ProviderCapability {
-                provider_type: provider.provider_type,
-                version: self.version.lock().unwrap().clone(),
-                adapter_dialect: match provider.provider_type {
-                    ProviderRefType::ClaudeCode => ProviderDialect::ClaudeCodeCliV1,
-                    ProviderRefType::Codex => ProviderDialect::CodexCliV1,
-                    ProviderRefType::Pi => ProviderDialect::PiRpcV1,
-                    ProviderRefType::KimiCode => ProviderDialect::KimiAcpV1,
-                },
-                capability_snapshot_ref: provider.capability_snapshot_ref.clone(),
-                resume_evidence: *self.resume.lock().unwrap(),
-            })
+            Ok(self.capability(provider, action))
+        }
+
+        fn require_resume_supported(
+            &self,
+            provider: &ProviderRef,
+            action: SessionPolicyAction,
+        ) -> Result<ProviderCapability, ProviderGatewayError> {
+            let capability = self.capability(provider, action);
+            if capability.action_capability.resume
+                != crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence::Confirmed
+            {
+                return Err(ProviderGatewayError::ResumeNotSupported);
+            }
+            Ok(capability)
+        }
+
+        fn require_write_boundary(
+            &self,
+            provider: &ProviderRef,
+            action: SessionPolicyAction,
+        ) -> Result<ProviderCapability, ProviderGatewayError> {
+            Ok(self.capability(provider, action))
+        }
+
+        fn require_root_recipe_supported(
+            &self,
+            provider: &ProviderRef,
+            _credential: &crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
+        ) -> Result<ProviderCapability, ProviderGatewayError> {
+            if provider.provider_type != ProviderRefType::ClaudeCode {
+                return Err(ProviderGatewayError::UnsupportedCapability(
+                    crate::product::logical_codebase::provider_gateway::PROVIDER_ROOT_RECIPE_REQUIRES_FIXED_CLAUDE
+                        .to_string(),
+                ));
+            }
+            Ok(self.capability(provider, SessionPolicyAction::PlanningReadOnly))
         }
     }
 

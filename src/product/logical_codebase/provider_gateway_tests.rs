@@ -317,6 +317,42 @@ fn start_streaming_resume_is_rejected_when_resume_evidence_not_confirmed() {
     assert_eq!(fixture.registry_start_count(), 0);
 }
 
+/// Task 2b(lcg_t02):fresh 门在 validate 阶段消费 write_boundary 分格——
+/// write_boundary 为 Denied(真实负向证据)时,正常 coding 请求在 validate
+/// 即拒绝(fresh = launch + write-boundary 两半),provider 零启动;分格恢复
+/// Confirmed 后同一请求放行。
+#[test]
+fn lcg_t02_gateway_fresh_requires_write_boundary_cell() {
+    use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
+    let fixture = gateway_fixture();
+    fixture.install_bootstrap_policy();
+    let worktree = fixture.real_worktree();
+    fixture
+        .capabilities()
+        .set_write_boundary_cell(ProviderCapabilityEvidence::Denied {
+            reason: "boundary probe denied".to_string(),
+        });
+
+    let error = fixture
+        .gateway()
+        .validate(fixture.coding_request(worktree.clone()))
+        .unwrap_err();
+    assert!(
+        matches!(&error, ProviderGatewayError::UnsupportedCapability(reason) if reason.starts_with(PROVIDER_CAPABILITY_WRITE_BOUNDARY_NOT_CONFIRMED)),
+        "unexpected fresh write-boundary error: {error:?}"
+    );
+    assert_eq!(fixture.registry_start_count(), 0);
+
+    // 分格恢复 Confirmed:同一请求放行(拒绝只来自分格状态)。
+    fixture
+        .capabilities()
+        .set_write_boundary_cell(ProviderCapabilityEvidence::Confirmed);
+    fixture
+        .gateway()
+        .validate(fixture.coding_request(worktree))
+        .unwrap();
+}
+
 /// resume 能力放行路径(B-2):`resume_evidence` 为 `Confirmed` 时 resume 启动通过复验
 /// 并触达 registry(start_count == 1),确认消费者只在非 Confirmed 时阻断。
 #[tokio::test]
@@ -396,19 +432,20 @@ impl PolicyTargetResolver for MutableTargetResolver {
     }
 }
 
-/// 测试用 capability source:返回固定 capability,version 可调以驱动 fingerprint 漂移。
-/// 测试用 capability source:version 与 resume 能力可调,以驱动 spawn 前
-/// 复验指纹漂移与 resume fail-closed。
+/// 测试用 capability source:version 与 resume/write 分格可调,以驱动 spawn
+/// 前复验指纹漂移与 resume/write-boundary fail-closed(Task 2b 分格门)。
 struct StaticCapabilitySource {
     version: std::sync::Mutex<String>,
-    resume_evidence: std::sync::Mutex<ResumeEvidenceState>,
+    resume_cell: std::sync::Mutex<ProviderCapabilityEvidence>,
+    write_boundary_cell: std::sync::Mutex<ProviderCapabilityEvidence>,
 }
 
 impl StaticCapabilitySource {
     fn new(version: &str) -> Self {
         Self {
             version: std::sync::Mutex::new(version.to_string()),
-            resume_evidence: std::sync::Mutex::new(ResumeEvidenceState::Confirmed),
+            resume_cell: std::sync::Mutex::new(ProviderCapabilityEvidence::Confirmed),
+            write_boundary_cell: std::sync::Mutex::new(ProviderCapabilityEvidence::Confirmed),
         }
     }
 
@@ -416,8 +453,57 @@ impl StaticCapabilitySource {
         *self.version.lock().unwrap() = version.to_string();
     }
 
+    /// 旧 resume 二态兼容入口:Confirmed → 三态 Confirmed;Unsupported →
+    /// 三态 Denied(既有 resume fail-closed 测试语义零变化)。
     fn set_resume_evidence(&self, state: ResumeEvidenceState) {
-        *self.resume_evidence.lock().unwrap() = state;
+        *self.resume_cell.lock().unwrap() = match state {
+            ResumeEvidenceState::Confirmed => ProviderCapabilityEvidence::Confirmed,
+            ResumeEvidenceState::Unsupported => ProviderCapabilityEvidence::Denied {
+                reason: "resume evidence unsupported".to_string(),
+            },
+        };
+    }
+
+    fn set_write_boundary_cell(&self, evidence: ProviderCapabilityEvidence) {
+        *self.write_boundary_cell.lock().unwrap() = evidence;
+    }
+
+    fn capability(
+        &self,
+        provider: &ProviderRef,
+        action: SessionPolicyAction,
+    ) -> ProviderCapability {
+        let version = self.version.lock().unwrap().clone();
+        let resume = self.resume_cell.lock().unwrap().clone();
+        let write_boundary = self.write_boundary_cell.lock().unwrap().clone();
+        let (adapter_dialect, wire_dialect) = match provider.provider_type {
+            ProviderRefType::ClaudeCode => (
+                ProviderDialect::ClaudeCodeCliV1,
+                ProviderWireDialect::ClaudeCodeStreamJson,
+            ),
+            ProviderRefType::Codex => (
+                ProviderDialect::CodexCliV1,
+                ProviderWireDialect::CodexAppServerRpc,
+            ),
+            ProviderRefType::Pi => (ProviderDialect::PiRpcV1, ProviderWireDialect::PiRpc),
+            ProviderRefType::KimiCode => (ProviderDialect::KimiAcpV1, ProviderWireDialect::KimiAcp),
+        };
+        ProviderCapability {
+            provider_type: provider.provider_type,
+            version,
+            adapter_dialect,
+            wire_dialect,
+            capability_snapshot_ref: provider.capability_snapshot_ref.clone(),
+            action_capability: ProviderActionCapability {
+                action,
+                launch: ProviderCapabilityEvidence::Confirmed,
+                resume,
+                write_boundary,
+                projection_digest: format!("projection-digest-{action:?}"),
+                evidence_ref: format!("probe://{action:?}"),
+            },
+            trust: ProviderCapabilityEvidence::Confirmed,
+        }
     }
 }
 
@@ -425,23 +511,50 @@ impl ProviderCapabilitySource for StaticCapabilitySource {
     fn require_supported(
         &self,
         provider: &ProviderRef,
-        _action: SessionPolicyAction,
+        action: SessionPolicyAction,
     ) -> Result<ProviderCapability, ProviderGatewayError> {
-        let version = self.version.lock().unwrap().clone();
-        let resume_evidence = *self.resume_evidence.lock().unwrap();
-        let adapter_dialect = match provider.provider_type {
-            ProviderRefType::ClaudeCode => ProviderDialect::ClaudeCodeCliV1,
-            ProviderRefType::Codex => ProviderDialect::CodexCliV1,
-            ProviderRefType::Pi => ProviderDialect::PiRpcV1,
-            ProviderRefType::KimiCode => ProviderDialect::KimiAcpV1,
-        };
-        Ok(ProviderCapability {
-            provider_type: provider.provider_type,
-            version,
-            adapter_dialect,
-            capability_snapshot_ref: provider.capability_snapshot_ref.clone(),
-            resume_evidence,
-        })
+        Ok(self.capability(provider, action))
+    }
+
+    fn require_resume_supported(
+        &self,
+        provider: &ProviderRef,
+        action: SessionPolicyAction,
+    ) -> Result<ProviderCapability, ProviderGatewayError> {
+        let capability = self.capability(provider, action);
+        if capability.action_capability.resume != ProviderCapabilityEvidence::Confirmed {
+            return Err(ProviderGatewayError::ResumeNotSupported);
+        }
+        Ok(capability)
+    }
+
+    fn require_write_boundary(
+        &self,
+        provider: &ProviderRef,
+        action: SessionPolicyAction,
+    ) -> Result<ProviderCapability, ProviderGatewayError> {
+        let capability = self.capability(provider, action);
+        if capability.action_capability.write_boundary != ProviderCapabilityEvidence::Confirmed {
+            return Err(ProviderGatewayError::UnsupportedCapability(
+                PROVIDER_CAPABILITY_WRITE_BOUNDARY_NOT_CONFIRMED.to_string(),
+            ));
+        }
+        Ok(capability)
+    }
+
+    fn require_root_recipe_supported(
+        &self,
+        provider: &ProviderRef,
+        _credential: &crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
+    ) -> Result<ProviderCapability, ProviderGatewayError> {
+        // 测试 double:固定 Claude recipe 事实的基础形态(durable 重核验归
+        // StoreBacked source 的 for_lc 通道,由 admission 侧测试覆盖)。
+        if provider.provider_type != ProviderRefType::ClaudeCode {
+            return Err(ProviderGatewayError::UnsupportedCapability(
+                PROVIDER_ROOT_RECIPE_REQUIRES_FIXED_CLAUDE.to_string(),
+            ));
+        }
+        Ok(self.capability(provider, SessionPolicyAction::PlanningReadOnly))
     }
 }
 
@@ -838,29 +951,6 @@ impl GatewayFixture {
             "sha256:managed-config-artifact",
         )
     }
-}
-
-/// bridge 映射(B-2):`cross_cutting::ProviderCapabilityEvidence` 三态经
-/// `ResumeEvidenceState::from_cross_cutting_evidence` 进入 gateway 消费路径。
-/// 仅 `Confirmed` 放行;`Denied`/`Unknown` 归为 `Unsupported`(fail-closed),
-/// 使该三态字段不再是无消费者的 dead field。
-#[test]
-fn resume_evidence_bridge_maps_cross_cutting_three_states_to_gateway_state() {
-    use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
-    assert!(
-        ResumeEvidenceState::from_cross_cutting_evidence(&ProviderCapabilityEvidence::Confirmed)
-            .allows_resume()
-    );
-    assert!(
-        !ResumeEvidenceState::from_cross_cutting_evidence(&ProviderCapabilityEvidence::Denied {
-            reason: "probe says no".to_string(),
-        })
-        .allows_resume()
-    );
-    assert!(
-        !ResumeEvidenceState::from_cross_cutting_evidence(&ProviderCapabilityEvidence::Unknown)
-            .allows_resume()
-    );
 }
 
 /// Task 11 覆盖率:验证逻辑代码库同步与流式 provider 全入口经 gateway 接线后,

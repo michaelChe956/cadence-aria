@@ -44,23 +44,77 @@ use crate::protocol::contracts::{AdapterOutput, TimeoutStatus};
 
 // ---- 测试 doubles（与 provider_admission_preflight 测试同型，作用域隔离） ----
 
-/// 恒放行 capability source：ClaudeCode→ClaudeCodeCliV1，snapshot ref 透传。
+/// 恒放行 capability source:ClaudeCode→ClaudeCodeCliV1,snapshot ref 透传
+/// (Task 2b 分格形状:launch/resume/write_boundary 恒 Confirmed)。
 struct LcStaticCapabilitySource;
+
+impl LcStaticCapabilitySource {
+    fn capability(provider: &ProviderRef, action: SessionPolicyAction) -> ProviderCapability {
+        use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
+        use crate::product::logical_codebase::policy::ProviderWireDialect;
+        use crate::product::logical_codebase::provider_capability_store::ProviderActionCapability;
+        ProviderCapability {
+            provider_type: provider.provider_type,
+            version: "1.4.0".to_string(),
+            adapter_dialect: ProviderDialect::ClaudeCodeCliV1,
+            wire_dialect: ProviderWireDialect::ClaudeCodeStreamJson,
+            capability_snapshot_ref: provider.capability_snapshot_ref.clone(),
+            action_capability: ProviderActionCapability {
+                action,
+                launch: ProviderCapabilityEvidence::Confirmed,
+                resume: ProviderCapabilityEvidence::Confirmed,
+                write_boundary: ProviderCapabilityEvidence::Confirmed,
+                projection_digest: format!("projection-digest-{action:?}"),
+                evidence_ref: format!("probe://{action:?}"),
+            },
+            trust: ProviderCapabilityEvidence::Confirmed,
+        }
+    }
+}
 
 impl ProviderCapabilitySource for LcStaticCapabilitySource {
     fn require_supported(
         &self,
         provider: &ProviderRef,
-        _action: SessionPolicyAction,
+        action: SessionPolicyAction,
     ) -> Result<ProviderCapability, crate::product::logical_codebase::ProviderGatewayError> {
-        Ok(ProviderCapability {
-            provider_type: provider.provider_type,
-            version: "1.4.0".to_string(),
-            adapter_dialect: ProviderDialect::ClaudeCodeCliV1,
-            capability_snapshot_ref: provider.capability_snapshot_ref.clone(),
-            resume_evidence:
-                crate::product::logical_codebase::provider_gateway::ResumeEvidenceState::Confirmed,
-        })
+        Ok(Self::capability(provider, action))
+    }
+
+    fn require_resume_supported(
+        &self,
+        provider: &ProviderRef,
+        action: SessionPolicyAction,
+    ) -> Result<ProviderCapability, crate::product::logical_codebase::ProviderGatewayError> {
+        Ok(Self::capability(provider, action))
+    }
+
+    fn require_write_boundary(
+        &self,
+        provider: &ProviderRef,
+        action: SessionPolicyAction,
+    ) -> Result<ProviderCapability, crate::product::logical_codebase::ProviderGatewayError> {
+        Ok(Self::capability(provider, action))
+    }
+
+    fn require_root_recipe_supported(
+        &self,
+        provider: &ProviderRef,
+        _credential: &crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
+    ) -> Result<ProviderCapability, crate::product::logical_codebase::ProviderGatewayError> {
+        use crate::product::logical_codebase::provider_gateway::ProviderGatewayError;
+        if provider.provider_type
+            != crate::product::logical_codebase::provider_gateway::ProviderRefType::ClaudeCode
+        {
+            return Err(ProviderGatewayError::UnsupportedCapability(
+                crate::product::logical_codebase::provider_gateway::PROVIDER_ROOT_RECIPE_REQUIRES_FIXED_CLAUDE
+                    .to_string(),
+            ));
+        }
+        Ok(Self::capability(
+            provider,
+            SessionPolicyAction::PlanningReadOnly,
+        ))
     }
 }
 

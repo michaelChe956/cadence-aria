@@ -381,10 +381,54 @@ mod tests {
         }
     }
 
-    /// planning gateway 测试用 capability source：固定 version/dialect，resume
-    /// 证据恒 `Confirmed`（与 provider_gateway_tests 的 StaticCapabilitySource
-    /// 同构，仅服务于 `validate` 冻结 envelope）。
+    /// planning gateway 测试用 capability source：固定 version/dialect,分格
+    /// 恒 `Confirmed`(与 provider_gateway_tests 的 StaticCapabilitySource
+    /// 同构,仅服务于 `validate` 冻结 envelope)。
     struct PlanningStaticCapabilitySource;
+
+    impl PlanningStaticCapabilitySource {
+        fn capability(
+            provider: &crate::product::logical_codebase::provider_gateway::ProviderRef,
+            action: SessionPolicyAction,
+        ) -> crate::product::logical_codebase::provider_gateway::ProviderCapability {
+            use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
+            use crate::product::logical_codebase::policy::{ProviderDialect, ProviderWireDialect};
+            use crate::product::logical_codebase::provider_capability_store::ProviderActionCapability;
+            use crate::product::logical_codebase::provider_gateway::{
+                ProviderCapability, ProviderRefType,
+            };
+            let (adapter_dialect, wire_dialect) = match provider.provider_type {
+                ProviderRefType::ClaudeCode => (
+                    ProviderDialect::ClaudeCodeCliV1,
+                    ProviderWireDialect::ClaudeCodeStreamJson,
+                ),
+                ProviderRefType::Codex => (
+                    ProviderDialect::CodexCliV1,
+                    ProviderWireDialect::CodexAppServerRpc,
+                ),
+                ProviderRefType::Pi => (ProviderDialect::PiRpcV1, ProviderWireDialect::PiRpc),
+                ProviderRefType::KimiCode => {
+                    (ProviderDialect::KimiAcpV1, ProviderWireDialect::KimiAcp)
+                }
+            };
+            ProviderCapability {
+                provider_type: provider.provider_type,
+                version: "1.4.0".to_string(),
+                adapter_dialect,
+                wire_dialect,
+                capability_snapshot_ref: provider.capability_snapshot_ref.clone(),
+                action_capability: ProviderActionCapability {
+                    action,
+                    launch: ProviderCapabilityEvidence::Confirmed,
+                    resume: ProviderCapabilityEvidence::Confirmed,
+                    write_boundary: ProviderCapabilityEvidence::Confirmed,
+                    projection_digest: format!("projection-digest-{action:?}"),
+                    evidence_ref: format!("probe://{action:?}"),
+                },
+                trust: ProviderCapabilityEvidence::Confirmed,
+            }
+        }
+    }
 
     impl crate::product::logical_codebase::provider_gateway::ProviderCapabilitySource
         for PlanningStaticCapabilitySource
@@ -392,28 +436,57 @@ mod tests {
         fn require_supported(
             &self,
             provider: &crate::product::logical_codebase::provider_gateway::ProviderRef,
-            _action: SessionPolicyAction,
+            action: SessionPolicyAction,
         ) -> Result<
             crate::product::logical_codebase::provider_gateway::ProviderCapability,
             crate::product::logical_codebase::provider_gateway::ProviderGatewayError,
         > {
-            use crate::product::logical_codebase::policy::ProviderDialect;
+            Ok(Self::capability(provider, action))
+        }
+
+        fn require_resume_supported(
+            &self,
+            provider: &crate::product::logical_codebase::provider_gateway::ProviderRef,
+            action: SessionPolicyAction,
+        ) -> Result<
+            crate::product::logical_codebase::provider_gateway::ProviderCapability,
+            crate::product::logical_codebase::provider_gateway::ProviderGatewayError,
+        > {
+            Ok(Self::capability(provider, action))
+        }
+
+        fn require_write_boundary(
+            &self,
+            provider: &crate::product::logical_codebase::provider_gateway::ProviderRef,
+            action: SessionPolicyAction,
+        ) -> Result<
+            crate::product::logical_codebase::provider_gateway::ProviderCapability,
+            crate::product::logical_codebase::provider_gateway::ProviderGatewayError,
+        > {
+            Ok(Self::capability(provider, action))
+        }
+
+        fn require_root_recipe_supported(
+            &self,
+            provider: &crate::product::logical_codebase::provider_gateway::ProviderRef,
+            _credential: &crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
+        ) -> Result<
+            crate::product::logical_codebase::provider_gateway::ProviderCapability,
+            crate::product::logical_codebase::provider_gateway::ProviderGatewayError,
+        > {
             use crate::product::logical_codebase::provider_gateway::{
-                ProviderCapability, ProviderRefType, ResumeEvidenceState,
+                ProviderGatewayError, ProviderRefType,
             };
-            let adapter_dialect = match provider.provider_type {
-                ProviderRefType::ClaudeCode => ProviderDialect::ClaudeCodeCliV1,
-                ProviderRefType::Codex => ProviderDialect::CodexCliV1,
-                ProviderRefType::Pi => ProviderDialect::PiRpcV1,
-                ProviderRefType::KimiCode => ProviderDialect::KimiAcpV1,
-            };
-            Ok(ProviderCapability {
-                provider_type: provider.provider_type,
-                version: "1.4.0".to_string(),
-                adapter_dialect,
-                capability_snapshot_ref: provider.capability_snapshot_ref.clone(),
-                resume_evidence: ResumeEvidenceState::Confirmed,
-            })
+            if provider.provider_type != ProviderRefType::ClaudeCode {
+                return Err(ProviderGatewayError::UnsupportedCapability(
+                    crate::product::logical_codebase::provider_gateway::PROVIDER_ROOT_RECIPE_REQUIRES_FIXED_CLAUDE
+                        .to_string(),
+                ));
+            }
+            Ok(Self::capability(
+                provider,
+                SessionPolicyAction::PlanningReadOnly,
+            ))
         }
     }
 
