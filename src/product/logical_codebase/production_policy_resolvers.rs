@@ -257,7 +257,13 @@ impl StoreBackedProviderCapabilitySource {
             .get(&self.project_id, provider.provider_type)
             .map_err(ProviderGatewayError::policy)?
             .ok_or_else(|| {
-                ProviderGatewayError::UnsupportedCapability("capability record missing".to_string())
+                // Task 3(6b carry 重钉):Pi/Kimi 已是 1a 合法映射,缺 durable
+                // capability 记录属于 capability 准入失败,不再是映射失败;
+                // 稳定码沿用 launch 分格判别码并点名 provider。
+                ProviderGatewayError::UnsupportedCapability(format!(
+                    "{PROVIDER_CAPABILITY_LAUNCH_NOT_CONFIRMED}: {:?} capability record missing",
+                    provider.provider_type
+                ))
             })?;
 
         if record.provider_type == ProviderRefType::Codex {
@@ -1081,7 +1087,7 @@ mod tests {
             .unwrap_err();
 
         assert!(
-            matches!(&error, ProviderGatewayError::UnsupportedCapability(reason) if reason == "capability record missing")
+            matches!(&error, ProviderGatewayError::UnsupportedCapability(reason) if reason.starts_with(PROVIDER_CAPABILITY_LAUNCH_NOT_CONFIRMED) && reason.contains("capability record missing"))
         );
     }
 

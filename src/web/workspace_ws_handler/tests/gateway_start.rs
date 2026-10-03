@@ -446,9 +446,10 @@ async fn logical_plan_launch_carries_session_author_provider_identity() {
     );
 }
 
-/// C-2(组3):author 配置 Pi/Kimi 时,logical 启动必须在集中映射处显式失败
-/// (判别码 + provider 名),gateway 零启动。回归锁定:修复前该配置会静默以
-/// ClaudeCode 身份跑完整 planning run。
+/// Task 1a 后合同重钉(6b carry):Pi/Kimi 是合法显式映射,「静默以 Claude
+/// 跑完整 planning run」的防线从集中映射移到 capability 准入——fixture 未
+/// 给 Pi/Kimi 落 durable capability 记录,logical 启动必须在 launch 分格门
+/// 显式失败(判别码 + provider 名),gateway 零启动。
 #[tokio::test]
 async fn logical_plan_launch_fails_closed_for_unsupported_author_provider() {
     for author in [ProviderName::Pi, ProviderName::KimiCode] {
@@ -462,8 +463,8 @@ async fn logical_plan_launch_fails_closed_for_unsupported_author_provider() {
         assert!(
             error
                 .details
-                .contains("provider_unsupported_for_gateway_launch"),
-            "expected provider_unsupported_for_gateway_launch, got: {}",
+                .contains("provider_capability_launch_not_confirmed"),
+            "expected provider_capability_launch_not_confirmed, got: {}",
             error.details
         );
         assert!(

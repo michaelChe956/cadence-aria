@@ -885,11 +885,13 @@ mod tests {
 
     #[test]
     fn bootstrap_phase_only_waives_missing_root_rules() {
-        // 成员规则缺失 = 根 recipe 尚未生成的正常自举事实。
+        // Task 3a 拆分后:成员规则在场,根规则(canonical root 自身的
+        // .claude/rules/language.md)缺失 = recipe 尚未生成的自举事实。
         let fixture = admission_fixture();
+        fixture.write_language_rules("# language\n");
         let (_store, _operation_id, credential) = derived_credential(&fixture);
 
-        // AggregateBootstrap：只豁免规则存在性；其余维度全过 → ready。
+        // AggregateBootstrap:只豁免根规则存在性;其余维度全过 → ready。
         let result = fixture
             .preflight()
             .check(
@@ -898,20 +900,46 @@ mod tests {
             )
             .expect("bootstrap phase must waive only missing root rules");
         assert!(result.ready, "missing: {:?}", result.missing_materials);
-        // 缺失规则仍作为事实记录（digest=None），不构成阻断材料。
+        // 成员规则在场(digest Some);根规则缺失仍作为事实记录,不阻断。
         assert_eq!(result.rules.len(), 1);
-        assert!(result.rules[0].digest.is_none());
+        assert!(result.rules[0].digest.is_some());
+        assert_eq!(result.missing_root_rules.len(), 1);
         assert!(result.missing_materials.is_empty());
+        assert!(result.missing_member_rules.is_empty());
         assert_eq!(fixture.streaming_adapter.start_count(), 0);
 
-        // Normal 对照组：同样材料下规则缺失仍阻断（既有语义零变化）。
-        assert_bootstrap_waiting(
+        // Normal 对照组(自举桩政策,存量迁移前):根规则缺失不阻断——
+        // 根规则门只在 #8 已发布真实政策后生效(旧语义零回归)。
+        assert!(
             fixture
                 .preflight()
-                .check(&fixture.launch_request(), &ProviderAdmissionPhase::Normal)
-                .map(|_| ()),
-            "member_language_rules_missing",
+                .check(
+                    &fixture.launch_request(),
+                    &ProviderAdmissionPhase::Normal
+                )
+                .expect("placeholder policy keeps legacy normal admission")
+                .ready
         );
+
+        // Task 3a:#8 已发布真实政策(非桩 artifact + receipt + locator)后,
+        // Normal 相位根规则缺失必须阻断(root_rules_missing)。
+        let fixture_published = admission_fixture();
+        fixture_published.write_language_rules("# language\n");
+        publish_root_policy_with_receipt(&fixture_published, "op_waive_published");
+        assert_bootstrap_waiting(
+            fixture_published
+                .preflight()
+                .check(
+                    &fixture_published.launch_request(),
+                    &ProviderAdmissionPhase::Normal
+                )
+                .map(|_| ()),
+            "root_rules_missing",
+        );
+        assert_eq!(fixture_published.streaming_adapter.start_count(), 0);
+
+        // 成员规则缺失任何相位都不豁免(lcg_t03_member_language_rule_missing_
+        // is_not_root_phase_exempt 钉住 bootstrap 相位)。
 
         // 豁免不覆盖 policy：aggregate policy artifact 缺失仍 waiting。
         let fixture_no_policy = admission_fixture_without_policy();

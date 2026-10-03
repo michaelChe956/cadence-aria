@@ -298,6 +298,44 @@ impl RootRecipeReceiptStore {
         Ok(Some(existing))
     }
 
+    /// Task 3a:读取 LC 作用域内最新 finalize 的 receipt(纯投影,零副作用)。
+    ///
+    /// admission/verdict 消费 #8 发布链时需要「当前权威 receipt」:多个
+    /// receipt 在场时按 `finalized_at` 取最新;命令审计子目录
+    /// (`{operation_id}/commands/`)与其它扩展名跳过。receipt 在场但不可读/
+    /// 损坏 fail-closed(不把损坏事实当缺失放行)。
+    pub fn latest_finalized(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<RootRecipeReceipt>, ProductStoreError> {
+        let receipts_root = self.receipts_root(project_id)?;
+        if !receipts_root.try_exists().map_err(|error| {
+            ProductStoreError::Io(format!("try_exists {}: {error}", receipts_root.display()))
+        })? {
+            return Ok(None);
+        }
+        let entries = std::fs::read_dir(&receipts_root).map_err(|error| {
+            ProductStoreError::Io(format!("read {}: {error}", receipts_root.display()))
+        })?;
+        let mut latest: Option<RootRecipeReceipt> = None;
+        for entry in entries {
+            let path = entry
+                .map_err(|error| ProductStoreError::Io(format!("read receipt entry: {error}")))?
+                .path();
+            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            let receipt: RootRecipeReceipt = read_json(&path)?;
+            if latest
+                .as_ref()
+                .is_none_or(|current| receipt.finalized_at > current.finalized_at)
+            {
+                latest = Some(receipt);
+            }
+        }
+        Ok(latest)
+    }
+
     /// Durable 边界上的 receipt 事实校验：命令身份符合固定索引、allowlist
     /// 形状安全（绝不扩大为整个 root）、快照与 canonical root 自洽、
     /// verdict 与拒绝原因一致。

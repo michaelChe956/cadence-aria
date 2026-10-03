@@ -471,7 +471,8 @@ pub enum ProviderGatewayError {
     /// config digest 与 envelope 冻结值不一致。`dimension` 标记漂移维度便于审计。
     #[error("provider_gateway_policy_drift: {dimension}")]
     PolicyDrift { dimension: String },
-    /// resume 启动但 provider 的 `resume_evidence` 未 `Confirmed`(B-2 消费者)。
+    /// resume 启动但 action row 的 resume 分格未 `Confirmed`(Task 2b B-2 消费者,
+    /// `require_resume_supported`;旧 `resume_evidence` 二态不再消费)。
     /// fail-closed:`Denied`/`Unknown` 一律拒绝 resume。
     #[error("provider_gateway_resume_not_supported")]
     ResumeNotSupported,
@@ -1093,8 +1094,9 @@ impl LogicalCodebaseProviderGateway {
     ///    重算 `SessionResumeFingerprint` 与冻结值逐字一致(防 provider 被替换)。
     /// 3. **config digest**:据 envelope 的 `config_artifact_ref` 重算 digest,
     ///    与 envelope 冻结的 `config_digest` 一致(防托管配置被篡改)。
-    /// 4. **resume 能力**(B-2):若启动为 resume,provider 的 `resume_evidence` 必须
-    ///    `Confirmed`,否则 fail-closed 为 `ResumeNotSupported`。
+    /// 4. **resume 能力**(Task 2b B-2):若启动为 resume,action row 的 resume
+    ///    分格必须 `Confirmed`(`require_resume_supported`),否则 fail-closed 为
+    ///    `ResumeNotSupported`。
     /// 5. **canonical cwd 权威**(Task 2.8):重新 canonicalize spawn cwd 与
     ///    envelope 冻结的独立 `working_directory`,不一致返回
     ///    `TargetMismatch { field: "cwd" }`;冻结 cwd 越出 authority root
@@ -1313,10 +1315,6 @@ pub const PROVIDER_CAPABILITY_LAUNCH_NOT_CONFIRMED: &str =
 pub const PROVIDER_CAPABILITY_WRITE_BOUNDARY_NOT_CONFIRMED: &str =
     "provider_capability_write_boundary_not_confirmed";
 
-/// 正常 action row 的 resume 分格非 `Confirmed` 时的稳定判别码。
-pub const PROVIDER_CAPABILITY_RESUME_NOT_CONFIRMED: &str =
-    "provider_capability_resume_not_confirmed";
-
 /// root-recipe 相位仅接受固定 Claude recipe provider 的稳定判别码。
 pub const PROVIDER_ROOT_RECIPE_REQUIRES_FIXED_CLAUDE: &str =
     "root_recipe_requires_fixed_claude_provider";
@@ -1344,6 +1342,150 @@ pub fn ensure_bootstrap_policy(
     crate::product::json_store::ProductStoreError,
 > {
     AggregatePolicyArtifactStore::new(paths.clone()).ensure_bootstrap(manifest)
+}
+
+// ---------------------------------------------------------------------------
+// Task 3a(lcg_t03):#8 已发布政策正文的只读校验
+// ---------------------------------------------------------------------------
+
+/// 校验 #8 发布的最终政策正文与 digest 链(只读,零副作用)。
+///
+/// 消费契约(Global Constraints #8):gateway 只消费最终
+/// `artifact.policy_text` 原始 UTF-8 字节(= canonical root 下 `policy_id`
+/// locator 文件原字节)。本函数逐项核对:
+///
+/// 1. `policy_id` 是安全的相对 locator(非绝对路径、无 `..`/`.` 组件);
+/// 2. locator 解析无 symlink 逃逸:从 canonical root 逐组件走查,中间组件
+///    必须是真实目录、终组件必须是普通文件(拒绝任何 symlink 形态);
+/// 3. locator 原始字节 == `artifact.policy_text` 原始 UTF-8 字节;
+/// 4. digest 链三方一致:`artifact.digest == receipt.policy_digest ==
+///    SHA-256(locator 原字节)`;
+/// 5. receipt 冻结的 `canonical_root` 与 `authority_root` canonical 相等,
+///    且 artifact 的 `policy_id`/`revision` 自洽(id 以
+///    `policy/{project_id}/{logical_codebase_id}/{revision}` 组成);
+/// 6. `rule_digest` 独立读取 canonical root `AGENTS.md` 原字节重算比对
+///    (与 policy digest 不要求相等)。
+///
+/// 任何缺失/漂移 fail-closed 为 `Target`(IO/形态)或 `PolicyDrift`(digest
+/// 链维度);本函数绝不写文件、不物化 locator/AGENTS/成员规则副本。
+pub fn verify_published_policy_body(
+    authority_root: &Path,
+    artifact: &crate::product::logical_codebase::policy::AggregatePolicyArtifact,
+    receipt: &crate::product::logical_codebase::RootRecipeReceipt,
+) -> Result<(), ProviderGatewayError> {
+    // 1. policy_id 必须是安全相对 locator。
+    let locator_relative = Path::new(&artifact.policy_id);
+    if locator_relative.is_absolute() || artifact.policy_id.is_empty() {
+        return Err(ProviderGatewayError::Target(format!(
+            "policy id {} is not a safe relative locator",
+            artifact.policy_id
+        )));
+    }
+    let components: Vec<std::path::Component> = locator_relative.components().collect();
+    if components.is_empty()
+        || components
+            .iter()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(ProviderGatewayError::Target(format!(
+            "policy id {} contains non-normal path components",
+            artifact.policy_id
+        )));
+    }
+
+    // 2. receipt 与 authority 的 canonical root 一致。
+    let canonical_root = authority_root.canonicalize().map_err(|error| {
+        ProviderGatewayError::Target(format!(
+            "canonicalize authority root {}: {error}",
+            authority_root.display()
+        ))
+    })?;
+    let canonical_receipt_root = receipt.canonical_root.canonicalize().map_err(|error| {
+        ProviderGatewayError::Target(format!(
+            "canonicalize receipt root {}: {error}",
+            receipt.canonical_root.display()
+        ))
+    })?;
+    if canonical_root != canonical_receipt_root {
+        return Err(ProviderGatewayError::PolicyDrift {
+            dimension: "policy_receipt_root".to_string(),
+        });
+    }
+
+    // 3. artifact 的 policy_id/revision 自洽(id 组成即 revision 尾缀)。
+    let expected_id = format!(
+        "policy/{}/{}/{}",
+        artifact.project_id, artifact.logical_codebase_id, artifact.revision
+    );
+    if artifact.policy_id != expected_id {
+        return Err(ProviderGatewayError::PolicyDrift {
+            dimension: "policy_artifact_identity".to_string(),
+        });
+    }
+
+    // 4. locator 逐组件走查:无 symlink 逃逸,终组件是普通文件。
+    let mut locator = canonical_root.clone();
+    let last_index = components.len().saturating_sub(1);
+    for (index, component) in components.iter().enumerate() {
+        locator.push(component.as_os_str());
+        let metadata = std::fs::symlink_metadata(&locator).map_err(|error| {
+            ProviderGatewayError::Target(format!(
+                "read policy locator {}: {error}",
+                locator.display()
+            ))
+        })?;
+        if metadata.is_symlink() {
+            return Err(ProviderGatewayError::PolicyDrift {
+                dimension: "policy_locator_symlink".to_string(),
+            });
+        }
+        if index == last_index {
+            if !metadata.is_file() {
+                return Err(ProviderGatewayError::Target(format!(
+                    "policy locator {} is not a regular file",
+                    locator.display()
+                )));
+            }
+        } else if !metadata.is_dir() {
+            return Err(ProviderGatewayError::Target(format!(
+                "policy locator parent {} is not a directory",
+                locator.display()
+            )));
+        }
+    }
+
+    // 5. 原始字节比对 + digest 链三方一致。
+    let raw_body = std::fs::read(&locator).map_err(|error| {
+        ProviderGatewayError::Target(format!("read policy body {}: {error}", locator.display()))
+    })?;
+    if raw_body != artifact.policy_text.as_bytes() {
+        return Err(ProviderGatewayError::PolicyDrift {
+            dimension: "policy_body".to_string(),
+        });
+    }
+    let body_digest = format!("sha256:{:x}", Sha256::digest(&raw_body));
+    if artifact.digest != body_digest || receipt.policy_digest != body_digest {
+        return Err(ProviderGatewayError::PolicyDrift {
+            dimension: "policy_digest_chain".to_string(),
+        });
+    }
+
+    // 6. rule digest 独立读取 AGENTS.md 原字节重算。
+    let rule_entry = canonical_root
+        .join(crate::product::logical_codebase::root_recipe_receipt::ROOT_RULE_ENTRY_FILE);
+    let rule_bytes = std::fs::read(&rule_entry).map_err(|error| {
+        ProviderGatewayError::Target(format!(
+            "read root rule entry {}: {error}",
+            rule_entry.display()
+        ))
+    })?;
+    let rule_digest = format!("sha256:{:x}", Sha256::digest(&rule_bytes));
+    if receipt.rule_digest != rule_digest {
+        return Err(ProviderGatewayError::PolicyDrift {
+            dimension: "rule_digest".to_string(),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -1,3 +1,6 @@
+use crate::product::logical_codebase::policy::AggregatePolicyArtifactStore;
+use crate::product::logical_codebase::root_recipe_receipt::RootRecipeReceiptStore;
+
 fn bootstrap_waiting(reason_code: &str, detail: String) -> ProviderAdmissionError {
     ProviderAdmissionError::Waiting {
         reason_code: reason_code.to_string(),
@@ -83,6 +86,10 @@ pub struct ProviderAdmissionPreflightResult {
     pub rules: Vec<ProviderRuleReference>,
     pub capability_snapshot_ref: String,
     pub ready: bool,
+    /// Task 3a：canonical root 自身规则缺失事实（bootstrap 相位豁免时仍记录）。
+    pub missing_root_rules: Vec<String>,
+    /// Task 3a：成员 checkout 规则缺失事实（任何相位都构成阻断材料）。
+    pub missing_member_rules: Vec<String>,
     pub missing_materials: Vec<String>,
     pub allowed_actions: Vec<BootstrapActionKind>,
 }
@@ -141,27 +148,24 @@ impl LogicalCodebaseProviderAdmissionPreflight {
     ) -> Result<ProviderAdmissionPreflightResult, ProviderAdmissionError> {
         // 0. 相位凭据先核验（REQ-BOOT-04）：AggregateBootstrap 凭据必须仍与
         //    durable Running operation 一致；失效/漂移凭据 fail-closed，
-        //    绝不降级为普通 session 或放宽其他维度。
-        let waive_missing_root_rules = match phase {
-            ProviderAdmissionPhase::Normal => false,
-            ProviderAdmissionPhase::AggregateBootstrap(credential) => {
-                if credential.project_id != request.project_id {
-                    return Err(bootstrap_waiting(
-                        "bootstrap_project_mismatch",
-                        format!(
-                            "credential project {} does not match launch request project {}",
-                            credential.project_id, request.project_id
-                        ),
-                    ));
-                }
-                let operations = AggregateInitializationOperationStore::for_lc(
-                    self.paths.clone(),
-                    self.lc_id.clone(),
-                );
-                credential.reverify_against_running_operation(&operations, &self.lc_id)?;
-                true
+        //    绝不降级为普通 session 或放宽其他维度。Task 3a 起 bootstrap
+        //    相位的豁免面收窄为「根规则存在性」（成员规则任何相位阻断）。
+        if let ProviderAdmissionPhase::AggregateBootstrap(credential) = phase {
+            if credential.project_id != request.project_id {
+                return Err(bootstrap_waiting(
+                    "bootstrap_project_mismatch",
+                    format!(
+                        "credential project {} does not match launch request project {}",
+                        credential.project_id, request.project_id
+                    ),
+                ));
             }
-        };
+            let operations = AggregateInitializationOperationStore::for_lc(
+                self.paths.clone(),
+                self.lc_id.clone(),
+            );
+            credential.reverify_against_running_operation(&operations, &self.lc_id)?;
+        }
         let resolution = RepositoryAuthorityResolver::new(self.paths.clone()).resolve(
             RepositoryRoutingRequest {
                 project_id: request.project_id.clone(),
@@ -176,9 +180,14 @@ impl LogicalCodebaseProviderAdmissionPreflight {
 
         let mut missing_materials = Vec::new();
         let mut allowed_actions = Vec::new();
-        // 根规则存在性缺失（Task 1.2 与其他材料分离：自举相位凭据是唯一
-        // 豁免面，其余维度永不豁免）。
-        let mut missing_rules = Vec::new();
+        // Task 3a(lcg_t03)：admission 规则门拆分——
+        // - missing_member_rules：成员 checkout 的 `.claude/rules/language.md`，
+        //   任何相位都阻断（不是根规则豁免面）；
+        // - missing_root_rules：canonical root 自身的
+        //   `.claude/rules/language.md`（#8 发布链的 REQUIRED_POLICY_RULE），
+        //   仅 AggregateBootstrap 相位凭据可豁免「根规则尚未生成」。
+        let mut missing_member_rules = Vec::new();
+        let mut missing_root_rules = Vec::new();
 
         // 1. manifest：冷启动未登记时投影 waiting（Prepare）。
         let manifest =
@@ -235,7 +244,7 @@ impl LogicalCodebaseProviderAdmissionPreflight {
                     digest: Some(format!("sha256:{:x}", sha2::Sha256::digest(&bytes))),
                 }),
                 Err(_) => {
-                    missing_rules.push(format!(
+                    missing_member_rules.push(format!(
                         "member {} missing {}",
                         member.alias,
                         rule_path.display()
@@ -249,14 +258,14 @@ impl LogicalCodebaseProviderAdmissionPreflight {
                 }
             }
         }
-        if waive_missing_root_rules {
-            // BOOT-04（Task 1.2）：有效自举凭据只豁免「根规则尚未生成」——
-            // 缺失规则保持为记录事实（digest=None），不构成阻断材料，也
-            // 不污染后续维度的 missing_materials；其余维度照常必检。
-        } else if !missing_rules.is_empty() {
-            missing_materials.extend(missing_rules.clone());
+        if !missing_member_rules.is_empty() {
+            missing_materials.extend(missing_member_rules.clone());
             allowed_actions.push(BootstrapActionKind::Prepare);
             allowed_actions.push(BootstrapActionKind::Retry);
+        }
+        let root_rule_path = resolution.authority_root.join(".claude/rules/language.md");
+        if !root_rule_path.is_file() {
+            missing_root_rules.push(format!("root rules missing {}", root_rule_path.display()));
         }
 
         // 3. 聚合 policy artifact：digest/revision 由 store 校验后冻结进引用。
@@ -276,6 +285,73 @@ impl LogicalCodebaseProviderAdmissionPreflight {
                 allowed_actions: vec![BootstrapActionKind::Prepare, BootstrapActionKind::Retry],
             }
         })?;
+
+        // 3b. Task 3a(lcg_t03)：#8 政策正文消费门（Normal 相位 + 非自举桩
+        //     artifact）。只读加载 LC 作用域最新最终 receipt 并逐项校验
+        //     locator 正文/digest 链/rule digest；缺失或漂移一律停等
+        //     `provider_policy_artifact_missing`（可操作 Revalidate/Retry），
+        //     绝不物化正文、不回退内部 JSON。自举桩政策（存量迁移前）与
+        //     AggregateBootstrap recipe 链保持旧语义零回归。
+        let artifact_store = AggregatePolicyArtifactStore::for_lc(self.paths.clone(), &self.lc_id);
+        let artifact = artifact_store.get(&request.project_id)?;
+        let published_artifact = match artifact {
+            Some(artifact) if !artifact.is_bootstrap_placeholder() => Some(artifact),
+            _ => None,
+        };
+        if let Some(artifact) = published_artifact.as_ref()
+            && matches!(phase, ProviderAdmissionPhase::Normal)
+        {
+            let receipts = RootRecipeReceiptStore::for_lc(self.paths.clone(), &self.lc_id);
+            match receipts.latest_finalized(&request.project_id)? {
+                None => {
+                    return Err(ProviderAdmissionError::Waiting {
+                        reason_code: "provider_policy_artifact_missing".to_string(),
+                        detail: format!(
+                            "logical codebase {} has no finalized root recipe receipt for the published policy",
+                            self.lc_id
+                        ),
+                        missing_materials: missing_materials.clone(),
+                        allowed_actions: vec![
+                            BootstrapActionKind::Revalidate,
+                            BootstrapActionKind::Retry,
+                        ],
+                    });
+                }
+                Some(receipt) => {
+                    if let Err(error) = crate::product::logical_codebase::provider_gateway::verify_published_policy_body(
+                        &resolution.authority_root,
+                        artifact,
+                        &receipt,
+                    ) {
+                        return Err(ProviderAdmissionError::Waiting {
+                            reason_code: "provider_policy_artifact_missing".to_string(),
+                            detail: format!("published policy body verification failed: {error}"),
+                            missing_materials: missing_materials.clone(),
+                            allowed_actions: vec![
+                                BootstrapActionKind::Revalidate,
+                                BootstrapActionKind::Retry,
+                            ],
+                        });
+                    }
+                }
+            }
+        }
+
+        // 3c. 根规则门（Normal + 已发布真实政策）：根规则缺失不再可豁免。
+        if matches!(phase, ProviderAdmissionPhase::Normal)
+            && published_artifact.is_some()
+            && !missing_root_rules.is_empty()
+        {
+            return Err(ProviderAdmissionError::Waiting {
+                reason_code: "root_rules_missing".to_string(),
+                detail: format!(
+                    "logical codebase {} root rules are missing under the canonical root",
+                    self.lc_id
+                ),
+                missing_materials: [missing_materials.clone(), missing_root_rules.clone()].concat(),
+                allowed_actions: vec![BootstrapActionKind::Prepare, BootstrapActionKind::Retry],
+            });
+        }
 
         // 4. 真实 gateway 谓词：bootstrap capability 记录不满足 snapshot/action
         //    时在此拒绝（validate 不启动 provider）。
@@ -342,8 +418,45 @@ impl LogicalCodebaseProviderAdmissionPreflight {
         let cwd = if request.working_directory.is_absolute() {
             request.working_directory.clone()
         } else {
-            manifest.provider_context_root.join(&request.working_directory)
+            manifest
+                .provider_context_root
+                .join(&request.working_directory)
         };
+        // 6a. Task 3a(lcg_t03)：cwd canonical 全等门——进程 cwd 必须等于
+        //     manifest `provider_context_root` 的 canonical path；authority
+        //     子目录（仅 prefix 命中）不是合法 cwd。
+        let canonical_cwd =
+            cwd.canonicalize()
+                .map_err(|error| ProviderAdmissionError::Waiting {
+                    reason_code: "cwd_authority_drift".to_string(),
+                    detail: format!("canonicalize request cwd {}: {error}", cwd.display()),
+                    missing_materials: missing_materials.clone(),
+                    allowed_actions: vec![BootstrapActionKind::Revalidate],
+                })?;
+        let canonical_authority = resolution.authority_root.canonicalize().map_err(|error| {
+            ProviderAdmissionError::Waiting {
+                reason_code: "cwd_authority_drift".to_string(),
+                detail: format!(
+                    "canonicalize authority root {}: {error}",
+                    resolution.authority_root.display()
+                ),
+                missing_materials: missing_materials.clone(),
+                allowed_actions: vec![BootstrapActionKind::Revalidate],
+            }
+        })?;
+        if canonical_cwd != canonical_authority {
+            return Err(ProviderAdmissionError::Waiting {
+                reason_code: "cwd_authority_drift".to_string(),
+                detail: format!(
+                    "request cwd {} canonicalizes to {} which is not the canonical authority root {}",
+                    cwd.display(),
+                    canonical_cwd.display(),
+                    canonical_authority.display()
+                ),
+                missing_materials: missing_materials.clone(),
+                allowed_actions: vec![BootstrapActionKind::Revalidate],
+            });
+        }
         self.gateway
             .revalidate_before_spawn(&validated, &cwd, false)
             .map_err(|error| ProviderAdmissionError::Waiting {
@@ -372,6 +485,8 @@ impl LogicalCodebaseProviderAdmissionPreflight {
             rules,
             capability_snapshot_ref: validated.capability_snapshot_ref().to_string(),
             ready: true,
+            missing_root_rules,
+            missing_member_rules,
             missing_materials,
             allowed_actions: Vec::new(),
         })
