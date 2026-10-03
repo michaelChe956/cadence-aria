@@ -11,6 +11,8 @@ struct D4MemberFixture {
     #[allow(dead_code)]
     target_checkout: PathBuf,
     other_active_checkout: PathBuf,
+    /// manifest 成员身份（Task 6b 窗口变化用例需要重签 manifest）。
+    member_ids: Vec<LogicalRepositoryId>,
 }
 
 fn seed_d4_member_codebase(
@@ -110,6 +112,7 @@ fn seed_d4_member_codebase(
     D4MemberFixture {
         target_checkout: repo_a,
         other_active_checkout: repo_b,
+        member_ids: vec![member_a, member_b, removed_member],
     }
 }
 
@@ -177,7 +180,6 @@ async fn drive_logical_coding_run(
     Arc<GatewayRunAudit>,
 ) {
     override_coder_to_claude_code(store, attempt);
-    let audit = Arc::new(GatewayRunAudit::new());
     let role_run = store
         .create_role_run(
             attempt,
@@ -187,6 +189,25 @@ async fn drive_logical_coding_run(
             None,
         )
         .expect("create role run");
+    drive_logical_coding_run_for_role_run(store, attempt, &role_run, drift_target).await
+}
+
+/// [`drive_logical_coding_run`] 的显式 role_run 变体（Task 6b）：调用方先创建
+/// role run 并可在其 spawn 前冻结/漂移 D4 基线，再驱动该 role run 的真实流。
+#[allow(clippy::type_complexity)]
+async fn drive_logical_coding_run_for_role_run(
+    store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+    role_run: &CodingRoleRun,
+    drift_target: Option<PathBuf>,
+) -> (
+    ProviderInvocationOutcome,
+    Arc<std::sync::atomic::AtomicUsize>,
+    Arc<std::sync::Mutex<Option<serde_json::Value>>>,
+    Arc<GatewayRunAudit>,
+) {
+    override_coder_to_claude_code(store, attempt);
+    let audit = Arc::new(GatewayRunAudit::new());
     let baseline_path = CodingAttemptStore::new(store.paths())
         .attempt_cross_target_baselines_path(
             &attempt.project_id,
@@ -242,7 +263,7 @@ async fn drive_logical_coding_run(
         .run_provider_stream_invocation(CodingProviderStreamRun {
             attempt,
             node_id: "d4-seam-probe-node",
-            role_run: Some(&role_run),
+            role_run: Some(role_run),
             provider: probe.as_ref(),
             legacy_input: &legacy_input,
             input: provider_input,
@@ -701,5 +722,297 @@ async fn logical_coder_without_validated_gateway_zero_spawns() {
         probe.spawns.load(std::sync::atomic::Ordering::SeqCst),
         0,
         "zero provider spawns without a validated gateway launch"
+    );
+}
+
+// ================= Task 6b：D4 baseline freshness 只读复检 seam（REQ-LCG-03/07） =================
+
+use crate::product::coding_attempt_store::StableCode;
+use crate::product::coding_workspace_engine::cross_target_check::{
+    capture_cross_target_baseline, revalidate_cross_target_baseline,
+};
+
+fn new_coder_role_run(
+    store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+) -> CodingRoleRun {
+    store
+        .create_role_run(
+            attempt,
+            CodingExecutionStage::Coding,
+            CodingProviderRole::Coder,
+            CodingRoleRunTrigger::Initial,
+            None,
+        )
+        .expect("create role run")
+}
+
+/// 冻结本 role run 的 D4 基线（模拟准入/验证时点的首采），返回 baseline 文件
+/// 路径。Task 6b 用它在 spawn 前制造「冻结早于 spawn」的复检窗口。
+fn freeze_d4_baseline_for_role_run(
+    store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+    role_run: &CodingRoleRun,
+) -> PathBuf {
+    capture_cross_target_baseline(&store.paths(), attempt, &role_run.id)
+        .expect("admission-time baseline freeze");
+    CodingAttemptStore::new(store.paths())
+        .attempt_cross_target_baselines_path(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &role_run.id,
+        )
+        .expect("baseline path")
+}
+
+/// Task 6b（REQ-LCG-03/07 D4 基线 freshness）：基线冻结与 spawn 之间发生漂移
+/// （非 target active 成员主 checkout 被写）时，spawn 前复检 seam 必须
+/// fail-closed 阻断本次 role run——provider 子进程计数为 0，冻结基线保持
+/// 原样（不得静默重冻结把漂移洗白成新基线）。
+#[tokio::test]
+async fn lcg_t06_d4_baseline_drift_before_spawn_zero_child() {
+    let (root, store, attempt) = running_attempt_with_worktree();
+    // Removed 成员主 checkout 已清理（移除后常态）：窗口恰为 2 个 active 成员。
+    let members = seed_d4_member_codebase(&store, &attempt, root.path(), false);
+    let logical_attempt = with_target_snapshot(&store, &attempt);
+
+    // 冻结时点（准入/验证）先采集本 role run 的基线，再在 spawn 前制造漂移。
+    let role_run = new_coder_role_run(&store, &logical_attempt);
+    let baseline_path = freeze_d4_baseline_for_role_run(&store, &logical_attempt, &role_run);
+    std::fs::write(
+        members.other_active_checkout.join("trespass.txt"),
+        "drift between freeze and spawn\n",
+    )
+    .expect("pre-spawn drift into non-target member main checkout");
+
+    let (outcome, spawns, _baseline_at_spawn, audit) =
+        drive_logical_coding_run_for_role_run(&store, &logical_attempt, &role_run, None).await;
+
+    let spawn_count_after_d4_drift = spawns.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(spawn_count_after_d4_drift, 0);
+    assert!(
+        !matches!(outcome, ProviderInvocationOutcome::Completed(_)),
+        "drifted baseline must fail the spawn pre-gate, got {outcome:?}"
+    );
+    let outcome_text = format!("{outcome:?}");
+    assert!(
+        outcome_text.contains("cross_target_baseline_capture_failed")
+            && outcome_text.contains("cross_target_violation_detected"),
+        "expected cross_target drift to fail the capture seam, got: {outcome_text}"
+    );
+    assert_eq!(
+        audit.stream_launches(),
+        0,
+        "gateway must not launch any stream when the frozen baseline has drifted"
+    );
+
+    // 冻结基线不得被漂移后的重采洗白：文件仍是首采的干净快照。
+    let frozen: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&baseline_path).expect("frozen baseline survives"),
+    )
+    .expect("frozen baseline json");
+    for snapshot in frozen["member_checkouts"]
+        .as_array()
+        .expect("frozen member_checkouts array")
+    {
+        assert_eq!(
+            snapshot["porcelain_status"].as_str(),
+            Some(""),
+            "frozen baseline must keep the admission-time clean snapshot"
+        );
+    }
+}
+
+/// Task 6b 正例：基线冻结后无漂移时，同 role run 重入的 spawn 前复检放行——
+/// 恰一次 spawn 经 gateway，会话正常完成（复检不产生假阳性阻断）。
+#[tokio::test]
+async fn lcg_t06_d4_baseline_fresh_reentry_spawns_once() {
+    let (root, store, attempt) = running_attempt_with_worktree();
+    let _members = seed_d4_member_codebase(&store, &attempt, root.path(), false);
+    let logical_attempt = with_target_snapshot(&store, &attempt);
+
+    let role_run = new_coder_role_run(&store, &logical_attempt);
+    freeze_d4_baseline_for_role_run(&store, &logical_attempt, &role_run);
+
+    let (outcome, spawns, baseline_at_spawn, audit) =
+        drive_logical_coding_run_for_role_run(&store, &logical_attempt, &role_run, None).await;
+
+    assert!(
+        matches!(outcome, ProviderInvocationOutcome::Completed(_)),
+        "fresh baseline must not block the spawn, got {outcome:?}"
+    );
+    assert_eq!(
+        spawns.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "exactly one provider spawn when the frozen baseline is still fresh"
+    );
+    assert_eq!(
+        audit.stream_launches(),
+        1,
+        "the spawn must be audited by the gateway run audit"
+    );
+    assert!(
+        baseline_at_spawn
+            .lock()
+            .expect("baseline probe mutex")
+            .is_some(),
+        "the frozen baseline must still be readable at spawn"
+    );
+}
+
+/// Task 6b 负例（seam 直连）：冻结后任一 active 成员主 checkout 漂移 →
+/// `revalidate_cross_target_baseline` 只读复检返回 `cross_target_violation_detected`。
+#[test]
+fn lcg_t06_revalidate_blocks_drifted_member_checkout() {
+    let (root, store, attempt) = running_attempt_with_worktree();
+    let members = seed_d4_member_codebase(&store, &attempt, root.path(), false);
+    let logical_attempt = with_target_snapshot(&store, &attempt);
+    let role_run = new_coder_role_run(&store, &logical_attempt);
+    freeze_d4_baseline_for_role_run(&store, &logical_attempt, &role_run);
+
+    std::fs::write(
+        members.other_active_checkout.join("trespass.txt"),
+        "out of worktree write\n",
+    )
+    .expect("post-freeze drift");
+
+    assert_eq!(
+        revalidate_cross_target_baseline(&store.paths(), &logical_attempt, &role_run.id),
+        Err(StableCode::CrossTargetViolationDetected)
+    );
+}
+
+/// Task 6b 负例（seam 直连）：冻结基线文件缺失（崩溃重启/丢失）→ 复检返回
+/// `cross_target_baseline_missing`——证据不足 fail-closed，绝不折算成放行。
+#[test]
+fn lcg_t06_revalidate_blocks_missing_baseline_file() {
+    let (root, store, attempt) = running_attempt_with_worktree();
+    seed_d4_member_codebase(&store, &attempt, root.path(), false);
+    let logical_attempt = with_target_snapshot(&store, &attempt);
+    let role_run = new_coder_role_run(&store, &logical_attempt);
+    let baseline_path = freeze_d4_baseline_for_role_run(&store, &logical_attempt, &role_run);
+
+    std::fs::remove_file(&baseline_path).expect("simulate baseline loss");
+
+    assert_eq!(
+        revalidate_cross_target_baseline(&store.paths(), &logical_attempt, &role_run.id),
+        Err(StableCode::CrossTargetBaselineMissing)
+    );
+}
+
+/// Task 6b 负例（重采全部 active main checkout）：冻结后 LC 新增 active 成员
+/// （窗口增长）→ 复检把「现窗口 ≠ 冻结窗口」判为差异阻断；交付统一门同语义
+/// 阻断（旧 frozen-window detect 检不出窗口增长，新 seam 必须拦下）。
+#[tokio::test]
+async fn lcg_t06_revalidate_resamples_full_active_main_window() {
+    let (root, store, attempt) = running_attempt_with_worktree();
+    let members = seed_d4_member_codebase(&store, &attempt, root.path(), false);
+    let logical_attempt = with_target_snapshot(&store, &attempt);
+    let role_run = new_coder_role_run(&store, &logical_attempt);
+    freeze_d4_baseline_for_role_run(&store, &logical_attempt, &role_run);
+
+    // 冻结窗口 {A, B} → 现窗口 {A, B, D}：新增干净 active 成员 D。
+    let repo_d = root.path().join("repo_d");
+    std::fs::create_dir_all(&repo_d).expect("repo_d dir");
+    init_test_git_repo(&repo_d);
+    let member_d = LogicalRepositoryId(uuid::Uuid::new_v4());
+    let logical_store = LogicalCodebaseStore::new(store.paths());
+    let mut member_ids = members.member_ids.clone();
+    member_ids.push(member_d);
+    logical_store
+        .save_manifest(
+            &logical_attempt.project_id,
+            &LogicalCodebaseManifest::new(
+                &logical_attempt.project_id,
+                store.paths().root().to_path_buf(),
+                member_ids,
+            ),
+        )
+        .expect("re-sign manifest with the new active member");
+    let now = "2026-10-01T00:00:00Z".to_string();
+    let source_identity =
+        RepositorySourceIdentity::from_git_parts(&repo_d, repo_d.join(".git"), None);
+    let checkout_d = RepositoryCheckoutId(uuid::Uuid::new_v4());
+    logical_store
+        .save_member(
+            &logical_attempt.project_id,
+            &CodebaseMemberRecord {
+                logical_repository_id: member_d,
+                physical_repository_id: "repository_0001".to_string(),
+                alias: "repo_d".to_string(),
+                role: "repository".to_string(),
+                ordinal: 2,
+                source_identity,
+                repo_type: RepositoryType::Unknown,
+                tech_stack: Vec::new(),
+                owner: None,
+                tags: Vec::new(),
+                default_ref: None,
+                checkout_ids: vec![checkout_d],
+                status: MemberStatus::Active,
+                created_at: now.clone(),
+                updated_at: now.clone(),
+            },
+        )
+        .expect("save member d");
+    logical_store
+        .save_checkout(
+            &logical_attempt.project_id,
+            &RepositoryCheckoutRecord {
+                checkout_id: checkout_d,
+                logical_repository_id: member_d,
+                physical_repository_id: "repository_0001".to_string(),
+                kind: CheckoutKind::Main,
+                canonical_path: repo_d,
+                checkout_path_hash: "sha256:checkout".to_string(),
+                git_dir_identity: "sha256:git-dir".to_string(),
+                revision: None,
+                availability: CheckoutAvailability::Available,
+                observed_at: now.clone(),
+                created_at: now.clone(),
+                updated_at: now,
+            },
+        )
+        .expect("save checkout d");
+
+    // seam 直连：重采全部 active main checkout，窗口增长即差异。
+    assert_eq!(
+        revalidate_cross_target_baseline(&store.paths(), &logical_attempt, &role_run.id),
+        Err(StableCode::CrossTargetViolationDetected)
+    );
+
+    // 交付统一门同语义：窗口变化必须阻断交付。
+    let (event_tx, _event_rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), event_tx);
+    match engine
+        .execute_review_request(&logical_attempt, "origin", "feat: window grew")
+        .await
+    {
+        Err(CodingWorkspaceEngineError::CrossTargetDeliveryBlocked(code)) => {
+            assert_eq!(code, "cross_target_violation_detected");
+        }
+        other => panic!("expected CrossTargetDeliveryBlocked, got {other:?}"),
+    }
+}
+
+/// Task 6b 负例（fail-closed 证据不足）：冻结后成员主 checkout 的 git 元数据
+/// 不可采样（如 `.git` 丢失）→ 复检返回 `cross_target_store_failure`——证据
+/// 不足只能阻断，不得折算成「无漂移」或 Unknown 放行（复检不是用户 normal
+/// action 的旁路）。
+#[test]
+fn lcg_t06_revalidate_fails_closed_on_unsampled_checkout() {
+    let (root, store, attempt) = running_attempt_with_worktree();
+    let members = seed_d4_member_codebase(&store, &attempt, root.path(), false);
+    let logical_attempt = with_target_snapshot(&store, &attempt);
+    let role_run = new_coder_role_run(&store, &logical_attempt);
+    freeze_d4_baseline_for_role_run(&store, &logical_attempt, &role_run);
+
+    std::fs::remove_dir_all(members.other_active_checkout.join(".git"))
+        .expect("destroy member git metadata");
+
+    assert_eq!(
+        revalidate_cross_target_baseline(&store.paths(), &logical_attempt, &role_run.id),
+        Err(StableCode::CrossTargetStoreFailure)
     );
 }
