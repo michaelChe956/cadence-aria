@@ -293,8 +293,9 @@ fn boundary_evidence_ref_for(plan: &ProviderBoundaryPlan) -> String {
     boundary_plan_ref(plan)
 }
 
-/// MCP 来源字段校验:只接受 Aria 注入 bundle digest(`sha256:` 前缀)或
-/// native 项目配置来源标记;空串 fail-closed(来源必须显式标注,不冒充)。
+/// MCP 来源字段校验:来源必须显式非空标注——Aria 注入时为 bundle digest
+/// (形态由 `mcp_bundle::validate_bundle` 冻结,现为裸 64 位 hex),无注入
+/// 时为 native 项目配置来源标记;空串 fail-closed(不冒充任一来源)。
 fn verify_mcp_source(mcp_bundle_digest: &str) -> Result<(), ProviderProjectionError> {
     if mcp_bundle_digest.trim().is_empty() {
         return Err(ProviderProjectionError::Invalid(

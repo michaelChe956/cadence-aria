@@ -378,7 +378,6 @@ impl StreamingProviderAdapter for KimiCodeProvider {
         //    来源,不冒充 Aria bundle digest)。trust digest 的 gateway 侧
         //    装配(ProviderTrustSource)归 1b/1c;空串同样纳入 session
         //    digest,装配后任一漂移都会改变 projection_digest。
-        eprintln!("LC4C-DBG: version probed ok: {provider_version}");
         let boundary = projection::lc_boundary_plan(&envelope).map_err(|error| {
             ProviderAdapterError::parse_error(
                 format!("kimi lc validated start: {error}"),
@@ -487,7 +486,6 @@ impl StreamingProviderAdapter for KimiCodeProvider {
         let handshake_bound = Duration::from_secs(u64::from(input.timeout_secs.max(1)));
         let session_cancel = cancel.clone();
 
-        eprintln!("LC4C-DBG: child spawned, handing to session task");
         // 8) 会话任务(与 direct `start` 同构:stderr 收集 + MCP 注入决策
         //    + 失败 kill 链);差异:携带 LC boundary plan 与统一 audit
         //    落盘上下文。

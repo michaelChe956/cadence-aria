@@ -193,7 +193,6 @@ where
     let timeout_secs = input.timeout_secs.max(1);
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
 
-    eprintln!("LC4C-DBG: inner starting, sending initialize");
     let initialize = match request_control(
         &peer,
         json!({
@@ -325,10 +324,6 @@ where
     // 落盘 provider_start(回填握手原生会话 id);落盘成功才回传握手结果。
     // 落盘失败 fail-closed(会话终止,由 mod.rs 会话任务的既有 kill 链
     // 回收子进程)。
-    eprintln!(
-        "LC4C-DBG: post-handshake audit block reached, session_id={}",
-        session_id
-    );
     let target_boundary = lc.as_ref().map(|lc| lc.boundary.clone());
     if let Some(lc) = lc {
         let mut audit_event = lc.audit_template;
