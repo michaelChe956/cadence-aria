@@ -2,6 +2,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::cross_cutting::provider_boundary::ProviderBoundaryPlan;
+use crate::cross_cutting::tool_policy_audit::{
+    DurableToolPolicyEvent, ProviderStartAudit, ToolPolicyAuditSink,
+};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -56,6 +60,20 @@ impl Drop for CommandRelayGuard {
     }
 }
 
+/// Task 4c:LC validated 会话上下文——不可伪造 target boundary plan 与统一
+/// launch audit 的会话内落盘(native session/handshake 之后)。
+/// `audit_template.provider_session_id` 在握手前留空,由 `session/new`/
+/// `session/load` 返回的原生会话 id 回填后经 `audit_sink` 落盘;落盘成功
+/// 才经 `native_id_tx` 向 `start_validated` 回传握手结果。
+pub(crate) struct LcValidatedSession {
+    pub(crate) boundary: ProviderBoundaryPlan,
+    pub(crate) audit_sink: Arc<dyn ToolPolicyAuditSink>,
+    pub(crate) audit_template: ProviderStartAudit,
+    pub(crate) native_id_tx: tokio::sync::oneshot::Sender<
+        Result<String, crate::cross_cutting::provider_adapter::ProviderAdapterError>,
+    >,
+}
+
 /// MCP 兼容入口（测试与既有调用方使用）：等价于不带 bundle 的
 /// `run_kimi_session_with_mcp`，保持 `mcpServers: []`。
 #[cfg_attr(not(test), allow(dead_code))]
@@ -69,7 +87,7 @@ pub(crate) async fn run_kimi_session<W>(
 where
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    run_kimi_session_inner(peer, command_rx, event_tx, input, None, cancel).await
+    run_kimi_session_inner(peer, command_rx, event_tx, input, None, None, cancel).await
 }
 
 /// 带 MCP 受控注入的会话入口：`mcpServers` 由经校验的 bundle 派生；
@@ -85,7 +103,44 @@ pub(crate) async fn run_kimi_session_with_mcp<W>(
 where
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    run_kimi_session_inner(peer, command_rx, event_tx, input, mcp_injection, cancel).await
+    run_kimi_session_inner(
+        peer,
+        command_rx,
+        event_tx,
+        input,
+        mcp_injection,
+        None,
+        cancel,
+    )
+    .await
+}
+
+/// LC validated 会话入口(Task 4c):携带不可伪造 target boundary plan 与
+/// 统一 launch audit 上下文——native session/handshake 完成后回填原生会话
+/// id 落盘 `ProviderStartAudit.lc_projection`,成功后向调用方回传握手
+/// 结果;宿主 fs/terminal 消费同一 boundary plan(读写面分离)。
+pub(crate) async fn run_kimi_session_validated<W>(
+    peer: JsonRpcPeer<W>,
+    command_rx: mpsc::Receiver<ProviderCommand>,
+    event_tx: mpsc::Sender<ProviderEvent>,
+    input: StreamingProviderInput,
+    mcp_injection: Option<KimiMcpInjection>,
+    lc: LcValidatedSession,
+    cancel: CancellationToken,
+) -> Result<(), ProviderAdapterError>
+where
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    run_kimi_session_inner(
+        peer,
+        command_rx,
+        event_tx,
+        input,
+        mcp_injection,
+        Some(lc),
+        cancel,
+    )
+    .await
 }
 
 async fn run_kimi_session_inner<W>(
@@ -94,6 +149,7 @@ async fn run_kimi_session_inner<W>(
     event_tx: mpsc::Sender<ProviderEvent>,
     input: StreamingProviderInput,
     mcp_injection: Option<KimiMcpInjection>,
+    lc: Option<LcValidatedSession>,
     cancel: CancellationToken,
 ) -> Result<(), ProviderAdapterError>
 where
@@ -137,6 +193,7 @@ where
     let timeout_secs = input.timeout_secs.max(1);
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
 
+    eprintln!("LC4C-DBG: inner starting, sending initialize");
     let initialize = match request_control(
         &peer,
         json!({
@@ -264,6 +321,31 @@ where
             .await;
     }
 
+    // Task 4c 统一 launch audit:native session/handshake 之后、prompt 之前
+    // 落盘 provider_start(回填握手原生会话 id);落盘成功才回传握手结果。
+    // 落盘失败 fail-closed(会话终止,由 mod.rs 会话任务的既有 kill 链
+    // 回收子进程)。
+    eprintln!(
+        "LC4C-DBG: post-handshake audit block reached, session_id={}",
+        session_id
+    );
+    let target_boundary = lc.as_ref().map(|lc| lc.boundary.clone());
+    if let Some(lc) = lc {
+        let mut audit_event = lc.audit_template;
+        audit_event.provider_session_id = session_id.clone();
+        if let Err(error) = lc
+            .audit_sink
+            .append_bound(DurableToolPolicyEvent::ProviderStart(audit_event))
+        {
+            let failure = provider_error(format!(
+                "kimi lc validated session: provider_start audit append failed: {error}"
+            ));
+            let _ = lc.native_id_tx.send(Err(failure.clone()));
+            return Err(failure);
+        }
+        let _ = lc.native_id_tx.send(Ok(session_id.clone()));
+    }
+
     let dispatcher = KimiClientServiceDispatcher::new(
         peer.clone(),
         session_id.clone(),
@@ -275,9 +357,9 @@ where
         cancel.clone(),
         // REQ-PIB-02：基线会话锚点透传（fs 读路由基线树 / terminal 拒绝）。
         input.baseline_tree.clone(),
-        // LC target 边界(Task 4c):direct 入口无 boundary plan;LC
-        // validated 路径经 `run_kimi_session_validated` 传入。
-        None,
+        // LC target 边界(Task 4c):fs read/write 与 terminal 消费同一
+        // 不可伪造 plan;direct 入口为 None,行为不变。
+        target_boundary,
     );
 
     let mut next_prompt_id = 4_u64;

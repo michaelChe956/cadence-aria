@@ -75,7 +75,6 @@ struct ClientServiceState {
     /// linked-worktree git-dir 沿冻结授权;terminal 实际 cwd 不改变
     /// provider 进程 cwd。`None`(direct 会话)行为不变,原 24 格
     /// ClientServicePolicy 决策表保持原值。
-    #[allow(dead_code)] // Task 4c 阶段 1 RED 桩:阶段 2 由 fs/terminal handler 消费。
     target_boundary: Option<ProviderBoundaryPlan>,
     /// 会话私有清理 token：随引擎 run token（父）取消而取消；dispatcher Drop 时
     /// 只取消它，绝不反噬父 token——否则 kimi 正常完成后会 cancel 引擎 run，
@@ -145,10 +144,26 @@ where
         target_boundary: Option<ProviderBoundaryPlan>,
     ) -> Self {
         let root = canonicalize_root(&working_dir).unwrap_or(working_dir);
+        // Task 4c 一致性早门:LC plan 的进程 cwd 必须即会话根(plan 与 root
+        // 同源于 start_validated 的 envelope;不一致说明装配链被伪造,
+        // fail-closed 拒绝构造)。
+        if let Some(plan) = target_boundary.as_ref()
+            && plan.working_directory() != root
+        {
+            // 无自然错误通道(dispatcher 构造无 Result):退化为无 plan 的
+            // direct 形态会被写成「host 全可写」,绝不可接受——直接 panic
+            // fail-closed(装配 bug 属程序错误,不是可运行状态)。
+            panic!(
+                "lc target boundary plan working directory {} disagrees with the session root {}",
+                plan.working_directory().display(),
+                root.display()
+            );
+        }
         // Freeze the git bind face before the coder can touch the root:
         // per-command re-resolution would follow a swapped `.git` pointer
-        // (F-17 fix round 2).
-        let writable_git_paths = writable_git_paths_for(&role, &root);
+        // (F-17 fix round 2). LC 会话(Task 4c)按 plan 的 target root
+        // 解析(read-only plan 无写面,不解析);direct 会话按 role。
+        let writable_git_paths = writable_git_paths_for(&role, &root, target_boundary.as_ref());
         let bwrap = probe_bwrap();
         // Command output is served through `terminal/output`
         // request/response (see `handle_terminal_output`); kimi 0.38.0
@@ -324,11 +339,24 @@ async fn evaluate_policy(
 /// per retry/rework round, would let a sandboxed coder rewrite the `.git`
 /// pointer (or `<gitdir>/gitdir`/`commondir`) and aim the extra rw binds at
 /// an arbitrary valid host git dir.
-fn writable_git_paths_for(role: &AdapterRole, root: &Path) -> Vec<PathBuf> {
-    if matches!(role, AdapterRole::Executor) {
-        frozen_writable_git_paths(root)
-    } else {
-        Vec::new()
+fn writable_git_paths_for(
+    role: &AdapterRole,
+    root: &Path,
+    boundary: Option<&ProviderBoundaryPlan>,
+) -> Vec<PathBuf> {
+    match boundary {
+        // LC 会话(Task 4c):git bind 面唯一锚定 plan 的 target root
+        // (linked-worktree git-dir 沿冻结授权);read-only plan 无写面。
+        Some(plan) => match plan.mode() {
+            crate::cross_cutting::provider_boundary::ProviderBoundaryMode::TargetWriteOnly => plan
+                .target_root()
+                .map(frozen_writable_git_paths)
+                .unwrap_or_default(),
+            crate::cross_cutting::provider_boundary::ProviderBoundaryMode::ReadOnly => Vec::new(),
+        },
+        // direct 会话:保持原值(仅 Executor 解析,其余角色为空)。
+        None if matches!(role, AdapterRole::Executor) => frozen_writable_git_paths(root),
+        None => Vec::new(),
     }
 }
 

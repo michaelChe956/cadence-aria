@@ -403,12 +403,14 @@ fn lcg_t04_kimi_native_mcp_is_not_aria_bundle() {
     assert_eq!(native.mcp_bundle_digest(), KIMI_NATIVE_MCP_SOURCE);
     assert!(!native.mcp_bundle_digest().starts_with("sha256:"));
 
-    // aria:注入 bundle digest 原样进投影。
+    // aria:注入 bundle digest 原样进投影(既有 bundle digest 为裸 64 位
+    // hex,与 native 标记可区分)。
     let aria = projector
         .project(&input_with_mcp(bundle.digest()))
         .expect("aria-bundle projection is produced");
     assert_eq!(aria.mcp_bundle_digest(), bundle.digest());
-    assert!(aria.mcp_bundle_digest().starts_with("sha256:"));
+    assert_eq!(aria.mcp_bundle_digest().len(), 64);
+    assert_ne!(aria.mcp_bundle_digest(), KIMI_NATIVE_MCP_SOURCE);
 
     // 来源漂移两层 digest 都变(可检)。
     assert_ne!(native.projection_digest(), aria.projection_digest());

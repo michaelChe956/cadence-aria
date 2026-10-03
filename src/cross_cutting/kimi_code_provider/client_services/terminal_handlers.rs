@@ -20,6 +20,8 @@ use super::sandbox::{
 use super::terminal::{TerminalCommand, TerminalIsolation, TerminalResult};
 use super::{ClientServiceError, ClientServiceState, check_session, evaluate_policy};
 
+use crate::cross_cutting::provider_boundary::ProviderBoundaryMode;
+
 #[cfg(test)]
 use super::policy::ClientServicePolicy;
 #[cfg(test)]
@@ -80,7 +82,14 @@ fn isolation_for(state: &ClientServiceState) -> Result<TerminalIsolation, Client
                 // re-resolved here: the coder can rewrite `.git` inside
                 // the writable root and aim a fresh resolution at any
                 // valid host git dir (F-17 fix round 2).
-                let writable_root = matches!(state.policy.role, AdapterRole::Executor);
+                //
+                // Task 4c 读写面分离:LC 会话的可写面由 boundary plan 决定
+                // (TargetWriteOnly → face root 可写,ReadOnly → 全只读);
+                // direct 会话保持 role 判定原值。
+                let writable_root = match state.target_boundary.as_ref() {
+                    Some(plan) => plan.mode() == ProviderBoundaryMode::TargetWriteOnly,
+                    None => matches!(state.policy.role, AdapterRole::Executor),
+                };
                 TerminalIsolation::Bubblewrap {
                     bwrap,
                     writable_root,
@@ -98,40 +107,64 @@ fn isolation_for(state: &ClientServiceState) -> Result<TerminalIsolation, Client
         }
     }
 }
-/// Resolve a terminal cwd inside the authorized root (or the root itself),
-/// rejecting symlinks via `openat` + `O_NOFOLLOW` and returning the canonical
-/// path of the anchored directory fd. Absolute paths are tolerated when they
-/// lexically point beneath the root (the fs_service anchoring pattern), then
-/// re-anchored through the same no-follow walk; anything outside the root, or
-/// trying to climb back with `..`, is rejected without echoing the path.
+
+/// Task 4c 读写面分离:terminal 的授权面根——LC 会话(TargetWriteOnly)为
+/// boundary plan 的 target root(bwrap 写面与 cwd 锚定都以它为界;
+/// read-only plan/direct 会话为会话根)。terminal 实际 cwd 只在该面内
+/// 解析,不改变 provider 进程 cwd(进程 cwd 由 start_validated 冻结为
+/// canonical LC root)。
+fn terminal_face_root(state: &ClientServiceState) -> Result<PathBuf, ClientServiceError> {
+    match state.target_boundary.as_ref() {
+        Some(plan) => match plan.mode() {
+            ProviderBoundaryMode::TargetWriteOnly => {
+                plan.target_root().map(ToOwned::to_owned).ok_or_else(|| {
+                    ClientServiceError::Rejected(
+                        "lc target boundary plan carries no writable target".to_string(),
+                    )
+                })
+            }
+            ProviderBoundaryMode::ReadOnly => Ok(state.root.clone()),
+        },
+        None => Ok(state.root.clone()),
+    }
+}
+
+/// Resolve a terminal cwd inside the authorized face root (or the root
+/// itself), rejecting symlinks via `openat` + `O_NOFOLLOW` and returning the
+/// canonical path of the anchored directory fd. Absolute paths are tolerated
+/// when they lexically point beneath the face root (the fs_service anchoring
+/// pattern), then re-anchored through the same no-follow walk; anything
+/// outside the face root, or trying to climb back with `..`, is rejected
+/// without echoing the path.
 fn resolve_cwd(
     state: &ClientServiceState,
     cwd: Option<&str>,
 ) -> Result<PathBuf, ClientServiceError> {
+    let face_root = terminal_face_root(state)?;
     let Some(cwd) = cwd.filter(|cwd| !cwd.is_empty()) else {
-        return Ok(state.root.clone());
+        return Ok(face_root.to_path_buf());
     };
     let rel: PathBuf = if Path::new(cwd).is_absolute() {
         let rel = Path::new(cwd)
-            .strip_prefix(&state.root)
-            .map_err(|_| ClientServiceError::Rejected(cwd_usage_hint(state)))?;
+            .strip_prefix(&face_root)
+            .map_err(|_| ClientServiceError::Rejected(cwd_usage_hint(&face_root)))?;
         if rel
             .components()
             .any(|component| component == Component::ParentDir)
         {
-            return Err(ClientServiceError::Rejected(cwd_usage_hint(state)));
+            return Err(ClientServiceError::Rejected(cwd_usage_hint(&face_root)));
         }
         rel.to_path_buf()
     } else if cwd.split('/').any(|component| component == "..") {
-        return Err(ClientServiceError::Rejected(cwd_usage_hint(state)));
+        return Err(ClientServiceError::Rejected(cwd_usage_hint(&face_root)));
     } else {
         PathBuf::from(cwd)
     };
-    let fd = open_dir_no_follow(&state.root, &rel)
+    let fd = open_dir_no_follow(&face_root, &rel)
         .map_err(|error| ClientServiceError::Rejected(format!("terminal cwd rejected: {error}")))?;
     let canonical = canonical_path_of_fd(&fd)
         .map_err(|error| ClientServiceError::Rejected(format!("terminal cwd: {error}")))?;
-    if !canonical.starts_with(&state.root) {
+    if !canonical.starts_with(face_root) {
         return Err(ClientServiceError::Rejected(
             "terminal cwd is outside the authorized root".to_string(),
         ));
@@ -140,13 +173,13 @@ fn resolve_cwd(
 }
 
 /// Rejection message for a terminal cwd that cannot be anchored inside the
-/// authorized root. It names the root and teaches the correct usage, but
+/// authorized face root. It names the root and teaches the correct usage, but
 /// never echoes the rejected path (outside-root paths must not leak back).
-fn cwd_usage_hint(state: &ClientServiceState) -> String {
+fn cwd_usage_hint(face_root: &Path) -> String {
     format!(
         "terminal cwd must stay inside the authorized root {}; point an absolute cwd at a \
          subdirectory beneath it, or use a relative path without ..",
-        state.root.display()
+        face_root.display()
     )
 }
 
@@ -214,6 +247,9 @@ pub(super) async fn handle_terminal_create(
             .ok_or_else(|| ClientServiceError::Internal("trusted shell not found".to_string()))?,
     };
 
+    // Task 4c 读写面分离:cwd 与 sandbox 面都锚定 boundary plan 的 face
+    // root(LC Coding=target;terminal 实际 cwd 不改 provider 进程 cwd)。
+    let face_root = terminal_face_root(state)?;
     let cwd = resolve_cwd(state, params.get("cwd").and_then(Value::as_str))?;
     if let Some(parsed) = parsed.as_ref() {
         for operand in &parsed.path_operands {
@@ -225,7 +261,7 @@ pub(super) async fn handle_terminal_create(
     let terminal_command = TerminalCommand {
         argv: final_argv,
         binary,
-        root: state.root.clone(),
+        root: face_root,
         cwd,
         isolation,
     };
@@ -534,7 +570,7 @@ mod tests {
             event_tx,
             terminal: TerminalManager::new(),
             bwrap: None,
-            writable_git_paths: writable_git_paths_for(&AdapterRole::Executor, &root),
+            writable_git_paths: writable_git_paths_for(&AdapterRole::Executor, &root, None),
             cleanup_cancel: CancellationToken::new().child_token(),
             baseline_tree: None,
             target_boundary: None,
@@ -559,7 +595,7 @@ mod tests {
             event_tx,
             terminal: TerminalManager::new(),
             bwrap: Some(PathBuf::from("/usr/bin/bwrap")),
-            writable_git_paths: writable_git_paths_for(&role, &root),
+            writable_git_paths: writable_git_paths_for(&role, &root, None),
             cleanup_cancel: CancellationToken::new().child_token(),
             baseline_tree: None,
             target_boundary: None,
