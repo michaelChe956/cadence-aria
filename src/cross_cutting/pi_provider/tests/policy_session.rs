@@ -753,7 +753,7 @@ async fn lcg_t04_no_generic_tool_policy_still_records_version_audit_and_native_s
     assert!(!lc_projection.boundary_evidence_ref.is_empty());
 
     // 进程 cwd = canonical LC root(envelope 冻结,不是 target worktree)。
-    let observed_cwd = std::fs::read_to_string(&marker).expect("cwd marker is written");
+    let observed_cwd = wait_for_lc_cwd_marker(&marker);
     assert_eq!(
         observed_cwd.trim(),
         fixture.canonical_root().to_string_lossy(),

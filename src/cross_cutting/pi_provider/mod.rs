@@ -30,6 +30,7 @@ use crate::cross_cutting::tool_policy_audit::{
     DurableToolPolicyEvent, ProviderStartAudit, ResumeDecision, ToolPolicyAuditSink,
     append_superseded_policy_drift, resume_with_audit_record,
 };
+use crate::product::logical_codebase::provider_projection::ProviderPolicyProjector;
 
 mod parse;
 mod projection;
@@ -326,15 +327,30 @@ impl PiProvider {
     /// (rpc 模式 + aria-ask extension + `--session-id` + 策略角色的
     /// exclude-tools 冻结片段),独立方法显式冻结 LC 语义,后续 LC 特化
     /// 不污染 direct argv。direct `build_args` 保持逐字节不变。
-    ///
-    /// Task 4b 阶段 1 RED 桩:阶段 2 实现真实 argv。
     pub(crate) fn build_lc_validated_args(
         &self,
-        _resume_session_id: Option<&str>,
-        _extension_path: &Path,
-        _tool_policy: Option<&crate::cross_cutting::streaming_provider::ProviderToolPolicy>,
+        resume_session_id: Option<&str>,
+        extension_path: &Path,
+        tool_policy: Option<&crate::cross_cutting::streaming_provider::ProviderToolPolicy>,
     ) -> Vec<String> {
-        Vec::new()
+        let mut args = vec![
+            "--mode".to_string(),
+            "rpc".to_string(),
+            "-e".to_string(),
+            extension_path.display().to_string(),
+        ];
+        if let Some(session_id) = resume_session_id.map(str::trim).filter(|id| !id.is_empty()) {
+            args.push("--session-id".to_string());
+            args.push(session_id.to_string());
+        }
+        if let Some(crate::cross_cutting::streaming_provider::ProviderToolPolicy {
+            intent:
+                crate::cross_cutting::streaming_provider::ToolPolicyIntent::DenyFileWriteBuiltins,
+        }) = tool_policy
+        {
+            args.extend(deny_file_write_builtins_tokens());
+        }
+        args
     }
 }
 
@@ -592,19 +608,260 @@ impl StreamingProviderAdapter for PiProvider {
     /// canonical LC root 为进程 cwd 启动,统一落盘 `ProviderStartAudit.
     /// lc_projection`;无通用 tool policy 的角色(Coding/Executor)同样执行
     /// exact version 解析、原生会话(id 预生成/传入)与统一 launch audit,
-    /// 不以 `tool_policy=None` 早退。
-    ///
-    /// Task 4b 阶段 1 RED 桩:阶段 2 实现真实启动链。
+    /// 不以 `tool_policy=None` 早退。resume 的冻结三元组严格比对由 Task 9
+    /// 补(与 4a 对齐)。
     async fn start_validated(
         &self,
-        _validated: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
-        _cancel: CancellationToken,
+        validated: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+        cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
-        Err(ProviderAdapterError::execution_failed(
-            None,
-            String::new(),
-            "pi lc validated start is not implemented yet (task 4b red stub)",
-            0,
-        ))
+        let (input, launch) = validated.into_parts();
+        let envelope = launch.envelope().clone();
+
+        // 双向 spawn 前守卫(与 direct `start` 同源;LC 同样非法即拒)。
+        validate_tool_policy_for_role(&input.role, input.tool_policy.as_ref()).map_err(
+            |error| {
+                ProviderAdapterError::parse_error(error.to_string(), String::new(), String::new())
+            },
+        )?;
+
+        // adapter 匹配:validated input 必须是 pi RPC(不匹配即拒,不回退
+        // 其它 provider/dialect)。
+        if input.provider_type != crate::protocol::contracts::ProviderType::Pi
+            || envelope.provider_dialect
+                != crate::product::logical_codebase::policy::ProviderDialect::PiRpcV1
+        {
+            return Err(ProviderAdapterError::parse_error(
+                "pi lc validated start: only Pi RPC launches are accepted by this adapter",
+                String::new(),
+                String::new(),
+            ));
+        }
+
+        // 统一 launch audit sink:LC 会话必须绑定 run-bound sink,缺失
+        // fail-closed(1b 的 prepare 契约之前由本路径强制)。
+        let sink = input.audit_sink.clone().ok_or_else(|| {
+            ProviderAdapterError::parse_error(
+                "pi lc validated start: audit sink is required for LC launches",
+                String::new(),
+                String::new(),
+            )
+        })?;
+
+        // exact version(supplier seam 优先;默认真实 `--version` 探测+进程内
+        // 缓存,策略会话 fail-closed 映射;不可得 fail-closed)。全 LC 路径
+        // 必填,非仅策略角色。
+        let provider_version = match self.version_supplier.clone() {
+            Some(supplier) => supplier().map_err(|error| {
+                ProviderAdapterError::parse_error(
+                    format!("pi lc validated start: {error}"),
+                    String::new(),
+                    String::new(),
+                )
+            })?,
+            None => {
+                let command = self.command.clone();
+                crate::cross_cutting::streaming_provider::cached_cli_version(
+                    &self.command,
+                    async move {
+                        let probed =
+                            probe_pi_version_with_timeout(&command, PI_VERSION_PROBE_TIMEOUT).await;
+                        pi_policy_version(&probed)
+                    },
+                )
+                .await
+                .map_err(|error| {
+                    ProviderAdapterError::parse_error(
+                        format!("pi lc validated start: {error}"),
+                        String::new(),
+                        String::new(),
+                    )
+                })?
+            }
+        };
+
+        // extension 准备在 guard 之后(计划 Task 4 Step 3:pi extension 准备
+        // 在 guard 之后、launcher 覆盖面内;RPC/MCP 继续既有 adapter)。
+        let extension_path = ensure_ask_extension()?;
+
+        // 不可伪造 boundary plan + LC 投影。trust/MCP bundle digest 的 gateway
+        // 侧装配(ProviderTrustSource/Aria bundle)归 1b/1c;空串同样纳入
+        // session digest,装配后任一漂移都会改变 projection_digest。
+        let boundary = projection::lc_boundary_plan(&envelope).map_err(|error| {
+            ProviderAdapterError::parse_error(
+                format!("pi lc validated start: {error}"),
+                String::new(),
+                String::new(),
+            )
+        })?;
+        let projection_input =
+            crate::product::logical_codebase::provider_projection::ProviderProjectionInput::new(
+                envelope.clone(),
+                crate::product::logical_codebase::provider_gateway::ProviderRef::pi(
+                    launch.capability_snapshot_ref(),
+                ),
+                envelope.action,
+                input.role.clone(),
+                input.permission_mode.clone(),
+                input.tool_policy.clone(),
+                projection::PI_LC_APPROVAL_POLICY.to_string(),
+                String::new(),
+                envelope.config_artifact_ref.clone(),
+                String::new(),
+                Some(boundary),
+            );
+        let projector = PiPolicyProjector::new(provider_version.clone());
+        let lc_projection = projector.project(&projection_input).map_err(|error| {
+            ProviderAdapterError::parse_error(
+                format!("pi lc validated start: {error}"),
+                String::new(),
+                String::new(),
+            )
+        })?;
+
+        // 原生会话 id:pi 的有界握手 = id 预生成/传入(fresh 预生成 uuid,
+        // resume 复用冻结 id;与 direct 策略路径同语义)。
+        let native_session_id = input
+            .resume_provider_session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(ToString::to_string)
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+        // LC argv 与投影同源;进程 cwd = envelope 冻结的 canonical LC root。
+        let args = self.build_lc_validated_args(
+            Some(native_session_id.as_str()),
+            &extension_path,
+            input.tool_policy.as_ref(),
+        );
+        let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+        let command = self.command.to_string_lossy().to_string();
+        let process_cwd = envelope.working_directory.clone();
+        let process = ProcessManager::spawn(
+            &command,
+            &arg_refs,
+            &process_cwd,
+            &input.env_vars,
+            cancel.clone(),
+        )
+        .await?;
+
+        let peer = JsonRpcPeer::new(process.stdout, process.stdin);
+        let stderr = process.stderr;
+        let mut child = process.child;
+        let (event_tx, event_rx) = mpsc::channel(32);
+        // pi 是 Auto-only:与 direct 路径一致构造 bridge,但授权/命令转发
+        // 永不经过它。
+        let bridge = ApprovalBridge::new(ProviderPermissionMode::Auto, event_tx.clone());
+        let (command_tx, command_rx) = mpsc::channel(8);
+        let _ = event_tx
+            .send(ProviderEvent::StatusChanged(ProviderStatus::Starting))
+            .await;
+        let _ = event_tx
+            .send(ProviderEvent::Execution(ProviderExecutionEvent {
+                event_id: "provider".to_string(),
+                kind: ProviderExecutionEventKind::Provider,
+                status: ProviderExecutionEventStatus::Started,
+                title: "Pi provider started".to_string(),
+                detail: None,
+                command: None,
+                cwd: Some(process_cwd.display().to_string()),
+                output: None,
+                exit_code: None,
+            }))
+            .await;
+
+        // 统一 launch audit:spawn 后、start 返回前写 `provider_start`
+        // (握手 = id 已预生成/传入完成);无通用 tool policy 也有 canonical
+        // digest(空 token 序列形态)。append 失败终止子进程并 fail-closed
+        // (engine 沿既有 kill 链判失败)。
+        let tool_policy_digest = projection::lc_tool_policy_canonical_digest(
+            input.tool_policy.as_ref(),
+        )
+        .map_err(|error| {
+            ProviderAdapterError::parse_error(
+                format!("pi lc validated start: {error}"),
+                String::new(),
+                String::new(),
+            )
+        })?;
+        let audit_event = DurableToolPolicyEvent::ProviderStart(ProviderStartAudit {
+            provider: TOOL_POLICY_PROVIDER_NAME.to_string(),
+            role: crate::cross_cutting::streaming_provider::adapter_role_text(&input.role)
+                .to_string(),
+            workspace_session_id: input.workspace_session_id.clone().unwrap_or_default(),
+            provider_session_id: native_session_id.clone(),
+            tool_policy_canonical_digest: tool_policy_digest,
+            argv: args.clone(),
+            sandbox: None,
+            approval_policy: None,
+            provider_version,
+            adapter_dialect: PI_POLICY_DIALECT.to_string(),
+            lc_projection: Some(crate::cross_cutting::tool_policy_audit::LcProjectionAudit {
+                action: projection::action_text(envelope.action).to_string(),
+                wire_dialect: projection::wire_dialect_text(lc_projection.wire_dialect())
+                    .to_string(),
+                capability_projection_digest: lc_projection
+                    .capability_projection_digest()
+                    .to_string(),
+                projection_digest: lc_projection.projection_digest().to_string(),
+                boundary_evidence_ref: lc_projection.boundary_evidence_ref().to_string(),
+            }),
+        });
+        if let Err(error) = sink.append_bound(audit_event) {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            return Err(tool_policy_session_error(format!(
+                "provider_start audit append failed: {error}"
+            )));
+        }
+
+        // 会话收尾任务(与 direct `start` 同构:stderr 收集 + run_pi_session +
+        // 失败 kill 链)。
+        tokio::spawn(async move {
+            let stderr_output = std::sync::Arc::new(tokio::sync::Mutex::new(String::new()));
+            let stderr_output_for_task = std::sync::Arc::clone(&stderr_output);
+            let stderr_task = tokio::spawn(async move {
+                let mut lines = tokio::io::BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let mut output = stderr_output_for_task.lock().await;
+                    if !output.is_empty() {
+                        output.push('\n');
+                    }
+                    output.push_str(&line);
+                }
+            });
+
+            let result =
+                session::run_pi_session(peer, command_rx, event_tx.clone(), input, cancel).await;
+            drop(bridge);
+            if result.is_err() {
+                let _ = child.start_kill();
+            }
+            let status = child.wait().await;
+            let _ = stderr_task.await;
+            if let Err(error) = result {
+                let stderr = stderr_output.lock().await.trim().to_string();
+                let status_text = match status {
+                    Ok(status) => format!("exit status: {status}"),
+                    Err(wait_error) => format!("failed to wait for process: {wait_error}"),
+                };
+                let message = if stderr.is_empty() {
+                    format!("{} ({status_text})", error.details)
+                } else {
+                    format!("{} ({status_text}); stderr: {stderr}", error.details)
+                };
+                // run_pi_session already emitted the terminal Failed event; emitting an
+                // additional execution event here would violate fail-fast terminality.
+                tracing::debug!(%message, "Pi provider session ended with failure");
+            }
+        });
+
+        Ok(ProviderSession {
+            native_session_id: Some(native_session_id),
+            events: event_rx,
+            commands: command_tx,
+        })
     }
 }

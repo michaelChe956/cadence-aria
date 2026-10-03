@@ -906,3 +906,19 @@ fn lc_cwd_pi_fixture(marker: &std::path::Path) -> PathBuf {
         ),
     )
 }
+
+/// 等待 LC cwd marker 落盘并返回内容(pi 的有界握手是 id 预生成,start
+/// 返回时子进程可能尚未写 marker;有界轮询 2s,超时即 panic)。
+#[cfg(unix)]
+fn wait_for_lc_cwd_marker(marker: &std::path::Path) -> String {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        if let Ok(content) = std::fs::read_to_string(marker) {
+            return content;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("lc cwd marker {marker:?} was never written by the fixture child");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}

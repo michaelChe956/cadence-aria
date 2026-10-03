@@ -905,10 +905,7 @@ async fn lcg_t04_pi_projection_has_exclude_write_tokens_and_root_cwd() {
     assert!(record.lc_projection.is_some());
 
     // 299 逐字:进程 cwd = canonical LC root(不是 target worktree)。
-    let provider_cwd = std::fs::read_to_string(&marker)
-        .expect("cwd marker is written")
-        .trim()
-        .to_string();
+    let provider_cwd = wait_for_lc_cwd_marker(&marker).trim().to_string();
     let canonical_root = fixture.canonical_root().to_string_lossy().into_owned();
     assert_eq!(
         provider_cwd, canonical_root,
