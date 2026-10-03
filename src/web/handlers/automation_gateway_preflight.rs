@@ -170,7 +170,7 @@ mod tests {
 
     fn lc_carrier() -> AutomationCarrierResolution {
         AutomationCarrierResolution::LogicalCodebase {
-            resolution: RepositoryAuthorityResolution {
+            resolution: Box::new(RepositoryAuthorityResolution {
                 authority_root: std::path::PathBuf::new(),
                 target: ResolvedTargetIdentity {
                     kind: RepositoryTargetKind::LogicalCodebase,
@@ -189,7 +189,7 @@ mod tests {
                     membership_revision: None,
                     status: None,
                 },
-            },
+            }),
         }
     }
 

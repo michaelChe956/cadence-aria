@@ -42,7 +42,7 @@ struct CodingAttemptCommandLedger {
 /// - `LeaseUnknown`：证据缺失或读失败——停等，绝不抢占。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodingRunExclusionDecision {
-    Allowed(CodingExecutionAttempt),
+    Allowed(Box<CodingExecutionAttempt>),
     AlreadyRunning { lease: LeaseDecision },
     TakeoverRequired { lease: LeaseDecision },
     LeaseUnknown { lease: LeaseDecision },
@@ -182,13 +182,13 @@ impl super::CodingAttemptStore {
                     ledger.records[existing_index].state = OperationState::Accepted;
                     ledger.records[existing_index].recorded_at = Utc::now().to_rfc3339();
                     write_json(&ledger_path, &ledger)?;
-                    return Ok(CodingRunExclusionDecision::Allowed(authoritative));
+                    return Ok(CodingRunExclusionDecision::Allowed(Box::new(authoritative)));
                 }
                 // 首次结果 Accepted：重放放行（provider 启动去重由调用侧
                 // 临界区收口，账本不重复驱动副作用）。
-                return Ok(CodingRunExclusionDecision::Allowed(
+                return Ok(CodingRunExclusionDecision::Allowed(Box::new(
                     self.ensure_provider_run_allowed(attempt)?,
-                ));
+                )));
             }
 
             // ② 租约三态（复用 C1 判定）：活跃他人 → AlreadyRunning；
@@ -219,7 +219,7 @@ impl super::CodingAttemptStore {
             };
             ledger.records.push(record);
             write_json(&ledger_path, &ledger)?;
-            Ok(CodingRunExclusionDecision::Allowed(authoritative))
+            Ok(CodingRunExclusionDecision::Allowed(Box::new(authoritative)))
         })
     }
 

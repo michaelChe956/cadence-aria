@@ -216,7 +216,7 @@ pub(crate) enum AutomationCarrierResolution {
     /// LC issue：C4 authority resolver 的完整解析结果（manifest/selection
     /// 由调用方按既有 LC 约束消费）。
     LogicalCodebase {
-        resolution: crate::product::logical_codebase::RepositoryAuthorityResolution,
+        resolution: Box<crate::product::logical_codebase::RepositoryAuthorityResolution>,
     },
 }
 
@@ -238,7 +238,9 @@ pub(crate) fn resolve_automation_carrier(
         .resolve_for_issue(project_id, &issue.id)
         .map_err(product_store_api_error)?
     {
-        Some(resolution) => Ok(AutomationCarrierResolution::LogicalCodebase { resolution }),
+        Some(resolution) => Ok(AutomationCarrierResolution::LogicalCodebase {
+            resolution: Box::new(resolution),
+        }),
         None => {
             let repository_id = issue.repo_id.clone().ok_or_else(|| {
                 super::automation_enrollment::invalid_scope(

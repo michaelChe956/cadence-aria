@@ -369,7 +369,7 @@ impl CodingWorkspaceEngine {
             .store
             .admit_coding_run_exclusive(attempt, &command_id, &payload_digest)?
         {
-            CodingRunExclusionDecision::Allowed(authoritative) => Ok(authoritative),
+            CodingRunExclusionDecision::Allowed(authoritative) => Ok(*authoritative),
             CodingRunExclusionDecision::AlreadyRunning { lease } => {
                 Err(CodingWorkspaceEngineError::ProviderStream(format!(
                     "coding_run_already_running: lease {} 已在运行，请等待",
