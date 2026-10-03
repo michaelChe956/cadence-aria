@@ -7,12 +7,16 @@ pub struct LogicalCodebaseBootstrapService {
     paths: ProductAppPaths,
     /// C4 Task 6：member-index 步骤“Running 但内存 run 不活跃”的判定探针
     ///（web 层注入 run registry 视角；缺省视为活跃——不知道就不动）。
-    member_index_run_active: Option<std::sync::Arc<dyn Fn(&str, &str, &str) -> bool + Send + Sync>>,
+    member_index_run_active: Option<MemberIndexRunProbe>,
     /// G3（终局关闸缺口）：aggregate_index_active 步 Retry 的重建派发器
     ///（web 层注入 LC 隔离的 `AggregateIndexOperation::build_with_command_id`
     /// 闭包；缺省 None 保持既有仅重放语义——NotFound fail-closed）。
     aggregate_index_rebuild: Option<AggregateIndexRebuildDispatcher>,
 }
+
+/// C4 Task 6 探针签名：`(project_id, lc_id, operation_id)` → 该 member-index
+/// run 当前是否活跃（web 层注入 run registry 视角）。
+pub type MemberIndexRunProbe = std::sync::Arc<dyn Fn(&str, &str, &str) -> bool + Send + Sync>;
 
 /// G3：重建派发器契约——`(project_id, command_id,
 /// expected_membership_revision)` → 落盘后的聚合索引记录。生产实现是
@@ -41,7 +45,7 @@ impl LogicalCodebaseBootstrapService {
     /// 注入 member-index run 活跃探针（参数：project/lc/operation id）。
     pub fn with_member_index_run_probe(
         mut self,
-        probe: std::sync::Arc<dyn Fn(&str, &str, &str) -> bool + Send + Sync>,
+        probe: MemberIndexRunProbe,
     ) -> Self {
         self.member_index_run_active = Some(probe);
         self
