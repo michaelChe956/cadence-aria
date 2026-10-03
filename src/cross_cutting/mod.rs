@@ -30,8 +30,8 @@ pub mod provider_boundary;
 // Task 6a:产品写边界 launcher helper 接入(消费方:adapter start_validated,
 // owner 顺序见 §0 的 1a→6a→1b)。
 pub use provider_boundary::{
-    BoundaryWriteAttempt, ProviderBoundaryLauncher, provider_runtime_writable_roots,
-    run_builtin_write_probe,
+    BoundaryWriteAttempt, BoundaryWriteChannel, PlannedBoundaryWrite, ProviderBoundaryLauncher,
+    provider_runtime_writable_roots, run_builtin_write_probe, run_write_surface_probe,
 };
 pub mod provider_capabilities;
 pub mod provider_context_builder;

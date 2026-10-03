@@ -320,29 +320,68 @@ pub(crate) fn protected_shadow_roots(plan: &ProviderBoundaryPlan) -> Vec<PathBuf
 // Task 6a:写面探针(受控隔离 fixture 的探测通道;6c 真实 probe 与验收复用)
 // ============================================================================
 
+/// 写探针通道:覆盖 provider 进程自身与其后代写面(terminal/MCP/extension
+/// 均为 provider 派生的子孙进程,天然落在同一 mount namespace 内)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoundaryWriteChannel {
+    /// provider 进程自身直接写(内建写工具面)。
+    Builtin,
+    /// terminal 子进程写(provider 起 shell 的通道)。
+    Terminal,
+    /// MCP 后代写(MCP server 进程链;不可隔离的外部 MCP 写通道同样只
+    /// 命中只读挂载面而被阻断)。
+    Mcp,
+    /// extension 子进程写(如 Pi extension)。
+    Extension,
+}
+
+/// 计划内写探针(通道 + 目标文件)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedBoundaryWrite {
+    channel: BoundaryWriteChannel,
+    path: PathBuf,
+}
+
+impl PlannedBoundaryWrite {
+    pub fn new(channel: BoundaryWriteChannel, path: PathBuf) -> Self {
+        Self { channel, path }
+    }
+
+    pub fn channel(&self) -> BoundaryWriteChannel {
+        self.channel
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
 /// 单次写探针结果:拒绝必须带证据(errno/shell 报文),未观测到证据的
 /// 「拒绝」不可计入支持面。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundaryWriteAttempt {
+    channel: BoundaryWriteChannel,
     path: PathBuf,
     refused: bool,
     evidence: String,
 }
 
 impl BoundaryWriteAttempt {
-    fn refused_with(path: PathBuf, evidence: String) -> Self {
+    fn allowed(channel: BoundaryWriteChannel, path: PathBuf) -> Self {
         Self {
-            path,
-            refused: true,
-            evidence,
-        }
-    }
-
-    fn allowed(path: PathBuf) -> Self {
-        Self {
+            channel,
             path,
             refused: false,
             evidence: String::new(),
+        }
+    }
+
+    fn refused_with(channel: BoundaryWriteChannel, path: PathBuf, evidence: String) -> Self {
+        Self {
+            channel,
+            path,
+            refused: true,
+            evidence,
         }
     }
 
@@ -361,6 +400,10 @@ impl BoundaryWriteAttempt {
         }
     }
 
+    pub fn channel(&self) -> BoundaryWriteChannel {
+        self.channel
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -375,6 +418,28 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
+/// 生成指定通道的一次写命令(嵌入探针脚本;路径/脚本经单引号转义)。
+fn probe_write_command(channel: BoundaryWriteChannel, quoted_path: &str) -> String {
+    let builtin = r#"printf aria-boundary-probe >"$1""#;
+    match channel {
+        BoundaryWriteChannel::Builtin => {
+            format!("printf aria-boundary-probe >{quoted_path}")
+        }
+        BoundaryWriteChannel::Terminal => {
+            format!("sh -c {} aria-terminal {quoted_path}", shell_quote(builtin))
+        }
+        BoundaryWriteChannel::Extension => format!(
+            "sh -c {} aria-extension {quoted_path}",
+            shell_quote(builtin)
+        ),
+        // MCP 通道 = 两层后代:外层 shell 再起内层 MCP server 代写。
+        BoundaryWriteChannel::Mcp => {
+            let inner = format!("sh -c {} aria-mcp-inner \"$1\"", shell_quote(builtin));
+            format!("sh -c {} aria-mcp {quoted_path}", shell_quote(&inner))
+        }
+    }
+}
+
 /// 内置通道写探针(provider 进程自身直接写):在真实产品写边界沙箱内逐
 /// 路径尝试写入并结构化回报结果。进程退出非 0(如 bwrap 无法建
 /// namespace/mount)直接报错——不把「沙箱起不来」当拒绝或成功。
@@ -384,16 +449,34 @@ pub async fn run_builtin_write_probe(
     env_vars: &BTreeMap<String, String>,
     paths: &[PathBuf],
 ) -> Result<Vec<BoundaryWriteAttempt>, ProviderAdapterError> {
+    let attempts: Vec<PlannedBoundaryWrite> = paths
+        .iter()
+        .map(|path| PlannedBoundaryWrite::new(BoundaryWriteChannel::Builtin, path.clone()))
+        .collect();
+    run_write_surface_probe(launcher, plan, env_vars, &attempts).await
+}
+
+/// 多通道写面探针(段 3):在真实产品写边界沙箱内,以 provider 自身
+/// (builtin)与其后代(terminal/MCP/extension)通道逐路径尝试写入并
+/// 结构化回报;后代进程与 provider 共享同一 mount namespace,任何通道
+/// 的越界写都必须被只读挂载拒绝并带证据。
+pub async fn run_write_surface_probe(
+    launcher: &ProviderBoundaryLauncher,
+    plan: &ProviderBoundaryPlan,
+    env_vars: &BTreeMap<String, String>,
+    attempts: &[PlannedBoundaryWrite],
+) -> Result<Vec<BoundaryWriteAttempt>, ProviderAdapterError> {
     let mut script = String::new();
-    for (index, path) in paths.iter().enumerate() {
-        let quoted = shell_quote(&path.to_string_lossy());
+    for (index, planned) in attempts.iter().enumerate() {
+        let quoted = shell_quote(&planned.path.to_string_lossy());
+        let write = probe_write_command(planned.channel, &quoted);
         let error_file = format!("/tmp/.aria-boundary-probe-{index}.err");
         script.push_str(&format!(
-            "if ( printf aria-boundary-probe >{quoted} ) 2>{error_file}; then printf 'A {index} ok\\n'; \
+            "if ( {write} ) 2>{error_file}; then printf 'A {index} ok\\n'; \
              else printf 'A {index} refused %s\\n' \"$(tr '\\n' ' ' <{error_file} | cut -c1-160)\"; fi\n"
         ));
     }
-    run_probe_script(launcher, plan, env_vars, &script, paths).await
+    run_probe_script(launcher, plan, env_vars, &script, attempts).await
 }
 
 /// 在写边界沙箱内执行探针脚本并解析 `A <i> ok|refused <evidence>` 哨兵。
@@ -402,12 +485,12 @@ async fn run_probe_script(
     plan: &ProviderBoundaryPlan,
     env_vars: &BTreeMap<String, String>,
     script: &str,
-    paths: &[PathBuf],
+    planned: &[PlannedBoundaryWrite],
 ) -> Result<Vec<BoundaryWriteAttempt>, ProviderAdapterError> {
     use tokio::io::AsyncReadExt;
     use tokio_util::sync::CancellationToken;
 
-    let mut process = ProcessManager::spawn_with_boundary_resolved(
+    let process = ProcessManager::spawn_with_boundary_resolved(
         launcher.clone(),
         "sh",
         &["-c", script],
@@ -420,7 +503,7 @@ async fn run_probe_script(
     drop(process.stdin);
     let (mut stdout, mut stderr) = (process.stdout, process.stderr);
     let mut child = process.child;
-    let (status, mut stdout_text, mut stderr_text) =
+    let (status, stdout_text, mut stderr_text) =
         tokio::time::timeout(std::time::Duration::from_secs(60), async {
             let mut stdout_text = String::new();
             let mut stderr_text = String::new();
@@ -444,19 +527,23 @@ async fn run_probe_script(
             0,
         ));
     }
-    let mut attempts = Vec::with_capacity(paths.len());
-    for (index, path) in paths.iter().enumerate() {
+    let mut attempts = Vec::with_capacity(planned.len());
+    for (index, planned) in planned.iter().enumerate() {
         let sentinel = stdout_text
             .lines()
             .find_map(|line| line.strip_prefix(&format!("A {index} ")));
         let attempt = match sentinel {
-            Some(rest) if rest.starts_with("ok") => BoundaryWriteAttempt::allowed(path.clone()),
+            Some(rest) if rest.starts_with("ok") => {
+                BoundaryWriteAttempt::allowed(planned.channel, planned.path.clone())
+            }
             Some(rest) => BoundaryWriteAttempt::refused_with(
-                path.clone(),
+                planned.channel,
+                planned.path.clone(),
                 rest.trim_start_matches("refused").trim().to_string(),
             ),
             None => BoundaryWriteAttempt::refused_with(
-                path.clone(),
+                planned.channel,
+                planned.path.clone(),
                 "probe sentinel missing (write unobserved)".to_string(),
             ),
         };
