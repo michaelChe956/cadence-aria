@@ -262,6 +262,38 @@ impl EnrolledGateFixture {
         assert_eq!(enable.status(), StatusCode::OK);
         assert!(response_json(enable).await["enabled"].as_bool().unwrap());
 
+        // fix 轮 1(Task 3 只读迁移收尾):coding runner 的 factory 组装改为
+        // build_readonly_for_lc(不再隐式 ensure_bootstrap)。enrollment 绑定
+        // 就绪后,按 coding runner 同源的 authority resolver 解析 LC 作用域,
+        // 显式播种自举桩政策与 capability 记录——断言意图零变化(coding
+        // run 仍强制经 gateway 校验)。
+        if let Some(runner_lc_id) =
+            crate::product::logical_codebase::RepositoryAuthorityResolver::new(inner.paths.clone())
+                .resolve_for_issue(PROJECT_ID, ISSUE_ID)
+                .unwrap()
+                .and_then(|authority| authority.target.logical_codebase_id)
+        {
+            let seed_manifest = crate::product::logical_codebase::LogicalCodebaseStore::for_lc(
+                inner.paths.clone(),
+                &runner_lc_id,
+            )
+            .load_manifest(PROJECT_ID)
+            .unwrap()
+            .expect("seeded logical codebase manifest");
+            crate::product::logical_codebase::AggregatePolicyArtifactStore::for_lc(
+                inner.paths.clone(),
+                &runner_lc_id,
+            )
+            .ensure_bootstrap(&seed_manifest)
+            .expect("seed aggregate policy artifact");
+            crate::product::logical_codebase::ProviderCapabilityStore::for_lc(
+                inner.paths.clone(),
+                &runner_lc_id,
+            )
+            .ensure_bootstrap(PROJECT_ID)
+            .expect("seed capability record");
+        }
+
         let lifecycle = LifecycleStore::new(inner.paths.clone());
         let store = IssueAutomationStore::new(inner.paths.clone());
         let enrollment = store.get(PROJECT_ID, ISSUE_ID).unwrap().unwrap();

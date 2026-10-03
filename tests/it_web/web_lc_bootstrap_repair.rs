@@ -1008,10 +1008,11 @@ async fn a04_failed_identity_and_missing_rules_require_product_repair_before_rea
     // identity 修复完成后（marker 终态非 Failed、成员在册）冷启动身份步完成。
     assert_eq!(bootstrap_step(&waiting, "identity")["status"], "completed");
 
-    // 触发 root recipe（成员规则仍缺失）：Task 1.2/1.4 起 bootstrap 相位
-    // 凭据豁免「根规则尚未生成」，admission 不再因成员规则缺失拒绝；
-    // 本段由注入的 pre_check 中断制造 Failed 检查点（中断先于成功启动，
-    // provider 保持零启动）。
+    // 触发 root recipe(成员规则仍缺失)。Task 3 新合同:missing_member_rules
+    // 任何 phase 都阻断(bootstrap 相位凭据只豁免 missing_root_rules)——
+    // 成员规则缺失时 provider turn 在 admission 预检即被拒绝(member_
+    // language_rules_missing,waiting 事实进 durable error),provider 保持
+    // 零启动;「失败身份/缺规则需产品修复后才能 read 切换」的意图不变。
     let (status, accepted) = request_json(
         &app,
         Method::POST,
@@ -1028,11 +1029,11 @@ async fn a04_failed_identity_and_missing_rules_require_product_repair_before_rea
         &app,
         &bootstrap,
         |projection| bootstrap_step(projection, "member_index")["status"] == "failed",
-        "the injected pre_check interruption fails the operation",
+        "member rules missing blocks the bootstrap provider turn at admission",
     )
     .await;
-    // 中断事实落在 durable operation 记录的 error（投影 detail 只带 stage
-    // 摘要）：注入的中断必须可补读。
+    // 阻断事实落在 durable operation 记录的 error(投影 detail 只带 stage
+    // 摘要):pre_check turn 的失败与缺失材料必须可补读。
     let (_, operation_denied) = request_json(
         &app,
         Method::GET,
@@ -1044,26 +1045,34 @@ async fn a04_failed_identity_and_missing_rules_require_product_repair_before_rea
     .await;
     assert_eq!(
         operation_denied["error"]["code"], "aggregate_pre_check_failed",
-        "durable error must name the interrupted turn: {operation_denied}"
+        "durable error must name the blocked turn: {operation_denied}"
+    );
+    assert!(
+        operation_denied["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("member_language_rules_missing"),
+        "durable error must name the missing member rules: {operation_denied}"
     );
     assert_eq!(
         factory.audit().stream_launches(),
         0,
-        "the injected interruption must fire before a successful launch"
+        "the admission denial must fire before any launch"
     );
 
-    // Task 4（生产同构，与 a03 同款）：根规则材料由 provider 在
-    // RuleAndMcpConfig 命令时机生成，中断窗口无需再手工预写 AGENTS。
+    // Task 4(生产同构,与 a03 同款):根规则材料由 provider 在
+    // RuleAndMcpConfig 命令时机生成,窗口内无需再手工预写 AGENTS。
 
-    // 通过产品准备动作恢复同一实际规则来源（真实成员仓规则文件），等待面
+    // 通过产品准备动作恢复同一实际规则来源(真实成员仓规则文件),等待面
     // 随 GET 补读消失。
     std::fs::create_dir_all(repository.join(".claude/rules")).expect("recreate rules dir");
     std::fs::write(&rules_path, "# language rule\n\n- Use Rust 2024 edition.\n")
         .expect("restore language.md");
 
-    // 显式 Retry：原链继续（三个 provider turn 各启动一次，
-    // detached index build 落 active）。
-    let (status, ready_result) = request_json(
+    // 显式 Retry #1:材料已恢复,turn 进入真实 gateway 启动路径并在此
+    // 第一次消费注入的 pre_check 中断(deterministic checkpoint,中断先于
+    // 成功启动,launch 计数不变)。
+    let (status, interrupted_result) = request_json(
         &app,
         Method::POST,
         &format!("{}/actions", bootstrap),
@@ -1076,8 +1085,36 @@ async fn a04_failed_identity_and_missing_rules_require_product_repair_before_rea
         }),
     )
     .await;
+    assert_eq!(status, StatusCode::OK, "{interrupted_result}");
+    let denied_again = poll_until(
+        &app,
+        &bootstrap,
+        |projection| bootstrap_step(projection, "member_index")["status"] == "failed",
+        "the injected pre_check interruption fails the retried operation",
+    )
+    .await;
+    assert_eq!(
+        factory.audit().stream_launches(),
+        0,
+        "the injected interruption must fire before a successful launch"
+    );
+
+    // 显式 Retry #2:注入中断已消费,原链继续(三个 provider turn 各启动
+    // 一次,detached index build 落 active)。
+    let (status, ready_result) = request_json(
+        &app,
+        Method::POST,
+        &format!("{}/actions", bootstrap),
+        json!({
+            "command_id": "cmd-a04-member-index-retry-2",
+            "step": "member_index",
+            "action": "retry",
+            "expected_revision": denied_again["membership_revision"].as_u64(),
+            "expected_object_id": operation_id,
+        }),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{ready_result}");
-    assert_eq!(ready_result["outcome"], "accepted");
 
     let ready = poll_until(
         &app,
