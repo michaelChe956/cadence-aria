@@ -378,10 +378,10 @@ fn ensure_recipe_trust_ready(
         &[crate::product::models::ProviderName::ClaudeCode],
     ) {
         ProviderTrustPreparationResult::Ready { .. } => Ok(()),
-        ProviderTrustPreparationResult::Waiting { waiting } => {
-            Err(aggregate_initialization_api_error(
-                AggregateInitializationError::TrustWaiting { waiting },
-            ))
-        }
+        ProviderTrustPreparationResult::Waiting { waiting } => Err(
+            aggregate_initialization_api_error(AggregateInitializationError::TrustWaiting {
+                waiting: Box::new(waiting),
+            }),
+        ),
     }
 }

@@ -131,10 +131,14 @@ fn single_candidate_scope_rejects_initial_scope_during_verification() {
     );
     assert!(matches!(
         result,
-        Err(RoutingAction::AbortFatal {
-            reason: FatalReason::ProtocolViolation,
-            ..
-        })
+        Err(action)
+            if matches!(
+                *action,
+                RoutingAction::AbortFatal {
+                    reason: FatalReason::ProtocolViolation,
+                    ..
+                }
+            )
     ));
 }
 
@@ -166,9 +170,13 @@ fn single_candidate_scope_rejects_verification_scope_during_initial() {
     );
     assert!(matches!(
         result,
-        Err(RoutingAction::AbortFatal {
-            reason: FatalReason::ProtocolViolation,
-            ..
-        })
+        Err(action)
+            if matches!(
+                *action,
+                RoutingAction::AbortFatal {
+                    reason: FatalReason::ProtocolViolation,
+                    ..
+                }
+            )
     ));
 }

@@ -200,7 +200,7 @@ pub(super) fn single_candidate_review_cycle(
 fn validate_single_candidate_scope(
     scope: ReviewInvocationScope,
     phase: ReviewPhase,
-) -> Result<ReviewInvocationScope, RoutingAction> {
+) -> Result<ReviewInvocationScope, Box<RoutingAction>> {
     let phase_matches = matches!(
         (phase, &scope),
         (ReviewPhase::Initial, ReviewInvocationScope::Initial { .. })
@@ -210,7 +210,7 @@ fn validate_single_candidate_scope(
             )
     );
     if !phase_matches {
-        return Err(RoutingAction::AbortFatal {
+        return Err(Box::new(RoutingAction::AbortFatal {
             reason: FatalReason::ProtocolViolation,
             diagnostics: vec![PolicyDiagnostic {
                 code: "verification_scope_violation".to_string(),
@@ -218,17 +218,17 @@ fn validate_single_candidate_scope(
                     .to_string(),
                 field: Some("phase".to_string()),
             }],
-        });
+        }));
     }
     if let Err(error) = scope.validate_digest() {
-        return Err(RoutingAction::AbortFatal {
+        return Err(Box::new(RoutingAction::AbortFatal {
             reason: FatalReason::ProtocolViolation,
             diagnostics: vec![PolicyDiagnostic {
                 code: "verification_scope_violation".to_string(),
                 message: format!("review invocation scope digest invalid: {error}"),
                 field: Some("scope_digest".to_string()),
             }],
-        });
+        }));
     }
     Ok(scope)
 }
@@ -310,7 +310,7 @@ impl WorkspaceEngine {
         &self,
         phase: ReviewPhase,
         cycle_key: &str,
-    ) -> Result<ReviewInvocationScope, RoutingAction> {
+    ) -> Result<ReviewInvocationScope, Box<RoutingAction>> {
         if self.session.flow_kind == WorkItemPlanFlowKind::SingleCandidate {
             return self.single_candidate_policy_invocation(phase, cycle_key);
         }
@@ -331,7 +331,7 @@ impl WorkspaceEngine {
         // 锚定改造后 SC 分支不再消费 cycle_key（anchor 由 durable candidate
         // ref 派生）；保留参数以维持与 legacy 分派同形的调用面。
         _cycle_key: &str,
-    ) -> Result<ReviewInvocationScope, RoutingAction> {
+    ) -> Result<ReviewInvocationScope, Box<RoutingAction>> {
         let scope = match self.session.review_invocation_scope.clone() {
             Some(scope) => scope,
             // A direct policy invocation may be used by recovery code before
@@ -346,19 +346,21 @@ impl WorkspaceEngine {
                     .plan_candidate_ir_ref
                     .clone()
                     .filter(|value| !value.trim().is_empty())
-                    .ok_or_else(|| RoutingAction::AbortFatal {
-                        reason: FatalReason::ProtocolViolation,
-                        diagnostics: vec![PolicyDiagnostic {
-                            code: "verification_scope_violation".to_string(),
-                            message: "initial review requires a durable plan candidate IR"
-                                .to_string(),
-                            field: Some("plan_candidate_ir_ref".to_string()),
-                        }],
+                    .ok_or_else(|| {
+                        Box::new(RoutingAction::AbortFatal {
+                            reason: FatalReason::ProtocolViolation,
+                            diagnostics: vec![PolicyDiagnostic {
+                                code: "verification_scope_violation".to_string(),
+                                message: "initial review requires a durable plan candidate IR"
+                                    .to_string(),
+                                field: Some("plan_candidate_ir_ref".to_string()),
+                            }],
+                        })
                     })?;
                 ReviewInvocationScope::initial(anchor)
             }
             None => {
-                return Err(RoutingAction::AbortFatal {
+                return Err(Box::new(RoutingAction::AbortFatal {
                     reason: FatalReason::ProtocolViolation,
                     diagnostics: vec![PolicyDiagnostic {
                         code: "verification_scope_violation".to_string(),
@@ -366,7 +368,7 @@ impl WorkspaceEngine {
                             .to_string(),
                         field: Some("review_invocation_scope".to_string()),
                     }],
-                });
+                }));
             }
         };
         validate_single_candidate_scope(scope, phase)
@@ -487,7 +489,7 @@ impl WorkspaceEngine {
     pub(super) fn verified_mechanical_report_ref(
         &self,
         invocation: &ReviewInvocationScope,
-    ) -> Result<Option<String>, RoutingAction> {
+    ) -> Result<Option<String>, Box<RoutingAction>> {
         let ReviewInvocationScope::Verification {
             mechanical_report_ref,
             repaired_revision_id,
@@ -551,7 +553,7 @@ impl WorkspaceEngine {
 
     pub(super) fn single_candidate_mechanical_findings(
         &self,
-    ) -> Result<Vec<ClassifiedFinding>, RoutingAction> {
+    ) -> Result<Vec<ClassifiedFinding>, Box<RoutingAction>> {
         if self.session.flow_kind != WorkItemPlanFlowKind::SingleCandidate
             || self.session.single_candidate_phase.clone()
                 != Some(crate::product::models::SingleCandidatePhase::Evaluate)
@@ -561,17 +563,16 @@ impl WorkspaceEngine {
         let Some(report_ref) = self.session.mechanical_report_ref.as_deref() else {
             return Ok(Vec::new());
         };
-        let lifecycle = self
-            .lifecycle_store
-            .as_ref()
-            .ok_or_else(|| RoutingAction::AbortFatal {
+        let lifecycle = self.lifecycle_store.as_ref().ok_or_else(|| {
+            Box::new(RoutingAction::AbortFatal {
                 reason: FatalReason::PersistenceFailure,
                 diagnostics: vec![PolicyDiagnostic {
                     code: FatalReason::PersistenceFailure.as_code().to_owned(),
                     message: "lifecycle_store unavailable for mechanical report".to_string(),
                     field: Some("mechanical_report_ref".to_string()),
                 }],
-            })?;
+            })
+        })?;
         let scope = SourceStoreScope {
             project_id: self.session.project_id.clone(),
             issue_id: self.session.issue_id.clone(),
@@ -579,13 +580,15 @@ impl WorkspaceEngine {
         };
         let report = WorkItemPlanSourceStore::new(lifecycle.app_paths())
             .get_mechanical_report(&scope, report_ref)
-            .map_err(|error| RoutingAction::AbortFatal {
-                reason: FatalReason::ProtocolViolation,
-                diagnostics: vec![PolicyDiagnostic {
-                    code: "mechanical_report_invalid".to_string(),
-                    message: format!("mechanical report rejected: {}", error.code()),
-                    field: Some("mechanical_report_ref".to_string()),
-                }],
+            .map_err(|error| {
+                Box::new(RoutingAction::AbortFatal {
+                    reason: FatalReason::ProtocolViolation,
+                    diagnostics: vec![PolicyDiagnostic {
+                        code: "mechanical_report_invalid".to_string(),
+                        message: format!("mechanical report rejected: {}", error.code()),
+                        field: Some("mechanical_report_ref".to_string()),
+                    }],
+                })
             })?;
         Ok(report
             .report
@@ -1088,7 +1091,10 @@ pub(super) fn route_outcome_from_decision(
     )
 }
 
-fn verification_scope_source_store_error(error: SourceStoreError, field: &str) -> RoutingAction {
+fn verification_scope_source_store_error(
+    error: SourceStoreError,
+    field: &str,
+) -> Box<RoutingAction> {
     let persistence_failure = matches!(
         error,
         SourceStoreError::Io(_) | SourceStoreError::Json(_) | SourceStoreError::Serialize(_)
@@ -1099,13 +1105,16 @@ fn verification_scope_source_store_error(error: SourceStoreError, field: &str) -
     )
 }
 
-fn verification_scope_store_error(message: String, persistence_failure: bool) -> RoutingAction {
+fn verification_scope_store_error(
+    message: String,
+    persistence_failure: bool,
+) -> Box<RoutingAction> {
     let reason = if persistence_failure {
         FatalReason::PersistenceFailure
     } else {
         FatalReason::ProtocolViolation
     };
-    RoutingAction::AbortFatal {
+    Box::new(RoutingAction::AbortFatal {
         reason,
         diagnostics: vec![PolicyDiagnostic {
             code: if persistence_failure {
@@ -1116,7 +1125,7 @@ fn verification_scope_store_error(message: String, persistence_failure: bool) ->
             message,
             field: Some("review_invocation_scope".to_string()),
         }],
-    }
+    })
 }
 
 #[cfg(test)]

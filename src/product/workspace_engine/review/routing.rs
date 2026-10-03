@@ -243,7 +243,7 @@ impl WorkspaceEngine {
                     .review_invocation_scope
                     .clone()
                     .unwrap_or_else(|| ReviewInvocationScope::initial(cycle_key.clone()));
-                return Some((scope, action, self.session.run_history.clone()));
+                return Some((scope, *action, self.session.run_history.clone()));
             }
         };
         if let Some(diagnostic) = verdict.structured_output_diagnostic.as_ref() {
@@ -307,7 +307,7 @@ impl WorkspaceEngine {
         let verified_mechanical_report_ref = match self.verified_mechanical_report_ref(&invocation)
         {
             Ok(reference) => reference,
-            Err(action) => return Some((invocation, action, self.session.run_history.clone())),
+            Err(action) => return Some((invocation, *action, self.session.run_history.clone())),
         };
         let mut findings = match classify_review(
             &envelope,
@@ -341,7 +341,7 @@ impl WorkspaceEngine {
         }
         let mechanical = match self.single_candidate_mechanical_findings() {
             Ok(findings) => findings,
-            Err(action) => return Some((invocation, action, self.session.run_history.clone())),
+            Err(action) => return Some((invocation, *action, self.session.run_history.clone())),
         };
         let mut decision = if cycle.initial_count == 1 && cycle.verification_count >= 1 {
             EvaluationDecision {

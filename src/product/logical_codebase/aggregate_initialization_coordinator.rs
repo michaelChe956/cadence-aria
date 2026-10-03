@@ -76,7 +76,7 @@ pub enum AggregateInitializationError {
         retryable: bool,
     },
     #[error("provider trust gate is waiting before the recipe may start")]
-    TrustWaiting { waiting: ProviderTrustWaiting },
+    TrustWaiting { waiting: Box<ProviderTrustWaiting> },
     #[error("cancellation requested")]
     Cancelled,
     #[error("aggregate initialization store error: {0}")]

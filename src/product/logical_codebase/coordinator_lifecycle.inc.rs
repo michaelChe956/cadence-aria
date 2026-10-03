@@ -239,7 +239,9 @@ impl AggregateInitializationCoordinator {
                     reason_code = %waiting.reason_code,
                     "aggregate initialization trust gate waiting; five-step recipe stays unstarted"
                 );
-                return Err(AggregateInitializationError::TrustWaiting { waiting });
+                return Err(AggregateInitializationError::TrustWaiting {
+                    waiting: Box::new(waiting),
+                });
             }
         }
         let operation = self.begin(operation_id, project_id, input)?;
