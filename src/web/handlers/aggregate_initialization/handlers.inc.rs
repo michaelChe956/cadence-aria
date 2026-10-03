@@ -361,9 +361,7 @@ fn ensure_recipe_trust_ready(
     logical_codebase_id: &str,
     provider_context_root: &std::path::Path,
 ) -> ApiResult<()> {
-    use crate::product::logical_codebase::provider_trust::{
-        ProviderTrustPrecondition, ProviderTrustPreparationResult,
-    };
+    use crate::product::logical_codebase::provider_trust::ProviderTrustPreparationResult;
 
     let Some(trust) = dependencies.trust() else {
         return Ok(());

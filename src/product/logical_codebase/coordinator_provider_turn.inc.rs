@@ -1,11 +1,6 @@
 /// 默认托管配置 artifact 引用,经 gateway envelope 的 config_digest 复验。
 const AGGREGATE_CONFIG_ARTIFACT_REF: &str = "sha256:aggregate-initialization-managed-config";
 
-/// Task 1.4（REQ-BOOT-03）：root recipe 每条命令的超时预算默认值。与单仓
-/// registration 生产初始化超时（web handler 的 1800s）对齐——每个 provider
-/// turn（一或两条命令）一个独立预算，启动与事件消费共享。
-pub(crate) const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 1800;
-
 /// 单个 provider turn 输出摘要的累积上限（字节）：durable checkpoint 引用只
 /// 保留有界摘要，完整输出仍归属 provider 会话侧（与单仓 `LimitedOutput`
 /// 同一截断语义的聚合侧实现）。

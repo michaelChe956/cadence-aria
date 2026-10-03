@@ -133,7 +133,7 @@ impl RepositoryRouting {
 
 // ---- Task 1：唯一 authority resolver（显式 kind + fail-closed 冲突）----
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::product::logical_codebase::aggregate_index::{
     AggregateIndexError, AggregateIndexStatus, AggregateIndexStore,

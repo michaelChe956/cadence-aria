@@ -81,7 +81,7 @@ mod tests {
 
     #[test]
     fn choice_delivery_signal_starts_submitting_and_advances_on_each_transition() {
-        let (receipt, mut status) = ChoiceDeliverySignal::new();
+        let (receipt, status) = ChoiceDeliverySignal::new();
         assert_eq!(*status.borrow(), ChoiceReplyState::Submitting);
 
         receipt.mark_resolving();
@@ -93,11 +93,11 @@ mod tests {
 
     #[test]
     fn choice_delivery_signal_reject_and_expire_are_terminal_for_their_paths() {
-        let (rejected, mut rejected_status) = ChoiceDeliverySignal::new();
+        let (rejected, rejected_status) = ChoiceDeliverySignal::new();
         rejected.reject();
         assert_eq!(*rejected_status.borrow(), ChoiceReplyState::Rejected);
 
-        let (expired, mut expired_status) = ChoiceDeliverySignal::new();
+        let (expired, expired_status) = ChoiceDeliverySignal::new();
         expired.expire();
         assert_eq!(*expired_status.borrow(), ChoiceReplyState::Expired);
     }

@@ -187,6 +187,8 @@ impl crate::cross_cutting::streaming_provider::StreamingProviderAdapter
 // ---- LC 别名登记 ----
 
 pub(super) struct AliasLcFixture {
+    /// 别名登记的 LC id；当前无读取点，保留 fixture 形状。
+    #[allow(dead_code)]
     pub(super) lc_id: String,
     pub(super) member_id: LogicalRepositoryId,
     pub(super) checkout_id: RepositoryCheckoutId,

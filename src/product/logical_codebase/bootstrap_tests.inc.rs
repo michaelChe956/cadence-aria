@@ -14,7 +14,6 @@ mod tests {
         RepositoryCheckoutRecord, RepositoryType,
     };
     use crate::product::logical_codebase::{
-        IdentityMigrationJournal, IdentityMigrationJournalStore, IdentityMigrationPhase,
         LogicalCodebaseCreateInput, LogicalCodebaseManifest, LogicalRepositoryId,
         RepositoryCheckoutId,
     };

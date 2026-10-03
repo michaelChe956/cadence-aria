@@ -168,7 +168,7 @@ async fn same_command_resumes_before_provider_barrier() {
     let key = CodingAttemptRunKey::from_attempt(&attempt);
 
     // 窗口一：claim 后 / registry 激活前。
-    let ClaimCodingStartOutcome::Claimed(claimed) = store
+    let ClaimCodingStartOutcome::Claimed(_claimed) = store
         .claim_coding_start(&attempt, "wiga-start-x", &origin)
         .expect("seed claim at window one")
     else {

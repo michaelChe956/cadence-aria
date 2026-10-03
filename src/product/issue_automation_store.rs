@@ -812,6 +812,8 @@ fn resolve_generation(
 pub(crate) enum PreparedPlanIntentRead {
     Current(PreparedPlanIntent),
     /// 旧代意图：无 target。携带身份字段供诊断；绝不驱动自动链。
+    // 字段当前无读取点；删除会改变枚举形状并触发 large_enum_variant（禁碰类别），故保留并放行。
+    #[allow(dead_code)]
     LegacyUnbound {
         enrollment_id: String,
         prepare_intent_id: String,
@@ -847,9 +849,12 @@ pub(crate) fn read_prepared_plan_intent(
 }
 
 /// C5 Task 1：`automation-generation-intent.json` 的版本化读侧（语义同
-/// [`PreparedPlanIntentRead`]：旧格式无 target → 旧代无绑定 fail-closed）。
-pub(crate) enum PlanGenerationIntentRead {
+/// `PreparedPlanIntentRead`：旧格式无 target → 旧代无绑定 fail-closed）。
+pub enum PlanGenerationIntentRead {
     Current(PlanGenerationIntent),
+    /// 旧代意图：无 target。携带身份字段供诊断；绝不驱动自动链。
+    // 字段当前无读取点；删除会改变枚举形状，故保留并放行。
+    #[allow(dead_code)]
     LegacyUnbound {
         enrollment_id: String,
         plan_id: String,

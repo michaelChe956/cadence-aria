@@ -128,8 +128,6 @@
     #[tokio::test]
     async fn aggregate_recipe_turns_carry_bootstrap_executor_marker() {
         use crate::cross_cutting::streaming_provider::ToolPolicyIntent;
-        use crate::product::logical_codebase::policy::SessionPolicyAction;
-        use crate::product::logical_codebase::provider_admission_preflight::BootstrapExecutorMarker;
         use crate::protocol::contracts::AdapterRole;
 
         let fixture = gateway_aggregate_fixture();
@@ -168,7 +166,6 @@
         marker: &crate::product::logical_codebase::provider_admission_preflight::BootstrapExecutorMarker,
         canonical_root: &std::path::Path,
     ) {
-        use crate::product::logical_codebase::provider_admission_preflight::BootstrapExecutorMarker;
         use crate::product::logical_codebase::policy::SessionPolicyAction;
 
         assert!(marker.incomplete_reason().is_none());

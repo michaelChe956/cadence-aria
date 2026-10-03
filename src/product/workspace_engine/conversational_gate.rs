@@ -123,6 +123,9 @@ pub(crate) const SC_REVISION_ASSEMBLY_FILE: &str = "sc-revision-assembly.json";
 pub(crate) const SC_REVISION_BLOCKED_FILE: &str = "sc-revision-blocked.json";
 
 // C2 Task 11：分块交付与静态预算表供 WS/REST 层与测试消费（同模块再导出）。
+// 分块交付渲染/重组仅由 cfg(test) 消费（生产交付走 artifact 引用路径）。
+#[cfg(test)]
+pub(crate) use super::prompts::{render_sc_revision_delivery, sc_provider_input_budget};
 
 /// C2 Task 11：SC 修订组装记录（inline 交付不落账——零新增持久化）。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

@@ -7,6 +7,8 @@ use super::*;
 /// 控制 C 是否仍留有主 checkout 记录（true=移除后清理前的过渡态，
 /// false=清理后的常态）。
 struct D4MemberFixture {
+    /// target 成员 checkout；当前无读取点，保留 fixture 形状。
+    #[allow(dead_code)]
     target_checkout: PathBuf,
     other_active_checkout: PathBuf,
 }

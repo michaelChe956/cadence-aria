@@ -121,8 +121,7 @@ mod tests {
         CodingAttemptStore, CreateChoiceGateInput, CreateCodingAttemptInput,
     };
     use crate::product::coding_models::{
-        CodingChoiceGateStatus, CodingChoiceOption, CodingChoiceQuestion, CodingExecutionStage,
-        CodingProviderRole,
+        CodingChoiceOption, CodingChoiceQuestion, CodingExecutionStage, CodingProviderRole,
     };
     use crate::product::coding_workspace_runner::CodingRunnerCommand;
     use crate::product::models::ProviderName;

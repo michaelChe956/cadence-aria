@@ -292,7 +292,7 @@ async fn coding_amendment_delivery_retries_same_event_after_send_before_mark_fai
 /// 投递一次；双双业务 Ok + Running。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn coding_amendment_concurrent_recovery_reconciles_one_durable_delivery() {
-    let mut fixture = amendment_fixture().await;
+    let fixture = amendment_fixture().await;
     let failpoint = register_plan_amendment_delivery_mark_failpoint(
         &fixture.store,
         &fixture.attempt,
@@ -424,13 +424,6 @@ async fn coding_amendment_delivery_slow_observer_never_backpressures_business() 
         crate::product::coding_models::CodingPlanAmendmentDeliveryStatus::Pending,
     )
     .await;
-}
-
-fn plan_amendment_event_id(event: &CodingWsOutMessage) -> String {
-    match event {
-        CodingWsOutMessage::PlanAmendmentUpdated { event_id, .. } => event_id.clone(),
-        event => panic!("unexpected amendment delivery event: {event:?}"),
-    }
 }
 
 #[tokio::test]

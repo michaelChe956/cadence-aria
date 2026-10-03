@@ -208,6 +208,8 @@ struct TrustRouteFixture {
     paths: ProductAppPaths,
     factory: Arc<LogicalCodebaseGatewayFactory>,
     gate: Arc<RouteTrustGate>,
+    /// 生产形依赖图；当前无读取点，保留 fixture 形状。
+    #[allow(dead_code)]
     dependencies: AggregateInitializationDependencies,
 }
 

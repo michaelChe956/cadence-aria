@@ -17,14 +17,11 @@ use crate::product::work_item_plan_policy::{HumanGateSnapshot, HumanReason, RunP
 use crate::product::work_item_plan_store::WorkItemPlanStore;
 use crate::product::workspace_engine::SingleCandidateCompileCheckpoint;
 use crate::product::workspace_engine::WorkItemPlanCompileFinalizerCheckpoint;
-use crate::product::workspace_engine::WorkspaceSession;
 use crate::product::workspace_engine::tests::single_candidate_recovery::single_candidate_recovery_record;
-use crate::web::autopilot_orchestrator::{
-    AutopilotOrchestrator, OrchestratorConfig, ReconcileOutcome,
-};
+use crate::web::autopilot_orchestrator::{AutopilotOrchestrator, ReconcileOutcome};
 pub(crate) use crate::web::handlers::automation_enrollment_test_support::{ISSUE_ID, PROJECT_ID};
 use crate::web::handlers::automation_enrollment_test_support::{
-    enrollment_body, put_enrollment, response_json, seed_fixture, seed_single_repository_fixture,
+    put_enrollment, response_json, seed_fixture, seed_single_repository_fixture,
     single_repository_enable_body,
 };
 use crate::web::handlers::lifecycle::plan_preparation::ensure_enrolled_plan;

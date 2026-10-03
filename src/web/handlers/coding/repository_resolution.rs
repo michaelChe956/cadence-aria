@@ -18,7 +18,7 @@ pub(crate) fn resolve_work_item_repository(
     //   “单仓请求命中 LC 归属 issue”的 kind_mismatch，再走既有 legacy 兼容解析。
     let resolver =
         crate::product::logical_codebase::RepositoryAuthorityResolver::new(app_paths.clone());
-    if work_item.target_repository_id.is_some() {
+    if let Some(logical_repository_id) = work_item.target_repository_id {
         let resolution = resolver
             .resolve_for_issue(project_id, &work_item.issue_id)
             .map_err(product_store_api_error)?
@@ -40,7 +40,6 @@ pub(crate) fn resolve_work_item_repository(
                 ),
             ))
         })?;
-        let logical_repository_id = work_item.target_repository_id.expect("checked above");
         if !manifest.member_ids.contains(&logical_repository_id) {
             return Err(product_store_api_error(routing_error(
                 RepositoryRoutingErrorCode::TargetUnknown,

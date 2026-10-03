@@ -119,8 +119,7 @@ mod tests {
         CodingAdmissionKind, GroupFinalReadinessSnapshot, GroupFinalReadinessUnit,
     };
     use crate::web::wiga_gate_fixture::{
-        EnrolledGateFixture, ISSUE_ID, PROJECT_ID,
-        complete_enrolled_group_waiting_for_final_confirm,
+        ISSUE_ID, PROJECT_ID, complete_enrolled_group_waiting_for_final_confirm,
     };
 
     /// 主证据（R5）：Fake 真实业务链跑到 FinalConfirm 等待后，readiness 被

@@ -390,7 +390,7 @@ fn resolve_logical_target(
     manifest: &Option<LogicalCodebaseManifest>,
     members: &[crate::product::logical_codebase::types::CodebaseMemberRecord],
     checkouts: &[crate::product::logical_codebase::types::RepositoryCheckoutRecord],
-    record_root: &PathBuf,
+    record_root: &Path,
 ) -> Result<
     (
         PathBuf,
@@ -454,7 +454,7 @@ fn resolve_logical_target(
             let root = manifest
                 .as_ref()
                 .map(|manifest| manifest.provider_context_root.clone())
-                .unwrap_or_else(|| record_root.clone());
+                .unwrap_or_else(|| record_root.to_path_buf());
             // 聚合 source digest：root + 排序后的成员 source digests。
             let mut digests: Vec<&str> = members
                 .iter()

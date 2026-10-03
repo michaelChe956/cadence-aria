@@ -262,7 +262,7 @@ pub async fn reconcile_claimed_coding_runs_once(state: &WebAppState) -> Result<u
 /// 单 attempt 启动恢复分诊（P2 Task 6）：
 /// - registry 已有 runner/预约：幂等跳过（并发抢输不是失败）。
 /// - Running：可信半启动，走既有 `ensure_runner_for_resumed_attempt`
-///（SC durable-ready 门、物化判定、双启去重全在 helper 内）。
+///   （SC durable-ready 门、物化判定、双启去重全在 helper 内）。
 /// - Created + claim（Claimed/RunnerRegistered）：同 command/origin 幂等
 ///   续启——Task 4 单一恢复方法，不隐式新 command。
 /// - Created + claim（ProviderMayHaveStarted）且无可信 ledger：外部副作用

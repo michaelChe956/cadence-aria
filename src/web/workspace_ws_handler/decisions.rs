@@ -163,6 +163,8 @@ pub(crate) enum HumanGateTerminationEffect {
     Confirmed,
     Abandoned,
     AlreadyClosed {
+        /// 关门时的 session 状态：保留供诊断/后续响应扩展；当前无读取点。
+        #[allow(dead_code)]
         status: crate::product::models::WorkspaceSessionStatus,
     },
     Busy {

@@ -458,7 +458,8 @@
         project_id: String,
         /// canonical LC root（含空格；非 Git）。
         lc_root: PathBuf,
-        /// 成员主仓（真实 Git checkout）。
+        /// 成员主仓（真实 Git checkout）；当前无读取点，保留 fixture 形状。
+        #[allow(dead_code)]
         member_main: PathBuf,
         /// 成员主仓的真实链接 worktree（member target）。
         member_worktree: PathBuf,

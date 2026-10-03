@@ -1,8 +1,6 @@
 // Task 2.1（lc-root-initialization，REQ-ENV-01/ENV-10）测试 doubles。
 // 物理拆分（1200 行守卫）：经 include! 挂载，模块域与 provider_run_events.rs 相同。
 
-use super::*;
-
 /// 记录启动 input 并立即完成的 capture provider。gateway registry 与 run
 /// registry 各持独立实例，用启动计数区分「经 gateway」与「直连」经路。
 pub(super) struct RootCwdCaptureAuthorProvider {

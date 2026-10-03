@@ -316,7 +316,7 @@ fn c1_existing_create_declared_create_compiles_and_persists_intent() {
         content_hash: String::new(),
     };
     source_record.content_hash = source_record.content_hash().expect("source content hash");
-    let source_ref = source_store
+    let _source_ref = source_store
         .put_source_revision(
             "project_c1_0001",
             "issue_c1_0001",

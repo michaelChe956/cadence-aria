@@ -19,7 +19,6 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::cross_cutting::provider_adapter::ProviderAdapter;
 use crate::cross_cutting::streaming_provider::{
     ProviderCompletion, ProviderEvent, ProviderSession, ProviderToolPolicy,
     StreamingProviderAdapter, StreamingProviderInput,

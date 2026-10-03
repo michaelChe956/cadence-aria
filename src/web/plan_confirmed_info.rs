@@ -1069,7 +1069,6 @@ mod tests {
     use super::*;
     use crate::web::wiga_gate_fixture::EnrolledGateFixture;
     use crate::web::wiga_gate_fixture::{ISSUE_ID, PROJECT_ID};
-    use tower::ServiceExt;
 
     struct CompiledPlanFixture {
         gate: EnrolledGateFixture,

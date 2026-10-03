@@ -171,7 +171,7 @@ async fn workspace_choice_claim_run_finish_expires_old_commands() {
 #[tokio::test]
 async fn workspace_choice_claim_pending_frame_removed_only_after_delivered() {
     let manager = claim_manager("session_claim_deliver");
-    let (_token, incarnation) = started_claim_run(&manager).await;
+    let (_token, _incarnation) = started_claim_run(&manager).await;
     manager.register_pending_choice_frame(provider_choice_frame("choice-d"));
 
     // 拿到 run 的 command 通道以扮演 provider 等待者。

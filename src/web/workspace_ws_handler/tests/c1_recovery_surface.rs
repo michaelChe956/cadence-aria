@@ -35,10 +35,8 @@ use crate::product::coding_workspace_engine::CodingWorkspaceEngine;
 use crate::product::git_workspace_service::GitWorkspaceService;
 use crate::product::issue_automation_store::IssueAutomationStore;
 use crate::product::json_store::write_json;
-use crate::product::lifecycle_store::{
-    CreateWorkspaceSessionInput, LifecycleStore, UpsertIssueSharedWorktreeInput,
-};
-use crate::product::logical_codebase::{EnrollmentTarget, LogicalRepositoryId};
+use crate::product::lifecycle_store::{LifecycleStore, UpsertIssueSharedWorktreeInput};
+use crate::product::logical_codebase::EnrollmentTarget;
 use crate::product::models::WorkspaceSessionStatus;
 use crate::product::models::automation::{
     EnrollmentBindingIdentityInput, EnrollmentOptions, EnrollmentRebindRequest, EnrollmentSource,

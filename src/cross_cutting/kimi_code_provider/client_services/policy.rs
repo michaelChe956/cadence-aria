@@ -44,6 +44,8 @@ impl ClientServicePolicy {
     /// spawn 前拒绝（fail-closed），使其无法成为第二条「带写权限
     /// Executor」物理路径。无 marker 的普通会话（None/deny 意图）零变化
     ///（deny 意图归三 adapter 的双向守卫裁决，本判定不重复）。
+    // 仅本文件 cfg(test) 消费（生产无调用点）。
+    #[cfg(test)]
     pub fn evaluate_bootstrap_executor_marker(
         tool_policy: Option<&crate::cross_cutting::streaming_provider::ProviderToolPolicy>,
     ) -> PolicyDecision {

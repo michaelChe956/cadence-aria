@@ -151,7 +151,11 @@ struct RootSafetyFixture {
     aggregate_root: std::path::PathBuf,
     member_repo: std::path::PathBuf,
     factory: Arc<LogicalCodebaseGatewayFactory>,
+    /// 路由 trust 门；当前无读取点，保留 fixture 形状。
+    #[allow(dead_code)]
     gate: Arc<RouteTrustGate>,
+    /// 生产形依赖图；当前无读取点，保留 fixture 形状。
+    #[allow(dead_code)]
     dependencies: AggregateInitializationDependencies,
 }
 

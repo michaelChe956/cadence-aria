@@ -80,7 +80,7 @@ async fn choice_delivery_author_path_forwards_full_answers_and_receipt() {
     let (provider_command_tx, mut provider_command_rx) = mpsc::channel(8);
     let (command_tx, command_rx) = mpsc::channel(8);
 
-    let (receipt, mut status) = ChoiceDeliverySignal::new();
+    let (receipt, status) = ChoiceDeliverySignal::new();
     let sent_receipt = receipt.clone();
     let two_answers = choice_delivery_two_answers();
     let expected_answers = two_answers.clone();
@@ -340,7 +340,7 @@ async fn choice_delivery_review_path_forwards_full_answers_and_receipt() {
         }
     }
 
-    let (receipt, mut status) = ChoiceDeliverySignal::new();
+    let (receipt, status) = ChoiceDeliverySignal::new();
     let sent_receipt = receipt.clone();
     let two_answers = choice_delivery_two_answers();
     let captured: ChoiceDeliveryCapture = std::sync::Arc::new(std::sync::Mutex::new(None));

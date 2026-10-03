@@ -36,6 +36,9 @@ use crate::product::lifecycle_store::{
     CreateWorkspaceSessionInput, LifecycleStore, UpsertIssueSharedWorktreeInput,
     UpsertRepoSharedWorktreeInput,
 };
+// 仅测试模块消费（lifecycle_tests.inc.rs 经 `use super::*` 取用）。
+#[cfg(test)]
+use crate::product::lifecycle_store::CreateIssueWorkItemPlanInput;
 use crate::product::models::{
     DesignSpecRecord, GateStatus, IssuePhase as ProductIssuePhase,
     IssueRecord as ProductIssueRecord, IssueRuntimeBindingRecord,

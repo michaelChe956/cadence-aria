@@ -144,6 +144,8 @@ pub(crate) struct ScRevisionAssembledInput {
 }
 
 /// 分块帧头前缀（`[sc_revision_chunk i/n assembly_digest]`）。
+// 仅 cfg(test) 的 render/reassemble 与交付完整性反演测试消费。
+#[cfg(test)]
 const SC_REVISION_CHUNK_HEADER_PREFIX: &str = "[sc_revision_chunk ";
 /// 每块目标字节数：inline 预算减去帧头与安全余量（digest 64 hex＋固定文案）。
 const SC_REVISION_CHUNK_TARGET_BYTES: usize = SC_MANUAL_REVISION_PROMPT_QUALITY_BUDGET_BYTES - 512;
@@ -183,6 +185,8 @@ pub(crate) fn assemble_sc_revision_input(
 
 /// 渲染完整有序分块交付形态：每块 ≤inline 字节、UTF-8 字符边界切分、帧头带
 /// `i/n` 与组装 digest；按序拼接块负载逐字节恢复全文（不截断、无缺块）。
+// 仅 cfg(test) 消费（生产交付走 AssembleScRevisionDelivery 的 artifact 引用路径）。
+#[cfg(test)]
 pub(crate) fn render_sc_revision_delivery(prompt: &str, budget: &ScProviderInputBudget) -> String {
     if prompt.len() <= budget.inline_bytes {
         return prompt.to_string();
@@ -208,6 +212,8 @@ pub(crate) fn render_sc_revision_delivery(prompt: &str, budget: &ScProviderInput
 
 /// 分块交付的完整性反演：剥离帧头/帧尾后按序拼接块负载，必须逐字节恢复
 /// 全文（缺块/截断/乱序在此显式失败，供交付前校验与测试共用）。
+// 仅 cfg(test) 消费（交付完整性反演）。
+#[cfg(test)]
 pub(crate) fn reassemble_sc_revision_delivery(delivery: &str) -> String {
     let mut restored = String::new();
     for line in delivery.lines() {
@@ -227,6 +233,8 @@ pub(crate) fn assembly_digest_of(prompt: &str) -> String {
 }
 
 /// 按 UTF-8 字符边界把全文切成 ≤max_bytes 的完整有序块。
+// 仅 cfg(test) 的 render_sc_revision_delivery 消费。
+#[cfg(test)]
 fn split_utf8_chunks(prompt: &str, max_bytes: usize) -> Vec<String> {
     let mut chunks = Vec::new();
     let mut current = String::new();

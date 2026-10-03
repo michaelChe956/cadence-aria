@@ -3,8 +3,6 @@
 use crate::product::advance_store::{AdvanceRecord, AdvanceStatus, AdvanceStore};
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::CodingAttemptStore;
-use crate::product::coding_workspace_engine::CodingWorkspaceEngine;
-use crate::product::git_workspace_service::GitWorkspaceService;
 use crate::product::issue_automation_store::IssueAutomationStore;
 use crate::product::json_store::write_json;
 use crate::product::lifecycle_store::{

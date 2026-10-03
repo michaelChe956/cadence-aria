@@ -5,6 +5,8 @@ use crate::product::cadence_skills::routing_reference::{
 use crate::product::workspace_engine::review::trusted_review_comments;
 
 impl WorkspaceEngine {
+    // 仅测试消费（生产走 build_revision_input_without_resume / _with_resume）。
+    #[cfg(test)]
     pub(crate) fn build_revision_input(&self) -> Result<StreamingProviderInput, String> {
         self.build_revision_input_with_resume(true)
     }

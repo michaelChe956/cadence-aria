@@ -125,7 +125,7 @@ async fn choice_delivery_coding_gate_stays_open_until_receipt_delivered() {
         }
     }
 
-    let (receipt, mut status) = ChoiceDeliverySignal::new();
+    let (receipt, status) = ChoiceDeliverySignal::new();
     let two_answers = vec![
         ChoiceAnswerData {
             question_id: "q-1".to_string(),

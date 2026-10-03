@@ -950,8 +950,7 @@ mod tests {
     use crate::product::lifecycle_store::{CreateIssueWorkItemPlanInput, LifecycleStore};
     use crate::product::models::automation::{IssueAutomationEnrollment, PreparedPlanIntent};
     use crate::product::models::{
-        IssueWorkItemPlan, IssueWorkItemPlanOptions, IssueWorkItemPlanStatus,
-        WorkspaceSessionRecord,
+        IssueWorkItemPlan, IssueWorkItemPlanStatus, WorkspaceSessionRecord,
     };
     use crate::web::error::ApiResult;
     use crate::web::handlers::lifecycle::plan_preparation::ensure_enrolled_plan;

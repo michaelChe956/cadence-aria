@@ -514,9 +514,8 @@ impl super::WorkspaceEngine {
                     || item.starts_with("plan_candidate_ir_unreadable")
                     || item.starts_with("mechanical_report_unreadable")
             });
-        let state = if facts.complete {
-            OperationState::Accepted
-        } else if command.action == CandidateRecoveryAction::Rebuild && authoritative_refs_readable
+        let state = if facts.complete
+            || (command.action == CandidateRecoveryAction::Rebuild && authoritative_refs_readable)
         {
             OperationState::Accepted
         } else {

@@ -117,10 +117,7 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
-    use crate::cross_cutting::choice_delivery::ChoiceDeliverySignal;
-    use crate::cross_cutting::streaming_provider::{
-        ChoiceAnswerData, ChoiceOptionData, ChoiceRequestData, ChoiceRequestSource, ProviderCommand,
-    };
+    use crate::cross_cutting::streaming_provider::ProviderCommand;
     use crate::product::app_paths::ProductAppPaths;
     use crate::product::lifecycle_store::CreateWorkspaceSessionInput;
     use crate::product::models::{ProviderName, WorkspaceType};
@@ -230,21 +227,6 @@ mod tests {
             incarnation,
             session_id,
         }
-    }
-
-    fn two_answers() -> Vec<ChoiceAnswerData> {
-        vec![
-            ChoiceAnswerData {
-                question_id: "q-1".to_string(),
-                selected_option_ids: vec!["yes".to_string()],
-                free_text: None,
-            },
-            ChoiceAnswerData {
-                question_id: "q-2".to_string(),
-                selected_option_ids: vec!["no".to_string()],
-                free_text: None,
-            },
-        ]
     }
 
     fn request_body(command_id: &str, incarnation: &str) -> serde_json::Value {
