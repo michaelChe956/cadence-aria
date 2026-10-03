@@ -23,6 +23,7 @@ use crate::cross_cutting::structured_output::StructuredOutputContract;
 use crate::cross_cutting::tool_policy_audit::{
     DurableToolPolicyEvent, ProviderStartAudit, ToolPolicyAuditSink,
 };
+use crate::product::logical_codebase::provider_projection::ProviderPolicyProjector;
 
 mod ask_user_question;
 mod projection;
@@ -207,16 +208,48 @@ impl ClaudeCodeProvider {
     }
 
     /// LC validated 启动的 argv(Task 4a):在 headless 基础片段上追加冻结的
-    /// MCP/内建工具 allowlist(`--allowedTools`);策略角色(Planning/Review)
-    /// 追加 deny token 冻结片段。direct `build_args` 保持逐字节不变。
-    ///
-    /// Task 4a 阶段 1 RED 桩:阶段 2 实现真实 argv。
+    /// MCP/内建工具 allowlist(`--allowedTools`,只列既有合法只读工具);策略
+    /// 角色(Planning/Review)追加 deny token 冻结片段。与投影/audit 同源
+    /// (allowlist/approval 常量同 projection.rs)。direct `build_args` 保持
+    /// 逐字节不变。
     fn build_lc_validated_args(
         &self,
-        _resume_provider_session_id: Option<&str>,
-        _tool_policy: Option<&crate::cross_cutting::streaming_provider::ProviderToolPolicy>,
+        resume_provider_session_id: Option<&str>,
+        tool_policy: Option<&crate::cross_cutting::streaming_provider::ProviderToolPolicy>,
     ) -> Vec<String> {
-        Vec::new()
+        let mut args = vec![
+            "-p".to_string(),
+            "--verbose".to_string(),
+            "--output-format=stream-json".to_string(),
+            "--input-format=stream-json".to_string(),
+            "--include-partial-messages".to_string(),
+            "--replay-user-messages".to_string(),
+        ];
+
+        if let Some(session_id) = resume_provider_session_id
+            .map(str::trim)
+            .filter(|session_id| !session_id.is_empty())
+        {
+            args.push("--resume".to_string());
+            args.push(session_id.to_string());
+        }
+
+        // LC headless 工具 allowlist(冻结):MCP/内建工具控制进入 argv 投影,
+        // 只列既有合法只读工具,不扩大到 MCP 写工具。
+        args.push("--allowedTools".to_string());
+        args.push(projection::CLAUDE_LC_ALLOWED_TOOLS.to_string());
+
+        if let Some(crate::cross_cutting::streaming_provider::ProviderToolPolicy {
+            intent:
+                crate::cross_cutting::streaming_provider::ToolPolicyIntent::DenyFileWriteBuiltins,
+        }) = tool_policy
+        {
+            args.extend(deny_file_write_builtins_tokens());
+        }
+
+        args.push("--permission-prompt-tool=stdio".to_string());
+
+        args
     }
 
     fn parse_stream_text_delta(value: &Value) -> Option<String> {
@@ -1036,21 +1069,338 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
     }
 
     /// LC validated 启动(Task 4a):只接受 gateway 产出的 validated input,
-    /// 消费冻结 envelope/boundary plan 并统一落盘 `ProviderStartAudit.
-    /// lc_projection`;无通用 tool policy 的角色同样执行 version 解析、
+    /// 消费冻结 envelope 派生的不可伪造 boundary plan,投影后以 canonical
+    /// LC root 为进程 cwd 启动;统一落盘 `ProviderStartAudit.lc_projection`。
+    /// 无通用 tool policy 的角色(Coding/Executor)同样执行 version 解析、
     /// 原生握手与统一 launch audit,不以 `tool_policy=None` 早退。
-    ///
-    /// Task 4a 阶段 1 RED 桩:阶段 2 实现真实启动链。
     async fn start_validated(
         &self,
-        _input: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
-        _cancel: CancellationToken,
+        validated: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+        cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
-        Err(ProviderAdapterError::execution_failed(
-            None,
-            String::new(),
-            "claude lc validated start is not implemented yet (task 4a red stub)",
-            0,
-        ))
+        let (input, launch) = validated.into_parts();
+        let envelope = launch.envelope().clone();
+
+        // 双向守卫在子进程之前(与 direct `start` 同源;LC 同样非法即拒)。
+        validate_tool_policy_for_role(&input.role, input.tool_policy.as_ref()).map_err(
+            |error| {
+                ProviderAdapterError::parse_error(error.to_string(), String::new(), String::new())
+            },
+        )?;
+
+        // adapter 匹配:validated input 必须是 Claude Code(不匹配即拒,
+        // 不回退其它 provider/dialect)。
+        if input.provider_type != crate::protocol::contracts::ProviderType::ClaudeCode
+            || envelope.provider_dialect
+                != crate::product::logical_codebase::policy::ProviderDialect::ClaudeCodeCliV1
+        {
+            return Err(ProviderAdapterError::parse_error(
+                "claude lc validated start: only Claude Code launches are accepted by this adapter",
+                String::new(),
+                String::new(),
+            ));
+        }
+
+        // 统一 launch audit sink:LC 会话必须绑定 run-bound sink,缺失
+        // fail-closed(1b 的 prepare 契约之前由本路径强制)。
+        let sink = input.audit_sink.clone().ok_or_else(|| {
+            ProviderAdapterError::parse_error(
+                "claude lc validated start: audit sink is required for LC launches",
+                String::new(),
+                String::new(),
+            )
+        })?;
+
+        // exact version(supplier seam 优先,默认真实 `--version` 探测+进程内
+        // 缓存;不可得 fail-closed)。全 LC 路径必填,非仅策略角色。
+        let provider_version = match self.version_supplier.clone() {
+            Some(supplier) => supplier().map_err(|error| {
+                ProviderAdapterError::parse_error(
+                    format!("claude lc validated start: {error}"),
+                    String::new(),
+                    String::new(),
+                )
+            })?,
+            None => crate::cross_cutting::streaming_provider::cached_cli_version(
+                &self.command,
+                probe_claude_version(&self.command, CLAUDE_VERSION_PROBE_TIMEOUT),
+            )
+            .await
+            .map_err(|error| {
+                ProviderAdapterError::parse_error(
+                    format!("claude lc validated start: {error}"),
+                    String::new(),
+                    String::new(),
+                )
+            })?,
+        };
+
+        // 不可伪造 boundary plan + 投影。trust/MCP bundle digest 的 gateway
+        // 侧装配(ProviderTrustSource/Aria bundle)归 1b/1c;空串同样纳入
+        // session digest,装配后任一漂移都会改变 projection_digest。
+        let boundary = projection::lc_boundary_plan(&envelope).map_err(|error| {
+            ProviderAdapterError::parse_error(
+                format!("claude lc validated start: {error}"),
+                String::new(),
+                String::new(),
+            )
+        })?;
+        let projection_input =
+            crate::product::logical_codebase::provider_projection::ProviderProjectionInput::new(
+                envelope.clone(),
+                crate::product::logical_codebase::provider_gateway::ProviderRef::claude_code(
+                    launch.capability_snapshot_ref(),
+                ),
+                envelope.action,
+                input.role.clone(),
+                input.permission_mode.clone(),
+                input.tool_policy.clone(),
+                projection::CLAUDE_LC_APPROVAL_POLICY.to_string(),
+                String::new(),
+                envelope.config_artifact_ref.clone(),
+                String::new(),
+                Some(boundary),
+            );
+        let projector = ClaudePolicyProjector::new(provider_version.clone());
+        let lc_projection = projector.project(&projection_input).map_err(|error| {
+            ProviderAdapterError::parse_error(
+                format!("claude lc validated start: {error}"),
+                String::new(),
+                String::new(),
+            )
+        })?;
+
+        // LC argv 与投影同源;进程 cwd = envelope 冻结的 canonical LC root。
+        let args = self.build_lc_validated_args(
+            input.resume_provider_session_id.as_deref(),
+            input.tool_policy.as_ref(),
+        );
+        let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+        let command = self.command.to_string_lossy().to_string();
+        let process_cwd = envelope.working_directory.clone();
+        let process = ProcessManager::spawn(
+            &command,
+            &arg_refs,
+            &process_cwd,
+            &input.env_vars,
+            cancel.clone(),
+        )
+        .await?;
+
+        let stdin = Arc::new(Mutex::new(process.stdin));
+        let stdout = process.stdout;
+        let stderr = process.stderr;
+        let mut child = process.child;
+        let (event_tx, event_rx) = mpsc::channel(32);
+        let bridge = ApprovalBridge::new(input.permission_mode.clone(), event_tx.clone());
+        let commands = bridge.command_sender();
+        let structured_output_contract = input.structured_output_contract.clone();
+
+        // resume 已知:native id 即 resume id,不等 init;fresh 等 init 握手。
+        let resume_native_id = input
+            .resume_provider_session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(ToString::to_string);
+
+        let _ = event_tx
+            .send(ProviderEvent::StatusChanged(ProviderStatus::Starting))
+            .await;
+        let _ = event_tx
+            .send(ProviderEvent::Execution(ProviderExecutionEvent {
+                event_id: "provider".to_string(),
+                kind: ProviderExecutionEventKind::Provider,
+                status: ProviderExecutionEventStatus::Started,
+                title: "Claude Code provider started".to_string(),
+                detail: None,
+                command: None,
+                cwd: Some(process_cwd.display().to_string()),
+                output: None,
+                exit_code: None,
+            }))
+            .await;
+
+        let workspace_session_id = input.workspace_session_id.clone().unwrap_or_default();
+        let role_text =
+            crate::cross_cutting::streaming_provider::adapter_role_text(&input.role).to_string();
+        let tool_policy_digest = projection::lc_tool_policy_canonical_digest(
+            input.tool_policy.as_ref(),
+        )
+        .map_err(|error| {
+            ProviderAdapterError::parse_error(
+                format!("claude lc validated start: {error}"),
+                String::new(),
+                String::new(),
+            )
+        })?;
+
+        // 与策略路径同构的有界「初始写入→Running→握手→provider_start 落盘」;
+        // 差异仅在于 audit 追加统一 `lc_projection`(LC 会话必填)。
+        let stderr_output = Arc::new(Mutex::new(String::new()));
+        let stderr_output_for_task = Arc::clone(&stderr_output);
+        let stderr_task = tokio::spawn(async move {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let mut output = stderr_output_for_task.lock().await;
+                if !output.is_empty() {
+                    output.push('\n');
+                }
+                output.push_str(&line);
+            }
+        });
+
+        let bound = stream::CLAUDE_POLICY_HANDSHAKE_TIMEOUT.saturating_mul(3);
+        let outcome = tokio::time::timeout(bound, async {
+            Self::write_initial_messages(&stdin, &input)
+                .await
+                .map_err(|error| {
+                    ProviderAdapterError::parse_error(
+                        format!(
+                            "claude lc validated start: initial write failed: {}",
+                            error.details
+                        ),
+                        String::new(),
+                        String::new(),
+                    )
+                })?;
+            let _ = event_tx
+                .send(ProviderEvent::StatusChanged(ProviderStatus::Running))
+                .await;
+            let _ = event_tx
+                .send(ProviderEvent::Execution(ProviderExecutionEvent {
+                    event_id: "turn".to_string(),
+                    kind: ProviderExecutionEventKind::Turn,
+                    status: ProviderExecutionEventStatus::Started,
+                    title: "Turn started".to_string(),
+                    detail: None,
+                    command: None,
+                    cwd: Some(process_cwd.display().to_string()),
+                    output: None,
+                    exit_code: None,
+                }))
+                .await;
+            let (reader, native_id) = match resume_native_id.clone() {
+                Some(id) => (tokio::io::BufReader::new(stdout), id),
+                None => {
+                    let (reader, session_id) = stream::wait_for_claude_init(stdout, &cancel)
+                        .await
+                        .map_err(|error| {
+                            ProviderAdapterError::parse_error(
+                                format!(
+                                    "claude lc validated start: handshake failed: {}",
+                                    error.details
+                                ),
+                                String::new(),
+                                String::new(),
+                            )
+                        })?;
+                    (reader, session_id)
+                }
+            };
+            // F2 同验:空白原生会话 id 不得进入 durable 审计。
+            if native_id.trim().is_empty() {
+                return Err(ProviderAdapterError::parse_error(
+                    "claude lc validated start: native session id is blank before audit write",
+                    String::new(),
+                    String::new(),
+                ));
+            }
+            let audit_event = DurableToolPolicyEvent::ProviderStart(ProviderStartAudit {
+                provider: TOOL_POLICY_PROVIDER_NAME.to_string(),
+                role: role_text.clone(),
+                workspace_session_id: workspace_session_id.clone(),
+                provider_session_id: native_id.clone(),
+                tool_policy_canonical_digest: tool_policy_digest.clone(),
+                argv: args.clone(),
+                sandbox: None,
+                approval_policy: None,
+                provider_version: provider_version.clone(),
+                adapter_dialect: CLAUDE_POLICY_DIALECT.to_string(),
+                lc_projection: Some(crate::cross_cutting::tool_policy_audit::LcProjectionAudit {
+                    action: projection::action_text(envelope.action).to_string(),
+                    wire_dialect: projection::wire_dialect_text(lc_projection.wire_dialect())
+                        .to_string(),
+                    capability_projection_digest: lc_projection
+                        .capability_projection_digest()
+                        .to_string(),
+                    projection_digest: lc_projection.projection_digest().to_string(),
+                    boundary_evidence_ref: lc_projection.boundary_evidence_ref().to_string(),
+                }),
+            });
+            sink.append_bound(audit_event).map_err(|error| {
+                ProviderAdapterError::parse_error(
+                    format!(
+                        "claude lc validated start: provider_start audit append failed: {error}"
+                    ),
+                    String::new(),
+                    String::new(),
+                )
+            })?;
+            Ok::<_, ProviderAdapterError>((reader, native_id))
+        })
+        .await;
+
+        let (reader, native_id) = match outcome {
+            Ok(Ok(prepared)) => prepared,
+            Ok(Err(mut error)) => {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                let _ = tokio::time::timeout(bound, stderr_task).await;
+                let stderr_snapshot = Self::bounded_stderr_snapshot(&stderr_output).await;
+                if !stderr_snapshot.is_empty() {
+                    if error.stderr.is_empty() {
+                        error.stderr = stderr_snapshot.clone();
+                    }
+                    error.details.push_str(&format!(
+                        "\nclaude stderr (last {} bytes): {stderr_snapshot}",
+                        stderr_snapshot.len()
+                    ));
+                }
+                return Err(error);
+            }
+            Err(_elapsed) => {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                let _ = tokio::time::timeout(bound, stderr_task).await;
+                let stderr_snapshot = Self::bounded_stderr_snapshot(&stderr_output).await;
+                let details = if stderr_snapshot.is_empty() {
+                    "provider command timed out".to_string()
+                } else {
+                    format!(
+                        "provider command timed out\nclaude stderr (last {} bytes): {stderr_snapshot}",
+                        stderr_snapshot.len()
+                    )
+                };
+                return Err(ProviderAdapterError::timeout_with_details(
+                    details,
+                    String::new(),
+                    stderr_snapshot,
+                    stream::CLAUDE_POLICY_HANDSHAKE_TIMEOUT.as_millis() as u64,
+                ));
+            }
+        };
+        // 成功:child 与续读 reader 移交会话收尾任务(与策略路径共用收尾)。
+        let usage_role = UsageReportData::role_text(&input.role);
+        tokio::spawn(async move {
+            run_claude_session_tail(
+                reader,
+                stdin,
+                bridge,
+                event_tx,
+                cancel,
+                structured_output_contract,
+                usage_role,
+                child,
+                stderr_output,
+                stderr_task,
+            )
+            .await;
+        });
+        Ok(ProviderSession {
+            native_session_id: Some(native_id),
+            events: event_rx,
+            commands,
+        })
     }
 }
