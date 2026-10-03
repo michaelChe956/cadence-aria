@@ -65,22 +65,30 @@ impl ProviderActionCapability {
 
     /// fresh 门:launch 与 write_boundary 均 `Confirmed` 才放行;resume 分格
     /// 状态不影响 fresh(fresh 必过 launch/write-boundary,resume Unknown
-    /// 不阻止合法 fresh)。
-    ///
-    /// 阶段 1 编译桩:恒拒绝;阶段 2 实现真实三态判定。
+    /// 不阻止合法 fresh)。失败时携带失败格的当前证据供审计。
     pub fn fresh_gate(&self) -> Result<(), ProviderActionCapabilityGateError> {
-        Err(ProviderActionCapabilityGateError::LaunchNotConfirmed(
-            self.launch.clone(),
-        ))
+        match (&self.launch, &self.write_boundary) {
+            (ProviderCapabilityEvidence::Confirmed, ProviderCapabilityEvidence::Confirmed) => {
+                Ok(())
+            }
+            (ProviderCapabilityEvidence::Confirmed, other) => {
+                Err(ProviderActionCapabilityGateError::WriteBoundaryNotConfirmed(other.clone()))
+            }
+            (other, _) => Err(ProviderActionCapabilityGateError::LaunchNotConfirmed(
+                other.clone(),
+            )),
+        }
     }
 
-    /// 明确 resume 门:仅 resume `Confirmed` 放行,不得静默改 fresh。
-    ///
-    /// 阶段 1 编译桩:恒拒绝;阶段 2 实现真实三态判定。
+    /// 明确 resume 门:仅 resume `Confirmed` 放行,resume Unknown/Denied 均
+    /// 拒绝,不得静默改 fresh。
     pub fn explicit_resume_gate(&self) -> Result<(), ProviderActionCapabilityGateError> {
-        Err(ProviderActionCapabilityGateError::ResumeNotConfirmed(
-            self.resume.clone(),
-        ))
+        match &self.resume {
+            ProviderCapabilityEvidence::Confirmed => Ok(()),
+            other => Err(ProviderActionCapabilityGateError::ResumeNotConfirmed(
+                other.clone(),
+            )),
+        }
     }
 }
 
@@ -137,6 +145,11 @@ impl ProviderActionMatrix {
             .find(|row| row.action == *action)
             .cloned()
             .unwrap_or_else(|| ProviderActionCapability::unknown(*action))
+    }
+
+    /// 行视图(持久化 DTO 写出用),保持固定 action 序。
+    pub fn rows(&self) -> &[ProviderActionCapability] {
+        &self.rows
     }
 
     fn canonical_action_order(action: SessionPolicyAction) -> u8 {
@@ -281,28 +294,37 @@ impl ProviderCapabilityRecord {
     }
 
     /// 以当前 CLI 事实(exact version + wire dialect)解析 action 行:版本或
-    /// wire 漂移时旧行整体失效为 Unknown,旧 Confirmed 不跨 CLI 版本沿用。
-    ///
-    /// 阶段 1 编译桩:恒返回全 Unknown 行;阶段 2 实现漂移判定。
+    /// wire 任一漂移时旧行整体失效为全 Unknown 行,旧 Confirmed 不跨 CLI
+    /// 版本/wire 沿用(CLI 升级/漂移后须等待真实 probe 重建证据)。
     pub fn current_action_row(
         &self,
         wire_dialect: ProviderWireDialect,
         exact_version: &str,
         action: SessionPolicyAction,
     ) -> ProviderActionCapability {
-        let _ = (wire_dialect, exact_version);
-        ProviderActionCapability::unknown(action)
+        if self.wire_dialect == wire_dialect && self.version == exact_version {
+            self.action_matrix.row(&action)
+        } else {
+            ProviderActionCapability::unknown(action)
+        }
     }
 
     fn to_json(&self) -> ProviderCapabilityRecordJson {
         ProviderCapabilityRecordJson {
             provider_type: provider_type_to_string(self.provider_type).to_string(),
+            schema_version: Some(self.schema_version),
             version: self.version.clone(),
             adapter_dialect: self.adapter_dialect,
+            wire_dialect: Some(self.wire_dialect),
             capability_snapshot_ref: self.capability_snapshot_ref.clone(),
             evidence: self.evidence,
             resume_evidence: resume_evidence_to_string(self.resume_evidence).to_string(),
             supported_actions: self.supported_actions.clone(),
+            action_matrix: Some(self.action_matrix.rows().to_vec()),
+            trust: Some(self.trust.clone()),
+            probed_at: self.probed_at.clone(),
+            probe_artifact_ref: self.probe_artifact_ref.clone(),
+            root_recipe_evidence: Some(self.root_recipe_evidence.clone()),
         }
     }
 }
@@ -319,16 +341,27 @@ fn wire_dialect_for_legacy(dialect: ProviderDialect) -> ProviderWireDialect {
 }
 
 /// 持久化 DTO:`ProviderRefType` 与 `ResumeEvidenceState` 无 serde 派生,用 String
-/// 承载并在 load 时 match 映射回枚举。
+/// 承载并在 load 时 match 映射回枚举。v2 字段(`schema_version` 起)在 v1 旧
+/// 记录上缺失(serde Option 缺省 None),decode 时按 schema 分支:v1 → 矩阵
+/// 全 Unknown;v2 → 必须携带 matrix/wire;未知 schema 拒绝(fail-closed)。
 #[derive(Debug, Serialize, Deserialize)]
 struct ProviderCapabilityRecordJson {
     provider_type: String,
+    /// 缺失 = v1 legacy 记录;存在则必须等于当前 schema 版本。
+    schema_version: Option<u32>,
     version: String,
     adapter_dialect: ProviderDialect,
+    wire_dialect: Option<ProviderWireDialect>,
     capability_snapshot_ref: String,
     evidence: CapabilityEvidence,
     resume_evidence: String,
     supported_actions: Vec<SessionPolicyAction>,
+    /// v2 必填(缺失的 v2 记录属损坏,拒绝);序列化为行数组。
+    action_matrix: Option<Vec<ProviderActionCapability>>,
+    trust: Option<ProviderCapabilityEvidence>,
+    probed_at: Option<String>,
+    probe_artifact_ref: Option<String>,
+    root_recipe_evidence: Option<RootRecipeEvidence>,
 }
 
 impl ProviderCapabilityRecordJson {
@@ -346,23 +379,76 @@ impl ProviderCapabilityRecordJson {
                     reason: format!("unknown resume_evidence: {}", self.resume_evidence),
                 }
             })?;
+        // schema 分支(fail-closed):缺 schema = v1 legacy(旧字段仅 decode,
+        // 三 action 全 Unknown);schema=2 读 v2 字段;其它 schema 拒绝。
+        let (
+            schema_version,
+            wire_dialect,
+            action_matrix,
+            trust,
+            probed_at,
+            probe_artifact_ref,
+            root_recipe_evidence,
+        ) = match self.schema_version {
+            None => (
+                PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION,
+                wire_dialect_for_legacy(self.adapter_dialect),
+                ProviderActionMatrix::unknown_all(),
+                ProviderCapabilityEvidence::Unknown,
+                None,
+                None,
+                RootRecipeEvidence::None,
+            ),
+            Some(PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION) => {
+                let wire_dialect =
+                    self.wire_dialect
+                        .ok_or_else(|| ProductStoreError::InvalidRecord {
+                            kind: "provider_capability_record",
+                            reason: "v2 record missing wire_dialect".to_string(),
+                        })?;
+                let rows =
+                    self.action_matrix
+                        .clone()
+                        .ok_or_else(|| ProductStoreError::InvalidRecord {
+                            kind: "provider_capability_record",
+                            reason: "v2 record missing action_matrix".to_string(),
+                        })?;
+                (
+                    PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION,
+                    wire_dialect,
+                    ProviderActionMatrix::from_rows(rows)?,
+                    self.trust
+                        .clone()
+                        .unwrap_or(ProviderCapabilityEvidence::Unknown),
+                    self.probed_at.clone(),
+                    self.probe_artifact_ref.clone(),
+                    self.root_recipe_evidence
+                        .clone()
+                        .unwrap_or(RootRecipeEvidence::None),
+                )
+            }
+            Some(other) => {
+                return Err(ProductStoreError::InvalidRecord {
+                    kind: "provider_capability_record",
+                    reason: format!("unsupported schema_version: {other}"),
+                });
+            }
+        };
         Ok(ProviderCapabilityRecord {
             provider_type,
-            schema_version: PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION,
+            schema_version,
             version: self.version.clone(),
             adapter_dialect: self.adapter_dialect,
-            wire_dialect: wire_dialect_for_legacy(self.adapter_dialect),
+            wire_dialect,
             capability_snapshot_ref: self.capability_snapshot_ref.clone(),
             evidence: self.evidence,
             resume_evidence,
             supported_actions: self.supported_actions.clone(),
-            // 阶段 1 编译桩:DTO 尚未携带 v2 字段,decode 恒为未探测默认;
-            // 阶段 2 按 schema_version 分支(v1 → 全 Unknown,未知 schema 拒绝)。
-            action_matrix: ProviderActionMatrix::unknown_all(),
-            trust: ProviderCapabilityEvidence::Unknown,
-            probed_at: None,
-            probe_artifact_ref: None,
-            root_recipe_evidence: RootRecipeEvidence::None,
+            action_matrix,
+            trust,
+            probed_at,
+            probe_artifact_ref,
+            root_recipe_evidence,
         })
     }
 }
