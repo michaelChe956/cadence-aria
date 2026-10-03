@@ -1160,6 +1160,220 @@ mod tests {
         assert_eq!(fixture.streaming_adapter.start_count(), 0);
     }
 
+    // ===== Task 3a(lcg_t03):canonical 政策正文消费与成员规则门 =====
+
+    /// 递归收集 root 下全部相对路径(排序后比较,证明 waiting 前后零物化)。
+    fn sorted_tree_files(root: &Path) -> Vec<String> {
+        fn walk(root: &Path, dir: &Path, out: &mut Vec<String>) {
+            let entries = std::fs::read_dir(dir).expect("read dir for tree snapshot");
+            for entry in entries {
+                let path = entry.expect("dir entry").path();
+                let relative = path
+                    .strip_prefix(root)
+                    .expect("path under snapshot root")
+                    .to_string_lossy()
+                    .to_string();
+                if path.is_dir() {
+                    out.push(format!("{relative}/"));
+                    walk(root, &path, out);
+                } else {
+                    out.push(relative);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        walk(root, root, &mut files);
+        files.sort();
+        files
+    }
+
+    /// 把 fixture 的自举桩升级为一次真实 #8 发布形态:store 保存非桩
+    /// artifact,canonical root 落 locator 正文(policy_id 原字节)与
+    /// AGENTS.md,LC 子树写入与 digest 链一致的最终 receipt。
+    fn publish_root_policy_with_receipt(
+        fixture: &AdmissionFixture,
+        operation_id: &str,
+    ) -> crate::product::logical_codebase::policy::AggregatePolicyArtifact {
+        use sha2::Digest as _;
+
+        let current = fixture
+            .policy_store
+            .get(&fixture.project_id)
+            .expect("read current policy")
+            .expect("fixture policy present");
+        let artifact = current.with_revised_policy(
+            "# 聚合政策\n\npublished body for lcg_t03\n",
+            "2026-10-03T00:00:00Z".to_string(),
+        );
+        fixture
+            .policy_store
+            .save(&fixture.project_id, &artifact)
+            .expect("save published artifact");
+
+        let canonical_root = std::fs::canonicalize(&fixture.aggregate_root).unwrap();
+        let locator = canonical_root.join(&artifact.policy_id);
+        std::fs::create_dir_all(locator.parent().expect("locator parent")).unwrap();
+        std::fs::write(&locator, artifact.policy_text.as_bytes()).unwrap();
+
+        let rule_bytes = b"# AGENTS rules\nlcg_t03 root rules\n";
+        std::fs::write(canonical_root.join("AGENTS.md"), rule_bytes).unwrap();
+        let rule_digest = format!("sha256:{:x}", sha2::Sha256::digest(rule_bytes));
+
+        let receipt = crate::product::logical_codebase::RootRecipeReceipt {
+            operation_id: operation_id.to_string(),
+            canonical_root: canonical_root.clone(),
+            commands: Vec::new(),
+            policy_digest: artifact.digest.clone(),
+            rule_digest,
+            finalized_at: "2026-10-03T00:00:00Z".to_string(),
+        };
+        let scope = crate::product::logical_codebase::store::lc_scope_root(
+            &fixture.paths,
+            &fixture.project_id,
+            &Some(fixture.lc_id.clone()),
+        )
+        .expect("lc scope root");
+        let receipts = scope.join("aggregate-recipe-receipts");
+        std::fs::create_dir_all(&receipts).unwrap();
+        crate::product::json_store::write_json(
+            &receipts.join(format!("{operation_id}.json")),
+            &receipt,
+        )
+        .expect("write fixture receipt");
+        artifact
+    }
+
+    /// 消费侧观察面:admission 判定状态与 provider 启动计数(测试 6 断言组)。
+    struct ProviderSpawnObservation {
+        status: &'static str,
+        provider_spawn_count: usize,
+    }
+
+    /// Task 3a(lcg_t03):#8 已发布过真实政策(store 内非桩 artifact)但
+    /// canonical root 上 locator 正文/最终 receipt 缺失时,Normal admission
+    /// 停等为可操作 waiting(Revalidate/Retry),不物化任何 root 文件。
+    #[test]
+    fn lcg_t03_root_policy_body_missing_waits_without_materialization() {
+        let fixture = admission_fixture();
+        fixture.write_language_rules("# language\n");
+        let current = fixture
+            .policy_store
+            .get(&fixture.project_id)
+            .unwrap()
+            .unwrap();
+        let revised = current.with_revised_policy(
+            "# 聚合政策\n\npublished but not materialized\n",
+            "2026-10-03T00:00:00Z".to_string(),
+        );
+        fixture
+            .policy_store
+            .save(&fixture.project_id, &revised)
+            .unwrap();
+
+        let root_files_before = sorted_tree_files(&fixture.aggregate_root);
+        let waiting = fixture
+            .preflight()
+            .check(&fixture.launch_request(), &ProviderAdmissionPhase::Normal)
+            .unwrap_err();
+        assert!(
+            matches!(&waiting, ProviderAdmissionError::Waiting { reason_code, .. } if reason_code == "provider_policy_artifact_missing")
+        );
+        let root_files_after = sorted_tree_files(&fixture.aggregate_root);
+        assert_eq!(root_files_before, root_files_after);
+        assert_eq!(fixture.streaming_adapter.start_count(), 0);
+    }
+
+    /// Task 3a(lcg_t03):已发布政策正文的 locator 被 symlink 调包、正文
+    /// 字节漂移或 AGENTS.md rule digest 漂移时,admission 停等
+    /// `provider_policy_artifact_missing`,绝不消费被调包正文。
+    #[test]
+    fn lcg_t03_policy_locator_rejects_symlink_and_digest_drift() {
+        // (i) locator 被 symlink 调包(即使字节完全一致):canonical 无
+        //     symlink 逃逸,admission 拒绝消费。
+        let fixture = admission_fixture();
+        fixture.write_language_rules("# language\n");
+        let artifact = publish_root_policy_with_receipt(&fixture, "op_lcg_t03_locator");
+        let canonical_root = std::fs::canonicalize(&fixture.aggregate_root).unwrap();
+        let locator = canonical_root.join(&artifact.policy_id);
+        let outside = fixture._temp.path().join("outside-copy");
+        std::fs::write(&outside, artifact.policy_text.as_bytes()).unwrap();
+        std::fs::remove_file(&locator).unwrap();
+        std::os::unix::fs::symlink(&outside, &locator).unwrap();
+        let error = fixture
+            .preflight()
+            .check(&fixture.launch_request(), &ProviderAdmissionPhase::Normal)
+            .unwrap_err();
+        assert!(
+            matches!(&error, ProviderAdmissionError::Waiting { reason_code, .. } if reason_code == "provider_policy_artifact_missing"),
+            "symlink locator must not be consumed, got {error:?}"
+        );
+        assert_eq!(fixture.streaming_adapter.start_count(), 0);
+
+        // (ii) locator 正文字节漂移(digest 漂移):拒绝消费。
+        let fixture = admission_fixture();
+        fixture.write_language_rules("# language\n");
+        let artifact = publish_root_policy_with_receipt(&fixture, "op_lcg_t03_drift");
+        let canonical_root = std::fs::canonicalize(&fixture.aggregate_root).unwrap();
+        let locator = canonical_root.join(&artifact.policy_id);
+        std::fs::write(&locator, b"# tampered policy body\n").unwrap();
+        let error = fixture
+            .preflight()
+            .check(&fixture.launch_request(), &ProviderAdmissionPhase::Normal)
+            .unwrap_err();
+        assert!(
+            matches!(&error, ProviderAdmissionError::Waiting { reason_code, .. } if reason_code == "provider_policy_artifact_missing"),
+            "digest drift must not be consumed, got {error:?}"
+        );
+
+        // (iii) AGENTS.md 原字节漂移(rule digest 漂移):同样停等。
+        let fixture = admission_fixture();
+        fixture.write_language_rules("# language\n");
+        publish_root_policy_with_receipt(&fixture, "op_lcg_t03_rule");
+        let canonical_root = std::fs::canonicalize(&fixture.aggregate_root).unwrap();
+        std::fs::write(
+            canonical_root.join("AGENTS.md"),
+            b"# AGENTS rules\nmutated rule bytes\n",
+        )
+        .unwrap();
+        let error = fixture
+            .preflight()
+            .check(&fixture.launch_request(), &ProviderAdmissionPhase::Normal)
+            .unwrap_err();
+        assert!(
+            matches!(&error, ProviderAdmissionError::Waiting { reason_code, .. } if reason_code == "provider_policy_artifact_missing"),
+            "rule digest drift must not be consumed, got {error:?}"
+        );
+    }
+
+    /// Task 3a(lcg_t03):AggregateBootstrap 相位只豁免根规则缺失;成员
+    /// checkout 的 language.md 缺失任何相位都阻断(waiting + 零启动)。
+    #[test]
+    fn lcg_t03_member_language_rule_missing_is_not_root_phase_exempt() {
+        let fixture = admission_fixture();
+        let (_store, _operation_id, credential) = derived_credential(&fixture);
+
+        let error = fixture
+            .preflight()
+            .check(
+                &fixture.launch_request(),
+                &ProviderAdmissionPhase::AggregateBootstrap(credential),
+            )
+            .unwrap_err();
+        let member_rule_missing = ProviderSpawnObservation {
+            status: match &error {
+                ProviderAdmissionError::Waiting { .. } => "waiting",
+                ProviderAdmissionError::Store(_) => "store_error",
+            },
+            provider_spawn_count: fixture.streaming_adapter.start_count(),
+        };
+        assert_eq!(member_rule_missing.status, "waiting");
+        assert_eq!(member_rule_missing.provider_spawn_count, 0);
+        assert!(
+            matches!(&error, ProviderAdmissionError::Waiting { reason_code, .. } if reason_code == "member_language_rules_missing"),
+            "member rule missing must block with its own reason, got {error:?}"
+        );
+    }
+
     // ===== Task 2b(lcg_t02):unknown normal 矩阵下既有 root recipe 契约保持 =====
 
     use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence as T02Evidence;

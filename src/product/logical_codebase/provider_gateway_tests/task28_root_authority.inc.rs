@@ -455,6 +455,8 @@
     /// identity 复验走真实生产路径，不用成员 fallback。
     struct SeparatedRootMemberFixture {
         _root: tempfile::TempDir,
+        paths: ProductAppPaths,
+        lc_id: String,
         project_id: String,
         /// canonical LC root（含空格；非 Git）。
         lc_root: PathBuf,
@@ -466,7 +468,7 @@
         member_id: String,
         checkout_id: String,
         streaming_adapter: Arc<CountingStreamingAdapter>,
-        gateway: LogicalCodebaseProviderGateway,
+        gateway: Arc<LogicalCodebaseProviderGateway>,
     }
 
     fn separated_root_member_fixture() -> SeparatedRootMemberFixture {
@@ -607,6 +609,8 @@
 
         SeparatedRootMemberFixture {
             _root: root,
+            paths,
+            lc_id,
             project_id: project.id,
             lc_root,
             member_main,
@@ -614,7 +618,7 @@
             member_id: member_id.0.to_string(),
             checkout_id: checkout_id.0.to_string(),
             streaming_adapter,
-            gateway,
+            gateway: Arc::new(gateway),
         }
     }
 
@@ -844,4 +848,81 @@
 
         // resume 判定全程零 spawn（拒绝续接 ≠ 启动新 provider）。
         assert_eq!(fixture.registry_start_count(), 0);
+    }
+
+    /// Task 3a(lcg_t03):root cwd 与 member target 是两个独立维度——
+    /// LC Coding 会话 cwd=canonical root、唯一 writable root=canonical
+    /// target(envelope 冻结两者,不互相替代);cwd 只允许 canonical 等于
+    /// manifest root,authority 子目录不是合法 cwd(拒绝仅 prefix 放行)。
+    #[test]
+    fn lcg_t03_root_cwd_and_target_are_independent() {
+        let fixture = separated_root_member_fixture();
+        // 成员 main checkout 的 language.md 在场(控制组 ready 的材料面)。
+        let member_rules = fixture.member_main.join(".claude/rules");
+        std::fs::create_dir_all(&member_rules).expect("create member rules dir");
+        std::fs::write(member_rules.join("language.md"), "# member language\n")
+            .expect("write member language rule");
+        let canonical_root = std::fs::canonicalize(&fixture.lc_root).unwrap();
+        let canonical_target = std::fs::canonicalize(&fixture.member_worktree).unwrap();
+
+        // (a) 分离形态 Coding 请求:cwd=root、target=member worktree、
+        //     恰一个 writable root=canonical target。
+        let coding = SessionLaunchRequest {
+            project_id: fixture.project_id.clone(),
+            provider: ProviderRef::claude_code("cap_claude_1_4_0"),
+            action: SessionPolicyAction::CodingTargetWrite,
+            target: PolicyTarget::checkout(
+                fixture.member_id.clone(),
+                fixture.checkout_id.clone(),
+                fixture.member_worktree.clone(),
+            ),
+            working_directory: fixture.lc_root.clone(),
+            readable_roots: vec![fixture.lc_root.clone()],
+            writable_roots: vec![fixture.member_worktree.clone()],
+            config_artifact_ref: "sha256:managed-config-artifact".to_string(),
+        };
+        let envelope = fixture
+            .gateway
+            .validate(coding)
+            .expect("separated coding form validates")
+            .envelope()
+            .clone();
+        assert_eq!(envelope.working_directory, canonical_root);
+        assert_eq!(envelope.writable_roots, vec![canonical_target]);
+        assert_ne!(envelope.working_directory, envelope.target.worktree);
+
+        // (b) admission 对 cwd 的判据是 canonical 全等:authority 子目录
+        //     cwd(仅 prefix 命中)waiting,零启动。
+        let subdir_cwd = fixture.lc_root.join("nested cwd");
+        std::fs::create_dir_all(&subdir_cwd).expect("create subdir cwd");
+        let request = fixture.separated_planning_request();
+        let mut subdirectory_request = request.clone();
+        subdirectory_request.working_directory = subdir_cwd.clone();
+        subdirectory_request.readable_roots = vec![subdir_cwd.clone()];
+        let preflight =
+            crate::product::logical_codebase::LogicalCodebaseProviderAdmissionPreflight::new(
+                fixture.paths.clone(),
+                fixture.lc_id.clone(),
+                fixture.gateway.clone(),
+            );
+        let error = preflight
+            .check(
+                &subdirectory_request,
+                &crate::product::logical_codebase::provider_admission_preflight::ProviderAdmissionPhase::Normal,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(&error, crate::product::logical_codebase::ProviderAdmissionError::Waiting { reason_code, .. } if reason_code == "cwd_authority_drift"),
+            "subdirectory cwd must not pass a prefix check, got {error:?}"
+        );
+        assert_eq!(fixture.streaming_adapter.start_count(), 0);
+
+        // 对照:cwd=root 的分离形态请求在同一 preflight 下 ready(既有
+        // cwd 分离绿语义保留)。
+        preflight
+            .check(
+                &request,
+                &crate::product::logical_codebase::provider_admission_preflight::ProviderAdmissionPhase::Normal,
+            )
+            .expect("separated root cwd form stays ready");
     }
