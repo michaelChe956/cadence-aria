@@ -47,9 +47,11 @@ fn store_persists_and_resolves_choice_gates_in_attempt_scope() {
             "issue_0001",
             &attempt.id,
             "choice_0001",
-            vec!["backend_first".to_string()],
-            Some("先控制范围".to_string()),
-            Vec::new(),
+            ResolveChoiceGateInput {
+                selected_option_ids: vec!["backend_first".to_string()],
+                free_text: Some("先控制范围".to_string()),
+                answers: Vec::new(),
+            },
         )
         .expect("resolve choice gate");
 

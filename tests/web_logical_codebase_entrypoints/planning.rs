@@ -18,10 +18,10 @@ use cadence_aria::cross_cutting::bounded_command_runner::{
 use cadence_aria::product::app_paths::ProductAppPaths;
 use cadence_aria::product::issue_store::{CreateProductIssueInput, IssueStore};
 use cadence_aria::product::logical_codebase::{
-    AggregateInitializationStepKind, CheckoutAvailability, CheckoutKind, CodebaseMemberRecord,
-    IssueCodebaseSelection, IssueCodebaseSelectionStore, LogicalCodebaseManifest,
-    LogicalCodebaseStore, LogicalRepositoryId, MemberStatus, RepositoryCheckoutId,
-    RepositoryCheckoutRecord, RepositorySourceIdentity, RepositoryType,
+    CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, IssueCodebaseSelection,
+    IssueCodebaseSelectionStore, LogicalCodebaseManifest, LogicalCodebaseStore,
+    LogicalRepositoryId, MemberStatus, RepositoryCheckoutId, RepositoryCheckoutRecord,
+    RepositorySourceIdentity, RepositoryType,
     aggregate_index::{
         AggregateIndexMemberSnapshot, AggregateIndexOperation, AggregateIndexRecord,
         AggregateIndexStatus, AggregateIndexStore, CodeGraphCli, CodeGraphExcludeGenerator,
@@ -29,7 +29,7 @@ use cadence_aria::product::logical_codebase::{
     aggregate_initialization_coordinator::{
         AggregateInitializationCoordinator, AggregateInitializationError,
         AggregatePreflightService, AggregatePreflightSnapshot, AggregateProviderTurnDriver,
-        AggregateSkillsPreparation, MachineSkillsPreparation,
+        AggregateProviderTurnRequest, AggregateSkillsPreparation, MachineSkillsPreparation,
     },
     aggregate_initialization_store::AggregateInitializationOperationStore,
     policy::AggregatePolicyArtifactStore,
@@ -101,14 +101,9 @@ struct NoopProvider;
 impl AggregateProviderTurnDriver for NoopProvider {
     async fn run_turn(
         &self,
-        _project_id: &str,
-        _operation_id: &str,
-        _step: AggregateInitializationStepKind,
-        _preflight: &AggregatePreflightSnapshot,
-        _lc_id: Option<&str>,
-        _bootstrap: cadence_aria::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
-        cancellation: CancellationToken,
+        request: AggregateProviderTurnRequest<'_>,
     ) -> Result<String, AggregateInitializationError> {
+        let AggregateProviderTurnRequest { cancellation, .. } = request;
         if cancellation.is_cancelled() {
             return Err(AggregateInitializationError::Cancelled);
         }

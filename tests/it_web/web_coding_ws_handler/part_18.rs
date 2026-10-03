@@ -367,9 +367,11 @@ async fn coding_ws_new_connection_does_not_resend_answered_choice() {
             "issue_0001",
             &attempt.id,
             PENDING_CHOICE_ID,
-            vec!["Yes".to_string()],
-            None,
-            Vec::new(),
+            ResolveChoiceGateInput {
+                selected_option_ids: vec!["Yes".to_string()],
+                free_text: None,
+                answers: Vec::new(),
+            },
         )
         .expect("resolve pending choice gate");
 

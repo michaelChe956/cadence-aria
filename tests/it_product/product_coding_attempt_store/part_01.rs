@@ -1,7 +1,7 @@
 use cadence_aria::product::app_paths::ProductAppPaths;
 use cadence_aria::product::coding_attempt_store::{
     CodingAttemptStore, CreateBlockedGateInput, CreateChoiceGateInput, CreateCodingAttemptInput,
-    CreateGroupCodingAttemptInput, CreateQualityBypassAuditInput,
+    CreateGroupCodingAttemptInput, CreateQualityBypassAuditInput, ResolveChoiceGateInput,
 };
 use cadence_aria::product::coding_models::{
     CodeReviewReport, CodingAgentRole, CodingAttemptStatus, CodingChatEntry,

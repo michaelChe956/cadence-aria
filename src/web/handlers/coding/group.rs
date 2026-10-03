@@ -6,6 +6,7 @@ use super::super::*;
 use super::RuntimeBindingProviderConfigInput;
 use super::coding_provider_config_snapshot_for_runtime_binding;
 use super::worktree_route::IssueWorktreeRoute;
+use super::worktree_route::WorktreeRouteLeaseRequest;
 use super::worktree_route::bind_worktree_lock_to_attempt_routed;
 use super::worktree_route::upsert_worktree_and_acquire_lease;
 use crate::product::coding_attempt_store::target_snapshot::build_attempt_target_snapshot;
@@ -191,19 +192,19 @@ pub async fn create_group_coding_attempt(
         return Ok(Json(coding_attempt_dto(&coding_store, &existing)?));
     }
 
-    let worktree_lease = upsert_worktree_and_acquire_lease(
-        &app_paths,
-        &lifecycle,
-        &worktree_route,
-        &project_id,
-        &issue_id,
-        &repository.id,
-        &journal.lock_work_item_id,
-        &journal.worktree_lease_id,
-        &branch_name,
-        &base_branch,
-        shared_worktree_path,
-    )?;
+    let worktree_lease = upsert_worktree_and_acquire_lease(WorktreeRouteLeaseRequest {
+        app_paths: &app_paths,
+        lifecycle: &lifecycle,
+        route: &worktree_route,
+        project_id: &project_id,
+        issue_id: &issue_id,
+        physical_repository_id: &repository.id,
+        lock_work_item_id: &journal.lock_work_item_id,
+        worktree_lease_id: &journal.worktree_lease_id,
+        branch_name: &branch_name,
+        base_branch: &base_branch,
+        worktree_path: shared_worktree_path,
+    })?;
     let replay_already_bound = journal
         .phase
         .has_reached(CodingGroupInitializationPhase::AttemptPersisted)

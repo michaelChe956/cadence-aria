@@ -211,6 +211,18 @@ pub trait AggregatePreflightService: Send + Sync {
     }
 }
 
+/// [`AggregateProviderTurnDriver::run_turn`] 的单 turn 入参：root-recipe
+/// turn 的一次性上下文（字段语义与既有平铺参数一一对应）。
+pub struct AggregateProviderTurnRequest<'a> {
+    pub project_id: &'a str,
+    pub operation_id: &'a str,
+    pub step: AggregateInitializationStepKind,
+    pub preflight: &'a AggregatePreflightSnapshot,
+    pub lc_id: Option<&'a str>,
+    pub bootstrap: BootstrapPhaseCredential,
+    pub cancellation: CancellationToken,
+}
+
 /// Drives a single provider turn for one of `pre_check`, `rule_and_mcp_config`
 /// or `openspec_and_examples`. Each call is one Claude turn rooted at the
 /// aggregate root; the driver must not run for `machine_skills` or
@@ -223,13 +235,7 @@ pub trait AggregatePreflightService: Send + Sync {
 pub trait AggregateProviderTurnDriver: Send + Sync {
     async fn run_turn(
         &self,
-        project_id: &str,
-        operation_id: &str,
-        step: AggregateInitializationStepKind,
-        preflight: &AggregatePreflightSnapshot,
-        lc_id: Option<&str>,
-        bootstrap: BootstrapPhaseCredential,
-        cancellation: CancellationToken,
+        request: AggregateProviderTurnRequest<'_>,
     ) -> Result<String, AggregateInitializationError>;
 }
 

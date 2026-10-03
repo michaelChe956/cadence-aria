@@ -330,15 +330,19 @@ impl GatewayBackedAggregateProviderTurnDriver {
 impl AggregateProviderTurnDriver for GatewayBackedAggregateProviderTurnDriver {
     async fn run_turn(
         &self,
-        project_id: &str,
-        operation_id: &str,
-        step: AggregateInitializationStepKind,
-        preflight: &AggregatePreflightSnapshot,
-        _lc_id: Option<&str>,
-        bootstrap: crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
-        cancellation: CancellationToken,
+        request: AggregateProviderTurnRequest<'_>,
     ) -> Result<String, AggregateInitializationError> {
         use crate::cross_cutting::session_launch::ValidatedStreamingProviderInput;
+
+        let AggregateProviderTurnRequest {
+            project_id,
+            operation_id,
+            step,
+            preflight,
+            lc_id: _lc_id,
+            bootstrap,
+            cancellation,
+        } = request;
 
         // 确定性 step 不得进入 provider turn：固定映射为空即 fail-closed。
         let commands = Self::recipe_commands(step);

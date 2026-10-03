@@ -265,13 +265,7 @@
         impl AggregateProviderTurnDriver for InterruptAfterFirstTurnProvider {
             async fn run_turn(
                 &self,
-                _project_id: &str,
-                _operation_id: &str,
-                _step: AggregateInitializationStepKind,
-                _preflight: &AggregatePreflightSnapshot,
-                _lc_id: Option<&str>,
-                _bootstrap: BootstrapPhaseCredential,
-                _cancellation: CancellationToken,
+                _request: AggregateProviderTurnRequest<'_>,
             ) -> Result<String, AggregateInitializationError> {
                 let mut turns = self.turns.lock().unwrap();
                 *turns += 1;
@@ -370,7 +364,6 @@
 
     // ---- Task 1.4（REQ-REG-14/REQ-BOOT-03/BOOT-04）：trust 硬前置门 + 真实四命令 root recipe ----
 
-    use crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential;
     use crate::product::logical_codebase::provider_trust::{
         ProviderTrustPrecondition, ProviderTrustPreparationResult, ProviderTrustWaiting,
     };

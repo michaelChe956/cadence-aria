@@ -31,9 +31,9 @@ use crate::product::logical_codebase::aggregate_index::{
 };
 use crate::product::logical_codebase::aggregate_initialization_coordinator::{
     AggregateInitializationCoordinator, AggregateInitializationError, AggregatePreflightService,
-    AggregatePreflightSnapshot, AggregateProviderTurnDriver, AggregateSkillsPreparation,
-    DeterministicAggregatePreflightService, GatewayBackedAggregateProviderTurnDriver,
-    MachineSkillsPreparation,
+    AggregatePreflightSnapshot, AggregateProviderTurnDriver, AggregateProviderTurnRequest,
+    AggregateSkillsPreparation, DeterministicAggregatePreflightService,
+    GatewayBackedAggregateProviderTurnDriver, MachineSkillsPreparation,
 };
 use crate::product::logical_codebase::aggregate_initialization_store::AggregateInitializationOperationStore;
 use crate::web::error::ApiError;

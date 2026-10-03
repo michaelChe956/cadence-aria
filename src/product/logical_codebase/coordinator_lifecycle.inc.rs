@@ -589,15 +589,15 @@ impl AggregateInitializationCoordinator {
         let cancellation_token = cancellation.clone();
         let turn_result = match self
             .provider
-            .run_turn(
+            .run_turn(AggregateProviderTurnRequest {
                 project_id,
                 operation_id,
                 step,
                 preflight,
-                self.lc_id.as_deref(),
+                lc_id: self.lc_id.as_deref(),
                 bootstrap,
-                cancellation_token,
-            )
+                cancellation: cancellation_token,
+            })
             .await
         {
             Ok(summary) => summary,

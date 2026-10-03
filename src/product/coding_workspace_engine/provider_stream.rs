@@ -576,9 +576,11 @@ impl CodingWorkspaceEngine {
                                         &attempt.issue_id,
                                         &attempt.id,
                                         &id,
-                                        selected_option_ids,
-                                        free_text,
-                                        answers,
+                                        ResolveChoiceGateInput {
+                                            selected_option_ids,
+                                            free_text,
+                                            answers,
+                                        },
                                     )?;
                                     open_choice_ids.retain(|choice_id| choice_id != &id);
                                     let current = self.store.get_attempt(

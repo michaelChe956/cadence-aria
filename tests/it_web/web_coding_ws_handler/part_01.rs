@@ -7,7 +7,7 @@ use cadence_aria::cross_cutting::streaming_provider::{
 use cadence_aria::product::app_paths::ProductAppPaths;
 use cadence_aria::product::coding_attempt_store::{
     CodingAttemptStore, CreateBlockedGateInput, CreateChoiceGateInput, CreateCodingAttemptInput,
-    CreateCodingExecutionUnitInput, CreateGroupCodingAttemptInput,
+    CreateCodingExecutionUnitInput, CreateGroupCodingAttemptInput, ResolveChoiceGateInput,
 };
 use cadence_aria::product::coding_models::{
     CodingAgentRole, CodingAttemptPlanBinding, CodingAttemptStatus, CodingChoiceOption,

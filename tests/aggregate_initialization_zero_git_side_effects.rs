@@ -17,8 +17,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use cadence_aria::product::app_paths::ProductAppPaths;
 use cadence_aria::product::logical_codebase::aggregate_initialization_coordinator::{
-    AggregatePreflightService, AggregateProviderTurnDriver, AggregateSkillsPreparation,
-    MachineSkillsPreparation,
+    AggregatePreflightService, AggregateProviderTurnDriver, AggregateProviderTurnRequest,
+    AggregateSkillsPreparation, MachineSkillsPreparation,
 };
 use cadence_aria::product::logical_codebase::store::LogicalCodebaseManifest;
 use cadence_aria::product::logical_codebase::types::{
@@ -27,7 +27,7 @@ use cadence_aria::product::logical_codebase::types::{
 };
 use cadence_aria::product::logical_codebase::{
     AggregateInitializationCoordinator, AggregateInitializationOperationInput,
-    AggregateInitializationStepKind, AggregatePreflightSnapshot, LogicalCodebaseStore,
+    AggregateInitializationStepKind, LogicalCodebaseStore,
 };
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -116,14 +116,11 @@ impl RecordingProviderTurnDriver {
 impl AggregateProviderTurnDriver for RecordingProviderTurnDriver {
     async fn run_turn(
         &self,
-        _project_id: &str,
-        _operation_id: &str,
-        step: AggregateInitializationStepKind,
-        preflight: &AggregatePreflightSnapshot,
-        _lc_id: Option<&str>,
-        _bootstrap: cadence_aria::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
-        _cancellation: CancellationToken,
+        request: AggregateProviderTurnRequest<'_>,
     ) -> Result<String, cadence_aria::product::logical_codebase::AggregateInitializationError> {
+        let AggregateProviderTurnRequest {
+            step, preflight, ..
+        } = request;
         // 聚合 provider turn 只在聚合根读 / 写 `.aria/aggregate/**`;它绝不 spawn
         // 任何 git 调用。这里记录一条非 git 的合成 argv,使 command_log 断言
         // 能验证没有任何 `git add/commit/push`。

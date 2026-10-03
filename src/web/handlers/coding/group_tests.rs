@@ -311,22 +311,22 @@ fn group_worktree_layout_repository_route_writes_repo_scoped_record() {
         repository_id: *api,
     };
 
-    let lease = upsert_worktree_and_acquire_lease(
-        &fixture.paths,
-        &lifecycle,
-        &route,
-        &fixture.project_id,
-        &fixture.issue_id,
-        "repository_physical_0001",
-        "work_item_0001",
-        "issue_worktree_lease_layout_test",
-        "aria/issues/issue_0001",
-        "main",
-        fixture
+    let lease = upsert_worktree_and_acquire_lease(WorktreeRouteLeaseRequest {
+        app_paths: &fixture.paths,
+        lifecycle: &lifecycle,
+        route: &route,
+        project_id: &fixture.project_id,
+        issue_id: &fixture.issue_id,
+        physical_repository_id: "repository_physical_0001",
+        lock_work_item_id: "work_item_0001",
+        worktree_lease_id: "issue_worktree_lease_layout_test",
+        branch_name: "aria/issues/issue_0001",
+        base_branch: "main",
+        worktree_path: fixture
             .paths
             .issue_root(&fixture.project_id, &fixture.issue_id)
             .join("wt"),
-    )
+    })
     .expect("repository route worktree layout binding");
 
     assert!(lease.acquired, "first acquisition on a fresh repo record");
@@ -369,24 +369,24 @@ fn group_worktree_layout_repository_route_fails_closed_on_legacy_record() {
         })
         .unwrap();
 
-    let error = upsert_worktree_and_acquire_lease(
-        &fixture.paths,
-        &lifecycle,
-        &IssueWorktreeRoute::Repository {
+    let error = upsert_worktree_and_acquire_lease(WorktreeRouteLeaseRequest {
+        app_paths: &fixture.paths,
+        lifecycle: &lifecycle,
+        route: &IssueWorktreeRoute::Repository {
             repository_id: *api,
         },
-        &fixture.project_id,
-        &fixture.issue_id,
-        "repository_physical_0001",
-        "work_item_0001",
-        "issue_worktree_lease_layout_test",
-        "aria/issues/issue_0001",
-        "main",
-        fixture
+        project_id: &fixture.project_id,
+        issue_id: &fixture.issue_id,
+        physical_repository_id: "repository_physical_0001",
+        lock_work_item_id: "work_item_0001",
+        worktree_lease_id: "issue_worktree_lease_layout_test",
+        branch_name: "aria/issues/issue_0001",
+        base_branch: "main",
+        worktree_path: fixture
             .paths
             .issue_root(&fixture.project_id, &fixture.issue_id)
             .join("wt"),
-    )
+    })
     .unwrap_err();
 
     assert_eq!(error.code, "legacy_shared_worktree_present");
@@ -398,22 +398,22 @@ fn group_worktree_layout_legacy_route_keeps_issue_scoped_record() {
     let fixture = split_resolution_fixture();
     let lifecycle = crate::product::lifecycle_store::LifecycleStore::new(fixture.paths.clone());
 
-    let lease = upsert_worktree_and_acquire_lease(
-        &fixture.paths,
-        &lifecycle,
-        &IssueWorktreeRoute::Legacy,
-        &fixture.project_id,
-        &fixture.issue_id,
-        "repository_physical_legacy",
-        "work_item_0001",
-        "issue_worktree_lease_legacy_test",
-        "aria/issues/issue_0001",
-        "main",
-        fixture
+    let lease = upsert_worktree_and_acquire_lease(WorktreeRouteLeaseRequest {
+        app_paths: &fixture.paths,
+        lifecycle: &lifecycle,
+        route: &IssueWorktreeRoute::Legacy,
+        project_id: &fixture.project_id,
+        issue_id: &fixture.issue_id,
+        physical_repository_id: "repository_physical_legacy",
+        lock_work_item_id: "work_item_0001",
+        worktree_lease_id: "issue_worktree_lease_legacy_test",
+        branch_name: "aria/issues/issue_0001",
+        base_branch: "main",
+        worktree_path: fixture
             .paths
             .issue_root(&fixture.project_id, &fixture.issue_id)
             .join("legacy-wt"),
-    )
+    })
     .expect("legacy route worktree layout binding");
 
     assert!(lease.acquired);

@@ -80,6 +80,15 @@ pub struct CreateChoiceGateInput {
     pub questions: Vec<CodingChoiceQuestion>,
 }
 
+/// `resolve_choice_gate` 的应答载荷：原样落入 `CodingChoiceGateResponse`
+///（responded_at 由 store 落盘时补齐）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolveChoiceGateInput {
+    pub selected_option_ids: Vec<String>,
+    pub free_text: Option<String>,
+    pub answers: Vec<crate::cross_cutting::streaming_provider::ChoiceAnswerData>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateQualityBypassAuditInput {
     pub attempt_id: String,

@@ -53,13 +53,13 @@ use cadence_aria::product::logical_codebase::aggregate_initialization_coordinato
 use cadence_aria::product::logical_codebase::provider_gateway::ResumeEvidenceState;
 use cadence_aria::product::logical_codebase::{
     AggregateInitializationCoordinator, AggregateInitializationError,
-    AggregateInitializationOperationStore, AggregateInitializationStepKind,
-    AggregatePolicyArtifactStore, AggregatePreflightService, AggregatePreflightSnapshot,
-    AggregateProviderTurnDriver, AggregateSkillsPreparation, CheckoutAvailability, CheckoutKind,
-    CodebaseMemberRecord, GatewayRunAudit, LogicalCodebaseManifest, LogicalCodebaseProviderGateway,
-    LogicalCodebaseStore, LogicalRepositoryId, MachineSkillsPreparation, MemberStatus,
-    PolicyTarget, PolicyTargetResolver, ProviderCapability, ProviderCapabilitySource,
-    ProviderDialect, ProviderGatewayError, ProviderRef, ProviderRefType, RepositoryCheckoutId,
+    AggregateInitializationOperationStore, AggregatePolicyArtifactStore, AggregatePreflightService,
+    AggregatePreflightSnapshot, AggregateProviderTurnDriver, AggregateProviderTurnRequest,
+    AggregateSkillsPreparation, CheckoutAvailability, CheckoutKind, CodebaseMemberRecord,
+    GatewayRunAudit, LogicalCodebaseManifest, LogicalCodebaseProviderGateway, LogicalCodebaseStore,
+    LogicalRepositoryId, MachineSkillsPreparation, MemberStatus, PolicyTarget,
+    PolicyTargetResolver, ProviderCapability, ProviderCapabilitySource, ProviderDialect,
+    ProviderGatewayError, ProviderRef, ProviderRefType, RepositoryCheckoutId,
     RepositoryCheckoutRecord, RepositorySourceIdentity, RepositoryType, SessionLaunchRequest,
 };
 use cadence_aria::product::models::{ProviderName, WorkspaceRolePermissionModes};
@@ -555,14 +555,17 @@ impl FactoryBackedProviderTurnDriver {
 impl AggregateProviderTurnDriver for FactoryBackedProviderTurnDriver {
     async fn run_turn(
         &self,
-        project_id: &str,
-        operation_id: &str,
-        step: AggregateInitializationStepKind,
-        preflight: &AggregatePreflightSnapshot,
-        lc_id: Option<&str>,
-        bootstrap: cadence_aria::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
-        cancellation: CancellationToken,
+        request: AggregateProviderTurnRequest<'_>,
     ) -> Result<String, AggregateInitializationError> {
+        let AggregateProviderTurnRequest {
+            project_id,
+            operation_id,
+            step,
+            preflight,
+            lc_id,
+            bootstrap,
+            cancellation,
+        } = request;
         let factory =
             self.factory
                 .as_ref()
@@ -582,7 +585,7 @@ impl AggregateProviderTurnDriver for FactoryBackedProviderTurnDriver {
             Arc::new(gateway),
             "cap_managed_snapshot",
         )
-        .run_turn(
+        .run_turn(AggregateProviderTurnRequest {
             project_id,
             operation_id,
             step,
@@ -590,7 +593,7 @@ impl AggregateProviderTurnDriver for FactoryBackedProviderTurnDriver {
             lc_id,
             bootstrap,
             cancellation,
-        )
+        })
         .await
     }
 }

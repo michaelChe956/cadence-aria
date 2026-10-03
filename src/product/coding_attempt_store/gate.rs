@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::product::coding_attempt_store::{
     CreateBlockedGateInput, CreateChoiceGateInput, CreateQualityBypassAuditInput,
+    ResolveChoiceGateInput,
 };
 use crate::product::coding_models::{
     CodingAttemptStatus, CodingChoiceGate, CodingChoiceGateResponse, CodingChoiceGateStatus,
@@ -502,9 +503,7 @@ impl super::CodingAttemptStore {
         issue_id: &str,
         attempt_id: &str,
         choice_id: &str,
-        selected_option_ids: Vec<String>,
-        free_text: Option<String>,
-        answers: Vec<crate::cross_cutting::streaming_provider::ChoiceAnswerData>,
+        input: ResolveChoiceGateInput,
     ) -> Result<CodingChoiceGate, ProductStoreError> {
         let gates_root = self.choice_gates_root(project_id, issue_id, attempt_id);
         let Some(path) = matching_open_choice_gate_path(&gates_root, choice_id)? else {
@@ -517,10 +516,10 @@ impl super::CodingAttemptStore {
         let mut gate: CodingChoiceGate = read_json(&path)?;
         gate.status = CodingChoiceGateStatus::Resolved;
         gate.response = Some(CodingChoiceGateResponse {
-            selected_option_ids,
-            free_text,
+            selected_option_ids: input.selected_option_ids,
+            free_text: input.free_text,
             responded_at: Utc::now().to_rfc3339(),
-            answers,
+            answers: input.answers,
         });
         gate.updated_at = Utc::now().to_rfc3339();
         write_json(
@@ -1047,9 +1046,11 @@ mod tests {
                 &attempt.issue_id,
                 &attempt.id,
                 "choice-question-1",
-                vec!["yes".to_string()],
-                None,
-                answers,
+                ResolveChoiceGateInput {
+                    selected_option_ids: vec!["yes".to_string()],
+                    free_text: None,
+                    answers,
+                },
             )
             .unwrap();
         assert_eq!(resolved.status, CodingChoiceGateStatus::Resolved);
@@ -1090,9 +1091,11 @@ mod tests {
                 &attempt.issue_id,
                 &attempt.id,
                 "choice-question-1",
-                vec!["a".to_string()],
-                None,
-                Vec::new(),
+                ResolveChoiceGateInput {
+                    selected_option_ids: vec!["a".to_string()],
+                    free_text: None,
+                    answers: Vec::new(),
+                },
             )
             .unwrap();
         assert_eq!(resolved.status, CodingChoiceGateStatus::Resolved);

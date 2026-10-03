@@ -49,7 +49,7 @@ pub use aggregate_initialization::{
 pub use aggregate_initialization_coordinator::{
     AggregateInitializationCoordinator, AggregateInitializationError,
     AggregatePreflightMemberProjection, AggregatePreflightService, AggregatePreflightSnapshot,
-    AggregateProviderTurnDriver, AggregateSkillsPreparation,
+    AggregateProviderTurnDriver, AggregateProviderTurnRequest, AggregateSkillsPreparation,
     DeterministicAggregatePreflightService, DeterministicRepositoryTypeDetector,
     MachineSkillsPreparation, RepositoryTypeDetector, profile_preflight_commands,
     resolve_aggregate_profile,

@@ -45,14 +45,9 @@ mod tests {
     impl AggregateProviderTurnDriver for FakeProviderTurnDriver {
         async fn run_turn(
             &self,
-            _project_id: &str,
-            _operation_id: &str,
-            step: AggregateInitializationStepKind,
-            _preflight: &AggregatePreflightSnapshot,
-            _lc_id: Option<&str>,
-            _bootstrap: BootstrapPhaseCredential,
-            _cancellation: CancellationToken,
+            request: AggregateProviderTurnRequest<'_>,
         ) -> Result<String, AggregateInitializationError> {
+            let AggregateProviderTurnRequest { step, .. } = request;
             self.calls.lock().unwrap().push(step.as_str().to_string());
             Ok(format!("{} summary", step.as_str()))
         }
@@ -274,14 +269,9 @@ mod tests {
         impl AggregateProviderTurnDriver for FailingProvider {
             async fn run_turn(
                 &self,
-                _project_id: &str,
-                _operation_id: &str,
-                step: AggregateInitializationStepKind,
-                _preflight: &AggregatePreflightSnapshot,
-                _lc_id: Option<&str>,
-                _bootstrap: BootstrapPhaseCredential,
-                _cancellation: CancellationToken,
+                request: AggregateProviderTurnRequest<'_>,
             ) -> Result<String, AggregateInitializationError> {
+                let AggregateProviderTurnRequest { step, .. } = request;
                 if step == AggregateInitializationStepKind::RuleAndMcpConfig {
                     return Err(AggregateInitializationError::ProviderTurn {
                         step,
@@ -394,13 +384,7 @@ mod tests {
         impl AggregateProviderTurnDriver for CountingProvider {
             async fn run_turn(
                 &self,
-                _project_id: &str,
-                _operation_id: &str,
-                _step: AggregateInitializationStepKind,
-                _preflight: &AggregatePreflightSnapshot,
-                _lc_id: Option<&str>,
-                _bootstrap: BootstrapPhaseCredential,
-                _cancellation: CancellationToken,
+                _request: AggregateProviderTurnRequest<'_>,
             ) -> Result<String, AggregateInitializationError> {
                 let mut count = self.count.lock().unwrap();
                 *count += 1;

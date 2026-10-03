@@ -22,7 +22,7 @@ use crate::cross_cutting::worktree::{scope_allows_path, validate_write_path};
 use crate::product::coding_attempt_store::{
     CodingAttemptStore, CodingGitOperationJournal, CodingGitOperationKind, CodingGitOperationPhase,
     CompleteReviewGitOperationInput, CreateBlockedGateInput, CreateChoiceGateInput,
-    CreateQualityBypassAuditInput, PrepareCodingGitOperationInput,
+    CreateQualityBypassAuditInput, PrepareCodingGitOperationInput, ResolveChoiceGateInput,
 };
 use crate::product::coding_evaluation_context::{
     EvaluationContextRole, build_evaluation_context_pack,

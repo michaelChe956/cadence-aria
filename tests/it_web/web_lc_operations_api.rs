@@ -17,14 +17,13 @@ use cadence_aria::cross_cutting::bounded_command_runner::{
     BoundedCommandError, BoundedCommandRequest, BoundedCommandResult, BoundedCommandRunner,
 };
 use cadence_aria::product::app_paths::ProductAppPaths;
-use cadence_aria::product::logical_codebase::AggregateInitializationStepKind;
 use cadence_aria::product::logical_codebase::aggregate_index::{
     AggregateIndexOperation, AggregateIndexStore, CodeGraphCli, CodeGraphExcludeGenerator,
 };
 use cadence_aria::product::logical_codebase::aggregate_initialization_coordinator::{
     AggregateInitializationCoordinator, AggregateInitializationError, AggregatePreflightService,
-    AggregatePreflightSnapshot, AggregateProviderTurnDriver, AggregateSkillsPreparation,
-    MachineSkillsPreparation,
+    AggregatePreflightSnapshot, AggregateProviderTurnDriver, AggregateProviderTurnRequest,
+    AggregateSkillsPreparation, MachineSkillsPreparation,
 };
 use cadence_aria::product::logical_codebase::aggregate_initialization_store::AggregateInitializationOperationStore;
 use cadence_aria::product::logical_codebase::store::{
@@ -100,14 +99,9 @@ struct NoopProvider {
 impl AggregateProviderTurnDriver for NoopProvider {
     async fn run_turn(
         &self,
-        _project_id: &str,
-        _operation_id: &str,
-        _step: AggregateInitializationStepKind,
-        _preflight: &AggregatePreflightSnapshot,
-        _lc_id: Option<&str>,
-        _bootstrap: cadence_aria::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
-        cancellation: CancellationToken,
+        request: AggregateProviderTurnRequest<'_>,
     ) -> Result<String, AggregateInitializationError> {
+        let AggregateProviderTurnRequest { cancellation, .. } = request;
         if cancellation.is_cancelled() {
             return Err(AggregateInitializationError::Cancelled);
         }

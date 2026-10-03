@@ -93,6 +93,22 @@ pub(crate) struct GroupWorktreeLease {
     pub(crate) owner_attempt_id: Option<String>,
 }
 
+/// `upsert_worktree_and_acquire_lease` 的路由分流入参（租约键/分支/worktree
+/// 路径等一次性绑定上下文，字段语义与既有平铺参数一一对应）。
+pub(crate) struct WorktreeRouteLeaseRequest<'a> {
+    pub(crate) app_paths: &'a ProductAppPaths,
+    pub(crate) lifecycle: &'a LifecycleStore,
+    pub(crate) route: &'a IssueWorktreeRoute,
+    pub(crate) project_id: &'a str,
+    pub(crate) issue_id: &'a str,
+    pub(crate) physical_repository_id: &'a str,
+    pub(crate) lock_work_item_id: &'a str,
+    pub(crate) worktree_lease_id: &'a str,
+    pub(crate) branch_name: &'a str,
+    pub(crate) base_branch: &'a str,
+    pub(crate) worktree_path: PathBuf,
+}
+
 /// 按 worktree 路由分流执行「upsert shared worktree + 取 WI 级租约」
 /// （REQ-COD-03 §4.2，与单件入口 `create_coding_attempt` 同一模式）。
 ///
@@ -102,18 +118,21 @@ pub(crate) struct GroupWorktreeLease {
 /// 写仓维 record 并在发现旧布局残留时 fail-closed 422——不静默覆盖、不从旧
 /// 文件推导 repository（迁移契约 §4.2.6 红线在组入口同样生效）。
 pub(crate) fn upsert_worktree_and_acquire_lease(
-    app_paths: &ProductAppPaths,
-    lifecycle: &LifecycleStore,
-    route: &IssueWorktreeRoute,
-    project_id: &str,
-    issue_id: &str,
-    physical_repository_id: &str,
-    lock_work_item_id: &str,
-    worktree_lease_id: &str,
-    branch_name: &str,
-    base_branch: &str,
-    worktree_path: PathBuf,
+    request: WorktreeRouteLeaseRequest<'_>,
 ) -> Result<GroupWorktreeLease, ApiError> {
+    let WorktreeRouteLeaseRequest {
+        app_paths,
+        lifecycle,
+        route,
+        project_id,
+        issue_id,
+        physical_repository_id,
+        lock_work_item_id,
+        worktree_lease_id,
+        branch_name,
+        base_branch,
+        worktree_path,
+    } = request;
     match route {
         IssueWorktreeRoute::Legacy => {
             lifecycle

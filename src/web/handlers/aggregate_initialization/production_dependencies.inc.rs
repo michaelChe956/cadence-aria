@@ -62,14 +62,17 @@ impl GatewayFactoryProviderTurnDriver {
 impl AggregateProviderTurnDriver for GatewayFactoryProviderTurnDriver {
     async fn run_turn(
         &self,
-        project_id: &str,
-        operation_id: &str,
-        step: AggregateInitializationStepKind,
-        preflight: &AggregatePreflightSnapshot,
-        lc_id: Option<&str>,
-        bootstrap: crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
-        cancellation: CancellationToken,
+        request: AggregateProviderTurnRequest<'_>,
     ) -> Result<String, AggregateInitializationError> {
+        let AggregateProviderTurnRequest {
+            project_id,
+            operation_id,
+            step,
+            preflight,
+            lc_id,
+            bootstrap,
+            cancellation,
+        } = request;
         let Some(factory) = self.factory.as_ref() else {
             return Err(AggregateInitializationError::ProviderTurn {
                 step,
@@ -142,15 +145,15 @@ impl AggregateProviderTurnDriver for GatewayFactoryProviderTurnDriver {
                 paths.clone(),
             );
             let summary = driver
-                .run_turn(
+                .run_turn(AggregateProviderTurnRequest {
                     project_id,
                     operation_id,
                     step,
                     preflight,
-                    Some(lc_id),
+                    lc_id: Some(lc_id),
                     bootstrap,
                     cancellation,
-                )
+                })
                 .await?;
             // 命令未执行完成（turn 失败/取消）不落 receipt：无执行即无证据，
             // 重试窗口重新审计；同 index 同内容重放幂等。
@@ -188,7 +191,7 @@ impl AggregateProviderTurnDriver for GatewayFactoryProviderTurnDriver {
             "cap_managed_snapshot",
         );
         driver
-            .run_turn(
+            .run_turn(AggregateProviderTurnRequest {
                 project_id,
                 operation_id,
                 step,
@@ -196,7 +199,7 @@ impl AggregateProviderTurnDriver for GatewayFactoryProviderTurnDriver {
                 lc_id,
                 bootstrap,
                 cancellation,
-            )
+            })
             .await
     }
 }
