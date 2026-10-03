@@ -19,9 +19,10 @@
 //! 错误,调用方(2d 导入、4/5/6a 消费 shape)不得把校验失败解释为能力支持。
 
 use crate::cross_cutting::provider_boundary::{ProviderBoundaryEvidence, ProviderBoundaryMode};
+use crate::product::json_store::ProductStoreError;
 use crate::product::logical_codebase::policy::SessionPolicyAction;
 use crate::product::logical_codebase::provider_capability_store::{
-    PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION, ProviderCapabilityRecord,
+    PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION, ProviderCapabilityRecord, ProviderCapabilityStore,
 };
 use crate::product::logical_codebase::provider_gateway::ProviderRef;
 use crate::product::logical_codebase::provider_projection::ProviderPolicyProjection;
@@ -60,17 +61,47 @@ pub enum ProviderCapabilityProbeError {
     ProbeMetadataMismatch(String),
 }
 
-/// capability probe/evidence shape 校验服务(Task 2c 冻结接口)。
+/// capability probe/evidence shape 校验服务(Task 2c)+ durable 导入
+/// (Task 2d `record_verified_probe`)。
 ///
-/// 无状态、无副作用:不持有 durable store(2d 后续在同服务上追加
-/// `record_verified_probe` 时注入),不执行 probe。任何输入组合都只做
-/// 三方逐字段比对并返回稳定错误。
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ProviderCapabilityProbeService;
+/// `validate_probe_shape` 保持无状态、无副作用;2d 的 durable 导入经
+/// `with_durable_writer` 注入 `ProviderCapabilityStore`(与 gateway 消费的
+/// capability store 同一 LC 作用域),无通道即 fail-closed。本服务不执行
+/// 真实 probe(6c 的 `ProviderBoundaryProbe::run`)。
+#[derive(Debug, Clone, Default)]
+pub struct ProviderCapabilityProbeService {
+    /// durable writer 通道(2d 注入;`None` = 无 durable 通道,导入 fail-closed)。
+    durable: Option<ProviderCapabilityStore>,
+}
 
 impl ProviderCapabilityProbeService {
     pub fn new() -> Self {
-        Self
+        Self { durable: None }
+    }
+
+    /// 2d:注入 durable writer。store 作用域必须与 gateway 消费的 capability
+    /// store 一致(由 `LogicalCodebaseGatewayFactory::durable_probe_writer_for_lc`
+    /// 统一装配),否则导入写入 gateway 读不到的子树。
+    pub fn with_durable_writer(store: ProviderCapabilityStore) -> Self {
+        Self {
+            durable: Some(store),
+        }
+    }
+
+    /// 冻结签名(Task 2d):先 2c `validate_probe_shape` 通过,再逐字段比对
+    /// evidence/projection/record 三方 version/provider/digest/artifact_ref/
+    /// probed_at,一致才把 action row 原子导入 durable Confirmed;不一致返回
+    /// 错误且旧 durable 字节保持。不重新 probe、不接受 record 自报。
+    pub fn record_verified_probe(
+        &self,
+        project_id: &str,
+        record: &ProviderCapabilityRecord,
+        evidence: &ProviderBoundaryEvidence,
+        projection: &ProviderPolicyProjection,
+    ) -> Result<(), ProductStoreError> {
+        // Task 2d 阶段 1 RED 桩:阶段 2 实现三方校验与原子导入。
+        let _ = (project_id, record, evidence, projection, &self.durable);
+        Ok(())
     }
 
     /// 冻结签名:只验证三方可比对性(字段可比对/digest 形状/action 类型/
@@ -270,6 +301,7 @@ mod tests {
 
     use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
     use crate::cross_cutting::streaming_provider::ProviderPermissionMode;
+    use crate::product::app_paths::ProductAppPaths;
     use crate::product::logical_codebase::policy::{
         PolicyTarget, ProviderDialect, ProviderWireDialect,
     };
@@ -696,6 +728,145 @@ mod tests {
         expect_mismatch(
             service().validate_probe_shape(&record, &evidence, &projection),
             "provider_probe_shape_probe_metadata_mismatch",
+        );
+    }
+
+    /// Task 2d(imports):三方逐字段一致的真实三元组经 `record_verified_probe`
+    /// 原子导入 durable Confirmed——被探测 action 行 launch/write_boundary
+    /// Confirmed、digest/evidence 引用/probe 元数据三方一致落盘;evidence
+    /// 未覆盖的格子(resume/其它 action)不自报;同版本重复导入幂等;
+    /// durable 旧版本 Confirmed 行随版本推进失效为 Unknown(旧证据不跨
+    /// CLI 版本 allow,等待各自真实 probe;旧 evidence 工件保留在盘)。
+    #[test]
+    fn lcg_t02_probe_evidence_projection_record_imports_confirmed_atomically() {
+        let root = tempfile::tempdir().expect("temporary product root");
+        let paths = ProductAppPaths::new(root.path());
+        let store = ProviderCapabilityStore::new(paths);
+        let project_id = "project_0001";
+        let action = SessionPolicyAction::CodingTargetWrite;
+        let (record, evidence, projection) =
+            consistent_triple(action, ProviderBoundaryMode::TargetWriteOnly);
+
+        // 断言块(计划 Task 2 Step 1 逐字语义;`row(&action)` 为 2b 删除
+        // `Index<&SessionPolicyAction>` 后的等价读取):
+        assert_eq!(evidence.exact_version(), projection.exact_version());
+        assert_eq!(evidence.projection_digest(), projection.projection_digest());
+        assert_eq!(record.version, evidence.exact_version());
+        assert_eq!(
+            record.action_matrix.row(&action).projection_digest,
+            projection.projection_digest()
+        );
+        assert_eq!(
+            record.action_matrix.row(&action).launch,
+            ProviderCapabilityEvidence::Confirmed
+        );
+        assert_eq!(
+            record.action_matrix.row(&action).write_boundary,
+            ProviderCapabilityEvidence::Confirmed
+        );
+        assert_eq!(
+            record.probe_artifact_ref.as_deref(),
+            Some(evidence.artifact_ref())
+        );
+
+        let service = ProviderCapabilityProbeService::with_durable_writer(store.clone());
+        service
+            .record_verified_probe(project_id, &record, &evidence, &projection)
+            .expect("三方一致的真实三元组应导入 durable Confirmed");
+
+        // durable 侧:被探测 action 行 Confirmed,digest/evidence 引用与
+        // probe 元数据三方一致落盘。
+        let loaded = store
+            .get(project_id, ProviderRefType::KimiCode)
+            .expect("durable 读取")
+            .expect("导入后 durable 行存在");
+        assert_eq!(loaded.version, evidence.exact_version());
+        assert_eq!(loaded.probed_at.as_deref(), Some(evidence.probed_at()));
+        assert_eq!(
+            loaded.probe_artifact_ref.as_deref(),
+            Some(evidence.artifact_ref())
+        );
+        let row = loaded.action_matrix.row(&action);
+        assert_eq!(row.launch, ProviderCapabilityEvidence::Confirmed);
+        assert_eq!(row.write_boundary, ProviderCapabilityEvidence::Confirmed);
+        assert_eq!(row.projection_digest, projection.projection_digest());
+        assert_eq!(row.evidence_ref, evidence.artifact_ref());
+        // resume 分格与其它 action 行不被自报导入:evidence 只覆盖本次
+        // probe 的 action 行,其余保持未探测。
+        assert_eq!(row.resume, ProviderCapabilityEvidence::Unknown);
+        for other in [
+            SessionPolicyAction::PlanningReadOnly,
+            SessionPolicyAction::ReviewReadOnly,
+        ] {
+            let other_row = loaded.action_matrix.row(&other);
+            assert_eq!(other_row.launch, ProviderCapabilityEvidence::Unknown);
+            assert_eq!(
+                other_row.write_boundary,
+                ProviderCapabilityEvidence::Unknown
+            );
+        }
+
+        // 同版本重复导入:幂等,不漂移既有行。
+        service
+            .record_verified_probe(project_id, &record, &evidence, &projection)
+            .expect("同版本重复导入仍应成功");
+        assert_eq!(
+            store
+                .get(project_id, ProviderRefType::KimiCode)
+                .expect("durable 读取")
+                .expect("durable 行存在"),
+            loaded
+        );
+
+        // 旧版本 durable 行(Planning 曾 Confirmed@1.40.0)在新版本导入后
+        // 失效为 Unknown:旧 Confirmed 不跨 CLI 版本沿用(2b 过渡桥语义
+        // 衔接——旧行回到未探测,等待各自真实 probe)。
+        let mut stale = loaded.clone();
+        stale.version = "1.40.0".to_string();
+        let mut rows = stale.action_matrix.rows().to_vec();
+        rows.retain(|row| row.action != SessionPolicyAction::PlanningReadOnly);
+        rows.push(ProviderActionCapability {
+            action: SessionPolicyAction::PlanningReadOnly,
+            launch: ProviderCapabilityEvidence::Confirmed,
+            resume: ProviderCapabilityEvidence::Unknown,
+            write_boundary: ProviderCapabilityEvidence::Confirmed,
+            projection_digest: digest64(21),
+            evidence_ref: "probe://boundary/kimi-code/0000".to_string(),
+        });
+        stale.action_matrix = ProviderActionMatrix::from_rows(rows).expect("唯一 action 行");
+        store
+            .upsert(project_id, &stale)
+            .expect("seed 旧版本 durable 行");
+
+        service
+            .record_verified_probe(project_id, &record, &evidence, &projection)
+            .expect("新版本导入应成功");
+        let reloaded = store
+            .get(project_id, ProviderRefType::KimiCode)
+            .expect("durable 读取")
+            .expect("durable 行存在");
+        assert_eq!(reloaded.version, evidence.exact_version());
+        assert_eq!(
+            reloaded
+                .action_matrix
+                .row(&SessionPolicyAction::PlanningReadOnly)
+                .launch,
+            ProviderCapabilityEvidence::Unknown
+        );
+        assert_eq!(
+            reloaded
+                .action_matrix
+                .row(&SessionPolicyAction::PlanningReadOnly)
+                .write_boundary,
+            ProviderCapabilityEvidence::Unknown
+        );
+        assert_eq!(
+            reloaded.action_matrix.row(&action).launch,
+            ProviderCapabilityEvidence::Confirmed
+        );
+        assert_eq!(
+            reloaded.action_matrix.row(&action).write_boundary,
+            ProviderCapabilityEvidence::Confirmed
         );
     }
 }
