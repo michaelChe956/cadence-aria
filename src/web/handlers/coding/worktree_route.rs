@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_models::AttemptTargetSnapshot;
 use crate::product::json_store::ProductStoreError;
 use crate::product::lifecycle_store::LifecycleStore;
@@ -7,7 +8,6 @@ use crate::product::lifecycle_store::UpsertIssueSharedWorktreeInput;
 use crate::product::lifecycle_store::UpsertRepoSharedWorktreeInput;
 use crate::product::logical_codebase::LegacySharedWorktreeMigration;
 use crate::product::logical_codebase::LogicalRepositoryId;
-use crate::product::app_paths::ProductAppPaths;
 use crate::web::error::ApiError;
 use serde_json::json;
 
@@ -140,21 +140,18 @@ pub(crate) fn upsert_worktree_and_acquire_lease(
             })
         }
         IssueWorktreeRoute::Repository { repository_id } => {
-            let legacy_error =
-                match LegacySharedWorktreeMigration::load_legacy_shared_worktree(
-                    app_paths,
-                    project_id,
-                    issue_id,
-                ) {
-                    Ok(None) => None,
-                    Ok(Some(_)) => Some("legacy_shared_worktree_present"),
-                    Err(ProductStoreError::InvalidRecord { reason, .. })
-                        if reason.starts_with("legacy_shared_worktree_inconsistent:") =>
-                    {
-                        Some("legacy_shared_worktree_inconsistent")
-                    }
-                    Err(error) => return Err(product_store_api_error(error)),
-                };
+            let legacy_error = match LegacySharedWorktreeMigration::load_legacy_shared_worktree(
+                app_paths, project_id, issue_id,
+            ) {
+                Ok(None) => None,
+                Ok(Some(_)) => Some("legacy_shared_worktree_present"),
+                Err(ProductStoreError::InvalidRecord { reason, .. })
+                    if reason.starts_with("legacy_shared_worktree_inconsistent:") =>
+                {
+                    Some("legacy_shared_worktree_inconsistent")
+                }
+                Err(error) => return Err(product_store_api_error(error)),
+            };
             if let Some(code) = legacy_error {
                 return Err(ApiError::validation(
                     code,

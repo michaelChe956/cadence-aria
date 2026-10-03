@@ -151,7 +151,9 @@ mod tests {
         AggregateIndexRecord, AggregateIndexStatus, AggregateIndexStore,
     };
     use crate::product::logical_codebase::issue_selection::IssueCodebaseSelectionStore;
-    use crate::product::logical_codebase::policy::{AggregatePolicyArtifact, AggregatePolicyArtifactStore};
+    use crate::product::logical_codebase::policy::{
+        AggregatePolicyArtifact, AggregatePolicyArtifactStore,
+    };
     use crate::product::logical_codebase::types::{
         CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, MemberStatus,
         RepositoryCheckoutRecord, RepositoryType,
@@ -241,11 +243,9 @@ mod tests {
         let alpha_canonical = std::fs::canonicalize(&alpha_repo).unwrap();
         let beta_canonical = std::fs::canonicalize(&beta_repo).unwrap();
         let alpha_source =
-            crate::product::repository_store::resolve_repository_source(&alpha_canonical)
-                .unwrap();
+            crate::product::repository_store::resolve_repository_source(&alpha_canonical).unwrap();
         let beta_source =
-            crate::product::repository_store::resolve_repository_source(&beta_canonical)
-                .unwrap();
+            crate::product::repository_store::resolve_repository_source(&beta_canonical).unwrap();
 
         let store = LogicalCodebaseStore::new(paths.clone());
         let lc_a = store
@@ -408,14 +408,7 @@ mod tests {
             .unwrap();
 
         (
-            temp,
-            paths,
-            project_id,
-            lc_a,
-            lc_b,
-            member_a,
-            member_b,
-            issue_a,
+            temp, paths, project_id, lc_a, lc_b, member_a, member_b, issue_a,
         )
     }
 
@@ -459,8 +452,7 @@ mod tests {
 
     #[test]
     fn planning_and_coding_resolution_use_same_lc_authority_root() {
-        let (temp, paths, project_id, lc_a, lc_b, member_a, member_b, issue_a) =
-            two_lc_fixture();
+        let (temp, paths, project_id, lc_a, lc_b, member_a, member_b, issue_a) = two_lc_fixture();
 
         // 规划侧：PlanningContextSetResolver 只读 issue_a 归属 LC 的成员集合。
         let planning = PlanningContextSetResolver::new(paths.clone())
@@ -473,13 +465,12 @@ mod tests {
         assert_ne!(planning.set[0].member_id, member_b);
 
         // coding 侧：work item target 解析到同一 LC 成员的物理 checkout。
-        let repository =
-            resolve_work_item_repository(&paths, &project_id, &work_item_for(
-                &project_id,
-                &issue_a,
-                Some(member_a),
-            ))
-            .unwrap();
+        let repository = resolve_work_item_repository(
+            &paths,
+            &project_id,
+            &work_item_for(&project_id, &issue_a, Some(member_a)),
+        )
+        .unwrap();
         assert_eq!(repository.logical_repository_id, Some(member_a));
         assert_eq!(
             repository.path,
@@ -498,9 +489,7 @@ mod tests {
         // bootstrap policy digest 是 canonical 文本哈希（跨 LC 相同）；可区分的
         // 身份是 policy_id / logical_codebase_id（各 LC 的 manifest id 不同）。
         assert_ne!(policy_a.policy_id, policy_b.policy_id);
-        assert_ne!(
-            policy_a.logical_codebase_id, policy_b.logical_codebase_id
-        );
+        assert_ne!(policy_a.logical_codebase_id, policy_b.logical_codebase_id);
         let index_a = AggregateIndexStore::for_lc(paths.clone(), &lc_a)
             .active(&project_id)
             .unwrap()
@@ -528,13 +517,12 @@ mod tests {
             .resolve(&project_id, &issue_b)
             .unwrap();
         assert_eq!(planning_beta.set[0].member_id, member_b);
-        let repository_b =
-            resolve_work_item_repository(&paths, &project_id, &work_item_for(
-                &project_id,
-                &issue_b,
-                Some(member_b),
-            ))
-            .unwrap();
+        let repository_b = resolve_work_item_repository(
+            &paths,
+            &project_id,
+            &work_item_for(&project_id, &issue_b, Some(member_b)),
+        )
+        .unwrap();
         assert_eq!(repository_b.logical_repository_id, Some(member_b));
         assert_eq!(
             repository_b.path,
@@ -548,12 +536,8 @@ mod tests {
             two_lc_fixture();
 
         let before = aria_inventory(temp.path());
-        let repos_json_before = std::fs::read(
-            paths
-                .project_root(&project_id)
-                .join("repos.json"),
-        )
-        .unwrap_or_default();
+        let repos_json_before =
+            std::fs::read(paths.project_root(&project_id).join("repos.json")).unwrap_or_default();
 
         // 单仓形状（无 target_repository_id）命中 LC 归属 issue：显式 SingleRepo
         // 请求必须在 target lookup 之前 fail-closed kind_mismatch。
@@ -568,12 +552,8 @@ mod tests {
         // 零写入：物理 repos.json 与 `.aria` durable inventory 字节不变。
         let after = aria_inventory(temp.path());
         assert_eq!(before, after);
-        let repos_json_after = std::fs::read(
-            paths
-                .project_root(&project_id)
-                .join("repos.json"),
-        )
-        .unwrap_or_default();
+        let repos_json_after =
+            std::fs::read(paths.project_root(&project_id).join("repos.json")).unwrap_or_default();
         assert_eq!(repos_json_before, repos_json_after);
     }
 }

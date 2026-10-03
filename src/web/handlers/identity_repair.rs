@@ -14,17 +14,15 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde_json::json;
 
+use crate::product::json_store::ProductStoreError;
 use crate::product::logical_codebase::identity_repair::{
     IdentityMappingSubmission, IdentityRepairActionKind, IdentityRepairActionRequest,
     IdentityRepairService,
 };
 use crate::product::logical_codebase::{LogicalRepositoryId, RepositoryCheckoutId};
-use crate::product::json_store::ProductStoreError;
 use crate::web::error::{ApiError, ApiResult};
 use crate::web::state::WebAppState;
-use crate::web::types::{
-    IdentityJournalDiagnosticDto, IdentityRepairActionRequestDto,
-};
+use crate::web::types::{IdentityJournalDiagnosticDto, IdentityRepairActionRequestDto};
 
 pub async fn get_lc_identity_repair(
     State(state): State<WebAppState>,
@@ -73,11 +71,12 @@ pub async fn post_lc_identity_repair_action(
                 "submit_mapping requires a mapping submission",
             ));
         }
-        (IdentityRepairActionKind::SubmitMapping, Some(_)) => {
-            Some(mapping_submission_from_dto(request.mapping.as_ref().expect(
-                "submit_mapping branch guarantees the mapping payload",
-            ))?)
-        }
+        (IdentityRepairActionKind::SubmitMapping, Some(_)) => Some(mapping_submission_from_dto(
+            request
+                .mapping
+                .as_ref()
+                .expect("submit_mapping branch guarantees the mapping payload"),
+        )?),
         (_, Some(_)) => {
             return Err(ApiError::validation(
                 "identity_repair_mapping_unexpected",
@@ -162,15 +161,15 @@ fn mapping_submission_from_dto(
         source_identity_digest: submission.source_identity_digest.clone(),
         logical_repository_id: LogicalRepositoryId(
             submission
-            .logical_repository_id
-            .parse()
-            .map_err(|_| invalid_mapping_uuid("logical_repository_id"))?,
+                .logical_repository_id
+                .parse()
+                .map_err(|_| invalid_mapping_uuid("logical_repository_id"))?,
         ),
         primary_checkout_id: RepositoryCheckoutId(
             submission
-            .primary_checkout_id
-            .parse()
-            .map_err(|_| invalid_mapping_uuid("primary_checkout_id"))?,
+                .primary_checkout_id
+                .parse()
+                .map_err(|_| invalid_mapping_uuid("primary_checkout_id"))?,
         ),
         physical_repository_id: submission.physical_repository_id.clone(),
         idempotency_key: submission.idempotency_key.clone(),
@@ -195,9 +194,7 @@ fn identity_repair_api_error(error: ProductStoreError) -> ApiError {
             "no identity migration journal exists for this project",
             json!({ "project_id": id }),
         ),
-        ProductStoreError::Conflict { kind, id }
-            if kind.starts_with("identity_repair_") =>
-        {
+        ProductStoreError::Conflict { kind, id } if kind.starts_with("identity_repair_") => {
             match kind {
                 "identity_repair_mapping_unknown_repository"
                 | "identity_repair_mapping_digest_mismatch"

@@ -9,7 +9,9 @@
 
 use super::*;
 use crate::product::coding_models::AttemptTargetSnapshot;
-use crate::product::lifecycle_store::{UpsertIssueSharedWorktreeInput, UpsertRepoSharedWorktreeInput};
+use crate::product::lifecycle_store::{
+    UpsertIssueSharedWorktreeInput, UpsertRepoSharedWorktreeInput,
+};
 use crate::product::logical_codebase::{
     IssueCodebaseSelection, IssueCodebaseSelectionStore, LogicalCodebaseManifest,
     LogicalCodebaseStore, LogicalRepositoryId, RepositoryCheckoutId,
@@ -188,7 +190,9 @@ fn seed_self_owned_legacy_layout(
         .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
             project_id: attempt.project_id.clone(),
             issue_id: attempt.issue_id.clone(),
-            repository_id: attempt.target_snapshot.as_ref()
+            repository_id: attempt
+                .target_snapshot
+                .as_ref()
                 .map(|snapshot| snapshot.physical_repository_id.clone())
                 .unwrap_or_else(|| "repository_0001".to_string()),
             branch_name: attempt.branch_name.clone(),

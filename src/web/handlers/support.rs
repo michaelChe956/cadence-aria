@@ -232,9 +232,8 @@ pub(crate) fn resolve_automation_carrier(
     project_id: &str,
     issue: &crate::product::models::IssueRecord,
 ) -> ApiResult<AutomationCarrierResolution> {
-    let resolver = crate::product::logical_codebase::RepositoryAuthorityResolver::new(
-        app_paths.clone(),
-    );
+    let resolver =
+        crate::product::logical_codebase::RepositoryAuthorityResolver::new(app_paths.clone());
     match resolver
         .resolve_for_issue(project_id, &issue.id)
         .map_err(product_store_api_error)?
@@ -255,7 +254,7 @@ pub(crate) fn resolve_automation_carrier(
                         "automation carrier requires a registered repository: repo_id \
                          {repository_id} has no repository record ({})",
                         error.message
-                    )))
+                    )));
                 }
             };
             // C4 显式 single-repo authority/conflict 检查：同 git 根别名与
@@ -413,7 +412,9 @@ pub(crate) fn provider_workspace_config(
 
     let author = match author_provider {
         Some(provider) => resolve_explicit_provider_name(provider, provider_availability)?,
-        None => resolve_default_coding_provider("codex", test_provider_enabled, provider_availability)?,
+        None => {
+            resolve_default_coding_provider("codex", test_provider_enabled, provider_availability)?
+        }
     };
     let reviewer = match reviewer_provider {
         Some(provider) => resolve_explicit_provider_name(provider, provider_availability)?,
@@ -592,16 +593,9 @@ mod tests {
 
     #[test]
     fn provider_workspace_config_rejects_explicit_unavailable_provider() {
-        let error = provider_workspace_config(
-            Some("codex"),
-            None,
-            None,
-            None,
-            None,
-            false,
-            &availability,
-        )
-            .expect_err("explicit unavailable provider must fail");
+        let error =
+            provider_workspace_config(Some("codex"), None, None, None, None, false, &availability)
+                .expect_err("explicit unavailable provider must fail");
 
         assert_eq!(error.code, "provider_unavailable");
         assert_eq!(error.details["provider"], "codex");
@@ -609,8 +603,7 @@ mod tests {
 
     #[test]
     fn provider_workspace_config_records_default_fallback_status() {
-        let config =
-            provider_workspace_config(None, None, None, None, None, false, &availability)
+        let config = provider_workspace_config(None, None, None, None, None, false, &availability)
             .expect("default provider config");
 
         assert_eq!(config.author_provider, ProviderName::ClaudeCode);
@@ -872,8 +865,8 @@ mod tests {
     fn finalize_deletion_cleans_miswritten_legacy_issue_layout_for_snapshot_attempts() {
         use crate::product::coding_attempt_store::CreateCodingAttemptInput;
         use crate::product::coding_models::AttemptTargetSnapshot;
-        use crate::product::logical_codebase::RepositoryCheckoutId;
         use crate::product::lifecycle_store::UpsertIssueSharedWorktreeInput;
+        use crate::product::logical_codebase::RepositoryCheckoutId;
         use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 
         // 缺陷 #13 层2 存量出口：组入口路由分流修复前，Logical 路由的 group
@@ -945,7 +938,6 @@ mod tests {
             "miswritten legacy issue layout must be cleaned once the last attempt is deleted"
         );
     }
-
 
     #[test]
     fn aggregate_root_api_error_fallback_maps_unknown_code_to_internal_error() {

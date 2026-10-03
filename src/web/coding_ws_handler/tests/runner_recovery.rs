@@ -176,8 +176,7 @@ async fn lc_gateway_factory_build_failure_fails_closed_before_provider_spawn() {
     use crate::product::issue_store::{CreateProductIssueInput, IssueStore};
     use crate::product::logical_codebase::store::LogicalCodebaseRecord;
     use crate::product::logical_codebase::{
-        LogicalCodebaseManifest, LogicalCodebaseStore, LogicalRepositoryId,
-        RepositoryCheckoutId,
+        LogicalCodebaseManifest, LogicalCodebaseStore, LogicalRepositoryId, RepositoryCheckoutId,
     };
     use crate::product::project_store::{CreateProjectInput, ProjectStore};
 
@@ -310,11 +309,11 @@ async fn lc_gateway_factory_build_failure_fails_closed_before_provider_spawn() {
         .expect("chat entries");
     let diagnostic_visible = entries.iter().any(|entry| {
         matches!(
-            &entry.entry_type,
-            crate::product::coding_models::CodingEntryType::SystemEvent { message, .. }
- if message.contains("logical gateway factory build failed")
-                && message.contains("registration_root")
-        )
+                   &entry.entry_type,
+                   crate::product::coding_models::CodingEntryType::SystemEvent { message, .. }
+        if message.contains("logical gateway factory build failed")
+                       && message.contains("registration_root")
+               )
     });
     assert!(
         diagnostic_visible,
@@ -722,8 +721,10 @@ async fn startup_reconciles_claimed_running_coding_without_attach() {
 /// 恢复方法），不隐式新 command。
 #[tokio::test]
 async fn startup_reconcile_resumes_claimed_first_start_with_same_command() {
-    let fixture =
-        seed_startup_attempt(Some(crate::product::coding_models::CodingStartPhase::Claimed), false);
+    let fixture = seed_startup_attempt(
+        Some(crate::product::coding_models::CodingStartPhase::Claimed),
+        false,
+    );
     let fresh = fixture.restart_state();
     fixture.reconcile(&fresh).await;
     assert_eq!(
@@ -733,7 +734,11 @@ async fn startup_reconcile_resumes_claimed_first_start_with_same_command() {
     );
     let reloaded = fixture.reload();
     assert_eq!(
-        reloaded.start_claim.as_ref().expect("claim kept").command_id,
+        reloaded
+            .start_claim
+            .as_ref()
+            .expect("claim kept")
+            .command_id,
         format!("startup-reconcile-{}", reloaded.id),
         "recovery must replay the durable claim command identity"
     );
@@ -808,7 +813,9 @@ async fn startup_reconcile_skips_terminal_and_unclaimed_but_recovers_legacy_runn
         let terminal_state = terminal.restart_state();
         terminal.reconcile(&terminal_state).await;
         assert_eq!(
-            terminal_state.coding_runs.runner_count(&terminal.attempt_key()),
+            terminal_state
+                .coding_runs
+                .runner_count(&terminal.attempt_key()),
             0,
             "{status:?} must not recover"
         );
@@ -853,7 +860,9 @@ async fn startup_reconcile_recovers_legacy_running_review_request_stage() {
     let transitional_state = transitional.restart_state();
     transitional.reconcile(&transitional_state).await;
     assert_eq!(
-        transitional_state.coding_runs.runner_count(&transitional.attempt_key()),
+        transitional_state
+            .coding_runs
+            .runner_count(&transitional.attempt_key()),
         0,
         "running prepare-context attempt must stay fail-safe for manual triage"
     );

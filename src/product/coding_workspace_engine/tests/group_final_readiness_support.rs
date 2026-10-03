@@ -113,8 +113,8 @@ pub(super) fn seed_completed_run(
     let coder_renderer = renderer_for(&providers.coder)
         .renderer_version()
         .to_string();
-    let reviewer_renderer = renderer_version_for_optional_provider(providers.code_reviewer.as_ref())
-        .to_string();
+    let reviewer_renderer =
+        renderer_version_for_optional_provider(providers.code_reviewer.as_ref()).to_string();
     let run = CodingUnitRun {
         id: format!("coding_unit_run_{}", unit.order_index + 1),
         unit_id: unit.id.clone(),

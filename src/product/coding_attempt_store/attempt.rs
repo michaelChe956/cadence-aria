@@ -191,8 +191,6 @@ impl super::CodingAttemptStore {
             self.save_coding_attempt_with_status(&updated)
         })
     }
-
-
 }
 
 /// P2 Task 4：durable 单发首启认领结果——`Claimed` 是本次写入的新 claim；
@@ -277,7 +275,6 @@ impl super::CodingAttemptStore {
 }
 
 impl super::CodingAttemptStore {
-
     #[cfg(test)]
     pub(crate) fn write_coding_attempt_for_test(
         &self,

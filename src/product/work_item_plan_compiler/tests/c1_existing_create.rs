@@ -216,13 +216,12 @@ fn c1_context<'a>(
     existing_ids: &'a [String],
     baseline: Option<&'a BTreeSet<String>>,
 ) -> PlanCandidateValidationContext<'a> {
-    static BOUND_TARGET: std::sync::LazyLock<
-        crate::product::logical_codebase::EnrollmentTarget,
-    > = std::sync::LazyLock::new(|| {
-        crate::product::logical_codebase::EnrollmentTarget::SingleRepository {
-            repository_id: C1_TARGET_REPO.to_string(),
-        }
-    });
+    static BOUND_TARGET: std::sync::LazyLock<crate::product::logical_codebase::EnrollmentTarget> =
+        std::sync::LazyLock::new(|| {
+            crate::product::logical_codebase::EnrollmentTarget::SingleRepository {
+                repository_id: C1_TARGET_REPO.to_string(),
+            }
+        });
     c1_context_with_target(existing_ids, baseline, Some(&BOUND_TARGET))
 }
 
@@ -247,8 +246,7 @@ fn c1_context_with_target<'a>(
 }
 
 fn c1_profile_ref() -> &'static RepositoryProfile {
-    static PROFILE: std::sync::LazyLock<RepositoryProfile> =
-        std::sync::LazyLock::new(c1_profile);
+    static PROFILE: std::sync::LazyLock<RepositoryProfile> = std::sync::LazyLock::new(c1_profile);
     &PROFILE
 }
 
@@ -272,10 +270,16 @@ fn c1_existing_create_declared_create_compiles_and_persists_intent() {
         .intent_contract
         .as_ref()
         .expect("intent contract lowered onto canonical contract");
-    assert_eq!(intent.intent, crate::product::work_item_contract::WorkItemIntent::Create);
+    assert_eq!(
+        intent.intent,
+        crate::product::work_item_contract::WorkItemIntent::Create
+    );
     assert_eq!(intent.provider_work_item_id, "WI-002");
     assert_eq!(intent.depends_on, vec!["WI-002".to_string()]);
-    assert_eq!(intent.exclusive_scopes, vec!["src/levels_new/**".to_string()]);
+    assert_eq!(
+        intent.exclusive_scopes,
+        vec!["src/levels_new/**".to_string()]
+    );
     assert_eq!(intent.forbidden_scopes, vec!["web/**".to_string()]);
     assert_eq!(
         intent.target,
@@ -292,11 +296,8 @@ fn c1_existing_create_declared_create_compiles_and_persists_intent() {
     .expect("declared create must pass intent validation");
 
     // 全链 validate：无 Error finding（preflight 三族 + intent 均满足）。
-    let report = validate_plan_candidate_ir(
-        &ir,
-        &c1_context(&[], Some(&c1_baseline_tree())),
-    )
-    .expect("declared create must validate through mechanical report");
+    let report = validate_plan_candidate_ir(&ir, &c1_context(&[], Some(&c1_baseline_tree())))
+        .expect("declared create must validate through mechanical report");
     assert!(
         !report.has_errors(),
         "declared create findings must be Error-free: {:#?}",
@@ -306,7 +307,8 @@ fn c1_existing_create_declared_create_compiles_and_persists_intent() {
     // IR 经真实 source store 落盘/回读后意图保留（binding 可追溯）。
     let root = tempfile::TempDir::new().expect("temp root");
     let app_paths = crate::product::app_paths::ProductAppPaths::new(root.path());
-    let source_store = crate::product::work_item_plan_source_store::WorkItemPlanSourceStore::new(app_paths);
+    let source_store =
+        crate::product::work_item_plan_source_store::WorkItemPlanSourceStore::new(app_paths);
     let mut source_record = crate::product::work_item_plan_source_store::SourceRevisionRecord {
         id: "source-c1-create".to_string(),
         source: source.clone(),
@@ -315,7 +317,12 @@ fn c1_existing_create_declared_create_compiles_and_persists_intent() {
     };
     source_record.content_hash = source_record.content_hash().expect("source content hash");
     let source_ref = source_store
-        .put_source_revision("project_c1_0001", "issue_c1_0001", "plan_c1_0001", &source_record)
+        .put_source_revision(
+            "project_c1_0001",
+            "issue_c1_0001",
+            "plan_c1_0001",
+            &source_record,
+        )
         .expect("persist source");
     let mut ir_record = crate::product::work_item_plan_source_store::PlanCandidateIrRecord {
         id: "ir-c1-create".to_string(),
@@ -325,7 +332,12 @@ fn c1_existing_create_declared_create_compiles_and_persists_intent() {
     };
     ir_record.content_hash = ir_record.content_hash().expect("ir content hash");
     let ir_ref = source_store
-        .put_plan_candidate_ir("project_c1_0001", "issue_c1_0001", "plan_c1_0001", &ir_record)
+        .put_plan_candidate_ir(
+            "project_c1_0001",
+            "issue_c1_0001",
+            "plan_c1_0001",
+            &ir_record,
+        )
         .expect("persist ir");
     let reloaded = source_store
         .get_plan_candidate_ir(
@@ -338,8 +350,7 @@ fn c1_existing_create_declared_create_compiles_and_persists_intent() {
         )
         .expect("reload ir");
     assert_eq!(
-        reloaded.ir.items[0].contract.intent_contract,
-        ir.items[0].contract.intent_contract,
+        reloaded.ir.items[0].contract.intent_contract, ir.items[0].contract.intent_contract,
         "保存后的 revision 必须原样保留 create 意图"
     );
 }

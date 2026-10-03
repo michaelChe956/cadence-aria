@@ -63,8 +63,8 @@ pub(super) async fn spawn_provider_run_with_start_mode(
                     Some(reviewer) => reviewer,
                     None => {
                         return Err(
-                            "reviewer_configuration_missing: review run not started".to_string(),
-                        )
+                            "reviewer_configuration_missing: review run not started".to_string()
+                        );
                     }
                 }
             }
@@ -175,7 +175,9 @@ pub(super) async fn spawn_provider_run_with_start_mode(
             }
             ProviderRunKind::WorkItemPlanLegacyAuthor
             | ProviderRunKind::WorkItemPlanOutlineRevision { .. }
-            | ProviderRunKind::WorkItemPlanOutlineRebuild { .. } => include!("provider_run/work_item_plan_legacy_author.inc.rs"),
+            | ProviderRunKind::WorkItemPlanOutlineRebuild { .. } => {
+                include!("provider_run/work_item_plan_legacy_author.inc.rs")
+            }
             ProviderRunKind::WorkItemPlanSingleCandidateAuthor => {
                 let mut command_rx = command_rx;
                 match single_candidate::run_single_candidate_author(

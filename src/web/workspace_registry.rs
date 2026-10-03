@@ -76,9 +76,7 @@ impl WorkspaceRegistry {
                 .default_policy_preset
                 .unwrap_or_else(|| "manual-write".to_string()),
             // 缺陷 #13 层 1：未显式配置落空串（未配置），生产解析链 fail-closed。
-            default_provider_mode: input
-                .default_provider_mode
-                .unwrap_or_default(),
+            default_provider_mode: input.default_provider_mode.unwrap_or_default(),
             created_at: now,
             updated_at: now,
         };

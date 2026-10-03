@@ -10,8 +10,8 @@
 
 use uuid::Uuid;
 
-use crate::product::logical_codebase::LogicalRepositoryId;
 use crate::cross_cutting::structured_output::parse_all_structured_output_blocks;
+use crate::product::logical_codebase::LogicalRepositoryId;
 use crate::product::workspace_engine::parsers::extract_markdown_fence_json;
 
 /// Story 聚合输出的结构化结果。

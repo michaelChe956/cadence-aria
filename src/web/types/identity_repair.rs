@@ -109,8 +109,12 @@ fn phase_str(phase: &crate::product::logical_codebase::IdentityMigrationPhase) -
         crate::product::logical_codebase::IdentityMigrationPhase::BackfillingCompatibility => {
             "backfilling_compatibility"
         }
-        crate::product::logical_codebase::IdentityMigrationPhase::DualReadWrite => "dual_read_write",
-        crate::product::logical_codebase::IdentityMigrationPhase::SwitchingReads => "switching_reads",
+        crate::product::logical_codebase::IdentityMigrationPhase::DualReadWrite => {
+            "dual_read_write"
+        }
+        crate::product::logical_codebase::IdentityMigrationPhase::SwitchingReads => {
+            "switching_reads"
+        }
         crate::product::logical_codebase::IdentityMigrationPhase::LegacyFallbackRemoved => {
             "legacy_fallback_removed"
         }

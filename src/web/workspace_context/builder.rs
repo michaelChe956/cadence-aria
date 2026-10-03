@@ -136,9 +136,7 @@ async fn build_workspace_context_message(
         None => RepositoryRouting::Legacy {
             repository_id: String::new(),
         },
-        Some(resolution) => {
-            RepositoryRouting::classify(resolution.manifest, resolution.selection)
-        }
+        Some(resolution) => RepositoryRouting::classify(resolution.manifest, resolution.selection),
     };
     let aggregate_planning = match &routing {
         RepositoryRouting::FailClosed { code, reason } => {
@@ -174,7 +172,12 @@ async fn build_workspace_context_message(
                 resolved.cwd.display().to_string(),
             )
         } else {
-            let repository = repository_for(app_paths, &session.project_id, &session.issue_id, &entity.repository_id)?;
+            let repository = repository_for(
+                app_paths,
+                &session.project_id,
+                &session.issue_id,
+                &entity.repository_id,
+            )?;
             (
                 repository.name,
                 repository.id,

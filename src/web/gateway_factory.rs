@@ -71,9 +71,7 @@ impl LogicalCodebaseGatewayFactory {
             Some(lc_id) => Some(lc_id.to_string()),
             None => {
                 let alias_id =
-                    crate::product::logical_codebase::store::legacy_logical_codebase_id(
-                        project_id,
-                    );
+                    crate::product::logical_codebase::store::legacy_logical_codebase_id(project_id);
                 let alias_record_exists = self
                     .paths
                     .logical_codebase_record_root(project_id, &alias_id)
@@ -168,12 +166,11 @@ impl LogicalCodebaseGatewayFactory {
             .paths
             .logical_codebase_record_root(project_id, lc_id)
             .join("record.json");
-        if !record_path
-            .try_exists()
-            .map_err(|error| ProviderGatewayError::PolicyMissing(format!(
+        if !record_path.try_exists().map_err(|error| {
+            ProviderGatewayError::PolicyMissing(format!(
                 "{project_id}: read registration record existence: {error}"
-            )))?
-        {
+            ))
+        })? {
             return Ok(None);
         }
         let record = crate::product::json_store::read_json::<
@@ -203,12 +200,11 @@ impl LogicalCodebaseGatewayFactory {
         )
         .map_err(ProviderGatewayError::policy)?;
         let receipts_dir = scope.join("aggregate-recipe-receipts");
-        if !receipts_dir
-            .try_exists()
-            .map_err(|error| ProviderGatewayError::PolicyMissing(format!(
+        if !receipts_dir.try_exists().map_err(|error| {
+            ProviderGatewayError::PolicyMissing(format!(
                 "{project_id}: read aggregate receipts existence: {error}"
-            )))?
-        {
+            ))
+        })? {
             return Ok(None);
         }
         let entries = std::fs::read_dir(&receipts_dir).map_err(|error| {
@@ -221,9 +217,7 @@ impl LogicalCodebaseGatewayFactory {
         for entry in entries {
             let path = entry
                 .map_err(|error| {
-                    ProviderGatewayError::Target(format!(
-                        "read aggregate receipt entry: {error}"
-                    ))
+                    ProviderGatewayError::Target(format!("read aggregate receipt entry: {error}"))
                 })?
                 .path();
             if path.extension().and_then(|value| value.to_str()) != Some("json") {

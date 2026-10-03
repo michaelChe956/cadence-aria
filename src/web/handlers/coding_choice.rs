@@ -589,8 +589,7 @@ mod tests {
 
         // 反例：无 waiter（run 已摘除）→ 410，不隐式新投递。
         let bare = coding_choice_http_fixture().await;
-        let (_keep_release, _keep_seen, _keep_answers) =
-            paused_coding_runner(bare.command_rx);
+        let (_keep_release, _keep_seen, _keep_answers) = paused_coding_runner(bare.command_rx);
         bare.state
             .coding_runs
             .remove(&bare.attempt_key, bare.run_id);

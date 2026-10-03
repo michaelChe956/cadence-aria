@@ -185,8 +185,7 @@ pub struct EnrollmentRebindRequest {
 impl EnrollmentRebindRequest {
     /// 稳定 payload 摘要：同一 command 的异 payload 必然产生不同 digest。
     pub fn payload_digest(&self) -> String {
-        let payload =
-            serde_json::to_string(self).expect("rebind request payload is serializable");
+        let payload = serde_json::to_string(self).expect("rebind request payload is serializable");
         format!("sha256:{:x}", Sha256::digest(payload.as_bytes()))
     }
 }

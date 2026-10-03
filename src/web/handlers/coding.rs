@@ -23,10 +23,9 @@ pub(crate) mod scope;
 mod verification_surface;
 
 pub(crate) use verification_surface::{
-    get_coding_policy_text, get_verification_command_evidence,
-    get_verification_triage_records, post_coding_policy_reauthorization,
-    post_rerun_planned_command, post_verification_triage_decision,
-    post_verification_triage_enter,
+    get_coding_policy_text, get_verification_command_evidence, get_verification_triage_records,
+    post_coding_policy_reauthorization, post_rerun_planned_command,
+    post_verification_triage_decision, post_verification_triage_enter,
 };
 mod worktree_route;
 #[allow(unused_imports)]
@@ -289,7 +288,9 @@ pub(crate) fn coding_provider_config_snapshot(
         let reviewer = session
             .reviewer_provider
             .as_ref()
-            .map(|reviewer| resolve_explicit_provider_name(provider_name_key(reviewer), provider_availability))
+            .map(|reviewer| {
+                resolve_explicit_provider_name(provider_name_key(reviewer), provider_availability)
+            })
             .transpose()?
             .map(|resolved| resolved.provider);
         return Ok(ProviderConfigSnapshot {
@@ -352,7 +353,9 @@ pub(crate) fn coding_provider_config_snapshot_for_runtime_binding(
         let reviewer = session
             .reviewer_provider
             .as_ref()
-            .map(|reviewer| resolve_explicit_provider_name(provider_name_key(reviewer), provider_availability))
+            .map(|reviewer| {
+                resolve_explicit_provider_name(provider_name_key(reviewer), provider_availability)
+            })
             .transpose()?
             .map(|resolved| resolved.provider);
         return Ok(ProviderConfigSnapshot {
@@ -576,9 +579,12 @@ pub(crate) async fn restart_coding_attempt(
     State(state): State<WebAppState>,
     Path(path): Path<CodingAttemptRoutePath>,
     Json(request): Json<crate::web::coding_start::RestartCodingAttemptRequest>,
-) -> ApiResult<(axum::http::StatusCode, Json<crate::web::coding_start::RestartCodingAttemptResult>)> {
-    use axum::http::StatusCode;
+) -> ApiResult<(
+    axum::http::StatusCode,
+    Json<crate::web::coding_start::RestartCodingAttemptResult>,
+)> {
     use crate::product::models::automation::OperationState;
+    use axum::http::StatusCode;
 
     let app_paths = product_app_paths(&state);
     let coding_store = CodingAttemptStore::new(app_paths.clone());
@@ -651,10 +657,7 @@ pub(crate) async fn post_coding_gate_response(
     State(state): State<WebAppState>,
     Path(path): Path<CodingAttemptRoutePath>,
     Json(request): Json<CodingGateResponseRestRequest>,
-) -> ApiResult<(
-    axum::http::StatusCode,
-    Json<CodingGateResponseRestResult>,
-)> {
+) -> ApiResult<(axum::http::StatusCode, Json<CodingGateResponseRestResult>)> {
     use crate::product::coding_attempt_store::CodingAttemptCommandRecord;
     use crate::product::json_store::validate_relative_id;
     use crate::product::models::automation::OperationState;
@@ -707,15 +710,13 @@ pub(crate) async fn post_coding_gate_response(
         state: cmd_state,
         recorded_at: chrono::Utc::now().to_rfc3339(),
     };
-    let result = |cmd_state: OperationState, reason: Option<String>| {
-        CodingGateResponseRestResult {
-            command_id: request.command_id.clone(),
-            state: cmd_state,
-            attempt_id: attempt.id.clone(),
-            gate_id: request.gate_id.clone(),
-            action_id: request.action_id.clone(),
-            reason,
-        }
+    let result = |cmd_state: OperationState, reason: Option<String>| CodingGateResponseRestResult {
+        command_id: request.command_id.clone(),
+        state: cmd_state,
+        attempt_id: attempt.id.clone(),
+        gate_id: request.gate_id.clone(),
+        action_id: request.action_id.clone(),
+        reason,
     };
     let store_error = |error: crate::product::json_store::ProductStoreError| {
         ApiError::runtime(

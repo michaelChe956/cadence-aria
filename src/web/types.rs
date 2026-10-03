@@ -415,15 +415,15 @@ pub use logical_codebase_registration::{
 
 mod logical_codebase_bootstrap;
 pub use logical_codebase_bootstrap::{
-    BootstrapActionResultDto, BootstrapActionRequestDto, BootstrapCheckpointDto,
+    BootstrapActionRequestDto, BootstrapActionResultDto, BootstrapCheckpointDto,
     BootstrapFailureDto, BootstrapPolicyReferenceDto, BootstrapStepProjectionDto,
     LogicalCodebaseBootstrapNoticeDto, LogicalCodebaseBootstrapProjectionDto,
 };
 
 mod identity_repair;
 pub use identity_repair::{
-    IdentityJournalDiagnosticDto, IdentityMappingSubmissionDto,
-    IdentityRepairActionRequestDto, RepositoryIdentityMappingDto,
+    IdentityJournalDiagnosticDto, IdentityMappingSubmissionDto, IdentityRepairActionRequestDto,
+    RepositoryIdentityMappingDto,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1032,7 +1032,9 @@ pub enum CandidateRecoveryActionDto {
     Rebuild,
 }
 
-impl From<CandidateRecoveryActionDto> for crate::product::work_item_plan_policy::CandidateRecoveryAction {
+impl From<CandidateRecoveryActionDto>
+    for crate::product::work_item_plan_policy::CandidateRecoveryAction
+{
     fn from(value: CandidateRecoveryActionDto) -> Self {
         match value {
             CandidateRecoveryActionDto::Recover => Self::Recover,

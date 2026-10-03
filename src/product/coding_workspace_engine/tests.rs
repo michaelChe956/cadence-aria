@@ -561,6 +561,8 @@ mod provider_rework_context;
 mod provider_start_persistence;
 mod provider_stream_cancellation_diag;
 mod provider_usage_event;
+#[path = "tests/resume_worktree_lock.rs"]
+mod resume_worktree_lock;
 mod retry_push;
 mod reviewer_configuration_gate;
 mod reviewer_retry_diagnostic_teaching;
@@ -571,8 +573,6 @@ mod runtime_handoff_impact;
 mod sc_group_admission_isolation;
 #[path = "tests/sc_group_dependency_gate.rs"]
 mod sc_group_dependency_gate;
-#[path = "tests/resume_worktree_lock.rs"]
-mod resume_worktree_lock;
 
 mod schema_v2_runtime;
 
@@ -879,7 +879,7 @@ fn test_attempt(id: &str) -> CodingExecutionAttempt {
         start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         start_claim: None,
     }
-        }
+}
 
 pub(super) fn init_test_git_repo(repo: &Path) {
     run_test_git(repo, &["init"]);
@@ -971,15 +971,15 @@ fn seed_delivery_attempt(
     let attempt = CodingExecutionAttempt {
         status: CodingAttemptStatus::Completed,
         head_commit: Some(commit_sha.to_string()),
-                start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
-                start_claim: None,
+        start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+        start_claim: None,
         ..created
     };
     store
         .write_coding_attempt_for_test(&attempt)
         .expect("write attempt");
     attempt
-        }
+}
 
 fn delivery_provider_snapshot() -> ProviderConfigSnapshot {
     ProviderConfigSnapshot {

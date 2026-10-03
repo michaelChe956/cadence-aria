@@ -7,9 +7,9 @@
 //! Confirmed）；受理（含幂等重放与 AlreadyClosed）200。
 
 use axum::Json;
-use axum::response::IntoResponse;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use serde_json::json;
 
 use crate::product::workspace_engine::{HumanGateCloseDecision, HumanGateFeedbackInput};
@@ -58,8 +58,8 @@ pub async fn post_workspace_human_action(
     // C1 Task 4：CandidateRecovery 携带专用响应体（facts/missing 投影），
     // 与既有 HumanActionStatus 族并存于同一路由（唯一 additive variant）。
     if matches!(request, HumanActionRequest::CandidateRecovery { .. }) {
-        let result = handle_candidate_recovery(engine, gate_id, command_id, &session_id, request)
-            .await?;
+        let result =
+            handle_candidate_recovery(engine, gate_id, command_id, &session_id, request).await?;
         return Ok((StatusCode::OK, Json(result)).into_response());
     }
     handle_request(&state, &manager, &session_id, engine, gate_id, request)
@@ -117,14 +117,29 @@ async fn handle_candidate_recovery(
     };
     match outcome {
         Ok(crate::product::workspace_engine::CandidateRecoveryOutcome::Accepted { facts }) => {
-            Ok(projection(OperationState::Accepted, facts.complete, facts.missing, facts.completed_steps))
+            Ok(projection(
+                OperationState::Accepted,
+                facts.complete,
+                facts.missing,
+                facts.completed_steps,
+            ))
         }
         Ok(crate::product::workspace_engine::CandidateRecoveryOutcome::NeedsHuman { facts }) => {
-            Ok(projection(OperationState::NeedsHuman, facts.complete, facts.missing, facts.completed_steps))
+            Ok(projection(
+                OperationState::NeedsHuman,
+                facts.complete,
+                facts.missing,
+                facts.completed_steps,
+            ))
         }
-        Ok(crate::product::workspace_engine::CandidateRecoveryOutcome::Replayed { facts, .. }) => {
-            Ok(projection(OperationState::Replayed, facts.complete, facts.missing, facts.completed_steps))
-        }
+        Ok(crate::product::workspace_engine::CandidateRecoveryOutcome::Replayed {
+            facts, ..
+        }) => Ok(projection(
+            OperationState::Replayed,
+            facts.complete,
+            facts.missing,
+            facts.completed_steps,
+        )),
         Err(message) => {
             let code = if message.contains("GATE_MISMATCH") {
                 "candidate_recovery_gate_mismatch"

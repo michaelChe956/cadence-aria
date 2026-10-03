@@ -166,12 +166,10 @@ fn spawn_coding_runner_first_start_reserved_inner(
         ));
     };
     if claim.command_id != command_id {
-        return Err(CodingWorkspaceEngineError::ProviderStream(
-            format!(
-                "coding_first_start_claim_command_mismatch: claim={}, spawn={command_id}",
-                claim.command_id
-            ),
-        ));
+        return Err(CodingWorkspaceEngineError::ProviderStream(format!(
+            "coding_first_start_claim_command_mismatch: claim={}, spawn={command_id}",
+            claim.command_id
+        )));
     }
     let attempt_key = CodingAttemptRunKey::from_attempt(&attempt);
     let (command_tx, command_rx) = mpsc::channel(32);
@@ -198,7 +196,10 @@ fn spawn_coding_runner_first_start_reserved_inner(
         panic_after_registration: None,
     });
     record_runner_start_event(probe_events.as_ref(), "task_created");
-    for phase in [CodingStartPhase::RunnerRegistered, CodingStartPhase::ProviderMayHaveStarted] {
+    for phase in [
+        CodingStartPhase::RunnerRegistered,
+        CodingStartPhase::ProviderMayHaveStarted,
+    ] {
         if let Err(error) =
             coding_store.advance_coding_start_phase(&attempt, command_id, phase.clone())
         {
@@ -588,11 +589,9 @@ pub(crate) async fn execute_start_coding_flow(
                 )?
                 .internal_reviewer;
             let internal_reviewer_provider = match internal_reviewer_provider_name {
-                Some(provider_name) => provider_for(
-                    state,
-                    &provider_name,
-                    "coding internal reviewer provider",
-                )?,
+                Some(provider_name) => {
+                    provider_for(state, &provider_name, "coding internal reviewer provider")?
+                }
                 // C2 Task 5（REQ-CRO-05）：缺 internal reviewer → 落缺配置门后停止
                 // 推进，绝不以 author 顶替启动 reviewer。
                 None => {

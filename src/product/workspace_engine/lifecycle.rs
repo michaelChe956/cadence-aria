@@ -463,7 +463,6 @@ impl WorkspaceEngine {
         self.session.repository_path = repository_path;
     }
 
-
     pub fn pending_author_choice_request_message(&self) -> Option<WsOutMessage> {
         let pending = self.pending_author_choice.as_ref()?;
         Some(WsOutMessage::ChoiceRequest {

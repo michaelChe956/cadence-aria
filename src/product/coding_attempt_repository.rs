@@ -512,7 +512,7 @@ mod tests {
             start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
             start_claim: None,
         }
-            }
+    }
 
     fn write_repository_projection(paths: &ProductAppPaths, repository_path: &Path) {
         crate::product::json_store::write_json(

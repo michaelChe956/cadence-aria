@@ -81,7 +81,6 @@ enum FixtureRoute {
     },
 }
 
-
 impl ProviderRunFixture {
     pub(super) fn new(flow_kind: WorkItemPlanFlowKind) -> Self {
         // 既有语义：engine 事件接收端在 fixture 返回前释放，engine 侧 `send` 立即
@@ -150,8 +149,7 @@ impl ProviderRunFixture {
             FixtureRoute::Legacy => tempfile::tempdir().expect("temporary repository root"),
             FixtureRoute::LogicalAlias { .. } => {
                 let aggregate_root = root.path().join("aggregate-root");
-                std::fs::create_dir_all(&aggregate_root)
-                    .expect("create aggregate root directory");
+                std::fs::create_dir_all(&aggregate_root).expect("create aggregate root directory");
                 tempfile::tempdir_in(&aggregate_root)
                     .expect("temporary member checkout under aggregate root")
             }
@@ -495,10 +493,7 @@ fn single_candidate_markdown_with_duplicate_command(story_id: &str, design_id: &
 /// author 输出「多 source_type + 批量 requirement_id」的 Traceability 形态——
 /// parse 全过、lower 在首个 source flush 时报
 /// `lowering_error:traceability 缺少 requirement_id`。
-fn single_candidate_markdown_with_batched_traceability(
-    story_id: &str,
-    design_id: &str,
-) -> String {
+fn single_candidate_markdown_with_batched_traceability(story_id: &str, design_id: &str) -> String {
     single_candidate_markdown(story_id, design_id).replacen(
         &format!(
             "### Traceability\n- source_type: design_spec\n- source_id: {design_id}\n- requirement_id: REQ-001"
@@ -678,10 +673,8 @@ async fn single_candidate_mixed_duplicate_and_missing_section_uses_one_teaching_
 async fn single_candidate_batched_traceability_lowering_error_uses_one_teaching_reredrive() {
     let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
     let (input_tx, mut input_rx) = mpsc::unbounded_channel();
-    let output = single_candidate_markdown_with_batched_traceability(
-        &fixture.story_id,
-        &fixture.design_id,
-    );
+    let output =
+        single_candidate_markdown_with_batched_traceability(&fixture.story_id, &fixture.design_id);
     let provider = Arc::new(RecordingOutputProvider {
         output,
         inputs: input_tx,
@@ -711,7 +704,9 @@ async fn single_candidate_batched_traceability_lowering_error_uses_one_teaching_
             .contains("立即输出完整 work-item-plan markdown source")
     );
     assert!(
-        reredrive_input.prompt.contains("traceability 缺少 requirement_id"),
+        reredrive_input
+            .prompt
+            .contains("traceability 缺少 requirement_id"),
         "teaching re-drive must carry the lowering error verbatim: {}",
         reredrive_input.prompt
     );
@@ -725,10 +720,7 @@ async fn single_candidate_batched_traceability_lowering_error_uses_one_teaching_
 
     let error = tokio::time::timeout(std::time::Duration::from_secs(1), async {
         loop {
-            let outbound = outbound_rx
-                .recv()
-                .await
-                .expect("lowering failure outbound");
+            let outbound = outbound_rx.recv().await.expect("lowering failure outbound");
             let OutboundControl::Text(json) = outbound else {
                 continue;
             };

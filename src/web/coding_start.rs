@@ -173,24 +173,26 @@ pub async fn restart_coding_attempt(
     issue_id: &str,
     request: RestartCodingAttemptRequest,
 ) -> Result<RestartCodingAttemptResult, StartCodingError> {
-    use crate::product::coding_attempt_store::{
-        CodingAttemptCommandRecord, CodingAttemptStore,
-    };
+    use crate::product::coding_attempt_store::{CodingAttemptCommandRecord, CodingAttemptStore};
     use crate::product::coding_models::CodingAttemptStatus;
     use crate::product::models::automation::{LeaseDisposition, OperationState};
 
-    validate_relative_id(&request.command_id).map_err(|error| StartCodingError::new(
-        "coding_restart_invalid_command_id",
-        format!("invalid restart command id: {error}"),
-    ))?;
+    validate_relative_id(&request.command_id).map_err(|error| {
+        StartCodingError::new(
+            "coding_restart_invalid_command_id",
+            format!("invalid restart command id: {error}"),
+        )
+    })?;
     let paths = ProductAppPaths::new(state.workspace_root.join(".aria"));
     let coding_store = CodingAttemptStore::new(paths.clone());
     let attempt = coding_store
         .get_attempt(project_id, issue_id, &request.attempt_id)
-        .map_err(|error| StartCodingError::new(
-            "coding_restart_attempt_load_failed",
-            format!("load coding attempt for restart failed: {error}"),
-        ))?;
+        .map_err(|error| {
+            StartCodingError::new(
+                "coding_restart_attempt_load_failed",
+                format!("load coding attempt for restart failed: {error}"),
+            )
+        })?;
 
     let payload_digest = format!(
         "restart|{}|{}|{}|{}",
@@ -202,13 +204,12 @@ pub async fn restart_coding_attempt(
         attempt_id: attempt.id.clone(),
         reason: Some(reason),
     };
-    let needs_human =
-        |reason: String| RestartCodingAttemptResult {
-            command_id: request.command_id.clone(),
-            state: OperationState::NeedsHuman,
-            attempt_id: attempt.id.clone(),
-            reason: Some(reason),
-        };
+    let needs_human = |reason: String| RestartCodingAttemptResult {
+        command_id: request.command_id.clone(),
+        state: OperationState::NeedsHuman,
+        attempt_id: attempt.id.clone(),
+        reason: Some(reason),
+    };
     let record = |state: OperationState| CodingAttemptCommandRecord {
         command_id: request.command_id.clone(),
         payload_digest: payload_digest.clone(),
@@ -353,8 +354,8 @@ pub async fn restart_coding_attempt(
         crate::product::git_workspace_service::GitWorkspaceService::new(),
         restart_event_tx,
     );
-    if let Err(lock_error) = restart_engine
-        .ensure_issue_worktree_lock_for_resumed_attempt(&restarted)
+    if let Err(lock_error) =
+        restart_engine.ensure_issue_worktree_lock_for_resumed_attempt(&restarted)
     {
         let result = needs_human(format!("coding_restart_worktree_lock: {lock_error}"));
         let _ = coding_store
@@ -407,7 +408,9 @@ pub async fn restart_coding_attempt(
     })
 }
 
-fn coding_restart_store_error(error: crate::product::json_store::ProductStoreError) -> StartCodingError {
+fn coding_restart_store_error(
+    error: crate::product::json_store::ProductStoreError,
+) -> StartCodingError {
     StartCodingError::new(
         "coding_restart_store_failed",
         format!("coding restart command ledger failed: {error}"),
@@ -446,19 +449,23 @@ async fn start_coding_attempt(
     use crate::product::coding_attempt_store::ClaimCodingStartOutcome;
     use crate::product::coding_models::CodingStartPhase;
 
-    validate_relative_id(&command.command_id).map_err(|error| StartCodingError::new(
-        "coding_start_invalid_command_id",
-        format!("invalid start coding command id: {error}"),
-    ))?;
+    validate_relative_id(&command.command_id).map_err(|error| {
+        StartCodingError::new(
+            "coding_start_invalid_command_id",
+            format!("invalid start coding command id: {error}"),
+        )
+    })?;
 
     let paths = ProductAppPaths::new(state.workspace_root.join(".aria"));
     let coding_store = CodingAttemptStore::new(paths.clone());
     let attempt = coding_store
         .get_attempt(project_id, issue_id, &command.attempt_id)
-        .map_err(|error| StartCodingError::new(
-            "coding_start_attempt_load_failed",
-            format!("load coding attempt for start failed: {error}"),
-        ))?;
+        .map_err(|error| {
+            StartCodingError::new(
+                "coding_start_attempt_load_failed",
+                format!("load coding attempt for start failed: {error}"),
+            )
+        })?;
 
     // D4 ①（锁外快路径）：首启状态矩阵。
     if let Some(outcome) = first_start_short_circuit(&attempt)? {
@@ -470,10 +477,12 @@ async fn start_coding_attempt(
     let _attempt_guard = state.coding_runs.lock_attempt(&attempt_key).await;
     let attempt = coding_store
         .get_attempt(project_id, issue_id, &command.attempt_id)
-        .map_err(|error| StartCodingError::new(
-            "coding_start_attempt_load_failed",
-            format!("reload coding attempt for start failed: {error}"),
-        ))?;
+        .map_err(|error| {
+            StartCodingError::new(
+                "coding_start_attempt_load_failed",
+                format!("reload coding attempt for start failed: {error}"),
+            )
+        })?;
     if let Some(outcome) = first_start_short_circuit(&attempt)? {
         return Ok(outcome);
     }
@@ -487,10 +496,12 @@ async fn start_coding_attempt(
             sc_advance_ready_gate(&paths, &attempt)?;
             coding_store
                 .claim_coding_start(&attempt, &command.command_id, &command.origin)
-                .map_err(|error| StartCodingError::new(
-                    "coding_start_claim_failed",
-                    format!("claim coding start failed: {error}"),
-                ))?
+                .map_err(|error| {
+                    StartCodingError::new(
+                        "coding_start_claim_failed",
+                        format!("claim coding start failed: {error}"),
+                    )
+                })?
         }
         CodingStartOrigin::Enrolled {
             enrollment_id,
@@ -508,13 +519,8 @@ async fn start_coding_attempt(
                         // authority 载体（错仓/跨载体即 fail-closed，零 claim
                         // 零启动；resolver 错误保留稳定错误码不折叠）。
                         let admission =
-                            resolve_current_carrier(&paths, &attempt).and_then(
-                                |current_carrier| {
-                                    verify_frozen_policy(
-                                        &attempt,
-                                        enrollment_id,
-                                        *policy_revision,
-                                    )
+                            resolve_current_carrier(&paths, &attempt).and_then(|current_carrier| {
+                                verify_frozen_policy(&attempt, enrollment_id, *policy_revision)
                                     .and_then(|plan_id| {
                                         verify_current_enrollment(
                                             enrollment,
@@ -537,26 +543,19 @@ async fn start_coding_attempt(
                                         )
                                     })
                                     .and_then(|()| {
-                                        verify_journal_and_record(
-                                            &paths,
-                                            &coding_store,
-                                            &attempt,
-                                        )
+                                        verify_journal_and_record(&paths, &coding_store, &attempt)
                                     })
                                     .and_then(|()| sc_advance_ready_gate(&paths, &attempt))
-                                },
-                            );
+                            });
                         let admission = admission.and_then(|()| {
                             coding_store
-                                .claim_coding_start(
-                                    &attempt,
-                                    &command.command_id,
-                                    &command.origin,
-                                )
-                                .map_err(|error| StartCodingError::new(
-                                    "coding_start_claim_failed",
-                                    format!("claim coding start failed: {error}"),
-                                ))
+                                .claim_coding_start(&attempt, &command.command_id, &command.origin)
+                                .map_err(|error| {
+                                    StartCodingError::new(
+                                        "coding_start_claim_failed",
+                                        format!("claim coding start failed: {error}"),
+                                    )
+                                })
                         });
                         Ok(admission)
                     },
@@ -587,7 +586,9 @@ async fn start_coding_attempt(
                 .clone()
                 .expect("existing coding start claim must be present");
             if existing.command_id != command.command_id || existing.origin != command.origin {
-                return Ok(StartCodingOutcome::AlreadyStarted { attempt_id: saved.id });
+                return Ok(StartCodingOutcome::AlreadyStarted {
+                    attempt_id: saved.id,
+                });
             }
             match existing.phase {
                 CodingStartPhase::Claimed | CodingStartPhase::RunnerRegistered => saved,
@@ -596,18 +597,18 @@ async fn start_coding_attempt(
                     // 或 role run ledger 已有 provider 启动证据——交由在途 run /
                     // 恢复协议，绝不二次首启。
                     let ledger_started = coding_store
-                        .list_role_runs(
-                            &saved.project_id,
-                            &saved.issue_id,
-                            &saved.id,
-                        )
+                        .list_role_runs(&saved.project_id, &saved.issue_id, &saved.id)
                         .map(|runs| !runs.is_empty())
                         .unwrap_or(false);
                     if saved.status == CodingAttemptStatus::Running
                         || ledger_started
-                        || state.coding_runs.attempt_is_reserved_or_running(&attempt_key)
+                        || state
+                            .coding_runs
+                            .attempt_is_reserved_or_running(&attempt_key)
                     {
-                        return Ok(StartCodingOutcome::AlreadyStarted { attempt_id: saved.id });
+                        return Ok(StartCodingOutcome::AlreadyStarted {
+                            attempt_id: saved.id,
+                        });
                     }
                     let marked = coding_store
                         .advance_coding_start_phase(
@@ -615,10 +616,12 @@ async fn start_coding_attempt(
                             &command.command_id,
                             CodingStartPhase::NeedsHuman,
                         )
-                        .map_err(|error| StartCodingError::new(
-                            "coding_start_claim_phase_failed",
-                            format!("mark manual triage failed: {error}"),
-                        ))?;
+                        .map_err(|error| {
+                            StartCodingError::new(
+                                "coding_start_claim_phase_failed",
+                                format!("mark manual triage failed: {error}"),
+                            )
+                        })?;
                     return Ok(StartCodingOutcome::NeedsHuman {
                         attempt_id: marked.id,
                         reason: "first start crossed the provider barrier with unproven \
@@ -651,15 +654,17 @@ async fn start_coding_attempt(
     let event_tx = state.coding_sockets.hub_sender(&attempt_key);
     let spawned = match probe {
         #[cfg(test)]
-        Some(probe) => crate::web::coding_ws_handler::spawn_coding_runner_first_start_reserved_with_probe(
-            state.clone(),
-            coding_store.clone(),
-            event_tx,
-            claimed_attempt.clone(),
-            reservation,
-            &command.command_id,
-            probe,
-        ),
+        Some(probe) => {
+            crate::web::coding_ws_handler::spawn_coding_runner_first_start_reserved_with_probe(
+                state.clone(),
+                coding_store.clone(),
+                event_tx,
+                claimed_attempt.clone(),
+                reservation,
+                &command.command_id,
+                probe,
+            )
+        }
         #[cfg(test)]
         None => crate::web::coding_ws_handler::spawn_coding_runner_first_start_reserved(
             state.clone(),
@@ -745,10 +750,12 @@ fn resolve_current_carrier(
 ) -> Result<crate::web::handlers::AutomationCarrierResolution, StartCodingError> {
     let issue = crate::product::issue_store::IssueStore::new(paths.clone())
         .get(&attempt.project_id, &attempt.issue_id)
-        .map_err(|error| StartCodingError::new(
-            "coding_start_issue_load_failed",
-            format!("load issue for coding start carrier resolution failed: {error}"),
-        ))?;
+        .map_err(|error| {
+            StartCodingError::new(
+                "coding_start_issue_load_failed",
+                format!("load issue for coding start carrier resolution failed: {error}"),
+            )
+        })?;
     crate::web::handlers::resolve_automation_carrier(paths, &attempt.project_id, &issue)
         .map_err(|error| StartCodingError::new(&error.code, error.message))
 }
@@ -882,13 +889,9 @@ fn verify_current_binding(
     origin_binding_version: Option<&u64>,
     origin_target: Option<&crate::product::logical_codebase::EnrollmentTarget>,
 ) -> Result<(), StartCodingError> {
-    let binding = crate::web::advance_plan::load_current_enrollment_binding(enrollment)
-        .map_err(|reason| {
-            StartCodingError::new(
-                "coding_start_enrollment_binding_invalid",
-                reason,
-            )
-        })?;
+    let binding = crate::web::advance_plan::load_current_enrollment_binding(enrollment).map_err(
+        |reason| StartCodingError::new("coding_start_enrollment_binding_invalid", reason),
+    )?;
     if let Some(expected) = origin_binding_version
         && *expected != binding.binding_version
     {
@@ -900,7 +903,9 @@ fn verify_current_binding(
             ),
         ));
     }
-    if let Some(expected) = origin_target && expected != &binding.target {
+    if let Some(expected) = origin_target
+        && expected != &binding.target
+    {
         return Err(StartCodingError::new(
             "coding_start_enrollment_binding_mismatch",
             format!(
@@ -920,7 +925,8 @@ fn verify_journal_and_record(
     attempt: &CodingExecutionAttempt,
 ) -> Result<(), StartCodingError> {
     let CodingStartRunPolicy::AutoStartOnce {
-        source_plan_revision, ..
+        source_plan_revision,
+        ..
     } = &attempt.start_run_policy
     else {
         return Err(StartCodingError::new(
@@ -936,10 +942,12 @@ fn verify_journal_and_record(
     };
     let journal = coding_store
         .get_group_initialization(&attempt.project_id, &attempt.issue_id, plan_id)
-        .map_err(|error| StartCodingError::new(
-            "coding_start_plan_binding_unreadable",
-            format!("load group initialization journal failed: {error}"),
-        ))?;
+        .map_err(|error| {
+            StartCodingError::new(
+                "coding_start_plan_binding_unreadable",
+                format!("load group initialization journal failed: {error}"),
+            )
+        })?;
     if journal.attempt.id != attempt.id
         || journal.plan_binding.attempt_id != attempt.id
         || journal.plan_binding.plan_id != plan_id
@@ -965,10 +973,12 @@ fn verify_journal_and_record(
     let advance_store = AdvanceStore::new(paths.clone());
     let record = advance_store
         .get_advance_for_plan(&attempt.project_id, &attempt.issue_id, plan_id)
-        .map_err(|error| StartCodingError::new(
-            "coding_start_advance_record_unreadable",
-            format!("load advance record failed: {error}"),
-        ))?;
+        .map_err(|error| {
+            StartCodingError::new(
+                "coding_start_advance_record_unreadable",
+                format!("load advance record failed: {error}"),
+            )
+        })?;
     let Some(record) = record else {
         return Err(StartCodingError::requires_advance(format!(
             "no durable advance record exists for plan {plan_id}"

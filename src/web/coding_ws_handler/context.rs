@@ -153,10 +153,7 @@ pub(crate) fn update_provider_permission_mode(
     let provider = role_snapshot.provider_for_role(&parsed_role).cloned();
     role_snapshot.set_permission_mode_for_role(
         &parsed_role,
-        normalize_coding_permission_mode_for_optional_provider(
-            provider.as_ref(),
-            permission_mode,
-        ),
+        normalize_coding_permission_mode_for_optional_provider(provider.as_ref(), permission_mode),
     );
     // C2 Task 5：reviewer 缺失（空 effective）时该角色无 provider 可回包，
     // fail-closed——绝不以 author 顶替（配置缺失应先经面板配置 reviewer）。
@@ -361,7 +358,7 @@ mod tests {
             start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
             start_claim: None,
         }
-            }
+    }
 
     fn write_logical_authority_fixture(
         paths: &ProductAppPaths,

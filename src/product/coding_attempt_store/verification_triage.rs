@@ -133,22 +133,24 @@ impl super::CodingAttemptStore {
             self.verification_triage_root(&attempt.project_id, &attempt.issue_id, &attempt.id);
         let lock_target = root.join("verification-triage-mutations");
         with_exclusive_lock(&lock_target, || {
-            if let Some(existing) = list_verification_triage_records_locked(&root)?.into_iter().find(
-                |record| {
+            if let Some(existing) = list_verification_triage_records_locked(&root)?
+                .into_iter()
+                .find(|record| {
                     record.status == VerificationTriageStatus::Pending
                         && record.finding_id == input.finding_id
                         && record.check_id == input.check_id
                         && record.plan_revision_id == input.plan_revision_id
-                },
-            ) {
+                })
+            {
                 return Ok(existing);
             }
             std::fs::create_dir_all(&root).map_err(|error| {
                 ProductStoreError::Io(format!("create {}: {error}", root.display()))
             })?;
-            let id = next_sequential_id_in_directory("verification_triage", &root).map_err(
-                |error| ProductStoreError::Io(format!("read {}: {error}", root.display())),
-            )?;
+            let id =
+                next_sequential_id_in_directory("verification_triage", &root).map_err(|error| {
+                    ProductStoreError::Io(format!("read {}: {error}", root.display()))
+                })?;
             let record = VerificationTriageRecord {
                 triage_id: id,
                 attempt_id: attempt.id.clone(),
@@ -249,9 +251,12 @@ impl super::CodingAttemptStore {
                     decided_by.clone(),
                     reason.clone(),
                 ),
-                VerificationTriageDecision::Reject { decided_by, reason } => {
-                    (VerificationTriageStatus::Rejected, None, decided_by.clone(), reason.clone())
-                }
+                VerificationTriageDecision::Reject { decided_by, reason } => (
+                    VerificationTriageStatus::Rejected,
+                    None,
+                    decided_by.clone(),
+                    reason.clone(),
+                ),
             };
             if record.status != VerificationTriageStatus::Pending {
                 if record.status == status

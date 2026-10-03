@@ -796,8 +796,7 @@ impl LifecycleStore {
                     kind: "repo_worktree_lock_takeover",
                     id: format!(
                         "{project_id}/{issue_id}/{}: expected owner {expected_owner_id}, got {:?}",
-                        repository_id.0,
-                        record.current_lock_owner_id
+                        repository_id.0, record.current_lock_owner_id
                     ),
                 });
             }

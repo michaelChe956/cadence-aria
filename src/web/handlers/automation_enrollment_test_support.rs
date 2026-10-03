@@ -179,7 +179,10 @@ pub(crate) fn seed_single_repository_fixture() -> Fixture {
         .current_dir(&repo_root)
         .status()
         .unwrap();
-    assert!(status.success(), "fixture repository must be a real git repo");
+    assert!(
+        status.success(),
+        "fixture repository must be a real git repo"
+    );
     let now = "2026-09-30T00:00:00Z".to_string();
     let repositories = vec![RepositoryRecord {
         id: REPOSITORY_ID.to_string(),
@@ -187,10 +190,7 @@ pub(crate) fn seed_single_repository_fixture() -> Fixture {
         name: "repo-1".to_string(),
         path: repo_root,
         repo_hash: "sha256:fixture-single-repository".to_string(),
-        runtime_root: fixture
-            ._root
-            .path()
-            .join("repo-1/.aria/runtime"),
+        runtime_root: fixture._root.path().join("repo-1/.aria/runtime"),
         default_policy_preset: "manual-write".to_string(),
         default_provider_mode: "fake".to_string(),
         created_at: now.clone(),

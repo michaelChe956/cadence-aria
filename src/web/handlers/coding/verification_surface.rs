@@ -394,7 +394,10 @@ pub(crate) async fn post_coding_policy_reauthorization(
     State(state): State<WebAppState>,
     Path(path): Path<CodingAttemptRoutePath>,
     Json(request): Json<PolicyReauthorizationRestRequest>,
-) -> ApiResult<(axum::http::StatusCode, Json<PolicyReauthorizationRestResult>)> {
+) -> ApiResult<(
+    axum::http::StatusCode,
+    Json<PolicyReauthorizationRestResult>,
+)> {
     use crate::product::models::automation::OperationState;
     use axum::http::StatusCode;
 
@@ -469,8 +472,8 @@ fn verification_surface_engine_error(
 
 #[cfg(test)]
 mod tests {
-    use axum::extract::{Path, State};
     use axum::Json;
+    use axum::extract::{Path, State};
 
     use crate::product::app_paths::ProductAppPaths;
     use crate::product::coding_attempt_store::CodingAttemptStore;
@@ -572,10 +575,9 @@ mod tests {
     #[tokio::test]
     async fn c2_verification_triage_enter_surfaces_engine_fail_closed_reason() {
         let (_tmp, state, _store, attempt) = fixture().await;
-        let error =
-            post_verification_triage_enter(State(state), route(&attempt), enter_request())
-                .await
-                .expect_err("enter without eligible gate must fail closed");
+        let error = post_verification_triage_enter(State(state), route(&attempt), enter_request())
+            .await
+            .expect_err("enter without eligible gate must fail closed");
         assert_eq!(error.code, "verification_triage_no_eligible_gate");
     }
 

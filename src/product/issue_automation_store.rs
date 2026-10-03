@@ -186,12 +186,11 @@ impl IssueAutomationStore {
     ) -> Result<T, ProductStoreError> {
         let path = self.enrollment_path(project_id, issue_id)?;
         with_exclusive_lock(&path, || {
-            let enrollment = read_optional_enrollment(&path)?.ok_or_else(|| {
-                ProductStoreError::NotFound {
+            let enrollment =
+                read_optional_enrollment(&path)?.ok_or_else(|| ProductStoreError::NotFound {
                     kind: "automation_enrollment",
                     id: format!("{project_id}/{issue_id}"),
-                }
-            })?;
+                })?;
             f(&enrollment)
         })
     }
@@ -245,12 +244,12 @@ impl IssueAutomationStore {
                     PreparedPlanIntentRead::LegacyUnbound { .. } => {
                         return Ok(EnsurePlanResolution::Conflict {
                             current_revision: Some(saved.policy_revision),
-                        })
+                        });
                     }
                     PreparedPlanIntentRead::Current(existing) if existing != intent => {
                         return Ok(EnsurePlanResolution::Conflict {
                             current_revision: Some(saved.policy_revision),
-                        })
+                        });
                     }
                     PreparedPlanIntentRead::Current(_) => {}
                 }
@@ -259,13 +258,17 @@ impl IssueAutomationStore {
             }
             // P1 WIGA Task 10：测试注入的 intent 落盘中窗（创建回调之前）。
             #[cfg(test)]
-            if automation_crash_window::fire_once(automation_crash_window::CrashWindow::AfterIntentSaved) {
+            if automation_crash_window::fire_once(
+                automation_crash_window::CrashWindow::AfterIntentSaved,
+            ) {
                 return Err(ProductStoreError::Io(
                     "automation_crash_window: interrupted after intent saved".to_string(),
                 ));
             }
             match (saved.plan_id.as_deref(), saved.session_id.as_deref()) {
-                (Some(plan), Some(session)) if plan == intent.plan_id && session == intent.session_id => {
+                (Some(plan), Some(session))
+                    if plan == intent.plan_id && session == intent.session_id =>
+                {
                     return Ok(EnsurePlanResolution::Unchanged(saved));
                 }
                 // 半提交（单边）或异来源绑定：损坏 fail-closed，禁止覆盖/修补。
@@ -293,7 +296,9 @@ impl IssueAutomationStore {
             // P1 WIGA Task 10：测试注入的绑定 session 落盘中窗（enrollment
             // 绑定写回之前）。
             #[cfg(test)]
-            if automation_crash_window::fire_once(automation_crash_window::CrashWindow::AfterSessionSaved) {
+            if automation_crash_window::fire_once(
+                automation_crash_window::CrashWindow::AfterSessionSaved,
+            ) {
                 return Err(ProductStoreError::Io(
                     "automation_crash_window: interrupted after bound session saved".to_string(),
                 ));
@@ -342,10 +347,7 @@ impl IssueAutomationStore {
             };
             let derived = PlanGenerationIntent {
                 enrollment_id: saved.enrollment_id.clone(),
-                action_key: PlanGenerationIntent::action_key_for(
-                    &saved.enrollment_id,
-                    &plan_id,
-                ),
+                action_key: PlanGenerationIntent::action_key_for(&saved.enrollment_id, &plan_id),
                 plan_id,
                 session_id,
                 source: saved.source.clone(),
@@ -361,7 +363,7 @@ impl IssueAutomationStore {
                     PlanGenerationIntentRead::LegacyUnbound { .. } => {
                         return Ok(GenerationResolution::Conflict {
                             current_revision: Some(saved.policy_revision),
-                        })
+                        });
                     }
                     PlanGenerationIntentRead::Current(existing) => {
                         if !existing.same_identity(&derived) {
@@ -411,7 +413,7 @@ impl IssueAutomationStore {
                         "plan generation checkpoint is a legacy intent without a target; \
                          it cannot drive automatic chains"
                             .to_string(),
-                    ))
+                    ));
                 }
             };
             // C5 Task 1：旧代 enrollment（无显式 target）不能驱动自动链。
@@ -626,7 +628,7 @@ impl IssueAutomationStore {
             }
             Ok(Some(entry.clone()))
         })
-            .map_err(command_ledger_error)
+        .map_err(command_ledger_error)
     }
 
     /// C1 Task 6（REQ-WIGA-03）：追加命令账本（lease takeover 等非换代
@@ -678,7 +680,7 @@ impl IssueAutomationStore {
             write_json(&path, &saved)?;
             Ok(entry)
         })
-            .map_err(command_ledger_error)
+        .map_err(command_ledger_error)
     }
 }
 
@@ -689,10 +691,13 @@ fn command_ledger_error(error: ProductStoreError) -> EnrollmentError {
         ProductStoreError::Conflict {
             kind: "enrollment_command_ledger",
             ..
-        } => EnrollmentError::Conflict { current_revision: None },
-        ProductStoreError::NotFound { kind: "automation_enrollment", .. } => {
-            EnrollmentError::NotFound
-        }
+        } => EnrollmentError::Conflict {
+            current_revision: None,
+        },
+        ProductStoreError::NotFound {
+            kind: "automation_enrollment",
+            ..
+        } => EnrollmentError::NotFound,
         other => EnrollmentError::Store(other),
     }
 }
@@ -745,7 +750,9 @@ fn bind_plan_ids_locked(
 enum EnsurePlanResolution {
     Unchanged(IssueAutomationEnrollment),
     Applied(IssueAutomationEnrollment),
-    Conflict { current_revision: Option<u64> },
+    Conflict {
+        current_revision: Option<u64>,
+    },
     Missing,
     /// C5 Task 1：旧代 enrollment（无显式 target）不能驱动自动链。
     InvalidScope(String),
@@ -756,9 +763,9 @@ fn ensure_resolution_from_cas(resolution: CasResolution) -> EnsurePlanResolution
     match resolution {
         CasResolution::Unchanged(saved) => EnsurePlanResolution::Unchanged(saved),
         CasResolution::Applied(saved) => EnsurePlanResolution::Applied(saved),
-        CasResolution::Conflict { current_revision } => EnsurePlanResolution::Conflict {
-            current_revision,
-        },
+        CasResolution::Conflict { current_revision } => {
+            EnsurePlanResolution::Conflict { current_revision }
+        }
         CasResolution::Missing => EnsurePlanResolution::Missing,
     }
 }
@@ -815,7 +822,11 @@ pub(crate) fn read_prepared_plan_intent(
     path: &Path,
 ) -> Result<PreparedPlanIntentRead, ProductStoreError> {
     let value: serde_json::Value = read_json(path)?;
-    if value.get("target").map(serde_json::Value::is_null).unwrap_or(true) {
+    if value
+        .get("target")
+        .map(serde_json::Value::is_null)
+        .unwrap_or(true)
+    {
         return Ok(PreparedPlanIntentRead::LegacyUnbound {
             enrollment_id: value
                 .get("enrollment_id")
@@ -849,7 +860,11 @@ pub(crate) fn read_plan_generation_intent(
     path: &Path,
 ) -> Result<PlanGenerationIntentRead, ProductStoreError> {
     let value: serde_json::Value = read_json(path)?;
-    if value.get("target").map(serde_json::Value::is_null).unwrap_or(true) {
+    if value
+        .get("target")
+        .map(serde_json::Value::is_null)
+        .unwrap_or(true)
+    {
         return Ok(PlanGenerationIntentRead::LegacyUnbound {
             enrollment_id: value
                 .get("enrollment_id")
@@ -886,9 +901,7 @@ enum RebindResolution {
     Missing,
 }
 
-fn resolve_rebind(
-    resolution: RebindResolution,
-) -> Result<EnrollmentRebindResult, EnrollmentError> {
+fn resolve_rebind(resolution: RebindResolution) -> Result<EnrollmentRebindResult, EnrollmentError> {
     match resolution {
         RebindResolution::Accepted {
             command_id,
@@ -993,7 +1006,10 @@ fn apply_revision_and_write(
         ) => {
             // 旧 enrollment（无声明）重开时允许显式升级 target；已声明
             // target 的漂移：fail-closed（走显式 rebind）。
-            let target_drifted = saved.target.as_ref().is_some_and(|declared| *declared != target);
+            let target_drifted = saved
+                .target
+                .as_ref()
+                .is_some_and(|declared| *declared != target);
             if target_drifted {
                 return Ok(CasResolution::Conflict {
                     current_revision: Some(saved.policy_revision),

@@ -17,7 +17,8 @@ impl CodingWorkspaceEngine {
         provider: &dyn StreamingProviderAdapter,
         command_rx: &mut mpsc::Receiver<CodingRunnerCommand>,
     ) -> Result<CodeReviewReport, CodingWorkspaceEngineError> {
-        let attempt = self.admit_provider_run(attempt, &CodingExecutionStage::CodeReview, "execute")?;
+        let attempt =
+            self.admit_provider_run(attempt, &CodingExecutionStage::CodeReview, "execute")?;
         let Some(worktree_path) = attempt.worktree_path.as_ref() else {
             return Err(CodingWorkspaceEngineError::MissingWorktree(
                 attempt.id.clone(),
@@ -38,7 +39,7 @@ impl CodingWorkspaceEngine {
                         CodingExecutionStage::CodeReview,
                         CodingProviderRole::CodeReviewer,
                     )
-                    .await)
+                    .await);
             }
         };
         let attempt = self.store.update_attempt_stage(

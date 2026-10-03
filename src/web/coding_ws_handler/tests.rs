@@ -994,7 +994,7 @@ fn seed_compiled_work_item_fixture() -> (TempDir, ProductAppPaths, CodingExecuti
         completed_at: None,
         start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         start_claim: None,
-        };
+    };
 
     (tmp, app_paths, attempt)
 }

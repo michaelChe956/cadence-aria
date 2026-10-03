@@ -10,8 +10,8 @@
 // 取当前 ledger 值或 0）。成功路径仍由 T6 落审计，本层不重复。
 
 use axum::Json;
-use axum::response::IntoResponse;
 use axum::extract::State;
+use axum::response::IntoResponse;
 use chrono::Utc;
 
 use crate::product::app_paths::ProductAppPaths;
@@ -290,15 +290,14 @@ mod tests {
             response.message
         );
         // 不消耗 evidence 配额（政策读取不在 budget ledger 内）。
-        let budget =
-            crate::product::logical_codebase::evidence_budget::EvidenceBudgetLedger::new(
-                paths.clone(),
-            )
-            .remaining(
-                &crate::product::logical_codebase::resolve_attempt_by_token(&paths, &token)
-                    .expect("attempt resolves"),
-            )
-            .expect("budget read");
+        let budget = crate::product::logical_codebase::evidence_budget::EvidenceBudgetLedger::new(
+            paths.clone(),
+        )
+        .remaining(
+            &crate::product::logical_codebase::resolve_attempt_by_token(&paths, &token)
+                .expect("attempt resolves"),
+        )
+        .expect("budget read");
         assert_eq!(
             budget,
             crate::product::logical_codebase::evidence_budget::EVIDENCE_ATTEMPT_CHAR_QUOTA

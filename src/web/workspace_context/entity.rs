@@ -296,9 +296,7 @@ pub(super) fn repository_for(
     // issue 属非 legacy LC 时物理仓在 per-LC 子树，先按 member 权威记录匹配；
     // 无匹配回落 legacy list/find（原语义不变）。
     let lc_id = crate::product::logical_codebase::resolve_issue_logical_codebase_id(
-        app_paths,
-        project_id,
-        issue_id,
+        app_paths, project_id, issue_id,
     )?;
     let store = crate::product::repository_store::RepositoryStore::new(app_paths.clone());
     if let Some(record) = store.resolve_physical_repository_in_issue_codebase(

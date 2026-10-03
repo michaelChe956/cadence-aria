@@ -103,14 +103,10 @@ pub async fn get_automation_target(
         }
         super::support::AutomationCarrierResolution::LogicalCodebase { resolution } => {
             let manifest = resolution.manifest.clone().ok_or_else(|| {
-                invalid_scope(
-                    "automation target requires a logical codebase manifest routing",
-                )
+                invalid_scope("automation target requires a logical codebase manifest routing")
             })?;
             let selection = resolution.selection.as_ref().ok_or_else(|| {
-                invalid_scope(
-                    "automation target requires an explicit logical codebase selection",
-                )
+                invalid_scope("automation target requires an explicit logical codebase selection")
             })?;
             let candidates = logical_repository_ids_for_preflight(&manifest, selection);
             let SingleCandidatePreflightDecision::Eligible { repository_id } =
@@ -286,11 +282,8 @@ mod tests {
             |_| true,
         );
         let app = build_web_router(state);
-        let response = get_automation_target(
-            &app,
-            "?author_provider=pi&reviewer_provider=kimi_code",
-        )
-        .await;
+        let response =
+            get_automation_target(&app, "?author_provider=pi&reviewer_provider=kimi_code").await;
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(
             response_json(response).await["code"],
@@ -325,7 +318,10 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         let payload = response_json(response).await;
         assert_eq!(payload["code"], "automation_role_chain_unsupported");
-        let violations = payload["details"]["violations"].as_array().cloned().unwrap_or_default();
+        let violations = payload["details"]["violations"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
         assert!(
             violations
                 .iter()
@@ -351,13 +347,13 @@ mod tests {
         let app = fixture.router();
         // C5 Task 3：显式 fake author 避开缺省 codex 的路由禁令；测试运行
         // test_provider_enabled 下 Fake 全链豁免，仍建立原同键 enrollment。
-        let response = get_automation_target(
-            &app,
-            "?author_provider=fake&reviewer_provider=fake",
-        )
-        .await;
+        let response =
+            get_automation_target(&app, "?author_provider=fake&reviewer_provider=fake").await;
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response_json(response).await["resolved_options"]["reviewer_provider"], "fake");
+        assert_eq!(
+            response_json(response).await["resolved_options"]["reviewer_provider"],
+            "fake"
+        );
 
         let enable = put_enrollment(&app, enrollment_body(&fixture, 1, 1)).await;
         assert_eq!(enable.status(), StatusCode::OK);
@@ -377,11 +373,8 @@ mod tests {
             |_| true,
         );
         let app = build_web_router(state);
-        let response = get_automation_target(
-            &app,
-            "?author_provider=pi&reviewer_provider=claude_code",
-        )
-        .await;
+        let response =
+            get_automation_target(&app, "?author_provider=pi&reviewer_provider=claude_code").await;
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         let payload = response_json(response).await;
         assert_eq!(payload["code"], "automation_role_chain_unsupported");
@@ -409,9 +402,7 @@ mod tests {
             .unwrap_or_default();
         let roles: Vec<String> = violations
             .iter()
-            .map(|violation| {
-                violation["role"].as_str().unwrap_or_default().to_string()
-            })
+            .map(|violation| violation["role"].as_str().unwrap_or_default().to_string())
             .collect();
         assert_eq!(roles, vec!["plan_author", "coder"], "{payload}");
         assert!(!enrollment_file_exists(&fixture));
@@ -425,18 +416,14 @@ mod single_repository_tests {
     use tower::ServiceExt;
 
     use super::super::automation_enrollment_test_support::{
-        ISSUE_ID, PROJECT_ID, REPOSITORY_ID, enrollment_file_exists, put_enrollment,
-        response_json, seed_fixture, seed_single_repository_fixture,
-        single_repository_enable_body,
+        ISSUE_ID, PROJECT_ID, REPOSITORY_ID, enrollment_file_exists, put_enrollment, response_json,
+        seed_fixture, seed_single_repository_fixture, single_repository_enable_body,
     };
     use crate::web::app::build_web_router;
     use crate::web::runtime::WebRuntime;
     use crate::web::state::WebAppState;
 
-    async fn get_automation_target(
-        app: &axum::Router,
-        query: &str,
-    ) -> axum::http::Response<Body> {
+    async fn get_automation_target(app: &axum::Router, query: &str) -> axum::http::Response<Body> {
         app.clone()
             .oneshot(
                 Request::builder()
@@ -489,10 +476,7 @@ mod single_repository_tests {
         assert_eq!(payload["target"]["kind"], "single_repository");
         assert_eq!(payload["target"]["repository_id"], REPOSITORY_ID);
         assert!(payload.get("logical_repository_id").is_none());
-        assert_eq!(
-            payload["binding_history"]["current"]["binding_version"],
-            1
-        );
+        assert_eq!(payload["binding_history"]["current"]["binding_version"], 1);
 
         // 同键同 payload 幂等：返回同一 enrollment。
         let again = put_enrollment(&app, single_repository_enable_body(&fixture)).await;
@@ -640,20 +624,19 @@ mod single_repository_tests {
             |_| true,
         );
         let app = build_web_router(state);
-        let response = get_automation_target(
-            &app,
-            "?author_provider=pi&reviewer_provider=kimi_code",
-        )
-        .await;
+        let response =
+            get_automation_target(&app, "?author_provider=pi&reviewer_provider=kimi_code").await;
         assert_eq!(response.status(), StatusCode::OK);
         let payload = response_json(response).await;
         assert_eq!(payload["resolved_options"]["author_provider"], "pi");
-        assert_eq!(payload["resolved_options"]["reviewer_provider"], "kimi_code");
+        assert_eq!(
+            payload["resolved_options"]["reviewer_provider"],
+            "kimi_code"
+        );
 
         let mut enable = single_repository_enable_body(&fixture);
         enable["command"]["options"]["author_provider"] = serde_json::json!("pi");
-        enable["command"]["options"]["reviewer_provider"] =
-            serde_json::json!("kimi_code");
+        enable["command"]["options"]["reviewer_provider"] = serde_json::json!("kimi_code");
         let response = put_enrollment(&app, enable).await;
         assert_eq!(response.status(), StatusCode::OK);
         assert!(enrollment_file_exists(&fixture));

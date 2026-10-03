@@ -288,9 +288,7 @@ impl std::fmt::Debug for RepositoryInitializationResume {
 /// `cadence/repository-initialization/v1\0{failed_operation_id}\0{command_id}`，
 /// 再加 `repository_initialization_` 前缀。
 fn resume_operation_id(failed_operation_id: &str, command_id: &str) -> String {
-    let name = format!(
-        "cadence/repository-initialization/v1\0{failed_operation_id}\0{command_id}"
-    );
+    let name = format!("cadence/repository-initialization/v1\0{failed_operation_id}\0{command_id}");
     format!(
         "repository_initialization_{}",
         Uuid::new_v5(&Uuid::NAMESPACE_URL, name.as_bytes()).simple()
@@ -457,7 +455,6 @@ impl RepositoryRegistrationCoordinator {
             _guard: guard,
         })
     }
-
 
     /// C5 Task 6（REQ-INIT-C5-RESUME）：GAP-J 产品层恢复入口——先校验原
     /// operation 为 Failed 终态，再以**原 operation.input 的冻结值**与确定性

@@ -263,13 +263,14 @@ fn prevalidate_plan_candidate_ir(
     };
     // C1 Task 5（REQ-C1-PLAN-01）：existing 意图的授权解析面（读失败转预检
     // 诊断，权威路径仍 fail-closed）。
-    let existing_work_item_ids = match lifecycle.list_work_items(
-        &session.project_id,
-        &session.issue_id,
-    ) {
-        Ok(records) => records.into_iter().map(|record| record.id).collect::<Vec<_>>(),
-        Err(error) => return Some(vec![format!("list existing work items failed: {error}")]),
-    };
+    let existing_work_item_ids =
+        match lifecycle.list_work_items(&session.project_id, &session.issue_id) {
+            Ok(records) => records
+                .into_iter()
+                .map(|record| record.id)
+                .collect::<Vec<_>>(),
+            Err(error) => return Some(vec![format!("list existing work items failed: {error}")]),
+        };
     let validation_now = chrono::Utc::now().to_rfc3339();
     let validation = crate::product::work_item_plan_compiler::validate_plan_candidate_ir(
         ir,
@@ -398,33 +399,33 @@ fn preflight_lc_member_rules_before_author_run(
     run_context: &ProviderRunContext,
     launch: &super::gateway_start::LogicalPlanLaunch,
 ) -> Result<(), SingleCandidateProviderRunError> {
-    let lc_id =
-        crate::product::logical_codebase::resolve_issue_logical_codebase_id(
-            &run_context.app_paths,
-            &run_context.session_record.project_id,
-            &run_context.session_record.issue_id,
+    let lc_id = crate::product::logical_codebase::resolve_issue_logical_codebase_id(
+        &run_context.app_paths,
+        &run_context.session_record.project_id,
+        &run_context.session_record.issue_id,
+    )
+    .map_err(|error| {
+        SingleCandidateProviderRunError::Message(format!(
+            "resolve logical codebase for admission preflight failed: {error}"
+        ))
+    })?
+    .ok_or_else(|| {
+        SingleCandidateProviderRunError::Message(
+            "logical session has no logical codebase attribution; admission preflight cannot run"
+                .to_string(),
         )
-        .map_err(|error| {
-            SingleCandidateProviderRunError::Message(format!(
-                "resolve logical codebase for admission preflight failed: {error}"
-            ))
-        })?
-        .ok_or_else(|| {
-            SingleCandidateProviderRunError::Message(
-                "logical session has no logical codebase attribution; admission preflight cannot run"
-                    .to_string(),
-            )
-        })?;
+    })?;
     let request = launch.planning_request().map_err(|error| {
         SingleCandidateProviderRunError::Message(format!(
             "build admission preflight request failed: {error}"
         ))
     })?;
-    let preflight = crate::product::logical_codebase::LogicalCodebaseProviderAdmissionPreflight::new(
-        run_context.app_paths.clone(),
-        lc_id,
-        launch.gateway.clone(),
-    );
+    let preflight =
+        crate::product::logical_codebase::LogicalCodebaseProviderAdmissionPreflight::new(
+            run_context.app_paths.clone(),
+            lc_id,
+            launch.gateway.clone(),
+        );
     // Task 1.2：LC 作者会话是普通 session（根规则必须存在）——Normal 相位；
     // AggregateBootstrap 仅由聚合 root recipe 的凭据流程使用。
     match preflight.check(&request, &crate::product::logical_codebase::provider_admission_preflight::ProviderAdmissionPhase::Normal) {
@@ -1015,10 +1016,7 @@ mod tests {
         use super::is_teachable_compile_failure;
 
         assert!(
-            is_teachable_compile_failure(
-                "lowering_error",
-                "traceability 缺少 requirement_id。"
-            ),
+            is_teachable_compile_failure("lowering_error", "traceability 缺少 requirement_id。"),
             "缺席类 lowering 错误必须可教学重驱"
         );
         assert!(

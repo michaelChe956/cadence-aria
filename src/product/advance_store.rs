@@ -5,9 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::locking::with_exclusive_lock;
-use crate::product::json_store::{
-    ProductStoreError, read_json, validate_relative_id, write_json,
-};
+use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::models::automation::{RetryInitializationRecord, RetryInitializationRequest};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -649,23 +647,19 @@ impl AdvanceStore {
         state: crate::product::models::automation::OperationState,
     ) -> Result<RetryInitializationRecord, ProductStoreError> {
         validate_relative_id(&request.command_id)?;
-        let journal = self
-            .get_advance_initialization(record)?
-            .ok_or_else(|| ProductStoreError::NotFound {
+        let journal = self.get_advance_initialization(record)?.ok_or_else(|| {
+            ProductStoreError::NotFound {
                 kind: "advance_initialization_journal",
                 id: record.id.clone(),
-            })?;
+            }
+        })?;
         if journal.attempt_id != request.expected_attempt_id {
             return Err(ProductStoreError::IdentityMismatch {
                 kind: "advance_retry_attempt",
                 id: request.expected_attempt_id.clone(),
             });
         }
-        let path = self.retry_path(
-            &record.project_id,
-            &record.issue_id,
-            &request.command_id,
-        )?;
+        let path = self.retry_path(&record.project_id, &record.issue_id, &request.command_id)?;
         let root = self.retries_root(&record.project_id, &record.issue_id)?;
         with_exclusive_lock(&root, || {
             if path.is_file() {

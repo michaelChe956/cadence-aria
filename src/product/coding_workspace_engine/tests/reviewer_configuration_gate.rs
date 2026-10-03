@@ -27,8 +27,12 @@ impl StreamingProviderAdapter for NeverStartedProvider {
         &self,
         _input: crate::cross_cutting::streaming_provider::StreamingProviderInput,
         _cancel: tokio_util::sync::CancellationToken,
-    ) -> Result<crate::cross_cutting::streaming_provider::ProviderSession, crate::cross_cutting::provider_adapter::ProviderAdapterError> {
-        self.starts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    ) -> Result<
+        crate::cross_cutting::streaming_provider::ProviderSession,
+        crate::cross_cutting::provider_adapter::ProviderAdapterError,
+    > {
+        self.starts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Err(
             crate::cross_cutting::provider_adapter::ProviderAdapterError::provider_unavailable(
                 "never_started_provider".to_string(),
@@ -108,32 +112,34 @@ fn running_group_attempt_with_reviewer(
         .expect("issue");
     let store = CodingAttemptStore::new(paths);
     let attempt = store
-        .create_group_attempt(crate::product::coding_attempt_store::CreateGroupCodingAttemptInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            plan_id: "plan_0001".to_string(),
-            current_work_item_id: "work_item_0001".to_string(),
-            base_branch: "HEAD".to_string(),
-            branch_name: "aria/groups/plan_0001/attempt-1".to_string(),
-            worktree_path: Some(worktree),
-            provider_config_snapshot: ProviderConfigSnapshot {
-                author: ProviderName::Codex,
-                reviewer,
-                review_rounds: 1,
-                permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
+        .create_group_attempt(
+            crate::product::coding_attempt_store::CreateGroupCodingAttemptInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                plan_id: "plan_0001".to_string(),
+                current_work_item_id: "work_item_0001".to_string(),
+                base_branch: "HEAD".to_string(),
+                branch_name: "aria/groups/plan_0001/attempt-1".to_string(),
+                worktree_path: Some(worktree),
+                provider_config_snapshot: ProviderConfigSnapshot {
+                    author: ProviderName::Codex,
+                    reviewer,
+                    review_rounds: 1,
+                    permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(
+                    ),
+                },
+                target_snapshot: None,
+                max_auto_rework: 2,
+                start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
             },
-            target_snapshot: None,
-            max_auto_rework: 2,
-            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
-        })
+        )
         .expect("create group attempt");
     let attempt = store
         .seed_running_attempt_for_test(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("running group attempt");
     // group attempt 的 admission lineage 校验需要 plan lineage 在场。
-    let revision_store = crate::product::work_item_revision_store::WorkItemRevisionStore::new(
-        store.paths(),
-    );
+    let revision_store =
+        crate::product::work_item_revision_store::WorkItemRevisionStore::new(store.paths());
     let lineage = crate::product::models::WorkItemPlanLineage {
         id: "plan_0001".to_string(),
         project_id: attempt.project_id.clone(),
@@ -189,7 +195,10 @@ async fn missing_reviewer_lands_configuration_gate_without_author_fallback() {
     let runs = store
         .list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("role runs");
-    assert!(runs.is_empty(), "no role run may be created before the gate");
+    assert!(
+        runs.is_empty(),
+        "no role run may be created before the gate"
+    );
     let nodes = store
         .get_timeline_nodes(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("timeline nodes");

@@ -264,10 +264,13 @@ impl WorkspaceSessionManager {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        state.active_run.as_ref().map(|run| super::ActiveRunRefForTest {
-            token: run.token,
-            run_incarnation: run.run_incarnation.clone(),
-        })
+        state
+            .active_run
+            .as_ref()
+            .map(|run| super::ActiveRunRefForTest {
+                token: run.token,
+                run_incarnation: run.run_incarnation.clone(),
+            })
     }
 
     pub fn is_active_run(&self) -> bool {

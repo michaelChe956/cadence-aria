@@ -32,10 +32,8 @@ impl WorkspaceEngine {
         };
         self.session.session_status = status.clone();
         if let Some(store) = &self.lifecycle_store
-            && let Ok(record) = store.update_workspace_session_status(
-                &self.session.session_id,
-                status,
-            )
+            && let Ok(record) =
+                store.update_workspace_session_status(&self.session.session_id, status)
         {
             self.session.session_status = record.status;
         }

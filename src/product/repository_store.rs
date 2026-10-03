@@ -27,12 +27,12 @@ mod types;
 
 pub use initializer::ClaudeRepositoryInitializer;
 pub use operation::RepositoryInitializationOperationStore;
-#[allow(unused_imports)]
-pub(crate) use registration::{RepositoryInitializationLaunch, RepositoryInitializationResume};
 pub use registration::{
     CadenceSkillsPreparation, ProjectLookup, RepositoryInitializer, RepositoryPersistence,
     RepositoryRegistrationCoordinator,
 };
+#[allow(unused_imports)]
+pub(crate) use registration::{RepositoryInitializationLaunch, RepositoryInitializationResume};
 pub use types::{
     CadenceSkillsPreparationSummary, RepositoryInitializationCommandSummary,
     RepositoryInitializationOperation, RepositoryInitializationOperationInput,

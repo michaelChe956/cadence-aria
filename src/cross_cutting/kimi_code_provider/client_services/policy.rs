@@ -50,7 +50,9 @@ impl ClientServicePolicy {
         let carries_marker = tool_policy.is_some_and(|policy| {
             matches!(
                 policy.intent,
-                crate::cross_cutting::streaming_provider::ToolPolicyIntent::BootstrapExecutorMarker(_)
+                crate::cross_cutting::streaming_provider::ToolPolicyIntent::BootstrapExecutorMarker(
+                    _
+                )
             )
         });
         if carries_marker {
@@ -107,9 +109,7 @@ mod tests {
     /// Task 1.2（BOOT-04/D1）：kimi 不承载 LC 根 recipe 自举执行器。
     #[test]
     fn bootstrap_executor_marker_is_denied_for_kimi_client_services() {
-        use crate::cross_cutting::streaming_provider::{
-            ProviderToolPolicy, ToolPolicyIntent,
-        };
+        use crate::cross_cutting::streaming_provider::{ProviderToolPolicy, ToolPolicyIntent};
 
         // marker 通道（任意角色装配面）→ Deny：kimi 不是 bootstrap provider。
         let marker_intent = ToolPolicyIntent::BootstrapExecutorMarker(test_marker());
@@ -136,12 +136,12 @@ mod tests {
 
     /// 构造测试用 marker：kimi 判定只看通道形态，不依赖凭据有效性
     ///（凭据/相位核验在 admission 层；此处仅证明通道被拒绝）。
-    fn test_marker() -> crate::product::logical_codebase::provider_admission_preflight::BootstrapExecutorMarker
-    {
+    fn test_marker()
+    -> crate::product::logical_codebase::provider_admission_preflight::BootstrapExecutorMarker {
+        use crate::product::logical_codebase::aggregate_initialization::AggregateInitializationStepKind;
         use crate::product::logical_codebase::provider_admission_preflight::{
             BootstrapExecutorMarker, BootstrapPhaseCredential,
         };
-        use crate::product::logical_codebase::aggregate_initialization::AggregateInitializationStepKind;
 
         // 测试内构造：凭据字段在同模块树外不可见，此处经结构体字面量仅用于
         // kimi 通道判定（不进入 admission/spawn 判定路径）。

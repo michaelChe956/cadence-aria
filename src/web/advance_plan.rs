@@ -12,9 +12,9 @@ use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::CodingAttemptStore;
 use crate::product::issue_automation_store::IssueAutomationStore;
 use crate::product::json_store::validate_relative_id;
+use crate::product::models::automation::{EnrollmentBindingIdentity, IssueAutomationEnrollment};
 use crate::product::models::{SingleCandidatePhase, WorkspaceSessionStatus, WorkspaceType};
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
-use crate::product::models::automation::{EnrollmentBindingIdentity, IssueAutomationEnrollment};
 use crate::web::state::WebAppState;
 /// advance 请求归属：Manual 走人工 WS 语义；Enrolled 是自动编排的精确
 /// enrollment 身份（id + policy_revision 快照），两者不得互相冒充。
@@ -96,9 +96,8 @@ pub async fn advance_plan(
     // P2 Task 2：Enrolled origin 在精确核验后冻结 AutoStartOnce（enrollment
     // id/revision + plan revision id）；Manual 恒为 Manual，不按 enrollment
     // 擅自升级。
-    let mut enrolled_start_policy: Option<
-        crate::product::coding_models::CodingStartRunPolicy,
-    > = None;
+    let mut enrolled_start_policy: Option<crate::product::coding_models::CodingStartRunPolicy> =
+        None;
     if let AdvancePlanOrigin::Enrolled {
         enrollment_id,
         policy_revision,
@@ -155,8 +154,7 @@ pub async fn advance_plan(
                 binding.plan_id, input.plan_id
             ));
         }
-        let expected_command_id =
-            format!("wiga-advance-{enrollment_id}-{}", input.plan_id);
+        let expected_command_id = format!("wiga-advance-{enrollment_id}-{}", input.plan_id);
         if input.command_id != expected_command_id {
             return Err(format!(
                 "enrolled advance command id must be the stable per-enrollment id \
@@ -205,9 +203,7 @@ pub async fn advance_plan(
                 },
             ) => current_repository == bound_repository,
             (
-                crate::web::handlers::AutomationCarrierResolution::LogicalCodebase {
-                    ..
-                },
+                crate::web::handlers::AutomationCarrierResolution::LogicalCodebase { .. },
                 crate::product::logical_codebase::EnrollmentTarget::LogicalCodebase { .. },
             ) => true,
             _ => false,
@@ -236,9 +232,7 @@ pub async fn advance_plan(
                 &input.plan_id,
                 &active_revision_id,
             )
-            .map_err(|error| {
-                format!("resolve authoritative group plan binding failed: {error}")
-            })?;
+            .map_err(|error| format!("resolve authoritative group plan binding failed: {error}"))?;
         let grouped = crate::product::coding_attempt_store::units_by_target(&authoritative);
         match &binding.target {
             crate::product::logical_codebase::EnrollmentTarget::SingleRepository { .. } => {
@@ -313,7 +307,11 @@ pub async fn advance_plan(
             let engine_arc = manager.engine();
             let mut engine = engine_arc.lock().await;
             match enrolled_start_policy {
-                Some(policy) => engine.handle_advance_with_start_policy(input, policy).await?,
+                Some(policy) => {
+                    engine
+                        .handle_advance_with_start_policy(input, policy)
+                        .await?
+                }
                 None => engine.handle_advance(input).await?,
             }
         }
@@ -331,7 +329,11 @@ pub async fn advance_plan(
                 crate::product::workspace_engine::WorkspaceSession::from_record(full_record),
             );
             match enrolled_start_policy {
-                Some(policy) => engine.handle_advance_with_start_policy(input, policy).await?,
+                Some(policy) => {
+                    engine
+                        .handle_advance_with_start_policy(input, policy)
+                        .await?
+                }
                 None => engine.handle_advance(input).await?,
             }
         }
@@ -362,9 +364,7 @@ pub async fn post_work_item_plan_advance_retry_initialization(
         String,
         String,
     )>,
-    axum::Json(request): axum::Json<
-        crate::product::models::automation::RetryInitializationRequest,
-    >,
+    axum::Json(request): axum::Json<crate::product::models::automation::RetryInitializationRequest>,
 ) -> Result<
     axum::response::Json<crate::product::models::automation::RetryInitializationResult>,
     crate::web::error::ApiError,
@@ -373,7 +373,10 @@ pub async fn post_work_item_plan_advance_retry_initialization(
 
     for id in [&project_id, &issue_id, &plan_id, &request.command_id] {
         validate_relative_id(id).map_err(|error| {
-            ApiError::validation("retry_initialization_invalid_id", format!("invalid id: {error}"))
+            ApiError::validation(
+                "retry_initialization_invalid_id",
+                format!("invalid id: {error}"),
+            )
         })?;
     }
     let paths = ProductAppPaths::new(state.workspace_root.join(".aria"));
@@ -442,7 +445,8 @@ mod tests {
     use super::*;
     use crate::product::advance_store::AdvanceOutcome;
     use crate::web::wiga_gate_fixture::{
-        ISSUE_ID, PROJECT_ID, confirmed_enrolled_fixture, confirmed_single_repository_enrolled_fixture,
+        ISSUE_ID, PROJECT_ID, confirmed_enrolled_fixture,
+        confirmed_single_repository_enrolled_fixture,
     };
 
     /// P2 Task 1：Enrolled origin 经真实 Confirmed fixture advance 到稳定
@@ -556,8 +560,8 @@ mod tests {
         use crate::product::models::automation::{
             EnrollmentBindingIdentityInput, EnrollmentRebindRequest,
         };
-        use crate::web::handlers::automation_enrollment_test_support::create_plan_and_session;
         use crate::product::work_item_plan_policy::RunPolicy;
+        use crate::web::handlers::automation_enrollment_test_support::create_plan_and_session;
 
         let fixture = confirmed_enrolled_fixture().await;
         let enrollment = fixture.enrollment();
@@ -615,7 +619,15 @@ mod tests {
             )
             .expect("rebind to v2");
         let after = rebind.enrollment;
-        assert_eq!(after.binding_history.as_ref().unwrap().current.binding_version, 2);
+        assert_eq!(
+            after
+                .binding_history
+                .as_ref()
+                .unwrap()
+                .current
+                .binding_version,
+            2
+        );
 
         // v1 advance 回执（旧 revision + 旧 plan）→ 身份 fail-closed。
         let v1_receipt = advance_plan(
@@ -816,11 +828,9 @@ mod tests {
         assert_eq!(fixture.coding_attempts().len(), 0);
 
         // Disable 后旧 origin 不得再 advance（D2：禁用先胜未消费即失效）。
-        let store = IssueAutomationStore::new(
-            crate::product::app_paths::ProductAppPaths::new(
-                fixture.state.workspace_root.join(".aria"),
-            ),
-        );
+        let store = IssueAutomationStore::new(crate::product::app_paths::ProductAppPaths::new(
+            fixture.state.workspace_root.join(".aria"),
+        ));
         store
             .compare_and_set(
                 &enrollment.project_id,
@@ -935,9 +945,7 @@ mod tests {
             .expect("single-repository enrolled advance must reach ready");
         let (first_id, expected_revision) = match &first {
             AdvanceOutcome::Completed {
-                attempt_id,
-                record,
-                ..
+                attempt_id, record, ..
             } => (attempt_id.clone(), record.plan_revision_id.clone()),
             AdvanceOutcome::Replayed { record } => (
                 record.attempt_id.clone().expect("replayed attempt id"),
@@ -989,10 +997,9 @@ mod tests {
         // 制造 durable 漂移：编译产物的 accepted draft target 改指另一 logical 仓
         //（binding target 仍为原 logical repository）。
         let drifted = crate::product::logical_codebase::LogicalRepositoryId(uuid::Uuid::new_v4());
-        let plan_store =
-            crate::product::work_item_plan_store::WorkItemPlanStore::new(ProductAppPaths::new(
-                fixture.state.workspace_root.join(".aria"),
-            ));
+        let plan_store = crate::product::work_item_plan_store::WorkItemPlanStore::new(
+            ProductAppPaths::new(fixture.state.workspace_root.join(".aria")),
+        );
         for draft in plan_store
             .list_draft_records(&enrollment.project_id, &enrollment.issue_id, &plan_id)
             .expect("list compiled drafts")
@@ -1005,10 +1012,7 @@ mod tests {
         let error = advance_plan(
             &fixture.state,
             AdvanceInput {
-                command_id: format!(
-                    "wiga-advance-{}-{plan_id}",
-                    enrollment.enrollment_id
-                ),
+                command_id: format!("wiga-advance-{}-{plan_id}", enrollment.enrollment_id),
                 project_id: enrollment.project_id.clone(),
                 issue_id: enrollment.issue_id.clone(),
                 plan_id: plan_id.clone(),
@@ -1036,12 +1040,10 @@ mod tests {
         let fixture = confirmed_single_repository_enrolled_fixture().await;
         let enrollment = fixture.enrollment();
         let plan_id = enrollment.plan_id.clone().expect("bound plan");
-        let polluted =
-            crate::product::logical_codebase::LogicalRepositoryId(uuid::Uuid::new_v4());
-        let plan_store =
-            crate::product::work_item_plan_store::WorkItemPlanStore::new(ProductAppPaths::new(
-                fixture.state.workspace_root.join(".aria"),
-            ));
+        let polluted = crate::product::logical_codebase::LogicalRepositoryId(uuid::Uuid::new_v4());
+        let plan_store = crate::product::work_item_plan_store::WorkItemPlanStore::new(
+            ProductAppPaths::new(fixture.state.workspace_root.join(".aria")),
+        );
         for draft in plan_store
             .list_draft_records(&enrollment.project_id, &enrollment.issue_id, &plan_id)
             .expect("list compiled drafts")
@@ -1056,10 +1058,7 @@ mod tests {
             policy_revision: enrollment.policy_revision,
         };
         let input = AdvanceInput {
-            command_id: format!(
-                "wiga-advance-{}-{plan_id}",
-                enrollment.enrollment_id
-            ),
+            command_id: format!("wiga-advance-{}-{plan_id}", enrollment.enrollment_id),
             project_id: enrollment.project_id.clone(),
             issue_id: enrollment.issue_id.clone(),
             plan_id: plan_id.clone(),
@@ -1082,7 +1081,9 @@ mod tests {
         {
             let mut patched = draft.clone();
             patched.candidate.target_repository_id = None;
-            plan_store.put_draft_record(&patched).expect("restore draft");
+            plan_store
+                .put_draft_record(&patched)
+                .expect("restore draft");
         }
         advance_plan(&fixture.state, input.clone(), origin.clone())
             .await
@@ -1110,7 +1111,9 @@ mod tests {
         crate::product::json_store::write_json(&attempt_path, &attempt_json)
             .expect("pollute attempt snapshot");
 
-        let error = advance_plan(&fixture.state, input, origin).await.unwrap_err();
+        let error = advance_plan(&fixture.state, input, origin)
+            .await
+            .unwrap_err();
         assert!(
             error.contains("cross-carrier pollution") || error.contains("target snapshot"),
             "snapshot pollution must fail closed: {error}"

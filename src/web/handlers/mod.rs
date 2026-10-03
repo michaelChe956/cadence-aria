@@ -72,9 +72,9 @@ use crate::web::workspace_ws_types::{ArtifactVersion, ProviderConfigSnapshot, Re
 mod aggregate_index;
 pub mod aggregate_initialization;
 mod automation_enrollment;
-mod automation_gateway_preflight;
 #[cfg(test)]
 pub(crate) mod automation_enrollment_test_support;
+mod automation_gateway_preflight;
 mod automation_target;
 mod codebases;
 mod coding;
@@ -84,12 +84,12 @@ mod evidence_error_mapping;
 mod evidence_query;
 mod gateway_error_mapping;
 mod health;
+mod identity_repair;
 pub mod image_create;
 pub(crate) mod lifecycle;
+mod logical_codebase_bootstrap;
 mod logical_codebase_members;
 mod logical_codebase_registration;
-mod logical_codebase_bootstrap;
-mod identity_repair;
 mod pointer_publication;
 mod pointer_publish_error_mapping;
 mod product_resources;
@@ -129,20 +129,20 @@ pub use codebases::{
 pub(crate) use coding::scope::CodingAttemptRoutePath;
 pub use evidence_query::evidence_query;
 pub use health::{health, runtime_info};
+pub use identity_repair::{get_lc_identity_repair, post_lc_identity_repair_action};
 pub use image_create::{
     create_session as create_image_create_session, delete_session as delete_image_create_session,
     generate_image, get_session as get_image_create_session,
     get_settings as get_image_create_settings, image_create_chat_ws,
     list_sessions as list_image_create_sessions, update_settings as update_image_create_settings,
 };
+pub use logical_codebase_bootstrap::{
+    get_lc_bootstrap_projection, get_logical_codebase_bootstrap, post_lc_bootstrap_action,
+    post_logical_codebase_bootstrap_action,
+};
 pub use logical_codebase_members::{
     list_lc_logical_codebase_members, list_logical_codebase_members,
 };
-pub use logical_codebase_bootstrap::{
-    get_lc_bootstrap_projection, get_logical_codebase_bootstrap,
-    post_lc_bootstrap_action, post_logical_codebase_bootstrap_action,
-};
-pub use identity_repair::{get_lc_identity_repair, post_lc_identity_repair_action};
 pub use logical_codebase_registration::{
     cancel_lc_registration, cancel_logical_codebase_registration, get_lc_registration_batch,
     get_logical_codebase_registration_batch, preflight_lc_registration,

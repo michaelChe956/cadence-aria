@@ -10,10 +10,10 @@
 //!   `single_candidate_author_rejects_missing_language_rules_before_provider_start`
 //!   回归锁定（终态 Failed 语义保留）。
 
-use super::*;
 use super::single_candidate_provider_run::{
     ProviderRunFixture, single_candidate_context, single_candidate_markdown,
 };
+use super::*;
 
 use crate::cross_cutting::provider_adapter::ProviderAdapter;
 use crate::cross_cutting::provider_availability_gate::{
@@ -30,9 +30,8 @@ use crate::product::logical_codebase::provider_gateway::{
 };
 use crate::product::logical_codebase::store::LogicalCodebaseRecord;
 use crate::product::logical_codebase::types::{
-    CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, LogicalRepositoryId,
-    MemberStatus, RepositoryCheckoutId, RepositoryCheckoutRecord, RepositorySourceIdentity,
-    RepositoryType,
+    CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, LogicalRepositoryId, MemberStatus,
+    RepositoryCheckoutId, RepositoryCheckoutRecord, RepositorySourceIdentity, RepositoryType,
 };
 use crate::product::logical_codebase::{
     GatewayRunAudit, IssueCodebaseSelectionStore, LogicalCodebaseManifest,
@@ -72,22 +71,25 @@ impl PolicyTargetResolver for LcPassThroughTargetResolver {
     fn resolve_and_revalidate(
         &self,
         request: &SessionLaunchRequest,
-    ) -> Result<crate::product::logical_codebase::policy::PolicyTarget, crate::product::logical_codebase::ProviderGatewayError> {
+    ) -> Result<
+        crate::product::logical_codebase::policy::PolicyTarget,
+        crate::product::logical_codebase::ProviderGatewayError,
+    > {
         let canonical = std::fs::canonicalize(&request.target.worktree).map_err(|_| {
             crate::product::logical_codebase::ProviderGatewayError::Target(
                 "worktree missing".to_string(),
             )
         })?;
         if request.target.logical_repository_id.is_empty() {
-            Ok(crate::product::logical_codebase::policy::PolicyTarget::aggregate_root(
-                canonical,
-            ))
+            Ok(crate::product::logical_codebase::policy::PolicyTarget::aggregate_root(canonical))
         } else {
-            Ok(crate::product::logical_codebase::policy::PolicyTarget::checkout(
-                request.target.logical_repository_id.clone(),
-                request.target.checkout_id.clone(),
-                canonical,
-            ))
+            Ok(
+                crate::product::logical_codebase::policy::PolicyTarget::checkout(
+                    request.target.logical_repository_id.clone(),
+                    request.target.checkout_id.clone(),
+                    canonical,
+                ),
+            )
         }
     }
 }
@@ -162,8 +164,7 @@ impl crate::cross_cutting::streaming_provider::StreamingProviderAdapter
         &self,
         input: StreamingProviderInput,
         _cancel: CancellationToken,
-    ) -> Result<ProviderSession, crate::cross_cutting::provider_adapter::ProviderAdapterError>
-    {
+    ) -> Result<ProviderSession, crate::cross_cutting::provider_adapter::ProviderAdapterError> {
         let _ = self.inputs.send(input);
         let output = self.output.clone();
         let (event_tx, event_rx) = mpsc::channel(4);
@@ -171,8 +172,7 @@ impl crate::cross_cutting::streaming_provider::StreamingProviderAdapter
         tokio::spawn(async move {
             let _ = event_tx
                 .send(ProviderEvent::Completed(ProviderCompletion::plain(
-                    output,
-                    None,
+                    output, None,
                 )))
                 .await;
         });
@@ -230,11 +230,8 @@ pub(super) fn register_alias_logical_codebase(
     let checkout_id = RepositoryCheckoutId(uuid::Uuid::new_v4());
     let canonical_member = std::fs::canonicalize(member_root).expect("canonical member root");
     let authority = LogicalCodebaseStore::new(app_paths.clone());
-    let manifest = LogicalCodebaseManifest::new(
-        project_id,
-        aggregate_root.clone(),
-        vec![member_id],
-    );
+    let manifest =
+        LogicalCodebaseManifest::new(project_id, aggregate_root.clone(), vec![member_id]);
     authority
         .save_manifest(project_id, &manifest)
         .expect("save manifest");
@@ -285,7 +282,6 @@ pub(super) fn register_alias_logical_codebase(
         )
         .expect("save checkout");
 
-
     // 聚合索引（Logical WorkItemPlan 的 workspace context 聚合视野输入）。
     let index = crate::product::logical_codebase::aggregate_index::AggregateIndexRecord::building(
         "aggregate_index_0001".to_string(),
@@ -302,10 +298,9 @@ pub(super) fn register_alias_logical_codebase(
         ],
         now.clone(),
     );
-    let index_store =
-        crate::product::logical_codebase::aggregate_index::AggregateIndexStore::new(
-            app_paths.clone(),
-        );
+    let index_store = crate::product::logical_codebase::aggregate_index::AggregateIndexStore::new(
+        app_paths.clone(),
+    );
     index_store
         .create(project_id, index.clone())
         .expect("create aggregate index");
@@ -388,9 +383,7 @@ async fn next_error_frame(outbound_rx: &mut mpsc::Receiver<OutboundControl>) -> 
     .expect("error frame")
 }
 
-fn durable_session(
-    fixture: &ProviderRunFixture,
-) -> crate::product::models::WorkspaceSessionRecord {
+fn durable_session(fixture: &ProviderRunFixture) -> crate::product::models::WorkspaceSessionRecord {
     fixture
         .lifecycle
         .get_workspace_session(&fixture.record.id)

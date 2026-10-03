@@ -178,8 +178,11 @@ impl WorkspaceEngine {
     /// initialization belong to the following advance tasks; until then a valid
     /// request is deliberately rejected without durable side effects.
     pub async fn handle_advance(&mut self, input: AdvanceInput) -> Result<AdvanceOutcome, String> {
-        self.handle_advance_with_start_policy(input, crate::product::coding_models::CodingStartRunPolicy::Manual)
-            .await
+        self.handle_advance_with_start_policy(
+            input,
+            crate::product::coding_models::CodingStartRunPolicy::Manual,
+        )
+        .await
     }
 
     /// P2 Task 2：带首启策略的 advance——仅供 Task 1 自动路径在精确核验后
@@ -509,7 +512,8 @@ impl WorkspaceEngine {
             .ok_or_else(|| "lifecycle_store unavailable".to_string())?
             .app_paths();
         let advance_store = AdvanceStore::new(app_paths.clone());
-        let automation = crate::product::issue_automation_store::IssueAutomationStore::new(app_paths.clone());
+        let automation =
+            crate::product::issue_automation_store::IssueAutomationStore::new(app_paths.clone());
 
         let record = advance_store
             .get_advance_for_plan(&project_id, &issue_id, &plan_id)
@@ -617,8 +621,8 @@ impl WorkspaceEngine {
 
         // 未知副作用门：失败已在 WorktreeBound 及以后 → 可能存在
         // git/worktree 外部副作用状态；未确认只写 NeedsHuman 事实。
-        let side_effect_possible =
-            journal.phase.order_for_engine() >= AdvanceInitializationPhase::WorktreeBound.order_for_engine();
+        let side_effect_possible = journal.phase.order_for_engine()
+            >= AdvanceInitializationPhase::WorktreeBound.order_for_engine();
         if side_effect_possible && !request.confirm_unknown_side_effect {
             let retry = advance_store
                 .create_retry_initialization(&record, request, OperationState::NeedsHuman)

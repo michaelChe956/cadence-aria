@@ -12,17 +12,17 @@ use crate::product::lifecycle_store::{
 };
 use crate::product::logical_codebase::{EnrollmentTarget, LogicalRepositoryId};
 use crate::product::models::automation::{
-    EnrollmentBindingIdentityInput, EnrollmentOptions, EnrollmentRebindRequest,
-    EnrollmentSource, EnrollmentWriteCommand,
+    EnrollmentBindingIdentityInput, EnrollmentOptions, EnrollmentRebindRequest, EnrollmentSource,
+    EnrollmentWriteCommand,
 };
 use crate::product::models::lifecycle::{
     IssueWorkItemPlan, IssueWorkItemPlanOptions, IssueWorkItemPlanStatus,
 };
-use crate::product::models::outline::{WorkItemPlanCompileStatus, WorkItemPlanCommitState};
+use crate::product::models::outline::{WorkItemPlanCommitState, WorkItemPlanCompileStatus};
 use crate::product::models::provider::ProviderName;
 use crate::product::models::{
-    IssueWorkItemDependencyEdge, WorkItemSplitFinding, WorkItemSplitFindingSeverity,
-    WorkItemPlanCompileTransaction, WorkspaceSessionRecord, WorkspaceType,
+    IssueWorkItemDependencyEdge, WorkItemPlanCompileTransaction, WorkItemSplitFinding,
+    WorkItemSplitFindingSeverity, WorkspaceSessionRecord, WorkspaceType,
 };
 use crate::product::work_item_plan_policy::{CandidateSnapshotRecovery, HumanGateSnapshot};
 use crate::product::work_item_plan_store::WorkItemPlanStore;
@@ -176,9 +176,7 @@ fn c1_waiting_items_include_identity_and_actions() {
     let session_id = session.id.clone();
     // enrolled 链：binding v1 精确指向真实 plan/session。
     enable_enrollment(&paths, plan_id, &session_id);
-    let mut durable: WorkspaceSessionRecord = lifecycle
-        .get_workspace_session(&session.id)
-        .unwrap();
+    let mut durable: WorkspaceSessionRecord = lifecycle.get_workspace_session(&session.id).unwrap();
     durable.human_gate_snapshot = Some(HumanGateSnapshot {
         findings: vec![],
         repeated_fingerprints: vec![],
@@ -316,8 +314,14 @@ fn c1_waiting_items_include_identity_and_actions() {
         .iter()
         .find(|item| item.kind == "candidate_recovery")
         .expect("orphan candidate snapshot must project");
-    assert_eq!(candidate.reason, "candidate snapshot incomplete: source_revision_missing");
-    assert_eq!(candidate.completed_steps, vec!["candidate_source_persisted".to_string()]);
+    assert_eq!(
+        candidate.reason,
+        "candidate snapshot incomplete: source_revision_missing"
+    );
+    assert_eq!(
+        candidate.completed_steps,
+        vec!["candidate_source_persisted".to_string()]
+    );
     assert_eq!(candidate.gate_id.as_deref(), Some("gate_0001"));
     assert_eq!(candidate.session_id.as_deref(), Some(session.id.as_str()));
     assert_eq!(candidate.plan_id.as_deref(), Some(plan_id));
@@ -352,14 +356,20 @@ fn c1_waiting_items_include_identity_and_actions() {
         .find(|item| item.kind == "intent_blocked")
         .expect("intent undeclared compile failure must project");
     assert!(intent.reason.contains("intent_undeclared"));
-    assert!(intent.actions.is_empty(), "intent stop waits for revision, no REST action");
+    assert!(
+        intent.actions.is_empty(),
+        "intent stop waits for revision, no REST action"
+    );
     assert_eq!(intent.next_phase.as_deref(), Some("plan_revision"));
 
     let generation = items
         .iter()
         .find(|item| item.kind == "generation_history")
         .expect("previous binding generations must stay queryable");
-    assert!(generation.reason.contains('1'), "history reason must count previous generations");
+    assert!(
+        generation.reason.contains('1'),
+        "history reason must count previous generations"
+    );
     assert_eq!(generation.actions, vec!["rebind".to_string()]);
 }
 
@@ -379,7 +389,9 @@ fn c1_waiting_items_stay_silent_without_enrollment_or_lease_facts() {
     enable_enrollment_only(&paths);
     let items = list_c1_waiting_items(&paths, PROJECT_ID, ISSUE_ID).unwrap();
     assert!(
-        items.iter().all(|item| item.kind != "lease_takeover" && item.kind != "lease_unknown"),
+        items
+            .iter()
+            .all(|item| item.kind != "lease_takeover" && item.kind != "lease_unknown"),
         "unstarted chain must not fabricate lease items: {items:?}"
     );
     assert!(
@@ -564,8 +576,7 @@ fn c2_waiting_items_project_coding_run_facts() {
                 node_id: None,
                 role: Some(CodingProviderRole::CodeReviewer),
                 title: "reviewer 未配置".to_string(),
-                description: "reviewer provider is missing; pick a reviewer and retry"
-                    .to_string(),
+                description: "reviewer provider is missing; pick a reviewer and retry".to_string(),
                 reason_code: Some("reviewer_configuration_missing".to_string()),
                 evidence_refs: vec![],
                 raw_provider_output_ref: None,
@@ -646,9 +657,14 @@ fn c2_waiting_items_project_coding_run_facts() {
     // 完成状态待确认：AwaitingManualRecovery＋诊断 reason；无 REST 动作
     //（恢复操作在 coding workspace 的显式 RecoverCoding 面）。
     let completion = find("coding_completion_unconfirmed");
-    assert_eq!(completion.attempt_id.as_deref(), Some(attempt_b.id.as_str()));
+    assert_eq!(
+        completion.attempt_id.as_deref(),
+        Some(attempt_b.id.as_str())
+    );
     assert!(
-        completion.reason.contains("runner_died_before_provider_start"),
+        completion
+            .reason
+            .contains("runner_died_before_provider_start"),
         "completion reason carries the durable diagnostic: {completion:?}"
     );
     assert!(completion.actions.is_empty());
@@ -701,7 +717,11 @@ fn c2_waiting_items_project_coding_run_facts() {
     let large = find("large_candidate_blocked");
     assert_eq!(large.session_id.as_deref(), Some(session.id.as_str()));
     assert!(large.reason.contains("48000"));
-    assert!(large.reason.contains("HUMAN_GATE_REVISION_INPUT_OVER_HARD_LIMIT"));
+    assert!(
+        large
+            .reason
+            .contains("HUMAN_GATE_REVISION_INPUT_OVER_HARD_LIMIT")
+    );
 
     // 已在运行：活跃持有者身份；无抢占动作。
     let already = find("coding_already_running");
@@ -732,7 +752,9 @@ fn c2_waiting_items_project_coding_run_facts() {
     assert_eq!(takeover.action_context[0].action, "confirm_takeover");
     assert_eq!(takeover.action_context[0].expected_version, 11);
     assert!(
-        !items.iter().any(|item| item.kind == "coding_already_running"),
+        !items
+            .iter()
+            .any(|item| item.kind == "coding_already_running"),
         "dead holder no longer projects already_running"
     );
 
@@ -745,7 +767,9 @@ fn c2_waiting_items_project_coding_run_facts() {
         .unwrap_or_else(|| panic!("unresolvable owner must project lease_unknown: {items:?}"));
     assert!(unknown.actions.is_empty());
     assert!(
-        !items.iter().any(|item| item.kind == "coding_takeover_required"),
+        !items
+            .iter()
+            .any(|item| item.kind == "coding_takeover_required"),
         "unknown holder no longer projects takeover"
     );
 

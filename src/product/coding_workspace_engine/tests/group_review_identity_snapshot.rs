@@ -354,19 +354,19 @@ use crate::cross_cutting::provider_availability_gate::{
 };
 use crate::cross_cutting::provider_health::{ProviderHealthEntry, ProviderHealthSnapshot};
 use crate::cross_cutting::provider_registry::ProviderRegistry;
-use crate::product::coding_models::AttemptTargetSnapshot;
 use crate::cross_cutting::streaming_provider::ProviderCompletion;
+use crate::product::coding_models::AttemptTargetSnapshot;
 use crate::product::coding_workspace_engine::group_review_orchestrator::{
     GroupReviewExecutor, RealGroupReviewExecutor,
 };
 use crate::product::logical_codebase::provider_gateway::ResumeEvidenceState;
 use crate::product::logical_codebase::{
     AggregatePolicyArtifactStore, CheckoutAvailability, CheckoutKind, CodebaseMemberRecord,
-    GatewayRunAudit, LogicalCodebaseManifest, LogicalCodebaseProviderGateway,
-    LogicalCodebaseStore, LogicalRepositoryId, MemberStatus, PolicyTarget, PolicyTargetResolver,
-    ProviderCapability, ProviderCapabilitySource, ProviderDialect, ProviderGatewayError,
-    ProviderRef, ProviderRefType, RepositoryCheckoutId, RepositoryCheckoutRecord,
-    RepositorySourceIdentity, RepositoryType, SessionLaunchRequest, SessionPolicyAction,
+    GatewayRunAudit, LogicalCodebaseManifest, LogicalCodebaseProviderGateway, LogicalCodebaseStore,
+    LogicalRepositoryId, MemberStatus, PolicyTarget, PolicyTargetResolver, ProviderCapability,
+    ProviderCapabilitySource, ProviderDialect, ProviderGatewayError, ProviderRef, ProviderRefType,
+    RepositoryCheckoutId, RepositoryCheckoutRecord, RepositorySourceIdentity, RepositoryType,
+    SessionLaunchRequest, SessionPolicyAction,
 };
 use crate::protocol::contracts::{AdapterInput, AdapterOutput, TimeoutStatus};
 
@@ -673,9 +673,11 @@ impl StreamingProviderAdapter for ReviewerRootCwdProbeAdapter {
         let output = self.output.clone();
         tokio::spawn(async move {
             let _ = event_tx
-                .send(ProviderEvent::Completed(
-                    ProviderCompletion::from_output(output, structured_output_contract.as_ref(), None),
-                ))
+                .send(ProviderEvent::Completed(ProviderCompletion::from_output(
+                    output,
+                    structured_output_contract.as_ref(),
+                    None,
+                )))
                 .await;
         });
         Ok(ProviderSession {
@@ -738,12 +740,11 @@ async fn drive_reviewer_root_launch(
         spawns: Arc::new(AtomicUsize::new(0)),
         cwd_at_spawns: Arc::new(std::sync::Mutex::new(Vec::new())),
         baseline_files_at_spawns: Arc::new(std::sync::Mutex::new(Vec::new())),
-        baselines_root: CodingAttemptStore::new(store.paths())
-            .attempt_cross_target_baselines_root(
-                &logical.project_id,
-                &logical.issue_id,
-                &logical.id,
-            ),
+        baselines_root: CodingAttemptStore::new(store.paths()).attempt_cross_target_baselines_root(
+            &logical.project_id,
+            &logical.issue_id,
+            &logical.id,
+        ),
         drift_target: drift.then(|| {
             non_target_member_checkout
                 .as_ref()
@@ -842,11 +843,7 @@ async fn drive_reviewer_root_launch(
         None => panic!("logical attempt must carry a target snapshot"),
     };
     let policy = engine
-        .resolve_launch_policy_for_role(
-            &logical,
-            CodingProviderRole::InternalReviewer,
-            &worktree,
-        )
+        .resolve_launch_policy_for_role(&logical, CodingProviderRole::InternalReviewer, &worktree)
         .expect("policy resolve returns Ok")
         .expect("logical attempt + gateway must produce reviewer policy");
     let envelope = policy.envelope();
@@ -949,7 +946,10 @@ async fn logical_reviewer_keeps_empty_writable_roots_and_d4_baseline() {
         "readable roots 随 cwd root 化"
     );
     assert_eq!(
-        *launch.baseline_files_at_spawns.lock().expect("baseline probe mutex"),
+        *launch
+            .baseline_files_at_spawns
+            .lock()
+            .expect("baseline probe mutex"),
         vec![1],
         "cross-target baseline 必须先于 reviewer spawn 落盘"
     );
@@ -991,7 +991,10 @@ async fn group_review_shard_keeps_d4_baseline_and_blocks_cross_target_drift() {
         "group review shard executor 恰一次 spawn"
     );
     assert_eq!(
-        *launch.baseline_files_at_spawns.lock().expect("baseline probe mutex"),
+        *launch
+            .baseline_files_at_spawns
+            .lock()
+            .expect("baseline probe mutex"),
         vec![1],
         "cross-target baseline 必须先于 group review spawn 落盘"
     );

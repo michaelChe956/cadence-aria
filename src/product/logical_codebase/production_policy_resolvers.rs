@@ -268,10 +268,7 @@ pub fn assert_canonical_lc_root_consistent(
     authority_root: &Path,
     envelope_working_directory: &Path,
 ) -> Result<PathBuf, ProviderGatewayError> {
-    fn canonical(
-        label: &str,
-        path: &Path,
-    ) -> Result<PathBuf, ProviderGatewayError> {
+    fn canonical(label: &str, path: &Path) -> Result<PathBuf, ProviderGatewayError> {
         path.canonicalize().map_err(|error| {
             ProviderGatewayError::Target(format!(
                 "canonicalize {label} {}: {error}",

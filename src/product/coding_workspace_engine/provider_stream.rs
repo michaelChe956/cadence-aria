@@ -5,9 +5,9 @@ use std::sync::{Arc, Mutex};
 
 mod persistence;
 
-mod legacy_stream;
 mod cancellation;
 mod launch;
+mod legacy_stream;
 #[cfg(test)]
 mod outcome_tests;
 

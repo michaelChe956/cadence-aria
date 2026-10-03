@@ -22,11 +22,7 @@ struct SplitResolutionFixture {
 
 impl SplitResolutionFixture {
     /// 重写 issue selection（focus 形态由用例自定）。
-    fn save_selection(
-        &self,
-        included: Vec<LogicalRepositoryId>,
-        focus: Vec<LogicalRepositoryId>,
-    ) {
+    fn save_selection(&self, included: Vec<LogicalRepositoryId>, focus: Vec<LogicalRepositoryId>) {
         IssueCodebaseSelectionStore::new(self.paths.clone())
             .save(&IssueCodebaseSelection::explicit(
                 &self.project_id,
@@ -156,15 +152,14 @@ fn group_target_snapshots_resolves_mixed_targets_per_target() {
     };
     let binding = authoritative(vec![unit_binding(Some(*api)), unit_binding(Some(*web))]);
 
-    let snapshots: BTreeMap<LogicalRepositoryId, AttemptTargetSnapshot> =
-        group_target_snapshots(
-            &fixture.paths,
-            &fixture.project_id,
-            &fixture.issue_id,
-            &binding,
-        )
-        .expect("mixed-target split resolution must succeed")
-        .expect("logical routing must yield a target map");
+    let snapshots: BTreeMap<LogicalRepositoryId, AttemptTargetSnapshot> = group_target_snapshots(
+        &fixture.paths,
+        &fixture.project_id,
+        &fixture.issue_id,
+        &binding,
+    )
+    .expect("mixed-target split resolution must succeed")
+    .expect("logical routing must yield a target map");
 
     assert_eq!(snapshots.len(), 2, "one snapshot per target");
     assert_eq!(snapshots[api].logical_repository_id, *api);
@@ -312,7 +307,9 @@ fn group_worktree_layout_repository_route_writes_repo_scoped_record() {
         panic!("fixture must register two targets");
     };
     let lifecycle = crate::product::lifecycle_store::LifecycleStore::new(fixture.paths.clone());
-    let route = IssueWorktreeRoute::Repository { repository_id: *api };
+    let route = IssueWorktreeRoute::Repository {
+        repository_id: *api,
+    };
 
     let lease = upsert_worktree_and_acquire_lease(
         &fixture.paths,
@@ -325,7 +322,10 @@ fn group_worktree_layout_repository_route_writes_repo_scoped_record() {
         "issue_worktree_lease_layout_test",
         "aria/issues/issue_0001",
         "main",
-        fixture.paths.issue_root(&fixture.project_id, &fixture.issue_id).join("wt"),
+        fixture
+            .paths
+            .issue_root(&fixture.project_id, &fixture.issue_id)
+            .join("wt"),
     )
     .expect("repository route worktree layout binding");
 
@@ -372,7 +372,9 @@ fn group_worktree_layout_repository_route_fails_closed_on_legacy_record() {
     let error = upsert_worktree_and_acquire_lease(
         &fixture.paths,
         &lifecycle,
-        &IssueWorktreeRoute::Repository { repository_id: *api },
+        &IssueWorktreeRoute::Repository {
+            repository_id: *api,
+        },
         &fixture.project_id,
         &fixture.issue_id,
         "repository_physical_0001",

@@ -254,12 +254,14 @@ impl StreamingProviderAdapter for CapturingStreamingAdapter {
         let (command_tx, _command_rx) = mpsc::channel(1);
         tokio::spawn(async move {
             let _ = event_tx
-                .send(crate::cross_cutting::streaming_provider::ProviderEvent::Completed(
-                    crate::cross_cutting::streaming_provider::ProviderCompletion::plain(
-                        "{}".to_string(),
-                        None,
+                .send(
+                    crate::cross_cutting::streaming_provider::ProviderEvent::Completed(
+                        crate::cross_cutting::streaming_provider::ProviderCompletion::plain(
+                            "{}".to_string(),
+                            None,
+                        ),
                     ),
-                ))
+                )
                 .await;
         });
         Ok(ProviderSession {
@@ -278,9 +280,8 @@ impl StreamingProviderAdapter for CapturingStreamingAdapter {
 #[tokio::test]
 async fn start_work_item_plan_author_rebinds_input_cwd_to_envelope_root_for_rebuild() {
     let (input_tx, mut input_rx) = mpsc::unbounded_channel();
-    let fixture = gateway_fixture_with_adapter(Arc::new(CapturingStreamingAdapter {
-        inputs: input_tx,
-    }));
+    let fixture =
+        gateway_fixture_with_adapter(Arc::new(CapturingStreamingAdapter { inputs: input_tx }));
     let member = fixture.aggregate_root.join("member-checkout");
     std::fs::create_dir_all(&member).expect("member checkout under aggregate root");
     let engine = workspace_engine_with_repository_path(&fixture, member.clone());
@@ -327,9 +328,8 @@ async fn start_work_item_plan_author_rebinds_input_cwd_to_envelope_root_for_rebu
 #[tokio::test]
 async fn start_work_item_plan_author_binds_normal_input_cwd_to_envelope_root() {
     let (input_tx, mut input_rx) = mpsc::unbounded_channel();
-    let fixture = gateway_fixture_with_adapter(Arc::new(CapturingStreamingAdapter {
-        inputs: input_tx,
-    }));
+    let fixture =
+        gateway_fixture_with_adapter(Arc::new(CapturingStreamingAdapter { inputs: input_tx }));
     let member = fixture.aggregate_root.join("member-checkout");
     std::fs::create_dir_all(&member).expect("member checkout under aggregate root");
     let engine = workspace_engine_with_repository_path(&fixture, member.clone());
@@ -719,8 +719,15 @@ fn logical_plan_launch_uses_root_cwd_not_member_repository_path() {
         "target worktree 独立保持成员 checkout"
     );
     let request = plan.launch.planning_request().expect("planning request");
-    assert_eq!(request.working_directory, canonical_root, "envelope cwd 冻结 root");
+    assert_eq!(
+        request.working_directory, canonical_root,
+        "envelope cwd 冻结 root"
+    );
     assert_eq!(request.target.worktree, member, "target 锚定成员 checkout");
-    assert_eq!(request.readable_roots, vec![canonical_root], "readable roots=root");
+    assert_eq!(
+        request.readable_roots,
+        vec![canonical_root],
+        "readable roots=root"
+    );
     assert!(request.writable_roots.is_empty(), "planning 只读写根为空");
 }

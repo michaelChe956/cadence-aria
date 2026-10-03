@@ -253,6 +253,5 @@ impl super::CodingAttemptStore {
     }
 }
 
-
 #[cfg(test)]
 mod tests;

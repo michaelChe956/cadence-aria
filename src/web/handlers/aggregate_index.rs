@@ -258,8 +258,8 @@ mod projection_tests {
     fn read_active_projection_reports_missing_when_no_generation_exists() {
         let temp = tempfile::tempdir().unwrap();
         let paths = ProductAppPaths::new(temp.path());
-        let response = read_active_projection(&paths, "project_0001", "logical_codebase_0001")
-            .unwrap();
+        let response =
+            read_active_projection(&paths, "project_0001", "logical_codebase_0001").unwrap();
         assert_eq!(response.state, "missing");
         assert_eq!(response.revision, None);
     }
@@ -288,15 +288,17 @@ mod projection_tests {
             )
             .unwrap();
 
-        let response = read_active_projection(&paths, "project_0001", "logical_codebase_0001")
-            .unwrap();
+        let response =
+            read_active_projection(&paths, "project_0001", "logical_codebase_0001").unwrap();
         // 无 LKG：首建失败投影 missing，但保留可操作 warning。
         assert_eq!(response.state, "missing");
-        assert!(response
-            .warning
-            .as_deref()
-            .unwrap_or_default()
-            .contains("codegraph_init_failed"));
+        assert!(
+            response
+                .warning
+                .as_deref()
+                .unwrap_or_default()
+                .contains("codegraph_init_failed")
+        );
     }
 
     #[test]
@@ -342,15 +344,17 @@ mod projection_tests {
             )
             .unwrap();
 
-        let response = read_active_projection(&paths, "project_0001", "logical_codebase_0001")
-            .unwrap();
+        let response =
+            read_active_projection(&paths, "project_0001", "logical_codebase_0001").unwrap();
         assert_eq!(response.state, "degraded");
         assert_eq!(response.revision, Some(3));
-        assert!(response
-            .warning
-            .as_deref()
-            .unwrap_or_default()
-            .contains("codegraph_init_failed"));
+        assert!(
+            response
+                .warning
+                .as_deref()
+                .unwrap_or_default()
+                .contains("codegraph_init_failed")
+        );
     }
 
     #[test]
@@ -369,8 +373,8 @@ mod projection_tests {
             )
             .unwrap();
 
-        let response = read_active_projection(&paths, "project_0001", "logical_codebase_0001")
-            .unwrap();
+        let response =
+            read_active_projection(&paths, "project_0001", "logical_codebase_0001").unwrap();
         assert_eq!(response.state, "rebuilding");
     }
 
@@ -382,7 +386,9 @@ mod projection_tests {
         use crate::product::issue_store::CreateProductIssueInput;
         use crate::product::logical_codebase::issue_selection::IssueCodebaseSelectionStore;
         use crate::product::logical_codebase::policy::PolicyTarget;
-        use crate::product::logical_codebase::provider_gateway::{ProviderRef, SessionLaunchRequest};
+        use crate::product::logical_codebase::provider_gateway::{
+            ProviderRef, SessionLaunchRequest,
+        };
         use crate::product::logical_codebase::types::{
             CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, MemberStatus,
             RepositoryCheckoutRecord, RepositoryType,
@@ -431,21 +437,24 @@ mod projection_tests {
             .args(["commit", "-m", "init"])
             .output()
             .unwrap();
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         let canonical = std::fs::canonicalize(&repo).unwrap();
-        let source = crate::product::repository_store::resolve_repository_source(&canonical)
-            .unwrap();
+        let source =
+            crate::product::repository_store::resolve_repository_source(&canonical).unwrap();
 
         // 旧 project 级布局：project-level manifest + 同 source 成员，并迁移出别名 LC。
         let legacy_store = LogicalCodebaseStore::new(paths.clone());
         let legacy_member = LogicalRepositoryId(uuid::Uuid::new_v4());
-        let mut legacy_manifest = LogicalCodebaseManifest::new(
-            &project_id,
-            temp.path().join("workspace"),
-            Vec::new(),
-        );
+        let mut legacy_manifest =
+            LogicalCodebaseManifest::new(&project_id, temp.path().join("workspace"), Vec::new());
         legacy_manifest.member_ids = vec![legacy_member];
-        legacy_store.save_manifest(&project_id, &legacy_manifest).unwrap();
+        legacy_store
+            .save_manifest(&project_id, &legacy_manifest)
+            .unwrap();
         legacy_store
             .save_member(
                 &project_id,
@@ -521,9 +530,7 @@ mod projection_tests {
                     physical_repository_id: "repository_explicit_member".to_string(),
                     kind: CheckoutKind::Main,
                     canonical_path: canonical.clone(),
-                    checkout_path_hash: repo_hash_for_path(
-                        canonical.to_string_lossy().as_ref(),
-                    ),
+                    checkout_path_hash: repo_hash_for_path(canonical.to_string_lossy().as_ref()),
                     git_dir_identity: source.git_dir_identity(),
                     revision: None,
                     availability: CheckoutAvailability::Available,
@@ -556,8 +563,8 @@ mod projection_tests {
         let expected_conflict = "repository_routing_legacy_conflict";
 
         // 入口 1：规划/工作区上下文（PlanningContextSetResolver）。
-        let planning = PlanningContextSetResolver::new(paths.clone())
-            .resolve(&project_id, &issue.id);
+        let planning =
+            PlanningContextSetResolver::new(paths.clone()).resolve(&project_id, &issue.id);
         match planning {
             Err(crate::product::json_store::ProductStoreError::Conflict { kind, .. }) => {
                 assert_eq!(kind, expected_conflict);

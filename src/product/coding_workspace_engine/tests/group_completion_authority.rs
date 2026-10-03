@@ -952,10 +952,7 @@ async fn retry_execution_freezes_real_head_and_empty_range_excludes_manual_wip()
         .into_iter()
         .find(|run| run.id == retry.id)
         .expect("retry run");
-    assert_eq!(
-        refrozen.start_commit.as_deref(),
-        Some(manual_head.as_str())
-    );
+    assert_eq!(refrozen.start_commit.as_deref(), Some(manual_head.as_str()));
 
     // 零提交完成：区间为空（start==completion），人工提交不进入当前 Work Item。
     let completed = fixture
@@ -973,14 +970,12 @@ async fn retry_execution_freezes_real_head_and_empty_range_excludes_manual_wip()
     );
 }
 
-
 /// C2 Task 7（#18／BYPASS-18）：渲染失败不消费——rework 路径在完整 prompt
 /// 渲染失败（组 attempt 投影绑定损坏）时，指令必须保持未消费、可被用户
 /// 重试读取；消费标记 MUST NOT 早于渲染完成。
 #[tokio::test]
 async fn rework_render_failure_keeps_instruction_unconsumed() {
-    let fixture =
-        group_completion_fixture_at_stage(false, false, CodingExecutionStage::CodeReview);
+    let fixture = group_completion_fixture_at_stage(false, false, CodingExecutionStage::CodeReview);
     // 预置一个 canonical_contract_hash 不匹配的活跃 run，令渲染 fail-closed。
     create_authoritative_active_run(
         &fixture,
@@ -1005,7 +1000,9 @@ async fn rework_render_failure_keeps_instruction_unconsumed() {
         .await
         .expect_err("render failure must stop the rework path");
     assert!(
-        error.to_string().contains("unit_run_projection_binding_mismatch"),
+        error
+            .to_string()
+            .contains("unit_run_projection_binding_mismatch"),
         "{error}"
     );
 
@@ -1041,4 +1038,3 @@ async fn rework_render_failure_keeps_instruction_unconsumed() {
 include!("group_completion_recovery.rs");
 include!("runtime_handoff_group_completion.rs");
 include!("runner_fallback_commit.rs");
-

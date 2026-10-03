@@ -1,16 +1,13 @@
 use super::*;
 use crate::product::issue_automation_store::IssueAutomationStore;
 use crate::product::models::automation::EnrollmentBindingIdentity;
-use crate::product::models::{
-    ChildBindingIdentity, WorkItemRuntimeBinding, match_compile_child,
-};
+use crate::product::models::{ChildBindingIdentity, WorkItemRuntimeBinding, match_compile_child};
 use crate::web::workspace_context::ensure_workspace_context_message;
 use crate::web::workspace_ws_types::{
     WorkItemHistoryEntryDto, WorkItemHistoryEntryKind, WorkItemRevisionHistoryDto,
 };
 
 impl WorkspaceEngine {
-
     /// C1 Task 8（REQ-C1-CHILD-01）：从 durable enrollment 事实派生当前
     /// compile 的期望 child binding 身份来源。仅当 enrollment enabled 且
     /// binding history current 精确指向本 plan/session 时返回 Some；
@@ -22,8 +19,7 @@ impl WorkspaceEngine {
         plan_id: &str,
     ) -> Result<Option<EnrollmentBindingIdentity>, ProductStoreError> {
         let store = IssueAutomationStore::new(lifecycle.app_paths());
-        let Some(enrollment) = store.get(&self.session.project_id, &self.session.issue_id)?
-        else {
+        let Some(enrollment) = store.get(&self.session.project_id, &self.session.issue_id)? else {
             return Ok(None);
         };
         if !enrollment.enabled {
@@ -254,9 +250,7 @@ impl WorkspaceEngine {
                         ),
                         None => lifecycle.create_workspace_session(input),
                     }
-                    .map_err(|error| {
-                        format!("create child work item workspace failed: {error}")
-                    })?;
+                    .map_err(|error| format!("create child work item workspace failed: {error}"))?;
                     let id = created.id.clone();
                     sessions.push(created);
                     id

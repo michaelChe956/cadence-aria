@@ -9,9 +9,11 @@
 
 use crate::product::issue_automation_store::IssueAutomationStore;
 use crate::product::models::automation::{
-    IssueAutomationEnrollment, PlanGenerationPhase, PlanGenerationIntent,
+    IssueAutomationEnrollment, PlanGenerationIntent, PlanGenerationPhase,
 };
-use crate::product::models::{SingleCandidatePhase, WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceType};
+use crate::product::models::{
+    SingleCandidatePhase, WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceType,
+};
 use crate::product::work_item_plan_policy::RunPolicy;
 use crate::web::state::WebAppState;
 use crate::web::workspace_session::WorkspaceSessionManager;
@@ -222,12 +224,8 @@ fn delegated_rerun_orphan(session: &WorkspaceSessionRecord) -> bool {
 pub fn generation_intent(
     state: &WebAppState,
     enrollment: &IssueAutomationEnrollment,
-) -> Result<
-    Option<crate::product::issue_automation_store::PlanGenerationIntentRead>,
-    String,
-> {
-    let paths =
-        crate::product::app_paths::ProductAppPaths::new(state.workspace_root.join(".aria"));
+) -> Result<Option<crate::product::issue_automation_store::PlanGenerationIntentRead>, String> {
+    let paths = crate::product::app_paths::ProductAppPaths::new(state.workspace_root.join(".aria"));
     let intent_path = paths
         .issue_root(&enrollment.project_id, &enrollment.issue_id)
         .join("automation-generation-intent.json");

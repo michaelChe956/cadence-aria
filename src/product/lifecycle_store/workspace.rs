@@ -15,10 +15,9 @@ use crate::web::workspace_ws_types::{ArtifactVersion, TimelineNode};
 
 use super::{
     CreateWorkItemChildSessionInput, CreateWorkspaceSessionInput, LifecycleStore,
-    child_directories, json_file_paths,
-    list_workspace_session_records, path_exists, path_is_regular_file,
-    read_workspace_session_record, remove_dir_all_if_exists, remove_file_if_exists,
-    workspace_session_file_paths,
+    child_directories, json_file_paths, list_workspace_session_records, path_exists,
+    path_is_regular_file, read_workspace_session_record, remove_dir_all_if_exists,
+    remove_file_if_exists, workspace_session_file_paths,
 };
 
 impl LifecycleStore {

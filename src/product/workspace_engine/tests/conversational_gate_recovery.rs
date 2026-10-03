@@ -239,7 +239,7 @@ fn conversational_gate_recovery_revision_crash_window_with_cross_round_refs_fail
             repository_profile: repository_profile.as_ref(),
             plan_options: &plan.options,
             baseline_tree: None,
-                existing_work_item_ids: &[],
+            existing_work_item_ids: &[],
             enrollment_target: None,
 
             now: "2026-08-31T00:00:00Z",
@@ -473,8 +473,8 @@ fn conversational_gate_recovery_forward_evidence_completes_revision() {
             repository_profile: repository_profile.as_ref(),
             plan_options: &plan.options,
             baseline_tree: None,
-                existing_work_item_ids: &[],
-                enrollment_target: None,
+            existing_work_item_ids: &[],
+            enrollment_target: None,
             now: "2026-08-31T00:00:00Z",
         },
     )
@@ -618,17 +618,17 @@ async fn orphaned_candidate_snapshot_requires_recovery_before_approve() {
     use crate::product::checkpoint_store::CheckpointStore;
     use crate::product::json_store::write_json;
     use crate::product::models::{SingleCandidatePhase, WorkspaceSessionStatus};
+    use crate::product::work_item_plan_policy::CandidateRecoveryAction;
     use crate::product::work_item_plan_policy::{
         HumanGateSnapshot, HumanReason, RunPolicy, WorkItemPlanFlowKind,
     };
-    use crate::product::work_item_plan_policy::CandidateRecoveryAction;
     use crate::product::workspace_engine::{CandidateRecoveryCommand, CandidateRecoveryOutcome};
     use crate::product::workspace_engine::{
         HumanGateCloseDecision, WorkspaceEngine, WorkspaceSession, WorkspaceStage,
     };
     use crate::web::workspace_ws_types::ArtifactPayload;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use tokio::sync::mpsc;
 
     let rep4_candidate = include_str!(concat!(
@@ -728,7 +728,9 @@ async fn orphaned_candidate_snapshot_requires_recovery_before_approve() {
     session.artifact = artifact;
     let (event_tx, _event_rx) = mpsc::channel(64);
     let mut engine = WorkspaceEngine::new_persistent(
-        Arc::new(CheckpointStore::new(root.path().join("c1gate-a-checkpoints"))),
+        Arc::new(CheckpointStore::new(
+            root.path().join("c1gate-a-checkpoints"),
+        )),
         lifecycle.clone(),
         event_tx,
         session,
@@ -894,7 +896,9 @@ async fn orphaned_candidate_snapshot_requires_recovery_before_approve() {
     session.session_status = WorkspaceSessionStatus::WaitingForHuman;
     let (event_tx, _event_rx) = mpsc::channel(64);
     let mut engine = WorkspaceEngine::new_persistent(
-        Arc::new(CheckpointStore::new(root.path().join("c1gate-b-checkpoints"))),
+        Arc::new(CheckpointStore::new(
+            root.path().join("c1gate-b-checkpoints"),
+        )),
         lifecycle.clone(),
         event_tx,
         session,
@@ -950,7 +954,11 @@ async fn orphaned_candidate_snapshot_requires_recovery_before_approve() {
         Some(SingleCandidatePhase::Approval)
     );
     assert_eq!(
-        after.human_gate_snapshot.as_ref().unwrap().manual_repairs_remaining,
+        after
+            .human_gate_snapshot
+            .as_ref()
+            .unwrap()
+            .manual_repairs_remaining,
         2,
         "预算不动"
     );

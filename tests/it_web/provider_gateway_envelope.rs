@@ -56,13 +56,11 @@ use cadence_aria::product::logical_codebase::{
     AggregateInitializationOperationStore, AggregateInitializationStepKind,
     AggregatePolicyArtifactStore, AggregatePreflightService, AggregatePreflightSnapshot,
     AggregateProviderTurnDriver, AggregateSkillsPreparation, CheckoutAvailability, CheckoutKind,
-    CodebaseMemberRecord,
-    GatewayRunAudit, LogicalCodebaseManifest, LogicalCodebaseProviderGateway, LogicalCodebaseStore,
-    LogicalRepositoryId, MachineSkillsPreparation, MemberStatus, PolicyTarget, PolicyTargetResolver,
-    ProviderCapability, ProviderCapabilitySource, ProviderDialect, ProviderGatewayError,
-    ProviderRef, ProviderRefType, RepositoryCheckoutId, RepositoryCheckoutRecord,
-    RepositorySourceIdentity, RepositoryType,
-    SessionLaunchRequest,
+    CodebaseMemberRecord, GatewayRunAudit, LogicalCodebaseManifest, LogicalCodebaseProviderGateway,
+    LogicalCodebaseStore, LogicalRepositoryId, MachineSkillsPreparation, MemberStatus,
+    PolicyTarget, PolicyTargetResolver, ProviderCapability, ProviderCapabilitySource,
+    ProviderDialect, ProviderGatewayError, ProviderRef, ProviderRefType, RepositoryCheckoutId,
+    RepositoryCheckoutRecord, RepositorySourceIdentity, RepositoryType, SessionLaunchRequest,
 };
 use cadence_aria::product::models::{ProviderName, WorkspaceRolePermissionModes};
 use cadence_aria::product::project_store::{CreateProjectInput, ProjectStore};
@@ -410,11 +408,7 @@ async fn non_default_lc_coding_gateway_validate_resolves_lc_scoped_checkout_targ
     authority
         .save_manifest(
             &project.id,
-            &LogicalCodebaseManifest::new(
-                &project.id,
-                aggregate_root.clone(),
-                vec![logical_id],
-            ),
+            &LogicalCodebaseManifest::new(&project.id, aggregate_root.clone(), vec![logical_id]),
         )
         .expect("save lc manifest");
     let source_identity =

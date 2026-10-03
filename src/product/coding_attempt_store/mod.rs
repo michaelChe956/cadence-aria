@@ -29,8 +29,8 @@ mod recovery;
 mod report;
 mod rework_claim;
 mod role_run;
-mod run_exclusion;
 mod role_run_event;
+mod run_exclusion;
 mod split_audit;
 mod verification_triage;
 pub use split_audit::*;
@@ -48,20 +48,9 @@ pub(crate) use admission::{
 };
 #[cfg(test)]
 pub(crate) use amendment_delivery::register_plan_amendment_delivery_mark_failpoint;
-pub use attempt_creation::WorkItemAttemptCreationGuard;
 pub use attempt::ClaimCodingStartOutcome;
-pub use rework_claim::{ReworkClaimOutcome, ReworkInstructionClaim};
-pub use run_exclusion::{CodingAttemptCommandRecord, CodingRunExclusionDecision};
-pub use verification_triage::{
-    EnterVerificationTriageInput, VerificationTriageConclusion, VerificationTriageDecision,
-    VerificationTriageRecord, VerificationTriageStatus,
-};
+pub use attempt_creation::WorkItemAttemptCreationGuard;
 pub use git_operation::*;
-pub use role_run_event::{
-    VerificationCommandEvidence, VERIFICATION_EVIDENCE_ACTUAL_COMMAND_MISMATCH,
-    VERIFICATION_EVIDENCE_PLAN_PATH_UNEXECUTABLE, VERIFICATION_EVIDENCE_PLAN_UNDECLARED,
-    verification_evidence_copy,
-};
 pub use group_initialization::*;
 pub use group_validation::*;
 pub use inputs::*;
@@ -71,8 +60,18 @@ pub(crate) use recovery::{
     FAILED_CODE_REVIEW_RECOVERY_JOURNAL_FILE, is_failed_review_manual_retry,
 };
 pub use recovery::{FailedCodeReviewRecoveryJournal, FailedCodeReviewRecoveryPhase};
+pub use rework_claim::{ReworkClaimOutcome, ReworkInstructionClaim};
+pub use role_run_event::{
+    VERIFICATION_EVIDENCE_ACTUAL_COMMAND_MISMATCH, VERIFICATION_EVIDENCE_PLAN_PATH_UNEXECUTABLE,
+    VERIFICATION_EVIDENCE_PLAN_UNDECLARED, VerificationCommandEvidence, verification_evidence_copy,
+};
+pub use run_exclusion::{CodingAttemptCommandRecord, CodingRunExclusionDecision};
 #[allow(unused_imports)]
 pub(crate) use utils::*;
+pub use verification_triage::{
+    EnterVerificationTriageInput, VerificationTriageConclusion, VerificationTriageDecision,
+    VerificationTriageRecord, VerificationTriageStatus,
+};
 
 #[derive(Debug, Clone)]
 pub struct CodingAttemptStore {

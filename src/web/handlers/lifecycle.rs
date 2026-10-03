@@ -485,12 +485,9 @@ pub async fn issue_lifecycle(
 
     // C1（enrollment-recovery-surface Task 9）：durable 恢复等待项投影——
     // 与列表同源派生，读取失败按 HTTP 显式错误传播（不伪 client、不吞为空）。
-    let c1_waiting_items = crate::web::plan_confirmed_info::list_c1_waiting_items(
-        &app_paths,
-        &project_id,
-        &issue_id,
-    )
-    .map_err(product_store_api_error)?;
+    let c1_waiting_items =
+        crate::web::plan_confirmed_info::list_c1_waiting_items(&app_paths, &project_id, &issue_id)
+            .map_err(product_store_api_error)?;
 
     Ok(Json(IssueLifecycleResponse {
         issue: product_issue_dto_with_binding(&app_paths, issue)?,

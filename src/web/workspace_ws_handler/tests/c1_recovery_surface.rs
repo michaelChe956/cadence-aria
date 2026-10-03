@@ -26,14 +26,10 @@
 //! c1_existing_create / part_11 / advance_plan tests）；本串测证明四链可以
 //! 在同一验收序列里各自从真实故障走到用户操作后的 durable 续进。
 
-use crate::product::advance_store::{
-    AdvanceInput, AdvanceOutcome, AdvanceStatus, AdvanceStore,
-};
+use crate::product::advance_store::{AdvanceInput, AdvanceOutcome, AdvanceStatus, AdvanceStore};
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::checkpoint_store::CheckpointStore;
-use crate::product::coding_attempt_store::{
-    CodingAttemptStore, CreateCodingAttemptInput,
-};
+use crate::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttemptInput};
 use crate::product::coding_models::CodingAttemptStatus;
 use crate::product::coding_workspace_engine::CodingWorkspaceEngine;
 use crate::product::git_workspace_service::GitWorkspaceService;
@@ -43,19 +39,19 @@ use crate::product::lifecycle_store::{
     CreateWorkspaceSessionInput, LifecycleStore, UpsertIssueSharedWorktreeInput,
 };
 use crate::product::logical_codebase::{EnrollmentTarget, LogicalRepositoryId};
+use crate::product::models::WorkspaceSessionStatus;
 use crate::product::models::automation::{
-    EnrollmentBindingIdentityInput, EnrollmentOptions, EnrollmentRebindRequest,
-    EnrollmentSource, EnrollmentWriteCommand, LeaseDisposition, SourceRevisionRef,
+    EnrollmentBindingIdentityInput, EnrollmentOptions, EnrollmentRebindRequest, EnrollmentSource,
+    EnrollmentWriteCommand, LeaseDisposition, SourceRevisionRef,
 };
 use crate::product::models::lifecycle::IssueWorkItemPlanOptions;
-use crate::product::models::WorkspaceSessionStatus;
 use crate::product::models::outline::{
     WorkItemDraftCandidate, WorkItemDraftRecord, WorkItemDraftStatus,
     WorkItemDraftVerificationPlan, WorkItemGenerationMode,
 };
 use crate::product::models::provider::ProviderName;
 use crate::product::models::{
-    IssueRecord, IssuePhase, IssueStatus, RepositoryProfile, RepositoryProfileConfidence,
+    IssuePhase, IssueRecord, IssueStatus, RepositoryProfile, RepositoryProfileConfidence,
     WorkspaceType,
 };
 use crate::product::project_store::{CreateProjectInput, ProjectStore};
@@ -95,11 +91,9 @@ async fn c1_a07_a09_a12_a13_recovery_surface() {
 // ============================================================================
 
 async fn a07_orphan_candidate_recovery_chain() {
-    let fixture = super::campaign_stage3_interactive::workspace_human_action_http_fixture(
-        2,
-        Vec::new(),
-    )
-    .await;
+    let fixture =
+        super::campaign_stage3_interactive::workspace_human_action_http_fixture(2, Vec::new())
+            .await;
     let gate_id = fixture.active_gate_id().await.expect("durable gate node");
 
     // 错误 → 通知 → 用户操作：candidate_recovery 只读评估 + label 落盘。
@@ -188,7 +182,12 @@ async fn a09_lease_three_states_and_confirmed_takeover_chain() {
     let root = tmp.path().to_path_buf();
     let paths = ProductAppPaths::new(root.join(".aria"));
     seed_project_and_issue(&paths, PROJECT_ID, ISSUE_ID, "c1 serial lease fixture");
-    seed_project_and_issue(&paths, PROJECT_ID, ISSUE_TRANSIENT, "c1 serial transient lease");
+    seed_project_and_issue(
+        &paths,
+        PROJECT_ID,
+        ISSUE_TRANSIENT,
+        "c1 serial transient lease",
+    );
 
     // 真实 attempt + issue 共享 worktree 锁（owner 绑定 attempt）。
     let store = CodingAttemptStore::new(paths.clone());
@@ -283,7 +282,13 @@ async fn a09_lease_three_states_and_confirmed_takeover_chain() {
     );
 
     // 死亡：终态 attempt → DeadNeedsTakeover（判定只读，未确认不推进）。
-    set_attempt_status(&store, PROJECT_ID, ISSUE_ID, &attempt.id, CodingAttemptStatus::Failed);
+    set_attempt_status(
+        &store,
+        PROJECT_ID,
+        ISSUE_ID,
+        &attempt.id,
+        CodingAttemptStatus::Failed,
+    );
     let dead = engine.classify_worktree_lease(PROJECT_ID, ISSUE_ID);
     assert_eq!(dead.disposition, LeaseDisposition::DeadNeedsTakeover);
     assert_eq!(dead.lease_id, attempt.id);
@@ -335,7 +340,13 @@ async fn a09_lease_three_states_and_confirmed_takeover_chain() {
     };
 
     // 活跃复活 → Rejected，不写任何 durable 文件（owner 不变）。
-    set_attempt_status(&store, PROJECT_ID, ISSUE_ID, &attempt.id, CodingAttemptStatus::Running);
+    set_attempt_status(
+        &store,
+        PROJECT_ID,
+        ISSUE_ID,
+        &attempt.id,
+        CodingAttemptStatus::Running,
+    );
     let (status, body) = post_router_json(
         &app,
         &uri,
@@ -354,7 +365,13 @@ async fn a09_lease_three_states_and_confirmed_takeover_chain() {
     );
 
     // 回到死亡后：过期 lease id → IdentityMismatch 409，durable 不变。
-    set_attempt_status(&store, PROJECT_ID, ISSUE_ID, &attempt.id, CodingAttemptStatus::Failed);
+    set_attempt_status(
+        &store,
+        PROJECT_ID,
+        ISSUE_ID,
+        &attempt.id,
+        CodingAttemptStatus::Failed,
+    );
     let (status, body) = post_router_json(
         &app,
         &uri,
@@ -362,7 +379,10 @@ async fn a09_lease_three_states_and_confirmed_takeover_chain() {
     )
     .await;
     assert_eq!(status, axum::http::StatusCode::CONFLICT, "body: {body}");
-    assert_eq!(body["code"], "lease_takeover_identity_mismatch", "body: {body}");
+    assert_eq!(
+        body["code"], "lease_takeover_identity_mismatch",
+        "body: {body}"
+    );
 
     // 合法接管：Accepted，死亡 owner 原子清出。
     let (status, body) = post_router_json(
@@ -408,7 +428,10 @@ async fn a09_lease_three_states_and_confirmed_takeover_chain() {
         .unwrap();
     assert!(next.acquired);
     assert_eq!(
-        store.list_attempts_for_issue(PROJECT_ID, ISSUE_ID).unwrap().len(),
+        store
+            .list_attempts_for_issue(PROJECT_ID, ISSUE_ID)
+            .unwrap()
+            .len(),
         1,
         "takeover must not create a second attempt"
     );
@@ -432,12 +455,7 @@ fn set_attempt_status(
     store.write_coding_attempt_for_test(&attempt).unwrap();
 }
 
-fn seed_project_and_issue(
-    paths: &ProductAppPaths,
-    project_id: &str,
-    issue_id: &str,
-    title: &str,
-) {
+fn seed_project_and_issue(paths: &ProductAppPaths, project_id: &str, issue_id: &str, title: &str) {
     ProjectStore::new(paths.clone())
         .create(CreateProjectInput {
             name: title.to_string(),
@@ -547,7 +565,9 @@ async fn a09_failed_advance_explicit_retry_chain() {
         .expect("seeded plan workspace session");
     let (event_tx, _event_rx) = tokio::sync::mpsc::channel(8);
     let mut engine = WorkspaceEngine::new_persistent(
-        Arc::new(CheckpointStore::new(root.path().join("advance-checkpoints"))),
+        Arc::new(CheckpointStore::new(
+            root.path().join("advance-checkpoints"),
+        )),
         lifecycle,
         event_tx,
         WorkspaceSession::from_record(session_record),
@@ -694,7 +714,10 @@ async fn a09_failed_advance_explicit_retry_chain() {
     )
     .await;
     assert!(!status.is_success(), "body: {body}");
-    assert_eq!(body["code"], "retry_initialization_rejected", "body: {body}");
+    assert_eq!(
+        body["code"], "retry_initialization_rejected",
+        "body: {body}"
+    );
 
     // 确认未知副作用后续做：Accepted，同一 attempt 到 Ready。
     let (status, body) = post_router_json(
@@ -757,10 +780,7 @@ fn seed_serial_advance_drafts(app_paths: &ProductAppPaths) {
     let plan_store = WorkItemPlanStore::new(app_paths.clone());
     for (logical_id, revision_id) in [
         ("wi_core", "work_item_revision_wi_core_0001"),
-        (
-            "wi_registration",
-            "work_item_revision_wi_registration_0001",
-        ),
+        ("wi_registration", "work_item_revision_wi_registration_0001"),
         ("wi_unrelated", "work_item_revision_wi_unrelated_0001"),
     ] {
         let revision = revision_store
@@ -991,10 +1011,8 @@ fn c1_serial_context<'a>(
     baseline: Option<&'a BTreeSet<String>>,
 ) -> PlanCandidateValidationContext<'a> {
     static BOUND_TARGET: std::sync::LazyLock<EnrollmentTarget> =
-        std::sync::LazyLock::new(|| {
-            EnrollmentTarget::SingleRepository {
-                repository_id: C1_SERIAL_TARGET_REPO.to_string(),
-            }
+        std::sync::LazyLock::new(|| EnrollmentTarget::SingleRepository {
+            repository_id: C1_SERIAL_TARGET_REPO.to_string(),
         });
     static PROFILE: std::sync::LazyLock<RepositoryProfile> =
         std::sync::LazyLock::new(c1_serial_profile);
@@ -1024,7 +1042,9 @@ fn c1_serial_context<'a>(
     }
 }
 
-fn c1_serial_compile(intent_section: &str) -> crate::product::work_item_plan_compiler::PlanCandidateIr {
+fn c1_serial_compile(
+    intent_section: &str,
+) -> crate::product::work_item_plan_compiler::PlanCandidateIr {
     compile_work_item_plan(
         &c1_serial_source(intent_section, ("src/levels_new/**", "web/**"), "WI-002"),
         &WorkItemPlanSourceContext {

@@ -127,11 +127,10 @@ async fn run_coding_runner_task_body(
         let app_paths = ProductAppPaths::new(state.workspace_root.join(".aria"));
         // C4 Task 2：lc 身份经唯一 authority resolver 冻结（conflict fail-closed，
         // 不再直接按 issue 记录回退 project 级路径）。
-        let resolved = crate::product::logical_codebase::RepositoryAuthorityResolver::new(
-            app_paths.clone(),
-        )
-        .resolve_for_issue(&attempt.project_id, &attempt.issue_id)
-        .map(|authority| authority.and_then(|r| r.target.logical_codebase_id));
+        let resolved =
+            crate::product::logical_codebase::RepositoryAuthorityResolver::new(app_paths.clone())
+                .resolve_for_issue(&attempt.project_id, &attempt.issue_id)
+                .map(|authority| authority.and_then(|r| r.target.logical_codebase_id));
         let gateway = match resolved {
             // Task 2.8 fix round 1（P1）：LC 作用域的 gateway 组装失败（含
             // 双工厂 root 投影不一致 fail-closed）必须中止启动——`.ok()`
@@ -142,10 +141,9 @@ async fn run_coding_runner_task_body(
                 match factory.build_for_lc(&attempt.project_id, Some(lc_id.as_str())) {
                     Ok(gateway) => Some(gateway),
                     Err(error) => {
-                        gateway_build_failure =
-                            Some(CodingWorkspaceEngineError::ProviderStream(format!(
-                                "logical gateway factory build failed: {error}"
-                            )));
+                        gateway_build_failure = Some(CodingWorkspaceEngineError::ProviderStream(
+                            format!("logical gateway factory build failed: {error}"),
+                        ));
                         None
                     }
                 }

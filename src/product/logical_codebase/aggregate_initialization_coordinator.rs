@@ -43,14 +43,14 @@ use crate::product::logical_codebase::aggregate_initialization::{
     AggregateInitializationStepKind, AggregateInitializationStepStatus, RepositoryTypeEvidence,
 };
 use crate::product::logical_codebase::aggregate_initialization_store::AggregateInitializationOperationStore;
-use crate::product::logical_codebase::registration::AggregateRootPreflight;
-use crate::product::logical_codebase::store::{LogicalCodebaseManifest, LogicalCodebaseStore};
-use crate::product::logical_codebase::types::{CodebaseMemberRecord, RepositoryCheckoutRecord};
-use crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential;
 use crate::product::logical_codebase::legacy_logical_codebase_id;
+use crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential;
 use crate::product::logical_codebase::provider_trust::{
     ProviderTrustPrecondition, ProviderTrustWaiting,
 };
+use crate::product::logical_codebase::registration::AggregateRootPreflight;
+use crate::product::logical_codebase::store::{LogicalCodebaseManifest, LogicalCodebaseStore};
+use crate::product::logical_codebase::types::{CodebaseMemberRecord, RepositoryCheckoutRecord};
 
 /// Errors surfaced by aggregate-initialization coordinator operations. Every
 /// variant carries enough context for the operation record to be marked failed
@@ -76,9 +76,7 @@ pub enum AggregateInitializationError {
         retryable: bool,
     },
     #[error("provider trust gate is waiting before the recipe may start")]
-    TrustWaiting {
-        waiting: ProviderTrustWaiting,
-    },
+    TrustWaiting { waiting: ProviderTrustWaiting },
     #[error("cancellation requested")]
     Cancelled,
     #[error("aggregate initialization store error: {0}")]

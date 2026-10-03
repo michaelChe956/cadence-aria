@@ -314,8 +314,7 @@ fn two_member_repositories() -> AggregateInitializationGitFixture {
         lc_store.save_checkout("project_0001", &checkout).unwrap();
     }
 
-    let manifest =
-        LogicalCodebaseManifest::new("project_0001", aggregate_root.clone(), member_ids);
+    let manifest = LogicalCodebaseManifest::new("project_0001", aggregate_root.clone(), member_ids);
     lc_store.save_manifest("project_0001", &manifest).unwrap();
 
     let command_log: Arc<Mutex<Vec<RecordedCall>>> = Arc::new(Mutex::new(Vec::new()));

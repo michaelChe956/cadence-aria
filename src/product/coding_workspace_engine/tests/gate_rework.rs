@@ -461,11 +461,7 @@ async fn rework_instruction_claim_binds_render_before_consumption() {
 
     // 认领 journal：绑定实际 prompt 的渲染 digest 与执行上下文 hash。
     let claims = store
-        .list_rework_instruction_claims(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-        )
+        .list_rework_instruction_claims(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("rework instruction claims");
     assert_eq!(claims.len(), 1, "一次 role run 恰一条认领：{claims:?}");
     let claim = claims[0].clone();
@@ -475,7 +471,10 @@ async fn rework_instruction_claim_binds_render_before_consumption() {
         .expect("rework instructions");
     assert_eq!(instructions.len(), 1);
     let instruction = &instructions[0];
-    assert!(instruction.consumed_at.is_some(), "指令被该次 role run 消费");
+    assert!(
+        instruction.consumed_at.is_some(),
+        "指令被该次 role run 消费"
+    );
     assert!(instruction.consumed_by_node_id.is_some());
     assert_eq!(claim.instruction_ids, vec![instruction.id.clone()]);
     let expected_digest = {
@@ -509,11 +508,7 @@ async fn rework_instruction_claim_binds_render_before_consumption() {
         }
     );
     let claims_after = store
-        .list_rework_instruction_claims(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-        )
+        .list_rework_instruction_claims(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("claims after replay");
     assert_eq!(claims_after, vec![claim.clone()], "重放命中同一认领");
     let instructions_after = store
@@ -585,7 +580,11 @@ async fn interrupted_rework_claim_is_force_replayed_on_recovery_redrive() {
     let renders = store
         .reconcile_interrupted_rework_claims(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("reconcile");
-    assert_eq!(renders.len(), 1, "exactly the interrupted claim: {renders:?}");
+    assert_eq!(
+        renders.len(),
+        1,
+        "exactly the interrupted claim: {renders:?}"
+    );
     assert_eq!(renders[0].claim.claim_id, claim.claim_id);
     assert_eq!(renders[0].instructions.len(), 1);
     assert_eq!(renders[0].instructions[0].id, instruction.id);
@@ -639,9 +638,11 @@ async fn interrupted_rework_claim_is_force_replayed_on_recovery_redrive() {
         .expect("claims after re-drive");
     assert_eq!(claims_after.len(), 2, "{claims_after:?}");
     assert!(
-        claims_after.iter().any(|record| record.claim_id == claim.claim_id
-            && record.rendered_prompt_digest == claim.rendered_prompt_digest
-            && record.context_hash == claim.context_hash),
+        claims_after
+            .iter()
+            .any(|record| record.claim_id == claim.claim_id
+                && record.rendered_prompt_digest == claim.rendered_prompt_digest
+                && record.context_hash == claim.context_hash),
         "interrupted claim must not be rewritten"
     );
     let new_claim = claims_after
@@ -721,10 +722,16 @@ async fn reconcile_skips_prompted_claims_and_note_only_claims() {
         .reconcile_interrupted_rework_claims(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("reconcile");
     assert!(renders.is_empty(), "prompted claim is not interrupted");
-    assert!(store
-        .list_instruction_claim_interrupted_facts(&attempt.project_id, &attempt.issue_id, &attempt.id)
-        .expect("facts")
-        .is_empty());
+    assert!(
+        store
+            .list_instruction_claim_interrupted_facts(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id
+            )
+            .expect("facts")
+            .is_empty()
+    );
 
     // 纯 context note 认领：无 node 归因，不参与对账（备注为辅助上下文）。
     let note = store

@@ -1183,4 +1183,3 @@ async fn handle_coding_socket(
     }
     state.coding_sockets.remove(&attempt_key, socket_token);
 }
-

@@ -552,10 +552,8 @@ impl CodingWorkspaceEngine {
         let coder_renderer_version = renderer_for(&providers.coder)
             .renderer_version()
             .to_string();
-        let reviewer_renderer_version = renderer_version_for_optional_provider(
-            providers.code_reviewer.as_ref(),
-        )
-        .to_string();
+        let reviewer_renderer_version =
+            renderer_version_for_optional_provider(providers.code_reviewer.as_ref()).to_string();
         let run = match self.store.get_active_unit_run(attempt) {
             Ok(run) => run,
             Err(ProductStoreError::NotFound {

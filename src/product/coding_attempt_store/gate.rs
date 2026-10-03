@@ -386,7 +386,11 @@ impl super::CodingAttemptStore {
                     record.resolved_action.as_deref(),
                     Some("manual_continue") | Some("accept_risk")
                 )
-                && record.gate.evidence_refs.iter().any(|evidence| evidence == report_id)
+                && record
+                    .gate
+                    .evidence_refs
+                    .iter()
+                    .any(|evidence| evidence == report_id)
         }))
     }
 

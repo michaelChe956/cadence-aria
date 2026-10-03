@@ -2,9 +2,7 @@ use tempfile::tempdir;
 
 use super::*;
 use crate::product::app_paths::ProductAppPaths;
-use crate::product::lifecycle_store::{
-    CreateWorkspaceSessionInput, WorkItemPlanSessionOptions,
-};
+use crate::product::lifecycle_store::{CreateWorkspaceSessionInput, WorkItemPlanSessionOptions};
 use crate::product::models::{ProviderName, WorkspaceType};
 use crate::product::work_item_plan_policy::{ReviewInvocationScope, RunHistory, RunPolicy};
 
@@ -317,11 +315,7 @@ fn single_candidate_approval_and_reservation_are_cas_bound_to_durable_refs() {
         session.mechanical_report_ref.as_deref().unwrap(),
     );
     let approved = store
-        .compare_and_save_single_candidate_approval(
-            &session,
-            &approval_id,
-            "2026-08-27T12:34:56Z",
-        )
+        .compare_and_save_single_candidate_approval(&session, &approval_id, "2026-08-27T12:34:56Z")
         .expect("approval CAS");
     assert_eq!(
         approved.approval_attempt_id.as_deref(),
@@ -477,11 +471,7 @@ fn repair_generation_rotation_invalidates_stale_approval_tuple() {
         report_ref_v2,
     );
     let approved = store
-        .compare_and_save_single_candidate_approval(
-            &gated,
-            &fresh_attempt,
-            "2026-09-24T13:29:03Z",
-        )
+        .compare_and_save_single_candidate_approval(&gated, &fresh_attempt, "2026-09-24T13:29:03Z")
         .expect("approve after repair rotation must not conflict with the stale tuple");
     assert_eq!(
         approved.approval_attempt_id.as_deref(),

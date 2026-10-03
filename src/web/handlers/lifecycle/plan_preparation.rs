@@ -275,39 +275,44 @@ pub async fn ensure_enrolled_plan(
 ) -> ApiResult<PreparedPlanRecords> {
     // C1 Task 3：prepare 前置——自动链只接受当前版本化 binding（旧式
     // enrollment 按 off/Manual 解释，自动路径 fail-closed）。
-    crate::web::advance_plan::load_current_enrollment_binding(enrollment).map_err(|reason| {
-        ApiError::validation("automation_enrollment_binding_invalid", reason)
-    })?;
+    crate::web::advance_plan::load_current_enrollment_binding(enrollment)
+        .map_err(|reason| ApiError::validation("automation_enrollment_binding_invalid", reason))?;
 
-    let store = crate::product::issue_automation_store::IssueAutomationStore::new(
-        product_app_paths(state),
-    );
+    let store =
+        crate::product::issue_automation_store::IssueAutomationStore::new(product_app_paths(state));
     let (project_id, issue_id) = (enrollment.project_id.clone(), enrollment.issue_id.clone());
     // create 回调错误类型固定为 EnrollmentError：ApiError 原样暂存、锁外还原，
     // 不丢验证/运行错误细节。
     let mut create_error: Option<ApiError> = None;
     let bound = store
-        .ensure_plan_binding(&project_id, &issue_id, &enrollment.enrollment_id, |_, intent| {
-            let request = intent_request(intent);
-            match prepare_plan_records(
-                state,
-                &project_id,
-                &issue_id,
-                request,
-                Some(PreparedPlanIds {
-                    plan_id: intent.plan_id.clone(),
-                    session_id: intent.session_id.clone(),
-                }),
-            ) {
-                Ok(_) => Ok(()),
-                Err(error) => {
-                    create_error = Some(error);
-                    Err(crate::product::models::automation::EnrollmentError::InvalidScope(
-                        "bound plan creation failed".to_string(),
-                    ))
+        .ensure_plan_binding(
+            &project_id,
+            &issue_id,
+            &enrollment.enrollment_id,
+            |_, intent| {
+                let request = intent_request(intent);
+                match prepare_plan_records(
+                    state,
+                    &project_id,
+                    &issue_id,
+                    request,
+                    Some(PreparedPlanIds {
+                        plan_id: intent.plan_id.clone(),
+                        session_id: intent.session_id.clone(),
+                    }),
+                ) {
+                    Ok(_) => Ok(()),
+                    Err(error) => {
+                        create_error = Some(error);
+                        Err(
+                            crate::product::models::automation::EnrollmentError::InvalidScope(
+                                "bound plan creation failed".to_string(),
+                            ),
+                        )
+                    }
                 }
-            }
-        })
+            },
+        )
         .map_err(|error| match create_error {
             Some(api_error) => api_error,
             None => crate::web::handlers::automation_enrollment::enrollment_api_error(error),
@@ -337,9 +342,7 @@ pub async fn ensure_enrolled_plan(
         .get_workspace_session(&session_id)
         .map_err(product_store_api_error)?;
     let session = match crate::web::workspace_context::ensure_workspace_context_message(
-        &app_paths,
-        &lifecycle,
-        session,
+        &app_paths, &lifecycle, session,
     )
     .await
     {

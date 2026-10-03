@@ -110,7 +110,8 @@ async fn coding_plan_repair_group_rework_uses_bound_authoritative_coder_context(
 //（unit run 已冻结 coder_execution_context_hash，恒自撞死循环）；指令
 // 经增量段进入实际 prompt，并由 Task 7 认领事务消费。
 #[tokio::test]
-async fn coding_restart_after_unconsumed_rerun_instruction_keeps_frozen_context_and_consumes_instruction() {
+async fn coding_restart_after_unconsumed_rerun_instruction_keeps_frozen_context_and_consumes_instruction()
+ {
     let root = tempdir().unwrap();
     let worktree = root.path().join("worktree");
     fs::create_dir_all(&worktree).unwrap();

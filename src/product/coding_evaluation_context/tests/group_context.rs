@@ -170,7 +170,7 @@ fn group_attempt_fixture(
         completed_at: None,
         start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         start_claim: None,
-        };
+    };
     (tmp, paths, attempt)
 }
 

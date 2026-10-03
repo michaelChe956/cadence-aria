@@ -16,9 +16,8 @@ pub(crate) fn resolve_work_item_repository(
     //   authority 后按 manifest 成员严格解析。
     // - 否则 → SingleRepo 形状：显式 SingleRepo 请求先经 resolver 拒绝
     //   “单仓请求命中 LC 归属 issue”的 kind_mismatch，再走既有 legacy 兼容解析。
-    let resolver = crate::product::logical_codebase::RepositoryAuthorityResolver::new(
-        app_paths.clone(),
-    );
+    let resolver =
+        crate::product::logical_codebase::RepositoryAuthorityResolver::new(app_paths.clone());
     if work_item.target_repository_id.is_some() {
         let resolution = resolver
             .resolve_for_issue(project_id, &work_item.issue_id)
@@ -35,7 +34,10 @@ pub(crate) fn resolve_work_item_repository(
         let manifest = resolution.manifest.clone().ok_or_else(|| {
             product_store_api_error(routing_error(
                 RepositoryRoutingErrorCode::TargetMissing,
-                format!("work item {} has no logical codebase manifest", work_item.id),
+                format!(
+                    "work item {} has no logical codebase manifest",
+                    work_item.id
+                ),
             ))
         })?;
         let logical_repository_id = work_item.target_repository_id.expect("checked above");

@@ -130,8 +130,7 @@ impl super::CodingAttemptStore {
             .unwrap_or(&rendered_prompt_digest)
             .to_string();
         let claim_id = deterministic_claim_id(&attempt.id, &ids);
-        let path =
-            self.rework_claims_path(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+        let path = self.rework_claims_path(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
         with_exclusive_lock(&path, || {
             let mut journal: ReworkClaimJournal = if path.is_file() {
                 read_json(&path)?
@@ -314,7 +313,10 @@ impl super::CodingAttemptStore {
         if claims.is_empty() {
             return Ok(Vec::new());
         }
-        let instructions_by_id: HashMap<String, crate::product::coding_models::CodingReworkInstruction> = self
+        let instructions_by_id: HashMap<
+            String,
+            crate::product::coding_models::CodingReworkInstruction,
+        > = self
             .list_rework_instructions(project_id, issue_id, attempt_id)?
             .into_iter()
             .map(|instruction| (instruction.id.clone(), instruction))
@@ -335,7 +337,8 @@ impl super::CodingAttemptStore {
             run_prompted.insert(run.id.clone(), prompted);
         }
         let role_runs = self.list_role_runs(project_id, issue_id, attempt_id)?;
-        let fact_root = self.instruction_claim_interrupted_root(project_id, issue_id, attempt_id)?;
+        let fact_root =
+            self.instruction_claim_interrupted_root(project_id, issue_id, attempt_id)?;
 
         let mut renders = Vec::new();
         for claim in claims {
@@ -357,7 +360,9 @@ impl super::CodingAttemptStore {
                 continue;
             }
             let own_prompted = role_runs.iter().any(|run| {
-                run.node_id.as_deref().is_some_and(|node| claim_nodes.contains(&node))
+                run.node_id
+                    .as_deref()
+                    .is_some_and(|node| claim_nodes.contains(&node))
                     && run_prompted.get(&run.id).copied().unwrap_or(false)
             });
             // 解析失败按未重放处理（重复投递优于静默丢失）。
@@ -373,10 +378,7 @@ impl super::CodingAttemptStore {
                 // 已发出 prompt（认领自身或后续重驱回放）：清除等待事实。
                 if fact_path.exists() {
                     std::fs::remove_file(&fact_path).map_err(|error| {
-                        ProductStoreError::Io(format!(
-                            "remove {}: {error}",
-                            fact_path.display()
-                        ))
+                        ProductStoreError::Io(format!("remove {}: {error}", fact_path.display()))
                     })?;
                 }
                 continue;

@@ -269,16 +269,15 @@ fn lower_plan_intent(
     forbidden_scopes: Vec<String>,
     diagnostics: &mut Vec<CompilerDiagnostic>,
 ) -> Option<crate::product::work_item_contract::WorkItemIntentContract> {
-    use crate::product::work_item_contract::{WorkItemIntent, WorkItemIntentContract};
     use crate::product::logical_codebase::{EnrollmentTarget, LogicalRepositoryId};
+    use crate::product::work_item_contract::{WorkItemIntent, WorkItemIntentContract};
 
     if !fields.iter().any(|(name, _)| *name == "Plan Intent") {
         return None;
     }
     let value = |key: &str| {
         fields.iter().find_map(|(name, field)| {
-            (*name == "Plan Intent" && field.key.value == key)
-                .then_some(field.value.value.as_str())
+            (*name == "Plan Intent" && field.key.value == key).then_some(field.value.value.as_str())
         })
     };
     let line = |key: &str| {

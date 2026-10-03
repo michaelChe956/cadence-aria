@@ -761,7 +761,6 @@ fn validate_logical_group_selection(
     }
 }
 
-
 fn group_initialization_api_error(error: ProductStoreError) -> ApiError {
     match error {
         ProductStoreError::Io(message) if message.starts_with("active_coding_attempt_exists:") => {

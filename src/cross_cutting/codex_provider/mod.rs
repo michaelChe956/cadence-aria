@@ -164,7 +164,8 @@ impl StreamingProviderAdapter for CodexProvider {
         // 的 durable 审计由 root recipe receipt 承担）。
         if let Some(
             policy @ crate::cross_cutting::streaming_provider::ProviderToolPolicy {
-                intent: crate::cross_cutting::streaming_provider::ToolPolicyIntent::DenyFileWriteBuiltins,
+                intent:
+                    crate::cross_cutting::streaming_provider::ToolPolicyIntent::DenyFileWriteBuiltins,
             },
         ) = input.tool_policy.as_ref()
         {

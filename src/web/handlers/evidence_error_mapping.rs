@@ -68,11 +68,7 @@ pub(crate) fn policy_error_code(
 pub(crate) fn policy_api_error(
     error: crate::product::logical_codebase::evidence_mediator::PolicyAccessError,
 ) -> ApiError {
-    ApiError::runtime(
-        policy_error_code(&error),
-        error.to_string(),
-        json!({}),
-    )
+    ApiError::runtime(policy_error_code(&error), error.to_string(), json!({}))
 }
 
 #[cfg(test)]

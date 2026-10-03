@@ -357,7 +357,10 @@ impl super::CodingAttemptStore {
             last_activity_at: Some(record.updated_at.clone()),
             evidence: messages,
         };
-        match (&record.current_lock_owner_id, &record.current_active_work_item_id) {
+        match (
+            &record.current_lock_owner_id,
+            &record.current_active_work_item_id,
+        ) {
             (None, None) => LeaseDecision {
                 disposition: LeaseDisposition::DeadNeedsTakeover,
                 lease_id: String::new(),

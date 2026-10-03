@@ -134,9 +134,8 @@ fn workspace_repository(
                     // 缺陷 #7（同族）：聚合 plan 会话 target 以源 Design involved 集
                     // 过滤（LC selection 恒 all_members，不过滤恒 Ambiguous）；无聚合
                     // 视野（involved 空）保持原 target 集不变。
-                    let design_involved =
-                        load_involved_from_confirmed_design(lifecycle, &plan)
-                            .map_err(|reason| routing_error_for_target_error(&reason))?;
+                    let design_involved = load_involved_from_confirmed_design(lifecycle, &plan)
+                        .map_err(|reason| routing_error_for_target_error(&reason))?;
                     if !design_involved.is_empty() {
                         let involved: std::collections::BTreeSet<LogicalRepositoryId> =
                             design_involved.into_iter().collect();
@@ -249,12 +248,9 @@ fn resolve_selected_logical_repository(
     // 解析恒 IdentityMismatch（design 会话回写 involved 后 WS 重连即撞）。
     // 按 issue 持久化 lc_id 走 for_lc 权威解析（合成投影），legacy LC 语义
     // 由 for_issue_codebase 内部分流保持不变。
-    let lc_id =
-        crate::product::logical_codebase::resolve_issue_logical_codebase_id(
-            app_paths,
-            project_id,
-            issue_id,
-        )?;
+    let lc_id = crate::product::logical_codebase::resolve_issue_logical_codebase_id(
+        app_paths, project_id, issue_id,
+    )?;
     let project = ProjectStore::new(app_paths.clone()).get(project_id)?;
     RepositoryStore::for_project(app_paths.clone(), &project)
         .resolve_logical_repository_for_issue_codebase(project_id, lc_id.as_deref(), logical_id)
@@ -639,7 +635,8 @@ mod tests {
             involved: Vec<LogicalRepositoryId>,
             focus: Option<LogicalRepositoryId>,
         ) -> crate::product::models::WorkspaceSessionRecord {
-            let lifecycle = crate::product::lifecycle_store::LifecycleStore::new(self.paths.clone());
+            let lifecycle =
+                crate::product::lifecycle_store::LifecycleStore::new(self.paths.clone());
             let story = lifecycle
                 .create_story_spec(crate::product::lifecycle_store::CreateStorySpecInput {
                     project_id: "project_0001".to_string(),
@@ -686,7 +683,8 @@ mod tests {
             issue_id: &str,
             involved: Vec<LogicalRepositoryId>,
         ) -> crate::product::models::WorkspaceSessionRecord {
-            let lifecycle = crate::product::lifecycle_store::LifecycleStore::new(self.paths.clone());
+            let lifecycle =
+                crate::product::lifecycle_store::LifecycleStore::new(self.paths.clone());
             let design = lifecycle
                 .create_design_spec(crate::product::lifecycle_store::CreateDesignSpecInput {
                     project_id: "project_0001".to_string(),
@@ -727,7 +725,8 @@ mod tests {
             involved: Vec<LogicalRepositoryId>,
             effective_member_ids: Vec<LogicalRepositoryId>,
         ) -> crate::product::models::WorkspaceSessionRecord {
-            let lifecycle = crate::product::lifecycle_store::LifecycleStore::new(self.paths.clone());
+            let lifecycle =
+                crate::product::lifecycle_store::LifecycleStore::new(self.paths.clone());
             let design = lifecycle
                 .create_design_spec(crate::product::lifecycle_store::CreateDesignSpecInput {
                     project_id: "project_0001".to_string(),
@@ -815,7 +814,10 @@ mod tests {
             &session,
         )
         .unwrap_err();
-        assert_eq!(stable_routing_code(&error), "repository_routing_target_missing");
+        assert_eq!(
+            stable_routing_code(&error),
+            "repository_routing_target_missing"
+        );
     }
 
     /// 缺陷 #5（2026-10-02 全链 E2E）红→绿主锁：草稿 LC Design（involved 空）
@@ -856,10 +858,8 @@ mod tests {
     #[test]
     fn lc_design_with_multiple_involved_stays_target_ambiguous() {
         let fixture = LcStoryRoutingFixture::new();
-        let session = fixture.design_session(vec![
-            fixture.member_logical_id,
-            fixture.member_b_logical_id,
-        ]);
+        let session =
+            fixture.design_session(vec![fixture.member_logical_id, fixture.member_b_logical_id]);
         let error = workspace_repository_for_session(
             &fixture.paths,
             &LifecycleStore::new(fixture.paths.clone()),
@@ -905,7 +905,10 @@ mod tests {
             assert!(status.success(), "git {:?} failed", args);
         }
         std::fs::write(member_c_path.join("README.md"), "# member-c\n").unwrap();
-        for args in [vec!["add", "README.md"], vec!["commit", "--quiet", "-m", "init"]] {
+        for args in [
+            vec!["add", "README.md"],
+            vec!["commit", "--quiet", "-m", "init"],
+        ] {
             let status = std::process::Command::new("git")
                 .args(&args)
                 .current_dir(&member_c_path)
@@ -916,11 +919,12 @@ mod tests {
         let member_c = LogicalRepositoryId(uuid::Uuid::new_v4());
         let checkout_id =
             crate::product::logical_codebase::RepositoryCheckoutId(uuid::Uuid::new_v4());
-        let source_identity = crate::product::logical_codebase::RepositorySourceIdentity::from_git_parts(
-            &member_c_path,
-            member_c_path.join(".git"),
-            None,
-        );
+        let source_identity =
+            crate::product::logical_codebase::RepositorySourceIdentity::from_git_parts(
+                &member_c_path,
+                member_c_path.join(".git"),
+                None,
+            );
         let manifest = LogicalCodebaseManifest::new(
             "project_0001",
             fixture.manifest.provider_context_root.clone(),
@@ -1007,11 +1011,7 @@ mod tests {
         ))
         .unwrap();
 
-        let session = fixture.design_session_for_lc(
-            &issue.id,
-            vec![member_c],
-            vec![member_c],
-        );
+        let session = fixture.design_session_for_lc(&issue.id, vec![member_c], vec![member_c]);
         let repository = workspace_repository_for_session(
             &fixture.paths,
             &LifecycleStore::new(fixture.paths.clone()),

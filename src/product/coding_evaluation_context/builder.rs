@@ -1002,7 +1002,7 @@ mod tests {
             start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
             start_claim: None,
         }
-            }
+    }
 
     fn write_physical_repository_fixture(paths: &ProductAppPaths, root: &Path) {
         crate::product::json_store::write_json(

@@ -240,7 +240,7 @@ mod tests {
             start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
             start_claim: None,
         }
-            }
+    }
 
     fn attempt_key() -> CodingAttemptRunKey {
         CodingAttemptRunKey::new("project_0001", "issue_0001", "coding_attempt_0001")

@@ -95,4 +95,3 @@ pub(crate) enum ProviderRunStartMode {
     SupersedeFromAttachment,
     ClaimIfIdle,
 }
-

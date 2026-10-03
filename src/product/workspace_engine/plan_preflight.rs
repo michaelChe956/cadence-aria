@@ -192,17 +192,13 @@ fn plan_baseline_repository_path(
     // 匹配 physical_repository_id，经统一解析链取主 checkout 路径；legacy
     // 语义原样保留（既有调用面字节级不变）。
     let lc_id = crate::product::logical_codebase::resolve_issue_logical_codebase_id(
-        paths,
-        project_id,
-        issue_id,
+        paths, project_id, issue_id,
     )
     .map_err(|error| format!("resolve plan baseline codebase failed: {error}"))?;
     if let Some(lc) = lc_id.as_deref() {
         if lc != crate::product::logical_codebase::legacy_logical_codebase_id(project_id) {
-            let authority = crate::product::logical_codebase::LogicalCodebaseStore::for_lc(
-                paths.clone(),
-                lc,
-            );
+            let authority =
+                crate::product::logical_codebase::LogicalCodebaseStore::for_lc(paths.clone(), lc);
             let store = crate::product::repository_store::RepositoryStore::new(paths.clone());
             if let Ok(Some(record)) = store.resolve_physical_repository_in_issue_codebase(
                 project_id,

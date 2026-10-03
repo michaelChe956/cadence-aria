@@ -10,8 +10,7 @@
 //!   alias，alias 与 canonical 走同一 projector/service。
 
 use super::support::{
-    default_logical_codebase_id, product_app_paths, product_store_api_error,
-    resolve_lc_authority,
+    default_logical_codebase_id, product_app_paths, product_store_api_error, resolve_lc_authority,
 };
 use super::*;
 
@@ -130,16 +129,16 @@ async fn post_bootstrap_action_for_lc(
     let service = LogicalCodebaseBootstrapService::new(paths)
         .with_member_index_run_probe(Arc::new(
             move |project_id: &str, lc_id: &str, operation_id: &str| {
-                runs.is_active(&InitializationRunKey::aggregate(project_id, lc_id, operation_id))
+                runs.is_active(&InitializationRunKey::aggregate(
+                    project_id,
+                    lc_id,
+                    operation_id,
+                ))
             },
         ))
         .with_aggregate_index_rebuild(Arc::new(
             move |project_id: &str, command_id: &str, expected_revision: u64| {
-                index_operation.build_with_command_id(
-                    project_id,
-                    expected_revision,
-                    command_id,
-                )
+                index_operation.build_with_command_id(project_id, expected_revision, command_id)
             },
         ));
     let result = service
@@ -175,16 +174,13 @@ async fn post_bootstrap_action_for_lc(
     let member_index_reopened = matches!(
         result.outcome,
         crate::product::logical_codebase::BootstrapActionOutcome::Accepted
-    ) && request.step == crate::product::logical_codebase::LogicalCodebaseBootstrapStep::MemberIndex
-        && result
-            .projection
-            .steps
-            .iter()
-            .any(|step| {
-                step.step == crate::product::logical_codebase::LogicalCodebaseBootstrapStep::MemberIndex
-                    && step.status
-                        == crate::product::logical_codebase::LogicalCodebaseBootstrapStepStatus::Running
-            });
+    ) && request.step
+        == crate::product::logical_codebase::LogicalCodebaseBootstrapStep::MemberIndex
+        && result.projection.steps.iter().any(|step| {
+            step.step == crate::product::logical_codebase::LogicalCodebaseBootstrapStep::MemberIndex
+                && step.status
+                    == crate::product::logical_codebase::LogicalCodebaseBootstrapStepStatus::Running
+        });
     if member_index_reopened {
         let dependencies = state
             .aggregate_initialization_dependencies()
@@ -290,5 +286,9 @@ async fn post_bootstrap_action_for_lc(
         }),
     );
 
-    Ok((StatusCode::OK, Json(BootstrapActionResultDto::from(&result))).into_response())
+    Ok((
+        StatusCode::OK,
+        Json(BootstrapActionResultDto::from(&result)),
+    )
+        .into_response())
 }

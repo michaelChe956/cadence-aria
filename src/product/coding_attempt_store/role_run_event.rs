@@ -331,7 +331,10 @@ impl super::CodingAttemptStore {
                 if event.event_type != CodingRoleRunEventType::ExecutionEvent {
                     continue;
                 }
-                let Some(command) = event.payload.get("command").and_then(|value| value.as_str())
+                let Some(command) = event
+                    .payload
+                    .get("command")
+                    .and_then(|value| value.as_str())
                 else {
                     continue;
                 };

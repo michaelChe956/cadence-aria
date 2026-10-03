@@ -681,8 +681,7 @@ pub async fn serve_web(
             crate::web::autopilot_orchestrator::OrchestratorConfig::default(),
         ),
     );
-    let orchestrator_task =
-        tokio::spawn(async move { orchestrator.run(wake_rx).await });
+    let orchestrator_task = tokio::spawn(async move { orchestrator.run(wake_rx).await });
 
     let listener = TcpListener::bind(addr).await?;
     let bound_addr = listener.local_addr()?;
@@ -693,9 +692,7 @@ pub async fn serve_web(
     Ok(())
 }
 
-fn orchestrator_wake_subscribe(
-    state: &WebAppState,
-) -> tokio::sync::watch::Receiver<bool> {
+fn orchestrator_wake_subscribe(state: &WebAppState) -> tokio::sync::watch::Receiver<bool> {
     state.autopilot_wake.subscribe()
 }
 

@@ -77,7 +77,8 @@ impl BaselineFixture {
             source_design_spec_ids: &self.design_ids,
             repository_profile: None,
             plan_options: &self.options,
-            baseline_tree: self.baseline.as_ref(),                existing_work_item_ids: &[],
+            baseline_tree: self.baseline.as_ref(),
+            existing_work_item_ids: &[],
             enrollment_target: None,
 
             now: "2026-08-27T00:00:00Z",

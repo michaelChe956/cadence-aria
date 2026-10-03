@@ -3,13 +3,12 @@ use tempfile::TempDir;
 use super::*;
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_models::{
-    CodingStartOrigin, CodingStartPhase, CodingStartRunPolicy,
     AttemptTargetSnapshot, CodingAdmissionKind, CodingAttemptScope, CodingAttemptStatus,
     CodingExecutionStage, CodingExecutionUnitStatus, CodingGateAction, CodingGateActionType,
-    CodingProviderRole, FindingSeverity, GroupFinalReadinessDiagnostic,
-    GroupFinalReadinessDiagnosticKind, GroupFinalReadinessSnapshot, GroupFinalReadinessStatus,
-    GroupFinalReadinessUnit, PushStatus, RemoteKind, ReviewFinding, ReviewRequest,
-    ReviewRequestKind, ReviewRequestOwnerKind, ReviewVerdict,
+    CodingProviderRole, CodingStartOrigin, CodingStartPhase, CodingStartRunPolicy, FindingSeverity,
+    GroupFinalReadinessDiagnostic, GroupFinalReadinessDiagnosticKind, GroupFinalReadinessSnapshot,
+    GroupFinalReadinessStatus, GroupFinalReadinessUnit, PushStatus, RemoteKind, ReviewFinding,
+    ReviewRequest, ReviewRequestKind, ReviewRequestOwnerKind, ReviewVerdict,
 };
 use crate::product::json_store::write_json;
 use crate::product::logical_codebase::{LogicalRepositoryId, RepositoryCheckoutId};
@@ -133,7 +132,9 @@ fn old_attempt_json_defaults_to_manual_and_frozen_policy_survives_updates() {
         policy_revision: 1,
         source_plan_revision: "work_item_plan_revision_0001".into(),
     };
-    store.update_attempt_non_status_fields(&replacement).unwrap();
+    store
+        .update_attempt_non_status_fields(&replacement)
+        .unwrap();
     assert_eq!(
         store
             .get_attempt(&created.project_id, &created.issue_id, &created.id)
@@ -236,9 +237,9 @@ fn status_machine_rejects_direct_blocked_to_running_and_manual_recovery_only_to_
             version: 0,
             manual_recovery_reason: None,
             admission_ticket_consumed_at: None,
-                        start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
             ..running
-            })
+        })
         .expect("seed manual-recovery attempt");
 
     for status in [
@@ -291,9 +292,9 @@ fn aborting_manual_recovery_attempt_preserves_reason_for_audit() {
             version: 0,
             manual_recovery_reason: Some("attempt_awaiting_manual_recovery".to_string()),
             admission_ticket_consumed_at: None,
-                        start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
             ..running
-            })
+        })
         .expect("seed manual-recovery attempt");
 
     let aborted = store

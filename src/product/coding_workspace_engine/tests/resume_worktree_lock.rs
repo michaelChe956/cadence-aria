@@ -103,7 +103,10 @@ fn resume_after_takeover_release_reacquires_and_rebinds_lock() {
     // runner 死亡 → AwaitingManualRecovery。
     fixture
         .store
-        .transition_to_awaiting_manual_recovery(&fixture.attempt.id, "coding_runner_failed_while_running")
+        .transition_to_awaiting_manual_recovery(
+            &fixture.attempt.id,
+            "coding_runner_failed_while_running",
+        )
         .expect("manual recovery");
     // 确认接管显式释放锁（A09 takeover 的落盘效果）。
     fixture
@@ -136,8 +139,14 @@ fn resume_after_takeover_release_reacquires_and_rebinds_lock() {
         .validate_attempt_issue_shared_worktree_lock_if_present(&recovered)
         .expect("coding start validation passes after rebind");
     let record = lock_record(&fixture);
-    assert_eq!(record.current_active_work_item_id.as_deref(), Some(WORK_ITEM_ID));
-    assert_eq!(record.current_lock_owner_id.as_deref(), Some(recovered.id.as_str()));
+    assert_eq!(
+        record.current_active_work_item_id.as_deref(),
+        Some(WORK_ITEM_ID)
+    );
+    assert_eq!(
+        record.current_lock_owner_id.as_deref(),
+        Some(recovered.id.as_str())
+    );
 }
 
 #[test]
@@ -145,7 +154,10 @@ fn resume_with_self_held_lock_while_awaiting_recovery_keeps_or_rebinds_owner() {
     let fixture = seed_running_attempt_with_bound_lock();
     fixture
         .store
-        .transition_to_awaiting_manual_recovery(&fixture.attempt.id, "coding_runner_failed_while_running")
+        .transition_to_awaiting_manual_recovery(
+            &fixture.attempt.id,
+            "coding_runner_failed_while_running",
+        )
         .expect("manual recovery");
     let engine = engine_for(&fixture);
     // AMR 非活跃：自持锁按死亡残留判别，释放后重绑（幂等，owner 不变）。
@@ -153,8 +165,14 @@ fn resume_with_self_held_lock_while_awaiting_recovery_keeps_or_rebinds_owner() {
         .ensure_issue_worktree_lock_for_resumed_attempt(&fixture.attempt)
         .expect("self residue rebind");
     let record = lock_record(&fixture);
-    assert_eq!(record.current_lock_owner_id.as_deref(), Some(fixture.attempt.id.as_str()));
-    assert_eq!(record.current_active_work_item_id.as_deref(), Some(WORK_ITEM_ID));
+    assert_eq!(
+        record.current_lock_owner_id.as_deref(),
+        Some(fixture.attempt.id.as_str())
+    );
+    assert_eq!(
+        record.current_active_work_item_id.as_deref(),
+        Some(WORK_ITEM_ID)
+    );
 }
 
 #[test]
@@ -162,7 +180,10 @@ fn resume_with_transient_lease_residue_adopts_and_rebinds() {
     let fixture = seed_running_attempt_with_bound_lock();
     fixture
         .store
-        .transition_to_awaiting_manual_recovery(&fixture.attempt.id, "coding_runner_failed_while_running")
+        .transition_to_awaiting_manual_recovery(
+            &fixture.attempt.id,
+            "coding_runner_failed_while_running",
+        )
         .expect("manual recovery");
     // 恢复 spawn 失败遗留的瞬态 lease 残留（active=WI，owner 未绑 attempt）。
     fixture
@@ -183,8 +204,14 @@ fn resume_with_transient_lease_residue_adopts_and_rebinds() {
         .ensure_issue_worktree_lock_for_resumed_attempt(&fixture.attempt)
         .expect("transient residue adoption");
     let record = lock_record(&fixture);
-    assert_eq!(record.current_lock_owner_id.as_deref(), Some(fixture.attempt.id.as_str()));
-    assert_eq!(record.current_active_work_item_id.as_deref(), Some(WORK_ITEM_ID));
+    assert_eq!(
+        record.current_lock_owner_id.as_deref(),
+        Some(fixture.attempt.id.as_str())
+    );
+    assert_eq!(
+        record.current_active_work_item_id.as_deref(),
+        Some(WORK_ITEM_ID)
+    );
 }
 
 #[test]
@@ -192,7 +219,10 @@ fn resume_with_foreign_active_holder_stops_waiting_without_preemption() {
     let fixture = seed_running_attempt_with_bound_lock();
     fixture
         .store
-        .transition_to_awaiting_manual_recovery(&fixture.attempt.id, "coding_runner_failed_while_running")
+        .transition_to_awaiting_manual_recovery(
+            &fixture.attempt.id,
+            "coding_runner_failed_while_running",
+        )
         .expect("manual recovery");
     fixture
         .lifecycle
@@ -220,7 +250,12 @@ fn resume_with_foreign_active_holder_stops_waiting_without_preemption() {
         .expect("other attempt");
     fixture
         .lifecycle
-        .try_acquire_issue_worktree_lock(PROJECT_ID, ISSUE_ID, OTHER_WORK_ITEM_ID, "issue_worktree_lease_b")
+        .try_acquire_issue_worktree_lock(
+            PROJECT_ID,
+            ISSUE_ID,
+            OTHER_WORK_ITEM_ID,
+            "issue_worktree_lease_b",
+        )
         .expect("foreign lease");
     fixture
         .lifecycle
@@ -241,8 +276,14 @@ fn resume_with_foreign_active_holder_stops_waiting_without_preemption() {
     );
     // 绝不抢占：锁仍归 B。
     let record = lock_record(&fixture);
-    assert_eq!(record.current_lock_owner_id.as_deref(), Some(other.id.as_str()));
-    assert_eq!(record.current_active_work_item_id.as_deref(), Some(OTHER_WORK_ITEM_ID));
+    assert_eq!(
+        record.current_lock_owner_id.as_deref(),
+        Some(other.id.as_str())
+    );
+    assert_eq!(
+        record.current_active_work_item_id.as_deref(),
+        Some(OTHER_WORK_ITEM_ID)
+    );
 }
 
 #[test]
@@ -250,7 +291,10 @@ fn resume_with_foreign_dead_holder_requires_takeover_surface() {
     let fixture = seed_running_attempt_with_bound_lock();
     fixture
         .store
-        .transition_to_awaiting_manual_recovery(&fixture.attempt.id, "coding_runner_failed_while_running")
+        .transition_to_awaiting_manual_recovery(
+            &fixture.attempt.id,
+            "coding_runner_failed_while_running",
+        )
         .expect("manual recovery");
     fixture
         .lifecycle
@@ -277,7 +321,12 @@ fn resume_with_foreign_dead_holder_requires_takeover_surface() {
         .expect("other attempt");
     fixture
         .lifecycle
-        .try_acquire_issue_worktree_lock(PROJECT_ID, ISSUE_ID, OTHER_WORK_ITEM_ID, "issue_worktree_lease_b")
+        .try_acquire_issue_worktree_lock(
+            PROJECT_ID,
+            ISSUE_ID,
+            OTHER_WORK_ITEM_ID,
+            "issue_worktree_lease_b",
+        )
         .expect("foreign lease");
     fixture
         .lifecycle
@@ -290,7 +339,12 @@ fn resume_with_foreign_dead_holder_requires_takeover_surface() {
         .expect("foreign running");
     fixture
         .store
-        .update_attempt_status(PROJECT_ID, ISSUE_ID, &other.id, crate::product::coding_models::CodingAttemptStatus::Failed)
+        .update_attempt_status(
+            PROJECT_ID,
+            ISSUE_ID,
+            &other.id,
+            crate::product::coding_models::CodingAttemptStatus::Failed,
+        )
         .expect("foreign failed");
 
     let engine = engine_for(&fixture);
@@ -303,7 +357,10 @@ fn resume_with_foreign_dead_holder_requires_takeover_surface() {
     );
     // 未确认接管不抢占：锁仍归终态 B，等待项投影走既有 lease_takeover 面。
     let record = lock_record(&fixture);
-    assert_eq!(record.current_lock_owner_id.as_deref(), Some(other.id.as_str()));
+    assert_eq!(
+        record.current_lock_owner_id.as_deref(),
+        Some(other.id.as_str())
+    );
 }
 
 #[test]

@@ -119,7 +119,8 @@ mod tests {
         CodingAdmissionKind, GroupFinalReadinessSnapshot, GroupFinalReadinessUnit,
     };
     use crate::web::wiga_gate_fixture::{
-        EnrolledGateFixture, ISSUE_ID, PROJECT_ID, complete_enrolled_group_waiting_for_final_confirm,
+        EnrolledGateFixture, ISSUE_ID, PROJECT_ID,
+        complete_enrolled_group_waiting_for_final_confirm,
     };
 
     /// 主证据（R5）：Fake 真实业务链跑到 FinalConfirm 等待后，readiness 被
@@ -145,7 +146,10 @@ mod tests {
         assert_eq!(&first.key, &second.key);
         assert_eq!(&first.occurred_at, &second.occurred_at);
         assert!(!second.final_confirmed);
-        assert_eq!(fixture.attempt().status, CodingAttemptStatus::WaitingForHuman);
+        assert_eq!(
+            fixture.attempt().status,
+            CodingAttemptStatus::WaitingForHuman
+        );
 
         fixture.confirm_final_by_human().await;
         let completed = issue_coding_final_confirm_info(&fixture.inner.paths, PROJECT_ID, ISSUE_ID)
@@ -281,24 +285,27 @@ mod tests {
     ) -> crate::product::coding_models::CodingExecutionAttempt {
         let issue_id = format!("issue_{attempt_key}");
         let created = store
-            .create_group_attempt(crate::product::coding_attempt_store::CreateGroupCodingAttemptInput {
-                project_id: "project_0001".to_string(),
-                issue_id: issue_id.clone(),
-                plan_id: "work_item_plan_0001".to_string(),
-                current_work_item_id: "work_item_0001".to_string(),
-                base_branch: "main".to_string(),
-                branch_name: "aria/issues/issue_0001".to_string(),
-                worktree_path: None,
-                provider_config_snapshot: crate::web::workspace_ws_types::ProviderConfigSnapshot {
-                    author: crate::product::models::ProviderName::Fake,
-                    reviewer: Some(crate::product::models::ProviderName::Fake),
-                    review_rounds: 1,
-                    permission_modes: Default::default(),
+            .create_group_attempt(
+                crate::product::coding_attempt_store::CreateGroupCodingAttemptInput {
+                    project_id: "project_0001".to_string(),
+                    issue_id: issue_id.clone(),
+                    plan_id: "work_item_plan_0001".to_string(),
+                    current_work_item_id: "work_item_0001".to_string(),
+                    base_branch: "main".to_string(),
+                    branch_name: "aria/issues/issue_0001".to_string(),
+                    worktree_path: None,
+                    provider_config_snapshot:
+                        crate::web::workspace_ws_types::ProviderConfigSnapshot {
+                            author: crate::product::models::ProviderName::Fake,
+                            reviewer: Some(crate::product::models::ProviderName::Fake),
+                            review_rounds: 1,
+                            permission_modes: Default::default(),
+                        },
+                    target_snapshot: None,
+                    max_auto_rework: 1,
+                    start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
                 },
-                target_snapshot: None,
-                max_auto_rework: 1,
-                start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
-            })
+            )
             .expect("create group attempt");
         // 反例矩阵以固定 id 落盘（`write_coding_attempt_for_test` 支持），
         // 与 snapshot.attempt_id/节点 attempt_id 保持一致。
@@ -353,13 +360,15 @@ mod tests {
         let fixture = complete_enrolled_group_waiting_for_final_confirm().await;
         let paths = fixture.inner.paths.clone();
         let coding = issue_coding_final_confirm_info(&paths, PROJECT_ID, ISSUE_ID).unwrap();
-        let plan =
-            crate::web::plan_confirmed_info::issue_plan_confirmed_info(&paths, PROJECT_ID, ISSUE_ID)
-                .unwrap();
+        let plan = crate::web::plan_confirmed_info::issue_plan_confirmed_info(
+            &paths, PROJECT_ID, ISSUE_ID,
+        )
+        .unwrap();
         assert_eq!(coding.len(), 1);
         assert!(coding[0].key.starts_with("coding_final_confirm:"));
         assert!(
-            plan.iter().all(|info| info.key.starts_with("plan_confirmed:")),
+            plan.iter()
+                .all(|info| info.key.starts_with("plan_confirmed:")),
             "plan info keys must stay in their own namespace: {plan:?}"
         );
     }

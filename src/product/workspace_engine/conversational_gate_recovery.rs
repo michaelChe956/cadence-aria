@@ -509,12 +509,11 @@ impl super::WorkspaceEngine {
         let authoritative_refs_readable = facts.source_revision_ref.is_some()
             && facts.plan_candidate_ir_ref.is_some()
             && facts.mechanical_report_ref.is_some()
-            && !facts
-                .missing
-                .iter()
-                .any(|item| item.starts_with("source_revision_unreadable")
+            && !facts.missing.iter().any(|item| {
+                item.starts_with("source_revision_unreadable")
                     || item.starts_with("plan_candidate_ir_unreadable")
-                    || item.starts_with("mechanical_report_unreadable"));
+                    || item.starts_with("mechanical_report_unreadable")
+            });
         let state = if facts.complete {
             OperationState::Accepted
         } else if command.action == CandidateRecoveryAction::Rebuild && authoritative_refs_readable
@@ -538,10 +537,11 @@ impl super::WorkspaceEngine {
             if let Some(source_ref) = expected.work_item_plan_source_revision_ref.as_deref()
                 && let Ok(source) = source_store.get_source_revision(&scope, source_ref)
             {
-                self.session.artifact = Some(crate::web::workspace_ws_types::ArtifactPayload::Markdown {
-                    markdown: source.source,
-                    diff: None,
-                });
+                self.session.artifact =
+                    Some(crate::web::workspace_ws_types::ArtifactPayload::Markdown {
+                        markdown: source.source,
+                        diff: None,
+                    });
             }
         }
 

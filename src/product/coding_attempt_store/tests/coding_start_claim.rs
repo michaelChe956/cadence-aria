@@ -56,7 +56,10 @@ fn coding_start_claim_is_single_shot_and_frozen_against_updates() {
         .get_attempt(PROJECT_ID, ISSUE_ID, &attempt.id)
         .unwrap();
     assert_eq!(
-        stored.start_claim.as_ref().map(|claim| claim.command_id.as_str()),
+        stored
+            .start_claim
+            .as_ref()
+            .map(|claim| claim.command_id.as_str()),
         Some("start-command-a")
     );
 }
@@ -71,13 +74,15 @@ fn coding_start_phase_advances_only_for_claimed_command() {
     else {
         panic!("first claim must succeed");
     };
-    assert!(store
-        .advance_coding_start_phase(
-            &claimed,
-            "start-command-b",
-            CodingStartPhase::RunnerRegistered,
-        )
-        .is_err());
+    assert!(
+        store
+            .advance_coding_start_phase(
+                &claimed,
+                "start-command-b",
+                CodingStartPhase::RunnerRegistered,
+            )
+            .is_err()
+    );
     let advanced = store
         .advance_coding_start_phase(
             &claimed,
@@ -97,7 +102,9 @@ fn coding_start_claim_rejects_non_created_attempt_without_existing_claim() {
     let mut running = attempt.clone();
     running.status = CodingAttemptStatus::Running;
     store.write_coding_attempt_for_test(&running).unwrap();
-    let result =
-        store.claim_coding_start(&running, "start-command-a", &CodingStartOrigin::Manual);
-    assert!(result.is_err(), "claim must fail-closed off the first-start state");
+    let result = store.claim_coding_start(&running, "start-command-a", &CodingStartOrigin::Manual);
+    assert!(
+        result.is_err(),
+        "claim must fail-closed off the first-start state"
+    );
 }

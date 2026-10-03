@@ -339,11 +339,8 @@ impl CodingWorkspaceEngine {
                                 .and_then(|shared| shared.current_active_work_item_id),
                         }
                         .unwrap_or_else(|| active_work_item_id.clone());
-                    self.ensure_issue_shared_worktree_clean(
-                        &current,
-                        &shared_active_work_item_id,
-                    )
-                    .await?;
+                    self.ensure_issue_shared_worktree_clean(&current, &shared_active_work_item_id)
+                        .await?;
                 }
             }
             CodingAttemptScope::WorkItem => {
@@ -385,23 +382,23 @@ impl CodingWorkspaceEngine {
         Ok(())
     }
 
-/// 删除链的「自持矛盾布局」判别：`target_snapshot` 存在（Logical 路由）且
-/// issue 维 legacy record 的锁 owner 正是本 attempt。仅此形态（缺陷 #13 层2
-/// 分流修复前 group create 误写）在删除时整体跳过 owner 校验 / active item
-/// 读取 / clean 检查；Legacy 路由正常形态（snapshot 缺席）与他人/无主残留
-/// 一律返回 false 走原校验链。
-fn delete_tolerates_self_owned_legacy_layout(
-    lifecycle: &LifecycleStore,
-    attempt: &CodingExecutionAttempt,
-) -> bool {
-    attempt.target_snapshot.is_some()
-        && lifecycle
-            .get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)
-            .ok()
-            .flatten()
-            .and_then(|shared| shared.current_lock_owner_id)
-            .is_some_and(|owner| owner == attempt.id)
-}
+    /// 删除链的「自持矛盾布局」判别：`target_snapshot` 存在（Logical 路由）且
+    /// issue 维 legacy record 的锁 owner 正是本 attempt。仅此形态（缺陷 #13 层2
+    /// 分流修复前 group create 误写）在删除时整体跳过 owner 校验 / active item
+    /// 读取 / clean 检查；Legacy 路由正常形态（snapshot 缺席）与他人/无主残留
+    /// 一律返回 false 走原校验链。
+    fn delete_tolerates_self_owned_legacy_layout(
+        lifecycle: &LifecycleStore,
+        attempt: &CodingExecutionAttempt,
+    ) -> bool {
+        attempt.target_snapshot.is_some()
+            && lifecycle
+                .get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)
+                .ok()
+                .flatten()
+                .and_then(|shared| shared.current_lock_owner_id)
+                .is_some_and(|owner| owner == attempt.id)
+    }
 
     /// 记录 work item 的完成 commit。
     ///

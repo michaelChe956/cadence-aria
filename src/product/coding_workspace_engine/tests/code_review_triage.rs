@@ -588,10 +588,12 @@ async fn code_review_complete_persists_facts_before_emitting_events() {
                     1,
                     "completion checkpoint persisted exactly once"
                 );
-                assert!(reports[0]
-                    .raw_provider_output_ref
-                    .as_deref()
-                    .is_some_and(|reference| !reference.is_empty()));
+                assert!(
+                    reports[0]
+                        .raw_provider_output_ref
+                        .as_deref()
+                        .is_some_and(|reference| !reference.is_empty())
+                );
             }
             _ => {}
         }

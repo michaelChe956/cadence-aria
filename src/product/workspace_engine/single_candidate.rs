@@ -324,8 +324,8 @@ impl WorkspaceEngine {
                 plan_options: &plan.options,
                 baseline_tree: baseline_tree.as_ref(),
                 existing_work_item_ids: &existing_work_item_ids,
-            enrollment_target: None,
-            now: &validation_now,
+                enrollment_target: None,
+                now: &validation_now,
             },
         )
         .map_err(|diagnostics| {

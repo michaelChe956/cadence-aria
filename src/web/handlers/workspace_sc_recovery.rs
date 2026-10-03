@@ -13,19 +13,15 @@ use axum::http::StatusCode;
 use serde_json::json;
 
 use crate::product::lifecycle_store::LifecycleStore;
-use crate::product::models::{
-    SingleCandidatePhase, WorkspaceSessionStatus, WorkspaceType,
-};
+use crate::product::models::{SingleCandidatePhase, WorkspaceSessionStatus, WorkspaceType};
 use crate::product::work_item_plan_policy::{RunPolicy, WorkItemPlanFlowKind};
 use crate::web::error::{ApiError, ApiResult};
 use crate::web::handlers::support::{product_app_paths, product_store_api_error};
 use crate::web::handlers::workspace_choice::resolve_session_manager;
 use crate::web::state::WebAppState;
 use crate::web::types::{RetryFailedScRunRequest, RetryFailedScRunStatus};
+use crate::web::workspace_ws_handler::{ProviderRunKind, spawn_provider_run_claiming_idle};
 use crate::web::workspace_ws_types::{ProviderConfigSnapshot, TimelineNodeStatus};
-use crate::web::workspace_ws_handler::{
-    ProviderRunKind, spawn_provider_run_claiming_idle,
-};
 
 pub async fn post_workspace_failed_sc_run_retry(
     State(state): State<WebAppState>,
@@ -57,7 +53,10 @@ pub async fn post_workspace_failed_sc_run_retry(
                 crate::product::models::ScRecoveryClaimState::NeedsHuman => "needs_human",
                 crate::product::models::ScRecoveryClaimState::Accepted => "replayed",
             };
-            return Ok((StatusCode::OK, Json(retry_status(&request, &failed_node_id, state_name))));
+            return Ok((
+                StatusCode::OK,
+                Json(retry_status(&request, &failed_node_id, state_name)),
+            ));
         }
         if record.single_candidate_phase == Some(SingleCandidatePhase::Failed) {
             return Err(ApiError::runtime(
@@ -110,15 +109,14 @@ pub async fn post_workspace_failed_sc_run_retry(
         .claim_failed_sc_run_retry(&session_id, &failed_node_id, &request.command_id)
         .map_err(product_store_api_error)?;
     if let crate::product::lifecycle_store::ClaimScRecoveryOutcome::Existing(existing) = claimed {
-        let state_name = match existing
-            .sc_recovery_claim
-            .as_ref()
-            .map(|claim| claim.state)
-        {
+        let state_name = match existing.sc_recovery_claim.as_ref().map(|claim| claim.state) {
             Some(crate::product::models::ScRecoveryClaimState::NeedsHuman) => "needs_human",
             _ => "replayed",
         };
-        return Ok((StatusCode::OK, Json(retry_status(&request, &failed_node_id, state_name))));
+        return Ok((
+            StatusCode::OK,
+            Json(retry_status(&request, &failed_node_id, state_name)),
+        ));
     }
 
     // 现有 start_generation（SC Failed 重臂）+ 非 superseding 派发。
@@ -133,7 +131,9 @@ pub async fn post_workspace_failed_sc_run_retry(
     let engine = manager.engine();
     let generation = {
         let mut locked = engine.lock().await;
-        locked.start_generation(provider_config, reviewer_enabled).await
+        locked
+            .start_generation(provider_config, reviewer_enabled)
+            .await
     };
     let dispatch = match generation {
         Err(message) => Err(message),
@@ -154,7 +154,12 @@ pub async fn post_workspace_failed_sc_run_retry(
         Ok(false) => {
             // 认领窗口内活 run 被他人启动：本命令未派发，交由其持有者驱动；
             // 认领保留，人工可观察，不隐式重试。
-            mark_needs_human(&lifecycle, &session_id, &failed_node_id, &request.command_id);
+            mark_needs_human(
+                &lifecycle,
+                &session_id,
+                &failed_node_id,
+                &request.command_id,
+            );
             Ok((
                 StatusCode::OK,
                 Json(retry_status(&request, &failed_node_id, "needs_human")),
@@ -162,7 +167,12 @@ pub async fn post_workspace_failed_sc_run_retry(
         }
         Err(message) => {
             // 派发外部副作用是否发生不可证明：保留认领、停人工分诊。
-            mark_needs_human(&lifecycle, &session_id, &failed_node_id, &request.command_id);
+            mark_needs_human(
+                &lifecycle,
+                &session_id,
+                &failed_node_id,
+                &request.command_id,
+            );
             Ok((
                 StatusCode::OK,
                 Json(retry_status(&request, &failed_node_id, "needs_human")),
@@ -171,7 +181,11 @@ pub async fn post_workspace_failed_sc_run_retry(
     }
 }
 
-fn retry_status(request: &RetryFailedScRunRequest, failed_node_id: &str, state: &str) -> RetryFailedScRunStatus {
+fn retry_status(
+    request: &RetryFailedScRunRequest,
+    failed_node_id: &str,
+    state: &str,
+) -> RetryFailedScRunStatus {
     RetryFailedScRunStatus {
         command_id: request.command_id.clone(),
         failed_node_id: failed_node_id.to_string(),
@@ -253,10 +267,12 @@ mod tests {
         format!("/api/workspace-sessions/{session_id}/failed-sc-runs/{failed_node_id}/retry")
     }
 
-    fn durable(state: &WebAppState, session_id: &str) -> crate::product::models::WorkspaceSessionRecord {
-        let paths = crate::product::app_paths::ProductAppPaths::new(
-            state.workspace_root.join(".aria"),
-        );
+    fn durable(
+        state: &WebAppState,
+        session_id: &str,
+    ) -> crate::product::models::WorkspaceSessionRecord {
+        let paths =
+            crate::product::app_paths::ProductAppPaths::new(state.workspace_root.join(".aria"));
         LifecycleStore::new(paths)
             .get_workspace_session(session_id)
             .expect("durable session")
@@ -293,12 +309,10 @@ mod tests {
                 crate::product::work_item_plan_policy::WorkItemPlanFlowKind::SingleCandidate;
             record.run_policy = RunPolicy::Interactive;
             record.single_candidate_phase = Some(SingleCandidatePhase::Evaluate);
-            crate::product::json_store::write_json(
-                &fixture.session_path(&record.id),
-                &record,
-            )
-            .expect("persist evaluate session");
-            engine.session = crate::product::workspace_engine::WorkspaceSession::from_record(record);
+            crate::product::json_store::write_json(&fixture.session_path(&record.id), &record)
+                .expect("persist evaluate session");
+            engine.session =
+                crate::product::workspace_engine::WorkspaceSession::from_record(record);
             // 评审失败现场要求非 Fake reviewer（Fake 是快速跳过路径）。
             engine.session.reviewer_provider = Some(ProviderName::ClaudeCode);
             engine.start_review().await;
@@ -317,7 +331,10 @@ mod tests {
         };
         {
             let record = durable(&state, &session_id);
-            assert_eq!(record.single_candidate_phase, Some(SingleCandidatePhase::Failed));
+            assert_eq!(
+                record.single_candidate_phase,
+                Some(SingleCandidatePhase::Failed)
+            );
             assert_eq!(record.status, WorkspaceSessionStatus::Failed);
         }
 
@@ -329,13 +346,18 @@ mod tests {
 
         // 前置 1：fixture 的生成 run 仍注册为活 run → 409 busy，零副作用。
         assert!(manager.is_active_run());
-        let (status, payload) = post_json(&app, retry_uri(&session_id, &failed_node_id), &body).await;
+        let (status, payload) =
+            post_json(&app, retry_uri(&session_id, &failed_node_id), &body).await;
         assert_eq!(status, StatusCode::CONFLICT, "busy run must 409: {payload}");
         assert!(manager.abort_active_run().await, "abort fixture run");
 
         // 前置 2：错误失败节点 → 409，零副作用。
-        let (status, payload) =
-            post_json(&app, retry_uri(&session_id, "node_not_a_failed_node"), &body).await;
+        let (status, payload) = post_json(
+            &app,
+            retry_uri(&session_id, "node_not_a_failed_node"),
+            &body,
+        )
+        .await;
         assert_eq!(
             status,
             StatusCode::CONFLICT,
@@ -349,7 +371,8 @@ mod tests {
 
         // 正确节点：200 accepted。
         let ledger_before = durable(&state, &session_id).provider_start_ledger.len();
-        let (status, payload) = post_json(&app, retry_uri(&session_id, &failed_node_id), &body).await;
+        let (status, payload) =
+            post_json(&app, retry_uri(&session_id, &failed_node_id), &body).await;
         assert_eq!(status, StatusCode::OK, "correct node retry: {payload}");
         assert_eq!(payload["state"], "accepted", "{payload}");
         assert_eq!(payload["command_id"], "cmd-sc-retry-1", "{payload}");
@@ -369,7 +392,8 @@ mod tests {
         }
 
         // 重复同键：replayed 读原结果，不增加 provider_start_ledger。
-        let (status, payload) = post_json(&app, retry_uri(&session_id, &failed_node_id), &body).await;
+        let (status, payload) =
+            post_json(&app, retry_uri(&session_id, &failed_node_id), &body).await;
         assert_eq!(status, StatusCode::OK, "same-key replay: {payload}");
         assert_eq!(payload["state"], "replayed", "{payload}");
         assert_eq!(
@@ -383,7 +407,8 @@ mod tests {
             "command_id": "cmd-sc-retry-2",
             "expected_phase": "failed",
         });
-        let (status, payload) = post_json(&app, retry_uri(&session_id, &failed_node_id), &other).await;
+        let (status, payload) =
+            post_json(&app, retry_uri(&session_id, &failed_node_id), &other).await;
         assert_eq!(
             status,
             StatusCode::CONFLICT,

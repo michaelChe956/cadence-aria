@@ -419,9 +419,7 @@ fn intent_path(paths: &ProductAppPaths) -> std::path::PathBuf {
         .join("automation-plan-intent.json")
 }
 
-fn read_intent(
-    paths: &ProductAppPaths,
-) -> crate::product::models::automation::PreparedPlanIntent {
+fn read_intent(paths: &ProductAppPaths) -> crate::product::models::automation::PreparedPlanIntent {
     read_json(&intent_path(paths)).unwrap()
 }
 
@@ -441,32 +439,33 @@ fn issue_automation_store_ensure_plan_binding_binds_once_and_is_idempotent() {
 
     let creates = std::sync::atomic::AtomicUsize::new(0);
     let bound = store
-        .ensure_plan_binding("project_1", "issue_1", &enrolled.enrollment_id, |current, intent| {
-            creates.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            assert_eq!(current.enrollment_id, enrolled.enrollment_id);
-            assert_eq!(
-                intent.plan_id,
-                format!("issue_work_item_plan_auto_{}", current.prepare_intent_id)
-            );
-            assert_eq!(
-                intent.session_id,
-                format!("workspace_session_auto_{}", current.prepare_intent_id)
-            );
-            Ok(())
-        })
+        .ensure_plan_binding(
+            "project_1",
+            "issue_1",
+            &enrolled.enrollment_id,
+            |current, intent| {
+                creates.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                assert_eq!(current.enrollment_id, enrolled.enrollment_id);
+                assert_eq!(
+                    intent.plan_id,
+                    format!("issue_work_item_plan_auto_{}", current.prepare_intent_id)
+                );
+                assert_eq!(
+                    intent.session_id,
+                    format!("workspace_session_auto_{}", current.prepare_intent_id)
+                );
+                Ok(())
+            },
+        )
         .unwrap();
     assert_eq!(bound.policy_revision, enrolled.policy_revision + 1);
     assert_eq!(
         bound.plan_id.as_deref(),
-        Some(
-            format!("issue_work_item_plan_auto_{}", enrolled.prepare_intent_id).as_str()
-        )
+        Some(format!("issue_work_item_plan_auto_{}", enrolled.prepare_intent_id).as_str())
     );
     assert_eq!(
         bound.session_id.as_deref(),
-        Some(
-            format!("workspace_session_auto_{}", enrolled.prepare_intent_id).as_str()
-        )
+        Some(format!("workspace_session_auto_{}", enrolled.prepare_intent_id).as_str())
     );
 
     // 重复补偿：完整绑定 → Unchanged 幂等，不再调用 create，revision 不再 +1。
@@ -514,7 +513,9 @@ fn issue_automation_store_ensure_plan_binding_recovers_after_create_failure() {
     assert!(intent_path(&paths).exists());
 
     let bound = store
-        .ensure_plan_binding("project_1", "issue_1", &enrolled.enrollment_id, |_, _| Ok(()))
+        .ensure_plan_binding("project_1", "issue_1", &enrolled.enrollment_id, |_, _| {
+            Ok(())
+        })
         .unwrap();
     assert_eq!(bound.policy_revision, enrolled.policy_revision + 1);
 }
@@ -536,7 +537,9 @@ fn issue_automation_store_ensure_plan_binding_fails_closed_on_divergent_reopen()
         )
         .unwrap();
     let bound = store
-        .ensure_plan_binding("project_1", "issue_1", &enrolled.enrollment_id, |_, _| Ok(()))
+        .ensure_plan_binding("project_1", "issue_1", &enrolled.enrollment_id, |_, _| {
+            Ok(())
+        })
         .unwrap();
     assert_eq!(bound.policy_revision, enrolled.policy_revision + 1);
 
@@ -641,7 +644,7 @@ fn issue_automation_store_ensure_plan_binding_rejects_corrupt_disabled_and_missi
 /// 原样返回（进程重建按 phase 分诊）；换源重开身份漂移 fail-closed。
 #[test]
 fn issue_automation_store_plan_generation_checkpoint_phases_and_conflicts() {
-    use crate::product::models::automation::{PlanGenerationPhase, PlanGenerationIntent};
+    use crate::product::models::automation::{PlanGenerationIntent, PlanGenerationPhase};
 
     let tmp = tempfile::tempdir().unwrap();
     let paths = ProductAppPaths::new(tmp.path());
@@ -706,7 +709,11 @@ fn issue_automation_store_plan_generation_checkpoint_phases_and_conflicts() {
     assert!(matches!(error, EnrollmentError::Conflict { .. }));
 
     // Disable → 异 payload 重开：派生身份漂移 → 认领 fail-closed。
-    let bound_revision = store.get("project_1", "issue_1").unwrap().unwrap().policy_revision;
+    let bound_revision = store
+        .get("project_1", "issue_1")
+        .unwrap()
+        .unwrap()
+        .policy_revision;
     store
         .compare_and_set(
             "project_1",
@@ -715,7 +722,11 @@ fn issue_automation_store_plan_generation_checkpoint_phases_and_conflicts() {
             EnrollmentWriteCommand::Disable,
         )
         .unwrap();
-    let disabled_revision = store.get("project_1", "issue_1").unwrap().unwrap().policy_revision;
+    let disabled_revision = store
+        .get("project_1", "issue_1")
+        .unwrap()
+        .unwrap()
+        .policy_revision;
     let mut other_options = options();
     other_options.review_rounds = 2;
     store
@@ -759,15 +770,11 @@ fn issue_automation_store_ensure_plan_binding_concurrent_workers_bind_once() {
         std::thread::spawn(move || {
             barrier.wait();
             let store = IssueAutomationStore::new((*paths).clone());
-            let result = store.ensure_plan_binding(
-                "project_1",
-                "issue_1",
-                &enrollment_id,
-                |_, _| {
+            let result =
+                store.ensure_plan_binding("project_1", "issue_1", &enrollment_id, |_, _| {
                     creates.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     Ok(())
-                },
-            );
+                });
             let _ = tx.send(result);
         });
     }

@@ -69,9 +69,7 @@ impl RepositoryInitializationOperationStore {
             return Ok(Vec::new());
         }
         let mut file_names: Vec<String> = std::fs::read_dir(&root)
-            .map_err(|error| {
-                ProductStoreError::Io(format!("open {}: {error}", root.display()))
-            })?
+            .map_err(|error| ProductStoreError::Io(format!("open {}: {error}", root.display())))?
             .filter_map(|entry| {
                 let path = entry.ok()?.path();
                 let name = path.file_name()?.to_string_lossy().into_owned();
@@ -87,8 +85,7 @@ impl RepositoryInitializationOperationStore {
                 .strip_suffix(".json")
                 .unwrap_or(file_name.as_str())
                 .to_string();
-            let operation: RepositoryInitializationOperation =
-                read_json(&root.join(&file_name))?;
+            let operation: RepositoryInitializationOperation = read_json(&root.join(&file_name))?;
             ensure_identity(&operation, project_id, &operation_id)?;
             validate_record_shape(&operation)?;
             operations.push(operation);

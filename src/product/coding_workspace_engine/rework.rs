@@ -190,7 +190,8 @@ impl CodingWorkspaceEngine {
                 forced_replay_lines.join("\n")
             )
         };
-        let rendered_context = self.render_coder_unit_run_context(&updated, &coder_provider_name)?;
+        let rendered_context =
+            self.render_coder_unit_run_context(&updated, &coder_provider_name)?;
         let mut delta_prompt = build_coding_delta_prompt(
             &updated,
             context,
@@ -648,8 +649,10 @@ impl CodingWorkspaceEngine {
         request: &RerunPlannedCommandRequest,
     ) -> Result<RerunPlannedCommandOutcome, CodingWorkspaceEngineError> {
         let attempt = self.store.get_attempt(project_id, issue_id, attempt_id)?;
-        let payload_digest =
-            format!("rerun|{}|{}|{}", request.command_id, request.gate_id, request.check_id);
+        let payload_digest = format!(
+            "rerun|{}|{}|{}",
+            request.command_id, request.gate_id, request.check_id
+        );
         // ① 命令账本重放：同 command 同 payload 返回首次 durable 结果。
         if let Some(existing) = self.store.find_attempt_command_result(
             project_id,
@@ -715,10 +718,8 @@ impl CodingWorkspaceEngine {
                 "coding_rerun_gate_not_eligible".to_string(),
             ));
         }
-        let (_plan_revision_id, revision) =
-            self.verification_triage_current_revision(&attempt)?;
-        let check =
-            self.verification_triage_bound_check(&attempt, &revision, &request.check_id)?;
+        let (_plan_revision_id, revision) = self.verification_triage_current_revision(&attempt)?;
+        let check = self.verification_triage_bound_check(&attempt, &revision, &request.check_id)?;
         let planned_command = check.command.clone().ok_or_else(|| {
             CodingWorkspaceEngineError::ProviderStream(
                 "coding_rerun_check_has_no_command".to_string(),

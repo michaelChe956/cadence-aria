@@ -560,10 +560,9 @@ impl CodingAttemptStore {
         // C4 Task 2：issue 身份先经唯一 authority resolver 冻结（kind/来源/legacy
         // 布局冲突 fail-closed）；lc 子树与 routing 判定同源。无归属且无 legacy
         // 别名 record 的旧数据回退 Legacy 兼容分支（classify 单元语义不变）。
-        let authority = crate::product::logical_codebase::RepositoryAuthorityResolver::new(
-            self.paths.clone(),
-        )
-        .resolve_for_issue(&attempt.project_id, &attempt.issue_id)?;
+        let authority =
+            crate::product::logical_codebase::RepositoryAuthorityResolver::new(self.paths.clone())
+                .resolve_for_issue(&attempt.project_id, &attempt.issue_id)?;
         let routing = match &authority {
             None => RepositoryRouting::Legacy {
                 repository_id: String::new(),

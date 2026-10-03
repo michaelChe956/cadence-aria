@@ -24,8 +24,8 @@ use crate::product::models::automation::{
     EnrollmentRebindResult, EnrollmentSource, EnrollmentWriteCommand, IssueAutomationEnrollment,
     LeaseTakeoverRequest, LeaseTakeoverResult, OperationState,
 };
-use crate::web::error::{ApiError, ApiResult};
 use crate::product::work_item_plan_policy::RunPolicy;
+use crate::web::error::{ApiError, ApiResult};
 use crate::web::handlers::lifecycle::preflight::{
     SingleCandidatePreflightDecision, logical_repository_ids_for_preflight,
     preflight_single_repository_candidate,
@@ -362,9 +362,7 @@ fn validate_enrollment_scope(
             // 自动授权仅恰一 logical repository/单 attempt（REQ-WIGA-01/02、
             // REQ-MTG-03）；LC 分支保持既有单 target 约束。
             let manifest = resolution.manifest.clone().ok_or_else(|| {
-                invalid_scope(
-                    "automation enrollment requires a logical codebase manifest routing",
-                )
+                invalid_scope("automation enrollment requires a logical codebase manifest routing")
             })?;
             let selection = resolution.selection.as_ref().ok_or_else(|| {
                 invalid_scope(
@@ -795,10 +793,7 @@ mod tests {
         let enable = put_enrollment(&app, enrollment_body_with_target(&fixture)).await;
         assert_eq!(enable.status(), StatusCode::OK);
         let enrolled = response_json(enable).await;
-        assert_eq!(
-            enrolled["binding_history"]["current"]["binding_version"],
-            1
-        );
+        assert_eq!(enrolled["binding_history"]["current"]["binding_version"], 1);
 
         // v1 显式绑定 plan/session。
         let revision = enrolled["policy_revision"].as_u64().unwrap();
@@ -835,7 +830,10 @@ mod tests {
         assert_eq!(payload["state"], "accepted");
         let after = payload["enrollment"].clone();
         assert_eq!(after["binding_history"]["current"]["binding_version"], 2);
-        assert_eq!(after["binding_history"]["current"]["plan_id"], plan_2.as_str());
+        assert_eq!(
+            after["binding_history"]["current"]["plan_id"],
+            plan_2.as_str()
+        );
         assert_eq!(
             after["binding_history"]["previous"]
                 .as_array()
@@ -847,7 +845,10 @@ mod tests {
             after["binding_history"]["previous"][0]["plan_id"],
             plan_1.as_str()
         );
-        assert_eq!(after["binding_history"]["previous"][0]["session_id"], session_1.as_str());
+        assert_eq!(
+            after["binding_history"]["previous"][0]["session_id"],
+            session_1.as_str()
+        );
         assert_eq!(after["plan_id"], plan_2.as_str());
         assert!(after["policy_revision"].as_u64().unwrap() > bound_revision);
 
@@ -950,7 +951,8 @@ mod tests {
     use crate::product::lifecycle_store::{CreateIssueWorkItemPlanInput, LifecycleStore};
     use crate::product::models::automation::{IssueAutomationEnrollment, PreparedPlanIntent};
     use crate::product::models::{
-        IssueWorkItemPlan, IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, WorkspaceSessionRecord,
+        IssueWorkItemPlan, IssueWorkItemPlanOptions, IssueWorkItemPlanStatus,
+        WorkspaceSessionRecord,
     };
     use crate::web::error::ApiResult;
     use crate::web::handlers::lifecycle::plan_preparation::ensure_enrolled_plan;
@@ -1012,10 +1014,8 @@ mod tests {
         /// 以重建的 state/store 执行后台补偿，返回补偿后的 enrollment 投影。
         async fn ensure_enrolled_plan(&self) -> ApiResult<IssueAutomationEnrollment> {
             let root = self._root.path();
-            let state = WebAppState::new(
-                root.to_path_buf(),
-                WebRuntime::new_fake(root.to_path_buf()),
-            );
+            let state =
+                WebAppState::new(root.to_path_buf(), WebRuntime::new_fake(root.to_path_buf()));
             let enrollment = IssueAutomationStore::new(self.paths.clone())
                 .get(PROJECT_ID, ISSUE_ID)
                 .unwrap()
@@ -1049,9 +1049,10 @@ mod tests {
     #[tokio::test]
     async fn automation_prepare_recovers_plan_without_session_or_rebinding() {
         let fixture = seed_fixture(1, true);
-        let enrolled =
-            response_json(put_enrollment(&fixture.router(), enrollment_body_with_target(&fixture)).await)
-                .await;
+        let enrolled = response_json(
+            put_enrollment(&fixture.router(), enrollment_body_with_target(&fixture)).await,
+        )
+        .await;
         let intent_id = enrolled["prepare_intent_id"].as_str().unwrap();
         let expected_plan_id = format!("issue_work_item_plan_auto_{intent_id}");
         fixture.seed_intent_and_plan_without_session(&expected_plan_id);
@@ -1061,8 +1062,14 @@ mod tests {
         let again = fixture.ensure_enrolled_plan().await.unwrap();
         assert_eq!(recovered.plan_id, again.plan_id);
         assert_eq!(recovered.session_id, again.session_id);
-        assert_eq!(recovered.plan_id.as_deref(), Some(expected_plan_id.as_str()));
-        assert_eq!(recovered.session_id.as_deref(), Some(format!("workspace_session_auto_{intent_id}").as_str()));
+        assert_eq!(
+            recovered.plan_id.as_deref(),
+            Some(expected_plan_id.as_str())
+        );
+        assert_eq!(
+            recovered.session_id.as_deref(),
+            Some(format!("workspace_session_auto_{intent_id}").as_str())
+        );
         assert_eq!(fixture.plans().len(), 1);
         assert_eq!(fixture.sessions().len(), 1);
         assert_eq!(fixture.sessions()[0].run_policy, RunPolicy::Interactive);

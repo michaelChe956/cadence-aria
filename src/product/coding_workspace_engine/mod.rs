@@ -213,8 +213,6 @@ pub(crate) use group::*;
 #[allow(unused_imports)]
 pub(crate) use group_review_orchestrator::group_review_streaming_input;
 #[allow(unused_imports)]
-pub use rework::{RerunPlannedCommandOutcome, RerunPlannedCommandRequest};
-#[allow(unused_imports)]
 pub(crate) use internal_pr_review::{
     internal_pr_review_streaming_input, internal_review_blocked_gate_reason,
 };
@@ -234,6 +232,8 @@ pub(crate) use provider_stream::ProviderStreamOutcome;
 pub(crate) use reports::*;
 #[allow(unused_imports)]
 pub(crate) use review_parser::*;
+#[allow(unused_imports)]
+pub use rework::{RerunPlannedCommandOutcome, RerunPlannedCommandRequest};
 #[allow(unused_imports)]
 pub(crate) use tool_format::*;
 #[allow(unused_imports)]

@@ -18,8 +18,8 @@ pub(crate) const LANGUAGE_RULE_FILE_CONTENT: &str = include_str!(concat!(
     "/.claude/rules/language.md"
 ));
 
-use crate::product::work_item_split_engine::prompts::SINGLE_CANDIDATE_PROJECT_RULE_PRIORITY;
 use crate::product::models::ProviderName;
+use crate::product::work_item_split_engine::prompts::SINGLE_CANDIDATE_PROJECT_RULE_PRIORITY;
 
 pub(crate) struct ScManualRevisionPromptInput<'a> {
     pub candidate_markdown: &'a str,

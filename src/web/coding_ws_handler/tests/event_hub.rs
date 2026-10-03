@@ -246,7 +246,9 @@ async fn slow_observer_does_not_block_coding_business() {
     let waiter = register_plan_amendment_socket_write("plan_amendment_slow_second")
         .expect("delivery waiter");
     let second = plan_amendment_event("plan_amendment_slow_second");
-    hub.send(second.clone()).await.expect("second event enqueued");
+    hub.send(second.clone())
+        .await
+        .expect("second event enqueued");
     tokio::time::timeout(
         Duration::from_millis(250),
         registry.wait_until_hub_drained(&key),

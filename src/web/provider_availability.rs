@@ -362,18 +362,14 @@ mod tests {
         /// 真实默认与回退链语义不变（红线）。
         #[test]
         fn resolve_default_real_provider_semantics_unchanged() {
-            let direct = resolve_default_coding_provider(
-                "claude_code",
-                false,
-                production_availability,
-            )
-            .expect("可用真实默认直接命中");
+            let direct =
+                resolve_default_coding_provider("claude_code", false, production_availability)
+                    .expect("可用真实默认直接命中");
             assert_eq!(direct.provider, ProviderName::ClaudeCode);
             assert_eq!(direct.status_code, "provider_available");
 
-            let fallback =
-                resolve_default_coding_provider("codex", false, production_availability)
-                    .expect("不可用真实默认走回退链");
+            let fallback = resolve_default_coding_provider("codex", false, production_availability)
+                .expect("不可用真实默认走回退链");
             assert_eq!(fallback.provider, ProviderName::ClaudeCode);
             assert_eq!(fallback.status_code, "provider_fallback");
         }

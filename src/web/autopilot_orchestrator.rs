@@ -15,7 +15,6 @@ use crate::web::handlers::lifecycle::plan_preparation::ensure_enrolled_plan;
 use crate::web::plan_generation::{PlanGenerationOutcome, start_plan_generation_once};
 use crate::web::state::WebAppState;
 
-
 /// crash-window 注入（automation_crash_window）是进程级全局：驱动
 /// ensure_enrolled_plan/reconcile 且涉及窗口武装的测试经此锁互斥
 ///（p1 四中窗测试 × g8 孤儿重驱测试，并行会互偷窗口）。
@@ -107,7 +106,7 @@ impl AutopilotOrchestrator {
                     return Err(format!(
                         "ensure enrolled plan failed: {}: {}",
                         error.code, error.message
-                    ))
+                    ));
                 }
             });
         }
@@ -188,8 +187,8 @@ impl AutopilotOrchestrator {
         }
         let mut cursor = self.cursor.lock().await;
         // 满轮（本轮预算未用尽或已绕回起点）→ 游标归零重扫。
-        let wrapped = budget < self.config.max_issues_per_tick
-            || start_index + budget >= ordered.len();
+        let wrapped =
+            budget < self.config.max_issues_per_tick || start_index + budget >= ordered.len();
         *cursor = if wrapped { None } else { last };
         Ok(processed)
     }
@@ -275,9 +274,7 @@ async fn recover_claimed_attempt_at_startup(
     attempt: &crate::product::coding_models::CodingExecutionAttempt,
 ) -> Result<bool, String> {
     use crate::product::coding_models::{CodingAttemptStatus, CodingStartPhase};
-    use crate::web::coding_ws_handler::{
-        ResumedAttemptRunner, ensure_runner_for_resumed_attempt,
-    };
+    use crate::web::coding_ws_handler::{ResumedAttemptRunner, ensure_runner_for_resumed_attempt};
 
     let attempt_key = crate::web::state::CodingAttemptRunKey::from_attempt(attempt);
     if state
@@ -294,8 +291,9 @@ async fn recover_claimed_attempt_at_startup(
                 .await
             {
                 ResumedAttemptRunner::Restarted { .. } => Ok(true),
-                ResumedAttemptRunner::NotNeeded
-                | ResumedAttemptRunner::ManualRecovery { .. } => Ok(false),
+                ResumedAttemptRunner::NotNeeded | ResumedAttemptRunner::ManualRecovery { .. } => {
+                    Ok(false)
+                }
             }
         }
         CodingAttemptStatus::Created => {
@@ -394,19 +392,17 @@ async fn human_stop_point(
     }
     // 最近 compile 事务 Failed/RecoveryRequired：compile recovery 等人处理。
     if let Some(plan_id) = enrollment.plan_id.as_deref() {
-        let transactions = crate::product::work_item_plan_store::WorkItemPlanStore::new(
-            paths.clone(),
-        )
-        .list_compile_transactions(&session.project_id, &session.issue_id, plan_id)
-        .map_err(|error| format!("bound plan compile transactions unreadable: {error}"))?;
+        let transactions =
+            crate::product::work_item_plan_store::WorkItemPlanStore::new(paths.clone())
+                .list_compile_transactions(&session.project_id, &session.issue_id, plan_id)
+                .map_err(|error| format!("bound plan compile transactions unreadable: {error}"))?;
         let latest_failed = transactions
             .iter()
             .max_by(|left, right| left.created_at.cmp(&right.created_at))
             .is_some_and(|latest| {
                 matches!(
                     latest.status,
-                    WorkItemPlanCompileStatus::Failed
-                        | WorkItemPlanCompileStatus::RecoveryRequired
+                    WorkItemPlanCompileStatus::Failed | WorkItemPlanCompileStatus::RecoveryRequired
                 )
             });
         if latest_failed {
@@ -472,9 +468,8 @@ async fn coding_chain_stage(
     // 成功 publication/compile 必须可由 P1 只读投影派生（含 enrollment
     // enabled/精确绑定与 compile reservation/事务 Committed）；不可派生
     // 即 fail-closed 人工分诊。
-    let confirmed =
-        crate::web::plan_confirmed_info::plan_confirmed_info(&paths, enrollment)
-            .map_err(|error| format!("plan confirmed info unreadable: {error}"))?;
+    let confirmed = crate::web::plan_confirmed_info::plan_confirmed_info(&paths, enrollment)
+        .map_err(|error| format!("plan confirmed info unreadable: {error}"))?;
     if confirmed.is_none() {
         return Ok(Some(ReconcileOutcome::NeedsHuman));
     }
@@ -509,9 +504,7 @@ async fn coding_chain_stage(
             {
                 ReconcileOutcome::Advancing
             }
-            Ok(AdvanceOutcome::Replayed { record })
-                if record.status == AdvanceStatus::Ready =>
-            {
+            Ok(AdvanceOutcome::Replayed { record }) if record.status == AdvanceStatus::Ready => {
                 ReconcileOutcome::Advancing
             }
             _ => ReconcileOutcome::NeedsHuman,
@@ -566,9 +559,7 @@ async fn coding_chain_stage(
             Ok(Some(match start {
                 Ok(StartCodingOutcome::Started { .. })
                 | Ok(StartCodingOutcome::AlreadyStarted { .. }) => ReconcileOutcome::Coding,
-                Ok(StartCodingOutcome::NeedsHuman { .. }) | Err(_) => {
-                    ReconcileOutcome::NeedsHuman
-                }
+                Ok(StartCodingOutcome::NeedsHuman { .. }) | Err(_) => ReconcileOutcome::NeedsHuman,
             }))
         }
     }
@@ -828,10 +819,7 @@ mod tests {
             "expected_revision": revision,
             "command": {"type": "disable"}
         });
-        assert_eq!(
-            put_enrollment(&app, disable).await.status(),
-            StatusCode::OK
-        );
+        assert_eq!(put_enrollment(&app, disable).await.status(), StatusCode::OK);
         let mut divergent = enrollment_body(&fixture.inner, 1, 1);
         divergent["command"]["options"]["review_rounds"] = serde_json::json!(2);
         divergent["expected_revision"] = serde_json::json!(revision + 1);
@@ -863,8 +851,6 @@ mod tests {
         let _crash_window_serial = super::CRASH_WINDOW_SERIAL
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-
 
         for window in [
             CrashWindow::AfterIntentSaved,
@@ -926,11 +912,7 @@ mod tests {
                     assert!(binding_after_crash.plan_id.is_some());
                     assert_eq!(fixture.bound_plans().len(), 1);
                     assert_eq!(fixture.sessions_for_bound_plan().len(), 1);
-                    assert_eq!(
-                        fixture.provider_start_count(),
-                        0,
-                        "崩溃先于 provider 派发"
-                    );
+                    assert_eq!(fixture.provider_start_count(), 0, "崩溃先于 provider 派发");
                 }
             }
 

@@ -164,7 +164,7 @@ pub(crate) use conversational_gate::{
     ScManualRevisionResult,
 };
 pub(crate) use conversational_gate_recovery::{
-    HUMAN_GATE_PROVIDER_MAX_ATTEMPTS, CandidateRecoveryCommand, CandidateRecoveryOutcome,
+    CandidateRecoveryCommand, CandidateRecoveryOutcome, HUMAN_GATE_PROVIDER_MAX_ATTEMPTS,
     HumanGateRecoveryAction, provider_run_kind_for_human_gate,
 };
 pub(crate) use lifecycle_recovery::*;

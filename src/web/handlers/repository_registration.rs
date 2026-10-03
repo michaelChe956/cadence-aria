@@ -1,7 +1,7 @@
 use super::dto::repository_initialization_operation_dto;
 use super::support::{product_app_paths, product_store_api_error};
-use crate::web::types::ResumeRepositoryInitializationRequest;
 use super::*;
+use crate::web::types::ResumeRepositoryInitializationRequest;
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;

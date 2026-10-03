@@ -684,9 +684,8 @@ async fn retry_initialization_preserves_failed_record_and_attempt() {
 
     let (root, app_paths, _lifecycle, mut engine) = advance_fixture().await;
     let advance_store = AdvanceStore::new(app_paths.clone());
-    let coding_store = crate::product::coding_attempt_store::CodingAttemptStore::new(
-        app_paths.clone(),
-    );
+    let coding_store =
+        crate::product::coding_attempt_store::CodingAttemptStore::new(app_paths.clone());
 
     // 在 PlanBindingSaved（≥ WorktreeBound）注入失败：可能存在外部副作用
     // 状态，先走副作用门。
@@ -726,10 +725,12 @@ async fn retry_initialization_preserves_failed_record_and_attempt() {
         matches!(replay, AdvanceOutcome::Replayed { ref record } if record.status == AdvanceStatus::Failed),
         "plain advance must not implicitly retry: {replay:?}"
     );
-    assert!(advance_store
-        .get_retry_initialization("project_0001", "issue_plan_0001", "retry_cmd_0001")
-        .unwrap()
-        .is_none());
+    assert!(
+        advance_store
+            .get_retry_initialization("project_0001", "issue_plan_0001", "retry_cmd_0001")
+            .unwrap()
+            .is_none()
+    );
 
     // enrollment binding（store 级 Enable + 显式 target → binding v1）。
     let automation = IssueAutomationStore::new(app_paths.clone());
@@ -798,7 +799,10 @@ async fn retry_initialization_preserves_failed_record_and_attempt() {
         .get_advance_initialization(&unchanged)
         .unwrap()
         .expect("journal");
-    assert_eq!(unchanged_journal.error.as_deref(), Some(failed_error.as_str()));
+    assert_eq!(
+        unchanged_journal.error.as_deref(),
+        Some(failed_error.as_str())
+    );
 
     // 过期 checkpoint：拒绝且 durable 不变（不写 retry 事实）。
     let stale = RetryInitializationRequest {
@@ -813,10 +817,12 @@ async fn retry_initialization_preserves_failed_record_and_attempt() {
         .await
         .expect_err("stale checkpoint rejected");
     assert!(error.contains("checkpoint expired"), "{error}");
-    assert!(advance_store
-        .get_retry_initialization("project_0001", "issue_plan_0001", "retry_cmd_0003")
-        .unwrap()
-        .is_none());
+    assert!(
+        advance_store
+            .get_retry_initialization("project_0001", "issue_plan_0001", "retry_cmd_0003")
+            .unwrap()
+            .is_none()
+    );
 
     // 确认后续做：Accepted + 同一 attempt 到 Ready；attempt 数量/id 不变；
     // 原 created_at 不变；失败审计保留在 record.error（不改写为成功前史）。
@@ -833,9 +839,7 @@ async fn retry_initialization_preserves_failed_record_and_attempt() {
         .expect("confirmed retry continues the same attempt");
     assert_eq!(result.state, OperationState::Accepted);
     let outcome = result.outcome.clone();
-    let AdvanceOutcome::Completed { record: ready, .. } =
-        outcome.expect("retry outcome")
-    else {
+    let AdvanceOutcome::Completed { record: ready, .. } = outcome.expect("retry outcome") else {
         panic!("confirmed retry must complete to Ready");
     };
     assert_eq!(ready.status, AdvanceStatus::Ready);

@@ -40,11 +40,11 @@ pub mod types;
 pub use aggregate_initialization::{
     AGGREGATE_INITIALIZATION_LAYOUT_VERSION, AGGREGATE_INITIALIZATION_OPERATION_KIND,
     AggregateCancellationRecord, AggregateInitializationActionRecord,
-    AggregateInitializationErrorRecord,
-    AggregateInitializationIdempotencyIdentity, AggregateInitializationOperation,
-    AggregateInitializationOperationInput, AggregateInitializationOperationStatus,
-    AggregateInitializationProfile, AggregateInitializationStepKind,
-    AggregateInitializationStepRecord, AggregateInitializationStepStatus, RepositoryTypeEvidence,
+    AggregateInitializationErrorRecord, AggregateInitializationIdempotencyIdentity,
+    AggregateInitializationOperation, AggregateInitializationOperationInput,
+    AggregateInitializationOperationStatus, AggregateInitializationProfile,
+    AggregateInitializationStepKind, AggregateInitializationStepRecord,
+    AggregateInitializationStepStatus, RepositoryTypeEvidence,
 };
 pub use aggregate_initialization_coordinator::{
     AggregateInitializationCoordinator, AggregateInitializationError,
@@ -57,22 +57,25 @@ pub use aggregate_initialization_coordinator::{
 pub use aggregate_initialization_store::{
     AggregateInitializationOperationStore, root_recipe_command_index,
 };
-pub use root_recipe_receipt::{
-    ROOT_RECIPE_ALLOWLIST, RootRecipeChangeClass, RootRecipeChangeKind, RootRecipeCommandReceipt,
-    RootRecipeCommandSummary, RootRecipeCommandVerdict, RootRecipeCommandWatch,
-    RootRecipeFilesystemAuditor, RootRecipeFilesystemSnapshot, RootRecipeObservedChange,
-    RootRecipeReceipt, RootRecipeReceiptStore, RootRecipeSnapshotBudget, RootRecipeSnapshotEntry,
-    RootRecipeSnapshotEntryKind,
+pub use bootstrap::{
+    BootstrapActionError, BootstrapActionOutcome, BootstrapActionRequest, BootstrapActionResult,
+    BootstrapCheckpoint, BootstrapFailure, BootstrapStepProjection, LogicalCodebaseBootstrapNotice,
+    LogicalCodebaseBootstrapProjection, LogicalCodebaseBootstrapProjector,
+    LogicalCodebaseBootstrapService, LogicalCodebaseBootstrapStep,
+    LogicalCodebaseBootstrapStepStatus,
 };
 pub use evidence_mediator::{
-    POLICY_REAUTHORIZATION_TTL_HOURS, EvidenceIndexPinRecord, EvidenceQueryInput,
-    EvidenceQueryResponse, EvidenceRole, PolicyAccessError, PolicyReauthorizationRequest,
+    EvidenceIndexPinRecord, EvidenceQueryInput, EvidenceQueryResponse, EvidenceRole,
+    POLICY_REAUTHORIZATION_TTL_HOURS, PolicyAccessError, PolicyReauthorizationRequest,
     PolicyReauthorizationResult, PolicyTextQueryInput, PolicyVerificationWaitingRecord,
     handle_evidence_query, handle_policy_reauthorization, handle_policy_text_query,
-    load_policy_verification_waiting_fact, read_policy_text_for_attempt,
-    resolve_attempt_by_token,
+    load_policy_verification_waiting_fact, read_policy_text_for_attempt, resolve_attempt_by_token,
 };
 pub use feature::LogicalCodebaseFeature;
+pub use identity_repair::{
+    IdentityJournalDiagnostic, IdentityMappingSubmission, IdentityRepairActionKind,
+    IdentityRepairActionRequest, IdentityRepairService, RepairContinuation,
+};
 pub use issue_selection::{
     EffectiveMemberResolution, InvalidationRecord, IssueCodebaseSelection,
     IssueCodebaseSelectionStore, SelectionPolicy, load_selection,
@@ -85,10 +88,6 @@ pub use migration::{
     IdentityMigrationExecutor, IdentityMigrationJournal, IdentityMigrationJournalStore,
     IdentityMigrationPhase, IdentityMigrationVerifier, IdentityRepairAuditEntry,
     MigrationFaultInjector, RepositoryIdentityMapping,
-};
-pub use identity_repair::{
-    IdentityJournalDiagnostic, IdentityMappingSubmission, IdentityRepairActionKind,
-    IdentityRepairActionRequest, IdentityRepairService, RepairContinuation,
 };
 pub use planning_context::{
     MemberCheckoutFingerprint, PlanningContextSnapshot, PlanningContextSnapshotStore,
@@ -116,19 +115,12 @@ pub use production_policy_resolvers::{
     ProductionPolicyTargetResolver, StoreBackedProviderCapabilitySource,
     assert_canonical_lc_root_consistent,
 };
+pub use provider_admission_preflight::{
+    BootstrapActionKind, LogicalCodebaseProviderAdmissionPreflight, ProviderAdmissionError,
+    ProviderAdmissionPreflightResult, ProviderRuleReference,
+};
 pub use provider_capability_store::{
     CapabilityEvidence, ProviderCapabilityRecord, ProviderCapabilityStore,
-};
-pub use bootstrap::{
-    BootstrapActionError, BootstrapActionOutcome, BootstrapActionRequest,
-    BootstrapActionResult, BootstrapCheckpoint, BootstrapFailure, BootstrapStepProjection,
-    LogicalCodebaseBootstrapNotice, LogicalCodebaseBootstrapProjection,
-    LogicalCodebaseBootstrapProjector, LogicalCodebaseBootstrapService,
-    LogicalCodebaseBootstrapStep, LogicalCodebaseBootstrapStepStatus,
-};
-pub use provider_admission_preflight::{
-    BootstrapActionKind, LogicalCodebaseProviderAdmissionPreflight,
-    ProviderAdmissionError, ProviderAdmissionPreflightResult, ProviderRuleReference,
 };
 pub use provider_gateway::{
     GatewayRunAudit, GatewayRunAuditEntry, GatewayRunStack, LogicalCodebaseProviderGateway,
@@ -174,6 +166,13 @@ pub use repository_routing::{
     RepositoryRoutingErrorCode, RepositoryRoutingRequest, RepositoryTargetKind,
     ResolvedTargetIdentity, read_policy_text_for_reference, resolve_issue_logical_codebase_id,
 };
+pub use root_recipe_receipt::{
+    ROOT_RECIPE_ALLOWLIST, RootRecipeChangeClass, RootRecipeChangeKind, RootRecipeCommandReceipt,
+    RootRecipeCommandSummary, RootRecipeCommandVerdict, RootRecipeCommandWatch,
+    RootRecipeFilesystemAuditor, RootRecipeFilesystemSnapshot, RootRecipeObservedChange,
+    RootRecipeReceipt, RootRecipeReceiptStore, RootRecipeSnapshotBudget, RootRecipeSnapshotEntry,
+    RootRecipeSnapshotEntryKind,
+};
 pub(crate) use store::lc_scope_root;
 pub(crate) use store::legacy_logical_codebase_id;
 pub use store::{
@@ -181,7 +180,7 @@ pub use store::{
     LogicalCodebaseRecord, LogicalCodebaseStore,
 };
 pub use types::{
-    CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, EnrollmentTarget, LogicalRepositoryId,
-    MemberStatus, RepositoryCheckoutId, RepositoryCheckoutRecord, RepositorySourceIdentity,
-    RepositoryType,
+    CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, EnrollmentTarget,
+    LogicalRepositoryId, MemberStatus, RepositoryCheckoutId, RepositoryCheckoutRecord,
+    RepositorySourceIdentity, RepositoryType,
 };

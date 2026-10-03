@@ -637,12 +637,9 @@ async fn logical_coder_rebinds_root_cwd_without_expanding_writable_root() {
     // cwd=canonical root、唯一 writable root=target worktree（target 来自
     // attempt snapshot）。
     let (policy_tx, _policy_rx) = mpsc::channel(32);
-    let policy_engine = CodingWorkspaceEngine::new(
-        store.clone(),
-        GitWorkspaceService::new(),
-        policy_tx,
-    )
-    .with_logical_provider_gateway(gateway.clone());
+    let policy_engine =
+        CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), policy_tx)
+            .with_logical_provider_gateway(gateway.clone());
     let worktree = logical_attempt.worktree_path.clone().expect("worktree");
     let policy = policy_engine
         .resolve_coder_root_launch_policy(&logical_attempt, &worktree)
@@ -654,7 +651,6 @@ async fn logical_coder_rebinds_root_cwd_without_expanding_writable_root() {
     let success = drive_coder_retry_cycle(&store, &logical_attempt, Some(gateway), probe.as_ref())
         .await
         .expect("logical coder retry cycle must complete through the gateway");
-
 
     assert_eq!(
         success.outcome.full_output, "root cwd probe output",
@@ -675,8 +671,6 @@ async fn logical_coder_rebinds_root_cwd_without_expanding_writable_root() {
         vec![canonical_root.clone()],
         "provider process cwd must be rebound to the canonical lc root"
     );
-
-
 }
 
 /// Task 2.6：LC attempt 未注入 gateway（无 validated launch）时 coder retry
@@ -696,7 +690,9 @@ async fn logical_coder_without_validated_gateway_zero_spawns() {
     };
 
     assert!(
-        error.to_string().contains("logical_provider_gateway_required"),
+        error
+            .to_string()
+            .contains("logical_provider_gateway_required"),
         "expected logical_provider_gateway_required error, got: {error:?}"
     );
     assert_eq!(

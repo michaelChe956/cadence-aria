@@ -13,7 +13,7 @@ use crate::product::json_store::ProductStoreError;
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::models::automation::IssueAutomationEnrollment;
 use crate::product::models::lifecycle::IssueWorkItemPlanStatus;
-use crate::product::models::outline::{WorkItemPlanCompileStatus, WorkItemPlanCommitState};
+use crate::product::models::outline::{WorkItemPlanCommitState, WorkItemPlanCompileStatus};
 use crate::product::models::{SingleCandidatePhase, WorkspaceSessionStatus};
 use crate::product::work_item_plan_policy::RunPolicy;
 use crate::product::work_item_plan_source_store::{SourceStoreScope, WorkItemPlanSourceStore};
@@ -126,7 +126,9 @@ pub fn issue_plan_confirmed_info(
     let Some(enrollment) = enrollment else {
         return Ok(Vec::new());
     };
-    Ok(plan_confirmed_info(paths, &enrollment)?.into_iter().collect())
+    Ok(plan_confirmed_info(paths, &enrollment)?
+        .into_iter()
+        .collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -239,7 +241,7 @@ pub fn list_c1_waiting_items(
     use crate::product::coding_attempt_store::CodingAttemptStore;
     use crate::product::coding_workspace_engine::CodingWorkspaceEngine;
     use crate::product::git_workspace_service::GitWorkspaceService;
-    use crate::product::models::automation::{LeaseDisposition, LeaseDecision};
+    use crate::product::models::automation::{LeaseDecision, LeaseDisposition};
     use crate::product::models::outline::WorkItemPlanCompileStatus;
     use crate::product::work_item_plan_store::WorkItemPlanStore;
 
@@ -263,9 +265,7 @@ pub fn list_c1_waiting_items(
     let lifecycle = LifecycleStore::new(paths.clone());
     if let Some(bound_session_id) = session_id.as_deref() {
         let bound_session = lifecycle.get_workspace_session(bound_session_id)?;
-        if bound_session.workspace_type
-            == crate::product::models::WorkspaceType::WorkItemPlan
-        {
+        if bound_session.workspace_type == crate::product::models::WorkspaceType::WorkItemPlan {
             if let Some(recovery) = bound_session
                 .human_gate_snapshot
                 .as_ref()
@@ -411,9 +411,7 @@ pub fn list_c1_waiting_items(
     // next_phase 携带 durable journal checkpoint（重试从该检查点续做）。
     if let Some(plan_id) = plan_id.as_deref() {
         let advance_store = AdvanceStore::new(paths.clone());
-        if let Some(record) =
-            advance_store.get_advance_for_plan(project_id, issue_id, plan_id)?
-        {
+        if let Some(record) = advance_store.get_advance_for_plan(project_id, issue_id, plan_id)? {
             if record.status == AdvanceStatus::Failed {
                 let journal_phase = advance_store
                     .get_advance_initialization(&record)?
@@ -457,8 +455,7 @@ pub fn list_c1_waiting_items(
                 tx.validator_findings
                     .iter()
                     .find(|finding| {
-                        finding.code == "intent_undeclared"
-                            || finding.code == "intent_unexecutable"
+                        finding.code == "intent_undeclared" || finding.code == "intent_unexecutable"
                     })
                     .map(|finding| (tx.compile_id.clone(), finding))
             });
@@ -541,8 +538,7 @@ pub fn list_c1_waiting_items(
 // ---------------------------------------------------------------------------
 
 /// C5 Task 6：Claude 初始化失败等待项 kind（前端 kind 宽 string 兼容）。
-pub const WAITING_KIND_REPOSITORY_INITIALIZATION_FAILED: &str =
-    "repository_initialization_failed";
+pub const WAITING_KIND_REPOSITORY_INITIALIZATION_FAILED: &str = "repository_initialization_failed";
 
 /// C5 Task 6：初始化失败的结构化诊断（由 operation 冻结的 error 派生）。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -586,16 +582,18 @@ fn repository_initialization_failure_item(
         .map(repository_initialization_step_slug)
         .unwrap_or_default()
         .to_string();
-    let diagnostics = operation.error.as_ref().map(|error| {
-        RepositoryInitializationFailureDiagnostics {
-            reason_code: error.reason_code.clone(),
-            provider: error.provider.clone(),
-            stderr_summary: error.stderr_summary.clone(),
-            changed_paths: error.changed_paths.clone().unwrap_or_default(),
-            retryable: error.retryable,
-            failed_step: failed_step.clone(),
-        }
-    });
+    let diagnostics =
+        operation
+            .error
+            .as_ref()
+            .map(|error| RepositoryInitializationFailureDiagnostics {
+                reason_code: error.reason_code.clone(),
+                provider: error.provider.clone(),
+                stderr_summary: error.stderr_summary.clone(),
+                changed_paths: error.changed_paths.clone().unwrap_or_default(),
+                retryable: error.retryable,
+                failed_step: failed_step.clone(),
+            });
     C1WaitingItemDto {
         id: format!(
             "c1:project:{project_id}:repository_init:{}",
@@ -652,7 +650,9 @@ pub fn list_project_c1_waiting_items(
         match operation.status {
             // 链叶 Failed：唯一可 resume 的展示项。
             RepositoryInitializationOperationStatus::Failed if !has_successor => {
-                items.push(repository_initialization_failure_item(project_id, operation));
+                items.push(repository_initialization_failure_item(
+                    project_id, operation,
+                ));
             }
             // Created/Running 后继：运行中只读项（无动作、无诊断），避免重复执行。
             RepositoryInitializationOperationStatus::Created
@@ -693,7 +693,6 @@ pub fn list_project_c1_waiting_items(
     items.sort_by(|left, right| left.operation_id.cmp(&right.operation_id));
     Ok(items)
 }
-
 
 // ---------------------------------------------------------------------------
 // C2 Task 12（REQ-CRO-06）：coding 链十类 durable 等待事实的 additive
@@ -871,9 +870,7 @@ fn append_c2_waiting_items(
         if let Some(record) =
             crate::product::logical_codebase::load_policy_verification_waiting_fact(paths, attempt)
                 .map_err(|error| {
-                    ProductStoreError::Io(format!(
-                        "read policy verification waiting fact: {error}"
-                    ))
+                    ProductStoreError::Io(format!("read policy verification waiting fact: {error}"))
                 })?
         {
             let mut item = base(
@@ -892,11 +889,9 @@ fn append_c2_waiting_items(
         // 存在而其 node 无 role run 输出——消费标记后、spawn 前中断）；
         // 下一次 coder 重驱以 claim.instruction_ids 强制入渲染（不重写
         // claim、不二次消费），重放完成后对账清除事实。
-        for fact in store.list_instruction_claim_interrupted_facts(
-            project_id,
-            issue_id,
-            &attempt.id,
-        )? {
+        for fact in
+            store.list_instruction_claim_interrupted_facts(project_id, issue_id, &attempt.id)?
+        {
             let mut item = base(
                 C2_KIND_INSTRUCTION_CLAIM_INTERRUPTED,
                 format!(
@@ -942,10 +937,7 @@ fn append_c2_waiting_items(
                 LeaseDisposition::ActiveWait => {
                     let mut item = base(
                         C2_KIND_CODING_ALREADY_RUNNING,
-                        format!(
-                            "c2:coding_already_running:{}:{}",
-                            issue_id, lease.lease_id
-                        ),
+                        format!("c2:coding_already_running:{}:{}", issue_id, lease.lease_id),
                     );
                     item.reason = format!(
                         "coding run {} already holds the worktree lease; \
@@ -960,7 +952,8 @@ fn append_c2_waiting_items(
                 }
                 LeaseDisposition::DeadNeedsTakeover
                     if !lease.lease_id.is_empty()
-                        && let Ok(holder) = store.get_attempt(project_id, issue_id, &lease.lease_id) =>
+                        && let Ok(holder) =
+                            store.get_attempt(project_id, issue_id, &lease.lease_id) =>
                 {
                     let mut item = base(
                         C2_KIND_CODING_TAKEOVER_REQUIRED,
@@ -1067,7 +1060,10 @@ fn checkpoint_slug(
 fn source_store_error(
     error: crate::product::work_item_plan_source_store::SourceStoreError,
 ) -> ProductStoreError {
-    ProductStoreError::Io(format!("plan publication provenance unreadable: {}", error.code()))
+    ProductStoreError::Io(format!(
+        "plan publication provenance unreadable: {}",
+        error.code()
+    ))
 }
 
 #[cfg(test)]
@@ -1139,7 +1135,10 @@ mod tests {
         assert!(first.key.contains("plan_confirmed:"));
         assert_eq!(first.session_id, fixture.gate.session_id);
         assert_eq!(first.title, PLAN_CONFIRMED_INFO_TITLE);
-        assert!(!first.occurred_at.is_empty(), "occurred_at 取 tx.committed_at");
+        assert!(
+            !first.occurred_at.is_empty(),
+            "occurred_at 取 tx.committed_at"
+        );
     }
 
     /// 禁用 enrollment 后历史成功不投影为当前信息（禁用不是假成功）。

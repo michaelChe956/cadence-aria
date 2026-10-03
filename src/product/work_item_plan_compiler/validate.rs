@@ -92,9 +92,7 @@ pub fn validate_plan_candidate_ir(
     // C1 Task 5（REQ-C1-PLAN-01）：existing/create 意图合同校验——未声明
     //（intent_undeclared）与不能执行（intent_unexecutable）分开停等修订，
     // 作为 preflight 族 Error 保留在报告里（不清既有 finding、不硬失败）。
-    if let Err(intent_diagnostics) =
-        validate_work_item_intent_contract(ir, context)
-    {
+    if let Err(intent_diagnostics) = validate_work_item_intent_contract(ir, context) {
         for diagnostic in intent_diagnostics {
             findings.push(WorkItemSplitFinding {
                 severity: WorkItemSplitFindingSeverity::Error,
@@ -207,7 +205,8 @@ pub fn validate_work_item_intent_contract(
                     }
                     WorkItemIntent::Existing => context
                         .existing_work_item_ids
-                        .iter().any(|id| *id == intent.provider_work_item_id),
+                        .iter()
+                        .any(|id| *id == intent.provider_work_item_id),
                 };
                 if !provider_resolves {
                     diagnostics.push(unexecutable(
@@ -230,7 +229,10 @@ pub fn validate_work_item_intent_contract(
                 if !dangling.is_empty() {
                     diagnostics.push(unexecutable(
                         &work_item_id,
-                        format!("依赖闭包悬空：[{}] 不在本 plan 也不在既有 work item 集", dangling.join("、")),
+                        format!(
+                            "依赖闭包悬空：[{}] 不在本 plan 也不在既有 work item 集",
+                            dangling.join("、")
+                        ),
                     ));
                 }
                 let conflict: Vec<&str> = intent
@@ -257,9 +259,13 @@ pub fn validate_work_item_intent_contract(
                         (EnrollmentTarget::SingleRepository { repository_id }, _) => {
                             repository_id == &item.target_repository_id
                         }
-                        (EnrollmentTarget::LogicalCodebase { logical_repository_id, .. }, _) => {
-                            logical_repository_id.0.to_string() == item.target_repository_id
-                        }
+                        (
+                            EnrollmentTarget::LogicalCodebase {
+                                logical_repository_id,
+                                ..
+                            },
+                            _,
+                        ) => logical_repository_id.0.to_string() == item.target_repository_id,
                     };
                     if !target_matches {
                         diagnostics.push(unexecutable(
@@ -280,7 +286,8 @@ pub fn validate_work_item_intent_contract(
         Ok(())
     } else {
         diagnostics.sort_by(|left, right| {
-            left.code.cmp(&right.code)
+            left.code
+                .cmp(&right.code)
                 .then(left.field.cmp(&right.field))
                 .then(left.message.cmp(&right.message))
         });
@@ -310,7 +317,10 @@ fn intent_target_repository(target: &crate::product::logical_codebase::Enrollmen
 }
 
 /// scope（glob 如 `src/x/**`）与基线树无任何交集＝纯新建写面。
-fn scope_absent_from_baseline(scope: &str, baseline_tree: &std::collections::BTreeSet<String>) -> bool {
+fn scope_absent_from_baseline(
+    scope: &str,
+    baseline_tree: &std::collections::BTreeSet<String>,
+) -> bool {
     let prefix = scope.strip_suffix("/**").unwrap_or(scope);
     if prefix.is_empty() {
         return false;
