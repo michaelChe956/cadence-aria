@@ -13,6 +13,9 @@ pub mod cli_adapter;
 pub mod codex_provider;
 pub mod document_ops;
 pub mod git_command;
+// Task 1b 段①:LC 专用 validated sync bridge(streaming→sync,专用 OS 线程
+// + 自有 Tokio runtime,不嵌套 current-thread block_on)。
+pub mod gateway_sync_provider;
 pub mod image_client;
 pub mod image_reference_validation;
 pub mod integration_queue;

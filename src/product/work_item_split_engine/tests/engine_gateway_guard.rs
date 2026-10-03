@@ -624,3 +624,48 @@ async fn split_sync_gateway_launch_rebinds_cwd_to_canonical_root() {
         "worktree_path must stay the target member checkout"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Task 1b 段①(lcg_t01):WorkItemSplitProviderRunHandle 的 lifecycle 与
+// parse.rs 的 complete 函数消费。
+//
+// 断言语义(计划冻结接口「WS Plan/split run identity」):
+// - `begin` 分配 run_ref + run-bound role_run_seq,handle 冻结 workspace 会话身份;
+// - parse.rs 的 complete 函数消费已有 handle 收口 run 记录(status=completed),
+//   不再重新 `save_work_item_split_provider_run`;
+// - read-back 的 provider_run_ref 与 handle.run_ref 一致——split 的运行身份
+//   与 streaming Plan/split 的 run_ref/证据不混用。
+// ---------------------------------------------------------------------------
+
+/// begin 分配的 handle 携带冻结身份;complete 函数消费已有 handle 收口 run,
+/// durable 记录的 provider_run_ref 与 handle.run_ref 一致。
+#[test]
+fn lcg_t01_parse_consumes_existing_split_run_handle() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    std::fs::create_dir_all(root.path().join(".aria")).expect("aria root");
+    let lifecycle = LifecycleStore::new(paths);
+
+    let handle = lifecycle
+        .begin_work_item_split_provider_run(
+            "project_0001",
+            "issue_0001",
+            &ProviderName::ClaudeCode,
+            "ws_session_0001",
+        )
+        .expect("begin split provider run");
+
+    assert!(!handle.run_ref.trim().is_empty());
+    assert_eq!(handle.workspace_session_id, "ws_session_0001");
+
+    let structured = serde_json::json!({"work_items": []});
+    let parsed = crate::product::work_item_split_engine::parse::complete_split_provider_run(
+        &lifecycle,
+        &handle,
+        "split prompt",
+        &structured,
+    )
+    .expect("complete consumes the existing handle");
+
+    assert_eq!(parsed.provider_run_ref, handle.run_ref);
+}

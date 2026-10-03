@@ -606,3 +606,96 @@ pub(crate) fn parse_provider_output(
         verification_plans,
     })
 }
+
+// ---------------------------------------------------------------------------
+// Task 1b 段①:WorkItemSplitProviderRunHandle 三 lifecycle 方法与 complete
+// 消费面(计划冻结接口「WS Plan/split run identity」)。
+//
+// 本文件承载 `impl LifecycleStore` 扩展:1b 的文件门不含 `lifecycle_store/*`,
+// split run 的 durable 身份由 split engine 侧的 store 扩展承担(`begin` 经
+// `next_tool_policy_role_run_seq` 分配 run-bound seq,与 tool-policy 审计分区
+// 同一分配器);1c-coordinator 之后按 §0 owner 门接续装配。
+// ---------------------------------------------------------------------------
+
+/// split provider run 的运行身份句柄(计划冻结字段)。`begin` 分配并持久化,
+/// caller 依次 begin handle → bind sink → start → parse → complete/fail;retry
+/// 每次新 handle。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkItemSplitProviderRunHandle {
+    pub run_ref: String,
+    pub workspace_session_id: String,
+    pub role_run_seq: u64,
+}
+
+/// complete/fail 后的 read-back 快照(供 caller 与测试断言 run 收口状态)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SplitProviderRunSnapshot {
+    pub provider_run_ref: String,
+    pub status: String,
+}
+
+impl LifecycleStore {
+    /// 开始一次 split provider run:分配 `provider-runs/` 下的 run 目录与
+    /// run-bound `role_run_seq`,写入 status=running 的 run 记录并返回句柄。
+    /// 后续的 run-bound audit sink 以 `(workspace_session_id, role_run_seq)`
+    /// 绑定,provider_start 恰为审计文件首行。
+    pub fn begin_work_item_split_provider_run(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        provider: &ProviderName,
+        workspace_session_id: &str,
+    ) -> Result<WorkItemSplitProviderRunHandle, crate::product::json_store::ProductStoreError> {
+        let _ = (project_id, issue_id, provider, workspace_session_id);
+        // 段① RED 占位:begin/complete/fail 由 lcg_t01 split run handle 测试锁定。
+        Err(crate::product::json_store::ProductStoreError::Io(
+            "begin_work_item_split_provider_run is not implemented yet".to_string(),
+        ))
+    }
+
+    /// 收口成功的 split provider run:写 status=completed 的 run 记录与
+    /// structured output,不再走 `save_work_item_split_provider_run` 的旧路径。
+    pub fn complete_work_item_split_provider_run(
+        &self,
+        handle: &WorkItemSplitProviderRunHandle,
+        prompt: &str,
+        structured_output: &serde_json::Value,
+    ) -> Result<(), crate::product::json_store::ProductStoreError> {
+        let _ = (handle, prompt, structured_output);
+        Err(crate::product::json_store::ProductStoreError::Io(
+            "complete_work_item_split_provider_run is not implemented yet".to_string(),
+        ))
+    }
+
+    /// 收口失败的 split provider run:写 status=failed 的 run 记录与 reason。
+    pub fn fail_work_item_split_provider_run(
+        &self,
+        handle: &WorkItemSplitProviderRunHandle,
+        reason: &str,
+    ) -> Result<(), crate::product::json_store::ProductStoreError> {
+        let _ = (handle, reason);
+        Err(crate::product::json_store::ProductStoreError::Io(
+            "fail_work_item_split_provider_run is not implemented yet".to_string(),
+        ))
+    }
+}
+
+/// parse.rs 的 complete 函数(计划冻结口径):消费已有 handle 收口 run 记录,
+/// 不再重新 `save_work_item_split_provider_run`。返回 read-back 快照,使
+/// `parsed.provider_run_ref == handle.run_ref` 成为可断言事实。
+pub fn complete_split_provider_run(
+    lifecycle: &LifecycleStore,
+    handle: &WorkItemSplitProviderRunHandle,
+    prompt: &str,
+    structured_output: &serde_json::Value,
+) -> ApiResult<SplitProviderRunSnapshot> {
+    let _ = (prompt, structured_output);
+    lifecycle
+        .complete_work_item_split_provider_run(handle, prompt, structured_output)
+        .map_err(product_store_api_error)?;
+    Err(ApiError::runtime(
+        "work_item_split_run_readback_not_implemented",
+        "complete_split_provider_run read-back is not implemented yet",
+        json!({}),
+    ))
+}
