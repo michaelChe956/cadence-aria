@@ -229,6 +229,7 @@
                     provider_for_run.clone(),
                     provider_input,
                     run_cancel.clone(),
+                    None,
                 )
                 .await;
                 // 新 BLOCKER 修复：rebuilt snapshot 仅在 provider 成功启动后 commit。
@@ -403,6 +404,7 @@
                                 provider_for_run.clone(),
                                 provider_input,
                                 run_cancel.clone(),
+                                None,
                             )
                             .await;
                             let full_output = match engine

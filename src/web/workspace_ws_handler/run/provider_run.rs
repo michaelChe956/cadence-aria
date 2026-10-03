@@ -317,6 +317,7 @@ pub(super) async fn spawn_provider_run_with_start_mode(
                         provider_for_run.clone(),
                         provider_input,
                         run_cancel.clone(),
+                        None,
                     )
                     .await;
                     let full_output = match engine
@@ -441,6 +442,7 @@ pub(super) async fn spawn_provider_run_with_start_mode(
                         provider_for_run.clone(),
                         provider_input,
                         run_cancel.clone(),
+                        None,
                     )
                     .await;
                     let full_output = match engine
@@ -678,6 +680,7 @@ pub(super) async fn spawn_provider_run_with_start_mode(
                     provider_for_run.clone(),
                     provider_input,
                     run_cancel.clone(),
+                    None,
                 )
                 .await;
                 let full_output = match engine

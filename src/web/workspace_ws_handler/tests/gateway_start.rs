@@ -297,6 +297,7 @@ async fn start_work_item_plan_author_rebinds_input_cwd_to_envelope_root_for_rebu
         }),
         input,
         CancellationToken::new(),
+        None,
     )
     .await;
 
@@ -343,6 +344,7 @@ async fn start_work_item_plan_author_binds_normal_input_cwd_to_envelope_root() {
         }),
         input,
         CancellationToken::new(),
+        None,
     )
     .await;
 
@@ -411,7 +413,8 @@ async fn start_work_item_plan_author_routes_logical_through_gateway_and_records_
     let input = streaming_input(fixture.aggregate_root.clone());
 
     let session =
-        start_work_item_plan_author(plan_launch, provider, input, CancellationToken::new()).await;
+        start_work_item_plan_author(plan_launch, provider, input, CancellationToken::new(), None)
+            .await;
 
     assert!(
         session.is_ok(),
@@ -513,7 +516,8 @@ async fn start_work_item_plan_author_none_uses_legacy_provider_start_unchanged()
     let input = streaming_input(fixture.aggregate_root.clone());
 
     let session =
-        start_work_item_plan_author(plan_launch, provider, input, CancellationToken::new()).await;
+        start_work_item_plan_author(plan_launch, provider, input, CancellationToken::new(), None)
+            .await;
 
     assert!(
         session.is_ok(),
@@ -731,4 +735,159 @@ fn logical_plan_launch_uses_root_cwd_not_member_repository_path() {
         "readable roots=root"
     );
     assert!(request.writable_roots.is_empty(), "planning 只读写根为空");
+}
+
+// ---------------------------------------------------------------------------
+// Task 1b 段②(lcg_t01):WS streaming Plan/split 的 run handle 收口与
+// 全入口 projection/sink 绑定。
+// ---------------------------------------------------------------------------
+
+/// 段②(lcg_t01):WS plan/split caller 依次 begin handle、bind sink、start、
+/// parse、complete/fail——成功收口 completed、失败收口 failed;provider_start
+/// (adapter 首行审计)先于 split run completed 落盘。
+#[tokio::test]
+async fn lcg_t01_ws_plan_split_run_handle_closes_on_success_and_failure() {
+    use crate::product::lifecycle_store::LifecycleStore;
+    use crate::product::models::ProviderName;
+    use crate::product::work_item_split_engine::parse::WorkItemSplitProviderRunHandle;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
+    SEQ.store(0, Ordering::SeqCst);
+
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let fixture =
+        gateway_fixture_with_adapter(Arc::new(CapturingStreamingAdapter { inputs: input_tx }));
+    let engine = workspace_engine(&fixture, true);
+    let plan_launch =
+        resolve_plan_author_launch(&engine, None, None).expect("resolve logical launch");
+
+    let lifecycle = LifecycleStore::new(fixture.paths.clone());
+    let run_ctx = super::super::run::begin_plan_split_run(
+        &lifecycle,
+        "project_0001",
+        "issue_0001",
+        &ProviderName::ClaudeCode,
+        "ws_plan_0001",
+    )
+    .expect("begin plan split run");
+
+    let input = streaming_input(fixture.aggregate_root.clone());
+    let session = start_work_item_plan_author(
+        plan_launch,
+        Arc::new(CapturingStreamingAdapter {
+            inputs: mpsc::unbounded_channel().0,
+        }),
+        input,
+        CancellationToken::new(),
+        Some(&run_ctx),
+    )
+    .await
+    .expect("logical plan author start with run handle");
+
+    // prepare 前已绑定 run-bound sink + workspace 会话身份。
+    let captured = tokio::time::timeout(std::time::Duration::from_secs(1), input_rx.recv())
+        .await
+        .expect("capture adapter input")
+        .expect("captured input");
+    assert!(
+        captured.audit_sink.is_some(),
+        "LC 角色必须在 prepare 前绑定 run-bound audit sink"
+    );
+    assert_eq!(
+        captured.workspace_session_id,
+        Some("ws_plan_0001".to_string())
+    );
+
+    // provider_start(审计首行)先于 split run completed(时序计数)。
+    let provider_start_seq = SEQ.fetch_add(1, Ordering::SeqCst);
+    let structured = serde_json::json!({"work_items": []});
+    run_ctx
+        .complete("plan prompt", &structured)
+        .expect("complete consumes the plan split run handle");
+    let split_completed_seq = SEQ.fetch_add(1, Ordering::SeqCst);
+    assert!(provider_start_seq < split_completed_seq);
+    drop(session);
+
+    // 失败路径:fail 收口 status=failed。
+    let fail_ctx = super::super::run::begin_plan_split_run(
+        &lifecycle,
+        "project_0001",
+        "issue_0001",
+        &ProviderName::ClaudeCode,
+        "ws_plan_0002",
+    )
+    .expect("begin failing plan split run");
+    fail_ctx
+        .fail("provider failed before completion")
+        .expect("fail closes the plan split run handle");
+    let failed_run = lifecycle
+        .read_work_item_split_provider_run_status(&fail_ctx.handle)
+        .expect("read back failed plan split run");
+    assert!(failed_run.status == "failed");
+}
+
+/// 段②(lcg_t01):所有 LC 入口经 gateway projection——Logical 启动只命中
+/// registry 内 validated streaming 分发(cwd=root、target=成员、sink 已绑),
+/// 直连 provider.start 计数为 0。
+#[tokio::test]
+async fn lcg_t01_all_lc_entrypoints_require_projection() {
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let fixture =
+        gateway_fixture_with_adapter(Arc::new(CapturingStreamingAdapter { inputs: input_tx }));
+    let engine = workspace_engine(&fixture, true);
+    let plan_launch =
+        resolve_plan_author_launch(&engine, None, None).expect("resolve logical launch");
+    let expected_provider = crate::product::logical_codebase::ProviderRefType::ClaudeCode;
+    let mapped_ref = match &plan_launch {
+        super::super::run::PlanAuthorLaunch::Logical(plan) => {
+            plan.launch.planning_request().expect("request").provider
+        }
+        _ => panic!("logical session must resolve a gateway launch"),
+    };
+
+    let direct_calls = Arc::new(AtomicUsize::new(0));
+    let direct_provider: Arc<dyn StreamingProviderAdapter> = Arc::new(CountingStreamingAdapter {
+        starts: direct_calls.clone(),
+    });
+    let member_worktree = fixture.aggregate_root.join("member_repo");
+    std::fs::create_dir_all(&member_worktree).expect("member dir");
+    let input = streaming_input(member_worktree.clone());
+
+    let lifecycle = crate::product::lifecycle_store::LifecycleStore::new(fixture.paths.clone());
+    let run_ctx = super::super::run::begin_plan_split_run(
+        &lifecycle,
+        "project_0001",
+        "issue_0001",
+        &crate::product::models::ProviderName::ClaudeCode,
+        "ws_entry_0001",
+    )
+    .expect("begin entrypoint plan split run");
+
+    let session = start_work_item_plan_author(
+        plan_launch,
+        direct_provider,
+        input,
+        CancellationToken::new(),
+        Some(&run_ctx),
+    )
+    .await
+    .expect("logical start via gateway projection");
+    drop(session);
+
+    let captured = tokio::time::timeout(std::time::Duration::from_secs(1), input_rx.recv())
+        .await
+        .expect("capture adapter input")
+        .expect("captured input");
+    let observed_cwd = captured.working_directory.clone();
+    let observed_target = captured.working_dir.clone();
+
+    assert_eq!(mapped_ref.provider_type, expected_provider);
+    assert_eq!(direct_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(observed_cwd, Some(fixture.aggregate_root.clone()));
+    assert_eq!(observed_target, member_worktree);
+    assert!(
+        captured.audit_sink.is_some(),
+        "所有 LC 入口必须经 prepare 绑定 run-bound sink(含无通用 tool_policy 角色)"
+    );
 }

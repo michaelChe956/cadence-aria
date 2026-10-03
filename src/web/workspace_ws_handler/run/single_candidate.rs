@@ -342,6 +342,7 @@ async fn drive_single_candidate_reredrive(
         Arc::clone(&provider_for_run),
         reredrive_input,
         run_cancel.clone(),
+        None,
     )
     .await;
     let reredrive_output = match engine
@@ -686,6 +687,7 @@ pub(crate) async fn run_single_candidate_author(
         Arc::clone(&provider_for_run),
         provider_input,
         run_cancel.clone(),
+        None,
     )
     .await;
     let full_output = match engine

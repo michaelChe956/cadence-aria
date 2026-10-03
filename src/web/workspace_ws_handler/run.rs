@@ -16,6 +16,7 @@ use followups::{
 mod gateway_start;
 #[cfg(test)]
 pub(crate) use gateway_start::PlanAuthorLaunch;
+pub(crate) use gateway_start::{PlanSplitRunContext, begin_plan_split_run};
 pub(crate) use gateway_start::{resolve_plan_author_launch, start_work_item_plan_author};
 #[path = "run/provider_run.rs"]
 mod provider_run;

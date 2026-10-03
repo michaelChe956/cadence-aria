@@ -195,6 +195,7 @@ macro_rules! workspace_ws_work_item_plan_revision_arm {
                     $provider_for_run.clone(),
                     provider_input,
                     $run_cancel.clone(),
+                    None,
                 )
                 .await;
                 let full_output = match $engine
@@ -385,6 +386,7 @@ macro_rules! workspace_ws_work_item_plan_revision_arm {
                                 $provider_for_run.clone(),
                                 provider_input,
                                 $run_cancel.clone(),
+                                None,
                             )
                             .await;
                             let full_output = match $engine
@@ -665,6 +667,7 @@ macro_rules! workspace_ws_provider_run_followups {
                 provider_for_draft.clone(),
                 provider_input,
                 $run_cancel.clone(),
+                None,
             )
             .await;
             let full_output = match $engine
@@ -800,6 +803,7 @@ pub(crate) async fn drive_current_work_item_plan_outline_run(
             provider.clone(),
             provider_input,
             run_cancel.clone(),
+            None,
         )
         .await;
         let full_output = engine

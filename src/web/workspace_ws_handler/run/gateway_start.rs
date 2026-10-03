@@ -177,6 +177,60 @@ pub(crate) fn resolve_plan_author_launch(
     })))
 }
 
+/// Task 1b 段②:WS streaming Plan/split 的 run 身份绑定——caller 先 begin,
+/// `start_work_item_plan_author` 消费它做 prepare 前 sink 绑定,成功 complete、
+/// 失败 fail;retry 每次新 handle(计划冻结「WS Plan/split run identity」)。
+pub(crate) struct PlanSplitRunContext {
+    pub handle: crate::product::work_item_split_engine::parse::WorkItemSplitProviderRunHandle,
+    lifecycle: crate::product::lifecycle_store::LifecycleStore,
+}
+
+/// begin handle:分配 run-bound 身份(sink 绑定与审计文件 key 同源)。
+pub(crate) fn begin_plan_split_run(
+    lifecycle: &crate::product::lifecycle_store::LifecycleStore,
+    project_id: &str,
+    issue_id: &str,
+    provider: &crate::product::models::ProviderName,
+    workspace_session_id: &str,
+) -> Result<PlanSplitRunContext, String> {
+    let handle = lifecycle
+        .begin_work_item_split_provider_run(project_id, issue_id, provider, workspace_session_id)
+        .map_err(|error| error.to_string())?;
+    Ok(PlanSplitRunContext {
+        handle,
+        lifecycle: lifecycle.clone(),
+    })
+}
+
+impl PlanSplitRunContext {
+    /// prepare 前 run-bound audit 上下文(sink=LifecycleStore 生产 sink)。
+    pub(crate) fn audit_context(
+        &self,
+    ) -> crate::product::logical_codebase::provider_gateway::ProviderLaunchAuditContext {
+        crate::product::logical_codebase::provider_gateway::ProviderLaunchAuditContext {
+            workspace_session_id: self.handle.workspace_session_id.clone(),
+            role_run_seq: self.handle.role_run_seq,
+            audit_sink: std::sync::Arc::new(self.lifecycle.clone()),
+        }
+    }
+
+    /// 成功收口:complete 消费已有 handle(RED 占位)。
+    pub(crate) fn complete(
+        &self,
+        prompt: &str,
+        structured_output: &serde_json::Value,
+    ) -> Result<(), String> {
+        let _ = (prompt, structured_output);
+        Err("plan split run complete is not implemented yet".to_string())
+    }
+
+    /// 失败收口(RED 占位)。
+    pub(crate) fn fail(&self, reason: &str) -> Result<(), String> {
+        let _ = reason;
+        Err("plan split run fail is not implemented yet".to_string())
+    }
+}
+
 /// 逻辑会话经 gateway 启动,否则原 `provider.start`。返回 `ProviderSession`。
 ///
 /// `launch` 为 `Logical` 时复用已 resolve 的 validated policy 经
@@ -190,12 +244,15 @@ pub(crate) async fn start_work_item_plan_author(
     provider: Arc<dyn StreamingProviderAdapter>,
     mut input: StreamingProviderInput,
     cancel: CancellationToken,
+    plan_split_run: Option<&PlanSplitRunContext>,
 ) -> Result<ProviderSession, ProviderAdapterError> {
     let PlanAuthorLaunch::Logical(plan) = launch else {
         return provider.start(input, cancel).await;
     };
     let plan = *plan;
-
+    // 段② RED 占位:plan_split_run 的 prepare 前 sink 绑定由
+    // lcg_t01_ws_plan_split_* 测试锁定后实现。
+    let _ = plan_split_run;
     // Task 2.8（REQ-PLN-03，planning snapshot 贯穿）：input 的独立 cwd 重绑
     // envelope 冻结的 canonical root——cwd/target 分离贯穿正常 run（worktree=
     // 成员 checkout）与 B3 StaleContext 重建 run（worktree=rebuilt.cwd=root），
