@@ -1131,3 +1131,66 @@ done
         }
     }
 }
+
+/// Task 5 Step 1(断言组 323-324):LC 危险请求零 child——Coder 形态
+/// (无通用 tool policy)的 Coding 启动在受限写面未冻结(writable roots 非
+/// target-only)时,direct 映射的唯一替代是 danger-full-access;REQ-LCG-04
+/// 永久拒绝,稳定 reason=`codex_danger_full_access_unsupported`,拒绝发生在
+/// spawn 之前(Auto/Supervised × fresh/resume 四组合,零 provider_start)。
+#[cfg(unix)]
+#[tokio::test]
+async fn lcg_t05_danger_full_access_zero_child_for_fresh_resume_and_permission_modes() {
+    let fixture = LcCodexFixture::new();
+    let resume = Some("codex-thread-lc".to_string());
+    let combinations = [
+        (ProviderPermissionMode::Auto, None),
+        (ProviderPermissionMode::Auto, resume.clone()),
+        (ProviderPermissionMode::Supervised, None),
+        (ProviderPermissionMode::Supervised, resume),
+    ];
+
+    for (permission_mode, resume_id) in combinations {
+        let sink = RecordingToolPolicyAuditSink::new();
+        let marker_root = tempfile::tempdir().expect("danger marker dir").keep();
+        let mut raw = fixture.lc_input(
+            AdapterRole::Executor,
+            None,
+            permission_mode.clone(),
+            resume_id,
+            Some(sink.clone().bound()),
+            fixture.canonical_root(),
+        );
+        let (_cwd, _wire, spawn_marker) = lc_markers(&mut raw, &marker_root);
+        let provider = CodexProvider::new(lc_app_server_fixture())
+            .with_version_supplier(lc_version_supplier());
+
+        // 写面未冻结(writable roots 为空,非 target-only):受限投影无法成立。
+        let Err(error) = provider
+            .start_lc_validated(
+                raw,
+                &fixture.envelope(SessionPolicyAction::CodingTargetWrite, Vec::new()),
+                "cap_codex_lc_fixture",
+                CancellationToken::new(),
+            )
+            .await
+        else {
+            panic!("danger request must be rejected ({permission_mode:?})");
+        };
+
+        // 稳定 reason(断言组 323):与 gateway 路由门同源的字节级稳定码。
+        assert_eq!(
+            error.details, "codex_danger_full_access_unsupported",
+            "danger refusal must carry the stable reason ({permission_mode:?})"
+        );
+        // 零 child(断言组 324):拒绝发生在 ProcessManager::spawn 之前,
+        // fixture 从未执行、provider_start 从未落盘。
+        assert!(
+            !spawn_marker.exists(),
+            "no codex child may spawn for a danger request ({permission_mode:?})"
+        );
+        assert!(
+            sink.events().is_empty(),
+            "no provider_start audit may be written for a danger request"
+        );
+    }
+}

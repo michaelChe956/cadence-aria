@@ -11,9 +11,14 @@ use crate::cross_cutting::json_rpc_peer::{JsonRpcPeer, OutboundIdNamespace, ensu
 use crate::cross_cutting::streaming_provider::{
     ChoiceAnswerData, CodexApprovalCategory, CodexApprovalResponse, ProviderCommand,
     ProviderCompletion, ProviderEvent, ProviderExecutionEventKind, ProviderExecutionEventStatus,
-    ProviderPermissionMode, ProviderToolPolicy, StreamingProviderAdapter, StreamingProviderInput,
+    ProviderPermissionMode, ProviderToolPolicy, ProviderVersionSupplier, StreamingProviderAdapter,
+    StreamingProviderInput,
 };
 use crate::cross_cutting::structured_output::{StructuredOutputContract, StructuredOutputState};
+use crate::product::logical_codebase::policy::{
+    PolicyTarget, ProviderDialect, SessionPolicyAction, SessionPolicyEnvelope,
+};
+use crate::product::logical_codebase::provider_gateway::ProviderRef;
 use crate::protocol::contracts::{AdapterRole, ProviderType};
 
 use super::CodexProvider;
@@ -346,4 +351,181 @@ fn parse_codex_usage_reads_nested_total_token_usage_object() {
     assert_eq!(report.input_tokens, Some(16190));
     assert_eq!(report.output_tokens, Some(482));
     assert_eq!(report.cache_read_tokens, Some(2432));
+}
+
+// ── Task 5 LC 受限 sandbox 测试 fixture(REQ-LCG-04)──────────────────────
+//
+// gateway 路由级 Codex 阻断(默认 danger-full-access)迁移到 LC projection
+// 判定归 Task 3/8;此前真实 gateway validate 无法为 Codex 产出 validated
+// policy。本 fixture 在 provider 域构造 gateway 同形状的冻结 envelope,直接
+// 驱动 `CodexProvider::start_lc_validated`(`start_validated` 的真实执行体)
+// 锁定受限 sandbox/wire/审计行为。
+
+/// LC fixture 的冻结 exact version(supplier seam 注入)。
+fn lc_version_supplier() -> ProviderVersionSupplier {
+    std::sync::Arc::new(|| Ok("codex 0.124.0-lc-fixture".to_string()))
+}
+
+/// LC app-server 假体(运行时写入;三家 Task 4 先例同构):
+/// - 执行即 `touch $LC_SPAWN_MARKER`(零 child 断言的观测点);
+/// - `pwd -P > $LC_CWD_MARKER`(进程 cwd 断言);
+/// - thread/start|resume 原始请求行写 `$LC_WIRE_MARKER`(真实 RPC params
+///   断言),应答固定 thread id `codex-thread-lc`;
+/// - turn/start 应答后送出 agentMessage + turn/completed 并退出。
+fn lc_app_server_fixture() -> PathBuf {
+    let path = tempfile::tempdir()
+        .expect("lc fixture dir")
+        .keep()
+        .join("codex_lc_app_server_fixture.sh");
+    std::fs::write(&path, LC_APP_SERVER_FIXTURE_BODY).expect("write lc fixture");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = std::fs::metadata(&path)
+            .unwrap_or_else(|error| panic!("fixture metadata {}: {error}", path.display()))
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&path, permissions)
+            .unwrap_or_else(|error| panic!("chmod fixture {}: {error}", path.display()));
+    }
+    path
+}
+
+const LC_APP_SERVER_FIXTURE_BODY: &str = r#"#!/usr/bin/env bash
+set -uo pipefail
+pwd -P > "$LC_CWD_MARKER"
+touch "$LC_SPAWN_MARKER"
+while IFS= read -r line; do
+  if [[ "$line" == *'"method":"initialize"'* ]]; then
+    id="$(printf '%s' "$line" | sed -n -e 's/.*"id":[[:space:]]*"\([0-9A-Za-z_-][0-9A-Za-z_-]*\)".*/\1/p' -e 's/.*"id":[[:space:]]*\([0-9][0-9]*\).*/\1/p')"
+    echo "{\"jsonrpc\":\"2.0\",\"id\":\"${id:-aria-0}\",\"result\":{\"capabilities\":{}}}"
+  elif [[ "$line" == *'"method":"initialized"'* ]]; then
+    :
+  elif [[ "$line" == *'"method":"thread/start"'* ]] || [[ "$line" == *'"method":"thread/resume"'* ]]; then
+    printf '%s' "$line" > "$LC_WIRE_MARKER"
+    id="$(printf '%s' "$line" | sed -n -e 's/.*"id":[[:space:]]*"\([0-9A-Za-z_-][0-9A-Za-z_-]*\)".*/\1/p' -e 's/.*"id":[[:space:]]*\([0-9][0-9]*\).*/\1/p')"
+    echo "{\"jsonrpc\":\"2.0\",\"id\":\"${id:-aria-1}\",\"result\":{\"thread\":{\"id\":\"codex-thread-lc\"}}}"
+  elif [[ "$line" == *'"method":"turn/start"'* ]]; then
+    id="$(printf '%s' "$line" | sed -n -e 's/.*"id":[[:space:]]*"\([0-9A-Za-z_-][0-9A-Za-z_-]*\)".*/\1/p' -e 's/.*"id":[[:space:]]*\([0-9][0-9]*\).*/\1/p')"
+    echo "{\"jsonrpc\":\"2.0\",\"id\":\"${id:-aria-2}\",\"result\":{\"turn\":{\"id\":\"turn-lc\"}}}"
+    echo '{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"id":"msg-1","type":"agentMessage","text":"lc restricted done"}}}'
+    echo '{"jsonrpc":"2.0","method":"turn/completed","params":{"turnId":"turn-lc"}}'
+    exit 0
+  fi
+done
+"#;
+
+/// LC 启动 fixture:canonical root 与成员 target worktree 分离(双 cwd 合同:
+/// 进程 cwd=root,协议 cwd 由 action 投影决定)。
+struct LcCodexFixture {
+    root: PathBuf,
+    target: PathBuf,
+}
+
+impl LcCodexFixture {
+    fn new() -> Self {
+        let root = tempfile::tempdir().expect("lc fixture root").keep();
+        let target = root.join("member-worktree");
+        std::fs::create_dir_all(&target).expect("create member worktree");
+        Self { root, target }
+    }
+
+    /// canonical LC root(= manifest `provider_context_root` 的 canonical 形态)。
+    fn canonical_root(&self) -> PathBuf {
+        std::fs::canonicalize(&self.root).expect("lc fixture root exists")
+    }
+
+    /// 唯一成员 target worktree(与 canonical root 分离)。
+    fn target_worktree(&self) -> PathBuf {
+        self.target.clone()
+    }
+
+    /// gateway 同形状的冻结 envelope(正确形态:read-only 空 writable roots;
+    /// coding 恰一个等于 target 的可写 root。形状违规变体由调用方传入)。
+    fn envelope(
+        &self,
+        action: SessionPolicyAction,
+        writable_roots: Vec<PathBuf>,
+    ) -> SessionPolicyEnvelope {
+        let canonical_root = self.canonical_root();
+        SessionPolicyEnvelope {
+            policy_id: "policy_lc_codex_fixture".to_string(),
+            policy_revision: 1,
+            policy_digest: "sha256:policy-lc-codex-fixture".to_string(),
+            action,
+            target: PolicyTarget::checkout(
+                "logical_repo_0001",
+                "checkout_0001",
+                self.target.clone(),
+            ),
+            working_directory: canonical_root.clone(),
+            readable_roots: vec![canonical_root.clone()],
+            writable_roots,
+            provider_dialect: ProviderDialect::CodexCliV1,
+            config_artifact_ref: "sha256:managed-config-artifact".to_string(),
+            config_digest: "sha256:cfg-digest-lc".to_string(),
+            created_at: "2026-10-04T00:00:00Z".to_string(),
+            authority_root: canonical_root,
+        }
+    }
+
+    /// LC streaming input(`raw_working_dir` 故意与投影 protocol cwd 相反,
+    /// 证明 wire 参数来自投影而非 raw 输入)。
+    #[allow(clippy::too_many_arguments)]
+    fn lc_input(
+        &self,
+        role: AdapterRole,
+        tool_policy: Option<ProviderToolPolicy>,
+        permission_mode: ProviderPermissionMode,
+        resume_id: Option<String>,
+        audit_sink: Option<
+            std::sync::Arc<dyn crate::cross_cutting::tool_policy_audit::ToolPolicyAuditSink>,
+        >,
+        raw_working_dir: PathBuf,
+    ) -> StreamingProviderInput {
+        StreamingProviderInput {
+            working_directory: Some(self.canonical_root()),
+            baseline_tree: None,
+            tool_policy,
+            audit_sink,
+            provider_type: ProviderType::Codex,
+            role,
+            prompt: "Run the LC fixture provider".to_string(),
+            working_dir: raw_working_dir,
+            workspace_session_id: Some("ws-lc-fixture-1".to_string()),
+            resume_provider_session_id: resume_id,
+            permission_mode,
+            structured_output_contract: None,
+            env_vars: BTreeMap::new(),
+            timeout_secs: 60,
+        }
+    }
+}
+
+/// 注入 LC 观测 marker 环境变量:进程 pwd、thread 请求原文、任何子进程执行。
+/// 返回 (cwd_marker, wire_marker, spawn_marker)。
+fn lc_markers(input: &mut StreamingProviderInput, dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
+    let cwd = dir.join("lc-cwd-marker");
+    let wire = dir.join("lc-wire-marker");
+    let spawn = dir.join("lc-spawn-marker");
+    input
+        .env_vars
+        .insert("LC_CWD_MARKER".to_string(), cwd.display().to_string());
+    input
+        .env_vars
+        .insert("LC_WIRE_MARKER".to_string(), wire.display().to_string());
+    input
+        .env_vars
+        .insert("LC_SPAWN_MARKER".to_string(), spawn.display().to_string());
+    (cwd, wire, spawn)
+}
+
+/// 读取 wire marker 中的 thread/start|resume 请求并解析 params(真实 RPC
+/// params 断言的单一入口)。
+fn lc_wire_params(wire_marker: &Path) -> Value {
+    let line = std::fs::read_to_string(wire_marker).expect("wire marker is written");
+    let request: Value = serde_json::from_str(&line)
+        .unwrap_or_else(|error| panic!("wire marker is valid JSON ({line}): {error}"));
+    request["params"].clone()
 }

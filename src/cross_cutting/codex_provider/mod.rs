@@ -18,6 +18,7 @@ use crate::cross_cutting::streaming_provider::{
 use crate::cross_cutting::tool_policy_audit::{DurableToolPolicyEvent, ProviderStartAudit};
 
 mod parse;
+mod projection;
 mod response;
 pub(crate) mod session;
 mod support;
@@ -26,9 +27,9 @@ mod support;
 pub mod tests;
 
 pub(crate) use parse::*;
+pub use projection::CodexPolicyProjector;
 pub(crate) use response::*;
 pub(crate) use support::*;
-
 pub(crate) const CODEX_RPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 /// Codex app-server 默认 sandbox 模式。当前唯一支持的是 `danger-full-access`,
 /// 这是受限写尚未就绪的已知 gap。gateway 据此在路由级阻断 Codex 启动(见
@@ -128,6 +129,28 @@ impl CodexProvider {
             "--enable".to_string(),
             "default_mode_request_user_input".to_string(),
         ]
+    }
+}
+
+impl CodexProvider {
+    /// `start_validated` 的真实执行体(gateway 路由级 Codex 阻断迁移到 LC
+    /// projection 判定归 Task 3/8;此前真实 gateway validate 无法为 Codex
+    /// 产出 validated policy,tests 子模块直接驱动本私有方法锁定受限分支)。
+    ///
+    /// Task 5a 阶段 1 RED 桩:阶段 2 实现受限启动链。
+    async fn start_lc_validated(
+        &self,
+        _input: StreamingProviderInput,
+        _envelope: &crate::product::logical_codebase::policy::SessionPolicyEnvelope,
+        _capability_snapshot_ref: &str,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        Err(ProviderAdapterError::execution_failed(
+            None,
+            String::new(),
+            "codex lc validated start is not implemented yet (task 5a red stub)",
+            0,
+        ))
     }
 }
 
@@ -447,5 +470,25 @@ impl StreamingProviderAdapter for CodexProvider {
             events: event_rx,
             commands,
         })
+    }
+    /// LC validated 启动(Task 5,REQ-LCG-04):只接受 gateway 产出的
+    /// validated input,经 `CodexPolicyProjector` 投影受限 sandbox
+    /// (read-only/workspace-write,danger-full-access 永久拒绝),以 canonical
+    /// LC root 为进程 cwd、投影 protocol cwd 为协议 cwd 启动;统一落盘
+    /// `ProviderStartAudit.lc_projection`(sandbox/approvalPolicy 与 wire
+    /// 同源;无通用 tool policy 的角色不早退)。
+    async fn start_validated(
+        &self,
+        validated: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let (input, launch) = validated.into_parts();
+        self.start_lc_validated(
+            input,
+            launch.envelope(),
+            launch.capability_snapshot_ref(),
+            cancel,
+        )
+        .await
     }
 }

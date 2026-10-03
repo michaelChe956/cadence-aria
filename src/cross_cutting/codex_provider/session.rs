@@ -70,6 +70,36 @@ pub(crate) fn codex_launch_params(input: &StreamingProviderInput) -> serde_json:
     }
 }
 
+/// LC 受限启动参数(Task 5,REQ-LCG-04):thread/start 与 thread/resume 共用,
+/// 只能来自已投影的 `CodexSandboxProjection`——`cwd`=投影冻结的协议 cwd
+/// (Coding=target,只读=root),不以 raw 输入的 working_dir 覆盖。direct
+/// `codex_launch_params` 原签名/分支保留,仅供 direct 启动消费。
+///
+/// Task 5a 阶段 1 RED 桩:阶段 2 实现真实参数。
+pub(crate) fn codex_lc_launch_params(
+    _lc: &super::projection::CodexSandboxProjection,
+) -> serde_json::Value {
+    serde_json::json!({})
+}
+
+/// LC 会话握手(Task 5):initialize/initialized + thread/resume|thread/start,
+/// 启动参数来自受限投影(与 direct 握手共用 thread/start|resume 流程与
+/// F1 resume id 确认语义)。
+///
+/// Task 5a 阶段 1 RED 桩:阶段 2 实现真实握手。
+pub(crate) async fn codex_lc_session_handshake<W>(
+    _peer: &JsonRpcPeer<W>,
+    _input: &StreamingProviderInput,
+    _lc: &super::projection::CodexSandboxProjection,
+) -> Result<CodexSessionHandshake, ProviderAdapterError>
+where
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    Err(provider_error(
+        "codex lc session handshake is not implemented yet (task 5a red stub)",
+    ))
+}
+
 /// 策略会话即时审批决策（GC6 冻结）：commandExecution/fileChange 一律拒绝并
 /// 审计；所有会话 MCP 一律 accept 并审计。决策以结构化事件形式暴露
 /// （`CodexApprovalDecisionEvent`，内存出口；durable 接线在 Task 3.2）。
