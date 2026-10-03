@@ -1634,7 +1634,7 @@ impl LogicalCodebaseProviderGateway {
         provider: &ProviderRef,
         action: SessionPolicyAction,
         _role: &crate::protocol::contracts::AdapterRole,
-        _permission_mode: &crate::cross_cutting::streaming_provider::ProviderPermissionMode,
+        _permission_mode: crate::cross_cutting::streaming_provider::ProviderPermissionMode,
     ) -> Result<ProviderActionAdmission, ProviderAdmissionError> {
         let capability = self
             .capabilities

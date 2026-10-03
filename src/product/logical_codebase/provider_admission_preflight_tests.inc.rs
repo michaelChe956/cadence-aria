@@ -1522,7 +1522,7 @@ mod tests {
                 &ProviderRef::claude_code("snapshot-admission-test"),
                 SessionPolicyAction::CodingTargetWrite,
                 &crate::protocol::contracts::AdapterRole::Executor,
-                &crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
+                crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
             )
             .expect("early eligibility must not require future D4 facts");
         assert_eq!(early.capability_snapshot_ref, "snapshot-admission-test");

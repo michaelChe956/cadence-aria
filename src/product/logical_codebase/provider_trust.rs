@@ -219,7 +219,16 @@ impl ProviderTrustSource for ReadonlyProviderTrustSource {
             }
             None => None,
         };
-        let _ = lc_id;
+        // T3R2-F2:形参 lc_id 与 source 装配作用域必须一致——调用侧携带
+        // 的 LC 作用域(空串=无作用域)若与装配不一致,说明装配漂移,
+        // fail-closed(本 change 语义:不静默采信任一侧)。
+        let requested_scope = if lc_id.is_empty() { None } else { Some(lc_id) };
+        if requested_scope != self.lc_id.as_deref() {
+            return Err(ProviderGatewayError::ProviderUnavailable(format!(
+                "read-only trust source scope mismatch: requested {requested_scope:?}, source {:?}",
+                self.lc_id
+            )));
+        }
         Ok(ProviderTrustVerification {
             provider: provider.clone(),
             canonical_root: canonical_root.to_path_buf(),
