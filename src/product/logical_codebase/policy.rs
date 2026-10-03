@@ -16,7 +16,17 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::product::app_paths::ProductAppPaths;
-use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
+use crate::product::coding_attempt_store::locking::with_exact_exclusive_lock;
+use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id};
+use crate::product::logical_codebase::aggregate_initialization::{
+    AggregateInitializationOperation, AggregateInitializationOperationStatus,
+    AggregateInitializationStepKind,
+};
+use crate::product::logical_codebase::aggregate_initialization_store::AggregateInitializationOperationStore;
+use crate::product::logical_codebase::root_recipe_receipt::ROOT_RULE_ENTRY_FILE;
+
+#[cfg(test)]
+use publish_faults::FaultPhase;
 
 /// 路由级 fail-closed 安全策略:任何与 action 不匹配的 root 配置都返回此错误。
 ///
@@ -27,6 +37,12 @@ pub const POLICY_ENVELOPE_INVALID_ROOTS: &str = "policy_envelope_invalid_roots";
 /// bootstrap 政策使用的最小政策正文。Task 9 的 gateway 在首次真实 provider
 /// launch 前从此正文解析政策,后续 revision 可由更完整的政策正文替换。
 const BOOTSTRAP_POLICY_TEXT: &str = "# Aggregate policy (bootstrap)\n\nAllow planning read-only and coding target-write sessions under the logical codebase.\n";
+
+/// I2:已知自举桩正文的固定 digest(由当前桩原字节独立计算并以测试
+/// 钉定,消费端不得复制常量)。Task 2 的 readiness 桩识别与
+/// [`AggregatePolicyArtifact::is_bootstrap_placeholder`] 共用此常量。
+pub(crate) const BOOTSTRAP_POLICY_DIGEST: &str =
+    "sha256:7985b93678372d9dca0cf4489f454a6ec04fdc83f9c1c45497a7542119401373";
 
 /// 集中政策正文的持久化事实来源。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,6 +125,47 @@ impl AggregatePolicyArtifact {
         }
         Ok(())
     }
+
+    /// I2:唯一桩识别谓词。仅比较完整固定正文或 store 已校验的固定
+    /// digest,不比较 revision、年龄或关键词——任何"看起来像"的正文都
+    /// 不算命中。readiness 消费在 Task 2,本包先保留。
+    #[allow(dead_code)]
+    pub(crate) fn is_bootstrap_placeholder(&self) -> bool {
+        self.policy_text == BOOTSTRAP_POLICY_TEXT || self.digest == BOOTSTRAP_POLICY_DIGEST
+    }
+}
+
+/// 发布输出记录的基础引用:候选发布所基于的当时 current artifact 快照。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct AggregatePolicyPublicationReference {
+    pub(crate) policy_id: String,
+    pub(crate) revision: u64,
+    pub(crate) digest: String,
+}
+
+/// 根政策单来源的相对路径与原字节 SHA-256(sources 不重复保存正文,
+/// 完整正文只存在候选 artifact 中)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct AggregatePolicySourceDigest {
+    pub(crate) relative_path: String,
+    pub(crate) digest: String,
+}
+
+/// operation-owned 不可变发布输出:冻结候选 artifact、基础引用、来源
+/// 摘要与 rule digest。`lc_id` 是产品 record id,`logical_codebase_id`
+/// 是 manifest UUID 字符串,两者不得混用;`artifact.created_at` 兼作
+/// 稳定发布/finalize 时间,不另设同义时间字段。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct AggregatePolicyPublicationOutput {
+    pub(crate) project_id: String,
+    pub(crate) lc_id: String,
+    pub(crate) logical_codebase_id: String,
+    pub(crate) operation_id: String,
+    pub(crate) canonical_root: PathBuf,
+    pub(crate) base_policy: AggregatePolicyPublicationReference,
+    pub(crate) artifact: AggregatePolicyArtifact,
+    pub(crate) sources: Vec<AggregatePolicySourceDigest>,
+    pub(crate) rule_digest: String,
 }
 
 /// 每次会话的不可变 action。
@@ -369,25 +426,36 @@ impl AggregatePolicyArtifactStore {
     }
 
     /// 保存 artifact。digest 必须是 policy_text 的 canonical SHA-256,禁止
-    /// 调用方传任意摘要;新 revision 的 digest 在写入前重新校验。
+    /// 调用方传任意摘要;新 revision 的 digest 在写入前重新校验。与
+    /// `ensure_bootstrap`/根政策发布共用同 scope 的 `.aggregate-policy.lock`,
+    /// 三方写串行化,防止丢失更新。
     pub fn save(
+        &self,
+        project_id: &str,
+        artifact: &AggregatePolicyArtifact,
+    ) -> Result<(), ProductStoreError> {
+        with_exact_exclusive_lock(&self.lock_path(project_id)?, || {
+            self.save_unlocked(project_id, artifact)
+        })
+    }
+
+    /// 锁内保存:调用方必须已持有 scope 锁(发布路径复用,绝不重入取锁)。
+    fn save_unlocked(
         &self,
         project_id: &str,
         artifact: &AggregatePolicyArtifact,
     ) -> Result<(), ProductStoreError> {
         artifact.validate_identity(project_id)?;
         artifact.validate_digest()?;
-
         if let Some(existing) = self.get(project_id)? {
             existing.validate_successor(artifact)?;
         }
-
-        write_json(&self.artifact_path(project_id)?, artifact)
+        write_artifact_durable(&self.artifact_path(project_id)?, artifact)
     }
 
     /// 确保存在 bootstrap artifact;幂等。相同 artifact 无副作用返回;
     /// 存在 project/logical-codebase 不一致的 artifact 时返回 `IdentityMismatch`,
-    /// 不能覆盖。
+    /// 不能覆盖。与 save/发布共用同 scope 的 `.aggregate-policy.lock`。
     pub fn ensure_bootstrap(
         &self,
         manifest: &LogicalCodebaseManifest,
@@ -399,13 +467,14 @@ impl AggregatePolicyArtifactStore {
         let bootstrap =
             AggregatePolicyArtifact::bootstrap(&manifest.project_id, &logical_codebase_id, now);
 
-        if let Some(existing) = self.get(&manifest.project_id)? {
-            existing.assert_matches_bootstrap(&bootstrap)?;
-            return Ok(existing);
-        }
-
-        self.save(&manifest.project_id, &bootstrap)?;
-        Ok(bootstrap)
+        with_exact_exclusive_lock(&self.lock_path(&manifest.project_id)?, || {
+            if let Some(existing) = self.get(&manifest.project_id)? {
+                existing.assert_matches_bootstrap(&bootstrap)?;
+                return Ok(existing);
+            }
+            self.save_unlocked(&manifest.project_id, &bootstrap)?;
+            Ok(bootstrap)
+        })
     }
 
     fn artifact_path(&self, project_id: &str) -> Result<PathBuf, ProductStoreError> {
@@ -414,6 +483,252 @@ impl AggregatePolicyArtifactStore {
             crate::product::logical_codebase::lc_scope_root(&self.paths, project_id, &self.lc_id)?
                 .join("aggregate-policy.json"),
         )
+    }
+
+    // -----------------------------------------------------------------
+    // I1:operation-owned 根政策发布
+    // -----------------------------------------------------------------
+
+    fn scope_root(&self, project_id: &str) -> Result<PathBuf, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        crate::product::logical_codebase::lc_scope_root(&self.paths, project_id, &self.lc_id)
+    }
+
+    /// save/ensure_bootstrap/发布三方共用的 scope 锁(同 scope 一把)。
+    fn lock_path(&self, project_id: &str) -> Result<PathBuf, ProductStoreError> {
+        Ok(self
+            .scope_root(project_id)?
+            .join(AGGREGATE_POLICY_LOCK_FILE))
+    }
+
+    /// 不可变发布输出路径:`<lc_scope_root>/aggregate-initializations/
+    /// {operation_id}/policy-publication.json`——不放会被 cancel/recover
+    /// 清理的 `staging/`。
+    fn publication_output_path(
+        &self,
+        project_id: &str,
+        operation_id: &str,
+    ) -> Result<PathBuf, ProductStoreError> {
+        validate_relative_id(operation_id)?;
+        Ok(self
+            .scope_root(project_id)?
+            .join("aggregate-initializations")
+            .join(operation_id)
+            .join(POLICY_PUBLICATION_FILE))
+    }
+
+    /// 同 scope 的 operation store(发布前状态核验用)。
+    fn operation_store(&self) -> AggregateInitializationOperationStore {
+        match &self.lc_id {
+            Some(lc_id) => {
+                AggregateInitializationOperationStore::for_lc(self.paths.clone(), lc_id.clone())
+            }
+            None => AggregateInitializationOperationStore::new(self.paths.clone()),
+        }
+    }
+
+    /// 当前 store 的 scope 标识(写入输出记录):显式 `for_lc` 用 record
+    /// id,legacy 未 scoped store 用 legacy 别名 id。
+    fn scoped_lc_id(&self, project_id: &str) -> String {
+        self.lc_id
+            .clone()
+            .unwrap_or_else(|| legacy_logical_codebase_id(project_id))
+    }
+
+    /// I1:确定性构造并发布根政策正文。锁外先核验 operation(同 scope/
+    /// project/root、Running 且 current_step=OpenspecAndExamples,不放宽
+    /// 生产状态核验),再在 scope 锁内冻结候选 revision、来源摘要与发布
+    /// 时间。发布顺序固定:不可变输出 → 精确 locator no-clobber 发布 →
+    /// read-back 字节/SHA 复验 → current artifact durable 替换。同
+    /// operation 重入复用同一候选与时间;来源/身份/base 漂移冲突停等。
+    /// 生产接线在 Task 4(生产末命令收口),本包先保留。
+    #[allow(dead_code)]
+    pub(crate) fn publish_recipe_policy(
+        &self,
+        manifest: &LogicalCodebaseManifest,
+        operation_id: &str,
+        canonical_root: &Path,
+        created_at: String,
+    ) -> Result<AggregatePolicyArtifact, ProductStoreError> {
+        validate_relative_id(&manifest.project_id)?;
+        validate_relative_id(operation_id)?;
+        let operation = self
+            .operation_store()
+            .get(&manifest.project_id, operation_id)?;
+        validate_publication_operation(&operation, manifest, canonical_root)?;
+        with_exact_exclusive_lock(&self.lock_path(&manifest.project_id)?, || {
+            self.publish_locked(manifest, operation_id, canonical_root, created_at)
+        })
+    }
+
+    /// I1:读取 operation-owned 发布输出(纯投影,零副作用)。生产接线
+    /// 在 Task 4,本包先保留。
+    #[allow(dead_code)]
+    pub(crate) fn get_recipe_policy_publication(
+        &self,
+        project_id: &str,
+        operation_id: &str,
+    ) -> Result<Option<AggregatePolicyPublicationOutput>, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(operation_id)?;
+        let path = self.publication_output_path(project_id, operation_id)?;
+        if !path.try_exists().map_err(|error| {
+            ProductStoreError::Io(format!("try_exists {}: {error}", path.display()))
+        })? {
+            return Ok(None);
+        }
+        let output: AggregatePolicyPublicationOutput = read_json(&path)?;
+        if output.project_id != project_id || output.operation_id != operation_id {
+            return Err(invalid_publication(format!(
+                "publication output at {} does not belong to operation {operation_id}",
+                path.display()
+            )));
+        }
+        output.artifact.validate_digest()?;
+        Ok(Some(output))
+    }
+
+    /// 锁内发布主流程(调用方已持 scope 锁)。
+    fn publish_locked(
+        &self,
+        manifest: &LogicalCodebaseManifest,
+        operation_id: &str,
+        canonical_root: &Path,
+        created_at: String,
+    ) -> Result<AggregatePolicyArtifact, ProductStoreError> {
+        let project_id = manifest.project_id.as_str();
+        let logical_codebase_id = manifest.logical_codebase_id.to_string();
+        let scope_lc_id = self.scoped_lc_id(project_id);
+        let output_path = self.publication_output_path(project_id, operation_id)?;
+
+        // 首次发布与重入都重新收集来源并复验清单/摘要——漂移冲突停等。
+        let sources = collect_policy_sources(canonical_root)?;
+        let source_digests: Vec<AggregatePolicySourceDigest> = sources
+            .iter()
+            .map(|source| AggregatePolicySourceDigest {
+                relative_path: source.relative_path.clone(),
+                digest: sha256_hex(&source.bytes),
+            })
+            .collect();
+        // rule_digest 只取 AGENTS.md 原字节 SHA-256(与 root_rule_digest 同语义)。
+        let rule_digest = sha256_hex(&sources[0].bytes);
+
+        if output_path.exists() {
+            // 同 operation 重入:复用不可变候选与时间,只补齐未完成发布。
+            let output: AggregatePolicyPublicationOutput = read_json(&output_path)?;
+            validate_publication_identity(
+                &output,
+                manifest,
+                operation_id,
+                canonical_root,
+                &scope_lc_id,
+            )?;
+            if output.sources != source_digests {
+                return Err(invalid_publication(format!(
+                    "policy sources drifted since the frozen publication of operation {operation_id}"
+                )));
+            }
+            if output.rule_digest != rule_digest {
+                return Err(invalid_publication(format!(
+                    "root rule digest drifted since the frozen publication of operation {operation_id}"
+                )));
+            }
+            let candidate = output.artifact.clone();
+            self.complete_locator_and_current(project_id, canonical_root, &candidate)?;
+            return Ok(candidate);
+        }
+
+        // 新候选:base 引用当前 artifact(无则 revision 0);溢出先拒绝。
+        let current = self.get(project_id)?;
+        let (base_revision, base_policy_id, base_digest) = match &current {
+            Some(existing) => (
+                existing.revision,
+                existing.policy_id.clone(),
+                existing.digest.clone(),
+            ),
+            None => (0, String::new(), String::new()),
+        };
+        let revision = base_revision.checked_add(1).ok_or_else(|| {
+            invalid_publication(format!("policy revision overflow from {base_revision}"))
+        })?;
+        let policy_text = build_policy_text(&sources)?;
+        let artifact = AggregatePolicyArtifact {
+            policy_id: format!("policy/{project_id}/{logical_codebase_id}/{revision}"),
+            project_id: project_id.to_string(),
+            logical_codebase_id,
+            revision,
+            digest: sha256_hex(policy_text.as_bytes()),
+            policy_text,
+            created_at,
+        };
+        let output = AggregatePolicyPublicationOutput {
+            project_id: project_id.to_string(),
+            lc_id: scope_lc_id,
+            logical_codebase_id: artifact.logical_codebase_id.clone(),
+            operation_id: operation_id.to_string(),
+            canonical_root: canonical_root.to_path_buf(),
+            base_policy: AggregatePolicyPublicationReference {
+                policy_id: base_policy_id,
+                revision: base_revision,
+                digest: base_digest,
+            },
+            artifact: artifact.clone(),
+            sources: source_digests,
+            rule_digest,
+        };
+        // 顺序固定:先不可变输出(冻结候选与时间)。
+        #[cfg(test)]
+        if let Some(error) = publish_faults::trip(&output_path, FaultPhase::OutputWrite) {
+            return Err(error);
+        }
+        let output_bytes = serde_json::to_vec_pretty(&output)
+            .map_err(|error| ProductStoreError::Json(error.to_string()))?;
+        publish_bytes_no_clobber(&output_path, &output_bytes, None)?;
+        self.complete_locator_and_current(project_id, canonical_root, &artifact)?;
+        Ok(artifact)
+    }
+
+    /// locator no-clobber 发布 → read-back 字节/SHA 复验 → current
+    /// artifact durable 替换(复用既有 identity/successor 规则;同候选
+    /// 幂等跳过)。
+    fn complete_locator_and_current(
+        &self,
+        project_id: &str,
+        canonical_root: &Path,
+        artifact: &AggregatePolicyArtifact,
+    ) -> Result<(), ProductStoreError> {
+        let locator = canonical_root.join(&artifact.policy_id);
+        #[cfg(test)]
+        if let Some(error) = publish_faults::trip(&locator, FaultPhase::LocatorPublish) {
+            return Err(error);
+        }
+        publish_bytes_no_clobber(
+            &locator,
+            artifact.policy_text.as_bytes(),
+            Some(canonical_root),
+        )?;
+        let published = std::fs::read(&locator).map_err(|error| {
+            ProductStoreError::Io(format!("read back {}: {error}", locator.display()))
+        })?;
+        if published != artifact.policy_text.as_bytes() || sha256_hex(&published) != artifact.digest
+        {
+            return Err(invalid_publication(format!(
+                "published policy bytes at {} do not match the artifact digest",
+                locator.display()
+            )));
+        }
+        if let Some(existing) = self.get(project_id)?
+            && existing == *artifact
+        {
+            return Ok(());
+        }
+        #[cfg(test)]
+        if let Some(error) =
+            publish_faults::trip(&self.artifact_path(project_id)?, FaultPhase::ArtifactSave)
+        {
+            return Err(error);
+        }
+        self.save_unlocked(project_id, artifact)
     }
 }
 
@@ -471,316 +786,16 @@ impl AggregatePolicyArtifact {
     }
 }
 
+// 本文件按仓库惯例拆入 `.inc.rs`(同模块命名空间,符号路径与可见性不变),
+// 保持每个文件低于 large_file_guard 的 1200 行上限(root_recipe_receipt.rs 同款先例):
+// - policy_publication.inc.rs:I1 发布原语——来源收集/正文构造/durable 写入/身份复验。
+// - policy_tests.inc.rs:I2/发布测试与 cfg(test) IO 故障注入 seam。
+
 // 引入 manifest 类型以供 ensure_bootstrap 使用;此处只依赖其稳定 logical-codebase
 // UUID、project_id 与 updated_at,与 store.rs 的 LogicalCodebaseManifest 同源。
-use crate::product::logical_codebase::store::LogicalCodebaseManifest;
+use crate::product::logical_codebase::store::{
+    LogicalCodebaseManifest, legacy_logical_codebase_id,
+};
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::product::app_paths::ProductAppPaths;
-    use uuid::Uuid;
-
-    #[test]
-    fn envelope_freezes_policy_target_roots_dialect_and_managed_config_digest() {
-        let artifact = AggregatePolicyArtifact::bootstrap(
-            "project_0001",
-            "logical_0001",
-            "2026-08-09T00:00:00Z".into(),
-        );
-        let envelope = SessionPolicyEnvelope::new(
-            &artifact,
-            SessionPolicyAction::CodingTargetWrite,
-            PolicyTarget::checkout(
-                "logical_repo",
-                "checkout",
-                "/work/api/.worktrees/aria-issues/issue_1",
-            ),
-            PathBuf::from("/lc-root"),
-            vec![std::path::PathBuf::from("/aggregate")],
-            vec![std::path::PathBuf::from(
-                "/work/api/.worktrees/aria-issues/issue_1",
-            )],
-            ProviderDialect::ClaudeCodeCliV1,
-            "sha256:settings".into(),
-            "2026-08-09T00:00:00Z".into(),
-            PathBuf::from("/authority-root"),
-        )
-        .unwrap();
-
-        assert_eq!(envelope.policy_digest, artifact.digest);
-        assert_eq!(envelope.writable_roots.len(), 1);
-        assert_eq!(envelope.action, SessionPolicyAction::CodingTargetWrite);
-        assert!(
-            serde_json::to_value(&envelope)
-                .unwrap()
-                .get("config_artifact_ref")
-                .is_some()
-        );
-    }
-
-    #[test]
-    fn bootstrap_digest_is_canonical_sha256_of_policy_text() {
-        let artifact =
-            AggregatePolicyArtifact::bootstrap("p1", "l1", "2026-08-09T00:00:00Z".into());
-        let expected = format!(
-            "sha256:{:x}",
-            Sha256::digest(BOOTSTRAP_POLICY_TEXT.as_bytes())
-        );
-        assert_eq!(artifact.digest, expected);
-        assert_eq!(artifact.revision, 1);
-        assert!(artifact.policy_id.contains("p1"));
-        assert!(artifact.policy_id.contains("l1"));
-    }
-
-    #[test]
-    fn read_only_actions_reject_any_writable_root() {
-        let artifact = AggregatePolicyArtifact::bootstrap("p1", "l1", "now".into());
-        let target = PolicyTarget::checkout("repo", "co", "/work/repo");
-        let error = SessionPolicyEnvelope::new(
-            &artifact,
-            SessionPolicyAction::PlanningReadOnly,
-            target.clone(),
-            PathBuf::from("/lc-root"),
-            vec![PathBuf::from("/work/repo")],
-            vec![PathBuf::from("/work/repo")],
-            ProviderDialect::CodexCliV1,
-            "sha256:cfg".into(),
-            "now".into(),
-            PathBuf::from("/authority-root"),
-        )
-        .unwrap_err();
-        assert!(
-            matches!(error, ProductStoreError::InvalidRecord { ref reason, .. } if reason.starts_with(POLICY_ENVELOPE_INVALID_ROOTS))
-        );
-
-        let ok = SessionPolicyEnvelope::new(
-            &artifact,
-            SessionPolicyAction::ReviewReadOnly,
-            target,
-            PathBuf::from("/lc-root"),
-            vec![PathBuf::from("/work/repo")],
-            vec![],
-            ProviderDialect::CodexCliV1,
-            "sha256:cfg".into(),
-            "now".into(),
-            PathBuf::from("/authority-root"),
-        )
-        .unwrap();
-        assert!(ok.writable_roots.is_empty());
-    }
-
-    #[test]
-    fn coding_action_requires_single_writable_root_equal_to_target() {
-        let artifact = AggregatePolicyArtifact::bootstrap("p1", "l1", "now".into());
-        let target = PolicyTarget::checkout("repo", "co", "/work/repo");
-
-        // wrong root
-        let err = SessionPolicyEnvelope::new(
-            &artifact,
-            SessionPolicyAction::CodingTargetWrite,
-            target.clone(),
-            PathBuf::from("/lc-root"),
-            vec![],
-            vec![PathBuf::from("/elsewhere")],
-            ProviderDialect::ClaudeCodeCliV1,
-            "sha256:cfg".into(),
-            "now".into(),
-            PathBuf::from("/authority-root"),
-        )
-        .unwrap_err();
-        assert!(
-            matches!(err, ProductStoreError::InvalidRecord { ref reason, .. } if reason.contains("policy_envelope_invalid_roots"))
-        );
-
-        // two roots
-        let err = SessionPolicyEnvelope::new(
-            &artifact,
-            SessionPolicyAction::CodingTargetWrite,
-            target.clone(),
-            PathBuf::from("/lc-root"),
-            vec![],
-            vec![PathBuf::from("/work/repo"), PathBuf::from("/other")],
-            ProviderDialect::ClaudeCodeCliV1,
-            "sha256:cfg".into(),
-            "now".into(),
-            PathBuf::from("/authority-root"),
-        )
-        .unwrap_err();
-        assert!(
-            matches!(err, ProductStoreError::InvalidRecord { ref reason, .. } if reason.contains("policy_envelope_invalid_roots"))
-        );
-
-        // correct single root
-        let ok = SessionPolicyEnvelope::new(
-            &artifact,
-            SessionPolicyAction::CodingTargetWrite,
-            target,
-            PathBuf::from("/lc-root"),
-            vec![],
-            vec![PathBuf::from("/work/repo")],
-            ProviderDialect::ClaudeCodeCliV1,
-            "sha256:cfg".into(),
-            "now".into(),
-            PathBuf::from("/authority-root"),
-        )
-        .unwrap();
-        assert_eq!(ok.writable_roots, vec![PathBuf::from("/work/repo")]);
-    }
-
-    #[test]
-    fn empty_config_artifact_ref_is_rejected() {
-        let artifact = AggregatePolicyArtifact::bootstrap("p1", "l1", "now".into());
-        let err = SessionPolicyEnvelope::new(
-            &artifact,
-            SessionPolicyAction::PlanningReadOnly,
-            PolicyTarget::checkout("repo", "co", "/work/repo"),
-            PathBuf::from("/lc-root"),
-            vec![],
-            vec![],
-            ProviderDialect::ClaudeCodeCliV1,
-            String::new(),
-            "now".into(),
-            PathBuf::from("/authority-root"),
-        )
-        .unwrap_err();
-        assert!(
-            matches!(err, ProductStoreError::InvalidRecord { ref reason, .. } if reason.contains("policy_envelope_invalid_roots"))
-        );
-    }
-
-    #[test]
-    fn store_roundtrips_and_recomputes_digest_on_save() {
-        let temp = tempfile::tempdir().unwrap();
-        let store = AggregatePolicyArtifactStore::new(ProductAppPaths::new(temp.path()));
-        let artifact = AggregatePolicyArtifact::bootstrap(
-            "project_0001",
-            "logical_0001",
-            "2026-08-09T00:00:00Z".into(),
-        );
-
-        store.save("project_0001", &artifact).unwrap();
-        let loaded = store.get("project_0001").unwrap().unwrap();
-        assert_eq!(loaded, artifact);
-        assert!(
-            temp.path()
-                .join("projects/project_0001/logical-codebase/aggregate-policy.json")
-                .exists()
-        );
-
-        // caller-supplied arbitrary digest is rejected on save
-        let mut bad = artifact.clone();
-        bad.digest = "sha256:deadbeef".into();
-        assert!(store.save("project_0001", &bad).is_err());
-    }
-
-    #[test]
-    fn save_rejects_non_advancing_revision() {
-        let temp = tempfile::tempdir().unwrap();
-        let store = AggregatePolicyArtifactStore::new(ProductAppPaths::new(temp.path()));
-        let artifact = AggregatePolicyArtifact::bootstrap("p1", "l1", "now".into());
-        store.save("p1", &artifact).unwrap();
-
-        let mut duplicate = artifact.clone();
-        duplicate.revision = 1; // same revision
-        assert!(store.save("p1", &duplicate).is_err());
-    }
-
-    #[test]
-    fn ensure_bootstrap_is_idempotent_and_refuses_mismatched_identity() {
-        let temp = tempfile::tempdir().unwrap();
-        let store = AggregatePolicyArtifactStore::new(ProductAppPaths::new(temp.path()));
-        let manifest =
-            LogicalCodebaseManifest::new("project_0001", temp.path().to_path_buf(), vec![]);
-
-        let first = store.ensure_bootstrap(&manifest).unwrap();
-        assert_eq!(first.revision, 1);
-        let second = store.ensure_bootstrap(&manifest).unwrap();
-        assert_eq!(first, second);
-
-        // a different logical-codebase identity is not overwritten
-        let mut other = manifest.clone();
-        other.logical_codebase_id = Uuid::new_v4();
-        assert!(matches!(
-            store.ensure_bootstrap(&other),
-            Err(ProductStoreError::IdentityMismatch { .. })
-        ));
-    }
-
-    /// `with_revised_policy` 提升 revision、重算 canonical digest 与 policy_id,
-    /// 且可作为合法 successor 被保存(gateway spawn 前复验测试依赖此路径)。
-    #[test]
-    fn with_revised_policy_advances_revision_and_recomputes_digest() {
-        let temp = tempfile::tempdir().unwrap();
-        let store = AggregatePolicyArtifactStore::new(ProductAppPaths::new(temp.path()));
-        let manifest =
-            LogicalCodebaseManifest::new("project_0001", temp.path().to_path_buf(), vec![]);
-        let bootstrap = store.ensure_bootstrap(&manifest).unwrap();
-
-        let revised =
-            bootstrap.with_revised_policy("# revision 2 policy text\n", "2026-08-10T00:00:00Z");
-        assert_eq!(revised.revision, 2);
-        assert_ne!(revised.digest, bootstrap.digest);
-        assert!(revised.policy_id.ends_with("/2"));
-        // digest 是新 policy_text 的 canonical sha256
-        let expected = format!("sha256:{:x}", Sha256::digest(b"# revision 2 policy text\n"));
-        assert_eq!(revised.digest, expected);
-        // 可作为 successor 保存
-        store.save("project_0001", &revised).unwrap();
-        let reloaded = store.get("project_0001").unwrap().unwrap();
-        assert_eq!(reloaded, revised);
-    }
-
-    /// 存量 envelope JSON(无 `authority_root` 键)反序列化不失败:serde 缺省为
-    /// `PathBuf::default()`,新字段不破坏旧记录读取。
-    #[test]
-    fn legacy_envelope_json_without_authority_root_deserializes_with_default() {
-        let artifact = AggregatePolicyArtifact::bootstrap("p1", "l1", "now".into());
-        let envelope = SessionPolicyEnvelope::new(
-            &artifact,
-            SessionPolicyAction::PlanningReadOnly,
-            PolicyTarget::aggregate_root(PathBuf::from("/aggregate")),
-            PathBuf::from("/lc-root"),
-            vec![PathBuf::from("/aggregate")],
-            vec![],
-            ProviderDialect::ClaudeCodeCliV1,
-            "sha256:cfg".into(),
-            "now".into(),
-            PathBuf::from("/authority-root"),
-        )
-        .unwrap();
-
-        let mut json = serde_json::to_value(&envelope).unwrap();
-        json.as_object_mut()
-            .expect("envelope serializes to an object")
-            .remove("authority_root");
-        let restored: SessionPolicyEnvelope =
-            serde_json::from_value(json).expect("legacy envelope JSON must deserialize");
-
-        assert_eq!(restored.authority_root, PathBuf::new());
-        assert_eq!(restored.policy_id, envelope.policy_id);
-    }
-
-    /// `recompute_config_digest` 与 `new` 内部冻结的 config_digest 算法一致,
-    /// 供 gateway spawn 前复验托管配置未被篡改。
-    #[test]
-    fn recompute_config_digest_matches_envelope_frozen_value() {
-        let artifact = AggregatePolicyArtifact::bootstrap("p1", "l1", "now".into());
-        let envelope = SessionPolicyEnvelope::new(
-            &artifact,
-            SessionPolicyAction::PlanningReadOnly,
-            PolicyTarget::checkout("repo", "co", "/work/repo"),
-            PathBuf::from("/lc-root"),
-            vec![],
-            vec![],
-            ProviderDialect::ClaudeCodeCliV1,
-            "sha256:managed-config".into(),
-            "now".into(),
-            PathBuf::from("/authority-root"),
-        )
-        .unwrap();
-        let recomputed =
-            SessionPolicyEnvelope::recompute_config_digest("sha256:managed-config").unwrap();
-        assert_eq!(recomputed, envelope.config_digest);
-    }
-}
+include!("policy_publication.inc.rs");
+include!("policy_tests.inc.rs");
