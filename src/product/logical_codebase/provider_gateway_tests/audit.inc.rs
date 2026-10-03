@@ -132,14 +132,13 @@ async fn start_streaming_audit_entry_carries_config_digest_and_argv() {
 #[test]
 fn lcg_t02_probe_evidence_projection_record_mismatch_stays_unknown() {
     use crate::cross_cutting::provider_boundary::{ProviderBoundaryEvidence, ProviderBoundaryMode};
+    use crate::product::logical_codebase::ProviderPolicyProjection;
     use crate::product::logical_codebase::provider_capability_store::{
         CapabilityEvidence, PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION, ProviderActionCapability,
         ProviderActionMatrix, ProviderCapabilityRecord, ProviderCapabilityStore,
         RootRecipeEvidence,
     };
-    use crate::product::logical_codebase::{
-        ProviderCapabilityProbeService, ProviderPolicyProjection,
-    };
+    use crate::web::gateway_factory::LogicalCodebaseGatewayFactory;
 
     let fixture = gateway_fixture();
     fixture.install_bootstrap_policy();
@@ -223,7 +222,19 @@ fn lcg_t02_probe_evidence_projection_record_mismatch_stays_unknown() {
         digest_ok,
     );
 
-    let service = ProviderCapabilityProbeService::with_durable_writer(store.clone());
+    // factory 注入的 durable writer(owner 门 §0.3 2d 段):与 `build_for_lc`
+    // 同一 LC 作用域解析,导入子树与 gateway 读取的 capability store 同源。
+    let mut registry = ProviderRegistry::new();
+    registry.register(ProviderName::KimiCode, fixture.streaming_adapter.clone());
+    let factory = LogicalCodebaseGatewayFactory::new(
+        paths,
+        Arc::new(registry),
+        fixture.sync_adapter.clone(),
+        fixture.gate.clone(),
+    );
+    let service = factory
+        .durable_probe_writer_for_lc(project_id, None)
+        .expect("factory 注入 durable probe writer");
     let error = service
         .record_verified_probe(project_id, &record, &evidence, &projection)
         .expect_err("三方不一致必须 fail-closed 拒绝导入");

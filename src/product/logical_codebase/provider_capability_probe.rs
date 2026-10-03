@@ -1,22 +1,26 @@
-//! Provider capability probe/evidence 的 shape validator(Task 2c,REQ-LCG-01)。
+//! Provider capability probe/evidence 的 shape validator(Task 2c)与
+//! 三方一致性 durable 导入(Task 2d,REQ-LCG-01)。
 //!
-//! 冻结接口(计划 Task 2 Interfaces):`ProviderCapabilityProbeService::
-//! validate_probe_shape(record, evidence, projection)` 对 2a 的 v2
-//! `ProviderCapabilityRecord`、1a 纯 DTO `ProviderBoundaryEvidence` 与
-//! `ProviderPolicyProjection` 做**无副作用的三方可比对性校验**:
+//! 冻结接口(计划 Task 2 Interfaces):
+//! - `ProviderCapabilityProbeService::validate_probe_shape(record, evidence,
+//!   projection)`(2c)对 2a 的 v2 `ProviderCapabilityRecord`、1a 纯 DTO
+//!   `ProviderBoundaryEvidence` 与 `ProviderPolicyProjection` 做**无副作用的
+//!   三方可比对性校验**:字段可比对(`evidence.exact_version ==
+//!   projection.exact_version == record.version` 等,provider 身份 type/
+//!   adapter/wire dialect 三方一致)、digest 形状(`sha256:` + 64 位小写
+//!   十六进制)、action/profile 类型(projection action 有对应 record 行,
+//!   evidence boundary 模式与 action 读写语义一致)、evidence 引用一致
+//!   (`record.probe_artifact_ref ↔ evidence.artifact_ref`,含 action 行
+//!   `evidence_ref` 与 probe 元数据 `probed_at`)。
+//! - `record_verified_probe(project_id, record, evidence, projection)`(2d,
+//!   后置 6c)先通过上述 shape 校验,再逐字段比对三方 version/provider/
+//!   digest/artifact_ref/probed_at,一致才把 action row 原子导入 durable
+//!   Confirmed;不一致返回错误且旧 durable 字节保持。
 //!
-//! - 字段可比对:`evidence.exact_version == projection.exact_version ==
-//!   record.version` 等,provider 身份(type/adapter/wire dialect)三方一致;
-//! - digest 形状:`projection_digest` 为 `sha256:` + 64 位小写十六进制;
-//! - action/profile 类型:projection action 在 record 矩阵中有对应行,
-//!   evidence boundary 模式与 action 读写语义一致;
-//! - evidence 引用一致:`record.probe_artifact_ref ↔ evidence.artifact_ref`
-//!   (含 action 行 `evidence_ref` 与 probe 元数据 `probed_at`)。
-//!
-//! 职责边界(§0 E2/E3/E4/E5):本服务**不写 durable**(那是 2d 的
-//! `record_verified_probe`,后置 6c)、**不执行真实 probe**(那是 6c 的
-//! `ProviderBoundaryProbe::run`);任一维度不可比对即 fail-closed 返回稳定
-//! 错误,调用方(2d 导入、4/5/6a 消费 shape)不得把校验失败解释为能力支持。
+//! 职责边界(§0 E2/E3/E4/E5/E9):本服务**不执行真实 probe**(那是 6c 的
+//! `ProviderBoundaryProbe::run`),导入也不重新 probe、不接受 record 自报;
+//! 任一维度不可比对即 fail-closed 返回稳定错误,调用方(2d 导入、4/5/6a
+//! 消费 shape)不得把校验失败解释为能力支持。
 
 use crate::cross_cutting::provider_boundary::{ProviderBoundaryEvidence, ProviderBoundaryMode};
 use crate::product::json_store::ProductStoreError;
@@ -99,9 +103,30 @@ impl ProviderCapabilityProbeService {
         evidence: &ProviderBoundaryEvidence,
         projection: &ProviderPolicyProjection,
     ) -> Result<(), ProductStoreError> {
-        // Task 2d 阶段 1 RED 桩:阶段 2 实现三方校验与原子导入。
-        let _ = (project_id, record, evidence, projection, &self.durable);
-        Ok(())
+        // durable 通道缺失 fail-closed:无 store 即无导入,绝不无条件通过。
+        let Some(store) = &self.durable else {
+            return Err(ProductStoreError::InvalidRecord {
+                kind: "provider_capability_record",
+                reason: "provider_probe_import_unavailable: no durable writer injected".to_string(),
+            });
+        };
+        // 1) 2c shape 校验(字段可比对/digest 形状/action 类型/evidence 引用)。
+        if let Err(error) = self.validate_probe_shape(record, evidence, projection) {
+            return Err(ProductStoreError::InvalidRecord {
+                kind: "provider_capability_record",
+                reason: format!("provider_probe_import_rejected: {error}"),
+            });
+        }
+        // 2) 三方逐字段比对(version/provider/digest/artifact_ref/probed_at)。
+        if let Err(field) = three_way_fields_match(record, evidence, projection) {
+            return Err(ProductStoreError::InvalidRecord {
+                kind: "provider_capability_record",
+                reason: format!("provider_probe_import_rejected: {field}"),
+            });
+        }
+        // 3) 原子导入 durable Confirmed(merge 在 store 内完成后单次
+        //    temp+rename 落盘;任一前置失败不触达 durable 字节)。
+        store.import_verified_probe_row(project_id, record, projection.action())
     }
 
     /// 冻结签名:只验证三方可比对性(字段可比对/digest 形状/action 类型/
@@ -264,6 +289,77 @@ impl ProviderCapabilityProbeService {
 
         Ok(())
     }
+}
+
+/// 2d 冻结语义的显式三方逐字段比对:导入前按字段核对 evidence/projection/
+/// record 的 version/provider/digest/artifact_ref/probed_at(与
+/// `validate_probe_shape` 的判别维度一致,导入路径再核对一次并给出字段名),
+/// 任何不一致返回 `Err(字段诊断)`。
+fn three_way_fields_match(
+    record: &ProviderCapabilityRecord,
+    evidence: &ProviderBoundaryEvidence,
+    projection: &ProviderPolicyProjection,
+) -> Result<(), String> {
+    // provider:evidence 的 provider 名经 1a 冻结映射解析,与 record/
+    // projection 的 provider_type 三方一致。
+    let evidence_provider = ProviderRef::from_provider_name(evidence.provider(), String::new())
+        .map_err(|error| format!("provider: {error}"))?;
+    if evidence_provider.provider_type != record.provider_type
+        || record.provider_type != projection.provider_type()
+    {
+        return Err(format!(
+            "provider: evidence={:?} record={:?} projection={:?}",
+            evidence_provider.provider_type,
+            record.provider_type,
+            projection.provider_type()
+        ));
+    }
+    // exact version 三方一致(CLI 漂移后旧证据不可导入)。
+    if record.version != evidence.exact_version()
+        || evidence.exact_version() != projection.exact_version()
+    {
+        return Err(format!(
+            "exact_version: record={:?} evidence={:?} projection={:?}",
+            record.version,
+            evidence.exact_version(),
+            projection.exact_version()
+        ));
+    }
+    // projection digest 三方一致(record 行已由 shape 校验确认存在)。
+    let Some(row) = record
+        .action_matrix
+        .rows()
+        .iter()
+        .find(|row| row.action == projection.action())
+    else {
+        return Err(format!("action row missing: {:?}", projection.action()));
+    };
+    if projection.projection_digest() != evidence.projection_digest()
+        || projection.projection_digest() != row.projection_digest
+    {
+        return Err(format!(
+            "projection_digest: projection={:?} evidence={:?} record_row={:?}",
+            projection.projection_digest(),
+            evidence.projection_digest(),
+            row.projection_digest
+        ));
+    }
+    // artifact_ref/probed_at:record 与 evidence 描述同一探测。
+    if record.probe_artifact_ref.as_deref() != Some(evidence.artifact_ref()) {
+        return Err(format!(
+            "probe_artifact_ref: record={:?} evidence={:?}",
+            record.probe_artifact_ref,
+            evidence.artifact_ref()
+        ));
+    }
+    if record.probed_at.as_deref() != Some(evidence.probed_at()) {
+        return Err(format!(
+            "probed_at: record={:?} evidence={:?}",
+            record.probed_at,
+            evidence.probed_at()
+        ));
+    }
+    Ok(())
 }
 
 /// digest 形状:与 `SessionResumeFingerprint` 同构的 `sha256:` 前缀 + 64 位

@@ -152,6 +152,23 @@ impl ProviderActionMatrix {
         &self.rows
     }
 
+    /// 替换已有行或按 canonical 序插入新行(Task 2d durable 导入用;行本身
+    /// 来自已通过三方一致性校验的 record,不经此处二次校验)。
+    pub fn replace_row(&mut self, row: ProviderActionCapability) {
+        match self
+            .rows
+            .iter_mut()
+            .find(|existing| existing.action == row.action)
+        {
+            Some(existing) => *existing = row,
+            None => {
+                self.rows.push(row);
+                self.rows
+                    .sort_by_key(|row| Self::canonical_action_order(row.action));
+            }
+        }
+    }
+
     fn canonical_action_order(action: SessionPolicyAction) -> u8 {
         match action {
             SessionPolicyAction::PlanningReadOnly => 0,
@@ -551,6 +568,63 @@ impl ProviderCapabilityStore {
             records.push(json);
         }
         write_json(&path, &records)
+    }
+
+    /// Task 2d:把已通过三方一致性校验(evidence/projection/record,由
+    /// `ProviderCapabilityProbeService::record_verified_probe` 前置完成)的
+    /// action row 导入 durable Confirmed。原子:merge 在内存完成后单次
+    /// `upsert` 落盘(temp+rename),任一前置失败不触达 durable 字节。
+    ///
+    /// merge 语义(Global Constraints 第 2 条 / Review Focus #1):
+    /// - 只导入 `action` 一行;evidence 未覆盖的格子(resume/trust/其它
+    ///   action)不自报导入,保持既有状态;
+    /// - durable 既有 version/wire/adapter dialect 与本次 probe 不一致
+    ///   (CLI 漂移)时,旧行整体失效为 Unknown 等待各自真实 probe(旧
+    ///   evidence 工件保留在盘,此处不删除任何探测工件);
+    /// - `root_recipe_evidence` 独立隔离:原样保留,不被 normal 导入升级;
+    /// - provenance 升级 `ProductionVerified`(真实 probe 导入)。
+    pub fn import_verified_probe_row(
+        &self,
+        project_id: &str,
+        verified: &ProviderCapabilityRecord,
+        action: SessionPolicyAction,
+    ) -> Result<(), ProductStoreError> {
+        let existing = self.get(project_id, verified.provider_type)?;
+        let mut merged = existing.unwrap_or_else(|| ProviderCapabilityRecord {
+            provider_type: verified.provider_type,
+            schema_version: PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION,
+            version: verified.version.clone(),
+            adapter_dialect: verified.adapter_dialect,
+            wire_dialect: verified.wire_dialect,
+            capability_snapshot_ref: verified.capability_snapshot_ref.clone(),
+            evidence: CapabilityEvidence::ProductionVerified,
+            resume_evidence: ResumeEvidenceState::Unsupported,
+            supported_actions: Vec::new(),
+            action_matrix: ProviderActionMatrix::unknown_all(),
+            trust: ProviderCapabilityEvidence::Unknown,
+            probed_at: None,
+            probe_artifact_ref: None,
+            root_recipe_evidence: RootRecipeEvidence::None,
+        });
+        // CLI version/wire/adapter dialect 任一漂移:旧 Confirmed 不跨版本
+        // 沿用,矩阵整体回 Unknown(导入行随后覆盖其 action 格)。
+        if merged.version != verified.version
+            || merged.wire_dialect != verified.wire_dialect
+            || merged.adapter_dialect != verified.adapter_dialect
+        {
+            merged.action_matrix = ProviderActionMatrix::unknown_all();
+        }
+        merged
+            .action_matrix
+            .replace_row(verified.action_matrix.row(&action));
+        merged.schema_version = PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION;
+        merged.version = verified.version.clone();
+        merged.adapter_dialect = verified.adapter_dialect;
+        merged.wire_dialect = verified.wire_dialect;
+        merged.probed_at = verified.probed_at.clone();
+        merged.probe_artifact_ref = verified.probe_artifact_ref.clone();
+        merged.evidence = CapabilityEvidence::ProductionVerified;
+        self.upsert(project_id, &merged)
     }
 
     /// 确保存在 bootstrap 记录;幂等。文件不存在才写两条默认记录

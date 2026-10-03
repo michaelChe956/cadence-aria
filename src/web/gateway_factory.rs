@@ -9,8 +9,8 @@ use crate::cross_cutting::provider_registry::ProviderRegistry;
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::logical_codebase::{
     AggregatePolicyArtifactStore, GatewayRunAudit, LogicalCodebaseProviderGateway,
-    LogicalCodebaseStore, ProductionPolicyTargetResolver, ProviderCapabilityStore,
-    ProviderGatewayError, StoreBackedProviderCapabilitySource,
+    LogicalCodebaseStore, ProductionPolicyTargetResolver, ProviderCapabilityProbeService,
+    ProviderCapabilityStore, ProviderGatewayError, StoreBackedProviderCapabilitySource,
 };
 
 /// 为指定 project 组装 `LogicalCodebaseProviderGateway` 的 Web 层工厂。
@@ -67,24 +67,7 @@ impl LogicalCodebaseGatewayFactory {
         project_id: &str,
         lc_id: Option<&str>,
     ) -> Result<LogicalCodebaseProviderGateway, ProviderGatewayError> {
-        let lc_id = match lc_id {
-            Some(lc_id) => Some(lc_id.to_string()),
-            None => {
-                let alias_id =
-                    crate::product::logical_codebase::store::legacy_logical_codebase_id(project_id);
-                let alias_record_exists = self
-                    .paths
-                    .logical_codebase_record_root(project_id, &alias_id)
-                    .join("record.json")
-                    .try_exists()
-                    .map_err(|error| {
-                        ProviderGatewayError::PolicyMissing(format!(
-                            "{project_id}: read alias record: {error}"
-                        ))
-                    })?;
-                alias_record_exists.then_some(alias_id)
-            }
-        };
+        let lc_id = self.resolve_lc_scope(project_id, lc_id)?;
         let logical = match lc_id.as_deref() {
             Some(lc_id) => LogicalCodebaseStore::for_lc(self.paths.clone(), lc_id),
             None => LogicalCodebaseStore::new(self.paths.clone()),
@@ -146,6 +129,55 @@ impl LogicalCodebaseGatewayFactory {
             self.audit.clone(),
             authority_root,
         ))
+    }
+
+    /// Task 2d:durable probe writer 注入(owner 门 §0.3)。按 `build_for_lc`
+    /// 同一 LC 作用域解析构造 `ProviderCapabilityProbeService::with_durable_
+    /// writer`,使「已通过三方一致性校验的 evidence 导入 durable
+    /// Confirmed」写入的子树与 gateway 读取的 capability store 完全同源。
+    /// 导入通道本身不重新 probe、不 spawn(provider spawn count 恒 0);
+    /// Task 3 admission 消费本通道。
+    pub fn durable_probe_writer_for_lc(
+        &self,
+        project_id: &str,
+        lc_id: Option<&str>,
+    ) -> Result<ProviderCapabilityProbeService, ProviderGatewayError> {
+        let lc_id = self.resolve_lc_scope(project_id, lc_id)?;
+        let capabilities = match lc_id.as_deref() {
+            Some(lc_id) => ProviderCapabilityStore::for_lc(self.paths.clone(), lc_id),
+            None => ProviderCapabilityStore::new(self.paths.clone()),
+        };
+        Ok(ProviderCapabilityProbeService::with_durable_writer(
+            capabilities,
+        ))
+    }
+
+    /// 解析 LC 作用域:显式 `lc_id` 原样使用;`None`(legacy 别名)解析
+    /// alias record 存在性——存在则用别名 id,否则保持 project 级路径
+    /// (C4 Task 2 语义,与 `build_for_lc` 历史行为逐字节等价)。
+    fn resolve_lc_scope(
+        &self,
+        project_id: &str,
+        lc_id: Option<&str>,
+    ) -> Result<Option<String>, ProviderGatewayError> {
+        match lc_id {
+            Some(lc_id) => Ok(Some(lc_id.to_string())),
+            None => {
+                let alias_id =
+                    crate::product::logical_codebase::store::legacy_logical_codebase_id(project_id);
+                let alias_record_exists = self
+                    .paths
+                    .logical_codebase_record_root(project_id, &alias_id)
+                    .join("record.json")
+                    .try_exists()
+                    .map_err(|error| {
+                        ProviderGatewayError::PolicyMissing(format!(
+                            "{project_id}: read alias record: {error}"
+                        ))
+                    })?;
+                Ok(alias_record_exists.then_some(alias_id))
+            }
+        }
     }
 }
 
