@@ -654,3 +654,104 @@ async fn lcg_t06_coding_allows_target_commit_and_denies_protected_roots() {
     );
     assert_eq!(protected_pre_snapshot, protected_post_snapshot);
 }
+
+/// Task 6a 段 3:read-only 写边界覆盖 provider 后代写面——内建、terminal
+/// 子进程、MCP 后代与 extension 子进程对 root/成员/元数据的写全部被拒绝
+/// 且带证据,pre==post 快照零漂移;不可隔离的外部 MCP 写通道同样只命中
+/// 只读挂载面而被阻断。
+#[tokio::test]
+async fn lcg_t06_readonly_blocks_builtin_terminal_mcp_and_child_writes() {
+    use crate::cross_cutting::provider_boundary::{
+        BoundaryWriteChannel, PlannedBoundaryWrite, ProviderBoundaryLauncher, ProviderBoundaryMode,
+        ProviderBoundaryPlan, run_write_surface_probe,
+    };
+
+    let base = tempdir().expect("base dir");
+    let root = base.path().join("lc-root");
+    fs::create_dir_all(root.join(".aria")).expect("root aria");
+    fs::write(root.join("AGENTS.md"), "# lc root\n").expect("agents");
+    fs::write(root.join(".aria").join("state.json"), "{}").expect("root aria state");
+    fs::write(root.join(".mcp.json"), "{}\n").expect("mcp config");
+    let member = root.join("member-a");
+    fs::create_dir_all(&member).expect("member");
+    fs::write(member.join("README.md"), "member\n").expect("member readme");
+    let member_b = root.join("member-b");
+    fs::create_dir_all(&member_b).expect("member b");
+    fs::write(member_b.join("note.txt"), "note\n").expect("member note");
+    let home = base.path().join("home");
+    fs::create_dir_all(home.join(".claude")).expect("runtime home");
+
+    let git = |dir: &Path, args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .status()
+            .expect("git fixture");
+        assert!(status.success(), "git fixture {args:?} failed");
+    };
+    git(&root, &["init", "-q"]);
+    git(&member, &["init", "-q"]);
+
+    let launcher = ProviderBoundaryLauncher::probe_environment();
+    assert!(
+        launcher.is_available(),
+        "environment blocked: mandatory read-only descendant case needs bwrap + user namespace"
+    );
+    let plan = ProviderBoundaryPlan::new(
+        ProviderBoundaryMode::ReadOnly,
+        root.clone(),
+        None,
+        Vec::new(),
+    );
+    let mut env = BTreeMap::new();
+    env.insert("HOME".to_string(), home.to_string_lossy().into_owned());
+    env.insert("PATH".to_string(), "/usr/bin:/bin".to_string());
+
+    let attempts = vec![
+        PlannedBoundaryWrite::new(BoundaryWriteChannel::Builtin, root.join("rogue-builtin")),
+        PlannedBoundaryWrite::new(
+            BoundaryWriteChannel::Builtin,
+            root.join(".git").join("rogue"),
+        ),
+        PlannedBoundaryWrite::new(
+            BoundaryWriteChannel::Terminal,
+            root.join(".aria").join("rogue"),
+        ),
+        PlannedBoundaryWrite::new(BoundaryWriteChannel::Terminal, member.join("rogue")),
+        PlannedBoundaryWrite::new(BoundaryWriteChannel::Mcp, root.join(".mcp.json.rogue")),
+        PlannedBoundaryWrite::new(BoundaryWriteChannel::Mcp, member.join(".git").join("rogue")),
+        PlannedBoundaryWrite::new(BoundaryWriteChannel::Extension, member_b.join("rogue")),
+        PlannedBoundaryWrite::new(BoundaryWriteChannel::Extension, root.join("AGENTS.md")),
+    ];
+    let protected_pre_snapshot = snapshot_tree(&root);
+
+    let observed = run_write_surface_probe(&launcher, &plan, &env, &attempts)
+        .await
+        .expect("descendant write surface probe");
+    let protected_attempts: Vec<_> = observed;
+    assert_eq!(protected_attempts.len(), attempts.len());
+    assert!(
+        protected_attempts
+            .iter()
+            .all(|attempt| attempt.was_refused_with_evidence())
+    );
+
+    // 越界写零落盘(含既有 AGENTS.md 未被覆写)。
+    for path in [
+        root.join("rogue-builtin"),
+        root.join(".git").join("rogue"),
+        root.join(".aria").join("rogue"),
+        member.join("rogue"),
+        root.join(".mcp.json.rogue"),
+        member.join(".git").join("rogue"),
+        member_b.join("rogue"),
+    ] {
+        assert!(!path.exists(), "rogue write landed at {}", path.display());
+    }
+
+    let protected_post_snapshot = snapshot_tree(&root);
+    assert_eq!(protected_pre_snapshot, protected_post_snapshot);
+}
