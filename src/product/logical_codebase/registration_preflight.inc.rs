@@ -376,7 +376,7 @@ fn proven_entry_matches(
         )
     })?;
     let digest = format!("sha256:{:x}", Sha256::digest(&bytes));
-    Ok(&digest == expected_digest)
+    Ok(digest == expected_digest)
 }
 
 fn preflight_error(code: &'static str, message: impl Into<String>) -> AggregateRootPreflightError {

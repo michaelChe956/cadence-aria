@@ -67,19 +67,24 @@ impl DeterministicAggregatePreflightService {
             if operation.status != AggregateInitializationOperationStatus::Completed {
                 continue;
             }
-            let Ok(Some(receipt)) = receipts.get(project_id, &operation.operation_id) else {
+            match receipts.get(project_id, &operation.operation_id) {
                 // 该 operation 无最终 receipt：证据不成立，继续尝试更旧的
                 // Completed operation（不拼接、不借用其他 scope）。
-                continue;
-            };
-            if let Some(proven) = proven_digests_from_receipt(
-                &receipts,
-                project_id,
-                &receipt,
-                canonical_root,
-                store_failure,
-            )? {
-                return Ok(Some(proven));
+                Ok(None) => continue,
+                Ok(Some(receipt)) => {
+                    if let Some(proven) = proven_digests_from_receipt(
+                        &receipts,
+                        project_id,
+                        &receipt,
+                        canonical_root,
+                        store_failure,
+                    )? {
+                        return Ok(Some(proven));
+                    }
+                }
+                // store 材料读取/解析错误与 list_commands 一致：经
+                // store_failure 可重试失败关闭，绝不静默当作无证据。
+                Err(error) => return Err(store_failure(error)),
             }
         }
         Ok(None)
