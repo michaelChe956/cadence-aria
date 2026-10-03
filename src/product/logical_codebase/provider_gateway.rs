@@ -805,6 +805,10 @@ impl LogicalCodebaseProviderGateway {
         let capability = self
             .capabilities
             .require_supported(&request.provider, request.action)?;
+        // Task 2b:fresh 门 = launch + write-boundary 两半,validate 阶段即
+        // 消费 write_boundary 分格(spawn 前复验会再次施加,防 TOCTOU)。
+        self.capabilities
+            .require_write_boundary(&request.provider, request.action)?;
 
         // 路由级硬门(Task 13):Codex danger-full-access 在 gateway 路由级阻断,
         // 不论 UI 是否选择该 provider。该阻断发生在 envelope 冻结之前,使 Codex
@@ -1104,12 +1108,15 @@ impl LogicalCodebaseProviderGateway {
             });
         }
 
-        // 4. resume 能力 fail-closed(B-2 消费者,Task 2b 迁移为 resume 分格):
-        //    RED 编译桩——resume 门读 action_capability.resume 分格;
-        //    GREEN 段替换为 source 的 `require_resume_supported`。
-        if is_resume && capability.action_capability.resume != ProviderCapabilityEvidence::Confirmed
-        {
-            return Err(ProviderGatewayError::ResumeNotSupported);
+        // 4. fresh/resume 分格门 fail-closed(Task 2b):spawn 前经 source 重新
+        //    消费对应分格——fresh 复验 write_boundary,明确 resume 复验 resume
+        //    分格(仅 Confirmed 放行,不静默转 fresh)。
+        if is_resume {
+            self.capabilities
+                .require_resume_supported(&validated.provider, validated.action)?;
+        } else {
+            self.capabilities
+                .require_write_boundary(&validated.provider, validated.action)?;
         }
 
         // 3. config digest 重算(防托管配置被篡改)。

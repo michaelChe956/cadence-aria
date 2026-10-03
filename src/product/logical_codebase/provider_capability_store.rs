@@ -161,17 +161,11 @@ impl ProviderActionMatrix {
     }
 }
 
-impl std::ops::Index<&SessionPolicyAction> for ProviderActionMatrix {
-    type Output = ProviderActionCapability;
-
-    /// 缺行 panic(矩阵消费方应保证 canonical 行存在;安全访问用 `row`)。
-    fn index(&self, action: &SessionPolicyAction) -> &Self::Output {
-        self.rows
-            .iter()
-            .find(|row| row.action == *action)
-            .unwrap_or_else(|| panic!("action matrix 缺少 action 行: {action:?}"))
-    }
-}
+// 2a 审查 carry ②(2b 处置):原 `impl Index<&SessionPolicyAction> for
+// ProviderActionMatrix` 已删除——缺行 panic 与 fail-closed 语义冲突;消费方
+// 一律改用返回全 Unknown 行的 `row()`(缺行视为未探测),重复/缺行断言由
+// `lcg_t02_matrix_missing_action_row_reads_unknown` /
+// `lcg_t02_matrix_duplicate_action_rows_are_rejected` 直接钉住。
 
 /// 根 recipe 证据隔离格(record.root_recipe_evidence,冻结接口):仅承载固定
 /// Claude root recipe 的已交付证据事实,与 normal action matrix 相互隔离,
@@ -790,19 +784,28 @@ mod tests {
         assert_eq!(loaded.action_matrix, written.action_matrix);
         // Denied 的 reason 字符串完整保留。
         assert_eq!(
-            loaded.action_matrix[&SessionPolicyAction::PlanningReadOnly].resume,
+            loaded
+                .action_matrix
+                .row(&SessionPolicyAction::PlanningReadOnly)
+                .resume,
             ProviderCapabilityEvidence::Denied {
                 reason: "boundary probe denied".to_string()
             }
         );
         assert_eq!(
-            loaded.action_matrix[&SessionPolicyAction::CodingTargetWrite].write_boundary,
+            loaded
+                .action_matrix
+                .row(&SessionPolicyAction::CodingTargetWrite)
+                .write_boundary,
             ProviderCapabilityEvidence::Denied {
                 reason: "root write probe rejected".to_string()
             }
         );
         assert_eq!(
-            loaded.action_matrix[&SessionPolicyAction::ReviewReadOnly].launch,
+            loaded
+                .action_matrix
+                .row(&SessionPolicyAction::ReviewReadOnly)
+                .launch,
             ProviderCapabilityEvidence::Unknown
         );
         // v2 顶层字段一并往返。

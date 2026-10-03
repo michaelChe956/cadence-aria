@@ -13,10 +13,14 @@ use std::path::{Path, PathBuf};
 
 use uuid::Uuid;
 
+use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::logical_codebase::policy::{PolicyTarget, SessionPolicyAction};
 use crate::product::logical_codebase::provider_capability_store::ProviderCapabilityStore;
-use crate::product::logical_codebase::provider_gateway::CODEX_DANGER_FULL_ACCESS_UNSUPPORTED;
+use crate::product::logical_codebase::provider_gateway::{
+    CODEX_DANGER_FULL_ACCESS_UNSUPPORTED, PROVIDER_CAPABILITY_LAUNCH_NOT_CONFIRMED,
+    PROVIDER_CAPABILITY_WRITE_BOUNDARY_NOT_CONFIRMED, PROVIDER_ROOT_RECIPE_REQUIRES_FIXED_CLAUDE,
+};
 use crate::product::logical_codebase::{
     LogicalCodebaseFeature, LogicalRepositoryId, PolicyTargetResolver, ProviderCapability,
     ProviderCapabilitySource, ProviderGatewayError, ProviderRef, ProviderRefType,
@@ -268,12 +272,12 @@ impl StoreBackedProviderCapabilitySource {
         Ok(record)
     }
 
-    /// 以 record v2 字段组装 capability 快照(wire dialect/action row/trust)。
+    /// 以 record v2 字段组装 capability 快照(wire dialect/action row/trust);
+    /// `row` 由调用方按相位解析(正常行 / recipe 镜像行)。
     fn capability_from_record(
         record: &crate::product::logical_codebase::provider_capability_store::ProviderCapabilityRecord,
-        action: SessionPolicyAction,
+        row: crate::product::logical_codebase::provider_capability_store::ProviderActionCapability,
     ) -> ProviderCapability {
-        let row = record.action_matrix.row(&action);
         ProviderCapability {
             provider_type: record.provider_type,
             version: record.version.clone(),
@@ -287,52 +291,93 @@ impl StoreBackedProviderCapabilitySource {
 }
 
 impl ProviderCapabilitySource for StoreBackedProviderCapabilitySource {
+    /// 正常 action row 的 launch 分格门:`Confirmed` 放行;v1→v2 过渡桥仅当
+    /// 行未探测(Unknown)且旧 allow 列表仍列出该 action 时放行(既有 root
+    /// recipe 聚合链零回归),且**绝不铸造 Confirmed**;`Denied`(真实负向
+    /// 证据)恒拒;旧列表未列出且行 Unknown 亦拒(fail-closed,稳定判别码)。
     fn require_supported(
         &self,
         provider: &ProviderRef,
         action: SessionPolicyAction,
     ) -> Result<ProviderCapability, ProviderGatewayError> {
-        // RED 编译桩:门保持 v1 supported_actions 语义;GREEN 段迁移为
-        // v2 正常 action row 的 launch 分格门(v1 列表仅作过渡桥,不铸 Confirmed)。
         let record = self.load_record(provider)?;
-        if !record.supported_actions.contains(&action) {
-            return Err(ProviderGatewayError::UnsupportedCapability(format!(
-                "{action:?} not supported"
-            )));
+        let row = record.action_matrix.row(&action);
+        match &row.launch {
+            ProviderCapabilityEvidence::Confirmed => Ok(Self::capability_from_record(&record, row)),
+            ProviderCapabilityEvidence::Unknown if record.supported_actions.contains(&action) => {
+                // 过渡桥:legacy bootstrap/v1 记录(矩阵未探测)维持今日放行
+                // 行为,等待真实 probe(2d)写入 Confirmed 行后自然取代;
+                // capability 里的行保持 Unknown——旧列表不产生正常会话
+                // Confirmed(Global Constraints 第 2 条)。
+                Ok(Self::capability_from_record(&record, row))
+            }
+            other => Err(ProviderGatewayError::UnsupportedCapability(format!(
+                "{PROVIDER_CAPABILITY_LAUNCH_NOT_CONFIRMED}: {action:?} launch cell is {other:?}"
+            ))),
         }
-        Ok(Self::capability_from_record(&record, action))
     }
 
+    /// 明确 resume 门:仅 resume 分格 `Confirmed` 放行;旧 resume_evidence
+    /// 二态不再消费(不产生 Confirmed),Unknown/Denied 一律
+    /// `ResumeNotSupported`(不得静默转 fresh)。
     fn require_resume_supported(
         &self,
         provider: &ProviderRef,
         action: SessionPolicyAction,
     ) -> Result<ProviderCapability, ProviderGatewayError> {
-        let _ = (provider, action);
-        Err(ProviderGatewayError::UnsupportedCapability(
-            "provider_capability_resume_not_migrated".to_string(),
-        ))
+        let record = self.load_record(provider)?;
+        let row = record.action_matrix.row(&action);
+        match &row.resume {
+            ProviderCapabilityEvidence::Confirmed => Ok(Self::capability_from_record(&record, row)),
+            _other => Err(ProviderGatewayError::ResumeNotSupported),
+        }
     }
 
+    /// fresh 门的 write-boundary 半边:`Confirmed` 放行;过渡桥同 launch 分格
+    /// (Unknown + 旧 allow 列表,不铸 Confirmed);`Denied` 恒拒且 reason 完整
+    /// 保留在错误详情中。
     fn require_write_boundary(
         &self,
         provider: &ProviderRef,
         action: SessionPolicyAction,
     ) -> Result<ProviderCapability, ProviderGatewayError> {
-        let _ = (provider, action);
-        Err(ProviderGatewayError::UnsupportedCapability(
-            "provider_capability_write_boundary_not_migrated".to_string(),
-        ))
+        let record = self.load_record(provider)?;
+        let row = record.action_matrix.row(&action);
+        match &row.write_boundary {
+            ProviderCapabilityEvidence::Confirmed => Ok(Self::capability_from_record(&record, row)),
+            ProviderCapabilityEvidence::Unknown if record.supported_actions.contains(&action) => {
+                Ok(Self::capability_from_record(&record, row))
+            }
+            other => Err(ProviderGatewayError::UnsupportedCapability(format!(
+                "{PROVIDER_CAPABILITY_WRITE_BOUNDARY_NOT_CONFIRMED}: {action:?} write_boundary cell is {other:?}"
+            ))),
+        }
     }
 
+    /// root-recipe 相位:仅现有固定 Claude recipe 事实放行——provider 必须
+    /// 是固定 Claude recipe provider、记录在场且 snapshot 一致;凭据是
+    /// durable Running operation 派生的 opaque 相位证明(类型面保证),每次
+    /// 重验由 `for_lc` 通道/GREEN 第二段接入。返回的 capability 只镜像
+    /// durable normal 状态(行不因 recipe 事实铸造 Confirmed),不推 normal
+    /// Confirmed(隔离契约)。
     fn require_root_recipe_supported(
         &self,
         provider: &ProviderRef,
         credential: &crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
     ) -> Result<ProviderCapability, ProviderGatewayError> {
-        let _ = (provider, credential);
-        Err(ProviderGatewayError::UnsupportedCapability(
-            "root_recipe_capability_not_migrated".to_string(),
+        let _ = credential;
+        if provider.provider_type != ProviderRefType::ClaudeCode {
+            return Err(ProviderGatewayError::UnsupportedCapability(format!(
+                "{PROVIDER_ROOT_RECIPE_REQUIRES_FIXED_CLAUDE}: got {:?}",
+                provider.provider_type
+            )));
+        }
+        let record = self.load_record(provider)?;
+        Ok(Self::capability_from_record(
+            &record,
+            record
+                .action_matrix
+                .row(&SessionPolicyAction::PlanningReadOnly),
         ))
     }
 }
@@ -1031,15 +1076,23 @@ mod tests {
         store
             .upsert(
                 "project_0001",
+                // 2a 的 FRU 过渡桩已整体替换:显式新字段构造(v2 全字段),
+                // 行为与旧桩一致(矩阵全 Unknown),语义由 v2 分格门接管。
                 &ProviderCapabilityRecord {
                     provider_type: ProviderRefType::ClaudeCode,
+                    schema_version: PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION,
                     version: "0.0.0-managed".to_string(),
                     adapter_dialect: ProviderDialect::ClaudeCodeCliV1,
+                    wire_dialect: ProviderWireDialect::ClaudeCodeStreamJson,
                     capability_snapshot_ref: "cap_managed_snapshot".to_string(),
                     evidence: CapabilityEvidence::FixtureVerified,
                     resume_evidence: ResumeEvidenceState::Confirmed,
                     supported_actions: vec![SessionPolicyAction::ReviewReadOnly],
-                    ..ProviderCapabilityRecord::legacy_transition_claude_code()
+                    action_matrix: ProviderActionMatrix::unknown_all(),
+                    trust: ProviderCapabilityEvidence::Unknown,
+                    probed_at: None,
+                    probe_artifact_ref: None,
+                    root_recipe_evidence: RootRecipeEvidence::None,
                 },
             )
             .unwrap();
@@ -1052,8 +1105,11 @@ mod tests {
             )
             .unwrap_err();
 
+        // v2 语义:行 Unknown 且旧 allow 列表未列出 → launch 分格 fail-closed
+        // 稳定判别码(替代旧 v1 文案)。
         assert!(
-            matches!(&error, ProviderGatewayError::UnsupportedCapability(reason) if reason == "CodingTargetWrite not supported")
+            matches!(&error, ProviderGatewayError::UnsupportedCapability(reason) if reason.starts_with(PROVIDER_CAPABILITY_LAUNCH_NOT_CONFIRMED)),
+            "unexpected launch-cell error: {error:?}"
         );
     }
 
@@ -1309,7 +1365,7 @@ mod tests {
             }]"#,
         )
         .unwrap();
-        let paths = ProductAppPaths::new(root.path().join(".aria"));
+        let paths = ProductAppPaths::new(root.path());
         let source = StoreBackedProviderCapabilitySource::new(paths, "project_0001".to_string());
 
         let capability = source
@@ -1333,5 +1389,66 @@ mod tests {
                 SessionPolicyAction::PlanningReadOnly,
             )
             .unwrap();
+    }
+
+    /// 2a 审查 carry ①:矩阵缺 action 行 → `row()` 读取为全 Unknown 行
+    /// (fail-closed,不 panic、不拒绝),source 消费面上缺行按 launch 分格
+    /// Unknown 处理(legacy 未列出即拒)。
+    #[test]
+    fn lcg_t02_matrix_missing_action_row_reads_unknown() {
+        let matrix = ProviderActionMatrix::from_rows(vec![lcg_t02_row(
+            SessionPolicyAction::CodingTargetWrite,
+            ProviderCapabilityEvidence::Confirmed,
+            ProviderCapabilityEvidence::Confirmed,
+            ProviderCapabilityEvidence::Confirmed,
+        )])
+        .unwrap();
+
+        // 缺行(Planning/Review 不在矩阵中)→ 全 Unknown 行。
+        let missing = matrix.row(&SessionPolicyAction::PlanningReadOnly);
+        assert_eq!(missing.action, SessionPolicyAction::PlanningReadOnly);
+        assert_eq!(missing.launch, ProviderCapabilityEvidence::Unknown);
+        assert_eq!(missing.resume, ProviderCapabilityEvidence::Unknown);
+        assert_eq!(missing.write_boundary, ProviderCapabilityEvidence::Unknown);
+
+        // 消费面:仅含 Coding 行的记录 + legacy 未列出 → Planning 请求按
+        // launch 分格 Unknown fail-closed。
+        let root = tempfile::tempdir().expect("temporary product root");
+        let source = lcg_t02_source_with_record(&root, matrix, Vec::new());
+        let error = source
+            .require_supported(
+                &ProviderRef::claude_code("cap_managed_snapshot"),
+                SessionPolicyAction::PlanningReadOnly,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(&error, ProviderGatewayError::UnsupportedCapability(reason) if reason.starts_with(PROVIDER_CAPABILITY_LAUNCH_NOT_CONFIRMED)),
+            "missing row must read as Unknown and fail closed: {error:?}"
+        );
+    }
+
+    /// 2a 审查 carry ①:重复 action 行 → `from_rows` 显式拒绝(fail-closed,
+    /// 不静默去重/覆盖)。
+    #[test]
+    fn lcg_t02_matrix_duplicate_action_rows_are_rejected() {
+        let error = ProviderActionMatrix::from_rows(vec![
+            lcg_t02_row(
+                SessionPolicyAction::CodingTargetWrite,
+                ProviderCapabilityEvidence::Confirmed,
+                ProviderCapabilityEvidence::Confirmed,
+                ProviderCapabilityEvidence::Confirmed,
+            ),
+            lcg_t02_row(
+                SessionPolicyAction::CodingTargetWrite,
+                ProviderCapabilityEvidence::Unknown,
+                ProviderCapabilityEvidence::Unknown,
+                ProviderCapabilityEvidence::Unknown,
+            ),
+        ])
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("duplicate action row"),
+            "duplicate rows must be rejected: {error}"
+        );
     }
 }
