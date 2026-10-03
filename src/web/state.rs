@@ -470,7 +470,7 @@ fn default_provider_registry(
 /// 生产模式 registry:注册所有实际 provider，不含 `ProviderName::Fake`。
 fn real_provider_registry(provider_gate: Arc<ProviderAvailabilityGate>) -> ProviderRegistry {
     let mut registry = ProviderRegistry::new();
-    registry.register_gated(
+    let _ = registry.register_gated(
         ProviderName::ClaudeCode,
         Arc::new(ClaudeCodeProvider::new(PathBuf::from("claude"))),
         // 1a 合同期占位(裁决 A1):四参原子 register_gated 的未接入
@@ -478,7 +478,7 @@ fn real_provider_registry(provider_gate: Arc<ProviderAvailabilityGate>) -> Provi
         Arc::new(UnprovisionedProviderPolicyProjector),
         provider_gate.clone(),
     );
-    registry.register_gated(
+    let _ = registry.register_gated(
         ProviderName::Codex,
         Arc::new(CodexProvider::new(PathBuf::from("codex"))),
         // 1a 合同期占位(裁决 A1):四参原子 register_gated 的未接入
@@ -486,7 +486,7 @@ fn real_provider_registry(provider_gate: Arc<ProviderAvailabilityGate>) -> Provi
         Arc::new(UnprovisionedProviderPolicyProjector),
         provider_gate.clone(),
     );
-    registry.register_gated(
+    let _ = registry.register_gated(
         ProviderName::Pi,
         Arc::new(PiProvider::new(PathBuf::from("pi"))),
         // 1a 合同期占位(裁决 A1):四参原子 register_gated 的未接入
@@ -494,7 +494,7 @@ fn real_provider_registry(provider_gate: Arc<ProviderAvailabilityGate>) -> Provi
         Arc::new(UnprovisionedProviderPolicyProjector),
         provider_gate.clone(),
     );
-    registry.register_gated(
+    let _ = registry.register_gated(
         ProviderName::KimiCode,
         Arc::new(KimiCodeProvider::new(PathBuf::from("kimi"))),
         // 1a 合同期占位(裁决 A1):四参原子 register_gated 的未接入

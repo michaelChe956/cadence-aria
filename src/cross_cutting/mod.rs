@@ -26,6 +26,7 @@ pub mod policy_mode;
 pub mod process_manager;
 pub mod provider_adapter;
 pub mod provider_availability_gate;
+pub mod provider_boundary;
 pub mod provider_capabilities;
 pub mod provider_context_builder;
 pub mod provider_health;

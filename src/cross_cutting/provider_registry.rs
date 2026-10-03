@@ -13,30 +13,52 @@ use crate::product::models::ProviderName;
 #[error("provider_registry: {0}")]
 pub struct ProviderRegistryError(pub String);
 
+/// 同一 provider key 的注册 entry:adapter 与 projector/gate 生命周期一致
+/// (同 entry 整体写入/整体替换)。`projector`/`gate` 为 `None` 的 entry 是
+/// `register` 写入的半注册(legacy/test 边界),生产消费面对其不可见。
+struct ProviderRegistryEntry {
+    adapter: Arc<dyn StreamingProviderAdapter>,
+    projector: Option<Arc<dyn ProviderPolicyProjector>>,
+    /// 同 key 原子保存的 availability gate(三件套合同)。非 Fake 路径的
+    /// 运行时复验经 adapter 上的 `GatedStreamingProviderAdapter` 执行;
+    /// entry 级 gate 读取面由 Task 1b 的 registry 消费(availability
+    /// recheck)启用,届时移除 allow。
+    #[allow(dead_code)]
+    gate: Option<Arc<ProviderAvailabilityGate>>,
+}
+
 pub struct ProviderRegistry {
-    providers: HashMap<ProviderName, Arc<dyn StreamingProviderAdapter>>,
+    entries: HashMap<ProviderName, ProviderRegistryEntry>,
 }
 
 impl ProviderRegistry {
     pub fn new() -> Self {
         Self {
-            providers: HashMap::new(),
+            entries: HashMap::new(),
         }
     }
 
     /// 普通注册(legacy/test 边界,§0.4):只写 adapter、不携带 projector,
     /// 因此**不再生产可用**——生产消费面(`register_gated` 原子三件套与
-    /// `projector` getter)对这种半注册 entry 不可见。
+    /// `projector` getter)对这种半注册 entry 不可见。同 key 覆盖时整体
+    /// 替换 entry,不保留旧 projector 形成「新 adapter+旧 projector」错配。
     pub fn register(&mut self, name: ProviderName, provider: Arc<dyn StreamingProviderAdapter>) {
-        self.providers.insert(name, provider);
+        self.entries.insert(
+            name,
+            ProviderRegistryEntry {
+                adapter: provider,
+                projector: None,
+                gate: None,
+            },
+        );
     }
 
     /// 原子注册同一 provider key 的 adapter、policy projector 与 availability
-    /// gate(Task 1a 冻结签名)。三件套要么同 key 一次写入、要么都不写入,
-    /// 不允许出现「有 adapter 无 projector」的半注册生产 entry。
-    ///
-    /// 🔴 Task 1a 阶段 1 桩:projector 尚未原子入表(同 key 三件套存储在
-    /// 阶段 2 实现,红点见 `lcg_t01_registry_*`);gate 装饰行为沿用现状。
+    /// gate(Task 1a 冻结签名)。三件套同 key 一次写入、整体替换,不允许出现
+    /// 「有 adapter 无 projector」的半注册生产 entry。非 Fake 的 adapter 以
+    /// `GatedStreamingProviderAdapter` 装饰(透传同一 projector,取用时复验
+    /// 同一 gate);Fake 沿用既有特例不做 gate 装饰,但 projector/gate 同样
+    /// 原子入表。
     pub fn register_gated(
         &mut self,
         name: ProviderName,
@@ -44,45 +66,57 @@ impl ProviderRegistry {
         projector: Arc<dyn ProviderPolicyProjector>,
         gate: Arc<ProviderAvailabilityGate>,
     ) -> Result<(), ProviderRegistryError> {
-        let _ = &projector;
-        if name == ProviderName::Fake {
-            self.register(name, adapter);
-            return Ok(());
-        }
-        let gated = Arc::new(GatedStreamingProviderAdapter::new(
-            name.clone(),
-            adapter,
-            gate,
-        ));
-        self.register(name, gated);
+        let adapter = if name == ProviderName::Fake {
+            adapter
+        } else {
+            Arc::new(GatedStreamingProviderAdapter::new_with_projector(
+                name.clone(),
+                adapter,
+                Some(projector.clone()),
+                gate.clone(),
+            ))
+        };
+        self.entries.insert(
+            name,
+            ProviderRegistryEntry {
+                adapter,
+                projector: Some(projector),
+                gate: Some(gate),
+            },
+        );
         Ok(())
     }
 
     /// test-only:LC 测试 fixture 注册 adapter+projector 对(§0.4;不带
-    /// availability gate)。生产装配必须走 `register_gated` 三件套。
-    ///
-    /// 🔴 Task 1a 阶段 1 桩:projector 尚未入表(阶段 2 实现)。
+    /// availability gate,测试路径不做可用性装饰)。生产装配必须走
+    /// `register_gated` 三件套。
     pub fn register_test_pair(
         &mut self,
         name: ProviderName,
         adapter: Arc<dyn StreamingProviderAdapter>,
         projector: Arc<dyn ProviderPolicyProjector>,
     ) -> Result<(), ProviderRegistryError> {
-        let _ = &projector;
-        self.register(name, adapter);
+        self.entries.insert(
+            name,
+            ProviderRegistryEntry {
+                adapter,
+                projector: Some(projector),
+                gate: None,
+            },
+        );
         Ok(())
     }
 
     /// 生产 projector getter:只对 `register_gated`/`register_test_pair`
     /// 原子写入的 entry 可见;普通 `register` 的半注册 entry 一律 `None`。
-    ///
-    /// 🔴 Task 1a 阶段 1 桩:恒返回 `None`(阶段 2 实现原子 entry 读取)。
-    pub fn projector(&self, _name: &ProviderName) -> Option<Arc<dyn ProviderPolicyProjector>> {
-        None
+    pub fn projector(&self, name: &ProviderName) -> Option<Arc<dyn ProviderPolicyProjector>> {
+        self.entries
+            .get(name)
+            .and_then(|entry| entry.projector.clone())
     }
 
     pub fn get(&self, name: &ProviderName) -> Option<Arc<dyn StreamingProviderAdapter>> {
-        self.providers.get(name).cloned()
+        self.entries.get(name).map(|entry| entry.adapter.clone())
     }
 
     pub fn available_names(&self) -> Vec<ProviderName> {
@@ -94,7 +128,7 @@ impl ProviderRegistry {
             ProviderName::Fake,
         ]
         .into_iter()
-        .filter(|name| self.providers.contains_key(name))
+        .filter(|name| self.entries.contains_key(name))
         .collect()
     }
 
@@ -213,30 +247,38 @@ mod tests {
     fn provider_availability_gate_registry_distinguishes_registered_and_executable_names() {
         let gate = registry_gate();
         let mut registry = ProviderRegistry::new();
-        registry.register_gated(
-            ProviderName::ClaudeCode,
-            Arc::new(FakeStreamingProvider),
-            Arc::new(UnprovisionedProviderPolicyProjector),
-            gate.clone(),
-        );
-        registry.register_gated(
-            ProviderName::Codex,
-            Arc::new(FakeStreamingProvider),
-            Arc::new(UnprovisionedProviderPolicyProjector),
-            gate.clone(),
-        );
-        registry.register_gated(
-            ProviderName::Pi,
-            Arc::new(FakeStreamingProvider),
-            Arc::new(UnprovisionedProviderPolicyProjector),
-            gate.clone(),
-        );
-        registry.register_gated(
-            ProviderName::Fake,
-            Arc::new(FakeStreamingProvider),
-            Arc::new(UnprovisionedProviderPolicyProjector),
-            gate.clone(),
-        );
+        registry
+            .register_gated(
+                ProviderName::ClaudeCode,
+                Arc::new(FakeStreamingProvider),
+                Arc::new(UnprovisionedProviderPolicyProjector),
+                gate.clone(),
+            )
+            .expect("register_gated");
+        registry
+            .register_gated(
+                ProviderName::Codex,
+                Arc::new(FakeStreamingProvider),
+                Arc::new(UnprovisionedProviderPolicyProjector),
+                gate.clone(),
+            )
+            .expect("register_gated");
+        registry
+            .register_gated(
+                ProviderName::Pi,
+                Arc::new(FakeStreamingProvider),
+                Arc::new(UnprovisionedProviderPolicyProjector),
+                gate.clone(),
+            )
+            .expect("register_gated");
+        registry
+            .register_gated(
+                ProviderName::Fake,
+                Arc::new(FakeStreamingProvider),
+                Arc::new(UnprovisionedProviderPolicyProjector),
+                gate.clone(),
+            )
+            .expect("register_gated");
 
         assert_eq!(
             registry.available_names(),

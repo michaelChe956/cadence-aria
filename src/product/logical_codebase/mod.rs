@@ -129,6 +129,10 @@ pub use provider_gateway::{
     ProviderRef, ProviderRefType, SessionLaunchRequest, SessionResumeFingerprint,
     ValidatedSessionLaunchPolicy,
 };
+pub use provider_projection::{
+    ProviderPolicyProjection, ProviderPolicyProjector, ProviderProjectionError,
+    ProviderProjectionInput, UnprovisionedProviderPolicyProjector,
+};
 pub use provider_trust::{
     HomeBackedProviderTrustRegistry, ProviderTrustAction, ProviderTrustError,
     ProviderTrustOwnership, ProviderTrustPrecondition, ProviderTrustPreparationResult,

@@ -891,6 +891,23 @@ pub trait StreamingProviderAdapter: Send + Sync {
         ))
     }
 
+    /// LC validated 启动(Task 1a 冻结签名):只接受 gateway 产出的
+    /// `ValidatedStreamingProviderInput`。默认返回 unsupported,仅供未接入
+    /// validated 路径的 adapter 显式拒绝;**不得**回调裸 `start`(raw
+    /// `start` 仅保留单仓 direct)。真实 provider 的接入归 Task 7/1b。
+    async fn start_validated(
+        &self,
+        _input: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        Err(ProviderAdapterError::execution_failed(
+            None,
+            String::new(),
+            "streaming provider validated start is not supported by this adapter",
+            0,
+        ))
+    }
+
     /// **Legacy bridge**:`run_streaming` 把同步 `AdapterInput` 适配为流式 session,
     /// 仅供未携带逻辑代码库 target(`attempt.target_snapshot.is_none()`)的历史调用
     /// 使用。逻辑代码库真实 provider 启动必须经 `LogicalCodebaseProviderGateway`,

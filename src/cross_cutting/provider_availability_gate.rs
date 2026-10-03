@@ -7,9 +7,13 @@ use crate::cross_cutting::provider_adapter::{ProviderAdapter, ProviderAdapterErr
 use crate::cross_cutting::provider_health::{
     ProviderHealthReasonCode, ProviderHealthService, ProviderHealthSnapshot,
 };
+use crate::cross_cutting::session_launch::{
+    ValidatedAdapterInput, ValidatedStreamingProviderInput,
+};
 use crate::cross_cutting::streaming_provider::{
     ProviderSession, StreamChunk, StreamingProviderAdapter, StreamingProviderInput,
 };
+use crate::product::logical_codebase::provider_projection::ProviderPolicyProjector;
 use crate::product::models::ProviderName;
 use crate::protocol::contracts::{AdapterInput, AdapterOutput};
 
@@ -141,6 +145,7 @@ fn reason_code_str(reason_code: ProviderHealthReasonCode) -> &'static str {
 pub struct GatedProviderAdapter {
     provider: ProviderName,
     inner: Arc<dyn ProviderAdapter>,
+    projector: Option<Arc<dyn ProviderPolicyProjector>>,
     gate: Arc<ProviderAvailabilityGate>,
 }
 
@@ -150,11 +155,32 @@ impl GatedProviderAdapter {
         inner: Arc<dyn ProviderAdapter>,
         gate: Arc<ProviderAvailabilityGate>,
     ) -> Self {
+        Self::new_with_projector(provider, inner, None, gate)
+    }
+
+    /// 带 projector 的原子构造(Task 1a):装饰器透传 projector,取用时
+    /// 先复验同一 gate(不可用时拒绝提供)。
+    pub fn new_with_projector(
+        provider: ProviderName,
+        inner: Arc<dyn ProviderAdapter>,
+        projector: Option<Arc<dyn ProviderPolicyProjector>>,
+        gate: Arc<ProviderAvailabilityGate>,
+    ) -> Self {
         Self {
             provider,
             inner,
+            projector,
             gate,
         }
+    }
+
+    /// 透传的 projector(取用时复验同一 gate;未携带 projector 的 legacy
+    /// 装饰返回 `None`)。
+    pub fn projector(
+        &self,
+    ) -> Result<Option<Arc<dyn ProviderPolicyProjector>>, ProviderAvailabilityError> {
+        self.gate.ensure_available(&self.provider)?;
+        Ok(self.projector.clone())
     }
 }
 
@@ -165,11 +191,25 @@ impl ProviderAdapter for GatedProviderAdapter {
             .map_err(ProviderAvailabilityError::into_adapter_error)?;
         self.inner.run(input)
     }
+
+    /// validated 透传(Task 1a):先复验同一 gate,再转发 inner 的
+    /// `run_validated`;inner 未接入(默认 unsupported)时错误原样上抛,
+    /// 不回落裸 `run`。
+    fn run_validated(
+        &self,
+        input: ValidatedAdapterInput,
+    ) -> Result<AdapterOutput, ProviderAdapterError> {
+        self.gate
+            .ensure_available(&self.provider)
+            .map_err(ProviderAvailabilityError::into_adapter_error)?;
+        self.inner.run_validated(input)
+    }
 }
 
 pub struct GatedStreamingProviderAdapter {
     provider: ProviderName,
     inner: Arc<dyn StreamingProviderAdapter>,
+    projector: Option<Arc<dyn ProviderPolicyProjector>>,
     gate: Arc<ProviderAvailabilityGate>,
 }
 
@@ -179,11 +219,32 @@ impl GatedStreamingProviderAdapter {
         inner: Arc<dyn StreamingProviderAdapter>,
         gate: Arc<ProviderAvailabilityGate>,
     ) -> Self {
+        Self::new_with_projector(provider, inner, None, gate)
+    }
+
+    /// 带 projector 的原子构造(Task 1a):装饰器透传 projector,取用时
+    /// 先复验同一 gate(不可用时拒绝提供)。
+    pub fn new_with_projector(
+        provider: ProviderName,
+        inner: Arc<dyn StreamingProviderAdapter>,
+        projector: Option<Arc<dyn ProviderPolicyProjector>>,
+        gate: Arc<ProviderAvailabilityGate>,
+    ) -> Self {
         Self {
             provider,
             inner,
+            projector,
             gate,
         }
+    }
+
+    /// 透传的 projector(取用时复验同一 gate;未携带 projector 的 legacy
+    /// 装饰返回 `None`)。
+    pub fn projector(
+        &self,
+    ) -> Result<Option<Arc<dyn ProviderPolicyProjector>>, ProviderAvailabilityError> {
+        self.gate.ensure_available(&self.provider)?;
+        Ok(self.projector.clone())
     }
 }
 
@@ -209,6 +270,20 @@ impl StreamingProviderAdapter for GatedStreamingProviderAdapter {
             .ensure_available(&self.provider)
             .map_err(ProviderAvailabilityError::into_adapter_error)?;
         self.inner.start(input, cancel).await
+    }
+
+    /// validated 透传(Task 1a):先复验同一 gate,再转发 inner 的
+    /// `start_validated`;inner 未接入(默认 unsupported)时错误原样上抛,
+    /// 不回落裸 `start`。
+    async fn start_validated(
+        &self,
+        input: ValidatedStreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        self.gate
+            .ensure_available(&self.provider)
+            .map_err(ProviderAvailabilityError::into_adapter_error)?;
+        self.inner.start_validated(input, cancel).await
     }
 
     async fn run_streaming(

@@ -20,6 +20,22 @@ pub trait ProviderAdapter {
         &self,
         input: &crate::protocol::contracts::AdapterInput,
     ) -> Result<AdapterOutput, ProviderAdapterError>;
+
+    /// LC validated 运行(Task 1a 冻结签名):只接受 gateway 产出的
+    /// `ValidatedAdapterInput`。默认返回 unsupported,仅供未接入 validated
+    /// 路径的 adapter 显式拒绝;**不得**回调裸 `run`(raw `run` 仅保留
+    /// 单仓 direct)。LC sync bridge 的接入归 1b。
+    fn run_validated(
+        &self,
+        _input: crate::cross_cutting::session_launch::ValidatedAdapterInput,
+    ) -> Result<AdapterOutput, ProviderAdapterError> {
+        Err(ProviderAdapterError::execution_failed(
+            None,
+            String::new(),
+            "provider validated run is not supported by this adapter",
+            0,
+        ))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

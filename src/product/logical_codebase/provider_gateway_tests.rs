@@ -1116,9 +1116,9 @@ mod task13_gateway_hardening {
     }
 
     /// C-2 集中映射:session/role 配置的 `ProviderName` → gateway `ProviderRef`。
-    /// ClaudeCode/Codex 是仅有的两个 gateway 真实 dialect;其余 provider 必须显式
-    /// `UnsupportedCapability` 失败,🔴 禁止静默回退 ClaudeCode(用户配置的 provider
-    /// 不允许被悄悄换成 Claude 启动)。
+    /// Task 1a 起四家真实 provider(ClaudeCode/Codex/Pi/KimiCode)各自显式
+    /// 映射;Fake 不经 gateway。🔴 禁止静默回退 ClaudeCode(用户配置的
+    /// provider 不允许被悄悄换成 Claude 启动)。
     #[test]
     fn provider_ref_from_provider_name_maps_supported_providers() {
         let claude =
@@ -1131,26 +1131,36 @@ mod task13_gateway_hardening {
             .expect("Codex must map to a gateway provider ref");
         assert_eq!(codex.provider_type, ProviderRefType::Codex);
         assert_eq!(codex.capability_snapshot_ref, "cap_managed_snapshot");
+
+        let pi = ProviderRef::from_provider_name(&ProviderName::Pi, "cap_managed_snapshot")
+            .expect("Pi must map to a gateway provider ref");
+        assert_eq!(pi.provider_type, ProviderRefType::Pi);
+
+        let kimi = ProviderRef::from_provider_name(&ProviderName::KimiCode, "cap_managed_snapshot")
+            .expect("KimiCode must map to a gateway provider ref");
+        assert_eq!(kimi.provider_type, ProviderRefType::KimiCode);
     }
 
-    /// C-2 集中映射 fail-closed:Pi/KimiCode/Fake 一律显式 unsupported,错误信息
-    /// 含稳定判别码与 provider 名,绝不回退 Claude。
+    /// C-2 集中映射 fail-closed:Fake(及未来新增 provider)一律显式
+    /// unsupported,错误信息含稳定判别码与 provider 名,绝不回退 Claude。
+    /// (Task 1a 前的旧合同把 Pi/KimiCode 也列入拒绝;四家映射落地后仅
+    /// Fake/未知值保持 fail-closed。)
     #[test]
     fn provider_ref_from_provider_name_fails_closed_for_unsupported_providers() {
-        for provider in [ProviderName::Pi, ProviderName::KimiCode, ProviderName::Fake] {
-            let error = ProviderRef::from_provider_name(&provider, "cap_managed_snapshot")
-                .err()
-                .unwrap_or_else(|| panic!("{provider:?} must not map to a gateway provider ref"));
-            assert!(
-                matches!(&error, ProviderGatewayError::UnsupportedCapability(reason)
-                    if reason.contains(PROVIDER_UNSUPPORTED_FOR_GATEWAY_LAUNCH)),
-                "expected {PROVIDER_UNSUPPORTED_FOR_GATEWAY_LAUNCH}, got {error:?}"
-            );
-            assert!(
-                error.to_string().contains(&format!("{provider:?}")),
-                "error must name the configured provider, got {error}"
-            );
-        }
+        let error = ProviderRef::from_provider_name(&ProviderName::Fake, "cap_managed_snapshot")
+            .err()
+            .unwrap_or_else(|| panic!("Fake must not map to a gateway provider ref"));
+        assert!(
+            matches!(&error, ProviderGatewayError::UnsupportedCapability(reason)
+                if reason.contains(PROVIDER_UNSUPPORTED_FOR_GATEWAY_LAUNCH)),
+            "expected {PROVIDER_UNSUPPORTED_FOR_GATEWAY_LAUNCH}, got {error:?}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("{:?}", ProviderName::Fake)),
+            "error must name the configured provider, got {error}"
+        );
     }
 
     include!("provider_gateway_tests/audit.inc.rs");
