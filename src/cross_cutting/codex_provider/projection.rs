@@ -385,6 +385,40 @@ fn coding_danger_refusal(envelope: &SessionPolicyEnvelope) -> ProviderProjection
     ))
 }
 
+/// gateway 提供的 boundary plan 路径上对 envelope 写面冻结的同强度复核
+/// (T5-P3-1):`Some(plan)` 分支不得弱于 `None` 分支(`lc_boundary_plan` 强制
+/// Coding 恰一个==target 的可写 root、只读空 writable_roots)。plan 自身形状
+/// 合法不等于 envelope 写面已冻结——两条都要过,否则外部 plan 构成绕过
+/// target-only/只读冻结的 seam;违规以 `CODEX_TARGET_BOUNDARY_UNVERIFIED`
+/// 稳定码拒绝。
+fn verify_envelope_write_face(
+    envelope: &SessionPolicyEnvelope,
+) -> Result<(), ProviderProjectionError> {
+    match envelope.action {
+        SessionPolicyAction::CodingTargetWrite => {
+            if envelope.writable_roots.len() != 1
+                || envelope.writable_roots[0] != envelope.target.worktree
+            {
+                return Err(ProviderProjectionError::Invalid(format!(
+                    "{CODEX_TARGET_BOUNDARY_UNVERIFIED}: coding envelope write face must \
+                     freeze exactly one writable root equal to the target worktree (got {} \
+                     roots) before accepting a provided boundary plan",
+                    envelope.writable_roots.len()
+                )));
+            }
+        }
+        SessionPolicyAction::PlanningReadOnly | SessionPolicyAction::ReviewReadOnly => {
+            if !envelope.writable_roots.is_empty() {
+                return Err(ProviderProjectionError::Invalid(format!(
+                    "{CODEX_TARGET_BOUNDARY_UNVERIFIED}: read-only envelope must freeze no \
+                     writable roots before accepting a provided boundary plan"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// gateway 提供的 boundary plan 按 action 复核形状(不合法即拒绝,不静默
 /// 采纳外部 plan)。
 fn verify_boundary_shape(
@@ -508,6 +542,7 @@ impl ProviderPolicyProjector for CodexPolicyProjector {
         // envelope 派生(Coding 写面非 target-only → danger 稳定码拒绝)。
         let boundary = match input.boundary() {
             Some(plan) => {
+                verify_envelope_write_face(envelope)?;
                 verify_boundary_shape(envelope, plan)?;
                 plan.clone()
             }

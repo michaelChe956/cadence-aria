@@ -485,6 +485,86 @@ fn lcg_t05_mismatched_boundary_plan_reports_target_boundary_unverified() {
     );
 }
 
+/// T5-P3-1(审查修复):`Some(plan)` 分支不得弱于 `None` 分支——plan 自身
+/// 形状合法也不能绕过 envelope 写面冻结:Coding 的 writable_roots 必须仍
+/// 恰一个==target,只读必须空 writable_roots;违规以
+/// `codex_target_boundary_unverified` 拒绝,合法形态照常投影。
+#[test]
+fn lcg_t05_provided_plan_cannot_bypass_envelope_write_face_freeze() {
+    let fixture = LcCodexFixture::new();
+    let target = fixture.target_worktree();
+    let other = fixture.root.join("other-member");
+    let mut envelope = fixture.envelope(SessionPolicyAction::CodingTargetWrite, vec![other]);
+    envelope.target = PolicyTarget::checkout("logical_repo_0001", "checkout_0001", target.clone());
+    // plan 自身形状合法(TargetWriteOnly 且指向 envelope target),但 envelope
+    // 写面冻结的是非 target root——必须拒绝,不得静默采纳 plan。
+    let well_formed_plan = crate::cross_cutting::provider_boundary::ProviderBoundaryPlan::new(
+        crate::cross_cutting::provider_boundary::ProviderBoundaryMode::TargetWriteOnly,
+        fixture.canonical_root(),
+        Some(target.clone()),
+        Vec::new(),
+    );
+    let projection_input =
+        |envelope: SessionPolicyEnvelope,
+         plan: crate::cross_cutting::provider_boundary::ProviderBoundaryPlan| {
+            ProviderProjectionInput::new(
+                envelope.clone(),
+                ProviderRef::codex("cap_codex_lc_fixture"),
+                envelope.action,
+                AdapterRole::Executor,
+                ProviderPermissionMode::Auto,
+                None,
+                String::new(),
+                String::new(),
+                "sha256:managed-config-artifact".to_string(),
+                "sha256:trust-lc-fixture".to_string(),
+                Some(plan),
+            )
+        };
+
+    // 1) Coding:envelope writable_roots 含非 target(恰一个但 ≠target)→ 拒绝。
+    let error = LcProjector::new("codex 0.124.0-lc-fixture")
+        .project(&projection_input(
+            envelope.clone(),
+            well_formed_plan.clone(),
+        ))
+        .expect_err("provided plan must not bypass the envelope write-face freeze");
+    assert!(
+        error
+            .to_string()
+            .contains("codex_target_boundary_unverified"),
+        "write-face bypass must carry the stable reason, got: {error}"
+    );
+
+    // 2) 只读:envelope 带非空 writable_roots + 合法只读 plan → 同码拒绝。
+    let mut read_only =
+        fixture.envelope(SessionPolicyAction::PlanningReadOnly, vec![target.clone()]);
+    read_only.target = PolicyTarget::checkout("logical_repo_0001", "checkout_0001", target.clone());
+    let read_only_plan = crate::cross_cutting::provider_boundary::ProviderBoundaryPlan::new(
+        crate::cross_cutting::provider_boundary::ProviderBoundaryMode::ReadOnly,
+        fixture.canonical_root(),
+        None,
+        Vec::new(),
+    );
+    let error = LcProjector::new("codex 0.124.0-lc-fixture")
+        .project(&projection_input(read_only, read_only_plan))
+        .expect_err("read-only envelope with writable roots must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("codex_target_boundary_unverified"),
+        "read-only write-face bypass must carry the stable reason, got: {error}"
+    );
+
+    // 3) 合法形态(Some(plan) + envelope 写面已冻结)照常产出受限投影。
+    let mut frozen = fixture.envelope(SessionPolicyAction::CodingTargetWrite, vec![target.clone()]);
+    frozen.target = PolicyTarget::checkout("logical_repo_0001", "checkout_0001", target.clone());
+    let projection = LcProjector::new("codex 0.124.0-lc-fixture")
+        .project(&projection_input(frozen, well_formed_plan))
+        .expect("legal provided plan with frozen write face still projects");
+    assert_eq!(projection.sandbox(), "workspace-write");
+}
+
 /// Task 5b wire 深化:LC read-only 的 thread/resume 与 thread/start 共享同
 /// 一受限投影——resume 请求在真实 wire 上携带同 sandbox/approvalPolicy/
 /// cwd 与原 threadId,并由应答确认(F1)。
