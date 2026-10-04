@@ -2610,10 +2610,15 @@ impl StageObservation {
                 self.role_run_seq = Some(*seq);
             }
             // run_ref:workspace streaming 栈以 run-bound 身份回填。
+            // r14 复盘:resume 格零 spawn(路由 fail-closed 拒启)时会借
+            // fresh 的同一 run_ref,与 fresh 格判重把已 Confirmed 的 fresh
+            // 格拖成 denied——resume 格追加相位标记保持唯一(schema 要求
+            // 非空,空值也不得参与判重豁免)。
+            let phase_suffix = if self.force_resume { "-resume" } else { "" };
             if cell.run_ref.trim().is_empty() {
                 cell.run_ref = format!(
-                    "ws-{}-{}-run-{}",
-                    self.workspace_session_id, self.stage, seq
+                    "ws-{}-{}-run-{}{}",
+                    self.workspace_session_id, self.stage, seq, phase_suffix
                 );
             }
         }
