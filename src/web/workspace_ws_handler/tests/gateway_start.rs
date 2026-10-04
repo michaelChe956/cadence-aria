@@ -251,6 +251,11 @@ fn workspace_engine_with_repository_path(
 /// Task 2.8：记录启动 input 并立即完成的 capture adapter（gateway registry 内）。
 struct CapturingStreamingAdapter {
     inputs: mpsc::UnboundedSender<StreamingProviderInput>,
+    /// T1B-P3-1:provider 启动时序探针——`start`(含 `start_validated` 委托)
+    /// 在共享计数器上取标记并快照,使 run 收口时序断言承载真实启动顺序
+    /// 而非测试线程手工计数。`None`/缺省时零行为(其余构造点不受影响)。
+    start_mark: Option<Arc<AtomicUsize>>,
+    observed_start_mark: Arc<std::sync::Mutex<Option<usize>>>,
 }
 
 #[async_trait::async_trait]
@@ -260,6 +265,10 @@ impl StreamingProviderAdapter for CapturingStreamingAdapter {
         input: StreamingProviderInput,
         _cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
+        if let Some(counter) = self.start_mark.as_ref() {
+            let mark = counter.fetch_add(1, Ordering::SeqCst);
+            *self.observed_start_mark.lock().expect("start mark probe") = Some(mark);
+        }
         let _ = self.inputs.send(input);
         let (event_tx, event_rx) = mpsc::channel(4);
         let (command_tx, _command_rx) = mpsc::channel(1);
@@ -301,8 +310,11 @@ impl StreamingProviderAdapter for CapturingStreamingAdapter {
 #[tokio::test]
 async fn start_work_item_plan_author_rebinds_input_cwd_to_envelope_root_for_rebuild() {
     let (input_tx, mut input_rx) = mpsc::unbounded_channel();
-    let fixture =
-        gateway_fixture_with_adapter(Arc::new(CapturingStreamingAdapter { inputs: input_tx }));
+    let fixture = gateway_fixture_with_adapter(Arc::new(CapturingStreamingAdapter {
+        inputs: input_tx,
+        start_mark: None,
+        observed_start_mark: Arc::default(),
+    }));
     let member = fixture.aggregate_root.join("member-checkout");
     std::fs::create_dir_all(&member).expect("member checkout under aggregate root");
     let engine = workspace_engine_with_repository_path(&fixture, member.clone());
@@ -315,6 +327,8 @@ async fn start_work_item_plan_author_rebinds_input_cwd_to_envelope_root_for_rebu
         launch,
         Arc::new(CapturingStreamingAdapter {
             inputs: mpsc::unbounded_channel().0,
+            start_mark: None,
+            observed_start_mark: Arc::default(),
         }),
         input,
         CancellationToken::new(),
@@ -350,8 +364,11 @@ async fn start_work_item_plan_author_rebinds_input_cwd_to_envelope_root_for_rebu
 #[tokio::test]
 async fn start_work_item_plan_author_binds_normal_input_cwd_to_envelope_root() {
     let (input_tx, mut input_rx) = mpsc::unbounded_channel();
-    let fixture =
-        gateway_fixture_with_adapter(Arc::new(CapturingStreamingAdapter { inputs: input_tx }));
+    let fixture = gateway_fixture_with_adapter(Arc::new(CapturingStreamingAdapter {
+        inputs: input_tx,
+        start_mark: None,
+        observed_start_mark: Arc::default(),
+    }));
     let member = fixture.aggregate_root.join("member-checkout");
     std::fs::create_dir_all(&member).expect("member checkout under aggregate root");
     let engine = workspace_engine_with_repository_path(&fixture, member.clone());
@@ -362,6 +379,8 @@ async fn start_work_item_plan_author_binds_normal_input_cwd_to_envelope_root() {
         launch,
         Arc::new(CapturingStreamingAdapter {
             inputs: mpsc::unbounded_channel().0,
+            start_mark: None,
+            observed_start_mark: Arc::default(),
         }),
         input,
         CancellationToken::new(),
@@ -772,12 +791,19 @@ async fn lcg_t01_ws_plan_split_run_handle_closes_on_success_and_failure() {
     use crate::product::models::ProviderName;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    static SEQ: AtomicUsize = AtomicUsize::new(0);
-    SEQ.store(0, Ordering::SeqCst);
+    // T1B-P3-1:时序断言改由 adapter 真实观测——启动标记在 registry 内
+    // adapter 的 `start_validated` 路径写入共享计数器并快照,收口标记在
+    // complete 落盘后取下一值;若 prepared 分流未触达 adapter,快照缺失
+    // 即失败(不再是测试线程手工 fetch_add 的恒真式)。
+    let seq = Arc::new(AtomicUsize::new(0));
+    let probe = Arc::new(std::sync::Mutex::new(None));
 
     let (input_tx, mut input_rx) = mpsc::unbounded_channel();
-    let fixture =
-        gateway_fixture_with_adapter(Arc::new(CapturingStreamingAdapter { inputs: input_tx }));
+    let fixture = gateway_fixture_with_adapter(Arc::new(CapturingStreamingAdapter {
+        inputs: input_tx,
+        start_mark: Some(seq.clone()),
+        observed_start_mark: probe.clone(),
+    }));
     let engine = workspace_engine(&fixture, true);
     let plan_launch =
         resolve_plan_author_launch(&engine, None, None).expect("resolve logical launch");
@@ -797,6 +823,8 @@ async fn lcg_t01_ws_plan_split_run_handle_closes_on_success_and_failure() {
         plan_launch,
         Arc::new(CapturingStreamingAdapter {
             inputs: mpsc::unbounded_channel().0,
+            start_mark: None,
+            observed_start_mark: Arc::default(),
         }),
         input,
         CancellationToken::new(),
@@ -819,14 +847,21 @@ async fn lcg_t01_ws_plan_split_run_handle_closes_on_success_and_failure() {
         Some("ws_plan_0001".to_string())
     );
 
-    // provider_start(审计首行)先于 split run completed(时序计数)。
-    let provider_start_seq = SEQ.fetch_add(1, Ordering::SeqCst);
+    // provider_start(adapter 在 start_validated 路径写入的真实启动标记)
+    // 先于 split run completed(complete 落盘后取下一标记)——T1B-P3-1。
+    let provider_start_seq = probe
+        .lock()
+        .expect("start mark probe")
+        .expect("adapter must have started via start_validated dispatch");
     let structured = serde_json::json!({"work_items": []});
     run_ctx
         .complete("plan prompt", &structured)
         .expect("complete consumes the plan split run handle");
-    let split_completed_seq = SEQ.fetch_add(1, Ordering::SeqCst);
-    assert!(provider_start_seq < split_completed_seq);
+    let split_completed_seq = seq.fetch_add(1, Ordering::SeqCst);
+    assert!(
+        provider_start_seq < split_completed_seq,
+        "provider 启动标记({provider_start_seq})必须先于 split completed 标记({split_completed_seq})"
+    );
     drop(session);
 
     // 失败路径:fail 收口 status=failed。
@@ -853,8 +888,11 @@ async fn lcg_t01_ws_plan_split_run_handle_closes_on_success_and_failure() {
 #[tokio::test]
 async fn lcg_t01_all_lc_entrypoints_require_projection() {
     let (input_tx, mut input_rx) = mpsc::unbounded_channel();
-    let fixture =
-        gateway_fixture_with_adapter(Arc::new(CapturingStreamingAdapter { inputs: input_tx }));
+    let fixture = gateway_fixture_with_adapter(Arc::new(CapturingStreamingAdapter {
+        inputs: input_tx,
+        start_mark: None,
+        observed_start_mark: Arc::default(),
+    }));
     let engine = workspace_engine(&fixture, true);
     let plan_launch =
         resolve_plan_author_launch(&engine, None, None).expect("resolve logical launch");
