@@ -644,7 +644,15 @@ impl LifecycleStore {
         validate_relative_id(issue_id)?;
 
         let root = self.provider_runs_root(project_id, issue_id);
-        let id = next_sequential_id_in_directory("provider_run_split", &root)
+        // Task 1c(carry④/Ruling 5B):split 运行身份与 1b
+        // `WorkItemSplitProviderRunHandle` 装配对齐——legacy 落档路径改铸与
+        // handle 同族的 `ws-<scope>-split-run-<seq>` 前缀(scope 取本路径
+        // 仅有的 project/issue 二元组);run_ref 是不透明字符串,流经
+        // created_from_provider_run/provider_run_ref 无任何格式解析,前缀族
+        // 对齐不影响既有消费者。序号仍按 per-issue 目录单调分配(4 位零
+        // 填充,与既有 next_sequential_id 同宽);旧 provider_run_split_NNNN
+        // 记录不迁移、不冲突(不同前缀名空间)。
+        let id = next_ws_split_run_id(project_id, issue_id, &root)
             .map_err(|error| ProductStoreError::Io(format!("read {}: {error}", root.display())))?;
         let dir = root.join(&id);
         let now = Utc::now().to_rfc3339();
@@ -662,6 +670,37 @@ impl LifecycleStore {
         write_json(&dir.join("structured_output.json"), structured_output)?;
         Ok(id)
     }
+}
+
+/// 扫描 per-issue provider-runs 目录,返回下一个与 1b handle 同族的
+/// `ws-{project}-{issue}-split-run-NNNN` run id(空目录从 0001 起,取既有
+/// 最大序号 +1;旧 `provider_run_split_NNNN` 名字不在新前缀名空间,不参与
+/// 计数)。目录缺失视为空(fresh issue)。
+fn next_ws_split_run_id(
+    project_id: &str,
+    issue_id: &str,
+    root: &std::path::Path,
+) -> std::io::Result<String> {
+    let prefix = format!("ws-{project_id}-{issue_id}-split-run-");
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(format!("{prefix}0001"));
+        }
+        Err(error) => return Err(error),
+    };
+    let mut max = 0usize;
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let name = name.strip_suffix(".json").unwrap_or(&name);
+        if let Some(suffix) = name.strip_prefix(&prefix)
+            && let Ok(sequence) = suffix.parse::<usize>()
+        {
+            max = max.max(sequence);
+        }
+    }
+    Ok(format!("{prefix}{:04}", max + 1))
 }
 
 #[cfg(test)]

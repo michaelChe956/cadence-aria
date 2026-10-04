@@ -326,6 +326,58 @@ impl GatewayBackedAggregateProviderTurnDriver {
     }
 }
 
+impl crate::product::logical_codebase::LogicalCodebaseProviderGateway {
+    /// Task 1c(计划冻结接口「准备与同步」):root-recipe 相位的流式 prepare
+    /// 入口——只由 durable recipe driver(`GatewayBackedAggregateProviderTurnDriver`
+    /// 生产臂)调用,普通 input 不能自报 phase。语义 =
+    /// `validate_root_recipe_request`(凭据每次对 durable Running operation
+    /// 重核验并冻结私有 RootRecipe 相位;policy/target/envelope 形状/cwd
+    /// authority 与普通链一致,不误套 normal action 分格门——recipe 的写面
+    /// 由 BootstrapExecutorMarker/receipt 链持有)+ 镜像
+    /// `prepare_streaming_launch` 的 run-bound sink 绑定(角色策略守卫 →
+    /// `workspace_session_id` → `RoleRunBoundAuditSink` → `with_launch_audit`)。
+    /// `start_streaming` 对 `launch_audit` 在场的 prepared launch 自动走
+    /// `start_validated`,spawn 前复验按 RootRecipe 分支重新消费固定 recipe
+    /// 事实。impl 落位本文件:gateway 主文件归 1a/2b owner 门,root-recipe
+    /// 消费面装配归 1c-coordinator 切片。
+    pub(crate) fn prepare_root_recipe_launch(
+        &self,
+        mut input: crate::cross_cutting::streaming_provider::StreamingProviderInput,
+        request: crate::product::logical_codebase::SessionLaunchRequest,
+        credential: crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
+        context: crate::product::logical_codebase::provider_gateway::ProviderLaunchAuditContext,
+    ) -> Result<
+        crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+        crate::product::logical_codebase::ProviderGatewayError,
+    > {
+        crate::cross_cutting::streaming_provider::validate_tool_policy_for_role(
+            &input.role,
+            input.tool_policy.as_ref(),
+        )
+        .map_err(|error| {
+            crate::product::logical_codebase::ProviderGatewayError::UnsupportedCapability(
+                error.to_string(),
+            )
+        })?;
+        let validated = self.validate_root_recipe_request(request, &credential)?;
+        input.workspace_session_id = Some(context.workspace_session_id.clone());
+        input.audit_sink = Some(
+            crate::cross_cutting::tool_policy_audit::RoleRunBoundAuditSink::new(
+                context.audit_sink.clone(),
+                context.workspace_session_id.clone(),
+                context.role_run_seq,
+            )
+            .into_sink(),
+        );
+        Ok(
+            crate::cross_cutting::session_launch::ValidatedStreamingProviderInput::new(
+                input,
+                validated.with_launch_audit(context),
+            ),
+        )
+    }
+}
+
 #[async_trait]
 impl AggregateProviderTurnDriver for GatewayBackedAggregateProviderTurnDriver {
     async fn run_turn(
@@ -376,7 +428,7 @@ impl AggregateProviderTurnDriver for GatewayBackedAggregateProviderTurnDriver {
                     lc_id,
                     self.gateway.clone(),
                 );
-            let phase = crate::product::logical_codebase::provider_admission_preflight::ProviderAdmissionPhase::AggregateBootstrap(bootstrap);
+            let phase = crate::product::logical_codebase::provider_admission_preflight::ProviderAdmissionPhase::AggregateBootstrap(bootstrap.clone());
             if let Err(error) = admission.check(&request, &phase) {
                 return Err(AggregateInitializationError::ProviderTurn {
                     step,
@@ -386,34 +438,32 @@ impl AggregateProviderTurnDriver for GatewayBackedAggregateProviderTurnDriver {
             }
         }
         let input = self.streaming_input(step, &aggregate_root, Some(tool_policy));
-        // Task 1b 段③:admission paths 在场(生产主路径)时,provider turn 经
-        // gateway `prepare_streaming_launch` 组装 prepared launch——prepare 前
-        // 绑定 run-bound audit sink(BootstrapExecutor marker 校验/角色策略
-        // guard 在 prepare 内统一施加);paths 缺席(legacy 别名解析失败的
-        // 降级组装/测试构造)保持原 validate+new 路径(无审计旧路径,
-        // 与 production_dependencies 的降级语义一致)。
+        // Task 1c(credential phase 准备):admission paths 在场(生产主路径)
+        // 时,root recipe turn 改经 gateway 冻结接口 `prepare_root_recipe_launch`
+        // (计划「准备与同步」节冻结;impl 落本文件,gateway 主文件归 1a/2b
+        // owner 门)——凭据在 prepare 内经 `validate_root_recipe_request` 对
+        // durable Running 重核验并冻结 RootRecipe 相位(不误套 normal action
+        // 分格门),并镜像 `prepare_streaming_launch` 的 run-bound sink 绑定;
+        // `start_streaming` 对 prepared launch 自动走 `start_validated`。
+        // paths 缺席(legacy 别名解析失败的降级组装/测试构造)保持 1b 之前的
+        // 原 validate+new 路径(无审计旧路径,与 production_dependencies 的
+        // 降级语义一致,零回归)。
         let launch = match self.admission_paths.as_ref() {
             Some(paths) => {
                 let lifecycle = crate::product::lifecycle_store::LifecycleStore::new(paths.clone());
                 let workspace_session_id = format!("aggregate-{project_id}-{operation_id}");
-                let role_run_seq = lifecycle
-                    .next_tool_policy_role_run_seq(&workspace_session_id)
+                let context = lifecycle
+                    .allocate_launch_audit_context(&workspace_session_id)
                     .map_err(|error| AggregateInitializationError::ProviderTurn {
                         step,
                         reason: format!("tool_policy_role_run_seq_alloc_failed: {error}"),
                         retryable: true,
                     })?;
-                let context =
-                    crate::product::logical_codebase::provider_gateway::ProviderLaunchAuditContext {
-                        workspace_session_id,
-                        role_run_seq,
-                        audit_sink: std::sync::Arc::new(lifecycle),
-                    };
                 self.gateway
-                    .prepare_streaming_launch(input, request, context)
+                    .prepare_root_recipe_launch(input, request, bootstrap, context)
                     .map_err(|error| AggregateInitializationError::ProviderTurn {
                         step,
-                        reason: format!("gateway prepare_streaming_launch failed: {error}"),
+                        reason: format!("gateway prepare_root_recipe_launch failed: {error}"),
                         retryable: true,
                     })?
             }

@@ -186,6 +186,28 @@ impl LifecycleStore {
         file.flush().map_err(audit_error)?;
         Ok(next)
     }
+
+    /// Task 1c(carry④/「装配与生命周期」):run-bound launch audit 的统一
+    /// 装配点——分配 run-bound `role_run_seq`(与 1b split run handle 同一
+    /// 分配器)并组装 `ProviderLaunchAuditContext`(audit_sink=本 store 的
+    /// 生产 sink)。coordinator 生产臂等 LC caller 经此复用同一装配,替代
+    /// 各调用点手写 seq 分配/sink 绑定,防组装漂移。
+    pub fn allocate_launch_audit_context(
+        &self,
+        workspace_session_id: &str,
+    ) -> Result<
+        crate::product::logical_codebase::provider_gateway::ProviderLaunchAuditContext,
+        ToolPolicyAuditError,
+    > {
+        let role_run_seq = self.next_tool_policy_role_run_seq(workspace_session_id)?;
+        Ok(
+            crate::product::logical_codebase::provider_gateway::ProviderLaunchAuditContext {
+                workspace_session_id: workspace_session_id.to_string(),
+                role_run_seq,
+                audit_sink: std::sync::Arc::new(self.clone()),
+            },
+        )
+    }
 }
 
 /// marker 高水位（坏行跳过取最大可解析值；缺失→ None）。
@@ -391,5 +413,49 @@ mod tests {
             )),
             Err(ToolPolicyAuditError::UnboundSink)
         ));
+    }
+
+    /// Task 1c:run-bound launch audit 装配点——seq 分配与 1b split handle
+    /// 同一分配器(同 workspace 单调递增),产出的 context sink 可直接收口
+    /// provider_start(run-bound append 首行)。
+    #[test]
+    fn allocate_launch_audit_context_binds_run_bound_seq_and_production_sink() {
+        use crate::cross_cutting::tool_policy_audit::RoleRunBoundAuditSink;
+        use crate::product::app_paths::ProductAppPaths;
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let store = LifecycleStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
+
+        let first = store
+            .allocate_launch_audit_context("ws-lc-ctx")
+            .expect("allocate first launch audit context");
+        assert_eq!(first.workspace_session_id, "ws-lc-ctx");
+        assert_eq!(first.role_run_seq, 0, "fresh workspace 首个 seq 为 0");
+
+        // 生产 sink 直接收口 provider_start:run-bound append 恰为首行。
+        RoleRunBoundAuditSink::new(first.audit_sink.clone(), "ws-lc-ctx", first.role_run_seq)
+            .into_sink()
+            .append_bound(DurableToolPolicyEvent::ProviderStart(ProviderStartAudit {
+                provider: "claude".to_string(),
+                provider_session_id: "fake-session".to_string(),
+                ..ProviderStartAudit::default()
+            }))
+            .expect("bound append writes provider_start");
+
+        let second = store
+            .allocate_launch_audit_context("ws-lc-ctx")
+            .expect("allocate second launch audit context");
+        assert_eq!(
+            second.role_run_seq, 1,
+            "同一 workspace 的 run-bound seq 必须单调递增(与 split handle 同一分配器)"
+        );
+
+        let lines = store
+            .read_tool_policy_lines("ws-lc-ctx", 0)
+            .expect("read back first run");
+        assert_eq!(
+            lines.first().map(|line| line.event_type()),
+            Some("provider_start")
+        );
     }
 }
