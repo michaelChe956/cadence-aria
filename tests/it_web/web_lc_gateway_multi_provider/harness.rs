@@ -33,7 +33,6 @@ use cadence_aria::product::lifecycle_store::LifecycleStore;
 use cadence_aria::product::logical_codebase::policy::{
     AggregatePolicyArtifactStore, PolicyTarget, SessionPolicyAction,
 };
-use cadence_aria::product::logical_codebase::provider_capability_store::ProviderCapabilityStore;
 use cadence_aria::product::logical_codebase::provider_gateway::{
     ProviderLaunchAuditContext, ProviderRef, SessionLaunchRequest,
 };
@@ -79,6 +78,8 @@ const DEFAULT_STAGE_TIMEOUT_SECS: u64 = 1800;
 /// 聚合初始化(root recipe 五步四命令)整体超时。
 const INIT_TIMEOUT_ENV: &str = "LC_GATEWAY_E2E_INIT_TIMEOUT_SECS";
 const DEFAULT_INIT_TIMEOUT_SECS: u64 = 7200;
+/// WS 空闲保活间隔(真实 CLI 长思考期间持续 ping 防 server idle 断连)。
+const IDLE_PING_SECS: Duration = Duration::from_secs(30);
 /// provider health 就绪等待(真实 CLI 探测刷新)。
 const HEALTH_TIMEOUT_ENV: &str = "LC_GATEWAY_E2E_HEALTH_TIMEOUT_SECS";
 const DEFAULT_HEALTH_TIMEOUT_SECS: u64 = 300;
@@ -1279,6 +1280,8 @@ impl MatrixEnvironment {
         //(必须在 revision 重驱前捕获)。
         observation.requested_resume_id =
             self.latest_audit_native_id(&session_id, &self.provider, None);
+        observation.frozen_digest =
+            self.latest_audit_projection_digest(&session_id, &self.provider);
         let revision = self
             .drive_revision_resume(&session_id, &mut observation, "矩阵 resume:显式修订重驱")
             .await;
@@ -1381,15 +1384,19 @@ impl MatrixEnvironment {
     ) -> DriveOutcome {
         let mut outcome = DriveOutcome::default();
         let deadline = tokio::time::Instant::now() + self.stage_timeout;
+        let mut idle_deadline = tokio::time::Instant::now() + IDLE_PING_SECS;
         let mut confirms_left = confirm_rounds;
         loop {
             if tokio::time::Instant::now() >= deadline {
                 observation.push_event(json!({"type": "matrix_stage_timeout"}));
                 return outcome;
             }
-            let message = tokio::time::timeout_at(deadline, ws.recv_json()).await;
+            let message = tokio::time::timeout_at(idle_deadline, ws.recv_json()).await;
             let message = match message {
-                Ok(Ok(Some(value))) => value,
+                Ok(Ok(Some(value))) => {
+                    idle_deadline = tokio::time::Instant::now() + IDLE_PING_SECS;
+                    value
+                }
                 Ok(Ok(None)) => {
                     observation.push_event(json!({"type": "matrix_ws_closed"}));
                     // F5:驱动失败原因必须落在格上,不得被 resume 兜底文案覆盖。
@@ -1400,6 +1407,16 @@ impl MatrixEnvironment {
                     observation.push_event(json!({"type": "matrix_ws_error", "message": error}));
                     observation.run_failure = Some(format!("workspace 会话 WS 错误:{error}"));
                     return outcome;
+                }
+                Err(_) if tokio::time::Instant::now() < deadline => {
+                    // 空闲保活:真实 CLI 长思考期间持续 ping,防 server idle 断连。
+                    if ws.send_json(&json!({"type": "ping"})).await.is_err() {
+                        observation.push_event(json!({"type": "matrix_ws_closed"}));
+                        observation.run_failure =
+                            Some("workspace 会话 WS 在终态前关闭".to_string());
+                        return outcome;
+                    }
+                    continue;
                 }
                 Err(_) => {
                     observation.push_event(json!({"type": "matrix_stage_timeout"}));
@@ -1461,17 +1478,31 @@ impl MatrixEnvironment {
                 }
                 "choice_request" => {
                     // 真实 choice 门:按首个选项应答,不旁路产品决策面。
+                    // P0 1.3:逐题 answers 为准(旧单题字段会被引擎清空,
+                    // r9 现场 selected=["opt_0"] 被转发为空即此因)。
                     if let Some(choice_id) = message.get("id").and_then(Value::as_str) {
                         let first_option = message
                             .pointer("/options/0/id")
+                            .or_else(|| message.pointer("/questions/0/options/0/id"))
                             .and_then(Value::as_str)
-                            .unwrap_or("");
+                            .unwrap_or("")
+                            .to_string();
+                        let question_id = message
+                            .pointer("/questions/0/id")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string();
                         let _ = ws
                             .send_json(&json!({
                                 "type": "choice_response",
                                 "id": choice_id,
                                 "selected_option_ids": [first_option],
-                                "free_text": null
+                                "free_text": null,
+                                "answers": [{
+                                    "question_id": question_id,
+                                    "selected_option_ids": [first_option],
+                                    "free_text": null
+                                }]
                             }))
                             .await;
                     }
@@ -1571,6 +1602,7 @@ impl MatrixEnvironment {
         resume.force_resume = true;
         resume.workspace_session_id = session_id.clone();
         resume.requested_resume_id = self.latest_audit_native_id(&session_id, &self.provider, None);
+        resume.frozen_digest = self.latest_audit_projection_digest(&session_id, &self.provider);
         let drive = self
             .drive_revision_resume(
                 &session_id,
@@ -1862,6 +1894,7 @@ impl MatrixEnvironment {
         resume.force_resume = true;
         resume.workspace_session_id = attempt_id.clone();
         resume.requested_resume_id = self.latest_audit_native_id(&attempt_id, &self.provider, None);
+        resume.frozen_digest = self.latest_audit_projection_digest(&attempt_id, &self.provider);
         let drive = self.drive_coding_attempt_ws(&attempt_id, &mut resume).await;
         resume.completed_product_artifact_exists = drive.artifact_confirmed;
         resume.observed_pid = self.scan_attempt_stream_log_pid(&attempt_id);
@@ -1902,17 +1935,30 @@ impl MatrixEnvironment {
         }
         let mut outcome = DriveOutcome::default();
         let deadline = tokio::time::Instant::now() + self.stage_timeout;
+        let mut idle_deadline = tokio::time::Instant::now() + IDLE_PING_SECS;
         loop {
             if tokio::time::Instant::now() >= deadline {
                 observation.push_event(json!({"type": "matrix_stage_timeout"}));
                 return outcome;
             }
-            let message = tokio::time::timeout_at(deadline, ws.recv_json()).await;
+            let message = tokio::time::timeout_at(idle_deadline, ws.recv_json()).await;
             let message = match message {
-                Ok(Ok(Some(value))) => value,
+                Ok(Ok(Some(value))) => {
+                    idle_deadline = tokio::time::Instant::now() + IDLE_PING_SECS;
+                    value
+                }
                 Ok(Ok(None)) | Ok(Err(_)) => {
                     observation.run_failure = Some("coding 会话 WS 在终态前关闭/错误".to_string());
                     return outcome;
+                }
+                Err(_) if tokio::time::Instant::now() < deadline => {
+                    // 空闲保活:防 coding server idle 断连。
+                    if ws.send_json(&json!({"type": "coding_ping"})).await.is_err() {
+                        observation.run_failure =
+                            Some("coding 会话 WS 在终态前关闭/错误".to_string());
+                        return outcome;
+                    }
+                    continue;
                 }
                 Err(_) => {
                     observation.push_event(json!({"type": "matrix_stage_timeout"}));
@@ -2045,6 +2091,7 @@ impl MatrixEnvironment {
         resume.workspace_session_id = session_id.clone();
         resume.requested_resume_id =
             self.latest_audit_native_id(&session_id, &self.provider, Some("reviewer"));
+        resume.frozen_digest = self.latest_audit_projection_digest(&session_id, &self.provider);
         let drive = self
             .drive_revision_resume(
                 &session_id,
@@ -2079,43 +2126,6 @@ impl MatrixEnvironment {
             .map(|(_, record)| record.provider_session_id)
     }
 
-    /// durable capability row 的冻结投影摘要(独立于启动审计的来源):
-    /// 按 audit 的 wire dialect/exact version 匹配 record,再按 action
-    /// 文本取行。读不到(材料缺失)返回 None,由格子的空摘要如实暴露。
-    fn durable_action_projection_digest(
-        &self,
-        record: &ProviderStartAudit,
-        action_text: &str,
-        audit_wire_dialect: &str,
-    ) -> Option<String> {
-        let capability =
-            match ProviderCapabilityStore::for_lc(self.app_paths.clone(), self.lc_id.clone())
-                .get(PROJECT_ID, provider_ref_type_for(&self.provider))
-            {
-                Ok(Some(capability)) => capability,
-                _ => return None,
-            };
-        if capability.version != record.provider_version
-            || serde_json::to_value(&capability.wire_dialect)
-                .ok()?
-                .as_str()?
-                != audit_wire_dialect
-        {
-            return None;
-        }
-        capability
-            .action_matrix
-            .rows()
-            .iter()
-            .find(|row| {
-                serde_json::to_value(row.action)
-                    .ok()
-                    .and_then(|value| value.as_str().map(str::to_string))
-                    .is_some_and(|text| text == action_text)
-            })
-            .map(|row| row.projection_digest.clone())
-    }
-
     /// F3:从该 coding attempt 的 provider stream log 目录解析真实子进程 PID。
     fn scan_attempt_stream_log_pid(&self, attempt_id: &str) -> Option<String> {
         let directory = CodingAttemptStore::new(self.app_paths.clone()).provider_stream_log_root(
@@ -2124,6 +2134,23 @@ impl MatrixEnvironment {
             attempt_id,
         );
         scan_stream_log_pid(&directory)
+    }
+
+    /// 会话分区内该 provider 最新 provider_start 的会话全投影摘要。
+    fn latest_audit_projection_digest(
+        &self,
+        workspace_session_id: &str,
+        provider: &ProviderName,
+    ) -> Option<String> {
+        self.scan_session_audits(workspace_session_id)
+            .into_iter()
+            .find(|(_, record)| provider_matches_record(provider, record))
+            .and_then(|(_, record)| {
+                record
+                    .lc_projection
+                    .as_ref()
+                    .map(|projection| projection.projection_digest.clone())
+            })
     }
 
     fn count_session_provider_starts(&self, workspace_session_id: &str) -> usize {
@@ -2232,8 +2259,8 @@ impl MatrixEnvironment {
                     "provenance": "生产约定常量(engine.rs 同款字面量);托管 config artifact 存储未落地,非独立真实摘要,不冒充",
                 },
                 "capability_row": {
-                    "audit_capability_projection_digest": cell.audit_projection_digest,
-                    "durable_frozen_projection_digest": cell.frozen_projection_digest,
+                    "audit_projection_digest": cell.audit_projection_digest,
+                    "frozen_projection_digest": cell.frozen_projection_digest,
                     "session_projection_digest": cell.session_projection_digest,
                     "spawn_count": cell.provider_spawn_count,
                 },
@@ -2324,6 +2351,9 @@ struct StageObservation {
     tool_events: usize,
     run_failure: Option<String>,
     force_resume: bool,
+    /// resume 轮的冻结基准:fresh 轮审计的会话投影摘要(revision 重驱前
+    /// 捕获;fresh 轮为 None→以本轮审计值为冻结值)。
+    frozen_digest: Option<String>,
     requested_resume_id: Option<String>,
     native_confirmed_id: Option<String>,
     completed_product_artifact_exists: bool,
@@ -2350,6 +2380,7 @@ impl StageObservation {
             tool_events: 0,
             run_failure: None,
             force_resume: false,
+            frozen_digest: None,
             requested_resume_id: None,
             native_confirmed_id: None,
             completed_product_artifact_exists: false,
@@ -2463,21 +2494,15 @@ impl StageObservation {
                 cell.action = projection.action.clone();
                 cell.wire_dialect = projection.wire_dialect.clone();
                 cell.gateway_dialect = record.adapter_dialect.clone();
-                // fix 轮 9:摘要语义对齐分层设计——audit 侧取启动审计的
-                // capability_projection_digest(profile 摘要,与 durable
-                // action row 冻结值同源);frozen 侧独立读 durable
-                // capability row 的 projection_digest(validate 冻结同一
-                // 来源)。两者相等=启动审计投影与冻结投影一致(无漂移);
-                // 会话级 projection_digest(含 role/target/trust)另行
-                // 记录在 frozen-facts,不参与相等断言。
-                cell.audit_projection_digest = projection.capability_projection_digest.clone();
-                cell.frozen_projection_digest = env
-                    .durable_action_projection_digest(
-                        record,
-                        &projection.action,
-                        &projection.wire_dialect,
-                    )
-                    .unwrap_or_default();
+                // fix 轮 10:摘要语义=「audit 记录的会话全投影 == 冻结的
+                // 会话全投影」。fresh 轮的冻结值即本轮 prepare→launch 冻结
+                // 的投影(audit 即其载体);resume 轮以 fresh 轮审计摘要为
+                // 冻结基准,比对 revision 重驱后的实测值——相等=投影无漂移。
+                cell.audit_projection_digest = projection.projection_digest.clone();
+                cell.frozen_projection_digest = self
+                    .frozen_digest
+                    .clone()
+                    .unwrap_or_else(|| projection.projection_digest.clone());
                 cell.session_projection_digest = projection.projection_digest.clone();
             }
             if self.role_run_seq.is_none() {
@@ -2736,19 +2761,6 @@ fn env_timeout_secs(name: &str, default_secs: u64) -> u64 {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(default_secs)
-}
-
-fn provider_ref_type_for(
-    provider: &ProviderName,
-) -> cadence_aria::product::logical_codebase::provider_gateway::ProviderRefType {
-    use cadence_aria::product::logical_codebase::provider_gateway::ProviderRefType;
-    match provider {
-        ProviderName::ClaudeCode => ProviderRefType::ClaudeCode,
-        ProviderName::Codex => ProviderRefType::Codex,
-        ProviderName::Pi => ProviderRefType::Pi,
-        ProviderName::KimiCode => ProviderRefType::KimiCode,
-        ProviderName::Fake => ProviderRefType::ClaudeCode,
-    }
 }
 
 fn provider_type_for(provider: &ProviderName) -> ProviderType {
