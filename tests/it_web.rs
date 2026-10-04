@@ -134,6 +134,8 @@ mod web_hard_gate;
 mod web_image_create_file_storage;
 #[path = "it_web/web_lc_bootstrap_repair.rs"]
 mod web_lc_bootstrap_repair;
+#[path = "it_web/web_lc_gateway_multi_provider/mod.rs"]
+mod web_lc_gateway_multi_provider;
 
 #[path = "it_web/web_lc_operations_api.rs"]
 mod web_lc_operations_api;
