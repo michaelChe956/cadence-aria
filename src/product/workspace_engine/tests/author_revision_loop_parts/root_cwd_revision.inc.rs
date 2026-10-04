@@ -468,6 +468,32 @@ fn revision_stage_engine(fixture: &LogicalRevisionFixture) -> WorkspaceEngine {
     engine
 }
 
+/// 同 `revision_stage_engine`,但保留事件接收端(Task 9c:StartNew 等待
+/// 错误的上浮观测)。
+fn revision_stage_engine_with_events(
+    fixture: &LogicalRevisionFixture,
+) -> (
+    WorkspaceEngine,
+    mpsc::Receiver<crate::product::workspace_engine::EngineEvent>,
+) {
+    let mut session = WorkspaceSession::from_record(fixture.record.clone());
+    session.repository_path = Some(fixture.member_root.clone());
+    let (tx, rx) = mpsc::channel(64);
+    let mut engine = WorkspaceEngine::new_persistent(
+        Arc::new(CheckpointStore::new(
+            fixture.paths.root().join("checkpoints"),
+        )),
+        fixture.lifecycle.clone(),
+        tx,
+        session,
+    )
+    .with_logical_provider_gateway(fixture.gateway.clone());
+    engine.session.stage = WorkspaceStage::Revision;
+    engine.session.artifact = Some(artifact_payload("# Story Spec\n\n修订前产物"));
+    engine.pending_revision_context = Some("补充异常场景".to_string());
+    (engine, rx)
+}
+
 async fn next_captured_revision_input(
     inputs: &mut mpsc::UnboundedReceiver<StreamingProviderInput>,
 ) -> StreamingProviderInput {
@@ -565,9 +591,13 @@ async fn logical_revision_rebinds_root_cwd_and_preserves_revision_target() {
     );
 }
 
-/// Task 2.3 resume 面：cwd-inclusive launch fingerprint 决定续接/supersede——
-/// 指纹一致（cwd 未漂移）时 native session identity 原样续接；root cwd 漂移
-/// 时 supersede 旧 native session（gateway 审计）并以新 session 启动。
+/// Task 2.3 resume 面 + Task 9c StartNew 语义:cwd-inclusive launch
+/// fingerprint 决定续接/supersede——指纹一致(cwd 未漂移)时 native
+/// session identity 原样续接;root cwd 漂移时 supersede 旧 native
+/// session(gateway 审计),StartNew 后**同一 revision driver 不得继续
+/// start_streaming**(零 provider 启动、稳定等待错误上浮、run 收口回
+/// PrepareContext、被 supersede 的旧 native 引用清理);用户显式动作
+/// (StartGeneration 重驱)后重新 prepare/revalidate 以全新会话启动。
 #[tokio::test]
 async fn revision_resume_cwd_drift_supersedes_session() {
     let (fixture, mut inputs) =
@@ -576,7 +606,7 @@ async fn revision_resume_cwd_drift_supersedes_session() {
         starts: Arc::new(AtomicUsize::new(0)),
     });
     let direct_starts = direct.starts.clone();
-    let mut engine = revision_stage_engine(&fixture);
+    let (mut engine, mut engine_events) = revision_stage_engine_with_events(&fixture);
     // 旧 native session（Author 对话）+ 其发行 launch 的 cwd-inclusive 指纹
     // （Task 2.1 author 路径在 launch 时记忆；此处按同一口径预置）。
     engine.session.provider_conversations = vec![ProviderConversationRef {
@@ -620,7 +650,69 @@ async fn revision_resume_cwd_drift_supersedes_session() {
         .save_manifest("project_0001", &drifted)
         .expect("save drifted manifest");
 
-    // 第二轮（修订完成后回 AuthorConfirm，重新进入 Revision 态再驱动）。
+    // 第二轮（Task 9c）：漂移 → StartNew(supersede)——同一 revision
+    // driver 不得继续 start_streaming:零 provider 启动、零捕获 input。
+    engine.session.stage = WorkspaceStage::Revision;
+    engine.pending_revision_context = Some("补充异常场景".to_string());
+    engine
+        .drive_revision_session(direct.clone(), empty_provider_commands())
+        .await;
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), inputs.recv())
+            .await
+            .is_err(),
+        "StartNew 后同一 revision driver 不得启动 provider(零捕获 input)"
+    );
+    assert_eq!(
+        fixture.provider_starts.load(Ordering::SeqCst),
+        1,
+        "StartNew 等待显式 StartGeneration:revision driver 的 provider 启动计数为 0(第一轮 1 次)"
+    );
+    // supersede 审计落旧 run(durable),等待错误稳定上浮。
+    assert_eq!(
+        fixture.audit.supersede_count(),
+        1,
+        "cwd 漂移 supersede 必须写 gateway 审计"
+    );
+    assert_eq!(
+        fixture.audit.last_supersede_reason().as_deref(),
+        Some("resume_fingerprint_mismatch"),
+        "supersede 原因必须是 resume fingerprint 漂移"
+    );
+    let waiting_error = engine_events
+        .recv()
+        .await
+        .expect("StartNew must surface a stable waiting error");
+    match waiting_error {
+        crate::product::workspace_engine::EngineEvent::Error { message } => {
+            assert!(
+                message.contains("superseded")
+                    && message.contains("start a new generation explicitly"),
+                "waiting error must name superseded and the explicit fresh action: {message}"
+            );
+        }
+        _other => panic!("expected EngineEvent::Error after StartNew supersede"),
+    }
+    // run 收口回 PrepareContext(waiting 不是隐式续跑,用户显式动作后重新
+    // prepare/revalidate)。
+    assert_eq!(
+        engine.session().stage,
+        WorkspaceStage::PrepareContext,
+        "StartNew 等待收口回 PrepareContext"
+    );
+    // 被 supersede 的旧 native 引用清理:后续显式 fresh 不再携带旧 resume id。
+    assert!(
+        engine
+            .session
+            .provider_conversations
+            .iter()
+            .all(|conversation| conversation.provider_session_id != "native-revision-r1"),
+        "superseded native session reference must be cleared"
+    );
+
+    // 第三轮（Task 9c）：用户显式动作(现有 StartGeneration 面重驱)→ 重新
+    // prepare/revalidate 后 fresh 启动:经 gateway 全新会话(resume id 无),
+    // cwd=漂移后的新 root。
     engine.session.stage = WorkspaceStage::Revision;
     engine.pending_revision_context = Some("补充异常场景".to_string());
     engine
@@ -631,32 +723,20 @@ async fn revision_resume_cwd_drift_supersedes_session() {
     assert_eq!(
         direct_starts.load(Ordering::SeqCst),
         0,
-        "两轮都不得绕过 gateway 直连 provider"
+        "全程不得绕过 gateway 直连 provider"
     );
     assert_eq!(
         fixture.provider_starts.load(Ordering::SeqCst),
         2,
-        "两轮各经 gateway 启动一次"
+        "显式 fresh 与第一轮续接各经 gateway 启动一次"
     );
-    // cwd 漂移 → supersede 旧 native session，新 session 启动（resume id 丢弃，
-    // 走 full prompt 新 thread——绝不静默续接漂移前的旧 thread）。
     assert_eq!(
         fresh.resume_provider_session_id, None,
-        "cwd 漂移必须 supersede 旧 native session，不再续接"
+        "显式 fresh 是全新会话,不再携带被 supersede 的旧 resume id"
     );
     assert_eq!(
         fresh.working_directory.as_deref(),
         Some(fixture.drift_root.as_path()),
-        "漂移后启动的 cwd 必须是新 root"
-    );
-    assert_eq!(
-        fixture.audit.supersede_count(),
-        1,
-        "cwd 漂移 supersede 必须写 gateway 审计"
-    );
-    assert_eq!(
-        fixture.audit.last_supersede_reason().as_deref(),
-        Some("resume_fingerprint_mismatch"),
-        "supersede 原因必须是 resume fingerprint 漂移"
+        "显式 fresh 启动的 cwd 必须是重新 validate 后的新 root"
     );
 }
