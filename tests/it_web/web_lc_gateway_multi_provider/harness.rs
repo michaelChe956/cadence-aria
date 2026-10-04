@@ -3006,7 +3006,11 @@ fn semantic_choice_answers(message: &Value) -> (Vec<Value>, Vec<String>) {
             .and_then(Value::as_array)
             .map(Vec::as_slice)
             .unwrap_or(&[]);
-        let selected = semantic_option_selection(options, false);
+        let selected = semantic_option_selection(
+            message.get("prompt").and_then(Value::as_str).unwrap_or(""),
+            options,
+            false,
+        );
         vec![semantic_answer_entry(&question_id, &selected)]
     } else {
         questions
@@ -3026,7 +3030,11 @@ fn semantic_choice_answers(message: &Value) -> (Vec<Value>, Vec<String>) {
                     .and_then(Value::as_array)
                     .map(Vec::as_slice)
                     .unwrap_or(&[]);
-                let selected = semantic_option_selection(options, allow_multiple);
+                let selected = semantic_option_selection(
+                    question.get("prompt").and_then(Value::as_str).unwrap_or(""),
+                    options,
+                    allow_multiple,
+                );
                 semantic_answer_entry(&question_id, &selected)
             })
             .collect()
@@ -3055,7 +3063,11 @@ fn semantic_answer_entry(question_id: &str, selected: &[String]) -> Value {
 }
 
 /// 单题选答:返回选项 id 列表(语义口径见 `semantic_choice_answers`)。
-fn semantic_option_selection(options: &[Value], allow_multiple: bool) -> Vec<String> {
+fn semantic_option_selection(
+    question_text: &str,
+    options: &[Value],
+    allow_multiple: bool,
+) -> Vec<String> {
     if options.is_empty() {
         return Vec::new();
     }
@@ -3095,7 +3107,59 @@ fn semantic_option_selection(options: &[Value], allow_multiple: bool) -> Vec<Str
             .map(str::to_string)
             .unwrap_or_else(|| format!("opt_{index}"))
     };
-    let selected: Vec<usize> = if let Some((index, _)) = classified
+    // r14/v1.1 对照结论:仓库范围题(「涉及哪些逻辑仓库/成员」)优先单成员
+    // 口径——plan 阶段 single-candidate 预检按 Design involved 计数(exactly
+    // one),story 语义应答选「全部成员」会沿 involved=[alpha,beta] 传导,
+    // 把 plan prepare 打死在 preflight(found 2),且 focus 缺席使实体
+    // resume 路由 fail-closed。v1.1 E2E 先例(§5.1 plan Confirmed)即单
+    // 成员 involved 形态。识别:题面含「仓库/成员/repo」且存在「仅含一个
+    // 跨选项枚举词」的选项;该口径优先于全量/推荐。
+    let repo_scope_question = ["仓库", "成员", "repo", "repository"]
+        .iter()
+        .any(|marker| question_text.contains(marker));
+    let single_scope = if repo_scope_question {
+        let labels: Vec<&str> = options
+            .iter()
+            .map(|option| option.get("label").and_then(Value::as_str).unwrap_or(""))
+            .collect();
+        let tokens: Vec<String> = labels
+            .iter()
+            .flat_map(|label| label.split(|c: char| !c.is_ascii_alphanumeric()))
+            .filter(|token| token.len() >= 3)
+            .map(str::to_lowercase)
+            .collect();
+        let enumerated: std::collections::BTreeSet<String> = tokens
+            .iter()
+            .filter(|token| {
+                let needle = token.as_str();
+                labels
+                    .iter()
+                    .filter(|l| l.to_lowercase().contains(needle))
+                    .count()
+                    >= 2
+            })
+            .cloned()
+            .collect();
+        classified
+            .iter()
+            .filter(|(index, tier)| {
+                *tier != SemanticTier::Negative && *tier != SemanticTier::SelectAll
+            })
+            .find(|(index, _)| {
+                let label = labels[*index].to_lowercase();
+                enumerated
+                    .iter()
+                    .filter(|token| label.contains(token.as_str()))
+                    .count()
+                    == 1
+            })
+            .map(|(index, _)| *index)
+    } else {
+        None
+    };
+    let selected: Vec<usize> = if let Some(index) = single_scope {
+        vec![index]
+    } else if let Some((index, _)) = classified
         .iter()
         .find(|(_, tier)| *tier == SemanticTier::SelectAll)
     {
