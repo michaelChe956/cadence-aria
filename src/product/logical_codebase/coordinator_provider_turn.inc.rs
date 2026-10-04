@@ -580,3 +580,485 @@ impl AggregateAssetPublisher {
             && components.next().is_some()
     }
 }
+
+// Task 1c-coordinator:credential phase 与 run-bound audit 时序的内嵌测试。
+// 独立 `mod`(不并入 coordinator_tests.inc.rs 的共享 `mod tests`)以保持
+// 1c 切片文件边界——本文件是 1c-coordinator 的独占交付面。
+#[cfg(test)]
+mod provider_turn_lcg_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    use tokio_util::sync::CancellationToken;
+
+    use super::AggregatePreflightSnapshot;
+    use super::{
+        AggregateProviderTurnDriver, AggregateProviderTurnRequest,
+        GatewayBackedAggregateProviderTurnDriver,
+    };
+    use crate::cross_cutting::provider_adapter::ProviderAdapterError;
+    use crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate;
+    use crate::cross_cutting::provider_registry::ProviderRegistry;
+    use crate::cross_cutting::session_launch::ValidatedStreamingProviderInput;
+    use crate::cross_cutting::streaming_provider::{ProviderSession, StreamingProviderAdapter};
+    use crate::cross_cutting::tool_policy_audit::{DurableToolPolicyEvent, ProviderStartAudit};
+    use crate::product::app_paths::ProductAppPaths;
+    use crate::product::lifecycle_store::LifecycleStore;
+    use crate::product::logical_codebase::aggregate_initialization::AggregateInitializationStepStatus;
+    use crate::product::logical_codebase::aggregate_initialization::{
+        AggregateInitializationOperation, AggregateInitializationOperationInput,
+        AggregateInitializationStepKind,
+    };
+    use crate::product::logical_codebase::aggregate_initialization_store::AggregateInitializationOperationStore;
+    use crate::product::logical_codebase::policy::AggregatePolicyArtifactStore;
+    use crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential;
+    use crate::product::logical_codebase::provider_gateway::{
+        GatewayRunAudit, PolicyTargetResolver,
+    };
+    use crate::product::logical_codebase::{
+        LogicalCodebaseStore, ProviderCapabilityStore, StoreBackedProviderCapabilitySource,
+    };
+    use crate::product::project_store::{CreateProjectInput, ProjectStore};
+
+    const FIXTURE_TS: &str = "2026-10-04T00:00:00Z";
+
+    /// start_validated 启动时刻的真实观测快照(T1B-P3-1 同款:由 adapter
+    /// 在真实分发路径上记录,而非测试线程手工计数)。
+    #[derive(Debug, Clone)]
+    struct ValidatedStartObservation {
+        /// provider_start 审计行落盘后立即取得的共享计数器标记。
+        seq_mark: usize,
+        /// 启动请求冻结相位是否为 RootRecipe(pub(crate)
+        /// `ValidatedSessionLaunchPolicy::is_root_recipe_phase`)。
+        root_recipe_phase: bool,
+    }
+
+    /// LC validated 启动观测 adapter:镜像真实 LC adapter(claude_code_provider
+    /// 的 lc validated start)在 `start_validated` 首步把 `provider_start`
+    /// 写入 run-bound audit sink 的行为——该 append 即「audit 首行」的真实
+    /// 落盘时刻;随后取共享计数器标记并快照冻结相位,最后立即完成会话。
+    struct RootRecipeObservingAdapter {
+        seq: Arc<AtomicUsize>,
+        observations: Arc<Mutex<Vec<ValidatedStartObservation>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl StreamingProviderAdapter for RootRecipeObservingAdapter {
+        async fn start_validated(
+            &self,
+            launch: ValidatedStreamingProviderInput,
+            _cancel: CancellationToken,
+        ) -> Result<ProviderSession, ProviderAdapterError> {
+            let (input, policy) = launch.into_parts();
+            let sink = input
+                .audit_sink
+                .as_ref()
+                .expect("prepared launch must bind a run-bound audit sink");
+            sink.append_bound(DurableToolPolicyEvent::ProviderStart(ProviderStartAudit {
+                provider: "claude".to_string(),
+                role: "executor".to_string(),
+                workspace_session_id: input.workspace_session_id.clone().unwrap_or_default(),
+                provider_session_id: "lcg-t01-fake-native-session".to_string(),
+                ..ProviderStartAudit::default()
+            }))
+            .expect("provider_start audit append");
+            let seq_mark = self.seq.fetch_add(1, Ordering::SeqCst);
+            self.observations
+                .lock()
+                .expect("observation probe mutex")
+                .push(ValidatedStartObservation {
+                    seq_mark,
+                    root_recipe_phase: policy.is_root_recipe_phase(),
+                });
+            let (event_tx, events) = tokio::sync::mpsc::channel(1);
+            let (commands, _command_rx) = tokio::sync::mpsc::channel(1);
+            let _ = event_tx.try_send(
+                crate::cross_cutting::streaming_provider::ProviderEvent::Completed(
+                    crate::cross_cutting::streaming_provider::ProviderCompletion::plain(
+                        "aggregate turn complete",
+                        None,
+                    ),
+                ),
+            );
+            Ok(ProviderSession {
+                events,
+                commands,
+                native_session_id: Some("lcg-t01-fake-native-session".to_string()),
+            })
+        }
+    }
+
+    /// 测试用 target resolver:与 coordinator_tests/provider_admission_preflight_tests
+    /// 的 PassThroughTargetResolver 同型(aggregate root target 原样通过,
+    /// spawn 前 canonical 复验由 gateway 内部完成)。
+    struct PassThroughTargetResolver;
+
+    impl PolicyTargetResolver for PassThroughTargetResolver {
+        fn resolve_and_revalidate(
+            &self,
+            request: &crate::product::logical_codebase::SessionLaunchRequest,
+        ) -> Result<
+            crate::product::logical_codebase::policy::PolicyTarget,
+            crate::product::logical_codebase::ProviderGatewayError,
+        > {
+            Ok(request.target.clone())
+        }
+    }
+
+    /// 测试用同步 adapter 桩(coordinator_tests 的 StubSyncAdapter 同型)。
+    struct StubSyncAdapter;
+
+    impl crate::cross_cutting::provider_adapter::ProviderAdapter for StubSyncAdapter {
+        fn run(
+            &self,
+            _input: &crate::protocol::contracts::AdapterInput,
+        ) -> Result<
+            crate::protocol::contracts::AdapterOutput,
+            crate::cross_cutting::provider_adapter::ProviderAdapterError,
+        > {
+            use crate::protocol::contracts::TimeoutStatus;
+            Ok(crate::protocol::contracts::AdapterOutput {
+                exit_code: Some(0),
+                stdout: String::new(),
+                stderr: String::new(),
+                structured_output: None,
+                files_modified: Vec::new(),
+                duration_ms: 0,
+                timeout_status: TimeoutStatus::NotTimedOut,
+            })
+        }
+    }
+
+    /// 恒可用 availability gate(coordinator_tests 同型)。
+    fn always_available_gate() -> Arc<ProviderAvailabilityGate> {
+        use crate::cross_cutting::provider_availability_gate::ProviderHealthSource;
+        use crate::cross_cutting::provider_health::{ProviderHealthEntry, ProviderHealthSnapshot};
+        use chrono::Utc;
+
+        struct AlwaysHealthy(Arc<ProviderHealthSnapshot>);
+        impl ProviderHealthSource for AlwaysHealthy {
+            fn snapshot(&self) -> Arc<ProviderHealthSnapshot> {
+                self.0.clone()
+            }
+            fn degraded(&self) -> bool {
+                false
+            }
+        }
+
+        let checked_at = Utc::now();
+        let snapshot = Arc::new(ProviderHealthSnapshot {
+            schema_version: 1,
+            generation: 1,
+            checked_at,
+            providers: [crate::product::models::ProviderName::ClaudeCode]
+                .into_iter()
+                .map(|provider| ProviderHealthEntry {
+                    provider,
+                    command: "stub".to_string(),
+                    available: true,
+                    version: Some("1.0".to_string()),
+                    reason_code: None,
+                    reason: None,
+                    checked_at,
+                })
+                .collect(),
+        });
+        Arc::new(ProviderAvailabilityGate::new(Arc::new(AlwaysHealthy(
+            snapshot,
+        ))))
+    }
+
+    /// Task 1c fixture(蓝图:LC=create+for_lc manifest+material prep 自动物化
+    /// policy/capability;Running op=create→mark_running→start_step(PreCheck);
+    /// 凭据=from_running_operation):真实 for_lc 存储链 + 生产装配驱动
+    /// (`claude_code_with_admission`,snapshot ref 与自举记录一致的
+    /// `cap_managed_snapshot`),capability source 为携带 root-recipe 凭据
+    /// durable Running 重核验通道的 `StoreBackedProviderCapabilitySource::for_lc`。
+    struct LcProductionTurnFixture {
+        _temp: tempfile::TempDir,
+        paths: ProductAppPaths,
+        project_id: String,
+        lc_id: String,
+        operation_id: String,
+        operations: AggregateInitializationOperationStore,
+        /// 生产臂在 prepare 前绑定的 run-bound workspace 会话 id(与驱动内
+        /// 派生同式:`aggregate-{project}-{operation}`)。
+        workspace_session_id: String,
+        driver: GatewayBackedAggregateProviderTurnDriver,
+    }
+
+    fn lc_production_turn_fixture(
+        seq: Arc<AtomicUsize>,
+        observations: Arc<Mutex<Vec<ValidatedStartObservation>>>,
+    ) -> LcProductionTurnFixture {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let paths = ProductAppPaths::new(temp.path().join(".aria"));
+        let project = ProjectStore::new(paths.clone())
+            .create(CreateProjectInput {
+                name: "lcg-t01-production-turn".to_string(),
+                description: None,
+            })
+            .expect("project");
+        let aggregate_root = temp.path().join("aggregate-root");
+        std::fs::create_dir_all(&aggregate_root).unwrap();
+        let canonical_root = std::fs::canonicalize(&aggregate_root).unwrap();
+
+        // LC=create + for_lc manifest(无成员:成员规则门无检查面;根规则
+        // 存在性由 AggregateBootstrap 凭据豁免)。
+        let lc = LogicalCodebaseStore::new(paths.clone())
+            .create(
+                &project.id,
+                crate::product::logical_codebase::LogicalCodebaseCreateInput {
+                    name: "lcg-t01-lc".to_string(),
+                    aggregate_root: aggregate_root.clone(),
+                },
+            )
+            .expect("logical codebase");
+        let lc_store = LogicalCodebaseStore::for_lc(paths.clone(), lc.id.clone());
+        let mut manifest = crate::product::logical_codebase::store::LogicalCodebaseManifest::new(
+            &project.id,
+            aggregate_root.clone(),
+            Vec::new(),
+        );
+        manifest.logical_codebase_id = uuid::Uuid::new_v4();
+        lc_store.save_manifest(&project.id, &manifest).unwrap();
+
+        // material prep:policy/capability 自举材料自动物化(for_lc 作用域)。
+        AggregatePolicyArtifactStore::for_lc(paths.clone(), lc.id.clone())
+            .ensure_bootstrap(&manifest)
+            .expect("bootstrap policy");
+        ProviderCapabilityStore::for_lc(paths.clone(), lc.id.clone())
+            .ensure_bootstrap(&project.id)
+            .expect("bootstrap capability");
+
+        let streaming_adapter = Arc::new(RootRecipeObservingAdapter { seq, observations });
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            crate::product::models::ProviderName::ClaudeCode,
+            streaming_adapter,
+        );
+        let gateway = Arc::new(
+            crate::product::logical_codebase::LogicalCodebaseProviderGateway::with_audit(
+                AggregatePolicyArtifactStore::for_lc(paths.clone(), lc.id.clone()),
+                Arc::new(StoreBackedProviderCapabilitySource::for_lc(
+                    paths.clone(),
+                    project.id.clone(),
+                    lc.id.clone(),
+                )),
+                Arc::new(PassThroughTargetResolver),
+                Arc::new(registry),
+                Arc::new(StubSyncAdapter),
+                always_available_gate(),
+                Arc::new(GatewayRunAudit::new()),
+                canonical_root.clone(),
+            ),
+        );
+
+        // Running op:create→mark_running→(前置确定性步骤完成)→
+        // start_step(PreCheck, digest)——凭据的唯一合法派生面。
+        let operations =
+            AggregateInitializationOperationStore::for_lc(paths.clone(), lc.id.clone());
+        let operation_id = "aggregate_initialization_lcg0001".to_string();
+        let input = AggregateInitializationOperationInput {
+            idempotency_key: format!("lcg-t01-{operation_id}"),
+            manifest_revision: manifest.membership_revision,
+            policy_digest: "sha256:lcg-t01-fixture-policy".to_string(),
+            profile_evidence_digest: None,
+            provider_context_root: canonical_root.clone(),
+            provider: "claude_code".to_string(),
+        };
+        operations
+            .create_idempotent(AggregateInitializationOperation::new(
+                operation_id.clone(),
+                project.id.clone(),
+                input,
+                FIXTURE_TS.to_string(),
+            ))
+            .expect("create operation");
+        operations
+            .mark_running(&project.id, &operation_id, FIXTURE_TS.to_string())
+            .expect("mark operation running");
+        for predecessor in [
+            AggregateInitializationStepKind::MachineSkills,
+            AggregateInitializationStepKind::AggregatePreflight,
+        ] {
+            operations
+                .mark_step_running(
+                    &project.id,
+                    &operation_id,
+                    predecessor,
+                    format!("sha256:lcg-t01-input-{predecessor:?}"),
+                    FIXTURE_TS.to_string(),
+                )
+                .expect("mark predecessor running");
+            operations
+                .checkpoint_step_output(
+                    &project.id,
+                    &operation_id,
+                    predecessor,
+                    format!("artifact-{predecessor:?}"),
+                    FIXTURE_TS.to_string(),
+                )
+                .expect("checkpoint predecessor");
+            operations
+                .mark_step_completed(
+                    &project.id,
+                    &operation_id,
+                    predecessor,
+                    FIXTURE_TS.to_string(),
+                )
+                .expect("complete predecessor");
+        }
+        operations
+            .mark_step_running(
+                &project.id,
+                &operation_id,
+                AggregateInitializationStepKind::PreCheck,
+                "sha256:lcg-t01-precheck-input".to_string(),
+                FIXTURE_TS.to_string(),
+            )
+            .expect("mark pre_check running");
+
+        // 生产装配驱动:admission paths 在场=生产主路径(credential phase
+        // 准备即本切片交付面);snapshot ref 与自举 capability 记录一致
+        // (`cap_managed_snapshot`)。
+        let driver = GatewayBackedAggregateProviderTurnDriver::claude_code_with_admission(
+            gateway,
+            "cap_managed_snapshot",
+            paths.clone(),
+        );
+        let workspace_session_id = format!("aggregate-{}-{}", project.id, operation_id);
+
+        LcProductionTurnFixture {
+            _temp: temp,
+            paths,
+            project_id: project.id,
+            lc_id: lc.id,
+            operation_id,
+            operations,
+            workspace_session_id,
+            driver,
+        }
+    }
+
+    /// Task 1c(Step 1 冻结测试):生产臂(admission paths 在场)root recipe
+    /// turn 的 credential phase 准备与 run-bound audit 真实时序——
+    /// ① adapter 经 `start_validated` 真实观测冻结相位为 RootRecipe
+    /// (当前 1b 过渡期经 `prepare_streaming_launch` 走 Normal 相位,先红);
+    /// ② `provider_start` 恰为该 run 审计分区文件首行(durable 落盘);
+    /// ③ audit 首行(adapter 落盘时刻标记)先于 completed 记录落盘
+    /// (run_turn 成功后按 coordinator 生命周期收口 step 再取下一标记);
+    /// ④ completed 记录 durable(step Completed)。
+    #[tokio::test]
+    async fn lcg_t01_split_start_audit_precedes_completed_record() {
+        let seq = Arc::new(AtomicUsize::new(0));
+        let observations: Arc<Mutex<Vec<ValidatedStartObservation>>> = Arc::default();
+        let fixture = lc_production_turn_fixture(seq.clone(), observations.clone());
+
+        let bootstrap = BootstrapPhaseCredential::from_running_operation(
+            &fixture.operations,
+            &fixture.project_id,
+            &fixture.operation_id,
+            AggregateInitializationStepKind::PreCheck,
+            &fixture.lc_id,
+            &std::path::PathBuf::from(
+                std::fs::canonicalize(fixture._temp.path().join("aggregate-root")).unwrap(),
+            ),
+        )
+        .expect("derive bootstrap credential from running operation");
+        let snapshot = AggregatePreflightSnapshot {
+            aggregate_root: std::fs::canonicalize(fixture._temp.path().join("aggregate-root"))
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            index_excludes_assets: true,
+            members: Vec::new(),
+            manifest_revision: 1,
+            manifest_digest: "sha256:lcg-t01-manifest".to_string(),
+        };
+        let summary = fixture
+            .driver
+            .run_turn(AggregateProviderTurnRequest {
+                project_id: &fixture.project_id,
+                operation_id: &fixture.operation_id,
+                step: AggregateInitializationStepKind::PreCheck,
+                preflight: &snapshot,
+                lc_id: Some(&fixture.lc_id),
+                bootstrap,
+                cancellation: CancellationToken::new(),
+            })
+            .await
+            .expect("production turn must complete");
+        assert_eq!(summary, "aggregate turn complete");
+
+        // ① credential phase:adapter 在 start_validated 分发路径上真实观测
+        // 冻结相位(快照缺失=未走 prepared 分流,同样失败)。
+        let observation = observations
+            .lock()
+            .expect("observation probe mutex")
+            .first()
+            .cloned()
+            .expect("adapter must have started via start_validated dispatch");
+        assert!(
+            observation.root_recipe_phase,
+            "生产臂必须以 RootRecipe 凭据相位启动(root recipe turn 不得误走 \
+             Normal 相位的 prepare_streaming_launch)"
+        );
+
+        // ② audit 首行 durable:provider_start 恰为该 run 审计分区首行
+        // (fresh workspace 分区 ⇒ 首个 role_run_seq 为 0)。
+        let lifecycle = LifecycleStore::new(fixture.paths.clone());
+        let lines = lifecycle
+            .read_tool_policy_lines(&fixture.workspace_session_id, 0)
+            .expect("read run-bound audit lines");
+        assert_eq!(
+            lines.first().map(|line| line.event_type()),
+            Some("provider_start"),
+            "provider_start 必须是该 run 审计文件的首行"
+        );
+
+        // ③ 真实时序:audit 首行(adapter 落盘时刻标记)先于 completed
+        //    记录落盘(收口 step 后取下一标记)。
+        let provider_start_seq = observation.seq_mark;
+        fixture
+            .operations
+            .checkpoint_step_output(
+                &fixture.project_id,
+                &fixture.operation_id,
+                AggregateInitializationStepKind::PreCheck,
+                "artifact-precheck-lcg-t01".to_string(),
+                FIXTURE_TS.to_string(),
+            )
+            .expect("checkpoint pre_check output");
+        fixture
+            .operations
+            .mark_step_completed(
+                &fixture.project_id,
+                &fixture.operation_id,
+                AggregateInitializationStepKind::PreCheck,
+                FIXTURE_TS.to_string(),
+            )
+            .expect("complete pre_check step");
+        let split_completed_seq = seq.fetch_add(1, Ordering::SeqCst);
+        assert!(
+            provider_start_seq < split_completed_seq,
+            "provider 启动审计标记({provider_start_seq})必须先于 split completed \
+             标记({split_completed_seq})"
+        );
+
+        // ④ completed 记录 durable:operation 记录中 PreCheck 已 Completed。
+        let operation = fixture
+            .operations
+            .get(&fixture.project_id, &fixture.operation_id)
+            .expect("read back operation record");
+        let pre_check = operation
+            .steps
+            .iter()
+            .find(|step| step.step_id == AggregateInitializationStepKind::PreCheck)
+            .expect("pre_check step record");
+        assert_eq!(
+            pre_check.status,
+            AggregateInitializationStepStatus::Completed
+        );
+    }
+}

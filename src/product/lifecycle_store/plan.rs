@@ -663,3 +663,61 @@ impl LifecycleStore {
         Ok(id)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::product::app_paths::ProductAppPaths;
+
+    /// Task 1c(carry④/Ruling 5B):legacy split 落档路径的运行身份与 1b
+    /// `WorkItemSplitProviderRunHandle` 装配对齐——改铸与 handle 同族的
+    /// `ws-<scope>-split-run-<seq>` 前缀(scope 取该路径仅有的 project/issue
+    /// 二元组);run_ref 是不透明字符串,流经 created_from_provider_run/
+    /// provider_run_ref 无任何格式解析,前缀族对齐不影响既有消费者,序号仍
+    /// 按 per-issue 目录单调分配。旧 `provider_run_split_NNNN` 前缀不再铸造
+    /// (先红:当前仍铸造旧前缀)。
+    #[test]
+    fn save_work_item_split_provider_run_mints_handle_family_run_ref() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = LifecycleStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
+        let structured = serde_json::json!({"work_items": []});
+
+        let first = store
+            .save_work_item_split_provider_run(
+                "project_0001",
+                "issue_0001",
+                &ProviderName::ClaudeCode,
+                "split prompt",
+                &structured,
+            )
+            .expect("save first split provider run");
+        assert_eq!(
+            first, "ws-project_0001-issue_0001-split-run-0001",
+            "legacy split 落档必须铸造与 1b handle 同族的 run_ref 前缀"
+        );
+
+        let second = store
+            .save_work_item_split_provider_run(
+                "project_0001",
+                "issue_0001",
+                &ProviderName::ClaudeCode,
+                "split prompt",
+                &structured,
+            )
+            .expect("save second split provider run");
+        assert_eq!(
+            second, "ws-project_0001-issue_0001-split-run-0002",
+            "同 issue 内序号必须单调递增"
+        );
+
+        // run 记录落在该 id 目录,provider_run_ref 与铸造 id 一致(不透明流经)。
+        let run_root = store.provider_runs_root("project_0001", "issue_0001");
+        let run: serde_json::Value =
+            crate::product::json_store::read_json(&run_root.join(&second).join("run.json"))
+                .expect("read back run record");
+        assert_eq!(
+            run.get("provider_run_id").and_then(|value| value.as_str()),
+            Some(second.as_str())
+        );
+    }
+}
