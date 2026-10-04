@@ -1115,3 +1115,212 @@ async fn lcg_t09a_claude_lc_resume_audit_gate_zero_child_on_legacy_or_drift() {
         );
     }
 }
+
+// ==== Task 9b:LC 原生 resume 的 native 会话确认(错/缺 id 绝不 fresh)====
+
+/// Task 9b fixture:以指定原生会话 id 应答 init 并完成的 LC fixture(与
+/// `lc_init_result_cwd_fixture` 同构,init/result 的 session_id 参数化——
+/// resume 确认路径的真实 native 应答形态;`pwd -P` 落 LC_CWD_MARKER 保持
+/// 零 child 断言的观测点)。
+fn lc_init_result_cwd_fixture_for_session(session_id: &str, result_text: &str) -> PathBuf {
+    write_fixture(
+        "claude_lc_init_cwd_session_fixture.sh",
+        &format!(
+            "#!/usr/bin/env bash\npwd -P > \"$LC_CWD_MARKER\"\nwhile IFS= read -r line; do\n  if [[ \"$line\" == *'\"type\":\"user\"'* ]]; then\n    echo '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"{}\"}}'\n    echo '{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"{}\",\"session_id\":\"{}\"}}'\n    exit 0\n  fi\ndone\n",
+            session_id, result_text, session_id
+        ),
+    )
+}
+
+/// Task 9b fixture:登记 pid 并以「与请求不同的原生会话 id」应答 init,随后
+/// 存活等待 kill 链终止(不自行退出——kill/reap 必须来自 adapter 返回前)。
+#[cfg(unix)]
+fn lc_pid_registering_init_fixture(marker: &std::path::Path, session_id: &str) -> PathBuf {
+    write_fixture(
+        "claude_lc_pid_init_fixture.sh",
+        &format!(
+            "#!/usr/bin/env bash\nwhile IFS= read -r line; do\n  if [[ \"$line\" == *'\"type\":\"user\"'* ]]; then\n    echo $$ > {}\n    echo '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"{}\"}}'\n    while IFS= read -r line; do :; done\n    exit 0\n  fi\ndone\n",
+            marker.display(),
+            session_id
+        ),
+    )
+}
+
+/// Task 9b kill 链断言辅助:轮询读取 fixture 登记的子进程 pid,再轮询确认
+/// 该 pid 已退出且被回收(zombie 仍响应 `kill -0`,故「从进程表消失」才能
+/// 证明 kill+reap 都发生了)。
+#[cfg(unix)]
+fn t09b_child_killed_and_reaped(pid_marker: &std::path::Path) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let pid = loop {
+        if let Some(pid) = std::fs::read_to_string(pid_marker)
+            .ok()
+            .and_then(|content| content.trim().parse::<u32>().ok())
+        {
+            break pid;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "fixture must register its pid at {}",
+            pid_marker.display()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    loop {
+        let alive = std::process::Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if !alive {
+            return true;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "claude child (pid {pid}) must be killed and reaped after an unconfirmed native resume"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// Task 9b(Step 1 断言组 438-440 逐字):LC 显式 resume 的真实 native 会话
+/// 确认——Claude 侧 resume 同样等待 init 握手,原生应答 id 必须与请求
+/// resume id 一致:
+/// - 一致(无存档记录,9a 的「无存档→依赖 native 握手」由本测试补真实
+///   确认)→ 续接,confirmed==requested;
+/// - 缺 id(init 应答空白 session_id)→ Err;错 id(应答不同会话 id)→
+///   Err——两者都是已启动 child 后的 runtime 失败:child 被 kill/reap、
+///   错误记录「未恢复」(不伪称零 spawn),不回填请求 id、不清 id 转
+///   fresh、零新 provider_start。
+#[cfg(unix)]
+#[tokio::test]
+async fn lcg_t09_claude_missing_or_wrong_native_id_never_fresh() {
+    let fixture = LcLaunchFixture::new();
+    let requested_native_id = "sess-lc-resume-t09b".to_string();
+
+    // 1) native 应答同 id(无存档记录):真实确认后续接,provider_start 落
+    //    确认 id,握手消耗 init 行后流式续读不受影响。
+    {
+        let sink = RecordingToolPolicyAuditSink::new();
+        let mut raw = fixture.lc_streaming_input(
+            AdapterRole::Executor,
+            None,
+            Some(sink.clone().bound()),
+            Some(requested_native_id.clone()),
+        );
+        let marker_dir = tempfile::tempdir().expect("t09b matching marker dir");
+        raw.env_vars.insert(
+            "LC_CWD_MARKER".to_string(),
+            marker_dir
+                .path()
+                .join("t09b-matching-cwd-marker")
+                .display()
+                .to_string(),
+        );
+        let provider = ClaudeCodeProvider::new(lc_init_result_cwd_fixture_for_session(
+            &requested_native_id,
+            "lc resume done",
+        ))
+        .with_version_supplier(policy_version_supplier());
+        let mut session = provider
+            .start_validated(
+                fixture.validated_coding_input(raw),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("a native-confirmed resume must continue the LC session");
+        let confirmed_native_id = session.native_session_id.clone().unwrap_or_default();
+        assert_eq!(confirmed_native_id, requested_native_id);
+        let events = sink.events();
+        assert_eq!(
+            events.len(),
+            1,
+            "confirmed resume writes exactly one provider_start"
+        );
+        assert!(matches!(
+            &events[0],
+            DurableToolPolicyEvent::ProviderStart(record)
+                if record.provider_session_id == requested_native_id
+        ));
+        assert_eq!(recv_completed(&mut session.events).await, "lc resume done");
+    }
+
+    // 2) 缺 id:init 应答空白 session_id → runtime 失败:Err + kill/reap +
+    //    「未恢复」记录,零新 provider_start。
+    {
+        let marker_dir = tempfile::tempdir().expect("t09b missing-id marker dir");
+        let pid_marker = marker_dir.path().join("claude-t09b-missing-id.pid");
+        let sink = RecordingToolPolicyAuditSink::new();
+        let raw = fixture.lc_streaming_input(
+            AdapterRole::Executor,
+            None,
+            Some(sink.clone().bound()),
+            Some(requested_native_id.clone()),
+        );
+        let provider = ClaudeCodeProvider::new(pid_registering_blank_init_fixture(&pid_marker, ""))
+            .with_version_supplier(policy_version_supplier());
+        let native_id_missing_result = provider
+            .start_validated(
+                fixture.validated_coding_input(raw),
+                CancellationToken::new(),
+            )
+            .await;
+        assert!(native_id_missing_result.is_err());
+        let Err(rejected) = native_id_missing_result else {
+            panic!("unconfirmed resume must fail");
+        };
+        assert!(
+            rejected.details.contains("session NOT resumed")
+                && rejected.details.contains("not a zero-spawn refusal"),
+            "rejection must record the not-resumed outcome without claiming zero spawn: {rejected:?}"
+        );
+        assert!(
+            sink.events().is_empty(),
+            "no fresh provider_start may be written for a resume the native side never confirmed"
+        );
+        assert!(t09b_child_killed_and_reaped(&pid_marker));
+    }
+
+    // 3) 错 id:init 应答不同的原生会话 id → 同为 runtime 失败:Err +
+    //    kill/reap,绝不采纳陌生 id 续接、绝不清请求 id 转 fresh。
+    {
+        let marker_dir = tempfile::tempdir().expect("t09b wrong-id marker dir");
+        let pid_marker = marker_dir.path().join("claude-t09b-wrong-id.pid");
+        let sink = RecordingToolPolicyAuditSink::new();
+        let raw = fixture.lc_streaming_input(
+            AdapterRole::Executor,
+            None,
+            Some(sink.clone().bound()),
+            Some(requested_native_id.clone()),
+        );
+        let provider = ClaudeCodeProvider::new(lc_pid_registering_init_fixture(
+            &pid_marker,
+            "sess-lc-native-wrong-t09b",
+        ))
+        .with_version_supplier(policy_version_supplier());
+        let wrong_native_id_result = provider
+            .start_validated(
+                fixture.validated_coding_input(raw),
+                CancellationToken::new(),
+            )
+            .await;
+        let Err(rejected) = wrong_native_id_result else {
+            panic!("a wrong native id must fail the resume");
+        };
+        assert!(
+            rejected.details.contains("sess-lc-native-wrong-t09b")
+                && rejected.details.contains(&requested_native_id)
+                && rejected.details.contains("session NOT resumed"),
+            "rejection must name both ids and record the not-resumed outcome: {rejected:?}"
+        );
+        assert!(
+            sink.events().is_empty(),
+            "no fresh provider_start may be written for a mismatched native resume confirmation"
+        );
+        let started_child_was_killed_and_reaped = t09b_child_killed_and_reaped(&pid_marker);
+        assert!(started_child_was_killed_and_reaped);
+    }
+}
