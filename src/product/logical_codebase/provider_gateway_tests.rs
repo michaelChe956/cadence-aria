@@ -1515,11 +1515,46 @@ mod lcg_t09a_resume_fingerprint {
         // 投影携带维度逐项漂移:trust / MCP bundle / exact version /
         // capability projection 摘要 / 会话全投影摘要。
         for drifted in [
-            t09a_projection(&validated, "sha256:trust-drifted", "sha256:mcp-t09a", "claude 1.4.0", "sha256:capability-projection-t09a", "sha256:session-projection-t09a"),
-            t09a_projection(&validated, "sha256:trust-t09a", "sha256:mcp-drifted", "claude 1.4.0", "sha256:capability-projection-t09a", "sha256:session-projection-t09a"),
-            t09a_projection(&validated, "sha256:trust-t09a", "sha256:mcp-t09a", "claude 1.4.1", "sha256:capability-projection-t09a", "sha256:session-projection-t09a"),
-            t09a_projection(&validated, "sha256:trust-t09a", "sha256:mcp-t09a", "claude 1.4.0", "sha256:capability-projection-drifted", "sha256:session-projection-t09a"),
-            t09a_projection(&validated, "sha256:trust-t09a", "sha256:mcp-t09a", "claude 1.4.0", "sha256:capability-projection-t09a", "sha256:session-projection-drifted"),
+            t09a_projection(
+                &validated,
+                "sha256:trust-drifted",
+                "sha256:mcp-t09a",
+                "claude 1.4.0",
+                "sha256:capability-projection-t09a",
+                "sha256:session-projection-t09a",
+            ),
+            t09a_projection(
+                &validated,
+                "sha256:trust-t09a",
+                "sha256:mcp-drifted",
+                "claude 1.4.0",
+                "sha256:capability-projection-t09a",
+                "sha256:session-projection-t09a",
+            ),
+            t09a_projection(
+                &validated,
+                "sha256:trust-t09a",
+                "sha256:mcp-t09a",
+                "claude 1.4.1",
+                "sha256:capability-projection-t09a",
+                "sha256:session-projection-t09a",
+            ),
+            t09a_projection(
+                &validated,
+                "sha256:trust-t09a",
+                "sha256:mcp-t09a",
+                "claude 1.4.0",
+                "sha256:capability-projection-drifted",
+                "sha256:session-projection-t09a",
+            ),
+            t09a_projection(
+                &validated,
+                "sha256:trust-t09a",
+                "sha256:mcp-t09a",
+                "claude 1.4.0",
+                "sha256:capability-projection-t09a",
+                "sha256:session-projection-drifted",
+            ),
         ] {
             assert_ne!(
                 baseline.digest,
@@ -1673,9 +1708,11 @@ mod lcg_t09a_resume_fingerprint {
         assert_eq!(superseded_session_id, "sess_t09a_0002");
         // StartNew 仅 supersede 并等待显式 fresh:唯一稳定 allowed action
         // 是 StartGeneration。
-        assert!(waiting
-            .allowed_actions
-            .contains(&BootstrapActionKind::StartGeneration));
+        assert!(
+            waiting
+                .allowed_actions
+                .contains(&BootstrapActionKind::StartGeneration)
+        );
         assert_eq!(fixture.gateway_audit().supersede_count(), 1);
         assert_eq!(
             fixture.gateway_audit().last_supersede_reason().as_deref(),

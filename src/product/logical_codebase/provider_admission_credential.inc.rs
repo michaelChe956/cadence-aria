@@ -8,6 +8,10 @@ pub enum BootstrapActionKind {
     Retry,
     Revalidate,
     Repair,
+    /// 显式新会话启动(Task 9a:resume 指纹漂移 supersede 后的唯一稳定
+    /// 等待动作;由现有 `WsInMessage::StartGeneration` /
+    /// `WorkspaceEngine::start_generation` 接受)。
+    StartGeneration,
 }
 impl BootstrapActionKind {
     /// 与 serde snake_case 序列化一致的稳定动作名（通知 payload/前端按钮
@@ -19,6 +23,7 @@ impl BootstrapActionKind {
             Self::Retry => "retry",
             Self::Revalidate => "revalidate",
             Self::Repair => "repair",
+            Self::StartGeneration => "start_generation",
         }
     }
 }

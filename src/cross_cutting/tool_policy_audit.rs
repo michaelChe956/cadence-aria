@@ -337,6 +337,84 @@ pub fn resume_with_audit_record(
     }
 }
 
+/// LC validated 启动的完整 resume 审计字面量(Task 9a):在 direct 三元组
+/// (digest/version/dialect,`resume_with_audit_record` 保持)之上,LC 会话
+/// 的 resume 比对以完整字面量进行——投影摘要层(action/wire dialect/
+/// capability projection 摘要/会话全投影摘要/boundary 引用)+ v2 resume
+/// 材料(resume 指纹、action evidence 摘要、target git identity)。
+///
+/// 当前侧由 provider 的 `start_validated` 以本次启动的真实投影与 v2 材料
+/// 装配(完整字面量,无缺省);存档侧取 durable `provider_start` 的
+/// `lc_projection`。旧记录缺 `lc_projection`(direct/Task 4 前形态)或
+/// 任一投影摘要漂移 → 拒绝 resume(supersede),不得在 adapter 内清
+/// resume id 后静默 fresh。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+pub struct LcProviderStartAudit {
+    /// 投影 action 稳定文本(`planning_read_only`/`coding_target_write`/
+    /// `review_read_only`)。
+    #[serde(default)]
+    pub action: String,
+    /// wire dialect 序列化值(如 `claude-stream-json`)。
+    #[serde(default)]
+    pub wire_dialect: String,
+    /// 完整权限 profile 摘要(action row 的 projection_digest 同源)。
+    #[serde(default)]
+    pub capability_projection_digest: String,
+    /// 会话全投影摘要。
+    #[serde(default)]
+    pub projection_digest: String,
+    /// boundary 计划/证据引用(read-only action 为空串)。
+    #[serde(default)]
+    pub boundary_evidence_ref: String,
+    /// v2:resume 复验指纹(`SessionResumeFingerprint::from_envelope` 五参
+    /// digest;空串 = 未装配,比对即拒绝)。
+    #[serde(default)]
+    pub resume_fingerprint: String,
+    /// v2:action row evidence 摘要。
+    #[serde(default)]
+    pub action_evidence_digest: String,
+    /// v2:canonical target git identity。
+    #[serde(default)]
+    pub target_git_identity: String,
+}
+
+impl LcProviderStartAudit {
+    /// v2 resume 材料完整性:resume 指纹/action evidence/git identity 任一
+    /// 为空即未装配,不得据此放行 resume。
+    pub fn is_v2_complete(&self) -> bool {
+        !self.resume_fingerprint.trim().is_empty()
+            && !self.action_evidence_digest.trim().is_empty()
+            && !self.target_git_identity.trim().is_empty()
+    }
+}
+
+/// LC resume 决策(Task 9a):存档 provider_start 必须携带 `lc_projection`
+/// 且其投影摘要与当前完整字面量逐字相等,当前侧 v2 材料必须完整;存档缺
+/// projection(旧/direct 形态)、投影漂移或 v2 材料不完整 → 拒绝 resume、
+/// supersede、等待显式新会话。direct 三元组语义(`resume_with_audit_record`)
+/// 保持原样,不经本判定。
+pub fn resume_with_lc_start_record(
+    stored: &ProviderStartAudit,
+    current: &LcProviderStartAudit,
+) -> ResumeDecision {
+    let Some(stored_lc) = stored.lc_projection.as_ref() else {
+        return ResumeDecision::RejectSupersedeAndStartNew;
+    };
+    if !current.is_v2_complete() {
+        return ResumeDecision::RejectSupersedeAndStartNew;
+    }
+    let projection_matches = stored_lc.action == current.action
+        && stored_lc.wire_dialect == current.wire_dialect
+        && stored_lc.capability_projection_digest == current.capability_projection_digest
+        && stored_lc.projection_digest == current.projection_digest
+        && stored_lc.boundary_evidence_ref == current.boundary_evidence_ref;
+    if projection_matches {
+        ResumeDecision::Resume
+    } else {
+        ResumeDecision::RejectSupersedeAndStartNew
+    }
+}
+
 /// 读取坏行告警（内存形态；不写回 durable 分区）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolPolicyAuditReadWarning {

@@ -514,6 +514,37 @@ impl ClaudeCodeProvider {
 /// provider_start 写入」留在 `start()` 内完成，成功后才把 child 与续读 reader
 /// 移交本收尾任务；失败路径由 `start()` 直接持有 child 同步 `kill()`+`wait()`
 /// 后返回错误（对齐 codex/pi 先例），本任务不再承担失败窗口的终止责任。
+/// Task 9a:LC 启动的完整 resume 审计字面量(投影摘要 + v2 resume 材料)。
+/// action evidence 摘要与 `capability_projection_digest` 同源(action row 的
+/// projection_digest);resume 指纹为五参 `from_envelope` 全上下文计算。
+pub(crate) fn lc_start_audit_literal(
+    envelope: &crate::product::logical_codebase::policy::SessionPolicyEnvelope,
+    lc_projection: &crate::product::logical_codebase::provider_projection::ProviderPolicyProjection,
+) -> crate::cross_cutting::tool_policy_audit::LcProviderStartAudit {
+    let git_identity =
+        crate::product::logical_codebase::provider_gateway::canonical_target_git_identity(
+            &envelope.target.worktree,
+        );
+    let action_evidence = lc_projection.capability_projection_digest().to_string();
+    crate::cross_cutting::tool_policy_audit::LcProviderStartAudit {
+        action: projection::action_text(envelope.action).to_string(),
+        wire_dialect: projection::wire_dialect_text(lc_projection.wire_dialect()).to_string(),
+        capability_projection_digest: action_evidence.clone(),
+        projection_digest: lc_projection.projection_digest().to_string(),
+        boundary_evidence_ref: lc_projection.boundary_evidence_ref().to_string(),
+        resume_fingerprint:
+            crate::product::logical_codebase::provider_gateway::SessionResumeFingerprint::from_envelope(
+                envelope,
+                lc_projection,
+                &action_evidence,
+                &git_identity,
+            )
+            .digest,
+        action_evidence_digest: action_evidence,
+        target_git_identity: git_identity,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_claude_session_tail(
     stdout_reader: impl tokio::io::AsyncRead + Unpin,
@@ -1175,6 +1206,56 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
                 String::new(),
             )
         })?;
+
+        // Task 9a:LC 显式 resume 在 child 前比较全 LC audit(完整字面量含
+        // 投影)。存档缺 lc_projection(旧/direct 形态)或任一投影摘要漂移
+        // → superseded 终止审计写被取代旧 run、零 child 拒绝(不清 resume
+        // id 静默 fresh);无存档记录时依赖 native 握手确认(9b 收口),
+        // 本层不清 id。
+        if let Some(resume_id) = input
+            .resume_provider_session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        {
+            let stored = sink.find_provider_start(resume_id).map_err(|error| {
+                ProviderAdapterError::parse_error(
+                    format!("claude lc validated start: resume lookup failed: {error}"),
+                    String::new(),
+                    String::new(),
+                )
+            })?;
+            if let Some(stored) = stored.as_ref() {
+                let current = lc_start_audit_literal(&envelope, &lc_projection);
+                if matches!(
+                    crate::cross_cutting::tool_policy_audit::resume_with_lc_start_record(
+                        &stored.record,
+                        &current
+                    ),
+                    crate::cross_cutting::tool_policy_audit::ResumeDecision::RejectSupersedeAndStartNew
+                ) {
+                    // P1-4 同源裁决:superseded 终止审计写入被取代旧 run。
+                    crate::cross_cutting::tool_policy_audit::append_superseded_policy_drift(
+                        sink.as_ref(),
+                        stored,
+                    )
+                    .map_err(|error| {
+                        ProviderAdapterError::parse_error(
+                            format!(
+                                "claude lc validated start: superseded audit append failed: {error}"
+                            ),
+                            String::new(),
+                            String::new(),
+                        )
+                    })?;
+                    return Err(ProviderAdapterError::parse_error(
+                        "claude lc validated start: resume audit drifted or legacy record lacks lc projection; refusing to spawn a fresh child for an explicit LC resume",
+                        String::new(),
+                        String::new(),
+                    ));
+                }
+            }
+        }
 
         // LC argv 与投影同源;进程 cwd = envelope 冻结的 canonical LC root。
         let args = self.build_lc_validated_args(

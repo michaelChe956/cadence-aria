@@ -76,6 +76,13 @@ pub struct ValidatedSessionLaunchPolicy {
     /// 已在 prepare 前绑定 run-bound sink 的 prepared launch(gateway 同步
     /// 分发与 sync bridge 消费)。
     launch_audit: Option<ProviderLaunchAuditContext>,
+    /// Task 9a:完整上下文路径(`resume_or_start_with_projection`)冻结的
+    /// 候选 LC 投影与其配套指纹。`None` = 裸 `validate` 的 envelope+
+    /// capability 基准(legacy/单仓语义,由 `resume_or_start` 保持);`Some`
+    /// = 调用者先完整 prepare 得候选投影后经 gateway 全上下文判定,指纹
+    /// 与投影同源冻结,spawn 前复验按同一基准重算。
+    lc_projection:
+        Option<crate::product::logical_codebase::provider_projection::ProviderPolicyProjection>,
 }
 
 /// #8 发布链在 validate 时点冻结的 digest 事实(spawn 前复验重读比对)。
@@ -152,6 +159,33 @@ impl ValidatedSessionLaunchPolicy {
     /// gateway 的 `prepare_*_launch` 使用,模块外不可构造 prepared policy)。
     pub(crate) fn with_launch_audit(mut self, context: ProviderLaunchAuditContext) -> Self {
         self.launch_audit = Some(context);
+        self
+    }
+
+    /// Task 9a:完整上下文路径冻结的候选 LC 投影(裸 validate 为 `None`)。
+    pub(crate) fn lc_projection(
+        &self,
+    ) -> Option<&crate::product::logical_codebase::provider_projection::ProviderPolicyProjection>
+    {
+        self.lc_projection.as_ref()
+    }
+
+    /// Task 9a:action row 的 evidence profile 摘要(`capability_projection_
+    /// digest` 同源;冻结已实测 version/action 的完整权限画像,不随单次
+    /// role 变化)——五参 `from_envelope` 的 action evidence 维度。
+    pub(crate) fn action_evidence_digest(&self) -> &str {
+        &self.projection_digest
+    }
+
+    /// Task 9a:以候选 LC 投影与配套全上下文指纹覆写基准(仅
+    /// `resume_or_start_with_projection` 内部使用)。
+    fn with_lc_projection(
+        mut self,
+        projection: crate::product::logical_codebase::provider_projection::ProviderPolicyProjection,
+        fingerprint: SessionResumeFingerprint,
+    ) -> Self {
+        self.lc_projection = Some(projection);
+        self.fingerprint = fingerprint;
         self
     }
 
@@ -331,39 +365,104 @@ pub struct ProviderCapability {
     pub trust: ProviderCapabilityEvidence,
 }
 
-/// resume 复验指纹:覆盖 policy digest、target、canonical working_directory(cwd,
-/// Task 2.5)、provider exact version、dialect 与 capability snapshot。spawn 前
-///(Task 10)与 provider 上报状态重新比对。
+/// resume 复验指纹(Task 9a 起 v2):覆盖 policy 指纹(id/revision/digest)、
+/// canonical authority root/cwd、target 三元组与 git identity、action evidence
+/// 摘要,以及候选 LC 投影携带的全部冻结维度(provider 映射/exact version/
+/// wire dialect、trust/config/MCP bundle digest、boundary 引用与分层投影
+/// 摘要)。spawn 前与 provider 上报状态重新比对;旧会话缺 v2 材料即视为
+/// 漂移(supersede),不存在仅 envelope 指纹的可 spawn 权。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionResumeFingerprint {
     pub digest: String,
 }
 
+/// 五参 `from_envelope` 的 schema 域版本:长度分隔域序列的前置标签。域
+/// 集合或域语义变化时必须递增版本,旧 digest 与新 digest 永不相等。
+pub const LC_RESUME_FINGERPRINT_SCHEMA: &str = "lc-session-resume-fingerprint/2";
+
+/// resume 指纹漂移的 supersede 稳定原因码(gateway 审计与 `StartNew`
+/// 等待投影同源)。
+pub const RESUME_FINGERPRINT_MISMATCH: &str = "resume_fingerprint_mismatch";
+
 impl SessionResumeFingerprint {
-    /// 由 envelope、provider exact version、adapter dialect 与 capability snapshot
-    /// 计算 canonical SHA-256。任一维度漂移(含 canonical working_directory/cwd,
-    /// Task 2.5)都会产生不同 digest。
+    /// 由 envelope、候选 LC 投影、action evidence 摘要与 target git identity
+    /// 计算 canonical SHA-256(Task 9a 冻结五参签名)。每个域以 8 字节大端
+    /// 长度前缀分隔(无边界歧义),schema 域版本前置;policy/authority/cwd/
+    /// target/git identity/trust/tool/MCP bundle/exact version/投影摘要任一
+    /// 漂移都会产生不同 digest。
     pub fn from_envelope(
         envelope: &SessionPolicyEnvelope,
-        version: &str,
-        adapter_dialect: ProviderDialect,
-        capability_snapshot_ref: &str,
+        projection: &crate::product::logical_codebase::provider_projection::ProviderPolicyProjection,
+        action_evidence_digest: &str,
+        target_git_identity: &str,
     ) -> Self {
         let mut hasher = Sha256::new();
-        hasher.update(envelope.policy_id.as_bytes());
-        hasher.update(envelope.policy_revision.to_be_bytes());
-        hasher.update(envelope.policy_digest.as_bytes());
-        hasher.update(format!("{:?}", envelope.action).as_bytes());
-        hasher.update(envelope.target.logical_repository_id.as_bytes());
-        hasher.update(envelope.target.checkout_id.as_bytes());
-        hasher.update(envelope.target.worktree.to_string_lossy().as_bytes());
-        // Task 2.5：cwd 独立维度——canonical working_directory 漂移即 supersede。
-        hasher.update(envelope.working_directory.to_string_lossy().as_bytes());
-        hasher.update(version.as_bytes());
-        hasher.update(format!("{adapter_dialect:?}").as_bytes());
-        hasher.update(capability_snapshot_ref.as_bytes());
+        let mut domain = |part: &[u8]| {
+            hasher.update(&(part.len() as u64).to_be_bytes());
+            hasher.update(part);
+        };
+        domain(LC_RESUME_FINGERPRINT_SCHEMA.as_bytes());
+        domain(envelope.policy_id.as_bytes());
+        domain(&envelope.policy_revision.to_be_bytes());
+        domain(envelope.policy_digest.as_bytes());
+        domain(format!("{:?}", envelope.action).as_bytes());
+        // canonical authority root 与 cwd(独立维度,Task 2.5/2.8)。
+        domain(envelope.authority_root.to_string_lossy().as_bytes());
+        domain(envelope.working_directory.to_string_lossy().as_bytes());
+        // target 三元组 + git identity(REQ-ENV-03)。
+        domain(envelope.target.logical_repository_id.as_bytes());
+        domain(envelope.target.checkout_id.as_bytes());
+        domain(envelope.target.worktree.to_string_lossy().as_bytes());
+        domain(target_git_identity.as_bytes());
+        domain(action_evidence_digest.as_bytes());
+        // 候选投影携带的冻结维度:provider 映射与 exact version、trust/
+        // config/MCP bundle digest、boundary 引用、分层投影摘要。
+        domain(format!("{:?}", projection.provider_type()).as_bytes());
+        domain(format!("{:?}", projection.provider_dialect()).as_bytes());
+        domain(format!("{:?}", projection.wire_dialect()).as_bytes());
+        domain(projection.exact_version().as_bytes());
+        domain(projection.trust_digest().as_bytes());
+        domain(projection.config_digest().as_bytes());
+        domain(projection.mcp_bundle_digest().as_bytes());
+        domain(projection.boundary_evidence_ref().as_bytes());
+        domain(projection.capability_projection_digest().as_bytes());
+        domain(projection.projection_digest().as_bytes());
+        // logical roots(计划冻结:Planning/Review 空 writable,Coding 恰一个
+        // canonical target)。
+        domain(&projection.readable_roots().len().to_be_bytes());
+        for root in projection.readable_roots() {
+            domain(root.to_string_lossy().as_bytes());
+        }
+        domain(&projection.writable_roots().len().to_be_bytes());
+        for root in projection.writable_roots() {
+            domain(root.to_string_lossy().as_bytes());
+        }
         let digest = format!("sha256:{:x}", hasher.finalize());
         Self { digest }
+    }
+}
+
+/// 解析 target worktree 的 canonical git identity(REQ-ENV-03 的 git-dir
+/// identity 形态):`.git` 为目录时取其 canonical 路径,为 worktree 指针文件
+/// 时取 `gitdir:` 指向的 canonical 路径;解析失败退化为 worktree canonical
+/// 文本(确定性维度——identity 值只需随 git identity 漂移而变化,解析
+/// 失败本身不是 spawn 权威判定,spawn 前仍由 resolver 复验)。
+pub(crate) fn canonical_target_git_identity(worktree: &Path) -> String {
+    let git_entry = worktree.join(".git");
+    let resolved = if git_entry.is_dir() {
+        git_entry.canonicalize().ok()
+    } else if let Ok(pointer) = std::fs::read_to_string(&git_entry) {
+        pointer
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("gitdir:"))
+            .map(str::trim)
+            .and_then(|gitdir| Path::new(gitdir).canonicalize().ok())
+    } else {
+        None
+    };
+    match resolved {
+        Some(identity) => identity.to_string_lossy().into_owned(),
+        None => worktree.to_string_lossy().into_owned(),
     }
 }
 
@@ -379,19 +478,47 @@ pub struct ResumeSessionLaunchRequest {
     pub previous_session_id: String,
 }
 
-/// `resume_or_start` 的返回决策(Task 13)。
+/// `StartNew` 决策的稳定等待投影(Task 9a):旧会话已 supersede,唯一稳定
+/// allowed action 是显式 `StartGeneration` fresh(由现有 `WsInMessage::
+/// StartGeneration`/`WorkspaceEngine::start_generation` 接受);同一 revision
+/// driver 不得据此继续 `start_streaming`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LcSupersededWaiting {
+    /// supersede 稳定原因码(与 gateway 审计 `supersede` 记录同源)。
+    pub reason_code: String,
+    /// 稳定等待动作集(仅显式 fresh)。
+    pub allowed_actions:
+        Vec<crate::product::logical_codebase::provider_admission_preflight::BootstrapActionKind>,
+}
+
+impl LcSupersededWaiting {
+    /// `StartNew` 的唯一等待形态:等待用户显式 `StartGeneration`。
+    fn superseded() -> Self {
+        Self {
+            reason_code: RESUME_FINGERPRINT_MISMATCH.to_string(),
+            allowed_actions: vec![
+                crate::product::logical_codebase::provider_admission_preflight::BootstrapActionKind::StartGeneration,
+            ],
+        }
+    }
+}
+
+/// `resume_or_start` 的返回决策(Task 13;Task 9a 起 `StartNew` 携带稳定
+/// 等待投影)。
 ///
 /// - `Resume`:fingerprint 全维度相等,旧会话可安全 resume,返回新的 validated
 ///   policy 供 spawn。
-/// - `StartNew`:fingerprint 漂移(policy digest/target/version/dialect/capability
-///   任一不一致),旧会话被 supersede(审计),返回新 validated policy 与被
-///   supersede 的旧 session id。
+/// - `StartNew`:fingerprint 漂移,旧会话被 supersede(审计),返回新 validated
+///   policy、被 supersede 的旧 session id 与稳定等待投影——仅等待显式
+///   `StartGeneration` fresh,不在同一 revision driver 静默 fresh。
 #[derive(Debug)]
 pub enum GatewaySessionDisposition {
     Resume(ValidatedSessionLaunchPolicy),
     StartNew {
         validated: ValidatedSessionLaunchPolicy,
         superseded_session_id: String,
+        /// Task 9a:稳定等待投影(仅显式 `StartGeneration`)。
+        waiting: LcSupersededWaiting,
     },
 }
 
@@ -991,11 +1118,18 @@ impl LogicalCodebaseProviderGateway {
             });
         }
 
+        // Task 9a:指纹为五参全上下文计算;裸 validate 无调用者准备的候选
+        // 投影,以 capability+envelope 组装的 gateway 基准投影计算(基准
+        // 维度=policy/target/cwd/git identity/action evidence/provider 映射
+        // 与 exact version/config digest;会话级投影摘要为常量空串,不构成
+        // 该路径的漂移维度)。完整上下文路径(`resume_or_start_with_projection`)
+        // 以调用者候选投影覆写本基准——仅 envelope 指纹不构成可 spawn 权。
+        let basis_projection = Self::lc_basis_projection(&capability, &envelope);
         let fingerprint = SessionResumeFingerprint::from_envelope(
             &envelope,
-            &capability.version,
-            capability.adapter_dialect,
-            &capability.capability_snapshot_ref,
+            &basis_projection,
+            &capability.action_capability.projection_digest,
+            &canonical_target_git_identity(&envelope.target.worktree),
         );
         // Task 3a/3b:#8 发布链消费(factory 注入 receipt store、Normal 相位
         // 且 artifact 非自举桩时):校验 locator 正文/digest 链并冻结
@@ -1035,6 +1169,7 @@ impl LogicalCodebaseProviderGateway {
             phase,
             policy_locator,
             launch_audit: None,
+            lc_projection: None,
         })
     }
 
@@ -1061,11 +1196,50 @@ impl LogicalCodebaseProviderGateway {
         Ok(())
     }
 
-    /// resume 启动判定(Task 13):据旧会话冻结的 fingerprint 与当前 validate
-    /// 产出的 validated policy 全维度比对。只有 policy digest、target、provider
-    /// exact version、dialect 与 capability snapshot 全一致(fingerprint 相等)
-    /// 才 `Resume`;任一维度漂移则 supersede 旧会话(写审计)并 `StartNew`,
-    /// 旧 session id 透传给调用方以清理旧会话状态。
+    /// 裸 validate 的 gateway 基准投影(Task 9a):以 capability+envelope 可
+    /// 得材料组装的确定性投影(会话级 role/permission/approval 不进入任何
+    /// 指纹维度,`projection_digest` 为常量空串——裸 validate 路径的指纹基准
+    /// 不含会话级投影上下文,也不据此授予 resume 权)。完整上下文路径经
+    /// `resume_or_start_with_projection` 的调用者候选投影覆写。
+    fn lc_basis_projection(
+        capability: &ProviderCapability,
+        envelope: &SessionPolicyEnvelope,
+    ) -> crate::product::logical_codebase::provider_projection::ProviderPolicyProjection {
+        use crate::product::logical_codebase::provider_projection::ProviderPolicyProjection;
+        ProviderPolicyProjection::new(
+            capability.provider_type,
+            capability.adapter_dialect,
+            capability.wire_dialect,
+            capability.version.clone(),
+            envelope.action,
+            crate::protocol::contracts::AdapterRole::Executor,
+            crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
+            None,
+            String::new(),
+            String::new(),
+            envelope.working_directory.clone(),
+            envelope.working_directory.clone(),
+            envelope.target.clone(),
+            envelope.readable_roots.clone(),
+            envelope.writable_roots.clone(),
+            String::new(),
+            envelope.config_digest.clone(),
+            String::new(),
+            String::new(),
+            capability.action_capability.projection_digest.clone(),
+            String::new(),
+        )
+    }
+
+    /// resume 启动判定(Task 13,legacy/单仓语义):据旧会话冻结的 fingerprint
+    /// 与当前 validate 产出的 validated policy(envelope+capability 基准指纹)
+    /// 比对。只有基准维度全一致(fingerprint 相等)才 `Resume`;任一漂移则
+    /// supersede 旧会话(写审计)并 `StartNew`,旧 session id 透传给调用方
+    /// 以清理旧会话状态。
+    ///
+    /// Task 9a:该入口保持既有调用方(SingleRepository/review revision
+    /// resume)的原行为;LC 全上下文判定走 `resume_or_start_with_projection`
+    /// ——本入口的基准指纹不构成 LC 会话的可 spawn 权来源。
     ///
     /// resume 判定在路由级硬门之后:Codex danger-full-access 等被路由阻断的
     /// provider 在进入 resume 决策前即被拒绝。
@@ -1078,12 +1252,100 @@ impl LogicalCodebaseProviderGateway {
             Ok(GatewaySessionDisposition::Resume(validated))
         } else {
             self.audit
-                .supersede(&request.previous_session_id, "resume_fingerprint_mismatch")?;
+                .supersede(&request.previous_session_id, RESUME_FINGERPRINT_MISMATCH)?;
             Ok(GatewaySessionDisposition::StartNew {
                 validated,
                 superseded_session_id: request.previous_session_id,
+                waiting: LcSupersededWaiting::superseded(),
             })
         }
+    }
+
+    /// LC resume 全上下文判定(Task 9a 冻结签名):调用者先完整 prepare 得
+    /// 候选投影再比指纹。gateway 先 validate 请求(policy/target/envelope
+    /// 冻结),再施加显式 resume 能力分格与投影身份一致性门,最后以
+    /// (envelope, 候选投影, action evidence 摘要, target git identity) 五参
+    /// 重算当前指纹与旧会话冻结值比对:
+    /// - 相等 → `Resume`,返回的 validated 冻结候选投影与全上下文指纹
+    ///   (spawn 前复验与调用方存储同源);
+    /// - 不等 → 仅 supersede(审计)+ `StartNew`(等待显式 `StartGeneration`),
+    ///   决策层零 spawn,不得用仅 envelope 指纹生成可 spawn 权。
+    ///
+    /// 显式 resume 的能力分格先行:resume 证据 Unknown/Denied →
+    /// `ResumeNotSupported` 稳定拒绝、零 spawn、不静默转 fresh(resume 为
+    /// Unknown 不阻止之后的合法显式 fresh)。
+    pub fn resume_or_start_with_projection(
+        &self,
+        request: ResumeSessionLaunchRequest,
+        projection: crate::product::logical_codebase::provider_projection::ProviderPolicyProjection,
+    ) -> Result<GatewaySessionDisposition, ProviderGatewayError> {
+        let mut validated = self.validate(request.launch)?;
+        // 显式 resume 能力分格(路由级/launch/write-boundary 门已在 validate
+        // 内施加)。
+        self.capabilities
+            .require_resume_supported(&validated.provider, validated.action)?;
+        // 候选投影与请求/envelope 的身份一致(provider 映射/action/cwd/
+        // target),错配即 fail-closed——防投影与请求错接后产生伪 resume 权。
+        Self::assert_projection_matches_envelope(&validated, &projection)?;
+
+        let action_evidence_digest = validated.action_evidence_digest().to_string();
+        let target_git_identity =
+            canonical_target_git_identity(&validated.envelope().target.worktree);
+        let current = SessionResumeFingerprint::from_envelope(
+            validated.envelope(),
+            &projection,
+            &action_evidence_digest,
+            &target_git_identity,
+        );
+        if current == request.previous_fingerprint {
+            Ok(GatewaySessionDisposition::Resume(
+                validated.with_lc_projection(projection, current),
+            ))
+        } else {
+            self.audit
+                .supersede(&request.previous_session_id, RESUME_FINGERPRINT_MISMATCH)?;
+            Ok(GatewaySessionDisposition::StartNew {
+                validated,
+                superseded_session_id: request.previous_session_id,
+                waiting: LcSupersededWaiting::superseded(),
+            })
+        }
+    }
+
+    /// 候选投影与 validated envelope 的身份一致性门(同源判定的最小身份
+    /// 面:provider 映射/action/cwd/target;完整 admission verdict 归 spawn
+    /// 前复验)。
+    fn assert_projection_matches_envelope(
+        validated: &ValidatedSessionLaunchPolicy,
+        projection: &crate::product::logical_codebase::provider_projection::ProviderPolicyProjection,
+    ) -> Result<(), ProviderGatewayError> {
+        let envelope = validated.envelope();
+        if validated.provider.provider_type != projection.provider_type() {
+            return Err(ProviderGatewayError::PolicyDrift {
+                dimension: "provider_identity".to_string(),
+            });
+        }
+        if envelope.provider_dialect != projection.provider_dialect() {
+            return Err(ProviderGatewayError::PolicyDrift {
+                dimension: "provider_dialect".to_string(),
+            });
+        }
+        if envelope.action != projection.action() {
+            return Err(ProviderGatewayError::PolicyDrift {
+                dimension: "action".to_string(),
+            });
+        }
+        if envelope.working_directory != *projection.working_directory() {
+            return Err(ProviderGatewayError::PolicyDrift {
+                dimension: "working_directory".to_string(),
+            });
+        }
+        if envelope.target != *projection.target() {
+            return Err(ProviderGatewayError::TargetMismatch {
+                field: "target".to_string(),
+            });
+        }
+        Ok(())
     }
 
     /// 配置来源审计 policy 门禁(Task 13 → Task 11 语义修正):据 `ConfigSourceAudit`
@@ -1442,11 +1704,18 @@ impl LogicalCodebaseProviderGateway {
                 dimension: "projection_digest".to_string(),
             });
         }
+        // Task 9a:按 validated 冻结的指纹基准重算——完整上下文路径冻结了
+        // 候选投影则按投影重算,裸 validate 基准则按 gateway 基准投影重算;
+        // 任一输入维度的 spawn 时点漂移都会在此 fail-closed。
+        let fingerprint_basis = validated
+            .lc_projection()
+            .cloned()
+            .unwrap_or_else(|| Self::lc_basis_projection(&capability, envelope));
         let current_fingerprint = SessionResumeFingerprint::from_envelope(
             envelope,
-            &capability.version,
-            capability.adapter_dialect,
-            &capability.capability_snapshot_ref,
+            &fingerprint_basis,
+            &capability.action_capability.projection_digest,
+            &canonical_target_git_identity(&envelope.target.worktree),
         );
         if current_fingerprint.digest != validated.fingerprint.digest {
             return Err(ProviderGatewayError::PolicyDrift {

@@ -942,7 +942,10 @@ async fn lcg_t04_no_generic_tool_policy_still_records_version_audit_and_native_s
 
 // ==== Task 9a:LC 显式 resume 的 child 前全 LC audit 比对 ====
 
-use crate::cross_cutting::tool_policy_audit::{LcProviderStartAudit, LcProjectionAudit, ProviderStartAudit, ResumeDecision, resume_with_lc_start_record};
+use crate::cross_cutting::tool_policy_audit::{
+    LcProjectionAudit, LcProviderStartAudit, ProviderStartAudit, ResumeDecision,
+    resume_with_lc_start_record,
+};
 
 /// 以与 adapter 同源的材料(gateway validate 的 envelope + 相同投影输入)
 /// 预计算 LC 启动会得到的投影摘要,供存档记录构造。
@@ -1036,7 +1039,11 @@ async fn lcg_t09a_claude_lc_resume_audit_gate_zero_child_on_legacy_or_drift() {
             Some("sess-lc-resume-t09a")
         );
         let events = sink.events();
-        assert_eq!(events.len(), 1, "resumed run writes exactly one provider_start");
+        assert_eq!(
+            events.len(),
+            1,
+            "resumed run writes exactly one provider_start"
+        );
         assert!(matches!(
             &events[0],
             DurableToolPolicyEvent::ProviderStart(record)
@@ -1090,20 +1097,21 @@ async fn lcg_t09a_claude_lc_resume_audit_gate_zero_child_on_legacy_or_drift() {
             !marker.exists(),
             "no claude child may spawn after a refused LC resume ({case})"
         );
-        // 零新 provider_start;漂移存档被追加 superseded 终止审计。
+        // 零新 provider_start;legacy 与漂移存档同样被标记 superseded(旧 run
+        // 追加终止审计,不启动 fresh provider_start)。
         let events = sink.events();
-        if case == "legacy" {
-            assert!(events.is_empty(), "legacy record writes nothing new");
-        } else {
-            assert_eq!(events.len(), 1, "drift appends superseded termination once");
-            assert!(
-                matches!(
-                    &events[0],
-                    DurableToolPolicyEvent::SessionTerminated(terminated)
-                        if terminated.reason_code == "superseded_policy_drift"
-                ),
-                "drifted resume must mark the old run superseded"
-            );
-        }
+        assert_eq!(
+            events.len(),
+            1,
+            "{case} record is marked superseded without a fresh provider_start"
+        );
+        assert!(
+            matches!(
+                &events[0],
+                DurableToolPolicyEvent::SessionTerminated(terminated)
+                    if terminated.reason_code == "superseded_policy_drift"
+            ),
+            "{case} resume must mark the old run superseded"
+        );
     }
 }

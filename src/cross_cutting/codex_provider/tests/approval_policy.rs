@@ -1270,8 +1270,10 @@ async fn lcg_t09a_codex_lc_resume_audit_gate_zero_child_on_legacy_or_drift() {
     // 1)匹配的完整 LC 存档 → 续接:thread/resume 应答确认同 id。
     {
         let sink = RecordingToolPolicyAuditSink::new();
-        sink.with_stored_provider_start(stored_record(Some(matching_lc_projection.clone())));
-        let raw = fixture.lc_input(
+        let marker_root = tempfile::tempdir()
+            .expect("t09a codex matching marker dir")
+            .keep();
+        let mut raw = fixture.lc_input(
             AdapterRole::Reviewer,
             Some(ProviderToolPolicy::deny_file_write_builtins()),
             ProviderPermissionMode::Auto,
@@ -1279,6 +1281,7 @@ async fn lcg_t09a_codex_lc_resume_audit_gate_zero_child_on_legacy_or_drift() {
             Some(sink.clone().bound()),
             fixture.target_worktree(),
         );
+        let _ = lc_markers(&mut raw, &marker_root);
         let provider = CodexProvider::new(lc_app_server_fixture())
             .with_version_supplier(lc_version_supplier());
         let mut session = provider
@@ -1290,13 +1293,20 @@ async fn lcg_t09a_codex_lc_resume_audit_gate_zero_child_on_legacy_or_drift() {
             )
             .await
             .expect("matching full LC audit must resume the native thread");
-        assert_eq!(session.native_session_id.as_deref(), Some("codex-thread-lc"));
+        assert_eq!(
+            session.native_session_id.as_deref(),
+            Some("codex-thread-lc")
+        );
         assert_eq!(
             recv_completed(&mut session.events).await,
             "lc restricted done"
         );
         let events = sink.events();
-        assert_eq!(events.len(), 1, "resumed run writes exactly one provider_start");
+        assert_eq!(
+            events.len(),
+            1,
+            "resumed run writes exactly one provider_start"
+        );
         assert!(matches!(
             &events[0],
             crate::cross_cutting::tool_policy_audit::DurableToolPolicyEvent::ProviderStart(record)
@@ -1353,20 +1363,21 @@ async fn lcg_t09a_codex_lc_resume_audit_gate_zero_child_on_legacy_or_drift() {
             !spawn_marker.exists(),
             "no codex child may spawn after a refused LC resume ({case})"
         );
-        // 零新 provider_start;漂移存档被追加 superseded 终止审计。
+        // 零新 provider_start;legacy 与漂移存档同样被标记 superseded(旧 run
+        // 追加终止审计,不启动 fresh provider_start)。
         let events = sink.events();
-        if case == "legacy" {
-            assert!(events.is_empty(), "legacy record writes nothing new");
-        } else {
-            assert_eq!(events.len(), 1, "drift appends superseded termination once");
-            assert!(
-                matches!(
-                    &events[0],
-                    crate::cross_cutting::tool_policy_audit::DurableToolPolicyEvent::SessionTerminated(terminated)
-                        if terminated.reason_code == "superseded_policy_drift"
-                ),
-                "drifted resume must mark the old run superseded"
-            );
-        }
+        assert_eq!(
+            events.len(),
+            1,
+            "{case} record is marked superseded without a fresh provider_start"
+        );
+        assert!(
+            matches!(
+                &events[0],
+                crate::cross_cutting::tool_policy_audit::DurableToolPolicyEvent::SessionTerminated(terminated)
+                    if terminated.reason_code == "superseded_policy_drift"
+            ),
+            "{case} resume must mark the old run superseded"
+        );
     }
 }

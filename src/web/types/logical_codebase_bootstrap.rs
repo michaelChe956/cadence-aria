@@ -158,6 +158,9 @@ fn action_str(action: crate::product::logical_codebase::BootstrapActionKind) -> 
         crate::product::logical_codebase::BootstrapActionKind::Retry => "retry",
         crate::product::logical_codebase::BootstrapActionKind::Revalidate => "revalidate",
         crate::product::logical_codebase::BootstrapActionKind::Repair => "repair",
+        crate::product::logical_codebase::BootstrapActionKind::StartGeneration => {
+            "start_generation"
+        }
     }
     .to_string()
 }
