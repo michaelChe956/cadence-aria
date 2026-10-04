@@ -37,6 +37,9 @@ use cadence_aria::product::logical_codebase::provider_gateway::{
     ProviderLaunchAuditContext, ProviderRef, SessionLaunchRequest,
 };
 use cadence_aria::product::logical_codebase::store::LogicalCodebaseStore;
+use cadence_aria::product::logical_codebase::types::{
+    CodebaseMemberRecord, RepositoryCheckoutRecord,
+};
 use cadence_aria::product::models::ProviderName;
 use cadence_aria::protocol::contracts::{AdapterInput, AdapterRole, ProviderType};
 use cadence_aria::web::app::build_web_router;
@@ -998,7 +1001,11 @@ impl MatrixEnvironment {
             .join("alpha")
             .canonicalize()
             .expect("canonical alpha source");
-        let store = LogicalCodebaseStore::new(self.app_paths.clone());
+        // fix 轮 6:store 必须 `for_lc` 作用域——checkout 记录随 per-LC
+        // 子树落盘,`new()`(legacy project root)读不到;成员记录按
+        // member.checkout_ids 逐个 `load_checkout`(#8 同链路),不做
+        // 全项目 list 过滤。
+        let store = LogicalCodebaseStore::for_lc(self.app_paths.clone(), self.lc_id.clone());
         let members = match store.list_lc_members(PROJECT_ID, &self.lc_id) {
             Ok(members) => members,
             Err(error) => {
@@ -1020,53 +1027,43 @@ impl MatrixEnvironment {
             );
             return Err(self.fail_with_diagnostics(failure, None).await);
         }
-        let checkouts = match store.list_checkouts(PROJECT_ID) {
-            Ok(checkouts) => checkouts,
-            Err(error) => {
-                self.dump_members_diagnostics().await;
-                let failure = matrix_failure(
-                    "lc_checkout_store_error",
-                    format!("读取 checkout 记录失败:{error}"),
-                    None,
-                );
-                return Err(self.fail_with_diagnostics(failure, None).await);
+        // 逐成员逐 checkout_id 读取记录;成员选择=checkout canonical_path
+        // 以 alpha 源路径开头者优先,否则第一个读到 checkout 的成员。
+        let mut resolved: Option<(&CodebaseMemberRecord, RepositoryCheckoutRecord)> = None;
+        let mut alpha_matched: Option<(&CodebaseMemberRecord, RepositoryCheckoutRecord)> = None;
+        for member in &members {
+            for checkout_id in &member.checkout_ids {
+                match store.load_checkout(PROJECT_ID, *checkout_id) {
+                    Ok(Some(checkout)) => {
+                        if checkout.canonical_path.starts_with(&alpha_source)
+                            && alpha_matched.is_none()
+                        {
+                            alpha_matched = Some((member, checkout));
+                        } else if resolved.is_none() {
+                            resolved = Some((member, checkout));
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        self.dump_members_diagnostics().await;
+                        let failure = matrix_failure(
+                            "lc_checkout_store_error",
+                            format!("读取 checkout 记录失败:{error}"),
+                            None,
+                        );
+                        return Err(self.fail_with_diagnostics(failure, None).await);
+                    }
+                }
             }
-        };
-        // 首选:checkout canonical_path 指向 alpha 源路径的成员;否则退回
-        // 第一个带 checkout 的成员(两成员登记顺序固定,alpha 在前)。
-        let member = members
-            .iter()
-            .find(|member| {
-                member.checkout_ids.iter().any(|checkout_id| {
-                    checkouts.iter().any(|checkout| {
-                        checkout.checkout_id.0 == checkout_id.0
-                            && checkout.canonical_path == alpha_source
-                    })
-                })
-            })
-            .or_else(|| {
-                members
-                    .iter()
-                    .find(|member| !member.checkout_ids.is_empty())
-            });
-        let Some(member) = member else {
-            self.dump_members_diagnostics().await;
-            let failure = matrix_failure(
-                "member_repository_missing",
-                format!("成员记录均无 checkout(成员 {members:?})"),
-                None,
-            );
-            return Err(self.fail_with_diagnostics(failure, None).await);
-        };
-        let checkout_id = member.checkout_ids.first().expect("member with checkout");
-        let Some(checkout) = checkouts
-            .iter()
-            .find(|checkout| checkout.checkout_id.0 == checkout_id.0)
-        else {
+        }
+        let Some((member, checkout)) = alpha_matched.or(resolved) else {
             self.dump_members_diagnostics().await;
             let failure = matrix_failure(
                 "member_checkout_missing",
-                format!("checkout 记录缺失(成员 {})", member.alias),
+                format!(
+                    "成员 checkout 记录缺失(成员 {members:?};store 作用域 lc_id={})",
+                    self.lc_id
+                ),
                 None,
             );
             return Err(self.fail_with_diagnostics(failure, None).await);
@@ -1081,8 +1078,8 @@ impl MatrixEnvironment {
         Ok(())
     }
 
-    /// 成员解析失败时抄录 GET members/manifest 实际 HTTP 响应到
-    /// diagnostics(端点形态与推断不符时现场定位)。
+    /// 成员解析失败时抄录现场到 diagnostics:GET members 实际 HTTP 响应、
+    /// manifest 摘要、成员记录(含 checkout_ids)与逐 checkout 读取结果。
     async fn dump_members_diagnostics(&self) {
         let diagnostics_dir = self.evidence_root.join("diagnostics");
         let _ = std::fs::create_dir_all(&diagnostics_dir);
@@ -1100,15 +1097,44 @@ impl MatrixEnvironment {
             }))
             .unwrap_or_default(),
         );
-        let manifest = LogicalCodebaseStore::new(self.app_paths.clone())
+        let store = LogicalCodebaseStore::for_lc(self.app_paths.clone(), self.lc_id.clone());
+        let manifest = store
             .load_lc_manifest(PROJECT_ID, &self.lc_id)
             .ok()
             .flatten();
+        let members = store.list_lc_members(PROJECT_ID, &self.lc_id).ok();
+        let mut checkout_probes = Vec::new();
+        if let Some(members) = &members {
+            for member in members {
+                for checkout_id in &member.checkout_ids {
+                    let probe = match store.load_checkout(PROJECT_ID, *checkout_id) {
+                        Ok(Some(checkout)) => json!({
+                            "checkout_id": checkout_id.0.to_string(),
+                            "found": true,
+                            "canonical_path": checkout.canonical_path,
+                            "kind": checkout.kind,
+                        }),
+                        Ok(None) => json!({
+                            "checkout_id": checkout_id.0.to_string(),
+                            "found": false,
+                        }),
+                        Err(error) => json!({
+                            "checkout_id": checkout_id.0.to_string(),
+                            "error": error.to_string(),
+                        }),
+                    };
+                    checkout_probes.push(probe);
+                }
+            }
+        }
         let _ = std::fs::write(
-            diagnostics_dir.join("manifest.json"),
+            diagnostics_dir.join("members-store.json"),
             serde_json::to_vec_pretty(&json!({
+                "lc_id": self.lc_id,
                 "member_count": manifest.as_ref().map(|value| value.member_ids.len()),
                 "membership_revision": manifest.as_ref().map(|value| value.membership_revision),
+                "members": members,
+                "checkout_probes": checkout_probes,
             }))
             .unwrap_or_default(),
         );
