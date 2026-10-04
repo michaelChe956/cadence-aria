@@ -1283,7 +1283,9 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
         let commands = bridge.command_sender();
         let structured_output_contract = input.structured_output_contract.clone();
 
-        // resume 已知:native id 即 resume id,不等 init;fresh 等 init 握手。
+        // Task 9b:LC resume 同样执行真实 init 握手(native 应答 id 必须确认
+        // 同 id);fresh 等 init 握手。direct `start` 的「resume 已知即不等
+        // init」行为保持原样,不属于本路径。
         let resume_native_id = input
             .resume_provider_session_id
             .as_deref()
@@ -1367,8 +1369,37 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
                     exit_code: None,
                 }))
                 .await;
-            let (reader, native_id) = match resume_native_id.clone() {
-                Some(id) => (tokio::io::BufReader::new(stdout), id),
+            let (reader, native_id) = match resume_native_id.as_deref() {
+                // Task 9b:原生应答 id 必须与请求 resume id 逐字相等才构成
+                // 「已恢复」。缺 id(init 缺/空白,F2)或错 id(应答不同会话)
+                // 属于已启动 child 后的 runtime 失败:沿既有 kill 链终止并
+                // 回收子进程,错误显式记录「未恢复」(不伪称零 spawn);绝不
+                // 回填请求 id、绝不清 id 转 fresh。
+                Some(requested_native_id) => {
+                    let (reader, native_id) =
+                        stream::wait_for_claude_init(stdout, &cancel)
+                            .await
+                            .map_err(|error| {
+                                ProviderAdapterError::parse_error(
+                                    format!(
+                                        "claude lc validated start: native resume not confirmed (session NOT resumed; the started child was killed and reaped, not a zero-spawn refusal): {}",
+                                        error.details
+                                    ),
+                                    String::new(),
+                                    String::new(),
+                                )
+                            })?;
+                    if native_id != requested_native_id {
+                        return Err(ProviderAdapterError::parse_error(
+                            format!(
+                                "claude lc validated start: native init session id {native_id} does not confirm the requested resume id {requested_native_id} (session NOT resumed; the started child was killed and reaped, not a zero-spawn refusal)"
+                            ),
+                            String::new(),
+                            String::new(),
+                        ));
+                    }
+                    (reader, native_id)
+                }
                 None => {
                     let (reader, session_id) = stream::wait_for_claude_init(stdout, &cancel)
                         .await

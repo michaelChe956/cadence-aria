@@ -980,11 +980,11 @@ fn t09a_expected_lc_projection(
 }
 
 /// Task 9a:LC 显式 resume 在 child 前比较全 LC audit(`LcProviderStartAudit`
-/// 完整字面量含投影)。匹配的完整 LC 存档照常续接(native id 保持);旧
-/// audit 缺 projection(direct/Task 4 前形态)或投影摘要漂移都拒绝 resume、
-/// 拒绝发生在 ProcessManager::spawn 之前(零 child、零新 provider_start),
-/// superseded 终止审计追加到被取代旧 run——绝不在 adapter 内清 resume id
-/// 后静默 fresh。
+/// 完整字面量含投影)。匹配的完整 LC 存档照常续接(9b 起 resume 亦等 init
+/// 握手、native 应答确认同 id);旧 audit 缺 projection(direct/Task 4 前
+/// 形态)或投影摘要漂移都拒绝 resume、拒绝发生在 ProcessManager::spawn
+/// 之前(零 child、零新 provider_start),superseded 终止审计追加到被取代
+/// 旧 run——绝不在 adapter 内清 resume id 后静默 fresh。
 #[cfg(unix)]
 #[tokio::test]
 async fn lcg_t09a_claude_lc_resume_audit_gate_zero_child_on_legacy_or_drift() {
@@ -1011,7 +1011,7 @@ async fn lcg_t09a_claude_lc_resume_audit_gate_zero_child_on_legacy_or_drift() {
         lc_projection,
     };
 
-    // 1)匹配的完整 LC 存档 → 续接:native id 即 resume id,新 run 落
+    // 1)匹配的完整 LC 存档 → 续接:9b 起 init 握手确认同 id 后新 run 落
     // provider_start,无 superseded。
     {
         let sink = RecordingToolPolicyAuditSink::new();
@@ -1025,8 +1025,11 @@ async fn lcg_t09a_claude_lc_resume_audit_gate_zero_child_on_legacy_or_drift() {
         let marker = fixture.paths.root().join("t09a-matching-cwd-marker");
         raw.env_vars
             .insert("LC_CWD_MARKER".to_string(), marker.display().to_string());
-        let provider = ClaudeCodeProvider::new(lc_init_result_cwd_fixture())
-            .with_version_supplier(policy_version_supplier());
+        let provider = ClaudeCodeProvider::new(lc_init_result_cwd_fixture_for_session(
+            "sess-lc-resume-t09a",
+            "lc done",
+        ))
+        .with_version_supplier(policy_version_supplier());
         let session = provider
             .start_validated(
                 fixture.validated_coding_input(raw),
