@@ -42,6 +42,28 @@ impl LogicalCodebaseGatewayFactory {
         }
     }
 
+    /// Task 1c-factory:LC 生产组装——gateway 的同步槽注入 LC gateway sync
+    /// bridge(`GatewaySyncProvider`,streaming→sync validated 桥)。LC 同步
+    /// 栈从此只接受 prepared validated launch,raw `run` 由 bridge
+    /// fail-closed;单仓 direct 的裸 `CliProviderAdapter` 两槽 routing 不经
+    /// 本工厂,保持原契约。不扩大 normal admission 写权限(material prep 与
+    /// readonly 的区分仍由 `build_for_lc_material_prep`/`build_readonly_for_lc`
+    /// 承担)。
+    pub fn with_lc_sync_bridge(
+        paths: ProductAppPaths,
+        registry: Arc<ProviderRegistry>,
+        availability_gate: Arc<ProviderAvailabilityGate>,
+    ) -> Self {
+        Self::new(
+            paths,
+            registry.clone(),
+            Arc::new(
+                crate::cross_cutting::gateway_sync_provider::GatewaySyncProvider::new(registry),
+            ),
+            availability_gate,
+        )
+    }
+
     pub fn audit(&self) -> Arc<GatewayRunAudit> {
         self.audit.clone()
     }
@@ -152,10 +174,20 @@ impl LogicalCodebaseGatewayFactory {
 
         Ok(LogicalCodebaseProviderGateway::with_audit(
             policies,
-            Arc::new(StoreBackedProviderCapabilitySource::with_store(
-                capabilities,
-                project_id.to_string(),
-            )),
+            // Task 1c-factory(carry③):LC 作用域用 `for_lc` 构造 capability
+            // source——同时建立 root-recipe 凭据的 durable Running 重核验
+            // 通道(capability store 与 operation store 同一 lc 子树);无
+            // LC 作用域(legacy)保持 `with_store` 原语义。
+            Arc::new(match lc_id.as_deref() {
+                Some(lc_id) => StoreBackedProviderCapabilitySource::for_lc(
+                    self.paths.clone(),
+                    project_id.to_string(),
+                    lc_id.to_string(),
+                ),
+                None => {
+                    StoreBackedProviderCapabilitySource::with_store(capabilities, project_id.to_string())
+                }
+            }),
             Arc::new(match lc_id.as_deref() {
                 // R9 fix round 1【Important-1】：resolver 同步按 lc_id 作用域解析 checkout
                 // 目标，否则非 legacy 新 LC 的 coding session 启动会 fail-closed。
@@ -600,6 +632,56 @@ mod tests {
         assert!(
             text.contains("root_recipe_credential_recheck_denied"),
             "无 Running operation 的凭据必须被真实重核验拒绝, got: {text}"
+        );
+    }
+
+    /// Task 1c-factory(lcg_t01):`with_lc_sync_bridge` 组装的 gateway 同步槽是
+    /// LC gateway sync bridge——raw(未经 prepare 的)同步 `run` 由 bridge
+    /// fail-closed 拒绝,绝不回落裸同步直连。
+    #[test]
+    fn lcg_t01_lc_sync_bridge_factory_rejects_raw_sync_run() {
+        let root = tempdir().expect("temporary product root");
+        let paths = ProductAppPaths::new(root.path().join(".aria"));
+        let factory = LogicalCodebaseGatewayFactory::with_lc_sync_bridge(
+            paths.clone(),
+            fake_registry(),
+            always_available_gate(),
+        );
+        register_manifest(&paths, "project_0001");
+        let gateway = factory.build("project_0001").expect("build gateway");
+
+        let aggregate_root = paths.root().join("aggregate");
+        std::fs::create_dir_all(&aggregate_root).expect("create aggregate root");
+        let request = SessionLaunchRequest::planning(
+            "project_0001",
+            ProviderRef::claude_code("cap_managed_snapshot"),
+            PolicyTarget::aggregate_root(aggregate_root.clone()),
+            vec![paths.root().to_path_buf()],
+            "sha256:managed-config-artifact",
+        );
+        let validated = gateway.validate(request).expect("validate policy");
+        let input = crate::protocol::contracts::AdapterInput {
+            provider_type: crate::protocol::contracts::ProviderType::ClaudeCode,
+            role: crate::protocol::contracts::AdapterRole::WorkItemSplitter,
+            working_directory: Some(aggregate_root),
+            worktree_path: None,
+            provider_stream_log_dir: None,
+            prompt: "lc sync bridge raw run probe".to_string(),
+            context_files: Vec::new(),
+            output_schema: String::new(),
+            timeout: 5,
+            max_retries: 1,
+        };
+        let launch =
+            crate::cross_cutting::session_launch::ValidatedAdapterInput::new(input, validated);
+        let error = gateway
+            .run_sync(launch)
+            .expect_err("raw sync run must be rejected by the LC gateway sync bridge");
+        assert!(
+            error
+                .to_string()
+                .contains("lc gateway sync bridge only accepts validated launches"),
+            "sync slot must be the LC gateway sync bridge, got: {error}"
         );
     }
 

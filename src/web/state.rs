@@ -8,9 +8,14 @@ use crate::cross_cutting::bounded_command_runner::{
     BoundedCommandRunner, TokioBoundedCommandRunner,
 };
 use crate::cross_cutting::claude_code_provider::ClaudeCodeProvider;
+use crate::cross_cutting::claude_code_provider::ClaudePolicyProjector;
+use crate::cross_cutting::codex_provider::CodexPolicyProjector;
 use crate::cross_cutting::codex_provider::CodexProvider;
+use crate::cross_cutting::gateway_sync_provider::GatewaySyncProvider;
 use crate::cross_cutting::image_client::ImageClient;
 use crate::cross_cutting::kimi_code_provider::KimiCodeProvider;
+use crate::cross_cutting::kimi_code_provider::KimiPolicyProjector;
+use crate::cross_cutting::pi_provider::PiPolicyProjector;
 use crate::cross_cutting::pi_provider::PiProvider;
 use crate::cross_cutting::provider_adapter::ProviderAdapter;
 use crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate;
@@ -22,7 +27,8 @@ use crate::product::app_paths::ProductAppPaths;
 use crate::product::image_create::{
     ImageCreateEngine, ImageCreateRunRegistry, SessionStore, SettingsStore,
 };
-use crate::product::logical_codebase::provider_projection::UnprovisionedProviderPolicyProjector;
+use crate::product::logical_codebase::provider_projection::ProviderPolicyProjector;
+// 1c-factory:Unprovisioned 占位已由四家真实 projector 整体替换。
 use crate::product::models::ProviderName;
 use crate::web::events::EventHub;
 use crate::web::gateway_factory::LogicalCodebaseGatewayFactory;
@@ -188,10 +194,12 @@ impl WebAppState {
             provider_registry.clone(),
             image_create_run_registry.clone(),
         ));
-        let logical_gateway_factory = Arc::new(LogicalCodebaseGatewayFactory::new(
+        // Task 1c-factory:gateway factory 的同步槽注入 LC gateway sync
+        // bridge——LC 同步栈只接受 validated launch;裸 `provider_adapter`
+        // 仍归单仓 direct 两槽 routing,不迁移。
+        let logical_gateway_factory = Arc::new(LogicalCodebaseGatewayFactory::with_lc_sync_bridge(
             ProductAppPaths::new(workspace_root.join(".aria")),
             provider_registry.clone(),
-            provider_adapter.clone(),
             provider_gate.clone(),
         ));
         let mut state = Self {
@@ -279,13 +287,15 @@ impl WebAppState {
         ));
         // T4 deferred minor:注入 registry 后必须用注入的 registry 同步重建
         // `logical_gateway_factory`,否则 factory 持有旧 registry,后续注入 fake
-        // registry 时 gateway 解析不到 fake。
-        state.logical_gateway_factory = Some(Arc::new(LogicalCodebaseGatewayFactory::new(
-            ProductAppPaths::new(state.workspace_root.join(".aria")),
-            state.provider_registry.clone(),
-            state.provider_adapter.clone(),
-            state.provider_gate.clone(),
-        )));
+        // registry 时 gateway 解析不到 fake。Task 1c-factory:重建同步槽仍走
+        // LC sync bridge 注入(与 `with_events` 生产装配同构)。
+        state.logical_gateway_factory = Some(Arc::new(
+            LogicalCodebaseGatewayFactory::with_lc_sync_bridge(
+                ProductAppPaths::new(state.workspace_root.join(".aria")),
+                state.provider_registry.clone(),
+                state.provider_gate.clone(),
+            ),
+        ));
         state.aggregate_initialization_dependencies = Some(
             crate::web::handlers::AggregateInitializationDependencies::production(&state)
                 .expect("build aggregate initialization dependencies"),
@@ -468,40 +478,47 @@ fn default_provider_registry(
 }
 
 /// 生产模式 registry:注册所有实际 provider，不含 `ProviderName::Fake`。
+///
+/// Task 1c-factory:四家按 `register_gated` 原子装配 adapter/projector/gate
+/// 三件套,projector 为各 provider 的真实实现(替换 1a 的 Unprovisioned
+/// 占位)。装配期 exact version 尚未实测,projector 以空版本构造——按各
+/// 实现合同 fail-closed 拒绝投影(不伪造版本);真实启动的投影由 adapter
+/// 侧在 validated 启动时以实测版本构造同款 projector 产出。注册失败
+/// fail-fast(expect 带语境),绝不带着半注册三件套继续启动。
 fn real_provider_registry(provider_gate: Arc<ProviderAvailabilityGate>) -> ProviderRegistry {
     let mut registry = ProviderRegistry::new();
-    let _ = registry.register_gated(
-        ProviderName::ClaudeCode,
-        Arc::new(ClaudeCodeProvider::new(PathBuf::from("claude"))),
-        // 1a 合同期占位(裁决 A1):四参原子 register_gated 的未接入
-        // projector,恒拒绝投影;1c-factory 落真实 projector 时整体替换。
-        Arc::new(UnprovisionedProviderPolicyProjector),
-        provider_gate.clone(),
-    );
-    let _ = registry.register_gated(
-        ProviderName::Codex,
-        Arc::new(CodexProvider::new(PathBuf::from("codex"))),
-        // 1a 合同期占位(裁决 A1):四参原子 register_gated 的未接入
-        // projector,恒拒绝投影;1c-factory 落真实 projector 时整体替换。
-        Arc::new(UnprovisionedProviderPolicyProjector),
-        provider_gate.clone(),
-    );
-    let _ = registry.register_gated(
-        ProviderName::Pi,
-        Arc::new(PiProvider::new(PathBuf::from("pi"))),
-        // 1a 合同期占位(裁决 A1):四参原子 register_gated 的未接入
-        // projector,恒拒绝投影;1c-factory 落真实 projector 时整体替换。
-        Arc::new(UnprovisionedProviderPolicyProjector),
-        provider_gate.clone(),
-    );
-    let _ = registry.register_gated(
-        ProviderName::KimiCode,
-        Arc::new(KimiCodeProvider::new(PathBuf::from("kimi"))),
-        // 1a 合同期占位(裁决 A1):四参原子 register_gated 的未接入
-        // projector,恒拒绝投影;1c-factory 落真实 projector 时整体替换。
-        Arc::new(UnprovisionedProviderPolicyProjector),
-        provider_gate,
-    );
+    registry
+        .register_gated(
+            ProviderName::ClaudeCode,
+            Arc::new(ClaudeCodeProvider::new(PathBuf::from("claude"))),
+            Arc::new(ClaudePolicyProjector::new(String::new())),
+            provider_gate.clone(),
+        )
+        .expect("register gated claude code provider trio");
+    registry
+        .register_gated(
+            ProviderName::Codex,
+            Arc::new(CodexProvider::new(PathBuf::from("codex"))),
+            Arc::new(CodexPolicyProjector::new(String::new())),
+            provider_gate.clone(),
+        )
+        .expect("register gated codex provider trio");
+    registry
+        .register_gated(
+            ProviderName::Pi,
+            Arc::new(PiProvider::new(PathBuf::from("pi"))),
+            Arc::new(PiPolicyProjector::new(String::new())),
+            provider_gate.clone(),
+        )
+        .expect("register gated pi provider trio");
+    registry
+        .register_gated(
+            ProviderName::KimiCode,
+            Arc::new(KimiCodeProvider::new(PathBuf::from("kimi"))),
+            Arc::new(KimiPolicyProjector::new(String::new())),
+            provider_gate,
+        )
+        .expect("register gated kimi code provider trio");
     registry
 }
 
