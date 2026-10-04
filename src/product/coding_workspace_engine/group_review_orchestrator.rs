@@ -14,7 +14,6 @@ use super::{
     CodingProviderStreamRun, CodingWorkspaceEngine, CodingWorkspaceEngineError,
     provider_type_for_name, role_permission_mode_for_attempt, streaming_input_from_adapter,
 };
-use crate::cross_cutting::session_launch::ValidatedStreamingProviderInput;
 
 use super::group_review_budget::{
     BudgetDecision, CapacityDecision, FindingsDecision, GROUP_REVIEW_QUALITY_TARGET_BYTES,
@@ -1000,8 +999,19 @@ impl GroupReviewExecutor for RealGroupReviewExecutor<'_> {
         if let Some(policy) = policy.as_ref() {
             provider_input.working_directory = Some(policy.envelope().working_directory.clone());
         }
-        let validated_input = policy
-            .map(|policy| ValidatedStreamingProviderInput::new(provider_input.clone(), policy));
+        // Task 1b 段③:validated input 一律经 gateway `prepare_streaming_launch`
+        // 组装(prepare 前绑定 run-bound sink;无通用 tool_policy 的角色同样
+        // 绑定;外来非法 Some(policy) 由 gateway 拒绝)。
+        let validated_input = self
+            .engine
+            .prepare_streaming_launch_for_role(
+                &self.attempt,
+                CodingProviderRole::InternalReviewer,
+                &worktree_path,
+                provider_input.clone(),
+            )
+            .map_err(|error| CodingWorkspaceEngineError::ProviderStream(error.to_string()))
+            .map_err(map_group_review_engine_error)?;
         let (command_tx, mut command_rx) = mpsc::channel::<CodingRunnerCommand>(1);
         drop(command_tx);
         let full_output = self

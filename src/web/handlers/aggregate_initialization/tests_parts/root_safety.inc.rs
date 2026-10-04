@@ -142,6 +142,19 @@ impl crate::cross_cutting::streaming_provider::StreamingProviderAdapter
         }
         self.recipe.start(input, cancel).await
     }
+    /// Task 1b 段③:prepared launch 经 `start_validated` 分发——拆出 input
+    /// 后与裸 `start` 同路径(rogue 写探针行为保持)。
+    async fn start_validated(
+        &self,
+        validated: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<
+        crate::cross_cutting::streaming_provider::ProviderSession,
+        crate::cross_cutting::provider_adapter::ProviderAdapterError,
+    > {
+        let (input, _launch) = validated.into_parts();
+        self.start(input, cancel).await
+    }
 }
 
 struct RootSafetyFixture {

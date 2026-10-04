@@ -159,6 +159,16 @@ impl StreamingProviderAdapter for D4BaselineProbeAdapter {
             commands: command_tx,
         })
     }
+    /// Task 1b 段③:prepared launch 经 `start_validated` 分发——拆出 input
+    /// 后与裸 `start` 同路径(probe 副作用/计数保持)。
+    async fn start_validated(
+        &self,
+        validated: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let (input, _launch) = validated.into_parts();
+        self.start(input, cancel).await
+    }
 }
 
 /// 以 LC Coder 角色驱动一次真实 provider stream：policy 经
@@ -412,6 +422,16 @@ impl StreamingProviderAdapter for D4ReviewCycleProbeAdapter {
             .start(input, cancel)
             .await
     }
+    /// Task 1b 段③:prepared launch 经 `start_validated` 分发——拆出 input
+    /// 后与裸 `start` 同路径(probe 副作用/计数保持)。
+    async fn start_validated(
+        &self,
+        validated: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let (input, _launch) = validated.into_parts();
+        self.start(input, cancel).await
+    }
 }
 
 /// Task 3.2（D4 全角色，REQ-ENV-03/REQ-PLN-06）：CodeReviewer rework cycle
@@ -567,6 +587,16 @@ impl StreamingProviderAdapter for RootCwdProbeAdapter {
             events: event_rx,
             commands: command_tx,
         })
+    }
+    /// Task 1b 段③:prepared launch 经 `start_validated` 分发——拆出 input
+    /// 后与裸 `start` 同路径(cwd 探针保持)。
+    async fn start_validated(
+        &self,
+        validated: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let (input, _launch) = validated.into_parts();
+        self.start(input, cancel).await
     }
 }
 

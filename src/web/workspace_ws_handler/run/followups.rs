@@ -189,43 +189,75 @@ macro_rules! workspace_ws_work_item_plan_revision_arm {
                         return;
                     }
                 };
-                let provider_input = $engine.attach_tool_policy_audit(provider_input);
-                let provider_session = start_work_item_plan_author(
-                    plan_launch,
-                    $provider_for_run.clone(),
-                    provider_input,
-                    $run_cancel.clone(),
-                    None,
-                )
-                .await;
-                let full_output = match $engine
-                    .drive_work_item_plan_provider_session_to_output(
-                        provider_session,
-                        &mut $command_rx,
-                        node_id,
-                        invocation.author_provider.clone(),
-                    )
-                    .await
-                {
-                    Ok(output) => output,
-                    Err(_) => {
-                        $engine.mark_active_run_finished(&$run_label);
-                        return;
-                    }
-                };
-                let structured_output = match parse_work_item_split_structured_output(&full_output)
-                {
-                    Ok(output) => output,
+                // Task 1b 段②生产臂:Logical 启动先 begin split run 身份
+                // (retry 每次新 handle);begin 失败 fail-closed 上浮。
+                let plan_split_run = match crate::web::workspace_ws_handler::run::begin_plan_split_run_if_logical(
+                    &plan_launch,
+                    &lifecycle_for_run,
+                    &session_record_for_run.project_id,
+                    &session_record_for_run.issue_id,
+                    &invocation.author_provider,
+                    &$engine.session().session_id,
+                ) {
+                    Ok(run) => run,
                     Err(message) => {
                         $engine.mark_active_run_finished(&$run_label);
                         drop($engine);
-                        let err = WsOutMessage::Error {
-                            message: format!("split generate_revision failed: {message}"),
-                        };
+                        let err = WsOutMessage::Error { message };
                         let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
                         return;
                     }
                 };
+                 let provider_input = $engine.attach_tool_policy_audit(provider_input);
+                 let provider_session = start_work_item_plan_author(
+                     plan_launch,
+                     $provider_for_run.clone(),
+                     provider_input,
+                     $run_cancel.clone(),
+                    plan_split_run.as_ref(),
+                 )
+                 .await;
+                 let full_output = match $engine
+                     .drive_work_item_plan_provider_session_to_output(
+                         provider_session,
+                         &mut $command_rx,
+                         node_id,
+                         invocation.author_provider.clone(),
+                     )
+                     .await
+                 {
+                     Ok(output) => output,
+                    Err(message) => {
+                        crate::web::workspace_ws_handler::run::fail_plan_split_run(
+                            plan_split_run.as_ref(),
+                            &format!("provider session drive failed: {message}"),
+                        );
+                         $engine.mark_active_run_finished(&$run_label);
+                         return;
+                     }
+                 };
+                 let structured_output = match parse_work_item_split_structured_output(&full_output)
+                 {
+                     Ok(output) => output,
+                     Err(message) => {
+                        crate::web::workspace_ws_handler::run::fail_plan_split_run(
+                            plan_split_run.as_ref(),
+                            &format!("structured output parse failed: {message}"),
+                        );
+                         $engine.mark_active_run_finished(&$run_label);
+                         drop($engine);
+                         let err = WsOutMessage::Error {
+                             message: format!("split generate_revision failed: {message}"),
+                         };
+                         let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
+                         return;
+                     }
+                 };
+                crate::web::workspace_ws_handler::run::close_plan_split_run(
+                    plan_split_run.as_ref(),
+                    &invocation.prompt,
+                    &full_output,
+                );
                 let output = match WorkItemSplitEngine::complete_revision_from_structured_output(
                     &request,
                     &lifecycle_for_run,
@@ -381,12 +413,31 @@ macro_rules! workspace_ws_work_item_plan_revision_arm {
                                 }
                             };
                             let provider_input = $engine.attach_tool_policy_audit(provider_input);
+                            // Task 1b 段②生产臂:AutoRevision retry 每次迭代
+                            // begin 新 handle(retry 不复用旧身份)。
+                            let plan_split_run = match crate::web::workspace_ws_handler::run::begin_plan_split_run_if_logical(
+                                &plan_launch,
+                                &lifecycle_for_run,
+                                &session_record_for_run.project_id,
+                                &session_record_for_run.issue_id,
+                                &invocation.author_provider,
+                                &$engine.session().session_id,
+                            ) {
+                                Ok(run) => run,
+                                Err(message) => {
+                                    $engine.mark_active_run_finished(&$run_label);
+                                    drop($engine);
+                                    let err = WsOutMessage::Error { message };
+                                    let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
+                                    return;
+                                }
+                            };
                             let provider_session = start_work_item_plan_author(
                                 plan_launch,
                                 $provider_for_run.clone(),
                                 provider_input,
                                 $run_cancel.clone(),
-                                None,
+                                plan_split_run.as_ref(),
                             )
                             .await;
                             let full_output = match $engine
@@ -399,7 +450,11 @@ macro_rules! workspace_ws_work_item_plan_revision_arm {
                                 .await
                             {
                                 Ok(output) => output,
-                                Err(_) => {
+                                Err(message) => {
+                                    crate::web::workspace_ws_handler::run::fail_plan_split_run(
+                                        plan_split_run.as_ref(),
+                                        &format!("provider session drive failed: {message}"),
+                                    );
                                     $engine.mark_active_run_finished(&$run_label);
                                     return;
                                 }
@@ -408,6 +463,10 @@ macro_rules! workspace_ws_work_item_plan_revision_arm {
                                 match parse_work_item_split_structured_output(&full_output) {
                                     Ok(output) => output,
                                     Err(message) => {
+                                        crate::web::workspace_ws_handler::run::fail_plan_split_run(
+                                            plan_split_run.as_ref(),
+                                            &format!("structured output parse failed: {message}"),
+                                        );
                                         $engine.mark_active_run_finished(&$run_label);
                                         drop($engine);
                                         let err = WsOutMessage::Error {
@@ -420,6 +479,11 @@ macro_rules! workspace_ws_work_item_plan_revision_arm {
                                         return;
                                     }
                                 };
+                            crate::web::workspace_ws_handler::run::close_plan_split_run(
+                                plan_split_run.as_ref(),
+                                &invocation.prompt,
+                                &full_output,
+                            );
                             let output =
                                 match WorkItemSplitEngine::complete_revision_from_structured_output(
                                     &request,
@@ -662,12 +726,35 @@ macro_rules! workspace_ws_provider_run_followups {
                 )
                 .await;
             let provider_input = $engine.attach_tool_policy_audit(provider_input);
+            // Task 1b 段②生产臂:RetryOnce 循环每轮 begin 新 handle。
+            let draft_prompt = provider_input.prompt.clone();
+            let plan_split_run = match crate::web::workspace_ws_handler::run::begin_plan_split_run_if_logical(
+                &plan_launch,
+                &crate::product::lifecycle_store::LifecycleStore::new(
+                    $run_context_clone.app_paths.clone(),
+                ),
+                &$run_context_clone.session_record.project_id,
+                &$run_context_clone.session_record.issue_id,
+                &author_name,
+                &$engine.session().session_id,
+            ) {
+                Ok(run) => run,
+                Err(message) => {
+                    $engine.mark_active_run_finished(&$run_label);
+                    drop($engine);
+                    let err = WsOutMessage::Error { message };
+                    let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
+                    drop($provider_drive_guard.take());
+                    $manager_for_task.finish_run($run_token).await;
+                    return;
+                }
+            };
             let provider_session = start_work_item_plan_author(
                 plan_launch,
                 provider_for_draft.clone(),
                 provider_input,
                 $run_cancel.clone(),
-                None,
+                plan_split_run.as_ref(),
             )
             .await;
             let full_output = match $engine
@@ -680,7 +767,11 @@ macro_rules! workspace_ws_provider_run_followups {
                 .await
             {
                 Ok(output) => output,
-                Err(_) => {
+                Err(message) => {
+                    crate::web::workspace_ws_handler::run::fail_plan_split_run(
+                        plan_split_run.as_ref(),
+                        &format!("provider session drive failed: {message}"),
+                    );
                     $engine.mark_active_run_finished(&$run_label);
                     return;
                 }
@@ -688,6 +779,10 @@ macro_rules! workspace_ws_provider_run_followups {
             let structured_output = match parse_work_item_split_structured_output(&full_output) {
                 Ok(output) => output,
                 Err(message) => {
+                    crate::web::workspace_ws_handler::run::fail_plan_split_run(
+                        plan_split_run.as_ref(),
+                        &format!("structured output parse failed: {message}"),
+                    );
                     $engine.mark_active_run_finished(&$run_label);
                     drop($engine);
                     let err = WsOutMessage::Error {
@@ -699,6 +794,11 @@ macro_rules! workspace_ws_provider_run_followups {
                     return;
                 }
             };
+            crate::web::workspace_ws_handler::run::close_plan_split_run(
+                plan_split_run.as_ref(),
+                &draft_prompt,
+                &full_output,
+            );
             let candidate = match parse_work_item_draft_output(structured_output) {
                 Ok(candidate) => candidate,
                 Err(error) => {
@@ -798,22 +898,43 @@ pub(crate) async fn drive_current_work_item_plan_outline_run(
             PlanAuthorOutputContract::Structured,
         )?;
         let provider_input = engine.attach_tool_policy_audit(provider_input);
+        // Task 1b 段②生产臂:AutoRevision 循环每轮 begin 新 handle。
+        let plan_split_run = begin_plan_split_run_if_logical(
+            &plan_launch,
+            &lifecycle,
+            &session_record.project_id,
+            &session_record.issue_id,
+            &invocation.author_provider,
+            &engine.session().session_id,
+        )
+        .map_err(|message| format!("begin plan split run failed: {message}"))?;
         let provider_session = start_work_item_plan_author(
             plan_launch,
             provider.clone(),
             provider_input,
             run_cancel.clone(),
-            None,
+            plan_split_run.as_ref(),
         )
         .await;
-        let full_output = engine
+        let full_output = match engine
             .drive_work_item_plan_provider_session_to_output(
                 provider_session,
                 command_rx,
                 node_id,
                 invocation.author_provider.clone(),
             )
-            .await?;
+            .await
+        {
+            Ok(output) => output,
+            Err(message) => {
+                fail_plan_split_run(
+                    plan_split_run.as_ref(),
+                    &format!("provider session drive failed: {message}"),
+                );
+                return Err(message);
+            }
+        };
+        close_plan_split_run(plan_split_run.as_ref(), &invocation.prompt, &full_output);
         let outcome =
             complete_work_item_plan_outline_author_from_output(engine, &full_output).await?;
 

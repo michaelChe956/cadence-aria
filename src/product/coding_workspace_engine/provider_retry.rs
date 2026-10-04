@@ -1,5 +1,4 @@
 use super::*;
-use crate::cross_cutting::session_launch::ValidatedStreamingProviderInput;
 use crate::cross_cutting::structured_output::StructuredOutputContract;
 use crate::product::coding_models::{CodingAdmissionKind, CodingAttemptScope};
 use crate::product::coding_workspace_engine::group::GroupUnitFailureOutcome;
@@ -334,8 +333,24 @@ impl CodingWorkspaceEngine {
                 provider_input.working_directory =
                     Some(policy.envelope().working_directory.clone());
             }
-            let validated_input = policy
-                .map(|policy| ValidatedStreamingProviderInput::new(provider_input.clone(), policy));
+            // Task 1b 段③:validated input 一律经 gateway prepare 组装(prepare
+            // 前绑定 run-bound sink——Coder/Kimi 无通用 tool_policy 也绑定;
+            // 外来非法 Some(policy) 由 gateway 拒绝)。
+            let validated_input = if invocation_attempt.target_snapshot.is_some() {
+                self.prepare_coder_root_launch_streaming(
+                    &invocation_attempt,
+                    worktree_path,
+                    provider_input.clone(),
+                )
+            } else {
+                self.prepare_streaming_launch_for_role(
+                    &invocation_attempt,
+                    CodingProviderRole::Coder,
+                    worktree_path,
+                    provider_input.clone(),
+                )
+            }
+            .map_err(|error| CodingWorkspaceEngineError::ProviderStream(error.to_string()))?;
             let outcome = self
                 .run_provider_stream_invocation(CodingProviderStreamRun {
                     attempt: &invocation_attempt,
@@ -490,8 +505,16 @@ impl CodingWorkspaceEngine {
                 provider_input.working_directory =
                     Some(policy.envelope().working_directory.clone());
             }
-            let validated_input = policy
-                .map(|policy| ValidatedStreamingProviderInput::new(provider_input.clone(), policy));
+            // Task 1b 段③:validated input 一律经 gateway prepare 组装(prepare
+            // 前绑定 run-bound sink;外来非法 Some(policy) 拒绝)。
+            let validated_input = self
+                .prepare_streaming_launch_for_role(
+                    &invocation_attempt,
+                    CodingProviderRole::CodeReviewer,
+                    worktree_path,
+                    provider_input.clone(),
+                )
+                .map_err(|error| CodingWorkspaceEngineError::ProviderStream(error.to_string()))?;
             let outcome = self
                 .run_provider_stream_invocation(CodingProviderStreamRun {
                     attempt: &invocation_attempt,

@@ -236,6 +236,16 @@ impl crate::cross_cutting::streaming_provider::StreamingProviderAdapter
             commands: command_tx,
         })
     }
+    /// Task 1b 段③:prepared launch 经 `start_validated` 分发——拆出 input
+    /// 后与裸 `start` 同路径(记录/输出语义保持)。
+    async fn start_validated(
+        &self,
+        validated: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, crate::cross_cutting::provider_adapter::ProviderAdapterError> {
+        let (input, _launch) = validated.into_parts();
+        self.start(input, cancel).await
+    }
 }
 
 // ---- LC 别名登记 ----

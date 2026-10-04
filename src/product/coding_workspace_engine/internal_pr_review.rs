@@ -1,6 +1,5 @@
 use super::cross_target_check::detect_cross_target_violation_for_delivery;
 use super::*;
-use crate::cross_cutting::session_launch::ValidatedStreamingProviderInput;
 
 pub(crate) fn summarize_push_error(
     remote: &str,
@@ -377,8 +376,16 @@ impl CodingWorkspaceEngine {
         if let Some(policy) = policy.as_ref() {
             provider_input.working_directory = Some(policy.envelope().working_directory.clone());
         }
-        let validated_input = policy
-            .map(|policy| ValidatedStreamingProviderInput::new(provider_input.clone(), policy));
+        // Task 1b 段③:validated input 一律经 gateway `prepare_streaming_launch`
+        // 组装(prepare 前绑定 run-bound sink;外来非法 Some(policy) 拒绝)。
+        let validated_input = self
+            .prepare_streaming_launch_for_role(
+                &attempt,
+                CodingProviderRole::InternalReviewer,
+                worktree_path.as_path(),
+                provider_input.clone(),
+            )
+            .map_err(|error| CodingWorkspaceEngineError::ProviderStream(error.to_string()))?;
         let full_output = self
             .run_provider_stream_to_completion(CodingProviderStreamRun {
                 attempt: &attempt,

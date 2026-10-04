@@ -53,3 +53,28 @@ impl CodingWorkspaceEngine {
         Ok(Some(gateway.validate(request)?))
     }
 }
+
+impl CodingWorkspaceEngine {
+    /// Task 1b 段③:LC Coder/retry root launch 的 prepare 入口。request 构造
+    /// 与 `prepare_streaming_launch_for_role(Coder)` 同源(Coder 恒
+    /// `role_config.coder`,cwd=canonical root、target/writable root=attempt
+    /// worktree),prepare 前绑定 run-bound sink;分流与
+    /// `resolve_coder_root_launch_policy` 一致(未注入 gateway 或非逻辑
+    /// attempt 返回 `Ok(None)`,Legacy 直连)。
+    pub(crate) fn prepare_coder_root_launch_streaming(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        worktree_path: &Path,
+        input: crate::cross_cutting::streaming_provider::StreamingProviderInput,
+    ) -> Result<
+        Option<crate::cross_cutting::session_launch::ValidatedStreamingProviderInput>,
+        ProviderGatewayError,
+    > {
+        self.prepare_streaming_launch_for_role(
+            attempt,
+            crate::product::coding_models::CodingProviderRole::Coder,
+            worktree_path,
+            input,
+        )
+    }
+}

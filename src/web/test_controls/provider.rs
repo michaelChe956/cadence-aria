@@ -174,6 +174,18 @@ impl StreamingProviderAdapter for TestControlledFakeStreamingProvider {
         ))
     }
 
+    /// Task 1b 段③:prepared launch 经 `start_validated` 分发——拆出 input
+    /// 后与裸 `start` 同路径(review/permission fixture 与 fake fallback
+    /// 语义保持)。
+    async fn start_validated(
+        &self,
+        validated: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let (input, _launch) = validated.into_parts();
+        self.start(input, cancel).await
+    }
+
     async fn run_streaming(
         &self,
         input: &AdapterInput,

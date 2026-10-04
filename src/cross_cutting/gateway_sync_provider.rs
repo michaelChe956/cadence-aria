@@ -834,121 +834,129 @@ mod tests {
         assert!(timer_completed_before_provider_finished);
     }
 
-/// 段③(lcg_t01):prepared launch(gateway `prepare_streaming_launch`/
-/// `prepare_sync_launch` 产出,run-bound audit 上下文已冻结)在
-/// `start_streaming`/`run_sync` 内永不回落裸 `start`/`run`——streaming
-/// 栈唯一经 `start_validated` 分发,sync 栈唯一经 bridge `run_validated`;
-/// direct start/legacy bridge 计数恒 0(冻结断言组 194-204 对应项)。
-#[tokio::test]
-async fn lcg_t01_validated_call_never_falls_back_to_raw_start_or_run() {
-    use crate::cross_cutting::streaming_provider::ProviderPermissionMode;
-    use crate::product::lifecycle_store::LifecycleStore;
-    use crate::product::logical_codebase::provider_gateway::ProviderLaunchAuditContext;
+    /// 段③(lcg_t01):prepared launch(gateway `prepare_streaming_launch`/
+    /// `prepare_sync_launch` 产出,run-bound audit 上下文已冻结)在
+    /// `start_streaming`/`run_sync` 内永不回落裸 `start`/`run`——streaming
+    /// 栈唯一经 `start_validated` 分发,sync 栈唯一经 bridge `run_validated`;
+    /// direct start/legacy bridge 计数恒 0(冻结断言组 194-204 对应项)。
+    #[tokio::test]
+    async fn lcg_t01_validated_call_never_falls_back_to_raw_start_or_run() {
+        use crate::cross_cutting::streaming_provider::ProviderPermissionMode;
+        use crate::product::lifecycle_store::LifecycleStore;
+        use crate::product::logical_codebase::provider_gateway::ProviderLaunchAuditContext;
 
-    let (root, canonical_root, member) = bridge_root_and_member();
-    let paths = ProductAppPaths::new(canonical_root.join(".aria"));
+        let (root, canonical_root, member) = bridge_root_and_member();
+        let paths = ProductAppPaths::new(canonical_root.join(".aria"));
 
-    let adapter = BridgeCountingStreamingAdapter::new(
+        let adapter = BridgeCountingStreamingAdapter::new(
         Duration::from_millis(10),
         "<ARIA_STRUCTURED_OUTPUT nonce=\"rawgrd01\">{\"nonce\":\"rawgrd01\",\"work_items\":[]}</ARIA_STRUCTURED_OUTPUT>"
             .to_string(),
     );
-    let mut registry = ProviderRegistry::new();
-    registry.register(ProviderName::ClaudeCode, adapter.clone());
-    let registry = std::sync::Arc::new(registry);
-    // sync 槽注入 streaming→sync bridge:run_validated 内部从同一 registry
-    // 经 `start_validated` 驱动,裸 `run` 通道 fail-closed。
-    let sync_bridge = GatewaySyncProvider::new(registry.clone());
+        let mut registry = ProviderRegistry::new();
+        registry.register(ProviderName::ClaudeCode, adapter.clone());
+        let registry = std::sync::Arc::new(registry);
+        // sync 槽注入 streaming→sync bridge:run_validated 内部从同一 registry
+        // 经 `start_validated` 驱动,裸 `run` 通道 fail-closed。
+        let sync_bridge = GatewaySyncProvider::new(registry.clone());
 
-    let manifest =
-        LogicalCodebaseManifest::new("project_0001", canonical_root.to_path_buf(), vec![]);
-    let policies = AggregatePolicyArtifactStore::new(paths.clone());
-    policies.ensure_bootstrap(&manifest).expect("bootstrap policy");
-    let gateway = LogicalCodebaseProviderGateway::with_audit(
-        policies,
-        std::sync::Arc::new(BridgeStaticCapabilitySource),
-        std::sync::Arc::new(BridgePassThroughResolver),
-        registry,
-        std::sync::Arc::new(sync_bridge),
-        bridge_availability_gate(),
-        std::sync::Arc::new(GatewayRunAudit::new()),
-        manifest.provider_context_root.clone(),
-    );
+        let manifest =
+            LogicalCodebaseManifest::new("project_0001", canonical_root.to_path_buf(), vec![]);
+        let policies = AggregatePolicyArtifactStore::new(paths.clone());
+        policies
+            .ensure_bootstrap(&manifest)
+            .expect("bootstrap policy");
+        let gateway = LogicalCodebaseProviderGateway::with_audit(
+            policies,
+            std::sync::Arc::new(BridgeStaticCapabilitySource),
+            std::sync::Arc::new(BridgePassThroughResolver),
+            registry,
+            std::sync::Arc::new(sync_bridge),
+            bridge_availability_gate(),
+            std::sync::Arc::new(GatewayRunAudit::new()),
+            manifest.provider_context_root.clone(),
+        );
 
-    let request = SessionLaunchRequest {
-        project_id: "project_0001".to_string(),
-        provider: ProviderRef::claude_code("cap_bridge_fixture"),
-        action: SessionPolicyAction::PlanningReadOnly,
-        target: PolicyTarget::checkout(
-            "logical_repo_0001".to_string(),
-            "checkout_0001".to_string(),
-            member.to_path_buf(),
-        ),
-        working_directory: canonical_root.to_path_buf(),
-        readable_roots: vec![canonical_root.to_path_buf()],
-        writable_roots: Vec::new(),
-        config_artifact_ref: "sha256:bridge-fixture-config".to_string(),
-    };
-    let lifecycle = LifecycleStore::new(paths.clone());
-    let audit_context = |role_run_seq: u64| ProviderLaunchAuditContext {
-        workspace_session_id: "ws_raw_guard_0001".to_string(),
-        role_run_seq,
-        audit_sink: std::sync::Arc::new(lifecycle.clone()),
-    };
+        let request = SessionLaunchRequest {
+            project_id: "project_0001".to_string(),
+            provider: ProviderRef::claude_code("cap_bridge_fixture"),
+            action: SessionPolicyAction::PlanningReadOnly,
+            target: PolicyTarget::checkout(
+                "logical_repo_0001".to_string(),
+                "checkout_0001".to_string(),
+                member.to_path_buf(),
+            ),
+            working_directory: canonical_root.to_path_buf(),
+            readable_roots: vec![canonical_root.to_path_buf()],
+            writable_roots: Vec::new(),
+            config_artifact_ref: "sha256:bridge-fixture-config".to_string(),
+        };
+        let lifecycle = LifecycleStore::new(paths.clone());
+        let audit_context = |role_run_seq: u64| ProviderLaunchAuditContext {
+            workspace_session_id: "ws_raw_guard_0001".to_string(),
+            role_run_seq,
+            audit_sink: std::sync::Arc::new(lifecycle.clone()),
+        };
 
-    // streaming 栈:prepare(绑 run-bound sink)→ start_streaming——唯一经
-    // `start_validated` 分发,不回落裸 `start`。
-    let streaming_input = crate::cross_cutting::streaming_provider::StreamingProviderInput {
-        working_directory: Some(canonical_root.clone()),
-        baseline_tree: None,
-        tool_policy: None,
-        audit_sink: None,
-        provider_type: ProviderType::ClaudeCode,
-        role: AdapterRole::WorkItemSplitter,
-        prompt: "raw guard split prompt".to_string(),
-        working_dir: member.clone(),
-        workspace_session_id: None,
-        resume_provider_session_id: None,
-        permission_mode: ProviderPermissionMode::Auto,
-        structured_output_contract: None,
-        env_vars: std::collections::BTreeMap::new(),
-        timeout_secs: 30,
-    };
-    let prepared_streaming = gateway
-        .prepare_streaming_launch(streaming_input, request.clone(), audit_context(1))
-        .expect("prepare streaming launch");
-    let session = gateway
-        .start_streaming(prepared_streaming, tokio_util::sync::CancellationToken::new())
-        .await
-        .expect("start streaming via validated dispatch");
-    drop(session);
+        // streaming 栈:prepare(绑 run-bound sink)→ start_streaming——唯一经
+        // `start_validated` 分发,不回落裸 `start`。
+        let streaming_input = crate::cross_cutting::streaming_provider::StreamingProviderInput {
+            working_directory: Some(canonical_root.clone()),
+            baseline_tree: None,
+            tool_policy: None,
+            audit_sink: None,
+            provider_type: ProviderType::ClaudeCode,
+            role: AdapterRole::WorkItemSplitter,
+            prompt: "raw guard split prompt".to_string(),
+            working_dir: member.clone(),
+            workspace_session_id: None,
+            resume_provider_session_id: None,
+            permission_mode: ProviderPermissionMode::Auto,
+            structured_output_contract: None,
+            env_vars: std::collections::BTreeMap::new(),
+            timeout_secs: 30,
+        };
+        let prepared_streaming = gateway
+            .prepare_streaming_launch(streaming_input, request.clone(), audit_context(1))
+            .expect("prepare streaming launch");
+        let session = gateway
+            .start_streaming(
+                prepared_streaming,
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("start streaming via validated dispatch");
+        drop(session);
 
-    // sync 栈:prepare_sync_launch → run_sync——唯一经 bridge
-    // `run_validated`,裸 `run` fail-closed。
-    let prepared_sync = gateway
-        .prepare_sync_launch(
-            bridge_adapter_input(&canonical_root, &member),
-            request,
-            audit_context(2),
-        )
-        .expect("prepare sync launch");
-    let output = gateway
-        .run_sync(prepared_sync)
-        .expect("run via bridge validated run");
+        // sync 栈:prepare_sync_launch → run_sync——唯一经 bridge
+        // `run_validated`,裸 `run` fail-closed。
+        let prepared_sync = gateway
+            .prepare_sync_launch(
+                bridge_adapter_input(&canonical_root, &member),
+                request,
+                audit_context(2),
+            )
+            .expect("prepare sync launch");
+        let output = gateway
+            .run_sync(prepared_sync)
+            .expect("run via bridge validated run");
 
-    let validated_start_calls = adapter.validated_starts.load(Ordering::SeqCst);
-    let direct_calls = adapter.direct_starts.load(Ordering::SeqCst);
-    let legacy_bridge_calls = adapter.legacy_bridge_runs.load(Ordering::SeqCst);
-    assert_eq!(
-        validated_start_calls, 2,
-        "streaming 与 sync 两栈都唯一经 start_validated 分发"
-    );
-    assert_eq!(direct_calls, 0, "prepared launch 不得回落裸 start");
-    assert_eq!(legacy_bridge_calls, 0, "prepared launch 不得回落 legacy bridge");
-    assert_eq!(
-        output.structured_output,
-        Some(serde_json::json!({"work_items": []}))
-    );
-    assert_eq!(output.timeout_status, TimeoutStatus::NotTimedOut);
-}
+        let validated_start_calls = adapter.validated_starts.load(Ordering::SeqCst);
+        let direct_calls = adapter.direct_starts.load(Ordering::SeqCst);
+        let legacy_bridge_calls = adapter.legacy_bridge_runs.load(Ordering::SeqCst);
+        assert_eq!(
+            validated_start_calls, 2,
+            "streaming 与 sync 两栈都唯一经 start_validated 分发"
+        );
+        assert_eq!(direct_calls, 0, "prepared launch 不得回落裸 start");
+        assert_eq!(
+            legacy_bridge_calls, 0,
+            "prepared launch 不得回落 legacy bridge"
+        );
+        assert_eq!(
+            output.structured_output,
+            Some(serde_json::json!({"work_items": []}))
+        );
+        assert_eq!(output.timeout_status, TimeoutStatus::NotTimedOut);
+    }
 }

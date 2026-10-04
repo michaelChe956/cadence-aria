@@ -385,15 +385,49 @@ impl AggregateProviderTurnDriver for GatewayBackedAggregateProviderTurnDriver {
                 });
             }
         }
-        let validated = self.gateway.validate(request).map_err(|error| {
-            AggregateInitializationError::ProviderTurn {
-                step,
-                reason: format!("gateway validate failed: {error}"),
-                retryable: true,
-            }
-        })?;
         let input = self.streaming_input(step, &aggregate_root, Some(tool_policy));
-        let launch = ValidatedStreamingProviderInput::new(input, validated);
+        // Task 1b 段③:admission paths 在场(生产主路径)时,provider turn 经
+        // gateway `prepare_streaming_launch` 组装 prepared launch——prepare 前
+        // 绑定 run-bound audit sink(BootstrapExecutor marker 校验/角色策略
+        // guard 在 prepare 内统一施加);paths 缺席(legacy 别名解析失败的
+        // 降级组装/测试构造)保持原 validate+new 路径(无审计旧路径,
+        // 与 production_dependencies 的降级语义一致)。
+        let launch = match self.admission_paths.as_ref() {
+            Some(paths) => {
+                let lifecycle = crate::product::lifecycle_store::LifecycleStore::new(paths.clone());
+                let workspace_session_id = format!("aggregate-{project_id}-{operation_id}");
+                let role_run_seq = lifecycle
+                    .next_tool_policy_role_run_seq(&workspace_session_id)
+                    .map_err(|error| AggregateInitializationError::ProviderTurn {
+                        step,
+                        reason: format!("tool_policy_role_run_seq_alloc_failed: {error}"),
+                        retryable: true,
+                    })?;
+                let context =
+                    crate::product::logical_codebase::provider_gateway::ProviderLaunchAuditContext {
+                        workspace_session_id,
+                        role_run_seq,
+                        audit_sink: std::sync::Arc::new(lifecycle),
+                    };
+                self.gateway
+                    .prepare_streaming_launch(input, request, context)
+                    .map_err(|error| AggregateInitializationError::ProviderTurn {
+                        step,
+                        reason: format!("gateway prepare_streaming_launch failed: {error}"),
+                        retryable: true,
+                    })?
+            }
+            None => {
+                let validated = self.gateway.validate(request).map_err(|error| {
+                    AggregateInitializationError::ProviderTurn {
+                        step,
+                        reason: format!("gateway validate failed: {error}"),
+                        retryable: true,
+                    }
+                })?;
+                ValidatedStreamingProviderInput::new(input, validated)
+            }
+        };
         // Task 1.4：复用单仓初始化命令的取消/超时/摘要语义——启动与事件
         // 消费共享同一命令超时预算。
         let command_timeout = self.command_timeout;

@@ -233,6 +233,78 @@ impl PlanSplitRunContext {
     }
 }
 
+/// Task 1b 段②生产臂:Logical 启动才分配 split run 身份(begin→Some);
+/// Legacy(直连 `provider.start`)保持 `None`,run 记录与 sink 绑定零变化。
+/// begin 失败(durable 存储故障)fail-closed 上浮。
+pub(crate) fn begin_plan_split_run_if_logical(
+    launch: &PlanAuthorLaunch,
+    lifecycle: &crate::product::lifecycle_store::LifecycleStore,
+    project_id: &str,
+    issue_id: &str,
+    provider: &ProviderName,
+    workspace_session_id: &str,
+) -> Result<Option<PlanSplitRunContext>, String> {
+    match launch {
+        PlanAuthorLaunch::Legacy => Ok(None),
+        PlanAuthorLaunch::Logical(_) => begin_plan_split_run(
+            lifecycle,
+            project_id,
+            issue_id,
+            provider,
+            workspace_session_id,
+        )
+        .map(Some),
+    }
+}
+
+/// Task 1b 段②生产臂:驱动成功后的 run 收口——structured 输出可解析则
+/// `complete`(存档该 run 的结构化产物),不可解析则 `fail`。收口落盘失败
+/// 不阻断业务流(`tracing::warn`,与 `commit_rebuilt_snapshot_after_provider_start`
+/// 同语义:split run 记录是审计身份,不是主产物)。
+pub(crate) fn close_plan_split_run(
+    run: Option<&PlanSplitRunContext>,
+    prompt: &str,
+    full_output: &str,
+) {
+    let Some(run) = run else { return };
+    match crate::web::workspace_ws_handler::run::parse_work_item_split_structured_output(
+        full_output,
+    ) {
+        Ok(structured_output) => {
+            if let Err(error) = run.complete(prompt, &structured_output) {
+                tracing::warn!(%error, "complete plan split provider run failed");
+            }
+        }
+        Err(message) => {
+            if let Err(error) = run.fail(&format!("structured output parse failed: {message}")) {
+                tracing::warn!(%error, "fail plan split provider run failed");
+            }
+        }
+    }
+}
+
+/// Task 1b 段②生产臂:Markdown 产物(无 structured sentinel,如 SC plan
+/// markdown/human-gate 修订)的 run 收口——原始全文按 JSON 字符串存档。
+pub(crate) fn close_plan_split_run_with_markdown(
+    run: Option<&PlanSplitRunContext>,
+    prompt: &str,
+    full_output: &str,
+) {
+    let Some(run) = run else { return };
+    let structured_output = serde_json::Value::String(full_output.to_string());
+    if let Err(error) = run.complete(prompt, &structured_output) {
+        tracing::warn!(%error, "complete plan split provider run failed");
+    }
+}
+
+/// Task 1b 段②生产臂:驱动失败(run 未产出可用输出)的 run 收口。
+pub(crate) fn fail_plan_split_run(run: Option<&PlanSplitRunContext>, reason: &str) {
+    let Some(run) = run else { return };
+    if let Err(error) = run.fail(reason) {
+        tracing::warn!(%error, "fail plan split provider run failed");
+    }
+}
+
 /// 逻辑会话经 gateway 启动,否则原 `provider.start`。返回 `ProviderSession`。
 ///
 /// `launch` 为 `Logical` 时复用已 resolve 的 validated policy 经

@@ -53,10 +53,82 @@ impl CodingWorkspaceEngine {
         let Some(gateway) = self.logical_provider_gateway.as_ref() else {
             return Ok(None);
         };
+        let Some(request) =
+            self.coding_session_launch_request_for_role(attempt, role, working_dir)?
+        else {
+            return Ok(None);
+        };
+        let validated = gateway.validate(request)?;
+        Ok(Some(validated))
+    }
+
+    /// Task 1b 段③:Coding/Review caller 的 validated streaming prepare 入口。
+    /// 分流与 `resolve_launch_policy_for_role` 一致(gateway 未注入/非逻辑
+    /// attempt → `Ok(None)`,Legacy 直连零变化);逻辑 attempt 经 gateway
+    /// `prepare_streaming_launch` 组装 validated input——prepare 前绑定
+    /// run-bound audit sink(无通用 tool_policy 的 Coder/Kimi 同样绑定,
+    /// 统一写 launch audit),外来非法 `Some(policy)` 由 gateway 直接拒绝。
+    /// `role_run_seq` 与 `attach_tool_policy_audit` 同一分配器
+    /// (`next_tool_policy_role_run_seq`),workspace 会话身份同源
+    /// (`input.workspace_session_id`,缺省回填 `coding-{attempt_id}`)。
+    pub(crate) fn prepare_streaming_launch_for_role(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        role: CodingProviderRole,
+        working_dir: &Path,
+        input: crate::cross_cutting::streaming_provider::StreamingProviderInput,
+    ) -> Result<
+        Option<crate::cross_cutting::session_launch::ValidatedStreamingProviderInput>,
+        ProviderGatewayError,
+    > {
+        let Some(gateway) = self.logical_provider_gateway.as_ref() else {
+            return Ok(None);
+        };
+        let Some(request) =
+            self.coding_session_launch_request_for_role(attempt, role, working_dir)?
+        else {
+            return Ok(None);
+        };
+        let workspace_session_id = input
+            .workspace_session_id
+            .clone()
+            .unwrap_or_else(|| format!("coding-{}", attempt.id));
+        let lifecycle = crate::product::lifecycle_store::LifecycleStore::new(self.store.paths());
+        let role_run_seq = lifecycle
+            .next_tool_policy_role_run_seq(&workspace_session_id)
+            .map_err(|error| {
+                ProviderGatewayError::PolicyMissing(format!(
+                    "tool_policy_role_run_seq_alloc_failed: {error}"
+                ))
+            })?;
+        let context =
+            crate::product::logical_codebase::provider_gateway::ProviderLaunchAuditContext {
+                workspace_session_id,
+                role_run_seq,
+                audit_sink: std::sync::Arc::new(lifecycle),
+            };
+        let prepared = gateway.prepare_streaming_launch(input, request, context)?;
+        Ok(Some(prepared))
+    }
+
+    /// 逻辑 target + 已注入 gateway 时构造该角色的 launch request(不含
+    /// validate);否则 `Ok(None)`(Legacy 直连)。Coder 角色映射
+    /// `CodingTargetWrite`(writable_roots 为 worktree),其余角色映射
+    /// `ReviewReadOnly`(writable_roots 为空)。provider 由角色从 attempt 的
+    /// role provider config snapshot 推导,与调用点 `provider_type_for_name`
+    /// 1:1。
+    fn coding_session_launch_request_for_role(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        role: CodingProviderRole,
+        working_dir: &Path,
+    ) -> Result<Option<SessionLaunchRequest>, ProviderGatewayError> {
+        let Some(gateway) = self.logical_provider_gateway.as_ref() else {
+            return Ok(None);
+        };
         let Some(snapshot) = attempt.target_snapshot.as_ref() else {
             return Ok(None);
         };
-
         let action = match role {
             CodingProviderRole::Coder => SessionPolicyAction::CodingTargetWrite,
             CodingProviderRole::CodeReviewer | CodingProviderRole::InternalReviewer => {
@@ -73,7 +145,7 @@ impl CodingWorkspaceEngine {
             &attempt.id,
         )?;
         // C2 Task 5（REQ-CRO-05）：reviewer 缺失（空 effective）时该角色无 provider
-        // 可推导——launch policy 无从 resolve，fail-closed（缺配置门已在 execute 入口拦截，
+        // 可推导——launch request 无从构造，fail-closed（缺配置门已在 execute 入口拦截，
         // 此处是防御性兜底，绝不以 author 顶替）。
         let provider_name = match role {
             CodingProviderRole::Coder => Some(role_config.coder),
@@ -87,7 +159,7 @@ impl CodingWorkspaceEngine {
             ))
         })?;
         let root = gateway.authority_root().to_path_buf();
-        let request = SessionLaunchRequest {
+        Ok(Some(SessionLaunchRequest {
             project_id: attempt.project_id.clone(),
             provider: provider_ref_for_name(&provider_name)?,
             action,
@@ -108,9 +180,7 @@ impl CodingWorkspaceEngine {
             readable_roots: vec![root],
             writable_roots,
             config_artifact_ref: "sha256:managed-config-artifact".to_string(),
-        };
-        let validated = gateway.validate(request)?;
-        Ok(Some(validated))
+        }))
     }
 
     pub(crate) fn with_cancellation(mut self, cancellation: CancellationToken) -> Self {

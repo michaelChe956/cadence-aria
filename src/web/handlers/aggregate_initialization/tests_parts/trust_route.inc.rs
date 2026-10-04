@@ -194,6 +194,19 @@ impl crate::cross_cutting::streaming_provider::StreamingProviderAdapter
             .start(input, cancel)
             .await
     }
+    /// Task 1b 段③:prepared launch 经 `start_validated` 分发——拆出 input
+    /// 后与裸 `start` 同路径(recipe 命令时机行为保持)。
+    async fn start_validated(
+        &self,
+        validated: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<
+        crate::cross_cutting::streaming_provider::ProviderSession,
+        crate::cross_cutting::provider_adapter::ProviderAdapterError,
+    > {
+        let (input, _launch) = validated.into_parts();
+        self.start(input, cancel).await
+    }
 }
 
 /// Task 1.8 fixture：与 `production()` 同形的依赖图——gateway factory 驱动

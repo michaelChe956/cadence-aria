@@ -312,12 +312,33 @@ pub(super) async fn spawn_provider_run_with_start_mode(
                         )
                         .await;
                     let provider_input = engine.attach_tool_policy_audit(provider_input);
+                    // Task 1b 段②生产臂:RetryOnce 循环每轮 begin 新 handle。
+                    let draft_prompt = provider_input.prompt.clone();
+                    let plan_split_run = match begin_plan_split_run_if_logical(
+                        &plan_launch,
+                        &crate::product::lifecycle_store::LifecycleStore::new(
+                            run_context_clone.app_paths.clone(),
+                        ),
+                        &run_context_clone.session_record.project_id,
+                        &run_context_clone.session_record.issue_id,
+                        &author_provider,
+                        &engine.session().session_id,
+                    ) {
+                        Ok(run) => run,
+                        Err(message) => {
+                            engine.mark_active_run_finished(&run_label);
+                            drop(engine);
+                            let err = WsOutMessage::Error { message };
+                            let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                            return;
+                        }
+                    };
                     let provider_session = start_work_item_plan_author(
                         plan_launch,
                         provider_for_run.clone(),
                         provider_input,
                         run_cancel.clone(),
-                        None,
+                        plan_split_run.as_ref(),
                     )
                     .await;
                     let full_output = match engine
@@ -330,7 +351,11 @@ pub(super) async fn spawn_provider_run_with_start_mode(
                         .await
                     {
                         Ok(output) => output,
-                        Err(_) => {
+                        Err(message) => {
+                            fail_plan_split_run(
+                                plan_split_run.as_ref(),
+                                &format!("provider session drive failed: {message}"),
+                            );
                             engine.mark_active_run_finished(&run_label);
                             return;
                         }
@@ -339,6 +364,10 @@ pub(super) async fn spawn_provider_run_with_start_mode(
                         match parse_work_item_split_structured_output(&full_output) {
                             Ok(output) => output,
                             Err(message) => {
+                                fail_plan_split_run(
+                                    plan_split_run.as_ref(),
+                                    &format!("structured output parse failed: {message}"),
+                                );
                                 engine.mark_active_run_finished(&run_label);
                                 drop(engine);
                                 let err = WsOutMessage::Error {
@@ -348,6 +377,7 @@ pub(super) async fn spawn_provider_run_with_start_mode(
                                 return;
                             }
                         };
+                    close_plan_split_run(plan_split_run.as_ref(), &draft_prompt, &full_output);
                     let candidate = match parse_work_item_draft_output(structured_output) {
                         Ok(candidate) => candidate,
                         Err(error) => {
@@ -437,12 +467,33 @@ pub(super) async fn spawn_provider_run_with_start_mode(
                         )
                         .await;
                     let provider_input = engine.attach_tool_policy_audit(provider_input);
+                    // Task 1b 段②生产臂:RetryOnce 循环每轮 begin 新 handle。
+                    let batch_prompt = provider_input.prompt.clone();
+                    let plan_split_run = match begin_plan_split_run_if_logical(
+                        &plan_launch,
+                        &crate::product::lifecycle_store::LifecycleStore::new(
+                            run_context_clone.app_paths.clone(),
+                        ),
+                        &run_context_clone.session_record.project_id,
+                        &run_context_clone.session_record.issue_id,
+                        &author_provider,
+                        &engine.session().session_id,
+                    ) {
+                        Ok(run) => run,
+                        Err(message) => {
+                            engine.mark_active_run_finished(&run_label);
+                            drop(engine);
+                            let err = WsOutMessage::Error { message };
+                            let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                            return;
+                        }
+                    };
                     let provider_session = start_work_item_plan_author(
                         plan_launch,
                         provider_for_run.clone(),
                         provider_input,
                         run_cancel.clone(),
-                        None,
+                        plan_split_run.as_ref(),
                     )
                     .await;
                     let full_output = match engine
@@ -455,7 +506,11 @@ pub(super) async fn spawn_provider_run_with_start_mode(
                         .await
                     {
                         Ok(output) => output,
-                        Err(_) => {
+                        Err(message) => {
+                            fail_plan_split_run(
+                                plan_split_run.as_ref(),
+                                &format!("provider session drive failed: {message}"),
+                            );
                             engine.mark_active_run_finished(&run_label);
                             return;
                         }
@@ -464,6 +519,10 @@ pub(super) async fn spawn_provider_run_with_start_mode(
                         match parse_work_item_split_structured_output(&full_output) {
                             Ok(output) => output,
                             Err(message) => {
+                                fail_plan_split_run(
+                                    plan_split_run.as_ref(),
+                                    &format!("structured output parse failed: {message}"),
+                                );
                                 engine.mark_active_run_finished(&run_label);
                                 drop(engine);
                                 let err = WsOutMessage::Error {
@@ -475,6 +534,7 @@ pub(super) async fn spawn_provider_run_with_start_mode(
                                 return;
                             }
                         };
+                    close_plan_split_run(plan_split_run.as_ref(), &batch_prompt, &full_output);
                     let candidate = match parse_work_item_draft_output(structured_output) {
                         Ok(candidate) => candidate,
                         Err(error) => {
@@ -675,24 +735,19 @@ pub(super) async fn spawn_provider_run_with_start_mode(
                     }
                 };
                 let provider_input = engine.attach_tool_policy_audit(provider_input);
-                let provider_session = start_work_item_plan_author(
-                    launch,
-                    provider_for_run.clone(),
-                    provider_input,
-                    run_cancel.clone(),
-                    None,
-                )
-                .await;
-                let full_output = match engine
-                    .drive_work_item_plan_provider_session_to_output(
-                        provider_session,
-                        &mut command_rx,
-                        node_id,
-                        author_provider,
-                    )
-                    .await
-                {
-                    Ok(output) => output,
+                // Task 1b 段②生产臂:门修订轮单次 provider run 同样绑定
+                // split run 身份;Markdown 修订产物按原文存档收口。
+                let plan_split_run = match begin_plan_split_run_if_logical(
+                    &launch,
+                    &crate::product::lifecycle_store::LifecycleStore::new(
+                        run_context_clone.app_paths.clone(),
+                    ),
+                    &run_context_clone.session_record.project_id,
+                    &run_context_clone.session_record.issue_id,
+                    &author_provider,
+                    &engine.session().session_id,
+                ) {
+                    Ok(run) => run,
                     Err(message) => {
                         let _ = engine
                             .fail_human_gate_turn(&turn_id, HumanGateTurnFailureClass::ProviderErr)
@@ -711,6 +766,47 @@ pub(super) async fn spawn_provider_run_with_start_mode(
                         return;
                     }
                 };
+                let provider_session = start_work_item_plan_author(
+                    launch,
+                    provider_for_run.clone(),
+                    provider_input,
+                    run_cancel.clone(),
+                    plan_split_run.as_ref(),
+                )
+                .await;
+                let full_output = match engine
+                    .drive_work_item_plan_provider_session_to_output(
+                        provider_session,
+                        &mut command_rx,
+                        node_id,
+                        author_provider,
+                    )
+                    .await
+                {
+                    Ok(output) => output,
+                    Err(message) => {
+                        fail_plan_split_run(
+                            plan_split_run.as_ref(),
+                            &format!("provider session drive failed: {message}"),
+                        );
+                        let _ = engine
+                            .fail_human_gate_turn(&turn_id, HumanGateTurnFailureClass::ProviderErr)
+                            .await;
+                        engine.mark_active_run_finished(&run_label);
+                        drop(engine);
+                        let _ = send_json_outbound(
+                            &outbound_tx_for_task,
+                            &WsOutMessage::HumanGateTurnFailed {
+                                turn_id,
+                                failure_class: "provider_err".to_string(),
+                                message,
+                            },
+                        )
+                        .await;
+                        return;
+                    }
+                };
+                close_plan_split_run_with_markdown(plan_split_run.as_ref(), &prompt, &full_output);
                 match engine
                     .run_sc_manual_revision_turn(&turn_id, full_output)
                     .await

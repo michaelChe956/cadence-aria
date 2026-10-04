@@ -224,12 +224,30 @@
                     }
                 };
                 let provider_input = engine.attach_tool_policy_audit(provider_input);
+                // Task 1b 段②生产臂:初次 outline run 先 begin split run 身份。
+                let plan_split_run = match begin_plan_split_run_if_logical(
+                    &plan_launch,
+                    &lifecycle_for_run,
+                    &session_record_for_run.project_id,
+                    &session_record_for_run.issue_id,
+                    &invocation.author_provider,
+                    &engine.session().session_id,
+                ) {
+                    Ok(run) => run,
+                    Err(message) => {
+                        engine.mark_active_run_finished(&run_label);
+                        drop(engine);
+                        let err = WsOutMessage::Error { message };
+                        let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                        return;
+                    }
+                };
                 let provider_session = start_work_item_plan_author(
                     plan_launch,
                     provider_for_run.clone(),
                     provider_input,
                     run_cancel.clone(),
-                    None,
+                    plan_split_run.as_ref(),
                 )
                 .await;
                 // 新 BLOCKER 修复：rebuilt snapshot 仅在 provider 成功启动后 commit。
@@ -251,11 +269,16 @@
                     .await
                 {
                     Ok(output) => output,
-                    Err(_) => {
+                    Err(message) => {
+                        fail_plan_split_run(
+                            plan_split_run.as_ref(),
+                            &format!("provider session drive failed: {message}"),
+                        );
                         engine.mark_active_run_finished(&run_label);
                         return;
                     }
                 };
+                close_plan_split_run(plan_split_run.as_ref(), &invocation.prompt, &full_output);
                 let mut outcome = match complete_work_item_plan_outline_author_from_output(
                     &mut engine,
                     &full_output,
@@ -399,12 +422,31 @@
                                 }
                             };
                             let provider_input = engine.attach_tool_policy_audit(provider_input);
+                            // Task 1b 段②生产臂:AutoRevision retry 每轮 begin
+                            // 新 handle(retry 不复用旧身份)。
+                            let plan_split_run = match begin_plan_split_run_if_logical(
+                                &plan_launch,
+                                &lifecycle_for_run,
+                                &session_record_for_run.project_id,
+                                &session_record_for_run.issue_id,
+                                &invocation.author_provider,
+                                &engine.session().session_id,
+                            ) {
+                                Ok(run) => run,
+                                Err(message) => {
+                                    engine.mark_active_run_finished(&run_label);
+                                    drop(engine);
+                                    let err = WsOutMessage::Error { message };
+                                    let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                                    return;
+                                }
+                            };
                             let provider_session = start_work_item_plan_author(
                                 plan_launch,
                                 provider_for_run.clone(),
                                 provider_input,
                                 run_cancel.clone(),
-                                None,
+                                plan_split_run.as_ref(),
                             )
                             .await;
                             let full_output = match engine
@@ -417,11 +459,20 @@
                                 .await
                             {
                                 Ok(output) => output,
-                                Err(_) => {
+                                Err(message) => {
+                                    fail_plan_split_run(
+                                        plan_split_run.as_ref(),
+                                        &format!("provider session drive failed: {message}"),
+                                    );
                                     engine.mark_active_run_finished(&run_label);
                                     return;
                                 }
                             };
+                            close_plan_split_run(
+                                plan_split_run.as_ref(),
+                                &invocation.prompt,
+                                &full_output,
+                            );
                             outcome = match complete_work_item_plan_outline_author_from_output(
                                 &mut engine,
                                 &full_output,

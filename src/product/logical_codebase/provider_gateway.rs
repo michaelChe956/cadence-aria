@@ -1132,21 +1132,34 @@ impl LogicalCodebaseProviderGateway {
         }
         let adapter = self.lookup_real_streaming_adapter(&validated)?;
         let policy_digest = validated.envelope().policy_digest.clone();
-        let session = adapter
-            .start(input, cancel)
-            .await
-            .map_err(ProviderGatewayError::Adapter)?;
-        // Task 11 审计聚合:在 gateway 启动路径内构造 ConfigSourceAudit。当前无
-        // provider `/status` setting sources 注入接口与真实 argv 源,故 sources 与
-        // argv 均为空(记录为空并保留字段);config digest 由 envelope 冻结的
-        // config_artifact_ref 重算。
+        // Task 1b 段③:prepared launch(prepare_streaming_launch 产出,run-bound
+        // audit 上下文已冻结)唯一经 `start_validated` 分发,绝不回落裸
+        // `start`;未经 prepare 的存量构造(既有测试 fixture)暂走原
+        // `start`,Task 7 收口为 validated-only。
+        let prepared_launch = validated.launch_audit().is_some();
+        let config_artifact_ref = validated.envelope().config_artifact_ref.clone();
+
+        let session = if prepared_launch {
+            adapter
+                .start_validated(
+                    ValidatedStreamingProviderInput::new(input, validated),
+                    cancel,
+                )
+                .await
+                .map_err(ProviderGatewayError::Adapter)?
+        } else {
+            adapter
+                .start(input, cancel)
+                .await
+                .map_err(ProviderGatewayError::Adapter)?
+        };
         let ConfigSourceAudit {
             argv,
             config_digest,
             ..
         } = ConfigSourceAudit::from_launch(
             &[],
-            &validated.envelope().config_artifact_ref,
+            &config_artifact_ref,
             ConfigSourceProvenance::detect_from_setting_sources(&[]),
         );
         self.audit.record(

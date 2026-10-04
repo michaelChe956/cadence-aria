@@ -326,6 +326,9 @@ async fn drive_single_candidate_reredrive(
     author_provider: &crate::product::models::ProviderName,
     reredrive_prompt: &str,
     repository_path: &std::path::Path,
+    // Task 1b 段②生产臂:重驱是独立 provider run,调用方每轮 begin 新
+    // handle 后传入。
+    plan_split_run: Option<&crate::web::workspace_ws_handler::run::PlanSplitRunContext>,
 ) -> Result<String, SingleCandidateProviderRunError> {
     let reredrive_input = engine
         .build_work_item_plan_streaming_input(
@@ -342,7 +345,7 @@ async fn drive_single_candidate_reredrive(
         Arc::clone(&provider_for_run),
         reredrive_input,
         run_cancel.clone(),
-        None,
+        plan_split_run,
     )
     .await;
     let reredrive_output = match engine
@@ -355,13 +358,22 @@ async fn drive_single_candidate_reredrive(
         .await
     {
         Ok(output) => output,
-        Err(_) => {
+        Err(message) => {
+            crate::web::workspace_ws_handler::run::fail_plan_split_run(
+                plan_split_run,
+                &format!("provider session drive failed: {message}"),
+            );
             engine.persist_single_candidate_terminal_phase(
                 crate::product::models::SingleCandidatePhase::Failed,
             );
             return Err(SingleCandidateProviderRunError::AlreadyFinished);
         }
     };
+    crate::web::workspace_ws_handler::run::close_plan_split_run_with_markdown(
+        plan_split_run,
+        reredrive_prompt,
+        &reredrive_output,
+    );
     let reredrive_delivery = prepare_author_delivery_for_compile(&reredrive_output);
     emit_author_heading_normalized_event(
         engine,
@@ -682,12 +694,31 @@ pub(crate) async fn run_single_candidate_author(
         )
         .map_err(SingleCandidateProviderRunError::Message)?;
     let provider_input = engine.attach_tool_policy_audit(provider_input);
+    // Task 1b 段②生产臂:SC markdown author 单次 provider run 绑定
+    // split run 身份;Markdown plan 产物按原文存档收口。
+    let plan_split_run =
+        match crate::web::workspace_ws_handler::run::begin_plan_split_run_if_logical(
+            &launch,
+            &lifecycle,
+            &engine.session().project_id,
+            &engine.session().issue_id,
+            &author_provider,
+            &engine.session().session_id,
+        ) {
+            Ok(run) => run,
+            Err(message) => {
+                engine.persist_single_candidate_terminal_phase(
+                    crate::product::models::SingleCandidatePhase::Failed,
+                );
+                return Err(SingleCandidateProviderRunError::Message(message));
+            }
+        };
     let provider_session = start_work_item_plan_author(
         launch.clone(),
         Arc::clone(&provider_for_run),
         provider_input,
         run_cancel.clone(),
-        None,
+        plan_split_run.as_ref(),
     )
     .await;
     let full_output = match engine
@@ -700,13 +731,22 @@ pub(crate) async fn run_single_candidate_author(
         .await
     {
         Ok(output) => output,
-        Err(_) => {
+        Err(message) => {
+            crate::web::workspace_ws_handler::run::fail_plan_split_run(
+                plan_split_run.as_ref(),
+                &format!("provider session drive failed: {message}"),
+            );
             engine.persist_single_candidate_terminal_phase(
                 crate::product::models::SingleCandidatePhase::Failed,
             );
             return Err(SingleCandidateProviderRunError::AlreadyFinished);
         }
     };
+    crate::web::workspace_ws_handler::run::close_plan_split_run_with_markdown(
+        plan_split_run.as_ref(),
+        &full_prompt,
+        &full_output,
+    );
     let delivery = prepare_author_delivery_for_compile(&full_output);
     emit_author_heading_normalized_event(
         engine,
@@ -777,6 +817,22 @@ pub(crate) async fn run_single_candidate_author(
                                 Some(author_provider.clone()),
                             )
                             .await;
+                        let reredrive_run = match crate::web::workspace_ws_handler::run::begin_plan_split_run_if_logical(
+                            &launch,
+                            &lifecycle,
+                            &engine.session().project_id,
+                            &engine.session().issue_id,
+                            &author_provider,
+                            &engine.session().session_id,
+                        ) {
+                            Ok(run) => run,
+                            Err(message) => {
+                                engine.persist_single_candidate_terminal_phase(
+                                    crate::product::models::SingleCandidatePhase::Failed,
+                                );
+                                return Err(SingleCandidateProviderRunError::Message(message));
+                            }
+                        };
                         compile_source = drive_single_candidate_reredrive(
                             engine,
                             &launch,
@@ -787,6 +843,7 @@ pub(crate) async fn run_single_candidate_author(
                             &author_provider,
                             &reredrive_prompt,
                             &repository.path,
+                            reredrive_run.as_ref(),
                         )
                         .await?;
                         continue;
@@ -835,6 +892,23 @@ pub(crate) async fn run_single_candidate_author(
                         Some(author_provider.clone()),
                     )
                     .await;
+                let reredrive_run =
+                    match crate::web::workspace_ws_handler::run::begin_plan_split_run_if_logical(
+                        &launch,
+                        &lifecycle,
+                        &engine.session().project_id,
+                        &engine.session().issue_id,
+                        &author_provider,
+                        &engine.session().session_id,
+                    ) {
+                        Ok(run) => run,
+                        Err(message) => {
+                            engine.persist_single_candidate_terminal_phase(
+                                crate::product::models::SingleCandidatePhase::Failed,
+                            );
+                            return Err(SingleCandidateProviderRunError::Message(message));
+                        }
+                    };
                 compile_source = drive_single_candidate_reredrive(
                     engine,
                     &launch,
@@ -845,6 +919,7 @@ pub(crate) async fn run_single_candidate_author(
                     &author_provider,
                     &reredrive_prompt,
                     &repository.path,
+                    reredrive_run.as_ref(),
                 )
                 .await?;
                 continue;
