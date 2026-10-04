@@ -36,8 +36,8 @@ use cadence_aria::product::logical_codebase::policy::{
 use cadence_aria::product::logical_codebase::provider_gateway::{
     ProviderLaunchAuditContext, ProviderRef, SessionLaunchRequest,
 };
+use cadence_aria::product::logical_codebase::store::LogicalCodebaseStore;
 use cadence_aria::product::models::ProviderName;
-use cadence_aria::product::repository_store::RepositoryStore;
 use cadence_aria::protocol::contracts::{AdapterInput, AdapterRole, ProviderType};
 use cadence_aria::web::app::build_web_router;
 use cadence_aria::web::events::EventHub;
@@ -983,59 +983,135 @@ impl MatrixEnvironment {
         }
     }
 
-    /// canonical root + 成员 worktree 定位(登记后的真实 checkout 记录)。
+    /// canonical root + 成员 target 定位(fix 轮 5:对照 #8 E2E 同链路——
+    /// 经 LC store 的成员记录(logical_repository_id/physical_repository_id/
+    /// checkout_ids)与 checkout 记录(canonical_path)解析,不再查物理
+    /// repository store 的 logical_repository_id 字段)。
     async fn resolve_member_target(&mut self) -> Result<(), LiveMatrixFailure> {
         self.canonical_root = self
             .aggregate_root_path()
             .to_path_buf()
             .canonicalize()
             .expect("canonical aggregate root");
-        let alpha = self
+        let alpha_source = self
             .canonical_root
             .join("alpha")
             .canonicalize()
-            .expect("canonical alpha");
-        let repositories = match RepositoryStore::new(self.app_paths.clone()).list(PROJECT_ID) {
-            Ok(repositories) => repositories,
+            .expect("canonical alpha source");
+        let store = LogicalCodebaseStore::new(self.app_paths.clone());
+        let members = match store.list_lc_members(PROJECT_ID, &self.lc_id) {
+            Ok(members) => members,
             Err(error) => {
-                let failure = matrix_failure("repository_store_error", format!("{error}"), None);
-                return Err(self.fail_with_diagnostics(failure, None).await);
-            }
-        };
-        let member = repositories
-            .iter()
-            .find(|record| record.logical_repository_id.is_some() && record.path == alpha)
-            .or_else(|| {
-                repositories
-                    .iter()
-                    .find(|record| record.logical_repository_id.is_some())
-            })
-            .cloned();
-        let member = match member {
-            Some(member) => member,
-            None => {
+                self.dump_members_diagnostics().await;
                 let failure = matrix_failure(
-                    "member_repository_missing",
-                    "登记后未找到逻辑成员 repository 记录".to_string(),
+                    "lc_member_store_error",
+                    format!("读取 LC 成员记录失败:{error}"),
                     None,
                 );
                 return Err(self.fail_with_diagnostics(failure, None).await);
             }
         };
-        self.member_physical_repo_id = member.id.clone();
-        self.member_logical_id = member
-            .logical_repository_id
-            .as_ref()
-            .expect("logical id")
-            .0
-            .to_string();
-        self.member_checkout_id = member
-            .primary_checkout_id
-            .as_ref()
-            .map(|checkout| checkout.0.to_string())
-            .unwrap_or_default();
-        self.member_worktree = member.path.canonicalize().expect("member canonical");
+        if members.is_empty() {
+            self.dump_members_diagnostics().await;
+            let failure = matrix_failure(
+                "member_repository_missing",
+                "LC 成员记录为空(登记未产出成员)".to_string(),
+                None,
+            );
+            return Err(self.fail_with_diagnostics(failure, None).await);
+        }
+        let checkouts = match store.list_checkouts(PROJECT_ID) {
+            Ok(checkouts) => checkouts,
+            Err(error) => {
+                self.dump_members_diagnostics().await;
+                let failure = matrix_failure(
+                    "lc_checkout_store_error",
+                    format!("读取 checkout 记录失败:{error}"),
+                    None,
+                );
+                return Err(self.fail_with_diagnostics(failure, None).await);
+            }
+        };
+        // 首选:checkout canonical_path 指向 alpha 源路径的成员;否则退回
+        // 第一个带 checkout 的成员(两成员登记顺序固定,alpha 在前)。
+        let member = members
+            .iter()
+            .find(|member| {
+                member.checkout_ids.iter().any(|checkout_id| {
+                    checkouts.iter().any(|checkout| {
+                        checkout.checkout_id.0 == checkout_id.0
+                            && checkout.canonical_path == alpha_source
+                    })
+                })
+            })
+            .or_else(|| {
+                members
+                    .iter()
+                    .find(|member| !member.checkout_ids.is_empty())
+            });
+        let Some(member) = member else {
+            self.dump_members_diagnostics().await;
+            let failure = matrix_failure(
+                "member_repository_missing",
+                format!("成员记录均无 checkout(成员 {members:?})"),
+                None,
+            );
+            return Err(self.fail_with_diagnostics(failure, None).await);
+        };
+        let checkout_id = member.checkout_ids.first().expect("member with checkout");
+        let Some(checkout) = checkouts
+            .iter()
+            .find(|checkout| checkout.checkout_id.0 == checkout_id.0)
+        else {
+            self.dump_members_diagnostics().await;
+            let failure = matrix_failure(
+                "member_checkout_missing",
+                format!("checkout 记录缺失(成员 {})", member.alias),
+                None,
+            );
+            return Err(self.fail_with_diagnostics(failure, None).await);
+        };
+        self.member_logical_id = member.logical_repository_id.0.to_string();
+        self.member_checkout_id = checkout.checkout_id.0.to_string();
+        self.member_physical_repo_id = member.physical_repository_id.clone();
+        self.member_worktree = checkout
+            .canonical_path
+            .canonicalize()
+            .expect("member checkout canonical");
         Ok(())
+    }
+
+    /// 成员解析失败时抄录 GET members/manifest 实际 HTTP 响应到
+    /// diagnostics(端点形态与推断不符时现场定位)。
+    async fn dump_members_diagnostics(&self) {
+        let diagnostics_dir = self.evidence_root.join("diagnostics");
+        let _ = std::fs::create_dir_all(&diagnostics_dir);
+        let members_uri = format!(
+            "/api/projects/{PROJECT_ID}/logical-codebases/{}/members",
+            self.lc_id
+        );
+        let (status, body) = request_json(&self.app, Method::GET, &members_uri, json!({})).await;
+        let _ = std::fs::write(
+            diagnostics_dir.join("members-endpoint.json"),
+            serde_json::to_vec_pretty(&json!({
+                "uri": members_uri,
+                "http_status": status.as_u16(),
+                "body": body,
+            }))
+            .unwrap_or_default(),
+        );
+        let manifest = LogicalCodebaseStore::new(self.app_paths.clone())
+            .load_lc_manifest(PROJECT_ID, &self.lc_id)
+            .ok()
+            .flatten();
+        let _ = std::fs::write(
+            diagnostics_dir.join("manifest.json"),
+            serde_json::to_vec_pretty(&json!({
+                "member_count": manifest.as_ref().map(|value| value.member_ids.len()),
+                "membership_revision": manifest.as_ref().map(|value| value.membership_revision),
+            }))
+            .unwrap_or_default(),
+        );
     }
 
     async fn create_issue(&mut self) -> Result<(), LiveMatrixFailure> {
