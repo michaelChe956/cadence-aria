@@ -426,3 +426,69 @@ fn lcg_t04_kimi_native_mcp_is_not_aria_bundle() {
         "empty mcp source must not project as either aria or native"
     );
 }
+
+// ==== Task 9c:LC 显式 resume 的 MCP bundle 漂移不走 session/new ====
+
+use super::session_tests::{
+    LcKimiResumeFixture, lc_kimi_resume_fixture, t09c_child_killed_and_reaped,
+};
+use crate::cross_cutting::tool_policy_audit::test_support::RecordingToolPolicyAuditSink;
+use crate::cross_cutting::kimi_code_provider::KimiCodeProvider;
+use crate::cross_cutting::streaming_provider::StreamingProviderAdapter;
+
+/// Task 9c(冻结决策:MCP bundle 漂移不走 session/new):LC 显式 resume 的
+/// 冻结 bundle digest 与当前注入 bundle 漂移时,direct 路径的「拒绝 load、
+/// 静默 session/new」不适用于 LC——drift 属于已启动 child 后的 runtime 失败:
+/// 不发 session/new、kill/reap、错误显式记录「未恢复」(不伪称零 spawn),
+/// 零新 provider_start;显式 fresh 只能由用户重新发起。
+#[cfg(unix)]
+#[tokio::test]
+async fn lcg_t09_kimi_bundle_drift_never_session_new() {
+    let fixture = LcKimiResumeFixture::new();
+    let marker_dir = tempfile::tempdir().expect("t09c drift marker dir");
+    let pid_marker = marker_dir.path().join("kimi-t09c-drift.pid");
+    let new_marker = marker_dir.path().join("kimi-t09c-drift-session-new.marker");
+    let sink = RecordingToolPolicyAuditSink::new();
+    let mut raw = fixture.lc_streaming_input(
+        Some(sink.clone().bound()),
+        Some("kimi-session-drift-t09c".to_string()),
+    );
+    raw.env_vars.insert(
+        "KIMI_PID_MARKER".to_string(),
+        pid_marker.display().to_string(),
+    );
+    raw.env_vars.insert(
+        "KIMI_NEW_MARKER".to_string(),
+        new_marker.display().to_string(),
+    );
+
+    let bundle = codegraph_bundle();
+    let frozen_digest = "frozen-digest-drifted-t09c".to_string();
+    let provider = KimiCodeProvider::new(lc_kimi_resume_fixture(marker_dir.path()))
+        .with_mcp_bundle_for_resume(bundle, frozen_digest.clone());
+    let drifted_result = provider
+        .start_validated(
+            fixture.validated_coding_input(raw),
+            CancellationToken::new(),
+        )
+        .await;
+    let Err(rejected) = drifted_result else {
+        panic!("bundle drift must not silently start a new session for an explicit LC resume")
+    };
+    assert!(
+        rejected.details.contains("session NOT resumed")
+            && rejected.details.contains("kimi-session-drift-t09c")
+            && rejected.details.contains(&frozen_digest),
+        "rejection must name the old session and frozen digest and record the not-resumed outcome: {rejected:?}"
+    );
+    assert!(
+        sink.events().is_empty(),
+        "no fresh provider_start may be written for a drifted explicit LC resume"
+    );
+    assert!(
+        !new_marker.exists(),
+        "session/new must never be sent after MCP bundle drift on an explicit LC resume"
+    );
+    let started_child_was_killed_and_reaped = t09c_child_killed_and_reaped(&pid_marker);
+    assert!(started_child_was_killed_and_reaped);
+}

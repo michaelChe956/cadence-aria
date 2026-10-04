@@ -1183,3 +1183,512 @@ async fn abort_emits_aborted_without_failed() {
     }
     assert!(saw_aborted);
 }
+
+// ==== Task 9c:Kimi LC 原生 resume 的 session/load 同 id 确认(错/缺 id 绝不 fresh)====
+
+
+use crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate;
+use crate::cross_cutting::provider_registry::ProviderRegistry;
+use crate::cross_cutting::session_launch::ValidatedStreamingProviderInput;
+use crate::cross_cutting::tool_policy_audit::test_support::RecordingToolPolicyAuditSink;
+use crate::cross_cutting::tool_policy_audit::{DurableToolPolicyEvent, ToolPolicyAuditSink};
+use crate::product::app_paths::ProductAppPaths;
+use crate::product::logical_codebase::policy::AggregatePolicyArtifactStore;
+use crate::product::logical_codebase::provider_capability_store::ProviderActionCapability;
+use crate::product::logical_codebase::provider_gateway::{
+    GatewayRunAudit, LogicalCodebaseProviderGateway, PolicyTargetResolver, ProviderCapability,
+    ProviderCapabilitySource, ProviderGatewayError, ProviderRefType, SessionLaunchRequest,
+};
+use crate::product::logical_codebase::store::LogicalCodebaseManifest;
+use crate::product::models::ProviderName;
+use crate::product::logical_codebase::policy::{PolicyTarget, SessionPolicyAction};
+use crate::protocol::contracts::{AdapterOutput, TimeoutStatus};
+
+/// Kimi 9c LC fixture:与 4c 的 LcKimiLaunchFixture 同构(trimmed)——经真实
+/// `LogicalCodebaseProviderGateway::validate` 链产出 validated input,供
+/// `start_validated` 的 LC 原生 resume 确认测试消费(pub(crate) 供
+/// mcp_bundle_tests 复用)。
+pub(crate) struct LcKimiResumeFixture {
+    _root: tempfile::TempDir,
+    paths: ProductAppPaths,
+    audit: std::sync::Arc<GatewayRunAudit>,
+}
+
+impl LcKimiResumeFixture {
+    pub(crate) fn new() -> Self {
+        let root = tempfile::tempdir().expect("lc fixture root");
+        let paths = ProductAppPaths::new(root.path());
+        let manifest =
+            LogicalCodebaseManifest::new("project_0001", root.path().to_path_buf(), vec![]);
+        AggregatePolicyArtifactStore::new(paths.clone())
+            .ensure_bootstrap(&manifest)
+            .expect("install lc bootstrap policy");
+        let fixture = Self {
+            _root: root,
+            paths,
+            audit: std::sync::Arc::new(GatewayRunAudit::new()),
+        };
+        fixture.target_worktree();
+        fixture
+    }
+
+    /// canonical LC root(= manifest provider_context_root)。
+    pub(crate) fn canonical_root(&self) -> PathBuf {
+        std::fs::canonicalize(self.paths.root()).expect("lc fixture root exists")
+    }
+
+    /// 唯一可写 target(成员 worktree;与 canonical root 分离)。
+    pub(crate) fn target_worktree(&self) -> PathBuf {
+        let worktree = self.paths.root().join("member-worktree");
+        std::fs::create_dir_all(&worktree).expect("create member worktree");
+        worktree
+    }
+
+    fn gateway(&self) -> LogicalCodebaseProviderGateway {
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            ProviderName::KimiCode,
+            std::sync::Arc::new(LcNoopStreamingAdapter),
+        );
+        LogicalCodebaseProviderGateway::with_audit(
+            AggregatePolicyArtifactStore::new(self.paths.clone()),
+            std::sync::Arc::new(LcStaticCapabilitySource),
+            std::sync::Arc::new(LcTargetResolver),
+            std::sync::Arc::new(registry),
+            std::sync::Arc::new(LcNoopSyncAdapter),
+            lc_available_gate(),
+            self.audit.clone(),
+            self.canonical_root(),
+        )
+    }
+
+    /// LC coding 请求:cwd=canonical root,target=成员 worktree。
+    pub(crate) fn coding_request(&self) -> SessionLaunchRequest {
+        let manifest =
+            LogicalCodebaseManifest::new("project_0001", self.paths.root().to_path_buf(), vec![]);
+        let worktree = self.target_worktree();
+        SessionLaunchRequest {
+            project_id: manifest.project_id,
+            provider: crate::product::logical_codebase::provider_gateway::ProviderRef::kimi_code(
+                "cap_kimi_lc_fixture",
+            ),
+            action: SessionPolicyAction::CodingTargetWrite,
+            target: PolicyTarget::checkout("logical_repo_0001", "checkout_0001", worktree.clone()),
+            working_directory: self.canonical_root(),
+            readable_roots: vec![self.canonical_root()],
+            writable_roots: vec![worktree],
+            config_artifact_ref: "sha256:managed-config-artifact".to_string(),
+        }
+    }
+
+    /// LC streaming input(Kimi 通用 tool policy 恒 None)。
+    pub(crate) fn lc_streaming_input(
+        &self,
+        audit_sink: Option<std::sync::Arc<dyn ToolPolicyAuditSink>>,
+        resume_id: Option<String>,
+    ) -> StreamingProviderInput {
+        StreamingProviderInput {
+            working_directory: Some(self.canonical_root()),
+            baseline_tree: None,
+            tool_policy: None,
+            audit_sink,
+            provider_type: ProviderType::KimiCode,
+            role: AdapterRole::Executor,
+            prompt: "Run the LC fixture provider".to_string(),
+            working_dir: self.target_worktree(),
+            workspace_session_id: Some("ws-lc-fixture-1".to_string()),
+            resume_provider_session_id: resume_id,
+            permission_mode: ProviderPermissionMode::Auto,
+            structured_output_contract: None,
+            env_vars: BTreeMap::new(),
+            timeout_secs: 60,
+        }
+    }
+
+    /// 经真实 gateway validate 产出 coding validated input。
+    pub(crate) fn validated_coding_input(
+        &self,
+        raw: StreamingProviderInput,
+    ) -> ValidatedStreamingProviderInput {
+        let validated = self
+            .gateway()
+            .validate(self.coding_request())
+            .expect("lc coding launch validates");
+        ValidatedStreamingProviderInput::new(raw, validated)
+    }
+}
+
+/// LC fixture 的 capability 源:仅返回 kimi 的已实测快照(fixture 事实)。
+struct LcStaticCapabilitySource;
+
+fn lc_kimi_capability() -> ProviderCapability {
+    ProviderCapability {
+        provider_type: ProviderRefType::KimiCode,
+        version: "kimi 0.34.0-lc-fixture".to_string(),
+        adapter_dialect: crate::product::logical_codebase::policy::ProviderDialect::KimiAcpV1,
+        wire_dialect: crate::product::logical_codebase::policy::ProviderWireDialect::KimiAcp,
+        capability_snapshot_ref: "cap_kimi_lc_fixture".to_string(),
+        action_capability: ProviderActionCapability {
+            action: SessionPolicyAction::CodingTargetWrite,
+            launch:
+                crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence::Confirmed,
+            resume:
+                crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence::Confirmed,
+            write_boundary:
+                crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence::Confirmed,
+            projection_digest: String::new(),
+            evidence_ref: String::new(),
+        },
+        trust: crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence::Confirmed,
+    }
+}
+
+impl ProviderCapabilitySource for LcStaticCapabilitySource {
+    fn require_supported(
+        &self,
+        _provider: &crate::product::logical_codebase::provider_gateway::ProviderRef,
+        _action: SessionPolicyAction,
+    ) -> Result<ProviderCapability, ProviderGatewayError> {
+        Ok(lc_kimi_capability())
+    }
+
+    fn require_resume_supported(
+        &self,
+        _provider: &crate::product::logical_codebase::provider_gateway::ProviderRef,
+        _action: SessionPolicyAction,
+    ) -> Result<ProviderCapability, ProviderGatewayError> {
+        Ok(lc_kimi_capability())
+    }
+
+    fn require_write_boundary(
+        &self,
+        _provider: &crate::product::logical_codebase::provider_gateway::ProviderRef,
+        _action: SessionPolicyAction,
+    ) -> Result<ProviderCapability, ProviderGatewayError> {
+        Ok(lc_kimi_capability())
+    }
+
+    fn require_root_recipe_supported(
+        &self,
+        _provider: &crate::product::logical_codebase::provider_gateway::ProviderRef,
+        _credential: &crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
+    ) -> Result<ProviderCapability, ProviderGatewayError> {
+        Err(ProviderGatewayError::UnsupportedCapability(
+            "lc fixture has no root recipe facts".to_string(),
+        ))
+    }
+}
+
+/// LC fixture 的 target resolver:直接返回请求冻结的 target。
+struct LcTargetResolver;
+
+impl PolicyTargetResolver for LcTargetResolver {
+    fn resolve_and_revalidate(
+        &self,
+        request: &SessionLaunchRequest,
+    ) -> Result<PolicyTarget, ProviderGatewayError> {
+        Ok(request.target.clone())
+    }
+}
+
+/// 占位 streaming adapter:validate 不触 registry,仅为 gateway 构造提供槽位。
+struct LcNoopStreamingAdapter;
+
+#[async_trait::async_trait]
+impl crate::cross_cutting::streaming_provider::StreamingProviderAdapter for LcNoopStreamingAdapter {}
+
+/// 占位 sync adapter:gateway 构造参数,LC validated 测试不调用。
+struct LcNoopSyncAdapter;
+
+impl crate::cross_cutting::provider_adapter::ProviderAdapter for LcNoopSyncAdapter {
+    fn run(
+        &self,
+        _input: &crate::protocol::contracts::AdapterInput,
+    ) -> Result<AdapterOutput, crate::cross_cutting::provider_adapter::ProviderAdapterError> {
+        Ok(AdapterOutput {
+            exit_code: Some(0),
+            stdout: "ok".to_string(),
+            stderr: String::new(),
+            structured_output: None,
+            files_modified: Vec::new(),
+            duration_ms: 0,
+            timeout_status: TimeoutStatus::NotTimedOut,
+        })
+    }
+}
+
+fn lc_available_gate() -> std::sync::Arc<ProviderAvailabilityGate> {
+    use crate::cross_cutting::provider_availability_gate::ProviderHealthSource;
+    use crate::cross_cutting::provider_health::{ProviderHealthEntry, ProviderHealthSnapshot};
+    use chrono::Utc;
+
+    struct AlwaysHealthy(std::sync::Arc<ProviderHealthSnapshot>);
+    impl ProviderHealthSource for AlwaysHealthy {
+        fn snapshot(&self) -> std::sync::Arc<ProviderHealthSnapshot> {
+            self.0.clone()
+        }
+        fn degraded(&self) -> bool {
+            false
+        }
+    }
+
+    let checked_at = Utc::now();
+    let snapshot = std::sync::Arc::new(ProviderHealthSnapshot {
+        schema_version: 1,
+        generation: 1,
+        checked_at,
+        providers: [ProviderName::KimiCode]
+            .into_iter()
+            .map(|provider| ProviderHealthEntry {
+                provider,
+                command: "stub".to_string(),
+                available: true,
+                version: Some("0.34.0".to_string()),
+                reason_code: None,
+                reason: None,
+                checked_at,
+            })
+            .collect(),
+    });
+    std::sync::Arc::new(ProviderAvailabilityGate::new(std::sync::Arc::new(
+        AlwaysHealthy(snapshot),
+    )))
+}
+
+/// 写可执行 fixture 脚本(0o755)。
+#[cfg(unix)]
+pub(crate) fn write_executable(dir: &std::path::Path, name: &str, script: &str) -> PathBuf {
+    use std::io::Write as _;
+    use std::os::unix::fs::PermissionsExt as _;
+    let path = dir.join(name);
+    let mut file = std::fs::File::create(&path).expect("create fixture script");
+    file.write_all(script.as_bytes())
+        .expect("write fixture script");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod fixture script");
+    path
+}
+
+/// Task 9c fixture(fake kimi ACP):`--version` 打印兼容版本;ACP 循环内
+/// initialize 应答完整 resume 能力(loadSession+sessionCapabilities.resume),
+/// session/load 按 `KIMI_LOAD_SESSION_ID` 应答(非空 → `result.sessionId`;
+/// 空 → success 但无 sessionId),session/prompt 应答文本增量与 end_turn;
+/// 收到 session/new 即写 `KIMI_NEW_MARKER`(漂移测试断言其永不出现)并
+/// 失败退出;登记 pid 到 `KIMI_PID_MARKER`(kill/reap 断言),其余情况不
+/// 自行退出——终止必须来自 adapter 的 kill 链。
+#[cfg(unix)]
+pub(crate) fn lc_kimi_resume_fixture(dir: &std::path::Path) -> PathBuf {
+    write_executable(
+        dir,
+        "fake-kimi-lc-resume-acp",
+        r#"#!/usr/bin/env bash
+if [[ "${1:-}" == "--version" ]]; then
+  echo "kimi 0.34.0"
+  exit 0
+fi
+echo $$ > "${KIMI_PID_MARKER:-/dev/null}"
+while IFS= read -r line; do
+  id="$(printf '%s' "$line" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p')"
+  if [[ "$line" == *'"initialize"'* ]]; then
+    echo "{\"jsonrpc\":\"2.0\",\"id\":${id:-1},\"result\":{\"protocolVersion\":1,\"agentCapabilities\":{\"loadSession\":true,\"sessionCapabilities\":{\"resume\":{}}}}}"
+  elif [[ "$line" == *'"session/new"'* ]]; then
+    echo new > "${KIMI_NEW_MARKER:-/dev/null}"
+    echo "{\"jsonrpc\":\"2.0\",\"id\":${id:-2},\"error\":{\"code\":-32000,\"message\":\"session/new must not follow an explicit resume\"}}"
+    exit 1
+  elif [[ "$line" == *'"session/load"'* ]]; then
+    if [[ -n "${KIMI_LOAD_SESSION_ID:-}" ]]; then
+      echo "{\"jsonrpc\":\"2.0\",\"id\":${id:-2},\"result\":{\"sessionId\":\"${KIMI_LOAD_SESSION_ID}\"}}"
+    else
+      echo "{\"jsonrpc\":\"2.0\",\"id\":${id:-2},\"result\":{}}"
+    fi
+  elif [[ "$line" == *'"session/prompt"'* ]]; then
+    sid="${KIMI_LOAD_SESSION_ID:-none}"
+    echo "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"$sid\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"lc resume done\"}}}}"
+    echo "{\"jsonrpc\":\"2.0\",\"id\":${id:-3},\"result\":{\"stopReason\":\"end_turn\"}}"
+    exit 0
+  fi
+done
+"#,
+    )
+}
+
+/// Task 9c kill 链断言辅助:轮询读取 fixture 登记的子进程 pid,再轮询确认
+/// 该 pid 已从进程表消失(kill+reap 都发生)。
+#[cfg(unix)]
+pub(crate) fn t09c_child_killed_and_reaped(pid_marker: &std::path::Path) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let pid = loop {
+        if let Some(pid) = std::fs::read_to_string(pid_marker)
+            .ok()
+            .and_then(|content| content.trim().parse::<u32>().ok())
+        {
+            break pid;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "fixture must register its pid at {}",
+            pid_marker.display()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    loop {
+        let alive = std::process::Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if !alive {
+            return true;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "kimi child (pid {pid}) must be killed and reaped after an unconfirmed native resume"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// Task 9c(Step 1 断言组 438-440 逐字):Kimi LC 显式 resume 的原生确认——
+/// `session/load` 应答与能力协商(initialize)必须确认同一 id:
+/// - 应答同 id → 续接,confirmed==requested,provider_start 落确认 id;
+/// - 缺 id(load 应答 success 但无 sessionId)→ Err;错 id(应答不同会话
+///   id)→ Err——两者都是已启动 child 后的 runtime 失败:child 被
+///   kill/reap、错误记录「未恢复」(不伪称零 spawn),不回填请求 id、不清
+///   id 转 fresh、零新 provider_start。
+#[cfg(unix)]
+#[tokio::test]
+async fn lcg_t09_kimi_missing_or_wrong_native_id_never_fresh() {
+    let fixture = LcKimiResumeFixture::new();
+    let requested_native_id = "kimi-session-resume-t09c".to_string();
+
+    // 1) session/load 应答同 id:真实确认后续接,provider_start 落确认 id,
+    //    会话流照常完成。
+    {
+        let marker_dir = tempfile::tempdir().expect("t09c matching marker dir");
+        let sink = RecordingToolPolicyAuditSink::new();
+        let mut raw = fixture.lc_streaming_input(
+            Some(sink.clone().bound()),
+            Some(requested_native_id.clone()),
+        );
+        raw.env_vars.insert(
+            "KIMI_LOAD_SESSION_ID".to_string(),
+            requested_native_id.clone(),
+        );
+        let provider = KimiCodeProvider::new(lc_kimi_resume_fixture(marker_dir.path()));
+        let mut session = provider
+            .start_validated(
+                fixture.validated_coding_input(raw),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("a native-confirmed resume must continue the LC session");
+        let confirmed_native_id = session.native_session_id.clone().unwrap_or_default();
+        assert_eq!(confirmed_native_id, requested_native_id);
+        let events = sink.events();
+        assert_eq!(
+            events.len(),
+            1,
+            "confirmed resume writes exactly one provider_start"
+        );
+        assert!(matches!(
+            &events[0],
+            DurableToolPolicyEvent::ProviderStart(record)
+                if record.provider_session_id == requested_native_id
+        ));
+        let terminal = terminal_events(&mut session).await;
+        let completion = terminal
+            .iter()
+            .find_map(|event| match event {
+                ProviderEvent::Completed(completion) => Some(completion.clone()),
+                _ => None,
+            })
+            .expect("confirmed kimi resume must complete");
+        assert_eq!(completion.full_output, "lc resume done");
+    }
+
+    // 2) 缺 id:session/load success 但应答无 sessionId → runtime 失败:
+    //    Err + kill/reap + 「未恢复」记录,零新 provider_start。
+    {
+        let marker_dir = tempfile::tempdir().expect("t09c missing-id marker dir");
+        let pid_marker = marker_dir.path().join("kimi-t09c-missing-id.pid");
+        let sink = RecordingToolPolicyAuditSink::new();
+        let mut raw = fixture.lc_streaming_input(
+            Some(sink.clone().bound()),
+            Some(requested_native_id.clone()),
+        );
+        raw.env_vars
+            .insert("KIMI_LOAD_SESSION_ID".to_string(), String::new());
+        raw.env_vars.insert(
+            "KIMI_PID_MARKER".to_string(),
+            pid_marker.display().to_string(),
+        );
+        let provider = KimiCodeProvider::new(lc_kimi_resume_fixture(marker_dir.path()));
+        let native_id_missing_result = provider
+            .start_validated(
+                fixture.validated_coding_input(raw),
+                CancellationToken::new(),
+            )
+            .await;
+        assert!(native_id_missing_result.is_err());
+        let Err(rejected) = native_id_missing_result else {
+            panic!("unconfirmed resume must fail");
+        };
+        assert!(
+            rejected.details.contains("session NOT resumed")
+                && rejected.details.contains("not a zero-spawn refusal"),
+            "rejection must record the not-resumed outcome without claiming zero spawn: {rejected:?}"
+        );
+        assert!(
+            sink.events().is_empty(),
+            "no fresh provider_start may be written for a resume the native side never confirmed"
+        );
+        let started_child_was_killed_and_reaped = t09c_child_killed_and_reaped(&pid_marker);
+        assert!(started_child_was_killed_and_reaped);
+    }
+
+    // 3) 错 id:session/load 应答不同的原生会话 id → 同为 runtime 失败:
+    //    Err + kill/reap,绝不采纳陌生 id 续接、绝不清请求 id 转 fresh。
+    {
+        let marker_dir = tempfile::tempdir().expect("t09c wrong-id marker dir");
+        let pid_marker = marker_dir.path().join("kimi-t09c-wrong-id.pid");
+        let sink = RecordingToolPolicyAuditSink::new();
+        let wrong_native_id = "kimi-session-native-wrong-t09c".to_string();
+        let mut raw = fixture.lc_streaming_input(
+            Some(sink.clone().bound()),
+            Some(requested_native_id.clone()),
+        );
+        raw.env_vars.insert(
+            "KIMI_LOAD_SESSION_ID".to_string(),
+            wrong_native_id.clone(),
+        );
+        raw.env_vars.insert(
+            "KIMI_PID_MARKER".to_string(),
+            pid_marker.display().to_string(),
+        );
+        let provider = KimiCodeProvider::new(lc_kimi_resume_fixture(marker_dir.path()));
+        let wrong_native_id_result = provider
+            .start_validated(
+                fixture.validated_coding_input(raw),
+                CancellationToken::new(),
+            )
+            .await;
+        let Err(rejected) = wrong_native_id_result else {
+            panic!("a wrong native id must fail the resume");
+        };
+        assert!(
+            rejected.details.contains("kimi-session-native-wrong-t09c")
+                && rejected.details.contains(&requested_native_id)
+                && rejected.details.contains("session NOT resumed"),
+            "rejection must name both ids and record the not-resumed outcome: {rejected:?}"
+        );
+        assert!(
+            sink.events().is_empty(),
+            "no fresh provider_start may be written for a mismatched native resume confirmation"
+        );
+        let started_child_was_killed_and_reaped = t09c_child_killed_and_reaped(&pid_marker);
+        assert!(started_child_was_killed_and_reaped);
+    }
+}
