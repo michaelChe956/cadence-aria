@@ -415,7 +415,6 @@ impl WorkspaceEngine {
                             receipt,
                         }) => {
                             tracing::info!(choice_id = %id, "engine forwarding choice response");
-                            let choice_id = id.clone();
                             let choice_request = pending_choice_requests.remove(&id);
                             if choice_request.is_some() {
                                 // F-27R2：应答命中挂起 choice（进程级登记簿已同步
@@ -436,12 +435,6 @@ impl WorkspaceEngine {
                                 agent: agent.as_ref(),
                                 role: &role,
                             });
-                            eprintln!(
-                                "[aria-choice-diag] engine forwarding author choice_response id={} selected={:?} free_text_present={}",
-                                choice_id,
-                                selected_option_ids,
-                                free_text.as_ref().is_some_and(|text| !text.trim().is_empty())
-                            );
                             if session.commands.send(ProviderCommand::ChoiceResponse {
                                 id,
                                 selected_option_ids,
@@ -449,16 +442,7 @@ impl WorkspaceEngine {
                                 answers,
                             receipt,
                             }).await.is_err() {
-                                eprintln!(
-                                    "[aria-choice-diag] engine failed to forward author choice_response id={} to provider session",
-                                    choice_id
-                                );
                                 commands_open = false;
-                            } else {
-                                eprintln!(
-                                    "[aria-choice-diag] engine forwarded author choice_response id={} to provider session",
-                                    choice_id
-                                );
                             }
                         }
                         Some(ProviderCommand::ToolResult(_)) => {}

@@ -264,15 +264,6 @@ async fn handle_workspace_inbound_message_inner(
             expected_run_id,
         } => {
             tracing::info!(choice_id = %id, "ws inbound choice response");
-            eprintln!(
-                "[aria-choice-diag] ws inbound choice_response session={} id={} selected={:?} free_text_present={}",
-                session_id,
-                id,
-                selected_option_ids,
-                free_text
-                    .as_ref()
-                    .is_some_and(|text| !text.trim().is_empty())
-            );
             let active_run = run_context.manager.active_run().await;
             if let Some(run) = active_run {
                 // P0 1.3（REQ-WIGA-05）：WS 与 REST 共用 claim 门面——缺省
@@ -329,10 +320,6 @@ async fn handle_workspace_inbound_message_inner(
                         .await
                     {
                         Ok(_) => {
-                            eprintln!(
-                                "[aria-choice-diag] ws submitted claimed choice_response session={} id={}",
-                                session_id, id
-                            );
                             return;
                         }
                         Err(error) => {
@@ -350,11 +337,6 @@ async fn handle_workspace_inbound_message_inner(
                         return;
                     }
                 }
-            } else {
-                eprintln!(
-                    "[aria-choice-diag] ws has no active run for choice_response session={} id={}; trying text fallback follow-up",
-                    session_id, id
-                );
             }
 
             let prompt = {

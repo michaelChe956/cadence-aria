@@ -40,24 +40,12 @@ pub(super) async fn listen_for_permission_commands(
                 receipt,
             } => {
                 tracing::info!(choice_id = %id, "bridge received choice response");
-                eprintln!(
-                    "[aria-choice-diag] bridge received choice_response id={} selected={:?} free_text_present={}",
-                    id,
-                    selected_option_ids,
-                    free_text
-                        .as_ref()
-                        .is_some_and(|text| !text.trim().is_empty())
-                );
                 // P0 1.3：mpsc 消费者已领取命令——回执先推进 Resolving；
                 // Delivered 只能由 request_choice waiter 解析后推进。
                 if let Some(receipt) = receipt.as_ref() {
                     receipt.mark_resolving();
                 }
                 if let Some(decision_tx) = pending_choices.lock().await.remove(&id) {
-                    eprintln!(
-                        "[aria-choice-diag] bridge matched pending choice_response id={}",
-                        id
-                    );
                     // oneshot 关闭（waiter 取消）则值会返回——从中取回回执
                     // 置 Rejected，不得悬置 Resolving。
                     if let Err(undelivered) = decision_tx.send(ChoiceDecision {
@@ -71,10 +59,6 @@ pub(super) async fn listen_for_permission_commands(
                     }
                 } else {
                     tracing::warn!(choice_id = %id, "bridge: no pending choice entry for id");
-                    eprintln!(
-                        "[aria-choice-diag] bridge missing pending choice_response id={}",
-                        id
-                    );
                     if let Some(receipt) = receipt.as_ref() {
                         receipt.reject();
                     }

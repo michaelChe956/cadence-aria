@@ -287,13 +287,6 @@ impl WorkspaceEngine {
                                     .await;
                             }
                             tracing::info!(choice_id = %id, "engine forwarding choice response");
-                            let choice_id = id.clone();
-                            eprintln!(
-                                "[aria-choice-diag] engine forwarding reviewer choice_response id={} selected={:?} free_text_present={}",
-                                choice_id,
-                                selected_option_ids,
-                                free_text.as_ref().is_some_and(|text| !text.trim().is_empty())
-                            );
                             if session
                                 .commands
                                 .send(ProviderCommand::ChoiceResponse {
@@ -304,18 +297,9 @@ impl WorkspaceEngine {
                                     receipt,
                                 })
                                 .await
-                                .is_err()
+                            .is_err()
                             {
-                                eprintln!(
-                                    "[aria-choice-diag] engine failed to forward reviewer choice_response id={} to provider session",
-                                    choice_id
-                                );
                                 commands_open = false;
-                            } else {
-                                eprintln!(
-                                    "[aria-choice-diag] engine forwarded reviewer choice_response id={} to provider session",
-                                    choice_id
-                                );
                             }
                         }
                         Some(ProviderCommand::ToolResult(_)) => {}

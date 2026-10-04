@@ -110,21 +110,11 @@ where
 
         if let Some(request) = ClaudeCodeProvider::parse_control_request(&value) {
             if request.tool_name == "AskUserQuestion" {
-                eprintln!(
-                    "[aria-choice-diag] claude received control_request AskUserQuestion request_id={} tool_use_id={}",
-                    request.request_id,
-                    request.tool_use_id.as_deref().unwrap_or("<none>")
-                );
                 if let Some(resolved) = request
                     .tool_use_id
                     .as_deref()
                     .and_then(|tool_use_id| resolved_ask_user_questions.get(tool_use_id))
                 {
-                    eprintln!(
-                        "[aria-choice-diag] claude reusing AskUserQuestion decision for control_request request_id={} tool_use_id={}",
-                        request.request_id,
-                        request.tool_use_id.as_deref().unwrap_or("<none>")
-                    );
                     ClaudeCodeProvider::write_choice_control_response(
                         &stdin,
                         &request.request_id,
@@ -155,15 +145,6 @@ where
                             return Err(error);
                         }
                     };
-                eprintln!(
-                    "[aria-choice-diag] claude got choice decision for control_request request_id={} selected={:?} free_text_present={}",
-                    request.request_id,
-                    choice_decision.selected_option_ids,
-                    choice_decision
-                        .free_text
-                        .as_ref()
-                        .is_some_and(|text| !text.trim().is_empty())
-                );
                 let answers = ask_user_question::ask_user_question_answers_from_decision(
                     &request.input,
                     &choice_decision,
@@ -202,10 +183,6 @@ where
         if let Some(tool_uses) = ClaudeCodeProvider::parse_tool_use_from_assistant(&value) {
             for tool_use in tool_uses {
                 if tool_use.name == "AskUserQuestion" {
-                    eprintln!(
-                        "[aria-choice-diag] claude received assistant tool_use AskUserQuestion tool_use_id={}",
-                        tool_use.id
-                    );
                     pending_tool_uses.insert(tool_use.id.clone(), tool_use);
                 } else {
                     let description = tool::tool_use_description(&tool_use);

@@ -176,18 +176,11 @@ impl ApprovalBridge {
         cancel: CancellationToken,
     ) -> Result<ChoiceDecision, ProviderAdapterError> {
         let id = request.id.clone();
-        eprintln!(
-            "[aria-choice-diag] bridge emitting choice_request id={} source={} options={}",
-            id,
-            request.source.as_str(),
-            request.options.len()
-        );
         let (decision_tx, decision_rx) = oneshot::channel();
         self.pending_choices
             .lock()
             .await
             .insert(id.clone(), decision_tx);
-        let request_id = id.clone();
         let mut pending_guard = PendingChoiceGuard::new(id, Arc::clone(&self.pending_choices));
 
         let send_result = tokio::select! {
@@ -219,12 +212,6 @@ impl ApprovalBridge {
                 let decision = decision.map_err(|_| {
                     permission_bridge_error("choice response channel closed")
                 })?;
-                eprintln!(
-                    "[aria-choice-diag] bridge resolved choice_request id={} selected={:?} free_text_present={}",
-                    request_id,
-                    decision.selected_option_ids,
-                    decision.free_text.as_ref().is_some_and(|text| !text.trim().is_empty())
-                );
                 // P0 1.3：两层回执——waiter 真正解出 ChoiceDecision 才 Delivered。
                 if let Some(receipt) = decision.receipt.as_ref() {
                     receipt.deliver();

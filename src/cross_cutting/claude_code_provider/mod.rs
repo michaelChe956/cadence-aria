@@ -421,11 +421,6 @@ impl ClaudeCodeProvider {
         original_input: &Value,
         answers: serde_json::Map<String, Value>,
     ) -> Result<(), ProviderAdapterError> {
-        eprintln!(
-            "[aria-choice-diag] claude writing control_response request_id={} answer_keys={:?}",
-            request_id,
-            answers.keys().cloned().collect::<Vec<_>>()
-        );
         let mut updated_input = original_input.clone();
         if let Some(obj) = updated_input.as_object_mut() {
             obj.insert("answers".to_string(), Value::Object(answers));
