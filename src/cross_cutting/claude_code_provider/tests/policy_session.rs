@@ -1327,3 +1327,138 @@ async fn lcg_t09_claude_missing_or_wrong_native_id_never_fresh() {
         assert!(started_child_was_killed_and_reaped);
     }
 }
+
+// ==== Task 10 fix:RootRecipe 相位 marker 的确定性 canonical 化 ====
+
+use crate::cross_cutting::streaming_provider::ToolPolicyIntent;
+use crate::product::logical_codebase::aggregate_initialization::AggregateInitializationStepKind;
+use crate::product::logical_codebase::provider_admission_preflight::{
+    BootstrapExecutorMarker, BootstrapPhaseCredential,
+};
+
+/// 构造完整四要素的 BootstrapExecutorMarker 策略(canonical 层测试材料;
+/// 生产面凭据只能经 `from_running_operation` 派生,此处用 for_test seam)。
+fn t10_bootstrap_marker_policy(operation_id: &str, receipt_context: &str) -> ProviderToolPolicy {
+    let canonical_root = PathBuf::from("/lc/bootstrap-root");
+    let credential = BootstrapPhaseCredential::for_test(
+        "project_0001",
+        "logical_codebase_0001",
+        operation_id,
+        AggregateInitializationStepKind::PreCheck,
+        "sha256:test-input-digest",
+        canonical_root.clone(),
+    );
+    let marker = BootstrapExecutorMarker::new(
+        credential,
+        SessionPolicyAction::CodingTargetWrite,
+        canonical_root,
+        receipt_context,
+    )
+    .expect("complete bootstrap executor marker");
+    ProviderToolPolicy {
+        intent: ToolPolicyIntent::BootstrapExecutorMarker(marker),
+    }
+}
+
+/// Task 10 fix(root recipe 生产启动经 LC validated 链):RootRecipe 相位的
+/// BootstrapExecutorMarker 可确定性 canonical 化(固定 schema 序列化+长度
+/// 分隔+域前缀),供会话投影与统一 launch audit 落盘;Normal 相位的 marker
+/// 在 canonical 层独立拒绝(T7 guard 相位门之外的二层防线,普通 Coder 不可
+/// 借 marker);deny/None 的既有 canonical 语义与相位无关,零回归。
+#[test]
+fn lcg_t10_claude_root_recipe_marker_canonicalization_is_deterministic_and_phase_gated() {
+    // 1) RootRecipe 相位:可翻译且确定性(同材料两次一致,digest 形状与
+    //    LC 分层摘要同构:sha256: 前缀 + 64 位小写 hex)。
+    let marker_policy = t10_bootstrap_marker_policy(
+        "aggregate_initialization_0001",
+        "root-recipe:pre_check:command-1",
+    );
+    let canonical = projection::lc_tool_policy_canonical_digest(Some(&marker_policy), true)
+        .expect("root recipe phase marker must canonicalize");
+    assert!(canonical.starts_with("sha256:"));
+    assert_eq!(canonical.len(), 71);
+    let again = projection::lc_tool_policy_canonical_digest(Some(&marker_policy), true)
+        .expect("canonicalization is deterministic");
+    assert_eq!(canonical, again);
+
+    // 2) 漂移敏感:凭据 operation id / receipt context 任一变化 → digest 变化。
+    let drifted_operation = t10_bootstrap_marker_policy(
+        "aggregate_initialization_0002",
+        "root-recipe:pre_check:command-1",
+    );
+    let drifted_receipt = t10_bootstrap_marker_policy(
+        "aggregate_initialization_0001",
+        "root-recipe:rule_and_mcp_config:command-2",
+    );
+    assert_ne!(
+        canonical,
+        projection::lc_tool_policy_canonical_digest(Some(&drifted_operation), true)
+            .expect("drifted operation still canonicalizes")
+    );
+    assert_ne!(
+        canonical,
+        projection::lc_tool_policy_canonical_digest(Some(&drifted_receipt), true)
+            .expect("drifted receipt still canonicalizes")
+    );
+
+    // 3) canonical 层防线:Normal 相位不可传 marker(普通 Coder 不可借)。
+    let rejected = projection::lc_tool_policy_canonical_digest(Some(&marker_policy), false)
+        .expect_err("normal phase marker must be rejected at the canonical layer");
+    assert!(
+        rejected.to_string().contains("root recipe phase"),
+        "unexpected rejection: {rejected:?}"
+    );
+
+    // 4) deny/None 与相位无关(既有 canonical 语义零回归)。
+    let deny = ProviderToolPolicy::deny_file_write_builtins();
+    assert_eq!(
+        projection::lc_tool_policy_canonical_digest(Some(&deny), true)
+            .expect("deny canonicalizes in root recipe phase"),
+        projection::lc_tool_policy_canonical_digest(Some(&deny), false)
+            .expect("deny canonicalizes in normal phase")
+    );
+    assert_eq!(
+        projection::lc_tool_policy_canonical_digest(None, true).expect("none in root recipe"),
+        projection::lc_tool_policy_canonical_digest(None, false).expect("none in normal")
+    );
+
+    // 5) projector 层:RootRecipe 相位投影成功且确定性(Normal 相位的 marker
+    //    经 T7 guard 先拦,此处验证 projector/canonical 层独立 fail-closed)。
+    let marker_input = lc_projection_input(
+        lc_projection_envelope(
+            SessionPolicyAction::CodingTargetWrite,
+            PathBuf::from("/lc/member-a"),
+            "sha256:cfg-a",
+            "sha256:cfg-digest-a",
+        ),
+        AdapterRole::Executor,
+        Some(marker_policy.clone()),
+        "sha256:trust-1",
+    );
+    let root_recipe_projector =
+        ClaudePolicyProjector::new("claude 2.0.4-lc-fixture").with_root_recipe_phase(true);
+    let projected = root_recipe_projector
+        .project(&marker_input)
+        .expect("root recipe projector accepts the bootstrap marker");
+    assert!(projected.tool_policy().is_some());
+    assert!(projected.projection_digest().starts_with("sha256:"));
+    assert_eq!(
+        projected.projection_digest(),
+        root_recipe_projector
+            .project(&marker_input)
+            .expect("projection is deterministic")
+            .projection_digest()
+    );
+
+    let normal_projector = ClaudePolicyProjector::new("claude 2.0.4-lc-fixture");
+    let rejected_projection = normal_projector
+        .project(&marker_input)
+        .err()
+        .expect("normal phase projector must refuse the marker");
+    assert!(
+        rejected_projection
+            .to_string()
+            .contains("root recipe phase"),
+        "unexpected projection rejection: {rejected_projection:?}"
+    );
+}

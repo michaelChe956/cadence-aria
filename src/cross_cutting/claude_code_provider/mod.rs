@@ -1198,7 +1198,8 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
                 String::new(),
                 Some(boundary),
             );
-        let projector = ClaudePolicyProjector::new(provider_version.clone());
+        let projector = ClaudePolicyProjector::new(provider_version.clone())
+            .with_root_recipe_phase(launch.is_root_recipe_phase());
         let lc_projection = projector.project(&projection_input).map_err(|error| {
             ProviderAdapterError::parse_error(
                 format!("claude lc validated start: {error}"),
@@ -1315,6 +1316,7 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
             crate::cross_cutting::streaming_provider::adapter_role_text(&input.role).to_string();
         let tool_policy_digest = projection::lc_tool_policy_canonical_digest(
             input.tool_policy.as_ref(),
+            launch.is_root_recipe_phase(),
         )
         .map_err(|error| {
             ProviderAdapterError::parse_error(
