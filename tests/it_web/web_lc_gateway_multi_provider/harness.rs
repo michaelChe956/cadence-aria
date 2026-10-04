@@ -525,9 +525,10 @@ struct MatrixEnvironment {
     provider: ProviderName,
     provider_wire: String,
     /// 非 Git 隔离 root(store/服务器工作区;未经审计不覆盖用户文件)。
-    _root: TempDir,
+    /// `Option`:失败诊断时 `keep()` 保留 tempdir,成功路径随 drop 清理。
+    _root: Option<TempDir>,
     /// 真实聚合根(canonical root;两成员 git 仓)。
-    _aggregate_root: TempDir,
+    _aggregate_root: Option<TempDir>,
     app: axum::Router,
     _server: tokio::task::JoinHandle<()>,
     ws_addr: SocketAddr,
@@ -620,8 +621,8 @@ impl MatrixEnvironment {
         let mut env = Self {
             provider,
             provider_wire,
-            _root: root,
-            _aggregate_root: aggregate_root,
+            _root: Some(root),
+            _aggregate_root: Some(aggregate_root),
             app: http_app,
             _server: server,
             ws_addr,
@@ -663,9 +664,85 @@ impl MatrixEnvironment {
         env.wait_for_index_ready().await?;
 
         // 5) canonical root/target 定位 + 成员 issue。
-        env.resolve_member_target()?;
+        env.resolve_member_target().await?;
         env.create_issue().await?;
         Ok(env)
+    }
+
+    fn workspace_root_path(&self) -> &Path {
+        self._root.as_ref().expect("workspace root").path()
+    }
+
+    fn aggregate_root_path(&self) -> &Path {
+        self._aggregate_root
+            .as_ref()
+            .expect("aggregate root")
+            .path()
+    }
+
+    /// fix 轮 3:失败诊断抄录 + tempdir 保留。把该 LC 的 root recipe
+    /// receipts(逐命令 observed_changes/verdict)与 bootstrap GET 投影
+    /// 抄录到 `evidence_root/diagnostics/`,并 `keep()` 两个 tempdir
+    /// (成功路径照旧随 drop 清理);保留路径写入 failure.message。
+    async fn fail_with_diagnostics(
+        &mut self,
+        mut failure: LiveMatrixFailure,
+        operation_id: Option<&str>,
+    ) -> LiveMatrixFailure {
+        let diagnostics_dir = self.evidence_root.join("diagnostics");
+        let _ = std::fs::create_dir_all(&diagnostics_dir);
+        // 1) root recipe receipts 目录整体抄录(拒绝也 durable 保留证据)。
+        let receipts_src = self
+            .app_paths
+            .logical_codebases_root(PROJECT_ID)
+            .join(&self.lc_id)
+            .join("aggregate-recipe-receipts");
+        let receipts_dst = diagnostics_dir.join("aggregate-recipe-receipts");
+        let _ = copy_tree(&receipts_src, &receipts_dst);
+        // 2) bootstrap GET 投影快照(材料/planning 状态)。
+        let bootstrap_uri = format!(
+            "/api/projects/{PROJECT_ID}/logical-codebases/{}/bootstrap",
+            self.lc_id
+        );
+        let (bootstrap_status, bootstrap_body) =
+            request_json(&self.app, Method::GET, &bootstrap_uri, json!({})).await;
+        let _ = std::fs::write(
+            diagnostics_dir.join("bootstrap.json"),
+            serde_json::to_vec_pretty(&json!({
+                "http_status": bootstrap_status.as_u16(),
+                "body": bootstrap_body,
+            }))
+            .unwrap_or_default(),
+        );
+        // 3) tempdir 保留(keep 后不再随 drop 删除)。
+        let workspace_before = self.workspace_root_path().display().to_string();
+        let workspace_kept = self
+            ._root
+            .take()
+            .map(|temp| temp.keep())
+            .map(|path| path.display().to_string());
+        let aggregate_kept = self
+            ._aggregate_root
+            .take()
+            .map(|temp| temp.keep())
+            .map(|path| path.display().to_string());
+        let _ = std::fs::write(
+            diagnostics_dir.join("paths.json"),
+            serde_json::to_vec_pretty(&json!({
+                "operation_id": operation_id,
+                "reason_code": failure.reason_code,
+                "workspace_root_before_keep": workspace_before,
+                "workspace_root_kept": workspace_kept,
+                "aggregate_root_kept": aggregate_kept,
+            }))
+            .unwrap_or_default(),
+        );
+        failure.message = format!(
+            "{} [诊断已保留:{},workspace/aggregate_root 见 paths.json]",
+            failure.message,
+            diagnostics_dir.display()
+        );
+        failure
     }
 
     /// 轮询真实 provider health 直到所选 provider available(先触发一次
@@ -693,14 +770,15 @@ impl MatrixEnvironment {
                 return Ok(());
             }
             if tokio::time::Instant::now() >= deadline {
-                return Err(matrix_failure(
+                let failure = matrix_failure(
                     "provider_health_not_ready",
                     format!(
                         "provider health 未就绪({}):{} (环境不可运行须报告 BLOCKED)",
                         self.provider_wire, body
                     ),
                     None,
-                ));
+                );
+                return Err(self.fail_with_diagnostics(failure, None).await);
             }
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
@@ -714,24 +792,29 @@ impl MatrixEnvironment {
             json!({"name":"LC gateway matrix","description":null}),
         )
         .await;
-        expect_ok(status, &body, "创建 project", None)?;
+        if let Err(failure) = expect_ok(status, &body, "创建 project", None) {
+            return Err(self.fail_with_diagnostics(failure, None).await);
+        }
         let (status, body) = request_json(
             &self.app,
             Method::POST,
             &format!("/api/projects/{PROJECT_ID}/logical-codebases"),
-            json!({"name":"Matrix","aggregate_root": self._aggregate_root.path()}),
+            json!({"name":"Matrix","aggregate_root": self.aggregate_root_path()}),
         )
         .await;
-        expect_ok(status, &body, "创建逻辑代码库", None)?;
-        self.lc_id = body["id"]
-            .as_str()
-            .ok_or_else(|| matrix_failure("lc_id_missing", format!("{body}"), None))?
-            .to_string();
+        if let Err(failure) = expect_ok(status, &body, "创建逻辑代码库", None) {
+            return Err(self.fail_with_diagnostics(failure, None).await);
+        }
+        let Some(lc_id) = body["id"].as_str() else {
+            let failure = matrix_failure("lc_id_missing", format!("{body}"), None);
+            return Err(self.fail_with_diagnostics(failure, None).await);
+        };
+        self.lc_id = lc_id.to_string();
         Ok(())
     }
 
     async fn register_members(&mut self) -> Result<(), LiveMatrixFailure> {
-        let aggregate_root = self._aggregate_root.path();
+        let aggregate_root = self.aggregate_root_path().to_path_buf();
         let (status, body) = request_json(
             &self.app,
             Method::POST,
@@ -742,7 +825,9 @@ impl MatrixEnvironment {
             json!({"aggregate_root": aggregate_root, "candidate_paths": [], "auto_discover": true}),
         )
         .await;
-        expect_ok(status, &body, "登记 preflight", None)?;
+        if let Err(failure) = expect_ok(status, &body, "登记 preflight", None) {
+            return Err(self.fail_with_diagnostics(failure, None).await);
+        }
         let preflight_id = body["preflight_id"].as_str().expect("preflight id");
         let (status, body) = request_json(
             &self.app,
@@ -761,13 +846,16 @@ impl MatrixEnvironment {
             }),
         )
         .await;
-        expect_ok(status, &body, "真实登记成员", None)?;
+        if let Err(failure) = expect_ok(status, &body, "真实登记成员", None) {
+            return Err(self.fail_with_diagnostics(failure, None).await);
+        }
         if body["status"] != "completed" {
-            return Err(matrix_failure(
+            let failure = matrix_failure(
                 "registration_not_completed",
                 format!("登记未完成:{body}"),
                 None,
-            ));
+            );
+            return Err(self.fail_with_diagnostics(failure, None).await);
         }
         Ok(())
     }
@@ -785,11 +873,12 @@ impl MatrixEnvironment {
         )
         .await;
         if status != StatusCode::ACCEPTED {
-            return Err(matrix_failure(
+            let failure = matrix_failure(
                 "initialization_rejected",
                 format!("初始化启动被拒({status}):{body}"),
                 None,
-            ));
+            );
+            return Err(self.fail_with_diagnostics(failure, None).await);
         }
         let operation_id = body["operation_id"]
             .as_str()
@@ -806,22 +895,32 @@ impl MatrixEnvironment {
         let deadline = tokio::time::Instant::now() + init_timeout;
         loop {
             if tokio::time::Instant::now() >= deadline {
-                return Err(matrix_failure(
+                let failure = matrix_failure(
                     "initialization_timeout",
                     format!("聚合初始化超时({init_timeout:?});环境不可运行须报告 BLOCKED"),
                     None,
-                ));
+                );
+                return Err(self
+                    .fail_with_diagnostics(failure, Some(&operation_id))
+                    .await);
             }
             let (status, snapshot) = request_json(&self.app, Method::GET, &uri, json!({})).await;
-            expect_ok(status, &snapshot, "轮询初始化", None)?;
+            if let Err(failure) = expect_ok(status, &snapshot, "轮询初始化", None) {
+                return Err(self
+                    .fail_with_diagnostics(failure, Some(&operation_id))
+                    .await);
+            }
             match snapshot["status"].as_str() {
                 Some("completed") => return Ok(()),
                 Some("failed") | Some("cancelled") => {
-                    return Err(matrix_failure(
+                    let failure = matrix_failure(
                         "initialization_failed",
                         format!("聚合初始化 {snapshot}"),
                         None,
-                    ));
+                    );
+                    return Err(self
+                        .fail_with_diagnostics(failure, Some(&operation_id))
+                        .await);
                 }
                 _ => tokio::time::sleep(Duration::from_millis(500)).await,
             }
@@ -841,44 +940,49 @@ impl MatrixEnvironment {
         let deadline = tokio::time::Instant::now() + self.stage_timeout;
         loop {
             let (status, body) = request_json(&self.app, Method::GET, &active_uri, json!({})).await;
-            expect_ok(status, &body, "读取 active index", None)?;
+            if let Err(failure) = expect_ok(status, &body, "读取 active index", None) {
+                return Err(self.fail_with_diagnostics(failure, None).await);
+            }
             match body["state"].as_str() {
                 Some("ready") | Some("active") | Some("completed") => return Ok(()),
                 Some("missing") | Some("building") | None => {
                     let (rebuild_status, rebuild_body) =
                         request_json(&self.app, Method::POST, &rebuild_uri, json!({})).await;
                     if rebuild_status != StatusCode::ACCEPTED && rebuild_status != StatusCode::OK {
-                        return Err(matrix_failure(
+                        let failure = matrix_failure(
                             "index_rebuild_rejected",
                             format!("索引 rebuild 被拒({rebuild_status}):{rebuild_body}"),
                             None,
-                        ));
+                        );
+                        return Err(self.fail_with_diagnostics(failure, None).await);
                     }
                 }
                 Some(other) => {
-                    return Err(matrix_failure(
+                    let failure = matrix_failure(
                         "index_unexpected_state",
                         format!("active index 状态 {other}:{body}"),
                         None,
-                    ));
+                    );
+                    return Err(self.fail_with_diagnostics(failure, None).await);
                 }
             }
             if tokio::time::Instant::now() >= deadline {
-                return Err(matrix_failure(
+                let failure = matrix_failure(
                     "index_timeout",
                     "索引未 ready(超时);环境不可运行须报告 BLOCKED".to_string(),
                     None,
-                ));
+                );
+                return Err(self.fail_with_diagnostics(failure, None).await);
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
     }
 
     /// canonical root + 成员 worktree 定位(登记后的真实 checkout 记录)。
-    fn resolve_member_target(&mut self) -> Result<(), LiveMatrixFailure> {
+    async fn resolve_member_target(&mut self) -> Result<(), LiveMatrixFailure> {
         self.canonical_root = self
-            ._aggregate_root
-            .path()
+            .aggregate_root_path()
+            .to_path_buf()
             .canonicalize()
             .expect("canonical aggregate root");
         let alpha = self
@@ -886,9 +990,13 @@ impl MatrixEnvironment {
             .join("alpha")
             .canonicalize()
             .expect("canonical alpha");
-        let repositories = RepositoryStore::new(self.app_paths.clone())
-            .list(PROJECT_ID)
-            .map_err(|error| matrix_failure("repository_store_error", format!("{error}"), None))?;
+        let repositories = match RepositoryStore::new(self.app_paths.clone()).list(PROJECT_ID) {
+            Ok(repositories) => repositories,
+            Err(error) => {
+                let failure = matrix_failure("repository_store_error", format!("{error}"), None);
+                return Err(self.fail_with_diagnostics(failure, None).await);
+            }
+        };
         let member = repositories
             .iter()
             .find(|record| record.logical_repository_id.is_some() && record.path == alpha)
@@ -897,14 +1005,18 @@ impl MatrixEnvironment {
                     .iter()
                     .find(|record| record.logical_repository_id.is_some())
             })
-            .ok_or_else(|| {
-                matrix_failure(
+            .cloned();
+        let member = match member {
+            Some(member) => member,
+            None => {
+                let failure = matrix_failure(
                     "member_repository_missing",
                     "登记后未找到逻辑成员 repository 记录".to_string(),
                     None,
-                )
-            })?
-            .clone();
+                );
+                return Err(self.fail_with_diagnostics(failure, None).await);
+            }
+        };
         self.member_physical_repo_id = member.id.clone();
         self.member_logical_id = member
             .logical_repository_id
@@ -934,7 +1046,9 @@ impl MatrixEnvironment {
             }),
         )
         .await;
-        expect_ok(status, &body, "创建逻辑 issue", None)?;
+        if let Err(failure) = expect_ok(status, &body, "创建逻辑 issue", None) {
+            return Err(self.fail_with_diagnostics(failure, None).await);
+        }
         self.issue_id = body["id"].as_str().expect("issue id").to_string();
         Ok(())
     }
@@ -2327,6 +2441,28 @@ fn seed_member_rule_material(path: &Path, member: &str) {
         ),
     )
     .expect("write member language rule");
+}
+
+/// 递归复制目录(诊断抄录用;缺失源返回 Ok(0))。
+fn copy_tree(source: &Path, destination: &Path) -> std::io::Result<usize> {
+    let mut copied = 0usize;
+    let entries = match std::fs::read_dir(source) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    };
+    std::fs::create_dir_all(destination)?;
+    for entry in entries.flatten() {
+        let file_type = entry.file_type()?;
+        let target = destination.join(entry.file_name());
+        if file_type.is_dir() {
+            copied += copy_tree(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), &target)?;
+            copied += 1;
+        }
+    }
+    Ok(copied)
 }
 
 fn git_repo_at(path: &Path) {
