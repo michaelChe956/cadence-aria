@@ -1062,3 +1062,638 @@ fn append_partial_output(observer: Option<&Arc<Mutex<String>>>, content: &str) {
         output.push_str(content);
     }
 }
+
+/// Task 7(lcg_t07):LC validated 分流收口与 run-bound sink 统一分配的
+/// engine 侧观测。计数 probe adapter 镜像真实 LC adapter 的 fail-closed
+/// 契约(`start_validated` 缺 run-bound sink 即拒),使 sink 缺失与裸 start
+/// 回退都成为可观测红点。
+#[cfg(test)]
+mod lcg_t07_validated_dispatch_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use crate::cross_cutting::provider_adapter::{ProviderAdapter, ProviderAdapterError};
+    use crate::cross_cutting::provider_availability_gate::{
+        ProviderAvailabilityGate, ProviderHealthSource,
+    };
+    use crate::cross_cutting::provider_health::{ProviderHealthEntry, ProviderHealthSnapshot};
+    use crate::cross_cutting::provider_registry::ProviderRegistry;
+    use crate::cross_cutting::session_launch::{
+        ValidatedAdapterInput, ValidatedStreamingProviderInput,
+    };
+    use crate::product::app_paths::ProductAppPaths;
+    use crate::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttemptInput};
+    use crate::product::logical_codebase::store::LogicalCodebaseManifest;
+    use crate::product::logical_codebase::{
+        AggregatePolicyArtifactStore, GatewayRunAudit, LogicalCodebaseProviderGateway,
+        PolicyTarget, PolicyTargetResolver, ProviderCapability, ProviderCapabilitySource,
+        ProviderGatewayError, ProviderRef, ProviderRefType, SessionLaunchRequest,
+        SessionPolicyAction,
+    };
+    use crate::product::models::ProviderName;
+    use crate::protocol::contracts::{AdapterOutput, TimeoutStatus};
+    use crate::web::workspace_ws_types::ProviderConfigSnapshot;
+
+    /// 计数 probe streaming adapter:raw `start` 计数并成功返回;`start_validated`
+    /// 镜像真实 LC adapter 契约——缺 run-bound sink 即 fail-closed,成功启动
+    /// 才计入 validated 计数。
+    struct T07DispatchProbeAdapter {
+        raw_starts: AtomicUsize,
+        validated_starts: AtomicUsize,
+    }
+
+    impl T07DispatchProbeAdapter {
+        fn new() -> Self {
+            Self {
+                raw_starts: AtomicUsize::new(0),
+                validated_starts: AtomicUsize::new(0),
+            }
+        }
+
+        fn raw_start_count(&self) -> usize {
+            self.raw_starts.load(Ordering::SeqCst)
+        }
+
+        fn validated_start_count(&self) -> usize {
+            self.validated_starts.load(Ordering::SeqCst)
+        }
+    }
+
+    fn probe_session() -> crate::cross_cutting::streaming_provider::ProviderSession {
+        use crate::cross_cutting::streaming_provider::{
+            ProviderCompletion, ProviderEvent, ProviderSession,
+        };
+        let (event_tx, events) = tokio::sync::mpsc::channel(4);
+        let (commands, _command_rx) = tokio::sync::mpsc::channel(4);
+        let _ = event_tx.try_send(ProviderEvent::Completed(ProviderCompletion::plain(
+            "lcg t07 probe done",
+            None,
+        )));
+        ProviderSession {
+            native_session_id: None,
+            events,
+            commands,
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::cross_cutting::streaming_provider::StreamingProviderAdapter
+        for T07DispatchProbeAdapter
+    {
+        async fn start(
+            &self,
+            _input: crate::cross_cutting::streaming_provider::StreamingProviderInput,
+            _cancel: CancellationToken,
+        ) -> Result<crate::cross_cutting::streaming_provider::ProviderSession, ProviderAdapterError>
+        {
+            self.raw_starts.fetch_add(1, Ordering::SeqCst);
+            Ok(probe_session())
+        }
+
+        async fn start_validated(
+            &self,
+            launch: ValidatedStreamingProviderInput,
+            _cancel: CancellationToken,
+        ) -> Result<crate::cross_cutting::streaming_provider::ProviderSession, ProviderAdapterError>
+        {
+            let (input, launch_policy) = launch.into_parts();
+            if input.audit_sink.is_none() {
+                return Err(ProviderAdapterError::parse_error(
+                    "lcg t07 probe: audit sink is required for LC launches",
+                    String::new(),
+                    String::new(),
+                ));
+            }
+            let _ = launch_policy;
+            self.validated_starts.fetch_add(1, Ordering::SeqCst);
+            Ok(probe_session())
+        }
+    }
+
+    /// 计数 probe sync adapter:raw `run` 与 `run_validated` 分别计数。
+    struct T07DispatchProbeSyncAdapter {
+        raw_runs: AtomicUsize,
+        validated_runs: AtomicUsize,
+    }
+
+    impl T07DispatchProbeSyncAdapter {
+        fn new() -> Self {
+            Self {
+                raw_runs: AtomicUsize::new(0),
+                validated_runs: AtomicUsize::new(0),
+            }
+        }
+
+        fn raw_run_count(&self) -> usize {
+            self.raw_runs.load(Ordering::SeqCst)
+        }
+
+        fn validated_run_count(&self) -> usize {
+            self.validated_runs.load(Ordering::SeqCst)
+        }
+    }
+
+    fn probe_output() -> AdapterOutput {
+        AdapterOutput {
+            exit_code: Some(0),
+            stdout: "lcg t07 probe ok".to_string(),
+            stderr: String::new(),
+            structured_output: None,
+            files_modified: Vec::new(),
+            duration_ms: 0,
+            timeout_status: TimeoutStatus::NotTimedOut,
+        }
+    }
+
+    impl ProviderAdapter for T07DispatchProbeSyncAdapter {
+        fn run(
+            &self,
+            _input: &crate::protocol::contracts::AdapterInput,
+        ) -> Result<AdapterOutput, ProviderAdapterError> {
+            self.raw_runs.fetch_add(1, Ordering::SeqCst);
+            Ok(probe_output())
+        }
+
+        fn run_validated(
+            &self,
+            _launch: ValidatedAdapterInput,
+        ) -> Result<AdapterOutput, ProviderAdapterError> {
+            self.validated_runs.fetch_add(1, Ordering::SeqCst);
+            Ok(probe_output())
+        }
+    }
+
+    struct T07StaticCapabilitySource;
+
+    impl T07StaticCapabilitySource {
+        fn capability() -> ProviderCapability {
+            use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
+            use crate::product::logical_codebase::policy::{ProviderDialect, ProviderWireDialect};
+            use crate::product::logical_codebase::provider_capability_store::ProviderActionCapability;
+            ProviderCapability {
+                provider_type: ProviderRefType::ClaudeCode,
+                version: "1.0.0".to_string(),
+                adapter_dialect: ProviderDialect::ClaudeCodeCliV1,
+                wire_dialect: ProviderWireDialect::ClaudeCodeStreamJson,
+                capability_snapshot_ref: "cap-lcg-t07".to_string(),
+                action_capability: ProviderActionCapability {
+                    action: SessionPolicyAction::CodingTargetWrite,
+                    launch: ProviderCapabilityEvidence::Confirmed,
+                    resume: ProviderCapabilityEvidence::Confirmed,
+                    write_boundary: ProviderCapabilityEvidence::Confirmed,
+                    projection_digest: "t07-projection-digest".to_string(),
+                    evidence_ref: "t07-evidence".to_string(),
+                },
+                trust: ProviderCapabilityEvidence::Confirmed,
+            }
+        }
+    }
+
+    impl ProviderCapabilitySource for T07StaticCapabilitySource {
+        fn require_supported(
+            &self,
+            _provider: &ProviderRef,
+            _action: SessionPolicyAction,
+        ) -> Result<ProviderCapability, ProviderGatewayError> {
+            Ok(Self::capability())
+        }
+
+        fn require_resume_supported(
+            &self,
+            provider: &ProviderRef,
+            action: SessionPolicyAction,
+        ) -> Result<ProviderCapability, ProviderGatewayError> {
+            self.require_supported(provider, action)
+        }
+
+        fn require_write_boundary(
+            &self,
+            provider: &ProviderRef,
+            action: SessionPolicyAction,
+        ) -> Result<ProviderCapability, ProviderGatewayError> {
+            self.require_supported(provider, action)
+        }
+
+        fn require_root_recipe_supported(
+            &self,
+            _provider: &ProviderRef,
+            _credential: &crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
+        ) -> Result<ProviderCapability, ProviderGatewayError> {
+            Err(ProviderGatewayError::UnsupportedCapability(
+                "t07 fixture has no root recipe facts".to_string(),
+            ))
+        }
+    }
+
+    struct T07TargetResolver;
+
+    impl PolicyTargetResolver for T07TargetResolver {
+        fn resolve_and_revalidate(
+            &self,
+            request: &SessionLaunchRequest,
+        ) -> Result<PolicyTarget, ProviderGatewayError> {
+            Ok(request.target.clone())
+        }
+    }
+
+    fn t07_available_gate() -> std::sync::Arc<ProviderAvailabilityGate> {
+        struct AlwaysHealthy(std::sync::Arc<ProviderHealthSnapshot>);
+        impl ProviderHealthSource for AlwaysHealthy {
+            fn snapshot(&self) -> std::sync::Arc<ProviderHealthSnapshot> {
+                self.0.clone()
+            }
+            fn degraded(&self) -> bool {
+                false
+            }
+        }
+        let checked_at = chrono::Utc::now();
+        let snapshot = std::sync::Arc::new(ProviderHealthSnapshot {
+            schema_version: 1,
+            generation: 1,
+            checked_at,
+            providers: [ProviderName::ClaudeCode]
+                .into_iter()
+                .map(|provider| ProviderHealthEntry {
+                    provider,
+                    command: "stub".to_string(),
+                    available: true,
+                    version: Some("1.0.0".to_string()),
+                    reason_code: None,
+                    reason: None,
+                    checked_at,
+                })
+                .collect(),
+        });
+        std::sync::Arc::new(ProviderAvailabilityGate::new(std::sync::Arc::new(
+            AlwaysHealthy(snapshot),
+        )))
+    }
+
+    fn t07_gateway(
+        paths: &ProductAppPaths,
+        registry: ProviderRegistry,
+        sync_adapter: std::sync::Arc<T07DispatchProbeSyncAdapter>,
+        authority_root: std::path::PathBuf,
+    ) -> LogicalCodebaseProviderGateway {
+        LogicalCodebaseProviderGateway::with_audit(
+            AggregatePolicyArtifactStore::new(paths.clone()),
+            std::sync::Arc::new(T07StaticCapabilitySource),
+            std::sync::Arc::new(T07TargetResolver),
+            std::sync::Arc::new(registry),
+            sync_adapter,
+            t07_available_gate(),
+            std::sync::Arc::new(GatewayRunAudit::new()),
+            authority_root,
+        )
+    }
+
+    fn t07_ensure_bootstrap(paths: &ProductAppPaths) {
+        let manifest =
+            LogicalCodebaseManifest::new("project_0001", paths.root().to_path_buf(), vec![]);
+        AggregatePolicyArtifactStore::new(paths.clone())
+            .ensure_bootstrap(&manifest)
+            .expect("install lc bootstrap policy");
+    }
+
+    fn t07_logical_running_attempt(store: &CodingAttemptStore) -> CodingExecutionAttempt {
+        let worktree = store.paths().root().join("member-worktree");
+        std::fs::create_dir_all(&worktree).expect("member worktree");
+        let created = store
+            .create_attempt(CreateCodingAttemptInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                work_item_id: "work_item_0001".to_string(),
+                base_branch: "HEAD".to_string(),
+                branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
+                worktree_path: Some(worktree.clone()),
+                provider_config_snapshot: ProviderConfigSnapshot {
+                    author: ProviderName::ClaudeCode,
+                    reviewer: Some(ProviderName::ClaudeCode),
+                    review_rounds: 1,
+                    permission_modes: Default::default(),
+                },
+                target_snapshot: None,
+                max_auto_rework: 2,
+            })
+            .expect("create attempt");
+        let running = store
+            .seed_running_attempt_for_test(&created.project_id, &created.issue_id, &created.id)
+            .expect("seed running attempt");
+        let mut logical = running.clone();
+        logical.target_snapshot = Some(crate::product::coding_models::AttemptTargetSnapshot {
+            logical_repository_id: crate::product::logical_codebase::LogicalRepositoryId(
+                uuid::Uuid::new_v4(),
+            ),
+            checkout_id: crate::product::logical_codebase::RepositoryCheckoutId(
+                uuid::Uuid::new_v4(),
+            ),
+            physical_repository_id: "repository_0001".to_string(),
+            canonical_path: worktree,
+            git_dir_identity: "git-dir-identity".to_string(),
+            revision: None,
+            policy_digest: String::new(),
+            membership_revision: 1,
+            captured_at: "2026-10-04T00:00:00Z".to_string(),
+            capture_source: "lcg-t07".to_string(),
+        });
+        crate::product::json_store::write_json(
+            &store
+                .paths()
+                .issue_root(&logical.project_id, &logical.issue_id)
+                .join("coding-attempts")
+                .join(format!("{}.json", logical.id)),
+            &logical,
+        )
+        .expect("seed logical attempt record");
+        logical
+    }
+
+    fn t07_engine(
+        store: &CodingAttemptStore,
+        gateway: Option<std::sync::Arc<LogicalCodebaseProviderGateway>>,
+    ) -> CodingWorkspaceEngine {
+        let (tx, _rx) = tokio::sync::mpsc::channel(32);
+        let engine = CodingWorkspaceEngine::new(
+            store.clone(),
+            crate::product::git_workspace_service::GitWorkspaceService::new(),
+            tx,
+        );
+        match gateway {
+            Some(gateway) => engine.with_logical_provider_gateway(gateway),
+            None => engine,
+        }
+    }
+
+    fn t07_coder_input(
+        working_dir: std::path::PathBuf,
+        tool_policy: Option<crate::cross_cutting::streaming_provider::ProviderToolPolicy>,
+    ) -> crate::cross_cutting::streaming_provider::StreamingProviderInput {
+        crate::cross_cutting::streaming_provider::StreamingProviderInput {
+            working_directory: None,
+            baseline_tree: None,
+            tool_policy,
+            audit_sink: None,
+            provider_type: crate::protocol::contracts::ProviderType::ClaudeCode,
+            role: crate::protocol::contracts::AdapterRole::Executor,
+            prompt: "lcg t07 validated dispatch probe".to_string(),
+            working_dir,
+            workspace_session_id: Some("ws-lcg-t07".to_string()),
+            resume_provider_session_id: None,
+            permission_mode: crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
+            structured_output_contract: None,
+            env_vars: std::collections::BTreeMap::new(),
+            timeout_secs: 30,
+        }
+    }
+
+    fn t07_legacy_input(
+        working_dir: std::path::PathBuf,
+    ) -> crate::protocol::contracts::AdapterInput {
+        crate::protocol::contracts::AdapterInput {
+            working_directory: Some(working_dir),
+            prompt: "lcg t07 legacy probe".to_string(),
+            provider_type: crate::protocol::contracts::ProviderType::ClaudeCode,
+            role: crate::protocol::contracts::AdapterRole::Executor,
+            timeout: 30,
+            max_retries: 0,
+            context_files: Vec::new(),
+            output_schema: String::new(),
+            provider_stream_log_dir: None,
+            worktree_path: None,
+        }
+    }
+
+    fn t07_coding_request(
+        authority_root: std::path::PathBuf,
+        worktree: std::path::PathBuf,
+    ) -> SessionLaunchRequest {
+        SessionLaunchRequest {
+            project_id: "project_0001".to_string(),
+            provider: ProviderRef::claude_code("cap-lcg-t07"),
+            action: SessionPolicyAction::CodingTargetWrite,
+            target: PolicyTarget::checkout("logical_repo_0001", "checkout_0001", worktree.clone()),
+            working_directory: authority_root.clone(),
+            readable_roots: vec![authority_root],
+            writable_roots: vec![worktree],
+            config_artifact_ref: "sha256:managed-config-artifact".to_string(),
+        }
+    }
+
+    async fn t07_run_provider_stream(
+        engine: &CodingWorkspaceEngine,
+        attempt: &CodingExecutionAttempt,
+        provider: &dyn crate::cross_cutting::streaming_provider::StreamingProviderAdapter,
+        input: crate::cross_cutting::streaming_provider::StreamingProviderInput,
+        validated_input: Option<ValidatedStreamingProviderInput>,
+    ) -> Result<String, CodingWorkspaceEngineError> {
+        let (command_tx, command_rx) = tokio::sync::mpsc::channel::<
+            crate::product::coding_workspace_runner::CodingRunnerCommand,
+        >(32);
+        std::mem::forget(command_tx);
+        let legacy_input = crate::protocol::contracts::AdapterInput {
+            working_directory: None,
+            prompt: "lcg t07 legacy probe".to_string(),
+            provider_type: crate::protocol::contracts::ProviderType::ClaudeCode,
+            role: crate::protocol::contracts::AdapterRole::Executor,
+            timeout: 30,
+            max_retries: 0,
+            context_files: Vec::new(),
+            output_schema: String::new(),
+            provider_stream_log_dir: None,
+            worktree_path: None,
+        };
+        let run = CodingProviderStreamRun {
+            attempt,
+            node_id: "lcg-t07-node",
+            role_run: None,
+            provider,
+            legacy_input: &legacy_input,
+            input,
+            provider_name: &ProviderName::ClaudeCode,
+            provider_role: CodingProviderRole::Coder,
+            command_rx: &mut { command_rx },
+            allow_legacy_stream_fallback: false,
+            timeout: None,
+            timeout_reason_code: None,
+            suppress_failure_side_effects: true,
+            validated_input,
+        };
+        engine.run_provider_stream_to_completion(run).await
+    }
+
+    /// Task 7 Step 1(断言组 377-380 逐字):LC 会话启动永远不触达裸
+    /// `start`/`run`——engine 流式路径经 gateway 只调 `start_validated`
+    /// (BASE:Coder 无通用策略时 `attach_tool_policy_audit` 早退、validated
+    /// 启动缺 run-bound sink 失败,计数为 0,红);gateway 缺席时 LC
+    /// validated 输入返回稳定错误、不回退裸 `start`(BASE:分派裸 start,
+    /// raw 计数 1,红);同步栈 prepared launch 只经 `run_validated`,
+    /// 非 prepared 存量构造同样不得落入裸 `run`(BASE:gateway 过渡分叉
+    /// 走裸 run,raw 计数 1,红)。
+    #[tokio::test]
+    async fn lcg_t07_validated_launch_never_invokes_raw_start_or_run() {
+        let root = tempfile::tempdir().expect("lcg t07 root");
+        let paths = ProductAppPaths::new(root.path().join(".aria"));
+        let store = CodingAttemptStore::new(paths.clone());
+        let attempt = t07_logical_running_attempt(&store);
+        let authority_root = std::fs::canonicalize(root.path()).expect("canonical authority root");
+        let worktree = attempt.worktree_path.clone().expect("worktree");
+        t07_ensure_bootstrap(&paths);
+
+        // 场景 A(流式,gateway 在场,prepared Coder launch):只允许
+        // `start_validated` 成功一次;probe 镜像真实 adapter 的 sink 契约。
+        let probe_stream = std::sync::Arc::new(T07DispatchProbeAdapter::new());
+        let mut registry_stream = ProviderRegistry::new();
+        registry_stream.register(ProviderName::ClaudeCode, probe_stream.clone());
+        let gateway_stream = std::sync::Arc::new(t07_gateway(
+            &paths,
+            registry_stream,
+            std::sync::Arc::new(T07DispatchProbeSyncAdapter::new()),
+            authority_root.clone(),
+        ));
+        let engine_stream = t07_engine(&store, Some(gateway_stream.clone()));
+        let coder_input = t07_coder_input(worktree.clone(), None);
+        let prepared = engine_stream
+            .prepare_streaming_launch_for_role(
+                &attempt,
+                CodingProviderRole::Coder,
+                &worktree,
+                coder_input.clone(),
+            )
+            .expect("prepare lc coder launch")
+            .expect("logical attempt with gateway must prepare");
+        let _ = t07_run_provider_stream(
+            &engine_stream,
+            &attempt,
+            probe_stream.as_ref(),
+            coder_input,
+            Some(prepared),
+        )
+        .await;
+
+        // 场景 B(gateway 缺席):LC validated 输入不得回退裸 `start`。
+        let probe_fallback = std::sync::Arc::new(T07DispatchProbeAdapter::new());
+        let mut registry_probe = ProviderRegistry::new();
+        registry_probe.register(ProviderName::ClaudeCode, probe_fallback.clone());
+        let gateway_probe = t07_gateway(
+            &paths,
+            registry_probe,
+            std::sync::Arc::new(T07DispatchProbeSyncAdapter::new()),
+            authority_root.clone(),
+        );
+        let policy_for_fallback = gateway_probe
+            .validate(t07_coding_request(authority_root.clone(), worktree.clone()))
+            .expect("validate fallback probe policy");
+        let engine_no_gateway = t07_engine(&store, None);
+        let fallback_input = t07_coder_input(worktree.clone(), None);
+        let fallback_validated =
+            ValidatedStreamingProviderInput::new(fallback_input.clone(), policy_for_fallback);
+        let fallback_result = t07_run_provider_stream(
+            &engine_no_gateway,
+            &attempt,
+            probe_fallback.as_ref(),
+            fallback_input,
+            Some(fallback_validated),
+        )
+        .await;
+        assert!(fallback_result.is_err(), "gateway 缺失必须稳定报错");
+        assert!(
+            fallback_result
+                .expect_err("fallback result")
+                .to_string()
+                .contains("lc_validated_launch_requires_gateway"),
+            "LC validated 输入缺 gateway 必须返回稳定错误码,不回退裸 start"
+        );
+
+        // 场景 C(同步,prepared):只经 `run_validated`,恰好一次。
+        let probe_sync_prepared = std::sync::Arc::new(T07DispatchProbeSyncAdapter::new());
+        let gateway_sync_prepared = t07_gateway(
+            &paths,
+            ProviderRegistry::new(),
+            probe_sync_prepared.clone(),
+            authority_root.clone(),
+        );
+        let lifecycle = crate::product::lifecycle_store::LifecycleStore::new(paths.clone());
+        let context =
+            crate::product::logical_codebase::provider_gateway::ProviderLaunchAuditContext {
+                workspace_session_id: "ws-lcg-t07".to_string(),
+                role_run_seq: lifecycle
+                    .next_tool_policy_role_run_seq("ws-lcg-t07")
+                    .expect("allocate role run seq"),
+                audit_sink: std::sync::Arc::new(lifecycle),
+            };
+        let sync_input = t07_legacy_input(worktree.clone());
+        let prepared_sync = gateway_sync_prepared
+            .prepare_sync_launch(
+                sync_input.clone(),
+                t07_coding_request(authority_root.clone(), worktree.clone()),
+                context,
+            )
+            .expect("prepare sync launch");
+        gateway_sync_prepared
+            .run_sync(prepared_sync)
+            .expect("prepared sync launch runs via run_validated");
+
+        // 场景 D(同步,非 prepared 存量构造):不得落入裸 `run`。
+        let probe_sync_legacy = std::sync::Arc::new(T07DispatchProbeSyncAdapter::new());
+        let gateway_sync_legacy = t07_gateway(
+            &paths,
+            ProviderRegistry::new(),
+            probe_sync_legacy.clone(),
+            authority_root.clone(),
+        );
+        let legacy_policy = gateway_sync_legacy
+            .validate(t07_coding_request(authority_root.clone(), worktree.clone()))
+            .expect("validate legacy sync policy");
+        let legacy_sync = ValidatedAdapterInput::new(sync_input, legacy_policy);
+        let _ = gateway_sync_legacy.run_sync(legacy_sync);
+
+        let raw_start_count_for_lc =
+            probe_stream.raw_start_count() + probe_fallback.raw_start_count();
+        let raw_run_count_for_lc =
+            probe_sync_prepared.raw_run_count() + probe_sync_legacy.raw_run_count();
+        let validated_start_count_for_lc = probe_stream.validated_start_count();
+        let validated_run_count_for_lc = probe_sync_prepared.validated_run_count();
+        assert_eq!(raw_start_count_for_lc, 0);
+        assert_eq!(raw_run_count_for_lc, 0);
+        assert_eq!(validated_start_count_for_lc, 1);
+        assert_eq!(validated_run_count_for_lc, 1);
+    }
+
+    /// Task 7 Step 1(断言组 381 逐字):`attach_tool_policy_audit` 不因
+    /// `tool_policy=None` 早退——LC run(Coder/Kimi 无通用策略)同样分配
+    /// run-bound durable sink 与独立 `role_run_seq`;非 LC legacy 直连保持
+    /// 零变化(不分配)。
+    #[test]
+    fn lcg_t07_lc_tool_policy_none_still_allocates_audit_sink() {
+        let root = tempfile::tempdir().expect("lcg t07 audit root");
+        let paths = ProductAppPaths::new(root.path().join(".aria"));
+        let store = CodingAttemptStore::new(paths.clone());
+        let attempt = t07_logical_running_attempt(&store);
+        let engine = t07_engine(&store, None);
+
+        // LC run(tool_policy=None):必须分配 run-bound sink。
+        let lc_input = t07_coder_input(attempt.worktree_path.clone().expect("worktree"), None);
+        let (attached_input, attached_validated) = engine
+            .attach_tool_policy_audit(&attempt, lc_input, None)
+            .expect("attach audit for lc run");
+        let audit_sink_allocated_when_tool_policy_is_none =
+            attached_input.audit_sink.is_some() && attached_validated.is_none();
+
+        // 非 LC legacy 直连(tool_policy=None):保持零变化,不分配。
+        let mut legacy_attempt = attempt.clone();
+        legacy_attempt.target_snapshot = None;
+        let legacy_input = t07_coder_input(
+            legacy_attempt.worktree_path.clone().expect("worktree"),
+            None,
+        );
+        let (legacy_attached, _) = engine
+            .attach_tool_policy_audit(&legacy_attempt, legacy_input, None)
+            .expect("attach audit for legacy run");
+        assert!(
+            legacy_attached.audit_sink.is_none(),
+            "非 LC legacy 直连不分配审计 sink(零变化)"
+        );
+
+        assert!(audit_sink_allocated_when_tool_policy_is_none);
+    }
+}

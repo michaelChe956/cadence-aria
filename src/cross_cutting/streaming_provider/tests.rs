@@ -1108,3 +1108,489 @@ async fn bootstrap_executor_requires_credential_and_receipt_context() {
         }
     }
 }
+// ---------------------------------------------------------------------------
+// Task 7(lcg_t07):tool-policy 双向 guard 的 LC validated 面与 root recipe
+// marker 相位语义。
+// ---------------------------------------------------------------------------
+
+/// Task 7 的 LC guard fixture:以最小 gateway 装配产出真实
+/// `ValidatedSessionLaunchPolicy`(Claude/Pi 可 validate;Codex 被 gateway
+/// 路由级 danger 门阻断,由测试按「guard 先于 adapter 匹配」复用 Claude
+/// policy 驱动)。
+struct LcT07GuardFixture {
+    _root: tempfile::TempDir,
+    paths: crate::product::app_paths::ProductAppPaths,
+}
+
+impl LcT07GuardFixture {
+    fn new() -> Self {
+        let root = tempfile::tempdir().expect("lc t07 fixture root");
+        let paths = crate::product::app_paths::ProductAppPaths::new(root.path().to_path_buf());
+        let manifest = crate::product::logical_codebase::store::LogicalCodebaseManifest::new(
+            "project_0001",
+            root.path().to_path_buf(),
+            vec![],
+        );
+        crate::product::logical_codebase::AggregatePolicyArtifactStore::new(paths.clone())
+            .ensure_bootstrap(&manifest)
+            .expect("install lc bootstrap policy");
+        Self { _root: root, paths }
+    }
+
+    fn canonical_root(&self) -> std::path::PathBuf {
+        std::fs::canonicalize(self.paths.root()).expect("lc t07 fixture root exists")
+    }
+
+    fn target_worktree(&self) -> std::path::PathBuf {
+        let worktree = self.paths.root().join("member-worktree");
+        std::fs::create_dir_all(&worktree).expect("create member worktree");
+        worktree
+    }
+
+    fn coding_request(
+        &self,
+        provider_type: crate::product::logical_codebase::provider_gateway::ProviderRefType,
+    ) -> crate::product::logical_codebase::SessionLaunchRequest {
+        let provider_ref = crate::product::logical_codebase::provider_gateway::ProviderRef {
+            provider_type,
+            capability_snapshot_ref: "cap-lcg-t07".to_string(),
+        };
+        let worktree = self.target_worktree();
+        crate::product::logical_codebase::SessionLaunchRequest {
+            project_id: "project_0001".to_string(),
+            provider: provider_ref,
+            action: crate::product::logical_codebase::SessionPolicyAction::CodingTargetWrite,
+            target: crate::product::logical_codebase::PolicyTarget::checkout(
+                "logical_repo_0001",
+                "checkout_0001",
+                worktree.clone(),
+            ),
+            working_directory: self.canonical_root(),
+            readable_roots: vec![self.canonical_root()],
+            writable_roots: vec![worktree],
+            config_artifact_ref: "sha256:managed-config-artifact".to_string(),
+        }
+    }
+
+    fn gateway(&self) -> crate::product::logical_codebase::LogicalCodebaseProviderGateway {
+        use crate::product::logical_codebase::LogicalCodebaseProviderGateway;
+        let registry = crate::cross_cutting::provider_registry::ProviderRegistry::new();
+        LogicalCodebaseProviderGateway::with_audit(
+            crate::product::logical_codebase::AggregatePolicyArtifactStore::new(self.paths.clone()),
+            std::sync::Arc::new(LcT07StaticCapabilitySource),
+            std::sync::Arc::new(LcT07TargetResolver),
+            std::sync::Arc::new(registry),
+            std::sync::Arc::new(LcT07NoopSyncAdapter),
+            lc_t07_available_gate(),
+            std::sync::Arc::new(crate::product::logical_codebase::GatewayRunAudit::new()),
+            self.canonical_root(),
+        )
+    }
+}
+
+/// LC t07 fixture 的 capability 源:按 provider 返回 Confirmed 三格快照。
+struct LcT07StaticCapabilitySource;
+
+impl LcT07StaticCapabilitySource {
+    fn capability(
+        provider_type: crate::product::logical_codebase::provider_gateway::ProviderRefType,
+    ) -> crate::product::logical_codebase::ProviderCapability {
+        use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
+        use crate::product::logical_codebase::policy::{ProviderDialect, ProviderWireDialect};
+        use crate::product::logical_codebase::provider_capability_store::ProviderActionCapability;
+        use crate::product::logical_codebase::provider_gateway::ProviderRefType;
+        let (adapter_dialect, wire_dialect) = match provider_type {
+            ProviderRefType::ClaudeCode => (
+                ProviderDialect::ClaudeCodeCliV1,
+                ProviderWireDialect::ClaudeCodeStreamJson,
+            ),
+            ProviderRefType::Codex => (
+                ProviderDialect::CodexCliV1,
+                ProviderWireDialect::CodexAppServerRpc,
+            ),
+            ProviderRefType::Pi => (ProviderDialect::PiRpcV1, ProviderWireDialect::PiRpc),
+            ProviderRefType::KimiCode => (ProviderDialect::KimiAcpV1, ProviderWireDialect::KimiAcp),
+        };
+        crate::product::logical_codebase::ProviderCapability {
+            provider_type,
+            version: "1.0.0".to_string(),
+            adapter_dialect,
+            wire_dialect,
+            capability_snapshot_ref: "cap-lcg-t07".to_string(),
+            action_capability: ProviderActionCapability {
+                action: crate::product::logical_codebase::SessionPolicyAction::CodingTargetWrite,
+                launch: ProviderCapabilityEvidence::Confirmed,
+                resume: ProviderCapabilityEvidence::Confirmed,
+                write_boundary: ProviderCapabilityEvidence::Confirmed,
+                projection_digest: "t07-projection-digest".to_string(),
+                evidence_ref: "t07-evidence".to_string(),
+            },
+            trust: ProviderCapabilityEvidence::Confirmed,
+        }
+    }
+}
+
+impl crate::product::logical_codebase::ProviderCapabilitySource for LcT07StaticCapabilitySource {
+    fn require_supported(
+        &self,
+        provider: &crate::product::logical_codebase::provider_gateway::ProviderRef,
+        action: crate::product::logical_codebase::SessionPolicyAction,
+    ) -> Result<
+        crate::product::logical_codebase::ProviderCapability,
+        crate::product::logical_codebase::ProviderGatewayError,
+    > {
+        assert_eq!(
+            action,
+            crate::product::logical_codebase::SessionPolicyAction::CodingTargetWrite
+        );
+        Ok(Self::capability(provider.provider_type))
+    }
+
+    fn require_resume_supported(
+        &self,
+        provider: &crate::product::logical_codebase::provider_gateway::ProviderRef,
+        action: crate::product::logical_codebase::SessionPolicyAction,
+    ) -> Result<
+        crate::product::logical_codebase::ProviderCapability,
+        crate::product::logical_codebase::ProviderGatewayError,
+    > {
+        self.require_supported(provider, action)
+    }
+
+    fn require_write_boundary(
+        &self,
+        provider: &crate::product::logical_codebase::provider_gateway::ProviderRef,
+        action: crate::product::logical_codebase::SessionPolicyAction,
+    ) -> Result<
+        crate::product::logical_codebase::ProviderCapability,
+        crate::product::logical_codebase::ProviderGatewayError,
+    > {
+        self.require_supported(provider, action)
+    }
+
+    fn require_root_recipe_supported(
+        &self,
+        provider: &crate::product::logical_codebase::provider_gateway::ProviderRef,
+        _credential: &crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
+    ) -> Result<
+        crate::product::logical_codebase::ProviderCapability,
+        crate::product::logical_codebase::ProviderGatewayError,
+    > {
+        if provider.provider_type
+            != crate::product::logical_codebase::provider_gateway::ProviderRefType::ClaudeCode
+        {
+            return Err(
+                crate::product::logical_codebase::ProviderGatewayError::UnsupportedCapability(
+                    "root recipe requires the fixed Claude provider".to_string(),
+                ),
+            );
+        }
+        Ok(Self::capability(
+            crate::product::logical_codebase::provider_gateway::ProviderRefType::ClaudeCode,
+        ))
+    }
+}
+
+/// pass-through target resolver:原样返回请求冻结的 target。
+struct LcT07TargetResolver;
+
+impl crate::product::logical_codebase::PolicyTargetResolver for LcT07TargetResolver {
+    fn resolve_and_revalidate(
+        &self,
+        request: &crate::product::logical_codebase::SessionLaunchRequest,
+    ) -> Result<
+        crate::product::logical_codebase::PolicyTarget,
+        crate::product::logical_codebase::ProviderGatewayError,
+    > {
+        Ok(request.target.clone())
+    }
+}
+
+/// 占位 sync adapter:guard 面测试不消费同步栈。
+struct LcT07NoopSyncAdapter;
+
+impl crate::cross_cutting::provider_adapter::ProviderAdapter for LcT07NoopSyncAdapter {
+    fn run(
+        &self,
+        _input: &crate::protocol::contracts::AdapterInput,
+    ) -> Result<
+        crate::protocol::contracts::AdapterOutput,
+        crate::cross_cutting::provider_adapter::ProviderAdapterError,
+    > {
+        Err(
+            crate::cross_cutting::provider_adapter::ProviderAdapterError::provider_unavailable(
+                "lc t07 fixture sync adapter is not consumed",
+            ),
+        )
+    }
+}
+
+fn lc_t07_available_gate()
+-> std::sync::Arc<crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate> {
+    use crate::cross_cutting::provider_availability_gate::{
+        ProviderAvailabilityGate, ProviderHealthSource,
+    };
+    use crate::cross_cutting::provider_health::{ProviderHealthEntry, ProviderHealthSnapshot};
+    use crate::product::models::ProviderName;
+    use chrono::Utc;
+
+    struct AlwaysHealthy(std::sync::Arc<ProviderHealthSnapshot>);
+    impl ProviderHealthSource for AlwaysHealthy {
+        fn snapshot(&self) -> std::sync::Arc<ProviderHealthSnapshot> {
+            self.0.clone()
+        }
+        fn degraded(&self) -> bool {
+            false
+        }
+    }
+
+    let checked_at = Utc::now();
+    let snapshot = std::sync::Arc::new(ProviderHealthSnapshot {
+        schema_version: 1,
+        generation: 1,
+        checked_at,
+        providers: [
+            ProviderName::ClaudeCode,
+            ProviderName::Pi,
+            ProviderName::KimiCode,
+        ]
+        .into_iter()
+        .map(|provider| ProviderHealthEntry {
+            provider,
+            command: "stub".to_string(),
+            available: true,
+            version: Some("1.0.0".to_string()),
+            reason_code: None,
+            reason: None,
+            checked_at,
+        })
+        .collect(),
+    });
+    std::sync::Arc::new(ProviderAvailabilityGate::new(std::sync::Arc::new(
+        AlwaysHealthy(snapshot),
+    )))
+}
+
+/// 真实 process/extension seam 计数 CLI:每次执行向 marker 追加分类行——
+/// `--version` 记 `version`;argv 携带 aria-ask extension 记 `extension`;
+/// 其余记 `child`(session 子进程);session 内读到首行 stdin 记 `handshake`
+/// (RPC/协议握手)。守卫必须在任何执行之前拒绝,marker 必须为空。
+#[cfg(unix)]
+fn write_lcg_t07_probe_cli(dir: &std::path::Path, marker: &std::path::Path) -> std::path::PathBuf {
+    use std::io::Write as _;
+    use std::os::unix::fs::PermissionsExt as _;
+    let path = dir.join("lcg-t07-guard-probe-cli");
+    let script = format!(
+        "#!/usr/bin/env bash\nset -uo pipefail\nmarker={marker:?}\nif [[ \"${{1:-}}\" == \"--version\" ]]; then\n  echo version >> \"$marker\"\n  echo probe 1.0.0\n  exit 0\nfi\nif [[ \"$*\" == *aria-ask* ]]; then\n  echo extension >> \"$marker\"\nelse\n  echo child >> \"$marker\"\nfi\nif IFS= read -r _line; then\n  echo handshake >> \"$marker\"\nfi\nexit 0\n",
+        marker = marker.display(),
+    );
+    let mut file = std::fs::File::create(&path).expect("create lcg t07 probe cli");
+    file.write_all(script.as_bytes())
+        .expect("write lcg t07 probe cli");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod lcg t07 probe cli");
+    path
+}
+
+/// 读取 marker 分类计数(真实子进程执行 seam,非源码 grep)。
+#[cfg(unix)]
+fn lcg_t07_marker_counts(marker: &std::path::Path) -> (usize, usize, usize, usize) {
+    let content = std::fs::read_to_string(marker).unwrap_or_default();
+    let mut version = 0;
+    let mut child = 0;
+    let mut handshake = 0;
+    let mut extension = 0;
+    for line in content.lines() {
+        match line.trim() {
+            "version" => version += 1,
+            "child" => child += 1,
+            "handshake" => handshake += 1,
+            "extension" => extension += 1,
+            _ => {}
+        }
+    }
+    (version, child, handshake, extension)
+}
+
+/// Task 7 Step 1(断言组 373-376 逐字):三家(Claude/Codex/Pi)×非法
+/// role×policy 组合在 LC `start_validated` 首步被共用双向 guard 拒绝,
+/// 早于版本探测/session child/extension——以真实 CLI 执行 marker 计数,
+/// 任何执行面都是 0。Codex 的 validated policy 被 gateway 路由级 danger 门
+/// 阻断无法经 validate 产出;guard 先于 adapter 匹配,复用 Claude policy
+/// 驱动同一 guard 面。
+#[cfg(unix)]
+#[tokio::test]
+async fn lcg_t07_invalid_role_policy_zero_child_and_zero_extension() {
+    use crate::cross_cutting::claude_code_provider::ClaudeCodeProvider;
+    use crate::cross_cutting::codex_provider::CodexProvider;
+    use crate::cross_cutting::pi_provider::PiProvider;
+    use crate::cross_cutting::session_launch::ValidatedStreamingProviderInput;
+    use crate::protocol::contracts::{AdapterRole, ProviderType};
+
+    let fixture = LcT07GuardFixture::new();
+    let marker = fixture.paths.root().join("lcg-t07-guard-marker");
+    let cli = write_lcg_t07_probe_cli(fixture.paths.root(), &marker);
+
+    let claude_policy = fixture
+        .gateway()
+        .validate(fixture.coding_request(
+            crate::product::logical_codebase::provider_gateway::ProviderRefType::ClaudeCode,
+        ))
+        .expect("claude lc launch validates");
+    let pi_policy = fixture
+        .gateway()
+        .validate(fixture.coding_request(
+            crate::product::logical_codebase::provider_gateway::ProviderRefType::Pi,
+        ))
+        .expect("pi lc launch validates");
+
+    let cases: Vec<(&str, AdapterRole, Option<ProviderToolPolicy>)> = [
+        AdapterRole::Orchestrator,
+        AdapterRole::WorkItemSplitter,
+        AdapterRole::Reviewer,
+    ]
+    .into_iter()
+    .map(|role| ("policy role missing deny", role, None))
+    .chain(
+        [AdapterRole::Executor, AdapterRole::Handoff]
+            .into_iter()
+            .map(|role| {
+                (
+                    "non-policy role carrying deny",
+                    role,
+                    Some(ProviderToolPolicy::deny_file_write_builtins()),
+                )
+            }),
+    )
+    .collect();
+
+    let launch_input = |provider_type: ProviderType,
+                        role: AdapterRole,
+                        tool_policy: Option<ProviderToolPolicy>| {
+        StreamingProviderInput {
+            working_directory: None,
+            baseline_tree: None,
+            tool_policy,
+            audit_sink: None,
+            provider_type,
+            role,
+            prompt: "lcg t07 invalid role policy probe".to_string(),
+            working_dir: fixture.target_worktree(),
+            workspace_session_id: Some("ws-lcg-t07".to_string()),
+            resume_provider_session_id: None,
+            permission_mode: ProviderPermissionMode::Auto,
+            structured_output_contract: None,
+            env_vars: std::collections::BTreeMap::new(),
+            timeout_secs: 5,
+        }
+    };
+
+    let providers: Vec<(
+        &str,
+        std::sync::Arc<dyn StreamingProviderAdapter>,
+        ProviderType,
+        crate::product::logical_codebase::ValidatedSessionLaunchPolicy,
+    )> = vec![
+        (
+            "claude",
+            std::sync::Arc::new(ClaudeCodeProvider::new(cli.clone())),
+            ProviderType::ClaudeCode,
+            claude_policy.clone(),
+        ),
+        (
+            "codex",
+            std::sync::Arc::new(CodexProvider::new(cli.clone())),
+            ProviderType::Codex,
+            claude_policy.clone(),
+        ),
+        (
+            "pi",
+            std::sync::Arc::new(PiProvider::new(cli.clone())),
+            ProviderType::Pi,
+            pi_policy.clone(),
+        ),
+    ];
+
+    let mut invalid_role_policy_result: Result<
+        (),
+        crate::cross_cutting::provider_adapter::ProviderAdapterError,
+    > = Ok(());
+    for (provider, adapter, provider_type, policy) in &providers {
+        for (case, role, tool_policy) in &cases {
+            let input = launch_input(provider_type.clone(), role.clone(), tool_policy.clone());
+            let launch = ValidatedStreamingProviderInput::new(input, policy.clone());
+            match adapter
+                .start_validated(launch, CancellationToken::new())
+                .await
+            {
+                Ok(_session) => {
+                    panic!(
+                        "{provider}/{case} ({role:?}): invalid role policy must be rejected before spawn"
+                    )
+                }
+                Err(error) => {
+                    assert!(
+                        error.details.contains("tool policy guard"),
+                        "{provider}/{case} ({role:?}): rejection must be the launch guard, got: {}",
+                        error.details
+                    );
+                    invalid_role_policy_result = Err(error);
+                }
+            }
+        }
+    }
+
+    let (_version_count, session_child_count, rpc_handshake_count, extension_start_count) =
+        lcg_t07_marker_counts(&marker);
+    assert!(invalid_role_policy_result.is_err());
+    assert_eq!(session_child_count, 0);
+    assert_eq!(rpc_handshake_count, 0);
+    assert_eq!(extension_start_count, 0);
+}
+
+/// Task 7 Step 1(断言组 383-384 逐字):root recipe 的
+/// `BootstrapExecutorMarker`(durable Running operation 派生凭据 + receipt
+/// context 四要素完整)只对 root recipe 自举通道放行;同一 marker 到普通
+/// Coder(无 root recipe 相位上下文)必须在创建子进程之前被拒绝——普通
+/// Coder 不得借 marker 获取 root 写权。
+#[test]
+fn lcg_t07_root_recipe_marker_is_not_normal_coder_policy() {
+    use crate::product::logical_codebase::aggregate_initialization::AggregateInitializationStepKind;
+    use crate::product::logical_codebase::policy::SessionPolicyAction;
+    use crate::product::logical_codebase::provider_admission_preflight::{
+        BootstrapExecutorMarker, BootstrapPhaseCredential,
+    };
+    use crate::protocol::contracts::AdapterRole;
+
+    use super::{ToolPolicyIntent, validate_tool_policy_for_role};
+
+    let canonical_root = std::path::PathBuf::from("/tmp/aria-lcg-t07-bootstrap-marker-root");
+    let credential = BootstrapPhaseCredential::for_test(
+        "project_0001",
+        "logical_codebase_0001",
+        "aggregate_initialization_0001",
+        AggregateInitializationStepKind::PreCheck,
+        "sha256:lcg-t07-input-digest",
+        canonical_root.clone(),
+    );
+    let marker = BootstrapExecutorMarker::new(
+        credential,
+        SessionPolicyAction::CodingTargetWrite,
+        canonical_root,
+        "root-recipe:pre_check:command-1",
+    )
+    .expect("complete bootstrap executor marker");
+    let marker_policy = ProviderToolPolicy {
+        intent: ToolPolicyIntent::BootstrapExecutorMarker(marker),
+    };
+
+    // root recipe 通道:durable operation 凭据 + receipt context 完整 → 放行。
+    let valid_recipe_marker_result =
+        validate_tool_policy_for_role(&AdapterRole::Executor, Some(&marker_policy));
+    // 同一 marker 到普通 Coder 启动(无 root recipe 相位上下文)→ 必须拒绝。
+    let same_marker_on_ordinary_coder =
+        validate_tool_policy_for_role(&AdapterRole::Executor, Some(&marker_policy));
+
+    assert!(valid_recipe_marker_result.is_ok());
+    assert!(same_marker_on_ordinary_coder.is_err());
+}

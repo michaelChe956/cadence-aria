@@ -591,12 +591,12 @@ impl LcKimiLaunchFixture {
         worktree
     }
 
-    fn gateway(&self) -> LogicalCodebaseProviderGateway {
-        let mut registry = ProviderRegistry::new();
-        registry.register(
-            ProviderName::KimiCode,
-            std::sync::Arc::new(LcNoopStreamingAdapter),
-        );
+    /// 以注入 registry 组装 gateway(Task 7:注册真实 Kimi adapter 观测
+    /// gateway 分流;默认仍用占位 adapter)。
+    fn gateway_with_registry(
+        &self,
+        registry: crate::cross_cutting::provider_registry::ProviderRegistry,
+    ) -> LogicalCodebaseProviderGateway {
         LogicalCodebaseProviderGateway::with_audit(
             AggregatePolicyArtifactStore::new(self.paths.clone()),
             std::sync::Arc::new(LcStaticCapabilitySource),
@@ -607,6 +607,15 @@ impl LcKimiLaunchFixture {
             self.audit.clone(),
             self.canonical_root(),
         )
+    }
+
+    fn gateway(&self) -> LogicalCodebaseProviderGateway {
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            ProviderName::KimiCode,
+            std::sync::Arc::new(LcNoopStreamingAdapter),
+        );
+        self.gateway_with_registry(registry)
     }
 
     /// LC coding 请求:cwd=canonical root,target=成员 worktree,恰一个
@@ -1001,4 +1010,77 @@ async fn lcg_t04_no_generic_tool_policy_still_records_version_audit_and_native_s
         denied_sink.events().is_empty(),
         "rejected launch must not write any provider_start audit"
     );
+}
+
+/// Kimi 拒绝探针 CLI(Task 7):`--version` 记 `version` 并打印不兼容版本
+/// 0.0.0(若拒绝晚于版本门,错误会变成 incompatible 而非策略稳定码);
+/// ACP 会话执行记 `child`,读到首行 stdin 记 `handshake` 后退出。
+#[cfg(unix)]
+fn write_kimi_t07_reject_probe(dir: &std::path::Path, marker: &std::path::Path) -> PathBuf {
+    write_executable(
+        dir,
+        "fake-kimi-t07-reject-probe",
+        &format!(
+            "#!/usr/bin/env bash\nset -uo pipefail\nif [[ \"${{1:-}}\" == \"--version\" ]]; then\n  echo version >> {marker}\n  echo \"kimi 0.0.0\"\n  exit 0\nfi\necho child >> {marker}\nif IFS= read -r _line; then\n  echo handshake >> {marker}\nfi\nexit 0\n",
+            marker = marker.display(),
+        ),
+    )
+}
+
+/// Task 7 Step 1(断言组 382 逐字):经 gateway `start_streaming` 启动的 LC
+/// 会话携带非空通用策略时,Kimi 以稳定码
+/// `provider_generic_tool_policy_forbidden` 在版本探测与 session child 之前
+/// 拒绝。BASE 的 gateway prepared/raw 过渡分叉会把未经 prepare 的 validated
+/// 构造分派到裸 `start`——Kimi 直连不读通用策略、直接 spawn child,稳定码
+/// 拒绝消失(本测试红);Task 7 收口 validated-only 后由 `start_validated`
+/// 首步拒绝(绿),marker 全零证明拒绝先于 version/child/handshake。
+#[cfg(unix)]
+#[tokio::test]
+async fn lcg_t07_kimi_generic_policy_rejected_before_version_child() {
+    let fixture = LcKimiLaunchFixture::new();
+    let marker = fixture.paths.root().join("t07-kimi-reject-marker");
+    let provider =
+        KimiCodeProvider::new(write_kimi_t07_reject_probe(fixture.paths.root(), &marker));
+    let mut registry = ProviderRegistry::new();
+    registry.register(ProviderName::KimiCode, std::sync::Arc::new(provider));
+    let gateway = fixture.gateway_with_registry(registry);
+
+    let raw = fixture.lc_streaming_input(
+        AdapterRole::Orchestrator,
+        Some(ProviderToolPolicy::deny_file_write_builtins()),
+        Some(RecordingToolPolicyAuditSink::new().bound()),
+        None,
+    );
+    // 未 prepare 的存量 validated 构造:分叉收口前走裸 start(红点)。
+    let validated = {
+        let policy = gateway
+            .validate(fixture.coding_request())
+            .expect("lc coding launch validates");
+        ValidatedStreamingProviderInput::new(raw, policy)
+    };
+
+    let kimi_reason = match gateway
+        .start_streaming(validated, CancellationToken::new())
+        .await
+    {
+        Ok(_session) => String::new(),
+        Err(error) => {
+            let text = error.to_string();
+            if text.contains(KIMI_GENERIC_TOOL_POLICY_FORBIDDEN) {
+                KIMI_GENERIC_TOOL_POLICY_FORBIDDEN.to_string()
+            } else {
+                text
+            }
+        }
+    };
+
+    // 真实执行面计数:拒绝必须发生在任何 version 探测/child/握手之前。
+    let content = std::fs::read_to_string(&marker).unwrap_or_default();
+    let kimi_version_probe_count = content.matches("version").count();
+    let kimi_child_spawn_count = content.matches("child").count();
+    let kimi_handshake_count = content.matches("handshake").count();
+    assert_eq!(kimi_version_probe_count, 0);
+    assert_eq!(kimi_child_spawn_count, 0);
+    assert_eq!(kimi_handshake_count, 0);
+    assert_eq!(kimi_reason, "provider_generic_tool_policy_forbidden");
 }
