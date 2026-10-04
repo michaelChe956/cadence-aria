@@ -215,7 +215,26 @@ where
         None => return Err(aborted_session_error()),
     };
     ensure_response_success(&initialize, "initialize")?;
-    validate_initialize(&initialize, input.resume_provider_session_id.is_some())?;
+    // Task 9c:LC 显式 resume 的能力协商(initialize)确认——LC 路径发现
+    // 不支持 resume 属于已启动 child 后的 runtime 失败,经 native_id_tx
+    // 显式回传「未恢复」(调用方沿既有 kill 链终止并回收子进程,不伪称
+    // 零 spawn);direct 路径错误形态零变化。
+    let lc_explicit_resume = lc.is_some() && input.resume_provider_session_id.is_some();
+    if let Err(error) = validate_initialize(&initialize, input.resume_provider_session_id.is_some())
+    {
+        let failure = if lc_explicit_resume {
+            provider_error(format!(
+                "kimi initialize capability negotiation did not confirm resume support for the requested session (session NOT resumed; the started child was killed and reaped, not a zero-spawn refusal): {}",
+                error.details
+            ))
+        } else {
+            error
+        };
+        if let Some(lc) = lc {
+            let _ = lc.native_id_tx.send(Err(failure.clone()));
+        }
+        return Err(failure);
+    }
     peer.send(json!({
         "jsonrpc": "2.0",
         "method": "notifications/initialized",
@@ -228,7 +247,8 @@ where
         .clone()
         .filter(|id| !id.trim().is_empty());
     // MCP 受控注入（tasks.md 6.1）：mcpServers 由经校验的 bundle 派生；
-    // resume 时 digest 漂移 → 拒绝 session/load、启动新会话并标记旧会话 superseded。
+    // direct resume 时 digest 漂移 → 拒绝 session/load、启动新会话并标记旧
+    // 会话 superseded（LC 显式 resume 不走 session/new,见下方 Task 9c）。
     if let Some(bundle) = mcp_injection.as_ref().map(KimiMcpInjection::bundle) {
         for line in bundle.argv_audit_lines() {
             tracing::info!(target: "kimi_code_provider", audit = %line, "kimi MCP server injection");
@@ -251,6 +271,21 @@ where
             superseded,
             mcp_servers,
         } => {
+            // Task 9c(冻结决策):LC 显式 resume 的 MCP bundle 漂移不走
+            // session/new——drift 属于已启动 child 后的 runtime 失败:不发
+            // session/new、显式「未恢复」经 native_id_tx 回传(调用方沿
+            // 既有 kill 链终止并回收子进程,不伪称零 spawn),零新
+            // provider_start;direct 路径保持「拒绝 load + 新会话」原语义。
+            if let (Some(superseded), true) = (superseded.as_ref(), lc_explicit_resume) {
+                let failure = provider_error(format!(
+                    "kimi session/load rejected for explicit resume {} because the MCP bundle digest drifted (frozen_digest={}, actual_digest={}) (session NOT resumed; the started child was killed and reaped, not a zero-spawn refusal)",
+                    superseded.session_id, superseded.frozen_digest, superseded.actual_digest
+                ));
+                if let Some(lc) = lc {
+                    let _ = lc.native_id_tx.send(Err(failure.clone()));
+                }
+                return Err(failure);
+            }
             if let Some(superseded) = superseded.as_ref() {
                 tracing::warn!(
                     target: "kimi_code_provider",
@@ -277,17 +312,38 @@ where
             None => return Err(aborted_session_error()),
         };
     ensure_response_success(&session_response, session_method)?;
-    let session_id = session_response
+    let response_session_id = session_response
         .get("sessionId")
         .and_then(Value::as_str)
         .filter(|id| !id.trim().is_empty())
-        .map(ToString::to_string)
-        .or_else(|| resume_id.clone())
-        .ok_or_else(|| {
-            provider_error(format!(
-                "Kimi ACP {session_method} response did not contain sessionId"
-            ))
-        })?;
+        .map(ToString::to_string);
+    // Task 9c:LC 显式 resume 的 session/load 应答必须与请求同 id——缺 id
+    // 不回填请求 id、错 id 不采纳,两者都是已启动 child 后的 runtime 失败
+    // (显式「未恢复」+ kill 链);direct 路径保持既有回填语义,零变化。
+    let session_id = if lc_explicit_resume {
+        let requested = resume_id.clone().expect("explicit resume carries an id");
+        match response_session_id {
+            Some(confirmed) if Some(&confirmed) == resume_id.as_ref() => confirmed,
+            other => {
+                let failure = provider_error(format!(
+                    "kimi session/load response session id {} does not confirm the requested resume id {requested} (session NOT resumed; the started child was killed and reaped, not a zero-spawn refusal)",
+                    other.as_deref().unwrap_or("<missing>")
+                ));
+                if let Some(lc) = lc {
+                    let _ = lc.native_id_tx.send(Err(failure.clone()));
+                }
+                return Err(failure);
+            }
+        }
+    } else {
+        response_session_id
+            .or_else(|| resume_id.clone())
+            .ok_or_else(|| {
+                provider_error(format!(
+                    "Kimi ACP {session_method} response did not contain sessionId"
+                ))
+            })?
+    };
 
     // digest 漂移 → 旧会话标记 superseded：在 ProviderEvent 通道发可消费的
     // Execution 事件（gateway/审计层后续可订阅消费，REQ-ENV-04）。tracing 保留。

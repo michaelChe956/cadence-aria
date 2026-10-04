@@ -432,9 +432,9 @@ fn lcg_t04_kimi_native_mcp_is_not_aria_bundle() {
 use super::session_tests::{
     LcKimiResumeFixture, lc_kimi_resume_fixture, t09c_child_killed_and_reaped,
 };
-use crate::cross_cutting::tool_policy_audit::test_support::RecordingToolPolicyAuditSink;
 use crate::cross_cutting::kimi_code_provider::KimiCodeProvider;
 use crate::cross_cutting::streaming_provider::StreamingProviderAdapter;
+use crate::cross_cutting::tool_policy_audit::test_support::RecordingToolPolicyAuditSink;
 
 /// Task 9c(冻结决策:MCP bundle 漂移不走 session/new):LC 显式 resume 的
 /// 冻结 bundle digest 与当前注入 bundle 漂移时,direct 路径的「拒绝 load、
@@ -489,6 +489,6 @@ async fn lcg_t09_kimi_bundle_drift_never_session_new() {
         !new_marker.exists(),
         "session/new must never be sent after MCP bundle drift on an explicit LC resume"
     );
-    let started_child_was_killed_and_reaped = t09c_child_killed_and_reaped(&pid_marker);
+    let started_child_was_killed_and_reaped = t09c_child_killed_and_reaped(&pid_marker).await;
     assert!(started_child_was_killed_and_reaped);
 }

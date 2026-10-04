@@ -1186,7 +1186,6 @@ async fn abort_emits_aborted_without_failed() {
 
 // ==== Task 9c:Kimi LC 原生 resume 的 session/load 同 id 确认(错/缺 id 绝不 fresh)====
 
-
 use crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate;
 use crate::cross_cutting::provider_registry::ProviderRegistry;
 use crate::cross_cutting::session_launch::ValidatedStreamingProviderInput;
@@ -1194,6 +1193,7 @@ use crate::cross_cutting::tool_policy_audit::test_support::RecordingToolPolicyAu
 use crate::cross_cutting::tool_policy_audit::{DurableToolPolicyEvent, ToolPolicyAuditSink};
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::logical_codebase::policy::AggregatePolicyArtifactStore;
+use crate::product::logical_codebase::policy::{PolicyTarget, SessionPolicyAction};
 use crate::product::logical_codebase::provider_capability_store::ProviderActionCapability;
 use crate::product::logical_codebase::provider_gateway::{
     GatewayRunAudit, LogicalCodebaseProviderGateway, PolicyTargetResolver, ProviderCapability,
@@ -1201,7 +1201,6 @@ use crate::product::logical_codebase::provider_gateway::{
 };
 use crate::product::logical_codebase::store::LogicalCodebaseManifest;
 use crate::product::models::ProviderName;
-use crate::product::logical_codebase::policy::{PolicyTarget, SessionPolicyAction};
 use crate::protocol::contracts::{AdapterOutput, TimeoutStatus};
 
 /// Kimi 9c LC fixture:与 4c 的 LcKimiLaunchFixture 同构(trimmed)——经真实
@@ -1513,9 +1512,11 @@ done
 }
 
 /// Task 9c kill 链断言辅助:轮询读取 fixture 登记的子进程 pid,再轮询确认
-/// 该 pid 已从进程表消失(kill+reap 都发生)。
+/// 该 pid 已从进程表消失(kill+reap 都发生)。轮询用 tokio sleep(yield):
+/// kill 链在 start_validated 的会话任务里执行,current_thread 运行时下
+/// 阻塞式 sleep 会饿死该任务。
 #[cfg(unix)]
-pub(crate) fn t09c_child_killed_and_reaped(pid_marker: &std::path::Path) -> bool {
+pub(crate) async fn t09c_child_killed_and_reaped(pid_marker: &std::path::Path) -> bool {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     let pid = loop {
         if let Some(pid) = std::fs::read_to_string(pid_marker)
@@ -1529,7 +1530,7 @@ pub(crate) fn t09c_child_killed_and_reaped(pid_marker: &std::path::Path) -> bool
             "fixture must register its pid at {}",
             pid_marker.display()
         );
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     };
     loop {
         let alive = std::process::Command::new("kill")
@@ -1547,7 +1548,7 @@ pub(crate) fn t09c_child_killed_and_reaped(pid_marker: &std::path::Path) -> bool
             std::time::Instant::now() < deadline,
             "kimi child (pid {pid}) must be killed and reaped after an unconfirmed native resume"
         );
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
 }
 
@@ -1645,7 +1646,7 @@ async fn lcg_t09_kimi_missing_or_wrong_native_id_never_fresh() {
             sink.events().is_empty(),
             "no fresh provider_start may be written for a resume the native side never confirmed"
         );
-        let started_child_was_killed_and_reaped = t09c_child_killed_and_reaped(&pid_marker);
+        let started_child_was_killed_and_reaped = t09c_child_killed_and_reaped(&pid_marker).await;
         assert!(started_child_was_killed_and_reaped);
     }
 
@@ -1660,10 +1661,8 @@ async fn lcg_t09_kimi_missing_or_wrong_native_id_never_fresh() {
             Some(sink.clone().bound()),
             Some(requested_native_id.clone()),
         );
-        raw.env_vars.insert(
-            "KIMI_LOAD_SESSION_ID".to_string(),
-            wrong_native_id.clone(),
-        );
+        raw.env_vars
+            .insert("KIMI_LOAD_SESSION_ID".to_string(), wrong_native_id.clone());
         raw.env_vars.insert(
             "KIMI_PID_MARKER".to_string(),
             pid_marker.display().to_string(),
@@ -1688,7 +1687,7 @@ async fn lcg_t09_kimi_missing_or_wrong_native_id_never_fresh() {
             sink.events().is_empty(),
             "no fresh provider_start may be written for a mismatched native resume confirmation"
         );
-        let started_child_was_killed_and_reaped = t09c_child_killed_and_reaped(&pid_marker);
+        let started_child_was_killed_and_reaped = t09c_child_killed_and_reaped(&pid_marker).await;
         assert!(started_child_was_killed_and_reaped);
     }
 }
