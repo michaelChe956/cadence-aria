@@ -218,13 +218,22 @@ fn sync_input_preserves_root_working_directory_and_member_worktree() {
 /// cwd 漂移进入 resume fingerprint：envelope 冻结 working_directory 并纳入
 /// digest，两个仅 cwd 不同的 envelope 指纹不同（`resume_or_start` 据此判定
 /// supersede 旧会话并 StartNew）；cwd 不漂移时指纹稳定。
+///
+/// Task 9a：指纹迁移为五参 `from_envelope`(envelope+候选投影+action
+/// evidence 摘要+target git identity)——split sync 测试 caller 同一原子
+/// 迁移；本测试只钉 cwd 维度，投影其余维度由 gateway 侧 lcg_t09a 测试覆盖。
 #[test]
 fn resume_fingerprint_changes_when_working_directory_drifts() {
+    use crate::cross_cutting::streaming_provider::ProviderPermissionMode;
     use crate::product::logical_codebase::policy::{
-        AggregatePolicyArtifact, PolicyTarget, ProviderDialect, SessionPolicyAction,
-        SessionPolicyEnvelope,
+        AggregatePolicyArtifact, PolicyTarget, ProviderDialect, ProviderWireDialect,
+        SessionPolicyAction, SessionPolicyEnvelope,
     };
-    use crate::product::logical_codebase::provider_gateway::SessionResumeFingerprint;
+    use crate::product::logical_codebase::provider_gateway::{
+        ProviderRefType, SessionResumeFingerprint,
+    };
+    use crate::product::logical_codebase::provider_projection::ProviderPolicyProjection;
+    use crate::protocol::contracts::AdapterRole;
 
     let artifact = AggregatePolicyArtifact::bootstrap(
         "project_0001",
@@ -266,12 +275,38 @@ fn resume_fingerprint_changes_when_working_directory_drifts() {
     let back: SessionPolicyEnvelope = serde_json::from_value(json).unwrap();
     assert_eq!(back.working_directory, root_a.working_directory);
 
+    // 候选投影与 envelope 的 cwd/target/roots 同源(调用者完整 prepare 所得)。
+    let projection_for = |envelope: &SessionPolicyEnvelope| {
+        ProviderPolicyProjection::new(
+            ProviderRefType::ClaudeCode,
+            envelope.provider_dialect,
+            ProviderWireDialect::ClaudeCodeStreamJson,
+            "1.4.0".to_string(),
+            envelope.action,
+            AdapterRole::WorkItemSplitter,
+            ProviderPermissionMode::Auto,
+            None,
+            String::new(),
+            String::new(),
+            envelope.working_directory.clone(),
+            envelope.working_directory.clone(),
+            envelope.target.clone(),
+            envelope.readable_roots.clone(),
+            envelope.writable_roots.clone(),
+            String::new(),
+            envelope.config_digest.clone(),
+            String::new(),
+            String::new(),
+            "sha256:capability-projection-split".to_string(),
+            "sha256:session-projection-split".to_string(),
+        )
+    };
     let fingerprint = |envelope: &SessionPolicyEnvelope| {
         SessionResumeFingerprint::from_envelope(
             envelope,
-            "1.4.0",
-            ProviderDialect::ClaudeCodeCliV1,
-            "cap_claude_code_1_4_0",
+            &projection_for(envelope),
+            "sha256:action-evidence-split",
+            "/work/main/.git/worktrees/repo",
         )
     };
     // 仅 cwd 漂移 → fingerprint 漂移（resume supersede 判定维度）。

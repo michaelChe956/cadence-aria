@@ -760,3 +760,180 @@ async fn lcg_t04_no_generic_tool_policy_still_records_version_audit_and_native_s
         "provider process must spawn at the canonical LC root"
     );
 }
+
+// ==== Task 9a:LC 显式 resume 的 child 前全 LC audit 比对 ====
+
+use crate::cross_cutting::tool_policy_audit::{
+    LcProjectionAudit, ProviderStartAudit, ResumeDecision,
+};
+
+/// 以与 adapter 同源的材料(gateway validate 的 envelope + 相同投影输入)
+/// 预计算 LC 启动会得到的投影摘要,供存档记录构造。
+fn t09a_expected_lc_projection(
+    fixture: &LcLaunchFixture,
+) -> crate::product::logical_codebase::provider_projection::ProviderPolicyProjection {
+    let validated = fixture
+        .gateway()
+        .validate(fixture.coding_request())
+        .expect("lc coding launch validates");
+    let envelope = validated.envelope().clone();
+    let boundary = projection::lc_boundary_plan(&envelope).expect("boundary plan");
+    let projection_input =
+        crate::product::logical_codebase::provider_projection::ProviderProjectionInput::new(
+            envelope.clone(),
+            crate::product::logical_codebase::provider_gateway::ProviderRef::pi(
+                validated.capability_snapshot_ref(),
+            ),
+            envelope.action,
+            AdapterRole::Executor,
+            ProviderPermissionMode::Auto,
+            None,
+            projection::PI_LC_APPROVAL_POLICY.to_string(),
+            String::new(),
+            envelope.config_artifact_ref.clone(),
+            String::new(),
+            Some(boundary),
+        );
+    PiPolicyProjector::new("pi 0.83.0-policy-fixture")
+        .project(&projection_input)
+        .expect("expected lc projection")
+}
+
+/// Task 9a:LC 显式 resume 在 child 前比较全 LC audit(完整字面量含投影)。
+/// 匹配的完整 LC 存档照常续接(native id 保持、child 正常启动);旧 audit
+/// 缺 projection 或投影摘要漂移都拒绝 resume——拒绝发生在
+/// ProcessManager::spawn 之前(零 child、零新 provider_start),漂移存档
+/// 追加 superseded 终止审计;绝不在 adapter 内清 resume id 后静默 fresh。
+#[cfg(unix)]
+#[tokio::test]
+async fn lcg_t09a_pi_lc_resume_audit_gate_zero_child_on_legacy_or_drift() {
+    let fixture = LcLaunchFixture::new();
+    let expected = t09a_expected_lc_projection(&fixture);
+    let matching_lc_projection = LcProjectionAudit {
+        action: projection::action_text(expected.action()).to_string(),
+        wire_dialect: projection::wire_dialect_text(expected.wire_dialect()).to_string(),
+        capability_projection_digest: expected.capability_projection_digest().to_string(),
+        projection_digest: expected.projection_digest().to_string(),
+        boundary_evidence_ref: expected.boundary_evidence_ref().to_string(),
+    };
+    let stored_record = |lc_projection: Option<LcProjectionAudit>| ProviderStartAudit {
+        provider: "pi".to_string(),
+        role: "executor".to_string(),
+        workspace_session_id: "ws-lc-fixture-1".to_string(),
+        provider_session_id: "pi-session-resume-t09a".to_string(),
+        tool_policy_canonical_digest: "sha256:seed".to_string(),
+        argv: Vec::new(),
+        sandbox: None,
+        approval_policy: None,
+        provider_version: "pi 0.83.0-policy-fixture".to_string(),
+        adapter_dialect: PI_POLICY_DIALECT.to_string(),
+        lc_projection,
+    };
+
+    // 1)匹配的完整 LC 存档 → 续接:native id 即 resume id,child 正常启动。
+    {
+        let sink = RecordingToolPolicyAuditSink::new();
+        sink.with_stored_provider_start(stored_record(Some(matching_lc_projection.clone())));
+        let marker = fixture.paths.root().join("t09a-pi-matching-cwd-marker");
+        let raw = fixture.lc_streaming_input(
+            AdapterRole::Executor,
+            None,
+            Some(sink.clone().bound()),
+            Some("pi-session-resume-t09a".to_string()),
+        );
+        // marker 经 env 注入(lc_cwd_pi_fixture 读取 $LC_CWD_MARKER)。
+        let mut raw = raw;
+        raw.env_vars
+            .insert("LC_CWD_MARKER".to_string(), marker.display().to_string());
+        let provider = PiProvider::new(lc_cwd_pi_fixture(&marker))
+            .with_version_supplier(policy_version_supplier());
+        let session = provider
+            .start_validated(
+                fixture.validated_coding_input(raw),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("matching full LC audit must resume the native session");
+        assert_eq!(
+            session.native_session_id.as_deref(),
+            Some("pi-session-resume-t09a")
+        );
+        // 续接确实启动了 child(正向观测)。
+        let observed_cwd = wait_for_lc_cwd_marker(&marker);
+        assert_eq!(
+            observed_cwd.trim(),
+            fixture.canonical_root().to_string_lossy(),
+            "resumed pi session must spawn at the canonical LC root"
+        );
+        let events = sink.events();
+        assert_eq!(events.len(), 1, "resumed run writes exactly one provider_start");
+        assert!(matches!(
+            &events[0],
+            DurableToolPolicyEvent::ProviderStart(record)
+                if record.provider_session_id == "pi-session-resume-t09a"
+                    && record.lc_projection.is_some()
+        ));
+    }
+
+    // 2)旧 audit 缺 projection → 不能 resume LC;投影摘要漂移同理:
+    // 零 child、零新 provider_start,不清 id 转 fresh。
+    for (case, record) in [
+        ("legacy", stored_record(None)),
+        (
+            "drifted",
+            stored_record(Some(LcProjectionAudit {
+                projection_digest: "sha256:session-projection-drifted".to_string(),
+                ..matching_lc_projection.clone()
+            })),
+        ),
+    ] {
+        let sink = RecordingToolPolicyAuditSink::new();
+        sink.with_stored_provider_start(record);
+        let marker = fixture.paths.root().join(format!("t09a-pi-{case}-cwd-marker"));
+        let mut raw = fixture.lc_streaming_input(
+            AdapterRole::Executor,
+            None,
+            Some(sink.clone().bound()),
+            Some("pi-session-resume-t09a".to_string()),
+        );
+        raw.env_vars
+            .insert("LC_CWD_MARKER".to_string(), marker.display().to_string());
+        let provider = PiProvider::new(lc_cwd_pi_fixture(&marker))
+            .with_version_supplier(policy_version_supplier());
+
+        let rejected = match provider
+            .start_validated(
+                fixture.validated_coding_input(raw),
+                CancellationToken::new(),
+            )
+            .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("legacy or drifted LC audit must refuse resume ({case})"),
+        };
+        assert!(
+            rejected.details.contains("resume audit"),
+            "rejection must name the resume audit gate: {rejected:?}"
+        );
+        // 零 child:拒绝发生在 ProcessManager::spawn 之前。
+        assert!(
+            !marker.exists(),
+            "no pi child may spawn after a refused LC resume ({case})"
+        );
+        // 零新 provider_start;漂移存档被追加 superseded 终止审计。
+        let events = sink.events();
+        if case == "legacy" {
+            assert!(events.is_empty(), "legacy record writes nothing new");
+        } else {
+            assert_eq!(events.len(), 1, "drift appends superseded termination once");
+            assert!(
+                matches!(
+                    &events[0],
+                    DurableToolPolicyEvent::SessionTerminated(terminated)
+                        if terminated.reason_code == "superseded_policy_drift"
+                ),
+                "drifted resume must mark the old run superseded"
+            );
+        }
+    }
+}

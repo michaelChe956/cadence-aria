@@ -858,3 +858,77 @@ fn tool_policy_audit_resume_lookup_finds_latest_provider_start_by_native_session
             .is_none()
     );
 }
+
+// ---- Task 9a(lcg_t09a):LC 完整字面量与旧记录缺 projection 拒 resume ----
+
+use crate::cross_cutting::tool_policy_audit::{
+    LcProviderStartAudit, LcProjectionAudit, resume_with_lc_start_record,
+};
+
+/// LC resume 当前侧完整字面量 fixture(投影摘要 + v2 resume 材料)。
+fn lc_start_literal(projection_digest: &str) -> LcProviderStartAudit {
+    LcProviderStartAudit {
+        action: "coding_target_write".to_string(),
+        wire_dialect: "claude-stream-json".to_string(),
+        capability_projection_digest: "sha256:capability-projection-t09a".to_string(),
+        projection_digest: projection_digest.to_string(),
+        boundary_evidence_ref: "probe://boundary-t09a".to_string(),
+        resume_fingerprint: "sha256:resume-fingerprint-t09a".to_string(),
+        action_evidence_digest: "sha256:capability-projection-t09a".to_string(),
+        target_git_identity: "/main/.git/worktrees/target-t09a".to_string(),
+    }
+}
+
+/// LC 存档记录:lc_projection 携带给定会话投影摘要。
+fn lc_stored_record(projection_digest: &str) -> crate::cross_cutting::tool_policy_audit::ProviderStartAudit {
+    let mut record = provider_start_record("sha256:a", "provider 1.2.3", "codex-app-server-rpc");
+    record.lc_projection = Some(LcProjectionAudit {
+        action: "coding_target_write".to_string(),
+        wire_dialect: "claude-stream-json".to_string(),
+        capability_projection_digest: "sha256:capability-projection-t09a".to_string(),
+        projection_digest: projection_digest.to_string(),
+        boundary_evidence_ref: "probe://boundary-t09a".to_string(),
+    });
+    record
+}
+
+/// Task 9a:LC resume 比对消费完整字面量(含投影摘要与 v2 resume 材料)。
+/// 旧 audit 缺 projection(direct/Task 4 前形态,lc_projection=None)→
+/// 拒绝 resume LC(supersede);投影摘要漂移 → 拒绝;匹配的完整字面量 →
+/// Resume;当前侧 v2 材料不完整(未装配)不得放行。direct 三元组语义由
+/// `resume_rejects_digest_version_or_dialect_drift_and_missing_record` 保持。
+#[test]
+fn lcg_t09a_lc_start_literal_rejects_legacy_missing_projection_and_drift() {
+    let current = lc_start_literal("sha256:session-projection-t09a");
+
+    // 匹配的完整 LC 存档 → Resume。
+    assert!(matches!(
+        resume_with_lc_start_record(&lc_stored_record("sha256:session-projection-t09a"), &current),
+        ResumeDecision::Resume
+    ));
+    // 旧 audit 缺 projection → 不能 resume LC。
+    let legacy = provider_start_record("sha256:a", "provider 1.2.3", "codex-app-server-rpc");
+    assert!(matches!(
+        resume_with_lc_start_record(&legacy, &current),
+        ResumeDecision::RejectSupersedeAndStartNew
+    ));
+    // 投影摘要漂移 → 拒绝(supersede,等待显式新会话)。
+    assert!(matches!(
+        resume_with_lc_start_record(&lc_stored_record("sha256:session-projection-drifted"), &current),
+        ResumeDecision::RejectSupersedeAndStartNew
+    ));
+    // 当前侧 v2 材料不完整 → 不得放行 resume。
+    let mut incomplete = lc_start_literal("sha256:session-projection-t09a");
+    incomplete.resume_fingerprint = String::new();
+    assert!(matches!(
+        resume_with_lc_start_record(&lc_stored_record("sha256:session-projection-t09a"), &incomplete),
+        ResumeDecision::RejectSupersedeAndStartNew
+    ));
+    // 边界引用漂移同样拒绝(完整字面量逐字比较)。
+    let mut drifted_boundary = lc_start_literal("sha256:session-projection-t09a");
+    drifted_boundary.boundary_evidence_ref = "probe://boundary-drifted".to_string();
+    assert!(matches!(
+        resume_with_lc_start_record(&lc_stored_record("sha256:session-projection-t09a"), &drifted_boundary),
+        ResumeDecision::RejectSupersedeAndStartNew
+    ));
+}

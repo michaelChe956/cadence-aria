@@ -1195,3 +1195,178 @@ async fn lcg_t05_danger_full_access_zero_child_for_fresh_resume_and_permission_m
         );
     }
 }
+
+// ==== Task 9a:LC 显式 resume 的 child 前全 LC audit 比对 ====
+
+use crate::cross_cutting::codex_provider::projection::{
+    CodexPolicyProjector as T09aProjector, action_text as t09a_action_text,
+    lc_boundary_plan as t09a_lc_boundary_plan, wire_dialect_text as t09a_wire_dialect_text,
+};
+use crate::cross_cutting::tool_policy_audit::{
+    LcProjectionAudit, ProviderStartAudit, ResumeDecision,
+};
+use crate::product::logical_codebase::provider_projection::ProviderPolicyProjector as _;
+use crate::product::logical_codebase::provider_projection::ProviderProjectionInput;
+
+/// 以与 adapter 同源的材料(fixture envelope + 相同投影输入)预计算 LC
+/// read-only 启动会得到的投影摘要,供存档记录构造。
+fn t09a_expected_codex_lc_projection(
+    fixture: &LcCodexFixture,
+) -> crate::product::logical_codebase::provider_projection::ProviderPolicyProjection {
+    let envelope = fixture.envelope(SessionPolicyAction::PlanningReadOnly, Vec::new());
+    let boundary = t09a_lc_boundary_plan(&envelope).expect("boundary plan");
+    let projection_input = ProviderProjectionInput::new(
+        envelope.clone(),
+        crate::product::logical_codebase::provider_gateway::ProviderRef::codex(
+            "cap_codex_lc_fixture",
+        ),
+        envelope.action,
+        AdapterRole::Reviewer,
+        ProviderPermissionMode::Auto,
+        Some(ProviderToolPolicy::deny_file_write_builtins()),
+        String::new(),
+        String::new(),
+        envelope.config_artifact_ref.clone(),
+        String::new(),
+        Some(boundary),
+    );
+    T09aProjector::new("codex 0.124.0-lc-fixture")
+        .project(&projection_input)
+        .expect("expected lc projection")
+}
+
+/// Task 9a:LC 显式 resume 在 child 前比较全 LC audit(完整字面量含投影)。
+/// 匹配的完整 LC 存档照常续接(thread/resume 应答确认同 id);旧 audit 缺
+/// projection 或投影摘要漂移都拒绝 resume——拒绝发生在 ProcessManager::spawn
+/// 之前(零 child、零新 provider_start),漂移存档追加 superseded 终止审计;
+/// 绝不在 adapter 内清 resume id 后静默 fresh。记录缺失路径(依赖 native
+/// 握手确认)由 streaming.rs 的 wire 测试保持,不在此重复。
+#[cfg(unix)]
+#[tokio::test]
+async fn lcg_t09a_codex_lc_resume_audit_gate_zero_child_on_legacy_or_drift() {
+    let fixture = LcCodexFixture::new();
+    let expected = t09a_expected_codex_lc_projection(&fixture);
+    let matching_lc_projection = LcProjectionAudit {
+        action: t09a_action_text(expected.action()).to_string(),
+        wire_dialect: t09a_wire_dialect_text(expected.wire_dialect()).to_string(),
+        capability_projection_digest: expected.capability_projection_digest().to_string(),
+        projection_digest: expected.projection_digest().to_string(),
+        boundary_evidence_ref: expected.boundary_evidence_ref().to_string(),
+    };
+    let stored_record = |lc_projection: Option<LcProjectionAudit>| ProviderStartAudit {
+        provider: "codex".to_string(),
+        role: "reviewer".to_string(),
+        workspace_session_id: "ws-test".to_string(),
+        provider_session_id: "codex-thread-lc".to_string(),
+        tool_policy_canonical_digest: "sha256:seed".to_string(),
+        argv: Vec::new(),
+        sandbox: Some("read-only".to_string()),
+        approval_policy: Some("on-request".to_string()),
+        provider_version: "codex 0.124.0-lc-fixture".to_string(),
+        adapter_dialect: "codex-app-server-rpc".to_string(),
+        lc_projection,
+    };
+
+    // 1)匹配的完整 LC 存档 → 续接:thread/resume 应答确认同 id。
+    {
+        let sink = RecordingToolPolicyAuditSink::new();
+        sink.with_stored_provider_start(stored_record(Some(matching_lc_projection.clone())));
+        let raw = fixture.lc_input(
+            AdapterRole::Reviewer,
+            Some(ProviderToolPolicy::deny_file_write_builtins()),
+            ProviderPermissionMode::Auto,
+            Some("codex-thread-lc".to_string()),
+            Some(sink.clone().bound()),
+            fixture.target_worktree(),
+        );
+        let provider = CodexProvider::new(lc_app_server_fixture())
+            .with_version_supplier(lc_version_supplier());
+        let mut session = provider
+            .start_lc_validated(
+                raw,
+                &fixture.envelope(SessionPolicyAction::PlanningReadOnly, Vec::new()),
+                "cap_codex_lc_fixture",
+                CancellationToken::new(),
+            )
+            .await
+            .expect("matching full LC audit must resume the native thread");
+        assert_eq!(session.native_session_id.as_deref(), Some("codex-thread-lc"));
+        assert_eq!(
+            recv_completed(&mut session.events).await,
+            "lc restricted done"
+        );
+        let events = sink.events();
+        assert_eq!(events.len(), 1, "resumed run writes exactly one provider_start");
+        assert!(matches!(
+            &events[0],
+            crate::cross_cutting::tool_policy_audit::DurableToolPolicyEvent::ProviderStart(record)
+                if record.provider_session_id == "codex-thread-lc"
+                    && record.lc_projection.is_some()
+        ));
+    }
+
+    // 2)旧 audit 缺 projection → 不能 resume LC;投影摘要漂移同理:
+    // 零 child、零新 provider_start,不清 id 转 fresh。
+    for (case, record) in [
+        ("legacy", stored_record(None)),
+        (
+            "drifted",
+            stored_record(Some(LcProjectionAudit {
+                projection_digest: "sha256:session-projection-drifted".to_string(),
+                ..matching_lc_projection.clone()
+            })),
+        ),
+    ] {
+        let sink = RecordingToolPolicyAuditSink::new();
+        sink.with_stored_provider_start(record);
+        let marker_root = tempfile::tempdir().expect("t09a codex marker dir").keep();
+        let mut raw = fixture.lc_input(
+            AdapterRole::Reviewer,
+            Some(ProviderToolPolicy::deny_file_write_builtins()),
+            ProviderPermissionMode::Auto,
+            Some("codex-thread-lc".to_string()),
+            Some(sink.clone().bound()),
+            fixture.target_worktree(),
+        );
+        let (_cwd, _wire, spawn_marker) = lc_markers(&mut raw, &marker_root);
+        let provider = CodexProvider::new(lc_app_server_fixture())
+            .with_version_supplier(lc_version_supplier());
+
+        let rejected = match provider
+            .start_lc_validated(
+                raw,
+                &fixture.envelope(SessionPolicyAction::PlanningReadOnly, Vec::new()),
+                "cap_codex_lc_fixture",
+                CancellationToken::new(),
+            )
+            .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("legacy or drifted LC audit must refuse resume ({case})"),
+        };
+        assert!(
+            rejected.details.contains("resume audit"),
+            "rejection must name the resume audit gate: {rejected:?}"
+        );
+        // 零 child:拒绝发生在 ProcessManager::spawn 之前。
+        assert!(
+            !spawn_marker.exists(),
+            "no codex child may spawn after a refused LC resume ({case})"
+        );
+        // 零新 provider_start;漂移存档被追加 superseded 终止审计。
+        let events = sink.events();
+        if case == "legacy" {
+            assert!(events.is_empty(), "legacy record writes nothing new");
+        } else {
+            assert_eq!(events.len(), 1, "drift appends superseded termination once");
+            assert!(
+                matches!(
+                    &events[0],
+                    crate::cross_cutting::tool_policy_audit::DurableToolPolicyEvent::SessionTerminated(terminated)
+                        if terminated.reason_code == "superseded_policy_drift"
+                ),
+                "drifted resume must mark the old run superseded"
+            );
+        }
+    }
+}

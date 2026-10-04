@@ -939,3 +939,171 @@ async fn lcg_t04_no_generic_tool_policy_still_records_version_audit_and_native_s
     // 握手消耗 init 行后,流式续读不受影响。
     assert_eq!(recv_completed(&mut session.events).await, "lc done");
 }
+
+// ==== Task 9a:LC 显式 resume 的 child 前全 LC audit 比对 ====
+
+use crate::cross_cutting::tool_policy_audit::{LcProviderStartAudit, LcProjectionAudit, ProviderStartAudit, ResumeDecision, resume_with_lc_start_record};
+
+/// 以与 adapter 同源的材料(gateway validate 的 envelope + 相同投影输入)
+/// 预计算 LC 启动会得到的投影摘要,供存档记录构造。
+fn t09a_expected_lc_projection(
+    fixture: &LcLaunchFixture,
+) -> crate::product::logical_codebase::provider_projection::ProviderPolicyProjection {
+    let validated = fixture
+        .gateway()
+        .validate(fixture.coding_request())
+        .expect("lc coding launch validates");
+    let envelope = validated.envelope().clone();
+    let boundary = projection::lc_boundary_plan(&envelope).expect("boundary plan");
+    let projection_input =
+        crate::product::logical_codebase::provider_projection::ProviderProjectionInput::new(
+            envelope.clone(),
+            crate::product::logical_codebase::provider_gateway::ProviderRef::claude_code(
+                validated.capability_snapshot_ref(),
+            ),
+            envelope.action,
+            AdapterRole::Executor,
+            crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
+            None,
+            projection::CLAUDE_LC_APPROVAL_POLICY.to_string(),
+            String::new(),
+            envelope.config_artifact_ref.clone(),
+            String::new(),
+            Some(boundary),
+        );
+    ClaudePolicyProjector::new("claude 1.0.99-policy-fixture")
+        .project(&projection_input)
+        .expect("expected lc projection")
+}
+
+/// Task 9a:LC 显式 resume 在 child 前比较全 LC audit(`LcProviderStartAudit`
+/// 完整字面量含投影)。匹配的完整 LC 存档照常续接(native id 保持);旧
+/// audit 缺 projection(direct/Task 4 前形态)或投影摘要漂移都拒绝 resume、
+/// 拒绝发生在 ProcessManager::spawn 之前(零 child、零新 provider_start),
+/// superseded 终止审计追加到被取代旧 run——绝不在 adapter 内清 resume id
+/// 后静默 fresh。
+#[cfg(unix)]
+#[tokio::test]
+async fn lcg_t09a_claude_lc_resume_audit_gate_zero_child_on_legacy_or_drift() {
+    let fixture = LcLaunchFixture::new();
+    let expected = t09a_expected_lc_projection(&fixture);
+    let matching_lc_projection = LcProjectionAudit {
+        action: projection::action_text(expected.action()).to_string(),
+        wire_dialect: projection::wire_dialect_text(expected.wire_dialect()).to_string(),
+        capability_projection_digest: expected.capability_projection_digest().to_string(),
+        projection_digest: expected.projection_digest().to_string(),
+        boundary_evidence_ref: expected.boundary_evidence_ref().to_string(),
+    };
+    let stored_record = |lc_projection: Option<LcProjectionAudit>| ProviderStartAudit {
+        provider: "claude-code".to_string(),
+        role: "executor".to_string(),
+        workspace_session_id: "ws-lc-fixture-1".to_string(),
+        provider_session_id: "sess-lc-resume-t09a".to_string(),
+        tool_policy_canonical_digest: "sha256:seed".to_string(),
+        argv: Vec::new(),
+        sandbox: None,
+        approval_policy: None,
+        provider_version: "claude 1.0.99-policy-fixture".to_string(),
+        adapter_dialect: "claude-stream-json".to_string(),
+        lc_projection,
+    };
+
+    // 1)匹配的完整 LC 存档 → 续接:native id 即 resume id,新 run 落
+    // provider_start,无 superseded。
+    {
+        let sink = RecordingToolPolicyAuditSink::new();
+        sink.with_stored_provider_start(stored_record(Some(matching_lc_projection.clone())));
+        let mut raw = fixture.lc_streaming_input(
+            AdapterRole::Executor,
+            None,
+            Some(sink.clone().bound()),
+            Some("sess-lc-resume-t09a".to_string()),
+        );
+        let marker = fixture.paths.root().join("t09a-matching-cwd-marker");
+        raw.env_vars
+            .insert("LC_CWD_MARKER".to_string(), marker.display().to_string());
+        let provider = ClaudeCodeProvider::new(lc_init_result_cwd_fixture())
+            .with_version_supplier(policy_version_supplier());
+        let session = provider
+            .start_validated(
+                fixture.validated_coding_input(raw),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("matching full LC audit must resume the native session");
+        assert_eq!(
+            session.native_session_id.as_deref(),
+            Some("sess-lc-resume-t09a")
+        );
+        let events = sink.events();
+        assert_eq!(events.len(), 1, "resumed run writes exactly one provider_start");
+        assert!(matches!(
+            &events[0],
+            DurableToolPolicyEvent::ProviderStart(record)
+                if record.provider_session_id == "sess-lc-resume-t09a"
+                    && record.lc_projection.is_some()
+        ));
+    }
+
+    // 2)旧 audit 缺 projection → 不能 resume LC:零 child、零 provider_start,
+    // 不清 id 转 fresh。
+    for (case, record) in [
+        ("legacy", stored_record(None)),
+        (
+            "drifted",
+            stored_record(Some(LcProjectionAudit {
+                projection_digest: "sha256:session-projection-drifted".to_string(),
+                ..matching_lc_projection.clone()
+            })),
+        ),
+    ] {
+        let sink = RecordingToolPolicyAuditSink::new();
+        sink.with_stored_provider_start(record);
+        let mut raw = fixture.lc_streaming_input(
+            AdapterRole::Executor,
+            None,
+            Some(sink.clone().bound()),
+            Some("sess-lc-resume-t09a".to_string()),
+        );
+        let marker = fixture.paths.root().join(format!("t09a-{case}-cwd-marker"));
+        raw.env_vars
+            .insert("LC_CWD_MARKER".to_string(), marker.display().to_string());
+        let provider = ClaudeCodeProvider::new(lc_init_result_cwd_fixture())
+            .with_version_supplier(policy_version_supplier());
+
+        let rejected = match provider
+            .start_validated(
+                fixture.validated_coding_input(raw),
+                CancellationToken::new(),
+            )
+            .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("legacy or drifted LC audit must refuse resume ({case})"),
+        };
+        assert!(
+            rejected.details.contains("resume audit"),
+            "rejection must name the resume audit gate: {rejected:?}"
+        );
+        // 零 child:拒绝发生在 ProcessManager::spawn 之前。
+        assert!(
+            !marker.exists(),
+            "no claude child may spawn after a refused LC resume ({case})"
+        );
+        // 零新 provider_start;漂移存档被追加 superseded 终止审计。
+        let events = sink.events();
+        if case == "legacy" {
+            assert!(events.is_empty(), "legacy record writes nothing new");
+        } else {
+            assert_eq!(events.len(), 1, "drift appends superseded termination once");
+            assert!(
+                matches!(
+                    &events[0],
+                    DurableToolPolicyEvent::SessionTerminated(terminated)
+                        if terminated.reason_code == "superseded_policy_drift"
+                ),
+                "drifted resume must mark the old run superseded"
+            );
+        }
+    }
+}
