@@ -74,7 +74,7 @@ pub(crate) const RESUME: &str = "resume";
 
 /// 会话级真实阶段超时(真实现场 CLI 慢;可用环境变量放宽)。
 const STAGE_TIMEOUT_ENV: &str = "LC_GATEWAY_E2E_STAGE_TIMEOUT_SECS";
-const DEFAULT_STAGE_TIMEOUT_SECS: u64 = 1800;
+const DEFAULT_STAGE_TIMEOUT_SECS: u64 = 3600;
 /// 聚合初始化(root recipe 五步四命令)整体超时。
 const INIT_TIMEOUT_ENV: &str = "LC_GATEWAY_E2E_INIT_TIMEOUT_SECS";
 const DEFAULT_INIT_TIMEOUT_SECS: u64 = 7200;
@@ -2516,7 +2516,10 @@ impl StageObservation {
                 );
             }
         }
-        // approval/tool 事件:审计 approval_decision + WS 事件流合计。
+        // approval/tool 事件:审计 approval_decision + WS 事件流合计;
+        // sync 栈(无 WS 事件流)以审计 approval 或真实 argv 携带的权限
+        // 投影 wire 段(--allowedTools/--disallowedTools/
+        // --permission-prompt-tool 或等价 token)为投放证据。
         let audit_approvals = env
             .scan_session_audits(&self.workspace_session_id)
             .into_iter()
@@ -2529,7 +2532,8 @@ impl StageObservation {
             })
             .count();
         cell.approval_and_tool_events_exist =
-            self.tool_events + self.permission_events + audit_approvals > 0;
+            self.tool_events + self.permission_events + audit_approvals > 0
+                || argv_carries_permission_wire(&cell.argv);
 
         // 结论:全部要素齐备且无运行失败才 Confirmed;否则 Unknown/Denied。
         if let Some(reason) = self.run_failure.clone() {
@@ -2827,6 +2831,19 @@ fn scan_stream_log_pid(directory: &Path) -> Option<String> {
         }
     }
     newest.map(|(_, pid)| pid)
+}
+
+/// argv 是否携带真实权限投影投放段(sync 栈无 WS 事件流时,权限
+/// allowlist/denylist/approval 通道的 argv 痕迹即真实投放证据)。
+fn argv_carries_permission_wire(argv: &[String]) -> bool {
+    argv.iter().any(|argument| {
+        argument.starts_with("--allowedTools")
+            || argument.starts_with("--disallowedTools")
+            || argument.starts_with("--permission-prompt-tool")
+            || argument.starts_with("--allowed-tools")
+            || argument.starts_with("--exclude-tools")
+            || argument.starts_with("--tools")
+    })
 }
 
 fn provider_matches_record(provider: &ProviderName, record: &ProviderStartAudit) -> bool {
