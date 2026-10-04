@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use cadence_aria::product::models::ProviderName;
 
 use super::harness::{
-    ENTRYPOINT_SPLIT_SYNC, ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT, FRESH, RESUME,
-    LC_GATEWAY_E2E_SWITCH, EvidenceCell, LiveLcGatewayHarness,
+    ENTRYPOINT_SPLIT_SYNC, ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT, EvidenceCell, FRESH,
+    LC_GATEWAY_E2E_SWITCH, LiveLcGatewayHarness, RESUME,
 };
 
 /// 真实现场开关门:缺失/非 1 时测试失败(fail),不得静默 return 成功。
@@ -253,10 +253,31 @@ async fn run_live_five_stage_matrix(selected_provider: ProviderName) {
     require_lc_gateway_e2e_switch();
     let evidence_root = live_evidence_root(&selected_provider);
     let harness = LiveLcGatewayHarness::new();
-    let matrix = harness
+    let matrix = match harness
         .run_provider_matrix(selected_provider.clone(), &evidence_root)
         .await
-        .expect("run_provider_matrix 现场执行失败(环境不可运行须报告 BLOCKED,不删格)");
+    {
+        Ok(matrix) => matrix,
+        Err(failure) => panic!(
+            "run_provider_matrix 现场执行失败 [{}]{}: {} (环境不可运行须报告 BLOCKED,不删格)",
+            failure.reason_code,
+            failure
+                .stage
+                .map(|stage| format!("/{stage}"))
+                .unwrap_or_default(),
+            failure.message
+        ),
+    };
+
+    // 矩阵级校验:harness 返回的矩阵确属所选 provider;被结构校验拒绝的
+    // 格都有非空 reason(与 unconfirmed 格的分列记录一致)。
+    assert_eq!(matrix.provider, selected_provider);
+    assert!(
+        matrix
+            .rejections
+            .iter()
+            .all(|rejection| !rejection.reason.is_empty())
+    );
 
     let canonical_root = matrix.canonical_root().to_path_buf();
     let selected_member_worktree = matrix.member_worktree().to_path_buf();
@@ -278,12 +299,16 @@ async fn run_live_five_stage_matrix(selected_provider: ProviderName) {
         assert_eq!(cell.native_resume_confirmed_id, cell.requested_resume_id);
         assert!(cell.argv_or_wire_capture_exists && cell.approval_and_tool_events_exist);
         assert!(cell.completed_product_artifact_exists);
-        assert!(cell.entrypoint == "workspace_streaming_plan/split" || cell.entrypoint == "split_sync");
+        assert!(
+            cell.entrypoint == "workspace_streaming_plan/split" || cell.entrypoint == "split_sync"
+        );
         assert!(cell.run_ref_is_unique_within_entrypoint);
     }
     for cell in matrix.unconfirmed_cells() {
         assert!(
-            cell.denied_reason.as_deref().is_some_and(|reason| !reason.is_empty()),
+            cell.denied_reason
+                .as_deref()
+                .is_some_and(|reason| !reason.is_empty()),
             "缺证据格(stage={}/entrypoint={}/{})必须记录 Unknown/Denied reason",
             cell.stage,
             cell.entrypoint,
@@ -299,7 +324,10 @@ async fn run_live_five_stage_matrix(selected_provider: ProviderName) {
         "缺少 workspace_streaming_plan/split 入口证据"
     );
     assert!(
-        matrix.cells().iter().any(|cell| cell.entrypoint == ENTRYPOINT_SPLIT_SYNC),
+        matrix
+            .cells()
+            .iter()
+            .any(|cell| cell.entrypoint == ENTRYPOINT_SPLIT_SYNC),
         "缺少 split_sync 入口证据"
     );
 }
