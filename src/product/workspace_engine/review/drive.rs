@@ -536,6 +536,30 @@ impl WorkspaceEngine {
         // 决策（cwd 漂移 supersede 后不得再以 delta 续写旧 thread）。`None` = 非
         // 逻辑会话（未注入 gateway）→ 下方 Legacy 直连原样（单仓零变化）。
         let logical_launch = self.resolve_revision_root_launch();
+
+        // Task 9c:StartNew(supersede)只持久化 superseded 与稳定等待——
+        // 同一 revision driver 不得继续 start_streaming。supersede 审计已由
+        // gateway 落旧 run;此处清理被取代旧会话的 native 引用(显式 fresh
+        // 不再携带旧 resume id)、上浮稳定等待错误并收口本 run,用户显式
+        // 动作(现有 `WsInMessage::StartGeneration`→`start_generation`)后
+        // 重新 prepare/revalidate。
+        if let Some(Ok(decision)) = logical_launch.as_ref()
+            && let Some(superseded) = decision.superseded.as_ref()
+        {
+            self.clear_superseded_provider_session(
+                ProviderConversationRole::Author,
+                &author,
+                &superseded.superseded_session_id,
+            )
+            .await;
+            let message = format!(
+                "logical revision resume superseded ({}): the old native session {} was marked superseded and no provider was started; start a new generation explicitly",
+                superseded.waiting.reason_code, superseded.superseded_session_id
+            );
+            let _ = self.event_tx.send(EngineEvent::Error { message }).await;
+            self.finish_failed_run().await;
+            return;
+        }
         let allow_resume = logical_launch
             .as_ref()
             .is_none_or(|decision| decision.as_ref().map(|d| d.resume_allowed) == Ok(true));
@@ -699,13 +723,22 @@ impl WorkspaceEngine {
                     Ok(GatewaySessionDisposition::Resume(launch)) => RevisionLaunchDecision {
                         launch,
                         resume_allowed: true,
+                        superseded: None,
                     },
-                    Ok(GatewaySessionDisposition::StartNew { validated, .. }) => {
-                        RevisionLaunchDecision {
-                            launch: validated,
-                            resume_allowed: false,
-                        }
-                    }
+                    // Task 9c:StartNew 携带 superseded session id 与稳定等待
+                    // 投影——同一 revision driver 不得据此继续 start_streaming。
+                    Ok(GatewaySessionDisposition::StartNew {
+                        validated,
+                        superseded_session_id,
+                        waiting,
+                    }) => RevisionLaunchDecision {
+                        launch: validated,
+                        resume_allowed: false,
+                        superseded: Some(SupersededRevisionWait {
+                            superseded_session_id,
+                            waiting,
+                        }),
+                    },
                     Err(error) => {
                         return Some(Err(format!(
                             "logical revision gateway validation failed: {error}"
@@ -718,6 +751,7 @@ impl WorkspaceEngine {
                 Ok(launch) => RevisionLaunchDecision {
                     launch,
                     resume_allowed: false,
+                    superseded: None,
                 },
                 Err(error) => {
                     return Some(Err(format!(
@@ -729,6 +763,7 @@ impl WorkspaceEngine {
                 Ok(launch) => RevisionLaunchDecision {
                     launch,
                     resume_allowed: true,
+                    superseded: None,
                 },
                 Err(error) => {
                     return Some(Err(format!(
@@ -743,9 +778,19 @@ impl WorkspaceEngine {
 
 /// Task 2.3：LC revision launch 决策结果——validated launch（cwd=root、
 /// target=成员 checkout）+ resume 是否放行（supersede/fresh 时 false）。
+/// Task 9c:`superseded` 携带 StartNew 的旧会话 id 与稳定等待投影(仅显式
+/// `StartGeneration` fresh)。
 struct RevisionLaunchDecision {
     launch: ValidatedSessionLaunchPolicy,
     resume_allowed: bool,
+    superseded: Option<SupersededRevisionWait>,
+}
+
+/// Task 9c:StartNew(supersede)的等待上下文——被取代旧会话 id + gateway
+/// 稳定等待投影(reason_code + 唯一 allowed action StartGeneration)。
+struct SupersededRevisionWait {
+    superseded_session_id: String,
+    waiting: crate::product::logical_codebase::provider_gateway::LcSupersededWaiting,
 }
 
 include!("drive_parts/reviewer_provider_session.inc.rs");

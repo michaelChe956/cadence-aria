@@ -562,6 +562,33 @@ impl WorkspaceEngine {
         }
     }
 
+    /// Task 9c:StartNew(supersede)后清理被取代旧会话的 native 引用——显式
+    /// fresh(现有 `WsInMessage::StartGeneration`→`start_generation` 面)只能
+    /// 启动全新会话,旧 thread 引用不得再触发 resume 决策;匹配
+    /// (role,provider,session id) 的引用移除并 durable 收口
+    /// (`replace_workspace_provider_conversations`),无匹配时零写入。
+    pub(crate) async fn clear_superseded_provider_session(
+        &mut self,
+        role: ProviderConversationRole,
+        provider: &ProviderName,
+        superseded_session_id: &str,
+    ) {
+        let before = self.session.provider_conversations.len();
+        self.session.provider_conversations.retain(|conversation| {
+            !(conversation.role == role
+                && conversation.provider == *provider
+                && conversation.provider_session_id == superseded_session_id)
+        });
+        if self.session.provider_conversations.len() != before
+            && let Some(store) = &self.lifecycle_store
+        {
+            let _ = store.replace_workspace_provider_conversations(
+                &self.session.session_id,
+                self.session.provider_conversations.clone(),
+            );
+        }
+    }
+
     pub fn current_stage(&self) -> WorkspaceStage {
         self.session.stage.clone()
     }

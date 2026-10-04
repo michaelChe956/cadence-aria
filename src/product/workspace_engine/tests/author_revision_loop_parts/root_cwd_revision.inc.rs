@@ -679,20 +679,21 @@ async fn revision_resume_cwd_drift_supersedes_session() {
         Some("resume_fingerprint_mismatch"),
         "supersede 原因必须是 resume fingerprint 漂移"
     );
-    let waiting_error = engine_events
-        .recv()
-        .await
-        .expect("StartNew must surface a stable waiting error");
-    match waiting_error {
-        crate::product::workspace_engine::EngineEvent::Error { message } => {
-            assert!(
-                message.contains("superseded")
-                    && message.contains("start a new generation explicitly"),
-                "waiting error must name superseded and the explicit fresh action: {message}"
-            );
+    // 第一轮的运行事件仍在通道里:有界排空直到 StartNew 的等待错误。
+    let waiting_error = loop {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), engine_events.recv())
+            .await
+            .expect("StartNew must surface a stable waiting error")
+            .expect("engine event channel stays open");
+        if let crate::product::workspace_engine::EngineEvent::Error { message } = event {
+            break message;
         }
-        _other => panic!("expected EngineEvent::Error after StartNew supersede"),
-    }
+    };
+    assert!(
+        waiting_error.contains("superseded")
+            && waiting_error.contains("start a new generation explicitly"),
+        "waiting error must name superseded and the explicit fresh action: {waiting_error}"
+    );
     // run 收口回 PrepareContext(waiting 不是隐式续跑,用户显式动作后重新
     // prepare/revalidate)。
     assert_eq!(
