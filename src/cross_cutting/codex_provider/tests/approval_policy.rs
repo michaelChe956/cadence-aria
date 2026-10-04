@@ -1381,3 +1381,121 @@ async fn lcg_t09a_codex_lc_resume_audit_gate_zero_child_on_legacy_or_drift() {
         );
     }
 }
+
+// ==== Task 9b:LC 原生 resume 的 native 会话确认(错/缺 id 绝不 fresh)====
+
+/// Task 9b(Step 1 断言组 438-440 逐字):LC 显式 resume 的 native 会话
+/// 确认——Codex 侧 `thread/resume` 应答必须逐字等于请求 id:
+/// - 应答同 id(无存档记录,9a 的「无存档→依赖 native 握手」由本测试补
+///   真实确认)→ 续接,confirmed==requested,wire 上是 thread/resume
+///   携带请求 threadId;
+/// - 缺 id(应答无 thread id)与错 id(应答陌生 thread id)→ 已启动
+///   child 后的 runtime 失败:Err、child 被 kill/reap、错误记录「未恢复」
+///   (不伪称零 spawn),不回填请求 id、不清 id 转 fresh、零新
+///   provider_start。
+#[cfg(unix)]
+#[tokio::test]
+async fn lcg_t09_codex_missing_or_wrong_native_id_never_fresh() {
+    let fixture = LcCodexFixture::new();
+    let requested_native_id = "codex-thread-lc".to_string();
+
+    // 1) thread/resume 应答同 id(无存档记录):真实确认后续接。
+    {
+        let sink = RecordingToolPolicyAuditSink::new();
+        let marker_root = tempfile::tempdir()
+            .expect("t09b codex matching marker dir")
+            .keep();
+        let mut raw = fixture.lc_input(
+            AdapterRole::Reviewer,
+            Some(ProviderToolPolicy::deny_file_write_builtins()),
+            ProviderPermissionMode::Auto,
+            Some(requested_native_id.clone()),
+            Some(sink.clone().bound()),
+            fixture.target_worktree(),
+        );
+        let (_cwd_marker, wire_marker, _spawn_marker) = lc_markers(&mut raw, &marker_root);
+        let provider = CodexProvider::new(lc_app_server_fixture())
+            .with_version_supplier(lc_version_supplier());
+        let mut session = provider
+            .start_lc_validated(
+                raw,
+                &fixture.envelope(SessionPolicyAction::PlanningReadOnly, Vec::new()),
+                "cap_codex_lc_fixture",
+                CancellationToken::new(),
+            )
+            .await
+            .expect("a native-confirmed resume must continue the LC thread");
+        let confirmed_native_id = session.native_session_id.clone().unwrap_or_default();
+        assert_eq!(confirmed_native_id, requested_native_id);
+        // wire 确为 thread/resume 携带请求 threadId(确认 id 来自 provider
+        // 应答,不是回填请求 id)。
+        let wire = std::fs::read_to_string(&wire_marker).expect("wire marker is written");
+        assert!(
+            wire.contains("\"method\":\"thread/resume\"")
+                && wire.contains("\"threadId\":\"codex-thread-lc\""),
+            "resume wire must carry the requested thread id: {wire}"
+        );
+        assert_eq!(
+            recv_completed(&mut session.events).await,
+            "lc restricted done"
+        );
+        let events = sink.events();
+        assert_eq!(
+            events.len(),
+            1,
+            "confirmed resume writes exactly one provider_start"
+        );
+        assert!(matches!(
+            &events[0],
+            crate::cross_cutting::tool_policy_audit::DurableToolPolicyEvent::ProviderStart(record)
+                if record.provider_session_id == requested_native_id
+        ));
+    }
+
+    // 2) 缺 id 与 3) 错 id:同为已启动 child 后的 runtime 失败(kill/reap +
+    //    「未恢复」记录,绝不 fresh)。
+    for mode in ["missing", "mismatched"] {
+        let marker_dir = tempfile::tempdir().expect("t09b codex marker dir");
+        let pid_marker = marker_dir.path().join(format!("codex-t09b-{mode}.pid"));
+        let server = resume_without_thread_confirmation_fixture(&pid_marker, mode);
+        let sink = RecordingToolPolicyAuditSink::new();
+        let raw = fixture.lc_input(
+            AdapterRole::Reviewer,
+            Some(ProviderToolPolicy::deny_file_write_builtins()),
+            ProviderPermissionMode::Auto,
+            Some(requested_native_id.clone()),
+            Some(sink.clone().bound()),
+            fixture.target_worktree(),
+        );
+        let provider = CodexProvider::new(server).with_version_supplier(lc_version_supplier());
+        let native_id_missing_result = provider
+            .start_lc_validated(
+                raw,
+                &fixture.envelope(SessionPolicyAction::PlanningReadOnly, Vec::new()),
+                "cap_codex_lc_fixture",
+                CancellationToken::new(),
+            )
+            .await;
+        assert!(native_id_missing_result.is_err());
+        let Err(rejected) = native_id_missing_result else {
+            panic!("an unconfirmed thread/resume must fail the LC resume ({mode})");
+        };
+        assert!(
+            rejected.details.contains("session NOT resumed")
+                && rejected.details.contains("not a zero-spawn refusal"),
+            "rejection must record the not-resumed outcome without claiming zero spawn ({mode}): {rejected:?}"
+        );
+        assert!(
+            sink.events().is_empty(),
+            "no fresh provider_start may be written for a resume the native side never confirmed ({mode})"
+        );
+        let started_child_was_killed_and_reaped = match wait_for_child_pid_marker(&pid_marker) {
+            Some(pid) => {
+                assert_child_terminated(pid, "an unconfirmed LC thread/resume handshake");
+                true
+            }
+            None => false,
+        };
+        assert!(started_child_was_killed_and_reaped);
+    }
+}
