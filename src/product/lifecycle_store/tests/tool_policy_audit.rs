@@ -946,3 +946,49 @@ fn lcg_t09a_lc_start_literal_rejects_legacy_missing_projection_and_drift() {
         ResumeDecision::RejectSupersedeAndStartNew
     ));
 }
+
+/// Task 9a 决策测试(legacy audit 缺 projection):durable 存档形态的旧
+/// provider_start(无 lc_projection)不能 resume LC——显式 resume 决策
+/// 拒绝、被取代旧 run 追加 superseded 终止审计、零新 provider_start
+/// (等待用户显式新会话,不静默 fresh)。
+#[test]
+fn lcg_t09_legacy_audit_missing_projection_cannot_resume_lc() {
+    let sink = test_tool_policy_audit_sink();
+    // 旧 run(seq 0):legacy/direct 形态 provider_start,无 lc_projection。
+    let mut legacy = provider_start_record("sha256:a", "provider 1.2.3", "codex-app-server-rpc");
+    legacy.provider_session_id = "thread-legacy-t09".to_string();
+    sink.append(
+        "ws-t09",
+        0,
+        DurableToolPolicyEvent::ProviderStart(legacy.clone()),
+    )
+    .unwrap();
+
+    // resume 检索命中旧记录 → LC 完整字面量判定拒绝(缺 projection)。
+    let stored = sink
+        .find_latest_tool_policy_provider_start("ws-t09", "thread-legacy-t09")
+        .unwrap()
+        .expect("legacy provider_start must be found for the resume decision");
+    let current = lc_start_literal("sha256:session-projection-t09a");
+    let decision = resume_with_lc_start_record(&stored.record, &current);
+    assert!(matches!(
+        decision,
+        ResumeDecision::RejectSupersedeAndStartNew
+    ));
+
+    // 拒绝即 supersede:被取代旧 run(seq 0)追加 superseded 终止审计;
+    // 新 run(若调用方尝试重启)不会有任何 provider_start(零 spawn,由
+    // gateway 决策层保证;此处锁定 durable 面的 superseded 落旧 run)。
+    use crate::cross_cutting::tool_policy_audit::append_superseded_policy_drift;
+    append_superseded_policy_drift(&sink, &stored).expect("superseded append lands");
+    let old_run_lines = sink.read_tool_policy_lines("ws-t09", 0).unwrap();
+    let old_run_superseded_recorded = matches!(
+        old_run_lines.last().map(|line| &line.event),
+        Some(DurableToolPolicyEvent::SessionTerminated(terminated))
+            if terminated.reason_code == "superseded_policy_drift"
+    );
+    assert!(old_run_superseded_recorded);
+    // 新 run 分区(seq 1)保持为空:没有伪称恢复的 provider_start。
+    let new_run_lines = sink.read_tool_policy_lines("ws-t09", 1).unwrap();
+    assert!(new_run_lines.is_empty());
+}

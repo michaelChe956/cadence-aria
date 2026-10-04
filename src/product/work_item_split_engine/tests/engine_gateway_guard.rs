@@ -481,11 +481,27 @@ impl ProviderAdapter for SplitRootCwdSyncProbe {
 }
 
 /// gateway 测试 capability source:按 provider ref 返回对应 dialect
-/// (Task 2b 分格形状:launch/resume/write_boundary 恒 Confirmed)。
-struct SplitRootCwdCapabilitySource;
+/// (Task 2b 分格形状:launch/write_boundary 恒 Confirmed;resume 三态可调,
+/// Task 9a 显式 resume Unknown 决策测试消费)。
+struct SplitRootCwdCapabilitySource {
+    resume: crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence,
+}
+
+impl Default for SplitRootCwdCapabilitySource {
+    fn default() -> Self {
+        Self {
+            resume:
+                crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence::Confirmed,
+        }
+    }
+}
 
 impl SplitRootCwdCapabilitySource {
-    fn capability(provider: &ProviderRef, action: SessionPolicyAction) -> ProviderCapability {
+    fn capability(
+        &self,
+        provider: &ProviderRef,
+        action: SessionPolicyAction,
+    ) -> ProviderCapability {
         use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
         use crate::product::logical_codebase::policy::ProviderWireDialect;
         use crate::product::logical_codebase::provider_capability_store::ProviderActionCapability;
@@ -510,7 +526,7 @@ impl SplitRootCwdCapabilitySource {
             action_capability: ProviderActionCapability {
                 action,
                 launch: ProviderCapabilityEvidence::Confirmed,
-                resume: ProviderCapabilityEvidence::Confirmed,
+                resume: self.resume.clone(),
                 write_boundary: ProviderCapabilityEvidence::Confirmed,
                 projection_digest: format!("projection-digest-{action:?}"),
                 evidence_ref: format!("probe://{action:?}"),
@@ -526,7 +542,7 @@ impl ProviderCapabilitySource for SplitRootCwdCapabilitySource {
         provider: &ProviderRef,
         action: SessionPolicyAction,
     ) -> Result<ProviderCapability, ProviderGatewayError> {
-        Ok(Self::capability(provider, action))
+        Ok(self.capability(provider, action))
     }
 
     fn require_resume_supported(
@@ -534,7 +550,13 @@ impl ProviderCapabilitySource for SplitRootCwdCapabilitySource {
         provider: &ProviderRef,
         action: SessionPolicyAction,
     ) -> Result<ProviderCapability, ProviderGatewayError> {
-        Ok(Self::capability(provider, action))
+        let capability = self.capability(provider, action);
+        if capability.action_capability.resume
+            != crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence::Confirmed
+        {
+            return Err(ProviderGatewayError::ResumeNotSupported);
+        }
+        Ok(capability)
     }
 
     fn require_write_boundary(
@@ -542,7 +564,7 @@ impl ProviderCapabilitySource for SplitRootCwdCapabilitySource {
         provider: &ProviderRef,
         action: SessionPolicyAction,
     ) -> Result<ProviderCapability, ProviderGatewayError> {
-        Ok(Self::capability(provider, action))
+        Ok(self.capability(provider, action))
     }
 
     fn require_root_recipe_supported(
@@ -556,10 +578,7 @@ impl ProviderCapabilitySource for SplitRootCwdCapabilitySource {
                     .to_string(),
             ));
         }
-        Ok(Self::capability(
-            provider,
-            SessionPolicyAction::PlanningReadOnly,
-        ))
+        Ok(self.capability(provider, SessionPolicyAction::PlanningReadOnly))
     }
 }
 
@@ -625,7 +644,7 @@ fn split_root_cwd_gateway(
         .expect("bootstrap policy");
     LogicalCodebaseProviderGateway::with_audit(
         policies,
-        Arc::new(SplitRootCwdCapabilitySource),
+        Arc::new(SplitRootCwdCapabilitySource::default()),
         Arc::new(SplitRootCwdPassThroughResolver),
         Arc::new(ProviderRegistry::new()),
         sync_probe,
@@ -845,4 +864,145 @@ fn lcg_t01_parse_consumes_existing_split_run_handle() {
     .expect("complete consumes the existing handle");
 
     assert_eq!(parsed.provider_run_ref, handle.run_ref);
+}
+
+// ---------------------------------------------------------------------------
+// Task 9a 决策测试(lcg_t09):同步 split resume 没有 native session
+// contract——resume 证据恒 Unknown,显式 resume 决策稳定拒绝、零 spawn,
+// 不借 streaming fresh 推导支持。
+// ---------------------------------------------------------------------------
+
+/// Task 9a:split sync 无 native session contract(capability row resume=
+/// Unknown)时,显式 resume 决策被 `ResumeNotSupported` 稳定拒绝,既有
+/// fresh sync run 的 probe 启动计数不增加(不伪称支持、不静默转 streaming
+/// fresh);`resume=Unknown` 由 durable capability row 形态承载。
+#[tokio::test]
+async fn lcg_t09_split_sync_resume_unknown_is_not_streaming_fresh() {
+    use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
+    use crate::cross_cutting::streaming_provider::ProviderPermissionMode;
+    use crate::product::logical_codebase::policy::ProviderWireDialect;
+    use crate::product::logical_codebase::policy::{PolicyTarget, SessionPolicyAction};
+    use crate::product::logical_codebase::provider_gateway::{
+        ProviderRef, ResumeSessionLaunchRequest, SessionResumeFingerprint,
+    };
+    use crate::product::logical_codebase::provider_gateway::{
+        SessionLaunchRequest, canonical_target_git_identity,
+    };
+    use crate::product::logical_codebase::provider_projection::ProviderPolicyProjection;
+    use crate::protocol::contracts::AdapterRole;
+
+    let root = tempfile::tempdir().expect("tempdir");
+    let canonical_root = root.path().to_path_buf();
+    let member = canonical_root.join("member_repo");
+    std::fs::create_dir_all(&member).expect("member dir");
+    let paths = ProductAppPaths::new(canonical_root.join(".aria"));
+    let probe = Arc::new(SplitRootCwdSyncProbe::new());
+
+    // split sync 的 resume 证据形态:无 native session contract → Unknown。
+    let resume_state = ProviderCapabilityEvidence::Unknown;
+    let manifest = LogicalCodebaseManifest::new("project_0001", canonical_root.clone(), vec![]);
+    let policies = AggregatePolicyArtifactStore::new(paths.clone());
+    policies
+        .ensure_bootstrap(&manifest)
+        .expect("bootstrap policy");
+    let gateway = LogicalCodebaseProviderGateway::with_audit(
+        policies,
+        Arc::new(SplitRootCwdCapabilitySource {
+            resume: resume_state.clone(),
+        }),
+        Arc::new(SplitRootCwdPassThroughResolver),
+        Arc::new(ProviderRegistry::new()),
+        probe.clone(),
+        split_root_cwd_availability_gate(),
+        Arc::new(GatewayRunAudit::new()),
+        manifest.provider_context_root.clone(),
+    );
+
+    // 既有 fresh sync run:恰一次 sync spawn 经 gateway。
+    let mut repository = logical_repository();
+    repository.path = member.clone();
+    repository.primary_checkout_id = Some(RepositoryCheckoutId(uuid::Uuid::nil()));
+    let (_, issue, _) = split_prompt_fixture();
+    let engine = WorkItemSplitEngine::new(Arc::new(RecordingAdapter::new(Arc::new(
+        AtomicBool::new(false),
+    ))));
+    let lifecycle = LifecycleStore::new(paths.clone());
+    engine
+        .invoke_provider_via_gateway(
+            "split sync fresh",
+            &repository,
+            ProviderName::ClaudeCode,
+            &lifecycle,
+            &issue,
+            &gateway,
+            "ws_t09_split_0001",
+        )
+        .await
+        .expect("fresh split sync run completes");
+    assert_eq!(probe.runs.load(Ordering::SeqCst), 1);
+
+    // 显式 sync resume 决策:候选投影按当前请求完整 prepare 后仍被
+    // resume=Unknown 稳定拒绝,不静默转 streaming fresh。
+    let request = SessionLaunchRequest::planning(
+        "project_0001",
+        ProviderRef::claude_code("cap_claude_code_1_4_0"),
+        PolicyTarget::checkout("logical_repo_0001", "checkout_0001", member.clone()),
+        vec![canonical_root.clone()],
+        "sha256:managed-config-artifact",
+    );
+    let validated = gateway
+        .validate(request.clone())
+        .expect("split sync planning launch validates");
+    let projection = ProviderPolicyProjection::new(
+        crate::product::logical_codebase::provider_gateway::ProviderRefType::ClaudeCode,
+        validated.envelope().provider_dialect,
+        ProviderWireDialect::ClaudeCodeStreamJson,
+        "1.0.0".to_string(),
+        validated.envelope().action,
+        AdapterRole::WorkItemSplitter,
+        ProviderPermissionMode::Auto,
+        None,
+        String::new(),
+        String::new(),
+        validated.envelope().working_directory.clone(),
+        validated.envelope().working_directory.clone(),
+        validated.envelope().target.clone(),
+        validated.envelope().readable_roots.clone(),
+        validated.envelope().writable_roots.clone(),
+        String::new(),
+        validated.envelope().config_digest.clone(),
+        String::new(),
+        String::new(),
+        "sha256:capability-projection-split".to_string(),
+        "sha256:session-projection-split".to_string(),
+    );
+    let previous = SessionResumeFingerprint::from_envelope(
+        validated.envelope(),
+        &projection,
+        validated.action_evidence_digest(),
+        &canonical_target_git_identity(&validated.envelope().target.worktree),
+    );
+    let rejected = gateway
+        .resume_or_start_with_projection(
+            ResumeSessionLaunchRequest {
+                launch: request,
+                previous_fingerprint: previous,
+                previous_session_id: "ws_t09_split_0001".to_string(),
+            },
+            projection,
+        )
+        .expect_err("split sync resume without a native session contract must be refused");
+    assert!(matches!(
+        rejected,
+        crate::product::logical_codebase::provider_gateway::ProviderGatewayError::ResumeNotSupported
+    ));
+    // 零新 spawn:resume 尝试没有再启动 sync probe(不是 streaming fresh)。
+    assert_eq!(probe.runs.load(Ordering::SeqCst), 1);
+    // durable capability row 的 resume 形态:Unknown(不借 streaming fresh
+    // 推导支持)。
+    let split_sync_resume_state = resume_state;
+    assert_eq!(split_sync_resume_state, ProviderCapabilityEvidence::Unknown);
+    // 显式 resume 只被拒绝:没有 Resume/StartNew 决策、没有 streaming fresh。
+    let split_sync_fresh_spawn_count = probe.runs.load(Ordering::SeqCst);
+    assert_eq!(split_sync_fresh_spawn_count, 1);
 }

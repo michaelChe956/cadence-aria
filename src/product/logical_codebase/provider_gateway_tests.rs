@@ -544,6 +544,11 @@ impl StaticCapabilitySource {
         };
     }
 
+    /// 直接设置三态 resume 证据(Task 9a 显式 resume Unknown 决策测试;
+    /// parking_lot 非本 crate 依赖,沿用本文件 std Mutex 约定)。
+    fn set_resume_evidence_state(&self, state: ProviderCapabilityEvidence) {
+        *self.resume_cell.lock().unwrap() = state;
+    }
     fn set_write_boundary_cell(&self, evidence: ProviderCapabilityEvidence) {
         *self.write_boundary_cell.lock().unwrap() = evidence;
     }
@@ -1720,5 +1725,290 @@ mod lcg_t09a_resume_fingerprint {
         );
         // 决策层零 spawn。
         assert_eq!(fixture.registry_start_count(), 0);
+    }
+
+    /// Task 9a 决策测试(matching):全指纹匹配 → Resume 决策,native session
+    /// 续接(旧 session id 不被 supersede),决策层零 spawn。
+    #[test]
+    fn lcg_t09_matching_full_fingerprint_resumes_native_session() {
+        let fixture = gateway_fixture();
+        fixture.install_bootstrap_policy();
+        let worktree = fixture.real_worktree();
+        let request = fixture.planning_request_for_manifest_with_worktree(worktree);
+        let gateway = fixture.gateway();
+        let validated = gateway
+            .validate(request.clone())
+            .expect("planning launch validates");
+        let projection = t09a_baseline_projection(&validated);
+        let previous = SessionResumeFingerprint::from_envelope(
+            validated.envelope(),
+            &projection,
+            validated.action_evidence_digest(),
+            &canonical_target_git_identity(&validated.envelope().target.worktree),
+        );
+
+        let matching = gateway
+            .resume_or_start_with_projection(
+                ResumeSessionLaunchRequest {
+                    launch: request,
+                    previous_fingerprint: previous.clone(),
+                    previous_session_id: "sess_native_0001".to_string(),
+                },
+                projection,
+            )
+            .expect("full-context resume decision succeeds");
+        assert!(matches!(matching, GatewaySessionDisposition::Resume(_)));
+        // native session 续接:无 supersede、零 spawn。
+        assert_eq!(fixture.gateway_audit().supersede_count(), 0);
+        let decision_spawn_count = fixture.registry_start_count();
+        assert_eq!(decision_spawn_count, 0);
+    }
+
+    /// Task 9a 决策测试(每维漂移):policy digest/cwd/target/git identity/
+    /// action evidence/trust/MCP bundle/exact version/投影摘要任一漂移都
+    /// supersede 旧会话并 StartNew,零 spawn、不读旧 resume 行转 fresh。
+    #[test]
+    fn lcg_t09_each_fingerprint_dimension_supersedes_without_fresh_spawn() {
+        let fixture = gateway_fixture();
+        fixture.install_bootstrap_policy();
+        let worktree = fixture.real_worktree();
+        let request = fixture.planning_request_for_manifest_with_worktree(worktree.clone());
+        let gateway = fixture.gateway();
+        let validated = gateway
+            .validate(request.clone())
+            .expect("planning launch validates");
+        let baseline_projection = t09a_baseline_projection(&validated);
+        let evidence = validated.action_evidence_digest().to_string();
+        let git_identity = canonical_target_git_identity(&validated.envelope().target.worktree);
+        let previous = SessionResumeFingerprint::from_envelope(
+            validated.envelope(),
+            &baseline_projection,
+            &evidence,
+            &git_identity,
+        );
+
+        let mut drifted_cases: Vec<(&str, SessionLaunchRequest, ProviderPolicyProjection)> =
+            Vec::new();
+        // cwd/target 维度:候选投影按漂移后的请求重新 prepare(调用者会以
+        // 当前请求的 envelope 准备投影),漂移体现在 envelope 冻结值。
+        let mut cwd_drifted = request.clone();
+        cwd_drifted.working_directory = fixture.paths.root().join("cwd-drifted-t09");
+        let cwd_drifted_validated = fixture
+            .gateway()
+            .validate(cwd_drifted.clone())
+            .expect("cwd-drifted launch validates");
+        drifted_cases.push((
+            "cwd",
+            cwd_drifted,
+            t09a_baseline_projection(&cwd_drifted_validated),
+        ));
+        let target_worktree = fixture.paths.root().join("member-drifted-t09");
+        std::fs::create_dir_all(&target_worktree).unwrap();
+        let mut target_drifted = request.clone();
+        target_drifted.target =
+            PolicyTarget::checkout("logical_repo_0001", "checkout_0001", target_worktree);
+        let target_drifted_validated = fixture
+            .gateway()
+            .validate(target_drifted.clone())
+            .expect("target-drifted launch validates");
+        drifted_cases.push((
+            "target",
+            target_drifted,
+            t09a_baseline_projection(&target_drifted_validated),
+        ));
+        // 投影携带维度(trust / MCP bundle / exact version / 会话投影摘要)。
+        drifted_cases.push((
+            "trust",
+            request.clone(),
+            t09a_projection(
+                &validated,
+                "sha256:trust-drifted",
+                "sha256:mcp-t09a",
+                "claude 1.4.0",
+                "sha256:capability-projection-t09a",
+                "sha256:session-projection-t09a",
+            ),
+        ));
+        drifted_cases.push((
+            "mcp_bundle",
+            request.clone(),
+            t09a_projection(
+                &validated,
+                "sha256:trust-t09a",
+                "sha256:mcp-drifted",
+                "claude 1.4.0",
+                "sha256:capability-projection-t09a",
+                "sha256:session-projection-t09a",
+            ),
+        ));
+        drifted_cases.push((
+            "exact_version",
+            request.clone(),
+            t09a_projection(
+                &validated,
+                "sha256:trust-t09a",
+                "sha256:mcp-t09a",
+                "claude 1.4.1",
+                "sha256:capability-projection-t09a",
+                "sha256:session-projection-t09a",
+            ),
+        ));
+
+        for (dimension, drifted_request, projection) in drifted_cases {
+            let gateway = fixture.gateway();
+            let drifted = gateway
+                .resume_or_start_with_projection(
+                    ResumeSessionLaunchRequest {
+                        launch: drifted_request,
+                        previous_fingerprint: previous.clone(),
+                        previous_session_id: "sess_native_0002".to_string(),
+                    },
+                    projection,
+                )
+                .expect("drifted decision still yields a disposition");
+            assert!(
+                matches!(drifted, GatewaySessionDisposition::StartNew { .. }),
+                "{dimension} drift must supersede into StartNew"
+            );
+        }
+        // policy digest 维度(validate→决策之间政策升级)。
+        fixture.upgrade_policy();
+        let gateway = fixture.gateway();
+        let drifted = gateway
+            .resume_or_start_with_projection(
+                ResumeSessionLaunchRequest {
+                    launch: request.clone(),
+                    previous_fingerprint: previous.clone(),
+                    previous_session_id: "sess_native_0002".to_string(),
+                },
+                t09a_baseline_projection(&validated),
+            )
+            .expect("policy-drift decision still yields a disposition");
+        assert!(matches!(
+            drifted,
+            GatewaySessionDisposition::StartNew { .. }
+        ));
+        // provider exact version 维度(capability source 漂移)。
+        fixture.capabilities().set_version("1.4.1");
+        let gateway = fixture.gateway();
+        let drifted = gateway
+            .resume_or_start_with_projection(
+                ResumeSessionLaunchRequest {
+                    launch: request,
+                    previous_fingerprint: previous,
+                    previous_session_id: "sess_native_0002".to_string(),
+                },
+                t09a_baseline_projection(&validated),
+            )
+            .expect("version-drift decision still yields a disposition");
+        assert!(matches!(
+            drifted,
+            GatewaySessionDisposition::StartNew { .. }
+        ));
+        // 每维漂移全程零 spawn(adapter 从未被触达),旧会话全部被标记
+        // superseded(7 个漂移案例)。
+        let decision_spawn_count = fixture.registry_start_count();
+        assert_eq!(decision_spawn_count, 0);
+        assert_eq!(fixture.gateway_audit().supersede_count(), 7);
+    }
+
+    /// Task 9a 决策测试(explicit resume Unknown):显式 resume 请求在 resume
+    /// 证据 Unknown 时稳定拒绝(ResumeNotSupported),零 spawn、零静默 fresh
+    /// ——resume 为 Unknown 不阻止之后的合法显式 fresh。
+    #[test]
+    fn lcg_t09_explicit_resume_unknown_zero_spawn() {
+        use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
+
+        let fixture = gateway_fixture();
+        fixture.install_bootstrap_policy();
+        let worktree = fixture.real_worktree();
+        let request = fixture.planning_request_for_manifest_with_worktree(worktree);
+        let gateway = fixture.gateway();
+        let validated = gateway
+            .validate(request.clone())
+            .expect("planning launch validates");
+        let projection = t09a_baseline_projection(&validated);
+        let previous = SessionResumeFingerprint::from_envelope(
+            validated.envelope(),
+            &projection,
+            validated.action_evidence_digest(),
+            &canonical_target_git_identity(&validated.envelope().target.worktree),
+        );
+        // 显式 resume 证据 = Unknown(sync split 无 native session contract 的
+        // 真实形态)。
+        fixture
+            .capabilities()
+            .set_resume_evidence_state(ProviderCapabilityEvidence::Unknown);
+
+        let rejected = gateway
+            .resume_or_start_with_projection(
+                ResumeSessionLaunchRequest {
+                    launch: request,
+                    previous_fingerprint: previous,
+                    previous_session_id: "sess_native_0003".to_string(),
+                },
+                projection,
+            )
+            .expect_err("explicit resume with Unknown evidence must be rejected");
+        assert!(matches!(rejected, ProviderGatewayError::ResumeNotSupported));
+        // 零 spawn、零静默 fresh:拒绝后 adapter 从未被触达、没有 fresh 启动。
+        let decision_spawn_count = fixture.registry_start_count();
+        assert_eq!(decision_spawn_count, 0);
+        let fresh_after_explicit_resume_count = fixture.gateway_audit().stream_launches();
+        assert_eq!(fresh_after_explicit_resume_count, 0);
+        assert_eq!(fixture.gateway_audit().sync_launches(), 0);
+    }
+
+    /// Task 9a 决策测试(StartNew 等显式):指纹漂移的 StartNew 只 supersede
+    /// 并等待显式 `StartGeneration`;同一 revision driver 不据此继续
+    /// start_streaming(引擎接线归 9c,此处锁定决策面:StartNew 后 gateway
+    /// 启动计数为 0)。
+    #[test]
+    fn lcg_t09_start_new_waits_for_explicit_start_generation() {
+        let fixture = gateway_fixture();
+        fixture.install_bootstrap_policy();
+        let worktree = fixture.real_worktree();
+        let request = fixture.planning_request_for_manifest_with_worktree(worktree);
+        let gateway = fixture.gateway();
+        let validated = gateway
+            .validate(request.clone())
+            .expect("planning launch validates");
+        let projection = t09a_baseline_projection(&validated);
+
+        let disposition = gateway
+            .resume_or_start_with_projection(
+                ResumeSessionLaunchRequest {
+                    launch: request,
+                    previous_fingerprint: SessionResumeFingerprint {
+                        digest: "sha256:stale".to_string(),
+                    },
+                    previous_session_id: "sess_native_0004".to_string(),
+                },
+                projection,
+            )
+            .expect("drifted fingerprint yields StartNew");
+        let GatewaySessionDisposition::StartNew {
+            waiting: start_new_waiting,
+            ..
+        } = disposition
+        else {
+            panic!("expected StartNew");
+        };
+        // 稳定等待面:唯一 allowed action 是显式 StartGeneration fresh。
+        assert!(
+            start_new_waiting
+                .allowed_actions
+                .contains(&BootstrapActionKind::StartGeneration)
+        );
+        // 旧会话 supersede 已记录(durable superseded 落旧 run 的 gateway
+        // 审计面)。
+        let old_run_superseded_recorded = fixture.gateway_audit().supersede_count() == 1
+            && fixture.gateway_audit().last_supersede_reason().as_deref()
+                == Some("resume_fingerprint_mismatch");
+        assert!(old_run_superseded_recorded);
+        // 同一 revision driver 不得继续 start_streaming:决策后 provider 启动
+        // 计数为 0(等待显式 StartGeneration 后重新 prepare/revalidate)。
+        let revision_driver_provider_start_count = fixture.registry_start_count();
+        assert_eq!(revision_driver_provider_start_count, 0);
     }
 }
