@@ -33,6 +33,7 @@ use cadence_aria::product::lifecycle_store::LifecycleStore;
 use cadence_aria::product::logical_codebase::policy::{
     AggregatePolicyArtifactStore, PolicyTarget, SessionPolicyAction,
 };
+use cadence_aria::product::logical_codebase::provider_capability_store::ProviderCapabilityStore;
 use cadence_aria::product::logical_codebase::provider_gateway::{
     ProviderLaunchAuditContext, ProviderRef, SessionLaunchRequest,
 };
@@ -126,6 +127,8 @@ pub(crate) struct EvidenceCell {
     pub pid_unavailable_reason: Option<String>,
     /// 本格观测到的 provider spawn 计数(split_sync resume 恒 0)。
     pub provider_spawn_count: u64,
+    /// 会话级全投影摘要(含 role/target/trust;审计记录,非相等断言维度)。
+    pub session_projection_digest: String,
     /// 带 ts 封包的事件载荷(provider-events.jsonl 全量来源)。
     pub provider_events: Vec<Value>,
 }
@@ -281,6 +284,7 @@ impl EvidenceCell {
             "provider_pid": self.provider_pid,
             "pid_unavailable_reason": self.pid_unavailable_reason,
             "provider_spawn_count": self.provider_spawn_count,
+            "session_projection_digest": self.session_projection_digest,
             "timeline": self.timeline_summary(),
         })
     }
@@ -406,7 +410,7 @@ impl LiveLcGatewayHarness {
                     "title": "矩阵 story:会话过期提示",
                     "author_provider": env.provider_wire,
                     "reviewer_provider": env.provider_wire,
-                    "review_rounds": 0,
+                    "review_rounds": 1,
                     "superpowers_enabled": false,
                     "openspec_enabled": true
                 }),
@@ -426,7 +430,7 @@ impl LiveLcGatewayHarness {
                     "story_spec_ids": env.story_spec_ids(),
                     "author_provider": env.provider_wire,
                     "reviewer_provider": env.provider_wire,
-                    "review_rounds": 0,
+                    "review_rounds": 1,
                     "superpowers_enabled": false,
                     "openspec_enabled": true
                 }),
@@ -1355,7 +1359,7 @@ impl MatrixEnvironment {
             "provider_config": {
                 "author": self.provider,
                 "reviewer": null,
-                "review_rounds": 0
+                "review_rounds": 1
             },
             "reviewer_enabled": false
         });
@@ -1492,8 +1496,10 @@ impl MatrixEnvironment {
                 StageObservation::new("plan", &self.provider)
                     .denied_cell("前置 story/design 未确认,plan 无法启动(不删格)".to_string()),
             );
+            let mut plan_resume = StageObservation::new("plan", &self.provider);
+            plan_resume.force_resume = true;
             cells.push(
-                StageObservation::new("plan", &self.provider)
+                plan_resume
                     .denied_cell("前置 story/design 未确认,plan resume 无会话可恢复".to_string()),
             );
             return cells;
@@ -1517,7 +1523,7 @@ impl MatrixEnvironment {
                 "design_spec_ids": [design_spec_id],
                 "author_provider": self.provider_wire,
                 "reviewer_provider": self.provider_wire,
-                "review_rounds": 0,
+                "review_rounds": 1,
                 "superpowers_enabled": false,
                 "openspec_enabled": true
             }),
@@ -1525,10 +1531,9 @@ impl MatrixEnvironment {
         .await;
         if !status.is_success() {
             cells.push(observation.denied_cell(format!("plan prepare 失败({status}):{body}")));
-            cells.push(
-                StageObservation::new("plan", &self.provider)
-                    .denied_cell("plan fresh 未启动,resume 无会话".to_string()),
-            );
+            let mut plan_resume = StageObservation::new("plan", &self.provider);
+            plan_resume.force_resume = true;
+            cells.push(plan_resume.denied_cell("plan fresh 未启动,resume 无会话".to_string()));
             return cells;
         }
         let session_id = body["workspace_session"]["workspace_session_id"]
@@ -1537,10 +1542,9 @@ impl MatrixEnvironment {
             .to_string();
         if session_id.is_empty() {
             cells.push(observation.denied_cell(format!("plan prepare 缺会话:{body}")));
-            cells.push(
-                StageObservation::new("plan", &self.provider)
-                    .denied_cell("plan fresh 未启动,resume 无会话".to_string()),
-            );
+            let mut plan_resume = StageObservation::new("plan", &self.provider);
+            plan_resume.force_resume = true;
+            cells.push(plan_resume.denied_cell("plan fresh 未启动,resume 无会话".to_string()));
             return cells;
         }
         observation.workspace_session_id = session_id.clone();
@@ -1639,9 +1643,11 @@ impl MatrixEnvironment {
             Ok(gateway) => gateway,
             Err(error) => {
                 cells.push(fresh.denied_cell(format!("split_sync gateway 组装失败:{error}")));
+                let mut split_resume = StageObservation::new(stage, &self.provider);
+                split_resume.entrypoint = entrypoint.to_string();
+                split_resume.force_resume = true;
                 cells.push(
-                    StageObservation::new(stage, &self.provider)
-                        .denied_cell("split_sync fresh 未启动,resume 无对照".to_string()),
+                    split_resume.denied_cell("split_sync fresh 未启动,resume 无对照".to_string()),
                 );
                 return cells;
             }
@@ -1655,9 +1661,11 @@ impl MatrixEnvironment {
             Ok(handle) => handle,
             Err(error) => {
                 cells.push(fresh.denied_cell(format!("split_sync begin handle 失败:{error}")));
+                let mut split_resume = StageObservation::new(stage, &self.provider);
+                split_resume.entrypoint = entrypoint.to_string();
+                split_resume.force_resume = true;
                 cells.push(
-                    StageObservation::new(stage, &self.provider)
-                        .denied_cell("split_sync fresh 未启动,resume 无对照".to_string()),
+                    split_resume.denied_cell("split_sync fresh 未启动,resume 无对照".to_string()),
                 );
                 return cells;
             }
@@ -1673,8 +1681,11 @@ impl MatrixEnvironment {
                         .lifecycle
                         .fail_work_item_split_provider_run(&handle, &error.to_string());
                     cells.push(fresh.denied_cell(format!("split_sync provider 映射失败:{error}")));
+                    let mut split_resume = StageObservation::new(stage, &self.provider);
+                    split_resume.entrypoint = entrypoint.to_string();
+                    split_resume.force_resume = true;
                     cells.push(
-                        StageObservation::new(stage, &self.provider)
+                        split_resume
                             .denied_cell("split_sync fresh 未启动,resume 无对照".to_string()),
                     );
                     return cells;
@@ -1797,10 +1808,9 @@ impl MatrixEnvironment {
                     "无已确认 work item(前置 plan 未产出),coding 无法启动".to_string(),
                 ),
             );
-            cells.push(
-                StageObservation::new("coding", &self.provider)
-                    .denied_cell("coding fresh 未启动,resume 无会话".to_string()),
-            );
+            let mut coding_resume = StageObservation::new("coding", &self.provider);
+            coding_resume.force_resume = true;
+            cells.push(coding_resume.denied_cell("coding fresh 未启动,resume 无会话".to_string()));
             return cells;
         };
         // fresh:真实 coding attempt 创建(创建沿 plan 会话的 provider 配置)
@@ -1821,19 +1831,17 @@ impl MatrixEnvironment {
         if !status.is_success() {
             cells
                 .push(observation.denied_cell(format!("coding attempt 创建失败({status}):{body}")));
-            cells.push(
-                StageObservation::new("coding", &self.provider)
-                    .denied_cell("coding fresh 未启动,resume 无会话".to_string()),
-            );
+            let mut coding_resume = StageObservation::new("coding", &self.provider);
+            coding_resume.force_resume = true;
+            cells.push(coding_resume.denied_cell("coding fresh 未启动,resume 无会话".to_string()));
             return cells;
         }
         let attempt_id = body["attempt_id"].as_str().unwrap_or_default().to_string();
         if attempt_id.is_empty() {
             cells.push(observation.denied_cell(format!("coding attempt 响应缺 id:{body}")));
-            cells.push(
-                StageObservation::new("coding", &self.provider)
-                    .denied_cell("coding fresh 未启动,resume 无会话".to_string()),
-            );
+            let mut coding_resume = StageObservation::new("coding", &self.provider);
+            coding_resume.force_resume = true;
+            cells.push(coding_resume.denied_cell("coding fresh 未启动,resume 无会话".to_string()));
             return cells;
         }
         observation.workspace_session_id = attempt_id.clone();
@@ -2005,10 +2013,9 @@ impl MatrixEnvironment {
         if !status.is_success() {
             cells
                 .push(observation.denied_cell(format!("review 载体会话创建失败({status}):{body}")));
-            cells.push(
-                StageObservation::new("review", &self.provider)
-                    .denied_cell("review fresh 未启动,resume 无会话".to_string()),
-            );
+            let mut review_resume = StageObservation::new("review", &self.provider);
+            review_resume.force_resume = true;
+            cells.push(review_resume.denied_cell("review fresh 未启动,resume 无会话".to_string()));
             return cells;
         }
         let session_id = body["workspace_session"]["workspace_session_id"]
@@ -2017,10 +2024,9 @@ impl MatrixEnvironment {
             .to_string();
         if session_id.is_empty() {
             cells.push(observation.denied_cell(format!("review 响应缺会话:{body}")));
-            cells.push(
-                StageObservation::new("review", &self.provider)
-                    .denied_cell("review fresh 未启动,resume 无会话".to_string()),
-            );
+            let mut review_resume = StageObservation::new("review", &self.provider);
+            review_resume.force_resume = true;
+            cells.push(review_resume.denied_cell("review fresh 未启动,resume 无会话".to_string()));
             return cells;
         }
         observation.workspace_session_id = session_id.clone();
@@ -2071,6 +2077,43 @@ impl MatrixEnvironment {
                     && role.is_none_or(|role| record.role == role)
             })
             .map(|(_, record)| record.provider_session_id)
+    }
+
+    /// durable capability row 的冻结投影摘要(独立于启动审计的来源):
+    /// 按 audit 的 wire dialect/exact version 匹配 record,再按 action
+    /// 文本取行。读不到(材料缺失)返回 None,由格子的空摘要如实暴露。
+    fn durable_action_projection_digest(
+        &self,
+        record: &ProviderStartAudit,
+        action_text: &str,
+        audit_wire_dialect: &str,
+    ) -> Option<String> {
+        let capability =
+            match ProviderCapabilityStore::for_lc(self.app_paths.clone(), self.lc_id.clone())
+                .get(PROJECT_ID, provider_ref_type_for(&self.provider))
+            {
+                Ok(Some(capability)) => capability,
+                _ => return None,
+            };
+        if capability.version != record.provider_version
+            || serde_json::to_value(&capability.wire_dialect)
+                .ok()?
+                .as_str()?
+                != audit_wire_dialect
+        {
+            return None;
+        }
+        capability
+            .action_matrix
+            .rows()
+            .iter()
+            .find(|row| {
+                serde_json::to_value(row.action)
+                    .ok()
+                    .and_then(|value| value.as_str().map(str::to_string))
+                    .is_some_and(|text| text == action_text)
+            })
+            .map(|row| row.projection_digest.clone())
     }
 
     /// F3:从该 coding attempt 的 provider stream log 目录解析真实子进程 PID。
@@ -2189,8 +2232,9 @@ impl MatrixEnvironment {
                     "provenance": "生产约定常量(engine.rs 同款字面量);托管 config artifact 存储未落地,非独立真实摘要,不冒充",
                 },
                 "capability_row": {
-                    "capability_projection_digest": cell.frozen_projection_digest,
-                    "session_projection_digest": cell.audit_projection_digest,
+                    "audit_capability_projection_digest": cell.audit_projection_digest,
+                    "durable_frozen_projection_digest": cell.frozen_projection_digest,
+                    "session_projection_digest": cell.session_projection_digest,
                     "spawn_count": cell.provider_spawn_count,
                 },
                 "projection": {
@@ -2377,6 +2421,7 @@ impl StageObservation {
             provider_pid: None,
             pid_unavailable_reason: None,
             provider_spawn_count: self.observed_spawn_count as u64,
+            session_projection_digest: String::new(),
             provider_events: self.events.clone(),
         }
     }
@@ -2417,8 +2462,23 @@ impl StageObservation {
             if let Some(projection) = &record.lc_projection {
                 cell.action = projection.action.clone();
                 cell.wire_dialect = projection.wire_dialect.clone();
-                cell.frozen_projection_digest = projection.capability_projection_digest.clone();
-                cell.audit_projection_digest = projection.projection_digest.clone();
+                cell.gateway_dialect = record.adapter_dialect.clone();
+                // fix 轮 9:摘要语义对齐分层设计——audit 侧取启动审计的
+                // capability_projection_digest(profile 摘要,与 durable
+                // action row 冻结值同源);frozen 侧独立读 durable
+                // capability row 的 projection_digest(validate 冻结同一
+                // 来源)。两者相等=启动审计投影与冻结投影一致(无漂移);
+                // 会话级 projection_digest(含 role/target/trust)另行
+                // 记录在 frozen-facts,不参与相等断言。
+                cell.audit_projection_digest = projection.capability_projection_digest.clone();
+                cell.frozen_projection_digest = env
+                    .durable_action_projection_digest(
+                        record,
+                        &projection.action,
+                        &projection.wire_dialect,
+                    )
+                    .unwrap_or_default();
+                cell.session_projection_digest = projection.projection_digest.clone();
             }
             if self.role_run_seq.is_none() {
                 self.role_run_seq = Some(*seq);
@@ -2676,6 +2736,19 @@ fn env_timeout_secs(name: &str, default_secs: u64) -> u64 {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(default_secs)
+}
+
+fn provider_ref_type_for(
+    provider: &ProviderName,
+) -> cadence_aria::product::logical_codebase::provider_gateway::ProviderRefType {
+    use cadence_aria::product::logical_codebase::provider_gateway::ProviderRefType;
+    match provider {
+        ProviderName::ClaudeCode => ProviderRefType::ClaudeCode,
+        ProviderName::Codex => ProviderRefType::Codex,
+        ProviderName::Pi => ProviderRefType::Pi,
+        ProviderName::KimiCode => ProviderRefType::KimiCode,
+        ProviderName::Fake => ProviderRefType::ClaudeCode,
+    }
 }
 
 fn provider_type_for(provider: &ProviderName) -> ProviderType {

@@ -65,6 +65,7 @@ fn complete_baseline_cell(
         provider_pid: Some("48017".to_string()),
         pid_unavailable_reason: None,
         provider_spawn_count: 0,
+        session_projection_digest: "sha256:session-projection-fixture".to_string(),
         provider_events: vec![serde_json::json!({
             "ts": "2026-10-04T00:00:00.000Z",
             "event": {"type": "tool_call", "tool": "Read", "native_session_id": "native-session-fixture"}
@@ -337,6 +338,25 @@ async fn run_live_five_stage_matrix(selected_provider: ProviderName) {
 
     let canonical_root = matrix.canonical_root().to_path_buf();
     let selected_member_worktree = matrix.member_worktree().to_path_buf();
+
+    // 全 denied 不是矩阵通过:至少一格真实 Confirmed(成功支持格具全部
+    // 断言才 PASS;全部缺证据=驱动/环境失败,不得以 reason 齐全冒充)。
+    assert!(
+        !matrix.confirmed_cells().is_empty(),
+        "矩阵无任何 Confirmed 格(全部 denied/unknown):{}",
+        matrix
+            .unconfirmed_cells()
+            .iter()
+            .map(|cell| format!(
+                "{}/{}/{}: {}",
+                cell.stage,
+                cell.entrypoint,
+                cell.fresh_or_resume,
+                cell.denied_reason.as_deref().unwrap_or("?")
+            ))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    );
 
     // 五阶段×fresh/resume 主格完备:不合并隐藏,缺格即矩阵不完整。
     assert!(
