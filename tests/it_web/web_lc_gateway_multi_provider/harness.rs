@@ -3012,15 +3012,11 @@ fn semantic_option_selection(options: &[Value], allow_multiple: bool) -> Vec<Str
         .iter()
         .enumerate()
         .map(|(index, option)| {
-            let text = format!(
-                "{} {}",
-                option.get("label").and_then(Value::as_str).unwrap_or(""),
-                option
-                    .get("description")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-            );
-            (index, semantic_tier(&text))
+            // r13 复盘:只按 label 分级——description 常含范围界定语
+            //("不含自动续期/不含主动登出清理")会误触负向口径,把
+            //「(推荐)」正解挤出选择。
+            let label = option.get("label").and_then(Value::as_str).unwrap_or("");
+            (index, semantic_tier(label))
         })
         .collect();
     let id_at = |index: usize| -> String {
