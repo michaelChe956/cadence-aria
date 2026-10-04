@@ -727,6 +727,98 @@ mod tests {
         assert!(fake.get(&ProviderName::KimiCode).is_some());
     }
 
+    // ---------------------------------------------------------------------------
+    // Task 1c-factory(lcg_t01):生产 registry 四家真实 projector 原子装配。
+    // ---------------------------------------------------------------------------
+
+    /// 1c:`real_provider_registry` 的四家 projector 是各 provider 的真实实现——
+    /// projector getter 对四家全部可见,且装配期 exact version 未实测(不伪造
+    /// 版本)时 `project` 按各实现合同 fail-closed 拒绝(version-unknown 语义),
+    /// 而非 1a 的 Unprovisioned 占位错误。
+    #[test]
+    fn lcg_t01_real_registry_assembles_four_real_policy_projectors() {
+        use crate::product::logical_codebase::policy::{
+            PolicyTarget, ProviderDialect, SessionPolicyAction, SessionPolicyEnvelope,
+        };
+        use crate::product::logical_codebase::provider_gateway::ProviderRef;
+        use crate::product::logical_codebase::provider_projection::ProviderProjectionInput;
+
+        let root = tempdir().expect("root");
+        let runner = Arc::new(ScriptedRunner::new(Vec::new()));
+        let health = provider_health(root.path(), runner);
+        let gate = Arc::new(ProviderAvailabilityGate::new(health));
+        let registry = real_provider_registry(gate);
+
+        let aggregate_root = root.path().join("aggregate-root");
+        std::fs::create_dir_all(&aggregate_root).expect("aggregate root");
+        let cases = [
+            (
+                ProviderName::ClaudeCode,
+                ProviderRef::claude_code("cap_registry_assembly"),
+                ProviderDialect::ClaudeCodeCliV1,
+                "claude exact version is unknown",
+            ),
+            (
+                ProviderName::Codex,
+                ProviderRef::codex("cap_registry_assembly"),
+                ProviderDialect::CodexCliV1,
+                "codex exact version is unknown",
+            ),
+            (
+                ProviderName::Pi,
+                ProviderRef::pi("cap_registry_assembly"),
+                ProviderDialect::PiRpcV1,
+                "pi exact version is unknown",
+            ),
+            (
+                ProviderName::KimiCode,
+                ProviderRef::kimi_code("cap_registry_assembly"),
+                ProviderDialect::KimiAcpV1,
+                "kimi exact version is unknown",
+            ),
+        ];
+        for (name, provider_ref, dialect, unknown_version_fragment) in cases {
+            let projector = registry
+                .projector(&name)
+                .unwrap_or_else(|| panic!("{name:?} projector must be atomically registered"));
+            let envelope = SessionPolicyEnvelope {
+                policy_id: "policy_registry_assembly".to_string(),
+                policy_revision: 1,
+                policy_digest: format!("sha256:{}", "a".repeat(64)),
+                action: SessionPolicyAction::PlanningReadOnly,
+                target: PolicyTarget::aggregate_root(aggregate_root.clone()),
+                working_directory: aggregate_root.clone(),
+                readable_roots: vec![aggregate_root.clone()],
+                writable_roots: Vec::new(),
+                provider_dialect: dialect,
+                config_artifact_ref: "sha256:registry-assembly-config".to_string(),
+                config_digest: format!("sha256:{}", "b".repeat(64)),
+                created_at: "2026-10-04T00:00:00Z".to_string(),
+                authority_root: aggregate_root.clone(),
+            };
+            let input = ProviderProjectionInput::new(
+                envelope,
+                provider_ref,
+                SessionPolicyAction::PlanningReadOnly,
+                AdapterRole::Orchestrator,
+                ProviderPermissionMode::Auto,
+                None,
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                None,
+            );
+            let error = projector.project(&input).err().unwrap_or_else(|| {
+                panic!("{name:?} projector must fail closed without a measured exact version")
+            });
+            assert!(
+                error.to_string().contains(unknown_version_fragment),
+                "{name:?} must assemble its real projector (version-unknown fail-closed), got: {error}"
+            );
+        }
+    }
+
     #[test]
     fn web_app_state_single_candidate_rollout_defaults_to_disabled_and_can_be_enabled_at_creation()
     {

@@ -548,6 +548,61 @@ mod tests {
         assert_eq!(validated.envelope().policy_revision, 1);
     }
 
+    /// Task 1c-factory(lcg_t01,carry③):`build_for_lc` 的 LC 作用域组装注入
+    /// root-recipe 凭据重核验通道(`StoreBackedProviderCapabilitySource::for_lc`)
+    /// ——root recipe 相位的 gateway 校验不再 fail-closed 于
+    /// `root_recipe_credential_recheck_unavailable`,而是真实消费 durable 凭据
+    /// 重核验(无 Running operation → denied)。
+    #[test]
+    fn lcg_t01_build_for_lc_wires_root_recipe_credential_recheck_channel() {
+        let (_root, paths, factory) = factory_fixture();
+        let lc_id = "lc_recipe_recheck";
+
+        let manifest =
+            LogicalCodebaseManifest::new("project_0001", paths.root().to_path_buf(), vec![]);
+        LogicalCodebaseStore::for_lc(paths.clone(), lc_id)
+            .save_manifest("project_0001", &manifest)
+            .expect("save lc manifest");
+
+        let gateway = factory
+            .build_for_lc("project_0001", Some(lc_id))
+            .expect("build lc gateway");
+
+        // 材料齐备(manifest/policy/capability 由 material prep 物化),但 lc
+        // 子树没有该凭据对应的 Running operation——重核验通道在场时结果必须是
+        // denied(而非无通道的 unavailable)。
+        let credential =
+        crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential::for_test(
+            "project_0001",
+            lc_id,
+            "operation_missing_0001",
+            crate::product::logical_codebase::AggregateInitializationStepKind::PreCheck,
+            "sha256:recheck-input",
+            paths.root().to_path_buf(),
+        );
+        let aggregate_root = paths.root().join("aggregate");
+        std::fs::create_dir_all(&aggregate_root).expect("create aggregate root");
+        let request = SessionLaunchRequest::planning(
+            "project_0001",
+            ProviderRef::claude_code("cap_managed_snapshot"),
+            PolicyTarget::aggregate_root(aggregate_root),
+            vec![paths.root().to_path_buf()],
+            "sha256:managed-config-artifact",
+        );
+        let error = gateway
+            .validate_root_recipe_request(request, &credential)
+            .expect_err("credential without a Running operation must be denied");
+        let text = error.to_string();
+        assert!(
+            !text.contains("root_recipe_credential_recheck_unavailable"),
+            "for_lc 组装必须携带凭据重核验通道, got: {text}"
+        );
+        assert!(
+            text.contains("root_recipe_credential_recheck_denied"),
+            "无 Running operation 的凭据必须被真实重核验拒绝, got: {text}"
+        );
+    }
+
     #[test]
     fn web_app_state_installs_factory_and_supports_injection() {
         let root = tempdir().expect("root");
