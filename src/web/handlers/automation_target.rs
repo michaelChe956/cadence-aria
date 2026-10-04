@@ -115,11 +115,12 @@ pub async fn get_automation_target(
                     "automation target requires exactly one logical repository",
                 ));
             };
-            // C5 Task 3：唯一 logical target 确认后做完整角色链静态预检
-            //（author→coder→reviewer 逐角色）——与最终 PUT Enable 同一
-            // carrier、同一判定，投影阶段即拒绝确定性不支持的组合，
-            // 一次列全全部违规角色。
+            // C5 Task 3/Task 8:唯一 logical target 确认后做完整角色链
+            // 同源预检——与最终 PUT Enable 同一 carrier、同一判定,一次
+            // 列全全部违规角色(经 action_admission_verdict 的真实判定;
+            // gateway 接线由 Task 8b 注入 readonly factory)。
             super::automation_gateway_preflight::validate_role_chain_for_enrollment(
+                None,
                 &resolved_options.author_provider,
                 &resolved_options.reviewer_provider,
                 &carrier,

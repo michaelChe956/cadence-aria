@@ -1,105 +1,198 @@
-//! P2 GAP-F（Task 0.2）→ C5 Task 3（REQ-WIGA-C5-PREFLIGHT）：Enable 前
-//! 完整角色链静态预检。
+//! P2 GAP-F(Task 0.2)→ C5 Task 3(REQ-WIGA-C5-PREFLIGHT)→ Task 8
+//! (REQ-LCG-06):Enable 前完整角色链同源预检。
 //!
-//! 逐角色循环：plan_author/coder←author_provider，plan/code reviewer←
-//! reviewer_provider，internal reviewer 按同一 reviewer 配置三值派生先例
-//!（`From<&ProviderConfigSnapshot>`：internal_reviewer＝reviewer）取
-//! reviewer_provider。谓词本体与原 reviewer 单角色预检同源（Pi/KimiCode
-//! 无 gateway dialect 经 `ProviderRef::from_provider_name` 集中 fail-closed、
-//! Codex 固定 `danger-full-access` sandbox 的路由禁令与
-//! `LogicalCodebaseProviderGateway::enforce_route_policy` 同源），不产生第二
-//! 套支持矩阵。只判**确定性**静态不支持：不探活、不实例化 provider、不改
-//! 用户选项。GET 投影、PUT Enable、rebind 三调用点共用同一判定；单仓载体
-//! 整体跳过 gateway 谓词不误拒（A10）；422 payload 一次列全全部违规角色
-//!（不逐次试错）。测试运行 `test_provider_enabled` 只按角色豁免 Fake。
+//! 逐角色循环:plan_author/coder←author_provider,plan/code/internal
+//! reviewer←reviewer_provider。判定与 gateway 同源:显式 provider 映射
+//! (`provider_ref_for_name`/`ProviderRef::from_provider_name` 集中
+//! fail-closed)+ Task 3 early 资格 verdict(`action_admission_verdict`
+//! 只读 durable capability),不产生第二套支持矩阵。一次 422 列全全部
+//! 违规角色(role/provider/action/reason_code + capability/projection
+//! 引用);LC 的 `gateway_required=false` 无旁路效力;SingleRepository
+//! 保留原跳过语义;`test_provider_enabled` 只按角色豁免 Fake。只收集
+//! early 可确定的错误,不要求尚不存在的 attempt worktree 或 role-run
+//! D4;实际 launch 继续完整门且无豁免。GET 投影、PUT Enable、rebind
+//! 三调用点共用同一判定。
 
+use crate::product::logical_codebase::policy::SessionPolicyAction;
+use crate::product::logical_codebase::provider_admission_preflight::ProviderAdmissionError;
 use crate::product::logical_codebase::provider_gateway::{
-    CODEX_DANGER_FULL_ACCESS_SANDBOX_MODE, CODEX_DANGER_FULL_ACCESS_UNSUPPORTED, ProviderRef,
+    CODEX_DANGER_FULL_ACCESS_UNSUPPORTED, LogicalCodebaseProviderGateway,
+    PROVIDER_CAPABILITY_LAUNCH_NOT_CONFIRMED, PROVIDER_CAPABILITY_WRITE_BOUNDARY_NOT_CONFIRMED,
+    PROVIDER_UNSUPPORTED_FOR_GATEWAY_LAUNCH,
 };
 use crate::product::models::ProviderName;
+use crate::product::work_item_split_engine::engine::provider_ref_for_name;
 use crate::web::error::{ApiError, ApiResult};
 use serde_json::json;
 
 use super::support::AutomationCarrierResolution;
 
-/// GET 投影／PUT Enable／rebind 共用的稳定错误码（HTTP 422）。
+/// GET 投影/PUT Enable/rebind 共用的稳定错误码(HTTP 422)。
 pub(crate) const AUTOMATION_ROLE_CHAIN_UNSUPPORTED: &str = "automation_role_chain_unsupported";
 
-/// 逐角色违规投影：一次 422 列全（契约 `AutomationRoleChainViolation`）。
+/// gateway 组装失败(同源判定不可用)时的稳定判别码,与 Task 3
+/// admission waiting 的兜底码同源——预检 fail-closed,不静默放行。
+const PROVIDER_GATEWAY_UNAVAILABLE: &str = "provider_gateway_denied";
+
+/// 逐角色违规投影(Task 8 冻结契约):一次 422 列全,携带判定依据的
+/// action 与 capability/projection 引用(early 阶段不可确定时为 None)。
 #[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct AutomationRoleChainViolation {
     pub role: String,
     pub provider: String,
+    pub action: SessionPolicyAction,
     pub reason_code: String,
+    /// 判定读取的 capability snapshot 引用(映射失败等无法确定时 None)。
+    pub capability_snapshot_ref: Option<String>,
+    /// action 行 projection digest 引用(verdict 拒绝时无法提供,None)。
+    pub projection_ref: Option<String>,
 }
 
-/// 单角色静态谓词本体（与 `provider_gateway::enforce_route_policy` 同源）：
-/// 返回稳定 reason_code（`codex_danger_full_access_unsupported` 路由禁令 /
-/// `provider_unsupported_for_gateway_launch` dialect 缺失）与人类可读 message。
-fn static_gateway_verdict(provider: &ProviderName) -> Result<(), (String, String)> {
-    // Codex 路由级硬门：当前固定 sandbox 即 danger-full-access 时静态拒绝，
-    // 不依赖运行时 policy。
-    if matches!(provider, ProviderName::Codex)
-        && CODEX_DANGER_FULL_ACCESS_SANDBOX_MODE
-            == crate::cross_cutting::codex_provider::CODEX_DEFAULT_SANDBOX_MODE
-    {
-        return Err((
-            CODEX_DANGER_FULL_ACCESS_UNSUPPORTED.to_string(),
-            format!(
-                "codex is statically blocked at the gateway route: \
-                 {CODEX_DANGER_FULL_ACCESS_UNSUPPORTED}"
-            ),
-        ));
+/// 角色链五角色 → (policy action, adapter role):plan_author 规划只读、
+/// coder 目标写、三个 reviewer 评审只读。AdapterRole/permission 参数
+/// 目前由 gateway 忽略(Task 7 统一 guard 接线),随 guard 同源演进。
+fn role_action_and_adapter_role(
+    role: &str,
+) -> (SessionPolicyAction, crate::protocol::contracts::AdapterRole) {
+    match role {
+        "plan_author" => (
+            SessionPolicyAction::PlanningReadOnly,
+            crate::protocol::contracts::AdapterRole::Orchestrator,
+        ),
+        "coder" => (
+            SessionPolicyAction::CodingTargetWrite,
+            crate::protocol::contracts::AdapterRole::Executor,
+        ),
+        _ => (
+            SessionPolicyAction::ReviewReadOnly,
+            crate::protocol::contracts::AdapterRole::Reviewer,
+        ),
     }
-    ProviderRef::from_provider_name(provider, "static-preflight")
-        .map(|_| ())
-        .map_err(|error| {
-            (
-                "provider_unsupported_for_gateway_launch".to_string(),
-                error.to_string(),
-            )
-        })
 }
 
-/// 共享核心：角色派生＋逐角色谓词循环。`single_repository_carrier` 为真时
-/// 整体跳过 gateway 谓词（单仓不误拒，Review Focus 5）；`gateway_required`
-/// 为假不预检；`test_provider_enabled` 只按角色豁免 Fake（Pi/KimiCode 不豁免）。
+/// 从 early verdict 的 waiting 事实提取具体稳定判别码:detail 携带
+/// Task 3 判别码原文(比泛化 waiting reason 更可诊断),未命中时沿用
+/// waiting 的 reason_code。
+fn detailed_reason_code(waiting_reason_code: &str, detail: &str) -> String {
+    for code in [
+        CODEX_DANGER_FULL_ACCESS_UNSUPPORTED,
+        PROVIDER_CAPABILITY_LAUNCH_NOT_CONFIRMED,
+        PROVIDER_CAPABILITY_WRITE_BOUNDARY_NOT_CONFIRMED,
+        PROVIDER_UNSUPPORTED_FOR_GATEWAY_LAUNCH,
+    ] {
+        if detail.contains(code) {
+            return code.to_string();
+        }
+    }
+    waiting_reason_code.to_string()
+}
+
+/// 单角色同源判定:显式映射 + Task 3 early 资格 verdict;返回 None
+/// 表示该角色 action 证据完整。只读,零 provider 启动、零写入。
+fn role_chain_violation(
+    gateway: Option<&LogicalCodebaseProviderGateway>,
+    role: &str,
+    provider: &ProviderName,
+) -> Option<AutomationRoleChainViolation> {
+    let provider_label = |provider: &ProviderName| {
+        serde_json::to_value(provider)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_string))
+            .unwrap_or_else(|| format!("{provider:?}"))
+    };
+    let (action, adapter_role) = role_action_and_adapter_role(role);
+    // 显式 provider 映射(与 gateway 同源):Fake/未知值 fail-closed,
+    // 不回退其它 provider。
+    let provider_ref = match provider_ref_for_name(provider) {
+        Ok(provider_ref) => provider_ref,
+        Err(_error) => {
+            return Some(AutomationRoleChainViolation {
+                role: role.to_string(),
+                provider: provider_label(provider),
+                action,
+                reason_code: PROVIDER_UNSUPPORTED_FOR_GATEWAY_LAUNCH.to_string(),
+                capability_snapshot_ref: None,
+                projection_ref: None,
+            });
+        }
+    };
+    let Some(gateway) = gateway else {
+        // factory 缺失/组装失败:同源判定不可用,缺材料列 reason
+        // (不建 worktree/provider),预检 fail-closed。
+        return Some(AutomationRoleChainViolation {
+            role: role.to_string(),
+            provider: provider_label(provider),
+            action,
+            reason_code: PROVIDER_GATEWAY_UNAVAILABLE.to_string(),
+            capability_snapshot_ref: Some(provider_ref.capability_snapshot_ref.clone()),
+            projection_ref: None,
+        });
+    };
+    match gateway.action_admission_verdict(
+        &provider_ref,
+        action,
+        &adapter_role,
+        crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
+    ) {
+        // verdict 通过:admission 携带的两枚引用不构成违规,不另列。
+        Ok(_admission) => None,
+        Err(ProviderAdmissionError::Waiting {
+            reason_code,
+            detail,
+            ..
+        }) => Some(AutomationRoleChainViolation {
+            role: role.to_string(),
+            provider: provider_label(provider),
+            action,
+            reason_code: detailed_reason_code(&reason_code, &detail),
+            capability_snapshot_ref: Some(provider_ref.capability_snapshot_ref.clone()),
+            projection_ref: None,
+        }),
+        Err(ProviderAdmissionError::Store(_error)) => Some(AutomationRoleChainViolation {
+            role: role.to_string(),
+            provider: provider_label(provider),
+            action,
+            reason_code: PROVIDER_GATEWAY_UNAVAILABLE.to_string(),
+            capability_snapshot_ref: Some(provider_ref.capability_snapshot_ref.clone()),
+            projection_ref: None,
+        }),
+    }
+}
+
+/// 共享核心:角色派生+逐角色同源判定循环。
+/// - SingleRepository 载体先走原跳过(单仓不误拒,Review Focus 5/A10);
+/// - LC 的 `gateway_required=false` 无旁路效力(Global Constraints 7):
+///   标志不参与判定,仍检查全部角色;
+/// - `test_provider_enabled` 只按角色豁免 Fake(Pi/KimiCode 不豁免);
+/// - 全部角色的违规一次列全(不逐次试错)。
 fn validate_role_chain(
+    gateway: Option<&LogicalCodebaseProviderGateway>,
     author_provider: &ProviderName,
     reviewer_provider: &ProviderName,
     single_repository_carrier: bool,
     gateway_required: bool,
     test_provider_enabled: bool,
 ) -> ApiResult<()> {
-    if !gateway_required || single_repository_carrier {
+    if single_repository_carrier {
         return Ok(());
     }
-    let provider_name = |provider: &ProviderName| {
-        serde_json::to_value(provider)
-            .ok()
-            .and_then(|value| value.as_str().map(str::to_string))
-            .unwrap_or_else(|| format!("{provider:?}"))
-    };
+    let _ = gateway_required;
     let mut violations: Vec<AutomationRoleChainViolation> = Vec::new();
     for (role, provider) in [
         ("plan_author", author_provider),
         ("coder", author_provider),
         ("plan_reviewer", reviewer_provider),
         ("code_reviewer", reviewer_provider),
-        // internal reviewer 无独立 ProviderName 变体：按同一 reviewer 配置
-        // 三值派生先例取 reviewer_provider（在场即参与；缺失即 None 不参与
-        // ——enrollment options 的 reviewer 必填，故此处恒在场）。
+        // internal reviewer 无独立 ProviderName 变体:按同一 reviewer 配置
+        // 三值派生先例取 reviewer_provider(enrollment options 的 reviewer
+        // 必填,恒在场)。
         ("internal_reviewer", reviewer_provider),
     ] {
         if test_provider_enabled && matches!(provider, ProviderName::Fake) {
             continue;
         }
-        if let Err((reason_code, _message)) = static_gateway_verdict(provider) {
-            violations.push(AutomationRoleChainViolation {
-                role: role.to_string(),
-                provider: provider_name(provider),
-                reason_code,
-            });
+        if let Some(violation) = role_chain_violation(gateway, role, provider) {
+            violations.push(violation);
         }
     }
     if violations.is_empty() {
@@ -111,14 +204,17 @@ fn validate_role_chain(
     });
     Err(ApiError::validation_with_details(
         AUTOMATION_ROLE_CHAIN_UNSUPPORTED,
-        "automation role chain has statically unsupported providers",
+        "automation role chain has unsupported providers or missing action evidence",
         details,
     ))
 }
 
-/// C5 Task 3 契约入口：GET 投影与 PUT Enable 的载体判定来自
-/// `resolve_automation_carrier`（Task 2 产物），同一 carrier 进同一判定。
+/// 契约入口(Task 8 签名):GET 投影与 PUT Enable 的载体判定来自
+/// `resolve_automation_carrier`(唯一 resolver),同一 carrier 进同一
+/// 判定;`gateway` 为调用方经 readonly factory(`build_readonly_for_lc`)
+/// 组装的只读 gateway。
 pub(crate) fn validate_role_chain_for_enrollment(
+    gateway: Option<&LogicalCodebaseProviderGateway>,
     author_provider: &ProviderName,
     reviewer_provider: &ProviderName,
     carrier: &AutomationCarrierResolution,
@@ -126,6 +222,7 @@ pub(crate) fn validate_role_chain_for_enrollment(
     test_provider_enabled: bool,
 ) -> ApiResult<()> {
     validate_role_chain(
+        gateway,
         author_provider,
         reviewer_provider,
         matches!(
@@ -137,10 +234,12 @@ pub(crate) fn validate_role_chain_for_enrollment(
     )
 }
 
-/// rebind 调用点专用：手上只有 enrollment 声明的 target（无 authority
-/// resolution），按声明 target 的载体类别进同一判定核心——不重解析 issue
-/// 权威载体（契约「rebind 的 carrier 取 enrollment 现有 target」）。
+/// rebind 调用点专用:手上只有 enrollment 声明的 target(无 authority
+/// resolution),按声明 target 的载体类别进同一判定核心——沿 declared
+/// target 读取现有 LC/成员,不重解析 issue 权威载体(契约「rebind 的
+/// carrier 取 enrollment 现有 target」)。
 pub(crate) fn validate_role_chain_for_declared_enrollment_target(
+    gateway: Option<&LogicalCodebaseProviderGateway>,
     author_provider: &ProviderName,
     reviewer_provider: &ProviderName,
     declared: &crate::product::logical_codebase::EnrollmentTarget,
@@ -148,6 +247,7 @@ pub(crate) fn validate_role_chain_for_declared_enrollment_target(
     test_provider_enabled: bool,
 ) -> ApiResult<()> {
     validate_role_chain(
+        gateway,
         author_provider,
         reviewer_provider,
         matches!(
@@ -808,6 +908,8 @@ mod tests {
         let with_evidence = role_chain_fixture(&[
             capability_record(ProviderRefType::Pi, true),
             capability_record(ProviderRefType::KimiCode, true),
+            // reviewer=ClaudeCode 的三角色同样需要证据完整才放行。
+            capability_record(ProviderRefType::ClaudeCode, true),
         ]);
         for provider in [ProviderName::KimiCode, ProviderName::Pi] {
             let error = validate_role_chain_for_declared_enrollment_target(

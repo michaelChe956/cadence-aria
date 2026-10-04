@@ -182,11 +182,13 @@ pub async fn post_automation_enrollment_rebind(
     //（AutoIfValid 不代表授权，REQ-WIGA-02 同一口径；换代是用户显式提交，
     // 不按 created_at 排除旧 plan——排除的只是隐式认领）。
     validate_rebind_binding_target(&lifecycle, &project_id, &issue_id, &request.binding)?;
-    // 换代换 provider 同样过完整角色链静态预检（C5 Task 3）。rebind 手上
-    // 只有 enrollment 声明的 target——carrier 取声明值，不重解析 issue
-    // 权威载体；旧代 enrollment（无 target）由 store rebind 语义兜底拒绝。
+    // 换代换 provider 同样过完整角色链同源预检(C5 Task 3/Task 8)。
+    // rebind 手上只有 enrollment 声明的 target——carrier 取声明值,不
+    // 重解析 issue 权威载体;旧代 enrollment(无 target)由 store rebind
+    // 语义兜底拒绝。gateway 接线由 Task 8b 注入 readonly factory。
     if let Some(declared) = enrollment.target.as_ref() {
         super::automation_gateway_preflight::validate_role_chain_for_declared_enrollment_target(
+            None,
             &request.binding.author_provider,
             &request.binding.reviewer_provider,
             declared,
@@ -381,10 +383,12 @@ fn validate_enrollment_scope(
                 {
                     // C1 Task 1：显式声明的 target 必须与授权域同载体同身份
                     //（logical 双级齐全且指向同一 logical repository）。
-                    // C5 Task 3：唯一 logical target 确认后做完整角色链静态
-                    // 预检——与 GET automation-target 投影同一 carrier、同一
-                    // 判定，Enable 前拒绝，一次列全全部违规角色。
+                    // C5 Task 3/Task 8：唯一 logical target 确认后做完整
+                    // 角色链同源预检——与 GET automation-target 投影同一
+                    // carrier、同一判定,Enable 前拒绝,一次列全全部违规
+                    // 角色(gateway 接线由 Task 8b 注入 readonly factory)。
                     super::automation_gateway_preflight::validate_role_chain_for_enrollment(
+                        None,
                         &options.author_provider,
                         &options.reviewer_provider,
                         &carrier,
