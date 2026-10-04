@@ -75,6 +75,11 @@ pub(crate) const RESUME: &str = "resume";
 /// 会话级真实阶段超时(真实现场 CLI 慢;可用环境变量放宽)。
 const STAGE_TIMEOUT_ENV: &str = "LC_GATEWAY_E2E_STAGE_TIMEOUT_SECS";
 const DEFAULT_STAGE_TIMEOUT_SECS: u64 = 3600;
+/// 实体会话长阶段(story/design/plan/review:多轮真实交互+长生成)独立
+/// 放宽——r12 现场 story fresh 3600s 仅差数分钟,r13 起语义应答减轮次后
+/// 仍需覆盖真实 CLI 长思考窗口。
+const ENTITY_STAGE_TIMEOUT_ENV: &str = "LC_GATEWAY_E2E_ENTITY_STAGE_TIMEOUT_SECS";
+const DEFAULT_ENTITY_STAGE_TIMEOUT_SECS: u64 = 5400;
 /// 聚合初始化(root recipe 五步四命令)整体超时。
 const INIT_TIMEOUT_ENV: &str = "LC_GATEWAY_E2E_INIT_TIMEOUT_SECS";
 const DEFAULT_INIT_TIMEOUT_SECS: u64 = 7200;
@@ -560,6 +565,7 @@ struct MatrixEnvironment {
     prior_review_session_id: Option<String>,
     evidence_root: PathBuf,
     stage_timeout: Duration,
+    entity_stage_timeout: Duration,
 }
 
 impl MatrixEnvironment {
@@ -657,6 +663,10 @@ impl MatrixEnvironment {
             stage_timeout: Duration::from_secs(env_timeout_secs(
                 STAGE_TIMEOUT_ENV,
                 DEFAULT_STAGE_TIMEOUT_SECS,
+            )),
+            entity_stage_timeout: Duration::from_secs(env_timeout_secs(
+                ENTITY_STAGE_TIMEOUT_ENV,
+                DEFAULT_ENTITY_STAGE_TIMEOUT_SECS,
             )),
         };
 
@@ -1286,7 +1296,7 @@ impl MatrixEnvironment {
         // WS streaming 驱动:hello → start_generation → pump(真实 author
         // caller 链在服务端执行)。
         let drive = self
-            .drive_workspace_session_ws(&session_id, &mut observation, 3)
+            .drive_workspace_session_ws(&session_id, &mut observation, 8, self.entity_stage_timeout)
             .await;
         observation.completed_product_artifact_exists = drive.artifact_confirmed;
         observation.build_cell(self)
@@ -1310,7 +1320,12 @@ impl MatrixEnvironment {
         observation.frozen_digest =
             self.latest_audit_projection_digest(&session_id, &self.provider);
         let revision = self
-            .drive_revision_resume(&session_id, &mut observation, "矩阵 resume:显式修订重驱")
+            .drive_revision_resume(
+                &session_id,
+                &mut observation,
+                "矩阵 resume:显式修订重驱",
+                self.entity_stage_timeout,
+            )
             .await;
         observation.completed_product_artifact_exists = revision.artifact_confirmed;
         // 原生恢复确认:revision 轮审计的 provider_session_id == 请求 id。
@@ -1320,11 +1335,14 @@ impl MatrixEnvironment {
     }
 
     /// revision 重驱公共路径:连接会话 WS → request_revision → pump。
+    /// confirm 轮次 8:真实 resume 链可能带多轮门(lc-root 先例 13 轮),
+    /// 3-4 轮上限会卡真终态;timeout 由调用面传入(实体长阶段独立放宽)。
     async fn drive_revision_resume(
         &self,
         session_id: &str,
         observation: &mut StageObservation,
         description: &str,
+        timeout: Duration,
     ) -> DriveOutcome {
         let mut ws = match self.connect_session_ws(session_id).await {
             Ok(ws) => ws,
@@ -1347,7 +1365,8 @@ impl MatrixEnvironment {
             observation.run_failure = Some(format!("request_revision 发送失败:{error}"));
             return DriveOutcome::default();
         }
-        self.pump_workspace_session(&mut ws, observation, 4).await
+        self.pump_workspace_session(&mut ws, observation, 8, timeout)
+            .await
     }
 
     /// 连接 workspace 会话 WS 并完成 hello。
@@ -1372,6 +1391,7 @@ impl MatrixEnvironment {
         session_id: &str,
         observation: &mut StageObservation,
         confirm_rounds: usize,
+        timeout: Duration,
     ) -> DriveOutcome {
         let mut ws = match self.connect_session_ws(session_id).await {
             Ok(ws) => ws,
@@ -1398,19 +1418,21 @@ impl MatrixEnvironment {
             observation.run_failure = Some(format!("start_generation 发送失败:{error}"));
             return DriveOutcome::default();
         }
-        self.pump_workspace_session(&mut ws, observation, confirm_rounds)
+        self.pump_workspace_session(&mut ws, observation, confirm_rounds, timeout)
             .await
     }
 
     /// 泵送会话事件直至终态;waiting_for_human 时走真实 HTTP confirm 门。
+    /// timeout 由调用面区分:实体长阶段(story/design/plan/review)独立放宽。
     async fn pump_workspace_session(
         &self,
         ws: &mut LiveWs,
         observation: &mut StageObservation,
         confirm_rounds: usize,
+        timeout: Duration,
     ) -> DriveOutcome {
         let mut outcome = DriveOutcome::default();
-        let deadline = tokio::time::Instant::now() + self.stage_timeout;
+        let deadline = tokio::time::Instant::now() + timeout;
         let mut idle_deadline = tokio::time::Instant::now() + IDLE_PING_SECS;
         let mut confirms_left = confirm_rounds;
         loop {
@@ -1437,12 +1459,16 @@ impl MatrixEnvironment {
                 }
                 Err(_) if tokio::time::Instant::now() < deadline => {
                     // 空闲保活:真实 CLI 长思考期间持续 ping,防 server idle 断连。
+                    // r12 复盘:此处不重置 idle_deadline 会退化成 ping 风暴
+                    //(过期 deadline 使 timeout_at 立即 Err,循环狂发 ping,
+                    // r12 证据里 128 pong 同毫秒突发即此因),必须按间隔节流。
                     if ws.send_json(&json!({"type": "ping"})).await.is_err() {
                         observation.push_event(json!({"type": "matrix_ws_closed"}));
                         observation.run_failure =
                             Some("workspace 会话 WS 在终态前关闭".to_string());
                         return outcome;
                     }
+                    idle_deadline = tokio::time::Instant::now() + IDLE_PING_SECS;
                     continue;
                 }
                 Err(_) => {
@@ -1504,32 +1530,20 @@ impl MatrixEnvironment {
                     }
                 }
                 "choice_request" => {
-                    // 真实 choice 门:按首个选项应答,不旁路产品决策面。
-                    // P0 1.3:逐题 answers 为准(旧单题字段会被引擎清空,
-                    // r9 现场 selected=["opt_0"] 被转发为空即此因)。
+                    // 真实 choice 门:读选项文本语义应答,不旁路产品决策面。
+                    // r12 复盘:恒 opt_0 非语义答案触发 provider 反复追问
+                    //(lc-root 先例 story 13 轮确认);且仅答 questions/0 时
+                    // 多题请求其余题悬空同样诱发重问。逐题 answers 为准
+                    //(P0 1.3:旧单题字段会被引擎清空)。
                     if let Some(choice_id) = message.get("id").and_then(Value::as_str) {
-                        let first_option = message
-                            .pointer("/options/0/id")
-                            .or_else(|| message.pointer("/questions/0/options/0/id"))
-                            .and_then(Value::as_str)
-                            .unwrap_or("")
-                            .to_string();
-                        let question_id = message
-                            .pointer("/questions/0/id")
-                            .and_then(Value::as_str)
-                            .unwrap_or("")
-                            .to_string();
+                        let (answers, top_selected) = semantic_choice_answers(&message);
                         let _ = ws
                             .send_json(&json!({
                                 "type": "choice_response",
                                 "id": choice_id,
-                                "selected_option_ids": [first_option],
+                                "selected_option_ids": top_selected,
                                 "free_text": null,
-                                "answers": [{
-                                    "question_id": question_id,
-                                    "selected_option_ids": [first_option],
-                                    "free_text": null
-                                }]
+                                "answers": answers
                             }))
                             .await;
                     }
@@ -1616,7 +1630,7 @@ impl MatrixEnvironment {
                 .collect();
         }
         let drive = self
-            .drive_workspace_session_ws(&session_id, &mut observation, 4)
+            .drive_workspace_session_ws(&session_id, &mut observation, 8, self.entity_stage_timeout)
             .await;
         observation.completed_product_artifact_exists = drive.artifact_confirmed;
         cells.push(observation.build_cell(self));
@@ -1635,6 +1649,7 @@ impl MatrixEnvironment {
                 &session_id,
                 &mut resume,
                 "矩阵 plan resume:显式修订重驱,须原生恢复 native 会话",
+                self.entity_stage_timeout,
             )
             .await;
         resume.completed_product_artifact_exists = drive.artifact_confirmed;
@@ -1979,12 +1994,15 @@ impl MatrixEnvironment {
                     return outcome;
                 }
                 Err(_) if tokio::time::Instant::now() < deadline => {
-                    // 空闲保活:防 coding server idle 断连。
+                    // 空闲保活:防 coding server idle 断连。同 workspace 泵:
+                    // ping 后必须重置 idle_deadline,否则过期 deadline 使
+                    // timeout_at 立即 Err 退化成 ping 风暴。
                     if ws.send_json(&json!({"type": "coding_ping"})).await.is_err() {
                         observation.run_failure =
                             Some("coding 会话 WS 在终态前关闭/错误".to_string());
                         return outcome;
                     }
+                    idle_deadline = tokio::time::Instant::now() + IDLE_PING_SECS;
                     continue;
                 }
                 Err(_) => {
@@ -2105,7 +2123,7 @@ impl MatrixEnvironment {
         observation.workspace_session_id = session_id.clone();
         self.prior_review_session_id = Some(session_id.clone());
         let drive = self
-            .drive_workspace_session_ws(&session_id, &mut observation, 4)
+            .drive_workspace_session_ws(&session_id, &mut observation, 8, self.entity_stage_timeout)
             .await;
         observation.completed_product_artifact_exists = drive.artifact_confirmed;
         cells.push(observation.build_cell(self));
@@ -2124,6 +2142,7 @@ impl MatrixEnvironment {
                 &session_id,
                 &mut resume,
                 "矩阵 review resume:显式修订重驱,须原生恢复 reviewer 会话",
+                self.entity_stage_timeout,
             )
             .await;
         resume.completed_product_artifact_exists = drive.artifact_confirmed;
@@ -2419,13 +2438,19 @@ impl StageObservation {
     fn push_event(&mut self, event: Value) {
         // 事件留证上限:防长流撑爆内存(完整流在服务端 durable 审计)。
         // F3:每事件带 wall-clock ts,落 provider-events.jsonl 供时间线核对。
-        if self.events.len() < 512 {
-            let wrapped = json!({
-                "ts": Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-                "event": event,
-            });
-            self.events.push(wrapped);
+        // r12 复盘:仅按先到 512 截断会丢掉长阶段尾部的关键事件
+        //(choice_request 选项文本/session_state 终态),高频流式块
+        //(stream_chunk/pong)满额后让位给低频关键事件。
+        let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
+        let bulky = matches!(kind, "stream_chunk" | "pong");
+        if self.events.len() >= 512 && bulky {
+            return;
         }
+        let wrapped = json!({
+            "ts": Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            "event": event,
+        });
+        self.events.push(wrapped);
     }
 
     fn record_status(&mut self, status: &str) {
@@ -2880,6 +2905,229 @@ fn provider_matches_record(provider: &ProviderName, record: &ProviderStartAudit)
         .unwrap_or_default();
     // 审计 provider 为 canonical 序列(dash 形态,如 claude-code)。
     record.provider == snake || record.provider == snake.replace('_', "-")
+}
+
+/// choice 语义应答:读选项 label(+description)文本逐题选答。
+///
+/// r12 复盘:恒选首个选项(opt_0)是非语义答案,真实 provider 会把
+/// 「聚合视野要求必须确认」类问题反复重问(lc-root 先例 story 13 轮)。
+/// 选答口径:
+/// 1. 优先聚合/全量口径——「全部/所有/两者/全选」类;
+/// 2. 次选确认/正向口径——「确认/继续/是/同意/按建议」类;
+/// 3. 规避负向项——「取消/否/不/停止/拒绝/跳过」类(仅当无其他选项才落);
+/// 4. 无语义命中时维持首个非负向选项(与旧行为兼容)。
+/// 多选题:有全量项只选全量项;否则全选所有非负向项(聚合视野)。
+fn semantic_choice_answers(message: &Value) -> (Vec<Value>, Vec<String>) {
+    let questions: Vec<&Value> = message
+        .get("questions")
+        .and_then(Value::as_array)
+        .map(|questions| questions.iter().collect())
+        .filter(|questions: &Vec<&Value>| !questions.is_empty())
+        .unwrap_or_default();
+    // 无 questions 数组时按单题顶层形态(options/首题 id)构造伪题,
+    // 与 bridge `effective_questions` 的 default 题语义一致。
+    let answers = if questions.is_empty() {
+        let question_id = message
+            .pointer("/questions/0/id")
+            .and_then(Value::as_str)
+            .unwrap_or("default")
+            .to_string();
+        let options = message
+            .get("options")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let selected = semantic_option_selection(options, false);
+        vec![semantic_answer_entry(&question_id, &selected)]
+    } else {
+        questions
+            .iter()
+            .map(|question| {
+                let question_id = question
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("default")
+                    .to_string();
+                let allow_multiple = question
+                    .get("allow_multiple")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let options = question
+                    .get("options")
+                    .and_then(Value::as_array)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                let selected = semantic_option_selection(options, allow_multiple);
+                semantic_answer_entry(&question_id, &selected)
+            })
+            .collect()
+    };
+    // 顶层 selected_option_ids 以首题答案为准(逐题 answers 才是权威)。
+    let top_selected = answers
+        .first()
+        .and_then(|answer| answer.get("selected_option_ids"))
+        .and_then(Value::as_array)
+        .map(|ids| {
+            ids.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    (answers, top_selected)
+}
+
+fn semantic_answer_entry(question_id: &str, selected: &[String]) -> Value {
+    json!({
+        "question_id": question_id,
+        "selected_option_ids": selected,
+        "free_text": null
+    })
+}
+
+/// 单题选答:返回选项 id 列表(语义口径见 `semantic_choice_answers`)。
+fn semantic_option_selection(options: &[Value], allow_multiple: bool) -> Vec<String> {
+    if options.is_empty() {
+        return Vec::new();
+    }
+    eprintln!(
+        "[lcg-choice] options={}",
+        options
+            .iter()
+            .map(|option| {
+                format!(
+                    "{}|{}|{}",
+                    option.get("id").and_then(Value::as_str).unwrap_or("?"),
+                    option.get("label").and_then(Value::as_str).unwrap_or(""),
+                    option
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" ;; ")
+    );
+    let classified: Vec<(usize, SemanticTier)> = options
+        .iter()
+        .enumerate()
+        .map(|(index, option)| {
+            let text = format!(
+                "{} {}",
+                option.get("label").and_then(Value::as_str).unwrap_or(""),
+                option
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+            );
+            (index, semantic_tier(&text))
+        })
+        .collect();
+    let id_at = |index: usize| -> String {
+        options[index]
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("opt_{index}"))
+    };
+    let selected: Vec<usize> = if let Some((index, _)) = classified
+        .iter()
+        .find(|(_, tier)| *tier == SemanticTier::SelectAll)
+    {
+        vec![*index]
+    } else if let Some((index, _)) = classified
+        .iter()
+        .find(|(_, tier)| *tier == SemanticTier::Confirm)
+    {
+        vec![*index]
+    } else {
+        let non_negative: Vec<usize> = classified
+            .iter()
+            .filter(|(_, tier)| *tier != SemanticTier::Negative)
+            .map(|(index, _)| *index)
+            .collect();
+        if allow_multiple && non_negative.len() >= 2 {
+            non_negative
+        } else {
+            vec![non_negative.first().copied().unwrap_or(0)]
+        }
+    };
+    eprintln!(
+        "[lcg-choice] selected={:?} labels={:?}",
+        selected,
+        selected
+            .iter()
+            .map(|&index| options[index]
+                .get("label")
+                .and_then(Value::as_str)
+                .unwrap_or("?"))
+            .collect::<Vec<_>>()
+    );
+    selected.into_iter().map(id_at).collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SemanticTier {
+    Negative,
+    Neutral,
+    Confirm,
+    SelectAll,
+}
+
+/// 选项文本分级:负向判定优先(「不确认」不得命中确认口径),
+/// 其次全量口径,再次确认口径,其余中性。中文走子串,英文走词边界
+///(防 "small" 命中 "all"、"notify" 命中 "no" 一类误配)。
+fn semantic_tier(text: &str) -> SemanticTier {
+    let normalized = text.trim().to_lowercase();
+    let words: Vec<&str> = normalized
+        .split_whitespace()
+        .map(|word| word.trim_matches(|c: char| !c.is_alphanumeric()))
+        .collect();
+    let negative_cjk = [
+        "取消", "否", "不", "停止", "终止", "拒绝", "跳过", "暂停", "放弃", "无需",
+    ];
+    let select_all_cjk = ["全部", "所有", "两者", "全都", "全选", "都包含", "都涉及"];
+    let confirm_cjk = [
+        "确认",
+        "继续",
+        "确定",
+        "同意",
+        "接受",
+        "按建议",
+        "保持",
+        "默认",
+        "推荐",
+        "执行",
+    ];
+    let negative_words = [
+        "cancel", "stop", "abort", "skip", "discard", "pause", "no", "none", "not",
+    ];
+    let select_all_words = ["all", "both", "everything"];
+    let confirm_words = ["yes", "ok", "confirm", "continue", "approve"];
+    if negative_cjk
+        .iter()
+        .any(|pattern| normalized.contains(pattern))
+        || words.iter().any(|word| negative_words.contains(word))
+    {
+        return SemanticTier::Negative;
+    }
+    if select_all_cjk
+        .iter()
+        .any(|pattern| normalized.contains(pattern))
+        || words.iter().any(|word| select_all_words.contains(word))
+    {
+        return SemanticTier::SelectAll;
+    }
+    if confirm_cjk
+        .iter()
+        .any(|pattern| normalized.contains(pattern))
+        || words.iter().any(|word| confirm_words.contains(word))
+        || normalized == "是"
+        || normalized == "对"
+    {
+        return SemanticTier::Confirm;
+    }
+    SemanticTier::Neutral
 }
 
 /// split_sync prompt:harness 携带的真实拆分指令(结构化输出按
