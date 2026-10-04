@@ -75,6 +75,9 @@ const DEFAULT_STAGE_TIMEOUT_SECS: u64 = 1800;
 /// 聚合初始化(root recipe 五步四命令)整体超时。
 const INIT_TIMEOUT_ENV: &str = "LC_GATEWAY_E2E_INIT_TIMEOUT_SECS";
 const DEFAULT_INIT_TIMEOUT_SECS: u64 = 7200;
+/// provider health 就绪等待(真实 CLI 探测刷新)。
+const HEALTH_TIMEOUT_ENV: &str = "LC_GATEWAY_E2E_HEALTH_TIMEOUT_SECS";
+const DEFAULT_HEALTH_TIMEOUT_SECS: u64 = 300;
 
 const PROJECT_ID: &str = "project_0001";
 
@@ -580,6 +583,12 @@ impl MatrixEnvironment {
         let member_b = aggregate_root.path().join("beta");
         git_repo_at(&member_a);
         git_repo_at(&member_b);
+        // 真实产品语义:成员 checkout 缺 `.claude/rules/language.md` 时
+        // missing_member_rules 任何 phase 阻断(Task 3 收紧)。与 lc-root
+        // 旧 E2E 的真实成员仓形态对齐,git fixture 播种成员规则材料
+        //(环境材料补齐,非产品绕过;root 侧规则由 #8 发布链产出)。
+        seed_member_rule_material(&member_a, "alpha");
+        seed_member_rule_material(&member_b, "beta");
         commit(
             &member_a,
             "pub fn cross_repo_greeting() -> &'static str { \"alpha\" }",
@@ -640,6 +649,10 @@ impl MatrixEnvironment {
             )),
         };
 
+        // 2.5) provider health 就绪等待:new_real 的 ProviderHealthService
+        // 需完成探测刷新,否则 spawn 复验报 provider_gateway_unavailable
+        //(health state degraded)。有界超时,超时=BLOCKED 真实报告。
+        env.wait_for_provider_health().await?;
         // 3) 产品创建 + 真实登记(与 LcOperationsFixture 同一 HTTP 形态)。
         env.create_project_and_lc().await?;
         env.register_members().await?;
@@ -653,6 +666,44 @@ impl MatrixEnvironment {
         env.resolve_member_target()?;
         env.create_issue().await?;
         Ok(env)
+    }
+
+    /// 轮询真实 provider health 直到所选 provider available(先触发一次
+    /// 主动 recheck 刷新,再读 status;有界超时,超时按 BLOCKED 报告)。
+    async fn wait_for_provider_health(&mut self) -> Result<(), LiveMatrixFailure> {
+        let deadline = tokio::time::Instant::now()
+            + Duration::from_secs(env_timeout_secs(
+                HEALTH_TIMEOUT_ENV,
+                DEFAULT_HEALTH_TIMEOUT_SECS,
+            ));
+        loop {
+            // 主动刷新一次(探测真实 CLI --version),随后读状态。
+            let _ =
+                request_json(&self.app, Method::POST, "/api/providers/recheck", json!({})).await;
+            let (status, body) =
+                request_json(&self.app, Method::GET, "/api/providers/status", json!({})).await;
+            let provider_ready = status.is_success()
+                && body["state_status"] == "ready"
+                && body["providers"].as_array().is_some_and(|entries| {
+                    entries.iter().any(|entry| {
+                        entry["provider"] == self.provider_wire && entry["available"] == true
+                    })
+                });
+            if provider_ready {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(matrix_failure(
+                    "provider_health_not_ready",
+                    format!(
+                        "provider health 未就绪({}):{} (环境不可运行须报告 BLOCKED)",
+                        self.provider_wire, body
+                    ),
+                    None,
+                ));
+            }
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
     }
 
     async fn create_project_and_lc(&mut self) -> Result<(), LiveMatrixFailure> {
@@ -2261,6 +2312,21 @@ fn expect_ok(
             stage,
         ))
     }
+}
+
+/// 成员仓规则材料播种:`.claude/rules/language.md`(合法 UTF-8;随
+/// `git add .` 进入 fixture 首次提交)。真实 LC 成员仓自带该文件,
+/// admission 的 missing_member_rules 门任何 phase 均阻断。
+fn seed_member_rule_material(path: &Path, member: &str) {
+    let rule_dir = path.join(".claude/rules");
+    std::fs::create_dir_all(&rule_dir).expect("create member rule dir");
+    std::fs::write(
+        rule_dir.join("language.md"),
+        format!(
+            "# {member} 语言规则\n\n本成员仓为 Rust 仓:公开接口附英文文档注释;\n变更须保持格式化与编译通过;禁止引入未审计依赖。\n"
+        ),
+    )
+    .expect("write member language rule");
 }
 
 fn git_repo_at(path: &Path) {
