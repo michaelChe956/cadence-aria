@@ -878,7 +878,44 @@ impl MatrixEnvironment {
     }
 
     /// 固定 Claude recipe 的真实聚合初始化(产品确认走真实 HTTP gate)。
+    /// 真实聚合初始化(固定 Claude recipe):对概率性 receipt Rejected
+    /// (现场 /rule-config 审计拒绝两轮复现,产品标 retryable)按新产品
+    /// operation 有界重试——每轮失败先抄录该轮 receipts 到
+    /// diagnostics/attempt-N/,拒绝轮证据全留;最终失败才保留 tempdir。
     async fn run_real_aggregate_initialization(&mut self) -> Result<(), LiveMatrixFailure> {
+        const MAX_ATTEMPTS: usize = 3;
+        let mut last_failure = None;
+        for attempt in 1..=MAX_ATTEMPTS {
+            match self.run_initialization_once(attempt).await {
+                Ok(()) => return Ok(()),
+                Err(failure) => {
+                    // 抄录该轮 receipts(不 keep tempdir,可继续重试)。
+                    let diagnostics_dir = self.evidence_root.join("diagnostics");
+                    let _ = std::fs::create_dir_all(&diagnostics_dir);
+                    let receipts_src = self
+                        .app_paths
+                        .logical_codebases_root(PROJECT_ID)
+                        .join(&self.lc_id)
+                        .join("aggregate-recipe-receipts");
+                    let _ = copy_tree(
+                        &receipts_src,
+                        &diagnostics_dir.join(format!("attempt-{attempt}")),
+                    );
+                    let retryable =
+                        failure.reason_code == "initialization_failed" && attempt < MAX_ATTEMPTS;
+                    if !retryable {
+                        last_failure = Some(failure);
+                        break;
+                    }
+                    last_failure = Some(failure);
+                }
+            }
+        }
+        let failure = last_failure.expect("initialization attempts exhausted");
+        Err(self.fail_with_diagnostics(failure, None).await)
+    }
+
+    async fn run_initialization_once(&mut self, attempt: usize) -> Result<(), LiveMatrixFailure> {
         let (status, body) = request_json(
             &self.app,
             Method::POST,
@@ -886,7 +923,7 @@ impl MatrixEnvironment {
                 "/api/projects/{PROJECT_ID}/logical-codebases/{}/initializations",
                 self.lc_id
             ),
-            json!({"idempotency_key": format!("lcg-matrix-{}", self.lc_id)}),
+            json!({"idempotency_key": format!("lcg-matrix-{}-a{attempt}", self.lc_id)}),
         )
         .await;
         if status != StatusCode::ACCEPTED {
@@ -895,7 +932,7 @@ impl MatrixEnvironment {
                 format!("初始化启动被拒({status}):{body}"),
                 None,
             );
-            return Err(self.fail_with_diagnostics(failure, None).await);
+            return Err(failure);
         }
         let Some(operation_id) = body["operation_id"].as_str() else {
             let failure = matrix_failure(
@@ -903,7 +940,7 @@ impl MatrixEnvironment {
                 format!("初始化响应缺 operation_id:{body}"),
                 None,
             );
-            return Err(self.fail_with_diagnostics(failure, None).await);
+            return Err(failure);
         };
         let operation_id = operation_id.to_string();
         let init_timeout = Duration::from_secs(env_timeout_secs(
@@ -917,32 +954,22 @@ impl MatrixEnvironment {
         let deadline = tokio::time::Instant::now() + init_timeout;
         loop {
             if tokio::time::Instant::now() >= deadline {
-                let failure = matrix_failure(
+                return Err(matrix_failure(
                     "initialization_timeout",
                     format!("聚合初始化超时({init_timeout:?});环境不可运行须报告 BLOCKED"),
                     None,
-                );
-                return Err(self
-                    .fail_with_diagnostics(failure, Some(&operation_id))
-                    .await);
+                ));
             }
             let (status, snapshot) = request_json(&self.app, Method::GET, &uri, json!({})).await;
-            if let Err(failure) = expect_ok(status, &snapshot, "轮询初始化", None) {
-                return Err(self
-                    .fail_with_diagnostics(failure, Some(&operation_id))
-                    .await);
-            }
+            expect_ok(status, &snapshot, "轮询初始化", None)?;
             match snapshot["status"].as_str() {
                 Some("completed") => return Ok(()),
                 Some("failed") | Some("cancelled") => {
-                    let failure = matrix_failure(
+                    return Err(matrix_failure(
                         "initialization_failed",
                         format!("聚合初始化 {snapshot}"),
                         None,
-                    );
-                    return Err(self
-                        .fail_with_diagnostics(failure, Some(&operation_id))
-                        .await);
+                    ));
                 }
                 _ => tokio::time::sleep(Duration::from_millis(500)).await,
             }
