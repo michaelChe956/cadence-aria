@@ -62,6 +62,13 @@ fn complete_baseline_cell(
         ],
         capability_state: "confirmed".to_string(),
         denied_reason: None,
+        provider_pid: Some("48017".to_string()),
+        pid_unavailable_reason: None,
+        provider_spawn_count: 0,
+        provider_events: vec![serde_json::json!({
+            "ts": "2026-10-04T00:00:00.000Z",
+            "event": {"type": "tool_call", "tool": "Read", "native_session_id": "native-session-fixture"}
+        })],
     }
 }
 
@@ -237,7 +244,7 @@ fn lcg_t10_evidence_requires_exact_version_wire_and_native_confirmation() {
     );
 
     // ---- 阶段枚举面:五阶段之外不是合法格 ----
-    let mut bad_stage = baseline;
+    let mut bad_stage = baseline.clone();
     bad_stage.stage = "deploy".to_string();
     expect_rejected(
         bad_stage,
@@ -245,6 +252,55 @@ fn lcg_t10_evidence_requires_exact_version_wire_and_native_confirmation() {
         &canonical_root,
         &member_worktree,
         "stage 不在五阶段枚举内",
+    );
+
+    // ---- F3:PID 可追溯面——缺 PID 且无不可达说明必须拒绝;
+    // 有明确不可达说明(streaming 入口无 stream log 目录)则如实放行。----
+    let mut missing_pid = baseline.clone();
+    missing_pid.provider_pid = None;
+    missing_pid.pid_unavailable_reason = None;
+    expect_rejected(
+        missing_pid,
+        &provider,
+        &canonical_root,
+        &member_worktree,
+        "缺 provider PID 且无不可达说明",
+    );
+    let mut pid_unavailable = baseline.clone();
+    pid_unavailable.provider_pid = None;
+    pid_unavailable.pid_unavailable_reason =
+        Some("该入口未由生产路径提供 provider stream log 目录".to_string());
+    assert!(
+        pid_unavailable
+            .validate_against(&provider, &canonical_root, &member_worktree)
+            .is_ok(),
+        "PID 不可达但已如实标注说明的格必须通过(时间线以事件 ts+audit seq 追溯)"
+    );
+
+    // ---- F1:事件载荷面——provider-events.jsonl 无可核对事件必须拒绝。----
+    let mut missing_events = baseline.clone();
+    missing_events.provider_events = Vec::new();
+    expect_rejected(
+        missing_events,
+        &provider,
+        &canonical_root,
+        &member_worktree,
+        "缺事件载荷(provider-events.jsonl 无可核对事件)",
+    );
+
+    // ---- F5:split_sync resume 零 spawn 面——计数>0 即语义漂移,拒绝。----
+    let mut split_resume_spawned = baseline.clone();
+    split_resume_spawned.entrypoint = ENTRYPOINT_SPLIT_SYNC.to_string();
+    split_resume_spawned.fresh_or_resume = RESUME.to_string();
+    split_resume_spawned.requested_resume_id = Some("native-session-fixture".to_string());
+    split_resume_spawned.native_resume_confirmed_id = Some("native-session-fixture".to_string());
+    split_resume_spawned.provider_spawn_count = 2;
+    expect_rejected(
+        split_resume_spawned,
+        &provider,
+        &canonical_root,
+        &member_worktree,
+        "split_sync resume 必须零 spawn",
     );
 }
 

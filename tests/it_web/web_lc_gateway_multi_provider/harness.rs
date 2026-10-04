@@ -28,8 +28,11 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use cadence_aria::cross_cutting::tool_policy_audit::{DurableToolPolicyEvent, ProviderStartAudit};
 use cadence_aria::product::app_paths::ProductAppPaths;
+use cadence_aria::product::coding_attempt_store::CodingAttemptStore;
 use cadence_aria::product::lifecycle_store::LifecycleStore;
-use cadence_aria::product::logical_codebase::policy::{PolicyTarget, SessionPolicyAction};
+use cadence_aria::product::logical_codebase::policy::{
+    AggregatePolicyArtifactStore, PolicyTarget, SessionPolicyAction,
+};
 use cadence_aria::product::logical_codebase::provider_gateway::{
     ProviderLaunchAuditContext, ProviderRef, SessionLaunchRequest,
 };
@@ -41,6 +44,7 @@ use cadence_aria::web::events::EventHub;
 use cadence_aria::web::gateway_factory::LogicalCodebaseGatewayFactory;
 use cadence_aria::web::runtime::WebRuntime;
 use cadence_aria::web::state::WebAppState;
+use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -108,6 +112,16 @@ pub(crate) struct EvidenceCell {
     pub argv: Vec<String>,
     pub capability_state: String,
     pub denied_reason: Option<String>,
+    // ---- F3/F5:PID/时间线/spawn 计数(485 行可追溯要素) ----
+    /// provider 子进程 PID(取自 stream log 文件名 `{program}-{pid}-{stream}.log`)。
+    /// 入口未提供 stream log 目录时为 `None`,且必须携带
+    /// `pid_unavailable_reason`(如实标注不可达,不伪造)。
+    pub provider_pid: Option<String>,
+    pub pid_unavailable_reason: Option<String>,
+    /// 本格观测到的 provider spawn 计数(split_sync resume 恒 0)。
+    pub provider_spawn_count: u64,
+    /// 带 ts 封包的事件载荷(provider-events.jsonl 全量来源)。
+    pub provider_events: Vec<Value>,
 }
 
 impl EvidenceCell {
@@ -202,6 +216,31 @@ impl EvidenceCell {
         if !self.run_ref_is_unique_within_entrypoint {
             return Err("run_ref 在 entrypoint 内重复".to_string());
         }
+        // F3:PID 可追溯——要么有真实 PID,要么有明确的不可达说明;两者皆缺
+        // 即结构不完整(不以缺记录放行)。
+        if self.provider_pid.is_none()
+            && self
+                .pid_unavailable_reason
+                .as_deref()
+                .is_none_or(str::is_empty)
+        {
+            return Err("缺 provider PID 且无不可达说明(时间线不可追溯)".to_string());
+        }
+        // F1:事件载荷必须落盘可核对(approval_and_tool_events 的磁盘证据)。
+        if self.provider_events.is_empty() {
+            return Err("缺事件载荷(provider-events.jsonl 无可核对事件)".to_string());
+        }
+        // F5:split_sync 无 native session contract → resume 恒零 spawn;
+        // 计数>0 即语义漂移,拒绝。
+        if self.entrypoint == ENTRYPOINT_SPLIT_SYNC
+            && self.fresh_or_resume == RESUME
+            && self.provider_spawn_count > 0
+        {
+            return Err(format!(
+                "split_sync resume 必须零 spawn,实测 {}",
+                self.provider_spawn_count
+            ));
+        }
         Ok(())
     }
 
@@ -233,6 +272,27 @@ impl EvidenceCell {
             "argv": self.argv,
             "capability_state": self.capability_state,
             "denied_reason": self.denied_reason,
+            "provider_pid": self.provider_pid,
+            "pid_unavailable_reason": self.pid_unavailable_reason,
+            "provider_spawn_count": self.provider_spawn_count,
+            "timeline": self.timeline_summary(),
+        })
+    }
+
+    /// F3:时间线摘要(首/末事件 ts;provider-events.jsonl 为全量)。
+    fn timeline_summary(&self) -> Value {
+        let first = self
+            .provider_events
+            .first()
+            .and_then(|event| event.get("ts").and_then(Value::as_str).map(str::to_string));
+        let last = self
+            .provider_events
+            .last()
+            .and_then(|event| event.get("ts").and_then(Value::as_str).map(str::to_string));
+        json!({
+            "first_event_ts": first,
+            "last_event_ts": last,
+            "event_count": self.provider_events.len(),
         })
     }
 }
@@ -406,23 +466,35 @@ impl LiveLcGatewayHarness {
             )
         })?;
         let mut rejections = Vec::new();
-        for cell in &cells {
-            let verdict =
-                cell.validate_against(&env.provider, &env.canonical_root, &env.member_worktree);
+        for index in 0..cells.len() {
+            let verdict = cells[index].validate_against(
+                &env.provider,
+                &env.canonical_root,
+                &env.member_worktree,
+            );
             if let Err(reason) = verdict {
                 rejections.push(EvidenceCellRejection {
-                    stage: cell.stage.clone(),
-                    entrypoint: cell.entrypoint.clone(),
-                    fresh_or_resume: cell.fresh_or_resume.clone(),
+                    stage: cells[index].stage.clone(),
+                    entrypoint: cells[index].entrypoint.clone(),
+                    fresh_or_resume: cells[index].fresh_or_resume.clone(),
                     reason: reason.clone(),
                 });
                 // 结构不完整的 Confirmed 格降级为 denied(不以删格缩小验收)。
-                let mut demoted = cell.clone();
-                demoted.capability_state = "denied".to_string();
-                demoted.denied_reason = demoted.denied_reason.or_else(|| Some(reason));
-                env.write_cell_evidence(&demoted);
-            } else {
-                env.write_cell_evidence(cell);
+                cells[index].capability_state = "denied".to_string();
+                cells[index].denied_reason =
+                    cells[index].denied_reason.take().or_else(|| Some(reason));
+            }
+            // F7:证据落盘失败不静默——该格降级 denied(reason=证据落盘失败),
+            // 不出现绿格+空证据目录。
+            if let Err(io_reason) = env.write_cell_evidence(&cells[index]) {
+                rejections.push(EvidenceCellRejection {
+                    stage: cells[index].stage.clone(),
+                    entrypoint: cells[index].entrypoint.clone(),
+                    fresh_or_resume: cells[index].fresh_or_resume.clone(),
+                    reason: io_reason.clone(),
+                });
+                cells[index].capability_state = "denied".to_string();
+                cells[index].denied_reason = Some(io_reason);
             }
         }
 
@@ -922,6 +994,7 @@ impl MatrixEnvironment {
             Ok(ws) => ws,
             Err(error) => {
                 observation.push_event(json!({"type": "matrix_error", "message": error}));
+                observation.run_failure = Some(format!("resume WS 连接失败:{error}"));
                 return DriveOutcome::default();
             }
         };
@@ -935,6 +1008,7 @@ impl MatrixEnvironment {
         });
         if let Err(error) = ws.send_json(&revision).await {
             observation.push_event(json!({"type": "matrix_error", "message": error}));
+            observation.run_failure = Some(format!("request_revision 发送失败:{error}"));
             return DriveOutcome::default();
         }
         self.pump_workspace_session(&mut ws, observation, 4).await
@@ -967,6 +1041,7 @@ impl MatrixEnvironment {
             Ok(ws) => ws,
             Err(error) => {
                 observation.push_event(json!({"type": "matrix_error", "message": error}));
+                observation.run_failure = Some(format!("workspace 会话 WS 连接失败:{error}"));
                 return DriveOutcome::default();
             }
         };
@@ -984,6 +1059,7 @@ impl MatrixEnvironment {
         });
         if let Err(error) = ws.send_json(&start).await {
             observation.push_event(json!({"type": "matrix_error", "message": error}));
+            observation.run_failure = Some(format!("start_generation 发送失败:{error}"));
             return DriveOutcome::default();
         }
         self.pump_workspace_session(&mut ws, observation, confirm_rounds)
@@ -1010,14 +1086,18 @@ impl MatrixEnvironment {
                 Ok(Ok(Some(value))) => value,
                 Ok(Ok(None)) => {
                     observation.push_event(json!({"type": "matrix_ws_closed"}));
+                    // F5:驱动失败原因必须落在格上,不得被 resume 兜底文案覆盖。
+                    observation.run_failure = Some("workspace 会话 WS 在终态前关闭".to_string());
                     return outcome;
                 }
                 Ok(Err(error)) => {
                     observation.push_event(json!({"type": "matrix_ws_error", "message": error}));
+                    observation.run_failure = Some(format!("workspace 会话 WS 错误:{error}"));
                     return outcome;
                 }
                 Err(_) => {
                     observation.push_event(json!({"type": "matrix_stage_timeout"}));
+                    observation.run_failure = Some("workspace 会话阶段超时未达终态".to_string());
                     return outcome;
                 }
             };
@@ -1027,8 +1107,8 @@ impl MatrixEnvironment {
                 .unwrap_or_default()
                 .to_string();
             observation.push_event(message.clone());
-            // tool 事件计数:真实 provider 输出流里的 tool/task 载荷。
-            if message.to_string().to_ascii_lowercase().contains("tool") {
+            // F6:tool 事件结构化计数(type/字段精确匹配,非全文子串)。
+            if is_tool_event(&message) {
                 observation.tool_events += 1;
             }
             match kind.as_str() {
@@ -1285,13 +1365,23 @@ impl MatrixEnvironment {
                     return cells;
                 }
             };
+        // F3:split_sync 自备绝对 stream log 目录——真实子进程 PID 从
+        // `{program}-{pid}-{stream}.log` 文件名解析(时间线可追溯)。
+        let split_log_dir = self
+            .evidence_root
+            .join(stage)
+            .join(entrypoint.replace('/', "-"))
+            .join(FRESH)
+            .join("stream-logs");
+        let _ = std::fs::create_dir_all(&split_log_dir);
+        let split_log_dir = split_log_dir.canonicalize().unwrap_or(split_log_dir);
         let adapter_input = AdapterInput {
             provider_type: provider_type_for(&self.provider),
             role: AdapterRole::WorkItemSplitter,
             // cwd=canonical root(gateway 冻结);worktree_path=target 成员路径。
             working_directory: Some(gateway.authority_root().to_path_buf()),
             worktree_path: Some(self.member_worktree.to_string_lossy().into_owned()),
-            provider_stream_log_dir: None,
+            provider_stream_log_dir: Some(split_log_dir.to_string_lossy().into_owned()),
             prompt: split_sync_prompt(),
             context_files: Vec::new(),
             output_schema: work_item_split_output_schema(),
@@ -1359,6 +1449,8 @@ impl MatrixEnvironment {
         }
         let after_starts = self.count_session_provider_starts(&workspace_session_id);
         fresh.observed_spawn_count = after_starts.saturating_sub(before_starts);
+        // F3:split_sync PID 来自自备 stream log 目录的真实文件名。
+        fresh.observed_pid = scan_stream_log_pid(&split_log_dir);
         cells.push(fresh.build_cell(self));
 
         // resume:sync split 无 native session contract → resume=Unknown、
@@ -1439,6 +1531,8 @@ impl MatrixEnvironment {
             .drive_coding_attempt_ws(&attempt_id, &mut observation)
             .await;
         observation.completed_product_artifact_exists = drive.artifact_confirmed;
+        // F3:PID 取自该 attempt 的 provider stream log 目录(生产路径)。
+        observation.observed_pid = self.scan_attempt_stream_log_pid(&attempt_id);
         cells.push(observation.build_cell(self));
 
         // resume:重连 coding WS 再次驱动(原生恢复由生产 resume 语义裁决,
@@ -1451,6 +1545,7 @@ impl MatrixEnvironment {
         resume.requested_resume_id = self.latest_audit_native_id(&attempt_id, &self.provider, None);
         let drive = self.drive_coding_attempt_ws(&attempt_id, &mut resume).await;
         resume.completed_product_artifact_exists = drive.artifact_confirmed;
+        resume.observed_pid = self.scan_attempt_stream_log_pid(&attempt_id);
         resume.native_confirmed_id = self.latest_audit_native_id(&attempt_id, &self.provider, None);
         cells.push(resume.build_cell(self));
         cells
@@ -1478,10 +1573,12 @@ impl MatrixEnvironment {
             .await
         {
             observation.push_event(json!({"type": "matrix_error", "message": error}));
+            observation.run_failure = Some(format!("coding_hello 发送失败:{error}"));
             return DriveOutcome::default();
         }
         if let Err(error) = ws.send_json(&json!({"type": "start_coding"})).await {
             observation.push_event(json!({"type": "matrix_error", "message": error}));
+            observation.run_failure = Some(format!("start_coding 发送失败:{error}"));
             return DriveOutcome::default();
         }
         let mut outcome = DriveOutcome::default();
@@ -1494,9 +1591,13 @@ impl MatrixEnvironment {
             let message = tokio::time::timeout_at(deadline, ws.recv_json()).await;
             let message = match message {
                 Ok(Ok(Some(value))) => value,
-                Ok(Ok(None)) | Ok(Err(_)) => return outcome,
+                Ok(Ok(None)) | Ok(Err(_)) => {
+                    observation.run_failure = Some("coding 会话 WS 在终态前关闭/错误".to_string());
+                    return outcome;
+                }
                 Err(_) => {
                     observation.push_event(json!({"type": "matrix_stage_timeout"}));
+                    observation.run_failure = Some("coding 阶段超时未达终态".to_string());
                     return outcome;
                 }
             };
@@ -1506,7 +1607,8 @@ impl MatrixEnvironment {
                 .unwrap_or_default()
                 .to_string();
             observation.push_event(message.clone());
-            if message.to_string().to_ascii_lowercase().contains("tool") {
+            // F6:tool 事件结构化计数。
+            if is_tool_event(&message) {
                 observation.tool_events += 1;
             }
             match kind.as_str() {
@@ -1536,8 +1638,11 @@ impl MatrixEnvironment {
                     if let Some(status) = message.get("status").and_then(Value::as_str) {
                         observation.record_status(status);
                         match status {
+                            // F2:waiting_for_human 即阶段门就绪——确认成功并
+                            // 立即返回,不再烧满 stage_timeout。
                             "waiting_for_human" => {
                                 outcome.artifact_confirmed = true;
+                                return outcome;
                             }
                             "completed" | "confirmed" => {
                                 outcome.artifact_confirmed = true;
@@ -1545,6 +1650,8 @@ impl MatrixEnvironment {
                             }
                             "failed" | "aborted" => {
                                 observation.terminal_status = Some(status.to_string());
+                                observation.run_failure =
+                                    Some(format!("coding attempt 终态 {status}"));
                                 return outcome;
                             }
                             _ => {}
@@ -1655,6 +1762,16 @@ impl MatrixEnvironment {
             .map(|(_, record)| record.provider_session_id)
     }
 
+    /// F3:从该 coding attempt 的 provider stream log 目录解析真实子进程 PID。
+    fn scan_attempt_stream_log_pid(&self, attempt_id: &str) -> Option<String> {
+        let directory = CodingAttemptStore::new(self.app_paths.clone()).provider_stream_log_root(
+            PROJECT_ID,
+            &self.issue_id,
+            attempt_id,
+        );
+        scan_stream_log_pid(&directory)
+    }
+
     fn count_session_provider_starts(&self, workspace_session_id: &str) -> usize {
         self.scan_session_audits(workspace_session_id)
             .into_iter()
@@ -1682,96 +1799,152 @@ impl MatrixEnvironment {
         found
     }
 
-    fn write_cell_evidence(&self, cell: &EvidenceCell) {
+    /// 逐格证据落盘(485 行形态全要素)。F7:IO 失败不静默——返回 Err 由
+    /// 上层把该格降级 denied(reason=证据落盘失败),不出现绿格+空目录。
+    fn write_cell_evidence(&self, cell: &EvidenceCell) -> Result<(), String> {
         let entrypoint_dir = cell.entrypoint.replace('/', "-");
         let cell_dir = self
             .evidence_root
             .join(&cell.stage)
             .join(entrypoint_dir)
             .join(&cell.fresh_or_resume);
-        if std::fs::create_dir_all(&cell_dir).is_err() {
-            return;
-        }
-        // cell.json:键 + 断言组字段 + 全要素(敏感项不落盘)。
-        let _ = std::fs::write(
-            cell_dir.join("cell.json"),
+        let write = |name: &str, bytes: Vec<u8>| -> Result<(), String> {
+            std::fs::write(cell_dir.join(name), bytes)
+                .map_err(|error| format!("证据落盘失败 {}/{}: {error}", cell_dir.display(), name))
+        };
+        std::fs::create_dir_all(&cell_dir)
+            .map_err(|error| format!("证据目录创建失败 {}: {error}", cell_dir.display()))?;
+        // cell.json:键 + 断言组字段 + 全要素 + 时间线摘要(敏感项不落盘)。
+        write(
+            "cell.json",
             serde_json::to_vec_pretty(&cell.to_cell_json()).unwrap_or_default(),
-        );
-        // provider-events.jsonl:真实 argv(审计)与 wire 形态(脱敏由生产
-        // 审计形态保证;此处不注入政策、不伪造事件)。
+        )?;
+        // F1:provider-events.jsonl 落盘全事件——provider_start 首行(真实
+        // argv/wire 形态)之后逐事件追加(ts 封包;approval/tool/关键帧
+        // 磁盘可核对,不注入政策、不伪造事件)。
         let mut events = String::new();
-        events.push_str(
-            &serde_json::to_string(&json!({
-                "event": "provider_start_argv",
+        let provider_start = json!({
+            "ts": Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            "event": {
+                "kind": "provider_start_argv",
                 "argv": cell.argv,
                 "wire_dialect": cell.wire_dialect,
-                "native_session_id": cell.native_session_id
-            }))
-            .unwrap_or_default(),
-        );
+                "native_session_id": cell.native_session_id,
+                "provider_pid": cell.provider_pid,
+            }
+        });
+        events.push_str(&serde_json::to_string(&provider_start).unwrap_or_default());
         events.push('\n');
-        let _ = std::fs::write(cell_dir.join("provider-events.jsonl"), events);
-        // frozen-facts.json:canonical cwd/target/git identity 与 policy 引用。
-        let _ = std::fs::write(
-            cell_dir.join("frozen-facts.json"),
+        for event in &cell.provider_events {
+            events.push_str(&serde_json::to_string(event).unwrap_or_default());
+            events.push('\n');
+        }
+        write("provider-events.jsonl", events.into_bytes())?;
+        // F4:frozen-facts.json 补齐 485 全要素——#8 最终 policy artifact 从
+        // durable store 真实读取(policy_id/revision/raw-body digest+字节数);
+        // config artifact ref 如实标注生产约定常量(非独立真实摘要,不冒充);
+        // trust/bundle 不可达项显式标 missing,不以 null 混同缺记录。
+        let artifact =
+            AggregatePolicyArtifactStore::for_lc(self.app_paths.clone(), self.lc_id.clone())
+                .get(PROJECT_ID)
+                .ok()
+                .flatten();
+        let raw_body = artifact.as_ref().map(|value| {
+            let digest = Sha256::digest(value.policy_text.as_bytes());
+            let raw_body_sha256: String =
+                digest.iter().map(|byte| format!("{byte:02x}")).collect();
+            json!({
+                "policy_id": value.policy_id,
+                "revision": value.revision,
+                "digest": value.digest,
+                "raw_body_bytes": value.policy_text.len(),
+                "raw_body_sha256": raw_body_sha256,
+            })
+        })
+            .unwrap_or_else(|| {
+                json!({"missing": "#8 最终 policy artifact 未在 durable store 解析到(该格不可凭此 Confirmed)"})
+            });
+        write(
+            "frozen-facts.json",
             serde_json::to_vec_pretty(&json!({
                 "canonical_cwd": self.canonical_root,
                 "target": self.member_worktree,
                 "target_git_head": git_head(&self.member_worktree),
                 "provider": cell.provider,
                 "exact_version": cell.exact_version,
-                "config_artifact_ref": "sha256:managed-config-artifact",
-                "capability_projection_digest": cell.frozen_projection_digest,
-                "session_projection_digest": cell.audit_projection_digest,
-                "policy_note": "#8 最终政策正文/artifact/receipt 由真实聚合初始化发布,gateway 只消费最终 artifact.policy_text"
+                "policy": raw_body,
+                "config_artifact_ref": {
+                    "value": "sha256:managed-config-artifact",
+                    "provenance": "生产约定常量(engine.rs 同款字面量);托管 config artifact 存储未落地,非独立真实摘要,不冒充",
+                },
+                "capability_row": {
+                    "capability_projection_digest": cell.frozen_projection_digest,
+                    "session_projection_digest": cell.audit_projection_digest,
+                    "spawn_count": cell.provider_spawn_count,
+                },
+                "projection": {
+                    "gateway_dialect": cell.gateway_dialect,
+                    "wire_dialect": cell.wire_dialect,
+                    "action": cell.action,
+                    "role": cell.role,
+                },
+                "trust": {
+                    "missing": "trust home 状态不在本 harness 读取面;由生产 trust 审计链(#8/trust store)核对",
+                },
+                "mcp_bundle_digest": {
+                    "missing": "Aria 注入 bundle digest 逐会话冻结于服务端 audit;此处不复制(不适用格记 missing)",
+                },
             }))
             .unwrap_or_default(),
-        );
+        )?;
         // pre/post snapshot:成员 worktree git 状态(D4 baseline 引用同源)。
-        let _ = std::fs::write(
-            cell_dir.join("pre-snapshot.json"),
+        write(
+            "pre-snapshot.json",
             serde_json::to_vec_pretty(&git_snapshot(&self.member_worktree)).unwrap_or_default(),
-        );
-        let _ = std::fs::write(
-            cell_dir.join("post-snapshot.json"),
+        )?;
+        write(
+            "post-snapshot.json",
             serde_json::to_vec_pretty(&git_snapshot(&self.member_worktree)).unwrap_or_default(),
-        );
+        )?;
         // boundary-attempts.jsonl:本格观测到的越界写尝试(正/负向探针归
         // Task 11 boundary_matrix;此处只留真实流观测位)。
-        let _ = std::fs::write(cell_dir.join("boundary-attempts.jsonl"), String::new());
-        // result.json:格子结论。
-        let _ = std::fs::write(
-            cell_dir.join("result.json"),
+        write("boundary-attempts.jsonl", Vec::new())?;
+        // result.json:格子结论 + spawn 计数 + 时间线摘要。
+        write(
+            "result.json",
             serde_json::to_vec_pretty(&json!({
                 "capability_state": cell.capability_state,
                 "denied_reason": cell.denied_reason,
                 "run_ref": cell.run_ref,
-                "workspace_session_id": cell.workspace_session_id
+                "workspace_session_id": cell.workspace_session_id,
+                "provider_pid": cell.provider_pid,
+                "pid_unavailable_reason": cell.pid_unavailable_reason,
+                "provider_spawn_count": cell.provider_spawn_count,
+                "timeline": cell.timeline_summary(),
             }))
             .unwrap_or_default(),
-        );
+        )?;
         // sha256 清单(排除自身)。
         let mut names: Vec<String> = std::fs::read_dir(&cell_dir)
-            .map(|entries| {
-                entries
-                    .flatten()
-                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
-                    .collect()
-            })
-            .unwrap_or_default();
+            .map_err(|error| format!("证据目录读取失败 {}: {error}", cell_dir.display()))?
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
         names.sort();
         let mut manifest = String::new();
         for name in names {
             if name == "manifest.sha256" {
                 continue;
             }
-            if let Ok(bytes) = std::fs::read(cell_dir.join(&name)) {
-                let digest = Sha256::digest(&bytes);
-                let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
-                manifest.push_str(&format!("{hex}  {name}\n"));
-            }
+            let bytes = std::fs::read(cell_dir.join(&name)).map_err(|error| {
+                format!("清单读取失败 {}/{}: {error}", cell_dir.display(), name)
+            })?;
+            let digest = Sha256::digest(&bytes);
+            let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+            manifest.push_str(&format!("{hex}  {name}\n"));
         }
-        let _ = std::fs::write(cell_dir.join("manifest.sha256"), manifest);
+        write("manifest.sha256", manifest.into_bytes())?;
+        Ok(())
     }
 }
 
@@ -1788,6 +1961,7 @@ struct StageObservation {
     role_run_seq: Option<u64>,
     role: String,
     action: String,
+    /// 带 ts 封包的事件载荷(provider-events.jsonl 全量来源;512 上限)。
     events: Vec<Value>,
     statuses: Vec<String>,
     terminal_status: Option<String>,
@@ -1799,6 +1973,8 @@ struct StageObservation {
     native_confirmed_id: Option<String>,
     completed_product_artifact_exists: bool,
     observed_spawn_count: usize,
+    /// F3:驱动侧解析到的 provider 子进程 PID(stream log 文件名)。
+    observed_pid: Option<String>,
 }
 
 impl StageObservation {
@@ -1823,13 +1999,19 @@ impl StageObservation {
             native_confirmed_id: None,
             completed_product_artifact_exists: false,
             observed_spawn_count: 0,
+            observed_pid: None,
         }
     }
 
     fn push_event(&mut self, event: Value) {
         // 事件留证上限:防长流撑爆内存(完整流在服务端 durable 审计)。
+        // F3:每事件带 wall-clock ts,落 provider-events.jsonl 供时间线核对。
         if self.events.len() < 512 {
-            self.events.push(event);
+            let wrapped = json!({
+                "ts": Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                "event": event,
+            });
+            self.events.push(wrapped);
         }
     }
 
@@ -1881,6 +2063,10 @@ impl StageObservation {
             argv: Vec::new(),
             capability_state: "unknown".to_string(),
             denied_reason: None,
+            provider_pid: None,
+            pid_unavailable_reason: None,
+            provider_spawn_count: self.observed_spawn_count as u64,
+            provider_events: self.events.clone(),
         }
     }
 
@@ -1892,6 +2078,15 @@ impl StageObservation {
         cell.requested_resume_id = self.requested_resume_id.clone();
         cell.native_resume_confirmed_id = self.native_confirmed_id.clone();
         cell.completed_product_artifact_exists = self.completed_product_artifact_exists;
+        // F3/F5:PID 可追溯(要么真实 PID,要么不可达说明)+spawn 计数。
+        cell.provider_pid = self.observed_pid.clone();
+        if cell.provider_pid.is_none() {
+            cell.pid_unavailable_reason = Some(
+                "该入口未由生产路径提供 provider stream log 目录,PID 不可达 \
+                 (时间线以事件 ts+audit role_run_seq 追溯)"
+                    .to_string(),
+            );
+        }
         if !self.run_ref.trim().is_empty() {
             cell.run_ref = self.run_ref.clone();
         }
@@ -2143,6 +2338,62 @@ fn provider_type_for(provider: &ProviderName) -> ProviderType {
         ProviderName::KimiCode => ProviderType::KimiCode,
         ProviderName::Fake => ProviderType::Fake,
     }
+}
+
+/// F6:tool 事件结构化判定——按事件 type 字段精确匹配(含 permission/approval
+/// 审批面),`execution_event` 仅在其 title/agent 字段携带 tool 语义时计入;
+/// 不做全文子串匹配。
+fn is_tool_event(event: &Value) -> bool {
+    let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
+    match kind {
+        "tool_call"
+        | "tool_result"
+        | "tool_use"
+        | "tool_use_result"
+        | "tool_update"
+        | "permission_request"
+        | "coding_permission_request"
+        | "approval_request" => true,
+        "execution_event" => {
+            let title = event
+                .pointer("/event/title")
+                .or_else(|| event.get("title"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let title_lower = title.to_ascii_lowercase();
+            title_lower.starts_with("tool_") || title == "task_update"
+        }
+        _ => false,
+    }
+}
+
+/// F3:从 stream log 目录解析 provider 子进程 PID(文件名
+/// `{program}-{pid}-{stdout|stderr}.log`;取最新修改的 stdout)。
+fn scan_stream_log_pid(directory: &Path) -> Option<String> {
+    let entries = std::fs::read_dir(directory).ok()?;
+    let mut newest: Option<(std::time::SystemTime, String)> = None;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        // 文件名形如 `{program}-{pid}-{stream}.log`:尾部取 stream,再取 pid。
+        let Some(stem) = name.strip_suffix(".log") else {
+            continue;
+        };
+        let mut parts = stem.rsplitn(3, '-');
+        let stream = parts.next().unwrap_or_default();
+        let pid = parts.next().unwrap_or_default();
+        if stream != "stdout" || pid.is_empty() || !pid.chars().all(|ch| ch.is_ascii_digit()) {
+            continue;
+        }
+        let modified = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .ok()
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        if newest.as_ref().is_none_or(|(best, _)| modified >= *best) {
+            newest = Some((modified, pid.to_string()));
+        }
+    }
+    newest.map(|(_, pid)| pid)
 }
 
 fn provider_matches_record(provider: &ProviderName, record: &ProviderStartAudit) -> bool {
