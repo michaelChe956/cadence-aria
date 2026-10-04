@@ -215,11 +215,7 @@ fn review_prompt_limits_revise_to_strong_findings() {
 
     let input = engine.build_review_input().expect("review input");
 
-    assert!(
-        input
-            .prompt
-            .contains("blocking|must_fix|suggestion")
-    );
+    assert!(input.prompt.contains("blocking|must_fix|suggestion"));
     assert!(input.prompt.contains("suggestion"));
     assert!(
         input
@@ -291,17 +287,11 @@ fn four_backtick_artifact_extracts_across_workspace_types_and_suppresses_story_d
     for (workspace_type, artifact) in [
         (
             WorkspaceType::Story,
-            complete_story_artifact(
-                "用户遇到失败时应该如何处理？",
-                "失败路径有明确提示。",
-            ),
+            complete_story_artifact("用户遇到失败时应该如何处理？", "失败路径有明确提示。"),
         ),
         (
             WorkspaceType::Design,
-            complete_design_artifact(
-                "明确失败时应该如何处理？",
-                "返回类型化失败原因。",
-            ),
+            complete_design_artifact("明确失败时应该如何处理？", "返回类型化失败原因。"),
         ),
         (
             WorkspaceType::WorkItem,
@@ -392,6 +382,17 @@ impl StreamingProviderAdapter for ReviewVerdictStreamingProvider {
             events: event_rx,
             commands: command_tx,
         })
+    }
+
+    /// Task 7 分流收口:gateway 只经 validated trait 分发——拆出 input 后
+    /// 与裸 `start` 同路径。
+    async fn start_validated(
+        &self,
+        validated: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let (input, _launch) = validated.into_parts();
+        self.start(input, cancel).await
     }
 
     async fn run_streaming(
@@ -681,10 +682,11 @@ async fn kimi_review_repairs_missing_json_nonce_once_for_all_workspace_types() {
                 (_tmp, name, review_json, engine, rx, review_node_id)
             }
             KimiReviewRepairCase::WorkItemPlan => {
-                let (_tmp, engine, rx, review_node_id) = queued_work_item_plan_outline_review_engine(
-                    "sess_kimi_review_repair_work_item_plan",
-                )
-                .await;
+                let (_tmp, engine, rx, review_node_id) =
+                    queued_work_item_plan_outline_review_engine(
+                        "sess_kimi_review_repair_work_item_plan",
+                    )
+                    .await;
                 (
                     _tmp,
                     "work_item_plan",
@@ -725,7 +727,10 @@ async fn kimi_review_repairs_missing_json_nonce_once_for_all_workspace_types() {
                     ProviderExecutionEventStatus::Started,
                     Some(review_node_id.clone())
                 ),
-                (ProviderExecutionEventStatus::Completed, Some(review_node_id)),
+                (
+                    ProviderExecutionEventStatus::Completed,
+                    Some(review_node_id)
+                ),
             ],
             "{case_name}"
         );
@@ -747,7 +752,10 @@ async fn review_structured_output_repair_failure_persists_diagnostic() {
         .await;
 
     assert_eq!(provider.starts.load(Ordering::SeqCst), 2);
-    let verdict = engine.latest_review_verdict.as_ref().expect("fallback verdict");
+    let verdict = engine
+        .latest_review_verdict
+        .as_ref()
+        .expect("fallback verdict");
     assert_eq!(verdict.verdict, ReviewVerdictType::NeedsHuman);
     let diagnostic = verdict
         .structured_output_diagnostic
@@ -768,10 +776,7 @@ async fn review_structured_output_repair_failure_persists_diagnostic() {
     let repair_events = repair_event_statuses(&mut rx);
     assert_eq!(
         repair_events.last(),
-        Some(&(
-            ProviderExecutionEventStatus::Failed,
-            Some(review_node_id)
-        ))
+        Some(&(ProviderExecutionEventStatus::Failed, Some(review_node_id)))
     );
 }
 
@@ -792,7 +797,10 @@ async fn review_structured_output_repair_rejects_payload_change() {
         .await;
 
     assert_eq!(provider.starts.load(Ordering::SeqCst), 2);
-    let verdict = engine.latest_review_verdict.as_ref().expect("fallback verdict");
+    let verdict = engine
+        .latest_review_verdict
+        .as_ref()
+        .expect("fallback verdict");
     assert_eq!(verdict.verdict, ReviewVerdictType::NeedsHuman);
     let diagnostic = verdict
         .structured_output_diagnostic
@@ -804,10 +812,7 @@ async fn review_structured_output_repair_rejects_payload_change() {
     let repair_events = repair_event_statuses(&mut rx);
     assert_eq!(
         repair_events.last(),
-        Some(&(
-            ProviderExecutionEventStatus::Failed,
-            Some(review_node_id)
-        ))
+        Some(&(ProviderExecutionEventStatus::Failed, Some(review_node_id)))
     );
 }
 
@@ -831,7 +836,10 @@ async fn invalid_review_json_retries_same_input_without_verifiable_payload_repai
     assert_eq!(provider.starts.load(Ordering::SeqCst), 2);
     let prompts = provider.prompts.lock().unwrap().clone();
     assert_eq!(prompts[0], prompts[1], "retry resends the original input");
-    let verdict = engine.latest_review_verdict.as_ref().expect("fallback verdict");
+    let verdict = engine
+        .latest_review_verdict
+        .as_ref()
+        .expect("fallback verdict");
     assert_eq!(verdict.verdict, ReviewVerdictType::NeedsHuman);
     let diagnostic = verdict
         .structured_output_diagnostic
@@ -868,7 +876,10 @@ async fn invalid_json_retries_once_within_invocation_and_consumes_recovery() {
     // 同 invocation 静默重试：同一份 input 重新拉起（非 repair prompt），
     // 续用同一 provider 会话。
     let prompts = provider.prompts.lock().unwrap().clone();
-    assert_eq!(prompts[0], prompts[1], "retry must resend the original input");
+    assert_eq!(
+        prompts[0], prompts[1],
+        "retry must resend the original input"
+    );
     assert!(
         !prompts[1].contains("结构化输出格式无效"),
         "retry must not build a repair prompt"
@@ -900,8 +911,7 @@ async fn invalid_json_retry_failure_preserves_diagnostic_and_counts_nothing() {
         valid_structured_output(r#"{"verdict":"pass","summary":}"#),
     ]);
     let (_tmp, mut engine, _rx, _review_node_id) =
-        queued_work_item_plan_outline_review_engine("sess_review_invalid_json_retry_failed")
-            .await;
+        queued_work_item_plan_outline_review_engine("sess_review_invalid_json_retry_failed").await;
 
     engine
         .drive_review_session(Arc::new(provider.clone()), empty_provider_commands())
@@ -949,7 +959,10 @@ async fn malformed_review_findings_do_not_trigger_business_rewrite() {
         .await;
 
     assert_eq!(provider.starts.load(Ordering::SeqCst), 1);
-    let verdict = engine.latest_review_verdict.as_ref().expect("fallback verdict");
+    let verdict = engine
+        .latest_review_verdict
+        .as_ref()
+        .expect("fallback verdict");
     assert_eq!(verdict.verdict, ReviewVerdictType::NeedsHuman);
     assert_eq!(
         verdict

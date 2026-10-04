@@ -677,6 +677,27 @@ impl crate::cross_cutting::streaming_provider::StreamingProviderAdapter
             native_session_id: None,
         })
     }
+
+    /// Task 7 分流收口:gateway `start_streaming` 只走 validated trait,
+    /// 计数并入同一 `start_count`(「复验失败不触达 registry」断言不变)。
+    async fn start_validated(
+        &self,
+        _input: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<
+        crate::cross_cutting::streaming_provider::ProviderSession,
+        crate::cross_cutting::provider_adapter::ProviderAdapterError,
+    > {
+        self.start_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let (_event_tx, events) = tokio::sync::mpsc::channel(1);
+        let (commands, _command_rx) = tokio::sync::mpsc::channel(1);
+        Ok(crate::cross_cutting::streaming_provider::ProviderSession {
+            events,
+            commands,
+            native_session_id: None,
+        })
+    }
 }
 
 /// 测试用同步 adapter stub:run 返回最小成功输出。
@@ -690,17 +711,35 @@ impl crate::cross_cutting::provider_adapter::ProviderAdapter for StubSyncAdapter
         crate::protocol::contracts::AdapterOutput,
         crate::cross_cutting::provider_adapter::ProviderAdapterError,
     > {
-        use crate::protocol::contracts::TimeoutStatus;
-        Ok(crate::protocol::contracts::AdapterOutput {
-            exit_code: Some(0),
-            stdout: "ok".to_string(),
-            stderr: String::new(),
-            structured_output: None,
-            files_modified: Vec::new(),
-            duration_ms: 0,
-            timeout_status: TimeoutStatus::NotTimedOut,
-        })
+        stub_sync_output()
     }
+
+    /// Task 7 分流收口:gateway `run_sync` 只走 validated trait。
+    fn run_validated(
+        &self,
+        _launch: crate::cross_cutting::session_launch::ValidatedAdapterInput,
+    ) -> Result<
+        crate::protocol::contracts::AdapterOutput,
+        crate::cross_cutting::provider_adapter::ProviderAdapterError,
+    > {
+        stub_sync_output()
+    }
+}
+
+fn stub_sync_output() -> Result<
+    crate::protocol::contracts::AdapterOutput,
+    crate::cross_cutting::provider_adapter::ProviderAdapterError,
+> {
+    use crate::protocol::contracts::TimeoutStatus;
+    Ok(crate::protocol::contracts::AdapterOutput {
+        exit_code: Some(0),
+        stdout: "ok".to_string(),
+        stderr: String::new(),
+        structured_output: None,
+        files_modified: Vec::new(),
+        duration_ms: 0,
+        timeout_status: TimeoutStatus::NotTimedOut,
+    })
 }
 
 /// 始终可用的 availability gate fixture:health snapshot 标记所有真实 provider 可用。

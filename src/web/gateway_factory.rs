@@ -427,6 +427,22 @@ mod tests {
                 native_session_id: None,
             })
         }
+
+        /// Task 7 分流收口:gateway 只经 validated trait 分发。
+        async fn start_validated(
+            &self,
+            _validated: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+            _cancel: tokio_util::sync::CancellationToken,
+        ) -> Result<ProviderSession, crate::cross_cutting::provider_adapter::ProviderAdapterError>
+        {
+            let (_event_tx, events) = tokio::sync::mpsc::channel(1);
+            let (commands, _command_rx) = tokio::sync::mpsc::channel(1);
+            Ok(ProviderSession {
+                events,
+                commands,
+                native_session_id: None,
+            })
+        }
     }
 
     fn fake_registry() -> Arc<ProviderRegistry> {
@@ -635,9 +651,10 @@ mod tests {
         );
     }
 
-    /// Task 1c-factory(lcg_t01):`with_lc_sync_bridge` 组装的 gateway 同步槽是
-    /// LC gateway sync bridge——raw(未经 prepare 的)同步 `run` 由 bridge
-    /// fail-closed 拒绝,绝不回落裸同步直连。
+    /// Task 1c-factory(lcg_t01)→Task 7 分流收口:`with_lc_sync_bridge` 组装
+    /// 的 gateway 同步槽是 LC gateway sync bridge——gateway `run_sync` 唯一经
+    /// `run_validated` 分发(raw 同步 `run` 在 gateway 层已不可达),未经
+    /// prepare 的存量构造同样进入 validated bridge,绝不回落裸同步直连。
     #[test]
     fn lcg_t01_lc_sync_bridge_factory_rejects_raw_sync_run() {
         let root = tempdir().expect("temporary product root");
@@ -674,14 +691,20 @@ mod tests {
         };
         let launch =
             crate::cross_cutting::session_launch::ValidatedAdapterInput::new(input, validated);
+        // Task 7 收口后:未经 prepare 的构造经 bridge `run_validated` 消费
+        // Noop adapter(空事件流提前关闭,fail-closed 报错);若错误仍是
+        // bridge 的 raw-run 拒绝文案,说明 gateway 又回落了裸 `run`。
         let error = gateway
             .run_sync(launch)
-            .expect_err("raw sync run must be rejected by the LC gateway sync bridge");
+            .expect_err("noop session must fail closed before completion");
+        let text = error.to_string();
         assert!(
-            error
-                .to_string()
-                .contains("lc gateway sync bridge only accepts validated launches"),
-            "sync slot must be the LC gateway sync bridge, got: {error}"
+            !text.contains("lc gateway sync bridge only accepts validated launches"),
+            "gateway run_sync must dispatch through run_validated, not raw run: {text}"
+        );
+        assert!(
+            text.contains("provider_gateway_adapter:"),
+            "failure must surface from the validated bridge/adapter path, got: {text}"
         );
     }
 

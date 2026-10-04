@@ -675,6 +675,20 @@ mod tests {
                 native_session_id: None,
             })
         }
+
+        /// Task 7 分流收口:gateway 只经 validated trait 分发——拆出 input
+        /// 后与裸 `start` 同路径(计数与输入快照语义不变)。
+        async fn start_validated(
+            &self,
+            validated: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+            cancel: CancellationToken,
+        ) -> Result<
+            crate::cross_cutting::streaming_provider::ProviderSession,
+            crate::cross_cutting::provider_adapter::ProviderAdapterError,
+        > {
+            let (input, _launch) = validated.into_parts();
+            self.start(input, cancel).await
+        }
     }
 
     struct StubSyncAdapter;
@@ -696,6 +710,28 @@ mod tests {
                 files_modified: Vec::new(),
                 duration_ms: 0,
                 timeout_status: TimeoutStatus::NotTimedOut,
+            })
+        }
+
+        /// Task 7 分流收口:gateway `run_sync` 只经 validated trait 分发。
+        fn run_validated(
+            &self,
+            _launch: crate::cross_cutting::session_launch::ValidatedAdapterInput,
+        ) -> Result<
+            crate::protocol::contracts::AdapterOutput,
+            crate::cross_cutting::provider_adapter::ProviderAdapterError,
+        > {
+            self.run(&crate::protocol::contracts::AdapterInput {
+                provider_type: crate::protocol::contracts::ProviderType::ClaudeCode,
+                role: crate::protocol::contracts::AdapterRole::Orchestrator,
+                worktree_path: None,
+                working_directory: None,
+                provider_stream_log_dir: None,
+                prompt: String::new(),
+                context_files: Vec::new(),
+                output_schema: String::new(),
+                timeout: 0,
+                max_retries: 0,
             })
         }
     }

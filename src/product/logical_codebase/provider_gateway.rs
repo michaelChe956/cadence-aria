@@ -1132,27 +1132,18 @@ impl LogicalCodebaseProviderGateway {
         }
         let adapter = self.lookup_real_streaming_adapter(&validated)?;
         let policy_digest = validated.envelope().policy_digest.clone();
-        // Task 1b 段③:prepared launch(prepare_streaming_launch 产出,run-bound
-        // audit 上下文已冻结)唯一经 `start_validated` 分发,绝不回落裸
-        // `start`;未经 prepare 的存量构造(既有测试 fixture)暂走原
-        // `start`,Task 7 收口为 validated-only。
-        let prepared_launch = validated.launch_audit().is_some();
+        // Task 7(Step 3 分流收口):LC 启动唯一经 `start_validated` 分发,
+        // 1b 过渡期的 prepared/raw 分叉就此取消——未经 prepare 的存量
+        // validated 构造同样走 validated trait,绝不回落裸 `start`(raw
+        // `start` 仅保留单仓 direct)。
         let config_artifact_ref = validated.envelope().config_artifact_ref.clone();
-
-        let session = if prepared_launch {
-            adapter
-                .start_validated(
-                    ValidatedStreamingProviderInput::new(input, validated),
-                    cancel,
-                )
-                .await
-                .map_err(ProviderGatewayError::Adapter)?
-        } else {
-            adapter
-                .start(input, cancel)
-                .await
-                .map_err(ProviderGatewayError::Adapter)?
-        };
+        let session = adapter
+            .start_validated(
+                ValidatedStreamingProviderInput::new(input, validated),
+                cancel,
+            )
+            .await
+            .map_err(ProviderGatewayError::Adapter)?;
         let ConfigSourceAudit {
             argv,
             config_digest,
@@ -1176,11 +1167,9 @@ impl LogicalCodebaseProviderGateway {
     /// 独立 `working_directory`,否则回填 `worktree_path`)重新复验政策指纹、
     /// canonical cwd/git-dir/worktree identity、provider 可用性与 resume 能力。
     /// 任一复验失败都发生在真实 adapter run 之前(fail-closed)。
-    ///
-    /// Task 1b:经 `prepare_sync_launch` 绑定 run-bound audit 上下文的
-    /// prepared launch 只调用 validated trait(`run_validated`——生产侧为
-    /// `GatewaySyncProvider` streaming→sync bridge);未经 prepare 的存量构造
-    /// (既有测试 fixture)暂走原 raw `run`,Task 7 收口为 validated-only。
+    /// Task 1b→Task 7:同步栈只调用 validated trait(`run_validated`——
+    /// 生产侧为 `GatewaySyncProvider` streaming→sync bridge);Task 7 已
+    /// 收口为 validated-only,任何 validated 构造都不回落 raw `run`。
     pub fn run_sync(
         &self,
         launch: ValidatedAdapterInput,
@@ -1200,19 +1189,15 @@ impl LogicalCodebaseProviderGateway {
         }
         let policy_digest = validated.envelope().policy_digest.clone();
         let config_artifact_ref = validated.envelope().config_artifact_ref.clone();
-        let prepared_launch = validated.launch_audit().is_some();
-        let output = if prepared_launch {
-            // prepared launch(1b 入口):validated trait——生产 sync_adapter 为
-            // LC sync bridge,只经 streaming `start_validated` 桥接。
-            let prepared = ValidatedAdapterInput::new(input, validated);
-            self.sync_adapter
-                .run_validated(prepared)
-                .map_err(ProviderGatewayError::Adapter)?
-        } else {
-            self.sync_adapter
-                .run(&input)
-                .map_err(ProviderGatewayError::Adapter)?
-        };
+        // Task 7(Step 3 分流收口):同步栈唯一经 `run_validated`(生产侧为
+        // `GatewaySyncProvider` streaming→sync bridge,只经 streaming
+        // `start_validated` 桥接);1b 过渡期的 prepared/raw 分叉就此取消,
+        // 未经 prepare 的存量构造同样走 validated trait,绝不回落裸 `run`。
+        let prepared = ValidatedAdapterInput::new(input, validated);
+        let output = self
+            .sync_adapter
+            .run_validated(prepared)
+            .map_err(ProviderGatewayError::Adapter)?;
         // Task 11 审计聚合:同 start_streaming,sources/argv 为空(无真实注入源),config
         // digest 由 envelope 冻结的 config_artifact_ref 重算。
         let ConfigSourceAudit {

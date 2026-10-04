@@ -76,6 +76,16 @@ impl StreamingProviderAdapter for RevisionCaptureProvider {
         })
     }
 
+    /// Task 7 分流收口:gateway 只经 validated trait 分发。
+    async fn start_validated(
+        &self,
+        validated: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<ProviderSession, crate::cross_cutting::provider_adapter::ProviderAdapterError> {
+        let (input, _launch) = validated.into_parts();
+        self.start(input, cancel).await
+    }
+
     async fn run_streaming(
         &self,
         _input: &crate::protocol::contracts::AdapterInput,
@@ -116,6 +126,17 @@ impl StreamingProviderAdapter for RevisionDirectSentinel {
             events: event_rx,
             commands: command_tx,
         })
+    }
+
+    /// Task 7 分流收口:gateway 只经 validated trait 分发(sentinel 语义
+    /// 保持——LC 会话误走直连仍计数)。
+    async fn start_validated(
+        &self,
+        validated: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<ProviderSession, crate::cross_cutting::provider_adapter::ProviderAdapterError> {
+        let (input, _launch) = validated.into_parts();
+        self.start(input, cancel).await
     }
 
     async fn run_streaming(
