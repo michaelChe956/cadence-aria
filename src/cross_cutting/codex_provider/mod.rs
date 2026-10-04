@@ -348,12 +348,32 @@ impl CodexProvider {
         // 8) LC 握手:thread/start|thread/resume 共用受限投影 params(协议
         //    cwd=投影冻结面,不以 raw 输入覆盖);失败终止子进程 fail-closed;
         //    LC 路径必得非空 thread id(与 direct 策略路径同源兜底)。
+        //    Task 9b:resume 请求的握手失败(thread/resume 应答缺/错 id)
+        //    属于已启动 child 后的 runtime 失败——kill/reap 并在错误中记录
+        //    「未恢复」(显式声明 child 已启动并被终止,不伪称零 spawn),
+        //    不回填请求 id、不清 id 转 fresh。
+        let lc_resume_requested = input
+            .resume_provider_session_id
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|session_id| !session_id.is_empty());
         let handshake = match session::codex_lc_session_handshake(&peer, &input, &sandbox).await {
             Ok(handshake) => handshake,
             Err(error) => {
                 let _ = child.start_kill();
                 let _ = child.wait().await;
-                return Err(error);
+                return Err(if lc_resume_requested {
+                    ProviderAdapterError::parse_error(
+                        format!(
+                            "codex lc validated start: native resume not confirmed (session NOT resumed; the started child was killed and reaped, not a zero-spawn refusal): {}",
+                            error.details
+                        ),
+                        String::new(),
+                        String::new(),
+                    )
+                } else {
+                    error
+                });
             }
         };
         let Some(thread_id) = handshake.thread_id.clone() else {
