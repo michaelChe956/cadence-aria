@@ -944,8 +944,20 @@ impl MatrixEnvironment {
                 return Err(self.fail_with_diagnostics(failure, None).await);
             }
             match body["state"].as_str() {
+                // 终态:active 簇 → 通过。
                 Some("ready") | Some("active") | Some("completed") => return Ok(()),
-                Some("missing") | Some("building") | None => {
+                // 终态:failed/error → 失败(带 warning 原文)。
+                Some("failed") | Some("error") => {
+                    let failure =
+                        matrix_failure("index_failed", format!("聚合索引终态失败:{body}"), None);
+                    return Err(self.fail_with_diagnostics(failure, None).await);
+                }
+                // 中间态(building/rebuilding/未知)→ 继续轮询到终态,
+                // 有界超时兜底;不把中间态当终态判失败,也不重复 POST
+                // rebuild(已有任务在跑会 409)。
+                // 仅缺失(missing/None)时触发一次 rebuild。
+                missing @ (Some("missing") | None) => {
+                    let _ = missing;
                     let (rebuild_status, rebuild_body) =
                         request_json(&self.app, Method::POST, &rebuild_uri, json!({})).await;
                     if rebuild_status != StatusCode::ACCEPTED && rebuild_status != StatusCode::OK {
@@ -957,14 +969,7 @@ impl MatrixEnvironment {
                         return Err(self.fail_with_diagnostics(failure, None).await);
                     }
                 }
-                Some(other) => {
-                    let failure = matrix_failure(
-                        "index_unexpected_state",
-                        format!("active index 状态 {other}:{body}"),
-                        None,
-                    );
-                    return Err(self.fail_with_diagnostics(failure, None).await);
-                }
+                _ => {}
             }
             if tokio::time::Instant::now() >= deadline {
                 let failure = matrix_failure(
