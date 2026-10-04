@@ -945,3 +945,238 @@ async fn lcg_t09a_pi_lc_resume_audit_gate_zero_child_on_legacy_or_drift() {
         );
     }
 }
+
+// ==== Task 9c:Pi LC 原生 resume 的 get_state 真实同 id 确认(错/缺 id 绝不 fresh)====
+
+/// Task 9c fixture(fake pi RPC):`--version` 打印兼容版本;rpc 循环内按
+/// `PI_SESSION_ID` 应答 get_state(非空 → `data.sessionId`;空 → success 但
+/// 无 sessionId),prompt 应答后送 text_delta 与 agent_settled;登记 pid 到
+/// `PI_PID_MARKER`(kill/reap 断言),不自行退出——终止必须来自 adapter 的
+/// kill 链。
+#[cfg(unix)]
+fn lc_pi_rpc_resume_fixture(dir: &std::path::Path) -> PathBuf {
+    write_executable(
+        dir,
+        "fake-lc-pi-rpc-resume",
+        r#"#!/usr/bin/env bash
+if [ "$1" = "--version" ]; then echo 0.83.0; exit 0; fi
+echo $$ > "${PI_PID_MARKER:-/dev/null}"
+while IFS= read -r line; do
+  id="$(printf '%s' "$line" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+  if [[ "$line" == *'"get_state"'* ]]; then
+    if [[ -n "${PI_SESSION_ID:-}" ]]; then
+      echo "{\"type\":\"response\",\"id\":\"${id:-pi-1}\",\"command\":\"get_state\",\"success\":true,\"data\":{\"sessionId\":\"${PI_SESSION_ID}\"}}"
+    else
+      echo "{\"type\":\"response\",\"id\":\"${id:-pi-1}\",\"command\":\"get_state\",\"success\":true,\"data\":{}}"
+    fi
+  elif [[ "$line" == *'"prompt"'* ]]; then
+    echo "{\"type\":\"response\",\"id\":\"${id:-pi-2}\",\"success\":true}"
+    echo '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"lc resume done"}}'
+    echo '{"type":"agent_settled"}'
+  fi
+done
+"#,
+    )
+}
+
+/// Task 9c kill 链断言辅助:轮询读取 fixture 登记的子进程 pid,再轮询确认该
+/// pid 已从进程表消失(kill+reap 都发生后 zombie 不复存在)。
+#[cfg(unix)]
+fn t09c_child_killed_and_reaped(pid_marker: &std::path::Path) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let pid = loop {
+        if let Some(pid) = std::fs::read_to_string(pid_marker)
+            .ok()
+            .and_then(|content| content.trim().parse::<u32>().ok())
+        {
+            break pid;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "fixture must register its pid at {}",
+            pid_marker.display()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    loop {
+        let alive = std::process::Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if !alive {
+            return true;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "pi child (pid {pid}) must be killed and reaped after an unconfirmed native resume"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// 有界等待终态事件:Completed 返回产物全文,Failed 即 panic(5s 上界)。
+#[cfg(unix)]
+async fn t09c_recv_pi_completed_text(
+    events: &mut tokio::sync::mpsc::Receiver<ProviderEvent>,
+) -> String {
+    let deadline = std::time::Duration::from_secs(5);
+    loop {
+        let event = tokio::time::timeout(deadline, events.recv())
+            .await
+            .expect("pi session must reach a terminal event within timeout")
+            .expect("pi session event channel stays open");
+        match event {
+            ProviderEvent::Completed(completion) => return completion.full_output,
+            ProviderEvent::Failed { message } => {
+                panic!("confirmed pi resume must complete, failed instead: {message}")
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Task 9c(Step 1 断言组 438-440 逐字):Pi LC 显式 resume 的原生确认——
+/// `--session-id` 传入后必须由 RPC `get_state` 应答真实核对同 id:
+/// - 应答同 id(无存档记录,9a 的「无存档→依赖 native 握手」由本测试补
+///   真实确认)→ 续接,confirmed==requested,provider_start 落确认 id;
+/// - 缺 id(get_state success 但无 `data.sessionId`)→ Err;错 id(应答不同
+///   会话 id)→ Err——两者都是已启动 child 后的 runtime 失败:child 被
+///   kill/reap、错误记录「未恢复」(不伪称零 spawn),不回填请求 id、不清
+///   id 转 fresh、零新 provider_start。
+#[cfg(unix)]
+#[tokio::test]
+async fn lcg_t09_pi_missing_or_wrong_native_id_never_fresh() {
+    let fixture = LcLaunchFixture::new();
+    let requested_native_id = "pi-session-resume-t09c".to_string();
+
+    // 1) get_state 应答同 id(无存档记录):真实确认后续接,provider_start
+    //    落确认 id,握手消耗 get_state 行后会话流照常完成。
+    {
+        let marker_dir = tempfile::tempdir().expect("t09c matching marker dir");
+        let sink = RecordingToolPolicyAuditSink::new();
+        let mut raw = fixture.lc_streaming_input(
+            AdapterRole::Executor,
+            None,
+            Some(sink.clone().bound()),
+            Some(requested_native_id.clone()),
+        );
+        raw.env_vars.insert(
+            "PI_SESSION_ID".to_string(),
+            requested_native_id.clone(),
+        );
+        let provider = PiProvider::new(lc_pi_rpc_resume_fixture(marker_dir.path()))
+            .with_version_supplier(policy_version_supplier());
+        let mut session = provider
+            .start_validated(
+                fixture.validated_coding_input(raw),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("a native-confirmed resume must continue the LC session");
+        let confirmed_native_id = session.native_session_id.clone().unwrap_or_default();
+        assert_eq!(confirmed_native_id, requested_native_id);
+        let events = sink.events();
+        assert_eq!(
+            events.len(),
+            1,
+            "confirmed resume writes exactly one provider_start"
+        );
+        assert!(matches!(
+            &events[0],
+            DurableToolPolicyEvent::ProviderStart(record)
+                if record.provider_session_id == requested_native_id
+        ));
+        let completed = t09c_recv_pi_completed_text(&mut session.events).await;
+        assert_eq!(completed, "lc resume done");
+    }
+
+    // 2) 缺 id:get_state success 但应答无 sessionId → runtime 失败:Err +
+    //    kill/reap + 「未恢复」记录,零新 provider_start。
+    {
+        let marker_dir = tempfile::tempdir().expect("t09c missing-id marker dir");
+        let pid_marker = marker_dir.path().join("pi-t09c-missing-id.pid");
+        let sink = RecordingToolPolicyAuditSink::new();
+        let mut raw = fixture.lc_streaming_input(
+            AdapterRole::Executor,
+            None,
+            Some(sink.clone().bound()),
+            Some(requested_native_id.clone()),
+        );
+        raw.env_vars
+            .insert("PI_SESSION_ID".to_string(), String::new());
+        raw.env_vars.insert(
+            "PI_PID_MARKER".to_string(),
+            pid_marker.display().to_string(),
+        );
+        let provider = PiProvider::new(lc_pi_rpc_resume_fixture(marker_dir.path()))
+            .with_version_supplier(policy_version_supplier());
+        let native_id_missing_result = provider
+            .start_validated(
+                fixture.validated_coding_input(raw),
+                CancellationToken::new(),
+            )
+            .await;
+        assert!(native_id_missing_result.is_err());
+        let Err(rejected) = native_id_missing_result else {
+            panic!("unconfirmed resume must fail");
+        };
+        assert!(
+            rejected.details.contains("session NOT resumed")
+                && rejected.details.contains("not a zero-spawn refusal"),
+            "rejection must record the not-resumed outcome without claiming zero spawn: {rejected:?}"
+        );
+        assert!(
+            sink.events().is_empty(),
+            "no fresh provider_start may be written for a resume the native side never confirmed"
+        );
+        let started_child_was_killed_and_reaped = t09c_child_killed_and_reaped(&pid_marker);
+        assert!(started_child_was_killed_and_reaped);
+    }
+
+    // 3) 错 id:get_state 应答不同的原生会话 id → 同为 runtime 失败:Err +
+    //    kill/reap,绝不采纳陌生 id 续接、绝不清请求 id 转 fresh。
+    {
+        let marker_dir = tempfile::tempdir().expect("t09c wrong-id marker dir");
+        let pid_marker = marker_dir.path().join("pi-t09c-wrong-id.pid");
+        let sink = RecordingToolPolicyAuditSink::new();
+        let wrong_native_id = "pi-session-native-wrong-t09c".to_string();
+        let mut raw = fixture.lc_streaming_input(
+            AdapterRole::Executor,
+            None,
+            Some(sink.clone().bound()),
+            Some(requested_native_id.clone()),
+        );
+        raw.env_vars.insert("PI_SESSION_ID".to_string(), wrong_native_id.clone());
+        raw.env_vars.insert(
+            "PI_PID_MARKER".to_string(),
+            pid_marker.display().to_string(),
+        );
+        let provider = PiProvider::new(lc_pi_rpc_resume_fixture(marker_dir.path()))
+            .with_version_supplier(policy_version_supplier());
+        let wrong_native_id_result = provider
+            .start_validated(
+                fixture.validated_coding_input(raw),
+                CancellationToken::new(),
+            )
+            .await;
+        let Err(rejected) = wrong_native_id_result else {
+            panic!("a wrong native id must fail the resume");
+        };
+        assert!(
+            rejected.details.contains("pi-session-native-wrong-t09c")
+                && rejected.details.contains(&requested_native_id)
+                && rejected.details.contains("session NOT resumed"),
+            "rejection must name both ids and record the not-resumed outcome: {rejected:?}"
+        );
+        assert!(
+            sink.events().is_empty(),
+            "no fresh provider_start may be written for a mismatched native resume confirmation"
+        );
+        let started_child_was_killed_and_reaped = t09c_child_killed_and_reaped(&pid_marker);
+        assert!(started_child_was_killed_and_reaped);
+    }
+}

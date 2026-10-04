@@ -924,3 +924,105 @@ async fn lcg_t04_pi_projection_has_exclude_write_tokens_and_root_cwd() {
             .any(|p| p == ["--session-id", native_id.as_str()])
     );
 }
+
+/// Task 9c:resume 请求下 get_state 应答的 sessionId 必须与请求逐字相等——
+/// 缺 id 不得回填请求 id、错 id 不得被采纳:两者都是「未恢复」runtime 失败
+/// (Err + Failed 终态事件),不伪称续接(现况可回填——修)。
+#[tokio::test]
+async fn lcg_t09_pi_session_get_state_missing_or_wrong_id_never_backfilled() {
+    // 缺 id:get_state success 但应答无 sessionId → 不回填请求 id。
+    {
+        let (client_io, server_io) = tokio::io::duplex(8192);
+        let (reader, writer) = tokio::io::split(client_io);
+        let peer = JsonRpcPeer::new(reader, writer);
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        let (_command_tx, command_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            let (server_reader, mut server_writer) = tokio::io::split(server_io);
+            let mut reader = tokio::io::BufReader::new(server_reader);
+            let get_state = read_outbound(&mut reader).await;
+            write_inbound(
+                &mut server_writer,
+                serde_json::json!({
+                    "type": "response", "id": get_state["id"], "command": "get_state",
+                    "success": true, "data": {}
+                }),
+            )
+            .await;
+        });
+        let input = streaming_input_for_test(Some("sess-requested-t09c".to_string()));
+        let result = run_pi_session(
+            peer,
+            command_rx,
+            event_tx,
+            input,
+            CancellationToken::new(),
+        )
+        .await;
+        let Err(rejected) = result else {
+            panic!("a get_state response without sessionId must not be backfilled with the requested resume id")
+        };
+        assert!(
+            rejected.details.contains("sess-requested-t09c")
+                && rejected.details.contains("session NOT resumed"),
+            "rejection must name the requested id and record the not-resumed outcome: {rejected:?}"
+        );
+        let events = drain_events(&mut event_rx).await;
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, ProviderEvent::Completed(_))),
+            "an unconfirmed resume must never complete: {events:?}"
+        );
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, ProviderEvent::Failed { .. })));
+    }
+
+    // 错 id:应答不同 sessionId → 不采纳陌生 id。
+    {
+        let (client_io, server_io) = tokio::io::duplex(8192);
+        let (reader, writer) = tokio::io::split(client_io);
+        let peer = JsonRpcPeer::new(reader, writer);
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        let (_command_tx, command_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            let (server_reader, mut server_writer) = tokio::io::split(server_io);
+            let mut reader = tokio::io::BufReader::new(server_reader);
+            let get_state = read_outbound(&mut reader).await;
+            write_inbound(
+                &mut server_writer,
+                serde_json::json!({
+                    "type": "response", "id": get_state["id"], "command": "get_state",
+                    "success": true, "data": {"sessionId": "sess-stranger-t09c"}
+                }),
+            )
+            .await;
+        });
+        let input = streaming_input_for_test(Some("sess-requested-t09c".to_string()));
+        let result = run_pi_session(
+            peer,
+            command_rx,
+            event_tx,
+            input,
+            CancellationToken::new(),
+        )
+        .await;
+        let Err(rejected) = result else {
+            panic!("a get_state response naming a different session must not be adopted")
+        };
+        assert!(
+            rejected.details.contains("sess-stranger-t09c")
+                && rejected.details.contains("sess-requested-t09c")
+                && rejected.details.contains("session NOT resumed"),
+            "rejection must name both ids and record the not-resumed outcome: {rejected:?}"
+        );
+        let events = drain_events(&mut event_rx).await;
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, ProviderEvent::Completed(_))),
+            "an unconfirmed resume must never complete: {events:?}"
+        );
+    }
+}
