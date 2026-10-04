@@ -1263,11 +1263,14 @@ impl MatrixEnvironment {
     /// 同一会话的显式 revision 重驱:gateway resume 路径的原生恢复确认。
     async fn drive_entity_session_resume(&mut self, stage: &'static str) -> EvidenceCell {
         let mut observation = StageObservation::new(stage, &self.provider);
+        // fix 轮 8:resume 格先定 mode 再早退——早退分支曾以 fresh 落盘,
+        // 覆盖 fresh 格目录并掩埋其真实失败原因。
+        observation.force_resume = true;
         let Some(session_id) = self.prior_entity_session_id.clone() else {
-            return observation.denied_cell("无可恢复的本阶段 fresh 会话".to_string());
+            return observation
+                .denied_cell("无可恢复的本阶段 fresh 会话(fresh 未建立会话)".to_string());
         };
         observation.workspace_session_id = session_id.clone();
-        observation.force_resume = true;
         // 请求恢复的 native id = fresh 轮审计里的 provider_session_id
         //(必须在 revision 重驱前捕获)。
         observation.requested_resume_id =
@@ -2753,11 +2756,22 @@ fn provider_matches_record(provider: &ProviderName, record: &ProviderStartAudit)
 /// split_sync prompt:harness 携带的真实拆分指令(结构化输出按
 /// `WORK_ITEM_SPLIT_OUTPUT_SCHEMA` 契约;产物经 gateway sync bridge 解析)。
 fn split_sync_prompt() -> String {
-    "你是跨仓逻辑代码库的 work item 拆分引擎。阅读聚合根下成员仓的公开接口与分层,\n\
-     按输出 schema 把本次修复拆为 1-3 个可独立交付的 work item(含 title/kind/\n\
-     sequence_hint/depends_on/exclusive_write_scopes),以结构化 JSON 输出。\n\
-     只读规划:不写任何文件。"
-        .to_string()
+    // fix 轮 8:sync bridge 的 completion parser 只解析
+    // `<ARIA_STRUCTURED_OUTPUT nonce=...>...</ARIA_STRUCTURED_OUTPUT>`
+    // 包裹的 JSON(生产 split prompt 由 invocation.sentinel_nonce 注入
+    // 同款指令);缺失该指令时 provider 输出裸 JSON/文本,必落
+    // "missing structured output sentinel"。
+    let nonce = "lcg-matrix-split";
+    format!(
+        "你是跨仓逻辑代码库的 work item 拆分引擎。阅读聚合根下成员仓的公开接口与分层,\n\
+         按输出 schema 把本次修复拆为 1-3 个可独立交付的 work item(含 title/kind/\n\
+         sequence_hint/depends_on/exclusive_write_scopes)。\n\
+         只读规划:不写任何文件。\n\n\
+         [output]\n\
+         使用 nonce `{nonce}` 包裹唯一 JSON:开始标签 \"<ARIA_STRUCTURED_OUTPUT nonce=\\\"{nonce}\\\">\",\n\
+         结束标签 \"</ARIA_STRUCTURED_OUTPUT>\"。JSON 顶层必须先含 \"nonce\":\"{nonce}\",\n\
+         再含 repository_profile/plan/work_items(按输出 schema;不用 Markdown code fence)。"
+    )
 }
 
 /// `WORK_ITEM_SPLIT_OUTPUT_SCHEMA` 为 `pub(crate)`,跨 crate 不可引用;
