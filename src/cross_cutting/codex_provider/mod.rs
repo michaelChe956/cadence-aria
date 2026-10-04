@@ -144,20 +144,43 @@ impl CodexProvider {
     /// → audit sink → exact version → 受限投影 → 以 canonical root 为进程
     /// cwd spawn → LC 握手(协议 params 来自投影)→ provider_start 统一审计
     /// (`lc_projection` 必填)→ 会话循环。
+    #[cfg(test)]
     async fn start_lc_validated(
+        &self,
+        input: StreamingProviderInput,
+        envelope: &crate::product::logical_codebase::policy::SessionPolicyEnvelope,
+        capability_snapshot_ref: &str,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        // 既有测试驱动的 Normal 相位入口(Task 7 保持签名零变化)。
+        self.start_lc_validated_with_phase(input, envelope, capability_snapshot_ref, false, cancel)
+            .await
+    }
+
+    /// `start_validated` 的相位感知执行体(Task 7):`root_recipe_phase`
+    /// 来自 validated policy 的冻结相位,供共用 LC guard 消费 marker 语义。
+    async fn start_lc_validated_with_phase(
         &self,
         mut input: StreamingProviderInput,
         envelope: &crate::product::logical_codebase::policy::SessionPolicyEnvelope,
         capability_snapshot_ref: &str,
+        root_recipe_phase: bool,
         cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
         let lc_error = |details: String| {
             ProviderAdapterError::parse_error(details, String::new(), String::new())
         };
 
-        // 1) 双向 spawn 前守卫(与 direct `start` 同源;LC 同样非法即拒)。
-        validate_tool_policy_for_role(&input.role, input.tool_policy.as_ref())
-            .map_err(|error| lc_error(format!("codex lc validated start: {error}")))?;
+        // 1) 共用 LC run-context guard(Task 7):projection/input role 一致 +
+        //    root recipe marker 相位语义 + 双向守卫,早于版本/session child
+        //    (与 direct `start` 的纯双向守卫同源)。
+        crate::cross_cutting::streaming_provider::guard_lc_validated_launch(
+            root_recipe_phase,
+            &input.role,
+            &input.role,
+            input.tool_policy.as_ref(),
+        )
+        .map_err(|error| lc_error(format!("codex lc validated start: {error}")))?;
 
         // 2) adapter 匹配:validated input 必须是 Codex app-server(不匹配即拒,
         //    不回退其它 provider/dialect)。
@@ -758,10 +781,11 @@ impl StreamingProviderAdapter for CodexProvider {
         cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
         let (input, launch) = validated.into_parts();
-        self.start_lc_validated(
+        self.start_lc_validated_with_phase(
             input,
             launch.envelope(),
             launch.capability_snapshot_ref(),
+            launch.is_root_recipe_phase(),
             cancel,
         )
         .await

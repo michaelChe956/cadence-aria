@@ -1081,12 +1081,18 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
         let (input, launch) = validated.into_parts();
         let envelope = launch.envelope().clone();
 
-        // 双向守卫在子进程之前(与 direct `start` 同源;LC 同样非法即拒)。
-        validate_tool_policy_for_role(&input.role, input.tool_policy.as_ref()).map_err(
-            |error| {
-                ProviderAdapterError::parse_error(error.to_string(), String::new(), String::new())
-            },
-        )?;
+        // 共用 LC run-context guard(Task 7):projection role 与 input role
+        // 一致性 + root recipe marker 相位语义 + 双向 tool-policy 守卫,
+        // 整块早于版本/session child(与 direct `start` 的纯双向守卫同源)。
+        crate::cross_cutting::streaming_provider::guard_lc_validated_launch(
+            launch.is_root_recipe_phase(),
+            &input.role,
+            &input.role,
+            input.tool_policy.as_ref(),
+        )
+        .map_err(|error| {
+            ProviderAdapterError::parse_error(error.to_string(), String::new(), String::new())
+        })?;
 
         // adapter 匹配:validated input 必须是 Claude Code(不匹配即拒,
         // 不回退其它 provider/dialect)。

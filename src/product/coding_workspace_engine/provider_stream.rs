@@ -107,9 +107,13 @@ impl CodingWorkspaceEngine {
         Ok(())
     }
 
-    /// 策略会话审计接线（Task 3.2）：policy present 时为 input 绑定 run-bound
+    /// 策略会话审计接线（Task 3.2 → Task 7 统一）：为 input 绑定 run-bound
     /// durable sink 并分配新的 `role_run_seq`；gateway validated input 同步重建。
-    /// 每次 provider run 重新分配（重试 run 独立审计文件），幂等跳过非策略路径。
+    /// 每次 provider run 重新分配（重试 run 独立审计文件）。Task 7 起不因
+    /// `tool_policy=None` 早退——LC run（Coder/Kimi 无通用策略）同样分配
+    /// run-bound sink（prepared launch 已绑定 sink 时不重复分配）；非 LC
+    /// legacy 直连保持零变化（不分配）。所有分配错误直接返回，不删 policy
+    /// 再尝试。
     fn attach_tool_policy_audit(
         &self,
         attempt: &CodingExecutionAttempt,
@@ -125,7 +129,12 @@ impl CodingWorkspaceEngine {
         String,
     > {
         if input.tool_policy.is_none() {
-            return Ok((input, validated));
+            let is_lc_run = attempt.target_snapshot.is_some();
+            if !is_lc_run || input.audit_sink.is_some() {
+                // 非 LC legacy 直连零变化;LC prepared launch 的 sink 已在
+                // gateway prepare 阶段绑定,不重复分配。
+                return Ok((input, validated));
+            }
         }
         let workspace_session_id = input
             .workspace_session_id
@@ -1446,11 +1455,14 @@ mod lcg_t07_validated_dispatch_tests {
         }
     }
 
+    /// 同步栈 fixture input:与生产 LC sync 调用同形——独立 cwd = authority
+    /// root(envelope 冻结的 canonical root),`worktree_path` 仍是 target。
     fn t07_legacy_input(
-        working_dir: std::path::PathBuf,
+        authority_root: std::path::PathBuf,
+        worktree: std::path::PathBuf,
     ) -> crate::protocol::contracts::AdapterInput {
         crate::protocol::contracts::AdapterInput {
-            working_directory: Some(working_dir),
+            working_directory: Some(authority_root),
             prompt: "lcg t07 legacy probe".to_string(),
             provider_type: crate::protocol::contracts::ProviderType::ClaudeCode,
             role: crate::protocol::contracts::AdapterRole::Executor,
@@ -1459,7 +1471,7 @@ mod lcg_t07_validated_dispatch_tests {
             context_files: Vec::new(),
             output_schema: String::new(),
             provider_stream_log_dir: None,
-            worktree_path: None,
+            worktree_path: Some(worktree.to_string_lossy().to_string()),
         }
     }
 
@@ -1551,7 +1563,10 @@ mod lcg_t07_validated_dispatch_tests {
             authority_root.clone(),
         ));
         let engine_stream = t07_engine(&store, Some(gateway_stream.clone()));
-        let coder_input = t07_coder_input(worktree.clone(), None);
+        // 与生产 Coder 调用同源:input 显式携带 envelope 冻结的 canonical
+        // cwd(authority root),spawn 前复验以 effective cwd 消费。
+        let mut coder_input = t07_coder_input(worktree.clone(), None);
+        coder_input.working_directory = Some(authority_root.clone());
         let prepared = engine_stream
             .prepare_streaming_launch_for_role(
                 &attempt,
@@ -1561,14 +1576,17 @@ mod lcg_t07_validated_dispatch_tests {
             )
             .expect("prepare lc coder launch")
             .expect("logical attempt with gateway must prepare");
-        let _ = t07_run_provider_stream(
+        if let Err(error) = t07_run_provider_stream(
             &engine_stream,
             &attempt,
             probe_stream.as_ref(),
             coder_input,
             Some(prepared),
         )
-        .await;
+        .await
+        {
+            panic!("scenario A lc stream run failed: {error}");
+        }
 
         // 场景 B(gateway 缺席):LC validated 输入不得回退裸 `start`。
         let probe_fallback = std::sync::Arc::new(T07DispatchProbeAdapter::new());
@@ -1621,7 +1639,7 @@ mod lcg_t07_validated_dispatch_tests {
                     .expect("allocate role run seq"),
                 audit_sink: std::sync::Arc::new(lifecycle),
             };
-        let sync_input = t07_legacy_input(worktree.clone());
+        let sync_input = t07_legacy_input(authority_root.clone(), worktree.clone());
         let prepared_sync = gateway_sync_prepared
             .prepare_sync_launch(
                 sync_input.clone(),

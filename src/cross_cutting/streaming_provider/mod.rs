@@ -123,6 +123,10 @@ pub enum ToolPolicyGuardError {
     /// credential、写权限 action、canonical root 与 receipt context 四要素
     /// 缺一不可，退化 marker 在创建子进程之前拒绝。
     BootstrapMarkerInvalid { role: String, detail: String },
+    /// LC validated 启动的投影角色与 input 角色不一致(Task 7):投影将冻结
+    /// 的角色与真实 input 携带的角色分叉,属内部一致性缺陷,创建子进程之前
+    /// fail-closed,不静默采纳任一侧。
+    LaunchRoleMismatch { projection: String, input: String },
 }
 
 impl std::fmt::Display for ToolPolicyGuardError {
@@ -139,6 +143,10 @@ impl std::fmt::Display for ToolPolicyGuardError {
             ToolPolicyGuardError::BootstrapMarkerInvalid { role, detail } => write!(
                 f,
                 "tool policy guard: bootstrap executor marker rejected for {role}: {detail}"
+            ),
+            ToolPolicyGuardError::LaunchRoleMismatch { projection, input } => write!(
+                f,
+                "tool policy guard: lc validated launch role mismatch: projection={projection} input={input}"
             ),
         }
     }
@@ -255,6 +263,45 @@ pub fn validate_tool_policy_for_role(
             }),
         },
     }
+}
+
+/// LC validated 启动的共用 run-context guard(Task 7 Step 3):验证
+/// projection role 与 input role 一致后调用双向 tool-policy guard。三家
+/// (Claude/Codex/Pi)的 LC `start_validated` 首步调用,整个检查块早于
+/// 版本探测/session child/extension——任何不一致或非法组合都在创建子
+/// 进程之前拒绝。
+///
+/// - `projection_role`:即将冻结进 LC 投影(`ProviderProjectionInput`)的
+///   角色,与 `input_role` 分叉即内部一致性缺陷(`LaunchRoleMismatch`);
+/// - `root_recipe_phase`:validated policy 是否 RootRecipe 相位(durable
+///   Running operation 派生凭据)。`BootstrapExecutorMarker` 是唯一只对
+///   root recipe 自举通道放行的写权限载体——普通 Coder(Normal 相位)借
+///   marker 获取 root 写权在 guard 层即拒绝,不进入投影/子进程;
+/// - 其余组合沿 [`validate_tool_policy_for_role`] 的双向语义。
+pub fn guard_lc_validated_launch(
+    root_recipe_phase: bool,
+    projection_role: &AdapterRole,
+    input_role: &AdapterRole,
+    policy: Option<&ProviderToolPolicy>,
+) -> Result<(), ToolPolicyGuardError> {
+    if projection_role != input_role {
+        return Err(ToolPolicyGuardError::LaunchRoleMismatch {
+            projection: adapter_role_text(projection_role).to_string(),
+            input: adapter_role_text(input_role).to_string(),
+        });
+    }
+    if !root_recipe_phase
+        && policy.is_some_and(|policy| {
+            matches!(policy.intent, ToolPolicyIntent::BootstrapExecutorMarker(_))
+        })
+    {
+        return Err(ToolPolicyGuardError::BootstrapMarkerInvalid {
+            role: adapter_role_text(input_role).to_string(),
+            detail: "bootstrap executor marker requires a root recipe durable operation context; ordinary coder launches must not carry it"
+                .to_string(),
+        });
+    }
+    validate_tool_policy_for_role(input_role, policy)
 }
 
 /// Canonical tool policy 投影：provider 名 + 按 provider 冻结的 canonical token

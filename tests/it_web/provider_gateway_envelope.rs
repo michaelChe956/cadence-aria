@@ -856,6 +856,22 @@ impl StreamingProviderAdapter for NeverStartAdapter {
             0,
         ))
     }
+
+    /// Task 7 分流收口:validated 分发同样不得触达 fail-closed 路径的
+    /// provider(计数并入同一 `start_count`)。
+    async fn start_validated(
+        &self,
+        _validated: cadence_aria::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        self.starts.fetch_add(1, Ordering::SeqCst);
+        Err(ProviderAdapterError::execution_failed(
+            None,
+            String::new(),
+            "unexpected provider start for fail-closed path",
+            0,
+        ))
+    }
 }
 
 /// internal review 用的完成型 streaming adapter：立即输出固定 review JSON。
@@ -888,6 +904,31 @@ impl StreamingProviderAdapter for ReviewStreamingAdapter {
                     output,
                     structured_output_contract.as_ref(),
                     None,
+                )))
+                .await;
+        });
+        Ok(ProviderSession {
+            native_session_id: None,
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+
+    /// Task 7 分流收口:gateway `start_streaming` 只经 validated trait 分发。
+    /// it_web(库外)无法拆 `ValidatedStreamingProviderInput`,以 plain
+    /// completion 输出同一 review JSON(review 判定消费 full_output)。
+    async fn start_validated(
+        &self,
+        _validated: cadence_aria::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let (event_tx, event_rx) = mpsc::channel(4);
+        let (command_tx, _command_rx) = mpsc::channel(4);
+        let output = self.output.clone();
+        tokio::spawn(async move {
+            let _ = event_tx
+                .send(ProviderEvent::Completed(ProviderCompletion::plain(
+                    output, None,
                 )))
                 .await;
         });

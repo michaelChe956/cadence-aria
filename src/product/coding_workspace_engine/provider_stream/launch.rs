@@ -2,17 +2,23 @@
 
 use super::*;
 
-/// Task 11:按是否携带 validated input + 是否注入 gateway 选择 provider 启动路径。
+/// Task 11→Task 7:按是否携带 validated input + 是否注入 gateway 选择 provider
+/// 启动路径。
 ///
-/// - 两者均存在:经 `LogicalCodebaseProviderGateway::start_streaming` 启动,使政策
-///   校验、canonical 复验、resume fail-closed 都在 gateway 内完成并留 audit。
-///   Task 2.6（REQ-ENV-10）起 LC Coder/retry 的 validated input 携带独立
-///   `working_directory`（=envelope 冻结的 canonical root，调用侧
-///   `resolve_coder_root_launch_policy` + envelope 重绑产出），gateway 在
-///   `revalidate_before_spawn` 以 effective cwd 消费该字段并做 canonical/authority
-///   复验——本分流不重建该校验，fail-closed 语义全部留在 gateway。
-/// - 否则(传统/非逻辑 issue):直接 `provider.start`,保留既有行为（单仓 cwd
-///   仍取 `working_dir`，`working_directory` 为 None 的回填语义不变）。
+/// - validated + gateway 两者均在:经 `LogicalCodebaseProviderGateway::
+///   start_streaming` 启动,政策校验、canonical 复验、resume fail-closed
+///   都在 gateway 内完成并留 audit。Task 2.6（REQ-ENV-10）起 LC Coder/retry
+///   的 validated input 携带独立 `working_directory`（=envelope 冻结的
+///   canonical root，调用侧 `resolve_coder_root_launch_policy` + envelope
+///   重绑产出），gateway 在 `revalidate_before_spawn` 以 effective cwd
+///   消费该字段并做 canonical/authority 复验——本分流不重建该校验，
+///   fail-closed 语义全部留在 gateway。
+/// - validated 在场而 gateway 缺失(Task 7 分流收口):LC validated 输入必须
+///   经 gateway 启动——返回稳定错误 `lc_validated_launch_requires_gateway`,
+///   🔴 禁止回退裸 `provider.start`。
+/// - validated 缺失(传统/非逻辑 issue):直接 `provider.start`,保留既有
+///   行为（单仓 cwd 仍取 `working_dir`，`working_directory` 为 None 的回填
+///   语义不变）。
 ///
 /// 返回 boxed future 以便外层 `tokio::select!` 统一内联。gateway 错误映射为
 /// `ProviderAdapterError`,使其与直接 adapter 错误在 stream 层等价处理。
@@ -35,19 +41,26 @@ pub(super) fn launch_provider_session<'a>(
             + 'a,
     >,
 > {
-    if let (Some(validated), Some(gateway)) = (validated, gateway) {
-        let gateway = gateway.clone();
-        Box::pin(async move {
-            gateway
-                .start_streaming(validated, cancel)
-                .await
-                .map_err(provider_adapter_error_from_gateway)
-        })
-    } else {
+    match (validated, gateway) {
+        (Some(validated), Some(gateway)) => {
+            let gateway = gateway.clone();
+            Box::pin(async move {
+                gateway
+                    .start_streaming(validated, cancel)
+                    .await
+                    .map_err(provider_adapter_error_from_gateway)
+            })
+        }
+        // Task 7 分流收口:LC validated 输入缺 gateway 是装配错误,返回稳定
+        // 错误码 fail-closed,不回退裸 `provider.start`。
+        (Some(_), None) => Box::pin(async move {
+            Err(ProviderAdapterError::provider_unavailable(
+                "lc_validated_launch_requires_gateway: validated LC launches must start through LogicalCodebaseProviderGateway; raw provider start fallback is forbidden",
+            ))
+        }),
         // 非 gateway 路径(传统/非逻辑 issue):直接 adapter start。逻辑代码库 feature
-        // 在入口处由 `validated_input`/`logical_provider_gateway` 的存在与否分流,
-        // 使旧 API 行为不被本工作包扩大。
-        Box::pin(async move { provider.start(input, cancel).await })
+        // 在入口处由 `validated_input` 的存在与否分流,使旧 API 行为不被本工作包扩大。
+        (None, _) => Box::pin(async move { provider.start(input, cancel).await }),
     }
 }
 

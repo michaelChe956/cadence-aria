@@ -618,12 +618,18 @@ impl StreamingProviderAdapter for PiProvider {
         let (input, launch) = validated.into_parts();
         let envelope = launch.envelope().clone();
 
-        // 双向 spawn 前守卫(与 direct `start` 同源;LC 同样非法即拒)。
-        validate_tool_policy_for_role(&input.role, input.tool_policy.as_ref()).map_err(
-            |error| {
-                ProviderAdapterError::parse_error(error.to_string(), String::new(), String::new())
-            },
-        )?;
+        // 共用 LC run-context guard(Task 7):projection/input role 一致 +
+        // 双向守卫,早于版本/session child/extension 准备(与 direct `start`
+        // 的纯双向守卫同源)。
+        crate::cross_cutting::streaming_provider::guard_lc_validated_launch(
+            launch.is_root_recipe_phase(),
+            &input.role,
+            &input.role,
+            input.tool_policy.as_ref(),
+        )
+        .map_err(|error| {
+            ProviderAdapterError::parse_error(error.to_string(), String::new(), String::new())
+        })?;
 
         // adapter 匹配:validated input 必须是 pi RPC(不匹配即拒,不回退
         // 其它 provider/dialect)。

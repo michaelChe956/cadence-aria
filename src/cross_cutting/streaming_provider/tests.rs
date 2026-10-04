@@ -1562,7 +1562,7 @@ fn lcg_t07_root_recipe_marker_is_not_normal_coder_policy() {
     };
     use crate::protocol::contracts::AdapterRole;
 
-    use super::{ToolPolicyIntent, validate_tool_policy_for_role};
+    use super::{ToolPolicyIntent, guard_lc_validated_launch};
 
     let canonical_root = std::path::PathBuf::from("/tmp/aria-lcg-t07-bootstrap-marker-root");
     let credential = BootstrapPhaseCredential::for_test(
@@ -1584,12 +1584,22 @@ fn lcg_t07_root_recipe_marker_is_not_normal_coder_policy() {
         intent: ToolPolicyIntent::BootstrapExecutorMarker(marker),
     };
 
-    // root recipe 通道:durable operation 凭据 + receipt context 完整 → 放行。
-    let valid_recipe_marker_result =
-        validate_tool_policy_for_role(&AdapterRole::Executor, Some(&marker_policy));
-    // 同一 marker 到普通 Coder 启动(无 root recipe 相位上下文)→ 必须拒绝。
-    let same_marker_on_ordinary_coder =
-        validate_tool_policy_for_role(&AdapterRole::Executor, Some(&marker_policy));
+    // root recipe 通道(RootRecipe 相位:durable operation 凭据 + receipt
+    // context 完整)→ 放行。
+    let valid_recipe_marker_result = guard_lc_validated_launch(
+        true,
+        &AdapterRole::Executor,
+        &AdapterRole::Executor,
+        Some(&marker_policy),
+    );
+    // 同一 marker 到普通 Coder 启动(Normal 相位,无 root recipe durable
+    // operation 上下文)→ 必须拒绝,不得借 marker 获取 root 写权。
+    let same_marker_on_ordinary_coder = guard_lc_validated_launch(
+        false,
+        &AdapterRole::Executor,
+        &AdapterRole::Executor,
+        Some(&marker_policy),
+    );
 
     assert!(valid_recipe_marker_result.is_ok());
     assert!(same_marker_on_ordinary_coder.is_err());
