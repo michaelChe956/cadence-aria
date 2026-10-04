@@ -162,11 +162,28 @@ pub(crate) fn validate_role_chain_for_declared_enrollment_target(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::product::logical_codebase::EnrollmentTarget;
-    use crate::product::logical_codebase::{
-        AuthorityAggregateIndexReference, RepositoryAuthorityResolution, RepositoryTargetKind,
-        ResolvedTargetIdentity,
+    use crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate;
+    use crate::cross_cutting::provider_registry::ProviderRegistry;
+    use crate::product::app_paths::ProductAppPaths;
+    use crate::product::logical_codebase::policy::AggregatePolicyArtifactStore;
+    use crate::product::logical_codebase::policy::{
+        ProviderDialect, ProviderWireDialect, SessionPolicyAction,
     };
+    use crate::product::logical_codebase::production_policy_resolvers::StoreBackedProviderCapabilitySource;
+    use crate::product::logical_codebase::provider_capability_store::{
+        CapabilityEvidence, PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION, ProviderActionCapability,
+        ProviderActionMatrix, ProviderCapabilityRecord, ProviderCapabilityStore,
+        RootRecipeEvidence,
+    };
+    use crate::product::logical_codebase::provider_gateway::{
+        LogicalCodebaseProviderGateway, PolicyTargetResolver, ProviderRefType, ResumeEvidenceState,
+    };
+    use crate::product::logical_codebase::{
+        AuthorityAggregateIndexReference, EnrollmentTarget, RepositoryAuthorityResolution,
+        RepositoryTargetKind, ResolvedTargetIdentity,
+    };
+    use crate::product::models::ProviderName;
+    use std::sync::Arc;
 
     fn lc_carrier() -> AutomationCarrierResolution {
         AutomationCarrierResolution::LogicalCodebase {
@@ -193,6 +210,23 @@ mod tests {
         }
     }
 
+    fn single_repository_carrier() -> AutomationCarrierResolution {
+        AutomationCarrierResolution::SingleRepository {
+            target: EnrollmentTarget::SingleRepository {
+                repository_id: "repo-1".to_string(),
+            },
+        }
+    }
+
+    fn lc_declared_target() -> EnrollmentTarget {
+        EnrollmentTarget::LogicalCodebase {
+            logical_codebase_id: "logical_codebase_0001".to_string(),
+            logical_repository_id: crate::product::logical_codebase::LogicalRepositoryId(
+                uuid::Uuid::nil(),
+            ),
+        }
+    }
+
     fn violations_of(error: ApiError) -> Vec<serde_json::Value> {
         error
             .details
@@ -202,12 +236,471 @@ mod tests {
             .unwrap_or_default()
     }
 
-    /// C5 Task 3 主链：LC 载体下 author=Pi（plan_author＋coder 违规）且
-    /// reviewer=KimiCode（plan/code/internal reviewer 违规）→ 同一次 422
-    /// payload 列出全部 5 个角色（一次列全，不逐次试错）。
+    /// 三调用点(GET/Enable/rebind)共享 verdict 的比较面:违规
+    /// role+reason_code 序列。
+    fn violation_reasons(error: ApiError) -> Vec<String> {
+        violations_of(error)
+            .iter()
+            .map(|violation| {
+                format!(
+                    "{}:{}",
+                    violation["role"].as_str().unwrap_or_default(),
+                    violation["reason_code"].as_str().unwrap_or_default()
+                )
+            })
+            .collect()
+    }
+
+    // ---- Task 8 fixture:真实 store-backed capability source + 计数 adapter ----
+
+    /// 预检永不解析 target(`action_admission_verdict` 只读 capability,
+    /// 不触达 resolver);占位实现 fail-closed。
+    struct UnreachableTargetResolver;
+    impl PolicyTargetResolver for UnreachableTargetResolver {
+        fn resolve_and_revalidate(
+            &self,
+            _request: &crate::product::logical_codebase::provider_gateway::SessionLaunchRequest,
+        ) -> Result<
+            crate::product::logical_codebase::policy::PolicyTarget,
+            crate::product::logical_codebase::provider_gateway::ProviderGatewayError,
+        > {
+            Err(
+                crate::product::logical_codebase::provider_gateway::ProviderGatewayError::Target(
+                    "role-chain preflight never resolves targets".to_string(),
+                ),
+            )
+        }
+    }
+
+    struct CountingStreamingAdapter {
+        start_count: std::sync::atomic::AtomicUsize,
+    }
+    impl CountingStreamingAdapter {
+        fn new() -> Self {
+            Self {
+                start_count: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+        fn start_count(&self) -> usize {
+            self.start_count.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+    #[async_trait::async_trait]
+    impl crate::cross_cutting::streaming_provider::StreamingProviderAdapter
+        for CountingStreamingAdapter
+    {
+        async fn start(
+            &self,
+            _input: crate::cross_cutting::streaming_provider::StreamingProviderInput,
+            _cancel: tokio_util::sync::CancellationToken,
+        ) -> Result<
+            crate::cross_cutting::streaming_provider::ProviderSession,
+            crate::cross_cutting::provider_adapter::ProviderAdapterError,
+        > {
+            self.start_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let (_event_tx, events) = tokio::sync::mpsc::channel(1);
+            let (commands, _command_rx) = tokio::sync::mpsc::channel(1);
+            Ok(crate::cross_cutting::streaming_provider::ProviderSession {
+                events,
+                commands,
+                native_session_id: None,
+            })
+        }
+    }
+
+    struct StubSyncAdapter;
+    impl crate::cross_cutting::provider_adapter::ProviderAdapter for StubSyncAdapter {
+        fn run(
+            &self,
+            _input: &crate::protocol::contracts::AdapterInput,
+        ) -> Result<
+            crate::protocol::contracts::AdapterOutput,
+            crate::cross_cutting::provider_adapter::ProviderAdapterError,
+        > {
+            use crate::protocol::contracts::TimeoutStatus;
+            Ok(crate::protocol::contracts::AdapterOutput {
+                exit_code: Some(0),
+                stdout: "ok".to_string(),
+                stderr: String::new(),
+                structured_output: None,
+                files_modified: Vec::new(),
+                duration_ms: 0,
+                timeout_status: TimeoutStatus::NotTimedOut,
+            })
+        }
+    }
+
+    fn always_available_gate() -> Arc<ProviderAvailabilityGate> {
+        use crate::cross_cutting::provider_availability_gate::ProviderHealthSource;
+        use crate::cross_cutting::provider_health::{ProviderHealthEntry, ProviderHealthSnapshot};
+        use chrono::Utc;
+
+        struct AlwaysHealthy(Arc<ProviderHealthSnapshot>);
+        impl ProviderHealthSource for AlwaysHealthy {
+            fn snapshot(&self) -> Arc<ProviderHealthSnapshot> {
+                self.0.clone()
+            }
+            fn degraded(&self) -> bool {
+                false
+            }
+        }
+
+        let checked_at = Utc::now();
+        let snapshot = Arc::new(ProviderHealthSnapshot {
+            schema_version: 1,
+            generation: 1,
+            checked_at,
+            providers: [
+                ProviderName::ClaudeCode,
+                ProviderName::Codex,
+                ProviderName::Pi,
+                ProviderName::KimiCode,
+            ]
+            .into_iter()
+            .map(|provider| ProviderHealthEntry {
+                provider,
+                command: "stub".to_string(),
+                available: true,
+                version: Some("1.0".to_string()),
+                reason_code: None,
+                reason: None,
+                checked_at,
+            })
+            .collect(),
+        });
+        Arc::new(ProviderAvailabilityGate::new(Arc::new(AlwaysHealthy(
+            snapshot,
+        ))))
+    }
+
+    /// capability 记录:`confirmed=true` 三 action 行全 Confirmed 且 trust
+    /// Confirmed(证据完整);否则矩阵/边界/trust 全 Unknown(未探测,
+    /// 「boundary Unknown/trust 缺失」的 action 证据缺失形态)。
+    fn capability_record(
+        provider_type: ProviderRefType,
+        confirmed: bool,
+    ) -> ProviderCapabilityRecord {
+        let (adapter_dialect, wire_dialect) = match provider_type {
+            ProviderRefType::ClaudeCode => (
+                ProviderDialect::ClaudeCodeCliV1,
+                ProviderWireDialect::ClaudeCodeStreamJson,
+            ),
+            ProviderRefType::Codex => (
+                ProviderDialect::CodexCliV1,
+                ProviderWireDialect::CodexAppServerRpc,
+            ),
+            ProviderRefType::Pi => (ProviderDialect::PiRpcV1, ProviderWireDialect::PiRpc),
+            ProviderRefType::KimiCode => (ProviderDialect::KimiAcpV1, ProviderWireDialect::KimiAcp),
+        };
+        let evidence = |confirmed: bool| {
+            if confirmed {
+                crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence::Confirmed
+            } else {
+                crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence::Unknown
+            }
+        };
+        let row = |action: SessionPolicyAction| ProviderActionCapability {
+            action,
+            launch: evidence(confirmed),
+            resume: evidence(confirmed),
+            write_boundary: evidence(confirmed),
+            projection_digest: format!("projection-digest-{action:?}"),
+            evidence_ref: format!("probe://{action:?}"),
+        };
+        ProviderCapabilityRecord {
+            provider_type,
+            schema_version: PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION,
+            version: "1.4.0".to_string(),
+            adapter_dialect,
+            wire_dialect,
+            capability_snapshot_ref: "cap_managed_snapshot".to_string(),
+            evidence: CapabilityEvidence::ProductionVerified,
+            resume_evidence: ResumeEvidenceState::Unsupported,
+            supported_actions: Vec::new(),
+            action_matrix: if confirmed {
+                ProviderActionMatrix::from_rows(vec![
+                    row(SessionPolicyAction::PlanningReadOnly),
+                    row(SessionPolicyAction::CodingTargetWrite),
+                    row(SessionPolicyAction::ReviewReadOnly),
+                ])
+                .unwrap()
+            } else {
+                ProviderActionMatrix::unknown_all()
+            },
+            trust: evidence(confirmed),
+            probed_at: None,
+            probe_artifact_ref: None,
+            root_recipe_evidence: RootRecipeEvidence::None,
+        }
+    }
+
+    /// ClaudeCode bootstrap 过渡桥形状:矩阵全 Unknown 但 legacy
+    /// supported_actions 全列——require_supported 沿过渡桥放行(既有
+    /// root recipe 聚合链零回归语义)。
+    fn claude_bootstrap_record() -> ProviderCapabilityRecord {
+        let mut record = capability_record(ProviderRefType::ClaudeCode, false);
+        record.evidence = CapabilityEvidence::FixtureVerified;
+        record.resume_evidence = ResumeEvidenceState::Confirmed;
+        record.supported_actions = vec![
+            SessionPolicyAction::PlanningReadOnly,
+            SessionPolicyAction::CodingTargetWrite,
+            SessionPolicyAction::ReviewReadOnly,
+        ];
+        record
+    }
+
+    struct RoleChainFixture {
+        _temp: tempfile::TempDir,
+        streaming_adapter: Arc<CountingStreamingAdapter>,
+        gateway: LogicalCodebaseProviderGateway,
+    }
+
+    /// 真实 store-backed gateway + 指定 capability 记录;preflight 全程
+    /// 只读(`action_admission_verdict`),registry 挂计数 adapter 以断言
+    /// 零 provider 启动。
+    fn role_chain_fixture(records: &[ProviderCapabilityRecord]) -> RoleChainFixture {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let paths = ProductAppPaths::new(temp.path().to_path_buf());
+        let project_id = "project_t08".to_string();
+        let lc_id = "lc_t08".to_string();
+        let capability_store = ProviderCapabilityStore::for_lc(paths.clone(), lc_id.clone());
+        for record in records {
+            capability_store
+                .upsert(&project_id, record)
+                .expect("upsert");
+        }
+        let streaming_adapter = Arc::new(CountingStreamingAdapter::new());
+        let mut registry = ProviderRegistry::new();
+        for provider in [
+            ProviderName::ClaudeCode,
+            ProviderName::Codex,
+            ProviderName::Pi,
+            ProviderName::KimiCode,
+        ] {
+            registry.register(provider, streaming_adapter.clone());
+        }
+        let authority_root = temp.path().join("authority-root");
+        std::fs::create_dir_all(&authority_root).expect("authority root");
+        let gateway = LogicalCodebaseProviderGateway::new(
+            AggregatePolicyArtifactStore::new(paths.clone()),
+            Arc::new(StoreBackedProviderCapabilitySource::for_lc(
+                paths, project_id, lc_id,
+            )),
+            Arc::new(UnreachableTargetResolver),
+            Arc::new(registry),
+            Arc::new(StubSyncAdapter),
+            always_available_gate(),
+            authority_root,
+        );
+        RoleChainFixture {
+            _temp: temp,
+            streaming_adapter,
+            gateway,
+        }
+    }
+
+    /// Task 8 主链(断言组 401-406):同一次预检列全全部角色的 action
+    /// 证据失败——Pi 行未探测(boundary Unknown)、Kimi trust 未建立
+    /// (记录 trust Unknown 且行未探测)同场五角色全列;Codex 受限
+    /// coding 协议证据缺失经路由禁令列出。预检零 provider 启动。
+    #[tokio::test]
+    async fn lcg_t08_preflight_lists_all_role_provider_action_evidence_failures() {
+        use axum::response::IntoResponse;
+
+        let unprobed = role_chain_fixture(&[
+            capability_record(ProviderRefType::Pi, false),
+            capability_record(ProviderRefType::KimiCode, false),
+        ]);
+        let error = validate_role_chain_for_enrollment(
+            Some(&unprobed.gateway),
+            &ProviderName::Pi,
+            &ProviderName::KimiCode,
+            &lc_carrier(),
+            true,
+            false,
+        )
+        .unwrap_err();
+        // HTTP 形态:同一 ApiError 经 IntoResponse 映射 422 + 稳定码。
+        let response = error.into_response();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(status, axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(payload["code"], "automation_role_chain_unsupported");
+        let violations = payload["details"]["violations"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let roles: Vec<&str> = violations
+            .iter()
+            .map(|violation| violation["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            roles,
+            [
+                "plan_author",
+                "coder",
+                "plan_reviewer",
+                "code_reviewer",
+                "internal_reviewer"
+            ]
+        );
+        assert!(
+            violations
+                .iter()
+                .all(|v| v.get("action").is_some() && v.get("reason_code").is_some()),
+            "violations must carry action evidence fields: {violations:?}"
+        );
+        // 缺当前 action 证据的稳定判别码(Pi boundary 行未探测/Kimi
+        // trust 缺失均以 launch 分格证据缺失呈现)。
+        assert!(
+            violations
+                .iter()
+                .all(|v| v["reason_code"] == "provider_capability_launch_not_confirmed")
+        );
+
+        // Codex 受限 coding 协议证据缺失:author=Codex 时 plan_author/coder
+        // 以路由禁令稳定码列出(codex_danger_full_access_unsupported)。
+        let codex = role_chain_fixture(&[
+            capability_record(ProviderRefType::Codex, false),
+            capability_record(ProviderRefType::KimiCode, false),
+        ]);
+        let error = validate_role_chain_for_enrollment(
+            Some(&codex.gateway),
+            &ProviderName::Codex,
+            &ProviderName::KimiCode,
+            &lc_carrier(),
+            true,
+            false,
+        )
+        .unwrap_err();
+        let violations = violations_of(error);
+        let head: Vec<&str> = violations
+            .iter()
+            .map(|violation| violation["role"].as_str().unwrap())
+            .take(2)
+            .collect();
+        assert_eq!(head, ["plan_author", "coder"], "{violations:?}");
+        assert!(
+            violations
+                .iter()
+                .take(2)
+                .all(|v| v["reason_code"] == "codex_danger_full_access_unsupported")
+        );
+
+        let provider_start_count =
+            unprobed.streaming_adapter.start_count() + codex.streaming_adapter.start_count();
+        assert_eq!(provider_start_count, 0);
+    }
+
+    /// Task 8(断言组 407):LC `gateway_required=false` 无旁路效力——
+    /// 与 true 标志产出同一 verdict。
+    #[test]
+    fn lcg_t08_lc_gateway_false_still_checks_all_roles() {
+        let fixture = role_chain_fixture(&[claude_bootstrap_record()]);
+        let lc_false_flag_verdict = violation_reasons(
+            validate_role_chain_for_enrollment(
+                Some(&fixture.gateway),
+                &ProviderName::Pi,
+                &ProviderName::ClaudeCode,
+                &lc_carrier(),
+                false,
+                false,
+            )
+            .unwrap_err(),
+        );
+        let lc_true_flag_verdict = violation_reasons(
+            validate_role_chain_for_enrollment(
+                Some(&fixture.gateway),
+                &ProviderName::Pi,
+                &ProviderName::ClaudeCode,
+                &lc_carrier(),
+                true,
+                false,
+            )
+            .unwrap_err(),
+        );
+        assert!(!lc_false_flag_verdict.is_empty());
+        assert_eq!(lc_false_flag_verdict, lc_true_flag_verdict);
+    }
+
+    /// Task 8(断言组 408):SingleRepository 保留原跳过语义——LC 下
+    /// 全违规的组合在单仓载体下不误拒。
+    #[test]
+    fn lcg_t08_single_repository_skips_lc_predicates() {
+        let fixture = role_chain_fixture(&[]);
+        let single_repository_verdict = validate_role_chain_for_enrollment(
+            Some(&fixture.gateway),
+            &ProviderName::Pi,
+            &ProviderName::KimiCode,
+            &single_repository_carrier(),
+            true,
+            false,
+        );
+        assert!(single_repository_verdict.is_ok());
+    }
+
+    /// Task 8(断言组 409-410):GET 投影、PUT Enable 从同 carrier,rebind
+    /// 沿 declared target——三调用点共享同一 verdict。
+    #[test]
+    fn lcg_t08_get_enable_rebind_share_verdict() {
+        let fixture = role_chain_fixture(&[
+            capability_record(ProviderRefType::Pi, false),
+            capability_record(ProviderRefType::KimiCode, false),
+        ]);
+        let get_reasons = violation_reasons(
+            validate_role_chain_for_enrollment(
+                Some(&fixture.gateway),
+                &ProviderName::Pi,
+                &ProviderName::KimiCode,
+                &lc_carrier(),
+                true,
+                false,
+            )
+            .unwrap_err(),
+        );
+        let enable_reasons = violation_reasons(
+            validate_role_chain_for_enrollment(
+                Some(&fixture.gateway),
+                &ProviderName::Pi,
+                &ProviderName::KimiCode,
+                &lc_carrier(),
+                true,
+                false,
+            )
+            .unwrap_err(),
+        );
+        let rebind_reasons = violation_reasons(
+            validate_role_chain_for_declared_enrollment_target(
+                Some(&fixture.gateway),
+                &ProviderName::Pi,
+                &ProviderName::KimiCode,
+                &lc_declared_target(),
+                true,
+                false,
+            )
+            .unwrap_err(),
+        );
+        assert!(!get_reasons.is_empty());
+        assert_eq!(get_reasons, enable_reasons);
+        assert_eq!(enable_reasons, rebind_reasons);
+    }
+
+    /// 主链(1a 四家映射后重钉):Pi author + KimiCode reviewer 的全部
+    /// 证据缺失角色一次列全(roles 序即五角色链序);证据完整的
+    /// ClaudeCode 组合通过。
     #[test]
     fn role_chain_preflight_lists_every_violating_role_at_once() {
+        let fixture = role_chain_fixture(&[
+            capability_record(ProviderRefType::Pi, false),
+            capability_record(ProviderRefType::KimiCode, false),
+            capability_record(ProviderRefType::ClaudeCode, true),
+        ]);
         let error = validate_role_chain_for_enrollment(
+            Some(&fixture.gateway),
             &ProviderName::Pi,
             &ProviderName::KimiCode,
             &lc_carrier(),
@@ -232,16 +725,11 @@ mod tests {
             ],
             "every violating role must be listed at once: {violations:?}"
         );
-        for violation in &violations {
-            assert_eq!(
-                violation["reason_code"], "provider_unsupported_for_gateway_launch",
-                "{violation:?}"
-            );
-        }
 
-        // 纯净组合零违规。
+        // 证据完整的组合零违规。
         assert!(
             validate_role_chain_for_enrollment(
+                Some(&fixture.gateway),
                 &ProviderName::ClaudeCode,
                 &ProviderName::ClaudeCode,
                 &lc_carrier(),
@@ -252,19 +740,19 @@ mod tests {
         );
     }
 
-    /// 路由阻断：任一角色派生为 Codex（固定 danger-full-access 静态拒）→
-    /// 该角色以路由禁令 reason_code 列出。
+    /// 路由阻断:任一角色派生为 Codex(受限 coding 协议证据缺失,当前
+    /// 固定 danger-full-access)→ 该角色以路由禁令 reason_code 列出。
     #[test]
     fn role_chain_preflight_routes_codex_violations() {
+        let fixture = role_chain_fixture(&[
+            capability_record(ProviderRefType::Codex, false),
+            capability_record(ProviderRefType::ClaudeCode, true),
+        ]);
         let error = validate_role_chain_for_declared_enrollment_target(
+            Some(&fixture.gateway),
             &ProviderName::Codex,
             &ProviderName::ClaudeCode,
-            &EnrollmentTarget::LogicalCodebase {
-                logical_codebase_id: "logical_codebase_0001".to_string(),
-                logical_repository_id: crate::product::logical_codebase::LogicalRepositoryId(
-                    uuid::Uuid::nil(),
-                ),
-            },
+            &lc_declared_target(),
             true,
             false,
         )
@@ -287,75 +775,87 @@ mod tests {
         }
     }
 
-    /// 单仓载体整体跳过 gateway 谓词：LC 不支持但本机可用的组合不误拒
+    /// 单仓载体整体跳过 gateway 谓词:LC 不支持但本机可用的组合不误拒
     ///（Review Focus 5／A10）。
     #[test]
     fn role_chain_preflight_skips_gateway_predicates_for_single_repository() {
-        let single = AutomationCarrierResolution::SingleRepository {
-            target: EnrollmentTarget::SingleRepository {
-                repository_id: "repo-1".to_string(),
-            },
-        };
+        let fixture = role_chain_fixture(&[]);
         for (author, reviewer) in [
             (ProviderName::Pi, ProviderName::KimiCode),
             (ProviderName::KimiCode, ProviderName::Pi),
         ] {
             assert!(
-                validate_role_chain_for_enrollment(&author, &reviewer, &single, true, false)
-                    .is_ok(),
+                validate_role_chain_for_enrollment(
+                    Some(&fixture.gateway),
+                    &author,
+                    &reviewer,
+                    &single_repository_carrier(),
+                    true,
+                    false
+                )
+                .is_ok(),
                 "single-repository carrier must skip gateway predicates"
             );
         }
     }
 
-    /// 旧实名 1/3：Pi/KimiCode 无 gateway dialect，静态拒且携带稳定 verdict。
+    /// 旧实名 1/3 重钉(Task 8 新合同):Pi/KimiCode 已是 1a 合法映射,
+    /// 「恒静态 unsupported」语义失效——缺当前 action 证据(capability
+    /// 记录缺失)时拒,证据完整(行 Confirmed)时通过。
     #[test]
-    fn kimi_code_and_pi_are_statically_rejected() {
-        let lc = EnrollmentTarget::LogicalCodebase {
-            logical_codebase_id: "logical_codebase_0001".to_string(),
-            logical_repository_id: crate::product::logical_codebase::LogicalRepositoryId(
-                uuid::Uuid::nil(),
-            ),
-        };
+    fn kimi_code_and_pi_are_admitted_only_with_action_evidence() {
+        let without_evidence = role_chain_fixture(&[]);
+        let with_evidence = role_chain_fixture(&[
+            capability_record(ProviderRefType::Pi, true),
+            capability_record(ProviderRefType::KimiCode, true),
+        ]);
         for provider in [ProviderName::KimiCode, ProviderName::Pi] {
             let error = validate_role_chain_for_declared_enrollment_target(
+                Some(&without_evidence.gateway),
                 &provider,
                 &ProviderName::ClaudeCode,
-                &lc,
+                &lc_declared_target(),
                 true,
                 false,
             )
             .unwrap_err();
             assert_eq!(error.code, AUTOMATION_ROLE_CHAIN_UNSUPPORTED);
-            let violations = error
-                .details
-                .get("violations")
-                .and_then(|value| value.as_array())
-                .cloned()
-                .unwrap_or_default();
+            let violations = violations_of(error);
             assert!(
                 violations.iter().all(|violation| {
-                    violation["reason_code"] == "provider_unsupported_for_gateway_launch"
+                    violation["reason_code"] == "provider_capability_launch_not_confirmed"
                 }),
-                "should carry the gateway mapping verdict, got: {violations:?}"
+                "missing action evidence must deny via the capability verdict, got: {violations:?}"
+            );
+            // 证据完整(行 Confirmed)时通过。
+            assert!(
+                validate_role_chain_for_declared_enrollment_target(
+                    Some(&with_evidence.gateway),
+                    &provider,
+                    &ProviderName::ClaudeCode,
+                    &lc_declared_target(),
+                    true,
+                    false
+                )
+                .is_ok(),
+                "confirmed action rows must admit {provider:?}"
             );
         }
     }
 
-    /// 旧实名 2/3：Codex 在当前固定 danger-full-access sandbox 下被路由禁令
-    /// 静态拒绝。
+    /// 旧实名 2/3:Codex 在当前固定 danger-full-access sandbox 下被路由
+    /// 禁令拒绝(danger profile 无受限协议证据)。
     #[test]
     fn codex_is_rejected_under_current_default_sandbox() {
-        let lc = EnrollmentTarget::LogicalCodebase {
-            logical_codebase_id: "logical_codebase_0001".to_string(),
-            logical_repository_id: crate::product::logical_codebase::LogicalRepositoryId(
-                uuid::Uuid::nil(),
-            ),
-        };
+        let fixture = role_chain_fixture(&[
+            capability_record(ProviderRefType::Codex, false),
+            capability_record(ProviderRefType::ClaudeCode, true),
+        ]);
         let error = validate_role_chain_for_declared_enrollment_target(
+            Some(&fixture.gateway),
             &ProviderName::ClaudeCode,
             &ProviderName::Codex,
-            &lc,
+            &lc_declared_target(),
             true,
             false,
         )
@@ -371,32 +871,29 @@ mod tests {
         );
     }
 
-    /// 旧实名 3/3：ClaudeCode 通过；Fake 仅测试运行豁免；非 gateway 路径
-    /// 不预检；测试模式不放行 Pi/KimiCode。
+    /// 旧实名 3/3(重钉):ClaudeCode 通过;Fake 仅测试运行豁免;LC
+    /// `gateway_required=false` 无旁路;测试模式不放行 Pi/KimiCode。
     #[test]
     fn claude_code_passes_and_fake_requires_test_run() {
-        let lc = EnrollmentTarget::LogicalCodebase {
-            logical_codebase_id: "logical_codebase_0001".to_string(),
-            logical_repository_id: crate::product::logical_codebase::LogicalRepositoryId(
-                uuid::Uuid::nil(),
-            ),
-        };
+        let fixture = role_chain_fixture(&[claude_bootstrap_record()]);
         assert!(
             validate_role_chain_for_declared_enrollment_target(
+                Some(&fixture.gateway),
                 &ProviderName::ClaudeCode,
                 &ProviderName::ClaudeCode,
-                &lc,
+                &lc_declared_target(),
                 true,
                 false
             )
             .is_ok()
         );
-        // 真实运行 Fake 无 gateway dialect；仅测试运行豁免。
+        // 真实运行 Fake 无 gateway dialect(映射 fail-closed);仅测试运行豁免。
         assert!(
             validate_role_chain_for_declared_enrollment_target(
+                Some(&fixture.gateway),
                 &ProviderName::Fake,
                 &ProviderName::Fake,
-                &lc,
+                &lc_declared_target(),
                 true,
                 false
             )
@@ -404,31 +901,34 @@ mod tests {
         );
         assert!(
             validate_role_chain_for_declared_enrollment_target(
+                Some(&fixture.gateway),
                 &ProviderName::Fake,
                 &ProviderName::Fake,
-                &lc,
+                &lc_declared_target(),
                 true,
                 true
             )
             .is_ok()
         );
-        // 非 gateway 路径不预检。
+        // LC 的 gateway_required=false 无旁路效力:仍检查全部角色。
         assert!(
             validate_role_chain_for_declared_enrollment_target(
+                Some(&fixture.gateway),
                 &ProviderName::KimiCode,
                 &ProviderName::KimiCode,
-                &lc,
+                &lc_declared_target(),
                 false,
                 false
             )
-            .is_ok()
+            .is_err()
         );
-        // 测试模式不放行 Pi/KimiCode。
+        // 测试模式不放行 Pi/KimiCode(缺证据照拒)。
         assert!(
             validate_role_chain_for_declared_enrollment_target(
+                Some(&fixture.gateway),
                 &ProviderName::Pi,
                 &ProviderName::KimiCode,
-                &lc,
+                &lc_declared_target(),
                 true,
                 true
             )
