@@ -145,6 +145,72 @@ where
     result
 }
 
+/// Task 9c:LC 显式 resume 的原生 get_state 确认(spawn 后、start 返回前)。
+///
+/// pi 的 resume 语义由 `--session-id` 传入,但「已恢复」只能由真实 RPC
+/// `get_state` 应答证明:应答 `data.sessionId` 必须与请求 id 逐字相等。
+/// 缺 id(应答无 sessionId)或错 id(应答不同会话)属于已启动 child 后的
+/// runtime 失败,返回显式「未恢复」错误(调用方沿 kill 链终止并回收子进
+/// 程,不伪称零 spawn);绝不回填请求 id、绝不清 id 转 fresh。
+pub(crate) async fn confirm_pi_native_resume_id<W>(
+    peer: &JsonRpcPeer<W>,
+    cancel: &CancellationToken,
+    requested_native_id: &str,
+) -> Result<String, ProviderAdapterError>
+where
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    // 预会话命名空间沿用 `pi-<N>`(F3);run_pi_session 的 next_id 独立从 1
+    // 计数,两阶段顺序执行,响应按 id 匹配不冲突。
+    let request_id = "pi-1".to_string();
+    peer.send(json!({ "id": request_id, "type": "get_state" }))
+        .await?;
+    let timeout = tokio::time::sleep(PI_RPC_REQUEST_TIMEOUT);
+    tokio::pin!(timeout);
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                return Err(provider_error(
+                    "pi native resume confirmation cancelled before get_state answered (session NOT resumed)",
+                ));
+            }
+            _ = &mut timeout => {
+                return Err(ProviderAdapterError::timeout_with_details(
+                    "pi native resume confirmation timed out waiting for get_state (session NOT resumed)",
+                    String::new(),
+                    String::new(),
+                    u64::try_from(PI_RPC_REQUEST_TIMEOUT.as_millis()).unwrap_or(u64::MAX),
+                ));
+            }
+            incoming = peer.next_incoming() => {
+                let Some(incoming) = incoming else {
+                    return Err(provider_error(
+                        "pi rpc stream ended before get_state confirmed the resume (session NOT resumed)",
+                    ));
+                };
+                if incoming.get("type").and_then(Value::as_str) != Some("response")
+                    || incoming.get("id").and_then(pi_id_key).as_deref()
+                        != Some(request_id.as_str())
+                {
+                    // 确认阶段只等 get_state 应答;其余事件/应答留给会话任务。
+                    continue;
+                }
+                ensure_pi_success(&incoming)?;
+                return match parse_pi_session_id(&incoming) {
+                    Some(confirmed) if confirmed == requested_native_id => Ok(confirmed),
+                    Some(other) => Err(provider_error(format!(
+                        "pi get_state session id {other} does not confirm the requested resume id {requested_native_id} (session NOT resumed; the started child was killed and reaped, not a zero-spawn refusal)"
+                    ))),
+                    None => Err(provider_error(format!(
+                        "pi get_state response did not contain a session id confirming the requested resume id {requested_native_id} (session NOT resumed; the started child was killed and reaped, not a zero-spawn refusal)"
+                    ))),
+                };
+            }
+        }
+    }
+}
+
 async fn run_pi_session_inner<W>(
     peer: JsonRpcPeer<W>,
     mut command_rx: mpsc::Receiver<ProviderCommand>,
@@ -186,12 +252,27 @@ where
         PiResponseWait::Aborted => return Ok(()),
     };
     ensure_pi_success(&get_state_response)?;
-    let session_id = parse_pi_session_id(&get_state_response).or_else(|| {
-        input
-            .resume_provider_session_id
-            .clone()
-            .filter(|id| !id.trim().is_empty())
-    });
+    // Task 9c:resume 请求下不回填请求 id——完成事件的原生 id 必须来自
+    // get_state 应答且与请求逐字相等;缺 id(应答无 sessionId)或错 id
+    // (应答不同会话)都是「未恢复」runtime 失败,不伪称续接。fresh 会话
+    // (无 resume id)照常采纳应答 id。
+    let session_id = match input
+        .resume_provider_session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        Some(requested) => match parse_pi_session_id(&get_state_response) {
+            Some(confirmed) if confirmed == requested => Some(confirmed),
+            other => {
+                return Err(provider_error(format!(
+                    "pi get_state session id {} does not confirm the requested resume id {requested} (session NOT resumed)",
+                    other.as_deref().unwrap_or("<missing>")
+                )));
+            }
+        },
+        None => parse_pi_session_id(&get_state_response),
+    };
 
     let prompt = send_pi_command(
         &peer,

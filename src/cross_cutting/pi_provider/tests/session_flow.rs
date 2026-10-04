@@ -951,16 +951,12 @@ async fn lcg_t09_pi_session_get_state_missing_or_wrong_id_never_backfilled() {
             .await;
         });
         let input = streaming_input_for_test(Some("sess-requested-t09c".to_string()));
-        let result = run_pi_session(
-            peer,
-            command_rx,
-            event_tx,
-            input,
-            CancellationToken::new(),
-        )
-        .await;
+        let result =
+            run_pi_session(peer, command_rx, event_tx, input, CancellationToken::new()).await;
         let Err(rejected) = result else {
-            panic!("a get_state response without sessionId must not be backfilled with the requested resume id")
+            panic!(
+                "a get_state response without sessionId must not be backfilled with the requested resume id"
+            )
         };
         assert!(
             rejected.details.contains("sess-requested-t09c")
@@ -974,9 +970,11 @@ async fn lcg_t09_pi_session_get_state_missing_or_wrong_id_never_backfilled() {
                 .any(|event| matches!(event, ProviderEvent::Completed(_))),
             "an unconfirmed resume must never complete: {events:?}"
         );
-        assert!(events
-            .iter()
-            .any(|event| matches!(event, ProviderEvent::Failed { .. })));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ProviderEvent::Failed { .. }))
+        );
     }
 
     // 错 id:应答不同 sessionId → 不采纳陌生 id。
@@ -1000,14 +998,8 @@ async fn lcg_t09_pi_session_get_state_missing_or_wrong_id_never_backfilled() {
             .await;
         });
         let input = streaming_input_for_test(Some("sess-requested-t09c".to_string()));
-        let result = run_pi_session(
-            peer,
-            command_rx,
-            event_tx,
-            input,
-            CancellationToken::new(),
-        )
-        .await;
+        let result =
+            run_pi_session(peer, command_rx, event_tx, input, CancellationToken::new()).await;
         let Err(rejected) = result else {
             panic!("a get_state response naming a different session must not be adopted")
         };

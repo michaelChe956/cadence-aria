@@ -638,9 +638,10 @@ impl StreamingProviderAdapter for PiProvider {
     /// 消费冻结 envelope 派生的不可伪造 boundary plan 与 LC 权限投影,以
     /// canonical LC root 为进程 cwd 启动,统一落盘 `ProviderStartAudit.
     /// lc_projection`;无通用 tool policy 的角色(Coding/Executor)同样执行
-    /// exact version 解析、原生会话(id 预生成/传入)与统一 launch audit,
-    /// 不以 `tool_policy=None` 早退。resume 的冻结三元组严格比对由 Task 9
-    /// 补(与 4a 对齐)。
+    /// exact version 解析、原生会话与统一 launch audit,不以
+    /// `tool_policy=None` 早退。Task 9:resume 在 child 前比较全 LC audit
+    /// (9a),spawn 后由 RPC `get_state` 真实确认同 id(9c)——缺/错 id
+    /// kill/reap 并显式记录「未恢复」,不回填请求 id、不清 id 转 fresh。
     async fn start_validated(
         &self,
         validated: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
@@ -806,8 +807,8 @@ impl StreamingProviderAdapter for PiProvider {
             }
         }
 
-        // 原生会话 id:pi 的有界握手 = id 预生成/传入(fresh 预生成 uuid,
-        // resume 复用冻结 id;与 direct 策略路径同语义)。
+        // 原生会话 id:fresh 预生成 uuid,resume 复用冻结 id(spawn 后由
+        // Task 9c 的 get_state 确认真实同 id 才放行)。
         let native_session_id = input
             .resume_provider_session_id
             .as_deref()
@@ -841,6 +842,25 @@ impl StreamingProviderAdapter for PiProvider {
         // pi 是 Auto-only:与 direct 路径一致构造 bridge,但授权/命令转发
         // 永不经过它。
         let bridge = ApprovalBridge::new(ProviderPermissionMode::Auto, event_tx.clone());
+
+        // Task 9c:LC 显式 resume 的原生确认——spawn 后、事件/audit 落盘前
+        // 用 RPC `get_state` 应答核对同 id;缺/错 id 属于已启动 child 后的
+        // runtime 失败:kill/reap 并返回显式「未恢复」错误(不伪称零
+        // spawn、不回填请求 id、不清 id 转 fresh)。fresh 会话不受影响。
+        if let Some(requested_native_id) = input
+            .resume_provider_session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        {
+            if let Err(error) =
+                session::confirm_pi_native_resume_id(&peer, &cancel, requested_native_id).await
+            {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                return Err(error);
+            }
+        }
         let (command_tx, command_rx) = mpsc::channel(8);
         let _ = event_tx
             .send(ProviderEvent::StatusChanged(ProviderStatus::Starting))

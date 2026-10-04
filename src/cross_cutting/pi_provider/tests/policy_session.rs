@@ -830,23 +830,32 @@ async fn lcg_t09a_pi_lc_resume_audit_gate_zero_child_on_legacy_or_drift() {
         lc_projection,
     };
 
-    // 1)匹配的完整 LC 存档 → 续接:native id 即 resume id,child 正常启动。
+    // 1)匹配的完整 LC 存档 → 续接:9c 起续接由 RPC get_state 真实确认同 id
+    //    (fixture 以 PI_SESSION_ID 应答),native id 即 resume id,child 正常
+    //    启动于 canonical root。
     {
         let sink = RecordingToolPolicyAuditSink::new();
         sink.with_stored_provider_start(stored_record(Some(matching_lc_projection.clone())));
         let marker = fixture.paths.root().join("t09a-pi-matching-cwd-marker");
-        let raw = fixture.lc_streaming_input(
+        let mut raw = fixture.lc_streaming_input(
             AdapterRole::Executor,
             None,
             Some(sink.clone().bound()),
             Some("pi-session-resume-t09a".to_string()),
         );
-        // marker 经 env 注入(lc_cwd_pi_fixture 读取 $LC_CWD_MARKER)。
-        let mut raw = raw;
+        // marker 经 env 注入(lc_pi_rpc_resume_fixture 读取 $LC_CWD_MARKER)。
         raw.env_vars
             .insert("LC_CWD_MARKER".to_string(), marker.display().to_string());
-        let provider = PiProvider::new(lc_cwd_pi_fixture(&marker))
-            .with_version_supplier(policy_version_supplier());
+        raw.env_vars.insert(
+            "PI_SESSION_ID".to_string(),
+            "pi-session-resume-t09a".to_string(),
+        );
+        let provider = PiProvider::new(lc_pi_rpc_resume_fixture(
+            marker
+                .parent()
+                .expect("marker parent hosts the rpc fixture"),
+        ))
+        .with_version_supplier(policy_version_supplier());
         let session = provider
             .start_validated(
                 fixture.validated_coding_input(raw),
@@ -948,11 +957,11 @@ async fn lcg_t09a_pi_lc_resume_audit_gate_zero_child_on_legacy_or_drift() {
 
 // ==== Task 9c:Pi LC 原生 resume 的 get_state 真实同 id 确认(错/缺 id 绝不 fresh)====
 
-/// Task 9c fixture(fake pi RPC):`--version` 打印兼容版本;rpc 循环内按
-/// `PI_SESSION_ID` 应答 get_state(非空 → `data.sessionId`;空 → success 但
-/// 无 sessionId),prompt 应答后送 text_delta 与 agent_settled;登记 pid 到
-/// `PI_PID_MARKER`(kill/reap 断言),不自行退出——终止必须来自 adapter 的
-/// kill 链。
+/// Task 9c fixture(fake pi RPC):`--version` 打印兼容版本;rpc 循环前把进程
+/// `pwd -P` 写入 `LC_CWD_MARKER`、pid 写入 `PI_PID_MARKER`(kill/reap 断言);
+/// rpc 循环内按 `PI_SESSION_ID` 应答 get_state(非空 → `data.sessionId`;
+/// 空 → success 但无 sessionId),prompt 应答后送 text_delta 与
+/// agent_settled;不自行退出——终止必须来自 adapter 的 kill 链。
 #[cfg(unix)]
 fn lc_pi_rpc_resume_fixture(dir: &std::path::Path) -> PathBuf {
     write_executable(
@@ -960,6 +969,7 @@ fn lc_pi_rpc_resume_fixture(dir: &std::path::Path) -> PathBuf {
         "fake-lc-pi-rpc-resume",
         r#"#!/usr/bin/env bash
 if [ "$1" = "--version" ]; then echo 0.83.0; exit 0; fi
+pwd -P > "${LC_CWD_MARKER:-/dev/null}"
 echo $$ > "${PI_PID_MARKER:-/dev/null}"
 while IFS= read -r line; do
   id="$(printf '%s' "$line" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
@@ -1064,10 +1074,8 @@ async fn lcg_t09_pi_missing_or_wrong_native_id_never_fresh() {
             Some(sink.clone().bound()),
             Some(requested_native_id.clone()),
         );
-        raw.env_vars.insert(
-            "PI_SESSION_ID".to_string(),
-            requested_native_id.clone(),
-        );
+        raw.env_vars
+            .insert("PI_SESSION_ID".to_string(), requested_native_id.clone());
         let provider = PiProvider::new(lc_pi_rpc_resume_fixture(marker_dir.path()))
             .with_version_supplier(policy_version_supplier());
         let mut session = provider
@@ -1150,7 +1158,8 @@ async fn lcg_t09_pi_missing_or_wrong_native_id_never_fresh() {
             Some(sink.clone().bound()),
             Some(requested_native_id.clone()),
         );
-        raw.env_vars.insert("PI_SESSION_ID".to_string(), wrong_native_id.clone());
+        raw.env_vars
+            .insert("PI_SESSION_ID".to_string(), wrong_native_id.clone());
         raw.env_vars.insert(
             "PI_PID_MARKER".to_string(),
             pid_marker.display().to_string(),
