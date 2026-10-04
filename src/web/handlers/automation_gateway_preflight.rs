@@ -209,6 +209,33 @@ fn validate_role_chain(
     ))
 }
 
+/// Task 8b:三调用点(GET/Enable/rebind)共用的 readonly gateway 组装。
+/// `lc_id` 取 resolver 冻结的权威身份(GET/Enable)或 enrollment 声明
+/// target 的现有 LC(rebind);经 `build_readonly_for_lc` 只读组装
+/// (不运行 `ensure_bootstrap`,GET 不写 policy/capability/trust audit)。
+/// factory 缺失或组装失败返回 `None`——预检 fail-closed 列违规
+/// (`provider_gateway_denied`),不静默放行、不在读取路径物化自举桩。
+pub(crate) fn readonly_preflight_gateway(
+    state: &crate::web::state::WebAppState,
+    project_id: &str,
+    lc_id: Option<&str>,
+) -> Option<LogicalCodebaseProviderGateway> {
+    let factory = state.gateway_factory()?;
+    let lc_id = lc_id?;
+    factory
+        .build_readonly_for_lc(project_id, Some(lc_id))
+        .map_err(|error| {
+            tracing::warn!(
+                project_id,
+                lc_id,
+                error = %error,
+                "automation role-chain preflight: readonly gateway build failed; failing closed"
+            );
+            error
+        })
+        .ok()
+}
+
 /// 契约入口(Task 8 签名):GET 投影与 PUT Enable 的载体判定来自
 /// `resolve_automation_carrier`(唯一 resolver),同一 carrier 进同一
 /// 判定;`gateway` 为调用方经 readonly factory(`build_readonly_for_lc`)

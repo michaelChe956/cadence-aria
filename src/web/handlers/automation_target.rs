@@ -117,10 +117,16 @@ pub async fn get_automation_target(
             };
             // C5 Task 3/Task 8:唯一 logical target 确认后做完整角色链
             // 同源预检——与最终 PUT Enable 同一 carrier、同一判定,一次
-            // 列全全部违规角色(经 action_admission_verdict 的真实判定;
-            // gateway 接线由 Task 8b 注入 readonly factory)。
+            // 列全全部违规角色。Task 8b:readonly gateway 接线,lc_id 取
+            // resolver 冻结的权威身份;组装失败 fail-closed(预检不静默
+            // 放行)。
+            let gateway = super::automation_gateway_preflight::readonly_preflight_gateway(
+                &state,
+                &project_id,
+                resolution.target.logical_codebase_id.as_deref(),
+            );
             super::automation_gateway_preflight::validate_role_chain_for_enrollment(
-                None,
+                gateway.as_ref(),
                 &resolved_options.author_provider,
                 &resolved_options.reviewer_provider,
                 &carrier,

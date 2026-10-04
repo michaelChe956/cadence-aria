@@ -185,10 +185,24 @@ pub async fn post_automation_enrollment_rebind(
     // 换代换 provider 同样过完整角色链同源预检(C5 Task 3/Task 8)。
     // rebind 手上只有 enrollment 声明的 target——carrier 取声明值,不
     // 重解析 issue 权威载体;旧代 enrollment(无 target)由 store rebind
-    // 语义兜底拒绝。gateway 接线由 Task 8b 注入 readonly factory。
+    // 语义兜底拒绝。Task 8b:沿 declared target 的现有 LC 组装 readonly
+    // gateway(读取现有 LC/成员而不猜 issue);缺 checkout 材料列 reason,
+    // 不建 worktree/provider。
     if let Some(declared) = enrollment.target.as_ref() {
+        let gateway = match declared {
+            crate::product::logical_codebase::EnrollmentTarget::LogicalCodebase {
+                logical_codebase_id,
+                ..
+            } => super::automation_gateway_preflight::readonly_preflight_gateway(
+                &state,
+                &project_id,
+                Some(logical_codebase_id),
+            ),
+            // 单仓声明的载体类别在判定核心内走原跳过,无需 gateway。
+            crate::product::logical_codebase::EnrollmentTarget::SingleRepository { .. } => None,
+        };
         super::automation_gateway_preflight::validate_role_chain_for_declared_enrollment_target(
-            None,
+            gateway.as_ref(),
             &request.binding.author_provider,
             &request.binding.reviewer_provider,
             declared,
@@ -386,9 +400,15 @@ fn validate_enrollment_scope(
                     // C5 Task 3/Task 8：唯一 logical target 确认后做完整
                     // 角色链同源预检——与 GET automation-target 投影同一
                     // carrier、同一判定,Enable 前拒绝,一次列全全部违规
-                    // 角色(gateway 接线由 Task 8b 注入 readonly factory)。
+                    // 角色。Task 8b:readonly gateway 接线(resolver 冻结的
+                    // 权威 lc_id),组装失败 fail-closed。
+                    let gateway = super::automation_gateway_preflight::readonly_preflight_gateway(
+                        state,
+                        project_id,
+                        resolution.target.logical_codebase_id.as_deref(),
+                    );
                     super::automation_gateway_preflight::validate_role_chain_for_enrollment(
-                        None,
+                        gateway.as_ref(),
                         &options.author_provider,
                         &options.reviewer_provider,
                         &carrier,
