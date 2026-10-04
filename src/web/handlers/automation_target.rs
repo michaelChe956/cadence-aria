@@ -173,6 +173,28 @@ mod tests {
             .unwrap()
     }
 
+    /// Task 8(8b):为 fixture 的权威 LC 子树播种 capability 记录——
+    /// `ensure_bootstrap` 写 ClaudeCode 过渡桥记录(缺省 reviewer 的三
+    /// 角色沿 legacy allow 列表放行)与 Codex bootstrap 记录(路由禁令
+    /// 判定材料);Pi/KimiCode 保持无记录(action 证据缺失形态)。lc_id
+    /// 权威取 resolver 冻结的 resolution(与 GET/Enable 接线同源)。
+    fn seed_capability_records(
+        fixture: &super::super::automation_enrollment_test_support::Fixture,
+    ) {
+        let paths = fixture.paths.clone();
+        let lc_id =
+            crate::product::logical_codebase::RepositoryAuthorityResolver::new(paths.clone())
+                .resolve_for_issue(PROJECT_ID, ISSUE_ID)
+                .expect("resolve carrier")
+                .expect("logical carrier")
+                .target
+                .logical_codebase_id
+                .expect("resolver-frozen lc id");
+        crate::product::logical_codebase::ProviderCapabilityStore::for_lc(paths, lc_id)
+            .ensure_bootstrap(PROJECT_ID)
+            .expect("capability bootstrap");
+    }
+
     #[tokio::test]
     async fn automation_target_requires_exactly_one_logical_member() {
         let one = seed_fixture(1, true);
@@ -215,8 +237,10 @@ mod tests {
     #[tokio::test]
     async fn automation_target_resolves_server_defaults_when_query_omits_them() {
         let fixture = seed_fixture(1, true);
-        // C5 Task 3：缺省 author=codex 在 LC 载体下按角色链语义被静态拒
-        //（plan_author/coder 违规）——显式 fake author 保持缺省解析断言。
+        seed_capability_records(&fixture);
+        // Task 8:缺省 author=codex 在 LC 载体下经真实 verdict 被路由禁令
+        // 拒(plan_author/coder 违规)——显式 fake author 保持缺省解析断言;
+        // 缺省 reviewer=claude_code 沿过渡桥 capability 记录放行。
         let refused = get_automation_target(&fixture.router(), "").await;
         assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
         let payload = response_json(refused).await;
@@ -307,6 +331,7 @@ mod tests {
     #[tokio::test]
     async fn automation_target_rejects_codex_reviewer_under_default_sandbox() {
         let fixture = seed_fixture(1, true);
+        seed_capability_records(&fixture);
         let root = fixture._root.path().to_path_buf();
         let state = WebAppState::with_provider_availability(
             root.clone(),
@@ -366,6 +391,7 @@ mod tests {
     #[tokio::test]
     async fn automation_target_rejects_lc_pi_coder_with_role_chain_before_enable() {
         let fixture = seed_fixture(1, true);
+        seed_capability_records(&fixture);
         let root = fixture._root.path().to_path_buf();
         let state = WebAppState::with_provider_availability(
             root.clone(),
