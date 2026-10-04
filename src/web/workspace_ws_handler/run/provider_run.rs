@@ -138,462 +138,685 @@ pub(super) async fn spawn_provider_run_with_start_mode(
             ProviderRunKind::WorkItemPlanOutlineRebuild { rebuilt } => Some((**rebuilt).clone()),
             _ => None,
         };
-        match run_kind {
-            ProviderRunKind::Author { content } => {
-                engine
-                    .handle_user_message_from_run(
-                        content,
-                        provider_for_run.clone(),
-                        command_rx,
-                        &run_context_clone.session_record,
-                    )
-                    .await;
-            }
-            ProviderRunKind::AuthorChoiceFollowup { content } => {
-                engine
-                    .handle_author_choice_followup_from_run(
-                        content,
-                        provider_for_run.clone(),
-                        command_rx,
-                        &run_context_clone.session_record,
-                    )
-                    .await;
-            }
-            ProviderRunKind::Revision => {
-                engine
-                    .drive_revision_session(provider_for_run.clone(), command_rx)
-                    .await;
-            }
-            ProviderRunKind::ReviewOnly => {
-                if engine.logical_provider_gateway().is_some() {
-                    engine.drive_review_session_via_gateway(command_rx).await;
-                } else {
+        // r16 现场死锁根修(缺陷 #10 家族,授权:run 注册/取消链):驱动体可能
+        // 悬停在 select 之外的裸 await(现场形态:provider 启动链/SC 臂体内
+        // 链),engine MutexGuard 随任务体永驻,supersede 取消 token 后新 run
+        // 的 engine.lock().await 永久排队,WS/HTTP 全冻。取消臂兜底:drive
+        // 体被 drop 时 guard 随之释放,run 注册由 finish_run 幂等回收(非本人
+        // token 自动复位,不误伤接替 run)。主 select 臂的既有取消观察
+        //(provider_drive.rs cancel.cancelled)保持不变——本臂覆盖其盲区。
+        let supersede_reclaim_manager = manager_for_task.clone();
+        let drive = async {
+            match run_kind {
+                ProviderRunKind::Author { content } => {
                     engine
-                        .drive_review_session(provider_for_run.clone(), command_rx)
+                        .handle_user_message_from_run(
+                            content,
+                            provider_for_run.clone(),
+                            command_rx,
+                            &run_context_clone.session_record,
+                        )
                         .await;
                 }
-            }
-            ProviderRunKind::WorkItemPlanLegacyAuthor
-            | ProviderRunKind::WorkItemPlanOutlineRevision { .. }
-            | ProviderRunKind::WorkItemPlanOutlineRebuild { .. } => {
-                include!("provider_run/work_item_plan_legacy_author.inc.rs")
-            }
-            ProviderRunKind::WorkItemPlanSingleCandidateAuthor => {
-                let mut command_rx = command_rx;
-                match single_candidate::run_single_candidate_author(
-                    &mut engine,
-                    provider_for_run.clone(),
-                    run_cancel.clone(),
-                    &mut command_rx,
-                    &run_context_clone,
-                )
-                .await
-                {
-                    Ok(single_candidate::SingleCandidateProviderRunOutcome::Completed) => {}
-                    Err(single_candidate::SingleCandidateProviderRunError::AlreadyFinished) => {
-                        engine.mark_active_run_finished(&run_label);
-                        drop(engine);
-                        drop(provider_drive_guard.take());
-                        manager_for_task.finish_run(run_token).await;
-                        return;
-                    }
-                    Err(single_candidate::SingleCandidateProviderRunError::Superseded) => {
-                        // 败者让位：键的持有者（健康在途 run 或已完结会话）继续
-                        // 拥有本次启动。迟到 run 静默退场——不落 failed 节点、
-                        // 不广播 Error、不改写 durable phase（k3 P2）。
-                        engine.mark_active_run_finished(&run_label);
-                        drop(engine);
-                        drop(provider_drive_guard.take());
-                        manager_for_task.finish_run(run_token).await;
-                        return;
-                    }
-                    Err(single_candidate::SingleCandidateProviderRunError::Message(message)) => {
+                ProviderRunKind::AuthorChoiceFollowup { content } => {
+                    engine
+                        .handle_author_choice_followup_from_run(
+                            content,
+                            provider_for_run.clone(),
+                            command_rx,
+                            &run_context_clone.session_record,
+                        )
+                        .await;
+                }
+                ProviderRunKind::Revision => {
+                    engine
+                        .drive_revision_session(provider_for_run.clone(), command_rx)
+                        .await;
+                }
+                ProviderRunKind::ReviewOnly => {
+                    if engine.logical_provider_gateway().is_some() {
+                        engine.drive_review_session_via_gateway(command_rx).await;
+                    } else {
                         engine
-                            .finish_active_run_with_failed_node(message.clone())
+                            .drive_review_session(provider_for_run.clone(), command_rx)
                             .await;
-                        drop(engine);
-                        // 缺陷 #10：终态失败路径必须释放 run 注册——对齐同族
-                        // AlreadyFinished/Superseded/AdmissionWaiting 分支的既有
-                        // finish_run 惯例。修复前提前 return 跳过释放——provider
-                        // 已死但 active_run 永驻，is_active_run() 误报
-                        // sc_recovery_busy，显式恢复面被僵死注册阻塞
-                        //（E2E v1.1 §3.3，曾需人工 WS Abort 清除）。
-                        drop(provider_drive_guard.take());
-                        manager_for_task.finish_run(run_token).await;
-                        let _ = send_json_outbound(
-                            &outbound_tx_for_task,
-                            &WsOutMessage::Error { message },
-                        )
-                        .await;
-                        return;
-                    }
-                    Err(single_candidate::SingleCandidateProviderRunError::AdmissionWaiting {
-                        reason_code,
-                        detail,
-                        missing_materials,
-                        allowed_actions,
-                    }) => {
-                        // C-1：LC admission waiting——durable phase 已由运行内
-                        // 回落 Prepare 面，此处以无 failed 节点收尾（waiting 不是
-                        // 失败），并把缺失材料与允许动作作为可操作指引上浮。
-                        engine.mark_active_run_finished(&run_label);
-                        drop(engine);
-                        drop(provider_drive_guard.take());
-                        manager_for_task.finish_run(run_token).await;
-                        let message = format_single_candidate_admission_waiting(
-                            &reason_code,
-                            &detail,
-                            &missing_materials,
-                            &allowed_actions,
-                        );
-                        let _ = send_json_outbound(
-                            &outbound_tx_for_task,
-                            &WsOutMessage::Error { message },
-                        )
-                        .await;
-                        return;
                     }
                 }
-            }
-            ProviderRunKind::WorkItemPlanDraft { feedback } => {
-                let mut command_rx = command_rx;
-                let mut feedback = feedback.or_else(|| engine.pending_revision_context.clone());
-                while engine.active_node_type()
-                    == Some(crate::web::workspace_ws_types::TimelineNodeType::WorkItemDraftRun)
-                {
-                    let Some(node_id) = engine.active_timeline_node_id() else {
-                        engine.mark_active_run_finished(&run_label);
-                        drop(engine);
-                        let err = WsOutMessage::Error {
-                            message: "work item draft run node unavailable".to_string(),
-                        };
-                        let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
-                        return;
-                    };
-                    let plan_launch = match resolve_plan_author_launch(&engine, None, None) {
-                        Ok(launch) => launch,
-                        Err(error) => {
+                ProviderRunKind::WorkItemPlanLegacyAuthor
+                | ProviderRunKind::WorkItemPlanOutlineRevision { .. }
+                | ProviderRunKind::WorkItemPlanOutlineRebuild { .. } => {
+                    include!("provider_run/work_item_plan_legacy_author.inc.rs")
+                }
+                ProviderRunKind::WorkItemPlanSingleCandidateAuthor => {
+                    let mut command_rx = command_rx;
+                    match single_candidate::run_single_candidate_author(
+                        &mut engine,
+                        provider_for_run.clone(),
+                        run_cancel.clone(),
+                        &mut command_rx,
+                        &run_context_clone,
+                    )
+                    .await
+                    {
+                        Ok(single_candidate::SingleCandidateProviderRunOutcome::Completed) => {}
+                        Err(single_candidate::SingleCandidateProviderRunError::AlreadyFinished) => {
                             engine.mark_active_run_finished(&run_label);
                             drop(engine);
-                            let err = WsOutMessage::Error {
-                                message: format!("logical plan launch failed: {error}"),
-                            };
-                            let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                            drop(provider_drive_guard.take());
+                            manager_for_task.finish_run(run_token).await;
                             return;
                         }
-                    };
-                    let routing_context = plan_launch.routing_context();
-                    let provider_input = match engine.build_current_work_item_draft_streaming_input(
-                        feedback.as_deref(),
-                        &routing_context,
-                    ) {
-                        Ok(input) => input,
-                        Err(message) => {
+                        Err(single_candidate::SingleCandidateProviderRunError::Superseded) => {
+                            // 败者让位：键的持有者（健康在途 run 或已完结会话）继续
+                            // 拥有本次启动。迟到 run 静默退场——不落 failed 节点、
+                            // 不广播 Error、不改写 durable phase（k3 P2）。
+                            engine.mark_active_run_finished(&run_label);
+                            drop(engine);
+                            drop(provider_drive_guard.take());
+                            manager_for_task.finish_run(run_token).await;
+                            return;
+                        }
+                        Err(single_candidate::SingleCandidateProviderRunError::Message(
+                            message,
+                        )) => {
                             engine
                                 .finish_active_run_with_failed_node(message.clone())
                                 .await;
                             drop(engine);
-                            let err = WsOutMessage::Error { message };
-                            let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                            // 缺陷 #10：终态失败路径必须释放 run 注册——对齐同族
+                            // AlreadyFinished/Superseded/AdmissionWaiting 分支的既有
+                            // finish_run 惯例。修复前提前 return 跳过释放——provider
+                            // 已死但 active_run 永驻，is_active_run() 误报
+                            // sc_recovery_busy，显式恢复面被僵死注册阻塞
+                            //（E2E v1.1 §3.3，曾需人工 WS Abort 清除）。
+                            drop(provider_drive_guard.take());
+                            manager_for_task.finish_run(run_token).await;
+                            let _ = send_json_outbound(
+                                &outbound_tx_for_task,
+                                &WsOutMessage::Error { message },
+                            )
+                            .await;
                             return;
                         }
-                    };
-                    let author_provider = engine.session().author_provider.clone();
-                    engine
-                        .emit_provider_prompt_event(
-                            &node_id,
-                            provider_input.prompt.clone(),
-                            if feedback.is_some() {
-                                "发送给 WorkItemDraft provider 的增量返修提示词"
-                            } else {
-                                "发送给 WorkItemDraft provider 的完整提示词"
+                        Err(
+                            single_candidate::SingleCandidateProviderRunError::AdmissionWaiting {
+                                reason_code,
+                                detail,
+                                missing_materials,
+                                allowed_actions,
                             },
-                            Some(author_provider.clone()),
-                        )
-                        .await;
-                    let provider_input = engine.attach_tool_policy_audit(provider_input);
-                    // Task 1b 段②生产臂:RetryOnce 循环每轮 begin 新 handle。
-                    let draft_prompt = provider_input.prompt.clone();
-                    let plan_split_run = match begin_plan_split_run_if_logical(
-                        &plan_launch,
-                        &crate::product::lifecycle_store::LifecycleStore::new(
-                            run_context_clone.app_paths.clone(),
-                        ),
-                        &run_context_clone.session_record.project_id,
-                        &run_context_clone.session_record.issue_id,
-                        &author_provider,
-                        &engine.session().session_id,
-                    ) {
-                        Ok(run) => run,
-                        Err(message) => {
+                        ) => {
+                            // C-1：LC admission waiting——durable phase 已由运行内
+                            // 回落 Prepare 面，此处以无 failed 节点收尾（waiting 不是
+                            // 失败），并把缺失材料与允许动作作为可操作指引上浮。
                             engine.mark_active_run_finished(&run_label);
                             drop(engine);
-                            let err = WsOutMessage::Error { message };
+                            drop(provider_drive_guard.take());
+                            manager_for_task.finish_run(run_token).await;
+                            let message = format_single_candidate_admission_waiting(
+                                &reason_code,
+                                &detail,
+                                &missing_materials,
+                                &allowed_actions,
+                            );
+                            let _ = send_json_outbound(
+                                &outbound_tx_for_task,
+                                &WsOutMessage::Error { message },
+                            )
+                            .await;
+                            return;
+                        }
+                    }
+                }
+                ProviderRunKind::WorkItemPlanDraft { feedback } => {
+                    let mut command_rx = command_rx;
+                    let mut feedback = feedback.or_else(|| engine.pending_revision_context.clone());
+                    while engine.active_node_type()
+                        == Some(crate::web::workspace_ws_types::TimelineNodeType::WorkItemDraftRun)
+                    {
+                        let Some(node_id) = engine.active_timeline_node_id() else {
+                            engine.mark_active_run_finished(&run_label);
+                            drop(engine);
+                            let err = WsOutMessage::Error {
+                                message: "work item draft run node unavailable".to_string(),
+                            };
                             let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
                             return;
-                        }
-                    };
-                    let provider_session = start_work_item_plan_author(
-                        plan_launch,
-                        provider_for_run.clone(),
-                        provider_input,
-                        run_cancel.clone(),
-                        plan_split_run.as_ref(),
-                    )
-                    .await;
-                    let full_output = match engine
-                        .drive_work_item_plan_provider_session_to_output(
-                            provider_session,
-                            &mut command_rx,
-                            node_id,
-                            author_provider,
-                        )
-                        .await
-                    {
-                        Ok(output) => output,
-                        Err(message) => {
-                            fail_plan_split_run(
-                                plan_split_run.as_ref(),
-                                &format!("provider session drive failed: {message}"),
-                            );
-                            engine.mark_active_run_finished(&run_label);
-                            return;
-                        }
-                    };
-                    let structured_output =
-                        match parse_work_item_split_structured_output(&full_output) {
-                            Ok(output) => output,
-                            Err(message) => {
-                                fail_plan_split_run(
-                                    plan_split_run.as_ref(),
-                                    &format!("structured output parse failed: {message}"),
-                                );
+                        };
+                        let plan_launch = match resolve_plan_author_launch(&engine, None, None) {
+                            Ok(launch) => launch,
+                            Err(error) => {
                                 engine.mark_active_run_finished(&run_label);
                                 drop(engine);
                                 let err = WsOutMessage::Error {
-                                    message: format!("work item draft generate failed: {message}"),
+                                    message: format!("logical plan launch failed: {error}"),
                                 };
                                 let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
                                 return;
                             }
                         };
-                    close_plan_split_run(plan_split_run.as_ref(), &draft_prompt, &full_output);
-                    let candidate = match parse_work_item_draft_output(structured_output) {
-                        Ok(candidate) => candidate,
-                        Err(error) => {
-                            engine.mark_active_run_finished(&run_label);
-                            drop(engine);
-                            let err = WsOutMessage::Error {
-                                message: format!("work item draft parse failed: {}", error.message),
-                            };
-                            let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
-                            return;
-                        }
-                    };
-                    match engine
-                        .complete_work_item_draft_author(candidate, feedback.as_deref())
-                        .await
-                    {
-                        Ok(WorkItemDraftAuthorOutcome::RetryOnce {
-                            feedback: repair_feedback,
-                            ..
-                        }) => feedback = Some(repair_feedback),
-                        Ok(WorkItemDraftAuthorOutcome::AwaitConfirmation) => break,
-                        Err(message) => {
-                            engine.mark_active_run_finished(&run_label);
-                            drop(engine);
-                            let err = WsOutMessage::Error { message };
-                            let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
-                            return;
-                        }
-                    }
-                }
-            }
-            ProviderRunKind::WorkItemPlanBatch => {
-                let mut command_rx = command_rx;
-                let mut feedback = engine.pending_revision_context.clone();
-                while engine.active_node_type()
-                    == Some(crate::web::workspace_ws_types::TimelineNodeType::WorkItemBatchRun)
-                {
-                    let Some(node_id) = engine.active_timeline_node_id() else {
-                        engine.mark_active_run_finished(&run_label);
-                        drop(engine);
-                        let err = WsOutMessage::Error {
-                            message: "work item batch run node unavailable".to_string(),
+                        let routing_context = plan_launch.routing_context();
+                        let provider_input = match engine
+                            .build_current_work_item_draft_streaming_input(
+                                feedback.as_deref(),
+                                &routing_context,
+                            ) {
+                            Ok(input) => input,
+                            Err(message) => {
+                                engine
+                                    .finish_active_run_with_failed_node(message.clone())
+                                    .await;
+                                drop(engine);
+                                let err = WsOutMessage::Error { message };
+                                let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                                return;
+                            }
                         };
-                        let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
-                        return;
-                    };
-                    let plan_launch = match resolve_plan_author_launch(&engine, None, None) {
-                        Ok(launch) => launch,
-                        Err(error) => {
-                            engine.mark_active_run_finished(&run_label);
-                            drop(engine);
-                            let err = WsOutMessage::Error {
-                                message: format!("logical plan launch failed: {error}"),
-                            };
-                            let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
-                            return;
-                        }
-                    };
-                    let routing_context = plan_launch.routing_context();
-                    let provider_input = match engine
-                        .build_current_work_item_batch_draft_streaming_input(
-                            feedback.as_deref(),
-                            &routing_context,
+                        let author_provider = engine.session().author_provider.clone();
+                        engine
+                            .emit_provider_prompt_event(
+                                &node_id,
+                                provider_input.prompt.clone(),
+                                if feedback.is_some() {
+                                    "发送给 WorkItemDraft provider 的增量返修提示词"
+                                } else {
+                                    "发送给 WorkItemDraft provider 的完整提示词"
+                                },
+                                Some(author_provider.clone()),
+                            )
+                            .await;
+                        let provider_input = engine.attach_tool_policy_audit(provider_input);
+                        // Task 1b 段②生产臂:RetryOnce 循环每轮 begin 新 handle。
+                        let draft_prompt = provider_input.prompt.clone();
+                        let plan_split_run = match begin_plan_split_run_if_logical(
+                            &plan_launch,
+                            &crate::product::lifecycle_store::LifecycleStore::new(
+                                run_context_clone.app_paths.clone(),
+                            ),
+                            &run_context_clone.session_record.project_id,
+                            &run_context_clone.session_record.issue_id,
+                            &author_provider,
+                            &engine.session().session_id,
                         ) {
-                        Ok(input) => input,
-                        Err(message) => {
-                            engine
-                                .finish_active_run_with_failed_node(message.clone())
-                                .await;
-                            drop(engine);
-                            let err = WsOutMessage::Error { message };
-                            let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
-                            return;
-                        }
-                    };
-                    let author_provider = engine.session().author_provider.clone();
-                    engine
-                        .emit_provider_prompt_event(
-                            &node_id,
-                            provider_input.prompt.clone(),
-                            if feedback.is_some() {
-                                "发送给 WorkItemBatch provider 的本地校验修复提示词"
-                            } else {
-                                "发送给 WorkItemBatch provider 的完整提示词"
-                            },
-                            Some(author_provider.clone()),
+                            Ok(run) => run,
+                            Err(message) => {
+                                engine.mark_active_run_finished(&run_label);
+                                drop(engine);
+                                let err = WsOutMessage::Error { message };
+                                let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                                return;
+                            }
+                        };
+                        let provider_session = start_work_item_plan_author(
+                            plan_launch,
+                            provider_for_run.clone(),
+                            provider_input,
+                            run_cancel.clone(),
+                            plan_split_run.as_ref(),
                         )
                         .await;
-                    let provider_input = engine.attach_tool_policy_audit(provider_input);
-                    // Task 1b 段②生产臂:RetryOnce 循环每轮 begin 新 handle。
-                    let batch_prompt = provider_input.prompt.clone();
-                    let plan_split_run = match begin_plan_split_run_if_logical(
-                        &plan_launch,
-                        &crate::product::lifecycle_store::LifecycleStore::new(
-                            run_context_clone.app_paths.clone(),
-                        ),
-                        &run_context_clone.session_record.project_id,
-                        &run_context_clone.session_record.issue_id,
-                        &author_provider,
-                        &engine.session().session_id,
-                    ) {
-                        Ok(run) => run,
-                        Err(message) => {
-                            engine.mark_active_run_finished(&run_label);
-                            drop(engine);
-                            let err = WsOutMessage::Error { message };
-                            let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
-                            return;
-                        }
-                    };
-                    let provider_session = start_work_item_plan_author(
-                        plan_launch,
-                        provider_for_run.clone(),
-                        provider_input,
-                        run_cancel.clone(),
-                        plan_split_run.as_ref(),
-                    )
-                    .await;
-                    let full_output = match engine
-                        .drive_work_item_plan_provider_session_to_output(
-                            provider_session,
-                            &mut command_rx,
-                            node_id,
-                            author_provider,
-                        )
-                        .await
-                    {
-                        Ok(output) => output,
-                        Err(message) => {
-                            fail_plan_split_run(
-                                plan_split_run.as_ref(),
-                                &format!("provider session drive failed: {message}"),
-                            );
-                            engine.mark_active_run_finished(&run_label);
-                            return;
-                        }
-                    };
-                    let structured_output =
-                        match parse_work_item_split_structured_output(&full_output) {
+                        let full_output = match engine
+                            .drive_work_item_plan_provider_session_to_output(
+                                provider_session,
+                                &mut command_rx,
+                                node_id,
+                                author_provider,
+                            )
+                            .await
+                        {
                             Ok(output) => output,
                             Err(message) => {
                                 fail_plan_split_run(
                                     plan_split_run.as_ref(),
-                                    &format!("structured output parse failed: {message}"),
+                                    &format!("provider session drive failed: {message}"),
                                 );
+                                engine.mark_active_run_finished(&run_label);
+                                return;
+                            }
+                        };
+                        let structured_output =
+                            match parse_work_item_split_structured_output(&full_output) {
+                                Ok(output) => output,
+                                Err(message) => {
+                                    fail_plan_split_run(
+                                        plan_split_run.as_ref(),
+                                        &format!("structured output parse failed: {message}"),
+                                    );
+                                    engine.mark_active_run_finished(&run_label);
+                                    drop(engine);
+                                    let err = WsOutMessage::Error {
+                                        message: format!(
+                                            "work item draft generate failed: {message}"
+                                        ),
+                                    };
+                                    let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                                    return;
+                                }
+                            };
+                        close_plan_split_run(plan_split_run.as_ref(), &draft_prompt, &full_output);
+                        let candidate = match parse_work_item_draft_output(structured_output) {
+                            Ok(candidate) => candidate,
+                            Err(error) => {
                                 engine.mark_active_run_finished(&run_label);
                                 drop(engine);
                                 let err = WsOutMessage::Error {
                                     message: format!(
-                                        "work item batch draft generate failed: {message}"
+                                        "work item draft parse failed: {}",
+                                        error.message
                                     ),
                                 };
                                 let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
                                 return;
                             }
                         };
-                    close_plan_split_run(plan_split_run.as_ref(), &batch_prompt, &full_output);
-                    let candidate = match parse_work_item_draft_output(structured_output) {
-                        Ok(candidate) => candidate,
-                        Err(error) => {
+                        match engine
+                            .complete_work_item_draft_author(candidate, feedback.as_deref())
+                            .await
+                        {
+                            Ok(WorkItemDraftAuthorOutcome::RetryOnce {
+                                feedback: repair_feedback,
+                                ..
+                            }) => feedback = Some(repair_feedback),
+                            Ok(WorkItemDraftAuthorOutcome::AwaitConfirmation) => break,
+                            Err(message) => {
+                                engine.mark_active_run_finished(&run_label);
+                                drop(engine);
+                                let err = WsOutMessage::Error { message };
+                                let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                                return;
+                            }
+                        }
+                    }
+                }
+                ProviderRunKind::WorkItemPlanBatch => {
+                    let mut command_rx = command_rx;
+                    let mut feedback = engine.pending_revision_context.clone();
+                    while engine.active_node_type()
+                        == Some(crate::web::workspace_ws_types::TimelineNodeType::WorkItemBatchRun)
+                    {
+                        let Some(node_id) = engine.active_timeline_node_id() else {
                             engine.mark_active_run_finished(&run_label);
                             drop(engine);
                             let err = WsOutMessage::Error {
-                                message: format!(
-                                    "work item batch draft parse failed: {}",
-                                    error.message
-                                ),
+                                message: "work item batch run node unavailable".to_string(),
                             };
                             let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
                             return;
+                        };
+                        let plan_launch = match resolve_plan_author_launch(&engine, None, None) {
+                            Ok(launch) => launch,
+                            Err(error) => {
+                                engine.mark_active_run_finished(&run_label);
+                                drop(engine);
+                                let err = WsOutMessage::Error {
+                                    message: format!("logical plan launch failed: {error}"),
+                                };
+                                let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                                return;
+                            }
+                        };
+                        let routing_context = plan_launch.routing_context();
+                        let provider_input = match engine
+                            .build_current_work_item_batch_draft_streaming_input(
+                                feedback.as_deref(),
+                                &routing_context,
+                            ) {
+                            Ok(input) => input,
+                            Err(message) => {
+                                engine
+                                    .finish_active_run_with_failed_node(message.clone())
+                                    .await;
+                                drop(engine);
+                                let err = WsOutMessage::Error { message };
+                                let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                                return;
+                            }
+                        };
+                        let author_provider = engine.session().author_provider.clone();
+                        engine
+                            .emit_provider_prompt_event(
+                                &node_id,
+                                provider_input.prompt.clone(),
+                                if feedback.is_some() {
+                                    "发送给 WorkItemBatch provider 的本地校验修复提示词"
+                                } else {
+                                    "发送给 WorkItemBatch provider 的完整提示词"
+                                },
+                                Some(author_provider.clone()),
+                            )
+                            .await;
+                        let provider_input = engine.attach_tool_policy_audit(provider_input);
+                        // Task 1b 段②生产臂:RetryOnce 循环每轮 begin 新 handle。
+                        let batch_prompt = provider_input.prompt.clone();
+                        let plan_split_run = match begin_plan_split_run_if_logical(
+                            &plan_launch,
+                            &crate::product::lifecycle_store::LifecycleStore::new(
+                                run_context_clone.app_paths.clone(),
+                            ),
+                            &run_context_clone.session_record.project_id,
+                            &run_context_clone.session_record.issue_id,
+                            &author_provider,
+                            &engine.session().session_id,
+                        ) {
+                            Ok(run) => run,
+                            Err(message) => {
+                                engine.mark_active_run_finished(&run_label);
+                                drop(engine);
+                                let err = WsOutMessage::Error { message };
+                                let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                                return;
+                            }
+                        };
+                        let provider_session = start_work_item_plan_author(
+                            plan_launch,
+                            provider_for_run.clone(),
+                            provider_input,
+                            run_cancel.clone(),
+                            plan_split_run.as_ref(),
+                        )
+                        .await;
+                        let full_output = match engine
+                            .drive_work_item_plan_provider_session_to_output(
+                                provider_session,
+                                &mut command_rx,
+                                node_id,
+                                author_provider,
+                            )
+                            .await
+                        {
+                            Ok(output) => output,
+                            Err(message) => {
+                                fail_plan_split_run(
+                                    plan_split_run.as_ref(),
+                                    &format!("provider session drive failed: {message}"),
+                                );
+                                engine.mark_active_run_finished(&run_label);
+                                return;
+                            }
+                        };
+                        let structured_output =
+                            match parse_work_item_split_structured_output(&full_output) {
+                                Ok(output) => output,
+                                Err(message) => {
+                                    fail_plan_split_run(
+                                        plan_split_run.as_ref(),
+                                        &format!("structured output parse failed: {message}"),
+                                    );
+                                    engine.mark_active_run_finished(&run_label);
+                                    drop(engine);
+                                    let err = WsOutMessage::Error {
+                                        message: format!(
+                                            "work item batch draft generate failed: {message}"
+                                        ),
+                                    };
+                                    let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                                    return;
+                                }
+                            };
+                        close_plan_split_run(plan_split_run.as_ref(), &batch_prompt, &full_output);
+                        let candidate = match parse_work_item_draft_output(structured_output) {
+                            Ok(candidate) => candidate,
+                            Err(error) => {
+                                engine.mark_active_run_finished(&run_label);
+                                drop(engine);
+                                let err = WsOutMessage::Error {
+                                    message: format!(
+                                        "work item batch draft parse failed: {}",
+                                        error.message
+                                    ),
+                                };
+                                let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                                return;
+                            }
+                        };
+                        match engine
+                            .complete_work_item_batch_draft_author(candidate, feedback.as_deref())
+                            .await
+                        {
+                            Ok(WorkItemDraftAuthorOutcome::RetryOnce {
+                                feedback: repair_feedback,
+                                ..
+                            }) => feedback = Some(repair_feedback),
+                            Ok(WorkItemDraftAuthorOutcome::AwaitConfirmation) => feedback = None,
+                            Err(message) => {
+                                engine.mark_active_run_finished(&run_label);
+                                drop(engine);
+                                let err = WsOutMessage::Error { message };
+                                let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                                return;
+                            }
+                        }
+                    }
+                }
+                ProviderRunKind::WorkItemPlanRevision { feedback } => {
+                    workspace_ws_work_item_plan_revision_arm!(
+                        engine,
+                        run_context_clone,
+                        provider_for_run,
+                        run_cancel,
+                        command_rx,
+                        run_label,
+                        outbound_tx_for_task,
+                        manager_for_task,
+                        run_token,
+                        provider_drive_guard,
+                        feedback
+                    );
+                }
+                ProviderRunKind::HumanGateScManualRevision { turn_id, prompt } => {
+                    use crate::product::models::HumanGateTurnFailureClass;
+                    let mut command_rx = command_rx;
+                    let prompt = if prompt.is_empty() {
+                        let turn = match LifecycleStore::new(run_context_clone.app_paths.clone())
+                            .get_human_gate_turn(&engine.session().session_id, &turn_id)
+                        {
+                            Ok(turn) => turn,
+                            Err(error) => {
+                                let message = format!("load human gate turn failed: {error}");
+                                let _ = engine
+                                    .fail_human_gate_turn(
+                                        &turn_id,
+                                        HumanGateTurnFailureClass::ProviderErr,
+                                    )
+                                    .await;
+                                engine.mark_active_run_finished(&run_label);
+                                drop(engine);
+                                let _ = send_json_outbound(
+                                    &outbound_tx_for_task,
+                                    &WsOutMessage::HumanGateTurnFailed {
+                                        turn_id,
+                                        failure_class: "provider_err".to_string(),
+                                        message,
+                                    },
+                                )
+                                .await;
+                                return;
+                            }
+                        };
+                        match engine.build_sc_manual_revision_prompt_for_turn(&turn.feedback_text) {
+                            Ok(prompt) => prompt,
+                            Err(message) => {
+                                let _ = engine
+                                    .fail_human_gate_turn(
+                                        &turn_id,
+                                        HumanGateTurnFailureClass::ProviderErr,
+                                    )
+                                    .await;
+                                engine.mark_active_run_finished(&run_label);
+                                drop(engine);
+                                let _ = send_json_outbound(
+                                    &outbound_tx_for_task,
+                                    &WsOutMessage::HumanGateTurnFailed {
+                                        turn_id,
+                                        failure_class: "provider_err".to_string(),
+                                        message,
+                                    },
+                                )
+                                .await;
+                                return;
+                            }
+                        }
+                    } else {
+                        prompt
+                    };
+
+                    // Durable state must prove Running before the provider is started. This is
+                    // deliberately inside the spawned task, after the handler has cancelled any
+                    // previous run, so a crash cannot leave Reserved while a provider is active.
+                    if let Err(message) = engine.mark_human_gate_turn_running(&turn_id) {
+                        let _ = engine
+                            .fail_human_gate_turn(&turn_id, HumanGateTurnFailureClass::ProviderErr)
+                            .await;
+                        engine.mark_active_run_finished(&run_label);
+                        drop(engine);
+                        let _ = send_json_outbound(
+                            &outbound_tx_for_task,
+                            &WsOutMessage::HumanGateTurnFailed {
+                                turn_id,
+                                failure_class: "provider_err".to_string(),
+                                message,
+                            },
+                        )
+                        .await;
+                        return;
+                    }
+
+                    // F-49/A6：门修订轮必须与普通 SC 修订同构地落在 author 节点上。
+                    // 此前取 `active_timeline_node_id()`——门内活动节点就是 HumanConfirm
+                    // 门节点，修订 prompt/输出流/artifact_ref 与产物版本 source_node_id
+                    // 全部写进门节点 detail；门节点在对话流 rebuild 判 role=null，整节点
+                    // 零条目，用户侧「author 修订步不可见」。选节点规则（复用活动
+                    // AuthorRun / 新建）见 `begin_work_item_plan_human_gate_revision_run`。
+                    let node_id = engine.begin_work_item_plan_human_gate_revision_run().await;
+                    let author_provider = engine.session().author_provider.clone();
+                    engine
+                        .emit_provider_prompt_event(
+                            &node_id,
+                            prompt.clone(),
+                            "发送给 SC human-gate revision provider 的完整修订提示词",
+                            Some(author_provider.clone()),
+                        )
+                        .await;
+                    let worktree_path = engine
+                        .session()
+                        .repository_path
+                        .as_ref()
+                        .cloned()
+                        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+                    let provider_input = match engine.build_work_item_plan_streaming_input(
+                        crate::product::work_item_split_engine::types::provider_name_to_type(
+                            &author_provider,
+                        ),
+                        prompt.clone(),
+                        worktree_path.to_string_lossy().to_string(),
+                        author_provider.clone(),
+                        PlanAuthorOutputContract::Structured,
+                    ) {
+                        Ok(provider_input) => provider_input,
+                        Err(message) => {
+                            // REQ-PIB-02（T2.3）：基线不可解析 → 门内轮次失败（可观测）。
+                            let _ = engine
+                                .fail_human_gate_turn(
+                                    &turn_id,
+                                    HumanGateTurnFailureClass::ProviderErr,
+                                )
+                                .await;
+                            engine.mark_active_run_finished(&run_label);
+                            drop(engine);
+                            let _ = send_json_outbound(
+                                &outbound_tx_for_task,
+                                &WsOutMessage::HumanGateTurnFailed {
+                                    turn_id,
+                                    failure_class: "provider_err".to_string(),
+                                    message,
+                                },
+                            )
+                            .await;
+                            return;
                         }
                     };
-                    match engine
-                        .complete_work_item_batch_draft_author(candidate, feedback.as_deref())
+                    let launch = match resolve_plan_author_launch(&engine, None, None) {
+                        Ok(launch) => launch,
+                        Err(error) => {
+                            let message = error.details.clone();
+                            let _ = engine
+                                .fail_human_gate_turn(
+                                    &turn_id,
+                                    HumanGateTurnFailureClass::ProviderErr,
+                                )
+                                .await;
+                            engine.mark_active_run_finished(&run_label);
+                            drop(engine);
+                            let _ = send_json_outbound(
+                                &outbound_tx_for_task,
+                                &WsOutMessage::HumanGateTurnFailed {
+                                    turn_id,
+                                    failure_class: "provider_err".to_string(),
+                                    message,
+                                },
+                            )
+                            .await;
+                            return;
+                        }
+                    };
+                    let provider_input = engine.attach_tool_policy_audit(provider_input);
+                    // Task 1b 段②生产臂:门修订轮单次 provider run 同样绑定
+                    // split run 身份;Markdown 修订产物按原文存档收口。
+                    let plan_split_run = match begin_plan_split_run_if_logical(
+                        &launch,
+                        &crate::product::lifecycle_store::LifecycleStore::new(
+                            run_context_clone.app_paths.clone(),
+                        ),
+                        &run_context_clone.session_record.project_id,
+                        &run_context_clone.session_record.issue_id,
+                        &author_provider,
+                        &engine.session().session_id,
+                    ) {
+                        Ok(run) => run,
+                        Err(message) => {
+                            let _ = engine
+                                .fail_human_gate_turn(
+                                    &turn_id,
+                                    HumanGateTurnFailureClass::ProviderErr,
+                                )
+                                .await;
+                            engine.mark_active_run_finished(&run_label);
+                            drop(engine);
+                            let _ = send_json_outbound(
+                                &outbound_tx_for_task,
+                                &WsOutMessage::HumanGateTurnFailed {
+                                    turn_id,
+                                    failure_class: "provider_err".to_string(),
+                                    message,
+                                },
+                            )
+                            .await;
+                            return;
+                        }
+                    };
+                    let provider_session = start_work_item_plan_author(
+                        launch,
+                        provider_for_run.clone(),
+                        provider_input,
+                        run_cancel.clone(),
+                        plan_split_run.as_ref(),
+                    )
+                    .await;
+                    let full_output = match engine
+                        .drive_work_item_plan_provider_session_to_output(
+                            provider_session,
+                            &mut command_rx,
+                            node_id,
+                            author_provider,
+                        )
                         .await
                     {
-                        Ok(WorkItemDraftAuthorOutcome::RetryOnce {
-                            feedback: repair_feedback,
-                            ..
-                        }) => feedback = Some(repair_feedback),
-                        Ok(WorkItemDraftAuthorOutcome::AwaitConfirmation) => feedback = None,
+                        Ok(output) => output,
                         Err(message) => {
-                            engine.mark_active_run_finished(&run_label);
-                            drop(engine);
-                            let err = WsOutMessage::Error { message };
-                            let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
-                            return;
-                        }
-                    }
-                }
-            }
-            ProviderRunKind::WorkItemPlanRevision { feedback } => {
-                workspace_ws_work_item_plan_revision_arm!(
-                    engine,
-                    run_context_clone,
-                    provider_for_run,
-                    run_cancel,
-                    command_rx,
-                    run_label,
-                    outbound_tx_for_task,
-                    manager_for_task,
-                    run_token,
-                    provider_drive_guard,
-                    feedback
-                );
-            }
-            ProviderRunKind::HumanGateScManualRevision { turn_id, prompt } => {
-                use crate::product::models::HumanGateTurnFailureClass;
-                let mut command_rx = command_rx;
-                let prompt = if prompt.is_empty() {
-                    let turn = match LifecycleStore::new(run_context_clone.app_paths.clone())
-                        .get_human_gate_turn(&engine.session().session_id, &turn_id)
-                    {
-                        Ok(turn) => turn,
-                        Err(error) => {
-                            let message = format!("load human gate turn failed: {error}");
+                            fail_plan_split_run(
+                                plan_split_run.as_ref(),
+                                &format!("provider session drive failed: {message}"),
+                            );
                             let _ = engine
                                 .fail_human_gate_turn(
                                     &turn_id,
@@ -614,200 +837,12 @@ pub(super) async fn spawn_provider_run_with_start_mode(
                             return;
                         }
                     };
-                    match engine.build_sc_manual_revision_prompt_for_turn(&turn.feedback_text) {
-                        Ok(prompt) => prompt,
-                        Err(message) => {
-                            let _ = engine
-                                .fail_human_gate_turn(
-                                    &turn_id,
-                                    HumanGateTurnFailureClass::ProviderErr,
-                                )
-                                .await;
-                            engine.mark_active_run_finished(&run_label);
-                            drop(engine);
-                            let _ = send_json_outbound(
-                                &outbound_tx_for_task,
-                                &WsOutMessage::HumanGateTurnFailed {
-                                    turn_id,
-                                    failure_class: "provider_err".to_string(),
-                                    message,
-                                },
-                            )
-                            .await;
-                            return;
-                        }
-                    }
-                } else {
-                    prompt
-                };
-
-                // Durable state must prove Running before the provider is started. This is
-                // deliberately inside the spawned task, after the handler has cancelled any
-                // previous run, so a crash cannot leave Reserved while a provider is active.
-                if let Err(message) = engine.mark_human_gate_turn_running(&turn_id) {
-                    let _ = engine
-                        .fail_human_gate_turn(&turn_id, HumanGateTurnFailureClass::ProviderErr)
-                        .await;
-                    engine.mark_active_run_finished(&run_label);
-                    drop(engine);
-                    let _ = send_json_outbound(
-                        &outbound_tx_for_task,
-                        &WsOutMessage::HumanGateTurnFailed {
-                            turn_id,
-                            failure_class: "provider_err".to_string(),
-                            message,
-                        },
-                    )
-                    .await;
-                    return;
-                }
-
-                // F-49/A6：门修订轮必须与普通 SC 修订同构地落在 author 节点上。
-                // 此前取 `active_timeline_node_id()`——门内活动节点就是 HumanConfirm
-                // 门节点，修订 prompt/输出流/artifact_ref 与产物版本 source_node_id
-                // 全部写进门节点 detail；门节点在对话流 rebuild 判 role=null，整节点
-                // 零条目，用户侧「author 修订步不可见」。选节点规则（复用活动
-                // AuthorRun / 新建）见 `begin_work_item_plan_human_gate_revision_run`。
-                let node_id = engine.begin_work_item_plan_human_gate_revision_run().await;
-                let author_provider = engine.session().author_provider.clone();
-                engine
-                    .emit_provider_prompt_event(
-                        &node_id,
-                        prompt.clone(),
-                        "发送给 SC human-gate revision provider 的完整修订提示词",
-                        Some(author_provider.clone()),
-                    )
-                    .await;
-                let worktree_path = engine
-                    .session()
-                    .repository_path
-                    .as_ref()
-                    .cloned()
-                    .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-                let provider_input = match engine.build_work_item_plan_streaming_input(
-                    crate::product::work_item_split_engine::types::provider_name_to_type(
-                        &author_provider,
-                    ),
-                    prompt.clone(),
-                    worktree_path.to_string_lossy().to_string(),
-                    author_provider.clone(),
-                    PlanAuthorOutputContract::Structured,
-                ) {
-                    Ok(provider_input) => provider_input,
-                    Err(message) => {
-                        // REQ-PIB-02（T2.3）：基线不可解析 → 门内轮次失败（可观测）。
-                        let _ = engine
-                            .fail_human_gate_turn(&turn_id, HumanGateTurnFailureClass::ProviderErr)
-                            .await;
-                        engine.mark_active_run_finished(&run_label);
-                        drop(engine);
-                        let _ = send_json_outbound(
-                            &outbound_tx_for_task,
-                            &WsOutMessage::HumanGateTurnFailed {
-                                turn_id,
-                                failure_class: "provider_err".to_string(),
-                                message,
-                            },
-                        )
-                        .await;
-                        return;
-                    }
-                };
-                let launch = match resolve_plan_author_launch(&engine, None, None) {
-                    Ok(launch) => launch,
-                    Err(error) => {
-                        let message = error.details.clone();
-                        let _ = engine
-                            .fail_human_gate_turn(&turn_id, HumanGateTurnFailureClass::ProviderErr)
-                            .await;
-                        engine.mark_active_run_finished(&run_label);
-                        drop(engine);
-                        let _ = send_json_outbound(
-                            &outbound_tx_for_task,
-                            &WsOutMessage::HumanGateTurnFailed {
-                                turn_id,
-                                failure_class: "provider_err".to_string(),
-                                message,
-                            },
-                        )
-                        .await;
-                        return;
-                    }
-                };
-                let provider_input = engine.attach_tool_policy_audit(provider_input);
-                // Task 1b 段②生产臂:门修订轮单次 provider run 同样绑定
-                // split run 身份;Markdown 修订产物按原文存档收口。
-                let plan_split_run = match begin_plan_split_run_if_logical(
-                    &launch,
-                    &crate::product::lifecycle_store::LifecycleStore::new(
-                        run_context_clone.app_paths.clone(),
-                    ),
-                    &run_context_clone.session_record.project_id,
-                    &run_context_clone.session_record.issue_id,
-                    &author_provider,
-                    &engine.session().session_id,
-                ) {
-                    Ok(run) => run,
-                    Err(message) => {
-                        let _ = engine
-                            .fail_human_gate_turn(&turn_id, HumanGateTurnFailureClass::ProviderErr)
-                            .await;
-                        engine.mark_active_run_finished(&run_label);
-                        drop(engine);
-                        let _ = send_json_outbound(
-                            &outbound_tx_for_task,
-                            &WsOutMessage::HumanGateTurnFailed {
-                                turn_id,
-                                failure_class: "provider_err".to_string(),
-                                message,
-                            },
-                        )
-                        .await;
-                        return;
-                    }
-                };
-                let provider_session = start_work_item_plan_author(
-                    launch,
-                    provider_for_run.clone(),
-                    provider_input,
-                    run_cancel.clone(),
-                    plan_split_run.as_ref(),
-                )
-                .await;
-                let full_output = match engine
-                    .drive_work_item_plan_provider_session_to_output(
-                        provider_session,
-                        &mut command_rx,
-                        node_id,
-                        author_provider,
-                    )
-                    .await
-                {
-                    Ok(output) => output,
-                    Err(message) => {
-                        fail_plan_split_run(
-                            plan_split_run.as_ref(),
-                            &format!("provider session drive failed: {message}"),
-                        );
-                        let _ = engine
-                            .fail_human_gate_turn(&turn_id, HumanGateTurnFailureClass::ProviderErr)
-                            .await;
-                        engine.mark_active_run_finished(&run_label);
-                        drop(engine);
-                        let _ = send_json_outbound(
-                            &outbound_tx_for_task,
-                            &WsOutMessage::HumanGateTurnFailed {
-                                turn_id,
-                                failure_class: "provider_err".to_string(),
-                                message,
-                            },
-                        )
-                        .await;
-                        return;
-                    }
-                };
-                close_plan_split_run_with_markdown(plan_split_run.as_ref(), &prompt, &full_output);
-                match engine
+                    close_plan_split_run_with_markdown(
+                        plan_split_run.as_ref(),
+                        &prompt,
+                        &full_output,
+                    );
+                    match engine
                     .run_sc_manual_revision_turn(&turn_id, full_output)
                     .await
                 {
@@ -843,23 +878,30 @@ pub(super) async fn spawn_provider_run_with_start_mode(
                         ).await;
                     }
                 }
+                }
             }
+            workspace_ws_provider_run_followups!(
+                engine,
+                provider_registry_for_run,
+                manager_for_task,
+                run_token,
+                run_label,
+                outbound_tx_for_task,
+                run_cancel,
+                run_context_clone,
+                provider_drive_guard
+            );
+            engine.mark_active_run_finished(&run_label);
+            drop(engine);
+            drop(provider_drive_guard.take());
+            manager_for_task.finish_run(run_token).await;
+        };
+        tokio::select! {
+            _ = run_cancel.cancelled() => {
+                let _ = supersede_reclaim_manager.finish_run(run_token).await;
+            }
+            _ = drive => {}
         }
-        workspace_ws_provider_run_followups!(
-            engine,
-            provider_registry_for_run,
-            manager_for_task,
-            run_token,
-            run_label,
-            outbound_tx_for_task,
-            run_cancel,
-            run_context_clone,
-            provider_drive_guard
-        );
-        engine.mark_active_run_finished(&run_label);
-        drop(engine);
-        drop(provider_drive_guard.take());
-        manager_for_task.finish_run(run_token).await;
     });
 
     Ok(true)

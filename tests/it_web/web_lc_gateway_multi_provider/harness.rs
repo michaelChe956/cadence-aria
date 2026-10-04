@@ -3292,8 +3292,16 @@ fn work_item_split_output_schema() -> String {
 
 /// 把 `connect_async` 的裸流包装为 JSON 帧驱动(与 LiveWs 方法配套)。
 async fn connect_live_ws(url: &str) -> Result<LiveWs, String> {
-    let (stream, _) = connect_async(url)
-        .await
-        .map_err(|error| error.to_string())?;
-    Ok(LiveWs::new(stream))
+    // r16 兜底:服务端冻结时连接/升级可能悬死(现场 67min 无 IO);
+    // 有界超时把全矩阵挂死降级为单格 WS 连接失败可落格。
+    let connect = async {
+        let (stream, _) = connect_async(url)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok::<LiveWs, String>(LiveWs::new(stream))
+    };
+    match tokio::time::timeout(Duration::from_secs(180), connect).await {
+        Ok(result) => result,
+        Err(_) => Err("WS 连接 180s 超时(服务端任务疑似冻结)".to_string()),
+    }
 }
