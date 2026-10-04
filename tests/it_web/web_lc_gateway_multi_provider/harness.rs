@@ -548,6 +548,7 @@ struct MatrixEnvironment {
     story_spec_id: Option<String>,
     design_spec_id: Option<String>,
     work_item_id: Option<String>,
+    plan_work_item_ids: Vec<String>,
     prior_entity_session_id: Option<String>,
     prior_plan_session_id: Option<String>,
     prior_coding_session_id: Option<String>,
@@ -642,6 +643,7 @@ impl MatrixEnvironment {
             story_spec_id: None,
             design_spec_id: None,
             work_item_id: None,
+            plan_work_item_ids: Vec::new(),
             prior_entity_session_id: None,
             prior_plan_session_id: None,
             prior_coding_session_id: None,
@@ -831,7 +833,14 @@ impl MatrixEnvironment {
         if let Err(failure) = expect_ok(status, &body, "登记 preflight", None) {
             return Err(self.fail_with_diagnostics(failure, None).await);
         }
-        let preflight_id = body["preflight_id"].as_str().expect("preflight id");
+        let Some(preflight_id) = body["preflight_id"].as_str() else {
+            let failure = matrix_failure(
+                "preflight_id_missing",
+                format!("登记 preflight 响应缺 preflight_id:{body}"),
+                None,
+            );
+            return Err(self.fail_with_diagnostics(failure, None).await);
+        };
         let (status, body) = request_json(
             &self.app,
             Method::POST,
@@ -883,10 +892,15 @@ impl MatrixEnvironment {
             );
             return Err(self.fail_with_diagnostics(failure, None).await);
         }
-        let operation_id = body["operation_id"]
-            .as_str()
-            .expect("operation id")
-            .to_string();
+        let Some(operation_id) = body["operation_id"].as_str() else {
+            let failure = matrix_failure(
+                "operation_id_missing",
+                format!("初始化响应缺 operation_id:{body}"),
+                None,
+            );
+            return Err(self.fail_with_diagnostics(failure, None).await);
+        };
+        let operation_id = operation_id.to_string();
         let init_timeout = Duration::from_secs(env_timeout_secs(
             INIT_TIMEOUT_ENV,
             DEFAULT_INIT_TIMEOUT_SECS,
@@ -1156,7 +1170,15 @@ impl MatrixEnvironment {
         if let Err(failure) = expect_ok(status, &body, "创建逻辑 issue", None) {
             return Err(self.fail_with_diagnostics(failure, None).await);
         }
-        self.issue_id = body["id"].as_str().expect("issue id").to_string();
+        let Some(issue_id) = body["issue_id"].as_str() else {
+            let failure = matrix_failure(
+                "issue_id_missing",
+                format!("issue 创建响应缺 issue_id:{body}"),
+                None,
+            );
+            return Err(self.fail_with_diagnostics(failure, None).await);
+        };
+        self.issue_id = issue_id.to_string();
         Ok(())
     }
 
@@ -1206,7 +1228,7 @@ impl MatrixEnvironment {
         if !status.is_success() {
             return observation.denied_cell(format!("生成 {stage} 实体失败({status}):{body}"));
         }
-        let session_id = body["workspace_session"]["id"]
+        let session_id = body["workspace_session"]["workspace_session_id"]
             .as_str()
             .unwrap_or_default()
             .to_string();
@@ -1214,7 +1236,12 @@ impl MatrixEnvironment {
             return observation
                 .denied_cell(format!("生成 {stage} 响应缺 workspace_session:{body}"));
         }
-        if let Some(spec_id) = body[response_spec_field][0]["id"].as_str() {
+        let spec_id_field = if stage == "story" {
+            "story_spec_id"
+        } else {
+            "design_spec_id"
+        };
+        if let Some(spec_id) = body[response_spec_field][0][spec_id_field].as_str() {
             match stage {
                 "story" => self.story_spec_id = Some(spec_id.to_string()),
                 "design" => self.design_spec_id = Some(spec_id.to_string()),
@@ -1501,7 +1528,7 @@ impl MatrixEnvironment {
             );
             return cells;
         }
-        let session_id = body["workspace_session"]["id"]
+        let session_id = body["workspace_session"]["workspace_session_id"]
             .as_str()
             .unwrap_or_default()
             .to_string();
@@ -1515,6 +1542,14 @@ impl MatrixEnvironment {
         }
         observation.workspace_session_id = session_id.clone();
         self.prior_plan_session_id = Some(session_id.clone());
+        // 预检:work item 列表直接取 plan DTO 的 work_item_ids(形态已核对),
+        // 不依赖列表端点探测。
+        if let Some(ids) = body["work_item_plan"]["work_item_ids"].as_array() {
+            self.plan_work_item_ids = ids
+                .iter()
+                .filter_map(|value| value.as_str().map(str::to_string))
+                .collect();
+        }
         let drive = self
             .drive_workspace_session_ws(&session_id, &mut observation, 4)
             .await;
@@ -1543,6 +1578,11 @@ impl MatrixEnvironment {
     }
 
     async fn resolve_first_work_item(&mut self) {
+        // plan prepare 响应携带的 work_item_ids 优先(无列表端点依赖)。
+        if let Some(id) = self.plan_work_item_ids.first().cloned() {
+            self.work_item_id = Some(id);
+            return;
+        }
         let (status, body) = request_json(
             &self.app,
             Method::GET,
@@ -1784,11 +1824,7 @@ impl MatrixEnvironment {
             );
             return cells;
         }
-        let attempt_id = body["id"]
-            .as_str()
-            .or_else(|| body["attempt"]["id"].as_str())
-            .unwrap_or_default()
-            .to_string();
+        let attempt_id = body["attempt_id"].as_str().unwrap_or_default().to_string();
         if attempt_id.is_empty() {
             cells.push(observation.denied_cell(format!("coding attempt 响应缺 id:{body}")));
             cells.push(
@@ -1972,7 +2008,7 @@ impl MatrixEnvironment {
             );
             return cells;
         }
-        let session_id = body["workspace_session"]["id"]
+        let session_id = body["workspace_session"]["workspace_session_id"]
             .as_str()
             .unwrap_or_default()
             .to_string();
