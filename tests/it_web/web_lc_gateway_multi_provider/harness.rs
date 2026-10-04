@@ -1422,6 +1422,55 @@ impl MatrixEnvironment {
             .await
     }
 
+    /// 真实确认门:POST /confirm(引擎裁决端点),按响应 DTO status 判定
+    /// 终态收口。confirmed → 产物确认并收口;评审接管等中间态 → 继续泵送;
+    /// 拒绝 → 拒绝事件落格继续泵送(不旁路产品决策面)。
+    async fn confirm_session_gate(
+        &self,
+        observation: &mut StageObservation,
+        outcome: &mut DriveOutcome,
+    ) -> bool {
+        let uri = format!(
+            "/api/workspace-sessions/{}/confirm",
+            observation.workspace_session_id
+        );
+        let (status, body) = request_json(
+            &self.app,
+            Method::POST,
+            &uri,
+            json!({"confirmed_by": "lcg-matrix"}),
+        )
+        .await;
+        if !status.is_success() {
+            observation.push_event(json!({
+                "type": "matrix_confirm_rejected",
+                "status": status.as_u16(),
+                "body": body
+            }));
+            return false;
+        }
+        let dto_status = body
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        observation.push_event(json!({
+            "type": "matrix_confirm_result",
+            "status": dto_status,
+        }));
+        match dto_status.as_str() {
+            "confirmed" => {
+                outcome.artifact_confirmed = true;
+                true
+            }
+            "failed" | "terminated" | "stopped_needs_human" | "blocked_provider_unavailable" => {
+                observation.terminal_status = Some(dto_status);
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// 泵送会话事件直至终态;waiting_for_human 时走真实 HTTP confirm 门。
     /// timeout 由调用面区分:实体长阶段(story/design/plan/review)独立放宽。
     async fn pump_workspace_session(
@@ -1494,29 +1543,15 @@ impl MatrixEnvironment {
                         match status {
                             "waiting_for_human" if confirms_left > 0 => {
                                 confirms_left -= 1;
-                                let uri = format!(
-                                    "/api/workspace-sessions/{}/confirm",
-                                    observation.workspace_session_id
-                                );
-                                let (status, body) = request_json(
-                                    &self.app,
-                                    Method::POST,
-                                    &uri,
-                                    json!({"confirmed_by": "lcg-matrix"}),
-                                )
-                                .await;
-                                if status.is_success() {
-                                    outcome.artifact_confirmed = true;
-                                } else {
-                                    observation.push_event(json!({
-                                        "type": "matrix_confirm_rejected",
-                                        "status": status.as_u16(),
-                                        "body": body
-                                    }));
+                                if self.confirm_session_gate(observation, &mut outcome).await {
+                                    return outcome;
                                 }
                             }
+                            // confirmed 是终态:确认门已过,立即收口,
+                            // 不再空转到阶段超时。
                             "confirmed" => {
                                 outcome.artifact_confirmed = true;
+                                return outcome;
                             }
                             "failed"
                             | "blocked_provider_unavailable"
@@ -1526,6 +1561,20 @@ impl MatrixEnvironment {
                                 return outcome;
                             }
                             _ => {}
+                        }
+                    }
+                }
+                "stage_change" => {
+                    // r13 复盘:产物就绪后产品端广播的是 stage_change(
+                    // author_confirm/human_confirm)+message_complete,并不推
+                    // session_state waiting_for_human——人工门就绪必须以
+                    // stage_change 为准(r13 会话 00:14 已 waiting_for_human,
+                    // 泵只认 session_state 空转到 90min 超时)。
+                    let stage = message.get("stage").and_then(Value::as_str).unwrap_or("");
+                    if matches!(stage, "author_confirm" | "human_confirm") && confirms_left > 0 {
+                        confirms_left -= 1;
+                        if self.confirm_session_gate(observation, &mut outcome).await {
+                            return outcome;
                         }
                     }
                 }
@@ -2678,24 +2727,39 @@ async fn request_json(
     uri: &str,
     body: Value,
 ) -> (StatusCode, Value) {
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(method)
-                .uri(uri)
-                .header("content-type", "application/json")
-                .body(Body::from(body.to_string()))
-                .expect("request"),
-        )
-        .await
-        .expect("response");
-    let status = response.status();
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("body");
-    let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-    (status, value)
+    // r13 复盘:oneshot 由同 runtime 服务,服务端任务死锁时永不返回
+    //(现场 futex 挂死 90min+ 无任何 IO)。有界超时把全矩阵挂死降级为
+    // 单格 HTTP 失败,原因可落格。
+    let request = async {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, value)
+    };
+    match tokio::time::timeout(Duration::from_secs(180), request).await {
+        Ok(result) => result,
+        Err(_) => (
+            StatusCode::GATEWAY_TIMEOUT,
+            json!({
+                "type": "matrix_request_timeout",
+                "message": "HTTP 请求 180s 超时(服务端任务疑似挂起)"
+            }),
+        ),
+    }
 }
 
 fn expect_ok(
