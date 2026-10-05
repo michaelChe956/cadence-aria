@@ -482,15 +482,12 @@ impl LiveLcGatewayHarness {
                     "/api/projects/{PROJECT_ID}/issues/{}/design-specs:generate",
                     env.issue_id
                 ),
-                json!({
-                    "title": "矩阵 design:会话过期后端设计",
-                    "story_spec_ids": env.story_spec_ids(),
-                    "author_provider": env.provider_wire,
-                    "reviewer_provider": env.provider_wire,
-                    "review_rounds": 1,
-                    "superpowers_enabled": false,
-                    "openspec_enabled": true
-                }),
+                pinned_design_generate_body(
+                    "矩阵 design:alpha 仓会话过期后端设计",
+                    &env.story_spec_ids(),
+                    &env.member_logical_id,
+                    &env.provider_wire,
+                ),
                 "design_specs",
             )
             .await,
@@ -1296,8 +1293,13 @@ impl MatrixEnvironment {
             Method::POST,
             &format!("/api/projects/{PROJECT_ID}/issues"),
             json!({
-                "title": "矩阵 issue:跨仓会话过期修复",
-                "description": "四家五阶段真实矩阵驱动 issue",
+                // r23 问题2:issue 文案显式 alpha 仓交付域——design 的
+                // involved 由 AI 自决回写(prompt 只有成员清单与禁猜规则),
+                // r22「跨仓会话过期修复」文案让 AI 如实声明 [alpha,beta],
+                // design 修订路由按产品语义 fail-closed(TargetAmbiguous)。
+                // 对齐 v1.1 E2E 单成员先例:交付域收窄到 alpha。
+                "title": "矩阵 issue:alpha 仓会话过期提示",
+                "description": "在 alpha 仓内实现会话过期签发、判定与用户提示;本需求不修改 beta 仓(beta 仅按既有接口消费,不属本需求交付范围)。四家五阶段真实矩阵驱动 issue。",
                 "repository_id": self.member_physical_repo_id,
                 "logical_codebase_id": self.lc_id,
             }),
@@ -1330,6 +1332,10 @@ impl MatrixEnvironment {
     // -----------------------------------------------------------------------
 
     /// 驱动一个 workspace 实体会话阶段(story/design),fresh + resume 两格。
+    /// r23 问题3 根修:两格共用同一条 WS 连接——真实用户流里门上反馈修订
+    /// 不打断连接;跨连接时 manager 随最后一个连接 detach 被回收,engine
+    /// new_persistent 重建丢 launch 指纹内存,产品按设计 fail-closed 走
+    /// full-prompt fresh(非原生恢复,r22 story 实测无 --resume 新会话)。
     async fn run_workspace_entity_stage(
         &mut self,
         stage: &'static str,
@@ -1341,40 +1347,48 @@ impl MatrixEnvironment {
         // 本阶段专属会话锚:防 fresh 失败后 resume 误用上一阶段会话。
         self.prior_entity_session_id = None;
         // ---- fresh:生成实体 → WS streaming 驱动 → 停在人工门(不 confirm,
-        // 门留给 resume 格的反馈修订;r21 C1 前fresh就地confirm,Completed
-        // 终态上 request_revision 被协议矩阵正确拒收,resume 格空转到超时)----
-        let fresh = self
+        // 门与连接都留给 resume 格的反馈修订;r21 C1 前 fresh 就地 confirm,
+        // Completed 终态上 request_revision 被协议矩阵正确拒收,resume 格
+        // 空转到超时)----
+        let (fresh, gate_ws) = self
             .drive_entity_session_fresh(stage, generate_uri, &generate_body, response_spec_field)
             .await;
         cells.push(fresh);
-        // ---- resume:同一会话门上 request_revision 修订重驱(原生恢复确认)
-        // → 回门 → 真实 HTTP confirm 定稿(spec id 供 plan 前置)----
-        let resume = self.drive_entity_session_resume(stage).await;
+        // ---- resume:同一连接门上 request_revision 修订重驱(原生恢复确认)
+        // → 回门 → 真实 HTTP confirm 定稿(spec Confirmed 供 plan 前置)----
+        let resume = self.drive_entity_session_resume(stage, gate_ws).await;
         cells.push(resume);
         cells
     }
 
+    /// 返回(格, 门上连接):门到且干净收口时保留 WS 供 resume 格同连接修订。
     async fn drive_entity_session_fresh(
         &mut self,
         stage: &'static str,
         generate_uri: &str,
         generate_body: &Value,
         response_spec_field: &str,
-    ) -> EvidenceCell {
+    ) -> (EvidenceCell, Option<LiveWs>) {
         let mut observation = StageObservation::new(stage, &self.provider);
         fp_enter_phase(stage, ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT, FRESH);
         let (status, body) =
             request_json(&self.app, Method::POST, generate_uri, generate_body.clone()).await;
         if !status.is_success() {
-            return observation.denied_cell(format!("生成 {stage} 实体失败({status}):{body}"));
+            return (
+                observation.denied_cell(format!("生成 {stage} 实体失败({status}):{body}")),
+                None,
+            );
         }
         let session_id = body["workspace_session"]["workspace_session_id"]
             .as_str()
             .unwrap_or_default()
             .to_string();
         if session_id.is_empty() {
-            return observation
-                .denied_cell(format!("生成 {stage} 响应缺 workspace_session:{body}"));
+            return (
+                observation
+                    .denied_cell(format!("生成 {stage} 响应缺 workspace_session:{body}")),
+                None,
+            );
         }
         let spec_id_field = if stage == "story" {
             "story_spec_id"
@@ -1400,7 +1414,7 @@ impl MatrixEnvironment {
         // request_revision 会被协议矩阵正确拒收(Completed 只放行 SC
         // Advance),r21 现场 story/design resume 双双 53-90min 空转即此。
         // 定稿 confirm 由 resume 格在修订轮回门后执行(修订→回门→确认)。
-        let drive = self
+        let (drive, ws) = self
             .drive_workspace_session_ws(&session_id, &mut observation, 0, self.entity_stage_timeout)
             .await;
         // 产物=author 轮已生成的实体 spec(generate 响应携带 spec id),
@@ -1413,11 +1427,23 @@ impl MatrixEnvironment {
                 drive.gate_reached
             ),
         );
-        observation.build_cell(self)
+        // 门到且无失败才保留连接(失败路径连接状态未知,交由 resume 格
+        // 落可诊断拒绝,不带病复用)。
+        let gate_ws = (drive.gate_reached && observation.run_failure.is_none())
+            .then_some(ws)
+            .flatten();
+        (observation.build_cell(self), gate_ws)
     }
 
     /// 同一会话的显式 revision 重驱:gateway resume 路径的原生恢复确认。
-    async fn drive_entity_session_resume(&mut self, stage: &'static str) -> EvidenceCell {
+    /// r23 问题3:修订在 fresh 轮保留下来的同一条连接上发起——同 engine
+    /// 实例保有 launch 指纹与 provider_conversations,revision 经
+    /// gateway.resume_or_start 走原生恢复(--resume 同一 native id)。
+    async fn drive_entity_session_resume(
+        &mut self,
+        stage: &'static str,
+        gate_ws: Option<LiveWs>,
+    ) -> EvidenceCell {
         let mut observation = StageObservation::new(stage, &self.provider);
         fp_enter_phase(stage, ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT, RESUME);
         // fix 轮 8:resume 格先定 mode 再早退——早退分支曾以 fresh 落盘,
@@ -1426,6 +1452,11 @@ impl MatrixEnvironment {
         let Some(session_id) = self.prior_entity_session_id.clone() else {
             return observation
                 .denied_cell("无可恢复的本阶段 fresh 会话(fresh 未建立会话)".to_string());
+        };
+        let Some(mut ws) = gate_ws else {
+            return observation.denied_cell(
+                "fresh 轮未达人工门(无干净的同连接会话可供门上修订)".to_string(),
+            );
         };
         observation.workspace_session_id = session_id.clone();
         fp("resume_audit_scan_begin", format_args!("session={session_id}"));
@@ -1439,14 +1470,21 @@ impl MatrixEnvironment {
             "resume_audit_scan_end",
             format_args!("requested_id={:?} frozen={:?}", observation.requested_resume_id, observation.frozen_digest),
         );
+        let revision = json!({
+            "type": "request_revision",
+            "feedback": {
+                "feedback_types": ["scope"],
+                "description": "矩阵 resume:显式修订重驱",
+                "target_artifact_version": null
+            }
+        });
+        if let Err(error) = ws.send_json(&revision).await {
+            observation.push_event(json!({"type": "matrix_error", "message": error}));
+            observation.run_failure = Some(format!("request_revision 发送失败:{error}"));
+            return observation.build_cell(self);
+        }
         let revision = self
-            .drive_revision_resume(
-                &session_id,
-                &mut observation,
-                "矩阵 resume:显式修订重驱",
-                1,
-                self.entity_stage_timeout,
-            )
+            .pump_workspace_session(&mut ws, &mut observation, 1, self.entity_stage_timeout)
             .await;
         observation.completed_product_artifact_exists = revision.artifact_confirmed;
         // 原生恢复确认:revision 轮审计的 provider_session_id == 请求 id。
@@ -1509,19 +1547,21 @@ impl MatrixEnvironment {
     }
 
     /// fresh 轮:连接 WS、start_generation(provider 配置真实选型)、pump。
+    /// r23:返回(结果, 连接)——实体 fresh 在门上收口后把连接交给 resume 格
+    /// 同连接修订;调用方不需要时丢弃即关闭(plan 阶段即此)。
     async fn drive_workspace_session_ws(
         &self,
         session_id: &str,
         observation: &mut StageObservation,
         confirm_rounds: usize,
         timeout: Duration,
-    ) -> DriveOutcome {
+    ) -> (DriveOutcome, Option<LiveWs>) {
         let mut ws = match self.connect_session_ws(session_id).await {
             Ok(ws) => ws,
             Err(error) => {
                 observation.push_event(json!({"type": "matrix_error", "message": error}));
                 observation.run_failure = Some(format!("workspace 会话 WS 连接失败:{error}"));
-                return DriveOutcome::default();
+                return (DriveOutcome::default(), None);
             }
         };
         // 产品确认走真实 WS gate:StartGeneration 携带所选 provider 配置。
@@ -1539,10 +1579,12 @@ impl MatrixEnvironment {
         if let Err(error) = ws.send_json(&start).await {
             observation.push_event(json!({"type": "matrix_error", "message": error}));
             observation.run_failure = Some(format!("start_generation 发送失败:{error}"));
-            return DriveOutcome::default();
+            return (DriveOutcome::default(), None);
         }
-        self.pump_workspace_session(&mut ws, observation, confirm_rounds, timeout)
-            .await
+        let outcome = self
+            .pump_workspace_session(&mut ws, observation, confirm_rounds, timeout)
+            .await;
+        (outcome, Some(ws))
     }
 
     /// 真实确认门:POST /confirm(引擎裁决端点),按响应 DTO status 判定
@@ -1843,7 +1885,7 @@ impl MatrixEnvironment {
                 .filter_map(|value| value.as_str().map(str::to_string))
                 .collect();
         }
-        let drive = self
+        let (drive, _ws) = self
             .drive_workspace_session_ws(&session_id, &mut observation, 8, self.entity_stage_timeout)
             .await;
         observation.completed_product_artifact_exists = drive.artifact_confirmed;
@@ -2363,15 +2405,12 @@ impl MatrixEnvironment {
                 "/api/projects/{PROJECT_ID}/issues/{}/design-specs:generate",
                 self.issue_id
             ),
-            json!({
-                "title": "矩阵 review:评审会话载体",
-                "story_spec_ids": self.story_spec_ids(),
-                "author_provider": self.provider_wire,
-                "reviewer_provider": self.provider_wire,
-                "review_rounds": 1,
-                "superpowers_enabled": false,
-                "openspec_enabled": true
-            }),
+            pinned_design_generate_body(
+                "矩阵 review:评审会话载体",
+                &self.story_spec_ids(),
+                &self.member_logical_id,
+                &self.provider_wire,
+            ),
         )
         .await;
         if !status.is_success() {
@@ -2395,7 +2434,7 @@ impl MatrixEnvironment {
         }
         observation.workspace_session_id = session_id.clone();
         self.prior_review_session_id = Some(session_id.clone());
-        let drive = self
+        let (drive, _ws) = self
             .drive_workspace_session_ws(&session_id, &mut observation, 8, self.entity_stage_timeout)
             .await;
         observation.completed_product_artifact_exists = drive.artifact_confirmed;
@@ -2977,6 +3016,31 @@ fn pump_frame_disposition(
         "protocol_error" | "error" => PumpFrameDisposition::ServerError,
         _ => PumpFrameDisposition::Listen,
     }
+}
+
+/// r23 问题2:design 生成请求体——产品端点原生支持调用方钉定聚合视野
+/// (`GenerateDesignSpecsRequest.involved_repository_ids`/`change_order`,
+/// 方案X 阶段1);不传则由 AI 结构化输出自决回写,r22 实测自决
+/// [alpha,beta] 令 design 修订路由 TargetAmbiguous(产品语义:≥2 involved
+/// fail-closed,workspace_repository.rs unique_target)。矩阵按 v1.1 E2E
+/// 单成员先例钉定 alpha;issue 文案交付域同向收敛 AI 自决回写。
+fn pinned_design_generate_body(
+    title: &str,
+    story_spec_ids: &[String],
+    member_logical_id: &str,
+    provider_wire: &str,
+) -> Value {
+    json!({
+        "title": title,
+        "story_spec_ids": story_spec_ids,
+        "involved_repository_ids": [member_logical_id],
+        "change_order": [member_logical_id],
+        "author_provider": provider_wire,
+        "reviewer_provider": provider_wire,
+        "review_rounds": 1,
+        "superpowers_enabled": false,
+        "openspec_enabled": true
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -3741,5 +3805,35 @@ mod pump_disposition_tests {
             pump_frame_disposition("session_state", &snapshot, 1),
             PumpFrameDisposition::Listen
         );
+    }
+    /// r23 问题2 回归锚点:design 生成必须钉定单成员聚合视野——
+    /// involved ≥2 时 design 修订路由按产品语义 fail-closed(TargetAmbiguous,
+    /// r22 现场 design_spec_0001/0002 双双命中),矩阵 resume 格永不可达。
+    #[test]
+    fn lcg_design_generate_body_pins_single_member_aggregate_scope() {
+        let body = pinned_design_generate_body(
+            "矩阵 design:alpha 仓会话过期后端设计",
+            &["story_spec_0001".to_string()],
+            "logical-uuid-alpha",
+            "claude-code",
+        );
+        let involved = body["involved_repository_ids"]
+            .as_array()
+            .expect("design 生成请求必须携带 involved_repository_ids 钉定");
+        assert_eq!(
+            involved,
+            &vec![json!("logical-uuid-alpha")],
+            "design involved 必须钉定单成员(修订路由 ≥2 fail-closed)"
+        );
+        let change_order = body["change_order"]
+            .as_array()
+            .expect("design 生成请求必须携带 change_order");
+        assert_eq!(
+            change_order,
+            &vec![json!("logical-uuid-alpha")],
+            "change_order 必须恰好覆盖 involved(端点 validate_requested_aggregate_scope)"
+        );
+        // story spec 引用透传(design 生成前置)。
+        assert_eq!(body["story_spec_ids"], json!(["story_spec_0001"]));
     }
 }
