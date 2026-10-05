@@ -37,6 +37,14 @@ pub mod tests;
 
 const TOOL_RESULT_PREVIEW_MAX_BYTES: usize = 500;
 
+/// r19 根修:会话收尾中子进程退出先于流终态时,给流的有界排空窗口——
+/// 正常完成的 result 行已在管道缓冲内,秒级排空;窗口耗尽即以子进程退出
+/// 为终态 fail-closed。测试环境缩短以保持回归秒级。
+#[cfg(not(test))]
+const CLAUDE_CHILD_EXIT_STREAM_DRAIN: std::time::Duration = std::time::Duration::from_secs(2);
+#[cfg(test)]
+const CLAUDE_CHILD_EXIT_STREAM_DRAIN: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// claude 的 adapter dialect 常量（GC9 冻结：`claude-stream-json`）。
 pub const CLAUDE_POLICY_DIALECT: &str = "claude-stream-json";
 
@@ -553,7 +561,13 @@ async fn run_claude_session_tail(
     stderr_output: Arc<Mutex<String>>,
     stderr_task: tokio::task::JoinHandle<()>,
 ) {
-    let result = stream::read_claude_stream(
+    // r19 根修:CLI 子进程退出必须终结事件流。stdout EOF 可能被「同进程组
+    // 内仍存活、继承了管道写端的进程」无限推迟(CLI 工具子进程形态),流
+    // 读取因此与 `child.wait()` 竞速:子进程先退出时对进程组补 SIGKILL
+    // 释放管道持有者,再给流一个有界排空窗口(正常完成的 result 行已在
+    // 管道缓冲内);窗口耗尽即以子进程退出为终态 fail-closed(Failed 事件
+    // → 同步桥秒级返回),不依赖外层 stage 超时兜底。
+    let mut stream_reader = Box::pin(stream::read_claude_stream(
         stdout_reader,
         stdin,
         bridge,
@@ -561,8 +575,27 @@ async fn run_claude_session_tail(
         cancel,
         structured_output_contract,
         usage_role,
-    )
-    .await;
+    ));
+    let result = tokio::select! {
+        result = &mut stream_reader => result,
+        status = child.wait() => {
+            let _ = child.start_kill();
+            match tokio::time::timeout(CLAUDE_CHILD_EXIT_STREAM_DRAIN, &mut stream_reader).await {
+                Ok(result) => result,
+                Err(_elapsed) => {
+                    let status_note = match &status {
+                        Ok(status) => format!("exit status: {status}"),
+                        Err(error) => format!("wait error: {error}"),
+                    };
+                    let mut error =
+                        ProviderAdapterError::execution_failed(None, String::new(), String::new(), 0);
+                    error.details =
+                        format!("claude child exited before stream terminal event ({status_note})");
+                    Err(error)
+                }
+            }
+        }
+    };
     match result {
         Ok(ClaudeStreamOutcome::Aborted) => {
             stderr_task.abort();

@@ -399,3 +399,76 @@ done
     assert_eq!(report.cache_read_tokens, Some(300));
     assert_eq!(report.cache_creation_tokens, Some(40));
 }
+
+/// r19 根修回归:CLI 直接子进程死亡(kill -9)而同进程组的后台进程仍持有
+/// stdout 写端时,EOF 被无限推迟——会话事件流仍必须在秒级以 Failed 终结,
+/// 不得依赖外层 stage 超时兜底(r19 现场:sync 桥 epoll 空等 57min+ 直至
+/// 5400s 外层 kill)。
+#[cfg(unix)]
+#[tokio::test]
+async fn claude_child_death_terminates_stream_when_pipe_held_by_group_member() {
+    let fixture = write_fixture(
+        "claude_child_exit_pipe_held_fixture.sh",
+        "#!/usr/bin/env bash\nwhile IFS= read -r line; do\n  if [[ \"$line\" == *'\"type\":\"user\"'* ]]; then\n    echo '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-exit-1\"}'\n    sleep 300 &\n    kill -9 $$\n  fi\ndone\n",
+    );
+    let provider = ClaudeCodeProvider::new(fixture);
+    let mut session = provider
+        .start(
+            streaming_input(ProviderType::ClaudeCode, ProviderPermissionMode::Auto),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("claude session starts");
+
+    let failure = tokio::time::timeout(TEST_TIMEOUT, async {
+        loop {
+            match session
+                .events
+                .recv()
+                .await
+                .expect("event channel stays open until terminal event")
+            {
+                ProviderEvent::Failed { message } => break message,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("child exit must terminate the session stream within seconds");
+    assert!(
+        failure.contains("exited without result") || failure.contains("child exited"),
+        "unexpected failure message: {failure}"
+    );
+}
+
+/// r19 结构性根修回归:事件流必须能随会话机构(收尾任务+审批桥)终结而
+/// 关闭——即使消费者仍持有 `ProviderSession.commands`(同步桥 drive 循环
+/// 形态),审批桥监听任务不得无限期持有 event 通道发送端使 recv 永不返回
+/// None(否则收尾任务无终态事件的任何路径都会空等到 stage 超时)。
+#[cfg(unix)]
+#[tokio::test]
+async fn claude_event_stream_closes_after_session_ends_even_while_commands_held() {
+    let fixture = write_fixture(
+        "claude_init_result_close_fixture.sh",
+        "#!/usr/bin/env bash\nwhile IFS= read -r line; do\n  if [[ \"$line\" == *'\"type\":\"user\"'* ]]; then\n    echo '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-close-1\"}'\n    echo '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"close done\",\"session_id\":\"sess-close-1\"}'\n    exit 0\n  fi\ndone\n",
+    );
+    let provider = ClaudeCodeProvider::new(fixture);
+    let mut session = provider
+        .start(
+            streaming_input(ProviderType::ClaudeCode, ProviderPermissionMode::Auto),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("claude session starts");
+
+    let _ = recv_completion(&mut session.events).await;
+
+    // 消费者镜像 sync bridge drive 循环:持有 commands 不放,等事件流终结。
+    let closed = tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+        .await
+        .expect("event stream must close after session machinery ends");
+    assert!(
+        closed.is_none(),
+        "event channel must terminate once the session tail ends"
+    );
+}

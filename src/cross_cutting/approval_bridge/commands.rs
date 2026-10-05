@@ -1,4 +1,5 @@
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use crate::cross_cutting::streaming_provider::{ProviderCommand, ProviderEvent};
 
@@ -9,8 +10,20 @@ pub(super) async fn listen_for_permission_commands(
     pending: PendingPermissions,
     pending_choices: PendingChoices,
     event_tx: mpsc::Sender<ProviderEvent>,
+    cancel: CancellationToken,
 ) {
-    while let Some(command) = command_rx.recv().await {
+    loop {
+        let command = tokio::select! {
+            // r19 结构性根修:会话机构(ApprovalBridge)消亡后监听任务必须
+            // 退出并释放 event 通道发送端——否则消费者(同步桥 drive 循环)
+            // 持有 commands 期间事件流永不关闭,recv 空等到 stage 超时。
+            // 桥消亡后本任务已无 waiter 可服务,退出语义安全。
+            _ = cancel.cancelled() => return,
+            command = command_rx.recv() => match command {
+                Some(command) => command,
+                None => return,
+            },
+        };
         match command {
             ProviderCommand::PermissionResponse {
                 id,

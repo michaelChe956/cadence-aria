@@ -961,4 +961,106 @@ mod tests {
         );
         assert_eq!(output.timeout_status, TimeoutStatus::NotTimedOut);
     }
+
+    /// r19 现场回归(lcg 桥):同步桥驱动真实 claude adapter,CLI 子进程在
+    /// init 握手后立即死亡(kill -9;同组后台 sleep 持有 stdout 写端使 EOF
+    /// 被无限推迟)——桥必须秒级返回错误,不得空等 stage 超时(r19 现场:
+    /// bridge 线程 epoll 空等 57min+,ps 已无 claude CLI 子进程,直至 5400s
+    /// 外层 SIGKILL)。修前该形态要等到 `AdapterInput.timeout`(生产 3h)。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn lcg_bridge_returns_promptly_when_cli_child_dies_after_init() {
+        use crate::cross_cutting::claude_code_provider::ClaudeCodeProvider;
+        use crate::product::lifecycle_store::LifecycleStore;
+        use crate::product::logical_codebase::provider_gateway::ProviderLaunchAuditContext;
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_root, canonical_root, member) = bridge_root_and_member();
+        let paths = ProductAppPaths::new(canonical_root.join(".aria"));
+
+        // r19 形态 CLI:收到 user 消息后吐 init 行,随后立即 kill -9 自身;
+        // 同进程组的 `sleep 300` 继承 stdout 写端,EOF 因此永不到来。
+        let script = canonical_root.join("claude_dead_child_fixture.sh");
+        std::fs::write(
+            &script,
+            "#!/usr/bin/env bash\nwhile IFS= read -r line; do\n  if [[ \"$line\" == *'\"type\":\"user\"'* ]]; then\n    echo '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-bridge-dead-1\"}'\n    sleep 300 &\n    kill -9 $$\n  fi\ndone\n",
+        )
+        .expect("write dead-child fixture");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod dead-child fixture");
+
+        let adapter = std::sync::Arc::new(ClaudeCodeProvider::new(script).with_version_supplier(
+            std::sync::Arc::new(|| Ok("claude 1.0.99-bridge-dead-fixture".to_string())),
+        ));
+        let mut registry = ProviderRegistry::new();
+        registry.register(ProviderName::ClaudeCode, adapter);
+        let registry = std::sync::Arc::new(registry);
+        let sync_bridge = GatewaySyncProvider::new(registry.clone());
+
+        let manifest =
+            LogicalCodebaseManifest::new("project_0001", canonical_root.to_path_buf(), vec![]);
+        let policies = AggregatePolicyArtifactStore::new(paths.clone());
+        policies
+            .ensure_bootstrap(&manifest)
+            .expect("bootstrap policy");
+        let gateway = std::sync::Arc::new(LogicalCodebaseProviderGateway::with_audit(
+            policies,
+            std::sync::Arc::new(BridgeStaticCapabilitySource),
+            std::sync::Arc::new(BridgePassThroughResolver),
+            registry,
+            std::sync::Arc::new(sync_bridge),
+            bridge_availability_gate(),
+            std::sync::Arc::new(GatewayRunAudit::new()),
+            manifest.provider_context_root.clone(),
+        ));
+
+        let request = SessionLaunchRequest {
+            project_id: "project_0001".to_string(),
+            provider: ProviderRef::claude_code("cap_bridge_fixture"),
+            action: SessionPolicyAction::PlanningReadOnly,
+            target: PolicyTarget::checkout(
+                "logical_repo_0001".to_string(),
+                "checkout_0001".to_string(),
+                member.to_path_buf(),
+            ),
+            working_directory: canonical_root.to_path_buf(),
+            readable_roots: vec![canonical_root.to_path_buf()],
+            writable_roots: Vec::new(),
+            config_artifact_ref: "sha256:bridge-fixture-config".to_string(),
+        };
+        let lifecycle = LifecycleStore::new(paths.clone());
+        let audit_context = ProviderLaunchAuditContext {
+            workspace_session_id: "ws_bridge_dead_0001".to_string(),
+            role_run_seq: 1,
+            audit_sink: std::sync::Arc::new(lifecycle.clone()),
+        };
+
+        // 桥 deadline 显式拉大(镜像 r19 的 3h 形态):修前形态要等到该
+        // deadline 才归,断言窗口(15s)先失败使回归必然红。
+        let mut input = bridge_adapter_input(&canonical_root, &member);
+        input.timeout = 120;
+        let prepared = gateway
+            .prepare_sync_launch(input, request, audit_context)
+            .expect("prepare sync launch");
+
+        let started = std::time::Instant::now();
+        let outcome = tokio::time::timeout(Duration::from_secs(15), async move {
+            tokio::task::spawn_blocking(move || gateway.run_sync(prepared))
+                .await
+                .expect("bridge worker must not panic")
+        })
+        .await
+        .expect("dead CLI child must fail the bridge within seconds, not wait for stage timeout");
+
+        let failure = outcome.expect_err("dead CLI child must fail the sync bridge");
+        assert!(
+            started.elapsed() < Duration::from_secs(15),
+            "bridge must return promptly after child death, took {:?}",
+            started.elapsed()
+        );
+        assert!(
+            !failure.to_string().is_empty(),
+            "failure must carry the child-death cause"
+        );
+    }
 }

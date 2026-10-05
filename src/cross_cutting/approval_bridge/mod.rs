@@ -66,6 +66,7 @@ impl ApprovalBridge {
             Arc::clone(&pending),
             Arc::clone(&pending_choices),
             event_tx.clone(),
+            cleanup_cancel.clone(),
         ));
         tokio::spawn(cleanup_pending_permissions(
             Arc::clone(&pending),

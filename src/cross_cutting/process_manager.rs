@@ -24,8 +24,8 @@ const TRANSIENT_SPAWN_RETRY_COUNT: usize = 2;
 const TRANSIENT_SPAWN_RETRY_DELAY: Duration = Duration::from_millis(10);
 
 #[cfg(unix)]
-fn unix_process_group_signal_target(current_child_id: Option<u32>, pgid: i32) -> Option<i32> {
-    (current_child_id == u32::try_from(pgid).ok()).then_some(pgid)
+fn unix_process_group_signal_target(spawn_time_leader_pid: Option<u32>, pgid: i32) -> Option<i32> {
+    (spawn_time_leader_pid == u32::try_from(pgid).ok()).then_some(pgid)
 }
 
 #[derive(Debug)]
@@ -43,6 +43,12 @@ pub struct ManagedProcessChild {
     child: AsyncGroupChild,
     #[cfg(unix)]
     pgid: Option<i32>,
+    /// r19 根修:spawn 时冻结的进程组组长 pid(`process_group(0)` 使 child
+    /// 即组长)。组长回收后组清理仍须可达——组内残留进程(CLI 工具孙进程)
+    /// 持有 stdout/stderr 管道写端,会无限推迟 EOF(现场:sync 桥 epoll
+    /// 空等 57min+)。以 spawn 时身份判定组归属,不随 child 回收失效。
+    #[cfg(unix)]
+    group_leader_pid: Option<u32>,
     #[cfg(all(unix, test))]
     drop_reaper_spawns: Arc<AtomicUsize>,
 }
@@ -64,9 +70,11 @@ impl ManagedProcessChild {
             command.process_group(0);
             let child = command.spawn()?;
             let pgid = child.id().and_then(|pid| i32::try_from(pid).ok());
+            let group_leader_pid = child.id();
             Ok(Self {
                 child: Some(child),
                 pgid,
+                group_leader_pid,
                 #[cfg(test)]
                 drop_reaper_spawns: Arc::new(AtomicUsize::new(0)),
             })
@@ -104,10 +112,13 @@ impl ManagedProcessChild {
     }
 
     pub fn start_kill(&mut self) -> std::io::Result<()> {
+        // r19:以 spawn 时冻结的组长身份判定组归属——child 已退出/回收后
+        // 组清理仍须可达(组内残留进程持有管道写端,推迟 EOF 使事件流
+        // 无法终结)。
         #[cfg(unix)]
         if let Some(pgid) = self
             .pgid
-            .and_then(|pgid| unix_process_group_signal_target(self.id(), pgid))
+            .and_then(|pgid| unix_process_group_signal_target(self.group_leader_pid, pgid))
         {
             let result = unsafe { libc::killpg(pgid, libc::SIGKILL) };
             if result == 0 {
@@ -118,14 +129,10 @@ impl ManagedProcessChild {
     }
 
     pub async fn wait(&mut self) -> std::io::Result<ExitStatus> {
-        let status = self.inner().wait().await;
-        if status.is_ok() {
-            #[cfg(unix)]
-            {
-                self.pgid = None;
-            }
-        }
-        status
+        // r19:成功回收后不再清空 pgid——组内残留进程(继承管道写端的工具
+        // 孙进程)仍需后续 start_kill()/Drop 的组清理;组长身份以 spawn 时
+        // 冻结的 group_leader_pid 判定,不受回收影响。
+        self.inner().wait().await
     }
 
     pub async fn terminate(&mut self) {
@@ -142,7 +149,7 @@ impl Drop for ManagedProcessChild {
             if let Some(pgid) = self
                 .pgid
                 .take()
-                .and_then(|pgid| unix_process_group_signal_target(self.id(), pgid))
+                .and_then(|pgid| unix_process_group_signal_target(self.group_leader_pid, pgid))
             {
                 unsafe {
                     let _ = libc::killpg(pgid, libc::SIGKILL);
