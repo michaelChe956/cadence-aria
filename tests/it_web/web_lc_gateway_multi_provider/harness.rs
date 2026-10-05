@@ -461,14 +461,16 @@ impl LiveLcGatewayHarness {
                     "/api/projects/{PROJECT_ID}/issues/{}/story-specs:generate",
                     env.issue_id
                 ),
-                json!({
-                    "title": "矩阵 story:会话过期提示",
-                    "author_provider": env.provider_wire,
-                    "reviewer_provider": env.provider_wire,
-                    "review_rounds": 1,
-                    "superpowers_enabled": false,
-                    "openspec_enabled": true
-                }),
+                // r23:story 同样钉定单成员 involved——产品面(r23 根修)对钉定
+                // involved 派生 focus=首成员,story 首轮 launch 即锚 alpha 成员
+                // checkout;不钉则首轮锚聚合根视图,AI 回写 involved/focus 后
+                // 修订轮 target 三元组+git identity 漂移,按设计 supersede
+                // (resume_fingerprint_mismatch,r23 现场),原生恢复不可达。
+                pinned_story_generate_body(
+                    "矩阵 story:alpha 仓会话过期提示",
+                    &env.member_logical_id,
+                    &env.provider_wire,
+                ),
                 "story_specs",
             )
             .await,
@@ -3043,6 +3045,26 @@ fn pinned_design_generate_body(
     })
 }
 
+/// r23:story 生成请求体——钉定单成员 involved。产品面(r23 根修)对钉定
+/// involved 派生 focus=首成员,首轮 launch 即锚该成员 checkout;story 的
+/// focus 无独立请求面,这是唯一让首轮与修订轮 target 锚一致(指纹可比对、
+/// 原生恢复可达)的钉定入口。
+fn pinned_story_generate_body(
+    title: &str,
+    member_logical_id: &str,
+    provider_wire: &str,
+) -> Value {
+    json!({
+        "title": title,
+        "involved_repository_ids": [member_logical_id],
+        "author_provider": provider_wire,
+        "reviewer_provider": provider_wire,
+        "review_rounds": 1,
+        "superpowers_enabled": false,
+        "openspec_enabled": true
+    })
+}
+
 // ---------------------------------------------------------------------------
 // WS 驱动辅助。
 // ---------------------------------------------------------------------------
@@ -3835,5 +3857,25 @@ mod pump_disposition_tests {
         );
         // story spec 引用透传(design 生成前置)。
         assert_eq!(body["story_spec_ids"], json!(["story_spec_0001"]));
+    }
+
+    /// r23 回归锚点:story 生成体必须钉定单成员 involved——不钉则首轮 launch
+    /// 锚聚合根视图(记录 involved 空),AI 回写后修订轮锚成员,指纹 target
+    /// 三元组+git identity 必漂移(resume_fingerprint_mismatch supersede)。
+    #[test]
+    fn lcg_story_generate_body_pins_single_member_involved() {
+        let body = pinned_story_generate_body(
+            "矩阵 story:alpha 仓会话过期提示",
+            "logical-uuid-alpha",
+            "claude-code",
+        );
+        let involved = body["involved_repository_ids"]
+            .as_array()
+            .expect("story 生成请求必须携带 involved_repository_ids 钉定");
+        assert_eq!(
+            involved,
+            &vec![json!("logical-uuid-alpha")],
+            "story involved 必须钉定单成员(产品面据此派生 focus,首轮即锚成员)"
+        );
     }
 }

@@ -144,6 +144,81 @@ async fn generate_story_specs_logical_branch_injects_aggregate_prompt() {
 }
 
 #[tokio::test]
+async fn generate_story_specs_pinned_involved_derives_focus_for_member_anchored_launch() {
+    // r23 指纹漂移维度钉死(story resume superseded 根因):AI 自决流的首轮
+    // launch 锚聚合根视图(记录 involved 空 → aggregate_root_view),AI 回写
+    // involved/focus 后 revision 轮锚成员 checkout → 指纹 target 三元组 +
+    // git identity 维度漂移 → 按设计 superseded(resume_fingerprint_mismatch)。
+    // 调用方钉定 involved 是让首轮即锚成员的唯一入口,但 pin 面 previously
+    // 只落 involved、focus 恒 None——钉定后路由恒 TargetMissing
+    // (workspace_repository.rs story None+involved 非空臂),pin API 结构性
+    // 不可用。修:钉定 involved 非空时 focus=involved 首成员,story 首轮
+    // 即锚成员 checkout,门上修订指纹可比对(原生恢复可达)。
+    let root = tempdir().expect("root");
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects",
+        json!({"name":"Lifecycle","description":null}),
+    )
+    .await;
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    IssueStore::new(app_paths.clone())
+        .create(CreateProductIssueInput {
+            project_id: "project_0001".to_string(),
+            repo_id: None,
+            logical_codebase_id: None,
+            title: "多仓聚合 Story pin".to_string(),
+            description: Some("alpha 仓交付".to_string()),
+            change_id: None,
+                   base_branch: None,
+})
+        .expect("multi-repo issue");
+    let member_id = LogicalRepositoryId(uuid::Uuid::from_u128(1));
+    seed_logical_codebase(&app_paths, member_id);
+
+    let (status, story_response) = request_json(
+        app,
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/story-specs:generate",
+        json!({
+            "title":"聚合 Story Spec(钉定单成员)",
+            "involved_repository_ids": [member_id.0.to_string()],
+            "author_provider":"fake",
+            "reviewer_provider":"codex",
+            "review_rounds":1,
+            "superpowers_enabled":false,
+            "openspec_enabled":false
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "钉定 involved 的 story generate 必须成功: {story_response}"
+    );
+    let story_id = story_response["story_specs"][0]["story_spec_id"]
+        .as_str()
+        .expect("story id");
+    let record = LifecycleStore::new(app_paths)
+        .list_story_specs("project_0001", "issue_0001")
+        .expect("story records")
+        .into_iter()
+        .find(|record| record.id == story_id)
+        .expect("created story record");
+    assert_eq!(record.involved_repository_ids, vec![member_id]);
+    assert_eq!(
+        record.focus_repository_id,
+        Some(member_id),
+        "钉定 involved 非空时必须派生 focus(否则路由恒 TargetMissing,首轮锚聚合根,修订指纹必漂移 supersede)"
+    );
+}
+
+#[tokio::test]
 async fn generate_design_specs_logical_branch_injects_aggregate_prompt() {
     // 多仓 issue → POST design-specs:generate → 200，design 为草稿态聚合视野
     // （aggregate_codebase=Some），session context message 注入 aggregate_design prompt

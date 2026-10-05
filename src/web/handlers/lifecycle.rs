@@ -564,11 +564,20 @@ pub async fn generate_story_specs(
                 &involved_repository_ids,
                 &[],
             )?;
+            // r23 指纹漂移根修:调用方钉定 involved 非空时派生 focus=首成员。
+            // 此前 focus 恒 None——story 路由(workspace_repository.rs)对
+            // focus=None ∧ involved 非空恒 TargetMissing,pin 面结构性不可用;
+            // AI 自决流的首轮 launch 只能锚聚合根视图,回写 involved/focus 后
+            // 修订轮锚成员 checkout,指纹 target 三元组+git identity 维度必
+            // 漂移(resume_fingerprint_mismatch supersede,r23 现场)。钉定
+            // 即首轮锚成员,门上修订指纹可比对(原生恢复可达);单成员钉定
+            // 下 focus=该成员是唯一合法取值(focus ∈ involved)。
+            let focus_repository_id = involved_repository_ids.first().cloned();
             let scope = AggregateStorySpecScope {
                 logical_codebase_ref: manifest.logical_codebase_id,
                 effective_member_ids: resolved.snapshot.effective_member_ids.clone(),
                 involved_repository_ids,
-                focus_repository_id: None,
+                focus_repository_id,
             };
             (String::new(), Some(scope))
         }
