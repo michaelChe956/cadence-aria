@@ -87,6 +87,178 @@ pub fn provider_family_text(provider: &ProviderName) -> &'static str {
     }
 }
 
+/// resume 面 probe 通道:四家真实 CLI 的 launch/resume 原生 id 语义
+/// (2026-10-05 现场实测;argv/错 id 行为均为真实 CLI 实测口径):
+/// - claude:`-p --output-format json` 应答 JSON `session_id`;`--resume <id>`
+///   续开同 id;错 id exit 1「No conversation found with session ID」。
+/// - codex:`exec --json` JSONL `thread.started.thread_id`;`exec resume <id>
+///   --json` 续开同 id;错 id exit 1「no rollout found for thread id」。
+/// - pi:`--mode json -p` 首事件 `{"type":"session","id":…}`;resume 经
+///   `--session-id <id>`(与产品 adapter 同通道);错 id 时新建**另一** id
+///   的会话(stderr 警告),不回显原 id——负探针判据为「错 id 不得回显原
+///   会话 id」(claude/codex/kimi 以真实报错满足,pi 以不同 id 满足)。
+/// - kimi:`-p --output-format stream-json` 事件 `session_id`;`-S <id>`
+///   续开同 id;错 id exit 1「Session … not found」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResumeChannelKind {
+    ClaudePrintJson,
+    CodexExecJson,
+    PiSessionId,
+    KimiStreamJson,
+}
+
+impl ResumeChannelKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ClaudePrintJson => "claude_print_json",
+            Self::CodexExecJson => "codex_exec_json",
+            Self::PiSessionId => "pi_session_id",
+            Self::KimiStreamJson => "kimi_stream_json",
+        }
+    }
+
+    /// launch argv(不含程序名;prompt 注入)。
+    pub(crate) fn launch_argv(self, prompt: &str) -> Vec<String> {
+        match self {
+            Self::ClaudePrintJson => {
+                vec![
+                    "-p".into(),
+                    prompt.into(),
+                    "--output-format".into(),
+                    "json".into(),
+                ]
+            }
+            Self::CodexExecJson => vec!["exec".into(), "--json".into(), prompt.into()],
+            Self::PiSessionId => vec!["--mode".into(), "json".into(), "-p".into(), prompt.into()],
+            Self::KimiStreamJson => vec![
+                "-p".into(),
+                prompt.into(),
+                "--output-format".into(),
+                "stream-json".into(),
+            ],
+        }
+    }
+
+    /// 同 id 续开 argv(native id 注入)。
+    pub(crate) fn resume_argv(self, native_id: &str, prompt: &str) -> Vec<String> {
+        match self {
+            Self::ClaudePrintJson => vec![
+                "-p".into(),
+                "--resume".into(),
+                native_id.into(),
+                prompt.into(),
+                "--output-format".into(),
+                "json".into(),
+            ],
+            Self::CodexExecJson => vec![
+                "exec".into(),
+                "resume".into(),
+                native_id.into(),
+                "--json".into(),
+                prompt.into(),
+            ],
+            Self::PiSessionId => vec![
+                "--mode".into(),
+                "json".into(),
+                "--session-id".into(),
+                native_id.into(),
+                "-p".into(),
+                prompt.into(),
+            ],
+            Self::KimiStreamJson => vec![
+                "-S".into(),
+                native_id.into(),
+                "-p".into(),
+                prompt.into(),
+                "--output-format".into(),
+                "stream-json".into(),
+            ],
+        }
+    }
+
+    /// 负探针使用的伪造 native id(格式与各家真实 id 同形)。
+    pub(crate) fn bogus_native_id(self) -> String {
+        match self {
+            Self::KimiStreamJson => "session_00000000-dead-0000-0000-000000000000".to_string(),
+            _ => "00000000-dead-0000-0000-000000000000".to_string(),
+        }
+    }
+
+    /// 从真实输出提取 native id(launch 与 resume 共用;逐行 JSON 扫描,
+    /// claude 单对象整体解析优先)。
+    pub(crate) fn extract_native_id(self, output: &str) -> Option<String> {
+        match self {
+            Self::ClaudePrintJson => {
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(output.trim())
+                    && let Some(id) = value.get("session_id").and_then(|id| id.as_str())
+                {
+                    return Some(id.to_string());
+                }
+                scan_json_lines(output, "session_id", None)
+            }
+            Self::CodexExecJson => scan_json_lines(output, "thread_id", None),
+            Self::PiSessionId => scan_json_lines(output, "id", Some("session")),
+            Self::KimiStreamJson => scan_json_lines(output, "session_id", None),
+        }
+    }
+}
+
+/// 逐行扫描 JSON 输出,取首个含 `key` 的行的该字段(可选按 `type` 过滤)。
+fn scan_json_lines(output: &str, key: &str, type_filter: Option<&str>) -> Option<String> {
+    for line in output.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
+        if let Some(filter) = type_filter
+            && value.get("type").and_then(|kind| kind.as_str()) != Some(filter)
+        {
+            continue;
+        }
+        if let Some(id) = value.get(key).and_then(|id| id.as_str()) {
+            return Some(id.to_string());
+        }
+    }
+    None
+}
+
+/// resume 面 probe 规格:受控 fixture 内「真实 launch(记录 native id)→
+/// 同 id 真实 resume→native id 确认同 id→错 id 负探针」。规格缺省 =
+/// resume 未探测(launch/write_boundary 面不受影响)。
+#[derive(Debug, Clone)]
+pub struct ResumeProbeSpec {
+    kind: ResumeChannelKind,
+    prompt: String,
+    timeout_secs: u64,
+}
+
+impl ResumeProbeSpec {
+    /// 默认单次调用 240s 超时(真机 LLM 轮次;fail-closed)。
+    pub fn new(kind: ResumeChannelKind, prompt: impl Into<String>) -> Self {
+        Self {
+            kind,
+            prompt: prompt.into(),
+            timeout_secs: 240,
+        }
+    }
+
+    pub fn with_timeout_secs(mut self, timeout_secs: u64) -> Self {
+        self.timeout_secs = timeout_secs;
+        self
+    }
+
+    pub fn kind(&self) -> ResumeChannelKind {
+        self.kind
+    }
+
+    pub fn prompt(&self) -> &str {
+        &self.prompt
+    }
+
+    pub(crate) fn timeout_secs(&self) -> u64 {
+        self.timeout_secs
+    }
+}
+
 /// `SessionPolicyAction` 的稳定文本(serde snake_case 序列化同形)。
 fn action_text(action: SessionPolicyAction) -> &'static str {
     match action {
@@ -119,6 +291,8 @@ pub struct BoundaryFixture {
     home: PathBuf,
     evidence_root: PathBuf,
     session_label: String,
+    /// resume 面 probe 规格(None = resume 未探测,只验 launch/write 面)。
+    resume: Option<ResumeProbeSpec>,
 }
 
 impl BoundaryFixture {
@@ -226,6 +400,7 @@ impl BoundaryFixture {
             home,
             evidence_root: evidence_root.to_path_buf(),
             session_label: session_label.to_string(),
+            resume: None,
         })
     }
 
@@ -263,6 +438,16 @@ impl BoundaryFixture {
 
     pub fn session_label(&self) -> &str {
         &self.session_label
+    }
+
+    /// 附加 resume 面 probe 规格(builder;材料不变,仅扩展探测面)。
+    pub fn with_resume(mut self, spec: ResumeProbeSpec) -> Self {
+        self.resume = Some(spec);
+        self
+    }
+
+    pub fn resume_spec(&self) -> Option<&ResumeProbeSpec> {
+        self.resume.as_ref()
     }
 
     /// fixture 材料对应的 canonical action(target 在场即 Coding)。
@@ -636,6 +821,16 @@ impl ProviderBoundaryProbe {
                 }
             }
         }
+    }
+
+    /// 证据工件 resume 面的三态(capability `resume` 列的签发口径;2d
+    /// 导入 resume 格消费):Confirmed=launch/resume/负探针全部真实通过;
+    /// Denied=CLI 不支持/同 id 续开 id 不符/错 id 回显原 id(带真实错误);
+    /// Unknown=未探测/超时/工件不可读。
+    pub fn artifact_resume_state(artifact_ref: &str) -> ProviderCapabilityEvidence {
+        // Task 6c resume 段阶段 1 RED 桩:阶段 2 实现真实工件解析。
+        let _ = artifact_ref;
+        ProviderCapabilityEvidence::Unknown
     }
 }
 
@@ -1132,7 +1327,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{BoundaryFixture, ProviderBoundaryProbe};
+    use super::{BoundaryFixture, ProviderBoundaryProbe, ResumeChannelKind, ResumeProbeSpec};
     use crate::cross_cutting::claude_code_provider::ClaudePolicyProjector;
     use crate::cross_cutting::codex_provider::CodexPolicyProjector;
     use crate::cross_cutting::kimi_code_provider::KimiPolicyProjector;
@@ -1572,7 +1767,229 @@ mod tests {
         assert_eq!(invalid_plan, ProviderCapabilityEvidence::Unknown);
     }
 
+    // ==== Task 6c resume 面:真实 launch→同 id resume→错 id 负探针 ====
+
+    /// 可编程假 CLI(宿主真实进程,claude print-json 形态):launch 打印
+    /// 固定 session_id 的 JSON;`--resume <id>` 回显请求 id;错 id
+    /// (00000000-*)exit 1 带真实报文。`broken` 变体的 resume 回显**另一个**
+    /// id(模拟 id 绑定失效)。真实四家 CLI 由 live probe 覆盖。
+    fn write_fake_resume_cli(dir: &Path, variant: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let resume_body = if variant == "broken" {
+            // id 绑定失效:resume 回显另一个 id。
+            "printf '{\"session_id\":\"99999999-8888-7777-6666-555555555555\",\"result\":\"resumed\"}\\n'"
+        } else {
+            "printf '{\"session_id\":\"%s\",\"result\":\"resumed\"}\\n' \"$rid\""
+        };
+        let script = format!(
+            "#!/bin/sh\n\
+             if [ \"$1\" = \"--version\" ]; then echo \"fake-resume-cli 1.0.0\"; exit 0; fi\n\
+             prev=\"\"; rid=\"\"\n\
+             for a in \"$@\"; do\n\
+             \x20 if [ \"$prev\" = \"--resume\" ]; then rid=\"$a\"; fi\n\
+             \x20 prev=\"$a\"\n\
+             done\n\
+             if [ -n \"$rid\" ]; then\n\
+             \x20 case \"$rid\" in\n\
+             \x20 \x20 00000000-*) echo \"No conversation found with session ID: $rid\" >&2; exit 1;;\n\
+             \x20 esac\n\
+             \x20 {resume_body}\n\
+             \x20 exit 0\n\
+             fi\n\
+             printf '{{\"session_id\":\"11111111-2222-3333-4444-555555555555\",\"result\":\"ok\"}}\\n'\n"
+        );
+        let path = dir.join(format!("fake-resume-cli-{variant}"));
+        fs::write(&path, script).expect("write fake resume cli");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
+            .expect("chmod fake resume cli");
+        path
+    }
+
+    /// Task 6c resume 面:launch 记录 native id→同 id resume 确认同 id→
+    /// 错 id 负探针被拒;工件 resume 段完整可审计,`artifact_resume_state`
+    /// 签发 Confirmed,且 2c shape 对 resume=Confirmed 的行兼容。
+    #[tokio::test]
+    async fn lcg_t06_resume_probe_round_trips_native_session_id() {
+        let launcher = ProviderBoundaryLauncher::probe_environment();
+        assert!(
+            launcher.is_available(),
+            "environment blocked: resume round-trip case needs bwrap + user namespace"
+        );
+        let base = tempdir().expect("base dir");
+        let cli = write_fake_resume_cli(base.path(), "ok");
+        let cli_text = cli.to_string_lossy().into_owned();
+        let version = host_cli_version(&cli_text);
+        let fixture = BoundaryFixture::create(
+            ProviderName::ClaudeCode,
+            &cli_text,
+            SessionPolicyAction::CodingTargetWrite,
+            base.path(),
+            &base.path().join("evidence"),
+            "unit-resume-ok",
+        )
+        .expect("fixture")
+        .with_resume(ResumeProbeSpec::new(
+            ResumeChannelKind::ClaudePrintJson,
+            "Reply with exactly: resume-ok",
+        ));
+        let projection = probe_projection(
+            ProviderName::ClaudeCode,
+            &fixture,
+            &version,
+            AdapterRole::Executor,
+        );
+        let outcome = ProviderBoundaryProbe::run(&projection, &fixture).await;
+        assert_eq!(
+            ProviderBoundaryProbe::evidence_state(&outcome),
+            ProviderCapabilityEvidence::Confirmed,
+            "write face must stay Confirmed independently of the resume face: {outcome:?}"
+        );
+        let evidence = outcome.expect("confirmed evidence");
+        let artifact: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(evidence.artifact_ref()).expect("read artifact"),
+        )
+        .expect("parse artifact");
+        let resume = &artifact["resume"];
+        assert_eq!(resume["probed"], serde_json::json!(true));
+        assert_eq!(resume["state"], serde_json::json!("Confirmed"));
+        assert_eq!(
+            resume["launch_native_session_id"],
+            serde_json::json!("11111111-2222-3333-4444-555555555555")
+        );
+        assert_eq!(
+            resume["resume_native_session_id"],
+            serde_json::json!("11111111-2222-3333-4444-555555555555")
+        );
+        assert_eq!(resume["id_confirmed_same"], serde_json::json!(true));
+        assert_eq!(resume["wrong_id_rejected"], serde_json::json!(true));
+        assert_eq!(
+            ProviderBoundaryProbe::artifact_resume_state(evidence.artifact_ref()),
+            ProviderCapabilityEvidence::Confirmed
+        );
+        // 2c shape 校验对 resume=Confirmed 的行兼容(2d 导入 resume 格)。
+        let record = shape_validation_record(
+            &evidence,
+            &projection,
+            ProviderCapabilityEvidence::Confirmed,
+        );
+        ProviderCapabilityProbeService::new()
+            .validate_probe_shape(&record, &evidence, &projection)
+            .expect("2c shape validation accepts a resume-confirmed row");
+    }
+
+    /// Task 6c resume 面:同 id resume 回显**另一个** native id(id 绑定
+    /// 失效)→ resume 段 Denied(带真实应答摘录);写面证据不受影响。
+    #[tokio::test]
+    async fn lcg_t06_resume_probe_denies_when_cli_breaks_id_binding() {
+        let launcher = ProviderBoundaryLauncher::probe_environment();
+        assert!(
+            launcher.is_available(),
+            "environment blocked: resume deny case needs bwrap + user namespace"
+        );
+        let base = tempdir().expect("base dir");
+        let cli = write_fake_resume_cli(base.path(), "broken");
+        let cli_text = cli.to_string_lossy().into_owned();
+        let version = host_cli_version(&cli_text);
+        let fixture = BoundaryFixture::create(
+            ProviderName::ClaudeCode,
+            &cli_text,
+            SessionPolicyAction::CodingTargetWrite,
+            base.path(),
+            &base.path().join("evidence"),
+            "unit-resume-broken",
+        )
+        .expect("fixture")
+        .with_resume(ResumeProbeSpec::new(
+            ResumeChannelKind::ClaudePrintJson,
+            "Reply with exactly: resume-ok",
+        ));
+        let projection = probe_projection(
+            ProviderName::ClaudeCode,
+            &fixture,
+            &version,
+            AdapterRole::Executor,
+        );
+        let outcome = ProviderBoundaryProbe::run(&projection, &fixture).await;
+        assert_eq!(
+            ProviderBoundaryProbe::evidence_state(&outcome),
+            ProviderCapabilityEvidence::Confirmed,
+            "write face is independent of the resume face: {outcome:?}"
+        );
+        let evidence = outcome.expect("confirmed evidence");
+        let artifact: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(evidence.artifact_ref()).expect("read artifact"),
+        )
+        .expect("parse artifact");
+        assert_eq!(artifact["resume"]["state"], serde_json::json!("Denied"));
+        let denied = ProviderBoundaryProbe::artifact_resume_state(evidence.artifact_ref());
+        match denied {
+            ProviderCapabilityEvidence::Denied { reason } => {
+                assert!(
+                    reason.contains("resume native id mismatch"),
+                    "deny reason must carry the real mismatch: {reason}"
+                );
+            }
+            other => panic!("resume face must be Denied, got {other:?}"),
+        }
+    }
+
+    /// Task 6c resume 面:规格缺省 = 未探测——工件 resume 段 `probed=false`,
+    /// 三态 Unknown(launch/write 面不受影响,legacy 行为零变化)。
+    #[tokio::test]
+    async fn lcg_t06_resume_face_not_probed_without_spec() {
+        let launcher = ProviderBoundaryLauncher::probe_environment();
+        assert!(
+            launcher.is_available(),
+            "environment blocked: resume not-probed case needs bwrap + user namespace"
+        );
+        let base = tempdir().expect("base dir");
+        let version = host_cli_version("git");
+        let fixture = BoundaryFixture::create(
+            ProviderName::ClaudeCode,
+            "git",
+            SessionPolicyAction::PlanningReadOnly,
+            base.path(),
+            &base.path().join("evidence"),
+            "unit-resume-absent",
+        )
+        .expect("fixture");
+        let projection = probe_projection(
+            ProviderName::ClaudeCode,
+            &fixture,
+            &version,
+            AdapterRole::Reviewer,
+        );
+        let outcome = ProviderBoundaryProbe::run(&projection, &fixture).await;
+        assert_eq!(
+            ProviderBoundaryProbe::evidence_state(&outcome),
+            ProviderCapabilityEvidence::Confirmed,
+            "{outcome:?}"
+        );
+        let evidence = outcome.expect("confirmed evidence");
+        let artifact: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(evidence.artifact_ref()).expect("read artifact"),
+        )
+        .expect("parse artifact");
+        assert_eq!(artifact["resume"]["probed"], serde_json::json!(false));
+        assert_eq!(
+            ProviderBoundaryProbe::artifact_resume_state(evidence.artifact_ref()),
+            ProviderCapabilityEvidence::Unknown
+        );
+    }
+
     // ==== Task 6c 四家现场:真实 CLI boundary probe(LC_GATEWAY_E2E=1) ====
+
+    /// 各家真实 CLI 的 resume 通道(现场实测口径,见 `ResumeChannelKind`)。
+    fn live_resume_kind(provider: &ProviderName) -> ResumeChannelKind {
+        match provider {
+            ProviderName::ClaudeCode => ResumeChannelKind::ClaudePrintJson,
+            ProviderName::Codex => ResumeChannelKind::CodexExecJson,
+            ProviderName::Pi => ResumeChannelKind::PiSessionId,
+            ProviderName::KimiCode => ResumeChannelKind::KimiStreamJson,
+            ProviderName::Fake => unreachable!("fake has no real resume channel"),
+        }
+    }
 
     fn live_gate() -> bool {
         std::env::var("LC_GATEWAY_E2E").ok().as_deref() == Some("1")
@@ -1587,17 +2004,18 @@ mod tests {
             .join("boundary")
     }
 
-    /// 2c shape 校验用的对齐 record(只签 write_boundary=Confirmed;launch/
-    /// resume 未探测保持 Unknown;artifact/probed_at/version 三方一致)。
+    /// 2c shape 校验用的对齐 record(write_boundary=Confirmed;resume 格由
+    /// probe 工件签发,launch 未探测保持 Unknown;三方一致字段对齐)。
     fn shape_validation_record(
         evidence: &crate::cross_cutting::provider_boundary::ProviderBoundaryEvidence,
         projection: &ProviderPolicyProjection,
+        resume: ProviderCapabilityEvidence,
     ) -> ProviderCapabilityRecord {
         let action = projection.action();
         let row = ProviderActionCapability {
             action,
             launch: ProviderCapabilityEvidence::Unknown,
-            resume: ProviderCapabilityEvidence::Unknown,
+            resume,
             write_boundary: ProviderCapabilityEvidence::Confirmed,
             projection_digest: evidence.projection_digest().to_string(),
             evidence_ref: evidence.artifact_ref().to_string(),
@@ -1648,7 +2066,11 @@ mod tests {
                 &evidence_root,
                 &label,
             )
-            .expect("live fixture");
+            .expect("live fixture")
+            .with_resume(ResumeProbeSpec::new(
+                live_resume_kind(&provider),
+                "Reply with exactly: boundary-resume-probe",
+            ));
             let role = if action == SessionPolicyAction::CodingTargetWrite {
                 AdapterRole::Executor
             } else {
@@ -1663,7 +2085,15 @@ mod tests {
                 "live {family_dir} {label} probe must sign Confirmed: {outcome:?}"
             );
             let evidence = outcome.expect("confirmed live evidence");
-            let record = shape_validation_record(&evidence, &projection);
+            // resume 面:真实 launch→同 id resume→错 id 负探针(工件签发)。
+            let resume_state =
+                ProviderBoundaryProbe::artifact_resume_state(evidence.artifact_ref());
+            assert_eq!(
+                resume_state,
+                ProviderCapabilityEvidence::Confirmed,
+                "live {family_dir} {label} resume face must be Confirmed"
+            );
+            let record = shape_validation_record(&evidence, &projection, resume_state);
             ProviderCapabilityProbeService::new()
                 .validate_probe_shape(&record, &evidence, &projection)
                 .unwrap_or_else(|error| panic!("2c shape validation: {error:?}"));

@@ -122,7 +122,7 @@ pub use provider_admission_preflight::{
     BootstrapActionKind, LogicalCodebaseProviderAdmissionPreflight, ProviderAdmissionError,
     ProviderAdmissionPreflightResult, ProviderRuleReference,
 };
-pub use provider_boundary_probe::{BoundaryFixture, ProviderBoundaryProbe};
+pub use provider_boundary_probe::{BoundaryFixture, ProviderBoundaryProbe, ResumeChannelKind, ResumeProbeSpec};
 pub use provider_capability_probe::{ProviderCapabilityProbeError, ProviderCapabilityProbeService};
 pub use provider_capability_store::{
     CapabilityEvidence, ProviderActionCapability, ProviderActionMatrix, ProviderCapabilityRecord,
