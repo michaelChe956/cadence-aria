@@ -592,6 +592,15 @@ impl ProviderBoundaryProbe {
                 cli_version
             )));
         }
+        // 3.5) resume 面(规格在场时):宿主侧真实 launch→同 id resume→错
+        //     id 负探针。置于 pre 快照**之前**:宿主 LLM 会话可能在 cwd
+        //     git 仓库做项目探测而物化 `.git/index` 等状态(pi 实测)——
+        //     那是宿主侧会话准备,不是沙箱写边界违规;D4 只度量沙箱窗口。
+        //     resume 结果与写边界正交,只记录工件 resume 段(2d 导入消费)。
+        let resume = match fixture.resume_spec() {
+            Some(spec) => run_resume_segment(spec, fixture.cli_program(), fixture.root()).await,
+            None => ResumeProbeRecord::not_probed(),
+        };
         let env = fixture.probe_env();
         // 4) 受保护面 pre 快照(沿 HEAD 既有预算;超限即拒签,不截断)。
         let snapshot_budget = RootRecipeSnapshotBudget::DEFAULT;
@@ -696,14 +705,7 @@ impl ProviderBoundaryProbe {
         } else {
             None
         };
-        // 9.5) resume 面(规格在场时):宿主侧真实 launch→同 id resume→
-        //     错 id 负探针。native id 语义与写边界正交,失败不影响写面
-        //     签发,只记录工件 resume 段(2d 导入 resume 格消费)。
-        let resume = match fixture.resume_spec() {
-            Some(spec) => run_resume_segment(spec, fixture.cli_program(), fixture.root()).await,
-            None => ResumeProbeRecord::not_probed(),
-        };
-        // 10) 受保护面 post 快照:pre==post 零漂移(D4 口径)。
+        // 10) 受保护面 post 快照:pre==post 零漂移(D4 口径,只度量沙箱窗口)。
         let post = bounded_snapshot(&faces, &snapshot_budget)?;
         if post != pre {
             return Err(ProviderBoundaryError::ProbeFailed(format!(
