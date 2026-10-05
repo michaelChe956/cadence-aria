@@ -949,3 +949,42 @@ async fn lcg_t01_all_lc_entrypoints_require_projection() {
         "所有 LC 入口必须经 prepare 绑定 run-bound sink(含无通用 tool_policy 角色)"
     );
 }
+
+/// r27 问题2:成员锚 vs 无锚的 target 漂移机制(SC 门修订 turn 9a 审计门
+/// 恒拒的根因)。带成员锚(logical/checkout id 对)的 planning_request
+/// target=checkout 锚;无锚 (None,None) 退 aggregate_root 锚——两者
+/// envelope 指纹必然不同,显式 resume 的投影五字段比对
+/// (`resume_with_lc_start_record`)按漂移恒拒。fresh 生成 turn 与 SC 门
+/// 修订 turn 必须经 `plan_member_anchor` 同源取锚。
+#[test]
+fn plan_author_launch_anchor_drifts_target_and_fingerprint_without_member_anchor() {
+    let fixture = gateway_fixture_with_adapter(Arc::new(CapturingStreamingAdapter {
+        inputs: mpsc::unbounded_channel().0,
+        start_mark: None,
+        observed_start_mark: Arc::default(),
+    }));
+    let member = fixture.aggregate_root.join("member-checkout");
+    std::fs::create_dir_all(&member).expect("member checkout under aggregate root");
+    let engine = workspace_engine_with_repository_path(&fixture, member.clone());
+
+    // 只比 planning_request 锚形态(不 validate:fixture 无成员登记,
+    // target 复验在本测试面之外;指纹随 target 三元组单调,锚形态区分
+    // 即漂移机制的充分证据)。
+    let anchored_launch =
+        logical_plan_launch_for(&engine, Some("logical-uuid-1".into()), Some("checkout-uuid-1".into()))
+            .expect("anchored launch");
+    let unanchored_launch = logical_plan_launch_for(&engine, None, None)
+        .expect("unanchored launch");
+
+    let anchored_request = anchored_launch.planning_request().expect("anchored request");
+    let unanchored_request = unanchored_launch.planning_request().expect("unanchored request");
+    assert_eq!(
+        anchored_request.target.logical_repository_id, "logical-uuid-1",
+        "成员锚 target 必须携带 logical id(checkout 锚)"
+    );
+    assert_eq!(anchored_request.target.checkout_id, "checkout-uuid-1");
+    assert_ne!(
+        unanchored_request.target.logical_repository_id, "logical-uuid-1",
+        "无锚 target 退 aggregate_root 锚(不带成员身份)——修订 turn 锚漂移即 9a 门恒拒"
+    );
+}

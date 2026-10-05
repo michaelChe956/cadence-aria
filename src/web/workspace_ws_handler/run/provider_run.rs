@@ -735,7 +735,35 @@ pub(super) async fn spawn_provider_run_with_start_mode(
                             return;
                         }
                     };
-                    let launch = match resolve_plan_author_launch(&engine, None, None) {
+                    // r27 问题2:与 fresh 生成 turn 同源成员锚——修订 turn 的
+                    // envelope target 必须与 fresh 轮一致(成员 checkout 锚),
+                    // 否则 9a 显式 resume 审计门按投影漂移恒拒(r26 现场
+                    // "resume audit drifted");此前 (None,None) 退聚合根锚。
+                    let launch = {
+                        let lifecycle_for_launch = crate::product::lifecycle_store::LifecycleStore::new(
+                            run_context_clone.app_paths.clone(),
+                        );
+                        let anchor = crate::web::workspace_ws_handler::workspace_repository_for_session(
+                            &run_context_clone.app_paths,
+                            &lifecycle_for_launch,
+                            &run_context_clone.session_record,
+                        )
+                        .map_err(|error| {
+                            ProviderAdapterError::parse_error(
+                                format!("sc gate revision launch: load repository failed: {error}"),
+                                String::new(),
+                                String::new(),
+                            )
+                        })
+                        .map(|repository| plan_member_anchor(&repository));
+                        match anchor {
+                            Ok((logical_repository_id, checkout_id)) => {
+                                resolve_plan_author_launch(&engine, logical_repository_id, checkout_id)
+                            }
+                            Err(error) => Err(error),
+                        }
+                    };
+                    let launch = match launch {
                         Ok(launch) => launch,
                         Err(error) => {
                             let message = error.details.clone();

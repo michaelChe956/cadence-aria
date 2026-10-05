@@ -19,7 +19,8 @@ pub(crate) use gateway_start::PlanAuthorLaunch;
 pub(crate) use gateway_start::{
     PlanSplitRunContext, begin_plan_split_run, begin_plan_split_run_if_logical,
     close_plan_split_run, close_plan_split_run_with_markdown, fail_plan_split_run,
-    resolve_plan_author_launch, start_work_item_plan_author,
+    logical_plan_launch_for, plan_member_anchor, resolve_plan_author_launch,
+    start_work_item_plan_author,
 };
 #[path = "run/provider_run.rs"]
 mod provider_run;

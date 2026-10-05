@@ -587,20 +587,14 @@ pub(crate) async fn run_single_candidate_author(
             &repository.path,
         );
     let author_provider = engine.session().author_provider.clone();
-    let launch = resolve_plan_author_launch(
-        engine,
-        repository
-            .logical_repository_id
-            .as_ref()
-            .map(|id| id.0.to_string()),
-        repository
-            .primary_checkout_id
-            .as_ref()
-            .map(|id| id.0.to_string()),
-    )
-    .map_err(|error| {
-        SingleCandidateProviderRunError::Message(format!("logical plan launch failed: {error}"))
-    })?;
+    // r27 问题2:成员锚与 SC 门修订 turn 同源(plan_member_anchor)——两轮
+    // envelope target 一致是 9a 显式 resume 审计门(投影五字段比对)的
+    // 通过前提。
+    let (member_logical_id, member_checkout_id) = plan_member_anchor(&repository);
+    let launch = resolve_plan_author_launch(engine, member_logical_id, member_checkout_id)
+        .map_err(|error| {
+            SingleCandidateProviderRunError::Message(format!("logical plan launch failed: {error}"))
+        })?;
     // F5-A：SC 修订轮 findings 回灌——最近 verdict 要求返修时，本轮 author 重跑
     // 使用返修 prompt（在首轮完整 prompt 的尾部输出指令前注入 reviewer findings 与
     // 硬性修复指令）；首轮（无 verdict）prompt 逐字节不变。

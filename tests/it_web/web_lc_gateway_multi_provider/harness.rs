@@ -1846,7 +1846,11 @@ impl MatrixEnvironment {
             if is_tool_event(&message) {
                 observation.tool_events += 1;
             }
-            // ---- 副作用层(r20 前语义不变):状态留痕/choice 语义应答/审批计数 ----
+            // ---- 副作用层(r20 前语义不变):状态留痕/choice 语义应答/审批计数
+            // ---- + r27 问题1:产物 markdown 在场捕获 ----
+            if frame_carries_artifact_markdown(&kind, &message) {
+                observation.artifact_markdown_seen = true;
+            }
             match kind.as_str() {
                 "session_state" => {
                     if let Some(status) = message.get("status").and_then(Value::as_str) {
@@ -2021,10 +2025,14 @@ impl MatrixEnvironment {
         let (drive, gate_ws) = self
             .drive_workspace_session_ws(&session_id, &mut observation, 0, self.entity_stage_timeout)
             .await;
-        // 产物=plan 轮已产出的 work item 拆分(prepare 响应携带 ids)+
-        // gate_reached 证明拆分 run 完整驱动到门。
+        // r27 问题1:产物判定按停门模型差异化——plan 的产物分两级:候选
+        // plan markdown(author 轮产出,fresh 格)与 confirmed plan(resume
+        // 格 typed confirm 后,work item 才落库)。fresh 判定=产物 markdown
+        // 在场(artifact_update/session_state 携带)× gate_reached;此前
+        // 依赖 prepare 响应 work_item_ids(r26 实测 prepare 时 work item
+        // 尚未产出,ids 恒空)误判"缺完成产物"。
         observation.completed_product_artifact_exists =
-            !self.plan_work_item_ids.is_empty() && drive.gate_reached;
+            observation.artifact_markdown_seen && drive.gate_reached;
         let gate_ws = (drive.gate_reached && observation.run_failure.is_none())
             .then_some(gate_ws)
             .flatten();
@@ -2168,6 +2176,9 @@ impl MatrixEnvironment {
             events_seen += 1;
             if is_tool_event(&message) {
                 observation.tool_events += 1;
+            }
+            if frame_carries_artifact_markdown(&kind, &message) {
+                observation.artifact_markdown_seen = true;
             }
             match kind.as_str() {
                 "choice_request" => {
@@ -3070,6 +3081,10 @@ struct StageObservation {
     requested_resume_id: Option<String>,
     native_confirmed_id: Option<String>,
     completed_product_artifact_exists: bool,
+    /// r27 问题1:产物 markdown 在场(artifact_update/session_state 携带
+    /// 非空 markdown)——plan fresh 的产物判定用(停门模型:候选产物已
+    /// 生成,confirmed plan 归 resume 格 confirm 后)。
+    artifact_markdown_seen: bool,
     observed_spawn_count: usize,
     /// F3:驱动侧解析到的 provider 子进程 PID(stream log 文件名)。
     observed_pid: Option<String>,
@@ -3097,6 +3112,7 @@ impl StageObservation {
             requested_resume_id: None,
             native_confirmed_id: None,
             completed_product_artifact_exists: false,
+            artifact_markdown_seen: false,
             observed_spawn_count: 0,
             observed_pid: None,
         }
@@ -3327,6 +3343,24 @@ fn truncate_verbose_wire_fields(value: &mut Value) {
             }
         }
     }
+}
+
+/// r27 问题1:帧是否携带非空产物 markdown(artifact_update 的 payload,或
+/// session_state 全量快照的 artifact 字段)。plan fresh 的产物判定用
+/// (停门模型:候选产物已生成即可,confirmed plan 归 resume 格 confirm 后)。
+fn frame_carries_artifact_markdown(kind: &str, message: &Value) -> bool {
+    let markdown = match kind {
+        "artifact_update" => message
+            .get("payload")
+            .and_then(|payload| payload.get("markdown"))
+            .and_then(Value::as_str),
+        "session_state" => message
+            .get("artifact")
+            .and_then(|artifact| artifact.get("markdown"))
+            .and_then(Value::as_str),
+        _ => None,
+    };
+    markdown.is_some_and(|text| !text.trim().is_empty())
 }
 
 /// r26 问题2:SC 门泵单帧信号决策(纯函数,决策表可单测)。
@@ -4381,6 +4415,29 @@ mod pump_disposition_tests {
         let truncated = value["long_field"].as_str().expect("truncated text");
         assert!(truncated.len() < 600, "长字段必须截断:{}", truncated.len());
         assert!(truncated.ends_with("…[truncated]"));
+    }
+
+    /// r27 问题1:产物 markdown 在场判定(artifact_update payload / session_state
+    /// artifact 字段;空 markdown 不算)。
+    #[test]
+    fn lcg_frame_carries_artifact_markdown_detects_non_empty_payload() {
+        let artifact_update = json!({
+            "type": "artifact_update",
+            "payload": {"markdown": "# 会话过期提示 Story Spec\n内容…", "version": 2},
+        });
+        assert!(frame_carries_artifact_markdown("artifact_update", &artifact_update));
+        let snapshot = json!({
+            "type": "session_state",
+            "artifact": {"markdown": "# plan 候选"},
+        });
+        assert!(frame_carries_artifact_markdown("session_state", &snapshot));
+        // 空 markdown/缺失/其他帧不算(plan fresh 产物判定不得被空帧误置)。
+        let empty_update = json!({"type": "artifact_update", "payload": {"markdown": "   "}});
+        assert!(!frame_carries_artifact_markdown("artifact_update", &empty_update));
+        let no_artifact = json!({"type": "session_state", "artifact": null});
+        assert!(!frame_carries_artifact_markdown("session_state", &no_artifact));
+        let chunk = json!({"type": "stream_chunk", "content": "# 不是产物"});
+        assert!(!frame_carries_artifact_markdown("stream_chunk", &chunk));
     }
 
 }

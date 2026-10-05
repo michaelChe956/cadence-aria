@@ -159,6 +159,29 @@ pub(crate) fn logical_plan_launch_for(
     })
 }
 
+/// r27 问题2 根修:SC plan 会话的成员锚(logical/checkout id 对)。
+/// fresh 生成 turn(single_candidate.rs)与 SC 门修订 turn
+/// (provider_run.rs HumanGateScManualRevision 臂)必须**同源**取锚——
+/// 修订臂此前传 (None,None),`planning_request` 退 aggregate_root 锚,
+/// envelope target 三元组与 fresh 轮漂移,9a 显式 resume 审计门
+/// (`resume_with_lc_start_record` 五字段比对)按投影漂移恒拒
+/// (r26 现场:"resume audit drifted or legacy record lacks lc
+/// projection")。两调用点统一经本 helper 从同一 repository 解析取锚。
+pub(crate) fn plan_member_anchor(
+    repository: &crate::product::models::RepositoryRecord,
+) -> (Option<String>, Option<String>) {
+    (
+        repository
+            .logical_repository_id
+            .as_ref()
+            .map(|id| id.0.to_string()),
+        repository
+            .primary_checkout_id
+            .as_ref()
+            .map(|id| id.0.to_string()),
+    )
+}
+
 /// 在 prompt 构建之前 resolve 出 planning author 启动:非逻辑会话 → `Legacy`;
 /// 逻辑会话 → 经 gateway `validate` 冻结 policy 并返回 `Logical`。
 /// gateway 校验失败映射为 `ProviderAdapterError`,与启动路径的错误形态一致。
