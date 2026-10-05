@@ -36,6 +36,11 @@ use cadence_aria::product::logical_codebase::policy::{
 use cadence_aria::product::logical_codebase::provider_gateway::{
     ProviderLaunchAuditContext, ProviderRef, SessionLaunchRequest,
 };
+use cadence_aria::product::logical_codebase::provider_boundary_probe::{
+    ProviderBoundaryProbe, ResumeChannelKind, ResumeProbeSpec, run_cli_boundary_probe,
+};
+use cadence_aria::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
+
 use cadence_aria::product::logical_codebase::store::LogicalCodebaseStore;
 use cadence_aria::product::logical_codebase::types::{
     CodebaseMemberRecord, RepositoryCheckoutRecord,
@@ -746,7 +751,128 @@ impl MatrixEnvironment {
         // 5) canonical root/target 定位 + 成员 issue。
         env.resolve_member_target().await?;
         env.create_issue().await?;
+        // 6) r25 接线:capability 真实验证导入(索引 ready 后、五阶段前)。
+        //    bootstrap 只落全 Unknown:launch/write_boundary 靠 2b 过渡桥
+        //    放行,resume 无桥(gateway 仅 Confirmed 放行)——story/design
+        //    门上修订(require_resume_supported)必须由 6c 真实探针证据经
+        //    2d 导入后才可达。失败=BLOCKED 真实报告,不伪造。
+        env.seed_provider_capability_probe().await?;
         Ok(env)
+    }
+
+    /// r25:对所选 provider 现场执行 6c 真实边界探针(Coding/Planning 两
+    /// action,含 ResumeProbeSpec 的 resume 面:真实 launch→同 id resume→
+    /// 错 id 负探针),经 2d `record_verified_probe` 导入 durable Confirmed
+    ///(与 gateway 消费的 capability store 同一 LC 作用域,工厂
+    /// `durable_probe_writer_for_lc` 装配)。证据落 `evidence_root/boundary/`。
+    async fn seed_provider_capability_probe(&mut self) -> Result<(), LiveMatrixFailure> {
+        fp_enter_phase("env", "capability_probe", "-");
+        let Some((cli_program, resume_kind)) = provider_probe_channel(&self.provider) else {
+            let failure = matrix_failure(
+                "capability_probe_provider_unsupported",
+                format!("provider {:?} 无真实探针通道(四家之外不冒充)", self.provider),
+                None,
+            );
+            return Err(self.fail_with_diagnostics(failure, None).await);
+        };
+        let durable = match self
+            .gateway_factory
+            .durable_probe_writer_for_lc(PROJECT_ID, Some(&self.lc_id))
+        {
+            Ok(writer) => writer,
+            Err(error) => {
+                let failure = matrix_failure(
+                    "capability_probe_writer_unavailable",
+                    format!("durable probe writer 装配失败:{error:?}"),
+                    None,
+                );
+                return Err(self.fail_with_diagnostics(failure, None).await);
+            }
+        };
+        let boundary_root = self.evidence_root.join("boundary");
+        let probe_base = TempDir::new().expect("capability probe base dir");
+        for action in [
+            SessionPolicyAction::CodingTargetWrite,
+            SessionPolicyAction::PlanningReadOnly,
+        ] {
+            let label = format!(
+                "matrix-{}-{}",
+                matrix_action_text(action),
+                chrono::Utc::now().format("%Y%m%dT%H%M%SZ")
+            );
+            let probe = run_cli_boundary_probe(
+                self.provider.clone(),
+                cli_program,
+                action,
+                probe_base.path(),
+                &boundary_root,
+                &label,
+                Some(ResumeProbeSpec::new(
+                    resume_kind,
+                    "Reply with exactly: matrix-resume-probe",
+                )),
+            )
+            .await;
+            let outcome = match probe {
+                Ok(pair) => pair,
+                Err(error) => {
+                    // BLOCKED 真实报告:不伪造 Confirmed,不让矩阵继续裸跑。
+                    let failure = matrix_failure(
+                        "capability_probe_failed",
+                        format!(
+                            "provider {:?} action {:?} 真实探针失败:{error:?}",
+                            self.provider, action
+                        ),
+                        None,
+                    );
+                    return Err(self.fail_with_diagnostics(failure, None).await);
+                }
+            };
+            let evidence = outcome.evidence;
+            let write_state = ProviderBoundaryProbe::evidence_state(&Ok(evidence.clone()));
+            // 6c worker 提醒:record 行 resume 格取 artifact_resume_state 结果
+            //(工件签发,非自报;材料包 record 同口径构造)。
+            let resume_state = ProviderBoundaryProbe::artifact_resume_state(evidence.artifact_ref());
+            if write_state != ProviderCapabilityEvidence::Confirmed
+                || resume_state != ProviderCapabilityEvidence::Confirmed
+            {
+                let failure = matrix_failure(
+                    "capability_probe_not_confirmed",
+                    format!(
+                        "provider {:?} action {:?} 探针未签 Confirmed(write={:?} resume={:?};artifact={})",
+                        self.provider,
+                        action,
+                        write_state,
+                        resume_state,
+                        evidence.artifact_ref()
+                    ),
+                    None,
+                );
+                return Err(self.fail_with_diagnostics(failure, None).await);
+            }
+            // 2d 导入:三方一致(2c shape + 逐字段)通过才落 durable。record
+            // 由产品 seam 材料包签发(write_boundary=Confirmed、resume=工件
+            // 签发结果、launch=Unknown 由 2b 过渡桥继续覆盖),harness 不自
+            // 造 record 身份字段(投影 getter 冻结为 crate 内)。
+            durable
+                .record_verified_probe(PROJECT_ID, &outcome.record, &evidence, &outcome.projection)
+                .map_err(|error| {
+                    matrix_failure(
+                        "capability_probe_import_rejected",
+                        format!("provider {:?} action {:?} 2d 导入被拒:{error:?}", self.provider, action),
+                        None,
+                    )
+                })?;
+            fp(
+                "capability_probe_imported",
+                format_args!(
+                    "action={} resume=Confirmed artifact={}",
+                    matrix_action_text(action),
+                    evidence.artifact_ref()
+                ),
+            );
+        }
+        Ok(())
     }
 
     fn workspace_root_path(&self) -> &Path {
@@ -3063,6 +3189,27 @@ fn pinned_story_generate_body(
         "superpowers_enabled": false,
         "openspec_enabled": true
     })
+}
+
+/// r25:所选 provider 的真实探针通道(CLI 程序 + resume 面 native id 提取
+/// 通道),同 6c live_probe 冻结映射;四家之外无通道(不冒充)。
+fn provider_probe_channel(provider: &ProviderName) -> Option<(&'static str, ResumeChannelKind)> {
+    match provider {
+        ProviderName::ClaudeCode => Some(("claude", ResumeChannelKind::ClaudePrintJson)),
+        ProviderName::Codex => Some(("codex", ResumeChannelKind::CodexExecJson)),
+        ProviderName::Pi => Some(("pi", ResumeChannelKind::PiSessionId)),
+        ProviderName::KimiCode => Some(("kimi", ResumeChannelKind::KimiStreamJson)),
+        ProviderName::Fake => None,
+    }
+}
+
+/// 探针证据目录 label 用的 action 稳定文本(与产品 action_text 同口径)。
+fn matrix_action_text(action: SessionPolicyAction) -> &'static str {
+    match action {
+        SessionPolicyAction::PlanningReadOnly => "planning_read_only",
+        SessionPolicyAction::CodingTargetWrite => "coding_target_write",
+        SessionPolicyAction::ReviewReadOnly => "review_read_only",
+    }
 }
 
 // ---------------------------------------------------------------------------

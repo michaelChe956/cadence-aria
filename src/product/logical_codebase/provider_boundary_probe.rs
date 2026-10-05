@@ -1542,6 +1542,214 @@ fn probe_cli_version(cli_program: &str) -> Result<String, ProviderBoundaryError>
     Ok(version)
 }
 
+/// 以被测 provider 的真实 projector 构造 probe 用 projection(fixture
+/// 材料与 projection 的 cwd/target/action 完全一致;envelope 直构)。
+/// `pub(crate)`:`ProviderProjectionInput` 构造冻结为 crate 内(1a),本
+/// 构造与 [`run_cli_boundary_probe`] 是外部调用方(矩阵 harness 等)经
+/// 由的受控 seam。
+pub(crate) fn boundary_probe_projection(
+    provider: ProviderName,
+    fixture: &BoundaryFixture,
+    exact_version: &str,
+    role: crate::protocol::contracts::AdapterRole,
+) -> ProviderPolicyProjection {
+    use crate::cross_cutting::claude_code_provider::ClaudePolicyProjector;
+    use crate::cross_cutting::codex_provider::CodexPolicyProjector;
+    use crate::cross_cutting::kimi_code_provider::KimiPolicyProjector;
+    use crate::cross_cutting::pi_provider::PiPolicyProjector;
+    use crate::cross_cutting::streaming_provider::ProviderPermissionMode;
+    use crate::product::logical_codebase::policy::{
+        PolicyTarget, ProviderDialect, SessionPolicyEnvelope,
+    };
+    use crate::product::logical_codebase::provider_gateway::ProviderRef;
+    use crate::product::logical_codebase::provider_projection::ProviderProjectionInput;
+    use crate::product::logical_codebase::provider_projection::ProviderPolicyProjector;
+
+    let action = fixture.boundary_action();
+    let (dialect, mcp_source) = match &provider {
+        ProviderName::ClaudeCode => (ProviderDialect::ClaudeCodeCliV1, ""),
+        ProviderName::Codex => (ProviderDialect::CodexCliV1, ""),
+        ProviderName::Pi => (ProviderDialect::PiRpcV1, ""),
+        // kimi 投影要求 MCP 来源非空:无 Aria 注入时用 native 标记
+        //(与 `KIMI_NATIVE_MCP_SOURCE` 冻结同值)。
+        ProviderName::KimiCode => (ProviderDialect::KimiAcpV1, "native-project-config"),
+        ProviderName::Fake => unreachable!("fake has no real projector"),
+    };
+    let target_worktree = fixture
+        .target()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| fixture.root().to_path_buf());
+    let writable_roots = match action {
+        SessionPolicyAction::CodingTargetWrite => vec![target_worktree.clone()],
+        SessionPolicyAction::PlanningReadOnly | SessionPolicyAction::ReviewReadOnly => Vec::new(),
+    };
+    let envelope = SessionPolicyEnvelope {
+        policy_id: "lc-boundary-probe-policy".to_string(),
+        policy_revision: 1,
+        policy_digest: format!("sha256:{}", "0".repeat(64)),
+        action,
+        target: PolicyTarget::checkout("lc_probe_repo", "lc_probe_checkout", target_worktree),
+        working_directory: fixture.root().to_path_buf(),
+        readable_roots: vec![
+            fixture.root().to_path_buf(),
+            fixture.member().to_path_buf(),
+            fixture.member_b().to_path_buf(),
+        ],
+        writable_roots,
+        provider_dialect: dialect,
+        config_artifact_ref: "lc-boundary-probe-config".to_string(),
+        config_digest: format!("sha256:{}", "1".repeat(64)),
+        created_at: "2026-10-04T00:00:00Z".to_string(),
+        authority_root: fixture.root().to_path_buf(),
+    };
+    let boundary_mode = match action {
+        SessionPolicyAction::CodingTargetWrite => ProviderBoundaryMode::TargetWriteOnly,
+        SessionPolicyAction::PlanningReadOnly | SessionPolicyAction::ReviewReadOnly => {
+            ProviderBoundaryMode::ReadOnly
+        }
+    };
+    let boundary = ProviderBoundaryPlan::new(
+        boundary_mode,
+        fixture.root().to_path_buf(),
+        fixture.target().map(Path::to_path_buf),
+        Vec::new(),
+    );
+    let provider_ref = match provider {
+        ProviderName::ClaudeCode => ProviderRef::claude_code("lc_boundary_probe"),
+        ProviderName::Codex => ProviderRef::codex("lc_boundary_probe"),
+        ProviderName::Pi => ProviderRef::pi("lc_boundary_probe"),
+        ProviderName::KimiCode => ProviderRef::kimi_code("lc_boundary_probe"),
+        ProviderName::Fake => unreachable!("fake has no gateway ref"),
+    };
+    let input = ProviderProjectionInput::new(
+        envelope,
+        provider_ref,
+        action,
+        role,
+        ProviderPermissionMode::Auto,
+        None,
+        "lc-boundary-probe".to_string(),
+        mcp_source.to_string(),
+        "lc-boundary-probe-config".to_string(),
+        String::new(),
+        Some(boundary),
+    );
+    match provider {
+        ProviderName::ClaudeCode => ClaudePolicyProjector::new(exact_version)
+            .project(&input)
+            .expect("claude probe projection"),
+        ProviderName::Codex => CodexPolicyProjector::new(exact_version)
+            .project(&input)
+            .expect("codex probe projection"),
+        ProviderName::Pi => PiPolicyProjector::new(exact_version)
+            .project(&input)
+            .expect("pi probe projection"),
+        ProviderName::KimiCode => KimiPolicyProjector::new(exact_version)
+            .project(&input)
+            .expect("kimi probe projection"),
+        ProviderName::Fake => unreachable!("fake has no real projector"),
+    }
+}
+/// 6c 现场探针结果(外部调用方的 2d 导入材料包):evidence + projection +
+/// 导入用 record(record.resume 格取工件签发的 `artifact_resume_state`,
+/// write_boundary=Confirmed 由 probe 签发;launch 未探测保持 Unknown,由
+/// 2b 过渡桥继续覆盖)。projection 的身份 getter 冻结为 crate 内,外部
+/// 调用方经本材料包完成 2d 导入,不自造 record 身份字段。
+#[derive(Debug, Clone)]
+pub struct CliBoundaryProbeOutcome {
+    pub evidence: ProviderBoundaryEvidence,
+    pub projection: ProviderPolicyProjection,
+    pub record: crate::product::logical_codebase::provider_capability_store::ProviderCapabilityRecord,
+}
+
+/// probe 签发证据对应的 2d 导入 record(与 6c 测试的 shape_validation_
+/// record 同构造:三方一致字段对齐,write_boundary=Confirmed、resume=工件
+/// 签发、launch=Unknown)。
+pub(crate) fn probe_import_record(
+    evidence: &ProviderBoundaryEvidence,
+    projection: &ProviderPolicyProjection,
+    resume: ProviderCapabilityEvidence,
+) -> crate::product::logical_codebase::provider_capability_store::ProviderCapabilityRecord {
+    use crate::product::logical_codebase::provider_capability_store::{
+        CapabilityEvidence, PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION, ProviderActionCapability,
+        ProviderActionMatrix, ProviderCapabilityRecord,
+    };
+    use crate::product::logical_codebase::provider_gateway::ResumeEvidenceState;
+
+    let action = projection.action();
+    let row = ProviderActionCapability {
+        action,
+        launch: ProviderCapabilityEvidence::Unknown,
+        resume,
+        write_boundary: ProviderCapabilityEvidence::Confirmed,
+        projection_digest: evidence.projection_digest().to_string(),
+        evidence_ref: evidence.artifact_ref().to_string(),
+    };
+    ProviderCapabilityRecord {
+        provider_type: projection.provider_type(),
+        schema_version: PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION,
+        version: evidence.exact_version().to_string(),
+        adapter_dialect: projection.provider_dialect(),
+        wire_dialect: projection.wire_dialect(),
+        capability_snapshot_ref: "lc_boundary_probe".to_string(),
+        evidence: CapabilityEvidence::ProductionVerified,
+        resume_evidence: ResumeEvidenceState::Unsupported,
+        supported_actions: vec![action],
+        action_matrix: ProviderActionMatrix::from_rows(vec![row])
+            .expect("probe action rows"),
+        trust: ProviderCapabilityEvidence::Unknown,
+        probed_at: Some(evidence.probed_at().to_string()),
+        probe_artifact_ref: Some(evidence.artifact_ref().to_string()),
+        root_recipe_evidence:
+            crate::product::logical_codebase::provider_capability_store::RootRecipeEvidence::None,
+    }
+}
+
+/// 6c 现场探针的外部入口(矩阵 harness 等 crate 外调用方):受控 fixture +
+/// 真实 projector 组装 probe 投影并执行完整真实 probe(`resume` 规格在场时
+/// 覆盖 resume 面:真实 launch→同 id resume→错 id 负探针)。返回
+/// evidence/projection/record 材料包,record 经 2d `record_verified_probe`
+/// 导入 durable;任何环节失败返回稳定码错误——调用方 BLOCKED 真实报告,
+/// 不伪造。
+pub async fn run_cli_boundary_probe(
+    provider: ProviderName,
+    cli_program: &str,
+    action: SessionPolicyAction,
+    base: &Path,
+    evidence_root: &Path,
+    session_label: &str,
+    resume: Option<ResumeProbeSpec>,
+) -> Result<CliBoundaryProbeOutcome, ProviderBoundaryError> {
+    let mut fixture = BoundaryFixture::create(
+        provider.clone(),
+        cli_program,
+        action,
+        base,
+        evidence_root,
+        session_label,
+    )?;
+    if let Some(resume) = resume {
+        fixture = fixture.with_resume(resume);
+    }
+    // 宿主侧当前版本:与 probe 内部版本门同一口径(漂移即拒)。
+    let version = probe_cli_version(cli_program)?;
+    let role = match action {
+        SessionPolicyAction::CodingTargetWrite => crate::protocol::contracts::AdapterRole::Executor,
+        SessionPolicyAction::PlanningReadOnly
+        | SessionPolicyAction::ReviewReadOnly => crate::protocol::contracts::AdapterRole::Reviewer,
+    };
+    let projection = boundary_probe_projection(provider, &fixture, &version, role);
+    let evidence = ProviderBoundaryProbe::run(&projection, &fixture).await?;
+    // record.resume 格取工件签发结果(6c worker 提醒:不自报)。
+    let resume = ProviderBoundaryProbe::artifact_resume_state(evidence.artifact_ref());
+    let record = probe_import_record(&evidence, &projection, resume);
+    Ok(CliBoundaryProbeOutcome {
+        evidence,
+        projection,
+        record,
+    })
+}
+
 /// 成功且非空才返回的命令输出采集(best-effort 记录用)。
 fn capture_trim(program: &Path, args: &[&str]) -> Option<String> {
     let output = Command::new(program).args(args).output().ok()?;
@@ -1636,109 +1844,13 @@ mod tests {
         ProviderActionMatrix, ProviderCapabilityRecord,
     };
     use crate::product::logical_codebase::provider_gateway::{ProviderRef, ResumeEvidenceState};
-    use crate::product::logical_codebase::provider_projection::{
-        ProviderPolicyProjection, ProviderPolicyProjector, ProviderProjectionInput,
-    };
+    use crate::product::logical_codebase::provider_projection::ProviderPolicyProjection;
     use crate::product::models::ProviderName;
     use crate::protocol::contracts::AdapterRole;
 
     use super::action_text;
+    use super::boundary_probe_projection as probe_projection;
 
-    /// 以被测 provider 的真实 projector 构造 probe 用 projection(fixture
-    /// 材料与 projection 的 cwd/target/action 完全一致;envelope 直构)。
-    fn probe_projection(
-        provider: ProviderName,
-        fixture: &BoundaryFixture,
-        exact_version: &str,
-        role: AdapterRole,
-    ) -> ProviderPolicyProjection {
-        let action = fixture.boundary_action();
-        let (dialect, mcp_source) = match &provider {
-            ProviderName::ClaudeCode => (ProviderDialect::ClaudeCodeCliV1, ""),
-            ProviderName::Codex => (ProviderDialect::CodexCliV1, ""),
-            ProviderName::Pi => (ProviderDialect::PiRpcV1, ""),
-            // kimi 投影要求 MCP 来源非空:无 Aria 注入时用 native 标记
-            // (与 `KIMI_NATIVE_MCP_SOURCE` 冻结同值)。
-            ProviderName::KimiCode => (ProviderDialect::KimiAcpV1, "native-project-config"),
-            ProviderName::Fake => unreachable!("fake has no real projector"),
-        };
-        let target_worktree = fixture
-            .target()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| fixture.root().to_path_buf());
-        let writable_roots = match action {
-            SessionPolicyAction::CodingTargetWrite => vec![target_worktree.clone()],
-            SessionPolicyAction::PlanningReadOnly | SessionPolicyAction::ReviewReadOnly => {
-                Vec::new()
-            }
-        };
-        let envelope = SessionPolicyEnvelope {
-            policy_id: "lc-boundary-probe-policy".to_string(),
-            policy_revision: 1,
-            policy_digest: format!("sha256:{}", "0".repeat(64)),
-            action,
-            target: PolicyTarget::checkout("lc_probe_repo", "lc_probe_checkout", target_worktree),
-            working_directory: fixture.root().to_path_buf(),
-            readable_roots: vec![
-                fixture.root().to_path_buf(),
-                fixture.member().to_path_buf(),
-                fixture.member_b().to_path_buf(),
-            ],
-            writable_roots,
-            provider_dialect: dialect,
-            config_artifact_ref: "lc-boundary-probe-config".to_string(),
-            config_digest: format!("sha256:{}", "1".repeat(64)),
-            created_at: "2026-10-04T00:00:00Z".to_string(),
-            authority_root: fixture.root().to_path_buf(),
-        };
-        let boundary_mode = match action {
-            SessionPolicyAction::CodingTargetWrite => ProviderBoundaryMode::TargetWriteOnly,
-            SessionPolicyAction::PlanningReadOnly | SessionPolicyAction::ReviewReadOnly => {
-                ProviderBoundaryMode::ReadOnly
-            }
-        };
-        let boundary = ProviderBoundaryPlan::new(
-            boundary_mode,
-            fixture.root().to_path_buf(),
-            fixture.target().map(Path::to_path_buf),
-            Vec::new(),
-        );
-        let provider_ref = match provider {
-            ProviderName::ClaudeCode => ProviderRef::claude_code("lc_boundary_probe"),
-            ProviderName::Codex => ProviderRef::codex("lc_boundary_probe"),
-            ProviderName::Pi => ProviderRef::pi("lc_boundary_probe"),
-            ProviderName::KimiCode => ProviderRef::kimi_code("lc_boundary_probe"),
-            ProviderName::Fake => unreachable!("fake has no gateway ref"),
-        };
-        let input = ProviderProjectionInput::new(
-            envelope,
-            provider_ref,
-            action,
-            role,
-            ProviderPermissionMode::Auto,
-            None,
-            "lc-boundary-probe".to_string(),
-            mcp_source.to_string(),
-            "lc-boundary-probe-config".to_string(),
-            String::new(),
-            Some(boundary),
-        );
-        match provider {
-            ProviderName::ClaudeCode => ClaudePolicyProjector::new(exact_version)
-                .project(&input)
-                .expect("claude probe projection"),
-            ProviderName::Codex => CodexPolicyProjector::new(exact_version)
-                .project(&input)
-                .expect("codex probe projection"),
-            ProviderName::Pi => PiPolicyProjector::new(exact_version)
-                .project(&input)
-                .expect("pi probe projection"),
-            ProviderName::KimiCode => KimiPolicyProjector::new(exact_version)
-                .project(&input)
-                .expect("kimi probe projection"),
-            ProviderName::Fake => unreachable!("fake has no real projector"),
-        }
-    }
 
     /// 宿主侧 CLI 版本采集(与 probe 内部同一口径:trimmed 完整 stdout)。
     fn host_cli_version(cli: &str) -> String {
@@ -2166,6 +2278,54 @@ mod tests {
         ProviderCapabilityProbeService::new()
             .validate_probe_shape(&record, &evidence, &projection)
             .expect("2c shape validation accepts a resume-confirmed row");
+    }
+
+    /// r25 接线回归:外部探针入口 `run_cli_boundary_probe`(harness seam)
+    /// 以原生参数执行完整 probe(含 resume 面)并返回 (evidence, projection),
+    /// 结果可经 2d `record_verified_probe` 导入 durable——矩阵 LC setup 段
+    /// capability 播种链端到端(probe→2c shape→2d import)。
+    #[tokio::test]
+    async fn lcg_t06_external_cli_probe_entry_feeds_2d_import() {
+        let launcher = ProviderBoundaryLauncher::probe_environment();
+        assert!(
+            launcher.is_available(),
+            "environment blocked: external entry case needs bwrap + user namespace"
+        );
+        let base = tempdir().expect("base dir");
+        let cli = write_fake_resume_cli(base.path(), "ok");
+        let cli_text = cli.to_string_lossy().into_owned();
+        let outcome = super::run_cli_boundary_probe(
+            ProviderName::ClaudeCode,
+            &cli_text,
+            SessionPolicyAction::PlanningReadOnly,
+            base.path(),
+            &base.path().join("evidence"),
+            "unit-external-entry",
+            Some(ResumeProbeSpec::new(
+                ResumeChannelKind::ClaudePrintJson,
+                "Reply with exactly: resume-ok",
+            )),
+        )
+        .await
+        .expect("external probe entry must run the full probe");
+        let evidence = outcome.evidence;
+        let projection = outcome.projection;
+        assert_eq!(
+            ProviderBoundaryProbe::evidence_state(&Ok(evidence.clone())),
+            ProviderCapabilityEvidence::Confirmed
+        );
+        let resume_state = ProviderBoundaryProbe::artifact_resume_state(evidence.artifact_ref());
+        assert_eq!(resume_state, ProviderCapabilityEvidence::Confirmed);
+        // record.resume 格必须取工件签发结果(材料包构造同口径)。
+        assert_eq!(outcome.record.action_matrix.rows()[0].resume, resume_state);
+        let record = outcome.record;
+        let store = crate::product::logical_codebase::provider_capability_store::ProviderCapabilityStore::for_lc(
+            crate::product::app_paths::ProductAppPaths::new(base.path().join(".aria")),
+            "lc-unit-external-entry",
+        );
+        ProviderCapabilityProbeService::with_durable_writer(store)
+            .record_verified_probe("project_0001", &record, &evidence, &projection)
+            .expect("2d import from external entry evidence");
     }
 
     /// Task 6c resume 面:同 id resume 回显**另一个** native id(id 绑定
