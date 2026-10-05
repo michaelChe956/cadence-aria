@@ -1340,12 +1340,15 @@ impl MatrixEnvironment {
         let mut cells = Vec::new();
         // 本阶段专属会话锚:防 fresh 失败后 resume 误用上一阶段会话。
         self.prior_entity_session_id = None;
-        // ---- fresh:生成实体 → WS streaming 驱动 → 真实 HTTP confirm ----
+        // ---- fresh:生成实体 → WS streaming 驱动 → 停在人工门(不 confirm,
+        // 门留给 resume 格的反馈修订;r21 C1 前fresh就地confirm,Completed
+        // 终态上 request_revision 被协议矩阵正确拒收,resume 格空转到超时)----
         let fresh = self
             .drive_entity_session_fresh(stage, generate_uri, &generate_body, response_spec_field)
             .await;
         cells.push(fresh);
-        // ---- resume:同一会话显式 revision 重驱,原生恢复确认 ----
+        // ---- resume:同一会话门上 request_revision 修订重驱(原生恢复确认)
+        // → 回门 → 真实 HTTP confirm 定稿(spec id 供 plan 前置)----
         let resume = self.drive_entity_session_resume(stage).await;
         cells.push(resume);
         cells
@@ -1378,25 +1381,37 @@ impl MatrixEnvironment {
         } else {
             "design_spec_id"
         };
+        let mut spec_captured = false;
         if let Some(spec_id) = body[response_spec_field][0][spec_id_field].as_str() {
             match stage {
                 "story" => self.story_spec_id = Some(spec_id.to_string()),
                 "design" => self.design_spec_id = Some(spec_id.to_string()),
                 _ => {}
             }
+            spec_captured = true;
         }
         observation.workspace_session_id = session_id.clone();
         self.prior_entity_session_id = Some(session_id.clone());
 
-        // WS streaming 驱动:hello → start_generation → pump(真实 author
-        // caller 链在服务端执行)。
+        // r21 C1 根修:实体 fresh 以零确认预算停在人工门(author_confirm)。
+        // Completed 是终态(spec-design-dialog-revision:确认定稿不再经过
+        // 任何中间确认阶段),门上的反馈修订(request_revision)才是
+        // revision/resume 格的产品入口;fresh 若就地 confirm,resume 格的
+        // request_revision 会被协议矩阵正确拒收(Completed 只放行 SC
+        // Advance),r21 现场 story/design resume 双双 53-90min 空转即此。
+        // 定稿 confirm 由 resume 格在修订轮回门后执行(修订→回门→确认)。
         let drive = self
-            .drive_workspace_session_ws(&session_id, &mut observation, 8, self.entity_stage_timeout)
+            .drive_workspace_session_ws(&session_id, &mut observation, 0, self.entity_stage_timeout)
             .await;
-        observation.completed_product_artifact_exists = drive.artifact_confirmed;
+        // 产物=author 轮已生成的实体 spec(generate 响应携带 spec id),
+        // gate_reached 证明 author run 完整驱动到门。
+        observation.completed_product_artifact_exists = spec_captured && drive.gate_reached;
         fp(
             "entity_fresh_drive_end",
-            format_args!("session={session_id} artifact={}", drive.artifact_confirmed),
+            format_args!(
+                "session={session_id} spec_captured={spec_captured} gate_reached={}",
+                drive.gate_reached
+            ),
         );
         observation.build_cell(self)
     }
@@ -1429,6 +1444,7 @@ impl MatrixEnvironment {
                 &session_id,
                 &mut observation,
                 "矩阵 resume:显式修订重驱",
+                1,
                 self.entity_stage_timeout,
             )
             .await;
@@ -1440,13 +1456,15 @@ impl MatrixEnvironment {
     }
 
     /// revision 重驱公共路径:连接会话 WS → request_revision → pump。
-    /// confirm 轮次 8:真实 resume 链可能带多轮门(lc-root 先例 13 轮),
-    /// 3-4 轮上限会卡真终态;timeout 由调用面传入(实体长阶段独立放宽)。
+    /// confirm 轮次由调用面给定:实体 resume=1(修订→回门→确认定稿);
+    /// lc-root 先例的长门链场景保留更高预算的调用自由。timeout 由调用面
+    /// 传入(实体长阶段独立放宽)。
     async fn drive_revision_resume(
         &self,
         session_id: &str,
         observation: &mut StageObservation,
         description: &str,
+        confirm_rounds: usize,
         timeout: Duration,
     ) -> DriveOutcome {
         let mut ws = match self.connect_session_ws(session_id).await {
@@ -1470,7 +1488,7 @@ impl MatrixEnvironment {
             observation.run_failure = Some(format!("request_revision 发送失败:{error}"));
             return DriveOutcome::default();
         }
-        self.pump_workspace_session(&mut ws, observation, 8, timeout)
+        self.pump_workspace_session(&mut ws, observation, confirm_rounds, timeout)
             .await
     }
 
@@ -1595,7 +1613,12 @@ impl MatrixEnvironment {
         fp("pump_begin", format_args!("timeout={timeout:?} confirms={confirm_rounds}"));
         loop {
             if tokio::time::Instant::now() >= deadline {
+                // r21 C1 同族盲区:该分支此前不落 run_failure——story resume
+                // 空转 5400s 后仍以"通过"建格,正是 r21 误判「story resume 过」
+                // 的另一半原因。阶段超时=驱动未达终态,必须落格失败原因。
                 observation.push_event(json!({"type": "matrix_stage_timeout"}));
+                observation.run_failure =
+                    Some("workspace 会话阶段超时未达终态(对端零响应或挂死)".to_string());
                 fp("pump_stage_timeout", format_args!("elapsed={:?} events={events_seen}", pump_started.elapsed()));
                 return outcome;
             }
@@ -1653,35 +1676,12 @@ impl MatrixEnvironment {
             if is_tool_event(&message) {
                 observation.tool_events += 1;
             }
+            // ---- 副作用层(r20 前语义不变):状态留痕/choice 语义应答/审批计数 ----
             match kind.as_str() {
                 "session_state" => {
                     if let Some(status) = message.get("status").and_then(Value::as_str) {
                         observation.record_status(status);
                         fp("pump_session_state", format_args!("status={status} events={events_seen}"));
-                        match status {
-                            "waiting_for_human" if confirms_left > 0 => {
-                                confirms_left -= 1;
-                                if self.confirm_session_gate(observation, &mut outcome).await {
-                                    return outcome;
-                                }
-                            }
-                            // confirmed 是终态:确认门已过,立即收口,
-                            // 不再空转到阶段超时。
-                            "confirmed" => {
-                                outcome.artifact_confirmed = true;
-                                fp("pump_confirmed", format_args!("elapsed={:?}", pump_started.elapsed()));
-                                return outcome;
-                            }
-                            "failed"
-                            | "blocked_provider_unavailable"
-                            | "terminated"
-                            | "stopped_needs_human" => {
-                                observation.terminal_status = Some(status.to_string());
-                                fp("pump_terminal", format_args!("status={status} elapsed={:?}", pump_started.elapsed()));
-                                return outcome;
-                            }
-                            _ => {}
-                        }
                     }
                 }
                 "stage_change" => {
@@ -1692,12 +1692,6 @@ impl MatrixEnvironment {
                     // 泵只认 session_state 空转到 90min 超时)。
                     let stage = message.get("stage").and_then(Value::as_str).unwrap_or("");
                     fp("pump_stage_change", format_args!("stage={stage}"));
-                    if matches!(stage, "author_confirm" | "human_confirm") && confirms_left > 0 {
-                        confirms_left -= 1;
-                        if self.confirm_session_gate(observation, &mut outcome).await {
-                            return outcome;
-                        }
-                    }
                 }
                 "choice_request" => {
                     // 真实 choice 门:读选项文本语义应答,不旁路产品决策面。
@@ -1724,6 +1718,54 @@ impl MatrixEnvironment {
                     observation.permission_events += 1;
                 }
                 _ => {}
+            }
+            // ---- 处置层(r21 C1 根修):拒收帧秒收口;门到无预算=门上完成 ----
+            match pump_frame_disposition(&kind, &message, confirms_left) {
+                PumpFrameDisposition::Listen => {}
+                PumpFrameDisposition::ConfirmGate => {
+                    confirms_left -= 1;
+                    if self.confirm_session_gate(observation, &mut outcome).await {
+                        return outcome;
+                    }
+                }
+                PumpFrameDisposition::GateReached => {
+                    // 门到且无确认预算:驱动在门上完成(不 confirm)。实体
+                    // fresh 以零预算停在此处,把 author_confirm 门留给
+                    // resume 格的 request_revision(修订→回门→再确认)。
+                    outcome.gate_reached = true;
+                    fp(
+                        "pump_gate_reached",
+                        format_args!(
+                            "elapsed={:?} events={events_seen}(门到且无确认预算,驱动完成)",
+                            pump_started.elapsed()
+                        ),
+                    );
+                    return outcome;
+                }
+                PumpFrameDisposition::Confirmed => {
+                    // confirmed 是终态:确认门已过,立即收口,
+                    // 不再空转到阶段超时。
+                    outcome.artifact_confirmed = true;
+                    fp("pump_confirmed", format_args!("elapsed={:?}", pump_started.elapsed()));
+                    return outcome;
+                }
+                PumpFrameDisposition::Terminal(status) => {
+                    observation.terminal_status = Some(status.to_string());
+                    fp("pump_terminal", format_args!("status={status} elapsed={:?}", pump_started.elapsed()));
+                    return outcome;
+                }
+                PumpFrameDisposition::ServerError => {
+                    // r21 根修:服务端拒收/错误帧立即收口落格(带帧原文),
+                    // 不再与死锁同形地空转到阶段超时(r21 现场 story 90min/
+                    // design 53min 即此盲区)。
+                    fp(
+                        "pump_server_error",
+                        format_args!("elapsed={:?} frame={message}", pump_started.elapsed()),
+                    );
+                    observation.run_failure =
+                        Some(format!("服务端错误帧收口(kind={kind}):{message}"));
+                    return outcome;
+                }
             }
         }
     }
@@ -1822,6 +1864,7 @@ impl MatrixEnvironment {
                 &session_id,
                 &mut resume,
                 "矩阵 plan resume:显式修订重驱,须原生恢复 native 会话",
+                8,
                 self.entity_stage_timeout,
             )
             .await;
@@ -2373,6 +2416,7 @@ impl MatrixEnvironment {
                 &session_id,
                 &mut resume,
                 "矩阵 review resume:显式修订重驱,须原生恢复 reviewer 会话",
+                8,
                 self.entity_stage_timeout,
             )
             .await;
@@ -2872,6 +2916,67 @@ impl StageObservation {
 #[derive(Default)]
 struct DriveOutcome {
     artifact_confirmed: bool,
+    /// r21 C1:门到且无确认预算时收口(实体 fresh 停在人工门,
+    /// revision 由 resume 格驱动——见 pump_frame_disposition)。
+    gate_reached: bool,
+}
+
+/// 泵送单帧处置决策(r21 C1 根修提为纯函数,决策表可单测)。
+///
+/// r21 现场:resume 格在 stage=Completed 会话上发 request_revision,服务端
+/// 按协议矩阵正确拒收(protocol.rs Completed 只放行 SC Advance)并回
+/// protocol_error 帧;泵的 `_ => {}` 把它连同 error 帧一起吞掉——无足迹、
+/// 无收口,与死锁同形空转到 5400s 阶段超时(story 90min/design 53min 被
+/// kill 即此观测盲区)。处置规则:
+/// - `protocol_error`/`error`:服务端明确拒收/失败,立即收口落格(带帧
+///   原文),不再空等——消灭「拒收与死锁同形」;
+/// - 人工门(author_confirm/human_confirm)到且无确认预算:本格驱动完成
+///   (实体 fresh 停在门上;Completed 是终态不可修订,门上的反馈修订才是
+///   revision/resume 格的产品入口——spec-design-dialog-revision)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PumpFrameDisposition {
+    /// 继续泵送(流片段/choice/审批等常规帧)。
+    Listen,
+    /// 人工门就绪且有确认预算:走真实 HTTP confirm 门。
+    ConfirmGate,
+    /// 人工门就绪且无确认预算:驱动在门上完成(不 confirm)。
+    GateReached,
+    /// confirm 终态:产物确认收口。
+    Confirmed,
+    /// 失败/阻断终态。
+    Terminal(&'static str),
+    /// 服务端拒收/错误帧:立即失败收口。
+    ServerError,
+}
+
+fn pump_frame_disposition(
+    kind: &str,
+    message: &Value,
+    confirms_left: usize,
+) -> PumpFrameDisposition {
+    match kind {
+        "session_state" => match message.get("status").and_then(Value::as_str).unwrap_or("") {
+            "confirmed" => PumpFrameDisposition::Confirmed,
+            "failed" => PumpFrameDisposition::Terminal("failed"),
+            "blocked_provider_unavailable" => {
+                PumpFrameDisposition::Terminal("blocked_provider_unavailable")
+            }
+            "terminated" => PumpFrameDisposition::Terminal("terminated"),
+            "stopped_needs_human" => PumpFrameDisposition::Terminal("stopped_needs_human"),
+            "waiting_for_human" if confirms_left > 0 => PumpFrameDisposition::ConfirmGate,
+            "waiting_for_human" => PumpFrameDisposition::GateReached,
+            _ => PumpFrameDisposition::Listen,
+        },
+        "stage_change" => match message.get("stage").and_then(Value::as_str).unwrap_or("") {
+            "author_confirm" | "human_confirm" if confirms_left > 0 => {
+                PumpFrameDisposition::ConfirmGate
+            }
+            "author_confirm" | "human_confirm" => PumpFrameDisposition::GateReached,
+            _ => PumpFrameDisposition::Listen,
+        },
+        "protocol_error" | "error" => PumpFrameDisposition::ServerError,
+        _ => PumpFrameDisposition::Listen,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3526,5 +3631,115 @@ async fn connect_live_ws(url: &str) -> Result<LiveWs, String> {
             fp("ws_connect_timeout", format_args!("{url}(180s 超时:服务端任务疑似冻结)"));
             Err("WS 连接 180s 超时(服务端任务疑似冻结)".to_string())
         }
+    }
+}
+
+#[cfg(test)]
+mod pump_disposition_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn frame(value: Value) -> Value {
+        value
+    }
+
+    /// r21 C1 回归锚点:服务端拒收帧(protocol_error)必须秒收口——
+    /// 修复前该帧落入 `_ => {}` 无足迹空转,story 90min/design 53min
+    /// 与死锁同形;拒收即失败,不得再等阶段超时。
+    #[test]
+    fn lcg_pump_protocol_error_frame_fails_fast() {
+        let message = frame(json!({
+            "type": "protocol_error",
+            "code": "INVALID_MESSAGE_FOR_STAGE",
+            "message": "message request_revision not allowed in stage completed",
+            "context": {"stage": "completed", "received": "request_revision"},
+        }));
+        assert_eq!(
+            pump_frame_disposition("protocol_error", &message, 8),
+            PumpFrameDisposition::ServerError
+        );
+    }
+
+    /// r21 C1:error 帧同形秒收口(运行失败类错误帧立即落格)。
+    #[test]
+    fn lcg_pump_error_frame_fails_fast() {
+        let message = frame(json!({"type": "error", "message": "provider failed"}));
+        assert_eq!(
+            pump_frame_disposition("error", &message, 8),
+            PumpFrameDisposition::ServerError
+        );
+    }
+
+    /// r21 C1:实体 fresh 以零预算停在 author_confirm 门(门上的反馈修订
+    /// 才是 resume 格入口;Completed 终态不可修订——spec-design-dialog-
+    /// revision),门到且无预算=驱动完成,不得空转到阶段超时。
+    #[test]
+    fn lcg_pump_author_confirm_gate_without_budget_completes_drive() {
+        let message = frame(json!({"type": "stage_change", "stage": "author_confirm"}));
+        assert_eq!(
+            pump_frame_disposition("stage_change", &message, 0),
+            PumpFrameDisposition::GateReached
+        );
+    }
+
+    /// 对称面:waiting_for_human 状态帧无预算同样按门到收口。
+    #[test]
+    fn lcg_pump_waiting_for_human_without_budget_completes_drive() {
+        let message = frame(json!({"type": "session_state", "status": "waiting_for_human"}));
+        assert_eq!(
+            pump_frame_disposition("session_state", &message, 0),
+            PumpFrameDisposition::GateReached
+        );
+    }
+
+    /// 回归守卫:有预算的门照常走真实 confirm 门(r13 语义不变)。
+    #[test]
+    fn lcg_pump_gate_with_budget_still_confirms() {
+        let stage_change = frame(json!({"type": "stage_change", "stage": "author_confirm"}));
+        assert_eq!(
+            pump_frame_disposition("stage_change", &stage_change, 1),
+            PumpFrameDisposition::ConfirmGate
+        );
+        let human_change = frame(json!({"type": "stage_change", "stage": "human_confirm"}));
+        assert_eq!(
+            pump_frame_disposition("stage_change", &human_change, 8),
+            PumpFrameDisposition::ConfirmGate
+        );
+        let waiting = frame(json!({"type": "session_state", "status": "waiting_for_human"}));
+        assert_eq!(
+            pump_frame_disposition("session_state", &waiting, 2),
+            PumpFrameDisposition::ConfirmGate
+        );
+    }
+
+    /// 回归守卫:confirmed/失败终态、常规帧处置与 r20 前一致。
+    #[test]
+    fn lcg_pump_terminal_and_ordinary_frames_unchanged() {
+        let confirmed = frame(json!({"type": "session_state", "status": "confirmed"}));
+        assert_eq!(
+            pump_frame_disposition("session_state", &confirmed, 0),
+            PumpFrameDisposition::Confirmed
+        );
+        let failed = frame(json!({"type": "session_state", "status": "failed"}));
+        assert_eq!(
+            pump_frame_disposition("session_state", &failed, 3),
+            PumpFrameDisposition::Terminal("failed")
+        );
+        let running = frame(json!({"type": "stage_change", "stage": "running"}));
+        assert_eq!(
+            pump_frame_disposition("stage_change", &running, 0),
+            PumpFrameDisposition::Listen
+        );
+        let chunk = frame(json!({"type": "stream_chunk", "content": "..."}));
+        assert_eq!(
+            pump_frame_disposition("stream_chunk", &chunk, 8),
+            PumpFrameDisposition::Listen
+        );
+        // 快照 session_state 无 status 字段:只听不处置(连接初帧不打断泵)。
+        let snapshot = frame(json!({"type": "session_state", "stage": "author_confirm"}));
+        assert_eq!(
+            pump_frame_disposition("session_state", &snapshot, 1),
+            PumpFrameDisposition::Listen
+        );
     }
 }
