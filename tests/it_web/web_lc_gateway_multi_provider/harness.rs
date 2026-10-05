@@ -2013,35 +2013,217 @@ impl MatrixEnvironment {
                 .filter_map(|value| value.as_str().map(str::to_string))
                 .collect();
         }
-        let (drive, _ws) = self
-            .drive_workspace_session_ws(&session_id, &mut observation, 8, self.entity_stage_timeout)
+        // r26 问题1/2:plan fresh 零确认预算停 SC 人工门(human_confirm)。
+        // HTTP 会话 confirm 对 WorkItemPlan 恒 500
+        // (work_item_plan_confirm_not_supported,r25 现场 18:30 confirm 500
+        // 后泵空转 5400s)——SC 门的确认/修订入口是 WS typed 三命令
+        // (confirm / human_gate_feedback),与连接一起留给 resume 格。
+        let (drive, gate_ws) = self
+            .drive_workspace_session_ws(&session_id, &mut observation, 0, self.entity_stage_timeout)
             .await;
-        observation.completed_product_artifact_exists = drive.artifact_confirmed;
+        // 产物=plan 轮已产出的 work item 拆分(prepare 响应携带 ids)+
+        // gate_reached 证明拆分 run 完整驱动到门。
+        observation.completed_product_artifact_exists =
+            !self.plan_work_item_ids.is_empty() && drive.gate_reached;
+        let gate_ws = (drive.gate_reached && observation.run_failure.is_none())
+            .then_some(gate_ws)
+            .flatten();
         cells.push(observation.build_cell(self));
-        // Plan confirmed 后解析 work item(coding 前置)。
-        self.resolve_first_work_item().await;
 
-        // ---- resume:plan 会话 revision 重驱 ----
-        let mut resume = StageObservation::new("plan", &self.provider);
+        // ---- resume:SC 门 typed feedback 修订 → 回门 → typed confirm 定稿
+        //(work item 落库),同连接(与实体阶段同模型)----
+        let resume = self.drive_plan_sc_gate_resume(&session_id, gate_ws).await;
+        cells.push(resume);
+        // Plan confirmed 后解析 work item(coding 前置;r26:从 resume
+        // confirm 前移出——fresh 不再 confirm,work item 定稿在 resume 轮)。
+        self.resolve_first_work_item().await;
+        cells
+    }
+
+    /// r26 问题2:SC plan 会话的门上修订重驱。SC human_confirm 门的消息集是
+    /// typed 三命令:request_revision 不放行(r25 现场
+    /// WORK_ITEM_PLAN_HUMAN_GATE_STAGE_INVALID)。修订入口 =
+    /// `human_gate_feedback`(开门 turn→HumanGateScManualRevision run→
+    /// `human_gate_turn_completed` 回门),定稿入口 = typed `confirm`
+    ///(approve→compile→durable Confirmed+子 WorkItem 落库)。
+    /// 在 fresh 轮保留下来的同一条连接上驱动(SC 门快照/引擎内存态保持)。
+    async fn drive_plan_sc_gate_resume(
+        &mut self,
+        session_id: &str,
+        gate_ws: Option<LiveWs>,
+    ) -> EvidenceCell {
+        let mut observation = StageObservation::new("plan", &self.provider);
         fp_enter_phase("plan", ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT, RESUME);
-        resume.role = "work_item_splitter".to_string();
-        resume.force_resume = true;
-        resume.workspace_session_id = session_id.clone();
-        resume.requested_resume_id = self.latest_audit_native_id(&session_id, &self.provider, None);
-        resume.frozen_digest = self.latest_audit_projection_digest(&session_id, &self.provider);
-        let drive = self
-            .drive_revision_resume(
-                &session_id,
-                &mut resume,
-                "矩阵 plan resume:显式修订重驱,须原生恢复 native 会话",
-                8,
-                self.entity_stage_timeout,
+        observation.role = "work_item_splitter".to_string();
+        observation.force_resume = true;
+        let Some(mut ws) = gate_ws else {
+            return observation
+                .denied_cell("plan fresh 未达 SC 人工门(无干净的同连接会话可供门上修订)".to_string());
+        };
+        observation.workspace_session_id = session_id.to_string();
+        observation.requested_resume_id =
+            self.latest_audit_native_id(session_id, &self.provider, None);
+        observation.frozen_digest = self.latest_audit_projection_digest(session_id, &self.provider);
+
+        // ---- 阶段 1:typed feedback 修订 → 泵至 human_gate_turn_completed ----
+        let feedback = json!({
+            "type": "human_gate_feedback",
+            "command_id": "lcg-matrix-plan-revision",
+            "feedback": "矩阵 plan resume:按反馈修订拆分方案(补充验收条件与写域口径)",
+        });
+        if let Err(error) = ws.send_json(&feedback).await {
+            observation.push_event(json!({"type": "matrix_error", "message": error}));
+            observation.run_failure = Some(format!("human_gate_feedback 发送失败:{error}"));
+            return observation.build_cell(self);
+        }
+        let revision_done = self
+            .pump_plan_sc_phase(
+                &mut ws,
+                &mut observation,
+                PlanScPumpPhase::AwaitRevisionComplete,
             )
             .await;
-        resume.completed_product_artifact_exists = drive.artifact_confirmed;
-        resume.native_confirmed_id = self.latest_audit_native_id(&session_id, &self.provider, None);
-        cells.push(resume.build_cell(self));
-        cells
+        if !revision_done {
+            return observation.build_cell(self);
+        }
+        // ---- 阶段 2:typed confirm → 泵至终态(stage completed/confirmed)----
+        if let Err(error) = ws.send_json(&json!({"type": "confirm"})).await {
+            observation.push_event(json!({"type": "matrix_error", "message": error}));
+            observation.run_failure = Some(format!("typed confirm 发送失败:{error}"));
+            return observation.build_cell(self);
+        }
+        let confirmed = self
+            .pump_plan_sc_phase(&mut ws, &mut observation, PlanScPumpPhase::AwaitConfirmTerminal)
+            .await;
+        observation.completed_product_artifact_exists = confirmed;
+        observation.native_confirmed_id =
+            self.latest_audit_native_id(session_id, &self.provider, None);
+        observation.build_cell(self)
+    }
+
+    /// SC 门两阶段泵:AwaitRevisionComplete 等 `human_gate_turn_completed`
+    ///(回门信号);AwaitConfirmTerminal 等 stage_change completed /
+    /// session_state confirmed(定稿终态)。通用面:30s 心跳保活、choice
+    /// 语义应答、错误帧秒收口(r21 处置面)、阶段超时落 run_failure。
+    async fn pump_plan_sc_phase(
+        &self,
+        ws: &mut LiveWs,
+        observation: &mut StageObservation,
+        phase: PlanScPumpPhase,
+    ) -> bool {
+        let deadline = tokio::time::Instant::now() + self.entity_stage_timeout;
+        let mut idle_deadline = tokio::time::Instant::now() + IDLE_PING_SECS;
+        let phase_started = std::time::Instant::now();
+        let mut events_seen = 0u64;
+        fp(
+            "plan_sc_pump_begin",
+            format_args!("phase={phase:?} timeout={:?}", self.entity_stage_timeout),
+        );
+        loop {
+            if tokio::time::Instant::now() >= deadline {
+                observation.run_failure = Some(format!(
+                    "plan SC 门阶段超时(phase={phase:?},未达预期信号)"
+                ));
+                fp(
+                    "plan_sc_pump_timeout",
+                    format_args!("phase={phase:?} elapsed={:?}", phase_started.elapsed()),
+                );
+                return false;
+            }
+            let message = tokio::time::timeout_at(idle_deadline, ws.recv_json()).await;
+            let message = match message {
+                Ok(Ok(Some(value))) => {
+                    idle_deadline = tokio::time::Instant::now() + IDLE_PING_SECS;
+                    value
+                }
+                Ok(Ok(None)) => {
+                    observation.run_failure =
+                        Some("plan SC 门会话 WS 在终态前关闭".to_string());
+                    return false;
+                }
+                Ok(Err(error)) => {
+                    observation.run_failure = Some(format!("plan SC 门会话 WS 错误:{error}"));
+                    return false;
+                }
+                Err(_) => {
+                    fp(
+                        "plan_sc_pump_idle_ping",
+                        format_args!("phase={phase:?} elapsed={:?}", phase_started.elapsed()),
+                    );
+                    if ws.send_json(&json!({"type": "ping"})).await.is_err() {
+                        observation.run_failure =
+                            Some("plan SC 门会话 WS 在终态前关闭".to_string());
+                        return false;
+                    }
+                    idle_deadline = tokio::time::Instant::now() + IDLE_PING_SECS;
+                    continue;
+                }
+            };
+            let kind = message
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            observation.push_event(message.clone());
+            events_seen += 1;
+            if is_tool_event(&message) {
+                observation.tool_events += 1;
+            }
+            match kind.as_str() {
+                "choice_request" => {
+                    if let Some(choice_id) = message.get("id").and_then(Value::as_str) {
+                        let (answers, top_selected) = semantic_choice_answers(&message);
+                        fp("plan_sc_pump_choice_request", format_args!("id={choice_id}"));
+                        let _ = ws
+                            .send_json(&json!({
+                                "type": "choice_response",
+                                "id": choice_id,
+                                "selected_option_ids": top_selected,
+                                "free_text": null,
+                                "answers": answers
+                            }))
+                            .await;
+                    }
+                }
+                "permission_request" => {
+                    observation.permission_events += 1;
+                }
+                "stage_change" => {
+                    let stage = message.get("stage").and_then(Value::as_str).unwrap_or("");
+                    fp("plan_sc_pump_stage_change", format_args!("stage={stage}"));
+                }
+                "session_state" => {
+                    if let Some(status) = message.get("status").and_then(Value::as_str) {
+                        observation.record_status(status);
+                    }
+                }
+                _ => {}
+            }
+            // 处置(r26 纯函数决策表):revision 轮回门 / confirm 终态 /
+            // 错误帧秒收口。
+            match plan_sc_frame_signal(&kind, &message, phase) {
+                PlanScFrameSignal::Listen => {}
+                PlanScFrameSignal::PhaseDone => {
+                    fp(
+                        "plan_sc_phase_done",
+                        format_args!(
+                            "phase={phase:?} elapsed={:?} events={events_seen}",
+                            phase_started.elapsed()
+                        ),
+                    );
+                    return true;
+                }
+                PlanScFrameSignal::ServerError => {
+                    fp(
+                        "plan_sc_pump_server_error",
+                        format_args!("phase={phase:?} frame={message}"),
+                    );
+                    observation.run_failure =
+                        Some(format!("plan SC 门服务端错误帧收口(kind={kind}):{message}"));
+                    return false;
+                }
+            }
+        }
     }
 
     async fn resolve_first_work_item(&mut self) {
@@ -2222,6 +2404,45 @@ impl MatrixEnvironment {
                 fp("split_sync_run_sync_end", format_args!("bounded={}", bounded.is_ok()));
                 match bounded {
                     Ok(Ok(Ok(output))) => {
+                        // r26 问题4:F1 事件载荷——sync 栈无 WS 事件流,以
+                        // 真实运行观测回填:完成事实(exit/duration/structured)
+                        // + CLI stdout 的 stream-json wire 事件行(有界节录,
+                        // 磁盘可核对,不伪造)。r25 该格因 events 恒空被
+                        // validate 拒("缺事件载荷")。
+                        fresh.push_event(json!({
+                            "type": "matrix_sync_run_completed",
+                            "exit_code": output.exit_code,
+                            "duration_ms": output.duration_ms,
+                            "timeout_status": format!("{:?}", output.timeout_status),
+                            "structured_output_present": output.structured_output.is_some(),
+                        }));
+                        let mut wire_lines = 0usize;
+                        for line in output.stdout.lines() {
+                            if wire_lines >= SPLIT_SYNC_WIRE_EVENT_LIMIT {
+                                break;
+                            }
+                            let trimmed = line.trim();
+                            if !trimmed.starts_with('{') {
+                                continue;
+                            }
+                            let Ok(mut value) = serde_json::from_str::<Value>(trimmed) else {
+                                continue;
+                            };
+                            truncate_verbose_wire_fields(&mut value);
+                            fresh.push_event(json!({
+                                "type": "matrix_sync_wire_event",
+                                "line": value,
+                            }));
+                            wire_lines += 1;
+                        }
+                        if wire_lines == 0 {
+                            // stdout 无 JSON 行也是真实观测(如实记录,由
+                            // validate 的产物/argv 面兜底判定)。
+                            fresh.push_event(json!({
+                                "type": "matrix_sync_wire_empty",
+                                "stdout_len": output.stdout.len(),
+                            }));
+                        }
                         let structured = output.structured_output.clone();
                         let complete = structured.as_ref().map(|value| {
                             self.lifecycle
@@ -3088,6 +3309,59 @@ struct DriveOutcome {
     gate_reached: bool,
 }
 
+/// r26 问题4:split_sync fresh 回填 wire 事件行的节录上限(真实 stdout
+/// stream-json;过大产物节录防证据膨胀,完整原始输出在 stream-logs/)。
+const SPLIT_SYNC_WIRE_EVENT_LIMIT: usize = 24;
+
+/// wire 事件行的大字段截断(逐字段落上限 512 字符;保留 wire 形态与
+/// type/id 等身份字段原样)。
+fn truncate_verbose_wire_fields(value: &mut Value) {
+    const FIELD_TEXT_LIMIT: usize = 512;
+    if let Some(object) = value.as_object_mut() {
+        for (_key, field) in object.iter_mut() {
+            if let Some(text) = field.as_str() {
+                if text.len() > FIELD_TEXT_LIMIT {
+                    let truncated: String = text.chars().take(FIELD_TEXT_LIMIT).collect();
+                    *field = Value::String(format!("{truncated}…[truncated]"));
+                }
+            }
+        }
+    }
+}
+
+/// r26 问题2:SC 门泵单帧信号决策(纯函数,决策表可单测)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlanScFrameSignal {
+    /// 继续泵送。
+    Listen,
+    /// 当前相位完成(revision 轮回门 / confirm 定稿终态)。
+    PhaseDone,
+    /// 服务端拒收/错误帧:立即失败收口。
+    ServerError,
+}
+
+fn plan_sc_frame_signal(kind: &str, message: &Value, phase: PlanScPumpPhase) -> PlanScFrameSignal {
+    match kind {
+        "protocol_error" | "error" => PlanScFrameSignal::ServerError,
+        "human_gate_turn_completed" if phase == PlanScPumpPhase::AwaitRevisionComplete => {
+            PlanScFrameSignal::PhaseDone
+        }
+        "stage_change" => {
+            let stage = message.get("stage").and_then(Value::as_str).unwrap_or("");
+            (phase == PlanScPumpPhase::AwaitConfirmTerminal && stage == "completed")
+                .then_some(PlanScFrameSignal::PhaseDone)
+                .unwrap_or(PlanScFrameSignal::Listen)
+        }
+        "session_state" => {
+            let status = message.get("status").and_then(Value::as_str).unwrap_or("");
+            (phase == PlanScPumpPhase::AwaitConfirmTerminal && status == "confirmed")
+                .then_some(PlanScFrameSignal::PhaseDone)
+                .unwrap_or(PlanScFrameSignal::Listen)
+        }
+        _ => PlanScFrameSignal::Listen,
+    }
+}
+
 /// 泵送单帧处置决策(r21 C1 根修提为纯函数,决策表可单测)。
 ///
 /// r21 现场:resume 格在 stage=Completed 会话上发 request_revision,服务端
@@ -3114,6 +3388,16 @@ enum PumpFrameDisposition {
     Terminal(&'static str),
     /// 服务端拒收/错误帧:立即失败收口。
     ServerError,
+}
+
+/// r26:SC plan 门 resume 的两阶段泵相位。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlanScPumpPhase {
+    /// 阶段 1:`human_gate_feedback` 修订轮,等 `human_gate_turn_completed`。
+    AwaitRevisionComplete,
+    /// 阶段 2:typed `confirm` 定稿,等 stage_change completed /
+    /// session_state confirmed。
+    AwaitConfirmTerminal,
 }
 
 fn pump_frame_disposition(
@@ -4025,4 +4309,78 @@ mod pump_disposition_tests {
             "story involved 必须钉定单成员(产品面据此派生 focus,首轮即锚成员)"
         );
     }
+    /// r26 问题2 回归锚点:SC 门泵信号决策表——
+    /// - SC 门修订轮回门信号=human_gate_turn_completed(仅阶段1);
+    /// - confirm 定稿终态=stage_change completed / session_state confirmed
+    ///   (仅阶段2);
+    /// - 拒收/错误帧恒秒收口(r25 现场 request_revision 被门拒后不得再
+    ///   空转)。
+    #[test]
+    fn lcg_plan_sc_frame_signal_decision_table() {
+        let revision = PlanScPumpPhase::AwaitRevisionComplete;
+        let confirm = PlanScPumpPhase::AwaitConfirmTerminal;
+        let turn_completed = json!({"type": "human_gate_turn_completed", "turn_id": "t1"});
+        assert_eq!(
+            plan_sc_frame_signal("human_gate_turn_completed", &turn_completed, revision),
+            PlanScFrameSignal::PhaseDone
+        );
+        assert_eq!(
+            plan_sc_frame_signal("human_gate_turn_completed", &turn_completed, confirm),
+            PlanScFrameSignal::Listen
+        );
+        let completed = json!({"type": "stage_change", "stage": "completed"});
+        assert_eq!(
+            plan_sc_frame_signal("stage_change", &completed, confirm),
+            PlanScFrameSignal::PhaseDone
+        );
+        let confirmed = json!({"type": "session_state", "status": "confirmed"});
+        assert_eq!(
+            plan_sc_frame_signal("session_state", &confirmed, confirm),
+            PlanScFrameSignal::PhaseDone
+        );
+        assert_eq!(
+            plan_sc_frame_signal("stage_change", &completed, revision),
+            PlanScFrameSignal::Listen
+        );
+        let rejected = json!({
+            "type": "protocol_error",
+            "code": "WORK_ITEM_PLAN_HUMAN_GATE_STAGE_INVALID",
+        });
+        assert_eq!(
+            plan_sc_frame_signal("protocol_error", &rejected, revision),
+            PlanScFrameSignal::ServerError
+        );
+        let error = json!({"type": "error", "message": "provider failed"});
+        assert_eq!(
+            plan_sc_frame_signal("error", &error, confirm),
+            PlanScFrameSignal::ServerError
+        );
+        let chunk = json!({"type": "stream_chunk", "content": "..."});
+        assert_eq!(
+            plan_sc_frame_signal("stream_chunk", &chunk, confirm),
+            PlanScFrameSignal::Listen
+        );
+    }
+
+    /// r26 问题4:wire 事件行大字段截断保留形态。
+    #[test]
+    fn lcg_truncate_verbose_wire_fields_bounds_payload() {
+        let long_text = "x".repeat(2048);
+        let mut value = json!({
+            "type": "system",
+            "subtype": "init",
+            "session_id": "11111111-2222-3333-4444-555555555555",
+            "long_field": long_text,
+        });
+        truncate_verbose_wire_fields(&mut value);
+        assert_eq!(value["type"], json!("system"));
+        assert_eq!(
+            value["session_id"],
+            json!("11111111-2222-3333-4444-555555555555")
+        );
+        let truncated = value["long_field"].as_str().expect("truncated text");
+        assert!(truncated.len() < 600, "长字段必须截断:{}", truncated.len());
+        assert!(truncated.ends_with("…[truncated]"));
+    }
+
 }
