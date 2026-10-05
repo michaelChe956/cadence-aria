@@ -89,6 +89,52 @@ const IDLE_PING_SECS: Duration = Duration::from_secs(30);
 const HEALTH_TIMEOUT_ENV: &str = "LC_GATEWAY_E2E_HEALTH_TIMEOUT_SECS";
 const DEFAULT_HEALTH_TIMEOUT_SECS: u64 = 300;
 
+// ---------------------------------------------------------------------------
+// r20 黑匣子足迹:全驱动链(阶段/HTTP/WS/轮询)一行足迹 + 关键轮询 30s 心跳。
+//
+// r16~r20 同位置变体复盘:现场挂死后唯一可观测信号是「无输出/无子进程/
+// 线程 park」,格证据只在矩阵收尾落盘,卡点不可定位。足迹打到 stderr,
+// 挂死现场日志最后一行=精确卡点;「静默正常」与「挂死」以 30s 心跳区分。
+// 相位(阶段/入口/fresh_or_resume)随格推进全局切换,HTTP/WS/轮询足迹
+// 自动携带,无需逐调用点透传上下文。
+// ---------------------------------------------------------------------------
+
+/// 当前格相位 `stage/entrypoint/fresh_or_resume`(进程内单写;临界区仅
+/// 赋值/克隆,同步微段,无跨 await 持锁)。
+static FP_PHASE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+/// 打一行足迹:`[fp HH:MM:SS.mmm] [phase] event detail`。成本一行 stderr,
+/// 可忽略;现场以最后一行定位卡点。
+fn fp(event: &str, detail: impl std::fmt::Display) {
+    let phase = FP_PHASE
+        .lock()
+        .map(|guard| guard.clone())
+        .unwrap_or_default();
+    eprintln!(
+        "[fp {}] [{}] {} {}",
+        Utc::now().format("%H:%M:%S%.3f"),
+        phase,
+        event,
+        detail
+    );
+}
+
+/// 切换当前格相位并留痕(后续 HTTP/WS/轮询足迹自动携带新相位)。
+fn fp_enter_phase(stage: &str, entrypoint: &str, fresh_or_resume: &str) {
+    let next = format!("{stage}/{entrypoint}/{fresh_or_resume}");
+    if let Ok(mut guard) = FP_PHASE.lock() {
+        *guard = next.clone();
+    }
+    fp("phase_begin", &next);
+}
+
+/// 轮询心跳节流:距上次足迹 ≥30s 才再打一行(防「静默正常/挂死」不可分)。
+const FP_HEARTBEAT_SECS: Duration = Duration::from_secs(30);
+
+/// WS 单帧发送有界超时:r20 候选③——`send_json` 原为无超时裸 await(对端
+/// 停读+缓冲塞满时永久挂起,无 timer 可观测)。小帧 60s 已远超正常完成。
+const WS_SEND_TIMEOUT_SECS: Duration = Duration::from_secs(60);
+
 const PROJECT_ID: &str = "project_0001";
 
 /// 单格证据(键 + 断言组字段 + 每格证据形态要素)。
@@ -401,10 +447,13 @@ impl LiveLcGatewayHarness {
         provider: ProviderName,
         evidence_root: &Path,
     ) -> Result<LiveMatrixEvidence, LiveMatrixFailure> {
+        fp_enter_phase("matrix", "env", "build");
         let mut env = MatrixEnvironment::build(provider.clone(), evidence_root).await?;
+        fp("env_built", format_args!("lc={} issue={}", env.lc_id, env.issue_id));
 
         let mut cells = Vec::new();
         // 五阶段顺序固定:Story、Design、Plan、Coding、Review。
+        fp("stage_begin", "story");
         cells.extend(
             env.run_workspace_entity_stage(
                 "story",
@@ -424,6 +473,8 @@ impl LiveLcGatewayHarness {
             )
             .await,
         );
+        fp("stage_end", format_args!("story cells={}", cells.len()));
+        fp("stage_begin", "design");
         cells.extend(
             env.run_workspace_entity_stage(
                 "design",
@@ -444,15 +495,25 @@ impl LiveLcGatewayHarness {
             )
             .await,
         );
+        fp("stage_end", format_args!("design cells={}", cells.len()));
         // Plan:workspace streaming 主入口(start_work_item_plan_author caller 链)。
+        fp("stage_begin", "plan streaming");
         cells.extend(env.run_plan_streaming_stage().await);
+        fp("stage_end", format_args!("plan streaming cells={}", cells.len()));
         // Plan:split_sync 对照(gateway sync bridge)。
+        fp("stage_begin", "plan split_sync");
         cells.extend(env.run_split_sync_stage().await);
+        fp("stage_end", format_args!("plan split_sync cells={}", cells.len()));
         // Coding(依赖 Plan 确认后的 work item;失败落格)。
+        fp("stage_begin", "coding");
         cells.extend(env.run_coding_stage().await);
+        fp("stage_end", format_args!("coding cells={}", cells.len()));
         // Review:reviewer 角色经 streaming 栈的真实评审会话。
+        fp("stage_begin", "review");
         cells.extend(env.run_review_stage().await);
+        fp("stage_end", format_args!("review cells={}", cells.len()));
 
+        fp_enter_phase("matrix", "validate", "final");
         // run_ref 在 entrypoint 内唯一:跨格回填(空 run_ref 不参与判重)。
         let mut seen_per_entrypoint: BTreeMap<(String, String), usize> = BTreeMap::new();
         for cell in &cells {
@@ -768,11 +829,13 @@ impl MatrixEnvironment {
     /// 轮询真实 provider health 直到所选 provider available(先触发一次
     /// 主动 recheck 刷新,再读 status;有界超时,超时按 BLOCKED 报告)。
     async fn wait_for_provider_health(&mut self) -> Result<(), LiveMatrixFailure> {
+        fp_enter_phase("env", "provider_health", "-");
         let deadline = tokio::time::Instant::now()
             + Duration::from_secs(env_timeout_secs(
                 HEALTH_TIMEOUT_ENV,
                 DEFAULT_HEALTH_TIMEOUT_SECS,
             ));
+        let mut last_heartbeat = std::time::Instant::now();
         loop {
             // 主动刷新一次(探测真实 CLI --version),随后读状态。
             let _ =
@@ -787,7 +850,12 @@ impl MatrixEnvironment {
                     })
                 });
             if provider_ready {
+                fp("health_ready", &self.provider_wire);
                 return Ok(());
+            }
+            if last_heartbeat.elapsed() >= FP_HEARTBEAT_SECS {
+                fp("health_poll", "provider health 未就绪,继续轮询(30s 心跳)");
+                last_heartbeat = std::time::Instant::now();
             }
             if tokio::time::Instant::now() >= deadline {
                 let failure = matrix_failure(
@@ -805,6 +873,7 @@ impl MatrixEnvironment {
     }
 
     async fn create_project_and_lc(&mut self) -> Result<(), LiveMatrixFailure> {
+        fp_enter_phase("env", "create_project_and_lc", "-");
         let (status, body) = request_json(
             &self.app,
             Method::POST,
@@ -830,10 +899,12 @@ impl MatrixEnvironment {
             return Err(self.fail_with_diagnostics(failure, None).await);
         };
         self.lc_id = lc_id.to_string();
+        fp("project_lc_created", format_args!("lc={}", self.lc_id));
         Ok(())
     }
 
     async fn register_members(&mut self) -> Result<(), LiveMatrixFailure> {
+        fp_enter_phase("env", "register_members", "-");
         let aggregate_root = self.aggregate_root_path().to_path_buf();
         let (status, body) = request_json(
             &self.app,
@@ -884,6 +955,7 @@ impl MatrixEnvironment {
             );
             return Err(self.fail_with_diagnostics(failure, None).await);
         }
+        fp("members_registered", "");
         Ok(())
     }
 
@@ -893,6 +965,7 @@ impl MatrixEnvironment {
     /// operation 有界重试——每轮失败先抄录该轮 receipts 到
     /// diagnostics/attempt-N/,拒绝轮证据全留;最终失败才保留 tempdir。
     async fn run_real_aggregate_initialization(&mut self) -> Result<(), LiveMatrixFailure> {
+        fp_enter_phase("env", "aggregate_init", "-");
         const MAX_ATTEMPTS: usize = 3;
         let mut last_failure = None;
         for attempt in 1..=MAX_ATTEMPTS {
@@ -962,6 +1035,7 @@ impl MatrixEnvironment {
             self.lc_id
         );
         let deadline = tokio::time::Instant::now() + init_timeout;
+        let mut last_heartbeat = std::time::Instant::now();
         loop {
             if tokio::time::Instant::now() >= deadline {
                 return Err(matrix_failure(
@@ -973,7 +1047,10 @@ impl MatrixEnvironment {
             let (status, snapshot) = request_json(&self.app, Method::GET, &uri, json!({})).await;
             expect_ok(status, &snapshot, "轮询初始化", None)?;
             match snapshot["status"].as_str() {
-                Some("completed") => return Ok(()),
+                Some("completed") => {
+                    fp("init_completed", format_args!("operation={operation_id}"));
+                    return Ok(());
+                }
                 Some("failed") | Some("cancelled") => {
                     return Err(matrix_failure(
                         "initialization_failed",
@@ -981,13 +1058,20 @@ impl MatrixEnvironment {
                         None,
                     ));
                 }
-                _ => tokio::time::sleep(Duration::from_millis(500)).await,
+                _ => {
+                    if last_heartbeat.elapsed() >= FP_HEARTBEAT_SECS {
+                        fp("init_poll", format_args!("status={} 继续轮询(30s 心跳)", snapshot["status"]));
+                        last_heartbeat = std::time::Instant::now();
+                    }
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
             }
         }
     }
 
     /// 真实索引 ready(初始化 D5 后 active index 应可用;缺失则 rebuild)。
     async fn wait_for_index_ready(&mut self) -> Result<(), LiveMatrixFailure> {
+        fp_enter_phase("env", "index_ready", "-");
         let active_uri = format!(
             "/api/projects/{PROJECT_ID}/logical-codebases/{}/aggregate-indexes/active",
             self.lc_id
@@ -997,6 +1081,7 @@ impl MatrixEnvironment {
             self.lc_id
         );
         let deadline = tokio::time::Instant::now() + self.stage_timeout;
+        let mut last_heartbeat = std::time::Instant::now();
         loop {
             let (status, body) = request_json(&self.app, Method::GET, &active_uri, json!({})).await;
             if let Err(failure) = expect_ok(status, &body, "读取 active index", None) {
@@ -1004,7 +1089,10 @@ impl MatrixEnvironment {
             }
             match body["state"].as_str() {
                 // 终态:active 簇 → 通过。
-                Some("ready") | Some("active") | Some("completed") => return Ok(()),
+                Some("ready") | Some("active") | Some("completed") => {
+                    fp("index_ready", format_args!("state={}", body["state"]));
+                    return Ok(());
+                }
                 // 终态:failed/error → 失败(带 warning 原文)。
                 Some("failed") | Some("error") => {
                     let failure =
@@ -1030,6 +1118,10 @@ impl MatrixEnvironment {
                 }
                 _ => {}
             }
+            if last_heartbeat.elapsed() >= FP_HEARTBEAT_SECS {
+                fp("index_poll", format_args!("state={} 继续轮询(30s 心跳)", body["state"]));
+                last_heartbeat = std::time::Instant::now();
+            }
             if tokio::time::Instant::now() >= deadline {
                 let failure = matrix_failure(
                     "index_timeout",
@@ -1047,6 +1139,7 @@ impl MatrixEnvironment {
     /// checkout_ids)与 checkout 记录(canonical_path)解析,不再查物理
     /// repository store 的 logical_repository_id 字段)。
     async fn resolve_member_target(&mut self) -> Result<(), LiveMatrixFailure> {
+        fp_enter_phase("env", "resolve_member_target", "-");
         self.canonical_root = self
             .aggregate_root_path()
             .to_path_buf()
@@ -1197,6 +1290,7 @@ impl MatrixEnvironment {
     }
 
     async fn create_issue(&mut self) -> Result<(), LiveMatrixFailure> {
+        fp_enter_phase("env", "create_issue", "-");
         let (status, body) = request_json(
             &self.app,
             Method::POST,
@@ -1265,6 +1359,7 @@ impl MatrixEnvironment {
         response_spec_field: &str,
     ) -> EvidenceCell {
         let mut observation = StageObservation::new(stage, &self.provider);
+        fp_enter_phase(stage, ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT, FRESH);
         let (status, body) =
             request_json(&self.app, Method::POST, generate_uri, generate_body.clone()).await;
         if !status.is_success() {
@@ -1299,12 +1394,17 @@ impl MatrixEnvironment {
             .drive_workspace_session_ws(&session_id, &mut observation, 8, self.entity_stage_timeout)
             .await;
         observation.completed_product_artifact_exists = drive.artifact_confirmed;
+        fp(
+            "entity_fresh_drive_end",
+            format_args!("session={session_id} artifact={}", drive.artifact_confirmed),
+        );
         observation.build_cell(self)
     }
 
     /// 同一会话的显式 revision 重驱:gateway resume 路径的原生恢复确认。
     async fn drive_entity_session_resume(&mut self, stage: &'static str) -> EvidenceCell {
         let mut observation = StageObservation::new(stage, &self.provider);
+        fp_enter_phase(stage, ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT, RESUME);
         // fix 轮 8:resume 格先定 mode 再早退——早退分支曾以 fresh 落盘,
         // 覆盖 fresh 格目录并掩埋其真实失败原因。
         observation.force_resume = true;
@@ -1313,12 +1413,17 @@ impl MatrixEnvironment {
                 .denied_cell("无可恢复的本阶段 fresh 会话(fresh 未建立会话)".to_string());
         };
         observation.workspace_session_id = session_id.clone();
+        fp("resume_audit_scan_begin", format_args!("session={session_id}"));
         // 请求恢复的 native id = fresh 轮审计里的 provider_session_id
         //(必须在 revision 重驱前捕获)。
         observation.requested_resume_id =
             self.latest_audit_native_id(&session_id, &self.provider, None);
         observation.frozen_digest =
             self.latest_audit_projection_digest(&session_id, &self.provider);
+        fp(
+            "resume_audit_scan_end",
+            format_args!("requested_id={:?} frozen={:?}", observation.requested_resume_id, observation.frozen_digest),
+        );
         let revision = self
             .drive_revision_resume(
                 &session_id,
@@ -1458,6 +1563,7 @@ impl MatrixEnvironment {
             "type": "matrix_confirm_result",
             "status": dto_status,
         }));
+        fp("confirm_gate_result", format_args!("status={dto_status}"));
         match dto_status.as_str() {
             "confirmed" => {
                 outcome.artifact_confirmed = true;
@@ -1484,9 +1590,13 @@ impl MatrixEnvironment {
         let deadline = tokio::time::Instant::now() + timeout;
         let mut idle_deadline = tokio::time::Instant::now() + IDLE_PING_SECS;
         let mut confirms_left = confirm_rounds;
+        let pump_started = std::time::Instant::now();
+        let mut events_seen = 0u64;
+        fp("pump_begin", format_args!("timeout={timeout:?} confirms={confirm_rounds}"));
         loop {
             if tokio::time::Instant::now() >= deadline {
                 observation.push_event(json!({"type": "matrix_stage_timeout"}));
+                fp("pump_stage_timeout", format_args!("elapsed={:?} events={events_seen}", pump_started.elapsed()));
                 return outcome;
             }
             let message = tokio::time::timeout_at(idle_deadline, ws.recv_json()).await;
@@ -1499,6 +1609,7 @@ impl MatrixEnvironment {
                     observation.push_event(json!({"type": "matrix_ws_closed"}));
                     // F5:驱动失败原因必须落在格上,不得被 resume 兜底文案覆盖。
                     observation.run_failure = Some("workspace 会话 WS 在终态前关闭".to_string());
+                    fp("pump_ws_closed", format_args!("elapsed={:?} events={events_seen}", pump_started.elapsed()));
                     return outcome;
                 }
                 Ok(Err(error)) => {
@@ -1511,6 +1622,10 @@ impl MatrixEnvironment {
                     // r12 复盘:此处不重置 idle_deadline 会退化成 ping 风暴
                     //(过期 deadline 使 timeout_at 立即 Err,循环狂发 ping,
                     // r12 证据里 128 pong 同毫秒突发即此因),必须按间隔节流。
+                    fp(
+                        "pump_idle_ping",
+                        format_args!("elapsed={:?} events={events_seen}(30s 心跳:泵存活/对端静默)", pump_started.elapsed()),
+                    );
                     if ws.send_json(&json!({"type": "ping"})).await.is_err() {
                         observation.push_event(json!({"type": "matrix_ws_closed"}));
                         observation.run_failure =
@@ -1523,6 +1638,7 @@ impl MatrixEnvironment {
                 Err(_) => {
                     observation.push_event(json!({"type": "matrix_stage_timeout"}));
                     observation.run_failure = Some("workspace 会话阶段超时未达终态".to_string());
+                    fp("pump_stage_timeout", format_args!("elapsed={:?} events={events_seen}", pump_started.elapsed()));
                     return outcome;
                 }
             };
@@ -1532,6 +1648,7 @@ impl MatrixEnvironment {
                 .unwrap_or_default()
                 .to_string();
             observation.push_event(message.clone());
+            events_seen += 1;
             // F6:tool 事件结构化计数(type/字段精确匹配,非全文子串)。
             if is_tool_event(&message) {
                 observation.tool_events += 1;
@@ -1540,6 +1657,7 @@ impl MatrixEnvironment {
                 "session_state" => {
                     if let Some(status) = message.get("status").and_then(Value::as_str) {
                         observation.record_status(status);
+                        fp("pump_session_state", format_args!("status={status} events={events_seen}"));
                         match status {
                             "waiting_for_human" if confirms_left > 0 => {
                                 confirms_left -= 1;
@@ -1551,6 +1669,7 @@ impl MatrixEnvironment {
                             // 不再空转到阶段超时。
                             "confirmed" => {
                                 outcome.artifact_confirmed = true;
+                                fp("pump_confirmed", format_args!("elapsed={:?}", pump_started.elapsed()));
                                 return outcome;
                             }
                             "failed"
@@ -1558,6 +1677,7 @@ impl MatrixEnvironment {
                             | "terminated"
                             | "stopped_needs_human" => {
                                 observation.terminal_status = Some(status.to_string());
+                                fp("pump_terminal", format_args!("status={status} elapsed={:?}", pump_started.elapsed()));
                                 return outcome;
                             }
                             _ => {}
@@ -1571,6 +1691,7 @@ impl MatrixEnvironment {
                     // stage_change 为准(r13 会话 00:14 已 waiting_for_human,
                     // 泵只认 session_state 空转到 90min 超时)。
                     let stage = message.get("stage").and_then(Value::as_str).unwrap_or("");
+                    fp("pump_stage_change", format_args!("stage={stage}"));
                     if matches!(stage, "author_confirm" | "human_confirm") && confirms_left > 0 {
                         confirms_left -= 1;
                         if self.confirm_session_gate(observation, &mut outcome).await {
@@ -1586,6 +1707,7 @@ impl MatrixEnvironment {
                     //(P0 1.3:旧单题字段会被引擎清空)。
                     if let Some(choice_id) = message.get("id").and_then(Value::as_str) {
                         let (answers, top_selected) = semantic_choice_answers(&message);
+                        fp("pump_choice_request", format_args!("id={choice_id} options={}", top_selected.join(",")));
                         let _ = ws
                             .send_json(&json!({
                                 "type": "choice_response",
@@ -1629,6 +1751,7 @@ impl MatrixEnvironment {
         // caller 链在 WS author 驱动里执行:begin handle→bind sink→start→
         // parse/complete)----
         let mut observation = StageObservation::new("plan", &self.provider);
+        fp_enter_phase("plan", ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT, FRESH);
         observation.role = "work_item_splitter".to_string();
         let design_spec_id = self.design_spec_id.clone().expect("design spec");
         let (status, body) = request_json(
@@ -1688,6 +1811,7 @@ impl MatrixEnvironment {
 
         // ---- resume:plan 会话 revision 重驱 ----
         let mut resume = StageObservation::new("plan", &self.provider);
+        fp_enter_phase("plan", ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT, RESUME);
         resume.role = "work_item_splitter".to_string();
         resume.force_resume = true;
         resume.workspace_session_id = session_id.clone();
@@ -1749,6 +1873,7 @@ impl MatrixEnvironment {
         // fresh:begin handle → prepare_sync_launch(绑定 run-bound audit
         // sink)→ run_sync(真实 CLI)→ complete(handle 收口)。
         let mut fresh = StageObservation::new(stage, &self.provider);
+        fp_enter_phase(stage, ENTRYPOINT_SPLIT_SYNC, FRESH);
         fresh.entrypoint = entrypoint.to_string();
         fresh.role = "work_item_splitter".to_string();
         fresh.action = "planning_read_only".to_string();
@@ -1775,6 +1900,7 @@ impl MatrixEnvironment {
                 return cells;
             }
         };
+        fp("split_sync_begin_handle", format_args!("session={workspace_session_id}(同步段:持审计互斥锁)"));
         let handle = match self.lifecycle.begin_work_item_split_provider_run(
             PROJECT_ID,
             &self.issue_id,
@@ -1793,6 +1919,7 @@ impl MatrixEnvironment {
                 return cells;
             }
         };
+        fp("split_sync_handle_ok", format_args!("run_ref={}", handle.run_ref));
         fresh.run_ref = handle.run_ref.clone();
         fresh.role_run_seq = Some(handle.role_run_seq);
 
@@ -1856,9 +1983,11 @@ impl MatrixEnvironment {
             role_run_seq: handle.role_run_seq,
             audit_sink: Arc::new(self.lifecycle.clone()),
         };
+        fp("split_sync_prepare", "prepare_sync_launch(同步段)");
         let launch = gateway
             .prepare_sync_launch(adapter_input, request, context)
             .map_err(|error| error.to_string());
+        fp("split_sync_prepare_done", "");
         match launch {
             // B案(r16/r17 冻死根修):run_sync 的同步桥在自有 OS 线程 join 到
             // 终态,直接在测试 runtime 线程上调用会把唯一 runtime(含 in-process
@@ -1868,11 +1997,16 @@ impl MatrixEnvironment {
             // 与阻塞任务泄漏至进程退出(受 AdapterInput.timeout=stage_timeout
             // 兜底自灭),由外层 kill 回收。
             Ok(launch) => {
+                fp(
+                    "split_sync_run_sync_begin",
+                    format_args!("spawn_blocking 桥启动,stage 预算={}s(桥线程 lc-gateway-sync-bridge)", self.stage_timeout.as_secs()),
+                );
                 let bounded = tokio::time::timeout(
                     self.stage_timeout,
                     tokio::task::spawn_blocking(move || gateway.run_sync(launch)),
                 )
                 .await;
+                fp("split_sync_run_sync_end", format_args!("bounded={}", bounded.is_ok()));
                 match bounded {
                     Ok(Ok(Ok(output))) => {
                         let structured = output.structured_output.clone();
@@ -1897,6 +2031,7 @@ impl MatrixEnvironment {
                         }
                     }
                     Ok(Ok(Err(error))) => {
+                        fp("split_sync_failed", format_args!("{error}"));
                         let _ = self
                             .lifecycle
                             .fail_work_item_split_provider_run(&handle, &error.to_string());
@@ -1937,6 +2072,7 @@ impl MatrixEnvironment {
         // resume:sync split 无 native session contract → resume=Unknown、
         // 零 spawn(不借 streaming fresh 推导支持),证据如实记录。
         let mut resume = StageObservation::new(stage, &self.provider);
+        fp_enter_phase(stage, ENTRYPOINT_SPLIT_SYNC, RESUME);
         resume.entrypoint = entrypoint.to_string();
         resume.role = "work_item_splitter".to_string();
         resume.action = "planning_read_only".to_string();
@@ -1971,6 +2107,7 @@ impl MatrixEnvironment {
         // fresh:真实 coding attempt 创建(创建沿 plan 会话的 provider 配置)
         // → coding WS 驱动(StartCoding/阶段门)→ FinalConfirm。
         let mut observation = StageObservation::new("coding", &self.provider);
+        fp_enter_phase("coding", ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT, FRESH);
         observation.role = "executor".to_string();
         observation.action = "coding_workspace_write".to_string();
         let (status, body) = request_json(
@@ -2012,6 +2149,7 @@ impl MatrixEnvironment {
         // resume:重连 coding WS 再次驱动(原生恢复由生产 resume 语义裁决,
         // 审计 provider_session_id 与 fresh 轮比对)。
         let mut resume = StageObservation::new("coding", &self.provider);
+        fp_enter_phase("coding", ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT, RESUME);
         resume.role = "executor".to_string();
         resume.action = "coding_workspace_write".to_string();
         resume.force_resume = true;
@@ -2059,6 +2197,9 @@ impl MatrixEnvironment {
         let mut outcome = DriveOutcome::default();
         let deadline = tokio::time::Instant::now() + self.stage_timeout;
         let mut idle_deadline = tokio::time::Instant::now() + IDLE_PING_SECS;
+        let coding_started = std::time::Instant::now();
+        let mut events_seen = 0u64;
+        fp("coding_pump_begin", format_args!("attempt={attempt_id} timeout={:?}", self.stage_timeout));
         loop {
             if tokio::time::Instant::now() >= deadline {
                 observation.push_event(json!({"type": "matrix_stage_timeout"}));
@@ -2072,12 +2213,17 @@ impl MatrixEnvironment {
                 }
                 Ok(Ok(None)) | Ok(Err(_)) => {
                     observation.run_failure = Some("coding 会话 WS 在终态前关闭/错误".to_string());
+                    fp("coding_pump_closed", format_args!("elapsed={:?} events={events_seen}", coding_started.elapsed()));
                     return outcome;
                 }
                 Err(_) if tokio::time::Instant::now() < deadline => {
                     // 空闲保活:防 coding server idle 断连。同 workspace 泵:
                     // ping 后必须重置 idle_deadline,否则过期 deadline 使
                     // timeout_at 立即 Err 退化成 ping 风暴。
+                    fp(
+                        "coding_pump_idle_ping",
+                        format_args!("elapsed={:?} events={events_seen}(30s 心跳:泵存活/对端静默)", coding_started.elapsed()),
+                    );
                     if ws.send_json(&json!({"type": "coding_ping"})).await.is_err() {
                         observation.run_failure =
                             Some("coding 会话 WS 在终态前关闭/错误".to_string());
@@ -2098,6 +2244,7 @@ impl MatrixEnvironment {
                 .unwrap_or_default()
                 .to_string();
             observation.push_event(message.clone());
+            events_seen += 1;
             // F6:tool 事件结构化计数。
             if is_tool_event(&message) {
                 observation.tool_events += 1;
@@ -2128,6 +2275,7 @@ impl MatrixEnvironment {
                 "coding_session_state" => {
                     if let Some(status) = message.get("status").and_then(Value::as_str) {
                         observation.record_status(status);
+                        fp("coding_pump_state", format_args!("status={status} events={events_seen}"));
                         match status {
                             // F2:waiting_for_human 即阶段门就绪——确认成功并
                             // 立即返回,不再烧满 stage_timeout。
@@ -2162,6 +2310,7 @@ impl MatrixEnvironment {
         let mut cells = Vec::new();
         // reviewer 评审走 design 实体 review_rounds=1(reviewer=所选 provider)。
         let mut observation = StageObservation::new("review", &self.provider);
+        fp_enter_phase("review", ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT, FRESH);
         observation.role = "reviewer".to_string();
         observation.action = "review_read_only".to_string();
         let (status, body) = request_json(
@@ -2211,6 +2360,7 @@ impl MatrixEnvironment {
 
         // resume:评审修订重驱(reviewer 原生恢复)。
         let mut resume = StageObservation::new("review", &self.provider);
+        fp_enter_phase("review", ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT, RESUME);
         resume.role = "reviewer".to_string();
         resume.action = "review_read_only".to_string();
         resume.force_resume = true;
@@ -2310,6 +2460,10 @@ impl MatrixEnvironment {
     /// 逐格证据落盘(485 行形态全要素)。F7:IO 失败不静默——返回 Err 由
     /// 上层把该格降级 denied(reason=证据落盘失败),不出现绿格+空目录。
     fn write_cell_evidence(&self, cell: &EvidenceCell) -> Result<(), String> {
+        fp(
+            "write_cell_evidence",
+            format_args!("{}/{}/{}(同步段)", cell.stage, cell.entrypoint, cell.fresh_or_resume),
+        );
         let entrypoint_dir = cell.entrypoint.replace('/', "-");
         let cell_dir = self
             .evidence_root
@@ -2592,6 +2746,10 @@ impl StageObservation {
 
     /// 由真实观测(审计 + 事件流 + 产品门)组装证据格。
     fn build_cell(&mut self, env: &MatrixEnvironment) -> EvidenceCell {
+        fp(
+            "build_cell",
+            format_args!("{}/{}(同步段:审计扫描+git 快照)", self.stage, self.force_resume),
+        );
         let mut cell = self.placeholder_cell();
         cell.process_cwd = env.canonical_root.clone();
         cell.target = env.member_worktree.clone();
@@ -2745,12 +2903,25 @@ impl LiveWs {
         }
     }
 
+    /// r20 候选③修复:单帧发送原为无超时裸 await(对端停读+缓冲塞满时
+    /// 永久挂起,且无 timer 可观测——与 r20 现场「无活跃 timer」吻合)。
+    /// 小帧 60s 有界:超时按发送失败落格,不再可能无限等待。
     async fn send_json(&mut self, value: &Value) -> Result<(), String> {
         let text = serde_json::to_string(value).map_err(|error| error.to_string())?;
-        self.inner
-            .send(Message::Text(text.into()))
-            .await
-            .map_err(|error| error.to_string())
+        let kind = value.get("type").and_then(Value::as_str).unwrap_or("?");
+        let send = self.inner.send(Message::Text(text.into()));
+        fp("ws_send_begin", format_args!("type={kind}"));
+        let sent = match tokio::time::timeout(WS_SEND_TIMEOUT_SECS, send).await {
+            Ok(result) => result.map_err(|error| error.to_string()),
+            Err(_) => Err(format!(
+                "WS 发送超时({WS_SEND_TIMEOUT_SECS:?};对端不读或链路冻结,type={kind})"
+            )),
+        };
+        match &sent {
+            Ok(()) => fp("ws_send_ok", format_args!("type={kind}")),
+            Err(error) => fp("ws_send_fail", format_args!("type={kind} error={error}")),
+        }
+        sent
     }
 }
 
@@ -2764,6 +2935,8 @@ async fn request_json(
     uri: &str,
     body: Value,
 ) -> (StatusCode, Value) {
+    let http_label = format!("{method} {uri}");
+    fp("http_begin", format_args!("{http_label}"));
     // r13 复盘:oneshot 由同 runtime 服务,服务端任务死锁时永不返回
     //(现场 futex 挂死 90min+ 无任何 IO)。有界超时把全矩阵挂死降级为
     // 单格 HTTP 失败,原因可落格。
@@ -2787,15 +2960,22 @@ async fn request_json(
         let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
         (status, value)
     };
+    fp("http_wait", format_args!("{http_label}(180s 有界)"));
     match tokio::time::timeout(Duration::from_secs(180), request).await {
-        Ok(result) => result,
-        Err(_) => (
-            StatusCode::GATEWAY_TIMEOUT,
-            json!({
-                "type": "matrix_request_timeout",
-                "message": "HTTP 请求 180s 超时(服务端任务疑似挂起)"
-            }),
-        ),
+        Ok(result) => {
+            fp("http_end", format_args!("{http_label} -> {}", result.0.as_u16()));
+            result
+        }
+        Err(_) => {
+            fp("http_timeout", format_args!("{http_label}(180s 超时:服务端任务疑似挂起)"));
+            (
+                StatusCode::GATEWAY_TIMEOUT,
+                json!({
+                    "type": "matrix_request_timeout",
+                    "message": "HTTP 请求 180s 超时(服务端任务疑似挂起)"
+                }),
+            )
+        }
     }
 }
 
@@ -3326,6 +3506,7 @@ fn work_item_split_output_schema() -> String {
 async fn connect_live_ws(url: &str) -> Result<LiveWs, String> {
     // r16 兜底:服务端冻结时连接/升级可能悬死(现场 67min 无 IO);
     // 有界超时把全矩阵挂死降级为单格 WS 连接失败可落格。
+    fp("ws_connect_begin", format_args!("{url}(180s 有界)"));
     let connect = async {
         let (stream, _) = connect_async(url)
             .await
@@ -3333,7 +3514,17 @@ async fn connect_live_ws(url: &str) -> Result<LiveWs, String> {
         Ok::<LiveWs, String>(LiveWs::new(stream))
     };
     match tokio::time::timeout(Duration::from_secs(180), connect).await {
-        Ok(result) => result,
-        Err(_) => Err("WS 连接 180s 超时(服务端任务疑似冻结)".to_string()),
+        Ok(Ok(ws)) => {
+            fp("ws_connect_ok", format_args!("{url}"));
+            Ok(ws)
+        }
+        Ok(Err(error)) => {
+            fp("ws_connect_fail", format_args!("{url} error={error}"));
+            Err(error)
+        }
+        Err(_) => {
+            fp("ws_connect_timeout", format_args!("{url}(180s 超时:服务端任务疑似冻结)"));
+            Err("WS 连接 180s 超时(服务端任务疑似冻结)".to_string())
+        }
     }
 }
