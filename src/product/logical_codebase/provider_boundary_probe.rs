@@ -696,6 +696,13 @@ impl ProviderBoundaryProbe {
         } else {
             None
         };
+        // 9.5) resume 面(规格在场时):宿主侧真实 launch→同 id resume→
+        //     错 id 负探针。native id 语义与写边界正交,失败不影响写面
+        //     签发,只记录工件 resume 段(2d 导入 resume 格消费)。
+        let resume = match fixture.resume_spec() {
+            Some(spec) => run_resume_segment(spec, fixture.cli_program(), fixture.root()).await,
+            None => ResumeProbeRecord::not_probed(),
+        };
         // 10) 受保护面 post 快照:pre==post 零漂移(D4 口径)。
         let post = bounded_snapshot(&faces, &snapshot_budget)?;
         if post != pre {
@@ -749,6 +756,7 @@ impl ProviderBoundaryProbe {
                 .map(attempt_record)
                 .collect(),
             controlled_commit,
+            resume,
             d4: D4Record {
                 protected_faces: faces
                     .iter()
@@ -828,9 +836,27 @@ impl ProviderBoundaryProbe {
     /// Denied=CLI 不支持/同 id 续开 id 不符/错 id 回显原 id(带真实错误);
     /// Unknown=未探测/超时/工件不可读。
     pub fn artifact_resume_state(artifact_ref: &str) -> ProviderCapabilityEvidence {
-        // Task 6c resume 段阶段 1 RED 桩:阶段 2 实现真实工件解析。
-        let _ = artifact_ref;
-        ProviderCapabilityEvidence::Unknown
+        let Ok(content) = fs::read_to_string(artifact_ref) else {
+            return ProviderCapabilityEvidence::Unknown;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) else {
+            return ProviderCapabilityEvidence::Unknown;
+        };
+        let resume = &value["resume"];
+        if resume.get("probed").and_then(|probed| probed.as_bool()) != Some(true) {
+            return ProviderCapabilityEvidence::Unknown;
+        }
+        match resume.get("state").and_then(|state| state.as_str()) {
+            Some("Confirmed") => ProviderCapabilityEvidence::Confirmed,
+            Some("Denied") => ProviderCapabilityEvidence::Denied {
+                reason: resume
+                    .get("reason")
+                    .and_then(|reason| reason.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+            },
+            _ => ProviderCapabilityEvidence::Unknown,
+        }
     }
 }
 
@@ -915,10 +941,77 @@ struct BoundaryProbeEvidenceArtifact {
     positives: Vec<AttemptRecord>,
     negatives: Vec<AttemptRecord>,
     controlled_commit: Option<CommitRecord>,
+    resume: ResumeProbeRecord,
     d4: D4Record,
     observation: ObservationRecord,
     write_boundary_state: String,
     probed_at: String,
+}
+
+/// resume 面 probe 记录(launch/native id/同 id resume/错 id 负探针;
+/// `probed=false` = 规格缺省,launch/write 面不受影响)。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct ResumeProbeRecord {
+    probed: bool,
+    /// Confirmed | Denied | Unknown | not_probed。
+    state: String,
+    reason: String,
+    channel_kind: String,
+    launch_argv: Vec<String>,
+    launch_exit: Option<i32>,
+    launch_native_session_id: Option<String>,
+    resume_argv: Vec<String>,
+    resume_exit: Option<i32>,
+    resume_native_session_id: Option<String>,
+    resume_reply_excerpt: String,
+    wrong_id_argv: Vec<String>,
+    wrong_id_exit: Option<i32>,
+    wrong_id_native_session_id: Option<String>,
+    wrong_id_rejected: Option<bool>,
+    id_confirmed_same: Option<bool>,
+}
+
+impl ResumeProbeRecord {
+    fn not_probed() -> Self {
+        Self {
+            probed: false,
+            state: "not_probed".to_string(),
+            reason: String::new(),
+            channel_kind: String::new(),
+            launch_argv: Vec::new(),
+            launch_exit: None,
+            launch_native_session_id: None,
+            resume_argv: Vec::new(),
+            resume_exit: None,
+            resume_native_session_id: None,
+            resume_reply_excerpt: String::new(),
+            wrong_id_argv: Vec::new(),
+            wrong_id_exit: None,
+            wrong_id_native_session_id: None,
+            wrong_id_rejected: None,
+            id_confirmed_same: None,
+        }
+    }
+
+    fn probing(kind: ResumeChannelKind) -> Self {
+        Self {
+            probed: true,
+            state: "Unknown".to_string(),
+            channel_kind: kind.as_str().to_string(),
+            ..Self::not_probed()
+        }
+    }
+
+    fn deny(&mut self, reason: String) {
+        self.state = "Denied".to_string();
+        self.reason = reason;
+    }
+
+    fn unknown(&mut self, reason: String) {
+        self.state = "Unknown".to_string();
+        self.reason = reason;
+    }
 }
 
 /// 由 projection/fixture 派生探测用 boundary plan,并校验一致性(cwd/
@@ -1222,6 +1315,201 @@ async fn run_controlled_commit(
         verified_on_host: true,
         argv: argv_text(&argv),
     })
+}
+
+/// resume 面 probe 段:宿主侧(LLM 会话需要真实 HOME/网络/登录态)在
+/// fixture root 内执行「真实 launch→同 id resume→错 id 负探针」。native
+/// id 语义与写边界正交:本段结果只写入工件 resume 段,不影响写面签发。
+async fn run_resume_segment(
+    spec: &ResumeProbeSpec,
+    cli_program: &str,
+    cwd: &Path,
+) -> ResumeProbeRecord {
+    let kind = spec.kind();
+    let prompt = spec.prompt();
+    let timeout = spec.timeout_secs();
+    let mut record = ResumeProbeRecord::probing(kind);
+
+    // 1) 真实 launch:记录 native session id。
+    let launch_args = kind.launch_argv(prompt);
+    record.launch_argv = argv_with_program(cli_program, &launch_args);
+    let launch = run_cli_capture(cli_program, &launch_args, cwd, timeout).await;
+    record.launch_exit = launch.exit_code();
+    if launch.timed_out {
+        record.unknown(format!("resume probe timed out after {timeout}s (launch)"));
+        return record;
+    }
+    if !launch.succeeded() {
+        record.deny(format!(
+            "resume launch failed: {}{}",
+            launch.exit_summary(),
+            text_excerpt(&launch.stderr, 200)
+        ));
+        return record;
+    }
+    let Some(native_id) = kind.extract_native_id(&launch.stdout) else {
+        record.deny(format!(
+            "resume launch produced no native session id{}",
+            text_excerpt(&launch.stdout, 200)
+        ));
+        return record;
+    };
+    record.launch_native_session_id = Some(native_id.clone());
+
+    // 2) 同 id 真实 resume:native id 确认同 id。
+    let resume_args = kind.resume_argv(&native_id, prompt);
+    record.resume_argv = argv_with_program(cli_program, &resume_args);
+    let resume = run_cli_capture(cli_program, &resume_args, cwd, timeout).await;
+    record.resume_exit = resume.exit_code();
+    if resume.timed_out {
+        record.unknown(format!("resume probe timed out after {timeout}s (resume)"));
+        return record;
+    }
+    if !resume.succeeded() {
+        record.deny(format!(
+            "resume invocation failed: {}{}",
+            resume.exit_summary(),
+            text_excerpt(&resume.stderr, 200)
+        ));
+        return record;
+    }
+    record.resume_reply_excerpt = text_excerpt(&resume.stdout, 200);
+    let resumed_id = kind.extract_native_id(&resume.stdout);
+    let confirmed_same = resumed_id.as_deref() == Some(native_id.as_str());
+    record.resume_native_session_id = resumed_id.clone();
+    record.id_confirmed_same = Some(confirmed_same);
+    if !confirmed_same {
+        record.deny(format!(
+            "resume native id mismatch: requested {native_id} got {:?}",
+            resumed_id.as_deref().unwrap_or("<none>")
+        ));
+        return record;
+    }
+
+    // 3) 错 id 负探针:错 id 不得回显**原** native id(claude/codex/kimi
+    //    以真实报错满足;pi 以新建另一 id 满足)。
+    let bogus = kind.bogus_native_id();
+    let wrong_args = kind.resume_argv(&bogus, prompt);
+    record.wrong_id_argv = argv_with_program(cli_program, &wrong_args);
+    let wrong = run_cli_capture(cli_program, &wrong_args, cwd, timeout).await;
+    record.wrong_id_exit = wrong.exit_code();
+    if wrong.timed_out {
+        record.unknown(format!(
+            "resume probe timed out after {timeout}s (bogus id)"
+        ));
+        return record;
+    }
+    let wrong_id = if wrong.succeeded() {
+        kind.extract_native_id(&wrong.stdout)
+    } else {
+        None
+    };
+    record.wrong_id_native_session_id = wrong_id.clone();
+    let wrong_rejected = wrong_id.as_deref() != Some(native_id.as_str());
+    record.wrong_id_rejected = Some(wrong_rejected);
+    if !wrong_rejected {
+        record.deny(format!(
+            "resume confirmed the original native id {native_id} for a bogus native id"
+        ));
+        return record;
+    }
+
+    record.state = "Confirmed".to_string();
+    record
+}
+
+/// 宿主侧 CLI 捕获(有界输出 + 超时 fail-closed)。
+struct CliCapture {
+    timed_out: bool,
+    spawn_error: Option<String>,
+    status_success: bool,
+    exit_code: Option<i32>,
+    stdout: String,
+    stderr: String,
+}
+
+impl CliCapture {
+    fn exit_code(&self) -> Option<i32> {
+        self.exit_code
+    }
+
+    fn succeeded(&self) -> bool {
+        self.spawn_error.is_none() && self.status_success
+    }
+
+    fn exit_summary(&self) -> String {
+        if let Some(error) = &self.spawn_error {
+            return format!("cannot execute: {error}");
+        }
+        format!("exit {:?}: ", self.exit_code)
+    }
+}
+
+/// 单次输出捕获上限(超限截断记录;LLM 轮次输出远小于此)。
+const CLI_CAPTURE_TEXT_LIMIT: usize = 64 * 1024;
+
+async fn run_cli_capture(
+    program: &str,
+    args: &[String],
+    cwd: &Path,
+    timeout_secs: u64,
+) -> CliCapture {
+    let invocation = tokio::process::Command::new(program)
+        .args(args)
+        .current_dir(cwd)
+        .output();
+    let output =
+        tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), invocation).await;
+    match output {
+        Err(_) => CliCapture {
+            timed_out: true,
+            spawn_error: None,
+            status_success: false,
+            exit_code: None,
+            stdout: String::new(),
+            stderr: String::new(),
+        },
+        Ok(Err(error)) => CliCapture {
+            timed_out: false,
+            spawn_error: Some(error.to_string()),
+            status_success: false,
+            exit_code: None,
+            stdout: String::new(),
+            stderr: String::new(),
+        },
+        Ok(Ok(output)) => CliCapture {
+            timed_out: false,
+            spawn_error: None,
+            status_success: output.status.success(),
+            exit_code: output.status.code(),
+            stdout: bounded_text(&output.stdout),
+            stderr: bounded_text(&output.stderr),
+        },
+    }
+}
+
+/// 有界文本(Lossy + 截断到捕获上限)。
+fn bounded_text(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    text.chars().take(CLI_CAPTURE_TEXT_LIMIT).collect()
+}
+
+/// 记录摘录:压缩空白并截断到 `limit` 字符。
+fn text_excerpt(text: &str, limit: usize) -> String {
+    let flattened: String = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" | ");
+    flattened.chars().take(limit).collect()
+}
+
+/// 完整 argv 记录(程序名 + 参数)。
+fn argv_with_program(program: &str, args: &[String]) -> Vec<String> {
+    let mut argv = vec![program.to_string()];
+    argv.extend(args.iter().cloned());
+    argv
 }
 
 /// 宿主侧真实 CLI 版本探测(`<cli> --version`,trimmed 完整 stdout;与
