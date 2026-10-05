@@ -5,7 +5,10 @@ use crate::cross_cutting::bounded_command_runner::{
     BoundedCommandRequest, TokioBoundedCommandRunner,
 };
 use crate::cross_cutting::json_rpc_peer::JsonRpcPeer;
-use crate::cross_cutting::process_manager::ProcessManager;
+use crate::cross_cutting::process_manager::{
+    ProcessManager, PROVIDER_CHILD_EXIT_STREAM_DRAIN, SessionTailExit,
+    bounded_task_join, provider_child_exit_error, run_session_tail_with_exit_watch,
+};
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::streaming_provider::{
     ProviderEvent, ProviderSession, ProviderStatus, StreamingProviderAdapter,
@@ -270,15 +273,27 @@ impl StreamingProviderAdapter for KimiCodeProvider {
                     }
                     _ => KimiMcpInjection::for_new_session(config.bundle),
                 });
-            let result = session::run_kimi_session_with_mcp(
-                peer,
-                command_rx,
-                event_tx.clone(),
-                input,
-                mcp_injection,
-                cancel.clone(),
+            // r19 续修(fix 轮 2):exit-watch 竞速——子进程先退出且排空耗尽时
+            // 泵被截断,合成错误沿既有 Err 路径发终态 Failed(非 KIMI_SESSION_
+            // ABORTED 语义,不会被吞)。
+            let result = match run_session_tail_with_exit_watch(
+                session::run_kimi_session_with_mcp(
+                    peer,
+                    command_rx,
+                    event_tx.clone(),
+                    input,
+                    mcp_injection,
+                    cancel.clone(),
+                ),
+                &mut child,
+                PROVIDER_CHILD_EXIT_STREAM_DRAIN,
+                provider_child_exit_error,
             )
-            .await;
+            .await
+            {
+                SessionTailExit::Stream(result) => result,
+                SessionTailExit::ChildExitBeforeTerminal { error } => Err(error),
+            };
             let status = if result.is_err() {
                 match tokio::time::timeout(std::time::Duration::from_millis(100), child.wait())
                     .await
@@ -294,9 +309,14 @@ impl StreamingProviderAdapter for KimiCodeProvider {
                     }
                 }
             } else {
-                child.wait().await.ok()
+                match tokio::time::timeout(PROVIDER_CHILD_EXIT_STREAM_DRAIN, child.wait()).await {
+                    Ok(Ok(status)) => Some(status),
+                    _ => None,
+                }
             };
-            let stderr_output = stderr_task.await.unwrap_or_default();
+            let stderr_output = bounded_task_join(stderr_task, PROVIDER_CHILD_EXIT_STREAM_DRAIN)
+                .await
+                .unwrap_or_default();
             if let Err(error) = result
                 && error.details != session::KIMI_SESSION_ABORTED
             {
@@ -518,16 +538,27 @@ impl StreamingProviderAdapter for KimiCodeProvider {
                     }
                     _ => KimiMcpInjection::for_new_session(config.bundle),
                 });
-            let result = session::run_kimi_session_validated(
-                peer,
-                command_rx,
-                event_tx.clone(),
-                input,
-                mcp_injection,
-                lc_session,
-                session_cancel.clone(),
+            // r19 续修(fix 轮 2):同 direct 路径——exit-watch 竞速 + 终态
+            // join 有界(红线 a)。
+            let result = match run_session_tail_with_exit_watch(
+                session::run_kimi_session_validated(
+                    peer,
+                    command_rx,
+                    event_tx.clone(),
+                    input,
+                    mcp_injection,
+                    lc_session,
+                    session_cancel.clone(),
+                ),
+                &mut child,
+                PROVIDER_CHILD_EXIT_STREAM_DRAIN,
+                provider_child_exit_error,
             )
-            .await;
+            .await
+            {
+                SessionTailExit::Stream(result) => result,
+                SessionTailExit::ChildExitBeforeTerminal { error } => Err(error),
+            };
             let status = if result.is_err() {
                 match tokio::time::timeout(std::time::Duration::from_millis(100), child.wait())
                     .await
@@ -543,9 +574,14 @@ impl StreamingProviderAdapter for KimiCodeProvider {
                     }
                 }
             } else {
-                child.wait().await.ok()
+                match tokio::time::timeout(PROVIDER_CHILD_EXIT_STREAM_DRAIN, child.wait()).await {
+                    Ok(Ok(status)) => Some(status),
+                    _ => None,
+                }
             };
-            let stderr_output = stderr_task.await.unwrap_or_default();
+            let stderr_output = bounded_task_join(stderr_task, PROVIDER_CHILD_EXIT_STREAM_DRAIN)
+                .await
+                .unwrap_or_default();
             if let Err(error) = result
                 && error.details != session::KIMI_SESSION_ABORTED
             {

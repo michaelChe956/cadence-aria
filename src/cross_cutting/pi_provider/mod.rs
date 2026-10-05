@@ -18,7 +18,10 @@ use crate::cross_cutting::bounded_command_runner::{
     BoundedCommandRequest, TokioBoundedCommandRunner,
 };
 use crate::cross_cutting::json_rpc_peer::JsonRpcPeer;
-use crate::cross_cutting::process_manager::ProcessManager;
+use crate::cross_cutting::process_manager::{
+    ProcessManager, PROVIDER_CHILD_EXIT_STREAM_DRAIN, SessionTailExit, bounded_child_wait,
+    bounded_task_join, provider_child_exit_error, run_session_tail_with_exit_watch,
+};
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::streaming_provider::{
     ProviderEvent, ProviderExecutionEvent, ProviderExecutionEventKind,
@@ -602,14 +605,49 @@ impl StreamingProviderAdapter for PiProvider {
                 }
             });
 
-            let result =
-                session::run_pi_session(peer, command_rx, event_tx.clone(), input, cancel).await;
+            // r19 续修(fix 轮 2):exit-watch 竞速。run_pi_session 对自身错误
+            // 已发终态 Failed(Failed-先于-join 先例);子进程先退出且排空
+            // 耗尽时泵被截断、终态未发——由 wrapper 显式补发同形态终态。
+            let result = match run_session_tail_with_exit_watch(
+                session::run_pi_session(peer, command_rx, event_tx.clone(), input, cancel),
+                &mut child,
+                PROVIDER_CHILD_EXIT_STREAM_DRAIN,
+                provider_child_exit_error,
+            )
+            .await
+            {
+                SessionTailExit::Stream(result) => result,
+                SessionTailExit::ChildExitBeforeTerminal { error } => {
+                    let _ = event_tx
+                        .send(ProviderEvent::StatusChanged(ProviderStatus::Failed))
+                        .await;
+                    let _ = event_tx
+                        .send(ProviderEvent::Failed {
+                            message: error.details.clone(),
+                        })
+                        .await;
+                    Err(error)
+                }
+            };
             drop(bridge);
             if result.is_err() {
                 let _ = child.start_kill();
             }
-            let status = child.wait().await;
-            let _ = stderr_task.await;
+            // r19 续修:终态 join 一律有界(红线 a)。
+            let status = match bounded_child_wait(
+                &mut child,
+                PROVIDER_CHILD_EXIT_STREAM_DRAIN,
+            )
+            .await
+            {
+                Some(status) => Ok(status),
+                None => Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "bounded child join elapsed before exit status",
+                )),
+            };
+            let _ =
+                bounded_task_join(stderr_task, PROVIDER_CHILD_EXIT_STREAM_DRAIN).await;
             if let Err(error) = result {
                 let stderr = stderr_output.lock().await.trim().to_string();
                 let status_text = match status {
@@ -940,14 +978,47 @@ impl StreamingProviderAdapter for PiProvider {
                 }
             });
 
-            let result =
-                session::run_pi_session(peer, command_rx, event_tx.clone(), input, cancel).await;
+            // r19 续修(fix 轮 2):同 direct 路径——exit-watch 竞速 + 截断时
+            // wrapper 补发终态 Failed + 终态 join 有界(红线 a)。
+            let result = match run_session_tail_with_exit_watch(
+                session::run_pi_session(peer, command_rx, event_tx.clone(), input, cancel),
+                &mut child,
+                PROVIDER_CHILD_EXIT_STREAM_DRAIN,
+                provider_child_exit_error,
+            )
+            .await
+            {
+                SessionTailExit::Stream(result) => result,
+                SessionTailExit::ChildExitBeforeTerminal { error } => {
+                    let _ = event_tx
+                        .send(ProviderEvent::StatusChanged(ProviderStatus::Failed))
+                        .await;
+                    let _ = event_tx
+                        .send(ProviderEvent::Failed {
+                            message: error.details.clone(),
+                        })
+                        .await;
+                    Err(error)
+                }
+            };
             drop(bridge);
             if result.is_err() {
                 let _ = child.start_kill();
             }
-            let status = child.wait().await;
-            let _ = stderr_task.await;
+            let status = match bounded_child_wait(
+                &mut child,
+                PROVIDER_CHILD_EXIT_STREAM_DRAIN,
+            )
+            .await
+            {
+                Some(status) => Ok(status),
+                None => Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "bounded child join elapsed before exit status",
+                )),
+            };
+            let _ =
+                bounded_task_join(stderr_task, PROVIDER_CHILD_EXIT_STREAM_DRAIN).await;
             if let Err(error) = result {
                 let stderr = stderr_output.lock().await.trim().to_string();
                 let status_text = match status {

@@ -922,3 +922,52 @@ fn wait_for_lc_cwd_marker(marker: &std::path::Path) -> String {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
 }
+
+/// r19 续修回归(fix 轮 2,oracle 裁决三家同批收口):CLI 子进程在消费
+/// initialize 写入后立即 kill -9,同组 `sleep 300` 持有管道写端使 EOF 无限
+/// 推迟——会话泵对 initialize 应答的等待(r19 前形态)只能等 60s RPC 超时;
+/// exit-watch 竞速必须使会话秒级以 Failed 终结(ProviderSession 终结保证)。
+#[cfg(unix)]
+#[tokio::test]
+async fn pi_child_death_after_initialize_write_terminates_session_promptly() {
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let command = write_executable(
+        temp.path(),
+        "fake-pi-dead-child",
+        r#"if [ "$1" = "--version" ]; then echo 0.83.0; exit 0; fi
+while IFS= read -r line; do
+  case "$line" in
+    *get_state*)
+      sleep 300 &
+      kill -9 $$
+      ;;
+  esac
+done"#,
+    );
+
+    let provider = PiProvider::new(command);
+    let mut session = provider
+        .start(streaming_input_for_test(None), CancellationToken::new())
+        .await
+        .expect("pi session starts");
+
+    let failure = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            match session
+                .events
+                .recv()
+                .await
+                .expect("event channel stays open until terminal event")
+            {
+                ProviderEvent::Failed { message } => break message,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("child exit must terminate the pi session stream within seconds");
+    assert!(
+        !failure.is_empty(),
+        "terminal failure must carry a cause message"
+    );
+}

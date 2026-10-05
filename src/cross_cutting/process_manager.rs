@@ -191,6 +191,104 @@ fn reap_child_after_drop(
         });
 }
 
+/// r19 续修(fix 轮 2,oracle 裁决):子进程退出 ⇒ 会话泵必然终结的排空/
+/// join 有界窗口。正常完成的终态行已在管道缓冲内,秒级排空;窗口耗尽即
+/// 以「子进程先于泵终态退出」fail-closed。测试环境缩短保持回归秒级。
+#[cfg(not(test))]
+pub(crate) const PROVIDER_CHILD_EXIT_STREAM_DRAIN: Duration = Duration::from_secs(2);
+#[cfg(test)]
+pub(crate) const PROVIDER_CHILD_EXIT_STREAM_DRAIN: Duration = Duration::from_secs(1);
+
+/// `run_session_tail_with_exit_watch` 的结局:区分「泵自身终结」(其错误可能
+/// 已由泵发终态事件——由各 provider 既有语义决定)与「子进程先退出且排空
+/// 耗尽」(泵被截断,终态事件必然未发,调用方必须显式补发)。
+#[derive(Debug)]
+pub(crate) enum SessionTailExit<T, E> {
+    /// 泵 future 自身返回(正常终态或泵内错误——终态事件发射责任归泵)。
+    Stream(Result<T, E>),
+    /// 子进程先退出且排空窗口耗尽:泵未终结、终态事件未发,调用方必须
+    /// 以携带的错误显式补发终态 Failed。
+    ChildExitBeforeTerminal { error: E },
+}
+
+/// r19 续修(fix 轮 2):会话泵与子进程退出的 exit-watch 竞速 supervisor
+/// (claude 先例提炼,oracle 裁决三家同批收口)。
+///
+/// 契约(ProviderSession 终结保证,见 `StreamingProviderAdapter::start`):
+/// 子进程退出 ⇒ 泵在有界时间内终结。泵 future 与 `child.wait()` 竞速;
+/// 子进程先退出时先对进程组补 SIGKILL(释放持有 stdout/stderr 管道写端的
+/// 组内残留进程,使 EOF 可达——EOF 本身可能被无限推迟,r19 现场),再给
+/// 泵一个有界排空窗口;窗口耗尽即以合成错误终结,不得依赖消费方 timeout
+/// 为唯一出口。
+pub(crate) async fn run_session_tail_with_exit_watch<F, T, E>(
+    stream: F,
+    child: &mut ManagedProcessChild,
+    drain_window: Duration,
+    into_exit_error: impl FnOnce(String) -> E,
+) -> SessionTailExit<T, E>
+where
+    F: Future<Output = Result<T, E>>,
+{
+    let mut stream = Box::pin(stream);
+    tokio::select! {
+        result = &mut stream => SessionTailExit::Stream(result),
+        status = child.wait() => {
+            let _ = child.start_kill();
+            match tokio::time::timeout(drain_window, stream).await {
+                Ok(result) => SessionTailExit::Stream(result),
+                Err(_elapsed) => {
+                    let status_note = match &status {
+                        Ok(status) => format!("exit status: {status}"),
+                        Err(error) => format!("wait error: {error}"),
+                    };
+                    SessionTailExit::ChildExitBeforeTerminal {
+                        error: into_exit_error(format!(
+                            "provider child exited before stream terminal event ({status_note})"
+                        )),
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// r19 续修:终态 join 有界化(红线 a:终结条件已成立后的一切 join 有界)。
+/// 先组清理(SIGKILL 后 wait 通常即刻返回),窗口耗尽放弃 join 返回 None。
+pub(crate) async fn bounded_child_wait(
+    child: &mut ManagedProcessChild,
+    window: Duration,
+) -> Option<ExitStatus> {
+    let _ = child.start_kill();
+    match tokio::time::timeout(window, child.wait()).await {
+        Ok(Ok(status)) => Some(status),
+        Ok(Err(_wait_error)) => None,
+        Err(_elapsed) => None,
+    }
+}
+
+/// r19 续修:后台任务 join 有界化——窗口耗尽 abort 后回收,不泄漏句柄。
+pub(crate) async fn bounded_task_join<T>(
+    mut task: tokio::task::JoinHandle<T>,
+    window: Duration,
+) -> Option<T> {
+    match tokio::time::timeout(window, &mut task).await {
+        Ok(Ok(output)) => Some(output),
+        Ok(Err(_join_error)) => None,
+        Err(_elapsed) => {
+            task.abort();
+            task.await.ok()
+        }
+    }
+}
+
+/// r19 续修:exit-watch 合成错误构造——`execution_failed` 的固定 details
+/// 文案被覆写为携带子进程死因(调用方 Failed 事件可直接引用)。
+pub(crate) fn provider_child_exit_error(message: String) -> ProviderAdapterError {
+    let mut error = ProviderAdapterError::execution_failed(None, String::new(), String::new(), 0);
+    error.details = message;
+    error
+}
+
 pub struct ProcessManager;
 
 impl ProcessManager {

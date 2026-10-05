@@ -908,6 +908,24 @@ pub struct ProviderSession {
     pub native_session_id: Option<String>,
 }
 
+/// 🔴 **ProviderSession 终结保证契约**(r19 裁决冻结,oracle 2026-10-05):
+///
+/// `start`/`start_validated` 返回的会话必须满足:
+///
+/// > 子进程退出/泵任务结束或死亡 ⇒ `events` 在有界时间内以终态事件
+/// > (`Failed`/`Completed`/…,先于一切无界 join 发出)或通道关闭(`recv`
+/// > 返回 `None`)终结;任何存活等待不得以消费方 timeout 为唯一出口。
+///
+/// 两条红线(违反即缺陷,k3 审查对照):
+///
+/// - **红线 a**:会话内新增 `await` 位于「终结条件已成立」与「终态事件已
+///   发出」之间时必须有界(组清理+有界 join;参照
+///   `process_manager::run_session_tail_with_exit_watch`/`bounded_child_wait`/
+///   `bounded_task_join`)。
+/// - **红线 b**:`event_tx` 克隆寿命必须系于会话机构(Drop/cancel,如
+///   ApprovalBridge 监听任务随桥消亡退出),不得系于消费方句柄(`commands`
+///   发送端被消费方持有时通道仍必须可关闭)。
+
 #[async_trait::async_trait]
 pub trait StreamingProviderAdapter: Send + Sync {
     fn supports_tool_calls(&self) -> bool {
@@ -924,7 +942,9 @@ pub trait StreamingProviderAdapter: Send + Sync {
     {
         None
     }
-
+    /// direct 启动:返回的会话必须满足 [ProviderSession 终结保证契约]
+    /// (见上方 🔴 契约块与红线 a/b)——子进程退出 ⇒ `events` 有界终结,
+    /// 不得依赖消费方 timeout 兜底。
     async fn start(
         &self,
         _input: StreamingProviderInput,
@@ -942,6 +962,8 @@ pub trait StreamingProviderAdapter: Send + Sync {
     /// `ValidatedStreamingProviderInput`。默认返回 unsupported,仅供未接入
     /// validated 路径的 adapter 显式拒绝;**不得**回调裸 `start`(raw
     /// `start` 仅保留单仓 direct)。真实 provider 的接入归 Task 7/1b。
+    /// 返回的会话同样必须满足 [ProviderSession 终结保证契约](上方 🔴
+    /// 契约块与红线 a/b)。
     async fn start_validated(
         &self,
         _input: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,

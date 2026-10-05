@@ -625,3 +625,39 @@ async fn lcg_t05_thread_resume_shares_restricted_projection_on_wire() {
         "thread/resume must carry the original thread id: {resume_request}"
     );
 }
+
+/// r19 续修回归(fix 轮 2,oracle 裁决三家同批收口):CLI 子进程在消费
+/// initialize 写入后立即 kill -9,同组 `sleep 300` 持有管道写端使 EOF 无限
+/// 推迟——会话泵对 initialize 应答的等待(r19 前形态)只能等 60s RPC 超时;
+/// exit-watch 竞速必须使会话秒级以 Failed 终结(ProviderSession 终结保证)。
+#[cfg(unix)]
+#[tokio::test]
+async fn codex_child_death_after_initialize_write_terminates_session_promptly() {
+    let fixture = executable_fixture("tests/fixtures/provider/codex_app_server_dead_child_fixture.sh");
+    let provider = CodexProvider::new(fixture);
+    let input = streaming_input(ProviderType::Codex, ProviderPermissionMode::Auto);
+    let mut session = provider
+        .start(input, CancellationToken::new())
+        .await
+        .expect("start");
+
+    let failure = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            match session
+                .events
+                .recv()
+                .await
+                .expect("event channel stays open until terminal event")
+            {
+                ProviderEvent::Failed { message } => break message,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("child exit must terminate the codex session stream within seconds");
+    assert!(
+        !failure.is_empty(),
+        "terminal failure must carry a cause message"
+    );
+}

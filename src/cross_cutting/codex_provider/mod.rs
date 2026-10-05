@@ -7,7 +7,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::cross_cutting::approval_bridge::ApprovalBridge;
 use crate::cross_cutting::json_rpc_peer::{JsonRpcPeer, OutboundIdNamespace};
-use crate::cross_cutting::process_manager::ProcessManager;
+use crate::cross_cutting::process_manager::{
+    ProcessManager, PROVIDER_CHILD_EXIT_STREAM_DRAIN, SessionTailExit, bounded_child_wait,
+    bounded_task_join, provider_child_exit_error, run_session_tail_with_exit_watch,
+};
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::streaming_provider::{
     ProviderEvent, ProviderExecutionEvent, ProviderExecutionEventKind,
@@ -461,20 +464,42 @@ impl CodexProvider {
                 }
             });
 
-            let result = session::run_codex_session_loop(
-                peer,
-                bridge,
-                event_tx.clone(),
-                input,
-                cancel.clone(),
-                handshake,
+            // r19 续修(fix 轮 2):同 direct 路径——exit-watch 竞速+终态 join 有界。
+            let result = match run_session_tail_with_exit_watch(
+                session::run_codex_session_loop(
+                    peer,
+                    bridge,
+                    event_tx.clone(),
+                    input,
+                    cancel.clone(),
+                    handshake,
+                ),
+                &mut child,
+                PROVIDER_CHILD_EXIT_STREAM_DRAIN,
+                provider_child_exit_error,
             )
-            .await;
+            .await
+            {
+                SessionTailExit::Stream(result) => result,
+                SessionTailExit::ChildExitBeforeTerminal { error } => Err(error),
+            };
             if result.is_err() {
                 let _ = child.start_kill();
             }
-            let status = child.wait().await;
-            let _ = stderr_task.await;
+            let status = match bounded_child_wait(
+                &mut child,
+                PROVIDER_CHILD_EXIT_STREAM_DRAIN,
+            )
+            .await
+            {
+                Some(status) => Ok(status),
+                None => Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "bounded child join elapsed before exit status",
+                )),
+            };
+            let _ =
+                bounded_task_join(stderr_task, PROVIDER_CHILD_EXIT_STREAM_DRAIN).await;
             if let Err(error) = result {
                 let stderr =
                     support::combine_stderr(stderr_output.lock().await.clone(), error.stderr);
@@ -798,34 +823,62 @@ impl StreamingProviderAdapter for CodexProvider {
                 }
             });
 
-            let result = match policy_handshake {
-                Some(handshake) => {
-                    session::run_codex_session_loop(
-                        peer,
-                        bridge,
-                        event_tx.clone(),
-                        input,
-                        cancel.clone(),
-                        handshake,
-                    )
-                    .await
-                }
-                None => {
-                    session::run_codex_session(
-                        peer,
-                        bridge,
-                        event_tx.clone(),
-                        input,
-                        cancel.clone(),
-                    )
-                    .await
-                }
+            // r19 续修(fix 轮 2):泵与会话循环经共享 exit-watch supervisor 与
+            // 子进程退出竞速;终态 join 一律有界(红线 a)。子进程先退出且
+            // 排空耗尽 ⇒ 合成错误沿既有 Err 路径发终态 Failed。
+            let result = match run_session_tail_with_exit_watch(
+                // 双 session 入口 future 类型不同,各臂独立装箱统一(契约不变)。
+                match policy_handshake {
+                    Some(handshake) => {
+                        Box::pin(session::run_codex_session_loop(
+                            peer,
+                            bridge,
+                            event_tx.clone(),
+                            input,
+                            cancel.clone(),
+                            handshake,
+                        )) as std::pin::Pin<
+                            Box<dyn Future<Output = Result<(), ProviderAdapterError>> + Send>,
+                        >
+                    }
+                    None => {
+                        Box::pin(session::run_codex_session(
+                            peer,
+                            bridge,
+                            event_tx.clone(),
+                            input,
+                            cancel.clone(),
+                        )) as std::pin::Pin<
+                            Box<dyn Future<Output = Result<(), ProviderAdapterError>> + Send>,
+                        >
+                    }
+                },
+                &mut child,
+                PROVIDER_CHILD_EXIT_STREAM_DRAIN,
+                provider_child_exit_error,
+            )
+            .await
+            {
+                SessionTailExit::Stream(result) => result,
+                SessionTailExit::ChildExitBeforeTerminal { error } => Err(error),
             };
             if result.is_err() {
                 let _ = child.start_kill();
             }
-            let status = child.wait().await;
-            let _ = stderr_task.await;
+            let status = match bounded_child_wait(
+                &mut child,
+                PROVIDER_CHILD_EXIT_STREAM_DRAIN,
+            )
+            .await
+            {
+                Some(status) => Ok(status),
+                None => Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "bounded child join elapsed before exit status",
+                )),
+            };
+            let _ =
+                bounded_task_join(stderr_task, PROVIDER_CHILD_EXIT_STREAM_DRAIN).await;
             if let Err(error) = result {
                 let stderr =
                     support::combine_stderr(stderr_output.lock().await.clone(), error.stderr);
