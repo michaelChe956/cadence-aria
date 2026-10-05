@@ -2,9 +2,11 @@
 //!
 //! 把 gateway 同步栈的 `ValidatedAdapterInput` 桥接到 registry 内真实 streaming
 //! adapter 的 `start_validated`:在一个**专用 OS 线程**的自有 current-thread
-//! Tokio runtime 内驱动会话到终态,绝不嵌套调用方线程的 `block_on`(同步调用
-//! 语义与既有 `ProviderAdapter::run` 一致,由调用方在 async 上下文直接同步调用
-//! 或自行 `spawn_blocking`)。
+//! Tokio runtime 内驱动会话到终态,绝不嵌套调用方线程的 `block_on`。同步阻塞
+//! (join)到终态是本方法的契约语义;🔴 **async 上下文禁止直接调用**——join
+//! 会同步冻结调用方 runtime 的唯一线程(r16/r17 B案现场:全 timer/WS/HTTP
+//! 无响应直至外层 kill),异步调用方必须经 `spawn_blocking` 驱动(参见
+//! `WorkItemSplitEngine::invoke_provider_via_gateway` 的 B案根修形态)。
 //!
 //! 输出经现有 completion/sentinel parser 提取 structured output;超时、取消、
 //! `Failed`、`PermissionTimeout`、malformed output 全部沿

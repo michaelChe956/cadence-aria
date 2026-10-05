@@ -683,7 +683,7 @@ async fn split_sync_gateway_launch_rebinds_cwd_to_canonical_root() {
             ProviderName::ClaudeCode,
             &lifecycle,
             &issue,
-            &gateway,
+            Arc::new(gateway),
             "ws_probe_0001",
         )
         .await
@@ -754,6 +754,7 @@ async fn split_sync_gateway_launch_closes_run_handle_on_success_and_failure() {
     let paths = ProductAppPaths::new(canonical_root.join(".aria"));
     let probe = Arc::new(SplitRootCwdSyncProbe::new());
     let gateway = split_root_cwd_gateway(&paths, &canonical_root, "project_0001", probe.clone());
+    let gateway = Arc::new(gateway);
 
     let mut repository = logical_repository();
     repository.path = member.clone();
@@ -773,7 +774,7 @@ async fn split_sync_gateway_launch_closes_run_handle_on_success_and_failure() {
             ProviderName::ClaudeCode,
             &lifecycle,
             &issue,
-            &gateway,
+            gateway.clone(),
             "ws_handle_0001",
         )
         .await
@@ -804,7 +805,7 @@ async fn split_sync_gateway_launch_closes_run_handle_on_success_and_failure() {
             ProviderName::ClaudeCode,
             &lifecycle,
             &issue,
-            &gateway,
+            gateway.clone(),
             "ws_handle_0002",
         )
         .await
@@ -917,6 +918,7 @@ async fn lcg_t09_split_sync_resume_unknown_is_not_streaming_fresh() {
         Arc::new(GatewayRunAudit::new()),
         manifest.provider_context_root.clone(),
     );
+    let gateway = Arc::new(gateway);
 
     // 既有 fresh sync run:恰一次 sync spawn 经 gateway。
     let mut repository = logical_repository();
@@ -934,7 +936,7 @@ async fn lcg_t09_split_sync_resume_unknown_is_not_streaming_fresh() {
             ProviderName::ClaudeCode,
             &lifecycle,
             &issue,
-            &gateway,
+            gateway.clone(),
             "ws_t09_split_0001",
         )
         .await
@@ -1005,4 +1007,154 @@ async fn lcg_t09_split_sync_resume_unknown_is_not_streaming_fresh() {
     // 显式 resume 只被拒绝:没有 Resume/StartNew 决策、没有 streaming fresh。
     let split_sync_fresh_spawn_count = probe.runs.load(Ordering::SeqCst);
     assert_eq!(split_sync_fresh_spawn_count, 1);
+}
+
+// ---------------------------------------------------------------------------
+// r16/r17 B案现场回归(同步桥 join 冻结唯一 runtime 线程):
+//
+// invoke_provider_via_gateway 若在 async 任务内直接调用 gateway.run_sync,
+// GatewaySyncProvider::run_validated 的 worker.join() 会同步阻塞唯一
+// runtime 线程——现场形态(r16 67min/r17 51min 后 kill,EXIT=137):lc-
+// gateway-sync bridge 线程驱动真实 provider 会话等待终态,主线程 join 期间
+// 全部 timer/WS/HTTP 无响应(180s 兜底 timer 同被冻结,表现为"timer 全灭")。
+// 修复:同步桥 join 经 tokio::task::spawn_blocking 移入阻塞线程池,调用方
+// runtime 保持调度。本测试用「bridge 线程内 sleep 2s 后失败」的探针制造
+// 确定的冻结窗口:修前 liveness timer(300ms)只能在 join 返回后被调度
+// (fire≥2s,红);修后 ~300ms 即 fire(绿)。
+// ---------------------------------------------------------------------------
+
+/// 慢速 validated streaming adapter:bridge 线程内先睡 `delay` 再失败,
+/// 制造确定的「bridge 在途窗口」(现场形态:真实 CLI 会话长时间无终态)。
+struct SlowValidatedStreamingAdapter {
+    delay: std::time::Duration,
+    bridge_starts: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl crate::cross_cutting::streaming_provider::StreamingProviderAdapter
+    for SlowValidatedStreamingAdapter
+{
+    async fn start_validated(
+        &self,
+        _validated: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<
+        crate::cross_cutting::streaming_provider::ProviderSession,
+        ProviderAdapterError,
+    > {
+        self.bridge_starts.fetch_add(1, Ordering::SeqCst);
+        tokio::time::sleep(self.delay).await;
+        Err(ProviderAdapterError::execution_failed(
+            None,
+            String::new(),
+            "slow validated probe injected failure".to_string(),
+            0,
+        ))
+    }
+}
+
+/// B案回归:同步桥在途期间调用方 runtime 必须保持调度(liveness timer 在
+/// 调用窗口内 fire),且 bridge 恰好启动一次、失败沿 ApiError 上浮。
+#[tokio::test]
+async fn sync_bridge_run_must_not_starve_caller_runtime() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let canonical_root = root.path().to_path_buf();
+    let member = canonical_root.join("member_repo");
+    std::fs::create_dir_all(&member).expect("member dir");
+    let paths = ProductAppPaths::new(canonical_root.join(".aria"));
+
+    // 真实同步桥:registry 挂慢速 streaming adapter,sync 槽注入
+    // GatewaySyncProvider(join 冻结点),不掺测试用 sync probe。
+    let bridge_starts = Arc::new(AtomicUsize::new(0));
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::ClaudeCode,
+        Arc::new(SlowValidatedStreamingAdapter {
+            delay: std::time::Duration::from_millis(2_000),
+            bridge_starts: bridge_starts.clone(),
+        }),
+    );
+    let registry = Arc::new(registry);
+    let manifest =
+        LogicalCodebaseManifest::new("project_0001", canonical_root.to_path_buf(), vec![]);
+    let policies = AggregatePolicyArtifactStore::new(paths.clone());
+    policies
+        .ensure_bootstrap(&manifest)
+        .expect("bootstrap policy");
+    let gateway = LogicalCodebaseProviderGateway::with_audit(
+        policies,
+        Arc::new(SplitRootCwdCapabilitySource::default()),
+        Arc::new(SplitRootCwdPassThroughResolver),
+        registry.clone(),
+        Arc::new(crate::cross_cutting::gateway_sync_provider::GatewaySyncProvider::new(
+            registry,
+        )),
+        split_root_cwd_availability_gate(),
+        Arc::new(GatewayRunAudit::new()),
+        manifest.provider_context_root.clone(),
+    );
+
+    let mut repository = logical_repository();
+    repository.path = member.clone();
+    repository.primary_checkout_id = Some(RepositoryCheckoutId(uuid::Uuid::nil()));
+    let (_, issue, _) = split_prompt_fixture();
+    let engine = WorkItemSplitEngine::new(Arc::new(RecordingAdapter::new(Arc::new(
+        AtomicBool::new(false),
+    ))));
+    let lifecycle = LifecycleStore::new(paths.clone());
+
+    // liveness 探针:300ms timer 应在 2s 的 bridge 在途窗口内被调度。
+    let liveness_ms = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let probe = liveness_ms.clone();
+    let started = std::time::Instant::now();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        probe.store(
+            started.elapsed().as_millis() as u64,
+            Ordering::SeqCst,
+        );
+    });
+
+    let failure = tokio::time::timeout(
+        std::time::Duration::from_secs(6),
+        engine.invoke_provider_via_gateway(
+            "runtime liveness probe",
+            &repository,
+            ProviderName::ClaudeCode,
+            &lifecycle,
+            &issue,
+            Arc::new(gateway),
+            "ws_b_case_0001",
+        ),
+    )
+    .await
+    .expect("sync bridge call must stay bounded by the probe delay")
+    .expect_err("slow probe failure must propagate through the sync bridge");
+    // 给 timer 任务充分补跑机会:修前它在 join 返回后才被首次 poll(300ms
+    // timer 从 ~2000ms 起算,~2300ms 才 fire,红信息自释);修后调用窗口内
+    // ~300ms 即 fire。
+    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+
+    assert_eq!(
+        bridge_starts.load(Ordering::SeqCst),
+        1,
+        "exactly one validated start through the bridge thread"
+    );
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    assert!(
+        elapsed_ms >= 1_900,
+        "call must span the 2s bridge window, took {elapsed_ms}ms"
+    );
+    let fired = liveness_ms.load(Ordering::SeqCst);
+    assert!(
+        fired > 0 && fired < 1_900,
+        "B案回归:同步桥 join 冻结了调用方 runtime——liveness timer 于 \
+         {fired}ms 才 fire(应在 ~300ms,bridge 在途窗口 2s 内保持调度)"
+    );
+    assert!(
+        failure.message.contains("slow validated probe injected failure")
+            || failure.message.contains("ProviderExecutionFailed"),
+        "bridge failure must propagate with the adapter error kind, got {}",
+        failure.message
+    );
 }

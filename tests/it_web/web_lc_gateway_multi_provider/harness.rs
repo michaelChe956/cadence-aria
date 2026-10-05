@@ -1860,35 +1860,67 @@ impl MatrixEnvironment {
             .prepare_sync_launch(adapter_input, request, context)
             .map_err(|error| error.to_string());
         match launch {
-            Ok(launch) => match gateway.run_sync(launch) {
-                Ok(output) => {
-                    let structured = output.structured_output.clone();
-                    let complete = structured.as_ref().map(|value| {
-                        self.lifecycle
-                            .complete_work_item_split_provider_run(
-                                &handle,
-                                &split_sync_prompt(),
-                                value,
-                            )
-                            .map(|_| ())
-                    });
-                    fresh.completed_product_artifact_exists =
-                        complete.is_some_and(|result| result.is_ok());
-                    if !fresh.completed_product_artifact_exists {
-                        let reason = format!("split_sync 结构化产物缺失/收口失败:{output:?}");
+            // B案(r16/r17 冻死根修):run_sync 的同步桥在自有 OS 线程 join 到
+            // 终态,直接在测试 runtime 线程上调用会把唯一 runtime(含 in-process
+            // server 的全部 timer/WS/HTTP)同步冻死——现场 r16 67min/r17 51min
+            // 后 kill(EXIT=137)。join 经 spawn_blocking 移入阻塞线程池 +
+            // stage 预算有界观测:超时/失败如实落格,不拖全矩阵;超时后桥线程
+            // 与阻塞任务泄漏至进程退出(受 AdapterInput.timeout=stage_timeout
+            // 兜底自灭),由外层 kill 回收。
+            Ok(launch) => {
+                let bounded = tokio::time::timeout(
+                    self.stage_timeout,
+                    tokio::task::spawn_blocking(move || gateway.run_sync(launch)),
+                )
+                .await;
+                match bounded {
+                    Ok(Ok(Ok(output))) => {
+                        let structured = output.structured_output.clone();
+                        let complete = structured.as_ref().map(|value| {
+                            self.lifecycle
+                                .complete_work_item_split_provider_run(
+                                    &handle,
+                                    &split_sync_prompt(),
+                                    value,
+                                )
+                                .map(|_| ())
+                        });
+                        fresh.completed_product_artifact_exists =
+                            complete.is_some_and(|result| result.is_ok());
+                        if !fresh.completed_product_artifact_exists {
+                            let reason =
+                                format!("split_sync 结构化产物缺失/收口失败:{output:?}");
+                            let _ = self
+                                .lifecycle
+                                .fail_work_item_split_provider_run(&handle, &reason);
+                            fresh.run_failure = Some(reason);
+                        }
+                    }
+                    Ok(Ok(Err(error))) => {
+                        let _ = self
+                            .lifecycle
+                            .fail_work_item_split_provider_run(&handle, &error.to_string());
+                        fresh.run_failure = Some(format!("split_sync run_sync 失败:{error}"));
+                    }
+                    Ok(Err(join_error)) => {
+                        let reason = format!("split_sync run_sync 阻塞任务异常:{join_error}");
+                        let _ = self
+                            .lifecycle
+                            .fail_work_item_split_provider_run(&handle, &reason);
+                        fresh.run_failure = Some(reason);
+                    }
+                    Err(_elapsed) => {
+                        let reason = format!(
+                            "split_sync run_sync 超过 stage 预算({}s),降级落格不冻结矩阵",
+                            self.stage_timeout.as_secs()
+                        );
                         let _ = self
                             .lifecycle
                             .fail_work_item_split_provider_run(&handle, &reason);
                         fresh.run_failure = Some(reason);
                     }
                 }
-                Err(error) => {
-                    let _ = self
-                        .lifecycle
-                        .fail_work_item_split_provider_run(&handle, &error.to_string());
-                    fresh.run_failure = Some(format!("split_sync run_sync 失败:{error}"));
-                }
-            },
+            }
             Err(reason) => {
                 let _ = self
                     .lifecycle

@@ -211,7 +211,8 @@ impl WorkItemSplitEngine {
     /// 与 `invoke_provider` 对称:同一个 prompt、同一份 `AdapterInput`(经
     /// `WORK_ITEM_SPLIT_OUTPUT_SCHEMA`),但启动前的政策校验、canonical 复验、resume
     /// fail-closed 都由 gateway 在 spawn 前完成;调用方负责构造一个已注入 policy
-    /// store/capability/target resolver/真实 registry 的 gateway。
+    /// store/capability/target resolver/真实 registry 的 gateway(gateway 全字段
+    /// Send+Sync,以 `Arc` 传入供 `spawn_blocking` 驱动同步桥)。
     ///
     /// 该方法在 Web 层为逻辑代码库 issue 选定 gateway 后接入;传统单仓/非逻辑 issue
     /// 仍走 `invoke_provider` 的直接 adapter 路径,防止本工作包扩大旧 API 行为。
@@ -223,7 +224,7 @@ impl WorkItemSplitEngine {
         author_provider: ProviderName,
         lifecycle: &LifecycleStore,
         issue: &IssueRecord,
-        gateway: &LogicalCodebaseProviderGateway,
+        gateway: std::sync::Arc<LogicalCodebaseProviderGateway>,
         workspace_session_id: &str,
     ) -> ApiResult<ProviderInvocationResult> {
         // Task 1b 段①尾:sync split 的真实 caller 收口流——
@@ -265,19 +266,38 @@ impl WorkItemSplitEngine {
             };
 
         let launch = prepare_sync_launch(
-            gateway,
+            gateway.as_ref(),
             &issue.project_id,
             repository,
             &author_provider,
             adapter_input,
             context,
         );
-        // gateway 持有的 sync_adapter 不是 `Send`(registry 内的真实 adapter 未约束
-        // Send+Sync),因此无法 `spawn_blocking` 出当前线程;改为在当前 async 任务内
-        // 同步调用 `run_sync`。这与同步 adapter run 的阻塞语义一致,调用方负责确保
-        // gateway 已在该 runtime 构造。
-        let run_result =
-            launch.and_then(|launch| gateway.run_sync(launch).map_err(map_provider_gateway_error));
+        // B案(r16/r17 冻死根修):run_sync 的同步桥(GatewaySyncProvider)
+        // 在自有 OS 线程 join 到终态——若直接在 async 任务内调用,唯一
+        // runtime 线程被 join 同步冻死(r16 67min/r17 51min 现场:bridge
+        // 等 provider 会话终态期间,主线程 join 使全部 timer/WS/HTTP 无
+        // 响应直至外层 kill)。gateway 全字段 Send+Sync(sync_adapter 显式
+        // `+ Send + Sync`,capability/resolver trait 均 `Send + Sync`),旧
+        // 注释「无法 spawn_blocking」不成立——join 移入阻塞线程池,调用方
+        // runtime 保持调度。取消/超时语义:调用方 drop 本 future 时桥线程
+        // 继续跑到自身终态(受 AdapterInput.timeout 兜底),结果被丢弃。
+        let run_result = match launch {
+            Ok(launch) => {
+                let joined =
+                    tokio::task::spawn_blocking(move || gateway.run_sync(launch))
+                        .await
+                        .map_err(|error| {
+                            ApiError::runtime(
+                                "work_item_split_provider_panic",
+                                "provider adapter panicked",
+                                json!({"details": error.to_string()}),
+                            )
+                        })?;
+                joined.map_err(map_provider_gateway_error)
+            }
+            Err(error) => Err(error),
+        };
         let output = match run_result {
             Ok(output) => output,
             Err(error) => {
