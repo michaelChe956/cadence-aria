@@ -8,15 +8,19 @@ use super::*;
 /// 依据：v27 story 会话 codex app-server 楔死实测——09:16 拉起，前几分钟 9 条
 /// skill 探索命令后**完全静默 27min**（CPU 时间采样零增长、出站 TCP 0 条、
 /// durable streaming 恒 137 字；cadence/notes 2026-09-19 阶段4监控 F-19）。
-/// 流式 provider 正常推理逐 token 产出事件，合法静默间隙远小于 10min；
 /// `DEFAULT_PROVIDER_TIMEOUT_SECS=3h` 是整 run 总上限，对「子进程活着但不
-/// 干活」无效（27min 楔死全程在总上限内）。取 600s：约为实测楔死确认时间
-/// 的 1/3（27min→10min 即转可诊断终态），同时低于 ApprovalBridge
-/// `PERMISSION_TIMEOUT=15min` 的人工等待界（权限/选择挂起期间看门狗不计时，
-/// 见驱动循环挂起逻辑）。
+/// 干活」无效（27min 楔死全程在总上限内）。
+///
+/// r38 校准：600s→1800s。原 600s 依据「流式 provider 正常推理逐 token 产出
+/// 事件，合法静默间隙远小于 10min」——r32(work item plan 生成 648s)与
+/// r38(design fresh 实体阶段)两轮实测推翻该假设：大文档生成+API 慢周期
+/// 下实体阶段合法静默同样可超 10min，600s 把合法慢生成当楔死误杀。1800s
+/// 与 work item plan 循环(fd056da5)同值：真挂死 30min 收口仍可诊断
+/// (harness 阶段预算 5400s 前有界)；权限/选择挂起期间看门狗不计时不变
+/// (人工等待由 ApprovalBridge PERMISSION_TIMEOUT 与 choice_wait 界收口)。
 #[cfg(not(test))]
 pub(crate) const PROVIDER_IDLE_WATCHDOG_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_secs(600);
+    std::time::Duration::from_secs(1800);
 #[cfg(test)]
 pub(crate) const PROVIDER_IDLE_WATCHDOG_TIMEOUT: std::time::Duration =
     std::time::Duration::from_millis(150);
