@@ -21,6 +21,19 @@ pub(crate) const PROVIDER_IDLE_WATCHDOG_TIMEOUT: std::time::Duration =
 pub(crate) const PROVIDER_IDLE_WATCHDOG_TIMEOUT: std::time::Duration =
     std::time::Duration::from_millis(150);
 
+/// r32 校准:work item plan 驱动循环(SC 单候选 plan 文档生成)的零活动
+/// 看门狗界——1800s(30min)。r32 现场 plan fresh 被 600s 界误杀:Claude
+/// 生成完整 work item plan 文档的合法静默可超 10min(r28 实测生成段
+/// 648s>600s;600s 界把合法慢生成当楔死)。30min 真挂死收口仍可接受
+//(harness 阶段预算 5400s 前有界);若现场再误杀,再议事件类型分级
+///(stream_chunk 重置/纯静默才计时)方案。
+#[cfg(not(test))]
+pub(crate) const PROVIDER_WORK_ITEM_PLAN_IDLE_WATCHDOG_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(1800);
+#[cfg(test)]
+pub(crate) const PROVIDER_WORK_ITEM_PLAN_IDLE_WATCHDOG_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_millis(150);
+
 /// F-22/F-19b：choice（结构化提问）悬置等待上限——provider 发出
 /// ChoiceRequest（pi `ask_user`/claude AskUserQuestion/codex requestUserInput）
 /// 后等待人工应答的界。

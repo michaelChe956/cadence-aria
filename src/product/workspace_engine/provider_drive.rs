@@ -21,7 +21,10 @@ use artifact_retry::artifact_failure_reasons_with_diagnostic;
 use choice_audit::ChoiceResponseAuditInput;
 pub(crate) use pending_choices::PendingChoiceRequests;
 pub(crate) use pending_choices::pending_choice_requests_snapshot;
-pub(crate) use watchdog::{PROVIDER_CHOICE_WAIT_TIMEOUT, PROVIDER_IDLE_WATCHDOG_TIMEOUT};
+pub(crate) use watchdog::{
+    PROVIDER_CHOICE_WAIT_TIMEOUT, PROVIDER_IDLE_WATCHDOG_TIMEOUT,
+    PROVIDER_WORK_ITEM_PLAN_IDLE_WATCHDOG_TIMEOUT,
+};
 
 impl WorkspaceEngine {
     pub async fn handle_user_message(

@@ -57,7 +57,10 @@ impl WorkspaceEngine {
         // 事件/命令任一活动重置;等待人工权限/选择应答期间挂起(与主驱动
         // 同语义——人工等待由 ApprovalBridge PERMISSION_TIMEOUT 与
         // choice_wait 界收口,不是 provider 楔死)。
-        let idle_watchdog_timeout = PROVIDER_IDLE_WATCHDOG_TIMEOUT;
+        // r32 校准:plan 文档生成的合法静默可超 10min(r28 实测 648s),本循环
+        // 用 1800s 专用界(主驱动保持 600s——story/design 逐 token 流式形态
+        // 不同);r32 现场 600s 界曾误杀合法慢生成。
+        let idle_watchdog_timeout = PROVIDER_WORK_ITEM_PLAN_IDLE_WATCHDOG_TIMEOUT;
         let idle_watchdog =
             tokio::time::sleep_until(tokio::time::Instant::now() + idle_watchdog_timeout);
         tokio::pin!(idle_watchdog);
