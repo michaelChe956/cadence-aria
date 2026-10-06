@@ -309,3 +309,48 @@ const REP4_FIXTURE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/src/product/work_item_plan_compiler/fixtures/work-item-plan-rep4.md"
 ));
+
+#[tokio::test]
+async fn conversational_gate_revision_compiles_with_lc_shaped_empty_story_repository() {
+    // r30 根修锚点(r29 现场):LC 会话的 story.repository_id 为空(Logical
+    // story 生成落空串),修订 turn 此前经 work_item_plan_repository_id 直取
+    // story.repository_id → compile lowering_error「session context 缺少
+    // target repository」→ turn validation_reject,门上修订对 LC 会话恒不可用
+    //(fresh 生成链经 workspace_repository_for_session 取 repository.id 不受
+    // 影响)。修:修订 turn 同源经会话记录解析 repository,story 字段仅作
+    // 解析失败时的 legacy 回退。
+    let _serial = crate::product::workspace_engine::single_candidate_compile_test_lock().await;
+    let (_root, lifecycle, mut engine) =
+        evaluate_gate_revision_fixture("revision_lc_story_repository", 2, 0);
+    // LC 形态:把源 story 的 repository_id 置空(模拟 Logical story 记录),
+    // issue.repo_id/物理仓仍在——会话记录解析必须不依赖 story 字段。
+    let plan_source_story = lifecycle
+        .list_story_specs("project_0001", "issue_0001")
+        .expect("story specs")
+        .pop()
+        .expect("at least one story");
+    let mut lc_shaped = plan_source_story.clone();
+    lc_shaped.repository_id = String::new();
+    crate::product::json_store::write_json(
+        &lifecycle
+            .app_paths()
+            .issue_lifecycle_root("project_0001", "issue_0001")
+            .join("story-specs")
+            .join(format!("{}.json", lc_shaped.id)),
+        &lc_shaped,
+    )
+    .expect("persist lc-shaped story");
+
+    let turn_id = open_running_revision_turn(&mut engine, "revision_lc_command").await;
+    let result = engine
+        .run_sc_manual_revision_turn(&turn_id, handoff_clean_rep4_v2())
+        .await
+        .expect("revision turn must terminate");
+    assert!(
+        matches!(
+            result,
+            crate::product::workspace_engine::ScManualRevisionResult::Accepted { .. }
+        ),
+        "LC 形态(空 story.repository_id)修订必须经会话记录解析 repository 完成编译,不得 lowering_error"
+    );
+}

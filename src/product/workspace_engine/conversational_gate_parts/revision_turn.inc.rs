@@ -109,7 +109,21 @@ impl super::WorkspaceEngine {
                 &self.session.entity_id,
             )
             .map_err(|error| format!("load plan for human gate revision failed: {error}"))?;
-        let repository_id = self.work_item_plan_repository_id(&lifecycle, &plan)?;
+        // r30 根修(r29 现场):LC 会话的 story.repository_id 为空(Logical
+        // story 生成落空串),直取 story 字段令 compile lowering_error
+        // 「session context 缺少 target repository」→ turn validation_reject,
+        // 门上修订对 LC 会话恒不可用。与 fresh 生成链(single_candidate.rs
+        // 经 workspace_repository_for_session 取 repository.id)同源解析;
+        // 解析失败回退 legacy story 字段口径。
+        let repository_id =
+            match crate::product::workspace_repository::workspace_repository_for_session(
+                &lifecycle.app_paths(),
+                &lifecycle,
+                &expected,
+            ) {
+                Ok(resolved) => resolved.id,
+                Err(_) => self.work_item_plan_repository_id(&lifecycle, &plan)?,
+            };
         let repository_profile = plan
             .repository_profile_ref
             .as_deref()

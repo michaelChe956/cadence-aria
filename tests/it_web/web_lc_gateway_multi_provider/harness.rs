@@ -3385,6 +3385,10 @@ enum PlanScFrameSignal {
 fn plan_sc_frame_signal(kind: &str, message: &Value, phase: PlanScPumpPhase) -> PlanScFrameSignal {
     match kind {
         "protocol_error" | "error" => PlanScFrameSignal::ServerError,
+        // r30 根修(r29 现场):修订 turn 的失败终态帧(validation_reject/
+        // provider_err)此前被 Listen——01:52:30 帧已到,泵空转到 03:21
+        // 阶段超时。turn 失败=该相位有界收口,帧原文落格。
+        "human_gate_turn_failed" => PlanScFrameSignal::ServerError,
         "human_gate_turn_completed" if phase == PlanScPumpPhase::AwaitRevisionComplete => {
             PlanScFrameSignal::PhaseDone
         }
@@ -4401,6 +4405,21 @@ mod pump_disposition_tests {
         assert_eq!(
             plan_sc_frame_signal("stream_chunk", &chunk, confirm),
             PlanScFrameSignal::Listen
+        );
+        // r30:turn 失败终态帧两相位都秒收口(r29 现场 validation_reject 被
+        // Listen 空转 90min)。
+        let turn_failed = json!({
+            "type": "human_gate_turn_failed",
+            "failure_class": "validation_reject",
+            "message": "lowering_error:1:session context 缺少 target repository。",
+        });
+        assert_eq!(
+            plan_sc_frame_signal("human_gate_turn_failed", &turn_failed, revision),
+            PlanScFrameSignal::ServerError
+        );
+        assert_eq!(
+            plan_sc_frame_signal("human_gate_turn_failed", &turn_failed, confirm),
+            PlanScFrameSignal::ServerError
         );
     }
 
