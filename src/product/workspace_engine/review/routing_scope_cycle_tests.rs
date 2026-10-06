@@ -219,3 +219,91 @@ fn single_candidate_cycle_none_scope_demotes_to_verification_when_initial_consum
     assert_eq!(fresh.1, ReviewPhase::Initial);
 }
 
+#[test]
+fn single_candidate_policy_invocation_rebuilds_verification_scope_from_durable_refs() {
+    // r42 现场:同候选(人工修订原样复写→同 cycle key)再评审,r37 修复使
+    // None 臂判 Verification;但 single_candidate_policy_invocation 的恢复
+    // 臂只构造 Initial——Verification+scope=None 撞 AbortFatal「scope is
+    // not durable」(fresh 终态已清 durable scope,cycle initial=1)。
+    // 修:None 臂对 Verification 从 durable refs(plan_candidate_ir_ref/
+    // mechanical_report_ref/cycle 指纹)重建 Verification scope,与
+    // ensure_review_invocation_scope 同构。
+    use crate::product::work_item_plan_policy::RunHistory;
+    use crate::product::workspace_engine::types::WorkspaceSession;
+    use std::collections::BTreeMap;
+
+    let ir_ref = "project/project_0001/issue/issue_0001/plan/plan_0001/plan_candidate_ir/ir-340fe12ab34c5678";
+    let cycle_key = "sc:candidate:340fe12ab34c5678".to_string();
+    let (event_tx, _rx) = tokio::sync::mpsc::channel(8);
+    let mut session = WorkspaceSession {
+        session_id: "sess_scope_rebuild".to_string(),
+        project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        entity_id: "work_item_plan_0001".to_string(),
+        workspace_type: crate::product::models::WorkspaceType::WorkItemPlan,
+        stage: WorkspaceStage::CrossReview,
+        messages: Vec::new(),
+        artifact: None,
+        author_provider: crate::product::models::ProviderName::ClaudeCode,
+        reviewer_provider: Some(crate::product::models::ProviderName::Codex),
+        review_rounds: 1,
+        permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
+        provisional_reviewer_provider: None,
+        reviewer_enabled_at_start: None,
+        superpowers_enabled: false,
+        openspec_enabled: false,
+        session_status: crate::product::models::WorkspaceSessionStatus::Running,
+        flow_kind: crate::product::work_item_plan_policy::WorkItemPlanFlowKind::SingleCandidate,
+        run_policy: crate::product::work_item_plan_policy::RunPolicy::Interactive,
+        run_history: RunHistory::default(),
+        review_invocation_scope: None,
+        human_gate_snapshot: None,
+        repair_reservation: None,
+        policy_diagnostics: Vec::new(),
+        provider_start_ledger: Vec::new(),
+        single_candidate_phase: None,
+        work_item_plan_source_revision_ref: None,
+        plan_candidate_ir_ref: None,
+        mechanical_report_ref: None,
+        publication_provenance_ref: None,
+        approval_attempt_id: None,
+        approved_at: None,
+        compile_reservation: None,
+        provider_conversations: Vec::new(),
+        repository_path: None,
+    };
+    session.workspace_type = crate::product::models::WorkspaceType::WorkItemPlan;
+    session.flow_kind = crate::product::work_item_plan_policy::WorkItemPlanFlowKind::SingleCandidate;
+    session.stage = crate::product::workspace_engine::WorkspaceStage::CrossReview;
+    session.review_invocation_scope = None;
+    session.plan_candidate_ir_ref = Some(ir_ref.to_string());
+    session.mechanical_report_ref = Some("report-001".to_string());
+    session.run_history = RunHistory {
+        review_cycles: BTreeMap::from([(
+            cycle_key.clone(),
+            ReviewCycleState {
+                initial_count: 1,
+                verification_count: 0,
+                repairs_used: 0,
+                ..ReviewCycleState::default()
+            },
+        )]),
+        ..RunHistory::default()
+    };
+    let checkpoint_root = tempfile::tempdir().expect("root");
+    let engine = WorkspaceEngine::new(
+        std::sync::Arc::new(crate::product::checkpoint_store::CheckpointStore::new(
+            checkpoint_root.path().to_path_buf(),
+        )),
+        event_tx,
+        session,
+    );
+    let scope = engine
+        .policy_invocation(ReviewPhase::Verification, &cycle_key)
+        .expect("同 key 已初评的 Verification 必须从 durable refs 重建,不得 AbortFatal");
+    assert!(matches!(
+        scope,
+        ReviewInvocationScope::Verification { .. }
+    ));
+}
+

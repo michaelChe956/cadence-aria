@@ -376,16 +376,57 @@ impl WorkspaceEngine {
                     })?;
                 ReviewInvocationScope::initial(anchor)
             }
+            // r42 根修:同候选(人工修订原样复写→同 cycle key,r37 修复使
+            // None 臂判 Verification)再评审时,durable scope 已被 fresh 终态
+            // action 清空(closes_single_candidate_cycle)——此前该形态撞
+            // AbortFatal「scope is not durable」。从 durable refs 重建
+            // Verification scope(与 ensure_review_invocation_scope 的
+            // Verification 构造同构:anchor 缺省 None 由 cycle key 派生
+            // fail-safe,指纹取 cycle 初评集/seen 兜底)。
             None => {
-                return Err(Box::new(RoutingAction::AbortFatal {
-                    reason: FatalReason::ProtocolViolation,
-                    diagnostics: vec![PolicyDiagnostic {
-                        code: "verification_scope_violation".to_string(),
-                        message: "single-candidate review invocation scope is not durable"
-                            .to_string(),
-                        field: Some("review_invocation_scope".to_string()),
-                    }],
-                }));
+                let repaired_revision_id = self
+                    .session
+                    .plan_candidate_ir_ref
+                    .clone()
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| {
+                        Box::new(RoutingAction::AbortFatal {
+                            reason: FatalReason::ProtocolViolation,
+                            diagnostics: vec![PolicyDiagnostic {
+                                code: "verification_scope_violation".to_string(),
+                                message: "verification review requires a durable plan candidate IR"
+                                    .to_string(),
+                                field: Some("plan_candidate_ir_ref".to_string()),
+                            }],
+                        })
+                    })?;
+                let mechanical_report_ref = self
+                    .session
+                    .mechanical_report_ref
+                    .clone()
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| {
+                        Box::new(RoutingAction::AbortFatal {
+                            reason: FatalReason::ProtocolViolation,
+                            diagnostics: vec![PolicyDiagnostic {
+                                code: "verification_scope_violation".to_string(),
+                                message: "verification review requires a durable mechanical report"
+                                    .to_string(),
+                                field: Some("mechanical_report_ref".to_string()),
+                            }],
+                        })
+                    })?;
+                let original_fingerprints = self
+                    .session
+                    .run_history
+                    .seen_fingerprints
+                    .clone();
+                ReviewInvocationScope::verification(
+                    original_fingerprints,
+                    repaired_revision_id,
+                    mechanical_report_ref,
+                    None,
+                )
             }
         };
         validate_single_candidate_scope(scope, phase)
