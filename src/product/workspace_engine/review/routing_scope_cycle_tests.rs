@@ -180,3 +180,42 @@ fn single_candidate_scope_rejects_verification_scope_during_initial() {
             )
     ));
 }
+#[test]
+fn single_candidate_cycle_none_scope_demotes_to_verification_when_initial_consumed() {
+    // r37 现场(产品计费 bug 锚点):终态 action(EnterHumanGate)关闭
+    // durable scope 后,同一候选(人工修订 AI 原样复写→源内容哈希不变→
+    // 同 cycle key)再进评审——None 臂此前无条件判 Initial,对 initial=1
+    // 的同 key cycle 再 +1 initial,merge_into 按 initial≤1 拒收,呈形
+    // StateCorruption「run history delta cannot be merged within policy
+    // limits」(r37 消耗账:transitions 2/12,manual 0/3,repairs 0/1,
+    // cycles=[sc:candidate:af6aa517…[initial=1,verification=0,repairs=0]]
+    // ——全在预算内却拒=本缺陷)。修:None 臂与 Some(Initial{R}) 臂同规
+    // ——同 key cycle 初评已计数 → 判 Verification(复评),不再二次 initial。
+    let ir_ref = "project/project_0001/issue/issue_0001/plan/plan_0001/plan_candidate_ir/ir-340fe12ab34c5678";
+    let cycle_key = "sc:candidate:340fe12ab34c5678".to_string();
+    let history = RunHistory {
+        review_cycles: std::collections::BTreeMap::from([(
+            cycle_key.clone(),
+            ReviewCycleState {
+                initial_count: 1,
+                verification_count: 0,
+                repairs_used: 0,
+                ..ReviewCycleState::default()
+            },
+        )]),
+        ..RunHistory::default()
+    };
+    let (key, phase) = single_candidate_review_cycle(None, Some(ir_ref), &history)
+        .expect("same-candidate re-review must resolve, not fail");
+    assert_eq!(key, cycle_key);
+    assert_eq!(
+        phase,
+        ReviewPhase::Verification,
+        "初评已计数的同 key cycle:同候选再进评审必须判 Verification(复评),不得二次 Initial"
+    );
+    // 对照:计数 0(真新候选)仍判 Initial。
+    let fresh = single_candidate_review_cycle(None, Some(ir_ref), &RunHistory::default())
+        .expect("fresh candidate resolves");
+    assert_eq!(fresh.1, ReviewPhase::Initial);
+}
+

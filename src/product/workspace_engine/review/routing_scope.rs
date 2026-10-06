@@ -189,10 +189,27 @@ pub(super) fn single_candidate_review_cycle(
                 .ok_or_else(|| {
                     "active plan candidate is unavailable for SingleCandidate review".to_string()
                 })?;
-            Ok((
-                format!("sc:candidate:{}", candidate_revision_hash_segment(ir_ref)),
-                ReviewPhase::Initial,
-            ))
+            let cycle_key = format!(
+                "sc:candidate:{}",
+                candidate_revision_hash_segment(ir_ref)
+            );
+            // r37 根修:终态 action(EnterHumanGate 等)已关闭 durable scope,
+            // 同一候选(人工修订原样复写→源哈希不变→同 key)再进评审时,与
+            // Some(Initial{R}) 臂同规——该 key cycle 的初评已计数则判
+            // Verification(复评)。此前无条件 Initial,对 initial=1 的同 key
+            // cycle 二次 +1 initial,merge_into 按 initial≤1 拒收,呈形
+            // StateCorruption「run history delta cannot be merged within
+            // policy limits」(r37 消耗账全在预算内却拒)。
+            let phase = if run_history
+                .review_cycles
+                .get(&cycle_key)
+                .is_some_and(|cycle| cycle.initial_count >= 1)
+            {
+                ReviewPhase::Verification
+            } else {
+                ReviewPhase::Initial
+            };
+            Ok((cycle_key, phase))
         }
     }
 }
