@@ -2352,34 +2352,32 @@ impl MatrixEnvironment {
         }
     }
 
-    /// r33:confirmed design 当前版本正文的有效需求编号清单(供 plan SC
-    /// 修订反馈纠偏 AI 编造编号;产品 store list_versions 读正文,空/缺
-    /// 失时返回空串=反馈退回基础文案)。
+    /// r33/r41 A1:已登记需求编号清单(供 plan SC 修订反馈纠偏 AI 编造
+    /// 编号)。r41 起复用产品公共提取器 extract_registered_requirement_ids
+    /// (story+design 双源,消除 harness/产品双实现漂移);story 与 design
+    /// 的最新版本正文都扫。空/缺失返回空串=反馈退回基础文案。
     fn design_requirement_ids_digest(&self) -> String {
-        let Some(entity_id) = self.design_spec_id.as_deref() else {
-            return String::new();
-        };
-        let Ok(mut versions) =
-            self.lifecycle
-                .list_versions(PROJECT_ID, &self.issue_id, entity_id)
-        else {
-            return String::new();
-        };
-        versions.sort_by_key(|version| version.version);
-        let Some(latest) = versions.last() else {
-            return String::new();
-        };
-        extract_requirement_ids(&latest.markdown)
+        let mut contexts = Vec::new();
+        for entity_id in [self.story_spec_id.as_deref(), self.design_spec_id.as_deref()]
             .into_iter()
-            .map(|(id, brief)| {
-                if brief.is_empty() {
-                    format!("- {id}")
-                } else {
-                    format!("- {id}:{brief}")
+            .flatten()
+        {
+            if let Ok(mut versions) =
+                self.lifecycle.list_versions(PROJECT_ID, &self.issue_id, entity_id)
+            {
+                versions.sort_by_key(|version| version.version);
+                if let Some(latest) = versions.last() {
+                    contexts.push(latest.markdown.clone());
                 }
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+            }
+        }
+        cadence_aria::product::work_item_split_engine::context::extract_registered_requirement_ids(
+            &contexts,
+        )
+        .into_iter()
+        .map(|id| format!("- {id}"))
+        .collect::<Vec<_>>()
+        .join("\n")
     }
 
     // -----------------------------------------------------------------------

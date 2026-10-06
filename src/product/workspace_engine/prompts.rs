@@ -197,6 +197,20 @@ pub(crate) fn build_work_item_plan_compile_reredrive_prompt(blocking_reasons: &[
             prompt.push_str(reason);
             prompt.push('\n');
         }
+        // r41 B1(诊断增强):unknown_structured_key 类失败附「合法 section/key
+        // 白名单 + 具体动作」——错误码单行不足以让 AI 自纠(它不知道合法集)。
+        if blocking_reasons
+            .iter()
+            .any(|reason| reason.contains("unknown_structured_key"))
+        {
+            let sections =
+                crate::product::work_item_plan_compiler::grammar::STRUCTURED_SECTIONS.join("、");
+            let free = crate::product::work_item_plan_compiler::grammar::FREE_TEXT_SECTIONS.join("、");
+            prompt.push_str(&format!(
+                "\n结构化 section/key 白名单(结构化段只允许这些 key):\n- 结构化: {sections}\n- 自由文本: {free}\n\
+                 动作:删除违例 section,或将其内容并入语义最近的合法 section 后重新输出完整 plan。\n"
+            ));
+        }
     }
     prompt.push('\n');
     prompt
@@ -1011,5 +1025,38 @@ mod routing_reference_prompt_tests {
         assert!(prompt.contains("sha256:abc123"), "{prompt}");
         assert!(prompt.contains("不作为政策正文"), "{prompt}");
         assert!(prompt.contains("只报告阻塞"), "{prompt}");
+    }
+}
+
+#[cfg(test)]
+mod reredrive_prompt_tests {
+    use super::build_work_item_plan_compile_reredrive_prompt;
+
+    /// r41 B1:unknown_structured_key 类失败的重驱 prompt 必须附 14 合法
+    /// section/key 白名单与具体动作(AI 不知道合法集就无法自纠)。
+    #[test]
+    fn compile_reredrive_prompt_lists_section_whitelist_for_unknown_key() {
+        let reasons = vec![
+            "unknown_structured_key:1:未知结构化 key `NotAPermission`".to_string(),
+        ];
+        let prompt = build_work_item_plan_compile_reredrive_prompt(&reasons);
+        assert!(prompt.contains("unknown_structured_key"));
+        assert!(
+            prompt.contains("结构化: Identity"),
+            "白名单必须列出合法 section 集: {prompt}"
+        );
+        assert!(prompt.contains("Traceability"));
+        assert!(
+            prompt.contains("删除违例 section"),
+            "必须给具体动作: {prompt}"
+        );
+    }
+
+    /// 对照:非 unknown_structured_key 失败不附白名单(保持既有形态)。
+    #[test]
+    fn compile_reredrive_prompt_keeps_plain_form_without_unknown_key() {
+        let reasons = vec!["missing_section:0:缺 Identity".to_string()];
+        let prompt = build_work_item_plan_compile_reredrive_prompt(&reasons);
+        assert!(!prompt.contains("白名单"));
     }
 }

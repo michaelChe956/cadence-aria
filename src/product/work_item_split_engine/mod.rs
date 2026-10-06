@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::cross_cutting::provider_adapter::ProviderAdapter;
 
-pub(crate) mod context;
+pub mod context;
 pub(crate) mod engine;
 pub(crate) mod parse;
 pub(crate) mod prompts;

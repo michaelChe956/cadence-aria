@@ -40,8 +40,10 @@ const SINGLE_CANDIDATE_TERMINAL_REOPEN_GUIDANCE: &str =
 /// 重复 trusted command 亦有确定性收敛轮，先确定性后模型，故不进教学重驱。
 /// 其余三个码在编译 loop 现状下无任何自动返修面（F-48：invalid_ears 因此直达
 /// 终态），教学重驱是其唯一一次自愈机会。
-const TEACHABLE_PARSE_FAILURE_CODES: [&str; 3] =
-    ["missing_section", "invalid_ears", "invalid_work_item_id"];
+// r41 B2:unknown_structured_key 入可教面(F-48 先例:一次自愈机会;
+// contract_autorepair 可收敛多数,残余经教学重驱带 B1 白名单自纠)。
+const TEACHABLE_PARSE_FAILURE_CODES: [&str; 4] =
+    ["missing_section", "invalid_ears", "invalid_work_item_id", "unknown_structured_key"];
 
 /// 该诊断码是否属于可教学重驱的 parse 语法类。
 fn is_teachable_parse_failure(code: &str) -> bool {
@@ -290,15 +292,71 @@ fn prevalidate_plan_candidate_ir(
         },
     );
     match validation {
-        Ok(_) => None,
-        Err(diagnostics) => Some(format_compile_failure_reasons(&diagnostics)),
+        Ok(_) => {}
+        Err(diagnostics) => return Some(format_compile_failure_reasons(&diagnostics)),
     }
+    // r41 B2(Max 补充):伪编号 fail-closed——contract 校验的 requirement 域
+    // 只查 WI 内自洽(design_traceability 自报即过,AI 可编造+登记逃逸);
+    // 此处按已确认 story/design 真实 ID 集(story+design 双源提取)比对
+    // IR 的 traceability requirement_id,清单外即拒绝(经 A2 教学重驱可
+    // 纠一次,再败终态可观测)。
+    let mut spec_contexts: Vec<String> = request
+        .story_spec_ids
+        .iter()
+        .filter_map(|id| {
+            latest_spec_markdown(lifecycle, &session.project_id, &session.issue_id, id)
+        })
+        .collect();
+    spec_contexts.extend(request.design_spec_ids.iter().filter_map(|id| {
+        latest_spec_markdown(lifecycle, &session.project_id, &session.issue_id, id)
+    }));
+    let registered =
+        crate::product::work_item_split_engine::context::extract_registered_requirement_ids(
+            &spec_contexts,
+        );
+    if !registered.is_empty() {
+        let forged: Vec<String> = ir
+            .items
+            .iter()
+            .flat_map(|item| item.contract.design_traceability.iter())
+            .map(|entry| entry.requirement_id.as_str())
+            .filter(|id| !registered.iter().any(|registered| registered == id))
+            .map(str::to_string)
+            .collect();
+        if !forged.is_empty() {
+            return Some(vec![format!(
+                "unknown_requirement_ref: plan 引用了已确认 spec 之外的需求编号 [{}];合法编号仅 [{}]",
+                forged.join("、"),
+                registered.join("、")
+            )]);
+        }
+    }
+    None
+}
+
+/// r41 B2:spec 最新版本正文(读失败/无版本返回 None,该校验面不阻断
+/// 既有 IR 校验语义)。
+fn latest_spec_markdown(
+    lifecycle: &LifecycleStore,
+    project_id: &str,
+    issue_id: &str,
+    entity_id: &str,
+) -> Option<String> {
+    lifecycle
+        .list_versions(project_id, issue_id, entity_id)
+        .ok()?
+        .into_iter()
+        .max_by_key(|version| version.version)
+        .map(|version| version.markdown)
 }
 
 /// 3.6 弱模型基线加固：IR 校验失败的教学重驱 prompt。复用 F2-B 既有 compile
 /// 重驱模板（错误原文已逐条回灌 + 立即输出完整 source 指令），附加「修正引用/
 /// 补齐字段后重新输出完整 plan」的 IR 修复指令。
-fn build_work_item_plan_ir_reredrive_prompt(blocking_reasons: &[String]) -> String {
+fn build_work_item_plan_ir_reredrive_prompt(
+    blocking_reasons: &[String],
+    registered_requirement_ids: &[String],
+) -> String {
     let mut prompt =
         crate::product::workspace_engine::build_work_item_plan_compile_reredrive_prompt(
             blocking_reasons,
@@ -306,9 +364,18 @@ fn build_work_item_plan_ir_reredrive_prompt(blocking_reasons: &[String]) -> Stri
     prompt.push_str(
         "上述为 IR 校验失败（引用或字段不符合契约）。\n\
          修正引用/补齐字段：requirement_refs、done_when_refs、reviewer_check_refs 只能逐字引用本计划已定义 id；\
-         每个 criterion_id 必须有配对的 reviewer_check_refs 行。\n\
-         修正后重新输出完整 plan，第一行即 `# Work Item Plan`，不要输出解释。\n",
+         每个 criterion_id 必须有配对的 reviewer_check_refs 行。\n",
     );
+    // r41 A2:附已登记需求编号清单(产品侧与 harness 反馈轮对称;story+
+    // design 双源,与 fresh prompt 的 [design_requirements] 同集)。
+    if !registered_requirement_ids.is_empty() {
+        prompt.push_str(&format!(
+            "[design_requirements] {}\n\
+             requirement_refs/Traceability 的 requirement_id 只能取自上列清单,清单外 REQ-*/NFR-* 一律删除或改为清单内编号。\n",
+            registered_requirement_ids.join("、")
+        ));
+    }
+    prompt.push_str("修正后重新输出完整 plan，第一行即 `# Work Item Plan`，不要输出解释。\n");
     prompt
 }
 
@@ -557,16 +624,17 @@ pub(crate) async fn run_single_candidate_author(
             )));
         }
     };
-    let story_context = crate::product::work_item_split_engine::context::collect_story_context(
-        &lifecycle, &request, &issue,
-    )
-    .map_err(|error| {
-        SingleCandidateProviderRunError::Message(format!(
-            "load story context failed: {}",
-            error.message
-        ))
-    })?
-    .join("\n\n");
+    let story_context_blocks =
+        crate::product::work_item_split_engine::context::collect_story_context(
+            &lifecycle, &request, &issue,
+        )
+        .map_err(|error| {
+            SingleCandidateProviderRunError::Message(format!(
+                "load story context failed: {}",
+                error.message
+            ))
+        })?;
+    let story_context = story_context_blocks.join("\n\n");
     let design_context_blocks =
         crate::product::work_item_split_engine::context::collect_design_context(
             &lifecycle, &request, &issue,
@@ -577,10 +645,17 @@ pub(crate) async fn run_single_candidate_author(
                 error.message
             ))
         })?;
-    let design_requirement_ids =
-        crate::product::work_item_split_engine::context::extract_design_requirement_ids(
-            &design_context_blocks,
-        );
+    // r41 A1:story+design 双源提取已登记需求 ID——仅扫 design 时,design
+    // 正文缺 NFR token 会让 [design_requirements] 白名单缺员,反而逼 AI
+    // 编造编号(r33/r37 三轮现场);story 正文的 REQ-/NFR- 同属登记域。
+    let registered_requirement_ids = {
+        let mut contexts = story_context_blocks.clone();
+        contexts.extend(design_context_blocks.iter().cloned());
+        crate::product::work_item_split_engine::context::extract_registered_requirement_ids(
+            &contexts,
+        )
+    };
+    let design_requirement_ids = registered_requirement_ids;
     let design_context = design_context_blocks.join("\n\n");
     let repository_structure =
         crate::product::work_item_split_engine::context::summarize_repository_structure(
@@ -865,7 +940,10 @@ pub(crate) async fn run_single_candidate_author(
         if let Some(reasons) = prevalidate_plan_candidate_ir(engine, &lifecycle, &request, &ir) {
             if first_round_failure.is_none() {
                 first_round_failure = Some(reasons.join("; "));
-                let reredrive_prompt = build_work_item_plan_ir_reredrive_prompt(&reasons);
+                let reredrive_prompt = build_work_item_plan_ir_reredrive_prompt(
+                    &reasons,
+                    &design_requirement_ids,
+                );
                 engine
                     .emit_execution_event(
                         ProviderExecutionEvent {
@@ -1054,27 +1132,26 @@ mod tests {
         );
     }
 
-    /// Task 0 实查结论的代码化:parse 语法类白名单 = parse 语法类全集
-    /// (`grammar::DIAGNOSTIC_CODES`) 减去 `contract_autorepair` 已确定性收敛的码
-    /// (`unknown_structured_key` 按诊断行号确定性删行,F-41)。语法层新增诊断码时
-    /// 本断言会失败,迫使同步审视白名单。
+    /// Task 0 实查结论的代码化(修订于 r41 B2):parse 语法类白名单 =
+    /// parse 语法类全集(`grammar::DIAGNOSTIC_CODES`)。`unknown_structured_key`
+    /// 此前由 contract_autorepair 确定性收敛(F-41)而排除;r41 B2 裁决:
+    /// 收敛器对「未知 section 标题」形态 fail-closed 后残余失败应有恰一次
+    /// 教学重驱自愈机会(F-48 先例,重驱 prompt 携带 B1 白名单可自纠)。
+    /// 语法层新增诊断码时本断言会失败,迫使同步审视白名单。
     #[test]
     fn teachable_parse_failure_codes_are_parse_grammar_minus_converged_codes() {
         use super::{TEACHABLE_PARSE_FAILURE_CODES, is_teachable_parse_failure};
         use crate::product::work_item_plan_compiler::grammar;
 
-        let converged_codes = ["unknown_structured_key"];
         for code in grammar::DIAGNOSTIC_CODES {
-            let expected = !converged_codes.contains(&code);
-            assert_eq!(
+            assert!(
                 is_teachable_parse_failure(code),
-                expected,
-                "白名单与实查推导不符: {code}"
+                "parse 语法类全集都应可教学重驱: {code}"
             );
         }
         assert_eq!(
             TEACHABLE_PARSE_FAILURE_CODES.len(),
-            grammar::DIAGNOSTIC_CODES.len() - converged_codes.len()
+            grammar::DIAGNOSTIC_CODES.len()
         );
     }
 
@@ -1181,5 +1258,36 @@ mod tests {
             "同内容重放必须保持 event_id 稳定以幂等去重"
         );
         assert!(first.starts_with("single_candidate_heading_normalized_timeline_node_001"));
+    }
+}
+
+#[cfg(test)]
+mod r41_teachable_and_ir_prompt_tests {
+    use super::*;
+
+    /// r41 B2:unknown_structured_key 属可教面(一次自愈机会,F-48 先例)。
+    #[test]
+    fn unknown_structured_key_is_teachable() {
+        assert!(is_teachable_parse_failure("unknown_structured_key"));
+        assert!(is_teachable_parse_failure("missing_section"));
+        assert!(!is_teachable_parse_failure("internal_error"));
+    }
+
+    /// r41 A2:IR 重驱 prompt 附已登记需求编号清单与约束指令。
+    #[test]
+    fn ir_reredrive_prompt_appends_registered_requirement_ids() {
+        let reasons = vec!["unknown_requirement_ref: task references unknown design requirement NFR-1".to_string()];
+        let ids = vec!["REQ-ENV-01".to_string(), "NFR-PERF-02".to_string()];
+        let prompt = build_work_item_plan_ir_reredrive_prompt(&reasons, &ids);
+        assert!(prompt.contains("[design_requirements] REQ-ENV-01、NFR-PERF-02"));
+        assert!(prompt.contains("清单外 REQ-*/NFR-* 一律删除或改为清单内编号"));
+    }
+
+    /// r41 A2:清单空时不注入(无 spec 上下文的老会话零变化)。
+    #[test]
+    fn ir_reredrive_prompt_omits_empty_requirement_list() {
+        let reasons = vec!["acceptance_criterion_without_reviewer_check: WI-001 AC-1".to_string()];
+        let prompt = build_work_item_plan_ir_reredrive_prompt(&reasons, &[]);
+        assert!(!prompt.contains("[design_requirements]"));
     }
 }

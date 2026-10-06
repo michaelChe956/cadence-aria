@@ -326,10 +326,15 @@ pub(crate) fn coding_provider_config_snapshot_for_runtime_binding(
     let sessions = lifecycle
         .list_workspace_sessions(input.project_id, input.issue_id)
         .map_err(product_store_api_error)?;
+    // r41 根修(#13 层 1 家族):runtime binding 六元组匹配即权威——child
+    // WorkItem 会话在 coding 起点是 Open 设计态(终编译 finalizer 创建,
+    // author_provider=plan 会话所选;Confirmed 是 coding 完成后的状态),
+    // 此前的 status==Confirmed 过滤把绑定会话拦在仓默认回退;LC 合成仓
+    // 记录 default_provider_mode 空(resolve.inc.rs 缺陷 #13 层 1 fail-
+    // closed)→组入口 500 default_provider_not_configured(r41 现场)。
     if let Some(session) = sessions.iter().rev().find(|session| {
         session.entity_id == input.unit.logical_work_item_id
             && session.workspace_type == WorkspaceType::WorkItem
-            && session.status == WorkspaceSessionStatus::Confirmed
             && session
                 .work_item_runtime_binding
                 .as_ref()
@@ -1026,3 +1031,103 @@ mod artifact_content;
 pub(crate) use artifact_content::coding_attempt_artifact_content;
 
 include!("coding_parts/c2_gate_response_rest_tests.inc.rs");
+
+#[cfg(test)]
+mod coding_provider_snapshot_tests {
+    use super::*;
+    use crate::product::app_paths::ProductAppPaths;
+    use crate::product::lifecycle_store::inputs::{
+        CreateWorkItemChildSessionInput, CreateWorkspaceSessionInput,
+    };
+    use crate::product::lifecycle_store::LifecycleStore;
+    use crate::product::models::work_item_revision::WorkItemRuntimeBinding;
+    use crate::product::models::{ChildBindingIdentity, ProviderName, WorkspaceType};
+
+    fn binding_fixture() -> WorkItemRuntimeBinding {
+        WorkItemRuntimeBinding {
+            plan_id: "plan_0001".to_string(),
+            plan_revision_id: "planrev_0001".to_string(),
+            logical_work_item_id: "WI-001".to_string(),
+            work_item_revision_id: "wirev_0001".to_string(),
+            projection_bundle_id: "bundle_0001".to_string(),
+            verification_plan_revision_id: "verrev_0001".to_string(),
+            canonical_contract_hash: "sha256:0".to_string(),
+            projection_compiler_version: "v1".to_string(),
+            human_projection_hash: "sha256:1".to_string(),
+            coder_projection_hash: "sha256:2".to_string(),
+            reviewer_projection_hash: "sha256:3".to_string(),
+        }
+    }
+
+    /// r41 根修锚点(#13 层 1 家族):LC 合成仓记录 default_provider_mode 空,
+    /// 组入口 provider 解析回退仓默认即 500 default_provider_not_configured。
+    /// 终编译 finalizer 已把 plan 会话所选 provider 写入 child WorkItem 会话
+    /// (author_provider)与 runtime binding——绑定匹配即权威,不该再被
+    /// status==Confirmed 过滤拦在仓默认回退(child 会话在 coding 起点是 Open
+    /// 设计态,Confirm 是 coding 完成后的状态)。
+    #[test]
+    fn runtime_binding_provider_snapshot_prefers_bound_child_session_over_repo_default() {
+        let root = tempfile::tempdir().expect("root");
+        let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+        let lifecycle = LifecycleStore::new(app_paths);
+        let binding = binding_fixture();
+        let child = lifecycle
+            .create_workspace_child_session(CreateWorkItemChildSessionInput {
+                session: CreateWorkspaceSessionInput {
+                    project_id: "project_0001".to_string(),
+                    issue_id: "issue_0001".to_string(),
+                    entity_id: binding.logical_work_item_id.clone(),
+                    workspace_type: WorkspaceType::WorkItem,
+                    author_provider: ProviderName::ClaudeCode,
+                    reviewer_provider: None,
+                    review_rounds: 1,
+                    superpowers_enabled: false,
+                    openspec_enabled: false,
+                    work_item_plan_options: None,
+                },
+                child_binding: ChildBindingIdentity {
+                    plan_id: binding.plan_id.clone(),
+                    plan_revision_id: binding.plan_revision_id.clone(),
+                    logical_work_item_id: binding.logical_work_item_id.clone(),
+                    work_item_revision_id: binding.work_item_revision_id.clone(),
+                    binding_version: 1,
+                    enrollment_id: "enrollment_0001".to_string(),
+                    target: crate::product::logical_codebase::EnrollmentTarget::LogicalCodebase {
+                        logical_codebase_id: "lc_0001".to_string(),
+                        logical_repository_id: crate::product::logical_codebase::LogicalRepositoryId(
+                            uuid::Uuid::from_u128(1),
+                        ),
+                    },
+                },
+            })
+            .expect("child session");
+        lifecycle
+            .ensure_work_item_runtime_binding(&child.id, &binding)
+            .expect("runtime binding");
+        let unit = AuthoritativeCodingUnitBinding {
+            logical_work_item_id: binding.logical_work_item_id.clone(),
+            work_item_revision_id: binding.work_item_revision_id.clone(),
+            verification_plan_revision_id: binding.verification_plan_revision_id.clone(),
+            projection_bundle_id: binding.projection_bundle_id.clone(),
+            target_repository_id: None,
+            source_draft_error: None,
+            dependency_logical_work_item_ids: Vec::new(),
+        };
+        let snapshot = coding_provider_config_snapshot_for_runtime_binding(
+            &lifecycle,
+            RuntimeBindingProviderConfigInput {
+                project_id: "project_0001",
+                issue_id: "issue_0001",
+                plan_id: &binding.plan_id,
+                plan_revision_id: &binding.plan_revision_id,
+                unit: &unit,
+                // LC 合成仓记录的空默认(#13 层 1)。
+                repository_default_provider: "",
+            },
+            false,
+            &|_provider| true,
+        )
+        .expect("bound child session provider must win over empty repo default");
+        assert_eq!(snapshot.author, ProviderName::ClaudeCode);
+    }
+}

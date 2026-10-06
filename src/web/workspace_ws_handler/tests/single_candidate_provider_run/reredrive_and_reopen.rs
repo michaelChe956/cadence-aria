@@ -242,14 +242,14 @@ async fn single_candidate_compile_missing_section_reredrive_failure_is_terminal_
 }
 
 #[tokio::test]
-async fn single_candidate_unrepairable_unknown_key_failure_stays_terminal_without_reredrive() {
+async fn single_candidate_unrepairable_unknown_key_failure_gets_one_reredrive_then_terminal() {
     let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
     let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let bad = markdown_with_unknown_section(&fixture.story_id, &fixture.design_id);
     let provider = Arc::new(SequenceOutputProvider {
-        outputs: vec![markdown_with_unknown_section(
-            &fixture.story_id,
-            &fixture.design_id,
-        )],
+        // r41 B2:收敛器对未知 section 形态 fail-closed 后,残余失败享有
+        // 恰一次教学重驱(重驱 prompt 携带 B1 白名单);重驱仍败→终态。
+        outputs: vec![bad.clone(), bad],
         inputs: input_tx,
         next: AtomicUsize::new(0),
     });
@@ -265,12 +265,14 @@ async fn single_candidate_unrepairable_unknown_key_failure_stays_terminal_withou
     .await;
 
     let _first_input = next_provider_input(&mut input_rx).await;
+    // 恰一次教学重驱(第二轮)。
+    let _reredrive_input = next_provider_input(&mut input_rx).await;
     no_more_provider_inputs(&mut input_rx).await;
     let message = next_error_message(&mut outbound_rx).await;
     assert!(
         message.contains("compile markdown source failed")
             && message.contains("unknown_structured_key"),
-        "non-missing_section compile failure must stay terminal: {message}"
+        "重驱后仍败必须终态: {message}"
     );
     assert!(
         message.contains("请显式重新开始生成"),

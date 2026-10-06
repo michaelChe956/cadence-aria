@@ -99,8 +99,18 @@ pub(crate) fn collect_design_context(
 /// DesignSpecRecord 本身只保存 spec 元数据，需求正文位于其 latest version markdown；
 /// 因此这里只接受 markdown 中显式出现的 REQ-/NFR- token，不为 prompt 生成任何 ID。
 pub(crate) fn extract_design_requirement_ids(design_context: &[String]) -> Vec<String> {
+    extract_registered_requirement_ids(design_context)
+}
+
+/// r41 A1(结构根修):从 story+design 双源上下文提取已登记的需求 ID。
+///
+/// 此前仅扫 design 上下文——design 正文缺 NFR token 时白名单缺员,反而逼
+/// AI 编造编号(r33/r37 现场三轮编造的结构诱因);story 正文中的 REQ-/NFR-
+/// 同属已登记需求域,双源并扫消除缺员窗口。pub:矩阵 harness 复用同一
+/// 实现(消除与 harness 侧提取器的双实现漂移)。
+pub fn extract_registered_requirement_ids(contexts: &[String]) -> Vec<String> {
     let mut ids = BTreeSet::new();
-    for context in design_context {
+    for context in contexts {
         for token in context
             .split(|character: char| !(character.is_ascii_alphanumeric() || character == '-'))
         {

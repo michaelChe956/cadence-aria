@@ -359,4 +359,25 @@ fn empty_design_spec_has_no_capabilities() {
 
     let merged = crate::product::work_item_split_engine::merge_design_context_capabilities(&[]);
     assert_eq!(design_context_gaps(&merged).len(), 5);
+
+#[test]
+fn extract_registered_requirement_ids_merges_story_and_design_sources() {
+    // r41 A1:story+design 双源——design 正文缺 NFR token 时,story 正文的
+    // NFR- 编号仍是登记域(修「白名单缺员逼 AI 编造」结构陷阱)。
+    let contexts = vec![
+        "Story Spec: alpha 会话过期 (story_spec_0001)\n需求 REQ-ENV-01: 签发。".to_string(),
+        "Design Spec: 后端设计 (design_spec_0001)\nNFR-PERF-02: P99<50ms。".to_string(),
+    ];
+    let ids = crate::product::work_item_split_engine::context::extract_registered_requirement_ids(
+        &contexts,
+    );
+    assert_eq!(ids, vec!["NFR-PERF-02".to_string(), "REQ-ENV-01".to_string()]);
+    // 单源退化(design-only)保持既有语义。
+    let design_only = vec!["Design: REQ-A-1 x".to_string()];
+    assert_eq!(
+        crate::product::work_item_split_engine::context::extract_design_requirement_ids(&design_only),
+        vec!["REQ-A-1".to_string()]
+    );
+}
+
 }
