@@ -2108,15 +2108,50 @@ impl MatrixEnvironment {
         if !revision_done {
             return observation.build_cell(self);
         }
-        // ---- 阶段 2:typed confirm → 泵至终态(stage completed/confirmed)----
-        if let Err(error) = ws.send_json(&json!({"type": "confirm"})).await {
-            observation.push_event(json!({"type": "matrix_error", "message": error}));
-            observation.run_failure = Some(format!("typed confirm 发送失败:{error}"));
-            return observation.build_cell(self);
+        // ---- 阶段 2:typed confirm → 泵至终态(stage completed/confirmed)。
+        // r34:v1.1 缺陷 #12 同族——首拍 approve 可撞 Final Compile
+        // recovery_required(「single-candidate approval compile failed; human
+        // gate remains open」)。按 v1.1 §5.1 先例续跑:发 WS
+        // work_item_plan_compile_recovery_action: continue 步进编译游标,
+        // 直至终态或真失败(有界 2 次;非该族失败不重试)。
+        let mut recovery_actions_left = 2usize;
+        let mut confirm_command = json!({"type": "confirm"});
+        let mut confirmed = false;
+        loop {
+            if let Err(error) = ws.send_json(&confirm_command).await {
+                observation.push_event(json!({"type": "matrix_error", "message": error}));
+                observation.run_failure = Some(format!("typed confirm 发送失败:{error}"));
+                return observation.build_cell(self);
+            }
+            confirmed = self
+                .pump_plan_sc_phase(
+                    &mut ws,
+                    &mut observation,
+                    PlanScPumpPhase::AwaitConfirmTerminal,
+                )
+                .await;
+            if confirmed {
+                break;
+            }
+            let failure_text = observation.run_failure.clone().unwrap_or_default();
+            if recovery_actions_left > 0
+                && plan_confirm_failure_is_recoverable(&failure_text)
+            {
+                recovery_actions_left -= 1;
+                observation.run_failure = None;
+                fp(
+                    "plan_sc_compile_recovery_continue",
+                    format_args!("left={}", recovery_actions_left + 1),
+                );
+                confirm_command = json!({
+                    "type": "work_item_plan_compile_recovery_action",
+                    "action": "continue",
+                    "reason": "lcg-matrix: 续跑 Final Compile(v1.1 缺陷 #12 先例)",
+                });
+                continue;
+            }
+            break;
         }
-        let confirmed = self
-            .pump_plan_sc_phase(&mut ws, &mut observation, PlanScPumpPhase::AwaitConfirmTerminal)
-            .await;
         observation.completed_product_artifact_exists = confirmed;
         observation.native_confirmed_id =
             self.latest_audit_native_id(session_id, &self.provider, None);
@@ -3430,6 +3465,13 @@ fn find_requirement_token(text: &str) -> Option<(String, &str)> {
     None
 }
 
+/// r34:confirm 失败是否属于 Final Compile recovery_required 族(v1.1
+/// 缺陷 #12 同族:门保持打开,WS work_item_plan_compile_recovery_action:
+/// continue 可续跑编译游标)。纯函数可单测。
+fn plan_confirm_failure_is_recoverable(failure_text: &str) -> bool {
+    failure_text.contains("single-candidate approval compile failed")
+}
+
 /// r27 问题1:帧是否携带非空产物 markdown(artifact_update 的 payload,或
 /// session_state 全量快照的 artifact 字段)。plan fresh 的产物判定用
 /// (停门模型:候选产物已生成即可,confirmed plan 归 resume 格 confirm 后)。
@@ -4576,6 +4618,16 @@ mod pump_disposition_tests {
         let dup = extract_requirement_ids("REQ-A-1: x\nREQ-A-1: y\nREQ-");
         assert_eq!(dup.len(), 1, "重复编号去重、裸前缀不提取: {dup:?}");
         assert!(dup[0].1.contains('x'), "保留首次出现的简述: {dup:?}");
+    }
+
+    /// r34:confirm 失败的可恢复族判定——v1.1 缺陷 #12 同族(门保持打开,
+    /// recovery continue 可续跑);非该族(真失败)不重试。
+    #[test]
+    fn lcg_plan_confirm_failure_recoverable_family() {
+        let recoverable = "plan SC 门服务端错误帧收口(kind=error):{\"message\": \"single-candidate approval compile failed; human gate remains open\\nfailure_reason: compile transaction recovery_required\"}";
+        assert!(plan_confirm_failure_is_recoverable(recoverable));
+        let genuine = "plan SC 门服务端错误帧收口(kind=error):{\"message\": \"validator findings: [error] requirement_not_found\"}";
+        assert!(!plan_confirm_failure_is_recoverable(genuine));
     }
 
 }
