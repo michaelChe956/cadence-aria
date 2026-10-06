@@ -591,6 +591,22 @@ impl StreamingProviderAdapter for ScAuthorStubProvider {
                 )))
                 .await;
         } else {
+            // r29:held 会话改为周期 keepalive(StatusChanged)——产品驱动循环
+            // 已补 F-19 零活动看门狗(work_item_plan.rs),静默挂起的 stub 会被
+            // 150ms(test cfg)中止;在途语义=事件端存活且持续活动。
+            let keepalive_tx = event_tx.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+                    if keepalive_tx
+                        .send(ProviderEvent::StatusChanged(ProviderStatus::Running))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            });
             self.held.lock().await.push(event_tx);
         }
         Ok(ProviderSession {

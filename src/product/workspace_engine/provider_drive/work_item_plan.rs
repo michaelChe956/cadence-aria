@@ -51,9 +51,88 @@ impl WorkspaceEngine {
         // provider_drive 先例）——session_state 全量投影据此补挂本子驱动挂起的
         // choice 卡；guard Drop（本函数任意出口）只摘本 run 登记的 id，防泄漏。
         let mut pending_choice_requests = PendingChoiceRequests::new(&self.session.session_id);
-
+        // r29 问题2 根修(r28 现场):本循环此前缺 F-19 零活动看门狗(主驱动
+        // drive_provider_session 有)——SC 门修订 turn 的 provider 流式 1min 后
+        // 静默挂死,驱动永不收口,harness 侧 90min 空等零信号。同构补齐:
+        // 事件/命令任一活动重置;等待人工权限/选择应答期间挂起(与主驱动
+        // 同语义——人工等待由 ApprovalBridge PERMISSION_TIMEOUT 与
+        // choice_wait 界收口,不是 provider 楔死)。
+        let idle_watchdog_timeout = PROVIDER_IDLE_WATCHDOG_TIMEOUT;
+        let idle_watchdog =
+            tokio::time::sleep_until(tokio::time::Instant::now() + idle_watchdog_timeout);
+        tokio::pin!(idle_watchdog);
+        let choice_wait_timeout = PROVIDER_CHOICE_WAIT_TIMEOUT;
+        let choice_wait_timer =
+            tokio::time::sleep_until(tokio::time::Instant::now() + choice_wait_timeout);
+        tokio::pin!(choice_wait_timer);
+        let mut waiting_for_permission = false;
         while events_open {
             tokio::select! {
+                _ = &mut idle_watchdog,
+                if !waiting_for_permission && pending_choice_requests.is_empty() =>
+                {
+                    // F-19 同构:provider 会话零活动楔死——Abort kill 链 + cancel +
+                    // 失败节点带稳定原因码 + Error 事件 + finish_failed_run
+                    //(workspace 会话回 prepare_context 可重跑)。
+                    eprintln!(
+                        "[aria-cancellation] workspace work_item_plan_drive idle_watchdog trigger=provider_idle_watchdog session_id={} role=author timeout_secs={}",
+                        self.session.session_id,
+                        idle_watchdog_timeout.as_secs()
+                    );
+                    let message = format!(
+                        "provider_idle_watchdog: provider 会话 {} 秒零活动（无事件/命令），疑似楔死，运行已由看门狗中止；可重新开始生成",
+                        idle_watchdog_timeout.as_secs()
+                    );
+                    let _ = session.commands.send(ProviderCommand::Abort).await;
+                    cancel.cancel();
+                    let display_content = display_filter.finish();
+                    self.emit_work_item_plan_display_chunk(&node_id, display_content).await;
+                    self.update_timeline_node(
+                        &node_id,
+                        TimelineNodeStatus::Failed,
+                        Some(message.clone()),
+                    )
+                    .await;
+                    let _ = self
+                        .event_tx
+                        .send(EngineEvent::Error { message })
+                        .await;
+                    self.finish_failed_run().await;
+                    return Err("provider_idle_watchdog: work item plan provider 会话零活动楔死，运行已中止".to_string());
+                }
+                _ = &mut choice_wait_timer,
+                if !pending_choice_requests.is_empty() =>
+                {
+                    // F-22/F-19b 同构:choice 卡丢失/无人应答超界。
+                    let pending_ids: Vec<&str> = pending_choice_requests.ids();
+                    eprintln!(
+                        "[aria-cancellation] workspace work_item_plan_drive choice_wait_timeout trigger=provider_choice_wait_timeout session_id={} role=author pending={:?} timeout_secs={}",
+                        self.session.session_id,
+                        pending_ids,
+                        choice_wait_timeout.as_secs()
+                    );
+                    let message = format!(
+                        "provider_choice_wait_timeout: 等待回答超时——{} 秒内未收到选择应答，运行已中止；choice 卡可能未送达或已送达但无人应答（pending={:?}）。请重新提交反馈重新发起本轮",
+                        choice_wait_timeout.as_secs(),
+                        pending_ids
+                    );
+                    let _ = session.commands.send(ProviderCommand::Abort).await;
+                    cancel.cancel();
+                    let display_content = display_filter.finish();
+                    self.emit_work_item_plan_display_chunk(&node_id, display_content).await;
+                    self.update_timeline_node(
+                        &node_id,
+                        TimelineNodeStatus::Failed,
+                        Some(message.clone()),
+                    )
+                    .await;
+                    let _ = self
+                        .event_tx
+                        .send(EngineEvent::Error { message })
+                        .await;
+                    self.finish_failed_run().await;
+                    return Err("provider_choice_wait_timeout: work item plan provider 等待选择应答超时，运行已中止".to_string());
+                }
                 _ = cancel.cancelled() => {
                     // 诊断打点（claude×轻 握手谜团第 2 轮，不改行为）：workitem author
                     // 驱动循环观察到 engine/run token 被外部取消。
@@ -68,6 +147,10 @@ impl WorkspaceEngine {
                     return Err("provider run aborted".to_string());
                 }
                 command = command_rx.recv(), if commands_open => {
+                    // F-19 同构:任何命令活动(含人工权限/选择应答)重置看门狗。
+                    idle_watchdog
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + idle_watchdog_timeout);
                     match command {
                         Some(ProviderCommand::Abort) => {
                             // 诊断打点：Abort 命令到达 workitem author 驱动循环。
@@ -88,6 +171,8 @@ impl WorkspaceEngine {
                             approved,
                             reason,
                         }) => {
+                            // 人工权限应答到达:解除看门狗挂起(与主驱动同语义)。
+                            waiting_for_permission = false;
                             let _ = self
                                 .persist_permission_response(
                                     &node_id,
@@ -137,6 +222,10 @@ impl WorkspaceEngine {
                     }
                 }
                 event = session.events.recv() => {
+                    // F-19 同构:事件活动重置看门狗。
+                    idle_watchdog
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + idle_watchdog_timeout);
                     let Some(event) = event else {
                         events_open = false;
                         continue;
@@ -149,6 +238,8 @@ impl WorkspaceEngine {
                             self.emit_work_item_plan_display_chunk(&node_id, display_content).await;
                         }
                         ProviderEvent::PermissionRequest(request) => {
+                            // F-19 同构:等待人工权限应答期间看门狗不计时。
+                            waiting_for_permission = true;
                             let _ = self
                                 .persist_permission_request(
                                     &node_id,

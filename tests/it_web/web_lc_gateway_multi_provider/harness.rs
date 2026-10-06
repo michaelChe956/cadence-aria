@@ -3350,10 +3350,18 @@ fn truncate_verbose_wire_fields(value: &mut Value) {
 /// (停门模型:候选产物已生成即可,confirmed plan 归 resume 格 confirm 后)。
 fn frame_carries_artifact_markdown(kind: &str, message: &Value) -> bool {
     let markdown = match kind {
+        // r29 问题1:真实帧形态(r28 实测)——artifact_update 的 markdown 在
+        // 事件顶层(ArtifactPayload 枚举字段被 serde 展平);保留 payload
+        // 嵌套形态兜底。
         "artifact_update" => message
-            .get("payload")
-            .and_then(|payload| payload.get("markdown"))
-            .and_then(Value::as_str),
+            .get("markdown")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                message
+                    .get("payload")
+                    .and_then(|payload| payload.get("markdown"))
+                    .and_then(Value::as_str)
+            }),
         "session_state" => message
             .get("artifact")
             .and_then(|artifact| artifact.get("markdown"))
@@ -4421,11 +4429,19 @@ mod pump_disposition_tests {
     /// artifact 字段;空 markdown 不算)。
     #[test]
     fn lcg_frame_carries_artifact_markdown_detects_non_empty_payload() {
+        // r28 真实形态:markdown 在事件顶层(载荷枚举字段展平)。
         let artifact_update = json!({
+            "type": "artifact_update",
+            "event_seq": 7334,
+            "markdown": "# Work Item Plan\n## Work Item WI-001 …",
+        });
+        assert!(frame_carries_artifact_markdown("artifact_update", &artifact_update));
+        // 嵌套 payload 形态兜底同样命中。
+        let nested_update = json!({
             "type": "artifact_update",
             "payload": {"markdown": "# 会话过期提示 Story Spec\n内容…", "version": 2},
         });
-        assert!(frame_carries_artifact_markdown("artifact_update", &artifact_update));
+        assert!(frame_carries_artifact_markdown("artifact_update", &nested_update));
         let snapshot = json!({
             "type": "session_state",
             "artifact": {"markdown": "# plan 候选"},
