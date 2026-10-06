@@ -2152,6 +2152,34 @@ impl MatrixEnvironment {
             }
             break;
         }
+        // r35:confirm 失败附 run 预算消耗账(超限族失败的产品正确限制需
+        // 带实测数字落格——transitions_used/manual_repairs_used/repairs_
+        // 计数 vs RunBudgets 默认 12/3/1 与初评复评各小于等于 1。
+        if !confirmed && observation.run_failure.is_some() {
+            if let Ok(record) = self.lifecycle.get_workspace_session(session_id) {
+                let history = &record.run_history;
+                let cycles = history
+                    .review_cycles
+                    .iter()
+                    .map(|(key, cycle)| {
+                        format!(
+                            "{}[initial={},verification={},repairs={}]",
+                            key, cycle.initial_count, cycle.verification_count, cycle.repairs_used
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(";");
+                let account = format!(
+                    "run 预算消耗账:transitions_used={}/12,manual_repairs_used={}/3,repairs_used={}/1,review_cycles=[{cycles}]",
+                    history.transitions_used,
+                    history.manual_repairs_used,
+                    history.repairs_used
+                );
+                fp("plan_sc_budget_account", format_args!("{account}"));
+                observation.run_failure =
+                    Some(format!("{}/{}", observation.run_failure.clone().unwrap_or_default(), account));
+            }
+        }
         observation.completed_product_artifact_exists = confirmed;
         observation.native_confirmed_id =
             self.latest_audit_native_id(session_id, &self.provider, None);
