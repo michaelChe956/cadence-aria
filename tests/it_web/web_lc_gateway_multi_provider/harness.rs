@@ -624,6 +624,9 @@ struct MatrixEnvironment {
     design_spec_id: Option<String>,
     work_item_id: Option<String>,
     plan_work_item_ids: Vec<String>,
+    /// r37:streaming plan 的 durable plan id(prepare 响应携带;coding 组
+    /// 入口 POST work-item-plans/{plan_id}/coding-attempts 消费)。
+    plan_id: String,
     prior_entity_session_id: Option<String>,
     prior_plan_session_id: Option<String>,
     prior_coding_session_id: Option<String>,
@@ -720,6 +723,7 @@ impl MatrixEnvironment {
             design_spec_id: None,
             work_item_id: None,
             plan_work_item_ids: Vec::new(),
+            plan_id: String::new(),
             prior_entity_session_id: None,
             prior_plan_session_id: None,
             prior_coding_session_id: None,
@@ -2017,6 +2021,12 @@ impl MatrixEnvironment {
                 .filter_map(|value| value.as_str().map(str::to_string))
                 .collect();
         }
+        // r37:捕获 durable plan id(coding 组入口 POST
+        // work-item-plans/{plan_id}/coding-attempts 消费;schema v2 work
+        // item 单件入口被产品正确拒收 schema_v2_group_coding_required)。
+        if let Some(plan_id) = body["work_item_plan"]["id"].as_str() {
+            self.plan_id = plan_id.to_string();
+        }
         // r26 问题1/2:plan fresh 零确认预算停 SC 人工门(human_confirm)。
         // HTTP 会话 confirm 对 WorkItemPlan 恒 500
         // (work_item_plan_confirm_not_supported,r25 现场 18:30 confirm 500
@@ -2654,18 +2664,32 @@ impl MatrixEnvironment {
             cells.push(coding_resume.denied_cell("coding fresh 未启动,resume 无会话".to_string()));
             return cells;
         };
-        // fresh:真实 coding attempt 创建(创建沿 plan 会话的 provider 配置)
-        // → coding WS 驱动(StartCoding/阶段门)→ FinalConfirm。
+        // fresh:组入口建 attempt → coding WS 驱动(StartCoding/阶段门)→
+        // FinalConfirm。r37:schema v2 work item 的单件创建入口被产品正确
+        // 拒收(schema_v2_group_coding_required,v2 必须经 work item group
+        /// lc-root v1.2 §2 coding 腿先例同款组链)——改走
+        // POST work-item-plans/{plan_id}/coding-attempts(create_group_
+        // coding_attempt:Confirmed plan 校验+组初始化 journal+组锁)。
         let mut observation = StageObservation::new("coding", &self.provider);
         fp_enter_phase("coding", ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT, FRESH);
         observation.role = "executor".to_string();
         observation.action = "coding_workspace_write".to_string();
+        if self.plan_id.is_empty() {
+            cells.push(observation.denied_cell(
+                "缺 durable plan id(前置 plan prepare 未捕获),coding 组入口无法启动".to_string(),
+            ));
+            let mut coding_resume = StageObservation::new("coding", &self.provider);
+            coding_resume.force_resume = true;
+            cells.push(coding_resume.denied_cell("coding fresh 未启动,resume 无会话".to_string()));
+            return cells;
+        }
+        let _ = work_item_id;
         let (status, body) = request_json(
             &self.app,
             Method::POST,
             &format!(
-                "/api/projects/{PROJECT_ID}/issues/{}/work-items/{work_item_id}/coding-attempts",
-                self.issue_id
+                "/api/projects/{PROJECT_ID}/issues/{}/work-item-plans/{}/coding-attempts",
+                self.issue_id, self.plan_id
             ),
             json!({}),
         )
