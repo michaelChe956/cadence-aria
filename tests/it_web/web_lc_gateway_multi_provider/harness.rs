@@ -2238,7 +2238,12 @@ impl MatrixEnvironment {
     }
 
     async fn resolve_first_work_item(&mut self) {
-        // plan prepare 响应携带的 work_item_ids 优先(无列表端点依赖)。
+        // r31:两个真实来源——①plan prepare 响应携带的 work_item_ids(SC
+        // 流 prepare 时已建候选条目);②issue lifecycle 查询(v1.1 E2E
+        // §5.1 的 work item 查询形态,plan Confirmed 后条目齐全)。
+        // GET /work-items 列表路由不存在(r28/r30 两轮 404 的根因),
+        // 不得再用;lifecycle 条目的 id 字段=work_item_id(logical id,
+        // coding-attempts 创建路由同口径消费)。
         if let Some(id) = self.plan_work_item_ids.first().cloned() {
             self.work_item_id = Some(id);
             return;
@@ -2246,25 +2251,18 @@ impl MatrixEnvironment {
         let (status, body) = request_json(
             &self.app,
             Method::GET,
-            &format!(
-                "/api/projects/{PROJECT_ID}/issues/{}/work-items",
-                self.issue_id
-            ),
+            &format!("/api/issues/{}/lifecycle?project_id={PROJECT_ID}", self.issue_id),
             json!({}),
         )
         .await;
         if status.is_success() {
             if let Some(id) = body
-                .pointer("/work_items/0/id")
-                .or_else(|| body.pointer("/0/id"))
+                .pointer("/work_items/0/work_item_id")
                 .and_then(Value::as_str)
             {
                 self.work_item_id = Some(id.to_string());
-                return;
             }
         }
-        // 列表端点形态变化时留 None,coding 阶段落格记录原因。
-        self.work_item_id = None;
     }
 
     // -----------------------------------------------------------------------
