@@ -2074,10 +2074,24 @@ impl MatrixEnvironment {
         observation.frozen_digest = self.latest_audit_projection_digest(session_id, &self.provider);
 
         // ---- 阶段 1:typed feedback 修订 → 泵至 human_gate_turn_completed ----
+        // r33 根修:plan fresh 连续 3 轮 2 中编造 requirement 编号(NFR-1/
+        // NFR-2 不在 design 里),教学重驱一轮纠不回——修订反馈文案附
+        // confirmed design 的有效需求编号清单(产品 store 读 design 当前
+        // 版本正文提取),反馈轮兜底纠偏引用面。
+        let requirement_digest = self.design_requirement_ids_digest();
+        let feedback_text = if requirement_digest.is_empty() {
+            "矩阵 plan resume:按反馈修订拆分方案(补充验收条件与写域口径)".to_string()
+        } else {
+            format!(
+                "矩阵 plan resume:修订拆分方案。当前候选引用了设计中不存在的需求编号。\
+                 设计中的有效需求编号只有以下这些,计划任务的 requirement 引用必须且只能\
+                 引用它们(不得编造新编号,多余引用一律删除或改为下列编号):\n{requirement_digest}"
+            )
+        };
         let feedback = json!({
             "type": "human_gate_feedback",
             "command_id": "lcg-matrix-plan-revision",
-            "feedback": "矩阵 plan resume:按反馈修订拆分方案(补充验收条件与写域口径)",
+            "feedback": feedback_text,
         });
         if let Err(error) = ws.send_json(&feedback).await {
             observation.push_event(json!({"type": "matrix_error", "message": error}));
@@ -2263,6 +2277,36 @@ impl MatrixEnvironment {
                 self.work_item_id = Some(id.to_string());
             }
         }
+    }
+
+    /// r33:confirmed design 当前版本正文的有效需求编号清单(供 plan SC
+    /// 修订反馈纠偏 AI 编造编号;产品 store list_versions 读正文,空/缺
+    /// 失时返回空串=反馈退回基础文案)。
+    fn design_requirement_ids_digest(&self) -> String {
+        let Some(entity_id) = self.design_spec_id.as_deref() else {
+            return String::new();
+        };
+        let Ok(mut versions) =
+            self.lifecycle
+                .list_versions(PROJECT_ID, &self.issue_id, entity_id)
+        else {
+            return String::new();
+        };
+        versions.sort_by_key(|version| version.version);
+        let Some(latest) = versions.last() else {
+            return String::new();
+        };
+        extract_requirement_ids(&latest.markdown)
+            .into_iter()
+            .map(|(id, brief)| {
+                if brief.is_empty() {
+                    format!("- {id}")
+                } else {
+                    format!("- {id}:{brief}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     // -----------------------------------------------------------------------
@@ -3341,6 +3385,49 @@ fn truncate_verbose_wire_fields(value: &mut Value) {
             }
         }
     }
+}
+
+/// r33:从 design 正文提取有效需求编号清单(REQ-xxx/NFR-xxx token + 同行
+/// 剩余文本作一句话描述,截 80 字符;去重保序)。纯函数可单测。
+fn extract_requirement_ids(markdown: &str) -> Vec<(String, String)> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut ordered: Vec<(String, String)> = Vec::new();
+    for line in markdown.lines() {
+        let mut rest = line;
+        while let Some((id, after)) = find_requirement_token(rest) {
+            let brief: String = after
+                .trim()
+                .trim_start_matches(|c| matches!(c, ':' | '：' | '-' | '—'))
+                .trim()
+                .chars()
+                .take(80)
+                .collect();
+            if seen.insert(id.clone()) {
+                ordered.push((id, brief));
+            }
+            rest = after;
+        }
+    }
+    ordered
+}
+
+/// 在文本中找首个需求编号 token(REQ-/NFR- 前缀 + 字母数字/-/_ 尾部),
+/// 返回 (编号, 其后剩余文本);无命中返回 None。
+fn find_requirement_token(text: &str) -> Option<(String, &str)> {
+    for (offset, _) in text.char_indices() {
+        let window = &text[offset..];
+        if !(window.starts_with("REQ-") || window.starts_with("NFR-")) {
+            continue;
+        }
+        let id_end = window[4..]
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+            .map(|end| 4 + end)
+            .unwrap_or(window.len());
+        if id_end > 4 {
+            return Some((window[..id_end].to_string(), &window[id_end..]));
+        }
+    }
+    None
 }
 
 /// r27 问题1:帧是否携带非空产物 markdown(artifact_update 的 payload,或
@@ -4471,6 +4558,24 @@ mod pump_disposition_tests {
         assert!(!frame_carries_artifact_markdown("session_state", &no_artifact));
         let chunk = json!({"type": "stream_chunk", "content": "# 不是产物"});
         assert!(!frame_carries_artifact_markdown("stream_chunk", &chunk));
+    }
+
+    /// r33:需求编号提取器——design 正文中的 REQ-/NFR- 编号(含同行简述,
+    /// 截 80 字符)去重保序列出;一行多编号逐个提取;非编号文本忽略。
+    #[test]
+    fn lcg_extract_requirement_ids_lists_design_ids_with_brief() {
+        let markdown = "# Design Spec\n\n## REQ-ENV-01: 会话签发接口\n签发与会话查询。\n\n## NFR-PERF-2 延迟上限\nP99 < 50ms(REQ-ENV-01 同样适用)。\n\n无关行不含编号。";
+        let ids = extract_requirement_ids(markdown);
+        let plain: Vec<&str> = ids.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(plain, vec!["REQ-ENV-01", "NFR-PERF-2"], "编号保序去重: {ids:?}");
+        assert!(
+            ids[0].1.contains("会话签发接口"),
+            "同行剩余文本作一句话描述: {ids:?}"
+        );
+        // 同编号第二次出现不重复;编号后无尾字符(如孤立 REQ-)不提取。
+        let dup = extract_requirement_ids("REQ-A-1: x\nREQ-A-1: y\nREQ-");
+        assert_eq!(dup.len(), 1, "重复编号去重、裸前缀不提取: {dup:?}");
+        assert!(dup[0].1.contains('x'), "保留首次出现的简述: {dup:?}");
     }
 
 }
