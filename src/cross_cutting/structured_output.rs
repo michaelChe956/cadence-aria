@@ -402,7 +402,12 @@ fn recover_json_object(text: &str) -> Result<Value, ()> {
 /// 串内的弯引号是数据，一律不动。serde 仍是 JSON 合法性的最终权威：
 /// 归一后仍非法则照旧 `invalid_json`，不静默放行。
 fn normalize_curly_json_delimiters(text: &str) -> Cow<'_, str> {
-    if !text.contains('\u{201c}') && !text.contains('\u{201d}') {
+    // r47b:全角结构标点(，：)与弯引号同族——任一在场即进入归一。
+    if !text.contains('\u{201c}')
+        && !text.contains('\u{201d}')
+        && !text.contains('\u{ff0c}')
+        && !text.contains('\u{ff1a}')
+    {
         return Cow::Borrowed(text);
     }
     let chars: Vec<char> = text.chars().collect();
@@ -452,6 +457,14 @@ fn normalize_curly_json_delimiters(text: &str) -> Cow<'_, str> {
                 in_string = true;
                 curly_string = true;
             }
+            // r47b(claude r47b verification review 现场):IME 形态下结构位
+            // 的字段分隔逗号(，U+FF0C)与键值冒号(：U+FF1A)也输出为全角
+            // ——弯引号归一后全角标点残留,serde 仍 invalid_json
+            //(raw_output_preview 实测:[]”,“category”: 形态)。字符串外
+            // 归一为 ASCII;字符串内(in_string 分支已 continue)是数据,
+            // 逐字保留。
+            '\u{ff0c}' => out.push(','),
+            '\u{ff1a}' => out.push(':'),
             _ => out.push(ch),
         }
         index += 1;
@@ -465,9 +478,10 @@ fn next_is_structural(chars: &[char], from: usize) -> bool {
     chars[from..]
         .iter()
         .find(|ch| !ch.is_whitespace())
-        .is_none_or(|ch| matches!(ch, ',' | ':' | '}' | ']'))
+        .is_none_or(|ch| {
+            matches!(ch, ',' | ':' | '}' | ']' | '\u{ff0c}' | '\u{ff1a}')
+        })
 }
-
 fn sentinel_json_candidate(text: &str) -> Result<&str, ()> {
     let trimmed = text.trim();
     if !trimmed.starts_with("```") {
@@ -920,5 +934,28 @@ mod tests {
 
         assert_eq!(error.code, StructuredOutputErrorCode::NonceMismatch);
         assert_eq!(error.observed_nonce.as_deref(), Some("deadbeef"));
+    }
+    #[test]
+    fn normalizes_fullwidth_structural_punctuation_alongside_curly_quotes() {
+        // r47b 现场(claude verification review):reviewer 的 sentinel JSON
+        // 弯引号+全角逗号/冒号混排(IME 形态)——弯引号归一后全角标点残留
+        // 结构位,serde 仍 invalid_json(raw_output_preview 实测:[]”，“category”: 形态)。
+        // 修:结构位(字符串外)全角标点归一 ASCII;字符串内是数据保留。
+        let body = "{“nonce”:“96aca42f”，“verdict”:“pass”，“summary”:“含数据逗号，与冒号：保留”，“findings”:[{“severity”:“suggestion”，“message”:“建议文本”}]}";
+
+        let parsed = parse_structured_output(
+            &format!("<ARIA_STRUCTURED_OUTPUT nonce=“96aca42f”>{body}</ARIA_STRUCTURED_OUTPUT>"),
+            &contract(),
+        );
+
+        assert_eq!(
+            parsed.state,
+            StructuredOutputState::Parsed(json!({
+                "verdict": "pass",
+                "summary": "含数据逗号，与冒号：保留",
+                "findings": [{"severity": "suggestion", "message": "建议文本"}]
+            })),
+            "结构位全角标点归一后必须解析成功,字符串内全角标点是数据保留"
+        );
     }
 }

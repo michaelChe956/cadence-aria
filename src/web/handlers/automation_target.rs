@@ -332,8 +332,9 @@ mod tests {
         assert!(!enrollment_file_exists(&fixture));
     }
 
-    /// Codex reviewer 在当前固定 danger-full-access sandbox 下被 gateway 路由
-    /// 静态拒绝（与 `enforce_route_policy` 同源）；GET 与 PUT 同码。
+    /// r47 后 Codex 全局路由块已移除(LC 投影无 danger 面,能力行决定访问):
+    /// bootstrap-only(无探针记录)的 codex 行 launch=Unknown,被能力层以
+    /// `provider_capability_launch_not_confirmed` 拒绝;GET 与 PUT 同码。
     #[tokio::test]
     async fn automation_target_rejects_codex_reviewer_under_default_sandbox() {
         let fixture = seed_fixture(1, true);
@@ -354,10 +355,9 @@ mod tests {
             .cloned()
             .unwrap_or_default();
         assert!(
-            violations
-                .iter()
-                .any(|violation| violation["reason_code"] == "codex_danger_full_access_unsupported"),
-            "violations should carry the stable gateway verdict code, got: {payload}"
+            violations.iter().any(|violation| violation["reason_code"]
+                == "provider_capability_launch_not_confirmed"),
+            "violations should carry the capability-layer verdict code, got: {payload}"
         );
 
         let mut enable = enrollment_body(&fixture, 1, 1);

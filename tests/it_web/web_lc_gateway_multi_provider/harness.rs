@@ -42,6 +42,12 @@ use cadence_aria::product::logical_codebase::provider_boundary_probe::{
 use cadence_aria::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
 
 use cadence_aria::product::logical_codebase::store::LogicalCodebaseStore;
+use cadence_aria::product::logical_codebase::provider_trust::{
+    HomeBackedProviderTrustRegistry, ProviderTrustPrecondition,
+};
+use cadence_aria::product::logical_codebase::provider_trust_adapters::{
+    CodexTrustAdapter, KimiTrustAdapter,
+};
 use cadence_aria::product::logical_codebase::types::{
     CodebaseMemberRecord, RepositoryCheckoutRecord,
 };
@@ -755,6 +761,14 @@ impl MatrixEnvironment {
         // 5) canonical root/target 定位 + 成员 issue。
         env.resolve_member_target().await?;
         env.create_issue().await?;
+        //      「provider trust not established for Codex: entry absent」
+        //      ——聚合初始化的 trust 硬前置门按 recipe 固定只评估
+        //      ClaudeCode(自身无用户级 trust 面,requires_workspace_trust
+        //      过滤后恒空),codex/kimi 的 workspace trust 条目无登记入口。
+        //      环境构造与生产 production_provider_trust_precondition 同源
+        //      构造 home 背书 registry,把 trust 面 provider 登记为 Ready
+        //      (claude/pi 无 trust 工件,registry 内部过滤跳过)。
+        env.ensure_provider_trust().await?;
         // 6) r25 接线:capability 真实验证导入(索引 ready 后、五阶段前)。
         //    bootstrap 只落全 Unknown:launch/write_boundary 靠 2b 过渡桥
         //    放行,resume 无桥(gateway 仅 Confirmed 放行)——story/design
@@ -877,6 +891,98 @@ impl MatrixEnvironment {
             );
         }
         Ok(())
+    }
+    /// r4:trust 面 provider 的用户级 workspace trust 登记(codex/kimi;
+    /// registry 内 `requires_workspace_trust` 过滤,pi/claude 天然跳过)。
+    /// canonical root 与 gateway authority root 同源(manifest
+    /// provider_context_root 的 canonicalize,见 gateway_factory
+    /// build_scoped);HOME 与生产 trust 装配同源。Waiting=可重试等待面,
+    /// 失败即 BLOCKED 真实报告,绝不伪造 Ready。
+    async fn ensure_provider_trust(&mut self) -> Result<(), LiveMatrixFailure> {
+        fp_enter_phase("env", "provider_trust_ensure", "-");
+        let Some(home) = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(std::path::PathBuf::from)
+            .filter(|home| home.is_absolute())
+        else {
+            let failure = matrix_failure(
+                "provider_trust_home_unavailable",
+                "HOME/USERPROFILE 缺失:无法构造 home 背书 trust registry".to_string(),
+                None,
+            );
+            return Err(self.fail_with_diagnostics(failure, None).await);
+        };
+        let store = LogicalCodebaseStore::for_lc(self.app_paths.clone(), self.lc_id.clone());
+        let manifest = match store.load_manifest(PROJECT_ID) {
+            Ok(Some(manifest)) => manifest,
+            Ok(None) => {
+                let failure = matrix_failure(
+                    "provider_trust_manifest_missing",
+                    "LC manifest 缺失:无法定位 provider_context_root".to_string(),
+                    None,
+                );
+                return Err(self.fail_with_diagnostics(failure, None).await);
+            }
+            Err(error) => {
+                let failure = matrix_failure(
+                    "provider_trust_manifest_error",
+                    format!("读取 LC manifest 失败:{error}"),
+                    None,
+                );
+                return Err(self.fail_with_diagnostics(failure, None).await);
+            }
+        };
+        let canonical_root = std::fs::canonicalize(&manifest.provider_context_root)
+            .unwrap_or_else(|_| manifest.provider_context_root.clone());
+        let registry = HomeBackedProviderTrustRegistry::new(
+            self.app_paths.clone(),
+            vec![
+                std::sync::Arc::new(CodexTrustAdapter::for_home(&home)),
+                std::sync::Arc::new(KimiTrustAdapter::for_home(&home)),
+            ],
+        );
+        let operation_id = format!("lcg-matrix-trust-{}", self.lc_id);
+        match registry.ensure_before_recipe(
+            PROJECT_ID,
+            &operation_id,
+            &self.lc_id,
+            &canonical_root,
+            &[
+                ProviderName::Codex,
+                ProviderName::Pi,
+                ProviderName::KimiCode,
+            ],
+        ) {
+            cadence_aria::product::logical_codebase::ProviderTrustPreparationResult::Ready {
+                registrations,
+            } => {
+                let summary = registrations
+                    .iter()
+                    .map(|registration| {
+                        format!(
+                            "{:?}={:?}",
+                            registration.provider, registration.result
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                fp("provider_trust_ready", summary);
+                Ok(())
+            }
+            cadence_aria::product::logical_codebase::ProviderTrustPreparationResult::Waiting {
+                waiting,
+            } => {
+                let failure = matrix_failure(
+                    "provider_trust_waiting",
+                    format!(
+                        "trust 登记未 Ready(provider={:?} reason={} message={};环境不可运行)",
+                        waiting.provider, waiting.reason_code, waiting.message
+                    ),
+                    None,
+                );
+                Err(self.fail_with_diagnostics(failure, None).await)
+            }
+        }
     }
 
     fn workspace_root_path(&self) -> &Path {
