@@ -293,6 +293,9 @@ pub struct BoundaryFixture {
     session_label: String,
     /// resume 面 probe 规格(None = resume 未探测,只验 launch/write 面)。
     resume: Option<ResumeProbeSpec>,
+    /// r50:请求 action 原样保留——Planning/Review 两只读 action 探针
+    /// 形态同构但导入行不同,不得折叠(boundary_action 由此取值)。
+    action: SessionPolicyAction,
 }
 
 impl BoundaryFixture {
@@ -401,6 +404,7 @@ impl BoundaryFixture {
             evidence_root: evidence_root.to_path_buf(),
             session_label: session_label.to_string(),
             resume: None,
+            action,
         })
     }
 
@@ -455,7 +459,9 @@ impl BoundaryFixture {
         if self.target.is_some() {
             SessionPolicyAction::CodingTargetWrite
         } else {
-            SessionPolicyAction::PlanningReadOnly
+            // r50:只读两 action 原样透传(请求 Review 即 Review——导入行
+            // 与能力矩阵消费行必须同 action,折叠会让该行恒 Unknown)。
+            self.action
         }
     }
 
@@ -2296,6 +2302,52 @@ mod tests {
     /// 以原生参数执行完整 probe(含 resume 面)并返回 (evidence, projection),
     /// 结果可经 2d `record_verified_probe` 导入 durable——矩阵 LC setup 段
     /// capability 播种链端到端(probe→2c shape→2d import)。
+
+    /// r50(#1 残根,coding fresh 现场):BoundaryFixture::boundary_action
+    /// 把 ReviewReadOnly 折叠为 PlanningReadOnly(无 target 即 Planning),
+    /// projection/evidence/2d 导入全落在 planning 行——review_read_only
+    /// 行恒 Unknown,code review reviewer 的原生 resume 被
+    /// require_resume_supported 拒(provider_gateway_resume_not_supported,
+    /// r50 实测探针 evidence.action=planning_read_only)。修:fixture 记住
+    /// 请求 action,只读两 action 原样透传。
+    #[test]
+    fn boundary_fixture_preserves_requested_review_read_only_action() {
+        let base = tempdir().expect("base dir");
+        let fixture = super::BoundaryFixture::create(
+            ProviderName::ClaudeCode,
+            "claude",
+            SessionPolicyAction::ReviewReadOnly,
+            base.path(),
+            &base.path().join("evidence"),
+            "unit-review-action-fixture",
+        )
+        .expect("fixture");
+        assert_eq!(
+            fixture.boundary_action(),
+            SessionPolicyAction::ReviewReadOnly,
+            "ReviewReadOnly 探针请求不得折叠为 PlanningReadOnly(r50 现场:reviewer resume 行恒 Unknown)"
+        );
+        let planning = super::BoundaryFixture::create(
+            ProviderName::ClaudeCode,
+            "claude",
+            SessionPolicyAction::PlanningReadOnly,
+            base.path(),
+            &base.path().join("evidence"),
+            "unit-planning-action-fixture",
+        )
+        .expect("fixture");
+        assert_eq!(planning.boundary_action(), SessionPolicyAction::PlanningReadOnly);
+        let coding = super::BoundaryFixture::create(
+            ProviderName::ClaudeCode,
+            "claude",
+            SessionPolicyAction::CodingTargetWrite,
+            base.path(),
+            &base.path().join("evidence"),
+            "unit-coding-action-fixture",
+        )
+        .expect("fixture");
+        assert_eq!(coding.boundary_action(), SessionPolicyAction::CodingTargetWrite);
+    }
     #[tokio::test]
     async fn lcg_t06_external_cli_probe_entry_feeds_2d_import() {
         let launcher = ProviderBoundaryLauncher::probe_environment();

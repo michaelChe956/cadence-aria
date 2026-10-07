@@ -2337,8 +2337,13 @@ impl MatrixEnvironment {
             }
         }
         observation.completed_product_artifact_exists = confirmed;
+        // r50(#2 残根):plan resume 轮以 cross-review reviewer 驱动收尾
+        //——role 不过滤的「最新 audit」取到 reviewer 的 native id(r50 现场
+        // 57d8≠请求 4ddb,实测值实为 reviewer 泄漏)。原生恢复确认的比对
+        // 面必须是 Author(work_item_splitter)驱动;story/design resume
+        // Confirmed 证明 CLI streaming resume 保持同 id,无 fork。
         observation.native_confirmed_id =
-            self.latest_audit_native_id(session_id, &self.provider, None);
+            self.latest_audit_native_id(session_id, &self.provider, Some("work_item_splitter"));
         observation.build_cell(self)
     }
 
