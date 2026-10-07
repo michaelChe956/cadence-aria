@@ -2344,6 +2344,29 @@ impl MatrixEnvironment {
         // Confirmed 证明 CLI streaming resume 保持同 id,无 fork。
         observation.native_confirmed_id =
             self.latest_audit_native_id(session_id, &self.provider, Some("work_item_splitter"));
+        // r51(#2 残根取证):修订轮 Author(work_item_splitter)面最新审计的
+        // argv 全文——argv 带 --resume<fresh id> 而 native 变化 = CLI fork;
+        // argv 无 --resume = adapter 9b resume 审计门(GC9/drift,mod.rs
+        // 758-807 清 resume)在 spawn 前清除。两案修法不同,以本足迹裁决。
+        if let Some((_, record)) = self
+            .scan_session_audits(session_id)
+            .into_iter()
+            .find(|(_, record)| record.role == "work_item_splitter")
+        {
+            fp(
+                "plan_resume_author_audit",
+                format_args!(
+                    "native={} argv_resume={:?} argv={:?}",
+                    record.provider_session_id,
+                    record
+                        .argv
+                        .iter()
+                        .position(|token| token == "--resume")
+                        .map(|index| record.argv.get(index + 1).cloned()),
+                    record.argv
+                ),
+            );
+        }
         observation.build_cell(self)
     }
 

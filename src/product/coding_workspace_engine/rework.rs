@@ -337,7 +337,8 @@ impl CodingWorkspaceEngine {
                 plan_defect_report.as_ref(),
                 plan_defect_error.as_deref(),
                 Some(raw_provider_output_ref.clone()),
-            )?
+            )
+            .await?
         } else if plan_defect_decision
             .is_some_and(|decision| decision != CodeReviewFlowDecision::RunCoderFix)
         {

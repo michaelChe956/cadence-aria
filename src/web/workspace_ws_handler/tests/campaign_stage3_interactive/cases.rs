@@ -1111,3 +1111,58 @@ async fn campaign_stage3_gate_revision_turn_resumes_recorded_author_native_sessi
         "SC 门修订 turn 必须以 fresh 轮记录的 Author native session resume"
     );
 }
+
+#[tokio::test]
+async fn campaign_stage3_gate_revision_resumes_from_spawn_audit_when_conversations_lost() {
+    // r51(#2 现场,plan resume 请求 547c 实测 424c):修订 turn 输入无
+    // resume id(fresh 出新 id)。现场形态=fresh 轮 spawn 审计在场而会话
+    // 引用(内存+durable provider_conversations)缺失——修订臂必须经
+    // 审计兜底(provider_resume_session_id 第三级)携带 fresh 轮原生 id。
+    let harness = campaign_stage3_fixture(
+        2,
+        vec![RevisionScriptStep::Complete(campaign_candidate_base())],
+    )
+    .await;
+    // 只落 fresh 轮 spawn 审计(work_item_splitter/claude-code/547c),
+    // 会话引用刻意留空(r49/r51 现场形态)。
+    {
+        let record = harness.session_record().await;
+        assert!(
+            record.provider_conversations.is_empty(),
+            "现场形态:会话引用缺失"
+        );
+        use crate::cross_cutting::tool_policy_audit::{
+            DurableToolPolicyEvent, ProviderStartAudit, RoleRunBoundAuditSink,
+        };
+        let sink = RoleRunBoundAuditSink::new(
+            std::sync::Arc::new(crate::product::lifecycle_store::LifecycleStore::new(
+                harness.app_paths.clone(),
+            )),
+            &harness.session_id,
+            9,
+        )
+        .into_sink();
+        sink.append_bound(DurableToolPolicyEvent::ProviderStart(ProviderStartAudit {
+            provider: "claude-code".to_string(),
+            role: "work_item_splitter".to_string(),
+            provider_session_id: "547c1779-c31d-4f2a-ae16-84a9d291d910".to_string(),
+            ..ProviderStartAudit::default()
+        }))
+        .expect("seed fresh author spawn audit");
+    }
+    harness
+        .send(WsInMessage::HumanGateFeedback {
+            command_id: "cmd-campaign-r51-audit-resume".to_string(),
+            feedback: "按矩阵反馈修订拆分方案".to_string(),
+        })
+        .await;
+    let _ = harness.await_gate_event("human_gate_turn_open").await;
+    let _ = harness.await_gate_event("human_gate_turn_completed").await;
+
+    assert_eq!(
+        harness.provider.resume_ids(),
+        vec![Some("547c1779-c31d-4f2a-ae16-84a9d291d910".to_string())],
+        "会话引用缺失时修订 turn 必须经 spawn 审计兜底携带 fresh 轮原生 resume id"
+    );
+}
+

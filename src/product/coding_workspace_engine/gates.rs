@@ -174,7 +174,7 @@ impl CodingWorkspaceEngine {
     /// 当 Coder 输出无法进入任何自动化路由（plan defect 契约校验失败，
     /// 或 finding 校验后仍只能人工分诊）时，落地人工分诊 blocked gate，
     /// 避免流程停在 running/coding 而 UI 没有任何可操作入口。
-    pub(crate) fn open_coding_output_human_triage_gate(
+    pub(crate) async fn open_coding_output_human_triage_gate(
         &self,
         attempt: &CodingExecutionAttempt,
         node_id: &str,
@@ -221,6 +221,19 @@ impl CodingWorkspaceEngine {
                 ],
             },
         )?;
+        // r51(#1 残点,coding fresh 现场):门必须同帧可见——只落盘不发帧时,
+        // 客户端(WS 泵)无门可应答,r51 现场 blocked 后 35min 零 gate 帧
+        // 空转到阶段超时。与 rework 上限门/审查中断门同构:落盘后发射
+        // CodingGateRequired(durable-first,断连不回滚业务事实)。
+        let _ = self
+            .event_tx
+            .send(CodingWsOutMessage::CodingGateRequired { gate: self
+                .store
+                .list_open_blocked_gates(&updated.project_id, &updated.issue_id, &updated.id)?
+                .into_iter()
+                .find(|gate| gate.reason_code.as_deref() == Some(CODING_OUTPUT_HUMAN_TRIAGE_REASON_CODE))
+                .expect("triage gate just created") })
+            .await;
         Ok(updated)
     }
 

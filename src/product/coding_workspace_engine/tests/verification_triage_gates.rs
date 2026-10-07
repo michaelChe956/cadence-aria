@@ -286,6 +286,7 @@ async fn verification_triage_entry_keeps_gate_action_sets_unchanged() {
             Some("structured output parse failed"),
             None,
         )
+        .await
         .expect("coder output gate");
     let coder_record = engine2
         .enter_verification_triage(
@@ -904,3 +905,39 @@ async fn rerun_planned_command_routes_via_rework_once_per_command() {
     assert_eq!(reports[0].findings.len(), 1);
     assert_eq!(reports[0].findings[0].message, "missing validation");
 }
+
+/// r51(#1 残点,coding fresh 现场):coder 输出人工分诊门只落盘不发帧——
+/// open_coding_output_human_triage_gate 置 Blocked+create_blocked_gate 后
+/// 直接返回,durable 门存在但客户端永不可见(r51 现场 19:48:42 blocked
+/// 后零 gate 帧,泵无门可应答,35min 空转到阶段超时)。修:与 rework
+/// 上限门/审查中断门同构,落盘后发射 CodingGateRequired。
+#[tokio::test]
+async fn coding_output_human_triage_gate_emits_gate_required_frame() {
+    let (root, store, _shadow_engine, attempt) = verification_triage_group_fixture();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let updated = engine
+        .open_coding_output_human_triage_gate(
+            &attempt,
+            "coding_node_0001",
+            None,
+            Some("structured output parse failed"),
+            None,
+        )
+        .await
+        .expect("coder output gate");
+    assert_eq!(updated.status, CodingAttemptStatus::Blocked);
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        .await
+        .expect("gate frame within timeout")
+        .expect("channel open");
+    match frame {
+        crate::web::coding_ws_handler::CodingWsOutMessage::CodingGateRequired { gate } => {
+            assert_eq!(gate.reason_code.as_deref(), Some("coding_output_human_triage"));
+            assert_eq!(gate.title, "Coder 输出需要人工分诊");
+        }
+        other => panic!("expected CodingGateRequired, got {other:?}"),
+    }
+    drop(root);
+}
+
