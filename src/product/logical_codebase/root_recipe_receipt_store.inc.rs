@@ -466,6 +466,15 @@ fn validate_allowlist(allowlist: &[String]) -> Result<(), ProductStoreError> {
 /// `.aria/aggregate` 脚手架）。
 fn allowlist_scope_contains(path: &str, allowlist: &[String]) -> bool {
     allowlist.iter().any(|prefix| {
+        // r49:尾缀 `*` 通配条目(如 `.mcp.json.cadence-backup-*`)按
+        // 字面头匹配——`*` 只吸收同目录字符,不跨 `/`(子目录伪装仍
+        // UnknownPath);非通配条目保持精确前缀语义不变。
+        if let Some(head) = prefix.strip_suffix('*') {
+            return !head.is_empty()
+                && !head.contains('*')
+                && path.starts_with(head)
+                && !path[head.len()..].contains('/');
+        }
         if path == prefix || path.starts_with(&format!("{prefix}/")) {
             return true;
         }

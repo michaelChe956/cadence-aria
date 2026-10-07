@@ -336,6 +336,7 @@ mod tests {
                 "AGENTS.md",
                 "CLAUDE.md",
                 ".mcp.json",
+                ".mcp.json.cadence-backup-*",
                 ".gitignore",
                 ".claude",
                 ".agents",
@@ -441,6 +442,75 @@ mod tests {
             receipt.verdict,
             RootRecipeCommandVerdict::Rejected,
             "any unknown-path write keeps the command rejected"
+        );
+    }
+
+    /// r49(claude r48 现场,8 组 receipts 诊断):Claude CLI 修改 `.mcp.json`
+    /// 时自动落 `.mcp.json.cadence-backup-<时间戳>` 备份——CLI 工具自身
+    /// 管理性文件(与 `.codegraph` daemon 共存同类),不在精确 allowlist →
+    /// 02/03 步 unknown_path 拒;同 workspace 重试时上次 `.mcp.json` 残留
+    /// 必触发备份,重试循环 7200s 超时。修:allowlist 增 `-` 尾缀通配条目
+    /// `.mcp.json.cadence-backup-*`,只匹配根级单文件(`*` 不跨 `/`)。
+    #[test]
+    fn receipt_auditor_allows_claude_cli_mcp_backup_artifacts() {
+        let fixture = ReceiptFixture::new();
+        let auditor = RootRecipeFilesystemAuditor::new();
+
+        let (step, command) = command_spec(3);
+        let watch = auditor
+            .before_command(OPERATION_ID, &fixture.root, step, 3, command)
+            .unwrap();
+
+        // CLI 真实备份形态(r48 receipts 实测):.mcp.json 修改 + 同批备份。
+        std::fs::write(fixture.root.join(".mcp.json"), "{\"mcpServers\":{}}\n").unwrap();
+        std::fs::write(
+            fixture.root.join(".mcp.json.cadence-backup-20261007T081530-012345"),
+            "{\"mcpServers\":{}}\n",
+        )
+        .unwrap();
+        // 通配不得跨 `/`:目录化伪装仍拒。
+        std::fs::create_dir_all(fixture.root.join(".mcp.json.cadence-backup-evil")).unwrap();
+        std::fs::write(
+            fixture.root.join(".mcp.json.cadence-backup-evil/payload.md"),
+            "# rogue\n",
+        )
+        .unwrap();
+        // 前缀不完整(`-` 后缀未对齐)的伪装仍拒。
+        std::fs::write(fixture.root.join(".mcp.json.cadence-backupX"), "x").unwrap();
+
+        let receipt = auditor
+            .after_command(watch, RECORDED_AT.to_string())
+            .unwrap();
+
+        let (class, allowed) = change_of(&receipt, ".mcp.json");
+        assert_eq!(class, &RootRecipeChangeClass::AllowlistedArtifact);
+        assert!(allowed, ".mcp.json itself stays allowlisted");
+        let (class, allowed) = change_of(&receipt, ".mcp.json.cadence-backup-20261007T081530-012345");
+        assert_eq!(
+            class, &RootRecipeChangeClass::AllowlistedArtifact,
+            "CLI 自身管理性备份文件必须按通配 allowlist 放行(r48 现场根因)"
+        );
+        assert!(allowed, "backup artifact must be allowed");
+        let (class, allowed) = change_of(&receipt, ".mcp.json.cadence-backup-evil");
+        assert_eq!(class, &RootRecipeChangeClass::AllowlistedArtifact);
+        assert!(allowed, "pattern-matching directory component itself matches the single-level glob");
+        let (class, allowed) = change_of(&receipt, ".mcp.json.cadence-backup-evil/payload.md");
+        assert_eq!(
+            class, &RootRecipeChangeClass::UnknownPath,
+            "glob must not cross '/' into subdirectories"
+        );
+        assert!(!allowed);
+        let (class, allowed) = change_of(&receipt, ".mcp.json.cadence-backupX");
+        assert_eq!(
+            class, &RootRecipeChangeClass::UnknownPath,
+            "incomplete prefix must not match"
+        );
+        assert!(!allowed);
+
+        assert_eq!(
+            receipt.verdict,
+            RootRecipeCommandVerdict::Rejected,
+            "subdirectory payload keeps the command rejected"
         );
     }
 

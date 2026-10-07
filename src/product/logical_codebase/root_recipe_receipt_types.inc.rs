@@ -11,7 +11,10 @@
 /// 放行成员仓路径（D2；成员 `.git` 分类优先于 allowlist）。2026-10-02
 /// E2E 增补：`.codegraph`/`codegraph.json` 为产品自管聚合索引面
 /// （aggregate_index/exclude.rs 根扫描白名单同款），索引建立后 codegraph
-/// daemon 与 recipe 共存属真实部署事实，按此补齐。
+/// daemon 与 recipe 共存属真实部署事实，按此补齐。r49(claude r48 现场)
+/// 增补：`.mcp.json.cadence-backup-*` 为 Claude CLI 修改 `.mcp.json` 时
+/// 自动落盘的管理性备份（CLI 自身行为，同 workspace 重试必触发）；尾缀
+/// `*` 通配仅匹配同目录单文件（不跨 `/`，见 allowlist_scope_contains）。
 pub const ROOT_RECIPE_ALLOWLIST: &[&str] = &[
     ".aria/aggregate",
     ".codegraph",
@@ -19,6 +22,7 @@ pub const ROOT_RECIPE_ALLOWLIST: &[&str] = &[
     "AGENTS.md",
     "CLAUDE.md",
     ".mcp.json",
+    ".mcp.json.cadence-backup-*",
     ".gitignore",
     ".claude",
     ".agents",
