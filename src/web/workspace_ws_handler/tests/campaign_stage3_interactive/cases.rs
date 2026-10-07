@@ -1073,3 +1073,41 @@ async fn campaign_stage3_interactive_gate_round_records_author_revision_facts() 
     assert!(!turn_id.is_empty());
 }
 
+#[tokio::test]
+async fn campaign_stage3_gate_revision_turn_resumes_recorded_author_native_session() {
+    // r50(#3,claude r49 plan resume 现场):SC 门修订 turn 的 provider 输入
+    // 无 resume id——argv 不带 --resume,CLI fresh 出新 native id
+    //(6fe0…≠fresh 轮 4ee4…),resume 格「原生恢复未确认」denied。fresh 轮
+    // Author native session 由 drive 完成时 record_provider_session 落
+    // 内存+durable;修订 turn 输入必须携带该 id(--resume 续接原生会话)。
+    let harness = campaign_stage3_fixture(
+        2,
+        vec![RevisionScriptStep::Complete(campaign_candidate_base())],
+    )
+    .await;
+    {
+        let mut engine = harness.engine.lock().await;
+        engine
+            .record_provider_session(
+                crate::product::models::ProviderConversationRole::Author,
+                crate::product::models::ProviderName::ClaudeCode,
+                Some("author-native-r50".to_string()),
+                Some("node-fresh".to_string()),
+            )
+            .await;
+    }
+    harness
+        .send(WsInMessage::HumanGateFeedback {
+            command_id: "cmd-campaign-r50-resume".to_string(),
+            feedback: "按矩阵反馈修订拆分方案".to_string(),
+        })
+        .await;
+    let _ = harness.await_gate_event("human_gate_turn_open").await;
+    let _ = harness.await_gate_event("human_gate_turn_completed").await;
+
+    assert_eq!(
+        harness.provider.resume_ids(),
+        vec![Some("author-native-r50".to_string())],
+        "SC 门修订 turn 必须以 fresh 轮记录的 Author native session resume"
+    );
+}

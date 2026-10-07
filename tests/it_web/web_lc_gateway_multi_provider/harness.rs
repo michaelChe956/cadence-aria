@@ -812,6 +812,13 @@ impl MatrixEnvironment {
         for action in [
             SessionPolicyAction::CodingTargetWrite,
             SessionPolicyAction::PlanningReadOnly,
+            // r50(#1,coding fresh 现场):code review reviewer 角色经
+            // ReviewReadOnly 启动——review round 2 的 reviewer 原生 resume
+            // 被 require_resume_supported 拒(provider_gateway_resume_not_
+            // supported:探针未覆盖该 action,resume 分格 Unknown)。探针
+            // 与 PlanningReadOnly 同族(只读+Reviewer 角色),补齐后 reviewer
+            // resume=Confirmed,round 2 正常续接。
+            SessionPolicyAction::ReviewReadOnly,
         ] {
             let label = format!(
                 "matrix-{}-{}",
@@ -2925,6 +2932,14 @@ impl MatrixEnvironment {
         // 第 2 次出现即判重试无效有界落格)。
         let mut blocked_gate_retries: std::collections::BTreeMap<String, u32> =
             std::collections::BTreeMap::new();
+        // r50(#2,coding fresh 现场):gate_response 失败计数——retry_review
+        // 应答撞 stale-read 竞态(coding_failed_review_recovery_requires_
+        // reservation)时补一次延迟重试(恢复 admission 需 durable Blocked
+        // 态落定);第 2 次失败即有界落格,不烧满 stage_timeout(r49 现场
+        // 34min 空转到阶段超时)。
+        let mut gate_response_failures: std::collections::BTreeMap<String, (u32, String)> =
+            std::collections::BTreeMap::new();
+        let mut last_gate_response: Option<(String, String)> = None;
         let deadline = tokio::time::Instant::now() + self.stage_timeout;
         let mut idle_deadline = tokio::time::Instant::now() + IDLE_PING_SECS;
         let coding_started = std::time::Instant::now();
@@ -3019,6 +3034,7 @@ impl MatrixEnvironment {
                         }
                     }
                     if !gate_id.is_empty() && !action_id.is_empty() {
+                        last_gate_response = Some((gate_id.to_string(), action_id.to_string()));
                         let _ = ws
                             .send_json(&json!({
                                 "type": "gate_response",
@@ -3028,6 +3044,52 @@ impl MatrixEnvironment {
                             }))
                             .await;
                     }
+                }
+                "coding_protocol_error" => {
+                    // r50(#2):gate_response 失败(retry_review 恢复协议撞
+                    // stale-read 竞态)→ 2s 后补一次重试(恢复 admission 需
+                    // durable Blocked 态与 role run 落定);同门第 2 次失败
+                    // 即有界落格,不空转到阶段超时。
+                    let code = message.get("code").and_then(Value::as_str).unwrap_or_default();
+                    if code != "coding_gate_response_failed" {
+                        continue;
+                    }
+                    let Some((gate_id, action_id)) = last_gate_response.clone() else {
+                        continue;
+                    };
+                    let entry = gate_response_failures
+                        .entry(gate_id.clone())
+                        .or_insert((0u32, String::new()));
+                    entry.0 += 1;
+                    entry.1 = message
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    if entry.0 >= 2 {
+                        observation.run_failure = Some(format!(
+                            "coding gate_response 重试仍失败(gate={gate_id} action={action_id} error={});恢复协议不可达,不空转",
+                            entry.1
+                        ));
+                        fp(
+                            "coding_pump_gate_response_unrecoverable",
+                            format_args!("gate={gate_id} action={action_id}"),
+                        );
+                        return outcome;
+                    }
+                    fp(
+                        "coding_pump_gate_response_retry",
+                        format_args!("gate={gate_id} action={action_id} attempt={}", entry.0),
+                    );
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    let _ = ws
+                        .send_json(&json!({
+                            "type": "gate_response",
+                            "gate_id": gate_id,
+                            "action_id": action_id,
+                            "extra_context": null
+                        }))
+                        .await;
                 }
                 "coding_session_state" => {
                     if let Some(status) = message.get("status").and_then(Value::as_str) {

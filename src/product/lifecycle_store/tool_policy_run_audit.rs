@@ -377,6 +377,51 @@ impl LifecycleStore {
             record,
         }))
     }
+
+    /// r50(#3):在 workspace 分区内按 (provider, role) 扫描最新
+    /// provider_start（max role_run_seq）并返回其原生 provider session id。
+    /// resume 兜底检索——会话引用（provider_conversations）缺失时以
+    /// spawn 时点审计还原原生 resume（fresh 轮 spawn 即落盘,不受会话
+    /// 引用记录的内存重建/durable clobber 影响）。provider 匹配接受
+    /// snake/dash 两种 canonical 形态（与审计写入侧一致）。
+    pub fn latest_provider_start_native_id(
+        &self,
+        workspace_session_id: &str,
+        provider_canonical: &str,
+        role: &str,
+    ) -> Result<Option<String>, ToolPolicyAuditError> {
+        let _guard = lock_audit_log()?;
+        let root = self.tool_policy_audit_workspace_root(workspace_session_id)?;
+        let entries = match std::fs::read_dir(&root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(audit_error(error)),
+        };
+        let dashed = provider_canonical.replace('_', "-");
+        let mut matched: Option<(u64, String)> = None;
+        for entry in entries {
+            let entry = entry.map_err(audit_error)?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Some(stem) = name.strip_suffix(".jsonl") else {
+                continue;
+            };
+            let Ok(role_run_seq) = stem.parse::<u64>() else {
+                continue;
+            };
+            let lines = self.read_tool_policy_lines(workspace_session_id, role_run_seq)?;
+            for line in lines {
+                if let DurableToolPolicyEvent::ProviderStart(record) = line.event
+                    && record.role == role
+                    && (record.provider == provider_canonical || record.provider == dashed)
+                    && !record.provider_session_id.trim().is_empty()
+                    && matched.as_ref().is_none_or(|(seq, _)| role_run_seq > *seq)
+                {
+                    matched = Some((role_run_seq, record.provider_session_id.clone()));
+                }
+            }
+        }
+        Ok(matched.map(|(_, native_id)| native_id))
+    }
 }
 
 #[cfg(test)]

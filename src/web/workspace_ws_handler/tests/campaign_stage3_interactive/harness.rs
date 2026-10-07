@@ -57,6 +57,7 @@ pub(super) enum RevisionScriptStep {
 struct ScriptedRevisionProvider {
     script: StdMutex<VecDeque<RevisionScriptStep>>,
     starts: StdMutex<Vec<usize>>,
+    resume_ids: StdMutex<Vec<Option<String>>>,
     hang_release: Arc<tokio::sync::Notify>,
     hang_entered: Arc<tokio::sync::Notify>,
 }
@@ -66,6 +67,7 @@ impl ScriptedRevisionProvider {
         Arc::new(Self {
             script: StdMutex::new(script.into()),
             starts: StdMutex::new(Vec::new()),
+            resume_ids: StdMutex::new(Vec::new()),
             hang_release: Arc::new(tokio::sync::Notify::new()),
             hang_entered: Arc::new(tokio::sync::Notify::new()),
         })
@@ -74,17 +76,27 @@ impl ScriptedRevisionProvider {
     fn start_count(&self) -> usize {
         self.starts.lock().expect("starts lock").len()
     }
+
+    /// r50(#3):修订 turn 实际携带的 resume id 序列(断言面)。
+    pub(super) fn resume_ids(&self) -> Vec<Option<String>> {
+        self.resume_ids.lock().expect("resume ids lock").clone()
+    }
 }
 
 #[async_trait::async_trait]
 impl StreamingProviderAdapter for ScriptedRevisionProvider {
     async fn start(
         &self,
-        _input: StreamingProviderInput,
+        input: StreamingProviderInput,
         cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
         let attempt = self.starts.lock().expect("starts lock").len() + 1;
         self.starts.lock().expect("starts lock").push(attempt);
+        // r50(#3):修订 turn 实际携带的 resume id(断言面)。
+        self.resume_ids
+            .lock()
+            .expect("resume ids lock")
+            .push(input.resume_provider_session_id.clone());
         let step = self
             .script
             .lock()

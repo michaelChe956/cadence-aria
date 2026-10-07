@@ -518,6 +518,45 @@ impl WorkspaceEngine {
                         })
                 })
             })
+            // r50(#3,claude r49 plan resume 现场):会话引用(内存+durable)
+            // 皆缺失时,以 gateway spawn 时点审计的最新 Author
+            // provider_start 兜底还原原生 resume——fresh 轮 spawn 即落盘,
+            // 不受会话引用记录丢失影响;修订 turn 因此携带 --resume 续接
+            // 原生会话(CLI resume 返回同 id),resume 格「原生恢复确认」
+            // 可达。仅 Author 面(Reviewer 会话不兜底,行为不变)。
+            .or_else(|| self.author_provider_start_audit_native_id(role, provider))
+    }
+
+    /// 审计兜底:按工作类型取 Author 面的 AdapterRole 审计标签
+    ///(Story/Design/WorkItem=orchestrator;WorkItemPlan=work_item_splitter),
+    /// 读 spawn 审计最新 provider_start 的原生 id。
+    fn author_provider_start_audit_native_id(
+        &self,
+        role: ProviderConversationRole,
+        provider: &ProviderName,
+    ) -> Option<String> {
+        if role != ProviderConversationRole::Author {
+            return None;
+        }
+        let store = self.lifecycle_store.as_ref()?;
+        let audit_role = match self.session.workspace_type {
+            crate::product::models::WorkspaceType::WorkItemPlan => "work_item_splitter",
+            crate::product::models::WorkspaceType::Story
+            | crate::product::models::WorkspaceType::Design
+            | crate::product::models::WorkspaceType::WorkItem => "orchestrator",
+        };
+        let provider_canonical = serde_json::to_value(provider)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_string))
+            .unwrap_or_default();
+        store
+            .latest_provider_start_native_id(
+                &self.session.session_id,
+                &provider_canonical,
+                audit_role,
+            )
+            .ok()
+            .flatten()
     }
 
     pub(crate) async fn record_provider_session(
