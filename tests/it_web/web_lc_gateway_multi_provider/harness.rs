@@ -1688,6 +1688,30 @@ impl MatrixEnvironment {
         confirm_rounds: usize,
         timeout: Duration,
     ) -> (DriveOutcome, Option<LiveWs>) {
+        self.drive_workspace_session_ws_with_reviewer(
+            session_id,
+            observation,
+            confirm_rounds,
+            timeout,
+            None,
+        )
+        .await
+    }
+
+    /// r45 根修:reviewer 可配——plan 会话的 reviewer 经 start_generation
+    /// provider_config 透传(r44 现场:plan fresh 发 reviewer:null 覆盖
+    /// prepare 所设 reviewer→SC compile 子会话 reviewer None→coding 组
+    /// attempt provider 快照 code_reviewer=null→code_review 门 blocked
+    /// reviewer_configuration_missing,重试动作救不回)。实体阶段
+    /// (story/design)保持 None 语义不变。
+    async fn drive_workspace_session_ws_with_reviewer(
+        &self,
+        session_id: &str,
+        observation: &mut StageObservation,
+        confirm_rounds: usize,
+        timeout: Duration,
+        reviewer: Option<ProviderName>,
+    ) -> (DriveOutcome, Option<LiveWs>) {
         let mut ws = match self.connect_session_ws(session_id).await {
             Ok(ws) => ws,
             Err(error) => {
@@ -1703,10 +1727,10 @@ impl MatrixEnvironment {
             "type": "start_generation",
             "provider_config": {
                 "author": self.provider,
-                "reviewer": null,
+                "reviewer": reviewer,
                 "review_rounds": 1
             },
-            "reviewer_enabled": false
+            "reviewer_enabled": reviewer.is_some()
         });
         if let Err(error) = ws.send_json(&start).await {
             observation.push_event(json!({"type": "matrix_error", "message": error}));
@@ -2033,7 +2057,16 @@ impl MatrixEnvironment {
         // 后泵空转 5400s)——SC 门的确认/修订入口是 WS typed 三命令
         // (confirm / human_gate_feedback),与连接一起留给 resume 格。
         let (drive, gate_ws) = self
-            .drive_workspace_session_ws(&session_id, &mut observation, 0, self.entity_stage_timeout)
+            .drive_workspace_session_ws_with_reviewer(
+                &session_id,
+                &mut observation,
+                0,
+                self.entity_stage_timeout,
+                // r45:plan 会话 reviewer 经 start_generation 透传(SC
+                // compile 子会话继承→coding 组快照 code_reviewer 非空;
+                // r44 现场 null→code_review 门 blocked 不可达)。
+                Some(self.provider.clone()),
+            )
             .await;
         // r27 问题1:产物判定按停门模型差异化——plan 的产物分两级:候选
         // plan markdown(author 轮产出,fresh 格)与 confirmed plan(resume
@@ -2728,7 +2761,9 @@ impl MatrixEnvironment {
         resume.workspace_session_id = attempt_id.clone();
         resume.requested_resume_id = self.latest_audit_native_id(&attempt_id, &self.provider, None);
         resume.frozen_digest = self.latest_audit_projection_digest(&attempt_id, &self.provider);
-        let drive = self.drive_coding_attempt_ws(&attempt_id, &mut resume).await;
+        let drive = self
+            .drive_coding_attempt_ws_inner(&attempt_id, &mut resume, true)
+            .await;
         resume.completed_product_artifact_exists = drive.artifact_confirmed;
         resume.observed_pid = self.scan_attempt_stream_log_pid(&attempt_id);
         resume.native_confirmed_id = self.latest_audit_native_id(&attempt_id, &self.provider, None);
@@ -2740,6 +2775,19 @@ impl MatrixEnvironment {
         &self,
         attempt_id: &str,
         observation: &mut StageObservation,
+    ) -> DriveOutcome {
+        self.drive_coding_attempt_ws_inner(attempt_id, observation, false)
+            .await
+    }
+
+    /// r45:resume 形态——重连同 attempt 且不重发 start_coding(blocked/
+    /// 中断 attempt 的恢复语义由产品在 attach 后自行裁决;对非 created 态
+    /// 重发 start_coding 会被产品拒收,r44 resume 白等 3600s 即此形态)。
+    async fn drive_coding_attempt_ws_inner(
+        &self,
+        attempt_id: &str,
+        observation: &mut StageObservation,
+        resume: bool,
     ) -> DriveOutcome {
         let url = format!("ws://{}/ws/coding-attempts/{attempt_id}", self.ws_addr);
         let mut ws = match connect_live_ws(&url).await {
@@ -2761,12 +2809,16 @@ impl MatrixEnvironment {
             observation.run_failure = Some(format!("coding_hello 发送失败:{error}"));
             return DriveOutcome::default();
         }
-        if let Err(error) = ws.send_json(&json!({"type": "start_coding"})).await {
+        if !resume && let Err(error) = ws.send_json(&json!({"type": "start_coding"})).await {
             observation.push_event(json!({"type": "matrix_error", "message": error}));
             observation.run_failure = Some(format!("start_coding 发送失败:{error}"));
             return DriveOutcome::default();
         }
         let mut outcome = DriveOutcome::default();
+        // r45:blocked 门重试计数(跨帧保持——r44 现场 retry 后同门重开,
+        // 第 2 次出现即判重试无效有界落格)。
+        let mut blocked_gate_retries: std::collections::BTreeMap<String, u32> =
+            std::collections::BTreeMap::new();
         let deadline = tokio::time::Instant::now() + self.stage_timeout;
         let mut idle_deadline = tokio::time::Instant::now() + IDLE_PING_SECS;
         let coding_started = std::time::Instant::now();
@@ -2826,6 +2878,15 @@ impl MatrixEnvironment {
                     // 真实阶段门:以首个可用动作应答,不旁路产品决策面。
                     let gate_id = message
                         .pointer("/gate/id")
+                        .or_else(|| message.pointer("/gate/gate_id"))
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let gate_kind = message
+                        .pointer("/gate/kind")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let reason_code = message
+                        .pointer("/gate/reason_code")
                         .and_then(Value::as_str)
                         .unwrap_or_default();
                     let action_id = message
@@ -2833,6 +2894,24 @@ impl MatrixEnvironment {
                         .or_else(|| message.pointer("/gate/available_actions/0/id"))
                         .and_then(Value::as_str)
                         .unwrap_or_default();
+                    // r45:blocked 门有界处理——blocked 态的重试动作救不回
+                    // 配置类缺失(如 reviewer_configuration_missing,r44 现场
+                    // retry_review 后门原样重开,泵空转 3600s×2)。同一
+                    // blocked 门第 2 次出现=重试无效,落格如实带门详情。
+                    if gate_kind == "blocked" {
+                        let seen = blocked_gate_retries.entry(gate_id.to_string()).or_default();
+                        *seen += 1;
+                        if *seen >= 2 {
+                            observation.run_failure = Some(format!(
+                                "coding blocked 门重试无效(gate={gate_id} reason={reason_code});真人工恢复门,不空转"
+                            ));
+                            fp(
+                                "coding_pump_blocked_unrecoverable",
+                                format_args!("gate={gate_id} reason={reason_code}"),
+                            );
+                            return outcome;
+                        }
+                    }
                     if !gate_id.is_empty() && !action_id.is_empty() {
                         let _ = ws
                             .send_json(&json!({
