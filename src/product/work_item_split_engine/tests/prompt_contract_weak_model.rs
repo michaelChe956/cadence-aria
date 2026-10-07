@@ -37,8 +37,8 @@ fn work_item_plan_markdown_prompt_teaches_weak_model_precision_discipline() {
         "正例：`- criterion_id: AC-001` 配 `- reviewer_check_refs: AC-001`",
         "漏写 → acceptance_criterion_without_reviewer_check 拒绝",
         "引用纪律：requirement_refs/done_when_refs 只能逐字复制 spec 已定义 id（REQ-*/AC-*/NFR-*）",
-        "task 的 requirement_refs 必须逐字取自 [design_requirements] 清单",
-        "反例：引用清单没有的 REQ-002 → unknown_requirement_ref 拒绝",
+        "且都必须逐字取自 [design_requirements] 清单",
+        "清单外 AC-* → unknown_done_when_ref 拒绝",
     ] {
         assert!(
             prompt.contains(required),

@@ -315,6 +315,7 @@ fn prevalidate_plan_candidate_ir(
             &spec_contexts,
         );
     if !registered.is_empty() {
+        // r41 B2:traceability requirement_id 伪编号。
         let forged: Vec<String> = ir
             .items
             .iter()
@@ -323,10 +324,27 @@ fn prevalidate_plan_candidate_ir(
             .filter(|id| !registered.iter().any(|registered| registered == id))
             .map(str::to_string)
             .collect();
-        if !forged.is_empty() {
+        // r45 扩 AC:task done_when 的 AC- 引用同域 fail-closed——r45 现场
+        // 第五变体(done_when 编造 AC-002/AC-003)证明 AC 是独立命名空间
+        // 漏口;产品的 unknown_done_when_ref 只查 WI 内自洽(自报即过),
+        // 此处按已确认 story 的真实 AC 集比对,清单外经教学重驱可救一次。
+        let forged_done_when: Vec<String> = ir
+            .items
+            .iter()
+            .flat_map(|item| item.contract.tasks.iter())
+            .flat_map(|task| task.done_when_refs.iter())
+            .filter(|reference| {
+                reference.starts_with("AC-")
+                    && !registered.iter().any(|registered| registered == reference.as_str())
+            })
+            .cloned()
+            .collect();
+        if !forged.is_empty() || !forged_done_when.is_empty() {
+            let mut offenders = forged;
+            offenders.extend(forged_done_when);
             return Some(vec![format!(
-                "unknown_requirement_ref: plan 引用了已确认 spec 之外的需求编号 [{}];合法编号仅 [{}]",
-                forged.join("、"),
+                "unknown_requirement_ref/unknown_done_when_ref: plan 引用了已确认 spec 之外的编号 [{}];合法编号仅 [{}]",
+                offenders.join("、"),
                 registered.join("、")
             )]);
         }
@@ -366,12 +384,14 @@ fn build_work_item_plan_ir_reredrive_prompt(
          修正引用/补齐字段：requirement_refs、done_when_refs、reviewer_check_refs 只能逐字引用本计划已定义 id；\
          每个 criterion_id 必须有配对的 reviewer_check_refs 行。\n",
     );
-    // r41 A2:附已登记需求编号清单(产品侧与 harness 反馈轮对称;story+
-    // design 双源,与 fresh prompt 的 [design_requirements] 同集)。
+    // r41 A2/r45 扩 AC:附已登记编号清单(产品侧与 harness 反馈轮对称;
+    // story+design 双源 REQ-/NFR-/AC-,与 fresh prompt 的
+    // [design_requirements] 同集)。
     if !registered_requirement_ids.is_empty() {
         prompt.push_str(&format!(
             "[design_requirements] {}\n\
-             requirement_refs/Traceability 的 requirement_id 只能取自上列清单,清单外 REQ-*/NFR-* 一律删除或改为清单内编号。\n",
+             requirement_refs 与 done_when 的引用只能取自上列清单(REQ-*/NFR-*/AC-*),\
+             清单外编号一律删除或改为清单内编号。\n",
             registered_requirement_ids.join("、")
         ));
     }
@@ -1280,7 +1300,24 @@ mod r41_teachable_and_ir_prompt_tests {
         let ids = vec!["REQ-ENV-01".to_string(), "NFR-PERF-02".to_string()];
         let prompt = build_work_item_plan_ir_reredrive_prompt(&reasons, &ids);
         assert!(prompt.contains("[design_requirements] REQ-ENV-01、NFR-PERF-02"));
-        assert!(prompt.contains("清单外 REQ-*/NFR-* 一律删除或改为清单内编号"));
+        assert!(prompt.contains("清单外编号一律删除或改为清单内编号"));
+    }
+
+    /// r45 扩 AC:done_when 的 AC 引用清单外被拒(第五变体锚点:
+    /// AC-002/AC-003 编造;产品 unknown_done_when_ref 只查 WI 内自洽)。
+    #[test]
+    fn ir_reredrive_prompt_lists_ac_namespace() {
+        let reasons = vec!["unknown_done_when_ref: task references unknown acceptance criterion AC-002".to_string()];
+        let ids = vec![
+            "REQ-ENV-01".to_string(),
+            "AC-001".to_string(),
+        ];
+        let prompt = build_work_item_plan_ir_reredrive_prompt(&reasons, &ids);
+        assert!(prompt.contains("AC-001"));
+        assert!(
+            prompt.contains("done_when 的引用只能取自上列清单"),
+            "清单约束必须覆盖 done_when/AC 命名空间: {prompt}"
+        );
     }
 
     /// r41 A2:清单空时不注入(无 spec 上下文的老会话零变化)。

@@ -102,20 +102,25 @@ pub(crate) fn extract_design_requirement_ids(design_context: &[String]) -> Vec<S
     extract_registered_requirement_ids(design_context)
 }
 
-/// r41 A1(结构根修):从 story+design 双源上下文提取已登记的需求 ID。
+/// r41 A1(结构根修)/r45 扩 AC:从 story+design 双源上下文提取已登记的
+/// 引用 ID(REQ-/NFR- 需求编号 + AC- 验收标准编号)。
 ///
 /// 此前仅扫 design 上下文——design 正文缺 NFR token 时白名单缺员,反而逼
 /// AI 编造编号(r33/r37 现场三轮编造的结构诱因);story 正文中的 REQ-/NFR-
-/// 同属已登记需求域,双源并扫消除缺员窗口。pub:矩阵 harness 复用同一
-/// 实现(消除与 harness 侧提取器的双实现漂移)。
+/// 同属已登记需求域,双源并扫消除缺员窗口。r45:story schema 强制 AC-*
+/// (验收标准),task done_when 引用的 AC 编号同属登记域——第五变体
+/// (AC-002/AC-003 编造)证明 AC 是独立命名空间漏口,并入同集提取。
+/// pub:矩阵 harness 复用同一实现(消除与 harness 侧提取器的双实现漂移)。
 pub fn extract_registered_requirement_ids(contexts: &[String]) -> Vec<String> {
     let mut ids = BTreeSet::new();
     for context in contexts {
         for token in context
             .split(|character: char| !(character.is_ascii_alphanumeric() || character == '-'))
         {
-            if (token.starts_with("REQ-") || token.starts_with("NFR-"))
-                && token.len() > "REQ-".len()
+            if (token.starts_with("REQ-")
+                || token.starts_with("NFR-")
+                || token.starts_with("AC-"))
+                && token.len() > "AC-".len()
             {
                 ids.insert(token.to_string());
             }

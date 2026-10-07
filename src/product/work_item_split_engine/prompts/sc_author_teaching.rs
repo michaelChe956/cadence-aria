@@ -101,7 +101,7 @@ pub(crate) const WORK_ITEM_PLAN_WEAK_MODEL_PRECISION_DISCIPLINE: &str = "\
 \
 AC 纪律：每个 `- criterion_id: AC-xxx` 必须在 Handoff Schema 配对一行 `- reviewer_check_refs: AC-xxx`；正例：`- criterion_id: AC-001` 配 `- reviewer_check_refs: AC-001`；漏写 → acceptance_criterion_without_reviewer_check 拒绝。
 \
-引用纪律：requirement_refs/done_when_refs 只能逐字复制 spec 已定义 id（REQ-*/AC-*/NFR-*）；task 的 requirement_refs 必须逐字取自 [design_requirements] 清单。反例：引用清单没有的 REQ-002 → unknown_requirement_ref 拒绝。
+引用纪律：requirement_refs/done_when_refs 只能逐字复制 spec 已定义 id（REQ-*/AC-*/NFR-*），且都必须逐字取自 [design_requirements] 清单；清单外 REQ-*/NFR-* → unknown_requirement_ref 拒绝、清单外 AC-* → unknown_done_when_ref 拒绝。
 \
 输出契约纪律：SC 计划由你在同一文档先后写出——下游 Inputs required_capabilities 写什么，被 (provider_logical_work_item_id, contract_id) 指向的上游 Outputs capabilities 就逐字复制什么，require_all 逐项覆盖。同一契约全计划只声明一次：多个下游消费同一契约时把全部能力串合并进这唯一一份 capabilities，禁止按下游重复声明契约。正例：下游 `- required_capabilities: [数据错误返回 500 且 code=LEVEL_DATA_UNAVAILABLE]` → 上游 `capabilities:` 逐字同串；两个下游消费同一 CT-001 → 一份 CT-001 含两者能力串。反例①改写/概括/漏一项 → required_capability_missing 拒绝；反例②按下游重复声明契约 → duplicate_contract_id 拒绝。
 成对书写纪律（DEF-PVR-ALL）：跨 WI 依赖必须两侧成对书写——写下下游一行 `- required_capabilities: [X]` 的同一时刻，回到被 (provider_logical_work_item_id, contract_id) 指向的上游 Outputs 同一契约补 `- capabilities: X`，两侧能力串逐字相同才算写完这一对。正例：WI-002 Inputs 写 `- provider_logical_work_item_id: WI-001` + `- contract_id: CT-001` + `- required_capabilities: [GET /api/levels 返回 200]`，WI-001 Outputs 的 CT-001 就有 `- capabilities: GET /api/levels 返回 200`。反例：只写消费侧忘写提供侧 → required_capability_missing 拒绝。
