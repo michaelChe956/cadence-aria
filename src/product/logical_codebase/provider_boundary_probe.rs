@@ -1679,7 +1679,13 @@ pub(crate) fn probe_import_record(
     let action = projection.action();
     let row = ProviderActionCapability {
         action,
-        launch: ProviderCapabilityEvidence::Unknown,
+        // r48(三家 r2):launch 改签 Confirmed——探针本身真实启动了 CLI
+        //(launch+正负写探针+resume 全真实验证,工件含真实 argv 与启动
+        // 成功),launch=Unknown 是 d8b9ea37 的设计保守而非无证据;无
+        // bootstrap 记录的三家(Codex/Pi/Kimi)探针直建记录后靠 2b
+        // 过渡桥(需 bootstrap 旧 allow 列表)放行——三家无 bootstrap
+        // 记录→桥不放行→launch cell Unknown 拒收(r2 现场共通首错)。
+        launch: ProviderCapabilityEvidence::Confirmed,
         resume,
         write_boundary: ProviderCapabilityEvidence::Confirmed,
         projection_digest: evidence.projection_digest().to_string(),
@@ -2324,6 +2330,13 @@ mod tests {
         assert_eq!(resume_state, ProviderCapabilityEvidence::Confirmed);
         // record.resume 格必须取工件签发结果(材料包构造同口径)。
         assert_eq!(outcome.record.action_matrix.rows()[0].resume, resume_state);
+        // r48:launch 也签 Confirmed(探针真实启动 CLI;三家无 bootstrap
+        // 记录时 2b 过渡桥不可达,launch=Unknown 会拒收——r2 现场首错)。
+        assert_eq!(
+            outcome.record.action_matrix.rows()[0].launch,
+            ProviderCapabilityEvidence::Confirmed,
+            "探针真实启动过 CLI,launch 必须签 Confirmed(r2 三家首错锚点)"
+        );
         let record = outcome.record;
         let store = crate::product::logical_codebase::provider_capability_store::ProviderCapabilityStore::for_lc(
             crate::product::app_paths::ProductAppPaths::new(base.path().join(".aria")),
@@ -2462,6 +2475,8 @@ mod tests {
 
     /// 2c shape 校验用的对齐 record(write_boundary=Confirmed;resume 格由
     /// probe 工件签发,launch 未探测保持 Unknown;三方一致字段对齐)。
+    /// r48:与 probe_import_record 同步——launch 签 Confirmed(探针真实
+    /// 启动 CLI;三家无 bootstrap 记录时 2b 过渡桥不可达)。
     fn shape_validation_record(
         evidence: &crate::cross_cutting::provider_boundary::ProviderBoundaryEvidence,
         projection: &ProviderPolicyProjection,
@@ -2470,7 +2485,7 @@ mod tests {
         let action = projection.action();
         let row = ProviderActionCapability {
             action,
-            launch: ProviderCapabilityEvidence::Unknown,
+            launch: ProviderCapabilityEvidence::Confirmed,
             resume,
             write_boundary: ProviderCapabilityEvidence::Confirmed,
             projection_digest: evidence.projection_digest().to_string(),
