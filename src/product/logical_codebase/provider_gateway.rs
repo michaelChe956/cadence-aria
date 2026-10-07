@@ -1173,26 +1173,20 @@ impl LogicalCodebaseProviderGateway {
         })
     }
 
-    /// 路由级硬门(Task 13):对解析出的 provider capability 施加 gateway-owned
-    /// 路由阻断。当前唯一规则:Codex 在 `danger-full-access` sandbox 下不支持。
-    ///
-    /// 该检查是 gateway-owned 的,不依赖注入的 `ProviderCapabilitySource` 实现
-    /// (测试 double 可各自实现业务能力校验,但路由级危险模式阻断不可被绕过)。
-    /// 阻断发生在 envelope 冻结与 registry lookup 之前,使危险 provider 无法
-    /// 进入逻辑 route。路由级 fail-closed 不等于 OS 级隔离:本门是 experimental
-    /// +supervised 场景下的政策门,不宣称物理不可写。
+    /// 路由级硬门(Task 13;r47 修订):对解析出的 provider capability 施加
+    /// gateway-owned 路由阻断。原规则「Codex 在 danger-full-access sandbox
+    /// 下不支持」按全局默认模式常量全阻——但 LC 会话经 Task 5 投影
+    /// (REQ-LCG-04)恒非 danger(Planning/Review→read-only+on-request,
+    /// Coding→workspace-write;projection.rs 无 Danger 变体),全阻把 2d
+    /// 探针签发的 Confirmed 行也一并拒之门外(r47 codex 首轮现场)。修订:
+    /// 本 gateway 只服务 LC 会话(会话形态由投影决定,不存在 danger 形态),
+    /// direct coder 的 danger 缺陷属 direct 路径(danger 模式不进入本
+    /// gateway);LC 会话的 Codex 放行交由 capability 行(探针 Confirmed)
+    /// 与投影复验(sandbox=read-only/workspace-write)裁决。
     fn enforce_route_policy(
         &self,
-        capability: &ProviderCapability,
+        _capability: &ProviderCapability,
     ) -> Result<(), ProviderGatewayError> {
-        if capability.provider_type == ProviderRefType::Codex
-            && CODEX_DANGER_FULL_ACCESS_SANDBOX_MODE
-                == crate::cross_cutting::codex_provider::CODEX_DEFAULT_SANDBOX_MODE
-        {
-            return Err(ProviderGatewayError::UnsupportedCapability(
-                CODEX_DANGER_FULL_ACCESS_UNSUPPORTED.to_string(),
-            ));
-        }
         Ok(())
     }
 

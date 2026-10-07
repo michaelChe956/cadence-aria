@@ -657,15 +657,18 @@ fn validated_streaming_input_for_role_rejects_codex_danger_full_access() {
     let engine = engine(&store, Some(gateway));
     let worktree = logical_attempt.worktree_path.clone().expect("worktree");
 
-    let error = engine
+    // r47:路由级 Codex 全阻已移除(LC 投影恒非 danger;本 fixture 的
+    // capability double 放行)→ validate 成功。反硬编码契约(C-2)以成功
+    // 形态钉死:validated 的 dialect 恒 Codex,绝不静默顶替 Claude。
+    let policy = engine
         .resolve_launch_policy_for_role(&logical_attempt, CodingProviderRole::Coder, &worktree)
-        .expect_err("Codex must be rejected");
+        .expect("codex coder must validate through LC gateway (capability source permitting)");
 
-    assert!(
-        error
-            .to_string()
-            .contains("codex_danger_full_access_unsupported"),
-        "expected codex_danger_full_access_unsupported, got: {error}"
+    let validated = policy.expect("validated policy present");
+    assert_eq!(
+        validated.envelope().provider_dialect,
+        crate::product::logical_codebase::policy::ProviderDialect::CodexCliV1,
+        "validated dialect must stay Codex (never silently swapped to Claude)"
     );
 }
 

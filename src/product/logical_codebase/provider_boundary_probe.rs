@@ -1691,7 +1691,13 @@ pub(crate) fn probe_import_record(
         version: evidence.exact_version().to_string(),
         adapter_dialect: projection.provider_dialect(),
         wire_dialect: projection.wire_dialect(),
-        capability_snapshot_ref: "lc_boundary_probe".to_string(),
+        // r47(pi/kimi 首轮):capability_snapshot_ref 必须与运行时 ProviderRef
+        // 的约定值一致(cap_managed_snapshot——launch 链 from_provider_name
+        // 统一传入)。此前写 "lc_boundary_probe":bootstrap(Claude recipe)
+        // 先建过记录的家(Claude)经 import 合并保留既有 ref 不受影响;
+        // 无 bootstrap 记录的 Pi/Kimi 探针直建记录 → gateway load_record
+        // 比对 mismatch。
+        capability_snapshot_ref: "cap_managed_snapshot".to_string(),
         evidence: CapabilityEvidence::ProductionVerified,
         resume_evidence: ResumeEvidenceState::Unsupported,
         supported_actions: vec![action],

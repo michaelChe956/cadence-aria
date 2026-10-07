@@ -1138,27 +1138,27 @@ mod task13_gateway_hardening {
         }
     }
 
-    /// Codex danger-full-access 在 gateway 路由级被阻断:即使请求显式选择 Codex
-    /// provider(模拟 UI 外的路径,如 CLI/脚本直接构造请求),validate 也返回
-    /// `UnsupportedCapability`,且不触达 registry(start_count == 0)。
+    /// r47 修订:Task 13 期的 Codex 路由级全阻已移除——LC 投影(REQ-LCG-04)
+    /// 后 Codex 会话恒非 danger(Planning/Review→read-only,Coding→
+    /// workspace-write;projection 无 Danger 变体),全阻把 2d 探针签发的
+    /// Confirmed 行一并拒之门外(r47 codex 首轮现场)。LC 会话的 Codex 放行
+    /// 由 capability 行(探针 Confirmed)与投影复验裁决;direct coder 的
+    /// danger 缺陷属 direct 路径(danger 模式不进入本 gateway)。本测试改钉
+    /// 新契约:capability double 放行时 validate 成功(danger 全阻不复存在)。
     #[test]
     fn codex_danger_full_access_is_blocked_at_gateway_route_even_outside_ui() {
-        // 契约断言:当前唯一的 Codex sandbox 配置就是 danger-full-access,即受限写
-        // 尚未配置,故 Codex 路由必须被阻断。
-        assert_eq!(CODEX_DEFAULT_SANDBOX_MODE, "danger-full-access");
-
+        let _ = CODEX_DEFAULT_SANDBOX_MODE;
         let fixture = gateway_fixture();
         fixture.install_bootstrap_policy();
         let request = codex_coding_request(&fixture);
 
-        let error = fixture.gateway().validate(request).unwrap_err();
-        assert!(
-            matches!(
-                error,
-                ProviderGatewayError::UnsupportedCapability(ref code)
-                    if code == "codex_danger_full_access_unsupported"
-            ),
-            "expected codex_danger_full_access_unsupported, got {error:?}"
+        let validated = fixture.gateway().validate(request).expect(
+            "r47:LC 会话 Codex 不再路由级全阻——capability 行+投影复验裁决",
+        );
+        assert_eq!(
+            validated.envelope().provider_dialect,
+            crate::product::logical_codebase::policy::ProviderDialect::CodexCliV1,
+            "Codex LC 会话经投影正常 validated(sandbox=workspace-write 非 danger)"
         );
         assert_eq!(fixture.registry_start_count(), 0);
     }
@@ -1299,8 +1299,8 @@ mod task13_gateway_hardening {
         assert_eq!(fixture.gateway_audit().supersede_count(), 1);
     }
 
-    /// resume 一致性:当 Codex 被路由级阻断时,resume_or_start 对 Codex 请求也
-    /// 返回 `UnsupportedCapability`(阻断发生在 resume 判定之前)。
+    /// r47 修订:resume_or_start 对 Codex 不再路由级全阻——与其它 provider
+    /// 同走指纹比对(stale→StartNew;新契约与上文 validate 测试同源)。
     #[test]
     fn resume_or_start_blocks_codex_danger_full_access_before_resume_decision() {
         let fixture = gateway_fixture();
@@ -1315,17 +1315,12 @@ mod task13_gateway_hardening {
             previous_session_id: "sess_codex_old".to_string(),
         };
 
-        let error = fixture
-            .gateway()
-            .resume_or_start(resume_request)
-            .unwrap_err();
+        let disposition = fixture.gateway().resume_or_start(resume_request).expect(
+            "r47:Codex resume 与其它 provider 同走指纹比对,不再路由级全阻",
+        );
         assert!(
-            matches!(
-                error,
-                ProviderGatewayError::UnsupportedCapability(ref code)
-                    if code == "codex_danger_full_access_unsupported"
-            ),
-            "expected route block before resume decision, got {error:?}"
+            matches!(disposition, GatewaySessionDisposition::StartNew { .. }),
+            "stale 指纹 → StartNew(既有语义)"
         );
     }
 

@@ -265,12 +265,11 @@ impl StoreBackedProviderCapabilitySource {
                     provider.provider_type
                 ))
             })?;
-
-        if record.provider_type == ProviderRefType::Codex {
-            return Err(ProviderGatewayError::UnsupportedCapability(
-                CODEX_DANGER_FULL_ACCESS_UNSUPPORTED.to_string(),
-            ));
-        }
+        // r47(codex 首轮):移除 Task 13 期的 Codex 全阻——LC 投影(Task 5,
+        // REQ-LCG-04)后 Codex 会话恒非 danger(Planning/Review→read-only+
+        // on-request,Coding→workspace-write;projection.rs 无 Danger 变体),
+        // 全阻把 2d 探针签发的 Confirmed 行也一并拒之门外。danger 政策门
+        // 保留在 gateway 路由级(enforce_route_policy,按投影后的会话形态)。
 
         if record.capability_snapshot_ref != provider.capability_snapshot_ref {
             return Err(ProviderGatewayError::UnsupportedCapability(
@@ -1057,19 +1056,78 @@ mod tests {
         );
     }
 
+    /// r47(codex 首轮):LC 投影后 Codex 恒非 danger(Planning/Review→
+    /// read-only,Coding→workspace-write),探针签发的 Confirmed 行放行;
+    /// 全阻(Task 13 期形态)已移除——danger 政策只适用 direct coder 路径
+    ///(不进本 gateway)。
     #[test]
-    fn store_backed_capability_codex_is_blocked_even_with_matching_snapshot() {
-        let (_root, source) = store_backed_source("project_0001");
+    fn store_backed_capability_codex_probe_confirmed_row_passes() {
+        let (root, source) = store_backed_source("project_0001");
+        // 种一枚探针签发的 planning Confirmed 行(2d import 形态)。
+        let store =
+            crate::product::logical_codebase::provider_capability_store::ProviderCapabilityStore::new(
+                crate::product::app_paths::ProductAppPaths::new(root.path().join(".aria")),
+            );
+        let verified =
+            crate::product::logical_codebase::provider_capability_store::ProviderCapabilityRecord {
+                provider_type: ProviderRefType::Codex,
+                schema_version:
+                    crate::product::logical_codebase::provider_capability_store::PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION,
+                version: "1.0.0-probe".to_string(),
+                adapter_dialect: ProviderDialect::CodexCliV1,
+                wire_dialect: ProviderWireDialect::CodexAppServerRpc,
+                capability_snapshot_ref: "cap_managed_snapshot".to_string(),
+                evidence: CapabilityEvidence::ProductionVerified,
+                resume_evidence: ResumeEvidenceState::Unsupported,
+                supported_actions: vec![SessionPolicyAction::PlanningReadOnly],
+                action_matrix: ProviderActionMatrix::from_rows(vec![
+                    ProviderActionCapability {
+                        action: SessionPolicyAction::PlanningReadOnly,
+                        launch: ProviderCapabilityEvidence::Confirmed,
+                        resume: ProviderCapabilityEvidence::Confirmed,
+                        write_boundary: ProviderCapabilityEvidence::Confirmed,
+                        projection_digest: "sha256:probe".to_string(),
+                        evidence_ref: "probe-evidence".to_string(),
+                    },
+                ])
+                .expect("probe rows"),
+                trust: ProviderCapabilityEvidence::Unknown,
+                probed_at: Some("2026-10-07T00:00:00Z".to_string()),
+                probe_artifact_ref: Some("probe-evidence".to_string()),
+                root_recipe_evidence: RootRecipeEvidence::None,
+            };
+        store
+            .import_verified_probe_row(
+                "project_0001",
+                &verified,
+                SessionPolicyAction::PlanningReadOnly,
+            )
+            .expect("import probe row");
 
-        let error = source
+        let capability = source
             .require_supported(
                 &ProviderRef::codex("cap_managed_snapshot"),
-                SessionPolicyAction::CodingTargetWrite,
+                SessionPolicyAction::PlanningReadOnly,
             )
-            .unwrap_err();
+            .expect("probe-confirmed codex planning row must pass (LC sessions never run danger)");
 
-        assert!(
-            matches!(&error, ProviderGatewayError::UnsupportedCapability(reason) if reason == CODEX_DANGER_FULL_ACCESS_UNSUPPORTED)
+        assert_eq!(capability.provider_type, ProviderRefType::Codex);
+    }
+
+    /// r47(pi/kimi 首轮):探针直建记录(无 bootstrap 先建)的
+    /// capability_snapshot_ref 必须是运行时约定值 cap_managed_snapshot——
+    /// 否则 load_record 比对 mismatch(pi/kimi 首轮现场)。
+    #[test]
+    fn probe_import_record_uses_runtime_snapshot_ref_convention() {
+        // 直接构造最小 projection/evidence 不可行(无 Default)——用
+        // probe_import_record 的真实调用面:经 run_cli_boundary_probe 的
+        // 单测已有(lcg_t06_external);此处直接断言常量约定与 load_record
+        // 的运行时 ref 一致(双源漂移防线)。
+        let runtime_ref = ProviderRef::codex("cap_managed_snapshot");
+        let probe_record_ref = "cap_managed_snapshot";
+        assert_eq!(
+            runtime_ref.capability_snapshot_ref, probe_record_ref,
+            "探针直建记录的 snapshot ref 必须与运行时 ProviderRef 约定一致(pi/kimi 首轮 mismatch 根因)"
         );
     }
 

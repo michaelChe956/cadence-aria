@@ -396,9 +396,12 @@ async fn drive_review_session_via_gateway_blocks_codex_reviewer_at_route() {
         }
     }
     let message = start_failure.expect("codex reviewer must surface an error event");
+    // r47:路由级 Codex 全阻已移除(LC 投影恒非 danger);无探针签发行的
+    // codex reviewer 经 capability 行 fail-closed(launch_not_confirmed),
+    // 错误仍必须点名 Codex 且零 session 启动(下两断言不变)。
     assert!(
-        message.contains("codex_danger_full_access_unsupported"),
-        "expected codex_danger_full_access_unsupported, got: {message}"
+        message.contains("Codex"),
+        "r47:路由全阻移除后,codex reviewer 的失败(此处 fixture 无 registry:         provider_gateway_registry_lookup)仍必须点名 Codex 且零启动, got: {message}"
     );
     assert_eq!(
         audit.stream_launches(),
@@ -563,10 +566,11 @@ fn routing_reference_context_projects_session_codex_author_not_hardcoded_claude(
     )
     .with_logical_provider_gateway(gateway);
 
-    // Codex 被路由级硬门阻断 → validate 失败 → 回落 Legacy(既有 fail-open 契约)。
+    // r47:路由级 Codex 全阻移除后 validate 成功(fixture double 放行)→
+    // Logical 投影(反硬编码断言语义不变:Codex 作者不被顶替为 Claude)。
     assert!(matches!(
         engine.routing_reference_context(),
-        RoutingReferenceContext::Legacy
+        RoutingReferenceContext::Logical(_)
     ));
     let seen = capabilities.seen_provider_refs();
     assert!(

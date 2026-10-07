@@ -277,13 +277,14 @@ async fn coding_logical_attempt_with_codex_coder_is_blocked_at_gateway_route() {
             &CodingExecutionContext::default(),
         )
         .await
-        .expect_err("Codex danger-full-access must be blocked at gateway route");
+        .expect_err("codex coder must fail closed before any provider start");
 
+    // r47:路由级 Codex 全阻移除(LC 投影恒非 danger);无探针签发行的
+    // codex coder 在后续链(cross-target/registry)fail-closed——不变式是
+    // 零 provider 启动(下两断言),错误码随链路阶段。
     assert!(
-        error
-            .to_string()
-            .contains("codex_danger_full_access_unsupported"),
-        "expected codex_danger_full_access_unsupported, got: {error}"
+        !error.to_string().is_empty(),
+        "failure must be observable: {error}"
     );
     assert_eq!(never_start.start_count(), 0);
     assert_eq!(audit.stream_launches(), 0);
