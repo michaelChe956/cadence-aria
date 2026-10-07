@@ -275,8 +275,10 @@ fn story_schema_contract_exposes_open_item_resolution_protocol() {
     let schema = author_artifact_schema_contract_for(&WorkspaceType::Story)
         .expect("Story must have a schema contract");
     assert!(
-        schema.contains("已通过 AskUserQuestion 确认"),
-        "Story schema contract must teach the resolved-cue protocol for 待确认项: {schema}"
+        schema.contains("已通过 <工具名> 确认")
+            && schema.contains("AskUserQuestion")
+            && schema.contains("requestUserInput"),
+        "Story schema contract must teach the provider-aware resolved-cue protocol for 待确认项: {schema}"
     );
     assert!(
         schema.contains("无待确认项"),

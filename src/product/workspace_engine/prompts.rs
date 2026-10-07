@@ -144,7 +144,7 @@ pub(crate) fn build_artifact_retry_prompt(
     prompt.push('\n');
     prompt.push_str(AUTHOR_ARTIFACT_NEGATIVE_LIST);
     prompt.push_str(
-        "如仍有需要用户确认的问题，必须先使用 AskUserQuestion 等结构化交互；不要把未解决问题写进最终 artifact 的待确认项/open_items，若 schema 包含待确认项则写“无”。\n",
+        "如仍有需要用户确认的问题，必须先调用本会话可用的结构化交互提问工具（Claude 为 AskUserQuestion；Codex 为 requestUserInput）获得回答后再产出 artifact；不要把未解决问题写进最终 artifact 的待确认项/open_items，若 schema 包含待确认项则写“无”。\n",
     );
     if !blocking_reasons.is_empty() {
         prompt.push_str("\n具体失败原因:\n");

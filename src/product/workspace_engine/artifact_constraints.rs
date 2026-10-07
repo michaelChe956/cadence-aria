@@ -137,7 +137,7 @@ pub(crate) fn artifact_constraint_spec_for(
                 id_rule("[AC-*]", ArtifactTokenPattern::BracketPrefix("AC-")),
             ],
             open_item_policy_hint: Some(
-                "## 待确认项：若某项已通过 AskUserQuestion 交互解决，必须标注「已通过 AskUserQuestion 确认：<结论>」；若无开放问题，只写「无待确认项」四个字，不得附加解释，解释性内容写入其他章节。不得以含糊描述（如「经提问未获回答，作者自行决定」）把已解决决策留在待确认项。",
+                "## 待确认项：若某项已通过结构化交互提问解决（Claude 用 AskUserQuestion；Codex 用 requestUserInput），必须标注「已通过 <工具名> 确认：<结论>」；若无开放问题，只写「无待确认项」四个字，不得附加解释，解释性内容写入其他章节。不得以含糊描述（如「经提问未获回答，作者自行决定」）把已解决决策留在待确认项，也不得把未决问题写入待确认项——未决问题必须先用交互工具提问获得回答。",
             ),
             reviewer_must_fix_rules: vec![
                 "Story artifact: Work Item heading, task splitting, [TASK-*], or WI-* content must be reported as must_fix.",
@@ -1038,9 +1038,14 @@ fn open_item_line_has_hard_unresolved_cue(line: &str) -> bool {
 fn open_item_line_has_resolved_cue(line: &str) -> bool {
     let normalized = normalize_open_item_inline_markdown(line);
     let lower = normalized.to_ascii_lowercase();
+    // r4(codex):codex 的结构化交互工具是 requestUserInput——标记形态与
+    // AskUserQuestion 同构(带/不带空格两种),缺省只认 Claude 工具名会把
+    // codex 已解决的决策误判为未解决(r4 story gate 现场同因的另一面)。
     line.contains("已通过结构化交互确认")
         || line.contains("已通过 AskUserQuestion")
         || lower.contains("已通过askuserquestion")
+        || line.contains("已通过 requestUserInput")
+        || lower.contains("已通过requestuserinput")
         || normalized.contains("已确认")
         || normalized.contains("均已确认")
         || normalized.contains("非待确认项")

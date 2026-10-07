@@ -207,6 +207,31 @@ fn story_artifact_accepts_resolved_open_items_with_confirmation_note() {
 }
 
 #[test]
+fn story_artifact_accepts_resolved_open_items_via_request_user_input_marker() {
+    // r4(codex)现场:codex 的结构化交互工具是 requestUserInput(非
+    // Claude 的 AskUserQuestion)。既有 resolved-cue 只认
+    // 「已通过 AskUserQuestion/已通过结构化交互确认」——codex AI 按
+    // 自己的工具名标注「已通过 requestUserInput 确认:<结论>」会被误判
+    // 未解决而拒收。修:resolved-cue 接受 requestUserInput 标记形态。
+    let report = validate_workspace_artifact_constraints(
+        "# Aria Provider Setup Story Spec\n\n\
+         ## 范围\n**来源**：Issue `issue_0001` — provider 安装引导。\n\n\
+         ## 用户故事\n作为用户，我要完成 provider 安装。\n\n\
+         ## 功能需求\n- [REQ-001] 系统支持 provider 检查。\n\n\
+         ## 成功标准\n- [AC-001] 用户能看到 provider 状态。\n\n\
+         ## 待确认项\n- 已通过 requestUserInput 确认：会话过期采用空闲超时基准（默认 30 分钟，可配置），绑定 [REQ-002] 与 [AC-002]。\n\n\
+         ## 非功能需求\n无。\n",
+        &WorkspaceType::Story,
+    );
+
+    assert!(
+        report.passed,
+        "codex requestUserInput resolution marker must be recognized: {:?}",
+        report.blocking_reasons()
+    );
+}
+
+#[test]
 fn story_artifact_accepts_upstream_derivation_note_without_interaction() {
     let report = validate_workspace_artifact_constraints(
         "# Aria Provider Setup Story Spec\n\n\
