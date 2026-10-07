@@ -1026,7 +1026,7 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
     );
     assert_eq!(
         crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES,
-        22_200
+        23_000
     );
     assert!(
         prompt.len()
@@ -1178,8 +1178,8 @@ fn sc_author_prompt_tail_clamps_heading_language_and_raises_budget() {
 
     assert_eq!(
         crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES,
-        22_200,
-        "第 12 次提额：C1-T5 intent 合同 grammar 注入后预算上调至整百级 22,200"
+        23_000,
+        "第 13 次提额：多 source Traceability 正例样例注入后预算上调至整百级 23,000"
     );
     assert!(
         prompt.len()

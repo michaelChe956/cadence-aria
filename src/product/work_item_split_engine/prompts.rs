@@ -118,7 +118,10 @@ pub(crate) const WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES: usize = 15_600;
 // key、DIAGNOSTIC_CODES 增 intent_undeclared/intent_unexecutable、最小合法源
 // 增 Plan Intent 语法形状示例（grammar 注入锚点自动展开），全 false fixture
 // 实测 22,162；第 12 次提额至整百级 22,200（余 38B）。
-pub(crate) const WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES: usize = 22_200;
+pub(crate) const WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES: usize = 23_000;
+// r46 第 13 次提额(非静默,批注):多 source Traceability 正例样例(约
+// 400B,AT 方案:结构歧义用样例封——r46 首轮漏填 requirement_id 的震荡
+// 根治)注入后最大 fixture 实测 22,603B,上调至整百级 23,000。
 
 /// SC markdown author prompt 的尾部输出指令。首轮与修订轮共享同一段字节；
 /// 修订轮（F5-A findings 回灌）仅在其之前插入 [review_revision] 返修段，
@@ -249,6 +252,18 @@ fn work_item_plan_real_few_shot() -> Result<String, String> {
 
     Ok(cases)
 }
+
+/// r46 配套 2(AT):多 source traceability 正例样例——结构歧义用样例封。
+/// ID 用真实登记形态(REQ-/AC-)但 000 后缀表样例占位(勿照抄指令在段头);
+/// 每组三元组(source_type/source_id/requirement_id)各自成组,缺
+/// requirement_id 的组即 r46 首轮漏填形态。
+const WORK_ITEM_PLAN_MULTI_SOURCE_TRACEABILITY_EXAMPLE: &str = "### Traceability\n\
+     - source_type: story\n\
+     - source_id: story_spec_0001\n\
+     - requirement_id: REQ-000\n\
+     - source_type: acceptance\n\
+     - source_id: story_spec_0001\n\
+     - requirement_id: AC-000\n";
 /// 构造单候选路径专用的 markdown source author prompt。
 ///
 /// 该 prompt 只描述待编译的 `work-item-plan.md` 产物：Provider 原始输出直接进入
@@ -287,6 +302,7 @@ pub(crate) fn build_work_item_plan_markdown_prompt(
          {reference_discipline}
          {weak_model_discipline}
          {grammar}\
+         [multi_source_traceability_example] 多 source_type 的 Traceability 形态——每组三元组各自带 requirement_id(逐字取自 [design_requirements] 清单;某组缺 requirement_id → lowering_error「traceability 缺少 requirement_id」拒绝):\n{traceability_example}\n\
          [minimum_legal_source] 仅示语法形状；按当前上下文替换，勿照抄。\n{minimum_source}\n\
          {few_shot}\n\
          {plan_options_mirror}\
@@ -313,6 +329,7 @@ pub(crate) fn build_work_item_plan_markdown_prompt(
         grammar = work_item_plan_markdown_grammar(),
         dependency_syntax_rules = dependency_syntax_rules,
         minimum_source = work_item_plan_minimum_legal_source(),
+        traceability_example = WORK_ITEM_PLAN_MULTI_SOURCE_TRACEABILITY_EXAMPLE,
         few_shot = few_shot,
         output_directive = WORK_ITEM_PLAN_MARKDOWN_OUTPUT_DIRECTIVE,
     );

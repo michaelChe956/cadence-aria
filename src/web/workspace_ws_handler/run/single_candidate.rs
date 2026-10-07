@@ -378,6 +378,7 @@ fn build_work_item_plan_ir_reredrive_prompt(
     let mut prompt =
         crate::product::workspace_engine::build_work_item_plan_compile_reredrive_prompt(
             blocking_reasons,
+            registered_requirement_ids,
         );
     prompt.push_str(
         "上述为 IR 校验失败（引用或字段不符合契约）。\n\
@@ -885,6 +886,7 @@ pub(crate) async fn run_single_candidate_author(
                         let reredrive_prompt =
                             crate::product::workspace_engine::build_work_item_plan_compile_reredrive_prompt(
                                 &reasons,
+                                &design_requirement_ids,
                             );
                         engine
                             .emit_execution_event(

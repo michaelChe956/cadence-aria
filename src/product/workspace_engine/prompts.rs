@@ -184,7 +184,15 @@ pub(crate) fn structured_output_nonce() -> String {
 /// [`build_artifact_retry_prompt`] 的模板形态（「上一轮已结束，但没有输出完整
 /// artifact…不要继续调研，不要只解释…立即输出完整…」）+ compile 错误原文
 /// 逐条回灌 + work-item-plan markdown source 的硬性重驱指令（第一行即文档标题）。
-pub(crate) fn build_work_item_plan_compile_reredrive_prompt(blocking_reasons: &[String]) -> String {
+///
+/// r46 核心修(三角色收敛):并入登记 ID 清单+短规则——compile 教学重驱
+/// 此前只有错误原文+B1 白名单,ID 纪律裸奔(现场:r46 首轮漏填
+/// requirement_id → 重驱改编号/新增清单外编号,震荡不收敛)。清单与
+/// IR 重驱/harness 反馈轮同集(story+design 双源 REQ-/NFR-/AC-)。
+pub(crate) fn build_work_item_plan_compile_reredrive_prompt(
+    blocking_reasons: &[String],
+    registered_requirement_ids: &[String],
+) -> String {
     let mut prompt = String::from(
         "上一轮已结束，但没有输出完整的 work-item-plan markdown source。\n\
          不要继续调研，不要只解释，不要输出任何前言或路由回执。\n\
@@ -211,6 +219,18 @@ pub(crate) fn build_work_item_plan_compile_reredrive_prompt(blocking_reasons: &[
                  动作:删除违例 section,或将其内容并入语义最近的合法 section 后重新输出完整 plan。\n"
             ));
         }
+    }
+    // r46 核心修:登记 ID 清单 + 短规则(与 IR 重驱同集;措辞与校验器字面量
+    // 对齐:三元组缺 requirement_id → lowering_error「traceability 缺少
+    // requirement_id」拒绝)。
+    if !registered_requirement_ids.is_empty() {
+        prompt.push_str(&format!(
+            "\n[design_requirements] {}\n\
+             每条 Traceability 三元组 requirement_id 必填且逐字取自上列清单;\
+             修复引用时不重编号、禁止新增清单外 REQ-*/NFR-*/AC-*/TASK;\
+             done_when 只指向已定义编号。\n",
+            registered_requirement_ids.join("、")
+        ));
     }
     prompt.push('\n');
     prompt
@@ -1028,7 +1048,6 @@ mod routing_reference_prompt_tests {
     }
 }
 
-#[cfg(test)]
 mod reredrive_prompt_tests {
     use super::build_work_item_plan_compile_reredrive_prompt;
 
@@ -1039,7 +1058,7 @@ mod reredrive_prompt_tests {
         let reasons = vec![
             "unknown_structured_key:1:未知结构化 key `NotAPermission`".to_string(),
         ];
-        let prompt = build_work_item_plan_compile_reredrive_prompt(&reasons);
+        let prompt = build_work_item_plan_compile_reredrive_prompt(&reasons, &[]);
         assert!(prompt.contains("unknown_structured_key"));
         assert!(
             prompt.contains("结构化: Identity"),
@@ -1056,7 +1075,48 @@ mod reredrive_prompt_tests {
     #[test]
     fn compile_reredrive_prompt_keeps_plain_form_without_unknown_key() {
         let reasons = vec!["missing_section:0:缺 Identity".to_string()];
-        let prompt = build_work_item_plan_compile_reredrive_prompt(&reasons);
+        let prompt = build_work_item_plan_compile_reredrive_prompt(&reasons, &[]);
         assert!(!prompt.contains("白名单"));
+    }
+
+    /// r46 核心修 TDD(精确复现 r46 首轮漏填形态):compile 教学重驱 prompt
+    /// 必须含真实登记清单+必填规则——此前只有错误原文+B1 白名单,ID 纪律
+    /// 裸奔,重驱改编号/新增清单外编号震荡不收敛。
+    #[test]
+    fn compile_reredrive_prompt_carries_registered_ids_and_discipline() {
+        let reasons = vec![
+            "lowering_error:42:traceability 缺少 requirement_id。".to_string(),
+        ];
+        let registered = vec![
+            "REQ-ENV-01".to_string(),
+            "NFR-PERF-02".to_string(),
+            "AC-001".to_string(),
+        ];
+        let prompt =
+            build_work_item_plan_compile_reredrive_prompt(&reasons, &registered);
+        assert!(
+            prompt.contains("[design_requirements] REQ-ENV-01、NFR-PERF-02、AC-001"),
+            "真实登记清单(双源同集 REQ/NFR/AC)必须并入: {prompt}"
+        );
+        assert!(
+            prompt.contains("requirement_id 必填且逐字取自上列清单"),
+            "必填规则必须在场: {prompt}"
+        );
+        assert!(
+            prompt.contains("不重编号、禁止新增清单外 REQ-*/NFR-*/AC-*/TASK"),
+            "修复纪律必须在场: {prompt}"
+        );
+        assert!(
+            prompt.contains("done_when 只指向已定义编号"),
+            "done_when 约束必须在场: {prompt}"
+        );
+    }
+
+    /// r46:清单空时不注入(无 spec 上下文的老会话零变化)。
+    #[test]
+    fn compile_reredrive_prompt_omits_empty_registered_ids() {
+        let reasons = vec!["missing_section:0:缺 Identity".to_string()];
+        let prompt = build_work_item_plan_compile_reredrive_prompt(&reasons, &[]);
+        assert!(!prompt.contains("[design_requirements]"));
     }
 }

@@ -12,7 +12,7 @@ fn work_item_plan_compile_reredrive_prompt_carries_errors_and_immediate_output_d
         "missing_section:6:Work Item 缺少必需 section。".to_string(),
     ];
 
-    let prompt = build_work_item_plan_compile_reredrive_prompt(&reasons);
+    let prompt = build_work_item_plan_compile_reredrive_prompt(&reasons, &[]);
 
     for required in [
         // build_artifact_retry_prompt 的模板形态（教学重驱先例措辞）。
