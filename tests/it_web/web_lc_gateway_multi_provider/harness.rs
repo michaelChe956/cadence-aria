@@ -26,6 +26,7 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
+use cadence_aria::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
 use cadence_aria::cross_cutting::tool_policy_audit::{DurableToolPolicyEvent, ProviderStartAudit};
 use cadence_aria::product::app_paths::ProductAppPaths;
 use cadence_aria::product::coding_attempt_store::CodingAttemptStore;
@@ -33,21 +34,20 @@ use cadence_aria::product::lifecycle_store::LifecycleStore;
 use cadence_aria::product::logical_codebase::policy::{
     AggregatePolicyArtifactStore, PolicyTarget, SessionPolicyAction,
 };
-use cadence_aria::product::logical_codebase::provider_gateway::{
-    ProviderLaunchAuditContext, ProviderRef, SessionLaunchRequest,
-};
 use cadence_aria::product::logical_codebase::provider_boundary_probe::{
     ProviderBoundaryProbe, ResumeChannelKind, ResumeProbeSpec, run_cli_boundary_probe,
 };
-use cadence_aria::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
+use cadence_aria::product::logical_codebase::provider_gateway::{
+    ProviderLaunchAuditContext, ProviderRef, SessionLaunchRequest,
+};
 
-use cadence_aria::product::logical_codebase::store::LogicalCodebaseStore;
 use cadence_aria::product::logical_codebase::provider_trust::{
     HomeBackedProviderTrustRegistry, ProviderTrustPrecondition,
 };
 use cadence_aria::product::logical_codebase::provider_trust_adapters::{
     CodexTrustAdapter, KimiTrustAdapter,
 };
+use cadence_aria::product::logical_codebase::store::LogicalCodebaseStore;
 use cadence_aria::product::logical_codebase::types::{
     CodebaseMemberRecord, RepositoryCheckoutRecord,
 };
@@ -490,7 +490,10 @@ impl LiveLcGatewayHarness {
                 MatrixEnvironment::build(provider.clone(), evidence_root).await?
             }
         };
-        fp("env_built", format_args!("lc={} issue={}", env.lc_id, env.issue_id));
+        fp(
+            "env_built",
+            format_args!("lc={} issue={}", env.lc_id, env.issue_id),
+        );
 
         let mut cells = Vec::new();
         if run_mode == super::snapshot::RunMode::ResumeFromPlanSnapshot {
@@ -506,61 +509,70 @@ impl LiveLcGatewayHarness {
                 .expect("resume env carries snapshot manifest");
             for stage in ["story", "design", "plan", "split"] {
                 cells.push(carried_cell(stage, &provider, manifest, &snapshot_id));
-                fp("stage_carried", format_args!("{stage} snapshot={snapshot_id}"));
+                fp(
+                    "stage_carried",
+                    format_args!("{stage} snapshot={snapshot_id}"),
+                );
             }
         }
         // 五阶段顺序固定:Story、Design、Plan、Coding、Review。
         if run_mode != super::snapshot::RunMode::ResumeFromPlanSnapshot {
-        fp("stage_begin", "story");
-        cells.extend(
-            env.run_workspace_entity_stage(
-                "story",
-                &format!(
-                    "/api/projects/{PROJECT_ID}/issues/{}/story-specs:generate",
-                    env.issue_id
-                ),
-                // r23:story 同样钉定单成员 involved——产品面(r23 根修)对钉定
-                // involved 派生 focus=首成员,story 首轮 launch 即锚 alpha 成员
-                // checkout;不钉则首轮锚聚合根视图,AI 回写 involved/focus 后
-                // 修订轮 target 三元组+git identity 漂移,按设计 supersede
-                // (resume_fingerprint_mismatch,r23 现场),原生恢复不可达。
-                pinned_story_generate_body(
-                    "矩阵 story:alpha 仓会话过期提示",
-                    &env.member_logical_id,
-                    &env.provider_wire,
-                ),
-                "story_specs",
-            )
-            .await,
-        );
-        fp("stage_end", format_args!("story cells={}", cells.len()));
-        fp("stage_begin", "design");
-        cells.extend(
-            env.run_workspace_entity_stage(
-                "design",
-                &format!(
-                    "/api/projects/{PROJECT_ID}/issues/{}/design-specs:generate",
-                    env.issue_id
-                ),
-                pinned_design_generate_body(
-                    "矩阵 design:alpha 仓会话过期后端设计",
-                    &env.story_spec_ids(),
-                    &env.member_logical_id,
-                    &env.provider_wire,
-                ),
-                "design_specs",
-            )
-            .await,
-        );
-        fp("stage_end", format_args!("design cells={}", cells.len()));
-        // Plan:workspace streaming 主入口(start_work_item_plan_author caller 链)。
-        fp("stage_begin", "plan streaming");
-        cells.extend(env.run_plan_streaming_stage().await);
-        fp("stage_end", format_args!("plan streaming cells={}", cells.len()));
-        // Plan:split_sync 对照(gateway sync bridge)。
-        fp("stage_begin", "plan split_sync");
-        cells.extend(env.run_split_sync_stage().await);
-        fp("stage_end", format_args!("plan split_sync cells={}", cells.len()));
+            fp("stage_begin", "story");
+            cells.extend(
+                env.run_workspace_entity_stage(
+                    "story",
+                    &format!(
+                        "/api/projects/{PROJECT_ID}/issues/{}/story-specs:generate",
+                        env.issue_id
+                    ),
+                    // r23:story 同样钉定单成员 involved——产品面(r23 根修)对钉定
+                    // involved 派生 focus=首成员,story 首轮 launch 即锚 alpha 成员
+                    // checkout;不钉则首轮锚聚合根视图,AI 回写 involved/focus 后
+                    // 修订轮 target 三元组+git identity 漂移,按设计 supersede
+                    // (resume_fingerprint_mismatch,r23 现场),原生恢复不可达。
+                    pinned_story_generate_body(
+                        "矩阵 story:alpha 仓会话过期提示",
+                        &env.member_logical_id,
+                        &env.provider_wire,
+                    ),
+                    "story_specs",
+                )
+                .await,
+            );
+            fp("stage_end", format_args!("story cells={}", cells.len()));
+            fp("stage_begin", "design");
+            cells.extend(
+                env.run_workspace_entity_stage(
+                    "design",
+                    &format!(
+                        "/api/projects/{PROJECT_ID}/issues/{}/design-specs:generate",
+                        env.issue_id
+                    ),
+                    pinned_design_generate_body(
+                        "矩阵 design:alpha 仓会话过期后端设计",
+                        &env.story_spec_ids(),
+                        &env.member_logical_id,
+                        &env.provider_wire,
+                    ),
+                    "design_specs",
+                )
+                .await,
+            );
+            fp("stage_end", format_args!("design cells={}", cells.len()));
+            // Plan:workspace streaming 主入口(start_work_item_plan_author caller 链)。
+            fp("stage_begin", "plan streaming");
+            cells.extend(env.run_plan_streaming_stage().await);
+            fp(
+                "stage_end",
+                format_args!("plan streaming cells={}", cells.len()),
+            );
+            // Plan:split_sync 对照(gateway sync bridge)。
+            fp("stage_begin", "plan split_sync");
+            cells.extend(env.run_split_sync_stage().await);
+            fp(
+                "stage_end",
+                format_args!("plan split_sync cells={}", cells.len()),
+            );
         }
         // Coding(依赖 Plan 确认后的 work item;失败落格)。全链与续跑轮都
         // 真实执行;续跑轮 observation.execution_origin 在阶段内部标记
@@ -729,10 +741,12 @@ impl MatrixEnvironment {
     ) -> Result<Self, LiveMatrixFailure> {
         let snapshot_id = super::snapshot::resolve_snapshot_id(evidence_root)
             .map_err(|message| matrix_failure("snapshot_unresolvable", message, None))?;
-        fp("snapshot_open_begin", format_args!("snapshot={snapshot_id}"));
-        let opened = super::snapshot::open_plan_snapshot(evidence_root, &snapshot_id).map_err(|error| {
-            matrix_failure(error.reason_code(), error.message(), None)
-        })?;
+        fp(
+            "snapshot_open_begin",
+            format_args!("snapshot={snapshot_id}"),
+        );
+        let opened = super::snapshot::open_plan_snapshot(evidence_root, &snapshot_id)
+            .map_err(|error| matrix_failure(error.reason_code(), error.message(), None))?;
         let manifest = opened.manifest.clone();
         fp(
             "snapshot_opened",
@@ -859,9 +873,8 @@ impl MatrixEnvironment {
         // canonical root/target 从 durable manifest 复原(原地同路径)。
         env.resolve_member_target().await?;
         // 成员 Git 身份 preflight:快照点 HEAD 复核(漂移=BLOCKED)。
-        let member_head = super::snapshot::git_head(&env.member_worktree).map_err(|message| {
-            matrix_failure("snapshot_member_head_unavailable", message, None)
-        })?;
+        let member_head = super::snapshot::git_head(&env.member_worktree)
+            .map_err(|message| matrix_failure("snapshot_member_head_unavailable", message, None))?;
         let expected_head = env
             .snapshot_manifest
             .as_ref()
@@ -986,24 +999,20 @@ impl MatrixEnvironment {
             // candidates;原始相对路径的 confirmed_paths 与其交集为空→
             // 「confirmed preflight must contain at least one candidate」500
             //(tempdir 轮天然绝对路径故不现)。canonicalize 后与发现面同源。
-            let run_workspace = run_workspace
-                .canonicalize()
-                .map_err(|error| {
-                    matrix_failure(
-                        "snapshot_run_dir_create_failed",
-                        format!("canonicalize {}: {error}", run_workspace.display()),
-                        None,
-                    )
-                })?;
-            let run_aggregate = run_aggregate
-                .canonicalize()
-                .map_err(|error| {
-                    matrix_failure(
-                        "snapshot_run_dir_create_failed",
-                        format!("canonicalize {}: {error}", run_aggregate.display()),
-                        None,
-                    )
-                })?;
+            let run_workspace = run_workspace.canonicalize().map_err(|error| {
+                matrix_failure(
+                    "snapshot_run_dir_create_failed",
+                    format!("canonicalize {}: {error}", run_workspace.display()),
+                    None,
+                )
+            })?;
+            let run_aggregate = run_aggregate.canonicalize().map_err(|error| {
+                matrix_failure(
+                    "snapshot_run_dir_create_failed",
+                    format!("canonicalize {}: {error}", run_aggregate.display()),
+                    None,
+                )
+            })?;
             fp(
                 "snapshot_capture_run_root",
                 format_args!("snapshot={snapshot_id} dir={}", directory.display()),
@@ -1035,15 +1044,13 @@ impl MatrixEnvironment {
             .expect("生产 logical gateway factory");
 
         // 2) 真实 git fixture(复用 web_lc_operations_api 建法:两成员仓+提交)。
-        let aggregate_root_path = aggregate_root_fixed
-            .clone()
-            .unwrap_or_else(|| {
-                aggregate_root
-                    .as_ref()
-                    .expect("aggregate root")
-                    .path()
-                    .to_path_buf()
-            });
+        let aggregate_root_path = aggregate_root_fixed.clone().unwrap_or_else(|| {
+            aggregate_root
+                .as_ref()
+                .expect("aggregate root")
+                .path()
+                .to_path_buf()
+        });
         let member_a = aggregate_root_path.join("alpha");
         let member_b = aggregate_root_path.join("beta");
         git_repo_at(&member_a);
@@ -1185,7 +1192,10 @@ impl MatrixEnvironment {
         let Some((cli_program, resume_kind)) = provider_probe_channel(&self.provider) else {
             let failure = matrix_failure(
                 "capability_probe_provider_unsupported",
-                format!("provider {:?} 无真实探针通道(四家之外不冒充)", self.provider),
+                format!(
+                    "provider {:?} 无真实探针通道(四家之外不冒充)",
+                    self.provider
+                ),
                 None,
             );
             return Err(self.fail_with_diagnostics(failure, None).await);
@@ -1254,7 +1264,8 @@ impl MatrixEnvironment {
             let write_state = ProviderBoundaryProbe::evidence_state(&Ok(evidence.clone()));
             // 6c worker 提醒:record 行 resume 格取 artifact_resume_state 结果
             //(工件签发,非自报;材料包 record 同口径构造)。
-            let resume_state = ProviderBoundaryProbe::artifact_resume_state(evidence.artifact_ref());
+            let resume_state =
+                ProviderBoundaryProbe::artifact_resume_state(evidence.artifact_ref());
             if write_state != ProviderCapabilityEvidence::Confirmed
                 || resume_state != ProviderCapabilityEvidence::Confirmed
             {
@@ -1281,7 +1292,10 @@ impl MatrixEnvironment {
                 .map_err(|error| {
                     matrix_failure(
                         "capability_probe_import_rejected",
-                        format!("provider {:?} action {:?} 2d 导入被拒:{error:?}", self.provider, action),
+                        format!(
+                            "provider {:?} action {:?} 2d 导入被拒:{error:?}",
+                            self.provider, action
+                        ),
                         None,
                     )
                 })?;
@@ -1363,10 +1377,7 @@ impl MatrixEnvironment {
                 let summary = registrations
                     .iter()
                     .map(|registration| {
-                        format!(
-                            "{:?}={:?}",
-                            registration.provider, registration.result
-                        )
+                        format!("{:?}={:?}", registration.provider, registration.result)
                     })
                     .collect::<Vec<_>>()
                     .join(",");
@@ -1397,14 +1408,12 @@ impl MatrixEnvironment {
     }
 
     fn aggregate_root_path(&self) -> &Path {
-        self.aggregate_root_fixed
-            .as_deref()
-            .unwrap_or_else(|| {
-                self._aggregate_root
-                    .as_ref()
-                    .expect("aggregate root")
-                    .path()
-            })
+        self.aggregate_root_fixed.as_deref().unwrap_or_else(|| {
+            self._aggregate_root
+                .as_ref()
+                .expect("aggregate root")
+                .path()
+        })
     }
 
     /// fix 轮 3:失败诊断抄录 + tempdir 保留。把该 LC 的 root recipe
@@ -1736,7 +1745,10 @@ impl MatrixEnvironment {
                 }
                 _ => {
                     if last_heartbeat.elapsed() >= FP_HEARTBEAT_SECS {
-                        fp("init_poll", format_args!("status={} 继续轮询(30s 心跳)", snapshot["status"]));
+                        fp(
+                            "init_poll",
+                            format_args!("status={} 继续轮询(30s 心跳)", snapshot["status"]),
+                        );
                         last_heartbeat = std::time::Instant::now();
                     }
                     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -1795,7 +1807,10 @@ impl MatrixEnvironment {
                 _ => {}
             }
             if last_heartbeat.elapsed() >= FP_HEARTBEAT_SECS {
-                fp("index_poll", format_args!("state={} 继续轮询(30s 心跳)", body["state"]));
+                fp(
+                    "index_poll",
+                    format_args!("state={} 继续轮询(30s 心跳)", body["state"]),
+                );
                 last_heartbeat = std::time::Instant::now();
             }
             if tokio::time::Instant::now() >= deadline {
@@ -2064,8 +2079,7 @@ impl MatrixEnvironment {
             .to_string();
         if session_id.is_empty() {
             return (
-                observation
-                    .denied_cell(format!("生成 {stage} 响应缺 workspace_session:{body}")),
+                observation.denied_cell(format!("生成 {stage} 响应缺 workspace_session:{body}")),
                 None,
             );
         }
@@ -2133,12 +2147,14 @@ impl MatrixEnvironment {
                 .denied_cell("无可恢复的本阶段 fresh 会话(fresh 未建立会话)".to_string());
         };
         let Some(mut ws) = gate_ws else {
-            return observation.denied_cell(
-                "fresh 轮未达人工门(无干净的同连接会话可供门上修订)".to_string(),
-            );
+            return observation
+                .denied_cell("fresh 轮未达人工门(无干净的同连接会话可供门上修订)".to_string());
         };
         observation.workspace_session_id = session_id.clone();
-        fp("resume_audit_scan_begin", format_args!("session={session_id}"));
+        fp(
+            "resume_audit_scan_begin",
+            format_args!("session={session_id}"),
+        );
         // 请求恢复的 native id = fresh 轮审计里的 provider_session_id
         //(必须在 revision 重驱前捕获)。
         observation.requested_resume_id =
@@ -2147,7 +2163,10 @@ impl MatrixEnvironment {
             self.latest_audit_projection_digest(&session_id, &self.provider);
         fp(
             "resume_audit_scan_end",
-            format_args!("requested_id={:?} frozen={:?}", observation.requested_resume_id, observation.frozen_digest),
+            format_args!(
+                "requested_id={:?} frozen={:?}",
+                observation.requested_resume_id, observation.frozen_digest
+            ),
         );
         let revision = json!({
             "type": "request_revision",
@@ -2355,7 +2374,10 @@ impl MatrixEnvironment {
         let mut confirms_left = confirm_rounds;
         let pump_started = std::time::Instant::now();
         let mut events_seen = 0u64;
-        fp("pump_begin", format_args!("timeout={timeout:?} confirms={confirm_rounds}"));
+        fp(
+            "pump_begin",
+            format_args!("timeout={timeout:?} confirms={confirm_rounds}"),
+        );
         loop {
             if tokio::time::Instant::now() >= deadline {
                 // r21 C1 同族盲区:该分支此前不落 run_failure——story resume
@@ -2364,7 +2386,10 @@ impl MatrixEnvironment {
                 observation.push_event(json!({"type": "matrix_stage_timeout"}));
                 observation.run_failure =
                     Some("workspace 会话阶段超时未达终态(对端零响应或挂死)".to_string());
-                fp("pump_stage_timeout", format_args!("elapsed={:?} events={events_seen}", pump_started.elapsed()));
+                fp(
+                    "pump_stage_timeout",
+                    format_args!("elapsed={:?} events={events_seen}", pump_started.elapsed()),
+                );
                 return outcome;
             }
             let message = tokio::time::timeout_at(idle_deadline, ws.recv_json()).await;
@@ -2377,7 +2402,10 @@ impl MatrixEnvironment {
                     observation.push_event(json!({"type": "matrix_ws_closed"}));
                     // F5:驱动失败原因必须落在格上,不得被 resume 兜底文案覆盖。
                     observation.run_failure = Some("workspace 会话 WS 在终态前关闭".to_string());
-                    fp("pump_ws_closed", format_args!("elapsed={:?} events={events_seen}", pump_started.elapsed()));
+                    fp(
+                        "pump_ws_closed",
+                        format_args!("elapsed={:?} events={events_seen}", pump_started.elapsed()),
+                    );
                     return outcome;
                 }
                 Ok(Err(error)) => {
@@ -2392,7 +2420,10 @@ impl MatrixEnvironment {
                     // r12 证据里 128 pong 同毫秒突发即此因),必须按间隔节流。
                     fp(
                         "pump_idle_ping",
-                        format_args!("elapsed={:?} events={events_seen}(30s 心跳:泵存活/对端静默)", pump_started.elapsed()),
+                        format_args!(
+                            "elapsed={:?} events={events_seen}(30s 心跳:泵存活/对端静默)",
+                            pump_started.elapsed()
+                        ),
                     );
                     if ws.send_json(&json!({"type": "ping"})).await.is_err() {
                         observation.push_event(json!({"type": "matrix_ws_closed"}));
@@ -2406,7 +2437,10 @@ impl MatrixEnvironment {
                 Err(_) => {
                     observation.push_event(json!({"type": "matrix_stage_timeout"}));
                     observation.run_failure = Some("workspace 会话阶段超时未达终态".to_string());
-                    fp("pump_stage_timeout", format_args!("elapsed={:?} events={events_seen}", pump_started.elapsed()));
+                    fp(
+                        "pump_stage_timeout",
+                        format_args!("elapsed={:?} events={events_seen}", pump_started.elapsed()),
+                    );
                     return outcome;
                 }
             };
@@ -2430,7 +2464,10 @@ impl MatrixEnvironment {
                 "session_state" => {
                     if let Some(status) = message.get("status").and_then(Value::as_str) {
                         observation.record_status(status);
-                        fp("pump_session_state", format_args!("status={status} events={events_seen}"));
+                        fp(
+                            "pump_session_state",
+                            format_args!("status={status} events={events_seen}"),
+                        );
                     }
                 }
                 "stage_change" => {
@@ -2450,7 +2487,10 @@ impl MatrixEnvironment {
                     //(P0 1.3:旧单题字段会被引擎清空)。
                     if let Some(choice_id) = message.get("id").and_then(Value::as_str) {
                         let (answers, top_selected) = semantic_choice_answers(&message);
-                        fp("pump_choice_request", format_args!("id={choice_id} options={}", top_selected.join(",")));
+                        fp(
+                            "pump_choice_request",
+                            format_args!("id={choice_id} options={}", top_selected.join(",")),
+                        );
                         let _ = ws
                             .send_json(&json!({
                                 "type": "choice_response",
@@ -2495,12 +2535,18 @@ impl MatrixEnvironment {
                     // confirmed 是终态:确认门已过,立即收口,
                     // 不再空转到阶段超时。
                     outcome.artifact_confirmed = true;
-                    fp("pump_confirmed", format_args!("elapsed={:?}", pump_started.elapsed()));
+                    fp(
+                        "pump_confirmed",
+                        format_args!("elapsed={:?}", pump_started.elapsed()),
+                    );
                     return outcome;
                 }
                 PumpFrameDisposition::Terminal(status) => {
                     observation.terminal_status = Some(status.to_string());
-                    fp("pump_terminal", format_args!("status={status} elapsed={:?}", pump_started.elapsed()));
+                    fp(
+                        "pump_terminal",
+                        format_args!("status={status} elapsed={:?}", pump_started.elapsed()),
+                    );
                     return outcome;
                 }
                 PumpFrameDisposition::ServerError => {
@@ -2646,9 +2692,8 @@ impl MatrixEnvironment {
             let lc_root = self
                 .app_paths
                 .logical_codebase_record_root(PROJECT_ID, &self.lc_id);
-            let audits = self.scan_session_audits(
-                &self.prior_plan_session_id.clone().unwrap_or_default(),
-            );
+            let audits =
+                self.scan_session_audits(&self.prior_plan_session_id.clone().unwrap_or_default());
             let cli_version = audits
                 .first()
                 .map(|(_, record)| record.provider_version.clone())
@@ -2660,10 +2705,7 @@ impl MatrixEnvironment {
                 issue_id: &self.issue_id,
                 lc_id: &self.lc_id,
                 plan_id: &self.plan_id,
-                work_item_id: self
-                    .work_item_id
-                    .as_deref()
-                    .unwrap_or_default(),
+                work_item_id: self.work_item_id.as_deref().unwrap_or_default(),
                 workspace_root: self.workspace_root_path(),
                 aggregate_root: self.aggregate_root_path(),
                 lc_root: &lc_root,
@@ -2714,8 +2756,9 @@ impl MatrixEnvironment {
         observation.role = "work_item_splitter".to_string();
         observation.force_resume = true;
         let Some(mut ws) = gate_ws else {
-            return observation
-                .denied_cell("plan fresh 未达 SC 人工门(无干净的同连接会话可供门上修订)".to_string());
+            return observation.denied_cell(
+                "plan fresh 未达 SC 人工门(无干净的同连接会话可供门上修订)".to_string(),
+            );
         };
         observation.workspace_session_id = session_id.to_string();
         // r52(#2 收口):请求基准必须与修订 turn 实际携带的 resume id 同源
@@ -2771,11 +2814,7 @@ impl MatrixEnvironment {
         // 门帧驱动:期间 choice 语义应答/心跳照常,确定终态秒收口,阶段
         // 超时兜底(有界,不空转)。
         let gate_open = self
-            .pump_plan_sc_phase(
-                &mut ws,
-                &mut observation,
-                PlanScPumpPhase::AwaitConfirmGate,
-            )
+            .pump_plan_sc_phase(&mut ws, &mut observation, PlanScPumpPhase::AwaitConfirmGate)
             .await;
         if !gate_open {
             return observation.build_cell(self);
@@ -2806,9 +2845,7 @@ impl MatrixEnvironment {
                 break;
             }
             let failure_text = observation.run_failure.clone().unwrap_or_default();
-            if recovery_actions_left > 0
-                && plan_confirm_failure_is_recoverable(&failure_text)
-            {
+            if recovery_actions_left > 0 && plan_confirm_failure_is_recoverable(&failure_text) {
                 recovery_actions_left -= 1;
                 observation.run_failure = None;
                 fp(
@@ -2843,13 +2880,14 @@ impl MatrixEnvironment {
                     .join(";");
                 let account = format!(
                     "run 预算消耗账:transitions_used={}/12,manual_repairs_used={}/3,repairs_used={}/1,review_cycles=[{cycles}]",
-                    history.transitions_used,
-                    history.manual_repairs_used,
-                    history.repairs_used
+                    history.transitions_used, history.manual_repairs_used, history.repairs_used
                 );
                 fp("plan_sc_budget_account", format_args!("{account}"));
-                observation.run_failure =
-                    Some(format!("{}/{}", observation.run_failure.clone().unwrap_or_default(), account));
+                observation.run_failure = Some(format!(
+                    "{}/{}",
+                    observation.run_failure.clone().unwrap_or_default(),
+                    account
+                ));
             }
         }
         observation.completed_product_artifact_exists = confirmed;
@@ -2909,9 +2947,8 @@ impl MatrixEnvironment {
         );
         loop {
             if tokio::time::Instant::now() >= deadline {
-                observation.run_failure = Some(format!(
-                    "plan SC 门阶段超时(phase={phase:?},未达预期信号)"
-                ));
+                observation.run_failure =
+                    Some(format!("plan SC 门阶段超时(phase={phase:?},未达预期信号)"));
                 fp(
                     "plan_sc_pump_timeout",
                     format_args!("phase={phase:?} elapsed={:?}", phase_started.elapsed()),
@@ -2925,8 +2962,7 @@ impl MatrixEnvironment {
                     value
                 }
                 Ok(Ok(None)) => {
-                    observation.run_failure =
-                        Some("plan SC 门会话 WS 在终态前关闭".to_string());
+                    observation.run_failure = Some("plan SC 门会话 WS 在终态前关闭".to_string());
                     return false;
                 }
                 Ok(Err(error)) => {
@@ -2964,7 +3000,10 @@ impl MatrixEnvironment {
                 "choice_request" => {
                     if let Some(choice_id) = message.get("id").and_then(Value::as_str) {
                         let (answers, top_selected) = semantic_choice_answers(&message);
-                        fp("plan_sc_pump_choice_request", format_args!("id={choice_id}"));
+                        fp(
+                            "plan_sc_pump_choice_request",
+                            format_args!("id={choice_id}"),
+                        );
                         let _ = ws
                             .send_json(&json!({
                                 "type": "choice_response",
@@ -3031,7 +3070,10 @@ impl MatrixEnvironment {
         let (status, body) = request_json(
             &self.app,
             Method::GET,
-            &format!("/api/issues/{}/lifecycle?project_id={PROJECT_ID}", self.issue_id),
+            &format!(
+                "/api/issues/{}/lifecycle?project_id={PROJECT_ID}",
+                self.issue_id
+            ),
             json!({}),
         )
         .await;
@@ -3051,12 +3093,16 @@ impl MatrixEnvironment {
     /// 的最新版本正文都扫。空/缺失返回空串=反馈退回基础文案。
     fn design_requirement_ids_digest(&self) -> String {
         let mut contexts = Vec::new();
-        for entity_id in [self.story_spec_id.as_deref(), self.design_spec_id.as_deref()]
-            .into_iter()
-            .flatten()
+        for entity_id in [
+            self.story_spec_id.as_deref(),
+            self.design_spec_id.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
         {
             if let Ok(mut versions) =
-                self.lifecycle.list_versions(PROJECT_ID, &self.issue_id, entity_id)
+                self.lifecycle
+                    .list_versions(PROJECT_ID, &self.issue_id, entity_id)
             {
                 versions.sort_by_key(|version| version.version);
                 if let Some(latest) = versions.last() {
@@ -3112,7 +3158,10 @@ impl MatrixEnvironment {
                 return cells;
             }
         };
-        fp("split_sync_begin_handle", format_args!("session={workspace_session_id}(同步段:持审计互斥锁)"));
+        fp(
+            "split_sync_begin_handle",
+            format_args!("session={workspace_session_id}(同步段:持审计互斥锁)"),
+        );
         let handle = match self.lifecycle.begin_work_item_split_provider_run(
             PROJECT_ID,
             &self.issue_id,
@@ -3131,7 +3180,10 @@ impl MatrixEnvironment {
                 return cells;
             }
         };
-        fp("split_sync_handle_ok", format_args!("run_ref={}", handle.run_ref));
+        fp(
+            "split_sync_handle_ok",
+            format_args!("run_ref={}", handle.run_ref),
+        );
         fresh.run_ref = handle.run_ref.clone();
         fresh.role_run_seq = Some(handle.role_run_seq);
 
@@ -3211,14 +3263,20 @@ impl MatrixEnvironment {
             Ok(launch) => {
                 fp(
                     "split_sync_run_sync_begin",
-                    format_args!("spawn_blocking 桥启动,stage 预算={}s(桥线程 lc-gateway-sync-bridge)", self.stage_timeout.as_secs()),
+                    format_args!(
+                        "spawn_blocking 桥启动,stage 预算={}s(桥线程 lc-gateway-sync-bridge)",
+                        self.stage_timeout.as_secs()
+                    ),
                 );
                 let bounded = tokio::time::timeout(
                     self.stage_timeout,
                     tokio::task::spawn_blocking(move || gateway.run_sync(launch)),
                 )
                 .await;
-                fp("split_sync_run_sync_end", format_args!("bounded={}", bounded.is_ok()));
+                fp(
+                    "split_sync_run_sync_end",
+                    format_args!("bounded={}", bounded.is_ok()),
+                );
                 match bounded {
                     Ok(Ok(Ok(output))) => {
                         // r26 问题4:F1 事件载荷——sync 栈无 WS 事件流,以
@@ -3273,8 +3331,7 @@ impl MatrixEnvironment {
                         fresh.completed_product_artifact_exists =
                             complete.is_some_and(|result| result.is_ok());
                         if !fresh.completed_product_artifact_exists {
-                            let reason =
-                                format!("split_sync 结构化产物缺失/收口失败:{output:?}");
+                            let reason = format!("split_sync 结构化产物缺失/收口失败:{output:?}");
                             let _ = self
                                 .lifecycle
                                 .fail_work_item_split_provider_run(&handle, &reason);
@@ -3512,7 +3569,10 @@ impl MatrixEnvironment {
         let mut idle_deadline = tokio::time::Instant::now() + IDLE_PING_SECS;
         let coding_started = std::time::Instant::now();
         let mut events_seen = 0u64;
-        fp("coding_pump_begin", format_args!("attempt={attempt_id} timeout={:?}", self.stage_timeout));
+        fp(
+            "coding_pump_begin",
+            format_args!("attempt={attempt_id} timeout={:?}", self.stage_timeout),
+        );
         loop {
             if tokio::time::Instant::now() >= deadline {
                 observation.push_event(json!({"type": "matrix_stage_timeout"}));
@@ -3526,7 +3586,13 @@ impl MatrixEnvironment {
                 }
                 Ok(Ok(None)) | Ok(Err(_)) => {
                     observation.run_failure = Some("coding 会话 WS 在终态前关闭/错误".to_string());
-                    fp("coding_pump_closed", format_args!("elapsed={:?} events={events_seen}", coding_started.elapsed()));
+                    fp(
+                        "coding_pump_closed",
+                        format_args!(
+                            "elapsed={:?} events={events_seen}",
+                            coding_started.elapsed()
+                        ),
+                    );
                     return outcome;
                 }
                 Err(_) if tokio::time::Instant::now() < deadline => {
@@ -3535,7 +3601,10 @@ impl MatrixEnvironment {
                     // timeout_at 立即 Err 退化成 ping 风暴。
                     fp(
                         "coding_pump_idle_ping",
-                        format_args!("elapsed={:?} events={events_seen}(30s 心跳:泵存活/对端静默)", coding_started.elapsed()),
+                        format_args!(
+                            "elapsed={:?} events={events_seen}(30s 心跳:泵存活/对端静默)",
+                            coding_started.elapsed()
+                        ),
                     );
                     if ws.send_json(&json!({"type": "coding_ping"})).await.is_err() {
                         observation.run_failure =
@@ -3616,7 +3685,10 @@ impl MatrixEnvironment {
                     // stale-read 竞态)→ 2s 后补一次重试(恢复 admission 需
                     // durable Blocked 态与 role run 落定);同门第 2 次失败
                     // 即有界落格,不空转到阶段超时。
-                    let code = message.get("code").and_then(Value::as_str).unwrap_or_default();
+                    let code = message
+                        .get("code")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
                     // r52(#2):恢复态落格的最近错误留痕。
                     last_protocol_error = Some(
                         message
@@ -3668,7 +3740,10 @@ impl MatrixEnvironment {
                 "coding_session_state" => {
                     if let Some(status) = message.get("status").and_then(Value::as_str) {
                         observation.record_status(status);
-                        fp("coding_pump_state", format_args!("status={status} events={events_seen}"));
+                        fp(
+                            "coding_pump_state",
+                            format_args!("status={status} events={events_seen}"),
+                        );
                         match status {
                             // r58 审计 F3:waiting_for_human 只有在终门
                             //(stage=final_confirm 且无未决 blocked 门)才是
@@ -3710,22 +3785,22 @@ impl MatrixEnvironment {
                             "awaiting_manual_recovery" => {
                                 recovery_seen += 1;
                                 if recovery_seen >= 2 {
-                                    observation.terminal_status =
-                                        Some(status.to_string());
+                                    observation.terminal_status = Some(status.to_string());
                                     observation.run_failure = Some(format!(
                                         "coding awaiting_manual_recovery 恢复无效(第 {recovery_seen} 次;上次错误={})",
                                         last_protocol_error.clone().unwrap_or_default()
                                     ));
                                     fp(
                                         "coding_pump_recovery_unrecoverable",
-                                        format_args!("last_error={}", last_protocol_error.clone().unwrap_or_default()),
+                                        format_args!(
+                                            "last_error={}",
+                                            last_protocol_error.clone().unwrap_or_default()
+                                        ),
                                     );
                                     return outcome;
                                 }
                                 fp("coding_pump_recovery_recover_coding", "attempt=1");
-                                let _ = ws
-                                    .send_json(&json!({"type": "recover_coding"}))
-                                    .await;
+                                let _ = ws.send_json(&json!({"type": "recover_coding"})).await;
                             }
                             _ => {}
                         }
@@ -3924,7 +3999,10 @@ impl MatrixEnvironment {
     fn write_cell_evidence(&self, cell: &EvidenceCell) -> Result<(), String> {
         fp(
             "write_cell_evidence",
-            format_args!("{}/{}/{}(同步段)", cell.stage, cell.entrypoint, cell.fresh_or_resume),
+            format_args!(
+                "{}/{}/{}(同步段)",
+                cell.stage, cell.entrypoint, cell.fresh_or_resume
+            ),
         );
         let entrypoint_dir = cell.entrypoint.replace('/', "-");
         let cell_dir = self
@@ -4219,7 +4297,10 @@ impl StageObservation {
     fn build_cell(&mut self, env: &MatrixEnvironment) -> EvidenceCell {
         fp(
             "build_cell",
-            format_args!("{}/{}(同步段:审计扫描+git 快照)", self.stage, self.force_resume),
+            format_args!(
+                "{}/{}(同步段:审计扫描+git 快照)",
+                self.stage, self.force_resume
+            ),
         );
         let mut cell = self.placeholder_cell();
         cell.process_cwd = env.canonical_root.clone();
@@ -4426,15 +4507,12 @@ fn frame_carries_artifact_markdown(kind: &str, message: &Value) -> bool {
         // r29 问题1:真实帧形态(r28 实测)——artifact_update 的 markdown 在
         // 事件顶层(ArtifactPayload 枚举字段被 serde 展平);保留 payload
         // 嵌套形态兜底。
-        "artifact_update" => message
-            .get("markdown")
-            .and_then(Value::as_str)
-            .or_else(|| {
-                message
-                    .get("payload")
-                    .and_then(|payload| payload.get("markdown"))
-                    .and_then(Value::as_str)
-            }),
+        "artifact_update" => message.get("markdown").and_then(Value::as_str).or_else(|| {
+            message
+                .get("payload")
+                .and_then(|payload| payload.get("markdown"))
+                .and_then(Value::as_str)
+        }),
         "session_state" => message
             .get("artifact")
             .and_then(|artifact| artifact.get("markdown"))
@@ -4489,7 +4567,10 @@ fn coding_gate_action_id(message: &Value) -> String {
 /// 阶段开的 shared_worktree_dirty manual 门,gates.rs 362-392)同样
 /// 不可确认,继续泵走门应答/有界失败路径。
 fn coding_waiting_human_confirms(frame: &Value) -> bool {
-    let stage = frame.get("stage").and_then(Value::as_str).unwrap_or_default();
+    let stage = frame
+        .get("stage")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     if stage != "final_confirm" {
         return false;
     }
@@ -4513,7 +4594,6 @@ enum PlanScFrameSignal {
     /// 服务端拒收/错误帧:立即失败收口。
     ServerError,
 }
-
 
 /// 泵送单帧处置决策(r21 C1 根修提为纯函数,决策表可单测)。
 ///
@@ -4667,11 +4747,7 @@ fn pinned_design_generate_body(
 /// involved 派生 focus=首成员,首轮 launch 即锚该成员 checkout;story 的
 /// focus 无独立请求面,这是唯一让首轮与修订轮 target 锚一致(指纹可比对、
 /// 原生恢复可达)的钉定入口。
-fn pinned_story_generate_body(
-    title: &str,
-    member_logical_id: &str,
-    provider_wire: &str,
-) -> Value {
+fn pinned_story_generate_body(title: &str, member_logical_id: &str, provider_wire: &str) -> Value {
     json!({
         "title": title,
         "involved_repository_ids": [member_logical_id],
@@ -4793,11 +4869,17 @@ async fn request_json(
     fp("http_wait", format_args!("{http_label}(180s 有界)"));
     match tokio::time::timeout(Duration::from_secs(180), request).await {
         Ok(result) => {
-            fp("http_end", format_args!("{http_label} -> {}", result.0.as_u16()));
+            fp(
+                "http_end",
+                format_args!("{http_label} -> {}", result.0.as_u16()),
+            );
             result
         }
         Err(_) => {
-            fp("http_timeout", format_args!("{http_label}(180s 超时:服务端任务疑似挂起)"));
+            fp(
+                "http_timeout",
+                format_args!("{http_label}(180s 超时:服务端任务疑似挂起)"),
+            );
             (
                 StatusCode::GATEWAY_TIMEOUT,
                 json!({
@@ -5182,11 +5264,7 @@ fn is_tool_event(event: &Value) -> bool {
         "execution_event" | "coding_execution_event" => {
             // provider 工具执行桥帧:inner event.kind == "command"
             // (codex commandExecution / pi bash-read 工具)。
-            if event
-                .pointer("/event/kind")
-                .and_then(Value::as_str)
-                == Some("command")
-            {
+            if event.pointer("/event/kind").and_then(Value::as_str) == Some("command") {
                 return true;
             }
             let title = event
@@ -5237,6 +5315,14 @@ fn scan_stream_log_pid(directory: &Path) -> Option<String> {
 /// 是其 requestUserInput 审批通道的实名启用 flag(069ab065 先例:codex
 /// 结构化交互工具=requestUserInput,argv 冻结 `app-server --enable
 /// default_mode_request_user_input`)——与 --allowedTools 族同为等价 token。
+///
+/// r62(kimi-6 split_sync 现场):kimi 的权限/审批投影不走 argv token 族——
+/// ACP 协议内 initialize clientCapabilities(fs/terminal 布尔方言)+
+/// ClientServicePolicy 决策表(24 格,由 action 派生;66e0d59d 先例:kimi
+/// 例外映射,DenyFileWriteBuiltins→None)承担,argv 仅冻结 `acp` 子命令。
+/// `acp` 是该控制面的唯一 argv 实名段(非 ACP 模式无 fs/terminal/permission
+/// 通道),与 codex 的 requestUserInput flag 同构计入;claude/codex/pi 的
+/// argv 形态(-p/app-server/--mode rpc)不含裸 `acp`,无误伤面。
 fn argv_carries_permission_wire(argv: &[String]) -> bool {
     argv.iter().any(|argument| {
         argument.starts_with("--allowedTools")
@@ -5246,6 +5332,7 @@ fn argv_carries_permission_wire(argv: &[String]) -> bool {
             || argument.starts_with("--exclude-tools")
             || argument.starts_with("--tools")
             || argument == "default_mode_request_user_input"
+            || argument == "acp"
     })
 }
 
@@ -5422,6 +5509,15 @@ fn semantic_option_selection(
             .collect::<Vec<_>>()
             .join(" ;; ")
     );
+    // r62(pi-6 review fresh 现场):自由文本宣告类选项(「其他(我会在回答
+    // 中说明…)」)语义上是 free-text 通道——自动应答选它等于给 provider
+    // 一个空洞应答(现场 Q5 的「C. 其他…兼容保持方式」被 confirm_cjk
+    // 「保持」误中选中,pi 收到空洞「其他」后无产物收束,artifact gate
+    // 拒)。存在非宣告类候选时把宣告类挤出选择(按 Negative 同款排除
+    // 语义);全为宣告类时保持原分级(维持 fallback,不空转)。
+    let any_non_declaring = options.iter().any(|option| {
+        !is_free_text_declaring_option(option.get("label").and_then(Value::as_str).unwrap_or(""))
+    });
     let classified: Vec<(usize, SemanticTier)> = options
         .iter()
         .enumerate()
@@ -5430,7 +5526,11 @@ fn semantic_option_selection(
             //("不含自动续期/不含主动登出清理")会误触负向口径,把
             //「(推荐)」正解挤出选择。
             let label = option.get("label").and_then(Value::as_str).unwrap_or("");
-            (index, semantic_tier(label))
+            let mut tier = semantic_tier(label);
+            if any_non_declaring && is_free_text_declaring_option(label) {
+                tier = SemanticTier::Negative;
+            }
+            (index, tier)
         })
         .collect();
     let id_at = |index: usize| -> String {
@@ -5534,6 +5634,18 @@ enum SemanticTier {
     Neutral,
     Confirm,
     SelectAll,
+}
+
+/// r62(pi-6 review fresh 现场):自由文本宣告类选项判定——「其他」开头
+/// (剥掉 A./B./1. 类拉丁前缀后)或含「我会在回答中说明」宣告语。这类
+/// 选项的语义是把答案留给 free-text 通道,自动应答无法为其提供实质
+/// 文本;仅做窄匹配(不认英文 "other",防误伤含该词的实义选项)。
+fn is_free_text_declaring_option(label: &str) -> bool {
+    let normalized = label.trim().to_lowercase();
+    let stripped = normalized
+        .trim_start_matches(|c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | ')' | '、'))
+        .trim_start();
+    stripped.starts_with("其他") || normalized.contains("我会在回答中说明")
 }
 
 /// 选项文本分级:负向判定优先(「不确认」不得命中确认口径),
@@ -5654,7 +5766,10 @@ async fn connect_live_ws(url: &str) -> Result<LiveWs, String> {
             Err(error)
         }
         Err(_) => {
-            fp("ws_connect_timeout", format_args!("{url}(180s 超时:服务端任务疑似冻结)"));
+            fp(
+                "ws_connect_timeout",
+                format_args!("{url}(180s 超时:服务端任务疑似冻结)"),
+            );
             Err("WS 连接 180s 超时(服务端任务疑似冻结)".to_string())
         }
     }
@@ -6116,7 +6231,6 @@ mod pump_disposition_tests {
         );
     }
 
-
     /// r26 问题4:wire 事件行大字段截断保留形态。
     #[test]
     fn lcg_truncate_verbose_wire_fields_bounds_payload() {
@@ -6148,13 +6262,19 @@ mod pump_disposition_tests {
             "event_seq": 7334,
             "markdown": "# Work Item Plan\n## Work Item WI-001 …",
         });
-        assert!(frame_carries_artifact_markdown("artifact_update", &artifact_update));
+        assert!(frame_carries_artifact_markdown(
+            "artifact_update",
+            &artifact_update
+        ));
         // 嵌套 payload 形态兜底同样命中。
         let nested_update = json!({
             "type": "artifact_update",
             "payload": {"markdown": "# 会话过期提示 Story Spec\n内容…", "version": 2},
         });
-        assert!(frame_carries_artifact_markdown("artifact_update", &nested_update));
+        assert!(frame_carries_artifact_markdown(
+            "artifact_update",
+            &nested_update
+        ));
         let snapshot = json!({
             "type": "session_state",
             "artifact": {"markdown": "# plan 候选"},
@@ -6162,9 +6282,15 @@ mod pump_disposition_tests {
         assert!(frame_carries_artifact_markdown("session_state", &snapshot));
         // 空 markdown/缺失/其他帧不算(plan fresh 产物判定不得被空帧误置)。
         let empty_update = json!({"type": "artifact_update", "payload": {"markdown": "   "}});
-        assert!(!frame_carries_artifact_markdown("artifact_update", &empty_update));
+        assert!(!frame_carries_artifact_markdown(
+            "artifact_update",
+            &empty_update
+        ));
         let no_artifact = json!({"type": "session_state", "artifact": null});
-        assert!(!frame_carries_artifact_markdown("session_state", &no_artifact));
+        assert!(!frame_carries_artifact_markdown(
+            "session_state",
+            &no_artifact
+        ));
         let chunk = json!({"type": "stream_chunk", "content": "# 不是产物"});
         assert!(!frame_carries_artifact_markdown("stream_chunk", &chunk));
     }
@@ -6176,7 +6302,11 @@ mod pump_disposition_tests {
         let markdown = "# Design Spec\n\n## REQ-ENV-01: 会话签发接口\n签发与会话查询。\n\n## NFR-PERF-2 延迟上限\nP99 < 50ms(REQ-ENV-01 同样适用)。\n\n无关行不含编号。";
         let ids = extract_requirement_ids(markdown);
         let plain: Vec<&str> = ids.iter().map(|(id, _)| id.as_str()).collect();
-        assert_eq!(plain, vec!["REQ-ENV-01", "NFR-PERF-2"], "编号保序去重: {ids:?}");
+        assert_eq!(
+            plain,
+            vec!["REQ-ENV-01", "NFR-PERF-2"],
+            "编号保序去重: {ids:?}"
+        );
         assert!(
             ids[0].1.contains("会话签发接口"),
             "同行剩余文本作一句话描述: {ids:?}"
@@ -6219,7 +6349,10 @@ mod pump_disposition_tests {
                 "title": "Command started"
             }
         });
-        assert!(is_tool_event(&codex_command), "codex commandExecution 桥帧必须计入");
+        assert!(
+            is_tool_event(&codex_command),
+            "codex commandExecution 桥帧必须计入"
+        );
         // codex-5 coding fresh 现场帧(coding_ 前缀,358 帧)。
         let codex_coding_command = json!({
             "type": "coding_execution_event",
@@ -6254,7 +6387,10 @@ mod pump_disposition_tests {
                 "title": "Provider Prompt"
             }
         });
-        assert!(!is_tool_event(&prompt_echo), "output/prompt 回显不是 tool 事件");
+        assert!(
+            !is_tool_event(&prompt_echo),
+            "output/prompt 回显不是 tool 事件"
+        );
         let turn_event = json!({
             "type": "execution_event",
             "event": {"kind": "turn", "title": "Turn started"}
@@ -6294,14 +6430,65 @@ mod pump_disposition_tests {
         // 无权限语义的普通 flag 不计入(判据不降低)。
         let plain = vec!["--mode".to_string(), "rpc".to_string()];
         assert!(!argv_carries_permission_wire(&plain));
-        let unrelated_enable = vec![
-            "--enable".to_string(),
-            "some_other_feature".to_string(),
-        ];
+        let unrelated_enable = vec!["--enable".to_string(), "some_other_feature".to_string()];
         assert!(
             !argv_carries_permission_wire(&unrelated_enable),
             "非审批通道的 --enable 值不得计入"
         );
+    }
+
+    /// r62(kimi-6 split_sync 现场):kimi 的权限/审批投影在 ACP 协议内
+    /// (initialize clientCapabilities + ClientServicePolicy 决策表,66e0d59d
+    /// 例外映射先例),argv 仅冻结 `acp` 子命令——`acp` 是该控制面的唯一
+    /// argv 实名段,与 codex requestUserInput flag 同构计入;claude/codex/pi
+    /// argv 形态不含裸 `acp`,无误伤面。
+    #[test]
+    fn lcg_argv_carries_permission_wire_recognizes_kimi_acp_client_services_channel() {
+        // kimi-6 split_sync 现场 argv(审计 provider_start 原形)。
+        let kimi_argv = vec!["acp".to_string()];
+        assert!(
+            argv_carries_permission_wire(&kimi_argv),
+            "kimi ACP clientServices 控制面子命令是权限 wire 实名段"
+        );
+        // 非子命令位置的同名词不计入(判据不降低:实名段是子命令形态)。
+        let embedded = vec!["--mode".to_string(), "acp-like".to_string()];
+        assert!(!argv_carries_permission_wire(&embedded));
+    }
+
+    /// r62(pi-6 review fresh 现场):语义应答不得选中自由文本宣告类选项
+    /// ——Q5 的「C. 其他(我会在回答中说明调整形态与兼容保持方式)」被
+    /// confirm_cjk「保持」误中选中,pi 收到空洞「其他」应答后无产物收束
+    /// (artifact gate 拒,pi 无 retry 既有契约);「A. 不调整」含负向「不」
+    /// 同样被排除,正确落点是实义选项 B。
+    #[test]
+    fn lcg_semantic_selection_skips_free_text_declaring_options() {
+        // pi-6 review fresh 现场 Q5 选项原形(id=label 全文,pi 方言)。
+        let option_a = "A. 不调整：`pub fn cross_repo_greeting() -> &'static str` 保持签名与返回值语义完全不变，新能力全部走新增入口【推荐：[REQ-006] 是「带约束的许可」而非必须调整，零调整即零兼容风险，[AC-007] 自动满足】";
+        let option_b = "B. 调整：改变签名或返回值语义（如返回结构体/版本信息），同时保证 beta 侧既有消费路径仍可用";
+        let option_c = "C. 其他（我会在回答中说明调整形态与兼容保持方式）";
+        let options = json!([
+            { "id": option_a, "label": option_a },
+            { "id": option_b, "label": option_b },
+            { "id": option_c, "label": option_c },
+        ]);
+        let selected = semantic_option_selection(
+            "cross_repo_greeting 调整口径？",
+            options.as_array().unwrap(),
+            false,
+        );
+        assert_eq!(
+            selected,
+            vec![option_b.to_string()],
+            "自由文本宣告类(C)与负向「不调整」(A)都必须让位给实义选项 B"
+        );
+        // 全为宣告类时保持 fallback(不空转,维持首选项语义)。
+        let all_declaring = json!([
+            { "id": "opt_x", "label": "其他（自由说明）" },
+            { "id": "opt_y", "label": "其他（另一形态）" },
+        ]);
+        let selected =
+            semantic_option_selection("任意问题", all_declaring.as_array().unwrap(), false);
+        assert_eq!(selected, vec!["opt_x".to_string()]);
     }
 }
 
@@ -6497,7 +6684,10 @@ mod snapshot_spec_restore_tests {
         );
         assert_eq!(
             restored_spec_ids_from_lifecycle(&body).expect("Confirmed 成对必须恢复"),
-            ("story_spec_0001".to_string(), "design_spec_0001".to_string())
+            (
+                "story_spec_0001".to_string(),
+                "design_spec_0001".to_string()
+            )
         );
     }
 
@@ -6516,7 +6706,10 @@ mod snapshot_spec_restore_tests {
         );
         assert_eq!(
             restored_spec_ids_from_lifecycle(&body).expect("存在 Confirmed 条目必须恢复"),
-            ("story_spec_0004".to_string(), "design_spec_0001".to_string())
+            (
+                "story_spec_0004".to_string(),
+                "design_spec_0001".to_string()
+            )
         );
     }
 
@@ -6528,7 +6721,8 @@ mod snapshot_spec_restore_tests {
             vec![story_entry("story_spec_0001", "draft")],
             vec![design_entry("design_spec_0001", "confirmed")],
         );
-        let reason = restored_spec_ids_from_lifecycle(&body).expect_err("无 Confirmed story 必须 BLOCKED");
+        let reason =
+            restored_spec_ids_from_lifecycle(&body).expect_err("无 Confirmed story 必须 BLOCKED");
         assert!(reason.contains("story"), "原因须点名 story:{reason}");
     }
 
@@ -6536,11 +6730,9 @@ mod snapshot_spec_restore_tests {
     /// 两 spec Confirmed;缺失=durable 态异常,真实报告)。
     #[test]
     fn lcg_restored_spec_ids_blocked_without_confirmed_design() {
-        let body = lifecycle_body(
-            vec![story_entry("story_spec_0001", "confirmed")],
-            vec![],
-        );
-        let reason = restored_spec_ids_from_lifecycle(&body).expect_err("无 Confirmed design 必须 BLOCKED");
+        let body = lifecycle_body(vec![story_entry("story_spec_0001", "confirmed")], vec![]);
+        let reason =
+            restored_spec_ids_from_lifecycle(&body).expect_err("无 Confirmed design 必须 BLOCKED");
         assert!(reason.contains("design"), "原因须点名 design:{reason}");
     }
 
