@@ -125,7 +125,8 @@ impl ProviderAdapter for GatewaySyncProvider {
 
 /// 同步 `AdapterInput` → streaming input 桥接(与 legacy bridge 的字段映射
 /// 同源):cwd 独立透传,`working_dir` 仍是 target;prepared launch 的 audit
-/// 上下文物化为 run-bound sink;工具策略按角色矩阵派生;恒 fresh。
+/// 上下文物化为 run-bound sink;工具策略按角色矩阵派生(kimi 例外:
+/// DenyFileWriteBuiltins 映射为 None,ClientServicePolicy 等价承担);恒 fresh。
 fn bridge_streaming_input(
     input: &AdapterInput,
     launch_audit: Option<
@@ -152,6 +153,16 @@ fn bridge_streaming_input(
         }
         crate::protocol::contracts::AdapterRole::Executor
         | crate::protocol::contracts::AdapterRole::Handoff => None,
+    };
+    // kimi 例外映射(r61 kimi 现场):sync/split_sync 栈的角色矩阵派生与
+    // 流式漏斗(start_streaming)同款例外——kimi 的 DenyFileWriteBuiltins
+    // 由既有 ClientServicePolicy 等价承担(spec「kimi 既有对齐维持」),
+    // 分发前映射为 None,否则 kimi validated start 以
+    // provider_generic_tool_policy_forbidden 拒绝;其余 provider 零变化。
+    let tool_policy = if input.provider_type == crate::protocol::contracts::ProviderType::KimiCode {
+        crate::cross_cutting::streaming_provider::kimi_exempted_tool_policy(tool_policy)
+    } else {
+        tool_policy
     };
     let (workspace_session_id, audit_sink) = match launch_audit {
         Some(context) => (
@@ -433,6 +444,8 @@ mod tests {
         validated_starts: AtomicUsize,
         observed_cwd: Mutex<Option<PathBuf>>,
         observed_target: Mutex<Option<PathBuf>>,
+        observed_tool_policy:
+            Mutex<Option<crate::cross_cutting::streaming_provider::ProviderToolPolicy>>,
         observed_audit_sink: AtomicBool,
         completion_delay: Duration,
         full_output: String,
@@ -446,6 +459,7 @@ mod tests {
                 validated_starts: AtomicUsize::new(0),
                 observed_cwd: Mutex::new(None),
                 observed_target: Mutex::new(None),
+                observed_tool_policy: Mutex::new(None),
                 observed_audit_sink: AtomicBool::new(false),
                 completion_delay,
                 full_output,
@@ -487,6 +501,10 @@ mod tests {
             *self.observed_cwd.lock().expect("bridge cwd probe") = input.working_directory.clone();
             *self.observed_target.lock().expect("bridge target probe") =
                 Some(input.working_dir.clone());
+            *self
+                .observed_tool_policy
+                .lock()
+                .expect("bridge tool_policy probe") = input.tool_policy.clone();
             self.observed_audit_sink
                 .store(input.audit_sink.is_some(), Ordering::SeqCst);
             // 在当前 runtime(bridge 专用线程的自有 runtime)内驱动延迟完成:
@@ -679,6 +697,22 @@ mod tests {
         canonical_root: &std::path::Path,
         member: &std::path::Path,
     ) -> crate::product::logical_codebase::ValidatedSessionLaunchPolicy {
+        bridge_validated_policy_for_provider(
+            paths,
+            canonical_root,
+            member,
+            ProviderRef::claude_code("cap_bridge_fixture"),
+        )
+    }
+
+    /// `bridge_validated_policy` 的 provider 参数化变体(kimi 例外映射
+    /// 对照测试用:kimi ProviderRef 同走 gateway.validate)。
+    fn bridge_validated_policy_for_provider(
+        paths: &ProductAppPaths,
+        canonical_root: &std::path::Path,
+        member: &std::path::Path,
+        provider: ProviderRef,
+    ) -> crate::product::logical_codebase::ValidatedSessionLaunchPolicy {
         let manifest =
             LogicalCodebaseManifest::new("project_0001", canonical_root.to_path_buf(), vec![]);
         let policies = AggregatePolicyArtifactStore::new(paths.clone());
@@ -697,7 +731,7 @@ mod tests {
         );
         let request = SessionLaunchRequest {
             project_id: "project_0001".to_string(),
-            provider: ProviderRef::claude_code("cap_bridge_fixture"),
+            provider,
             action: SessionPolicyAction::PlanningReadOnly,
             target: PolicyTarget::checkout(
                 "logical_repo_0001".to_string(),
@@ -716,8 +750,18 @@ mod tests {
         canonical_root: &std::path::Path,
         member: &std::path::Path,
     ) -> AdapterInput {
+        bridge_adapter_input_for(canonical_root, member, ProviderType::ClaudeCode)
+    }
+
+    /// `bridge_adapter_input` 的 provider 参数化变体(kimi 例外映射对照
+    /// 测试用:角色保持策略角色 WorkItemSplitter 不变)。
+    fn bridge_adapter_input_for(
+        canonical_root: &std::path::Path,
+        member: &std::path::Path,
+        provider_type: ProviderType,
+    ) -> AdapterInput {
         AdapterInput {
-            provider_type: ProviderType::ClaudeCode,
+            provider_type,
             role: AdapterRole::WorkItemSplitter,
             working_directory: Some(canonical_root.to_path_buf()),
             worktree_path: Some(member.to_string_lossy().to_string()),
@@ -834,6 +878,75 @@ mod tests {
         let timer_completed_before_provider_finished =
             timer_seq.load(Ordering::SeqCst) < provider_seq;
         assert!(timer_completed_before_provider_finished);
+    }
+
+    /// r61(kimi 适配):sync/split_sync 栈的角色矩阵派生(策略角色
+    /// WorkItemSplitter→DenyFileWriteBuiltins)在 kimi 侧映射为 None——
+    /// kimi 隔离控制面不携带通用 tool policy(spec「kimi 既有对齐维持」
+    /// 例外,该 intent 的等价面由 kimi 既有 ClientServicePolicy 承担),
+    /// 否则 kimi validated start 以 `provider_generic_tool_policy_forbidden`
+    /// 拒绝;claude 对照保持角色矩阵派生的 Some(deny) 不变。
+    #[tokio::test]
+    async fn lcg_t01_sync_bridge_maps_kimi_policy_role_tool_policy_to_none() {
+        let (_root, canonical_root, member) = bridge_root_and_member();
+        let paths = ProductAppPaths::new(canonical_root.join(".aria"));
+        // claude 对照用独立 store root:ensure_bootstrap 以 manifest.updated_at
+        // 签发 artifact,同 paths 两次签发(时间戳不同)会撞 IdentityMismatch。
+        let claude_paths = ProductAppPaths::new(canonical_root.join(".aria-claude-control"));
+
+        let kimi_adapter = BridgeCountingStreamingAdapter::new(
+            Duration::from_millis(10),
+            "<ARIA_STRUCTURED_OUTPUT nonce=\"kimimap01\">{\"nonce\":\"kimimap01\",\"work_items\":[]}</ARIA_STRUCTURED_OUTPUT>"
+                .to_string(),
+        );
+        let claude_adapter = BridgeCountingStreamingAdapter::new(
+            Duration::from_millis(10),
+            "<ARIA_STRUCTURED_OUTPUT nonce=\"kimimap02\">{\"nonce\":\"kimimap02\",\"work_items\":[]}</ARIA_STRUCTURED_OUTPUT>"
+                .to_string(),
+        );
+        let mut registry = ProviderRegistry::new();
+        registry.register(ProviderName::KimiCode, kimi_adapter.clone());
+        registry.register(ProviderName::ClaudeCode, claude_adapter.clone());
+        let bridge = GatewaySyncProvider::new(std::sync::Arc::new(registry));
+
+        // kimi split(策略角色):validated policy 与 adapter input 都指向 kimi。
+        let kimi_validated = bridge_validated_policy_for_provider(
+            &paths,
+            &canonical_root,
+            &member,
+            ProviderRef::kimi_code("cap_bridge_fixture"),
+        );
+        let kimi_input = bridge_adapter_input_for(&canonical_root, &member, ProviderType::KimiCode);
+        bridge
+            .run_validated(ValidatedAdapterInput::new(kimi_input, kimi_validated))
+            .expect("kimi bridge validated run completes");
+
+        // claude 对照:既有 WorkItemSplitter 形状零变化。
+        let claude_validated = bridge_validated_policy(&claude_paths, &canonical_root, &member);
+        let claude_input = bridge_adapter_input(&canonical_root, &member);
+        bridge
+            .run_validated(ValidatedAdapterInput::new(claude_input, claude_validated))
+            .expect("claude bridge validated run completes");
+
+        let observed_kimi_policy = kimi_adapter
+            .observed_tool_policy
+            .lock()
+            .expect("kimi tool_policy probe")
+            .clone();
+        let observed_claude_policy = claude_adapter
+            .observed_tool_policy
+            .lock()
+            .expect("claude tool_policy probe")
+            .clone();
+        assert_eq!(
+            observed_kimi_policy, None,
+            "kimi 策略角色 sync 会话必须以 tool_policy=None 分发"
+        );
+        assert_eq!(
+            observed_claude_policy,
+            Some(crate::cross_cutting::streaming_provider::ProviderToolPolicy::deny_file_write_builtins()),
+            "claude 对照保持角色矩阵派生的 Some(deny)"
+        );
     }
 
     /// 段③(lcg_t01):prepared launch(gateway `prepare_streaming_launch`/

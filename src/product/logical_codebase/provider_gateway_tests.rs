@@ -705,6 +705,73 @@ impl crate::cross_cutting::streaming_provider::StreamingProviderAdapter
     }
 }
 
+/// 测试用 streaming adapter:记录每次 validated start 收到的 tool_policy
+/// (r61 kimi 例外映射对照断言用),返回最小空会话。
+struct RecordingStreamingAdapter {
+    observed_tool_policies:
+        std::sync::Mutex<Vec<Option<crate::cross_cutting::streaming_provider::ProviderToolPolicy>>>,
+}
+
+impl Default for RecordingStreamingAdapter {
+    fn default() -> Self {
+        Self {
+            observed_tool_policies: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl RecordingStreamingAdapter {
+    fn observed_tool_policies(
+        &self,
+    ) -> Vec<Option<crate::cross_cutting::streaming_provider::ProviderToolPolicy>> {
+        self.observed_tool_policies.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::cross_cutting::streaming_provider::StreamingProviderAdapter
+    for RecordingStreamingAdapter
+{
+    async fn start(
+        &self,
+        _input: crate::cross_cutting::streaming_provider::StreamingProviderInput,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<
+        crate::cross_cutting::streaming_provider::ProviderSession,
+        crate::cross_cutting::provider_adapter::ProviderAdapterError,
+    > {
+        let (_event_tx, events) = tokio::sync::mpsc::channel(1);
+        let (commands, _command_rx) = tokio::sync::mpsc::channel(1);
+        Ok(crate::cross_cutting::streaming_provider::ProviderSession {
+            events,
+            commands,
+            native_session_id: None,
+        })
+    }
+
+    async fn start_validated(
+        &self,
+        input: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<
+        crate::cross_cutting::streaming_provider::ProviderSession,
+        crate::cross_cutting::provider_adapter::ProviderAdapterError,
+    > {
+        let (input, _launch) = input.into_parts();
+        self.observed_tool_policies
+            .lock()
+            .unwrap()
+            .push(input.tool_policy.clone());
+        let (_event_tx, events) = tokio::sync::mpsc::channel(1);
+        let (commands, _command_rx) = tokio::sync::mpsc::channel(1);
+        Ok(crate::cross_cutting::streaming_provider::ProviderSession {
+            events,
+            commands,
+            native_session_id: None,
+        })
+    }
+}
+
 /// 测试用同步 adapter stub:run 返回最小成功输出。
 struct StubSyncAdapter;
 
@@ -770,18 +837,23 @@ fn always_available_gate()
         schema_version: 1,
         generation: 1,
         checked_at,
-        providers: [ProviderName::ClaudeCode, ProviderName::Codex]
-            .into_iter()
-            .map(|provider| ProviderHealthEntry {
-                provider,
-                command: "stub".to_string(),
-                available: true,
-                version: Some("1.0".to_string()),
-                reason_code: None,
-                reason: None,
-                checked_at,
-            })
-            .collect(),
+        providers: [
+            ProviderName::ClaudeCode,
+            ProviderName::Codex,
+            ProviderName::Pi,
+            ProviderName::KimiCode,
+        ]
+        .into_iter()
+        .map(|provider| ProviderHealthEntry {
+            provider,
+            command: "stub".to_string(),
+            available: true,
+            version: Some("1.0".to_string()),
+            reason_code: None,
+            reason: None,
+            checked_at,
+        })
+        .collect(),
     });
     Arc::new(
         crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate::new(Arc::new(
@@ -837,6 +909,30 @@ impl GatewayFixture {
         let mut registry = ProviderRegistry::new();
         registry.register(ProviderName::ClaudeCode, self.streaming_adapter.clone());
         registry.register(ProviderName::Codex, self.streaming_adapter.clone());
+        // 权威根 = manifest.provider_context_root(temp dir),构造时 canonicalize。
+        let authority_root = std::fs::canonicalize(self.manifest().provider_context_root)
+            .expect("fixture provider context root exists");
+        LogicalCodebaseProviderGateway::with_audit(
+            self.policy_store(),
+            self.capabilities.clone(),
+            self.targets.clone(),
+            Arc::new(registry),
+            self.sync_adapter.clone(),
+            self.gate.clone(),
+            self.audit.clone(),
+            authority_root,
+        )
+    }
+
+    /// r61 kimi 例外映射测试构形:ClaudeCode/KimiCode 注册到同一 recording
+    /// adapter,支撑「kimi 收 None、claude 对照收 Some(deny)」的对照断言。
+    fn gateway_with_recording_streaming_adapter(
+        &self,
+        adapter: Arc<RecordingStreamingAdapter>,
+    ) -> LogicalCodebaseProviderGateway {
+        let mut registry = ProviderRegistry::new();
+        registry.register(ProviderName::ClaudeCode, adapter.clone());
+        registry.register(ProviderName::KimiCode, adapter);
         // 权威根 = manifest.provider_context_root(temp dir),构造时 canonicalize。
         let authority_root = std::fs::canonicalize(self.manifest().provider_context_root)
             .expect("fixture provider context root exists");
@@ -1369,6 +1465,96 @@ mod task13_gateway_hardening {
                 .to_string()
                 .contains(&format!("{:?}", ProviderName::Fake)),
             "error must name the configured provider, got {error}"
+        );
+    }
+
+    /// r61(kimi 现场):LC 策略角色(planning=Orchestrator)由 gateway 角色
+    /// 矩阵派生 DenyFileWriteBuiltins,但 kimi 隔离控制面不携带通用 tool
+    /// policy(spec「kimi 既有对齐维持」例外)——`start_streaming` 分发漏斗
+    /// 对 provider_type==KimiCode 把该 intent 映射为 None(等价面由 kimi
+    /// 既有 ClientServicePolicy 承担),否则 kimi validated start 以
+    /// `provider_generic_tool_policy_forbidden` 在极早帧拒绝(三家首跑
+    /// kimi 根断现场);其余 provider 照发不误(claude 对照)。
+    #[tokio::test]
+    async fn start_streaming_maps_kimi_policy_role_tool_policy_to_none() {
+        use crate::cross_cutting::streaming_provider::ProviderToolPolicy;
+        use crate::protocol::contracts::{AdapterRole, ProviderType};
+
+        fn policy_role_streaming_input(
+            provider_type: ProviderType,
+            working_dir: PathBuf,
+        ) -> crate::cross_cutting::streaming_provider::StreamingProviderInput {
+            use crate::cross_cutting::streaming_provider::{
+                ProviderPermissionMode, StreamingProviderInput,
+            };
+            // engine 侧照 prepare_streaming_launch 角色矩阵携带 deny 派生:
+            // 策略角色(Orchestrator)一律 Some(DenyFileWriteBuiltins)。
+            StreamingProviderInput {
+                working_directory: None,
+                baseline_tree: None,
+                tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
+                audit_sink: None,
+                provider_type,
+                role: AdapterRole::Orchestrator,
+                prompt: "probe".to_string(),
+                working_dir,
+                workspace_session_id: None,
+                resume_provider_session_id: None,
+                permission_mode: ProviderPermissionMode::Auto,
+                structured_output_contract: None,
+                env_vars: Default::default(),
+                timeout_secs: 1,
+            }
+        }
+
+        let fixture = gateway_fixture();
+        fixture.install_bootstrap_policy();
+        let worktree = fixture.real_worktree();
+        let adapter = Arc::new(RecordingStreamingAdapter::default());
+        let gateway = fixture.gateway_with_recording_streaming_adapter(adapter.clone());
+
+        // kimi planning(策略角色):请求与 input 都指向 kimi。
+        let kimi_request = SessionLaunchRequest::planning(
+            fixture.manifest().project_id,
+            ProviderRef::kimi_code("cap_kimi_code_1_4_0"),
+            PolicyTarget::checkout("logical_repo_0001", "checkout_0001", worktree.clone()),
+            vec![fixture.paths.root().to_path_buf()],
+            "sha256:managed-config-artifact",
+        );
+        gateway
+            .start_streaming(
+                ValidatedStreamingProviderInput::new(
+                    policy_role_streaming_input(ProviderType::KimiCode, worktree.clone()),
+                    gateway.validate(kimi_request).unwrap(),
+                ),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("kimi planning launch must start");
+
+        // claude 对照(同请求形状,仅 provider 不同):策略原样到达 adapter。
+        let claude_request = SessionLaunchRequest::planning(
+            fixture.manifest().project_id,
+            ProviderRef::claude_code("cap_claude_code_1_4_0"),
+            PolicyTarget::checkout("logical_repo_0001", "checkout_0001", worktree),
+            vec![fixture.paths.root().to_path_buf()],
+            "sha256:managed-config-artifact",
+        );
+        gateway
+            .start_streaming(
+                ValidatedStreamingProviderInput::new(
+                    policy_role_streaming_input(ProviderType::ClaudeCode, fixture.real_worktree()),
+                    gateway.validate(claude_request).unwrap(),
+                ),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("claude planning launch must start");
+
+        assert_eq!(
+            adapter.observed_tool_policies(),
+            vec![None, Some(ProviderToolPolicy::deny_file_write_builtins())],
+            "kimi 策略角色会话必须以 tool_policy=None 分发;claude 对照保持 Some(deny)"
         );
     }
 

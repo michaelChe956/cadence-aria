@@ -1027,16 +1027,25 @@ fn write_kimi_t07_reject_probe(dir: &std::path::Path, marker: &std::path::Path) 
     )
 }
 
-/// Task 7 Step 1(断言组 382 逐字):经 gateway `start_streaming` 启动的 LC
-/// 会话携带非空通用策略时,Kimi 以稳定码
+/// Task 7 Step 1(断言组 382 逐字,r61 例外修订):经 gateway
+/// `start_streaming` 启动的 LC 会话携带非空通用策略时,Kimi 以稳定码
 /// `provider_generic_tool_policy_forbidden` 在版本探测与 session child 之前
-/// 拒绝。BASE 的 gateway prepared/raw 过渡分叉会把未经 prepare 的 validated
-/// 构造分派到裸 `start`——Kimi 直连不读通用策略、直接 spawn child,稳定码
-/// 拒绝消失(本测试红);Task 7 收口 validated-only 后由 `start_validated`
-/// 首步拒绝(绿),marker 全零证明拒绝先于 version/child/handshake。
+/// 拒绝。r61 kimi 例外映射(kimi_exempted_tool_policy)后,gateway 对
+/// KimiCode 的 `DenyFileWriteBuiltins` 映射为 None(ClientServicePolicy
+/// 等价承担,spec「kimi 既有对齐维持」例外——豁免面由
+/// `start_streaming_maps_kimi_policy_role_tool_policy_to_none` 钉);本测试
+/// 改用**不豁免**的 `BootstrapExecutorMarker` intent 原样透传,钉「gateway
+/// 漏斗不吞非豁免策略,Kimi 稳定码拒绝先于 version/child/handshake」
+/// (marker 全零证明)。
 #[cfg(unix)]
 #[tokio::test]
 async fn lcg_t07_kimi_generic_policy_rejected_before_version_child() {
+    use crate::product::logical_codebase::aggregate_initialization::AggregateInitializationStepKind;
+    use crate::product::logical_codebase::policy::SessionPolicyAction;
+    use crate::product::logical_codebase::provider_admission_preflight::{
+        BootstrapExecutorMarker, BootstrapPhaseCredential,
+    };
+
     let fixture = LcKimiLaunchFixture::new();
     let marker = fixture.paths.root().join("t07-kimi-reject-marker");
     let provider =
@@ -1045,9 +1054,32 @@ async fn lcg_t07_kimi_generic_policy_rejected_before_version_child() {
     registry.register(ProviderName::KimiCode, std::sync::Arc::new(provider));
     let gateway = fixture.gateway_with_registry(registry);
 
+    // 非豁免 intent:BootstrapExecutorMarker 不是 deny 投影,例外映射原样
+    // 透传,kimi validated start 首步仍以稳定码拒绝。
+    let canonical_root = fixture.canonical_root().to_path_buf();
+    let credential = BootstrapPhaseCredential::for_test(
+        "project_0001",
+        "logical_codebase_0001",
+        "aggregate_initialization_0001",
+        AggregateInitializationStepKind::PreCheck,
+        "sha256:test-input-digest",
+        canonical_root.clone(),
+    );
+    let bootstrap_marker = BootstrapExecutorMarker::new(
+        credential,
+        SessionPolicyAction::CodingTargetWrite,
+        canonical_root,
+        "root-recipe:pre_check:command-1",
+    )
+    .expect("complete bootstrap executor marker");
+    let non_exempt_policy = ProviderToolPolicy {
+        intent: crate::cross_cutting::streaming_provider::ToolPolicyIntent::BootstrapExecutorMarker(
+            bootstrap_marker,
+        ),
+    };
     let raw = fixture.lc_streaming_input(
         AdapterRole::Orchestrator,
-        Some(ProviderToolPolicy::deny_file_write_builtins()),
+        Some(non_exempt_policy),
         Some(RecordingToolPolicyAuditSink::new().bound()),
         None,
     );

@@ -1374,7 +1374,20 @@ impl LogicalCodebaseProviderGateway {
         launch: ValidatedStreamingProviderInput,
         cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderGatewayError> {
-        let (input, validated) = launch.into_parts();
+        let (mut input, validated) = launch.into_parts();
+        // kimi 例外映射(r61 kimi 现场):角色矩阵对策略角色派生的
+        // DenyFileWriteBuiltins 在 kimi 侧由既有 ClientServicePolicy 等价
+        // 承担(spec「kimi 既有对齐维持」例外)——LC 流式分发唯一漏斗在此
+        // 按 provider_type==KimiCode 映射为 None(覆盖全部流式路径,含
+        // legacy-reuse),否则 kimi validated start 以
+        // provider_generic_tool_policy_forbidden 在极早帧拒绝;其余 intent
+        // 原样透传(kimi 自身 fail-closed)。prepare_streaming_launch 的
+        // 角色 guard 不变(上游仍按角色矩阵装配)。
+        if input.provider_type == crate::protocol::contracts::ProviderType::KimiCode {
+            input.tool_policy = crate::cross_cutting::streaming_provider::kimi_exempted_tool_policy(
+                input.tool_policy,
+            );
+        }
         let is_resume = input.resume_provider_session_id.is_some();
         if let Err(error) =
             self.revalidate_before_spawn(&validated, input.effective_working_directory(), is_resume)

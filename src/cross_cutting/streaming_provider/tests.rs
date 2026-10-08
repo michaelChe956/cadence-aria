@@ -1604,3 +1604,50 @@ fn lcg_t07_root_recipe_marker_is_not_normal_coder_policy() {
     assert!(valid_recipe_marker_result.is_ok());
     assert!(same_marker_on_ordinary_coder.is_err());
 }
+
+/// r61 kimi 例外映射:DenyFileWriteBuiltins(kimi 由 ClientServicePolicy
+/// 等价承担,spec「kimi 既有对齐维持」例外)→ None;None 与其余 intent
+/// 原样透传(marker 通道留给消费侧守卫 fail-closed,不在此吞掉)。
+#[test]
+fn lcg_kimi_exempted_tool_policy_maps_deny_intent_to_none_and_passes_others() {
+    use super::{ProviderToolPolicy, ToolPolicyIntent, kimi_exempted_tool_policy};
+    use crate::product::logical_codebase::aggregate_initialization::AggregateInitializationStepKind;
+    use crate::product::logical_codebase::policy::SessionPolicyAction;
+    use crate::product::logical_codebase::provider_admission_preflight::{
+        BootstrapExecutorMarker, BootstrapPhaseCredential,
+    };
+
+    // 角色矩阵对策略角色的派生形态 → 例外映射为 None。
+    assert_eq!(
+        kimi_exempted_tool_policy(Some(ProviderToolPolicy::deny_file_write_builtins())),
+        None
+    );
+    // 非策略路径(本来就 None)零变化。
+    assert_eq!(kimi_exempted_tool_policy(None), None);
+
+    // 其余 intent 原样透传:BootstrapExecutorMarker 不是 deny 投影,
+    // 不得在映射层被吞——kimi 侧由其 ClientServicePolicy 通道级拒绝。
+    let canonical_root = std::path::PathBuf::from("/tmp/aria-kimi-exempt-marker-root");
+    let credential = BootstrapPhaseCredential::for_test(
+        "project_0001",
+        "logical_codebase_0001",
+        "aggregate_initialization_0001",
+        AggregateInitializationStepKind::PreCheck,
+        "sha256:test-input-digest",
+        canonical_root.clone(),
+    );
+    let marker = BootstrapExecutorMarker::new(
+        credential,
+        SessionPolicyAction::CodingTargetWrite,
+        canonical_root,
+        "root-recipe:pre_check:command-1",
+    )
+    .expect("complete bootstrap executor marker");
+    let marker_policy = ProviderToolPolicy {
+        intent: ToolPolicyIntent::BootstrapExecutorMarker(marker),
+    };
+    assert_eq!(
+        kimi_exempted_tool_policy(Some(marker_policy.clone())),
+        Some(marker_policy)
+    );
+}

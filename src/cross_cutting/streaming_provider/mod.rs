@@ -110,6 +110,22 @@ impl ProviderToolPolicy {
     }
 }
 
+/// kimi 例外映射(Task 7 spec「kimi 既有对齐维持」):kimi 隔离控制面
+/// 不携带通用 tool policy,`DenyFileWriteBuiltins` 意图在 kimi 侧由既有
+/// ClientServicePolicy 等价承担——映射为 `None`,避免 gateway 角色矩阵
+/// 对策略角色派生的通用策略触发 kimi validated start 的
+/// `provider_generic_tool_policy_forbidden` 拒绝。其余 intent(如
+/// `BootstrapExecutorMarker`)原样透传,由消费侧守卫 fail-closed,不在此
+/// 吞掉。调用方负责先判定 provider 是 KimiCode(本函数不重复判 provider)。
+pub fn kimi_exempted_tool_policy(policy: Option<ProviderToolPolicy>) -> Option<ProviderToolPolicy> {
+    match policy {
+        Some(ProviderToolPolicy {
+            intent: ToolPolicyIntent::DenyFileWriteBuiltins,
+        }) => None,
+        other => other,
+    }
+}
+
 /// 双向 spawn 前守卫错误（REQ-ENV-09 Task 3.1 + Task 1.2 BOOT-04）。策略
 /// 角色缺失策略、非策略角色误带策略与 BootstrapExecutor marker 结构不完整
 /// 都在创建子进程之前拒绝，不 fallback 到无策略 argv。
