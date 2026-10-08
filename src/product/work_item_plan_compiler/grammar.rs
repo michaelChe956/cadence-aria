@@ -113,6 +113,10 @@ pub const ALLOWED_ITEM_KINDS: [&str; 7] = [
 
 /// `compatibility_policy` 的现有契约允许值。
 pub const ALLOWED_COMPATIBILITY_POLICIES: [&str; 2] = ["require_all", "require_any"];
+/// `intent` 的现有契约允许值,与 [`crate::product::work_item_contract::WorkItemIntent`]
+/// 的 lowering 分支(`lower_plan_intent`)逐字对齐;prompt 值域教学与 pi-6
+/// 现场教训(`intent: modify` 越界枚举→compile 终态)由此同源注入。
+pub const ALLOWED_WORK_ITEM_INTENTS: [&str; 2] = ["create", "existing"];
 /// `required_evidence` 的现有契约允许值。
 pub const ALLOWED_EVIDENCE_KINDS: [&str; 4] = [
     "source_diff",

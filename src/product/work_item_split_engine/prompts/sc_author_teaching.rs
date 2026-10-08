@@ -35,7 +35,7 @@ pub(crate) fn work_item_plan_markdown_grammar() -> String {
          反例：同一 item 的 CHECK-001 与 CHECK-002 都写 `- command: npm test` → lowering_error 拒绝。\n\
          正例：合并为一条 `- command: npm test` 的 check；或第二条写 `- command: null` 并配 `- manual_instruction: <人工步骤>`。\n\
          key 白名单：{structured_keys}。\n\
-         值域：kind={item_kinds}；compatibility_policy={compatibility_policies}；required_evidence={evidence_kinds}；route={blocker_routes}。\n\
+         值域：kind={item_kinds}；compatibility_policy={compatibility_policies}；required_evidence={evidence_kinds}；route={blocker_routes}；intent={intents}（本计划新建的 Work Item 一律填 create；existing 仅用于引用已登记的既有 work item；禁止 modify/update 等自造值——lowering_error「intent 必须是 create 或 existing。」拒绝）。\n\
          未知结构化 key 必须拒绝（{unknown_key_policy}）；未知 section、非法 ID、除空 Blockers 外的缺 section/field、EARS 非法均失败关闭；诊断：{diagnostic_codes}。\n\n",
         document_heading = grammar::DOCUMENT_HEADING,
         structured_sections = grammar::STRUCTURED_SECTIONS.join("、"),
@@ -49,6 +49,7 @@ pub(crate) fn work_item_plan_markdown_grammar() -> String {
         compatibility_policies = grammar::ALLOWED_COMPATIBILITY_POLICIES.join("、"),
         evidence_kinds = grammar::ALLOWED_EVIDENCE_KINDS.join("、"),
         blocker_routes = grammar::ALLOWED_BLOCKER_ROUTES.join("、"),
+        intents = grammar::ALLOWED_WORK_ITEM_INTENTS.join("、"),
         unknown_key_policy = grammar::UNKNOWN_STRUCTURED_KEY_POLICY,
         diagnostic_codes = grammar::DIAGNOSTIC_CODES.join("、"),
     )

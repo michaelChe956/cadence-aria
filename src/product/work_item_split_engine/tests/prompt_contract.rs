@@ -868,6 +868,7 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
         "所有标题必须逐字使用上列英文名（一级 `# Work Item Plan`、二级 `## Work Item WI-<三位数字>: <title>`、三级 section 名恰为上列 14 个英文名之一）；禁止翻译标题、禁止附加中文注或括号。",
         "未知结构化 key 必须拒绝（fail_closed）",
         "值域：kind=backend、frontend、integration、e2e、docs、infra、other",
+        "；intent=create、existing（本计划新建的 Work Item 一律填 create；existing 仅用于引用已登记的既有 work item；禁止 modify/update 等自造值——lowering_error「intent 必须是 create 或 existing。」拒绝）",
         "[design_requirements] REQ-002、NFR-001",
         "[cross_reference_discipline]",
         "done_when_refs 仅引用先定义 criterion_id",
