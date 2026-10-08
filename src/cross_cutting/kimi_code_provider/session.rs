@@ -317,13 +317,21 @@ where
         .and_then(Value::as_str)
         .filter(|id| !id.trim().is_empty())
         .map(ToString::to_string);
-    // Task 9c:LC 显式 resume 的 session/load 应答必须与请求同 id——缺 id
-    // 不回填请求 id、错 id 不采纳,两者都是已启动 child 后的 runtime 失败
-    // (显式「未恢复」+ kill 链);direct 路径保持既有回填语义,零变化。
+    // Task 9c(r62 kimi-6 story resume 现场修订):LC 显式 resume 的
+    // session/load 应答按 kimi ACP 实际协议形态确认——kimi 2.0.2 实测
+    // (现场 + 本地协议 probe 双证):成功应答**不回显 sessionId**(result
+    // 仅 configOptions 等字段,会话身份由后续 session/update 通知携带),
+    // 失败路径(Unknown sessionId / Invalid params)走 JSON-RPC error——已由
+    // 上方 ensure_response_success fail-closed 拦截(既有 Err+kill 链不变)。
+    // 因此:应答同 id → 采纳;应答 success 缺 sessionId → kimi 方言的正常
+    // 确认形态,采纳请求 id(不回填陌生值,恰是请求要恢复的会话);应答
+    // 错 id → 仍为已启动 child 后的 runtime 失败(显式「未恢复」+ kill 链);
+    // direct 路径保持既有回填语义,零变化。
     let session_id = if lc_explicit_resume {
         let requested = resume_id.clone().expect("explicit resume carries an id");
         match response_session_id {
             Some(confirmed) if Some(&confirmed) == resume_id.as_ref() => confirmed,
+            None => requested,
             other => {
                 let failure = provider_error(format!(
                     "kimi session/load response session id {} does not confirm the requested resume id {requested} (session NOT resumed; the started child was killed and reaped, not a zero-spawn refusal)",

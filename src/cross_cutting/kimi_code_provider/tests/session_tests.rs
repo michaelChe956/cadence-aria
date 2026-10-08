@@ -1552,13 +1552,17 @@ pub(crate) async fn t09c_child_killed_and_reaped(pid_marker: &std::path::Path) -
     }
 }
 
-/// Task 9c(Step 1 断言组 438-440 逐字):Kimi LC 显式 resume 的原生确认——
-/// `session/load` 应答与能力协商(initialize)必须确认同一 id:
+/// Task 9c(Step 1 断言组 438-440 逐字;r62 协议实测修订):Kimi LC 显式
+/// resume 的原生确认——`session/load` 应答按 kimi ACP 实际协议形态确认:
 /// - 应答同 id → 续接,confirmed==requested,provider_start 落确认 id;
-/// - 缺 id(load 应答 success 但无 sessionId)→ Err;错 id(应答不同会话
-///   id)→ Err——两者都是已启动 child 后的 runtime 失败:child 被
-///   kill/reap、错误记录「未恢复」(不伪称零 spawn),不回填请求 id、不清
-///   id 转 fresh、零新 provider_start。
+/// - 缺 id(load 应答 success 但无 sessionId)→ **kimi 2.0.2 实测的正常
+///   确认形态**(成功不回显 sessionId,仅 configOptions;kimi-6 story
+///   resume 现场 + 本地协议 probe 双证)——采纳请求 id 续接,confirmed==
+///   requested;真正的恢复失败(Unknown sessionId)走 JSON-RPC error,由
+///   ensure_response_success fail-closed 拦截(既有 Err+kill 链不变);
+/// - 错 id(应答不同会话 id)→ Err:已启动 child 后的 runtime 失败:child
+///   被 kill/reap、错误记录「未恢复」(不伪称零 spawn),不回填请求 id、
+///   不清 id 转 fresh、零新 provider_start。
 #[cfg(unix)]
 #[tokio::test]
 async fn lcg_t09_kimi_missing_or_wrong_native_id_never_fresh() {
@@ -1610,11 +1614,12 @@ async fn lcg_t09_kimi_missing_or_wrong_native_id_never_fresh() {
         assert_eq!(completion.full_output, "lc resume done");
     }
 
-    // 2) 缺 id:session/load success 但应答无 sessionId → runtime 失败:
-    //    Err + kill/reap + 「未恢复」记录,零新 provider_start。
+    // 2) 缺 id:session/load success 但应答无 sessionId——kimi ACP 实测的
+    //    正常确认形态(2.0.2 成功不回显,仅 configOptions;kimi-6 story
+    //    resume 现场撞断言)→ 采纳请求 id 续接,provider_start 落请求 id,
+    //    会话流照常完成。
     {
         let marker_dir = tempfile::tempdir().expect("t09c missing-id marker dir");
-        let pid_marker = marker_dir.path().join("kimi-t09c-missing-id.pid");
         let sink = RecordingToolPolicyAuditSink::new();
         let mut raw = fixture.lc_streaming_input(
             Some(sink.clone().bound()),
@@ -1622,32 +1627,41 @@ async fn lcg_t09_kimi_missing_or_wrong_native_id_never_fresh() {
         );
         raw.env_vars
             .insert("KIMI_LOAD_SESSION_ID".to_string(), String::new());
-        raw.env_vars.insert(
-            "KIMI_PID_MARKER".to_string(),
-            pid_marker.display().to_string(),
-        );
         let provider = KimiCodeProvider::new(lc_kimi_resume_fixture(marker_dir.path()));
-        let native_id_missing_result = provider
+        let mut session = provider
             .start_validated(
                 fixture.validated_coding_input(raw),
                 CancellationToken::new(),
             )
-            .await;
-        assert!(native_id_missing_result.is_err());
-        let Err(rejected) = native_id_missing_result else {
-            panic!("unconfirmed resume must fail");
-        };
-        assert!(
-            rejected.details.contains("session NOT resumed")
-                && rejected.details.contains("not a zero-spawn refusal"),
-            "rejection must record the not-resumed outcome without claiming zero spawn: {rejected:?}"
+            .await
+            .expect(
+                "kimi session/load success without sessionId echo must resume (kimi ACP dialect)",
+            );
+        assert_eq!(
+            session.native_session_id.as_deref(),
+            Some(requested_native_id.as_str()),
+            "unechoed kimi load confirmation adopts the requested resume id"
         );
-        assert!(
-            sink.events().is_empty(),
-            "no fresh provider_start may be written for a resume the native side never confirmed"
+        let events = sink.events();
+        assert_eq!(
+            events.len(),
+            1,
+            "the unechoed kimi resume confirmation writes exactly one provider_start"
         );
-        let started_child_was_killed_and_reaped = t09c_child_killed_and_reaped(&pid_marker).await;
-        assert!(started_child_was_killed_and_reaped);
+        assert!(matches!(
+            &events[0],
+            DurableToolPolicyEvent::ProviderStart(record)
+                if record.provider_session_id == requested_native_id
+        ));
+        let terminal = terminal_events(&mut session).await;
+        let completion = terminal
+            .iter()
+            .find_map(|event| match event {
+                ProviderEvent::Completed(completion) => Some(completion.clone()),
+                _ => None,
+            })
+            .expect("kimi resume with unechoed load confirmation must complete");
+        assert_eq!(completion.full_output, "lc resume done");
     }
 
     // 3) 错 id:session/load 应答不同的原生会话 id → 同为 runtime 失败:
