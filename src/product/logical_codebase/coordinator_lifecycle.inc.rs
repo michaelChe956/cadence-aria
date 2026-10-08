@@ -258,7 +258,17 @@ impl AggregateInitializationCoordinator {
         cancellation: &CancellationToken,
     ) -> Result<AggregateInitializationOperation, AggregateInitializationError> {
         let operation = self.load_operation(project_id, operation_id)?;
-        let manifest = self.load_manifest(project_id, &operation)?;
+        let manifest = match self.load_manifest(project_id, &operation) {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                return Err(self.persist_execution_failure(
+                    project_id,
+                    operation_id,
+                    None,
+                    error,
+                ));
+            }
+        };
         let step_completed = |kind: AggregateInitializationStepKind| {
             operation
                 .steps
@@ -278,7 +288,12 @@ impl AggregateInitializationCoordinator {
                 error = %error,
                 "aggregate initialization failed during machine skills preparation"
             );
-            return Err(error);
+            return Err(self.persist_execution_failure(
+                project_id,
+                operation_id,
+                Some(AggregateInitializationStepKind::MachineSkills),
+                error,
+            ));
         }
         if cancellation.is_cancelled() {
             return self.fail_interrupted(project_id, operation_id);
@@ -286,34 +301,49 @@ impl AggregateInitializationCoordinator {
 
         // aggregate_preflight: deterministic, never a provider turn. 续跑时
         // 直接复用 durable checkpoint 的 member projections 快照。
-        let preflight =
-            if step_completed(AggregateInitializationStepKind::AggregatePreflight) {
-                self.load_persisted_preflight(operation_id)?
-                    .ok_or_else(|| {
-                        AggregateInitializationError::state(
-                            operation_id,
-                            "preflight checkpoint artifact is missing for resume",
-                        )
-                    })?
-            } else {
-                match self.run_aggregate_preflight(
-                    project_id,
-                    operation_id,
-                    &manifest,
-                    cancellation,
-                ) {
-                    Ok(preflight) => preflight,
-                    Err(error) => {
-                        tracing::warn!(
-                            project_id,
-                            operation_id,
-                            error = %error,
-                            "aggregate initialization failed during aggregate preflight"
-                        );
-                        return Err(error);
-                    }
+        let preflight = if step_completed(AggregateInitializationStepKind::AggregatePreflight) {
+            match self.load_persisted_preflight(operation_id) {
+                Ok(Some(snapshot)) => snapshot,
+                Ok(None) => {
+                    let error = AggregateInitializationError::state(
+                        operation_id,
+                        "preflight checkpoint artifact is missing for resume",
+                    );
+                    return Err(self.persist_execution_failure(
+                        project_id,
+                        operation_id,
+                        Some(AggregateInitializationStepKind::AggregatePreflight),
+                        error,
+                    ));
                 }
-            };
+                Err(error) => {
+                    return Err(self.persist_execution_failure(
+                        project_id,
+                        operation_id,
+                        Some(AggregateInitializationStepKind::AggregatePreflight),
+                        error,
+                    ));
+                }
+            }
+        } else {
+            match self.run_aggregate_preflight(project_id, operation_id, &manifest, cancellation) {
+                Ok(preflight) => preflight,
+                Err(error) => {
+                    tracing::warn!(
+                        project_id,
+                        operation_id,
+                        error = %error,
+                        "aggregate initialization failed during aggregate preflight"
+                    );
+                    return Err(self.persist_execution_failure(
+                        project_id,
+                        operation_id,
+                        Some(AggregateInitializationStepKind::AggregatePreflight),
+                        error,
+                    ));
+                }
+            }
+        };
         if cancellation.is_cancelled() {
             return self.fail_interrupted(project_id, operation_id);
         }
@@ -327,22 +357,37 @@ impl AggregateInitializationCoordinator {
             if step_completed(step) {
                 continue;
             }
-            self.run_provider_turn(project_id, operation_id, step, &preflight, cancellation)
-                .await?;
+            if let Err(error) = self
+                .run_provider_turn(project_id, operation_id, step, &preflight, cancellation)
+                .await
+            {
+                return Err(self.persist_execution_failure(
+                    project_id,
+                    operation_id,
+                    Some(step),
+                    error,
+                ));
+            }
             if cancellation.is_cancelled() {
                 return self.fail_interrupted(project_id, operation_id);
             }
         }
 
-        let operation = self
+        let operation = match self
             .operations
             .finish_completed(project_id, operation_id, (self.clock)())
-            .map_err(|error| match error {
-                ProductStoreError::NotFound { id, .. } => {
-                    AggregateInitializationError::not_found(id)
-                }
-                other => AggregateInitializationError::Store(other),
-            })?;
+        {
+            Ok(operation) => operation,
+            Err(error) => {
+                let error = match error {
+                    ProductStoreError::NotFound { id, .. } => {
+                        AggregateInitializationError::not_found(id)
+                    }
+                    other => AggregateInitializationError::Store(other),
+                };
+                return Err(self.persist_execution_failure(project_id, operation_id, None, error));
+            }
+        };
         Ok(operation)
     }
 
@@ -688,6 +733,51 @@ impl AggregateInitializationCoordinator {
             .recover_interrupted(project_id, operation_id, (self.clock)())
             .map_err(AggregateInitializationError::from)?;
         Err(AggregateInitializationError::Cancelled)
+    }
+
+    /// 按文档契约(any failure marks the operation failed with a classified
+    /// error record)把执行期失败落为 durable Failed 终态后原样返回错误。
+    /// GET 是纯投影(C4 Task 6),不落终态的失败对外表现为永久
+    /// `running`(r57 E2E:preflight 所有权冲突被拒后 worker 静默退出,
+    /// 轮询 28min)。`step` 是失败归属步骤;失败发生在 `mark_step_running`
+    /// 之前或 operation 已终态(provider turn 路径已自行 `finish_failed`)
+    /// 时降级为无步骤归属或保持既有终态——落盘失败绝不掩盖原始错误。
+    fn persist_execution_failure(
+        &self,
+        project_id: &str,
+        operation_id: &str,
+        step: Option<AggregateInitializationStepKind>,
+        error: AggregateInitializationError,
+    ) -> AggregateInitializationError {
+        if let Ok(operation) = self.operations.get(project_id, operation_id)
+            && operation.status != AggregateInitializationOperationStatus::Running
+        {
+            return error;
+        }
+        let record = error.error_record();
+        let now = (self.clock)();
+        let attempt = self.operations.finish_failed(
+            project_id,
+            operation_id,
+            step,
+            record.clone(),
+            now.clone(),
+        );
+        let attempt = match attempt {
+            Err(ProductStoreError::IdentityMismatch { .. }) if step.is_some() => self
+                .operations
+                .finish_failed(project_id, operation_id, None, record, now),
+            other => other,
+        };
+        if let Err(store_error) = attempt {
+            tracing::warn!(
+                project_id,
+                operation_id,
+                error = %store_error,
+                "aggregate initialization failure could not be persisted as a terminal state"
+            );
+        }
+        error
     }
 
     fn load_manifest(

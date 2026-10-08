@@ -366,6 +366,243 @@ mod tests {
         assert_eq!(openspec.status.as_str(), "pending");
     }
 
+    /// r57 E2E 缺陷钉死:确定性步骤失败也必须落 durable Failed 终态。
+    /// worker(tokio::spawn)返回 Err 后 GET 是纯投影(C4 Task 6)只读
+    /// durable 记录——不落终态的失败对外表现为永久 `running`(r57
+    /// attempt3 "preflight 挂死"真身:根所有权冲突被拒后 worker 静默
+    /// 退出,GET 200 running 轮询 28min)。
+    #[tokio::test]
+    async fn preflight_failure_marks_operation_failed_terminal() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path().join(".aria"));
+        let store = AggregateInitializationOperationStore::new(paths.clone());
+        let mut manifest = LogicalCodebaseManifest::new(
+            "project_0001",
+            temp.path().join("aggregate-root"),
+            Vec::new(),
+        );
+        manifest.created_at = CREATED_AT.to_string();
+        manifest.updated_at = CREATED_AT.to_string();
+        LogicalCodebaseStore::new(paths.clone())
+            .save_manifest("project_0001", &manifest)
+            .unwrap();
+
+        struct OwnershipConflictPreflight;
+        impl AggregatePreflightService for OwnershipConflictPreflight {
+            fn inspect(
+                &self,
+                _project_id: &str,
+                _manifest: &LogicalCodebaseManifest,
+                _cancellation: &CancellationToken,
+            ) -> Result<AggregatePreflightSnapshot, AggregateInitializationError> {
+                Err(AggregateInitializationError::Preflight {
+                    reason:
+                        "aggregate root already contains user-owned AGENTS.md; move or merge it before aggregate initialization"
+                            .to_string(),
+                    retryable: false,
+                })
+            }
+        }
+
+        let skills: Arc<dyn AggregateSkillsPreparation> = Arc::new(FakeSkillsPreparation {
+            calls: Arc::new(Mutex::new(Vec::new())),
+        });
+        let preflight: Arc<dyn AggregatePreflightService> = Arc::new(OwnershipConflictPreflight);
+        let provider: Arc<dyn AggregateProviderTurnDriver> =
+            Arc::new(FakeProviderTurnDriver::new());
+        let clock: Arc<Clock> = Arc::new(|| CREATED_AT.to_string());
+        let coordinator = AggregateInitializationCoordinator::new(
+            paths.clone(),
+            store.clone(),
+            skills,
+            preflight,
+            provider,
+            clock,
+        );
+        coordinator
+            .begin(
+                "aggregate_initialization_0001".to_string(),
+                "project_0001",
+                AggregateInitializationOperationInput {
+                    idempotency_key: "0001".to_string(),
+                    manifest_revision: manifest.membership_revision,
+                    policy_digest: "sha256:policy".to_string(),
+                    profile_evidence_digest: Some("sha256:profile".to_string()),
+                    provider_context_root: manifest.provider_context_root.clone(),
+                    provider: "claude_code".to_string(),
+                },
+            )
+            .unwrap();
+
+        let result = coordinator
+            .execute(
+                "project_0001",
+                "aggregate_initialization_0001",
+                CancellationToken::new(),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(AggregateInitializationError::Preflight { .. })
+        ));
+
+        let operation = coordinator
+            .get("project_0001", "aggregate_initialization_0001")
+            .unwrap();
+        assert_eq!(
+            operation.status,
+            AggregateInitializationOperationStatus::Failed,
+            "deterministic preflight failure must leave a terminal record instead of a perpetual running projection"
+        );
+        assert_eq!(
+            operation.failed_step,
+            Some(AggregateInitializationStepKind::AggregatePreflight)
+        );
+        let machine = operation
+            .steps
+            .iter()
+            .find(|step| step.step_id == AggregateInitializationStepKind::MachineSkills)
+            .unwrap();
+        assert_eq!(machine.status.as_str(), "completed");
+        let preflight_step = operation
+            .steps
+            .iter()
+            .find(|step| step.step_id == AggregateInitializationStepKind::AggregatePreflight)
+            .unwrap();
+        assert_eq!(preflight_step.status.as_str(), "failed");
+        let openspec = operation
+            .steps
+            .iter()
+            .find(|step| step.step_id == AggregateInitializationStepKind::OpenspecAndExamples)
+            .unwrap();
+        assert_eq!(openspec.status.as_str(), "pending");
+        let error = operation.error.expect("classified error record");
+        assert_eq!(error.reason_code, "aggregate_preflight_failed");
+        assert!(!error.retryable);
+        assert!(error.action.contains("AGENTS.md"));
+
+        // 显式 Continue 依赖 durable Failed:重开只重置失败步,前置
+        // Completed(machine_skills)原样保留。
+        let reopened = store
+            .reopen_for_resume(
+                "project_0001",
+                "aggregate_initialization_0001",
+                CREATED_AT.to_string(),
+            )
+            .unwrap();
+        assert!(matches!(
+            reopened.status,
+            AggregateInitializationOperationStatus::Running
+        ));
+        let machine = reopened
+            .steps
+            .iter()
+            .find(|step| step.step_id == AggregateInitializationStepKind::MachineSkills)
+            .unwrap();
+        assert_eq!(machine.status.as_str(), "completed");
+        let preflight_step = reopened
+            .steps
+            .iter()
+            .find(|step| step.step_id == AggregateInitializationStepKind::AggregatePreflight)
+            .unwrap();
+        assert_eq!(preflight_step.status.as_str(), "pending");
+    }
+
+    #[tokio::test]
+    async fn machine_skills_failure_marks_operation_failed_terminal() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path().join(".aria"));
+        let store = AggregateInitializationOperationStore::new(paths.clone());
+        let mut manifest = LogicalCodebaseManifest::new(
+            "project_0001",
+            temp.path().join("aggregate-root"),
+            Vec::new(),
+        );
+        manifest.created_at = CREATED_AT.to_string();
+        manifest.updated_at = CREATED_AT.to_string();
+        LogicalCodebaseStore::new(paths.clone())
+            .save_manifest("project_0001", &manifest)
+            .unwrap();
+
+        struct FailingSkillsPreparation;
+        #[async_trait]
+        impl AggregateSkillsPreparation for FailingSkillsPreparation {
+            async fn prepare_skills(
+                &self,
+                _project_id: &str,
+                _operation_id: &str,
+                _cancellation: CancellationToken,
+            ) -> Result<MachineSkillsPreparation, AggregateInitializationError> {
+                Err(AggregateInitializationError::SkillsPreparation {
+                    reason: "skills layer digest mismatch".to_string(),
+                    retryable: true,
+                })
+            }
+        }
+
+        let skills: Arc<dyn AggregateSkillsPreparation> = Arc::new(FailingSkillsPreparation);
+        let preflight: Arc<dyn AggregatePreflightService> = Arc::new(FakePreflightService::new(
+            Arc::new(Mutex::new(Vec::new())),
+            manifest
+                .provider_context_root
+                .to_string_lossy()
+                .into_owned(),
+        ));
+        let provider: Arc<dyn AggregateProviderTurnDriver> =
+            Arc::new(FakeProviderTurnDriver::new());
+        let clock: Arc<Clock> = Arc::new(|| CREATED_AT.to_string());
+        let coordinator = AggregateInitializationCoordinator::new(
+            paths,
+            store,
+            skills,
+            preflight,
+            provider,
+            clock,
+        );
+        coordinator
+            .begin(
+                "aggregate_initialization_0001".to_string(),
+                "project_0001",
+                AggregateInitializationOperationInput {
+                    idempotency_key: "0001".to_string(),
+                    manifest_revision: manifest.membership_revision,
+                    policy_digest: "sha256:policy".to_string(),
+                    profile_evidence_digest: Some("sha256:profile".to_string()),
+                    provider_context_root: manifest.provider_context_root.clone(),
+                    provider: "claude_code".to_string(),
+                },
+            )
+            .unwrap();
+
+        let result = coordinator
+            .execute(
+                "project_0001",
+                "aggregate_initialization_0001",
+                CancellationToken::new(),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(AggregateInitializationError::SkillsPreparation { .. })
+        ));
+
+        let operation = coordinator
+            .get("project_0001", "aggregate_initialization_0001")
+            .unwrap();
+        assert_eq!(
+            operation.status,
+            AggregateInitializationOperationStatus::Failed,
+            "deterministic machine_skills failure must leave a terminal record"
+        );
+        assert_eq!(
+            operation.failed_step,
+            Some(AggregateInitializationStepKind::MachineSkills)
+        );
+        let error = operation.error.expect("classified error record");
+        assert_eq!(error.reason_code, "aggregate_machine_skills_failed");
+        assert!(error.retryable);
+    }
+
     #[tokio::test]
     async fn cancellation_fails_running_operation_and_can_be_recovered() {
         let temp = tempfile::tempdir().unwrap();

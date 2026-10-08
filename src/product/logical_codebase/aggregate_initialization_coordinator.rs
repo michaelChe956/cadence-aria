@@ -99,6 +99,13 @@ impl AggregateInitializationError {
     /// Convert into a persisted error record classification for
     /// `finish_failed`.
     fn into_error_record(self) -> AggregateInitializationErrorRecord {
+        self.error_record()
+    }
+
+    /// Borrowing form of [`Self::into_error_record`]: persists a failure as a
+    /// terminal record while the caller still returns the original error to
+    /// its caller.
+    fn error_record(&self) -> AggregateInitializationErrorRecord {
         let (reason_code, retryable, action) = match self {
             Self::NotFound { .. } | Self::Store(_) => (
                 "aggregate_initialization_store_failed".to_string(),
@@ -107,18 +114,18 @@ impl AggregateInitializationError {
             ),
             Self::StateRejected { retryable, .. } => (
                 "aggregate_initialization_state_rejected".to_string(),
-                retryable,
+                *retryable,
                 "The aggregate initialization state machine rejected the transition; review the operation and resubmit.".to_string(),
             ),
             Self::SkillsPreparation { retryable, reason } => (
                 "aggregate_machine_skills_failed".to_string(),
-                retryable,
-                reason,
+                *retryable,
+                reason.clone(),
             ),
             Self::Preflight { retryable, reason } => (
                 "aggregate_preflight_failed".to_string(),
-                retryable,
-                reason,
+                *retryable,
+                reason.clone(),
             ),
             Self::ProviderTurn {
                 step,
@@ -126,8 +133,8 @@ impl AggregateInitializationError {
                 retryable,
             } => (
                 format!("aggregate_{}_failed", step.as_str()),
-                retryable,
-                reason,
+                *retryable,
+                reason.clone(),
             ),
             Self::TrustWaiting { waiting } => (
                 "aggregate_initialization_trust_waiting".to_string(),
