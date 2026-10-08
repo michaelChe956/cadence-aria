@@ -291,19 +291,34 @@ fn parse_nonce(attrs: &str) -> Option<String> {
     let value = attrs.strip_prefix("nonce=")?;
     // 引号字形不是信任边界（见下方值比较注释）：CJK 输入法现场曾把属性值
     // 整体输出为全角弯引号（nonce=“86bc0a08”），直引号剥离失败即
-    // missing_start_tag 楔死 needs_human。直/弯两种字形都接受，值等式仍在。
-    let nonce = value
-        .strip_prefix('"')
-        .and_then(|inner| inner.strip_suffix('"'))
-        .or_else(|| {
-            value
-                .strip_prefix('\u{201c}')
-                .and_then(|inner| inner.strip_suffix('\u{201d}'))
-        })?;
+    // missing_start_tag 楔死 needs_human；r57b run8 又实测弯/直**混排**
+    // （nonce=“lcg-matrix-split"，U+201C 开 + ASCII 闭）。开/闭字形各自
+    // 独立接受直/弯，值等式仍在。
+    let nonce = strip_attribute_quote_glyphs(value)?;
     // The contract generates compact random nonces, while its intentional few-shot
     // placeholder is `EXAMPLE_NONCE`; format is not the trust boundary. The exact
     // value comparison below is, so retain any non-empty attribute value here.
     (!nonce.is_empty()).then(|| nonce.to_string())
+}
+
+/// 剥离属性值两侧的引号字形：开侧接受 `"`/`“`，闭侧接受 `"`/`”`，弯/直可
+/// 混排（r57b run8 实测形态）。字形只是定界结构位，不是信任边界；nonce 值
+/// 本身由调用方逐字比较（parse_block_at 的值等式）。
+fn strip_attribute_quote_glyphs(value: &str) -> Option<&str> {
+    const OPEN_GLYPHS: [char; 2] = ['"', '\u{201c}'];
+    const CLOSE_GLYPHS: [char; 2] = ['"', '\u{201d}'];
+    let open = value.chars().next()?;
+    let close = value.chars().next_back()?;
+    if !OPEN_GLYPHS.contains(&open) || !CLOSE_GLYPHS.contains(&close) {
+        return None;
+    }
+    let inner_start = open.len_utf8();
+    let inner_end = value.len() - close.len_utf8();
+    if inner_start > inner_end {
+        // 单字形值（如整个属性值只有一个引号字符）无内部内容。
+        return None;
+    }
+    Some(&value[inner_start..inner_end])
 }
 
 fn recoverable_value(text: &str, expected_nonce: &str) -> Option<Value> {
@@ -929,6 +944,52 @@ mod tests {
     fn curly_quoted_nonce_attribute_still_enforces_exact_value_equality() {
         // 放宽的是引号字形，不是 nonce 值等式——值不匹配仍 NonceMismatch。
         let output = "<ARIA_STRUCTURED_OUTPUT nonce=“deadbeef”>{“nonce”:“96aca42f”,“verdict”:“pass”}</ARIA_STRUCTURED_OUTPUT>";
+
+        let error = failed_error(output);
+
+        assert_eq!(error.code, StructuredOutputErrorCode::NonceMismatch);
+        assert_eq!(error.observed_nonce.as_deref(), Some("deadbeef"));
+    }
+
+    #[test]
+    fn parses_mixed_curly_straight_attribute_quote_glyphs() {
+        // r57b run8 现场(claude split fresh denied):prompt 正确下发直引号
+        // 标签模板,AI 回显起始标签却弯/直混排——nonce=“lcg-matrix-split"
+        // (U+201C 开 + ASCII 闭)。既有弯引号归一只认成对 “ ”,混排仍
+        // missing_start_tag 楔死。开/闭字形独立归一,值等式仍是信任边界。
+        let curly_open = "<ARIA_STRUCTURED_OUTPUT nonce=“96aca42f\">\n{\"nonce\":\"96aca42f\",\"verdict\":\"pass\"}\n</ARIA_STRUCTURED_OUTPUT>";
+        let parsed = parse_structured_output(curly_open, &contract());
+        assert_eq!(
+            parsed.state,
+            StructuredOutputState::Parsed(json!({"verdict": "pass"}))
+        );
+
+        let curly_close = "<ARIA_STRUCTURED_OUTPUT nonce=\"96aca42f”>\n{\"nonce\":\"96aca42f\",\"verdict\":\"pass\"}\n</ARIA_STRUCTURED_OUTPUT>";
+        let parsed = parse_structured_output(curly_close, &contract());
+        assert_eq!(
+            parsed.state,
+            StructuredOutputState::Parsed(json!({"verdict": "pass"}))
+        );
+    }
+
+    #[test]
+    fn split_sync_bridge_legacy_path_parses_mixed_glyph_nonce() {
+        // run8 实测链:gateway sync bridge 兜底走 parse_last_structured_output
+        // (nonce 从 sentinel 自发现,JSON envelope 等式仍强制)——混排引号
+        // 在该路径同样必须可解析。
+        let output = "<ARIA_STRUCTURED_OUTPUT nonce=“lcg-matrix-split\">\n{\"nonce\":\"lcg-matrix-split\",\"plan\":{\"work_item_ids\":[]}}\n</ARIA_STRUCTURED_OUTPUT>";
+
+        let parsed = parse_last_structured_output(output)
+            .expect("mixed glyph nonce must parse")
+            .expect("sentinel present");
+
+        assert_eq!(parsed.1, json!({"plan": {"work_item_ids": []}}));
+    }
+
+    #[test]
+    fn mixed_glyph_nonce_attribute_still_enforces_exact_value_equality() {
+        // 字形归一不放宽值等式:混排引号下值不匹配仍 NonceMismatch。
+        let output = "<ARIA_STRUCTURED_OUTPUT nonce=“deadbeef\">\n{\"nonce\":\"96aca42f\",\"verdict\":\"pass\"}\n</ARIA_STRUCTURED_OUTPUT>";
 
         let error = failed_error(output);
 

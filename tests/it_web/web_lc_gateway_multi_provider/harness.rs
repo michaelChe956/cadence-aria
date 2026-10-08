@@ -5439,7 +5439,8 @@ fn split_sync_prompt() -> String {
          [output]\n\
          使用 nonce `{nonce}` 包裹唯一 JSON:开始标签 \"<ARIA_STRUCTURED_OUTPUT nonce=\\\"{nonce}\\\">\",\n\
          结束标签 \"</ARIA_STRUCTURED_OUTPUT>\"。JSON 顶层必须先含 \"nonce\":\"{nonce}\",\n\
-         再含 repository_profile/plan/work_items(按输出 schema;不用 Markdown code fence)。"
+         再含 repository_profile/plan/work_items(按输出 schema;不用 Markdown code fence)。\n\
+         nonce 纪律:开始标签必须逐字回显 \"<ARIA_STRUCTURED_OUTPUT nonce=\\\"{nonce}\\\">\"——属性名恰为 `nonce`,属性值两侧必须是英文直双引号(禁止中文弯引号),nonce 值 {nonce} 逐字照抄。"
     )
 }
 
@@ -5503,6 +5504,32 @@ mod pump_disposition_tests {
         assert_eq!(
             pump_frame_disposition("protocol_error", &message, 8),
             PumpFrameDisposition::ServerError
+        );
+    }
+
+    /// r57b run8 回归锚点:split_sync prompt 是生产 split 输出契约的镜像,
+    /// 必须与 `split_output_contract` 同款钉 nonce 引号字形纪律——run8 现场
+    /// AI 把起始标签属性值回显为弯/直混排(nonce=“lcg-matrix-split"),解析
+    /// 楔死 missing_start_tag,split fresh 落 denied。
+    #[test]
+    fn lcg_split_sync_prompt_pins_nonce_attribute_glyph_discipline() {
+        let prompt = split_sync_prompt();
+
+        assert!(
+            prompt.contains("nonce 纪律"),
+            "split_sync prompt must pin the nonce discipline line: {prompt}"
+        );
+        assert!(
+            prompt.contains("英文直双引号"),
+            "split_sync prompt must require straight ASCII double quotes: {prompt}"
+        );
+        assert!(
+            prompt.contains("禁止中文弯引号"),
+            "split_sync prompt must forbid curly quote glyphs: {prompt}"
+        );
+        assert!(
+            prompt.contains("逐字回显"),
+            "split_sync prompt must demand verbatim echo of the start tag: {prompt}"
         );
     }
 

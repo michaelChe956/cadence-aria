@@ -99,6 +99,34 @@ fn build_split_prompt_allows_readable_stream_before_final_sentinel() {
 }
 
 #[test]
+fn build_split_prompt_pins_nonce_attribute_glyph_discipline() {
+    // r57b run8(claude split fresh denied):nonce 已正确下发(prompt 模板
+    // 直引号),AI 回显起始标签却弯/直混排(nonce=“lcg-matrix-split"),
+    // 解析楔死 missing_start_tag。Ruling 11:方差系统性消除——输出契约钉
+    // nonce 纪律行(属性名/英文直双引号/禁弯引号/逐字回显正例)。
+    let (request, issue, repository) = split_prompt_fixture();
+    let prompt = build_split_prompt(&request, &issue, &repository, &[], &[], "(empty)", &RoutingReferenceContext::Legacy);
+
+    assert!(prompt.contains("nonce 纪律"), "prompt must pin the nonce discipline line: {prompt}");
+    assert!(
+        prompt.contains("属性名恰为 `nonce`"),
+        "discipline line must pin the exact attribute name: {prompt}"
+    );
+    assert!(
+        prompt.contains("英文直双引号"),
+        "discipline line must require straight ASCII double quotes: {prompt}"
+    );
+    assert!(
+        prompt.contains("禁止中文弯引号"),
+        "discipline line must forbid curly quote glyphs: {prompt}"
+    );
+    assert!(
+        prompt.contains("逐字回显 `<ARIA_STRUCTURED_OUTPUT nonce=\""),
+        "discipline line must carry the verbatim positive example: {prompt}"
+    );
+}
+
+#[test]
 fn split_prompt_requests_progress_before_long_operations() {
     let (request, issue, repository) = split_prompt_fixture();
     let prompt = build_split_prompt(&request, &issue, &repository, &[], &[], "(empty)", &RoutingReferenceContext::Legacy);

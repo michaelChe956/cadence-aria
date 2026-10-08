@@ -540,6 +540,7 @@ fn split_output_contract(nonce: &str, composition_rule: &str, schema_tail: &str)
          最后必须输出一个 nonce sentinel JSON block。\n\
          后端只解析最后一个 nonce 匹配的 <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">...</ARIA_STRUCTURED_OUTPUT> block。\n\
          标签内部必须是一个完整 JSON object，JSON 顶层必须含 `\"nonce\":\"{nonce}\"` 并与开始标签一致，不要输出 Markdown code fence。\n\
+         nonce 纪律：开始标签必须逐字回显 `<ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">`——属性名恰为 `nonce`，属性值两侧必须是英文直双引号 `\"`（禁止中文弯引号 “ ”、全角引号或单引号），nonce 值 `{nonce}` 逐字照抄不得改写。\n\
          严格按以下 JSON schema 输出{schema_tail}。\n\
          {composition_rule}\n\
          每个 work_item 必须包含 `kind` 字段（不要写成 `type`），合法取值为以下之一：backend、frontend、integration、e2e、docs、infra、other。\n\n\
