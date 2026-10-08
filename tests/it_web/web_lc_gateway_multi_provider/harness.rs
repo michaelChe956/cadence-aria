@@ -5600,7 +5600,14 @@ fn split_sync_prompt() -> String {
     // 包裹的 JSON(生产 split prompt 由 invocation.sentinel_nonce 注入
     // 同款指令);缺失该指令时 provider 输出裸 JSON/文本,必落
     // "missing structured output sentinel"。
+    // a′(OraclePiSplit,r61 pi split 现场):pi 探索 14 轮的动机全部是
+    // 「I need to find the actual schema」——prompt 原来只写「按输出
+    // schema」+字段名清单,而生产 split_output_contract 内嵌
+    // WORK_ITEM_SPLIT_OUTPUT_SCHEMA 全文;现镜像生产「严格按以下 JSON
+    // schema 输出{schema}」形态内嵌冻结 schema(include_str! 与生产源
+    // 零漂移),schema 在手后模型无需再翻工作区探索。
     let nonce = "lcg-matrix-split";
+    let schema = work_item_split_output_schema();
     format!(
         "你是跨仓逻辑代码库的 work item 拆分引擎。阅读聚合根下成员仓的公开接口与分层,\n\
          按输出 schema 把本次修复拆为 1-3 个可独立交付的 work item(含 title/kind/\n\
@@ -5609,7 +5616,9 @@ fn split_sync_prompt() -> String {
          [output]\n\
          使用 nonce `{nonce}` 包裹唯一 JSON:开始标签 \"<ARIA_STRUCTURED_OUTPUT nonce=\\\"{nonce}\\\">\",\n\
          结束标签 \"</ARIA_STRUCTURED_OUTPUT>\"。JSON 顶层必须先含 \"nonce\":\"{nonce}\",\n\
-         再含 repository_profile/plan/work_items(按输出 schema;不用 Markdown code fence)。\n\
+         再含 repository_profile/plan/work_items(不用 Markdown code fence)。\n\
+         严格按以下 JSON schema 输出:\n\
+         {schema}\n\n\
          nonce 纪律:开始标签必须逐字回显 \"<ARIA_STRUCTURED_OUTPUT nonce=\\\"{nonce}\\\">\"——属性名恰为 `nonce`,属性值两侧必须是英文直双引号(禁止中文弯引号),nonce 值 {nonce} 逐字照抄。"
     )
 }
@@ -5700,6 +5709,26 @@ mod pump_disposition_tests {
         assert!(
             prompt.contains("逐字回显"),
             "split_sync prompt must demand verbatim echo of the start tag: {prompt}"
+        );
+    }
+
+    /// a′(OraclePiSplit,r61 pi split 现场):pi 探索 14 轮的动机全部是
+    /// 「I need to find the actual schema」——prompt 只写「按输出 schema」
+    /// +字段名清单,而生产 split_output_contract 内嵌
+    /// WORK_ITEM_SPLIT_OUTPUT_SCHEMA 全文;镜像生产「严格按以下 JSON
+    /// schema 输出{schema}」形态内嵌冻结 schema(harness 已有
+    /// include_str! 冻结源,与生产零漂移),模型无需再翻工作区找 schema。
+    #[test]
+    fn lcg_split_sync_prompt_embeds_output_schema_mirror() {
+        let prompt = split_sync_prompt();
+
+        assert!(
+            prompt.contains("严格按以下 JSON schema 输出"),
+            "split_sync prompt must mirror the production schema directive: {prompt}"
+        );
+        assert!(
+            prompt.contains(&work_item_split_output_schema()),
+            "split_sync prompt must embed the frozen WORK_ITEM_SPLIT_OUTPUT_SCHEMA verbatim"
         );
     }
 
