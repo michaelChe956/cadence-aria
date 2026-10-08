@@ -4,4 +4,5 @@
 //! 与 spec delta REQ-LCG-07。harness 复用 `web_lc_operations_api` 的 HTTP
 //! 形态与真实 git fixture 建法;不复用 Noop/Fake 驱动当真实证据。
 pub(crate) mod harness;
+pub(crate) mod snapshot;
 pub(crate) mod live_matrix;

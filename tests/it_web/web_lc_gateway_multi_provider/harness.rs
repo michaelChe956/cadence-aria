@@ -194,6 +194,10 @@ pub(crate) struct EvidenceCell {
     pub session_projection_digest: String,
     /// 带 ts 封包的事件载荷(provider-events.jsonl 全量来源)。
     pub provider_events: Vec<Value>,
+    /// r52 快照:格证据的执行来源——full_chain(本轮真实执行)|
+    /// snapshot_boot(快照续跑轮真实执行)|carried:<snapshot_id>
+    ///(承继格:引用来源轮证据链,不重新计票)。
+    pub execution_origin: String,
 }
 
 impl EvidenceCell {
@@ -210,6 +214,17 @@ impl EvidenceCell {
         canonical_root: &Path,
         member_worktree: &Path,
     ) -> Result<(), String> {
+        // r52 快照:承继格=引用格(capability_state=carried),结构断言
+        // 属于来源轮;本轮只校验其引用形态(origin/run_ref)。
+        if self.capability_state == "carried" {
+            if !self.execution_origin.starts_with("carried:") || self.run_ref.trim().is_empty() {
+                return Err(format!(
+                    "承继格引用形态不完整:origin={:?} run_ref={:?}",
+                    self.execution_origin, self.run_ref
+                ));
+            }
+            return Ok(());
+        }
         if self.provider != *expected_provider {
             return Err(format!(
                 "provider 不一致:格 {:?} != 所选 {expected_provider:?}",
@@ -458,12 +473,39 @@ impl LiveLcGatewayHarness {
         provider: ProviderName,
         evidence_root: &Path,
     ) -> Result<LiveMatrixEvidence, LiveMatrixFailure> {
+        let run_mode = super::snapshot::RunMode::from_env()
+            .map_err(|message| matrix_failure("run_mode_invalid", message, None))?;
+        fp("matrix_run_mode", format_args!("{run_mode:?}"));
         fp_enter_phase("matrix", "env", "build");
-        let mut env = MatrixEnvironment::build(provider.clone(), evidence_root).await?;
+        let mut env = match run_mode {
+            super::snapshot::RunMode::ResumeFromPlanSnapshot => {
+                MatrixEnvironment::build_from_snapshot(provider.clone(), evidence_root).await?
+            }
+            super::snapshot::RunMode::FullChain | super::snapshot::RunMode::CapturePlanSnapshot => {
+                MatrixEnvironment::build(provider.clone(), evidence_root).await?
+            }
+        };
         fp("env_built", format_args!("lc={} issue={}", env.lc_id, env.issue_id));
 
         let mut cells = Vec::new();
+        if run_mode == super::snapshot::RunMode::ResumeFromPlanSnapshot {
+            // 快照续跑轮:story/design/plan/split 为承继格(引用来源轮证据
+            // 链,不重新计票);coding/review 真实执行(snapshot_fresh)。
+            let snapshot_id = env
+                .snapshot_id
+                .clone()
+                .expect("resume env carries snapshot id");
+            let manifest = env
+                .snapshot_manifest
+                .as_ref()
+                .expect("resume env carries snapshot manifest");
+            for stage in ["story", "design", "plan", "split"] {
+                cells.push(carried_cell(stage, &provider, manifest, &snapshot_id));
+                fp("stage_carried", format_args!("{stage} snapshot={snapshot_id}"));
+            }
+        }
         // 五阶段顺序固定:Story、Design、Plan、Coding、Review。
+        if run_mode != super::snapshot::RunMode::ResumeFromPlanSnapshot {
         fp("stage_begin", "story");
         cells.extend(
             env.run_workspace_entity_stage(
@@ -514,7 +556,10 @@ impl LiveLcGatewayHarness {
         fp("stage_begin", "plan split_sync");
         cells.extend(env.run_split_sync_stage().await);
         fp("stage_end", format_args!("plan split_sync cells={}", cells.len()));
-        // Coding(依赖 Plan 确认后的 work item;失败落格)。
+        }
+        // Coding(依赖 Plan 确认后的 work item;失败落格)。全链与续跑轮都
+        // 真实执行;续跑轮 observation.execution_origin 在阶段内部标记
+        // snapshot_boot(见 run_coding_stage/run_review_stage 的 env 传导)。
         fp("stage_begin", "coding");
         cells.extend(env.run_coding_stage().await);
         fp("stage_end", format_args!("coding cells={}", cells.len()));
@@ -522,6 +567,15 @@ impl LiveLcGatewayHarness {
         fp("stage_begin", "review");
         cells.extend(env.run_review_stage().await);
         fp("stage_end", format_args!("review cells={}", cells.len()));
+        if run_mode == super::snapshot::RunMode::ResumeFromPlanSnapshot {
+            // 续跑轮收口:递增再基线计数(每 N 轮强制全链)。
+            let rounds = super::snapshot::record_resume_round(evidence_root)
+                .map_err(|message| matrix_failure("snapshot_state_write_failed", message, None))?;
+            fp(
+                "snapshot_resume_round_recorded",
+                format_args!("rounds_since_baseline={rounds}"),
+            );
+        }
 
         fp_enter_phase("matrix", "validate", "final");
         // run_ref 在 entrypoint 内唯一:跨格回填(空 run_ref 不参与判重)。
@@ -640,19 +694,195 @@ struct MatrixEnvironment {
     evidence_root: PathBuf,
     stage_timeout: Duration,
     entity_stage_timeout: Duration,
+    /// r52 快照:工作区根固定路径(capture/resume 模式;None=tempdir)。
+    workspace_root_path: PathBuf,
+    /// r52 快照:聚合根固定路径(capture/resume 模式;None=tempdir)。
+    aggregate_root_fixed: Option<PathBuf>,
+    /// r52 快照:capture 轮在 plan-confirmed 边界捕获的快照 id。
+    snapshot_id: Option<String>,
+    /// r52 快照:capture 轮 build 预建的快照目录(run/ 所在;pristine
+    /// 落同目录)。
+    capture_snapshot_dir: Option<PathBuf>,
+    /// r52 快照:resume 轮打开的 manifest(承继格引用)。
+    snapshot_manifest: Option<super::snapshot::SnapshotManifest>,
+    /// r52 快照:resume 轮=true——coding/review 观测格标 snapshot_boot。
+    snapshot_boot: bool,
 }
 
 impl MatrixEnvironment {
+    /// r52 快照续跑:打开快照(pristine 校验+diff 门禁+再基线计数→
+    /// 回灌 run/ 固定路径原地打开),重建全部短生命期状态(WebAppState/
+    /// registry/gate/EventHub/run registries 全新;provider health 真实
+    /// 重探测),durable preflight(manifest 摘要复核)由 open 完成。
+    /// 不做路径重写——run/ 与捕获轮逐字节同路径,指纹自然有效。
+    async fn build_from_snapshot(
+        provider: ProviderName,
+        evidence_root: &Path,
+    ) -> Result<Self, LiveMatrixFailure> {
+        let snapshot_id = super::snapshot::resolve_snapshot_id(evidence_root)
+            .map_err(|message| matrix_failure("snapshot_unresolvable", message, None))?;
+        fp("snapshot_open_begin", format_args!("snapshot={snapshot_id}"));
+        let opened = super::snapshot::open_plan_snapshot(evidence_root, &snapshot_id).map_err(|error| {
+            matrix_failure(error.reason_code(), error.message(), None)
+        })?;
+        let manifest = opened.manifest.clone();
+        fp(
+            "snapshot_opened",
+            format_args!(
+                "snapshot={snapshot_id} revision={} created_at={}",
+                manifest.harness_revision, manifest.created_at
+            ),
+        );
+        let root = opened.workspace_root;
+        let aggregate_root = opened.aggregate_root;
+        let runtime = WebRuntime::new_real(root.clone()).map_err(|error| {
+            matrix_failure("real_runtime_unavailable", format!("{error:?}"), None)
+        })?;
+        let state = WebAppState::with_events(root.clone(), runtime, EventHub::new());
+        if state.test_provider_enabled {
+            return Err(matrix_failure(
+                "real_mode_required",
+                "ARIA_PROVIDER_MODE=fake 或 test provider 生效:真实矩阵要求真实 provider registry"
+                    .to_string(),
+                None,
+            ));
+        }
+        let gateway_factory = state
+            .logical_gateway_factory
+            .clone()
+            .expect("生产 logical gateway factory");
+        let app_paths = ProductAppPaths::new(root.join(".aria"));
+        let lifecycle = LifecycleStore::new(app_paths.clone());
+        let app = build_web_router(state);
+        let http_app = app.clone();
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ws listener");
+        let ws_addr = listener.local_addr().expect("ws addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve matrix app");
+        });
+        let provider_wire = serde_json::to_value(&provider)
+            .expect("provider serde")
+            .as_str()
+            .expect("provider wire name")
+            .to_string();
+        let mut env = Self {
+            provider: provider.clone(),
+            provider_wire,
+            _root: None,
+            _aggregate_root: None,
+            app: http_app,
+            _server: server,
+            ws_addr,
+            app_paths,
+            lifecycle,
+            gateway_factory,
+            // durable 身份全部来自 manifest(快照点冻结)。
+            lc_id: manifest.lc_id.clone(),
+            issue_id: manifest.issue_id.clone(),
+            canonical_root: PathBuf::new(),
+            member_worktree: PathBuf::new(),
+            member_physical_repo_id: String::new(),
+            member_logical_id: String::new(),
+            member_checkout_id: String::new(),
+            story_spec_id: None,
+            design_spec_id: None,
+            work_item_id: Some(manifest.work_item_id.clone()),
+            plan_work_item_ids: vec![manifest.work_item_id.clone()],
+            plan_id: manifest.plan_id.clone(),
+            prior_entity_session_id: None,
+            prior_plan_session_id: None,
+            prior_coding_session_id: None,
+            prior_review_session_id: None,
+            evidence_root: evidence_root.to_path_buf(),
+            stage_timeout: Duration::from_secs(env_timeout_secs(
+                STAGE_TIMEOUT_ENV,
+                DEFAULT_STAGE_TIMEOUT_SECS,
+            )),
+            entity_stage_timeout: Duration::from_secs(env_timeout_secs(
+                ENTITY_STAGE_TIMEOUT_ENV,
+                DEFAULT_ENTITY_STAGE_TIMEOUT_SECS,
+            )),
+            workspace_root_path: root,
+            aggregate_root_fixed: Some(aggregate_root),
+            snapshot_id: Some(snapshot_id),
+            capture_snapshot_dir: None,
+            snapshot_manifest: Some(manifest),
+            snapshot_boot: true,
+        };
+        // provider health 真实重探测(不沿用快照;有界超时=BLOCKED 报告)。
+        env.wait_for_provider_health().await?;
+        // canonical root/target 从 durable manifest 复原(原地同路径)。
+        env.resolve_member_target().await?;
+        // 成员 Git 身份 preflight:快照点 HEAD 复核(漂移=BLOCKED)。
+        let member_head = super::snapshot::git_head(&env.member_worktree).map_err(|message| {
+            matrix_failure("snapshot_member_head_unavailable", message, None)
+        })?;
+        let expected_head = env
+            .snapshot_manifest
+            .as_ref()
+            .expect("snapshot manifest")
+            .member_git_head
+            .clone();
+        if !expected_head.is_empty() && member_head != expected_head {
+            return Err(matrix_failure(
+                "snapshot_member_head_mismatch",
+                format!("成员仓 HEAD {member_head} != 快照点 {expected_head}"),
+                None,
+            ));
+        }
+        Ok(env)
+    }
+
     async fn build(
         provider: ProviderName,
         evidence_root: &Path,
     ) -> Result<Self, LiveMatrixFailure> {
         // 1) 真实模式门:fake registry/test provider 下不允许冒充真实现场。
-        let root = TempDir::new().expect("workspace root");
-        let runtime = WebRuntime::new_real(root.path().to_path_buf()).map_err(|error| {
+        // r52 快照:capture 模式在固定路径 run/{workspace,aggregate-root}
+        // 上构建(resume 轮回灌 pristine→run/ 后路径与捕获轮逐字节同源,
+        // 绝对路径嵌入的指纹自然有效;不做路径重写)。
+        let capture_mode = matches!(
+            super::snapshot::RunMode::from_env(),
+            Ok(super::snapshot::RunMode::CapturePlanSnapshot)
+        );
+        let mut capture_snapshot_dir: Option<PathBuf> = None;
+        let (root, aggregate_root, workspace_root_path, aggregate_root_fixed) = if capture_mode {
+            let snapshot_id = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+            let directory = super::snapshot::snapshots_root(evidence_root).join(&snapshot_id);
+            let run_workspace = directory.join("run").join("workspace");
+            let run_aggregate = directory.join("run").join("aggregate-root");
+            std::fs::create_dir_all(&run_workspace).map_err(|error| {
+                matrix_failure(
+                    "snapshot_run_dir_create_failed",
+                    format!("{}: {error}", run_workspace.display()),
+                    None,
+                )
+            })?;
+            std::fs::create_dir_all(&run_aggregate).map_err(|error| {
+                matrix_failure(
+                    "snapshot_run_dir_create_failed",
+                    format!("{}: {error}", run_aggregate.display()),
+                    None,
+                )
+            })?;
+            fp(
+                "snapshot_capture_run_root",
+                format_args!("snapshot={snapshot_id} dir={}", directory.display()),
+            );
+            capture_snapshot_dir = Some(directory.clone());
+            (None, None, run_workspace, Some(run_aggregate))
+        } else {
+            let root = TempDir::new().expect("workspace root");
+            let aggregate_root = TempDir::new().expect("aggregate root");
+            let workspace_root_path = root.path().to_path_buf();
+            (Some(root), Some(aggregate_root), workspace_root_path, None)
+        };
+        let runtime = WebRuntime::new_real(workspace_root_path.clone()).map_err(|error| {
             matrix_failure("real_runtime_unavailable", format!("{error:?}"), None)
         })?;
-        let state = WebAppState::with_events(root.path().to_path_buf(), runtime, EventHub::new());
+        let state = WebAppState::with_events(workspace_root_path.clone(), runtime, EventHub::new());
         if state.test_provider_enabled {
             return Err(matrix_failure(
                 "real_mode_required",
@@ -668,9 +898,17 @@ impl MatrixEnvironment {
             .expect("生产 logical gateway factory");
 
         // 2) 真实 git fixture(复用 web_lc_operations_api 建法:两成员仓+提交)。
-        let aggregate_root = TempDir::new().expect("aggregate root");
-        let member_a = aggregate_root.path().join("alpha");
-        let member_b = aggregate_root.path().join("beta");
+        let aggregate_root_path = aggregate_root_fixed
+            .clone()
+            .unwrap_or_else(|| {
+                aggregate_root
+                    .as_ref()
+                    .expect("aggregate root")
+                    .path()
+                    .to_path_buf()
+            });
+        let member_a = aggregate_root_path.join("alpha");
+        let member_b = aggregate_root_path.join("beta");
         git_repo_at(&member_a);
         git_repo_at(&member_b);
         // 真实产品语义:成员 checkout 缺 `.claude/rules/language.md` 时
@@ -688,7 +926,7 @@ impl MatrixEnvironment {
             "pub fn cross_repo_greeting() -> &'static str { \"beta\" }",
         );
 
-        let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+        let app_paths = ProductAppPaths::new(workspace_root_path.join(".aria"));
         let lifecycle = LifecycleStore::new(app_paths.clone());
         let app = build_web_router(state);
         // serve 消费一份 clone(共享同一 WebAppState);HTTP 走 oneshot。
@@ -710,8 +948,8 @@ impl MatrixEnvironment {
         let mut env = Self {
             provider,
             provider_wire,
-            _root: Some(root),
-            _aggregate_root: Some(aggregate_root),
+            _root: root,
+            _aggregate_root: aggregate_root,
             app: http_app,
             _server: server,
             ws_addr,
@@ -743,6 +981,12 @@ impl MatrixEnvironment {
                 ENTITY_STAGE_TIMEOUT_ENV,
                 DEFAULT_ENTITY_STAGE_TIMEOUT_SECS,
             )),
+            workspace_root_path,
+            aggregate_root_fixed,
+            snapshot_id: None,
+            capture_snapshot_dir,
+            snapshot_manifest: None,
+            snapshot_boot: false,
         };
 
         // 2.5) provider health 就绪等待:new_real 的 ProviderHealthService
@@ -993,14 +1237,21 @@ impl MatrixEnvironment {
     }
 
     fn workspace_root_path(&self) -> &Path {
+        if !self.workspace_root_path.as_os_str().is_empty() {
+            return &self.workspace_root_path;
+        }
         self._root.as_ref().expect("workspace root").path()
     }
 
     fn aggregate_root_path(&self) -> &Path {
-        self._aggregate_root
-            .as_ref()
-            .expect("aggregate root")
-            .path()
+        self.aggregate_root_fixed
+            .as_deref()
+            .unwrap_or_else(|| {
+                self._aggregate_root
+                    .as_ref()
+                    .expect("aggregate root")
+                    .path()
+            })
     }
 
     /// fix 轮 3:失败诊断抄录 + tempdir 保留。把该 LC 的 root recipe
@@ -2201,6 +2452,63 @@ impl MatrixEnvironment {
         // Plan confirmed 后解析 work item(coding 前置;r26:从 resume
         // confirm 前移出——fresh 不再 confirm,work item 定稿在 resume 轮)。
         self.resolve_first_work_item().await;
+        // r52 快照:capture 模式在此静止边界落快照(typed confirm 已
+        // confirmed、work item 已解析、无 running run/attempt)。
+        if matches!(
+            super::snapshot::RunMode::from_env(),
+            Ok(super::snapshot::RunMode::CapturePlanSnapshot)
+        ) && self.snapshot_id.is_none()
+        {
+            let lc_root = self
+                .app_paths
+                .logical_codebase_record_root(PROJECT_ID, &self.lc_id);
+            let audits = self.scan_session_audits(
+                &self.prior_plan_session_id.clone().unwrap_or_default(),
+            );
+            let cli_version = audits
+                .first()
+                .map(|(_, record)| record.provider_version.clone())
+                .unwrap_or_default();
+            let input = super::snapshot::CaptureInput {
+                provider_wire: &self.provider_wire,
+                cli_version: &cli_version,
+                project_id: PROJECT_ID,
+                issue_id: &self.issue_id,
+                lc_id: &self.lc_id,
+                plan_id: &self.plan_id,
+                work_item_id: self
+                    .work_item_id
+                    .as_deref()
+                    .unwrap_or_default(),
+                workspace_root: self.workspace_root_path(),
+                aggregate_root: self.aggregate_root_path(),
+                lc_root: &lc_root,
+                policy_root: &self.canonical_root,
+                source_evidence_root: &self.evidence_root,
+            };
+            match super::snapshot::capture_plan_snapshot(
+                &self.evidence_root,
+                &input,
+                self.capture_snapshot_dir.as_deref(),
+            ) {
+                Ok(captured) => {
+                    self.snapshot_id = Some(captured.snapshot_id.clone());
+                    fp(
+                        "snapshot_captured",
+                        format_args!(
+                            "snapshot={} dir={}",
+                            captured.snapshot_id,
+                            captured.directory.display()
+                        ),
+                    );
+                }
+                Err(message) => {
+                    // 快照失败不伪造、不阻断全链证据:fp 留痕,本轮无快照
+                    //(capture 是运营加速面,矩阵证据语义不受影响)。
+                    fp("snapshot_capture_failed", format_args!("{message}"));
+                }
+            }
+        }
         cells
     }
 
@@ -2824,6 +3132,7 @@ impl MatrixEnvironment {
     // -----------------------------------------------------------------------
 
     async fn run_coding_stage(&mut self) -> Vec<EvidenceCell> {
+        let snapshot_boot = self.snapshot_boot;
         let mut cells = Vec::new();
         let Some(work_item_id) = self.work_item_id.clone() else {
             cells.push(
@@ -2843,6 +3152,9 @@ impl MatrixEnvironment {
         // POST work-item-plans/{plan_id}/coding-attempts(create_group_
         // coding_attempt:Confirmed plan 校验+组初始化 journal+组锁)。
         let mut observation = StageObservation::new("coding", &self.provider);
+        if snapshot_boot {
+            observation.execution_origin = "snapshot_boot".to_string();
+        }
         fp_enter_phase("coding", ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT, FRESH);
         observation.role = "executor".to_string();
         observation.action = "coding_workspace_write".to_string();
@@ -2895,6 +3207,9 @@ impl MatrixEnvironment {
         // resume:重连 coding WS 再次驱动(原生恢复由生产 resume 语义裁决,
         // 审计 provider_session_id 与 fresh 轮比对)。
         let mut resume = StageObservation::new("coding", &self.provider);
+        if snapshot_boot {
+            resume.execution_origin = "snapshot_boot".to_string();
+        }
         fp_enter_phase("coding", ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT, RESUME);
         resume.role = "executor".to_string();
         resume.action = "coding_workspace_write".to_string();
@@ -3157,6 +3472,9 @@ impl MatrixEnvironment {
         let mut cells = Vec::new();
         // reviewer 评审走 design 实体 review_rounds=1(reviewer=所选 provider)。
         let mut observation = StageObservation::new("review", &self.provider);
+        if self.snapshot_boot {
+            observation.execution_origin = "snapshot_boot".to_string();
+        }
         fp_enter_phase("review", ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT, FRESH);
         observation.role = "reviewer".to_string();
         observation.action = "review_read_only".to_string();
@@ -3204,6 +3522,9 @@ impl MatrixEnvironment {
 
         // resume:评审修订重驱(reviewer 原生恢复)。
         let mut resume = StageObservation::new("review", &self.provider);
+        if self.snapshot_boot {
+            resume.execution_origin = "snapshot_boot".to_string();
+        }
         fp_enter_phase("review", ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT, RESUME);
         resume.role = "reviewer".to_string();
         resume.action = "review_read_only".to_string();
@@ -3482,6 +3803,8 @@ struct StageObservation {
     frozen_digest: Option<String>,
     requested_resume_id: Option<String>,
     native_confirmed_id: Option<String>,
+    /// r52:本观测格的执行来源(full_chain/snapshot_boot;承继格不走本结构)。
+    execution_origin: String,
     completed_product_artifact_exists: bool,
     /// r27 问题1:产物 markdown 在场(artifact_update/session_state 携带
     /// 非空 markdown)——plan fresh 的产物判定用(停门模型:候选产物已
@@ -3513,6 +3836,7 @@ impl StageObservation {
             frozen_digest: None,
             requested_resume_id: None,
             native_confirmed_id: None,
+            execution_origin: "full_chain".to_string(),
             completed_product_artifact_exists: false,
             artifact_markdown_seen: false,
             observed_spawn_count: 0,
@@ -3591,6 +3915,7 @@ impl StageObservation {
             provider_spawn_count: self.observed_spawn_count as u64,
             session_projection_digest: String::new(),
             provider_events: self.events.clone(),
+            execution_origin: self.execution_origin.clone(),
         }
     }
 
@@ -4132,6 +4457,56 @@ fn seed_member_rule_material(path: &Path, member: &str) {
 }
 
 /// 递归复制目录(诊断抄录用;缺失源返回 Ok(0))。
+/// r52 快照:承继格(引用来源轮证据链;不重新计票,不参与 Confirmed
+/// 断言)。capability_state=carried;denied_reason 携带来源引用说明。
+fn carried_cell(
+    stage: &str,
+    provider: &ProviderName,
+    manifest: &super::snapshot::SnapshotManifest,
+    snapshot_id: &str,
+) -> EvidenceCell {
+    EvidenceCell {
+        provider: provider.clone(),
+        exact_version: manifest.cli_version.clone(),
+        stage: stage.to_string(),
+        entrypoint: if stage == "split" {
+            ENTRYPOINT_SPLIT_SYNC.to_string()
+        } else {
+            ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT.to_string()
+        },
+        fresh_or_resume: FRESH.to_string(),
+        process_cwd: PathBuf::new(),
+        target: PathBuf::new(),
+        audit_projection_digest: String::new(),
+        frozen_projection_digest: String::new(),
+        native_resume_confirmed_id: None,
+        requested_resume_id: None,
+        argv_or_wire_capture_exists: false,
+        approval_and_tool_events_exist: false,
+        completed_product_artifact_exists: false,
+        run_ref: format!("snapshot-{snapshot_id}-carried-{stage}"),
+        run_ref_is_unique_within_entrypoint: true,
+        action: String::new(),
+        role: String::new(),
+        gateway_dialect: String::new(),
+        wire_dialect: String::new(),
+        native_session_id: String::new(),
+        workspace_session_id: String::new(),
+        argv: Vec::new(),
+        capability_state: "carried".to_string(),
+        denied_reason: Some(format!(
+            "承继格:来源轮证据链 {}/matrix(快照 {snapshot_id}@{},构建 {});不重新计票",
+            manifest.source_evidence_root, manifest.created_at, manifest.harness_revision
+        )),
+        provider_pid: None,
+        pid_unavailable_reason: Some("承继格:证据在来源轮,本轮不重复观测".to_string()),
+        provider_spawn_count: 0,
+        session_projection_digest: String::new(),
+        provider_events: Vec::new(),
+        execution_origin: format!("carried:{snapshot_id}"),
+    }
+}
+
 fn copy_tree(source: &Path, destination: &Path) -> std::io::Result<usize> {
     let mut copied = 0usize;
     let entries = match std::fs::read_dir(source) {

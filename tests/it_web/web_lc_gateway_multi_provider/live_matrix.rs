@@ -70,6 +70,7 @@ fn complete_baseline_cell(
             "ts": "2026-10-04T00:00:00.000Z",
             "event": {"type": "tool_call", "tool": "Read", "native_session_id": "native-session-fixture"}
         })],
+        execution_origin: "full_chain".to_string(),
     }
 }
 
