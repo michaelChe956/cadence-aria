@@ -864,6 +864,49 @@ impl MatrixEnvironment {
                     .display()
             ),
         );
+        // r56 修复:resume 轮 spec id 恢复(与 r55 origin ensure 同区挂点:
+        // 全部 preflight 通过后、Ok(env) 前)。story/design 为承继格不重跑,
+        // manifest schema 冻结不携带 spec id——回灌后的 run 树 durable 态
+        // (.aria 内 plan_confirmed 前已 Confirmed 的 spec 记录)经现成只读
+        // 端点 GET issue lifecycle 重取(优先产品 API:零 .aria 直读、与
+        // harness 全程 HTTP 交互同风格;端点自带 legacy 版本 backfill 幂等,
+        // 只写 run 树不触 pristine/snapshots)。review 阶段建载体会话消费
+        // story_spec_ids,缺失=产品 500 story_spec_required(r54-r56 三轮
+        // 同错)→取不到 fail loudly(snapshot_resume_state_missing,
+        // BLOCKED 真实报告),绝不静默空。
+        let (status, body) = request_json(
+            &env.app,
+            Method::GET,
+            &format!(
+                "/api/issues/{}/lifecycle?project_id={PROJECT_ID}",
+                env.issue_id
+            ),
+            json!({}),
+        )
+        .await;
+        if !status.is_success() {
+            return Err(matrix_failure(
+                "snapshot_resume_state_missing",
+                format!("快照续跑恢复失败:issue lifecycle 读取失败({status}):{body}"),
+                None,
+            ));
+        }
+        let (story_spec_id, design_spec_id) = match restored_spec_ids_from_lifecycle(&body) {
+            Ok(ids) => ids,
+            Err(reason) => {
+                return Err(matrix_failure(
+                    "snapshot_resume_state_missing",
+                    format!("快照续跑恢复失败:回灌后 durable 态缺 Confirmed spec——{reason}"),
+                    None,
+                ));
+            }
+        };
+        env.story_spec_id = Some(story_spec_id.clone());
+        env.design_spec_id = Some(design_spec_id.clone());
+        fp(
+            "snapshot_spec_ids_restored",
+            format_args!("story={story_spec_id} design={design_spec_id}"),
+        );
         Ok(env)
     }
 
@@ -4620,6 +4663,63 @@ fn carried_cell(
     }
 }
 
+/// r56 第三类恢复缺口修复:从 issue lifecycle GET 响应恢复 resume 轮
+/// env 的 story/design spec id。resume 轮 story/design 为承继格(不
+/// 重跑),capture 轮经 generate 响应写入 env 的 spec id 不在快照
+/// manifest(schema 冻结,基线快照无该字段)→review 阶段建载体会话
+/// 消费 story_spec_ids([] 在产品 500 story_spec_required,r54-r56
+/// 三轮同错,前两轮被 coding 失败掩盖)。取数=回灌后 durable 态经
+/// 现成只读端点 GET /api/issues/{id}/lifecycle(harness 全程 HTTP
+/// 形态与产品交互,保持同风格);快照点=plan_confirmed 前置两 spec
+/// Confirmed,故各取「最新 Confirmed 条目」(修订流 Draft/InReview
+/// 中间态不参与);任一缺失→Err(BLOCKED 真实报告,不静默空)。
+/// 纯函数,两臂由 snapshot_spec_restore_tests 钉死。
+fn restored_spec_ids_from_lifecycle(body: &Value) -> Result<(String, String), String> {
+    let latest_confirmed = |entries: Option<&Vec<Value>>, id_field: &str| -> Option<String> {
+        entries?
+            .iter()
+            .filter(|entry| {
+                entry
+                    .get("confirmation_status")
+                    .and_then(Value::as_str)
+                    .is_some_and(|status| status == "confirmed")
+            })
+            .filter_map(|entry| {
+                entry
+                    .get(id_field)
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .next_back()
+    };
+    let story = latest_confirmed(
+        body.get("story_specs").and_then(Value::as_array),
+        "story_spec_id",
+    );
+    let design = latest_confirmed(
+        body.get("design_specs").and_then(Value::as_array),
+        "design_spec_id",
+    );
+    match (story, design) {
+        (Some(story), Some(design)) => Ok((story, design)),
+        (None, Some(_)) => Err(
+            "story_specs 无 Confirmed 条目(快照点 plan_confirmed 前置 story Confirmed;\
+             回灌后 durable 态异常)"
+                .to_string(),
+        ),
+        (Some(_), None) => Err(
+            "design_specs 无 Confirmed 条目(快照点 plan_confirmed 前置 design Confirmed;\
+             回灌后 durable 态异常)"
+                .to_string(),
+        ),
+        (None, None) => Err(
+            "story_specs/design_specs 均无 Confirmed 条目(快照点 plan_confirmed 前置\
+             两 spec Confirmed;回灌后 durable 态异常)"
+                .to_string(),
+        ),
+    }
+}
+
 fn copy_tree(source: &Path, destination: &Path) -> std::io::Result<usize> {
     let mut copied = 0usize;
     let entries = match std::fs::read_dir(source) {
@@ -5645,5 +5745,99 @@ mod member_bare_origin_tests {
             head,
             "push 后 ls-remote 远端头必须等于本地提交(Pushed 判定可达成)"
         );
+    }
+}
+
+/// r56 第三类恢复缺口回归锚点:resume 轮 story/design 为承继格(不重跑),
+/// capture 轮经 generate 响应写入 env 的 spec id 不在快照 manifest(schema
+/// 冻结)——env 必须从回灌后 durable 态重取。「有 Confirmed spec→回填」与
+/// 「无 Confirmed→BLOCKED(不静默空)」两臂钉死(r54-r56 三轮 review 同错
+/// 500 story_spec_required:建会话 POST story_spec_ids:[])。
+mod snapshot_spec_restore_tests {
+    use super::*;
+
+    fn story_entry(id: &str, status: &str) -> Value {
+        json!({
+            "story_spec_id": id,
+            "confirmation_status": status,
+        })
+    }
+
+    fn design_entry(id: &str, status: &str) -> Value {
+        json!({
+            "design_spec_id": id,
+            "confirmation_status": status,
+        })
+    }
+
+    fn lifecycle_body(story_specs: Vec<Value>, design_specs: Vec<Value>) -> Value {
+        json!({
+            "issue": {"issue_id": "issue_0001"},
+            "story_specs": story_specs,
+            "design_specs": design_specs,
+        })
+    }
+
+    /// 快照点形态:story/design 各一条 Confirmed → 两 id 回填。
+    #[test]
+    fn lcg_restored_spec_ids_confirmed_pair_fills_both() {
+        let body = lifecycle_body(
+            vec![story_entry("story_spec_0001", "confirmed")],
+            vec![design_entry("design_spec_0001", "confirmed")],
+        );
+        assert_eq!(
+            restored_spec_ids_from_lifecycle(&body).expect("Confirmed 成对必须恢复"),
+            ("story_spec_0001".to_string(), "design_spec_0001".to_string())
+        );
+    }
+
+    /// 多条目取最新 Confirmed(列表尾);非 Confirmed 条目不参与——
+    /// 修订流会产生 Draft/InReview 中间态,静默取首条会拿错版本。
+    #[test]
+    fn lcg_restored_spec_ids_picks_latest_confirmed_ignoring_drafts() {
+        let body = lifecycle_body(
+            vec![
+                story_entry("story_spec_0001", "draft"),
+                story_entry("story_spec_0002", "confirmed"),
+                story_entry("story_spec_0003", "in_review"),
+                story_entry("story_spec_0004", "confirmed"),
+            ],
+            vec![design_entry("design_spec_0001", "confirmed")],
+        );
+        assert_eq!(
+            restored_spec_ids_from_lifecycle(&body).expect("存在 Confirmed 条目必须恢复"),
+            ("story_spec_0004".to_string(), "design_spec_0001".to_string())
+        );
+    }
+
+    /// 无 Confirmed story → BLOCKED(Err),不静默空——review 阶段消费
+    /// story_spec_ids,空数组在产品 500 story_spec_required。
+    #[test]
+    fn lcg_restored_spec_ids_blocked_without_confirmed_story() {
+        let body = lifecycle_body(
+            vec![story_entry("story_spec_0001", "draft")],
+            vec![design_entry("design_spec_0001", "confirmed")],
+        );
+        let reason = restored_spec_ids_from_lifecycle(&body).expect_err("无 Confirmed story 必须 BLOCKED");
+        assert!(reason.contains("story"), "原因须点名 story:{reason}");
+    }
+
+    /// 无 Confirmed design → 同口径 BLOCKED(快照点 plan_confirmed 前置
+    /// 两 spec Confirmed;缺失=durable 态异常,真实报告)。
+    #[test]
+    fn lcg_restored_spec_ids_blocked_without_confirmed_design() {
+        let body = lifecycle_body(
+            vec![story_entry("story_spec_0001", "confirmed")],
+            vec![],
+        );
+        let reason = restored_spec_ids_from_lifecycle(&body).expect_err("无 Confirmed design 必须 BLOCKED");
+        assert!(reason.contains("design"), "原因须点名 design:{reason}");
+    }
+
+    /// 字段缺失/空数组(旧 durable 态或半恢复现场)→ BLOCKED,不 panic。
+    #[test]
+    fn lcg_restored_spec_ids_blocked_on_missing_fields() {
+        let body = json!({"issue": {"issue_id": "issue_0001"}});
+        assert!(restored_spec_ids_from_lifecycle(&body).is_err());
     }
 }
