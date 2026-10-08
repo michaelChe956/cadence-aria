@@ -5162,6 +5162,12 @@ fn provider_type_for(provider: &ProviderName) -> ProviderType {
 /// F6:tool 事件结构化判定——按事件 type 字段精确匹配(含 permission/approval
 /// 审批面),`execution_event` 仅在其 title/agent 字段携带 tool 语义时计入;
 /// 不做全文子串匹配。
+///
+/// r61(codex 现场)provider 事件形态映射:codex `commandExecution` item 与
+/// pi bash/read 工具执行经产品桥(parse.rs `parse_execution_event`/
+/// mapping.rs `ws_execution_event_kind`)映射为 `execution_event`/
+/// `coding_execution_event` 帧,inner `event.kind="command"`——协议实名
+/// 事件(counted);其余 kind(output/turn/usage/provider)仍不计。
 fn is_tool_event(event: &Value) -> bool {
     let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
     match kind {
@@ -5173,7 +5179,16 @@ fn is_tool_event(event: &Value) -> bool {
         | "permission_request"
         | "coding_permission_request"
         | "approval_request" => true,
-        "execution_event" => {
+        "execution_event" | "coding_execution_event" => {
+            // provider 工具执行桥帧:inner event.kind == "command"
+            // (codex commandExecution / pi bash-read 工具)。
+            if event
+                .pointer("/event/kind")
+                .and_then(Value::as_str)
+                == Some("command")
+            {
+                return true;
+            }
             let title = event
                 .pointer("/event/title")
                 .or_else(|| event.get("title"))
@@ -5217,6 +5232,11 @@ fn scan_stream_log_pid(directory: &Path) -> Option<String> {
 
 /// argv 是否携带真实权限投影投放段(sync 栈无 WS 事件流时,权限
 /// allowlist/denylist/approval 通道的 argv 痕迹即真实投放证据)。
+///
+/// r61(codex 现场):codex app-server 的 `default_mode_request_user_input`
+/// 是其 requestUserInput 审批通道的实名启用 flag(069ab065 先例:codex
+/// 结构化交互工具=requestUserInput,argv 冻结 `app-server --enable
+/// default_mode_request_user_input`)——与 --allowedTools 族同为等价 token。
 fn argv_carries_permission_wire(argv: &[String]) -> bool {
     argv.iter().any(|argument| {
         argument.starts_with("--allowedTools")
@@ -5225,6 +5245,7 @@ fn argv_carries_permission_wire(argv: &[String]) -> bool {
             || argument.starts_with("--allowed-tools")
             || argument.starts_with("--exclude-tools")
             || argument.starts_with("--tools")
+            || argument == "default_mode_request_user_input"
     })
 }
 
@@ -6145,6 +6166,113 @@ mod pump_disposition_tests {
         assert!(plan_confirm_failure_is_recoverable(recoverable));
         let genuine = "plan SC 门服务端错误帧收口(kind=error):{\"message\": \"validator findings: [error] requirement_not_found\"}";
         assert!(!plan_confirm_failure_is_recoverable(genuine));
+    }
+
+    /// r61(codex 现场):tool 事件判据按 provider 协议事件形态映射——
+    /// codex `commandExecution` item 经产品桥映射为 `execution_event`/
+    /// `coding_execution_event` 帧(inner `event.kind="command"`,
+    /// title=Command started/completed/failed);pi 的 bash/read 工具执行
+    /// 同走 kind="command"(title=工具名)。这些是 provider 协议实名事件,
+    /// 必须计入;非 command kind(output/turn/usage/provider)仍不计——
+    /// 映射实名对应,不降低判据。
+    #[test]
+    fn lcg_tool_event_counts_provider_command_execution_frames() {
+        // codex-5 design fresh 现场帧(event_seq 38 原形)。
+        let codex_command = json!({
+            "type": "execution_event",
+            "event_seq": 38,
+            "event": {
+                "agent": "codex",
+                "command": "/usr/bin/zsh -lc 'pwd && ls -la'",
+                "event_id": "command_call_00_eiVTyMSaA73Hzk6KZAFG3349",
+                "kind": "command",
+                "status": "started",
+                "title": "Command started"
+            }
+        });
+        assert!(is_tool_event(&codex_command), "codex commandExecution 桥帧必须计入");
+        // codex-5 coding fresh 现场帧(coding_ 前缀,358 帧)。
+        let codex_coding_command = json!({
+            "type": "coding_execution_event",
+            "event": {
+                "agent": "codex",
+                "command": "cargo test --locked",
+                "kind": "command",
+                "status": "completed",
+                "title": "Command completed"
+            }
+        });
+        assert!(
+            is_tool_event(&codex_coding_command),
+            "coding 栈 codex commandExecution 桥帧必须计入"
+        );
+        // pi 现场帧(bash/read 工具执行,kind=command,title=工具名)。
+        let pi_bash = json!({
+            "type": "execution_event",
+            "event": {
+                "agent": "pi",
+                "kind": "command",
+                "title": "bash"
+            }
+        });
+        assert!(is_tool_event(&pi_bash), "pi bash 工具执行帧必须计入");
+        // 非 command kind 不得计入(判据不降低)。
+        let prompt_echo = json!({
+            "type": "execution_event",
+            "event": {
+                "agent": "codex",
+                "kind": "output",
+                "title": "Provider Prompt"
+            }
+        });
+        assert!(!is_tool_event(&prompt_echo), "output/prompt 回显不是 tool 事件");
+        let turn_event = json!({
+            "type": "execution_event",
+            "event": {"kind": "turn", "title": "Turn started"}
+        });
+        assert!(!is_tool_event(&turn_event), "turn 生命周期不是 tool 事件");
+        let usage_event = json!({
+            "type": "coding_execution_event",
+            "event": {"kind": "usage", "title": "author token usage"}
+        });
+        assert!(!is_tool_event(&usage_event), "usage 统计不是 tool 事件");
+    }
+
+    /// r61(codex 现场):sync 栈无 WS 事件流,argv 权限投影 wire 段即投放
+    /// 证据——codex app-server 的 `default_mode_request_user_input` 是其
+    /// requestUserInput 审批通道的实名启用 flag(069ab065 先例:codex 结构化
+    /// 交互工具=requestUserInput),与 --allowedTools 族同为权限 wire 段。
+    #[test]
+    fn lcg_argv_carries_permission_wire_recognizes_codex_request_user_input_channel() {
+        // codex-5 现场 argv(审计 provider_start 原形)。
+        let codex_argv = vec![
+            "app-server".to_string(),
+            "--enable".to_string(),
+            "default_mode_request_user_input".to_string(),
+        ];
+        assert!(
+            argv_carries_permission_wire(&codex_argv),
+            "codex requestUserInput 通道 flag 是权限 wire 实名段"
+        );
+        // 既有 token 族不回归。
+        let pi_argv = vec![
+            "--mode".to_string(),
+            "rpc".to_string(),
+            "--exclude-tools".to_string(),
+            "edit,write".to_string(),
+        ];
+        assert!(argv_carries_permission_wire(&pi_argv));
+        // 无权限语义的普通 flag 不计入(判据不降低)。
+        let plain = vec!["--mode".to_string(), "rpc".to_string()];
+        assert!(!argv_carries_permission_wire(&plain));
+        let unrelated_enable = vec![
+            "--enable".to_string(),
+            "some_other_feature".to_string(),
+        ];
+        assert!(
+            !argv_carries_permission_wire(&unrelated_enable),
+            "非审批通道的 --enable 值不得计入"
+        );
     }
 }
 
