@@ -2533,8 +2533,12 @@ impl MatrixEnvironment {
                 .denied_cell("plan fresh 未达 SC 人工门(无干净的同连接会话可供门上修订)".to_string());
         };
         observation.workspace_session_id = session_id.to_string();
+        // r52(#2 收口):请求基准必须与修订 turn 实际携带的 resume id 同源
+        //——author 面(work_item_splitter)最新审计。role 不过滤会读到
+        // fresh 轮 cross-review reviewer 的 id(r52 现场:请求 7d13=
+        // reviewer,修订实际 --resume 0e97=author,native 同 0e97)。
         observation.requested_resume_id =
-            self.latest_audit_native_id(session_id, &self.provider, None);
+            self.latest_audit_native_id(session_id, &self.provider, Some("work_item_splitter"));
         observation.frozen_digest = self.latest_audit_projection_digest(session_id, &self.provider);
 
         // ---- 阶段 1:typed feedback 修订 → 泵至 human_gate_turn_completed ----
@@ -3283,6 +3287,10 @@ impl MatrixEnvironment {
         let mut gate_response_failures: std::collections::BTreeMap<String, (u32, String)> =
             std::collections::BTreeMap::new();
         let mut last_gate_response: Option<(String, String)> = None;
+        // r52(#2):awaiting_manual_recovery 有界恢复(一次 recover_coding,
+        // 同态重现即落格)与最近协议错误留痕。
+        let mut recovery_seen = 0u32;
+        let mut last_protocol_error: Option<String> = None;
         let deadline = tokio::time::Instant::now() + self.stage_timeout;
         let mut idle_deadline = tokio::time::Instant::now() + IDLE_PING_SECS;
         let coding_started = std::time::Instant::now();
@@ -3394,6 +3402,14 @@ impl MatrixEnvironment {
                     // durable Blocked 态与 role run 落定);同门第 2 次失败
                     // 即有界落格,不空转到阶段超时。
                     let code = message.get("code").and_then(Value::as_str).unwrap_or_default();
+                    // r52(#2):恢复态落格的最近错误留痕。
+                    last_protocol_error = Some(
+                        message
+                            .get("message")
+                            .and_then(Value::as_str)
+                            .unwrap_or(code)
+                            .to_string(),
+                    );
                     if code != "coding_gate_response_failed" {
                         continue;
                     }
@@ -3454,6 +3470,33 @@ impl MatrixEnvironment {
                                 observation.run_failure =
                                     Some(format!("coding attempt 终态 {status}"));
                                 return outcome;
+                            }
+                            // r52(#2 新层):awaiting_manual_recovery(F-16 恢复态,
+                            // 唯一非 Abort 放行动作=recover_coding)。r52 现场
+                            // 22:54 review round 2 完成后 cross_target_delivery_
+                            // blocked(cross_target_violation_detected)进入本态,
+                            // 无门帧。按 v1.2 §5.2 先例:发一次 recover_coding
+                            // (admission CAS 回 Running+重启 runner);同态第 2
+                            // 次出现=恢复无效,有界落格(真实报告,不空转)。
+                            "awaiting_manual_recovery" => {
+                                recovery_seen += 1;
+                                if recovery_seen >= 2 {
+                                    observation.terminal_status =
+                                        Some(status.to_string());
+                                    observation.run_failure = Some(format!(
+                                        "coding awaiting_manual_recovery 恢复无效(第 {recovery_seen} 次;上次错误={})",
+                                        last_protocol_error.clone().unwrap_or_default()
+                                    ));
+                                    fp(
+                                        "coding_pump_recovery_unrecoverable",
+                                        format_args!("last_error={}", last_protocol_error.clone().unwrap_or_default()),
+                                    );
+                                    return outcome;
+                                }
+                                fp("coding_pump_recovery_recover_coding", "attempt=1");
+                                let _ = ws
+                                    .send_json(&json!({"type": "recover_coding"}))
+                                    .await;
                             }
                             _ => {}
                         }
