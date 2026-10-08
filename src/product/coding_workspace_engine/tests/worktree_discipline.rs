@@ -232,6 +232,19 @@ fn assert_worktree_discipline(prompt: &str, worktree: &std::path::Path) {
         "纪律段必须声明交付门整轮作废后果:\n{}",
         prompt
     );
+    // F3(r58 深掏审计):push 纪律句必须随纪律段注入 coder/reviewer 全族
+    // 实际 prompt——交付 push 的权威执行面是产品进程(codex/kimi 沙箱内
+    // bare origin 不可达,coder 自 push 失败会自判任务失败/重试空转)。
+    assert!(
+        prompt.contains("git push 由平台执行"),
+        "纪律段必须声明 git push 由平台执行:\n{}",
+        prompt
+    );
+    assert!(
+        prompt.contains("禁止手动执行 git push"),
+        "纪律段必须携带手动 git push 禁令:\n{}",
+        prompt
+    );
 }
 
 #[tokio::test]

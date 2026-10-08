@@ -492,7 +492,8 @@ pub(crate) fn worktree_discipline_section(worktree_path: &std::path::Path) -> St
         "\n[worktree_discipline]\n\
          - 你的工作区是且只是隔离 worktree：{path}。所有文件修改、git add/commit 等版本操作、构建与测试命令（cargo 等）都必须在 {path} 内执行；任务材料或验证命令中的成员相对路径（例如 cd alpha）一律解析为 {path} 内的对应目录。\n\
          - 禁止在任何成员主 checkout（聚合根下各成员仓的主工作区）执行写操作、git mutation 或构建/测试命令；只读审查角色需要复跑验证命令时，同样只允许在隔离 worktree 内执行。\n\
-         - 存在 cross_target 交付门：违反以上纪律会使本轮交付整轮作废（cross_target_violation）。发现成员主 checkout 存在本任务无法解释的改动时，保留原样并在报告中报告，不得清理或提交。\n",
+         - 存在 cross_target 交付门：违反以上纪律会使本轮交付整轮作废（cross_target_violation）。发现成员主 checkout 存在本任务无法解释的改动时，保留原样并在报告中报告，不得清理或提交。\n\
+         - git push 由平台执行，禁止手动执行 git push（任何形式，含 --force 变体）；未执行 push 或 push 失败不算任务失败，交付分支的远端推送与对账由平台统一完成，不要为此重试或报告失败。\n",
         path = worktree_path.display()
     )
 }
@@ -844,6 +845,18 @@ mod tests {
         assert!(
             section.contains("cross_target_violation"),
             "纪律段第三句必须声明交付门整轮作废后果:\n{section}"
+        );
+        // F3(r58 深掏审计):push 纪律句——交付链的权威 push 在产品进程
+        //(codex/kimi 沙箱内 bare origin 不可达,coder 自 push 失败会自判
+        // 任务失败/重试空转烧格);纪律段必须显式声明 push 由平台执行,
+        // 消除沙箱内 AI 自 push 的失败方差。
+        assert!(
+            section.contains("git push 由平台执行"),
+            "纪律段必须声明 git push 由平台执行:\n{section}"
+        );
+        assert!(
+            section.contains("禁止手动执行 git push"),
+            "纪律段必须携带手动 git push 禁令:\n{section}"
         );
     }
 
