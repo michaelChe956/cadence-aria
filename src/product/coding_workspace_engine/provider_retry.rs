@@ -456,6 +456,12 @@ impl CodingWorkspaceEngine {
                     .await?
                 }
             };
+            // r54 越界根修:LC attempt 的 reviewer prompt 同样硬钉 worktree
+            // 纪律段——r54 现场 reviewer 复跑验证命令落在成员主 checkout
+            //(alpha ?? target/ 工件贡献者);只追加,终端契约仍收尾。
+            if attempt.target_snapshot.is_some() {
+                prompt.push_str(&worktree_discipline_section(worktree_path));
+            }
             if !prompt.ends_with(&terminal_contract) {
                 prompt.push_str(&terminal_contract);
             }

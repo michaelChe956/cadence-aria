@@ -575,6 +575,7 @@ mod sc_group_admission_isolation;
 mod sc_group_dependency_gate;
 
 mod schema_v2_runtime;
+mod worktree_discipline;
 
 #[tokio::test]
 async fn start_attempt_enters_running_through_admission_ticket() {

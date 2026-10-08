@@ -205,6 +205,13 @@ impl CodingWorkspaceEngine {
             ));
         }
         full_prompt.push_str(&forced_replay_section);
+        // r54 越界根修:LC attempt(target_snapshot 在场,与 cross_target_check
+        // 同口径)的 coder prompt 硬钉 worktree 纪律段(见
+        // worktree_discipline_section 文档);legacy 单仓 cwd 本就在 worktree,
+        // 零变化。
+        if attempt.target_snapshot.is_some() {
+            full_prompt.push_str(&worktree_discipline_section(worktree_path));
+        }
         let prompt_mode = if rendered_context.is_some() || resume_provider_session_id.is_none() {
             CodingPromptMode::FullConversation
         } else {
@@ -221,6 +228,11 @@ impl CodingWorkspaceEngine {
                     &routing_context,
                 );
                 delta.push_str(&forced_replay_section);
+                // r54 越界根修:delta-only resume 轮同样必须携带纪律段
+                //(oracle 裁决:delta/rework 变体必带禁线)。
+                if attempt.target_snapshot.is_some() {
+                    delta.push_str(&worktree_discipline_section(worktree_path));
+                }
                 delta
             }
         };

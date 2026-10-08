@@ -404,6 +404,7 @@ pub(crate) fn code_review_material_protocol(context: &RoutingReferenceContext) -
      - WorkItemGroup 当前 Unit 的 completion commit 与 HandoffRevision 在 Code Review approve 后才生成；Code Review 前为空是正常状态，不得据此创建 finding、request_changes 或 blocked。\n\
      - Code Review 阶段应以 Coder completion report、raw/artifact refs、实际测试输出和当前 Unit diff 判断验证证据；真正缺失或自相矛盾的 required verification evidence 仍必须记录。\n\
      - 不得重复执行 required verification commands；除非证据缺失、证据自相矛盾或用户/Work Item 明确要求 reviewer 复跑，否则只基于 CoderEvidencePack、diff 和任务材料判断。\n\
+     - 复跑验证命令时必须在隔离 worktree 内执行（以 worktree 纪律段钉定的绝对路径为准）；禁止在任何成员主 checkout 执行验证、构建或测试命令（cargo 等）或任何写操作/git mutation。\n\
      - 必须审查 diff 是否满足 Work Item 的实现目标、写入范围、禁止范围、验证计划、自检要求和交接契约。\n\
      - 如果 coder 报告或 EvaluationContextPack 中缺少 required 验证命令的执行证据，必须作为 finding 记录；若该证据是完成本 Work Item 的必要条件，verdict 应为 request_changes 或 blocked。\n\
      - 待人工处理事项不是缺陷：required_evidence 含 manual_check 的验收标准、以及只有 manual_instruction 而无 command 的检查，由人工在流程末端确认。coder 如实登记这些事项即为正确交付，不得因其“尚未验证”创建 finding、给出 request_changes 或 blocked；缺少浏览器等人工环境同理。\n\
@@ -473,6 +474,27 @@ pub(crate) fn cross_repo_evidence_section() -> String {
      - 预算规则: 收到 429 即停止查询（attempt 累计配额已耗尽）。\n\
      - 只允许通过上述脚本读取 `.aria/evidence-token` 令牌并查询证据；不得触碰 `.aria/evidence-token` 以外的机制（不得改写令牌文件、端口文件或 Aria 内部分区）。\n"
         .to_string()
+}
+
+/// r54 越界根修(Ruling 11 A 面 prompt 纪律,oracle 定性 2026-10-08):
+/// LC attempt 的 coder/reviewer 会话 spawn cwd=authority root(聚合根,
+/// REQ-ENV-10 冻结合同,claude_code_provider/mod.rs:1300-1312),隔离 worktree
+/// 只经 launch target/writable_roots 表达;组路径渲染 envelope 又不携带
+/// 「Worktree Path」行(build_coding_prompt 被绕过)——r54 现场 coder 依计划
+/// 验证命令「cd alpha」落入成员主 checkout 提交+构建,触发
+/// cross_target_violation(r53 同环境 AI 自行导航正确=方差,Ruling 11 系统性
+/// 消除)。本段以绝对路径硬钉唯一工作区+成员主 checkout 负边界禁线+交付门
+/// 整轮作废后果,注入 coder fresh/delta/rework 与 reviewer 全族实际 prompt
+/// (装配点:coding.rs/rework.rs/provider_retry.rs,LC attempt 才注入,与
+/// cross_target_check.rs 检测口径一致;legacy 单仓 cwd 本就在 worktree,零变化)。
+pub(crate) fn worktree_discipline_section(worktree_path: &std::path::Path) -> String {
+    format!(
+        "\n[worktree_discipline]\n\
+         - 你的工作区是且只是隔离 worktree：{path}。所有文件修改、git add/commit 等版本操作、构建与测试命令（cargo 等）都必须在 {path} 内执行；任务材料或验证命令中的成员相对路径（例如 cd alpha）一律解析为 {path} 内的对应目录。\n\
+         - 禁止在任何成员主 checkout（聚合根下各成员仓的主工作区）执行写操作、git mutation 或构建/测试命令；只读审查角色需要复跑验证命令时，同样只允许在隔离 worktree 内执行。\n\
+         - 存在 cross_target 交付门：违反以上纪律会使本轮交付整轮作废（cross_target_violation）。发现成员主 checkout 存在本任务无法解释的改动时，保留原样并在报告中报告，不得清理或提交。\n",
+        path = worktree_path.display()
+    )
 }
 
 pub(crate) fn append_coding_context_notes(
@@ -790,5 +812,56 @@ mod tests {
     #[test]
     fn group_final_review_material_protocol_logical_carries_policy_ref() {
         assert_logical_policy_ref(&group_final_review_material_protocol(&logical_context()));
+    }
+
+    /// r54 越界根修(Ruling 11 A 面)单测:纪律段文本契约——绝对路径唯一
+    /// 工作区+成员主 checkout 负边界禁线+交付门整轮作废后果三句齐全。
+    #[test]
+    fn worktree_discipline_section_pins_absolute_path_and_negative_boundaries() {
+        let worktree =
+            std::path::Path::new("/run/aggregate-root/alpha/.worktrees/aria-issues/issue_0001");
+        let section = worktree_discipline_section(worktree);
+        assert!(
+            section.starts_with("\n[worktree_discipline]\n"),
+            "纪律段必须以固定锚点开头:\n{section}"
+        );
+        assert!(
+            section.contains("/run/aggregate-root/alpha/.worktrees/aria-issues/issue_0001"),
+            "纪律段必须携带隔离 worktree 绝对路径(r54 现场唯一缺失锚):\n{section}"
+        );
+        assert!(
+            section.contains("是且只是隔离 worktree"),
+            "纪律段第一句必须显式钉唯一工作区:\n{section}"
+        );
+        assert!(
+            section.contains("禁止在任何成员主 checkout"),
+            "纪律段第二句必须携带成员主 checkout 负边界禁线:\n{section}"
+        );
+        assert!(
+            section.contains("git mutation"),
+            "禁线必须覆盖 git mutation(git commit 不走 Write 工具):\n{section}"
+        );
+        assert!(
+            section.contains("cross_target_violation"),
+            "纪律段第三句必须声明交付门整轮作废后果:\n{section}"
+        );
+    }
+
+    /// r54 越界根修 reviewer 侧对偶断言:复跑口(prompts.rs 原「证据缺失可
+    /// 复跑」行)收口为「只在隔离 worktree 内复跑+成员主 checkout 禁令」,
+    /// legacy 与 logical 两分支同文。
+    #[test]
+    fn code_review_material_protocol_reviewer_rerun_scoped_to_worktree() {
+        for context in [RoutingReferenceContext::Legacy, logical_context()] {
+            let protocol = code_review_material_protocol(&context);
+            assert!(
+                protocol.contains("复跑验证命令时必须在隔离 worktree 内执行"),
+                "reviewer 复跑口必须收口到 worktree:\n{protocol}"
+            );
+            assert!(
+                protocol.contains("禁止在任何成员主 checkout 执行验证、构建或测试命令"),
+                "reviewer 复跑口必须携带成员主 checkout 禁令:\n{protocol}"
+            );
+        }
     }
 }

@@ -195,7 +195,7 @@ fn build_gateway(paths: &ProductAppPaths, project_id: &str) -> LogicalCodebasePr
 
 /// 用注入的 registry 与 audit 组装 gateway,供 engine 级测试注册 fake streaming
 /// adapter 并断言 `GatewayRunAudit` 的 Stream 启动计数。
-fn build_gateway_with_registry(
+pub(super) fn build_gateway_with_registry(
     paths: &ProductAppPaths,
     project_id: &str,
     registry: Arc<ProviderRegistry>,
@@ -259,7 +259,10 @@ fn with_target_snapshot(
 
 /// Task 7 专用:为逻辑 attempt 播种 LogicalCodebaseStore 的 manifest 与主 checkout,
 /// 使 provider run 启动前的跨仓越界 baseline 采集(Task 14)能成功。
-fn seed_logical_codebase_checkout(store: &CodingAttemptStore, attempt: &CodingExecutionAttempt) {
+pub(super) fn seed_logical_codebase_checkout(
+    store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+) {
     let logical_store = LogicalCodebaseStore::new(store.paths());
     let repository_id = LogicalRepositoryId(uuid::Uuid::nil());
     let worktree = attempt.worktree_path.clone().expect("worktree");
@@ -320,7 +323,7 @@ fn seed_logical_codebase_checkout(store: &CodingAttemptStore, attempt: &CodingEx
         .expect("save checkout");
 }
 
-fn engine(
+pub(super) fn engine(
     store: &CodingAttemptStore,
     gateway: Option<LogicalCodebaseProviderGateway>,
 ) -> CodingWorkspaceEngine {

@@ -214,6 +214,11 @@ impl CodingWorkspaceEngine {
         // 强制回放段进实际 prompt 与 fresh prompt 各恰一次（认领绑定实际
         // prompt 全文，含强制回放内容）。
         full_prompt.push_str(&forced_replay_section);
+        // r54 越界根修:LC attempt 的 rework coder prompt 硬钉 worktree 纪律段
+        //(同 coding.rs;oracle 裁决 delta/rework 变体必带禁线)。
+        if updated.target_snapshot.is_some() {
+            full_prompt.push_str(&worktree_discipline_section(&worktree_path));
+        }
         let prompt_mode = if rendered_context.is_some() || resume_provider_session_id.is_none() {
             CodingPromptMode::FullConversation
         } else {
@@ -223,6 +228,9 @@ impl CodingWorkspaceEngine {
             CodingPromptMode::FullConversation => full_prompt.clone(),
             CodingPromptMode::DeltaOnly => {
                 delta_prompt.push_str(&forced_replay_section);
+                if updated.target_snapshot.is_some() {
+                    delta_prompt.push_str(&worktree_discipline_section(&worktree_path));
+                }
                 delta_prompt
             }
         };
