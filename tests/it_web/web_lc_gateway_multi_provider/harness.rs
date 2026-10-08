@@ -667,6 +667,9 @@ struct MatrixEnvironment {
     _root: Option<TempDir>,
     /// 真实聚合根(canonical root;两成员 git 仓)。
     _aggregate_root: Option<TempDir>,
+    /// r55:成员仓本地 bare origin 根(每轮 tempdir;持活至 env drop——
+    /// coding 交付链 push/ls-remote 需远端在本轮内存续)。
+    _bare_origin_root: Option<TempDir>,
     app: axum::Router,
     _server: tokio::task::JoinHandle<()>,
     ws_addr: SocketAddr,
@@ -772,6 +775,7 @@ impl MatrixEnvironment {
             provider_wire,
             _root: None,
             _aggregate_root: None,
+            _bare_origin_root: None,
             app: http_app,
             _server: server,
             ws_addr,
@@ -832,6 +836,34 @@ impl MatrixEnvironment {
                 None,
             ));
         }
+        // r55 修复:resume 轮 env 准备收尾——回灌后的 run 树成员仓补齐
+        // 本地 bare origin(coding 交付链 push/ls-remote 的 remote=origin
+        // 契约)。置于 pristine 校验/diff 门禁/成员 HEAD 复核全部通过之后:
+        // 只动 run 树 `.git` 配面(pristine 不触;tree_digest 跳过 .git,
+        // 后续轮 digest/HEAD 复核不受影响);pristine 可能携带 capture
+        // 轮陈旧 origin URL,ensure 以 set-url 收敛到本轮 bare(tempdir
+        // 随 env 持活,轮内 push 可达)。承继格(story/design/plan/split)
+        // 不涉 push,不受影响。
+        let bare_origin_root = TempDir::new().expect("bare origin root");
+        for member in ["alpha", "beta"] {
+            ensure_member_bare_origin(
+                bare_origin_root.path(),
+                &env.aggregate_root_path().join(member),
+            );
+        }
+        env._bare_origin_root = Some(bare_origin_root);
+        fp(
+            "member_bare_origin_ensured",
+            format_args!(
+                "snapshot={} bare_root={}",
+                env.snapshot_id.as_deref().unwrap_or("-"),
+                env._bare_origin_root
+                    .as_ref()
+                    .expect("bare origin root")
+                    .path()
+                    .display()
+            ),
+        );
         Ok(env)
     }
 
@@ -949,6 +981,20 @@ impl MatrixEnvironment {
             "pub fn cross_repo_greeting() -> &'static str { \"beta\" }",
         );
 
+        // r55 修复:建仓即配本地 bare origin——coding 交付链(commit→
+        // push→ls-remote)按真实部署假设消费 remote=origin;夹具此前
+        // git init 无 remote,r55 coder 守纪律走完 commit→push 后
+        // ls-remote fatal。bare 落 harness 自有 tempdir(不进 run/
+        // pristine 树);capture 轮 pristine 会携带本 tempdir URL,
+        // resume 轮 ensure 以 set-url 收敛(幂等)。
+        let bare_origin_root = TempDir::new().expect("bare origin root");
+        ensure_member_bare_origin(bare_origin_root.path(), &member_a);
+        ensure_member_bare_origin(bare_origin_root.path(), &member_b);
+        fp(
+            "member_bare_origin_ensured",
+            format_args!("bare_root={}", bare_origin_root.path().display()),
+        );
+
         let app_paths = ProductAppPaths::new(workspace_root_path.join(".aria"));
         let lifecycle = LifecycleStore::new(app_paths.clone());
         let app = build_web_router(state);
@@ -973,6 +1019,7 @@ impl MatrixEnvironment {
             provider_wire,
             _root: root,
             _aggregate_root: aggregate_root,
+            _bare_origin_root: Some(bare_origin_root),
             app: http_app,
             _server: server,
             ws_addr,
@@ -4601,6 +4648,57 @@ fn git_repo_at(path: &Path) {
     run_git(path, &["config", "user.name", "Test User"]);
 }
 
+/// r55:成员仓 `<bare_root>/<member>.git` 本地 bare 路径。
+fn member_bare_path(bare_root: &Path, member: &str) -> PathBuf {
+    bare_root.join(format!("{member}.git"))
+}
+
+/// 仓库 remote URL(None=remote 未配置/命令失败同形)。
+fn git_remote_url(path: &Path, remote: &str) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["remote", "get-url", remote])
+        .current_dir(path)
+        .output()
+        .ok()?;
+    if output.status.success() {
+        Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        None
+    }
+}
+
+/// r55 夹具缺口修复:为成员仓收敛配置本地 bare origin——coding 交付链
+///(commit→push→ls-remote)按真实部署假设消费 remote=origin
+///(execute_review_request 入参/reconcile.git_remote_branch_head);无
+/// origin 时 push/ls-remote fatal,产品 fail-closed 符合设计,夹具侧
+/// 补齐真实远端。幂等收敛:remote 缺失→add;URL 漂移→set-url(resume
+/// 轮 pristine 回灌携带 capture 轮已销毁 tempdir 的陈旧 URL);已一致
+/// →不动。bare 缺失才 init(重复 init 亦无害,但保持确定性)。
+/// 返回 bare 仓库路径。只动成员仓 `.git` 配面(tree_digest 跳过 .git,
+/// 不影响 pristine digest/HEAD 复核)。
+fn ensure_member_bare_origin(bare_root: &Path, member_checkout: &Path) -> PathBuf {
+    let member = member_checkout
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("member checkout dir name");
+    let bare = member_bare_path(bare_root, member);
+    if !bare.join("HEAD").exists() {
+        std::fs::create_dir_all(&bare).expect("create member bare dir");
+        run_git(&bare, &["init", "-q", "--bare"]);
+    }
+    let desired = bare
+        .canonicalize()
+        .expect("canonicalize member bare")
+        .to_string_lossy()
+        .to_string();
+    match git_remote_url(member_checkout, "origin") {
+        Some(url) if url == desired => {}
+        Some(_) => run_git(member_checkout, &["remote", "set-url", "origin", &desired]),
+        None => run_git(member_checkout, &["remote", "add", "origin", &desired]),
+    }
+    bare
+}
+
 fn run_git(path: &Path, arguments: &[&str]) {
     let status = std::process::Command::new("git")
         .args(arguments)
@@ -5395,5 +5493,157 @@ mod pump_disposition_tests {
         let genuine = "plan SC 门服务端错误帧收口(kind=error):{\"message\": \"validator findings: [error] requirement_not_found\"}";
         assert!(!plan_confirm_failure_is_recoverable(genuine));
     }
+}
 
+/// r55 夹具缺口修复面:成员仓本地 bare origin。coding 交付链
+///(commit→push→ls-remote)的 remote=origin 硬契约
+///(internal_pr_review execute_review_request/reconcile.rs git_remote_branch_head)
+/// 需要真实可推送远端;无 origin 时 push/ls-remote fatal(r55 死点)。
+mod member_bare_origin_tests {
+    use super::*;
+
+    fn member_repo(parent: &Path, name: &str) -> PathBuf {
+        let path = parent.join(name);
+        git_repo_at(&path);
+        commit(&path, "seed");
+        path
+    }
+
+    fn canonical_bare_url(bare_root: &Path, member: &str) -> String {
+        member_bare_path(bare_root, member)
+            .canonicalize()
+            .expect("canonicalize bare")
+            .to_string_lossy()
+            .to_string()
+    }
+
+    /// 幂等:首次 ensure 配 origin 指向本地 bare;重复 ensure 不改 URL。
+    #[test]
+    fn lcg_member_bare_origin_ensure_is_idempotent() {
+        let aggregate = tempfile::tempdir().expect("aggregate dir");
+        let alpha = member_repo(aggregate.path(), "alpha");
+        let bare_root = tempfile::tempdir().expect("bare root");
+
+        assert!(
+            git_remote_url(&alpha, "origin").is_none(),
+            "建仓时无 origin(git_repo_at 不配 remote)"
+        );
+        ensure_member_bare_origin(bare_root.path(), &alpha);
+        assert_eq!(
+            git_remote_url(&alpha, "origin").as_deref(),
+            Some(canonical_bare_url(bare_root.path(), "alpha").as_str())
+        );
+
+        // 幂等:同 bare 重复 ensure 后 URL 原样(bare 不重建、remote 不重配)。
+        ensure_member_bare_origin(bare_root.path(), &alpha);
+        assert_eq!(
+            git_remote_url(&alpha, "origin").as_deref(),
+            Some(canonical_bare_url(bare_root.path(), "alpha").as_str())
+        );
+    }
+
+    /// resume 轮形态:pristine 回灌携带 capture 轮陈旧 origin URL(tempdir
+    /// 已销毁)→ensure 以 set-url 收敛到本轮 bare,而非「存在即跳过」。
+    #[test]
+    fn lcg_member_bare_origin_ensure_converges_stale_url() {
+        let aggregate = tempfile::tempdir().expect("aggregate dir");
+        let alpha = member_repo(aggregate.path(), "alpha");
+        let capture_bare = tempfile::tempdir().expect("capture bare");
+        ensure_member_bare_origin(capture_bare.path(), &alpha);
+        drop(capture_bare);
+
+        let resume_bare = tempfile::tempdir().expect("resume bare");
+        ensure_member_bare_origin(resume_bare.path(), &alpha);
+        assert_eq!(
+            git_remote_url(&alpha, "origin").as_deref(),
+            Some(canonical_bare_url(resume_bare.path(), "alpha").as_str()),
+            "陈旧 URL 必须被收敛到本轮 bare(resume 可续跑)"
+        );
+    }
+
+    /// r55 死点端到端复原:产品在主 checkout 挂隔离 worktree
+    ///(SAFE_WORKTREE_PREFIXES 形态)→coder 在 worktree commit→push
+    /// origin <branch>→产品同形 ls-remote 读到远端头=本地提交
+    ///(finish_nonzero_review_push 的 Pushed 判定输入)。
+    #[test]
+    fn lcg_member_bare_origin_worktree_push_then_ls_remote_reads_head() {
+        let aggregate = tempfile::tempdir().expect("aggregate dir");
+        let alpha = member_repo(aggregate.path(), "alpha");
+        let bare_root = tempfile::tempdir().expect("bare root");
+        ensure_member_bare_origin(bare_root.path(), &alpha);
+
+        // 产品同形嵌套 worktree:主 checkout 下 .worktrees/aria-issues/<issue>。
+        let worktree = alpha
+            .join(".worktrees")
+            .join("aria-issues")
+            .join("issue_0001");
+        run_git(
+            &alpha,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                worktree.to_string_lossy().as_ref(),
+                "-b",
+                "aria/issues/issue_0001",
+            ],
+        );
+        assert_eq!(
+            git_remote_url(&worktree, "origin"),
+            git_remote_url(&alpha, "origin"),
+            "隔离 worktree 必须共享主 checkout 的 origin 配置(remotes 在公共 config)"
+        );
+
+        // 推送前:产品 ls-remote 同形命令输出为空(Ok(None)=未推送,
+        // 不再是 r55 的 fatal)。
+        let ls_remote = |cwd: &Path| {
+            let output = std::process::Command::new("git")
+                .args([
+                    "ls-remote",
+                    "--heads",
+                    "origin",
+                    "refs/heads/aria/issues/issue_0001",
+                ])
+                .current_dir(cwd)
+                .output()
+                .expect("ls-remote spawn");
+            assert!(
+                output.status.success(),
+                "ls-remote 必须可用:{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        assert_eq!(ls_remote(&worktree), "", "推送前远端分支不存在");
+
+        // coder 交付形态:worktree 内提交并 push origin <branch>。
+        std::fs::write(worktree.join("lib.rs"), "pub fn delivered() -> u8 { 1 }")
+            .expect("write worktree change");
+        run_git(&worktree, &["add", "."]);
+        run_git(
+            &worktree,
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "-m",
+                "feat: deliver",
+            ],
+        );
+        run_git(
+            &worktree,
+            &["push", "-q", "origin", "aria/issues/issue_0001"],
+        );
+
+        let head = git_head(&worktree).expect("worktree head");
+        let remote_line = ls_remote(&worktree);
+        assert_eq!(
+            remote_line.split_whitespace().next().unwrap_or_default(),
+            head,
+            "push 后 ls-remote 远端头必须等于本地提交(Pushed 判定可达成)"
+        );
+    }
 }
