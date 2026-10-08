@@ -2628,8 +2628,9 @@ impl MatrixEnvironment {
             .flatten();
         cells.push(observation.build_cell(self));
 
-        // ---- resume:SC 门 typed feedback 修订 → 回门 → typed confirm 定稿
-        //(work item 落库),同连接(与实体阶段同模型)----
+        // ---- resume:SC 门 typed feedback 修订 → 复评/修复循环回门(门帧
+        // 驱动,r58)→ typed confirm 定稿(work item 落库),同连接(与实体
+        // 阶段同模型)----
         let resume = self.drive_plan_sc_gate_resume(&session_id, gate_ws).await;
         cells.push(resume);
         // Plan confirmed 后解析 work item(coding 前置;r26:从 resume
@@ -2699,8 +2700,9 @@ impl MatrixEnvironment {
     /// typed 三命令:request_revision 不放行(r25 现场
     /// WORK_ITEM_PLAN_HUMAN_GATE_STAGE_INVALID)。修订入口 =
     /// `human_gate_feedback`(开门 turn→HumanGateScManualRevision run→
-    /// `human_gate_turn_completed` 回门),定稿入口 = typed `confirm`
-    ///(approve→compile→durable Confirmed+子 WorkItem 落库)。
+    /// `human_gate_turn_completed` 回门→r58 起复评/修复循环后门重开),
+    /// 定稿入口 = typed `confirm`(approve→compile→durable Confirmed+
+    /// 子 WorkItem 落库;confirm 只在 human_confirm 放行,门帧驱动)。
     /// 在 fresh 轮保留下来的同一条连接上驱动(SC 门快照/引擎内存态保持)。
     async fn drive_plan_sc_gate_resume(
         &mut self,
@@ -2759,7 +2761,26 @@ impl MatrixEnvironment {
         if !revision_done {
             return observation.build_cell(self);
         }
-        // ---- 阶段 2:typed confirm → 泵至终态(stage completed/confirmed)。
+        // ---- 阶段 2(r58 根修):等 SC 门重开(stage_change human_confirm)
+        // 才发 confirm。修订回门 ≠ 门开:产品合法走复评/修复循环(r58 现场
+        // reviewer 判修订版仍有缺陷→repairs_used=1/1 自动返修→再复评,全程
+        // stage=cross_review),confirm 仅在 human_confirm 放行(protocol.rs
+        // SC 矩阵)。旧定时发送=赌复评恰好在 confirm 被处理前回门:r57b
+        // 赌赢(confirm 排队 3min13s 后门开才被处理),r58 赌输(INVALID_
+        // MESSAGE_FOR_STAGE: confirm not allowed in stage cross_review)。
+        // 门帧驱动:期间 choice 语义应答/心跳照常,确定终态秒收口,阶段
+        // 超时兜底(有界,不空转)。
+        let gate_open = self
+            .pump_plan_sc_phase(
+                &mut ws,
+                &mut observation,
+                PlanScPumpPhase::AwaitConfirmGate,
+            )
+            .await;
+        if !gate_open {
+            return observation.build_cell(self);
+        }
+        // ---- 阶段 3:typed confirm → 泵至终态(stage completed/confirmed)。
         // r34:v1.1 缺陷 #12 同族——首拍 approve 可撞 Final Compile
         // recovery_required(「single-candidate approval compile failed; human
         // gate remains open」)。按 v1.1 §5.1 先例续跑:发 WS
@@ -2865,10 +2886,13 @@ impl MatrixEnvironment {
         observation.build_cell(self)
     }
 
-    /// SC 门两阶段泵:AwaitRevisionComplete 等 `human_gate_turn_completed`
-    ///(回门信号);AwaitConfirmTerminal 等 stage_change completed /
+    /// SC 门三相位泵(r58 起门帧驱动):AwaitRevisionComplete 等
+    /// `human_gate_turn_completed`(修订轮回门信号);AwaitConfirmGate 等
+    /// `stage_change human_confirm`(复评/修复循环后门重开,confirm 合法
+    /// 窗口);AwaitConfirmTerminal 等 stage_change completed /
     /// session_state confirmed(定稿终态)。通用面:30s 心跳保活、choice
-    /// 语义应答、错误帧秒收口(r21 处置面)、阶段超时落 run_failure。
+    /// 语义应答、错误帧与确定终态秒收口(r21/r58 处置面)、阶段超时落
+    /// run_failure。
     async fn pump_plan_sc_phase(
         &self,
         ws: &mut LiveWs,
@@ -3540,7 +3564,9 @@ impl MatrixEnvironment {
             }
             match kind.as_str() {
                 "coding_gate_required" => {
-                    // 真实阶段门:以首个可用动作应答,不旁路产品决策面。
+                    // 真实阶段门:按门形状选语义动作应答(默认 [0];
+                    // r58 审计 F3:rework 上限门 [0]=provide_context 楔死,
+                    // 选 send_to_coder),不旁路产品决策面。
                     let gate_id = message
                         .pointer("/gate/id")
                         .or_else(|| message.pointer("/gate/gate_id"))
@@ -3554,11 +3580,7 @@ impl MatrixEnvironment {
                         .pointer("/gate/reason_code")
                         .and_then(Value::as_str)
                         .unwrap_or_default();
-                    let action_id = message
-                        .pointer("/gate/available_actions/0/action_id")
-                        .or_else(|| message.pointer("/gate/available_actions/0/id"))
-                        .and_then(Value::as_str)
-                        .unwrap_or_default();
+                    let action_id = coding_gate_action_id(&message);
                     // r45:blocked 门有界处理——blocked 态的重试动作救不回
                     // 配置类缺失(如 reviewer_configuration_missing,r44 现场
                     // retry_review 后门原样重开,泵空转 3600s×2)。同一
@@ -3648,11 +3670,25 @@ impl MatrixEnvironment {
                         observation.record_status(status);
                         fp("coding_pump_state", format_args!("status={status} events={events_seen}"));
                         match status {
-                            // F2:waiting_for_human 即阶段门就绪——确认成功并
-                            // 立即返回,不再烧满 stage_timeout。
+                            // r58 审计 F3:waiting_for_human 只有在终门
+                            //(stage=final_confirm 且无未决 blocked 门)才是
+                            // 确认成功——中途门(rework 上限楔死/choice 挂起/
+                            // 共享 worktree 脏)也落本态,一律记 Confirmed=
+                            // 终门未达也算过(假阳性 PASS);非终门继续泵
+                            //(门应答/终态/阶段超时兜底,有界)。
                             "waiting_for_human" => {
-                                outcome.artifact_confirmed = true;
-                                return outcome;
+                                if coding_waiting_human_confirms(&message) {
+                                    outcome.artifact_confirmed = true;
+                                    return outcome;
+                                }
+                                let stage = message
+                                    .get("stage")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default();
+                                fp(
+                                    "coding_pump_waiting_non_final",
+                                    format_args!("stage={stage}(终门未达,继续泵)"),
+                                );
                             }
                             "completed" | "confirmed" => {
                                 outcome.artifact_confirmed = true;
@@ -3693,6 +3729,30 @@ impl MatrixEnvironment {
                             }
                             _ => {}
                         }
+                    }
+                }
+                // r58 审计 F2:coding choice 帧(顶层 id/prompt/options 形态)
+                // ——coder/reviewer 提问即落 WaitingForHuman(gates.rs
+                // 321-335),无应答=provider 悬等烧满 stage_timeout。与
+                // workspace 泵同构:semantic_choice_answers 单题顶层形态
+                // 语义应答(coding 入站 choice_response 同名字段,其余
+                // 缺省),不旁路产品决策面。
+                "coding_choice_request" => {
+                    if let Some(choice_id) = message.get("id").and_then(Value::as_str) {
+                        let (answers, top_selected) = semantic_choice_answers(&message);
+                        fp(
+                            "coding_pump_choice_request",
+                            format_args!("id={choice_id} options={}", top_selected.join(",")),
+                        );
+                        let _ = ws
+                            .send_json(&json!({
+                                "type": "choice_response",
+                                "id": choice_id,
+                                "selected_option_ids": top_selected,
+                                "free_text": null,
+                                "answers": answers
+                            }))
+                            .await;
                     }
                 }
                 "coding_permission_request" | "permission_request" => {
@@ -4384,6 +4444,65 @@ fn frame_carries_artifact_markdown(kind: &str, message: &Value) -> bool {
     markdown.is_some_and(|text| !text.trim().is_empty())
 }
 
+/// r58 审计 F3-A:coding 门动作选择(纯函数,决策表可单测)。默认取
+/// available_actions[0]——triage/配置缺失/interrupted 门的 [0]=retry_*
+/// 即正确语义动作。唯一例外=rework 上限门(reason_code=
+/// reviewer_rework_limit_reached,动作序 [provide_context, send_to_coder,
+/// abort]):provide_context+null 上下文不建 note、不 resolve 门、不唤
+/// runner(blocked_gate.inc.rs 42-43/144-163,续跑白名单无 provide_
+/// context),恒取 [0]=attempt 楔死在开着的门+假阳性 PASS;选
+/// send_to_coder(findings 交 coder 真实重驱)。
+fn coding_gate_action_id(message: &Value) -> String {
+    let actions = message
+        .pointer("/gate/available_actions")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let action_id = |action: &Value| -> String {
+        action
+            .get("action_id")
+            .or_else(|| action.get("id"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let reason_code = message
+        .pointer("/gate/reason_code")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if reason_code == "reviewer_rework_limit_reached"
+        && let Some(action) = actions
+            .iter()
+            .find(|action| action_id(action) == "send_to_coder")
+    {
+        return action_id(action);
+    }
+    actions.first().map(action_id).unwrap_or_default()
+}
+
+/// r58 审计 F3-B:coding waiting_for_human 收口判据(纯函数,可单测)。
+/// coding 的确认成功语义=流程真实走完到终门(stage=final_confirm 的
+/// group 终门,确认入口=入站 final_confirm,socket.rs 613-649;矩阵
+/// 停门模型不发、停在门上)。中途门(rework 上限/choice 挂起/共享
+/// worktree 脏)同样落 waiting_for_human——一律记 Confirmed=终门未达
+/// 也算过(假阳性 PASS);终门上还压着未决 blocked 门(如 FinalConfirm
+/// 阶段开的 shared_worktree_dirty manual 门,gates.rs 362-392)同样
+/// 不可确认,继续泵走门应答/有界失败路径。
+fn coding_waiting_human_confirms(frame: &Value) -> bool {
+    let stage = frame.get("stage").and_then(Value::as_str).unwrap_or_default();
+    if stage != "final_confirm" {
+        return false;
+    }
+    !frame
+        .get("pending_gates")
+        .and_then(Value::as_array)
+        .is_some_and(|gates| {
+            gates
+                .iter()
+                .any(|gate| gate.get("kind").and_then(Value::as_str) == Some("blocked"))
+        })
+}
+
 /// r26 问题2:SC 门泵单帧信号决策(纯函数,决策表可单测)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PlanScFrameSignal {
@@ -4395,31 +4514,6 @@ enum PlanScFrameSignal {
     ServerError,
 }
 
-fn plan_sc_frame_signal(kind: &str, message: &Value, phase: PlanScPumpPhase) -> PlanScFrameSignal {
-    match kind {
-        "protocol_error" | "error" => PlanScFrameSignal::ServerError,
-        // r30 根修(r29 现场):修订 turn 的失败终态帧(validation_reject/
-        // provider_err)此前被 Listen——01:52:30 帧已到,泵空转到 03:21
-        // 阶段超时。turn 失败=该相位有界收口,帧原文落格。
-        "human_gate_turn_failed" => PlanScFrameSignal::ServerError,
-        "human_gate_turn_completed" if phase == PlanScPumpPhase::AwaitRevisionComplete => {
-            PlanScFrameSignal::PhaseDone
-        }
-        "stage_change" => {
-            let stage = message.get("stage").and_then(Value::as_str).unwrap_or("");
-            (phase == PlanScPumpPhase::AwaitConfirmTerminal && stage == "completed")
-                .then_some(PlanScFrameSignal::PhaseDone)
-                .unwrap_or(PlanScFrameSignal::Listen)
-        }
-        "session_state" => {
-            let status = message.get("status").and_then(Value::as_str).unwrap_or("");
-            (phase == PlanScPumpPhase::AwaitConfirmTerminal && status == "confirmed")
-                .then_some(PlanScFrameSignal::PhaseDone)
-                .unwrap_or(PlanScFrameSignal::Listen)
-        }
-        _ => PlanScFrameSignal::Listen,
-    }
-}
 
 /// 泵送单帧处置决策(r21 C1 根修提为纯函数,决策表可单测)。
 ///
@@ -4449,14 +4543,69 @@ enum PumpFrameDisposition {
     ServerError,
 }
 
-/// r26:SC plan 门 resume 的两阶段泵相位。
+/// r26:SC plan 门 resume 的泵相位;r58 起三相位(confirm 时序门帧驱动)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PlanScPumpPhase {
     /// 阶段 1:`human_gate_feedback` 修订轮,等 `human_gate_turn_completed`。
     AwaitRevisionComplete,
-    /// 阶段 2:typed `confirm` 定稿,等 stage_change completed /
+    /// 阶段 2(r58 根修):修订回门后等 SC 门重开(`stage_change
+    /// human_confirm`)。回门≠门开:产品合法走复评/修复循环(reviewer
+    /// 判缺陷→repair 预算内自动返修→再复评,r58 现场 repairs_used=1/1),
+    /// 全程 stage=cross_review——confirm 仅在 human_confirm 放行
+    /// (protocol.rs SC 矩阵),r57b 成功轮证明定时发送=赌复评恰好在
+    /// confirm 被处理前回门(排队 3min13s 赌赢;r58 赌输被矩阵拒)。
+    /// 门帧才是唯一可靠时序信号。
+    AwaitConfirmGate,
+    /// 阶段 3:typed `confirm` 定稿,等 stage_change completed /
     /// session_state confirmed。
     AwaitConfirmTerminal,
+}
+
+fn plan_sc_frame_signal(kind: &str, message: &Value, phase: PlanScPumpPhase) -> PlanScFrameSignal {
+    match kind {
+        "protocol_error" | "error" => PlanScFrameSignal::ServerError,
+        // r30 根修(r29 现场):修订 turn 的失败终态帧(validation_reject/
+        // provider_err)此前被 Listen——01:52:30 帧已到,泵空转到 03:21
+        // 阶段超时。turn 失败=该相位有界收口,帧原文落格。
+        "human_gate_turn_failed" => PlanScFrameSignal::ServerError,
+        "human_gate_turn_completed" if phase == PlanScPumpPhase::AwaitRevisionComplete => {
+            PlanScFrameSignal::PhaseDone
+        }
+        "stage_change" => {
+            let stage = message.get("stage").and_then(Value::as_str).unwrap_or("");
+            match (phase, stage) {
+                // r58 根修:门重开帧=confirm 合法窗口打开(r57b 09:34:23 帧
+                // 序:cross_review 复评完回 human_confirm,排队的 confirm 才
+                // 被处理;定时发送在 r58 撞 cross_review 被矩阵拒)。
+                (PlanScPumpPhase::AwaitConfirmGate, "human_confirm") => {
+                    PlanScFrameSignal::PhaseDone
+                }
+                (PlanScPumpPhase::AwaitConfirmTerminal, "completed") => {
+                    PlanScFrameSignal::PhaseDone
+                }
+                _ => PlanScFrameSignal::Listen,
+            }
+        }
+        "session_state" => {
+            let status = message.get("status").and_then(Value::as_str).unwrap_or("");
+            if phase == PlanScPumpPhase::AwaitConfirmTerminal && status == "confirmed" {
+                return PlanScFrameSignal::PhaseDone;
+            }
+            // r58 同族收口:确定失败终态任意相位秒收口——门可能永不再开
+            //(AbortFatal/预算尽=failed;StopNeedsHuman=stopped_needs_human
+            // 且 stage=completed 只放行 SC Advance),等下去只会空转到阶段
+            // 超时(r51 死门教训),终态帧原文落格。编译失败不在此列:
+            // recovery/门保持路径落 waiting_for_human(compile.rs 598-617)。
+            if matches!(
+                status,
+                "failed" | "terminated" | "blocked_provider_unavailable" | "stopped_needs_human"
+            ) {
+                return PlanScFrameSignal::ServerError;
+            }
+            PlanScFrameSignal::Listen
+        }
+        _ => PlanScFrameSignal::Listen,
+    }
 }
 
 fn pump_frame_disposition(
@@ -5732,6 +5881,191 @@ mod pump_disposition_tests {
             PlanScFrameSignal::ServerError
         );
     }
+    /// r58 回归锚点:SC 门 confirm 时序必须门帧驱动——修订轮回门后产品
+    /// 合法走复评/修复循环(r58 现场 repairs_used=1/1,全程 stage=
+    /// cross_review),confirm 只在 human_confirm 门重开帧后发。成功轮
+    /// r57b 帧序(09:31 confirm 发出排队 → cross_review 3min13s 复评 →
+    /// 09:34:23 human_confirm 门开 confirm 才被处理→running→completed)
+    /// 证明定时发送=赌复评恰好在 confirm 被处理前回门:r57b 赌赢,r58
+    /// 赌输被协议矩阵拒(INVALID_MESSAGE_FOR_STAGE)。
+    #[test]
+    fn lcg_plan_sc_gate_wait_signal_decision_table() {
+        let gate_wait = PlanScPumpPhase::AwaitConfirmGate;
+        // r57b 09:34:23.719 帧:门重开=门等相位完成,confirm 此后才合法。
+        let gate_open = json!({"type": "stage_change", "stage": "human_confirm"});
+        assert_eq!(
+            plan_sc_frame_signal("stage_change", &gate_open, gate_wait),
+            PlanScFrameSignal::PhaseDone
+        );
+        // r58 12:16:16.527 帧:复评/修复循环中的 cross_review 继续听。
+        let cross_review = json!({"type": "stage_change", "stage": "cross_review"});
+        assert_eq!(
+            plan_sc_frame_signal("stage_change", &cross_review, gate_wait),
+            PlanScFrameSignal::Listen
+        );
+        // 门未重开前任何其它阶段帧都不驱动 confirm。
+        let running = json!({"type": "stage_change", "stage": "running"});
+        assert_eq!(
+            plan_sc_frame_signal("stage_change", &running, gate_wait),
+            PlanScFrameSignal::Listen
+        );
+        let completed = json!({"type": "stage_change", "stage": "completed"});
+        assert_eq!(
+            plan_sc_frame_signal("stage_change", &completed, gate_wait),
+            PlanScFrameSignal::Listen
+        );
+        // 已消费过的回门信号在门等相位不重放。
+        let turn_completed = json!({"type": "human_gate_turn_completed", "turn_id": "t1"});
+        assert_eq!(
+            plan_sc_frame_signal("human_gate_turn_completed", &turn_completed, gate_wait),
+            PlanScFrameSignal::Listen
+        );
+        // 门开伴随的 waiting_for_human 不是门帧本身(r13:门以 stage_change
+        // 为准),继续听。
+        let waiting = json!({"type": "session_state", "status": "waiting_for_human"});
+        assert_eq!(
+            plan_sc_frame_signal("session_state", &waiting, gate_wait),
+            PlanScFrameSignal::Listen
+        );
+        // 门永不再开的确定终态秒收口(防 r51 死门式空转到阶段超时):
+        // AbortFatal/致命失败=session failed;StopNeedsHuman=stopped_needs_
+        // human 且 stage=completed(confirm 只放行 SC Advance)。repair
+        // 预算尽回 human_confirm 门(routing.rs 346-354)——门等相位正常
+        // 收口,不在终态列。
+        for status in [
+            "failed",
+            "terminated",
+            "blocked_provider_unavailable",
+            "stopped_needs_human",
+        ] {
+            let terminal = json!({"type": "session_state", "status": status});
+            assert_eq!(
+                plan_sc_frame_signal("session_state", &terminal, gate_wait),
+                PlanScFrameSignal::ServerError,
+                "status={status} 必须秒收口,不得空转"
+            );
+        }
+    }
+    /// r58 审计 F2 回归锚点:coding choice 帧(coding_choice_request,
+    /// protocol.rs 顶层 id/prompt/options 形态,无 questions)必须得到
+    /// 语义应答——semantic_choice_answers 的单题顶层形态天然兼容;
+    /// coder/reviewer 以 choice 提问即落 WaitingForHuman(gates.rs
+    /// 321-335),无应答=provider 悬等烧满 stage_timeout。
+    #[test]
+    fn lcg_coding_choice_frame_gets_semantic_answers() {
+        let frame = json!({
+            "type": "coding_choice_request",
+            "id": "choice_1",
+            "prompt": "review findings 如何处置",
+            "source": "reviewer",
+            "options": [
+                {"id": "opt_continue", "label": "继续修复", "description": "再跑一轮修复"},
+                {"id": "opt_stop", "label": "停止修复", "description": "放弃"}
+            ],
+            "allow_multiple": false,
+            "allow_free_text": false,
+        });
+        let (answers, top_selected) = semantic_choice_answers(&frame);
+        assert_eq!(
+            top_selected,
+            vec!["opt_continue".to_string()],
+            "语义应答选正向动作项(继续),规避负向项(停止)"
+        );
+        assert_eq!(answers.len(), 1, "单题顶层形态构造一个伪题答案");
+        assert_eq!(answers[0]["question_id"], json!("default"));
+    }
+
+    /// r58 审计 F3-A:rework 上限门动作选择——[0]=provide_context+null
+    /// 上下文不建 note、不 resolve 门、不唤 runner(blocked_gate.inc.rs
+    /// 42-43/144-163,runner 续跑白名单无 provide_context),恒取 [0]=
+    /// attempt 楔死在开着的门;按 reason_code 选 send_to_coder(真实
+    /// 续跑:findings 交 coder 重驱,rework.rs 动作序 [provide_context,
+    /// send_to_coder, abort])。其余门保持 [0](triage/配置缺失/
+    /// interrupted 门的 [0]=retry_* 即正确语义动作)。
+    #[test]
+    fn lcg_coding_gate_action_prefers_send_to_coder_on_rework_limit() {
+        let rework_gate = json!({
+            "type": "coding_gate_required",
+            "gate": {
+                "gate_id": "gate_1",
+                "kind": "blocked",
+                "reason_code": "reviewer_rework_limit_reached",
+                "available_actions": [
+                    {"action_id": "provide_context", "label": "补充上下文"},
+                    {"action_id": "send_to_coder", "label": "交 coder 修复"},
+                    {"action_id": "abort", "label": "中止"}
+                ]
+            }
+        });
+        assert_eq!(coding_gate_action_id(&rework_gate), "send_to_coder");
+        let triage_gate = json!({
+            "type": "coding_gate_required",
+            "gate": {
+                "gate_id": "gate_2",
+                "kind": "blocked",
+                "reason_code": "plan_defect_triage",
+                "available_actions": [
+                    {"action_id": "retry_coding", "label": "重试"},
+                    {"action_id": "abort", "label": "中止"}
+                ]
+            }
+        });
+        assert_eq!(coding_gate_action_id(&triage_gate), "retry_coding");
+        // 空动作表:空串(泵不发送,不旁路产品决策面)。
+        assert_eq!(coding_gate_action_id(&json!({"gate": {}})), "");
+    }
+
+    /// r58 审计 F3-B:waiting_for_human 收口判据——coding 确认成功语义=
+    /// 流程真实走完到终门(stage=final_confirm);中途门(rework 上限/
+    /// choice 挂起/共享 worktree 脏)也落 waiting_for_human,一律记
+    /// Confirmed=终门未达也算过(假阳性 PASS,r58 审计)。终门上还压着
+    /// 未决 blocked 门(如 FinalConfirm 阶段开的 shared_worktree_dirty
+    /// manual 门,gates.rs 362-392)同样不可记 Confirmed。
+    #[test]
+    fn lcg_coding_waiting_human_confirms_only_at_final_gate() {
+        let final_gate = json!({
+            "type": "coding_session_state",
+            "status": "waiting_for_human",
+            "stage": "final_confirm",
+        });
+        assert!(coding_waiting_human_confirms(&final_gate));
+        let rework_wedge = json!({
+            "type": "coding_session_state",
+            "status": "waiting_for_human",
+            "stage": "code_review",
+        });
+        assert!(
+            !coding_waiting_human_confirms(&rework_wedge),
+            "rework 上限门楔死态不可记 Confirmed"
+        );
+        let choice_pending = json!({
+            "type": "coding_session_state",
+            "status": "waiting_for_human",
+            "stage": "coding",
+        });
+        assert!(
+            !coding_waiting_human_confirms(&choice_pending),
+            "choice 挂起态不可记 Confirmed"
+        );
+        let dirty_final = json!({
+            "type": "coding_session_state",
+            "status": "waiting_for_human",
+            "stage": "final_confirm",
+            "pending_gates": [
+                {
+                    "gate_id": "gate_dirty",
+                    "kind": "blocked",
+                    "reason_code": "shared_worktree_dirty_manual_gate",
+                    "available_actions": [],
+                }
+            ],
+        });
+        assert!(
+            !coding_waiting_human_confirms(&dirty_final),
+            "终门上未决 blocked 门不可记 Confirmed"
+        );
+    }
+
 
     /// r26 问题4:wire 事件行大字段截断保留形态。
     #[test]
