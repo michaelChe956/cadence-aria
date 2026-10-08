@@ -545,6 +545,14 @@ pub(crate) fn open_plan_snapshot(
             ),
         });
     }
+    // r53:回灌后 canonicalize——与 capture 轮同源绝对路径(evidence_root
+    // 可为相对路径,产品登记/指纹面消费 canonical 绝对形态)。
+    let run_workspace = run_workspace
+        .canonicalize()
+        .map_err(|error| SnapshotOpenError::Invalid(format!("canonicalize run workspace:{error}")))?;
+    let run_aggregate = run_aggregate
+        .canonicalize()
+        .map_err(|error| SnapshotOpenError::Invalid(format!("canonicalize run aggregate:{error}")))?;
     Ok(OpenedSnapshot {
         manifest,
         workspace_root: run_workspace,

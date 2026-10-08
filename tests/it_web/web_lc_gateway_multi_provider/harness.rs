@@ -867,6 +867,29 @@ impl MatrixEnvironment {
                     None,
                 )
             })?;
+            // r53 修复:固定路径 canonicalize——evidence_root 可为相对路径,
+            // 而登记 preflight 的 auto-discovery 以 canonical 绝对路径产出
+            // candidates;原始相对路径的 confirmed_paths 与其交集为空→
+            // 「confirmed preflight must contain at least one candidate」500
+            //(tempdir 轮天然绝对路径故不现)。canonicalize 后与发现面同源。
+            let run_workspace = run_workspace
+                .canonicalize()
+                .map_err(|error| {
+                    matrix_failure(
+                        "snapshot_run_dir_create_failed",
+                        format!("canonicalize {}: {error}", run_workspace.display()),
+                        None,
+                    )
+                })?;
+            let run_aggregate = run_aggregate
+                .canonicalize()
+                .map_err(|error| {
+                    matrix_failure(
+                        "snapshot_run_dir_create_failed",
+                        format!("canonicalize {}: {error}", run_aggregate.display()),
+                        None,
+                    )
+                })?;
             fp(
                 "snapshot_capture_run_root",
                 format_args!("snapshot={snapshot_id} dir={}", directory.display()),
