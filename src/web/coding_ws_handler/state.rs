@@ -9,7 +9,7 @@ use crate::product::coding_models::{
     CodingRoleRunSnapshot, CodingTimelineNode, CodingTimelineNodeStatus, GroupReviewArtifactRef,
 };
 use crate::product::coding_workspace_engine::{
-    CodingWorkspaceEngineError, recoverable_failed_code_review,
+    CodingExecutionContext, CodingWorkspaceEngineError, recoverable_failed_code_review,
 };
 use crate::product::json_store::ProductStoreError;
 use crate::product::models::ProviderName;
@@ -30,7 +30,21 @@ pub(crate) fn build_coding_session_state(
 ) -> Result<CodingWsOutMessage, CodingWorkspaceEngineError> {
     let reconciliation = coding_store.reconcile_linked_plan_repair_pause(&attempt)?;
     let attempt = reconciliation.attempt;
-    let execution_context = coding_execution_context(&coding_store.paths(), &attempt)?;
+    // r61(pi-5 现场):快照装配不得因 bound context 解析失败整体失败——
+    // runner 死亡转 AwaitingManualRecovery 后,attach 与死亡路径的会话快照
+    // 是 WS 客户端唯一可见信号;store 完整性受损(如 verification plan 文件
+    // 被覆盖致 runtime_binding_integrity_mismatch)时 context 降级为空
+    // (markdown/验证命令缺席),快照仍下发(状态/门/时间线完整),否则客户端
+    // 只能烧满阶段超时(现场 fresh/resume 双格 2×3600s 空转)。
+    let execution_context = coding_execution_context(&coding_store.paths(), &attempt)
+        .unwrap_or_else(|error| {
+            tracing::warn!(
+                attempt_id = %attempt.id,
+                error = %error,
+                "coding session snapshot degraded: bound work item context unavailable"
+            );
+            CodingExecutionContext::default()
+        });
     let timeline_nodes =
         coding_store.get_timeline_nodes(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
     let active_node_id = active_coding_timeline_node_id(&timeline_nodes);
