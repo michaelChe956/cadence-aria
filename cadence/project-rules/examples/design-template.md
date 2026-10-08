@@ -49,7 +49,7 @@
 - 响应结构: HTTP JSON + WebSocket 消息，字段以 serde 类型定义为准（`src/protocol`、`src/web`）；禁止新造通用响应格式
 - 异常体系: `thiserror` 定义库内错误类型，`anyhow` 用于应用层传播
 - 日志体系: `tracing` 结构化日志
-- 分层/目录组织: 后端 `src/`：`cli.rs`/`daemon` → `product`/`task_run`/`interactive`/`runtime_units` → `web`（axum）+ `protocol` + `cross_cutting`；前端 `web/src`：React 组件 → Zustand store → HTTP/WS 客户端
+- 分层/目录组织: 后端 `src/`：`cli.rs`/`daemon`/`repl` → `product`/`task_run`/`interactive`/`runtime_units` → `web`（axum）+ `protocol` + `cross_cutting`；前端 `web/src`：React 组件 → Zustand store → HTTP/WS 客户端
 
 ### 1.4 兼容性边界
 
@@ -117,7 +117,7 @@
 
 后端（Rust，`src/`）：
 
-`aria CLI（src/cli.rs）/ daemon（src/daemon）→ product / task_run / interactive / runtime_units 模块 → src/web（axum HTTP/WS）→ serde/protocol 类型`
+`aria CLI（src/cli.rs）/ daemon（src/daemon）/ repl（src/repl，CLI 侧 daemon 连接发现与事件流）→ product / task_run / interactive / runtime_units 模块 → src/web（axum HTTP/WS）→ serde/protocol 类型`
 
 前端（`web/src`）：
 
