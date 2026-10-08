@@ -306,6 +306,66 @@ fn lcg_t10_evidence_requires_exact_version_wire_and_native_confirmation() {
     );
 }
 
+/// F1(r58 深掏审计):按 RunMode 分档的主格完备性裁决(纯函数,
+/// `lcg_t10_cell_completeness_by_run_mode` 钉死)。既有 `>= 10` 断言在
+/// 续跑轮恒假(实际 8 格)——r56 EXIT=101 的直接 panic 点即旧断言:
+/// - resume:story/design/plan/split 各恰 1 个 carried 承继格(引用来源
+///   轮证据链,不重新计票)+ coding/review 真实执行各 fresh/resume
+///   2 格 = 8;
+/// - full/capture:五阶段真实执行×fresh/resume,plan 双入口分列
+///   (streaming 10 + split_sync 2)= 12(各阶段失败早退路径同样恰好
+///   2 格,不删格语义保持)。
+/// 格数精确相等钉总数,阶段×入口×相位覆盖钉不缺格,双断言合一。
+fn assert_matrix_cell_completeness(cells: &[EvidenceCell], mode: RunMode) {
+    let expected = match mode {
+        RunMode::ResumeFromPlanSnapshot => 8,
+        RunMode::FullChain | RunMode::CapturePlanSnapshot => 12,
+    };
+    assert_eq!(
+        cells.len(),
+        expected,
+        "矩阵主格数与 RunMode({mode:?})不匹配:resume=8(4 承继+coding/review 各 2),\
+         full/capture=12(五阶段×fresh/resume,plan 双入口分列),实际 {} 格",
+        cells.len()
+    );
+    if mode == RunMode::ResumeFromPlanSnapshot {
+        // 承继完整性:四承继阶段各恰一格且为 carried 态。
+        for stage in ["story", "design", "plan", "split"] {
+            let stage_cells = cells.iter().filter(|cell| cell.stage == stage).count();
+            assert_eq!(
+                stage_cells, 1,
+                "resume 轮承继阶段 {stage} 必须恰 1 个 carried 格,实际 {stage_cells} 格"
+            );
+            assert!(
+                cells
+                    .iter()
+                    .any(|cell| cell.stage == stage && cell.capability_state == "carried"),
+                "resume 轮 {stage} 格必须为 carried 态(引用来源轮证据链)"
+            );
+        }
+    } else {
+        // 全链完整性:五阶段×两相位全覆盖,plan 双入口分列。
+        let streaming = ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT;
+        for (stage, entrypoint) in [
+            ("story", streaming),
+            ("design", streaming),
+            ("plan", streaming),
+            ("plan", ENTRYPOINT_SPLIT_SYNC),
+            ("coding", streaming),
+            ("review", streaming),
+        ] {
+            for phase in [FRESH, RESUME] {
+                assert!(
+                    cells.iter().any(|cell| cell.stage == stage
+                        && cell.entrypoint == entrypoint
+                        && cell.fresh_or_resume == phase),
+                    "full/capture 矩阵缺 {stage}/{entrypoint}/{phase} 主格"
+                );
+            }
+        }
+    }
+}
+
 /// 单家 provider 的真实现场矩阵:断言组与矩阵完备性(459-482 行)。
 async fn run_live_five_stage_matrix(selected_provider: ProviderName) {
     require_lc_gateway_e2e_switch();
@@ -360,10 +420,13 @@ async fn run_live_five_stage_matrix(selected_provider: ProviderName) {
     );
 
     // 五阶段×fresh/resume 主格完备:不合并隐藏,缺格即矩阵不完整。
-    assert!(
-        matrix.cells().len() >= 10,
-        "五阶段×fresh/resume 至少 10 主格(Plan 两入口另列),实际 {} 格",
-        matrix.cells().len()
+    // F1:按 RunMode 分档(resume 轮 story/design/plan/split 为承继格,
+    // 旧 `>= 10` 在续跑轮恒假);run_provider_matrix 入口已校验过 env,
+    // 此处非法值=env 中途被改,fail loudly。
+    assert_matrix_cell_completeness(
+        matrix.cells(),
+        super::snapshot::RunMode::from_env()
+            .expect("LIVE_MATRIX_RUN_MODE 已在 run_provider_matrix 入口校验"),
     );
 
     // 成功支持格具全部断言才 PASS;缺证据格保持 Unknown/Denied + reason。
@@ -446,4 +509,196 @@ async fn lcg_live_pi_five_stages_fresh_resume() {
 #[ignore = "真实现场矩阵:LC_GATEWAY_E2E=1 且 Step 4 命令执行(需要真实 CLI/trust/#8 政策就绪)"]
 async fn lcg_live_kimi_five_stages_fresh_resume() {
     run_live_five_stage_matrix(ProviderName::KimiCode).await;
+}
+
+// ---------------------------------------------------------------------------
+// F1(r58 深掏审计):格数断言分档单测。r56 现场 resume 轮 8 格(4 承继+
+// coding/review 各 2)撞旧 `>= 10` 断言 panic(EXIT=101)——分档后
+// 合法 resume 形态放行,缺格/多格/形态错配均拒绝。
+// ---------------------------------------------------------------------------
+
+use super::snapshot::RunMode;
+
+fn completeness_cell(
+    provider: &ProviderName,
+    canonical_root: &Path,
+    member_worktree: &Path,
+    stage: &str,
+    entrypoint: &str,
+    phase: &str,
+) -> EvidenceCell {
+    let mut cell = complete_baseline_cell(provider.clone(), canonical_root, member_worktree);
+    cell.stage = stage.to_string();
+    cell.entrypoint = entrypoint.to_string();
+    cell.fresh_or_resume = phase.to_string();
+    cell
+}
+
+fn carried_completeness_cell(
+    provider: &ProviderName,
+    canonical_root: &Path,
+    member_worktree: &Path,
+    stage: &str,
+    entrypoint: &str,
+) -> EvidenceCell {
+    let mut cell = completeness_cell(
+        provider,
+        canonical_root,
+        member_worktree,
+        stage,
+        entrypoint,
+        FRESH,
+    );
+    cell.capability_state = "carried".to_string();
+    cell
+}
+
+/// resume 形态(8 格:4 承继 + coding/review 各 fresh/resume)必须放行
+/// ——r56 现场 panic 点;full/capture 形态(12 格,plan 双入口分列)
+/// 同样放行。
+#[test]
+fn lcg_t10_cell_completeness_by_run_mode() {
+    let provider = ProviderName::ClaudeCode;
+    let canonical_root = PathBuf::from("/tmp/lcg-t10-matrix/canonical-root");
+    let member_worktree = canonical_root.join("checkouts/alpha");
+    let streaming = ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT;
+
+    let mut resume_cells = vec![
+        carried_completeness_cell(
+            &provider,
+            &canonical_root,
+            &member_worktree,
+            "story",
+            streaming,
+        ),
+        carried_completeness_cell(
+            &provider,
+            &canonical_root,
+            &member_worktree,
+            "design",
+            streaming,
+        ),
+        carried_completeness_cell(
+            &provider,
+            &canonical_root,
+            &member_worktree,
+            "plan",
+            streaming,
+        ),
+        carried_completeness_cell(
+            &provider,
+            &canonical_root,
+            &member_worktree,
+            "split",
+            ENTRYPOINT_SPLIT_SYNC,
+        ),
+    ];
+    for stage in ["coding", "review"] {
+        for phase in [FRESH, RESUME] {
+            resume_cells.push(completeness_cell(
+                &provider,
+                &canonical_root,
+                &member_worktree,
+                stage,
+                streaming,
+                phase,
+            ));
+        }
+    }
+    assert_matrix_cell_completeness(&resume_cells, RunMode::ResumeFromPlanSnapshot);
+
+    let mut full_cells = Vec::new();
+    for (stage, entrypoint) in [
+        ("story", streaming),
+        ("design", streaming),
+        ("plan", streaming),
+        ("plan", ENTRYPOINT_SPLIT_SYNC),
+        ("coding", streaming),
+        ("review", streaming),
+    ] {
+        for phase in [FRESH, RESUME] {
+            full_cells.push(completeness_cell(
+                &provider,
+                &canonical_root,
+                &member_worktree,
+                stage,
+                entrypoint,
+                phase,
+            ));
+        }
+    }
+    assert_matrix_cell_completeness(&full_cells, RunMode::FullChain);
+    assert_matrix_cell_completeness(&full_cells, RunMode::CapturePlanSnapshot);
+}
+
+/// 缺承继格必须拒绝(resume 轮少一格=矩阵不完整,不得静默收窄验收)。
+#[test]
+#[should_panic(expected = "矩阵主格数与 RunMode")]
+fn lcg_t10_cell_completeness_rejects_missing_carried_stage() {
+    let provider = ProviderName::ClaudeCode;
+    let canonical_root = PathBuf::from("/tmp/lcg-t10-matrix/canonical-root");
+    let member_worktree = canonical_root.join("checkouts/alpha");
+    let streaming = ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT;
+    let mut cells = vec![
+        carried_completeness_cell(
+            &provider,
+            &canonical_root,
+            &member_worktree,
+            "story",
+            streaming,
+        ),
+        carried_completeness_cell(
+            &provider,
+            &canonical_root,
+            &member_worktree,
+            "design",
+            streaming,
+        ),
+        carried_completeness_cell(
+            &provider,
+            &canonical_root,
+            &member_worktree,
+            "plan",
+            streaming,
+        ),
+    ];
+    for stage in ["coding", "review"] {
+        for phase in [FRESH, RESUME] {
+            cells.push(completeness_cell(
+                &provider,
+                &canonical_root,
+                &member_worktree,
+                stage,
+                streaming,
+                phase,
+            ));
+        }
+    }
+    // split 承继格缺失:先撞总数(7 != 8)或承继断言,均拒绝。
+    assert_matrix_cell_completeness(&cells, RunMode::ResumeFromPlanSnapshot);
+}
+
+/// resume 形态(8 格)按 full 档校验必须拒绝——钉住旧 `>= 10` 断言的
+/// 拒绝形态已被分档替代:8 格只在 resume 档合法。
+#[test]
+#[should_panic(expected = "矩阵主格数与 RunMode")]
+fn lcg_t10_cell_completeness_rejects_resume_shape_under_full_mode() {
+    let provider = ProviderName::ClaudeCode;
+    let canonical_root = PathBuf::from("/tmp/lcg-t10-matrix/canonical-root");
+    let member_worktree = canonical_root.join("checkouts/alpha");
+    let streaming = ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT;
+    let mut cells = Vec::new();
+    for stage in ["story", "design", "plan", "coding", "review"] {
+        for phase in [FRESH, RESUME] {
+            cells.push(completeness_cell(
+                &provider,
+                &canonical_root,
+                &member_worktree,
+                stage,
+                streaming,
+                phase,
+            ));
+        }
+    }
+    assert_matrix_cell_completeness(&cells, RunMode::FullChain);
 }

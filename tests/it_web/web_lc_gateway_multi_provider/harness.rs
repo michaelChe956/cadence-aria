@@ -83,6 +83,11 @@ pub(crate) const STAGE_ORDER: [&str; 5] = ["story", "design", "plan", "coding", 
 pub(crate) const FRESH: &str = "fresh";
 pub(crate) const RESUME: &str = "resume";
 
+/// F5(r58 深掏审计):coding 观测格 role 与 native 断言扫描的角色过滤
+/// 共用常量(AdapterRole::Executor 的序列值;attempt 分区内 reviewer 的
+/// ReviewReadOnly 启动同计入,扫描必须按本角色过滤)。
+const CODING_EXECUTOR_ROLE: &str = "executor";
+
 /// 会话级真实阶段超时(真实现场 CLI 慢;可用环境变量放宽)。
 const STAGE_TIMEOUT_ENV: &str = "LC_GATEWAY_E2E_STAGE_TIMEOUT_SECS";
 const DEFAULT_STAGE_TIMEOUT_SECS: u64 = 3600;
@@ -816,7 +821,41 @@ impl MatrixEnvironment {
             snapshot_boot: true,
         };
         // provider health 真实重探测(不沿用快照;有界超时=BLOCKED 报告)。
-        env.wait_for_provider_health().await?;
+        // F2(r58 深掏审计):就绪返回的当前 CLI 版本与捕获时冻结的
+        // manifest.cli_version 前置比对——CLI 自动更新会使快照携带的
+        // capability 行/投影指纹全失效,coding/review spawn 八维复验必
+        // PolicyDrift 拒启(两格白烧 45-75min 且表象像新缺陷);漂移早
+        // BLOCKED 明确指示重 capture,同 token 放行(基线快照兼容)。
+        let current_cli_version = env.wait_for_provider_health().await?;
+        let frozen_cli_version = env
+            .snapshot_manifest
+            .as_ref()
+            .expect("snapshot manifest")
+            .cli_version
+            .clone();
+        if let Some(drift_reason) =
+            snapshot_cli_version_drift(&frozen_cli_version, current_cli_version.as_deref())
+        {
+            fp(
+                "snapshot_cli_version_drifted",
+                format_args!(
+                    "frozen={frozen_cli_version:?} current={:?}",
+                    current_cli_version.as_deref().unwrap_or("-")
+                ),
+            );
+            return Err(matrix_failure(
+                "snapshot_cli_version_drifted",
+                drift_reason,
+                None,
+            ));
+        }
+        // F4(r58 深掏审计):resume 轮与 build() 同源幂等重登 provider
+        // trust——codex/kimi 的用户级 trust 工件只在 build() 写 HOME
+        //(快照不含 HOME 面);HOME 清理/容器重建/换机跑 resume 会撞
+        // trust 硬前置门(r3 三家「entry absent」同款)。ensure_before_
+        // recipe 幂等:canonical root=固定快照路径,键稳定,工件在场
+        // =Replay 重写安全,缺工件=重新登记。
+        env.ensure_provider_trust().await?;
         // canonical root/target 从 durable manifest 复原(原地同路径)。
         env.resolve_member_target().await?;
         // 成员 Git 身份 preflight:快照点 HEAD 复核(漂移=BLOCKED)。
@@ -1105,7 +1144,8 @@ impl MatrixEnvironment {
         // 2.5) provider health 就绪等待:new_real 的 ProviderHealthService
         // 需完成探测刷新,否则 spawn 复验报 provider_gateway_unavailable
         //(health state degraded)。有界超时,超时=BLOCKED 真实报告。
-        env.wait_for_provider_health().await?;
+        // 全链/capture 轮不做版本比对(无快照基线;版本供 resume 轮用)。
+        let _ = env.wait_for_provider_health().await?;
         // 3) 产品创建 + 真实登记(与 LcOperationsFixture 同一 HTTP 形态)。
         env.create_project_and_lc().await?;
         env.register_members().await?;
@@ -1434,7 +1474,10 @@ impl MatrixEnvironment {
 
     /// 轮询真实 provider health 直到所选 provider available(先触发一次
     /// 主动 recheck 刷新,再读 status;有界超时,超时按 BLOCKED 报告)。
-    async fn wait_for_provider_health(&mut self) -> Result<(), LiveMatrixFailure> {
+    /// F2:就绪时返回该 provider 的当前 CLI 版本(与 recheck 的 --version
+    /// 探测同源,经 /api/providers/status 透出),供 resume 轮与快照
+    /// manifest.cli_version 前置比对。
+    async fn wait_for_provider_health(&mut self) -> Result<Option<String>, LiveMatrixFailure> {
         fp_enter_phase("env", "provider_health", "-");
         let deadline = tokio::time::Instant::now()
             + Duration::from_secs(env_timeout_secs(
@@ -1457,7 +1500,13 @@ impl MatrixEnvironment {
                 });
             if provider_ready {
                 fp("health_ready", &self.provider_wire);
-                return Ok(());
+                let current_version = body["providers"].as_array().and_then(|entries| {
+                    entries
+                        .iter()
+                        .find(|entry| entry["provider"] == self.provider_wire)
+                        .and_then(|entry| entry["version"].as_str().map(str::to_string))
+                });
+                return Ok(current_version);
             }
             if last_heartbeat.elapsed() >= FP_HEARTBEAT_SECS {
                 fp("health_poll", "provider health 未就绪,继续轮询(30s 心跳)");
@@ -3273,7 +3322,9 @@ impl MatrixEnvironment {
             observation.execution_origin = "snapshot_boot".to_string();
         }
         fp_enter_phase("coding", ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT, FRESH);
-        observation.role = "executor".to_string();
+        // F5:fresh/resume 观测格与 native 断言扫描共用同一 executor 角色
+        // 常量(审计 record.role 为 AdapterRole 序列值,不得漂移)。
+        observation.role = CODING_EXECUTOR_ROLE.to_string();
         observation.action = "coding_workspace_write".to_string();
         if self.plan_id.is_empty() {
             cells.push(observation.denied_cell(
@@ -3328,18 +3379,26 @@ impl MatrixEnvironment {
             resume.execution_origin = "snapshot_boot".to_string();
         }
         fp_enter_phase("coding", ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT, RESUME);
-        resume.role = "executor".to_string();
+        resume.role = CODING_EXECUTOR_ROLE.to_string();
         resume.action = "coding_workspace_write".to_string();
         resume.force_resume = true;
         resume.workspace_session_id = attempt_id.clone();
-        resume.requested_resume_id = self.latest_audit_native_id(&attempt_id, &self.provider, None);
+        // F5(r58 深掏审计):两次 native 断言扫描必须按 executor 角色过滤
+        //(与观测格 role 对齐,r50/r52 已修 plan author 与 review reviewer,
+        // coding 未跟进)——attempt 分区内 review round 的 reviewer
+        // ReviewReadOnly 启动同计入;None 读到 reviewer id,resume attach
+        // 期间新 reviewer spawn 落在两次扫描之间即 requested≠confirmed
+        // 假阴性(r56 Confirmed=时序幸运)。
+        resume.requested_resume_id =
+            self.latest_audit_native_id(&attempt_id, &self.provider, Some(CODING_EXECUTOR_ROLE));
         resume.frozen_digest = self.latest_audit_projection_digest(&attempt_id, &self.provider);
         let drive = self
             .drive_coding_attempt_ws_inner(&attempt_id, &mut resume, true)
             .await;
         resume.completed_product_artifact_exists = drive.artifact_confirmed;
         resume.observed_pid = self.scan_attempt_stream_log_pid(&attempt_id);
-        resume.native_confirmed_id = self.latest_audit_native_id(&attempt_id, &self.provider, None);
+        resume.native_confirmed_id =
+            self.latest_audit_native_id(&attempt_id, &self.provider, Some(CODING_EXECUTOR_ROLE));
         cells.push(resume.build_cell(self));
         cells
     }
@@ -3710,19 +3769,19 @@ impl MatrixEnvironment {
     // -----------------------------------------------------------------------
 
     /// 会话分区内该 provider(可按 role 过滤)最新 provider_start 的原生 id。
+    /// F5:过滤谓词抽纯函数 `latest_native_id_in_audits`(角色过滤语义由
+    /// lcg_coding_resume_native_scan_filters_by_executor_role 钉死)。
     fn latest_audit_native_id(
         &self,
         workspace_session_id: &str,
         provider: &ProviderName,
         role: Option<&str>,
     ) -> Option<String> {
-        self.scan_session_audits(workspace_session_id)
-            .into_iter()
-            .find(|(_, record)| {
-                provider_matches_record(provider, record)
-                    && role.is_none_or(|role| record.role == role)
-            })
-            .map(|(_, record)| record.provider_session_id)
+        latest_native_id_in_audits(
+            &self.scan_session_audits(workspace_session_id),
+            provider,
+            role,
+        )
     }
 
     /// F3:从该 coding attempt 的 provider stream log 目录解析真实子进程 PID。
@@ -4947,6 +5006,57 @@ fn provider_matches_record(provider: &ProviderName, record: &ProviderStartAudit)
     record.provider == snake || record.provider == snake.replace('_', "-")
 }
 
+/// F5(r58 深掏审计):审计分区(最新在前)内该 provider 可选 role 过滤
+/// 的最新 provider_start 原生 id(纯函数,过滤语义由
+/// lcg_coding_resume_native_scan_filters_by_executor_role 钉死)。
+fn latest_native_id_in_audits(
+    audits: &[(u64, ProviderStartAudit)],
+    provider: &ProviderName,
+    role: Option<&str>,
+) -> Option<String> {
+    audits
+        .iter()
+        .find(|(_, record)| {
+            provider_matches_record(provider, record) && role.is_none_or(|role| record.role == role)
+        })
+        .map(|(_, record)| record.provider_session_id.clone())
+}
+
+/// F2(r58 深掏审计):快照 CLI 版本漂移裁决(纯函数,三分支由
+/// snapshot_cli_version_drift_tests 钉死)。capture 侧 manifest.cli_version
+/// 存的是 plan 会话审计 provider_version 原样(CLI `--version` 全串,如
+/// "2.1.283 (Claude Code)"),health 侧经 /api/providers/status 透出的是
+/// token(如 "2.1.283")——两侧过同一 token 提取后比对:
+/// - token 不等 → Some(reason)(早 BLOCKED,明确指示重 capture);
+/// - token 相等 → None 放行(不同书写形态不误报,基线快照兼容);
+/// - 任一侧提不出 token(空串/无数字词)→ None(无法比对不无谓
+///   BLOCKED;spawn 期八维复验仍 fail-closed 兜底)。
+fn snapshot_cli_version_drift(frozen: &str, current: Option<&str>) -> Option<String> {
+    let frozen_token = cli_version_token(frozen)?;
+    let current_token = current.and_then(cli_version_token)?;
+    (frozen_token != current_token).then(|| {
+        format!(
+            "快照 CLI 版本 {frozen_token} != 当前 {current_token}\
+             (CLI 已升级/降级:快照冻结的 capability 行与投影指纹全失效,\
+             coding/review spawn 复验必 PolicyDrift 拒启;请重 capture 建新基线)"
+        )
+    })
+}
+
+/// CLI 版本串的数字 token 提取(镜像 provider_health::parse_version_token:
+/// 首个含数字的空白分词,去除非 [A-Za-z0-9._+-] 的边界字符)。
+fn cli_version_token(version: &str) -> Option<String> {
+    version.split_whitespace().find_map(|token| {
+        let token = token.trim_matches(|character: char| {
+            !(character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_' | '+'))
+        });
+        token
+            .chars()
+            .any(|character| character.is_ascii_digit())
+            .then(|| token.to_string())
+    })
+}
+
 /// choice 语义应答:读选项 label(+description)文本逐题选答。
 ///
 /// r12 复盘:恒选首个选项(opt_0)是非语义答案,真实 provider 会把
@@ -5839,5 +5949,154 @@ mod snapshot_spec_restore_tests {
     fn lcg_restored_spec_ids_blocked_on_missing_fields() {
         let body = json!({"issue": {"issue_id": "issue_0001"}});
         assert!(restored_spec_ids_from_lifecycle(&body).is_err());
+    }
+}
+
+/// F2(r58 深掏审计)回归锚:快照 CLI 版本漂移裁决三分支——token 漂移
+/// BLOCKED(原因点名两侧版本+重 capture 指示)/同 token 不同书写形态
+/// 放行(r57 基线 manifest 存全串、health 透 token,不得误报)/任一侧
+/// 不可解析跳过(不无谓 BLOCKED,spawn 复验兜底)。
+mod snapshot_cli_version_drift_tests {
+    use super::*;
+
+    #[test]
+    fn lcg_snapshot_cli_version_drift_blocks_on_token_drift() {
+        let reason = snapshot_cli_version_drift("2.1.283 (Claude Code)", Some("2.1.300"))
+            .expect("token 不等必须 BLOCKED");
+        assert!(reason.contains("2.1.283"), "原因须点名冻结版本:{reason}");
+        assert!(reason.contains("2.1.300"), "原因须点名当前版本:{reason}");
+        assert!(reason.contains("capture"), "原因须指示重 capture:{reason}");
+    }
+
+    #[test]
+    fn lcg_snapshot_cli_version_passes_on_token_equal_across_forms() {
+        // r57 基线形态:manifest 冻结 CLI --version 全串,health 侧 token。
+        assert_eq!(
+            snapshot_cli_version_drift("2.1.283 (Claude Code)", Some("2.1.283")),
+            None,
+            "同 token 不同书写形态必须放行(基线快照兼容,不无谓 BLOCKED)"
+        );
+    }
+
+    #[test]
+    fn lcg_snapshot_cli_version_skips_when_token_unparseable() {
+        assert_eq!(
+            snapshot_cli_version_drift("", Some("2.1.283")),
+            None,
+            "冻结侧空串(capture 边缘形态)无比对基准,不 BLOCKED"
+        );
+        assert_eq!(
+            snapshot_cli_version_drift("2.1.283", None),
+            None,
+            "当前版本不可得不无谓 BLOCKED,spawn 期复验兜底"
+        );
+        assert_eq!(
+            snapshot_cli_version_drift("no-digits", Some("2.1.283")),
+            None,
+            "冻结侧提不出数字 token 不构成漂移证据"
+        );
+    }
+}
+
+/// F4(r58 深掏审计)前提钉子:HOME trust 工件被清理(容器重建/换机/
+/// HOME 清理)后幂等重调 ensure_before_recipe 必须重登成功——resume 轮
+/// build_from_snapshot 已与 build() 同源重登(工件在场=Replay 幂等,
+/// 缺工件=重新登记),本测试钉死「缺工件→重登成功」臂。
+mod snapshot_resume_trust_tests {
+    use super::*;
+
+    #[test]
+    fn lcg_resume_trust_reensure_recovers_wiped_home_artifacts() {
+        let home = TempDir::new().expect("home");
+        let aria = TempDir::new().expect("aria root");
+        let canonical_root = home.path().join("lc-root");
+        std::fs::create_dir_all(&canonical_root).expect("canonical root");
+        let registry = HomeBackedProviderTrustRegistry::new(
+            ProductAppPaths::new(aria.path().to_path_buf()),
+            vec![
+                Arc::new(CodexTrustAdapter::for_home(home.path())),
+                Arc::new(KimiTrustAdapter::for_home(home.path())),
+            ],
+        );
+        let providers = [ProviderName::Codex, ProviderName::KimiCode];
+        let ensure = || {
+            matches!(
+                registry.ensure_before_recipe(
+                    PROJECT_ID,
+                    "lcg-matrix-trust-resume",
+                    "logical_codebase_resume",
+                    &canonical_root,
+                    &providers,
+                ),
+                cadence_aria::product::logical_codebase::ProviderTrustPreparationResult::Ready { .. }
+            )
+        };
+        assert!(ensure(), "首轮登记必须 Ready");
+        // HOME 工件清理(capture→resume 之间换机/容器重建形态):codex
+        // config.toml 与 kimi workspace-trust 全部抹掉(.aria 登记记录
+        // 仍在——快照回灌形态)。
+        let _ = std::fs::remove_file(home.path().join(".codex").join("config.toml"));
+        let _ = std::fs::remove_dir_all(home.path().join(".kimi-code").join("workspace-trust"));
+        assert!(
+            ensure(),
+            "缺 HOME 工件时幂等重登必须重新 Ready(resume 轮 F4 前提)"
+        );
+        // HOME 工件确已重建(codex config 携带 trusted 条目)。
+        let config = std::fs::read_to_string(home.path().join(".codex").join("config.toml"))
+            .expect("codex config rebuilt");
+        assert!(
+            config.contains("trust_level = \"trusted\""),
+            "重登后 HOME 工件必须重建:\n{config}"
+        );
+    }
+}
+
+/// F5(r58 深掏审计)回归锚:coding resume 两次 native 断言扫描的
+/// executor 角色过滤语义——attempt 分区(最新在前)内 review round 的
+/// reviewer ReviewReadOnly 启动同计入,None 读到 reviewer id(r56
+/// Confirmed=时序幸运);Some("executor") 恒取 executor 最新 id。
+mod coding_resume_role_filter_tests {
+    use super::*;
+
+    fn start(provider: &str, role: &str, native_id: &str) -> ProviderStartAudit {
+        ProviderStartAudit {
+            provider: provider.to_string(),
+            role: role.to_string(),
+            provider_session_id: native_id.to_string(),
+            ..ProviderStartAudit::default()
+        }
+    }
+
+    #[test]
+    fn lcg_coding_resume_native_scan_filters_by_executor_role() {
+        let provider = ProviderName::ClaudeCode;
+        // 最新在前(seq 降序):reviewer spawn 晚于 executor spawn。
+        let audits = vec![
+            (2u64, start("claude-code", "reviewer", "reviewer-native-2")),
+            (1u64, start("claude-code", "executor", "exec-native-1")),
+        ];
+        // 旧形态(None):读到 reviewer id——resume attach 期间新 reviewer
+        // spawn 落在两次扫描之间即 requested≠confirmed 假阴性(F5 机制)。
+        assert_eq!(
+            latest_native_id_in_audits(&audits, &provider, None),
+            Some("reviewer-native-2".to_string()),
+            "None=分区最新(含 reviewer 污染),钉住 F5 缺陷形态"
+        );
+        // 修复形态:与观测格 role 对齐的 executor 过滤恒取 executor id。
+        assert_eq!(
+            latest_native_id_in_audits(&audits, &provider, Some(CODING_EXECUTOR_ROLE)),
+            Some("exec-native-1".to_string()),
+            "executor 过滤必须命中 executor 最新启动"
+        );
+        // provider 不匹配的记录不参与(过滤谓词另一维)。
+        let mixed = vec![
+            (3u64, start("codex", "executor", "codex-native-3")),
+            (2u64, start("claude-code", "executor", "exec-native-2")),
+        ];
+        assert_eq!(
+            latest_native_id_in_audits(&mixed, &provider, Some(CODING_EXECUTOR_ROLE)),
+            Some("exec-native-2".to_string()),
+            "provider 维过滤不得被他家 provider 启动污染"
+        );
     }
 }
