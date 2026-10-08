@@ -576,11 +576,14 @@
             AggregateInitializationStepStatus::Completed
         );
 
-        // 录制的 provider 确实收到原 PreCheck 命令（命令文本唯一来源）。
+        // 录制的 provider 确实收到原 PreCheck 命令（命令文本唯一来源）;
+        // 命令保持 prompt 逐字前缀（OracleAggInitScope scope 纪律线只追加）。
         use crate::product::repository_store::RepositoryInitializationStepKind as RepoStep;
         let inputs = fixture.streaming_adapter.started_inputs();
         assert_eq!(inputs.len(), 3, "three provider turns must run");
-        assert_eq!(inputs[0].prompt, RepoStep::PreCheck.command().unwrap());
+        assert!(inputs[0]
+            .prompt
+            .starts_with(RepoStep::PreCheck.command().unwrap()));
     }
 
     #[tokio::test]

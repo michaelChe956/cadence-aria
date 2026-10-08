@@ -606,10 +606,13 @@
         let rules_examples = RepoStep::ProjectRulesExamples.command().unwrap();
 
         // 固定顺序：PreCheck=命令1；RuleAndMcpConfig=命令2+3（同一 Claude
-        // turn）；OpenspecAndExamples=命令4。
-        assert_eq!(inputs[0].prompt, pre_check);
-        assert_eq!(inputs[1].prompt, format!("{rule_config}\n{mcp_config}"));
-        assert_eq!(inputs[2].prompt, rules_examples);
+        // turn）；OpenspecAndExamples=命令4。命令文本保持 prompt 逐字前缀
+        // （OracleAggInitScope scope 纪律线只追加,不改命令冻结面）。
+        assert!(inputs[0].prompt.starts_with(pre_check));
+        assert!(inputs[1]
+            .prompt
+            .starts_with(&format!("{rule_config}\n{mcp_config}")));
+        assert!(inputs[2].prompt.starts_with(rules_examples));
 
         // 每条命令在根上恰好执行一次。
         let joined = inputs
@@ -642,6 +645,50 @@
         );
         assert_eq!(fixture.streaming_start_count(), 3);
         assert_eq!(fixture.gateway_audit().stream_launches(), 3);
+    }
+
+    /// OracleAggInitScope 红绿测(镜像 r54 worktree_discipline.rs 形态):
+    /// r57 attempt1 cmd4 receipt 10 变更 unknown_path DENY 全落 alpha/beta
+    /// (wrong-scope flavor),r57b attempt1 四命令零变更白烧(zero-action
+    /// flavor)——streaming_input prompt 原为裸命令串拼接,聚合根 cwd 是
+    /// 唯一隐式 scope 锚(oracle 定性 2026-10-08:与 r54 根因同构且更弱)。
+    /// 本测试钉住:三个 root recipe turn 实际下发 prompt 都必须携带 scope
+    /// 纪律段(真实 aggregate_root 绝对路径+成员仓负边界+auditor 逐路径
+    /// 把关/fail-closed 后果+zero-action 正向句),且 recipe 命令文本保持
+    /// 逐字前缀(命令同一性冻结面零变化)。
+    #[tokio::test]
+    async fn aggregate_recipe_prompt_carries_scope_discipline() {
+        let fixture = gateway_aggregate_fixture();
+        fixture
+            .coordinator()
+            .execute(
+                "project_0001",
+                "aggregate_initialization_0001",
+                CancellationToken::new(),
+            )
+            .await
+            .expect("aggregate recipe must complete");
+
+        let inputs = fixture.streaming_inputs();
+        assert_eq!(inputs.len(), 3, "three provider turns must launch");
+        let canonical_root = std::fs::canonicalize(fixture.aggregate_root()).unwrap();
+        for input in &inputs {
+            super::assert_aggregate_scope_discipline(&input.prompt, &canonical_root);
+        }
+
+        // 命令冻结面:纪律段只追加,recipe 命令文本保持逐字前缀。
+        use crate::product::repository_store::RepositoryInitializationStepKind as RepoStep;
+        assert!(inputs[0]
+            .prompt
+            .starts_with(RepoStep::PreCheck.command().unwrap()));
+        assert!(inputs[1].prompt.starts_with(&format!(
+            "{}\n{}",
+            RepoStep::RuleConfig.command().unwrap(),
+            RepoStep::McpConfiguration.command().unwrap()
+        )));
+        assert!(inputs[2]
+            .prompt
+            .starts_with(RepoStep::ProjectRulesExamples.command().unwrap()));
     }
 
     /// 失败 step 之后的全部步骤保持 Pending（REQ-BOOT-03「任一命令失败停止

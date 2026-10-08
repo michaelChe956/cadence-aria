@@ -198,7 +198,9 @@ impl GatewayBackedAggregateProviderTurnDriver {
             role: AdapterRole::Executor,
             // Task 1.4：真实 root recipe 命令（固定顺序，来源
             // `RepositoryInitializationStepKind::command()`），替换占位串。
-            prompt: Self::recipe_commands(step).join("\n"),
+            // OracleAggInitScope：recipe 命令保持逐字前缀，scope 纪律线
+            // 只追加（`recipe_prompt`）。
+            prompt: Self::recipe_prompt(step, aggregate_root),
             working_dir: aggregate_root.to_path_buf(),
             workspace_session_id: None,
             resume_provider_session_id: None,
@@ -208,6 +210,41 @@ impl GatewayBackedAggregateProviderTurnDriver {
             // Task 1.4：真实命令超时，替换 1s 占位。
             timeout_secs: self.command_timeout.as_secs().max(1),
         }
+    }
+
+    /// OracleAggInitScope 裁决 scope 纪律线(r57 attempt1 cmd4 receipt 10
+    /// 变更 unknown_path DENY 全落 alpha/beta=wrong-scope flavor;r57b
+    /// attempt1 四命令零变更白烧=zero-action flavor;oracle 定性 2026-10-08
+    /// =AI 导航方差,与 r54 根因同构且更弱——prompt 裸命令串拼接零 scope
+    /// 上下文,cwd 是唯一隐式锚):镜像 r54 `worktree_discipline_section`
+    /// (prompts.rs:490)四句结构注入每个 root recipe turn——①
+    /// provider_context_root 真实绝对路径硬钉唯一工作区(路径来自该
+    /// operation 的 preflight snapshot canonical 根,非硬编码;允许面由
+    /// `ROOT_RECIPE_ALLOWLIST` 同源渲染,与 auditor 把关面零漂移);②
+    /// 成员仓目录负边界禁线;③auditor 逐路径把关+越界写=该命令 rejected+
+    /// 发布 fail-closed 后果;④zero-action 正向句(产品面零变更 verdict
+    /// 仍 Allowed,故按任务要求措辞而非伪称强制门;oracle 已知该 flavor
+    /// 纪律线可能不治,如实标注残余方差)。
+    fn scope_discipline_section(aggregate_root: &std::path::Path) -> String {
+        format!(
+            "\n[aggregate_scope_discipline]\n\
+             - 你的工作区是且只是聚合根（provider context root 绝对路径）：{path}。上述 recipe 命令的全部文件写入都必须落在 {path} 下的允许面（{allowed}）内；聚合根里的成员目录（例如 alpha、beta）不属于允许面。\n\
+             - 禁止在任何成员仓目录（成员 checkout 及其 .git/worktrees，无论位于聚合根内还是聚合根外）执行写操作、git mutation 或构建命令；也禁止写 {path} 以外的任何路径——本阶段不存在写允许面之外路径的合法理由。\n\
+             - root recipe auditor 逐路径把关：任何越界写都会使该命令被 rejected（unknown_path DENY），聚合初始化发布 fail-closed——不要尝试越界或试探边界。\n\
+             - 必须实际逐条执行上述命令并产生真实文件变更；零文件变更的空完成不满足本任务要求，不得在未实际执行命令的情况下宣告完成。\n",
+            path = aggregate_root.display(),
+            allowed = crate::product::logical_codebase::ROOT_RECIPE_ALLOWLIST.join("、")
+        )
+    }
+
+    /// OracleAggInitScope：root recipe turn prompt 拼接纯函数——recipe
+    /// 命令逐字前缀+scope 纪律线追加(不经 gateway 即可直接测试)。
+    fn recipe_prompt(step: AggregateInitializationStepKind, aggregate_root: &std::path::Path) -> String {
+        format!(
+            "{}{}",
+            Self::recipe_commands(step).join("\n"),
+            Self::scope_discipline_section(aggregate_root)
+        )
     }
 
     /// Task 1.4：以单仓初始化命令同款语义消费会话——取消/超时共用命令预算，
@@ -629,6 +666,43 @@ impl AggregateAssetPublisher {
             && matches!(components.next(), Some(std::path::Component::Normal(b)) if b == "aggregate")
             && components.next().is_some()
     }
+}
+
+/// OracleAggInitScope 红绿测共用断言(镜像 r54
+/// `assert_worktree_discipline` 形态):root recipe prompt 必须携带 scope
+/// 纪律段四句结构(聚合根真实绝对路径硬钉+成员仓负边界+auditor 后果+
+/// zero-action 正向句)。供本文件 `provider_turn_lcg_tests` 与
+/// coordinator_tests 的 `mod tests`(profile_trust 全链测试)共用。
+#[cfg(test)]
+pub(crate) fn assert_aggregate_scope_discipline(prompt: &str, aggregate_root: &std::path::Path) {
+    assert!(
+        prompt.contains("[aggregate_scope_discipline]"),
+        "OracleAggInitScope:root recipe prompt 必须携带 scope 纪律段:\n{prompt}"
+    );
+    assert!(
+        prompt.contains(&aggregate_root.display().to_string()),
+        "纪律段必须钉 provider_context_root 真实绝对路径:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("你的工作区是且只是聚合根"),
+        "纪律段第一句必须硬钉聚合根为唯一工作区:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("禁止在任何成员仓目录"),
+        "纪律段必须携带成员仓目录负边界禁线:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("root recipe auditor 逐路径把关"),
+        "纪律段必须声明 auditor 逐路径把关:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("fail-closed"),
+        "纪律段必须声明越界=该命令 rejected+发布 fail-closed 后果:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("零文件变更的空完成"),
+        "纪律段必须携带 zero-action 正向句:\n{prompt}"
+    );
 }
 
 // Task 1c-coordinator:credential phase 与 run-bound audit 时序的内嵌测试。
@@ -1110,5 +1184,32 @@ mod provider_turn_lcg_tests {
             pre_check.status,
             AggregateInitializationStepStatus::Completed
         );
+    }
+
+    /// OracleAggInitScope 红绿测(纯函数面,镜像 r54 worktree_discipline
+    /// 形态):prompt 拼接钉真实 canonical aggregate_root 绝对路径+四句
+    /// 纪律结构,recipe 命令文本保持逐字前缀(不经 gateway 即可消费
+    /// `recipe_prompt` 纯函数)。
+    #[test]
+    fn recipe_prompt_pins_scope_discipline_with_real_aggregate_root() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let aggregate_root = temp.path().join("aggregate-root");
+        std::fs::create_dir_all(&aggregate_root).unwrap();
+        let canonical_root = std::fs::canonicalize(&aggregate_root).unwrap();
+
+        let prompt = GatewayBackedAggregateProviderTurnDriver::recipe_prompt(
+            AggregateInitializationStepKind::RuleAndMcpConfig,
+            &canonical_root,
+        );
+        use crate::product::repository_store::RepositoryInitializationStepKind as RepoStep;
+        assert!(
+            prompt.starts_with(&format!(
+                "{}\n{}",
+                RepoStep::RuleConfig.command().unwrap(),
+                RepoStep::McpConfiguration.command().unwrap()
+            )),
+            "recipe 命令文本必须保持 prompt 逐字前缀:\n{prompt}"
+        );
+        super::assert_aggregate_scope_discipline(&prompt, &canonical_root);
     }
 }
