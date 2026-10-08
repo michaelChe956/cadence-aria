@@ -94,11 +94,27 @@ fn workspace_repository(
                     let target_ids = unique_ids(design.involved_repository_ids);
                     // 方案X草稿态（缺陷 #5，同缺陷 #2 修法 A 口径）：involved 空 =
                     // AI 自决之前，目标锚定 LC 聚合根视图；回写 involved 后恢复
-                    // 唯一成员解析；≥2 成员保持 TargetAmbiguous fail-closed 不变。
+                    // 唯一成员解析。
                     if target_ids.is_empty() {
                         return Ok(aggregate_root_view(&manifest));
                     }
-                    let logical_id = unique_target(target_ids, &design.id)?;
+                    // r62(codex-6 design resume 现场):确认面已合法化多仓 Design
+                    // (REQ-PLN-05 决策 3b:involved>1 + change_order 通过确认
+                    // gate 落盘),路由面若对同一数据 TargetAmbiguous,则确认成功
+                    // 后修订轮永远 fail-closed(现场 design_spec_0001 involved=
+                    // [alpha,beta] 修订即拒)。≥2 involved 且 change_order 非空
+                    // 时按首成员确定性锚定(change_order 是该形态的确定性实施
+                    // 顺序,首仓=author 修订目标;与 plan 会话 selection.focus
+                    // 回落先例 REQ-COD-04 对称);change_order 空(未回写完成/
+                    // 中间态)保持 TargetAmbiguous fail-closed 不放宽。
+                    let logical_id = if target_ids.len() >= 2 {
+                        match design.change_order.first() {
+                            Some(first) if target_ids.contains(first) => *first,
+                            _ => unique_target(target_ids, &design.id)?,
+                        }
+                    } else {
+                        unique_target(target_ids, &design.id)?
+                    };
                     resolve_selected_logical_repository(
                         app_paths,
                         &session.project_id,
@@ -678,6 +694,49 @@ mod tests {
             self.design_session_for("issue_0001", involved)
         }
 
+        /// r62(codex design resume 现场):多仓 Design 的 change_order
+        /// 参数化变体(REQ-PLN-05:involved>1 必须 change_order)。
+        fn design_session_with_change_order(
+            &self,
+            involved: Vec<LogicalRepositoryId>,
+            change_order: Vec<LogicalRepositoryId>,
+        ) -> crate::product::models::WorkspaceSessionRecord {
+            let lifecycle =
+                crate::product::lifecycle_store::LifecycleStore::new(self.paths.clone());
+            let design = lifecycle
+                .create_design_spec(crate::product::lifecycle_store::CreateDesignSpecInput {
+                    project_id: "project_0001".to_string(),
+                    issue_id: "issue_0001".to_string(),
+                    story_spec_ids: Vec::new(),
+                    title: "lc multi-repo design".to_string(),
+                    aggregate_codebase: Some(
+                        crate::product::lifecycle_store::AggregateDesignSpecScope {
+                            logical_codebase_ref: self.manifest.logical_codebase_id,
+                            effective_member_ids: self.manifest.member_ids.clone(),
+                            involved_repository_ids: involved,
+                            change_order,
+                        },
+                    ),
+                })
+                .unwrap();
+            lifecycle
+                .create_workspace_session(
+                    crate::product::lifecycle_store::CreateWorkspaceSessionInput {
+                        project_id: "project_0001".to_string(),
+                        issue_id: "issue_0001".to_string(),
+                        entity_id: design.id,
+                        workspace_type: crate::product::models::WorkspaceType::Design,
+                        author_provider: crate::product::models::ProviderName::ClaudeCode,
+                        reviewer_provider: Some(crate::product::models::ProviderName::ClaudeCode),
+                        review_rounds: 1,
+                        superpowers_enabled: false,
+                        openspec_enabled: false,
+                        work_item_plan_options: None,
+                    },
+                )
+                .unwrap()
+        }
+
         fn design_session_for(
             &self,
             issue_id: &str,
@@ -867,6 +926,32 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(stable_routing_code(&error), "repository_routing_ambiguous");
+    }
+
+    /// r62(codex-6 design resume 现场)红→绿主锁:确认面合法化的多仓 Design
+    /// (REQ-PLN-05 决策 3b:involved>1 + change_order 通过确认 gate 落盘)在
+    /// 会话路由面不再 TargetAmbiguous——修订轮按 change_order 首成员确定性
+    /// 锚定(与 plan 会话 selection.focus 回落先例 REQ-COD-04 对称;现场:
+    /// design_spec_0001 involved=[alpha,beta] change_order=[alpha,beta],
+    /// 修订轮 resolve 直接拒绝)。
+    #[test]
+    fn lc_design_with_multiple_involved_and_change_order_anchors_first_member() {
+        let fixture = LcStoryRoutingFixture::new();
+        let session = fixture.design_session_with_change_order(
+            vec![fixture.member_logical_id, fixture.member_b_logical_id],
+            vec![fixture.member_logical_id, fixture.member_b_logical_id],
+        );
+        let repository = workspace_repository_for_session(
+            &fixture.paths,
+            &LifecycleStore::new(fixture.paths.clone()),
+            &session,
+        )
+        .expect("multi-repo design with change order anchors the first member");
+        assert_eq!(repository.path, fixture.member_path);
+        assert_eq!(
+            repository.logical_repository_id,
+            Some(fixture.member_logical_id)
+        );
     }
 
     /// 缺陷 #6（2026-10-02 全链 E2E）红→绿主锁：per-LC（v1.3）布局——成员/
