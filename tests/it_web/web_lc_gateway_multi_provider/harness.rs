@@ -1615,15 +1615,36 @@ impl MatrixEnvironment {
     }
 
     /// 固定 Claude recipe 的真实聚合初始化(产品确认走真实 HTTP gate)。
-    /// 真实聚合初始化(固定 Claude recipe):对概率性 receipt Rejected
-    /// (现场 /rule-config 审计拒绝两轮复现,产品标 retryable)按新产品
-    /// operation 有界重试——每轮失败先抄录该轮 receipts 到
-    /// diagnostics/attempt-N/,拒绝轮证据全留;最终失败才保留 tempdir。
+    /// 真实聚合初始化(固定 Claude recipe):对概率性失败(receipt
+    /// Rejected/CLI 写错 scope,产品标 retryable)按新产品 operation
+    /// 有界重试——每轮失败先抄录该轮 receipts 到 diagnostics/attempt-N/,
+    /// 拒绝轮证据全留;最终失败才保留 tempdir。
+    ///
+    /// r57:失败 attempt 可能把 root recipe 工件写进聚合根
+    /// (AGENTS.md/CLAUDE.md/.claude/…),下一次新 operation 的严格
+    /// preflight 会按 reject_owned_root_files 永拒(recipe replay 豁免
+    /// 只认 Completed operation 的 receipt);CLI 也可能把成员仓写脏
+    /// (r57 attempt1 把整套单仓布局写进 alpha/beta,114 个 DENY)。所以
+    /// 首次 attempt 前冻结根级 pristine 条目名,失败之后、下一次 attempt
+    /// 之前按 [`reset_aggregate_root_for_retry`] 复位。只有
+    /// `initialization_failed`(operation 已 durable 终态、worker 已退
+    /// 出)才会进入下一轮,超时轮(worker 可能仍活着)不复位不重试。
     async fn run_real_aggregate_initialization(&mut self) -> Result<(), LiveMatrixFailure> {
         fp_enter_phase("env", "aggregate_init", "-");
         const MAX_ATTEMPTS: usize = 3;
+        let pristine_root_entries: Vec<String> = std::fs::read_dir(self.aggregate_root_path())
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter_map(|entry| entry.file_name().into_string().ok())
+                    .collect()
+            })
+            .unwrap_or_default();
         let mut last_failure = None;
         for attempt in 1..=MAX_ATTEMPTS {
+            if attempt > 1 {
+                reset_aggregate_root_for_retry(self.aggregate_root_path(), &pristine_root_entries);
+            }
             match self.run_initialization_once(attempt).await {
                 Ok(()) => return Ok(()),
                 Err(failure) => {
@@ -4911,6 +4932,67 @@ fn git_snapshot(path: &Path) -> Value {
     })
 }
 
+/// r57:聚合初始化有界重试之间的聚合根复位计划。失败 attempt 可能已把
+/// root recipe 工件写进聚合根(AGENTS.md/CLAUDE.md/.claude/…),下一次
+/// 新 operation 的严格 preflight 会按 reject_owned_root_files 拒绝
+/// (recipe replay 豁免只认 Completed operation 的 receipt 证明);CLI
+/// 也可能把成员仓写脏(r57 attempt1 把整套单仓布局写进 alpha/beta,
+/// 114 个 DENY)。计划 = 根级「新增于 pristine 之外」的条目(排序稳定
+/// 便于足迹比对);pristine 条目本身不删,git 仓复位由
+/// [`reset_aggregate_root_for_retry`] 用 git 硬复位完成。
+fn aggregate_root_retry_reset_plan(pristine: &[String], current: &[String]) -> Vec<String> {
+    let mut extras: Vec<String> = current
+        .iter()
+        .filter(|name| !pristine.iter().any(|kept| kept == *name))
+        .cloned()
+        .collect();
+    extras.sort();
+    extras
+}
+
+/// r57:执行 [`aggregate_root_retry_reset_plan`] 的复位——删除根级非
+/// pristine 条目;对 pristine 内每个 git 仓(reset --hard + clean -fdx)
+/// 从 HEAD 恢复成员 checkout。仅由失败终态(`initialization_failed`,
+/// worker 已退出)后的下一轮 attempt 调用,绝不与在跑 worker 并发。
+/// 每个动作打一行足迹;git 失败按 `run_git` 断言风格直接 panic(夹具
+/// 环境损坏须显式失败,不得静默带脏重试)。
+fn reset_aggregate_root_for_retry(canonical_root: &Path, pristine: &[String]) {
+    let current: Vec<String> = std::fs::read_dir(canonical_root)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter_map(|entry| entry.file_name().into_string().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    for name in aggregate_root_retry_reset_plan(pristine, &current) {
+        let path = canonical_root.join(&name);
+        let removed = if path.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        fp(
+            "agg_root_retry_reset",
+            format_args!(
+                "remove {name}: {}",
+                if removed.is_ok() { "ok" } else { "failed" }
+            ),
+        );
+    }
+    for name in pristine {
+        let member = canonical_root.join(name);
+        if member.join(".git").is_dir() {
+            run_git(&member, &["reset", "--hard", "-q", "HEAD"]);
+            run_git(&member, &["clean", "-fdxq"]);
+            fp(
+                "agg_root_retry_reset",
+                format_args!("git restore member {name}"),
+            );
+        }
+    }
+}
+
 fn env_timeout_secs(name: &str, default_secs: u64) -> u64 {
     std::env::var(name)
         .ok()
@@ -6097,6 +6179,105 @@ mod coding_resume_role_filter_tests {
             latest_native_id_in_audits(&mixed, &provider, Some(CODING_EXECUTOR_ROLE)),
             Some("exec-native-2".to_string()),
             "provider 维过滤不得被他家 provider 启动污染"
+        );
+    }
+}
+
+#[cfg(test)]
+mod aggregate_root_retry_reset_tests {
+    use super::*;
+
+    /// r57 钉死:复位计划只挑 pristine 之外的新增条目,排序稳定。
+    #[test]
+    fn lcg_retry_reset_plan_picks_only_non_pristine_entries_sorted() {
+        let pristine = vec![
+            "alpha".to_string(),
+            "beta".to_string(),
+            "seed.md".to_string(),
+        ];
+        // 失败 attempt 后的根:成员 + 预置文件 + CLI 写入的 recipe 工件。
+        let current = vec![
+            "CLAUDE.md".to_string(),
+            "beta".to_string(),
+            "cadence".to_string(),
+            "alpha".to_string(),
+            "AGENTS.md".to_string(),
+            "seed.md".to_string(),
+        ];
+        assert_eq!(
+            aggregate_root_retry_reset_plan(&pristine, &current),
+            vec![
+                "AGENTS.md".to_string(),
+                "CLAUDE.md".to_string(),
+                "cadence".to_string(),
+            ],
+            "r57 attempt2 把 AGENTS.md/CLAUDE.md 写进聚合根后,attempt3 的\
+             严格 preflight 永拒——重试必须先按计划删掉这些新增条目"
+        );
+        // 干净根(与 pristine 一致)零动作。
+        assert!(aggregate_root_retry_reset_plan(&pristine, &pristine).is_empty());
+    }
+
+    /// r57 钉死(真 git):复位删除根级 recipe 工件、成员仓硬复位回
+    /// HEAD、pristine 非 git 条目原样保留。
+    #[test]
+    fn lcg_retry_reset_removes_recipe_artifacts_and_restores_members() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("aggregate-root");
+        std::fs::create_dir_all(root.join("alpha")).expect("create member");
+        git_repo_at(&root.join("alpha"));
+        std::fs::write(root.join("alpha").join("lib.rs"), "committed").expect("seed");
+        run_git(&root.join("alpha"), &["add", "."]);
+        run_git(
+            &root.join("alpha"),
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "-m",
+                "seed",
+            ],
+        );
+        std::fs::write(root.join("seed.md"), "pristine").expect("pristine file");
+        let pristine = vec![
+            "alpha".to_string(),
+            "seed.md".to_string(),
+            // 根级 CLI 工件在 pristine 之外。
+        ];
+
+        // 失败 attempt 的现场:根级 recipe 工件 + 成员仓脏写(r57
+        // attempt1 把 rules/.mcp.json 写进成员仓的形态)。
+        std::fs::write(root.join("AGENTS.md"), "cli wrote").expect("artifact");
+        std::fs::create_dir_all(root.join(".claude").join("rules")).expect("rules dir");
+        std::fs::write(
+            root.join(".claude").join("rules").join("language.md"),
+            "cli wrote",
+        )
+        .expect("rule");
+        std::fs::write(root.join("alpha").join("dirty-rules.md"), "cli wrote").expect("dirty");
+
+        reset_aggregate_root_for_retry(&root, &pristine);
+
+        assert!(!root.join("AGENTS.md").exists(), "根级 recipe 工件必须删除");
+        assert!(
+            !root.join(".claude").exists(),
+            "根级 recipe 目录必须整体删除"
+        );
+        assert!(
+            root.join("seed.md").exists(),
+            "pristine 非 git 条目必须原样保留"
+        );
+        assert!(
+            !root.join("alpha").join("dirty-rules.md").exists(),
+            "成员仓脏写必须被 git 复位清掉"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("alpha").join("lib.rs")).expect("lib"),
+            "committed",
+            "成员仓已提交内容必须从 HEAD 恢复"
         );
     }
 }
