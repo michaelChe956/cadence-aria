@@ -43,6 +43,7 @@ fn complete_baseline_cell(
         audit_projection_digest: "sha256:audit-projection-digest".to_string(),
         frozen_projection_digest: "sha256:audit-projection-digest".to_string(),
         native_resume_confirmed_id: None,
+        native_resume_reattached: false,
         requested_resume_id: None,
         argv_or_wire_capture_exists: true,
         approval_and_tool_events_exist: true,
@@ -168,6 +169,35 @@ fn lcg_t10_evidence_requires_exact_version_wire_and_native_confirmation() {
         &canonical_root,
         &member_worktree,
         "原生恢复确认 id 与请求 id 不一致",
+    );
+    // kimi-9(r10):reattached(在途 coder run 重挂)是 resume 格第二合法
+    // 会话引用后开全新会话是产品冻结设计;重挂证据见
+    // coding_resume_native_reattach_tests)。
+    let mut resume_wrong_native_reattached = baseline.clone();
+    resume_wrong_native_reattached.fresh_or_resume = RESUME.to_string();
+    resume_wrong_native_reattached.requested_resume_id = Some("native-session-fixture".to_string());
+    resume_wrong_native_reattached.native_resume_confirmed_id =
+        Some("other-native-session".to_string());
+    resume_wrong_native_reattached.native_resume_reattached = true;
+    assert!(
+        resume_wrong_native_reattached
+            .validate_against(&provider, &canonical_root, &member_worktree)
+            .is_ok(),
+        "kimi-9 形:在途 coder run 重挂(reattached)的 resume 格必须放行"
+    );
+    // reattached 不是缺证据的豁免:缺 confirmed id 仍拒绝。
+    let mut resume_requested_only_reattached = baseline.clone();
+    resume_requested_only_reattached.fresh_or_resume = RESUME.to_string();
+    resume_requested_only_reattached.requested_resume_id =
+        Some("native-session-fixture".to_string());
+    resume_requested_only_reattached.native_resume_confirmed_id = None;
+    resume_requested_only_reattached.native_resume_reattached = true;
+    expect_rejected(
+        resume_requested_only_reattached,
+        &provider,
+        &canonical_root,
+        &member_worktree,
+        "reattached 不豁免缺失的原生恢复确认 id",
     );
 
     // ---- 投影摘要面:audit 摘要与冻结摘要漂移必须拒绝 ----

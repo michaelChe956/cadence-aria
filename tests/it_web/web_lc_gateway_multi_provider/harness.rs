@@ -171,6 +171,9 @@ pub(crate) struct EvidenceCell {
     pub audit_projection_digest: String,
     pub frozen_projection_digest: String,
     pub native_resume_confirmed_id: Option<String>,
+    /// kimi-9:resume 格「在途 coder run 重挂」证据(native id 不等时的
+    /// 第二合法确认形态;fresh 格恒 false)。
+    pub native_resume_reattached: bool,
     pub requested_resume_id: Option<String>,
     pub argv_or_wire_capture_exists: bool,
     pub approval_and_tool_events_exist: bool,
@@ -274,19 +277,26 @@ impl EvidenceCell {
                 self.audit_projection_digest, self.frozen_projection_digest
             ));
         }
+        // kimi-9:resume 格第二合法形态——native id 不等但在途 coder run
+        // 重挂(reattached)时放行;fresh 格 reattached 恒 false。
         let native_pair = (
             self.fresh_or_resume.as_str(),
             self.requested_resume_id.as_deref(),
             self.native_resume_confirmed_id.as_deref(),
+            self.native_resume_reattached,
         );
         match native_pair {
-            (fresh, None, None) if fresh == FRESH => {}
-            (resume, Some(requested), Some(confirmed))
+            (fresh, None, None, false) if fresh == FRESH => {}
+            (resume, Some(requested), Some(confirmed), _)
                 if resume == RESUME && requested == confirmed => {}
+            (resume, Some(_requested), Some(_confirmed), true) if resume == RESUME => {}
             _ => {
                 return Err(format!(
-                    "原生恢复确认 != 请求:{} 格请求 {:?} 确认 {:?}",
-                    self.fresh_or_resume, self.requested_resume_id, self.native_resume_confirmed_id
+                    "原生恢复确认 != 请求:{} 格请求 {:?} 确认 {:?}(在途重挂={})",
+                    self.fresh_or_resume,
+                    self.requested_resume_id,
+                    self.native_resume_confirmed_id,
+                    self.native_resume_reattached
                 ));
             }
         }
@@ -349,6 +359,7 @@ impl EvidenceCell {
             "audit_projection_digest": self.audit_projection_digest,
             "frozen_projection_digest": self.frozen_projection_digest,
             "native_resume_confirmed_id": self.native_resume_confirmed_id,
+            "native_resume_reattached": self.native_resume_reattached,
             "requested_resume_id": self.requested_resume_id,
             "argv_or_wire_capture_exists": self.argv_or_wire_capture_exists,
             "approval_and_tool_events_exist": self.approval_and_tool_events_exist,
@@ -3568,6 +3579,10 @@ impl MatrixEnvironment {
         let deadline = tokio::time::Instant::now() + self.stage_timeout;
         let mut idle_deadline = tokio::time::Instant::now() + IDLE_PING_SECS;
         let coding_started = std::time::Instant::now();
+        // kimi-9:resume 窗口在途 coder run 重挂检测(见
+        // InflightCoderRunTracker;fresh 窗口内启动的 run 不触发)。
+        let pump_started_at = Utc::now();
+        let mut inflight_tracker = InflightCoderRunTracker::default();
         let mut events_seen = 0u64;
         fp(
             "coding_pump_begin",
@@ -3738,6 +3753,12 @@ impl MatrixEnvironment {
                         .await;
                 }
                 "coding_session_state" => {
+                    // kimi-9:在途 coder run 重挂检测(resume 格原生恢复
+                    // 证据;见 InflightCoderRunTracker)。
+                    inflight_tracker.observe(&message, pump_started_at);
+                    if inflight_tracker.reattached() {
+                        observation.reattached_inflight_run = true;
+                    }
                     if let Some(status) = message.get("status").and_then(Value::as_str) {
                         observation.record_status(status);
                         fp(
@@ -4184,6 +4205,9 @@ struct StageObservation {
     /// 非空 markdown)——plan fresh 的产物判定用(停门模型:候选产物已
     /// 生成,confirmed plan 归 resume 格 confirm 后)。
     artifact_markdown_seen: bool,
+    /// kimi-9:resume 窗口内观察到重连前启动的 coder role run 从 running
+    /// 走到 completed(在途 run 重挂;attempt 级原生恢复证据之一)。
+    reattached_inflight_run: bool,
     observed_spawn_count: usize,
     /// F3:驱动侧解析到的 provider 子进程 PID(stream log 文件名)。
     observed_pid: Option<String>,
@@ -4213,6 +4237,7 @@ impl StageObservation {
             execution_origin: "full_chain".to_string(),
             completed_product_artifact_exists: false,
             artifact_markdown_seen: false,
+            reattached_inflight_run: false,
             observed_spawn_count: 0,
             observed_pid: None,
         }
@@ -4269,6 +4294,7 @@ impl StageObservation {
             audit_projection_digest: String::new(),
             frozen_projection_digest: String::new(),
             native_resume_confirmed_id: None,
+            native_resume_reattached: false,
             requested_resume_id: None,
             argv_or_wire_capture_exists: false,
             approval_and_tool_events_exist: false,
@@ -4307,6 +4333,7 @@ impl StageObservation {
         cell.target = env.member_worktree.clone();
         cell.requested_resume_id = self.requested_resume_id.clone();
         cell.native_resume_confirmed_id = self.native_confirmed_id.clone();
+        cell.native_resume_reattached = self.reattached_inflight_run;
         cell.completed_product_artifact_exists = self.completed_product_artifact_exists;
         // F3/F5:PID 可追溯(要么真实 PID,要么不可达说明)+spawn 计数。
         cell.provider_pid = self.observed_pid.clone();
@@ -4392,18 +4419,22 @@ impl StageObservation {
             };
             cell.denied_reason = Some(reason);
         } else if self.force_resume {
-            // resume 格:原生恢复确认必须等于请求 id。
-            match (&self.requested_resume_id, &self.native_confirmed_id) {
-                (Some(requested), Some(confirmed)) if requested == confirmed => {
-                    cell.capability_state = "confirmed".to_string();
-                }
-                _ => {
-                    cell.capability_state = "unknown".to_string();
-                    cell.denied_reason = Some(format!(
-                        "原生恢复未确认:请求 {:?} 实测 {:?}",
-                        self.requested_resume_id, self.native_confirmed_id
-                    ));
-                }
+            // resume 格:kimi-9 修订——确认=(请求 id==实测 id)或在途
+            // coder run 重挂(判据语义见 coding_resume_native_confirmed)。
+            if coding_resume_native_confirmed(
+                &self.requested_resume_id,
+                &self.native_confirmed_id,
+                self.reattached_inflight_run,
+            ) {
+                cell.capability_state = "confirmed".to_string();
+            } else {
+                cell.capability_state = "unknown".to_string();
+                cell.denied_reason = Some(format!(
+                    "原生恢复未确认:请求 {:?} 实测 {:?}(在途重挂={})",
+                    self.requested_resume_id,
+                    self.native_confirmed_id,
+                    self.reattached_inflight_run
+                ));
             }
         } else if cell.exact_version.is_empty() {
             cell.capability_state = "unknown".to_string();
@@ -4947,6 +4978,7 @@ fn carried_cell(
         audit_projection_digest: String::new(),
         frozen_projection_digest: String::new(),
         native_resume_confirmed_id: None,
+        native_resume_reattached: false,
         requested_resume_id: None,
         argv_or_wire_capture_exists: false,
         approval_and_tool_events_exist: false,
@@ -5359,6 +5391,86 @@ fn latest_native_id_in_audits(
             provider_matches_record(provider, record) && role.is_none_or(|role| record.role == role)
         })
         .map(|(_, record)| record.provider_session_id.clone())
+}
+
+/// kimi-9 现场(r10 2026-10-09)coding resume 原生恢复确认判据(纯函数,
+/// `coding_resume_native_reattach_tests` 钉死):确认 = (a) 请求 id ==
+/// 实测 id(真 native resume:kimi 方言 session/load 不回显、session/update
+/// 携带同 id;或零 spawn 空转形——重连即终态,两次扫描读同一条旧审计,
+/// kimi-8 形),或 (b) 重连窗口内观察到「重连前启动的 coder role run 从
+/// running 走到 completed」(在途 run 重挂:provider 子进程跨 WS 重连存活,
+/// 事件继续流到新连接;不产生新 provider_start 审计)。blocked 门
+/// retry_coding 按产品冻结设计清除 coder 会话引用后开全新 native 会话
+/// (gates_parts/blocked_gate.inc.rs RetryCoding→clear_attempt_provider_
+/// conversation),重挂之后的 retry spawn 拿新 id 不构成「未恢复」;两条件
+/// 皆缺才是真 fork/未恢复(denied)。
+fn coding_resume_native_confirmed(
+    requested: &Option<String>,
+    confirmed: &Option<String>,
+    reattached_inflight_run: bool,
+) -> bool {
+    match (requested, confirmed) {
+        (Some(requested), Some(confirmed)) if requested == confirmed => true,
+        (Some(_), Some(_)) => reattached_inflight_run,
+        _ => false,
+    }
+}
+
+/// kimi-9:resume 窗口在途 coder run 重挂检测(coding_session_state 帧流
+/// 累积态;`Default` 构造,`observe` 逐帧喂入,纯数据累积可单测)。
+#[derive(Default)]
+struct InflightCoderRunTracker {
+    /// 首见即 running 且 started_at 早于泵启动时刻的 coder run id 集合。
+    started_before_window: std::collections::BTreeSet<String>,
+    reattached: bool,
+}
+
+impl InflightCoderRunTracker {
+    fn observe(&mut self, frame: &Value, pump_started_at: chrono::DateTime<chrono::Utc>) {
+        let Some(runs) = frame.get("role_runs").and_then(Value::as_array) else {
+            return;
+        };
+        for run in runs {
+            let (Some(id), Some(role), status) = (
+                run.get("id").and_then(Value::as_str),
+                run.get("role").and_then(Value::as_str),
+                run.get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+            ) else {
+                continue;
+            };
+            if role != "coder" {
+                continue;
+            }
+            match status {
+                "running" => {
+                    let started_before = run
+                        .get("started_at")
+                        .and_then(Value::as_str)
+                        .and_then(|started_at| {
+                            chrono::DateTime::parse_from_rfc3339(started_at).ok()
+                        })
+                        .is_some_and(|started| {
+                            started.with_timezone(&chrono::Utc) < pump_started_at
+                        });
+                    if started_before {
+                        self.started_before_window.insert(id.to_string());
+                    }
+                }
+                "completed" => {
+                    if self.started_before_window.contains(id) {
+                        self.reattached = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn reattached(&self) -> bool {
+        self.reattached
+    }
 }
 
 /// F2(r58 深掏审计):快照 CLI 版本漂移裁决(纯函数,三分支由
@@ -6889,6 +7001,144 @@ mod coding_resume_role_filter_tests {
             latest_native_id_in_audits(&mixed, &provider, Some(CODING_EXECUTOR_ROLE)),
             Some("exec-native-2".to_string()),
             "provider 维过滤不得被他家 provider 启动污染"
+        );
+    }
+}
+
+/// kimi-9 现场(r10 2026-10-09)coding resume 判据修订:coding attempt 的
+/// 原生恢复有两条合法形态——(a)executor native id 前后一致(真 session
+/// 复用,或零 spawn 空转形,kimi-8 形);(b)在途 coder run 重挂(WS 重连后
+/// 重连前启动的 coder role run 继续流出事件至 completed,不产生新
+/// provider_start 审计;kimi-9 现场 run 0019:03:10:18 启动、03:13:26 完成,
+/// 跨 fresh/resume 边界)。blocked 门 retry_coding 按产品冻结设计清除 coder
+/// 会话引用后开全新 native 会话(gates_parts/blocked_gate.inc.rs
+/// RetryCoding→clear_attempt_provider_conversation),重挂后的 retry spawn
+/// 拿新 id 不构成「未恢复」。判据纯函数与重挂检测由本模块钉死。
+mod coding_resume_native_reattach_tests {
+    use super::*;
+
+    #[test]
+    fn lcg_coding_resume_native_confirmed_accepts_id_equality_or_reattachment() {
+        // (a) 请求==实测:真 native resume(kimi 方言 session/load→
+        // session/update 同 id)或零 spawn 空转形(kimi-8:重连即终态,
+        // 两次扫描读同一条旧审计)。
+        assert!(coding_resume_native_confirmed(
+            &Some("session-a".to_string()),
+            &Some("session-a".to_string()),
+            false
+        ));
+        // (b) kimi-9 形:实测 id 变(retry 门清引用后全新会话)+ 在途
+        // coder run 重挂证据 → 恢复成立。
+        assert!(coding_resume_native_confirmed(
+            &Some("session-ddde50e2".to_string()),
+            &Some("session-8e4c3334".to_string()),
+            true
+        ));
+        // 真 fork/未恢复:实测 id 变且无重挂证据 → 不确认。
+        assert!(!coding_resume_native_confirmed(
+            &Some("session-a".to_string()),
+            &Some("session-b".to_string()),
+            false
+        ));
+        // 双缺(扫描不到 executor 启动)不因重挂标志放行。
+        assert!(!coding_resume_native_confirmed(&None, &None, true));
+    }
+
+    fn state_frame(runs: &[(&str, &str, &str, &str)]) -> Value {
+        json!({
+            "type": "coding_session_state",
+            "status": "running",
+            "role_runs": runs
+                .iter()
+                .map(|(id, role, status, started_at)| {
+                    json!({
+                        "id": id,
+                        "role": role,
+                        "status": status,
+                        "started_at": started_at,
+                    })
+                })
+                .collect::<Vec<_>>(),
+        })
+    }
+
+    #[test]
+    fn lcg_inflight_coder_run_tracker_detects_pre_window_run_completion() {
+        // kimi-9 现场:resume 窗口 03:12:18 起;run 0019 03:10:18 启动
+        //(窗口前)、首帧 running、后续帧 completed → 重挂证据成立。
+        let pump_started = chrono::DateTime::parse_from_rfc3339("2026-10-09T03:12:18Z")
+            .expect("ts")
+            .with_timezone(&chrono::Utc);
+        let mut tracker = InflightCoderRunTracker::default();
+        tracker.observe(
+            &state_frame(&[(
+                "coding_role_run_0019",
+                "coder",
+                "running",
+                "2026-10-09T03:10:18.933682317+00:00",
+            )]),
+            pump_started,
+        );
+        assert!(!tracker.reattached(), "首帧 running 只登记候选,不判定");
+        tracker.observe(
+            &state_frame(&[(
+                "coding_role_run_0019",
+                "coder",
+                "completed",
+                "2026-10-09T03:10:18.933682317+00:00",
+            )]),
+            pump_started,
+        );
+        assert!(
+            tracker.reattached(),
+            "窗口前启动的 coder run 在窗口内完成=重挂"
+        );
+    }
+
+    #[test]
+    fn lcg_inflight_coder_run_tracker_ignores_window_started_and_non_coder_runs() {
+        let pump_started = chrono::DateTime::parse_from_rfc3339("2026-10-09T03:12:18Z")
+            .expect("ts")
+            .with_timezone(&chrono::Utc);
+        let mut tracker = InflightCoderRunTracker::default();
+        // 窗口内启动的 run(重连后新 spawn)不是重挂;reviewer run 不算。
+        tracker.observe(
+            &state_frame(&[
+                (
+                    "coding_role_run_0020",
+                    "coder",
+                    "running",
+                    "2026-10-09T03:13:32.316936864+00:00",
+                ),
+                (
+                    "coding_role_run_0008",
+                    "code_reviewer",
+                    "running",
+                    "2026-10-09T02:36:47.435235214+00:00",
+                ),
+            ]),
+            pump_started,
+        );
+        tracker.observe(
+            &state_frame(&[
+                (
+                    "coding_role_run_0020",
+                    "coder",
+                    "completed",
+                    "2026-10-09T03:13:32.316936864+00:00",
+                ),
+                (
+                    "coding_role_run_0008",
+                    "code_reviewer",
+                    "completed",
+                    "2026-10-09T02:36:47.435235214+00:00",
+                ),
+            ]),
+            pump_started,
+        );
+        assert!(
+            !tracker.reattached(),
+            "窗口内启动的 coder run 与 reviewer run 的完成都不是重挂证据"
         );
     }
 }
