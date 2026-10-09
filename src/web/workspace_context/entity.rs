@@ -1,6 +1,7 @@
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::json_store::ProductStoreError;
 use crate::product::lifecycle_store::LifecycleStore;
+use crate::product::logical_codebase::LogicalRepositoryId;
 use crate::product::models::{
     DesignSpecRecord, IssueRecord, IssueWorkItemPlan, RepositoryRecord, SpecVersionRecord,
     StorySpecRecord, WorkspaceSessionRecord, WorkspaceType,
@@ -13,6 +14,12 @@ pub(super) struct WorkspaceEntityContext {
     pub(super) title: String,
     pub(super) repository_id: String,
     pub(super) linked_context: Vec<String>,
+    /// pi-7 钉定缺口修复：Design 分支携带 record 当前聚合视野（出生值=调用方钉定；
+    /// 修订轮=回写后的当前值），供 workspace context prompt 注入钉定块——否则 AI
+    /// sentinel 自决声明经方案X阶段2 write-back 覆写钉定（pi r7 现场 [alpha,beta]）
+    /// → Confirmed 后 plan 单候选 preflight found 2。其余类型恒空。
+    pub(super) aggregate_involved: Vec<LogicalRepositoryId>,
+    pub(super) aggregate_change_order: Vec<LogicalRepositoryId>,
 }
 
 pub(super) fn workspace_entity_context(
@@ -29,6 +36,8 @@ pub(super) fn workspace_entity_context(
                 title: story.title,
                 repository_id: story.repository_id,
                 linked_context: Vec::new(),
+                aggregate_involved: Vec::new(),
+                aggregate_change_order: Vec::new(),
             })
         }
         WorkspaceType::Design => {
@@ -44,6 +53,8 @@ pub(super) fn workspace_entity_context(
                     issue_repo_id(issue)?
                 },
                 linked_context: stories,
+                aggregate_involved: design.involved_repository_ids.clone(),
+                aggregate_change_order: design.change_order.clone(),
             })
         }
         WorkspaceType::WorkItem => {
@@ -60,6 +71,8 @@ pub(super) fn workspace_entity_context(
                 title: runtime.projection_bundle.human_projection.title,
                 repository_id: issue_repo_id(issue)?,
                 linked_context,
+                aggregate_involved: Vec::new(),
+                aggregate_change_order: Vec::new(),
             })
         }
         WorkspaceType::WorkItemPlan => {
@@ -81,6 +94,8 @@ pub(super) fn workspace_entity_context(
                     issue_repo_id(issue)?
                 },
                 linked_context,
+                aggregate_involved: Vec::new(),
+                aggregate_change_order: Vec::new(),
             })
         }
     }

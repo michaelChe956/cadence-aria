@@ -765,9 +765,18 @@ pub fn aggregate_story_scope_prompt(
 /// 接入点：由 Web Design 生成/修订入口在逻辑代码库分支调用（`LogicalCodebaseFeature::is_enabled()`
 /// 且 issue 有 codebase-selection.json 时，经 `PlanningContextResolver::build` 取 inventory_injection
 /// 后注入）。方案 X 阶段1已由 generate_design_specs 接线。
+///
+/// pi-7 钉定缺口根修：调用方钉定（`GenerateDesignSpecsRequest.involved_repository_ids`/
+/// `change_order`，方案X 阶段1）此前只落 record 出生值，不进 AI 输入——AI sentinel 自决
+/// 声明（pi r7 实测 [alpha,beta]）经方案X阶段2 write-back 覆写钉定值，Confirmed 后
+/// plan 单候选 preflight 按设计硬拒（found 2）。`pinned_involved` 非空时注入钉定块：
+/// sentinel 必须原样输出钉定集合（不得增删成员/不得改变顺序），范围异议走 artifact
+/// blocker，禁止 sentinel 自决改写（r23 story 钉定同款对称）。
 pub fn aggregate_design_scope_prompt(
     inventory_rendered: &str,
     effective_member_ids: &[crate::product::logical_codebase::LogicalRepositoryId],
+    pinned_involved: &[crate::product::logical_codebase::LogicalRepositoryId],
+    pinned_change_order: &[crate::product::logical_codebase::LogicalRepositoryId],
 ) -> String {
     let mut prompt = String::new();
     prompt.push_str("\n\n## 聚合代码库成员清单（involved repositories 必须从此集合中选取）：\n");
@@ -785,6 +794,35 @@ pub fn aggregate_design_scope_prompt(
          顺序按契约依赖推进，例如「先改公共契约 → 再改 provider → 最后改 consumer」。\n\
          若无法确定涉及仓库或改动顺序，必须明确声明并进入 blocker，禁止猜测。",
     );
+    if !pinned_involved.is_empty() {
+        let involved_list = pinned_involved
+            .iter()
+            .map(|member| member.0.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let change_order_line = if pinned_change_order.is_empty() {
+            "change_order = (未钉定；必须恰好覆盖全部 involved_repository_ids 且不重复)".to_string()
+        } else {
+            format!(
+                "change_order = [{}]",
+                pinned_change_order
+                    .iter()
+                    .map(|member| member.0.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        prompt.push_str("\n\n## 聚合视野钉定（调用方已确定，不得自决改写）\n");
+        prompt.push_str(&format!(
+            "本次 Design 的聚合视野已由调用方钉定：\n\
+             - involved_repository_ids = [{involved_list}]\n\
+             - {change_order_line}\n\
+             你的 <ARIA_STRUCTURED_OUTPUT> sentinel 必须原样输出这份钉定集合：\n\
+             involved_repository_ids 与 change_order 均不得增删成员、不得改变顺序。\n\
+             若你判断实际改动范围与钉定视野不符（需要扩大或缩小），必须在 artifact 正文中\n\
+             声明 blocker 并说明理由，禁止在 sentinel 中自行改写集合。"
+        ));
+    }
     if !effective_member_ids.is_empty() {
         prompt.push_str("\n可选仓库范围（logical_repository_id）：");
         for member in effective_member_ids {
@@ -885,7 +923,7 @@ mod aggregate_scope_prompt_tests {
     #[test]
     fn aggregate_design_scope_prompt_lists_inventory_involved_change_order_and_blocker() {
         let inventory = "00000000-0000-7000-8000-000000000001 | api | api/ | service\n";
-        let prompt = aggregate_design_scope_prompt(inventory, &[API, WEB]);
+        let prompt = aggregate_design_scope_prompt(inventory, &[API, WEB], &[], &[]);
 
         assert!(
             prompt.contains("聚合代码库成员清单"),
@@ -925,6 +963,48 @@ mod aggregate_scope_prompt_tests {
         // 有效成员 ID 列出以限定 involved 取值范围。
         assert!(prompt.contains("00000000-0000-7000-8000-000000000001"));
         assert!(prompt.contains("00000000-0000-7000-8000-000000000002"));
+    }
+
+    #[test]
+    fn aggregate_design_scope_prompt_pins_caller_scope_for_sentinel_echo() {
+        // pi-7 现场钉定:请求钉 [API] 但 AI sentinel 自决 [API,WEB] 回写覆写 →
+        // plan 单候选 preflight found 2。钉定块要求 sentinel 原样输出。
+        let inventory = "00000000-0000-7000-8000-000000000001 | api | api/ | service\n";
+        let prompt = aggregate_design_scope_prompt(inventory, &[API, WEB], &[API], &[API]);
+
+        assert!(prompt.contains("聚合视野钉定"), "缺钉定块标题：{prompt}");
+        assert!(
+            prompt.contains("involved_repository_ids = [00000000-0000-7000-8000-000000000001]"),
+            "缺钉定 involved 实值：{prompt}"
+        );
+        assert!(
+            prompt.contains("change_order = [00000000-0000-7000-8000-000000000001]"),
+            "缺钉定 change_order 实值：{prompt}"
+        );
+        assert!(
+            prompt.contains("原样输出"),
+            "缺 sentinel 原样输出指令：{prompt}"
+        );
+        assert!(
+            prompt.contains("不得增删成员") && prompt.contains("不得改变顺序"),
+            "缺禁止自决改写指令：{prompt}"
+        );
+        assert!(
+            prompt.contains("声明 blocker"),
+            "缺范围异议 blocker 出口：{prompt}"
+        );
+    }
+
+    #[test]
+    fn aggregate_design_scope_prompt_unpinned_keeps_self_decide_directive_only() {
+        // 不钉定(AI 自决流)保持原指令面,无钉定块——语义不回归。
+        let inventory = "00000000-0000-7000-8000-000000000001 | api | api/ | service\n";
+        let prompt = aggregate_design_scope_prompt(inventory, &[API, WEB], &[], &[]);
+
+        assert!(
+            !prompt.contains("聚合视野钉定"),
+            "未钉定不应出现钉定块：{prompt}"
+        );
     }
 }
 

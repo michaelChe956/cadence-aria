@@ -340,6 +340,141 @@ async fn generate_design_specs_logical_branch_injects_aggregate_prompt() {
     );
 }
 
+
+#[tokio::test]
+async fn generate_design_specs_pinned_scope_pins_involved_in_context_prompt() {
+    // pi-7 plan fresh 现场(SINGLE_CANDIDATE_PREFLIGHT_FAILED found 2):请求钉定
+    // involved/change_order 只落 record 出生值,design 聚合 prompt 不告知 AI——
+    // pi AI sentinel 自决声明 [alpha,beta] 回写覆写(方案X阶段2 write_back),
+    // Confirmed 后 plan 单候选 preflight 按设计硬拒(codex/claude 同链未撞仅因
+    // 其内容自决单仓)。修(r23 钉定同款对称):builder 把 design record 当前
+    // 聚合视野注入 aggregate_design_scope_prompt 钉定块,sentinel 必须原样输出,
+    // 禁止自决改写——调用方钉定从请求贯穿到 AI 输入。
+    let root = tempdir().expect("root");
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects",
+        json!({"name":"Lifecycle","description":null}),
+    )
+    .await;
+
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    IssueStore::new(app_paths.clone())
+        .create(CreateProductIssueInput {
+            project_id: "project_0001".to_string(),
+            repo_id: None,
+            logical_codebase_id: None,
+            title: "多仓聚合 Design 钉定".to_string(),
+            description: Some("跨 api 仓库的聚合设计".to_string()),
+            change_id: None,
+            base_branch: None,
+        })
+        .expect("multi-repo issue");
+    let member_id = LogicalRepositoryId(uuid::Uuid::from_u128(1));
+    seed_logical_codebase(&app_paths, member_id);
+
+    // Design 生成要求至少一个 Confirmed story(validate_confirmed_story_specs)。
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    let story = lifecycle
+        .create_story_spec(CreateStorySpecInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            title: "前置 Story Spec".to_string(),
+            aggregate_codebase: None,
+        })
+        .expect("confirmed story");
+    lifecycle
+        .update_spec_confirmation_status(
+            "project_0001",
+            "issue_0001",
+            &story.id,
+            LifecycleConfirmationStatus::Confirmed,
+        )
+        .expect("confirm story");
+
+    // 请求钉定单成员 involved+change_order(pinned_design_generate_body 同款面)。
+    let (status, design_response) = request_json(
+        app,
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/design-specs:generate",
+        json!({
+            "title":"聚合 Design Spec 钉定",
+            "story_spec_ids":[story.id],
+            "involved_repository_ids":[member_id.0.to_string()],
+            "change_order":[member_id.0.to_string()],
+            "author_provider":"fake",
+            "reviewer_provider":"codex",
+            "review_rounds":3,
+            "superpowers_enabled":false,
+            "openspec_enabled":false
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "pinned Logical design-specs:generate must succeed: {design_response}"
+    );
+    // 钉定落 record 出生值(DTO 无 involved 投影,经 store 断言;非 AI 自决空)。
+    let design_id = design_response["design_specs"][0]["design_spec_id"]
+        .as_str()
+        .expect("design spec id");
+    let design_record = lifecycle
+        .list_design_specs("project_0001", "issue_0001")
+        .expect("list design specs")
+        .into_iter()
+        .find(|design| design.id == design_id)
+        .expect("persisted design record");
+    assert_eq!(
+        design_record.involved_repository_ids,
+        vec![member_id],
+        "出生 involved 必须等于请求钉定"
+    );
+    assert_eq!(
+        design_record.change_order,
+        vec![member_id],
+        "出生 change_order 必须等于请求钉定"
+    );
+
+    // session context message 注入钉定块:sentinel 必须原样输出钉定集合。
+    let messages = design_response["workspace_session"]["messages"]
+        .as_array()
+        .unwrap();
+    let context = messages
+        .iter()
+        .find(|message| {
+            message["role"] == "system"
+                && message["content"]
+                    .as_str()
+                    .is_some_and(|content| content.contains("Workspace 生成任务已准备"))
+        })
+        .expect("generation context message");
+    let content = context["content"].as_str().unwrap();
+    assert!(content.contains("聚合视野钉定"), "缺钉定块标题:{content}");
+    assert!(
+        content.contains("involved_repository_ids = [00000000-0000-0000-0000-000000000001]"),
+        "缺钉定 involved 实值:{content}"
+    );
+    assert!(
+        content.contains("change_order = [00000000-0000-0000-0000-000000000001]"),
+        "缺钉定 change_order 实值:{content}"
+    );
+    assert!(
+        content.contains("原样输出"),
+        "缺 sentinel 原样输出指令:{content}"
+    );
+    assert!(
+        content.contains("不得增删成员") && content.contains("不得改变顺序"),
+        "缺禁止自决改写指令:{content}"
+    );
+}
 // ---- Task 6：confirm gate（多仓 involved + change_order 校验，3b 收紧）----
 // confirm_workspace_entity 在 Confirmed 前对多仓（logical_codebase_ref Some）Spec 校验：
 // ① involved 非空（REQ-PLN-04「AI 不确定即 blocker」）；② Design involved>1 必须 change_order

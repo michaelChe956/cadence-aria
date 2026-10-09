@@ -898,6 +898,8 @@ fn aggregate_design_author_input_sets_structured_output_contract_with_change_ord
         content: crate::product::workspace_engine::aggregate_design_scope_prompt(
             "inventory-rendered",
             &[],
+            &[],
+            &[],
         ),
         checkpoint_id: None,
         created_at: "2026-08-11T00:00:00Z".to_string(),
@@ -1048,6 +1050,8 @@ fn author_family_streaming_inputs_pair_orchestrator_with_deny_file_write_policy(
             WorkspaceType::Design,
             Some(crate::product::workspace_engine::aggregate_design_scope_prompt(
                 "inventory-rendered",
+                &[],
+                &[],
                 &[],
             )),
         ),

@@ -199,6 +199,12 @@ async fn build_workspace_context_message(
                 _ => aggregate_design_scope_prompt(
                     &resolved.inventory_injection.rendered,
                     &resolved.snapshot.effective_member_ids,
+                    // pi-7 钉定缺口:design record 当前聚合视野(出生值=调用方钉定)
+                    // 注入 prompt 钉定块,sentinel 必须原样输出——否则 AI 自决回写
+                    // 覆写钉定(方案X阶段2),Confirmed 后 plan 单候选 preflight
+                    // found 2(pi r7 plan fresh 现场)。
+                    &entity.aggregate_involved,
+                    &entity.aggregate_change_order,
                 ),
             });
     let issue_description = issue
