@@ -167,6 +167,10 @@ export type CreateProductIssueRequest = {
   base_branch?: string | null;
   /// v1.3：逻辑代码库归属；逻辑 issue 时必填，repository_id 为其 active primary 成员。
   logical_codebase_id?: string | null;
+  /// REQ-MRE-01：LC 成员勾选集（logical_repository_id 复数）。非空 → 服务端以
+  /// Explicit selection 落盘（授权上界=勾选集原样）；缺省/空 → 维持存量 AllMembers。
+  /// 单仓路径忽略本字段；null/undefined 不进入请求体。
+  focus_repository_ids?: string[] | null;
 };
 
 

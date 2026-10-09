@@ -3,7 +3,8 @@ use super::support::*;
 use super::*;
 use crate::product::issue_baseline::resolve_effective_base_branch;
 use crate::product::logical_codebase::{
-    IssueCodebaseSelection, IssueCodebaseSelectionStore, LogicalCodebaseStore, MemberStatus,
+    IssueCodebaseSelection, IssueCodebaseSelectionStore, LogicalCodebaseStore, LogicalRepositoryId,
+    MemberStatus,
 };
 
 pub async fn list_workspaces(
@@ -247,7 +248,9 @@ pub(crate) fn issue_baseline_api_error(
 }
 
 /// 逻辑代码库 issue（v1.3）：guard LC 存在（404）→ primary 校验（须属该 LC active
-/// member）→ 建 issue 并持久化归属 → 写该 LC all_members selection（键含 lc_id）。
+/// member）→ focus 勾选集校验（REQ-MRE-01）→ 建 issue 并持久化归属 → 写该 LC
+/// selection（键含 lc_id）：带 focus → Explicit（include=focus=勾选集），否则存量
+/// all_members。
 /// D4 补偿事务：selection 写失败删除刚建 issue → 422；删除亦失败记 orphan → 500。
 fn create_logical_codebase_issue(
     state: &WebAppState,
@@ -259,6 +262,13 @@ fn create_logical_codebase_issue(
 ) -> ApiResult<Json<ProductIssueDto>> {
     require_logical_codebase(app_paths, project_id, logical_codebase_id)?;
     validate_logical_codebase_primary(app_paths, project_id, logical_codebase_id, repository_id)?;
+    // REQ-MRE-01：focus 勾选集先于 issue 创建校验（fail-closed，不留半成品 issue）。
+    let focus = resolve_focus_repository_ids(
+        app_paths,
+        project_id,
+        logical_codebase_id,
+        &request.focus_repository_ids,
+    )?;
 
     let store = IssueStore::new(app_paths.clone());
     let issue = store
@@ -274,8 +284,23 @@ fn create_logical_codebase_issue(
         })
         .map_err(product_store_api_error)?;
 
-    let selection = IssueCodebaseSelection::all_members(project_id, &issue.id, None)
-        .for_logical_codebase(logical_codebase_id);
+    // REQ-MRE-01：请求带 focus → Explicit selection（include=focus=勾选集，durable
+    // 校验 focus⊆include 恒过，授权上界=勾选集原样，change design 关键点 0）；
+    // 不带/空 → 维持存量 all_members（存量兼容，上界=resolve_effective_members）。
+    let selection = if focus.is_empty() {
+        IssueCodebaseSelection::all_members(project_id, &issue.id, None)
+            .for_logical_codebase(logical_codebase_id)
+    } else {
+        IssueCodebaseSelection::explicit(
+            project_id,
+            &issue.id,
+            focus.clone(),
+            Vec::new(),
+            focus,
+            None,
+        )
+        .for_logical_codebase(logical_codebase_id)
+    };
     let selection_result = state.test_controls.save_issue_selection(|| {
         IssueCodebaseSelectionStore::for_lc(app_paths.clone(), logical_codebase_id).save(&selection)
     });
@@ -303,6 +328,69 @@ fn create_logical_codebase_issue(
     }
 
     Ok(Json(product_issue_dto(issue, None)))
+}
+
+/// REQ-MRE-01：解析并校验 focus 勾选集。空（缺省/空数组）=未指定成员范围（调用方
+/// 维持存量 all_members）；非空须 ⊆ 该 LC active 成员（logical id），逐项解析 UUID
+/// 并按请求序去重。越界/非 UUID → 422 fail-closed（先于 issue 创建，不留半成品）。
+fn resolve_focus_repository_ids(
+    app_paths: &crate::product::app_paths::ProductAppPaths,
+    project_id: &str,
+    logical_codebase_id: &str,
+    focus: &[String],
+) -> ApiResult<Vec<LogicalRepositoryId>> {
+    if focus.is_empty() {
+        return Ok(Vec::new());
+    }
+    // 与 validate_logical_codebase_primary 同一 for_lc scoping：校验读到的
+    // manifest/member 与 selection 写入、后续规划解析完全一致。
+    let authority = LogicalCodebaseStore::for_lc(app_paths.clone(), logical_codebase_id);
+    let manifest = authority
+        .load_manifest(project_id)
+        .map_err(product_store_api_error)?
+        .ok_or_else(|| {
+            product_store_api_error(ProductStoreError::NotFound {
+                kind: "logical_codebase_manifest",
+                id: logical_codebase_id.to_string(),
+            })
+        })?;
+    let active_member_ids: std::collections::BTreeSet<LogicalRepositoryId> = authority
+        .list_members(project_id)
+        .map_err(product_store_api_error)?
+        .into_iter()
+        .filter(|member| {
+            manifest.member_ids.contains(&member.logical_repository_id)
+                && member.status == MemberStatus::Active
+        })
+        .map(|member| member.logical_repository_id)
+        .collect();
+
+    let invalid_error = |details: serde_json::Value| {
+        ApiError::validation_with_details(
+            "focus_repository_outside_active_members",
+            "focus_repository_ids must be logical repository ids of active members",
+            details,
+        )
+    };
+    let mut resolved: Vec<LogicalRepositoryId> = Vec::with_capacity(focus.len());
+    let mut unknown: Vec<String> = Vec::new();
+    for raw in focus {
+        let parsed = match uuid::Uuid::parse_str(raw) {
+            Ok(id) => LogicalRepositoryId(id),
+            Err(_) => return Err(invalid_error(json!({ "invalid_repository_id": raw }))),
+        };
+        if active_member_ids.contains(&parsed) {
+            if !resolved.contains(&parsed) {
+                resolved.push(parsed);
+            }
+        } else {
+            unknown.push(raw.clone());
+        }
+    }
+    if !unknown.is_empty() {
+        return Err(invalid_error(json!({ "unknown_repository_ids": unknown })));
+    }
+    Ok(resolved)
 }
 
 /// 逻辑 issue 的 primary 校验：repository_id 必须来自该 LC manifest 的 active member。

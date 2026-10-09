@@ -17,6 +17,9 @@ export type CreateLifecycleIssuePayload = {
   /// REQ-PIB-01：基准分支（单仓）。null=交服务端按默认链解析；仓库无
   /// main/master 时必须显式选择（本对话框前置校验，服务端仍 fail-closed 复核）。
   base_branch: string | null;
+  /// REQ-MRE-01：LC 成员勾选集（成员列表序）。单仓为 null（不进入请求体）；
+  /// 列表序首个勾选成员承载 primary repository_id（勾 1 = 旧单选等价）。
+  focus_repository_ids: string[] | null;
 };
 
 type PrimaryMemberOption = {
@@ -59,7 +62,7 @@ export function CreateLifecycleIssueDialog({
   const [description, setDescription] = useState("");
   // 代码库选择值："" | `repo:{repository_id}` | `lc:{logical_codebase_id}`。
   const [codebaseValue, setCodebaseValue] = useState("");
-  const [primaryRepositoryId, setPrimaryRepositoryId] = useState("");
+  const [checkedLogicalIds, setCheckedLogicalIds] = useState<string[]>([]);
   const [members, setMembers] = useState<PrimaryMemberOption[]>([]);
   const [membersLoading, setMembersLoading] = useState(false);
   const [membersError, setMembersError] = useState<string | null>(null);
@@ -187,14 +190,21 @@ export function CreateLifecycleIssueDialog({
 
     let repositoryId = "";
     let logicalCodebaseId: string | null = null;
+    let focusRepositoryIds: string[] | null = null;
     if (selectedLogicalCodebaseId) {
-      if (!primaryRepositoryId) {
-        setRepositoryError("请选择 Primary 成员");
+      // REQ-MRE-01：成员复选——勾选集（成员列表序）即 focus_repository_ids；
+      // 列表序首个勾选成员承载 primary repository_id（勾 1 = 旧单选等价）。
+      const checked = members.filter((member) =>
+        checkedLogicalIds.includes(member.logical_repository_id),
+      );
+      if (checked.length === 0) {
+        setRepositoryError("请选择成员");
         setSubmitError(null);
         return;
       }
       logicalCodebaseId = selectedLogicalCodebaseId;
-      repositoryId = primaryRepositoryId;
+      repositoryId = checked[0].physical_repository_id ?? "";
+      focusRepositoryIds = checked.map((member) => member.logical_repository_id);
     } else {
       repositoryId = codebaseValue.slice("repo:".length);
       // REQ-PIB-01：单仓必须具备基准分支——仓库无 main/master 时（服务端
@@ -217,6 +227,7 @@ export function CreateLifecycleIssueDialog({
         repository_id: repositoryId,
         logical_codebase_id: logicalCodebaseId,
         base_branch: logicalCodebaseId ? null : (baseBranch ?? branchDefault),
+        focus_repository_ids: focusRepositoryIds,
       });
     } catch (reason) {
       setSubmitError(reason instanceof Error ? reason.message : "创建 Issue 失败");
@@ -275,7 +286,7 @@ export function CreateLifecycleIssueDialog({
               aria-invalid={repositoryError ? "true" : undefined}
               onChange={(event) => {
                 setCodebaseValue(event.target.value);
-                setPrimaryRepositoryId("");
+                setCheckedLogicalIds([]);
                 resetSelectionErrors();
               }}
               className="mt-1 block w-full rounded-md border border-[var(--aria-line)] bg-white px-3 py-2 text-sm font-normal text-[var(--aria-ink)]"
@@ -339,34 +350,45 @@ export function CreateLifecycleIssueDialog({
             </p>
           ) : null}
           {selectedLogicalCodebaseId ? (
-            <label className="block text-sm font-semibold text-[var(--aria-ink)]">
-              Primary 成员
-              <select
-                value={primaryRepositoryId}
-                disabled={membersLoading}
-                onChange={(event) => {
-                  setPrimaryRepositoryId(event.target.value);
-                  resetSelectionErrors();
-                }}
-                className="mt-1 block w-full rounded-md border border-[var(--aria-line)] bg-white px-3 py-2 text-sm font-normal text-[var(--aria-ink)] disabled:opacity-60"
-              >
-                <option value="">
-                  {membersLoading ? "加载成员中" : "请选择"}
-                </option>
-                {members.map((member) => (
-                  <option
-                    key={member.logical_repository_id}
-                    value={member.physical_repository_id ?? ""}
-                    disabled={!member.physical_repository_id}
-                  >
-                    {member.alias}
-                    {member.physical_repository_id
-                      ? ` · ${member.physical_repository_id}`
-                      : " · 缺少物理仓库映射"}
-                  </option>
-                ))}
-              </select>
-            </label>
+            <fieldset className="mt-1 rounded-md border border-[var(--aria-line)] px-3 py-2">
+              <legend className="px-1 text-sm font-semibold text-[var(--aria-ink)]">成员</legend>
+              <span className="block text-xs font-normal text-[var(--aria-ink-muted)]">
+                勾选参与本 Issue 的成员（勾选集=授权上界）；列表序首个勾选成员为 Primary。
+              </span>
+              <div className="mt-2 space-y-1">
+                {membersLoading ? (
+                  <span className="block text-sm font-normal text-[var(--aria-ink-muted)]">
+                    加载成员中
+                  </span>
+                ) : null}
+                {members.map((member) => {
+                  const label = member.physical_repository_id
+                    ? `${member.alias} · ${member.physical_repository_id}`
+                    : `${member.alias} · 缺少物理仓库映射`;
+                  return (
+                    <label
+                      key={member.logical_repository_id}
+                      className="flex items-center gap-2 text-sm font-normal text-[var(--aria-ink)]"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checkedLogicalIds.includes(member.logical_repository_id)}
+                        disabled={!member.physical_repository_id}
+                        onChange={() => {
+                          setCheckedLogicalIds((previous) =>
+                            previous.includes(member.logical_repository_id)
+                              ? previous.filter((id) => id !== member.logical_repository_id)
+                              : [...previous, member.logical_repository_id],
+                          );
+                          resetSelectionErrors();
+                        }}
+                      />
+                      {label}
+                    </label>
+                  );
+                })}
+              </div>
+            </fieldset>
           ) : null}
           {membersError ? (
             <p role="alert" className="text-sm font-semibold text-[var(--aria-danger)]">

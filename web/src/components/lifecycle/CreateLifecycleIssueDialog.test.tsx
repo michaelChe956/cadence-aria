@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { CreateLifecycleIssueDialog } from "./CreateLifecycleIssueDialog";
@@ -91,15 +91,12 @@ describe("CreateLifecycleIssueDialog 代码库选择（R8）", () => {
     await user.selectOptions(screen.getByLabelText("代码库"), "lc:lc_0001");
     expect(listMembers).toHaveBeenCalledWith("lc_0001");
 
-    const primarySelect = await screen.findByLabelText("Primary 成员");
-    const option = screen.getByRole(
-      "option",
-      { name: /legacy/ },
-    ) as HTMLOptionElement;
-    expect(option.disabled).toBe(true);
-    expect(screen.queryByRole("option", { name: /web/ })).toBeNull();
+    const group = await screen.findByRole("group", { name: "成员" });
+    // 无物理映射成员禁用；removed 成员不渲染。
+    expect(within(group).getByRole("checkbox", { name: /legacy/ })).toBeDisabled();
+    expect(within(group).queryByRole("checkbox", { name: /web/ })).toBeNull();
 
-    await user.selectOptions(primarySelect, "repository_1001");
+    await user.click(within(group).getByRole("checkbox", { name: /api · repository_1001/ }));
     await user.click(screen.getByRole("button", { name: "创建 Issue" }));
 
     expect(onCreate).toHaveBeenCalledWith({
@@ -108,6 +105,7 @@ describe("CreateLifecycleIssueDialog 代码库选择（R8）", () => {
       repository_id: "repository_1001",
       logical_codebase_id: "lc_0001",
       base_branch: null,
+      focus_repository_ids: ["lr-1"],
     });
   });
 
@@ -140,10 +138,11 @@ describe("CreateLifecycleIssueDialog 代码库选择（R8）", () => {
       repository_id: "repository_0001",
       logical_codebase_id: null,
       base_branch: "main",
+      focus_repository_ids: null,
     });
   });
 
-  it("逻辑代码库未选 primary 时阻止提交", async () => {
+  it("逻辑代码库未勾选成员时阻止提交", async () => {
     const onCreate = vi.fn().mockResolvedValue(undefined);
     const listMembers = vi.fn().mockResolvedValue([
       {
@@ -169,9 +168,10 @@ describe("CreateLifecycleIssueDialog 代码库选择（R8）", () => {
 
     await user.type(screen.getByLabelText("Issue 标题"), "跨仓需求");
     await user.selectOptions(screen.getByLabelText("代码库"), "lc:lc_0001");
+    await screen.findByRole("group", { name: "成员" });
     await user.click(screen.getByRole("button", { name: "创建 Issue" }));
 
-    expect(await screen.findByText("请选择 Primary 成员")).toBeInTheDocument();
+    expect(await screen.findByText("请选择成员")).toBeInTheDocument();
     expect(onCreate).not.toHaveBeenCalled();
   });
 
@@ -246,6 +246,7 @@ describe("CreateLifecycleIssueDialog 基准分支选择（REQ-PIB-01）", () => 
       repository_id: "repository_0001",
       logical_codebase_id: null,
       base_branch: "feature/x",
+      focus_repository_ids: null,
     });
   });
 
@@ -289,6 +290,7 @@ describe("CreateLifecycleIssueDialog 基准分支选择（REQ-PIB-01）", () => 
       repository_id: "repository_0001",
       logical_codebase_id: null,
       base_branch: "release/1.0",
+      focus_repository_ids: null,
     });
   });
 
@@ -324,7 +326,170 @@ describe("CreateLifecycleIssueDialog 基准分支选择（REQ-PIB-01）", () => 
     );
 
     await user.selectOptions(screen.getByLabelText("代码库"), "lc:lc_0001");
-    await screen.findByLabelText("Primary 成员");
+    await screen.findByRole("group", { name: "成员" });
     expect(screen.queryByLabelText(/^基准分支/, { selector: "select" })).toBeNull();
+  });
+});
+
+describe("CreateLifecycleIssueDialog 成员复选（REQ-MRE-01）", () => {
+  function logicalCodebase() {
+    return {
+      id: "lc_0001",
+      name: "monorepo",
+      kind: "logical" as const,
+      repository_id: null,
+      logical_codebase_id: "lc_0001",
+      member_count: 3,
+    };
+  }
+
+  function member(
+    logicalId: string,
+    alias: string,
+    physicalId: string | null,
+    status: "active" | "removed" = "active",
+  ) {
+    return {
+      logical_repository_id: logicalId,
+      physical_repository_id: physicalId,
+      alias,
+      status,
+    };
+  }
+
+  it("LC 成员复选：勾选多个提交 focus_repository_ids=勾选集（列表序），首项承载 primary repository_id", async () => {
+    const onCreate = vi.fn().mockResolvedValue(undefined);
+    const listMembers = vi.fn().mockResolvedValue([
+      member("lr-api", "api", "repository_1001"),
+      member("lr-web", "web", "repository_1002"),
+      member("lr-removed", "removed", "repository_1003", "removed"),
+      member("lr-legacy", "legacy", null),
+    ]);
+    const user = userEvent.setup();
+
+    render(
+      <CreateLifecycleIssueDialog
+        projectId="project_0001"
+        repositories={[repositoryRecord()]}
+        codebases={[logicalCodebase()]}
+        listMembers={listMembers}
+        listBranches={vi.fn().mockResolvedValue({ branches: ["main"], default_branch: "main" })}
+        onCreate={onCreate}
+        onClose={vi.fn()}
+      />,
+    );
+
+    await user.type(screen.getByLabelText("Issue 标题"), "跨仓需求");
+    await user.selectOptions(screen.getByLabelText("代码库"), "lc:lc_0001");
+    const group = await screen.findByRole("group", { name: "成员" });
+
+    // 非 active 成员不渲染；无物理映射成员禁用（不可勾选）。
+    expect(within(group).queryByRole("checkbox", { name: /removed/ })).toBeNull();
+    expect(within(group).getByRole("checkbox", { name: /legacy/ })).toBeDisabled();
+
+    // 故意乱序勾选：payload 仍按成员列表序（api, web）提交。
+    await user.click(within(group).getByRole("checkbox", { name: /web · repository_1002/ }));
+    await user.click(within(group).getByRole("checkbox", { name: /api · repository_1001/ }));
+    await user.click(screen.getByRole("button", { name: "创建 Issue" }));
+
+    expect(onCreate).toHaveBeenCalledWith({
+      title: "跨仓需求",
+      description: null,
+      repository_id: "repository_1001",
+      logical_codebase_id: "lc_0001",
+      base_branch: null,
+      focus_repository_ids: ["lr-api", "lr-web"],
+    });
+  });
+
+  it("勾选恰 1 个成员等价旧单选：repository_id=该成员物理仓，focus 仅含该成员", async () => {
+    const onCreate = vi.fn().mockResolvedValue(undefined);
+    const listMembers = vi.fn().mockResolvedValue([
+      member("lr-api", "api", "repository_1001"),
+      member("lr-web", "web", "repository_1002"),
+    ]);
+    const user = userEvent.setup();
+
+    render(
+      <CreateLifecycleIssueDialog
+        projectId="project_0001"
+        repositories={[repositoryRecord()]}
+        codebases={[logicalCodebase()]}
+        listMembers={listMembers}
+        listBranches={vi.fn().mockResolvedValue({ branches: ["main"], default_branch: "main" })}
+        onCreate={onCreate}
+        onClose={vi.fn()}
+      />,
+    );
+
+    await user.type(screen.getByLabelText("Issue 标题"), "单成员需求");
+    await user.selectOptions(screen.getByLabelText("代码库"), "lc:lc_0001");
+    const group = await screen.findByRole("group", { name: "成员" });
+    await user.click(within(group).getByRole("checkbox", { name: /web · repository_1002/ }));
+    await user.click(screen.getByRole("button", { name: "创建 Issue" }));
+
+    expect(onCreate).toHaveBeenCalledWith({
+      title: "单成员需求",
+      description: null,
+      repository_id: "repository_1002",
+      logical_codebase_id: "lc_0001",
+      base_branch: null,
+      focus_repository_ids: ["lr-web"],
+    });
+  });
+
+  it("未勾选任何成员时阻止提交", async () => {
+    const onCreate = vi.fn().mockResolvedValue(undefined);
+    const user = userEvent.setup();
+
+    render(
+      <CreateLifecycleIssueDialog
+        projectId="project_0001"
+        repositories={[repositoryRecord()]}
+        codebases={[logicalCodebase()]}
+        listMembers={vi.fn().mockResolvedValue([member("lr-api", "api", "repository_1001")])}
+        listBranches={vi.fn().mockResolvedValue({ branches: ["main"], default_branch: "main" })}
+        onCreate={onCreate}
+        onClose={vi.fn()}
+      />,
+    );
+
+    await user.type(screen.getByLabelText("Issue 标题"), "跨仓需求");
+    await user.selectOptions(screen.getByLabelText("代码库"), "lc:lc_0001");
+    await screen.findByRole("group", { name: "成员" });
+    await user.click(screen.getByRole("button", { name: "创建 Issue" }));
+
+    expect(await screen.findByText("请选择成员")).toBeInTheDocument();
+    expect(onCreate).not.toHaveBeenCalled();
+  });
+
+  it("单仓路径 payload 不携带成员勾选集（focus_repository_ids=null）", async () => {
+    const onCreate = vi.fn().mockResolvedValue(undefined);
+    const user = userEvent.setup();
+
+    render(
+      <CreateLifecycleIssueDialog
+        projectId="project_0001"
+        repositories={[repositoryRecord()]}
+        codebases={[logicalCodebase()]}
+        listMembers={vi.fn()}
+        listBranches={vi.fn().mockResolvedValue({ branches: ["main"], default_branch: "main" })}
+        onCreate={onCreate}
+        onClose={vi.fn()}
+      />,
+    );
+
+    await user.type(screen.getByLabelText("Issue 标题"), "单仓需求");
+    await user.selectOptions(screen.getByLabelText("代码库"), "repo:repository_0001");
+    await user.click(screen.getByRole("button", { name: "创建 Issue" }));
+
+    expect(onCreate).toHaveBeenCalledWith({
+      title: "单仓需求",
+      description: null,
+      repository_id: "repository_0001",
+      logical_codebase_id: null,
+      base_branch: "main",
+      focus_repository_ids: null,
+    });
   });
 });

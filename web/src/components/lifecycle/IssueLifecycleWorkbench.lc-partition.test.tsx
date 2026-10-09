@@ -324,9 +324,9 @@ describe("IssueLifecycleWorkbench 逻辑代码库按 LC 分区（R8）", () => {
       within(dialog).getByLabelText("代码库"),
       "lc:lc_0001",
     );
-    await user.selectOptions(
-      await within(dialog).findByLabelText("Primary 成员"),
-      "repository_1001",
+    const memberGroup = await within(dialog).findByRole("group", { name: "成员" });
+    await user.click(
+      within(memberGroup).getByRole("checkbox", { name: /api · repository_1001/ }),
     );
     await user.click(
       within(dialog).getByRole("button", { name: "创建 Issue" }),
@@ -337,6 +337,7 @@ describe("IssueLifecycleWorkbench 逻辑代码库按 LC 分区（R8）", () => {
       title: "跨仓需求",
       repository_id: "repository_1001",
       logical_codebase_id: "lc_0001",
+      focus_repository_ids: ["lr-1"],
     });
   });
 });

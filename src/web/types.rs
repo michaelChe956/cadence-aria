@@ -488,6 +488,11 @@ pub struct CreateProductIssueRequest {
     /// v1.3：逻辑代码库归属；Some 时创建逻辑 issue（repository_id 须为其 active primary）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logical_codebase_id: Option<String>,
+    /// REQ-MRE-01：LC 成员勾选集（logical_repository_id 复数）。非空 → selection 以
+    /// Explicit 策略落盘（include=focus=勾选集，授权上界=勾选集原样）；缺省/空 →
+    /// 维持存量 AllMembers（存量兼容）。仅逻辑代码库 issue 消费本字段。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub focus_repository_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

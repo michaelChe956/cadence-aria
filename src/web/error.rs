@@ -101,7 +101,9 @@ impl IntoResponse for ApiError {
             | "issue_selection_write_failed"
             | "issue_base_branch_required"
             | "issue_base_branch_not_found"
-            | "repository_branch_list_failed" => StatusCode::UNPROCESSABLE_ENTITY,
+            | "repository_branch_list_failed"
+            // REQ-MRE-01：创建链 focus 勾选集含 LC active 成员之外的 id → 422。
+            | "focus_repository_outside_active_members" => StatusCode::UNPROCESSABLE_ENTITY,
             "registration_batch_conflict"
             | "aggregate_initialization_conflict"
             | "aggregate_index_rebuild_in_progress"

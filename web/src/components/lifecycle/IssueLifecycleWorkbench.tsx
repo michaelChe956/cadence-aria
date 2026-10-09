@@ -724,6 +724,12 @@ export function IssueLifecycleWorkbench({
       repository_id: payload.repository_id,
       logical_codebase_id: payload.logical_codebase_id,
       base_branch: payload.base_branch,
+      // REQ-MRE-01：LC 勾选集透传；单仓 null → undefined（key 不进请求体，
+      // 服务端维持存量语义）。
+      focus_repository_ids:
+        payload.focus_repository_ids && payload.focus_repository_ids.length > 0
+          ? payload.focus_repository_ids
+          : undefined,
     });
     createdIssuesRef.current = [
       ...createdIssuesRef.current.filter((issue) => issue.issue_id !== createdIssue.issue_id),
