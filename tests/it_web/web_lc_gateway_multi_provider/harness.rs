@@ -1321,8 +1321,10 @@ impl MatrixEnvironment {
         }
         Ok(())
     }
-    /// r4:trust 面 provider 的用户级 workspace trust 登记(codex/kimi;
-    /// registry 内 `requires_workspace_trust` 过滤,pi/claude 天然跳过)。
+    /// r4:trust 面 provider 的用户级 workspace trust 登记;MaxParallel3
+    /// 收窄为仅 selected provider(registry 内 `requires_workspace_trust`
+    /// 过滤,pi/claude 天然零写,另一家条目不由本家进程登记)——三家
+    /// 并行时 HOME trust 文件每家唯一写者,消除跨进程 RMW TOCTOU。
     /// canonical root 与 gateway authority root 同源(manifest
     /// provider_context_root 的 canonicalize,见 gateway_factory
     /// build_scoped);HOME 与生产 trust 装配同源。Waiting=可重试等待面,
@@ -1376,11 +1378,7 @@ impl MatrixEnvironment {
             &operation_id,
             &self.lc_id,
             &canonical_root,
-            &[
-                ProviderName::Codex,
-                ProviderName::Pi,
-                ProviderName::KimiCode,
-            ],
+            selected_trust_targets(&self.provider),
         ) {
             cadence_aria::product::logical_codebase::ProviderTrustPreparationResult::Ready {
                 registrations,
@@ -4802,6 +4800,15 @@ fn provider_probe_channel(provider: &ProviderName) -> Option<(&'static str, Resu
     }
 }
 
+/// MaxParallel3(OracleParallel3 硬前提⑤):trust 登记收窄为 selected
+/// provider 单元素切片——三家并行时 Codex `~/.codex/config.toml` 仅由
+/// Codex 进程写、Kimi workspace-trust 仅由 Kimi 进程写、Pi/Claude 零写,
+/// 结构性消除跨进程 read-modify-write 的 TOCTOU(两进程同读旧内容各自
+/// rename 会静默丢对方异 root 条目)。
+fn selected_trust_targets(provider: &ProviderName) -> &[ProviderName] {
+    std::slice::from_ref(provider)
+}
+
 /// 探针证据目录 label 用的 action 稳定文本(与产品 action_text 同口径)。
 fn matrix_action_text(action: SessionPolicyAction) -> &'static str {
     match action {
@@ -6906,8 +6913,23 @@ mod snapshot_cli_version_drift_tests {
 /// HOME 清理)后幂等重调 ensure_before_recipe 必须重登成功——resume 轮
 /// build_from_snapshot 已与 build() 同源重登(工件在场=Replay 幂等,
 /// 缺工件=重新登记),本测试钉死「缺工件→重登成功」臂。
+/// MaxParallel3 改钉:登记口径与 harness 同为 selected-only——每家
+/// 只通过自己的单元素切片重登,另一家工件不因本家恢复被触碰。
 mod snapshot_resume_trust_tests {
     use super::*;
+
+    fn selected_registry(
+        home: &std::path::Path,
+        aria: &std::path::Path,
+    ) -> HomeBackedProviderTrustRegistry {
+        HomeBackedProviderTrustRegistry::new(
+            ProductAppPaths::new(aria.to_path_buf()),
+            vec![
+                Arc::new(CodexTrustAdapter::for_home(home)),
+                Arc::new(KimiTrustAdapter::for_home(home)),
+            ],
+        )
+    }
 
     #[test]
     fn lcg_resume_trust_reensure_recovers_wiped_home_artifacts() {
@@ -6915,35 +6937,35 @@ mod snapshot_resume_trust_tests {
         let aria = TempDir::new().expect("aria root");
         let canonical_root = home.path().join("lc-root");
         std::fs::create_dir_all(&canonical_root).expect("canonical root");
-        let registry = HomeBackedProviderTrustRegistry::new(
-            ProductAppPaths::new(aria.path().to_path_buf()),
-            vec![
-                Arc::new(CodexTrustAdapter::for_home(home.path())),
-                Arc::new(KimiTrustAdapter::for_home(home.path())),
-            ],
-        );
-        let providers = [ProviderName::Codex, ProviderName::KimiCode];
-        let ensure = || {
+        let registry = selected_registry(home.path(), aria.path());
+        let ensure = |selected: &ProviderName| {
             matches!(
                 registry.ensure_before_recipe(
                     PROJECT_ID,
                     "lcg-matrix-trust-resume",
                     "logical_codebase_resume",
                     &canonical_root,
-                    &providers,
+                    selected_trust_targets(selected),
                 ),
                 cadence_aria::product::logical_codebase::ProviderTrustPreparationResult::Ready { .. }
             )
         };
-        assert!(ensure(), "首轮登记必须 Ready");
+        assert!(
+            ensure(&ProviderName::Codex) && ensure(&ProviderName::KimiCode),
+            "首轮各家 selected 登记必须 Ready"
+        );
         // HOME 工件清理(capture→resume 之间换机/容器重建形态):codex
         // config.toml 与 kimi workspace-trust 全部抹掉(.aria 登记记录
         // 仍在——快照回灌形态)。
         let _ = std::fs::remove_file(home.path().join(".codex").join("config.toml"));
         let _ = std::fs::remove_dir_all(home.path().join(".kimi-code").join("workspace-trust"));
         assert!(
-            ensure(),
-            "缺 HOME 工件时幂等重登必须重新 Ready(resume 轮 F4 前提)"
+            ensure(&ProviderName::Codex),
+            "codex selected 重登必须重新 Ready(resume 轮 F4 前提)"
+        );
+        assert!(
+            ensure(&ProviderName::KimiCode),
+            "kimi selected 重登必须重新 Ready(resume 轮 F4 前提)"
         );
         // HOME 工件确已重建(codex config 携带 trusted 条目)。
         let config = std::fs::read_to_string(home.path().join(".codex").join("config.toml"))
@@ -6952,6 +6974,155 @@ mod snapshot_resume_trust_tests {
             config.contains("trust_level = \"trusted\""),
             "重登后 HOME 工件必须重建:\n{config}"
         );
+    }
+}
+
+/// MaxParallel3 trust 收窄(OracleParallel3 硬前提⑤)钉子:harness 的
+/// trust 登记面必须按 selected provider 单元素切片驱动 registry——旧
+/// 全量 `[Codex, Pi, KimiCode]` 形态会让 kimi 进程并发写 codex 的
+/// `~/.codex/config.toml`(跨进程 RMW→rename 静默丢异 root 条目),
+/// F4 清 HOME 恢复轮同样触发。本组以 harness 同一 helper 驱动
+/// registry,钉死零跨家写。
+mod harness_trust_selection_tests {
+    use super::*;
+
+    fn run_selected_trust_pass(
+        home: &std::path::Path,
+        aria: &std::path::Path,
+        canonical_root: &std::path::Path,
+        lc_id: &str,
+        selected: &ProviderName,
+    ) -> bool {
+        let registry = HomeBackedProviderTrustRegistry::new(
+            ProductAppPaths::new(aria.to_path_buf()),
+            vec![
+                Arc::new(CodexTrustAdapter::for_home(home)),
+                Arc::new(KimiTrustAdapter::for_home(home)),
+            ],
+        );
+        matches!(
+            registry.ensure_before_recipe(
+                PROJECT_ID,
+                "lcg-matrix-trust-selected",
+                lc_id,
+                canonical_root,
+                selected_trust_targets(selected),
+            ),
+            cadence_aria::product::logical_codebase::ProviderTrustPreparationResult::Ready { .. }
+        )
+    }
+
+    #[test]
+    fn lcg_trust_targets_pin_selected_only_slice() {
+        // 切片形状钉子:恒单元素、按引用借入(无 clone/无分配);
+        // pi/claude 等零 trust 家原样透传,由 registry 过滤。
+        assert_eq!(
+            selected_trust_targets(&ProviderName::Codex),
+            &[ProviderName::Codex]
+        );
+        assert_eq!(
+            selected_trust_targets(&ProviderName::KimiCode),
+            &[ProviderName::KimiCode]
+        );
+        assert_eq!(
+            selected_trust_targets(&ProviderName::Pi),
+            &[ProviderName::Pi]
+        );
+    }
+
+    #[test]
+    fn lcg_selected_trust_kimi_run_writes_no_codex_config() {
+        let home = TempDir::new().expect("home");
+        let aria = TempDir::new().expect("aria root");
+        let canonical_root = home.path().join("lc-root");
+        std::fs::create_dir_all(&canonical_root).expect("canonical root");
+        assert!(
+            run_selected_trust_pass(
+                home.path(),
+                aria.path(),
+                &canonical_root,
+                "logical_codebase_kimi",
+                &ProviderName::KimiCode,
+            ),
+            "kimi selected 登记必须 Ready"
+        );
+        assert!(
+            home.path()
+                .join(".kimi-code")
+                .join("workspace-trust")
+                .exists(),
+            "kimi 自家 trust 工件必须生成"
+        );
+        assert!(
+            !home.path().join(".codex").join("config.toml").exists(),
+            "kimi 运行不得写 codex 的 ~/.codex/config.toml(旧全量数组行为)"
+        );
+    }
+
+    #[test]
+    fn lcg_selected_trust_codex_run_writes_no_kimi_artifacts() {
+        let home = TempDir::new().expect("home");
+        let aria = TempDir::new().expect("aria root");
+        let canonical_root = home.path().join("lc-root");
+        std::fs::create_dir_all(&canonical_root).expect("canonical root");
+        assert!(
+            run_selected_trust_pass(
+                home.path(),
+                aria.path(),
+                &canonical_root,
+                "logical_codebase_codex",
+                &ProviderName::Codex,
+            ),
+            "codex selected 登记必须 Ready"
+        );
+        let config = std::fs::read_to_string(home.path().join(".codex").join("config.toml"))
+            .expect("codex config written");
+        assert!(
+            config.contains("trust_level = \"trusted\""),
+            "codex 自家 config 必须携带 trusted 条目:\n{config}"
+        );
+        assert!(
+            !home
+                .path()
+                .join(".kimi-code")
+                .join("workspace-trust")
+                .exists(),
+            "codex 运行不得生成 kimi workspace-trust(旧全量数组行为)"
+        );
+    }
+
+    #[test]
+    fn lcg_selected_trust_zero_write_providers_touch_no_home() {
+        // pi/claude 无 workspace trust 需要:registry 过滤后零 HOME 写,
+        // 也不需要另一家条目(设计验证矩阵 selected Pi/Claude 行)。
+        for provider in [ProviderName::Pi, ProviderName::ClaudeCode] {
+            let home = TempDir::new().expect("home");
+            let aria = TempDir::new().expect("aria root");
+            let canonical_root = home.path().join("lc-root");
+            std::fs::create_dir_all(&canonical_root).expect("canonical root");
+            assert!(
+                run_selected_trust_pass(
+                    home.path(),
+                    aria.path(),
+                    &canonical_root,
+                    "logical_codebase_zero_write",
+                    &provider,
+                ),
+                "{provider:?} 零 trust 家必须直接 Ready"
+            );
+            assert!(
+                !home.path().join(".codex").join("config.toml").exists(),
+                "{provider:?} 运行不得写 codex config"
+            );
+            assert!(
+                !home
+                    .path()
+                    .join(".kimi-code")
+                    .join("workspace-trust")
+                    .exists(),
+                "{provider:?} 运行不得写 kimi workspace-trust"
+            );
+        }
     }
 }
 
