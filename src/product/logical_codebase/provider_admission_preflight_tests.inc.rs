@@ -1827,4 +1827,181 @@ mod tests {
             "delivered evidence version drift must fail closed: {error:?}"
         );
     }
+
+    // ===== Task 14(lcg_t14):legacy Unknown 行的可操作迁移等待投影 =====
+
+    /// 存量 v1 记录:supported_actions 为空(部分迁移形态),无 v2 矩阵
+    /// 字段 → decode 后矩阵全 Unknown、trust Unknown。
+    const LCG_T14_V1_LEGACY_RECORDS: &str = r#"[
+  {
+    "provider_type": "claude_code",
+    "version": "0.0.0-managed",
+    "adapter_dialect": "claude_code_cli_v1",
+    "capability_snapshot_ref": "cap_managed_snapshot",
+    "evidence": "fixture_verified",
+    "resume_evidence": "confirmed",
+    "supported_actions": []
+  }
+]"#;
+
+    /// Task 14 主断言:legacy 矩阵 Unknown 的存量记录在 admission 侧保持
+    /// 冻结 waiting(reason `provider_capability_not_satisfied` + 恒
+    /// Revalidate/Retry + 零 spawn),且 capability store 投影出可操作的
+    /// 迁移等待材料(逐维 evidence 缺失点名,不扩大 allowed actions)。
+    #[test]
+    fn lcg_t14_legacy_matrix_unknown_projects_actionable_waiting() {
+        use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
+        use crate::product::logical_codebase::policy::ProviderWireDialect;
+        use crate::product::logical_codebase::production_policy_resolvers::StoreBackedProviderCapabilitySource;
+        use crate::product::logical_codebase::provider_capability_store::{
+            ProviderCapabilityStore, PROVIDER_CAPABILITY_ACTION_UNKNOWN,
+        };
+
+        let mut fixture = admission_fixture();
+        fixture.write_language_rules("# rules\n");
+
+        // 存量 v1 记录写入 LC 作用域 capability store(真实读取路径)。
+        let scope_root = crate::product::logical_codebase::store::lc_scope_root(
+            &fixture.paths,
+            &fixture.project_id,
+            &Some(fixture.lc_id.clone()),
+        )
+        .unwrap();
+        std::fs::create_dir_all(&scope_root).unwrap();
+        std::fs::write(
+            scope_root.join("capabilities.json"),
+            LCG_T14_V1_LEGACY_RECORDS,
+        )
+        .unwrap();
+
+        // gateway 换 store-backed capability source(与生产同型)。
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            crate::product::models::ProviderName::ClaudeCode,
+            fixture.streaming_adapter.clone(),
+        );
+        registry.register(
+            crate::product::models::ProviderName::Codex,
+            fixture.streaming_adapter.clone(),
+        );
+        fixture.gateway = Arc::new(LogicalCodebaseProviderGateway::with_audit(
+            fixture.policy_store.clone(),
+            Arc::new(StoreBackedProviderCapabilitySource::for_lc(
+                fixture.paths.clone(),
+                fixture.project_id.clone(),
+                fixture.lc_id.clone(),
+            )),
+            Arc::new(PassThroughTargetResolver),
+            Arc::new(registry),
+            Arc::new(StubSyncAdapter),
+            always_available_gate(),
+            Arc::new(crate::product::logical_codebase::GatewayRunAudit::new()),
+            std::fs::canonicalize(&fixture.aggregate_root).expect("canonical authority root"),
+        ));
+
+        // 存量读取:v1 记录的 launch 分格 = Unknown(不产生 Confirmed)。
+        let capability_store =
+            ProviderCapabilityStore::for_lc(fixture.paths.clone(), fixture.lc_id.clone());
+        let legacy = capability_store
+            .get(&fixture.project_id, ProviderRefType::ClaudeCode)
+            .unwrap()
+            .unwrap();
+        let legacy_launch_state = legacy.current_action_row(
+            ProviderWireDialect::ClaudeCodeStreamJson,
+            "0.0.0-managed",
+            SessionPolicyAction::PlanningReadOnly,
+        )
+        .launch;
+        assert_eq!(legacy_launch_state, ProviderCapabilityEvidence::Unknown);
+
+        // admission:既有 waiting 面保持冻结(reason + allowed actions),
+        // 材料面不含 capability 证据材料;provider 零启动。
+        let request = SessionLaunchRequest::planning(
+            fixture.project_id.clone(),
+            ProviderRef::claude_code("cap_managed_snapshot"),
+            crate::product::logical_codebase::policy::PolicyTarget::aggregate_root(
+                fixture.aggregate_root.clone(),
+            ),
+            vec![fixture.aggregate_root.clone()],
+            "sha256:admission-managed-config",
+        );
+        let error = fixture
+            .preflight()
+            .check(&request, &ProviderAdmissionPhase::Normal)
+            .unwrap_err();
+        match error {
+            ProviderAdmissionError::Waiting {
+                reason_code,
+                missing_materials,
+                allowed_actions,
+                ..
+            } => {
+                assert_eq!(reason_code, "provider_capability_not_satisfied");
+                assert!(
+                    allowed_actions.contains(&BootstrapActionKind::Revalidate),
+                    "frozen waiting face must keep Revalidate: {allowed_actions:?}"
+                );
+                assert!(
+                    allowed_actions.contains(&BootstrapActionKind::Retry),
+                    "frozen waiting face must keep Retry: {allowed_actions:?}"
+                );
+                assert!(
+                    !missing_materials
+                        .iter()
+                        .any(|material| material.contains("probe evidence")),
+                    "admission materials must not fabricate capability evidence: {missing_materials:?}"
+                );
+            }
+            other => panic!("expected waiting fact, got {other:?}"),
+        }
+        assert_eq!(fixture.streaming_adapter.start_count(), 0);
+
+        // Task 14 迁移等待投影(同一事实的可操作面):冻结判别码 + 逐维
+        // missing materials + 不扩大的 allowed actions。
+        let waiting = legacy
+            .migration_waiting(
+                ProviderWireDialect::ClaudeCodeStreamJson,
+                "0.0.0-managed",
+                SessionPolicyAction::PlanningReadOnly,
+            )
+            .expect("legacy unknown row must project an actionable waiting");
+        assert_eq!(waiting.reason_code, PROVIDER_CAPABILITY_ACTION_UNKNOWN);
+        let missing_evidence_ref = "probe evidence: claude_code@0.0.0-managed PlanningReadOnly launch cell is unknown; real probe evidence_ref required".to_string();
+        assert!(
+            waiting.missing_materials.contains(&missing_evidence_ref),
+            "launch-cell evidence material must be listed verbatim: {:?}",
+            waiting.missing_materials
+        );
+        assert!(
+            waiting
+                .missing_materials
+                .iter()
+                .any(|material| material.starts_with("projection evidence:"))
+        );
+        assert!(
+            waiting
+                .missing_materials
+                .iter()
+                .any(|material| material.starts_with("os evidence:"))
+        );
+        assert!(
+            waiting
+                .missing_materials
+                .iter()
+                .any(|material| material.starts_with("budget evidence:"))
+        );
+        assert!(
+            waiting
+                .missing_materials
+                .iter()
+                .any(|material| material.starts_with("trust evidence:"))
+        );
+        assert!(waiting.allowed_actions.contains(&BootstrapActionKind::Revalidate));
+        assert!(waiting.allowed_actions.contains(&BootstrapActionKind::Retry));
+        assert_eq!(
+            waiting.allowed_actions.len(),
+            2,
+            "migration waiting face must not widen allowed actions"
+        );
+    }
 }

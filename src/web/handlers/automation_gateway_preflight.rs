@@ -15,10 +15,10 @@
 
 use crate::product::logical_codebase::policy::SessionPolicyAction;
 use crate::product::logical_codebase::provider_admission_preflight::ProviderAdmissionError;
+use crate::product::logical_codebase::provider_capability_store::PROVIDER_CAPABILITY_MIGRATION_REASON_CODES;
 use crate::product::logical_codebase::provider_gateway::{
-    CODEX_DANGER_FULL_ACCESS_UNSUPPORTED, LogicalCodebaseProviderGateway,
-    PROVIDER_CAPABILITY_LAUNCH_NOT_CONFIRMED, PROVIDER_CAPABILITY_WRITE_BOUNDARY_NOT_CONFIRMED,
-    PROVIDER_UNSUPPORTED_FOR_GATEWAY_LAUNCH,
+    LogicalCodebaseProviderGateway, PROVIDER_CAPABILITY_LAUNCH_NOT_CONFIRMED,
+    PROVIDER_CAPABILITY_WRITE_BOUNDARY_NOT_CONFIRMED, PROVIDER_UNSUPPORTED_FOR_GATEWAY_LAUNCH,
 };
 use crate::product::models::ProviderName;
 use crate::product::work_item_split_engine::engine::provider_ref_for_name;
@@ -33,6 +33,10 @@ pub(crate) const AUTOMATION_ROLE_CHAIN_UNSUPPORTED: &str = "automation_role_chai
 /// gateway 组装失败(同源判定不可用)时的稳定判别码,与 Task 3
 /// admission waiting 的兜底码同源——预检 fail-closed,不静默放行。
 const PROVIDER_GATEWAY_UNAVAILABLE: &str = "provider_gateway_denied";
+
+/// policy/body 漂移的 gateway Display 判别码前缀(漂移维度保留在 detail;
+/// Task 14 冻结消费,不另立第二套漂移码)。
+const PROVIDER_GATEWAY_POLICY_DRIFT_MARKER: &str = "provider_gateway_policy_drift";
 
 /// 逐角色违规投影(Task 8 冻结契约):一次 422 列全,携带判定依据的
 /// action 与 capability/projection 引用(early 阶段不可确定时为 None)。
@@ -71,14 +75,22 @@ fn role_action_and_adapter_role(
 }
 
 /// 从 early verdict 的 waiting 事实提取具体稳定判别码:detail 携带
-/// Task 3 判别码原文(比泛化 waiting reason 更可诊断),未命中时沿用
-/// waiting 的 reason_code。
+/// Task 3/Task 14 判别码原文(比泛化 waiting reason 更可诊断),未命中时
+/// 沿用 waiting 的 reason_code。
+///
+/// Task 14(lcg_t14):先逐枚消费冻结迁移判别码全集(与 capability store
+/// 冻结清单同源),再沿既有 gateway 分格码;policy/body 漂移以 Display
+/// 判别码透传。未命中时回退 waiting 的 reason_code(既有回退零回归)。
 fn detailed_reason_code(waiting_reason_code: &str, detail: &str) -> String {
+    for code in PROVIDER_CAPABILITY_MIGRATION_REASON_CODES {
+        if detail.contains(code) {
+            return code.to_string();
+        }
+    }
     for code in [
-        CODEX_DANGER_FULL_ACCESS_UNSUPPORTED,
         PROVIDER_CAPABILITY_LAUNCH_NOT_CONFIRMED,
         PROVIDER_CAPABILITY_WRITE_BOUNDARY_NOT_CONFIRMED,
-        PROVIDER_UNSUPPORTED_FOR_GATEWAY_LAUNCH,
+        PROVIDER_GATEWAY_POLICY_DRIFT_MARKER,
     ] {
         if detail.contains(code) {
             return code.to_string();
@@ -303,7 +315,8 @@ mod tests {
         RootRecipeEvidence,
     };
     use crate::product::logical_codebase::provider_gateway::{
-        LogicalCodebaseProviderGateway, PolicyTargetResolver, ProviderRefType, ResumeEvidenceState,
+        CODEX_DANGER_FULL_ACCESS_UNSUPPORTED, LogicalCodebaseProviderGateway,
+        PolicyTargetResolver, ProviderRefType, ResumeEvidenceState,
     };
     use crate::product::logical_codebase::{
         AuthorityAggregateIndexReference, EnrollmentTarget, RepositoryAuthorityResolution,
@@ -1062,6 +1075,50 @@ mod tests {
                 true
             )
             .is_err()
+        );
+    }
+
+    /// Task 14(lcg_t14 诊断投影):waiting detail 携带任一冻结迁移判别码
+    /// 时,`detailed_reason_code` 投影该冻结码(不折叠为泛化 waiting
+    /// reason);policy/body 漂移以 gateway Display 判别码透传;未命中时
+    /// 沿用 waiting reason(既有回退语义零回归)。
+    #[test]
+    fn lcg_t14_diagnostic_projection_consumes_frozen_migration_reason_codes() {
+        use crate::product::logical_codebase::provider_capability_store::PROVIDER_CAPABILITY_MIGRATION_REASON_CODES;
+
+        for code in PROVIDER_CAPABILITY_MIGRATION_REASON_CODES {
+            assert_eq!(
+                detailed_reason_code(
+                    "provider_capability_not_satisfied",
+                    &format!("waiting detail carries {code} verbatim"),
+                ),
+                code,
+                "frozen migration reason codes must be projected verbatim"
+            );
+        }
+
+        // policy/body 漂移:gateway Display 判别码透传(维度保留在 detail)。
+        assert_eq!(
+            detailed_reason_code(
+                "provider_gateway_denied",
+                "provider_gateway_policy_drift: policy_body",
+            ),
+            "provider_gateway_policy_drift"
+        );
+
+        // 既有 gateway 分格码仍优先透传(与本清单并存互补)。
+        assert_eq!(
+            detailed_reason_code(
+                "provider_capability_not_satisfied",
+                &format!("detail {PROVIDER_CAPABILITY_LAUNCH_NOT_CONFIRMED} tail"),
+            ),
+            PROVIDER_CAPABILITY_LAUNCH_NOT_CONFIRMED
+        );
+
+        // 未命中任何冻结码:沿用 waiting 的 reason_code(回退零回归)。
+        assert_eq!(
+            detailed_reason_code("provider_capability_not_satisfied", "unrelated detail"),
+            "provider_capability_not_satisfied"
         );
     }
 }

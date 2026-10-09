@@ -20,7 +20,11 @@ use crate::product::json_store::{ProductStoreError, read_json, validate_relative
 use crate::product::logical_codebase::policy::{
     ProviderDialect, ProviderWireDialect, SessionPolicyAction,
 };
-use crate::product::logical_codebase::provider_gateway::{ProviderRefType, ResumeEvidenceState};
+use crate::product::logical_codebase::provider_admission_preflight::BootstrapActionKind;
+use crate::product::logical_codebase::provider_gateway::{
+    CODEX_DANGER_FULL_ACCESS_UNSUPPORTED, ProviderRefType, ResumeEvidenceState,
+    PROVIDER_UNSUPPORTED_FOR_GATEWAY_LAUNCH,
+};
 
 /// 能力证据三态:区分「声明」「fixture 验证」与「生产验证」,避免只以单一布尔
 /// 维度判定能力,使持久化记录可审计。
@@ -199,6 +203,60 @@ pub enum RootRecipeEvidence {
     },
 }
 
+// ---- Task 14(lcg_t14):存量迁移等待面与冻结稳定判别码 ----
+
+/// Task 14 冻结:capability 行未探测(Unknown)/版本漂移失效的迁移等待
+/// 稳定判别码。
+pub const PROVIDER_CAPABILITY_ACTION_UNKNOWN: &str = "provider_capability_action_unknown";
+
+/// Task 14 冻结:resume 分格未 `Confirmed` 的迁移等待稳定判别码(不得
+/// 静默转 fresh)。
+pub const PROVIDER_RESUME_UNSUPPORTED: &str = "provider_resume_unsupported";
+
+/// Task 14 冻结:provider workspace trust 未建立的迁移等待稳定判别码。
+pub const PROVIDER_TRUST_MISSING: &str = "provider_trust_missing";
+
+/// Task 14 冻结:write_boundary 分格未验证的迁移等待稳定判别码。
+pub const PROVIDER_WRITE_BOUNDARY_UNVERIFIED: &str = "provider_write_boundary_unverified";
+
+/// Task 14 冻结:wire dialect 漂移致行整体失效的迁移等待稳定判别码。
+pub const PROVIDER_ADAPTER_DIALECT_MISMATCH: &str = "provider_adapter_dialect_mismatch";
+
+/// Task 14 冻结:Codex target-only boundary 证据缺失的稳定判别码。
+pub const CODEX_TARGET_BOUNDARY_UNVERIFIED: &str = "codex_target_boundary_unverified";
+
+/// Task 14 冻结的迁移等待稳定判别码全集(计划 591 逐条):与 gateway 侧
+/// 分格码(`provider_capability_launch_not_confirmed`/
+/// `provider_capability_write_boundary_not_confirmed`)并存互补,供诊断
+/// 投影(`automation_gateway_preflight::detailed_reason_code`)与运维报告
+/// 逐枚消费;policy/body 漂移沿用 gateway Display 判别码
+/// (`provider_gateway_policy_drift` 等)与 admission waiting reason
+/// (`policy_digest_drift`/`authority_root_drift`),不另立第二套。
+pub const PROVIDER_CAPABILITY_MIGRATION_REASON_CODES: [&str; 8] = [
+    PROVIDER_UNSUPPORTED_FOR_GATEWAY_LAUNCH,
+    PROVIDER_CAPABILITY_ACTION_UNKNOWN,
+    PROVIDER_RESUME_UNSUPPORTED,
+    PROVIDER_TRUST_MISSING,
+    PROVIDER_WRITE_BOUNDARY_UNVERIFIED,
+    PROVIDER_ADAPTER_DIALECT_MISMATCH,
+    CODEX_DANGER_FULL_ACCESS_UNSUPPORTED,
+    CODEX_TARGET_BOUNDARY_UNVERIFIED,
+];
+
+/// 存量 capability 迁移等待投影(Task 14 冻结可操作面):缺失材料逐维
+/// 点名 + 允许动作。allowed actions 恒 `[Revalidate, Retry]`(迁移等待面
+/// 不扩大动作);补齐材料的唯一途径是真实 probe + 2d verified 导入,
+/// 本类型不承载任何「手工 JSON 改 Confirmed」或「迁移默认 allow」路径。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityMigrationWaiting {
+    /// 冻结稳定判别码(`PROVIDER_CAPABILITY_MIGRATION_REASON_CODES` 之一)。
+    pub reason_code: &'static str,
+    /// 逐维缺失材料(version/wire/projection/OS/预算成本/trust/evidence)。
+    pub missing_materials: Vec<String>,
+    /// 恒 `[Revalidate, Retry]`(冻结,不扩大)。
+    pub allowed_actions: Vec<BootstrapActionKind>,
+}
+
 /// 单个 provider 的能力记录。`provider_type` 为 `ClaudeCode` | `Codex`;
 /// `capability_snapshot_ref` 与 `provider_ref_for_name` 约定一致
 /// (`cap_managed_snapshot`)。
@@ -318,6 +376,104 @@ impl ProviderCapabilityRecord {
         } else {
             ProviderActionCapability::unknown(action)
         }
+    }
+
+    /// Task 14(lcg_t14):以当前 CLI 事实(wire dialect + exact version)解析
+    /// action 行并投影「存量迁移等待」事实(只读诊断,冻结面)。
+    ///
+    /// - 行按 [`Self::current_action_row`] 语义解析:version/wire 任一漂移
+    ///   即整行 Unknown(旧行不跨 CLI 版本沿用,等待真实 probe 重建,
+    ///   probe 历史工件永不删除);
+    /// - 任一证据维度缺失(分格未探测/projection digest 缺位/trust 未
+    ///   建立)转为逐维 missing materials;未实测 OS 与预算成本维度逐条
+    ///   点名(记录无 OS 字段、大 LC 新成本未实测——绝不默认支持);
+    /// - allowed actions 恒 `[Revalidate, Retry]`;全维度 `Confirmed` 时
+    ///   返回 `None`(不误伤既有支持)。本方法不写 store、不铸造
+    ///   Confirmed;Confirmed 行的 digest 形状校验归 2c shape validator,
+    ///   不在本面重复。
+    pub fn migration_waiting(
+        &self,
+        wire_dialect: ProviderWireDialect,
+        exact_version: &str,
+        action: SessionPolicyAction,
+    ) -> Option<CapabilityMigrationWaiting> {
+        let row = self.current_action_row(wire_dialect, exact_version, action);
+        let provider = provider_type_to_string(self.provider_type);
+        let mut reason_code: Option<&'static str> = None;
+        let mut materials = Vec::new();
+
+        if self.wire_dialect != wire_dialect {
+            reason_code = Some(PROVIDER_ADAPTER_DIALECT_MISMATCH);
+            materials.push(format!(
+                "wire dialect evidence: {provider} recorded {:?} vs current {wire_dialect:?}; row invalidated until reprobe",
+                self.wire_dialect
+            ));
+        }
+        if self.version != exact_version {
+            reason_code = reason_code.or(Some(PROVIDER_CAPABILITY_ACTION_UNKNOWN));
+            materials.push(format!(
+                "version evidence: {provider} probed at {}, current CLI {exact_version}; row invalidated until reprobe (probe history preserved)",
+                self.version
+            ));
+        }
+        let mut row_incomplete = false;
+        for (evidence, cell, cell_code) in [
+            (
+                &row.launch,
+                "launch",
+                PROVIDER_CAPABILITY_ACTION_UNKNOWN,
+            ),
+            (&row.resume, "resume", PROVIDER_RESUME_UNSUPPORTED),
+            (
+                &row.write_boundary,
+                "write_boundary",
+                PROVIDER_WRITE_BOUNDARY_UNVERIFIED,
+            ),
+        ] {
+            if *evidence != ProviderCapabilityEvidence::Confirmed {
+                row_incomplete = true;
+                reason_code = reason_code.or(Some(cell_code));
+                let state = match evidence {
+                    ProviderCapabilityEvidence::Confirmed => "confirmed",
+                    ProviderCapabilityEvidence::Unknown => "unknown",
+                    ProviderCapabilityEvidence::Denied { .. } => "denied",
+                };
+                materials.push(format!(
+                    "probe evidence: {provider}@{exact_version} {action:?} {cell} cell is {state}; real probe evidence_ref required"
+                ));
+            }
+        }
+        if row_incomplete {
+            if row.projection_digest.trim().is_empty() {
+                materials.push(format!(
+                    "projection evidence: {provider}@{exact_version} {action:?} projection digest missing (unprobed row)"
+                ));
+            }
+            // 记录无 OS 字段:矩阵格仅在实测 OS 上成立,未实测 OS 绝不
+            // 默认支持(Windows/macOS launcher 同此)。
+            materials.push(format!(
+                "os evidence: {provider}@{exact_version} {action:?} untested OS dimension; matrix cells are per-OS and never default-supported"
+            ));
+            // 大 LC 新成本未实测(20k/64MiB 快照与 4096/8192B inventory
+            // 预算既有证据只覆盖当前实测形态)。
+            materials.push(format!(
+                "budget evidence: {provider}@{exact_version} {action:?} 20k-entry/64MiB snapshot and 4096/8192B inventory budgets untested at this version"
+            ));
+        }
+        if self.trust != ProviderCapabilityEvidence::Confirmed {
+            reason_code = reason_code.or(Some(PROVIDER_TRUST_MISSING));
+            materials.push(format!(
+                "trust evidence: {provider} workspace trust not confirmed"
+            ));
+        }
+        if materials.is_empty() {
+            return None;
+        }
+        Some(CapabilityMigrationWaiting {
+            reason_code: reason_code.unwrap_or(PROVIDER_CAPABILITY_ACTION_UNKNOWN),
+            missing_materials: materials,
+            allowed_actions: vec![BootstrapActionKind::Revalidate, BootstrapActionKind::Retry],
+        })
     }
 
     fn to_json(&self) -> ProviderCapabilityRecordJson {
@@ -1059,5 +1215,273 @@ mod tests {
             SessionPolicyAction::CodingTargetWrite,
         );
         assert_eq!(wire_drift_row.launch, ProviderCapabilityEvidence::Unknown);
+    }
+
+    // ===== Task 14(lcg_t14):存量迁移等待面——evidence 失效与未实测面 =====
+
+    /// 构造「真实 probe 导入形状」的 verified 记录:单 action Confirmed 行 +
+    /// 指定 probe 工件引用/时间(2d `import_verified_probe_row` 的输入形态)。
+    fn lcg_t14_verified_row_record(
+        version: &str,
+        probe_artifact_ref: &str,
+        probed_at: &str,
+    ) -> ProviderCapabilityRecord {
+        let matrix = ProviderActionMatrix::from_rows(vec![lcg_t02_matrix_row(
+            SessionPolicyAction::CodingTargetWrite,
+            ProviderCapabilityEvidence::Confirmed,
+            ProviderCapabilityEvidence::Confirmed,
+            ProviderCapabilityEvidence::Confirmed,
+        )])
+        .unwrap();
+        ProviderCapabilityRecord {
+            version: version.to_string(),
+            probed_at: Some(probed_at.to_string()),
+            probe_artifact_ref: Some(probe_artifact_ref.to_string()),
+            ..lcg_t02_v2_record(version, matrix)
+        }
+    }
+
+    #[test]
+    fn lcg_t14_cli_upgrade_keeps_history_and_blocks_until_reprobe() {
+        // CLI 升级(1.2.3→2.0.0):旧行整体失效为 Unknown(阻断至重探),
+        // durable 旧事实与旧 probe 工件原样保留;重探导入后解除阻断。
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let store = ProviderCapabilityStore::new(paths.clone());
+
+        // 旧 probe 工件真实落盘(历史证据,任何迁移步骤不得删除)。
+        let probes_dir = temp.path().join("probe-artifacts");
+        std::fs::create_dir_all(&probes_dir).unwrap();
+        let old_probe_artifact = probes_dir.join("claude-code-1.2.3-coding.json");
+        std::fs::write(&old_probe_artifact, r#"{"probe":"claude-code@1.2.3 coding"}"#).unwrap();
+
+        // 1.2.3 真实导入(2d durable 通道):行 Confirmed。
+        store
+            .import_verified_probe_row(
+                "project_0001",
+                &lcg_t14_verified_row_record(
+                    "1.2.3",
+                    "probe://claude-code/1.2.3/coding",
+                    "2026-10-02T00:00:00Z",
+                ),
+                SessionPolicyAction::CodingTargetWrite,
+            )
+            .unwrap();
+        let durable = store
+            .get("project_0001", ProviderRefType::ClaudeCode)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            durable.current_action_row(
+                ProviderWireDialect::ClaudeCodeStreamJson,
+                "1.2.3",
+                SessionPolicyAction::CodingTargetWrite
+            )
+            .launch,
+            ProviderCapabilityEvidence::Confirmed
+        );
+
+        // CLI 升级至 2.0.0(未重探):行整体 Unknown,零沿用、永不默认支持。
+        let untested_version_state = durable.current_action_row(
+            ProviderWireDialect::ClaudeCodeStreamJson,
+            "2.0.0",
+            SessionPolicyAction::CodingTargetWrite,
+        );
+        assert_ne!(
+            untested_version_state.launch,
+            ProviderCapabilityEvidence::Confirmed
+        );
+        assert_eq!(
+            untested_version_state.launch,
+            ProviderCapabilityEvidence::Unknown
+        );
+        assert_eq!(
+            untested_version_state.resume,
+            ProviderCapabilityEvidence::Unknown
+        );
+        assert_eq!(
+            untested_version_state.write_boundary,
+            ProviderCapabilityEvidence::Unknown
+        );
+
+        // 迁移等待投影:version 维度材料点名重探;allowed actions 冻结不扩大。
+        let waiting = durable
+            .migration_waiting(
+                ProviderWireDialect::ClaudeCodeStreamJson,
+                "2.0.0",
+                SessionPolicyAction::CodingTargetWrite,
+            )
+            .expect("upgraded CLI without reprobe must project an actionable waiting");
+        assert_eq!(waiting.reason_code, PROVIDER_CAPABILITY_ACTION_UNKNOWN);
+        assert!(
+            waiting
+                .missing_materials
+                .iter()
+                .any(|material| material.starts_with("version evidence:"))
+        );
+        assert_eq!(waiting.allowed_actions.len(), 2);
+        assert!(
+            waiting
+                .allowed_actions
+                .contains(&crate::product::logical_codebase::BootstrapActionKind::Revalidate)
+        );
+        assert!(
+            waiting
+                .allowed_actions
+                .contains(&crate::product::logical_codebase::BootstrapActionKind::Retry)
+        );
+
+        // 保历史:durable 旧字节原样(1.2.3 行仍 Confirmed),旧工件仍在盘。
+        assert_eq!(
+            durable.current_action_row(
+                ProviderWireDialect::ClaudeCodeStreamJson,
+                "1.2.3",
+                SessionPolicyAction::CodingTargetWrite
+            )
+            .launch,
+            ProviderCapabilityEvidence::Confirmed
+        );
+        assert!(old_probe_artifact.is_file());
+
+        // 重探(2.0.0 真实导入)后解除阻断:行 Confirmed@2.0.0,等待消失;
+        // 旧工件仍保留(历史不删,可审计)。
+        let new_probe_artifact = probes_dir.join("claude-code-2.0.0-coding.json");
+        std::fs::write(&new_probe_artifact, r#"{"probe":"claude-code@2.0.0 coding"}"#).unwrap();
+        store
+            .import_verified_probe_row(
+                "project_0001",
+                &lcg_t14_verified_row_record(
+                    "2.0.0",
+                    "probe://claude-code/2.0.0/coding",
+                    "2026-10-08T00:00:00Z",
+                ),
+                SessionPolicyAction::CodingTargetWrite,
+            )
+            .unwrap();
+        let reloaded = store
+            .get("project_0001", ProviderRefType::ClaudeCode)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            reloaded.current_action_row(
+                ProviderWireDialect::ClaudeCodeStreamJson,
+                "2.0.0",
+                SessionPolicyAction::CodingTargetWrite
+            )
+            .launch,
+            ProviderCapabilityEvidence::Confirmed
+        );
+        // 重探解除「行阻断」:等待不再列 version/probe 材料——仅剩 trust
+        // 维度(2d 导入不自报 trust,Global Constraints 第 2 条;trust 由
+        // trust store 独立建立。trust Confirmed 的行级 None 语义由
+        // lcg_t14_unverified_os_version_or_cost_is_never_default_supported
+        // 的同版本断言覆盖)。
+        let waiting_after_reprobe = reloaded
+            .migration_waiting(
+                ProviderWireDialect::ClaudeCodeStreamJson,
+                "2.0.0",
+                SessionPolicyAction::CodingTargetWrite,
+            )
+            .expect("trust dimension must still project a waiting (probe never self-reports trust)");
+        assert_eq!(waiting_after_reprobe.reason_code, PROVIDER_TRUST_MISSING);
+        assert!(
+            !waiting_after_reprobe
+                .missing_materials
+                .iter()
+                .any(|material| material.starts_with("version evidence:")),
+            "reprobe must clear the version-dimension block: {:?}",
+            waiting_after_reprobe.missing_materials
+        );
+        assert!(
+            !waiting_after_reprobe
+                .missing_materials
+                .iter()
+                .any(|material| material.starts_with("probe evidence:")),
+            "reprobed row must clear the cell-dimension block: {:?}",
+            waiting_after_reprobe.missing_materials
+        );
+        assert!(
+            waiting_after_reprobe
+                .missing_materials
+                .iter()
+                .any(|material| material.starts_with("trust evidence:"))
+        );
+        assert!(old_probe_artifact.is_file());
+    }
+
+    #[test]
+    fn lcg_t14_unverified_os_version_or_cost_is_never_default_supported() {
+        // 未实测版本/OS/成本维度永不默认支持:1.2.3 全 Confirmed + trust
+        // Confirmed 的记录,查询 9.9.9 时逐格 Unknown,迁移等待逐维点名。
+        let matrix = ProviderActionMatrix::from_rows(vec![lcg_t02_matrix_row(
+            SessionPolicyAction::CodingTargetWrite,
+            ProviderCapabilityEvidence::Confirmed,
+            ProviderCapabilityEvidence::Confirmed,
+            ProviderCapabilityEvidence::Confirmed,
+        )])
+        .unwrap();
+        let record = lcg_t02_v2_record("1.2.3", matrix);
+        // provider 级 trust Confirmed 不得反向救活 version 级行。
+        assert_eq!(record.trust, ProviderCapabilityEvidence::Confirmed);
+
+        let untested_version_state = record.current_action_row(
+            ProviderWireDialect::ClaudeCodeStreamJson,
+            "9.9.9",
+            SessionPolicyAction::CodingTargetWrite,
+        );
+        assert_ne!(
+            untested_version_state.launch,
+            ProviderCapabilityEvidence::Confirmed
+        );
+        assert_ne!(
+            untested_version_state.resume,
+            ProviderCapabilityEvidence::Confirmed
+        );
+        assert_ne!(
+            untested_version_state.write_boundary,
+            ProviderCapabilityEvidence::Confirmed
+        );
+
+        // 迁移等待:version/OS/预算成本维度逐条点名,不提供任何默认支持。
+        let waiting = record
+            .migration_waiting(
+                ProviderWireDialect::ClaudeCodeStreamJson,
+                "9.9.9",
+                SessionPolicyAction::CodingTargetWrite,
+            )
+            .expect("untested version must project an actionable waiting");
+        assert_eq!(waiting.reason_code, PROVIDER_CAPABILITY_ACTION_UNKNOWN);
+        assert!(
+            waiting
+                .missing_materials
+                .iter()
+                .any(|material| material.starts_with("version evidence:"))
+        );
+        assert!(
+            waiting
+                .missing_materials
+                .iter()
+                .any(|material| material.starts_with("os evidence:")),
+            "untested OS dimension must be listed as missing material"
+        );
+        assert!(
+            waiting
+                .missing_materials
+                .iter()
+                .any(|material| material.starts_with("budget evidence:")),
+            "untested budget/cost dimension must be listed as missing material"
+        );
+        assert_eq!(waiting.allowed_actions.len(), 2);
+
+        // 同版本已验证行不误伤:无等待投影。
+        assert!(
+            record
+                .migration_waiting(
+                    ProviderWireDialect::ClaudeCodeStreamJson,
+                    "1.2.3",
+                    SessionPolicyAction::CodingTargetWrite,
+                )
+                .is_none()
+        );
     }
 }
