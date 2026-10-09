@@ -973,15 +973,15 @@ pub(crate) fn backfill_legacy_spec_versions(
 /// it here keeps malformed provider/gateway output in the request validation
 /// family rather than exposing a generic store failure.
 fn validate_requested_aggregate_scope(
-    effective_member_ids: &[LogicalRepositoryId],
+    resolved_upper_bound: &[LogicalRepositoryId],
     involved_repository_ids: &[LogicalRepositoryId],
     change_order: &[LogicalRepositoryId],
 ) -> ApiResult<()> {
     for involved in involved_repository_ids {
-        if !effective_member_ids.contains(involved) {
+        if !resolved_upper_bound.contains(involved) {
             return Err(ApiError::validation(
                 "involved_repository_not_effective",
-                "involved_repository_ids must be contained in the effective logical-codebase selection",
+                "involved_repository_ids must be contained in the issue repository upper bound (selection focus or effective members)",
             ));
         }
     }
