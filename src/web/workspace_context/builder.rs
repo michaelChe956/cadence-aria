@@ -184,6 +184,17 @@ async fn build_workspace_context_message(
                 repository.path.display().to_string(),
             )
         };
+    // add-multi-repo-issue-entry（组2 2.1）：resolved 上界 = selection.focus 非空取
+    // 原集 / 空取 resolved 有效成员（与 generate 出生值/write-back/preflight 四面
+    // 同源，`resolved_upper_bound` 唯一口径）。Design 钉定块注入上界（允许界内
+    // 子集收敛、界外即拒）；Story/WorkItemPlan 指令面不变；Legacy 单仓无聚合
+    // prompt，零回归。
+    let aggregate_design_bound = match (&routing, aggregate_planning.as_ref()) {
+        (RepositoryRouting::Logical { selection, .. }, Some(resolved)) => {
+            Some(selection.resolved_upper_bound(&resolved.snapshot.effective_member_ids))
+        }
+        _ => None,
+    };
     let aggregate_prompt =
         aggregate_planning
             .as_ref()
@@ -199,12 +210,7 @@ async fn build_workspace_context_message(
                 _ => aggregate_design_scope_prompt(
                     &resolved.inventory_injection.rendered,
                     &resolved.snapshot.effective_member_ids,
-                    // pi-7 钉定缺口:design record 当前聚合视野(出生值=调用方钉定)
-                    // 注入 prompt 钉定块,sentinel 必须原样输出——否则 AI 自决回写
-                    // 覆写钉定(方案X阶段2),Confirmed 后 plan 单候选 preflight
-                    // found 2(pi r7 plan fresh 现场)。
-                    &entity.aggregate_involved,
-                    &entity.aggregate_change_order,
+                    aggregate_design_bound.as_deref().unwrap_or(&[]),
                 ),
             });
     let issue_description = issue

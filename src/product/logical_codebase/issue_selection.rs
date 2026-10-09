@@ -136,6 +136,25 @@ impl IssueCodebaseSelection {
             .filter(|id| !excluded.contains(id))
             .collect()
     }
+
+    /// 多仓入口「resolved 上界」（add-multi-repo-issue-entry design 关键点 0）：
+    /// - `focus_repository_ids` 非空 → 上界 = focus 原集（勾选授权集，原样返回，
+    ///   不做 include−exclude/active 再筛）；
+    /// - 空 → 上界 = 调用方 resolved 的有效成员集合（AllMembers 历史语义原样透传，
+    ///   绝不以空集为上界——否则任何 involved 都越界，存量链整体回归）。
+    ///
+    /// preflight / design 钉定 / generate 出生值 / write-back 四面同源引用本函数，
+    /// 禁止任何一面自算第二套上界（成员过滤与格式归一由各调用面自行包装）。
+    pub fn resolved_upper_bound(
+        &self,
+        resolved_effective_member_ids: &[LogicalRepositoryId],
+    ) -> Vec<LogicalRepositoryId> {
+        if self.focus_repository_ids.is_empty() {
+            resolved_effective_member_ids.to_vec()
+        } else {
+            self.focus_repository_ids.clone()
+        }
+    }
 }
 
 pub struct IssueCodebaseSelectionStore {
@@ -378,6 +397,43 @@ mod tests {
             )
             .validate_focus_subset()
             .is_err()
+        );
+    }
+
+    #[test]
+    fn resolved_upper_bound_prefers_focus_verbatim_and_falls_back_to_resolved() {
+        // add-multi-repo-issue-entry：focus 非空 → 原集（不做 include−exclude 再筛）；
+        // 空 → 原样透传调用方 resolved 集（AllMembers 历史语义，不以空集为上界）。
+        let a = LogicalRepositoryId(stable_uuid(0x0001));
+        let b = LogicalRepositoryId(stable_uuid(0x0002));
+        let c = LogicalRepositoryId(stable_uuid(0x0003));
+
+        let pinned = IssueCodebaseSelection::explicit(
+            "project_0001",
+            "issue_0001",
+            vec![a, b, c],
+            vec![c],
+            vec![a, b],
+            None,
+        );
+        assert_eq!(
+            pinned.resolved_upper_bound(&[a, b, c]),
+            vec![a, b],
+            "focus 非空时上界必须是 focus 原集，不受 exclude/resolved 影响"
+        );
+
+        let unpinned = IssueCodebaseSelection::explicit(
+            "project_0001",
+            "issue_0001",
+            vec![a, b, c],
+            vec![c],
+            vec![],
+            None,
+        );
+        assert_eq!(
+            unpinned.resolved_upper_bound(&[a, b]),
+            vec![a, b],
+            "focus 空时上界必须原样透传 resolved 集"
         );
     }
 

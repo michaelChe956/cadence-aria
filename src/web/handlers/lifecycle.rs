@@ -656,15 +656,24 @@ pub async fn generate_design_specs(
             )?;
             None
         }
-        RepositoryRouting::Logical { manifest, .. } => {
+        RepositoryRouting::Logical {
+            manifest,
+            selection,
+        } => {
             let resolved = PlanningContextResolver::new(app_paths.clone())
                 .build_with_fresh_index(&project_id, &issue_id, &[])
                 .await
                 .map_err(product_store_api_error)?;
             let involved_repository_ids = request.involved_repository_ids.unwrap_or_default();
             let change_order = request.change_order.unwrap_or_default();
+            // add-multi-repo-issue-entry（组2 2.3，k3 P2-5）出生值守卫：resolved 上界 =
+            // selection.focus 非空取原集 / 空取 resolved 有效成员（与钉定块/write-back/
+            // preflight 四面同源）。请求 involved ⊄ 上界在 generate 入口即拒（4xx），
+            // 收敛早于 preflight——界外意图不落 record 出生值。
+            let resolved_bound =
+                selection.resolved_upper_bound(&resolved.snapshot.effective_member_ids);
             validate_requested_aggregate_scope(
-                &resolved.snapshot.effective_member_ids,
+                &resolved_bound,
                 &involved_repository_ids,
                 &change_order,
             )?;

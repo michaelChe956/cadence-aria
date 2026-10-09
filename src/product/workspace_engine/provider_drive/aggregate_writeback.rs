@@ -2,6 +2,7 @@
 //! 自 `provider_drive.rs` 拆出（1200 行守护，Wave 3.1）：纯移动零语义变化。
 
 use super::*;
+use crate::product::logical_codebase::RepositoryRouting;
 
 impl WorkspaceEngine {
     /// 方案X阶段2：AI run 完成后解析 structured output，将 AI 声明的 involved/change_order
@@ -85,6 +86,37 @@ impl WorkspaceEngine {
                         )));
                     }
                 };
+                // add-multi-repo-issue-entry（组2 2.2，spec REQ-WSC-08「design involved
+                // 界内收敛」）：resolved 上界 = selection.focus 非空取原集 / 空取
+                // snapshot effective（`resolved_upper_bound` 与出生值/preflight 同源；
+                // selection 缺失/加载失败退回 effective——store 校验仍兜底 ⊆ effective，
+                // 残余越界由 preflight 环收敛）。sentinel involved 越界 → 拒回写 +
+                // 可见诊断，record 保持原值，范围异议走修订反馈，禁止 AI 自决扩界。
+                let app_paths = store.app_paths();
+                let resolved_bound =
+                    RepositoryRouting::load_for_issue(&app_paths, project_id, issue_id)
+                        .ok()
+                        .and_then(|routing| match routing {
+                            RepositoryRouting::Logical { selection, .. } => {
+                                Some(selection.resolved_upper_bound(&effective_member_ids))
+                            }
+                            _ => None,
+                        })
+                        .unwrap_or_else(|| effective_member_ids.clone());
+                let out_of_bound: Vec<_> = output
+                    .involved_repository_ids
+                    .iter()
+                    .filter(|involved| !resolved_bound.contains(involved))
+                    .copied()
+                    .collect();
+                if !out_of_bound.is_empty() {
+                    return Ok(Some(format!(
+                        "Design 聚合回写拒绝：sentinel involved_repository_ids 越界（不在 \
+                         resolved 上界）：{out_of_bound:?}；上界={resolved_bound:?}。本次\
+                         回写不生效；范围异议走修订反馈（artifact 正文声明 blocker），\
+                         禁止 AI 自决扩界。"
+                    )));
+                }
                 let scope = AggregateDesignSpecScope {
                     logical_codebase_ref,
                     effective_member_ids,

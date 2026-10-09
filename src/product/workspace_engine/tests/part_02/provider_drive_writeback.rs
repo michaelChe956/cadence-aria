@@ -398,6 +398,146 @@ async fn provider_drive_design_run_writes_back_involved_and_change_order_from_st
 }
 
 #[tokio::test]
+async fn provider_drive_design_run_rejects_write_back_outside_resolved_bound() {
+    // add-multi-repo-issue-entry(组2 2.2):resolved 上界=selection.focus=[a](与
+    // 出生值/preflight 同源);sentinel involved=[a,b] 均为 effective 成员但 b 在
+    // focus 界外 → 拒绝回写 + 可见诊断,record involved 保持原值(走修订反馈,
+    // 不得以 AI 自决声明扩界)。
+    use crate::product::logical_codebase::{
+        IssueCodebaseSelection, IssueCodebaseSelectionStore, LogicalCodebaseManifest,
+        LogicalCodebaseStore,
+    };
+
+    let (tmp, checkpoint_store) = setup();
+    let app_paths = ProductAppPaths::new(tmp.path().join(".aria"));
+    let lifecycle_store = LifecycleStore::new(app_paths.clone());
+    let member_a = LogicalRepositoryId(Uuid::from_u128(0xaaaa));
+    let member_b = LogicalRepositoryId(Uuid::from_u128(0xbbbb));
+    let effective_member_ids = vec![member_a, member_b];
+
+    // manifest + selection(include=[a,b],focus=[a])→ load_for_issue 判 Logical,
+    // 上界=focus 原集 [a](resolved_upper_bound 同源)。
+    let aggregate_root = tmp.path().join("aggregate-root");
+    std::fs::create_dir_all(&aggregate_root).unwrap();
+    LogicalCodebaseStore::new(app_paths.clone())
+        .save_manifest(
+            "project_0001",
+            &LogicalCodebaseManifest::new(
+                "project_0001",
+                aggregate_root,
+                effective_member_ids.clone(),
+            ),
+        )
+        .unwrap();
+    IssueCodebaseSelectionStore::new(app_paths.clone())
+        .save(&IssueCodebaseSelection::explicit(
+            "project_0001",
+            "issue_0001",
+            effective_member_ids.clone(),
+            Vec::new(),
+            vec![member_a],
+            None,
+        ))
+        .unwrap();
+
+    let story = lifecycle_store
+        .create_story_spec(CreateStorySpecInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            title: "Story".to_string(),
+            aggregate_codebase: None,
+        })
+        .unwrap();
+    let design = lifecycle_store
+        .create_design_spec(CreateDesignSpecInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            story_spec_ids: vec![story.id.clone()],
+            title: "Design".to_string(),
+            aggregate_codebase: Some(AggregateDesignSpecScope {
+                logical_codebase_ref: Uuid::from_u128(0x0100),
+                effective_member_ids: effective_member_ids.clone(),
+                involved_repository_ids: Vec::new(),
+                change_order: Vec::new(),
+            }),
+        })
+        .unwrap();
+    save_planning_snapshot(
+        &app_paths,
+        "project_0001",
+        "issue_0001",
+        effective_member_ids.clone(),
+    );
+
+    let session_record = lifecycle_store
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        entity_id: design.id.clone(),
+        workspace_type: WorkspaceType::Design,
+        author_provider: ProviderName::ClaudeCode,
+        reviewer_provider: Some(ProviderName::Codex),
+
+        review_rounds: 2,
+        superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
+        .unwrap();
+    let session = WorkspaceSession::from_record(session_record);
+    let (tx, _rx) = mpsc::channel(64);
+    let mut engine =
+        WorkspaceEngine::new_persistent(checkpoint_store, lifecycle_store.clone(), tx, session);
+
+    // sentinel involved=[a,b]:均在 effective 内(存量校验会放行),但 b 在 focus 上界外。
+    let structured = format!(
+        "<ARIA_STRUCTURED_OUTPUT nonce=\"abcd1234\">{{\"nonce\":\"abcd1234\",\"involved_repository_ids\":[\"{a}\",\"{b}\"],\"change_order\":[\"{a}\",\"{b}\"]}}</ARIA_STRUCTURED_OUTPUT>",
+        a = member_a.0,
+        b = member_b.0,
+    );
+    let artifact_markdown = format!(
+        "{}\n{structured}",
+        complete_design_artifact("保留设计边界。", "公开接口保持稳定。")
+    );
+    drive_author_completed(&mut engine, format!("```artifact\n{artifact_markdown}\n```")).await;
+
+    // 拒回写:record involved/change_order 保持出生原值(空)。
+    let updated = lifecycle_store
+        .load_existing_spec("project_0001", "issue_0001", &design.id)
+        .unwrap();
+    match updated {
+        ExistingSpecRecord::Design { record, .. } => {
+            assert!(
+                record.involved_repository_ids.is_empty(),
+                "界外 sentinel involved 不得回写:actual={:?}",
+                record.involved_repository_ids
+            );
+            assert!(
+                record.change_order.is_empty(),
+                "界外 sentinel change_order 不得回写:actual={:?}",
+                record.change_order
+            );
+        }
+        _ => panic!("expected design spec"),
+    }
+    // 可见诊断:拒绝原因 + 越界成员,不静默吞。
+    let diagnostics = engine
+        .session()
+        .messages
+        .iter()
+        .filter(|message| message.role == "system")
+        .collect::<Vec<_>>();
+    assert_eq!(diagnostics.len(), 1, "越界拒应记录一条可见诊断");
+    assert!(
+        diagnostics[0].content.contains("聚合回写拒绝"),
+        "诊断应说明回写被拒: {}",
+        diagnostics[0].content
+    );
+    assert!(
+        diagnostics[0].content.contains("越界"),
+        "诊断应说明越界原因: {}",
+        diagnostics[0].content
+    );
+}
+
+#[tokio::test]
 async fn provider_drive_single_repo_story_run_does_not_write_back_aggregate() {
     // 传统单仓 Story（aggregate_codebase=None）：AI 产出无 structured output，
     // 回写应跳过且不产生诊断/失败，既有 append_version 行为不变。
