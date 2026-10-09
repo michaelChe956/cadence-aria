@@ -29,12 +29,23 @@ export type StageResult = {
   evidenceRefs?: string[];
 };
 
+export type ObservedWorkItem = {
+  workItemId: string;
+  alias: string | null;
+  repositoryId: string | null;
+  attemptId: string | null;
+  executionStatus: string | null;
+  completionCommit: string | null;
+};
+
 export type RunManifest = {
   runId: string;
   createdAt: string;
   dryRun: boolean;
   worktreeHead: string;
   providerMode: string;
+  /** 段编排顺序(real 全旅程线由 assemble-real 写入;缺省 s0-s3 冒烟)。 */
+  stageOrder?: string[];
   ariaBinary: { path: string; sha256: string };
   distFingerprint: { indexHtmlSha256: string; assetCount: number };
   baseURL: string | null;
@@ -44,6 +55,11 @@ export type RunManifest = {
   evidenceRoot: string;
   ariaPid: number | null;
   ariaStartTimeTicks: string | null;
+  /** real 线装配期事实(trust 工件/health 预热;冒烟线缺省)。 */
+  providerPreflight?: {
+    codexTrust: { canonicalRoot: string; action: string; beforeDigest: string | null; afterDigest: string }[];
+    health: { provider: string; ready: boolean; version: string | null; waitedMs: number; providers: { provider: string; available: boolean; version: string | null }[] } | null;
+  };
   /** spec 观测到的身份(只作台账,不作为产品状态来源)。 */
   observed: {
     projectId?: string;
@@ -55,6 +71,15 @@ export type RunManifest = {
     issueId?: string;
     issueTitle?: string;
     primaryAlias?: string;
+    storySessionId?: string;
+    storySpecId?: string;
+    designSessionId?: string;
+    designSpecId?: string;
+    planSessionId?: string;
+    planId?: string;
+    workItems?: ObservedWorkItem[];
+    issueStatus?: string;
+    deliveryOverall?: string;
   };
   stages: Record<string, StageResult>;
 };
@@ -94,10 +119,11 @@ export function writeManifest(manifest: RunManifest): void {
     runDir: runDir(manifest.runId),
     ariaPid: manifest.ariaPid,
     dryRun: manifest.dryRun,
+    providerMode: manifest.providerMode,
   });
 }
 
-export function readManifestPointer(): { runId: string; baseURL: string | null; runDir: string; ariaPid: number | null; dryRun: boolean } {
+export function readManifestPointer(): { runId: string; baseURL: string | null; runDir: string; ariaPid: number | null; dryRun: boolean; providerMode?: string } {
   if (!existsSync(MANIFEST_POINTER_PATH)) {
     throw new Error(`缺少装配指针 ${MANIFEST_POINTER_PATH}:先执行 npm run assemble`);
   }
@@ -126,11 +152,16 @@ export function recordObserved(runId: string, observed: Partial<RunManifest["obs
   writeManifest(manifest);
 }
 
+/** 段编排顺序:manifest.stageOrder 优先(real 线),缺省冒烟四段。 */
+export function stageOrderOf(manifest: RunManifest): string[] {
+  return manifest.stageOrder ?? ["s0", "s1", "s2", "s3"];
+}
+
 /** 段前置状态:上一段未 pass/pass_degraded → 后续 not_executed。 */
 export function previousStageCleared(manifest: RunManifest, stage: string): boolean {
-  const order = ["s0", "s1", "s2", "s3"];
+  const order = stageOrderOf(manifest);
   const index = order.indexOf(stage);
   if (index <= 0) return true;
-  const previous = manifest.stages[order[index - 1]];
+  const previous = manifest.stages[order[index - 1]!];
   return previous?.status === "pass" || previous?.status === "pass_degraded";
 }

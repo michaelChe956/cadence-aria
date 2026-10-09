@@ -13,6 +13,13 @@
   - 列表读取态随标读更新;
   - 刷新后本进程内状态保持(计数仍 1)。
 
+## 模块位置契约
+
+- `src/app.js`:页面逻辑模块位置(基线 NotImplementeds 占位);交付实现经同源
+  网关拉取/标读并填充 `index.html` 的 `[data-testid="notification-center"]` 容器。
+  本文件同时是聚合索引(codegraph)的最小可索引 JS 锚——成员仓无任何可索引
+  文件会使聚合索引 member coverage 失败,阻塞 story 生成。
+
 ## 静态资源契约
 
 - 入口:`index.html` + 原生 JS(无构建步骤、无 npm 依赖)。

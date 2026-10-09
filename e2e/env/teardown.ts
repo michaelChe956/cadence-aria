@@ -7,19 +7,19 @@ import {
   readManifest,
   readManifestPointer,
   runDir,
+  stageOrderOf,
   type StageResult,
 } from "../lib/run-contract.ts";
 
 /// teardown:全停(仅台账登记且 PID+starttime 匹配的 aria 子树)+ 证据全保留。
-/// 对未执行的段按 v2.0 语义回填 not_executed(台账诚实口径)。
+/// 对未执行的段按 v2.0 语义回填 not_executed(台账诚实口径);
+/// 段序取 manifest.stageOrder(real 全旅程 s0-s9 / 冒烟缺省 s0-s3)。
 /// 不做任何全局清理(禁止 pkill 类操作);材料目录留给报告与人工检视。
-
-const STAGE_ORDER = ["s0", "s1", "s2", "s3"] as const;
 
 function backfillNotExecuted(runId: string): void {
   const manifest = readManifest(runId);
   let sawFailure = false;
-  for (const stage of STAGE_ORDER) {
+  for (const stage of stageOrderOf(manifest)) {
     const existing = manifest.stages[stage];
     if (existing && existing.status === "fail") sawFailure = true;
     if (!existing && sawFailure) {
@@ -35,6 +35,7 @@ function backfillNotExecuted(runId: string): void {
   }
   atomicWriteJson(manifestPath(runId), manifest);
 }
+
 
 async function main(): Promise<void> {
   const pointer = readManifestPointer();

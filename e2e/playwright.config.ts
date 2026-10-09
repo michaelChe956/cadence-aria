@@ -31,6 +31,8 @@ process.env.no_proxy = "127.0.0.1,localhost";
 
 export default defineConfig({
   testDir: "./spec",
+  // v2.0 §6:默认(fake 冒烟)config 排除 real;real 只由 playwright.real.config 驱动。
+  testIgnore: /\/real\//,
   fullyParallel: false,
   workers: 1,
   // Ruling 11:retries 固定 0,绝不「直到绿」。

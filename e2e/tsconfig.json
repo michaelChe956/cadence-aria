@@ -11,5 +11,5 @@
     "allowImportingTsExtensions": true,
     "erasableSyntaxOnly": true
   },
-  "include": ["env/**/*.ts", "lib/**/*.ts", "spec/**/*.ts", "fixtures/**/*.ts", "playwright.config.ts"]
+  "include": ["env/**/*.ts", "lib/**/*.ts", "spec/**/*.ts", "scripts/**/*.ts", "fixtures/**/*.ts", "playwright.config.ts", "playwright.real.config.ts"]
 }
