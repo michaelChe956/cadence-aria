@@ -593,7 +593,46 @@ async fn shared_executor_cannot_reach_repository_registration_or_git_finalize() 
             ),
         }
     }
-    // 最终 receipt 冻结真正文 digest（Task 4 末命令收口）。
+    // 5. lcg_t13:normal capability matrix Unknown 不改变 recipe 隔离。
+    //    fixture 起跑时 capability store 无任何 probe 行——gateway 组装
+    //    (material prep)以 ensure_bootstrap 种下 ClaudeCode 过渡记录
+    //    (normal 矩阵全 Unknown + legacy allowlist 过渡桥)。五步 recipe
+    //    完整 Completed(上方断言)证明 root-recipe 相位只消费固定
+    //    Claude recipe 事实,不被 normal Unknown 阻断;跑完后 normal
+    //    矩阵逐格仍 Unknown 证明 recipe 成功不铸造 normal Confirmed
+    //    (相位分流互不渗透的隔离契约)。
+    use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
+    let capability_store = crate::product::logical_codebase::ProviderCapabilityStore::for_lc(
+        fixture.paths.clone(),
+        fixture.lc_id.clone(),
+    );
+    let claude_record = capability_store
+        .get(
+            "project_0001",
+            crate::product::logical_codebase::ProviderRefType::ClaudeCode,
+        )
+        .expect("capability record readable")
+        .expect("bootstrap must seed the fixed Claude recipe provider record");
+    for action in [
+        crate::product::logical_codebase::SessionPolicyAction::PlanningReadOnly,
+        crate::product::logical_codebase::SessionPolicyAction::CodingTargetWrite,
+        crate::product::logical_codebase::SessionPolicyAction::ReviewReadOnly,
+    ] {
+        let row = claude_record.action_matrix.row(&action);
+        assert!(
+            matches!(row.launch, ProviderCapabilityEvidence::Unknown),
+            "normal launch cell for {action:?} must stay Unknown: the root recipe must not mint normal Confirmed"
+        );
+        assert!(
+            matches!(row.write_boundary, ProviderCapabilityEvidence::Unknown),
+            "normal write_boundary cell for {action:?} must stay Unknown"
+        );
+        assert!(
+            matches!(row.resume, ProviderCapabilityEvidence::Unknown),
+            "normal resume cell for {action:?} must stay Unknown"
+        );
+    }
+    // 最终 receipt 冻结真正文 digest(Task 4 末命令收口)。
     let receipt = receipts
         .get("project_0001", &operation.operation_id)
         .expect("final receipt read")

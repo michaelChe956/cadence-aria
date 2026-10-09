@@ -296,12 +296,16 @@ async fn drive_review_session_via_gateway_records_audit_and_completes() {
     );
 }
 
-/// C-2(组3):reviewer 配置 Kimi 时不得静默回退 Claude。logical review 启动必须
-/// 在集中映射处 fail-closed:错误事件含判别码与 provider 名、gateway audit 零启动、
-/// capability source 零调用(映射失败发生在 gateway validate 之前)。回归锁定:
-/// 修复前该配置会静默用 ClaudeCode 跑完整 review。
+/// C-2(组3;lcg_t13 重钉):reviewer 配置 Kimi 时不得静默回退 Claude。
+/// Task 1a 四家映射后 KimiCode 是合法 gateway dialect——launch request
+/// 以 KimiCode ref 透传 gateway validate(映射不再失败),随后在本
+/// fixture 的 availability gate 处 fail-closed(gate 只播种 ClaudeCode/
+/// Codex 健康条目,Kimi 无健康记录 → `provider_unavailable` 点名
+/// KimiCode)、gateway audit 零启动。回归锁定语义不变:修复前该配置会
+/// 静默用 ClaudeCode 跑完整 review;现在任何失败都必须点名配置的
+/// reviewer 且零 session 启动。
 #[tokio::test]
-async fn drive_review_session_via_gateway_fails_closed_for_unsupported_reviewer() {
+async fn drive_review_session_via_gateway_fails_closed_for_unavailable_kimi_reviewer() {
     let fixture = review_gateway_fixture();
     let audit = fixture.audit.clone();
     assert_eq!(audit.stream_launches(), 0);
@@ -333,30 +337,29 @@ async fn drive_review_session_via_gateway_fails_closed_for_unsupported_reviewer(
             start_failure = Some(message);
         }
     }
-    let message = start_failure.expect("unsupported reviewer must surface an error event");
-    assert!(
-        message.contains("provider_unsupported_for_gateway_launch"),
-        "expected provider_unsupported_for_gateway_launch, got: {message}"
-    );
+    let message = start_failure.expect("unavailable Kimi reviewer must surface an error event");
     assert!(
         message.contains("KimiCode"),
-        "error must name the configured reviewer provider, got: {message}"
+        "the failure must name the session-configured reviewer, got: {message}"
+    );
+    assert!(
+        message.contains("provider_unavailable"),
+        "fixture gate has no Kimi health entry: the launch must fail closed at availability, got: {message}"
     );
     assert_eq!(
         audit.stream_launches(),
         0,
-        "unsupported reviewer must not start any gateway session"
+        "unavailable reviewer must not start any gateway session"
     );
-    // 集中映射失败发生在 review launch request 组装处:KimiCode 不存在对应的
-    // `ProviderRefType`,绝不可能出现在 capability 咨询记录里(记录中只允许
-    // author 侧路由投影的 ClaudeCode)。
+    // C-2 身份透传:Kimi reviewer 的 launch request 以 KimiCode ref 到达
+    // gateway validate(映射成功后由 availability gate fail-closed),绝无
+    // 静默 Claude 顶替——fixture registry 只注册了 ClaudeCode adapter,
+    // 若被顶替则启动成功、stream_launches 变 1(上方零启动断言即红)。
+    let seen = fixture.capabilities.seen_provider_refs();
     assert!(
-        fixture
-            .capabilities
-            .seen_provider_refs()
-            .iter()
-            .all(|r| r.provider_type == ProviderRefType::ClaudeCode),
-        "KimiCode must never reach gateway validate as a provider ref"
+        seen.iter().any(|r| r.provider_type == ProviderRefType::KimiCode
+            && r.capability_snapshot_ref == "cap_managed_snapshot"),
+        "the review launch must validate the session-configured Kimi reviewer, got {seen:?}"
     );
 }
 
@@ -581,11 +584,15 @@ fn routing_reference_context_projects_session_codex_author_not_hardcoded_claude(
     );
 }
 
-/// C-2(组3):author 配置 Pi 时投影无 gateway dialect → 回落 Legacy(prompt 路由
-/// 引用不假装 Logical，也不触达 gateway validate)；真实启动在集中映射处
-/// fail-closed(由 gateway_start 测试锁定)。
+/// C-2(组3;lcg_t13 重钉):Task 1a 四家映射后 Pi 是合法 gateway
+/// dialect——author 配置 Pi 时投影 request 以 session 配置的 Pi ref 经
+/// gateway validate(fixture capability 放行)→ `Logical`,不再回落
+/// Legacy。反硬编码语义不变:Pi 作者不被顶替为 Claude,也不假装
+/// Logical 之外的投影;无 gateway dialect 的 provider(如 Fake)仍回落
+/// Legacy(真实启动在集中映射处 fail-closed,由 provider_ref_mapping
+/// 测试锁定)。
 #[test]
-fn routing_reference_context_unsupported_author_falls_back_to_legacy() {
+fn routing_reference_context_projects_session_pi_author_not_hardcoded_claude() {
     let root = tempfile::tempdir().expect("temporary product root");
     let capabilities = Arc::new(ReviewStaticCapabilitySource::default());
     let (gateway, worktree) = routing_context_gateway_with_capability(
@@ -605,13 +612,18 @@ fn routing_reference_context_unsupported_author_falls_back_to_legacy() {
     )
     .with_logical_provider_gateway(gateway);
 
-    assert!(matches!(
-        engine.routing_reference_context(),
-        RoutingReferenceContext::Legacy
-    ));
     assert!(
-        capabilities.seen_provider_refs().is_empty(),
-        "unsupported author must not reach gateway validate from the prompt projection"
+        matches!(
+            engine.routing_reference_context(),
+            RoutingReferenceContext::Logical(_)
+        ),
+        "Pi is a legal gateway dialect after the four-provider mapping: the projection must validate it instead of silently falling back to Legacy"
+    );
+    let seen = capabilities.seen_provider_refs();
+    assert!(
+        seen.iter().any(|r| r.provider_type == ProviderRefType::Pi
+            && r.capability_snapshot_ref == "cap_managed_snapshot"),
+        "projection must validate the session-configured Pi author, got {seen:?}"
     );
 }
 

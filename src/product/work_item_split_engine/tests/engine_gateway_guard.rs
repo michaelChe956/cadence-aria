@@ -135,6 +135,140 @@ async fn legacy_repository_generate_still_invokes_adapter_directly() {
 }
 
 // ---------------------------------------------------------------------------
+// Task 13(lcg_t13):单仓 sync direct 兼容锁——direct 路径永不经 LC 桥。
+//
+// 断言语义(计划 Task 13 Step 1):legacy 单仓(`logical_repository_id:
+// None`)的 split sync 仍直接 `spawn_blocking(adapter.run)`,同一
+// repository 两次 generate 驱动的 AdapterInput 逐字段相同(provider 槽、
+// role、cwd/worktree 双字段、prompt/schema/timeout 冻结),且从不走
+// `run_validated`(LC 同步桥 `GatewaySyncProvider` 的唯一入口)——
+// validated_runs 恒 0 即「lc_bridge_calls_for_direct == 0」的可观测
+// 形态。本 change 不交付四家同步 direct;Pi/Kimi 的两槽 reject 由
+// task_run `RoutingProviderAdapter` it_web 侧
+// `lcg_t13_single_repository_sync_claude_codex_direct_topology_unchanged`
+// 锁定。
+// ---------------------------------------------------------------------------
+
+/// 记录每次收到的完整 AdapterInput,区分 raw `run` 与 `run_validated`,
+/// 返回固定 structured output(确定性输出对照)。
+struct DirectRunCapture {
+    raw_inputs: Mutex<Vec<AdapterInput>>,
+    validated_runs: AtomicUsize,
+}
+
+impl DirectRunCapture {
+    fn new() -> Self {
+        Self {
+            raw_inputs: Mutex::new(Vec::new()),
+            validated_runs: AtomicUsize::new(0),
+        }
+    }
+
+    fn minimal_output() -> Result<AdapterOutput, ProviderAdapterError> {
+        Ok(AdapterOutput {
+            exit_code: Some(0),
+            stdout: String::new(),
+            stderr: String::new(),
+            structured_output: Some(serde_json::json!({"work_items": []})),
+            files_modified: Vec::new(),
+            duration_ms: 0,
+            timeout_status: crate::protocol::contracts::TimeoutStatus::NotTimedOut,
+        })
+    }
+}
+
+impl ProviderAdapter for DirectRunCapture {
+    fn run(&self, input: &AdapterInput) -> Result<AdapterOutput, ProviderAdapterError> {
+        self.raw_inputs.lock().expect("direct run capture").push(input.clone());
+        Self::minimal_output()
+    }
+
+    fn run_validated(
+        &self,
+        _launch: crate::cross_cutting::session_launch::ValidatedAdapterInput,
+    ) -> Result<AdapterOutput, ProviderAdapterError> {
+        self.validated_runs.fetch_add(1, Ordering::SeqCst);
+        Err(ProviderAdapterError::execution_failed(
+            None,
+            String::new(),
+            "direct path must never launch through the LC sync bridge",
+            0,
+        ))
+    }
+}
+
+/// lcg_t13:legacy 单仓 split sync direct 拓扑不变——两次 generate 的
+/// AdapterInput 逐字段相同(Claude 槽/Codex 槽同一推导),raw `run`
+/// 恰好各一次,`run_validated` 零调用(LC 桥不可达),输出沿同一映射
+/// 确定性上浮。
+#[tokio::test]
+async fn lcg_t13_sync_direct_never_uses_lc_bridge() {
+    let probe = Arc::new(DirectRunCapture::new());
+    let engine = WorkItemSplitEngine::new(probe.clone());
+    let (request, issue, repository) = split_prompt_fixture();
+    let lifecycle = lifecycle();
+
+    for author_provider in [ProviderName::ClaudeCode, ProviderName::Codex] {
+        // 输出确定性:同一 structured output 各次得到同一映射错误
+        //(minimal fixture 输出无 work items,generate 在 provider 成功
+        // 之后的同一解析步失败——该边界即输出上浮的可观测面)。
+        let first_code = engine
+            .generate(&request, &lifecycle, &issue, &repository, author_provider.clone())
+            .await
+            .err()
+            .expect("minimal output must fail at the deterministic parse boundary")
+            .code;
+        let second_code = engine
+            .generate(&request, &lifecycle, &issue, &repository, author_provider.clone())
+            .await
+            .err()
+            .expect("minimal output must fail at the deterministic parse boundary")
+            .code;
+        assert_eq!(
+            first_code, second_code,
+            "sync direct output mapping must stay deterministic"
+        );
+        assert_eq!(first_code, "work_item_split_provider_output_invalid");
+    }
+
+    let inputs = probe.raw_inputs.lock().expect("direct run capture");
+    assert_eq!(inputs.len(), 4, "two raw runs per provider slot");
+    // 拓扑对照(prompt 含逐跑动态上下文,不在兼容锁范围;两槽路由语义、
+    // cwd/worktree 双字段、schema/timeout 冻结才是锁定面)。
+    assert_same_topology(&inputs[0], &inputs[1], "claude");
+    assert_same_topology(&inputs[2], &inputs[3], "codex");
+    assert_eq!(inputs[0].provider_type, crate::protocol::contracts::ProviderType::ClaudeCode);
+    assert_eq!(inputs[2].provider_type, crate::protocol::contracts::ProviderType::Codex);
+    for input in inputs.iter() {
+        assert_eq!(input.role, crate::protocol::contracts::AdapterRole::WorkItemSplitter);
+        // 单仓直连:不注入独立 cwd(None → 沿用 worktree_path,两字段
+        // 旧目录映射),worktree_path 即 repository.path。
+        assert_eq!(input.working_directory, None);
+        assert_eq!(
+            input.worktree_path.as_deref(),
+            Some(repository.path.to_string_lossy().to_string().as_str()),
+            "single-repo direct must keep the repository path as worktree target"
+        );
+    }
+    assert_eq!(
+        probe.validated_runs.load(Ordering::SeqCst),
+        0,
+        "lc bridge calls for direct must be 0: raw run is the only spawn edge"
+    );
+}
+
+/// lcg_t13 拓扑对照:prompt 含逐跑动态上下文(会话号/时间),不在兼容锁
+/// 范围;槽身份/role/cwd 双字段/schema/timeout 才是锁定面。
+fn assert_same_topology(a: &AdapterInput, b: &AdapterInput, slot: &str) {
+    assert_eq!(a.provider_type, b.provider_type, "{slot}: slot identity");
+    assert_eq!(a.role, b.role, "{slot}: role unchanged");
+    assert_eq!(a.working_directory, b.working_directory, "{slot}: cwd field");
+    assert_eq!(a.worktree_path, b.worktree_path, "{slot}: worktree target");
+    assert_eq!(a.output_schema, b.output_schema, "{slot}: schema frozen");
+    assert_eq!(a.timeout, b.timeout, "{slot}: timeout frozen");
+}
+
+// ---------------------------------------------------------------------------
 // Task 2.5：cwd/target 分离的跨层字段合同（纯字段合同层测试）。
 //
 // 断言语义（task-2-5 brief Step 1）：

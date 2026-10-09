@@ -1169,3 +1169,410 @@ fn run_git(cwd: &std::path::Path, args: &[&str]) {
         .expect("git command");
     assert!(status.success(), "git {args:?}");
 }
+
+// ---------------------------------------------------------------------------
+// Task 13(lcg_t13):单仓 sync direct 与 workspace streaming legacy 的
+// 兼容锁(REQ-LCG-02 非目标面)。两类 direct 对照与 LC validated gateway
+// 三路分离:sync direct 恒两槽、workspace streaming 恒 raw `start`,
+// 都不经 LC 桥——本 change 不交付四家同步 direct,也不把 streaming
+// 对照升级为 LC 支持。
+// ---------------------------------------------------------------------------
+
+/// 记录每次 `run` 收到的完整 AdapterInput 并返回固定输出(sync direct
+/// 两槽的确定性观察点)。
+#[derive(Default)]
+struct SyncDirectSlotRecorder {
+    inputs: std::sync::Mutex<Vec<AdapterInput>>,
+}
+
+impl ProviderAdapter for SyncDirectSlotRecorder {
+    fn run(&self, input: &AdapterInput) -> Result<AdapterOutput, ProviderAdapterError> {
+        self.inputs.lock().expect("sync direct slot").push(input.clone());
+        Ok(AdapterOutput {
+            exit_code: Some(0),
+            stdout: "ok".to_string(),
+            stderr: String::new(),
+            structured_output: Some(serde_json::json!({"ok": true})),
+            files_modified: Vec::new(),
+            duration_ms: 0,
+            timeout_status: TimeoutStatus::NotTimedOut,
+        })
+    }
+}
+
+/// `Arc` 共享包装,使 routing 装箱后仍可读取记录。
+struct SharedSyncSlot(std::sync::Arc<SyncDirectSlotRecorder>);
+
+impl ProviderAdapter for SharedSyncSlot {
+    fn run(&self, input: &AdapterInput) -> Result<AdapterOutput, ProviderAdapterError> {
+        self.0.run(input)
+    }
+}
+
+/// lcg_t13:单仓 sync direct 拓扑不变——`default_compatibility_matrix`
+/// 恒恰 ClaudeCode/Codex 两槽(本 change 不交付四家同步 direct),两槽
+/// run argv/prompt 通道/输出解析冻结;`RoutingProviderAdapter` 对同一
+/// AdapterInput 两次分发的 captured input 与输出逐字节相同(args/cwd/
+/// output 不变);Pi/KimiCode/Fake 显式 reject(错误码 + 点名 provider),
+/// 两槽零调用。
+#[test]
+fn lcg_t13_single_repository_sync_claude_codex_direct_topology_unchanged() {
+    use cadence_aria::cross_cutting::adapter_compatibility::{
+        OutputParser, PromptInputMode, StructuredOutputMode, default_compatibility_matrix,
+    };
+    use cadence_aria::protocol::contracts::ProviderType;
+    use cadence_aria::task_run::provider_factory::RoutingProviderAdapter;
+
+    // ① 两槽矩阵拓扑:恰 Claude/Codex 两行,Pi/Kimi 不是 sync direct 行。
+    let matrix = default_compatibility_matrix();
+    assert_eq!(
+        matrix.entries.len(),
+        2,
+        "sync direct compatibility matrix must stay exactly two slots"
+    );
+    let claude = matrix
+        .entry_for(ProviderType::ClaudeCode)
+        .expect("claude slot entry");
+    let codex = matrix
+        .entry_for(ProviderType::Codex)
+        .expect("codex slot entry");
+    assert!(matrix.entry_for(ProviderType::Pi).is_none());
+    assert!(matrix.entry_for(ProviderType::KimiCode).is_none());
+
+    // ② 两槽 argv/prompt 通道/输出解析基线冻结(args_before == args_after)。
+    assert_eq!(claude.run_command.program, "claude");
+    assert_eq!(
+        claude.run_command.args,
+        vec![
+            "-p",
+            "--permission-mode",
+            "dontAsk",
+            "--tools",
+            "",
+            "--strict-mcp-config",
+            "--no-session-persistence",
+        ],
+        "claude sync direct argv baseline must stay byte-identical"
+    );
+    assert!(matches!(claude.prompt_input_mode, PromptInputMode::Stdin));
+    assert!(!claude.pass_worktree_path_as_arg);
+    assert!(matches!(
+        claude.structured_output_mode,
+        StructuredOutputMode::SentinelJson
+    ));
+    assert!(matches!(claude.output_parser, OutputParser::SentinelBlock));
+    assert_eq!(codex.run_command.program, "codex");
+    assert_eq!(
+        codex.run_command.args,
+        vec!["exec", "-s", "danger-full-access"],
+        "codex sync direct argv baseline must stay byte-identical"
+    );
+    assert!(matches!(codex.prompt_input_mode, PromptInputMode::Stdin));
+    assert!(!codex.pass_worktree_path_as_arg);
+
+    // ③ 路由分发对照:同一 input 两次分发,captured args/cwd/output 不变。
+    let worktree = std::path::PathBuf::from("/tmp/lcg-t13-sync-direct-worktree");
+    let mut input = AdapterInput {
+        working_directory: None,
+        provider_type: ProviderType::ClaudeCode,
+        role: cadence_aria::protocol::contracts::AdapterRole::Executor,
+        worktree_path: Some(worktree.to_string_lossy().to_string()),
+        provider_stream_log_dir: None,
+        prompt: "lcg_t13 sync direct topology lock".to_string(),
+        context_files: Vec::new(),
+        output_schema: String::new(),
+        timeout: 60,
+        max_retries: 0,
+    };
+    let claude_slot = Arc::new(SyncDirectSlotRecorder::default());
+    let codex_slot = Arc::new(SyncDirectSlotRecorder::default());
+    let routing = RoutingProviderAdapter::new(
+        Box::new(SharedSyncSlot(claude_slot.clone())),
+        Box::new(SharedSyncSlot(codex_slot.clone())),
+    );
+
+    let out_before = routing.run(&input).expect("claude slot dispatch");
+    let out_after = routing.run(&input).expect("claude slot replay");
+    assert_eq!(out_before, out_after, "sync direct output unchanged");
+    input.provider_type = ProviderType::Codex;
+    let codex_out_before = routing.run(&input).expect("codex slot dispatch");
+    let codex_out_after = routing.run(&input).expect("codex slot replay");
+    assert_eq!(codex_out_before, codex_out_after);
+
+    let claude_inputs = claude_slot.inputs.lock().expect("claude slot inputs");
+    let codex_inputs = codex_slot.inputs.lock().expect("codex slot inputs");
+    assert_eq!(claude_inputs.len(), 2, "claude slot saw exactly the two runs");
+    assert_eq!(codex_inputs.len(), 2, "codex slot saw exactly the two runs");
+    assert_eq!(
+        claude_inputs[0], claude_inputs[1],
+        "sync direct args/cwd passthrough must be identical across dispatches"
+    );
+    assert_eq!(codex_inputs[0], codex_inputs[1]);
+    assert_eq!(
+        claude_inputs[0].worktree_path,
+        Some(worktree.to_string_lossy().to_string()),
+        "cwd/worktree passthrough must stay untouched by the routing layer"
+    );
+    assert_eq!(claude_inputs[0].working_directory, None);
+    drop(claude_inputs);
+    drop(codex_inputs);
+
+    // ④ Pi/Kimi/Fake 显式 reject:错误码 + 点名 provider,两槽零新增调用。
+    for (provider_type, name_fragment) in [
+        (ProviderType::Pi, "pi"),
+        (ProviderType::KimiCode, "kimi_code"),
+        (ProviderType::Fake, "fake"),
+    ] {
+        input.provider_type = provider_type.clone();
+        let error = routing
+            .run(&input)
+            .err()
+            .unwrap_or_else(|| panic!("{provider_type:?} must be rejected by sync direct"));
+        assert_eq!(
+            error.code,
+            cadence_aria::protocol::provider_errors::ProviderErrorCode::ProviderIncompatibleOutput,
+            "{provider_type:?} reject code unchanged"
+        );
+        assert!(
+            error.details.contains(name_fragment),
+            "reject must name the provider, got: {}",
+            error.details
+        );
+    }
+    assert_eq!(claude_slot.inputs.lock().expect("claude slot inputs").len(), 2);
+    assert_eq!(codex_slot.inputs.lock().expect("codex slot inputs").len(), 2);
+}
+
+/// 写一个捕获型 fixture CLI:`--version` 分支回固定版本(需要版本探测的
+/// provider 消费),其余调用把 argv 逐行 + `pwd` 追加写入 capture 文件后
+/// 立即退出 0(workspace streaming raw start 的 argv/cwd 观察点)。
+fn write_workspace_stream_capture_cli(
+    dir: &std::path::Path,
+    name: &str,
+    version_echo: Option<&str>,
+) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let capture = dir.join(format!("{name}.capture"));
+    let version_branch = version_echo
+        .map(|version| {
+            format!("if [ \"$1\" = \"--version\" ]; then printf '%s\\n' '{version}'; exit 0; fi\n")
+        })
+        .unwrap_or_default();
+    let script = format!(
+        "#!/bin/sh\n{version_branch}printf '%s\\n' \"$@\" >> \"{capture}\"\npwd >> \"{capture}\"\nexit 0\n",
+        capture = capture.display(),
+    );
+    let path = dir.join(name);
+    std::fs::write(&path, script).expect("write capture cli");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod capture cli");
+    path
+}
+
+/// 把 capture 文件内容解析为 (argv 行, cwd)。
+fn parse_workspace_stream_capture(content: &str) -> (Vec<String>, String) {
+    let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
+    let cwd = lines.pop().expect("cwd line");
+    (lines, cwd)
+}
+
+/// 有界等待并消费 capture 文件为 (argv 行, cwd)。脚本分两次 append
+/// (argv 后 cwd),必须等到至少两行才算写完整;读取后删除文件,使下
+/// 一次运行的存在性轮询有明确语义。
+async fn wait_workspace_stream_capture(
+    capture: &std::path::Path,
+) -> Option<(Vec<String>, String)> {
+    for _ in 0..150 {
+        if let Ok(content) = std::fs::read_to_string(capture) {
+            if content.lines().count() >= 2 {
+                std::fs::remove_file(capture).expect("consume capture file");
+                return Some(parse_workspace_stream_capture(&content));
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    None
+}
+
+/// 以 raw `start`(legacy workspace streaming 直连,非 `start_validated`)
+/// 驱动一次 adapter 启动并返回 capture。prompt 经 stdin/协议层注入,
+/// fixture CLI 立即退出,会话按终结契约有界收口。
+async fn drive_workspace_stream_raw_start(
+    adapter: Arc<dyn StreamingProviderAdapter>,
+    provider_type: cadence_aria::protocol::contracts::ProviderType,
+    working_dir: &std::path::Path,
+    capture: &std::path::Path,
+) -> (Vec<String>, String) {
+    let input = StreamingProviderInput {
+        provider_type: provider_type.clone(),
+        role: cadence_aria::protocol::contracts::AdapterRole::Executor,
+        prompt: "lcg_t13 workspace streaming legacy lock".to_string(),
+        working_dir: working_dir.to_path_buf(),
+        working_directory: None,
+        workspace_session_id: Some("lcg_t13_legacy_stream".to_string()),
+        resume_provider_session_id: None,
+        permission_mode:
+            cadence_aria::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
+        tool_policy: None,
+        audit_sink: None,
+        structured_output_contract: None,
+        env_vars: Default::default(),
+        timeout_secs: 30,
+        baseline_tree: None,
+    };
+    let cancel = CancellationToken::new();
+    let session = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        adapter.start(input, cancel.clone()),
+    )
+    .await
+    .expect("raw start must spawn within the bounded window")
+    .expect("raw legacy start must stay reachable (not LC-gated)");
+    // capture 落盘竞态:fixture CLI 在 spawn 后毫秒级写入;会话释放即触发
+    // kill 链,可能先于子进程 exec——先有界等待 capture 写完整,再释放会话。
+    let captured = wait_workspace_stream_capture(capture).await;
+    drop(session);
+    cancel.cancel();
+    captured.unwrap_or_else(|| {
+        panic!(
+            "fixture CLI must have captured argv+cwd before exiting (provider={provider_type:?}, capture={})",
+            capture.display()
+        )
+    })
+}
+
+/// lcg_t13:四家 workspace streaming legacy raw `start` 路径不变——
+/// Claude/Codex/Pi/Kimi 各自的 raw argv 基线冻结(prompt 通道、permission
+/// 标志、会话模式均不含 LC validated 专属 token),cwd 恒 input.working_dir,
+/// 两次驱动 capture 逐字节相同;该路径不是 split_sync、不是 LC validated
+/// gateway,对照不得被升级解读为四家同步 direct 支持。
+#[tokio::test]
+async fn lcg_t13_workspace_streaming_legacy_four_provider_path_unchanged() {
+    use cadence_aria::cross_cutting::claude_code_provider::ClaudeCodeProvider;
+    use cadence_aria::cross_cutting::codex_provider::CodexProvider;
+    use cadence_aria::cross_cutting::kimi_code_provider::KimiCodeProvider;
+    use cadence_aria::cross_cutting::pi_provider::PiProvider;
+    use cadence_aria::protocol::contracts::ProviderType;
+
+    let root = tempdir().expect("tempdir");
+    let working_dir = root.path().join("workspace");
+    std::fs::create_dir_all(&working_dir).expect("workspace dir");
+    let canonical_working_dir = std::fs::canonicalize(&working_dir).expect("canonical cwd");
+
+    struct Case {
+        provider_type: ProviderType,
+        capture: std::path::PathBuf,
+        adapter: Arc<dyn StreamingProviderAdapter>,
+        expected_prefix: Vec<&'static str>,
+        exact_len: usize,
+    }
+    let claude_cli = write_workspace_stream_capture_cli(root.path(), "claude-cli", None);
+    let codex_cli = write_workspace_stream_capture_cli(root.path(), "codex-cli", None);
+    let pi_cli = write_workspace_stream_capture_cli(root.path(), "pi-cli", Some("0.83.0"));
+    let kimi_cli = write_workspace_stream_capture_cli(root.path(), "kimi-cli", Some("0.34.0"));
+    let cases = vec![
+        Case {
+            provider_type: ProviderType::ClaudeCode,
+            capture: root.path().join("claude-cli.capture"),
+            adapter: Arc::new(ClaudeCodeProvider::new(claude_cli)),
+            expected_prefix: vec![
+                "-p",
+                "--verbose",
+                "--output-format=stream-json",
+                "--input-format=stream-json",
+                "--include-partial-messages",
+                "--replay-user-messages",
+            ],
+            exact_len: 7,
+        },
+        Case {
+            provider_type: ProviderType::Codex,
+            capture: root.path().join("codex-cli.capture"),
+            adapter: Arc::new(CodexProvider::new(codex_cli)),
+            expected_prefix: vec!["app-server", "--enable", "default_mode_request_user_input"],
+            exact_len: 3,
+        },
+        Case {
+            provider_type: ProviderType::Pi,
+            capture: root.path().join("pi-cli.capture"),
+            adapter: Arc::new(PiProvider::new(pi_cli)),
+            expected_prefix: vec!["--mode", "rpc", "-e"],
+            exact_len: 4,
+        },
+        Case {
+            provider_type: ProviderType::KimiCode,
+            capture: root.path().join("kimi-cli.capture"),
+            adapter: Arc::new(KimiCodeProvider::new(kimi_cli)),
+            expected_prefix: vec!["acp"],
+            exact_len: 1,
+        },
+    ];
+
+    for case in cases {
+        let provider_type = case.provider_type.clone();
+        let first = drive_workspace_stream_raw_start(
+            case.adapter.clone(),
+            provider_type.clone(),
+            &working_dir,
+            &case.capture,
+        )
+        .await;
+        let second = drive_workspace_stream_raw_start(
+            case.adapter.clone(),
+            provider_type.clone(),
+            &working_dir,
+            &case.capture,
+        )
+        .await;
+
+        // args/cwd 对照:两次 raw start 逐字节相同(workspace_streaming_
+        // args/output 不变),cwd 恒 working_dir。
+        assert_eq!(
+            first, second,
+            "{:?}: raw start capture must be identical across runs",
+            case.provider_type
+        );
+        let (args, cwd) = first;
+        assert_eq!(
+            std::path::PathBuf::from(&cwd),
+            canonical_working_dir,
+            "{:?}: raw start cwd must stay input.working_dir",
+            case.provider_type
+        );
+        let expected_len = case.exact_len;
+        assert_eq!(
+            args.len(),
+            expected_len,
+            "{:?}: raw argv length baseline, got {args:?}",
+            case.provider_type
+        );
+        for (index, expected) in case.expected_prefix.iter().enumerate() {
+            assert_eq!(
+                &args[index], expected,
+                "{:?}: raw argv baseline at {index}, got {args:?}",
+                case.provider_type
+            );
+        }
+        if case.provider_type == ProviderType::Pi {
+            // Pi 的第 4 个参数是 ask extension 安装路径($HOME 缓存内,
+            // 内容 hash 命名,确定性),逐字节钉死会耦合 HOME,只锁形态。
+            let extension = &args[3];
+            assert!(
+                extension.ends_with(".ts")
+                    && extension.contains("aria-ask-"),
+                "pi extension path shape unchanged, got {extension}"
+            );
+        }
+        // raw ≠ LC validated:argv 不得出现 LC 专属 token(允许列表/
+        // resume/deny 冻结片段);permission 语义保持 raw 通道(经
+        // stdin/协议,而非 argv 注入 LC 投影)。
+        for token in ["--allowedTools", "--resume", "--disallowedTools"] {
+            assert!(
+                !args.iter().any(|arg| arg == token),
+                "{:?}: raw argv must not carry the LC validated token {token}, got {args:?}",
+                case.provider_type
+            );
+        }
+    }
+}

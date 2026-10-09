@@ -810,3 +810,68 @@ async fn restart_after_abort_readmits_attempt_in_same_process() {
         .expect("attempt");
     assert_eq!(after.status, CodingAttemptStatus::Running);
 }
+
+/// lcg_t13(计划 Task 13 Step 1):plan 到 durable Ready 后不得自动为
+/// 其他 target 派工——显式 StartCoding 是唯一 provider 启动入口。
+/// ready 时不发任何命令:attempt 集合不增(other target 零新 attempt)、
+/// runner 零注册(provider 启动计数 0)、attempt 保持 Ready;随后一条
+/// 显式 Manual StartCoding 即可放行(probe 暂停 provider 入口,不冒充
+/// 启动)。
+#[tokio::test]
+async fn lcg_t13_ready_plan_does_not_start_other_target_without_manual_command() {
+    let fixture = ready_single_repository_attempt_fixture().await;
+    let attempt = fixture.attempt();
+    let store = fixture.store();
+    let before_count = store
+        .list_attempts_for_issue(&attempt.project_id, &attempt.issue_id)
+        .expect("list attempts before settle")
+        .len();
+    let status_before = attempt.status.clone();
+
+    // ready 后静置:无后台自动派工/自动 provider 启动。
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+    let after_count = store
+        .list_attempts_for_issue(&attempt.project_id, &attempt.issue_id)
+        .expect("list attempts after settle")
+        .len();
+    assert_eq!(
+        after_count, before_count,
+        "a ready plan must not auto-dispatch attempts for other targets"
+    );
+    assert_eq!(
+        fixture.runner_count(&CodingAttemptRunKey::from_attempt(&attempt)),
+        0,
+        "provider start count before an explicit start_coding command must be 0"
+    );
+    let settled = store
+        .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("settled attempt");
+    assert_eq!(
+        settled.status, status_before,
+        "no background worker may move a ready attempt without a command"
+    );
+
+    // 显式 Manual StartCoding 仍是唯一放行入口(probe 暂停 provider 真实
+    // 入口):Started 且恰一 runner——证明上方零启动不是门坏,而是没有
+    // 命令就没有派工。
+    let (probe, _entry, _hold) = paused_start_probe();
+    let outcome = crate::web::coding_start::start_coding_once_with_probe(
+        &fixture.state,
+        &attempt.project_id,
+        &attempt.issue_id,
+        StartCodingCommand {
+            attempt_id: attempt.id.clone(),
+            command_id: "lcg-t13-manual-1".into(),
+            origin: CodingStartOrigin::Manual,
+        },
+        probe,
+    )
+    .await
+    .expect("explicit manual start coding must be admitted at Ready");
+    assert!(matches!(outcome, StartCodingOutcome::Started { .. }), "{outcome:?}");
+    assert_eq!(
+        fixture.runner_count(&CodingAttemptRunKey::from_attempt(&attempt)),
+        1
+    );
+}
