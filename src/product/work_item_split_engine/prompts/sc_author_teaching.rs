@@ -36,6 +36,7 @@ pub(crate) fn work_item_plan_markdown_grammar() -> String {
          正例：合并为一条 `- command: npm test` 的 check；或第二条写 `- command: null` 并配 `- manual_instruction: <人工步骤>`。\n\
          key 白名单：{structured_keys}。\n\
          值域：kind={item_kinds}；compatibility_policy={compatibility_policies}；required_evidence={evidence_kinds}；route={blocker_routes}；intent={intents}（本计划新建的 Work Item 一律填 create；existing 仅用于引用已登记的既有 work item；禁止 modify/update 等自造值——lowering_error「intent 必须是 create 或 existing。」拒绝）。\n\
+         Plan Intent 分支必填：intent_target_kind=single_repository 时必写 intent_target_repo（逐字取 [issue] 头 repo= 的 repository id，不得填成员仓 UUID）；=logical_codebase 时必写 intent_target_codebase 与 intent_target_logical_repo（logical codebase id 与成员仓 UUID）。另一分支的 key 不顶替——kind=single_repository 却只写 intent_target_logical_repo → lowering_error「Plan Intent 声明在场时该字段必填。」拒绝。\n\
          未知结构化 key 必须拒绝（{unknown_key_policy}）；未知 section、非法 ID、除空 Blockers 外的缺 section/field、EARS 非法均失败关闭；诊断：{diagnostic_codes}。\n\n",
         document_heading = grammar::DOCUMENT_HEADING,
         structured_sections = grammar::STRUCTURED_SECTIONS.join("、"),

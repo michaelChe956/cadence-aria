@@ -118,10 +118,19 @@ pub(crate) const WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES: usize = 15_600;
 // key、DIAGNOSTIC_CODES 增 intent_undeclared/intent_unexecutable、最小合法源
 // 增 Plan Intent 语法形状示例（grammar 注入锚点自动展开），全 false fixture
 // 实测 22,162；第 12 次提额至整百级 22,200（余 38B）。
-pub(crate) const WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES: usize = 23_000;
+pub(crate) const WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES: usize = 23_500;
 // r46 第 13 次提额(非静默,批注):多 source Traceability 正例样例(约
 // 400B,AT 方案:结构歧义用样例封——r46 首轮漏填 requirement_id 的震荡
 // 根治)注入后最大 fixture 实测 22,603B,上调至整百级 23,000。
+// kimi-10 第 14 次提额(非静默,批注):Plan Intent 分支必填教学(473B,
+// kimi-10 plan fresh 现场:三个 WI 全写 kind=single_repository 却只给
+// intent_target_logical_repo,缺 intent_target_repo → lowering_error
+// 「Plan Intent 声明在场时该字段必填。」×3 零重驱终态——值域行 6a2e1207
+// 只教 intent 枚举,分支字段语义与值锚定从未教过)注入后实测 23,309B,
+// 上调至整百级 23,500。系统性「全段逐字段结构模板」评估被否:估增
+// 1.2-2KB 远超红线,且 grammar 面其余条件字段(Verification command/
+// manual_instruction、Inputs 条件、Blockers 空段)均已有教学,Plan Intent
+// 是唯一缺席的条件面——段级补齐即条件面教学的全集。
 
 /// SC markdown author prompt 的尾部输出指令。首轮与修订轮共享同一段字节；
 /// 修订轮（F5-A findings 回灌）仅在其之前插入 [review_revision] 返修段，

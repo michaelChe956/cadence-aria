@@ -1,7 +1,6 @@
 const TEST_SINGLE_CANDIDATE_LANGUAGE_RULES: &str =
     "## 语言规则\n\n- **必须使用中文** - 所有响应、解释、注释和文档必须使用中文。";
 
-
 #[test]
 fn single_item_prompt_scopes_writing_plans_to_pre_confirmation_candidate() {
     let outline = parse_work_item_plan_outline_output(valid_outline_author_output())
@@ -869,6 +868,8 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
         "未知结构化 key 必须拒绝（fail_closed）",
         "值域：kind=backend、frontend、integration、e2e、docs、infra、other",
         "；intent=create、existing（本计划新建的 Work Item 一律填 create；existing 仅用于引用已登记的既有 work item；禁止 modify/update 等自造值——lowering_error「intent 必须是 create 或 existing。」拒绝）",
+        "Plan Intent 分支必填：intent_target_kind=single_repository 时必写 intent_target_repo（逐字取 [issue] 头 repo= 的 repository id，不得填成员仓 UUID）；=logical_codebase 时必写 intent_target_codebase 与 intent_target_logical_repo（logical codebase id 与成员仓 UUID）。另一分支的 key 不顶替——kind=single_repository 却只写 intent_target_logical_repo → lowering_error「Plan Intent 声明在场时该字段必填。」拒绝。",
+        "intent_target_codebase 与 intent_target_logical_repo（logical codebase id 与成员仓 UUID）",
         "[design_requirements] REQ-002、NFR-001",
         "[cross_reference_discipline]",
         "done_when_refs 仅引用先定义 criterion_id",
@@ -1027,7 +1028,7 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
     );
     assert_eq!(
         crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES,
-        23_000
+        23_500
     );
     assert!(
         prompt.len()
@@ -1179,8 +1180,8 @@ fn sc_author_prompt_tail_clamps_heading_language_and_raises_budget() {
 
     assert_eq!(
         crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES,
-        23_000,
-        "第 13 次提额：多 source Traceability 正例样例注入后预算上调至整百级 23,000"
+        23_500,
+        "第 14 次提额：Plan Intent 分支必填教学注入（kimi-10 plan fresh 现场）后预算上调至整百级 23,500"
     );
     assert!(
         prompt.len()
