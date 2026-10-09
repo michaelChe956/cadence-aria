@@ -20,7 +20,7 @@ use super::sandbox::{
 use super::terminal::{TerminalCommand, TerminalIsolation, TerminalResult};
 use super::{ClientServiceError, ClientServiceState, check_session, evaluate_policy};
 
-use crate::cross_cutting::provider_boundary::ProviderBoundaryMode;
+use crate::cross_cutting::provider_boundary::{ProviderBoundaryMode, ProviderBoundaryPlan};
 
 #[cfg(test)]
 use super::policy::ClientServicePolicy;
@@ -133,9 +133,19 @@ fn terminal_face_root(state: &ClientServiceState) -> Result<PathBuf, ClientServi
 /// itself), rejecting symlinks via `openat` + `O_NOFOLLOW` and returning the
 /// canonical path of the anchored directory fd. Absolute paths are tolerated
 /// when they lexically point beneath the face root (the fs_service anchoring
-/// pattern), then re-anchored through the same no-follow walk; anything
-/// outside the face root, or trying to climb back with `..`, is rejected
-/// without echoing the path.
+/// pattern), then re-anchored through the same no-follow walk.
+///
+/// kimi-9 现场修订(r10 2026-10-09):kimi CLI(2.0.2)不转发模型 Bash 工具
+/// 的 `cwd` 参数——`terminal/create` 的 params.cwd 恒为会话启动 cwd(argv
+/// 形态下模型 cwd 只进脚本的 `cd '<dir>' &&` 前缀)。LC executor 的会话
+/// cwd=canonical 聚合根,是 face root(成员 worktree)的祖先,旧实现按
+/// 「cwd 出界即拒」在执行前拒绝 executor 的每一次 terminal 调用(现场
+/// 两 run 30/30 全拒,含模型 cwd 与守卫提示根 220 字节逐字节相同的调用;
+/// coder 60 分钟 16 轮 plan-defect blocked 后泵超时,coding fresh 落
+/// 「缺完成产物」)。修:CLI cwd 无法锚定进 face root(出界/父遍历/前缀
+/// 混淆/no-follow 拒绝)时不再拒绝,锚定 face_root 本身——terminal 的
+/// 执行面与 sandbox 挂载仍以 face root 为界,脚本自带 `cd` 由 sandbox
+/// 边界约束,边界语义不放宽。
 fn resolve_cwd(
     state: &ClientServiceState,
     cwd: Option<&str>,
@@ -144,43 +154,32 @@ fn resolve_cwd(
     let Some(cwd) = cwd.filter(|cwd| !cwd.is_empty()) else {
         return Ok(face_root.to_path_buf());
     };
+    Ok(anchor_cwd_within(&face_root, cwd).unwrap_or_else(|| face_root.to_path_buf()))
+}
+
+/// Try to anchor `cwd` inside `face_root`: absolute paths must strip the
+/// root without `..` components, relative paths must be `..`-free; the
+/// surviving remainder walks the no-follow `openat` chain and must
+/// canonicalize back beneath the root. `None` = cannot be anchored (caller
+/// falls back to the face root; the requested path is never echoed back).
+fn anchor_cwd_within(face_root: &Path, cwd: &str) -> Option<PathBuf> {
     let rel: PathBuf = if Path::new(cwd).is_absolute() {
-        let rel = Path::new(cwd)
-            .strip_prefix(&face_root)
-            .map_err(|_| ClientServiceError::Rejected(cwd_usage_hint(&face_root)))?;
+        let rel = Path::new(cwd).strip_prefix(face_root).ok()?;
         if rel
             .components()
             .any(|component| component == Component::ParentDir)
         {
-            return Err(ClientServiceError::Rejected(cwd_usage_hint(&face_root)));
+            return None;
         }
         rel.to_path_buf()
     } else if cwd.split('/').any(|component| component == "..") {
-        return Err(ClientServiceError::Rejected(cwd_usage_hint(&face_root)));
+        return None;
     } else {
         PathBuf::from(cwd)
     };
-    let fd = open_dir_no_follow(&face_root, &rel)
-        .map_err(|error| ClientServiceError::Rejected(format!("terminal cwd rejected: {error}")))?;
-    let canonical = canonical_path_of_fd(&fd)
-        .map_err(|error| ClientServiceError::Rejected(format!("terminal cwd: {error}")))?;
-    if !canonical.starts_with(face_root) {
-        return Err(ClientServiceError::Rejected(
-            "terminal cwd is outside the authorized root".to_string(),
-        ));
-    }
-    Ok(canonical)
-}
-
-/// Rejection message for a terminal cwd that cannot be anchored inside the
-/// authorized face root. It names the root and teaches the correct usage, but
-/// never echoes the rejected path (outside-root paths must not leak back).
-fn cwd_usage_hint(face_root: &Path) -> String {
-    format!(
-        "terminal cwd must stay inside the authorized root {}; point an absolute cwd at a \
-         subdirectory beneath it, or use a relative path without ..",
-        face_root.display()
-    )
+    let fd = open_dir_no_follow(face_root, &rel).ok()?;
+    let canonical = canonical_path_of_fd(&fd).ok()?;
+    canonical.starts_with(face_root).then_some(canonical)
 }
 
 pub(super) async fn handle_terminal_create(
@@ -722,8 +721,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn terminal_cwd_rejects_absolute_path_outside_root_without_echoing_it() {
+    async fn terminal_cwd_anchors_outside_cli_cwd_at_face_root() {
+        // kimi-9 现场修订:kimi CLI 不转发模型 cwd,params.cwd 恒为会话
+        // cwd;出界 cwd(绝对出界/父遍历/前缀混淆)不再拒绝,锚定 face root
+        // ——终端执行面仍以 face root 为界,脚本自带 cd 由 sandbox 约束。
         let dir = tempfile::tempdir().expect("dir");
+        std::fs::create_dir_all(dir.path().join("nested/dir")).expect("mkdir nested");
         let outside = tempfile::tempdir().expect("outside");
         let state = cwd_state(dir.path().canonicalize().expect("canonical root"));
         let escapes = [
@@ -734,47 +737,23 @@ mod tests {
                 .expect("canonical outside")
                 .to_string_lossy()
                 .into_owned(),
+            "../escape".to_string(),
+            "nested/../../escape".to_string(),
+            state
+                .root
+                .join("nested/../../escape")
+                .to_string_lossy()
+                .into_owned(),
         ];
         for escape in &escapes {
-            let error =
-                resolve_cwd(&state, Some(escape)).expect_err("absolute cwd outside root rejected");
-            let message = error.to_string();
-            assert!(message.contains("authorized root"), "{message}");
-            // The rejection teaches the correct usage and names the root.
-            assert!(
-                message.contains(state.root.to_str().expect("utf-8 root")),
-                "rejection must name the authorized root: {message}"
-            );
-            // Paths outside the root are never echoed back.
-            assert!(!message.contains(escape.as_str()), "{message}");
+            let resolved =
+                resolve_cwd(&state, Some(escape)).expect("outside cli cwd anchors at face root");
+            assert_eq!(resolved, state.root, "escape={escape}");
         }
     }
 
     #[tokio::test]
-    async fn terminal_cwd_rejects_relative_parent_traversal_unchanged() {
-        let dir = tempfile::tempdir().expect("dir");
-        std::fs::create_dir_all(dir.path().join("nested/dir")).expect("mkdir nested");
-        let state = cwd_state(dir.path().canonicalize().expect("canonical root"));
-
-        let error = resolve_cwd(&state, Some("nested/../../escape"))
-            .expect_err("relative parent traversal rejected");
-        assert!(error.to_string().contains("authorized root"));
-    }
-
-    #[tokio::test]
-    async fn terminal_cwd_rejects_absolute_parent_traversal_after_root_strip() {
-        let dir = tempfile::tempdir().expect("dir");
-        std::fs::create_dir_all(dir.path().join("nested/dir")).expect("mkdir nested");
-        let state = cwd_state(dir.path().canonicalize().expect("canonical root"));
-
-        let escape = state.root.join("nested/../../escape");
-        let error = resolve_cwd(&state, Some(escape.to_str().expect("utf-8 path")))
-            .expect_err("absolute parent traversal rejected");
-        assert!(error.to_string().contains("authorized root"));
-    }
-
-    #[tokio::test]
-    async fn terminal_cwd_rejects_prefix_confusion_sibling() {
+    async fn terminal_cwd_anchors_prefix_confusion_sibling_at_face_root() {
         let parent = tempfile::tempdir().expect("parent");
         let root = parent.path().join("xxx_root");
         let evil = parent.path().join("xxx_root_evil");
@@ -782,37 +761,100 @@ mod tests {
         std::fs::create_dir_all(&evil).expect("evil mkdir");
         let state = cwd_state(root.canonicalize().expect("canonical root"));
 
-        let error = resolve_cwd(&state, Some(evil.to_str().expect("utf-8 path")))
-            .expect_err("prefix-confusion sibling rejected");
-        assert!(error.to_string().contains("authorized root"));
+        let resolved = resolve_cwd(&state, Some(evil.to_str().expect("utf-8 path")))
+            .expect("prefix-confusion sibling anchors at face root");
+        assert_eq!(resolved, state.root);
     }
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn terminal_cwd_rejects_symlink_escape_and_internal_symlink() {
+    async fn terminal_cwd_anchors_symlink_escape_at_face_root() {
         let dir = tempfile::tempdir().expect("dir");
         let outside = tempfile::tempdir().expect("outside");
         let state = cwd_state(dir.path().canonicalize().expect("canonical root"));
 
-        // Symlink inside the root pointing outside: rejected by the
-        // `openat` + `O_NOFOLLOW` walk even though the lexical prefix check
-        // passes.
+        // Symlink inside the root pointing outside: the no-follow walk
+        // refuses to anchor through it; the cwd falls back to the face root
+        // instead of executing anywhere outside it.
         std::os::unix::fs::symlink(
             outside.path().canonicalize().expect("canonical outside"),
             state.root.join("leak"),
         )
         .expect("symlink");
         let escape = state.root.join("leak");
-        let error = resolve_cwd(&state, Some(escape.to_str().expect("utf-8 path")))
-            .expect_err("symlink escape rejected");
-        assert!(error.to_string().contains("terminal cwd"));
+        let resolved = resolve_cwd(&state, Some(escape.to_str().expect("utf-8 path")))
+            .expect("symlink escape anchors at face root");
+        assert_eq!(resolved, state.root);
 
-        // Symlink pointing inside the root is also rejected (no-follow).
+        // Symlink pointing inside the root is likewise not anchored through
+        // (no-follow); execution stays at the face root.
         std::fs::create_dir_all(state.root.join("nested/dir")).expect("mkdir nested");
         std::os::unix::fs::symlink("nested", state.root.join("link")).expect("symlink");
         let internal = state.root.join("link");
-        let error = resolve_cwd(&state, Some(internal.to_str().expect("utf-8 path")))
-            .expect_err("internal symlink rejected");
-        assert!(error.to_string().contains("terminal cwd"));
+        let resolved = resolve_cwd(&state, Some(internal.to_str().expect("utf-8 path")))
+            .expect("internal symlink anchors at face root");
+        assert_eq!(resolved, state.root);
+    }
+
+    #[tokio::test]
+    async fn terminal_cwd_anchors_ancestor_session_cwd_at_target_face_root_kimi9() {
+        // kimi-9 coding fresh 现场回归(r10 2026-10-09):coding executor
+        // 会话 cwd=canonical 聚合根,face root=target boundary 的成员
+        // worktree(聚合根的严格子目录)。kimi CLI(2.0.2)不转发模型 Bash
+        // 工具的 cwd,terminal/create 恒携带会话 cwd → 旧语义把 executor
+        // 的每一次 terminal 调用在执行前拒绝(现场两 run 30/30 全拒,含
+        // 模型 cwd 与守卫提示根 220 字节逐字节相同的调用),coder 60 分钟
+        // 16 轮 plan-defect blocked 后泵超时。锚定语义下:祖先 cwd 落到
+        // 成员 worktree,Bash 恢复可用。
+        let aggregate = tempfile::tempdir().expect("aggregate");
+        let member = aggregate
+            .path()
+            .join("alpha/.worktrees/aria-issues/issue_0001");
+        std::fs::create_dir_all(&member).expect("member mkdir");
+        let canonical_member = member.canonicalize().expect("canonical member");
+        let (event_tx, _events) = mpsc::channel(32);
+        let state = Arc::new(ClientServiceState {
+            session_id: "kimi9-ancestor-cwd-regression".to_string(),
+            root: aggregate
+                .path()
+                .canonicalize()
+                .expect("canonical aggregate"),
+            policy: ClientServicePolicy::new(AdapterRole::Executor, ProviderPermissionMode::Auto),
+            permission_mode: ProviderPermissionMode::Auto,
+            bridge: Arc::new(ApprovalBridge::new(
+                ProviderPermissionMode::Auto,
+                event_tx.clone(),
+            )),
+            event_tx,
+            terminal: TerminalManager::new(),
+            bwrap: None,
+            writable_git_paths: Vec::new(),
+            cleanup_cancel: CancellationToken::new().child_token(),
+            baseline_tree: None,
+            target_boundary: Some(ProviderBoundaryPlan::new(
+                ProviderBoundaryMode::TargetWriteOnly,
+                aggregate
+                    .path()
+                    .canonicalize()
+                    .expect("canonical aggregate"),
+                Some(canonical_member.clone()),
+                Vec::new(),
+            )),
+        });
+
+        // 会话 cwd(聚合根)= face root 的祖先:锚定到成员 worktree。
+        let resolved = resolve_cwd(&state, Some(state.root.to_str().expect("utf-8 aggregate")))
+            .expect("ancestor session cwd anchors at the target face root");
+        assert_eq!(resolved, canonical_member);
+
+        // 聚合根内、worktree 外的中间目录同样锚定回成员 worktree。
+        let intermediate = aggregate
+            .path()
+            .join("alpha")
+            .canonicalize()
+            .expect("canonical alpha");
+        let resolved = resolve_cwd(&state, Some(intermediate.to_str().expect("utf-8 alpha")))
+            .expect("intermediate aggregate dir anchors at the target face root");
+        assert_eq!(resolved, canonical_member);
     }
 }
