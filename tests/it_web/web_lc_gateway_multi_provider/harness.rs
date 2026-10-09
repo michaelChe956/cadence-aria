@@ -1723,20 +1723,35 @@ fn task11_protected_writes_cell(
 struct Task11D4Snapshot {
     faces: Vec<Value>,
     root_metadata_digest: String,
+    /// root/metadata 逐条目清单(rel,line)——与 digest 同源同预算。
+    /// r63 kimi 现场:combined 漂移但 git faces 全等,漂移在 root/metadata
+    /// 面且未逐面记录(可观测性缺口);本清单进 cell,漂移物自证。
+    root_metadata_entries: Vec<(String, String)>,
     combined_digest: String,
 }
 
-/// root/metadata 有界递归 digest(跳过成员工作树——它们由 git 面覆盖;
-/// 沿 HEAD 既有预算 20_000 条目/64 MiB,超限 fail-closed 不截断)。
-fn task11_root_metadata_digest(canonical_root: &Path) -> Result<String, LiveMatrixFailure> {
+/// root/metadata 面快照:聚合 digest + 逐条目清单(同一次遍历产出)。
+struct Task11RootMetadataFace {
+    digest: String,
+    entries: Vec<(String, String)>,
+}
+
+/// root/metadata 有界递归面快照(跳过成员工作树——它们由 git 面覆盖;
+/// 沿 HEAD 既有预算 20_000 条目/64 MiB,超限 fail-closed 不截断):
+/// 聚合 digest 与逐条目清单(rel,line)同一次遍历产出——漂移可逐面实名
+/// (r63 kimi 现场:combined 漂移但 git faces 全等,root/metadata 面
+/// 未逐面记录导致漂移物无法自证)。
+fn task11_root_metadata_face(
+    canonical_root: &Path,
+) -> Result<Task11RootMetadataFace, LiveMatrixFailure> {
     const MAX_ENTRIES: usize = 20_000;
     const MAX_BYTES: u64 = 64 * 1024 * 1024;
-    let mut entries: Vec<String> = Vec::new();
+    let mut entries: Vec<(String, String)> = Vec::new();
     let mut total_bytes = 0u64;
     fn walk(
         directory: &Path,
         relative: &str,
-        entries: &mut Vec<String>,
+        entries: &mut Vec<(String, String)>,
         total_bytes: &mut u64,
     ) -> Result<(), String> {
         let children = std::fs::read_dir(directory)
@@ -1756,24 +1771,30 @@ fn task11_root_metadata_digest(canonical_root: &Path) -> Result<String, LiveMatr
                 let target = std::fs::read_link(child.path())
                     .map(|path| path.to_string_lossy().into_owned())
                     .unwrap_or_else(|_| "unreadable".to_string());
-                entries.push(format!("{child_relative}:link:{target}"));
+                entries.push((
+                    child_relative.clone(),
+                    format!("{child_relative}:link:{target}"),
+                ));
             } else if metadata.is_dir() {
                 walk(&child.path(), &child_relative, entries, total_bytes)?;
             } else if metadata.is_file() {
                 let bytes = std::fs::read(child.path())
                     .map_err(|error| format!("read {}: {error}", child.path().display()))?;
                 *total_bytes += bytes.len() as u64;
-                entries.push(format!(
-                    "{child_relative}:{}:{}",
-                    metadata.len(),
-                    task11_sha256_hex(&bytes)
+                entries.push((
+                    child_relative.clone(),
+                    format!(
+                        "{child_relative}:{}:{}",
+                        metadata.len(),
+                        task11_sha256_hex(&bytes)
+                    ),
                 ));
             } else {
                 // unix socket/fifo 等特殊文件:不可读字节,以类型标记入摘要
                 //(在场性即元数据事实;不 fail,也不冒充内容)。
-                entries.push(format!(
-                    "{child_relative}:special:{:?}",
-                    metadata.file_type()
+                entries.push((
+                    child_relative.clone(),
+                    format!("{child_relative}:special:{:?}", metadata.file_type()),
                 ));
             }
             if entries.len() > MAX_ENTRIES || *total_bytes > MAX_BYTES {
@@ -1808,6 +1829,21 @@ fn task11_root_metadata_digest(canonical_root: &Path) -> Result<String, LiveMatr
             );
             continue;
         }
+        if name == ".provider-session-cache" {
+            // r63 kimi 现场实证的漂移物:kimi LC Executor 会话构造时,
+            // 产品 F-17 冻结面把 writable_git_paths.json 持久化到
+            // `<target-parent>/.provider-session-cache/<key>/`(host 领土、
+            // sandbox 只读、防 coder 改写 .git 指针的防御性缓存;
+            // provider_boundary launcher 与 kimi client services 共用)。
+            // 写入者是产品安全机制而非 provider 越界/模型写——非聚合根
+            // 元数据,按 .codegraph 同款语义排除;git faces 不受影响,
+            // 其余 root 路径越界写仍由本面抓取。
+            fp(
+                "t11_d4_face_excluded",
+                ".provider-session-cache(产品 F-17 冻结面自管缓存,非聚合根元数据)",
+            );
+            continue;
+        }
         let path = canonical_root.join(&name);
         let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
             matrix_failure(
@@ -1820,7 +1856,7 @@ fn task11_root_metadata_digest(canonical_root: &Path) -> Result<String, LiveMatr
             let target = std::fs::read_link(&path)
                 .map(|path| path.to_string_lossy().into_owned())
                 .unwrap_or_else(|_| "unreadable".to_string());
-            entries.push(format!("{name}:link:{target}"));
+            entries.push((name.clone(), format!("{name}:link:{target}")));
         } else if metadata.is_dir() {
             walk(&path, &name, &mut entries, &mut total_bytes)
                 .map_err(|reason| matrix_failure("d4_snapshot_failed", reason, None))?;
@@ -1833,15 +1869,17 @@ fn task11_root_metadata_digest(canonical_root: &Path) -> Result<String, LiveMatr
                 )
             })?;
             total_bytes += bytes.len() as u64;
-            entries.push(format!(
-                "{name}:{}:{}",
-                bytes.len(),
-                task11_sha256_hex(&bytes)
+            entries.push((
+                name.clone(),
+                format!("{name}:{}:{}", bytes.len(), task11_sha256_hex(&bytes)),
             ));
         } else {
             // unix socket/fifo 等特殊文件:以类型标记入摘要(在场性即
             // 元数据事实;不 fail,也不冒充内容)。
-            entries.push(format!("{name}:special:{:?}", metadata.file_type()));
+            entries.push((
+                name.clone(),
+                format!("{name}:special:{:?}", metadata.file_type()),
+            ));
         }
         if entries.len() > MAX_ENTRIES || total_bytes > MAX_BYTES {
             return Err(matrix_failure(
@@ -1854,10 +1892,18 @@ fn task11_root_metadata_digest(canonical_root: &Path) -> Result<String, LiveMatr
         }
     }
     entries.sort();
-    Ok(format!(
+    let digest = format!(
         "sha256:{}",
-        task11_sha256_hex(entries.join("\n").as_bytes())
-    ))
+        task11_sha256_hex(
+            entries
+                .iter()
+                .map(|(_, line)| line.as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+                .as_bytes()
+        )
+    );
+    Ok(Task11RootMetadataFace { digest, entries })
 }
 
 /// D4 快照:所有 active main(alpha/beta 主 checkout,HEAD+porcelain)+
@@ -1889,11 +1935,16 @@ fn task11_d4_snapshot(env: &MatrixEnvironment) -> Result<Task11D4Snapshot, LiveM
             "digest": digest,
         }));
     }
-    let root_metadata_digest = task11_root_metadata_digest(&env.canonical_root)?;
+    let root_metadata = task11_root_metadata_face(&env.canonical_root)?;
     fp(
         "t11_d4_root_metadata",
-        format_args!("digest={root_metadata_digest}"),
+        format_args!(
+            "digest={} entries={}",
+            root_metadata.digest,
+            root_metadata.entries.len()
+        ),
     );
+    let root_metadata_digest = root_metadata.digest;
     let mut combined = String::new();
     for face in &faces {
         combined.push_str(
@@ -1907,19 +1958,55 @@ fn task11_d4_snapshot(env: &MatrixEnvironment) -> Result<Task11D4Snapshot, LiveM
     Ok(Task11D4Snapshot {
         faces,
         root_metadata_digest,
+        root_metadata_entries: root_metadata.entries,
         combined_digest: format!("sha256:{}", task11_sha256_hex(combined.as_bytes())),
     })
 }
 
 /// D4 收口格:前后快照逐面对比,非 target 漂移即格 denied(现场断言红)。
+/// r63 起记录 root/metadata 拆面 + 逐条目清单与差分——漂移物自证
+/// (r63 kimi 现场:git faces 全等+combined 漂移,聚合 digest 无实径可查)。
 fn task11_d4_cell(
     env: &MatrixEnvironment,
     before: &Task11D4Snapshot,
     after: &Task11D4Snapshot,
 ) -> EvidenceCell {
     let no_drift = before.combined_digest == after.combined_digest;
-    let faces_before = before.faces.clone();
-    let faces_after = after.faces.clone();
+    // root/metadata 拆面进 faces 记录(与 git 面同列;digest 即面聚合)。
+    let root_metadata_face = |digest: &str, entries: &[(String, String)]| {
+        json!({
+            "face": "root-metadata",
+            "path": env.canonical_root.display().to_string(),
+            "digest": digest,
+            "entry_count": entries.len(),
+        })
+    };
+    let mut faces_before = before.faces.clone();
+    faces_before.push(root_metadata_face(
+        &before.root_metadata_digest,
+        &before.root_metadata_entries,
+    ));
+    let mut faces_after = after.faces.clone();
+    faces_after.push(root_metadata_face(
+        &after.root_metadata_digest,
+        &after.root_metadata_entries,
+    ));
+    // 拆面对比:哪些面漂了(逐面 digest 对齐;faces 同构等长)。
+    let drifted_faces: Vec<String> = faces_before
+        .iter()
+        .zip(faces_after.iter())
+        .filter(|(before_face, after_face)| before_face.get("digest") != after_face.get("digest"))
+        .filter_map(|(before_face, _)| {
+            before_face
+                .get("face")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .collect();
+    let root_metadata_drift = task11_root_metadata_entry_diff(
+        &before.root_metadata_entries,
+        &after.root_metadata_entries,
+    );
     let mut cell = task11_cell_base(
         env,
         format!("t11-boundary-d4-{}", Utc::now().format("%Y%m%dT%H%M%SZ")),
@@ -1929,8 +2016,11 @@ fn task11_d4_cell(
     cell.capability_state = if no_drift { "confirmed" } else { "denied" }.to_string();
     if !no_drift {
         cell.denied_reason = Some(format!(
-            "D4 非 target 漂移:pre={} post={}",
-            before.combined_digest, after.combined_digest
+            "D4 非 target 漂移:pre={} post={} drifted_faces={drifted_faces:?} \
+             root_metadata_drift={}",
+            before.combined_digest,
+            after.combined_digest,
+            task11_root_metadata_drift_summary(&root_metadata_drift),
         ));
     }
     cell.provider_events = vec![json!({
@@ -1942,11 +2032,93 @@ fn task11_d4_cell(
             "combined_digest_after": after.combined_digest,
             "root_metadata_digest_before": before.root_metadata_digest,
             "root_metadata_digest_after": after.root_metadata_digest,
+            "drifted_faces": drifted_faces,
+            "root_metadata_drift": root_metadata_drift,
+            "root_metadata_entries_before": before
+                .root_metadata_entries
+                .iter()
+                .map(|(_, line)| line.as_str())
+                .collect::<Vec<_>>(),
+            "root_metadata_entries_after": after
+                .root_metadata_entries
+                .iter()
+                .map(|(_, line)| line.as_str())
+                .collect::<Vec<_>>(),
             "faces_before": faces_before,
             "faces_after": faces_after,
         },
     })];
     cell
+}
+
+/// root/metadata 逐条目漂移差分(漂移物自证):按 rel 对齐前后清单,
+/// added/removed/changed 三列实名;changed 携带前后条目原文。
+fn task11_root_metadata_entry_diff(
+    before: &[(String, String)],
+    after: &[(String, String)],
+) -> Value {
+    let before_map: BTreeMap<&str, &str> = before
+        .iter()
+        .map(|(rel, line)| (rel.as_str(), line.as_str()))
+        .collect();
+    let after_map: BTreeMap<&str, &str> = after
+        .iter()
+        .map(|(rel, line)| (rel.as_str(), line.as_str()))
+        .collect();
+    let mut added = Vec::new();
+    let mut removed = Vec::new();
+    let mut changed = Vec::new();
+    for (rel, line) in &after_map {
+        match before_map.get(*rel) {
+            None => added.push(json!(rel)),
+            Some(old) if *old != *line => {
+                changed.push(json!({"path": rel, "before": old, "after": line}))
+            }
+            _ => {}
+        }
+    }
+    for rel in before_map.keys() {
+        if !after_map.contains_key(*rel) {
+            removed.push(json!(rel));
+        }
+    }
+    json!({"added": added, "removed": removed, "changed": changed})
+}
+
+/// 漂移差分紧凑摘要(denied_reason 用;每列实名至多 8 条+总数,防清单爆破)。
+fn task11_root_metadata_drift_summary(diff: &Value) -> String {
+    let column = |key: &str| {
+        let count = diff
+            .get(key)
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            .unwrap_or(0);
+        let listed: Vec<String> = diff
+            .get(key)
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .take(8)
+                    .map(|item| {
+                        item.as_str()
+                            .map(str::to_string)
+                            .or_else(|| {
+                                item.get("path").and_then(Value::as_str).map(str::to_string)
+                            })
+                            .unwrap_or_else(|| "?".to_string())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        format!("{count}{listed:?}(至多列8)")
+    };
+    format!(
+        "added={} removed={} changed={}",
+        column("added"),
+        column("removed"),
+        column("changed")
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -9859,6 +10031,161 @@ mod aggregate_root_retry_reset_tests {
             std::fs::read_to_string(root.join("alpha").join("lib.rs")).expect("lib"),
             "committed",
             "成员仓已提交内容必须从 HEAD 恢复"
+        );
+    }
+}
+
+#[cfg(test)]
+mod d4_observability_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// r63 kimi 现场回归锚点:root/metadata 面必须以逐条目清单暴露
+    /// (成员工作树 alpha/beta 与 .codegraph 排除;其余实名入清单)——
+    /// 聚合 digest 漂移时漂移物可自证,不再只有不可拆解的 digest。
+    #[test]
+    fn lcg_d4_root_metadata_face_lists_entries_and_excludes_members() {
+        let root = TempDir::new().expect("aggregate root");
+        let base = root.path();
+        std::fs::create_dir_all(base.join("alpha/.git")).expect("alpha git");
+        std::fs::create_dir_all(base.join("alpha/src")).expect("alpha src");
+        std::fs::write(base.join("alpha/src/lib.rs"), "alpha").expect("alpha file");
+        std::fs::create_dir_all(base.join("beta")).expect("beta");
+        std::fs::write(base.join("beta/README.md"), "beta").expect("beta file");
+        std::fs::create_dir_all(base.join(".codegraph")).expect("codegraph");
+        std::fs::write(base.join(".codegraph/state.db"), "watcher").expect("codegraph file");
+        std::fs::create_dir_all(base.join(".provider-session-cache/66f7c0dc6712e775"))
+            .expect("provider session cache");
+        std::fs::write(
+            base.join(".provider-session-cache/66f7c0dc6712e775/writable_git_paths.json"),
+            b"[]",
+        )
+        .expect("frozen face cache");
+        std::fs::create_dir_all(base.join("policy/project_0001/x")).expect("policy dir");
+        std::fs::write(base.join("policy/project_0001/x/2"), b"policy-body").expect("policy");
+        std::fs::write(base.join("AGENTS.md"), b"# root rules\n").expect("root rule");
+
+        let face = task11_root_metadata_face(base).expect("root/metadata face");
+        let rels: Vec<&str> = face.entries.iter().map(|(rel, _)| rel.as_str()).collect();
+        assert_eq!(
+            rels,
+            vec!["AGENTS.md", "policy/project_0001/x/2"],
+            "成员工作树(alpha/beta)、.codegraph 与 .provider-session-cache\
+             (产品 F-17 冻结面自管缓存,r63 kimi 现场漂移物)必须排除,其余逐条目实名"
+        );
+        assert!(face.digest.starts_with("sha256:"), "面聚合 digest 形态");
+        let policy_line = &face.entries[1].1;
+        assert!(
+            policy_line.starts_with("policy/project_0001/x/2:11:"),
+            "文件条目必须携带 len 与内容摘要:{policy_line}"
+        );
+    }
+
+    /// r63 kimi 现场回归锚点:kimi LC Executor 会话构造时产品 F-17 冻结面
+    /// 落盘 `.provider-session-cache/<key>/writable_git_paths.json`(D4 窗口内
+    /// fingerprint_drift 场景的真实 spawn 触发)——排除语义生效后,该文件
+    /// 出现前后 root/metadata 面 digest 必须不变(漂移物已按产品自管面排除)。
+    #[test]
+    fn lcg_d4_root_metadata_face_stable_across_provider_session_cache_creation() {
+        let root = TempDir::new().expect("aggregate root");
+        let base = root.path();
+        std::fs::create_dir_all(base.join("policy")).expect("policy dir");
+        std::fs::write(base.join("policy/body"), b"fixture").expect("policy body");
+        let before = task11_root_metadata_face(base).expect("before");
+        let cache = base.join(".provider-session-cache/66f7c0dc6712e775");
+        std::fs::create_dir_all(&cache).expect("frozen face cache dir");
+        std::fs::write(
+            cache.join("writable_git_paths.json"),
+            br#"["/tmp/.tmppTFuiU/alpha/.git"]"#,
+        )
+        .expect("frozen face cache file");
+        let after = task11_root_metadata_face(base).expect("after");
+        assert_eq!(
+            before.digest, after.digest,
+            "产品 F-17 冻结缓存落盘不得漂移 root/metadata 面(r63 kimi 现场)"
+        );
+        assert!(
+            after
+                .entries
+                .iter()
+                .all(|(rel, _)| !rel.starts_with(".provider-session-cache")),
+            "冻结缓存条目不得进入面清单:{:?}",
+            after.entries
+        );
+    }
+
+    /// mtime-only 变化(同内容重写)不得改变面 digest——「恢复」语义的
+    /// 判定基础:失败场景受控突变+字节级恢复后,root/metadata 面必须收敛。
+    #[test]
+    fn lcg_d4_root_metadata_face_digest_stable_across_mtime_rewrite() {
+        let root = TempDir::new().expect("aggregate root");
+        let file = root.path().join("policy/body");
+        std::fs::create_dir_all(root.path().join("policy")).expect("policy dir");
+        std::fs::write(&file, b"stable-bytes").expect("policy body");
+        let before = task11_root_metadata_face(root.path()).expect("before");
+        std::fs::write(&file, b"stable-bytes").expect("rewrite same bytes (mtime drift)");
+        let after = task11_root_metadata_face(root.path()).expect("after");
+        assert_eq!(
+            before.digest, after.digest,
+            "同内容重写(mtime-only)不得漂移 root/metadata 面"
+        );
+        std::fs::write(&file, b"mutated-bytes").expect("real content drift");
+        let drifted = task11_root_metadata_face(root.path()).expect("drifted");
+        assert_ne!(
+            before.digest, drifted.digest,
+            "真实内容变化必须改变面 digest"
+        );
+    }
+
+    /// 漂移差分必须三列实名(kimi r63 现场:combined 漂移无实径)——
+    /// added/removed/changed 逐路径,changed 携带前后条目原文。
+    #[test]
+    fn lcg_d4_root_metadata_entry_diff_names_added_removed_changed() {
+        let before = vec![
+            ("policy/a".to_string(), "policy/a:1:aaa".to_string()),
+            ("policy/b".to_string(), "policy/b:2:bbb".to_string()),
+        ];
+        let after = vec![
+            ("policy/a".to_string(), "policy/a:9:zzz".to_string()),
+            ("policy/c".to_string(), "policy/c:3:ccc".to_string()),
+        ];
+        let diff = task11_root_metadata_entry_diff(&before, &after);
+        assert_eq!(diff["added"], json!(["policy/c"]), "新增实名");
+        assert_eq!(diff["removed"], json!(["policy/b"]), "移除实名");
+        assert_eq!(
+            diff["changed"],
+            json!([{
+                "path": "policy/a",
+                "before": "policy/a:1:aaa",
+                "after": "policy/a:9:zzz",
+            }]),
+            "变更实名并携带前后条目原文"
+        );
+    }
+
+    /// denied_reason 摘要有界:每列至多列 8 条实名+总数,防清单爆破。
+    #[test]
+    fn lcg_d4_drift_summary_bounds_listed_paths() {
+        let added: Vec<Value> = (0..10)
+            .map(|index| json!(format!("rogue/extra-{index}")))
+            .collect();
+        let diff = json!({"added": added, "removed": [], "changed": []});
+        let summary = task11_root_metadata_drift_summary(&diff);
+        assert!(
+            summary.contains("added=10[\"rogue/extra-0\""),
+            "摘要必须带总数与实名前缀:{summary}"
+        );
+        assert!(
+            summary.contains("rogue/extra-7"),
+            "摘要列至多 8 条(0..=7):{summary}"
+        );
+        assert!(
+            !summary.contains("rogue/extra-8") && !summary.contains("rogue/extra-9"),
+            "超过 8 条不列名(只留总数):{summary}"
+        );
+        assert!(
+            summary.contains("removed=0[]") && summary.contains("changed=0[]"),
+            "空列零计数:{summary}"
         );
     }
 }
