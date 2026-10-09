@@ -71,6 +71,25 @@ impl ProviderBoundaryPlan {
     }
 }
 
+impl ProviderBoundaryPlan {
+    /// Task 11(组装层 seam):受控 fixture 探测计划构造——与 6c
+    /// `derive_boundary_plan` 同一形状(TargetWriteOnly:cwd=root、唯一
+    /// 可写 target、受保护根为空——root 与 host 的只读保护由 launcher
+    /// `--ro-bind / /` 恒施加,沙箱语义与产品探针逐字节一致)。仅供
+    /// harness/验收组装层在自有 fixture 上追加真实写探针;不改变
+    /// validated launch 的 plan 装配(`new` 仍 crate 内),形状校验照常。
+    pub fn probe_plan(
+        mode: ProviderBoundaryMode,
+        working_directory: PathBuf,
+        target_root: Option<PathBuf>,
+        protected_roots: Vec<PathBuf>,
+    ) -> Result<Self, ProviderBoundaryError> {
+        let plan = Self::new(mode, working_directory, target_root, protected_roots);
+        validate_boundary_plan(&plan)?;
+        Ok(plan)
+    }
+}
+
 /// 真实 boundary probe 的证据记录(Task 1a 冻结形状;6c 产出、2d 导入)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderBoundaryEvidence {
@@ -333,6 +352,11 @@ pub enum BoundaryWriteChannel {
     Mcp,
     /// extension 子进程写(如 Pi extension)。
     Extension,
+    /// child 子进程写(Task 11 第五通道:经 `setsid` 脱离会话组的再派生
+    /// 子进程尝试写——验证重挂/脱组的后代仍共享同一 mount namespace,
+    /// 越界写被只读挂载拒绝)。创建失败(setsid 不可用)由探针证据原文
+    /// 记录,不算写拒绝。
+    Child,
 }
 
 /// 计划内写探针(通道 + 目标文件)。
@@ -437,6 +461,12 @@ fn probe_write_command(channel: BoundaryWriteChannel, quoted_path: &str) -> Stri
             let inner = format!("sh -c {} aria-mcp-inner \"$1\"", shell_quote(builtin));
             format!("sh -c {} aria-mcp {quoted_path}", shell_quote(&inner))
         }
+        // child 通道:setsid 在非进程组长时直接 exec(退出码透传),内层
+        // shell 成为新会话(脱离终端/进程组)的再派生子进程。
+        BoundaryWriteChannel::Child => format!(
+            "setsid sh -c {} aria-child {quoted_path}",
+            shell_quote(builtin)
+        ),
     }
 }
 

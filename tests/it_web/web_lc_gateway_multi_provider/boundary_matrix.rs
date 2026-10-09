@@ -23,7 +23,7 @@ use super::failure_matrix::{
     FIXED_FAILURE_SCENARIOS, ZERO_SPAWN_ACCOUNTING_KEYS, capability_state_evidence,
     cell_accounting_dimension,
 };
-use super::harness::{EvidenceCell, LiveMatrixEvidence, LiveMatrixFailure};
+use super::harness::{EvidenceCell, LiveLcGatewayHarness, LiveMatrixEvidence, LiveMatrixFailure};
 use super::live_matrix::require_lc_gateway_e2e_switch;
 
 /// 零 spawn 被拒格(spawn 前被门拒:未确认且 spawn 计数为 0)。握手失败
@@ -228,23 +228,13 @@ async fn run_live_boundary_and_failures(selected_provider: ProviderName) {
 ///     provider: ProviderName) -> Result<LiveMatrixEvidence, LiveMatrixFailure>`
 /// ——与 Task 10 同 schema;证据落计划 Files 冻结目录
 /// `cadence/reports/lc-gateway-multi-provider/<provider>/boundary/` 与
-/// `failures/`。
-///
-/// 11a 骨架阶段该方法尚未实现:现场执行必须以 BLOCKED 失败告终,不以
-/// 缺探针/删格冒充矩阵通过;Step 3 落地后本函数体改为直接转调 harness
-/// 方法,断言组保持不变。
+/// `failures/`。Step 3 已落地:直接转调 harness 真实探针,断言组不变。
 async fn boundary_failure_matrix(
     provider: &ProviderName,
 ) -> Result<LiveMatrixEvidence, LiveMatrixFailure> {
-    Err(LiveMatrixFailure {
-        reason_code: "boundary_failure_matrix_not_wired".to_string(),
-        message: format!(
-            "LiveLcGatewayHarness::run_boundary_and_failure_matrix 尚未实现\
-             (Task 11 Step 3 真实探针):provider {provider:?} 的越界写/D4/\
-             失败零 spawn 矩阵不得以缺证据通过"
-        ),
-        stage: None,
-    })
+    LiveLcGatewayHarness::new()
+        .run_boundary_and_failure_matrix(provider.clone())
+        .await
 }
 
 #[tokio::test]

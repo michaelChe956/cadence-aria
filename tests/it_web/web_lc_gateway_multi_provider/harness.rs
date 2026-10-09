@@ -26,23 +26,45 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
+use cadence_aria::cross_cutting::provider_adapter::{ProviderAdapter, ProviderAdapterError};
+use cadence_aria::cross_cutting::provider_availability_gate::ProviderAvailabilityGate;
+use cadence_aria::cross_cutting::provider_boundary::{
+    BoundaryWriteChannel, PlannedBoundaryWrite, ProviderBoundaryLauncher, ProviderBoundaryMode,
+    ProviderBoundaryPlan, run_write_surface_probe,
+};
 use cadence_aria::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
+use cadence_aria::cross_cutting::provider_health::ProviderHealthService;
+use cadence_aria::cross_cutting::provider_registry::ProviderRegistry;
+use cadence_aria::cross_cutting::streaming_provider::{
+    ProviderPermissionMode, ProviderToolPolicy, StreamingProviderInput,
+};
 use cadence_aria::cross_cutting::tool_policy_audit::{DurableToolPolicyEvent, ProviderStartAudit};
 use cadence_aria::product::app_paths::ProductAppPaths;
 use cadence_aria::product::coding_attempt_store::CodingAttemptStore;
 use cadence_aria::product::lifecycle_store::LifecycleStore;
+use cadence_aria::product::logical_codebase::RootRecipeReceiptStore;
 use cadence_aria::product::logical_codebase::policy::{
     AggregatePolicyArtifactStore, PolicyTarget, SessionPolicyAction,
 };
+use cadence_aria::product::logical_codebase::policy::{ProviderDialect, ProviderWireDialect};
+use cadence_aria::product::logical_codebase::production_policy_resolvers::{
+    ProductionPolicyTargetResolver, StoreBackedProviderCapabilitySource,
+};
 use cadence_aria::product::logical_codebase::provider_boundary_probe::{
-    ProviderBoundaryProbe, ResumeChannelKind, ResumeProbeSpec, run_cli_boundary_probe,
+    BOUNDARY_PROBE_EVIDENCE_SCHEMA, BoundaryFixture, ProviderBoundaryProbe, ResumeChannelKind,
+    ResumeProbeSpec, provider_family_text, run_cli_boundary_probe,
+};
+use cadence_aria::product::logical_codebase::provider_capability_store::{
+    CapabilityEvidence, PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION, ProviderActionCapability,
+    ProviderActionMatrix, ProviderCapabilityRecord, ProviderCapabilityStore, RootRecipeEvidence,
 };
 use cadence_aria::product::logical_codebase::provider_gateway::{
-    ProviderLaunchAuditContext, ProviderRef, SessionLaunchRequest,
+    LogicalCodebaseProviderGateway, ProviderLaunchAuditContext, ProviderRef, ProviderRefType,
+    SessionLaunchRequest,
 };
-
 use cadence_aria::product::logical_codebase::provider_trust::{
-    HomeBackedProviderTrustRegistry, ProviderTrustPrecondition,
+    HomeBackedProviderTrustRegistry, ProviderTrustPrecondition, ProviderTrustSource,
+    ReadonlyProviderTrustSource, requires_workspace_trust,
 };
 use cadence_aria::product::logical_codebase::provider_trust_adapters::{
     CodexTrustAdapter, KimiTrustAdapter,
@@ -52,6 +74,7 @@ use cadence_aria::product::logical_codebase::types::{
     CodebaseMemberRecord, RepositoryCheckoutRecord,
 };
 use cadence_aria::product::models::ProviderName;
+use cadence_aria::protocol::contracts::AdapterOutput;
 use cadence_aria::protocol::contracts::{AdapterInput, AdapterRole, ProviderType};
 use cadence_aria::web::app::build_web_router;
 use cadence_aria::web::events::EventHub;
@@ -66,6 +89,7 @@ use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
+use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
 /// 真实现场开关:缺失时 `#[ignore]` 测试必须失败而非静默 return 成功。
@@ -343,12 +367,30 @@ impl EvidenceCell {
                 self.provider_spawn_count
             ));
         }
+        // Task 11 零 spawn 结构面:被拒格(capability∈{denied,unknown})与
+        // 完整 provider-start 成功证据互斥——argv/wire 捕获 + 真实 argv +
+        // exact version + 完成产物齐备而状态非 Confirmed = 矛盾记录(伪装
+        // 格),拒绝。握手失败已创建 child 的 kill/reap 格不携带完成产物,
+        // 不属零 spawn 被拒格,不受本条影响(spawn≥1 的观测由会计五维
+        // 分列,见 to_cell_json)。
+        if matches!(self.capability_state.as_str(), "denied" | "unknown")
+            && self.argv_or_wire_capture_exists
+            && !self.argv.is_empty()
+            && !self.exact_version.trim().is_empty()
+            && self.completed_product_artifact_exists
+        {
+            return Err(
+                "零 spawn 被拒格携带 provider-start 成功证据(被拒状态与完整 \
+                 正向证据矛盾)"
+                    .to_string(),
+            );
+        }
         Ok(())
     }
 
     /// `cell.json` 形态(键 + 断言组字段 + 全要素;敏感项不落盘)。
     pub(crate) fn to_cell_json(&self) -> Value {
-        json!({
+        let mut cell = json!({
             "provider": self.provider,
             "exact_version": self.exact_version,
             "stage": self.stage,
@@ -380,7 +422,84 @@ impl EvidenceCell {
             "provider_spawn_count": self.provider_spawn_count,
             "session_projection_digest": self.session_projection_digest,
             "timeline": self.timeline_summary(),
-        })
+        });
+        // Task 11:零 spawn 会计五维(计划 Interfaces 冻结,分列可审计)+
+        // 组装层经 provider_events 携带的边界矩阵证据 flag(首见为准)。
+        if let Some(flags) = self.boundary_matrix_evidence_flags() {
+            let object = cell.as_object_mut().expect("cell json object");
+            for (key, value) in flags {
+                object.insert(key, value);
+            }
+        }
+        if let Some(accounting) = self.zero_spawn_accounting() {
+            let object = cell.as_object_mut().expect("cell json object");
+            for (key, value) in accounting {
+                object.insert(key, value);
+            }
+        }
+        cell
+    }
+
+    /// Task 11 零 spawn 会计五维(计划 Interfaces 冻结;各维度只由本维证据
+    /// 源推导,分列可审计):
+    /// - session_child_count:spawn 审计计数与 stream-log PID 任一在场即取
+    ///   其大者,加上事件流里的显式 child 观测;两者皆缺=显式 0(被拒格
+    ///   零 child 的会计口径,不以「无记录」冒充正值);
+    /// - native_handshake_count:native session id 在场=握手完成(≥1);
+    ///   kill/reap 格(握手未完成、id 空)为 0,不冒充;
+    /// - extension_mcp_descendant_count/native_method_count:事件流里的
+    ///   extension/MCP 后代与 native 方法/RPC 观测计数;
+    /// - availability_version_count:`--version` availability 探测另记
+    ///   (探测不是 session child,不并入 session 维)。
+    fn zero_spawn_accounting(&self) -> Option<serde_json::Map<String, Value>> {
+        let observed = |marker: &str| {
+            self.provider_events
+                .iter()
+                .filter(|event| event["event"]["type"].as_str() == Some(marker))
+                .count() as u64
+        };
+        let session_child_count = self
+            .provider_spawn_count
+            .max(u64::from(self.provider_pid.is_some()))
+            .saturating_add(observed("session_child_observed"));
+        let native_handshake_count = if self.native_session_id.trim().is_empty() {
+            0
+        } else {
+            session_child_count.max(1)
+        };
+        Some(
+            json!({
+                "session_child_count": session_child_count,
+                "native_handshake_count": native_handshake_count,
+                "extension_mcp_descendant_count": observed("extension_mcp_descendant_observed"),
+                "native_method_count": observed("native_method_observed"),
+                "availability_version_count": observed("availability_version_probe"),
+            })
+            .as_object()
+            .cloned()
+            .expect("accounting object"),
+        )
+    }
+
+    /// Task 11 边界矩阵证据 flag:组装层经 `provider_events` 携带的
+    /// `boundary_matrix_evidence` 事件(failure_scenario/受控写/保护面拒绝/
+    /// D4 无漂移等逐格 flag)合并进 cell.json 顶层,首见为准。
+    fn boundary_matrix_evidence_flags(&self) -> Option<serde_json::Map<String, Value>> {
+        let mut merged = serde_json::Map::new();
+        for event in &self.provider_events {
+            let Some(payload) = event.get("event").and_then(Value::as_object) else {
+                continue;
+            };
+            if payload.get("type").and_then(Value::as_str) != Some("boundary_matrix_evidence") {
+                continue;
+            }
+            for (key, value) in payload {
+                if key != "type" && !merged.contains_key(key) {
+                    merged.insert(key.clone(), value.clone());
+                }
+            }
+        }
+        Some(merged)
     }
 
     /// F3:时间线摘要(首/末事件 ts;provider-events.jsonl 为全量)。
@@ -680,6 +799,2337 @@ impl LiveLcGatewayHarness {
 impl Default for LiveLcGatewayHarness {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Task 11:越界写、D4 与失败零 spawn 真实矩阵(boundary_matrix.rs 现场测试
+// 消费;计划 Task 11 段 488-511 行)。
+//
+// 结构(全程沿用 fp()/fp_enter_phase 足迹约定——看门狗 v3 以 [fp] 前缀判
+// 实质进展,每个探针/场景/会计步骤一行足迹,纯本地 git 转换点显式留痕):
+// 1. `run_boundary_and_failure_matrix`:单 provider 现场入口(计划
+//    Interfaces 冻结签名),复用 `MatrixEnvironment::build`(真实 git
+//    fixture/聚合初始化/trust/6c capability 探针,探针证据已落
+//    `boundary/boundary/<label>/`);
+// 2. 边界段:6c Coding 工件(受控 commit + 四通道负向)核对 + 组装层
+//    五通道×保护面追加探针(child 通道/越界 symlink/非 target worktree,
+//    经 `run_write_surface_probe` 在产品写边界沙箱内真实执行,每条留拒绝
+//    原文与文件 digest)+ D4(active main HEAD+porcelain 与 root/metadata
+//    前后快照,沿 HEAD 既有预算 fail-closed 不截断);
+// 3. 失败段:17 固定负向场景逐格真实拒绝(真实 gateway 的 validate/
+//    prepare/spawn 前复验对受控突变状态的真实拒绝),零 spawn 由
+//    「审计扫描=0 + 无 PID + 无 argv」三面同时证明(会计五维分列);
+//    child spawn 失败分清「创建失败=0」与「握手失败已创建=kill/reap」
+//    (后者 spawn≥1,不属零 spawn 格);
+// 4. 证据落计划 Files 冻结目录 `cadence/reports/lc-gateway-multi-provider/
+//    <provider>/boundary/` 与 `failures/`。
+// ---------------------------------------------------------------------------
+
+/// 失败段场景清单:直接消费冻结测试面 `failure_matrix::FIXED_FAILURE_
+/// SCENARIOS`(boundary_matrix 现场覆盖断言同源,harness 不另立第二清单)。
+use super::failure_matrix::FIXED_FAILURE_SCENARIOS as TASK11_FAILURE_SCENARIOS;
+
+/// Task 11 现场证据根(计划 Files 冻结):`<provider>/{boundary,failures}/`。
+fn task11_evidence_roots(provider: &ProviderName) -> (PathBuf, PathBuf) {
+    let base = PathBuf::from("cadence/reports/lc-gateway-multi-provider")
+        .join(provider_family_text(provider));
+    (base.join("boundary"), base.join("failures"))
+}
+
+/// 事件封包 ts(与 StageObservation::push_event 同口径)。
+fn task11_now_ts() -> String {
+    Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+/// 逐字节 sha256(hex)。
+fn task11_sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+impl LiveLcGatewayHarness {
+    /// Task 11 现场入口(计划 Interfaces 冻结签名):单 provider 的越界写
+    /// (五通道×保护面)、D4(active main HEAD+porcelain + root/metadata)与
+    /// 失败零 spawn(17 固定负向场景)真实矩阵。环境不可运行 → `Err`
+    /// (BLOCKED 真实报告);阶段内失败一律落格(denied/unknown + reason),
+    /// 不删格、不以删格缩小验收。
+    pub(crate) async fn run_boundary_and_failure_matrix(
+        &self,
+        provider: ProviderName,
+    ) -> Result<LiveMatrixEvidence, LiveMatrixFailure> {
+        let (boundary_root, failures_root) = task11_evidence_roots(&provider);
+        fp_enter_phase("t11", "env", "build");
+        let mut env = MatrixEnvironment::build(provider.clone(), &boundary_root).await?;
+        fp(
+            "t11_env_built",
+            format_args!(
+                "lc={} canonical_root={} target={}",
+                env.lc_id,
+                env.canonical_root.display(),
+                env.member_worktree.display()
+            ),
+        );
+
+        // D4 pre 快照:active main(HEAD+porcelain)+ root/metadata(先于一切探针)。
+        fp_enter_phase("t11", "d4", "pre");
+        let d4_before = task11_d4_snapshot(&env)?;
+        fp(
+            "t11_d4_pre",
+            format_args!("combined={}", d4_before.combined_digest),
+        );
+
+        // 边界段:组装层五通道×保护面探针 + 6c Coding 工件核对。
+        let write_matrix = run_task11_write_matrix(&env).await?;
+        let mut cells = Vec::new();
+        cells.push(task11_coding_positive_cell(&env)?);
+        cells.push(task11_protected_writes_cell(&env, &write_matrix)?);
+
+        // 失败段:17 固定负向场景逐格真实拒绝(逐格失败不中止矩阵)。
+        cells.extend(run_task11_failure_scenarios(&mut env).await);
+
+        // D4 post 快照 + 无漂移格(所有场景恢复之后收口)。
+        fp_enter_phase("t11", "d4", "post");
+        let d4_after = task11_d4_snapshot(&env)?;
+        fp(
+            "t11_d4_post",
+            format_args!(
+                "combined={} drift={}",
+                d4_after.combined_digest,
+                d4_after.combined_digest != d4_before.combined_digest
+            ),
+        );
+        cells.push(task11_d4_cell(&env, &d4_before, &d4_after));
+
+        // run_ref 在 entrypoint 内唯一(与 run_provider_matrix 同构)。
+        let mut seen: BTreeMap<(String, String), usize> = BTreeMap::new();
+        for cell in &cells {
+            *seen
+                .entry((cell.entrypoint.clone(), cell.run_ref.clone()))
+                .or_default() += 1;
+        }
+        for cell in &mut cells {
+            cell.run_ref_is_unique_within_entrypoint = seen
+                .get(&(cell.entrypoint.clone(), cell.run_ref.clone()))
+                .is_none_or(|count| *count == 1);
+        }
+
+        // 逐格落盘。Task 11 格不走 validate_against 降级:失败格的「缺
+        // argv/产物」是场景本体而非矛盾记录;边界格的证据面是探针工件,
+        // 完备性由逐格 flag 与现场断言承担。
+        for root in [&boundary_root, &failures_root] {
+            std::fs::create_dir_all(root).map_err(|error| {
+                matrix_failure(
+                    "evidence_root_unwritable",
+                    format!("创建证据根目录失败 {}: {error}", root.display()),
+                    None,
+                )
+            })?;
+        }
+        let mut pending_writes: Vec<(PathBuf, EvidenceCell)> = Vec::new();
+        for cell in &cells {
+            let failure_scenario = cell.boundary_matrix_evidence_flags().and_then(|flags| {
+                flags
+                    .get("failure_scenario")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            });
+            let directory = match failure_scenario {
+                Some(scenario) => failures_root.join(scenario),
+                None => boundary_root.join(&cell.run_ref),
+            };
+            pending_writes.push((directory, cell.clone()));
+        }
+        for (directory, cell) in &pending_writes {
+            write_task11_cell(directory, cell).map_err(|reason| {
+                matrix_failure(
+                    "evidence_write_failed",
+                    format!("格 {} 落盘失败:{reason}", cell.run_ref),
+                    None,
+                )
+            })?;
+        }
+
+        Ok(LiveMatrixEvidence {
+            provider,
+            canonical_root: env.canonical_root.clone(),
+            member_worktree: env.member_worktree.clone(),
+            cells,
+            rejections: Vec::new(),
+        })
+    }
+}
+
+/// Task 11 格落盘(cell.json + provider-events.jsonl + sha256 清单;与
+/// write_cell_evidence 同形态但按 Task 11 目录布局)。
+fn write_task11_cell(directory: &Path, cell: &EvidenceCell) -> Result<(), String> {
+    fp(
+        "t11_write_cell",
+        format_args!("{} → {}", cell.run_ref, directory.display()),
+    );
+    std::fs::create_dir_all(directory)
+        .map_err(|error| format!("证据目录创建失败 {}: {error}", directory.display()))?;
+    std::fs::write(
+        directory.join("cell.json"),
+        serde_json::to_vec_pretty(&cell.to_cell_json()).unwrap_or_default(),
+    )
+    .map_err(|error| format!("cell.json 写入失败: {error}"))?;
+    let mut events = String::new();
+    for event in &cell.provider_events {
+        events.push_str(&serde_json::to_string(event).unwrap_or_default());
+        events.push('\n');
+    }
+    std::fs::write(directory.join("provider-events.jsonl"), events.into_bytes())
+        .map_err(|error| format!("provider-events.jsonl 写入失败: {error}"))?;
+    let mut names: Vec<String> = std::fs::read_dir(directory)
+        .map_err(|error| format!("证据目录读取失败 {}: {error}", directory.display()))?
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    let mut manifest = String::new();
+    for name in names {
+        if name == "manifest.sha256" {
+            continue;
+        }
+        let bytes = std::fs::read(directory.join(&name))
+            .map_err(|error| format!("清单读取失败 {directory:?}/{name}: {error}"))?;
+        manifest.push_str(&format!("{}  {name}\n", task11_sha256_hex(&bytes)));
+    }
+    std::fs::write(directory.join("manifest.sha256"), manifest.into_bytes())
+        .map_err(|error| format!("manifest.sha256 写入失败: {error}"))?;
+    Ok(())
+}
+
+/// Task 11 通用格基座(字段语义见各段落;capability_state 由场景覆写)。
+fn task11_cell_base(env: &MatrixEnvironment, run_ref: String) -> EvidenceCell {
+    EvidenceCell {
+        provider: env.provider.clone(),
+        exact_version: String::new(),
+        stage: "coding".to_string(),
+        entrypoint: ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT.to_string(),
+        fresh_or_resume: FRESH.to_string(),
+        process_cwd: env.canonical_root.clone(),
+        target: env.member_worktree.clone(),
+        audit_projection_digest: String::new(),
+        frozen_projection_digest: String::new(),
+        native_resume_confirmed_id: None,
+        native_resume_reattached: false,
+        requested_resume_id: None,
+        argv_or_wire_capture_exists: false,
+        approval_and_tool_events_exist: false,
+        completed_product_artifact_exists: false,
+        run_ref,
+        run_ref_is_unique_within_entrypoint: true,
+        action: "coding_target_write".to_string(),
+        role: "executor".to_string(),
+        gateway_dialect: String::new(),
+        wire_dialect: String::new(),
+        native_session_id: String::new(),
+        workspace_session_id: String::new(),
+        argv: Vec::new(),
+        capability_state: "unknown".to_string(),
+        denied_reason: None,
+        provider_pid: None,
+        pid_unavailable_reason: Some(
+            "Task 11 探针格:本格不主张会话 PID(零 spawn 会计由事件流分列)".to_string(),
+        ),
+        provider_spawn_count: 0,
+        session_projection_digest: String::new(),
+        provider_events: Vec::new(),
+        execution_origin: "full_chain".to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 边界段:6c Coding 工件核对 + 组装层五通道×保护面追加探针 + D4。
+// ---------------------------------------------------------------------------
+
+/// build 内 6c 探针的 Coding 工件(最新 matrix-coding_target_write-*)。
+fn latest_task11_coding_probe_artifact(
+    env: &MatrixEnvironment,
+) -> Result<(PathBuf, Value), LiveMatrixFailure> {
+    let root = env.evidence_root.join("boundary");
+    let mut latest: Option<(String, PathBuf)> = None;
+    let entries = std::fs::read_dir(&root).map_err(|error| {
+        matrix_failure(
+            "coding_probe_artifact_missing",
+            format!("读取探针目录失败 {}: {error}", root.display()),
+            None,
+        )
+    })?;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        // 探针工件形态:<label 目录>/evidence.json;非目录条目(残留
+        // 文件)不参与。
+        if !name.starts_with("matrix-coding_target_write-") || !entry.path().is_dir() {
+            continue;
+        }
+        if latest.as_ref().is_none_or(|(seen, _)| *seen < name) {
+            latest = Some((name, entry.path().join("evidence.json")));
+        }
+    }
+    let Some((_, path)) = latest else {
+        return Err(matrix_failure(
+            "coding_probe_artifact_missing",
+            format!("6c Coding 探针工件未找到于 {}", root.display()),
+            None,
+        ));
+    };
+    let value: Value = serde_json::from_str(&std::fs::read_to_string(&path).map_err(|error| {
+        matrix_failure(
+            "coding_probe_artifact_unreadable",
+            format!("{}: {error}", path.display()),
+            None,
+        )
+    })?)
+    .map_err(|error| {
+        matrix_failure(
+            "coding_probe_artifact_unreadable",
+            format!("{} 解析失败: {error}", path.display()),
+            None,
+        )
+    })?;
+    if value.get("schema").and_then(Value::as_str) != Some(BOUNDARY_PROBE_EVIDENCE_SCHEMA) {
+        return Err(matrix_failure(
+            "coding_probe_artifact_schema_mismatch",
+            format!(
+                "{} schema 非 {BOUNDARY_PROBE_EVIDENCE_SCHEMA}",
+                path.display()
+            ),
+            None,
+        ));
+    }
+    Ok((path, value))
+}
+
+/// 组装层追加探针结果(逐条 {channel,path,outcome,refusal_text,digest 对})。
+struct Task11WriteMatrix {
+    attempts: Vec<Value>,
+    fixture_base: PathBuf,
+}
+
+/// 计划:五通道 × 保护面(root/非 target main/非 target worktree/.git/
+/// .aria/target .git 指针/越界 symlink)。与产品 6c 负向矩阵互补:补齐
+/// child 通道、越界 symlink 与非 target worktree 面。
+fn planned_task11_writes(
+    fixture: &BoundaryFixture,
+    non_target_wt: &Path,
+    escape_link: &Path,
+) -> Vec<PlannedBoundaryWrite> {
+    let root = fixture.root();
+    let member = fixture.member();
+    let member_b = fixture.member_b();
+    let target = fixture.target().expect("coding fixture target");
+    let planned =
+        |channel: BoundaryWriteChannel, path: PathBuf| PlannedBoundaryWrite::new(channel, path);
+    vec![
+        // builtin:root 面、root .git、非 target main、target .git 指针。
+        planned(
+            BoundaryWriteChannel::Builtin,
+            root.join("t11-rogue-builtin"),
+        ),
+        planned(
+            BoundaryWriteChannel::Builtin,
+            root.join(".git").join("t11-rogue"),
+        ),
+        planned(
+            BoundaryWriteChannel::Builtin,
+            member.join("t11-rogue-builtin"),
+        ),
+        planned(BoundaryWriteChannel::Builtin, target.join(".git")),
+        // terminal:root .aria、root AGENTS.md、非 target worktree。
+        planned(
+            BoundaryWriteChannel::Terminal,
+            root.join(".aria").join("t11-rogue"),
+        ),
+        planned(BoundaryWriteChannel::Terminal, root.join("AGENTS.md")),
+        planned(
+            BoundaryWriteChannel::Terminal,
+            non_target_wt.join("t11-rogue-terminal"),
+        ),
+        // extension:非 target main .git、root mcp 副本、target .aria。
+        planned(
+            BoundaryWriteChannel::Extension,
+            member_b.join(".git").join("t11-rogue"),
+        ),
+        planned(
+            BoundaryWriteChannel::Extension,
+            root.join(".mcp.json.t11-rogue"),
+        ),
+        planned(
+            BoundaryWriteChannel::Extension,
+            target.join(".aria").join("t11-rogue"),
+        ),
+        // mcp:非 target main .git、root .mcp.json。
+        planned(
+            BoundaryWriteChannel::Mcp,
+            member.join(".git").join("t11-rogue"),
+        ),
+        planned(BoundaryWriteChannel::Mcp, root.join(".mcp.json")),
+        // child(setsid 脱组再派生子进程):root、root .git、非 target main、
+        // 非 target worktree、target .git 指针。
+        planned(BoundaryWriteChannel::Child, root.join("t11-rogue-child")),
+        planned(
+            BoundaryWriteChannel::Child,
+            root.join(".git").join("t11-rogue-child"),
+        ),
+        planned(
+            BoundaryWriteChannel::Child,
+            member_b.join("t11-rogue-child"),
+        ),
+        planned(
+            BoundaryWriteChannel::Child,
+            non_target_wt.join("t11-rogue-child"),
+        ),
+        planned(BoundaryWriteChannel::Child, target.join(".git")),
+        // 越界 symlink:target 内链接指向 root 受保护文件,写经链接必须被拒。
+        planned(BoundaryWriteChannel::Builtin, escape_link.to_path_buf()),
+        planned(BoundaryWriteChannel::Child, escape_link.to_path_buf()),
+    ]
+}
+
+/// 逐路径内容 digest(absent=哨兵;symlink 走目标文件内容;目录形态以
+/// 条目名 digest 计)。
+fn task11_path_digests(planned: &[PlannedBoundaryWrite]) -> Vec<String> {
+    planned
+        .iter()
+        .map(|write| match std::fs::symlink_metadata(write.path()) {
+            Ok(metadata) if metadata.is_dir() => {
+                let mut names: Vec<String> = std::fs::read_dir(write.path())
+                    .map(|entries| {
+                        entries
+                            .flatten()
+                            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                names.sort();
+                format!("dir:{}", task11_sha256_hex(names.join("\n").as_bytes()))
+            }
+            Ok(_) => match std::fs::read(write.path()) {
+                Ok(bytes) => format!("sha256:{}", task11_sha256_hex(&bytes)),
+                Err(_) => "unreadable".to_string(),
+            },
+            Err(_) => "absent".to_string(),
+        })
+        .collect()
+}
+
+/// 受控 fixture 上的五通道×保护面真实探针(产品写边界沙箱内执行)。
+async fn run_task11_write_matrix(
+    env: &MatrixEnvironment,
+) -> Result<Task11WriteMatrix, LiveMatrixFailure> {
+    fp_enter_phase("t11-boundary", "write_matrix", "fresh");
+    let Some((cli_program, _)) = provider_probe_channel(&env.provider) else {
+        return Err(matrix_failure(
+            "capability_probe_provider_unsupported",
+            format!("provider {:?} 无真实探针通道", env.provider),
+            None,
+        ));
+    };
+    let launcher = ProviderBoundaryLauncher::probe_environment();
+    if !launcher.is_available() {
+        return Err(matrix_failure(
+            "boundary_launcher_unavailable",
+            "bwrap/user namespace 不可用:写面探针无法真实执行(fail-closed,不冒充)".to_string(),
+            None,
+        ));
+    }
+    let base = TempDir::new().expect("t11 write matrix base");
+    let label = format!("t11-write-matrix-{}", Utc::now().format("%Y%m%dT%H%M%SZ"));
+    let fixture = BoundaryFixture::create(
+        env.provider.clone(),
+        cli_program,
+        SessionPolicyAction::CodingTargetWrite,
+        base.path(),
+        &env.evidence_root.join("boundary"),
+        &label,
+    )
+    .map_err(|error| {
+        matrix_failure(
+            "boundary_fixture_invalid",
+            format!("受控 fixture 搭建失败: {error:?}"),
+            None,
+        )
+    })?;
+    // 非 target worktree 面:root 仓自身 worktree(沙箱 ro-bind / 恒可见,
+    // 越界写必得真实 EROFS 而非 ENOENT)。
+    let non_target_wt = fixture.root().join("t11-non-target-wt");
+    {
+        let git = |arguments: &[&str]| -> std::io::Result<()> {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(fixture.root())
+                .args(["-c", "user.email=t11@aria", "-c", "user.name=t11"])
+                .args(arguments)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .status()?;
+            if status.success() {
+                Ok(())
+            } else {
+                Err(std::io::Error::other(format!(
+                    "git {arguments:?} 失败:{status:?}"
+                )))
+            }
+        };
+        // member-b 补 git init(受控材料):使「非 target main 的 .git」面
+        // 真实在场,越界写得真实 EROFS 而非 ENOENT。
+        let member_b_init = std::process::Command::new("git")
+            .arg("-C")
+            .arg(fixture.member_b())
+            .args(["init", "-q"])
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .status();
+        if !matches!(&member_b_init, Ok(status) if status.success()) {
+            return Err(matrix_failure(
+                "boundary_fixture_invalid",
+                format!(
+                    "member-b git init 失败:{:?}",
+                    member_b_init.map(|status| status.to_string())
+                ),
+                None,
+            ));
+        }
+        fp("t11_member_b_git_ready", "非 target main .git 面在场");
+        git(&[
+            "commit",
+            "--allow-empty",
+            "-q",
+            "-m",
+            "t11 non-target worktree base",
+        ])
+        .map_err(|error| {
+            matrix_failure(
+                "boundary_fixture_invalid",
+                format!("非 target worktree 基提交失败: {error}"),
+                None,
+            )
+        })?;
+        git(&[
+            "worktree",
+            "add",
+            "-q",
+            non_target_wt.to_string_lossy().as_ref(),
+            "-b",
+            "t11-non-target",
+        ])
+        .map_err(|error| {
+            matrix_failure(
+                "boundary_fixture_invalid",
+                format!("非 target worktree 挂载失败: {error}"),
+                None,
+            )
+        })?;
+    }
+    fp(
+        "t11_non_target_worktree_ready",
+        format_args!("{}", non_target_wt.display()),
+    );
+    // 越界 symlink:target(可写面)内链接指向 root 受保护文件。
+    let escape_link = fixture
+        .target()
+        .expect("coding fixture target")
+        .join("t11-escape-link");
+    std::os::unix::fs::symlink(fixture.root().join("AGENTS.md"), &escape_link).map_err(
+        |error| {
+            matrix_failure(
+                "boundary_fixture_invalid",
+                format!("越界 symlink 搭建失败: {error}"),
+                None,
+            )
+        },
+    )?;
+    let planned = planned_task11_writes(&fixture, &non_target_wt, &escape_link);
+    fp("t11_boundary_digest", "pre");
+    let digests_before = task11_path_digests(&planned);
+    // 与 6c derive_boundary_plan 同构的 plan(TargetWriteOnly,root,protect=[])
+    // + 同一 env overlay,沙箱语义与产品探针逐字节一致。
+    let plan = ProviderBoundaryPlan::probe_plan(
+        ProviderBoundaryMode::TargetWriteOnly,
+        fixture.root().to_path_buf(),
+        fixture.target().map(Path::to_path_buf),
+        Vec::new(),
+    )
+    .map_err(|error| {
+        matrix_failure(
+            "boundary_plan_invalid",
+            format!("探测 plan 构造失败: {error:?}"),
+            None,
+        )
+    })?;
+    let sandbox_env = fixture.probe_env();
+    fp(
+        "t11_boundary_probe_run",
+        format_args!("attempts={} launcher=bwrap", planned.len()),
+    );
+    let attempts = run_write_surface_probe(&launcher, &plan, &sandbox_env, &planned)
+        .await
+        .map_err(|error| {
+            matrix_failure(
+                "boundary_probe_channel_failed",
+                format!("写面探针通道失败(观测前): {error:?}"),
+                None,
+            )
+        })?;
+    fp(
+        "t11_boundary_probe_done",
+        format_args!("attempts={}", attempts.len()),
+    );
+    fp("t11_boundary_digest", "post");
+    let digests_after = task11_path_digests(&planned);
+    if attempts.len() != planned.len() {
+        return Err(matrix_failure(
+            "boundary_probe_attempt_count_mismatch",
+            format!("探针回报 {} 条 != 计划 {}", attempts.len(), planned.len()),
+            None,
+        ));
+    }
+    // 分类:每条必须被拒且带真实拒绝原文(模型「不写」不是 attempt 证据),
+    // 且受保护文件 digest 前后一致;任一违例=防护失效 → 保留现场并阻断。
+    let mut records = Vec::new();
+    let mut violation: Option<String> = None;
+    for (index, attempt) in attempts.iter().enumerate() {
+        let refused_with_evidence = attempt.was_refused_with_evidence();
+        let digest_before = digests_before[index].clone();
+        let digest_after = digests_after[index].clone();
+        let unchanged = digest_before == digest_after;
+        let allowed = attempt.result() == Ok(());
+        if allowed || !refused_with_evidence || !unchanged {
+            violation = Some(violation.unwrap_or_else(|| {
+                format!(
+                    "channel={:?} path={} allowed={allowed} refused_with_evidence=\
+                     {refused_with_evidence} digest_unchanged={unchanged}",
+                    attempt.channel(),
+                    attempt.path().display()
+                )
+            }));
+        }
+        fp(
+            "t11_boundary_attempt",
+            format_args!(
+                "channel={:?} path={} outcome={} evidence={}",
+                attempt.channel(),
+                attempt.path().display(),
+                if allowed { "allowed" } else { "refused" },
+                attempt.evidence()
+            ),
+        );
+        records.push(json!({
+            "channel": format!("{:?}", attempt.channel()),
+            "path": attempt.path().display().to_string(),
+            "outcome": if allowed { "allowed" } else { "refused" },
+            "refusal_text": attempt.evidence(),
+            "digest_before": digest_before,
+            "digest_after": digest_after,
+        }));
+    }
+    if let Some(violation) = violation {
+        let preserved = base.keep();
+        fp(
+            "t11_boundary_scene_preserved",
+            format_args!("violation={violation} fixture={}", preserved.display()),
+        );
+        return Err(matrix_failure(
+            "boundary_protection_violation",
+            format!(
+                "越界写未被拒或受保护面漂移:{violation};现场已保留 {}",
+                preserved.display()
+            ),
+            None,
+        ));
+    }
+    Ok(Task11WriteMatrix {
+        attempts: records,
+        fixture_base: base.keep(),
+    })
+}
+
+/// Coding 正向格:6c 工件的受控 commit(subject+宿主复核+真实 git
+/// add/commit argv)与正向 target 写(真实落盘)。
+fn task11_coding_positive_cell(env: &MatrixEnvironment) -> Result<EvidenceCell, LiveMatrixFailure> {
+    fp_enter_phase("t11-boundary", "coding_positive", "fresh");
+    let (artifact_path, artifact) = latest_task11_coding_probe_artifact(env)?;
+    let commit = artifact
+        .get("controlled_commit")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            matrix_failure(
+                "coding_positive_missing",
+                format!("6c 工件缺受控 commit:{}", artifact_path.display()),
+                None,
+            )
+        })?;
+    let verified_on_host = commit
+        .get("verified_on_host")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let subject = commit
+        .get("subject")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let positives = artifact
+        .get("positives")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let target_write = positives.iter().find(|attempt| {
+        attempt
+            .get("path")
+            .and_then(Value::as_str)
+            .is_some_and(|path| path.ends_with("aria-boundary-probe.txt"))
+            && attempt.get("outcome").and_then(Value::as_str) == Some("allowed")
+    });
+    let Some(target_write) = target_write else {
+        return Err(matrix_failure(
+            "coding_positive_missing",
+            format!("6c 工件缺正向 target 写:{}", artifact_path.display()),
+            None,
+        ));
+    };
+    if !verified_on_host || subject.trim().is_empty() {
+        return Err(matrix_failure(
+            "coding_positive_missing",
+            format!(
+                "6c 受控 commit 未宿主复核:{},subject={subject:?}",
+                artifact_path.display()
+            ),
+            None,
+        ));
+    }
+    fp(
+        "t11_coding_positive_verified",
+        format_args!("subject={subject:?} artifact={}", artifact_path.display()),
+    );
+    let controlled_file = target_write
+        .get("path")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let mut events = vec![json!({
+        "ts": task11_now_ts(),
+        "event": {
+            "type": "boundary_matrix_evidence",
+            "coding_target_controlled_file_written": true,
+            "controlled_file": controlled_file,
+            "controlled_file_digest": format!(
+                "sha256:{}",
+                task11_sha256_hex(b"aria-boundary-probe")
+            ),
+            "controlled_commit_subject": subject,
+            "git_add_commit_argv": commit.get("argv").cloned().unwrap_or(Value::Null),
+            "probe_artifact": artifact_path.display().to_string(),
+        },
+    })];
+    // 会计观测:resume 段真实 CLI 子进程(launch/同 id resume/错 id 负探针)
+    // 与 native 协议交互——真实观察,逐条带 argv;错 id 负探针是「握手失败
+    // 已创建=kill/reap」形态(child 创建→失败退出),不属零 spawn 格。
+    if let Some(resume) = artifact.get("resume").and_then(Value::as_object) {
+        if resume.get("probed").and_then(Value::as_bool) == Some(true) {
+            for (phase, argv_key, exit_key, id_key) in [
+                (
+                    "launch",
+                    "launch_argv",
+                    "launch_exit",
+                    "launch_native_session_id",
+                ),
+                (
+                    "resume",
+                    "resume_argv",
+                    "resume_exit",
+                    "resume_native_session_id",
+                ),
+                (
+                    "wrong_id_negative",
+                    "wrong_id_argv",
+                    "wrong_id_exit",
+                    "wrong_id_native_session_id",
+                ),
+            ] {
+                let argv = resume.get(argv_key).cloned().unwrap_or(Value::Null);
+                let argv_non_empty = argv.as_array().is_some_and(|items| !items.is_empty());
+                if !argv_non_empty {
+                    continue;
+                }
+                events.push(json!({
+                    "ts": task11_now_ts(),
+                    "event": {
+                        "type": "session_child_observed",
+                        "phase": phase,
+                        "argv": argv,
+                        "exit": resume.get(exit_key).cloned().unwrap_or(Value::Null),
+                    },
+                }));
+                events.push(json!({
+                    "ts": task11_now_ts(),
+                    "event": {
+                        "type": "native_method_observed",
+                        "phase": phase,
+                        "native_session_id": resume.get(id_key).cloned().unwrap_or(Value::Null),
+                    },
+                }));
+                if phase == "wrong_id_negative" {
+                    events.push(json!({
+                        "ts": task11_now_ts(),
+                        "event": {
+                            "type": "probe_child_kill_reap_observed",
+                            "note": "握手失败已创建=kill/reap(child 创建→失败退出;spawn≥1,不属零 spawn 格)",
+                            "argv": argv,
+                            "exit": resume.get(exit_key).cloned().unwrap_or(Value::Null),
+                        },
+                    }));
+                }
+            }
+        }
+    }
+    let mut cell = task11_cell_base(
+        env,
+        format!(
+            "t11-boundary-coding-positive-{}",
+            Utc::now().format("%Y%m%dT%H%M%SZ")
+        ),
+    );
+    // 本格证据面是探针工件(其 fixture 为已回收 tempdir):cwd/target 不
+    // 主张矩阵 env 路径,真实路径落在事件与 probe_artifact。
+    cell.process_cwd = PathBuf::new();
+    cell.target = PathBuf::new();
+    cell.capability_state = "confirmed".to_string();
+    cell.completed_product_artifact_exists = true;
+    cell.provider_events = events;
+    Ok(cell)
+}
+
+/// 保护面拒绝格:组装层五通道×保护面逐条拒绝原文+digest,叠加 6c 工件
+/// 四通道负向与 D4 受保护面 pre/post 摘要。
+fn task11_protected_writes_cell(
+    env: &MatrixEnvironment,
+    write_matrix: &Task11WriteMatrix,
+) -> Result<EvidenceCell, LiveMatrixFailure> {
+    fp_enter_phase("t11-boundary", "protected_writes", "fresh");
+    let (artifact_path, artifact) = latest_task11_coding_probe_artifact(env)?;
+    let negatives = artifact
+        .get("negatives")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let all_6c_refused = !negatives.is_empty()
+        && negatives.iter().all(|attempt| {
+            attempt.get("outcome").and_then(Value::as_str) == Some("refused")
+                && attempt
+                    .get("evidence")
+                    .and_then(Value::as_str)
+                    .is_some_and(|evidence| !evidence.trim().is_empty())
+        });
+    let all_matrix_refused = write_matrix.attempts.iter().all(|attempt| {
+        attempt.get("outcome").and_then(Value::as_str) == Some("refused")
+            && attempt
+                .get("refusal_text")
+                .and_then(Value::as_str)
+                .is_some_and(|text| !text.trim().is_empty())
+            && attempt.get("digest_before") == attempt.get("digest_after")
+    });
+    // 6c 工件的 D4(受保护面 pre/post 摘要;缺证据=哨兵,现场断言红)。
+    let d4 = artifact.get("d4").cloned().unwrap_or(Value::Null);
+    let protected_digest_before = d4
+        .get("protected_pre_digest")
+        .and_then(Value::as_str)
+        .unwrap_or("evidence-missing#protected_digest_before")
+        .to_string();
+    let protected_digest_after = d4
+        .get("protected_post_digest")
+        .and_then(Value::as_str)
+        .unwrap_or("evidence-missing#protected_digest_after")
+        .to_string();
+    let flag = all_6c_refused && all_matrix_refused;
+    fp(
+        "t11_protected_writes_verdict",
+        format_args!(
+            "all_refused={flag} matrix_attempts={} 6c_negatives={}",
+            write_matrix.attempts.len(),
+            negatives.len()
+        ),
+    );
+    let mut events = vec![json!({
+        "ts": task11_now_ts(),
+        "event": {
+            "type": "boundary_matrix_evidence",
+            "protected_writes_all_refused_by_os_or_native_policy": flag,
+            "protected_digest_before": protected_digest_before,
+            "protected_digest_after": protected_digest_after,
+            "attempt_count": write_matrix.attempts.len() + negatives.len(),
+            "write_matrix_fixture": write_matrix.fixture_base.display().to_string(),
+            "probe_artifact": artifact_path.display().to_string(),
+        },
+    })];
+    // 逐条 attempt 留证(拒绝原文+digest);extension/MCP 通道探针在沙箱内
+    // 派生真实后代进程,按 attempt 计入会计维度。
+    for attempt in &write_matrix.attempts {
+        let channel = attempt
+            .get("channel")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        events.push(json!({
+            "ts": task11_now_ts(),
+            "event": {
+                "type": "boundary_write_attempt",
+                "attempt": attempt,
+            },
+        }));
+        if matches!(channel, "Mcp" | "Extension" | "Terminal" | "Child") {
+            events.push(json!({
+                "ts": task11_now_ts(),
+                "event": {
+                    "type": "extension_mcp_descendant_observed",
+                    "channel": channel,
+                    "path": attempt.get("path").cloned().unwrap_or(Value::Null),
+                },
+            }));
+        }
+    }
+    // availability `--version` 另记:6c 工件的真实版本探测(argv+结果)。
+    events.push(json!({
+        "ts": task11_now_ts(),
+        "event": {
+            "type": "availability_version_probe",
+            "argv": artifact.get("cli_version_argv").cloned().unwrap_or(Value::Null),
+            "exact_version": artifact.get("cli_exact_version").cloned().unwrap_or(Value::Null),
+            "source": artifact_path.display().to_string(),
+        },
+    }));
+    let mut cell = task11_cell_base(
+        env,
+        format!(
+            "t11-boundary-protected-writes-{}",
+            Utc::now().format("%Y%m%dT%H%M%SZ")
+        ),
+    );
+    cell.process_cwd = PathBuf::new();
+    cell.target = PathBuf::new();
+    cell.capability_state = if flag { "confirmed" } else { "denied" }.to_string();
+    if !flag {
+        cell.denied_reason =
+            Some("保护面写未全部被拒(或拒绝无证据/受保护面漂移):防护失效,现场断言将红".to_string());
+    }
+    cell.provider_events = events;
+    Ok(cell)
+}
+
+// ---------------------------------------------------------------------------
+// D4:active main(HEAD+porcelain)+ root/metadata 快照。
+// ---------------------------------------------------------------------------
+
+struct Task11D4Snapshot {
+    faces: Vec<Value>,
+    root_metadata_digest: String,
+    combined_digest: String,
+}
+
+/// root/metadata 有界递归 digest(跳过成员工作树——它们由 git 面覆盖;
+/// 沿 HEAD 既有预算 20_000 条目/64 MiB,超限 fail-closed 不截断)。
+fn task11_root_metadata_digest(canonical_root: &Path) -> Result<String, LiveMatrixFailure> {
+    const MAX_ENTRIES: usize = 20_000;
+    const MAX_BYTES: u64 = 64 * 1024 * 1024;
+    let mut entries: Vec<String> = Vec::new();
+    let mut total_bytes = 0u64;
+    fn walk(
+        directory: &Path,
+        relative: &str,
+        entries: &mut Vec<String>,
+        total_bytes: &mut u64,
+    ) -> Result<(), String> {
+        let children = std::fs::read_dir(directory)
+            .map_err(|error| format!("read_dir {}: {error}", directory.display()))?;
+        for child in children.flatten() {
+            let name = child.file_name().to_string_lossy().into_owned();
+            let child_relative = if relative.is_empty() {
+                name.clone()
+            } else {
+                format!("{relative}/{name}")
+            };
+            // DirEntry::metadata 在 Unix 上即 lstat 语义(不随 symlink)。
+            let metadata = child
+                .metadata()
+                .map_err(|error| format!("metadata {}: {error}", child.path().display()))?;
+            if metadata.is_symlink() {
+                let target = std::fs::read_link(child.path())
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| "unreadable".to_string());
+                entries.push(format!("{child_relative}:link:{target}"));
+            } else if metadata.is_dir() {
+                walk(&child.path(), &child_relative, entries, total_bytes)?;
+            } else if metadata.is_file() {
+                let bytes = std::fs::read(child.path())
+                    .map_err(|error| format!("read {}: {error}", child.path().display()))?;
+                *total_bytes += bytes.len() as u64;
+                entries.push(format!(
+                    "{child_relative}:{}:{}",
+                    metadata.len(),
+                    task11_sha256_hex(&bytes)
+                ));
+            } else {
+                // unix socket/fifo 等特殊文件:不可读字节,以类型标记入摘要
+                //(在场性即元数据事实;不 fail,也不冒充内容)。
+                entries.push(format!(
+                    "{child_relative}:special:{:?}",
+                    metadata.file_type()
+                ));
+            }
+            if entries.len() > MAX_ENTRIES || *total_bytes > MAX_BYTES {
+                return Err(format!(
+                    "root/metadata 快照超预算(>{MAX_ENTRIES} 条目或 {MAX_BYTES}B):fail-closed 不截断"
+                ));
+            }
+        }
+        Ok(())
+    }
+    let direct = std::fs::read_dir(canonical_root)
+        .map_err(|error| {
+            matrix_failure(
+                "d4_snapshot_failed",
+                format!("read_dir {}: {error}", canonical_root.display()),
+                None,
+            )
+        })?
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    for name in direct {
+        if matches!(name.as_str(), "alpha" | "beta") {
+            continue;
+        }
+        if name == ".codegraph" {
+            // 本机 codegraph watcher 的自写状态(非 fixture 材料/产品工件):
+            // 排除出 root/metadata 面,理由随 fp 留痕;成员 git 面不受影响。
+            fp(
+                "t11_d4_face_excluded",
+                ".codegraph(工具自写状态,非聚合根元数据)",
+            );
+            continue;
+        }
+        let path = canonical_root.join(&name);
+        let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+            matrix_failure(
+                "d4_snapshot_failed",
+                format!("metadata {}: {error}", path.display()),
+                None,
+            )
+        })?;
+        if metadata.is_symlink() {
+            let target = std::fs::read_link(&path)
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| "unreadable".to_string());
+            entries.push(format!("{name}:link:{target}"));
+        } else if metadata.is_dir() {
+            walk(&path, &name, &mut entries, &mut total_bytes)
+                .map_err(|reason| matrix_failure("d4_snapshot_failed", reason, None))?;
+        } else if metadata.is_file() {
+            let bytes = std::fs::read(&path).map_err(|error| {
+                matrix_failure(
+                    "d4_snapshot_failed",
+                    format!("read {}: {error}", path.display()),
+                    None,
+                )
+            })?;
+            total_bytes += bytes.len() as u64;
+            entries.push(format!(
+                "{name}:{}:{}",
+                bytes.len(),
+                task11_sha256_hex(&bytes)
+            ));
+        } else {
+            // unix socket/fifo 等特殊文件:以类型标记入摘要(在场性即
+            // 元数据事实;不 fail,也不冒充内容)。
+            entries.push(format!("{name}:special:{:?}", metadata.file_type()));
+        }
+        if entries.len() > MAX_ENTRIES || total_bytes > MAX_BYTES {
+            return Err(matrix_failure(
+                "d4_snapshot_failed",
+                format!(
+                    "root/metadata 快照超预算(>{MAX_ENTRIES} 条目或 {MAX_BYTES}B):fail-closed 不截断"
+                ),
+                None,
+            ));
+        }
+    }
+    entries.sort();
+    Ok(format!(
+        "sha256:{}",
+        task11_sha256_hex(entries.join("\n").as_bytes())
+    ))
+}
+
+/// D4 快照:所有 active main(alpha/beta 主 checkout,HEAD+porcelain)+
+/// root/metadata(预算内全量)。
+fn task11_d4_snapshot(env: &MatrixEnvironment) -> Result<Task11D4Snapshot, LiveMatrixFailure> {
+    let mut faces = Vec::new();
+    for (face, path) in [
+        ("alpha-main", env.member_worktree.clone()),
+        ("beta-main", env.canonical_root.join("beta")),
+    ] {
+        let snapshot = git_snapshot(&path);
+        let digest = format!(
+            "sha256:{}",
+            task11_sha256_hex(
+                serde_json::to_string(&snapshot)
+                    .unwrap_or_default()
+                    .as_bytes()
+            )
+        );
+        fp(
+            "t11_d4_face",
+            format_args!("{face} head={:?} digest={digest}", snapshot["head"]),
+        );
+        faces.push(json!({
+            "face": face,
+            "path": path.display().to_string(),
+            "head": snapshot["head"],
+            "porcelain": snapshot["status"],
+            "digest": digest,
+        }));
+    }
+    let root_metadata_digest = task11_root_metadata_digest(&env.canonical_root)?;
+    fp(
+        "t11_d4_root_metadata",
+        format_args!("digest={root_metadata_digest}"),
+    );
+    let mut combined = String::new();
+    for face in &faces {
+        combined.push_str(
+            face.get("digest")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        );
+        combined.push('\n');
+    }
+    combined.push_str(&root_metadata_digest);
+    Ok(Task11D4Snapshot {
+        faces,
+        root_metadata_digest,
+        combined_digest: format!("sha256:{}", task11_sha256_hex(combined.as_bytes())),
+    })
+}
+
+/// D4 收口格:前后快照逐面对比,非 target 漂移即格 denied(现场断言红)。
+fn task11_d4_cell(
+    env: &MatrixEnvironment,
+    before: &Task11D4Snapshot,
+    after: &Task11D4Snapshot,
+) -> EvidenceCell {
+    let no_drift = before.combined_digest == after.combined_digest;
+    let faces_before = before.faces.clone();
+    let faces_after = after.faces.clone();
+    let mut cell = task11_cell_base(
+        env,
+        format!("t11-boundary-d4-{}", Utc::now().format("%Y%m%dT%H%M%SZ")),
+    );
+    cell.process_cwd = PathBuf::new();
+    cell.target = PathBuf::new();
+    cell.capability_state = if no_drift { "confirmed" } else { "denied" }.to_string();
+    if !no_drift {
+        cell.denied_reason = Some(format!(
+            "D4 非 target 漂移:pre={} post={}",
+            before.combined_digest, after.combined_digest
+        ));
+    }
+    cell.provider_events = vec![json!({
+        "ts": task11_now_ts(),
+        "event": {
+            "type": "boundary_matrix_evidence",
+            "d4_detected_or_delivered_without_non_target_drift": no_drift,
+            "combined_digest_before": before.combined_digest,
+            "combined_digest_after": after.combined_digest,
+            "root_metadata_digest_before": before.root_metadata_digest,
+            "root_metadata_digest_after": after.root_metadata_digest,
+            "faces_before": faces_before,
+            "faces_after": faces_after,
+        },
+    })];
+    cell
+}
+
+// ---------------------------------------------------------------------------
+// 失败段:17 固定负向场景逐格真实拒绝(零 spawn 会计三面证明)。
+// ---------------------------------------------------------------------------
+
+/// 单场景真实探测结果。
+struct ScenarioOutcome {
+    /// 真实拒绝是否发生(被真实产品面拒绝)。
+    refused: bool,
+    /// 拒绝发生的真实产品面(validate/prepare/spawn 前复验/…)。
+    refusal_gate: String,
+    /// 真实拒绝原文(或不可观察说明)。
+    refusal_text: String,
+    /// 落格三态:denied(被拒/防护失效)/unknown(不可观察)。
+    state: &'static str,
+    detail: Value,
+    extra_events: Vec<Value>,
+}
+
+fn scenario_refused(gate: impl Into<String>, text: impl Into<String>) -> ScenarioOutcome {
+    ScenarioOutcome {
+        refused: true,
+        refusal_gate: gate.into(),
+        refusal_text: text.into(),
+        state: "denied",
+        detail: Value::Null,
+        extra_events: Vec::new(),
+    }
+}
+
+fn scenario_not_refused(gate: impl Into<String>, detail: String) -> ScenarioOutcome {
+    let gate = gate.into();
+    ScenarioOutcome {
+        refused: false,
+        refusal_text: format!(
+            "零 spawn 被拒验证失败[{gate}]:复验未拒,{detail}(真实 spawn 已立即收口;证据保留,现场断言将红)"
+        ),
+        refusal_gate: gate,
+        state: "denied",
+        detail: Value::Null,
+        extra_events: Vec::new(),
+    }
+}
+
+fn scenario_unobservable(text: String) -> ScenarioOutcome {
+    ScenarioOutcome {
+        refused: false,
+        refusal_gate: "unobservable".to_string(),
+        refusal_text: text,
+        state: "unknown",
+        detail: Value::Null,
+        extra_events: Vec::new(),
+    }
+}
+
+/// 基线请求:与产品 coder root launch 同构(cwd=canonical root、target/writable
+/// =成员 worktree、config artifact=生产约定常量)。
+fn task11_coding_request(env: &MatrixEnvironment) -> SessionLaunchRequest {
+    let provider = ProviderRef::from_provider_name(&env.provider, "cap_managed_snapshot")
+        .expect("real provider ref");
+    SessionLaunchRequest {
+        project_id: PROJECT_ID.to_string(),
+        provider,
+        action: SessionPolicyAction::CodingTargetWrite,
+        target: PolicyTarget::checkout(
+            env.member_logical_id.clone(),
+            env.member_checkout_id.clone(),
+            env.member_worktree.clone(),
+        ),
+        working_directory: env.canonical_root.clone(),
+        readable_roots: vec![env.canonical_root.clone()],
+        writable_roots: vec![env.member_worktree.clone()],
+        config_artifact_ref: "sha256:managed-config-artifact".to_string(),
+    }
+}
+
+/// 基线流式输入(Coder/Executor 语义:无通用 tool policy)。
+fn task11_streaming_input(env: &MatrixEnvironment) -> StreamingProviderInput {
+    StreamingProviderInput {
+        provider_type: provider_type_for(&env.provider),
+        role: AdapterRole::Executor,
+        prompt: "aria t11 failure-matrix probe: reply with exactly: t11-no-spawn".to_string(),
+        working_dir: env.canonical_root.clone(),
+        working_directory: Some(env.canonical_root.clone()),
+        workspace_session_id: None,
+        resume_provider_session_id: None,
+        permission_mode: ProviderPermissionMode::Auto,
+        tool_policy: None,
+        audit_sink: None,
+        structured_output_contract: None,
+        env_vars: BTreeMap::new(),
+        timeout_secs: 60,
+        baseline_tree: None,
+    }
+}
+
+fn task11_audit_context(env: &MatrixEnvironment, sid: &str) -> ProviderLaunchAuditContext {
+    ProviderLaunchAuditContext {
+        workspace_session_id: sid.to_string(),
+        role_run_seq: 0,
+        audit_sink: Arc::new(env.lifecycle.clone()),
+    }
+}
+
+fn task11_readonly_gateway(
+    env: &MatrixEnvironment,
+) -> Result<LogicalCodebaseProviderGateway, String> {
+    env.gateway_factory
+        .build_readonly_for_lc(PROJECT_ID, Some(&env.lc_id))
+        .map_err(|error| error.to_string())
+}
+
+/// 组装层 gateway(真实组件装配):policies/capabilities/targets 均生产
+/// for_lc 源;registry 空(validate/spawn 前复验不触达 registry);sync
+/// adapter 未行使(本段只走流式拒绝面);availability gate 用真实
+/// ProviderHealthService 的未刷新快照(readiness 未建立,缺 readiness 场景
+/// 的受控负向;trust 场景的拒绝发生在 #4b,先于 availability #9)。
+fn task11_assembled_gateway(
+    env: &MatrixEnvironment,
+    trust: Option<Arc<dyn ProviderTrustSource>>,
+) -> Result<LogicalCodebaseProviderGateway, String> {
+    let gateway = LogicalCodebaseProviderGateway::new(
+        AggregatePolicyArtifactStore::for_lc(env.app_paths.clone(), env.lc_id.clone()),
+        Arc::new(StoreBackedProviderCapabilitySource::for_lc(
+            env.app_paths.clone(),
+            PROJECT_ID.to_string(),
+            env.lc_id.clone(),
+        )),
+        Arc::new(ProductionPolicyTargetResolver::for_lc(
+            env.app_paths.clone(),
+            &env.lc_id,
+        )),
+        Arc::new(ProviderRegistry::new()),
+        Arc::new(Task11UnexercisedSyncAdapter),
+        Arc::new(ProviderAvailabilityGate::new(Arc::new(
+            ProviderHealthService::new(env.workspace_root_path.clone()),
+        ))),
+        env.canonical_root.clone(),
+    );
+    let Some(trust) = trust else {
+        return Ok(gateway);
+    };
+    Ok(gateway.with_readonly_lc_facts(
+        RootRecipeReceiptStore::for_lc(env.app_paths.clone(), env.lc_id.clone()),
+        trust,
+        Some(env.lc_id.clone()),
+    ))
+}
+
+/// 未行使的 sync adapter 占位(组装 gateway 的 run_sync 面不在 Task 11
+/// 探测范围;被调用即显式失败,不冒充)。
+struct Task11UnexercisedSyncAdapter;
+
+impl ProviderAdapter for Task11UnexercisedSyncAdapter {
+    fn run(&self, _input: &AdapterInput) -> Result<AdapterOutput, ProviderAdapterError> {
+        Err(ProviderAdapterError::execution_failed(
+            None,
+            String::new(),
+            "t11 组装 gateway 的 sync adapter 未行使(本段只走流式拒绝面)",
+            0,
+        ))
+    }
+}
+
+/// capability 记录受控突变守卫(Drop 恢复原记录;原缺失时如实留痕——
+/// store 无删除 API,受控行保留并记录)。
+struct Task11CapabilityRestore {
+    store: ProviderCapabilityStore,
+    original: Option<ProviderCapabilityRecord>,
+    provider_type: ProviderRefType,
+}
+
+impl Task11CapabilityRestore {
+    fn capture(env: &MatrixEnvironment, provider_type: ProviderRefType) -> Self {
+        let store = ProviderCapabilityStore::for_lc(env.app_paths.clone(), env.lc_id.clone());
+        let original = store.get(PROJECT_ID, provider_type).ok().flatten();
+        Self {
+            store,
+            original,
+            provider_type,
+        }
+    }
+
+    fn fixture_record(provider_type: ProviderRefType) -> ProviderCapabilityRecord {
+        // 受控 setup 行(只为通过 capability 门到达被测面;版本/证据引用
+        // 如实标注 fixture,不冒充探针签发)。
+        let (adapter_dialect, wire_dialect) = match provider_type {
+            ProviderRefType::ClaudeCode => (
+                ProviderDialect::ClaudeCodeCliV1,
+                ProviderWireDialect::ClaudeCodeStreamJson,
+            ),
+            ProviderRefType::Codex => (
+                ProviderDialect::CodexCliV1,
+                ProviderWireDialect::CodexAppServerRpc,
+            ),
+            ProviderRefType::Pi => (ProviderDialect::PiRpcV1, ProviderWireDialect::PiRpc),
+            ProviderRefType::KimiCode => (ProviderDialect::KimiAcpV1, ProviderWireDialect::KimiAcp),
+        };
+        let row = ProviderActionCapability {
+            action: SessionPolicyAction::CodingTargetWrite,
+            launch: ProviderCapabilityEvidence::Confirmed,
+            resume: ProviderCapabilityEvidence::Unknown,
+            write_boundary: ProviderCapabilityEvidence::Confirmed,
+            projection_digest: "sha256:t11-fixture-row".to_string(),
+            evidence_ref: "t11-fixture(受控 setup,非探针签发)".to_string(),
+        };
+        ProviderCapabilityRecord {
+            provider_type,
+            schema_version: PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION,
+            version: "0.0.0-t11-fixture".to_string(),
+            adapter_dialect,
+            wire_dialect,
+            capability_snapshot_ref: "cap_managed_snapshot".to_string(),
+            evidence: CapabilityEvidence::ProductionVerified,
+            resume_evidence: cadence_aria::product::logical_codebase::provider_gateway::ResumeEvidenceState::Unsupported,
+            supported_actions: vec![SessionPolicyAction::CodingTargetWrite],
+            action_matrix: ProviderActionMatrix::from_rows(vec![row]).expect("t11 fixture rows"),
+            trust: ProviderCapabilityEvidence::Unknown,
+            probed_at: None,
+            probe_artifact_ref: None,
+            root_recipe_evidence: RootRecipeEvidence::None,
+        }
+    }
+}
+
+impl Drop for Task11CapabilityRestore {
+    fn drop(&mut self) {
+        match &self.original {
+            Some(original) => {
+                if let Err(error) = self.store.upsert(PROJECT_ID, original) {
+                    fp(
+                        "t11_capability_restore_failed",
+                        format_args!("{:?}: {error:?}", self.provider_type),
+                    );
+                } else {
+                    fp(
+                        "t11_capability_restored",
+                        format_args!("{:?}", self.provider_type),
+                    );
+                }
+            }
+            None => fp(
+                "t11_capability_restore_absent_origin",
+                format_args!(
+                    "{:?} 原记录缺失:受控行保留(store 无删除 API,不影响本家行)",
+                    self.provider_type
+                ),
+            ),
+        }
+    }
+}
+
+/// 受控突变所选 provider 的 capability 记录(守卫 Drop 恢复)。
+fn task11_mutate_selected_record(
+    env: &MatrixEnvironment,
+    mutate: impl FnOnce(&mut ProviderCapabilityRecord),
+) -> Result<Task11CapabilityRestore, String> {
+    let provider = ProviderRef::from_provider_name(&env.provider, "cap_managed_snapshot")
+        .map_err(|error| error.to_string())?;
+    let guard = Task11CapabilityRestore::capture(env, provider.provider_type);
+    let mut record = guard
+        .original
+        .clone()
+        .unwrap_or_else(|| Task11CapabilityRestore::fixture_record(provider.provider_type));
+    mutate(&mut record);
+    guard
+        .store
+        .upsert(PROJECT_ID, &record)
+        .map_err(|error| error.to_string())?;
+    fp(
+        "t11_capability_mutated",
+        format_args!("{:?}", provider.provider_type),
+    );
+    Ok(guard)
+}
+
+/// 文件字节守卫(Drop 原字节恢复;路径缺失则 Drop 删除——受控恢复)。
+struct Task11FileRestore {
+    path: PathBuf,
+    original: Option<Vec<u8>>,
+}
+
+impl Task11FileRestore {
+    fn capture(path: &Path) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            original: std::fs::read(path).ok(),
+        }
+    }
+}
+
+impl Drop for Task11FileRestore {
+    fn drop(&mut self) {
+        match &self.original {
+            Some(bytes) => {
+                let _ = std::fs::write(&self.path, bytes);
+            }
+            None => {
+                let _ = std::fs::remove_file(&self.path);
+            }
+        }
+        fp("t11_file_restored", format_args!("{}", self.path.display()));
+    }
+}
+
+/// 基线 prepare(真实 gateway 的 validate+role guard)。
+async fn task11_prepare_baseline(
+    env: &MatrixEnvironment,
+    gateway: &LogicalCodebaseProviderGateway,
+    sid: &str,
+    input: StreamingProviderInput,
+    request: SessionLaunchRequest,
+) -> Result<
+    cadence_aria::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+    ScenarioOutcome,
+> {
+    gateway
+        .prepare_streaming_launch(input, request, task11_audit_context(env, sid))
+        .map_err(|error| scenario_refused("prepare(validate+role guard)", error.to_string()))
+}
+
+/// 受控突变守卫(持有至 spawn 前复验完成;Drop 恢复)。
+enum Task11MutationGuard {
+    Capability(Task11CapabilityRestore),
+    File(Task11FileRestore),
+    None,
+}
+
+/// spawn 前复验驱动的漂移场景共用骨架:prepare(基线全绿)→ 受控突变
+///(守卫持有)→ start_streaming(复验在 registry lookup/真实 adapter
+/// 之前 fail-closed)→ Drop 恢复。
+async fn task11_revalidate_drift(
+    env: &MatrixEnvironment,
+    sid: &str,
+    dimension: &str,
+    mutate: impl FnOnce(&MatrixEnvironment) -> Result<Task11MutationGuard, String>,
+) -> ScenarioOutcome {
+    let gateway = match task11_readonly_gateway(env) {
+        Ok(gateway) => gateway,
+        Err(error) => return scenario_unobservable(format!("readonly gateway 组装失败:{error}")),
+    };
+    let prepared = match task11_prepare_baseline(
+        env,
+        &gateway,
+        sid,
+        task11_streaming_input(env),
+        task11_coding_request(env),
+    )
+    .await
+    {
+        Ok(prepared) => prepared,
+        Err(outcome) => return outcome,
+    };
+    fp(
+        "t11_scenario_mutation",
+        format_args!("dimension={dimension}"),
+    );
+    let guard = match mutate(env) {
+        Ok(guard) => guard,
+        Err(problem) => return scenario_unobservable(format!("受控突变失败:{problem}")),
+    };
+    let cancel = CancellationToken::new();
+    let started = gateway.start_streaming(prepared, cancel.clone()).await;
+    drop(guard);
+    match started {
+        Err(error) => {
+            fp(
+                "t11_scenario_refused",
+                format_args!("dimension={dimension} error={error}"),
+            );
+            scenario_refused(format!("spawn 前复验({dimension})"), error.to_string())
+        }
+        Ok(session) => {
+            drop(session);
+            cancel.cancel();
+            fp(
+                "t11_scenario_unexpected_spawn",
+                format_args!("dimension={dimension}(已 cancel+drop 收口)"),
+            );
+            scenario_not_refused(
+                format!("spawn 前复验({dimension})"),
+                format!("维度 {dimension} 漂移未被复验拒绝"),
+            )
+        }
+    }
+}
+
+/// 场景 1:missing_readiness——readiness(health)未建立时 spawn 前复验 #9
+/// 以真实 availability 门拒绝(未刷新 health 快照=受控负向,零 spawn)。
+async fn scenario_missing_readiness(env: &MatrixEnvironment, sid: &str) -> ScenarioOutcome {
+    let gateway = match task11_assembled_gateway(env, None) {
+        Ok(gateway) => gateway,
+        Err(error) => return scenario_unobservable(format!("组装 gateway 失败:{error}")),
+    };
+    let prepared = match task11_prepare_baseline(
+        env,
+        &gateway,
+        sid,
+        task11_streaming_input(env),
+        task11_coding_request(env),
+    )
+    .await
+    {
+        Ok(prepared) => prepared,
+        Err(outcome) => return outcome,
+    };
+    let cancel = CancellationToken::new();
+    let started = gateway.start_streaming(prepared, cancel.clone()).await;
+    match started {
+        Err(error) => {
+            fp(
+                "t11_scenario_refused",
+                format_args!("gate=availability error={error}"),
+            );
+            scenario_refused("spawn 前复验(#9 availability/readiness)", error.to_string())
+        }
+        Ok(session) => {
+            drop(session);
+            cancel.cancel();
+            scenario_not_refused(
+                "spawn 前复验(#9 availability/readiness)",
+                "readiness 未建立未被 availability 门拒绝".to_string(),
+            )
+        }
+    }
+}
+
+/// 场景 2:missing_body——#8 发布链正文缺失(validate 的 receipt 链正文
+/// 复验读取失败)。
+fn scenario_missing_body(env: &MatrixEnvironment) -> ScenarioOutcome {
+    let gateway = match task11_readonly_gateway(env) {
+        Ok(gateway) => gateway,
+        Err(error) => return scenario_unobservable(format!("readonly gateway 组装失败:{error}")),
+    };
+    let artifact =
+        match AggregatePolicyArtifactStore::for_lc(env.app_paths.clone(), env.lc_id.clone())
+            .get(PROJECT_ID)
+        {
+            Ok(Some(artifact)) => artifact,
+            _ => return scenario_unobservable("policy artifact 缺失".to_string()),
+        };
+    let body_path = gateway.authority_root().join(&artifact.policy_id);
+    if std::fs::read(&body_path).is_err() {
+        return scenario_unobservable(format!(
+            "发布正文不可读(无法建立基线):{}",
+            body_path.display()
+        ));
+    }
+    let _restore = Task11FileRestore::capture(&body_path);
+    if let Err(error) = std::fs::remove_file(&body_path) {
+        return scenario_unobservable(format!("受控移除正文失败:{error}"));
+    }
+    fp(
+        "t11_scenario_mutation",
+        format_args!("policy body 移除:{}", body_path.display()),
+    );
+    match gateway.validate(task11_coding_request(env)) {
+        Err(error) => {
+            fp(
+                "t11_scenario_refused",
+                format_args!("gate=policy_body error={error}"),
+            );
+            scenario_refused("validate(#8 发布链正文复验)", error.to_string())
+        }
+        Ok(_) => scenario_not_refused(
+            "validate(#8 发布链正文复验)",
+            "正文缺失未被 validate 拒绝".to_string(),
+        ),
+    }
+}
+
+/// 场景 3:missing_receipt——finalized receipt 的 policy_digest 被篡改
+///(#8 receipt 链断裂:有效 receipt 缺失),validate 的三方一致校验拒绝。
+fn scenario_missing_receipt(env: &MatrixEnvironment) -> ScenarioOutcome {
+    let gateway = match task11_readonly_gateway(env) {
+        Ok(gateway) => gateway,
+        Err(error) => return scenario_unobservable(format!("readonly gateway 组装失败:{error}")),
+    };
+    let receipts_root = env
+        .app_paths
+        .logical_codebases_root(PROJECT_ID)
+        .join(&env.lc_id)
+        .join("aggregate-recipe-receipts");
+    let mut latest: Option<(String, PathBuf)> = None;
+    let Ok(entries) = std::fs::read_dir(&receipts_root) else {
+        return scenario_unobservable(format!("receipts 目录不可读:{}", receipts_root.display()));
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() || !path.to_string_lossy().ends_with(".json") {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(&content) else {
+            continue;
+        };
+        let finalized_at = value
+            .get("finalized_at")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        if finalized_at.is_empty() {
+            continue;
+        }
+        if latest.as_ref().is_none_or(|(seen, _)| *seen < finalized_at) {
+            latest = Some((finalized_at, path));
+        }
+    }
+    let Some((finalized_at, receipt_path)) = latest else {
+        return scenario_unobservable(format!(
+            "finalized receipt 未找到于 {}",
+            receipts_root.display()
+        ));
+    };
+    let Ok(mut value) =
+        serde_json::from_str::<Value>(&std::fs::read_to_string(&receipt_path).unwrap_or_default())
+    else {
+        return scenario_unobservable("finalized receipt 解析失败".to_string());
+    };
+    let _restore = Task11FileRestore::capture(&receipt_path);
+    value["policy_digest"] = json!("sha256:t11-receipt-chain-broken");
+    if let Err(error) = std::fs::write(
+        &receipt_path,
+        serde_json::to_vec(&value).unwrap_or_default(),
+    ) {
+        return scenario_unobservable(format!("受控篡改 receipt 失败:{error}"));
+    }
+    fp(
+        "t11_scenario_mutation",
+        format_args!(
+            "receipt 链断裂(有效 receipt 缺失):{} finalized_at={finalized_at}",
+            receipt_path.display()
+        ),
+    );
+    match gateway.validate(task11_coding_request(env)) {
+        Err(error) => {
+            fp(
+                "t11_scenario_refused",
+                format_args!("gate=policy_digest_chain error={error}"),
+            );
+            scenario_refused("validate(#8 receipt 链三方一致)", error.to_string())
+        }
+        Ok(_) => scenario_not_refused(
+            "validate(#8 receipt 链三方一致)",
+            "receipt 链断裂未被 validate 拒绝".to_string(),
+        ),
+    }
+}
+
+/// 场景 4:missing_trust——需要 workspace trust 的 provider(codex/kimi)
+/// 在未登记 HOME 上被 spawn 前复验 #4b 真实拒绝;无 trust 面的 provider
+/// (claude/pi)按产品过滤语义记 Unknown(不冒充被拒)。
+async fn scenario_missing_trust(env: &MatrixEnvironment, sid: &str) -> ScenarioOutcome {
+    if !requires_workspace_trust(&env.provider) {
+        return scenario_unobservable(format!(
+            "provider {:?} 无用户级 workspace trust 面(requires_workspace_trust=false,\
+             产品过滤语义真实观测):trust 缺失不可触发,记 Unknown 不冒充被拒",
+            env.provider
+        ));
+    }
+    // 受控 HOME(空 tempdir)上的真实 trust source(ReadonlyProviderTrustSource,
+    // 与 factory 生产装配同类型):verify 未登记 → spawn 前复验 #4b 拒绝;
+    // 不触碰真实 HOME。
+    let empty_home = TempDir::new().expect("t11 empty trust home");
+    let trust_source = ReadonlyProviderTrustSource::new(
+        env.app_paths.clone(),
+        Some(env.lc_id.clone()),
+        vec![
+            Arc::new(CodexTrustAdapter::for_home(empty_home.path())),
+            Arc::new(KimiTrustAdapter::for_home(empty_home.path())),
+        ],
+    );
+    let gateway = match task11_assembled_gateway(
+        env,
+        Some(Arc::new(trust_source) as Arc<dyn ProviderTrustSource>),
+    ) {
+        Ok(gateway) => gateway,
+        Err(error) => return scenario_unobservable(format!("组装 gateway 失败:{error}")),
+    };
+    let prepared = match task11_prepare_baseline(
+        env,
+        &gateway,
+        sid,
+        task11_streaming_input(env),
+        task11_coding_request(env),
+    )
+    .await
+    {
+        Ok(prepared) => prepared,
+        Err(outcome) => return outcome,
+    };
+    let cancel = CancellationToken::new();
+    let started = gateway.start_streaming(prepared, cancel.clone()).await;
+    match started {
+        Err(error) => {
+            fp(
+                "t11_scenario_refused",
+                format_args!("gate=trust error={error}"),
+            );
+            scenario_refused("spawn 前复验(#4b trust source)", error.to_string())
+        }
+        Ok(session) => {
+            drop(session);
+            cancel.cancel();
+            scenario_not_refused(
+                "spawn 前复验(#4b trust source)",
+                "trust 未登记未被拒绝".to_string(),
+            )
+        }
+    }
+}
+
+/// 场景 5-8:capability 分格门(launch/boundary × Unknown/Denied)——
+/// validate 阶段真实拒绝。Unknown 需同时移出旧 allow 列表(过渡桥语义:
+/// Unknown+列表内放行等待真实探针,列表外 fail-closed)。
+fn scenario_capability_cell(env: &MatrixEnvironment, scenario: &str) -> ScenarioOutcome {
+    let gateway = match task11_readonly_gateway(env) {
+        Ok(gateway) => gateway,
+        Err(error) => return scenario_unobservable(format!("readonly gateway 组装失败:{error}")),
+    };
+    let guard = match task11_mutate_selected_record(env, |record| {
+        let mut row = record
+            .action_matrix
+            .row(&SessionPolicyAction::CodingTargetWrite);
+        match scenario {
+            "launch_unknown" => {
+                row.launch = ProviderCapabilityEvidence::Unknown;
+                record
+                    .supported_actions
+                    .retain(|action| *action != SessionPolicyAction::CodingTargetWrite);
+            }
+            "launch_denied" => {
+                row.launch =
+                    ProviderCapabilityEvidence::denied("t11 受控负向:launch 分格携带真实负向证据");
+            }
+            "boundary_unknown" => {
+                row.write_boundary = ProviderCapabilityEvidence::Unknown;
+                record
+                    .supported_actions
+                    .retain(|action| *action != SessionPolicyAction::CodingTargetWrite);
+            }
+            "boundary_denied" => {
+                row.write_boundary = ProviderCapabilityEvidence::denied(
+                    "t11 受控负向:write_boundary 分格携带真实负向证据",
+                );
+            }
+            other => unreachable!("capability 分格场景分支外的场景 {other}"),
+        }
+        record.action_matrix.replace_row(row);
+    }) {
+        Ok(guard) => guard,
+        Err(error) => return scenario_unobservable(format!("capability 突变失败:{error}")),
+    };
+    let verdict = gateway.validate(task11_coding_request(env));
+    drop(guard);
+    match verdict {
+        Err(error) => {
+            fp(
+                "t11_scenario_refused",
+                format_args!("gate=capability error={error}"),
+            );
+            scenario_refused("validate(capability 分格门)", error.to_string())
+        }
+        Ok(_) => scenario_not_refused(
+            "validate(capability 分格门)",
+            format!("{scenario} 分格未被 capability 门拒绝"),
+        ),
+    }
+}
+
+/// 场景 9/10/14/17:version/wire 漂移、resume Unknown、D4 漂移——
+/// spawn 前复验的真实 TOCTOU 拒绝。
+async fn scenario_capability_drift(
+    env: &MatrixEnvironment,
+    sid: &str,
+    scenario: &str,
+) -> ScenarioOutcome {
+    let dimension = match scenario {
+        "version_drift" => "provider_version",
+        "wire_drift" => "provider_dialect",
+        "resume_unknown" => "resume 分格(ResumeNotSupported)",
+        "d4_missing_or_drift" => "write_boundary(D4)分格复验",
+        other => unreachable!("drift 场景分支外的场景 {other}"),
+    };
+    let mutation: Box<dyn FnOnce(&MatrixEnvironment) -> Result<Task11MutationGuard, String>> =
+        match scenario {
+            "version_drift" => Box::new(|env| {
+                task11_mutate_selected_record(env, |record| {
+                    record.version = format!("{}-t11-drift", record.version);
+                })
+                .map(Task11MutationGuard::Capability)
+            }),
+            "wire_drift" => Box::new(|env| {
+                task11_mutate_selected_record(env, |record| {
+                    let (dialect, wire) = match record.adapter_dialect {
+                        ProviderDialect::ClaudeCodeCliV1 => (
+                            ProviderDialect::CodexCliV1,
+                            ProviderWireDialect::CodexAppServerRpc,
+                        ),
+                        ProviderDialect::CodexCliV1 => {
+                            (ProviderDialect::PiRpcV1, ProviderWireDialect::PiRpc)
+                        }
+                        ProviderDialect::PiRpcV1 => {
+                            (ProviderDialect::KimiAcpV1, ProviderWireDialect::KimiAcp)
+                        }
+                        ProviderDialect::KimiAcpV1 => (
+                            ProviderDialect::ClaudeCodeCliV1,
+                            ProviderWireDialect::ClaudeCodeStreamJson,
+                        ),
+                    };
+                    record.adapter_dialect = dialect;
+                    record.wire_dialect = wire;
+                })
+                .map(Task11MutationGuard::Capability)
+            }),
+            "resume_unknown" => Box::new(|env| {
+                task11_mutate_selected_record(env, |record| {
+                    let mut row = record
+                        .action_matrix
+                        .row(&SessionPolicyAction::CodingTargetWrite);
+                    row.resume = ProviderCapabilityEvidence::Unknown;
+                    record.action_matrix.replace_row(row);
+                })
+                .map(Task11MutationGuard::Capability)
+            }),
+            "d4_missing_or_drift" => Box::new(|env| {
+                task11_mutate_selected_record(env, |record| {
+                    let mut row = record
+                        .action_matrix
+                        .row(&SessionPolicyAction::CodingTargetWrite);
+                    row.write_boundary = ProviderCapabilityEvidence::Unknown;
+                    record.action_matrix.replace_row(row);
+                    record
+                        .supported_actions
+                        .retain(|action| *action != SessionPolicyAction::CodingTargetWrite);
+                })
+                .map(Task11MutationGuard::Capability)
+            }),
+            other => unreachable!("drift 场景分支外的场景 {other}"),
+        };
+    // resume 场景:输入标记 resume(分格在 spawn 前复验施加)。
+    let mut input = task11_streaming_input(env);
+    if scenario == "resume_unknown" {
+        input.resume_provider_session_id = Some("t11-resume-unknown-fixture-id".to_string());
+    }
+    let gateway = match task11_readonly_gateway(env) {
+        Ok(gateway) => gateway,
+        Err(error) => return scenario_unobservable(format!("readonly gateway 组装失败:{error}")),
+    };
+    let prepared = match task11_prepare_baseline(
+        env,
+        &gateway,
+        sid,
+        input,
+        task11_coding_request(env),
+    )
+    .await
+    {
+        Ok(prepared) => prepared,
+        Err(outcome) => return outcome,
+    };
+    fp(
+        "t11_scenario_mutation",
+        format_args!("dimension={dimension}"),
+    );
+    let guard = match mutation(env) {
+        Ok(guard) => guard,
+        Err(problem) => return scenario_unobservable(format!("受控突变失败:{problem}")),
+    };
+    let cancel = CancellationToken::new();
+    let started = gateway.start_streaming(prepared, cancel.clone()).await;
+    drop(guard);
+    match started {
+        Err(error) => {
+            fp(
+                "t11_scenario_refused",
+                format_args!("dimension={dimension} error={error}"),
+            );
+            scenario_refused(&format!("spawn 前复验({dimension})"), error.to_string())
+        }
+        Ok(session) => {
+            drop(session);
+            cancel.cancel();
+            fp(
+                "t11_scenario_unexpected_spawn",
+                format_args!("dimension={dimension}(已 cancel+drop 收口)"),
+            );
+            scenario_not_refused(
+                &format!("spawn 前复验({dimension})"),
+                format!("维度 {dimension} 漂移未被复验拒绝"),
+            )
+        }
+    }
+}
+
+/// 场景 11:codex_danger_full_access——danger 形态(非 target-only 写面)
+/// 的 codex coding 启动被真实拒绝(validate 写面冻结/codex 投影 danger 门)。
+async fn scenario_codex_danger(env: &MatrixEnvironment, sid: &str) -> ScenarioOutcome {
+    let gateway = match task11_readonly_gateway(env) {
+        Ok(gateway) => gateway,
+        Err(error) => return scenario_unobservable(format!("readonly gateway 组装失败:{error}")),
+    };
+    let codex_ref = ProviderRef::codex("cap_managed_snapshot");
+    let guard = Task11CapabilityRestore::capture(env, codex_ref.provider_type);
+    let record = Task11CapabilityRestore::fixture_record(codex_ref.provider_type);
+    if let Err(error) = ProviderCapabilityStore::for_lc(env.app_paths.clone(), env.lc_id.clone())
+        .upsert(PROJECT_ID, &record)
+    {
+        drop(guard);
+        return scenario_unobservable(format!("codex 受控 setup 行写入失败:{error}"));
+    }
+    fp(
+        "t11_scenario_mutation",
+        "codex 受控 setup 行(Confirmed,只为通过 capability 门;被测面=danger 形态拒绝)",
+    );
+    // danger 形态:写面非 target-only(writable_roots 含 target 之外的 root)。
+    let mut request = task11_coding_request(env);
+    request.provider = codex_ref;
+    request.writable_roots = vec![env.member_worktree.clone(), env.canonical_root.clone()];
+    let mut input = task11_streaming_input(env);
+    input.provider_type = ProviderType::Codex;
+    let prepared = gateway.prepare_streaming_launch(input, request, task11_audit_context(env, sid));
+    let outcome = match prepared {
+        Err(error) => {
+            fp(
+                "t11_scenario_refused",
+                format_args!("gate=danger(validate) error={error}"),
+            );
+            scenario_refused("validate/prepare(danger 写面冻结)", error.to_string())
+        }
+        Ok(prepared) => {
+            let cancel = CancellationToken::new();
+            let started = gateway.start_streaming(prepared, cancel.clone()).await;
+            match started {
+                Err(error) => {
+                    fp(
+                        "t11_scenario_refused",
+                        format_args!("gate=danger(投影/spawn 前) error={error}"),
+                    );
+                    scenario_refused("codex danger 门(投影/spawn 前复验)", error.to_string())
+                }
+                Ok(session) => {
+                    drop(session);
+                    cancel.cancel();
+                    scenario_not_refused(
+                        "codex danger 门(投影/spawn 前复验)",
+                        "danger 形态未被拒绝".to_string(),
+                    )
+                }
+            }
+        }
+    };
+    drop(guard);
+    outcome
+}
+
+/// 场景 12:illegal_role——Executor 携带外来 tool policy(非法组合)被
+/// prepare 的 role/tool 策略 guard 真实拒绝。
+fn scenario_illegal_role(env: &MatrixEnvironment, sid: &str) -> ScenarioOutcome {
+    let gateway = match task11_readonly_gateway(env) {
+        Ok(gateway) => gateway,
+        Err(error) => return scenario_unobservable(format!("readonly gateway 组装失败:{error}")),
+    };
+    let mut input = task11_streaming_input(env);
+    input.role = AdapterRole::Executor;
+    input.tool_policy = Some(ProviderToolPolicy::deny_file_write_builtins());
+    fp(
+        "t11_scenario_mutation",
+        "Executor 携带外来 Some(tool policy)(非法组合)",
+    );
+    match gateway.prepare_streaming_launch(
+        input,
+        task11_coding_request(env),
+        task11_audit_context(env, sid),
+    ) {
+        Err(error) => {
+            fp(
+                "t11_scenario_refused",
+                format_args!("gate=role_guard error={error}"),
+            );
+            scenario_refused("prepare(role/tool 策略 guard)", error.to_string())
+        }
+        Ok(_) => scenario_not_refused(
+            "prepare(role/tool 策略 guard)",
+            "非法 role/policy 组合未被 guard 拒绝".to_string(),
+        ),
+    }
+}
+
+/// 场景 13:false_flag——config artifact 非空 flag=false(envelope 校验
+/// 拒绝;托管配置引用为 envelope 冻结的必填 flag)。
+fn scenario_false_flag(env: &MatrixEnvironment) -> ScenarioOutcome {
+    let gateway = match task11_readonly_gateway(env) {
+        Ok(gateway) => gateway,
+        Err(error) => return scenario_unobservable(format!("readonly gateway 组装失败:{error}")),
+    };
+    let mut request = task11_coding_request(env);
+    request.config_artifact_ref = String::new();
+    fp(
+        "t11_scenario_mutation",
+        "config_artifact_ref 置空(非空 flag=false)",
+    );
+    match gateway.validate(request) {
+        Err(error) => {
+            fp(
+                "t11_scenario_refused",
+                format_args!("gate=envelope_flag error={error}"),
+            );
+            scenario_refused(
+                "validate(envelope config artifact 非空 flag)",
+                error.to_string(),
+            )
+        }
+        Ok(_) => scenario_not_refused(
+            "validate(envelope config artifact 非空 flag)",
+            "非空 flag=false 未被 envelope 校验拒绝".to_string(),
+        ),
+    }
+}
+
+/// 场景 15:fingerprint_drift——prepare 后真实 commit 改变 target git
+/// identity → spawn 前复验指纹重算不等(零 spawn;受控复位)。
+async fn scenario_fingerprint_drift(env: &MatrixEnvironment, sid: &str) -> ScenarioOutcome {
+    let drift_file = env.member_worktree.join("t11-fingerprint-drift.txt");
+    let head_before = git_head(&env.member_worktree);
+    let mutation = |env: &MatrixEnvironment| -> Result<Task11MutationGuard, String> {
+        if std::fs::write(&drift_file, b"t11 fingerprint drift fixture").is_err() {
+            return Err(format!("写入 {} 失败", drift_file.display()));
+        }
+        let git = |arguments: &[&str]| -> std::io::Result<()> {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&env.member_worktree)
+                .args(["-c", "user.email=t11@aria", "-c", "user.name=t11"])
+                .args(arguments)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .status()?;
+            if status.success() {
+                Ok(())
+            } else {
+                Err(std::io::Error::other(format!("git {arguments:?} 失败")))
+            }
+        };
+        git(&["add", "."]).map_err(|error| format!("git add 失败:{error}"))?;
+        git(&[
+            "commit",
+            "-q",
+            "-m",
+            "t11 fingerprint drift(受控,场景后复位)",
+        ])
+        .map_err(|error| format!("git commit 失败:{error}"))?;
+        fp(
+            "t11_scenario_git_mutation",
+            "target 真实 commit(受控:git add+commit;场景后复位)",
+        );
+        Ok(Task11MutationGuard::None)
+    };
+    let outcome = task11_revalidate_drift(
+        env,
+        sid,
+        "resume_fingerprint(target git identity)",
+        mutation,
+    )
+    .await;
+    // 受控复位:硬复位回漂移前 HEAD(仅本场景提交;fixture 仓)。
+    if let (Some(head_before), Some(head_after)) = (head_before, git_head(&env.member_worktree)) {
+        if head_before != head_after {
+            let _ = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&env.member_worktree)
+                .args(["reset", "--hard", "-q", &head_before])
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .status();
+            let _ = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&env.member_worktree)
+                .args(["clean", "-fdq"])
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .status();
+            fp(
+                "t11_git_restored",
+                format_args!("reset → {head_before}(fingerprint 漂移复位)"),
+            );
+        }
+    }
+    outcome
+}
+
+/// 场景 16:target_git_pointer_missing_or_drift——prepare 后 target 的
+/// `.git`(目录或 linked-worktree 指针)被篡改 → resolver 重解析失败或
+/// 不一致(零 spawn;受控恢复)。
+async fn scenario_target_git_pointer(env: &MatrixEnvironment, sid: &str) -> ScenarioOutcome {
+    let git_path = env.member_worktree.join(".git");
+    let pointer_form = std::fs::symlink_metadata(&git_path)
+        .map(|metadata| metadata.is_file())
+        .unwrap_or(false);
+    let original_pointer = std::fs::read_to_string(&git_path).ok();
+    let mutation = |env: &MatrixEnvironment| -> Result<Task11MutationGuard, String> {
+        if pointer_form {
+            if std::fs::write(&git_path, b"gitdir: /tmp/t11-drift-pointer").is_err() {
+                return Err("改写 .git 指针失败".to_string());
+            }
+            // 指针形态:恢复信息由场景尾部显式处理(守卫闭包无法跨
+            // start_streaming 存活),原字节随事件留证。
+            fp(
+                "t11_scenario_pointer_tampered",
+                format!(".git 指针改写(原内容:{original_pointer:?})"),
+            );
+        } else {
+            let moved = env.member_worktree.join(".git.t11-tamper");
+            if std::fs::rename(&git_path, &moved).is_err() {
+                return Err("移走 .git 目录失败".to_string());
+            }
+            fp("t11_scenario_pointer_tampered", ".git 目录移走(受控)");
+        }
+        Ok(Task11MutationGuard::None)
+    };
+    let outcome =
+        task11_revalidate_drift(env, sid, "target/git identity(resolver 重解析)", mutation).await;
+    // 受控恢复:目录形态移回;指针形态按篡改前字节写回(原字节在闭包
+    // fp 已留证;此处从 tamper 语义恢复为「gitdir 指回真实 git dir」——
+    // 目录形态 git dir 未动,指针重写为原内容)。
+    if pointer_form {
+        if let Some(original) = original_pointer.clone() {
+            let _ = std::fs::write(&git_path, original);
+            fp("t11_git_restored", ".git 指针写回(target pointer 场景)");
+        }
+    } else {
+        let moved = env.member_worktree.join(".git.t11-tamper");
+        if moved.exists() && !git_path.exists() {
+            let _ = std::fs::rename(&moved, &git_path);
+            fp("t11_git_restored", ".git 目录移回(target pointer 场景)");
+        }
+    }
+    outcome
+}
+
+/// availability `--version` 真实探测(另记维度,不冒充 session child)。
+fn task11_availability_probe(env: &MatrixEnvironment) -> Option<Value> {
+    let (cli_program, _) = provider_probe_channel(&env.provider)?;
+    let output = std::process::Command::new(cli_program)
+        .arg("--version")
+        .output()
+        .ok()?;
+    let excerpt: String = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .chars()
+        .take(160)
+        .collect();
+    fp(
+        "t11_availability_version_probe",
+        format_args!(
+            "argv=[{cli_program} --version] exit={:?} excerpt={excerpt:?}",
+            output.status.code()
+        ),
+    );
+    Some(json!({
+        "ts": task11_now_ts(),
+        "event": {
+            "type": "availability_version_probe",
+            "argv": [cli_program, "--version"],
+            "exit": output.status.code(),
+            "output_excerpt": excerpt,
+        },
+    }))
+}
+
+/// 失败段驱动:逐场景真实探测(逐格失败不中止矩阵;不删格)。
+async fn run_task11_failure_scenarios(env: &mut MatrixEnvironment) -> Vec<EvidenceCell> {
+    let availability_event = task11_availability_probe(env);
+    let mut cells = Vec::new();
+    for (index, scenario) in TASK11_FAILURE_SCENARIOS.iter().enumerate() {
+        let phase = if matches!(*scenario, "resume_unknown" | "fingerprint_drift") {
+            RESUME
+        } else {
+            FRESH
+        };
+        fp_enter_phase("t11-failure", scenario, phase);
+        fp("t11_scenario_begin", format_args!("scenario={scenario}"));
+        let sid = format!("t11-failure-{scenario}");
+        // 零 spawn 会计三面之一:场景前后审计扫描(独立会话分区)。
+        let audits_before = env.scan_session_audits(&sid).len();
+        let outcome = run_task11_scenario(env, scenario, &sid).await;
+        let audits_after = env.scan_session_audits(&sid).len();
+        fp(
+            "t11_scenario_end",
+            format_args!(
+                "scenario={scenario} refused={} state={} audits_before={audits_before} audits_after={audits_after}",
+                outcome.refused, outcome.state
+            ),
+        );
+        fp(
+            "t11_zero_spawn_accounting",
+            format_args!(
+                "scenario={scenario} provider_start_audits={audits_after} pid=none argv=none"
+            ),
+        );
+        let mut events = vec![
+            json!({
+                "ts": task11_now_ts(),
+                "event": {
+                    "type": "boundary_matrix_evidence",
+                    "failure_scenario": scenario,
+                },
+            }),
+            json!({
+                "ts": task11_now_ts(),
+                "event": {
+                    "type": "launch_rejected_probe",
+                    "scenario": scenario,
+                    "refusal_gate": outcome.refusal_gate,
+                    "refusal_text": outcome.refusal_text,
+                    "refused": outcome.refused,
+                },
+            }),
+            json!({
+                "ts": task11_now_ts(),
+                "event": {
+                    "type": "zero_spawn_observation",
+                    "provider_start_audits_before": audits_before,
+                    "provider_start_audits_after": audits_after,
+                    "pid_observed": false,
+                    "argv_captured": false,
+                    "scan_window": "workspace session 分区 role_run_seq 0..=64",
+                },
+            }),
+        ];
+        if index == 0 {
+            if let Some(event) = availability_event.clone() {
+                events.push(event);
+            }
+        }
+        events.extend(outcome.extra_events);
+        let mut cell = task11_cell_base(
+            env,
+            format!(
+                "t11-failure-{scenario}-{}",
+                Utc::now().format("%Y%m%dT%H%M%SZ")
+            ),
+        );
+        cell.fresh_or_resume = phase.to_string();
+        cell.capability_state = outcome.state.to_string();
+        cell.denied_reason = Some(outcome.refusal_text.clone());
+        cell.workspace_session_id = sid;
+        cell.pid_unavailable_reason = Some(format!(
+            "零 spawn 被拒:无 provider 子进程(provider_start audits={audits_after},\
+             PID 无观测,argv 无捕获)"
+        ));
+        cell.provider_events = events;
+        cells.push(cell);
+    }
+    cells
+}
+
+/// 单场景分发(全部真实产品面;不可观察=Unknown 格,不冒充被拒)。
+async fn run_task11_scenario(
+    env: &mut MatrixEnvironment,
+    scenario: &str,
+    sid: &str,
+) -> ScenarioOutcome {
+    match scenario {
+        "missing_readiness" => scenario_missing_readiness(env, sid).await,
+        "missing_body" => scenario_missing_body(env),
+        "missing_receipt" => scenario_missing_receipt(env),
+        "missing_trust" => scenario_missing_trust(env, sid).await,
+        "launch_unknown" | "launch_denied" | "boundary_unknown" | "boundary_denied" => {
+            scenario_capability_cell(env, scenario)
+        }
+        "version_drift" | "wire_drift" | "resume_unknown" | "d4_missing_or_drift" => {
+            scenario_capability_drift(env, sid, scenario).await
+        }
+        "codex_danger_full_access" => scenario_codex_danger(env, sid).await,
+        "illegal_role" => scenario_illegal_role(env, sid),
+        "false_flag" => scenario_false_flag(env),
+        "fingerprint_drift" => scenario_fingerprint_drift(env, sid).await,
+        "target_git_pointer_missing_or_drift" => scenario_target_git_pointer(env, sid).await,
+        other => scenario_unobservable(format!("未知场景 {other}(清单漂移,须对齐冻结测试面)")),
     }
 }
 

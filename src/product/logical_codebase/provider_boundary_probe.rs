@@ -497,8 +497,9 @@ impl BoundaryFixture {
 
     /// probe 沙箱环境(6a launcher 的 env overlay):HOME 指向 fixture 运行时
     /// 窄面,PASS 沿宿主(保持既有配置发现),git identity 冻结,禁读宿主
-    /// 全局 git 配置。
-    pub(crate) fn probe_env(&self) -> BTreeMap<String, String> {
+    /// 全局 git 配置。pub(Task 11 组装层:harness 在自有 fixture 上追加
+    /// 写探针时复用同一 overlay,不另立第二套 env 约定)。
+    pub fn probe_env(&self) -> BTreeMap<String, String> {
         let mut env = BTreeMap::new();
         if let Ok(path) = std::env::var("PATH") {
             env.insert("PATH".to_string(), path);
