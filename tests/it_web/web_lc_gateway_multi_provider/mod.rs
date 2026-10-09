@@ -7,6 +7,8 @@
 //! 形态与真实 git fixture 建法;不复用 Noop/Fake 驱动当真实证据。
 pub(crate) mod boundary_matrix;
 pub(crate) mod failure_matrix;
+pub(crate) mod direct_comparison;
+pub(crate) mod policy_dependency;
 pub(crate) mod harness;
 pub(crate) mod live_matrix;
 pub(crate) mod snapshot;
