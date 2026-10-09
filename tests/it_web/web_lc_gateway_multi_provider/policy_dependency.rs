@@ -992,28 +992,88 @@ async fn lcg_live_fresh_lc_policy_publication_recipe_and_direct_comparison() {
     );
     let app = build_web_router(state);
 
-    // ---- 驱动真实五步 aggregate initialization(固定 Claude recipe)----
-    let created = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!(
-                    "/api/projects/{T12_PROJECT_ID}/logical-codebase/initializations"
-                ))
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::json!({"idempotency_key": "lcg-t12-live-fresh"}).to_string(),
-                ))
-                .expect("build create request"),
+    // 公共 HTTP JSON 请求辅助(live 骨架内嵌,不依赖 harness 私有面)。
+    async fn json_request(
+        app: &axum::Router,
+        method: axum::http::Method,
+        uri: &str,
+        body: serde_json::Value,
+    ) -> (axum::http::StatusCode, serde_json::Value) {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .expect("build json request"),
+            )
+            .await
+            .expect("json request");
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("json request body");
+        let value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, value)
+    }
+
+    // ---- provider health 预热(公共端点;矩阵 harness 同语义先例)----
+    // `WebRuntime::new_real` 的健康源需要主动 recheck 刷新 + 有界轮询;
+    // 未就绪时五步 init 的 provider turn spawn 复验会以
+    // provider_gateway_unavailable(health degraded)拒绝 pre_check
+    // (2026-10-09 集成现场:pre_check_failed/spawn_revalidation_drift)。
+    // 此处经 /api/providers/recheck + /api/providers/status 等价实现,
+    // 不复制 harness 私有面;claude(recipe 固定驱动)ready 才放行 POST。
+    let health_deadline = std::time::Instant::now()
+        + Duration::from_secs(
+            std::env::var("LCG_T12_HEALTH_TIMEOUT_SECS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(180),
+        );
+    loop {
+        let _ = json_request(
+            &app,
+            axum::http::Method::POST,
+            "/api/providers/recheck",
+            serde_json::json!({}),
         )
-        .await
-        .expect("create initialization");
-    assert_eq!(created.status(), StatusCode::ACCEPTED);
-    let body = axum::body::to_bytes(created.into_body(), 1024 * 1024)
-        .await
-        .expect("create body");
-    let value: serde_json::Value = serde_json::from_slice(&body).expect("create json");
+        .await;
+        let (status, health_body) = json_request(
+            &app,
+            axum::http::Method::GET,
+            "/api/providers/status",
+            serde_json::json!({}),
+        )
+        .await;
+        let claude_ready = status.is_success()
+            && health_body["state_status"] == "ready"
+            && health_body["providers"].as_array().is_some_and(|entries| {
+                entries
+                    .iter()
+                    .any(|entry| entry["provider"] == "claude_code" && entry["available"] == true)
+            });
+        if claude_ready {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < health_deadline,
+            "provider health 未就绪(claude_code):{health_body} (环境不可运行须报告 BLOCKED)"
+        );
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+
+    // ---- 驱动真实五步 aggregate initialization(固定 Claude recipe)----
+    let (create_status, value) = json_request(
+        &app,
+        axum::http::Method::POST,
+        &format!("/api/projects/{T12_PROJECT_ID}/logical-codebase/initializations"),
+        serde_json::json!({"idempotency_key": "lcg-t12-live-fresh"}),
+    )
+    .await;
+    assert_eq!(create_status, StatusCode::ACCEPTED);
     assert_eq!(
         value["steps"].as_array().expect("steps").len(),
         T12_RECIPE_STEP_COUNT,

@@ -335,8 +335,12 @@ impl ProcessManager {
     }
 
     /// Task 6a(冻结签名):产品写边界 spawn。validated launch 的 provider
-    /// 进程必须经此入口携带不可伪造 `ProviderBoundaryPlan`;plan 非法或本机
+    /// 进程必须经此入口携带 `ProviderBoundaryPlan`;plan 非法或本机
     /// 无 bwrap/user namespace 时失败关闭,绝不回退无隔离 spawn。
+    /// plan 来源契约(Task 11 起):除 crate 内 validated 装配外,
+    /// `ProviderBoundaryPlan::probe_plan`(pub)允许受信验收组装层
+    /// 构造同形状探测计划——形状校验在构造期与启动期双重生效
+    /// (validate_boundary_plan+build_boundary_argv),bwrap 边界不变。
     pub async fn spawn_with_boundary(
         command: &str,
         args: &[&str],

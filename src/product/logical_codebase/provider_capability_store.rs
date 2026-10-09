@@ -22,8 +22,8 @@ use crate::product::logical_codebase::policy::{
 };
 use crate::product::logical_codebase::provider_admission_preflight::BootstrapActionKind;
 use crate::product::logical_codebase::provider_gateway::{
-    CODEX_DANGER_FULL_ACCESS_UNSUPPORTED, ProviderRefType, ResumeEvidenceState,
-    PROVIDER_UNSUPPORTED_FOR_GATEWAY_LAUNCH,
+    CODEX_DANGER_FULL_ACCESS_UNSUPPORTED, PROVIDER_UNSUPPORTED_FOR_GATEWAY_LAUNCH, ProviderRefType,
+    ResumeEvidenceState,
 };
 
 /// 能力证据三态:区分「声明」「fixture 验证」与「生产验证」,避免只以单一布尔
@@ -223,6 +223,10 @@ pub const PROVIDER_WRITE_BOUNDARY_UNVERIFIED: &str = "provider_write_boundary_un
 pub const PROVIDER_ADAPTER_DIALECT_MISMATCH: &str = "provider_adapter_dialect_mismatch";
 
 /// Task 14 冻结:Codex target-only boundary 证据缺失的稳定判别码。
+/// 配对定义:`codex_provider::projection::CODEX_TARGET_BOUNDARY_UNVERIFIED`
+/// (私有模块单源字面量)与本常量必须同改——projection 侧改字面量时此
+/// 处必须随动(detailed_reason_code 的 detail.contains 消费依赖两侧
+/// 逐字一致;CODEX_DANGER 走 gateway 公开路径故无此配对义务)。
 pub const CODEX_TARGET_BOUNDARY_UNVERIFIED: &str = "codex_target_boundary_unverified";
 
 /// Task 14 冻结的迁移等待稳定判别码全集(计划 591 逐条):与 gateway 侧
@@ -418,11 +422,7 @@ impl ProviderCapabilityRecord {
         }
         let mut row_incomplete = false;
         for (evidence, cell, cell_code) in [
-            (
-                &row.launch,
-                "launch",
-                PROVIDER_CAPABILITY_ACTION_UNKNOWN,
-            ),
+            (&row.launch, "launch", PROVIDER_CAPABILITY_ACTION_UNKNOWN),
             (&row.resume, "resume", PROVIDER_RESUME_UNSUPPORTED),
             (
                 &row.write_boundary,
@@ -1253,7 +1253,11 @@ mod tests {
         let probes_dir = temp.path().join("probe-artifacts");
         std::fs::create_dir_all(&probes_dir).unwrap();
         let old_probe_artifact = probes_dir.join("claude-code-1.2.3-coding.json");
-        std::fs::write(&old_probe_artifact, r#"{"probe":"claude-code@1.2.3 coding"}"#).unwrap();
+        std::fs::write(
+            &old_probe_artifact,
+            r#"{"probe":"claude-code@1.2.3 coding"}"#,
+        )
+        .unwrap();
 
         // 1.2.3 真实导入(2d durable 通道):行 Confirmed。
         store
@@ -1272,12 +1276,13 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(
-            durable.current_action_row(
-                ProviderWireDialect::ClaudeCodeStreamJson,
-                "1.2.3",
-                SessionPolicyAction::CodingTargetWrite
-            )
-            .launch,
+            durable
+                .current_action_row(
+                    ProviderWireDialect::ClaudeCodeStreamJson,
+                    "1.2.3",
+                    SessionPolicyAction::CodingTargetWrite
+                )
+                .launch,
             ProviderCapabilityEvidence::Confirmed
         );
 
@@ -1333,12 +1338,13 @@ mod tests {
 
         // 保历史:durable 旧字节原样(1.2.3 行仍 Confirmed),旧工件仍在盘。
         assert_eq!(
-            durable.current_action_row(
-                ProviderWireDialect::ClaudeCodeStreamJson,
-                "1.2.3",
-                SessionPolicyAction::CodingTargetWrite
-            )
-            .launch,
+            durable
+                .current_action_row(
+                    ProviderWireDialect::ClaudeCodeStreamJson,
+                    "1.2.3",
+                    SessionPolicyAction::CodingTargetWrite
+                )
+                .launch,
             ProviderCapabilityEvidence::Confirmed
         );
         assert!(old_probe_artifact.is_file());
@@ -1346,7 +1352,11 @@ mod tests {
         // 重探(2.0.0 真实导入)后解除阻断:行 Confirmed@2.0.0,等待消失;
         // 旧工件仍保留(历史不删,可审计)。
         let new_probe_artifact = probes_dir.join("claude-code-2.0.0-coding.json");
-        std::fs::write(&new_probe_artifact, r#"{"probe":"claude-code@2.0.0 coding"}"#).unwrap();
+        std::fs::write(
+            &new_probe_artifact,
+            r#"{"probe":"claude-code@2.0.0 coding"}"#,
+        )
+        .unwrap();
         store
             .import_verified_probe_row(
                 "project_0001",
@@ -1363,12 +1373,13 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(
-            reloaded.current_action_row(
-                ProviderWireDialect::ClaudeCodeStreamJson,
-                "2.0.0",
-                SessionPolicyAction::CodingTargetWrite
-            )
-            .launch,
+            reloaded
+                .current_action_row(
+                    ProviderWireDialect::ClaudeCodeStreamJson,
+                    "2.0.0",
+                    SessionPolicyAction::CodingTargetWrite
+                )
+                .launch,
             ProviderCapabilityEvidence::Confirmed
         );
         // 重探解除「行阻断」:等待不再列 version/probe 材料——仅剩 trust
@@ -1382,7 +1393,9 @@ mod tests {
                 "2.0.0",
                 SessionPolicyAction::CodingTargetWrite,
             )
-            .expect("trust dimension must still project a waiting (probe never self-reports trust)");
+            .expect(
+                "trust dimension must still project a waiting (probe never self-reports trust)",
+            );
         assert_eq!(waiting_after_reprobe.reason_code, PROVIDER_TRUST_MISSING);
         assert!(
             !waiting_after_reprobe

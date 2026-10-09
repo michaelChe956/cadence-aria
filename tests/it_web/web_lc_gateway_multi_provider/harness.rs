@@ -3042,8 +3042,12 @@ fn scenario_false_flag(env: &MatrixEnvironment) -> ScenarioOutcome {
     }
 }
 
-/// 场景 15:fingerprint_drift——prepare 后真实 commit 改变 target git
-/// identity → spawn 前复验指纹重算不等(零 spawn;受控复位)。
+/// 场景 15:git_refs_mutation_observed_not_identity_drift——prepare 后真实
+/// commit 前移 HEAD(k3 终审澄清:产品指纹=canonical git-dir 路径,
+/// provider_gateway.rs canonical_target_git_identity,HEAD/refs 突变不改
+/// 该路径,复验不拒=设计必然且对正常 coding 自提交流程正确);本场景
+/// 如实记录「复验未拒+spawn 后 cancel 收口」形态,不构成 identity 漂移
+/// 负向证明(该判定面需 gitdir 路径突变才触发,受控复位)。
 async fn scenario_fingerprint_drift(env: &MatrixEnvironment, sid: &str) -> ScenarioOutcome {
     let drift_file = env.member_worktree.join("t11-fingerprint-drift.txt");
     let head_before = git_head(&env.member_worktree);

@@ -883,8 +883,10 @@ mod tests {
         );
     }
 
-    /// 路由阻断:任一角色派生为 Codex(受限 coding 协议证据缺失,当前
-    /// 固定 danger-full-access)→ 该角色以路由禁令 reason_code 列出。
+    /// 路由阻断:任一角色派生为 Codex(未探针记录)→ 该角色按各 action
+    /// 证据缺失列出 launch_not_confirmed 稳定码(r47 373fba91 起 Codex
+    /// 受限裁决移至 capability 行,codex_danger 由冻结码表在 capability
+    /// 面承载)。
     #[test]
     fn role_chain_preflight_routes_codex_violations() {
         let fixture = role_chain_fixture(&[
