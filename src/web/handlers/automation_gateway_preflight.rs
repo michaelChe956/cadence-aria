@@ -702,8 +702,10 @@ mod tests {
                 .all(|v| v["reason_code"] == "provider_capability_launch_not_confirmed")
         );
 
-        // Codex 受限 coding 协议证据缺失:author=Codex 时 plan_author/coder
-        // 以路由禁令稳定码列出(codex_danger_full_access_unsupported)。
+        // Codex 未探针记录:plan_author/coder 按各 action 证据缺失列出
+        // launch_not_confirmed 稳定码——r47(373fba91)起 Codex 受限裁决已
+        // 移至 capability 行(enforce_route_policy 桩化),角色链不再携带
+        // codex_danger 码(该码由 capability 面冻结码表承载)。
         let codex = role_chain_fixture(&[
             capability_record(ProviderRefType::Codex, false),
             capability_record(ProviderRefType::KimiCode, false),
@@ -728,7 +730,8 @@ mod tests {
             violations
                 .iter()
                 .take(2)
-                .all(|v| v["reason_code"] == "codex_danger_full_access_unsupported")
+                .all(|v| v["reason_code"] == "provider_capability_launch_not_confirmed"),
+            "{violations:?}"
         );
 
         let provider_start_count =
@@ -904,12 +907,14 @@ mod tests {
             .map(|violation| violation["role"].as_str().unwrap())
             .collect();
         assert_eq!(roles, vec!["plan_author", "coder"]);
+        // r47 语义(同 lcg_t08 重钉):角色链对未探针 Codex 记录列
+        // launch_not_confirmed 稳定码;codex_danger 由 capability 面承载。
         for violation in &violations {
             assert!(
                 violation["reason_code"]
                     .as_str()
                     .unwrap()
-                    .contains(CODEX_DANGER_FULL_ACCESS_UNSUPPORTED),
+                    .contains(PROVIDER_CAPABILITY_LAUNCH_NOT_CONFIRMED),
                 "{violation:?}"
             );
         }
