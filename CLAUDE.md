@@ -67,6 +67,7 @@ Skill 调用：Claude/Kimi 原生调用；Codex/pi/omp 清单选择后将用途�
 - 禁止在 `rules/` 目录中添加用户自定义规则
 - 禁止直接修改 `rules/` 目录下的框架内置规则文件
 - 详见 `cadence/project-rules/README.md`
+- **测试内容 /tmp 隔离(强制)**:一切测试产物(夹具仓/构建 target/日志/快照/E2E 装配)只能创建在 `/tmp` 下;禁止在仓库工作区/父级目录/家目录散落测试内容;subagent brief 必须携带 → 详见 `cadence/project-rules/test-content-tmp-only.md`
 
 ### 7. 代码阅读规则
 - **大范围检索使用 CodeGraph，精确结构阅读优先使用 ast-grep outline** → 详见 `.claude/rules/code-reading.md`

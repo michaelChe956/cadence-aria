@@ -133,6 +133,12 @@
   - 修改 Work Item Draft Prompt、Canonical Contract 投影或 Provider 输出结构约束时，交付前必须提醒操作者授权执行 Case A、Case B 各 10 次的真实 Claude Code 验证。
   - 不得自动调用 Provider，不得新增 CI、Hook、产品 CLI 或持久化评估报告；完整规则详见 `cadence/project-rules/work-item-draft-prompt-validation.md`。
 
+
+- **测试内容 /tmp 隔离规则（强制）**
+  - 一切测试产物（夹具仓/构建 target/日志/快照/补丁/E2E 环境装配）只能创建在 `/tmp` 下；禁止在仓库工作区、父级目录、家目录散落测试内容。
+  - 例外：`cadence/reports/` 正式验收证据与仓内测试代码资产。会话结束清理自建 /tmp 产物；所有 subagent brief 必须携带本规则。
+  - 完整规则详见 `cadence/project-rules/test-content-tmp-only.md`。
+
 **示例规则**（默认不启用，需用户主动添加）：
 
 ```markdown
