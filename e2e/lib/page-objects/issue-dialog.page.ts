@@ -37,16 +37,19 @@ export class IssueDialogPage {
     await this.dialog.getByLabel("代码库").selectOption({ label: optionLabel });
   }
 
-  /** Primary 成员按别名(option 文本含 alias)选择。 */
+  /** 成员复选组(add-multi-repo-issue-entry 后契约):按别名勾选成员。
+   * 单选等价=仅勾一个(冒烟形态);多选=连续调用。 */
   async selectPrimaryMember(alias: string): Promise<void> {
-    const select = this.dialog.getByLabel("Primary 成员");
-    await expect(select).toBeEnabled({ timeout: 30_000 });
-    const options = await select.locator("option").allInnerTexts();
-    const target = options.find((text) => text.includes(alias));
-    if (!target) {
-      throw new Error(`Primary 成员无 ${alias} 选项:${options.join(" | ")}`);
+    const box = this.dialog.getByRole("checkbox", { name: new RegExp(alias) });
+    await expect(box).toBeEnabled({ timeout: 30_000 });
+    await box.check();
+  }
+
+  /** 多选:按别名列表勾选多个成员(全旅程 S3+ 形态)。 */
+  async selectMembers(aliases: string[]): Promise<void> {
+    for (const alias of aliases) {
+      await this.selectPrimaryMember(alias);
     }
-    await select.selectOption({ label: target });
   }
 
   async submit(): Promise<void> {
