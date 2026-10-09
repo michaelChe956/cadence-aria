@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>通知中心(基线骨架)</title>
+  </head>
+  <body>
+    <!--
+      frontend 层模块位置契约(基线占位,非成品 UI)。
+      交付实现:经同源网关 /api/notifications* 拉取列表与未读计数
+      (请求头 X-User: e2e-user),渲染列表/未读徽标,点击条目调用
+      标读接口并更新读取态。基线不携带任何静态假数据,不直连 api 层。
+    -->
+    <main data-testid="notification-center">
+      <p>通知中心页面由交付实现填充(基线仅契约,见 README.md)。</p>
+    </main>
+  </body>
+</html>

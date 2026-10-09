@@ -1,0 +1,7 @@
+{
+  "name": "notify-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "通知中心网关层基线骨架(契约见 README.md)"
+}

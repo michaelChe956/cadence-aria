@@ -1,0 +1,7 @@
+{
+  "name": "notify-busi",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "通知中心领域层基线骨架(契约见 README.md,业务实现由交付线完成)"
+}

@@ -1,0 +1,7 @@
+{
+  "name": "notify-api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "通知中心 HTTP 服务层基线骨架(契约见 README.md)"
+}

@@ -1,0 +1,19 @@
+{
+  "name": "aria-page-e2e",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "页面 E2E P1(地基+冒烟):真实 aria CLI 单端口服务 + 真实页面的 S0-S3 冒烟。与 web/ 依赖完全隔离。",
+  "scripts": {
+    "assemble": "node env/assemble.ts",
+    "assemble:dry-run": "node env/assemble.ts --dry-run",
+    "test": "playwright test",
+    "smoke": "node env/assemble.ts && playwright test; rc=$?; node env/teardown.ts; exit $rc",
+    "teardown": "node env/teardown.ts"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.61.0-alpha-1781023400000",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.6.0"
+  }
+}
