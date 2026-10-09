@@ -7,6 +7,7 @@ import {
   installIssueLifecycleWorkbenchTestHooks,
   lifecycleFetch,
   projectRecord,
+  repositoryRecord,
 } from "./IssueLifecycleWorkbench.test-utils";
 
 vi.mock("../shared/MonacoViewer", () => ({
@@ -339,5 +340,88 @@ describe("IssueLifecycleWorkbench 逻辑代码库按 LC 分区（R8）", () => {
       logical_codebase_id: "lc_0001",
       focus_repository_ids: ["lr-1"],
     });
+  });
+
+  it("REQ-MRE-01：LC-only 项目（无单仓，LC 有 active 成员）新建 Issue 入口可用且对话框提供成员多选", async () => {
+    vi.stubGlobal(
+      "fetch",
+      lifecycleFetch({
+        projects: [projectRecord("project_0001", "Aria")],
+        // e2e 冒烟 S3 现场：LC-only 项目项目级 /repositories 为空（成员物理仓
+        // 经 members 端点投影），门不得因此禁用「新建 Issue」。
+        repositoriesByProject: { project_0001: [] },
+        logicalCodebases: [
+          { id: "lc_0001", name: "platform", member_count: 4 },
+        ],
+        logicalCodebaseMembersByLc: {
+          lc_0001: [
+            member("lr-1", "contracts", "repository_1001"),
+            member("lr-2", "api", "repository_1002"),
+            member("lr-3", "ui", "repository_1003"),
+            member("lr-4", "infra", "repository_1004"),
+          ],
+        },
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+
+    await screen.findByTestId("codebase-kind-platform");
+    expect(
+      screen.getByRole("button", { name: "新建 Issue" }),
+    ).toBeEnabled();
+
+    await user.click(screen.getByRole("button", { name: "新建 Issue" }));
+    const dialog = await screen.findByRole("dialog", { name: "新建 Issue" });
+    await user.selectOptions(
+      within(dialog).getByLabelText("代码库"),
+      "lc:lc_0001",
+    );
+    const memberGroup = await within(dialog).findByRole("group", {
+      name: "成员",
+    });
+    for (const alias of ["contracts", "api", "ui", "infra"]) {
+      expect(
+        within(memberGroup).getByRole("checkbox", { name: new RegExp(alias) }),
+      ).toBeInTheDocument();
+    }
+  });
+
+  it("无单仓且 LC 无 active 成员（member_count=0）：新建 Issue 仍禁用（不放宽空项目）", async () => {
+    vi.stubGlobal(
+      "fetch",
+      lifecycleFetch({
+        projects: [projectRecord("project_0001", "Aria")],
+        repositoriesByProject: { project_0001: [] },
+        logicalCodebases: [
+          { id: "lc_0001", name: "platform", member_count: 0 },
+        ],
+      }),
+    );
+
+    render(<IssueLifecycleWorkbench />);
+
+    await screen.findByTestId("codebase-kind-platform");
+    expect(
+      screen.getByRole("button", { name: "新建 Issue" }),
+    ).toBeDisabled();
+  });
+
+  it("有单仓项目：新建 Issue 可用（仓库路径零变化钉）", async () => {
+    vi.stubGlobal(
+      "fetch",
+      lifecycleFetch({
+        projects: [projectRecord("project_0001", "Aria")],
+        repositoriesByProject: { project_0001: [repositoryRecord()] },
+      }),
+    );
+
+    render(<IssueLifecycleWorkbench />);
+
+    await screen.findByTestId("codebase-kind-Aria Repo");
+    expect(
+      screen.getByRole("button", { name: "新建 Issue" }),
+    ).toBeEnabled();
   });
 });
