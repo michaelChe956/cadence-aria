@@ -22,8 +22,8 @@ use super::super::support::{
     routing_api_error,
 };
 use super::preflight::{
-    SingleCandidatePreflightDecision, logical_repository_ids_for_preflight,
-    preflight_single_repository_candidate,
+    PlanRepositoryPreflightDecision, logical_repository_upper_bound_for_plan,
+    preflight_plan_repository_candidates,
 };
 use super::{
     mark_single_candidate_prepare_failure, validate_confirmed_design_specs,
@@ -83,18 +83,22 @@ pub fn prepare_plan_records(
                 ApiError::validation("repository_required", "repository_id is required")
             })?;
             let repository = find_repository(&app_paths, project_id, &repository_id)?;
-            match preflight_single_repository_candidate(&[repository.id]) {
-                SingleCandidatePreflightDecision::Eligible { .. } => None,
-                SingleCandidatePreflightDecision::Ineligible { reason } => Some(reason),
+            // 单仓物理路由=单成员上界;involved 空回退恰一仓口径(等价旧
+            // 恰一仓判定,plan 面统一走子集判定入口)。
+            match preflight_plan_repository_candidates(&[repository.id], &[]) {
+                PlanRepositoryPreflightDecision::Eligible { .. } => None,
+                PlanRepositoryPreflightDecision::Ineligible { reason } => Some(reason),
             }
         }
         RepositoryRouting::Logical {
             manifest,
             selection,
         } => {
-            // 保留 REQ-TGT-01：确认的 Design 只能引用当前 selection 中的目标。
-            let selected_ids = logical_repository_ids_for_preflight(&manifest, &selection);
-            let selected_ids = selected_ids.iter().collect::<BTreeSet<_>>();
+            // 上界(add-multi-repo-issue-entry design 关键点 0):focus 非空取
+            // 勾选原集;空取 resolved 有效成员集(AllMembers 历史语义)——
+            // 与 design 钉定/generate 出生值/write-back 三面同源。
+            let upper_bound = logical_repository_upper_bound_for_plan(&manifest, &selection);
+            let upper_bound_set = upper_bound.iter().cloned().collect::<BTreeSet<_>>();
             let designs = lifecycle
                 .list_design_specs(project_id, issue_id)
                 .map_err(product_store_api_error)?;
@@ -109,31 +113,30 @@ pub fn prepare_plan_records(
                         },
                     )
                 })?;
+            // 保留 REQ-TGT-01：确认的 Design 只能引用上界内的目标——勾选集即
+            // 授权上界,含界外成员的 Design 在 prepare 期 422 拒绝(三环收敛
+            // 的 preflight 环;出生值/回写面在各自入口先行拦截)。
             for target in &design.involved_repository_ids {
-                if !selected_ids.contains(&target.0.to_string()) {
+                if !upper_bound_set.contains(&target.0.to_string()) {
                     return Err(ApiError::validation(
                         "target_not_in_selection",
                         format!("design involved {target:?} is not in issue codebase selection"),
                     ));
                 }
             }
-            // 缺陷 #7（2026-10-02 E2E）：聚合 Design（involved 非空）的单候选
-            // 计数以其 involved 集为准（上方已校验 ⊆ selection，REQ-TGT-01）；
-            // LC issue 的 selection 恒 all_members，按 selection 计数会把任何
-            // 单成员 Design 的 plan 准备死锁在 preflight（issue_0001 现场
-            // found 2）。无聚合视野的 Design（involved 空）保持 selection 口径。
-            let repository_ids = if design.involved_repository_ids.is_empty() {
-                selected_ids.into_iter().cloned().collect::<Vec<_>>()
-            } else {
-                design
-                    .involved_repository_ids
-                    .iter()
-                    .map(|target| target.0.to_string())
-                    .collect::<Vec<_>>()
-            };
-            match preflight_single_repository_candidate(&repository_ids) {
-                SingleCandidatePreflightDecision::Eligible { .. } => None,
-                SingleCandidatePreflightDecision::Ineligible { reason } => Some(reason),
+            // REQ-WSC-08 修订(恰一仓判定 → 上界子集判定 + 空 involved 回退):
+            // involved ⊆ 上界且非空 → 放行(含真子集,多仓 plan 入口闸打开);
+            // involved 空 → 回退「上界恰一仓」口径(缺陷#7 保留:单成员上界
+            // 旧行为通过——单成员 Design 的 plan 准备不死锁,多成员上界确定
+            // 性拒,矩阵 40+ live 链依赖的回退面不断)。
+            let involved_repository_ids = design
+                .involved_repository_ids
+                .iter()
+                .map(|target| target.0.to_string())
+                .collect::<Vec<_>>();
+            match preflight_plan_repository_candidates(&upper_bound, &involved_repository_ids) {
+                PlanRepositoryPreflightDecision::Eligible { .. } => None,
+                PlanRepositoryPreflightDecision::Ineligible { reason } => Some(reason),
             }
         }
         RepositoryRouting::FailClosed { code, reason } => {
