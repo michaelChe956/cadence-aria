@@ -315,8 +315,8 @@ mod tests {
         RootRecipeEvidence,
     };
     use crate::product::logical_codebase::provider_gateway::{
-        CODEX_DANGER_FULL_ACCESS_UNSUPPORTED, LogicalCodebaseProviderGateway,
-        PolicyTargetResolver, ProviderRefType, ResumeEvidenceState,
+        CODEX_DANGER_FULL_ACCESS_UNSUPPORTED, LogicalCodebaseProviderGateway, PolicyTargetResolver,
+        ProviderRefType, ResumeEvidenceState,
     };
     use crate::product::logical_codebase::{
         AuthorityAggregateIndexReference, EnrollmentTarget, RepositoryAuthorityResolution,

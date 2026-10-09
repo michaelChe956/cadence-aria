@@ -23,7 +23,7 @@
 //! 现场,不以单测冒充。
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -141,7 +141,7 @@ pub(crate) struct SyncDirectTopology {
     fake: SyncRejection,
 }
 
-fn sync_input(provider_type: ProviderType, prompt: &str, worktree: &PathBuf) -> AdapterInput {
+fn sync_input(provider_type: ProviderType, prompt: &str, worktree: &Path) -> AdapterInput {
     AdapterInput {
         provider_type,
         role: AdapterRole::Executor,
@@ -263,7 +263,7 @@ pub(crate) fn capture_sync_direct_topology() -> SyncDirectTopology {
 fn sync_rejection(
     routing: &RoutingProviderAdapter,
     provider_type: ProviderType,
-    worktree: &PathBuf,
+    worktree: &Path,
     label: &'static str,
 ) -> SyncRejection {
     let error = routing
