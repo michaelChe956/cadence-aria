@@ -12,6 +12,7 @@ import {
   type ProviderOption,
 } from "../../state/provider-options";
 import { useProviderAvailabilityStore } from "../../state/provider-availability-store";
+import { DialogShell } from "../shared/DialogShell";
 
 export type AutomationMode = "manual" | "automatic";
 
@@ -157,28 +158,13 @@ export function WorkItemPlanOptionsDialog({
   }
 
   return (
-    <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/35 p-4">
-      <form
-        role="dialog"
-        aria-label="Work Item Plan 配置"
-        aria-modal="true"
-        onSubmit={handleSubmit}
-        className="w-full max-w-lg rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] p-4 shadow-xl"
-      >
-        <div className="mb-4 flex items-center justify-between gap-3">
-          <h2 className="text-base font-semibold text-[var(--aria-ink)]">
-            Work Item Plan 配置
-          </h2>
-          <button
-            type="button"
-            disabled={submitting}
-            onClick={onClose}
-            className="rounded-md border border-[var(--aria-line)] px-2 py-1 text-xs font-semibold text-[var(--aria-ink-muted)] disabled:opacity-60"
-          >
-            关闭
-          </button>
-        </div>
-
+    <DialogShell
+      label="Work Item Plan 配置"
+      onClose={onClose}
+      closeDisabled={submitting}
+      layerClass="z-[80]"
+    >
+      <form onSubmit={handleSubmit}>
         <div className="space-y-3">
           <OptionCheckbox
             label="包含贯通/集成测试 Work Item"
@@ -339,7 +325,7 @@ export function WorkItemPlanOptionsDialog({
           </button>
         </div>
       </form>
-    </div>
+    </DialogShell>
   );
 }
 

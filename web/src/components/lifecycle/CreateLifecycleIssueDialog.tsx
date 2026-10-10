@@ -7,6 +7,7 @@ import type {
   RepositoryBranchListResponse,
 } from "../../api/types";
 import { errorMessage } from "./IssueLifecycleWorkbenchParts";
+import { DialogShell } from "../shared/DialogShell";
 
 export type CreateLifecycleIssuePayload = {
   title: string;
@@ -238,24 +239,8 @@ export function CreateLifecycleIssueDialog({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-4">
-      <form
-        role="dialog"
-        aria-label="新建 Issue"
-        aria-modal="true"
-        onSubmit={handleSubmit}
-        className="w-full max-w-lg rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] p-4 shadow-xl"
-      >
-        <div className="mb-4 flex items-center justify-between gap-3">
-          <h2 className="text-base font-semibold text-[var(--aria-ink)]">新建 Issue</h2>
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded-md border border-[var(--aria-line)] px-2 py-1 text-xs font-semibold text-[var(--aria-ink-muted)]"
-          >
-            关闭
-          </button>
-        </div>
+    <DialogShell label="新建 Issue" onClose={onClose}>
+      <form onSubmit={handleSubmit}>
         <div className="space-y-3">
           <label className="block text-sm font-semibold text-[var(--aria-ink)]">
             Issue 标题
@@ -421,6 +406,6 @@ export function CreateLifecycleIssueDialog({
           </button>
         </div>
       </form>
-    </div>
+    </DialogShell>
   );
 }

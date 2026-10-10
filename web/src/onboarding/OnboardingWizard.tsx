@@ -61,6 +61,17 @@ export function OnboardingWizard({
     };
   }, [step]);
 
+  // 非模态引导卡：Esc 与关闭按钮同路；刻意不锁 body/不圈闭焦点（引导需与页面交互）。
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
   if (!step) {
     return null;
   }

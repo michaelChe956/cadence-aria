@@ -1,4 +1,5 @@
-import { Settings, X } from "lucide-react";
+import { Settings } from "lucide-react";
+import { DialogShell } from "../components/shared/DialogShell";
 import { useState, type ComponentProps } from "react";
 import type {
   ProviderPermissionMode,
@@ -230,31 +231,14 @@ export function ProviderConfigDialogButton(props: ProviderConfigDialogButtonProp
       </button>
 
       {open ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4">
-          <div
-            role="dialog"
-            aria-modal="true"
-            aria-label="Provider 配置"
-            className="w-full max-w-md rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] shadow-xl"
-          >
-            <div className="flex items-center justify-between gap-3 border-b border-[var(--aria-line)] px-4 py-3">
-              <h2 className="text-sm font-semibold text-[var(--aria-ink)]">
-                Provider 配置
-              </h2>
-              <button
-                type="button"
-                aria-label="关闭 Provider 配置"
-                onClick={() => setOpen(false)}
-                className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-[var(--aria-line)] text-[var(--aria-ink-muted)] hover:text-[var(--aria-ink)]"
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-            <div className="p-4">
-              <ProviderConfigPanel {...props} />
-            </div>
-          </div>
-        </div>
+        <DialogShell
+          label="Provider 配置"
+          onClose={() => setOpen(false)}
+          closeLabel="关闭 Provider 配置"
+          widthClass="max-w-md"
+        >
+          <ProviderConfigPanel {...props} />
+        </DialogShell>
       ) : null}
     </div>
   );

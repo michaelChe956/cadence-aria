@@ -108,7 +108,7 @@ export function CockpitInboxDrawer({
             收起待处理抽屉
           </button>
         </div>
-        <div className="min-h-0 flex-1 overflow-auto p-2">{children}</div>
+        <div className="min-h-0 flex-1 overflow-auto overscroll-contain p-2">{children}</div>
       </aside>
     </>
   );

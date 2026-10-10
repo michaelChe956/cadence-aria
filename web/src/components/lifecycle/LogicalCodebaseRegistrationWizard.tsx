@@ -9,6 +9,7 @@ import type {
   RegistrationPreflightItemDto,
   RegistrationPreflightResponse,
 } from "../../api/types";
+import { DialogShell } from "../shared/DialogShell";
 
 const PREFLIGHT_CLASSES = [
   "eligible",
@@ -382,28 +383,14 @@ export function LogicalCodebaseRegistrationWizard({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-4">
-      <section
-        role="dialog"
-        aria-modal="true"
-        aria-label="登记成员"
-        className="max-h-[90vh] w-full max-w-2xl overflow-auto rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] p-4 shadow-xl"
-      >
-        <div className="mb-4 flex items-center justify-between gap-3">
-          <h2 className="text-base font-semibold text-[var(--aria-ink)]">登记成员</h2>
-          {onClose ? (
-            <button
-              type="button"
-              onClick={onClose}
-              disabled={Boolean(busyAction)}
-              className="rounded-md border border-[var(--aria-line)] px-2 py-1 text-xs font-semibold text-[var(--aria-ink-muted)] disabled:opacity-60"
-            >
-              关闭
-            </button>
-          ) : null}
-        </div>
-        {body}
-      </section>
-    </div>
+    <DialogShell
+      label="登记成员"
+      onClose={onClose ?? null}
+      closeLabel="关闭"
+      closeDisabled={Boolean(busyAction)}
+      widthClass="max-w-2xl"
+    >
+      {body}
+    </DialogShell>
   );
 }

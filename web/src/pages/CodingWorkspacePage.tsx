@@ -35,6 +35,7 @@ import {
 import { CodingProviderConfigPanel } from "../components/coding-workspace/CodingProviderConfigPanel";
 import { RoleRunHistoryPanel } from "../components/coding-workspace/RoleRunHistoryPanel";
 import { OperationAuditView } from "../components/cockpit/OperationAuditView";
+import { useModalBehavior } from "../components/shared/DialogShell";
 import {
   ChatEntryList,
   type ChatEntryListHandle,
@@ -133,6 +134,14 @@ export function CodingWorkspacePage({
     useState<PendingRepairAction | null>(null);
   const [activeDrawer, setActiveDrawer] = useState<CodingWorkspaceDrawer | null>(null);
   const [auditTarget, setAuditTarget] = useState<OperationAuditTarget | null>(null);
+  // 辅助抽屉浮层行为（body 锁/Esc/焦点移入归还/Tab 圈闭），与 DialogShell 同一规范。
+  const drawerPanelRef = useRef<HTMLElement | null>(null);
+  useModalBehavior({
+    active: activeDrawer !== null,
+    onClose: () => setActiveDrawer(null),
+    closeDisabled: false,
+    containerRef: drawerPanelRef,
+  });
   const auditRecords = useOperationAuditStore((audit) => audit.records);
   const chatListRef = useRef<ChatEntryListHandle | null>(null);
   const addressKey = JSON.stringify([address.projectId, address.issueId, address.attemptId]);
@@ -998,7 +1007,7 @@ export function CodingWorkspacePage({
       </main>
 
       {activeDrawer ? (
-        <div className="fixed inset-0 z-40 flex justify-end bg-black/20">
+        <div className="fixed inset-0 z-40 flex justify-end bg-black/35">
           <button
             type="button"
             aria-label="关闭辅助面板"
@@ -1006,10 +1015,12 @@ export function CodingWorkspacePage({
             onClick={() => setActiveDrawer(null)}
           />
           <aside
+            ref={drawerPanelRef}
             role="dialog"
             aria-modal="true"
             aria-label={activeDrawer === "providers" ? "Provider 设置" : activeDrawer === "runs" ? "角色运行历史" : "操作审计"}
-            className="relative grid h-full w-full max-w-[42rem] grid-rows-[auto_minmax(0,1fr)] overflow-hidden border-l border-[var(--aria-line)] bg-white shadow-xl"
+            tabIndex={-1}
+            className="relative grid h-full w-full max-w-[42rem] grid-rows-[auto_minmax(0,1fr)] overflow-hidden border-l border-[var(--aria-line)] bg-[var(--aria-panel)] shadow-xl outline-none"
           >
             <div className="flex h-12 min-w-0 items-center justify-between gap-3 border-b border-[var(--aria-line)] px-4">
               <div className="min-w-0">
@@ -1024,12 +1035,12 @@ export function CodingWorkspacePage({
                 type="button"
                 aria-label="关闭辅助面板"
                 onClick={() => setActiveDrawer(null)}
-                className="inline-flex h-8 w-8 cursor-pointer items-center justify-center rounded-md text-[var(--aria-ink-muted)] transition-colors hover:bg-[var(--aria-panel-muted)]"
+                className="inline-flex h-7 w-7 cursor-pointer items-center justify-center rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] text-[var(--aria-ink-muted)] transition-colors duration-200 motion-reduce:transition-none hover:border-[var(--aria-primary)] hover:text-[var(--aria-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
               >
                 <X className="h-4 w-4" />
               </button>
             </div>
-            <div className="min-h-0 overflow-auto p-4">
+            <div className="min-h-0 overflow-auto overscroll-contain p-4">
               {activeDrawer === "providers" ? (
                 <CodingProviderConfigPanel
                   snapshot={store.roleProviderConfigSnapshot}

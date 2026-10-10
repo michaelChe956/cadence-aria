@@ -276,7 +276,7 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
     fireEvent.change(within(dialog).getByLabelText("本地路径"), {
       target: { value: "/tmp/new-repo" },
     });
-    fireEvent.submit(dialog);
+    fireEvent.submit(within(dialog).getByLabelText("代码库名称").closest("form")!);
     await flushAsyncWork();
 
     expect(screen.getByText("还没有代码库")).toBeInTheDocument();
@@ -357,7 +357,7 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
     fireEvent.change(within(dialog).getByLabelText("本地路径"), {
       target: { value: "/tmp/new-repo" },
     });
-    fireEvent.submit(dialog);
+    fireEvent.submit(within(dialog).getByLabelText("代码库名称").closest("form")!);
     await flushAsyncWork();
     expect(
       fetchMock.mock.calls.filter(
