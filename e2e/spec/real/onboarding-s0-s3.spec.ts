@@ -102,11 +102,10 @@ test.describe("real 全旅程 S0-S3(建档/LC/四仓登记/真五步初始化/�
       await addDialog.getByLabel("聚合根目录", { exact: true }).fill(MANIFEST.aggregateRoot);
       await addDialog.getByLabel("名称").fill(LC_NAME);
       await addDialog.getByRole("button", { name: "创建逻辑代码库" }).click();
-      await expect(addDialog).toBeHidden();
 
-      const wizard = new RegistrationWizardPage(page);
-      await wizard.expectOpen();
-      await wizard.runAutoDiscovery(MANIFEST.aggregateRoot);
+      // 合并流:创建后弹窗保持打开并内嵌登记向导(聚合根复用+自动发现),无独立「登记成员」弹窗
+      const wizard = new RegistrationWizardPage(page, addDialog);
+      await wizard.expectEmbeddedReady();
       await wizard.expectEligibleCandidates([...FOUR_LAYERS]);
       await wizard.submit();
       await wizard.expectRegistrationCompleted(FOUR_LAYERS.map((layer) => `/${layer}`));

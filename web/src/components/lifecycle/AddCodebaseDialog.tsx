@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { createLogicalCodebase } from "../../api/codebases";
+import { LogicalCodebaseRegistrationWizard } from "./LogicalCodebaseRegistrationWizard";
 import type { LogicalCodebaseDto } from "../../api/types";
 
 type AddCodebaseMode = "single_repo" | "logical";
@@ -15,11 +16,14 @@ export function AddCodebaseDialog({
   projectId,
   onChooseSingle,
   onCreatedLogical,
+  onRegistrationCompleted,
   onClose,
 }: {
   projectId: string;
   onChooseSingle: () => void;
   onCreatedLogical: (codebase: LogicalCodebaseDto) => void;
+  /** 登记批完成后回调（成员已变化，宿主应刷新）；创建+登记合并在本弹窗内完成。 */
+  onRegistrationCompleted?: () => Promise<void> | void;
   onClose: () => void;
 }) {
   const [mode, setMode] = useState<AddCodebaseMode>("single_repo");
@@ -28,6 +32,7 @@ export function AddCodebaseDialog({
   const [aggregateRoot, setAggregateRoot] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [createdLogical, setCreatedLogical] = useState<LogicalCodebaseDto | null>(null);
 
   const derivedName = nameTouched ? name : aggregateRootBasename(aggregateRoot);
 
@@ -51,6 +56,8 @@ export function AddCodebaseDialog({
         name: trimmedName,
         aggregate_root: trimmedRoot,
       });
+      // 合并流：弹窗保持打开，切换到登记阶段并复用同一聚合根（不再弹独立登记向导）。
+      setCreatedLogical(codebase);
       onCreatedLogical(codebase);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "创建逻辑代码库失败");
@@ -65,7 +72,11 @@ export function AddCodebaseDialog({
         role="dialog"
         aria-modal="true"
         aria-label="添加代码库"
-        className="w-full max-w-lg rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] p-4 shadow-xl"
+        className={
+          createdLogical
+            ? "max-h-[90vh] w-full max-w-2xl overflow-auto rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] p-4 shadow-xl"
+            : "w-full max-w-lg rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] p-4 shadow-xl"
+        }
       >
         <div className="mb-4 flex items-center justify-between gap-3">
           <h2 className="text-base font-semibold text-[var(--aria-ink)]">添加代码库</h2>
@@ -79,6 +90,22 @@ export function AddCodebaseDialog({
           </button>
         </div>
 
+        {createdLogical ? (
+          <div>
+            <p className="mb-3 text-sm text-[var(--aria-ink-muted)]">
+              逻辑代码库「{createdLogical.name}」已创建，继续登记成员（聚合根已复用）。
+            </p>
+            <LogicalCodebaseRegistrationWizard
+              projectId={projectId}
+              logicalCodebaseId={createdLogical.id}
+              initialAggregateRoot={createdLogical.aggregate_root}
+              autoStart
+              embedded
+              onCompleted={onRegistrationCompleted}
+            />
+          </div>
+        ) : (
+          <>
         <fieldset className="space-y-2">
           <legend className="text-sm font-semibold text-[var(--aria-ink)]">模式</legend>
           <label className="flex items-start gap-2 rounded-md border border-[var(--aria-line)] p-2 text-sm">
@@ -109,7 +136,7 @@ export function AddCodebaseDialog({
             <span>
               <span className="font-semibold text-[var(--aria-ink)]">多仓库逻辑代码库</span>
               <span className="block text-xs text-[var(--aria-ink-muted)]">
-                以聚合根目录组织多个成员仓库，创建后进入登记向导（自动发现）。
+                以聚合根目录组织多个成员仓库，创建后在本弹窗内登记成员（自动发现）。
               </span>
             </span>
           </label>
@@ -164,6 +191,8 @@ export function AddCodebaseDialog({
               </button>
             </div>
           </form>
+        )}
+          </>
         )}
 
         {error ? (

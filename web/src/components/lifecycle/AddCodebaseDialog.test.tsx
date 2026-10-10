@@ -35,12 +35,31 @@ describe("AddCodebaseDialog", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("多仓库模式：name 默认聚合根目录名，创建成功回调 LC", async () => {
+  it("多仓库模式：创建成功后同弹窗进入登记，复用聚合根自动发现", async () => {
     const calls: Array<{ input: string; init?: RequestInit }> = [];
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         calls.push({ input: String(input), init });
+        const url = String(input);
+        if (url.endsWith("/preflight")) {
+          return jsonResponse({
+            preflight_id: "preflight_0001",
+            created_at: "2026-08-19T00:00:00Z",
+            items: [
+              { path: "/repos/monorepo/api", class: "eligible", reason: null },
+            ],
+          });
+        }
+        if (url.endsWith("/registrations")) {
+          return jsonResponse({
+            batch_id: "batch_0001",
+            status: "completed",
+            items: [
+              { path: "/repos/monorepo/api", status: "completed", failure_reason: null },
+            ],
+          });
+        }
         return jsonResponse({
           id: "lc_0001",
           name: "monorepo",
@@ -50,6 +69,7 @@ describe("AddCodebaseDialog", () => {
       }),
     );
     const onCreatedLogical = vi.fn();
+    const onRegistrationCompleted = vi.fn();
     const user = userEvent.setup();
 
     render(
@@ -57,6 +77,7 @@ describe("AddCodebaseDialog", () => {
         projectId="project_0001"
         onChooseSingle={vi.fn()}
         onCreatedLogical={onCreatedLogical}
+        onRegistrationCompleted={onRegistrationCompleted}
         onClose={vi.fn()}
       />,
     );
@@ -67,15 +88,40 @@ describe("AddCodebaseDialog", () => {
     await user.click(screen.getByRole("button", { name: "创建逻辑代码库" }));
 
     await vi.waitFor(() => expect(onCreatedLogical).toHaveBeenCalledTimes(1));
-    expect(calls.map(({ input }) => input)).toEqual([
+    expect(calls.map(({ input }) => input)[0]).toBe(
       "/api/projects/project_0001/logical-codebases",
-    ]);
+    );
     expect(JSON.parse(String(calls[0].init?.body))).toEqual({
       name: "monorepo",
       aggregate_root: "/repos/monorepo",
     });
     expect(onCreatedLogical).toHaveBeenCalledWith(
       expect.objectContaining({ id: "lc_0001" }),
+    );
+
+    // 合并流：不再弹出第二个「登记成员」对话框，登记内容并入本弹窗
+    expect(
+      screen.queryByRole("dialog", { name: "登记成员" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("dialog", { name: "添加代码库" }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("聚合根目录")).toHaveValue("/repos/monorepo");
+
+    // 自动发现复用同一聚合根（无需再填）
+    expect(
+      await screen.findByLabelText("选择 /repos/monorepo/api（eligible）"),
+    ).toBeInTheDocument();
+    const preflightCall = calls.find(({ input }) => input.endsWith("/preflight"));
+    expect(JSON.parse(String(preflightCall?.init?.body))).toEqual({
+      aggregate_root: "/repos/monorepo",
+      candidate_paths: [],
+      auto_discover: true,
+    });
+
+    await user.click(screen.getByRole("button", { name: "提交登记" }));
+    await vi.waitFor(() =>
+      expect(onRegistrationCompleted).toHaveBeenCalledTimes(1),
     );
   });
 
@@ -113,9 +159,17 @@ describe("AddCodebaseDialog", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "name must not be empty",
     );
+    expect(screen.getByLabelText("名称")).toHaveValue("custom-name");
 
+    // 创建成功 → 同弹窗切换到登记阶段（表单字段退出）
     fail = false;
     await user.click(screen.getByRole("button", { name: "创建逻辑代码库" }));
-    expect(screen.getByLabelText("名称")).toHaveValue("custom-name");
+    expect(
+      await screen.findByRole("button", { name: "确认聚合根并自动发现" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText("名称")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("dialog", { name: "登记成员" }),
+    ).not.toBeInTheDocument();
   });
 });

@@ -74,8 +74,9 @@ describe("IssueLifecycleWorkbench codebases 混合列表与添加弹窗", () => 
     );
   });
 
-  it("多仓库模式：创建 LC 后进入该 LC 的登记向导（lc_id 新路径）", async () => {
+  it("多仓库模式：创建 LC 后同一弹窗内登记成员（复用聚合根自动发现）", async () => {
     const calls: string[] = [];
+    const preflightBodies: string[] = [];
     const fetchMock = lifecycleFetch({
       projects: [projectRecord("project_0001", "Aria")],
       logicalCodebases: [{ id: "lc_0001", name: "monorepo", member_count: 0 }],
@@ -97,6 +98,9 @@ describe("IssueLifecycleWorkbench codebases 混合列表与添加弹窗", () => 
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         calls.push(`${init?.method ?? "GET"} ${url}`);
+        if (url.endsWith("/preflight") && init?.method === "POST") {
+          preflightBodies.push(String(init.body));
+        }
         if (
           url === "/api/projects/project_0001/logical-codebases" &&
           init?.method === "POST"
@@ -123,25 +127,35 @@ describe("IssueLifecycleWorkbench codebases 混合列表与添加弹窗", () => 
     expect(screen.getByLabelText("名称")).toHaveValue("root");
     await user.click(screen.getByRole("button", { name: "创建逻辑代码库" }));
 
-    // 创建成功 → 打开登记向导（自动发现模式）
-    await user.type(
-      await screen.findByLabelText("聚合根目录"),
-      "-override",
-    );
-    await user.click(
-      screen.getByRole("button", { name: "确认聚合根并自动发现" }),
-    );
+    // 合并流：不再弹出独立「登记成员」对话框，本弹窗直接进入登记
+    expect(
+      screen.getByRole("dialog", { name: "添加代码库" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("dialog", { name: "登记成员" }),
+    ).not.toBeInTheDocument();
+    expect(await screen.findByLabelText("聚合根目录")).toHaveValue("/root");
+
+    // 自动发现已复用同一聚合根触发（lc_id 新路径）
     expect(
       await screen.findByLabelText("选择 /root/api（eligible）"),
     ).toBeInTheDocument();
+    expect(calls).toContain(
+      "POST /api/projects/project_0001/logical-codebases/lc_0001/registrations/preflight",
+    );
+    expect(JSON.parse(preflightBodies.at(-1) ?? "null")).toMatchObject({
+      aggregate_root: "/root",
+      auto_discover: true,
+    });
+
     await user.click(screen.getByRole("button", { name: "提交登记" }));
 
     await waitFor(() =>
       expect(
-        calls.filter((call) =>
-          call.startsWith(
+        calls.filter(
+          (call) =>
+            call ===
             "POST /api/projects/project_0001/logical-codebases/lc_0001/registrations",
-          ),
         ).length,
       ).toBeGreaterThan(0),
     );

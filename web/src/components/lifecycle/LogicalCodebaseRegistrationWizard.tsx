@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import {
   preflightLogicalCodebaseRegistration,
   resumeLogicalCodebaseRegistration,
@@ -33,13 +33,22 @@ export function LogicalCodebaseRegistrationWizard({
   logicalCodebaseId,
   onCompleted,
   onClose,
+  embedded = false,
+  initialAggregateRoot,
+  autoStart = false,
 }: {
   projectId: string;
   logicalCodebaseId: string;
-  onCompleted: () => Promise<void> | void;
-  onClose: () => void;
+  onCompleted?: () => Promise<void> | void;
+  onClose?: () => void;
+  /** 内嵌模式：不渲染遮罩/对话框壳，由宿主弹窗提供 chrome（添加代码库弹窗合并登记流）。 */
+  embedded?: boolean;
+  /** 预填聚合根：创建 LC 后复用同一根，不再要求用户重填。 */
+  initialAggregateRoot?: string;
+  /** 挂载后立即以 initialAggregateRoot 触发自动发现预检。 */
+  autoStart?: boolean;
 }) {
-  const [aggregateRoot, setAggregateRoot] = useState("");
+  const [aggregateRoot, setAggregateRoot] = useState(initialAggregateRoot ?? "");
   const [candidatePaths, setCandidatePaths] = useState("");
   const [preflight, setPreflight] = useState<RegistrationPreflightResponse | null>(null);
   const [manualMode, setManualMode] = useState(false);
@@ -48,6 +57,7 @@ export function LogicalCodebaseRegistrationWizard({
   const [busyAction, setBusyAction] = useState<"preflight" | "submit" | "resume" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const busyRef = useRef(false);
+  const autoStartRef = useRef(false);
 
   const paths = useMemo(
     () => candidatePaths.split(/\r?\n/).map((path) => path.trim()).filter(Boolean),
@@ -66,14 +76,8 @@ export function LogicalCodebaseRegistrationWizard({
 
   const candidateItems = preflight?.items ?? [];
 
-  async function handlePreflight(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  async function runPreflight(root: string) {
     if (busyRef.current) return;
-    const root = aggregateRoot.trim();
-    if (!root) {
-      setError("请输入聚合根目录");
-      return;
-    }
     busyRef.current = true;
     setBusyAction("preflight");
     setError(null);
@@ -96,6 +100,26 @@ export function LogicalCodebaseRegistrationWizard({
       setBusyAction(null);
     }
   }
+
+  async function handlePreflight(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const root = aggregateRoot.trim();
+    if (!root) {
+      setError("请输入聚合根目录");
+      return;
+    }
+    await runPreflight(root);
+  }
+
+  useEffect(() => {
+    if (!autoStart || autoStartRef.current) return;
+    const root = (initialAggregateRoot ?? "").trim();
+    if (!root) return;
+    autoStartRef.current = true;
+    void runPreflight(root);
+    // 仅需在挂载时执行一次；runPreflight 闭包读取的初态即为目标初态。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoStart, initialAggregateRoot]);
 
   function handleManualPreflight() {
     setManualMode(true);
@@ -121,7 +145,7 @@ export function LogicalCodebaseRegistrationWizard({
       });
       setBatch(result);
       if (result.status === "completed") {
-        await onCompleted();
+        await onCompleted?.();
       }
     } catch (reason) {
       setError(formatError(reason, "提交登记失败"));
@@ -140,7 +164,7 @@ export function LogicalCodebaseRegistrationWizard({
       const result = await resumeLogicalCodebaseRegistration(projectId, logicalCodebaseId, batch.batch_id);
       setBatch(result);
       if (result.status === "completed") {
-        await onCompleted();
+        await onCompleted?.();
       }
     } catch (reason) {
       setError(formatError(reason, "恢复登记失败"));
@@ -153,26 +177,8 @@ export function LogicalCodebaseRegistrationWizard({
   const submitting = busyAction === "submit";
   const canSubmit = Boolean(preflight) && !batch && !busyAction;
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-4">
-      <section
-        role="dialog"
-        aria-modal="true"
-        aria-label="登记成员"
-        className="max-h-[90vh] w-full max-w-2xl overflow-auto rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] p-4 shadow-xl"
-      >
-        <div className="mb-4 flex items-center justify-between gap-3">
-          <h2 className="text-base font-semibold text-[var(--aria-ink)]">登记成员</h2>
-          <button
-            type="button"
-            onClick={onClose}
-            disabled={Boolean(busyAction)}
-            className="rounded-md border border-[var(--aria-line)] px-2 py-1 text-xs font-semibold text-[var(--aria-ink-muted)] disabled:opacity-60"
-          >
-            关闭
-          </button>
-        </div>
-
+  const body = (
+    <>
         <form onSubmit={handlePreflight} className="space-y-3">
           <label className="block text-sm font-semibold text-[var(--aria-ink)]">
             聚合根目录
@@ -311,16 +317,28 @@ export function LogicalCodebaseRegistrationWizard({
               })}
             </div>
             {!batch ? (
-              <button
-                type="button"
-                disabled={!canSubmit || submitting}
-                onClick={() => void handleSubmit()}
-                aria-label="提交登记"
-                aria-busy={submitting}
-                className="rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 py-2 text-sm font-semibold text-white disabled:opacity-60"
-              >
-                {submitting ? "⏳ " : ""}提交登记
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={!canSubmit || submitting}
+                  onClick={() => void handleSubmit()}
+                  aria-label="提交登记"
+                  aria-busy={submitting}
+                  className="rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 py-2 text-sm font-semibold text-white disabled:opacity-60"
+                >
+                  {submitting ? "⏳ " : ""}提交登记
+                </button>
+                {embedded && !manualMode ? (
+                  <button
+                    type="button"
+                    onClick={handleManualPreflight}
+                    disabled={Boolean(busyAction)}
+                    className="rounded-md border border-[var(--aria-line)] px-3 py-2 text-sm font-semibold text-[var(--aria-ink)] disabled:opacity-60"
+                  >
+                    改为手工预检
+                  </button>
+                ) : null}
+              </div>
             ) : null}
           </div>
         ) : null}
@@ -356,6 +374,35 @@ export function LogicalCodebaseRegistrationWizard({
             {error}
           </p>
         ) : null}
+    </>
+  );
+
+  if (embedded) {
+    return <div>{body}</div>;
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-4">
+      <section
+        role="dialog"
+        aria-modal="true"
+        aria-label="登记成员"
+        className="max-h-[90vh] w-full max-w-2xl overflow-auto rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] p-4 shadow-xl"
+      >
+        <div className="mb-4 flex items-center justify-between gap-3">
+          <h2 className="text-base font-semibold text-[var(--aria-ink)]">登记成员</h2>
+          {onClose ? (
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={Boolean(busyAction)}
+              className="rounded-md border border-[var(--aria-line)] px-2 py-1 text-xs font-semibold text-[var(--aria-ink-muted)] disabled:opacity-60"
+            >
+              关闭
+            </button>
+          ) : null}
+        </div>
+        {body}
       </section>
     </div>
   );

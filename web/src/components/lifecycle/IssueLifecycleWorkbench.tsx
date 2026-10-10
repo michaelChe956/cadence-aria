@@ -38,7 +38,6 @@ import {
 } from "../../api/pointer-publication";
 import type {
   CodebaseSummaryDto,
-  LogicalCodebaseDto,
   CodingAttemptAddress,
   IssueLifecycleResponse,
   PointerPublicationDto,
@@ -137,9 +136,6 @@ export function IssueLifecycleWorkbench({
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
   const [repositoryDialogOpen, setRepositoryDialogOpen] = useState(false);
   const [registrationDialogOpen, setRegistrationDialogOpen] = useState(false);
-  const [registrationWizardLcId, setRegistrationWizardLcId] = useState<
-    string | null
-  >(null);
   // R8：逻辑代码库选中态（多 LC 并存时面板按选中 LC 分区）。
   const [selectedLogicalCodebaseId, setSelectedLogicalCodebaseId] = useState<
     string | null
@@ -379,8 +375,6 @@ export function IssueLifecycleWorkbench({
     )
       ? selectedLogicalCodebaseId
       : (logicalCodebases[0]?.logical_codebase_id ?? null);
-  const wizardLogicalCodebaseId =
-    registrationWizardLcId ?? activeLogicalCodebaseId;
   const selectedProject = projects.find(
     (project) => project.project_id === selectedProjectId,
   );
@@ -756,14 +750,6 @@ export function IssueLifecycleWorkbench({
     setRepositoryDialogOpen(true);
   }
 
-  async function handleCreatedLogicalCodebase(codebase: LogicalCodebaseDto) {
-    setAddCodebaseDialogOpen(false);
-    setRegistrationWizardLcId(codebase.id);
-    setRegistrationDialogOpen(true);
-    if (selectedProjectId) {
-      await refresh(selectedProjectId);
-    }
-  }
 
   async function handleCreateProject(payload: CreateProjectPayload) {
     const project = await createProject(payload);
@@ -898,23 +884,22 @@ export function IssueLifecycleWorkbench({
         <AddCodebaseDialog
           projectId={selectedProjectId}
           onChooseSingle={handleChooseSingleCodebase}
-          onCreatedLogical={(codebase) =>
-            void handleCreatedLogicalCodebase(codebase)
-          }
+          onCreatedLogical={() => {
+            // 合并流：LC 创建后登记在弹窗内完成，这里只刷新列表（不再打开独立登记向导）。
+            if (selectedProjectId) void refresh(selectedProjectId);
+          }}
+          onRegistrationCompleted={() => refresh(selectedProjectId)}
           onClose={() => setAddCodebaseDialogOpen(false)}
         />
       ) : null}
       {registrationDialogOpen &&
       selectedProjectId &&
-      wizardLogicalCodebaseId ? (
+      activeLogicalCodebaseId ? (
         <LogicalCodebaseRegistrationWizard
           projectId={selectedProjectId}
-          logicalCodebaseId={wizardLogicalCodebaseId}
+          logicalCodebaseId={activeLogicalCodebaseId}
           onCompleted={() => refresh(selectedProjectId)}
-          onClose={() => {
-            setRegistrationDialogOpen(false);
-            setRegistrationWizardLcId(null);
-          }}
+          onClose={() => setRegistrationDialogOpen(false)}
         />
       ) : null}
       {repositoryDialogOpen ? (

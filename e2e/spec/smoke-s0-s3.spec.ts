@@ -183,18 +183,16 @@ test.describe("页面 E2E P1 冒烟 S0-S3", () => {
       // 建项目
       await workbench.createProject(PROJECT_NAME, "页面 E2E P1 冒烟:站内消息通知中心四层案例");
 
-      // 建 LC(多仓库逻辑代码库)
+      // 建 LC(多仓库逻辑代码库):创建后弹窗保持打开并切换到内嵌登记阶段
       const addDialog = await workbench.openAddCodebaseDialog();
       await addDialog.getByRole("radio", { name: /多仓库逻辑代码库/ }).check();
       await addDialog.getByLabel("聚合根目录", { exact: true }).fill(MANIFEST.aggregateRoot);
       await addDialog.getByLabel("名称").fill(LC_NAME);
       await addDialog.getByRole("button", { name: "创建逻辑代码库" }).click();
-      await expect(addDialog).toBeHidden();
 
-      // 批登记向导:自动发现→四仓 eligible→提交→completed
-      const wizard = new RegistrationWizardPage(page);
-      await wizard.expectOpen();
-      await wizard.runAutoDiscovery(MANIFEST.aggregateRoot);
+      // 合并流:同一弹窗内登记,聚合根已复用且挂载即自动发现→四仓 eligible→提交→completed
+      const wizard = new RegistrationWizardPage(page, addDialog);
+      await wizard.expectEmbeddedReady();
       await wizard.expectEligibleCandidates(FOUR_LAYERS);
       await wizard.submit();
       await wizard.expectRegistrationCompleted(FOUR_LAYERS.map((layer) => `/${layer}`));

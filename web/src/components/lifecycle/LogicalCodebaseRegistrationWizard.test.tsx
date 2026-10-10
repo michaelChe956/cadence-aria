@@ -133,4 +133,61 @@ describe("LogicalCodebaseRegistrationWizard", () => {
       auto_discover: false,
     });
   });
+
+  it("embedded：预填聚合根并自动触发自动发现，不渲染对话框壳", async () => {
+    const fetchMock = registrationFetch();
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <LogicalCodebaseRegistrationWizard
+        projectId="project_0001"
+        logicalCodebaseId="lc_0001"
+        onCompleted={vi.fn()}
+        embedded
+        initialAggregateRoot="/root/mono"
+        autoStart
+      />,
+    );
+
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("聚合根目录")).toHaveValue("/root/mono");
+
+    const preflightCall = fetchMock.mock.calls.find(([input]) =>
+      String(input).endsWith("/preflight"),
+    );
+    expect(JSON.parse(String(preflightCall?.[1]?.body))).toEqual({
+      aggregate_root: "/root/mono",
+      candidate_paths: [],
+      auto_discover: true,
+    });
+
+    expect(
+      await screen.findByLabelText("选择 /root/api（eligible）"),
+    ).toBeInTheDocument();
+  });
+
+  it("embedded：自动发现结果旁保留改为手工预检入口", async () => {
+    const fetchMock = registrationFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+
+    render(
+      <LogicalCodebaseRegistrationWizard
+        projectId="project_0001"
+        logicalCodebaseId="lc_0001"
+        onCompleted={vi.fn()}
+        embedded
+        initialAggregateRoot="/root"
+        autoStart
+      />,
+    );
+
+    await screen.findByLabelText("选择 /root/api（eligible）");
+    await user.click(screen.getByRole("button", { name: "改为手工预检" }));
+    expect(screen.getByLabelText("候选成员路径")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "执行手工预检" })).toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("选择 /root/api（eligible）"),
+    ).not.toBeInTheDocument();
+  });
 });
