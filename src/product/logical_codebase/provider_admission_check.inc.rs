@@ -360,9 +360,20 @@ impl LogicalCodebaseProviderAdmissionPreflight {
             && published_artifact.is_some()
             && missing_root_rules.is_empty();
 
-        // 4. 真实 gateway 谓词：bootstrap capability 记录不满足 snapshot/action
-        //    时在此拒绝（validate 不启动 provider）。
-        let validated = self.gateway.validate(request.clone()).map_err(|error| {
+        // 4. 真实 gateway 谓词（validate 不启动 provider）。路B
+        //    (fix-admission-member-rules-scope):按已重验 phase 分流——
+        //    Normal 维持 `validate`(normal action row launch/write-boundary
+        //    分格门);AggregateBootstrap 走既有 `validate_root_recipe_request`
+        //    (固定 Claude recipe 事实 + 凭据对 durable Running 重验,不套
+        //    normal 分格门)——合法 recipe 不先被 Normal capability 矩阵
+        //    拒绝,普通会话也不借 recipe 证据(不伪造 Confirmed)。
+        let validated = match phase {
+            ProviderAdmissionPhase::Normal => self.gateway.validate(request.clone()),
+            ProviderAdmissionPhase::AggregateBootstrap(credential) => self
+                .gateway
+                .validate_root_recipe_request(request.clone(), credential),
+        }
+        .map_err(|error| {
             let reason_code = match &error {
                 ProviderGatewayError::UnsupportedCapability(_) => {
                     "provider_capability_not_satisfied"
@@ -473,11 +484,16 @@ impl LogicalCodebaseProviderAdmissionPreflight {
                 allowed_actions: vec![BootstrapActionKind::Revalidate, BootstrapActionKind::Retry],
             })?;
 
-        // 7. 路A收口:成员规则缺失仅在根材料无效时维持阻断(placeholder 政策
-        //    等预存现状);根材料有效时仅审计——ready、allowed_actions 空。
-        //    真实阻断项(成员无 recorded checkout 等)保留在 missing_materials,
-        //    不因成员规则豁免清空;只有成员规则缺失时不加入成员准备动作。
-        let member_rules_block = !missing_member_rules.is_empty() && !root_materials_valid;
+        // 7. 路A/路B收口:成员规则缺失仅在「根材料无效的 Normal 相位」维持
+        //    阻断(placeholder 政策等预存现状);根材料有效时仅审计——ready、
+        //    allowed_actions 空;AggregateBootstrap 相位凭据豁免成员规则门
+        //    (裸仓首建:根材料由 recipe 生成,凭据已在步骤 0 对 durable
+        //    Running 重验)。真实阻断项(成员无 recorded checkout 等)保留在
+        //    missing_materials,不因成员规则豁免清空;只有成员规则缺失时
+        //    不加入成员准备动作。
+        let member_rules_block = !missing_member_rules.is_empty()
+            && matches!(phase, ProviderAdmissionPhase::Normal)
+            && !root_materials_valid;
         if member_rules_block || !missing_materials.is_empty() {
             let mut materials = missing_materials.clone();
             let mut actions = Vec::new();

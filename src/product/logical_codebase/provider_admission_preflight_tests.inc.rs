@@ -48,12 +48,18 @@ mod tests {
         deny: std::sync::atomic::AtomicBool,
         /// Task 3b:仅翻转 write_boundary 分格(缺 D4 证据的 early 场景)。
         write_boundary_denied: std::sync::atomic::AtomicBool,
+        /// 路B(fix-admission-member-rules-scope):仅拒绝 Normal capability
+        /// 矩阵(require_supported/resume/write_boundary),RootRecipe 通道
+        /// (require_root_recipe_supported)不受影响——证明 bootstrap 相位的
+        /// gateway 校验按已重验 phase 分流。
+        normal_matrix_denied: std::sync::atomic::AtomicBool,
     }
     impl StaticCapabilitySource {
         fn allowing() -> Self {
             Self {
                 deny: std::sync::atomic::AtomicBool::new(false),
                 write_boundary_denied: std::sync::atomic::AtomicBool::new(false),
+                normal_matrix_denied: std::sync::atomic::AtomicBool::new(false),
             }
         }
         fn deny(&self) {
@@ -62,6 +68,21 @@ mod tests {
         fn deny_write_boundary(&self) {
             self.write_boundary_denied
                 .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        fn deny_normal_matrix(&self) {
+            self.normal_matrix_denied
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        fn assert_normal_matrix_allowed(&self) -> Result<(), ProviderGatewayError> {
+            if self
+                .normal_matrix_denied
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(ProviderGatewayError::UnsupportedCapability(
+                    "normal capability matrix is not satisfied (fixture knob)".to_string(),
+                ));
+            }
+            Ok(())
         }
 
         fn capability(
@@ -122,6 +143,7 @@ mod tests {
             provider: &ProviderRef,
             action: SessionPolicyAction,
         ) -> Result<ProviderCapability, ProviderGatewayError> {
+            self.assert_normal_matrix_allowed()?;
             self.capability(provider, action)
         }
 
@@ -130,6 +152,7 @@ mod tests {
             provider: &ProviderRef,
             action: SessionPolicyAction,
         ) -> Result<ProviderCapability, ProviderGatewayError> {
+            self.assert_normal_matrix_allowed()?;
             self.capability(provider, action)
         }
 
@@ -138,6 +161,7 @@ mod tests {
             provider: &ProviderRef,
             action: SessionPolicyAction,
         ) -> Result<ProviderCapability, ProviderGatewayError> {
+            self.assert_normal_matrix_allowed()?;
             let capability = self.capability(provider, action)?;
             if capability.action_capability.write_boundary
                 != crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence::Confirmed
@@ -964,38 +988,62 @@ mod tests {
         ));
     }
 
+    /// 路B 主断言(fix-admission-member-rules-scope,先红;场景身份显式替换
+    /// lc-root-initialization 旧 Scenario「bootstrap phase 只豁免根规则」):
+    /// 有效 bootstrap credential 解除裸仓首建死锁——裸仓(recipe 首建:根
+    /// 规则尚未生成、全部成员缺 language.md、最终 receipt 不存在,政策为
+    /// 自举桩)持有由 durable Running operation 派生且重验有效的凭据时,
+    /// 成员规则门与根规则存在性一并无豁免空间地按既有自举边界进入
+    /// (fresh-LC 预期),policy/capability/gateway/cwd 照常必检。
     #[test]
-    fn bootstrap_phase_only_waives_missing_root_rules() {
-        // Task 3a 拆分后:成员规则在场,根规则(canonical root 自身的
-        // .claude/rules/language.md)缺失 = recipe 尚未生成的自举事实。
+    fn bootstrap_credential_releases_bare_repo_cold_start_deadlock() {
+        // 裸仓:默认 fixture(placeholder 政策),不写根规则、不写成员规则、
+        // 不发布 receipt——这些正是 root recipe 要生成的。
         let fixture = admission_fixture();
-        fixture.write_language_rules("# language\n");
         let (_store, _operation_id, credential) = derived_credential(&fixture);
 
-        // AggregateBootstrap:只豁免根规则存在性;其余维度全过 → ready。
         let result = fixture
             .preflight()
             .check(
                 &fixture.launch_request(),
-                &ProviderAdmissionPhase::AggregateBootstrap(credential.clone()),
+                &ProviderAdmissionPhase::AggregateBootstrap(credential),
             )
-            .expect("bootstrap phase must waive only missing root rules");
+            .expect("valid bootstrap credential must waive the bare-repo member rules gate");
         assert!(result.ready, "missing: {:?}", result.missing_materials);
-        // 成员规则在场(引用记录,digest 恒 None——不读取不消费的成员
-        // 正文);根规则缺失仍作为事实记录,不阻断。
-        assert_eq!(result.rules.len(), 1);
-        assert!(result.rules[0].digest.is_none());
+        // 豁免是审计而非静默:成员缺失与根规则缺失都保留非阻断事实。
+        assert_eq!(result.missing_member_rules.len(), 1);
         assert_eq!(result.missing_root_rules.len(), 1);
         assert!(result.missing_materials.is_empty());
-        assert!(result.missing_member_rules.is_empty());
+        assert!(result.allowed_actions.is_empty());
+        assert_eq!(result.rules.len(), 1);
+        assert!(result.rules[0].digest.is_none());
         assert_eq!(fixture.streaming_adapter.start_count(), 0);
 
-        // Normal 对照组(自举桩政策,存量迁移前):根规则缺失不阻断——
-        // 根规则门只在 #8 已发布真实政策后生效(旧语义零回归)。
+        // 对照(旧行为保留):成员规则在场时 bootstrap 相位同样 ready,根
+        // 规则缺失仅记录事实。
+        let fixture_rules = admission_fixture();
+        fixture_rules.write_language_rules("# language\n");
+        let (_store_rules, _op_rules, credential_rules) = derived_credential(&fixture_rules);
+        let result_rules = fixture_rules
+            .preflight()
+            .check(
+                &fixture_rules.launch_request(),
+                &ProviderAdmissionPhase::AggregateBootstrap(credential_rules),
+            )
+            .expect("bootstrap phase must waive missing root rules");
+        assert!(result_rules.ready);
+        assert_eq!(result_rules.missing_root_rules.len(), 1);
+        assert!(result_rules.missing_member_rules.is_empty());
+        assert!(result_rules.missing_materials.is_empty());
+
+        // Normal 对照组(自举桩政策,存量迁移前):成员规则在场时根规则缺失
+        // 不阻断——根规则门只在 #8 已发布真实政策后生效(旧语义零回归);
+        // 裸仓(成员缺失)的 Normal 请求仍被成员门拦(placeholder 不是
+        // 「根材料有效」证明,路A 边界)。
         assert!(
-            fixture
+            fixture_rules
                 .preflight()
-                .check(&fixture.launch_request(), &ProviderAdmissionPhase::Normal)
+                .check(&fixture_rules.launch_request(), &ProviderAdmissionPhase::Normal)
                 .expect("placeholder policy keeps legacy normal admission")
                 .ready
         );
@@ -1017,8 +1065,9 @@ mod tests {
         );
         assert_eq!(fixture_published.streaming_adapter.start_count(), 0);
 
-        // 成员规则缺失任何相位都不豁免(lcg_t03_member_language_rule_missing_
-        // is_not_root_phase_exempt 钉住 bootstrap 相位)。
+        // (supersede)旧「成员规则缺失任何相位阻断」条款已被本 change 取代:
+        // bootstrap 相位凭据豁免见上;gateway 相位分流见
+        // bootstrap_phase_gateway_uses_root_recipe_channel_not_normal_matrix。
 
         // 豁免不覆盖 policy：aggregate policy artifact 缺失仍 waiting。
         let fixture_no_policy = admission_fixture_without_policy();
@@ -1483,32 +1532,51 @@ mod tests {
         );
     }
 
-    /// Task 3a(lcg_t03):AggregateBootstrap 相位只豁免根规则缺失;成员
-    /// checkout 的 language.md 缺失任何相位都阻断(waiting + 零启动)。
+    /// 路B(fix-admission-member-rules-scope,先红;改写 lcg_t03 成员门
+    /// 「任何相位阻断」旧断言):bootstrap 相位的 gateway 校验按已重验
+    /// phase 分流——AggregateBootstrap 走既有 `validate_root_recipe_request`
+    /// (固定 Claude recipe 事实+凭据 durable 重验),合法 recipe 不先被
+    /// Normal capability 矩阵拒绝;同一 gateway 的普通会话仍按 Normal
+    /// 矩阵拒绝(不伪造 Confirmed、不借 recipe 证据搭便车)。
     #[test]
-    fn lcg_t03_member_language_rule_missing_is_not_root_phase_exempt() {
+    fn bootstrap_phase_gateway_uses_root_recipe_channel_not_normal_matrix() {
         let fixture = admission_fixture();
+        fixture.write_language_rules("# language\n");
         let (_store, _operation_id, credential) = derived_credential(&fixture);
 
-        let error = fixture
+        // Normal 矩阵整体拒绝(require_supported/resume/write_boundary),
+        // RootRecipe 通道照常放行——分流判据是 phase,不是 capability source
+        // 的全局开关。
+        fixture.capabilities.deny_normal_matrix();
+
+        let result = fixture
             .preflight()
             .check(
                 &fixture.launch_request(),
                 &ProviderAdmissionPhase::AggregateBootstrap(credential),
             )
-            .unwrap_err();
-        let member_rule_missing = ProviderSpawnObservation {
-            status: match &error {
-                ProviderAdmissionError::Waiting { .. } => "waiting",
-                ProviderAdmissionError::Store(_) => "store_error",
+            .expect("bootstrap phase must dispatch to the root-recipe gateway channel");
+        assert!(result.ready, "missing: {:?}", result.missing_materials);
+        assert_eq!(fixture.streaming_adapter.start_count(), 0);
+
+        // 同一 gateway、同一 capability source 的普通(Normal)请求仍被
+        // Normal 矩阵拒绝:recipe 证据不给普通会话。
+        let ordinary = fixture
+            .preflight()
+            .check(&fixture.launch_request(), &ProviderAdmissionPhase::Normal);
+        let observation = ProviderSpawnObservation {
+            status: match &ordinary {
+                Err(ProviderAdmissionError::Waiting { .. }) => "waiting",
+                Ok(_) => "ready",
+                Err(ProviderAdmissionError::Store(_)) => "store_error",
             },
             provider_spawn_count: fixture.streaming_adapter.start_count(),
         };
-        assert_eq!(member_rule_missing.status, "waiting");
-        assert_eq!(member_rule_missing.provider_spawn_count, 0);
+        assert_eq!(observation.status, "waiting");
+        assert_eq!(observation.provider_spawn_count, 0);
         assert!(
-            matches!(&error, ProviderAdmissionError::Waiting { reason_code, .. } if reason_code == "member_language_rules_missing"),
-            "member rule missing must block with its own reason, got {error:?}"
+            matches!(&ordinary, Err(ProviderAdmissionError::Waiting { reason_code, .. }) if reason_code == "provider_capability_not_satisfied"),
+            "ordinary request must keep the Normal matrix gate, got {ordinary:?}"
         );
     }
 
@@ -1829,6 +1897,62 @@ mod tests {
                 reason: "root write probe rejected".to_string()
             }
         );
+
+        // 路B 扩展(fix-admission-member-rules-scope,先红):完整
+        // admission→gateway 接线,不能只测 capability source——Normal 矩阵
+        // PlanningReadOnly 分格也 Unknown 的记录 + 已交付 recipe 证据 +
+        // 有效凭据(裸成员仓):AggregateBootstrap 相位的 admission 预检经
+        // validate_root_recipe_request 放行,合法 recipe 不先被 Normal
+        // capability 矩阵拒绝;同一 gateway 的普通(Normal)请求仍被
+        // Normal 矩阵拒绝。
+        let mut admission_record = t02_recipe_contract_record();
+        admission_record.action_matrix = T02Matrix::from_rows(vec![T02Row {
+            action: SessionPolicyAction::PlanningReadOnly,
+            launch: T02Evidence::Unknown,
+            resume: T02Evidence::Unknown,
+            write_boundary: T02Evidence::Unknown,
+            projection_digest: "projection-digest-PlanningReadOnly".to_string(),
+            evidence_ref: "probe://PlanningReadOnly".to_string(),
+        }])
+        .unwrap();
+        admission_record.supported_actions = Vec::new();
+        store.upsert(&fixture.project_id, &admission_record).unwrap();
+        let preflight = crate::product::logical_codebase::LogicalCodebaseProviderAdmissionPreflight::new(
+            fixture.paths.clone(),
+            fixture.lc_id.clone(),
+            std::sync::Arc::new(gateway),
+        );
+        // bootstrap 相位:凭据 + 已交付 recipe 证据 → ready(裸成员仓,
+        // 根规则/receipt 由 recipe 生成)。请求 provider ref 与记录的
+        // capability snapshot 一致(cap_managed_snapshot)。
+        let t02_launch_request = SessionLaunchRequest {
+            project_id: fixture.project_id.clone(),
+            provider: ProviderRef::claude_code("cap_managed_snapshot"),
+            action: SessionPolicyAction::PlanningReadOnly,
+            target: crate::product::logical_codebase::policy::PolicyTarget::aggregate_root(
+                std::fs::canonicalize(&fixture.aggregate_root).unwrap(),
+            ),
+            working_directory: fixture.aggregate_root.clone(),
+            readable_roots: vec![fixture.aggregate_root.clone()],
+            writable_roots: Vec::new(),
+            config_artifact_ref: "sha256:admission-managed-config".to_string(),
+        };
+        let bootstrap_ready = preflight
+            .check(
+                &t02_launch_request,
+                &ProviderAdmissionPhase::AggregateBootstrap(credential),
+            )
+            .expect("bootstrap admission must ride the root-recipe gateway channel");
+        assert!(bootstrap_ready.ready, "missing: {:?}", bootstrap_ready.missing_materials);
+        // 普通会话:同一 gateway 仍按 Normal 矩阵拒绝(PlanningReadOnly
+        // Unknown),不借 recipe 证据。
+        assert_bootstrap_waiting(
+            preflight
+                .check(&t02_launch_request, &ProviderAdmissionPhase::Normal)
+                .map(|_| ()),
+            "provider_capability_not_satisfied",
+        );
+        assert_eq!(streaming.start_count(), 0);
     }
 
     // ===== Task 2b 第二段(lcg_t02):root-recipe 凭据 durable 重验/漂移 =====

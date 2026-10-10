@@ -12,12 +12,12 @@
 //!   journal；GET identity-repair 不经普通成员列表（Task 7 HTTP 断言）；mapping
 //!   未确认前 read mode/authority JSON/member count/provider 启动计数全不变；
 //!   错误 mapping 拒绝、正确 mapping staged 后 Revalidate 才切读（journal 保留
-//!   repair audit）；删除实际成员 `.claude/rules/language.md` 后 readiness 停在
+//!   删除实际成员 `.claude/rules/language.md` 后 readiness 停在
 //!   `root_recipe_operation_missing` 等待面（Task 1.6 起成员规则谓词归属
-//!   provider admission；Task 1.2/1.4 起 bootstrap 相位凭据豁免「根规则尚未
-//!   生成」，recipe 不再因成员规则缺失被 admission 拒绝——改由注入的
-//!   pre_check 中断保留 Failed 检查点）；恢复同一规则来源后原链经显式
-//!   Retry 继续并冻结 policy digest。
+//!   provider admission；fix-admission-member-rules-scope 起 bootstrap 相位
+//!   凭据豁免成员规则门——裸成员的 recipe turn 不再被 admission 拒绝，
+//!   Failed 检查点改由注入的 pre_check 中断保留）；显式 Retry 后裸成员
+//!   原链继续至 planning_ready、冻结 policy digest，成员规则零重建。
 //!
 //! 全程同一 `WebAppState`：无服务重启、无 registry 清理、无 journal 删除、无
 //! `repos.json`/权威 JSON 编辑脱困（repos.json 仅作为 legacy 存量布局在场景
@@ -26,7 +26,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -42,7 +42,7 @@ use cadence_aria::cross_cutting::provider_availability_gate::{
 use cadence_aria::cross_cutting::provider_health::{ProviderHealthEntry, ProviderHealthSnapshot};
 use cadence_aria::cross_cutting::provider_registry::ProviderRegistry;
 use cadence_aria::cross_cutting::streaming_provider::{
-    FakeStreamingProvider, ProviderSession, StreamingProviderAdapter, StreamingProviderInput,
+    ProviderSession, StreamingProviderAdapter, StreamingProviderInput,
 };
 use cadence_aria::product::app_paths::ProductAppPaths;
 use cadence_aria::product::json_store::{ProductStoreError, write_json};
@@ -153,6 +153,14 @@ fn commit_rule_file(path: &std::path::Path, content: &str) {
     std::fs::write(rules.join("language.md"), content).expect("write language.md");
     run_git(path, &["add", "."]);
     run_git(path, &["commit", "-q", "-m", "seed member rules"]);
+}
+
+/// 裸成员基线:main 分支 + 初始提交(REQ-PIB-02 生产不变量),但不含任何
+/// `.claude/rules` 材料——owner 裸仓验收形态(fix-admission-member-rules-scope)。
+fn git_commit_initial(path: &std::path::Path) {
+    std::fs::write(path.join("README.md"), "# bare member\n").expect("write README");
+    run_git(path, &["add", "."]);
+    run_git(path, &["commit", "-q", "-m", "bare member baseline"]);
 }
 
 fn git_head(path: &std::path::Path) -> String {
@@ -284,14 +292,85 @@ fn fake_index_operation(
 }
 
 // ---------------------------------------------------------------------------
-// A03：一次性 pre_check provider turn 中断的流式 provider（test-only）。
-// Task 4（aggregate-policy-root-publication）起在 RuleAndMcpConfig 命令
-// 时机向聚合根生成 AGENTS/language 规则材料（与 lib 侧生产同构 fixture
-// 同款），使末命令发布收口有真实材料可聚合。
+// A03/A04：一次性中断首个 provider turn 的流式 provider（test-only）。
+// Task 4（aggregate-policy-root-publication）起在 RuleAndMcpConfig 轮向
+// 聚合根生成 AGENTS/language 规则材料，使末命令发布收口有真实材料可聚合。
+//
+// Task 7 分流收口后 gateway 唯一经 `start_validated` 分发（绝不回落裸
+// `start`），且库外（it_web）无法拆 `ValidatedStreamingProviderInput`
+// （`into_parts` 为 pub(crate)），prompt 不可匹配——本 fixture 改按确定性
+// 轮次合同注入：bootstrap 编排的首个 provider turn 恒为 pre_check
+// （machine_skills/aggregate_preflight 是确定性步骤，不启动 provider），
+// 首个 validated start 注入一次中断；中断后的首个成功 turn 是 pre_check
+// 重试，第二个成功 turn 恒为 rule_and_mcp_config（真实 provider 生成根
+// 规则的位置），在该轮向聚合根落盘材料。此前本 fixture 只实现 `start`，
+// 生产路径全部命中 trait 默认的「validated start is not supported」，
+// 注入从未生效（基线即红）。
 // ---------------------------------------------------------------------------
 
 struct FaultOncePreCheckStreamingProvider {
     fired: AtomicBool,
+    successful_starts: AtomicUsize,
+    /// provider spawn cwd（= canonical 聚合根；fixture 构造时已知）。
+    aggregate_root: PathBuf,
+}
+
+impl FaultOncePreCheckStreamingProvider {
+    fn new(aggregate_root: PathBuf) -> Self {
+        Self {
+            fired: AtomicBool::new(false),
+            successful_starts: AtomicUsize::new(0),
+            aggregate_root,
+        }
+    }
+
+    async fn start_turn(&self) -> Result<ProviderSession, ProviderAdapterError> {
+        // deterministic checkpoint：首个 pre_check turn 在真实 gateway 启动路径
+        // 内被注入一次中断（audit 只记录成功启动，中断不计 launch）。
+        if !self.fired.swap(true, Ordering::SeqCst) {
+            return Err(ProviderAdapterError::execution_failed(
+                None,
+                String::new(),
+                "test-injected interruption during the pre_check provider turn",
+                0,
+            ));
+        }
+        let successful = self.successful_starts.fetch_add(1, Ordering::SeqCst);
+        // RuleAndMcpConfig 命令时机（第二个成功 turn）：真实 provider 生成
+        // 根规则的位置——测试 provider 在聚合根落盘 AGENTS 入口与 language
+        // 规则，使末命令发布收口有真实材料可聚合；该写入落在命令审计
+        // 窗口内，重试链将其作为 allowlisted 变更冻结。
+        if successful == 1 {
+            let root = &self.aggregate_root;
+            std::fs::write(root.join("AGENTS.md"), A03_ROOT_AGENTS).expect("write root AGENTS.md");
+            std::fs::create_dir_all(root.join(".claude").join("rules"))
+                .expect("create root rules dir");
+            std::fs::write(
+                root.join(".claude").join("rules").join("language.md"),
+                A03_ROOT_LANGUAGE,
+            )
+            .expect("write root language rule");
+        }
+        // 轮次输出无结构化契约（aggregate recipe turn 消费自由文本摘要），
+        // 以 plain completion 立即完结（同 ReviewStreamingAdapter 先例）。
+        let (event_tx, events) = tokio::sync::mpsc::channel(4);
+        let (commands, _command_rx) = tokio::sync::mpsc::channel(4);
+        tokio::spawn(async move {
+            let _ = event_tx
+                .send(cadence_aria::cross_cutting::streaming_provider::ProviderEvent::Completed(
+                    cadence_aria::cross_cutting::streaming_provider::ProviderCompletion::plain(
+                        "aggregate recipe fixture turn output".to_string(),
+                        None,
+                    ),
+                ))
+                .await;
+        });
+        Ok(ProviderSession {
+            native_session_id: None,
+            events,
+            commands,
+        })
+    }
 }
 
 const A03_ROOT_AGENTS: &str =
@@ -302,44 +381,19 @@ const A03_ROOT_LANGUAGE: &str = "# language rule\n\n- Use Rust 2024 edition.\n";
 impl StreamingProviderAdapter for FaultOncePreCheckStreamingProvider {
     async fn start(
         &self,
-        input: StreamingProviderInput,
-        cancel: CancellationToken,
+        _input: StreamingProviderInput,
+        _cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
-        // deterministic checkpoint：首个 pre_check turn 在真实 gateway 启动路径
-        // 内被注入一次中断（audit 只记录成功启动，中断不计 launch）。Task
-        // 1.4 起 prompt 为真实 root recipe 命令文本（来源
-        // `RepositoryInitializationStepKind::command()`），按固定命令匹配。
-        let pre_check =
-            cadence_aria::product::repository_store::RepositoryInitializationStepKind::PreCheck
-                .command()
-                .expect("pre_check command");
-        let rule_config =
-            cadence_aria::product::repository_store::RepositoryInitializationStepKind::RuleConfig
-                .command()
-                .expect("rule-config command");
-        if input.prompt.contains(pre_check) && !self.fired.swap(true, Ordering::SeqCst) {
-            return Err(ProviderAdapterError::execution_failed(
-                None,
-                String::new(),
-                "test-injected interruption during the pre_check provider turn",
-                0,
-            ));
-        }
-        // RuleAndMcpConfig 命令时机：真实 provider 生成根规则的位置——
-        // 测试 provider 在 working_dir（聚合根）落盘 AGENTS 入口与
-        // language 规则，使末命令发布收口有真实材料可聚合。
-        if input.prompt.contains(rule_config) {
-            let root = input.working_dir.clone();
-            std::fs::write(root.join("AGENTS.md"), A03_ROOT_AGENTS).expect("write root AGENTS.md");
-            std::fs::create_dir_all(root.join(".claude").join("rules"))
-                .expect("create root rules dir");
-            std::fs::write(
-                root.join(".claude").join("rules").join("language.md"),
-                A03_ROOT_LANGUAGE,
-            )
-            .expect("write root language rule");
-        }
-        FakeStreamingProvider.start(input, cancel).await
+        self.start_turn().await
+    }
+
+    /// 生产 gateway 唯一分发入口（Task 7 分流收口）。
+    async fn start_validated(
+        &self,
+        _validated: cadence_aria::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        self.start_turn().await
     }
 }
 
@@ -410,9 +464,9 @@ async fn a03_app() -> (axum::Router, Arc<LogicalCodebaseGatewayFactory>, PathBuf
     let mut registry = ProviderRegistry::new();
     registry.register(
         ProviderName::ClaudeCode,
-        Arc::new(FaultOncePreCheckStreamingProvider {
-            fired: AtomicBool::new(false),
-        }),
+        Arc::new(FaultOncePreCheckStreamingProvider::new(
+            root_path.join("aggregate-root"),
+        )),
     );
     let factory = Arc::new(LogicalCodebaseGatewayFactory::new(
         paths.clone(),
@@ -436,21 +490,25 @@ async fn a03_app() -> (axum::Router, Arc<LogicalCodebaseGatewayFactory>, PathBuf
 }
 
 /// A04 fixture：生产默认依赖（fake-mode registry + 生产 admission driver）+
-/// fake CodeGraph CLI index operation。
-fn a04_app(root_path: &Path) -> (axum::Router, Arc<LogicalCodebaseGatewayFactory>) {
+/// fake CodeGraph CLI index operation。`aggregate_root` 是 LC 的 canonical
+/// 根（fixture provider 在 rule_config 轮向其落盘根材料）。
+fn a04_app(
+    root_path: &Path,
+    aggregate_root: &Path,
+) -> (axum::Router, Arc<LogicalCodebaseGatewayFactory>) {
     let paths = ProductAppPaths::new(root_path.join(".aria"));
     // 与生产 driver 相同的 admission 接线（with_gateway_factory 重建生产依赖），
     // registry 用恒可用 fake streaming provider——默认 factory 的 provider
     // gate 会做真实 ClaudeCode 健康探测，测试环境不可用。Task 1.8 重钉：
-    // 注入 pre_check 一次中断（Task 1.2/1.4 起 bootstrap 相位凭据豁免
-    // 「根规则（成员 language.md）尚未生成」，成员规则缺失不再阻断
-    // admission），为「恢复→显式 Retry→readiness 闭环」保留 Failed 检查点。
+    // 注入 pre_check 一次中断。fix-admission-member-rules-scope 起 bootstrap
+    // 相位凭据豁免成员规则门（裸成员可推进 recipe 链），为「中断→显式
+    // Retry→readiness 闭环」保留 Failed 检查点。
     let mut registry = ProviderRegistry::new();
     registry.register(
         ProviderName::ClaudeCode,
-        Arc::new(FaultOncePreCheckStreamingProvider {
-            fired: AtomicBool::new(false),
-        }),
+        Arc::new(FaultOncePreCheckStreamingProvider::new(
+            aggregate_root.to_path_buf(),
+        )),
     );
     let factory = Arc::new(LogicalCodebaseGatewayFactory::new(
         paths.clone(),
@@ -539,9 +597,12 @@ async fn a03_new_lc_reaches_planning_ready_without_manual_seed_or_duplicate_prov
     let aggregate_root = root_path.join("aggregate-root");
     let member_a = aggregate_root.join("alpha");
     let member_b = aggregate_root.join("beta");
+    // 裸成员仓(fix-admission-member-rules-scope):无任何 .claude/rules 材料
+    // ——路B 验收锚:bootstrap 凭据豁免成员规则门,根材料由 recipe 生成,
+    // 成员文件树/Git 状态零写(不预写规则文件,不靠成员材料证明根有效)。
     for member in [&member_a, &member_b] {
         git_repo_at(member);
-        commit_rule_file(member, "# language rule\n\n- Use Rust 2024 edition.\n");
+        git_commit_initial(member);
     }
     let head_a = git_head(&member_a);
     let head_b = git_head(&member_b);
@@ -631,9 +692,11 @@ async fn a03_new_lc_reaches_planning_ready_without_manual_seed_or_duplicate_prov
     assert_eq!(factory.audit().stream_launches(), 0);
 
     // Task 4（生产同构）：根规则材料（AGENTS + .claude/rules/language.md）
-    // 由 provider 在 RuleAndMcpConfig 命令时机生成——中断窗口无需再手工
-    // 预写 AGENTS；重试的命令审计窗口将其作为 allowlisted 变更冻结，末
-    // 命令收口发布真正文并冻结最终 receipt。
+    // 由 provider 在 RuleAndMcpConfig 轮生成（fixture 按轮次合同在第二个
+    // 成功 turn 落盘，见 FaultOncePreCheckStreamingProvider）——中断窗口
+    // 无需再手工预写 AGENTS；重试的命令审计窗口将其作为 allowlisted
+    // 变更冻结，末命令收口发布真正文并冻结最终 receipt。成员仓保持裸态
+    // 全程（bootstrap 凭据豁免成员规则门，不写成员规则）。
 
     // 从 REST 点击带 expected revision 的显式 Retry：原编排链从 checkpoint
     // 续跑（已完成 machine_skills/aggregate_preflight 不重跑，pre_check 及其
@@ -692,7 +755,10 @@ async fn a03_new_lc_reaches_planning_ready_without_manual_seed_or_duplicate_prov
     // openspec_and_examples）；已完成 provider turn 计数不增加。
     assert_eq!(factory.audit().stream_launches(), 3);
 
-    // 成员仓零 Git 写副作用。
+    // 成员仓零 Git 写副作用,且全程无任何规则文件被写入(裸成员零写:
+    // bootstrap 凭据豁免成员规则门,不复制/生成成员规则)。
+    assert!(!member_a.join(".claude/rules/language.md").exists());
+    assert!(!member_b.join(".claude/rules/language.md").exists());
     assert_eq!(git_porcelain(&member_a), "");
     assert_eq!(git_porcelain(&member_b), "");
     assert_eq!(git_head(&member_a), head_a);
@@ -791,7 +857,7 @@ async fn a04_failed_identity_and_missing_rules_require_product_repair_before_rea
         run_git(member, &["remote", "add", "origin", remote]);
     }
 
-    let (app, factory) = a04_app(&root_path);
+    let (app, factory) = a04_app(&root_path, &legacy_root);
     let (status, _) = request_json(
         &app,
         Method::POST,
@@ -1008,11 +1074,12 @@ async fn a04_failed_identity_and_missing_rules_require_product_repair_before_rea
     // identity 修复完成后（marker 终态非 Failed、成员在册）冷启动身份步完成。
     assert_eq!(bootstrap_step(&waiting, "identity")["status"], "completed");
 
-    // 触发 root recipe(成员规则仍缺失)。Task 3 新合同:missing_member_rules
-    // 任何 phase 都阻断(bootstrap 相位凭据只豁免 missing_root_rules)——
-    // 成员规则缺失时 provider turn 在 admission 预检即被拒绝(member_
-    // language_rules_missing,waiting 事实进 durable error),provider 保持
-    // 零启动;「失败身份/缺规则需产品修复后才能 read 切换」的意图不变。
+    // 触发 root recipe(成员规则仍缺失)。fix-admission-member-rules-scope
+    // 新合同(取代 lcg Task 3a/A9「任何相位阻断」):有效 bootstrap 凭据豁免
+    // 成员规则门——裸成员的 provider turn 不再被 admission 预检拒绝
+    // (member_language_rules_missing 不进 durable error),失败检查点改由
+    // 注入的 pre_check 中断保留(第一次启动即消费,deterministic checkpoint,
+    // 中断先于成功启动,launch 计数不变)。
     let (status, accepted) = request_json(
         &app,
         Method::POST,
@@ -1029,11 +1096,12 @@ async fn a04_failed_identity_and_missing_rules_require_product_repair_before_rea
         &app,
         &bootstrap,
         |projection| bootstrap_step(projection, "member_index")["status"] == "failed",
-        "member rules missing blocks the bootstrap provider turn at admission",
+        "the injected pre_check interruption fails the first bootstrap run",
     )
     .await;
-    // 阻断事实落在 durable operation 记录的 error(投影 detail 只带 stage
-    // 摘要):pre_check turn 的失败与缺失材料必须可补读。
+    // 失败事实落在 durable operation 记录的 error(投影 detail 只带 stage
+    // 摘要):pre_check turn 的失败可补读,且必须是注入的中断而非
+    // admission 阻断(凭据豁免已生效)。
     let (_, operation_denied) = request_json(
         &app,
         Method::GET,
@@ -1045,34 +1113,35 @@ async fn a04_failed_identity_and_missing_rules_require_product_repair_before_rea
     .await;
     assert_eq!(
         operation_denied["error"]["code"], "aggregate_pre_check_failed",
-        "durable error must name the blocked turn: {operation_denied}"
+        "durable error must name the interrupted turn: {operation_denied}"
+    );
+    let durable_message = operation_denied["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        !durable_message.contains("member_language_rules_missing"),
+        "bootstrap credential waives the member rules gate, got: {operation_denied}"
     );
     assert!(
-        operation_denied["error"]["message"]
-            .as_str()
-            .unwrap_or("")
-            .contains("member_language_rules_missing"),
-        "durable error must name the missing member rules: {operation_denied}"
+        !durable_message.contains("provider admission preflight denied"),
+        "the failure must be the injected interruption, not an admission denial: {operation_denied}"
+    );
+    assert!(
+        durable_message.contains("gateway start_streaming failed"),
+        "the injected turn failure must be observable: {operation_denied}"
     );
     assert_eq!(
         factory.audit().stream_launches(),
         0,
-        "the admission denial must fire before any launch"
+        "the injected interruption must fire before a successful launch"
     );
 
     // Task 4(生产同构,与 a03 同款):根规则材料由 provider 在
-    // RuleAndMcpConfig 命令时机生成,窗口内无需再手工预写 AGENTS。
+    // RuleAndMcpConfig 轮生成(fixture 轮次合同),窗口内无需手工预写
+    // AGENTS;成员规则不恢复(真实裸成员推进 planning-ready)。
 
-    // 通过产品准备动作恢复同一实际规则来源(真实成员仓规则文件),等待面
-    // 随 GET 补读消失。
-    std::fs::create_dir_all(repository.join(".claude/rules")).expect("recreate rules dir");
-    std::fs::write(&rules_path, "# language rule\n\n- Use Rust 2024 edition.\n")
-        .expect("restore language.md");
-
-    // 显式 Retry #1:材料已恢复,turn 进入真实 gateway 启动路径并在此
-    // 第一次消费注入的 pre_check 中断(deterministic checkpoint,中断先于
-    // 成功启动,launch 计数不变)。
-    let (status, interrupted_result) = request_json(
+    // 显式 Retry:注入中断已消费,原链继续(三个 provider turn 各启动一次,
+    // detached index build 落 active);成员文件树零写(bootstrap 不生成
+    // 成员规则——规则文件保持删除状态)。
+    let (status, ready_result) = request_json(
         &app,
         Method::POST,
         &format!("{}/actions", bootstrap),
@@ -1085,49 +1154,22 @@ async fn a04_failed_identity_and_missing_rules_require_product_repair_before_rea
         }),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{interrupted_result}");
-    let denied_again = poll_until(
-        &app,
-        &bootstrap,
-        |projection| bootstrap_step(projection, "member_index")["status"] == "failed",
-        "the injected pre_check interruption fails the retried operation",
-    )
-    .await;
-    assert_eq!(
-        factory.audit().stream_launches(),
-        0,
-        "the injected interruption must fire before a successful launch"
-    );
-
-    // 显式 Retry #2:注入中断已消费,原链继续(三个 provider turn 各启动
-    // 一次,detached index build 落 active)。
-    let (status, ready_result) = request_json(
-        &app,
-        Method::POST,
-        &format!("{}/actions", bootstrap),
-        json!({
-            "command_id": "cmd-a04-member-index-retry-2",
-            "step": "member_index",
-            "action": "retry",
-            "expected_revision": denied_again["membership_revision"].as_u64(),
-            "expected_object_id": operation_id,
-        }),
-    )
-    .await;
     assert_eq!(status, StatusCode::OK, "{ready_result}");
 
     let ready = poll_until(
         &app,
         &bootstrap,
         |projection| projection["planning_ready"] == true,
-        "the original chain continues after the rules are restored",
+        "the bare member chain reaches planning_ready after the explicit retry",
     )
     .await;
     assert_eq!(
         factory.audit().stream_launches(),
         3,
-        "the restored chain must launch exactly three provider turns"
+        "the bare chain must launch exactly three provider turns"
     );
+    // 成员仓零写:被删除的规则文件不被重建(bootstrap 不复制/生成成员规则)。
+    assert!(!rules_path.exists(), "member rules must stay absent (zero write)");
     // 冻结正确的 envelope/policy digest：两次补读一致且非空。
     let digest = ready["policy"]["policy_digest"]
         .as_str()
