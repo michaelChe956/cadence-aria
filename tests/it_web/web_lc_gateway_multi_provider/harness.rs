@@ -3692,10 +3692,10 @@ impl MatrixEnvironment {
         let member_b = aggregate_root_path.join("beta");
         git_repo_at(&member_a);
         git_repo_at(&member_b);
-        // 真实产品语义:成员 checkout 缺 `.claude/rules/language.md` 时
-        // missing_member_rules 任何 phase 阻断(Task 3 收紧)。与 lc-root
-        // 旧 E2E 的真实成员仓形态对齐,git fixture 播种成员规则材料
-        //(环境材料补齐,非产品绕过;root 侧规则由 #8 发布链产出)。
+        // 真实产品语义(fix-admission-member-rules-scope 后):成员 checkout 缺
+        // `.claude/rules/language.md` 不再全局阻断——bootstrap 凭据相位豁免、
+        // Normal 根材料有效时仅审计;SC 链按实际消费路径在消费点停等。
+        // seed 属环境材料补齐(SC 场景自备),非产品门槛绕过;root 侧规则由 #8 发布链产出。
         seed_member_rule_material(&member_a, "alpha");
         seed_member_rule_material(&member_b, "beta");
         commit(
@@ -7573,8 +7573,9 @@ fn expect_ok(
 }
 
 /// 成员仓规则材料播种:`.claude/rules/language.md`(合法 UTF-8;随
-/// `git add .` 进入 fixture 首次提交)。真实 LC 成员仓自带该文件,
-/// admission 的 missing_member_rules 门任何 phase 均阻断。
+/// `git add .` 进入 fixture 首次提交)。真实 LC 成员仓自带该文件;
+/// fix-admission-member-rules-scope 后缺失不再全局阻断(SC 消费点停等,
+/// seed 为 SC 场景自备环境材料)。
 fn seed_member_rule_material(path: &Path, member: &str) {
     let rule_dir = path.join(".claude/rules");
     std::fs::create_dir_all(&rule_dir).expect("create member rule dir");
