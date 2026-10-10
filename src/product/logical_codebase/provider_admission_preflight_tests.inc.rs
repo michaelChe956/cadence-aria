@@ -1291,6 +1291,32 @@ mod tests {
         artifact
     }
 
+    /// Task 1(fix-admission-member-rules-scope):真实有效根材料夹具——在
+    /// `publish_root_policy_with_receipt` 的发布链(locator 正文 + AGENTS 原字节
+    /// + 匹配最终 receipt)之上,补 canonical root 自身的
+    /// `.claude/rules/language.md`,构成「根规则 + 已发布政策 + 最终 receipt」
+    /// 齐备的有效根形态。路 A/路 B 的正向断言以本夹具为前提——豁免面靠真实
+    /// 根材料证明,不靠 placeholder 政策或补成员规则(REQ-REG-12 delta:
+    /// placeholder 不是「根材料有效」证明)。Task 2/3 消费;夹具矩阵区分:
+    /// 普通有效根 = 本函数;故意缺根 = `publish_root_policy_with_receipt`
+    /// (不建根 language);placeholder 兼容 = `admission_fixture` 默认形态;
+    /// fresh-bootstrap = 默认形态 + 有效凭据(根材料由 recipe 生成)。
+    #[allow(dead_code)] // Task 2/3 接入后移除
+    fn publish_valid_root_materials(
+        fixture: &AdmissionFixture,
+        operation_id: &str,
+    ) -> crate::product::logical_codebase::policy::AggregatePolicyArtifact {
+        let artifact = publish_root_policy_with_receipt(fixture, operation_id);
+        let canonical_root = std::fs::canonicalize(&fixture.aggregate_root).unwrap();
+        std::fs::create_dir_all(canonical_root.join(".claude/rules")).unwrap();
+        std::fs::write(
+            canonical_root.join(".claude/rules/language.md"),
+            "# 语言规则\n\n- 有效根材料 fixture:canonical root 自身的 language 规则。\n",
+        )
+        .unwrap();
+        artifact
+    }
+
     /// 消费侧观察面:admission 判定状态与 provider 启动计数(测试 6 断言组)。
     struct ProviderSpawnObservation {
         status: &'static str,
