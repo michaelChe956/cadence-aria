@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -40,6 +40,8 @@ function renderWizard(index: number, overrides: Partial<ComponentProps<typeof On
 
 describe("OnboardingWizard", () => {
   afterEach(() => {
+    // 先卸载 React 树（portal 节点由 React 从 body 摘除），再清手动附加的锚点。
+    cleanup();
     document.body.innerHTML = "";
   });
 
@@ -92,5 +94,76 @@ describe("OnboardingWizard", () => {
     renderWizard(0);
     expect(screen.getByTestId("onboarding-highlight")).toBeInTheDocument();
     expect(screen.queryByTestId("onboarding-anchor-missing")).not.toBeInTheDocument();
+  });
+});
+
+function mockElementRect(
+  el: Element,
+  rect: { top: number; left: number; width: number; height: number },
+) {
+  el.getBoundingClientRect = () => {
+    const { top, left, width, height } = rect;
+    return {
+      top,
+      left,
+      width,
+      height,
+      right: left + width,
+      bottom: top + height,
+      x: left,
+      y: top,
+      toJSON: () => ({}),
+    } as DOMRect;
+  };
+}
+
+describe("OnboardingWizard 引导卡定位", () => {
+  afterEach(() => {
+    cleanup();
+    document.body.innerHTML = "";
+  });
+
+  it("卡片直接挂载在 body 下（portal 免疫 transform 祖先包含块）", () => {
+    renderWizard(0);
+    expect(screen.getByTestId("onboarding-wizard").parentElement).toBe(document.body);
+  });
+
+  it("有目标时卡片锚定到目标右侧并渲染指向标记", () => {
+    const anchor = document.createElement("button");
+    anchor.setAttribute("data-testid", "onboarding-anchor-issue-create");
+    document.body.appendChild(anchor);
+    // jsdom 视口 1024×768；卡片尺寸测得 0×0 → 首选右侧：left = 100+120+12。
+    mockElementRect(anchor, { top: 200, left: 100, width: 120, height: 40 });
+
+    renderWizard(1);
+    const card = screen.getByTestId("onboarding-wizard");
+    expect(card).toHaveAttribute("data-anchor-side", "right");
+    expect(card.style.left).toBe("232px");
+    expect(card.style.top).toBe("220px");
+    expect(screen.getByTestId("onboarding-arrow")).toBeInTheDocument();
+  });
+
+  it("目标移动后 resize 触发重算", async () => {
+    const anchor = document.createElement("button");
+    anchor.setAttribute("data-testid", "onboarding-anchor-project-create");
+    document.body.appendChild(anchor);
+    mockElementRect(anchor, { top: 200, left: 100, width: 120, height: 40 });
+
+    renderWizard(0);
+    const card = screen.getByTestId("onboarding-wizard");
+    expect(card.style.left).toBe("232px");
+
+    mockElementRect(anchor, { top: 40, left: 800, width: 120, height: 40 });
+    fireEvent.resize(window);
+    await waitFor(() => expect(card.style.left).toBe("932px"));
+    expect(card.style.top).toBe("60px");
+  });
+
+  it("无锚点时回退视口底部居中，不渲染指向标记", () => {
+    renderWizard(0);
+    const card = screen.getByTestId("onboarding-wizard");
+    expect(card).toHaveAttribute("data-anchor-side", "fallback");
+    expect(card.className).toContain("left-1/2");
+    expect(screen.queryByTestId("onboarding-arrow")).not.toBeInTheDocument();
   });
 });

@@ -1,15 +1,28 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { ArrowLeft, ArrowRight, Check, X } from "lucide-react";
 import { onboardingProgress, type OnboardingStep } from "./steps";
+import {
+  computeCardPlacement,
+  type CardPlacement,
+  type PlacementRect,
+} from "./placement";
 
 const HIGHLIGHT_PADDING = 4;
+// 回退定位类与 placement.ts 的 FALLBACK_BOTTOM_OFFSET(72) 保持一致：
+// 抬高避开左下「操作引导」与右下「图片创作」两个 fixed 悬浮按钮。
+const FALLBACK_POSITION_CLASS = "bottom-[72px] left-1/2 -translate-x-1/2";
 
 /**
  * 无第三方依赖的引导浮层：说明卡 + 位置/总数 + 上一步/下一步/跳过/完成 +
  * 示意资源降级 + 缺失锚点提示 + 视觉高亮。
  *
  * 高亮层 `pointer-events-none`，不捕获业务点击；说明卡提供非阻塞控制。
- * 步骤切换 / resize / scroll 时重新测量，卸载时清理监听与高亮。
+ * 说明卡与高亮层经 portal 挂 document.body——fixed 恒以视口为包含块，
+ * 免疫 transform/filter 祖先劫持（同 DialogShell 先例，fc0963ef 根因）。
+ * 有锚点时卡片定位到目标旁（右/下/左/上自适应翻转 + 视口夹紧，见 placement.ts），
+ * 指向标记对准目标中心；无锚点回退视口底部居中。
+ * 步骤切换 / resize / scroll / 卡片内容尺寸变化时重新测量，卸载时清理监听与高亮。
  */
 export function OnboardingWizard({
   steps,
@@ -29,24 +42,58 @@ export function OnboardingWizard({
   const step = steps[index] ?? null;
   const progress = onboardingProgress(index, steps.length);
   const isLast = index >= steps.length - 1;
-  const [rect, setRect] = useState<DOMRect | null>(null);
+  const [targetRect, setTargetRect] = useState<PlacementRect | null>(null);
   const [anchorMissing, setAnchorMissing] = useState(false);
+  const [placement, setPlacement] = useState<CardPlacement | null>(null);
+  const cardRef = useRef<HTMLElement | null>(null);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!step) {
       return;
     }
+    const selector = `[data-testid="${step.anchorTestId}"]`;
+    // 先尽量把目标滚进可视区再测量（jsdom 未实现 scrollIntoView，可选调用跳过）。
+    document.querySelector(selector)?.scrollIntoView?.({ block: "center", inline: "nearest" });
+
     let frame = 0;
     const measure = () => {
-      const target = document.querySelector(`[data-testid="${step.anchorTestId}"]`);
+      const target = document.querySelector(selector);
       if (!target) {
-        setRect(null);
+        setTargetRect(null);
         setAnchorMissing(true);
+        setPlacement(null);
         return;
       }
-      setRect(target.getBoundingClientRect());
+      const box = target.getBoundingClientRect();
+      const rect: PlacementRect = {
+        top: box.top,
+        left: box.left,
+        width: box.width,
+        height: box.height,
+      };
+      setTargetRect((prev) =>
+        prev && prev.top === rect.top && prev.left === rect.left &&
+          prev.width === rect.width && prev.height === rect.height
+          ? prev
+          : rect,
+      );
       setAnchorMissing(false);
+      const cardBox = cardRef.current?.getBoundingClientRect();
+      const next = computeCardPlacement({
+        target: rect,
+        viewport: { width: window.innerWidth, height: window.innerHeight },
+        cardSize: cardBox
+          ? { width: cardBox.width, height: cardBox.height }
+          : { width: 0, height: 0 },
+      });
+      setPlacement((prev) =>
+        prev && prev.top === next.top && prev.left === next.left && prev.side === next.side &&
+          prev.arrow?.top === next.arrow?.top && prev.arrow?.left === next.arrow?.left
+          ? prev
+          : next,
+      );
     };
+    // 初始同步测量（提交后、绘制前），避免回退位闪现。
     measure();
     const schedule = () => {
       cancelAnimationFrame(frame);
@@ -54,10 +101,20 @@ export function OnboardingWizard({
     };
     window.addEventListener("resize", schedule);
     window.addEventListener("scroll", schedule, true);
+    // 示意截图加载完成等引起卡片高度变化时重算（测试环境 setup.ts 已装 mock）。
+    const cardElement = cardRef.current;
+    const observer =
+      cardElement && typeof ResizeObserver !== "undefined"
+        ? new ResizeObserver(schedule)
+        : null;
+    if (observer && cardElement) {
+      observer.observe(cardElement);
+    }
     return () => {
       cancelAnimationFrame(frame);
       window.removeEventListener("resize", schedule);
       window.removeEventListener("scroll", schedule, true);
+      observer?.disconnect();
     };
   }, [step]);
 
@@ -72,33 +129,46 @@ export function OnboardingWizard({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [onClose]);
 
-  if (!step) {
+  if (!step || typeof document === "undefined") {
     return null;
   }
 
-  return (
+  const anchored = placement !== null;
+
+  return createPortal(
     <>
-      {rect ? (
+      {targetRect ? (
         <div
           data-testid="onboarding-highlight"
           aria-hidden="true"
           className="pointer-events-none fixed z-40 rounded-lg ring-2 ring-[var(--aria-primary)] transition-all duration-200 motion-reduce:transition-none"
           style={{
-            top: rect.top - HIGHLIGHT_PADDING,
-            left: rect.left - HIGHLIGHT_PADDING,
-            width: rect.width + HIGHLIGHT_PADDING * 2,
-            height: rect.height + HIGHLIGHT_PADDING * 2,
+            top: targetRect.top - HIGHLIGHT_PADDING,
+            left: targetRect.left - HIGHLIGHT_PADDING,
+            width: targetRect.width + HIGHLIGHT_PADDING * 2,
+            height: targetRect.height + HIGHLIGHT_PADDING * 2,
             boxShadow: "0 0 0 9999px rgba(15, 23, 42, 0.35)",
           }}
         />
       ) : null}
       <section
+        ref={cardRef}
         data-testid="onboarding-wizard"
+        data-anchor-side={placement?.side ?? "fallback"}
         role="dialog"
         aria-label="操作引导"
         aria-modal="false"
-        className="fixed bottom-4 left-1/2 z-50 w-[min(26rem,calc(100vw-2rem))] -translate-x-1/2 rounded-2xl border border-[var(--aria-line)] bg-[var(--aria-panel)] p-4 shadow-[0_24px_64px_rgba(15,23,42,0.22)]"
+        className={`fixed z-50 w-[min(26rem,calc(100vw-2rem))] rounded-2xl border border-[var(--aria-line)] bg-[var(--aria-panel)] p-4 shadow-[0_24px_64px_rgba(15,23,42,0.22)]${anchored ? "" : ` ${FALLBACK_POSITION_CLASS}`}`}
+        style={anchored ? { top: placement.top, left: placement.left } : undefined}
       >
+        {placement?.arrow ? (
+          <span
+            data-testid="onboarding-arrow"
+            aria-hidden="true"
+            className="absolute h-3 w-3 rotate-45 border border-[var(--aria-line)] bg-[var(--aria-panel)]"
+            style={{ top: placement.arrow.top - 6, left: placement.arrow.left - 6 }}
+          />
+        ) : null}
         <header className="flex items-start justify-between gap-3">
           <div className="min-w-0">
             <p
@@ -197,6 +267,7 @@ export function OnboardingWizard({
           </div>
         </footer>
       </section>
-    </>
+    </>,
+    document.body,
   );
 }
