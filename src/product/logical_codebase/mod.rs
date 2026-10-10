@@ -24,6 +24,7 @@ pub mod production_policy_resolvers;
 pub mod provider_admission_preflight;
 pub mod provider_boundary_probe;
 pub mod provider_capability_probe;
+pub mod provider_capability_revalidate;
 pub mod provider_capability_store;
 pub mod provider_gateway;
 pub mod provider_projection;

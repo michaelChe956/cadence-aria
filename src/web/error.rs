@@ -259,6 +259,11 @@ impl IntoResponse for ApiError {
             "recent_since_required" | "invalid_recent_since" | "invalid_recent_limit" => {
                 StatusCode::UNPROCESSABLE_ENTITY
             }
+            // add-provider-revalidate-probe：Fake/未知 provider 422（不冒充
+            // 探测）；探针失败关闭 503（环境侧真实失败，可重试，不伪造
+            // Confirmed）。
+            "provider_capability_probe_unsupported" => StatusCode::UNPROCESSABLE_ENTITY,
+            "provider_capability_probe_failed" => StatusCode::SERVICE_UNAVAILABLE,
             // Task 7 证据查询稳定码：6 码 + evidence_io（设计 §5.2）。
             "evidence_unauthorized" => StatusCode::UNAUTHORIZED,
             "evidence_forbidden" => StatusCode::FORBIDDEN,

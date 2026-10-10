@@ -144,6 +144,14 @@ pub fn build_web_router_with_evidence(state: WebAppState, evidence_enabled: bool
             post(handlers::post_lc_bootstrap_action),
         )
         .route(
+            "/api/projects/{project_id}/logical-codebases/{lc_id}/capabilities",
+            get(handlers::get_lc_capabilities),
+        )
+        .route(
+            "/api/projects/{project_id}/logical-codebases/{lc_id}/capability-revalidate",
+            post(handlers::post_lc_capability_revalidate),
+        )
+        .route(
             "/api/projects/{project_id}/logical-codebase/bootstrap",
             get(handlers::get_logical_codebase_bootstrap),
         )

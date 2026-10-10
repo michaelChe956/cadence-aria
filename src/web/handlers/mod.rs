@@ -91,6 +91,7 @@ mod identity_repair;
 pub mod image_create;
 pub(crate) mod lifecycle;
 mod logical_codebase_bootstrap;
+mod logical_codebase_capabilities;
 mod logical_codebase_members;
 mod logical_codebase_registration;
 mod pointer_publication;
@@ -143,6 +144,7 @@ pub use logical_codebase_bootstrap::{
     get_lc_bootstrap_projection, get_logical_codebase_bootstrap, post_lc_bootstrap_action,
     post_logical_codebase_bootstrap_action,
 };
+pub use logical_codebase_capabilities::{get_lc_capabilities, post_lc_capability_revalidate};
 pub use logical_codebase_members::{
     list_lc_logical_codebase_members, list_logical_codebase_members,
 };

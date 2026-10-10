@@ -1524,7 +1524,7 @@ fn argv_with_program(program: &str, args: &[String]) -> Vec<String> {
 /// 宿主侧真实 CLI 版本探测(`<cli> --version`,trimmed 完整 stdout;与
 /// capability probe 的版本口径一致)。CLI 缺失/失败 → boundary_unavailable
 /// (Unknown),不冒充探测。
-fn probe_cli_version(cli_program: &str) -> Result<String, ProviderBoundaryError> {
+pub(crate) fn probe_cli_version(cli_program: &str) -> Result<String, ProviderBoundaryError> {
     let output = Command::new(cli_program)
         .arg("--version")
         .output()

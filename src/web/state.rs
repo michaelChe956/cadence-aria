@@ -153,6 +153,12 @@ pub struct WebAppState {
     pub image_create_run_registry: Arc<ImageCreateRunRegistry>,
     pub image_create_engine: Option<Arc<ImageCreateEngine>>,
     pub logical_gateway_factory: Option<Arc<LogicalCodebaseGatewayFactory>>,
+    /// add-provider-revalidate-probe：capability 重验证服务（生产缺省由
+    /// handler 按请求 paths 构造真实 seam；it_web 注入 fake 版本源/
+    /// 探针 runner 断言 HTTP 面）。
+    pub capability_revalidate_service: Option<
+        Arc<crate::product::logical_codebase::provider_capability_revalidate::ProviderCapabilityRevalidateService>,
+    >,
 }
 
 impl WebAppState {
@@ -228,12 +234,25 @@ impl WebAppState {
             image_create_run_registry,
             image_create_engine,
             logical_gateway_factory: Some(logical_gateway_factory),
+            capability_revalidate_service: None,
         };
         state.aggregate_initialization_dependencies = Some(
             crate::web::handlers::AggregateInitializationDependencies::production(&state)
                 .expect("build aggregate initialization dependencies"),
         );
         state
+    }
+
+    /// add-provider-revalidate-probe：注入 capability 重验证服务（it_web
+    /// fake seam；生产缺省走 handler 的真实服务构造）。
+    pub fn with_capability_revalidate_service(
+        mut self,
+        service: Arc<
+            crate::product::logical_codebase::provider_capability_revalidate::ProviderCapabilityRevalidateService,
+        >,
+    ) -> Self {
+        self.capability_revalidate_service = Some(service);
+        self
     }
 
     /// 仅由 `web` 启动入口在构造 state 时设置；运行期不会提供可变控制面。
