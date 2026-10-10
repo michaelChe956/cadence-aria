@@ -3,6 +3,7 @@ import type {
   AggregateInitializationOperationSnapshot,
   CodingAttempt,
   IssueDeliverySummaryDto,
+  LogicalCodebaseBootstrapProjection,
   PointerPublicationDto,
   RegistrationBatchDto,
   RegistrationPreflightResponse,
@@ -83,6 +84,9 @@ export type LifecycleFetchOptions = {
   automationPutFailures?: number;
   // P1 WIGA Task 2：PUT enrollment 一律 409（验证冲突留弹窗、不自动 Disable）。
   automationEnrollmentConflict?: boolean;
+  // 冷启动投影序列：GET .../bootstrap 依调用次序返回，末项之后重复末项
+  //（挂载/登记完成/抽屉展开等多次补读的分段断言用）。
+  bootstrapProjections?: LogicalCodebaseBootstrapProjection[];
   // S6/B1（2026-10-10）：issue 级交付状态聚合 mock；缺省不返回该字段
   // （旧响应缺失时前端不渲染交付面板的向后兼容形态）。
   deliverySummary?: IssueDeliverySummaryDto;
@@ -131,13 +135,25 @@ export function aggregateInitializationOperation(
   };
 }
 
-// aggregate-index/initialization 路由段（自 IssueLifecycleWorkbench.test-utils.ts
+// aggregate-index/initialization/bootstrap 路由段（自 IssueLifecycleWorkbench.test-utils.ts
 // lifecycleFetch 逐行移出；命中返回 Response，未命中返回 undefined 交后续路由）。
 export function createAggregateInitializationRoutes(
   options?: LifecycleFetchOptions,
 ) {
   let aggregateInitializationGetCount = 0;
+  let bootstrapGetCount = 0;
   return (url: string, init?: RequestInit): Promise<Response> | undefined => {
+    const bootstrapMatch = url.match(
+      /^\/api\/projects\/([^/]+)\/logical-codebases\/([^/]+)\/bootstrap$/,
+    );
+    if (bootstrapMatch && init?.method !== "POST" && options?.bootstrapProjections?.length) {
+      const projections = options.bootstrapProjections;
+      const projection =
+        projections[bootstrapGetCount] ??
+        projections[projections.length - 1]!;
+      bootstrapGetCount += 1;
+      return jsonResponse(projection);
+    }
     const aggregateIndexMatch = url.match(
       /^\/api\/projects\/([^/]+)\/logical-codebases\/([^/]+)\/aggregate-indexes\/(active|rebuild)$/,
     );

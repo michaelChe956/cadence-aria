@@ -37,6 +37,7 @@ type LogicalCodebaseScopeData = {
   >;
   bootstrapProjection: LogicalCodebaseBootstrapProjection | null;
   refreshBootstrap: () => void;
+  refreshScope: () => void;
   latestPointerPublication: PointerPublicationDto | null;
   showIncrementalHint: boolean;
 };
@@ -66,6 +67,9 @@ export function useLogicalCodebaseScopeData({
   const [bootstrapProjection, setBootstrapProjection] =
     useState<LogicalCodebaseBootstrapProjection | null>(null);
   const [bootstrapRefreshTick, setBootstrapRefreshTick] = useState(0);
+  // 作用域显式补读 tick：登记完成等「成员已变化」事件后整域重拉用；
+  // 与 LC/Project 切换不同，补读不清空 aggregateInitialization 等进行面。
+  const [scopeRefreshTick, setScopeRefreshTick] = useState(0);
 
   const latestPointerPublication = useMemo<PointerPublicationDto | null>(() => {
     if (pointerPublications.length === 0) {
@@ -97,9 +101,18 @@ export function useLogicalCodebaseScopeData({
     logicalCodebaseMembers.length >
       latestCompletedPointerPublication.entries.length;
 
+  // I1/R8：LC/Project 作用域切换时重置跨切面状态——aggregateInitialization
+  // 残留的 operation_id 会带着上一 LC 的身份打到新 LC 路径；bootstrapProjection
+  // 同步清空避免新 LC 数据到达前闪旧 LC 的投影。显式补读（scopeRefreshTick）
+  // 不触发重置：只重拉数据，不打断进行中的等待面。
   useEffect(() => {
     setAggregateInitialization(null);
     setBootstrapProjection(null);
+  }, [selectedProjectId, activeLogicalCodebaseId]);
+
+  // 成员/指针发布/聚合索引拉取：作用域切换或显式补读（登记完成等成员已
+  // 变化的事件）时重拉。
+  useEffect(() => {
     if (!selectedProjectId || !activeLogicalCodebaseId) {
       setLogicalCodebaseMembers([]);
       setPointerPublications([]);
@@ -136,7 +149,7 @@ export function useLogicalCodebaseScopeData({
     return () => {
       disposed = true;
     };
-  }, [selectedProjectId, activeLogicalCodebaseId]);
+  }, [selectedProjectId, activeLogicalCodebaseId, scopeRefreshTick]);
 
   // C4 Task 9：选中 LC 的 bootstrap 纯投影拉取/刷新（动作成功后经
   // refreshBootstrap 立即补读；GET 本身零副作用）。SSE/失效唤醒由全局
@@ -187,6 +200,14 @@ export function useLogicalCodebaseScopeData({
   }, [selectedProjectId, activeLogicalCodebaseId, bootstrapPolling]);
 
   const refreshBootstrap = useCallback(() => {
+    setBootstrapRefreshTick((tick) => tick + 1);
+  }, []);
+
+  // 登记完成等成员已变化的事件后整域补读：成员/指针发布/聚合索引与
+  // bootstrap 投影一并重拉（后端在登记批内推进 identity/manifest_checkout
+  // 并落成员，宿主不得沿用登记前的陈旧快照）。
+  const refreshScope = useCallback(() => {
+    setScopeRefreshTick((tick) => tick + 1);
     setBootstrapRefreshTick((tick) => tick + 1);
   }, []);
 
@@ -283,6 +304,7 @@ export function useLogicalCodebaseScopeData({
     setAggregateInitialization,
     bootstrapProjection,
     refreshBootstrap,
+    refreshScope,
     latestPointerPublication,
     showIncrementalHint,
   };

@@ -443,6 +443,7 @@ export function IssueLifecycleWorkbench({
     setAggregateInitialization,
     bootstrapProjection,
     refreshBootstrap,
+    refreshScope,
     latestPointerPublication,
     showIncrementalHint,
   } = useLogicalCodebaseScopeData({
@@ -513,7 +514,7 @@ export function IssueLifecycleWorkbench({
       (latestPointerPublication.status.includes("failed") ||
         latestPointerPublication.status.includes("partial")));
 
-  // Task 8：展开/折叠仅切换运维面板可见性——不发请求、不动选中态。
+  // Task 8：展开/折叠仅切换运维面板可见性——不动选中态（bootstrap 补读见下方 effect）。
   function handleToggleLcSummary() {
     if (!selectedProjectId) {
       return;
@@ -525,6 +526,15 @@ export function IssueLifecycleWorkbench({
     }));
     writeStoredValue(lcSummaryStorageKey(selectedProjectId), next ? "1" : "0");
   }
+
+  // 冷启动/运维抽屉每次展开（管理面板挂载）时补读 bootstrap 投影：后端
+  // 推进可能发生在抽屉关闭期间（如登记批内完成 identity/manifest_checkout），
+  // 展开时对齐后端当前状态；稳定态不轮询，等显式动作/事件唤醒。
+  useEffect(() => {
+    if (lcSummaryExpandedForProject) {
+      refreshBootstrap();
+    }
+  }, [lcSummaryExpandedForProject, refreshBootstrap]);
 
   async function handleSelectProject(projectId: string) {
     if (projectId === selectedProjectId) {
@@ -888,7 +898,13 @@ export function IssueLifecycleWorkbench({
             // 合并流：LC 创建后登记在弹窗内完成，这里只刷新列表（不再打开独立登记向导）。
             if (selectedProjectId) void refresh(selectedProjectId);
           }}
-          onRegistrationCompleted={() => refresh(selectedProjectId)}
+          onRegistrationCompleted={() => {
+            // 登记批在后端落成员并推进 identity/manifest_checkout：目录与
+            // LC 作用域（成员/发布/索引 + bootstrap 投影）都要重拉，否则
+            // 管理抽屉沿用登记前的陈旧冷启动快照。
+            void refresh(selectedProjectId);
+            refreshScope();
+          }}
           onClose={() => setAddCodebaseDialogOpen(false)}
         />
       ) : null}
@@ -898,7 +914,11 @@ export function IssueLifecycleWorkbench({
         <LogicalCodebaseRegistrationWizard
           projectId={selectedProjectId}
           logicalCodebaseId={activeLogicalCodebaseId}
-          onCompleted={() => refresh(selectedProjectId)}
+          onCompleted={() => {
+            // 独立登记向导完成：与合并流同口径——目录 + LC 作用域重拉。
+            void refresh(selectedProjectId);
+            refreshScope();
+          }}
           onClose={() => setRegistrationDialogOpen(false)}
         />
       ) : null}
