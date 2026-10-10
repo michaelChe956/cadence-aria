@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import type {
   CodebaseSummaryDto,
   CodingAttemptAddress,
+  IssueDeliverySummaryDto,
   LogicalCodebaseDto,
   PointerPublicationDto,
   Project,
@@ -37,7 +38,9 @@ export type IssueLifecycleWorkbenchViewProps = {
   aggregateIndex: unknown; aggregateIndexRebuilding: boolean; latestPointerPublication: PointerPublicationDto | null;
   pointerPublicationBusy: boolean; showIncrementalHint: boolean; focusedEntity: LifecycleCardData | null;
   isDrawerOpen: boolean; drawerWorkItems: unknown[];
-  codingAttempts: unknown[]; deliverySummary: unknown; pendingWorkItemPlanLaunch: boolean;
+  codingAttempts: unknown[]; deliverySummary: IssueDeliverySummaryDto | undefined;
+  selectedIssueDeliverySummary: IssueDeliverySummaryDto | undefined;
+  pendingWorkItemPlanLaunch: boolean;
   onSelectProject: (id: string) => void; onCreateProject: () => void; onAddCodebase: () => void;
   onDeleteProject: (id: string) => void; onDeleteRepository: (id: string) => void;
   onDeleteLogicalCodebase: (id: string) => void; onShowAll: () => void; onRefresh: () => void;
@@ -80,7 +83,7 @@ export function IssueLifecycleWorkbenchView({
   bootstrapProjection, onBootstrapChanged,
   aggregateInitializationBusy, aggregateIndex, aggregateIndexRebuilding, latestPointerPublication,
   pointerPublicationBusy, showIncrementalHint, focusedEntity, isDrawerOpen, drawerWorkItems,
-  codingAttempts, deliverySummary, onSelectProject, onCreateProject, onAddCodebase, onDeleteProject,
+  codingAttempts, deliverySummary, selectedIssueDeliverySummary, onSelectProject, onCreateProject, onAddCodebase, onDeleteProject,
   onDeleteRepository, onDeleteLogicalCodebase, onShowAll, onRefresh, onCreateIssue, onToggleLcSummary,
   onSelectLogicalCodebase, onOpenRegistration, onStartAggregateInitialization,
   onCancelAggregateInitialization, onRebuildAggregateIndex, onPublishFull, onPublishIncremental,
@@ -99,11 +102,11 @@ export function IssueLifecycleWorkbenchView({
         </div> : null}
         <div className="flex h-[calc(100dvh-6rem)] min-h-0 gap-3">
           {queueCollapsed ? <div data-testid="issue-queue-collapsed-rail" className="flex w-10 shrink-0 flex-col items-center gap-2 rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] py-2"><button type="button" aria-label="展开 Issue 队列" aria-expanded={false} onClick={onToggleQueueCollapsed} className="inline-flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] text-[var(--aria-ink-muted)] transition-colors duration-200 hover:border-[var(--aria-primary)] hover:text-[var(--aria-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"><PanelLeftOpen className="h-4 w-4" /></button><span data-testid="issue-queue-rail-count" className="shrink-0 rounded border border-[var(--aria-line)] bg-[var(--aria-panel)] px-1 py-0.5 font-mono text-[11px] text-[var(--aria-ink-muted)]">{queueTotalCount}</span></div> : <div data-testid="issue-queue-column" className="grid w-72 min-h-0 shrink-0 grid-rows-[auto_minmax(0,1fr)] gap-2"><button type="button" aria-label="折叠 Issue 队列" aria-expanded onClick={onToggleQueueCollapsed} className="inline-flex h-7 shrink-0 cursor-pointer items-center justify-center gap-1.5 self-start rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] px-2 text-[11px] font-semibold text-[var(--aria-ink-muted)] transition-colors duration-200 hover:border-[var(--aria-primary)] hover:text-[var(--aria-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"><PanelLeftClose className="h-3.5 w-3.5" />折叠队列</button><IssueQueue groups={issueQueueGroups} focusedIssueId={focusedIssueId} collapsedGroups={collapsedQueueGroups} onToggleGroup={onToggleQueueGroup} filterText={queueFilterText} onFilterTextChange={onQueueFilterTextChange} onSelectIssue={onSelectIssue} onGenerateStorySpec={onGenerateStorySpec} onDeleteIssue={onDeleteIssue} onShowMoreGroup={onShowMoreQueueGroup} deletingIssueId={deletingIssueId} /></div>}
-          <div className="flex min-h-0 min-w-0 flex-1"><IssueLifecycleDetail issue={selectedIssue} storySpecs={storySpecs} designSpecs={designSpecs} workItems={workItems} workItemRepositoryGroups={workItemRepositoryGroups} selectedKey={selectedCardKey} onSelect={onSelectCard} onOpenFullIssue={onOpenFullIssue} onDelete={onDeleteCard} onGenerateForStage={onGenerateForStage} deletingKey={deletingCardKey} /></div>
+          <div className="flex min-h-0 min-w-0 flex-1"><IssueLifecycleDetail issue={selectedIssue} storySpecs={storySpecs} designSpecs={designSpecs} workItems={workItems} workItemRepositoryGroups={workItemRepositoryGroups} selectedKey={selectedCardKey} deliverySummary={selectedIssueDeliverySummary} onSelect={onSelectCard} onOpenFullIssue={onOpenFullIssue} onDelete={onDeleteCard} onGenerateForStage={onGenerateForStage} deletingKey={deletingCardKey} /></div>
         </div>
       </div>} />
     </div>
-    {isDrawerOpen && focusedEntity ? <IssueLifecycleWorkbenchDrawer focusedEntity={focusedEntity} workItems={drawerWorkItems as never} codingAttempts={codingAttempts as never} deliverySummary={deliverySummary as never} onClose={onCloseDrawer} onOpenWorkspace={onOpenWorkspaceFromDrawer} onOpenCodingWorkspace={onOpenCodingWorkspaceFromDrawer} onGenerateNext={onGenerateNext} onDelete={onDeleteFromDrawer} /> : null}
+    {isDrawerOpen && focusedEntity ? <IssueLifecycleWorkbenchDrawer focusedEntity={focusedEntity} workItems={drawerWorkItems as never} codingAttempts={codingAttempts as never} deliverySummary={deliverySummary} onClose={onCloseDrawer} onOpenWorkspace={onOpenWorkspaceFromDrawer} onOpenCodingWorkspace={onOpenCodingWorkspaceFromDrawer} onGenerateNext={onGenerateNext} onDelete={onDeleteFromDrawer} /> : null}
     {dialogs}
   </>;
 }

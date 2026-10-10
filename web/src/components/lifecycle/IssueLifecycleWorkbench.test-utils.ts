@@ -923,6 +923,9 @@ export function lifecycleFetch(
           data.work_item_repository_groups,
         workspace_sessions: data.workspace_sessions,
         coding_attempts: data.coding_attempts,
+        ...(options?.deliverySummary
+          ? { delivery_summary: options.deliverySummary }
+          : {}),
       });
     }
     const codebasesMatch = url.match(

@@ -2,6 +2,7 @@ import type {
   AggregateIndexActiveResponse,
   AggregateInitializationOperationSnapshot,
   CodingAttempt,
+  IssueDeliverySummaryDto,
   PointerPublicationDto,
   RegistrationBatchDto,
   RegistrationPreflightResponse,
@@ -82,6 +83,9 @@ export type LifecycleFetchOptions = {
   automationPutFailures?: number;
   // P1 WIGA Task 2：PUT enrollment 一律 409（验证冲突留弹窗、不自动 Disable）。
   automationEnrollmentConflict?: boolean;
+  // S6/B1（2026-10-10）：issue 级交付状态聚合 mock；缺省不返回该字段
+  // （旧响应缺失时前端不渲染交付面板的向后兼容形态）。
+  deliverySummary?: IssueDeliverySummaryDto;
 };
 
 export function aggregateInitializationOperation(

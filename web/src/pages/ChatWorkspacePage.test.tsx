@@ -872,6 +872,26 @@ describe("ChatWorkspacePage dual track switch", () => {
     expect(screen.queryByTestId("workspace-status-bar")).toBeNull();
   });
 
+  it("surfaces the workspace error inside the connection shell", () => {
+    // S6（2026-10-10 E2E）可观测性：store 未绑定 session（如服务端 create 失败
+    // 发 Error 帧后关闭连接）时，连接壳必须透出 store.error——否则用户只见
+    // 「正在连接工作区…」永远看不到路由失败原因（TargetAmbiguous 现场）。
+    renderWorkspace();
+
+    act(() => {
+      useWorkspaceStore.setState({
+        error:
+          "workspace repository unavailable: repository_routing_ambiguous: issue_work_item_plan_0001 has multiple logical repository targets",
+      });
+    });
+
+    const shell = screen.getByTestId("workspace-connection-shell");
+    expect(shell).toHaveTextContent("正在连接工作区");
+    expect(screen.getByTestId("workspace-connection-error")).toHaveTextContent(
+      "repository_routing_ambiguous",
+    );
+  });
+
   it("uses one websocket while unknown becomes a known story", async () => {
     const { useWorkspaceWs: realUseWorkspaceWs } =
       await vi.importActual<typeof WorkspaceWsModule>("../hooks/useWorkspaceWs");

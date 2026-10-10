@@ -478,6 +478,13 @@ pub(crate) async fn handle_workspace_socket(
     {
         Ok(manager) => manager,
         Err(message) => {
+            // S6（2026-10-10 E2E）可观测性：create 失败臂原先发一帧 Error 即静默
+            // 关连接，服务端零痕迹（连接诊断只在 receiver 循环完整走完后记录），
+            // 现场只能看到前端 60s 重连循环。此处补一条 stderr 痕迹对齐
+            // aria-connection-diagnostic 惯例。
+            eprintln!(
+                "[aria-workspace-session-create-failed] session={session_id} connection={connection_id}: {message}"
+            );
             let err = WsOutMessage::Error { message };
             if let Ok(json) = serde_json::to_string(&err) {
                 let _ = ws_sender.send(Message::Text(json.into())).await;

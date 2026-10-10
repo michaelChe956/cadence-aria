@@ -352,6 +352,18 @@ export function IssueLifecycleWorkbench({
         : [],
     [lifecycles, focusedIssueIdForGroups],
   );
+  // B1（用户裁决 A，2026-10-10）：选中 issue 的交付状态聚合——详情区常驻
+  // 面板数据源（与抽屉 deliverySummary 分开派生：抽屉锚定 drawer 实体，
+  // 此处锚定当前选中 issue，抽屉关闭/残留 drawer key 时不串台）。
+  const selectedIssueDeliverySummary = useMemo(
+    () =>
+      focusedIssueIdForGroups
+        ? lifecycles.find(
+            (lifecycle) => lifecycle.issue.issue_id === focusedIssueIdForGroups,
+          )?.delivery_summary
+        : undefined,
+    [lifecycles, focusedIssueIdForGroups],
+  );
   const focusedEntity = useMemo(
     () => findCardInColumns(allColumns, drawerFocusedEntityKey),
     [allColumns, drawerFocusedEntityKey],
@@ -1000,6 +1012,7 @@ export function IssueLifecycleWorkbench({
       drawerWorkItems={focusedEntity ? lifecycles.find((lifecycle) => lifecycle.issue.issue_id === focusedEntity.issueId)?.work_items ?? [] : []}
       codingAttempts={focusedEntity ? lifecycles.find((lifecycle) => lifecycle.issue.issue_id === focusedEntity.issueId)?.coding_attempts ?? [] : []}
       deliverySummary={focusedEntity?.kind === "issue" ? lifecycles.find((lifecycle) => lifecycle.issue.issue_id === focusedEntity.issueId)?.delivery_summary : undefined}
+      selectedIssueDeliverySummary={selectedIssueDeliverySummary}
       pendingWorkItemPlanLaunch={Boolean(pendingWorkItemPlanLaunch)}
       onSelectProject={(projectId) => void handleSelectProject(projectId)}
       onCreateProject={() => setProjectDialogOpen(true)}

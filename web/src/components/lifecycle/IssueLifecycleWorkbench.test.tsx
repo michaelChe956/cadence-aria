@@ -382,6 +382,51 @@ describe("IssueLifecycleWorkbench base workflow", () => {
     ).toHaveTextContent("前端提示设计");
   });
 
+  it("shows the issue delivery panel persistently in the detail region once the issue is selected", async () => {
+    // B1（用户裁决 A，2026-10-10）：恢复 issue 交付面板用户可达入口——交付
+    // 面板原先只挂在 issue 抽屉，而抽屉唯一入口「查看完整 Issue」仅在长描述
+    // （>6 行或 >520 字符）时出现，短描述 issue 的交付状态无从查看。选中
+    // issue 后详情区必须常驻渲染交付状态面板，不依赖描述长度或抽屉开合。
+    vi.stubGlobal(
+      "fetch",
+      lifecycleFetch({
+        deliverySummary: {
+          project_id: "project_0001",
+          issue_id: "issue_0001",
+          overall: "partial",
+          entries: [
+            {
+              repository_name: "cadence-aria",
+              work_item_id: "work_item_0001",
+              attempt_status: "completed",
+              branch_name: "feat/delivery",
+              commit_sha: "abc123def456",
+              push_status: "pushed",
+              push_error: null,
+            },
+          ],
+        },
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "选择 Issue 登录会话过期" }),
+    );
+
+    // 短描述（默认「描述」）不出现「查看完整 Issue」，抽屉不可达——交付
+    // 面板必须常驻详情区。
+    expect(
+      screen.queryByRole("button", { name: "查看完整 Issue" }),
+    ).not.toBeInTheDocument();
+    const detail = screen.getByRole("region", { name: "Issue 生命周期详情" });
+    expect(
+      within(detail).getByTestId("delivery-status-panel"),
+    ).toHaveTextContent("部分交付");
+  });
+
   it("generates a story spec from the empty story stage panel action", async () => {
     const fetchMock = lifecycleFetch({ emptyLifecycle: true });
     vi.stubGlobal("fetch", fetchMock);

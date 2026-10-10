@@ -3,6 +3,7 @@ import { useState } from "react";
 import type {
   CodingAttempt,
   CodingAttemptAddress,
+  IssueDeliverySummaryDto,
   IssueLifecycleResponse,
   LifecycleWorkItem,
   PlanGroupProjectionDto,
@@ -16,6 +17,7 @@ import type {
 } from "../../state/lifecycle-workbench-store";
 import { workItemWaitingReason } from "../../state/lifecycle-workbench-store";
 import type { StagePipState } from "./issue-queue-derivation";
+import { DeliveryStatusPanel } from "./DeliveryStatusPanel";
 import { LifecycleCard } from "./LifecycleCard";
 import type { DrawerEntity } from "./LifecycleCardDrawer";
 import {
@@ -75,6 +77,7 @@ export function IssueLifecycleDetail({
   workItemRepositoryGroups = [],
   selectedKey,
   deletingKey,
+  deliverySummary,
   onSelect,
   onOpenFullIssue,
   onDelete,
@@ -87,6 +90,9 @@ export function IssueLifecycleDetail({
   workItemRepositoryGroups?: WorkItemRepositoryGroup[];
   selectedKey: string | null;
   deletingKey: string | null;
+  // B1（用户裁决 A，2026-10-10）：选中 issue 的交付状态聚合——常驻渲染
+  // 在详情区，不依赖「查看完整 Issue」抽屉入口（长描述限定）。
+  deliverySummary?: IssueDeliverySummaryDto;
   onSelect: (card: LifecycleCardData) => void;
   onOpenFullIssue: (card: LifecycleCardData) => void;
   onDelete: (card: LifecycleCardData) => void;
@@ -224,6 +230,12 @@ export function IssueLifecycleDetail({
           />
         </div>
       </div>
+      {/* B1（用户裁决 A，2026-10-10）：issue 级交付状态常驻面板——不随阶段
+          切换消失、不依赖「查看完整 Issue」抽屉入口；与抽屉内面板同组件
+          同数据（后端 delivery_summary 缺失时不渲染，向后兼容）。 */}
+      {deliverySummary ? (
+        <DeliveryStatusPanel summary={deliverySummary} />
+      ) : null}
       {/* Task 6：单阶段面板——同一时刻只渲染当前阶段区域，内容占满工作区宽度。 */}
       <div id={`stage-panel-${activeStage}`} className="flex min-h-0 flex-1 flex-col p-3">
         {activeStage === "story" ? (
