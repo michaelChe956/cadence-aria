@@ -468,10 +468,15 @@ mod tests {
         assert!(output.status.success());
     }
 
+    /// 路A 边界(fix-admission-member-rules-scope):自举桩政策(placeholder,
+    /// 存量迁移前)的普通请求,成员 checkout 缺 `.claude/rules/language.md`
+    /// 仍阻断(member_language_rules_missing,Prepare/Retry)——placeholder
+    /// 不是「根材料有效」证明,不得借成员豁免扩大普通请求放行;provider
+    /// 零启动。
     #[test]
     fn missing_member_language_rule_waits_before_provider_spawn() {
         let fixture = admission_fixture();
-        // 成员 checkout 缺 .claude/rules/language.md。
+        // placeholder 政策 + 成员 checkout 缺 .claude/rules/language.md。
         let error = fixture
             .preflight()
             .check(&fixture.launch_request(), &ProviderAdmissionPhase::Normal)
@@ -495,6 +500,57 @@ mod tests {
             other => panic!("expected waiting fact, got {other:?}"),
         }
         // provider 零启动。
+        assert_eq!(fixture.streaming_adapter.start_count(), 0);
+    }
+
+    /// 路A 主断言(fix-admission-member-rules-scope,先红):根材料(根规则+
+    /// 已发布政策+匹配最终 receipt)有效时,成员 language.md 缺失不再阻断
+    /// ——ready=true、allowed_actions 空(不提示准备无关成员);missing_
+    /// member_rules 保留非阻断审计事实;admission 不读取不消费的成员文件
+    /// 正文(引用在场、digest 恒 None,仅审计语义,不作为正文已存在或已
+    /// 核验的证明);provider 零启动。
+    #[test]
+    fn valid_root_materials_waive_missing_member_rules_as_audit_only() {
+        let fixture = admission_fixture();
+        publish_valid_root_materials(&fixture, "op_path_a_waive");
+        // 成员 checkout 缺 .claude/rules/language.md(不 write_language_rules)。
+
+        let result = fixture
+            .preflight()
+            .check(&fixture.launch_request(), &ProviderAdmissionPhase::Normal)
+            .expect("valid root materials must waive missing member rules");
+        assert!(result.ready, "missing: {:?}", result.missing_materials);
+        // 审计保留:缺失成员规则作为非阻断事实记录。
+        assert_eq!(result.missing_member_rules.len(), 1);
+        assert!(result.missing_member_rules[0].contains("language.md"));
+        // 只有这些非必需成员材料缺失:不产生阻断材料、无成员准备动作。
+        assert!(result.missing_materials.is_empty());
+        assert!(result.allowed_actions.is_empty());
+        // 不读取不消费的成员文件正文:引用在场但 digest 恒 None。
+        assert_eq!(result.rules.len(), 1);
+        assert!(result.rules[0].digest.is_none());
+        assert_eq!(fixture.streaming_adapter.start_count(), 0);
+    }
+
+    /// Review Focus 5(fix-admission-member-rules-scope):根材料缺失+成员
+    /// 缺失并存 → 仍 fail-closed(root_rules_missing),不把成员豁免误当
+    /// 根豁免;provider 零启动。
+    #[test]
+    fn published_root_missing_with_member_missing_stays_fail_closed() {
+        let fixture = admission_fixture();
+        // 已发布政策 + 匹配最终 receipt,但 canonical root 自身的
+        // .claude/rules/language.md 缺失;成员规则同样缺失。
+        publish_root_policy_with_receipt(&fixture, "op_path_a_root_missing");
+        let error = fixture
+            .preflight()
+            .check(&fixture.launch_request(), &ProviderAdmissionPhase::Normal)
+            .unwrap_err();
+        match error {
+            ProviderAdmissionError::Waiting { reason_code, .. } => {
+                assert_eq!(reason_code, "root_rules_missing");
+            }
+            other => panic!("expected waiting fact, got {other:?}"),
+        }
         assert_eq!(fixture.streaming_adapter.start_count(), 0);
     }
 
@@ -579,7 +635,9 @@ mod tests {
         assert!(result.ready, "missing: {:?}", result.missing_materials);
         assert_eq!(result.rules.len(), 1);
         let rule = &result.rules[0];
-        assert!(rule.digest.as_deref().unwrap().starts_with("sha256:"));
+        // 路A:admission 不读取不消费的成员文件正文——引用 digest 恒 None
+        // (仅审计语义,不作为正文已存在或已核验的证明)。
+        assert!(rule.digest.is_none());
         assert_eq!(
             result.authority_root,
             std::fs::canonicalize(&fixture.aggregate_root).unwrap()
@@ -923,9 +981,10 @@ mod tests {
             )
             .expect("bootstrap phase must waive only missing root rules");
         assert!(result.ready, "missing: {:?}", result.missing_materials);
-        // 成员规则在场(digest Some);根规则缺失仍作为事实记录,不阻断。
+        // 成员规则在场(引用记录,digest 恒 None——不读取不消费的成员
+        // 正文);根规则缺失仍作为事实记录,不阻断。
         assert_eq!(result.rules.len(), 1);
-        assert!(result.rules[0].digest.is_some());
+        assert!(result.rules[0].digest.is_none());
         assert_eq!(result.missing_root_rules.len(), 1);
         assert!(result.missing_materials.is_empty());
         assert!(result.missing_member_rules.is_empty());
@@ -1133,16 +1192,20 @@ mod tests {
         ));
     }
 
-    /// Task 3.1（REQ-ENV-10/11/BOOT-04）：cwd≠target 分离形态下的普通缺根
-    /// admission 回归锁——普通 session（Normal 相位，无自举凭据）以
-    /// root cwd + 成员 Git checkout target 发起时，成员缺根规则
-    ///（.claude/rules/language.md）照样 waiting、provider 零启动；cwd 经
-    /// root 内自引用 symlink alias 字面传入，钉住 admission 复验判据是
-    /// canonical 相等而非字面相等。补齐根规则后同一分离形态请求 ready，
-    /// 证明分离形态本身不是阻断源。
+    /// 路A(fix-admission-member-rules-scope,名实更正):普通已发布政策 +
+    /// canonical root 自身规则缺失 → root_rules_missing 停等、provider 零
+    /// 启动——成员豁免不是根豁免,根材料缺失+成员缺失并存仍 fail-closed。
+    /// 形态保持 cwd≠target 分离(root cwd + 成员 Git checkout target)与
+    /// root 内自引用 symlink alias cwd,钉住 admission 复验判据是 canonical
+    /// 相等而非字面相等。补齐根规则(language.md)后同一分离形态请求
+    /// ready 且成员缺失仅审计,证明分离形态本身不是阻断源。
     #[test]
-    fn ordinary_missing_root_session_zero_spawns() {
+    fn ordinary_published_root_missing_zero_spawns() {
         let fixture = admission_fixture();
+        // 已发布政策 + 匹配最终 receipt,但 canonical root 自身的
+        // .claude/rules/language.md 缺失(publish_root_policy_with_receipt
+        // 不建根 language);成员规则同样缺失。
+        publish_root_policy_with_receipt(&fixture, "op_ordinary_root_missing");
         // cwd=root 的自引用 symlink alias（词法上位于 authority 内，canonical
         // 解析回 root 本体）。
         let cwd_alias = fixture.aggregate_root.join("root-alias");
@@ -1173,38 +1236,40 @@ mod tests {
             config_artifact_ref: "sha256:admission-managed-config".to_string(),
         };
 
-        // 普通相位 + 成员缺根规则 → waiting（member_language_rules_missing），
-        // provider 零启动。等待判据优先钉根规则缺失（若 cwd alias 复验失
-        // 败会以 spawn_revalidation_drift 出现，reason_code 断言可捕捉）。
+        // 普通相位 + 已发布政策 + 根规则缺失(+成员规则缺失) → waiting
+        // (root_rules_missing),provider 零启动。等待判据优先钉根规则缺失
+        // (若 cwd alias 复验失败会以 spawn_revalidation_drift 出现,
+        // reason_code 断言可捕捉)。
         let error = fixture
             .preflight()
             .check(&separated_request, &ProviderAdmissionPhase::Normal)
             .unwrap_err();
         match error {
-            ProviderAdmissionError::Waiting {
-                reason_code,
-                missing_materials,
-                ..
-            } => {
-                assert_eq!(reason_code, "member_language_rules_missing");
-                assert!(
-                    missing_materials
-                        .iter()
-                        .any(|item| item.contains("language.md"))
-                );
+            ProviderAdmissionError::Waiting { reason_code, .. } => {
+                assert_eq!(reason_code, "root_rules_missing");
             }
             other => panic!("expected waiting fact, got {other:?}"),
         }
         assert_eq!(fixture.streaming_adapter.start_count(), 0);
 
-        // 对照：补齐根规则后同一分离形态请求 ready——分离形态（root cwd ≠
-        // member target、symlink alias cwd）不是阻断源；admission 本身仍零启动。
-        fixture.write_language_rules("# language\n");
+        // 对照：补齐根规则(language.md)后同一分离形态请求 ready——分离形态
+        // (root cwd ≠ member target、symlink alias cwd)不是阻断源;此时成员
+        // 规则缺失仅保留非阻断审计;admission 本身仍零启动。
+        let canonical_root = std::fs::canonicalize(&fixture.aggregate_root).unwrap();
+        std::fs::create_dir_all(canonical_root.join(".claude/rules")).unwrap();
+        std::fs::write(
+            canonical_root.join(".claude/rules/language.md"),
+            "# 语言规则\n\n- ordinary 对照:根规则正文。\n",
+        )
+        .unwrap();
         let result = fixture
             .preflight()
             .check(&separated_request, &ProviderAdmissionPhase::Normal)
-            .expect("separated form with rules present must be ready");
+            .expect("separated form with root rules present must be ready");
         assert!(result.ready, "missing: {:?}", result.missing_materials);
+        assert_eq!(result.missing_member_rules.len(), 1);
+        assert!(result.missing_materials.is_empty());
+        assert!(result.allowed_actions.is_empty());
         assert_eq!(fixture.streaming_adapter.start_count(), 0);
     }
 
@@ -1301,7 +1366,6 @@ mod tests {
     /// 普通有效根 = 本函数;故意缺根 = `publish_root_policy_with_receipt`
     /// (不建根 language);placeholder 兼容 = `admission_fixture` 默认形态;
     /// fresh-bootstrap = 默认形态 + 有效凭据(根材料由 recipe 生成)。
-    #[allow(dead_code)] // Task 2/3 接入后移除
     fn publish_valid_root_materials(
         fixture: &AdmissionFixture,
         operation_id: &str,

@@ -141,6 +141,8 @@ impl LogicalCodebaseProviderAdmissionPreflight {
     /// **只豁免「根规则尚未生成」的存在性检查**——凭据先对 durable Running
     /// operation 重核验（status/step/input digest/LC/root），漂移即 waiting；
     /// authority/policy/capability/gateway/cwd/target 全部照常必检。
+    /// 成员规则门按实际消费路径收窄(路A,fix-admission-member-rules-scope):
+    /// 根材料有效的普通请求成员缺失仅审计;成员正文不在此读取。
     pub fn check(
         &self,
         request: &SessionLaunchRequest,
@@ -179,13 +181,18 @@ impl LogicalCodebaseProviderAdmissionPreflight {
         )?;
 
         let mut missing_materials = Vec::new();
-        let mut allowed_actions = Vec::new();
-        // Task 3a(lcg_t03)：admission 规则门拆分——
-        // - missing_member_rules：成员 checkout 的 `.claude/rules/language.md`，
-        //   任何相位都阻断（不是根规则豁免面）；
-        // - missing_root_rules：canonical root 自身的
-        //   `.claude/rules/language.md`（#8 发布链的 REQUIRED_POLICY_RULE），
-        //   仅 AggregateBootstrap 相位凭据可豁免「根规则尚未生成」。
+        // 路A(fix-admission-member-rules-scope):admission 规则门按实际消费
+        // 路径拆分诊断与阻断——
+        // - missing_member_rules:成员 checkout 的 `.claude/rules/language.md`
+        //   存在性审计(不读正文、不算无谓 digest)。普通根消费者只消费
+        //   canonical root 材料:根材料(根规则+已发布政策+最终 receipt)有效
+        //   时成员缺失仅记录非阻断审计事实;根材料无效(placeholder 政策/
+        //   根缺失并存等)维持既有阻断——placeholder 不是「根材料有效」证明;
+        //   AggregateBootstrap 相位凭据豁免(Task 3);
+        // - missing_root_rules:canonical root 自身的
+        //   `.claude/rules/language.md`(#8 发布链的 REQUIRED_POLICY_RULE),
+        //   Normal+已发布政策时缺失即阻断;仅 AggregateBootstrap 相位凭据
+        //   可豁免「根规则尚未生成」。
         let mut missing_member_rules = Vec::new();
         let mut missing_root_rules = Vec::new();
 
@@ -207,8 +214,12 @@ impl LogicalCodebaseProviderAdmissionPreflight {
                     allowed_actions: vec![BootstrapActionKind::Prepare],
                 })?;
 
-        // 2. 实际成员规则：每个 active 成员的 main checkout 必须有
-        //    `.claude/rules/language.md`（与 single_candidate_author 同一路径）。
+        // 2. 成员规则存在性审计(路A):每个 active 成员的 checkout 只探测
+        //    `.claude/rules/language.md` 是否为文件——本预检的消费方(五阶段
+        //    多仓入口/SC)不消费成员正文,不读取内容、不计算 digest(引用
+        //    digest 恒 None,仅审计语义,不作为正文已存在或已核验的证明);
+        //    实际消费路径(SC 的 repository.path 读取)由消费点自身把关。
+        //    成员无 recorded checkout 仍是真实阻断项,保留在 missing_materials。
         let logical = LogicalCodebaseStore::for_lc(self.paths.clone(), &self.lc_id);
         let members = logical.list_members(&request.project_id)?;
         let checkouts = logical.list_checkouts(&request.project_id)?;
@@ -236,32 +247,19 @@ impl LogicalCodebaseProviderAdmissionPreflight {
                 continue;
             };
             let rule_path = checkout.canonical_path.join(".claude/rules/language.md");
-            match std::fs::read(&rule_path) {
-                Ok(bytes) => rules.push(ProviderRuleReference {
-                    member_id: member.logical_repository_id,
-                    checkout_id: checkout.checkout_id,
-                    path: rule_path,
-                    digest: Some(format!("sha256:{:x}", sha2::Sha256::digest(&bytes))),
-                }),
-                Err(_) => {
-                    missing_member_rules.push(format!(
-                        "member {} missing {}",
-                        member.alias,
-                        rule_path.display()
-                    ));
-                    rules.push(ProviderRuleReference {
-                        member_id: member.logical_repository_id,
-                        checkout_id: checkout.checkout_id,
-                        path: rule_path,
-                        digest: None,
-                    });
-                }
+            if !rule_path.is_file() {
+                missing_member_rules.push(format!(
+                    "member {} missing {}",
+                    member.alias,
+                    rule_path.display()
+                ));
             }
-        }
-        if !missing_member_rules.is_empty() {
-            missing_materials.extend(missing_member_rules.clone());
-            allowed_actions.push(BootstrapActionKind::Prepare);
-            allowed_actions.push(BootstrapActionKind::Retry);
+            rules.push(ProviderRuleReference {
+                member_id: member.logical_repository_id,
+                checkout_id: checkout.checkout_id,
+                path: rule_path,
+                digest: None,
+            });
         }
         let root_rule_path = resolution.authority_root.join(".claude/rules/language.md");
         if !root_rule_path.is_file() {
@@ -352,6 +350,15 @@ impl LogicalCodebaseProviderAdmissionPreflight {
                 allowed_actions: vec![BootstrapActionKind::Prepare, BootstrapActionKind::Retry],
             });
         }
+
+        // 3d. 路A:根材料有效性判定。Normal 相位走到此处且已发布真实政策
+        //     (receipt 校验已在 3b 通过、根规则在 3c 在场)即「根材料有效」
+        //     ——成员规则缺失仅审计,不阻断、不提示准备无关成员。placeholder
+        //     (自举桩)政策不是「根材料有效」证明:预存 Normal+桩政策边界
+        //     不动、不扩大,成员门维持既有阻断现状。
+        let root_materials_valid = matches!(phase, ProviderAdmissionPhase::Normal)
+            && published_artifact.is_some()
+            && missing_root_rules.is_empty();
 
         // 4. 真实 gateway 谓词：bootstrap capability 记录不满足 snapshot/action
         //    时在此拒绝（validate 不启动 provider）。
@@ -466,15 +473,27 @@ impl LogicalCodebaseProviderAdmissionPreflight {
                 allowed_actions: vec![BootstrapActionKind::Revalidate, BootstrapActionKind::Retry],
             })?;
 
-        if !missing_materials.is_empty() {
+        // 7. 路A收口:成员规则缺失仅在根材料无效时维持阻断(placeholder 政策
+        //    等预存现状);根材料有效时仅审计——ready、allowed_actions 空。
+        //    真实阻断项(成员无 recorded checkout 等)保留在 missing_materials,
+        //    不因成员规则豁免清空;只有成员规则缺失时不加入成员准备动作。
+        let member_rules_block = !missing_member_rules.is_empty() && !root_materials_valid;
+        if member_rules_block || !missing_materials.is_empty() {
+            let mut materials = missing_materials.clone();
+            let mut actions = Vec::new();
+            if member_rules_block {
+                materials.extend(missing_member_rules.clone());
+                actions.push(BootstrapActionKind::Prepare);
+                actions.push(BootstrapActionKind::Retry);
+            }
             return Err(ProviderAdmissionError::Waiting {
                 reason_code: "member_language_rules_missing".to_string(),
                 detail: format!(
                     "logical codebase {} has members without .claude/rules/language.md",
                     self.lc_id
                 ),
-                missing_materials,
-                allowed_actions,
+                missing_materials: materials,
+                allowed_actions: actions,
             });
         }
 

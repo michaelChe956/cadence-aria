@@ -12,7 +12,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use sha2::Digest as _;
+// (sha2 trait 导入已随「不读取不消费的成员正文」收窄移除:生产 check 面不再
+// 计算成员规则 digest;测试模块的 receipt fixture 使用各自的本地导入。)
 
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::json_store::ProductStoreError;
