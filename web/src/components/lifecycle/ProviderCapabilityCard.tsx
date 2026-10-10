@@ -175,7 +175,6 @@ export function ProviderCapabilityCard({
           Provider 能力核验
         </h3>
         <span className="text-xs text-[var(--aria-ink-muted)]">
-          真实探针显式触发；未核验 provider 的生成会被门拒绝
         </span>
       </div>
       {loadError ? (
@@ -190,7 +189,7 @@ export function ProviderCapabilityCard({
         <p className="mt-1 text-xs text-[var(--aria-ink-muted)]">载入中…</p>
       ) : null}
       {projection ? (
-        <ul className="mt-2 space-y-2">
+        <ul className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
           {projection.providers.map((provider) => {
             const feedback = feedbackByProvider[provider.provider_type] ?? null;
             return (

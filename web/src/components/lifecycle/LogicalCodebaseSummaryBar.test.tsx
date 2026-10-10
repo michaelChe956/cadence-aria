@@ -5,7 +5,8 @@
 // - `onToggle` 由「管理」按钮触发，`expanded` 反映在 aria-expanded；
 // - 视觉规范：hover 仅改颜色/边框/阴影（不位移）、150–300ms 过渡 + motion-reduce 降级、
 //   cursor-pointer、focus-visible 主色 ring。
-// 接线部分（IssueLifecycleWorkbench）：默认折叠只见摘要条、点「管理」后既有面板 testid 出现、
+// 接线部分（IssueLifecycleWorkbench）：默认折叠只见摘要条、点「管理」后面板以右侧抽屉
+// （LogicalCodebaseManagementDrawer，role=dialog）出现，既有面板 testid 全部保留、
 // 展开状态按 projectId 记忆到 localStorage["aria.workbench.lcSummary.<projectId>"]。
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";

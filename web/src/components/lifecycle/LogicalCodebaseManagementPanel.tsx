@@ -38,8 +38,8 @@ type LogicalCodebaseManagementPanelProps = {
 };
 
 /**
- * 逻辑代码库管理面板（纯搬运自 IssueLifecycleWorkbench，无行为改动）：
- * LC 切换 tab + 聚合初始化/索引卡 + 指针发布面板。
+ * 逻辑代码库管理面板：LC 切换 tab + 冷启动/能力核验 + 聚合初始化/索引卡 + 指针发布面板。
+ * 抽屉化后由 LogicalCodebaseManagementDrawer 承载（右侧滑入），本组件只管内容。
  */
 export function LogicalCodebaseManagementPanel({
   projectId,
@@ -66,7 +66,7 @@ export function LogicalCodebaseManagementPanel({
   onRevoke,
 }: LogicalCodebaseManagementPanelProps) {
   return (
-    <div className="overflow-hidden rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)]">
+    <div className="bg-[var(--aria-panel)]">
       <div className="flex items-center justify-between gap-3 border-b border-[var(--aria-line)] px-3 py-2">
         <h2 className="text-sm font-semibold text-[var(--aria-ink)]">
           逻辑代码库

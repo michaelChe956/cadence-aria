@@ -106,12 +106,12 @@ export function LogicalCodebaseBootstrapCard({
           {projection.planning_ready ? "PlanningReady" : "冷启动未完成"}
         </span>
       </div>
-      <ul className="mt-2 space-y-1">
+      <ul className="mt-1.5 space-y-0.5">
         {projection.steps.map((step) => (
           <li
             key={step.step}
             data-testid={`lc-bootstrap-step-${step.step}`}
-            className="flex flex-wrap items-baseline gap-x-2 text-xs text-[var(--aria-ink-muted)]"
+            className="flex flex-wrap items-baseline gap-x-2 text-xs leading-snug text-[var(--aria-ink-muted)]"
           >
             <span className="font-semibold text-[var(--aria-ink)]">
               {STEP_LABELS[step.step] ?? step.step}
