@@ -60,6 +60,10 @@ async fn provider_session_with_output(
 pub(super) struct ProviderRunFixture {
     root: tempfile::TempDir,
     repository_root: tempfile::TempDir,
+    /// Task 4（路 C）：多成员 LogicalAlias 夹具的附加成员 checkout——仅持有
+    /// 保活（TempDir Drop 清理），成员 0 沿用 `repository_root`。
+    #[allow(dead_code)]
+    extra_member_roots: Vec<tempfile::TempDir>,
     pub(super) app_paths: ProductAppPaths,
     pub(super) lifecycle: LifecycleStore,
     pub(super) record: WorkspaceSessionRecord,
@@ -71,14 +75,47 @@ pub(super) struct ProviderRunFixture {
     pub(super) design_id: String,
 }
 
+/// 单成员/legacy 夹具的成员规则默认正文（与 C-1 既有夹具字节一致）。
+const DEFAULT_MEMBER_LANGUAGE_RULES: &str =
+    "## 语言规则\n\n- **必须使用中文** - 所有响应、解释、注释和文档必须使用中文。\n";
+
+/// LC 夹具成员的 `.claude/rules/language.md` 材料状态（Task 4 路 C SC 消费
+/// 点矩阵：聚焦成员/聚合根/缺失/目录/非法 UTF-8）。
+#[derive(Clone)]
+pub(super) enum MemberRuleMaterial {
+    /// 写入指定正文。
+    Present(String),
+    /// 文件缺失。
+    Absent,
+    /// `language.md` 路径是目录（目录错误类）。
+    Directory,
+    /// 文件存在但非法 UTF-8。
+    InvalidUtf8,
+}
+
+/// LC 夹具 focus 形态（plan 会话路由面 target 解析输入）。
+pub(super) enum LogicalAliasFocus {
+    /// focus=首成员：多 target 唯一 focus → 解析为首成员 checkout；单成员
+    /// 等价 focus 空（唯一 target，与既有夹具一致）。
+    FirstMember,
+    /// focus=全员：多 target 无唯一 focus → 聚合根视图。
+    NonUnique,
+}
+
+/// LogicalAlias 夹具规格：逐成员材料 + 聚合根规则正文 + focus 形态。
+struct LogicalAliasSpec {
+    members: Vec<MemberRuleMaterial>,
+    root_rules: Option<String>,
+    focus: LogicalAliasFocus,
+    gateway_author: Arc<dyn StreamingProviderAdapter>,
+}
+
 /// 夹具路由形态：Legacy=单仓物理仓；LogicalAlias=legacy 别名逻辑代码库
-/// （成员 checkout 锚定 `repository_root`，C-1 admission 预检测试用）。
+/// （成员 0 checkout 锚定 `repository_root`，其余成员在其同级目录——C-1
+/// admission 预检与 Task 4 路 C SC 消费点测试用）。
 enum FixtureRoute {
     Legacy,
-    LogicalAlias {
-        write_member_language_rules: bool,
-        gateway_author: Arc<dyn StreamingProviderAdapter>,
-    },
+    LogicalAlias(LogicalAliasSpec),
 }
 
 impl ProviderRunFixture {
@@ -91,22 +128,52 @@ impl ProviderRunFixture {
         fixture
     }
 
-    /// C-1：LC（legacy 别名逻辑代码库）SingleCandidate 夹具——成员 checkout 即
-    /// `repository_root`，engine 注入 gateway。`write_member_language_rules=false`
-    /// 构造成员缺 `.claude/rules/language.md` 的 admission waiting 场景；
+    /// C-1：LC（legacy 别名逻辑代码库）单成员 SingleCandidate 夹具——成员
+    /// checkout 即 `repository_root`，engine 注入 gateway。
+    /// `write_member_language_rules=false` 构造成员缺
+    /// `.claude/rules/language.md` 的 admission waiting 场景；
     /// `gateway_author` 注册进 gateway registry（LC author 经 gateway 启动）。
     /// 权威记录登记细节见 `single_candidate_lc_admission.rs`。
     pub(super) fn new_logical(
         write_member_language_rules: bool,
         gateway_author: Arc<dyn StreamingProviderAdapter>,
     ) -> Self {
+        Self::new_logical_multi(
+            vec![if write_member_language_rules {
+                MemberRuleMaterial::Present(DEFAULT_MEMBER_LANGUAGE_RULES.to_string())
+            } else {
+                MemberRuleMaterial::Absent
+            }],
+            None,
+            LogicalAliasFocus::FirstMember,
+            gateway_author,
+        )
+    }
+
+    /// Task 4（路 C，REQ-REG-12）：多成员 LC 夹具——`members` 顺序即 ordinal
+    /// （成员 0 是 `session.repository_path` 锚定的聚焦成员，其余成员 checkout
+    /// 在其同级目录）；`root_rules` 写聚合根 `.claude/rules/language.md`
+    /// （聚合根视图消费用，None=不写）；`focus` 决定 plan 路由 target 解析
+    /// 形态（唯一 focus→成员 checkout；无唯一 focus→聚合根视图）。
+    pub(super) fn new_logical_multi(
+        members: Vec<MemberRuleMaterial>,
+        root_rules: Option<String>,
+        focus: LogicalAliasFocus,
+        gateway_author: Arc<dyn StreamingProviderAdapter>,
+    ) -> Self {
+        assert!(
+            !members.is_empty(),
+            "logical alias fixture needs at least one member"
+        );
         let (engine_tx, engine_rx) = mpsc::channel(64);
         let fixture = Self::build_routed(
             WorkItemPlanFlowKind::SingleCandidate,
-            FixtureRoute::LogicalAlias {
-                write_member_language_rules,
+            FixtureRoute::LogicalAlias(LogicalAliasSpec {
+                members,
+                root_rules,
+                focus,
                 gateway_author,
-            },
+            }),
             engine_tx,
         );
         drop(engine_rx);
@@ -144,35 +211,54 @@ impl ProviderRunFixture {
     ) -> Self {
         let root = tempfile::tempdir().expect("temporary workspace root");
         // LogicalAlias：成员 checkout 必须是聚合根的直接子目录（聚合索引布局
-        // 校验），故 repository_root 落在 root/aggregate-root/ 之下。
+        // 校验），故各成员 checkout 落在 root/aggregate-root/ 之下；成员 0 沿用
+        // `repository_root`（session.repository_path 锚）。
         let repository_root = match &route {
             FixtureRoute::Legacy => tempfile::tempdir().expect("temporary repository root"),
-            FixtureRoute::LogicalAlias { .. } => {
+            FixtureRoute::LogicalAlias(_) => {
                 let aggregate_root = root.path().join("aggregate-root");
                 std::fs::create_dir_all(&aggregate_root).expect("create aggregate root directory");
                 tempfile::tempdir_in(&aggregate_root)
                     .expect("temporary member checkout under aggregate root")
             }
         };
-        std::fs::create_dir_all(repository_root.path().join(".claude/rules"))
-            .expect("create language rules directory");
-        let write_language_rules = match &route {
-            FixtureRoute::Legacy => true,
-            FixtureRoute::LogicalAlias {
-                write_member_language_rules,
-                ..
-            } => *write_member_language_rules,
+        // Task 4（路 C）：逐成员按矩阵落 `.claude/rules/language.md` 材料；
+        // Legacy 恒默认正文（与 C-1 夹具字节一致）。
+        let member_materials: Vec<MemberRuleMaterial> = match &route {
+            FixtureRoute::Legacy => {
+                vec![MemberRuleMaterial::Present(DEFAULT_MEMBER_LANGUAGE_RULES.to_string())]
+            }
+            FixtureRoute::LogicalAlias(spec) => spec.members.clone(),
         };
-        if write_language_rules {
-            std::fs::write(
-                repository_root.path().join(".claude/rules/language.md"),
-                "## 语言规则\n\n- **必须使用中文** - 所有响应、解释、注释和文档必须使用中文。\n",
-            )
-            .expect("write language rules");
-        }
+        apply_member_rule_material(repository_root.path(), &member_materials[0]);
         // REQ-PIB-02：夹具对齐生产不变量（main 分支+初始提交，裸目录无 git
         // 仓库会令基线解析 fail-closed，provider run 起步即终止）。
         super::init_ws_test_git_repo(repository_root.path());
+        let mut extra_member_roots = Vec::new();
+        for material in &member_materials[1..] {
+            let member_root = tempfile::tempdir_in(
+                repository_root
+                    .path()
+                    .parent()
+                    .expect("member checkouts live under the aggregate root"),
+            )
+            .expect("extra member checkout under aggregate root");
+            apply_member_rule_material(member_root.path(), material);
+            super::init_ws_test_git_repo(member_root.path());
+            extra_member_roots.push(member_root);
+        }
+        if let FixtureRoute::LogicalAlias(spec) = &route
+            && let Some(root_rules) = spec.root_rules.as_ref()
+        {
+            let aggregate_root = repository_root
+                .path()
+                .parent()
+                .expect("logical alias fixture lives under the aggregate root");
+            std::fs::create_dir_all(aggregate_root.join(".claude/rules"))
+                .expect("create aggregate root rules directory");
+            std::fs::write(aggregate_root.join(".claude/rules/language.md"), root_rules)
+                .expect("write aggregate root language rules");
+        }
         let app_paths = ProductAppPaths::new(root.path().join(".aria"));
         seed_legacy_project(&app_paths);
         let repository = RepositoryStore::new(app_paths.clone())
@@ -185,12 +271,28 @@ impl ProviderRunFixture {
                 idempotency_key: format!("provider-run-fixture-{flow_kind:?}"),
             })
             .expect("create repository");
+        let extra_repositories = extra_member_roots
+            .iter()
+            .enumerate()
+            .map(|(index, member_root)| {
+                RepositoryStore::new(app_paths.clone())
+                    .create(CreateRepositoryInput {
+                        project_id: "project_0001".to_string(),
+                        name: format!("Provider run fixture member repository {index}"),
+                        path: member_root.path().to_path_buf(),
+                        default_policy_preset: None,
+                        default_provider_mode: None,
+                        idempotency_key: format!("provider-run-fixture-{flow_kind:?}-member-{index}"),
+                    })
+                    .expect("create extra member repository")
+            })
+            .collect::<Vec<_>>();
         // C-1：LogicalAlias 路由的 issue 归属用确定性 legacy 别名 id（登记前后
         // 同值）；LC 权威记录在 issue 之后登记——selection 写入
         // issues/issue_0001/ 会占用顺序 id 目录名，必须让 issue 先落 issue_0001。
         let alias_lc_id = match &route {
             FixtureRoute::Legacy => None,
-            FixtureRoute::LogicalAlias { .. } => Some(
+            FixtureRoute::LogicalAlias(_) => Some(
                 crate::product::logical_codebase::store::legacy_logical_codebase_id("project_0001"),
             ),
         };
@@ -211,25 +313,44 @@ impl ProviderRunFixture {
         // identity_schema_version 对齐）。
         let logical = match &route {
             FixtureRoute::Legacy => None,
-            FixtureRoute::LogicalAlias { gateway_author, .. } => {
+            FixtureRoute::LogicalAlias(spec) => {
+                let member_roots = std::iter::once(repository_root.path().to_path_buf())
+                    .chain(
+                        extra_member_roots
+                            .iter()
+                            .map(|member_root| member_root.path().to_path_buf()),
+                    )
+                    .collect::<Vec<_>>();
+                let physical_repositories = std::iter::once(repository.clone())
+                    .chain(extra_repositories.iter().cloned())
+                    .collect::<Vec<_>>();
                 let registered =
                     super::single_candidate_lc_admission::register_alias_logical_codebase(
                         &app_paths,
-                        repository_root.path(),
-                        &repository,
-                        Arc::clone(gateway_author),
+                        &member_roots,
+                        &physical_repositories,
+                        &spec.focus,
+                        Arc::clone(&spec.gateway_author),
                     );
-                let mut projection = repository.clone();
-                projection.logical_repository_id = Some(registered.member_id);
-                projection.primary_checkout_id = Some(registered.checkout_id);
-                projection.identity_schema_version = 1;
+                let projections = physical_repositories
+                    .iter()
+                    .cloned()
+                    .zip(&registered.member_ids)
+                    .zip(&registered.checkout_ids)
+                    .map(|((mut record, member_id), checkout_id)| {
+                        record.logical_repository_id = Some(*member_id);
+                        record.primary_checkout_id = Some(*checkout_id);
+                        record.identity_schema_version = 1;
+                        record
+                    })
+                    .collect::<Vec<_>>();
                 let repos_json = app_paths.project_root("project_0001").join("repos.json");
                 std::fs::write(
                     &repos_json,
-                    serde_json::to_vec_pretty(&vec![projection])
-                        .expect("serialize registered repository projection"),
+                    serde_json::to_vec_pretty(&projections)
+                        .expect("serialize registered repository projections"),
                 )
-                .expect("rewrite repos.json with registered projection");
+                .expect("rewrite repos.json with registered projections");
                 Some(registered)
             }
         };
@@ -354,6 +475,7 @@ impl ProviderRunFixture {
         Self {
             root,
             repository_root,
+            extra_member_roots,
             app_paths: app_paths.clone(),
             lifecycle,
             record: record.clone(),
@@ -369,6 +491,28 @@ impl ProviderRunFixture {
             workspace_runs: WorkspaceRunRegistry::default(),
             story_id: story.id,
             design_id: design.id,
+        }
+    }
+}
+
+/// Task 4（路 C）：按矩阵状态落成员 `.claude/rules/language.md` 材料
+/// （Present/Absent/Directory/InvalidUtf8），目录骨架与其他夹具一致。
+fn apply_member_rule_material(member_root: &std::path::Path, material: &MemberRuleMaterial) {
+    let rules_dir = member_root.join(".claude/rules");
+    std::fs::create_dir_all(&rules_dir).expect("create language rules directory");
+    match material {
+        MemberRuleMaterial::Present(content) => {
+            std::fs::write(rules_dir.join("language.md"), content)
+                .expect("write member language rules");
+        }
+        MemberRuleMaterial::Absent => {}
+        MemberRuleMaterial::Directory => {
+            std::fs::create_dir_all(rules_dir.join("language.md"))
+                .expect("create directory at member language.md path");
+        }
+        MemberRuleMaterial::InvalidUtf8 => {
+            std::fs::write(rules_dir.join("language.md"), b"\xef\xbb\xbf\xff\xff broken utf8 \xff")
+                .expect("write invalid utf-8 member language rules");
         }
     }
 }

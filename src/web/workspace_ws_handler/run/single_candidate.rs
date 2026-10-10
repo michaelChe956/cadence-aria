@@ -482,13 +482,23 @@ async fn drive_single_candidate_reredrive(
     Ok(reredrive_delivery.source)
 }
 
-/// C-1：LC 会话的 admission 预检——在读取 `.claude/rules/language.md` 之前
-/// 经 `LogicalCodebaseProviderAdmissionPreflight` 校验实际成员规则、聚合
-/// policy 与 gateway capability。
+/// 公共 admission 预检「成员语言规则缺失」等待项的判别码（路 C，Task 4）：
+/// SC 消费链对成员文件的必需性判定收敛到实际消费点——该等待项在 SC 侧不
+/// 直接阻断（其他 active 成员缺失不阻断 SC），由消费点对已解析
+/// `repository.path` 的同一份读取重判（读取失败才停等）。
+const PUBLIC_MEMBER_RULES_WAITING_REASON: &str = "member_language_rules_missing";
+
+/// C-1/路 C（Task 4，REQ-REG-12）：LC 会话的 admission 预检——在读取
+/// `.claude/rules/language.md` 之前经 `LogicalCodebaseProviderAdmissionPreflight`
+/// 校验聚合 policy、发布链与 gateway capability 等公共准入条件。
 ///
-/// - waiting（材料缺失/漂移/capability 不满足）：durable phase 回落
+/// - waiting（根规则/发布链/capability/cwd 漂移等公共门）：durable phase 回落
 ///   Prepare/Open 等待面，返回 `AdmissionWaiting`（不落终态 Failed、
 ///   不产生 failed 节点）；
+/// - 成员语言规则等待（`member_language_rules_missing`）：路 C 起 SC 不直接
+///   阻断——SC 必需成员材料只由实际消费点对已解析 `repository.path` 的
+///   同一份读取判定（其他成员缺失仅是审计事实，不产生成员准备动作，
+///   不枚举全部 active 成员作 SC 文件门）；
 /// - 存储/路由错误：与其它 pre-run 装载失败同形（`Message`，不改写
 ///   durable phase）；
 /// - LC 归属缺失（gateway 已注入但 issue 无 logical_codebase_id）：持久
@@ -531,6 +541,18 @@ fn preflight_lc_member_rules_before_author_run(
     // AggregateBootstrap 仅由聚合 root recipe 的凭据流程使用。
     match preflight.check(&request, &crate::product::logical_codebase::provider_admission_preflight::ProviderAdmissionPhase::Normal) {
         Ok(_) => Ok(()),
+        Err(
+            crate::product::logical_codebase::ProviderAdmissionError::Waiting {
+                reason_code, ..
+            },
+        ) if reason_code == PUBLIC_MEMBER_RULES_WAITING_REASON => {
+            // 路 C（Task 4，REQ-REG-12）：公共预检的成员语言规则事实不直接
+            // 阻断 SC——必需成员材料只由下方实际消费点对已解析
+            // `repository.path` 的同一份读取判定：读取失败在 provider 前停等
+            // （detail 区分实际读取错误并指明来源）；聚焦/根文件可读则继续。
+            // 审计事实（含成员无 recorded checkout）留在公共预检结果侧。
+            Ok(())
+        }
         Err(
             crate::product::logical_codebase::ProviderAdmissionError::Waiting {
                 reason_code,
@@ -611,12 +633,12 @@ pub(crate) async fn run_single_candidate_author(
         .map_err(|error| {
             SingleCandidateProviderRunError::Message(format!("load issue failed: {error}"))
         })?;
-    // C-1：LC 会话在读取 language rules 之前先过 provider admission preflight
-    // ——成员规则缺失、policy 漂移或 capability 不满足时转 waiting/Prepare 面
-    // （可操作等待事实），不再把缺材料暴露成运行时终态 Failed；单仓 legacy
-    // 会话（无 gateway 注入或无 planning launch，判定与下方
-    // `resolve_plan_author_launch` 同谓词）零变化。预检通过后仍由下方同一
-    // 实际文件读取消费 language rules（不新增 fallback 路径）。
+    // C-1/路 C（Task 4，REQ-REG-12）：LC 会话在消费 language rules 之前先过
+    // provider admission 公共预检——根规则/发布链/policy/capability 等公共门
+    // 漂移时转 waiting/Prepare 面（可操作等待事实）；成员语言规则等待不在此
+    // 阻断（见 `preflight_lc_member_rules_before_author_run` 路 C 说明）。
+    // 单仓 legacy 会话（无 gateway 注入或无 planning launch，判定与下方
+    // `resolve_plan_author_launch` 同谓词）零变化。
     let lc_plan_launch = super::gateway_start::logical_plan_launch_for(
         engine,
         repository
@@ -628,12 +650,40 @@ pub(crate) async fn run_single_candidate_author(
             .as_ref()
             .map(|id| id.0.to_string()),
     );
-    if let Some(lc_plan_launch) = lc_plan_launch {
-        preflight_lc_member_rules_before_author_run(engine, run_context, &lc_plan_launch)?;
+    if let Some(lc_plan_launch) = lc_plan_launch.as_ref() {
+        preflight_lc_member_rules_before_author_run(engine, run_context, lc_plan_launch)?;
     }
+    // 路 C（Task 4，REQ-REG-12）：LC SC 的必需成员材料在真实读取点判定并
+    // 同源消费——对已解析 `repository.path`（`workspace_repository_for_session`
+    // 的身份解析 primary checkout；多 target 无唯一 focus 时为聚合根视图）
+    // 做唯一一次 UTF-8 读取：成功的同一份 `String` 直接构造 prompt（不预检
+    // 一份、消费另一份）；NotFound/权限/目录/非法 UTF-8 在 provider 启动前
+    // 转 waiting/Prepare 面（reason 保持 member_language_rules_missing 语义，
+    // detail 区分实际读取错误并指明来源；Prepare/Retry、零启动），恢复文件后
+    // 原会话重新发起生成即按同一来源重读。非 LC 会话保持旧终态 Failed 行为
+    // 零变化。
     let language_rules_path = repository.path.join(".claude/rules/language.md");
     let language_rules = match std::fs::read_to_string(&language_rules_path) {
         Ok(rules) => rules,
+        Err(error) if lc_plan_launch.is_some() => {
+            engine.persist_single_candidate_waiting_phase();
+            return Err(SingleCandidateProviderRunError::AdmissionWaiting {
+                reason_code: PUBLIC_MEMBER_RULES_WAITING_REASON.to_string(),
+                detail: format!(
+                    "read required SingleCandidate language rules failed for repository {} at {}: {error}",
+                    repository.path.display(),
+                    language_rules_path.display(),
+                ),
+                missing_materials: vec![format!(
+                    "actual SC consumption path {} (unreadable: {error})",
+                    language_rules_path.display()
+                )],
+                allowed_actions: vec![
+                    crate::product::logical_codebase::BootstrapActionKind::Prepare,
+                    crate::product::logical_codebase::BootstrapActionKind::Retry,
+                ],
+            });
+        }
         Err(error) => {
             engine.persist_single_candidate_terminal_phase(
                 crate::product::models::SingleCandidatePhase::Failed,
