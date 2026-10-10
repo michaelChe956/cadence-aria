@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { getActiveAggregateIndex } from "../../api/aggregate-index";
-import { getAggregateInitialization } from "../../api/aggregate-initialization";
+import {
+  getActiveAggregateInitialization,
+  getAggregateInitialization,
+} from "../../api/aggregate-initialization";
 import { getLogicalCodebaseBootstrap } from "../../api/logical-codebase-bootstrap";
 import { listLogicalCodebaseMembers } from "../../api/logicalCodebaseMembers";
 import { listPointerPublications } from "../../api/pointer-publication";
@@ -110,8 +113,10 @@ export function useLogicalCodebaseScopeData({
     setBootstrapProjection(null);
   }, [selectedProjectId, activeLogicalCodebaseId]);
 
-  // 成员/指针发布/聚合索引拉取：作用域切换或显式补读（登记完成等成员已
-  // 变化的事件）时重拉。
+  // 成员/指针发布/聚合索引/最新初始化 operation 拉取：作用域切换或显式
+  // 补读（登记完成等成员已变化的事件）时重拉。active 投影恢复任意状态
+  // 的最新 operation（含 completed/failed/cancelled；未初始化为 null），
+  // 避免刷新/切换后完成态面板退回「尚未初始化」。
   useEffect(() => {
     if (!selectedProjectId || !activeLogicalCodebaseId) {
       setLogicalCodebaseMembers([]);
@@ -122,17 +127,23 @@ export function useLogicalCodebaseScopeData({
     let disposed = false;
     (async () => {
       try {
-        const [membersResponse, publicationResponse] = await Promise.all([
-          listLogicalCodebaseMembers(
-            selectedProjectId,
-            activeLogicalCodebaseId,
-          ),
-          listPointerPublications(selectedProjectId, activeLogicalCodebaseId),
-        ]);
+        const [membersResponse, publicationResponse, activeInitialization] =
+          await Promise.all([
+            listLogicalCodebaseMembers(
+              selectedProjectId,
+              activeLogicalCodebaseId,
+            ),
+            listPointerPublications(selectedProjectId, activeLogicalCodebaseId),
+            getActiveAggregateInitialization(
+              selectedProjectId,
+              activeLogicalCodebaseId,
+            ),
+          ]);
         if (disposed) {
           return;
         }
         setLogicalCodebaseMembers(membersResponse.members ?? []);
+        setAggregateInitialization(activeInitialization);
         setPointerPublications(publicationResponse ?? []);
         setAggregateIndex(
           (membersResponse.members ?? []).length > 0

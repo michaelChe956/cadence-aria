@@ -562,3 +562,123 @@ async fn aggregate_initialization_get_does_not_start_provider() {
         "GET must not evaluate the trust gate"
     );
 }
+
+/// 构造一个五步全部 Completed、operation 终态 Completed 的记录(时间戳
+/// 系列早于 `create_running_initialization` 的 2026-09-29 系列)。
+fn create_completed_initialization(paths: &ProductAppPaths, lc_id: &str, operation_id: &str) {
+    let store = AggregateInitializationOperationStore::for_lc(paths.clone(), lc_id);
+    let operation =
+        crate::product::logical_codebase::aggregate_initialization::AggregateInitializationOperation::new(
+            operation_id.to_string(),
+            "project_0001".to_string(),
+            crate::product::logical_codebase::aggregate_initialization::AggregateInitializationOperationInput {
+                idempotency_key: format!("idem-{operation_id}"),
+                manifest_revision: 1,
+                policy_digest: "sha256:policy".to_string(),
+                profile_evidence_digest: None,
+                provider_context_root: paths
+                    .logical_codebase_root("project_0001")
+                    .join("aggregate-root"),
+                provider: "claude_code".to_string(),
+            },
+            "2026-09-28T00:00:00Z".to_string(),
+        );
+    store.create_idempotent(operation).unwrap();
+    store
+        .mark_running(
+            "project_0001",
+            operation_id,
+            "2026-09-28T00:00:10Z".to_string(),
+        )
+        .unwrap();
+    for (index, step) in AggregateInitializationStepKind::V1.iter().enumerate() {
+        store
+            .mark_step_running(
+                "project_0001",
+                operation_id,
+                *step,
+                format!("sha256:{operation_id}-input-{index}"),
+                format!("2026-09-28T00:01:{index:02}Z"),
+            )
+            .unwrap();
+        store
+            .checkpoint_step_output(
+                "project_0001",
+                operation_id,
+                *step,
+                format!("aggregate-initializations/{operation_id}/{}.json", step.as_str()),
+                format!("2026-09-28T00:02:{index:02}Z"),
+            )
+            .unwrap();
+        store
+            .mark_step_completed(
+                "project_0001",
+                operation_id,
+                *step,
+                format!("2026-09-28T00:03:{index:02}Z"),
+            )
+            .unwrap();
+    }
+    store
+        .finish_completed(
+            "project_0001",
+            operation_id,
+            "2026-09-28T00:04:00Z".to_string(),
+        )
+        .unwrap();
+}
+
+#[tokio::test]
+async fn aggregate_initialization_active_projection_returns_latest_operation() {
+    let fixture = trust_route_fixture(false);
+    let uri = format!(
+        "/api/projects/project_0001/logical-codebases/{}/initializations/active",
+        fixture.lc_id
+    );
+
+    // 无 operation:未初始化语义,404 + 稳定 code(与按 id GET 的 not_found 一致)。
+    let (status, body) = get_json(&fixture.app, &uri).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(
+        body["code"], "aggregate_initialization_operation_not_found",
+ "{body}"
+    );
+
+    // 完成态 operation:active 投影必须返回 200 + completed,而不是把
+    // `active` 当 operation_id 的 404——否则完成后的 LC 面板永远显示未初始化。
+    create_completed_initialization(
+        &fixture.paths,
+        &fixture.lc_id,
+        "aggregate_initialization_active_completed_0001",
+    );
+    let (status, body) = get_json(&fixture.app, &uri).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["status"], "completed", "{body}");
+    assert_eq!(
+        body["operation_id"], "aggregate_initialization_active_completed_0001",
+ "{body}"
+    );
+    assert_eq!(body["completed_at"], "2026-09-28T00:04:00Z", "{body}");
+
+    // 较新的 running operation 落盘后,active 返回 updated_at 最新的那个。
+    create_running_initialization(
+        &fixture.paths,
+        &fixture.lc_id,
+        "aggregate_initialization_active_running_0002",
+    );
+    let (status, body) = get_json(&fixture.app, &uri).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["status"], "running", "{body}");
+    assert_eq!(
+        body["operation_id"], "aggregate_initialization_active_running_0002",
+ "{body}"
+    );
+
+    // 纯投影:零 provider 启动、零 trust 评估(与按 id GET 同约束)。
+    assert_eq!(fixture.factory.audit().stream_launches(), 0);
+    assert_eq!(
+        fixture.gate.calls(),
+        0,
+        "GET active must not evaluate the trust gate"
+    );
+}

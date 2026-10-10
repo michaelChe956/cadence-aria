@@ -168,7 +168,8 @@ pub use aggregate_initialization::{
     AggregateInitializationDependencies, cancel_aggregate_initialization,
     cancel_lc_aggregate_initialization, create_aggregate_initialization,
     create_lc_aggregate_initialization, get_aggregate_initialization,
-    get_lc_aggregate_initialization,
+    get_aggregate_initialization_active, get_lc_aggregate_initialization,
+    get_lc_aggregate_initialization_active,
 };
 pub(crate) use coding::map_advance_outcome;
 pub(crate) use coding_choice::{get_coding_choice_response_status, post_coding_choice_response};

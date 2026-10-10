@@ -132,6 +132,20 @@ impl AggregateInitializationCoordinator {
             })
     }
 
+    /// Latest operation by `updated_at` (desc) in this scope — read-only
+    /// projection feeding the management panel's active display. Returns any
+    /// status including terminal completed/failed/cancelled so a finished
+    /// initialization stays visible after a page reload.
+    pub fn latest(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<AggregateInitializationOperation>, AggregateInitializationError> {
+        self.operations
+            .list(project_id)
+            .map_err(AggregateInitializationError::from)
+            .map(|operations| operations.into_iter().next())
+    }
+
     /// Advance the operation through every remaining step in strict order. The
     /// operation must already exist (created via [`Self::begin`]). Machine skills
     /// and preflight run as deterministic Cadence code; exactly three provider

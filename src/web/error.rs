@@ -74,6 +74,7 @@ impl IntoResponse for ApiError {
             | "project_not_found"
             | "repository_not_found"
             | "repository_initialization_operation_not_found"
+            | "aggregate_initialization_operation_not_found"
             | "spec_not_found"
             | "workspace_not_found"
             | "work_item_not_found"

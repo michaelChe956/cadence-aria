@@ -57,6 +57,31 @@ export function getAggregateInitialization(
   );
 }
 
+/**
+ * LC 当前最新聚合初始化 operation 投影(任意状态,含 completed/failed/
+ * cancelled),供面板刷新/切换后恢复真实状态。LC 尚未初始化(404 +
+ * `aggregate_initialization_operation_not_found`)是正常态,解析为 null;
+ * 其它错误照抛 ApiRequestError。
+ */
+export async function getActiveAggregateInitialization(
+  projectId: string,
+  logicalCodebaseId: string,
+): Promise<AggregateInitializationOperationSnapshot | null> {
+  try {
+    return await requestJson<AggregateInitializationOperationSnapshot>(
+      `${initializationsPath(projectId, logicalCodebaseId)}/active`,
+    );
+  } catch (reason) {
+    if (
+      reason instanceof ApiRequestError &&
+      reason.code === "aggregate_initialization_operation_not_found"
+    ) {
+      return null;
+    }
+    throw reason;
+  }
+}
+
 export function cancelAggregateInitialization(
   projectId: string,
   logicalCodebaseId: string,

@@ -164,6 +164,52 @@ pub async fn get_lc_aggregate_initialization(
     get_aggregate_initialization_for_lc(state, project_id, logical_codebase_id, operation_id)
 }
 
+/// Legacy `/logical-codebase/initializations/active` compatibility alias for
+/// the default first logical codebase.
+pub async fn get_aggregate_initialization_active(
+    State(state): State<WebAppState>,
+    Path(project_id): Path<String>,
+) -> ApiResult<Response> {
+    let paths = product_app_paths(&state);
+    let logical_codebase_id = default_logical_codebase_id(&paths, &project_id)?;
+    get_aggregate_initialization_active_for_lc(state, project_id, logical_codebase_id)
+}
+
+/// v1.3 canonical endpoint: returns the LC's latest aggregate initialization
+/// operation regardless of terminal state (completed/failed/cancelled), so
+/// the management panel can restore the real status after a page reload
+/// instead of showing「尚未初始化」.
+pub async fn get_lc_aggregate_initialization_active(
+    State(state): State<WebAppState>,
+    Path((project_id, logical_codebase_id)): Path<(String, String)>,
+) -> ApiResult<Response> {
+    let paths = product_app_paths(&state);
+    require_logical_codebase(&paths, &project_id, &logical_codebase_id)?;
+    get_aggregate_initialization_active_for_lc(state, project_id, logical_codebase_id)
+}
+
+fn get_aggregate_initialization_active_for_lc(
+    state: WebAppState,
+    project_id: String,
+    logical_codebase_id: String,
+) -> ApiResult<Response> {
+    validate_project_id(&project_id)?;
+    let dependencies =
+        aggregate_initialization_dependencies(&state).for_lc(logical_codebase_id.clone());
+    // 纯投影:任意状态(含 completed/failed/cancelled)的最新 operation;
+    // 无 operation 时按未初始化语义返回稳定 not_found code(404)。
+    let operation = dependencies
+        .coordinator
+        .latest(&project_id)
+        .map_err(aggregate_initialization_api_error)?
+        .ok_or_else(|| {
+            aggregate_initialization_api_error(AggregateInitializationError::NotFound {
+                id: "active".to_string(),
+            })
+        })?;
+    Ok(Json(aggregate_initialization_dto(operation)).into_response())
+}
+
 fn get_aggregate_initialization_for_lc(
     state: WebAppState,
     project_id: String,

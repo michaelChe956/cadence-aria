@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiRequestError } from "./client";
 import {
   cancelAggregateInitialization,
+  getActiveAggregateInitialization,
   getAggregateInitialization,
   startAggregateInitialization,
 } from "./aggregate-initialization";
@@ -142,6 +143,68 @@ describe("aggregate initialization api client", () => {
     ).rejects.toMatchObject({
       name: "ApiRequestError",
       message: "aggregate initialization is already in progress",
+    } satisfies Partial<ApiRequestError>);
+  });
+
+  it("gets the active aggregate initialization with encoded ids", async () => {
+    const calls: Array<{ input: string; init?: RequestInit }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push({ input: String(input), init });
+        return jsonResponse({ ...operationResponse(), status: "completed" });
+      }),
+    );
+
+    const operation = await getActiveAggregateInitialization(
+      "project/with space",
+      "lc-0001",
+    );
+
+    expect(calls[0].input).toBe(
+      "/api/projects/project%2Fwith%20space/logical-codebases/lc-0001/initializations/active",
+    );
+    expect(operation?.status).toBe("completed");
+  });
+
+  it("resolves an uninitialized active aggregate initialization as null", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse(
+          {
+            code: "aggregate_initialization_operation_not_found",
+            message: "aggregate initialization operation not found",
+          },
+          404,
+        ),
+      ),
+    );
+
+    await expect(
+      getActiveAggregateInitialization("project_0001", "lc-0001"),
+    ).resolves.toBeNull();
+  });
+
+  it("propagates other active aggregate initialization failures", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse(
+          {
+            code: "logical_codebase_not_found",
+            message: "logical codebase not found",
+          },
+          404,
+        ),
+      ),
+    );
+
+    await expect(
+      getActiveAggregateInitialization("project_0001", "lc-unknown"),
+    ).rejects.toMatchObject({
+      name: "ApiRequestError",
+      message: "logical codebase not found",
     } satisfies Partial<ApiRequestError>);
   });
 });

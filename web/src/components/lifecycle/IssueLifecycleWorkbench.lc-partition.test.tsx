@@ -141,11 +141,55 @@ describe("IssueLifecycleWorkbench 逻辑代码库按 LC 分区（R8）", () => {
         screen.queryByTestId("aggregate-initialization-status"),
       ).not.toBeInTheDocument(),
     );
-    // 也不应对 B 轮询 A 的 operation_id
+    // 也不应对 B 轮询 A 的 operation_id(B 拉取自己的 active 投影属预期,
+    // 但不得携带 A 的 operation_id 发起按 id GET)。
     expect(
       calls.some((call) =>
-        call.includes("/logical-codebases/lc_0002/initializations/")),
+        /\/logical-codebases\/lc_0002\/initializations\/aggregate_initialization/.test(
+          call,
+        ),
+      ),
     ).toBe(false);
+  });
+
+  it("LC 作用域加载恢复最新初始化 operation:完成态显示而非「尚未初始化」", async () => {
+    const calls: string[] = [];
+    const fetchMock = lifecycleFetch({
+      projects: [projectRecord("project_0001", "Aria")],
+      logicalCodebases: [{ id: "lc_0001", name: "platform", member_count: 1 }],
+      logicalCodebaseMembersByLc: {
+        lc_0001: [member("lr-1", "api", "repository_1001")],
+      },
+      aggregateInitializationActive: aggregateInitializationOperation("completed"),
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        calls.push(`${init?.method ?? "GET"} ${url}`);
+        return fetchMock(input, init);
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+
+    await user.click(await screen.findByTestId("lc-summary-toggle"));
+
+    // 完成态从 active 投影恢复:徽标 completed、文案「初始化完成」、
+    // 无「启动聚合初始化」按钮(Completed 没有启动按钮)。
+    expect(
+      await screen.findByTestId("aggregate-initialization-status"),
+    ).toHaveAttribute("data-status", "completed");
+    expect(screen.getByText("初始化完成")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "启动聚合初始化" }),
+    ).not.toBeInTheDocument();
+    expect(
+      calls.some((call) =>
+        call.includes("/logical-codebases/lc_0001/initializations/active"),
+      ),
+    ).toBe(true);
   });
 
   it("登记成员对选中 LC 打开向导（不再固定取首个）", async () => {

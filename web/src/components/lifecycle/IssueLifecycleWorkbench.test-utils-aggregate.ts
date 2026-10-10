@@ -36,6 +36,7 @@ export type LifecycleFetchOptions = {
   aggregateIndexRebuild?: AggregateIndexActiveResponse;
   aggregateInitializationStart?: AggregateInitializationOperationSnapshot;
   aggregateInitializationSnapshots?: AggregateInitializationOperationSnapshot[];
+  aggregateInitializationActive?: AggregateInitializationOperationSnapshot;
   aggregateInitializationCancel?: AggregateInitializationOperationSnapshot;
   registrationPreflight?: RegistrationPreflightResponse;
   registrationSubmit?: RegistrationBatchDto;
@@ -173,6 +174,26 @@ export function createAggregateInitializationRoutes(
               indexed_at: null,
               warning: null,
             }),
+      );
+    }
+    const aggregateInitializationActiveMatch = url.match(
+      /^\/api\/projects\/([^/]+)\/logical-codebases\/([^/]+)\/initializations\/active$/,
+    );
+    if (aggregateInitializationActiveMatch && init?.method !== "POST") {
+      // 未注入快照 = 该 LC 尚未初始化:404 + 稳定 not_found code(与后端
+      // 未初始化语义一致,前端降级为 null → 面板显示「尚未初始化」)。
+      if (options?.aggregateInitializationActive) {
+        return jsonResponse(options.aggregateInitializationActive);
+      }
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            code: "aggregate_initialization_operation_not_found",
+            message: "aggregate initialization operation not found",
+            details: {},
+          }),
+          { status: 404 },
+        ),
       );
     }
     const aggregateInitializationStartMatch = url.match(

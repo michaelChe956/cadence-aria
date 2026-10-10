@@ -116,6 +116,10 @@ pub fn build_web_router_with_evidence(state: WebAppState, evidence_enabled: bool
             post(handlers::create_aggregate_initialization),
         )
         .route(
+            "/api/projects/{project_id}/logical-codebase/initializations/active",
+            get(handlers::get_aggregate_initialization_active),
+        )
+        .route(
             "/api/projects/{project_id}/logical-codebase/initializations/{operation_id}",
             get(handlers::get_aggregate_initialization),
         )
@@ -126,6 +130,10 @@ pub fn build_web_router_with_evidence(state: WebAppState, evidence_enabled: bool
         .route(
             "/api/projects/{project_id}/logical-codebases/{lc_id}/initializations",
             post(handlers::create_lc_aggregate_initialization),
+        )
+        .route(
+            "/api/projects/{project_id}/logical-codebases/{lc_id}/initializations/active",
+            get(handlers::get_lc_aggregate_initialization_active),
         )
         .route(
             "/api/projects/{project_id}/logical-codebases/{lc_id}/initializations/{operation_id}",
