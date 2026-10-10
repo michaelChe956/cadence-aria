@@ -132,7 +132,7 @@ export class CodingWorkspacePage {
   async answerChoice(entry: Locator, evidenceDir: string, stage: string): Promise<{ reason: string; selected: string[] }> {
     const dump = await dumpChoiceEntry(entry);
     const inputNames = [...new Set(dump.options.map((option) => option.name))];
-    if (inputNames.length !== 1 || dump.hasFreeText || dump.inputType === "mixed") {
+    if (inputNames.length !== 1 || (dump.hasFreeText && dump.options.length === 0) || dump.inputType === "mixed") {
       const file = writeFailClosedEvidence(evidenceDir, {
         stage,
         cause: `coding choice 结构未获单题授权:name 组=${inputNames.length} freeText=${dump.hasFreeText} type=${dump.inputType}`,
@@ -215,7 +215,7 @@ export class CodingWorkspacePage {
       if (choiceCount > 0) {
         const entry = this.choiceEntry.nth(0);
         const submit = entry.getByRole("button", { name: "提交选择" });
-        if ((await submit.count()) > 0 && (await submit.isEnabled())) {
+        if ((await submit.count()) > 0) {
           await this.answerChoice(entry, options.evidenceDir, options.stage);
           choicesAnswered += 1;
           lastActivityAt = Date.now();

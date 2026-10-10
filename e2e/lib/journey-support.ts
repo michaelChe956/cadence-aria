@@ -100,6 +100,7 @@ export type LifecycleRead = {
   }[];
   work_item_repository_groups: { target_repository_id: string | null; alias: string; status: string; items: string[] }[];
   coding_attempts: { attempt_id: string; status: string; stage?: string | null }[];
+  workspace_sessions: { workspace_session_id: string; entity_id: string; workspace_type: string; status: string }[];
   delivery_summary?: {
     overall: string;
     entries: {

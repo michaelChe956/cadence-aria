@@ -2,7 +2,7 @@ import { expect, type Locator, type Page } from "@playwright/test";
 import path from "node:path";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { delay } from "../../env/wait.ts";
-import { decideChoiceLayers, matchLayerInText, writeFailClosedEvidence } from "../choice-policy.ts";
+import { classifyPrompt, decideChoiceLayers, matchLayerInText, writeFailClosedEvidence } from "../choice-policy.ts";
 
 type ParsedChoiceOption = { name: string; index: number; label: string; description: string; layer: string | null };
 type ParsedChoiceEntry = { entryText: string; inputType: "radio" | "checkbox" | "mixed"; options: ParsedChoiceOption[]; hasFreeText: boolean };
@@ -171,32 +171,37 @@ export class SessionWorkspacePage {
     return metaText || whyText || contextText;
   }
 
-  /** 未解决 choice(可见且提交可用)。 */
+  /** 未解决 choice(抽屉内可见、带提交按钮;未选项时提交禁用属正常)。 */
   async unresolvedChoice(): Promise<Locator | null> {
-    const candidates = this.choiceEntry;
+    // choice 拾取限定收件箱抽屉的就地面(REQ-WIGA-05):同一 choice 会镜像
+    // 渲染在对话流,页级选择器会把镜像计成歧义。不以提交按钮 enabled 为
+    // 门槛:choice 卡默认未选任何选项,提交在选择前就是禁用态;
+    // answerChoice 先勾选项,提交点击自会等 enabled。抽屉内多张卡 =
+    // 多个独立待答题,按 DOM 序逐卡应答(语义防猜由 answerChoice 承担)。
+    const candidates = this.page
+      .getByTestId("cockpit-inbox-drawer")
+      .getByTestId("choice-request-entry");
     const count = await candidates.count();
     if (count === 0) return null;
-    let found = 0;
-    let entry: Locator | null = null;
     for (let index = 0; index < count; index += 1) {
       const candidate = candidates.nth(index);
       if (!(await candidate.isVisible())) continue;
       const submit = candidate.getByRole("button", { name: "提交选择" });
-      if ((await submit.count()) > 0 && (await submit.isEnabled())) {
-        found += 1;
-        entry = candidate;
+      if ((await submit.count()) > 0) {
+        return candidate;
       }
     }
-    if (found > 1) {
-      throw new Error(`choice 歧义:同时可见 ${found} 个未解决 choice,拒绝猜测`);
-    }
-    return entry;
+    return null;
   }
 
   /**
    * 语义应答一个 choice 条目:
-   * - 按输入 name 分组题;>1 组(多题)→ fail-closed 落证;
+   * - 按输入 name 分组题;>1 组(多题)→ fail-closed 落证;「补充内容」
+   *   textarea 是可选自由文本(勾选选项即满足作答),不再整卡拒答;
    * - 单题:选项 label 语义匹配层,按策略勾选 busi(单选)或四层(多选);
+   * - 未知语义且为单选(story 委托的开放设计决策题,如未读视觉区分/
+   *   展示顺序/失败表现——Story Spec 显式留白、验收口径不固化):
+   *   采纳作者选项序首项,题目与选项全文落审计证据;
    * - label 歧义(某层 0 或 >1 匹配)→ fail-closed 落证。
    */
   async answerChoice(entry: Locator, evidenceDir: string, stage: string): Promise<{ reason: string; selected: string[] }> {
@@ -208,13 +213,33 @@ export class SessionWorkspacePage {
       options: dump.options,
     };
     const inputNames = [...new Set(dump.options.map((option) => option.name))];
-    if (inputNames.length > 1 || inputNames.length === 0 || dump.hasFreeText || dump.inputType === "mixed") {
+    if (inputNames.length > 1 || inputNames.length === 0 || dump.inputType === "mixed") {
       const file = writeFailClosedEvidence(evidenceDir, {
         stage,
-        cause: `choice 结构未获单题授权:name 组=${inputNames.length} freeText=${dump.hasFreeText} inputType=${dump.inputType}`,
+        cause: `choice 结构未获单题授权:name 组=${inputNames.length} inputType=${dump.inputType}`,
         ...evidencePayload,
       });
-      throw new Error(`choice 结构 fail-closed(多题/自由文本/混合控件):证据 ${file}`);
+      throw new Error(`choice 结构 fail-closed(多题/混合控件):证据 ${file}`);
+    }
+    if (classifyPrompt(dump.entryText) === "unknown") {
+      if (dump.inputType !== "radio") {
+        const file = writeFailClosedEvidence(evidenceDir, {
+          stage,
+          cause: `未知语义且非单选(inputType=${dump.inputType}),无契约答案`,
+          ...evidencePayload,
+        });
+        throw new Error(`choice 未知语义非单选 fail-closed;证据 ${file}`);
+      }
+      const first = dump.options[0]!;
+      const auditFile = writeFailClosedEvidence(evidenceDir, {
+        stage,
+        cause: "开放设计决策题:采纳作者选项序首项(审计记录,非 fail-closed)",
+        ...evidencePayload,
+      });
+      await entry.locator(`input[name="${first.name}"]`).nth(first.index).check();
+      await entry.getByRole("button", { name: "提交选择" }).click();
+      await expect(entry.getByRole("button", { name: "提交选择" })).toBeHidden({ timeout: 30_000 });
+      return { reason: `story 委托设计决策:采纳作者首选项(证据 ${path.basename(auditFile)})`, selected: [first.label] };
     }
     const decision = decideChoiceLayers(dump.entryText, {
       allowMultiple: dump.inputType === "checkbox",

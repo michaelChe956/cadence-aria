@@ -66,6 +66,16 @@ export class WorkbenchPage {
     await expect(toggle).toHaveAttribute("aria-expanded", "true");
   }
 
+  /** 阶段面板切换:单阶段工作区同一时刻只渲染当前 stage 的卡,而默认
+   * 阶段=「需要动作的最早阶段」(无 Story→story;有 Story 无 Design→design;
+   * 其余→work_item),进入工作台时未必停在目标卡所在 stage——取卡前先切。 */
+  async openStage(stage: "story" | "design" | "work_item"): Promise<void> {
+    const tab = this.page.getByTestId(`stage-tab-${stage}`);
+    await expect(tab).toBeVisible({ timeout: 30_000 });
+    await tab.click();
+    await expect(this.page.locator(`#stage-panel-${stage}`)).toBeVisible();
+  }
+
   get initializationStatus(): Locator {
     return this.page.getByTestId("aggregate-initialization-status");
   }

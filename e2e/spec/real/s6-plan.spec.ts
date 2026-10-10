@@ -37,6 +37,9 @@ test.describe("real 全旅程 S6 Plan", () => {
       const workbench = await enterWorkbench(bootstrap, page);
 
       // design 卡(confirmed)→ drawer → 生成 Work Item(打开 Plan 选项对话框)。
+      // 单阶段面板:进入时已有 Story+Design、无 Work Item → 默认阶段=work_item,
+      // design 卡只在 Design 面板渲染,先切阶段再取卡。
+      await workbench.openStage("design");
       const designCards = page.getByTestId("lifecycle-card-design_spec");
       await expect(designCards).toHaveCount(1, { timeout: 30_000 });
       await designCards.nth(0).click();
