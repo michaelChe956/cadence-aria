@@ -8,6 +8,7 @@ export * from "./types/lifecycle";
 export * from "./types/logical-codebase-members";
 export * from "./types/logical-codebase-registration";
 export * from "./types/logical-codebase-bootstrap";
+export * from "./types/provider-capability";
 export * from "./types/pointer-publication";
 export * from "./types/provider";
 export * from "./types/work-item-plan";
