@@ -12,8 +12,10 @@ import { waitForFile } from "./wait.ts";
 /** 监听行前缀契约,与 src/web/app.rs LISTENING_LINE_PREFIX 一致。 */
 export const LISTENING_LINE_PREFIX = "aria web listening on http://";
 
-/** 从一段 stderr 文本中解析监听行,返回 {host, port}。 */
+/** 从一段 stderr 文本中解析监听行(取**最后**一条:重启续跑时日志追加,
+ * 旧监听行仍在文件内,首条会是已死端口的陈旧值),返回 {host, port}。 */
 export function parseListeningLine(chunk: string): { host: string; port: number } | null {
+  let last: { host: string; port: number } | null = null;
   for (const rawLine of chunk.split(/\r?\n/)) {
     const line = rawLine.trim();
     if (!line.startsWith(LISTENING_LINE_PREFIX)) continue;
@@ -22,9 +24,9 @@ export function parseListeningLine(chunk: string): { host: string; port: number 
     if (!match?.groups) continue;
     const port = Number.parseInt(match.groups.port, 10);
     if (!Number.isInteger(port) || port <= 0 || port > 65535) continue;
-    return { host: match.groups.v6 ?? match.groups.v4, port };
+    last = { host: match.groups.v6 ?? match.groups.v4, port };
   }
-  return null;
+  return last;
 }
 
 /** 读取 workspace 根 `.aria/web-endpoint`(内容为纯端口号)。 */

@@ -2,7 +2,7 @@ import { expect, type Locator, type Page } from "@playwright/test";
 
 /// LC 批登记向导页面对象(LogicalCodebaseRegistrationWizard)。
 /// 旅程:填聚合根→自动发现预检→核对 eligible 候选(默认全选)→提交登记→
-/// 登记结果 completed(v2.0 §8:不得走 legacy 逐仓表单)。
+/// 登记结果 completed(v2.0 §8:不得走单仓路由(非 LC)的逐仓表单)。
 
 export class RegistrationWizardPage {
   readonly page: Page;

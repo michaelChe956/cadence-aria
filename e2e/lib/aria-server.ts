@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { closeSync, mkdirSync, openSync, readFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { parseListeningLine, readWebEndpointFileSync } from "../env/ports.ts";
 import { delay, pathExists, waitFor } from "../env/wait.ts";
@@ -44,12 +44,18 @@ export type SpawnAriaOptions = {
   logFile: string;
   /** 冒烟桩态:产品自带 fake provider 模式(不 spawn 任何真实 AI)。 */
   providerMode: string;
+  /** /api/health 有界等待上界;既有 workspace 暖启(启动期 provider 探测)需更长。 */
+  healthTimeoutMs?: number;
 };
 
 /** 拉起 aria web(--port 0 内核分配),从日志监听行/端点文件解析端口,等待 /api/health。 */
 export async function spawnAriaWeb(options: SpawnAriaOptions): Promise<AriaServerHandle> {
   const logFile = path.resolve(options.logFile);
   mkdirSync(path.dirname(logFile), { recursive: true });
+  // 续跑场景日志追加:只认 spawn 之后写入的监听行/端点文件,否则会在新
+  // 服务写行前命中上一轮死端口的陈旧行,health 永远探测死端口。
+  const logStartOffset = existsSync(logFile) ? statSync(logFile).size : 0;
+  const spawnStartedAtMs = Date.now();
   const fd = openSync(logFile, "a");
   const child: ChildProcess = spawn(
     options.binary,
@@ -72,11 +78,17 @@ export async function spawnAriaWeb(options: SpawnAriaOptions): Promise<AriaServe
       const tail = await readLogTail(logFile, 4000);
       throw new Error(`aria web 提前退出,日志尾部:\n${tail}`);
     }
-    const logText = (await pathExists(logFile)) ? readFileSync(logFile, "utf8") : "";
-    const fromLine = parseListeningLine(logText);
-    if (fromLine) return fromLine;
+    if (existsSync(logFile)) {
+      const appended = readFileSync(logFile, "utf8").slice(logStartOffset);
+      const fromLine = parseListeningLine(appended);
+      if (fromLine) return fromLine;
+    }
     try {
-      return { host: "127.0.0.1", port: readWebEndpointFileSync(options.workspaceRoot) };
+      const endpoint = `${options.workspaceRoot}/.aria/web-endpoint`;
+      if (statSync(endpoint).mtimeMs >= spawnStartedAtMs - 1_000) {
+        return { host: "127.0.0.1", port: readWebEndpointFileSync(options.workspaceRoot) };
+      }
+      return null;
     } catch {
       return null;
     }
@@ -84,7 +96,7 @@ export async function spawnAriaWeb(options: SpawnAriaOptions): Promise<AriaServe
 
   const host = address.host === "::1" ? "[::1]" : address.host;
   const baseURL = `http://${host}:${address.port}`;
-  await waitFor("/api/health 200", 30_000, async () => {
+  await waitFor("/api/health 200", options.healthTimeoutMs ?? 30_000, async () => {
     if (!isAlive(pid)) {
       const tail = await readLogTail(logFile, 4000);
       throw new Error(`aria web 健康等待期间退出,日志尾部:\n${tail}`);

@@ -11,7 +11,7 @@
     "test": "playwright test",
     "smoke": "node env/assemble.ts && playwright test; rc=$?; node env/teardown.ts; exit $rc",
     "journey": "node env/assemble-real.ts && node scripts/run-real-journey.ts; rc=$?; node env/teardown.ts; exit $rc",
-    "journey:resume": "node scripts/run-real-journey.ts; rc=$?; node env/teardown.ts; exit $rc",
+    "journey:resume": "node env/restart-real.ts && node scripts/run-real-journey.ts; rc=$?; node env/teardown.ts; exit $rc",
     "teardown": "node env/teardown.ts"
   },
   "devDependencies": {

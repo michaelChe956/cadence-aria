@@ -255,9 +255,99 @@ export class SessionWorkspacePage {
   }
 
   /**
-   * 驱动长段直到安静(门/choice 全解决且页面签名在 quietWindowMs 内无变化)
-   * 或预算耗尽。返回事件台账;异常(停滞/歧义/协议错误)如实抛出。
+   * 会话首启按钮(chat-input-bar 的 start-generation):story/design 会话
+   * 在 provider 就绪后需显式「开始生成」才驱动 AI(截证:待处理卡「会话
+   * 尚未开始」)。visible+enabled 即返回。
    */
+  async startGenerationButton(): Promise<Locator | null> {
+    const button = this.page.getByTestId("start-generation");
+    if ((await button.count()) === 0) return null;
+    const target = button.nth(0);
+    return (await target.isVisible()) && (await target.isEnabled()) ? target : null;
+  }
+
+  /**
+   * 决策面确认(返工单精确化 2026-10-10):story/design author 门的真定稿
+   * 入口=cockpit 产物审核面板的「确认定稿」(exact,routeGateConfirm 走
+   * HTTP confirm;避开「确认并评审」与终止钮)。可点且 enabled 即返回。
+   */
+  async decisionConfirmButton(): Promise<Locator | null> {
+    const button = this.page.getByRole("button", { name: "确认定稿", exact: true });
+    const count = await button.count();
+    if (count === 0) return null;
+    if (count > 1) throw new Error(`决策面「确认定稿」按钮数=${count},歧义拒绝`);
+    const target = button.nth(0);
+    return (await target.isVisible()) && (await target.isEnabled()) ? target : null;
+  }
+
+  /** 收件箱抽屉:有待处理项且收起时打开(aria-expanded 状态防反选)。 */
+  async ensureInboxOpen(): Promise<void> {
+    const trigger = this.page.getByTestId("cockpit-inbox-drawer-trigger");
+    if (!(await trigger.isVisible())) return;
+    const expanded = await trigger.getAttribute("aria-expanded");
+    if (expanded !== "true") {
+      await trigger.click();
+      await expect(this.page.getByTestId("cockpit-inbox-drawer")).toBeVisible({ timeout: 15_000 });
+    }
+  }
+
+  /** 收起收件箱抽屉(全屏浮层会遮挡页面级动作,如 start-generation);
+   * 用抽屉头部「收起待处理抽屉」按钮(浮层内的关闭通路,trigger 可能被遮挡)。 */
+  async closeInbox(): Promise<void> {
+    const drawer = this.page.getByTestId("cockpit-inbox-drawer");
+    if (!(await drawer.isVisible())) return;
+    await drawer.getByRole("button", { name: "收起待处理抽屉" }).click();
+    await expect(drawer).toBeHidden({ timeout: 15_000 });
+  }
+
+  /**
+   * 收件箱门卡(story/design 会话协议(entity dialog,产品枚举名待改)的确认面之一,返工单 2026-10-10):
+   * cockpit-inbox-item-gate 中含可点「确认定稿/确认」(exact,避开
+   * 确认并评审/采纳 Review 意见/终止)的卡;多于一张可动卡 → fail-closed。
+   */
+  async unresolvedInboxGate(): Promise<Locator | null> {
+    const drawer = this.page.getByTestId("cockpit-inbox-drawer");
+    if (!(await drawer.isVisible())) return null;
+    const cards = drawer.getByTestId("cockpit-inbox-item-gate");
+    const count = await cards.count();
+    let actionable = 0;
+    let target: Locator | null = null;
+    for (let index = 0; index < count; index += 1) {
+      const card = cards.nth(index);
+      if (!(await card.isVisible())) continue;
+      const confirm = card.getByRole("button", { name: /^(确认定稿|确认)$/ });
+      if ((await confirm.count()) > 0 && (await confirm.nth(0).isEnabled())) {
+        actionable += 1;
+        target = card;
+      }
+    }
+    if (actionable > 1) {
+      throw new Error(`收件箱门歧义:${actionable} 张可确认卡,拒绝猜测`);
+    }
+    return target;
+  }
+
+  async confirmInboxGate(card: Locator, evidenceDir: string, stage: string): Promise<string> {
+    const cardText = (await card.innerText()).slice(0, 600);
+    mkdirSync(evidenceDir, { recursive: true });
+    writeFileSync(
+      path.join(evidenceDir, `inbox-gate-${stage}-${Date.now()}.json`),
+      JSON.stringify({ stage, sessionId: this.sessionId, card: cardText }, null, 2),
+      "utf8",
+    );
+    const confirm = card.getByRole("button", { name: /^(确认定稿|确认)$/ });
+    const count = await confirm.count();
+    if (count !== 1) throw new Error(`收件箱门确认按钮数=${count}(预期 1;按钮群含确认并评审等需人工消歧)`);
+    await confirm.nth(0).click();
+    await expect(confirm.nth(0)).toBeHidden({ timeout: 60_000 });
+    return cardText.split("\n")[0] ?? "inbox-gate";
+  }
+
+  /**
+   * 驱动长段直到安静:三通道(决策面确认定稿=story/design 会话协议(entity dialog,产品枚举名待改)主入口、收件箱门卡、timeline 门、
+   * choice)+页面签名 quietWindowMs 无变化收口;durable 由 spec 层核对。
+   */
+
   async driveUntilQuiet(options: {
     stage: string;
     budgetMs: number;
@@ -271,17 +361,57 @@ export class SessionWorkspacePage {
     let lastActivityAt = Date.now();
     let lastSignature = "";
     for (;;) {
+      // 通道0:收件箱抽屉(门/choice 卡只在展开时可见可点;全屏浮层会遮挡
+      // 页面级动作,故检查无果后必须收起)。
+      await this.ensureInboxOpen().catch(() => {});
+      const inboxGate = await this.unresolvedInboxGate();
+      if (inboxGate) {
+        const context = await this.confirmInboxGate(inboxGate, options.evidenceDir, options.stage);
+        events.gatesConfirmed.push({ at: new Date().toISOString(), context: `inbox:${context}` });
+        lastActivityAt = Date.now();
+        continue;
+      }
+      const drawerChoice = await this.unresolvedChoice();
+      if (drawerChoice) {
+        const answered = await this.answerChoice(drawerChoice, options.evidenceDir, options.stage);
+        events.choicesAnswered.push({ at: new Date().toISOString(), ...answered });
+        lastActivityAt = Date.now();
+        continue;
+      }
+      await this.closeInbox().catch(() => {});
+      // 通道A:会话首启「开始生成」——provider 就绪后显式发起。
+      const startButton = await this.startGenerationButton();
+      if (startButton) {
+        mkdirSync(options.evidenceDir, { recursive: true });
+        writeFileSync(
+          path.join(options.evidenceDir, `start-generation-${options.stage}-${Date.now()}.json`),
+          JSON.stringify({ stage: options.stage, sessionId: this.sessionId, at: new Date().toISOString() }, null, 2),
+          "utf8",
+        );
+        await startButton.click();
+        await expect(startButton).toBeHidden({ timeout: 60_000 });
+        lastActivityAt = Date.now();
+        continue;
+      }
+      // 通道B:决策面「确认定稿」=story/design author 门真定稿入口。
+      const decision = await this.decisionConfirmButton();
+      if (decision) {
+        mkdirSync(options.evidenceDir, { recursive: true });
+        writeFileSync(
+          path.join(options.evidenceDir, `decision-confirm-${options.stage}-${Date.now()}.json`),
+          JSON.stringify({ stage: options.stage, sessionId: this.sessionId, at: new Date().toISOString() }, null, 2),
+          "utf8",
+        );
+        await decision.click();
+        await expect(decision).toBeHidden({ timeout: 60_000 });
+        events.gatesConfirmed.push({ at: new Date().toISOString(), context: "decision-surface:确认定稿" });
+        lastActivityAt = Date.now();
+        continue;
+      }
       const gate = await this.unresolvedGate();
       if (gate) {
         const context = await this.confirmGate(gate, options.evidenceDir, options.stage);
         events.gatesConfirmed.push({ at: new Date().toISOString(), context });
-        lastActivityAt = Date.now();
-        continue;
-      }
-      const choice = await this.unresolvedChoice();
-      if (choice) {
-        const answered = await this.answerChoice(choice, options.evidenceDir, options.stage);
-        events.choicesAnswered.push({ at: new Date().toISOString(), ...answered });
         lastActivityAt = Date.now();
         continue;
       }
