@@ -1,6 +1,25 @@
 use super::*;
 use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
 
+/// T4.1（REQ-REG-15）：确认 trust 准备的同步预检产物（lifecycle.rs 私有）。
+/// `Skip`=免登记（非 LC 会话/无有效 trust provider，零调用放行）；
+/// `Ensure`=待执行的 registry 调用参数（owned 数据，不持 engine 借用跨
+/// await——见 `ensure_confirmation_trust_ready`）。
+enum ConfirmationTrustEnsure {
+    Skip,
+    Ensure {
+        precondition: std::sync::Arc<
+            dyn crate::product::logical_codebase::ProviderTrustPrecondition,
+        >,
+        session_id: String,
+        project_id: String,
+        operation_id: String,
+        registry_lc_id: String,
+        canonical_root: std::path::PathBuf,
+        providers: Vec<ProviderName>,
+    },
+}
+
 /// spec-design-dialog-revision T6：HumanConfirm/ReviewDecision 已从 Story/Design 流程退役，
 /// 存量会话恢复时迁移回 AuthorConfirm（保留产物与消息，review verdict 留在消息流）。
 /// 仅迁移 stage，不触碰 timeline/持久化存储（恢复语义由消息流保留，懒迁移随下次持久化落盘）。
@@ -244,6 +263,7 @@ impl WorkspaceEngine {
             logical_provider_gateway: None,
             logical_launch_fingerprints: HashMap::new(),
             last_gate_close_compile_failure: None,
+            confirmation_trust_context: None,
         }
     }
 
@@ -390,6 +410,7 @@ impl WorkspaceEngine {
             logical_provider_gateway: None,
             logical_launch_fingerprints: HashMap::new(),
             last_gate_close_compile_failure: None,
+            confirmation_trust_context: None,
         }
     }
 
@@ -431,6 +452,265 @@ impl WorkspaceEngine {
         &self,
     ) -> Option<Arc<crate::product::logical_codebase::LogicalCodebaseProviderGateway>> {
         self.logical_provider_gateway.clone()
+    }
+
+    /// T4.1/T4.3（REQ-REG-15/D2）：注入人工确认 trust 按需登记的冻结上下文
+    /// （manager create 在 gateway 装配段调用；与 aggregate initialization
+    /// 生产依赖共用同一 precondition 实例）。缺省 None 时 LC 会话（有
+    /// gateway）确认 fail-closed ContextWaiting，非 LC 会话免登记。
+    pub fn with_confirmation_trust_context(
+        mut self,
+        context: super::types::ConfirmationTrustContext,
+    ) -> Self {
+        self.confirmation_trust_context = Some(context);
+        self
+    }
+
+    /// T4.1（REQ-REG-15）：确认 trust 冻结上下文的只读快照（manager 装配
+    /// 断言/测试观察锚）。返回克隆的 precondition Arc 与冻结身份。
+    pub fn confirmation_trust_context(
+        &self,
+    ) -> Option<super::types::ConfirmationTrustContext> {
+        self.confirmation_trust_context.clone()
+    }
+
+    /// T4.1（REQ-REG-15 方案 A/D1/D2）：合法人工确认关门前 trust 按需准备。
+    ///
+    /// 接线边界（D1）：SC 在 `close_human_gate` Approve 臂静态资格预检通过
+    /// 后、原带写 close CAS 之前；非 SC 在 `handle_confirm` 的 HumanConfirm
+    /// 臂 `validate_confirm_aggregate_spec_gate` 之后、定稿/创建子会话之前。
+    /// Running 臂、SC 反馈、Abandon 不进入本方法（不登记）。
+    ///
+    /// - 非 LC 会话（未注入 gateway）：免登记零调用直接放行。
+    /// - LC 会话缺确认上下文/precondition：ContextWaiting fail-closed。
+    /// - 漂移重验（零 home 调用）：issue 原始 LC 归属重解析相等；frozen
+    ///   root 可 canonicalize；同 scope manifest root 与 frozen root
+    ///   canonical 相等。任一不成立 → ContextWaiting（只返回已知身份，
+    ///   不编造 provider/root/key、不给错误根 trust 指引、不降级到另一
+    ///   LC/成员 checkout/原路径）。
+    /// - 有效 provider 集：调用方给定 author + effective reviewer（SC=
+    ///   durable expected；非 SC=mutex 内锁定 session 事实；disabled
+    ///   reviewer 锁定期已清空、provisional 恒不采信），过滤非 trust
+    ///   provider 并去重；为空即免登记零调用（Claude-only 等不变）。
+    /// - 经 3.2 取消安全入口 `ensure_ready_cancellable`（Confirmation
+    ///   场景）调用共用 registry：待锁可取消——caller 取消即停止，取消的
+    ///   caller 不再推进原 CAS；临界区开始（home 锁已获取=提交边界）后
+    ///   detached 安全收尾、不误删。engine 互斥（manager 持有的锁）覆盖
+    ///   准备与后续 CAS 至结束。operation_id=`workspace_confirm:<session>`
+    ///   仅用于关联审计，非确认幂等键。
+    /// - 全部 Ready 才放行原 CAS/定稿；失败返回 typed HomeWaiting
+    ///   （retry_action=「修复后重新确认」，门不变、零推进副作用）。
+    pub(crate) async fn ensure_confirmation_trust_ready(
+        &mut self,
+        author: ProviderName,
+        reviewer: Option<ProviderName>,
+    ) -> Result<(), super::types::ConfirmationTrustWaiting> {
+        // 同步预检段：完成全部漂移重验与 provider 过滤，产出 owned 数据。
+        // 不持 `&self` 跨 await（WorkspaceEngine 含测试 hook 字段非 Sync，
+        // 引擎借用不可进入 Send future）；确认互斥仍由 manager 持有的
+        // engine 锁覆盖准备与后续 CAS 全程。
+        let request = self.prepare_confirmation_trust_request(author, reviewer)?;
+        let ConfirmationTrustEnsure::Ensure {
+            precondition,
+            session_id,
+            project_id,
+            operation_id,
+            registry_lc_id,
+            canonical_root,
+            providers,
+        } = request
+        else {
+            return Ok(());
+        };
+        use crate::product::logical_codebase::provider_trust::ProviderTrustScenario;
+        use crate::product::logical_codebase::ProviderTrustPreparationResult;
+        match precondition
+            .ensure_ready_cancellable(
+                project_id.clone(),
+                operation_id,
+                registry_lc_id.clone(),
+                canonical_root,
+                providers,
+                ProviderTrustScenario::Confirmation,
+            )
+            .await
+        {
+            ProviderTrustPreparationResult::Ready { .. } => Ok(()),
+            ProviderTrustPreparationResult::Waiting { waiting } => {
+                Err(super::types::ConfirmationTrustWaiting::Home {
+                    session_id,
+                    project_id,
+                    lc_id: registry_lc_id,
+                    waiting,
+                })
+            }
+        }
+    }
+
+    /// [`Self::ensure_confirmation_trust_ready`] 的同步预检段（零 home
+    /// 调用）：非 LC 会话/无有效 trust provider → `Skip`；漂移重验全部
+    /// 通过 → `Ensure`（owned 调用参数）。漂移任一不成立返回
+    /// ContextWaiting（判据见上方法文档）。
+    fn prepare_confirmation_trust_request(
+        &self,
+        author: ProviderName,
+        reviewer: Option<ProviderName>,
+    ) -> Result<ConfirmationTrustEnsure, super::types::ConfirmationTrustWaiting> {
+        use crate::product::logical_codebase::{
+            LogicalCodebaseStore, requires_workspace_trust,
+        };
+        use super::types::{ConfirmationTrustContext, ConfirmationTrustWaiting};
+
+        // 非 LC 会话：未注入 gateway → 免登记（零调用放行）。
+        if self.logical_provider_gateway.is_none() {
+            return Ok(ConfirmationTrustEnsure::Skip);
+        }
+        let session_id = self.session.session_id.clone();
+        let project_id = self.session.project_id.clone();
+        let issue_id = self.session.issue_id.clone();
+        let ConfirmationTrustContext {
+            precondition,
+            issue_lc_id,
+            frozen_root,
+        } = match self.confirmation_trust_context.clone() {
+            Some(context) => context,
+            None => {
+                return Err(ConfirmationTrustWaiting::Context {
+                    session_id,
+                    project_id,
+                    issue_id,
+                    issue_lc_id: None,
+                    frozen_root: None,
+                    reason_code: "confirmation_trust_context_unavailable",
+                    message: "LC 会话缺少确认 trust 登记上下文（manager 未注入 \
+                              precondition/冻结身份）；确认停等，未触碰 home，门保持开态。"
+                        .to_string(),
+                });
+            }
+        };
+        let context_waiting = |reason_code: &'static str, message: String| {
+            ConfirmationTrustWaiting::Context {
+                session_id: session_id.clone(),
+                project_id: project_id.clone(),
+                issue_id: issue_id.clone(),
+                issue_lc_id: issue_lc_id.clone(),
+                frozen_root: Some(frozen_root.clone()),
+                reason_code,
+                message,
+            }
+        };
+        // 引擎无 lifecycle store（非持久构造，仅测试面）时无法重验冻结身份。
+        let Some(store) = self.lifecycle_store.as_ref() else {
+            return Err(context_waiting(
+                "confirmation_trust_context_unavailable",
+                "引擎无 lifecycle store，无法重验确认 trust 冻结身份；确认停等，未触碰 home。"
+                    .to_string(),
+            ));
+        };
+        let app_paths = store.app_paths();
+        // 漂移重验 1：issue 原始 LC 归属（与 manager create 同源解析）。
+        let current_issue_lc =
+            crate::product::logical_codebase::resolve_issue_logical_codebase_id(
+                &app_paths,
+                &project_id,
+                &issue_id,
+            )
+            .map_err(|error| {
+                context_waiting(
+                    "confirmation_trust_context_unavailable",
+                    format!(
+                        "重解析 issue 原始 LC 归属失败（issue store IO：{error}）；\
+                         确认停等，未触碰 home。"
+                    ),
+                )
+            })?;
+        if current_issue_lc != issue_lc_id {
+            return Err(context_waiting(
+                "confirmation_trust_scope_changed",
+                format!(
+                    "issue 原始 LC 归属已改变：create 期冻结 {issue_lc_id:?}，当前 \
+                     {current_issue_lc:?}；确认停等，不降级到另一 LC/成员 checkout/原路径。"
+                ),
+            ));
+        }
+        // registry 调用点 LC 标签：显式 LC，或既有 legacy 别名约定（与
+        // aggregate initialization coordinator 的 scope 推导同源；legacy
+        // 别名与无 scope 的 durable 布局同路径，见 `lc_scope_root`）。
+        let registry_lc_id = issue_lc_id.clone().unwrap_or_else(|| {
+            crate::product::logical_codebase::legacy_logical_codebase_id(&project_id)
+        });
+        // 漂移重验 2：frozen root 仍可 canonicalize。
+        let canonical_frozen_root = std::fs::canonicalize(&frozen_root).map_err(|error| {
+            context_waiting(
+                "confirmation_trust_root_unavailable",
+                format!(
+                    "冻结聚合根 {} 无法 canonicalize（{error}）；确认停等，未触碰 home。",
+                    frozen_root.display()
+                ),
+            )
+        })?;
+        // 漂移重验 3：同 scope manifest root 与冻结 root 一致。manifest
+        // 缺失/不可读时一致性无法重建，按漂移 fail-closed（不伪称一致）。
+        let manifest = LogicalCodebaseStore::for_lc(app_paths.clone(), registry_lc_id.clone())
+            .load_manifest(&project_id)
+            .map_err(|error| {
+                context_waiting(
+                    "confirmation_trust_root_changed",
+                    format!(
+                        "同 scope LC manifest 读取失败（{error}），无法复验与冻结根一致；\
+                         确认停等。"
+                    ),
+                )
+            })?;
+        let Some(manifest) = manifest else {
+            return Err(context_waiting(
+                "confirmation_trust_root_changed",
+                "同 scope LC manifest 已缺失，无法复验与冻结根一致；确认停等。".to_string(),
+            ));
+        };
+        let canonical_manifest_root = std::fs::canonicalize(&manifest.provider_context_root)
+            .map_err(|error| {
+                context_waiting(
+                    "confirmation_trust_root_changed",
+                    format!(
+                        "manifest 聚合根 {} 无法 canonicalize（{error}），与冻结根一致性\
+                         无法复验；确认停等。",
+                        manifest.provider_context_root.display()
+                    ),
+                )
+            })?;
+        if canonical_manifest_root != canonical_frozen_root {
+            return Err(context_waiting(
+                "confirmation_trust_root_changed",
+                format!(
+                    "同 scope manifest 聚合根 {} 与 gateway 冻结根 {} 不一致；确认停等，\
+                     不给错误根提供 trust 指引。",
+                    canonical_manifest_root.display(),
+                    canonical_frozen_root.display()
+                ),
+            ));
+        }
+        // 有效 provider 集过滤：disabled reviewer 已在 provider 锁定期清空为
+        // None（调用方传入的即 effective）；provisional 恒不采信。
+        let mut selected: Vec<ProviderName> = Vec::new();
+        for provider in [author].into_iter().chain(reviewer) {
+            if requires_workspace_trust(&provider) && !selected.contains(&provider) {
+                selected.push(provider);
+            }
+        }
+        if selected.is_empty() {
+            return Ok(ConfirmationTrustEnsure::Skip);
+        }
+        let operation_id = format!("workspace_confirm:{session_id}");
+        Ok(ConfirmationTrustEnsure::Ensure {
+            precondition,
+            session_id,
+            project_id,
+            operation_id,
+            registry_lc_id,
+            canonical_root: canonical_frozen_root,
+            providers: selected,
+        })
     }
 
     /// 逻辑会话的 planning launch 标识:(project_id, target worktree 锚)。

@@ -12,6 +12,11 @@ use crate::product::models::{
 use crate::product::work_item_plan_compiler::grammar;
 use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
 
+// T4.1：确认 trust 按需登记的共用类型定义在 types.rs；本文件再导出供
+// web/manager 与同引擎测试以 `workspace_engine::conversational_gate::…`
+// 路径消费（mod.rs 的 types 重导出清单不在本 change 写面内）。
+pub(crate) use super::types::{ConfirmationTrustContext, ConfirmationTrustWaiting};
+
 mod story_terminate;
 
 pub(crate) enum ScManualRevisionResult {
@@ -60,6 +65,14 @@ pub(crate) enum HumanGateCloseOutcome {
     /// 迟到 confirm 的幂等 no-op 结果——不 abort 会话，可见提示事件由 engine 发出。
     AlreadyClosed {
         status: WorkspaceSessionStatus,
+    },
+    /// T4.1（REQ-REG-15/D4）：确认 trust 未 Ready 的 typed 停等——SC 在
+    /// 静态资格预检后、原带写 close CAS 之前返回；零 durable 副作用、门
+    /// 保持开态（close CAS 未被推进，`close_cas_attempts` 可断言）。web
+    /// 层（change 5.1）以稳定 code `workspace_confirmation_trust_waiting`
+    /// 投影为 WS ProtocolError / REST 非成功 ApiError。
+    TrustWaiting {
+        waiting: ConfirmationTrustWaiting,
     },
 }
 
@@ -619,6 +632,19 @@ impl super::WorkspaceEngine {
                     return self
                         .translate_human_gate_close_cas_error(&lifecycle, decision, error)
                         .await;
+                }
+                // T4.1（REQ-REG-15 方案 A/D1）：静态资格预检通过后、原带写
+                // close CAS 之前，按 durable expected 的 author/effective
+                // reviewer 做确认 trust 按需准备；未 Ready 返回 typed
+                // TrustWaiting（门不变，close CAS 不推进——计数锚不变）。
+                if let Err(waiting) = self
+                    .ensure_confirmation_trust_ready(
+                        expected.author_provider.clone(),
+                        expected.reviewer_provider.clone(),
+                    )
+                    .await
+                {
+                    return Ok(HumanGateCloseOutcome::TrustWaiting { waiting });
                 }
                 note_close_cas_attempt(&self.session.session_id);
                 let saved = match lifecycle

@@ -428,10 +428,99 @@ pub(crate) enum PlanRepairCrashPoint {
     LockReleased,
 }
 
+/// T4.1/T4.3（REQ-REG-15/D2）：人工确认 trust 按需登记的冻结上下文——
+/// manager create 在已解析 project/issue/LC 并 `build_readonly_for_lc` 的
+/// 现有段注入（复用同一 WebAppState 缓存的 trust precondition，不新造
+/// 第二套 HOME 推导）；确认动作据此重验漂移并按需登记，root 唯一权威
+/// 仍是冻结 gateway `authority_root()`，不另造浏览器/root authority。
+#[derive(Clone)]
+pub(crate) struct ConfirmationTrustContext {
+    /// 共用 trust 前置门（与 aggregate initialization 生产依赖同一实例）。
+    pub(crate) precondition:
+        Arc<dyn crate::product::logical_codebase::ProviderTrustPrecondition>,
+    /// create 期冻结的 issue 原始 LC 归属（None=单仓/legacy 无别名）。
+    pub(crate) issue_lc_id: Option<String>,
+    /// gateway 构造期冻结的 canonical 聚合根（`authority_root()`）。
+    pub(crate) frozen_root: PathBuf,
+}
+
+/// T4.1（REQ-REG-15/D4）：确认 trust 按需登记的 typed 等待——
+/// - `Home`：registry/home 侧失败等待（原 reason_code、场景化
+///   retry_action=「修复后重新确认」与同源 manual_guidance；retryable 恒
+///   true——表示修复后可显式重新确认，不表示冲突可无条件立即重试）。
+/// - `Context`：冻结身份缺失/漂移等待（零 home 调用；只返回已知身份，
+///   不编造 provider/root/key、不给错误根 trust 指引）。
+///
+/// web 层（change 5.1）以稳定 code `workspace_confirmation_trust_waiting`
+/// 投影为 WS ProtocolError / REST 非成功 ApiError；reason_code 原样保留。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ConfirmationTrustWaiting {
+    Home {
+        session_id: String,
+        project_id: String,
+        lc_id: String,
+        waiting: crate::product::logical_codebase::ProviderTrustWaiting,
+    },
+    Context {
+        session_id: String,
+        project_id: String,
+        issue_id: String,
+        /// 已知冻结身份（如实呈现已知部分；上下文缺失时为 None）。
+        issue_lc_id: Option<String>,
+        frozen_root: Option<PathBuf>,
+        /// 稳定原因码：confirmation_trust_context_unavailable /
+        /// confirmation_trust_scope_changed / confirmation_trust_root_unavailable /
+        /// confirmation_trust_root_changed。
+        reason_code: &'static str,
+        message: String,
+    },
+}
+
+impl ConfirmationTrustWaiting {
+    /// 稳定原因码（Home=原 reason_code 透传，不折叠）。
+    pub(crate) fn reason_code(&self) -> &str {
+        match self {
+            Self::Home { waiting, .. } => waiting.reason_code.as_str(),
+            Self::Context { reason_code, .. } => reason_code,
+        }
+    }
+
+    /// 人类可读摘要（web 层过渡通道/日志用；change 5.1 以稳定 code +
+    /// message/context 全量同源投影替代，不以此为最终面）。
+    pub(crate) fn summary(&self) -> String {
+        match self {
+            Self::Home {
+                lc_id, waiting, ..
+            } => format!(
+                "确认 trust 未就绪（reason_code={}，LC {}，provider {:?}，root {}）：{}；{}。{} 修复前确认门保持未关闭，完成后请重新选择该门并确认；失败不自动重试。",
+                waiting.reason_code,
+                lc_id,
+                waiting.provider,
+                waiting.canonical_root.display(),
+                waiting.message,
+                waiting.retry_action,
+                waiting.manual_guidance,
+            ),
+            Self::Context {
+                reason_code,
+                message,
+                ..
+            } => format!(
+                "确认 trust 上下文停等（reason_code={reason_code}）：{message} 修复前确认门保持未关闭，完成后请重新选择该门并确认；失败不自动重试。"
+            ),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkspaceConfirmOutcome {
     WorkItemPlan {
         child_sessions: Vec<WorkspaceSessionRecord>,
+    },
+    /// T4.1（REQ-REG-15/D4）：确认 trust 未 Ready 的 typed 停等——零定稿
+    /// 副作用、门保持开态；由 web 层（change 5.1）映射为稳定 waiting code。
+    TrustWaiting {
+        waiting: ConfirmationTrustWaiting,
     },
     None,
 }
@@ -571,6 +660,11 @@ pub struct WorkspaceEngine {
     /// 详情（每次 close 入口清空，仅当次失败时非空）。
     pub(crate) last_gate_close_compile_failure:
         Option<super::conversational_gate::HumanGateCloseCompileFailure>,
+    /// T4.1/T4.3（REQ-REG-15/D2）：人工确认 trust 按需登记的冻结上下文
+    /// （manager create 与 `logical_provider_gateway` 同段注入）。LC 会话
+    /// 有 gateway 却缺此上下文时确认 fail-closed ContextWaiting；非 LC
+    /// 会话（无 gateway）免登记，见 `ensure_confirmation_trust_ready`。
+    pub(crate) confirmation_trust_context: Option<ConfirmationTrustContext>,
 }
 
 #[derive(Debug, Clone)]

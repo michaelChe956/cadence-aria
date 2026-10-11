@@ -32,6 +32,20 @@ impl WorkspaceEngine {
         match self.session.stage {
             WorkspaceStage::HumanConfirm => {
                 self.validate_confirm_aggregate_spec_gate()?;
+                // T4.1（REQ-REG-15 方案 A/D1）：合法 HumanConfirm 门在
+                // aggregate spec 校验后、定稿/创建子会话/直入 compile 之前
+                // 做确认 trust 按需准备（mutex 内锁定的 session 事实取有效
+                // provider；SC Approval 直入 compile 臂同样先准备）。Running
+                // 臂不登记。未 Ready 返回 typed TrustWaiting，零定稿副作用。
+                if let Err(waiting) = self
+                    .ensure_confirmation_trust_ready(
+                        self.session.author_provider.clone(),
+                        self.session.reviewer_provider.clone(),
+                    )
+                    .await
+                {
+                    return Ok(WorkspaceConfirmOutcome::TrustWaiting { waiting });
+                }
                 match self.session.workspace_type {
                     WorkspaceType::WorkItemPlan
                         if self.session.flow_kind

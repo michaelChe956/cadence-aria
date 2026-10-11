@@ -961,3 +961,1284 @@ async fn conversational_gate_confirm_valid_static_eligibility_still_reaches_clos
         "合法静态资格仍走原带写 close CAS"
     );
 }
+
+// —— Task 4.1/4.2（REQ-REG-15 方案 A/D1/D2/D4）：确认关门前 trust 按需准备 ——
+// 覆盖：missing→Ready 才继续；disabled/provisional/Claude-only/非 LC 零调用；
+// 冻结身份漂移零 home 不编造；Running/反馈/Abandon 不登记；部分提交保守
+// 复用、原 CAS 竞争唯一胜者、取消 caller 不推进 CAS、Waiting 前后 durable
+// 全不变量。
+
+mod confirmation_trust {
+    use super::*;
+    use crate::product::app_paths::ProductAppPaths;
+    use crate::product::checkpoint_store::CheckpointStore;
+    use crate::product::issue_store::{CreateProductIssueInput, IssueStore};
+    use crate::product::lifecycle_store::{
+        CreateWorkspaceSessionInput, LifecycleStore, WorkItemPlanSessionOptions,
+    };
+    use crate::product::logical_codebase::provider_trust::ProviderTrustScenario;
+    use crate::product::logical_codebase::{
+        AggregatePolicyArtifactStore, CodexTrustAdapter, HomeBackedProviderTrustRegistry,
+        KimiTrustAdapter, LogicalCodebaseManifest, LogicalCodebaseProviderGateway,
+        LogicalCodebaseStore, PolicyTarget, PolicyTargetResolver, ProviderCapabilitySource,
+        ProviderGatewayError, ProviderRef, ProviderTrustHomeAdapter, ProviderTrustPrecondition,
+        ProviderTrustPreparationResult, ProviderTrustWaiting, SessionLaunchRequest,
+        SessionPolicyAction, requires_workspace_trust,
+    };
+    use crate::product::models::{
+        ProviderName, SingleCandidatePhase, WorkspaceSessionStatus, WorkspaceType,
+    };
+    use crate::product::work_item_plan_policy::{RunPolicy, WorkItemPlanFlowKind};
+    use crate::product::workspace_engine::conversational_gate::{
+        ConfirmationTrustContext, ConfirmationTrustWaiting,
+    };
+    use crate::product::workspace_engine::{
+        EngineEvent, HumanGateCloseDecision, HumanGateCloseOutcome, HumanGateCommandOutcome,
+        HumanGateFeedbackInput, WorkspaceConfirmOutcome,
+    };
+    use crate::protocol::contracts::{AdapterInput, AdapterOutput, TimeoutStatus};
+    use std::future::Future;
+    use std::path::PathBuf;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    // —— 最小 gateway 桩：确认链只把 gateway 用作「LC 会话」谓词，
+    // 不调用 validate/spawn，桩实现全部 fail-closed（不可达）。 ——
+
+    struct PresenceCapabilitySource;
+
+    impl ProviderCapabilitySource for PresenceCapabilitySource {
+        fn require_supported(
+            &self,
+            _provider: &ProviderRef,
+            _action: SessionPolicyAction,
+        ) -> Result<crate::product::logical_codebase::ProviderCapability, ProviderGatewayError>
+        {
+            Err(ProviderGatewayError::UnsupportedCapability(
+                "presence-only fixture gateway".to_string(),
+            ))
+        }
+
+        fn require_resume_supported(
+            &self,
+            _provider: &ProviderRef,
+            _action: SessionPolicyAction,
+        ) -> Result<crate::product::logical_codebase::ProviderCapability, ProviderGatewayError>
+        {
+            Err(ProviderGatewayError::UnsupportedCapability(
+                "presence-only fixture gateway".to_string(),
+            ))
+        }
+
+        fn require_write_boundary(
+            &self,
+            _provider: &ProviderRef,
+            _action: SessionPolicyAction,
+        ) -> Result<crate::product::logical_codebase::ProviderCapability, ProviderGatewayError>
+        {
+            Err(ProviderGatewayError::UnsupportedCapability(
+                "presence-only fixture gateway".to_string(),
+            ))
+        }
+
+        fn require_root_recipe_supported(
+            &self,
+            _provider: &ProviderRef,
+            _credential: &crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
+        ) -> Result<crate::product::logical_codebase::ProviderCapability, ProviderGatewayError>
+        {
+            Err(ProviderGatewayError::UnsupportedCapability(
+                "presence-only fixture gateway".to_string(),
+            ))
+        }
+    }
+
+    struct PresenceTargetResolver;
+
+    impl PolicyTargetResolver for PresenceTargetResolver {
+        fn resolve_and_revalidate(
+            &self,
+            _request: &SessionLaunchRequest,
+        ) -> Result<PolicyTarget, ProviderGatewayError> {
+            Err(ProviderGatewayError::UnsupportedCapability(
+                "presence-only fixture gateway".to_string(),
+            ))
+        }
+    }
+
+    struct PresenceSyncAdapter;
+
+    impl crate::cross_cutting::provider_adapter::ProviderAdapter for PresenceSyncAdapter {
+        fn run(&self, _input: &AdapterInput) -> Result<AdapterOutput, crate::cross_cutting::provider_adapter::ProviderAdapterError> {
+            Ok(AdapterOutput {
+                exit_code: Some(0),
+                stdout: "ok".to_string(),
+                stderr: String::new(),
+                structured_output: None,
+                files_modified: Vec::new(),
+                duration_ms: 0,
+                timeout_status: TimeoutStatus::NotTimedOut,
+            })
+        }
+    }
+
+    fn presence_availability_gate(
+    ) -> Arc<crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate> {
+        use crate::cross_cutting::provider_availability_gate::ProviderHealthSource;
+        use crate::cross_cutting::provider_health::{
+            ProviderHealthEntry, ProviderHealthSnapshot,
+        };
+
+        struct AlwaysHealthy(Arc<ProviderHealthSnapshot>);
+
+        impl ProviderHealthSource for AlwaysHealthy {
+            fn snapshot(&self) -> Arc<ProviderHealthSnapshot> {
+                self.0.clone()
+            }
+
+            fn degraded(&self) -> bool {
+                false
+            }
+        }
+
+        let checked_at = chrono::Utc::now();
+        let snapshot = Arc::new(ProviderHealthSnapshot {
+            schema_version: 1,
+            generation: 1,
+            checked_at,
+            providers: [ProviderName::ClaudeCode, ProviderName::Codex]
+                .into_iter()
+                .map(|provider| ProviderHealthEntry {
+                    provider,
+                    command: "stub".to_string(),
+                    available: true,
+                    version: Some("1.0".to_string()),
+                    reason_code: None,
+                    reason: None,
+                    checked_at,
+                })
+                .collect(),
+        });
+        Arc::new(
+            crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate::new(
+                Arc::new(AlwaysHealthy(snapshot)),
+            ),
+        )
+    }
+
+    fn presence_gateway(authority_root: PathBuf) -> Arc<LogicalCodebaseProviderGateway> {
+        let paths = ProductAppPaths::new(std::env::temp_dir().join("aria-t4-presence-gateway"));
+        Arc::new(LogicalCodebaseProviderGateway::new(
+            AggregatePolicyArtifactStore::new(paths),
+            Arc::new(PresenceCapabilitySource),
+            Arc::new(PresenceTargetResolver),
+            Arc::new(crate::cross_cutting::provider_registry::ProviderRegistry::new()),
+            Arc::new(PresenceSyncAdapter),
+            presence_availability_gate(),
+            authority_root,
+        ))
+    }
+
+    // —— 记数/剧本 fake precondition ——
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct RecordedTrustCall {
+        project_id: String,
+        operation_id: String,
+        lc_id: String,
+        canonical_root: PathBuf,
+        providers: Vec<ProviderName>,
+        scenario: ProviderTrustScenario,
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordingTrustGate {
+        calls: Arc<Mutex<Vec<RecordedTrustCall>>>,
+        scripted: Arc<Mutex<std::collections::VecDeque<ProviderTrustPreparationResult>>>,
+        hook: Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>,
+    }
+
+    impl RecordingTrustGate {
+        fn calls(&self) -> Vec<RecordedTrustCall> {
+            self.calls.lock().unwrap().clone()
+        }
+
+        fn script(&self, result: ProviderTrustPreparationResult) {
+            self.scripted.lock().unwrap().push_back(result);
+        }
+
+        fn script_waiting(&self, reason_code: &str) {
+            self.script(waiting_result(reason_code, ProviderName::Codex));
+        }
+
+        fn set_hook(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+            *self.hook.lock().unwrap() = Some(hook);
+        }
+    }
+
+    fn waiting_result(reason_code: &str, provider: ProviderName) -> ProviderTrustPreparationResult {
+        ProviderTrustPreparationResult::Waiting {
+            waiting: ProviderTrustWaiting {
+                provider,
+                canonical_root: PathBuf::from("/fixture-root"),
+                trust_key: "fixture-trust-key".to_string(),
+                reason_code: reason_code.to_string(),
+                message: "fixture 等待".to_string(),
+                retry_action: "修复后重新确认".to_string(),
+                manual_guidance: "fixture 指导".to_string(),
+                recorded_at: "2026-10-11T00:00:00Z".to_string(),
+            },
+        }
+    }
+
+    impl ProviderTrustPrecondition for RecordingTrustGate {
+        fn ensure_ready(
+            &self,
+            project_id: &str,
+            operation_id: &str,
+            lc_id: &str,
+            canonical_root: &std::path::Path,
+            providers: &[ProviderName],
+            scenario: ProviderTrustScenario,
+        ) -> ProviderTrustPreparationResult {
+            if let Some(hook) = self.hook.lock().unwrap().clone() {
+                hook();
+            }
+            self.calls.lock().unwrap().push(RecordedTrustCall {
+                project_id: project_id.to_string(),
+                operation_id: operation_id.to_string(),
+                lc_id: lc_id.to_string(),
+                canonical_root: canonical_root.to_path_buf(),
+                providers: providers.to_vec(),
+                scenario,
+            });
+            self.scripted
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(ProviderTrustPreparationResult::Ready {
+                    registrations: Vec::new(),
+                })
+        }
+    }
+
+    /// T4.2 取消边界 fake：`ensure_ready_cancellable` 模拟 3.2 的提交边界
+    /// ——spawn_blocking 内「临界区开始→收尾」，caller 可在结果前被取消；
+    /// detached 段独立完成。
+    #[derive(Default)]
+    struct DetachingTrustGate {
+        section_started: Arc<AtomicBool>,
+        section_done: Arc<AtomicBool>,
+    }
+
+    impl ProviderTrustPrecondition for DetachingTrustGate {
+        fn ensure_ready(
+            &self,
+            _project_id: &str,
+            _operation_id: &str,
+            _lc_id: &str,
+            _canonical_root: &std::path::Path,
+            _providers: &[ProviderName],
+            _scenario: ProviderTrustScenario,
+        ) -> ProviderTrustPreparationResult {
+            ProviderTrustPreparationResult::Ready {
+                registrations: Vec::new(),
+            }
+        }
+
+        fn ensure_ready_cancellable(
+            self: Arc<Self>,
+            _project_id: String,
+            _operation_id: String,
+            _lc_id: String,
+            _canonical_root: PathBuf,
+            _providers: Vec<ProviderName>,
+            _scenario: ProviderTrustScenario,
+        ) -> Pin<Box<dyn Future<Output = ProviderTrustPreparationResult> + Send>> {
+            let started = self.section_started.clone();
+            let done = self.section_done.clone();
+            let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+            tokio::task::spawn_blocking(move || {
+                started.store(true, Ordering::SeqCst); // home 锁已获取=提交边界
+                let _ = tx.send(());
+                std::thread::sleep(std::time::Duration::from_millis(50)); // 临界区收尾
+                done.store(true, Ordering::SeqCst); // detached 安全收尾、不误删
+            });
+            Box::pin(async move {
+                let _ = rx.await; // caller 取消点：drop 即停止等待
+                ProviderTrustPreparationResult::Ready {
+                    registrations: Vec::new(),
+                }
+            })
+        }
+    }
+
+    // —— 夹具 ——
+
+    static CONFIRM_TRUST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+    struct ConfirmationGateFacts {
+        app_paths: ProductAppPaths,
+        lc_id: String,
+        canonical_root: PathBuf,
+        issue_id: String,
+        session_id: String,
+    }
+
+    /// LC 会话 SC/非 SC 共用夹具：真实 issue（原始 LC 归属）+ LC scope manifest
+    /// （root=冻结根）+ 开态门 durable 记录 + presence gateway + 确认上下文。
+    /// `single_candidate=false` 时构造 Legacy 流非 SC 门（无相位/快照要求）。
+    #[allow(clippy::too_many_arguments)]
+    fn confirmation_gate_fixture(
+        single_candidate: bool,
+        author: ProviderName,
+        reviewer: Option<ProviderName>,
+        provisional_reviewer: Option<ProviderName>,
+        trust: Arc<dyn ProviderTrustPrecondition>,
+    ) -> (
+        tempfile::TempDir,
+        LifecycleStore,
+        WorkspaceEngine,
+        mpsc::Receiver<EngineEvent>,
+        ConfirmationGateFacts,
+    ) {
+        let seq = CONFIRM_TRUST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let root = tempfile::tempdir().expect("tempdir");
+        let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+        let worktree = root.path().join("aggregate-root");
+        std::fs::create_dir_all(&worktree).expect("create aggregate root");
+        let canonical_root = std::fs::canonicalize(&worktree).expect("canonical aggregate root");
+        let lc_id = format!("lc_confirm_{seq}");
+        let issue = IssueStore::new(app_paths.clone())
+            .create(CreateProductIssueInput {
+                project_id: "project_0001".to_string(),
+                repo_id: None,
+                logical_codebase_id: Some(lc_id.clone()),
+                base_branch: None,
+                title: "confirm trust fixture".to_string(),
+                description: None,
+                change_id: None,
+            })
+            .expect("create LC issue");
+        LogicalCodebaseStore::for_lc(app_paths.clone(), lc_id.clone())
+            .save_manifest(
+                "project_0001",
+                &LogicalCodebaseManifest::new(
+                    "project_0001",
+                    canonical_root.clone(),
+                    Vec::new(),
+                ),
+            )
+            .expect("save LC manifest");
+        let lifecycle = LifecycleStore::new(app_paths.clone());
+        let created = lifecycle
+            .create_workspace_session(CreateWorkspaceSessionInput {
+                project_id: "project_0001".to_string(),
+                issue_id: issue.id.clone(),
+                entity_id: format!("plan_{seq}"),
+                workspace_type: WorkspaceType::WorkItemPlan,
+                author_provider: author,
+                reviewer_provider: reviewer,
+                review_rounds: 0,
+                superpowers_enabled: false,
+                openspec_enabled: false,
+                work_item_plan_options: (single_candidate).then(|| WorkItemPlanSessionOptions {
+                    flow_kind: WorkItemPlanFlowKind::SingleCandidate,
+                    run_policy: RunPolicy::Interactive,
+                    rollout_snapshot: true,
+                }),
+            })
+            .expect("create workspace session");
+        // T1 fixture 同款重写：进程内唯一 session id（CAS 计数不互窜）+ 开态门。
+        let session_id = format!("workspace_session_t4_confirm_{seq}");
+        let mut record = lifecycle
+            .get_workspace_session(&created.id)
+            .expect("load created session");
+        let old_id = record.id.clone();
+        record.id = session_id.clone();
+        record.status = WorkspaceSessionStatus::WaitingForHuman;
+        record.provisional_reviewer_provider = provisional_reviewer;
+        if single_candidate {
+            record.single_candidate_phase = Some(SingleCandidatePhase::Approval);
+            record.human_gate_snapshot = Some(super::static_eligibility_gate_snapshot());
+        }
+        let session_dir = app_paths
+            .issue_root(&record.project_id, &record.issue_id)
+            .join("workspace-sessions");
+        crate::product::json_store::write_json(
+            &session_dir.join(format!("{}.json", record.id)),
+            &record,
+        )
+        .expect("persist confirmation fixture session");
+        std::fs::remove_file(session_dir.join(format!("{old_id}.json"))).ok();
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let mut session = WorkspaceSession::from_record(record);
+        session.stage = WorkspaceStage::HumanConfirm;
+        session.session_status = WorkspaceSessionStatus::WaitingForHuman;
+        session.artifact = Some(crate::web::workspace_ws_types::ArtifactPayload::Markdown {
+            markdown: "# Work Item Plan\n".to_string(),
+            diff: None,
+        });
+        let engine = WorkspaceEngine::new_persistent(
+            Arc::new(CheckpointStore::new(root.path().join("checkpoints"))),
+            lifecycle.clone(),
+            event_tx,
+            session,
+        )
+        .with_logical_provider_gateway(presence_gateway(canonical_root.clone()))
+        .with_confirmation_trust_context(ConfirmationTrustContext {
+            precondition: trust,
+            issue_lc_id: Some(lc_id.clone()),
+            frozen_root: canonical_root.clone(),
+        });
+        let facts = ConfirmationGateFacts {
+            app_paths,
+            lc_id,
+            canonical_root,
+            issue_id: issue.id,
+            session_id,
+        };
+        (root, lifecycle, engine, event_rx, facts)
+    }
+
+    fn sc_confirm_fixture(
+        author: ProviderName,
+        reviewer: Option<ProviderName>,
+        trust: Arc<dyn ProviderTrustPrecondition>,
+    ) -> (
+        tempfile::TempDir,
+        LifecycleStore,
+        WorkspaceEngine,
+        mpsc::Receiver<EngineEvent>,
+        ConfirmationGateFacts,
+    ) {
+        confirmation_gate_fixture(true, author, reviewer, None, trust)
+    }
+
+    fn durable_record(lifecycle: &LifecycleStore, facts: &ConfirmationGateFacts) -> crate::product::models::WorkspaceSessionRecord {
+        lifecycle
+            .get_workspace_session(&facts.session_id)
+            .expect("durable session")
+    }
+
+    fn assert_gate_untouched_by_waiting(
+        lifecycle: &LifecycleStore,
+        facts: &ConfirmationGateFacts,
+        before: &crate::product::models::WorkspaceSessionRecord,
+        event_rx: &mut mpsc::Receiver<EngineEvent>,
+    ) {
+        let after = durable_record(lifecycle, facts);
+        assert_eq!(
+            after, *before,
+            "Waiting 前后 durable 全不变量：session/status/phase/snapshot、节点、预算、\
+             turn（human_gate_reservation）、compile reservation、provider-start ledger 完全不变"
+        );
+        let timeline_after = lifecycle
+            .load_timeline_nodes_for_issue_session(
+                "project_0001",
+                &facts.issue_id,
+                &facts.session_id,
+            )
+            .expect("timeline after");
+        assert!(
+            timeline_after.is_empty(),
+            "Waiting 不产生任何时间线节点（零 compile/child/provider/close/abort）"
+        );
+        assert!(
+            event_rx.try_recv().is_err(),
+            "Waiting 不产生任何引擎事件（含 HumanGateClosed/abort）"
+        );
+    }
+
+    // —— 4.1：missing→Ready 才继续；未 Ready 零推进 ——
+
+    #[tokio::test]
+    async fn sc_confirm_waiting_trust_keeps_gate_open_and_skips_close_cas() {
+        let trust = Arc::new(RecordingTrustGate::default());
+        trust.script_waiting("fixture_home_failure");
+        let (_root, lifecycle, mut engine, mut event_rx, facts) =
+            sc_confirm_fixture(ProviderName::Codex, None, trust.clone());
+        let before = durable_record(&lifecycle, &facts);
+        let cas_attempts_before = close_cas_attempts(&facts.session_id);
+
+        let outcome = engine
+            .handle_human_gate_termination(HumanGateCloseDecision::Approve)
+            .await
+            .expect("approve resolves into a typed waiting");
+        match outcome {
+            HumanGateCloseOutcome::TrustWaiting { waiting } => match waiting {
+                ConfirmationTrustWaiting::Home {
+                    session_id,
+                    project_id,
+                    lc_id,
+                    waiting: inner,
+                } => {
+                    assert_eq!(session_id, facts.session_id);
+                    assert_eq!(project_id, "project_0001");
+                    assert_eq!(lc_id, facts.lc_id);
+                    assert_eq!(inner.reason_code, "fixture_home_failure");
+                    assert!(inner.retry_action.contains("重新确认"));
+                }
+                other => panic!("expected Home waiting, got {other:?}"),
+            },
+            other => panic!("expected TrustWaiting, got {other:?}"),
+        }
+
+        assert_eq!(trust.calls().len(), 1, "missing 才进入 ensure（恰一次）");
+        assert_eq!(
+            close_cas_attempts(&facts.session_id),
+            cas_attempts_before,
+            "准备失败不推进原 close CAS"
+        );
+        assert_gate_untouched_by_waiting(&lifecycle, &facts, &before, &mut event_rx);
+    }
+
+    #[tokio::test]
+    async fn sc_confirm_ready_trust_proceeds_to_original_close_cas() {
+        let trust = Arc::new(RecordingTrustGate::default());
+        let (_root, _lifecycle, mut engine, _event_rx, facts) =
+            sc_confirm_fixture(ProviderName::Codex, Some(ProviderName::KimiCode), trust.clone());
+        let cas_attempts_before = close_cas_attempts(&facts.session_id);
+
+        // fixture 未铺 accepted contract drafts：Ready 后 approve 沿原链在
+        // compile 段失败（与 T1 合法资格对照同语义），只断言原 CAS 被推进。
+        let error = engine
+            .handle_human_gate_termination(HumanGateCloseDecision::Approve)
+            .await
+            .expect_err("Ready 后沿原链推进，compile 段按 fixture 缺口失败");
+        assert!(error.contains("compile failed"), "{error}");
+        assert_eq!(
+            close_cas_attempts(&facts.session_id),
+            cas_attempts_before + 1,
+            "Ready 才继续：原带写 close CAS 恰推进一次"
+        );
+        let calls = trust.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0],
+            RecordedTrustCall {
+                project_id: "project_0001".to_string(),
+                operation_id: format!("workspace_confirm:{}", facts.session_id),
+                lc_id: facts.lc_id.clone(),
+                canonical_root: facts.canonical_root.clone(),
+                providers: vec![ProviderName::Codex, ProviderName::KimiCode],
+                scenario: ProviderTrustScenario::Confirmation,
+            },
+            "调用参数：SC durable expected 的 author/effective reviewer、冻结根、\
+             registry LC 标签与 workspace_confirm 关联 operation_id、Confirmation 场景"
+        );
+    }
+
+    // —— 4.1：有效 provider 集与免登记会话 ——
+
+    #[tokio::test]
+    async fn sc_confirm_effective_provider_matrix_dedup_and_zero_call_exemptions() {
+        struct Case {
+            label: &'static str,
+            author: ProviderName,
+            reviewer: Option<ProviderName>,
+            provisional: Option<ProviderName>,
+            expected_providers: Vec<ProviderName>,
+        }
+        let cases = [
+            Case {
+                label: "disabled reviewer（reviewer=None + provisional=Codex）→ 仅 author",
+                author: ProviderName::Codex,
+                reviewer: None,
+                provisional: Some(ProviderName::Codex),
+                expected_providers: vec![ProviderName::Codex],
+            },
+            Case {
+                label: "同 provider 去重",
+                author: ProviderName::Codex,
+                reviewer: Some(ProviderName::Codex),
+                provisional: None,
+                expected_providers: vec![ProviderName::Codex],
+            },
+            Case {
+                label: "author+reviewer 双 trust provider",
+                author: ProviderName::Codex,
+                reviewer: Some(ProviderName::KimiCode),
+                provisional: None,
+                expected_providers: vec![ProviderName::Codex, ProviderName::KimiCode],
+            },
+        ];
+        for case in cases {
+            let trust = Arc::new(RecordingTrustGate::default());
+            let (_root, _lifecycle, mut engine, _event_rx, facts) = confirmation_gate_fixture(
+                true,
+                case.author,
+                case.reviewer,
+                case.provisional,
+                trust.clone(),
+            );
+            let cas_before = close_cas_attempts(&facts.session_id);
+            let error = engine
+                .handle_human_gate_termination(HumanGateCloseDecision::Approve)
+                .await
+                .expect_err("矩阵用例均走原链（compile 段失败）");
+            assert!(error.contains("compile failed"), "{}: {error}", case.label);
+            let calls = trust.calls();
+            assert_eq!(
+                calls.len(),
+                1,
+                "{}：恰一次 ensure 调用",
+                case.label
+            );
+            assert_eq!(calls[0].providers, case.expected_providers, "{}", case.label);
+            assert_eq!(
+                close_cas_attempts(&facts.session_id),
+                cas_before + 1,
+                "{}：Ready 继续原 CAS",
+                case.label
+            );
+        }
+
+        // 零调用豁免：Claude-only / Fake / 非 LC 会话。
+        for (label, author, reviewer) in [
+            ("Claude-only author+reviewer", ProviderName::ClaudeCode, Some(ProviderName::ClaudeCode)),
+            ("Fake provider", ProviderName::Fake, None),
+        ] {
+            let trust = Arc::new(RecordingTrustGate::default());
+            let (_root, _lifecycle, mut engine, _event_rx, facts) =
+                sc_confirm_fixture(author, reviewer, trust.clone());
+            let cas_before = close_cas_attempts(&facts.session_id);
+            let error = engine
+                .handle_human_gate_termination(HumanGateCloseDecision::Approve)
+                .await
+                .expect_err("无需 trust 时沿原链（compile 段失败）");
+            assert!(error.contains("compile failed"), "{label}: {error}");
+            assert!(
+                trust.calls().is_empty(),
+                "{label}：零 ensure/home/ownership/audit 调用"
+            );
+            assert_eq!(close_cas_attempts(&facts.session_id), cas_before + 1);
+        }
+
+        // 非 LC 会话（无 gateway）：即使误注入上下文也免登记。
+        let trust = Arc::new(RecordingTrustGate::default());
+        let (_root, _lifecycle, mut engine, _event_rx, facts) =
+            sc_confirm_fixture(ProviderName::Codex, None, trust.clone());
+        engine.logical_provider_gateway = None;
+        let cas_before = close_cas_attempts(&facts.session_id);
+        let error = engine
+            .handle_human_gate_termination(HumanGateCloseDecision::Approve)
+            .await
+            .expect_err("非 LC 会话沿原链（compile 段失败）");
+        assert!(error.contains("compile failed"), "{error}");
+        assert!(
+            trust.calls().is_empty(),
+            "非 LC 会话零调用（不扩大到无 LC gateway 的单仓会话）"
+        );
+        assert_eq!(close_cas_attempts(&facts.session_id), cas_before + 1);
+    }
+
+    // —— 4.1：冻结身份缺失/漂移等待（零 home 调用、只返回已知身份） ——
+
+    #[tokio::test]
+    async fn sc_confirm_context_drift_matrix_stops_before_home_calls() {
+        struct Expectation {
+            reason_code: &'static str,
+            /// 上下文是否在场（在场=返回已知冻结身份；缺失=身份为 None）。
+            context_present: bool,
+        }
+        // 各漂移用例独立夹具 + 事后破坏。
+        for (label, mutate, expectation) in [
+            (
+                "LC 会话缺确认上下文",
+                "context",
+                Expectation {
+                    reason_code: "confirmation_trust_context_unavailable",
+                    context_present: false,
+                },
+            ),
+            (
+                "issue 原始 LC 归属已改变",
+                "scope",
+                Expectation {
+                    reason_code: "confirmation_trust_scope_changed",
+                    context_present: true,
+                },
+            ),
+            (
+                "冻结 root 不能 canonicalize",
+                "root-deleted",
+                Expectation {
+                    reason_code: "confirmation_trust_root_unavailable",
+                    context_present: true,
+                },
+            ),
+            (
+                "同 scope manifest root 与冻结根不一致",
+                "manifest-root",
+                Expectation {
+                    reason_code: "confirmation_trust_root_changed",
+                    context_present: true,
+                },
+            ),
+            (
+                "同 scope manifest 缺失",
+                "manifest-deleted",
+                Expectation {
+                    reason_code: "confirmation_trust_root_changed",
+                    context_present: true,
+                },
+            ),
+        ] {
+            let trust = Arc::new(RecordingTrustGate::default());
+            let (root, lifecycle, mut engine, mut event_rx, facts) =
+                sc_confirm_fixture(ProviderName::Codex, None, trust.clone());
+            match mutate {
+                "context" => {
+                    engine.confirmation_trust_context = None;
+                }
+                "scope" => {
+                    let mut issue = IssueStore::new(facts.app_paths.clone())
+                        .get("project_0001", &facts.issue_id)
+                        .expect("issue");
+                    issue.logical_codebase_id = Some("lc_drifted_elsewhere".to_string());
+                    crate::product::json_store::write_json(
+                        &facts
+                            .app_paths
+                            .issue_root("project_0001", &facts.issue_id)
+                            .join("issue.json"),
+                        &issue,
+                    )
+                    .expect("rewrite issue LC ownership");
+                }
+                "root-deleted" => {
+                    std::fs::remove_dir_all(&facts.canonical_root).expect("delete frozen root");
+                }
+                "manifest-root" => {
+                    let other_root = root.path().join("other-root");
+                    std::fs::create_dir_all(&other_root).expect("create other root");
+                    // 保持 manifest 身份不变（save_manifest 校验 id 稳定），
+                    // 仅漂移 provider_context_root。
+                    let mut manifest =
+                        LogicalCodebaseStore::for_lc(facts.app_paths.clone(), facts.lc_id.clone())
+                            .load_manifest("project_0001")
+                            .expect("load manifest")
+                            .expect("manifest present");
+                    manifest.provider_context_root =
+                        std::fs::canonicalize(&other_root).expect("canonical other");
+                    LogicalCodebaseStore::for_lc(facts.app_paths.clone(), facts.lc_id.clone())
+                        .save_manifest("project_0001", &manifest)
+                        .expect("rewrite manifest root");
+                }
+                "manifest-deleted" => {
+                    let scope_root = crate::product::logical_codebase::lc_scope_root(
+                        &facts.app_paths,
+                        "project_0001",
+                        &Some(facts.lc_id.clone()),
+                    )
+                    .expect("scope root");
+                    std::fs::remove_file(scope_root.join("manifest.json"))
+                        .expect("delete manifest");
+                }
+                other => unreachable!("unknown drift mutation {other}"),
+            }
+            let before = durable_record(&lifecycle, &facts);
+            let cas_before = close_cas_attempts(&facts.session_id);
+
+            let outcome = engine
+                .handle_human_gate_termination(HumanGateCloseDecision::Approve)
+                .await
+                .expect("漂移确认解析为 typed 停等");
+            match outcome {
+                HumanGateCloseOutcome::TrustWaiting { waiting } => match waiting {
+                    ConfirmationTrustWaiting::Context {
+                        session_id,
+                        issue_lc_id,
+                        frozen_root,
+                        reason_code,
+                        ..
+                    } => {
+                        assert_eq!(session_id, facts.session_id, "{label}");
+                        assert_eq!(reason_code, expectation.reason_code, "{label}");
+                        let expected_lc = if expectation.context_present {
+                            Some(facts.lc_id.clone())
+                        } else {
+                            None
+                        };
+                        assert_eq!(
+                            issue_lc_id, expected_lc,
+                            "{label}：只返回已知冻结身份，不编造"
+                        );
+                        let expected_root = if expectation.context_present {
+                            Some(facts.canonical_root.clone())
+                        } else {
+                            None
+                        };
+                        assert_eq!(frozen_root, expected_root, "{label}");
+                    }
+                    other => panic!("{label}：expected Context waiting, got {other:?}"),
+                },
+                other => panic!("{label}：expected TrustWaiting, got {other:?}"),
+            }
+            assert!(
+                trust.calls().is_empty(),
+                "{label}：漂移零 ensure/home/ownership/audit 调用"
+            );
+            assert_eq!(
+                close_cas_attempts(&facts.session_id),
+                cas_before,
+                "{label}：漂移不推进 close CAS"
+            );
+            assert_gate_untouched_by_waiting(&lifecycle, &facts, &before, &mut event_rx);
+        }
+    }
+
+    // —— 4.1：Running/反馈/Abandon 不登记 ——
+
+    #[tokio::test]
+    async fn sc_confirm_feedback_abandon_and_running_confirm_do_not_register() {
+        let trust = Arc::new(RecordingTrustGate::default());
+        let (_root, lifecycle, mut engine, mut event_rx, facts) =
+            sc_confirm_fixture(ProviderName::Codex, None, trust.clone());
+
+        // 反馈：开修订 turn，不登记。
+        let feedback = engine
+            .handle_human_gate_feedback(HumanGateFeedbackInput {
+                command_id: "cmd_t4_feedback".to_string(),
+                feedback: "只修正这个字段".to_string(),
+            })
+            .await
+            .expect("feedback opens a revision turn");
+        assert!(
+            matches!(feedback, HumanGateCommandOutcome::TurnOpened { .. }),
+            "fixture 反馈须开 turn（{feedback:?}）"
+        );
+        assert!(trust.calls().is_empty(), "反馈不登记");
+
+        // 该 turn 关闭后（此处直接换新夹具段测 Abandon/Running——同一夹具
+        // 上 Busy 会挡 close，故重开一个干净夹具逐段断言）。
+        let trust2 = Arc::new(RecordingTrustGate::default());
+        let (_root2, _lifecycle2, mut engine2, _event_rx2, facts2) =
+            sc_confirm_fixture(ProviderName::Codex, None, trust2.clone());
+        let outcome = engine2
+            .handle_human_gate_termination(HumanGateCloseDecision::Abandon)
+            .await
+            .expect("abandon closes the gate");
+        assert_eq!(outcome, HumanGateCloseOutcome::Abandoned);
+        assert!(trust2.calls().is_empty(), "Abandon 不登记（脱困不受影响）");
+
+        // Running 普通 confirm：不登记。
+        let trust3 = Arc::new(RecordingTrustGate::default());
+        let (_root3, _lifecycle3, mut engine3, _event_rx3, _facts3) =
+            sc_confirm_fixture(ProviderName::Codex, None, trust3.clone());
+        engine3.session.stage = WorkspaceStage::Running;
+        let outcome = engine3.handle_confirm().await.expect("running confirm ok");
+        assert!(
+            matches!(outcome, WorkspaceConfirmOutcome::None),
+            "Running 臂保持既有推进语义（{outcome:?}）"
+        );
+        assert!(trust3.calls().is_empty(), "Running 普通 confirm 不登记");
+        let _ = &mut event_rx;
+        let _ = (lifecycle, facts);
+    }
+
+    // —— 4.1：非 SC（Legacy WorkItemPlan）HumanConfirm 臂共用准备 ——
+
+    #[tokio::test]
+    async fn non_sc_confirm_preparation_before_finalize() {
+        // Waiting：typed 停等 + 零定稿副作用。
+        let trust = Arc::new(RecordingTrustGate::default());
+        trust.script_waiting("fixture_home_failure");
+        let (_root, lifecycle, mut engine, mut event_rx, facts) =
+            confirmation_gate_fixture(
+                false,
+                ProviderName::Codex,
+                None,
+                None,
+                trust.clone(),
+            );
+        let before = durable_record(&lifecycle, &facts);
+        let outcome = engine
+            .handle_confirm()
+            .await
+            .expect("non-SC confirm resolves into a typed waiting");
+        match outcome {
+            WorkspaceConfirmOutcome::TrustWaiting { waiting } => {
+                assert_eq!(waiting.reason_code(), "fixture_home_failure");
+            }
+            other => panic!("expected TrustWaiting, got {other:?}"),
+        }
+        assert_eq!(trust.calls().len(), 1, "非 SC mutex 内锁定事实触发恰一次 ensure");
+        assert_eq!(trust.calls()[0].providers, vec![ProviderName::Codex]);
+        assert_gate_untouched_by_waiting(&lifecycle, &facts, &before, &mut event_rx);
+
+        // Ready：沿原链推进（fixture 无 plan 记录，confirm_work_item_plan
+        // 如实失败——非 TrustWaiting）。
+        let trust2 = Arc::new(RecordingTrustGate::default());
+        let (_root2, _lifecycle2, mut engine2, _event_rx2, facts2) =
+            confirmation_gate_fixture(
+                false,
+                ProviderName::Codex,
+                None,
+                None,
+                trust2.clone(),
+            );
+        let result = engine2.handle_confirm().await;
+        assert!(
+            result.is_err(),
+            "fixture 缺 plan 记录，定稿段如实失败（{:?}）",
+            result
+        );
+        assert_eq!(
+            trust2.calls().len(),
+            1,
+            "Ready 才继续原定稿链（ensure 已发生）"
+        );
+        let _ = facts2;
+    }
+
+    // —— 4.2：真实 registry——部分提交保留 + 重试保守复用 ——
+
+    fn real_registry_fixture(
+        app_paths: &ProductAppPaths,
+        home: &std::path::Path,
+    ) -> Arc<HomeBackedProviderTrustRegistry> {
+        Arc::new(HomeBackedProviderTrustRegistry::new(
+            app_paths.clone(),
+            vec![
+                Arc::new(CodexTrustAdapter::for_home(home)),
+                Arc::new(KimiTrustAdapter::for_home(home)),
+            ],
+        ))
+    }
+
+    #[tokio::test]
+    async fn sc_confirm_partial_commit_keeps_written_provider_and_retry_replays() {
+        let trust = Arc::new(RecordingTrustGate::default());
+        let (_root, lifecycle, mut engine, _event_rx, facts) =
+            sc_confirm_fixture(ProviderName::Codex, Some(ProviderName::KimiCode), trust);
+        let home = tempfile::tempdir().expect("trust home");
+        let registry = real_registry_fixture(&facts.app_paths, home.path());
+        engine.confirmation_trust_context = Some(ConfirmationTrustContext {
+            precondition: registry.clone(),
+            issue_lc_id: Some(facts.lc_id.clone()),
+            frozen_root: facts.canonical_root.clone(),
+        });
+        // 第二 provider 预置损坏的 Kimi 记录 → 首确认 Codex 已登记、Kimi 失败停等。
+        let kimi = KimiTrustAdapter::for_home(home.path());
+        let kimi_record = kimi.artifact_path(&facts.canonical_root);
+        std::fs::create_dir_all(kimi_record.parent().expect("kimi parent"))
+            .expect("create kimi dir");
+        std::fs::write(&kimi_record, "{ not valid json").expect("break kimi record");
+
+        let outcome = engine
+            .handle_human_gate_termination(HumanGateCloseDecision::Approve)
+            .await
+            .expect("second provider failure resolves into typed waiting");
+        match outcome {
+            HumanGateCloseOutcome::TrustWaiting { waiting } => {
+                assert_eq!(waiting.reason_code(), "kimi_trust_record_invalid");
+            }
+            other => panic!("expected TrustWaiting, got {other:?}"),
+        }
+        let audit = crate::product::logical_codebase::ProviderTrustStore::for_lc(
+            facts.app_paths.clone(),
+            facts.lc_id.clone(),
+        )
+        .list_audit("project_0001")
+        .expect("audit");
+        assert!(
+            audit.iter().any(|record| record.action == "ensure"
+                && record.outcome == "registered"
+                && record.provider == "codex"
+                && record.operation_id.as_deref()
+                    == Some(format!("workspace_confirm:{}", facts.session_id).as_str())),
+            "部分提交：已写 Codex 条目保留并关联 workspace_confirm 审计（audit={audit:?}）"
+        );
+        assert!(
+            audit
+                .iter()
+                .any(|record| record.action == "gate_waiting" && record.provider == "kimi_code"),
+            "失败侧留 gate_waiting 审计（audit={audit:?}）"
+        );
+        let codex_config = CodexTrustAdapter::for_home(home.path())
+            .artifact_path(&facts.canonical_root);
+        let codex_bytes_after_first = std::fs::read(&codex_config).expect("codex config written");
+
+        // 修复 Kimi（移除损坏记录）后显式重新确认：Ready、Codex replay、Kimi 注册。
+        std::fs::remove_file(&kimi_record).expect("fix kimi record");
+        let cas_before = close_cas_attempts(&facts.session_id);
+        let error = engine
+            .handle_human_gate_termination(HumanGateCloseDecision::Approve)
+            .await
+            .expect_err("修复后 Ready，沿原链在 compile 段失败");
+        assert!(error.contains("compile failed"), "{error}");
+        assert_eq!(
+            close_cas_attempts(&facts.session_id),
+            cas_before + 1,
+            "重试 Ready 才推进原 close CAS"
+        );
+        let audit = crate::product::logical_codebase::ProviderTrustStore::for_lc(
+            facts.app_paths.clone(),
+            facts.lc_id.clone(),
+        )
+        .list_audit("project_0001")
+        .expect("audit after retry");
+        assert!(
+            audit
+                .iter()
+                .any(|record| record.action == "ensure"
+                    && record.outcome == "replay"
+                    && record.provider == "codex"),
+            "重试保守复用：Codex 走 ensure/replay（audit={audit:?}）"
+        );
+        assert!(
+            audit
+                .iter()
+                .any(|record| record.action == "ensure"
+                    && record.outcome == "registered"
+                    && record.provider == "kimi_code"),
+            "Kimi 修复后注册（audit={audit:?}）"
+        );
+        let codex_bytes_after_retry = std::fs::read(&codex_config).expect("codex config kept");
+        assert_eq!(
+            codex_bytes_after_first, codex_bytes_after_retry,
+            "replay 不改写 home 字节"
+        );
+        let _ = lifecycle;
+    }
+
+    #[tokio::test]
+    async fn sc_confirm_trusted_replay_and_other_lc_reuse_zero_home_writes() {
+        // 本 LC replay：同 scope 直接 seed 一次登记（owned），随后单次引擎
+        // 确认复用同一 registry → ensure/replay、home 字节不变。
+        let trust = Arc::new(RecordingTrustGate::default());
+        let (_root, _lifecycle, mut engine, _event_rx, facts) =
+            sc_confirm_fixture(ProviderName::Codex, None, trust);
+        let home = tempfile::tempdir().expect("trust home");
+        let registry = real_registry_fixture(&facts.app_paths, home.path());
+        match registry.ensure_ready(
+            "project_0001",
+            "op_seed_trusted",
+            &facts.lc_id,
+            &facts.canonical_root,
+            &[ProviderName::Codex],
+            ProviderTrustScenario::Recipe,
+        ) {
+            ProviderTrustPreparationResult::Ready { .. } => {}
+            other => panic!("seed must be Ready, got {other:?}"),
+        }
+        engine.confirmation_trust_context = Some(ConfirmationTrustContext {
+            precondition: registry.clone(),
+            issue_lc_id: Some(facts.lc_id.clone()),
+            frozen_root: facts.canonical_root.clone(),
+        });
+        let codex_config = CodexTrustAdapter::for_home(home.path())
+            .artifact_path(&facts.canonical_root);
+        let bytes_after_seed = std::fs::read(&codex_config).expect("codex config");
+        let error = engine
+            .handle_human_gate_termination(HumanGateCloseDecision::Approve)
+            .await
+            .expect_err("复用确认沿原链在 compile 段失败（replay 已完成）");
+        assert!(error.contains("compile failed"), "{error}");
+        let audit = crate::product::logical_codebase::ProviderTrustStore::for_lc(
+            facts.app_paths.clone(),
+            facts.lc_id.clone(),
+        )
+        .list_audit("project_0001")
+        .expect("audit");
+        assert!(
+            audit.iter().any(|record| record.action == "ensure"
+                && record.outcome == "replay"
+                && record.provider == "codex"
+                && record.operation_id.as_deref()
+                    == Some(format!("workspace_confirm:{}", facts.session_id).as_str())),
+            "本 LC replay 记 ensure/replay 并关联确认 operation（audit={audit:?}）"
+        );
+        assert_eq!(
+            std::fs::read(&codex_config).expect("codex config"),
+            bytes_after_seed,
+            "Trusted replay：home 写次数为 0（字节不变）"
+        );
+
+        // 其它 LC 已创建条目：首次复用走 reuse_user_entry、owned=false、字节不变。
+        let trust2 = Arc::new(RecordingTrustGate::default());
+        let (_root2, _lifecycle2, mut engine2, _event_rx2, facts2) =
+            sc_confirm_fixture(ProviderName::Codex, None, trust2);
+        let home2 = tempfile::tempdir().expect("trust home 2");
+        let registry2 = real_registry_fixture(&facts2.app_paths, home2.path());
+        let other_lc = format!("{}_other", facts2.lc_id);
+        match registry2.ensure_ready(
+            "project_0001",
+            "op_other_lc_seed",
+            &other_lc,
+            &facts2.canonical_root,
+            &[ProviderName::Codex],
+            ProviderTrustScenario::Recipe,
+        ) {
+            ProviderTrustPreparationResult::Ready { .. } => {}
+            other => panic!("other-LC seed must be Ready, got {other:?}"),
+        }
+        engine2.confirmation_trust_context = Some(ConfirmationTrustContext {
+            precondition: registry2.clone(),
+            issue_lc_id: Some(facts2.lc_id.clone()),
+            frozen_root: facts2.canonical_root.clone(),
+        });
+        let codex_config2 = CodexTrustAdapter::for_home(home2.path())
+            .artifact_path(&facts2.canonical_root);
+        let bytes_before_reuse = std::fs::read(&codex_config2).expect("codex config 2");
+        let error = engine2
+            .handle_human_gate_termination(HumanGateCloseDecision::Approve)
+            .await
+            .expect_err("复用确认沿原链在 compile 段失败");
+        assert!(error.contains("compile failed"), "{error}");
+        let audit2 = crate::product::logical_codebase::ProviderTrustStore::for_lc(
+            facts2.app_paths.clone(),
+            facts2.lc_id.clone(),
+        )
+        .list_audit("project_0001")
+        .expect("audit 2");
+        assert!(
+            audit2
+                .iter()
+                .any(|record| record.action == "ensure"
+                    && record.outcome == "reuse_user_entry"
+                    && record.provider == "codex"),
+            "首次复用其它 LC 条目记 ensure/reuse_user_entry（audit={audit2:?}）"
+        );
+        assert_eq!(
+            std::fs::read(&codex_config2).expect("codex config 2"),
+            bytes_before_reuse,
+            "复用不写 home（字节不变）"
+        );
+    }
+
+    // —— 4.2：合法 preparation 中途 expected 被改写 → 原 CAS 胜者唯一 ——
+
+    #[tokio::test]
+    async fn sc_confirm_ready_then_expected_rewritten_loses_cas_uniquely() {
+        let trust = Arc::new(RecordingTrustGate::default());
+        let (_root, lifecycle, mut engine, mut event_rx, facts) =
+            sc_confirm_fixture(ProviderName::Codex, None, trust.clone());
+        let cas_before = close_cas_attempts(&facts.session_id);
+        // hook 在 ensure 内同步触发（=准备窗口内）：改写 durable expected，
+        // 模拟另一 worker 已在准备窗口内赢得关门（status=Running）。
+        let session_path = facts
+            .app_paths
+            .issue_root("project_0001", &facts.issue_id)
+            .join("workspace-sessions")
+            .join(format!("{}.json", facts.session_id));
+        trust.set_hook({
+            let lifecycle = lifecycle.clone();
+            let session_id = facts.session_id.clone();
+            Arc::new(move || {
+                let mut record = lifecycle
+                    .get_workspace_session(&session_id)
+                    .expect("durable");
+                record.status = WorkspaceSessionStatus::Running;
+                crate::product::json_store::write_json(&session_path, &record)
+                    .expect("rewrite durable expected mid-preparation");
+            }) as Arc<dyn Fn() + Send + Sync>
+        });
+
+        let outcome = engine
+            .handle_human_gate_termination(HumanGateCloseDecision::Approve)
+            .await
+            .expect("race resolves through existing translation");
+        match &outcome {
+            HumanGateCloseOutcome::AlreadyClosed { status } => {
+                assert_eq!(*status, WorkspaceSessionStatus::Running);
+            }
+            other => panic!("expected AlreadyClosed via original CAS race, got {other:?}"),
+        }
+        assert_eq!(
+            close_cas_attempts(&facts.session_id),
+            cas_before + 1,
+            "Ready 后仍以原 expected 走原 CAS（败者被 Conflict 翻译拒收）"
+        );
+        let mut closed_events = 0;
+        while let Ok(event) = event_rx.try_recv() {
+            if matches!(event, EngineEvent::HumanGateClosed { .. }) {
+                closed_events += 1;
+            }
+        }
+        assert_eq!(
+            closed_events, 0,
+            "CAS 败者不 compile、不发第二次 close、不 abort"
+        );
+        let durable = durable_record(&lifecycle, &facts);
+        assert_ne!(durable.status, WorkspaceSessionStatus::Confirmed);
+        assert!(
+            durable.provider_start_ledger.is_empty(),
+            "败者零 provider 启动"
+        );
+        let compile_txs = engine
+            .work_item_plan_store()
+            .map(|store| {
+                store
+                    .list_compile_transactions("project_0001", &facts.issue_id, &durable.entity_id)
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
+        assert!(
+            compile_txs.is_empty(),
+            "败者不进入 compile（txs={compile_txs:?}）"
+        );
+    }
+
+    // —— 4.2：取消 caller 不推进 CAS；detached 提交安全收尾 ——
+
+    #[tokio::test]
+    async fn sc_confirm_cancelled_caller_does_not_advance_cas_and_detached_section_finalizes() {
+        let gate = Arc::new(DetachingTrustGate::default());
+        let started = gate.section_started.clone();
+        let done = gate.section_done.clone();
+        let (_root, lifecycle, mut engine, _event_rx, facts) =
+            sc_confirm_fixture(ProviderName::Codex, None, gate);
+        let before = durable_record(&lifecycle, &facts);
+        let cas_before = close_cas_attempts(&facts.session_id);
+
+        let mut confirm = Box::pin(
+            engine.handle_human_gate_termination(HumanGateCloseDecision::Approve),
+        );
+        // 并发轮询 confirm future 与「临界区开始」信号：confirm 被执行到
+        // ensure 的提交边界（spawn_blocking 已启动）后，caller 取消。
+        let started_wait = async {
+            while !started.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        };
+        tokio::select! {
+            result = &mut confirm => {
+                panic!("confirm must not finish before cancellation (got {result:?})");
+            }
+            _ = started_wait => {}
+        }
+        // caller 取消（drop）：确认 future 终止。
+        drop(confirm);
+        assert_eq!(
+            close_cas_attempts(&facts.session_id),
+            cas_before,
+            "取消的 caller 不推进原 close CAS"
+        );
+        assert_eq!(
+            durable_record(&lifecycle, &facts),
+            before,
+            "取消零 durable 推进（门保持开态）"
+        );
+        // detached 临界区独立安全收尾（不误删、不复活业务）。
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !done.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached critical section must finalize safely");
+        assert_eq!(
+            close_cas_attempts(&facts.session_id),
+            cas_before,
+            "detached 收尾不推进另一门/CAS"
+        );
+        assert_eq!(
+            durable_record(&lifecycle, &facts),
+            before,
+            "detached 收尾不改写 durable 门状态"
+        );
+    }
+}

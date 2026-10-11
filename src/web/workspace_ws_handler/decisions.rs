@@ -195,6 +195,15 @@ pub(crate) async fn apply_human_gate_termination(
         Ok(HumanGateCloseOutcome::AlreadyClosed { status }) => {
             HumanGateTerminationEffect::AlreadyClosed { status }
         }
+        // T4.1（REQ-REG-15/D4，过渡臂）：确认 trust 未 Ready 的 typed 停等
+        // ——真实行为是 fail-closed（不伪成功、不 abort），经既有 EngineError
+        // 通道携带 reason_code 上抛。change 5.1 将以稳定 code
+        // `workspace_confirmation_trust_waiting` 的 ProtocolError 投影
+        // （message/context 同源生成）替换本臂；此处仅为穷举 match 编译
+        // 闭包，非最终协议面。
+        Ok(HumanGateCloseOutcome::TrustWaiting { waiting }) => {
+            HumanGateTerminationEffect::EngineError(waiting.summary())
+        }
         Err(message) => {
             // F7 项 1（历史观察项族 12）：confirm 后 compile 失败的 validator
             // findings 经 ProtocolError.context 上抛给 WS 客户端；其余错误维持
