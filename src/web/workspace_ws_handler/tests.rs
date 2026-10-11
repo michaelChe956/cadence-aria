@@ -106,6 +106,7 @@ fn start_generation_is_only_valid_in_prepare_context() {
     let msg = WsInMessage::StartGeneration {
         provider_config: provider_config(),
         reviewer_enabled: false,
+        resume_recovery: None,
     };
 
     assert!(is_message_valid_for_stage_with_flow(
@@ -523,6 +524,7 @@ async fn start_generation_refreshes_stale_provider_guidance_before_prompting_aut
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
             reviewer_enabled: true,
+            resume_recovery: None,
         },
     )
     .await;

@@ -251,6 +251,7 @@ async fn workspace_ws_start_generation_includes_context_note_in_author_prompt() 
                     cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
             reviewer_enabled: false,
+            resume_recovery: None,
         },
     )
     .await;
@@ -320,6 +321,7 @@ async fn workspace_ws_start_generation_on_confirmed_session_is_rejected_without_
                     cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
             reviewer_enabled: false,
+            resume_recovery: None,
         },
     )
     .await;
@@ -414,6 +416,7 @@ async fn http_confirm_without_with_review_finalizes_directly_when_review_enabled
                         cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
                 },
                 reviewer_enabled: true,
+                resume_recovery: None,
             },
         )
         .await;
@@ -534,6 +537,7 @@ async fn http_confirm_on_story_author_confirm_starts_reviewer_then_finalizes() {
                     cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
             reviewer_enabled: true,
+            resume_recovery: None,
         },
     )
     .await;
@@ -660,6 +664,7 @@ async fn http_confirm_on_story_without_reviewer_finalizes_without_review_node() 
                     cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
             reviewer_enabled: false,
+            resume_recovery: None,
         },
     )
     .await;
@@ -790,6 +795,7 @@ async fn http_confirm_during_cross_review_is_rejected_without_finalizing() {
                     cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
             reviewer_enabled: true,
+            resume_recovery: None,
         },
     )
     .await;
@@ -928,6 +934,7 @@ async fn http_confirm_after_fake_reviewer_skip_finalizes_through_engine() {
                     cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
             reviewer_enabled: true,
+            resume_recovery: None,
         },
     )
     .await;

@@ -476,7 +476,18 @@ async fn handle_workspace_inbound_message_inner(
         WsInMessage::StartGeneration {
             provider_config,
             reviewer_enabled,
+            resume_recovery,
         } => {
+            if let Some(intent) = resume_recovery {
+                // B1b（Task 4.2，设计 §5.1）：显式 fresh——socket 入站门已做
+                // 身份/同 ID Replay/配置/source 前置核验，此处为 2.5 合同的
+                // 权威 CAS claim（`claim_lc_fresh`）+ typed OperationResult
+                // sender（A2.2 移交锚：本 decisions 消费面）。claim 后的
+                // provider 启动/tag dispatch 归 B2（5.1+），本包零 spawn。
+                handle_lc_resume_recovery_fresh(run_context.clone(), outbound_tx.clone(), intent)
+                    .await;
+                return;
+            }
             let result = {
                 let mut engine = engine.lock().await;
                 engine
@@ -785,4 +796,77 @@ fn choice_claim_error(
         message: format!("{message} (id={id})"),
         context: Some(serde_json::json!({ "id": id })),
     }
+}
+
+/// B1b（Task 4.2，设计 §5.1）：显式 fresh 的权威 CAS claim（A2a
+/// `claim_lc_fresh` 固定判定顺序，Task 2.5 合同）与 typed 结果发送。
+/// `Claimed` → Accepted/Reserved 帧；同 ID `Replay`（socket 门与 claim 间
+/// 的竞态窗口同形收敛）→ Replayed 帧；`Busy`/`Stale` → typed
+/// ProtocolError（码表与 socket 门共用）；store 写失败整体 Err（2.5：不残
+/// 留半受理状态）→ durable 不可用稳定码。全程零 provider 启动——claim 后
+/// 的 fresh native run 归 B2 tag dispatch。
+async fn handle_lc_resume_recovery_fresh(
+    run_context: ProviderRunContext,
+    outbound_tx: mpsc::Sender<OutboundControl>,
+    intent: crate::web::workspace_ws_types::LcResumeRecoveryIntent,
+) {
+    use crate::product::lifecycle_store::LcFreshClaimOutcome;
+    use crate::web::workspace_ws_handler::socket::{
+        LC_RESUME_RECOVERY_BUSY_CODE, LC_RESUME_STORE_UNAVAILABLE_CODE,
+    };
+    use crate::web::workspace_ws_types::LcResumeRecoveryDelivery;
+
+    let store = LifecycleStore::new(run_context.app_paths.clone());
+    let frame = match store.claim_lc_fresh(
+        &run_context.session_id,
+        &intent.recovery_id,
+        &intent.operation_id,
+    ) {
+        Ok(LcFreshClaimOutcome::Claimed { operation, .. }) => WsOutMessage::LcResumeRecoveryOperationResult {
+            recovery_id: intent.recovery_id.clone(),
+            operation_id: operation.operation_id.clone(),
+            delivery: LcResumeRecoveryDelivery::Accepted,
+            operation_state: operation.state,
+            fresh_node_id: operation.fresh_node_id.clone(),
+            reason_code: operation.reason_code.clone(),
+        },
+        Ok(LcFreshClaimOutcome::Replay { operation, .. }) => WsOutMessage::LcResumeRecoveryOperationResult {
+            recovery_id: intent.recovery_id.clone(),
+            operation_id: operation.operation_id.clone(),
+            delivery: LcResumeRecoveryDelivery::Replayed,
+            operation_state: operation.state,
+            fresh_node_id: operation.fresh_node_id.clone(),
+            reason_code: operation.reason_code.clone(),
+        },
+        Ok(LcFreshClaimOutcome::Busy {
+            active_operation_id,
+        }) => WsOutMessage::ProtocolError {
+            code: LC_RESUME_RECOVERY_BUSY_CODE.to_string(),
+            message: format!(
+                "lc resume recovery {} already holds an accepted fresh operation; a new operation id is rejected and running/unknown operations are never auto-resent",
+                intent.recovery_id
+            ),
+            context: Some(serde_json::json!({ "active_operation_id": active_operation_id })),
+        },
+        Ok(LcFreshClaimOutcome::Stale { reason_code }) => WsOutMessage::ProtocolError {
+            code: reason_code.clone(),
+            message: format!(
+                "lc resume fresh claim for operation {} rejected: {reason_code}",
+                intent.operation_id
+            ),
+            context: Some(serde_json::json!({
+                "recovery_id": intent.recovery_id,
+                "operation_id": intent.operation_id,
+            })),
+        },
+        Err(error) => WsOutMessage::ProtocolError {
+            code: LC_RESUME_STORE_UNAVAILABLE_CODE.to_string(),
+            message: format!(
+                "durable projection unavailable for session {}: lc fresh claim store failure: {error}",
+                run_context.session_id
+            ),
+            context: None,
+        },
+    };
+    let _ = send_json_outbound(&outbound_tx, &frame).await;
 }

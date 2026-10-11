@@ -49,6 +49,7 @@ async fn sc_delegated_rerun_relay_is_not_drained_by_gate_node_kind_collision() {
         WsInMessage::StartGeneration {
             provider_config: review_enabled_provider_config(),
             reviewer_enabled: true,
+            resume_recovery: None,
         },
     )
     .await;
@@ -206,6 +207,7 @@ async fn sc_delegated_rerun_relay_failure_falls_back_to_human_gate_durable() {
         WsInMessage::StartGeneration {
             provider_config: review_enabled_provider_config(),
             reviewer_enabled: true,
+            resume_recovery: None,
         },
     )
     .await;
@@ -508,6 +510,7 @@ async fn sc_delegated_rerun_orphan_reopens_human_gate_on_manager_recreate() {
         WsInMessage::StartGeneration {
             provider_config: review_enabled_provider_config(),
             reviewer_enabled: true,
+            resume_recovery: None,
         },
     )
     .await;

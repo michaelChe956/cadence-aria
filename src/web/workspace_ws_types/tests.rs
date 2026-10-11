@@ -305,6 +305,7 @@ fn start_generation_roundtrip() {
     let msg = WsInMessage::StartGeneration {
         provider_config: snapshot,
         reviewer_enabled: true,
+        resume_recovery: None,
     };
 
     let json = serde_json::to_value(&msg).unwrap();
@@ -313,6 +314,87 @@ fn start_generation_roundtrip() {
     assert_eq!(json["reviewer_enabled"], true);
     let back: WsInMessage = serde_json::from_value(json).unwrap();
     assert_eq!(back, msg);
+}
+
+/// B1b（Task 4.2，接口字典）：`StartGeneration.resume_recovery` wire 合同
+/// ——旧载荷缺省读 None（既有客户端兼容）；显式 fresh 意图 snake_case 往返；
+/// 未知 intent 种类 serde 拒收（不猜测回落）。
+#[test]
+fn anchor_t12_wire_resume_recovery_intent_serde() {
+    use super::{LcResumeRecoveryIntent, LcResumeRecoveryIntentKind};
+
+    let base_json = serde_json::json!({
+        "type": "start_generation",
+        "provider_config": {
+            "author": "claude_code",
+            "reviewer": "codex",
+            "review_rounds": 1,
+        },
+        "reviewer_enabled": true,
+    });
+    let legacy: WsInMessage = serde_json::from_value(base_json.clone()).unwrap();
+    let WsInMessage::StartGeneration {
+        resume_recovery, ..
+    } = legacy
+    else {
+        panic!("expected start_generation");
+    };
+    assert_eq!(
+        resume_recovery, None,
+        "旧载荷缺省 resume_recovery 必须读 None"
+    );
+
+    let mut fresh_json = base_json.clone();
+    fresh_json["resume_recovery"] = serde_json::json!({
+        "recovery_id": "recovery_anchor_t12",
+        "intent": "fresh",
+        "operation_id": "op-1",
+    });
+    let fresh: WsInMessage = serde_json::from_value(fresh_json).unwrap();
+    let WsInMessage::StartGeneration {
+        resume_recovery, ..
+    } = fresh
+    else {
+        panic!("expected start_generation");
+    };
+    assert_eq!(
+        resume_recovery,
+        Some(LcResumeRecoveryIntent {
+            recovery_id: "recovery_anchor_t12".to_string(),
+            intent: LcResumeRecoveryIntentKind::Fresh,
+            operation_id: "op-1".to_string(),
+        })
+    );
+
+    // 序列化面：显式意图回写为 snake_case wire；缺省 None 省略字段。
+    let wire = serde_json::to_value(&WsInMessage::StartGeneration {
+        provider_config: ProviderConfigSnapshot {
+            author: ProviderName::ClaudeCode,
+            reviewer: None,
+            review_rounds: 0,
+            permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
+        },
+        reviewer_enabled: false,
+        resume_recovery: Some(LcResumeRecoveryIntent {
+            recovery_id: "recovery_anchor_t12".to_string(),
+            intent: LcResumeRecoveryIntentKind::Fresh,
+            operation_id: "op-1".to_string(),
+        }),
+    })
+    .unwrap();
+    assert_eq!(wire["resume_recovery"]["intent"], "fresh");
+    assert_eq!(wire["resume_recovery"]["operation_id"], "op-1");
+
+    let mut unknown_json = base_json;
+    unknown_json["resume_recovery"] = serde_json::json!({
+        "recovery_id": "recovery_anchor_t12",
+        "intent": "resume",
+        "operation_id": "op-1",
+    });
+    assert!(
+        serde_json::from_value::<WsInMessage>(unknown_json).is_err(),
+        "未知 intent 种类必须被拒收"
+    );
 }
 
 // 退役留档（T5/REQ-RET-02）：`work_item_plan_mode_messages_roundtrip` 直接驱动已删除的 legacy 决策面，
@@ -809,7 +891,7 @@ fn anchor_t03_recovery_snapshot_and_operation_result_wire() {
     use crate::product::models::{
         LcFreshOperationResult, LcFreshOperationState, LcRecoveryBusinessContext,
         LcRecoveryDraftRef, LcRecoveryRunContext, LcResumeRecoveryRecord, LcResumeRecoveryState,
-        ProviderConversationRole, WorkspaceSessionStatus, WorkItemDraftStatus,
+        ProviderConversationRole, WorkItemDraftStatus, WorkspaceSessionStatus,
     };
     use crate::web::workspace_ws_types::{
         LcFreshOperationDto, LcResumeRecoveryDelivery, LcResumeRecoveryDto,

@@ -69,6 +69,7 @@ async fn story_author_confirm_request_revision_runs_revision_and_returns_to_gate
                     cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
             reviewer_enabled: true,
+            resume_recovery: None,
         },
     )
     .await;
@@ -203,6 +204,7 @@ async fn post_review_request_revision_uses_author_feedback_prompt_not_reviewer_r
                     cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
             reviewer_enabled: true,
+            resume_recovery: None,
         },
     )
     .await;

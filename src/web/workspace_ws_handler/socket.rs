@@ -1,8 +1,16 @@
 use super::*;
+use crate::product::lifecycle_store::LcFreshClaimOutcome;
 use crate::product::logical_codebase::{
     PlanningContextResolver, RepositoryRouting, RepositoryRoutingErrorCode, ResumeDecision,
 };
+use crate::product::models::{
+    LcRecoveryArtifactRef, LcRecoveryRunContext, LcResumeRecoveryRecord,
+    LcResumeRecoveryState,
+};
 use crate::web::workspace_session::WorkspaceSessionManager;
+use crate::web::workspace_ws_types::{
+    ArtifactPayload, LcResumeRecoveryDelivery, LcResumeRecoveryIntent, ProviderConfigSnapshot,
+};
 
 pub async fn workspace_ws(
     ws: WebSocketUpgrade,
@@ -387,6 +395,730 @@ mod tests {
             "取消初始帧写入后连接仍必须接收直播帧"
         );
     }
+
+    // ------------------------------------------------------------------
+    // B1b（Task 4.2，tasks.md 4.2 / 设计 §5.1）：fresh 协议 Replay 与真实
+    // 发送闭包。同 ID 三态 typed Replay（engine 持锁零等待）、显式 fresh 单
+    // claim（零 spawn、workspace 保留、旧 audit/native 不复活）、claim 前置
+    // 三负例（空 operation_id / 配置漂移 / recovery 替换或 source hash 变化）
+    // 与 RequestRevision 活动等待拒收。
+    // ------------------------------------------------------------------
+
+    use crate::cross_cutting::streaming_provider::ProviderPermissionMode;
+    use crate::product::lifecycle_store::{CreateStorySpecInput, CreateWorkspaceSessionInput};
+    use crate::product::models::{
+        LcFreshOperationResult, LcFreshOperationState, LcRecoveryArtifactRef,
+        LcRecoveryBusinessContext, LcRecoveryRunContext, LcResumeRecoveryRecord,
+        LcResumeRecoveryState, ProviderConversationRef, ProviderConversationRole,
+        WorkspaceRolePermissionModes, WorkspaceType,
+    };
+    use crate::web::workspace_ws_types::{
+        ArtifactVersion, LcResumeRecoveryIntentKind, ProviderConfigSnapshot, StructuredFeedback,
+    };
+
+    struct AnchorT12Fixture {
+        root: tempfile::TempDir,
+        app_paths: ProductAppPaths,
+        lifecycle: LifecycleStore,
+        record: WorkspaceSessionRecord,
+    }
+
+    fn anchor_t12_fixture() -> AnchorT12Fixture {
+        let root = tempfile::tempdir().expect("app root");
+        let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+        crate::product::project_store::ProjectStore::new(app_paths.clone())
+            .create(crate::product::project_store::CreateProjectInput {
+                name: "anchor t12 lc resume".to_string(),
+                description: None,
+            })
+            .expect("create project");
+        let lifecycle = LifecycleStore::new(app_paths.clone());
+        let story = lifecycle
+            .create_story_spec(CreateStorySpecInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                repository_id: "repository_0001".to_string(),
+                title: "Anchor T12 Story".to_string(),
+                aggregate_codebase: None,
+            })
+            .expect("story spec");
+        let record = lifecycle
+            .create_workspace_session(CreateWorkspaceSessionInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                entity_id: story.id,
+                workspace_type: WorkspaceType::Story,
+                author_provider: ProviderName::ClaudeCode,
+                reviewer_provider: Some(ProviderName::Codex),
+                review_rounds: 1,
+                superpowers_enabled: false,
+                openspec_enabled: false,
+                work_item_plan_options: None,
+            })
+            .expect("workspace session");
+        AnchorT12Fixture {
+            root,
+            app_paths,
+            lifecycle,
+            record,
+        }
+    }
+
+    fn anchor_t12_seed(
+        fixture: &AnchorT12Fixture,
+        state: LcResumeRecoveryState,
+        operations: Vec<LcFreshOperationResult>,
+        artifact_refs: Vec<LcRecoveryArtifactRef>,
+    ) {
+        let expected = fixture
+            .lifecycle
+            .get_workspace_session(&fixture.record.id)
+            .expect("expected record");
+        let recovery = LcResumeRecoveryRecord {
+            schema_version: 1,
+            recovery_id: "recovery_anchor_t12".to_string(),
+            failed_provider_node_id: "timeline_node_004".to_string(),
+            reason_code: "resume_fingerprint_mismatch".to_string(),
+            role: ProviderConversationRole::Reviewer,
+            provider: ProviderName::Codex,
+            superseded_native_session_id: Some("native-t12-old".to_string()),
+            previous_fingerprint_digest: Some("sha256:t12".to_string()),
+            previous_session_status: expected.status.clone(),
+            previous_stage: "cross_review".to_string(),
+            run_context: LcRecoveryRunContext::ReviewerRevision {
+                business: LcRecoveryBusinessContext {
+                    entity_id: fixture.record.entity_id.clone(),
+                    plan_id: None,
+                    workspace_type: WorkspaceType::Story,
+                    business_repository_physical_id: None,
+                    business_repository_logical_id: None,
+                    business_checkout_id: None,
+                    business_repository_path: None,
+                    source_story_ids: Vec::new(),
+                    source_design_ids: Vec::new(),
+                    plan_options_ref: None,
+                    artifact_refs,
+                    review_refs: Vec::new(),
+                    author_provider: fixture.record.author_provider.clone(),
+                    effective_reviewer_provider: fixture.record.reviewer_provider.clone(),
+                    original_node_id: Some("timeline_node_004".to_string()),
+                    original_role_run_seq: None,
+                },
+                original_feedback: Some("原修订反馈".to_string()),
+            },
+            state,
+            operation_id: operations
+                .last()
+                .map(|operation| operation.operation_id.clone()),
+            fresh_node_id: None,
+            fresh_native_session_id: None,
+            fresh_role_run_seq: None,
+            fresh_operations: operations,
+            detected_at: "2026-10-11T00:00:00Z".to_string(),
+            updated_at: "2026-10-11T00:00:00Z".to_string(),
+        };
+        fixture
+            .lifecycle
+            .compare_and_save_lc_resume_state(&expected, recovery)
+            .expect("seed lc resume recovery");
+    }
+
+    fn anchor_t12_operation(
+        operation_id: &str,
+        state: LcFreshOperationState,
+    ) -> LcFreshOperationResult {
+        LcFreshOperationResult {
+            operation_id: operation_id.to_string(),
+            state,
+            fresh_node_id: None,
+            reason_code: None,
+            role_run_seq: None,
+            accepted_at: "2026-10-11T00:00:00Z".to_string(),
+            updated_at: "2026-10-11T00:00:00Z".to_string(),
+        }
+    }
+
+    fn anchor_t12_engine(
+        fixture: &AnchorT12Fixture,
+    ) -> (Arc<Mutex<WorkspaceEngine>>, mpsc::Receiver<EngineEvent>) {
+        let record = fixture
+            .lifecycle
+            .get_workspace_session(&fixture.record.id)
+            .expect("latest record");
+        let checkpoint_store = Arc::new(CheckpointStore::new(
+            fixture.root.path().join("checkpoints"),
+        ));
+        let (engine_tx, engine_rx) = mpsc::channel::<EngineEvent>(64);
+        let engine = WorkspaceEngine::new_persistent(
+            checkpoint_store,
+            fixture.lifecycle.clone(),
+            engine_tx,
+            WorkspaceSession::from_record(record),
+        );
+        (Arc::new(Mutex::new(engine)), engine_rx)
+    }
+
+    fn anchor_t12_run_context(
+        fixture: &AnchorT12Fixture,
+        engine: Arc<Mutex<WorkspaceEngine>>,
+        workspace_runs: WorkspaceRunRegistry,
+    ) -> ProviderRunContext {
+        let record = fixture
+            .lifecycle
+            .get_workspace_session(&fixture.record.id)
+            .expect("latest record");
+        ProviderRunContext::test_fixture(
+            Arc::new(ProviderRegistry::new()),
+            engine,
+            workspace_runs,
+            record.id.clone(),
+            fixture.app_paths.clone(),
+            record,
+        )
+    }
+
+    fn anchor_t12_provider_config() -> ProviderConfigSnapshot {
+        ProviderConfigSnapshot {
+            author: ProviderName::ClaudeCode,
+            reviewer: Some(ProviderName::Codex),
+            review_rounds: 1,
+            permission_modes: WorkspaceRolePermissionModes::default(),
+        }
+    }
+
+    fn anchor_t12_fresh_message(operation_id: &str, recovery_id: &str) -> WsInMessage {
+        WsInMessage::StartGeneration {
+            provider_config: anchor_t12_provider_config(),
+            reviewer_enabled: true,
+            resume_recovery: Some(LcResumeRecoveryIntent {
+                recovery_id: recovery_id.to_string(),
+                intent: LcResumeRecoveryIntentKind::Fresh,
+                operation_id: operation_id.to_string(),
+            }),
+        }
+    }
+
+    fn anchor_t12_wire(frame: &WsOutMessage) -> serde_json::Value {
+        serde_json::to_value(frame).expect("frame serializes")
+    }
+
+    fn anchor_t12_protocol_code(frame: &WsOutMessage) -> String {
+        match frame {
+            WsOutMessage::ProtocolError { code, .. } => code.clone(),
+            other => panic!("expected protocol error, got {}", anchor_t12_wire(other)),
+        }
+    }
+
+    fn anchor_t12_recovery_of(frame_record: &WorkspaceSessionRecord) -> LcResumeRecoveryRecord {
+        frame_record
+            .lc_resume_recovery
+            .clone()
+            .expect("recovery present")
+    }
+
+    #[tokio::test]
+    async fn anchor_t12_wire_replay_running_resolved_and_failed_waiting() {
+        let fixture = anchor_t12_fixture();
+        let workspace_runs = WorkspaceRunRegistry::default();
+
+        // 三态之 FreshRunning：同 ID op-1（Running）在 engine 锁被持有期间
+        // 必须立即 typed Replay——不等待 engine mutex（store 层纯读），零 spawn。
+        anchor_t12_seed(
+            &fixture,
+            LcResumeRecoveryState::FreshRunning,
+            vec![anchor_t12_operation("op-1", LcFreshOperationState::Running)],
+            Vec::new(),
+        );
+        let (engine, _engine_rx) = anchor_t12_engine(&fixture);
+        let run_context = anchor_t12_run_context(&fixture, engine.clone(), workspace_runs.clone());
+        let lock_guard = engine.lock().await;
+        let running_replay = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            lc_resume_recovery_inbound_gate(
+                &run_context,
+                &anchor_t12_fresh_message("op-1", "recovery_anchor_t12"),
+            )
+        })
+        .await
+        .expect("同 ID Replay 不得等待 engine mutex（1s 内返回）")
+        .expect("同 ID 已受理必须 Replay");
+        drop(lock_guard);
+        let response = anchor_t12_wire(&running_replay);
+        assert_eq!(response["type"], "lc_resume_recovery_operation_result");
+        assert_eq!(response["delivery"], "replayed");
+        assert_eq!(response["operation_id"], "op-1");
+        assert_eq!(response["operation_state"], "running");
+
+        // 新 ID 撞 FreshRunning：typed busy（claim 前拒，不造第二受理）。
+        let busy_error = lc_resume_recovery_inbound_gate(
+            &run_context,
+            &anchor_t12_fresh_message("op-2", "recovery_anchor_t12"),
+        )
+        .expect("新 ID 在 FreshRunning 必须被拒收");
+        assert_eq!(
+            anchor_t12_protocol_code(&busy_error),
+            "lc_resume_recovery_busy"
+        );
+
+        // durable 事实不变：FreshRunning 保持，fresh_operations 仍只有 op-1。
+        let after_running = fixture
+            .lifecycle
+            .get_workspace_session(&fixture.record.id)
+            .expect("record after running replay");
+        let recovery = anchor_t12_recovery_of(&after_running);
+        assert_eq!(recovery.state, LcResumeRecoveryState::FreshRunning);
+        assert_eq!(recovery.fresh_operations.len(), 1);
+
+        // 三态之 Resolved：同 ID op-1（Completed）只 Replay（不拒、不复活）；
+        // 新 ID 拒第二会话（typed resolved stale）；普通 generation 门放行
+        //（resolved 只保留证据，不拦后续新 native）。
+        anchor_t12_seed(
+            &fixture,
+            LcResumeRecoveryState::Resolved,
+            vec![anchor_t12_operation(
+                "op-1",
+                LcFreshOperationState::Completed,
+            )],
+            Vec::new(),
+        );
+        let resolved_replay = lc_resume_recovery_inbound_gate(
+            &run_context,
+            &anchor_t12_fresh_message("op-1", "recovery_anchor_t12"),
+        )
+        .expect("resolved 同 ID 仍必须 Replay（保留证据）");
+        let resolved_response = anchor_t12_wire(&resolved_replay);
+        assert_eq!(resolved_response["delivery"], "replayed");
+        assert_eq!(resolved_response["operation_state"], "completed");
+        let resolved_new_id = lc_resume_recovery_inbound_gate(
+            &run_context,
+            &anchor_t12_fresh_message("op-2", "recovery_anchor_t12"),
+        )
+        .expect("resolved 新 ID 必须被拒收（不造第二会话）");
+        assert_eq!(
+            anchor_t12_protocol_code(&resolved_new_id),
+            "lc_resume_recovery_resolved"
+        );
+        let plain_generation = WsInMessage::StartGeneration {
+            provider_config: anchor_t12_provider_config(),
+            reviewer_enabled: true,
+            resume_recovery: None,
+        };
+        assert!(
+            lc_resume_recovery_inbound_gate(&run_context, &plain_generation).is_none(),
+            "resolved 后普通 generation 不得被恢复门拦截"
+        );
+
+        // 三态之 prepare 失败回 Waiting：同 ID op-1（NotStarted）只 Replay。
+        anchor_t12_seed(
+            &fixture,
+            LcResumeRecoveryState::Waiting,
+            vec![anchor_t12_operation(
+                "op-1",
+                LcFreshOperationState::NotStarted,
+            )],
+            Vec::new(),
+        );
+        let failed_waiting_replay = lc_resume_recovery_inbound_gate(
+            &run_context,
+            &anchor_t12_fresh_message("op-1", "recovery_anchor_t12"),
+        )
+        .expect("prepare 失败回 waiting 的同 ID 仍必须 Replay（不删 ID）");
+        let waiting_response = anchor_t12_wire(&failed_waiting_replay);
+        assert_eq!(waiting_response["delivery"], "replayed");
+        assert_eq!(waiting_response["operation_state"], "not_started");
+
+        // 普通旁路：RequestRevision 在活动 Waiting 期间必须被 typed 拒收。
+        let plain_request_revision = lc_resume_recovery_inbound_gate(
+            &run_context,
+            &WsInMessage::RequestRevision {
+                feedback: StructuredFeedback {
+                    feedback_types: vec!["clarification".to_string()],
+                    description: "普通旁路反馈".to_string(),
+                    target_artifact_version: None,
+                },
+            },
+        )
+        .expect("活动恢复期间普通 RequestRevision 必须被拒收");
+        assert_eq!(
+            anchor_t12_protocol_code(&plain_request_revision),
+            "LC_RESUME_RECOVERY_ACTIVE"
+        );
+
+        // 零 spawn：无 provider drive、无新 timeline 节点（Replay/拒收全程
+        // 不进 engine/run 面产 run）。
+        assert_eq!(workspace_runs.provider_drive_depth(&fixture.record.id), 0);
+        let durable_nodes = fixture
+            .lifecycle
+            .load_timeline_nodes(&fixture.record.id)
+            .expect("durable timeline nodes");
+        assert!(
+            durable_nodes.is_empty(),
+            "Replay/拒收不得创建任何 timeline 节点"
+        );
+    }
+
+    #[tokio::test]
+    async fn anchor_t12_explicit_fresh_keeps_workspace_and_ignores_old_audit() {
+        let fixture = anchor_t12_fixture();
+        anchor_t12_seed(
+            &fixture,
+            LcResumeRecoveryState::Waiting,
+            Vec::new(),
+            Vec::new(),
+        );
+        // 旧 native 引用在案（durable conversation）——显式 fresh 不得复活。
+        fixture
+            .lifecycle
+            .replace_workspace_provider_conversations(
+                &fixture.record.id,
+                vec![ProviderConversationRef {
+                    role: ProviderConversationRole::Author,
+                    provider: ProviderName::ClaudeCode,
+                    provider_session_id: "native-t12-old".to_string(),
+                    updated_at: "2026-10-11T00:00:00Z".to_string(),
+                    last_node_id: Some("timeline_node_002".to_string()),
+                }],
+            )
+            .expect("seed old conversation");
+
+        let before = fixture
+            .lifecycle
+            .get_workspace_session(&fixture.record.id)
+            .expect("record before claim");
+        let (engine, _engine_rx) = anchor_t12_engine(&fixture);
+        let workspace_runs = WorkspaceRunRegistry::default();
+        let run_context = anchor_t12_run_context(&fixture, engine.clone(), workspace_runs.clone());
+        let (outbound_tx, mut outbound_rx) = mpsc::channel::<OutboundControl>(64);
+        let inbound_context = WorkspaceInboundContext {
+            app_state: WebAppState::new(
+                fixture.root.path().to_path_buf(),
+                crate::web::runtime::WebRuntime::new_fake(fixture.root.path().to_path_buf()),
+            ),
+            engine: engine.clone(),
+            run_context: run_context.clone(),
+            outbound_tx: outbound_tx.clone(),
+            session_id: fixture.record.id.clone(),
+        };
+
+        handle_workspace_inbound_message(
+            inbound_context.clone(),
+            anchor_t12_fresh_message("op-fresh", "recovery_anchor_t12"),
+        )
+        .await;
+
+        let accepted = tokio::time::timeout(std::time::Duration::from_secs(2), outbound_rx.recv())
+            .await
+            .expect("accepted frame sent")
+            .expect("outbound channel open");
+        let OutboundControl::Text(accepted_json) = accepted else {
+            panic!("expected text frame, got {accepted:?}");
+        };
+        let response: serde_json::Value =
+            serde_json::from_str(&accepted_json).expect("accepted frame json");
+        assert_eq!(response["type"], "lc_resume_recovery_operation_result");
+        assert_eq!(response["delivery"], "accepted");
+        assert_eq!(response["operation_id"], "op-fresh");
+        assert_eq!(response["operation_state"], "reserved");
+        assert_eq!(response["fresh_node_id"], serde_json::Value::Null);
+
+        // durable：FreshReserved 单 claim，operation 绑定 op-fresh；fresh 面
+        // 零 native/节点绑定（新 input None——不复活旧 audit/native）。
+        let after = fixture
+            .lifecycle
+            .get_workspace_session(&fixture.record.id)
+            .expect("record after claim");
+        let recovery = anchor_t12_recovery_of(&after);
+        assert_eq!(recovery.state, LcResumeRecoveryState::FreshReserved);
+        assert_eq!(recovery.operation_id.as_deref(), Some("op-fresh"));
+        assert_eq!(
+            recovery.fresh_operations.len(),
+            1,
+            "新 ID waiting 恰一次 claim"
+        );
+        let operation = &recovery.fresh_operations[0];
+        assert_eq!(operation.operation_id, "op-fresh");
+        assert_eq!(operation.state, LcFreshOperationState::Reserved);
+        assert_eq!(operation.fresh_node_id, None);
+        assert_eq!(operation.role_run_seq, None);
+        assert_eq!(recovery.fresh_native_session_id, None);
+        assert_eq!(
+            recovery.superseded_native_session_id.as_deref(),
+            Some("native-t12-old"),
+            "claim 不得清理/复活旧 native 引用"
+        );
+
+        // workspace 保留：非恢复字段逐项不变（entity/type/status/provider/
+        // permission/messages/旧 conversation）。
+        assert_eq!(after.entity_id, before.entity_id);
+        assert_eq!(after.workspace_type, before.workspace_type);
+        assert_eq!(after.status, before.status);
+        assert_eq!(after.author_provider, before.author_provider);
+        assert_eq!(after.reviewer_provider, before.reviewer_provider);
+        assert_eq!(after.permission_modes, before.permission_modes);
+        assert_eq!(after.messages, before.messages);
+        assert_eq!(
+            after.provider_conversations, before.provider_conversations,
+            "显式 fresh 忽略旧 audit/conversation（不读取、不复活、不清理）"
+        );
+
+        // 零 spawn：无 provider drive、无新 timeline 节点、engine 锁即刻可取。
+        assert_eq!(workspace_runs.provider_drive_depth(&fixture.record.id), 0);
+        let _engine_probe = engine.clone().lock_owned().await;
+        let durable_nodes = fixture
+            .lifecycle
+            .load_timeline_nodes(&fixture.record.id)
+            .expect("durable timeline nodes");
+        assert!(durable_nodes.is_empty(), "claim 不得创建 timeline 节点");
+
+        // 同 ID 重发：只 Replay 不二claim（waiting 单 claim 语义）。
+        handle_workspace_inbound_message(
+            inbound_context,
+            anchor_t12_fresh_message("op-fresh", "recovery_anchor_t12"),
+        )
+        .await;
+        let replayed = tokio::time::timeout(std::time::Duration::from_secs(2), outbound_rx.recv())
+            .await
+            .expect("replayed frame sent")
+            .expect("outbound channel open");
+        let OutboundControl::Text(replayed_json) = replayed else {
+            panic!("expected text frame, got {replayed:?}");
+        };
+        let replay_response: serde_json::Value =
+            serde_json::from_str(&replayed_json).expect("replayed frame json");
+        assert_eq!(replay_response["delivery"], "replayed");
+        assert_eq!(replay_response["operation_state"], "reserved");
+        let after_resend = fixture
+            .lifecycle
+            .get_workspace_session(&fixture.record.id)
+            .expect("record after resend");
+        let recovery_after = anchor_t12_recovery_of(&after_resend);
+        assert_eq!(
+            recovery_after.fresh_operations.len(),
+            1,
+            "同 ID 重发不得产生第二次 claim"
+        );
+    }
+
+    #[tokio::test]
+    async fn anchor_t12_empty_operation_id_rejected_before_claim() {
+        let fixture = anchor_t12_fixture();
+        anchor_t12_seed(
+            &fixture,
+            LcResumeRecoveryState::Waiting,
+            Vec::new(),
+            Vec::new(),
+        );
+        let (engine, _engine_rx) = anchor_t12_engine(&fixture);
+        let workspace_runs = WorkspaceRunRegistry::default();
+        let run_context = anchor_t12_run_context(&fixture, engine, workspace_runs);
+
+        for empty_operation_id in ["", "   "] {
+            let error = lc_resume_recovery_inbound_gate(
+                &run_context,
+                &anchor_t12_fresh_message(empty_operation_id, "recovery_anchor_t12"),
+            )
+            .expect("空/空白 operation_id 必须被拒收");
+            assert_eq!(anchor_t12_protocol_code(&error), "INVALID_COMMAND_ID");
+        }
+
+        // durable 事实不变：Waiting 保持、零受理。
+        let after = fixture
+            .lifecycle
+            .get_workspace_session(&fixture.record.id)
+            .expect("record after rejections");
+        let recovery = anchor_t12_recovery_of(&after);
+        assert_eq!(recovery.state, LcResumeRecoveryState::Waiting);
+        assert!(
+            recovery.fresh_operations.is_empty(),
+            "空 operation_id 拒收必须发生在 claim 之前"
+        );
+    }
+
+    #[tokio::test]
+    async fn anchor_t12_provider_config_change_rejected_before_claim() {
+        let fixture = anchor_t12_fixture();
+        anchor_t12_seed(
+            &fixture,
+            LcResumeRecoveryState::Waiting,
+            Vec::new(),
+            Vec::new(),
+        );
+        let (engine, _engine_rx) = anchor_t12_engine(&fixture);
+        let workspace_runs = WorkspaceRunRegistry::default();
+        let run_context = anchor_t12_run_context(&fixture, engine, workspace_runs);
+
+        let mut changed_author = anchor_t12_fresh_message("op-cfg-1", "recovery_anchor_t12");
+        let WsInMessage::StartGeneration {
+            provider_config, ..
+        } = &mut changed_author
+        else {
+            unreachable!();
+        };
+        provider_config.author = ProviderName::Codex;
+        let changed_author_error = lc_resume_recovery_inbound_gate(&run_context, &changed_author)
+            .expect("author 配置漂移必须被拒收");
+        assert_eq!(
+            anchor_t12_protocol_code(&changed_author_error),
+            "lc_resume_recovery_configuration_changed"
+        );
+
+        let mut changed_reviewer = anchor_t12_fresh_message("op-cfg-2", "recovery_anchor_t12");
+        let WsInMessage::StartGeneration {
+            provider_config, ..
+        } = &mut changed_reviewer
+        else {
+            unreachable!();
+        };
+        provider_config.reviewer = None;
+        let changed_reviewer_error =
+            lc_resume_recovery_inbound_gate(&run_context, &changed_reviewer)
+                .expect("reviewer 配置漂移必须被拒收");
+        assert_eq!(
+            anchor_t12_protocol_code(&changed_reviewer_error),
+            "lc_resume_recovery_configuration_changed"
+        );
+
+        let mut changed_permission = anchor_t12_fresh_message("op-cfg-3", "recovery_anchor_t12");
+        let WsInMessage::StartGeneration {
+            provider_config, ..
+        } = &mut changed_permission
+        else {
+            unreachable!();
+        };
+        provider_config.permission_modes = WorkspaceRolePermissionModes {
+            author: ProviderPermissionMode::Supervised,
+            reviewer: ProviderPermissionMode::Auto,
+        };
+        let changed_permission_error =
+            lc_resume_recovery_inbound_gate(&run_context, &changed_permission)
+                .expect("permission 配置漂移必须被拒收");
+        assert_eq!(
+            anchor_t12_protocol_code(&changed_permission_error),
+            "lc_resume_recovery_configuration_changed"
+        );
+
+        // durable 事实不变：配置漂移拒收发生在 claim 之前。
+        let after = fixture
+            .lifecycle
+            .get_workspace_session(&fixture.record.id)
+            .expect("record after rejections");
+        let recovery = anchor_t12_recovery_of(&after);
+        assert_eq!(recovery.state, LcResumeRecoveryState::Waiting);
+        assert!(
+            recovery.fresh_operations.is_empty(),
+            "配置漂移拒收必须发生在 claim 之前"
+        );
+    }
+
+    #[tokio::test]
+    async fn anchor_t12_stale_recovery_or_changed_source_rejected_before_claim() {
+        let fixture = anchor_t12_fixture();
+        // source 引用冻结：artifact v1 内容 hash 记录进 run_context。
+        let artifact = ArtifactVersion {
+            version: 1,
+            payload: ArtifactPayload::Markdown {
+                markdown: "# T12 源稿\n".to_string(),
+                diff: None,
+            },
+            generated_by: ProviderName::ClaudeCode,
+            reviewed_by: None,
+            review_verdict: None,
+            confirmed_by: None,
+            is_current: true,
+            created_at: "2026-10-11T00:00:00Z".to_string(),
+            source_node_id: "timeline_node_002".to_string(),
+        };
+        let frozen_hash = lc_artifact_payload_digest(&artifact.payload).expect("digest computable");
+        fixture
+            .lifecycle
+            .save_artifact_versions(&fixture.record.id, &[artifact])
+            .expect("seed artifact");
+        anchor_t12_seed(
+            &fixture,
+            LcResumeRecoveryState::Waiting,
+            Vec::new(),
+            vec![LcRecoveryArtifactRef {
+                ref_id: "artifact_current".to_string(),
+                version: Some(1),
+                hash: Some(frozen_hash.clone()),
+            }],
+        );
+        let (engine, _engine_rx) = anchor_t12_engine(&fixture);
+        let workspace_runs = WorkspaceRunRegistry::default();
+        let run_context = anchor_t12_run_context(&fixture, engine, workspace_runs);
+
+        // 已换 recovery_id（被新漂移替换）：typed stale。
+        let stale_recovery_error = lc_resume_recovery_inbound_gate(
+            &run_context,
+            &anchor_t12_fresh_message("op-stale-1", "recovery_replaced_by_new_drift"),
+        )
+        .expect("recovery 替换后旧 ID 必须被拒收");
+        assert_eq!(
+            anchor_t12_protocol_code(&stale_recovery_error),
+            "lc_resume_recovery_stale"
+        );
+
+        // 正控：recovery_id 正确且 source hash 未变 → 门放行（None，进入
+        // stage+mutex+claim 路径）。
+        assert!(
+            lc_resume_recovery_inbound_gate(
+                &run_context,
+                &anchor_t12_fresh_message("op-stale-2", "recovery_anchor_t12"),
+            )
+            .is_none(),
+            "身份/配置/source 一致时必须放行 claim 路径"
+        );
+
+        // 原 source hash 变化（artifact v1 内容被改写）：typed stale。
+        let tampered = ArtifactVersion {
+            version: 1,
+            payload: ArtifactPayload::Markdown {
+                markdown: "# T12 源稿（被改写）\n".to_string(),
+                diff: None,
+            },
+            generated_by: ProviderName::ClaudeCode,
+            reviewed_by: None,
+            review_verdict: None,
+            confirmed_by: None,
+            is_current: true,
+            created_at: "2026-10-11T00:00:00Z".to_string(),
+            source_node_id: "timeline_node_002".to_string(),
+        };
+        fixture
+            .lifecycle
+            .save_artifact_versions(&fixture.record.id, &[tampered])
+            .expect("tamper artifact");
+        let changed_source_error = lc_resume_recovery_inbound_gate(
+            &run_context,
+            &anchor_t12_fresh_message("op-stale-3", "recovery_anchor_t12"),
+        )
+        .expect("source hash 变化必须被拒收");
+        assert_eq!(
+            anchor_t12_protocol_code(&changed_source_error),
+            "lc_resume_recovery_stale"
+        );
+
+        // durable 事实不变：全部拒收发生在 claim 之前（仍 Waiting、零受理、
+        // 冻结 hash 原样）。
+        let after = fixture
+            .lifecycle
+            .get_workspace_session(&fixture.record.id)
+            .expect("record after rejections");
+        let recovery = anchor_t12_recovery_of(&after);
+        assert_eq!(recovery.state, LcResumeRecoveryState::Waiting);
+        assert!(
+            recovery.fresh_operations.is_empty(),
+            "stale/source 拒收必须发生在 claim 之前"
+        );
+        let LcRecoveryRunContext::ReviewerRevision { business, .. } = &recovery.run_context else {
+            unreachable!("seeded reviewer revision context");
+        };
+        let frozen_ref = business
+            .artifact_refs
+            .first()
+            .cloned()
+            .expect("frozen artifact ref intact");
+        assert_eq!(frozen_ref.hash.as_deref(), Some(frozen_hash.as_str()));
+    }
 }
 
 /// 初帧载荷：未注入 `event_seq` 的 snapshot、可选补发 choice，以及 snapshot 构建
@@ -457,6 +1189,282 @@ async fn abort_stage_type(
                 None
             }
         }
+    }
+}
+
+/// B1b（Task 4.2）：recovery 冻结 artifact 引用的当前内容指纹——serde 规范
+/// 序列化后 sha256（`sha256:<hex>`）。与 `LcRecoveryArtifactRef.hash` 同式
+/// 比对：内容变化即 `lc_resume_recovery_stale`，不复活旧 source。
+fn lc_artifact_payload_digest(payload: &ArtifactPayload) -> Option<String> {
+    use sha2::Digest as _;
+    let canonical = serde_json::to_string(payload).ok()?;
+    Some(format!(
+        "sha256:{:x}",
+        sha2::Sha256::digest(canonical.as_bytes())
+    ))
+}
+
+/// B1b（Task 4.2，设计 §5.1）：LC 恢复入站门——arbitrate（auth/lease/scope）
+/// 之后、stage 校验/engine mutex 之前的固定判定顺序，全部只读 durable 事实
+///（store 层已保证），不等待 engine mutex：
+/// ① `StartGeneration` 携带显式 `resume_recovery`：
+///    operation_id 空/空白 typed `INVALID_COMMAND_ID` → recovery 身份（缺失/
+///    已被新漂移替换 → `lc_resume_recovery_stale` 族）→ 同 ID 已受理先 typed
+///    Replay（零 spawn、不重核配置——原受理已核，先于 stage waiting/busy）→
+///    新 ID 才核状态机（FreshReserved/FreshRunning → busy、Resolved → 不造
+///    第二会话）、无活 provider drive、冻结配置（author/reviewer/permission
+///    与 durable session record 相等）、run_context 冻结 artifact 引用与当前
+///    durable 产物一致；全部通过返回 `None` 放行原 stage 校验 + engine
+///    mutex/CAS claim 路径（decisions 的 `claim_lc_fresh` 消费）。
+/// ② `RequestRevision`：active 恢复（Waiting/FreshReserved/FreshRunning）期间
+///    普通旁路 typed 拒收（不得绕过显式 fresh 等待）；Resolved 只保留证据
+///    不拦截，后续新 native 正常。
+/// 其余消息一律返回 `None` 原路放行。
+pub(crate) fn lc_resume_recovery_inbound_gate(
+    run_context: &ProviderRunContext,
+    message: &WsInMessage,
+) -> Option<WsOutMessage> {
+    match message {
+        WsInMessage::StartGeneration {
+            provider_config,
+            resume_recovery: Some(intent),
+            ..
+        } => lc_resume_fresh_admission(run_context, intent, provider_config),
+        WsInMessage::RequestRevision { .. } => lc_request_revision_recovery_guard(run_context),
+        _ => None,
+    }
+}
+
+/// B1b（Task 4.2）新增稳定错误码（tasks.md 4.2 逐项负例；socket 门与
+/// decisions claim 消费面共用，修改须双向同步）。
+pub(crate) const LC_RESUME_RECOVERY_CONFIGURATION_CHANGED_CODE: &str =
+    "lc_resume_recovery_configuration_changed";
+pub(crate) const LC_RESUME_RECOVERY_BUSY_CODE: &str = "lc_resume_recovery_busy";
+/// 与 engine `start_generation` 的 `LC_RESUME_RECOVERY_ACTIVE` 稳定码同串
+///（Task 2.6 anchor_t07 已把该串定为等待期普通旁路拒收码）。
+const LC_RESUME_RECOVERY_ACTIVE_CODE: &str = "LC_RESUME_RECOVERY_ACTIVE";
+/// durable store 读写失败稳定码——与 manager 侧
+/// `DURABLE_PROJECTION_UNAVAILABLE_CODE`（模块私有常量）同值；按 wire 值
+/// 对齐，两处修改必须同步。
+pub(crate) const LC_RESUME_STORE_UNAVAILABLE_CODE: &str =
+    "workspace_durable_projection_unavailable";
+
+fn lc_resume_protocol_error(
+    code: &str,
+    message: String,
+    context: serde_json::Value,
+) -> WsOutMessage {
+    WsOutMessage::ProtocolError {
+        code: code.to_string(),
+        message,
+        context: Some(context),
+    }
+}
+
+fn lc_resume_store_unavailable(
+    session_id: &str,
+    error: crate::product::json_store::ProductStoreError,
+) -> WsOutMessage {
+    lc_resume_protocol_error(
+        LC_RESUME_STORE_UNAVAILABLE_CODE,
+        format!("durable projection unavailable for session {session_id}: {error}"),
+        serde_json::json!({ "session_id": session_id }),
+    )
+}
+
+/// ②（设计 §5.1）：`RequestRevision` 普通旁路守卫——active 恢复期间一律
+/// typed 拒收，不得绕过显式 fresh 等待；Resolved 只保留证据放行。
+fn lc_request_revision_recovery_guard(run_context: &ProviderRunContext) -> Option<WsOutMessage> {
+    let store = LifecycleStore::new(run_context.app_paths.clone());
+    let record = match store.get_workspace_session(&run_context.session_id) {
+        Ok(record) => record,
+        Err(error) => {
+            return Some(lc_resume_store_unavailable(&run_context.session_id, error));
+        }
+    };
+    let recovery = record.lc_resume_recovery?;
+    if recovery.state == LcResumeRecoveryState::Resolved {
+        return None;
+    }
+    Some(lc_resume_protocol_error(
+        LC_RESUME_RECOVERY_ACTIVE_CODE,
+        format!(
+            "LC_RESUME_RECOVERY_ACTIVE: 会话 {} 存在进行中的 LC 恢复（recovery_id={}，state={:?}）；RequestRevision 普通旁路已拒收，请以显式 fresh（StartGeneration.resume_recovery）继续",
+            run_context.session_id, recovery.recovery_id, recovery.state
+        ),
+        serde_json::json!({
+            "recovery_id": recovery.recovery_id,
+            "state": recovery.state,
+        }),
+    ))
+}
+
+/// ①③④⑤⑥⑦（设计 §5.1）：显式 fresh 的前置核验。`None` = 放行原
+/// stage 校验 + engine mutex + decisions CAS claim 路径。
+fn lc_resume_fresh_admission(
+    run_context: &ProviderRunContext,
+    intent: &LcResumeRecoveryIntent,
+    provider_config: &ProviderConfigSnapshot,
+) -> Option<WsOutMessage> {
+    // ① 幂等/审计键先于一切（与 HumanGateFeedback/Advance 同族 typed 命令键）。
+    if let Err(error) = validate_command_id(&intent.operation_id) {
+        return Some(error);
+    }
+    let store = LifecycleStore::new(run_context.app_paths.clone());
+    let record = match store.get_workspace_session(&run_context.session_id) {
+        Ok(record) => record,
+        Err(error) => {
+            return Some(lc_resume_store_unavailable(&run_context.session_id, error));
+        }
+    };
+    // ② recovery 身份：缺失/已被新漂移替换 → stale（不造第二会话、不猜最新）。
+    let recovery = match record.lc_resume_recovery.as_ref() {
+        Some(recovery) if recovery.recovery_id == intent.recovery_id => recovery,
+        Some(recovery) => {
+            return Some(lc_resume_protocol_error(
+                LcFreshClaimOutcome::STALE_SUPERSEDED,
+                format!(
+                    "lc resume recovery {} is superseded; the durable recovery is {}",
+                    intent.recovery_id, recovery.recovery_id
+                ),
+                serde_json::json!({ "recovery_id": recovery.recovery_id }),
+            ));
+        }
+        None => {
+            return Some(lc_resume_protocol_error(
+                LcFreshClaimOutcome::STALE_NO_RECOVERY,
+                "no lc resume recovery is waiting for this session".to_string(),
+                serde_json::Value::Null,
+            ));
+        }
+    };
+    // ③ 同 ID 已受理先 Replay：零 spawn、不重核配置（原受理已核）、不等待
+    //    engine mutex（durable 纯读）；resolved 同 ID 也只 Replay。
+    if let Some(operation) = recovery
+        .fresh_operations
+        .iter()
+        .find(|operation| operation.operation_id == intent.operation_id)
+    {
+        return Some(WsOutMessage::LcResumeRecoveryOperationResult {
+            recovery_id: recovery.recovery_id.clone(),
+            operation_id: operation.operation_id.clone(),
+            delivery: LcResumeRecoveryDelivery::Replayed,
+            operation_state: operation.state,
+            fresh_node_id: operation.fresh_node_id.clone(),
+            reason_code: operation.reason_code.clone(),
+        });
+    }
+    // ④ 新 ID 才核状态机：reserved/running → busy；resolved → 不造第二会话。
+    match recovery.state {
+        LcResumeRecoveryState::Waiting => {}
+        LcResumeRecoveryState::FreshReserved | LcResumeRecoveryState::FreshRunning => {
+            return Some(lc_resume_fresh_busy_error(recovery));
+        }
+        LcResumeRecoveryState::Resolved => {
+            return Some(lc_resume_protocol_error(
+                LcFreshClaimOutcome::STALE_RESOLVED,
+                format!(
+                    "lc resume recovery {} is resolved; a new fresh operation would create a second session",
+                    recovery.recovery_id
+                ),
+                serde_json::json!({ "recovery_id": recovery.recovery_id }),
+            ));
+        }
+    }
+    // ⑤ 无活 provider drive（run registry 计数，锁无关）。
+    if run_context
+        .workspace_runs
+        .provider_drive_depth(&run_context.session_id)
+        > 0
+    {
+        return Some(lc_resume_fresh_busy_error(recovery));
+    }
+    // ⑥ 冻结配置：author/reviewer/permission 与 durable session record 相等。
+    if provider_config.author != record.author_provider
+        || provider_config.reviewer != record.reviewer_provider
+        || provider_config.permission_modes != record.permission_modes
+    {
+        return Some(lc_resume_protocol_error(
+            LC_RESUME_RECOVERY_CONFIGURATION_CHANGED_CODE,
+            "the submitted provider configuration differs from the frozen configuration of the waiting recovery"
+                .to_string(),
+            serde_json::json!({
+                "frozen_author": record.author_provider,
+                "frozen_reviewer": record.reviewer_provider,
+            }),
+        ));
+    }
+    // ⑦ run_context 冻结 artifact 引用与当前 durable 产物一致。
+    match lc_recovery_source_stale(&store, &run_context.session_id, recovery) {
+        Ok(false) => None,
+        Ok(true) => Some(lc_resume_protocol_error(
+            LcFreshClaimOutcome::STALE_SUPERSEDED,
+            "the source artifacts referenced by the waiting recovery changed since freeze"
+                .to_string(),
+            serde_json::json!({ "recovery_id": recovery.recovery_id }),
+        )),
+        Err(error) => Some(lc_resume_store_unavailable(&run_context.session_id, error)),
+    }
+}
+
+fn lc_resume_fresh_busy_error(recovery: &LcResumeRecoveryRecord) -> WsOutMessage {
+    lc_resume_protocol_error(
+        LC_RESUME_RECOVERY_BUSY_CODE,
+        format!(
+            "lc resume recovery {} already holds an accepted fresh operation; a new operation id is rejected and running/unknown operations are never auto-resent",
+            recovery.recovery_id
+        ),
+        serde_json::json!({ "active_operation_id": recovery.operation_id }),
+    )
+}
+
+/// ⑦（设计 §5.1）：冻结 source 引用 vs 当前 durable artifact 版本。按
+/// `version` 定位；`hash` 严格比对（未冻结 hash/version 的引用跳过——不
+/// 倒算）。冻结版本消失或内容指纹不等 → stale。
+fn lc_recovery_source_stale(
+    store: &LifecycleStore,
+    session_id: &str,
+    recovery: &LcResumeRecoveryRecord,
+) -> Result<bool, crate::product::json_store::ProductStoreError> {
+    let artifact_refs = lc_recovery_business_artifact_refs(recovery);
+    if artifact_refs.is_empty() {
+        return Ok(false);
+    }
+    let versions = store.list_artifact_versions(session_id)?;
+    for artifact_ref in artifact_refs {
+        let Some(version) = artifact_ref.version else {
+            continue;
+        };
+        let Some(current) = versions.iter().find(|candidate| candidate.version == version) else {
+            return Ok(true);
+        };
+        if let Some(frozen_hash) = artifact_ref.hash.as_deref()
+            && lc_artifact_payload_digest(&current.payload).as_deref() != Some(frozen_hash)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// run_context 各 tag 的公共 business artifact 引用（A1a 模型纪律：全部
+/// tag 均携带 `business.artifact_refs`）。
+fn lc_recovery_business_artifact_refs(
+    recovery: &LcResumeRecoveryRecord,
+) -> &[LcRecoveryArtifactRef] {
+    match &recovery.run_context {
+        LcRecoveryRunContext::Author { business, .. }
+        | LcRecoveryRunContext::AuthorChoiceFollowup { business, .. }
+        | LcRecoveryRunContext::AuthorFeedback { business, .. }
+        | LcRecoveryRunContext::ReviewerRevision { business, .. }
+        | LcRecoveryRunContext::LegacyOutlineAuthor { business, .. }
+        | LcRecoveryRunContext::LegacyOutlineRevision { business, .. }
+        | LcRecoveryRunContext::LegacyOutlineRebuild { business, .. }
+        | LcRecoveryRunContext::LegacyDraft { business, .. }
+        | LcRecoveryRunContext::LegacyBatch { business, .. }
+        | LcRecoveryRunContext::LegacyPlanRevision { business, .. }
+        | LcRecoveryRunContext::ScAuthor { business, .. }
+        | LcRecoveryRunContext::ScManualRevision { business, .. } => business.artifact_refs.as_slice(),
     }
 }
 
@@ -693,6 +1701,16 @@ pub(crate) async fn handle_workspace_socket(
                         })),
                     };
                     let _ = send_json_outbound(&outbound_tx, &err).await;
+                    continue;
+                }
+
+                // B1b（Task 4.2，设计 §5.1）：LC 恢复入站门——auth/lease/scope
+                //（arbitrate）之后、stage 校验/engine mutex 之前。同 ID 已受理
+                // 立即 typed Replay（run 持锁期间不等待 engine mutex，store 层
+                // 纯读）；RequestRevision 活动等待期拒收；新 ID 前置核验通过才
+                // 放行 stage+mutex+CAS claim 路径。
+                if let Some(frame) = lc_resume_recovery_inbound_gate(&run_context, in_msg) {
+                    let _ = send_json_outbound(&outbound_tx, &frame).await;
                     continue;
                 }
 

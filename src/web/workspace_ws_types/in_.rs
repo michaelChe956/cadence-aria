@@ -26,6 +26,12 @@ pub enum WsInMessage {
     StartGeneration {
         provider_config: ProviderConfigSnapshot,
         reviewer_enabled: bool,
+        /// B1b（Task 4.2，设计 §5.1）：显式 fresh 恢复意图。缺省 `None`
+        /// 保持普通出生/重跑语义（既有客户端 wire 兼容）；携带时经
+        /// socket 的 LC 恢复入站门（同 ID typed Replay / 前置拒收）与
+        /// decisions 的 `claim_lc_fresh` CAS 受理。
+        #[serde(default)]
+        resume_recovery: Option<LcResumeRecoveryIntent>,
     },
     RetryInterruptedRun {
         failed_node_id: String,
@@ -116,4 +122,23 @@ pub enum WorkItemPlanCompileRecoveryActionDto {
     Continue,
     AbortAndRollback,
     HumanTriage,
+}
+
+/// B1b（Task 4.2，接口字典）：`StartGeneration.resume_recovery` 的显式
+/// fresh 意图——`recovery_id` 为 durable 恢复权威身份，`operation_id` 为
+/// 客户端生成的幂等/审计键（空/空白在 claim 前被 typed
+/// `INVALID_COMMAND_ID` 拒收）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LcResumeRecoveryIntent {
+    pub recovery_id: String,
+    pub intent: LcResumeRecoveryIntentKind,
+    pub operation_id: String,
+}
+
+/// 恢复意图种类：当前仅 `Fresh`（显式新 native 会话，不复活旧 ID）；
+/// 未知值 serde 拒收，不猜测回落。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LcResumeRecoveryIntentKind {
+    Fresh,
 }

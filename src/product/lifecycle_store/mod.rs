@@ -27,6 +27,7 @@ pub(crate) mod workspace_session_read_spy {
 pub use inputs::*;
 pub use spec::{ConfirmAggregateGateError, ConfirmGateViolation};
 pub(crate) use utils::*;
+pub use workspace::LcFreshClaimOutcome;
 pub use workspace_policy_route::PolicyRoutePersist;
 pub use workspace_single_candidate::{
     ClaimScRecoveryOutcome, CompileReservationError, single_candidate_approval_attempt_id,

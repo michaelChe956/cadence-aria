@@ -64,6 +64,7 @@ async fn single_candidate_ir_validation_failure_triggers_one_teaching_reredrive_
         WsInMessage::StartGeneration {
             provider_config: provider_config(),
             reviewer_enabled: false,
+            resume_recovery: None,
         },
     )
     .await;
@@ -145,6 +146,7 @@ async fn single_candidate_ir_validation_reredrive_failure_is_terminal_with_both_
         WsInMessage::StartGeneration {
             provider_config: provider_config(),
             reviewer_enabled: false,
+            resume_recovery: None,
         },
     )
     .await;
@@ -201,6 +203,7 @@ async fn single_candidate_ir_warning_findings_do_not_trigger_reredrive() {
         WsInMessage::StartGeneration {
             provider_config: provider_config(),
             reviewer_enabled: false,
+            resume_recovery: None,
         },
     )
     .await;

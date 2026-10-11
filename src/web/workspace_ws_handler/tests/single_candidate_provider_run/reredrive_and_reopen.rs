@@ -130,6 +130,7 @@ async fn single_candidate_compile_missing_section_reredrive_recovers_and_continu
         WsInMessage::StartGeneration {
             provider_config: provider_config(),
             reviewer_enabled: false,
+            resume_recovery: None,
         },
     )
     .await;
@@ -210,6 +211,7 @@ async fn single_candidate_compile_missing_section_reredrive_failure_is_terminal_
         WsInMessage::StartGeneration {
             provider_config: provider_config(),
             reviewer_enabled: false,
+            resume_recovery: None,
         },
     )
     .await;
@@ -260,6 +262,7 @@ async fn single_candidate_unrepairable_unknown_key_failure_gets_one_reredrive_th
         WsInMessage::StartGeneration {
             provider_config: provider_config(),
             reviewer_enabled: false,
+            resume_recovery: None,
         },
     )
     .await;
@@ -307,6 +310,7 @@ async fn single_candidate_unknown_key_line_is_removed_deterministically_without_
         WsInMessage::StartGeneration {
             provider_config: provider_config(),
             reviewer_enabled: false,
+            resume_recovery: None,
         },
     )
     .await;
@@ -378,6 +382,7 @@ async fn single_candidate_failed_reopen_claims_next_ledger_key_and_starts_provid
         WsInMessage::StartGeneration {
             provider_config: provider_config(),
             reviewer_enabled: false,
+            resume_recovery: None,
         },
     )
     .await;
@@ -402,6 +407,7 @@ async fn single_candidate_failed_reopen_claims_next_ledger_key_and_starts_provid
         WsInMessage::StartGeneration {
             provider_config: provider_config(),
             reviewer_enabled: false,
+            resume_recovery: None,
         },
     )
     .await;
@@ -447,6 +453,7 @@ async fn single_candidate_completed_reopen_is_rejected_without_starting_or_runni
         WsInMessage::StartGeneration {
             provider_config: provider_config(),
             reviewer_enabled: false,
+            resume_recovery: None,
         },
     )
     .await;
@@ -615,6 +622,7 @@ async fn single_candidate_late_run_yields_silently_when_start_key_already_claime
         WsInMessage::StartGeneration {
             provider_config: provider_config(),
             reviewer_enabled: false,
+            resume_recovery: None,
         },
     )
     .await;
@@ -751,6 +759,7 @@ async fn single_candidate_terminal_failure_releases_manager_run_registration() {
         WsInMessage::StartGeneration {
             provider_config: provider_config(),
             reviewer_enabled: false,
+            resume_recovery: None,
         },
     )
     .await;

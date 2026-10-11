@@ -757,6 +757,7 @@ async fn workspace_ws_plan_subdrive_choice_pending_projects_into_session_state()
                     cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
             reviewer_enabled: false,
+            resume_recovery: None,
         },
     )
     .await;

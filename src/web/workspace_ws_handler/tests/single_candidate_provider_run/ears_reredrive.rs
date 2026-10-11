@@ -75,6 +75,7 @@ async fn single_candidate_ears_spacing_rescue_skips_reredrive_and_leaves_audit_e
         WsInMessage::StartGeneration {
             provider_config: provider_config(),
             reviewer_enabled: false,
+            resume_recovery: None,
         },
     )
     .await;
@@ -129,6 +130,7 @@ async fn single_candidate_invalid_ears_triggers_exactly_one_teaching_reredrive_a
         WsInMessage::StartGeneration {
             provider_config: provider_config(),
             reviewer_enabled: false,
+            resume_recovery: None,
         },
     )
     .await;
@@ -180,6 +182,7 @@ async fn single_candidate_invalid_work_item_id_triggers_exactly_one_teaching_rer
         WsInMessage::StartGeneration {
             provider_config: provider_config(),
             reviewer_enabled: false,
+            resume_recovery: None,
         },
     )
     .await;
@@ -225,6 +228,7 @@ async fn single_candidate_two_parse_class_failures_share_the_single_reredrive_sl
         WsInMessage::StartGeneration {
             provider_config: provider_config(),
             reviewer_enabled: false,
+            resume_recovery: None,
         },
     )
     .await;
@@ -278,6 +282,7 @@ async fn single_candidate_lowering_failure_never_consumes_the_reredrive_slot() {
         WsInMessage::StartGeneration {
             provider_config: provider_config(),
             reviewer_enabled: false,
+            resume_recovery: None,
         },
     )
     .await;

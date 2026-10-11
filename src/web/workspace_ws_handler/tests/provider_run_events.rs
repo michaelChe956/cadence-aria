@@ -834,6 +834,7 @@ async fn single_candidate_revise_route_does_not_misfire_a_second_followup_review
         WsInMessage::StartGeneration {
             provider_config: review_enabled_provider_config(),
             reviewer_enabled: true,
+            resume_recovery: None,
         },
     )
     .await;
