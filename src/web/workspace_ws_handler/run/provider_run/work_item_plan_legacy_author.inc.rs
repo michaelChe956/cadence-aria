@@ -54,17 +54,7 @@
                 };
 
                 let author_provider = engine.session().author_provider.clone();
-                let plan_launch = match resolve_plan_author_launch(
-                    &engine,
-                    repository
-                        .logical_repository_id
-                        .as_ref()
-                        .map(|id| id.0.to_string()),
-                    repository
-                        .primary_checkout_id
-                        .as_ref()
-                        .map(|id| id.0.to_string()),
-                ) {
+                let plan_launch = match resolve_plan_author_launch(&engine) {
                     Ok(launch) => launch,
                     Err(error) => {
                         engine.mark_active_run_finished(&run_label);
@@ -342,17 +332,7 @@
                                 .unwrap_or_else(|| "timeline_node_unknown".to_string());
                             let retry_error = work_item_plan_retry_error(&findings);
                             let author_provider = engine.session().author_provider.clone();
-                            let plan_launch = match resolve_plan_author_launch(
-                                &engine,
-                                repository
-                                    .logical_repository_id
-                                    .as_ref()
-                                    .map(|id| id.0.to_string()),
-                                repository
-                                    .primary_checkout_id
-                                    .as_ref()
-                                    .map(|id| id.0.to_string()),
-                            ) {
+                            let plan_launch = match resolve_plan_author_launch(&engine) {
                                 Ok(launch) => launch,
                                 Err(error) => {
                                     engine.mark_active_run_finished(&run_label);

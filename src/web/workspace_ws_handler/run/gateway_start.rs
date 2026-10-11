@@ -4,14 +4,15 @@
 //! gateway `validate` + `start_streaming` 启动并留 audit;传统单仓/未注入 gateway
 //! 时保持原 `provider.start` 路径(Legacy 零变化)。
 //!
-//! Task 2.8（REQ-PLN-01/07，planning snapshot 贯穿）——原 B 阶段 deferred 的
-//! 「run cwd=成员 checkout」已裁决纠正:
-//! - provider spawn cwd 恒为 gateway 冻结的 canonical 聚合根（manifest
-//!   `provider_context_root`，双工厂 root assertion 保证与登记/聚合投影一致）；
-//! - target 独立传递:resolved 逻辑身份(logical_repository_id + checkout_id)成对
-//!   时用 `PolicyTarget::checkout`(带真实身份的成员 checkout 锚定,享受 git-dir
-//!   identity 防护);否则用 `PolicyTarget::aggregate_root(target_worktree)`。
-//!   禁止以 target worktree 覆盖 root cwd,也不得回退成员 cwd。
+//! Task 2.8(REQ-PLN-01/07,planning snapshot 贯穿)——provider spawn cwd 恒为
+//! gateway 冻结的 canonical 聚合根;B2b1(Task 5.2,设计 §3/REQ-PLN-08)把
+//! target 同步收敛到 E 分离 resolver 的 native anchor:
+//! - envelope target 恒 `PolicyTarget::aggregate_root(canonical root)`——
+//!   native anchor 不再从 business working_dir/成员 checkout 推导
+//!   (`resolve_plan_author_launch` 消费 `workspace_native_launch_anchor_for_session`
+//!   做 fail-closed 共同守卫;成员业务身份/材料路径不入 envelope 授权面);
+//! - cwd 与 target 同根(root),business 材料仍由 `workspace_repository_for_session`
+//!   原语义解析(prompt/compile 消费面零变化)。
 //!
 //! T3(裁决 A):planning author 的 `ValidatedSessionLaunchPolicy` 前移到 prompt 构建
 //! 之前 resolve(`resolve_plan_author_launch`),使 work_item_split_engine 的 outline/
@@ -23,6 +24,11 @@
 //! 真实 dialect 的 provider 在此显式失败,不再硬编码 ClaudeCode 静默替换)。
 //! `cap_managed_snapshot` capability ref 约定不变;Codex 的 REQ-ENV-05 路由阻断
 //! 仍由 gateway 路由级硬门施加。
+//!
+//! B2b1(Task 5.2,设计 §4.2 prepared-map-before-start):Logical 分支携带 split
+//! run handle 时,prepared full 指纹在 session spawn 前按 (role,provider,
+//! role_run_seq) 持久化(I/O 失败零 start);成功收口把 map 转 Active 并绑定
+//! 真实 native id,同 run 对账 FreshRunning recovery 的 Resolved 终态。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -48,39 +54,32 @@ use crate::product::workspace_engine::{ProviderRunKind, WorkspaceEngine};
 use crate::web::workspace_ws_handler::ProviderRunContext;
 
 /// 逻辑会话经 gateway 启动所需的已解析 launch 信息。
-/// `Clone`：F2-B SC compile 教学重驱需在同一 run 内复用已 resolve 的 launch
-/// （避免二次 gateway validate）；字段均为不可变快照，克隆无副作用。
+/// `Clone`:F2-B SC compile 教学重驱需在同一 run 内复用已 resolve 的 launch
+/// (避免二次 gateway validate);字段均为不可变快照,克隆无副作用。
 #[derive(Clone)]
 pub(crate) struct LogicalPlanLaunch {
     pub gateway: Arc<LogicalCodebaseProviderGateway>,
     pub project_id: String,
-    /// provider spawn cwd：gateway 冻结的 canonical 聚合根（Task 2.8，
-    /// REQ-PLN-07 唯一来源；禁止以成员 checkout/target worktree 覆盖）。
+    /// provider spawn cwd:gateway 冻结的 canonical 聚合根(Task 2.8,
+    /// REQ-PLN-07 唯一来源;禁止以成员 checkout/target worktree 覆盖)。
+    /// B2b1(Task 5.2,REQ-PLN-08):该 root 同时是 envelope target 的唯一
+    /// 来源——native anchor 不从 business working_dir/成员身份推导。
     pub working_dir: PathBuf,
-    /// target worktree（成员 checkout，`session.repository_path` 注入）。
-    /// cwd 与 target 显式分离；身份不可得时 target 锚仍取该路径。
-    pub target_worktree: PathBuf,
-    /// resolved 逻辑仓库身份(可选)。两者都有时用 checkout target,否则 aggregate_root。
-    pub logical_repository_id: Option<String>,
-    pub checkout_id: Option<String>,
     /// session 配置的 author provider(C-2:launch request provider ref 的唯一
     /// 来源,勿从 input.provider_type 或 UI 默认推导)。
     pub author_provider: ProviderName,
 }
 
 impl LogicalPlanLaunch {
-    /// 组装 planning 只读 `SessionLaunchRequest`（cwd=root、target=成员锚定，
-    /// 见文件头 Task 2.8 说明）;provider ref 由 `author_provider` 经集中映射派生,
-    /// 不支持的 provider 显式返回 `UnsupportedCapability` 而非静默回退 Claude(C-2)。
+    /// 组装 planning 只读 `SessionLaunchRequest`(cwd/target 同为 canonical
+    /// 聚合根,见文件头 B2b1 说明);provider ref 由 `author_provider` 经集中
+    /// 映射派生,不支持的 provider 显式返回 `UnsupportedCapability` 而非
+    /// 静默回退 Claude(C-2)。
     pub(crate) fn planning_request(&self) -> Result<SessionLaunchRequest, ProviderGatewayError> {
-        let target = match (&self.logical_repository_id, &self.checkout_id) {
-            (Some(logical_repository_id), Some(checkout_id)) => PolicyTarget::checkout(
-                logical_repository_id.clone(),
-                checkout_id.clone(),
-                self.target_worktree.clone(),
-            ),
-            _ => PolicyTarget::aggregate_root(self.target_worktree.clone()),
-        };
+        // B2b1(REQ-PLN-08):LC 规划 native anchor 恒聚合根视图——target 不绑
+        // 成员 logical/checkout 身份(checkout_id/logical_repository_id 为空),
+        // 成员业务身份/材料路径不作 envelope 授权面(design §3.2)。
+        let target = PolicyTarget::aggregate_root(self.working_dir.clone());
 
         Ok(SessionLaunchRequest {
             project_id: self.project_id.clone(),
@@ -90,8 +89,8 @@ impl LogicalPlanLaunch {
             )?,
             action: SessionPolicyAction::PlanningReadOnly,
             target,
-            // Task 2.8（REQ-PLN-01/07）：cwd 恒为 canonical root（≠成员
-            // target），由结构体字面量显式提供——`SessionLaunchRequest::planning`
+            // Task 2.8(REQ-PLN-01/07):cwd 恒为 canonical root(≠成员
+            // target),由结构体字面量显式提供——`SessionLaunchRequest::planning`
             // 的 cwd==target 默认仅适用单仓形态。
             working_directory: self.working_dir.clone(),
             readable_roots: vec![self.working_dir.clone()],
@@ -135,65 +134,64 @@ impl PlanAuthorLaunch {
 }
 
 /// 组装逻辑会话 launch(gateway 已注入时);非逻辑会话/未注入 gateway 时 `None`。
-/// Task 2.8：cwd 取 gateway 冻结的 canonical root（`authority_root()`，与
-/// manifest/登记投影 canonical 一致由双工厂 assertion 保证），成员 checkout
-/// （`logical_planning_launch` 的 repository_path）只作 target 锚。
-pub(crate) fn logical_plan_launch_for(
-    engine: &WorkspaceEngine,
-    logical_repository_id: Option<String>,
-    checkout_id: Option<String>,
-) -> Option<LogicalPlanLaunch> {
+/// Task 2.8/REQ-PLN-07:cwd 唯一来源是 gateway 冻结的 canonical root
+/// (`authority_root()`,双工厂 root assertion 与登记/聚合投影一致)——不读
+/// `session.repository_path`(成员 checkout 是 business 材料锚,不迁移入
+/// native launch)。
+pub(crate) fn logical_plan_launch_for(engine: &WorkspaceEngine) -> Option<LogicalPlanLaunch> {
     let gateway = engine.logical_provider_gateway()?;
-    let (project_id, target_worktree) = engine.logical_planning_launch()?;
+    let (project_id, _business_target_worktree) = engine.logical_planning_launch()?;
     Some(LogicalPlanLaunch {
-        // Task 2.8：cwd 唯一来源是 gateway 冻结的 canonical root——不读
-        // session.repository_path（成员 checkout 只作 target），杜绝成员 cwd
-        // fallback（REQ-PLN-07）。
+        // Task 2.8:cwd 唯一来源是 gateway 冻结的 canonical root——不读
+        // session.repository_path(成员 checkout 只作 business 材料),杜绝
+        // 成员 cwd fallback(REQ-PLN-07)。
         working_dir: gateway.authority_root().to_path_buf(),
         gateway,
         project_id,
-        target_worktree,
-        logical_repository_id,
-        checkout_id,
         // C-2:provider 身份唯一来源于 session 配置。
         author_provider: engine.session().author_provider.clone(),
     })
 }
 
-/// r27 问题2 根修:SC plan 会话的成员锚(logical/checkout id 对)。
-/// fresh 生成 turn(single_candidate.rs)与 SC 门修订 turn
-/// (provider_run.rs HumanGateScManualRevision 臂)必须**同源**取锚——
-/// 修订臂此前传 (None,None),`planning_request` 退 aggregate_root 锚,
-/// envelope target 三元组与 fresh 轮漂移,9a 显式 resume 审计门
-/// (`resume_with_lc_start_record` 五字段比对)按投影漂移恒拒
-/// (r26 现场:"resume audit drifted or legacy record lacks lc
-/// projection")。两调用点统一经本 helper 从同一 repository 解析取锚。
-pub(crate) fn plan_member_anchor(
-    repository: &crate::product::models::RepositoryRecord,
-) -> (Option<String>, Option<String>) {
-    (
-        repository
-            .logical_repository_id
-            .as_ref()
-            .map(|id| id.0.to_string()),
-        repository
-            .primary_checkout_id
-            .as_ref()
-            .map(|id| id.0.to_string()),
-    )
+/// B2b1(Task 5.2,设计 §3/REQ-PLN-08):plan native launch 消费 E 分离
+/// resolver 的 native_launch_anchor——共同守卫(selection 失效/focus 越界/
+/// manifest/selection 不成对)fail-closed,native launch 不得绕过。Logical
+/// 路由下 anchor 即聚合根视图,其根与 gateway 冻结的 canonical authority
+/// root 同源(双工厂 root assertion);envelope target 由 gateway 权威派生,
+/// 不在此二次推导。
+fn ensure_plan_native_anchor_resolved(engine: &WorkspaceEngine) -> Result<(), String> {
+    use crate::product::workspace_repository::workspace_native_launch_anchor_for_session;
+
+    let Some(store) = engine.lifecycle_store.as_ref() else {
+        return Err(format!(
+            "logical plan launch requires a persistent lifecycle store (session {})",
+            engine.session.session_id
+        ));
+    };
+    let record = store
+        .get_workspace_session(&engine.session.session_id)
+        .map_err(|error| error.to_string())?;
+    let app_paths = store.app_paths();
+    workspace_native_launch_anchor_for_session(&app_paths, store, &record)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 /// 在 prompt 构建之前 resolve 出 planning author 启动:非逻辑会话 → `Legacy`;
-/// 逻辑会话 → 经 gateway `validate` 冻结 policy 并返回 `Logical`。
-/// gateway 校验失败映射为 `ProviderAdapterError`,与启动路径的错误形态一致。
+/// 逻辑会话 → 先消费 E native anchor(fail-closed),再经 gateway `validate`
+/// 冻结 policy 并返回 `Logical`。gateway 校验失败映射为
+/// `ProviderAdapterError`,与启动路径的错误形态一致。
 pub(crate) fn resolve_plan_author_launch(
     engine: &WorkspaceEngine,
-    logical_repository_id: Option<String>,
-    checkout_id: Option<String>,
 ) -> Result<PlanAuthorLaunch, ProviderAdapterError> {
-    let Some(launch) = logical_plan_launch_for(engine, logical_repository_id, checkout_id) else {
+    let Some(launch) = logical_plan_launch_for(engine) else {
         return Ok(PlanAuthorLaunch::Legacy);
     };
+    if let Err(message) = ensure_plan_native_anchor_resolved(engine) {
+        return Err(ProviderAdapterError::provider_unavailable(format!(
+            "logical_plan_native_anchor_unavailable: {message}"
+        )));
+    }
     let validated = launch
         .validate()
         .map_err(|error| map_gateway_error_to_adapter(&error))?;
@@ -206,9 +204,16 @@ pub(crate) fn resolve_plan_author_launch(
 /// Task 1b 段②:WS streaming Plan/split 的 run 身份绑定——caller 先 begin,
 /// `start_work_item_plan_author` 消费它做 prepare 前 sink 绑定,成功 complete、
 /// 失败 fail;retry 每次新 handle(计划冻结「WS Plan/split run identity」)。
+///
+/// B2b1(Task 5.2):除 run-bound 审计身份外,携带 `(project,issue,session,
+/// provider)` 定位事实,供 prepared full 指纹 map 与 FreshRunning recovery
+/// 的同 run 绑定/对账(§4.2)在 `start_work_item_plan_author`/收口面使用。
 pub(crate) struct PlanSplitRunContext {
     pub handle: crate::product::work_item_split_engine::parse::WorkItemSplitProviderRunHandle,
     lifecycle: crate::product::lifecycle_store::LifecycleStore,
+    project_id: String,
+    issue_id: String,
+    provider: crate::product::models::ProviderName,
 }
 
 /// begin handle:分配 run-bound 身份(sink 绑定与审计文件 key 同源)。
@@ -225,10 +230,238 @@ pub(crate) fn begin_plan_split_run(
     Ok(PlanSplitRunContext {
         handle,
         lifecycle: lifecycle.clone(),
+        project_id: project_id.to_string(),
+        issue_id: issue_id.to_string(),
+        provider: provider.clone(),
     })
 }
 
+/// B2b1(Task 5.2,设计 §4.1/§4.2):LC plan run 的 durable launch 纪元
+/// 事实——全部落 `WorkspaceSessionRecord`(排它锁内 read-modify-write,
+/// 与 lifecycle_store 写方同一文件锁约定)。
 impl PlanSplitRunContext {
+    /// 会话 record 路径(与 `LifecycleStore` 派生同源:issue 生命周期根下
+    /// `workspace-sessions/{session_id}.json`)。
+    fn workspace_session_path(&self) -> std::path::PathBuf {
+        self.lifecycle
+            .workspace_sessions_root(&self.project_id, &self.issue_id)
+            .join(format!("{}.json", self.handle.workspace_session_id))
+    }
+
+    /// 锁内 read-modify-write;record 身份不符 fail-closed。
+    fn with_session_record_mut(
+        &self,
+        mutate: impl FnOnce(
+            &mut crate::product::models::WorkspaceSessionRecord,
+        ) -> Result<(), crate::product::json_store::ProductStoreError>,
+    ) -> Result<(), crate::product::json_store::ProductStoreError> {
+        let path = self.workspace_session_path();
+        let record_path = path.clone();
+        crate::product::coding_attempt_store::locking::with_exclusive_lock(&path, move || {
+            let mut record: crate::product::models::WorkspaceSessionRecord =
+                crate::product::json_store::read_json(&record_path)?;
+            if record.id != self.handle.workspace_session_id {
+                return Err(crate::product::json_store::ProductStoreError::IdentityMismatch {
+                    kind: "workspace_session",
+                    id: self.handle.workspace_session_id.clone(),
+                });
+            }
+            mutate(&mut record)?;
+            record.updated_at = chrono::Utc::now().to_rfc3339();
+            crate::product::json_store::write_json(&record_path, &record)
+        })
+    }
+
+    /// §4.2.1 prepared-map-before-start:同源 validated policy 冻结 digest 在
+    /// session spawn 前按 `(role=Author, provider, role_run_seq)` 持久化
+    /// (basis=FullLcProjectionV2;native/node 在 Prepared 阶段留空,不伪造);
+    /// 同锁内绑定 FreshRunning recovery 的 `fresh_role_run_seq`(§4.1 fresh
+    /// run/node/native 绑定;仅 FreshRunning 且未绑定时推进,不覆写既成事实)。
+    /// 既有同 (role,provider,seq) 记录原样保留(幂等,不降级不复活)。
+    pub(crate) fn persist_prepared_launch_identity(
+        &self,
+        fingerprint_digest: &str,
+    ) -> Result<(), crate::product::json_store::ProductStoreError> {
+        use crate::product::models::{
+            LogicalLaunchBasis, LogicalLaunchFingerprintRecord,
+            LogicalLaunchFingerprintState, LcResumeRecoveryState, ProviderConversationRole,
+        };
+
+        let role = ProviderConversationRole::Author;
+        let provider = self.provider.clone();
+        let role_run_seq = self.handle.role_run_seq;
+        let now = chrono::Utc::now().to_rfc3339();
+        self.with_session_record_mut(move |record| {
+            let exists = record.logical_launch_fingerprints.iter().any(|entry| {
+                entry.role == role
+                    && entry.provider == provider
+                    && entry.role_run_seq == role_run_seq
+            });
+            if !exists {
+                record.logical_launch_fingerprints.push(LogicalLaunchFingerprintRecord {
+                    schema_version: 1,
+                    basis: LogicalLaunchBasis::FullLcProjectionV2,
+                    role: role.clone(),
+                    provider: provider.clone(),
+                    role_run_seq,
+                    // Prepared 阶段未绑定节点/native——不伪造虚身份;成功收口
+                    // (`finalize_launch_after_success`)从真实 Completed 落的
+                    // conversation ref 补 Active 绑定。
+                    node_id: String::new(),
+                    native_session_id: None,
+                    fingerprint_digest: fingerprint_digest.to_string(),
+                    // cwd/readable/target 等 planning 访问维度均在冻结指纹
+                    // 内(B0a2 `from_envelope` 五参域);full candidate 消费面
+                    // 接入后由其 digest 覆写。
+                    planning_access_fingerprint: fingerprint_digest.to_string(),
+                    state: LogicalLaunchFingerprintState::Prepared,
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                });
+            }
+            if let Some(recovery) = record.lc_resume_recovery.as_mut()
+                && recovery.state == LcResumeRecoveryState::FreshRunning
+                && recovery.fresh_role_run_seq.is_none()
+            {
+                recovery.fresh_role_run_seq = Some(role_run_seq);
+                recovery.updated_at = now.clone();
+            }
+            Ok(())
+        })
+    }
+
+    /// §4.2.2/§4.3 成功收口:Prepared→Active(native id/节点从真实 Completed
+    /// 落的 conversation ref 绑定;Superseded/Active 不覆写不复活),并把
+    /// FreshRunning recovery(同 `fresh_role_run_seq`)对账为 Resolved——
+    /// `fresh_native_session_id`/`fresh_node_id`(缺失回填)与 operation
+    /// Completed 同锁落盘。失败只 `warn`(纪元失败方向=等待,非 fail-open)。
+    pub(crate) fn finalize_launch_after_success(&self) {
+        use crate::product::models::{
+            LogicalLaunchFingerprintState, LcFreshOperationState, LcResumeRecoveryState,
+            ProviderConversationRole,
+        };
+
+        let role = ProviderConversationRole::Author;
+        let provider = self.provider.clone();
+        let role_run_seq = self.handle.role_run_seq;
+        let now = chrono::Utc::now().to_rfc3339();
+        let result = self.with_session_record_mut(move |record| {
+            let conversation = record.provider_conversations.iter().find(|conversation| {
+                conversation.role == role && conversation.provider == provider
+            });
+            let native_session_id = conversation
+                .and_then(|conversation| {
+                    let id = conversation.provider_session_id.trim();
+                    (!id.is_empty()).then(|| id.to_string())
+                });
+            let last_node_id = conversation
+                .and_then(|conversation| conversation.last_node_id.as_deref())
+                .filter(|node| !node.is_empty())
+                .map(str::to_string);
+            for entry in record.logical_launch_fingerprints.iter_mut() {
+                if entry.role == role
+                    && entry.provider == provider
+                    && entry.role_run_seq == role_run_seq
+                    && entry.state == LogicalLaunchFingerprintState::Prepared
+                {
+                    entry.state = LogicalLaunchFingerprintState::Active;
+                    if let Some(native) = native_session_id.as_deref() {
+                        entry.native_session_id = Some(native.to_string());
+                    }
+                    if let Some(node) = last_node_id.as_deref() {
+                        entry.node_id = node.to_string();
+                    }
+                    entry.updated_at = now.clone();
+                }
+            }
+            let mut recovery = record
+                .lc_resume_recovery
+                .as_mut()
+                .filter(|recovery| {
+                    recovery.state == LcResumeRecoveryState::FreshRunning
+                        && recovery.fresh_role_run_seq == Some(role_run_seq)
+                });
+            if let Some(recovery) = recovery.as_deref_mut() {
+                recovery.state = LcResumeRecoveryState::Resolved;
+                if recovery.fresh_native_session_id.is_none() {
+                    recovery.fresh_native_session_id = native_session_id.clone();
+                }
+                if recovery.fresh_node_id.is_none() {
+                    recovery.fresh_node_id = last_node_id.clone();
+                }
+                let operation_id = recovery.operation_id.clone();
+                if let Some(operation_id) = operation_id.as_deref() {
+                    for operation in recovery.fresh_operations.iter_mut() {
+                        if operation.operation_id == operation_id {
+                            operation.state = LcFreshOperationState::Completed;
+                            operation.role_run_seq = Some(role_run_seq);
+                            if operation.fresh_node_id.is_none() {
+                                operation.fresh_node_id = last_node_id.clone();
+                            }
+                            operation.updated_at = now.clone();
+                        }
+                    }
+                }
+                recovery.updated_at = now.clone();
+            }
+            Ok(())
+        });
+        if let Err(error) = result {
+            tracing::warn!(
+                %error,
+                session_id = %self.handle.workspace_session_id,
+                role_run_seq = self.handle.role_run_seq,
+                "finalize logical launch map/recovery after success failed (fail-safe: waiting)"
+            );
+        }
+    }
+
+    /// §4.3「running 失败」行收口:FreshRunning recovery(同
+    /// `fresh_role_run_seq`)回 Waiting,operation 落 Failed(结果保留,同 ID
+    /// 只 Replay,下一次显式点击用新 ID);fresh 绑定事实保留作对账证据。
+    /// map 保持 Prepared(native 未绑定,resume 自然进纪元严格门等待)。
+    /// 失败只 `warn`(等待方向 fail-safe)。
+    pub(crate) fn reconcile_launch_failure(&self, reason: &str) {
+        use crate::product::models::{
+            LcFreshOperationState, LcResumeRecoveryState,
+        };
+
+        let role_run_seq = self.handle.role_run_seq;
+        let now = chrono::Utc::now().to_rfc3339();
+        let reason_code = format!("lc_resume_fresh_run_failed: {reason}");
+        let result = self.with_session_record_mut(move |record| {
+            let Some(recovery) = record.lc_resume_recovery.as_mut() else {
+                return Ok(());
+            };
+            if recovery.state != LcResumeRecoveryState::FreshRunning
+                || recovery.fresh_role_run_seq != Some(role_run_seq)
+            {
+                return Ok(());
+            }
+            recovery.state = LcResumeRecoveryState::Waiting;
+            let operation_id = recovery.operation_id.take();
+            if let Some(operation_id) = operation_id.as_deref() {
+                for operation in recovery.fresh_operations.iter_mut() {
+                    if operation.operation_id == operation_id {
+                        operation.state = LcFreshOperationState::Failed;
+                        operation.reason_code = Some(reason_code.clone());
+                        operation.updated_at = now.clone();
+                    }
+                }
+            }
+            recovery.updated_at = now.clone();
+            Ok(())
+        });
+        if let Err(error) = result {
+            tracing::warn!(
+                %error,
+                session_id = %self.handle.workspace_session_id,
+                role_run_seq = self.handle.role_run_seq,
+                "reconcile fresh launch failure back to waiting failed"
+            );
+        }
+    }
+
     /// prepare 前 run-bound audit 上下文(sink=LifecycleStore 生产 sink)。
     pub(crate) fn audit_context(
         &self,
@@ -287,6 +520,8 @@ pub(crate) fn begin_plan_split_run_if_logical(
 /// `complete`(存档该 run 的结构化产物),不可解析则 `fail`。收口落盘失败
 /// 不阻断业务流(`tracing::warn`,与 `commit_rebuilt_snapshot_after_provider_start`
 /// 同语义:split run 记录是审计身份,不是主产物)。
+/// B2b1(Task 5.2,§4.2.2/§4.3):成功/失败各自完成 launch 纪元收口——
+/// map Prepared→Active + FreshRunning recovery Resolved 对账 / 失败回 Waiting。
 pub(crate) fn close_plan_split_run(
     run: Option<&PlanSplitRunContext>,
     prompt: &str,
@@ -300,17 +535,21 @@ pub(crate) fn close_plan_split_run(
             if let Err(error) = run.complete(prompt, &structured_output) {
                 tracing::warn!(%error, "complete plan split provider run failed");
             }
+            run.finalize_launch_after_success();
         }
         Err(message) => {
-            if let Err(error) = run.fail(&format!("structured output parse failed: {message}")) {
+            let reason = format!("structured output parse failed: {message}");
+            if let Err(error) = run.fail(&reason) {
                 tracing::warn!(%error, "fail plan split provider run failed");
             }
+            run.reconcile_launch_failure(&reason);
         }
     }
 }
 
 /// Task 1b 段②生产臂:Markdown 产物(无 structured sentinel,如 SC plan
 /// markdown/human-gate 修订)的 run 收口——原始全文按 JSON 字符串存档。
+/// B2b1(Task 5.2):同 `close_plan_split_run` 的 launch 纪元成功收口。
 pub(crate) fn close_plan_split_run_with_markdown(
     run: Option<&PlanSplitRunContext>,
     prompt: &str,
@@ -321,14 +560,18 @@ pub(crate) fn close_plan_split_run_with_markdown(
     if let Err(error) = run.complete(prompt, &structured_output) {
         tracing::warn!(%error, "complete plan split provider run failed");
     }
+    run.finalize_launch_after_success();
 }
 
 /// Task 1b 段②生产臂:驱动失败(run 未产出可用输出)的 run 收口。
+/// B2b1(Task 5.2,§4.3):FreshRunning recovery 回 Waiting(operation Failed,
+/// 结果保留),fresh 绑定事实保留作对账证据。
 pub(crate) fn fail_plan_split_run(run: Option<&PlanSplitRunContext>, reason: &str) {
     let Some(run) = run else { return };
     if let Err(error) = run.fail(reason) {
         tracing::warn!(%error, "fail plan split provider run failed");
     }
+    run.reconcile_launch_failure(reason);
 }
 
 /// 逻辑会话经 gateway 启动,否则原 `provider.start`。返回 `ProviderSession`。
@@ -350,11 +593,11 @@ pub(crate) async fn start_work_item_plan_author(
         return provider.start(input, cancel).await;
     };
     let plan = *plan;
-    // T6 fix-loop r2：分类下沉到 Logical 分支唯一物理启动口——七个已包
-    // caller（WIP draft/batch/human-gate 修订、legacy outline 首发/
-    // AutoRevision、SC 教学/主 spawn）与 followups 四处续驱（U4-U7）
-    // 共用此口，不再依赖 caller 逐臂枚举；provider 取 launch 携带的
-    // session author（与 envelope 冻结同源）；Legacy 分支不经此面。
+    // T6 fix-loop r2:分类下沉到 Logical 分支唯一物理启动口——七个已包
+    // caller(WIP draft/batch/human-gate 修订、legacy outline 首发/
+    // AutoRevision、SC 教学/主 spawn)与 followups 四处续驱(U4-U7)
+    // 共用此口,不再依赖 caller 逐臂枚举;provider 取 launch 携带的
+    // session author(与 envelope 冻结同源);Legacy 分支不经此面。
     let trust_provider = plan.launch.author_provider.clone();
     // Task 2.8(REQ-PLN-03,planning snapshot 贯穿):input 的独立 cwd 重绑
     // envelope 冻结的 canonical root——cwd/target 分离贯穿正常 run(worktree=
@@ -367,17 +610,29 @@ pub(crate) async fn start_work_item_plan_author(
     // tool_policy 角色)并以冻结接口组装 validated input;无 handle 的存量
     // 调用面保持原 validate 复用路径(后续 caller 迁移逐步收敛)。
     let validated_input = match plan_split_run {
-        Some(run_ctx) => plan
-            .launch
-            .gateway
-            .prepare_streaming_launch(
-                input,
-                plan.launch
-                    .planning_request()
-                    .map_err(|error| map_gateway_error_to_adapter(&error))?,
-                run_ctx.audit_context(),
-            )
-            .map_err(|error| map_gateway_error_to_adapter(&error))?,
+        Some(run_ctx) => {
+            // B2b1(Task 5.2,设计 §4.2.1 prepared-map-before-start):同源
+            // validated policy 冻结指纹在 session spawn 前按 native/run 绑定
+            // 持久化(prepared map),并绑定 FreshRunning recovery 的
+            // fresh_role_run_seq;I/O 失败零 start(fail-closed)。
+            run_ctx
+                .persist_prepared_launch_identity(&plan.validated.fingerprint().digest)
+                .map_err(|error| {
+                    ProviderAdapterError::provider_unavailable(format!(
+                        "logical_launch_prepared_map_unavailable: {error}"
+                    ))
+                })?;
+            plan.launch
+                .gateway
+                .prepare_streaming_launch(
+                    input,
+                    plan.launch
+                        .planning_request()
+                        .map_err(|error| map_gateway_error_to_adapter(&error))?,
+                    run_ctx.audit_context(),
+                )
+                .map_err(|error| map_gateway_error_to_adapter(&error))?
+        }
         None => ValidatedStreamingProviderInput::new(input, plan.validated),
     };
 
@@ -606,8 +861,8 @@ async fn lc_fresh_dispatch_kind(
                 rebuilt: Box::new(resolved),
             })
         }
-        LcFreshRunKind::Kind(_) => Err(lc_context_unsupported(format!(
-            "run_context tag {} fresh handler lands with the remaining B2 packages (5.2-5.6); explicit fresh stays waiting",
+        LcFreshRunKind::Kind(kind) => Err(lc_context_unsupported(format!(
+            "run_context tag {} (resolved kind {kind:?}) fresh handler lands with the remaining B2 packages (5.2-5.6); explicit fresh stays waiting",
             lc_recovery_context_tag_label(&recovery.run_context)
         ))),
     }
@@ -637,6 +892,72 @@ fn lc_resume_store_unavailable_frame(
     }
 }
 
+/// B2b1(Task 5.2,5.1 移交项):fresh spawn 认领成功后,把 manager 活动 run
+/// 的节点绑定为 recovery `fresh_node_id`(仅 FreshRunning 且未绑定;kind
+/// 判别式守卫)。best-effort:并发让位/节点未建时不阻塞 dispatch——
+/// 成功收口(`PlanSplitRunContext::finalize_launch_after_success`)按
+/// conversation last_node 补全;失败只 `warn`。
+async fn lc_bind_fresh_node_after_spawn(
+    store: &crate::product::lifecycle_store::LifecycleStore,
+    run_context: &ProviderRunContext,
+    run_kind: &ProviderRunKind,
+    recovery: &crate::product::models::LcResumeRecoveryRecord,
+) {
+    use crate::product::models::LcResumeRecoveryState;
+
+    if recovery.state != LcResumeRecoveryState::FreshRunning {
+        return;
+    }
+    let Some(node_id) = run_context
+        .manager
+        .active_run()
+        .await
+        .filter(|active| {
+            std::mem::discriminant(&active.kind) == std::mem::discriminant(run_kind)
+        })
+        .and_then(|active| active.node_id)
+    else {
+        return;
+    };
+    let session_id = run_context.session_record.id.clone();
+    let path = store
+        .workspace_sessions_root(
+            &run_context.session_record.project_id,
+            &run_context.session_record.issue_id,
+        )
+        .join(format!("{session_id}.json"));
+    let now = chrono::Utc::now().to_rfc3339();
+    let record_path = path.clone();
+    let result =
+        crate::product::coding_attempt_store::locking::with_exclusive_lock(&path, move || {
+            let mut record: crate::product::models::WorkspaceSessionRecord =
+                crate::product::json_store::read_json(&record_path)?;
+            if record.id != session_id {
+                return Err(crate::product::json_store::ProductStoreError::IdentityMismatch {
+                    kind: "workspace_session",
+                    id: session_id.clone(),
+                });
+            }
+            if let Some(recovery) = record.lc_resume_recovery.as_mut()
+                && recovery.state == LcResumeRecoveryState::FreshRunning
+                && recovery.fresh_node_id.is_none()
+            {
+                recovery.fresh_node_id = Some(node_id.clone());
+                recovery.updated_at = now.clone();
+                record.updated_at = now;
+                crate::product::json_store::write_json(&record_path, &record)?;
+            }
+            Ok(())
+        });
+    if let Err(error) = result {
+        tracing::warn!(
+            %error,
+            session_id = %run_context.session_id,
+            "bind fresh node id after spawn failed (finalization backfills it)"
+        );
+    }
+}
+
 /// §4.3 prepare 失败行收口：operation failed（稳定 reason code）、
 /// recovery 回 Waiting（同 ID 仍 Replay、下一次显式点击用新 ID）、typed
 /// 拒帧上浮请求连接；零 spawn。
@@ -661,13 +982,27 @@ async fn lc_fail_fresh_operation_to_waiting(
         operation.reason_code = Some(rejection.code.to_string());
         operation.updated_at = now.clone();
     });
-    if let Err(error) = store.compare_and_save_lc_resume_state(expected, next) {
-        let _ = crate::web::workspace_ws_handler::send_json_outbound(
-            outbound_tx,
-            &lc_resume_store_unavailable_frame(session_id, &error),
-        )
-        .await;
-        return;
+    match store.compare_and_save_lc_resume_state(expected, next) {
+        // B2b1(5.1 审查收窄,Main 裁决附带项):CAS 败给并发写方(如
+        // FreshRunning 推进/新漂移替换)不是 store 不可用——让位且不误报
+        // store_unavailable typed 码。
+        Err(crate::product::json_store::ProductStoreError::Conflict { .. }) => {
+            tracing::debug!(
+                session_id,
+                operation_id,
+                "lc fresh fail-path CAS lost to a concurrent writer; conceding"
+            );
+            return;
+        }
+        Err(error) => {
+            let _ = crate::web::workspace_ws_handler::send_json_outbound(
+                outbound_tx,
+                &lc_resume_store_unavailable_frame(session_id, &error),
+            )
+            .await;
+            return;
+        }
+        Ok(_) => {}
     }
     let _ = crate::web::workspace_ws_handler::send_json_outbound(
         outbound_tx,
@@ -730,10 +1065,20 @@ pub(crate) async fn dispatch_lc_fresh_recovery_run(
                 operation.state = LcFreshOperationState::Running;
                 operation.updated_at = now.clone();
             });
-            // 整记录 CAS：并发 dispatch 只有一个赢（§5.1 single-flight）。
+            // 整记录 CAS:并发 dispatch 只有一个赢(§5.1 single-flight)。
+            // B2b1(5.1 审查收窄):Conflict=输给并发写方(静默让位);其余
+            // 错误才是 store 不可用(typed 上浮,不吞写失败)。
             let saved = match store.compare_and_save_lc_resume_state(&latest, next) {
                 Ok(saved) => saved,
-                Err(_) => return,
+                Err(crate::product::json_store::ProductStoreError::Conflict { .. }) => return,
+                Err(error) => {
+                    let _ = crate::web::workspace_ws_handler::send_json_outbound(
+                        &outbound_tx,
+                        &lc_resume_store_unavailable_frame(&run_context.session_id, &error),
+                    )
+                    .await;
+                    return;
+                }
             };
             let saved_recovery = saved
                 .lc_resume_recovery
@@ -741,14 +1086,27 @@ pub(crate) async fn dispatch_lc_fresh_recovery_run(
                 .unwrap_or_else(|| recovery.clone());
             let spawned = super::spawn_provider_run_claiming_idle(
                 run_context.clone(),
-                run_kind,
+                run_kind.clone(),
                 outbound_tx.clone(),
             )
             .await;
+            if spawned == Ok(true) {
+                // B2b1(5.1 移交项):dispatch 绑 fresh_node_id——spawn 认领后
+                // manager 活动 run 的节点(best-effort:rebuild 类 run 节点在
+                // 臂内新建,此处可为 None,由成功收口按 conversation last_node
+                // 补全;kind 判别式守卫,不误绑无关 run)。
+                lc_bind_fresh_node_after_spawn(
+                    &store,
+                    &run_context,
+                    &run_kind,
+                    &saved_recovery,
+                )
+                .await;
+            }
             match spawned {
                 Ok(true) => {}
-                // 认领窗口被占/run 面拒启：按 prepare 失败收口（operation
-                // failed、recovery 回 Waiting），typed 上浮——不残留无 run
+                // 认领窗口被占/run 面拒启:按 prepare 失败收口(operation
+                // failed、recovery 回 Waiting),typed 上浮——不残留无 run
                 // 的 FreshRunning。
                 Ok(false) => {
                     lc_fail_fresh_operation_to_waiting(

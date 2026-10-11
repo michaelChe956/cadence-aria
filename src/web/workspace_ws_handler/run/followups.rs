@@ -120,17 +120,7 @@ macro_rules! workspace_ws_work_item_plan_revision_arm {
                 };
 
                 let author_provider = $engine.session().author_provider.clone();
-                let plan_launch = match resolve_plan_author_launch(
-                    &*$engine,
-                    repository
-                        .logical_repository_id
-                        .as_ref()
-                        .map(|id| id.0.to_string()),
-                    repository
-                        .primary_checkout_id
-                        .as_ref()
-                        .map(|id| id.0.to_string()),
-                ) {
+                let plan_launch = match resolve_plan_author_launch(&*$engine) {
                     Ok(launch) => launch,
                     Err(error) => {
                         $engine.mark_active_run_finished(&$run_label);
@@ -345,17 +335,7 @@ macro_rules! workspace_ws_work_item_plan_revision_arm {
 
                             // 整组 AutoRevision 时丢弃局部 retained/redo，使用完整 generate_revision。
                             let author_provider = $engine.session().author_provider.clone();
-                            let plan_launch = match resolve_plan_author_launch(
-                                &*$engine,
-                                repository
-                                    .logical_repository_id
-                                    .as_ref()
-                                    .map(|id| id.0.to_string()),
-                                repository
-                                    .primary_checkout_id
-                                    .as_ref()
-                                    .map(|id| id.0.to_string()),
-                            ) {
+                            let plan_launch = match resolve_plan_author_launch(&*$engine) {
                                 Ok(launch) => launch,
                                 Err(error) => {
                                     $engine.mark_active_run_finished(&$run_label);
@@ -679,7 +659,7 @@ macro_rules! workspace_ws_provider_run_followups {
                     $manager_for_task.finish_run($run_token).await;
                     return;
                 };
-                let plan_launch = match resolve_plan_author_launch(&*$engine, None, None) {
+                let plan_launch = match resolve_plan_author_launch(&*$engine) {
                     Ok(launch) => launch,
                     Err(error) => {
                         $engine.mark_active_run_finished(&$run_label);
@@ -857,18 +837,8 @@ pub(crate) async fn drive_current_work_item_plan_outline_run(
     let mut revision_iterations = 0;
     loop {
         let author_provider = engine.session().author_provider.clone();
-        let plan_launch = resolve_plan_author_launch(
-            engine,
-            repository
-                .logical_repository_id
-                .as_ref()
-                .map(|id| id.0.to_string()),
-            repository
-                .primary_checkout_id
-                .as_ref()
-                .map(|id| id.0.to_string()),
-        )
-        .map_err(|error| format!("logical plan launch failed: {error}"))?;
+        let plan_launch = resolve_plan_author_launch(engine)
+            .map_err(|error| format!("logical plan launch failed: {error}"))?;
         let routing_context = plan_launch.routing_context();
         let context_resolutions = load_work_item_plan_outline_context_resolutions(
             app_paths,

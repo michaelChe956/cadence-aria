@@ -680,17 +680,7 @@ pub(crate) async fn run_single_candidate_author(
     // 阻断（见 `preflight_lc_member_rules_before_author_run` 路 C 说明）。
     // 单仓 legacy 会话（无 gateway 注入或无 planning launch，判定与下方
     // `resolve_plan_author_launch` 同谓词）零变化。
-    let lc_plan_launch = super::gateway_start::logical_plan_launch_for(
-        engine,
-        repository
-            .logical_repository_id
-            .as_ref()
-            .map(|id| id.0.to_string()),
-        repository
-            .primary_checkout_id
-            .as_ref()
-            .map(|id| id.0.to_string()),
-    );
+    let lc_plan_launch = super::gateway_start::logical_plan_launch_for(engine);
     if let Some(lc_plan_launch) = lc_plan_launch.as_ref() {
         preflight_lc_member_rules_before_author_run(engine, run_context, lc_plan_launch)?;
     }
@@ -776,11 +766,10 @@ pub(crate) async fn run_single_candidate_author(
             &repository.path,
         );
     let author_provider = engine.session().author_provider.clone();
-    // r27 问题2:成员锚与 SC 门修订 turn 同源(plan_member_anchor)——两轮
-    // envelope target 一致是 9a 显式 resume 审计门(投影五字段比对)的
-    // 通过前提。
-    let (member_logical_id, member_checkout_id) = plan_member_anchor(&repository);
-    let launch = resolve_plan_author_launch(engine, member_logical_id, member_checkout_id)
+    // B2b1(Task 5.2,REQ-PLN-08):envelope target 恒聚合根锚(E native
+    // anchor 消费收敛进 `resolve_plan_author_launch`);r27 成员锚同源机制
+    // 在 root 锚下结构性消失,fresh 轮与修订轮 envelope 恒一致。
+    let launch = resolve_plan_author_launch(engine)
         .map_err(|error| {
             SingleCandidateProviderRunError::Message(format!("logical plan launch failed: {error}"))
         })?;

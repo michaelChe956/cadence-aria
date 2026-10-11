@@ -21,11 +21,12 @@ pub(crate) use gateway_start::dispatch_lc_fresh_recovery_run;
 pub(crate) use gateway_start::{
     LcFreshDispatchRejection, LcFreshRunKind, lc_fresh_run_kind_for_recovery_context,
 };
+#[cfg(test)]
+pub(crate) use gateway_start::begin_plan_split_run;
 pub(crate) use gateway_start::{
-    PlanSplitRunContext, begin_plan_split_run, begin_plan_split_run_if_logical,
+    PlanSplitRunContext, begin_plan_split_run_if_logical,
     close_plan_split_run, close_plan_split_run_with_markdown, fail_plan_split_run,
-    logical_plan_launch_for, plan_member_anchor, resolve_plan_author_launch,
-    start_work_item_plan_author,
+    resolve_plan_author_launch, start_work_item_plan_author,
 };
 #[path = "run/provider_run.rs"]
 mod provider_run;
