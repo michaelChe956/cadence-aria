@@ -93,6 +93,37 @@ fn rejected(code: &str, reason: impl Into<String>) -> HumanGateCommandOutcome {
 #[cfg(test)]
 pub(crate) use story_terminate::register_story_terminate_drift_hook;
 
+/// Task 1.1 测试观察锚：SC 门 close 带写 CAS 的按会话尝试计数（仅测试构建
+/// 存在）。静态资格预检的拒收必须发生在任何带写 CAS 调用之前；计数不增即
+/// 证明拒收先于 CAS（生产构建 `note_close_cas_attempt` 为 no-op，不影响
+/// 锁/写路径）。与 story_terminate drift hook 同款测试注入纪律。
+#[cfg(test)]
+static CLOSE_CAS_ATTEMPT_COUNTS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, u64>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(test)]
+fn note_close_cas_attempt(session_id: &str) {
+    let mut counts = CLOSE_CAS_ATTEMPT_COUNTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *counts.entry(session_id.to_string()).or_insert(0) += 1;
+}
+
+#[cfg(test)]
+pub(crate) fn close_cas_attempts(session_id: &str) -> u64 {
+    CLOSE_CAS_ATTEMPT_COUNTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(session_id)
+        .copied()
+        .unwrap_or(0)
+}
+
+#[cfg(not(test))]
+#[inline]
+fn note_close_cas_attempt(_session_id: &str) {}
+
 fn non_terminal(turn: &HumanGateTurn) -> bool {
     matches!(
         turn.status,
@@ -115,6 +146,31 @@ pub(crate) fn validate_command_id(command_id: &str) -> Result<(), String> {
 
 fn validate_feedback(feedback: &str) -> Result<(), String> {
     super::prompts::validate_sc_manual_revision_feedback(feedback)
+}
+
+/// Task 1.1（REQ-REG-15 方案 A/D1）：SC Approve 静态资格预检——在**已加载的
+/// expected** 上纯判 `single_candidate_phase ∈ {Approval, Evaluate}` 且
+/// `human_gate_snapshot` 非空；不满足时返回与 store 原关门 CAS 同类的
+/// Conflict，交既有 `translate_human_gate_close_cas_error` 翻译拒收。
+/// 零副作用：不读不写 store、不取锁，零 ensure/home/ownership/audit，也
+/// 不调用带写入的 CAS 充当预检；store 层判据
+/// （`compare_and_save_human_gate_close`）一字不动。供 close Approve 臂
+/// （登记/带写 CAS 之前）拒收，及 Task 4 确认准备接线复用。
+fn human_gate_approve_static_eligibility(
+    expected: &crate::product::models::WorkspaceSessionRecord,
+) -> Result<(), ProductStoreError> {
+    if matches!(
+        expected.single_candidate_phase,
+        Some(SingleCandidatePhase::Approval) | Some(SingleCandidatePhase::Evaluate)
+    ) && expected.human_gate_snapshot.is_some()
+    {
+        Ok(())
+    } else {
+        Err(ProductStoreError::Conflict {
+            kind: "human_gate_close",
+            id: expected.id.clone(),
+        })
+    }
 }
 /// C2 Task 11：SC 修订组装记录文件（session 分区；"组装 digest 记录"）。
 pub(crate) const SC_REVISION_ASSEMBLY_FILE: &str = "sc-revision-assembly.json";
@@ -556,6 +612,15 @@ impl super::WorkspaceEngine {
 
         match decision {
             HumanGateCloseDecision::Approve => {
+                // Task 1.1：静态资格预检（零副作用）——无效资格在任何带写
+                // close CAS 与（Task 4 接线的）trust 登记之前拒收，沿原
+                // Conflict 既有翻译；不调用 CAS 充当预检。
+                if let Err(error) = human_gate_approve_static_eligibility(&expected) {
+                    return self
+                        .translate_human_gate_close_cas_error(&lifecycle, decision, error)
+                        .await;
+                }
+                note_close_cas_attempt(&self.session.session_id);
                 let saved = match lifecycle
                     .compare_and_save_human_gate_close(&expected, WorkspaceSessionStatus::Running)
                 {
@@ -597,6 +662,7 @@ impl super::WorkspaceEngine {
                 Ok(HumanGateCloseOutcome::Confirmed)
             }
             HumanGateCloseDecision::Abandon => {
+                note_close_cas_attempt(&self.session.session_id);
                 let saved = match lifecycle.compare_and_save_human_gate_close(
                     &expected,
                     WorkspaceSessionStatus::Terminated,

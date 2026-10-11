@@ -5,6 +5,7 @@ use crate::product::models::{
 };
 use crate::product::work_item_plan_policy::RunPolicy;
 use crate::product::workspace_engine::compile::SingleCandidateCompileCheckpoint;
+use crate::product::workspace_engine::conversational_gate::close_cas_attempts;
 
 fn approval_fixture() -> (tempfile::TempDir, LifecycleStore, WorkspaceEngine) {
     let (tmp, lifecycle, _plan_id, mut engine) =
@@ -819,5 +820,144 @@ async fn conversational_gate_approve_completes_human_confirm_node_before_confirm
     assert!(
         gate_node.completed_at.is_some(),
         "closed gate node carries the chain's completion timestamp"
+    );
+}
+
+// —— Task 1.1（REQ-REG-15 方案 A/D1）：SC Approve 静态资格预检矩阵 ——
+// 覆盖 WaitingForHuman 开门上 phase∉{Approval,Evaluate} 或 snapshot 缺席的
+// 全部组合：confirm 必须在带写 close CAS（及 Task 4 接线后的 trust 登记）之前
+// 纯拒收——沿原 Conflict 既有翻译（与 store 层判据同文案），零 durable 副作用、
+// 零 CAS 尝试；合法资格对照仍走原 CAS 链（store 判据一字不动）。
+
+/// Task 1.1 预检矩阵夹具：在真实 SC 门 fixture 上按参数重写 durable 相位/快照
+/// （approval_fixture 同款重写手法），内存会话同步；stage 随 WaitingForHuman→
+/// HumanConfirm 映射保持门开态。会话 id 进程内唯一：CAS 尝试计数以 session id
+/// 为全局键（同 plan_gate_terminate 纪律），避免并行测试互窜计数。
+fn gate_with_static_eligibility_fixture(
+    phase: Option<SingleCandidatePhase>,
+    human_gate_snapshot: Option<crate::product::work_item_plan_policy::HumanGateSnapshot>,
+) -> (
+    tempfile::TempDir,
+    LifecycleStore,
+    WorkspaceEngine,
+    mpsc::Receiver<EngineEvent>,
+) {
+    static STATIC_ELIGIBILITY_SESSION_SEQUENCE: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(1);
+    let (tmp, lifecycle, mut engine, event_rx) =
+        super::conversational_gate::gate_fixture_with_event_rx(1);
+    let old_session_id = engine.session().session_id.clone();
+    let mut record = lifecycle
+        .get_workspace_session(&old_session_id)
+        .expect("session");
+    record.id = format!(
+        "workspace_session_t11_precheck_{}",
+        STATIC_ELIGIBILITY_SESSION_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    record.single_candidate_phase = phase;
+    record.human_gate_snapshot = human_gate_snapshot;
+    let session_dir = lifecycle
+        .app_paths()
+        .issue_root(&record.project_id, &record.issue_id)
+        .join("workspace-sessions");
+    crate::product::json_store::write_json(&session_dir.join(format!("{}.json", record.id)), &record)
+        .expect("persist static eligibility session");
+    std::fs::remove_file(session_dir.join(format!("{old_session_id}.json"))).ok();
+    let artifact = engine.session.artifact.clone();
+    engine.session = WorkspaceSession::from_record(record);
+    engine.session.artifact = artifact;
+    (tmp, lifecycle, engine, event_rx)
+}
+
+fn static_eligibility_gate_snapshot() -> crate::product::work_item_plan_policy::HumanGateSnapshot {
+    crate::product::work_item_plan_policy::HumanGateSnapshot {
+        candidate_recovery: None,
+        findings: Vec::new(),
+        repeated_fingerprints: Vec::new(),
+        attempts_used: 0,
+        manual_repairs_remaining: 1,
+        trigger: crate::product::work_item_plan_policy::HumanReason::NativeHumanRequired,
+        resumable: false,
+        accepted_feedback_turns: None,
+    }
+}
+
+#[tokio::test]
+async fn conversational_gate_confirm_static_eligibility_matrix_rejects_before_close_cas() {
+    for (phase, snapshot_present) in [
+        (None, false),
+        (None, true),
+        (Some(SingleCandidatePhase::Prepare), false),
+        (Some(SingleCandidatePhase::Prepare), true),
+        (Some(SingleCandidatePhase::Generate), false),
+        (Some(SingleCandidatePhase::Generate), true),
+        (Some(SingleCandidatePhase::Failed), false),
+        (Some(SingleCandidatePhase::Failed), true),
+        (Some(SingleCandidatePhase::Approval), false),
+        (Some(SingleCandidatePhase::Evaluate), false),
+    ] {
+        let label = format!("phase={phase:?}, snapshot={snapshot_present}");
+        let snapshot = snapshot_present.then(static_eligibility_gate_snapshot);
+        let (_root, lifecycle, mut engine, mut event_rx) =
+            gate_with_static_eligibility_fixture(phase, snapshot);
+        let session_id = engine.session().session_id.clone();
+        let before = lifecycle
+            .get_workspace_session(&session_id)
+            .expect("durable session before confirm");
+        assert_eq!(
+            before.status,
+            WorkspaceSessionStatus::WaitingForHuman,
+            "夹具必须停在开态门（{label}）"
+        );
+        let cas_attempts_before = close_cas_attempts(&session_id);
+
+        let error = engine
+            .handle_human_gate_termination(HumanGateCloseDecision::Approve)
+            .await
+            .expect_err(&format!("无效静态资格（{label}）confirm 必须在 close CAS 前拒收"));
+        assert!(error.contains("product_store_conflict"), "{label}: {error}");
+        assert!(error.contains("human_gate_close"), "{label}: {error}");
+
+        let after = lifecycle
+            .get_workspace_session(&session_id)
+            .expect("durable session after rejected confirm");
+        assert_eq!(
+            after, before,
+            "拒收零副作用：durable 全字段不变（{label}）"
+        );
+        assert_eq!(
+            close_cas_attempts(&session_id),
+            cas_attempts_before,
+            "静态资格预检拒收必须先于任何带写 close CAS（{label}）"
+        );
+        assert!(
+            event_rx.try_recv().is_err(),
+            "拒收不产生任何引擎事件（{label}）"
+        );
+    }
+}
+
+/// 对照（Task 1.1）：合法静态资格（Approval 相位 × 快照在场）不被预检拦截——
+/// close CAS 尝试计数恰 +1，仍走原 CAS 关门链。本 fixture 未铺 accepted
+/// contract drafts，approve 链在 CAS 胜出后于 compile 段失败（与既有
+/// does_not_confirm_before_compile_success 同语义），不重复断言终态。
+#[tokio::test]
+async fn conversational_gate_confirm_valid_static_eligibility_still_reaches_close_cas() {
+    let (_root, _lifecycle, mut engine, _event_rx) = gate_with_static_eligibility_fixture(
+        Some(SingleCandidatePhase::Approval),
+        Some(static_eligibility_gate_snapshot()),
+    );
+    let session_id = engine.session().session_id.clone();
+    let cas_attempts_before = close_cas_attempts(&session_id);
+
+    let error = engine
+        .handle_human_gate_termination(HumanGateCloseDecision::Approve)
+        .await
+        .expect_err("合法资格 fixture 的 compile 链未铺齐，approve 以 compile 失败收场");
+    assert!(error.contains("compile failed"), "{error}");
+    assert_eq!(
+        close_cas_attempts(&session_id),
+        cas_attempts_before + 1,
+        "合法静态资格仍走原带写 close CAS"
     );
 }

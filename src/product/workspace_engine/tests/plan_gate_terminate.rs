@@ -13,6 +13,7 @@ use crate::product::models::{
 };
 use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
 use tempfile::TempDir;
+use crate::product::workspace_engine::conversational_gate::close_cas_attempts;
 
 /// plan 会话（SC 流）非终审门夹具：durable 记录按传入相位铺好（context
 /// blocker=Prepare、author 失败=Generate、缺相位=None），引擎经真实入口
@@ -163,5 +164,65 @@ async fn plan_author_failure_and_missing_phase_gate_abandon_terminate() {
             "terminate 不改相位（{phase_label}）"
         );
         assert_eq!(collect_close_events(&mut event_rx).len(), 1);
+    }
+}
+
+/// Task 1.1（REQ-REG-15 方案 A/D1「不合法确认在登记前拒收」）：SC plan 会话停
+/// 在 human_confirm 的非批准资格门（phase=None/Prepare/Generate/Failed、无快照
+/// ——0449/F-21 现场形态）上，confirm 必须在任何带写 close CAS 之前纯静态拒收：
+/// 沿原 Conflict 既有翻译上抛（durable 仍 WaitingForHuman、无关门事件），durable
+/// 全字段零变化（本引擎层尚无 trust 登记调用面，拒收不得引入任何 store 写），且
+/// close CAS 尝试计数不增——预检不调用带写入的 CAS 充当预检。terminate 脱困
+/// 不受影响由上方用例族守卫（原 CAS relaxed_terminate 判据一字不动）。
+#[tokio::test]
+async fn plan_non_approval_gate_confirm_rejected_before_close_cas() {
+    for phase in [
+        None,
+        Some(SingleCandidatePhase::Prepare),
+        Some(SingleCandidatePhase::Generate),
+        Some(SingleCandidatePhase::Failed),
+    ] {
+        let phase_label = format!("{phase:?}");
+        let (_root, lifecycle, mut engine, mut event_rx) =
+            plan_non_approval_gate_fixture(phase).await;
+        let session_id = engine.session().session_id.clone();
+        let before = lifecycle
+            .get_workspace_session(&session_id)
+            .expect("durable plan session before confirm");
+        assert_eq!(
+            before.status,
+            WorkspaceSessionStatus::WaitingForHuman,
+            "夹具必须停在开态门（{phase_label}）"
+        );
+        let cas_attempts_before = close_cas_attempts(&session_id);
+
+        let error = engine
+            .handle_human_gate_termination(HumanGateCloseDecision::Approve)
+            .await
+            .expect_err(&format!(
+                "非批准资格门（{phase_label}）confirm 必须在 close CAS 前拒收"
+            ));
+        assert!(
+            error.contains("product_store_conflict"),
+            "{phase_label}: {error}"
+        );
+        assert!(error.contains("human_gate_close"), "{phase_label}: {error}");
+
+        let after = lifecycle
+            .get_workspace_session(&session_id)
+            .expect("durable plan session after rejected confirm");
+        assert_eq!(
+            after, before,
+            "拒收零副作用：durable 全字段不变（{phase_label}）"
+        );
+        assert_eq!(
+            close_cas_attempts(&session_id),
+            cas_attempts_before,
+            "静态资格预检拒收必须先于任何带写 close CAS（{phase_label}）"
+        );
+        assert!(
+            collect_close_events(&mut event_rx).is_empty(),
+            "拒收不产生关门事件（{phase_label}）"
+        );
     }
 }
