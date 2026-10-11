@@ -1499,3 +1499,547 @@ async fn lcg_t09_codex_missing_or_wrong_native_id_never_fresh() {
         assert!(started_child_was_killed_and_reaped);
     }
 }
+
+// ==== Task 3.4(B0c):Codex 真实 prepare facts 与 full 投影/audit 同源 ====
+//
+// 本节 fixture 组装真实 gateway(capability/policy/target/registry/gate 全真
+// 链,先例同 coding_workspace_engine::tests::provider_gateway_validated_input),
+// 驱动 3.2 冻结的 `prepare_lc_streaming_candidate` 公共合同消费 Codex 真实
+// adapter facts。共享 fixture 标记 `pub(super)` 供 bridging.rs 的 drift/child
+// 测试复用;跨家组合守卫归 3.7,本节只断言 Codex 专属面。
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+use crate::cross_cutting::provider_adapter::{ProviderAdapter, ProviderAdapterError};
+use crate::cross_cutting::provider_availability_gate::{
+    ProviderAvailabilityGate, ProviderHealthSource,
+};
+use crate::cross_cutting::provider_health::{ProviderHealthEntry, ProviderHealthSnapshot};
+use crate::cross_cutting::provider_registry::ProviderRegistry;
+use crate::cross_cutting::session_launch::ValidatedStreamingProviderInput;
+use crate::cross_cutting::tool_policy_audit::DurableToolPolicyEvent;
+use crate::product::app_paths::ProductAppPaths;
+use crate::product::logical_codebase::provider_gateway::{
+    GatewaySessionDisposition, ProviderLaunchAuditContext, ResumeSessionLaunchRequest,
+    SessionResumeFingerprint, canonical_target_git_identity,
+};
+use crate::product::logical_codebase::provider_projection::UnprovisionedProviderPolicyProjector;
+use crate::product::logical_codebase::{
+    AggregatePolicyArtifactStore, GatewayRunAudit, LogicalCodebaseManifest,
+    LogicalCodebaseProviderGateway, PolicyTargetResolver, ProviderCapability,
+    ProviderCapabilitySource, SessionLaunchRequest,
+};
+use crate::product::models::ProviderName;
+use crate::protocol::contracts::{AdapterInput, AdapterOutput, TimeoutStatus};
+
+/// B0c drift 负例的初始真实 CLI 观测版本(combined fixture `--version` 回显)。
+pub(super) const ANCHOR_T34_VERSION_INITIAL: &str = "codex 1.0.0-t34probe";
+/// B0c drift 负例:命令 identity 变化(重写 fixture)后重观测到的替换版本。
+pub(super) const ANCHOR_T34_VERSION_REPLACED: &str = "codex 1.1.0-replaced";
+
+/// anchor_t34 capability fixture:Codex 行 launch/resume/write_boundary 恒
+/// Confirmed;version 与 capability 行一致(admission_verdict 的 version 门)。
+struct AnchorT34CapabilitySource {
+    version: String,
+}
+
+impl AnchorT34CapabilitySource {
+    fn capability(
+        provider: &ProviderRef,
+        action: SessionPolicyAction,
+        version: &str,
+    ) -> ProviderCapability {
+        use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
+        use crate::product::logical_codebase::policy::ProviderWireDialect;
+        use crate::product::logical_codebase::provider_capability_store::ProviderActionCapability;
+        ProviderCapability {
+            provider_type: provider.provider_type,
+            version: version.to_string(),
+            adapter_dialect: ProviderDialect::CodexCliV1,
+            wire_dialect: ProviderWireDialect::CodexAppServerRpc,
+            capability_snapshot_ref: provider.capability_snapshot_ref.clone(),
+            action_capability: ProviderActionCapability {
+                action,
+                launch: ProviderCapabilityEvidence::Confirmed,
+                resume: ProviderCapabilityEvidence::Confirmed,
+                write_boundary: ProviderCapabilityEvidence::Confirmed,
+                projection_digest: anchor_t34_capability_profile_digest(version),
+                evidence_ref: format!("probe://{action:?}"),
+            },
+            trust: ProviderCapabilityEvidence::Confirmed,
+        }
+    }
+}
+
+/// capability 行的 `projection_digest` 与真实 `CodexPolicyProjector` 的
+/// capability 摘要同源计算(admission_verdict 第 3 步对齐门)。profile 摘要
+/// 只覆盖 provider/dialect/wire/version/action/冻结映射/sandbox/boundary
+/// 模式/MCP(空),与单次 role/cwd/target 无关——同 action+version 即同摘要。
+fn anchor_t34_capability_profile_digest(version: &str) -> String {
+    let fixture = LcCodexFixture::new();
+    let envelope = fixture.envelope(SessionPolicyAction::PlanningReadOnly, Vec::new());
+    let boundary = t09a_lc_boundary_plan(&envelope).expect("anchor t34 boundary plan");
+    let projection_input = ProviderProjectionInput::new(
+        envelope.clone(),
+        ProviderRef::codex("cap_anchor_t34_digest_probe"),
+        envelope.action,
+        AdapterRole::Reviewer,
+        ProviderPermissionMode::Auto,
+        Some(ProviderToolPolicy::deny_file_write_builtins()),
+        String::new(),
+        String::new(),
+        envelope.config_artifact_ref.clone(),
+        String::new(),
+        Some(boundary),
+    );
+    T09aProjector::new(version)
+        .project(&projection_input)
+        .expect("anchor t34 capability profile digest")
+        .capability_projection_digest()
+        .to_string()
+}
+
+impl ProviderCapabilitySource for AnchorT34CapabilitySource {
+    fn require_supported(
+        &self,
+        provider: &ProviderRef,
+        action: SessionPolicyAction,
+    ) -> Result<ProviderCapability, crate::product::logical_codebase::ProviderGatewayError> {
+        Ok(Self::capability(provider, action, &self.version))
+    }
+
+    fn require_resume_supported(
+        &self,
+        provider: &ProviderRef,
+        action: SessionPolicyAction,
+    ) -> Result<ProviderCapability, crate::product::logical_codebase::ProviderGatewayError> {
+        Ok(Self::capability(provider, action, &self.version))
+    }
+
+    fn require_write_boundary(
+        &self,
+        provider: &ProviderRef,
+        action: SessionPolicyAction,
+    ) -> Result<ProviderCapability, crate::product::logical_codebase::ProviderGatewayError> {
+        Ok(Self::capability(provider, action, &self.version))
+    }
+
+    fn require_root_recipe_supported(
+        &self,
+        _provider: &ProviderRef,
+        _credential: &crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
+    ) -> Result<ProviderCapability, crate::product::logical_codebase::ProviderGatewayError> {
+        Err(
+            crate::product::logical_codebase::ProviderGatewayError::UnsupportedCapability(
+                "anchor t34 fixture only serves Codex normal LC rows".to_string(),
+            ),
+        )
+    }
+}
+
+/// pass-through target resolver:返回请求冻结的 target(先例同 engine 侧)。
+struct AnchorT34PassThroughTargetResolver;
+
+impl PolicyTargetResolver for AnchorT34PassThroughTargetResolver {
+    fn resolve_and_revalidate(
+        &self,
+        request: &SessionLaunchRequest,
+    ) -> Result<PolicyTarget, crate::product::logical_codebase::ProviderGatewayError> {
+        Ok(request.target.clone())
+    }
+}
+
+/// 同步 adapter stub:仅满足 gateway 构造签名,LC 流式链不触达。
+struct AnchorT34StubSyncAdapter;
+
+impl ProviderAdapter for AnchorT34StubSyncAdapter {
+    fn run(&self, _input: &AdapterInput) -> Result<AdapterOutput, ProviderAdapterError> {
+        Ok(AdapterOutput {
+            exit_code: Some(0),
+            stdout: String::new(),
+            stderr: String::new(),
+            structured_output: None,
+            files_modified: Vec::new(),
+            duration_ms: 0,
+            timeout_status: TimeoutStatus::NotTimedOut,
+        })
+    }
+}
+
+fn anchor_t34_gate() -> Arc<ProviderAvailabilityGate> {
+    struct AlwaysHealthy(Arc<ProviderHealthSnapshot>);
+
+    impl ProviderHealthSource for AlwaysHealthy {
+        fn snapshot(&self) -> Arc<ProviderHealthSnapshot> {
+            self.0.clone()
+        }
+
+        fn degraded(&self) -> bool {
+            false
+        }
+    }
+
+    let checked_at = chrono::Utc::now();
+    let snapshot = Arc::new(ProviderHealthSnapshot {
+        schema_version: 1,
+        generation: 1,
+        checked_at,
+        providers: [ProviderName::Codex]
+            .into_iter()
+            .map(|provider| ProviderHealthEntry {
+                provider,
+                command: "codex".to_string(),
+                available: true,
+                version: Some(ANCHOR_T34_VERSION_INITIAL.to_string()),
+                reason_code: None,
+                reason: None,
+                checked_at,
+            })
+            .collect(),
+    });
+    Arc::new(ProviderAvailabilityGate::new(Arc::new(AlwaysHealthy(
+        snapshot,
+    ))))
+}
+
+/// anchor_t34 真实 gateway 装配:canonical root 与成员 target worktree 分离
+/// (双 cwd 合同);registry 注册真实 `CodexProvider`(gated wrapper)。
+pub(super) struct AnchorT34LcHarness {
+    pub(super) gateway: LogicalCodebaseProviderGateway,
+    pub(super) request: SessionLaunchRequest,
+    pub(super) authority_root: PathBuf,
+}
+
+pub(super) fn anchor_t34_lc_harness(
+    provider: Arc<CodexProvider>,
+    capability_version: &str,
+) -> AnchorT34LcHarness {
+    let base = tempfile::tempdir().expect("anchor t34 lc base").keep();
+    let target = base.join("member-worktree");
+    std::fs::create_dir_all(&target).expect("create member worktree");
+    let authority_root = std::fs::canonicalize(&base).expect("canonical lc root");
+    let manifest = LogicalCodebaseManifest::new("project_anchor_t34", base.clone(), vec![]);
+    let policies = AggregatePolicyArtifactStore::new(ProductAppPaths::new(base.join("app-data")));
+    policies
+        .ensure_bootstrap(&manifest)
+        .expect("anchor t34 bootstrap policy");
+
+    let mut registry = ProviderRegistry::new();
+    registry
+        .register_gated(
+            ProviderName::Codex,
+            provider,
+            Arc::new(UnprovisionedProviderPolicyProjector),
+            anchor_t34_gate(),
+        )
+        .expect("register anchor t34 codex adapter trio");
+
+    let gateway = LogicalCodebaseProviderGateway::with_audit(
+        policies,
+        Arc::new(AnchorT34CapabilitySource {
+            version: capability_version.to_string(),
+        }),
+        Arc::new(AnchorT34PassThroughTargetResolver),
+        Arc::new(registry),
+        Arc::new(AnchorT34StubSyncAdapter),
+        anchor_t34_gate(),
+        Arc::new(GatewayRunAudit::new()),
+        authority_root.clone(),
+    );
+
+    let request = SessionLaunchRequest {
+        project_id: "project_anchor_t34".to_string(),
+        provider: ProviderRef::codex("cap_codex_anchor_t34"),
+        action: SessionPolicyAction::PlanningReadOnly,
+        target: PolicyTarget::checkout("logical_repo_0001", "checkout_0001", target),
+        working_directory: authority_root.clone(),
+        readable_roots: vec![base],
+        writable_roots: Vec::new(),
+        config_artifact_ref: "sha256:managed-config-artifact".to_string(),
+    };
+    AnchorT34LcHarness {
+        gateway,
+        request,
+        authority_root,
+    }
+}
+
+/// anchor_t34 的 LC streaming input:`raw_working_dir` 故意与投影 protocol
+/// cwd 相反(wire 参数必须来自投影而非 raw 输入);resume id 由调用方注入。
+pub(super) fn anchor_t34_lc_input(
+    authority_root: &Path,
+    resume_id: Option<String>,
+) -> StreamingProviderInput {
+    StreamingProviderInput {
+        working_directory: Some(authority_root.to_path_buf()),
+        baseline_tree: None,
+        tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
+        audit_sink: None,
+        provider_type: ProviderType::Codex,
+        role: AdapterRole::Reviewer,
+        prompt: "anchor t34 codex prepare".to_string(),
+        working_dir: authority_root.join("raw-working-dir-ignored"),
+        workspace_session_id: None,
+        resume_provider_session_id: resume_id,
+        permission_mode: ProviderPermissionMode::Auto,
+        structured_output_contract: None,
+        env_vars: BTreeMap::new(),
+        timeout_secs: 60,
+    }
+}
+
+/// anchor_t34 组合 fixture:同一命令身兼 `--version` 有界观测(回显冻结版本,
+/// 真实 CLI ①口径)与 LC app-server(pid/cwd/spawn/wire marker + thread
+/// 应答固定 `codex-thread-lc`)。重写本文件即命令 identity 变化 → TTL 换 key。
+pub(super) fn anchor_t34_combined_app_server_fixture(version: &str) -> PathBuf {
+    let body = format!(
+        r#"#!/usr/bin/env bash
+if [[ "${{1:-}}" == "--version" ]]; then
+  echo "{version}"
+  exit 0
+fi
+echo $$ > "$LC_PID_MARKER"
+pwd -P > "$LC_CWD_MARKER"
+touch "$LC_SPAWN_MARKER"
+while IFS= read -r line; do
+  if [[ "$line" == *'"method":"initialize"'* ]]; then
+    id="$(printf '%s' "$line" | sed -n -e 's/.*"id":[[:space:]]*"\([0-9A-Za-z_-][0-9A-Za-z_-]*\)".*/\1/p' -e 's/.*"id":[[:space:]]*\([0-9][0-9]*\).*/\1/p')"
+    echo "{{\"jsonrpc\":\"2.0\",\"id\":\"${{id:-aria-0}}\",\"result\":{{\"capabilities\":{{}}}}}}"
+  elif [[ "$line" == *'"method":"initialized"'* ]]; then
+    :
+  elif [[ "$line" == *'"method":"thread/start"'* ]] || [[ "$line" == *'"method":"thread/resume"'* ]]; then
+    printf '%s' "$line" > "$LC_WIRE_MARKER"
+    id="$(printf '%s' "$line" | sed -n -e 's/.*"id":[[:space:]]*"\([0-9A-Za-z_-][0-9A-Za-z_-]*\)".*/\1/p' -e 's/.*"id":[[:space:]]*\([0-9][0-9]*\).*/\1/p')"
+    echo "{{\"jsonrpc\":\"2.0\",\"id\":\"${{id:-aria-1}}\",\"result\":{{\"thread\":{{\"id\":\"codex-thread-lc\"}}}}}}"
+  elif [[ "$line" == *'"method":"turn/start"'* ]]; then
+    id="$(printf '%s' "$line" | sed -n -e 's/.*"id":[[:space:]]*"\([0-9A-Za-z_-][0-9A-Za-z_-]*\)".*/\1/p' -e 's/.*"id":[[:space:]]*\([0-9][0-9]*\).*/\1/p')"
+    echo "{{\"jsonrpc\":\"2.0\",\"id\":\"${{id:-aria-2}}\",\"result\":{{\"turn\":{{\"id\":\"turn-lc\"}}}}}}"
+    echo '{{"jsonrpc":"2.0","method":"item/completed","params":{{"item":{{"id":"msg-1","type":"agentMessage","text":"lc restricted done"}}}}}}'
+    echo '{{"jsonrpc":"2.0","method":"turn/completed","params":{{"turnId":"turn-lc"}}}}'
+    exit 0
+  fi
+done
+"#
+    );
+    let path = tempfile::tempdir()
+        .expect("anchor t34 fixture dir")
+        .keep()
+        .join(format!("codex_anchor_t34_{version}.sh"));
+    std::fs::write(&path, body).expect("write anchor t34 fixture");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = std::fs::metadata(&path)
+            .unwrap_or_else(|error| panic!("fixture metadata {}: {error}", path.display()))
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&path, permissions)
+            .unwrap_or_else(|error| panic!("chmod fixture {}: {error}", path.display()));
+    }
+    path
+}
+
+/// anchor_t34 观测 marker 注入(与既有 LC fixture 同源,追加 pid marker)。
+pub(super) fn anchor_t34_markers(
+    input: &mut StreamingProviderInput,
+    dir: &Path,
+    label: &str,
+) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+    let cwd = dir.join(format!("{label}-cwd-marker"));
+    let wire = dir.join(format!("{label}-wire-marker"));
+    let spawn = dir.join(format!("{label}-spawn-marker"));
+    let pid = dir.join(format!("{label}-pid-marker"));
+    input
+        .env_vars
+        .insert("LC_CWD_MARKER".to_string(), cwd.display().to_string());
+    input
+        .env_vars
+        .insert("LC_WIRE_MARKER".to_string(), wire.display().to_string());
+    input
+        .env_vars
+        .insert("LC_SPAWN_MARKER".to_string(), spawn.display().to_string());
+    input
+        .env_vars
+        .insert("LC_PID_MARKER".to_string(), pid.display().to_string());
+    (cwd, wire, spawn, pid)
+}
+
+/// sink 事件里 provider_start 的 lc_projection 摘要(同源断言的单一入口)。
+fn anchor_t34_provider_start_projection_digests(
+    sink: &crate::cross_cutting::tool_policy_audit::test_support::RecordingToolPolicyAuditSink,
+) -> Vec<String> {
+    sink.events()
+        .iter()
+        .filter_map(|event| match event {
+            DurableToolPolicyEvent::ProviderStart(record) => record
+                .lc_projection
+                .as_ref()
+                .map(|lc| lc.projection_digest.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// anchor_t34 共享的 kill 链观测(本文件既有 unix 助手的 `pub(super)` 桥,
+/// 供 bridging.rs 的 drift/child 测试复用;逻辑零拷贝新增)。
+#[cfg(unix)]
+pub(super) fn wait_for_child_pid_marker_public(marker: &Path) -> Option<u32> {
+    wait_for_child_pid_marker(marker)
+}
+
+/// anchor_t34 共享的 kill 链断言(同上)。
+#[cfg(unix)]
+pub(super) fn assert_child_terminated_public(pid: u32, what: &str) {
+    assert_child_terminated(pid, what);
+}
+
+/// Task 3.4(B0c)Step 1 红测试:真实 Codex adapter 的 prepare facts 与
+/// prepared full 投影、`start_validated` 审计三方同源——supplier seam 观测
+/// 本家 version(①恰一次)、受限 sandbox/approval/protocol cwd 映射冻结进
+/// facts/full 投影,adapter 审计字面量消费同一 prepared 投影(prepared
+/// digest == audit digest);prepare 全程零 durable 写/零 child。
+#[cfg(unix)]
+#[tokio::test]
+async fn anchor_t34_provider_prepare_and_audit_share_full_fingerprint() {
+    let supplier_calls = Arc::new(AtomicUsize::new(0));
+    let counted = supplier_calls.clone();
+    let supplier: crate::cross_cutting::streaming_provider::ProviderVersionSupplier =
+        Arc::new(move || {
+            counted.fetch_add(1, AtomicOrdering::SeqCst);
+            Ok("codex 0.124.0-t34".to_string())
+        });
+    let provider =
+        Arc::new(CodexProvider::new(lc_app_server_fixture()).with_version_supplier(supplier));
+    let recording =
+        crate::cross_cutting::tool_policy_audit::test_support::RecordingToolPolicyAuditSink::new();
+    let harness = anchor_t34_lc_harness(provider.clone(), "codex 0.124.0-t34");
+
+    let marker_root = tempfile::tempdir().expect("t34 marker dir").keep();
+    let mut input =
+        anchor_t34_lc_input(&harness.authority_root, Some("codex-thread-lc".to_string()));
+    let (cwd_marker, wire_marker, spawn_marker, _pid_marker) =
+        anchor_t34_markers(&mut input, &marker_root, "happy");
+
+    // durable/审计快照:prepare 必须零写、零 child。
+    let events_before = recording.events().len();
+    assert_eq!(events_before, 0);
+
+    let candidate = harness
+        .gateway
+        .prepare_lc_streaming_candidate(
+            input,
+            harness.request.clone(),
+            ProviderLaunchAuditContext {
+                workspace_session_id: "ws-anchor-t34".to_string(),
+                role_run_seq: 1,
+                audit_sink: recording.clone(),
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect("real codex prepare must freeze an opaque full candidate (B0c)");
+
+    // ① supplier 观测恰一次(TTL single-flight);facts 冻结本家真实面。
+    assert_eq!(supplier_calls.load(AtomicOrdering::SeqCst), 1);
+    assert_eq!(candidate.facts().exact_version(), "codex 0.124.0-t34");
+    assert_eq!(
+        candidate.facts().version_probe_key().provider,
+        ProviderName::Codex
+    );
+    // 受限 approval 冻结映射:read-only 恒 on-request(REQ-LCG-04)。
+    assert_eq!(candidate.facts().approval_policy(), "on-request");
+
+    // 受限 sandbox/protocol cwd:full 投影与 facts 同版本 projector 产出,
+    // 绝不 danger-full-access;read-only 协议 cwd=canonical root。
+    assert_ne!(candidate.full_projection().sandbox(), "danger-full-access");
+    assert_eq!(candidate.full_projection().sandbox(), "read-only");
+    assert_eq!(
+        candidate.full_projection().protocol_working_directory(),
+        harness.authority_root.as_path()
+    );
+    let prepared_projection_digest = candidate.full_projection().projection_digest().to_string();
+    assert!(!prepared_projection_digest.is_empty());
+
+    // prepare 零写/零 child:审计零事件、fixture 从未执行。
+    assert_eq!(recording.events().len(), events_before);
+    assert!(!spawn_marker.exists());
+
+    // full-matching resume:五参指纹一致 → Resume(validated 冻结候选投影)。
+    let previous = SessionResumeFingerprint::from_envelope(
+        candidate.validated().envelope(),
+        candidate.full_projection(),
+        candidate.validated().action_evidence_digest(),
+        &canonical_target_git_identity(&candidate.validated().envelope().target.worktree),
+    );
+    let GatewaySessionDisposition::Resume(resume_validated) = harness
+        .gateway
+        .resume_or_start_with_projection(
+            ResumeSessionLaunchRequest {
+                launch: harness.request.clone(),
+                previous_fingerprint: previous,
+                previous_session_id: "sess-anchor-t34".to_string(),
+            },
+            candidate.full_projection().clone(),
+        )
+        .expect("full-matching fingerprint must resume")
+    else {
+        panic!("expected a Resume disposition for the full-matching candidate");
+    };
+
+    // start_validated 消费 prepared projection:真实 child + LC 握手确认同 id。
+    let mut session = provider
+        .start_validated(
+            ValidatedStreamingProviderInput::new(candidate.input().clone(), resume_validated),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("prepared full projection must drive a real validated start");
+    assert_eq!(
+        session.native_session_id.as_deref(),
+        Some("codex-thread-lc")
+    );
+    assert_eq!(
+        recv_completed(&mut session.events).await,
+        "lc restricted done"
+    );
+
+    // audit 同源:adapter provider_start 的 lc_projection 摘要与 prepared
+    // full 投影摘要逐字节相等(单一来源消费,非重建)。
+    let audit_projection_digest = anchor_t34_provider_start_projection_digests(&recording)
+        .first()
+        .cloned()
+        .expect("validated start writes provider_start with lc projection");
+    assert_eq!(prepared_projection_digest, audit_projection_digest);
+
+    // wire 同源:thread/resume 携带请求 threadId;sandbox/approvalPolicy/cwd
+    // 来自投影(raw working_dir 不泄漏)。
+    let wire = std::fs::read_to_string(&wire_marker).expect("wire marker is written");
+    assert!(
+        wire.contains("\"method\":\"thread/resume\"")
+            && wire.contains("\"threadId\":\"codex-thread-lc\""),
+        "resume wire must carry the requested thread id: {wire}"
+    );
+    let params = lc_wire_params(&wire_marker);
+    assert_eq!(params["sandbox"], serde_json::json!("read-only"));
+    assert_eq!(params["approvalPolicy"], serde_json::json!("on-request"));
+    assert_eq!(
+        params["cwd"],
+        serde_json::json!(harness.authority_root.display().to_string())
+    );
+    // 双 cwd 合同:进程 cwd=canonical root(read-only 协议 cwd 同 root)。
+    assert_eq!(
+        std::fs::read_to_string(&cwd_marker)
+            .expect("cwd marker is written")
+            .trim(),
+        harness.authority_root.display().to_string()
+    );
+
+    // 只有一次 provider_start(带 lc_projection);mismatch 面零计数(见
+    // bridging.rs 的 anchor_t34_real_drift_zero_session_child)。
+    assert_eq!(
+        anchor_t34_provider_start_projection_digests(&recording).len(),
+        1
+    );
+}

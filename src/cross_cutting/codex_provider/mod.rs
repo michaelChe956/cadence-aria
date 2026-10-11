@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use tokio::io::AsyncBufReadExt;
@@ -8,20 +9,22 @@ use tokio_util::sync::CancellationToken;
 use crate::cross_cutting::approval_bridge::ApprovalBridge;
 use crate::cross_cutting::json_rpc_peer::{JsonRpcPeer, OutboundIdNamespace};
 use crate::cross_cutting::process_manager::{
-    ProcessManager, PROVIDER_CHILD_EXIT_STREAM_DRAIN, SessionTailExit, bounded_child_wait,
+    PROVIDER_CHILD_EXIT_STREAM_DRAIN, ProcessManager, SessionTailExit, bounded_child_wait,
     bounded_task_join, provider_child_exit_error, run_session_tail_with_exit_watch,
 };
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::streaming_provider::{
-    ProviderEvent, ProviderExecutionEvent, ProviderExecutionEventKind,
-    ProviderExecutionEventStatus, ProviderSession, ProviderStatus, ProviderVersionSupplier,
-    StreamingProviderAdapter, StreamingProviderInput, canonical_tool_policy,
-    validate_tool_policy_for_role,
+    LcVersionCache, LcVersionObservation, LcVersionProbe, LcVersionProbeKey, ProviderEvent,
+    ProviderExecutionEvent, ProviderExecutionEventKind, ProviderExecutionEventStatus,
+    ProviderSession, ProviderStatus, ProviderVersionSupplier, StreamingProviderAdapter,
+    StreamingProviderInput, canonical_tool_policy, validate_tool_policy_for_role,
 };
 use crate::cross_cutting::tool_policy_audit::{
     DurableToolPolicyEvent, LcProjectionAudit, ProviderStartAudit,
 };
+use crate::product::logical_codebase::provider_projection::ProviderLcPrepareFacts;
 use crate::product::logical_codebase::provider_projection::ProviderPolicyProjector as _;
+use crate::product::models::ProviderName;
 
 mod parse;
 mod projection;
@@ -44,6 +47,14 @@ pub(crate) const CODEX_RPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 pub const CODEX_DEFAULT_SANDBOX_MODE: &str = "danger-full-access";
 pub(crate) const CODEX_RESUME_STALL_ERROR: &str = "Codex resume stalled before provider progress";
 
+/// supplier seam 的 TTL key 实例范围序列(从 1 起;0 保留给真实 CLI 面)。
+static LC_SUPPLIER_SCOPE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Task 3.4(B0c):LC validated start 的 spawn 前 facts 复验——冻结 full 投影
+/// 的 exact version 与当前 TTL 观测不一致时的稳定判别码(child 前拒绝,
+/// 零 adapter start 足迹/零 child)。
+pub(crate) const CODEX_LC_PREPARED_VERSION_DRIFT: &str = "codex_lc_prepared_version_drift";
+
 pub(crate) fn is_resume_stall_failure(message: &str) -> bool {
     message.contains(CODEX_RESUME_STALL_ERROR)
 }
@@ -58,6 +69,12 @@ pub struct CodexProvider {
     command: PathBuf,
     /// 策略会话 provider 版本 supplier（测试 seam；3.3 接线真实 CLI 探测后保留）。
     version_supplier: Option<ProviderVersionSupplier>,
+    /// Task 3.4(B0c):LC 权威版本观测缓存(60 秒 TTL/single-flight,设计
+    /// §5.4;与 direct 路径的无过期 `cached_cli_version` 严格分离)。
+    lc_version_cache: LcVersionCache,
+    /// TTL key 的 supplier 实例范围(测试 supplier 与真实 CLI 不串值;真实
+    /// CLI 恒 0,supplier 每实例唯一——同 CLI 不同 supplier 实例互不命中)。
+    lc_supplier_scope: u64,
 }
 
 impl std::fmt::Debug for CodexProvider {
@@ -120,12 +137,16 @@ impl CodexProvider {
         Self {
             command,
             version_supplier: None,
+            lc_version_cache: LcVersionCache::new(),
+            lc_supplier_scope: 0,
         }
     }
 
-    /// 注入策略会话 provider 版本 supplier（fixture/测试 seam）。
+    /// 注入策略会话 provider 版本 supplier（fixture/测试 seam）。每次注入
+    /// 领取唯一 supplier scope,确保不同 supplier 实例的 TTL 观测互不串值。
     pub fn with_version_supplier(mut self, supplier: ProviderVersionSupplier) -> Self {
         self.version_supplier = Some(supplier);
+        self.lc_supplier_scope = LC_SUPPLIER_SCOPE_SEQ.fetch_add(1, Ordering::SeqCst);
         self
     }
 
@@ -135,6 +156,92 @@ impl CodexProvider {
             "--enable".to_string(),
             "default_mode_request_user_input".to_string(),
         ]
+    }
+
+    /// LC 版本观测 key(Task 3.4/B0c):真实 CLI 以命令路径+可执行身份
+    /// (size+mtime,二进制替换即换 key)区分;supplier seam 以稳定标记+
+    /// 实例 scope 区分——测试 supplier 与真实 CLI 不串值(设计 §5.4)。
+    fn lc_version_probe_key(&self) -> LcVersionProbeKey {
+        LcVersionProbeKey {
+            provider: ProviderName::Codex,
+            canonical_executable: self.command.clone(),
+            executable_identity: self.lc_executable_identity(),
+            argv: vec!["--version".to_string()],
+            supplier_scope: self.lc_supplier_scope,
+        }
+    }
+
+    fn lc_executable_identity(&self) -> String {
+        if self.version_supplier.is_some() {
+            return "codex-version-supplier-seam".to_string();
+        }
+        match std::fs::metadata(&self.command) {
+            Ok(metadata) => {
+                let modified_ns = metadata
+                    .modified()
+                    .ok()
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|duration| duration.as_nanos())
+                    .unwrap_or(0);
+                format!("len={},mtime_ns={}", metadata.len(), modified_ns)
+            }
+            Err(_) => "unresolved".to_string(),
+        }
+    }
+
+    /// LC 权威版本观测(Task 3.4/B0c):走 [`LcVersionCache`] 60 秒
+    /// TTL/single-flight 合同(supplier seam 优先,默认真实 `--version` 有界
+    /// 探测)。prepare facts 与 LC validated start 的 spawn 前复验共用本
+    /// 入口(不双矩阵);direct 路径的无过期 `cached_cli_version` 不动。
+    async fn observe_lc_exact_version(
+        &self,
+        cancel: CancellationToken,
+    ) -> Result<LcVersionObservation, crate::cross_cutting::streaming_provider::VersionProbeError>
+    {
+        let key = self.lc_version_probe_key();
+        let command = self.command.clone();
+        let supplier = self.version_supplier.clone();
+        let probe: LcVersionProbe = std::sync::Arc::new(move |_key| {
+            match supplier.clone() {
+                Some(supplier) => Box::pin(async move { supplier() }),
+                None => {
+                    let command = command.clone();
+                    Box::pin(async move {
+                        probe_codex_version(&command, CODEX_VERSION_PROBE_TIMEOUT).await
+                    })
+                }
+            }
+        });
+        self.lc_version_cache
+            .cached_lc_cli_version(key, probe, cancel)
+            .await
+    }
+
+    /// LC 版本观测不可得的 fail-closed 映射(Task 5b):Coder 危险形态以
+    /// 危险稳定码拒绝(版本未知即受限投影不可认证);其余沿 LC validated
+    /// 错误前缀。
+    fn lc_version_unavailable(
+        envelope: &crate::product::logical_codebase::policy::SessionPolicyEnvelope,
+        tool_policy: Option<&crate::cross_cutting::streaming_provider::ProviderToolPolicy>,
+        error: crate::cross_cutting::streaming_provider::VersionProbeError,
+    ) -> ProviderAdapterError {
+        if projection::lc_coder_danger_shape(envelope, tool_policy) {
+            tracing::warn!(
+                target: "codex_provider",
+                %error,
+                "codex lc coder launch uncertifiable: exact version unknown"
+            );
+            return ProviderAdapterError::parse_error(
+                crate::product::logical_codebase::provider_gateway::CODEX_DANGER_FULL_ACCESS_UNSUPPORTED,
+                String::new(),
+                String::new(),
+            );
+        }
+        ProviderAdapterError::parse_error(
+            format!("codex lc validated start: {error}"),
+            String::new(),
+            String::new(),
+        )
     }
 }
 
@@ -155,19 +262,34 @@ impl CodexProvider {
         capability_snapshot_ref: &str,
         cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
-        // 既有测试驱动的 Normal 相位入口(Task 7 保持签名零变化)。
-        self.start_lc_validated_with_phase(input, envelope, capability_snapshot_ref, false, cancel)
-            .await
+        // 既有测试驱动的 Normal 相位入口(Task 7 保持签名零变化;裸 validate
+        // 无 gateway 冻结候选投影,frozen=None 走 adapter 侧自建投影)。
+        self.start_lc_validated_with_phase(
+            input,
+            envelope,
+            capability_snapshot_ref,
+            false,
+            None,
+            cancel,
+        )
+        .await
     }
 
     /// `start_validated` 的相位感知执行体(Task 7):`root_recipe_phase`
     /// 来自 validated policy 的冻结相位,供共用 LC guard 消费 marker 语义。
+    /// Task 3.4(B0c):`frozen_lc_projection` 为 gateway full 上下文路径
+    /// (`resume_or_start_with_projection` Resume / prepared candidate)冻结的
+    /// 候选投影——`Some` 时直接消费(spawn 前复验冻结版本,audit 与 prepared
+    /// full 投影同源);`None`(裸 validate/既有测试)沿 adapter 侧自建投影。
     async fn start_lc_validated_with_phase(
         &self,
         mut input: StreamingProviderInput,
         envelope: &crate::product::logical_codebase::policy::SessionPolicyEnvelope,
         capability_snapshot_ref: &str,
         root_recipe_phase: bool,
+        frozen_lc_projection: Option<
+            crate::product::logical_codebase::provider_projection::ProviderPolicyProjection,
+        >,
         cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
         let lc_error = |details: String| {
@@ -215,65 +337,68 @@ impl CodexProvider {
             lc_error("codex lc validated start: audit sink is required for LC launches".to_string())
         })?;
 
-        // 5) exact version(supplier seam 优先,默认真实 `--version` 探测+进程内
-        //    缓存;不可得 fail-closed)。全 LC 路径必填,非仅策略角色。Coder
+        // 5) exact version(Task 3.4/B0c:LC 权威观测走 `LcVersionCache` 60 秒
+        //    TTL/single-flight,supplier seam 优先,默认真实 `--version` 有界
+        //    探测;不可得 fail-closed)。全 LC 路径必填,非仅策略角色。Coder
         //    形态(direct 映射=danger-full-access)的预认证失败同以危险
         //    稳定码拒绝(Task 5b):版本未知即受限投影不可认证,唯一替代是
         //    永久拒绝的 danger-full-access。
-        let version_failure =
-            |error: crate::cross_cutting::streaming_provider::VersionProbeError| {
-                if projection::lc_coder_danger_shape(envelope, input.tool_policy.as_ref()) {
-                    tracing::warn!(
-                        target: "codex_provider",
-                        %error,
-                        "codex lc coder launch uncertifiable: exact version unknown"
-                    );
-                    ProviderAdapterError::parse_error(
-                    crate::product::logical_codebase::provider_gateway::CODEX_DANGER_FULL_ACCESS_UNSUPPORTED,
-                    String::new(),
-                    String::new(),
-                )
-                } else {
-                    lc_error(format!("codex lc validated start: {error}"))
-                }
-            };
-        let provider_version = match self.version_supplier.clone() {
-            Some(supplier) => supplier().map_err(version_failure)?,
-            None => crate::cross_cutting::streaming_provider::cached_cli_version(
-                &self.command,
-                probe_codex_version(&self.command, CODEX_VERSION_PROBE_TIMEOUT),
-            )
+        let provider_version = self
+            .observe_lc_exact_version(cancel.clone())
             .await
-            .map_err(version_failure)?,
-        };
+            .map_err(|error| {
+                Self::lc_version_unavailable(envelope, input.tool_policy.as_ref(), error)
+            })?
+            .exact_version()
+            .to_string();
 
-        // 6) 受限投影(REQ-LCG-04):envelope 派生不可伪造 boundary plan;
-        //    trust/MCP bundle digest 的 gateway 侧装配归 1b/1c(空串同样纳入
-        //    session digest,装配后任一漂移都会改变 projection_digest)。
-        //    approval 由投影从 action×permission 派生,gateway 不预冻结。
-        let boundary = projection::lc_boundary_plan(envelope)
-            .map_err(|error| lc_error(format!("codex lc validated start: {error}")))?;
-        let projection_input =
-            crate::product::logical_codebase::provider_projection::ProviderProjectionInput::new(
-                envelope.clone(),
-                crate::product::logical_codebase::provider_gateway::ProviderRef::codex(
-                    capability_snapshot_ref,
-                ),
-                envelope.action,
-                input.role.clone(),
-                input.permission_mode.clone(),
-                input.tool_policy.clone(),
-                String::new(),
-                String::new(),
-                envelope.config_artifact_ref.clone(),
-                String::new(),
-                Some(boundary),
-            );
-        let projector = CodexPolicyProjector::new(provider_version.clone());
-        let lc_projection = projector
-            .project(&projection_input)
-            .map_err(|error| lc_error(format!("codex lc validated start: {error}")))?;
-        let sandbox = projector.sandbox_projection(&lc_projection);
+        // 6) 受限投影(REQ-LCG-04):gateway full 上下文路径冻结的候选投影
+        //    直接消费——spawn 前复验冻结 exact version 与当前 TTL 观测一致
+        //    (不一致以 `CODEX_LC_PREPARED_VERSION_DRIFT` 稳定码 child 前拒绝,
+        //    零 ②③),sandbox/audit 与 prepared full 投影同源;裸 validate
+        //    (None)沿 adapter 侧自建投影(trust/MCP 空串同样纳入 session
+        //    digest,装配后任一漂移都会改变 projection_digest)。
+        let (lc_projection, sandbox) = match frozen_lc_projection {
+            Some(frozen) => {
+                if frozen.exact_version() != provider_version {
+                    return Err(lc_error(format!(
+                        "codex lc validated start: {}: frozen full projection expects exact version {}, observed {}; refusing to spawn",
+                        CODEX_LC_PREPARED_VERSION_DRIFT,
+                        frozen.exact_version(),
+                        provider_version
+                    )));
+                }
+                let projector = CodexPolicyProjector::new(frozen.exact_version().to_string());
+                let sandbox = projector.sandbox_projection(&frozen);
+                (frozen, sandbox)
+            }
+            None => {
+                let boundary = projection::lc_boundary_plan(envelope)
+                    .map_err(|error| lc_error(format!("codex lc validated start: {error}")))?;
+                let projection_input =
+                    crate::product::logical_codebase::provider_projection::ProviderProjectionInput::new(
+                        envelope.clone(),
+                        crate::product::logical_codebase::provider_gateway::ProviderRef::codex(
+                            capability_snapshot_ref,
+                        ),
+                        envelope.action,
+                        input.role.clone(),
+                        input.permission_mode.clone(),
+                        input.tool_policy.clone(),
+                        String::new(),
+                        String::new(),
+                        envelope.config_artifact_ref.clone(),
+                        String::new(),
+                        Some(boundary),
+                    );
+                let projector = CodexPolicyProjector::new(provider_version.clone());
+                let lc_projection = projector
+                    .project(&projection_input)
+                    .map_err(|error| lc_error(format!("codex lc validated start: {error}")))?;
+                let sandbox = projector.sandbox_projection(&lc_projection);
+                (lc_projection, sandbox)
+            }
+        };
 
         // 派生一致性防线:投影冻结的 target_root 必须等于 envelope 冻结
         // target(不一致即内部错误,fail-closed,不静默采纳)。
@@ -486,20 +611,15 @@ impl CodexProvider {
             if result.is_err() {
                 let _ = child.start_kill();
             }
-            let status = match bounded_child_wait(
-                &mut child,
-                PROVIDER_CHILD_EXIT_STREAM_DRAIN,
-            )
-            .await
-            {
-                Some(status) => Ok(status),
-                None => Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "bounded child join elapsed before exit status",
-                )),
-            };
-            let _ =
-                bounded_task_join(stderr_task, PROVIDER_CHILD_EXIT_STREAM_DRAIN).await;
+            let status =
+                match bounded_child_wait(&mut child, PROVIDER_CHILD_EXIT_STREAM_DRAIN).await {
+                    Some(status) => Ok(status),
+                    None => Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "bounded child join elapsed before exit status",
+                    )),
+                };
+            let _ = bounded_task_join(stderr_task, PROVIDER_CHILD_EXIT_STREAM_DRAIN).await;
             if let Err(error) = result {
                 let stderr =
                     support::combine_stderr(stderr_output.lock().await.clone(), error.stderr);
@@ -829,29 +949,27 @@ impl StreamingProviderAdapter for CodexProvider {
             let result = match run_session_tail_with_exit_watch(
                 // 双 session 入口 future 类型不同,各臂独立装箱统一(契约不变)。
                 match policy_handshake {
-                    Some(handshake) => {
-                        Box::pin(session::run_codex_session_loop(
-                            peer,
-                            bridge,
-                            event_tx.clone(),
-                            input,
-                            cancel.clone(),
-                            handshake,
-                        )) as std::pin::Pin<
+                    Some(handshake) => Box::pin(session::run_codex_session_loop(
+                        peer,
+                        bridge,
+                        event_tx.clone(),
+                        input,
+                        cancel.clone(),
+                        handshake,
+                    ))
+                        as std::pin::Pin<
                             Box<dyn Future<Output = Result<(), ProviderAdapterError>> + Send>,
-                        >
-                    }
-                    None => {
-                        Box::pin(session::run_codex_session(
-                            peer,
-                            bridge,
-                            event_tx.clone(),
-                            input,
-                            cancel.clone(),
-                        )) as std::pin::Pin<
+                        >,
+                    None => Box::pin(session::run_codex_session(
+                        peer,
+                        bridge,
+                        event_tx.clone(),
+                        input,
+                        cancel.clone(),
+                    ))
+                        as std::pin::Pin<
                             Box<dyn Future<Output = Result<(), ProviderAdapterError>> + Send>,
-                        >
-                    }
+                        >,
                 },
                 &mut child,
                 PROVIDER_CHILD_EXIT_STREAM_DRAIN,
@@ -865,20 +983,15 @@ impl StreamingProviderAdapter for CodexProvider {
             if result.is_err() {
                 let _ = child.start_kill();
             }
-            let status = match bounded_child_wait(
-                &mut child,
-                PROVIDER_CHILD_EXIT_STREAM_DRAIN,
-            )
-            .await
-            {
-                Some(status) => Ok(status),
-                None => Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "bounded child join elapsed before exit status",
-                )),
-            };
-            let _ =
-                bounded_task_join(stderr_task, PROVIDER_CHILD_EXIT_STREAM_DRAIN).await;
+            let status =
+                match bounded_child_wait(&mut child, PROVIDER_CHILD_EXIT_STREAM_DRAIN).await {
+                    Some(status) => Ok(status),
+                    None => Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "bounded child join elapsed before exit status",
+                    )),
+                };
+            let _ = bounded_task_join(stderr_task, PROVIDER_CHILD_EXIT_STREAM_DRAIN).await;
             if let Err(error) = result {
                 let stderr =
                     support::combine_stderr(stderr_output.lock().await.clone(), error.stderr);
@@ -933,8 +1046,89 @@ impl StreamingProviderAdapter for CodexProvider {
             launch.envelope(),
             launch.capability_snapshot_ref(),
             launch.is_root_recipe_phase(),
+            launch.lc_projection().cloned(),
             cancel,
         )
         .await
+    }
+
+    /// Task 3.4(B0c):本家只读 LC prepare facts——guard(role 一致/危险门)
+    /// 先于 ①版本观测与一切 child;exact version 走 `LcVersionCache` 60 秒
+    /// TTL/single-flight(supplier seam 优先);boundary 由 envelope 派生;
+    /// approval 取 REQ-LCG-04 冻结映射;Codex LC 无 MCP bundle(空串,与
+    /// adapter 侧投影输入同源);projector 与 exact version 同源。全程零
+    /// durable 写/零 spawn(gateway 消费本 facts 装配 full 投影)。
+    async fn prepare_lc_facts(
+        &self,
+        input: &StreamingProviderInput,
+        launch: &crate::product::logical_codebase::provider_gateway::ValidatedSessionLaunchPolicy,
+        cancel: CancellationToken,
+    ) -> Result<ProviderLcPrepareFacts, ProviderAdapterError> {
+        let lc_error = |details: String| {
+            ProviderAdapterError::parse_error(details, String::new(), String::new())
+        };
+        let envelope = launch.envelope();
+
+        // 1) 共用 LC run-context guard(早于 ①版本观测/child,与 start 路径
+        //    同序、同源)。
+        crate::cross_cutting::streaming_provider::guard_lc_validated_launch(
+            launch.is_root_recipe_phase(),
+            &input.role,
+            &input.role,
+            input.tool_policy.as_ref(),
+        )
+        .map_err(|error| lc_error(format!("codex lc prepare facts: {error}")))?;
+
+        // 2) adapter 匹配:只观测 Codex app-server(不匹配即拒,不回退)。
+        if input.provider_type != crate::protocol::contracts::ProviderType::Codex
+            || envelope.provider_dialect
+                != crate::product::logical_codebase::policy::ProviderDialect::CodexCliV1
+        {
+            return Err(lc_error(
+                "codex lc prepare facts: only Codex app-server facts are served by this adapter"
+                    .to_string(),
+            ));
+        }
+
+        // 3) REQ-LCG-04 危险门(Coder 形态受限写面未冻结):零观测零 child
+        //    拒绝(稳定码与 gateway 路由门同源字节)。
+        if let Some(reason) = projection::lc_danger_refusal(envelope, input.tool_policy.as_ref()) {
+            return Err(ProviderAdapterError::parse_error(
+                reason,
+                String::new(),
+                String::new(),
+            ));
+        }
+
+        // 4) exact version:60 秒 TTL/single-flight(①口径;不可得
+        //    fail-closed,Coder 危险形态同以危险稳定码拒绝)。
+        let observation = self
+            .observe_lc_exact_version(cancel)
+            .await
+            .map_err(|error| {
+                Self::lc_version_unavailable(envelope, input.tool_policy.as_ref(), error)
+            })?;
+
+        // 5) 受限 boundary/approval fact 与同版本 projector(readonly,零写;
+        //    sandbox 受限观测约束——Codex LC 恒 read-only/workspace-write)。
+        let boundary = projection::lc_boundary_plan(envelope)
+            .map_err(|error| lc_error(format!("codex lc prepare facts: {error}")))?;
+        let approval_policy =
+            projection::lc_approval_policy(envelope.action, &input.permission_mode);
+
+        Ok(ProviderLcPrepareFacts::new(
+            crate::product::logical_codebase::provider_gateway::ProviderRefType::Codex,
+            envelope.provider_dialect,
+            crate::product::logical_codebase::policy::ProviderWireDialect::CodexAppServerRpc,
+            observation.exact_version().to_string(),
+            observation.observed_at(),
+            self.lc_version_probe_key(),
+            approval_policy,
+            String::new(),
+            boundary,
+            std::sync::Arc::new(CodexPolicyProjector::new(
+                observation.exact_version().to_string(),
+            )),
+        ))
     }
 }

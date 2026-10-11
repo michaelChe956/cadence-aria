@@ -478,8 +478,9 @@ fn boundary_evidence_ref_for(plan: &ProviderBoundaryPlan) -> String {
 }
 
 /// action×permission 的冻结 approval 映射(REQ-LCG-04:只读恒 on-request;
-/// Coding Auto→never/Supervised→on-request)。
-fn lc_approval_policy(
+/// Coding Auto→never/Supervised→on-request)。Task 3.4(B0c)起同时是
+/// `prepare_lc_facts` approval fact 的单一来源。
+pub(crate) fn lc_approval_policy(
     action: SessionPolicyAction,
     permission_mode: &ProviderPermissionMode,
 ) -> String {

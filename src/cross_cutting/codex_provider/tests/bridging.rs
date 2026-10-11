@@ -589,3 +589,233 @@ async fn lcg_t05_coding_supervised_maps_on_request_approval_on_wire() {
     assert_eq!(record.approval_policy.as_deref(), Some("on-request"));
     assert_eq!(record.sandbox.as_deref(), Some("workspace-write"));
 }
+
+// ==== Task 3.4(B0c):真实漂移零 session/child 与错 ID kill/reap ====
+
+use std::sync::Arc;
+
+use super::approval_policy::{
+    ANCHOR_T34_VERSION_INITIAL, ANCHOR_T34_VERSION_REPLACED,
+    anchor_t34_combined_app_server_fixture, anchor_t34_lc_harness, anchor_t34_lc_input,
+    anchor_t34_markers,
+};
+use crate::cross_cutting::session_launch::ValidatedStreamingProviderInput;
+use crate::cross_cutting::tool_policy_audit::DurableToolPolicyEvent;
+use crate::product::logical_codebase::provider_gateway::{
+    GatewaySessionDisposition, ProviderLaunchAuditContext, ResumeSessionLaunchRequest,
+    SessionResumeFingerprint, canonical_target_git_identity,
+};
+
+/// Task 3.4(B0c)Step 1 红测试:真实 CLI 命令 identity 变化(重写命令文件)
+/// 后,重观测 version 与冻结 full 投影不一致 → typed 拒、零 adapter start
+/// 足迹、零新 child;adapter 纵深(以陈旧冻结投影直启)在 child 前 typed 拒;
+/// thread/resume 真实同 ID 确认,错 ID 应答 kill/reap 不伪称零 child。
+///
+/// 三口径:①版本观测(probe/supplier 调用,identity 换 key 后允许再观测);
+/// ②adapter start 足迹(provider_start 审计落盘);③协议 child(mismatch
+/// 尝试的独立 spawn marker)。mismatch 比较自身零 ②③;错 ID 是已启动 child
+/// 后的 runtime 失败,kill/reap 并如实记录。
+#[cfg(unix)]
+#[tokio::test]
+async fn anchor_t34_real_drift_zero_session_child() {
+    let fixture_path = anchor_t34_combined_app_server_fixture(ANCHOR_T34_VERSION_INITIAL);
+    let provider = Arc::new(CodexProvider::new(fixture_path.clone()));
+    let recording =
+        crate::cross_cutting::tool_policy_audit::test_support::RecordingToolPolicyAuditSink::new();
+    let harness = anchor_t34_lc_harness(provider.clone(), ANCHOR_T34_VERSION_INITIAL);
+
+    // 1) prepare:真实 CLI ①观测恰一次,冻结 full 候选。
+    let marker_root = tempfile::tempdir().expect("t34 drift marker dir").keep();
+    let mut happy_input =
+        anchor_t34_lc_input(&harness.authority_root, Some("codex-thread-lc".to_string()));
+    let (_happy_cwd, _happy_wire, happy_spawn, _happy_pid) =
+        anchor_t34_markers(&mut happy_input, &marker_root, "happy");
+    let candidate = harness
+        .gateway
+        .prepare_lc_streaming_candidate(
+            happy_input,
+            harness.request.clone(),
+            ProviderLaunchAuditContext {
+                workspace_session_id: "ws-anchor-t34-drift".to_string(),
+                role_run_seq: 1,
+                audit_sink: recording.clone(),
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect("real cli codex prepare must freeze a full candidate");
+    assert_eq!(
+        candidate.facts().exact_version(),
+        ANCHOR_T34_VERSION_INITIAL
+    );
+    let prepared_projection_digest = candidate.full_projection().projection_digest().to_string();
+
+    // 2) full-matching resume → 真实 start:thread/resume 应答确认同 ID。
+    let previous = SessionResumeFingerprint::from_envelope(
+        candidate.validated().envelope(),
+        candidate.full_projection(),
+        candidate.validated().action_evidence_digest(),
+        &canonical_target_git_identity(&candidate.validated().envelope().target.worktree),
+    );
+    let GatewaySessionDisposition::Resume(resume_validated) = harness
+        .gateway
+        .resume_or_start_with_projection(
+            ResumeSessionLaunchRequest {
+                launch: harness.request.clone(),
+                previous_fingerprint: previous,
+                previous_session_id: "sess-anchor-t34-drift".to_string(),
+            },
+            candidate.full_projection().clone(),
+        )
+        .expect("full-matching fingerprint must resume")
+    else {
+        panic!("expected a Resume disposition");
+    };
+    let mut session = provider
+        .start_validated(
+            ValidatedStreamingProviderInput::new(
+                candidate.input().clone(),
+                resume_validated.clone(),
+            ),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("prepared projection must start the confirmed native thread");
+    assert_eq!(
+        session.native_session_id.as_deref(),
+        Some("codex-thread-lc"),
+        "thread/resume confirmation must equal the requested id"
+    );
+    assert_eq!(
+        recv_completed(&mut session.events).await,
+        "lc restricted done"
+    );
+    assert!(
+        happy_spawn.exists(),
+        "the confirmed resume really spawned once"
+    );
+
+    let provider_start_count = || {
+        recording
+            .events()
+            .iter()
+            .filter(|event| matches!(event, DurableToolPolicyEvent::ProviderStart(_)))
+            .count()
+    };
+    assert_eq!(provider_start_count(), 1);
+    let prepared_audit_digest = recording
+        .events()
+        .iter()
+        .find_map(|event| match event {
+            DurableToolPolicyEvent::ProviderStart(record) => record
+                .lc_projection
+                .as_ref()
+                .map(|lc| lc.projection_digest.clone()),
+            _ => None,
+        })
+        .expect("the confirmed start wrote an lc projection audit");
+    assert_eq!(prepared_projection_digest, prepared_audit_digest);
+
+    // 3) 错 ID 应答(请求 codex-thread-wrong,应答 codex-thread-lc):已启动
+    //    child 后的 runtime 失败——kill/reap、错误如实记录「未恢复」,零新
+    //    provider_start(不伪称零 spawn)。
+    let wrong_marker_root = tempfile::tempdir().expect("t34 wrong-id marker dir").keep();
+    // 复用 prepare 绑定的 run-bound 面(sink/会话身份),只换 resume id 与
+    // 观测 marker——与真实 caller 的错 ID 重试同一输入形态。
+    let mut wrong_input = candidate.input().clone();
+    wrong_input.resume_provider_session_id = Some("codex-thread-wrong".to_string());
+    let (_wrong_cwd, _wrong_wire, wrong_spawn, wrong_pid) =
+        anchor_t34_markers(&mut wrong_input, &wrong_marker_root, "wrong");
+    let wrong_result = provider
+        .start_validated(
+            ValidatedStreamingProviderInput::new(wrong_input, resume_validated.clone()),
+            CancellationToken::new(),
+        )
+        .await;
+    let Err(wrong_error) = wrong_result else {
+        panic!("a mismatched thread/resume confirmation must fail the start");
+    };
+    assert!(
+        wrong_error.details.contains("session NOT resumed")
+            && wrong_error
+                .details
+                .contains("the started child was killed and reaped"),
+        "wrong-id rejection must record the not-resumed outcome without claiming zero spawn: {wrong_error:?}"
+    );
+    assert_eq!(
+        provider_start_count(),
+        1,
+        "no fresh provider_start may be written for a resume the native side never confirmed"
+    );
+    assert!(
+        wrong_spawn.exists(),
+        "the wrong-id leg really spawned a child"
+    );
+    let wrong_native_child_killed_and_reaped =
+        match super::approval_policy::wait_for_child_pid_marker_public(&wrong_pid) {
+            Some(pid) => {
+                super::approval_policy::assert_child_terminated_public(
+                    pid,
+                    "a wrong-id LC thread/resume handshake",
+                );
+                true
+            }
+            None => false,
+        };
+    assert!(wrong_native_child_killed_and_reaped);
+
+    // 4) 真实漂移:重写命令文件(同路径新 identity:版本串回显 1.1.0)→
+    //    TTL 换 key 重观测;与冻结 full 投影比对 typed 拒,比较自身零 ②③。
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let replaced_path = anchor_t34_combined_app_server_fixture(ANCHOR_T34_VERSION_REPLACED);
+    std::fs::copy(&replaced_path, &fixture_path).expect("rewrite the command file in place");
+    // ①身份变更后允许再次真实观测(不同 key,不串旧值)。
+    let current = harness
+        .gateway
+        .reobserve_lc_prepare_facts(&candidate, CancellationToken::new())
+        .await
+        .expect("reobservation must re-probe under the new command identity key");
+    assert_eq!(current.exact_version(), ANCHOR_T34_VERSION_REPLACED);
+    let typed_rejection = candidate
+        .assert_frozen_version(&current)
+        .expect_err("a replaced command identity must be typed-rejected against frozen facts");
+    assert!(
+        matches!(
+            &typed_rejection,
+            crate::product::logical_codebase::ProviderGatewayError::PolicyDrift { dimension }
+                if dimension == "provider_version"
+        ),
+        "unexpected rejection shape: {typed_rejection:?}"
+    );
+    // mismatch 比较自身零 ②③:无新 provider_start、无新 child(mismatch
+    // 尝试使用独立 spawn marker)。
+    let mismatch_marker_root = tempfile::tempdir().expect("t34 mismatch marker dir").keep();
+    // 同上:复用 run-bound 面,只换观测 marker(陈旧冻结投影 + 已漂移的
+    // 当前观测必须在 child 前被拒)。
+    let mut mismatch_input = candidate.input().clone();
+    let (_m_cwd, _m_wire, mismatch_spawn, _m_pid) =
+        anchor_t34_markers(&mut mismatch_input, &mismatch_marker_root, "mismatch");
+    let mismatch_result = provider
+        .start_validated(
+            ValidatedStreamingProviderInput::new(mismatch_input, resume_validated),
+            CancellationToken::new(),
+        )
+        .await;
+    let Err(mismatch_error) = mismatch_result else {
+        panic!("a stale frozen projection must be refused before spawn (adapter defense)");
+    };
+    assert!(
+        mismatch_error
+            .details
+            .contains("codex_lc_prepared_version_drift"),
+        "adapter-side drift rejection must carry the stable marker: {mismatch_error:?}"
+    );
+    assert!(
+        !mismatch_spawn.exists(),
+        "no codex child may spawn for a drifted prepared projection"
+    );
+    let mismatch_adapter_starts = provider_start_count() - 1;
+    let mismatch_children = usize::from(mismatch_spawn.exists());
+    assert_eq!(mismatch_adapter_starts, 0);
+    assert_eq!(mismatch_children, 0);
+}
