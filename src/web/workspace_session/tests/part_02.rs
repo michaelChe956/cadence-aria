@@ -355,12 +355,49 @@ fn automation_ownership_store_projects_only_precisely_bound_session() {
     assert!(store.ownership_for_session(&bound).is_err());
 }
 
+/// A1b1（Task 2.3）：workspace session store 扫描只认 `workspace_session_*`
+/// ID（lifecycle_store/utils.rs::workspace_session_file_stem）——durable 投影
+/// 读取的落盘规范 ID（幂等）。automation 绑定（bind_plan/ownership）必须与
+/// 落盘 record.id 同串。
+fn automation_store_session_id(session_id: &str) -> String {
+    if session_id.starts_with("workspace_session_") {
+        session_id.to_string()
+    } else {
+        format!(
+            "workspace_session_{}",
+            session_id.strip_prefix("session_").unwrap_or(session_id)
+        )
+    }
+}
+
 fn automation_manager_fixture(
     paths: &ProductAppPaths,
-    record: crate::product::models::WorkspaceSessionRecord,
+    mut record: crate::product::models::WorkspaceSessionRecord,
 ) -> Arc<WorkspaceSessionManager> {
     use crate::product::checkpoint_store::CheckpointStore;
     use crate::product::workspace_engine::{WorkspaceEngine, WorkspaceSession};
+
+    // A1b1（Task 2.3，Main 裁定 Option A）：durable 投影正文每次读最新
+    // record——出生 record 必须真实落盘；store 扫描只认 `workspace_session_*`
+    // ID，统一补前缀（幂等）。断言本体不动；2.4 Result cutover 再按需迁移。
+    record.id = automation_store_session_id(&record.id);
+    crate::product::lifecycle_store::LifecycleStore::new(paths.clone())
+        .create_workspace_session_with_id(
+            crate::product::lifecycle_store::CreateWorkspaceSessionInput {
+                project_id: record.project_id.clone(),
+                issue_id: record.issue_id.clone(),
+                entity_id: record.entity_id.clone(),
+                workspace_type: record.workspace_type.clone(),
+                author_provider: record.author_provider.clone(),
+                reviewer_provider: record.reviewer_provider.clone(),
+                review_rounds: record.review_rounds,
+                superpowers_enabled: record.superpowers_enabled,
+                openspec_enabled: record.openspec_enabled,
+                work_item_plan_options: None,
+            },
+            record.id.clone(),
+        )
+        .expect("persist automation session record");
 
     let (engine_tx, _engine_rx) = mpsc::channel(1);
     let checkpoint_store = Arc::new(CheckpointStore::new(
@@ -404,7 +441,7 @@ async fn automation_ownership_injected_into_manager_session_state_frames() {
             "issue_auto",
             enrollment.policy_revision,
             "plan_auto",
-            "session_auto_bound",
+            &automation_store_session_id("session_auto_bound"),
         )
         .unwrap();
 
@@ -457,7 +494,10 @@ async fn automation_ownership_injected_into_manager_session_state_frames() {
     let dto = crate::web::handlers::dto::workspace_session_summary_dto(
         &bound_summary,
         store
-            .ownership_for_session(&automation_test_record("session_auto_bound", "plan_auto"))
+            .ownership_for_session(&automation_test_record(
+                &automation_store_session_id("session_auto_bound"),
+                "plan_auto",
+            ))
             .unwrap(),
     );
     assert_eq!(dto.automation.owner, AutomationOwner::Server);

@@ -30,6 +30,12 @@ use choices::ChoiceClaimRecord;
 pub use choices::ChoiceReplyError;
 mod degraded_diagnostics;
 mod durable_projection;
+/// A1b1（Task 2.3）：durable 纯投影加载核心的 crate 出口——2.3 tuple 内部
+/// 消费、part_07 typed 断言与 2.4 router/attach/socket Result cutover 共用。
+pub(crate) use durable_projection::{
+    DURABLE_PROJECTION_UNAVAILABLE_CODE, DurableProjectionError, DurableWorkspaceProjection,
+    WorkspaceSessionIdentity, load_durable_workspace_projection,
+};
 pub(crate) use lease_diagnostics::lease_diagnostics_path;
 mod lease_diagnostics;
 mod runs;

@@ -39,12 +39,36 @@ static FIXTURE_ROOTS: std::sync::Mutex<Vec<tempfile::TempDir>> = std::sync::Mute
 
 fn claim_manager(session_id: &str) -> Arc<WorkspaceSessionManager> {
     // 复用 part_02 的 automation fixture 构造思路：每个测试独立 tmp 目录。
+    // A1b1（Task 2.3）：durable 投影正文每次读最新 record——出生 record 必须
+    // 真实落盘；store 扫描只认 `workspace_session_*` ID，fixture 统一补前缀。
+    let session_id = format!(
+        "workspace_session_{}",
+        session_id.strip_prefix("session_").unwrap_or(session_id)
+    );
     let tmp = tempfile::tempdir().unwrap();
     let paths = crate::product::app_paths::ProductAppPaths::new(tmp.path().join(".aria"));
     FIXTURE_ROOTS.lock().unwrap().push(tmp);
-    let mut record = crate::web::workspace_session::manager::test_session_record(session_id);
+    let mut record = crate::web::workspace_session::manager::test_session_record(&session_id);
     record.project_id = "project_claim".to_string();
     record.issue_id = "issue_claim".to_string();
+    // A1b1：出生 record 落盘（读取失败按 typed 合同返回 ProtocolError）。
+    crate::product::lifecycle_store::LifecycleStore::new(paths.clone())
+        .create_workspace_session_with_id(
+            crate::product::lifecycle_store::CreateWorkspaceSessionInput {
+                project_id: record.project_id.clone(),
+                issue_id: record.issue_id.clone(),
+                entity_id: record.entity_id.clone(),
+                workspace_type: record.workspace_type.clone(),
+                author_provider: record.author_provider.clone(),
+                reviewer_provider: record.reviewer_provider.clone(),
+                review_rounds: record.review_rounds,
+                superpowers_enabled: record.superpowers_enabled,
+                openspec_enabled: record.openspec_enabled,
+                work_item_plan_options: None,
+            },
+            record.id.clone(),
+        )
+        .expect("persist claim session record");
     let (engine_tx, _engine_rx) = mpsc::channel(1);
     let engine = crate::product::workspace_engine::WorkspaceEngine::new(
         Arc::new(crate::product::checkpoint_store::CheckpointStore::new(
@@ -54,7 +78,7 @@ fn claim_manager(session_id: &str) -> Arc<WorkspaceSessionManager> {
         crate::product::workspace_engine::WorkspaceSession::from_record(record.clone()),
     );
     crate::web::workspace_session::manager::WorkspaceSessionManager::test_fixture_with_parts(
-        session_id,
+        &session_id,
         Arc::new(tokio::sync::Mutex::new(engine)),
         Arc::new(crate::cross_cutting::provider_registry::ProviderRegistry::new()),
         paths,
@@ -449,4 +473,262 @@ async fn automation_generation_does_not_supersede_live_run() {
     let active = manager.active_run_ref_for_test().unwrap();
     assert_eq!(active.token, token);
     assert_eq!(active.run_incarnation, run_incarnation);
+}
+
+// ==== A1b1（Task 2.3）：最新 record 纯投影加载与错误合同 ====
+// manager 存活期间 durable 恢复事实前进时，durable 投影每次以 session_id
+// 读取最新 WorkspaceSessionRecord（出生 record 仅身份对照，不作正文）；
+// ProjectionOnly 零恢复写；读取失败 typed 错误，绝不回退出生 record。
+
+use crate::product::checkpoint_store::CheckpointStore;
+use crate::product::lifecycle_store::CreateWorkspaceSessionInput;
+use crate::product::models::{
+    LcRecoveryBusinessContext, LcRecoveryRunContext, LcResumeRecoveryRecord,
+    LcResumeRecoveryState, ProviderConversationRole, ProviderName, WorkspaceSessionRecord,
+    WorkspaceSessionStatus,
+};
+use crate::product::workspace_engine::{WorkspaceEngine, WorkspaceSession};
+use crate::web::workspace_session::manager::{
+    DURABLE_PROJECTION_UNAVAILABLE_CODE, DurableProjectionError, DurableWorkspaceProjection,
+    WorkspaceSessionIdentity, load_durable_workspace_projection,
+};
+
+/// 出生 record 经真实 LifecycleStore 落盘（生产 `WorkspaceSessionManager::create`
+/// 同源），manager 绑定该 record。
+fn anchored_durable_manager(
+    project_id: &str,
+) -> (
+    Arc<WorkspaceSessionManager>,
+    ProductAppPaths,
+    WorkspaceSessionRecord,
+) {
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = ProductAppPaths::new(tmp.path().join(".aria"));
+    FIXTURE_ROOTS.lock().unwrap().push(tmp);
+    let record = LifecycleStore::new(paths.clone())
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: project_id.to_string(),
+            issue_id: "issue_anchor".to_string(),
+            entity_id: "entity_anchor".to_string(),
+            workspace_type: WorkspaceType::Story,
+            author_provider: ProviderName::Fake,
+            reviewer_provider: Some(ProviderName::Fake),
+            review_rounds: 0,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+            work_item_plan_options: None,
+        })
+        .expect("durable session record");
+    let (engine_tx, _engine_rx) = mpsc::channel(1);
+    let engine = WorkspaceEngine::new(
+        Arc::new(CheckpointStore::new(paths.issue_lifecycle_root(
+            &record.project_id,
+            &record.issue_id,
+        ))),
+        engine_tx,
+        WorkspaceSession::from_record(record.clone()),
+    );
+    let manager = WorkspaceSessionManager::test_fixture_with_parts(
+        &record.id,
+        Arc::new(tokio::sync::Mutex::new(engine)),
+        Arc::new(ProviderRegistry::new()),
+        paths.clone(),
+        record.clone(),
+    );
+    (manager, paths, record)
+}
+
+fn anchor_session_record_path(
+    paths: &ProductAppPaths,
+    record: &WorkspaceSessionRecord,
+) -> std::path::PathBuf {
+    paths
+        .issue_lifecycle_root(&record.project_id, &record.issue_id)
+        .join("workspace-sessions")
+        .join(format!("{}.json", record.id))
+}
+
+/// manager 存活期间 durable 恢复事实前进：最新 record 带 LC 恢复，
+/// 出生 record（manager 绑定）保持无恢复。
+fn overwrite_latest_record_with_recovery(
+    paths: &ProductAppPaths,
+    record: &WorkspaceSessionRecord,
+    recovery_id: &str,
+) {
+    let mut latest = LifecycleStore::new(paths.clone())
+        .get_workspace_session(&record.id)
+        .expect("latest record");
+    latest.lc_resume_recovery = Some(anchor_t04_recovery_record(recovery_id));
+    std::fs::write(
+        anchor_session_record_path(paths, record),
+        serde_json::to_string(&latest).expect("serialize latest record"),
+    )
+    .expect("overwrite latest record");
+}
+
+fn anchor_t04_recovery_record(recovery_id: &str) -> LcResumeRecoveryRecord {
+    LcResumeRecoveryRecord {
+        schema_version: 1,
+        recovery_id: recovery_id.to_string(),
+        failed_provider_node_id: "node_anchor_0001".to_string(),
+        reason_code: "resume_fingerprint_mismatch".to_string(),
+        role: ProviderConversationRole::Author,
+        provider: ProviderName::Codex,
+        superseded_native_session_id: Some("native_anchor_0001".to_string()),
+        previous_fingerprint_digest: Some("sha256:anchor_full_projection".to_string()),
+        previous_session_status: WorkspaceSessionStatus::Running,
+        previous_stage: "running".to_string(),
+        run_context: LcRecoveryRunContext::Author {
+            business: LcRecoveryBusinessContext {
+                entity_id: "entity_anchor".to_string(),
+                plan_id: None,
+                workspace_type: WorkspaceType::Story,
+                business_repository_physical_id: None,
+                business_repository_logical_id: None,
+                business_checkout_id: None,
+                business_repository_path: None,
+                source_story_ids: Vec::new(),
+                source_design_ids: Vec::new(),
+                plan_options_ref: None,
+                artifact_refs: Vec::new(),
+                review_refs: Vec::new(),
+                author_provider: ProviderName::Codex,
+                effective_reviewer_provider: None,
+                original_node_id: Some("node_anchor_0001".to_string()),
+                original_role_run_seq: Some(1),
+            },
+            original_content: Some("原 author prompt 内容".to_string()),
+        },
+        state: LcResumeRecoveryState::Waiting,
+        operation_id: None,
+        fresh_node_id: None,
+        fresh_native_session_id: None,
+        fresh_role_run_seq: None,
+        fresh_operations: Vec::new(),
+        detected_at: "2026-10-11T00:02:00Z".to_string(),
+        updated_at: "2026-10-11T00:02:00Z".to_string(),
+    }
+}
+
+/// durable 全量快照（projects 子树：session/timeline/turn 逐文件字节）。
+fn durable_tree_snapshot(paths: &ProductAppPaths) -> Vec<(String, Vec<u8>)> {
+    fn walk(dir: &std::path::Path, prefix: String, out: &mut Vec<(String, Vec<u8>)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut entries: Vec<_> = entries.flatten().collect();
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let path = entry.path();
+            let name = format!("{prefix}/{}", entry.file_name().to_string_lossy());
+            if path.is_dir() {
+                walk(&path, name, out);
+            } else {
+                out.push((name, std::fs::read(&path).expect("read durable file")));
+            }
+        }
+    }
+    let mut snapshot = Vec::new();
+    walk(&paths.projects_root(), String::new(), &mut snapshot);
+    snapshot
+}
+
+#[tokio::test]
+async fn anchor_t04_latest_record_pure_projection_while_engine_locked() {
+    let (manager, paths, birth) = anchored_durable_manager("project_anchor_latest");
+
+    // 最新 durable record 带 LC 恢复；出生 record 无恢复——出生 record
+    // 不得再作投影正文。
+    overwrite_latest_record_with_recovery(&paths, &birth, "latest-rec");
+
+    // 纯投影前后 session/timeline/turn 零写的对照快照。
+    let durable_before = durable_tree_snapshot(&paths);
+
+    // engine 锁被长持（provider run 占用）——纯投影不得依赖 engine 锁。
+    let _engine_guard = manager.lock_engine_for_test().await;
+
+    // private 纯加载核心：最新 record 为正文，身份与 manager 绑定一致。
+    let identity = WorkspaceSessionIdentity::from_bound_record(&birth);
+    let projection: DurableWorkspaceProjection =
+        load_durable_workspace_projection(&paths, &identity)
+            .expect("pure projection of latest record");
+    assert_eq!(projection.recovery_id(), Some("latest-rec"));
+
+    // tuple 出口（current_session_state 降级路径）同源最新 record。
+    let (frame, _pending) = manager.durable_projection();
+    let WsOutMessage::SessionState {
+        lc_resume_recovery, ..
+    } = &frame
+    else {
+        panic!("expected session state frame, got {frame:?}");
+    };
+    assert_eq!(
+        lc_resume_recovery
+            .as_ref()
+            .map(|dto| dto.recovery_id.as_str()),
+        Some("latest-rec"),
+        "tuple 出口必须投影最新 record 的恢复事实"
+    );
+
+    // ProjectionOnly：前后 session/timeline/turn 零写。
+    let durable_after = durable_tree_snapshot(&paths);
+    assert_eq!(
+        durable_before, durable_after,
+        "纯投影前后 session/timeline/turn 必须零写"
+    );
+}
+
+#[tokio::test]
+async fn anchor_t04_projection_read_failure_never_uses_birth_record() {
+    let (manager, paths, birth) = anchored_durable_manager("project_anchor_unreadable");
+    let identity = WorkspaceSessionIdentity::from_bound_record(&birth);
+    let record_path = anchor_session_record_path(&paths, &birth);
+
+    // 1) 最新 record 身份漂移（entity 不再匹配 manager 绑定）→
+    //    IdentityMismatch，不回出生 record。
+    let mut drifted = LifecycleStore::new(paths.clone())
+        .get_workspace_session(&birth.id)
+        .expect("latest record before drift");
+    drifted.entity_id = "entity_drifted".to_string();
+    std::fs::write(
+        &record_path,
+        serde_json::to_string(&drifted).expect("serialize drifted record"),
+    )
+    .expect("write drifted record");
+    assert!(matches!(
+        load_durable_workspace_projection(&paths, &identity),
+        Err(DurableProjectionError::IdentityMismatch { .. })
+    ));
+
+    // 2) record 文件损坏（JSON）→ typed Store 错误；tuple 出口真实
+    //    ProtocolError＋None，不出生 record/default 假态。code 取稳定常量
+    //    （与字面量单点锚定）。
+    assert_eq!(
+        DURABLE_PROJECTION_UNAVAILABLE_CODE,
+        "workspace_durable_projection_unavailable"
+    );
+    std::fs::write(&record_path, "{ not json").unwrap();
+    let unreadable = load_durable_workspace_projection(&paths, &identity);
+    assert!(matches!(unreadable, Err(DurableProjectionError::Store(_))));
+    let (frame, pending) = manager.durable_projection();
+    assert!(matches!(
+        &frame,
+        WsOutMessage::ProtocolError { code, .. }
+            if code == DURABLE_PROJECTION_UNAVAILABLE_CODE
+    ));
+    assert!(pending.is_none());
+
+    // 3) record 缺失（NotFound）→ 同样 typed Store，无出生 record 假态。
+    std::fs::remove_file(&record_path).unwrap();
+    assert!(matches!(
+        load_durable_workspace_projection(&paths, &identity),
+        Err(DurableProjectionError::Store(_))
+    ));
+    let (frame, pending) = manager.durable_projection();
+    assert!(matches!(
+        &frame,
+        WsOutMessage::ProtocolError { code, .. }
+            if code == DURABLE_PROJECTION_UNAVAILABLE_CODE
+    ));
+    assert!(pending.is_none());
 }

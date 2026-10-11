@@ -229,6 +229,19 @@ fn recover_complete_artifact_misclassified_as_text_fallback(
     *active_node_id = Some(author_confirm_node_id);
     Ok(true)
 }
+/// A1b1（设计 §4.4 / Plan 接口字典）：`new_persistent` 与
+/// `new_persistent_for_projection` 共享纯持久读核心的派生产物——两条持久
+/// 构造路径（真实恢复 / 纯投影）唯一的 session-state 组装中间态，不建
+/// 第二权威 model。
+struct PersistentDerivation {
+    session: WorkspaceSession,
+    timeline_nodes: Vec<TimelineNode>,
+    active_node_id: Option<String>,
+    artifact_versions: Vec<ArtifactVersion>,
+    latest_review_verdict: Option<ReviewVerdict>,
+    pending_author_choice: Option<PendingAuthorChoice>,
+    plan_repair_snapshot: Option<PlanRepairSessionSnapshotDto>,
+}
 
 impl WorkspaceEngine {
     pub fn new(
@@ -303,30 +316,11 @@ impl WorkspaceEngine {
                 &session.session_id,
             )
             .unwrap_or_default();
-        if !persisted_artifact_versions.is_empty() {
-            session.artifact = persisted_artifact_versions
-                .iter()
-                .rev()
-                .find(|version| version.is_current)
-                .map(|version| version.payload.clone());
-        }
-        let (mut timeline_nodes, mut active_node_id) = if persisted_timeline_nodes.is_empty() {
-            initial_timeline(&session)
-        } else {
-            let active_node_id = active_timeline_node_id(&persisted_timeline_nodes);
-            if let Some(stage) = active_node_id
-                .as_ref()
-                .and_then(|node_id| {
-                    persisted_timeline_nodes
-                        .iter()
-                        .find(|node| &node.node_id == node_id)
-                })
-                .map(|node| workspace_stage_from_ws_stage(&node.stage))
-            {
-                session.stage = stage;
-            }
-            (persisted_timeline_nodes, active_node_id)
-        };
+        let (mut timeline_nodes, mut active_node_id) = Self::derive_persistent_timeline(
+            &mut session,
+            persisted_timeline_nodes,
+            &persisted_artifact_versions,
+        );
         if let Err(error) = recover_complete_artifact_misclassified_as_text_fallback(
             &checkpoint_store,
             &lifecycle_store,
@@ -345,10 +339,118 @@ impl WorkspaceEngine {
         ) {
             tracing::warn!(%error, "failed to recover WorkItemPlan outline review schema fallback");
         }
+        let derivation = Self::finalize_persistent_derivation(
+            &lifecycle_store,
+            session,
+            timeline_nodes,
+            active_node_id,
+            persisted_artifact_versions,
+            plan_repair_transition_recovery_error,
+        );
+        Self::persistent_engine(
+            checkpoint_store,
+            lifecycle_store,
+            event_tx,
+            derivation,
+            outline_revision_recovery_error,
+        )
+    }
+
+    /// A1b1（设计 §4.4 / Plan 接口字典）：`ProjectionOnly` 纯持久读构造——与
+    /// `new_persistent` 共用纯读核心，但不执行任何恢复写：plan repair journal
+    /// 修复、outline revision transaction reconcile、text fallback 与 outline
+    /// review schema fallback 均不在内（durable 投影不得沿 fallback 偷偷恢复）。
+    /// durable 读失败（IO/JSON）typed 上抛，绝不降级为初始 timeline 假态；
+    /// LC 恢复等待的 reconcile 只属于真实恢复入口（A2b）。
+    pub fn new_persistent_for_projection(
+        checkpoint_store: Arc<CheckpointStore>,
+        lifecycle_store: LifecycleStore,
+        event_tx: mpsc::Sender<EngineEvent>,
+        mut session: WorkspaceSession,
+    ) -> Result<Self, ProductStoreError> {
+        let persisted_timeline_nodes = lifecycle_store
+            .load_timeline_nodes_for_issue_session(
+                &session.project_id,
+                &session.issue_id,
+                &session.session_id,
+            )?;
+        let persisted_artifact_versions = lifecycle_store
+            .list_artifact_versions_for_issue_session(
+                &session.project_id,
+                &session.issue_id,
+                &session.session_id,
+            )?;
+        let (timeline_nodes, active_node_id) = Self::derive_persistent_timeline(
+            &mut session,
+            persisted_timeline_nodes,
+            &persisted_artifact_versions,
+        );
+        let derivation = Self::finalize_persistent_derivation(
+            &lifecycle_store,
+            session,
+            timeline_nodes,
+            active_node_id,
+            persisted_artifact_versions,
+            // 纯投影不执行 plan repair journal 恢复：无恢复错误可注入。
+            None,
+        );
+        Ok(Self::persistent_engine(
+            checkpoint_store,
+            lifecycle_store,
+            event_tx,
+            derivation,
+            // 纯投影不执行 outline revision transaction 恢复。
+            None,
+        ))
+    }
+
+    /// A1b1 共享纯读核心（载入段）：durable artifact 版本覆盖与
+    /// timeline/active/stage 派生。纯内存，无 I/O、无恢复写。
+    fn derive_persistent_timeline(
+        session: &mut WorkspaceSession,
+        persisted_timeline_nodes: Vec<TimelineNode>,
+        persisted_artifact_versions: &[ArtifactVersion],
+    ) -> (Vec<TimelineNode>, Option<String>) {
+        if !persisted_artifact_versions.is_empty() {
+            session.artifact = persisted_artifact_versions
+                .iter()
+                .rev()
+                .find(|version| version.is_current)
+                .map(|version| version.payload.clone());
+        }
+        if persisted_timeline_nodes.is_empty() {
+            initial_timeline(session)
+        } else {
+            let active_node_id = active_timeline_node_id(&persisted_timeline_nodes);
+            if let Some(stage) = active_node_id
+                .as_ref()
+                .and_then(|node_id| {
+                    persisted_timeline_nodes
+                        .iter()
+                        .find(|node| &node.node_id == node_id)
+                })
+                .map(|node| workspace_stage_from_ws_stage(&node.stage))
+            {
+                session.stage = stage;
+            }
+            (persisted_timeline_nodes, active_node_id)
+        }
+    }
+
+    /// A1b1 共享纯读核心（收尾段）：retired-stage 迁移、最新 review verdict、
+    /// pending author choice 与 plan repair snapshot 装配。只读，无恢复写。
+    fn finalize_persistent_derivation(
+        lifecycle_store: &LifecycleStore,
+        mut session: WorkspaceSession,
+        mut timeline_nodes: Vec<TimelineNode>,
+        mut active_node_id: Option<String>,
+        artifact_versions: Vec<ArtifactVersion>,
+        plan_repair_transition_recovery_error: Option<String>,
+    ) -> PersistentDerivation {
         // 存量 Story/Design 会话若停留在已退役的 HumanConfirm/ReviewDecision 阶段，恢复时迁移回 AuthorConfirm。
         session = recover_story_design_retired_stage_fallback(session);
         let latest_review_verdict = latest_review_verdict_from_node_details(
-            &lifecycle_store,
+            lifecycle_store,
             &session.project_id,
             &session.issue_id,
             &session.session_id,
@@ -360,7 +462,7 @@ impl WorkspaceEngine {
         let pending_author_choice =
             recover_pending_author_choice(&session, active_node_id.as_deref(), &timeline_nodes);
         let mut plan_repair_snapshot = load_plan_repair_snapshot_fail_closed(
-            &lifecycle_store,
+            lifecycle_store,
             &session,
             &mut timeline_nodes,
             plan_repair_transition_recovery_error,
@@ -384,18 +486,38 @@ impl WorkspaceEngine {
                 | PlanRepairSessionStage::ApplyingAmendment => WorkspaceStage::Running,
             };
         }
+        PersistentDerivation {
+            session,
+            timeline_nodes,
+            active_node_id,
+            artifact_versions,
+            latest_review_verdict,
+            pending_author_choice,
+            plan_repair_snapshot,
+        }
+    }
+
+    /// A1b1：由共享纯读核心产物组装引擎——两条持久构造路径（真实恢复 /
+    /// 纯投影）的唯一 Self 装配点，保证 session-state 组装同源。
+    fn persistent_engine(
+        checkpoint_store: Arc<CheckpointStore>,
+        lifecycle_store: LifecycleStore,
+        event_tx: mpsc::Sender<EngineEvent>,
+        derivation: PersistentDerivation,
+        outline_revision_recovery_error: Option<String>,
+    ) -> Self {
         Self {
             checkpoint_store,
             lifecycle_store: Some(lifecycle_store),
             event_tx,
-            session,
+            session: derivation.session,
             cancel: CancellationToken::new(),
-            timeline_nodes,
-            active_node_id,
-            artifact_versions: persisted_artifact_versions,
-            latest_review_verdict,
+            timeline_nodes: derivation.timeline_nodes,
+            active_node_id: derivation.active_node_id,
+            artifact_versions: derivation.artifact_versions,
+            latest_review_verdict: derivation.latest_review_verdict,
             pending_revision_context: None,
-            pending_author_choice,
+            pending_author_choice: derivation.pending_author_choice,
             active_run_id: None,
             stream_buffers: HashMap::new(),
             work_item_plan_author_retry_count: 0,
@@ -404,7 +526,7 @@ impl WorkspaceEngine {
             outline_revision_recovery_error,
             outline_revision_crash_after: None,
             plan_repair_crash_after: None,
-            plan_repair_snapshot,
+            plan_repair_snapshot: derivation.plan_repair_snapshot,
             #[cfg(test)]
             policy_route_before_persist: None,
             logical_provider_gateway: None,

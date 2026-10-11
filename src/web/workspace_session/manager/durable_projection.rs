@@ -7,8 +7,9 @@ use tokio::sync::mpsc;
 use super::WorkspaceSessionManager;
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::checkpoint_store::CheckpointStore;
+use crate::product::json_store::ProductStoreError;
 use crate::product::lifecycle_store::LifecycleStore;
-use crate::product::models::WorkspaceSessionRecord;
+use crate::product::models::{WorkspaceSessionRecord, WorkspaceType};
 use crate::product::workspace_engine::{EngineEvent, WorkspaceEngine, WorkspaceSession};
 use crate::product::workspace_repository::workspace_repository_for_session;
 use crate::web::workspace_ws_handler::{
@@ -16,6 +17,147 @@ use crate::web::workspace_ws_handler::{
     planning_resume_run_kind, spawn_provider_run_from_handler,
 };
 use crate::web::workspace_ws_types::WsOutMessage;
+
+/// A1b1（设计 §4.4）：durable 投影读取失败的稳定 ProtocolError code——
+/// 读取失败不得发布可启动假态。
+pub(crate) const DURABLE_PROJECTION_UNAVAILABLE_CODE: &str =
+    "workspace_durable_projection_unavailable";
+
+/// A1b1（设计 §4.4 / Plan 接口字典）：manager 绑定身份——出生 record 冻结的
+/// session/project/issue/entity/type 五元组。纯投影每次以 session_id 定位
+/// 最新 durable record 并以此核对身份；出生 record 仅作 identity 对照，
+/// 不再是投影正文。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkspaceSessionIdentity {
+    pub(crate) session_id: String,
+    pub(crate) project_id: String,
+    pub(crate) issue_id: String,
+    pub(crate) entity_id: String,
+    pub(crate) workspace_type: WorkspaceType,
+}
+
+impl WorkspaceSessionIdentity {
+    /// 从 manager 绑定（出生）record 冻结身份。
+    pub(crate) fn from_bound_record(record: &WorkspaceSessionRecord) -> Self {
+        Self {
+            session_id: record.id.clone(),
+            project_id: record.project_id.clone(),
+            issue_id: record.issue_id.clone(),
+            entity_id: record.entity_id.clone(),
+            workspace_type: record.workspace_type.clone(),
+        }
+    }
+}
+
+/// 纯投影产物：durable session_state 帧＋挂起 author choice 帧。
+#[derive(Debug, Clone)]
+pub(crate) struct DurableWorkspaceProjection {
+    pub(crate) session_state: WsOutMessage,
+    pub(crate) pending_choice: Option<WsOutMessage>,
+}
+
+impl DurableWorkspaceProjection {
+    /// 最新 durable record 的当前 LC 恢复 ID（无恢复为 None）——核对
+    /// 「最新 record 而非出生 record」是投影正文。
+    pub(crate) fn recovery_id(&self) -> Option<&str> {
+        match &self.session_state {
+            WsOutMessage::SessionState {
+                lc_resume_recovery, ..
+            } => lc_resume_recovery
+                .as_ref()
+                .map(|recovery| recovery.recovery_id.as_str()),
+            _ => None,
+        }
+    }
+}
+
+/// 纯投影读取的 typed 错误：store 读失败（NotFound/IO/JSON）或最新 record
+/// 与 manager 绑定身份不一致。两者都不得把出生 record、空 recovery 或
+/// Open 当当前事实（设计 §4.4）。
+#[derive(Debug)]
+pub(crate) enum DurableProjectionError {
+    Store(ProductStoreError),
+    IdentityMismatch { session_id: String },
+}
+
+impl std::fmt::Display for DurableProjectionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Store(error) => write!(formatter, "durable store read failed: {error}"),
+            Self::IdentityMismatch { session_id } => write!(
+                formatter,
+                "latest workspace session record identity mismatch for {session_id}"
+            ),
+        }
+    }
+}
+
+/// A1b1 private 纯加载核心（设计 §4.4）：每次以 session_id 从 LifecycleStore
+/// 读取**最新** WorkspaceSessionRecord，核对 manager 绑定身份后经
+/// `WorkspaceEngine::new_persistent_for_projection`（ProjectionOnly，零恢复
+/// 写）构造纯投影。NotFound/IO/JSON/IdentityMismatch 一律 typed 错误上抛，
+/// 不发伪 SessionState、不回出生 record、不 default 假 state。LC 恢复等待
+/// 的 reconcile 只属于真实恢复入口（A2b），本核心零写。
+pub(crate) fn load_durable_workspace_projection(
+    app_paths: &ProductAppPaths,
+    expected_identity: &WorkspaceSessionIdentity,
+) -> Result<DurableWorkspaceProjection, DurableProjectionError> {
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    let latest_record = lifecycle
+        .get_workspace_session(&expected_identity.session_id)
+        .map_err(DurableProjectionError::Store)?;
+    if latest_record.project_id != expected_identity.project_id
+        || latest_record.issue_id != expected_identity.issue_id
+        || latest_record.entity_id != expected_identity.entity_id
+        || latest_record.workspace_type != expected_identity.workspace_type
+    {
+        return Err(DurableProjectionError::IdentityMismatch {
+            session_id: expected_identity.session_id.clone(),
+        });
+    }
+    let checkpoint_store = Arc::new(CheckpointStore::new(
+        app_paths.issue_lifecycle_root(&latest_record.project_id, &latest_record.issue_id),
+    ));
+    let (projection_tx, _projection_rx) = mpsc::channel::<EngineEvent>(1);
+    let mut session = WorkspaceSession::from_record(latest_record.clone());
+    if let Ok(repository) =
+        workspace_repository_for_session(&app_paths, &lifecycle, &latest_record)
+    {
+        session.repository_path = Some(repository.path);
+    }
+    if let Ok(checkpoints) = checkpoint_store.list_checkpoints(&session.session_id) {
+        session.restore_checkpoint_ids(&checkpoints);
+    }
+    let engine = WorkspaceEngine::new_persistent_for_projection(
+        checkpoint_store,
+        lifecycle,
+        projection_tx,
+        session,
+    )
+    .map_err(DurableProjectionError::Store)?;
+    let mut session_state = engine.build_session_state();
+    // P0 1.2：durable 投影同样以 durable enrollment 覆盖归属；读取失败置
+    // None（未知），绝不伪 client。
+    let store =
+        crate::product::issue_automation_store::IssueAutomationStore::new(app_paths.clone());
+    if let Err(error) = crate::product::issue_automation_store::project_session_automation(
+        &mut session_state,
+        &latest_record,
+        &store,
+    ) {
+        eprintln!(
+            "[aria-automation-ownership] durable projection failed session={}: {error}",
+            latest_record.id
+        );
+        if let WsOutMessage::SessionState { automation, .. } = &mut session_state {
+            *automation = None;
+        }
+    }
+    Ok(DurableWorkspaceProjection {
+        session_state,
+        pending_choice: engine.pending_author_choice_request_message(),
+    })
+}
 
 impl WorkspaceSessionManager {
     /// F-06/F-09：durable 投影的同步读盘挪入阻塞线程池——观察 attach 频发且 run 任务
@@ -42,6 +184,8 @@ impl WorkspaceSessionManager {
 
     /// 一次性只读 durable 投影器。禁止将它扩展为第二 engine 状态源：没有 spawn、没有
     /// provider/run 注册、没有 event receiver，并且使用有接收端但永不消费的 channel。
+    /// A1b1（设计 §4.4）：正文每次取最新 durable record（出生 record 仅身份
+    /// 对照）；读取失败由 tuple 出口输出真实 ProtocolError＋None。
     /// 读盘重（Lifecycle/Checkpoint 仓库 + JSON 反序列化），async 上下文必须经
     /// `durable_projection_offload` 调用；`current_session_state` 的同步降级路径是
     /// 唯一的直接调用方。
@@ -52,48 +196,38 @@ impl WorkspaceSessionManager {
         (session_state, pending_frame)
     }
 
+    /// A1b1（设计 §4.4）：出生 record 只构造绑定身份；投影正文每次经
+    /// `load_durable_workspace_projection` 取最新 durable record。读取失败
+    /// 输出真实 ProtocolError＋None（不回出生 record、不 default 假 state）；
+    /// 2.4 以同核心一次性迁 public Result 并删除本 tuple 封装。
     fn durable_projection_with(
         app_paths: ProductAppPaths,
         session_record: WorkspaceSessionRecord,
     ) -> (WsOutMessage, Option<WsOutMessage>) {
-        let lifecycle = LifecycleStore::new(app_paths.clone());
-        let checkpoint_store = Arc::new(CheckpointStore::new(
-            app_paths.issue_lifecycle_root(&session_record.project_id, &session_record.issue_id),
-        ));
-        let (projection_tx, _projection_rx) = mpsc::channel::<EngineEvent>(1);
-        let mut session = WorkspaceSession::from_record(session_record.clone());
-        if let Ok(repository) =
-            workspace_repository_for_session(&app_paths, &lifecycle, &session_record)
-        {
-            session.repository_path = Some(repository.path);
-        }
-        if let Ok(checkpoints) = checkpoint_store.list_checkpoints(&session.session_id) {
-            session.restore_checkpoint_ids(&checkpoints);
-        }
-        let engine =
-            WorkspaceEngine::new_persistent(checkpoint_store, lifecycle, projection_tx, session);
-        let mut session_state = engine.build_session_state();
-        // P0 1.2：durable 投影同样以 durable enrollment 覆盖归属；读取失败置
-        // None（未知），绝不伪 client。
-        let store =
-            crate::product::issue_automation_store::IssueAutomationStore::new(app_paths.clone());
-        if let Err(error) = crate::product::issue_automation_store::project_session_automation(
-            &mut session_state,
-            &session_record,
-            &store,
-        ) {
-            eprintln!(
-                "[aria-automation-ownership] durable projection failed session={}: {error}",
-                session_record.id
-            );
-            if let WsOutMessage::SessionState { automation, .. } = &mut session_state {
-                *automation = None;
+        let identity = WorkspaceSessionIdentity::from_bound_record(&session_record);
+        match load_durable_workspace_projection(&app_paths, &identity) {
+            Ok(DurableWorkspaceProjection {
+                session_state,
+                pending_choice,
+            }) => (session_state, pending_choice),
+            Err(error) => {
+                eprintln!(
+                    "[aria-durable-projection] latest record load failed session={}: {error}",
+                    session_record.id
+                );
+                (
+                    WsOutMessage::ProtocolError {
+                        code: DURABLE_PROJECTION_UNAVAILABLE_CODE.to_string(),
+                        message: format!(
+                            "durable projection unavailable for session {}: {error}",
+                            session_record.id
+                        ),
+                        context: None,
+                    },
+                    None,
+                )
             }
         }
-        (
-            session_state,
-            engine.pending_author_choice_request_message(),
-        )
     }
 
     pub(super) async fn recover_on_creation(self: &Arc<Self>) {
