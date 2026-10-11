@@ -10,6 +10,7 @@ use crate::product::app_paths::ProductAppPaths;
 use crate::product::checkpoint_store::CheckpointStore;
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::logical_codebase::resolve_issue_logical_codebase_id;
+use crate::product::workspace_engine::conversational_gate::ConfirmationTrustContext;
 use crate::product::models::WorkspaceSessionRecord;
 use crate::product::workspace_engine::{EngineEvent, WorkspaceEngine, WorkspaceSession};
 use crate::product::workspace_repository::workspace_repository_for_session;
@@ -390,6 +391,28 @@ impl WorkspaceSessionManager {
             let gateway = factory
                 .build_readonly_for_lc(&session_record.project_id, lc_id.as_deref())
                 .map_err(|error| format!("logical gateway build failed: {error}"))?;
+            // T4.3（REQ-REG-15/D2）：在已解析 project/issue/LC 并构造只读
+            // gateway 的现有段注入确认 trust 冻结上下文——复用同一
+            // WebAppState 缓存的 aggregate initialization trust precondition
+            //（生产/fake HOME 策略同源，不新造第二套 HOME 推导），冻结
+            // issue 原始 LC 归属与 gateway 冻结 root（`authority_root()`）；
+            // gateway 只持只读 source，不持可写 registry。依赖图缺 trust
+            // precondition 时不注入（fail-closed 延后到确认面
+            // ContextWaiting，不阻断 create）。
+            let frozen_root = gateway.authority_root().to_path_buf();
+            if let Some(precondition) = state
+                .aggregate_initialization_dependencies()
+                .trust()
+                .cloned()
+            {
+                engine_workspace = engine_workspace.with_confirmation_trust_context(
+                    ConfirmationTrustContext {
+                        precondition,
+                        issue_lc_id: lc_id.clone(),
+                        frozen_root,
+                    },
+                );
+            }
             engine_workspace = engine_workspace.with_logical_provider_gateway(Arc::new(gateway));
         }
         let engine = Arc::new(Mutex::new(engine_workspace));

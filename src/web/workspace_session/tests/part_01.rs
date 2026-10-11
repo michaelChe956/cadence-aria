@@ -735,3 +735,197 @@ async fn provider_run_requested_without_attachments_spawns_throwaway_run() {
     .await
     .expect("无订阅者时接力 run 必须仍被 spawn（F-1：修复前事件被 continue 丢弃，本断言超时必红）");
 }
+
+// —— T4.3（REQ-REG-15/D2）：manager create 复用 state 缓存依赖注入确认 context ——
+
+/// 在 enrollment 夹具（完整 legacy LC 拓扑：project/issue/manifest/成员/
+/// checkout/aggregate index/selection/policy + 已确认 story/design）上建
+/// story 会话（focus=None → 聚合根视图=logical_repository_id Some）。
+fn lc_confirm_story_session()
+-> (
+    crate::web::handlers::automation_enrollment_test_support::Fixture,
+    crate::product::models::WorkspaceSessionRecord,
+) {
+    use crate::product::lifecycle_store::CreateWorkspaceSessionInput;
+    use crate::product::models::ProviderName;
+    use crate::web::handlers::automation_enrollment_test_support::seed_fixture;
+
+    let fixture = seed_fixture(2, true);
+    let session_record = fixture
+        .lifecycle
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: fixture.story_id.clone(),
+            workspace_type: WorkspaceType::Story,
+            author_provider: ProviderName::Codex,
+            reviewer_provider: None,
+            review_rounds: 0,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+            work_item_plan_options: None,
+        })
+        .expect("LC story session");
+    (fixture, session_record)
+}
+
+#[tokio::test]
+async fn manager_create_injects_confirmation_trust_context_for_lc_session() {
+    use crate::product::logical_codebase::LogicalCodebaseStore;
+
+    let (fixture, session_record) = lc_confirm_story_session();
+    let root_path = fixture._root.path().to_path_buf();
+    let state = WebAppState::with_provider_registry(
+        root_path.clone(),
+        WebRuntime::new_fake(root_path.clone()),
+        ProviderRegistry::new(),
+    );
+    let deps_trust = state
+        .aggregate_initialization_dependencies()
+        .trust()
+        .cloned()
+        .expect("state 缓存 trust precondition（生产/fake HOME 策略同源装配）");
+
+    let manager = WorkspaceSessionManager::create(&state, &session_record.id)
+        .await
+        .expect("create manager for LC session");
+    let engine_arc = manager.engine();
+    let engine = engine_arc.lock().await;
+    let context = engine
+        .confirmation_trust_context()
+        .expect("LC 会话注入确认 trust 冻结上下文");
+    assert_eq!(
+        context.issue_lc_id, None,
+        "legacy LC：冻结 issue 原始归属=None（registry 标签沿既有 legacy 别名约定推导）"
+    );
+    let manifest_root = LogicalCodebaseStore::new(fixture.paths.clone())
+        .load_manifest("project_0001")
+        .expect("load manifest")
+        .expect("manifest present")
+        .provider_context_root;
+    assert_eq!(
+        context.frozen_root,
+        std::fs::canonicalize(&manifest_root).expect("canonical manifest root"),
+        "冻结 root=gateway authority_root（同 manifest 聚合根）"
+    );
+    assert!(
+        std::sync::Arc::ptr_eq(&context.precondition, &deps_trust),
+        "注入的 precondition 复用同一 WebAppState 缓存实例（不新造第二套 HOME 推导）"
+    );
+    assert!(
+        engine.logical_provider_gateway().is_some(),
+        "LC 会话 gateway 仍在（readonly source 不持可写 registry）"
+    );
+}
+
+#[tokio::test]
+async fn manager_create_confirmation_context_boundaries() {
+    use crate::product::lifecycle_store::CreateWorkspaceSessionInput;
+    use crate::product::models::ProviderName;
+
+    // 单仓会话：无 gateway、无确认上下文（确认免登记零调用）。
+    let root = tempfile::tempdir().expect("root");
+    let app_paths = crate::product::app_paths::ProductAppPaths::new(root.path().join(".aria"));
+    let project = ProjectStore::new(app_paths.clone())
+        .create(CreateProjectInput {
+            name: "single repo boundary".to_string(),
+            description: None,
+        })
+        .expect("project");
+    let repository = RepositoryStore::new(app_paths.clone())
+        .create(CreateRepositoryInput {
+            project_id: project.id.clone(),
+            name: "boundary repository".to_string(),
+            path: root.path().to_path_buf(),
+            default_policy_preset: None,
+            default_provider_mode: Some("fake".to_string()),
+            idempotency_key: "confirm-boundary-repository".to_string(),
+        })
+        .expect("repository");
+    let issue = IssueStore::new(app_paths.clone())
+        .create(CreateProductIssueInput {
+            project_id: project.id.clone(),
+            repo_id: Some(repository.id.clone()),
+            logical_codebase_id: None,
+            base_branch: None,
+            title: "single repo boundary issue".to_string(),
+            description: None,
+            change_id: None,
+        })
+        .expect("issue");
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    let story = lifecycle
+        .create_story_spec(CreateStorySpecInput {
+            project_id: project.id.clone(),
+            issue_id: issue.id.clone(),
+            repository_id: repository.id,
+            title: "single repo boundary story".to_string(),
+            aggregate_codebase: None,
+        })
+        .expect("story");
+    let session_record = lifecycle
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: project.id,
+            issue_id: issue.id,
+            entity_id: story.id,
+            workspace_type: WorkspaceType::Story,
+            author_provider: ProviderName::Codex,
+            reviewer_provider: None,
+            review_rounds: 0,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+            work_item_plan_options: None,
+        })
+        .expect("single-repo session");
+    let state = WebAppState::with_provider_registry(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        ProviderRegistry::new(),
+    );
+    let manager = WorkspaceSessionManager::create(&state, &session_record.id)
+        .await
+        .expect("create manager for single-repo session");
+    {
+        let engine_arc = manager.engine();
+        let engine = engine_arc.lock().await;
+        assert!(
+            engine.logical_provider_gateway().is_none(),
+            "单仓会话无 LC gateway"
+        );
+        assert!(
+            engine.confirmation_trust_context().is_none(),
+            "单仓会话不注入确认上下文（免登记）"
+        );
+    }
+
+    // LC 会话缺 trust precondition（依赖图重建为无 trust 形态）：fail-closed
+    // 不注入——确认时 ContextWaiting（引擎面已由 4.1 漂移矩阵「缺上下文」
+    // 用例锁定）。
+    let (fixture2, session_record2) = lc_confirm_story_session();
+    let root2_path = fixture2._root.path().to_path_buf();
+    let state2 = WebAppState::with_provider_registry(
+        root2_path.clone(),
+        WebRuntime::new_fake(root2_path.clone()),
+        ProviderRegistry::new(),
+    );
+    let deps = state2.aggregate_initialization_dependencies();
+    let stripped = crate::web::handlers::AggregateInitializationDependencies::with_index(
+        deps.coordinator.clone(),
+        deps.runs.clone(),
+        deps.index.clone(),
+    );
+    let state2 = state2.with_aggregate_initialization_dependencies(stripped);
+    let manager2 = WorkspaceSessionManager::create(&state2, &session_record2.id)
+        .await
+        .expect("缺 trust 依赖不阻断 create（fail-closed 延后到确认面）");
+    let engine2_arc = manager2.engine();
+    let engine2 = engine2_arc.lock().await;
+    assert!(
+        engine2.logical_provider_gateway().is_some(),
+        "LC 会话 gateway 装配不受 trust 依赖缺失影响"
+    );
+    assert!(
+        engine2.confirmation_trust_context().is_none(),
+        "LC 缺 precondition：不注入上下文，确认时 fail-closed ContextWaiting"
+    );
+}
