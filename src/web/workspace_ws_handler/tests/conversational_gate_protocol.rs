@@ -1016,16 +1016,17 @@ static T5_TRUST_WAITING_SEQUENCE: std::sync::atomic::AtomicU64 =
 #[derive(Default)]
 struct ScriptedTrustPrecondition {
     calls: std::sync::Mutex<Vec<String>>,
-    scripted:
-        std::sync::Mutex<std::collections::VecDeque<crate::product::logical_codebase::ProviderTrustPreparationResult>>,
+    scripted: std::sync::Mutex<
+        std::collections::VecDeque<
+            crate::product::logical_codebase::ProviderTrustPreparationResult,
+        >,
+    >,
 }
 
 impl ScriptedTrustPrecondition {
     fn script_waiting(&self, reason_code: &str) {
-        self.scripted
-            .lock()
-            .unwrap()
-            .push_back(crate::product::logical_codebase::ProviderTrustPreparationResult::Waiting {
+        self.scripted.lock().unwrap().push_back(
+            crate::product::logical_codebase::ProviderTrustPreparationResult::Waiting {
                 waiting: crate::product::logical_codebase::ProviderTrustWaiting {
                     provider: ProviderName::Codex,
                     canonical_root: std::path::PathBuf::from("/fixture-trust-root"),
@@ -1036,7 +1037,8 @@ impl ScriptedTrustPrecondition {
                     manual_guidance: "fixture 人工指导：修复 Codex home 配置".to_string(),
                     recorded_at: "2026-10-11T00:00:00Z".to_string(),
                 },
-            });
+            },
+        );
     }
 
     fn call_count(&self) -> usize {
@@ -1081,9 +1083,11 @@ impl crate::product::logical_codebase::ProviderCapabilitySource for T5PresenceCa
         crate::product::logical_codebase::ProviderCapability,
         crate::product::logical_codebase::ProviderGatewayError,
     > {
-        Err(crate::product::logical_codebase::ProviderGatewayError::UnsupportedCapability(
-            "presence-only fixture gateway".to_string(),
-        ))
+        Err(
+            crate::product::logical_codebase::ProviderGatewayError::UnsupportedCapability(
+                "presence-only fixture gateway".to_string(),
+            ),
+        )
     }
 
     fn require_resume_supported(
@@ -1094,9 +1098,11 @@ impl crate::product::logical_codebase::ProviderCapabilitySource for T5PresenceCa
         crate::product::logical_codebase::ProviderCapability,
         crate::product::logical_codebase::ProviderGatewayError,
     > {
-        Err(crate::product::logical_codebase::ProviderGatewayError::UnsupportedCapability(
-            "presence-only fixture gateway".to_string(),
-        ))
+        Err(
+            crate::product::logical_codebase::ProviderGatewayError::UnsupportedCapability(
+                "presence-only fixture gateway".to_string(),
+            ),
+        )
     }
 
     fn require_write_boundary(
@@ -1107,9 +1113,11 @@ impl crate::product::logical_codebase::ProviderCapabilitySource for T5PresenceCa
         crate::product::logical_codebase::ProviderCapability,
         crate::product::logical_codebase::ProviderGatewayError,
     > {
-        Err(crate::product::logical_codebase::ProviderGatewayError::UnsupportedCapability(
-            "presence-only fixture gateway".to_string(),
-        ))
+        Err(
+            crate::product::logical_codebase::ProviderGatewayError::UnsupportedCapability(
+                "presence-only fixture gateway".to_string(),
+            ),
+        )
     }
 
     fn require_root_recipe_supported(
@@ -1120,9 +1128,11 @@ impl crate::product::logical_codebase::ProviderCapabilitySource for T5PresenceCa
         crate::product::logical_codebase::ProviderCapability,
         crate::product::logical_codebase::ProviderGatewayError,
     > {
-        Err(crate::product::logical_codebase::ProviderGatewayError::UnsupportedCapability(
-            "presence-only fixture gateway".to_string(),
-        ))
+        Err(
+            crate::product::logical_codebase::ProviderGatewayError::UnsupportedCapability(
+                "presence-only fixture gateway".to_string(),
+            ),
+        )
     }
 }
 
@@ -1136,9 +1146,11 @@ impl crate::product::logical_codebase::PolicyTargetResolver for T5PresenceTarget
         crate::product::logical_codebase::PolicyTarget,
         crate::product::logical_codebase::ProviderGatewayError,
     > {
-        Err(crate::product::logical_codebase::ProviderGatewayError::UnsupportedCapability(
-            "presence-only fixture gateway".to_string(),
-        ))
+        Err(
+            crate::product::logical_codebase::ProviderGatewayError::UnsupportedCapability(
+                "presence-only fixture gateway".to_string(),
+            ),
+        )
     }
 }
 
@@ -1202,15 +1214,19 @@ fn t5_presence_gateway(
             .collect(),
     });
     let paths = ProductAppPaths::new(std::env::temp_dir().join("aria-t5-presence-gateway"));
-    Arc::new(crate::product::logical_codebase::LogicalCodebaseProviderGateway::new(
-        crate::product::logical_codebase::AggregatePolicyArtifactStore::new(paths),
-        Arc::new(T5PresenceCapabilitySource),
-        Arc::new(T5PresenceTargetResolver),
-        Arc::new(crate::cross_cutting::provider_registry::ProviderRegistry::new()),
-        Arc::new(T5PresenceSyncAdapter),
-        Arc::new(ProviderAvailabilityGate::new(Arc::new(AlwaysHealthy(snapshot)))),
-        authority_root,
-    ))
+    Arc::new(
+        crate::product::logical_codebase::LogicalCodebaseProviderGateway::new(
+            crate::product::logical_codebase::AggregatePolicyArtifactStore::new(paths),
+            Arc::new(T5PresenceCapabilitySource),
+            Arc::new(T5PresenceTargetResolver),
+            Arc::new(crate::cross_cutting::provider_registry::ProviderRegistry::new()),
+            Arc::new(T5PresenceSyncAdapter),
+            Arc::new(ProviderAvailabilityGate::new(Arc::new(AlwaysHealthy(
+                snapshot,
+            )))),
+            authority_root,
+        ),
+    )
 }
 
 struct T5TrustWaitingFacts {
@@ -1328,14 +1344,13 @@ fn t5_trust_waiting_ws_fixture(
         markdown: "# Work Item Plan\n".to_string(),
         diff: None,
     });
-    let mut engine =
-        WorkspaceEngine::new_persistent(
-            Arc::new(CheckpointStore::new(root.path().join("checkpoints"))),
-            lifecycle.clone(),
-            event_tx,
-            session,
-        )
-        .with_logical_provider_gateway(t5_presence_gateway(canonical_root.clone()));
+    let mut engine = WorkspaceEngine::new_persistent(
+        Arc::new(CheckpointStore::new(root.path().join("checkpoints"))),
+        lifecycle.clone(),
+        event_tx,
+        session,
+    )
+    .with_logical_provider_gateway(t5_presence_gateway(canonical_root.clone()));
     if let Some(trust) = trust {
         engine = engine.with_confirmation_trust_context(
             crate::product::workspace_engine::conversational_gate::ConfirmationTrustContext {
@@ -1359,10 +1374,7 @@ fn t5_inbound_context(
     lifecycle: &LifecycleStore,
     engine: Arc<Mutex<WorkspaceEngine>>,
     facts: &T5TrustWaitingFacts,
-) -> (
-    WorkspaceInboundContext,
-    mpsc::Receiver<OutboundControl>,
-) {
+) -> (WorkspaceInboundContext, mpsc::Receiver<OutboundControl>) {
     let record = lifecycle
         .get_workspace_session(&facts.session_id)
         .expect("fixture durable record");
@@ -1404,10 +1416,9 @@ async fn ws_sc_confirm_trust_waiting_is_stable_protocol_error_with_guidance() {
             .expect("durable before"),
     )
     .expect("serialize before");
-    let cas_before =
-        crate::product::workspace_engine::conversational_gate::close_cas_attempts(
-            &facts.session_id,
-        );
+    let cas_before = crate::product::workspace_engine::conversational_gate::close_cas_attempts(
+        &facts.session_id,
+    );
     let (context, mut outbound_rx) = t5_inbound_context(&root, &lifecycle, engine, &facts);
 
     handle_workspace_inbound_message(context, WsInMessage::Confirm).await;
@@ -1429,8 +1440,14 @@ async fn ws_sc_confirm_trust_waiting_is_stable_protocol_error_with_guidance() {
         panic!("SC trust waiting must be a ProtocolError, got {message:?}")
     };
     assert_eq!(code, "workspace_confirmation_trust_waiting");
-    assert!(message.contains("fixture 等待原因（home 读取失败）"), "{message}");
-    assert!(message.contains("fixture 人工指导：修复 Codex home 配置"), "{message}");
+    assert!(
+        message.contains("fixture 等待原因（home 读取失败）"),
+        "{message}"
+    );
+    assert!(
+        message.contains("fixture 人工指导：修复 Codex home 配置"),
+        "{message}"
+    );
     assert!(message.contains("修复后重新确认"), "{message}");
     assert!(message.contains("门保持未关闭"), "{message}");
     assert!(
@@ -1451,10 +1468,7 @@ async fn ws_sc_confirm_trust_waiting_is_stable_protocol_error_with_guidance() {
         context["reason_code"],
         serde_json::json!("fixture_home_failure")
     );
-    assert_eq!(
-        context["retry_action"],
-        serde_json::json!("修复后重新确认")
-    );
+    assert_eq!(context["retry_action"], serde_json::json!("修复后重新确认"));
     assert_eq!(
         context["manual_guidance"],
         serde_json::json!("fixture 人工指导：修复 Codex home 配置")
@@ -1465,8 +1479,7 @@ async fn ws_sc_confirm_trust_waiting_is_stable_protocol_error_with_guidance() {
     // 结束后 sender 随 context drop，通道关闭（None）同样算无后续帧。
     assert!(
         matches!(
-            tokio::time::timeout(std::time::Duration::from_millis(200), outbound_rx.recv())
-                .await,
+            tokio::time::timeout(std::time::Duration::from_millis(200), outbound_rx.recv()).await,
             Err(_) | Ok(None)
         ),
         "waiting must not emit any further outbound frame"
@@ -1536,7 +1549,10 @@ async fn ws_non_sc_confirm_trust_waiting_returns_visible_protocol_error() {
         panic!("non-SC trust waiting must be a ProtocolError, got {message:?}")
     };
     assert_eq!(code, "workspace_confirmation_trust_waiting");
-    assert!(message.contains("fixture 等待原因（home 读取失败）"), "{message}");
+    assert!(
+        message.contains("fixture 等待原因（home 读取失败）"),
+        "{message}"
+    );
     assert!(
         message.contains("完成后请重新选择该门并确认；失败不自动重试"),
         "{message}"
@@ -1549,8 +1565,7 @@ async fn ws_non_sc_confirm_trust_waiting_returns_visible_protocol_error() {
     );
     assert!(
         matches!(
-            tokio::time::timeout(std::time::Duration::from_millis(200), outbound_rx.recv())
-                .await,
+            tokio::time::timeout(std::time::Duration::from_millis(200), outbound_rx.recv()).await,
             Err(_) | Ok(None)
         ),
         "waiting 不产生后续出站帧（分发后 sender 随 context drop，None 亦无后续帧）"
@@ -1575,18 +1590,16 @@ async fn ws_non_sc_confirm_trust_waiting_returns_visible_protocol_error() {
 /// 短语。
 #[tokio::test]
 async fn ws_sc_confirm_trust_context_waiting_returns_known_identity_only() {
-    let (root, lifecycle, engine, _event_rx, facts) =
-        t5_trust_waiting_ws_fixture(true, None);
+    let (root, lifecycle, engine, _event_rx, facts) = t5_trust_waiting_ws_fixture(true, None);
     let before = serde_json::to_vec(
         &lifecycle
             .get_workspace_session(&facts.session_id)
             .expect("durable before"),
     )
     .expect("serialize before");
-    let cas_before =
-        crate::product::workspace_engine::conversational_gate::close_cas_attempts(
-            &facts.session_id,
-        );
+    let cas_before = crate::product::workspace_engine::conversational_gate::close_cas_attempts(
+        &facts.session_id,
+    );
     let (context, mut outbound_rx) = t5_inbound_context(&root, &lifecycle, engine, &facts);
 
     handle_workspace_inbound_message(context, WsInMessage::Confirm).await;
@@ -1637,8 +1650,7 @@ async fn ws_sc_confirm_trust_context_waiting_returns_known_identity_only() {
     );
     assert!(
         matches!(
-            tokio::time::timeout(std::time::Duration::from_millis(200), outbound_rx.recv())
-                .await,
+            tokio::time::timeout(std::time::Duration::from_millis(200), outbound_rx.recv()).await,
             Err(_) | Ok(None)
         ),
         "waiting 不产生后续出站帧（分发后 sender 随 context drop，None 亦无后续帧）"
@@ -1660,4 +1672,354 @@ async fn ws_sc_confirm_trust_context_waiting_returns_known_identity_only() {
         cas_before,
         "上下文停等零 home 调用、不推进 close CAS"
     );
+}
+
+// —— Task 7.2（REQ-REG-15）：SC 真实 manager 全链（create→仲裁→SC Confirm
+// 分流→真实 registry→关门 CAS 前停等）——
+// 与 T5.1 的剧本 precondition 用例不同：本用例经真实 WebAppState/manager
+// create 装配（fake runtime registry home=workspace_root；factory 从 HOME
+// 装配的 readonly source 指到同一隔离 home），SC Confirm 帧按 flow_kind
+// 分流进 handle_human_gate_termination，Approve 在静态资格预检后接真实
+// registry——冲突态 fail-closed：typed TrustWaiting 协议帧、close CAS 零
+// 推进、无 HumanGateClosed/close 广播、用户冲突条目字节保持。
+
+/// 与 part_01/gateway_factory 的 T7 HOME 守卫共用同一 sidecar 锁目标
+///（同一测试二进制内互斥）。
+fn t7_ws_home_env_lock_target() -> std::path::PathBuf {
+    std::env::temp_dir().join("aria-t7-home-env")
+}
+
+struct T7WsHomeEnvGuard {
+    _lock: crate::product::coding_attempt_store::locking::ExclusiveFileLock,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl T7WsHomeEnvGuard {
+    fn isolate(home: &std::path::Path) -> Self {
+        let _lock = crate::product::coding_attempt_store::locking::ExclusiveFileLock::acquire(
+            &t7_ws_home_env_lock_target(),
+        )
+        .expect("serialize HOME mutation across the test binary");
+        let previous = std::env::var_os("HOME");
+        // SAFETY: 与其它改写 HOME 的 T7 用例经同一文件锁串行；本二进制内
+        // 并行用例对 HOME 的消费只有 factory 装配的 adapter home 路径拼接
+        //（无文件 IO），读写交错不产生可观察行为差异。
+        unsafe { std::env::set_var("HOME", home) };
+        Self { _lock, previous }
+    }
+}
+
+impl Drop for T7WsHomeEnvGuard {
+    fn drop(&mut self) {
+        // SAFETY: 同上，文件锁串行下的恢复写。
+        unsafe {
+            if let Some(previous) = self.previous.clone() {
+                std::env::set_var("HOME", previous);
+            } else {
+                std::env::remove_var("HOME");
+            }
+        }
+    }
+}
+
+/// 真实 SC 会话夹具：复用 enrollment seed 拓扑（project+2 成员 legacy LC
+/// +已确认 story/design——manager create 的 workspace context/repository
+/// routing/aggregate index 全链可过，part_01 同款实证拓扑），其上建
+/// WorkItemPlan/SC/Approval 开态门 durable 记录（plan 实体真实落库）；
+/// 返回真实 manager 装配所需原料（不建 engine——create 全权负责）。
+fn t7_sc_confirm_chain_fixture() -> (
+    crate::web::handlers::automation_enrollment_test_support::Fixture,
+    crate::product::models::WorkspaceSessionRecord,
+) {
+    use crate::product::lifecycle_store::{
+        CreateIssueWorkItemPlanInput, CreateWorkspaceSessionInput, WorkItemPlanSessionOptions,
+    };
+    use crate::product::models::{SingleCandidatePhase, WorkspaceType};
+    use crate::product::work_item_plan_policy::{HumanGateSnapshot, HumanReason, RunPolicy};
+
+    let fixture = crate::web::handlers::automation_enrollment_test_support::seed_fixture(2, true);
+    let lifecycle = fixture.lifecycle.clone();
+    lifecycle
+        .create_issue_work_item_plan(CreateIssueWorkItemPlanInput {
+            id: Some("plan_t7_sc".to_string()),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            source_story_spec_ids: vec![fixture.story_id.clone()],
+            source_design_spec_ids: vec![fixture.design_id.clone()],
+            options: crate::product::models::IssueWorkItemPlanOptions {
+                include_integration_tests: false,
+                include_e2e_tests: false,
+                force_frontend_backend_split: false,
+                require_execution_plan_confirm: false,
+            },
+            status: crate::product::models::IssueWorkItemPlanStatus::Draft,
+            work_item_ids: vec!["work_item_t7_sc_0001".to_string()],
+            repository_profile_ref: None,
+            verification_plan_ids: Vec::new(),
+            dependency_graph: Vec::new(),
+            created_from_provider_run: None,
+            validator_findings: Vec::new(),
+        })
+        .expect("create t7 SC plan entity");
+    let created = lifecycle
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: "plan_t7_sc".to_string(),
+            workspace_type: WorkspaceType::WorkItemPlan,
+            author_provider: ProviderName::Codex,
+            reviewer_provider: None,
+            review_rounds: 0,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+            work_item_plan_options: Some(WorkItemPlanSessionOptions {
+                flow_kind: WorkItemPlanFlowKind::SingleCandidate,
+                run_policy: RunPolicy::Interactive,
+                rollout_snapshot: true,
+            }),
+        })
+        .expect("create SC session");
+    let mut record = lifecycle
+        .get_workspace_session(&created.id)
+        .expect("load created session");
+    record.status = WorkspaceSessionStatus::WaitingForHuman;
+    record.single_candidate_phase = Some(SingleCandidatePhase::Approval);
+    record.human_gate_snapshot = Some(HumanGateSnapshot {
+        candidate_recovery: None,
+        findings: Vec::new(),
+        repeated_fingerprints: Vec::new(),
+        attempts_used: 0,
+        manual_repairs_remaining: 1,
+        trigger: HumanReason::NativeHumanRequired,
+        resumable: false,
+        accepted_feedback_turns: None,
+    });
+    crate::product::json_store::write_json(
+        &fixture
+            .paths
+            .issue_lifecycle_root(&record.project_id, &record.issue_id)
+            .join("workspace-sessions")
+            .join(format!("{}.json", record.id)),
+        &record,
+    )
+    .expect("persist SC approval session");
+    (fixture, record)
+}
+
+/// 7.2 SC 全链（冲突停等面）：真实 create→仲裁→SC Confirm 分流→真实
+/// registry 冲突 fail-closed——typed TrustWaiting（真实 reason+场景
+/// retry_action）、close CAS 计数锚零推进、durable 会话零变化、无
+/// HumanGateClosed/close 广播、用户冲突条目字节保持、失败 waiting/audit
+/// 落盘可观察（按设计），factory HOME 装配的只读 source 同一隔离 home。
+#[tokio::test]
+async fn ws_sc_confirm_real_manager_chain_waits_on_real_registry_conflict() {
+    use crate::product::logical_codebase::{ProviderTrustHomeAdapter, ProviderTrustStore};
+    use crate::web::state::WebAppState;
+    use crate::web::workspace_session::{ConnectionRole, WorkspaceSessionManager};
+
+    let (fixture, record) = t7_sc_confirm_chain_fixture();
+    let root_path = fixture._root.path().to_path_buf();
+    let app_paths = fixture.paths.clone();
+    let lifecycle = fixture.lifecycle.clone();
+    // 用户冲突条目（隔离 home=workspace root；冻结根=manifest 聚合根）。
+    let canonical_root = std::fs::canonicalize(app_paths.root()).expect("canonical aggregate root");
+    let codex_config = root_path.join(".codex").join("config.toml");
+    std::fs::create_dir_all(codex_config.parent().expect("codex config dir"))
+        .expect("codex config dir");
+    std::fs::write(
+        &codex_config,
+        format!(
+            "[projects.\"{}\"]\ntrust_level = \"untrusted\"\n",
+            canonical_root.display()
+        ),
+    )
+    .expect("seed user conflict");
+    let conflict_bytes = std::fs::read(&codex_config).expect("conflict bytes");
+    // legacy 别名 LC 作用域（issue 无显式 LC 归属——与 part_01 实证拓扑一致）。
+    let lc_id = crate::product::logical_codebase::store::legacy_logical_codebase_id("project_0001");
+    let trust_store = ProviderTrustStore::for_lc(app_paths.clone(), &lc_id);
+
+    let _env = T7WsHomeEnvGuard::isolate(&root_path);
+    let state = WebAppState::with_provider_registry(
+        root_path.clone(),
+        crate::web::runtime::WebRuntime::new_fake(root_path.clone()),
+        ProviderRegistry::new(),
+    );
+    let manager = WorkspaceSessionManager::create(&state, &record.id)
+        .await
+        .expect("create real manager for SC session");
+
+    // 铁律：manager 装配的确认上下文在（真实 create 注入），且 factory
+    // HOME 装配的只读 source 指向同一隔离 home（冲突态给真实冲突指导）。
+    {
+        let engine_arc = manager.engine();
+        let engine = engine_arc.lock().await;
+        assert!(
+            engine.confirmation_trust_context().is_some(),
+            "真实 create 必须注入确认 trust 上下文"
+        );
+        let gateway = engine
+            .logical_provider_gateway()
+            .expect("LC 会话 gateway 在场");
+        let waiting = gateway
+            .read_only_generation_trust_waiting(&ProviderName::Codex)
+            .expect("冲突态只读复验给等待面");
+        assert_eq!(waiting.reason_code, "codex_trust_key_conflict");
+        assert!(
+            waiting
+                .manual_guidance
+                .contains(&codex_config.display().to_string()),
+            "factory HOME 装配的 source 指向隔离 home 工件：{}",
+            waiting.manual_guidance
+        );
+    }
+
+    // 当前 driver 连接（真实 attachment 语义），仲裁放行。
+    let (driver_tx, mut driver_rx) = mpsc::channel(16);
+    manager.register_attachment("t7-sc-driver", driver_tx.clone());
+    manager.bind_role(&driver_tx, ConnectionRole::Driver, None);
+    manager.activate_attachment("t7-sc-driver");
+    manager
+        .arbitrate("t7-sc-driver", &WsInMessage::Confirm)
+        .expect("driver 写面放行");
+
+    let session_id = record.id.clone();
+    let cas_before =
+        crate::product::workspace_engine::conversational_gate::close_cas_attempts(&session_id);
+    let durable_before = serde_json::to_vec(
+        &lifecycle
+            .get_workspace_session(&session_id)
+            .expect("durable before"),
+    )
+    .expect("serialize before");
+
+    let run_context = manager.provider_run_context(state.workspace_runs.clone());
+    let context = WorkspaceInboundContext {
+        app_state: state.clone(),
+        engine: manager.engine().clone(),
+        run_context,
+        outbound_tx: driver_tx.clone(),
+        session_id: session_id.clone(),
+    };
+    handle_workspace_inbound_message(context, WsInMessage::Confirm).await;
+
+    // SC 分流 → Approve → 真实 registry 冲突停等：typed ProtocolError。
+    let mut waiting_frame: Option<serde_json::Value> = None;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while let Some(control) = tokio::time::timeout(
+        deadline.saturating_duration_since(std::time::Instant::now()),
+        driver_rx.recv(),
+    )
+    .await
+    .expect("SC 真实链确认必须回执（含恢复 Error 帧在内的帧流内找到停等帧）")
+    {
+        let OutboundControl::Text(json) = control else {
+            continue;
+        };
+        let value: serde_json::Value = serde_json::from_str(&json).expect("frame json");
+        if value["type"] == "protocol_error" {
+            waiting_frame = Some(value);
+            break;
+        }
+    }
+    let frame = waiting_frame.expect("必须出现 protocol_error 停等帧");
+    assert_eq!(
+        frame["code"],
+        serde_json::json!("workspace_confirmation_trust_waiting")
+    );
+    let message = frame["message"].as_str().expect("message");
+    assert!(
+        message.contains("codex_trust_key_conflict"),
+        "真实冲突 reason 保留：{message}"
+    );
+    assert!(
+        message.contains("重新确认"),
+        "确认场景 retry_action：{message}"
+    );
+    assert!(
+        message.contains("门保持未关闭"),
+        "门未关闭提示在场：{message}"
+    );
+
+    // close CAS 零推进、durable 会话零变化、无 close 广播。
+    assert_eq!(
+        crate::product::workspace_engine::conversational_gate::close_cas_attempts(&session_id),
+        cas_before,
+        "准备失败不推进原 close CAS"
+    );
+    assert_eq!(
+        serde_json::to_vec(
+            &lifecycle
+                .get_workspace_session(&session_id)
+                .expect("durable after")
+        )
+        .expect("serialize after"),
+        durable_before,
+        "停等前后 durable 会话记录完全不变"
+    );
+    let frames = t7_sc_drain_outbound(&mut driver_rx, std::time::Duration::from_millis(200)).await;
+    assert!(
+        !frames.iter().any(|frame| {
+            (frame["type"] == "stage_change" && frame["stage"] == "completed")
+                || frame["type"] == "human_gate_closed"
+        }),
+        "停等不产生 close/关门广播：{frames:?}"
+    );
+
+    // 用户冲突条目字节保持；失败 waiting/audit 可观察；零 ownership。
+    assert_eq!(
+        std::fs::read(&codex_config).expect("conflict bytes after"),
+        conflict_bytes,
+        "用户冲突条目不得被覆盖"
+    );
+    let waiting = trust_store.list_waiting("project_0001").unwrap();
+    assert!(
+        waiting
+            .iter()
+            .any(|record| record.reason_code == "codex_trust_key_conflict"),
+        "失败 waiting 落盘可观察：{waiting:?}"
+    );
+    let expected_operation = format!("workspace_confirm:{}", session_id);
+    let audits = trust_store.list_audit("project_0001").unwrap();
+    assert!(
+        audits.iter().any(|audit| {
+            audit.action == "ensure"
+                && audit.outcome == "conflict"
+                && audit.operation_id.as_deref() == Some(expected_operation.as_str())
+        }),
+        "冲突审计落盘且关联本次确认（operation_id=workspace_confirm:<session>）：{audits:?}"
+    );
+    let codex_trust_key = crate::product::logical_codebase::CodexTrustAdapter::for_home(&root_path)
+        .trust_key(&canonical_root);
+    assert!(
+        trust_store
+            .load_ownership("project_0001", "codex", &codex_trust_key)
+            .expect("ownership lookup")
+            .is_none(),
+        "冲突未登记成功，零 ownership"
+    );
+}
+
+async fn t7_sc_drain_outbound(
+    rx: &mut mpsc::Receiver<OutboundControl>,
+    quiet: std::time::Duration,
+) -> Vec<serde_json::Value> {
+    let mut frames = Vec::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let wait = quiet.min(deadline.saturating_duration_since(std::time::Instant::now()));
+        match tokio::time::timeout(wait, rx.recv()).await {
+            Ok(Some(OutboundControl::Text(json))) => {
+                if let Ok(value) = serde_json::from_str(&json) {
+                    frames.push(value);
+                }
+            }
+            Ok(Some(_)) => continue,
+            Ok(None) | Err(_) => break,
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+    }
+    frames
 }
