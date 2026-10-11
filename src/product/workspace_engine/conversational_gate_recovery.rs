@@ -21,6 +21,13 @@ pub(crate) enum HumanGateRecoveryAction {
     MarkFailed {
         failure_class: HumanGateTurnFailureClass,
     },
+    /// B2d（Task 5.6，设计 §5.3 SC 纪律）：turn 被 active LC recovery
+    ///（sc_manual_revision 等待/fresh）阻塞——不自动 ResumeSameTurn、
+    /// 不增 attempt、不 spawn；显式 fresh 授权后继续同 turn。已真实
+    /// Completed 的结果仍走原 CompletedRevision 恢复核对（不当成新 fresh）。
+    BlockedByLcRecovery {
+        recovery_id: String,
+    },
 }
 
 /// Classify a durable turn without allocating a new turn or changing the
@@ -205,6 +212,10 @@ impl super::WorkspaceEngine {
     /// Reconcile all durable non-terminal turns after a websocket/process restart.
     /// The provider marker is deliberately supplied by the runtime; durable turn
     /// state alone determines whether to wait, resume the same turn, or fail it.
+    /// B2d（Task 5.6，设计 §5.3 SC 纪律）：被 active LC recovery（sc_manual_
+    /// revision 等待/fresh）阻塞的 turn 只做「已真实 Completed 结果」的原
+    /// 恢复核对，其余一律跳过（不 ResumeSameTurn/不增 attempt/不 spawn）；
+    /// Resolved 后既有恢复语义回归。
     pub(crate) fn recover_human_gate_turns(
         &mut self,
         provider_is_running: bool,
@@ -218,12 +229,31 @@ impl super::WorkspaceEngine {
         let turns = store
             .list_human_gate_turns(&self.session.session_id)
             .map_err(|error| error.to_string())?;
+        let blocked_sc_manual = blocked_sc_manual_turn(expected.lc_resume_recovery.as_ref());
         let mut actions = Vec::new();
         for turn in turns {
             if !matches!(
                 turn.status,
                 HumanGateTurnStatus::Reserved | HumanGateTurnStatus::Running
             ) {
+                continue;
+            }
+            if let Some((blocked_turn_id, recovery_id)) = &blocked_sc_manual
+                && blocked_turn_id == &turn.turn_id
+            {
+                // 已真实 Completed 结果仍原恢复核对（不当成新 fresh）。
+                if let Some(action) =
+                    complete_turn_from_durable_artifact(store, &mut expected, &turn)?
+                {
+                    actions.push((turn.turn_id, action));
+                } else {
+                    actions.push((
+                        turn.turn_id,
+                        HumanGateRecoveryAction::BlockedByLcRecovery {
+                            recovery_id: recovery_id.clone(),
+                        },
+                    ));
+                }
                 continue;
             }
             if let Some(current_source_hash) = current_revision_source_hash(store, &expected)?
@@ -245,26 +275,16 @@ impl super::WorkspaceEngine {
                 ));
                 continue;
             }
-            if let Some(result_artifact_ref) = (turn.status == HumanGateTurnStatus::Running)
-                .then(|| durable_revision_artifact_ref(store, &expected, &turn))
-                .transpose()?
-                .flatten()
+            if let Some(action) = complete_turn_from_durable_artifact(store, &mut expected, &turn)?
             {
-                let mut completed = turn.clone();
-                completed.status = HumanGateTurnStatus::Completed;
-                completed.result_artifact_ref = Some(result_artifact_ref);
-                completed.failure_class = None;
-                completed.updated_at = Utc::now().to_rfc3339();
-                expected = store
-                    .update_human_gate_turn(&expected, completed)
-                    .map_err(|error| error.to_string())?;
-                actions.push((turn.turn_id, HumanGateRecoveryAction::CompletedRevision));
+                actions.push((turn.turn_id, action));
                 continue;
             }
             let action = recover_human_gate_turn(&turn, provider_is_running)?;
             match &action {
                 HumanGateRecoveryAction::WaitForProvider
-                | HumanGateRecoveryAction::CompletedRevision => {}
+                | HumanGateRecoveryAction::CompletedRevision
+                | HumanGateRecoveryAction::BlockedByLcRecovery { .. } => {}
                 HumanGateRecoveryAction::ResumeSameTurn { next_attempt_no } => {
                     let mut resumed = turn.clone();
                     resumed.status = HumanGateTurnStatus::Running;
@@ -290,6 +310,242 @@ impl super::WorkspaceEngine {
         self.session.human_gate_snapshot = expected.human_gate_snapshot;
         Ok(actions)
     }
+}
+
+/// B2d（Task 5.6，设计 §5.3 SC 纪律）：SC 人工修订 turn 的 native mismatch
+/// 稳定等待判别码——与 gateway 冻结绑定家族 `RESUME_FINGERPRINT_UNAVAILABLE`
+/// 同码（manual turn 的 mismatch 即旧 native 在而冻结绑定不可用/已吊销，
+/// 与 sc_author 同族）。
+pub(crate) const SC_MANUAL_NATIVE_MISMATCH_WAITING_REASON: &str =
+    crate::product::logical_codebase::provider_gateway::RESUME_FINGERPRINT_UNAVAILABLE;
+
+impl super::WorkspaceEngine {
+    /// B2d（Task 5.6，设计 §5.3 sc_manual_revision 行）：SC 人工修订 turn
+    /// 驱动前的 native mismatch precheck——`FrozenBindingUnavailable`（旧
+    /// native 在而冻结绑定不可用/已吊销）返回 `Ok(Some(reason))`（caller
+    /// 转 typed 等待：不 fail turn、不 rearm）；出生/健康 resume 返回
+    /// `Ok(None)` 照常驱动（零变化）；其余读取错误原样上浮（fail-closed，
+    /// 与 `build_work_item_plan_streaming_input` 内同调用的传播语义一致）。
+    pub(crate) fn precheck_sc_manual_revision_resume(
+        &self,
+    ) -> Result<Option<&'static str>, String> {
+        let provider = self.session.author_provider.clone();
+        match self.provider_resume_session_candidate(
+            crate::product::models::ProviderConversationRole::Author,
+            &provider,
+        ) {
+            Ok(_) => Ok(None),
+            Err(super::lifecycle::NativeResumeCandidateError::FrozenBindingUnavailable) => {
+                Ok(Some(SC_MANUAL_NATIVE_MISMATCH_WAITING_REASON))
+            }
+            Err(error) => Err(format!(
+                "sc manual revision resume precheck failed: {error}"
+            )),
+        }
+    }
+
+    /// B2d（Task 5.6，设计 §5.3 SC 纪律②，plan 接口字典）：SC manual turn
+    /// native mismatch 的 durable 等待收口——手写 ScManualRevision tagged
+    /// record（同 turn 的 command_id/source_hash/status/attempt_no/
+    /// budget_reserved、关联 human_gate_reservation key、candidate/source
+    /// revision ref、同 turn feedback 全量冻结）后 CAS Waiting，再清被取代
+    /// 旧会话引用并幂等收口等待面（`reconcile_lc_resume_waiting`）。turn/
+    /// gate 快照/预算/provider_start_ledger 不动——等待不等价 Failed 业务
+    /// turn；显式 fresh 的物理 run/node/native 是新 native 证据，**不是**
+    /// 新 turn/attempt/budget。failed_provider_node_id 只取旧会话
+    /// conversation 的 last_node（绝不取活动门节点——门保持开态）。gate
+    /// 快照内嵌于 session record（单一权威），无独立 ref——attempt/budget
+    /// 已由 payload 逐字段冻结。assembly digest/ref 仅在 OrderedChunks
+    /// 交付形态存在（inline 交付零持久化），等待记录不伪造。
+    pub(crate) async fn persist_sc_manual_revision_superseded_wait(
+        &mut self,
+        turn_id: &str,
+        reason: &str,
+    ) -> Result<crate::product::models::LcResumeRecoveryRecord, String> {
+        use crate::product::models::{
+            LcRecoveryBusinessContext, LcRecoveryRunContext, LcResumeRecoveryRecord,
+            LcResumeRecoveryState, ProviderConversationRole,
+        };
+
+        let store = self
+            .lifecycle_store
+            .clone()
+            .ok_or_else(|| "lifecycle_store unavailable".to_string())?;
+        let expected = store
+            .get_workspace_session(&self.session.session_id)
+            .map_err(|error| {
+                format!(
+                    "load session for sc manual superseded wait failed ({}): {error}",
+                    self.session.session_id
+                )
+            })?;
+        let turn = store
+            .get_human_gate_turn(&self.session.session_id, turn_id)
+            .map_err(|error| {
+                format!("load human gate turn for sc manual wait failed ({turn_id}): {error}")
+            })?;
+        if !matches!(
+            turn.status,
+            crate::product::models::HumanGateTurnStatus::Reserved
+                | crate::product::models::HumanGateTurnStatus::Running
+        ) {
+            return Err(format!(
+                "sc manual superseded wait requires an active turn, got {:?} ({turn_id})",
+                turn.status
+            ));
+        }
+        let role = ProviderConversationRole::Author;
+        let provider = self.session.author_provider.clone();
+        let conversation = self
+            .session
+            .provider_conversations
+            .iter()
+            .find(|conversation| conversation.role == role && conversation.provider == provider)
+            .or_else(|| {
+                expected.provider_conversations.iter().find(|conversation| {
+                    conversation.role == role && conversation.provider == provider
+                })
+            });
+        let superseded_native_session_id = conversation.and_then(|conversation| {
+            let native_id = conversation.provider_session_id.trim();
+            (!native_id.is_empty()).then(|| native_id.to_string())
+        });
+        let failed_provider_node_id = conversation
+            .and_then(|conversation| conversation.last_node_id.clone())
+            .unwrap_or_default();
+        let human_gate_reservation_key = expected
+            .human_gate_reservation
+            .as_ref()
+            .filter(|reservation| reservation.turn_id == turn.turn_id)
+            .map(|reservation| reservation.provider_start_idempotency_key.clone());
+        let run_context = LcRecoveryRunContext::ScManualRevision {
+            business: LcRecoveryBusinessContext {
+                entity_id: self.session.entity_id.clone(),
+                plan_id: None,
+                workspace_type: self.session.workspace_type.clone(),
+                business_repository_physical_id: None,
+                business_repository_logical_id: None,
+                business_checkout_id: None,
+                business_repository_path: self
+                    .session
+                    .repository_path
+                    .clone()
+                    .map(|path| path.to_string_lossy().to_string()),
+                source_story_ids: Vec::new(),
+                source_design_ids: Vec::new(),
+                plan_options_ref: None,
+                artifact_refs: Vec::new(),
+                review_refs: Vec::new(),
+                author_provider: provider.clone(),
+                effective_reviewer_provider: self.session.reviewer_provider.clone(),
+                original_node_id: (!failed_provider_node_id.is_empty())
+                    .then(|| failed_provider_node_id.clone()),
+                original_role_run_seq: None,
+            },
+            turn_id: turn.turn_id.clone(),
+            command_id: turn.command_id.clone(),
+            source_hash: turn.source_hash.clone(),
+            turn_status: turn.status.clone(),
+            attempt_no: turn.attempt_no,
+            budget_reserved: turn.budget_reserved,
+            human_gate_reservation_key,
+            gate_snapshot_ref: None,
+            source_revision_ref: expected.work_item_plan_source_revision_ref.clone(),
+            feedback_text: Some(turn.feedback_text.clone()),
+            assembly_digest: None,
+            assembly_ref: None,
+        };
+        let now = chrono::Utc::now().to_rfc3339();
+        let record = LcResumeRecoveryRecord {
+            schema_version: 1,
+            recovery_id: format!("lc_resume_recovery_{}", uuid::Uuid::new_v4().simple()),
+            failed_provider_node_id,
+            reason_code: reason.to_string(),
+            role: role.clone(),
+            provider: provider.clone(),
+            superseded_native_session_id: superseded_native_session_id.clone(),
+            previous_fingerprint_digest: self
+                .logical_launch_fingerprints
+                .get(&self.session.author_provider)
+                .map(|fingerprint| fingerprint.digest.clone()),
+            previous_session_status: expected.status.clone(),
+            previous_stage: self.session.stage.as_str().to_string(),
+            run_context,
+            state: LcResumeRecoveryState::Waiting,
+            operation_id: None,
+            fresh_node_id: None,
+            fresh_native_session_id: None,
+            fresh_role_run_seq: None,
+            fresh_operations: Vec::new(),
+            detected_at: now.clone(),
+            updated_at: now,
+        };
+        let saved = store
+            .compare_and_save_lc_resume_state(&expected, record)
+            .map_err(|error| {
+                format!(
+                    "persist sc manual superseded wait failed ({}): {error}",
+                    self.session.session_id
+                )
+            })?;
+        // 内存镜像同步（A2a 合同：durable 以 CAS 锁内 stored 为准）。
+        self.session.session_status = saved.status.clone();
+        self.session.lc_resume_recovery = saved.lc_resume_recovery.clone();
+        // 被取代旧会话引用清理（显式 fresh 不再携带旧 resume id）+ 等待面
+        // 幂等收口；turn/gate 快照/预算/ledger 不动。
+        if let Some(native_id) = superseded_native_session_id.as_deref() {
+            self.clear_superseded_provider_session(role, &provider, native_id)
+                .await;
+        }
+        self.reconcile_lc_resume_waiting().await;
+        saved.lc_resume_recovery.ok_or_else(|| {
+            "persist sc manual superseded wait returned record without recovery".to_string()
+        })
+    }
+}
+
+/// B2d（Task 5.6）：active（非 Resolved）sc_manual_revision recovery 阻塞的
+/// turn 身份——(turn_id, recovery_id)。其余 tag 不阻塞（本包只接管 manual
+/// turn 的等待语义；整会话级自动链阻断由 manager `recover_on_creation`
+/// 的既有 LC waiting 守卫承担）。
+fn blocked_sc_manual_turn(
+    recovery: Option<&crate::product::models::LcResumeRecoveryRecord>,
+) -> Option<(String, String)> {
+    let recovery = recovery?;
+    if recovery.state == crate::product::models::LcResumeRecoveryState::Resolved {
+        return None;
+    }
+    match &recovery.run_context {
+        crate::product::models::LcRecoveryRunContext::ScManualRevision { turn_id, .. } => {
+            Some((turn_id.clone(), recovery.recovery_id.clone()))
+        }
+        _ => None,
+    }
+}
+
+/// 「已真实 Completed 结果」的原恢复核对（唯一写口）：Running turn 若已有
+/// 晚于其创建的 current artifact 版本（candidate hash 对账通过），则按原
+/// 语义落 Completed；无结果返回 None（caller 走各自分类/跳过路径）。
+fn complete_turn_from_durable_artifact(
+    store: &super::LifecycleStore,
+    expected: &mut crate::product::models::WorkspaceSessionRecord,
+    turn: &HumanGateTurn,
+) -> Result<Option<HumanGateRecoveryAction>, String> {
+    if turn.status != HumanGateTurnStatus::Running {
+        return Ok(None);
+    }
+    let Some(result_artifact_ref) = durable_revision_artifact_ref(store, expected, turn)? else {
+        return Ok(None);
+    };
+    let mut completed = turn.clone();
+    completed.status = HumanGateTurnStatus::Completed;
+    completed.result_artifact_ref = Some(result_artifact_ref);
+    completed.failure_class = None;
+    completed.updated_at = Utc::now().to_rfc3339();
+    *expected = store
+        .update_human_gate_turn(expected, completed)
+        .map_err(|error| error.to_string())?;
+    Ok(Some(HumanGateRecoveryAction::CompletedRevision))
 }
 
 /// C1 Task 4：候选门恢复命令（REST/WS 共用的应用服务输入）。

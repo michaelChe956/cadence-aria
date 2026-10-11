@@ -78,6 +78,50 @@ impl super::WorkspaceEngine {
         )
     }
 
+    /// B2d（Task 5.6，设计 §5.3 sc_manual_revision 行）：显式 fresh 的同
+    /// turn prompt 重装——重读同 turn（feedback 全量）并对 candidate hash
+    /// 复验（turn.source_hash 与当前候选 markdown 不一致＝业务漂移，稳定
+    /// 码 `HUMAN_GATE_REVISION_CANDIDATE_DRIFTED` 拒绝，不以旧 turn 权限
+    /// 强行修订漂移后的候选；空 source_hash 的 legacy 记录不可判定，同码
+    /// fail-closed）；复验通过仍走现完整 SC manual prompt 装配（原预算/
+    /// transport 契约不变，零新持久化）。
+    pub(crate) fn build_sc_manual_revision_prompt_for_fresh_turn(
+        &self,
+        turn: &crate::product::models::HumanGateTurn,
+    ) -> Result<String, String> {
+        use sha2::Digest;
+
+        let candidate_markdown = self
+            .session
+            .artifact
+            .as_ref()
+            .and_then(|artifact| artifact.markdown())
+            .or_else(|| {
+                self.artifact_versions
+                    .iter()
+                    .rev()
+                    .find_map(|version| version.payload.markdown())
+            })
+            .ok_or_else(|| {
+                "HUMAN_GATE_REVISION_CANDIDATE_MISSING: current candidate markdown is required"
+                    .to_string()
+            })?;
+        if turn.source_hash.is_empty() {
+            return Err(
+                "HUMAN_GATE_REVISION_CANDIDATE_DRIFTED: turn carries no candidate hash (legacy record); cannot re-assemble a fresh revision prompt"
+                    .to_string(),
+            );
+        }
+        let current_hash = hex::encode(sha2::Sha256::digest(candidate_markdown.as_bytes()));
+        if current_hash != turn.source_hash {
+            return Err(format!(
+                "HUMAN_GATE_REVISION_CANDIDATE_DRIFTED: turn was reserved for candidate sha256:{} but the current candidate is sha256:{current_hash}; the turn no longer matches its business candidate",
+                turn.source_hash
+            ));
+        }
+        self.build_sc_manual_revision_prompt_for_turn(&turn.feedback_text)
+    }
+
     /// C2 Task 11（REQ-CG-03，#15）：SC 修订完整预算组装与交付（HumanGateTurn
     /// CAS 之前）。≤inline 返回原 prompt（零新增持久化，现行为）；超 inline 但
     /// 硬限内持久化完整组装 artifact（readback digest 校验）并以 ArtifactRef
@@ -165,17 +209,13 @@ impl super::WorkspaceEngine {
         prompt: &str,
         assembly_digest: &str,
     ) -> Result<(), String> {
-        let path = self
-            .sc_revision_partition_root()?
-            .join(artifact_ref);
+        let path = self.sc_revision_partition_root()?.join(artifact_ref);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         }
         std::fs::write(&path, prompt).map_err(|error| error.to_string())?;
         let readback = std::fs::read_to_string(&path).map_err(|error| error.to_string())?;
-        if readback != prompt
-            || super::prompts::assembly_digest_of(&readback) != assembly_digest
-        {
+        if readback != prompt || super::prompts::assembly_digest_of(&readback) != assembly_digest {
             return Err("readback digest mismatch".to_string());
         }
         Ok(())
@@ -203,9 +243,7 @@ impl super::WorkspaceEngine {
                 return;
             }
         };
-        if let Err(error) =
-            crate::product::json_store::write_json(&path, &record)
-        {
+        if let Err(error) = crate::product::json_store::write_json(&path, &record) {
             tracing::warn!(%error, "sc revision assembly record write failed");
         }
     }
@@ -238,9 +276,7 @@ impl super::WorkspaceEngine {
                 return;
             }
         };
-        if let Err(error) =
-            crate::product::json_store::write_json(&path, &record)
-        {
+        if let Err(error) = crate::product::json_store::write_json(&path, &record) {
             tracing::warn!(%error, "sc revision blocked record write failed");
         }
     }
@@ -251,7 +287,9 @@ impl super::WorkspaceEngine {
             return;
         };
         let path = root.join(SC_REVISION_BLOCKED_FILE);
-        if path.exists() && let Err(error) = std::fs::remove_file(&path) {
+        if path.exists()
+            && let Err(error) = std::fs::remove_file(&path)
+        {
             tracing::warn!(%error, "remove sc revision blocked record failed");
         }
     }

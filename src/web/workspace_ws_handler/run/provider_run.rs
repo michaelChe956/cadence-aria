@@ -809,7 +809,126 @@ pub(super) async fn spawn_provider_run_with_start_mode(
                 ProviderRunKind::HumanGateScManualRevision { turn_id, prompt } => {
                     use crate::product::models::HumanGateTurnFailureClass;
                     let mut command_rx = command_rx;
-                    let prompt = if prompt.is_empty() {
+                    // B2d（Task 5.6，设计 §5.3 sc_manual_revision 行）：
+                    // FreshRunning 的 sc_manual recovery → 同 turn fresh 重入
+                    //（重装同 turn prompt、resume=None 全新 native、
+                    // run_sc_manual_revision_turn 同 turn 完成回原 human gate，
+                    // 不新 turn/attempt/预算）；Ordinary 先行 native mismatch
+                    // precheck——`FrozenBindingUnavailable` 家族转 typed 等待
+                    //（persist 后原 turn/gate/预算保留，不 fail turn、不
+                    // rearm、零 provider start）。读取失败按 Message 面收口
+                    //（不确定等待/失败归属时不落 turn 失败）。
+                    let manual_fresh_recovery = match lc_fresh_recovery_record_if_running(
+                        &run_context_clone.app_paths,
+                        &engine.session().session_id,
+                    ) {
+                        Ok(Some(recovery)) => matches!(
+                            &recovery.run_context,
+                            crate::product::models::LcRecoveryRunContext::ScManualRevision {
+                                turn_id: recovery_turn_id,
+                                ..
+                            } if recovery_turn_id == &turn_id
+                        ),
+                        Ok(None) => false,
+                        Err(message) => {
+                            engine.mark_active_run_finished(&run_label);
+                            drop(engine);
+                            drop(provider_drive_guard.take());
+                            manager_for_task.finish_run(run_token).await;
+                            let _ = send_json_outbound(
+                                &outbound_tx_for_task,
+                                &WsOutMessage::Error { message },
+                            )
+                            .await;
+                            return;
+                        }
+                    };
+                    if !manual_fresh_recovery {
+                        match engine.precheck_sc_manual_revision_resume() {
+                            Ok(None) => {}
+                            Ok(Some(reason_code)) => {
+                                match engine
+                                    .persist_sc_manual_revision_superseded_wait(
+                                        &turn_id,
+                                        reason_code,
+                                    )
+                                    .await
+                                {
+                                    Ok(recovery) => {
+                                        // typed 等待收口：无 failed 节点（等待
+                                        // 不是失败）、turn/gate/预算原样保留，
+                                        // 等待消息上浮显式 fresh 出口。
+                                        engine.mark_active_run_finished(&run_label);
+                                        drop(engine);
+                                        drop(provider_drive_guard.take());
+                                        manager_for_task.finish_run(run_token).await;
+                                        let superseded_native = recovery
+                                            .superseded_native_session_id
+                                            .as_deref()
+                                            .unwrap_or("unknown");
+                                        let message = format!(
+                                            "sc manual revision native resume superseded ({reason_code}): \
+                                             the old native session {superseded_native} can no longer be resumed \
+                                             (recovery {}); no provider was started and the original \
+                                             turn/gate/budget are preserved; 请通过显式恢复操作启动新原生会话继续同turn修订（explicit fresh）",
+                                            recovery.recovery_id
+                                        );
+                                        let _ = send_json_outbound(
+                                            &outbound_tx_for_task,
+                                            &WsOutMessage::Error { message },
+                                        )
+                                        .await;
+                                        return;
+                                    }
+                                    Err(message) => {
+                                        let _ = engine
+                                            .fail_human_gate_turn(
+                                                &turn_id,
+                                                HumanGateTurnFailureClass::ProviderErr,
+                                            )
+                                            .await;
+                                        engine.mark_active_run_finished(&run_label);
+                                        drop(engine);
+                                        drop(provider_drive_guard.take());
+                                        manager_for_task.finish_run(run_token).await;
+                                        let _ = send_json_outbound(
+                                            &outbound_tx_for_task,
+                                            &WsOutMessage::HumanGateTurnFailed {
+                                                turn_id: turn_id.clone(),
+                                                failure_class: "provider_err".to_string(),
+                                                message,
+                                            },
+                                        )
+                                        .await;
+                                        return;
+                                    }
+                                }
+                            }
+                            Err(message) => {
+                                let _ = engine
+                                    .fail_human_gate_turn(
+                                        &turn_id,
+                                        HumanGateTurnFailureClass::ProviderErr,
+                                    )
+                                    .await;
+                                engine.mark_active_run_finished(&run_label);
+                                drop(engine);
+                                drop(provider_drive_guard.take());
+                                manager_for_task.finish_run(run_token).await;
+                                let _ = send_json_outbound(
+                                    &outbound_tx_for_task,
+                                    &WsOutMessage::HumanGateTurnFailed {
+                                        turn_id: turn_id.clone(),
+                                        failure_class: "provider_err".to_string(),
+                                        message,
+                                    },
+                                )
+                                .await;
+                                return;
+                            }
+                        }
+                    }
+                    let prompt = if manual_fresh_recovery || prompt.is_empty() {
                         let turn = match LifecycleStore::new(run_context_clone.app_paths.clone())
                             .get_human_gate_turn(&engine.session().session_id, &turn_id)
                         {
@@ -836,22 +955,36 @@ pub(super) async fn spawn_provider_run_with_start_mode(
                                 return;
                             }
                         };
-                        match engine.build_sc_manual_revision_prompt_for_turn(&turn.feedback_text) {
+                        // B2d：fresh 重入按 §5.3 同 turn 语义重装——重读同
+                        // turn feedback 并对 candidate hash 复验（漂移按业务
+                        // 校验规则 validation_reject 收口，与恢复面 source-hash
+                        // 失配同族；不用旧 turn 权限强行修订漂移后的候选）。
+                        let built = if manual_fresh_recovery {
+                            engine.build_sc_manual_revision_prompt_for_fresh_turn(&turn)
+                        } else {
+                            engine.build_sc_manual_revision_prompt_for_turn(&turn.feedback_text)
+                        };
+                        match built {
                             Ok(prompt) => prompt,
                             Err(message) => {
-                                let _ = engine
-                                    .fail_human_gate_turn(
-                                        &turn_id,
-                                        HumanGateTurnFailureClass::ProviderErr,
+                                let (failure_class, class_label) = if message
+                                    .starts_with("HUMAN_GATE_REVISION_CANDIDATE_DRIFTED")
+                                {
+                                    (
+                                        HumanGateTurnFailureClass::ValidationReject,
+                                        "validation_reject",
                                     )
-                                    .await;
+                                } else {
+                                    (HumanGateTurnFailureClass::ProviderErr, "provider_err")
+                                };
+                                let _ = engine.fail_human_gate_turn(&turn_id, failure_class).await;
                                 engine.mark_active_run_finished(&run_label);
                                 drop(engine);
                                 let _ = send_json_outbound(
                                     &outbound_tx_for_task,
                                     &WsOutMessage::HumanGateTurnFailed {
                                         turn_id,
-                                        failure_class: "provider_err".to_string(),
+                                        failure_class: class_label.to_string(),
                                         message,
                                     },
                                 )
@@ -906,15 +1039,31 @@ pub(super) async fn spawn_provider_run_with_start_mode(
                         .as_ref()
                         .cloned()
                         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-                    let provider_input = match engine.build_work_item_plan_streaming_input(
-                        crate::product::work_item_split_engine::types::provider_name_to_type(
-                            &author_provider,
-                        ),
-                        prompt.clone(),
-                        worktree_path.to_string_lossy().to_string(),
-                        author_provider.clone(),
-                        PlanAuthorOutputContract::Structured,
-                    ) {
+                    // B2d：fresh 重入全新 native（resume_provider_session_id=None
+                    // 结构保证——`build_work_item_plan_streaming_input_fresh`）；
+                    // Ordinary 保持既有 resume 语义（行为不变）。
+                    let provider_input = if manual_fresh_recovery {
+                        engine.build_work_item_plan_streaming_input_fresh(
+                            crate::product::work_item_split_engine::types::provider_name_to_type(
+                                &author_provider,
+                            ),
+                            prompt.clone(),
+                            worktree_path.to_string_lossy().to_string(),
+                            author_provider.clone(),
+                            PlanAuthorOutputContract::Structured,
+                        )
+                    } else {
+                        engine.build_work_item_plan_streaming_input(
+                            crate::product::work_item_split_engine::types::provider_name_to_type(
+                                &author_provider,
+                            ),
+                            prompt.clone(),
+                            worktree_path.to_string_lossy().to_string(),
+                            author_provider.clone(),
+                            PlanAuthorOutputContract::Structured,
+                        )
+                    };
+                    let provider_input = match provider_input {
                         Ok(provider_input) => provider_input,
                         Err(message) => {
                             // REQ-PIB-02（T2.3）：基线不可解析 → 门内轮次失败（可观测）。

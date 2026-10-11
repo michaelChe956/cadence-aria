@@ -828,12 +828,13 @@ async fn anchor_t13_plan_stale_waits_for_explicit_fresh() {
     );
 
     // ⑤ 显式 fresh：claim 受理（FreshReserved）后 dispatch——未接管 tag
-    //    （sc_manual_revision，归 5.6/B2d）typed 拒（context_unsupported），
-    //    operation failed、recovery 回 Waiting、0 spawn（不回落通用
-    //    plan_author）。B2c（5.5）已把 sc_author 接管为真实 full fresh
-    //    （anchor_t17 正路覆盖）、B2b2（5.3）已接管 outline 反馈族两 tag
-    //    （anchor_t15 正路覆盖），故先以同 recovery_id 换载未接管
-    //    run_context 再 claim。
+    //    （author 族，归 B1 author fresh 合约面）typed 拒
+    //    （context_unsupported），operation failed、recovery 回 Waiting、
+    //    0 spawn（不回落通用 plan_author/legacy）。B2b2（5.3）已接管
+    //    outline 反馈族两 tag（anchor_t15 正路覆盖）、B2c（5.5）已接管
+    //    sc_author（anchor_t17 正路覆盖）、B2d（5.6）已接管 sc_manual_
+    //    revision（anchor_t18 正路覆盖），故先以同 recovery_id 换载仍未
+    //    接管的 author tag 再 claim。
     let before_swap = fixture.latest_record();
     let mut swapped_recovery = before_swap
         .lc_resume_recovery
@@ -843,20 +844,9 @@ async fn anchor_t13_plan_stale_waits_for_explicit_fresh() {
         LcRecoveryRunContext::LegacyOutlineRevision { business, .. } => business.clone(),
         other => panic!("期望换载前为 LegacyOutlineRevision，got {other:?}"),
     };
-    swapped_recovery.run_context = LcRecoveryRunContext::ScManualRevision {
+    swapped_recovery.run_context = LcRecoveryRunContext::Author {
         business: swapped_business,
-        turn_id: "turn_t13_manual_swap".to_string(),
-        command_id: "command_t13_manual_swap".to_string(),
-        source_hash: "sha256:t13-manual-swap".to_string(),
-        turn_status: HumanGateTurnStatus::Running,
-        attempt_no: 1,
-        budget_reserved: 1,
-        human_gate_reservation_key: None,
-        gate_snapshot_ref: None,
-        source_revision_ref: None,
-        feedback_text: None,
-        assembly_digest: None,
-        assembly_ref: None,
+        original_content: Some("t13 author swap content".to_string()),
     };
 
     fixture
@@ -2017,37 +2007,21 @@ async fn anchor_t16_fresh_plan_revision_payload_mismatch_waits_typed_stale() {
 #[tokio::test]
 async fn anchor_t16_untaken_tag_still_typed_rejected_no_fallback() {
     let fixture = AnchorT16PlanFixture::new();
-    // 未接管 tag（sc_manual_revision 归 B2d/5.6；sc_author 已由 B2c/5.5
-    // 接管为真实 full fresh，见 anchor_t17）：typed 拒，不回落通用
-    // plan_author。
+    // 未接管 tag（author 族，归 B1 author fresh 合约面；sc_author 已由
+    // B2c/5.5 接管、sc_manual_revision 已由 B2d/5.6 接管为真实 full
+    // fresh，见 anchor_t17/anchor_t18）：typed 拒，不回落通用 plan_author。
     let recovery = fixture.seed_recovery_waiting(
-        "recovery_anchor_t16_sc_manual_revision",
-        LcRecoveryRunContext::ScManualRevision {
+        "recovery_anchor_t16_author",
+        LcRecoveryRunContext::Author {
             business: anchor_t16_business(),
-            turn_id: "turn_t16_manual_swap".to_string(),
-            command_id: "command_t16_manual_swap".to_string(),
-            source_hash: "sha256:t16-manual-swap".to_string(),
-            turn_status: HumanGateTurnStatus::Running,
-            attempt_no: 1,
-            budget_reserved: 1,
-            human_gate_reservation_key: None,
-            gate_snapshot_ref: None,
-            source_revision_ref: None,
-            feedback_text: None,
-            assembly_digest: None,
-            assembly_ref: None,
+            original_content: Some("t16 author swap content".to_string()),
         },
     );
-    let engine_arc = fixture.engine_after_stale_closure(None, "checkpoints-t16-sc-manual-revision");
+    let engine_arc = fixture.engine_after_stale_closure(None, "checkpoints-t16-author");
     let (input_tx, mut input_rx) = mpsc::unbounded_channel();
-    let mut outbound_rx = anchor_t16_claim_and_dispatch(
-        &fixture,
-        &recovery,
-        "op-t16-sc-manual-revision",
-        engine_arc,
-        input_tx,
-    )
-    .await;
+    let mut outbound_rx =
+        anchor_t16_claim_and_dispatch(&fixture, &recovery, "op-t16-author", engine_arc, input_tx)
+            .await;
 
     let (_frame, code) = anchor_t16_next_frame_code(&mut outbound_rx).await;
     assert_eq!(code, "lc_resume_recovery_context_unsupported");

@@ -373,3 +373,317 @@ pub(crate) fn handoff_clean_rep4_v2() -> String {
     handoff_clean_rep4().replace("Backend levels API", "Backend levels API round-2")
 }
 
+// ---------------------------------------------------------------------------
+// B2d（Task 5.6，tasks.md 5.6 / 设计 §5.3 sc_manual_revision 行）：SC 人工
+// 修订 turn 的 native mismatch → typed 等待 → 显式 fresh → 同 turn 完成。
+// turn 身份/gate 快照/预算/reservation 逐字段保留；等待期恢复不自动
+// ResumeSameTurn（不增 attempt/不 spawn）；fresh 走同 turn 完成器
+// `run_sc_manual_revision_turn`（不新 turn、不二次扣预算）。
+// ---------------------------------------------------------------------------
+
+/// seed 漂移形态：旧 Author native 会话在场且已被 tombstone 吊销——
+/// `provider_resume_session_candidate` 必判 `FrozenBindingUnavailable`。
+fn anchor_t18_seed_superseded_native(
+    lifecycle: &crate::product::lifecycle_store::LifecycleStore,
+    engine: &mut crate::product::workspace_engine::WorkspaceEngine,
+) {
+    let mut record = lifecycle
+        .get_workspace_session(&engine.session().session_id)
+        .expect("t18 durable session");
+    record.provider_conversations = vec![crate::product::models::ProviderConversationRef {
+        role: crate::product::models::ProviderConversationRole::Author,
+        provider: crate::product::models::ProviderName::ClaudeCode,
+        provider_session_id: "t18-old-native".to_string(),
+        updated_at: "2026-10-12T00:00:00Z".to_string(),
+        last_node_id: Some("timeline_node_001".to_string()),
+    }];
+    record.superseded_native_sessions =
+        vec![crate::product::models::SupersededNativeSessionRecord {
+            role: crate::product::models::ProviderConversationRole::Author,
+            provider: crate::product::models::ProviderName::ClaudeCode,
+            native_session_id: "t18-old-native".to_string(),
+            reason_code: "resume_fingerprint_unavailable".to_string(),
+            recovery_id: "seed".to_string(),
+            superseded_at: "2026-10-12T00:00:00Z".to_string(),
+        }];
+    crate::product::json_store::write_json(
+        &lifecycle
+            .app_paths()
+            .issue_root(&record.project_id, &record.issue_id)
+            .join("workspace-sessions")
+            .join(format!("{}.json", record.id)),
+        &record,
+    )
+    .expect("seed t18 superseded native");
+    let repository_path = engine.session.repository_path.clone();
+    let artifact = engine.session.artifact.clone();
+    let stage = engine.session.stage.clone();
+    let session_status = engine.session.session_status.clone();
+    engine.session = crate::product::workspace_engine::WorkspaceSession::from_record(record);
+    engine.session.repository_path = repository_path;
+    engine.session.artifact = artifact;
+    engine.session.stage = stage;
+    engine.session.session_status = session_status;
+}
+
+/// B2d：manual turn native mismatch 的等待收口——ScManualRevision tagged
+/// record 冻结同 turn 事实与 feedback，turn/gate 快照/预算/ledger 逐字段
+/// 不变；等待 active 期间恢复跳过该 turn（BlockedByLcRecovery），Resolved
+/// 后既有恢复语义回归（不永久楔死）。
+#[tokio::test]
+async fn anchor_t18_manual_mismatch_wait_preserves_turn_gate_budget_and_blocks_recovery() {
+    let (_root, lifecycle, mut engine) = durable_revision_fixture("t18_manual_wait", 2);
+    let turn_before = {
+        let outcome = engine
+            .handle_human_gate_feedback(HumanGateFeedbackInput {
+                command_id: "cmd-t18-manual-wait".to_string(),
+                feedback: "T18:把后端接口标题改为round-2口径".to_string(),
+            })
+            .await
+            .expect("open t18 manual turn");
+        match outcome {
+            HumanGateCommandOutcome::TurnOpened { turn, .. } => turn,
+            other => panic!("expected opened turn, got {other:?}"),
+        }
+    };
+    assert_eq!(
+        turn_before.status,
+        crate::product::models::HumanGateTurnStatus::Reserved
+    );
+    anchor_t18_seed_superseded_native(&lifecycle, &mut engine);
+    let ledger_before = serde_json::to_vec(
+        &lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("t18 record before")
+            .provider_start_ledger,
+    )
+    .expect("serialize ledger before");
+
+    // precheck：mismatch 家族 → Some(稳定判别码)。
+    let reason = engine
+        .precheck_sc_manual_revision_resume()
+        .expect("t18 precheck read ok")
+        .expect("superseded native must classify as mismatch waiting");
+    assert_eq!(reason, "resume_fingerprint_unavailable");
+
+    let recovery = engine
+        .persist_sc_manual_revision_superseded_wait(&turn_before.turn_id, reason)
+        .await
+        .expect("persist t18 manual waiting");
+    assert_eq!(
+        recovery.state,
+        crate::product::models::LcResumeRecoveryState::Waiting
+    );
+    assert_eq!(recovery.reason_code, "resume_fingerprint_unavailable");
+    assert_eq!(
+        recovery.superseded_native_session_id.as_deref(),
+        Some("t18-old-native")
+    );
+    let crate::product::models::LcRecoveryRunContext::ScManualRevision {
+        turn_id: payload_turn_id,
+        command_id,
+        source_hash,
+        turn_status,
+        attempt_no,
+        budget_reserved,
+        human_gate_reservation_key,
+        feedback_text,
+        ..
+    } = &recovery.run_context
+    else {
+        panic!(
+            "t18 必须捕获 sc_manual_revision tag，got {:?}",
+            recovery.run_context
+        )
+    };
+    assert_eq!(payload_turn_id, &turn_before.turn_id);
+    assert_eq!(command_id, &turn_before.command_id);
+    assert_eq!(source_hash, &turn_before.source_hash);
+    assert_eq!(
+        *turn_status,
+        crate::product::models::HumanGateTurnStatus::Reserved
+    );
+    assert_eq!(*attempt_no, turn_before.attempt_no);
+    assert_eq!(*budget_reserved, turn_before.budget_reserved);
+    assert_eq!(
+        feedback_text.as_deref(),
+        Some(turn_before.feedback_text.as_str())
+    );
+    assert_eq!(
+        human_gate_reservation_key.as_deref(),
+        lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("t18 record after wait")
+            .human_gate_reservation
+            .as_ref()
+            .map(|reservation| reservation.provider_start_idempotency_key.as_str()),
+        "等待保留原 reservation key"
+    );
+
+    // turn/gate 快照/预算/账本逐字段不变（等待 ≠ 业务失败）。
+    let turn_after_wait = lifecycle
+        .get_human_gate_turn(&engine.session().session_id, &turn_before.turn_id)
+        .expect("t18 turn after wait");
+    assert_eq!(
+        turn_after_wait.status,
+        crate::product::models::HumanGateTurnStatus::Reserved,
+        "mismatch 不 fail turn（原 Reserved 保持）"
+    );
+    assert_eq!(turn_after_wait.attempt_no, turn_before.attempt_no);
+    assert_eq!(turn_after_wait.budget_reserved, turn_before.budget_reserved);
+    assert!(turn_after_wait.failure_class.is_none());
+    let record_after_wait = lifecycle
+        .get_workspace_session(&engine.session().session_id)
+        .expect("t18 record after wait");
+    assert_eq!(
+        record_after_wait
+            .human_gate_snapshot
+            .as_ref()
+            .expect("gate snapshot kept")
+            .manual_repairs_remaining,
+        1,
+        "等待不二次扣预算"
+    );
+    assert_eq!(
+        record_after_wait.status,
+        crate::product::models::WorkspaceSessionStatus::WaitingForHuman,
+        "门保持开态"
+    );
+    assert_eq!(
+        serde_json::to_vec(&record_after_wait.provider_start_ledger).expect("serialize ledger"),
+        ledger_before,
+        "等待不追加 provider_start_ledger"
+    );
+
+    // 等待 active：恢复跳过该 turn（不 ResumeSameTurn/不增 attempt/不 spawn）。
+    let blocked_actions = engine
+        .recover_human_gate_turns(false)
+        .expect("t18 blocked recovery");
+    assert_eq!(
+        blocked_actions,
+        vec![(
+            turn_before.turn_id.clone(),
+            crate::product::workspace_engine::HumanGateRecoveryAction::BlockedByLcRecovery {
+                recovery_id: recovery.recovery_id.clone(),
+            }
+        )],
+        "active sc_manual recovery 阻塞的 turn 不得自动恢复"
+    );
+    let turn_still_blocked = lifecycle
+        .get_human_gate_turn(&engine.session().session_id, &turn_before.turn_id)
+        .expect("t18 turn still blocked");
+    assert_eq!(turn_still_blocked.attempt_no, turn_before.attempt_no);
+    assert_eq!(
+        turn_still_blocked.status,
+        crate::product::models::HumanGateTurnStatus::Reserved
+    );
+
+    // 对照：Resolved 后既有恢复语义回归（不永久楔死）。
+    {
+        let expected = lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("t18 record before resolve");
+        let mut resolved = expected
+            .lc_resume_recovery
+            .clone()
+            .expect("t18 recovery before resolve");
+        resolved.state = crate::product::models::LcResumeRecoveryState::Resolved;
+        lifecycle
+            .compare_and_save_lc_resume_state(&expected, resolved)
+            .expect("resolve t18 recovery");
+    }
+    let unblocked_actions = engine
+        .recover_human_gate_turns(false)
+        .expect("t18 unblocked recovery");
+    assert!(matches!(
+        unblocked_actions.as_slice(),
+        [(
+            turn_id,
+            crate::product::workspace_engine::HumanGateRecoveryAction::ResumeSameTurn {
+                next_attempt_no: 1,
+            }
+        )] if turn_id == &turn_before.turn_id
+    ));
+}
+
+/// B2d：显式 fresh 完成后的同 turn 收口——run_sc_manual_revision_turn 同
+/// turn_id/command/source_hash 完成，attempt/budget 不变，门预算接续
+/// （回原 human gate，不二次扣预算）。
+#[tokio::test]
+async fn anchor_t18_manual_same_turn_completer_after_wait_keeps_turn_gate_budget() {
+    let (_root, lifecycle, mut engine) = durable_revision_fixture("t18_manual_complete", 2);
+    let turn_before = {
+        let outcome = engine
+            .handle_human_gate_feedback(HumanGateFeedbackInput {
+                command_id: "cmd-t18-manual-complete".to_string(),
+                feedback: "T18:把后端接口标题改为round-2口径".to_string(),
+            })
+            .await
+            .expect("open t18 manual turn");
+        match outcome {
+            HumanGateCommandOutcome::TurnOpened { turn, .. } => turn,
+            other => panic!("expected opened turn, got {other:?}"),
+        }
+    };
+    anchor_t18_seed_superseded_native(&lifecycle, &mut engine);
+    let reason = engine
+        .precheck_sc_manual_revision_resume()
+        .expect("t18 precheck read ok")
+        .expect("superseded native must classify as mismatch waiting");
+    let recovery = engine
+        .persist_sc_manual_revision_superseded_wait(&turn_before.turn_id, reason)
+        .await
+        .expect("persist t18 manual waiting");
+    assert_eq!(
+        recovery.state,
+        crate::product::models::LcResumeRecoveryState::Waiting
+    );
+
+    // 同 turn 完成器（fresh run 产出 → run_sc_manual_revision_turn）。
+    let result = engine
+        .run_sc_manual_revision_turn(&turn_before.turn_id, handoff_clean_rep4_v2())
+        .await
+        .expect("t18 same-turn completion");
+    assert!(matches!(
+        result,
+        crate::product::workspace_engine::ScManualRevisionResult::Accepted { .. }
+    ));
+    let turn_after = lifecycle
+        .get_human_gate_turn(&engine.session().session_id, &turn_before.turn_id)
+        .expect("t18 turn after completion");
+    assert_eq!(turn_after.turn_id, turn_before.turn_id, "同 turn_id");
+    assert_eq!(
+        turn_after.command_id, turn_before.command_id,
+        "同 command_id"
+    );
+    assert_eq!(
+        turn_after.source_hash, turn_before.source_hash,
+        "同 source_hash"
+    );
+    assert_eq!(
+        turn_after.status,
+        crate::product::models::HumanGateTurnStatus::Completed
+    );
+    assert_eq!(
+        turn_after.attempt_no, turn_before.attempt_no,
+        "同 turn 完成不加 attempt"
+    );
+    assert_eq!(turn_after.budget_reserved, turn_before.budget_reserved);
+    let record_after = lifecycle
+        .get_workspace_session(&engine.session().session_id)
+        .expect("t18 record after completion");
+    assert_eq!(
+        record_after
+            .human_gate_snapshot
+            .as_ref()
+            .expect("gate snapshot kept")
+            .manual_repairs_remaining,
+        1,
+        "fresh 完成不二次扣预算（门预算接续）"
+    );
+    assert_eq!(
+        record_after.status,
+        crate::product::models::WorkspaceSessionStatus::WaitingForHuman,
+        "回原 human gate（门重开）"
+    );
+}
