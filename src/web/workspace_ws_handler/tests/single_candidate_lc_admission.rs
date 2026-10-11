@@ -266,18 +266,57 @@ pub(super) struct AliasLcFixture {
     pub(super) gateway: Arc<LogicalCodebaseProviderGateway>,
 }
 
+/// 6.1（方案 A 附带）：Alias LC 夹具的 gateway 组装覆盖项。默认全空——
+/// 既有夹具行为零变化；trust 首次失败只读指导用例按需注入。
+#[derive(Default, Clone)]
+pub(super) struct AliasLcGatewayExtras {
+    /// 覆盖 capability source（如按 provider 报真实 dialect 的
+    /// `LcDialectCapabilitySource`，让 gateway 的只读 trust 复验按
+    /// `provider_name_for_dialect` 命中 Codex/Kimi 的 workspace trust 面）。
+    pub(super) capability: Option<Arc<dyn ProviderCapabilitySource>>,
+    /// 隔离 home（空 tempdir）——组装只读 trust source（真实 Codex/Kimi
+    /// adapter `for_home`，绝不读写真实用户 home）。
+    pub(super) trust_home: Option<std::path::PathBuf>,
+    /// 覆盖 availability gate（负例：provider 不健康时其它
+    /// ProviderUnavailable 不得误当 trust 缺失）。
+    pub(super) availability: Option<Arc<ProviderAvailabilityGate>>,
+}
+
 /// 在 legacy 别名位置登记逻辑代码库（record/manifest/member/checkout/
-/// selection/index/policy 权威记录）并组装 gateway。`member_roots` 顺序即
-/// ordinal（成员 0 即夹具 repository_root）；各成员 checkout 必须是聚合根的
-/// 直接子目录，聚合根取成员 0 的父目录。`focus` 决定 issue 显式选择的
-/// focus 形态（WorkItemPlan 路由面 target 解析输入：FirstMember+多成员=
-/// 唯一 focus 解析到成员 0；NonUnique=无唯一 focus 解析聚合根视图）。
+/// selection/index/policy 权威记录）并组装 gateway。既有行为入口——
+/// 零覆盖项；细节见 `register_alias_logical_codebase_with_extras`。
 pub(super) fn register_alias_logical_codebase(
     app_paths: &ProductAppPaths,
     member_roots: &[std::path::PathBuf],
     physical_repositories: &[RepositoryRecord],
     focus: &super::single_candidate_provider_run::LogicalAliasFocus,
     gateway_author: Arc<dyn crate::cross_cutting::streaming_provider::StreamingProviderAdapter>,
+) -> AliasLcFixture {
+    register_alias_logical_codebase_with_extras(
+        app_paths,
+        member_roots,
+        physical_repositories,
+        focus,
+        gateway_author,
+        AliasLcGatewayExtras::default(),
+    )
+}
+
+/// [`register_alias_logical_codebase`] 的 gateway 覆盖项变体（6.1）：
+/// `extras.trust_home` 注入只读 trust source（隔离 home 的真实
+/// Codex/Kimi adapter + LC 作用域 receipt store），capability/availability
+/// 可换可控 double。`member_roots` 顺序即 ordinal（成员 0 即夹具
+/// repository_root）；各成员 checkout 必须是聚合根的直接子目录，聚合根取
+/// 成员 0 的父目录。`focus` 决定 issue 显式选择的 focus 形态
+/// （WorkItemPlan 路由面 target 解析输入：FirstMember+多成员=唯一 focus
+/// 解析到成员 0；NonUnique=无唯一 focus 解析聚合根视图）。
+pub(super) fn register_alias_logical_codebase_with_extras(
+    app_paths: &ProductAppPaths,
+    member_roots: &[std::path::PathBuf],
+    physical_repositories: &[RepositoryRecord],
+    focus: &super::single_candidate_provider_run::LogicalAliasFocus,
+    gateway_author: Arc<dyn crate::cross_cutting::streaming_provider::StreamingProviderAdapter>,
+    extras: AliasLcGatewayExtras,
 ) -> AliasLcFixture {
     assert!(
         !member_roots.is_empty(),
@@ -453,19 +492,55 @@ pub(super) fn register_alias_logical_codebase(
         .expect("bootstrap aggregate policy");
 
     // gateway：测试 double capability/target resolver；registry 携带真实
-    // author provider（LC author 经 gateway 启动）。
+    // author provider（LC author 经 gateway 启动）。6.1 extras：dialect
+    // capability/可控 availability/隔离 home 只读 trust source 可覆盖。
+    let capability_source: Arc<dyn ProviderCapabilitySource> = extras
+        .capability
+        .unwrap_or_else(|| Arc::new(LcStaticCapabilitySource));
+    let availability_gate = extras
+        .availability
+        .unwrap_or_else(lc_always_available_gate);
     let mut gateway_registry = ProviderRegistry::new();
     gateway_registry.register(ProviderName::ClaudeCode, gateway_author);
-    let gateway = Arc::new(LogicalCodebaseProviderGateway::with_audit(
+    let gateway = LogicalCodebaseProviderGateway::with_audit(
         policy_store,
-        Arc::new(LcStaticCapabilitySource),
+        capability_source,
         Arc::new(LcPassThroughTargetResolver),
         Arc::new(gateway_registry),
         Arc::new(LcStubSyncAdapter),
-        lc_always_available_gate(),
+        availability_gate,
         Arc::new(GatewayRunAudit::new()),
         std::fs::canonicalize(&aggregate_root).expect("canonical authority root"),
-    ));
+    );
+    // 6.1：隔离 home 的只读 trust source（真实 Codex/Kimi adapter for_home，
+    // 绝不触碰真实用户 home）；LC 作用域与 gateway lc_scope 同源。
+    let gateway = match extras.trust_home {
+        Some(trust_home) => {
+            let source =
+                crate::product::logical_codebase::provider_trust::ReadonlyProviderTrustSource::new(
+                    app_paths.clone(),
+                    Some(lc_id.clone()),
+                    vec![
+                        Arc::new(
+                            crate::product::logical_codebase::provider_trust_adapters::CodexTrustAdapter::for_home(&trust_home),
+                        ),
+                        Arc::new(
+                            crate::product::logical_codebase::provider_trust_adapters::KimiTrustAdapter::for_home(&trust_home),
+                        ),
+                    ],
+                );
+            gateway.with_readonly_lc_facts(
+                crate::product::logical_codebase::RootRecipeReceiptStore::for_lc(
+                    app_paths.clone(),
+                    &lc_id,
+                ),
+                Arc::new(source),
+                Some(lc_id.clone()),
+            )
+        }
+        None => gateway,
+    };
+    let gateway = Arc::new(gateway);
 
     AliasLcFixture {
         lc_id,
@@ -1052,5 +1127,588 @@ async fn lc_sc_consumed_rule_file_unreadable_waits_before_provider() {
             Ok(Some(_))
         ),
         "权限错误必须 reject before provider startup"
+    );
+}
+
+// ---- 6.1（方案 A 附带，REQ-REG-15「新根首次生成带指导但不自动登记」）----
+
+/// 按 provider 报真实 adapter/wire dialect 的 capability source double：
+/// Codex→CodexCliV1、KimiCode→KimiAcpV1——gateway 的只读 trust 复验
+/// （#4b）按 `provider_name_for_dialect` 命中对应 provider 的用户级
+/// workspace trust 面（默认 double 恒 ClaudeCodeCliV1，不会触发 trust）。
+struct LcDialectCapabilitySource;
+
+impl LcDialectCapabilitySource {
+    fn capability(provider: &ProviderRef, action: SessionPolicyAction) -> ProviderCapability {
+        use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
+        use crate::product::logical_codebase::policy::ProviderWireDialect;
+        use crate::product::logical_codebase::provider_capability_store::ProviderActionCapability;
+        let (adapter_dialect, wire_dialect) = match provider.provider_type {
+            crate::product::logical_codebase::ProviderRefType::ClaudeCode => (
+                ProviderDialect::ClaudeCodeCliV1,
+                ProviderWireDialect::ClaudeCodeStreamJson,
+            ),
+            crate::product::logical_codebase::ProviderRefType::Codex => (
+                ProviderDialect::CodexCliV1,
+                ProviderWireDialect::CodexAppServerRpc,
+            ),
+            crate::product::logical_codebase::ProviderRefType::Pi => {
+                (ProviderDialect::PiRpcV1, ProviderWireDialect::PiRpc)
+            }
+            crate::product::logical_codebase::ProviderRefType::KimiCode => {
+                (ProviderDialect::KimiAcpV1, ProviderWireDialect::KimiAcp)
+            }
+        };
+        ProviderCapability {
+            provider_type: provider.provider_type,
+            version: "1.4.0".to_string(),
+            adapter_dialect,
+            wire_dialect,
+            capability_snapshot_ref: provider.capability_snapshot_ref.clone(),
+            action_capability: ProviderActionCapability {
+                action,
+                launch: ProviderCapabilityEvidence::Confirmed,
+                resume: ProviderCapabilityEvidence::Confirmed,
+                write_boundary: ProviderCapabilityEvidence::Confirmed,
+                projection_digest: format!("projection-digest-{action:?}"),
+                evidence_ref: format!("probe://{action:?}"),
+            },
+            trust: ProviderCapabilityEvidence::Confirmed,
+        }
+    }
+}
+
+impl ProviderCapabilitySource for LcDialectCapabilitySource {
+    fn require_supported(
+        &self,
+        provider: &ProviderRef,
+        action: SessionPolicyAction,
+    ) -> Result<ProviderCapability, crate::product::logical_codebase::ProviderGatewayError> {
+        Ok(Self::capability(provider, action))
+    }
+
+    fn require_resume_supported(
+        &self,
+        provider: &ProviderRef,
+        action: SessionPolicyAction,
+    ) -> Result<ProviderCapability, crate::product::logical_codebase::ProviderGatewayError> {
+        Ok(Self::capability(provider, action))
+    }
+
+    fn require_write_boundary(
+        &self,
+        provider: &ProviderRef,
+        action: SessionPolicyAction,
+    ) -> Result<ProviderCapability, crate::product::logical_codebase::ProviderGatewayError> {
+        Ok(Self::capability(provider, action))
+    }
+
+    fn require_root_recipe_supported(
+        &self,
+        provider: &ProviderRef,
+        _credential: &crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
+    ) -> Result<ProviderCapability, crate::product::logical_codebase::ProviderGatewayError> {
+        use crate::product::logical_codebase::provider_gateway::ProviderGatewayError;
+        if provider.provider_type
+            != crate::product::logical_codebase::provider_gateway::ProviderRefType::ClaudeCode
+        {
+            return Err(ProviderGatewayError::UnsupportedCapability(
+                crate::product::logical_codebase::provider_gateway::PROVIDER_ROOT_RECIPE_REQUIRES_FIXED_CLAUDE
+                    .to_string(),
+            ));
+        }
+        Ok(Self::capability(provider, SessionPolicyAction::PlanningReadOnly))
+    }
+}
+
+/// 可控 availability gate：ClaudeCode 恒健康，Codex/Kimi 按参数。
+fn lc_scoped_availability_gate(
+    codex_available: bool,
+    kimi_available: bool,
+) -> Arc<ProviderAvailabilityGate> {
+    struct Static(Arc<ProviderHealthSnapshot>);
+    impl ProviderHealthSource for Static {
+        fn snapshot(&self) -> Arc<ProviderHealthSnapshot> {
+            self.0.clone()
+        }
+        fn degraded(&self) -> bool {
+            false
+        }
+    }
+    let checked_at = chrono::Utc::now();
+    let entry = |provider, available| ProviderHealthEntry {
+        provider,
+        command: "stub".to_string(),
+        available,
+        version: Some("1.0".to_string()),
+        reason_code: None,
+        reason: None,
+        checked_at,
+    };
+    let snapshot = Arc::new(ProviderHealthSnapshot {
+        schema_version: 1,
+        generation: 1,
+        checked_at,
+        providers: [
+            entry(ProviderName::ClaudeCode, true),
+            entry(ProviderName::Codex, codex_available),
+            entry(ProviderName::KimiCode, kimi_available),
+        ]
+        .into_iter()
+        .collect(),
+    });
+    Arc::new(ProviderAvailabilityGate::new(Arc::new(Static(snapshot))))
+}
+
+/// 递归快照（路径 → 文件内容 sha256）：断言「零 trust 写」用——隔离
+/// home 与 LC trust fact 目录在首次生成前后逐字节不变。
+fn snapshot_tree(root: &std::path::Path) -> Vec<(String, String)> {
+    fn sha256_hex(bytes: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        format!("sha256:{:x}", Sha256::digest(bytes))
+    }
+    fn walk(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else {
+                let digest = std::fs::read(&path)
+                    .map(|bytes| sha256_hex(&bytes))
+                    .unwrap_or_else(|error| format!("read-error:{error}"));
+                out.push((path.display().to_string(), digest));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, &mut out);
+    out.sort();
+    out
+}
+
+/// LC trust durable 事实目录（legacy 别名 LC 作用域 = project 级
+/// `logical-codebase/`，含 provider-trust 的 waiting/ownership/audit）。
+fn trust_facts_root(fixture: &ProviderRunFixture) -> std::path::PathBuf {
+    fixture.app_paths.logical_codebase_root("project_0001")
+}
+
+/// 指定 author 的会话上下文（run-context registry 注册该 provider，
+/// StartGeneration 的 provider_config 锁定同一 author）。
+fn single_candidate_context_for_author(
+    fixture: &ProviderRunFixture,
+    author: ProviderName,
+    provider: Arc<dyn crate::cross_cutting::streaming_provider::StreamingProviderAdapter>,
+) -> (WorkspaceInboundContext, mpsc::Receiver<OutboundControl>) {
+    let mut registry = ProviderRegistry::new();
+    registry.register(author, provider);
+    let mut run_context = ProviderRunContext::test_fixture(
+        Arc::new(registry),
+        fixture.engine.clone(),
+        fixture.workspace_runs.clone(),
+        fixture.record.id.clone(),
+        fixture.app_paths.clone(),
+        fixture.record.clone(),
+    );
+    run_context.manager = fixture.manager.clone();
+    let (outbound_tx, outbound_rx) = mpsc::channel(64);
+    (
+        WorkspaceInboundContext {
+            app_state: WebAppState::new(
+                fixture.root_path(),
+                crate::web::runtime::WebRuntime::new_fake(fixture.root_path()),
+            ),
+            engine: fixture.engine.clone(),
+            run_context,
+            outbound_tx,
+            session_id: fixture.record.id.clone(),
+        },
+        outbound_rx,
+    )
+}
+
+fn author_provider_config(author: ProviderName) -> ProviderConfigSnapshot {
+    ProviderConfigSnapshot {
+        author,
+        reviewer: None,
+        review_rounds: 0,
+        permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
+    }
+}
+
+/// 6.1 红→绿主用例（Codex）：全新 root、其它准入门满足且隔离 home 无
+/// 预登记 → 首次生成仍 fail-closed（provider 零启动、真实 home 与 trust
+/// durable 事实快照不变），但 waiting 消息携带同源 manual_guidance（真实
+/// 工件路径／本根 trust 键／人工登记形状）与生成场景 retry_action
+/// 「人工登记…显式重新生成」，而不是裸 ProviderUnavailable 折叠。
+#[tokio::test]
+async fn lc_first_generation_codex_missing_trust_shows_manual_registration_guidance() {
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let provider = Arc::new(LcRecordingAuthorProvider {
+        output: single_candidate_markdown("story_0001", "design_0001"),
+        inputs: input_tx,
+    });
+    // 隔离 home：真实 Codex/Kimi adapter 指向空 tempdir，无预登记。
+    let trust_home = tempfile::tempdir().expect("isolated trust home");
+    let fixture = ProviderRunFixture::new_logical_with_gateway_extras(
+        true,
+        provider.clone(),
+        AliasLcGatewayExtras {
+            capability: Some(Arc::new(LcDialectCapabilitySource)),
+            trust_home: Some(trust_home.path().to_path_buf()),
+            availability: Some(lc_scoped_availability_gate(true, true)),
+        },
+    );
+    let canonical_aggregate_root = std::fs::canonicalize(
+        fixture
+            .member_checkout_root()
+            .parent()
+            .expect("member checkout lives under the aggregate root"),
+    )
+    .expect("canonical aggregate root");
+    let home_before = snapshot_tree(trust_home.path());
+    let trust_facts_before = snapshot_tree(&trust_facts_root(&fixture));
+
+    let (context, mut outbound_rx) =
+        single_candidate_context_for_author(&fixture, ProviderName::Codex, provider);
+    handle_workspace_inbound_message(
+        context,
+        WsInMessage::StartGeneration {
+            provider_config: author_provider_config(ProviderName::Codex),
+            reviewer_enabled: false,
+        },
+    )
+    .await;
+
+    let error = next_error_frame(&mut outbound_rx).await;
+    let message = error["message"].as_str().expect("error message");
+    assert!(
+        message.contains("provider_trust_missing"),
+        "trust 缺失必须以稳定判别码 provider_trust_missing 上浮，got: {message}"
+    );
+    assert!(
+        !message.contains("provider_gateway_unavailable"),
+        "trust 缺失不得再以裸 ProviderUnavailable 折叠呈现，got: {message}"
+    );
+    // 同源 manual_guidance：真实 adapter 工件路径＋本根 trust 键＋人工形状。
+    assert!(
+        message.contains(
+            &trust_home
+                .path()
+                .join(".codex")
+                .join("config.toml")
+                .display()
+                .to_string()
+        ),
+        "指导必须指向隔离 home 的真实 Codex config.toml 路径，got: {message}"
+    );
+    assert!(
+        message.contains("[projects.\"")
+            && message.contains(&canonical_aggregate_root.display().to_string()),
+        "指导必须携带本 canonical root 的 trust 键（[projects.\"<root>\"]），got: {message}"
+    );
+    assert!(
+        message.contains("trust_level = \"trusted\""),
+        "指导必须给出人工登记形状（trust_level = \"trusted\"），got: {message}"
+    );
+    // 生成场景 retry_action：人工登记后显式重新生成，不混其它场景动作。
+    assert!(
+        message.contains("人工登记") && message.contains("显式重新生成"),
+        "waiting 必须携带生成场景 retry_action（人工登记后显式重新生成），got: {message}"
+    );
+    assert!(
+        !message.contains("重新确认") && !message.contains("重试初始化"),
+        "generation 指导不得混入 recipe/confirmation 场景动作，got: {message}"
+    );
+
+    // durable waiting/Prepare 面（复用既有 AdmissionWaiting 回落），非终态 Failed。
+    let durable = durable_session(&fixture);
+    assert_eq!(
+        durable.single_candidate_phase,
+        Some(SingleCandidatePhase::Prepare),
+        "trust 缺失首次生成必须是 waiting/Prepare 面，got status={:?}",
+        durable.status
+    );
+    assert_ne!(durable.status, WorkspaceSessionStatus::Failed);
+
+    // provider 零启动。
+    assert!(
+        !matches!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), input_rx.recv()).await,
+            Ok(Some(_))
+        ),
+        "trust 缺失必须 reject before provider startup"
+    );
+
+    // 真实 home 与 trust durable 事实（waiting/ownership/audit）快照不变：
+    // 零登记、零 trust 写（start_generation 不自动登记）。
+    assert_eq!(
+        home_before,
+        snapshot_tree(trust_home.path()),
+        "首次 generation trust 失败不得写隔离 home"
+    );
+    assert_eq!(
+        trust_facts_before,
+        snapshot_tree(&trust_facts_root(&fixture)),
+        "首次 generation trust 失败不得写 trust durable 事实"
+    );
+}
+
+/// 6.1（Kimi 变体）：同源指导来自 Kimi 真实 adapter——workspace-trust
+/// 记录路径与稳定键 `wd_<basename>_<sha256[:12]>`（与 adapter 算法同源，
+/// 不手抄第二份），人工形状为真实 JSON 记录形。
+#[tokio::test]
+async fn lc_first_generation_kimi_missing_trust_shows_manual_registration_guidance() {
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let provider = Arc::new(LcRecordingAuthorProvider {
+        output: single_candidate_markdown("story_0001", "design_0001"),
+        inputs: input_tx,
+    });
+    let trust_home = tempfile::tempdir().expect("isolated trust home");
+    let fixture = ProviderRunFixture::new_logical_with_gateway_extras(
+        true,
+        provider.clone(),
+        AliasLcGatewayExtras {
+            capability: Some(Arc::new(LcDialectCapabilitySource)),
+            trust_home: Some(trust_home.path().to_path_buf()),
+            availability: Some(lc_scoped_availability_gate(true, true)),
+        },
+    );
+    let canonical_aggregate_root = std::fs::canonicalize(
+        fixture
+            .member_checkout_root()
+            .parent()
+            .expect("member checkout lives under the aggregate root"),
+    )
+    .expect("canonical aggregate root");
+    let home_before = snapshot_tree(trust_home.path());
+    let trust_facts_before = snapshot_tree(&trust_facts_root(&fixture));
+
+    let (context, mut outbound_rx) =
+        single_candidate_context_for_author(&fixture, ProviderName::KimiCode, provider);
+    handle_workspace_inbound_message(
+        context,
+        WsInMessage::StartGeneration {
+            provider_config: author_provider_config(ProviderName::KimiCode),
+            reviewer_enabled: false,
+        },
+    )
+    .await;
+
+    let error = next_error_frame(&mut outbound_rx).await;
+    let message = error["message"].as_str().expect("error message");
+    assert!(
+        message.contains("provider_trust_missing"),
+        "Kimi 首次 trust 失败同样以 provider_trust_missing 上浮，got: {message}"
+    );
+    assert!(
+        message.contains(
+            &trust_home
+                .path()
+                .join(".kimi-code")
+                .join("workspace-trust")
+                .display()
+                .to_string()
+        ),
+        "指导必须指向隔离 home 的 Kimi workspace-trust 目录，got: {message}"
+    );
+    assert!(
+        message.contains("wd_aggregate-root_"),
+        "指导必须携带 Kimi 稳定键形（wd_<basename>_<sha256[:12]>，同源生成），got: {message}"
+    );
+    assert!(
+        message.contains("trustedAt")
+            && message.contains(&canonical_aggregate_root.display().to_string()),
+        "指导必须给出真实 JSON 记录形状（root/trustedAt），got: {message}"
+    );
+    assert!(
+        message.contains("人工登记") && message.contains("显式重新生成"),
+        "Kimi waiting 同样携带生成场景 retry_action，got: {message}"
+    );
+
+    let durable = durable_session(&fixture);
+    assert_eq!(
+        durable.single_candidate_phase,
+        Some(SingleCandidatePhase::Prepare),
+        "Kimi trust 缺失首次生成必须是 waiting/Prepare 面，got status={:?}",
+        durable.status
+    );
+    assert_ne!(durable.status, WorkspaceSessionStatus::Failed);
+    assert!(
+        !matches!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), input_rx.recv()).await,
+            Ok(Some(_))
+        ),
+        "Kimi trust 缺失必须 reject before provider startup"
+    );
+    assert_eq!(
+        home_before,
+        snapshot_tree(trust_home.path()),
+        "Kimi 首次 generation trust 失败不得写隔离 home"
+    );
+    assert_eq!(
+        trust_facts_before,
+        snapshot_tree(&trust_facts_root(&fixture)),
+        "Kimi 首次 generation trust 失败不得写 trust durable 事实"
+    );
+}
+
+/// 6.1 负例（不误当）：Codex trust 已人工登记、但 availability gate 不
+/// 健康——revalidate 的 ProviderUnavailable 来自 #9（availability）而非
+/// #4b（trust）：保持 spawn_revalidation_drift 折叠，不附 trust 指导、
+/// 不误标 provider_trust_missing。
+#[tokio::test]
+async fn lc_first_generation_other_unavailable_not_misattributed_as_trust_missing() {
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let provider = Arc::new(LcRecordingAuthorProvider {
+        output: single_candidate_markdown("story_0001", "design_0001"),
+        inputs: input_tx,
+    });
+    let trust_home = tempfile::tempdir().expect("isolated trust home");
+    let fixture = ProviderRunFixture::new_logical_with_gateway_extras(
+        true,
+        provider.clone(),
+        AliasLcGatewayExtras {
+            capability: Some(Arc::new(LcDialectCapabilitySource)),
+            trust_home: Some(trust_home.path().to_path_buf()),
+            // Codex 不健康：ProviderUnavailable 来自 availability gate。
+            availability: Some(lc_scoped_availability_gate(false, true)),
+        },
+    );
+    // 人工预登记 Codex trust（直接落用户级工件，模拟用户已手工登记）。
+    let canonical_aggregate_root = std::fs::canonicalize(
+        fixture
+            .member_checkout_root()
+            .parent()
+            .expect("member checkout lives under the aggregate root"),
+    )
+    .expect("canonical aggregate root");
+    let codex_config = trust_home.path().join(".codex").join("config.toml");
+    std::fs::create_dir_all(codex_config.parent().expect("codex config dir"))
+        .expect("create codex config dir");
+    std::fs::write(
+        &codex_config,
+        format!(
+            "[projects.\"{}\"]\ntrust_level = \"trusted\"\n",
+            canonical_aggregate_root.display()
+        ),
+    )
+    .expect("pre-register codex trust");
+
+    let (context, mut outbound_rx) =
+        single_candidate_context_for_author(&fixture, ProviderName::Codex, provider);
+    handle_workspace_inbound_message(
+        context,
+        WsInMessage::StartGeneration {
+            provider_config: author_provider_config(ProviderName::Codex),
+            reviewer_enabled: false,
+        },
+    )
+    .await;
+
+    let error = next_error_frame(&mut outbound_rx).await;
+    let message = error["message"].as_str().expect("error message");
+    assert!(
+        message.contains("spawn_revalidation_drift"),
+        "非 trust 维度的 ProviderUnavailable 必须保持原判别码，got: {message}"
+    );
+    assert!(
+        !message.contains("provider_trust_missing"),
+        "availability 拒绝不得误标为 trust 缺失，got: {message}"
+    );
+    assert!(
+        !message.contains("人工登记") && !message.contains("显式重新生成"),
+        "非 trust 失败不得附人工登记指导，got: {message}"
+    );
+    // 同一 waiting 面（Prepare）与零启动不变。
+    let durable = durable_session(&fixture);
+    assert_eq!(
+        durable.single_candidate_phase,
+        Some(SingleCandidatePhase::Prepare)
+    );
+    assert_ne!(durable.status, WorkspaceSessionStatus::Failed);
+    assert!(
+        !matches!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), input_rx.recv()).await,
+            Ok(Some(_))
+        ),
+        "availability 拒绝同样必须 reject before provider startup"
+    );
+}
+
+/// 6.1 负例（其它门原样）：Codex trust 已登记、availability 健康、但成员
+/// language rules 缺失——member_language_rules_missing waiting 原样（判别
+/// 码/材料路径），不携带 trust 指导（指导只绑定 trust 维度失败）。
+#[tokio::test]
+async fn lc_first_generation_member_rules_missing_keeps_waiting_without_trust_guidance() {
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let provider = Arc::new(LcRecordingAuthorProvider {
+        output: single_candidate_markdown("story_0001", "design_0001"),
+        inputs: input_tx,
+    });
+    let trust_home = tempfile::tempdir().expect("isolated trust home");
+    let fixture = ProviderRunFixture::new_logical_with_gateway_extras(
+        // 成员缺 .claude/rules/language.md（其它材料门）。
+        false,
+        provider.clone(),
+        AliasLcGatewayExtras {
+            capability: Some(Arc::new(LcDialectCapabilitySource)),
+            trust_home: Some(trust_home.path().to_path_buf()),
+            availability: Some(lc_scoped_availability_gate(true, true)),
+        },
+    );
+    let canonical_aggregate_root = std::fs::canonicalize(
+        fixture
+            .member_checkout_root()
+            .parent()
+            .expect("member checkout lives under the aggregate root"),
+    )
+    .expect("canonical aggregate root");
+    let codex_config = trust_home.path().join(".codex").join("config.toml");
+    std::fs::create_dir_all(codex_config.parent().expect("codex config dir"))
+        .expect("create codex config dir");
+    std::fs::write(
+        &codex_config,
+        format!(
+            "[projects.\"{}\"]\ntrust_level = \"trusted\"\n",
+            canonical_aggregate_root.display()
+        ),
+    )
+    .expect("pre-register codex trust");
+
+    let (context, mut outbound_rx) =
+        single_candidate_context_for_author(&fixture, ProviderName::Codex, provider);
+    handle_workspace_inbound_message(
+        context,
+        WsInMessage::StartGeneration {
+            provider_config: author_provider_config(ProviderName::Codex),
+            reviewer_enabled: false,
+        },
+    )
+    .await;
+
+    let error = next_error_frame(&mut outbound_rx).await;
+    let message = error["message"].as_str().expect("error message");
+    assert!(
+        message.contains("member_language_rules_missing"),
+        "成员规则缺失保持原判别码（其它材料门原样），got: {message}"
+    );
+    assert!(
+        !message.contains("provider_trust_missing") && !message.contains("人工登记指导"),
+        "成员规则 waiting 不携带 trust 指导，got: {message}"
+    );
+    let durable = durable_session(&fixture);
+    assert_eq!(
+        durable.single_candidate_phase,
+        Some(SingleCandidatePhase::Prepare)
+    );
+    assert!(
+        !matches!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), input_rx.recv()).await,
+            Ok(Some(_))
+        ),
+        "成员规则缺失必须 reject before provider startup"
     );
 }

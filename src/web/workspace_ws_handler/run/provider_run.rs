@@ -244,11 +244,14 @@ pub(super) async fn spawn_provider_run_with_start_mode(
                                 detail,
                                 missing_materials,
                                 allowed_actions,
+                                manual_guidance,
                             },
                         ) => {
                             // C-1：LC admission waiting——durable phase 已由运行内
                             // 回落 Prepare 面，此处以无 failed 节点收尾（waiting 不是
-                            // 失败），并把缺失材料与允许动作作为可操作指引上浮。
+                            // 失败），并把缺失材料与允许动作作为可操作指引上浮；
+                            // 6.1：trust 缺失时附同源只读人工登记指导（生成场景
+                            // retry_action），不再是裸判别码。
                             engine.mark_active_run_finished(&run_label);
                             drop(engine);
                             drop(provider_drive_guard.take());
@@ -258,6 +261,7 @@ pub(super) async fn spawn_provider_run_with_start_mode(
                                 &detail,
                                 &missing_materials,
                                 &allowed_actions,
+                                manual_guidance.as_deref(),
                             );
                             let _ = send_json_outbound(
                                 &outbound_tx_for_task,

@@ -124,6 +124,19 @@ pub trait ProviderTrustSource: Send + Sync {
         provider: &ProviderName,
         canonical_root: &Path,
     ) -> Result<ProviderTrustVerification, ProviderGatewayError>;
+
+    /// 6.1（方案 A 附带，D5）：generation 首次 trust 失败的同源只读等待
+    /// 投影（`Generation` 场景 retry_action＋manual_guidance；零 durable
+    /// 副作用）。默认 `None`：非 home 背书实现（测试 fake 等）无同源
+    /// 指导可给，调用方保持既有投影，不伪造。
+    fn read_only_generation_waiting(
+        &self,
+        provider: &ProviderName,
+        canonical_root: &Path,
+    ) -> Option<ProviderTrustWaiting> {
+        let _ = (provider, canonical_root);
+        None
+    }
 }
 
 /// 只读 home 背书实现:factory 生产装配(只读 home adapter + 只读
@@ -185,6 +198,104 @@ impl ReadonlyProviderTrustSource {
                     "no read-only trust adapter is configured for {provider:?}"
                 ))
             })
+    }
+
+    /// 6.1（方案 A 附带，D5）：generation 首次 trust 失败的同源只读等待
+    /// 投影。
+    ///
+    /// 与 [`ProviderTrustSource::verify_trusted`] 同一 adapter、同一
+    /// trust key 算法，只读判定 entry 状态；未通过（缺失/非 trusted/
+    /// 读取失败）时构造 `Generation` 场景等待面（场景化 retry_action＋
+    /// 同源 manual_guidance——adapter 真实工件路径/键形/人工形状）。
+    /// **零 durable 副作用**：不 ensure、不写 waiting/ownership/audit
+    /// （generation 只补只读指导，不自动登记）；条目已 trusted 或
+    /// provider 无需 workspace trust 时返回 `None`（无可指导事实）。
+    fn generation_waiting(
+        &self,
+        provider: &ProviderName,
+        canonical_root: &Path,
+    ) -> Option<ProviderTrustWaiting> {
+        if !requires_workspace_trust(provider) {
+            return None;
+        }
+        let waiting_for = |error: ProviderTrustError, trust_key: String| {
+            let scenario = ProviderTrustScenario::Generation;
+            let retry_action = scenario.retry_action(trust_failure_kind(&error));
+            let manual_guidance = provider_trust_manual_guidance(
+                &self.adapters,
+                provider,
+                canonical_root,
+                &error,
+                scenario,
+            );
+            ProviderTrustWaiting {
+                provider: provider.clone(),
+                canonical_root: canonical_root.to_path_buf(),
+                trust_key,
+                reason_code: error.code.to_string(),
+                message: error.message.clone(),
+                retry_action,
+                manual_guidance,
+                recorded_at: trust_now(),
+            }
+        };
+        let adapter = match self.adapter_for(provider) {
+            Ok(adapter) => adapter,
+            Err(_) => {
+                // 无 adapter：NoAdapter 分型指导（修装配），给空 trust_key
+                // 占位——等待面主文与指导不依赖该键。
+                return Some(waiting_for(
+                    ProviderTrustError::conflict(
+                        "unsupported_trust_provider",
+                        format!("no read-only trust adapter is configured for {provider:?}"),
+                    ),
+                    String::new(),
+                ));
+            }
+        };
+        if !canonical_root.is_absolute() || canonical_root.file_name().is_none() {
+            return Some(waiting_for(
+                ProviderTrustError::conflict(
+                    "invalid_canonical_root",
+                    format!(
+                        "invalid canonical root for read-only trust guidance: {}",
+                        canonical_root.display()
+                    ),
+                ),
+                adapter.trust_key(canonical_root),
+            ));
+        }
+        let trust_key = adapter.trust_key(canonical_root);
+        match adapter.read_state(canonical_root) {
+            Ok(ProviderTrustEntryState::Trusted) => None,
+            Ok(ProviderTrustEntryState::Missing) => Some(waiting_for(
+                ProviderTrustError {
+                    code: TRUST_ENTRY_MISSING_CODE,
+                    message: format!(
+                        "canonical root {} 下未找到 {} 的用户级 workspace trust 条目（entry absent）",
+                        canonical_root.display(),
+                        provider_wire_label(provider),
+                    ),
+                    retryable: true,
+                    // 场景化投影覆写；默认动作不进入等待面。
+                    retry_action: String::new(),
+                },
+                trust_key,
+            )),
+            Ok(ProviderTrustEntryState::Untrusted { current_value }) => Some(waiting_for(
+                ProviderTrustError::conflict(
+                    adapter.conflict_code(),
+                    format!(
+                        "trust key holds a non-trusted value{}；系统不覆盖用户既有条目",
+                        current_value
+                            .map(|value| format!("（当前值 {value:?}）"))
+                            .unwrap_or_default()
+                    ),
+                ),
+                trust_key,
+            )),
+            Err(error) => Some(waiting_for(error, trust_key)),
+        }
     }
 }
 
@@ -256,6 +367,14 @@ impl ProviderTrustSource for ReadonlyProviderTrustSource {
             verified_at: trust_now(),
         })
     }
+
+    fn read_only_generation_waiting(
+        &self,
+        provider: &ProviderName,
+        canonical_root: &Path,
+    ) -> Option<ProviderTrustWaiting> {
+        self.generation_waiting(provider, canonical_root)
+    }
 }
 
 /// trust 准备场景：场景信息进入 preparation/等待投影（D2），使 recipe、
@@ -268,6 +387,10 @@ pub enum ProviderTrustScenario {
     /// 会话确认（human gate 确认前的 trust 准备）：失败后显式
     /// 「修复后重新确认」；确认门在修复前保持未关闭。
     Confirmation,
+    /// 6.1（方案 A 附带，D5）：generation 首次 trust 失败的只读指导——
+    /// 失败后显式「人工登记/修复后显式重新生成」；只读投影，不自动
+    /// 登记（start_generation 不插入 ensure）。
+    Generation,
 }
 
 impl ProviderTrustScenario {
@@ -276,12 +399,19 @@ impl ProviderTrustScenario {
     /// 误导为用户 home 修复。
     fn retry_action(self, kind: TrustFailureKind) -> String {
         match kind {
+            TrustFailureKind::EntryMissing => {
+                format!("人工登记该 trust 条目后{}", self.explicit_action())
+            }
             TrustFailureKind::UserConflict => match self {
                 Self::Recipe => {
                     "用户自行确认该 trust 键的取值后重试；系统不覆盖用户条目".to_string()
                 }
                 Self::Confirmation => {
                     "用户自行核对该 trust 键的取值后重新确认；系统不覆盖用户条目".to_string()
+                }
+                Self::Generation => {
+                    "用户自行核对该 trust 键的取值后显式重新生成；系统不覆盖用户条目"
+                        .to_string()
                 }
             },
             TrustFailureKind::HomeArtifactRead | TrustFailureKind::HomeArtifactWrite => {
@@ -304,11 +434,14 @@ impl ProviderTrustScenario {
         }
     }
 
-    /// 场景的显式动作后缀（recipe=重试初始化，confirmation=重新确认）。
+    /// 场景的显式动作后缀（recipe=重试初始化，confirmation=重新确认，
+    /// generation=显式重新生成——方案 A 不自动登记，登记/修复由用户
+    /// 显式完成后重新发起生成）。
     fn explicit_action(self) -> &'static str {
         match self {
             Self::Recipe => "重试初始化",
             Self::Confirmation => "重新确认",
+            Self::Generation => "显式重新生成",
         }
     }
 }
@@ -317,6 +450,9 @@ impl ProviderTrustScenario {
 /// 折叠 reason_code——等待面仍携带原始稳定 code。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TrustFailureKind {
+    /// 该根的 trust 条目缺失（entry absent）。6.1 只读 generation 投影的
+    /// 专属分型——ensure 链路里缺失走登记成功路径，不产生等待。
+    EntryMissing,
     /// 用户既有值冲突（不覆盖、不删除）。
     UserConflict,
     /// 用户级 home 工件读取/解析失败（权限/格式）。
@@ -331,10 +467,15 @@ enum TrustFailureKind {
     InvalidRoot,
 }
 
+/// 6.1：entry 缺失的稳定 code（只读 generation 投影构造，等待面原样
+/// 携带，不折叠）。
+const TRUST_ENTRY_MISSING_CODE: &str = "trust_entry_missing";
+
 /// 按（稳定 code，retryable）分型；未知 code 落回按 retryable 的保守
 /// 归类——不可自动重试视为用户冲突，其余瞬态视为 home 工件侧。
 fn trust_failure_kind(error: &ProviderTrustError) -> TrustFailureKind {
     match error.code {
+        TRUST_ENTRY_MISSING_CODE => TrustFailureKind::EntryMissing,
         "trust_store_io" => TrustFailureKind::FactStore,
         "unsupported_trust_provider" => TrustFailureKind::NoAdapter,
         "invalid_canonical_root" => TrustFailureKind::InvalidRoot,
@@ -361,6 +502,13 @@ pub(crate) fn provider_trust_manual_guidance(
     let provider_label = provider_wire_label(provider);
     let retry_action = scenario.retry_action(kind);
     let disposition = match kind {
+        TrustFailureKind::EntryMissing => format!(
+            "该根尚未登记 {provider_label} 的用户级 workspace trust（reason_code={}，\
+             entry absent）：系统不自动登记（方案 A：首次生成只给只读指导，\
+             不代写用户级 trust）；请按下方工件路径与 trust 键人工登记，\
+             然后{retry_action}。",
+            error.code
+        ),
         TrustFailureKind::UserConflict => format!(
             "该 trust 键已有用户既有值（reason_code={}）：系统不覆盖、不删除用户条目。\
              请人工核对该键当前取值后自行决定保留或修正（不要直接改成 trusted 了事），\
@@ -395,7 +543,8 @@ pub(crate) fn provider_trust_manual_guidance(
         ),
     };
     let artifact_line = match kind {
-        TrustFailureKind::UserConflict
+        TrustFailureKind::EntryMissing
+        | TrustFailureKind::UserConflict
         | TrustFailureKind::HomeArtifactRead
         | TrustFailureKind::HomeArtifactWrite => adapters
             .iter()
@@ -1572,6 +1721,7 @@ mod tests {
         HomeBackedProviderTrustRegistry, ProviderTrustAction, ProviderTrustError,
         ProviderTrustOwnership, ProviderTrustPrecondition, ProviderTrustPreparationResult,
         ProviderTrustRegistry, ProviderTrustRevocationOutcome, ProviderTrustScenario,
+        ReadonlyProviderTrustSource,
     };
 
     const PROJECT: &str = "project_0001";
@@ -1955,6 +2105,71 @@ mod tests {
         assert!(recipe.retry_action.contains("重试初始化"));
         assert!(!recipe.retry_action.contains("重新确认"));
         assert_eq!(recipe.reason_code, confirmation.reason_code);
+    }
+
+    /// 6.1：只读 generation 投影（`ReadonlyProviderTrustSource`）——entry
+    /// 缺失映射 `trust_entry_missing` 分型，retry_action 是「人工登记…
+    /// 显式重新生成」（不混 recipe/confirmation 动作），manual_guidance
+    /// 同源携带 adapter 真实工件路径与稳定键；条目登记后 `None`（不再
+    /// 给指导）；全程零 durable 写（waiting/audit 空）。
+    #[test]
+    fn provider_trust_generation_scenario_projects_read_only_missing_guidance() {
+        let fixture = TrustFixture::new();
+        let source = ReadonlyProviderTrustSource::new(
+            ProductAppPaths::new(fixture.aria.path().to_path_buf()),
+            Some(LC.to_string()),
+            vec![
+                Arc::new(CodexTrustAdapter::for_home(fixture.home())),
+                Arc::new(KimiTrustAdapter::for_home(fixture.home())),
+            ],
+        );
+
+        // 无需 workspace trust 的 provider 无指导事实。
+        assert!(
+            source
+                .generation_waiting(&ProviderName::ClaudeCode, &fixture.root)
+                .is_none()
+        );
+
+        let waiting = source
+            .generation_waiting(&ProviderName::KimiCode, &fixture.root)
+            .expect("missing entry must project a read-only generation waiting");
+        assert_eq!(waiting.reason_code, "trust_entry_missing");
+        assert!(waiting.message.contains("entry absent"));
+        assert!(
+            waiting.retry_action.contains("人工登记")
+                && waiting.retry_action.contains("显式重新生成"),
+            "generation retry_action must direct manual registration then explicit re-generation: {}",
+            waiting.retry_action
+        );
+        assert!(!waiting.retry_action.contains("重新确认"));
+        assert!(!waiting.retry_action.contains("重试初始化"));
+        // 同源指导：Kimi 真实工件目录 + 稳定键（与 adapter 算法同源）。
+        assert!(
+            waiting
+                .manual_guidance
+                .contains(&fixture.kimi_trust_dir().display().to_string())
+        );
+        assert!(waiting.manual_guidance.contains(&fixture.kimi_key()));
+        assert_eq!(waiting.trust_key, fixture.kimi_key());
+
+        // 人工登记后：只读投影不再给指导（None），且此前零 durable 写。
+        assert!(fixture.store().list_waiting(PROJECT).unwrap().is_empty());
+        assert!(fixture.store().list_audit(PROJECT).unwrap().is_empty());
+        std::fs::create_dir_all(fixture.kimi_trust_dir()).unwrap();
+        std::fs::write(
+            fixture.kimi_trust_dir().join(fixture.kimi_key()),
+            serde_json::json!({"root": fixture.root.display().to_string(), "trustedAt": 1_u64})
+                .to_string(),
+        )
+        .unwrap();
+        assert!(
+            source
+                .generation_waiting(&ProviderName::KimiCode, &fixture.root)
+                .is_none()
+        );
+        assert!(fixture.store().list_waiting(PROJECT).unwrap().is_empty());
+        assert!(fixture.store().list_audit(PROJECT).unwrap().is_empty());
     }
 
     /// Task 2.1：Claude-only recipe 零登记行为不变——无需 workspace trust

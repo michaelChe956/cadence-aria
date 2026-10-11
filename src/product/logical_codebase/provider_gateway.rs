@@ -998,6 +998,27 @@ impl LogicalCodebaseProviderGateway {
         self
     }
 
+    /// 6.1(方案 A 附带,D5):generation 首次 trust 失败的同源只读指导投影。
+    ///
+    /// 经注入的只读 trust source 与本 gateway 冻结的 canonical authority
+    /// root 构造 `Generation` 场景等待面(场景化 retry_action「人工登记/
+    /// 修复后显式重新生成」+同源 manual_guidance);**零 durable 副作用**
+    /// ——不 ensure、不写 waiting/ownership/audit(start_generation 不自动
+    /// 登记)。无注入 source、provider 无需用户级 workspace trust 或条目
+    /// 当前已 trusted 时返回 `None`:调用方保持既有投影,不伪造
+    /// capability、不给漂移根指导。仅供携带已确认 trust 失败原因的
+    /// 只读桥接消费(admission 预检分类与 generation waiting 指导)。
+    pub fn read_only_generation_trust_waiting(
+        &self,
+        provider: &crate::product::models::ProviderName,
+    ) -> Option<crate::product::logical_codebase::provider_trust::ProviderTrustWaiting> {
+        let trust = self.trust.as_ref()?;
+        if !crate::product::logical_codebase::provider_trust::requires_workspace_trust(provider) {
+            return None;
+        }
+        trust.read_only_generation_waiting(provider, &self.authority_root)
+    }
+
     /// 返回启动审计的共享句柄。供外部(测试 fixture、未来生产侧)观测启动计数与
     /// policy digest 完整性。
     pub fn audit(&self) -> Arc<GatewayRunAudit> {
@@ -2055,8 +2076,9 @@ impl LogicalCodebaseProviderGateway {
 }
 
 /// 把 envelope 冻结的 provider dialect 映射到 registry/availability gate 使用的
-/// `ProviderName`。dialect 与 provider 类型一一对应。
-fn provider_name_for_dialect(dialect: ProviderDialect) -> ProviderName {
+/// `ProviderName`。dialect 与 provider 类型一一对应。admission 预检的 trust
+/// 维度分类(6.1)与 spawn 复验共用,不复制第二份。
+pub(crate) fn provider_name_for_dialect(dialect: ProviderDialect) -> ProviderName {
     match dialect {
         ProviderDialect::ClaudeCodeCliV1 => ProviderName::ClaudeCode,
         ProviderDialect::CodexCliV1 => ProviderName::Codex,

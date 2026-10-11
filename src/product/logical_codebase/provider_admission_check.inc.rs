@@ -477,11 +477,42 @@ impl LogicalCodebaseProviderAdmissionPreflight {
         }
         self.gateway
             .revalidate_before_spawn(&validated, &cwd, false)
-            .map_err(|error| ProviderAdmissionError::Waiting {
-                reason_code: "spawn_revalidation_drift".to_string(),
-                detail: error.to_string(),
-                missing_materials: missing_materials.clone(),
-                allowed_actions: vec![BootstrapActionKind::Revalidate, BootstrapActionKind::Retry],
+            .map_err(|error| {
+                // 6.1(方案 A 附带,D5):spawn 复验内的 trust 维度拒绝(#4b,
+                // 先于 #9 availability)以同源只读判据结构化识别——错误为
+                // `ProviderUnavailable` 且注入的只读 trust source 当前仍
+                // 判定未通过(entry 缺失/非 trusted/读取失败)时,转
+                // `provider_trust_missing` waiting(携带原 trust reason,供
+                // generation 消费方按同一 source 桥接同源指导);其它
+                // `ProviderUnavailable`(availability gate 等)与漂移维度
+                // 保持原 `spawn_revalidation_drift` 折叠——不把其它
+                // ProviderUnavailable 误当 trust 缺失、不向漂移根给指导。
+                if matches!(error, ProviderGatewayError::ProviderUnavailable(_)) {
+                    let trust_provider =
+                        crate::product::logical_codebase::provider_gateway::provider_name_for_dialect(
+                            validated.envelope().provider_dialect,
+                        );
+                    if let Some(trust_waiting) = self
+                        .gateway
+                        .read_only_generation_trust_waiting(&trust_provider)
+                    {
+                        return ProviderAdmissionError::Waiting {
+                            reason_code: "provider_trust_missing".to_string(),
+                            detail: format!(
+                                "{}: {}",
+                                trust_waiting.reason_code, trust_waiting.message
+                            ),
+                            missing_materials: missing_materials.clone(),
+                            allowed_actions: vec![BootstrapActionKind::StartGeneration],
+                        };
+                    }
+                }
+                ProviderAdmissionError::Waiting {
+                    reason_code: "spawn_revalidation_drift".to_string(),
+                    detail: error.to_string(),
+                    missing_materials: missing_materials.clone(),
+                    allowed_actions: vec![BootstrapActionKind::Revalidate, BootstrapActionKind::Retry],
+                }
             })?;
 
         // 7. 路A/路B收口:成员规则缺失仅在「根材料无效的 Normal 相位」维持

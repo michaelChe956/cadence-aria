@@ -21,6 +21,11 @@ pub(crate) enum SingleCandidateProviderRunError {
         detail: String,
         missing_materials: Vec<String>,
         allowed_actions: Vec<crate::product::logical_codebase::BootstrapActionKind>,
+        /// 6.1（方案 A 附带）：trust 缺失（reason_code ==
+        /// `PROVIDER_TRUST_MISSING_WAITING_REASON`）时的同源只读人工登记
+        /// 指导——真实 adapter 工件路径/trust 键/人工形状＋生成场景
+        /// retry_action；其它 waiting 恒 `None`（原投影不变）。
+        manual_guidance: Option<String>,
     },
 }
 
@@ -488,6 +493,12 @@ async fn drive_single_candidate_reredrive(
 /// `repository.path` 的同一份读取重判（读取失败才停等）。
 const PUBLIC_MEMBER_RULES_WAITING_REASON: &str = "member_language_rules_missing";
 
+/// 6.1（方案 A 附带，REQ-REG-15「新根首次生成带指导但不自动登记」）：
+/// admission 预检「provider trust 缺失」等待项判别码（spawn 复验 trust
+/// 维度拒绝的同源只读分类）。该 reason 的 generation waiting 桥接同源
+/// 只读 manual_guidance；其它 waiting 原样上浮。
+const PROVIDER_TRUST_MISSING_WAITING_REASON: &str = "provider_trust_missing";
+
 /// C-1/路 C（Task 4，REQ-REG-12）：LC 会话的 admission 预检——在读取
 /// `.claude/rules/language.md` 之前经 `LogicalCodebaseProviderAdmissionPreflight`
 /// 校验聚合 policy、发布链与 gateway capability 等公共准入条件。
@@ -562,11 +573,33 @@ fn preflight_lc_member_rules_before_author_run(
             },
         ) => {
             engine.persist_single_candidate_waiting_phase();
+            // 6.1（方案 A 附带，D5）：trust 缺失的 generation waiting 桥接
+            // 同源只读 manual_guidance——同一 gateway 注入的只读 trust
+            // source 与冻结 authority root 生成（provider 特定工件路径/
+            // trust 键/人工形状＋生成场景 retry_action「人工登记后显式
+            // 重新生成」）；只读零登记/零 trust 写（start_generation 不
+            // 自动登记），指导缺席（无 source/无 adapter）时保持原投影，
+            // 不伪造 capability。
+            let manual_guidance = if reason_code == PROVIDER_TRUST_MISSING_WAITING_REASON {
+                let author_provider = engine.session().author_provider.clone();
+                launch
+                    .gateway
+                    .read_only_generation_trust_waiting(&author_provider)
+                    .map(|waiting| {
+                        format!(
+                            "{}（retry_action：{}）",
+                            waiting.manual_guidance, waiting.retry_action
+                        )
+                    })
+            } else {
+                None
+            };
             Err(SingleCandidateProviderRunError::AdmissionWaiting {
                 reason_code,
                 detail,
                 missing_materials,
                 allowed_actions,
+                manual_guidance,
             })
         }
         Err(crate::product::logical_codebase::ProviderAdmissionError::Store(error)) => {
@@ -682,6 +715,8 @@ pub(crate) async fn run_single_candidate_author(
                     crate::product::logical_codebase::BootstrapActionKind::Prepare,
                     crate::product::logical_codebase::BootstrapActionKind::Retry,
                 ],
+                // 成员规则等待不携带 trust 指导（指导只绑定 trust 维度失败）。
+                manual_guidance: None,
             });
         }
         Err(error) => {

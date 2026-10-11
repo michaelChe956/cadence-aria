@@ -13,6 +13,8 @@ use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
 use crate::product::work_item_plan_policy::{RunPolicy, WorkItemPlanFlowKind};
 use crate::web::workspace_session::WorkspaceSessionManager;
 
+use super::single_candidate_lc_admission::AliasLcGatewayExtras;
+
 struct RecordingOutputProvider {
     output: String,
     inputs: mpsc::UnboundedSender<StreamingProviderInput>,
@@ -102,12 +104,16 @@ pub(super) enum LogicalAliasFocus {
     NonUnique,
 }
 
-/// LogicalAlias 夹具规格：逐成员材料 + 聚合根规则正文 + focus 形态。
+/// LC 夹具规格：逐成员材料 + 聚合根规则正文 + focus 形态。
 struct LogicalAliasSpec {
     members: Vec<MemberRuleMaterial>,
     root_rules: Option<String>,
     focus: LogicalAliasFocus,
     gateway_author: Arc<dyn StreamingProviderAdapter>,
+    /// 6.1（方案 A 附带）：gateway 组装覆盖项（只读 trust source 隔离
+    /// home／dialect capability source／可控 availability gate）；既有
+    /// 调用方恒 `Default`（零覆盖，行为不变）。
+    gateway_extras: super::single_candidate_lc_admission::AliasLcGatewayExtras,
 }
 
 /// 夹具路由形态：Legacy=单仓物理仓；LogicalAlias=legacy 别名逻辑代码库
@@ -138,7 +144,22 @@ impl ProviderRunFixture {
         write_member_language_rules: bool,
         gateway_author: Arc<dyn StreamingProviderAdapter>,
     ) -> Self {
-        Self::new_logical_multi(
+        Self::new_logical_with_gateway_extras(
+            write_member_language_rules,
+            gateway_author,
+            AliasLcGatewayExtras::default(),
+        )
+    }
+
+    /// 6.1（方案 A 附带）：`new_logical` 的 gateway 覆盖项变体——trust
+    /// 首次失败只读指导用例注入隔离 home 只读 trust source／dialect
+    /// capability source／可控 availability gate。
+    pub(super) fn new_logical_with_gateway_extras(
+        write_member_language_rules: bool,
+        gateway_author: Arc<dyn StreamingProviderAdapter>,
+        gateway_extras: AliasLcGatewayExtras,
+    ) -> Self {
+        Self::new_logical_multi_with_gateway_extras(
             vec![if write_member_language_rules {
                 MemberRuleMaterial::Present(DEFAULT_MEMBER_LANGUAGE_RULES.to_string())
             } else {
@@ -147,6 +168,7 @@ impl ProviderRunFixture {
             None,
             LogicalAliasFocus::FirstMember,
             gateway_author,
+            gateway_extras,
         )
     }
 
@@ -161,6 +183,23 @@ impl ProviderRunFixture {
         focus: LogicalAliasFocus,
         gateway_author: Arc<dyn StreamingProviderAdapter>,
     ) -> Self {
+        Self::new_logical_multi_with_gateway_extras(
+            members,
+            root_rules,
+            focus,
+            gateway_author,
+            AliasLcGatewayExtras::default(),
+        )
+    }
+
+    /// 6.1（方案 A 附带）：`new_logical_multi` 的 gateway 覆盖项变体。
+    pub(super) fn new_logical_multi_with_gateway_extras(
+        members: Vec<MemberRuleMaterial>,
+        root_rules: Option<String>,
+        focus: LogicalAliasFocus,
+        gateway_author: Arc<dyn StreamingProviderAdapter>,
+        gateway_extras: AliasLcGatewayExtras,
+    ) -> Self {
         assert!(
             !members.is_empty(),
             "logical alias fixture needs at least one member"
@@ -173,6 +212,7 @@ impl ProviderRunFixture {
                 root_rules,
                 focus,
                 gateway_author,
+                gateway_extras,
             }),
             engine_tx,
         );
@@ -324,13 +364,14 @@ impl ProviderRunFixture {
                 let physical_repositories = std::iter::once(repository.clone())
                     .chain(extra_repositories.iter().cloned())
                     .collect::<Vec<_>>();
-                let registered =
-                    super::single_candidate_lc_admission::register_alias_logical_codebase(
+                let registered = super::single_candidate_lc_admission::
+                    register_alias_logical_codebase_with_extras(
                         &app_paths,
                         &member_roots,
                         &physical_repositories,
                         &spec.focus,
                         Arc::clone(&spec.gateway_author),
+                        spec.gateway_extras.clone(),
                     );
                 let projections = physical_repositories
                     .iter()
