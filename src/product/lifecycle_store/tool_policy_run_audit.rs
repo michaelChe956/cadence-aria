@@ -378,27 +378,40 @@ impl LifecycleStore {
         }))
     }
 
-    /// r50(#3):在 workspace 分区内按 (provider, role) 扫描最新
-    /// provider_start（max role_run_seq）并返回其原生 provider session id。
-    /// resume 兜底检索——会话引用（provider_conversations）缺失时以
-    /// spawn 时点审计还原原生 resume（fresh 轮 spawn 即落盘,不受会话
-    /// 引用记录的内存重建/durable clobber 影响）。provider 匹配接受
-    /// snake/dash 两种 canonical 形态（与审计写入侧一致）。
-    pub fn latest_provider_start_native_id(
+    /// B1a（Task 4.1，设计 §5.2）：audit 兜底 clean-cutover——旧
+    /// `latest_provider_start_native_id` 的 typed 替代。在 workspace 分区
+    /// 内按 (provider, role) 扫描 provider_start，返回最新**有恢复资格**
+    /// 候选 {native_id, role_run_seq}（resume 兜底：会话引用缺失时以
+    /// spawn 时点审计还原原生 resume，provider 匹配接受 snake/dash 两种
+    /// canonical 形态，与审计写入侧一致）。
+    ///
+    /// 恢复资格过滤（clean-cutover 语义，不再取回已吊销 id）：
+    /// - 该 run 文件已含 `session_terminated`（旧 run 被 superseded/终止，
+    ///   旧 native 不复活、不捞更旧代）；
+    /// - native id 命中调用方传入的 durable tombstone 集合。
+    ///
+    /// 有 (provider, role) 匹配但全部无资格 → `AllSuperseded`（调用方进
+    /// 显式等待，不当出生 fresh）；无任何匹配 → `NoMatch`（事实读取确证
+    /// 为空）。
+    pub fn latest_provider_start_resume_candidate(
         &self,
         workspace_session_id: &str,
         provider_canonical: &str,
         role: &str,
-    ) -> Result<Option<String>, ToolPolicyAuditError> {
+        superseded_native_ids: &std::collections::BTreeSet<String>,
+    ) -> Result<ProviderStartCandidateLookup, ToolPolicyAuditError> {
         let _guard = lock_audit_log()?;
         let root = self.tool_policy_audit_workspace_root(workspace_session_id)?;
         let entries = match std::fs::read_dir(&root) {
             Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(ProviderStartCandidateLookup::NoMatch)
+            }
             Err(error) => return Err(audit_error(error)),
         };
         let dashed = provider_canonical.replace('_', "-");
-        let mut matched: Option<(u64, String)> = None;
+        let mut matched = false;
+        let mut eligible: Option<(u64, String)> = None;
         for entry in entries {
             let entry = entry.map_err(audit_error)?;
             let name = entry.file_name().to_string_lossy().into_owned();
@@ -409,19 +422,68 @@ impl LifecycleStore {
                 continue;
             };
             let lines = self.read_tool_policy_lines(workspace_session_id, role_run_seq)?;
+            let mut run_provider_start: Option<String> = None;
+            let mut run_terminated = false;
             for line in lines {
-                if let DurableToolPolicyEvent::ProviderStart(record) = line.event
-                    && record.role == role
-                    && (record.provider == provider_canonical || record.provider == dashed)
-                    && !record.provider_session_id.trim().is_empty()
-                    && matched.as_ref().is_none_or(|(seq, _)| role_run_seq > *seq)
-                {
-                    matched = Some((role_run_seq, record.provider_session_id.clone()));
+                match line.event {
+                    DurableToolPolicyEvent::ProviderStart(record) => {
+                        if record.role == role
+                            && (record.provider == provider_canonical
+                                || record.provider == dashed)
+                            && !record.provider_session_id.trim().is_empty()
+                        {
+                            matched = true;
+                            run_provider_start = Some(record.provider_session_id.clone());
+                        }
+                    }
+                    DurableToolPolicyEvent::SessionTerminated(_) => {
+                        run_terminated = true;
+                    }
+                    _ => {}
                 }
             }
+            let Some(native_id) = run_provider_start else {
+                continue;
+            };
+            if run_terminated || superseded_native_ids.contains(native_id.trim()) {
+                continue;
+            }
+            if eligible.as_ref().is_none_or(|(seq, _)| role_run_seq > *seq) {
+                eligible = Some((role_run_seq, native_id));
+            }
         }
-        Ok(matched.map(|(_, native_id)| native_id))
+        Ok(match eligible {
+            Some((role_run_seq, native_id)) => {
+                ProviderStartCandidateLookup::Eligible(ProviderStartResumeCandidate {
+                    role_run_seq,
+                    native_id,
+                })
+            }
+            None if matched => ProviderStartCandidateLookup::AllSuperseded,
+            None => ProviderStartCandidateLookup::NoMatch,
+        })
     }
+}
+
+/// B1a（Task 4.1）：audit 兜底候选查找结果——区分「确证为空」与
+/// 「有历史但全部吊销」（后者不得当出生 fresh）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderStartCandidateLookup {
+    /// 最新有恢复资格的 provider_start（native id + 其 run 的 role_run_seq）。
+    Eligible(ProviderStartResumeCandidate),
+    /// 有 (provider, role) 匹配的 provider_start，但全部已终止/吊销——
+    /// 旧代不复活，也不能当出生 fresh（调用方显式等待）。
+    AllSuperseded,
+    /// 无任何匹配 provider_start（事实读取确证为空）。
+    NoMatch,
+}
+
+/// B1a（Task 4.1）：audit 兜底 typed 候选 {native_id, role_run_seq}——
+/// LC 候选的 `role_run_seq` 必须来自真实 run 绑定（文件 stem），不伪造。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderStartResumeCandidate {
+    pub role_run_seq: u64,
+    pub native_id: String,
 }
 
 #[cfg(test)]

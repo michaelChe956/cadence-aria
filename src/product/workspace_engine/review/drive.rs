@@ -724,21 +724,23 @@ impl WorkspaceEngine {
     ///（`resume_allowed=false`，丢 resume id 走 full prompt 新 thread）。指纹
     /// 记忆缺失（跨连接重建 engine）→ fail-closed 新会话：无法证明旧 thread 与
     /// 当前 launch 全维度一致，绝不静默续接。
-    fn resolve_revision_root_launch(&self) -> Option<Result<RevisionLaunchDecision, String>> {
+    pub(crate) fn resolve_revision_root_launch(&self) -> Option<Result<RevisionLaunchDecision, String>> {
         let gateway = self.logical_provider_gateway()?;
         let Some(lifecycle) = self.lifecycle_store.as_ref() else {
             return Some(Err(
                 "logical revision launch requires a persistent lifecycle store".to_string(),
             ));
         };
-        let Some(record) = lifecycle
-            .get_workspace_session(&self.session.session_id)
-            .ok()
-        else {
-            return Some(Err(format!(
-                "logical revision launch cannot load workspace session record {}",
-                self.session.session_id
-            )));
+        let record = match lifecycle.get_workspace_session(&self.session.session_id) {
+            Ok(record) => record,
+            // B1a（Task 4.1）：record 读取错误不再 `.ok()` 吞错——底层
+            // 类别（product_store_io/json/identity）随消息保留传播。
+            Err(error) => {
+                return Some(Err(format!(
+                    "logical revision launch cannot load workspace session record {}: {error}",
+                    self.session.session_id
+                )));
+            }
         };
         let provider = self.session.author_provider.clone();
         let request = match self.build_root_launch_request(
@@ -749,9 +751,22 @@ impl WorkspaceEngine {
             Ok(request) => request,
             Err(message) => return Some(Err(message)),
         };
-        let resume_session_id = self
-            .provider_resume_session_id(ProviderConversationRole::Author, &provider)
-            .filter(|id| !id.trim().is_empty());
+        // B1a（Task 4.1，BP2）：candidateErr 即 `Some(Err(..))`（typed 类别
+        // 保留），不落 `(None, _)` validate/fresh 臂；成功候选保留 native/seq
+        // （seq 与 durable fullmap/audit 联合绑定已在候选内校验）。
+        let resume_session_id = match self.provider_resume_session_candidate(
+            ProviderConversationRole::Author,
+            &provider,
+        ) {
+            Ok(candidate) => candidate
+                .map(|candidate| candidate.native_id)
+                .filter(|id| !id.trim().is_empty()),
+            Err(error) => {
+                return Some(Err(format!(
+                    "logical revision resume candidate unavailable: {error}"
+                )));
+            }
+        };
         let decision = match (
             resume_session_id,
             self.logical_launch_fingerprints.get(&provider),
@@ -851,7 +866,8 @@ impl WorkspaceEngine {
 /// target=成员 checkout）+ resume 是否放行（supersede/fresh 时 false）。
 /// Task 9c:`superseded` 携带 StartNew 的旧会话 id 与稳定等待投影(仅显式
 /// `StartGeneration` fresh)。
-struct RevisionLaunchDecision {
+#[derive(Debug)]
+pub(crate) struct RevisionLaunchDecision {
     launch: ValidatedSessionLaunchPolicy,
     resume_allowed: bool,
     superseded: Option<SupersededRevisionWait>,
@@ -859,6 +875,7 @@ struct RevisionLaunchDecision {
 
 /// Task 9c:StartNew(supersede)的等待上下文——被取代旧会话 id + gateway
 /// 稳定等待投影(reason_code + 唯一 allowed action StartGeneration)。
+#[derive(Debug)]
 struct SupersededRevisionWait {
     superseded_session_id: String,
     waiting: crate::product::logical_codebase::provider_gateway::LcSupersededWaiting,

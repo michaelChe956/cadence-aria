@@ -783,4 +783,434 @@ async fn completed_revision_run_reconnects_to_author_confirm_with_revised_artifa
 // 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
 // （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
+
+/// B1a（Task 4.1，设计 §5.2）：fresh 修订 prompt 自足——重连重建
+/// （`new_persistent` 从 durable record 恢复消息流）后，无 resume 的 fresh
+/// 输入 `ID=None` 且 artifact / 用户 feedback / trusted review / 压缩历史
+/// 全在场；author 反馈路径（无 review verdict）同样自足（fresh 注入
+/// compact_history，resumed 不注入）。
+#[tokio::test]
+async fn anchor_t11_fresh_revision_context_survives_reconnect() {
+    let (tmp, checkpoint_store) = setup();
+    let lifecycle_store = LifecycleStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
+    let record = lifecycle_store
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: "story_spec_0001".to_string(),
+            workspace_type: WorkspaceType::Story,
+            author_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::Codex),
+            review_rounds: 1,
+            superpowers_enabled: true,
+            openspec_enabled: true,
+            work_item_plan_options: None,
+        })
+        .unwrap();
+    // durable 消息流：用户初版请求 + assistant 初稿 + reviewer 评审报告——
+    // 重连（new_persistent）后必须继续滋养 fresh prompt 的压缩历史。
+    lifecycle_store
+        .append_workspace_message(
+            &record.id,
+            "user".to_string(),
+            "初版请覆盖登录成功路径。".to_string(),
+        )
+        .unwrap();
+    lifecycle_store
+        .append_workspace_message(
+            &record.id,
+            "assistant".to_string(),
+            "# Story Spec 初稿：覆盖登录成功路径。".to_string(),
+        )
+        .unwrap();
+    lifecycle_store
+        .append_workspace_message(
+            &record.id,
+            "reviewer".to_string(),
+            "评审报告：缺少异常场景处理。".to_string(),
+        )
+        .unwrap();
+
+    // 重连重建：durable record → new_persistent（消息流自 durable 恢复）。
+    let mut engine = WorkspaceEngine::new_persistent(
+        checkpoint_store,
+        lifecycle_store.clone(),
+        mpsc::channel(64).0,
+        WorkspaceSession::from_record(
+            lifecycle_store.get_workspace_session(&record.id).unwrap(),
+        ),
+    );
+    engine.session.artifact = Some(artifact_payload(
+        "# Story Spec\n\n## 范围\n来源 source id: Issue issue_0001；初版产物",
+    ));
+    engine.latest_review_verdict = Some(ReviewVerdict {
+        verdict: ReviewVerdictType::Revise,
+        comments: "TrustedReview：请补充异常场景与回滚策略。".to_string(),
+        summary: "缺少异常场景".to_string(),
+        findings: Vec::new(),
+        review_gate: ReviewGate::RequiresRevision,
+        work_item_plan_review: None,
+        structured_output_diagnostic: None,
+    });
+    engine.pending_revision_context = Some("补充异常场景与回滚策略".to_string());
+
+    // reviewer 返修 fresh（无 resume）：ID=None + 完整材料。
+    let fresh = engine
+        .build_revision_input_with_resume(false)
+        .expect("fresh revision input");
+    assert!(fresh.resume_provider_session_id.is_none());
+    assert!(fresh.prompt.contains("补充异常场景与回滚策略"));
+    assert!(fresh.prompt.contains("# Story Spec"));
+    assert!(fresh.prompt.contains("TrustedReview：请补充异常场景与回滚策略。"));
+    assert!(fresh.prompt.contains("会话上下文（滑动窗口压缩"));
+    assert!(fresh.prompt.contains("初版请覆盖登录成功路径。"));
+
+    // author 反馈路径 fresh（无 review verdict）：feedback/artifact/压缩历史
+    // 自足（fresh 会话无会话内记忆，不靠 provider 旧 thread）。
+    engine.latest_review_verdict = None;
+    let feedback_fresh = engine
+        .build_revision_input_with_resume(false)
+        .expect("author feedback fresh input");
+    assert!(feedback_fresh.resume_provider_session_id.is_none());
+    assert!(feedback_fresh.prompt.contains("补充异常场景与回滚策略"));
+    assert!(feedback_fresh.prompt.contains("# Story Spec"));
+    assert!(
+        feedback_fresh
+            .prompt
+            .contains("会话上下文（滑动窗口压缩"),
+        "fresh author 反馈 prompt 必须注入压缩历史: {}",
+        feedback_fresh.prompt
+    );
+    assert!(feedback_fresh.prompt.contains("初版请覆盖登录成功路径。"));
+    assert!(
+        feedback_fresh.prompt.matches("补充异常场景与回滚策略").count() >= 1
+    );
+    // 反馈不重复 append：用户反馈小节只出现一次（历史重放不含反馈小节标题）。
+    assert_eq!(
+        feedback_fresh
+            .prompt
+            .matches("## 用户反馈")
+            .count(),
+        1,
+        "{}",
+        feedback_fresh.prompt
+    );
+}
+
+/// B1a（Task 4.1，BP2）：candidate 读取错误 typed 停止全部 LC 生产 caller——
+/// workspace record 读错（损坏 JSON）与 author audit 读错（损坏审计文件）
+/// 分别以 `WorkspaceRecord` / `ProviderAudit` 类别传播：三个生产路径
+/// （`build_streaming_input` / `build_work_item_plan_streaming_input` /
+/// `resolve_revision_root_launch`）输入构造失败、LC launch 判定 `Some(Err)`、
+/// 零 provider 启动、durable 恢复面不变；LC 缺 fullmap 绑定进 typed 等待
+/// （`FrozenBindingUnavailable`），不落 fresh/validate 臂、不当出生 fresh。
+#[tokio::test]
+async fn anchor_t11_candidate_read_error_stops_all_lc_launch_callers() {
+    use crate::product::models::LogicalLaunchBasis;
+    use crate::product::models::LogicalLaunchFingerprintRecord;
+    use crate::product::models::LogicalLaunchFingerprintState;
+    use crate::product::workspace_engine::lifecycle::NativeResumeCandidateError;
+
+    let (fixture, mut inputs) =
+        logical_revision_fixture(LogicalRevisionAuthority::ManifestRoot);
+    let session_json_path = fixture
+        .lifecycle
+        .workspace_sessions_root("project_0001", "issue_0001")
+        .join(format!("{}.json", fixture.record.id));
+    let original_record_bytes = std::fs::read(&session_json_path).expect("read session record");
+
+    // ── 注入①：workspace record 读错（损坏 JSON）→ typed WorkspaceRecord。
+    std::fs::write(&session_json_path, "{ not valid json").expect("corrupt session record");
+    let engine = revision_stage_engine(&fixture);
+    let record_read_error = engine
+        .provider_resume_session_candidate(
+            ProviderConversationRole::Author,
+            &ProviderName::ClaudeCode,
+        )
+        .expect_err("corrupt session record must be a typed error");
+    assert!(matches!(
+        record_read_error,
+        NativeResumeCandidateError::WorkspaceRecord(_)
+    ));
+    let streaming_builder_error = engine
+        .build_streaming_input("开始生成", AuthorPromptMode::FullConversation)
+        .expect_err("streaming builder must propagate the candidate read error");
+    assert!(
+        streaming_builder_error.contains("native_resume_candidate_workspace_record"),
+        "{streaming_builder_error}"
+    );
+    let plan_builder_error = engine
+        .build_work_item_plan_streaming_input(
+            ProviderType::Fake,
+            "plan prompt".to_string(),
+            "/tmp/worktree".to_string(),
+            ProviderName::ClaudeCode,
+            PlanAuthorOutputContract::Structured,
+        )
+        .expect_err("plan builder must propagate the candidate read error");
+    assert!(
+        plan_builder_error.contains("native_resume_candidate_workspace_record"),
+        "{plan_builder_error}"
+    );
+    let Err(revision_launch_error) = engine
+        .resolve_revision_root_launch()
+        .expect("LC launch must resolve an arm")
+    else {
+        panic!("record read error must stop the LC revision launch");
+    };
+    assert!(
+        revision_launch_error.contains("native_resume_candidate_workspace_record")
+            || revision_launch_error.contains("product_store_json"),
+        "{revision_launch_error}"
+    );
+    std::fs::write(&session_json_path, &original_record_bytes).expect("restore session record");
+
+    // ── 注入②：author audit 读错（结构损坏审计文件）→ typed ProviderAudit；
+    // 同一 revision driver 零 provider 启动、durable 恢复面不变。
+    use crate::cross_cutting::tool_policy_audit::{
+        DurableToolPolicyEvent, ProviderStartAudit, RoleRunBoundAuditSink,
+        TOOL_POLICY_AUDIT_SCHEMA_VERSION,
+    };
+    let audit_run_path = fixture
+        .paths
+        .root()
+        .join("tool-policy-run-audit")
+        .join(&fixture.record.id)
+        .join("0.jsonl");
+    std::fs::create_dir_all(audit_run_path.parent().unwrap()).expect("create audit partition");
+    RoleRunBoundAuditSink::new(
+        std::sync::Arc::new(fixture.lifecycle.clone()),
+        &fixture.record.id,
+        0,
+    )
+    .into_sink()
+    .append_bound(DurableToolPolicyEvent::ProviderStart(ProviderStartAudit {
+        provider: "claude-code".to_string(),
+        role: "orchestrator".to_string(),
+        provider_session_id: "audit-corrupt-seed".to_string(),
+        ..ProviderStartAudit::default()
+    }))
+    .expect("seed provider_start before corrupting");
+    let seeded_line = std::fs::read_to_string(&audit_run_path).expect("read seeded audit line");
+    let corrupted = seeded_line.replace(
+        &format!("\"schema_version\":{TOOL_POLICY_AUDIT_SCHEMA_VERSION}"),
+        "\"schema_version\":999",
+    );
+    assert_ne!(&corrupted, &seeded_line, "fixture must mutate schema_version");
+    std::fs::write(&audit_run_path, corrupted).expect("corrupt audit schema version");
+
+    let (mut engine, mut engine_events) = revision_stage_engine_with_events(&fixture);
+    let audit_read_error = engine
+        .provider_resume_session_candidate(
+            ProviderConversationRole::Author,
+            &ProviderName::ClaudeCode,
+        )
+        .expect_err("corrupt audit must be a typed error");
+    assert!(matches!(
+        audit_read_error,
+        NativeResumeCandidateError::ProviderAudit(_)
+    ));
+    let Err(launch_error) = engine
+        .resolve_revision_root_launch()
+        .expect("LC launch must resolve an arm")
+    else {
+        panic!("audit read error must stop the LC revision launch");
+    };
+    assert!(
+        launch_error.contains("native_resume_candidate_provider_audit"),
+        "{launch_error}"
+    );
+
+    // drive 面：零捕获 input、零 gateway/直连启动、恢复面 durable 不变。
+    let provider_starts_before = fixture.provider_starts.load(Ordering::SeqCst);
+    let direct = Arc::new(RevisionDirectSentinel {
+        starts: Arc::new(AtomicUsize::new(0)),
+    });
+    let direct_starts = direct.starts.clone();
+    engine.session.stage = WorkspaceStage::Revision;
+    engine.pending_revision_context = Some("补充异常场景".to_string());
+    engine
+        .drive_revision_session(direct.clone(), empty_provider_commands())
+        .await;
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), inputs.recv())
+            .await
+            .is_err(),
+        "candidate 读错不得捕获任何 provider input（claim/adapter/child 不增）"
+    );
+    assert_eq!(
+        fixture.provider_starts.load(Ordering::SeqCst),
+        provider_starts_before,
+        "gateway adapter 启动计数不增"
+    );
+    assert_eq!(direct_starts.load(Ordering::SeqCst), 0, "直连零启动");
+    let surfaced = loop {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), engine_events.recv())
+            .await
+            .expect("blocked drive must surface an error")
+            .expect("engine event channel stays open");
+        if let crate::product::workspace_engine::EngineEvent::Error { message } = event {
+            break message;
+        }
+    };
+    assert!(
+        surfaced.contains("native_resume_candidate_provider_audit"),
+        "typed 类别必须上浮可见: {surfaced}"
+    );
+    let reloaded = fixture
+        .lifecycle
+        .get_workspace_session(&fixture.record.id)
+        .expect("reload record after blocked drive");
+    assert!(
+        reloaded.lc_resume_recovery.is_none(),
+        "读错不得推进 durable 恢复面（不落 waiting record）"
+    );
+    // 恢复面 durable 不变：不落 waiting recovery、不写 tombstone（run 收口
+    // 的 status/stage 写回是既有失败闭环路径，不属于恢复面推进）。
+    assert!(
+        reloaded.superseded_native_sessions.is_empty(),
+        "读错不得写 superseded tombstone"
+    );
+    assert!(
+        reloaded.provider_conversations.is_empty(),
+        "读错不得改写 conversation 引用"
+    );
+
+    // ── LC 缺 binding：fullmap 纪元（Active 绑定 native-anchored-x@seq2）+
+    // 旧 native 在而不可绑定 → FrozenBindingUnavailable（typed 等待，零启动），
+    // 不当出生 fresh；绑定一致的 native 正常 Some(seq) 续接。
+    std::fs::remove_file(&audit_run_path).expect("clean corrupt audit file");
+    let mut anchored = fixture
+        .lifecycle
+        .get_workspace_session(&fixture.record.id)
+        .expect("load record for fullmap seeding");
+    anchored.logical_launch_fingerprints = vec![LogicalLaunchFingerprintRecord {
+        schema_version: 1,
+        basis: LogicalLaunchBasis::FullLcProjectionV2,
+        role: ProviderConversationRole::Author,
+        provider: ProviderName::ClaudeCode,
+        role_run_seq: 2,
+        node_id: "timeline_node_002".to_string(),
+        native_session_id: Some("native-anchored-x".to_string()),
+        fingerprint_digest: "sha256:fixture-launch-digest".to_string(),
+        planning_access_fingerprint: "sha256:fixture-access".to_string(),
+        state: LogicalLaunchFingerprintState::Active,
+        created_at: "2026-10-11T00:00:00Z".to_string(),
+        updated_at: "2026-10-11T00:00:00Z".to_string(),
+    }];
+    crate::product::json_store::write_json(&session_json_path, &anchored)
+        .expect("seed fullmap era record");
+
+    let mut unbound_engine = revision_stage_engine(&fixture);
+    unbound_engine.session.provider_conversations = vec![ProviderConversationRef {
+        role: ProviderConversationRole::Author,
+        provider: ProviderName::ClaudeCode,
+        provider_session_id: "native-unbound-y".to_string(),
+        updated_at: "2026-10-11T00:00:00Z".to_string(),
+        last_node_id: None,
+    }];
+    let frozen = unbound_engine
+        .provider_resume_session_candidate(
+            ProviderConversationRole::Author,
+            &ProviderName::ClaudeCode,
+        )
+        .expect_err("unbound native in the fullmap era must wait, not resume or rebirth");
+    assert!(matches!(frozen, NativeResumeCandidateError::FrozenBindingUnavailable));
+    assert!(
+        unbound_engine
+            .build_streaming_input("开始生成", AuthorPromptMode::FullConversation)
+            .is_err(),
+        "streaming builder 不得把 frozen binding 折成 fresh 完整 prompt"
+    );
+    assert!(
+        unbound_engine
+            .build_work_item_plan_streaming_input(
+                ProviderType::Fake,
+                "plan prompt".to_string(),
+                "/tmp/worktree".to_string(),
+                ProviderName::ClaudeCode,
+                PlanAuthorOutputContract::Structured,
+            )
+            .is_err(),
+        "plan builder 不得把 frozen binding 折成 fresh"
+    );
+    let frozen_launch = unbound_engine.resolve_revision_root_launch();
+    assert!(
+        frozen_launch.as_ref().is_some_and(|decision| decision.is_err()),
+        "launch 判定不得落 (None, _) validate/fresh 臂"
+    );
+
+    // 绑定一致：Active fullmap 绑定的 native 正常 Some(seq) 候选。
+    let mut bound_engine = revision_stage_engine(&fixture);
+    bound_engine.session.provider_conversations = vec![ProviderConversationRef {
+        role: ProviderConversationRole::Author,
+        provider: ProviderName::ClaudeCode,
+        provider_session_id: "native-anchored-x".to_string(),
+        updated_at: "2026-10-11T00:00:00Z".to_string(),
+        last_node_id: None,
+    }];
+    assert_eq!(
+        bound_engine
+            .provider_resume_session_candidate(
+                ProviderConversationRole::Author,
+                &ProviderName::ClaudeCode
+            )
+            .expect("typed candidate read"),
+        Some(crate::product::workspace_engine::lifecycle::NativeResumeCandidate {
+            native_id: "native-anchored-x".to_string(),
+            role_run_seq: Some(2),
+        }),
+        "fullmap Active 绑定一致的 native 必须 Some(seq) 续接"
+    );
+}
+
+/// B1a（Task 4.1）/E（REQ-PLN-08）：成员 checkout 身份不可得的 deferred
+/// 臂——launch target 退 E native anchor（聚合根视图），不退业务成员
+/// 路径（scope 回写 focus/involved 不迁移 native 锚；cwd 恒为 root）。
+#[tokio::test]
+async fn anchor_t11_deferred_launch_anchor_stays_native_root_without_checkout_identity() {
+    let (fixture, _inputs) =
+        logical_revision_fixture(LogicalRevisionAuthority::ManifestRoot);
+    // Story focus=None（AI 自决前的聚合视野形态）：business_repository 派生
+    // 为聚合根视图（无成员 checkout 身份）→ launch 走 deferred aggregate_root
+    // 臂；native 锚恒聚合根，不随业务选仓（focus/involved 回写）迁移。
+    let story_spec_path = fixture
+        .paths
+        .issue_lifecycle_root("project_0001", "issue_0001")
+        .join("story-specs")
+        .join(format!("{}.json", fixture.record.entity_id));
+    let mut story_spec: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&story_spec_path).expect("read story spec"))
+            .expect("parse story spec");
+    story_spec["focus_repository_id"] = serde_json::Value::Null;
+    std::fs::write(
+        &story_spec_path,
+        serde_json::to_vec_pretty(&story_spec).expect("serialize story spec"),
+    )
+    .expect("rewrite story spec without focus");
+
+    let engine = revision_stage_engine(&fixture);
+    let request = engine
+        .build_root_launch_request(
+            &fixture.record,
+            &ProviderName::ClaudeCode,
+            crate::product::logical_codebase::SessionPolicyAction::PlanningReadOnly,
+        )
+        .expect("LC 会话必须解析出 launch request")
+        .expect("deferred arm must resolve");
+    let target = request.target;
+    assert!(
+        target.logical_repository_id.is_empty() && target.checkout_id.is_empty(),
+        "deferred 臂是 aggregate_root 锚（非成员 checkout target）"
+    );
+    assert_eq!(
+        target.worktree,
+        fixture.manifest_root.canonicalize().expect("canonical root"),
+        "deferred 锚 = E native anchor（聚合根视图），不退业务成员路径"
+    );
+    assert_eq!(
+        request.working_directory, target.worktree,
+        "deferred 形态 cwd==root（聚合根），与成员 target 分离语义不漂移"
+    );
+}
 include!("author_revision_loop_parts/root_cwd_revision.inc.rs");

@@ -174,19 +174,32 @@ impl WorkspaceEngine {
             ));
         };
         let app_paths = lifecycle.app_paths();
-        let repository =
-            match crate::product::workspace_repository::workspace_repository_for_session(
+        // B1a（Task 4.1）/E（REQ-PLN-08）：同 resolver 一次派生两用途——
+        // `business_repository` 给 target（成员 checkout 语义不变）；
+        // `native_launch_anchor` 给 deferred aggregate_root 锚（native 锚恒
+        // 聚合根视图，scope 回写 involved/focus/change_order 不迁移锚）。
+        let context =
+            match crate::product::workspace_repository::resolve_workspace_repository_context(
                 &app_paths,
                 lifecycle,
                 session_record,
             ) {
-                Ok(repository) => repository,
+                Ok(context) => context,
                 Err(error) => {
                     return Some(Err(format!(
                         "resolve logical author target repository failed: {error}"
                     )));
                 }
             };
+        let repository = match context.business_repository {
+            Ok(repository) => repository,
+            Err(error) => {
+                return Some(Err(format!(
+                    "resolve logical author target repository failed: {error}"
+                )));
+            }
+        };
+        let native_launch_anchor = context.native_launch_anchor;
         // gateway 注入谓词即 `repository.logical_repository_id.is_some()`（manager
         // 工厂）；此处不一致属持久状态漂移——fail-closed，绝不回落 legacy 直连。
         let Some(logical_repository_id) = repository.logical_repository_id else {
@@ -238,8 +251,17 @@ impl WorkspaceEngine {
                 repository.path.clone(),
             ),
             // 身份不可得时镜像 gateway_start.rs 的 deferred 口径退 aggregate_root
-            // 锚（cwd/target 分离语义不受影响：cwd 恒为 root）。
-            None => PolicyTarget::aggregate_root(repository.path.clone()),
+            // 锚（cwd/target 分离语义不受影响：cwd 恒为 root）——B1a（4.1）：
+            // deferred 锚取 E native anchor（聚合根视图），不随业务成员的
+            // scope 回写迁移。
+            None => match native_launch_anchor {
+                Ok(anchor) => PolicyTarget::aggregate_root(anchor.path.clone()),
+                Err(error) => {
+                    return Some(Err(format!(
+                        "resolve logical author native launch anchor failed: {error}"
+                    )));
+                }
+            },
         };
         Some(Ok(SessionLaunchRequest {
             project_id: session_record.project_id.clone(),

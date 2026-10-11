@@ -5,13 +5,18 @@ impl WorkspaceEngine {
     /// 独立于 build_revision_full_prompt/build_revision_delta_prompt（后者面向 reviewer 返修，
     /// 且 add-monorepo 分支已参数化，避免触碰）。
     ///
-    /// `_resumed_session` 为后续启用 compact_history 预留：届时仅 fresh 会话注入压缩历史。
+    /// B1a（Task 4.1，设计 §5.2）：`resumed_session=false`（fresh provider 会话）
+    /// 时注入压缩历史——fresh 会话无会话内记忆，prompt 必须自足；无历史材料
+    /// （无消息且无 review verdict）时不注入空小节。反馈正文只在「## 用户反馈」
+    /// 出现一次（反馈不重复 append）；trusted 材料经压缩历史携带（verdict 随
+    /// `HistoryCompactionInput` 进入重放），不改变「用户反馈优先级高于 Reviewer
+    /// 审核意见」的既有优先级。
     /// F-60 P0：输出契约由 build_revision_input_with_resume 出口统一装配（见 revision.rs），
     /// 本函数只负责修订指令与材料本身。
     pub(crate) fn build_author_revision_prompt(
         &self,
         feedback: &str,
-        _resumed_session: bool,
+        resumed_session: bool,
     ) -> String {
         let artifact = self
             .session
@@ -44,6 +49,21 @@ impl WorkspaceEngine {
         prompt.push_str("## 用户反馈\n\n");
         prompt.push_str(feedback.trim());
         prompt.push('\n');
+        if !resumed_session
+            && (!self.session.messages.is_empty() || self.latest_review_verdict.is_some())
+        {
+            prompt.push_str("\n会话上下文（滑动窗口压缩；最近 2 轮保留原文）:\n");
+            prompt.push_str(
+                &super::compact_history(super::HistoryCompactionInput {
+                    messages: &self.session.messages,
+                    artifact_versions: &self.artifact_versions,
+                    timeline_nodes: &self.timeline_nodes,
+                    latest_review_verdict: self.latest_review_verdict.as_ref(),
+                    mode: super::HistoryCompactionMode::Author,
+                })
+                .rendered,
+            );
+        }
 
         if is_design {
             self.append_missing_context_notes_to_prompt(&mut prompt);

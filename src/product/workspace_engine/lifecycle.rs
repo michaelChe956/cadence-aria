@@ -1,6 +1,60 @@
 use super::*;
-use crate::product::models::{LcRecoveryRunContext, LcResumeRecoveryRecord, LcResumeRecoveryState};
+use crate::product::models::{
+    LcRecoveryRunContext, LcResumeRecoveryRecord, LcResumeRecoveryState,
+    LogicalLaunchFingerprintRecord, LogicalLaunchFingerprintState,
+};
 use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
+
+/// B1a（Task 4.1，Plan §0.3 接口字典）：native resume 候选——真正已确认的
+/// 原生 provider session id（trim 且非空）+ 该 run 的 `role_run_seq` 绑定。
+/// LC 候选必须 `Some(seq)` 且与同 provider/role/native 的 durable
+/// fullmap/audit 绑定一致；direct 既有 conversation 可 `None` seq（不新增
+/// LC fullmap 硬门、不伪造 seq）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NativeResumeCandidate {
+    pub native_id: String,
+    pub role_run_seq: Option<u64>,
+}
+
+/// B1a（Task 4.1）：候选读取错误——沿真实来源区分，caller 转换
+/// `Result<_, String>` 时保留稳定类别前缀并立即 Err，不 `.ok()`/
+/// `unwrap_or_default()`/None 降级。
+#[derive(Debug)]
+pub(crate) enum NativeResumeCandidateError {
+    /// durable workspace record 读取失败（IO/JSON/身份）。
+    WorkspaceRecord(crate::product::json_store::ProductStoreError),
+    /// spawn 审计分区读取失败（IO/结构损坏）。
+    ProviderAudit(crate::cross_cutting::tool_policy_audit::ToolPolicyAuditError),
+    /// 候选身份无法确立（provider canonical 派生失败 / audit 与 fullmap
+    /// 同 native 异 seq 的绑定冲突）。
+    ProviderIdentityInvalid,
+    /// 旧历史/native 在而冻结 fullmap 绑定不可用（或 id 已吊销）——进
+    /// durable 等待、零 provider start，不能当出生 fresh。
+    FrozenBindingUnavailable,
+}
+
+impl std::fmt::Display for NativeResumeCandidateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::WorkspaceRecord(error) => {
+                write!(f, "native_resume_candidate_workspace_record: {error}")
+            }
+            Self::ProviderAudit(error) => {
+                write!(f, "native_resume_candidate_provider_audit: {error}")
+            }
+            Self::ProviderIdentityInvalid => write!(
+                f,
+                "native_resume_candidate_provider_identity_invalid: provider identity could not be derived for the resume candidate"
+            ),
+            Self::FrozenBindingUnavailable => write!(
+                f,
+                "native_resume_candidate_frozen_binding_unavailable: native session history exists without an eligible frozen full-map binding (or the id was superseded); waiting for an explicit fresh instead of resuming or rebirthing"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for NativeResumeCandidateError {}
 
 /// T4.1（REQ-REG-15）：确认 trust 准备的同步预检产物（lifecycle.rs 私有）。
 /// `Skip`=免登记（非 LC 会话/无有效 trust provider，零调用放行）；
@@ -923,65 +977,182 @@ impl WorkspaceEngine {
         })
     }
 
-    pub(crate) fn provider_resume_session_id(
+    /// B1a（Task 4.1，Plan §0.3 / 设计 §5.2）：typed native resume 候选——
+    /// `provider_resume_session_id` 的 clean-cutover 替代（旧接口与全部
+    /// `.ok()` 吞错删除，读取错误沿类别传播，不折 None/fresh）。
+    ///
+    /// 候选来源（短路顺序）：
+    /// 1. 内存 conversation 引用；
+    /// 2. durable workspace record 的 conversation 引用（record 读取
+    ///    IO/JSON/身份错误 → `WorkspaceRecord`，不吞）；
+    /// 3. Author 面审计兜底：spawn 时点 provider_start 的最新**有恢复
+    ///    资格** run（旧 run `session_terminated` 与 durable tombstone
+    ///    多代排除；读取错误 → `ProviderAudit`）。
+    ///
+    /// `role_run_seq` 绑定：优先 durable fullmap（同 provider/role/native
+    /// 的 Active 记录），audit 兜底自带其 run seq。LC 会话（gateway 在场）
+    /// 进入 fullmap 纪元后（同 provider/role 存在任何 fullmap 记录），
+    /// native 在而绑定缺失/已 superseded → `FrozenBindingUnavailable`
+    /// （durable 等待、零 provider start，不当出生 fresh）；audit 与
+    /// fullmap 同 native 异 seq → `ProviderIdentityInvalid`。纪元之前的
+    /// 旧历史无绑定可判——维持既有恢复行为（audit seq 在场即携带），
+    /// 由 B2b（Plan 5.2）的 prepared-map-before-start 收紧。direct（无
+    /// gateway）不加 LC fullmap 硬门。
+    pub(crate) fn provider_resume_session_candidate(
         &self,
         role: ProviderConversationRole,
         provider: &ProviderName,
-    ) -> Option<String> {
-        provider_conversation_session_id(&self.session.provider_conversations, &role, provider)
-            .or_else(|| {
-                self.lifecycle_store.as_ref().and_then(|store| {
-                    store
-                        .get_workspace_session(&self.session.session_id)
-                        .ok()
-                        .and_then(|session| {
-                            provider_conversation_session_id(
-                                &session.provider_conversations,
-                                &role,
-                                provider,
-                            )
-                        })
-                })
+    ) -> Result<Option<NativeResumeCandidate>, NativeResumeCandidateError> {
+        let in_memory_id = provider_conversation_session_id(
+            &self.session.provider_conversations,
+            &role,
+            provider,
+        );
+        let Some(store) = self.lifecycle_store.as_ref() else {
+            // direct 内存态：无持久 store、无旧引用事实可读——内存引用即
+            // 出生后的既有 direct conversation，seq 未知可 None。
+            return Ok(in_memory_id.map(|native_id| NativeResumeCandidate {
+                native_id,
+                role_run_seq: None,
+            }));
+        };
+        let record = store
+            .get_workspace_session(&self.session.session_id)
+            .map_err(NativeResumeCandidateError::WorkspaceRecord)?;
+        let tombstoned = |native_id: &str| {
+            record.superseded_native_sessions.iter().any(|tombstone| {
+                tombstone.role == role
+                    && tombstone.provider == *provider
+                    && tombstone.native_session_id == native_id
             })
-            // r50(#3,claude r49 plan resume 现场):会话引用(内存+durable)
-            // 皆缺失时,以 gateway spawn 时点审计的最新 Author
-            // provider_start 兜底还原原生 resume——fresh 轮 spawn 即落盘,
-            // 不受会话引用记录丢失影响;修订 turn 因此携带 --resume 续接
-            // 原生会话(CLI resume 返回同 id),resume 格「原生恢复确认」
-            // 可达。仅 Author 面(Reviewer 会话不兜底,行为不变)。
-            .or_else(|| self.author_provider_start_audit_native_id(role, provider))
-    }
-
-    /// 审计兜底:按工作类型取 Author 面的 AdapterRole 审计标签
-    ///(Story/Design/WorkItem=orchestrator;WorkItemPlan=work_item_splitter),
-    /// 读 spawn 审计最新 provider_start 的原生 id。
-    fn author_provider_start_audit_native_id(
-        &self,
-        role: ProviderConversationRole,
-        provider: &ProviderName,
-    ) -> Option<String> {
-        if role != ProviderConversationRole::Author {
-            return None;
+        };
+        if let Some(native_id) =
+            in_memory_id.or_else(|| {
+                provider_conversation_session_id(&record.provider_conversations, &role, provider)
+            })
+        {
+            let is_tombstoned = tombstoned(&native_id);
+            return self.bind_native_run_identity(
+                &record,
+                native_id,
+                &role,
+                provider,
+                None,
+                is_tombstoned,
+            );
         }
-        let store = self.lifecycle_store.as_ref()?;
+        // 审计兜底仅 Author 面（Reviewer 会话引用缺失不兜底，行为不变）。
+        if role != ProviderConversationRole::Author {
+            return Ok(None);
+        }
         let audit_role = match self.session.workspace_type {
             crate::product::models::WorkspaceType::WorkItemPlan => "work_item_splitter",
             crate::product::models::WorkspaceType::Story
             | crate::product::models::WorkspaceType::Design
             | crate::product::models::WorkspaceType::WorkItem => "orchestrator",
         };
-        let provider_canonical = serde_json::to_value(provider)
-            .ok()
-            .and_then(|value| value.as_str().map(str::to_string))
-            .unwrap_or_default();
-        store
-            .latest_provider_start_native_id(
+        let provider_canonical =
+            serde_json::to_value(provider).map_err(|_| {
+                NativeResumeCandidateError::ProviderIdentityInvalid
+            })?;
+        let Some(provider_canonical) = provider_canonical
+            .as_str()
+            .map(str::to_string)
+            .filter(|canonical| !canonical.trim().is_empty())
+        else {
+            return Err(NativeResumeCandidateError::ProviderIdentityInvalid);
+        };
+        let superseded_native_ids: std::collections::BTreeSet<String> = record
+            .superseded_native_sessions
+            .iter()
+            .filter(|tombstone| tombstone.role == role && tombstone.provider == *provider)
+            .map(|tombstone| tombstone.native_session_id.clone())
+            .collect();
+        match store
+            .latest_provider_start_resume_candidate(
                 &self.session.session_id,
                 &provider_canonical,
                 audit_role,
+                &superseded_native_ids,
             )
-            .ok()
-            .flatten()
+            .map_err(NativeResumeCandidateError::ProviderAudit)?
+        {
+            crate::product::lifecycle_store::tool_policy_run_audit::ProviderStartCandidateLookup::Eligible(
+                audit_candidate,
+            ) => {
+                let native_id = audit_candidate.native_id.trim().to_string();
+                let is_tombstoned = tombstoned(&native_id);
+                self.bind_native_run_identity(
+                    &record,
+                    native_id,
+                    &role,
+                    provider,
+                    Some(audit_candidate.role_run_seq),
+                    is_tombstoned,
+                )
+            }
+            // 旧运行在但全部已吊销/终止——旧代不复活，也不能当出生 fresh：
+            // typed 等待（显式 fresh 面归 B1b/4.2 的 StartGeneration
+            // resume_recovery 入参）。
+            crate::product::lifecycle_store::tool_policy_run_audit::ProviderStartCandidateLookup::AllSuperseded => {
+                Err(NativeResumeCandidateError::FrozenBindingUnavailable)
+            }
+            // 不存在旧运行且事实读取确证为空 → 出生 Ok(None)。
+            crate::product::lifecycle_store::tool_policy_run_audit::ProviderStartCandidateLookup::NoMatch => {
+                Ok(None)
+            }
+        }
+    }
+
+    /// B1a（Task 4.1）：候选 native 与 durable fullmap/audit 的 run 身份
+    /// 联合绑定（`bind_native_run_identity` 内部 helper，错误类别见
+    /// `NativeResumeCandidateError`）。
+    fn bind_native_run_identity(
+        &self,
+        record: &crate::product::models::WorkspaceSessionRecord,
+        native_id: String,
+        role: &ProviderConversationRole,
+        provider: &ProviderName,
+        audit_seq: Option<u64>,
+        tombstoned: bool,
+    ) -> Result<Option<NativeResumeCandidate>, NativeResumeCandidateError> {
+        if tombstoned {
+            // durable tombstone 多代排除：吊销 ID 不复活（引用/审计在场
+            // 也不行），等待显式 fresh。
+            return Err(NativeResumeCandidateError::FrozenBindingUnavailable);
+        }
+        let map_records: Vec<&LogicalLaunchFingerprintRecord> = record
+            .logical_launch_fingerprints
+            .iter()
+            .filter(|entry| entry.role == *role && entry.provider == *provider)
+            .collect();
+        if self.logical_provider_gateway.is_some() && !map_records.is_empty() {
+            // LC 冻结绑定纪元：resume 候选必须与同 provider/role/native 的
+            // durable fullmap Active 绑定一致。
+            let Some(binding) = map_records
+                .iter()
+                .find(|entry| {
+                    entry.native_session_id.as_deref() == Some(native_id.as_str())
+                        && entry.state == LogicalLaunchFingerprintState::Active
+                })
+                .copied()
+            else {
+                return Err(NativeResumeCandidateError::FrozenBindingUnavailable);
+            };
+            if audit_seq.is_some_and(|seq| seq != binding.role_run_seq) {
+                return Err(NativeResumeCandidateError::ProviderIdentityInvalid);
+            }
+            return Ok(Some(NativeResumeCandidate {
+                native_id,
+                role_run_seq: Some(binding.role_run_seq),
+            }));
+        }
+        // fullmap 纪元之前的旧历史（或 direct）：无冻结绑定可判——维持既有
+        // 恢复行为；audit 绑定在场时携带其 role_run_seq（不伪造 seq）。
+        Ok(Some(NativeResumeCandidate {
+            native_id,
+            role_run_seq: audit_seq,
+        }))
     }
 
     pub(crate) async fn record_provider_session(
@@ -1254,7 +1425,14 @@ impl WorkspaceEngine {
         let role = ProviderConversationRole::Author;
         let provider = self.session.author_provider.clone();
         let superseded_native_session_id = self
-            .provider_resume_session_id(role.clone(), &provider)
+            .provider_resume_session_candidate(role.clone(), &provider)
+            .map_err(|error| {
+                format!(
+                    "resolve superseded native id for lc wait failed ({}): {error}",
+                    self.session.session_id
+                )
+            })?
+            .map(|candidate| candidate.native_id)
             .filter(|id| !id.trim().is_empty());
         let previous_fingerprint_digest = self
             .logical_launch_fingerprints

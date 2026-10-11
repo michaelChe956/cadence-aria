@@ -213,7 +213,8 @@ pub(crate) fn build_work_item_plan_compile_reredrive_prompt(
         {
             let sections =
                 crate::product::work_item_plan_compiler::grammar::STRUCTURED_SECTIONS.join("、");
-            let free = crate::product::work_item_plan_compiler::grammar::FREE_TEXT_SECTIONS.join("、");
+            let free =
+                crate::product::work_item_plan_compiler::grammar::FREE_TEXT_SECTIONS.join("、");
             prompt.push_str(&format!(
                 "\n结构化 section/key 白名单(结构化段只允许这些 key):\n- 结构化: {sections}\n- 自由文本: {free}\n\
                  动作:删除违例 section,或将其内容并入语义最近的合法 section 后重新输出完整 plan。\n"
@@ -333,8 +334,13 @@ impl WorkspaceEngine {
                 .map_err(|error| format!("working directory error: {error}"))?,
         };
         let provider = self.session.author_provider.clone();
-        let resume_provider_session_id =
-            self.provider_resume_session_id(ProviderConversationRole::Author, &provider);
+        // B1a（Task 4.1，BP2）：先传播 candidateErr（typed 类别保留），
+        // 只有成功候选才提取 native id——错误不参与「fresh 完整 prompt」
+        // 选择，不得折 None 降级。
+        let candidate = self
+            .provider_resume_session_candidate(ProviderConversationRole::Author, &provider)
+            .map_err(|error| error.to_string())?;
+        let resume_provider_session_id = candidate.map(|candidate| candidate.native_id);
 
         let mut prompt = match prompt_mode {
             AuthorPromptMode::FullConversation => self.build_prompt(user_content),
@@ -421,8 +427,13 @@ impl WorkspaceEngine {
         author_provider: ProviderName,
         contract_family: PlanAuthorOutputContract,
     ) -> Result<StreamingProviderInput, String> {
-        let resume_provider_session_id =
-            self.provider_resume_session_id(ProviderConversationRole::Author, &author_provider);
+        let resume_provider_session_id = self
+            .provider_resume_session_candidate(
+                ProviderConversationRole::Author,
+                &author_provider,
+            )
+            .map_err(|error| error.to_string())?
+            .map(|candidate| candidate.native_id);
         self.build_work_item_plan_streaming_input_with_session(
             provider_type,
             prompt,
@@ -1136,9 +1147,7 @@ mod reredrive_prompt_tests {
     /// section/key 白名单与具体动作(AI 不知道合法集就无法自纠)。
     #[test]
     fn compile_reredrive_prompt_lists_section_whitelist_for_unknown_key() {
-        let reasons = vec![
-            "unknown_structured_key:1:未知结构化 key `NotAPermission`".to_string(),
-        ];
+        let reasons = vec!["unknown_structured_key:1:未知结构化 key `NotAPermission`".to_string()];
         let prompt = build_work_item_plan_compile_reredrive_prompt(&reasons, &[]);
         assert!(prompt.contains("unknown_structured_key"));
         assert!(
@@ -1165,16 +1174,13 @@ mod reredrive_prompt_tests {
     /// 裸奔,重驱改编号/新增清单外编号震荡不收敛。
     #[test]
     fn compile_reredrive_prompt_carries_registered_ids_and_discipline() {
-        let reasons = vec![
-            "lowering_error:42:traceability 缺少 requirement_id。".to_string(),
-        ];
+        let reasons = vec!["lowering_error:42:traceability 缺少 requirement_id。".to_string()];
         let registered = vec![
             "REQ-ENV-01".to_string(),
             "NFR-PERF-02".to_string(),
             "AC-001".to_string(),
         ];
-        let prompt =
-            build_work_item_plan_compile_reredrive_prompt(&reasons, &registered);
+        let prompt = build_work_item_plan_compile_reredrive_prompt(&reasons, &registered);
         assert!(
             prompt.contains("[design_requirements] REQ-ENV-01、NFR-PERF-02、AC-001"),
             "真实登记清单(双源同集 REQ/NFR/AC)必须并入: {prompt}"

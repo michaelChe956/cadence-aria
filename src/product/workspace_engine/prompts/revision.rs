@@ -34,11 +34,16 @@ impl WorkspaceEngine {
             .map(|payload| payload.into_markdown().unwrap_or_default())
             .unwrap_or_default();
         let provider = self.session.author_provider.clone();
-        let resume_provider_session_id = if allow_resume {
-            self.provider_resume_session_id(ProviderConversationRole::Author, &provider)
+        // B1a（Task 4.1，BP2）：显式 fresh（allow_resume=false）从头不查旧
+        // candidate、ID=None；resume 臂先传播 candidateErr（typed 类别保留），
+        // 只有成功候选才提取 native id 与 delta/full 分流判据。
+        let candidate = if allow_resume {
+            self.provider_resume_session_candidate(ProviderConversationRole::Author, &provider)
+                .map_err(|error| error.to_string())?
         } else {
             None
         };
+        let resume_provider_session_id = candidate.map(|candidate| candidate.native_id);
         let review = self.latest_review_verdict.as_ref();
         let context = self.routing_reference_context();
         // spec-design-dialog-revision T4：author 反馈修订路径（pending_revision_context 存在且无 review

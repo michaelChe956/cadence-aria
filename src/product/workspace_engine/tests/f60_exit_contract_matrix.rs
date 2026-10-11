@@ -523,3 +523,81 @@ fn markdown_author_family_prompt_quality_budget() {
         );
     }
 }
+
+/// B1a（Task 4.1）：direct 面出生/恢复不变——typed candidate 迁移后，
+/// direct（无 gateway/无 store）出生 `ID=None` + FullConversation 完整装配；
+/// 既有 conversation 同 ID 续接 + DeltaOnly 一行短引用；seq 未知（None）
+/// 不得因 LC `Some(seq)` 合同拒 direct，输出合同分层选择原样。
+#[test]
+fn anchor_t11_direct_birth_and_resume_are_unchanged() {
+    // direct 出生：无 store、无旧引用。
+    let engine = exit_contract_engine("anchor_t11_direct_birth", WorkspaceType::Story);
+    assert!(
+        engine
+            .provider_resume_session_candidate(
+                ProviderConversationRole::Author,
+                &ProviderName::ClaudeCode
+            )
+            .expect("typed candidate read")
+            .is_none(),
+        "direct 出生：事实确证为空才是 Ok(None)"
+    );
+    let birth = engine
+        .build_streaming_input("开始生成", AuthorPromptMode::FullConversation)
+        .expect("direct birth streaming input");
+    assert!(birth.resume_provider_session_id.is_none());
+    assert_terminal_full_contract(&birth.prompt, &WorkspaceType::Story);
+
+    // direct 既有 conversation：同 ID 恢复，seq 未知可 None（无 LC fullmap
+    // 硬门、不伪造 seq），delta 短引用合同选择不变。
+    let mut engine = exit_contract_engine("anchor_t11_direct_resume", WorkspaceType::Story);
+    engine.session.provider_conversations = vec![recorded_author_conversation()];
+    let candidate = engine
+        .provider_resume_session_candidate(
+            ProviderConversationRole::Author,
+            &ProviderName::ClaudeCode,
+        )
+        .expect("direct resume candidate read")
+        .expect("existing direct conversation must stay resumable");
+    assert_eq!(candidate.native_id, "author-session-1");
+    assert_eq!(
+        candidate.role_run_seq, None,
+        "direct 既有 conversation seq 未知可 None，不因 LC seq 必填拒 direct"
+    );
+    let direct_resume = engine
+        .build_streaming_input("请继续输出完整候选产物", AuthorPromptMode::DeltaOnly)
+        .expect("direct resume streaming input");
+    assert_eq!(
+        direct_resume.resume_provider_session_id.as_deref(),
+        Some("author-session-1")
+    );
+    assert_terminal_delta_reference(&direct_resume.prompt, &WorkspaceType::Story);
+
+    // WorkItemPlan 面同合同：正常 resume builder 携带 id、显式 fresh builder
+    // 从头不查旧 candidate、ID=None。
+    let mut engine = exit_contract_engine("anchor_t11_direct_plan", WorkspaceType::WorkItemPlan);
+    engine.session.provider_conversations = vec![recorded_author_conversation()];
+    let plan_resume = engine
+        .build_work_item_plan_streaming_input(
+            ProviderType::Fake,
+            "plan prompt".to_string(),
+            "/tmp/worktree".to_string(),
+            ProviderName::ClaudeCode,
+            PlanAuthorOutputContract::MarkdownArtifact,
+        )
+        .expect("plan resume input");
+    assert_eq!(
+        plan_resume.resume_provider_session_id.as_deref(),
+        Some("author-session-1")
+    );
+    let plan_fresh = engine
+        .build_work_item_plan_streaming_input_fresh(
+            ProviderType::Fake,
+            "plan prompt".to_string(),
+            "/tmp/worktree".to_string(),
+            ProviderName::ClaudeCode,
+            PlanAuthorOutputContract::MarkdownArtifact,
+        )
+        .expect("plan fresh input");
+    assert_eq!(plan_fresh.resume_provider_session_id, None);
+}
