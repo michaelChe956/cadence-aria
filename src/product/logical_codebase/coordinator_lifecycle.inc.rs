@@ -238,12 +238,15 @@ impl AggregateInitializationCoordinator {
         // 保持原样（后续 aggregate_preflight 会 fail-closed 拦截无效根）。
         let canonical_root = std::fs::canonicalize(&input.provider_context_root)
             .unwrap_or_else(|_| input.provider_context_root.clone());
-        match trust.ensure_before_recipe(
+        match trust.ensure_ready(
             project_id,
             &operation_id,
             &lc_id,
             &canonical_root,
             providers,
+            // 五步 recipe 入口：以 Recipe 场景驱动中立 trust 门，失败
+            // 等待面的 retry_action 指向「重试初始化」。
+            crate::product::logical_codebase::provider_trust::ProviderTrustScenario::Recipe,
         ) {
             crate::product::logical_codebase::ProviderTrustPreparationResult::Ready { .. } => {}
             crate::product::logical_codebase::ProviderTrustPreparationResult::Waiting { waiting } => {

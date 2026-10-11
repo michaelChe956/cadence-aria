@@ -28,13 +28,14 @@ impl RouteTrustGate {
 }
 
 impl crate::product::logical_codebase::ProviderTrustPrecondition for RouteTrustGate {
-    fn ensure_before_recipe(
+    fn ensure_ready(
         &self,
         _project_id: &str,
         _operation_id: &str,
         _lc_id: &str,
         canonical_root: &std::path::Path,
         _providers: &[crate::product::models::ProviderName],
+        _scenario: crate::product::logical_codebase::provider_trust::ProviderTrustScenario,
     ) -> crate::product::logical_codebase::ProviderTrustPreparationResult {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
@@ -47,6 +48,9 @@ impl crate::product::logical_codebase::ProviderTrustPrecondition for RouteTrustG
                     message: "workspace trust entry is blocked for the route test".to_string(),
                     retry_action: "Resolve the blocked workspace trust entry, then retry \
                                        aggregate initialization."
+                        .to_string(),
+                    manual_guidance: "Resolve the workspace-trust entry for this root, \
+                                       then retry aggregate initialization."
                         .to_string(),
                     recorded_at: "2026-10-01T00:00:00Z".to_string(),
                 },
@@ -353,6 +357,13 @@ async fn production_root_initialization_trust_failure_keeps_recipe_unstarted() {
             .as_str()
             .unwrap_or_default()
             .is_empty()
+    );
+    assert!(
+        !body["details"]["manual_guidance"]
+            .as_str()
+            .unwrap_or_default()
+            .is_empty(),
+        "trust waiting must surface provider-specific manual guidance: {body}"
     );
 
     // 五步 operation 不创建：durable store 为空。

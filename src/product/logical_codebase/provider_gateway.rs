@@ -1744,7 +1744,7 @@ impl LogicalCodebaseProviderGateway {
         //     source 且 provider 需要用户级 workspace trust 时重验;同一
         //     source 供 GET/early 与 spawn 复验,绝不 ensure/revoke、不写
         //     durable audit。RootRecipe 相位的 trust 硬前置由
-        //     ensure_before_recipe 合同持有,不在此重复施加。
+        //     ensure_ready 合同持有,不在此重复施加。
         let provider_name = provider_name_for_dialect(envelope.provider_dialect);
         if let Some(trust) = &self.trust
             && crate::product::logical_codebase::provider_trust::requires_workspace_trust(

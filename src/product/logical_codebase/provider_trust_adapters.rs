@@ -41,6 +41,19 @@ pub enum ProviderTrustWriteOutcome {
     AlreadyTrusted,
 }
 
+/// adapter 窄只读工件描述（D4）：进入人工指导的 provider 特定部分——
+/// 实际工件路径、该根的稳定 trust key 与人工登记/修复的最小形状。
+/// 只描述位置与形状，不读取/返回完整配置内容或凭据。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderTrustArtifactHint {
+    /// 用户级 trust 工件的实际文件路径（adapter 装配的 home 之下）。
+    pub artifact_path: PathBuf,
+    /// 该 canonical root 的稳定 trust 键（Codex TOML 表头/Kimi 记录名）。
+    pub trust_key: String,
+    /// 人工登记/修复该键的最小形状描述（provider 特定）。
+    pub manual_shape: String,
+}
+
 /// 用户级 trust 工件 adapter。所有 home 副作用只发生在这里；registry 与
 /// store 永远不直接触碰用户 home 文件。
 pub trait ProviderTrustHomeAdapter: Send + Sync {
@@ -72,6 +85,10 @@ pub trait ProviderTrustHomeAdapter: Send + Sync {
     ) -> Result<(), ProviderTrustError>;
     /// Stable error code used when the key holds an untrusted value.
     fn conflict_code(&self) -> &'static str;
+    /// 窄只读人工指导（D4）：本 adapter 用户级 trust 工件的实际路径、该根
+    /// 的稳定 trust 键与人工修复的最小形状；key/转义与 adapter 自身算法
+    /// 同源，不手抄第二份。
+    fn manual_hint(&self, canonical_root: &Path) -> ProviderTrustArtifactHint;
 }
 
 /// Codex 用户级 projects trust：`~/.codex/config.toml` 中
@@ -248,6 +265,18 @@ impl ProviderTrustHomeAdapter for CodexTrustAdapter {
     fn conflict_code(&self) -> &'static str {
         "codex_trust_key_conflict"
     }
+
+    fn manual_hint(&self, canonical_root: &Path) -> ProviderTrustArtifactHint {
+        let trust_key = self.trust_key(canonical_root);
+        ProviderTrustArtifactHint {
+            artifact_path: self.config_path.clone(),
+            manual_shape: format!(
+                "在 {trust_key} 表内设置 trust_level = \"trusted\"\
+                 （保留文件内其余用户配置不动）"
+            ),
+            trust_key,
+        }
+    }
 }
 
 /// Kimi workspace-trust：`~/.kimi-code/workspace-trust/<key>` 记录
@@ -416,6 +445,19 @@ impl ProviderTrustHomeAdapter for KimiTrustAdapter {
 
     fn conflict_code(&self) -> &'static str {
         "kimi_trust_key_conflict"
+    }
+
+    fn manual_hint(&self, canonical_root: &Path) -> ProviderTrustArtifactHint {
+        let trust_key = self.trust_key(canonical_root);
+        let shape = serde_json::json!({
+            "root": root_string(canonical_root),
+            "trustedAt": "<毫秒时间戳>",
+        });
+        ProviderTrustArtifactHint {
+            artifact_path: self.record_path(canonical_root),
+            manual_shape: format!("记录 JSON 形如 {shape}"),
+            trust_key,
+        }
     }
 }
 
@@ -669,5 +711,38 @@ mod tests {
             format!("[projects.\"{}\"]", root.display())
         );
         assert!(kimi.trust_key(&root).starts_with("wd_lc_"));
+    }
+
+    /// Task 2.2：hint 的路径/key 与 adapter 同源（特殊根的 TOML 转义、
+    /// Kimi 实际记录文件与 serde 转义的 JSON 形状），不手抄第二份算法。
+    #[test]
+    fn adapter_manual_hints_carry_real_paths_keys_and_shapes() {
+        let home = TempDir::new().unwrap();
+        let special = home.path().join("lc\"root\\path");
+        std::fs::create_dir_all(&special).unwrap();
+        let codex = CodexTrustAdapter::for_home(home.path());
+        let hint = codex.manual_hint(&special);
+        assert_eq!(
+            hint.artifact_path,
+            home.path().join(".codex").join("config.toml")
+        );
+        assert_eq!(hint.trust_key, codex.trust_key(&special));
+        assert!(hint.trust_key.contains("\\\""), "quote must stay escaped");
+        assert!(
+            hint.trust_key.contains("\\\\"),
+            "backslash must stay escaped"
+        );
+        assert!(hint.manual_shape.contains("trust_level = \"trusted\""));
+
+        let kimi = KimiTrustAdapter::for_home(home.path());
+        let root = home.path().join("lc-root");
+        std::fs::create_dir_all(&root).unwrap();
+        let hint = kimi.manual_hint(&root);
+        assert_eq!(hint.artifact_path, kimi.record_path(&root));
+        assert_eq!(hint.trust_key, kimi.trust_key(&root));
+        assert!(hint
+            .manual_shape
+            .contains(&format!("\"root\":\"{}\"", root.display())));
+        assert!(hint.manual_shape.contains("\"trustedAt\""));
     }
 }

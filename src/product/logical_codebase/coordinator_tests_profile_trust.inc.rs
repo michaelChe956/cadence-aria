@@ -393,13 +393,14 @@
     }
 
     impl ProviderTrustPrecondition for SwitchableTrustGate {
-        fn ensure_before_recipe(
+        fn ensure_ready(
             &self,
             _project_id: &str,
             _operation_id: &str,
             _lc_id: &str,
             canonical_root: &Path,
             _providers: &[ProviderName],
+            _scenario: crate::product::logical_codebase::provider_trust::ProviderTrustScenario,
         ) -> ProviderTrustPreparationResult {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
@@ -413,6 +414,9 @@
                         retry_action:
                             "Resolve the blocked workspace trust entry, then retry aggregate initialization."
                                 .to_string(),
+                        manual_guidance: "Resolve the blocked workspace trust entry for \
+                                           this root, then retry aggregate initialization."
+                            .to_string(),
                         recorded_at: CREATED_AT.to_string(),
                     },
                 };

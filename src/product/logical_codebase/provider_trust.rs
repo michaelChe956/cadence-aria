@@ -22,7 +22,9 @@ use crate::product::logical_codebase::provider_trust_store::{
 use crate::product::models::ProviderName;
 
 /// trust 前置门的稳定错误：code 永不本地化；`retryable` 标记自动重试是否
-/// 可能改变结果（用户值冲突不会），`retry_action` 是等待面展示的产品动作。
+/// 可能改变结果（用户值冲突不会）。错误内的 `retry_action` 是未分场景的
+/// 默认动作；等待投影（`ensure_ready`/确认准备）按场景+失败分型覆写为
+/// 各自正确的显式动作。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{code}: {message}")]
 pub struct ProviderTrustError {
@@ -241,18 +243,190 @@ impl ProviderTrustSource for ReadonlyProviderTrustSource {
     }
 }
 
-/// 五步 recipe 的 trust 硬前置门：全部所选 trust Ready 才放行。
+/// trust 准备场景：场景信息进入 preparation/等待投影（D2），使 recipe、
+/// confirmation 的 retry_action 各自正确——同一失败在不同场景给出正确的
+/// 显式动作，确认不得伪装成 recipe 重试。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderTrustScenario {
+    /// 五步 root recipe 初始化：失败后显式「重试初始化」。
+    Recipe,
+    /// 会话确认（human gate 确认前的 trust 准备）：失败后显式
+    /// 「修复后重新确认」；确认门在修复前保持未关闭。
+    Confirmation,
+}
+
+impl ProviderTrustScenario {
+    /// 场景化 retry_action（等待面展示的产品动作）：失败分型参与分句，
+    /// fact store 失败指修 store、装配失败指修装配，不把一切失败都
+    /// 误导为用户 home 修复。
+    fn retry_action(self, kind: TrustFailureKind) -> String {
+        match kind {
+            TrustFailureKind::UserConflict => match self {
+                Self::Recipe => {
+                    "用户自行确认该 trust 键的取值后重试；系统不覆盖用户条目".to_string()
+                }
+                Self::Confirmation => {
+                    "用户自行核对该 trust 键的取值后重新确认；系统不覆盖用户条目".to_string()
+                }
+            },
+            TrustFailureKind::HomeArtifactRead | TrustFailureKind::HomeArtifactWrite => {
+                format!(
+                    "修复用户级 trust 配置的可写性/一致性后{}",
+                    self.explicit_action()
+                )
+            }
+            TrustFailureKind::FactStore => format!(
+                "修复服务端 trust fact store 的可写性/一致性后{}",
+                self.explicit_action()
+            ),
+            TrustFailureKind::NoAdapter => format!(
+                "修复服务端 provider trust 依赖装配后{}",
+                self.explicit_action()
+            ),
+            TrustFailureKind::InvalidRoot => {
+                format!("修正聚合根路径参数后{}", self.explicit_action())
+            }
+        }
+    }
+
+    /// 场景的显式动作后缀（recipe=重试初始化，confirmation=重新确认）。
+    fn explicit_action(self) -> &'static str {
+        match self {
+            Self::Recipe => "重试初始化",
+            Self::Confirmation => "重新确认",
+        }
+    }
+}
+
+/// trust 失败分型（D4）：人工指导与场景化 retry_action 的判据。分型不
+/// 折叠 reason_code——等待面仍携带原始稳定 code。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrustFailureKind {
+    /// 用户既有值冲突（不覆盖、不删除）。
+    UserConflict,
+    /// 用户级 home 工件读取/解析失败（权限/格式）。
+    HomeArtifactRead,
+    /// 用户级 home 工件写入/并发失败（可写性/CAS 漂移/摘要漂移）。
+    HomeArtifactWrite,
+    /// 服务端 durable trust fact store IO 失败。
+    FactStore,
+    /// 未装配该 provider 的 trust adapter（服务端装配问题）。
+    NoAdapter,
+    /// canonical root 参数无效。
+    InvalidRoot,
+}
+
+/// 按（稳定 code，retryable）分型；未知 code 落回按 retryable 的保守
+/// 归类——不可自动重试视为用户冲突，其余瞬态视为 home 工件侧。
+fn trust_failure_kind(error: &ProviderTrustError) -> TrustFailureKind {
+    match error.code {
+        "trust_store_io" => TrustFailureKind::FactStore,
+        "unsupported_trust_provider" => TrustFailureKind::NoAdapter,
+        "invalid_canonical_root" => TrustFailureKind::InvalidRoot,
+        "codex_config_unreadable" | "kimi_trust_record_invalid" | "kimi_trust_unreadable" => {
+            TrustFailureKind::HomeArtifactRead
+        }
+        _ if !error.retryable => TrustFailureKind::UserConflict,
+        _ => TrustFailureKind::HomeArtifactWrite,
+    }
+}
+
+/// 同源人工指导生成器（D4/D5）：确认等待与 generation 只读指导投影共用。
+/// 由 adapter 窄只读 hint、失败分型与场景显式动作组成可读中文指导：
+/// provider 特定工件只描述实际路径/键形与最小修复形状，不读取/返回完整
+/// 配置内容或凭据；fact IO 指导修 store、无 adapter 只给装配修复。
+pub(crate) fn provider_trust_manual_guidance(
+    adapters: &[Arc<dyn ProviderTrustHomeAdapter>],
+    provider: &ProviderName,
+    canonical_root: &Path,
+    error: &ProviderTrustError,
+    scenario: ProviderTrustScenario,
+) -> String {
+    let kind = trust_failure_kind(error);
+    let provider_label = provider_wire_label(provider);
+    let retry_action = scenario.retry_action(kind);
+    let disposition = match kind {
+        TrustFailureKind::UserConflict => format!(
+            "该 trust 键已有用户既有值（reason_code={}）：系统不覆盖、不删除用户条目。\
+             请人工核对该键当前取值后自行决定保留或修正（不要直接改成 trusted 了事），\
+             然后{retry_action}。",
+            error.code
+        ),
+        TrustFailureKind::HomeArtifactRead => format!(
+            "用户级 trust 工件读取/解析失败（reason_code={}）：请先备份再修复该工件的\
+             读取权限或格式，然后{retry_action}。",
+            error.code
+        ),
+        TrustFailureKind::HomeArtifactWrite => format!(
+            "用户级 trust 工件写入失败（reason_code={}）：请检查工件及其父目录的\
+             可写性/一致性（并发修改可直接重试），然后{retry_action}。",
+            error.code
+        ),
+        TrustFailureKind::FactStore => format!(
+            "服务端 durable trust fact store 读写失败（reason_code={}）：这是服务端\
+             登记事实存储的 IO 问题，不是用户级 trust 配置问题；请修复服务端 \
+             trust fact store 的可写性/一致性后{retry_action}。",
+            error.code
+        ),
+        TrustFailureKind::NoAdapter => format!(
+            "未装配 {provider_label} 的 trust adapter（reason_code={}）：这是服务端 \
+             provider trust 依赖装配问题，用户侧无需改动 home 配置；请修复服务端\
+             装配后{retry_action}。",
+            error.code
+        ),
+        TrustFailureKind::InvalidRoot => format!(
+            "聚合根路径参数无效（reason_code={}）：{}。请修正后{retry_action}。",
+            error.code, error.message
+        ),
+    };
+    let artifact_line = match kind {
+        TrustFailureKind::UserConflict
+        | TrustFailureKind::HomeArtifactRead
+        | TrustFailureKind::HomeArtifactWrite => adapters
+            .iter()
+            .find(|adapter| adapter.provider() == *provider)
+            .map(|adapter| {
+                let hint = adapter.manual_hint(canonical_root);
+                format!(
+                    "{provider_label} 的用户级 trust 工件：{}；本根的 trust 键：{}。\
+                     人工形状：{}。",
+                    hint.artifact_path.display(),
+                    hint.trust_key,
+                    hint.manual_shape,
+                )
+            }),
+        // fact store/装配/根参数问题不给 home 工件指引，避免误导修复目标。
+        TrustFailureKind::FactStore
+        | TrustFailureKind::NoAdapter
+        | TrustFailureKind::InvalidRoot => None,
+    };
+    let mut guidance = disposition;
+    if let Some(line) = artifact_line {
+        guidance.push_str(&line);
+    }
+    if scenario == ProviderTrustScenario::Confirmation {
+        guidance.push_str("修复前确认门保持未关闭；完成修复后请显式重新发起确认。");
+    }
+    guidance
+}
+
+/// trust 硬前置门（场景中立）：全部所选 trust Ready 才放行调用方的后续
+/// 动作（五步 recipe 的创建/启动、会话确认准备等）。
 pub trait ProviderTrustPrecondition: Send + Sync {
     /// `providers` 中需要 workspace trust 的项（Codex/KimiCode）逐一登记；
-    /// 任一失败返回可重试 Waiting（durable waiting fact + 审计），五步
-    /// operation 不得创建/启动。全部 Ready（或无需 trust）才返回 Ready。
-    fn ensure_before_recipe(
+    /// 任一失败返回可重试 Waiting（durable waiting fact + 审计），调用方
+    /// 不得创建/启动后续动作。全部 Ready（或无需 trust）才返回 Ready。
+    ///
+    /// `scenario` 是准备场景（recipe/confirmation）：进入等待投影的
+    /// retry_action 与人工指导，使各场景的显式动作各自正确。
+    fn ensure_ready(
         &self,
         project_id: &str,
         operation_id: &str,
         lc_id: &str,
         canonical_root: &Path,
         providers: &[ProviderName],
+        scenario: ProviderTrustScenario,
     ) -> ProviderTrustPreparationResult;
 }
 
@@ -352,6 +526,10 @@ pub struct ProviderTrustWaiting {
     pub reason_code: String,
     pub message: String,
     pub retry_action: String,
+    /// 场景化人工指导（D4）：provider 特定工件路径/键形与失败分型处置，
+    /// 由 adapter 窄只读能力生成；不含完整配置内容或凭据。确认等待与
+    /// generation 只读指导投影共用同一生成器。
+    pub manual_guidance: String,
     pub recorded_at: String,
 }
 
@@ -814,13 +992,14 @@ impl ProviderTrustRegistry for HomeBackedProviderTrustRegistry {
 }
 
 impl ProviderTrustPrecondition for HomeBackedProviderTrustRegistry {
-    fn ensure_before_recipe(
+    fn ensure_ready(
         &self,
         project_id: &str,
         operation_id: &str,
         lc_id: &str,
         canonical_root: &Path,
         providers: &[ProviderName],
+        scenario: ProviderTrustScenario,
     ) -> ProviderTrustPreparationResult {
         let mut selected: Vec<ProviderName> = Vec::new();
         for provider in providers {
@@ -838,6 +1017,19 @@ impl ProviderTrustPrecondition for HomeBackedProviderTrustRegistry {
                         .adapter_for(&provider)
                         .map(|adapter| adapter.trust_key(canonical_root))
                         .unwrap_or_default();
+                    // 场景化 retry_action + 同源人工指导：同一失败在
+                    // recipe/confirmation 场景给出各自的显式动作；durable
+                    // waiting fact 与返回面同源（reason_code/message 原样
+                    // 保留，不折叠）。
+                    let kind = trust_failure_kind(&error);
+                    let retry_action = scenario.retry_action(kind);
+                    let manual_guidance = provider_trust_manual_guidance(
+                        &self.adapters,
+                        &provider,
+                        canonical_root,
+                        &error,
+                        scenario,
+                    );
                     let recorded_at = trust_now();
                     // durable waiting fact + 审计：失败也必须可关联、可重试。
                     // 落盘失败不吞掉 gate 判定——仍返回 Waiting（fail-closed）。
@@ -852,7 +1044,7 @@ impl ProviderTrustPrecondition for HomeBackedProviderTrustRegistry {
                             operation_id: non_empty(operation_id),
                             reason_code: error.code.to_string(),
                             message: error.message.clone(),
-                            retry_action: error.retry_action.clone(),
+                            retry_action: retry_action.clone(),
                             recorded_at: recorded_at.clone(),
                         },
                     );
@@ -876,7 +1068,8 @@ impl ProviderTrustPrecondition for HomeBackedProviderTrustRegistry {
                             trust_key,
                             reason_code: error.code.to_string(),
                             message: error.message,
-                            retry_action: error.retry_action,
+                            retry_action,
+                            manual_guidance,
                             recorded_at,
                         },
                     };
@@ -905,6 +1098,7 @@ mod tests {
     use super::{
         HomeBackedProviderTrustRegistry, ProviderTrustAction, ProviderTrustPrecondition,
         ProviderTrustPreparationResult, ProviderTrustRegistry, ProviderTrustRevocationOutcome,
+        ProviderTrustScenario,
     };
 
     const PROJECT: &str = "project_0001";
@@ -965,12 +1159,13 @@ mod tests {
         let fixture = TrustFixture::new();
         let providers = [ProviderName::Codex, ProviderName::KimiCode];
 
-        let first = fixture.registry.ensure_before_recipe(
+        let first = fixture.registry.ensure_ready(
             PROJECT,
             OPERATION,
             LC,
             &fixture.root,
             &providers,
+            ProviderTrustScenario::Recipe,
         );
         let ProviderTrustPreparationResult::Ready { registrations } = first else {
             panic!("expected the trust gate to become ready");
@@ -999,12 +1194,13 @@ mod tests {
         assert!(kimi["trustedAt"].as_u64().unwrap() > 0);
 
         // 重复 ensure 幂等：home 文件字节不变、块不重复、无重写。
-        let second = fixture.registry.ensure_before_recipe(
+        let second = fixture.registry.ensure_ready(
             PROJECT,
             OPERATION,
             LC,
             &fixture.root,
             &providers,
+            ProviderTrustScenario::Recipe,
         );
         let ProviderTrustPreparationResult::Ready { registrations } = second else {
             panic!("expected the replayed trust gate to stay ready");
@@ -1044,12 +1240,13 @@ mod tests {
         std::fs::write(fixture.kimi_trust_dir(), b"not-a-directory").unwrap();
 
         let providers = [ProviderName::Codex, ProviderName::KimiCode];
-        let outcome = fixture.registry.ensure_before_recipe(
+        let outcome = fixture.registry.ensure_ready(
             PROJECT,
             OPERATION,
             LC,
             &fixture.root,
             &providers,
+            ProviderTrustScenario::Recipe,
         );
         let ProviderTrustPreparationResult::Waiting { waiting } = outcome else {
             panic!("expected the trust gate to enter fail-closed waiting");
@@ -1078,12 +1275,13 @@ mod tests {
 
         // 可重试：移除阻断后重试转 Ready，并清空 waiting fact。
         std::fs::remove_file(fixture.kimi_trust_dir()).unwrap();
-        let retried = fixture.registry.ensure_before_recipe(
+        let retried = fixture.registry.ensure_ready(
             PROJECT,
             OPERATION,
             LC,
             &fixture.root,
             &providers,
+            ProviderTrustScenario::Recipe,
         );
         assert!(matches!(
             retried,
@@ -1119,12 +1317,13 @@ mod tests {
 
         let providers = [ProviderName::Codex, ProviderName::KimiCode];
         assert!(matches!(
-            fixture.registry.ensure_before_recipe(
+            fixture.registry.ensure_ready(
                 PROJECT,
                 OPERATION,
                 LC,
                 &fixture.root,
-                &providers
+                &providers,
+                ProviderTrustScenario::Recipe,
             ),
             ProviderTrustPreparationResult::Ready { .. }
         ));
@@ -1159,12 +1358,13 @@ mod tests {
         .unwrap();
         let user_pre_trusted = std::fs::read_to_string(fixture.codex_config()).unwrap();
         assert!(matches!(
-            fixture.registry.ensure_before_recipe(
+            fixture.registry.ensure_ready(
                 PROJECT,
                 OPERATION,
                 LC,
                 &fixture.root,
-                &[ProviderName::Codex]
+                &[ProviderName::Codex],
+                ProviderTrustScenario::Recipe,
             ),
             ProviderTrustPreparationResult::Ready { .. }
         ));
@@ -1188,12 +1388,13 @@ mod tests {
         let fixture = TrustFixture::new();
         let providers = [ProviderName::Codex, ProviderName::KimiCode];
         assert!(matches!(
-            fixture.registry.ensure_before_recipe(
+            fixture.registry.ensure_ready(
                 PROJECT,
                 OPERATION,
                 LC,
                 &fixture.root,
-                &providers
+                &providers,
+                ProviderTrustScenario::Recipe,
             ),
             ProviderTrustPreparationResult::Ready { .. }
         ));
@@ -1245,6 +1446,348 @@ mod tests {
         }
     }
 
+    /// Task 2.1：确认场景的 retry_action 必须是「…重新确认」而不是
+    /// recipe 专属的「重试初始化」；recipe 场景对照保持原文案，
+    /// reason_code 不因场景折叠。
+    #[test]
+    fn provider_trust_confirmation_scenario_directs_explicit_reconfirmation() {
+        let fixture = TrustFixture::new();
+        std::fs::create_dir_all(fixture.kimi_trust_dir().parent().unwrap()).unwrap();
+        std::fs::write(fixture.kimi_trust_dir(), b"not-a-directory").unwrap();
+        let providers = [ProviderName::KimiCode];
+        let waiting_for = |scenario| {
+            match fixture.registry.ensure_ready(
+                PROJECT,
+                OPERATION,
+                LC,
+                &fixture.root,
+                &providers,
+                scenario,
+            ) {
+                ProviderTrustPreparationResult::Waiting { waiting } => waiting,
+                other => panic!("expected fail-closed waiting, got {other:?}"),
+            }
+        };
+
+        let confirmation = waiting_for(ProviderTrustScenario::Confirmation);
+        assert!(
+            confirmation.retry_action.contains("重新确认"),
+            "confirmation waiting must direct an explicit re-confirm: {}",
+            confirmation.retry_action
+        );
+        assert!(!confirmation.retry_action.contains("重试初始化"));
+        assert!(confirmation.reason_code.starts_with("kimi_"));
+
+        let recipe = waiting_for(ProviderTrustScenario::Recipe);
+        assert!(recipe.retry_action.contains("重试初始化"));
+        assert!(!recipe.retry_action.contains("重新确认"));
+        assert_eq!(recipe.reason_code, confirmation.reason_code);
+    }
+
+    /// Task 2.1：Claude-only recipe 零登记行为不变——无需 workspace trust
+    /// 的 provider 不触碰 home 工件，也不产生 waiting/audit 事实。
+    #[test]
+    fn provider_trust_claude_only_recipe_stays_zero_registration() {
+        let fixture = TrustFixture::new();
+        let outcome = fixture.registry.ensure_ready(
+            PROJECT,
+            OPERATION,
+            LC,
+            &fixture.root,
+            &[ProviderName::ClaudeCode],
+            ProviderTrustScenario::Recipe,
+        );
+        let ProviderTrustPreparationResult::Ready { registrations } = outcome else {
+            panic!("claude-only recipe must stay ready without trust registration");
+        };
+        assert!(registrations.is_empty());
+        assert!(!fixture.codex_config().exists());
+        assert!(!fixture.kimi_trust_dir().exists());
+        assert!(fixture.store().list_waiting(PROJECT).unwrap().is_empty());
+        assert!(fixture.store().list_audit(PROJECT).unwrap().is_empty());
+    }
+
+    /// Task 2.1：中立化不改过滤/去重算法——重复与无需 trust 的 provider
+    /// 只登记一次有效项。
+    #[test]
+    fn provider_trust_selected_providers_are_filtered_and_deduplicated() {
+        let fixture = TrustFixture::new();
+        let providers = [
+            ProviderName::Codex,
+            ProviderName::ClaudeCode,
+            ProviderName::Codex,
+        ];
+        let ProviderTrustPreparationResult::Ready { registrations } = fixture
+            .registry
+            .ensure_ready(
+                PROJECT,
+                OPERATION,
+                LC,
+                &fixture.root,
+                &providers,
+                ProviderTrustScenario::Recipe,
+            )
+        else {
+ panic!("expected ready");
+        };
+        assert_eq!(registrations.len(), 1);
+        assert_eq!(registrations[0].provider, ProviderName::Codex);
+    }
+
+
+    /// Task 2.2：Codex 指导的键来自 adapter 自己的 trust_key（同源 TOML
+    /// 转义）；根含引号/反斜杠时不给未转义原文当键，冲突不引导一键覆盖。
+    #[test]
+    fn provider_trust_codex_guidance_uses_adapter_escaped_key_for_special_roots() {
+        let fixture = TrustFixture::new();
+        let special = fixture.home().join("lc\"root\\path");
+        std::fs::create_dir_all(&special).unwrap();
+        std::fs::create_dir_all(fixture.codex_config().parent().unwrap()).unwrap();
+        let adapter = CodexTrustAdapter::for_home(fixture.home());
+        let escaped_header = adapter.trust_key(&special);
+        let naive_header = format!("[projects.\"{}\"]", special.display());
+        assert_ne!(
+            escaped_header, naive_header,
+            "special root must exercise TOML escaping"
+        );
+        std::fs::write(
+            fixture.codex_config(),
+            format!("{escaped_header}\ntrust_level = \"untrusted\"\n"),
+        )
+        .unwrap();
+
+        let outcome = fixture.registry.ensure_ready(
+            PROJECT,
+            OPERATION,
+            LC,
+            &special,
+            &[ProviderName::Codex],
+            ProviderTrustScenario::Confirmation,
+        );
+        let ProviderTrustPreparationResult::Waiting { waiting } = outcome else {
+            panic!("expected conflict waiting for the special root");
+        };
+        assert_eq!(waiting.reason_code, "codex_trust_key_conflict");
+        assert!(waiting.retry_action.contains("重新确认"));
+        assert!(
+            waiting.manual_guidance.contains(&escaped_header),
+            "guidance must carry the adapter-escaped key: {}",
+            waiting.manual_guidance
+        );
+        assert!(
+            waiting.manual_guidance.contains("不覆盖"),
+            "conflict guidance must not read as a one-click overwrite: {}",
+            waiting.manual_guidance
+        );
+        assert!(
+            !waiting.manual_guidance.contains(&naive_header),
+            "guidance must not present the unescaped root as a TOML key"
+        );
+    }
+
+    /// Task 2.2：Kimi 指导携带实际 key、实际记录路径与记录 JSON 形状
+    /// （serde 同源转义，不手抄 key/JSON 算法）。
+    #[test]
+    fn provider_trust_kimi_guidance_carries_actual_key_path_and_json_shape() {
+        let fixture = TrustFixture::new();
+        let adapter = KimiTrustAdapter::for_home(fixture.home());
+        let record_path = adapter.record_path(&fixture.root);
+        std::fs::create_dir_all(record_path.parent().unwrap()).unwrap();
+        std::fs::write(&record_path, "not-json").unwrap();
+
+        let outcome = fixture.registry.ensure_ready(
+            PROJECT,
+            OPERATION,
+            LC,
+            &fixture.root,
+            &[ProviderName::KimiCode],
+            ProviderTrustScenario::Confirmation,
+        );
+        let ProviderTrustPreparationResult::Waiting { waiting } = outcome else {
+            panic!("expected format-failure waiting");
+        };
+        assert_eq!(waiting.reason_code, "kimi_trust_record_invalid");
+        let key = adapter.trust_key(&fixture.root);
+        assert!(
+            waiting.manual_guidance.contains(&key),
+            "guidance must carry the actual trust key {key}: {}",
+            waiting.manual_guidance
+        );
+        assert!(waiting
+            .manual_guidance
+            .contains(&record_path.display().to_string()));
+        assert!(waiting.manual_guidance.contains("\"root\""));
+        assert!(waiting.manual_guidance.contains("\"trustedAt\""));
+        assert!(waiting
+            .manual_guidance
+            .contains(&fixture.root.display().to_string()));
+    }
+
+    /// Task 2.2：home 写失败与 fact IO 失败必须分型——前者指导用户级
+    /// 工件修复，后者指明修服务端 trust fact store，互不误导。
+    #[test]
+    fn provider_trust_waiting_separates_home_write_from_fact_store_failures() {
+        // home 写失败：workspace-trust 目录只读（非 root 下 chmod 必生效）。
+        let fixture = TrustFixture::new();
+        let kimi_dir = fixture.kimi_trust_dir();
+        std::fs::create_dir_all(&kimi_dir).unwrap();
+        let original = std::fs::metadata(&kimi_dir).unwrap().permissions();
+        let mut readonly = original.clone();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut readonly, 0o500);
+        std::fs::set_permissions(&kimi_dir, readonly).unwrap();
+        let home_outcome = fixture.registry.ensure_ready(
+            PROJECT,
+            OPERATION,
+            LC,
+            &fixture.root,
+            &[ProviderName::KimiCode],
+            ProviderTrustScenario::Confirmation,
+        );
+        std::fs::set_permissions(&kimi_dir, original).unwrap();
+        match home_outcome {
+            ProviderTrustPreparationResult::Waiting { waiting } => {
+                assert!(waiting.reason_code.starts_with("kimi_"));
+                assert!(
+                    waiting.retry_action.contains("用户级 trust 配置"),
+                    "home failure retry action must target the user-level artifact: {}",
+                    waiting.retry_action
+                );
+                assert!(waiting.manual_guidance.contains("workspace-trust"));
+                assert!(
+                    !waiting.manual_guidance.contains("fact store"),
+                    "home failure must not be redirected at the server-side store: {}",
+                    waiting.manual_guidance
+                );
+            }
+            ProviderTrustPreparationResult::Ready { .. } => {
+                assert_eq!(
+                    unsafe { libc::geteuid() },
+                    0,
+                    "write-failure injection relies on chmod biting (requires non-root)"
+                );
+            }
+        }
+
+        // fact IO 失败：aria 根被普通文件占用 → durable store 读写失败，
+        // 指导与服务面动作都指向 trust fact store，不给 home 工件指引。
+        let home = tempfile::TempDir::new().unwrap();
+        let aria = tempfile::TempDir::new().unwrap();
+        let root = home.path().join("lc-root");
+        std::fs::create_dir_all(&root).unwrap();
+        let aria_as_file = aria.path().join("aria-is-a-file");
+        std::fs::write(&aria_as_file, b"not-a-dir").unwrap();
+        let registry = HomeBackedProviderTrustRegistry::new(
+            crate::product::app_paths::ProductAppPaths::new(aria_as_file.clone()),
+            vec![Arc::new(KimiTrustAdapter::for_home(home.path()))],
+        );
+        let outcome = registry.ensure_ready(
+            PROJECT,
+            OPERATION,
+            LC,
+            &root,
+            &[ProviderName::KimiCode],
+            ProviderTrustScenario::Confirmation,
+        );
+        let ProviderTrustPreparationResult::Waiting { waiting } = outcome else {
+            panic!("expected fact-store failure waiting");
+        };
+        assert_eq!(waiting.reason_code, "trust_store_io");
+        assert!(
+            waiting.retry_action.contains("trust fact store"),
+            "fact IO retry action must target the store: {}",
+            waiting.retry_action
+        );
+        assert!(
+            !waiting.retry_action.contains("用户级 trust 配置"),
+            "fact IO must not masquerade as a user-home fix"
+        );
+        assert!(waiting.manual_guidance.contains("trust fact store"));
+        assert!(
+            !waiting.manual_guidance.contains("workspace-trust"),
+            "fact IO guidance must not send the user at the home artifact: {}",
+            waiting.manual_guidance
+        );
+    }
+
+    /// Task 2.2：无 adapter 只给装配修复——不伪造 home 工件指引，场景
+    /// retry_action 不因分型折叠。
+    #[test]
+    fn provider_trust_missing_adapter_guidance_targets_server_assembly() {
+        let home = tempfile::TempDir::new().unwrap();
+        let aria = tempfile::TempDir::new().unwrap();
+        let root = home.path().join("lc-root");
+        std::fs::create_dir_all(&root).unwrap();
+        let registry = HomeBackedProviderTrustRegistry::new(
+            crate::product::app_paths::ProductAppPaths::new(aria.path().to_path_buf()),
+            // 只装配 Kimi adapter：Codex 无 adapter。
+            vec![Arc::new(KimiTrustAdapter::for_home(home.path()))],
+        );
+        let confirmation = match registry.ensure_ready(
+            PROJECT,
+            OPERATION,
+            LC,
+            &root,
+            &[ProviderName::Codex],
+            ProviderTrustScenario::Confirmation,
+        ) {
+            ProviderTrustPreparationResult::Waiting { waiting } => waiting,
+            other => panic!("expected no-adapter waiting, got {other:?}"),
+        };
+        assert_eq!(confirmation.reason_code, "unsupported_trust_provider");
+        assert!(
+            confirmation.manual_guidance.contains("装配"),
+            "no-adapter guidance must target assembly: {}",
+            confirmation.manual_guidance
+        );
+        assert!(
+            !confirmation.manual_guidance.contains(".codex"),
+            "no adapter must not fabricate home-artifact guidance"
+        );
+        assert!(confirmation.retry_action.contains("重新确认"));
+
+        let recipe = match registry.ensure_ready(
+            PROJECT,
+            OPERATION,
+            LC,
+            &root,
+            &[ProviderName::Codex],
+            ProviderTrustScenario::Recipe,
+        ) {
+            ProviderTrustPreparationResult::Waiting { waiting } => waiting,
+            other => panic!("expected no-adapter waiting, got {other:?}"),
+        };
+        assert_eq!(recipe.reason_code, "unsupported_trust_provider");
+        assert!(recipe.retry_action.contains("重试初始化"));
+    }
+
+    /// Task 2.2：Codex 读取失败（权限/格式类）指导含实际 config 路径与
+    /// 「先备份再修复」。
+    #[test]
+    fn provider_trust_codex_read_failure_guidance_mentions_backup_and_path() {
+        let fixture = TrustFixture::new();
+        // config.toml 被目录占用：读取结构性失败（权限/格式类分型）。
+        std::fs::create_dir_all(fixture.codex_config()).unwrap();
+        let outcome = fixture.registry.ensure_ready(
+            PROJECT,
+            OPERATION,
+            LC,
+            &fixture.root,
+            &[ProviderName::Codex],
+            ProviderTrustScenario::Confirmation,
+        );
+        let ProviderTrustPreparationResult::Waiting { waiting } = outcome else {
+            panic!("expected read-failure waiting");
+        };
+        assert_eq!(waiting.reason_code, "codex_config_unreadable");
+        assert!(waiting
+            .manual_guidance
+            .contains(&fixture.codex_config().display().to_string()));
+        assert!(
+            waiting.manual_guidance.contains("备份"),
+            "read/format guidance must advise backing up first: {}",
+            waiting.manual_guidance
+        );
+    }
     fn sha256_hex_12(value: &str) -> String {
         use sha2::{Digest, Sha256};
         let digest = Sha256::digest(value.as_bytes());

@@ -63,8 +63,8 @@ use cadence_aria::product::logical_codebase::provider_gateway::{
     SessionLaunchRequest,
 };
 use cadence_aria::product::logical_codebase::provider_trust::{
-    HomeBackedProviderTrustRegistry, ProviderTrustPrecondition, ProviderTrustSource,
-    ReadonlyProviderTrustSource, requires_workspace_trust,
+    HomeBackedProviderTrustRegistry, ProviderTrustPrecondition, ProviderTrustScenario,
+    ProviderTrustSource, ReadonlyProviderTrustSource, requires_workspace_trust,
 };
 use cadence_aria::product::logical_codebase::provider_trust_adapters::{
     CodexTrustAdapter, KimiTrustAdapter,
@@ -3999,12 +3999,13 @@ impl MatrixEnvironment {
             ],
         );
         let operation_id = format!("lcg-matrix-trust-{}", self.lc_id);
-        match registry.ensure_before_recipe(
+        match registry.ensure_ready(
             PROJECT_ID,
             &operation_id,
             &self.lc_id,
             &canonical_root,
             selected_trust_targets(&self.provider),
+            ProviderTrustScenario::Recipe,
         ) {
             cadence_aria::product::logical_codebase::ProviderTrustPreparationResult::Ready {
                 registrations,
@@ -9537,7 +9538,7 @@ mod snapshot_cli_version_drift_tests {
 }
 
 /// F4(r58 深掏审计)前提钉子:HOME trust 工件被清理(容器重建/换机/
-/// HOME 清理)后幂等重调 ensure_before_recipe 必须重登成功——resume 轮
+/// HOME 清理)后幂等重调 ensure_ready 必须重登成功——resume 轮
 /// build_from_snapshot 已与 build() 同源重登(工件在场=Replay 幂等,
 /// 缺工件=重新登记),本测试钉死「缺工件→重登成功」臂。
 /// MaxParallel3 改钉:登记口径与 harness 同为 selected-only——每家
@@ -9567,12 +9568,13 @@ mod snapshot_resume_trust_tests {
         let registry = selected_registry(home.path(), aria.path());
         let ensure = |selected: &ProviderName| {
             matches!(
-                registry.ensure_before_recipe(
+                registry.ensure_ready(
                     PROJECT_ID,
                     "lcg-matrix-trust-resume",
                     "logical_codebase_resume",
                     &canonical_root,
                     selected_trust_targets(selected),
+                    ProviderTrustScenario::Recipe,
                 ),
                 cadence_aria::product::logical_codebase::ProviderTrustPreparationResult::Ready { .. }
             )
@@ -9628,12 +9630,13 @@ mod harness_trust_selection_tests {
             ],
         );
         matches!(
-            registry.ensure_before_recipe(
+            registry.ensure_ready(
                 PROJECT_ID,
                 "lcg-matrix-trust-selected",
                 lc_id,
                 canonical_root,
                 selected_trust_targets(selected),
+                ProviderTrustScenario::Recipe,
             ),
             cadence_aria::product::logical_codebase::ProviderTrustPreparationResult::Ready { .. }
         )

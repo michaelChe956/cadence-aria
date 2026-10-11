@@ -377,6 +377,7 @@ fn aggregate_initialization_api_error(error: AggregateInitializationError) -> Ap
                 ),
                 "reason_code": waiting.reason_code,
                 "retry_action": waiting.retry_action,
+                "manual_guidance": waiting.manual_guidance,
                 "trust_key": waiting.trust_key,
                 "canonical_root": waiting.canonical_root.to_string_lossy(),
                 "retryable": true,
@@ -414,7 +415,7 @@ fn ensure_recipe_trust_ready(
     };
     let canonical_root = std::fs::canonicalize(provider_context_root)
         .unwrap_or_else(|_| provider_context_root.to_path_buf());
-    match trust.ensure_before_recipe(
+    match trust.ensure_ready(
         project_id,
         operation_id,
         logical_codebase_id,
@@ -422,6 +423,8 @@ fn ensure_recipe_trust_ready(
         // 五步 recipe 固定 Claude Code；`requires_workspace_trust` 过滤后
         // 仅 Codex/Kimi 进入登记（多 provider 入口由 Phase 2/3 扩展）。
         &[crate::product::models::ProviderName::ClaudeCode],
+        // route 面是五步 recipe 入口：以 Recipe 场景驱动中立 trust 门。
+        crate::product::logical_codebase::provider_trust::ProviderTrustScenario::Recipe,
     ) {
         ProviderTrustPreparationResult::Ready { .. } => Ok(()),
         ProviderTrustPreparationResult::Waiting { waiting } => Err(
