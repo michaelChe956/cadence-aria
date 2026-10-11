@@ -10,6 +10,7 @@ use crate::product::logical_codebase::{
     LogicalCodebaseProviderGateway, PolicyTarget, ProviderGatewayError, ProviderRef,
     SessionLaunchRequest, SessionPolicyAction, ValidatedSessionLaunchPolicy,
 };
+use crate::product::models::{LcRecoveryBusinessContext, LcRecoveryRunContext};
 use crate::product::workspace_engine::provider_drive::{
     PROVIDER_CHOICE_WAIT_TIMEOUT, PROVIDER_IDLE_WATCHDOG_TIMEOUT, PendingChoiceRequests,
 };
@@ -531,33 +532,74 @@ impl WorkspaceEngine {
     ) {
         let author = self.session.author_provider.clone();
         let node_id = self.active_node_id.clone();
+        // A2b（Task 2.6，设计 §4.3/§4.5）：active LC 恢复等待期间，同一
+        // revision driver 不得绕过显式 fresh 授权启动（A/B 未齐前旁路一律
+        // 后端拒收）——幂等收口后上浮 typed 等待错误，零 provider 启动。
+        if self.lc_resume_recovery_active() {
+            let (reason_code, recovery_id) = self
+                .session
+                .lc_resume_recovery
+                .as_ref()
+                .map(|recovery| (recovery.reason_code.clone(), recovery.recovery_id.clone()))
+                .unwrap_or_default();
+            self.reconcile_lc_resume_waiting().await;
+            let message = format!(
+                "logical revision blocked by lc resume recovery ({reason_code}): recovery {recovery_id} is waiting for an explicit fresh and no provider was started; start a new generation explicitly"
+            );
+            let _ = self.event_tx.send(EngineEvent::Error { message }).await;
+            return;
+        }
         // Task 2.3（REQ-PLN-03/PLN-07、REQ-ENV-04/ENV-10）：LC revision 的 root
         // launch + resume 决策先于 input 构建——delta/full prompt 分流依赖 resume
         // 决策（cwd 漂移 supersede 后不得再以 delta 续写旧 thread）。`None` = 非
         // 逻辑会话（未注入 gateway）→ 下方 Legacy 直连原样（单仓零变化）。
         let logical_launch = self.resolve_revision_root_launch();
 
-        // Task 9c:StartNew(supersede)只持久化 superseded 与稳定等待——
-        // 同一 revision driver 不得继续 start_streaming。supersede 审计已由
-        // gateway 落旧 run;此处清理被取代旧会话的 native 引用(显式 fresh
-        // 不再携带旧 resume id)、上浮稳定等待错误并收口本 run,用户显式
-        // 动作(现有 `WsInMessage::StartGeneration`→`start_generation`)后
-        // 重新 prepare/revalidate。
+        // A2b（Task 2.6，设计 §4.3）：StartNew(supersede) 走**真实等待收口**
+        // ——先持久 superseded waiting record（安全 record 先落盘，阻止旧
+        // resume 与旁路 spawn），再清理被取代旧会话的 native 引用（显式
+        // fresh 不再携带旧 resume id），再由 `reconcile_lc_resume_waiting`
+        // 幂等终态化旧 provider 节点/清 active/收口 run 阶段；同一 driver
+        // 不得继续 start_streaming（零 provider 启动），显式 fresh 面归 B1b
+        // 的 `resume_recovery` 入参。写失败 typed 传播、不吞（§4.3），此时
+        // 按原失败收口可见回 PrepareContext，仍不启动任何 provider。
         if let Some(Ok(decision)) = logical_launch.as_ref()
             && let Some(superseded) = decision.superseded.as_ref()
         {
-            self.clear_superseded_provider_session(
-                ProviderConversationRole::Author,
-                &author,
-                &superseded.superseded_session_id,
-            )
-            .await;
-            let message = format!(
-                "logical revision resume superseded ({}): the old native session {} was marked superseded and no provider was started; start a new generation explicitly",
-                superseded.waiting.reason_code, superseded.superseded_session_id
-            );
-            let _ = self.event_tx.send(EngineEvent::Error { message }).await;
-            self.finish_failed_run().await;
+            let context = LcRecoveryRunContext::ReviewerRevision {
+                business: self.lc_recovery_business_context(),
+                original_feedback: self.pending_revision_context.clone(),
+            };
+            match self
+                .persist_lc_superseded_wait(context, &superseded.waiting.reason_code)
+                .await
+            {
+                Ok(record) => {
+                    self.clear_superseded_provider_session(
+                        ProviderConversationRole::Author,
+                        &author,
+                        &superseded.superseded_session_id,
+                    )
+                    .await;
+                    self.reconcile_lc_resume_waiting().await;
+                    let message = format!(
+                        "logical revision resume superseded ({}): the old native session {} was marked superseded (recovery {}) and no provider was started; start a new generation explicitly",
+                        superseded.waiting.reason_code,
+                        superseded.superseded_session_id,
+                        record.recovery_id
+                    );
+                    let _ = self.event_tx.send(EngineEvent::Error { message }).await;
+                }
+                Err(message) => {
+                    let _ = self
+                        .event_tx
+                        .send(EngineEvent::Error {
+                            message: format!("persist lc superseded wait failed: {message}"),
+                        })
+                        .await;
+                    self.finish_failed_run().await;
+                }
+            }
             return;
         }
         let allow_resume = logical_launch
@@ -773,6 +815,35 @@ impl WorkspaceEngine {
             },
         };
         Some(Ok(decision))
+    }
+
+    /// A2b（Task 2.6）：LC 等待 record 的业务上下文快照——engine 已知身份
+    /// 全量携带；未持久化的身份（业务 repository 物理/logical id、source
+    /// story/design ids、role_run_seq）按 A1a 模型纪律留 None 不倒算
+    /// （covered-run fresh handler 由 B1b/B2 按 run kind 补全重建事实）。
+    fn lc_recovery_business_context(&self) -> LcRecoveryBusinessContext {
+        LcRecoveryBusinessContext {
+            entity_id: self.session.entity_id.clone(),
+            plan_id: None,
+            workspace_type: self.session.workspace_type.clone(),
+            business_repository_physical_id: None,
+            business_repository_logical_id: None,
+            business_checkout_id: None,
+            business_repository_path: self
+                .session
+                .repository_path
+                .clone()
+                .map(|path| path.to_string_lossy().to_string()),
+            source_story_ids: Vec::new(),
+            source_design_ids: Vec::new(),
+            plan_options_ref: None,
+            artifact_refs: Vec::new(),
+            review_refs: Vec::new(),
+            author_provider: self.session.author_provider.clone(),
+            effective_reviewer_provider: self.session.reviewer_provider.clone(),
+            original_node_id: self.active_node_id.clone(),
+            original_role_run_seq: None,
+        }
     }
 }
 

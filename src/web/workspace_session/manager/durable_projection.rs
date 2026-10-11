@@ -235,6 +235,30 @@ impl WorkspaceSessionManager {
     }
 
     pub(super) async fn recover_on_creation(self: &Arc<Self>) {
+        // A2b（Task 2.6，设计 §4.3/§4.4）：真实创建恢复入口**先**执行 LC
+        // 等待收口（唯一写方：幂等终态化旧 provider 节点、清 active run、
+        // run 阶段回 PrepareContext——在任何自动 recover_outline/human_turn
+        // 之前）；等待 active 时阻断其后的一切自动接力：旧 outline resume、
+        // human gate turn 重驱、委托返修孤儿回落与僵尸 run 终态化都不得在
+        // 等待期间再动业务事实（SC gate/phase/turn/预算保留、旁路 spawn
+        // 恒 0）。纯投影 fallback 从不写恢复事实。
+        let lc_waiting_active = {
+            let mut engine = self.engine.lock().await;
+            if engine.lc_resume_recovery_active() {
+                engine.reconcile_lc_resume_waiting().await;
+                true
+            } else {
+                false
+            }
+        };
+        if lc_waiting_active {
+            eprintln!(
+                "[aria-recovery] lc resume recovery waiting active; auto recovery chains blocked session={}",
+                self.session_id
+            );
+            self.broadcast_current_session_state();
+            return;
+        }
         let run_context = self.provider_run_context(self.workspace_runs.clone());
         let recovery_error = match self.recover_human_gate_turns(&run_context).await {
             Ok(()) => self.recover_outline_run(&run_context).await,

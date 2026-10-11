@@ -441,6 +441,28 @@ impl WorkspaceEngine {
             .await;
     }
 
+    /// A2b（Task 2.6，设计 §4.3/§4.4）：LC 等待收口的旧 provider 节点幂等
+    /// 终态化——仅 Active 节点落 Failed（durable timeline + node detail
+    /// 同步落盘、TimelineNodeUpdated 事件广播）；已终态节点不覆写历史
+    /// summary/completed_at（幂等重放零写）。summary 与纯投影派生同源
+    /// （`lc_waiting_node_summary`），不引入第二套文案。
+    pub(crate) async fn finalize_lc_waiting_provider_node(
+        &mut self,
+        node_id: &str,
+        reason_code: &str,
+    ) {
+        let occupied = self
+            .timeline_nodes
+            .iter()
+            .any(|node| node.node_id == node_id && node.status == TimelineNodeStatus::Active);
+        if !occupied {
+            return;
+        }
+        let summary = Some(Self::lc_waiting_node_summary(reason_code));
+        self.update_timeline_node(node_id, TimelineNodeStatus::Failed, summary)
+            .await;
+    }
+
     pub(crate) fn provider_config_snapshot(&self) -> ProviderConfigSnapshot {
         ProviderConfigSnapshot {
             author: self.session.author_provider.clone(),

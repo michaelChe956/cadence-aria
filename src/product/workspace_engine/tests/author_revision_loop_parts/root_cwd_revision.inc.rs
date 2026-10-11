@@ -711,16 +711,21 @@ async fn revision_resume_cwd_drift_supersedes_session() {
         "superseded native session reference must be cleared"
     );
 
-    // 第三轮（Task 9c）：用户显式动作(现有 StartGeneration 面重驱)→ 重新
-    // prepare/revalidate 后 fresh 启动:经 gateway 全新会话(resume id 无),
-    // cwd=漂移后的新 root。
+    // 第三轮（A2b / Task 2.6 契约更新）：waiting 已持久后，同一 revision
+    // driver 的普通重驱**必须被拒**——显式 fresh 面归 B1b 的
+    // `resume_recovery` 入参（A/B 未齐前无可启动半成品，旁路一律后端
+    // 拒收），零 provider 启动、run 仍收口在等待形态。
     engine.session.stage = WorkspaceStage::Revision;
     engine.pending_revision_context = Some("补充异常场景".to_string());
     engine
         .drive_revision_session(direct, empty_provider_commands())
         .await;
-    let fresh = next_captured_revision_input(&mut inputs).await;
-
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), inputs.recv())
+            .await
+            .is_err(),
+        "等待期间重驱不得捕获任何 provider input"
+    );
     assert_eq!(
         direct_starts.load(Ordering::SeqCst),
         0,
@@ -728,16 +733,284 @@ async fn revision_resume_cwd_drift_supersedes_session() {
     );
     assert_eq!(
         fixture.provider_starts.load(Ordering::SeqCst),
-        2,
-        "显式 fresh 与第一轮续接各经 gateway 启动一次"
+        1,
+        "等待期间重驱零新增 provider 启动(仅第一轮续接 1 次)"
+    );
+    let blocked_error = loop {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), engine_events.recv())
+            .await
+            .expect("blocked drive must surface a waiting error")
+            .expect("engine event channel stays open");
+        if let crate::product::workspace_engine::EngineEvent::Error { message } = event {
+            break message;
+        }
+    };
+    assert!(
+        blocked_error.contains("blocked by lc resume recovery")
+            && blocked_error.contains("start a new generation explicitly"),
+        "等待守卫错误必须点名恢复等待与显式动作: {blocked_error}"
     );
     assert_eq!(
-        fresh.resume_provider_session_id, None,
-        "显式 fresh 是全新会话,不再携带被 supersede 的旧 resume id"
+        engine.session().stage,
+        WorkspaceStage::PrepareContext,
+        "重驱被拒后仍收口在 PrepareContext"
+    );
+    // durable waiting record 已在第二轮落盘(A2b 安全 record 先)。
+    let reloaded = fixture
+        .lifecycle
+        .get_workspace_session(&fixture.record.id)
+        .expect("reload durable record");
+    let recovery = reloaded
+        .lc_resume_recovery
+        .expect("既有 supersede 用例也必须持久 waiting record");
+    assert_eq!(
+        recovery.state,
+        crate::product::models::LcResumeRecoveryState::Waiting
+    );
+    assert_eq!(recovery.reason_code, "resume_fingerprint_mismatch");
+}
+
+/// A2b（Task 2.6 / tasks.md 2.6，设计 §4.3/§4.4）：LC mismatch 的**真实等待
+/// 收口**——旧 provider 节点幂等终态化（Active→Failed）、active node/run 清
+/// 空、durable waiting record 先落盘（阻止旧 resume 与旁路 spawn）、纯投影
+/// 只派生零写、显式 fresh 授权前（A/B 未齐）同 driver 重驱零启动且
+/// allowed_actions 恒空。
+#[tokio::test]
+async fn anchor_t07_superseded_waiting_finishes_provider_node() {
+    let (fixture, mut inputs) =
+        logical_revision_fixture(LogicalRevisionAuthority::ParentOfManifestRoot);
+    let direct = Arc::new(RevisionDirectSentinel {
+        starts: Arc::new(AtomicUsize::new(0)),
+    });
+    let (mut engine, mut engine_events) = revision_stage_engine_with_events(&fixture);
+    // 旧 native session + 其发行 launch 的 cwd-inclusive 指纹（同既有
+    // supersede 用例口径）。
+    engine.session.provider_conversations = vec![ProviderConversationRef {
+        role: ProviderConversationRole::Author,
+        provider: ProviderName::ClaudeCode,
+        provider_session_id: "native-revision-r7".to_string(),
+        updated_at: "2026-10-02T00:00:00Z".to_string(),
+        last_node_id: None,
+    }];
+    let first_launch = engine
+        .resolve_author_root_launch(&fixture.record)
+        .expect("LC 会话必须解析出 root launch")
+        .expect("gateway validate 必须通过");
+    engine
+        .logical_launch_fingerprints
+        .insert(ProviderName::ClaudeCode, first_launch.fingerprint().clone());
+
+    // 第一轮：指纹一致续接（恰一次 provider 启动）。
+    engine
+        .drive_revision_session(direct.clone(), empty_provider_commands())
+        .await;
+    let _resumed = next_captured_revision_input(&mut inputs).await;
+    let starts_before_drift = fixture.provider_starts.load(Ordering::SeqCst);
+    assert_eq!(starts_before_drift, 1);
+
+    // 真实修订臂形态：mismatch 前 decisions 已创建 Active Revision 节点。
+    engine.session.stage = WorkspaceStage::Revision;
+    engine.pending_revision_context = Some("补充异常场景".to_string());
+    let revision_node_id = engine
+        .create_timeline_node(TimelineNodeDraft {
+            node_type: TimelineNodeType::Revision,
+            agent: Some(ProviderName::ClaudeCode),
+            stage: WorkspaceStage::Revision,
+            round: Some(2),
+            title: "反馈修订".to_string(),
+            summary: Some("补充异常场景".to_string()),
+            status: TimelineNodeStatus::Active,
+        })
+        .await;
+
+    // root cwd 漂移 → mismatch：真实等待收口。
+    let drifted = LogicalCodebaseManifest {
+        provider_context_root: fixture.drift_root.clone(),
+        ..fixture.manifest.clone()
+    };
+    LogicalCodebaseStore::new(fixture.paths.clone())
+        .save_manifest("project_0001", &drifted)
+        .expect("save drifted manifest");
+    engine
+        .drive_revision_session(direct.clone(), empty_provider_commands())
+        .await;
+
+    // mismatch 零新 provider 启动、零捕获 input。
+    assert_eq!(
+        fixture.provider_starts.load(Ordering::SeqCst),
+        starts_before_drift,
+        "mismatch 收口不得有新 provider 启动"
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), inputs.recv())
+            .await
+            .is_err(),
+        "mismatch 后不得捕获任何 provider input"
+    );
+    // 旧 provider 节点终态化 Failed、active node/run 清空、legacy 对外回
+    // PrepareContext。
+    let old_node = engine
+        .timeline_nodes
+        .iter()
+        .find(|node| node.node_id == revision_node_id)
+        .expect("revision node present")
+        .clone();
+    assert_eq!(
+        old_node.status,
+        TimelineNodeStatus::Failed,
+        "旧 provider 节点必须幂等终态化 Failed"
+    );
+    assert!(
+        engine.active_timeline_node_id().is_none(),
+        "active node 必须清空"
+    );
+    assert!(engine.active_run_id().is_none(), "active run 必须清空");
+    assert_eq!(
+        engine.current_stage(),
+        WorkspaceStage::PrepareContext,
+        "legacy 等待对外回 PrepareContext"
+    );
+    // durable waiting record（安全 record 先落盘）与被取代旧引用清理。
+    let reloaded = fixture
+        .lifecycle
+        .get_workspace_session(&fixture.record.id)
+        .expect("reload durable record");
+    let recovery = reloaded
+        .lc_resume_recovery
+        .expect("superseded waiting record must be persisted");
+    assert_eq!(
+        recovery.state,
+        crate::product::models::LcResumeRecoveryState::Waiting
+    );
+    assert_eq!(recovery.reason_code, "resume_fingerprint_mismatch");
+    assert_eq!(recovery.failed_provider_node_id, revision_node_id);
+    assert_eq!(
+        recovery.superseded_native_session_id.as_deref(),
+        Some("native-revision-r7")
+    );
+    assert_eq!(recovery.role, ProviderConversationRole::Author);
+    assert_eq!(recovery.provider, ProviderName::ClaudeCode);
+    assert!(
+        engine
+            .session
+            .provider_conversations
+            .iter()
+            .all(|conversation| conversation.provider_session_id != "native-revision-r7")
+    );
+    // 稳定等待错误上浮（同既有文案契约）。
+    let waiting_error = loop {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), engine_events.recv())
+            .await
+            .expect("mismatch must surface a stable waiting error")
+            .expect("engine event channel stays open");
+        if let crate::product::workspace_engine::EngineEvent::Error { message } = event {
+            break message;
+        }
+    };
+    assert!(
+        waiting_error.contains("superseded")
+            && waiting_error.contains("start a new generation explicitly"),
+        "waiting error must name superseded and the explicit fresh action: {waiting_error}"
+    );
+
+    // 显式 fresh 前（A/B 未齐）同 driver 重驱：等待守卫拒收，零新增启动。
+    engine.session.stage = WorkspaceStage::Revision;
+    engine.pending_revision_context = Some("再次补充".to_string());
+    engine
+        .drive_revision_session(direct, empty_provider_commands())
+        .await;
+    assert_eq!(
+        fixture.provider_starts.load(Ordering::SeqCst),
+        starts_before_drift,
+        "等待期间重驱必须零 provider 启动"
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), inputs.recv())
+            .await
+            .is_err(),
+        "等待期间重驱不得捕获 provider input"
     );
     assert_eq!(
-        fresh.working_directory.as_deref(),
-        Some(fixture.drift_root.as_path()),
-        "显式 fresh 启动的 cwd 必须是重新 validate 后的新 root"
+        engine.current_stage(),
+        WorkspaceStage::PrepareContext,
+        "重驱被拒后仍收口在 PrepareContext"
+    );
+
+    // 纯投影零写：模拟「CAS 已落盘、节点未终态化」的中间态（manager 在
+    // save 与 timeline 收口间崩溃）——节点回 Active 后 ProjectionOnly 只在
+    // 内存派生终态/无 active/PrepareContext，磁盘不动。
+    engine
+        .update_timeline_node(&revision_node_id, TimelineNodeStatus::Active, None)
+        .await;
+    let mut session_for_projection = WorkspaceSession::from_record(
+        fixture
+            .lifecycle
+            .get_workspace_session(&fixture.record.id)
+            .expect("reload record for projection"),
+    );
+    session_for_projection.repository_path = Some(fixture.member_root.clone());
+    let (projection_tx, _projection_rx) = mpsc::channel(8);
+    let projection = WorkspaceEngine::new_persistent_for_projection(
+        Arc::new(CheckpointStore::new(
+            fixture.paths.root().join("checkpoints"),
+        )),
+        fixture.lifecycle.clone(),
+        projection_tx,
+        session_for_projection,
+    )
+    .expect("projection engine");
+    assert_eq!(
+        projection.current_stage(),
+        WorkspaceStage::PrepareContext,
+        "纯投影派生等待对外形态（PrepareContext）"
+    );
+    assert!(
+        projection.active_timeline_node_id().is_none(),
+        "纯投影不得派生活跃 provider 节点"
+    );
+    let projected_node = projection
+        .timeline_nodes
+        .iter()
+        .find(|node| node.node_id == revision_node_id)
+        .expect("projected revision node")
+        .clone();
+    assert_eq!(
+        projected_node.status,
+        TimelineNodeStatus::Failed,
+        "纯投影在内存派生节点终态（不改磁盘）"
+    );
+    let disk_nodes = fixture
+        .lifecycle
+        .load_timeline_nodes_for_issue_session(
+            &fixture.record.project_id,
+            &fixture.record.issue_id,
+            &fixture.record.id,
+        )
+        .expect("disk timeline nodes");
+    let disk_node = disk_nodes
+        .iter()
+        .find(|node| node.node_id == revision_node_id)
+        .expect("disk revision node")
+        .clone();
+    assert_eq!(
+        disk_node.status,
+        TimelineNodeStatus::Active,
+        "纯投影零磁盘写（fallback 不得成为另一写方）"
+    );
+    // waiting DTO：B 波接齐前 allowed_actions 恒空（A/B 发布纪律）。
+    let crate::web::workspace_ws_types::WsOutMessage::SessionState {
+        lc_resume_recovery: Some(dto),
+        ..
+    } = projection.build_session_state()
+    else {
+        panic!("projection session state must carry the waiting recovery");
+    };
+    assert_eq!(
+        dto.state,
+        crate::product::models::LcResumeRecoveryState::Waiting
+    );
+    assert!(
+        dto.allowed_actions.is_empty(),
+        "B 齐前 waiting allowed_actions 必须为空"
     );
 }

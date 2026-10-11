@@ -1,4 +1,5 @@
 use super::*;
+use crate::product::models::LcResumeRecoveryState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InterruptedRunRecoveryOutcome {
@@ -19,6 +20,10 @@ pub enum InterruptedRunRecoveryError {
     NotRecoverable,
     #[error("中断任务状态已变化")]
     StateChanged,
+    /// A2b（Task 2.6，设计 §4.3/§4.5）：active LC 恢复等待期间一律 typed
+    /// 拒收——旁路不得绕过显式 fresh 授权（权威在后端入口，非 UI disabled）。
+    #[error("LC 恢复等待期间不能重试中断运行")]
+    LcResumeWaiting,
 }
 
 impl InterruptedRunRecoveryError {
@@ -27,6 +32,7 @@ impl InterruptedRunRecoveryError {
             Self::AlreadyActive => "INTERRUPTED_RUN_ALREADY_ACTIVE",
             Self::NotRecoverable => "INTERRUPTED_RUN_NOT_RECOVERABLE",
             Self::StateChanged => "INTERRUPTED_RUN_STATE_CHANGED",
+            Self::LcResumeWaiting => "LC_RESUME_RECOVERY_ACTIVE",
         }
     }
 }
@@ -37,12 +43,29 @@ impl WorkspaceEngine {
             return None;
         }
 
-        match self.session.workspace_type {
+        let candidate = match self.session.workspace_type {
             WorkspaceType::WorkItemPlan => self.recoverable_work_item_plan_interrupted_run(),
             WorkspaceType::Story | WorkspaceType::Design | WorkspaceType::WorkItem => {
                 self.recoverable_shared_review()
             }
-        }
+        };
+        // A2b（Task 2.6，设计 §4.3）：被 active LC 等待占用的旧 provider
+        // 失败节点不投影——等待期间恢复入口不存在（旁路拒收权威在后端
+        // 真实入口，SessionState 不得投出可恢复假态）。
+        candidate.filter(|run| !self.lc_waiting_occupies_node(&run.failed_node_id))
+    }
+
+    /// A2b（Task 2.6）：LC 恢复等待是否占用该 provider 失败节点
+    /// （recovery 仍 active 且 failed_provider_node_id 命中）。
+    fn lc_waiting_occupies_node(&self, node_id: &str) -> bool {
+        self.session
+            .lc_resume_recovery
+            .as_ref()
+            .is_some_and(|recovery| {
+                recovery.state != LcResumeRecoveryState::Resolved
+                    && !recovery.failed_provider_node_id.is_empty()
+                    && recovery.failed_provider_node_id == node_id
+            })
     }
 
     pub async fn retry_interrupted_run(
@@ -51,6 +74,12 @@ impl WorkspaceEngine {
     ) -> Result<InterruptedRunRecoveryOutcome, InterruptedRunRecoveryError> {
         if self.session.stage != WorkspaceStage::PrepareContext || self.active_run_id.is_some() {
             return Err(InterruptedRunRecoveryError::AlreadyActive);
+        }
+        // A2b（Task 2.6，设计 §4.3/§4.5）：active LC 恢复等待期间一律
+        // typed 拒收——被等待占用的旧 provider 失败节点不得经 interrupted
+        // retry 复活（先于 recoverable 判定，等待即权威）。
+        if self.lc_resume_recovery_active() {
+            return Err(InterruptedRunRecoveryError::LcResumeWaiting);
         }
         let recovery = self
             .recoverable_interrupted_run()

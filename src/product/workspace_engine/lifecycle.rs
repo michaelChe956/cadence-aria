@@ -1,4 +1,5 @@
 use super::*;
+use crate::product::models::{LcRecoveryRunContext, LcResumeRecoveryRecord, LcResumeRecoveryState};
 use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
 
 /// T4.1（REQ-REG-15）：确认 trust 准备的同步预检产物（lifecycle.rs 私有）。
@@ -392,14 +393,44 @@ impl WorkspaceEngine {
             // 纯投影不执行 plan repair journal 恢复：无恢复错误可注入。
             None,
         );
-        Ok(Self::persistent_engine(
+        let mut engine = Self::persistent_engine(
             checkpoint_store,
             lifecycle_store,
             event_tx,
             derivation,
             // 纯投影不执行 outline revision transaction 恢复。
             None,
-        ))
+        );
+        // A2b（Task 2.6，设计 §4.4）：LC 等待在纯投影中只**派生**对外形态
+        // ——旧 provider 节点视作已收口（无 busy、无 active provider 节点；
+        // run 阶段回 PrepareContext），全部内存态、零磁盘写；真正的收口写
+        // 入口只属于 manager `recover_on_creation` 与 live mismatch 收口
+        // （fallback 不得成为另一写方）。Resolved 历史证据不影响派生。
+        if let Some(recovery) = engine.session.lc_resume_recovery.clone()
+            && recovery.state != LcResumeRecoveryState::Resolved
+        {
+            let failed_node_id = recovery.failed_provider_node_id;
+            if !failed_node_id.is_empty() {
+                let now = chrono::Utc::now().to_rfc3339();
+                for node in engine.timeline_nodes.iter_mut() {
+                    if node.node_id == failed_node_id && node.status == TimelineNodeStatus::Active {
+                        node.status = TimelineNodeStatus::Failed;
+                        node.summary = Some(Self::lc_waiting_node_summary(&recovery.reason_code));
+                        node.completed_at = Some(now.clone());
+                    }
+                }
+                if engine.active_node_id.as_deref() == Some(failed_node_id.as_str()) {
+                    engine.active_node_id = None;
+                }
+            }
+            if matches!(
+                engine.session.stage,
+                WorkspaceStage::Running | WorkspaceStage::CrossReview | WorkspaceStage::Revision
+            ) {
+                engine.session.stage = WorkspaceStage::PrepareContext;
+            }
+        }
+        Ok(engine)
     }
 
     /// A1b1 共享纯读核心（载入段）：durable artifact 版本覆盖与
@@ -1176,11 +1207,168 @@ impl WorkspaceEngine {
             .await)
     }
 
+    /// A2b（Task 2.6）：durable LC 恢复是否仍 active（Waiting/
+    /// FreshReserved/FreshRunning）。Resolved 只保留证据不阻断；None 无恢复。
+    pub(crate) fn lc_resume_recovery_active(&self) -> bool {
+        self.session
+            .lc_resume_recovery
+            .as_ref()
+            .is_some_and(|recovery| recovery.state != LcResumeRecoveryState::Resolved)
+    }
+
+    /// A2b（Task 2.6，设计 §4.3）：LC 等待收口的旧 provider 节点终态化
+    /// summary——真实收口（`finalize_lc_waiting_provider_node`）与纯投影
+    /// 派生同源，不引入第二套文案。
+    pub(crate) fn lc_waiting_node_summary(reason_code: &str) -> String {
+        format!("LC resume recovery waiting（{reason_code}）：旧 native 会话漂移，等待显式恢复操作")
+    }
+
+    /// A2b（Plan Task 2.6 接口字典，设计 §4.3）：LC superseded 等待的
+    /// durable 收口第一步——**安全 record 先落盘**（跨 session
+    /// JSON/timeline/turn 非强原子事务，先保存阻止旧 resume 与旁路 spawn
+    /// 的 recovery record），经 A2a 的 `compare_and_save_lc_resume_state`
+    /// 整记录 CAS（single-flight；后续新漂移替换 recovery 时传新
+    /// recovery_id 的完整记录）。timeline 幂等收口与 snapshot 发布由
+    /// `reconcile_lc_resume_waiting` 继续；被取代旧 native 引用的清理在
+    /// 调用侧（`clear_superseded_provider_session`），多代 tombstone Vec
+    /// 的写入/消费归 B1a 资格门（4.1），本入口不越权。
+    pub(crate) async fn persist_lc_superseded_wait(
+        &mut self,
+        context: LcRecoveryRunContext,
+        reason: &str,
+    ) -> Result<LcResumeRecoveryRecord, String> {
+        let store = self
+            .lifecycle_store
+            .as_ref()
+            .ok_or_else(|| "lifecycle_store unavailable".to_string())?;
+        let expected = store
+            .get_workspace_session(&self.session.session_id)
+            .map_err(|error| {
+                format!(
+                    "load session for lc superseded wait failed ({}): {error}",
+                    self.session.session_id
+                )
+            })?;
+        // A2b 的 live mismatch 路径是 author revision resume 的 supersede
+        // （`drive_revision_session`）；被取代的 resume id 即旧 Author 对话。
+        let role = ProviderConversationRole::Author;
+        let provider = self.session.author_provider.clone();
+        let superseded_native_session_id = self
+            .provider_resume_session_id(role.clone(), &provider)
+            .filter(|id| !id.trim().is_empty());
+        let previous_fingerprint_digest = self
+            .logical_launch_fingerprints
+            .get(&provider)
+            .map(|fingerprint| fingerprint.digest.clone());
+        let failed_provider_node_id = self
+            .active_node_id
+            .clone()
+            .or_else(|| lc_recovery_context_original_node_id(&context))
+            .unwrap_or_default();
+        let now = chrono::Utc::now().to_rfc3339();
+        let record = LcResumeRecoveryRecord {
+            schema_version: 1,
+            recovery_id: format!("lc_resume_recovery_{}", uuid::Uuid::new_v4().simple()),
+            failed_provider_node_id,
+            reason_code: reason.to_string(),
+            role,
+            provider,
+            superseded_native_session_id,
+            previous_fingerprint_digest,
+            previous_session_status: expected.status.clone(),
+            previous_stage: self.session.stage.as_str().to_string(),
+            run_context: context,
+            state: LcResumeRecoveryState::Waiting,
+            operation_id: None,
+            fresh_node_id: None,
+            fresh_native_session_id: None,
+            fresh_role_run_seq: None,
+            fresh_operations: Vec::new(),
+            detected_at: now.clone(),
+            updated_at: now,
+        };
+        let saved = store
+            .compare_and_save_lc_resume_state(&expected, record)
+            .map_err(|error| {
+                format!(
+                    "persist lc superseded wait failed ({}): {error}",
+                    self.session.session_id
+                )
+            })?;
+        // 内存镜像同步：engine 是 runtime 单一权威内存态，守卫/收口立即
+        // 可见；durable 非 LC 字段以 CAS 锁内 stored 为准（A2a 合同）。
+        self.session.session_status = saved.status.clone();
+        self.session.lc_resume_recovery = saved.lc_resume_recovery.clone();
+        saved.lc_resume_recovery.ok_or_else(|| {
+            "persist lc superseded wait returned record without recovery".to_string()
+        })
+    }
+
+    /// A2b（Plan Task 2.6，设计 §4.3/§4.4）：LC 恢复等待的**真实收口写
+    /// 入口**——幂等终态化旧 provider 节点（仅 Active 落 Failed，已终态
+    /// 节点不覆写历史）、清该 run active、durable status 仅 Running→Open、
+    /// run 阶段（Running/CrossReview/Revision）对外回 PrepareContext。唯一
+    /// 调用方：manager 真实创建恢复入口 `recover_on_creation`（在任何自动
+    /// recover_outline/human_turn 之前）与 live mismatch 收口臂；纯投影
+    /// （`new_persistent_for_projection`）只派生不落盘。SC gate/phase/turn/
+    /// 预算与既有人审 CAS 不触碰——等待不等价 Failed 业务 turn（§4.3）。
+    pub(crate) async fn reconcile_lc_resume_waiting(&mut self) {
+        let Some(recovery) = self.session.lc_resume_recovery.clone() else {
+            return;
+        };
+        if recovery.state == LcResumeRecoveryState::Resolved {
+            return;
+        }
+        let failed_node_id = recovery.failed_provider_node_id;
+        if !failed_node_id.is_empty() {
+            self.finalize_lc_waiting_provider_node(&failed_node_id, &recovery.reason_code)
+                .await;
+            if self.active_node_id.as_deref() == Some(failed_node_id.as_str()) {
+                self.active_node_id = None;
+            }
+        }
+        self.active_run_id = None;
+        if self.session.session_status == WorkspaceSessionStatus::Running {
+            self.session.session_status = WorkspaceSessionStatus::Open;
+            if let Some(store) = &self.lifecycle_store
+                && let Ok(record) = store.update_workspace_session_status(
+                    &self.session.session_id,
+                    WorkspaceSessionStatus::Open,
+                )
+            {
+                self.session.session_status = record.status;
+            }
+        }
+        if matches!(
+            self.session.stage,
+            WorkspaceStage::Running | WorkspaceStage::CrossReview | WorkspaceStage::Revision
+        ) {
+            self.transition_stage(WorkspaceStage::PrepareContext).await;
+        }
+    }
+
     pub async fn start_generation(
         &mut self,
         provider_config: ProviderConfigSnapshot,
         reviewer_enabled: bool,
     ) -> Result<(TimelineNode, WsOutMessage), String> {
+        // A2b（Task 2.6，设计 §4.3/§4.5）：active LC 恢复（Waiting/
+        // FreshReserved/FreshRunning）期间，普通参数 generation 一律后端
+        // 真实入口拒收——显式 fresh 走 B1b 的 `resume_recovery` 入参（A/B
+        // 未齐前无可启动半成品，allowed_actions 恒空兜底同一纪律）；resolved
+        // 只保留证据，不阻后续正常会话。守卫先于终态检查与 SingleCandidate
+        // 重臂（SC 原业务态不 rearm）。
+        if self.lc_resume_recovery_active() {
+            let recovery = self
+                .session
+                .lc_resume_recovery
+                .as_ref()
+                .expect("lc resume recovery presence checked above");
+            return Err(format!(
+                "LC_RESUME_RECOVERY_ACTIVE: 会话 {} 存在进行中的 LC 恢复（recovery_id={}, state={:?}）；普通 generation 已被拒收，等待显式恢复操作",
+                self.session.session_id, recovery.recovery_id, recovery.state
+            ));
+        }
         // F-30（v34 复验 session_0008）：终态会话重跑走未定义路径——完整轮生成
         // 后挂零决策控件门、durable 停留旧状态、timeline 零新节点。入口按
         // session_status（真终态=Confirmed/Terminated）明确拒绝；Failed 不拦——
@@ -1594,6 +1782,27 @@ impl WorkspaceEngine {
             })
             .await;
         Ok(())
+    }
+}
+
+/// A2b（Task 2.6）：run context 各 tag 的公共 business 上下文原始节点
+/// （fallback 供 record.failed_provider_node_id 兜底；主路径取 active 节点）。
+fn lc_recovery_context_original_node_id(context: &LcRecoveryRunContext) -> Option<String> {
+    match context {
+        LcRecoveryRunContext::Author { business, .. }
+        | LcRecoveryRunContext::AuthorChoiceFollowup { business, .. }
+        | LcRecoveryRunContext::AuthorFeedback { business, .. }
+        | LcRecoveryRunContext::ReviewerRevision { business, .. }
+        | LcRecoveryRunContext::LegacyOutlineAuthor { business, .. }
+        | LcRecoveryRunContext::LegacyOutlineRevision { business, .. }
+        | LcRecoveryRunContext::LegacyOutlineRebuild { business, .. }
+        | LcRecoveryRunContext::LegacyDraft { business, .. }
+        | LcRecoveryRunContext::LegacyBatch { business, .. }
+        | LcRecoveryRunContext::LegacyPlanRevision { business, .. }
+        | LcRecoveryRunContext::ScAuthor { business, .. }
+        | LcRecoveryRunContext::ScManualRevision { business, .. } => {
+            business.original_node_id.clone()
+        }
     }
 }
 include!("lifecycle/routing_reference.inc.rs");
