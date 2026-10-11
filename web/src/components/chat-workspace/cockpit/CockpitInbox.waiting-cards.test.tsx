@@ -1,11 +1,14 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   c1WaitingItem,
   logicalCodebaseBootstrapItem,
   type CockpitInboxItem,
+  type LcResumeRecoveryInboxProjection,
 } from "../../../state/workspace-cockpit-projection";
+import { useProviderAvailabilityStore } from "../../../state/provider-availability-store";
+import { useWorkspaceStore } from "../../../state/workspace-ws-store";
 import type {
   C1WaitingItem,
   LogicalCodebaseBootstrapNoticeDto,
@@ -332,5 +335,225 @@ describe("repository initialization waiting cards", () => {
     expect(
       within(card).queryByTestId("repo-init-failure-diagnostics"),
     ).toBeNull();
+  });
+});
+
+// D（Task 7.1 / anchor_t21，设计 §6）：LC 恢复等待卡动作面——显式 fresh
+// 「启动新会话继续修订」＋既有守卫（observer 只读、断连/provider fail-closed、
+// inflight 禁双击、失败回 waiting 复原、missing map 不猜漂移维度）。
+// 卡面数据源是 C6.1 投影（item.recovery，wire allowed_actions/last_operation
+// 的只读镜像）；operation_id 由页面一次用户动作生成（Page 层用例覆盖 wire）。
+describe("anchor_t21 lc resume recovery cards", () => {
+  beforeEach(() => {
+    useProviderAvailabilityStore.setState({ snapshot: null });
+    useWorkspaceStore.getState().reset();
+  });
+
+  const recoveryItem = (
+    overrides: Partial<LcResumeRecoveryInboxProjection> & { id?: string } = {},
+  ): CockpitInboxItem => ({
+    id: overrides.id ?? "session_001:lc_resume_recovery:rec-1",
+    kind: "lc_resume_recovery",
+    severity: 2,
+    // 标题随 state 派生（与 C6.1 selectCockpitInbox 同判据）。
+    title: (overrides.state ?? "waiting") === "waiting"
+      ? "旧原生会话已失效"
+      : "正在启动新原生会话…",
+    summary: `${overrides.reasonCode ?? "resume_fingerprint_mismatch"} · ${overrides.provider ?? "codex"} · ${overrides.runKind ?? "legacy_draft"}`,
+    triage: false,
+    source: "lc_resume_recovery",
+    createdAt: "2026-10-11T00:02:00Z",
+    gate: null,
+    inlineError: null,
+    choice: null,
+    recovery: {
+      recoveryId: "rec-1",
+      state: "waiting",
+      reasonCode: "resume_fingerprint_mismatch",
+      provider: "codex",
+      failedNodeId: "node-1",
+      runKind: "legacy_draft",
+      detectedAt: "2026-10-11T00:02:00Z",
+      updatedAt: "2026-10-11T00:04:00Z",
+      allowedActions: [],
+      lastOperation: null,
+      ...(overrides as Partial<LcResumeRecoveryInboxProjection>),
+    },
+  });
+
+  it("anchor_t21_inbox_explicit_native_fresh_and_existing_guards", async () => {
+    const onStartLcResumeFresh = vi.fn(() => true);
+    const user = userEvent.setup();
+    const view = render(
+      <CockpitInbox
+        items={[recoveryItem()]}
+        onStartLcResumeFresh={onStartLcResumeFresh}
+        actionableSessionId="session_001"
+      />,
+    );
+    const card = screen.getByTestId("cockpit-inbox-item-lc_resume_recovery");
+    // 设计 §6 文案：保留 workspace 事实 + 动作说明（不叫安全重试）。
+    expect(
+      within(card).getByText(
+        "运行环境已变化，不能继续旧原生会话。当前工作区、产物、反馈与评审意见均保留。",
+      ),
+    ).toBeVisible();
+    expect(
+      within(card).getByText("只更换 AI 原生会话，将重新校验权限并继续当前任务"),
+    ).toBeVisible();
+
+    const button = screen.getByRole("button", { name: "启动新会话继续修订" });
+    expect(button).toBeEnabled();
+    await user.click(button);
+    expect(onStartLcResumeFresh).toHaveBeenCalledTimes(1);
+    expect(onStartLcResumeFresh).toHaveBeenCalledWith("rec-1");
+    // inflight 禁双击：durable 事实未推进前第二次点击零出站。
+    expect(button).toBeDisabled();
+    await user.click(button);
+    expect(onStartLcResumeFresh).toHaveBeenCalledTimes(1);
+
+    // 受理（typed 事实推进 updated_at → reserved）：卡转「正在启动新原生会话…」，
+    // 无写动作面。
+    view.rerender(
+      <CockpitInbox
+        items={[
+          recoveryItem({
+            state: "fresh_reserved",
+            updatedAt: "2026-10-11T00:05:00Z",
+            lastOperation: {
+              operation_id: "op-1",
+              state: "reserved",
+              reason: null,
+              fresh_node: null,
+            },
+          }),
+        ]}
+        onStartLcResumeFresh={onStartLcResumeFresh}
+        actionableSessionId="session_001"
+      />,
+    );
+    const reservedCard = screen.getByTestId("cockpit-inbox-item-lc_resume_recovery");
+    expect(reservedCard).toHaveTextContent("正在启动新原生会话…");
+    expect(
+      within(reservedCard).queryByRole("button", { name: "启动新会话继续修订" }),
+    ).toBeNull();
+
+    // prepare 失败回 waiting（updated_at 再推进）：回执 metadata 上卡面，
+    // 按钮复原可再次显式发起（新用户动作＝新 operation_id，由页面生成）。
+    view.rerender(
+      <CockpitInbox
+        items={[
+          recoveryItem({
+            state: "waiting",
+            updatedAt: "2026-10-11T00:06:00Z",
+            lastOperation: {
+              operation_id: "op-1",
+              state: "failed",
+              reason: "prepare_failed",
+              fresh_node: null,
+            },
+          }),
+        ]}
+        onStartLcResumeFresh={onStartLcResumeFresh}
+        actionableSessionId="session_001"
+      />,
+    );
+    const failedCard = screen.getByTestId("cockpit-inbox-item-lc_resume_recovery");
+    expect(within(failedCard).getByText(/prepare_failed/)).toBeVisible();
+    expect(screen.getByRole("button", { name: "启动新会话继续修订" })).toBeEnabled();
+  });
+
+  it("anchor_t21_recovery_card_observer_shows_facts_without_write_action", () => {
+    // observer（非当前会话，id 前缀 session_002）：只显示事实，不出写动作（设计 §6）。
+    render(
+      <CockpitInbox
+        items={[
+          recoveryItem({
+            id: "session_002:lc_resume_recovery:rec-obs",
+            recoveryId: "rec-obs",
+          }),
+        ]}
+        onStartLcResumeFresh={vi.fn(() => true)}
+        actionableSessionId="session_001"
+      />,
+    );
+    const observed = screen.getByTestId("cockpit-inbox-item-lc_resume_recovery");
+    expect(observed).toHaveTextContent("旧原生会话已失效");
+    expect(within(observed).queryByRole("button")).toBeNull();
+  });
+
+  it("anchor_t21_recovery_card_disables_when_disconnected_or_provider_unavailable", () => {
+    // 断连守卫：按钮可见但禁用并给原因。
+    const disconnected = render(
+      <CockpitInbox
+        items={[recoveryItem()]}
+        onStartLcResumeFresh={vi.fn(() => true)}
+        actionableSessionId="session_001"
+        resumeFreshConnectionBlocked
+      />,
+    );
+    const disconnectedButton = screen.getByRole("button", {
+      name: "启动新会话继续修订",
+    });
+    expect(disconnectedButton).toBeDisabled();
+    expect(screen.getByText(/连接已断开/)).toBeVisible();
+    disconnected.unmount();
+
+    // provider 不可用守卫（REQ-PPS-03 同源：已知不可用 fail-closed）。
+    useWorkspaceStore.setState({
+      providers: { author: "codex", reviewer: "codex" },
+    });
+    useProviderAvailabilityStore.setState({
+      snapshot: {
+        schema_version: 1,
+        generation: 1,
+        checked_at: "2026-10-12T00:00:00Z",
+        state_status: "ready",
+        state_error: null,
+        real_workflow_blocked: false,
+        test_provider_enabled: false,
+        providers: [
+          {
+            provider: "codex",
+            display_name: "Codex",
+            available: false,
+            version: null,
+            reason_code: "command_missing",
+            reason: "CLI 未安装",
+            checked_at: "2026-10-12T00:00:00Z",
+            install_hint: "",
+          },
+        ],
+      },
+    });
+    render(
+      <CockpitInbox
+        items={[recoveryItem()]}
+        onStartLcResumeFresh={vi.fn(() => true)}
+        actionableSessionId="session_001"
+      />,
+    );
+    const providerBlockedButton = screen.getByRole("button", {
+      name: "启动新会话继续修订",
+    });
+    expect(providerBlockedButton).toBeDisabled();
+    expect(screen.getByText(/Codex 当前不可用：CLI 未安装/)).toBeVisible();
+  });
+
+  it("anchor_t21_recovery_card_missing_map_copy_does_not_guess_drift", () => {
+    render(
+      <CockpitInbox
+        items={[
+          recoveryItem({
+            reasonCode: "resume_fingerprint_unavailable",
+          }),
+        ]}
+        onStartLcResumeFresh={vi.fn(() => true)}
+        actionableSessionId="session_001"
+      />,
+    );
+    const card = screen.getByTestId("cockpit-inbox-item-lc_resume_recovery");
+    expect(within(card).getByText("无法验证旧会话冻结信息")).toBeVisible();
+    expect(within(card).queryByText(/运行环境已变化/)).toBeNull();
   });
 });

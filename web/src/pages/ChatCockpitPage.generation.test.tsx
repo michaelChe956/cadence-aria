@@ -21,6 +21,10 @@ import type { PlanProjectionBundle } from "../api/types";
 import { fetchWorkspaceArtifactVersion } from "../api/workspace-content";
 import { planRepairSnapshotFixture } from "../state/workspace-plan-repair-test-fixtures";
 import { observerStateFromSessionState } from "../state/workspace-observer-store";
+import {
+  lcFreshOperationFixture,
+  lcResumeRecoveryFixture,
+} from "../state/workspace-cockpit-projection.test-fixtures";
 import { readCockpitSettings } from "../state/cockpit-settings";
 import { ChatCockpitPage } from "./ChatCockpitPage";
 import { COCKPIT_HOTKEYS } from "../state/cockpit-operation-semantics";
@@ -53,6 +57,9 @@ vi.mock("../state/bulk-confirm-store", () => ({
 vi.mock("../hooks/useWorkspaceWs", async (importOriginal) => ({
   ...(await importOriginal<typeof WorkspaceWsModule>()),
   useWorkspaceWs: vi.fn(),
+  // D（Task 7.1 / anchor_t21）：页面一次用户动作生成稳定 operation_id——
+  // mock 固定值供 wire 断言（freshSends[0].operation_id === "op-1"）。
+  newCommandId: vi.fn(() => "op-1"),
 }));
 vi.mock("../hooks/useUnloadGuard", () => ({ useUnloadGuard: vi.fn() }));
 
@@ -741,5 +748,92 @@ describe("ChatCockpitPage", () => {
     expect(screen.getByTestId("hard-error-notice")).toHaveTextContent(
       /OBSERVER_WRITE_REJECTED/,
     );
+  });
+
+  // D（Task 7.1 / anchor_t21，设计 §6）：恢复三活跃态隐藏 generic 开始生成
+  // 出口；等待卡「启动新会话继续修订」经 C6.2 sendLcResumeFresh 显式 fresh
+  // （稳定 operation_id 一次用户动作一次；inflight 禁双击）；resolved 卡消
+  // 且 generic 出口复原（不永久屏蔽）。
+  it("anchor_t21_inbox_explicit_native_fresh_and_existing_guards", async () => {
+    const user = userEvent.setup();
+    const freshSends: Array<{
+      recovery_id: string;
+      operation_id: string;
+      provider_config: unknown;
+      reviewer_enabled: boolean;
+    }> = [];
+    const workspaceWs = mockWorkspaceWs({
+      connectionStatus: "connected",
+      sendLcResumeFresh: (recoveryId, operationId, providerConfig, reviewerEnabled) => {
+        freshSends.push({
+          recovery_id: recoveryId,
+          operation_id: operationId,
+          provider_config: providerConfig,
+          reviewer_enabled: reviewerEnabled,
+        });
+        return true;
+      },
+    });
+    useWorkspaceStore.setState({
+      stage: "prepare_context",
+      providers: { author: "codex", reviewer: "codex" },
+      reviewerEnabled: false,
+      lcResumeRecovery: lcResumeRecoveryFixture(),
+    });
+
+    renderCockpitWith(workspaceWs, "session_001");
+
+    // 恢复活跃期：generic「开始生成」被隐藏，恢复卡是唯一动作出口。
+    expect(screen.queryByTestId("start-generation")).toBeNull();
+    const card = screen.getByTestId("cockpit-inbox-item-lc_resume_recovery");
+    expect(card).toHaveTextContent("旧原生会话已失效");
+
+    const button = screen.getByRole("button", { name: "启动新会话继续修订" });
+    expect(button).toBeEnabled();
+    await user.click(button);
+    expect(freshSends).toHaveLength(1);
+    expect(freshSends[0].operation_id).toBe("op-1");
+    expect(freshSends[0].recovery_id).toBe("rec-1");
+    expect(freshSends[0].reviewer_enabled).toBe(false);
+    expect(freshSends[0].provider_config).toEqual({
+      author: "codex",
+      reviewer: "codex",
+      review_rounds: 0,
+      permission_modes: { author: "auto", reviewer: "auto" },
+    });
+
+    // inflight 禁双击：durable 事实未推进前重复点击零出站。
+    expect(button).toBeDisabled();
+    await user.click(button);
+    expect(freshSends).toHaveLength(1);
+
+    // resolved：恢复卡消失，generic「开始生成」复原（合法后续不被永久屏蔽）。
+    act(() => {
+      useWorkspaceStore.setState({
+        lcResumeRecovery: lcResumeRecoveryFixture({
+          state: "resolved",
+          last_operation: lcFreshOperationFixture({
+            state: "completed",
+            fresh_node: "node-2",
+          }),
+        }),
+      });
+    });
+    expect(screen.queryByTestId("cockpit-inbox-item-lc_resume_recovery")).toBeNull();
+    expect(screen.getByTestId("start-generation")).toBeEnabled();
+  });
+
+  it("anchor_t21_recovery_fresh_button_keeps_connection_guard", () => {
+    const workspaceWs = mockWorkspaceWs({ connectionStatus: "disconnected" });
+    useWorkspaceStore.setState({
+      stage: "prepare_context",
+      lcResumeRecovery: lcResumeRecoveryFixture(),
+    });
+
+    renderCockpitWith(workspaceWs, "session_001");
+
+    const button = screen.getByRole("button", { name: "启动新会话继续修订" });
+    expect(button).toBeDisabled();
+    expect(screen.getByText(/连接已断开/)).toBeVisible();
   });
 });

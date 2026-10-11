@@ -30,6 +30,10 @@ import type { PlanProjectionBundle } from "../api/types";
 import { fetchWorkspaceArtifactVersion } from "../api/workspace-content";
 import { planRepairSnapshotFixture } from "../state/workspace-plan-repair-test-fixtures";
 import { observerStateFromSessionState } from "../state/workspace-observer-store";
+import {
+  lcFreshOperationFixture,
+  lcResumeRecoveryFixture,
+} from "../state/workspace-cockpit-projection.test-fixtures";
 import { readCockpitSettings } from "../state/cockpit-settings";
 import { ChatCockpitPage } from "./ChatCockpitPage";
 import { COCKPIT_HOTKEYS } from "../state/cockpit-operation-semantics";
@@ -37,6 +41,7 @@ import { useOperationAuditStore } from "../state/operation-audit-store";
 import {
   bulkConfirmStart,
   cockpitInbox,
+  lcResumeRecoveryItem,
   cockpitObservedRecords,
   codingInfoItem,
   gateItem,
@@ -1004,5 +1009,66 @@ describe("ChatCockpitPage", () => {
     await user.click(button);
     expect(retryMock).toHaveBeenCalledTimes(1);
     expect(retryMock).toHaveBeenCalledWith("session_001", "node_sc_503");
+  });
+
+  // D（Task 7.1 / anchor_t21，设计 §6）：driver store 投影的恢复卡可见
+  // （live/刷新/重连同源），回执 metadata（last_operation typed 事实）作
+  // 卡面数据源；observed 会话卡只显示事实不出写动作；resolved 卡消后
+  // generic stopped 卡不被永久屏蔽。
+  it("anchor_t21_recovery_card_receipt_metadata_face_and_resolved_unblocks_generic", () => {
+    mockWorkspaceWs();
+    useWorkspaceStore.setState({
+      stage: "prepare_context",
+      lcResumeRecovery: lcResumeRecoveryFixture({
+        state: "waiting",
+        last_operation: lcFreshOperationFixture({
+          state: "failed",
+          reason: "prepare_failed",
+        }),
+      }),
+    });
+    renderCockpit();
+
+    const card = screen.getByTestId("cockpit-inbox-item-lc_resume_recovery");
+    expect(card).toHaveTextContent("旧原生会话已失效");
+    // 回执 metadata 上卡面：上次启动未成功的 typed 原因可见。
+    expect(card).toHaveTextContent("prepare_failed");
+    expect(
+      within(card).getByRole("button", { name: "启动新会话继续修订" }),
+    ).toBeEnabled();
+
+    // resolved：恢复卡消失；同屏 generic stopped 卡在场且不被永久屏蔽。
+    act(() => {
+      useWorkspaceStore.getState().setSessionStatus("stopped_needs_human");
+      useWorkspaceStore.setState({
+        lcResumeRecovery: lcResumeRecoveryFixture({
+          state: "resolved",
+          last_operation: lcFreshOperationFixture({
+            state: "completed",
+            fresh_node: "node-2",
+          }),
+        }),
+      });
+    });
+    expect(screen.queryByTestId("cockpit-inbox-item-lc_resume_recovery")).toBeNull();
+    expect(screen.getByTestId("cockpit-inbox-item-stopped")).toBeVisible();
+  });
+
+  it("anchor_t21_recovery_card_observed_session_shows_facts_without_write_action", () => {
+    mockWorkspaceWs();
+    // observed 会话卡（id 前缀 session_002，非当前 actionable 会话）：事实
+    // 可见、无写动作（设计 §6 observer 只显示事实；换 driver/重连后同
+    // recovery_id 由 C6.1 投影保证）。
+    cockpitInbox.push(
+      lcResumeRecoveryItem({
+        id: "session_002:lc_resume_recovery:rec-obs",
+        recoveryId: "rec-obs",
+      }),
+    );
+    renderCockpit();
+
+    const observed = screen.getByTestId("cockpit-inbox-item-lc_resume_recovery");
+    expect(observed).toHaveTextContent("旧原生会话已失效");
+    expect(within(observed).queryByRole("button")).toBeNull();
   });
 });

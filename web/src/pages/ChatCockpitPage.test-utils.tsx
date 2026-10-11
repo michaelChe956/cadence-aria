@@ -3,7 +3,10 @@ import { render } from "@testing-library/react";
 import { takeoverWorkspaceSession } from "../api/client";
 import type { WorkspaceWsApi } from "../hooks/useWorkspaceWs";
 import { useOperationAuditStore } from "../state/operation-audit-store";
-import type { CockpitInboxItem } from "../state/workspace-cockpit-projection";
+import type {
+  CockpitInboxItem,
+  LcResumeRecoveryInboxProjection,
+} from "../state/workspace-cockpit-projection";
 import {
   useWorkspaceStore,
   type TimelineNode,
@@ -218,6 +221,42 @@ export function infoItem(
       sessionId,
       occurredAt: "2026-09-27T00:00:00Z",
       title: "Work Item Plan 已确认",
+    },
+  };
+}
+
+/** D（Task 7.1 / anchor_t21）：LC 恢复等待卡条目（C6.1 投影形状直投夹具；
+ * id 前缀决定 actionable 归属——driver 会话用 store setState 走真实
+ * selectCockpitInbox 投影，此夹具供 observed 会话卡直投 cockpitInbox）。 */
+export function lcResumeRecoveryItem(
+  overrides: Partial<LcResumeRecoveryInboxProjection> & { id?: string } = {},
+): CockpitInboxItem {
+  return {
+    id: overrides.id ?? "session_001:lc_resume_recovery:rec-1",
+    kind: "lc_resume_recovery",
+    severity: 2,
+    title: (overrides.state ?? "waiting") === "waiting"
+      ? "旧原生会话已失效"
+      : "正在启动新原生会话…",
+    summary: `${overrides.reasonCode ?? "resume_fingerprint_mismatch"} · ${overrides.provider ?? "codex"} · ${overrides.runKind ?? "legacy_draft"}`,
+    triage: false,
+    source: "lc_resume_recovery",
+    createdAt: overrides.detectedAt ?? "2026-10-11T00:02:00Z",
+    gate: null,
+    inlineError: null,
+    choice: null,
+    recovery: {
+      recoveryId: "rec-1",
+      state: "waiting",
+      reasonCode: "resume_fingerprint_mismatch",
+      provider: "codex",
+      failedNodeId: "node-1",
+      runKind: "legacy_draft",
+      detectedAt: "2026-10-11T00:02:00Z",
+      updatedAt: "2026-10-11T00:04:00Z",
+      allowedActions: [],
+      lastOperation: null,
+      ...(overrides as Partial<LcResumeRecoveryInboxProjection>),
     },
   };
 }

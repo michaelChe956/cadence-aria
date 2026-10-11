@@ -42,7 +42,7 @@ import { useWorkspaceContentLoaders } from "../hooks/useWorkspaceContentLoaders"
 import { useLeaseDiagnostics } from "../hooks/useLeaseDiagnostics";
 import { useCockpitAutopilot } from "../hooks/useCockpitAutopilot";
 import { useUnloadGuard } from "../hooks/useUnloadGuard";
-import type { WorkspaceWsApi } from "../hooks/useWorkspaceWs";
+import { newCommandId, type WorkspaceWsApi } from "../hooks/useWorkspaceWs";
 import type { ChatEntry, ChoiceResponsePayload } from "../state/chat-entries";
 import { createCockpitActionFacade } from "../state/cockpit-action-routing";
 import {
@@ -353,6 +353,41 @@ export function ChatCockpitPage({
       reviewerEnabled,
     );
   }, [workspaceWs.sendStartGeneration]);
+
+  // D（Task 7.1，设计 §6 卡与 generic 动作规则）：LC 恢复三活跃态
+  // （waiting/fresh_reserved/fresh_running）隐藏 generic 开始生成/中断重试
+  // 替代出口；resolved 只留证据不投卡、不阻塞合法后续（C6.1 投影按同一
+  // 判据收口卡面，此处只收 generic 出口）。
+  const lcResumeRecoveryActive =
+    state.lcResumeRecovery !== null && state.lcResumeRecovery.state !== "resolved";
+
+  // D（Task 7.1，设计 §6/C6.2 移交）：等待卡「启动新会话继续修订」——
+  // 一次用户动作生成稳定 operation_id（newCommandId 一次生成，sender 不
+  // 重生成、不进 retry/advance 通道）；provider 快照与普通开始生成同源；
+  // 发送成功零乐观本地变更，受理/回放/失败一律以 typed 结果帧＋
+  // SessionState 对账。durable 权威守卫：非当前 recovery 或非 waiting 态
+  // 不出站（resolved/被新漂移取代时拒绝本地重放）。
+  const handleStartLcResumeFresh = useCallback(
+    (recoveryId: string): boolean => {
+      const current = useWorkspaceStore.getState();
+      const recovery = current.lcResumeRecovery;
+      if (
+        recovery === null ||
+        recovery.recovery_id !== recoveryId ||
+        recovery.state !== "waiting"
+      ) {
+        return false;
+      }
+      const { providers, reviewerEnabled, reviewRounds, permissionModes } = current;
+      return workspaceWs.sendLcResumeFresh(
+        recoveryId,
+        newCommandId(),
+        providerConfigFor(providers, reviewerEnabled, reviewRounds, permissionModes),
+        reviewerEnabled,
+      );
+    },
+    [workspaceWs.sendLcResumeFresh],
+  );
   const handleSaveProviderDefaults = useCallback(() => {
     const { providers, reviewerEnabled } = useWorkspaceStore.getState();
     if (!providers) {
@@ -818,7 +853,9 @@ export function ChatCockpitPage({
               ? () => handleSelectTimelineNode(abortedByDisconnectNode.node_id)
               : undefined
           }
-          recoverableInterruptedRun={state.recoverableInterruptedRun}
+          recoverableInterruptedRun={
+            lcResumeRecoveryActive ? null : state.recoverableInterruptedRun
+          }
           onRetryInterruptedRun={workspaceWs.retryInterruptedRun}
           retryResetKey={
             state.protocolError
@@ -1134,7 +1171,9 @@ export function ChatCockpitPage({
               activeNodeType={activeNode?.node_type ?? null}
               workItemPlanArtifact={state.workItemPlanArtifact}
               disabled={workspaceWs.connectionStatus !== "connected"}
-              hideStartGeneration={Boolean(state.recoverableInterruptedRun)}
+              hideStartGeneration={
+                Boolean(state.recoverableInterruptedRun) || lcResumeRecoveryActive
+              }
               startGenerationDisabled={startGenerationBlockedByTerminalSession}
               startGenerationDisabledHint={
                 startGenerationBlockedByTerminalSession
@@ -1176,6 +1215,8 @@ export function ChatCockpitPage({
           latestReviewSummary={latestReviewReport ?? null}
           leaseEvents={staleLeaseNoticeActive ? staleLeaseEvents : null}
           repairReservation={state.repairReservation}
+          onStartLcResumeFresh={handleStartLcResumeFresh}
+          resumeFreshConnectionBlocked={workspaceWs.connectionStatus !== "connected"}
         />
       </CockpitInboxDrawer>
     </div>

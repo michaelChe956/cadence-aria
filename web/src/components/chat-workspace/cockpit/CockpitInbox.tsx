@@ -27,7 +27,11 @@ import {
   gateActionBlockCopy,
   isStaleDriverLeaseItem,
   type CockpitInboxItem,
+  type LcResumeRecoveryInboxProjection,
 } from "../../../state/workspace-cockpit-projection";
+import { useProviderAvailabilityStore } from "../../../state/provider-availability-store";
+import { getProviderOption } from "../../../state/provider-options";
+import { useWorkspaceStore } from "../../../state/workspace-ws-store";
 import type { WorkspaceProviderName } from "../../../api/types";
 import {
   GATE_TERMINATE_BUTTON_LABEL,
@@ -101,6 +105,8 @@ export function CockpitInbox({
   leaseEvents = null,
   latestReviewSummary = null,
   repairReservation = null,
+  onStartLcResumeFresh,
+  resumeFreshConnectionBlocked = false,
 }: {
   items: readonly CockpitInboxItem[];
   actions?: CockpitActionFacade;
@@ -128,6 +134,12 @@ export function CockpitInbox({
   leaseEvents?: readonly LeaseDiagnosticsEvent[] | null;
   latestReviewSummary?: string | null;
   repairReservation?: WorkItemPlanRepairReservation | null;
+  /** D（Task 7.1，设计 §6）：等待卡显式 fresh 出口——页面一次用户动作生成
+   * 稳定 operation_id 并经 C6.2 sendLcResumeFresh 发送；返回是否已发送。
+   * 缺省（宿主未接线）不出写动作面。 */
+  onStartLcResumeFresh?: (recoveryId: string) => boolean;
+  /** D（Task 7.1）：断连守卫（页面按 ws connectionStatus 传入，true=禁用）。 */
+  resumeFreshConnectionBlocked?: boolean;
 }) {
   const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(() => new Set());
   const selectableItems = useMemo(
@@ -195,6 +207,8 @@ export function CockpitInbox({
     leaseEvents,
     latestReviewSummary,
     repairReservation,
+    onStartLcResumeFresh,
+    resumeFreshConnectionBlocked,
     takeoverButtonRef:
       actionableSessionId === cockpitInboxItemSessionId(item.id) ? takeoverButtonRef : undefined,
   });
@@ -292,6 +306,8 @@ function CockpitInboxRow({
   leaseEvents,
   latestReviewSummary,
   repairReservation,
+  onStartLcResumeFresh,
+  resumeFreshConnectionBlocked,
   takeoverButtonRef,
 }: {
   item: CockpitInboxItem;
@@ -319,6 +335,9 @@ function CockpitInboxRow({
   leaseEvents: readonly LeaseDiagnosticsEvent[] | null;
   latestReviewSummary: string | null;
   repairReservation: WorkItemPlanRepairReservation | null;
+  /** D（Task 7.1）：恢复等待卡显式 fresh 出口（页面接线，见 CockpitInbox 同名 prop）。 */
+  onStartLcResumeFresh?: (recoveryId: string) => boolean;
+  resumeFreshConnectionBlocked: boolean;
   takeoverButtonRef?: Ref<ConfirmTwiceButtonHandle>;
 }) {
   const pulse = useCockpitInboxPulse(item.id);
@@ -421,6 +440,14 @@ function CockpitInboxRow({
         ) : null}
         {item.kind === "lc_bootstrap" && item.bootstrapInfo ? (
           <LcBootstrapCard item={item} actions={actions} />
+        ) : null}
+        {item.kind === "lc_resume_recovery" && item.recovery ? (
+          <LcResumeRecoveryCard
+            info={item.recovery}
+            actionable={actionable}
+            onStartLcResumeFresh={onStartLcResumeFresh}
+            connectionBlocked={resumeFreshConnectionBlocked}
+          />
         ) : null}
         {item.kind === "sc_failed" && item.scFailure && onRetryFailedSc ? (
           <button
@@ -995,6 +1022,115 @@ function ChoiceInboxCard({
         submittingOverride={pending}
         onRespond={(_entry, payload) => onChoiceRespond?.(item, payload)}
       />
+    </div>
+  );
+}
+
+/** 设计 §6：missing map（full 指纹不可用）的稳定判别码——只呈现事实，
+ * 不猜漂移维度（provider_gateway::RESUME_FINGERPRINT_UNAVAILABLE 同源）。 */
+const LC_RESUME_MAP_MISSING_REASON = "resume_fingerprint_unavailable";
+
+/**
+ * D（Task 7.1，设计 §6）：LC 恢复等待卡动作面——仅 waiting 态出
+ * 「启动新会话继续修订」（显式 fresh：一次用户动作一个稳定 operation_id，
+ * 由页面 newCommandId 生成并经 C6.2 sendLcResumeFresh 发送；本卡片零
+ * 乐观本地变更，受理/回放/失败一律以 typed 结果帧＋SessionState 对账，
+ * unknown 不伪成功也不自动换新 ID 重发）。inflight 禁双击：本地快照点击
+ * 时的 durable updated_at，事实推进（受理离场或 prepare 失败回 waiting
+ * 都会更新 updated_at）即解除禁用。observer（非 actionable）只显示事实
+ * 不出写动作；断连/provider 不可用 fail-closed 禁用并保留原因（provider
+ * 守卫与 ChatInputBar REQ-PPS-03 同源：快照未加载如实按未知放行）。
+ * fresh_reserved/fresh_running 无动作面——投影标题已呈
+ * 「正在启动新原生会话…」。
+ */
+function LcResumeRecoveryCard({
+  info,
+  actionable,
+  onStartLcResumeFresh,
+  connectionBlocked,
+}: {
+  info: LcResumeRecoveryInboxProjection;
+  actionable: boolean;
+  onStartLcResumeFresh?: (recoveryId: string) => boolean;
+  connectionBlocked: boolean;
+}) {
+  const [requestedAtUpdatedAt, setRequestedAtUpdatedAt] = useState<string | null>(null);
+  const providers = useWorkspaceStore((state) => state.providers);
+  const providerSnapshot = useProviderAvailabilityStore((state) => state.snapshot);
+  const authorProvider = providers?.author ?? "claude_code";
+  const authorOption = providerSnapshot
+    ? getProviderOption(providerSnapshot, authorProvider)
+    : null;
+  const providerBlockReason =
+    authorOption && !authorOption.available
+      ? `${authorOption.label} 当前不可用：${authorOption.reason ?? "原因未知"}`
+      : null;
+
+  useEffect(() => {
+    // durable 事实推进（updated_at 变化）= 本次动作已有 typed 结局：受理
+    // 离场（reserved/running，动作面随之消失）或失败回 waiting（复原可再
+    // 次显式发起，属新用户动作＝新 operation_id）。
+    if (requestedAtUpdatedAt !== null && info.updatedAt !== requestedAtUpdatedAt) {
+      setRequestedAtUpdatedAt(null);
+    }
+  }, [info.updatedAt, requestedAtUpdatedAt]);
+
+  if (info.state !== "waiting") {
+    return null;
+  }
+  const inflight = requestedAtUpdatedAt !== null;
+  const operationPending =
+    info.lastOperation !== null &&
+    (info.lastOperation.state === "reserved" || info.lastOperation.state === "running");
+  const failedReason =
+    info.lastOperation !== null && info.lastOperation.state === "failed"
+      ? info.lastOperation.reason ?? "未知原因"
+      : null;
+  const disabled =
+    inflight || operationPending || connectionBlocked || providerBlockReason !== null;
+  const handleStart = () => {
+    if (disabled || onStartLcResumeFresh === undefined) {
+      return;
+    }
+    if (onStartLcResumeFresh(info.recoveryId)) {
+      setRequestedAtUpdatedAt(info.updatedAt);
+    }
+  };
+  return (
+    <div className="mt-2" data-testid="lc-resume-recovery-actions">
+      <p className="text-xs text-slate-600">
+        {info.reasonCode === LC_RESUME_MAP_MISSING_REASON
+          ? "无法验证旧会话冻结信息"
+          : "运行环境已变化，不能继续旧原生会话。当前工作区、产物、反馈与评审意见均保留。"}
+      </p>
+      {failedReason ? (
+        <p className="mt-1 text-xs text-[var(--aria-danger)]">
+          上次启动未成功：{failedReason}
+        </p>
+      ) : null}
+      {onStartLcResumeFresh !== undefined && actionable ? (
+        <>
+          <p className="mt-1 text-xs text-slate-500">
+            只更换 AI 原生会话，将重新校验权限并继续当前任务
+          </p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <button
+              type="button"
+              disabled={disabled}
+              onClick={handleStart}
+              className={`${BTN_PRIMARY_CLASS} disabled:cursor-not-allowed disabled:opacity-60`}
+            >
+              启动新会话继续修订
+            </button>
+          </div>
+          {connectionBlocked ? (
+            <p className="mt-1 text-xs text-slate-500">连接已断开，恢复连接后可继续</p>
+          ) : null}
+          {providerBlockReason !== null ? (
+            <p className="mt-1 text-xs text-[var(--aria-danger)]">{providerBlockReason}</p>
+          ) : null}
+        </>
+      ) : null}
     </div>
   );
 }
