@@ -27,6 +27,31 @@ pub(crate) enum SingleCandidateProviderRunError {
         /// retry_action；其它 waiting 恒 `None`（原投影不变）。
         manual_guidance: Option<String>,
     },
+    /// B2c（Task 5.5，设计 §5.3 SC 纪律①）：SC author native mismatch
+    /// （旧 native 在而冻结绑定不可用/已吊销）的独立 typed 等待——不落
+    /// Message/AlreadyFinished 的 generic Failed，不 rearm。durable 已由
+    /// `persist_single_candidate_author_superseded_wait` 收口为 Waiting
+    /// recovery（原 reservation key/phase 保留，ledger 不追加），等待
+    /// 显式 fresh（sc_author → LcFreshContext）接管。
+    NativeSupersededWaiting {
+        reason_code: String,
+        superseded_native_session_id: Option<String>,
+        recovery_id: String,
+    },
+}
+
+/// B2c（Task 5.5，设计 §5.3 sc_author 行 / plan 接口字典 recovery entry
+/// mode）：`run_single_candidate_author` 的重入形态。
+pub(crate) enum SingleCandidateAuthorRecoveryEntry {
+    /// 常规入口：native mismatch precheck 先于新业务 reserve
+    /// （FrozenBindingUnavailable → typed `NativeSupersededWaiting`，
+    /// 不 reserve 第二次、不 rearm）。
+    Ordinary,
+    /// sc_author 显式 fresh 重入（FreshRunning recovery）：绕过
+    /// reserve/rearm——同 logical reservation 重入不 reserve 第二次；
+    /// `resume=None` 全新物理 native；verdict 在场时走 fresh 返修 prompt
+    /// （按 payload source ref 装载上一版 source 全文，自足不依赖旧会话）。
+    LcFreshContext { source_revision_ref: Option<String> },
 }
 
 /// SC author 终态失败消息的显式重开指引后缀：Failed 相位有显式恢复入口
@@ -623,15 +648,51 @@ pub(crate) async fn run_single_candidate_author(
     provider_for_run: Arc<dyn StreamingProviderAdapter>,
     run_cancel: CancellationToken,
     command_rx: &mut mpsc::Receiver<ProviderCommand>,
+    recovery_entry: SingleCandidateAuthorRecoveryEntry,
     run_context: &ProviderRunContext,
 ) -> Result<SingleCandidateProviderRunOutcome, SingleCandidateProviderRunError> {
-    let should_start = match engine.reserve_single_candidate_author_start() {
-        Ok(should_start) => should_start,
-        Err(message) => {
-            engine.persist_single_candidate_terminal_phase(
-                crate::product::models::SingleCandidatePhase::Failed,
-            );
-            return Err(SingleCandidateProviderRunError::Message(message));
+    // B2c（Task 5.5，设计 §5.3 SC 纪律①）：显式 fresh（LcFreshContext）不经
+    // precheck/reserve——同 logical reservation 重入不 reserve 第二次（trap：
+    // phase=Generate 时同 key 重放返回 false 会误判 Superseded）；claim CAS
+    // 已 single-flight。
+    let is_fresh_context = matches!(
+        recovery_entry,
+        SingleCandidateAuthorRecoveryEntry::LcFreshContext { .. }
+    );
+    // Ordinary 入口的 full resume precheck 先于新业务 reserve——mismatch
+    // 家族（旧 native 在而冻结绑定不可用/已吊销）转 typed
+    // NativeSupersededWaiting（durable 等待收口保留原 key/phase），不再落
+    // reserve 让位静默 Superseded / generic Failed。
+    if !is_fresh_context
+        && let Some(reason_code) = engine
+            .precheck_single_candidate_author_resume()
+            .map_err(SingleCandidateProviderRunError::Message)?
+    {
+        return match engine
+            .persist_single_candidate_author_superseded_wait(reason_code)
+            .await
+        {
+            Ok(recovery) => Err(SingleCandidateProviderRunError::NativeSupersededWaiting {
+                reason_code: reason_code.to_string(),
+                superseded_native_session_id: recovery.superseded_native_session_id.clone(),
+                recovery_id: recovery.recovery_id,
+            }),
+            Err(message) => Err(SingleCandidateProviderRunError::Message(format!(
+                "persist single candidate author superseded wait failed: {message}"
+            ))),
+        };
+    }
+    let should_start = if is_fresh_context {
+        true
+    } else {
+        match engine.reserve_single_candidate_author_start() {
+            Ok(should_start) => should_start,
+            Err(message) => {
+                engine.persist_single_candidate_terminal_phase(
+                    crate::product::models::SingleCandidatePhase::Failed,
+                );
+                return Err(SingleCandidateProviderRunError::Message(message));
+            }
         }
     };
     if !should_start {
@@ -769,10 +830,9 @@ pub(crate) async fn run_single_candidate_author(
     // B2b1(Task 5.2,REQ-PLN-08):envelope target 恒聚合根锚(E native
     // anchor 消费收敛进 `resolve_plan_author_launch`);r27 成员锚同源机制
     // 在 root 锚下结构性消失,fresh 轮与修订轮 envelope 恒一致。
-    let launch = resolve_plan_author_launch(engine)
-        .map_err(|error| {
-            SingleCandidateProviderRunError::Message(format!("logical plan launch failed: {error}"))
-        })?;
+    let launch = resolve_plan_author_launch(engine).map_err(|error| {
+        SingleCandidateProviderRunError::Message(format!("logical plan launch failed: {error}"))
+    })?;
     // F5-A：SC 修订轮 findings 回灌——最近 verdict 要求返修时，本轮 author 重跑
     // 使用返修 prompt（在首轮完整 prompt 的尾部输出指令前注入 reviewer findings 与
     // 硬性修复指令）；首轮（无 verdict）prompt 逐字节不变。
@@ -791,8 +851,75 @@ pub(crate) async fn run_single_candidate_author(
             })
     };
     let revision_verdict = engine.single_candidate_pending_revision_verdict();
-    let full_prompt = match revision_verdict.as_ref() {
-        Some(review) => {
+    // B2c（Task 5.5，设计 §5.3 sc_author 行）：fresh 重入的返修轮 prompt
+    // 自足——全新 provider 会话（resume=None）无旧会话历史可依赖，按
+    // payload source ref 装载 durable 上一版 candidate source 全文，走
+    // fresh 返修 builder（[previous_source] 先于 [review_revision]）；正常
+    // resume 的修订 prompt 与首轮 prompt 逐字节零变化。
+    let previous_source_for_fresh_revision: Option<String> = if is_fresh_context
+        && revision_verdict.is_some()
+    {
+        let source_ref = match &recovery_entry {
+            SingleCandidateAuthorRecoveryEntry::LcFreshContext {
+                source_revision_ref: Some(source_ref),
+            } => source_ref.clone(),
+            _ => {
+                return Err(SingleCandidateProviderRunError::Message(
+                    "sc_author fresh revision round requires the payload source revision ref to carry the previous candidate source"
+                        .to_string(),
+                ));
+            }
+        };
+        let (project_id, issue_id, plan_id) = {
+            let session = engine.session();
+            (
+                session.project_id.clone(),
+                session.issue_id.clone(),
+                session.entity_id.clone(),
+            )
+        };
+        let scope = crate::product::work_item_plan_source_store::SourceStoreScope {
+            project_id,
+            issue_id,
+            plan_id,
+        };
+        Some(
+            crate::product::work_item_plan_source_store::WorkItemPlanSourceStore::new(
+                lifecycle.app_paths(),
+            )
+            .get_source_revision(&scope, &source_ref)
+            .map_err(|error| {
+                SingleCandidateProviderRunError::Message(format!(
+                    "load previous source for sc fresh revision failed: {error:?}"
+                ))
+            })?
+            .source,
+        )
+    } else {
+        None
+    };
+    let full_prompt = match (revision_verdict.as_ref(), previous_source_for_fresh_revision.as_deref())
+    {
+        (Some(review), Some(previous_source)) => {
+            crate::product::work_item_split_engine::prompts::
+                build_work_item_plan_markdown_fresh_revision_prompt(
+                    &request,
+                    &issue,
+                    &repository,
+                    crate::product::work_item_split_engine::prompts::WorkItemPlanMarkdownAuthorContext {
+                        story_context: &story_context,
+                        design_context: &design_context,
+                        design_requirement_ids: &design_requirement_ids,
+                        repository_structure: &repository_structure,
+                        plan_options: &plan_options,
+                        language_rules: &language_rules,
+                        routing_context: &launch.routing_context(),
+                    },
+                    review,
+                    previous_source,
+                )
+        }
+        (Some(review), None) => {
             crate::product::work_item_split_engine::prompts::
                 build_work_item_plan_markdown_revision_prompt(
                     &request,
@@ -810,7 +937,7 @@ pub(crate) async fn run_single_candidate_author(
                     review,
                 )
         }
-        None => crate::product::work_item_split_engine::prompts::build_work_item_plan_markdown_prompt(
+        (None, _) => crate::product::work_item_split_engine::prompts::build_work_item_plan_markdown_prompt(
             &request,
             &issue,
             &repository,
@@ -843,10 +970,14 @@ pub(crate) async fn run_single_candidate_author(
         &engine.session().session_id,
         "full_markdown_author",
     );
-    let prompt_event_detail = if revision_verdict.is_some() {
-        "发送给 SingleCandidate markdown author 的返修提示词（已回灌 reviewer findings）"
-    } else {
-        "发送给 SingleCandidate markdown author 的完整提示词"
+    let prompt_event_detail = match (&revision_verdict, is_fresh_context) {
+        (Some(_), true) => {
+            "发送给 SingleCandidate markdown author 的显式 fresh 返修提示词（全新会话自足：上一版 source 全文＋reviewer findings 回灌）"
+        }
+        (Some(_), false) => {
+            "发送给 SingleCandidate markdown author 的返修提示词（已回灌 reviewer findings）"
+        }
+        (None, _) => "发送给 SingleCandidate markdown author 的完整提示词",
     };
     engine
         .emit_provider_prompt_event(
@@ -856,15 +987,27 @@ pub(crate) async fn run_single_candidate_author(
             Some(author_provider.clone()),
         )
         .await;
-    let provider_input = engine
-        .build_work_item_plan_streaming_input(
+    // B2c（Task 5.5，设计 §5.3 sc_author 行）：fresh 重入走 fresh input
+    // builder——resume_provider_session_id 结构性为 None（全新物理 native，
+    // 不回捞旧会话）；正常 run 维持 resume 候选路径零变化。
+    let provider_input = if is_fresh_context {
+        engine.build_work_item_plan_streaming_input_fresh(
             crate::product::work_item_split_engine::types::provider_name_to_type(&author_provider),
             full_prompt.clone(),
             repository.path.to_string_lossy().to_string(),
             author_provider.clone(),
             PlanAuthorOutputContract::Structured,
         )
-        .map_err(SingleCandidateProviderRunError::Message)?;
+    } else {
+        engine.build_work_item_plan_streaming_input(
+            crate::product::work_item_split_engine::types::provider_name_to_type(&author_provider),
+            full_prompt.clone(),
+            repository.path.to_string_lossy().to_string(),
+            author_provider.clone(),
+            PlanAuthorOutputContract::Structured,
+        )
+    }
+    .map_err(SingleCandidateProviderRunError::Message)?;
     let provider_input = engine.attach_tool_policy_audit(provider_input);
     // Task 1b 段②生产臂:SC markdown author 单次 provider run 绑定
     // split run 身份;Markdown plan 产物按原文存档收口。

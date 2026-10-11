@@ -140,6 +140,7 @@ pub(crate) const WORK_ITEM_PLAN_MARKDOWN_OUTPUT_DIRECTIVE: &str =
 
 mod sc_revision;
 pub(crate) use sc_revision::build_work_item_plan_markdown_revision_prompt;
+pub(crate) use sc_revision::build_work_item_plan_markdown_fresh_revision_prompt;
 mod sc_author_teaching;
 pub(crate) use sc_author_teaching::{
     WORK_ITEM_PLAN_WEAK_MODEL_PRECISION_DISCIPLINE, work_item_plan_markdown_grammar,

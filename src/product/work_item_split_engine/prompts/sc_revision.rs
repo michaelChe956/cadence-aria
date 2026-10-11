@@ -48,6 +48,54 @@ pub(crate) fn build_work_item_plan_markdown_revision_prompt(
     Ok(prompt)
 }
 
+/// B2c（Task 5.5，tasks.md 5.5 / 设计 §5.3 sc_author 行）：SC 显式 fresh 的
+/// 返修轮 prompt——全新 provider 会话（resume=None，不回捞旧 native）没有
+/// 旧会话历史可依赖，返修上下文必须自足：在既有返修段之前插入
+/// `[previous_source]` 小节（durable 上一版 candidate source 全文，由调用方
+/// 从 source store 按 ref 装载），声明「全新会话、不依赖任何历史会话」。
+/// 正常 resume 的修订 prompt（`build_work_item_plan_markdown_revision_prompt`，
+/// 依赖旧会话记忆「上一版」）保持零变化；首轮（无 verdict）fresh 不经本函数。
+pub(crate) fn build_work_item_plan_markdown_fresh_revision_prompt(
+    request: &GenerateWorkItemsRequest,
+    issue: &IssueRecord,
+    repository: &RepositoryRecord,
+    context: WorkItemPlanMarkdownAuthorContext<'_>,
+    review: &ReviewVerdict,
+    previous_source: &str,
+) -> Result<String, String> {
+    let base = build_work_item_plan_markdown_prompt(request, issue, repository, context)?;
+    let Some(output_pos) = base.rfind(WORK_ITEM_PLAN_MARKDOWN_OUTPUT_DIRECTIVE) else {
+        return Err(
+            "work item plan markdown fresh revision prompt cannot locate the shared output directive"
+                .to_string(),
+        );
+    };
+    let mut previous_block = String::new();
+    previous_block.push_str(
+        "[previous_source]\n\
+         本次是对 work-item-plan source 的显式全新会话返修轮：旧 provider 会话已因漂移废弃，本轮不依赖任何历史会话；\n\
+         以下代码围栏内是上一版完整 markdown source（durable 候选原文），本轮必须输出在上一版基础上修复后的完整 markdown source。\n\n",
+    );
+    previous_block.push_str("```markdown\n");
+    previous_block.push_str(previous_source.trim());
+    previous_block.push_str("\n```\n\n");
+    let revision_block = render_review_revision_block(review);
+    let mut prompt =
+        String::with_capacity(base.len() + previous_block.len() + revision_block.len());
+    prompt.push_str(&base[..output_pos]);
+    prompt.push_str(&previous_block);
+    prompt.push_str(&revision_block);
+    prompt.push_str(WORK_ITEM_PLAN_MARKDOWN_OUTPUT_DIRECTIVE);
+    if prompt.len() > WORK_ITEM_PLAN_MARKDOWN_PROMPT_MAX_BYTES {
+        return Err(format!(
+            "work item plan markdown fresh revision prompt exceeds hard budget: {} > {} bytes",
+            prompt.len(),
+            WORK_ITEM_PLAN_MARKDOWN_PROMPT_MAX_BYTES
+        ));
+    }
+    Ok(prompt)
+}
+
 fn render_review_revision_block(review: &ReviewVerdict) -> String {
     let mut block = String::new();
     block.push_str(

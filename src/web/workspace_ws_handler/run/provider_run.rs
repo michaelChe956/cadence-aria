@@ -20,11 +20,9 @@ pub(super) fn lc_fresh_recovery_record_if_running(
     let record = crate::product::lifecycle_store::LifecycleStore::new(app_paths.clone())
         .get_workspace_session(session_id)
         .map_err(|error| format!("load workspace session for fresh recovery failed: {error}"))?;
-    Ok(record
-        .lc_resume_recovery
-        .filter(|recovery| {
-            recovery.state == crate::product::models::LcResumeRecoveryState::FreshRunning
-        }))
+    Ok(record.lc_resume_recovery.filter(|recovery| {
+        recovery.state == crate::product::models::LcResumeRecoveryState::FreshRunning
+    }))
 }
 
 pub(super) async fn spawn_provider_run_with_start_mode(
@@ -208,11 +206,46 @@ pub(super) async fn spawn_provider_run_with_start_mode(
                 }
                 ProviderRunKind::WorkItemPlanSingleCandidateAuthor => {
                     let mut command_rx = command_rx;
+                    // B2c（Task 5.5，设计 §5.3 sc_author 行）：FreshRunning 的
+                    // sc_author recovery → LcFreshContext 重入（绕过
+                    // reserve/rearm、resume=None 全新 native；verdict 在场走
+                    // fresh 返修 prompt 携上一版 source 全文）；其余形态按
+                    // Ordinary（mismatch precheck 先于新业务 reserve）。
+                    let recovery_entry = match lc_fresh_recovery_record_if_running(
+                        &run_context_clone.app_paths,
+                        &engine.session().session_id,
+                    ) {
+                        Ok(Some(recovery)) => match &recovery.run_context {
+                            crate::product::models::LcRecoveryRunContext::ScAuthor {
+                                source_revision_ref,
+                                ..
+                            } => {
+                                single_candidate::SingleCandidateAuthorRecoveryEntry::LcFreshContext {
+                                    source_revision_ref: source_revision_ref.clone(),
+                                }
+                            }
+                            _ => single_candidate::SingleCandidateAuthorRecoveryEntry::Ordinary,
+                        },
+                        Ok(None) => single_candidate::SingleCandidateAuthorRecoveryEntry::Ordinary,
+                        Err(message) => {
+                            engine.mark_active_run_finished(&run_label);
+                            drop(engine);
+                            drop(provider_drive_guard.take());
+                            manager_for_task.finish_run(run_token).await;
+                            let _ = send_json_outbound(
+                                &outbound_tx_for_task,
+                                &WsOutMessage::Error { message },
+                            )
+                            .await;
+                            return;
+                        }
+                    };
                     match single_candidate::run_single_candidate_author(
                         &mut engine,
                         provider_for_run.clone(),
                         run_cancel.clone(),
                         &mut command_rx,
+                        recovery_entry,
                         &run_context_clone,
                     )
                     .await
@@ -289,6 +322,39 @@ pub(super) async fn spawn_provider_run_with_start_mode(
                             .await;
                             return;
                         }
+                        Err(
+                            single_candidate::SingleCandidateProviderRunError::NativeSupersededWaiting {
+                                reason_code,
+                                superseded_native_session_id,
+                                recovery_id,
+                            },
+                        ) => {
+                            // B2c（Task 5.5，设计 §5.3 SC 纪律①②）：SC native
+                            // mismatch 的 typed 等待——AdmissionWaiting 同型收口
+                            // （无 failed 节点，等待消息上浮）；durable 已由
+                            // `persist_single_candidate_author_superseded_wait`
+                            // 收口为 Waiting recovery，原 reservation key/phase
+                            // 保留（不 generic Failed、不 rearm），等待显式
+                            // fresh（sc_author → LcFreshContext）接管。
+                            engine.mark_active_run_finished(&run_label);
+                            drop(engine);
+                            drop(provider_drive_guard.take());
+                            manager_for_task.finish_run(run_token).await;
+                            let superseded_native =
+                                superseded_native_session_id.as_deref().unwrap_or("unknown");
+                            let message = format!(
+                                "single candidate author native resume superseded ({reason_code}): \
+                                 the old native session {superseded_native} can no longer be resumed \
+                                 (recovery {recovery_id}); no provider was started and the original \
+                                 reservation/phase are preserved; 请通过显式恢复操作启动新原生会话继续修订（explicit fresh）"
+                            );
+                            let _ = send_json_outbound(
+                                &outbound_tx_for_task,
+                                &WsOutMessage::Error { message },
+                            )
+                            .await;
+                            return;
+                        }
                     }
                 }
                 ProviderRunKind::WorkItemPlanDraft { feedback } => {
@@ -303,19 +369,17 @@ pub(super) async fn spawn_provider_run_with_start_mode(
                         &run_context_clone.app_paths,
                         &engine.session().session_id,
                     ) {
-                        Ok(Some(recovery)) => {
-                            match &recovery.run_context {
-                                crate::product::models::LcRecoveryRunContext::LegacyDraft {
-                                    pending_feedback,
-                                    active_outline_id,
-                                    ..
-                                } => {
-                                    draft_fresh_payload = Some(pending_feedback.clone());
-                                    Some(active_outline_id.clone())
-                                }
-                                _ => None,
+                        Ok(Some(recovery)) => match &recovery.run_context {
+                            crate::product::models::LcRecoveryRunContext::LegacyDraft {
+                                pending_feedback,
+                                active_outline_id,
+                                ..
+                            } => {
+                                draft_fresh_payload = Some(pending_feedback.clone());
+                                Some(active_outline_id.clone())
                             }
-                        }
+                            _ => None,
+                        },
                         Ok(None) => None,
                         Err(message) => {
                             engine.mark_active_run_finished(&run_label);

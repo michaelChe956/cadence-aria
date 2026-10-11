@@ -1,7 +1,11 @@
 use sha2::{Digest, Sha256};
 
+use super::lifecycle::NativeResumeCandidateError;
 use super::*;
-use crate::product::models::ProviderName;
+use crate::product::models::{
+    LcRecoveryBusinessContext, LcRecoveryRunContext, LcResumeRecoveryRecord, LcResumeRecoveryState,
+    ProviderName,
+};
 use crate::product::work_item_plan_compiler::{
     PlanCandidateValidationContext, WorkItemPlanSourceContext, validate_plan_candidate_ir,
 };
@@ -37,6 +41,12 @@ pub(crate) fn select_internal_generation_mode(
         WorkItemGenerationModeDto::Serial
     }
 }
+
+/// B2c（Task 5.5，设计 §5.3 SC 纪律①）：SC author native mismatch 的稳定
+/// 等待判别码——与 gateway 冻结绑定家族 `RESUME_FINGERPRINT_UNAVAILABLE`
+/// 同码（SC author 的 mismatch 即旧 native 在而冻结绑定不可用/已吊销）。
+pub(crate) const SC_AUTHOR_NATIVE_MISMATCH_WAITING_REASON: &str =
+    crate::product::logical_codebase::provider_gateway::RESUME_FINGERPRINT_UNAVAILABLE;
 
 impl WorkspaceEngine {
     pub(crate) fn persist_single_candidate_terminal_phase(
@@ -136,6 +146,198 @@ impl WorkspaceEngine {
             .map_err(|error| format!("persist provider reservation failed: {error}"))?;
         self.reload_session_from_record(saved);
         Ok(should_start)
+    }
+
+    /// B2c（Task 5.5，设计 §5.3 SC 纪律①，plan 接口字典 recovery entry
+    /// Ordinary 臂）：SC author 常规入口的 native mismatch precheck——
+    /// **先于新业务 reserve** 判定 full resume 可用性。出生（无旧
+    /// native）/健康 resume 返回 `Ok(None)` 照常走 reserve 路径（零变化）；
+    /// `FrozenBindingUnavailable`（旧 native 在而冻结绑定不可用/已吊销）
+    /// 返回 `Ok(Some(reason))`——caller 转 typed
+    /// `NativeSupersededWaiting` 等待（不 generic Failed、不 rearm）；
+    /// 其余读取错误原样上浮（fail-closed，与既有
+    /// `build_work_item_plan_streaming_input` 内同调用的传播语义一致）。
+    pub(crate) fn precheck_single_candidate_author_resume(
+        &self,
+    ) -> Result<Option<&'static str>, String> {
+        if self.session.flow_kind != WorkItemPlanFlowKind::SingleCandidate {
+            return Ok(None);
+        }
+        let provider = self.session.author_provider.clone();
+        match self.provider_resume_session_candidate(ProviderConversationRole::Author, &provider) {
+            Ok(_) => Ok(None),
+            Err(NativeResumeCandidateError::FrozenBindingUnavailable) => {
+                Ok(Some(SC_AUTHOR_NATIVE_MISMATCH_WAITING_REASON))
+            }
+            Err(error) => Err(format!(
+                "single candidate author resume precheck failed: {error}"
+            )),
+        }
+    }
+
+    /// B2c（Task 5.5，设计 §5.3 SC 纪律②，plan 接口字典）：SC author
+    /// native mismatch 的 durable 等待收口——手写 ScAuthor tagged record
+    /// 后 CAS Waiting，再清被取代旧会话引用并幂等收口等待面
+    /// （`reconcile_lc_resume_waiting`）。**不可复用
+    /// `persist_lc_superseded_wait`**：其内部
+    /// `provider_resume_session_candidate` 在 mismatch 场景自身必败，
+    /// 被取代 native id 在此直接取 conversation 引用（内存优先、
+    /// durable 兜底）。SC phase/provider_start_ledger 不动——等待保留
+    /// 原 key/phase（不 reserve 第二次、不 rearm；显式 fresh 的物理
+    /// run/node/native 是新 native 证据，不是新 SC logical reservation）。
+    pub(crate) async fn persist_single_candidate_author_superseded_wait(
+        &mut self,
+        reason: &str,
+    ) -> Result<LcResumeRecoveryRecord, String> {
+        let store = self
+            .lifecycle_store
+            .clone()
+            .ok_or_else(|| "lifecycle_store unavailable".to_string())?;
+        let expected = store
+            .get_workspace_session(&self.session.session_id)
+            .map_err(|error| {
+                format!(
+                    "load session for sc author superseded wait failed ({}): {error}",
+                    self.session.session_id
+                )
+            })?;
+        let role = ProviderConversationRole::Author;
+        let provider = self.session.author_provider.clone();
+        let conversation = self
+            .session
+            .provider_conversations
+            .iter()
+            .find(|conversation| conversation.role == role && conversation.provider == provider)
+            .or_else(|| {
+                expected.provider_conversations.iter().find(|conversation| {
+                    conversation.role == role && conversation.provider == provider
+                })
+            });
+        let superseded_native_session_id = conversation.and_then(|conversation| {
+            let native_id = conversation.provider_session_id.trim();
+            (!native_id.is_empty()).then(|| native_id.to_string())
+        });
+        let failed_provider_node_id = self
+            .active_node_id
+            .clone()
+            .or_else(|| conversation.and_then(|conversation| conversation.last_node_id.clone()))
+            .unwrap_or_default();
+        // 原业务 reservation key：durable ledger 中本会话最后一个 SC author
+        // 键（等待保留原 key；fresh 重入不 reserve 第二次）。
+        let reservation_prefix = format!("single_candidate_author:{}:", expected.id);
+        let provider_start_reservation_key = expected
+            .provider_start_ledger
+            .iter()
+            .rev()
+            .find(|entry| {
+                entry
+                    .provider_start_idempotency_key
+                    .starts_with(&reservation_prefix)
+            })
+            .map(|entry| entry.provider_start_idempotency_key.clone());
+        // 候选 source hash：上一版 candidate source 的 durable content hash
+        // （对账证据；装载失败不阻塞等待收口——fresh 返修的真实装载点自会
+        // fail-closed）。
+        let candidate_source_hash = expected
+            .work_item_plan_source_revision_ref
+            .as_deref()
+            .and_then(|source_ref| {
+                let scope = crate::product::work_item_plan_source_store::SourceStoreScope {
+                    project_id: expected.project_id.clone(),
+                    issue_id: expected.issue_id.clone(),
+                    plan_id: expected.entity_id.clone(),
+                };
+                WorkItemPlanSourceStore::new(store.app_paths())
+                    .get_source_revision(&scope, source_ref)
+                    .ok()
+                    .map(|revision| revision.content_hash)
+            });
+        let run_context = LcRecoveryRunContext::ScAuthor {
+            business: LcRecoveryBusinessContext {
+                entity_id: self.session.entity_id.clone(),
+                plan_id: None,
+                workspace_type: self.session.workspace_type.clone(),
+                business_repository_physical_id: None,
+                business_repository_logical_id: None,
+                business_checkout_id: None,
+                business_repository_path: self
+                    .session
+                    .repository_path
+                    .clone()
+                    .map(|path| path.to_string_lossy().to_string()),
+                source_story_ids: Vec::new(),
+                source_design_ids: Vec::new(),
+                plan_options_ref: None,
+                artifact_refs: Vec::new(),
+                review_refs: Vec::new(),
+                author_provider: provider.clone(),
+                effective_reviewer_provider: self.session.reviewer_provider.clone(),
+                original_node_id: (!failed_provider_node_id.is_empty())
+                    .then(|| failed_provider_node_id.clone()),
+                original_role_run_seq: None,
+            },
+            flow: WorkItemPlanFlowKind::SingleCandidate,
+            single_candidate_phase: expected
+                .single_candidate_phase
+                .clone()
+                .unwrap_or(crate::product::models::SingleCandidatePhase::Prepare),
+            provider_start_reservation_key,
+            source_revision_ref: expected.work_item_plan_source_revision_ref.clone(),
+            ir_ref: expected.plan_candidate_ir_ref.clone(),
+            report_ref: expected.mechanical_report_ref.clone(),
+            candidate_source_hash,
+            business_material_identity: self.session.repository_path.as_ref().map(|path| {
+                path.join(".claude/rules/language.md")
+                    .to_string_lossy()
+                    .to_string()
+            }),
+        };
+        let now = chrono::Utc::now().to_rfc3339();
+        let record = LcResumeRecoveryRecord {
+            schema_version: 1,
+            recovery_id: format!("lc_resume_recovery_{}", uuid::Uuid::new_v4().simple()),
+            failed_provider_node_id,
+            reason_code: reason.to_string(),
+            role: role.clone(),
+            provider: provider.clone(),
+            superseded_native_session_id: superseded_native_session_id.clone(),
+            previous_fingerprint_digest: self
+                .logical_launch_fingerprints
+                .get(&self.session.author_provider)
+                .map(|fingerprint| fingerprint.digest.clone()),
+            previous_session_status: expected.status.clone(),
+            previous_stage: self.session.stage.as_str().to_string(),
+            run_context,
+            state: LcResumeRecoveryState::Waiting,
+            operation_id: None,
+            fresh_node_id: None,
+            fresh_native_session_id: None,
+            fresh_role_run_seq: None,
+            fresh_operations: Vec::new(),
+            detected_at: now.clone(),
+            updated_at: now,
+        };
+        let saved = store
+            .compare_and_save_lc_resume_state(&expected, record)
+            .map_err(|error| {
+                format!(
+                    "persist sc author superseded wait failed ({}): {error}",
+                    self.session.session_id
+                )
+            })?;
+        // 内存镜像同步（A2a 合同：durable 以 CAS 锁内 stored 为准）。
+        self.session.session_status = saved.status.clone();
+        self.session.lc_resume_recovery = saved.lc_resume_recovery.clone();
+        // 被取代旧会话引用清理（显式 fresh 不再携带旧 resume id）+ 等待面
+        // 幂等收口；SC phase/ledger 不动。
+        if let Some(native_id) = superseded_native_session_id.as_deref() {
+            self.clear_superseded_provider_session(role, &provider, native_id)
+                .await;
+        }
+        self.reconcile_lc_resume_waiting().await;
+        saved.lc_resume_recovery.ok_or_else(|| {
+            "persist sc author superseded wait returned record without recovery".to_string()
+        })
     }
 
     /// F5-A：SC author 修订轮判定。最近一次 review verdict 要求返修（Revise 或

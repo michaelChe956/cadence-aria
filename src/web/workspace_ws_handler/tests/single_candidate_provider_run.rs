@@ -1466,3 +1466,6 @@ pub(super) async fn wait_for_stage(engine: &Arc<Mutex<WorkspaceEngine>>, expecte
 include!("single_candidate_provider_run/reredrive_and_reopen.rs");
 // Task 2（REQ-WSC-09）：教学重驱白名单扩到 parse 语法类集合的端到端用例。
 include!("single_candidate_provider_run/ears_reredrive.rs");
+// B2c（Task 5.5）：SC author 真链回归（成员材料/compile target 不跟随 native
+// 锚）与显式 fresh 同 reservation 重入用例（大文件守卫拆分）。
+include!("single_candidate_provider_run/anchor_t17.rs");

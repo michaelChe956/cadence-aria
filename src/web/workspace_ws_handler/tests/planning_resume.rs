@@ -828,9 +828,10 @@ async fn anchor_t13_plan_stale_waits_for_explicit_fresh() {
     );
 
     // ⑤ 显式 fresh：claim 受理（FreshReserved）后 dispatch——未接管 tag
-    //    （sc_author，归 5.5）typed 拒（context_unsupported），operation
-    //    failed、recovery 回 Waiting、0 spawn（不回落通用 plan_author）。
-    //    B2b2（5.3）已把 outline 反馈族两 tag 接管为真实 full fresh
+    //    （sc_manual_revision，归 5.6/B2d）typed 拒（context_unsupported），
+    //    operation failed、recovery 回 Waiting、0 spawn（不回落通用
+    //    plan_author）。B2c（5.5）已把 sc_author 接管为真实 full fresh
+    //    （anchor_t17 正路覆盖）、B2b2（5.3）已接管 outline 反馈族两 tag
     //    （anchor_t15 正路覆盖），故先以同 recovery_id 换载未接管
     //    run_context 再 claim。
     let before_swap = fixture.latest_record();
@@ -842,22 +843,26 @@ async fn anchor_t13_plan_stale_waits_for_explicit_fresh() {
         LcRecoveryRunContext::LegacyOutlineRevision { business, .. } => business.clone(),
         other => panic!("期望换载前为 LegacyOutlineRevision，got {other:?}"),
     };
-    swapped_recovery.run_context = LcRecoveryRunContext::ScAuthor {
+    swapped_recovery.run_context = LcRecoveryRunContext::ScManualRevision {
         business: swapped_business,
-        flow: WorkItemPlanFlowKind::SingleCandidate,
-        single_candidate_phase: SingleCandidatePhase::Generate,
-        provider_start_reservation_key: None,
+        turn_id: "turn_t13_manual_swap".to_string(),
+        command_id: "command_t13_manual_swap".to_string(),
+        source_hash: "sha256:t13-manual-swap".to_string(),
+        turn_status: HumanGateTurnStatus::Running,
+        attempt_no: 1,
+        budget_reserved: 1,
+        human_gate_reservation_key: None,
+        gate_snapshot_ref: None,
         source_revision_ref: None,
-        ir_ref: None,
-        report_ref: None,
-        candidate_source_hash: None,
-        business_material_identity: None,
+        feedback_text: None,
+        assembly_digest: None,
+        assembly_ref: None,
     };
+
     fixture
         .lifecycle
         .compare_and_save_lc_resume_state(&before_swap, swapped_recovery)
         .expect("swap run_context to unclaimed tag");
-
     assert!(matches!(
         fixture.lifecycle.claim_lc_fresh(
             &fixture.session_record.id,
@@ -1040,7 +1045,10 @@ async fn anchor_t13_plan_fresh_authorized_rebuild_starts_after_claim() {
     let (outbound_tx_2, _outbound_rx_2) = mpsc::channel::<OutboundControl>(8);
     dispatch_lc_fresh_recovery_run(run_context, outbound_tx_2).await;
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    assert!(input_rx.try_recv().is_err(), "FreshRunning 重放不得二次 spawn");
+    assert!(
+        input_rx.try_recv().is_err(),
+        "FreshRunning 重放不得二次 spawn"
+    );
     let idempotent = fixture.latest_record();
     assert_eq!(
         idempotent.lc_resume_recovery.expect("recovery kept").state,
@@ -1262,8 +1270,8 @@ use crate::product::lifecycle_store::CreateWorkItemInput;
 use crate::product::models::{
     LcRecoveryDraftRef, LcRecoveryRedoSpec, LcRetainedPlanItemRef, ProviderConversationRef,
     WorkItemBatchRecord, WorkItemBatchStatus, WorkItemContextBudget, WorkItemDraftRecord,
-    WorkItemDraftStatus, WorkItemGenerationMode, WorkItemKind, WorkItemPlanDraftActiveIndex,
-    WorkItemPlanOutline, WorkItemPlanStatus, WorkItemOutline,
+    WorkItemDraftStatus, WorkItemGenerationMode, WorkItemKind, WorkItemOutline,
+    WorkItemPlanDraftActiveIndex, WorkItemPlanOutline, WorkItemPlanStatus,
 };
 use crate::product::work_item_plan_store::WorkItemPlanStore;
 use crate::web::workspace_ws_types::{
@@ -1314,14 +1322,8 @@ impl AnchorT16PlanFixture {
         store
             .save_active_index(&anchor_t16_active_index(
                 Some("outline_a".to_string()),
-                BTreeMap::from([(
-                    "outline_a".to_string(),
-                    "draft_outline_a".to_string(),
-                )]),
-                BTreeMap::from([(
-                    "draft_outline_a".to_string(),
-                    WorkItemDraftStatus::Accepted,
-                )]),
+                BTreeMap::from([("outline_a".to_string(), "draft_outline_a".to_string())]),
+                BTreeMap::from([("draft_outline_a".to_string(), WorkItemDraftStatus::Accepted)]),
                 Vec::new(),
             ))
             .expect("save active index");
@@ -1370,10 +1372,7 @@ impl AnchorT16PlanFixture {
     /// revision 场景：两个 lifecycle work item（保留+重做），engine artifact
     /// 由用例注入 candidate（一个 reverted 带反馈）。
     fn seed_revision_work_items(&self, repository_id: &str) {
-        for (id, title) in [
-            ("wi_t16_keep", "保留项"),
-            ("wi_t16_redo", "重做项"),
-        ] {
+        for (id, title) in [("wi_t16_keep", "保留项"), ("wi_t16_redo", "重做项")] {
             self.t13
                 .lifecycle
                 .create_work_item(CreateWorkItemInput {
@@ -1681,9 +1680,11 @@ async fn anchor_t16_claim_and_dispatch(
     input_tx: mpsc::UnboundedSender<StreamingProviderInput>,
 ) -> mpsc::Receiver<OutboundControl> {
     assert!(matches!(
-        fixture
-            .lifecycle()
-            .claim_lc_fresh(fixture.session_id(), &recovery.recovery_id, operation_id),
+        fixture.lifecycle().claim_lc_fresh(
+            fixture.session_id(),
+            &recovery.recovery_id,
+            operation_id
+        ),
         Ok(LcFreshClaimOutcome::Claimed { .. })
     ));
     let record = fixture.latest_record();
@@ -1745,19 +1746,12 @@ async fn anchor_t16_legacy_draft_batch_revision_fresh_preserves_business_generat
             candidate_ref: None,
         },
     );
-    let engine_arc = fixture.engine_after_stale_closure(
-        Some(anchor_t16_outline_artifact()),
-        "checkpoints-t16-draft",
-    );
+    let engine_arc = fixture
+        .engine_after_stale_closure(Some(anchor_t16_outline_artifact()), "checkpoints-t16-draft");
     let (input_tx, mut input_rx) = mpsc::unbounded_channel();
-    let outbound_rx = anchor_t16_claim_and_dispatch(
-        &fixture,
-        &recovery,
-        "op-t16-draft",
-        engine_arc,
-        input_tx,
-    )
-    .await;
+    let outbound_rx =
+        anchor_t16_claim_and_dispatch(&fixture, &recovery, "op-t16-draft", engine_arc, input_tx)
+            .await;
 
     let input = tokio::time::timeout(std::time::Duration::from_secs(3), input_rx.recv())
         .await
@@ -1819,29 +1813,20 @@ async fn anchor_t16_legacy_batch_fresh_keeps_batch_and_budget() {
             outline_ref: Some("outline_001".to_string()),
             candidate_ref: None,
             batch_id: "batch_0001".to_string(),
-            batch_item_draft_refs: vec![
-                LcRecoveryDraftRef {
-                    draft_id: "draft_outline_a".to_string(),
-                    status: WorkItemDraftStatus::Accepted,
-                    version: None,
-                    hash: None,
-                },
-            ],
+            batch_item_draft_refs: vec![LcRecoveryDraftRef {
+                draft_id: "draft_outline_a".to_string(),
+                status: WorkItemDraftStatus::Accepted,
+                version: None,
+                hash: None,
+            }],
         },
     );
-    let engine_arc = fixture.engine_after_stale_closure(
-        Some(anchor_t16_outline_artifact()),
-        "checkpoints-t16-batch",
-    );
+    let engine_arc = fixture
+        .engine_after_stale_closure(Some(anchor_t16_outline_artifact()), "checkpoints-t16-batch");
     let (input_tx, mut input_rx) = mpsc::unbounded_channel();
-    let outbound_rx = anchor_t16_claim_and_dispatch(
-        &fixture,
-        &recovery,
-        "op-t16-batch",
-        engine_arc,
-        input_tx,
-    )
-    .await;
+    let outbound_rx =
+        anchor_t16_claim_and_dispatch(&fixture, &recovery, "op-t16-batch", engine_arc, input_tx)
+            .await;
 
     let input = tokio::time::timeout(std::time::Duration::from_secs(3), input_rx.recv())
         .await
@@ -1892,9 +1877,7 @@ async fn anchor_t16_legacy_plan_revision_fresh_recomputes_matching_payload() {
             }],
             redo_specs: vec![LcRecoveryRedoSpec {
                 old_item_id: "wi_t16_redo".to_string(),
-                feedback: Some(
-                    "返修该组件\n\n整体反馈: ".to_string() + &feedback,
-                ),
+                feedback: Some("返修该组件\n\n整体反馈: ".to_string() + &feedback),
             }],
             overall_feedback: Some(feedback.clone()),
         },
@@ -1904,14 +1887,9 @@ async fn anchor_t16_legacy_plan_revision_fresh_recomputes_matching_payload() {
         "checkpoints-t16-revision",
     );
     let (input_tx, mut input_rx) = mpsc::unbounded_channel();
-    let mut outbound_rx = anchor_t16_claim_and_dispatch(
-        &fixture,
-        &recovery,
-        "op-t16-revision",
-        engine_arc,
-        input_tx,
-    )
-    .await;
+    let mut outbound_rx =
+        anchor_t16_claim_and_dispatch(&fixture, &recovery, "op-t16-revision", engine_arc, input_tx)
+            .await;
 
     let input = tokio::time::timeout(std::time::Duration::from_secs(3), input_rx.recv())
         .await
@@ -2039,28 +2017,33 @@ async fn anchor_t16_fresh_plan_revision_payload_mismatch_waits_typed_stale() {
 #[tokio::test]
 async fn anchor_t16_untaken_tag_still_typed_rejected_no_fallback() {
     let fixture = AnchorT16PlanFixture::new();
-    // 未接管 tag（sc_author 归 B2c/5.5）：typed 拒，不回落通用 plan_author。
+    // 未接管 tag（sc_manual_revision 归 B2d/5.6；sc_author 已由 B2c/5.5
+    // 接管为真实 full fresh，见 anchor_t17）：typed 拒，不回落通用
+    // plan_author。
     let recovery = fixture.seed_recovery_waiting(
-        "recovery_anchor_t16_sc_author",
-        LcRecoveryRunContext::ScAuthor {
+        "recovery_anchor_t16_sc_manual_revision",
+        LcRecoveryRunContext::ScManualRevision {
             business: anchor_t16_business(),
-            flow: WorkItemPlanFlowKind::SingleCandidate,
-            single_candidate_phase: SingleCandidatePhase::Generate,
-            provider_start_reservation_key: None,
+            turn_id: "turn_t16_manual_swap".to_string(),
+            command_id: "command_t16_manual_swap".to_string(),
+            source_hash: "sha256:t16-manual-swap".to_string(),
+            turn_status: HumanGateTurnStatus::Running,
+            attempt_no: 1,
+            budget_reserved: 1,
+            human_gate_reservation_key: None,
+            gate_snapshot_ref: None,
             source_revision_ref: None,
-            ir_ref: None,
-            report_ref: None,
-            candidate_source_hash: None,
-            business_material_identity: None,
+            feedback_text: None,
+            assembly_digest: None,
+            assembly_ref: None,
         },
     );
-    let engine_arc =
-        fixture.engine_after_stale_closure(None, "checkpoints-t16-sc-author");
+    let engine_arc = fixture.engine_after_stale_closure(None, "checkpoints-t16-sc-manual-revision");
     let (input_tx, mut input_rx) = mpsc::unbounded_channel();
     let mut outbound_rx = anchor_t16_claim_and_dispatch(
         &fixture,
         &recovery,
-        "op-t16-sc-author",
+        "op-t16-sc-manual-revision",
         engine_arc,
         input_tx,
     )
@@ -2158,12 +2141,10 @@ impl StreamingProviderAdapter for T15OutlineFreshProvider {
         //（合同在 prompt 文本内）——从 prompt 提取 strict contract 的
         // sentinel nonce（同一 prompt 内所有出现同 nonce）自行包装。
         let output = match contract.as_ref() {
-            Some(contract) => {
-                crate::cross_cutting::provider_adapter::structured_output_sentinel(
-                    &contract.nonce,
-                    &payload,
-                )
-            }
+            Some(contract) => crate::cross_cutting::provider_adapter::structured_output_sentinel(
+                &contract.nonce,
+                &payload,
+            ),
             None => {
                 const NONCE_TAG: &str = "<ARIA_STRUCTURED_OUTPUT nonce=\"";
                 let nonce = input
@@ -2172,7 +2153,7 @@ impl StreamingProviderAdapter for T15OutlineFreshProvider {
                     .map(|start| {
                         input.prompt[start + NONCE_TAG.len()..]
                             .split('"')
-                    .next()
+                            .next()
                             .unwrap_or_default()
                             .to_string()
                     })
@@ -2181,22 +2162,19 @@ impl StreamingProviderAdapter for T15OutlineFreshProvider {
                     !nonce.is_empty(),
                     "t15 fake 必须能从 prompt 提取 sentinel nonce"
                 );
-                crate::cross_cutting::provider_adapter::structured_output_sentinel(
-                    &nonce, &payload,
-                )
+                crate::cross_cutting::provider_adapter::structured_output_sentinel(&nonce, &payload)
             }
         };
-        let completion =
-            crate::cross_cutting::streaming_provider::ProviderCompletion::from_output(
-                output,
-                contract.as_ref(),
-                Some("t15-fresh-native".to_string()),
-            );
+        let completion = crate::cross_cutting::streaming_provider::ProviderCompletion::from_output(
+            output,
+            contract.as_ref(),
+            Some("t15-fresh-native".to_string()),
+        );
         tokio::spawn(async move {
             let _ = event_tx
-                .send(crate::cross_cutting::streaming_provider::ProviderEvent::Completed(
-                    completion,
-                ))
+                .send(
+                    crate::cross_cutting::streaming_provider::ProviderEvent::Completed(completion),
+                )
                 .await;
         });
         Ok(ProviderSession {
@@ -2245,19 +2223,18 @@ async fn anchor_t15_legacy_outline_fresh_retains_feedback_and_prior_outline() {
             },
         );
     // 持续 drain engine 事件（夹具要求）。
-    tokio::spawn(async move {
-        while engine_rx.recv().await.is_some() {}
-    });
+    tokio::spawn(async move { while engine_rx.recv().await.is_some() {} });
     let (story_id, design_id) = (fixture.story_id.clone(), fixture.design_id.clone());
     *spec_ids.lock().expect("t15 spec ids") = (story_id.clone(), design_id.clone());
 
     // durable 旧稿全文（v1，策略标记与 fake 新稿互斥）＋ review 节点 verdict。
-    let prior_outline = crate::product::work_item_split_engine::parse_work_item_plan_outline_output(
-        t15_outline_output_payload(&story_id, &design_id),
-    )
-    .expect("prior outline payload")
-    .outline
-    .expect("outline");
+    let prior_outline =
+        crate::product::work_item_split_engine::parse_work_item_plan_outline_output(
+            t15_outline_output_payload(&story_id, &design_id),
+        )
+        .expect("prior outline payload")
+        .outline
+        .expect("outline");
     let mut prior_candidate = prior_outline.clone();
     prior_candidate.strategy_summary = "T15上一版大纲策略全文标记".to_string();
     fixture
@@ -2381,11 +2358,9 @@ async fn anchor_t15_legacy_outline_fresh_retains_feedback_and_prior_outline() {
 
     // 显式 fresh：socket 门通过后的权威 CAS claim → dispatch。
     assert!(matches!(
-        fixture.lifecycle.claim_lc_fresh(
-            &fixture.record.id,
-            "recovery_anchor_t15",
-            "op-t15-fresh"
-        ),
+        fixture
+            .lifecycle
+            .claim_lc_fresh(&fixture.record.id, "recovery_anchor_t15", "op-t15-fresh"),
         Ok(LcFreshClaimOutcome::Claimed { .. })
     ));
     let mut registry = ProviderRegistry::new();
@@ -2464,7 +2439,10 @@ async fn anchor_t15_legacy_outline_fresh_retains_feedback_and_prior_outline() {
             .expect("load active index")
             .map(|index| index.outline_to_current_draft_id.len())
             .unwrap_or(0);
-    assert_eq!(new_workspace_count, 0, "outline 确认门不得创建 draft workspace");
+    assert_eq!(
+        new_workspace_count, 0,
+        "outline 确认门不得创建 draft workspace"
+    );
 
     let after = fixture
         .lifecycle
