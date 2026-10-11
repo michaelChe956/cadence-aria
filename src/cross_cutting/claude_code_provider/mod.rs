@@ -14,16 +14,16 @@ use crate::cross_cutting::process_manager::{ManagedProcessChild, ProcessManager}
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::streaming_provider::{
     ChoiceAnswerData, ChoiceOptionData, ChoiceQuestionData, ChoiceRequestData, ChoiceRequestSource,
-    ProviderEvent, ProviderExecutionEvent, ProviderExecutionEventKind,
-    ProviderExecutionEventStatus, ProviderPermissionMode, ProviderSession, ProviderStatus,
-    ProviderVersionSupplier, RiskLevel, StreamingProviderAdapter, StreamingProviderInput,
-    UsageReportData, canonical_tool_policy, validate_tool_policy_for_role,
+    LcVersionCache, LcVersionObservation, LcVersionProbe, LcVersionProbeKey, ProviderEvent,
+    ProviderExecutionEvent, ProviderExecutionEventKind, ProviderExecutionEventStatus,
+    ProviderPermissionMode, ProviderSession, ProviderStatus, ProviderVersionSupplier, RiskLevel,
+    StreamingProviderAdapter, StreamingProviderInput, UsageReportData, canonical_tool_policy,
+    validate_tool_policy_for_role,
 };
 use crate::cross_cutting::structured_output::StructuredOutputContract;
 use crate::cross_cutting::tool_policy_audit::{
     DurableToolPolicyEvent, ProviderStartAudit, ToolPolicyAuditSink,
 };
-use crate::product::logical_codebase::provider_projection::ProviderPolicyProjector;
 
 mod ask_user_question;
 mod projection;
@@ -91,6 +91,25 @@ pub async fn probe_claude_version(
         Ok(_) | Err(_) => Err(VersionProbeError::Unavailable),
     }
 }
+
+/// CLI 可执行身份(LC probe key 维度,Task 3.3):文件长度 + mtime 纳秒的
+/// 稳定文本;重写/替换同一 canonical 路径下的二进制即换身份 → 新 key 再
+/// 观测(不命中旧 TTL 缓存)。元数据不可得时退化为路径文本(探测本身随后
+/// fail-closed,不伪造身份)。
+fn lc_executable_identity(command: &std::path::Path) -> String {
+    match std::fs::metadata(command) {
+        Ok(metadata) => {
+            let mtime_ns = metadata
+                .modified()
+                .ok()
+                .and_then(|moment| moment.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0);
+            format!("claude-cli:len:{}:mtime_ns:{mtime_ns}", metadata.len())
+        }
+        Err(_) => format!("claude-cli:unresolved:{}", command.to_string_lossy()),
+    }
+}
 #[derive(Debug, Clone)]
 struct ClaudePermissionRequest {
     request_id: String,
@@ -124,6 +143,14 @@ pub struct ClaudeCodeProvider {
     command: PathBuf,
     /// 策略会话 provider 版本 supplier（测试 seam；3.3 接线真实 CLI 探测后保留）。
     version_supplier: Option<ProviderVersionSupplier>,
+    /// supplier 实例范围（LC probe key 的 `supplier_scope` 维度;真实 CLI
+    /// 探测恒 0,每个注入 supplier 实例单调分配,测试 supplier 与真实 CLI
+    /// 不串值）。
+    version_supplier_scope: u64,
+    /// Task 3.3(B0b):LC exact-version 只读观测的 60 秒 TTL/single-flight
+    /// 缓存(实例内;与 direct 路径的无过期 `cached_cli_version` 严格分离,
+    /// 进程/实例重建即失效,不跨实例复用旧值)。
+    lc_version_cache: LcVersionCache,
 }
 
 impl std::fmt::Debug for ClaudeCodeProvider {
@@ -160,13 +187,117 @@ impl ClaudeCodeProvider {
         Self {
             command,
             version_supplier: None,
+            version_supplier_scope: 0,
+            lc_version_cache: LcVersionCache::new(),
         }
     }
 
     /// 注入策略会话 provider 版本 supplier（fixture/测试 seam）。
     pub fn with_version_supplier(mut self, supplier: ProviderVersionSupplier) -> Self {
+        static NEXT_SUPPLIER_SCOPE: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(1);
         self.version_supplier = Some(supplier);
+        self.version_supplier_scope =
+            NEXT_SUPPLIER_SCOPE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self
+    }
+
+    /// LC 版本观测 probe key:provider + canonical executable 路径 + 可执行
+    /// 身份(长度+mtime;路径/身份任一变化即换 key,不失效其它 key)+
+    /// `--version` argv + supplier 实例范围(3.2 `LcVersionProbeKey` 合同)。
+    fn lc_version_probe_key(&self, executable_identity: String) -> LcVersionProbeKey {
+        LcVersionProbeKey {
+            provider: crate::product::models::ProviderName::ClaudeCode,
+            canonical_executable: std::fs::canonicalize(&self.command)
+                .unwrap_or_else(|_| self.command.clone()),
+            executable_identity,
+            argv: vec!["--version".to_string()],
+            supplier_scope: self.version_supplier_scope,
+        }
+    }
+
+    /// Task 3.3(B0b):Claude LC 只读 facts 的单一观测实现——`prepare_lc_facts`
+    /// 与 `start_validated` 共用同一提取(guard/adapter 匹配由两入口各自
+    /// 先行,观测本身零 spawn/零写):
+    /// - exact version:supplier seam 优先(测试);默认真实 CLI `--version`
+    ///   有界探测经实例内 60 秒 TTL/single-flight `LcVersionCache`(失败/
+    ///   取消不缓存、不回退过期成功);
+    /// - boundary:envelope 派生的不可伪造 boundary plan(与 argv 同源);
+    /// - projector:与 exact version 同源的 `ClaudePolicyProjector`(provider
+    ///   owner 不变;不从 registry/capability 空 version 取证)。
+    async fn observe_lc_facts(
+        &self,
+        launch: &crate::product::logical_codebase::provider_gateway::ValidatedSessionLaunchPolicy,
+        cancel: CancellationToken,
+    ) -> Result<
+        crate::product::logical_codebase::provider_projection::ProviderLcPrepareFacts,
+        ProviderAdapterError,
+    > {
+        let (observation, key) = match self.version_supplier.clone() {
+            Some(supplier) => {
+                let version = supplier().map_err(|error| {
+                    ProviderAdapterError::parse_error(
+                        format!("claude lc prepare facts: {error}"),
+                        String::new(),
+                        String::new(),
+                    )
+                })?;
+                let key = self.lc_version_probe_key(format!(
+                    "claude-cli:supplier:{}",
+                    self.version_supplier_scope
+                ));
+                (
+                    LcVersionObservation::new(version, std::time::Instant::now()),
+                    key,
+                )
+            }
+            None => {
+                let key = self.lc_version_probe_key(lc_executable_identity(&self.command));
+                let command = self.command.clone();
+                let probe: LcVersionProbe = Arc::new(move |_probe_key| {
+                    let command = command.clone();
+                    Box::pin(async move {
+                        probe_claude_version(&command, CLAUDE_VERSION_PROBE_TIMEOUT).await
+                    })
+                });
+                let observation = self
+                    .lc_version_cache
+                    .cached_lc_cli_version(key.clone(), probe, cancel)
+                    .await
+                    .map_err(|error| {
+                        ProviderAdapterError::parse_error(
+                            format!("claude lc prepare facts: {error}"),
+                            String::new(),
+                            String::new(),
+                        )
+                    })?;
+                (observation, key)
+            }
+        };
+        let envelope = launch.envelope();
+        let boundary = projection::lc_boundary_plan(envelope).map_err(|error| {
+            ProviderAdapterError::parse_error(
+                format!("claude lc prepare facts: {error}"),
+                String::new(),
+                String::new(),
+            )
+        })?;
+        let projector = ClaudePolicyProjector::new(observation.exact_version().to_string())
+            .with_root_recipe_phase(launch.is_root_recipe_phase());
+        Ok(
+            crate::product::logical_codebase::provider_projection::ProviderLcPrepareFacts::new(
+                crate::product::logical_codebase::provider_gateway::ProviderRefType::ClaudeCode,
+                envelope.provider_dialect,
+                crate::product::logical_codebase::policy::ProviderWireDialect::ClaudeCodeStreamJson,
+                observation.exact_version().to_string(),
+                observation.observed_at(),
+                key,
+                projection::CLAUDE_LC_APPROVAL_POLICY.to_string(),
+                String::new(),
+                boundary,
+                Arc::new(projector),
+            ),
+        )
     }
 
     /// - Tool policy（REQ-ENV-09）：`Some(DenyFileWriteBuiltins)` 时追加冻结片段
@@ -577,9 +708,9 @@ async fn run_claude_session_tail(
     .await
     {
         crate::cross_cutting::process_manager::SessionTailExit::Stream(result) => result,
-        crate::cross_cutting::process_manager::SessionTailExit::ChildExitBeforeTerminal { error } => {
-            Err(error)
-        }
+        crate::cross_cutting::process_manager::SessionTailExit::ChildExitBeforeTerminal {
+            error,
+        } => Err(error),
     };
     match result {
         Ok(ClaudeStreamOutcome::Aborted) => {
@@ -1188,65 +1319,65 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
             )
         })?;
 
-        // exact version(supplier seam 优先,默认真实 `--version` 探测+进程内
-        // 缓存;不可得 fail-closed)。全 LC 路径必填,非仅策略角色。
-        let provider_version = match self.version_supplier.clone() {
-            Some(supplier) => supplier().map_err(|error| {
-                ProviderAdapterError::parse_error(
-                    format!("claude lc validated start: {error}"),
-                    String::new(),
-                    String::new(),
-                )
-            })?,
-            None => crate::cross_cutting::streaming_provider::cached_cli_version(
-                &self.command,
-                probe_claude_version(&self.command, CLAUDE_VERSION_PROBE_TIMEOUT),
-            )
-            .await
-            .map_err(|error| {
-                ProviderAdapterError::parse_error(
-                    format!("claude lc validated start: {error}"),
-                    String::new(),
-                    String::new(),
-                )
-            })?,
-        };
+        // Task 3.3(B0b):LC 只读 facts 与公共 prepare 合同同源
+        // (`prepare_lc_facts` 同一观测实现:supplier seam 优先,默认真实
+        // `--version` 有界探测经实例内 60 秒 TTL/single-flight 缓存;不可得
+        // fail-closed)。全 LC 路径必填,非仅策略角色;guard 已先行,观测
+        // 发生在任何 session child 之前。
+        let facts = self.observe_lc_facts(&launch, cancel.clone()).await?;
+        let provider_version = facts.exact_version().to_string();
 
-        // 不可伪造 boundary plan + 投影。trust/MCP bundle digest 的 gateway
-        // 侧装配(ProviderTrustSource/Aria bundle)归 1b/1c;空串同样纳入
-        // session digest,装配后任一漂移都会改变 projection_digest。
-        let boundary = projection::lc_boundary_plan(&envelope).map_err(|error| {
-            ProviderAdapterError::parse_error(
-                format!("claude lc validated start: {error}"),
-                String::new(),
-                String::new(),
-            )
-        })?;
-        let projection_input =
-            crate::product::logical_codebase::provider_projection::ProviderProjectionInput::new(
-                envelope.clone(),
-                crate::product::logical_codebase::provider_gateway::ProviderRef::claude_code(
-                    launch.capability_snapshot_ref(),
-                ),
-                envelope.action,
-                input.role.clone(),
-                input.permission_mode.clone(),
-                input.tool_policy.clone(),
-                projection::CLAUDE_LC_APPROVAL_POLICY.to_string(),
-                String::new(),
-                envelope.config_artifact_ref.clone(),
-                String::new(),
-                Some(boundary),
-            );
-        let projector = ClaudePolicyProjector::new(provider_version.clone())
-            .with_root_recipe_phase(launch.is_root_recipe_phase());
-        let lc_projection = projector.project(&projection_input).map_err(|error| {
-            ProviderAdapterError::parse_error(
-                format!("claude lc validated start: {error}"),
-                String::new(),
-                String::new(),
-            )
-        })?;
+        // start_validated 消费 prepared projection(与 gateway 冻结 full
+        // projection 同源):完整上下文路径(resume 判定)携带的冻结投影
+        // 直接作为审计投影——child 前以当前 facts 复验 exact version(TTL
+        // 内同一观测),漂移 typed 拒、零 child;裸 validate 路径(无冻结
+        // 投影,legacy/direct fixture)按原语义以 facts 同版本 projector
+        // 自投影。trust/MCP bundle digest 的 gateway 侧装配归 1b/1c;空串
+        // 同样纳入 session digest,装配后任一漂移都会改变 projection_digest。
+        let lc_projection = match launch.lc_projection() {
+            Some(frozen) => {
+                if frozen.exact_version() != facts.exact_version() {
+                    return Err(ProviderAdapterError::parse_error(
+                        format!(
+                            "claude lc validated start: frozen projection exact version {} disagrees with observed facts version {} (drift before spawn; zero children, no session started)",
+                            frozen.exact_version(),
+                            facts.exact_version()
+                        ),
+                        String::new(),
+                        String::new(),
+                    ));
+                }
+                frozen.clone()
+            }
+            None => {
+                let projection_input =
+                    crate::product::logical_codebase::provider_projection::ProviderProjectionInput::new(
+                        envelope.clone(),
+                        crate::product::logical_codebase::provider_gateway::ProviderRef::claude_code(
+                            launch.capability_snapshot_ref(),
+                        ),
+                        envelope.action,
+                        input.role.clone(),
+                        input.permission_mode.clone(),
+                        input.tool_policy.clone(),
+                        facts.approval_policy().to_string(),
+                        facts.mcp_bundle_digest().to_string(),
+                        envelope.config_artifact_ref.clone(),
+                        String::new(),
+                        Some(facts.boundary().clone()),
+                    );
+                facts
+                    .projector()
+                    .project(&projection_input)
+                    .map_err(|error| {
+                        ProviderAdapterError::parse_error(
+                            format!("claude lc validated start: {error}"),
+                            String::new(),
+                            String::new(),
+                        )
+                    })?
+            }
+        };
 
         // Task 9a:LC 显式 resume 在 child 前比较全 LC audit(完整字面量含
         // 投影)。存档缺 lc_projection(旧/direct 形态)或任一投影摘要漂移
@@ -1562,5 +1693,49 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
             events: event_rx,
             commands,
         })
+    }
+
+    /// Task 3.3(B0b):Claude 真实 `prepare_lc_facts`——消费 3.2 公共 prepare
+    /// 合同,以只读方式观测本家 facts(exact version 经 60 秒 TTL/single-
+    /// flight 的真实 CLI `--version` 观测或 supplier seam、envelope 派生
+    /// boundary、与该版本同源的纯 projector),供 gateway 装配 full
+    /// projection。guard 先行(早于版本 probe/child),adapter 匹配错位即
+    /// typed 拒;全程零 spawn/零写,不从 registry/capability 空 version
+    /// 取证。
+    async fn prepare_lc_facts(
+        &self,
+        input: &StreamingProviderInput,
+        launch: &crate::product::logical_codebase::provider_gateway::ValidatedSessionLaunchPolicy,
+        cancel: CancellationToken,
+    ) -> Result<
+        crate::product::logical_codebase::provider_projection::ProviderLcPrepareFacts,
+        ProviderAdapterError,
+    > {
+        // guard 早于 probe/child(与 start_validated 同一守卫:run-context
+        // role 一致 + root recipe 相位语义 + 双向 tool-policy 守卫)。
+        crate::cross_cutting::streaming_provider::guard_lc_validated_launch(
+            launch.is_root_recipe_phase(),
+            &input.role,
+            &input.role,
+            input.tool_policy.as_ref(),
+        )
+        .map_err(|error| {
+            ProviderAdapterError::parse_error(error.to_string(), String::new(), String::new())
+        })?;
+
+        // adapter 匹配:只有 Claude Code/ClaudeCodeCliV1 的 launch 可观测
+        // (不匹配即拒,不回退其它 provider/dialect)。
+        if input.provider_type != crate::protocol::contracts::ProviderType::ClaudeCode
+            || launch.envelope().provider_dialect
+                != crate::product::logical_codebase::policy::ProviderDialect::ClaudeCodeCliV1
+        {
+            return Err(ProviderAdapterError::parse_error(
+                "claude lc prepare facts: only Claude Code launches are accepted by this adapter",
+                String::new(),
+                String::new(),
+            ));
+        }
+
+        self.observe_lc_facts(launch, cancel).await
     }
 }

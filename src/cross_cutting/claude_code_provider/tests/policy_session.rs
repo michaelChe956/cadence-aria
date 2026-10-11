@@ -1462,3 +1462,475 @@ fn lcg_t10_claude_root_recipe_marker_canonicalization_is_deterministic_and_phase
         "unexpected projection rejection: {rejected_projection:?}"
     );
 }
+
+// ==== Task 3.3(B0b):Claude 真实 prepare facts 与 full 投影/审计同源 ====
+
+use crate::cross_cutting::claude_code_provider::{
+    CLAUDE_POLICY_DIALECT, TOOL_POLICY_PROVIDER_NAME,
+};
+use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
+use crate::product::logical_codebase::provider_gateway::{
+    GatewaySessionDisposition, PreparedLcStreamingCandidate, ProviderLaunchAuditContext,
+    ResumeSessionLaunchRequest, SessionResumeFingerprint, ValidatedSessionLaunchPolicy,
+    canonical_target_git_identity,
+};
+use crate::product::logical_codebase::provider_projection::UnprovisionedProviderPolicyProjector;
+
+/// t33 真实 CLI fixture 版本(`--version` 输出与 capability 快照同值,经
+/// admission 的 provider_version 一致门)。
+const T33_CLI_VERSION: &str = "claude 1.0.33-t33-fixture";
+
+/// t33 真实 CLI fixture 体:`--version` 分支应答指定版本(真实 `--version`
+/// 探测面);会话模式先把 `pwd -P` 落入 LC_CWD_MARKER(零 child 观测点),
+/// 随后以指定原生会话 id 应答 init/result。
+fn t33_cli_body(version: &str, session_id: &str, result_text: &str) -> String {
+    format!(
+        "#!/usr/bin/env bash\nif [[ \"${{1:-}}\" == \"--version\" ]]; then\n  echo '{version}'\n  exit 0\nfi\npwd -P > \"$LC_CWD_MARKER\"\nwhile IFS= read -r line; do\n  if [[ \"$line\" == *'\"type\":\"user\"'* ]]; then\n    echo '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"{session_id}\"}}'\n    echo '{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"{result_text}\",\"session_id\":\"{session_id}\"}}'\n    exit 0\n  fi\ndone\n"
+    )
+}
+
+/// t33 错 ID fixture 体:登记 pid 并以「与请求不同的原生会话 id」应答 init,
+/// 随后存活等待 kill 链终止(kill/reap 必须来自 adapter 返回前)。
+fn t33_wrong_id_cli_body(version: &str, pid_marker: &Path, wrong_session_id: &str) -> String {
+    format!(
+        "#!/usr/bin/env bash\nif [[ \"${{1:-}}\" == \"--version\" ]]; then\n  echo '{version}'\n  exit 0\nfi\nwhile IFS= read -r line; do\n  if [[ \"$line\" == *'\"type\":\"user\"'* ]]; then\n    echo $$ > {}\n    echo '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"{wrong_session_id}\"}}'\n    while IFS= read -r line; do :; done\n    exit 0\n  fi\ndone\n",
+        pid_marker.display()
+    )
+}
+
+/// 写入(或重写)t33 CLI fixture 并保持可执行(重写同一路径是漂移用例的
+/// 真实观测点:executable identity 变化 → probe key 换新再观测)。
+fn t33_write_cli(path: &Path, body: &str) {
+    std::fs::write(path, body).expect("write t33 cli fixture");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).expect("chmod t33 cli fixture");
+    }
+}
+
+fn t33_cli_path(name: &str, body: &str) -> PathBuf {
+    let dir = tempfile::tempdir().expect("t33 fixture dir");
+    let path = dir.keep().join(name);
+    t33_write_cli(&path, body);
+    path
+}
+
+/// t33 capability 源:version 与真实 CLI `--version` 输出同值;action row 的
+/// `projection_digest` 以生产同源 Claude projector 推导 capability profile
+/// 摘要(证据摘要分层:profile 只依赖 provider/dialect/wire/version/action/
+/// boundary mode/approval/MCP 控制规范,与单次 cwd/target/trust/config 无关),
+/// 保证 admission 的 profile 摘要门对真实投影放行。
+fn t33_claude_profile_digest(action: SessionPolicyAction) -> String {
+    let envelope = lc_projection_envelope(
+        action,
+        PathBuf::from("/t33/member-worktree"),
+        "sha256:t33-config-artifact",
+        "sha256:t33-config-digest",
+    );
+    let boundary = projection::lc_boundary_plan(&envelope).expect("t33 boundary plan");
+    let input = ProviderProjectionInput::new(
+        envelope.clone(),
+        ProviderRef::claude_code("cap_claude_code_lc_fixture"),
+        envelope.action,
+        AdapterRole::Executor,
+        crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
+        None,
+        projection::CLAUDE_LC_APPROVAL_POLICY.to_string(),
+        String::new(),
+        envelope.config_artifact_ref.clone(),
+        String::new(),
+        Some(boundary),
+    );
+    ClaudePolicyProjector::new(T33_CLI_VERSION)
+        .project(&input)
+        .expect("t33 profile projection derives the capability profile digest")
+        .capability_projection_digest()
+        .to_string()
+}
+
+struct T33CapabilitySource {
+    profile_digest: String,
+}
+
+impl T33CapabilitySource {
+    fn capability(&self, action: SessionPolicyAction) -> ProviderCapability {
+        ProviderCapability {
+            provider_type: ProviderRefType::ClaudeCode,
+            version: T33_CLI_VERSION.to_string(),
+            adapter_dialect: ProviderDialect::ClaudeCodeCliV1,
+            wire_dialect: ProviderWireDialect::ClaudeCodeStreamJson,
+            capability_snapshot_ref: "cap_claude_code_lc_fixture".to_string(),
+            action_capability: ProviderActionCapability {
+                action,
+                launch: ProviderCapabilityEvidence::Confirmed,
+                resume: ProviderCapabilityEvidence::Confirmed,
+                write_boundary: ProviderCapabilityEvidence::Confirmed,
+                projection_digest: self.profile_digest.clone(),
+                evidence_ref: String::new(),
+            },
+            trust: ProviderCapabilityEvidence::Confirmed,
+        }
+    }
+}
+
+impl ProviderCapabilitySource for T33CapabilitySource {
+    fn require_supported(
+        &self,
+        _provider: &ProviderRef,
+        action: SessionPolicyAction,
+    ) -> Result<ProviderCapability, ProviderGatewayError> {
+        Ok(self.capability(action))
+    }
+
+    fn require_resume_supported(
+        &self,
+        _provider: &ProviderRef,
+        action: SessionPolicyAction,
+    ) -> Result<ProviderCapability, ProviderGatewayError> {
+        Ok(self.capability(action))
+    }
+
+    fn require_write_boundary(
+        &self,
+        _provider: &ProviderRef,
+        action: SessionPolicyAction,
+    ) -> Result<ProviderCapability, ProviderGatewayError> {
+        Ok(self.capability(action))
+    }
+
+    fn require_root_recipe_supported(
+        &self,
+        _provider: &ProviderRef,
+        _credential: &crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
+    ) -> Result<ProviderCapability, ProviderGatewayError> {
+        Err(ProviderGatewayError::UnsupportedCapability(
+            "t33 fixture has no root recipe facts".to_string(),
+        ))
+    }
+}
+
+/// 以真实 ClaudeCodeProvider 装配 gateway(registry gated wrapper 透传
+/// `prepare_lc_facts`;capability 源与真实 CLI 版本/profile 摘要对齐)。
+fn t33_gateway(
+    fixture: &LcLaunchFixture,
+    adapter: Arc<ClaudeCodeProvider>,
+) -> LogicalCodebaseProviderGateway {
+    let mut registry = ProviderRegistry::new();
+    registry
+        .register_gated(
+            ProviderName::ClaudeCode,
+            adapter,
+            Arc::new(UnprovisionedProviderPolicyProjector),
+            lc_available_gate(),
+        )
+        .expect("register the real claude adapter for anchor t33");
+    LogicalCodebaseProviderGateway::with_audit(
+        AggregatePolicyArtifactStore::new(fixture.paths.clone()),
+        Arc::new(T33CapabilitySource {
+            profile_digest: t33_claude_profile_digest(SessionPolicyAction::CodingTargetWrite),
+        }),
+        Arc::new(LcTargetResolver),
+        Arc::new(registry),
+        Arc::new(LcNoopSyncAdapter),
+        lc_available_gate(),
+        fixture.audit.clone(),
+        fixture.canonical_root(),
+    )
+}
+
+fn t33_audit_context(sink: &Arc<RecordingToolPolicyAuditSink>) -> ProviderLaunchAuditContext {
+    ProviderLaunchAuditContext {
+        workspace_session_id: "ws-lc-fixture-1".to_string(),
+        role_run_seq: 1,
+        audit_sink: sink.clone(),
+    }
+}
+
+/// 真实 prepare→full-matching resume 链:gateway 冻结 opaque 候选(内部经
+/// registry wrapper 调真实 adapter `prepare_lc_facts`),再以候选 full
+/// projection 走 `resume_or_start_with_projection` 得到携带冻结投影的
+/// validated(完整上下文指纹一致 → Resume)。
+async fn t33_prepared_resume_validated(
+    gateway: &LogicalCodebaseProviderGateway,
+    fixture: &LcLaunchFixture,
+    sink: &Arc<RecordingToolPolicyAuditSink>,
+    resume_id: &str,
+) -> (PreparedLcStreamingCandidate, ValidatedSessionLaunchPolicy) {
+    let input = fixture.lc_streaming_input(
+        AdapterRole::Executor,
+        None,
+        None,
+        Some(resume_id.to_string()),
+    );
+    let candidate = gateway
+        .prepare_lc_streaming_candidate(
+            input,
+            fixture.coding_request(),
+            t33_audit_context(sink),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("gateway freezes the real claude full candidate");
+    let previous = SessionResumeFingerprint::from_envelope(
+        candidate.validated().envelope(),
+        candidate.full_projection(),
+        candidate.validated().action_evidence_digest(),
+        &canonical_target_git_identity(&candidate.validated().envelope().target.worktree),
+    );
+    let disposition = gateway
+        .resume_or_start_with_projection(
+            ResumeSessionLaunchRequest {
+                launch: fixture.coding_request(),
+                previous_fingerprint: previous,
+                previous_session_id: resume_id.to_string(),
+            },
+            candidate.full_projection().clone(),
+        )
+        .expect("full-matching fingerprint decision");
+    match disposition {
+        GatewaySessionDisposition::Resume(validated) => (candidate, validated),
+        GatewaySessionDisposition::StartNew { .. } => {
+            panic!("full-matching projection must resume, not start new")
+        }
+    }
+}
+
+/// Task 3.3(B0b) Step 1:仅 Claude——真实 `prepare_lc_facts`(复用本家 CLI
+/// `--version` 探测与工具 translator)与 gateway 冻结 full projection、
+/// adapter 审计同源:resume 判定产出的 validated 携带冻结 full projection,
+/// `start_validated` 以同一 facts 消费它;原生 `--resume` 同 ID 确认后续接,
+/// provider_start 的 lc_projection 摘要与 prepared full projection 逐字相等;
+/// 错 ID 属 child 后 runtime 失败:kill/reap,不伪称零 child。
+#[cfg(unix)]
+#[tokio::test]
+async fn anchor_t33_provider_prepare_and_audit_share_full_fingerprint() {
+    let fixture = LcLaunchFixture::new();
+    let resume_id = "sess-lc-resume-t33".to_string();
+
+    // 1) 真实 adapter facts 只读观测(无 supplier:真实 CLI `--version`)。
+    let cli = t33_cli_path(
+        "claude_t33_full_fingerprint_fixture.sh",
+        &t33_cli_body(T33_CLI_VERSION, &resume_id, "lc t33 done"),
+    );
+    let provider = Arc::new(ClaudeCodeProvider::new(cli));
+    let gateway = t33_gateway(&fixture, provider.clone());
+    let sink = RecordingToolPolicyAuditSink::new();
+
+    let (candidate, validated) =
+        t33_prepared_resume_validated(&gateway, &fixture, &sink, &resume_id).await;
+
+    // facts 真实可观察(非 default unsupported 虚绿):真实 CLI `--version`
+    // 值、probe key、approval 与 argv 投影同源。
+    let facts = provider
+        .prepare_lc_facts(
+            candidate.input(),
+            candidate.validated(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("real claude prepare_lc_facts observes the native CLI --version");
+    assert_eq!(facts.exact_version(), T33_CLI_VERSION);
+    assert_eq!(facts.version_probe_key().provider, ProviderName::ClaudeCode);
+    assert_eq!(
+        facts.version_probe_key().argv,
+        vec!["--version".to_string()]
+    );
+    assert!(
+        facts
+            .version_probe_key()
+            .executable_identity
+            .starts_with("claude-cli:"),
+        "probe key must freeze a real executable identity: {:?}",
+        facts.version_probe_key().executable_identity
+    );
+    assert_eq!(
+        facts.approval_policy(),
+        projection::CLAUDE_LC_APPROVAL_POLICY
+    );
+    assert!(facts.version_observed_at() <= std::time::Instant::now());
+    // gateway 冻结 full projection 与 facts 同版本同源(同版本 projector)。
+    assert_eq!(
+        candidate.full_projection().exact_version(),
+        facts.exact_version()
+    );
+
+    // 2) start_validated 消费冻结 prepared projection:真实 spawn,原生
+    // --resume 同 ID 确认后续接。
+    let marker_dir = tempfile::tempdir().expect("t33 cwd marker dir");
+    let mut spawn_input = fixture.lc_streaming_input(
+        AdapterRole::Executor,
+        None,
+        Some(sink.clone().bound()),
+        Some(resume_id.clone()),
+    );
+    spawn_input.env_vars.insert(
+        "LC_CWD_MARKER".to_string(),
+        marker_dir
+            .path()
+            .join("t33-cwd-marker")
+            .display()
+            .to_string(),
+    );
+    let mut session = provider
+        .start_validated(
+            ValidatedStreamingProviderInput::new(spawn_input, validated),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("prepared full projection must drive the real claude session");
+    assert_eq!(
+        session.native_session_id.as_deref(),
+        Some(resume_id.as_str())
+    );
+    assert_eq!(recv_completed(&mut session.events).await, "lc t33 done");
+
+    // 3) 审计同源:provider_start 的 lc_projection 摘要与 prepared full
+    // projection 逐字相等;版本/工具 translator 字面量同源。
+    let prepared_projection_digest = candidate.full_projection().projection_digest().to_string();
+    let events = sink.events();
+    let provider_start = events
+        .iter()
+        .find_map(|event| match event {
+            DurableToolPolicyEvent::ProviderStart(record) => Some(record),
+            _ => None,
+        })
+        .expect("real claude spawn writes provider_start");
+    let audit_projection_digest = provider_start
+        .lc_projection
+        .as_ref()
+        .expect("provider_start carries the lc projection audit")
+        .projection_digest
+        .clone();
+    assert_eq!(prepared_projection_digest, audit_projection_digest);
+    assert_eq!(provider_start.provider, TOOL_POLICY_PROVIDER_NAME);
+    assert_eq!(provider_start.adapter_dialect, CLAUDE_POLICY_DIALECT);
+    assert_eq!(provider_start.provider_version, T33_CLI_VERSION);
+    assert!(provider_start.argv.contains(&"--resume".to_string()));
+    assert!(provider_start.argv.contains(&resume_id));
+    assert!(
+        provider_start
+            .argv
+            .contains(&projection::CLAUDE_LC_ALLOWED_TOOLS.to_string())
+    );
+
+    // 4) 错 ID(冻结投影同版本):child 已启动的 runtime 失败 → kill/reap,
+    // 零新 provider_start(不伪称零 child)。
+    let wrong_marker_dir = tempfile::tempdir().expect("t33 wrong-id marker dir");
+    let pid_marker = wrong_marker_dir.path().join("claude-t33-wrong-id.pid");
+    let wrong_cli = t33_cli_path(
+        "claude_t33_wrong_id_fixture.sh",
+        &t33_wrong_id_cli_body(T33_CLI_VERSION, &pid_marker, "sess-lc-native-wrong-t33"),
+    );
+    let wrong_provider = Arc::new(ClaudeCodeProvider::new(wrong_cli));
+    let wrong_gateway = t33_gateway(&fixture, wrong_provider.clone());
+    let wrong_sink = RecordingToolPolicyAuditSink::new();
+    let (_wrong_candidate, wrong_validated) =
+        t33_prepared_resume_validated(&wrong_gateway, &fixture, &wrong_sink, &resume_id).await;
+
+    let wrong_input = fixture.lc_streaming_input(
+        AdapterRole::Executor,
+        None,
+        Some(wrong_sink.clone().bound()),
+        Some(resume_id.clone()),
+    );
+    let wrong_result = wrong_provider
+        .start_validated(
+            ValidatedStreamingProviderInput::new(wrong_input, wrong_validated),
+            CancellationToken::new(),
+        )
+        .await;
+    let Err(rejected) = wrong_result else {
+        panic!("a wrong native id must fail the resume");
+    };
+    assert!(
+        rejected.details.contains("sess-lc-native-wrong-t33")
+            && rejected.details.contains(&resume_id)
+            && rejected.details.contains("session NOT resumed"),
+        "rejection must name both ids and record the not-resumed outcome: {rejected:?}"
+    );
+    assert!(
+        wrong_sink.events().is_empty(),
+        "no fresh provider_start may be written for a mismatched native resume confirmation"
+    );
+    let wrong_native_child_killed_and_reaped = t09b_child_killed_and_reaped(&pid_marker);
+    assert!(wrong_native_child_killed_and_reaped);
+}
+
+/// Task 3.3(B0b) Step 1:仅 Claude——prepare→spawn 之间的真实版本漂移(重写
+/// 同一 CLI,`--version` 改答新版;executable identity 变化 → probe key 换新
+/// 再观测,不命中旧缓存)必须在 session child 之前被拒:零 provider_start
+/// (零 adapter start)、零 child,错误显式命名两侧版本。
+#[cfg(unix)]
+#[tokio::test]
+async fn anchor_t33_real_drift_zero_session_child() {
+    let fixture = LcLaunchFixture::new();
+    let resume_id = "sess-lc-resume-t33-drift".to_string();
+    let drifted_version = "claude 2.0.777-t33-drifted".to_string();
+
+    let cli_dir = tempfile::tempdir().expect("t33 drift cli dir");
+    let cli_path = cli_dir.keep().join("claude_t33_drift_fixture.sh");
+    t33_write_cli(
+        &cli_path,
+        &t33_cli_body(T33_CLI_VERSION, &resume_id, "lc t33 drift done"),
+    );
+    let provider = Arc::new(ClaudeCodeProvider::new(cli_path.clone()));
+    let gateway = t33_gateway(&fixture, provider.clone());
+    let sink = RecordingToolPolicyAuditSink::new();
+
+    let (candidate, validated) =
+        t33_prepared_resume_validated(&gateway, &fixture, &sink, &resume_id).await;
+    assert_eq!(candidate.full_projection().exact_version(), T33_CLI_VERSION);
+
+    // 真实漂移:重写同一 CLI(`--version` 改答新版;长度与 mtime 都变,
+    // executable identity 变化 → 新 key 再观测)。
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    t33_write_cli(
+        &cli_path,
+        &t33_cli_body(&drifted_version, &resume_id, "lc t33 drift done"),
+    );
+
+    let marker_dir = tempfile::tempdir().expect("t33 drift cwd marker dir");
+    let cwd_marker = marker_dir.path().join("t33-drift-cwd-marker");
+    let mut spawn_input = fixture.lc_streaming_input(
+        AdapterRole::Executor,
+        None,
+        Some(sink.clone().bound()),
+        Some(resume_id.clone()),
+    );
+    spawn_input.env_vars.insert(
+        "LC_CWD_MARKER".to_string(),
+        cwd_marker.display().to_string(),
+    );
+
+    let rejected = provider
+        .start_validated(
+            ValidatedStreamingProviderInput::new(spawn_input, validated),
+            CancellationToken::new(),
+        )
+        .await;
+    let Err(error) = rejected else {
+        panic!("real version drift must refuse the spawn before any session child");
+    };
+    assert!(
+        error.details.contains(T33_CLI_VERSION)
+            && error.details.contains(&drifted_version)
+            && error.details.contains("drift"),
+        "drift rejection must name both observed versions: {error:?}"
+    );
+
+    // 零 session child:拒绝发生在 ProcessManager::spawn 之前。
+    let mismatch_children = usize::from(cwd_marker.exists());
+    assert_eq!(mismatch_children, 0);
+    // 零 adapter start:漂移拒绝不落任何 provider_start,也不写其它审计。
+    let mismatch_adapter_starts = sink
+        .events()
+        .iter()
+        .filter(|event| matches!(event, DurableToolPolicyEvent::ProviderStart(_)))
+        .count();
+    assert_eq!(mismatch_adapter_starts, 0);
+    assert!(sink.events().is_empty());
+}
