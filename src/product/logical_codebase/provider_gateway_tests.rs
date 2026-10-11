@@ -61,7 +61,10 @@ fn validated_policy_only_exposes_getters_and_cannot_be_constructed_outside_modul
 
     // getter 返回冻结的引用;外部无法修改字段或凭空重建 validated policy。
     assert_eq!(validated.envelope().policy_revision, 1);
-    assert!(validated.fingerprint().digest.starts_with("sha256:"));
+    assert!(validated
+        .fingerprint()
+        .digest
+        .starts_with(&format!("{LC_RESUME_FINGERPRINT_SCHEMA}:sha256:")));
 }
 
 /// fingerprint 随 provider exact version 与 capability snapshot 变化:任一漂移
@@ -1686,8 +1689,13 @@ mod lcg_t09a_resume_fingerprint {
             &evidence,
             &git_identity,
         );
-        assert!(baseline.digest.starts_with("sha256:"));
-        assert_eq!(baseline.digest.len(), 71);
+        assert!(baseline
+            .digest
+            .starts_with(&format!("{LC_RESUME_FINGERPRINT_SCHEMA}:sha256:")));
+        assert_eq!(
+            baseline.digest.len(),
+            LC_RESUME_FINGERPRINT_SCHEMA.len() + 1 + 71
+        );
         // 稳定控制组:同输入 → 同 digest。
         assert_eq!(
             baseline.digest,
@@ -3947,7 +3955,10 @@ mod anchor_t10_convergence {
                 _ => panic!("[{tag}] full-matching fingerprint must resume"),
             }
 
-            // -- 旧 basis(legacy 指纹)不与 full 混比:StartNew 等待 mismatch。
+            // -- 旧 basis(无 v2 schema 前缀的 legacy digest)不得与 full 混比
+            //    (fix-loop P2:spec 禁止旧 basis 进 full 比对/对从未可信的
+            //    会话写 supersede):误传 Full 臂也必须 fail-closed 为
+            //    unavailable 等待,零 supersede。
             let supersede_before = harness.audit.supersede_count();
             let legacy = harness
                 .gateway
@@ -3962,10 +3973,47 @@ mod anchor_t10_convergence {
                 )
                 .expect("[{tag}] legacy basis disposition");
             match legacy {
+                GatewaySessionDisposition::StartNew { waiting, validated, .. } => {
+                    assert_eq!(
+                        waiting.reason_code, RESUME_FINGERPRINT_UNAVAILABLE,
+                        "[{tag}] legacy digest fed to the Full arm must fail closed to \
+                         resume_fingerprint_unavailable waiting, never a mixed comparison"
+                    );
+                    assert!(validated.lc_projection().is_some());
+                }
+                _ => panic!("[{tag}] legacy basis must wait for explicit fresh"),
+            }
+            assert_eq!(
+                harness.audit.supersede_count(),
+                supersede_before,
+                "[{tag}] legacy digest must not supersede a never-trusted session"
+            );
+
+            // -- 真 v2 漂移(带 schema 前缀、单维度不同):full 对 full 比对,
+            //    mismatch 等待 + supersede 审计(既有语义保持)。
+            let drifted_v2 = SessionResumeFingerprint::from_envelope(
+                candidate.validated().envelope(),
+                candidate.full_projection(),
+                "projection-digest-t10-drifted-evidence",
+                &canonical_target_git_identity(
+                    &candidate.validated().envelope().target.worktree,
+                ),
+            );
+            let drifted = harness
+                .gateway
+                .resume_or_start_prepared_lc_candidate(
+                    &candidate,
+                    PreparedLcResumeBasis::Full {
+                        previous_fingerprint: drifted_v2,
+                        previous_session_id: "native-t10-drifted".to_string(),
+                    },
+                )
+                .expect("[{tag}] genuine v2 drift disposition");
+            match drifted {
                 GatewaySessionDisposition::StartNew { waiting, .. } => {
                     assert_eq!(waiting.reason_code, "resume_fingerprint_mismatch");
                 }
-                _ => panic!("[{tag}] legacy basis must wait for explicit fresh"),
+                _ => panic!("[{tag}] genuine v2 drift must wait for explicit fresh"),
             }
             assert_eq!(harness.audit.supersede_count(), supersede_before + 1);
             assert_eq!(harness.adapter.adapter_starts(), 0, "[{tag}] ② after dispositions");

@@ -481,6 +481,17 @@ pub struct SessionResumeFingerprint {
     pub digest: String,
 }
 
+impl SessionResumeFingerprint {
+    /// 是否携带 full projection v2 basis 的 schema 前缀(fix-loop P2):
+    /// `from_envelope` 产出的 digest 以 [`LC_RESUME_FINGERPRINT_SCHEMA`]
+    /// 开头;无前缀(legacy/外来形态)不是可混比的 full basis,候选
+    /// 消费面 `PreparedLcResumeBasis::Full` 对其 fail-closed 为
+    /// unavailable 等待,不与 full 指纹混比。
+    pub fn is_full_projection_v2(&self) -> bool {
+        self.digest.starts_with(LC_RESUME_FINGERPRINT_SCHEMA)
+    }
+}
+
 /// 五参 `from_envelope` 的 schema 域版本:长度分隔域序列的前置标签。域
 /// 集合或域语义变化时必须递增版本,旧 digest 与新 digest 永不相等。
 pub const LC_RESUME_FINGERPRINT_SCHEMA: &str = "lc-session-resume-fingerprint/2";
@@ -547,7 +558,10 @@ impl SessionResumeFingerprint {
         for root in projection.writable_roots() {
             domain(root.to_string_lossy().as_bytes());
         }
-        let digest = format!("sha256:{:x}", hasher.finalize());
+        let digest = format!(
+            "{LC_RESUME_FINGERPRINT_SCHEMA}:sha256:{:x}",
+            hasher.finalize()
+        );
         Self { digest }
     }
 }
@@ -653,6 +667,14 @@ pub enum PreparedLcResumeBasis {
     /// full map 完整:旧会话冻结的 full 指纹与 native id,参与 full 对
     /// full 的全维度比对(漂移 → supersede 审计并等待
     /// [`RESUME_FINGERPRINT_MISMATCH`])。
+    ///
+    /// **只接受 basis=`FullLcProjectionV2` 的 digest**(带
+    /// [`LC_RESUME_FINGERPRINT_SCHEMA`] 前缀):B1/B2 读 durable
+    /// `LogicalLaunchFingerprintRecord` 时,`basis` 非 `FullLcProjectionV2`
+    /// 必须传 [`Self::Unavailable`],不得把 legacy/外来 digest 喂入本臂。
+    /// 误传(无 v2 schema 前缀)由 gateway fail-closed 为 unavailable
+    /// 等待(fix-loop P2:不同 basis 不与 full 混比、不 supersede 从未
+    /// 可信的会话),不进入比对。
     Full {
         previous_fingerprint: SessionResumeFingerprint,
         previous_session_id: String,
@@ -1861,14 +1883,30 @@ impl LogicalCodebaseProviderGateway {
             PreparedLcResumeBasis::Full {
                 previous_fingerprint,
                 previous_session_id,
-            } => self.resume_or_start_with_projection(
-                ResumeSessionLaunchRequest {
-                    launch: candidate.request().clone(),
-                    previous_fingerprint,
-                    previous_session_id,
-                },
-                candidate.full_projection().clone(),
-            ),
+            } => {
+                // fix-loop P2:无 v2 schema 前缀(legacy/外来 digest)不是
+                // 可混比的 full basis——不进比对、不 supersede 从未可信
+                // 的会话,直接 unavailable 等待(同 `Unavailable` 待遇)。
+                if !previous_fingerprint.is_full_projection_v2() {
+                    let superseded_session_id = previous_session_id;
+                    return Ok(GatewaySessionDisposition::StartNew {
+                        validated: candidate.validated().clone().with_lc_projection(
+                            candidate.full_projection().clone(),
+                            candidate.full_context_fingerprint(),
+                        ),
+                        superseded_session_id,
+                        waiting: LcSupersededWaiting::fingerprint_unavailable(),
+                    });
+                }
+                self.resume_or_start_with_projection(
+                    ResumeSessionLaunchRequest {
+                        launch: candidate.request().clone(),
+                        previous_fingerprint,
+                        previous_session_id,
+                    },
+                    candidate.full_projection().clone(),
+                )
+            }
             PreparedLcResumeBasis::Unavailable => {
                 let superseded_session_id = candidate
                     .input()
