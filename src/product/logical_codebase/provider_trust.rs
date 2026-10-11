@@ -108,6 +108,20 @@ pub trait ProviderTrustRegistry: Send + Sync {
     ) -> Result<ProviderTrustRevocation, ProviderTrustError>;
 }
 
+/// Task 3.1（B0a1）：只读 trust 冻结事实——resume/full 指纹冻结消费的
+/// 纯读快照。`verification` 与 GET/spawn 复验共用同一 readonly 判定；
+/// `record_digest` 只暴露 [`ProviderTrustHomeAdapter::digest`] 的工件摘要
+/// （Codex 整份 config、Kimi 对应 record 原文），verified_at/detail 等
+/// 观测时刻字段不参与摘要。零写铁律：不 ensure/revoke、不追加 trust
+/// 审计（REQ-REG-15 两场景边界保持）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderTrustFingerprintFacts {
+    /// 与 [`ProviderTrustSource::verify_trusted`] 同源的只读判定。
+    pub verification: ProviderTrustVerification,
+    /// 该 provider 用户级工件的真实摘要；工件不存在时 `None`，不伪造。
+    pub record_digest: Option<String>,
+}
+
 /// Task 3b(REQ-LCG-02/03):只读 trust source——GET/early eligibility 与
 /// spawn 前复验共用的零副作用通道。
 ///
@@ -136,6 +150,29 @@ pub trait ProviderTrustSource: Send + Sync {
     ) -> Option<ProviderTrustWaiting> {
         let _ = (provider, canonical_root);
         None
+    }
+
+    /// Task 3.1（B0a1）：冻结指纹消费的只读 trust 事实——verification 与
+    /// [`Self::verify_trusted`] 共用同一 readonly 实现、工件摘要直接暴露
+    /// [`ProviderTrustHomeAdapter::digest`]（Codex 整份 config、Kimi 对应
+    /// record 原文）；**零写**：不 ensure/revoke、不追加 trust 审计。
+    /// entry missing/非 trusted/登记后删除一律 typed 拒（错误携带稳定
+    /// trust code），不得以 `Ok(trusted=false)` 冻结假事实。
+    ///
+    /// 默认实现返回 typed unsupported：仅未接入/测试 source 可停留在
+    /// 默认；正例（真实 home 背书实现）必须提供可观测 facts，不得靠
+    /// 默认拒绝使正例虚绿。
+    fn fingerprint_facts(
+        &self,
+        project_id: &str,
+        lc_id: &str,
+        provider: &ProviderName,
+        canonical_root: &Path,
+    ) -> Result<ProviderTrustFingerprintFacts, ProviderGatewayError> {
+        let _ = (project_id, lc_id, canonical_root);
+        Err(ProviderGatewayError::ProviderUnavailable(format!(
+            "unsupported_trust_fingerprint_facts: {provider:?} source does not expose read-only trust fingerprint facts"
+        )))
     }
 }
 
@@ -297,16 +334,20 @@ impl ReadonlyProviderTrustSource {
             Err(error) => Some(waiting_for(error, trust_key)),
         }
     }
-}
 
-impl ProviderTrustSource for ReadonlyProviderTrustSource {
-    fn verify_trusted(
+    /// Task 3.1（B0a1）：verify/facts 共用的只读判定核心——同一 adapter、
+    /// 同一 trust key 算法、同一 ownership 只读投影与 scope 校验；返回
+    /// 判定结果与产生判定的 entry 原始状态（`fingerprint_facts` 按状态
+    /// 给出稳定 code 的 typed 拒）。`verify_trusted` 与
+    /// `fingerprint_facts` 都只经此核心读用户级工件，不新增第二份
+    /// home 推导。
+    fn verify_readonly_core(
         &self,
         project_id: &str,
         lc_id: &str,
         provider: &ProviderName,
         canonical_root: &Path,
-    ) -> Result<ProviderTrustVerification, ProviderGatewayError> {
+    ) -> Result<(ProviderTrustVerification, ProviderTrustEntryState), ProviderGatewayError> {
         let trust_error = |error: ProviderTrustError| {
             ProviderGatewayError::ProviderUnavailable(format!("{}: {}", error.code, error.message))
         };
@@ -357,14 +398,77 @@ impl ProviderTrustSource for ReadonlyProviderTrustSource {
                 self.lc_id
             )));
         }
-        Ok(ProviderTrustVerification {
-            provider: provider.clone(),
-            canonical_root: canonical_root.to_path_buf(),
-            trust_key,
-            trusted,
-            ownership,
-            detail,
-            verified_at: trust_now(),
+        Ok((
+            ProviderTrustVerification {
+                provider: provider.clone(),
+                canonical_root: canonical_root.to_path_buf(),
+                trust_key,
+                trusted,
+                ownership,
+                detail,
+                verified_at: trust_now(),
+            },
+            state,
+        ))
+    }
+}
+
+impl ProviderTrustSource for ReadonlyProviderTrustSource {
+    fn verify_trusted(
+        &self,
+        project_id: &str,
+        lc_id: &str,
+        provider: &ProviderName,
+        canonical_root: &Path,
+    ) -> Result<ProviderTrustVerification, ProviderGatewayError> {
+        // Task 3.1（B0a1）：判定主体移入 `verify_readonly_core`，与
+        // `fingerprint_facts` 共用同一 readonly 实现（不复制第二份推导）。
+        self.verify_readonly_core(project_id, lc_id, provider, canonical_root)
+            .map(|(verification, _)| verification)
+    }
+
+    fn fingerprint_facts(
+        &self,
+        project_id: &str,
+        lc_id: &str,
+        provider: &ProviderName,
+        canonical_root: &Path,
+    ) -> Result<ProviderTrustFingerprintFacts, ProviderGatewayError> {
+        let (verification, state) =
+            self.verify_readonly_core(project_id, lc_id, provider, canonical_root)?;
+        if !verification.trusted {
+            // typed 拒：missing/登记后删除回落 `trust_entry_missing`，
+            // conflict 用 adapter 冲突 code——不折叠成通用字符串、
+            // 不以 Ok(trusted=false) 冻结假事实。
+            let adapter = self.adapter_for(provider)?;
+            let code = match state {
+                ProviderTrustEntryState::Missing => TRUST_ENTRY_MISSING_CODE,
+                ProviderTrustEntryState::Untrusted { .. } => adapter.conflict_code(),
+                ProviderTrustEntryState::Trusted => {
+                    unreachable!("trusted state must not be rejected above")
+                }
+            };
+            return Err(ProviderGatewayError::ProviderUnavailable(format!(
+                "{code}: cannot freeze trust fingerprint for {provider:?} at {}: {}",
+                canonical_root.display(),
+                verification.detail
+            )));
+        }
+        // 只暴露 adapter 工件摘要（Codex 整份 config、Kimi 对应 record
+        // 原文），不复制算法、不混入 verified_at 等观测时刻字段；工件
+        // 缺失时如实 `None`，不伪造。
+        let record_digest =
+            self.adapter_for(provider)?
+                .digest(canonical_root)
+                .map_err(|error| {
+                    ProviderGatewayError::ProviderUnavailable(format!(
+                        "{}: {}",
+                        error.code, error.message
+                    ))
+                })?;
+        Ok(ProviderTrustFingerprintFacts {
+            verification,
+            record_digest,
         })
     }
 
@@ -2808,6 +2912,239 @@ mod tests {
         assert_eq!(fixture.store().list_audit(PROJECT).unwrap().len(), 2);
     }
 
+    // ------------------------------------------------------------------
+    // Task 3.1（B0a1）：只读 trust 冻结事实 `fingerprint_facts`——GET/spawn
+    // 复验与 resume 冻结共用的纯读面：verification 与 `verify_trusted` 同一
+    // 真实 adapter 只读来源，record_digest 只暴露 adapter 工件摘要（Codex
+    // 整份 config、Kimi 对应 record 原文），verified_at 不参与摘要；
+    // missing/conflict/登记后删除一律 typed 拒（稳定 trust code），全程
+    // home/ownership/waiting/audit 前后逐字节相等、adapter 写计数=0。
+    // ------------------------------------------------------------------
+
+    /// 独立复算文件字节的 sha256 摘要（与 adapter `digest` 的输出形状一致，
+    /// `sha256:<hex>`），证明 record_digest 就是工件原文摘要、不含
+    /// verified_at 等观测时刻字段。
+    fn anchor_t08_sha256_of_file(path: &Path) -> String {
+        use sha2::{Digest, Sha256};
+        let bytes = std::fs::read(path).unwrap();
+        format!("sha256:{:x}", Sha256::digest(&bytes))
+    }
+
+    /// 零副作用围栏：执行 `act` 前后断言 home 与 durable trust 事实
+    /// （ownership/waiting/audit）快照逐字节相等、adapter 写计数=0。
+    fn anchor_t08_assert_frozen_around<T>(
+        fixture: &ReadonlySourceFixture,
+        audits_before: usize,
+        act: impl FnOnce() -> T,
+    ) -> T {
+        let home_before = readonly_snapshot_tree(fixture.home());
+        let durable_before = readonly_snapshot_tree(fixture._aria.path());
+        let outcome = act();
+        assert_eq!(
+            fixture.writes.load(Ordering::SeqCst),
+            0,
+            "adapter_write_calls 必须为 0（不 ensure/不 revoke/不复活条目）"
+        );
+        assert!(
+            fixture.store().list_waiting(PROJECT).unwrap().is_empty(),
+            "只读 facts 不得落 waiting 事实"
+        );
+        assert_eq!(
+            fixture.store().list_audit(PROJECT).unwrap().len(),
+            audits_before,
+            "只读 facts 不得追加 trust 审计"
+        );
+        assert_eq!(
+            readonly_snapshot_tree(fixture.home()),
+            home_before,
+            "只读 facts 前后 home 快照必须逐字节相等"
+        );
+        assert_eq!(
+            readonly_snapshot_tree(fixture._aria.path()),
+            durable_before,
+            "只读 facts 前后 ownership/durable trust 快照必须逐字节相等"
+        );
+        outcome
+    }
+
+    #[test]
+    fn anchor_t08_readonly_trust_fingerprint_facts_have_zero_side_effects() {
+        use super::ProviderTrustSource;
+        use crate::product::logical_codebase::provider_gateway::ProviderGatewayError;
+
+        // ---- 正例：经真实 registry 登记后，facts 只读冻结真实工件事实 ----
+        let fixture = ReadonlySourceFixture::new();
+        {
+            let registry = fixture.registry();
+            for provider in [ProviderName::Codex, ProviderName::KimiCode] {
+                registry
+                    .ensure_trusted(PROJECT, OPERATION, LC, &provider, &fixture.root)
+                    .unwrap_or_else(|error| panic!("seed ensure {provider:?}: {error:?}"));
+            }
+        }
+        // 布置期审计基线：两 provider 各一条 ensure/registered。
+        assert_eq!(fixture.store().list_audit(PROJECT).unwrap().len(), 2);
+        let source = fixture.source();
+
+        for provider in [ProviderName::Codex, ProviderName::KimiCode] {
+            let facts = anchor_t08_assert_frozen_around(&fixture, 2, || {
+                source
+                    .fingerprint_facts(PROJECT, LC, &provider, &fixture.root)
+                    .unwrap_or_else(|error| panic!("fingerprint facts {provider:?}: {error:?}"))
+            });
+            assert!(facts.verification.trusted);
+            assert!(facts.record_digest.is_some());
+
+            // verify/digest 同真实 adapter 来源：facts.verification 与同一
+            // source 的 verify_trusted 逐字段一致（verified_at 是每次观测
+            // 时刻，不参与相等断言，也不参与 digest）。
+            let verification = anchor_t08_assert_frozen_around(&fixture, 2, || {
+                source
+                    .verify_trusted(PROJECT, LC, &provider, &fixture.root)
+                    .unwrap_or_else(|error| panic!("verify {provider:?}: {error:?}"))
+            });
+            assert_eq!(facts.verification.provider, verification.provider);
+            assert_eq!(
+                facts.verification.canonical_root,
+                verification.canonical_root
+            );
+            assert_eq!(facts.verification.trust_key, verification.trust_key);
+            assert_eq!(facts.verification.trusted, verification.trusted);
+            assert_eq!(facts.verification.ownership, verification.ownership);
+            assert_eq!(facts.verification.detail, verification.detail);
+
+            // Codex 整份 config / Kimi 对应 record 原文：record_digest 等
+            // 于工件字节的独立摘要，不含 verified_at/detail 等观测字段。
+            let artifact_path = match provider {
+                ProviderName::Codex => fixture.codex_config(),
+                ProviderName::KimiCode => fixture.kimi_record(),
+                other => panic!("unexpected trust provider {other:?}"),
+            };
+            let expected_digest = anchor_t08_sha256_of_file(&artifact_path);
+            assert_eq!(
+                facts.record_digest.as_deref(),
+                Some(expected_digest.as_str()),
+                "{provider:?} record_digest 必须是工件原文摘要"
+            );
+
+            // 工件不变时摘要稳定：二次调用（verified_at 为新观测时刻）
+            // record_digest 不变——观测时刻不入摘要。
+            let again = anchor_t08_assert_frozen_around(&fixture, 2, || {
+                source
+                    .fingerprint_facts(PROJECT, LC, &provider, &fixture.root)
+                    .unwrap()
+            });
+            assert_eq!(again.record_digest, facts.record_digest);
+        }
+
+        // ---- missing：typed 拒，不产 Ok(trusted=false) 假冻结 ----
+        let fixture = ReadonlySourceFixture::new();
+        let source = fixture.source();
+        for provider in [ProviderName::Codex, ProviderName::KimiCode] {
+            let rejection = anchor_t08_assert_frozen_around(&fixture, 0, || {
+                source
+                    .fingerprint_facts(PROJECT, LC, &provider, &fixture.root)
+                    .expect_err("missing entry must be typed-rejected, not frozen")
+            });
+            assert!(
+                matches!(rejection, ProviderGatewayError::ProviderUnavailable(_)),
+                "missing 拒收必须是 typed 错误：{rejection:?}"
+            );
+            assert!(
+                rejection.to_string().contains("trust_entry_missing"),
+                "missing 拒收携带稳定 code：{rejection}"
+            );
+        }
+
+        // ---- conflict：用户非 trusted 条目 typed 拒，用户字节不动 ----
+        let fixture = ReadonlySourceFixture::new();
+        fixture.seed_codex_conflict();
+        fixture.seed_kimi_conflict();
+        let conflict_config = std::fs::read_to_string(fixture.codex_config()).unwrap();
+        let source = fixture.source();
+        for (provider, stable_code) in [
+            (ProviderName::Codex, "codex_trust_key_conflict"),
+            (ProviderName::KimiCode, "kimi_trust_key_conflict"),
+        ] {
+            let rejection = anchor_t08_assert_frozen_around(&fixture, 0, || {
+                source
+                    .fingerprint_facts(PROJECT, LC, &provider, &fixture.root)
+                    .expect_err("conflict entry must be typed-rejected, not overwritten")
+            });
+            assert!(
+                matches!(rejection, ProviderGatewayError::ProviderUnavailable(_)),
+                "conflict 拒收必须是 typed 错误：{rejection:?}"
+            );
+            assert!(
+                rejection.to_string().contains(stable_code),
+                "conflict 拒收携带 adapter 稳定 code：{rejection}"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(fixture.codex_config()).unwrap(),
+            conflict_config,
+            "用户冲突条目字节保持不变（只读不覆盖）"
+        );
+
+        // ---- 登记后删除：durable 事实仍在，typed 拒回落 missing、不复活 ----
+        let fixture = ReadonlySourceFixture::new();
+        fixture.register_then_delete_home_entries();
+        let source = fixture.source();
+        for provider in [ProviderName::Codex, ProviderName::KimiCode] {
+            let rejection = anchor_t08_assert_frozen_around(&fixture, 2, || {
+                source
+                    .fingerprint_facts(PROJECT, LC, &provider, &fixture.root)
+                    .expect_err("deleted entry must be typed-rejected, not resurrected")
+            });
+            assert!(
+                matches!(rejection, ProviderGatewayError::ProviderUnavailable(_)),
+                "删除后拒收必须是 typed 错误：{rejection:?}"
+            );
+            assert!(
+                rejection.to_string().contains("trust_entry_missing"),
+                "删除后回落 trust_entry_missing：{rejection}"
+            );
+        }
+        assert!(
+            !fixture.codex_config().exists() && !fixture.kimi_record().exists(),
+            "只读 facts 后 home 条目不得被复活"
+        );
+
+        // ---- trait 默认：仅未接入/测试 source 停留在 typed unsupported ----
+        struct UnwiredFakeSource;
+        impl ProviderTrustSource for UnwiredFakeSource {
+            fn verify_trusted(
+                &self,
+                _project_id: &str,
+                _lc_id: &str,
+                _provider: &ProviderName,
+                _canonical_root: &Path,
+            ) -> Result<
+                crate::product::logical_codebase::ProviderTrustVerification,
+                ProviderGatewayError,
+            > {
+                Err(ProviderGatewayError::ProviderUnavailable(
+                    "unwired fake source".to_string(),
+                ))
+            }
+        }
+        let default_rejection = UnwiredFakeSource
+            .fingerprint_facts(PROJECT, LC, &ProviderName::Codex, &fixture.root)
+            .expect_err("default trait impl must stay typed-unsupported");
+        assert!(
+            matches!(
+                default_rejection,
+                ProviderGatewayError::ProviderUnavailable(_)
+            ),
+            "默认实现必须是 typed unsupported：{default_rejection:?}"
+        );
+        assert!(
+            default_rejection
+                .to_string()
+                .contains("unsupported_trust_fingerprint_facts"),
+            "默认 unsupported 携带稳定标记：{default_rejection}"
+        );
+    }
     // ------------------------------------------------------------------
     // Task 3.1/3.2：sidecar 锁并发矩阵与取消安全（受控窗口：lock-attempt
     // hook 先例 + 测试线程持锁 barrier；禁 sleep 概率绿灯——所有窗口都
