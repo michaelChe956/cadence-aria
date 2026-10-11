@@ -827,9 +827,37 @@ async fn anchor_t13_plan_stale_waits_for_explicit_fresh() {
         "未显式 fresh 前零受理 operation"
     );
 
-    // ⑤ 显式 fresh：claim 受理（FreshReserved）后 dispatch——本波未接管的
-    //    tag typed 拒（context_unsupported），operation failed、recovery 回
-    //    Waiting、0 spawn（不回落通用 plan_author）。
+    // ⑤ 显式 fresh：claim 受理（FreshReserved）后 dispatch——未接管 tag
+    //    （sc_author，归 5.5）typed 拒（context_unsupported），operation
+    //    failed、recovery 回 Waiting、0 spawn（不回落通用 plan_author）。
+    //    B2b2（5.3）已把 outline 反馈族两 tag 接管为真实 full fresh
+    //    （anchor_t15 正路覆盖），故先以同 recovery_id 换载未接管
+    //    run_context 再 claim。
+    let before_swap = fixture.latest_record();
+    let mut swapped_recovery = before_swap
+        .lc_resume_recovery
+        .clone()
+        .expect("recovery kept");
+    let swapped_business = match &swapped_recovery.run_context {
+        LcRecoveryRunContext::LegacyOutlineRevision { business, .. } => business.clone(),
+        other => panic!("期望换载前为 LegacyOutlineRevision，got {other:?}"),
+    };
+    swapped_recovery.run_context = LcRecoveryRunContext::ScAuthor {
+        business: swapped_business,
+        flow: WorkItemPlanFlowKind::SingleCandidate,
+        single_candidate_phase: SingleCandidatePhase::Generate,
+        provider_start_reservation_key: None,
+        source_revision_ref: None,
+        ir_ref: None,
+        report_ref: None,
+        candidate_source_hash: None,
+        business_material_identity: None,
+    };
+    fixture
+        .lifecycle
+        .compare_and_save_lc_resume_state(&before_swap, swapped_recovery)
+        .expect("swap run_context to unclaimed tag");
+
     assert!(matches!(
         fixture.lifecycle.claim_lc_fresh(
             &fixture.session_record.id,
@@ -2053,4 +2081,403 @@ async fn anchor_t16_untaken_tag_still_typed_rejected_no_fallback() {
         Err(_) | Ok(None) => {}
         Ok(Some(_)) => panic!("未接管 tag 必须零 spawn"),
     }
+}
+
+// ------------------------------------------------------------------
+// B2b2（Task 5.3，tasks.md 5.3 / 设计 §5.3）：legacy outline 反馈的 full
+// fresh 端到端——seed 等待（durable feedback/旧稿/review 全量）→ 显式
+// fresh claim → dispatch（tag 放行）→ 臂内 full fresh（prompt 自足：旧
+// outline 全文/feedback/review/完整材料；全新会话 resume=None；全新节点）
+// → 原 outline 确认门（AuthorConfirm + WorkItemPlanOutlineConfirm 节点，
+// flow=Legacy，零新 draft workspace）。
+// ------------------------------------------------------------------
+
+/// t15 端到端 fake：记录 provider input 并立即完成一轮合法 outline 结构化
+/// 输出（sentinel 按合约 nonce 包装）；story/design id 经槽位在 fixture
+/// 构造后回填（t14 probe 同型）。
+struct T15OutlineFreshProvider {
+    input_tx: mpsc::UnboundedSender<StreamingProviderInput>,
+    spec_ids: Arc<std::sync::Mutex<(String, String)>>,
+}
+
+fn t15_outline_output_payload(story_id: &str, design_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "outline": {
+            "id": "outline_t15_new",
+            "project_id": "project_0001",
+            "issue_id": "issue_0001",
+            "source_story_spec_ids": [story_id],
+            "source_design_spec_ids": [design_id],
+            "strategy_summary": "T15 fresh 修订大纲",
+            "work_item_outlines": [{
+                "outline_id": "outline_t15_backend",
+                "logical_work_item_id": "wi_t15",
+                "title": "T15新后端工作项",
+                "kind": "backend",
+                "goal": "实现 T15 后端接口",
+                "scope": ["src/product"],
+                "non_goals": [],
+                "estimated_context_tokens": 8000,
+                "session_fit": "fits_single_agent_session",
+                "source_story_spec_ids": [story_id],
+                "source_design_spec_ids": [design_id],
+                "exclusive_write_scopes": ["src/product/**"],
+                "forbidden_write_scopes": [],
+                "depends_on": [],
+                "verification_intent": ["cargo test --locked --lib anchor_t15"],
+                "trusted_verification_commands": [{
+                    "command": "cargo test --locked --lib anchor_t15",
+                    "cwd": ".",
+                    "purpose": "验证 T15 fresh 修订",
+                    "source_ref": "design_spec_0001#verification"
+                }],
+                "handoff_notes": "无"
+            }],
+            "risks": [],
+            "handoff_strategy": "",
+            "status": "draft"
+        },
+        "context_blockers": []
+    })
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for T15OutlineFreshProvider {
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let _ = self.input_tx.send(input.clone());
+        let (event_tx, event_rx) = mpsc::channel(4);
+        let (command_tx, _command_rx) = mpsc::channel(1);
+        let (story_id, design_id) = self.spec_ids.lock().expect("t15 spec ids").clone();
+        let payload = t15_outline_output_payload(&story_id, &design_id);
+        let contract = input.structured_output_contract.clone();
+        // WorkItemSplitter author 输入不携带 structured_output_contract
+        //（合同在 prompt 文本内）——从 prompt 提取 strict contract 的
+        // sentinel nonce（同一 prompt 内所有出现同 nonce）自行包装。
+        let output = match contract.as_ref() {
+            Some(contract) => {
+                crate::cross_cutting::provider_adapter::structured_output_sentinel(
+                    &contract.nonce,
+                    &payload,
+                )
+            }
+            None => {
+                const NONCE_TAG: &str = "<ARIA_STRUCTURED_OUTPUT nonce=\"";
+                let nonce = input
+                    .prompt
+                    .rfind(NONCE_TAG)
+                    .map(|start| {
+                        input.prompt[start + NONCE_TAG.len()..]
+                            .split('"')
+                    .next()
+                            .unwrap_or_default()
+                            .to_string()
+                    })
+                    .unwrap_or_default();
+                assert!(
+                    !nonce.is_empty(),
+                    "t15 fake 必须能从 prompt 提取 sentinel nonce"
+                );
+                crate::cross_cutting::provider_adapter::structured_output_sentinel(
+                    &nonce, &payload,
+                )
+            }
+        };
+        let completion =
+            crate::cross_cutting::streaming_provider::ProviderCompletion::from_output(
+                output,
+                contract.as_ref(),
+                Some("t15-fresh-native".to_string()),
+            );
+        tokio::spawn(async move {
+            let _ = event_tx
+                .send(crate::cross_cutting::streaming_provider::ProviderEvent::Completed(
+                    completion,
+                ))
+                .await;
+        });
+        Ok(ProviderSession {
+            native_session_id: Some("t15-fresh-native".to_string()),
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+
+    async fn start_validated(
+        &self,
+        validated: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let (input, _launch) = validated.into_parts();
+        self.start(input, cancel).await
+    }
+}
+
+#[tokio::test]
+async fn anchor_t15_legacy_outline_fresh_retains_feedback_and_prior_outline() {
+    use super::single_candidate_lc_admission::{AliasLcGatewayExtras, LcDialectCapabilitySource};
+    use super::single_candidate_provider_run::ProviderRunFixture;
+    use crate::product::models::{
+        LcRecoveryBusinessContext, LcRecoveryRunContext, LcResumeRecoveryRecord,
+        LcResumeRecoveryState, ProviderConversationRole,
+    };
+    use crate::web::workspace_ws_types::{ArtifactPayload, ArtifactVersion};
+
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let spec_ids = Arc::new(std::sync::Mutex::new((
+        "story_spec_0001".to_string(),
+        "design_spec_0001".to_string(),
+    )));
+    let gateway_author = Arc::new(T15OutlineFreshProvider {
+        input_tx: input_tx.clone(),
+        spec_ids: spec_ids.clone(),
+    });
+    let (fixture, mut engine_rx) =
+        ProviderRunFixture::new_logical_legacy_with_gateway_extras_and_engine_rx(
+            true,
+            gateway_author,
+            AliasLcGatewayExtras {
+                capability: Some(Arc::new(LcDialectCapabilitySource)),
+                ..AliasLcGatewayExtras::default()
+            },
+        );
+    // 持续 drain engine 事件（夹具要求）。
+    tokio::spawn(async move {
+        while engine_rx.recv().await.is_some() {}
+    });
+    let (story_id, design_id) = (fixture.story_id.clone(), fixture.design_id.clone());
+    *spec_ids.lock().expect("t15 spec ids") = (story_id.clone(), design_id.clone());
+
+    // durable 旧稿全文（v1，策略标记与 fake 新稿互斥）＋ review 节点 verdict。
+    let prior_outline = crate::product::work_item_split_engine::parse_work_item_plan_outline_output(
+        t15_outline_output_payload(&story_id, &design_id),
+    )
+    .expect("prior outline payload")
+    .outline
+    .expect("outline");
+    let mut prior_candidate = prior_outline.clone();
+    prior_candidate.strategy_summary = "T15上一版大纲策略全文标记".to_string();
+    fixture
+        .lifecycle
+        .save_artifact_versions(
+            &fixture.record.id,
+            &[ArtifactVersion {
+                version: 1,
+                payload: ArtifactPayload::WorkItemPlanOutlineCandidate {
+                    outline_candidate: Box::new(
+                        crate::web::workspace_ws_types::WorkItemPlanOutlineCandidateDto {
+                            outline: prior_candidate,
+                            design_context_gaps: Vec::new(),
+                            validator_findings: Vec::new(),
+                            context_blockers: Vec::new(),
+                            current_generation_round_id: None,
+                            selected_generation_mode: None,
+                        },
+                    ),
+                },
+                generated_by: ProviderName::ClaudeCode,
+                reviewed_by: None,
+                review_verdict: None,
+                confirmed_by: None,
+                is_current: true,
+                created_at: "2026-10-12T00:00:00Z".to_string(),
+                source_node_id: "timeline_node_001".to_string(),
+            }],
+        )
+        .expect("seed prior outline artifact version");
+    let review_node_id = "timeline_node_review_0001".to_string();
+    fixture
+        .lifecycle
+        .save_node_detail(
+            &fixture.record.id,
+            &review_node_id,
+            &crate::product::models::NodeDetail {
+                node_id: review_node_id.clone(),
+                session_id: fixture.record.id.clone(),
+                node_type: crate::web::workspace_ws_types::TimelineNodeType::ReviewerRun,
+                status: crate::web::workspace_ws_types::TimelineNodeStatus::Completed,
+                agent_role: None,
+                provider: None,
+                prompt: None,
+                messages: Vec::new(),
+                streaming_content: String::new(),
+                execution_events: Vec::new(),
+                permission_events: Vec::new(),
+                verdict: Some(serde_json::json!({
+                    "verdict": "revise",
+                    "summary": "T15评审意见摘要"
+                })),
+                artifact_ref: None,
+                is_revision: true,
+                revision_feedback: None,
+                base_artifact_ref: None,
+                started_at: "2026-10-12T00:00:00Z".to_string(),
+                ended_at: None,
+            },
+        )
+        .expect("seed review node detail");
+
+    // outline feedback 等待记录（mismatch→waiting 腿由 t13 覆盖；此处直接
+    // seed 等待态，验证 fresh→原门腿）。
+    let expected = fixture
+        .lifecycle
+        .get_workspace_session(&fixture.record.id)
+        .expect("baseline record");
+    let feedback = "T15返修反馈全文标记：补充验收边界".to_string();
+    let prior_outline_marker = "T15上一版大纲策略全文标记".to_string();
+    fixture
+        .lifecycle
+        .compare_and_save_lc_resume_state(
+            &expected,
+            LcResumeRecoveryRecord {
+                schema_version: 1,
+                recovery_id: "recovery_anchor_t15".to_string(),
+                failed_provider_node_id: "timeline_node_001".to_string(),
+                reason_code: "planning_context_stale".to_string(),
+                role: ProviderConversationRole::Author,
+                provider: ProviderName::ClaudeCode,
+                superseded_native_session_id: Some("native-t15-old".to_string()),
+                previous_fingerprint_digest: Some("sha256:t15-old".to_string()),
+                previous_session_status: expected.status.clone(),
+                previous_stage: "running".to_string(),
+                run_context: LcRecoveryRunContext::LegacyOutlineRevision {
+                    business: LcRecoveryBusinessContext {
+                        entity_id: fixture.record.entity_id.clone(),
+                        plan_id: Some(fixture.record.entity_id.clone()),
+                        workspace_type: crate::product::models::WorkspaceType::WorkItemPlan,
+                        business_repository_physical_id: None,
+                        business_repository_logical_id: None,
+                        business_checkout_id: None,
+                        business_repository_path: None,
+                        source_story_ids: vec![story_id.clone()],
+                        source_design_ids: vec![design_id.clone()],
+                        plan_options_ref: None,
+                        artifact_refs: Vec::new(),
+                        review_refs: vec![review_node_id],
+                        author_provider: ProviderName::ClaudeCode,
+                        effective_reviewer_provider: Some(ProviderName::Codex),
+                        original_node_id: Some("timeline_node_001".to_string()),
+                        original_role_run_seq: None,
+                    },
+                    normalized_feedback: feedback.clone(),
+                    outline_ref: Some("artifact_current".to_string()),
+                    outline_version: Some(1),
+                    outline_hash: None,
+                },
+                state: LcResumeRecoveryState::Waiting,
+                operation_id: None,
+                fresh_node_id: None,
+                fresh_native_session_id: None,
+                fresh_role_run_seq: None,
+                fresh_operations: Vec::new(),
+                detected_at: "2026-10-12T00:00:00Z".to_string(),
+                updated_at: "2026-10-12T00:00:00Z".to_string(),
+            },
+        )
+        .expect("seed outline revision waiting recovery");
+
+    // 显式 fresh：socket 门通过后的权威 CAS claim → dispatch。
+    assert!(matches!(
+        fixture.lifecycle.claim_lc_fresh(
+            &fixture.record.id,
+            "recovery_anchor_t15",
+            "op-t15-fresh"
+        ),
+        Ok(LcFreshClaimOutcome::Claimed { .. })
+    ));
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::ClaudeCode,
+        Arc::new(T15OutlineFreshProvider {
+            input_tx: input_tx.clone(),
+            spec_ids: spec_ids.clone(),
+        }),
+    );
+    let record = fixture
+        .lifecycle
+        .get_workspace_session(&fixture.record.id)
+        .expect("record after claim");
+    let run_context = ProviderRunContext::test_fixture(
+        Arc::new(registry),
+        fixture.engine.clone(),
+        WorkspaceRunRegistry::default(),
+        record.id.clone(),
+        fixture.app_paths.clone(),
+        record.clone(),
+    );
+    let (outbound_tx, _outbound_rx) = mpsc::channel::<OutboundControl>(8);
+    dispatch_lc_fresh_recovery_run(run_context, outbound_tx).await;
+
+    // ① 唯一启动口真实 spawn：全新会话（resume=None），prompt 自足。
+    let input = tokio::time::timeout(std::time::Duration::from_secs(5), input_rx.recv())
+        .await
+        .expect("显式 fresh 授权后 outline 反馈族必须真实 spawn（非 typed 拒）")
+        .expect("provider input");
+    assert!(
+        input.resume_provider_session_id.is_none(),
+        "fresh 全新启动，旧 native id 不回捞"
+    );
+    assert!(
+        input.prompt.contains(prior_outline_marker.as_str()),
+        "fresh prompt 必须携带上一版 outline 全文"
+    );
+    assert!(
+        input.prompt.contains(feedback.as_str()),
+        "fresh prompt 必须携带 durable 返修反馈"
+    );
+    assert!(input.prompt.contains("T15评审意见摘要"));
+    assert!(input.prompt.contains("[confirmed_story_specs]"));
+    assert!(input.prompt.contains("[confirmed_design_specs]"));
+    assert!(input.prompt.contains("[repository_structure_summary]"));
+
+    // ② 原 outline 确认门（AuthorConfirm + OutlineConfirm 节点），不重臂。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let stage_done = {
+            let engine = fixture.engine.lock().await;
+            engine.session().stage == WorkspaceStage::AuthorConfirm
+                && engine.active_node_type()
+                    == Some(crate::web::workspace_ws_types::TimelineNodeType::WorkItemPlanOutlineConfirm)
+        };
+        if stage_done {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "fresh run 必须完成回原 outline 确认门"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    // ③ flow=Legacy；零新 draft workspace；recovery 完成收口。
+    {
+        let engine = fixture.engine.lock().await;
+        let completed_flow = engine.session().flow_kind;
+        assert_eq!(completed_flow, WorkItemPlanFlowKind::Legacy);
+    }
+    let new_workspace_count =
+        crate::product::work_item_plan_store::WorkItemPlanStore::new(fixture.app_paths.clone())
+            .load_active_index("project_0001", "issue_0001", &fixture.record.entity_id)
+            .expect("load active index")
+            .map(|index| index.outline_to_current_draft_id.len())
+            .unwrap_or(0);
+    assert_eq!(new_workspace_count, 0, "outline 确认门不得创建 draft workspace");
+
+    let after = fixture
+        .lifecycle
+        .get_workspace_session(&fixture.record.id)
+        .expect("record after completion");
+    let recovery = after.lc_resume_recovery.expect("recovery kept");
+    assert_eq!(recovery.state, LcResumeRecoveryState::Resolved);
+    assert_eq!(
+        recovery.fresh_native_session_id.as_deref(),
+        Some("t15-fresh-native")
+    );
+    assert!(recovery.fresh_operations.iter().any(|operation| {
+        operation.operation_id == "op-t15-fresh"
+            && operation.state == LcFreshOperationState::Completed
+    }));
 }

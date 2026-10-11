@@ -371,3 +371,121 @@ pub(crate) fn build_outline_revision_prompt(
     );
     (prompt, nonce)
 }
+
+/// B2b2（Task 5.3，tasks.md 5.3 / 设计 §5.3）：LC 显式 fresh 恢复的 outline
+/// 完整返修 prompt——合同族第三个成员，与初次 full 同源渲染完整
+/// story/design/repository 材料、context_resolutions 与 strict contract
+/// （revision 语义：真实来源 ID 直接取自 request），并显式携带上一版
+/// outline 全文、durable 返修反馈与 review 记录；不依赖旧 provider 会话
+/// 历史（调用方以全新会话启动，resume=None）。`previous_outline`/
+/// `feedback`/`review_sections` 缺项时对应小节省略（author 首发 tag 无
+/// durable 反馈/无旧稿时不伪造成返修；revision/rebuild-origin tag 由调用
+/// 侧保证反馈非空，禁止无反馈出生 full）。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_outline_fresh_revision_prompt_with_nonce(
+    request: &GenerateWorkItemsRequest,
+    issue: &IssueRecord,
+    repository: &RepositoryRecord,
+    story_context: &[String],
+    design_context: &[String],
+    repository_structure: &str,
+    design_context_gaps: &[String],
+    context_resolutions: &[OutlineContextBlockerResolution],
+    previous_outline: Option<&str>,
+    feedback: Option<&str>,
+    review_sections: &[String],
+    context: &RoutingReferenceContext,
+) -> (String, String) {
+    let nonce = structured_output_nonce();
+    let runtime_contract = work_item_plan_runtime_contract("WorkItemPlan Outline Planner", context);
+    let previous_outline_section = previous_outline
+        .map(|outline| {
+            format!(
+                "[previous_outline]\n\
+                 上一版 outline 全文如下（本次返修的基础；除非反馈要求修改，既有正确决策必须保留）:\n\
+                 {outline}\n\n"
+            )
+        })
+        .unwrap_or_default();
+    let revision_feedback_section = feedback
+        .map(|feedback| {
+            format!(
+                "[revision_feedback]\n\
+                 上一会话已累积的返修反馈（含审核意见；必须在本次修订中全部处理）:\n\
+                 {feedback}\n\n"
+            )
+        })
+        .unwrap_or_default();
+    let review_section = if review_sections.is_empty() {
+        String::new()
+    } else {
+        format!("[review_feedback]\n{}\n\n", review_sections.join("\n\n"))
+    };
+    // F-60 P1b 同源：fresh 返修与初次/增量修订共享 strict contract 渲染与
+    // 最小正确示例（revision=true——full fresh 同样不依赖会话历史补 gate
+    // 必需条款，真实来源 ID 直接取自 request）。
+    let (example_story_spec_ids, story_placeholder) =
+        example_source_spec_id_array(&request.story_spec_ids, "story_spec_0001");
+    let (example_design_spec_ids, design_placeholder) =
+        example_source_spec_id_array(&request.design_spec_ids, "design_spec_0001");
+    let strict_output_contract = outline_strict_output_contract(
+        &nonce,
+        &outline_source_spec_id_rule(&request.story_spec_ids, &request.design_spec_ids, true),
+        &outline_minimal_correct_example(
+            &nonce,
+            &issue.project_id,
+            &issue.id,
+            &example_story_spec_ids,
+            &example_design_spec_ids,
+            story_placeholder || design_placeholder,
+        ),
+        true,
+    );
+    let prompt = format!(
+        "你是 Aria 的 WorkItemPlan Outline Planner。当前请求是显式全新会话（explicit fresh recovery）中的 WorkItemPlan Outline 完整返修：旧 provider 会话已因规划上下文漂移作废，本 prompt 携带全部所需上下文，不依赖任何历史会话。请基于以下完整输入、上一版 outline 全文与返修反馈，输出修订后的完整 outline。\n\n\
+         {runtime_contract}\
+         [issue]\n\
+         title: {title}\n\
+         description: {description}\n\n\
+         [repository]\n\
+         id: {repo_id}\n\
+         path: {repo_path}\n\n\
+         [confirmed_story_specs]\n{story_context}\n\n\
+         [confirmed_design_specs]\n{design_context}\n\n\
+         [repository_structure_summary]\n{repository_structure}\n\n\
+         [design_context_gaps]\n{design_context_gaps}\n\n\
+         [context_blocker_resolutions]\n{context_resolutions}\n\n\
+         {previous_outline_section}\
+         {revision_feedback_section}\
+         {review_section}\
+         [user_options]\n\
+         include_integration_tests: {include_integration_tests}\n\
+         include_e2e_tests: {include_e2e_tests}\n\
+         force_frontend_backend_split: {force_frontend_backend_split}\n\
+         require_execution_plan_confirm: {require_execution_plan_confirm}\n\n\
+         {split_option_semantics}\
+         {outline_write_scope_rules}\
+         {strict_output_contract}",
+        runtime_contract = runtime_contract,
+        title = issue.title,
+        description = issue.description.as_deref().unwrap_or("无"),
+        repo_id = repository.id,
+        repo_path = repository.path.display(),
+        story_context = story_context.join("\n\n"),
+        design_context = design_context.join("\n\n"),
+        repository_structure = repository_structure,
+        design_context_gaps = format_string_list(design_context_gaps),
+        context_resolutions = format_context_resolutions(context_resolutions),
+        previous_outline_section = previous_outline_section,
+        revision_feedback_section = revision_feedback_section,
+        review_section = review_section,
+        include_integration_tests = request.include_integration_tests.unwrap_or(false),
+        include_e2e_tests = request.include_e2e_tests.unwrap_or(false),
+        force_frontend_backend_split = request.force_frontend_backend_split.unwrap_or(false),
+        require_execution_plan_confirm = request.require_execution_plan_confirm.unwrap_or(false),
+        split_option_semantics = split_option_semantics(request),
+        outline_write_scope_rules = OUTLINE_WRITE_SCOPE_RULES,
+        strict_output_contract = strict_output_contract,
+    );
+    (prompt, nonce)
+}

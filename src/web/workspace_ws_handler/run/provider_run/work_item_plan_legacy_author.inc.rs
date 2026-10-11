@@ -67,10 +67,68 @@
                     }
                 };
                 let routing_context = plan_launch.routing_context();
+                // B2b2（Task 5.3，tasks.md 5.3 / 设计 §5.3）：LC 显式 fresh
+                // recovery run——dispatch（claim 受理）已把 recovery 推进
+                // FreshRunning 并 spawn 本 run。outline 反馈族三 tag
+                //（author/revision/rebuild）从 typed 拒接管为真实 full
+                // fresh：prompt 自足（旧 outline 全文/feedback/review/完整
+                // story/design/repository 材料），旧 provider 会话不回捞
+                //（resume=None，全新节点）；正常 resume 的增量返修与首发
+                // full 出生路径保持不变（FreshRunning 之外的记录零影响）。
+                let fresh_outline_source_context = lifecycle_for_run
+                    .get_workspace_session(&session_record_for_run.id)
+                    .ok()
+                    .and_then(|record| record.lc_resume_recovery)
+                    .filter(|recovery| {
+                        recovery.state
+                            == crate::product::models::LcResumeRecoveryState::FreshRunning
+                    })
+                    .map(|recovery| recovery.run_context)
+                    .filter(|context| {
+                        matches!(
+                            context,
+                            crate::product::models::LcRecoveryRunContext::LegacyOutlineAuthor {
+                                ..
+                            }
+                            | crate::product::models::LcRecoveryRunContext::LegacyOutlineRevision {
+                                ..
+                            }
+                            | crate::product::models::LcRecoveryRunContext::LegacyOutlineRebuild {
+                                ..
+                            }
+                        )
+                    });
 
                 // 首次生成：使用完整 prompt + context_resolutions；
-                // review/AutoRevision：使用同一会话增量返修 prompt，不重复完整上下文。
-                let mut invocation = if is_outline_revision_run {
+                // review/AutoRevision：使用同一会话增量返修 prompt，不重复完整上下文；
+                // 显式 fresh recovery：full fresh 返修 prompt（自足，不依赖旧会话）。
+                let mut invocation = if let Some(source_context) =
+                    fresh_outline_source_context.as_ref()
+                {
+                    match WorkItemSplitEngine::build_outline_fresh_revision_invocation(
+                        &request,
+                        &lifecycle_for_run,
+                        &issue,
+                        &repository,
+                        author_provider,
+                        source_context,
+                        &routing_context,
+                    ) {
+                        Ok(invocation) => invocation,
+                        Err(error) => {
+                            engine.mark_active_run_finished(&run_label);
+                            let err = WsOutMessage::Error {
+                                message: format!(
+                                    "outline fresh revision invocation failed: {}",
+                                    error.message
+                                ),
+                            };
+                            let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                            return;
+                        }
+                    }
+                } else if is_outline_revision_run {
+
                     let feedback = outline_revision_feedback
                         .as_deref()
                         .unwrap_or("用户在 Author Confirm 阶段要求返修当前 Outline");
@@ -146,8 +204,10 @@
                     );
                 }
 
-                let node_id = if rebuilt.is_some() {
-                    // B3：重建 run 不沿用中断会话的 OutlineRun 节点，新建节点。
+                let node_id = if rebuilt.is_some() || fresh_outline_source_context.is_some() {
+                    // B3/5.3：重建与显式 fresh run 都不沿用中断会话的
+                    // OutlineRun 节点（漂移作废，fresh_node_id 由新节点
+                    // 落 conversation 后回绑），新建节点。
                     engine.begin_work_item_plan_outline_run().await
                 } else if engine.active_node_type()
                     == Some(
@@ -173,7 +233,9 @@
                     .emit_provider_prompt_event(
                         &node_id,
                         invocation.prompt.clone(),
-                        if is_outline_revision_run {
+                        if fresh_outline_source_context.is_some() {
+                            "发送给 WorkItemPlan provider 的显式 fresh 完整返修提示词"
+                        } else if is_outline_revision_run {
                             "发送给 WorkItemPlan provider 的增量返修提示词"
                         } else {
                             "发送给 WorkItemPlan provider 的完整提示词"
@@ -181,27 +243,30 @@
                         Some(invocation.author_provider.clone()),
                     )
                     .await;
-                // B3 round3：StaleContext 重建 run 的 provider **全新启动** —— 不携带
-                // provider_resume_session_id（不读取旧 Author conversation，避免以 --resume
-                // 复用旧 provider 原生会话）；legacy 正常 resume（SameContext/传统单仓）
-                // 保持现有行为（携带会话 id）。
-                let provider_input = if rebuilt.is_some() {
-                    engine.build_work_item_plan_streaming_input_fresh(
-                        invocation.provider_type.clone(),
-                        invocation.prompt.clone(),
-                        invocation.worktree_path.clone(),
-                        invocation.author_provider.clone(),
-                        PlanAuthorOutputContract::Structured,
-                    )
-                } else {
-                    engine.build_work_item_plan_streaming_input(
-                        invocation.provider_type.clone(),
-                        invocation.prompt.clone(),
-                        invocation.worktree_path.clone(),
-                        invocation.author_provider.clone(),
-                        PlanAuthorOutputContract::Structured,
-                    )
-                };
+                // B3 round3/5.3：StaleContext 重建 run 与显式 fresh recovery run 的
+                // provider **全新启动** —— 不携带 provider_resume_session_id
+                //（不读取旧 Author conversation，避免以 --resume 复用旧
+                // provider 原生会话；fresh 的旧 native id 已被 superseded 记录
+                // 作废，不回捞）；legacy 正常 resume（SameContext/传统单仓）保持
+                // 现有行为（携带会话 id）。
+                let provider_input =
+                    if rebuilt.is_some() || fresh_outline_source_context.is_some() {
+                        engine.build_work_item_plan_streaming_input_fresh(
+                            invocation.provider_type.clone(),
+                            invocation.prompt.clone(),
+                            invocation.worktree_path.clone(),
+                            invocation.author_provider.clone(),
+                            PlanAuthorOutputContract::Structured,
+                        )
+                    } else {
+                        engine.build_work_item_plan_streaming_input(
+                            invocation.provider_type.clone(),
+                            invocation.prompt.clone(),
+                            invocation.worktree_path.clone(),
+                            invocation.author_provider.clone(),
+                            PlanAuthorOutputContract::Structured,
+                        )
+                    };
                 // REQ-PIB-02（T2.3）：基线不可解析 → 终止本轮 run（可观测错误出站）。
                 let provider_input = match provider_input {
                     Ok(provider_input) => provider_input,

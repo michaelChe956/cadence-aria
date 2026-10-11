@@ -1196,3 +1196,461 @@ fn sc_author_prompt_tail_clamps_heading_language_and_raises_budget() {
             - prompt.len()
     );
 }
+
+use crate::product::models::{LcRecoveryBusinessContext, LcRecoveryRunContext, NodeDetail};
+
+// ---------------------------------------------------------------------------
+// B2b2（Task 5.3，tasks.md 5.3 / 设计 §5.3）：LC 显式 fresh 恢复的 outline
+// 反馈族 full fresh invocation 契约——prompt 自足（完整 story/design/
+// repository 材料 + context_resolutions + 上一版 outline 全文 + durable
+// feedback + review 记录）；legacy outline 三 tag 之外 typed 拒；rebuild
+// origin feedback 不丢；空反馈注入默认文案（禁止无反馈出生 full）。
+// ---------------------------------------------------------------------------
+
+struct OutlineFreshContractFixture {
+    #[allow(dead_code)]
+    temp: tempfile::TempDir,
+    lifecycle: LifecycleStore,
+    issue: IssueRecord,
+    repository: RepositoryRecord,
+    request: GenerateWorkItemsRequest,
+    session_id: String,
+}
+
+fn outline_fresh_artifact_version(
+    version: u32,
+    outline: crate::product::models::WorkItemPlanOutline,
+) -> crate::web::workspace_ws_types::ArtifactVersion {
+    crate::web::workspace_ws_types::ArtifactVersion {
+        version,
+        payload: crate::web::workspace_ws_types::ArtifactPayload::WorkItemPlanOutlineCandidate {
+            outline_candidate: Box::new(
+                crate::web::workspace_ws_types::WorkItemPlanOutlineCandidateDto {
+                    outline,
+                    design_context_gaps: Vec::new(),
+                    validator_findings: Vec::new(),
+                    context_blockers: Vec::new(),
+                    current_generation_round_id: None,
+                    selected_generation_mode: None,
+                },
+            ),
+        },
+        generated_by: ProviderName::ClaudeCode,
+        reviewed_by: None,
+        review_verdict: None,
+        confirmed_by: None,
+        is_current: version == 2,
+        created_at: "2026-10-12T00:00:00Z".to_string(),
+        source_node_id: "timeline_node_001".to_string(),
+    }
+}
+
+fn outline_fresh_review_node_detail(session_id: &str, node_id: &str) -> NodeDetail {
+    NodeDetail {
+        node_id: node_id.to_string(),
+        session_id: session_id.to_string(),
+        node_type: crate::web::workspace_ws_types::TimelineNodeType::ReviewerRun,
+        status: crate::web::workspace_ws_types::TimelineNodeStatus::Completed,
+        agent_role: None,
+        provider: None,
+        prompt: None,
+        messages: Vec::new(),
+        streaming_content: String::new(),
+        execution_events: Vec::new(),
+        permission_events: Vec::new(),
+        verdict: Some(serde_json::json!({
+            "verdict": "revise",
+            "summary": "T15评审意见摘要"
+        })),
+        artifact_ref: None,
+        is_revision: false,
+        revision_feedback: None,
+        base_artifact_ref: None,
+        started_at: "2026-10-12T00:00:00Z".to_string(),
+        ended_at: None,
+    }
+}
+
+fn outline_fresh_business(review_refs: Vec<String>) -> LcRecoveryBusinessContext {
+    LcRecoveryBusinessContext {
+        entity_id: "issue_work_item_plan_0001".to_string(),
+        plan_id: Some("issue_work_item_plan_0001".to_string()),
+        workspace_type: crate::product::models::WorkspaceType::WorkItemPlan,
+        business_repository_physical_id: None,
+        business_repository_logical_id: None,
+        business_checkout_id: None,
+        business_repository_path: None,
+        source_story_ids: Vec::new(),
+        source_design_ids: Vec::new(),
+        plan_options_ref: None,
+        artifact_refs: Vec::new(),
+        review_refs,
+        author_provider: ProviderName::ClaudeCode,
+        effective_reviewer_provider: Some(ProviderName::Codex),
+        original_node_id: Some("timeline_node_001".to_string()),
+        original_role_run_seq: None,
+    }
+}
+
+fn outline_fresh_contract_fixture() -> OutlineFreshContractFixture {
+    use crate::product::lifecycle_store::{
+        AppendSpecVersionInput, CreateDesignSpecInput, CreateStorySpecInput,
+        CreateWorkspaceSessionInput,
+    };
+    use crate::product::models::{
+        DesignContextCapabilities, IssuePhase, IssueStatus, OutlineContextBlockerResolution,
+        OutlineContextIndex,
+    };
+    use crate::product::work_item_plan_store::WorkItemPlanStore;
+    use crate::web::types::GenerateWorkItemsRequest;
+
+    let temp = tempfile::tempdir().unwrap();
+    let paths = crate::product::app_paths::ProductAppPaths::new(temp.path());
+    let lifecycle = LifecycleStore::new(paths.clone());
+    let story = lifecycle
+        .create_story_spec(CreateStorySpecInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            title: "T15 故事规格".to_string(),
+            aggregate_codebase: None,
+        })
+        .unwrap();
+    lifecycle
+        .append_version(AppendSpecVersionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: story.id.clone(),
+            markdown: "## 架构\nREQ-0001 提供后端接口。".to_string(),
+            provider_run_refs: Vec::new(),
+            review_refs: Vec::new(),
+            confirmed_by: None,
+        })
+        .unwrap();
+    let design = lifecycle
+        .create_design_spec(CreateDesignSpecInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            story_spec_ids: vec![story.id.clone()],
+            title: "T15 设计规格".to_string(),
+            aggregate_codebase: None,
+        })
+        .unwrap();
+    lifecycle
+        .append_version(AppendSpecVersionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: design.id.clone(),
+            markdown: "## 模块\nREQ-0002 模块拆分。".to_string(),
+            provider_run_refs: Vec::new(),
+            review_refs: Vec::new(),
+            confirmed_by: None,
+        })
+        .unwrap();
+
+    let session = lifecycle
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: "issue_work_item_plan_0001".to_string(),
+            workspace_type: crate::product::models::WorkspaceType::WorkItemPlan,
+            author_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::Codex),
+            review_rounds: 1,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+            work_item_plan_options: None,
+        })
+        .unwrap();
+
+    // 上一版 outline 全文：v1（run_context 钉选版）与 v2（最新版）策略标记互斥。
+    let prior = parse_work_item_plan_outline_output(valid_outline_author_output())
+        .expect("outline output")
+        .outline
+        .expect("outline");
+    let mut pinned = prior.clone();
+    pinned.strategy_summary = "T15上一版大纲策略全文标记".to_string();
+    let mut latest = prior;
+    latest.strategy_summary = "T15更新版大纲策略标记".to_string();
+    lifecycle
+        .save_artifact_versions(
+            &session.id,
+            &[
+                outline_fresh_artifact_version(1, pinned),
+                outline_fresh_artifact_version(2, latest),
+            ],
+        )
+        .unwrap();
+
+    lifecycle
+        .save_node_detail(
+            &session.id,
+            "timeline_node_review_0001",
+            &outline_fresh_review_node_detail(&session.id, "timeline_node_review_0001"),
+        )
+        .unwrap();
+
+    WorkItemPlanStore::new(paths)
+        .save_outline_context_index(&OutlineContextIndex {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            plan_id: "issue_work_item_plan_0001".to_string(),
+            generation_round_id: "outline_stage".to_string(),
+            blocker_resolutions: vec![OutlineContextBlockerResolution {
+                blocker_node_id: "timeline_node_blocker".to_string(),
+                resolution_node_id: "timeline_node_resolution".to_string(),
+                resolution_artifact_ref: "T15上下文补充决议".to_string(),
+                estimated_tokens: 512,
+                created_at: "2026-10-12T00:00:00Z".to_string(),
+                summary: None,
+                merged_count: None,
+            }],
+            design_context_gaps: Vec::new(),
+            design_context_capabilities: DesignContextCapabilities {
+                has_architecture: true,
+                has_module_breakdown: true,
+                has_tech_stack: true,
+                has_test_strategy: true,
+                has_key_paths: true,
+            },
+            updated_at: "2026-10-12T00:00:00Z".to_string(),
+        })
+        .unwrap();
+
+    let issue = IssueRecord {
+        id: "issue_0001".to_string(),
+        project_id: "project_0001".to_string(),
+        repo_id: Some("repository_0001".to_string()),
+        base_branch: None,
+        logical_codebase_id: None,
+        title: "T15 计划".to_string(),
+        description: Some("T15 描述".to_string()),
+        change_id: "change_0001".to_string(),
+        phase: IssuePhase::Development,
+        status: IssueStatus::InProgress,
+        active_binding_id: None,
+        created_at: "2026-10-12T00:00:00Z".to_string(),
+        updated_at: "2026-10-12T00:00:00Z".to_string(),
+    };
+    let repo_root = temp.path().join("repo");
+    std::fs::create_dir_all(&repo_root).unwrap();
+    let repository = RepositoryRecord {
+        id: "repository_0001".to_string(),
+        project_id: "project_0001".to_string(),
+        name: "Repo".to_string(),
+        path: repo_root,
+        repo_hash: "sha256:repo".to_string(),
+        runtime_root: temp.path().to_path_buf(),
+        default_policy_preset: "default".to_string(),
+        default_provider_mode: "interactive".to_string(),
+        logical_repository_id: None,
+        primary_checkout_id: None,
+        identity_schema_version: 1,
+        created_at: "2026-10-12T00:00:00Z".to_string(),
+        updated_at: "2026-10-12T00:00:00Z".to_string(),
+    };
+    let request = GenerateWorkItemsRequest {
+        title: "T15".to_string(),
+        story_spec_ids: vec![story.id],
+        design_spec_ids: vec![design.id],
+        include_integration_tests: Some(false),
+        include_e2e_tests: Some(false),
+        force_frontend_backend_split: Some(false),
+        require_execution_plan_confirm: Some(false),
+        author_provider: None,
+        reviewer_provider: None,
+        review_rounds: None,
+        superpowers_enabled: None,
+        openspec_enabled: None,
+        revision_feedback: None,
+    };
+    OutlineFreshContractFixture {
+        temp,
+        lifecycle,
+        issue,
+        repository,
+        request,
+        session_id: session.id,
+    }
+}
+
+#[test]
+fn anchor_t15_outline_fresh_revision_prompt_is_self_sufficient() {
+    let fixture = outline_fresh_contract_fixture();
+    let source_context = LcRecoveryRunContext::LegacyOutlineRevision {
+        business: outline_fresh_business(vec!["timeline_node_review_0001".to_string()]),
+        normalized_feedback: "T15返修反馈全文标记：补充验收边界".to_string(),
+        outline_ref: Some("artifact_current".to_string()),
+        outline_version: Some(1),
+        outline_hash: None,
+    };
+    let invocation = crate::product::work_item_split_engine::WorkItemSplitEngine::build_outline_fresh_revision_invocation(
+        &fixture.request,
+        &fixture.lifecycle,
+        &fixture.issue,
+        &fixture.repository,
+        ProviderName::ClaudeCode,
+        &source_context,
+        &RoutingReferenceContext::Legacy,
+    )
+    .expect("fresh revision invocation");
+
+    // 完整材料（与出生 full 同源）+ durable 事实全部在 prompt 内。
+    for required in [
+        "[confirmed_story_specs]",
+        "T15 故事规格",
+        "[confirmed_design_specs]",
+        "T15 设计规格",
+        "[repository_structure_summary]",
+        "[context_blocker_resolutions]",
+        "T15上下文补充决议",
+        "[previous_outline]",
+        "T15上一版大纲策略全文标记",
+        "[revision_feedback]",
+        "T15返修反馈全文标记：补充验收边界",
+        "[review_feedback]",
+        "T15评审意见摘要",
+        "不依赖任何历史会话",
+    ] {
+        assert!(
+            invocation.prompt.contains(required),
+            "outline fresh prompt 必须自足携带 {required}，got: {}",
+            invocation.prompt
+        );
+    }
+    // 钉选 v1，不误取最新 v2。
+    assert!(
+        !invocation.prompt.contains("T15更新版大纲策略标记"),
+        "run_context 钉选 outline_version=1 时不得回退最新版"
+    );
+    assert!(!invocation.sentinel_nonce.is_empty());
+    assert_eq!(
+        invocation.worktree_path,
+        fixture.repository.path.to_string_lossy().to_string()
+    );
+    assert_eq!(invocation.author_provider, ProviderName::ClaudeCode);
+}
+
+#[test]
+fn anchor_t15_outline_fresh_revision_rejects_non_outline_tags() {
+    let fixture = outline_fresh_contract_fixture();
+    let source_context = LcRecoveryRunContext::LegacyDraft {
+        business: outline_fresh_business(Vec::new()),
+        generation_round_id: "round_0001".to_string(),
+        active_outline_id: "outline_backend".to_string(),
+        draft_refs: Vec::new(),
+        pending_feedback: None,
+        outline_ref: None,
+        candidate_ref: None,
+    };
+    let error = crate::product::work_item_split_engine::WorkItemSplitEngine::build_outline_fresh_revision_invocation(
+        &fixture.request,
+        &fixture.lifecycle,
+        &fixture.issue,
+        &fixture.repository,
+        ProviderName::ClaudeCode,
+        &source_context,
+        &RoutingReferenceContext::Legacy,
+    )
+    .expect_err("非 legacy outline tag 必须 typed 拒");
+    assert_eq!(error.code, "lc_resume_recovery_context_unsupported");
+    assert!(
+        error.message.contains("legacy_draft"),
+        "typed 拒文案必须携带 tag 短名，got: {}",
+        error.message
+    );
+}
+
+#[test]
+fn anchor_t15_outline_fresh_revision_keeps_rebuild_origin_feedback_and_outline() {
+    let fixture = outline_fresh_contract_fixture();
+    let source_context = LcRecoveryRunContext::LegacyOutlineRebuild {
+        business: outline_fresh_business(Vec::new()),
+        origin: crate::product::models::LcOutlineRebuildOrigin::OutlineRevision(
+            crate::product::models::LcLegacyOutlineRevisionPayload {
+                normalized_feedback: "T15重建前返修反馈".to_string(),
+                outline_ref: None,
+                outline_version: Some(1),
+                outline_hash: None,
+            },
+        ),
+        previous_snapshot_access_fingerprint: Some("sha256:t15-snap".to_string()),
+    };
+    let invocation = crate::product::work_item_split_engine::WorkItemSplitEngine::build_outline_fresh_revision_invocation(
+        &fixture.request,
+        &fixture.lifecycle,
+        &fixture.issue,
+        &fixture.repository,
+        ProviderName::ClaudeCode,
+        &source_context,
+        &RoutingReferenceContext::Legacy,
+    )
+    .expect("fresh rebuild invocation");
+
+    // rebuild origin=outline_revision：feedback 不丢 + 旧稿全文携带。
+    assert!(invocation.prompt.contains("T15重建前返修反馈"));
+    assert!(invocation.prompt.contains("T15上一版大纲策略全文标记"));
+    assert!(!invocation.prompt.contains("T15更新版大纲策略标记"));
+}
+
+#[test]
+fn anchor_t15_outline_fresh_revision_defaults_empty_feedback() {
+    let fixture = outline_fresh_contract_fixture();
+    let source_context = LcRecoveryRunContext::LegacyOutlineRevision {
+        business: outline_fresh_business(Vec::new()),
+        normalized_feedback: String::new(),
+        outline_ref: None,
+        outline_version: None,
+        outline_hash: None,
+    };
+    let invocation = crate::product::work_item_split_engine::WorkItemSplitEngine::build_outline_fresh_revision_invocation(
+        &fixture.request,
+        &fixture.lifecycle,
+        &fixture.issue,
+        &fixture.repository,
+        ProviderName::ClaudeCode,
+        &source_context,
+        &RoutingReferenceContext::Legacy,
+    )
+    .expect("fresh revision invocation");
+
+    assert!(
+        invocation
+            .prompt
+            .contains("用户在 Author Confirm 阶段要求返修当前 Outline"),
+        "durable 反馈为空时必须注入默认返修文案（禁止无反馈出生 full）"
+    );
+    assert!(invocation.prompt.contains("[revision_feedback]"));
+}
+
+#[test]
+fn anchor_t15_outline_fresh_author_tag_carries_prior_outline_without_feedback_section() {
+    let fixture = outline_fresh_contract_fixture();
+    let source_context = LcRecoveryRunContext::LegacyOutlineAuthor {
+        business: outline_fresh_business(Vec::new()),
+        flow: crate::product::work_item_plan_policy::WorkItemPlanFlowKind::Legacy,
+        original_provider_node_id: None,
+        outline_ref: Some("artifact_current".to_string()),
+    };
+    let invocation = crate::product::work_item_split_engine::WorkItemSplitEngine::build_outline_fresh_revision_invocation(
+        &fixture.request,
+        &fixture.lifecycle,
+        &fixture.issue,
+        &fixture.repository,
+        ProviderName::ClaudeCode,
+        &source_context,
+        &RoutingReferenceContext::Legacy,
+    )
+    .expect("fresh author invocation");
+
+    // 已产旧稿 → full 修订携旧稿（无版本钉选取最新版）；author tag 无 durable
+    // 反馈，不注入 [revision_feedback] 小节（不伪造成返修）。
+    assert!(invocation.prompt.contains("[previous_outline]"));
+    assert!(invocation.prompt.contains("T15更新版大纲策略标记"));
+    assert!(!invocation.prompt.contains("[revision_feedback]"));
+    assert!(
+        !invocation
+            .prompt
+            .contains("用户在 Author Confirm 阶段要求返修当前 Outline")
+    );
+}

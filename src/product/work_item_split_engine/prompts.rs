@@ -10,7 +10,7 @@ use crate::product::models::{
 use crate::product::work_item_plan_compiler::ACCEPTANCE_PATH_NOT_IN_BASELINE_REPAIR_ACTION;
 use crate::product::work_item_plan_compiler::grammar;
 use crate::product::workspace_engine::{allowed_outputs_for, forbidden_outputs_for};
-use crate::web::error::ApiResult;
+use crate::web::error::{ApiError, ApiResult};
 use crate::web::types::GenerateWorkItemsRequest;
 
 use super::WorkItemSplitEngine;
@@ -149,7 +149,10 @@ pub(crate) use sc_author_teaching::{
 mod outline_contract;
 #[cfg(test)]
 pub(crate) use outline_contract::build_outline_prompt;
-pub(crate) use outline_contract::{build_outline_prompt_with_nonce, build_outline_revision_prompt};
+pub(crate) use outline_contract::{
+    build_outline_fresh_revision_prompt_with_nonce, build_outline_prompt_with_nonce,
+    build_outline_revision_prompt,
+};
 
 pub(crate) const SINGLE_CANDIDATE_PROJECT_RULE_PRIORITY: &str = "结构标题(##/### section 名)、字段 key、ID(WI-*/CT-*/TASK-*/AC-*/REQ-*/CHECK-* 等)、枚举值(require_all/require_any/backend/frontend/integration 等)永远保持 grammar 指定的英文原样;上述语言规则仅约束自由文本值(各 ## 标题的 <title> 部分、statement/description/capabilities 等字段的值)与说明性文字。字段行分隔符必须是半角 ASCII:每行写作 `- key: value`(冒号+一个空格均为半角),禁止全角冒号`：`或全角空格;EARS 关键词(WHEN/THE SYSTEM SHALL)、ID 前缀(WI-/CT-/TASK-/AC-/REQ-/CHECK-)与枚举值内的分隔亦为半角;中文仅出现在值的自由文本中。";
 
@@ -497,6 +500,63 @@ impl WorkItemSplitEngine {
         })
     }
 
+    /// B2b2（Task 5.3，tasks.md 5.3 / 设计 §5.3）：LC 显式 fresh 恢复的
+    /// outline 反馈族 full fresh invocation——prompt 自足：完整
+    /// story/design/repository 材料（与初次 full 同源收集）+
+    /// context_resolutions（durable outline context index 只读保留）+
+    /// 上一版 outline 全文（session artifact 版本按 run_context 版本钉选）
+    /// + durable 返修反馈 + review 记录；不依赖旧 provider 会话历史，调用方
+    /// 以全新会话启动（resume=None，旧 native id 不回捞）。
+    ///
+    /// `source_context` 仅接受 legacy outline 三 tag
+    /// （legacy_outline_author / legacy_outline_revision /
+    /// legacy_outline_rebuild）；其它 tag typed 拒
+    /// （`lc_resume_recovery_context_unsupported`），不回落通用出生/增量
+    /// 路径。revision/rebuild(outline_revision origin) 的 durable 反馈为空时
+    /// 注入默认返修文案——禁止无反馈出生 full。
+    pub(crate) fn build_outline_fresh_revision_invocation(
+        request: &GenerateWorkItemsRequest,
+        lifecycle: &LifecycleStore,
+        issue: &IssueRecord,
+        business_repository: &RepositoryRecord,
+        author: ProviderName,
+        source_context: &crate::product::models::LcRecoveryRunContext,
+        routing: &RoutingReferenceContext,
+    ) -> ApiResult<WorkItemSplitInvocation> {
+        let facts = outline_fresh_revision_facts(source_context)?;
+        let story_context = collect_story_context(lifecycle, request, issue)?;
+        let design_context = collect_design_context(lifecycle, request, issue)?;
+        let repository_structure = summarize_repository_structure(&business_repository.path);
+        let capabilities = merge_design_context_capabilities(&design_context);
+        let gaps = design_context_gaps(&capabilities);
+        let context_resolutions =
+            load_fresh_outline_context_resolutions(lifecycle, issue, &facts.plan_entity_id);
+        let previous_outline = load_fresh_prior_outline_full_text(lifecycle, issue, &facts);
+        let review_sections = load_fresh_review_feedback_sections(lifecycle, issue, &facts);
+        let (prompt, sentinel_nonce) = build_outline_fresh_revision_prompt_with_nonce(
+            request,
+            issue,
+            business_repository,
+            &story_context,
+            &design_context,
+            &repository_structure,
+            &gaps,
+            &context_resolutions,
+            previous_outline.as_deref(),
+            facts.feedback.as_deref(),
+            &review_sections,
+            routing,
+        );
+
+        Ok(WorkItemSplitInvocation {
+            prompt,
+            provider_type: provider_name_to_type(&author),
+            worktree_path: business_repository.path.to_string_lossy().to_string(),
+            author_provider: author,
+            sentinel_nonce,
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn build_revision_invocation(
         request: &GenerateWorkItemsRequest,
@@ -532,6 +592,203 @@ impl WorkItemSplitEngine {
             author_provider,
         })
     }
+}
+
+// ---------------------------------------------------------------------------
+// B2b2（Task 5.3，设计 §5.3）：outline 反馈族 fresh invocation 的 durable
+// 事实装载。全部只读：上一版 outline 全文与 review 记录按
+// run_context 携带的 plan entity 定位 session artifact 版本；context
+// resolutions 只读保留（不重算 capabilities/gaps——那是出生路径
+// `load_work_item_plan_outline_context_resolutions` 的职责）。解析不到的
+// 可选事实省略对应 prompt 小节，不倒算、不伪造。
+// ---------------------------------------------------------------------------
+
+/// typed 拒码——与 `workspace_ws_handler::socket` 的
+/// `LC_RESUME_RECOVERY_CONTEXT_UNSUPPORTED_CODE` 同值（socket 模块对
+/// product 层私有，此处为唯一可用引用形态；wire 值由 t13/t15 用例钉住）。
+const OUTLINE_FRESH_CONTEXT_UNSUPPORTED_CODE: &str = "lc_resume_recovery_context_unsupported";
+
+/// fresh 返修默认反馈——与 provider_run 臂增量路径的缺省文案同语义
+/// （Author Confirm 阶段用户要求返修）；fresh 恢复的 durable 反馈为空时
+/// 不得无反馈出生 full。
+const OUTLINE_FRESH_DEFAULT_REVISION_FEEDBACK: &str =
+    "用户在 Author Confirm 阶段要求返修当前 Outline";
+
+struct OutlineFreshRevisionFacts {
+    plan_entity_id: String,
+    feedback: Option<String>,
+    outline_version: Option<u32>,
+    review_refs: Vec<String>,
+}
+
+/// run_context tag 的稳定短名（typed 拒错误文案用，不泄业务 payload）。
+fn lc_recovery_context_tag_label_for_prompt(context: &crate::product::models::LcRecoveryRunContext) -> &'static str {
+    use crate::product::models::LcRecoveryRunContext;
+    match context {
+        LcRecoveryRunContext::Author { .. } => "author",
+        LcRecoveryRunContext::AuthorChoiceFollowup { .. } => "author_choice_followup",
+        LcRecoveryRunContext::AuthorFeedback { .. } => "author_feedback",
+        LcRecoveryRunContext::ReviewerRevision { .. } => "reviewer_revision",
+        LcRecoveryRunContext::LegacyOutlineAuthor { .. } => "legacy_outline_author",
+        LcRecoveryRunContext::LegacyOutlineRevision { .. } => "legacy_outline_revision",
+        LcRecoveryRunContext::LegacyOutlineRebuild { .. } => "legacy_outline_rebuild",
+        LcRecoveryRunContext::LegacyDraft { .. } => "legacy_draft",
+        LcRecoveryRunContext::LegacyBatch { .. } => "legacy_batch",
+        LcRecoveryRunContext::LegacyPlanRevision { .. } => "legacy_plan_revision",
+        LcRecoveryRunContext::ScAuthor { .. } => "sc_author",
+        LcRecoveryRunContext::ScManualRevision { .. } => "sc_manual_revision",
+    }
+}
+
+/// legacy outline 三 tag → fresh 返修事实；其它 tag typed 拒。
+fn outline_fresh_revision_facts(
+    source_context: &crate::product::models::LcRecoveryRunContext,
+) -> ApiResult<OutlineFreshRevisionFacts> {
+    use crate::product::models::{LcOutlineRebuildOrigin, LcRecoveryRunContext};
+    fn non_empty_or_default(feedback: &str) -> String {
+        let trimmed = feedback.trim();
+        if trimmed.is_empty() {
+            OUTLINE_FRESH_DEFAULT_REVISION_FEEDBACK.to_string()
+        } else {
+            trimmed.to_string()
+        }
+    }
+    match source_context {
+        LcRecoveryRunContext::LegacyOutlineAuthor {
+            business,
+            ..
+        } => Ok(OutlineFreshRevisionFacts {
+            plan_entity_id: business.entity_id.clone(),
+            feedback: None,
+            outline_version: None,
+            review_refs: business.review_refs.clone(),
+        }),
+        LcRecoveryRunContext::LegacyOutlineRevision {
+            business,
+            normalized_feedback,
+            outline_version,
+            ..
+        } => Ok(OutlineFreshRevisionFacts {
+            plan_entity_id: business.entity_id.clone(),
+            feedback: Some(non_empty_or_default(normalized_feedback)),
+            outline_version: *outline_version,
+            review_refs: business.review_refs.clone(),
+        }),
+        LcRecoveryRunContext::LegacyOutlineRebuild { business, origin, .. } => match origin {
+            LcOutlineRebuildOrigin::LegacyAuthor(payload) => Ok(OutlineFreshRevisionFacts {
+                plan_entity_id: business.entity_id.clone(),
+                feedback: None,
+                outline_version: None,
+                review_refs: business.review_refs.clone(),
+            }),
+            // rebuild origin=outline_revision：feedback 不丢（设计 §5.3）。
+            LcOutlineRebuildOrigin::OutlineRevision(payload) => Ok(OutlineFreshRevisionFacts {
+                plan_entity_id: business.entity_id.clone(),
+                feedback: Some(non_empty_or_default(&payload.normalized_feedback)),
+                outline_version: payload.outline_version,
+                review_refs: business.review_refs.clone(),
+            }),
+        },
+        other => Err(ApiError::validation(
+            OUTLINE_FRESH_CONTEXT_UNSUPPORTED_CODE,
+            format!(
+                "outline fresh revision invocation requires a legacy outline run_context (legacy_outline_author/legacy_outline_revision/legacy_outline_rebuild); got tag {}",
+                lc_recovery_context_tag_label_for_prompt(other)
+            ),
+        )),
+    }
+}
+
+/// 定位 plan entity 的 WorkItemPlan 会话 record（fresh 返修 durable 事实
+/// 的 session 域）；多会话时取 updated_at 最新，不倒算。
+fn fresh_outline_session_record(
+    lifecycle: &LifecycleStore,
+    issue: &IssueRecord,
+    plan_entity_id: &str,
+) -> Option<crate::product::models::WorkspaceSessionRecord> {
+    lifecycle
+        .list_workspace_sessions(&issue.project_id, &issue.id)
+        .ok()?
+        .into_iter()
+        .filter(|record| {
+            record.entity_id == plan_entity_id
+                && record.workspace_type == crate::product::models::WorkspaceType::WorkItemPlan
+        })
+        .max_by(|a, b| a.updated_at.cmp(&b.updated_at))
+}
+
+/// 上一版 outline 全文：session artifact 版本中优先 run_context 钉选的
+/// outline_version，缺省取最新 WorkItemPlanOutlineCandidate。
+fn load_fresh_prior_outline_full_text(
+    lifecycle: &LifecycleStore,
+    issue: &IssueRecord,
+    facts: &OutlineFreshRevisionFacts,
+) -> Option<String> {
+    let session = fresh_outline_session_record(lifecycle, issue, &facts.plan_entity_id)?;
+    let versions = lifecycle
+        .list_artifact_versions_for_issue_session(&issue.project_id, &issue.id, &session.id)
+        .ok()?;
+    let mut pinned = None;
+    let mut latest = None;
+    for version in &versions {
+        if matches!(
+            &version.payload,
+            crate::web::workspace_ws_types::ArtifactPayload::WorkItemPlanOutlineCandidate { .. }
+        ) {
+            if facts.outline_version == Some(version.version) {
+                pinned = Some(&version.payload);
+            }
+            latest = Some(&version.payload);
+        }
+    }
+    let payload = pinned.or(latest)?;
+    let crate::web::workspace_ws_types::ArtifactPayload::WorkItemPlanOutlineCandidate {
+        outline_candidate,
+    } = payload
+    else {
+        return None;
+    };
+    serde_json::to_string_pretty(&outline_candidate.outline).ok()
+}
+
+/// review 记录：run_context review_refs 指向的 durable 节点 verdict 全文
+/// （压缩历史的最小自足面——反馈文本已含摘要时 refs 补齐可追溯正文）。
+fn load_fresh_review_feedback_sections(
+    lifecycle: &LifecycleStore,
+    issue: &IssueRecord,
+    facts: &OutlineFreshRevisionFacts,
+) -> Vec<String> {
+    if facts.review_refs.is_empty() {
+        return Vec::new();
+    }
+    let Some(session) = fresh_outline_session_record(lifecycle, issue, &facts.plan_entity_id)
+    else {
+        return Vec::new();
+    };
+    facts
+        .review_refs
+        .iter()
+        .filter_map(|node_id| {
+            let detail = lifecycle.load_node_detail(&session.id, node_id).ok()?;
+            let verdict = detail.verdict.as_ref()?;
+            Some(format!("review 节点 {node_id} 的 durable 审核记录:\n{verdict}"))
+        })
+        .collect()
+}
+
+/// context resolutions 只读保留：durable outline context index 的
+/// blocker_resolutions（出生路径的 capabilities/gaps 重算不在 fresh 面）。
+fn load_fresh_outline_context_resolutions(
+    lifecycle: &LifecycleStore,
+    issue: &IssueRecord,
+    plan_entity_id: &str,
+) -> Vec<OutlineContextBlockerResolution> {
+    crate::product::work_item_plan_store::WorkItemPlanStore::new(lifecycle.app_paths())
+        .load_outline_context_index(&issue.project_id, &issue.id, plan_entity_id)
+        .ok()
+        .flatten()
+        .map(|index| index.blocker_resolutions)
+        .unwrap_or_default()
 }
 
 /// F-60 P1b：Split 初次/redo 共享的 [output_schema] 合同渲染（增量契约等价）。

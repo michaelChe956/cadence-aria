@@ -881,6 +881,24 @@ async fn lc_fresh_dispatch_kind(
                 ),
             }
         }
+        // B2b2（Task 5.3，Main 批准 2026-10-12）：outline 反馈族两 tag 的
+        // full fresh 臂接管——dispatch 直接放行既有 kind；臂内
+        // （work_item_plan_legacy_author.inc.rs）以
+        // build_outline_fresh_revision_invocation 构建 prompt 自足的 full
+        // fresh 返修（旧 outline 全文/feedback/review/完整材料）并全新启动
+        // （resume=None、全新节点、原 outline 确认门）；正常 resume 的增量
+        // 返修/首发出生不受影响。legacy_outline_rebuild 仍走上方
+        // NeedsFreshPlanningContext 臂（dispatch 时新解析 planning context）。
+        kind @ LcFreshRunKind::Kind(
+            ProviderRunKind::WorkItemPlanLegacyAuthor
+            | ProviderRunKind::WorkItemPlanOutlineRevision { .. },
+        ) => match kind {
+            LcFreshRunKind::Kind(kind) => Ok(kind),
+            // 上面 match 收窄到 Kind；NeedsFreshPlanningContext 分支已消费。
+            LcFreshRunKind::NeedsFreshPlanningContext => unreachable!(
+                "NeedsFreshPlanningContext arm is matched before the Kind arm"
+            ),
+        },
         LcFreshRunKind::Kind(kind) => Err(lc_context_unsupported(format!(
             "run_context tag {} (resolved kind {kind:?}) fresh handler lands with the remaining B2 packages; explicit fresh stays waiting",
             lc_recovery_context_tag_label(&recovery.run_context)
