@@ -97,7 +97,10 @@ async fn attach_and_cursor_resubscribe_redeliver_pending_provider_choices() {
         .expect("active run");
     manager.register_pending_choice_frame(provider_choice_frame("choice_attach_1"));
 
-    let (session_state, _text_fallback) = manager.attached_session_state().await;
+    let (session_state, _text_fallback) = manager
+        .attached_session_state()
+        .await
+        .expect("attached session state from free engine");
     let frames = manager.activate_attachment_with_initial_frames(
         "conn-attach",
         session_state,
@@ -455,7 +458,10 @@ async fn automation_ownership_injected_into_manager_session_state_frames() {
     );
 
     // 活跃 engine 初帧（attach 路径）与 durable 投影同源：只绑定者 server。
-    let (frame, _) = bound.attached_session_state().await;
+    let (frame, _) = bound
+        .attached_session_state()
+        .await
+        .expect("bound attached session state");
     let ownership = automation_of(&frame).expect("bound session projects server ownership");
     assert_eq!(ownership.owner, AutomationOwner::Server);
     assert_eq!(
@@ -464,13 +470,19 @@ async fn automation_ownership_injected_into_manager_session_state_frames() {
     );
     assert!(ownership.enabled);
 
-    let (frame, _) = other.attached_session_state().await;
+    let (frame, _) = other
+        .attached_session_state()
+        .await
+        .expect("other attached session state");
     let ownership = automation_of(&frame).expect("unbound session projects client ownership");
     assert_eq!(ownership.owner, AutomationOwner::Client);
     assert_eq!(ownership.enrollment_id, None);
     assert!(!ownership.enabled);
 
-    let (durable, _) = bound.durable_projection();
+    let durable = bound
+        .durable_projection()
+        .expect("bound durable projection")
+        .session_state;
     assert_eq!(
         automation_of(&durable).unwrap().owner,
         AutomationOwner::Server
@@ -515,7 +527,10 @@ async fn automation_ownership_injected_into_manager_session_state_frames() {
             EnrollmentWriteCommand::Disable,
         )
         .unwrap();
-    let (frame, _) = bound.durable_projection();
+    let frame = bound
+        .durable_projection()
+        .expect("durable projection after disable")
+        .session_state;
     let ownership = automation_of(&frame).unwrap();
     assert_eq!(ownership.owner, AutomationOwner::Client);
     assert_eq!(
@@ -532,7 +547,10 @@ async fn automation_ownership_injected_into_manager_session_state_frames() {
         "{ not json",
     )
     .unwrap();
-    let (frame, _) = bound.durable_projection();
+    let frame = bound
+        .durable_projection()
+        .expect("durable projection with corrupted enrollment")
+        .session_state;
     assert!(
         automation_of(&frame).is_none(),
         "corrupted enrollment must surface unknown ownership, not fake client"

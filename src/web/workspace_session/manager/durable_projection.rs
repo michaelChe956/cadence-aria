@@ -91,6 +91,22 @@ impl std::fmt::Display for DurableProjectionError {
         }
     }
 }
+impl DurableProjectionError {
+    /// A1b2（设计 §4.4）：读失败的稳定 ProtocolError 帧（code 单点常量
+    /// `workspace_durable_projection_unavailable`）——router/attachment/
+    /// socket 的 caller 消费面统一经此转帧，不各自拼字面量、不发伪
+    /// SessionState。
+    pub(crate) fn unavailable_frame(&self, session_id: &str) -> WsOutMessage {
+        eprintln!(
+            "[aria-durable-projection] latest record load failed session={session_id}: {self}"
+        );
+        WsOutMessage::ProtocolError {
+            code: DURABLE_PROJECTION_UNAVAILABLE_CODE.to_string(),
+            message: format!("durable projection unavailable for session {session_id}: {self}"),
+            context: None,
+        }
+    }
+}
 
 /// A1b1 private 纯加载核心（设计 §4.4）：每次以 session_id 从 LifecycleStore
 /// 读取**最新** WorkspaceSessionRecord，核对 manager 绑定身份后经
@@ -120,8 +136,7 @@ pub(crate) fn load_durable_workspace_projection(
     ));
     let (projection_tx, _projection_rx) = mpsc::channel::<EngineEvent>(1);
     let mut session = WorkspaceSession::from_record(latest_record.clone());
-    if let Ok(repository) =
-        workspace_repository_for_session(&app_paths, &lifecycle, &latest_record)
+    if let Ok(repository) = workspace_repository_for_session(&app_paths, &lifecycle, &latest_record)
     {
         session.repository_path = Some(repository.path);
     }
@@ -163,71 +178,60 @@ impl WorkspaceSessionManager {
     /// F-06/F-09：durable 投影的同步读盘挪入阻塞线程池——观察 attach 频发且 run 任务
     /// 长期持有 engine 锁时，fallback 不得阻塞 async worker。JoinHandle 异常（panic/
     /// 取消）时退回原同步路径：投影只读，最坏也只是回到旧行为。
-    pub(super) async fn durable_projection_offload(&self) -> (WsOutMessage, Option<WsOutMessage>) {
+    pub(super) async fn durable_projection_offload(
+        &self,
+    ) -> Result<DurableWorkspaceProjection, DurableProjectionError> {
         let app_paths = self.app_paths.clone();
         let session_record = self.session_record.clone();
-        match tokio::task::spawn_blocking(move || {
+        let loaded = match tokio::task::spawn_blocking(move || {
             Self::durable_projection_with(app_paths, session_record)
         })
         .await
         {
-            Ok(projection) => projection,
+            Ok(result) => result,
             Err(join_error) => {
                 eprintln!(
                     "[aria-durable-projection] blocking offload join failed session={}: {join_error}",
                     self.session_id
                 );
-                self.durable_projection()
+                Self::durable_projection_with(self.app_paths.clone(), self.session_record.clone())
             }
-        }
+        };
+        loaded.map(|mut projection| {
+            self.stamp_pending_choice_run_ids(&mut projection.session_state);
+            projection
+        })
     }
 
-    /// 一次性只读 durable 投影器。禁止将它扩展为第二 engine 状态源：没有 spawn、没有
-    /// provider/run 注册、没有 event receiver，并且使用有接收端但永不消费的 channel。
-    /// A1b1（设计 §4.4）：正文每次取最新 durable record（出生 record 仅身份
-    /// 对照）；读取失败由 tuple 出口输出真实 ProtocolError＋None。
-    /// 读盘重（Lifecycle/Checkpoint 仓库 + JSON 反序列化），async 上下文必须经
-    /// `durable_projection_offload` 调用；`current_session_state` 的同步降级路径是
-    /// 唯一的直接调用方。
-    pub(crate) fn durable_projection(&self) -> (WsOutMessage, Option<WsOutMessage>) {
-        let (mut session_state, pending_frame) =
-            Self::durable_projection_with(self.app_paths.clone(), self.session_record.clone());
-        self.stamp_pending_choice_run_ids(&mut session_state);
-        (session_state, pending_frame)
+    /// 一次性只读 durable 投影器（A1b2 Result cutover，设计 §4.4）：正文每次
+    /// 经 `load_durable_workspace_projection` 取**最新** durable record（出生
+    /// record 仅身份对照）；读取失败 typed `DurableProjectionError` 上抛，由
+    /// router/attachment/socket caller 转 ProtocolError（不回出生 record、不
+    /// default 假 state、不发伪 SessionState）。禁止将它扩展为第二 engine
+    /// 状态源：没有 spawn、没有 provider/run 注册、没有 event receiver。
+    /// 读盘重（Lifecycle/Checkpoint 仓库 + JSON 反序列化），async 上下文必须
+    /// 经 `durable_projection_offload` 调用；`current_session_state` 的同步
+    /// 降级路径是唯一直接调用方。
+    pub(crate) fn durable_projection(
+        &self,
+    ) -> Result<DurableWorkspaceProjection, DurableProjectionError> {
+        Self::durable_projection_with(self.app_paths.clone(), self.session_record.clone()).map(
+            |mut projection| {
+                self.stamp_pending_choice_run_ids(&mut projection.session_state);
+                projection
+            },
+        )
     }
 
-    /// A1b1（设计 §4.4）：出生 record 只构造绑定身份；投影正文每次经
-    /// `load_durable_workspace_projection` 取最新 durable record。读取失败
-    /// 输出真实 ProtocolError＋None（不回出生 record、不 default 假 state）；
-    /// 2.4 以同核心一次性迁 public Result 并删除本 tuple 封装。
+    /// A1b2（设计 §4.4）：出生 record 只构造绑定身份；投影正文每次经
+    /// `load_durable_workspace_projection` 取最新 durable record，失败原样
+    /// typed 上抛（打点在 caller 转帧面 `unavailable_frame`）。
     fn durable_projection_with(
         app_paths: ProductAppPaths,
         session_record: WorkspaceSessionRecord,
-    ) -> (WsOutMessage, Option<WsOutMessage>) {
+    ) -> Result<DurableWorkspaceProjection, DurableProjectionError> {
         let identity = WorkspaceSessionIdentity::from_bound_record(&session_record);
-        match load_durable_workspace_projection(&app_paths, &identity) {
-            Ok(DurableWorkspaceProjection {
-                session_state,
-                pending_choice,
-            }) => (session_state, pending_choice),
-            Err(error) => {
-                eprintln!(
-                    "[aria-durable-projection] latest record load failed session={}: {error}",
-                    session_record.id
-                );
-                (
-                    WsOutMessage::ProtocolError {
-                        code: DURABLE_PROJECTION_UNAVAILABLE_CODE.to_string(),
-                        message: format!(
-                            "durable projection unavailable for session {}: {error}",
-                            session_record.id
-                        ),
-                        context: None,
-                    },
-                    None,
-                )
-            }
-        }
+        load_durable_workspace_projection(&app_paths, &identity)
     }
 
     pub(super) async fn recover_on_creation(self: &Arc<Self>) {

@@ -334,7 +334,10 @@ async fn durable_fallback_pending_choice_carries_active_run_incarnation() {
 
     // 取真实 durable 降级帧（attach/current_session_state 在 run 持锁时的
     // 数据源），手工挂一条 pending（fixture 无 provider，登记簿为空）。
-    let (mut frame, _) = manager.durable_projection();
+    let mut frame = manager
+        .durable_projection()
+        .expect("durable fallback projection for run stamping")
+        .session_state;
     frame_session_state_pending(
         &mut frame,
         WsPendingChoiceRequest {
@@ -654,8 +657,11 @@ async fn anchor_t04_latest_record_pure_projection_while_engine_locked() {
             .expect("pure projection of latest record");
     assert_eq!(projection.recovery_id(), Some("latest-rec"));
 
-    // tuple 出口（current_session_state 降级路径）同源最新 record。
-    let (frame, _pending) = manager.durable_projection();
+    // manager Result 出口（current_session_state 降级路径）同源最新 record。
+    let frame = manager
+        .durable_projection()
+        .expect("manager durable projection of latest record")
+        .session_state;
     let WsOutMessage::SessionState {
         lc_resume_recovery, ..
     } = &frame
@@ -667,7 +673,7 @@ async fn anchor_t04_latest_record_pure_projection_while_engine_locked() {
             .as_ref()
             .map(|dto| dto.recovery_id.as_str()),
         Some("latest-rec"),
-        "tuple 出口必须投影最新 record 的恢复事实"
+        "Result 出口必须投影最新 record 的恢复事实"
     );
 
     // ProjectionOnly：前后 session/timeline/turn 零写。
@@ -700,9 +706,9 @@ async fn anchor_t04_projection_read_failure_never_uses_birth_record() {
         Err(DurableProjectionError::IdentityMismatch { .. })
     ));
 
-    // 2) record 文件损坏（JSON）→ typed Store 错误；tuple 出口真实
-    //    ProtocolError＋None，不出生 record/default 假态。code 取稳定常量
-    //    （与字面量单点锚定）。
+    // 2) record 文件损坏（JSON）→ typed Store 错误；manager Result 出口
+    //    typed 上抛（不出生 record/default 假态），wire 面 ProtocolError
+    //    转帧由 anchor_t05 广播/attach 断言。code 取稳定常量（单点锚定）。
     assert_eq!(
         DURABLE_PROJECTION_UNAVAILABLE_CODE,
         "workspace_durable_projection_unavailable"
@@ -710,13 +716,10 @@ async fn anchor_t04_projection_read_failure_never_uses_birth_record() {
     std::fs::write(&record_path, "{ not json").unwrap();
     let unreadable = load_durable_workspace_projection(&paths, &identity);
     assert!(matches!(unreadable, Err(DurableProjectionError::Store(_))));
-    let (frame, pending) = manager.durable_projection();
     assert!(matches!(
-        &frame,
-        WsOutMessage::ProtocolError { code, .. }
-            if code == DURABLE_PROJECTION_UNAVAILABLE_CODE
+        manager.durable_projection(),
+        Err(DurableProjectionError::Store(_))
     ));
-    assert!(pending.is_none());
 
     // 3) record 缺失（NotFound）→ 同样 typed Store，无出生 record 假态。
     std::fs::remove_file(&record_path).unwrap();
@@ -724,11 +727,210 @@ async fn anchor_t04_projection_read_failure_never_uses_birth_record() {
         load_durable_workspace_projection(&paths, &identity),
         Err(DurableProjectionError::Store(_))
     ));
-    let (frame, pending) = manager.durable_projection();
     assert!(matches!(
-        &frame,
-        WsOutMessage::ProtocolError { code, .. }
-            if code == DURABLE_PROJECTION_UNAVAILABLE_CODE
+        manager.durable_projection(),
+        Err(DurableProjectionError::Store(_))
     ));
-    assert!(pending.is_none());
+}
+
+// ---------------------------------------------------------------------------
+// A1b2（Task 2.4，设计 §4.4）：router/attach/socket 全 caller 错误闭包。
+// ---------------------------------------------------------------------------
+
+/// 有界等待一帧出站文本并解析 JSON（超时即视为广播未接线）。
+async fn anchor_t05_recv_frame(rx: &mut mpsc::Receiver<OutboundControl>) -> serde_json::Value {
+    let control = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+        .await
+        .expect("frame must arrive within 5s")
+        .expect("outbound channel stays open");
+    let OutboundControl::Text(json) = control else {
+        panic!("router must deliver text frames, got {control:?}");
+    };
+    serde_json::from_str(&json).expect("wire frame json")
+}
+
+/// 断言帧为 session_state 并取出 lc_resume_recovery 投影。
+fn anchor_t05_recovery_of(frame: &serde_json::Value) -> &serde_json::Value {
+    assert_eq!(
+        frame["type"], "session_state",
+        "expect authoritative session_state frame: {frame}"
+    );
+    frame
+        .get("lc_resume_recovery")
+        .unwrap_or_else(|| panic!("session_state must carry lc_resume_recovery: {frame}"))
+}
+
+/// A1b2 验收（设计 §4.4）：同一存活 manager 持锁时 durable 恢复前进——
+/// RecoveryChanged 立即广播（不等 engine 锁，忙走最新 record 纯投影），
+/// driver/observer/新 attach 看到相同 recovery_id/reason/allowed_actions；
+/// 广播帧沿 journal event_seq。
+#[tokio::test]
+async fn anchor_t05_live_manager_locked_broadcast_attach_recovery() {
+    let (manager, paths, birth) = anchored_durable_manager("project_anchor_t05_live");
+    // 最新 durable record 带 LC 恢复（出生 record 无恢复）。
+    overwrite_latest_record_with_recovery(&paths, &birth, "latest-rec");
+
+    // driver/observer：同一存活 manager 的两个已激活连接。
+    let (driver_tx, mut driver_rx) = mpsc::channel(16);
+    let (observer_tx, mut observer_rx) = mpsc::channel(16);
+    manager.register_attachment("conn_t05_driver", driver_tx);
+    manager.register_attachment("conn_t05_observer", observer_tx);
+    manager.activate_attachment("conn_t05_driver");
+    manager.activate_attachment("conn_t05_observer");
+
+    // engine 锁长持（provider run 占用）——RecoveryChanged 广播不得等锁。
+    let _engine_guard = manager.lock_engine_for_test().await;
+
+    // router 真实广播接线（A2.2 移交）：事件经 event router 触发 authoritative 帧。
+    let (router_tx, router_rx) = mpsc::channel::<EngineEvent>(8);
+    manager.spawn_event_router(
+        router_rx,
+        crate::web::state::WorkspaceRunRegistry::default(),
+    );
+    router_tx
+        .send(EngineEvent::LcResumeRecoveryChanged)
+        .await
+        .expect("feed RecoveryChanged into router");
+
+    let driver = anchor_t05_recv_frame(&mut driver_rx).await;
+    let observer = anchor_t05_recv_frame(&mut observer_rx).await;
+    let driver_recovery = anchor_t05_recovery_of(&driver);
+    let observer_recovery = anchor_t05_recovery_of(&observer);
+
+    assert_eq!(driver_recovery["recovery_id"], "latest-rec");
+    assert_eq!(
+        driver_recovery["reason_code"],
+        "resume_fingerprint_mismatch"
+    );
+    assert_eq!(
+        driver_recovery["allowed_actions"].as_array().map(Vec::len),
+        Some(0),
+        "A 波未接齐 B0：allowed_actions 恒空"
+    );
+    // driver/observer 同 recovery 投影；event_seq 沿 journal 同序。
+    assert_eq!(
+        driver_recovery["recovery_id"],
+        observer_recovery["recovery_id"]
+    );
+    assert_eq!(
+        driver_recovery["reason_code"],
+        observer_recovery["reason_code"]
+    );
+    assert_eq!(
+        driver_recovery["allowed_actions"],
+        observer_recovery["allowed_actions"]
+    );
+    let event_seq = driver["event_seq"].as_u64().expect("event_seq stamped");
+    assert!(event_seq > 0);
+    assert_eq!(observer["event_seq"].as_u64(), Some(event_seq));
+
+    let journal_entries: Vec<(u64, String)> = {
+        let state = manager
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.journal.entries.iter().cloned().collect()
+    };
+    assert!(
+        journal_entries
+            .iter()
+            .any(|(seq, json)| *seq == event_seq && json.contains("latest-rec")),
+        "RecoveryChanged 广播帧必须沿 journal event_seq：{journal_entries:?}"
+    );
+
+    // 新 attach（engine 锁仍持有 → durable fallback）同 recovery/原因/动作。
+    let (attach_frame, _) = manager
+        .attached_session_state()
+        .await
+        .expect("attached durable fallback projects latest record");
+    let WsOutMessage::SessionState {
+        lc_resume_recovery, ..
+    } = &attach_frame
+    else {
+        panic!("attach fallback must be session_state, got {attach_frame:?}");
+    };
+    let attach_recovery = lc_resume_recovery
+        .as_ref()
+        .expect("attach fallback carries latest recovery");
+    assert_eq!(attach_recovery.recovery_id, "latest-rec");
+    assert_eq!(attach_recovery.reason_code, "resume_fingerprint_mismatch");
+    assert!(attach_recovery.allowed_actions.is_empty());
+}
+
+/// A1b2 验收（设计 §4.4）：durable 纯读失败——broadcast/attach/resubscribe
+/// 全 caller typed 错误闭包，稳定 code
+/// `workspace_durable_projection_unavailable`；零伪 SessionState（无旧可
+/// 启动 baseline/假 snapshot）。
+#[tokio::test]
+async fn anchor_t05_snapshot_failure_returns_typed_error_without_baseline() {
+    let (manager, paths, birth) = anchored_durable_manager("project_anchor_t05_unavailable");
+    std::fs::write(anchor_session_record_path(&paths, &birth), "{ not json")
+        .expect("corrupt latest record");
+    let _engine_guard = manager.lock_engine_for_test().await;
+
+    // 广播面：broadcast_current_session_state 广播 typed ProtocolError。
+    let (conn_tx, mut conn_rx) = mpsc::channel(16);
+    manager.register_attachment("conn_t05_fail", conn_tx);
+    manager.activate_attachment("conn_t05_fail");
+    manager.broadcast_current_session_state();
+    let error_frame = anchor_t05_recv_frame(&mut conn_rx).await;
+    assert_eq!(error_frame["type"], "protocol_error");
+    assert_eq!(error_frame["code"], DURABLE_PROJECTION_UNAVAILABLE_CODE);
+    assert!(
+        error_frame["event_seq"].as_u64().is_some_and(|seq| seq > 0),
+        "typed 错误帧沿 journal event_seq：{error_frame}"
+    );
+
+    // attach 面：typed Err 上抛，不产伪 snapshot。
+    assert!(
+        matches!(
+            manager.attached_session_state().await,
+            Err(DurableProjectionError::Store(_))
+        ),
+        "attached fallback 读取失败必须 typed 上抛"
+    );
+
+    // 重订阅面（cursor 越界走 snapshot 分支）：发 typed ProtocolError，
+    // 不激活伪 snapshot。
+    let (resub_tx, mut resub_rx) = mpsc::channel(16);
+    manager.register_attachment("conn_t05_resub", resub_tx.clone());
+    manager
+        .resubscribe(&resub_tx, "conn_t05_resub", 9_999)
+        .await;
+    let mut session_state_frames = 0usize;
+    let mut typed_error_frames = 0usize;
+    while let Ok(control) = resub_rx.try_recv() {
+        let OutboundControl::Text(json) = control else {
+            panic!("resubscribe must deliver text frames only");
+        };
+        let frame: serde_json::Value = serde_json::from_str(&json).expect("frame json");
+        match frame["type"].as_str() {
+            Some("protocol_error") => {
+                assert_eq!(frame["code"], DURABLE_PROJECTION_UNAVAILABLE_CODE);
+                typed_error_frames += 1;
+            }
+            Some("session_state") => session_state_frames += 1,
+            other => panic!("unexpected resubscribe frame type: {other:?}"),
+        }
+    }
+    assert_eq!(
+        typed_error_frames, 1,
+        "重订阅读失败发一帧 typed ProtocolError"
+    );
+    assert_eq!(session_state_frames, 0, "published_fake_snapshots 必须为 0");
+
+    // journal 无任何伪可启动 SessionState 基线。
+    let journal_entries: Vec<(u64, String)> = {
+        let state = manager
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.journal.entries.iter().cloned().collect()
+    };
+    assert!(
+        journal_entries
+            .iter()
+            .all(|(_, json)| !json.contains("\"session_state\"")),
+        "读取失败不得向 journal 发布伪 SessionState：{journal_entries:?}"
+    );
 }

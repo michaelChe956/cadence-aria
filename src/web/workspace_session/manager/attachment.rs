@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering;
 use tokio::sync::mpsc;
 
 use super::{
-    Attachment, WorkspaceSessionManager,
+    Attachment, DurableProjectionError, WorkspaceSessionManager,
     choices::{choice_frame_id, choice_ids_in_frames},
     inject_event_seq,
 };
@@ -82,24 +82,29 @@ impl WorkspaceSessionManager {
         self.maybe_recycle().await;
     }
 
-    /// 返回已登记 attachment 的 initial snapshot 与已恢复 choice。
-    pub(crate) async fn attached_session_state(&self) -> (WsOutMessage, Option<WsOutMessage>) {
+    /// 返回已登记 attachment 的 initial snapshot 与已恢复 choice；engine 锁被
+    /// run 长持时退最新 durable record 纯投影。A1b2（设计 §4.4）typed
+    /// Result：读取失败上抛 `DurableProjectionError`，由 caller 发稳定
+    /// ProtocolError（workspace_durable_projection_unavailable），不产伪
+    /// snapshot/旧可启动 baseline。
+    pub(crate) async fn attached_session_state(
+        &self,
+    ) -> Result<(WsOutMessage, Option<WsOutMessage>), DurableProjectionError> {
         for attempt in 0..2 {
             if let Ok(engine) = self.engine.try_lock() {
                 let mut session_state = engine.build_session_state();
                 self.project_automation_ownership(&mut session_state);
-                return (
+                return Ok((
                     session_state,
                     engine.pending_author_choice_request_message(),
-                );
+                ));
             }
             if attempt == 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(250)).await;
             }
         }
-        let (mut session_state, pending_frame) = self.durable_projection_offload().await;
-        self.stamp_pending_choice_run_ids(&mut session_state);
-        (session_state, pending_frame)
+        let projection = self.durable_projection_offload().await?;
+        Ok((projection.session_state, projection.pending_choice))
     }
 
     /// 初帧 attach 基线序号：snapshot 构建时刻的当前 event_seq。初帧投递时若存在
@@ -238,27 +243,46 @@ impl WorkspaceSessionManager {
                         return;
                     }
                 }
-                let (_, choice) = self.attached_session_state().await;
-                if !send_optional_message(outbound_tx, choice).await {
-                    return;
+                match self.attached_session_state().await {
+                    Ok((_, choice)) => {
+                        if !send_optional_message(outbound_tx, choice).await {
+                            return;
+                        }
+                    }
+                    Err(error) => {
+                        // A1b2（设计 §4.4）：重订阅读取失败发 typed
+                        // ProtocolError，不激活伪 snapshot。
+                        send_projection_unavailable(outbound_tx, &self.session_id, &error).await;
+                        return;
+                    }
                 }
                 self.send_pending_choices_for_resubscription(outbound_tx, &events)
                     .await;
             }
             Resubscription::ActiveRunWindow { baseline, events } => {
-                let (snapshot, choice) = self.attached_session_state().await;
-                if !self
-                    .send_snapshot_with_baseline(
-                        outbound_tx,
-                        snapshot.with_connection_id(connection_id),
-                        baseline,
-                    )
-                    .await
-                {
-                    return;
-                }
-                if !send_optional_message(outbound_tx, choice).await {
-                    return;
+                match self.attached_session_state().await {
+                    Ok((snapshot, choice)) => {
+                        if !self
+                            .send_snapshot_with_baseline(
+                                outbound_tx,
+                                snapshot.with_connection_id(connection_id),
+                                baseline,
+                            )
+                            .await
+                        {
+                            return;
+                        }
+                        if !send_optional_message(outbound_tx, choice).await {
+                            return;
+                        }
+                    }
+                    Err(error) => {
+                        // A1b2（设计 §4.4）：快照读失败发 typed ProtocolError，
+                        // 不激活伪 snapshot/旧可启动 baseline；补发窗口留给
+                        // 客户端 cursor 恢复。
+                        send_projection_unavailable(outbound_tx, &self.session_id, &error).await;
+                        return;
+                    }
                 }
                 for event in &events {
                     if outbound_tx
@@ -273,18 +297,28 @@ impl WorkspaceSessionManager {
                     .await;
             }
             Resubscription::Snapshot { baseline } => {
-                let (snapshot, choice) = self.attached_session_state().await;
-                if !self
-                    .send_snapshot_with_baseline(
-                        outbound_tx,
-                        snapshot.with_connection_id(connection_id),
-                        baseline,
-                    )
-                    .await
-                {
-                    return;
+                match self.attached_session_state().await {
+                    Ok((snapshot, choice)) => {
+                        if !self
+                            .send_snapshot_with_baseline(
+                                outbound_tx,
+                                snapshot.with_connection_id(connection_id),
+                                baseline,
+                            )
+                            .await
+                        {
+                            return;
+                        }
+                        let _ = send_optional_message(outbound_tx, choice).await;
+                    }
+                    Err(error) => {
+                        // A1b2（设计 §4.4）：快照分支读失败发 typed
+                        // ProtocolError，不激活伪 snapshot；挂起 choice/补发
+                        // 均以真实基线为前提，一并跳过。
+                        send_projection_unavailable(outbound_tx, &self.session_id, &error).await;
+                        return;
+                    }
                 }
-                let _ = send_optional_message(outbound_tx, choice).await;
                 self.send_pending_choices_for_resubscription(outbound_tx, &[])
                     .await;
             }
@@ -375,4 +409,18 @@ async fn send_optional_message(
         return false;
     };
     outbound_tx.send(OutboundControl::Text(json)).await.is_ok()
+}
+
+/// A1b2（设计 §4.4）：重订阅快照读失败的 typed 回执——稳定 ProtocolError
+///（workspace_durable_projection_unavailable）；连接保持直播激活态，但不收
+/// 任何伪 snapshot。
+async fn send_projection_unavailable(
+    outbound_tx: &mpsc::Sender<OutboundControl>,
+    session_id: &str,
+    error: &DurableProjectionError,
+) {
+    let frame = error.unavailable_frame(session_id);
+    if let Ok(json) = serde_json::to_string(&frame) {
+        let _ = outbound_tx.send(OutboundControl::Text(json)).await;
+    }
 }

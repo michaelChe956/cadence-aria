@@ -501,12 +501,24 @@ pub(crate) async fn handle_workspace_socket(
         socket_outbound_tx,
         connection_id.clone(),
     ));
-    let (session_state, restored_choice_request) = manager.attached_session_state().await;
-    let pending_initial = Arc::new(Mutex::new(Some(InitialAttach {
-        session_state: session_state.with_connection_id(&connection_id),
-        choice: restored_choice_request,
-        attach_seq: manager.attach_baseline_seq(),
-    })));
+    // A1b2（设计 §4.4）：初帧 durable 纯读失败——立即发 typed ProtocolError
+    //（workspace_durable_projection_unavailable），不排队伪 snapshot/旧可
+    // 启动 baseline；连接仍按原宽限/首条入站路径激活直播，客户端经
+    // cursor Hello 重订阅恢复。
+    let pending_initial = match manager.attached_session_state().await {
+        Ok((session_state, restored_choice_request)) => Arc::new(Mutex::new(Some(InitialAttach {
+            session_state: session_state.with_connection_id(&connection_id),
+            choice: restored_choice_request,
+            attach_seq: manager.attach_baseline_seq(),
+        }))),
+        Err(error) => {
+            let frame = error.unavailable_frame(&session_id);
+            if let Ok(json) = serde_json::to_string(&frame) {
+                let _ = outbound_tx.send(OutboundControl::Text(json)).await;
+            }
+            Arc::new(Mutex::new(None))
+        }
+    };
 
     let (socket_control_tx, mut socket_control_rx) = mpsc::channel::<WorkspaceSocketControl>(4);
     state

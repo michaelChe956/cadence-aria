@@ -9,7 +9,7 @@ use crate::web::workspace_ws_handler::{
 };
 use crate::web::workspace_ws_types::WsOutMessage;
 
-use super::manager::{WorkspaceSessionManager, inject_event_seq};
+use super::manager::{DurableProjectionError, WorkspaceSessionManager, inject_event_seq};
 
 impl WorkspaceSessionManager {
     /// session-owned event router：只持有 manager 弱引用，registry 回收最后一个强引用后
@@ -129,6 +129,16 @@ impl WorkspaceSessionManager {
                         // 收敛已答卡。
                         manager.broadcast_choice_pending_state(true);
                     }
+                    // A1b2（设计 §4.4 / A2.2 移交）：durable LC 恢复事实变化的
+                    // authoritative 广播接线——立即 try_lock 活引擎，忙时按最新
+                    // durable record 纯投影（不出生 record）；沿 journal/
+                    // event_seq 广播，同一存活 manager 的 driver/observer/新
+                    // attach 看到相同 recovery_id/reason/allowed_actions。读取
+                    // 失败广播 typed ProtocolError，不发伪 SessionState。mapping
+                    // 面保持 None（内部事件不是 wire delta）。
+                    EngineEvent::LcResumeRecoveryChanged => {
+                        manager.broadcast_current_session_state();
+                    }
                     EngineEvent::HumanGateClosed { .. } => {
                         // C3/REQ-HTR-01：任何门关闭即摘门开标志（会话至多一个
                         // Active 门，见 enter_human_confirm 收口注释）。
@@ -149,13 +159,19 @@ impl WorkspaceSessionManager {
 
     /// 从序列化边界注入增量 wire 字段，避免侵入所有 `WsOutMessage` 变体。旧客户端
     /// 忽略未知字段；同一 stamped JSON 同时写 journal 并 fan-out 到所有 attachment。
-    fn current_session_state(&self) -> WsOutMessage {
+    ///
+    /// A1b2（设计 §4.4）：authoritative session_state 的唯一取帧面——engine 锁
+    /// 空闲取活引擎投影；忙时读最新 durable record 纯投影（不等锁、不出生
+    /// record）。读取失败 typed 上抛，由广播面转 ProtocolError 或缺基线
+    /// resync，绝不发伪 SessionState。
+    fn current_session_state(&self) -> Result<WsOutMessage, DurableProjectionError> {
         if let Ok(engine) = self.engine.try_lock() {
             let mut session_state = engine.build_session_state();
             self.project_automation_ownership(&mut session_state);
-            session_state
+            Ok(session_state)
         } else {
-            self.durable_projection().0
+            self.durable_projection()
+                .map(|projection| projection.session_state)
         }
     }
     pub(super) fn broadcast(self: &Arc<Self>, message: WsOutMessage) {
@@ -190,14 +206,21 @@ impl WorkspaceSessionManager {
         // C3/REQ-HTR-03：基线构造条件放宽——关键帧广播时即使暂无 degraded
         // 连接也预建（新降级连接的有界等待投递以基线恢复；非关键帧维持
         // 既有「存在 degraded 才建」的惰性）。
+        // A1b2（设计 §4.4）：基线构建失败（durable 纯读失败）时置 None——
+        // 不得用旧可启动 snapshot 补基线；关键帧走 resync_required 终态。
         let recovery_baseline = (keyframe || attachments.iter().any(|(_, degraded)| *degraded))
-            .then(|| self.current_session_state())
+            .then(|| self.current_session_state().ok())
+            .flatten()
             .and_then(|snapshot| serde_json::to_string(&snapshot).ok())
             .and_then(|baseline| inject_event_seq(baseline, seq));
         for (connection_id, degraded) in attachments {
             if degraded {
                 if let Some(baseline) = recovery_baseline.as_deref() {
                     self.try_recover_degraded_attachment(&connection_id, baseline, keyframe, seq);
+                } else if keyframe {
+                    // A1b2：关键帧基线缺失（durable 纯读失败）——degraded
+                    // 连接按有界投递失败终态发 resync_required。
+                    self.send_resync_required(&connection_id, seq);
                 }
             } else {
                 self.try_send_live_event(&connection_id, &json, keyframe, seq, &recovery_baseline);
@@ -248,14 +271,21 @@ impl WorkspaceSessionManager {
                 drop(state);
                 // 打点在状态锁外（lease-diagnostics 同款纪律）。
                 self.record_degraded_enter(connection_id, seq);
-                if keyframe && let Some(baseline) = recovery_baseline.as_deref() {
-                    spawn_keyframe_delivery(
-                        Arc::clone(self),
-                        connection_id.to_string(),
-                        sender,
-                        baseline.to_string(),
-                        seq,
-                    );
+                if keyframe {
+                    if let Some(baseline) = recovery_baseline.as_deref() {
+                        spawn_keyframe_delivery(
+                            Arc::clone(self),
+                            connection_id.to_string(),
+                            sender,
+                            baseline.to_string(),
+                            seq,
+                        );
+                    } else {
+                        // A1b2（设计 §4.4）：关键帧被降级丢弃且无可投基线
+                        //（durable 纯读失败）——必发 resync_required，不得
+                        // 用旧可启动 snapshot 补基线。
+                        self.send_resync_required(connection_id, seq);
+                    }
                 }
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
@@ -349,10 +379,35 @@ impl WorkspaceSessionManager {
         }
     }
 
+    /// A1b2（设计 §4.4）：关键帧基线缺失（durable 纯读失败）时的 degraded
+    /// 终态信号——非阻塞投递；队列仍满则维持 degraded，等待下一次广播/
+    /// 重连恢复。
+    fn send_resync_required(&self, connection_id: &str, seq: u64) {
+        let sender = {
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state
+                .attachments
+                .get(connection_id)
+                .map(|attachment| attachment.outbound_tx.clone())
+        };
+        if let Some(sender) = sender {
+            let _ = sender.try_send(OutboundControl::Text(resync_required_json(seq)));
+        }
+    }
+
     /// F-23：恢复链整流后向全部连接广播当前快照（manager 创建时无订阅者，
     /// 广播仍入 journal 供后续 cursor 回放）。
+    /// A1b2（设计 §4.4）：快照读取失败广播 typed ProtocolError
+    ///（workspace_durable_projection_unavailable），不填 Open/null/ownership
+    /// 假态；event_seq 沿 journal，客户端经 cursor/重连恢复。
     pub(crate) fn broadcast_current_session_state(self: &Arc<Self>) {
-        self.broadcast(self.current_session_state());
+        match self.current_session_state() {
+            Ok(frame) => self.broadcast(frame),
+            Err(error) => self.broadcast(error.unavailable_frame(&self.session_id)),
+        }
     }
 
     /// F-27R2：choice 挂起集变更（登记/移除）的 session_state 广播面——已连接
@@ -377,7 +432,12 @@ impl WorkspaceSessionManager {
             return;
         }
         if immediate_durable {
-            self.broadcast(self.durable_projection().0);
+            match self.durable_projection() {
+                Ok(projection) => self.broadcast(projection.session_state),
+                // A1b2（设计 §4.4）：durable 纯读失败发 typed ProtocolError，
+                // 不以伪 session_state 补帧；锁释放后的活引擎补帧仍会调度。
+                Err(error) => self.broadcast(error.unavailable_frame(&self.session_id)),
+            }
         }
         let engine = self.engine.clone();
         let manager = Arc::clone(self);
@@ -443,6 +503,12 @@ fn is_keyframe_message(message: &WsOutMessage) -> bool {
     gate_frame || pending_choice_frame
 }
 
+/// resync_required 帧文本（序列化失败兜底保持 wire 形状）。
+fn resync_required_json(seq: u64) -> String {
+    serde_json::to_string(&WsOutMessage::ResyncRequired { event_seq: seq })
+        .unwrap_or_else(|_| "{\"type\":\"resync_required\",\"event_seq\":0}".to_string())
+}
+
 /// 关键帧有界等待投递：两次有界退避尝试送达恢复基线；均失败则必发
 /// resync_required（等待不设界——它是「帧被吞且无任何信号」的最后防线；
 /// 客户端恢复读取即送达、通道关闭即退出，parked 任务不占 router）。
@@ -455,8 +521,7 @@ fn spawn_keyframe_delivery(
     baseline: String,
     seq: u64,
 ) {
-    let resync = serde_json::to_string(&WsOutMessage::ResyncRequired { event_seq: seq })
-        .unwrap_or_else(|_| "{\"type\":\"resync_required\",\"event_seq\":0}".to_string());
+    let resync = resync_required_json(seq);
     tokio::spawn(async move {
         for attempt in 0..KEYFRAME_DELIVER_ATTEMPTS {
             if attempt > 0 {
