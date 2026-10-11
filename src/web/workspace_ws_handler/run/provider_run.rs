@@ -8,59 +8,6 @@ pub(crate) use entry::{
     spawn_provider_run_from_handler,
 };
 
-/// 6.1 fix-loop（owner 验收回归）：generation spawn 的 trust 拒绝分类桥。
-///
-/// Author 经 gateway spawn（`start_work_item_plan_author` →
-/// `prepare_streaming_launch`/`start_streaming`）的 trust 维度拒绝以裸
-/// `provider_gateway_unavailable: provider trust not established …` 直出时，
-/// 用与 admission 预检（`provider_admission_check` step 6）同源的只读判据
-/// ——gateway 注入的只读 trust source 当前仍判未通过——识别并把错误
-/// details 提升为 `provider_trust_missing` 分类＋同源 manual_guidance＋
-/// 生成场景 retry_action「人工登记…显式重新生成」；原诊断原文保留。
-/// 只读、零 trust 写；非 trust 维度的 provider_unavailable（availability
-/// gate 等）与无 gateway/条目已 trusted 的 spawn 保持原错误（不误当、
-/// 不伪造 capability）。
-pub(crate) fn classify_generation_spawn_trust_failure(
-    error: crate::cross_cutting::provider_adapter::ProviderAdapterError,
-    gateway: Option<
-        &std::sync::Arc<crate::product::logical_codebase::LogicalCodebaseProviderGateway>,
-    >,
-    author_provider: &crate::product::models::ProviderName,
-) -> crate::cross_cutting::provider_adapter::ProviderAdapterError {
-    use crate::cross_cutting::provider_adapter::ProviderAdapterError;
-    use crate::protocol::provider_errors::ProviderErrorCode;
-    if error.code != ProviderErrorCode::ProviderUnavailable {
-        return error;
-    }
-    let Some(gateway) = gateway else {
-        return error;
-    };
-    let Some(waiting) = gateway.read_only_generation_trust_waiting(author_provider) else {
-        return error;
-    };
-    ProviderAdapterError::provider_unavailable(format!(
-        "provider_trust_missing: {}: {}；原拒绝：{}；人工登记指导：{}（retry_action：{}）",
-        waiting.reason_code,
-        waiting.message,
-        error.details,
-        waiting.manual_guidance,
-        waiting.retry_action,
-    ))
-}
-
-/// [`classify_generation_spawn_trust_failure`] 的 launch 侧取 gateway 句柄
-/// （仅 Logical 会话经 gateway spawn；Legacy 直连无 trust 面）。
-pub(crate) fn logical_launch_gateway(
-    launch: &super::gateway_start::PlanAuthorLaunch,
-) -> Option<std::sync::Arc<crate::product::logical_codebase::LogicalCodebaseProviderGateway>> {
-    match launch {
-        super::gateway_start::PlanAuthorLaunch::Logical(plan) => {
-            Some(plan.launch.gateway.clone())
-        }
-        super::gateway_start::PlanAuthorLaunch::Legacy => None,
-    }
-}
-
 pub(super) async fn spawn_provider_run_with_start_mode(
     run_context: ProviderRunContext,
     run_kind: ProviderRunKind,
@@ -404,9 +351,8 @@ pub(super) async fn spawn_provider_run_with_start_mode(
                                 return;
                             }
                         };
-                        // 6.1 fix-loop：spawn 臂 trust 拒绝提升分类+同源指导
-                        //（裸 ProviderUnavailable 不再直出；见 helper 注释）。
-                        let trust_gateway = logical_launch_gateway(&plan_launch);
+                        // T6 fix-loop r2：trust 分类已下沉
+                        // start_work_item_plan_author 的 Logical 分支共享口。
                         let provider_session = start_work_item_plan_author(
                             plan_launch,
                             provider_for_run.clone(),
@@ -415,14 +361,6 @@ pub(super) async fn spawn_provider_run_with_start_mode(
                             plan_split_run.as_ref(),
                         )
                         .await;
-                        let provider_session = match provider_session {
-                            Ok(session) => Ok(session),
-                            Err(error) => Err(classify_generation_spawn_trust_failure(
-                                error,
-                                trust_gateway.as_ref(),
-                                &author_provider,
-                            )),
-                        };
                         let full_output = match engine
                             .drive_work_item_plan_provider_session_to_output(
                                 provider_session,
@@ -575,8 +513,8 @@ pub(super) async fn spawn_provider_run_with_start_mode(
                                 return;
                             }
                         };
-                        // 6.1 fix-loop：spawn 臂 trust 拒绝提升分类+同源指导。
-                        let trust_gateway = logical_launch_gateway(&plan_launch);
+                        // T6 fix-loop r2：trust 分类已下沉
+                        // start_work_item_plan_author 的 Logical 分支共享口。
                         let provider_session = start_work_item_plan_author(
                             plan_launch,
                             provider_for_run.clone(),
@@ -585,14 +523,6 @@ pub(super) async fn spawn_provider_run_with_start_mode(
                             plan_split_run.as_ref(),
                         )
                         .await;
-                        let provider_session = match provider_session {
-                            Ok(session) => Ok(session),
-                            Err(error) => Err(classify_generation_spawn_trust_failure(
-                                error,
-                                trust_gateway.as_ref(),
-                                &author_provider,
-                            )),
-                        };
                         let full_output = match engine
                             .drive_work_item_plan_provider_session_to_output(
                                 provider_session,
@@ -906,8 +836,8 @@ pub(super) async fn spawn_provider_run_with_start_mode(
                             return;
                         }
                     };
-                    // 6.1 fix-loop：spawn 臂 trust 拒绝提升分类+同源指导。
-                    let trust_gateway = logical_launch_gateway(&launch);
+                    // T6 fix-loop r2：trust 分类已下沉
+                    // start_work_item_plan_author 的 Logical 分支共享口。
                     let provider_session = start_work_item_plan_author(
                         launch,
                         provider_for_run.clone(),
@@ -916,14 +846,6 @@ pub(super) async fn spawn_provider_run_with_start_mode(
                         plan_split_run.as_ref(),
                     )
                     .await;
-                    let provider_session = match provider_session {
-                        Ok(session) => Ok(session),
-                        Err(error) => Err(classify_generation_spawn_trust_failure(
-                            error,
-                            trust_gateway.as_ref(),
-                            &author_provider,
-                        )),
-                    };
                     let full_output = match engine
                         .drive_work_item_plan_provider_session_to_output(
                             provider_session,

@@ -122,6 +122,10 @@ struct LogicalAliasSpec {
 enum FixtureRoute {
     Legacy,
     LogicalAlias(LogicalAliasSpec),
+    /// T6 fix-loop r2：LogicalAlias 拓扑 + Story 工作区会话（指定 author
+    /// provider）——通用 Author 链（StartGeneration → Author run →
+    /// drive_author_provider_session_via_gateway）验收夹具。
+    LogicalAliasStory(LogicalAliasSpec, ProviderName),
 }
 
 impl ProviderRunFixture {
@@ -228,10 +232,7 @@ impl ProviderRunFixture {
         write_member_language_rules: bool,
         gateway_author: Arc<dyn StreamingProviderAdapter>,
         gateway_extras: AliasLcGatewayExtras,
-    ) -> (
-        Self,
-        mpsc::Receiver<EngineEvent>,
-    ) {
+    ) -> (Self, mpsc::Receiver<EngineEvent>) {
         let (engine_tx, engine_rx) = mpsc::channel(64);
         let fixture = Self::build_routed(
             WorkItemPlanFlowKind::Legacy,
@@ -246,6 +247,37 @@ impl ProviderRunFixture {
                 gateway_author,
                 gateway_extras,
             }),
+            engine_tx,
+        );
+        (fixture, engine_rx)
+    }
+
+    /// T6 fix-loop r2（owner 现场回归）：LogicalAlias 拓扑 + **Story 工作区
+    /// 会话**（author 由参数指定，通常 KimiCode）+ gateway 覆盖项，保留
+    /// engine 事件接收端——观察 Story 首生成经 gateway spawn 失败的
+    /// `EngineEvent::Error` 上浮面（StartGeneration → 通用 Author run →
+    /// `drive_author_provider_session_via_gateway`）。调用方 MUST 持续
+    /// drain engine_rx。
+    pub(super) fn new_logical_story_with_gateway_extras_and_engine_rx(
+        gateway_author: Arc<dyn StreamingProviderAdapter>,
+        gateway_extras: AliasLcGatewayExtras,
+        author_provider: ProviderName,
+    ) -> (Self, mpsc::Receiver<EngineEvent>) {
+        let (engine_tx, engine_rx) = mpsc::channel(64);
+        let fixture = Self::build_routed(
+            WorkItemPlanFlowKind::Legacy,
+            FixtureRoute::LogicalAliasStory(
+                LogicalAliasSpec {
+                    members: vec![MemberRuleMaterial::Present(
+                        DEFAULT_MEMBER_LANGUAGE_RULES.to_string(),
+                    )],
+                    root_rules: None,
+                    focus: LogicalAliasFocus::FirstMember,
+                    gateway_author,
+                    gateway_extras,
+                },
+                author_provider,
+            ),
             engine_tx,
         );
         (fixture, engine_rx)
@@ -286,7 +318,7 @@ impl ProviderRunFixture {
         // `repository_root`（session.repository_path 锚）。
         let repository_root = match &route {
             FixtureRoute::Legacy => tempfile::tempdir().expect("temporary repository root"),
-            FixtureRoute::LogicalAlias(_) => {
+            FixtureRoute::LogicalAlias(_) | FixtureRoute::LogicalAliasStory(..) => {
                 let aggregate_root = root.path().join("aggregate-root");
                 std::fs::create_dir_all(&aggregate_root).expect("create aggregate root directory");
                 tempfile::tempdir_in(&aggregate_root)
@@ -301,7 +333,9 @@ impl ProviderRunFixture {
                     DEFAULT_MEMBER_LANGUAGE_RULES.to_string(),
                 )]
             }
-            FixtureRoute::LogicalAlias(spec) => spec.members.clone(),
+            FixtureRoute::LogicalAlias(spec) | FixtureRoute::LogicalAliasStory(spec, _) => {
+                spec.members.clone()
+            }
         };
         apply_member_rule_material(repository_root.path(), &member_materials[0]);
         // REQ-PIB-02：夹具对齐生产不变量（main 分支+初始提交，裸目录无 git
@@ -320,7 +354,8 @@ impl ProviderRunFixture {
             super::init_ws_test_git_repo(member_root.path());
             extra_member_roots.push(member_root);
         }
-        if let FixtureRoute::LogicalAlias(spec) = &route
+        if let (FixtureRoute::LogicalAlias(spec) | FixtureRoute::LogicalAliasStory(spec, _)) =
+            &route
             && let Some(root_rules) = spec.root_rules.as_ref()
         {
             let aggregate_root = repository_root
@@ -367,7 +402,7 @@ impl ProviderRunFixture {
         // issues/issue_0001/ 会占用顺序 id 目录名，必须让 issue 先落 issue_0001。
         let alias_lc_id = match &route {
             FixtureRoute::Legacy => None,
-            FixtureRoute::LogicalAlias(_) => Some(
+            FixtureRoute::LogicalAlias(_) | FixtureRoute::LogicalAliasStory(..) => Some(
                 crate::product::logical_codebase::store::legacy_logical_codebase_id("project_0001"),
             ),
         };
@@ -388,7 +423,7 @@ impl ProviderRunFixture {
         // identity_schema_version 对齐）。
         let logical = match &route {
             FixtureRoute::Legacy => None,
-            FixtureRoute::LogicalAlias(spec) => {
+            FixtureRoute::LogicalAlias(spec) | FixtureRoute::LogicalAliasStory(spec, _) => {
                 let member_roots = std::iter::once(repository_root.path().to_path_buf())
                     .chain(
                         extra_member_roots
@@ -481,22 +516,44 @@ impl ProviderRunFixture {
         );
         let record = lifecycle
             .create_workspace_session_with_id(
-                CreateWorkspaceSessionInput {
-                    project_id: "project_0001".to_string(),
-                    issue_id: "issue_0001".to_string(),
-                    entity_id: plan.id,
-                    workspace_type: WorkspaceType::WorkItemPlan,
-                    author_provider: ProviderName::ClaudeCode,
-                    reviewer_provider: Some(ProviderName::Codex),
+                match &route {
+                    // T6 fix-loop r2：Story 工作区会话——entity 是 story、无
+                    // WIP options，author 由路由变体指定（通用 Author 链）。
+                    FixtureRoute::LogicalAliasStory(_, story_author) => {
+                        CreateWorkspaceSessionInput {
+                            project_id: "project_0001".to_string(),
+                            issue_id: "issue_0001".to_string(),
+                            entity_id: story.id.clone(),
+                            workspace_type: WorkspaceType::Story,
+                            author_provider: story_author.clone(),
+                            reviewer_provider: Some(ProviderName::Codex),
 
-                    review_rounds: 0,
-                    superpowers_enabled: false,
-                    openspec_enabled: false,
-                    work_item_plan_options: Some(WorkItemPlanSessionOptions {
-                        flow_kind,
-                        run_policy: RunPolicy::Interactive,
-                        rollout_snapshot: flow_kind == WorkItemPlanFlowKind::SingleCandidate,
-                    }),
+                            review_rounds: 0,
+                            superpowers_enabled: false,
+                            openspec_enabled: false,
+                            work_item_plan_options: None,
+                        }
+                    }
+                    FixtureRoute::Legacy | FixtureRoute::LogicalAlias(_) => {
+                        CreateWorkspaceSessionInput {
+                            project_id: "project_0001".to_string(),
+                            issue_id: "issue_0001".to_string(),
+                            entity_id: plan.id,
+                            workspace_type: WorkspaceType::WorkItemPlan,
+                            author_provider: ProviderName::ClaudeCode,
+                            reviewer_provider: Some(ProviderName::Codex),
+
+                            review_rounds: 0,
+                            superpowers_enabled: false,
+                            openspec_enabled: false,
+                            work_item_plan_options: Some(WorkItemPlanSessionOptions {
+                                flow_kind,
+                                run_policy: RunPolicy::Interactive,
+                                rollout_snapshot: flow_kind
+                                    == WorkItemPlanFlowKind::SingleCandidate,
+                            }),
+                        }
+                    }
                 },
                 session_id,
             )
@@ -745,6 +802,7 @@ async fn single_candidate_repairs_duplicate_trusted_command_before_terminal_fail
         WsInMessage::StartGeneration {
             provider_config: provider_config(),
             reviewer_enabled: false,
+            resume_recovery: None,
         },
     )
     .await;
@@ -833,6 +891,7 @@ async fn single_candidate_mixed_duplicate_and_missing_section_uses_one_teaching_
         WsInMessage::StartGeneration {
             provider_config: provider_config(),
             reviewer_enabled: false,
+            resume_recovery: None,
         },
     )
     .await;
@@ -909,6 +968,7 @@ async fn single_candidate_batched_traceability_lowering_error_uses_one_teaching_
         WsInMessage::StartGeneration {
             provider_config: provider_config(),
             reviewer_enabled: false,
+            resume_recovery: None,
         },
     )
     .await;
@@ -1005,6 +1065,7 @@ async fn legacy_provider_run_uses_outline_builder_and_legacy_parser_only() {
         WsInMessage::StartGeneration {
             provider_config: provider_config(),
             reviewer_enabled: false,
+            resume_recovery: None,
         },
     )
     .await;
@@ -1071,6 +1132,7 @@ async fn single_candidate_provider_run_uses_markdown_builder_and_source_store_on
         WsInMessage::StartGeneration {
             provider_config: provider_config(),
             reviewer_enabled: false,
+            resume_recovery: None,
         },
     )
     .await;
@@ -1185,6 +1247,7 @@ async fn single_candidate_author_rejects_missing_language_rules_before_provider_
         WsInMessage::StartGeneration {
             provider_config: provider_config(),
             reviewer_enabled: false,
+            resume_recovery: None,
         },
     )
     .await;
@@ -1243,6 +1306,7 @@ async fn single_candidate_projects_declared_verification_command_without_outline
         WsInMessage::StartGeneration {
             provider_config: provider_config(),
             reviewer_enabled: false,
+            resume_recovery: None,
         },
     )
     .await;
@@ -1299,6 +1363,7 @@ async fn single_candidate_full_plan_parse_failure_is_fatal_after_one_teaching_re
         WsInMessage::StartGeneration {
             provider_config: provider_config(),
             reviewer_enabled: false,
+            resume_recovery: None,
         },
     )
     .await;

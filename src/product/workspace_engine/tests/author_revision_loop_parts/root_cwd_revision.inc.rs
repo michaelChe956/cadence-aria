@@ -216,6 +216,21 @@ fn logical_revision_fixture(
     LogicalRevisionFixture,
     mpsc::UnboundedReceiver<StreamingProviderInput>,
 ) {
+    logical_revision_fixture_with(authority, ProviderName::ClaudeCode, None)
+}
+
+/// T6 fix-loop r2：参数化变体——author provider 可指定（trust 面用
+/// KimiCode），`trust_home` 注入隔离 home 只读 trust source（条目缺失
+/// 场景）；其余拓扑与 [`logical_revision_fixture`] 同源。
+#[allow(clippy::type_complexity)]
+fn logical_revision_fixture_with(
+    authority: LogicalRevisionAuthority,
+    author_provider: ProviderName,
+    trust_home: Option<std::path::PathBuf>,
+) -> (
+    LogicalRevisionFixture,
+    mpsc::UnboundedReceiver<StreamingProviderInput>,
+) {
     let root = tempfile::tempdir().expect("temporary workspace root");
     // 成员 checkout 位于聚合根之下（CommonNonGitParent 布局）；漂移备选 root
     // 为兄弟目录（同属 authority 范围，成员/政策/能力不变——只有 cwd 漂移）。
@@ -385,7 +400,7 @@ fn logical_revision_fixture(
                 issue_id: "issue_0001".to_string(),
                 entity_id: story.id,
                 workspace_type: WorkspaceType::Story,
-                author_provider: ProviderName::ClaudeCode,
+                author_provider: author_provider.clone(),
                 reviewer_provider: Some(ProviderName::ClaudeCode),
                 review_rounds: 0,
                 superpowers_enabled: false,
@@ -417,7 +432,7 @@ fn logical_revision_fixture(
     let mut registry = ProviderRegistry::new();
     registry.register(ProviderName::ClaudeCode, capture);
     let audit = Arc::new(GatewayRunAudit::new());
-    let gateway = Arc::new(LogicalCodebaseProviderGateway::with_audit(
+    let gateway = LogicalCodebaseProviderGateway::with_audit(
         AggregatePolicyArtifactStore::new(paths.clone()),
         Arc::new(super::ReviewStaticCapabilitySource::default()),
         Arc::new(super::ReviewPassThroughTargetResolver),
@@ -426,7 +441,34 @@ fn logical_revision_fixture(
         super::review_always_available_gate(),
         audit.clone(),
         authority_root,
-    ));
+    );
+    // T6 fix-loop r2：隔离 home 只读 trust source（真实 Codex/Kimi adapter
+    // for_home，绝不触碰真实用户 home）。
+    let gateway = match trust_home {
+        Some(trust_home) => gateway.with_readonly_lc_facts(
+            crate::product::logical_codebase::RootRecipeReceiptStore::for_lc(
+                paths.clone(),
+                &lc_id,
+            ),
+            Arc::new(
+                crate::product::logical_codebase::provider_trust::ReadonlyProviderTrustSource::new(
+                    paths.clone(),
+                    Some(lc_id.clone()),
+                    vec![
+                        Arc::new(
+                            crate::product::logical_codebase::provider_trust_adapters::CodexTrustAdapter::for_home(&trust_home),
+                        ),
+                        Arc::new(
+                            crate::product::logical_codebase::provider_trust_adapters::KimiTrustAdapter::for_home(&trust_home),
+                        ),
+                    ],
+                ),
+            ),
+            Some(lc_id.clone()),
+        ),
+        None => gateway,
+    };
+    let gateway = Arc::new(gateway);
 
     (
         LogicalRevisionFixture {
@@ -1012,5 +1054,96 @@ async fn anchor_t07_superseded_waiting_finishes_provider_node() {
     assert!(
         dto.allowed_actions.is_empty(),
         "B 齐前 waiting allowed_actions 必须为空"
+    );
+}
+
+/// T6 fix-loop r2：LC Author Revision（`drive_revision_session` 的 gateway
+/// 启动口，review/drive.rs U2 位点）Kimi 条目缺失 → spawn trust 拒绝以
+/// `provider_trust_missing` 分类＋同源指导＋生成场景 retry_action 经
+/// `EngineEvent::Error` 上浮；provider 零启动（直连与 gateway registry
+/// 双零启动）。
+#[tokio::test]
+async fn logical_revision_spawn_trust_missing_classifies_with_manual_guidance() {
+    let trust_home = tempfile::tempdir().expect("isolated trust home");
+    let (fixture, mut inputs) = logical_revision_fixture_with(
+        LogicalRevisionAuthority::ManifestRoot,
+        ProviderName::KimiCode,
+        Some(trust_home.path().to_path_buf()),
+    );
+    let (mut engine, mut engine_rx) = revision_stage_engine_with_events(&fixture);
+    // 直连 fallback provider：LC 下不得被触达（trust 拒绝先于一切启动）。
+    let (direct_starts, _direct_inputs, direct) = {
+        let starts = Arc::new(AtomicUsize::new(0));
+        let (input_tx, _input_rx) = mpsc::unbounded_channel();
+        (
+            starts.clone(),
+            _input_rx,
+            Arc::new(RevisionCaptureProvider {
+                starts,
+                inputs: input_tx,
+                output: revision_story_output(),
+            }),
+        )
+    };
+
+    engine
+        .drive_revision_session(direct, empty_provider_commands())
+        .await;
+
+    let message = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            match engine_rx.recv().await {
+                Some(crate::product::workspace_engine::EngineEvent::Error { message }) => {
+                    return message;
+                }
+                Some(_) => continue,
+                None => panic!("engine event channel closed before spawn error surfaced"),
+            }
+        }
+    })
+    .await
+    .expect("revision spawn trust failure must surface via EngineEvent::Error");
+
+    assert!(
+        message.contains("provider_trust_missing"),
+        "revision gateway 启动臂 trust 拒绝必须提升 provider_trust_missing 分类，got: {message}"
+    );
+    assert!(
+        message.contains("provider trust not established for KimiCode"),
+        "原拒绝原文必须保留，got: {message}"
+    );
+    assert!(
+        message.contains(
+            &trust_home
+                .path()
+                .join(".kimi-code")
+                .join("workspace-trust")
+                .display()
+                .to_string()
+        ),
+        "revision 臂指导必须同源（真实工件路径），got: {message}"
+    );
+    assert!(
+        message.contains("人工登记") && message.contains("显式重新生成"),
+        "revision 臂必须携带生成场景 retry_action，got: {message}"
+    );
+    // provider 零启动：gateway registry（fixture.provider_starts）与直连
+    // fallback（direct_starts）都不得启动。
+    assert_eq!(
+        fixture.provider_starts.load(Ordering::SeqCst),
+        0,
+        "trust 拒绝必须发生在 gateway adapter 启动之前"
+    );
+    assert_eq!(
+        direct_starts.load(Ordering::SeqCst),
+        0,
+        "LC revision 不得回落直连 provider"
+    );
+    assert!(
+        !matches!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), inputs.recv()).await,
+            Ok(Some(_))
+        ),
+        "trust 拒绝必须 reject before provider startup"
     );
 }

@@ -439,8 +439,8 @@ async fn drive_single_candidate_reredrive(
         )
         .map_err(SingleCandidateProviderRunError::Message)?;
     let reredrive_input = engine.attach_tool_policy_audit(reredrive_input);
-    // 6.1 fix-loop：spawn 臂 trust 拒绝提升分类+同源指导（教学重驱同臂）。
-    let trust_gateway = super::provider_run::logical_launch_gateway(launch);
+    // T6 fix-loop r2：trust 分类已下沉 start_work_item_plan_author 的
+    // Logical 分支共享口（教学重驱同臂）。
     let reredrive_session = start_work_item_plan_author(
         launch.clone(),
         Arc::clone(&provider_for_run),
@@ -449,14 +449,6 @@ async fn drive_single_candidate_reredrive(
         plan_split_run,
     )
     .await;
-    let reredrive_session = match reredrive_session {
-        Ok(session) => Ok(session),
-        Err(error) => Err(super::provider_run::classify_generation_spawn_trust_failure(
-            error,
-            trust_gateway.as_ref(),
-            author_provider,
-        )),
-    };
     let reredrive_output = match engine
         .drive_work_item_plan_provider_session_to_output(
             reredrive_session,
@@ -904,9 +896,8 @@ pub(crate) async fn run_single_candidate_author(
                 return Err(SingleCandidateProviderRunError::Message(message));
             }
         };
-    // 6.1 fix-loop：spawn 臂 trust 拒绝提升分类+同源指导（preflight 之后
-    // 的撤销窗口残余也以分类面呈现，不再裸直出）。
-    let trust_gateway = super::provider_run::logical_launch_gateway(&launch);
+    // T6 fix-loop r2：trust 分类已下沉 start_work_item_plan_author 的
+    // Logical 分支共享口（preflight 之后的撤销窗口残余同样以分类面呈现）。
     let provider_session = start_work_item_plan_author(
         launch.clone(),
         Arc::clone(&provider_for_run),
@@ -915,14 +906,6 @@ pub(crate) async fn run_single_candidate_author(
         plan_split_run.as_ref(),
     )
     .await;
-    let provider_session = match provider_session {
-        Ok(session) => Ok(session),
-        Err(error) => Err(super::provider_run::classify_generation_spawn_trust_failure(
-            error,
-            trust_gateway.as_ref(),
-            &author_provider,
-        )),
-    };
     let full_output = match engine
         .drive_work_item_plan_provider_session_to_output(
             provider_session,

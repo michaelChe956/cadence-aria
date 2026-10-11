@@ -45,10 +45,29 @@ pub(super) fn launch_provider_session<'a>(
         (Some(validated), Some(gateway)) => {
             let gateway = gateway.clone();
             Box::pin(async move {
+                // T6 fix-loop r2：Coding 共享启动口（Coder/CodeReviewer/
+                // InternalReviewer）接产品层共享分类桥——trust 维度拒绝
+                // 提升 provider_trust_missing 分类+同源指导；恢复动作用
+                // Coding 场景（重新发起该 Coding 任务），不借用 generation
+                // 的「显式重新生成」。provider 取 validated envelope 冻结
+                // dialect 的同源映射（与 gateway 自身 trust 复验同口径）。
+                let trust_provider =
+                    crate::product::logical_codebase::provider_gateway::provider_name_for_dialect(
+                        validated.clone().into_parts().1.envelope().provider_dialect,
+                    );
                 gateway
                     .start_streaming(validated, cancel)
                     .await
-                    .map_err(provider_adapter_error_from_gateway)
+                    .map_err(|error| {
+                        let mut mapped = provider_adapter_error_from_gateway(&error);
+                        mapped.details = gateway.classify_launch_trust_failure_details(
+                            &error,
+                            &trust_provider,
+                            &mapped.details,
+                            crate::product::logical_codebase::provider_trust::ProviderTrustScenario::Coding,
+                        );
+                        mapped
+                    })
             })
         }
         // Task 7 分流收口:LC validated 输入缺 gateway 是装配错误,返回稳定
@@ -68,7 +87,7 @@ pub(super) fn launch_provider_session<'a>(
 /// 复验拒绝」与「adapter 运行失败」统一为 transport 错误。fail-closed 维度保留在
 /// `details` 中供上游诊断。
 fn provider_adapter_error_from_gateway(
-    error: crate::product::logical_codebase::ProviderGatewayError,
+    error: &crate::product::logical_codebase::ProviderGatewayError,
 ) -> ProviderAdapterError {
     use crate::protocol::contracts::TimeoutStatus;
     use crate::protocol::provider_errors::ProviderErrorCode;
@@ -80,5 +99,386 @@ fn provider_adapter_error_from_gateway(
         exit_code: None,
         timeout_status: TimeoutStatus::NotTimedOut,
         duration_ms: 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cross_cutting::streaming_provider::ProviderSession;
+    use crate::product::app_paths::ProductAppPaths;
+
+    /// T6 fix-loop r2（U8 位点）：Coding 共享启动口 trust 拒绝分类。
+    /// capability double：任意 provider×action 恒 Confirmed（真实 dialect）。
+    struct CodingTrustCapabilitySource;
+
+    impl crate::product::logical_codebase::ProviderCapabilitySource for CodingTrustCapabilitySource {
+        fn require_supported(
+            &self,
+            provider: &crate::product::logical_codebase::ProviderRef,
+            action: crate::product::logical_codebase::SessionPolicyAction,
+        ) -> Result<
+            crate::product::logical_codebase::ProviderCapability,
+            crate::product::logical_codebase::ProviderGatewayError,
+        > {
+            use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
+            use crate::product::logical_codebase::policy::ProviderWireDialect;
+            use crate::product::logical_codebase::provider_capability_store::ProviderActionCapability;
+            let (adapter_dialect, wire_dialect) = match provider.provider_type {
+                crate::product::logical_codebase::ProviderRefType::ClaudeCode => (
+                    crate::product::logical_codebase::policy::ProviderDialect::ClaudeCodeCliV1,
+                    ProviderWireDialect::ClaudeCodeStreamJson,
+                ),
+                crate::product::logical_codebase::ProviderRefType::Codex => (
+                    crate::product::logical_codebase::policy::ProviderDialect::CodexCliV1,
+                    ProviderWireDialect::CodexAppServerRpc,
+                ),
+                crate::product::logical_codebase::ProviderRefType::Pi => (
+                    crate::product::logical_codebase::policy::ProviderDialect::PiRpcV1,
+                    ProviderWireDialect::PiRpc,
+                ),
+                crate::product::logical_codebase::ProviderRefType::KimiCode => (
+                    crate::product::logical_codebase::policy::ProviderDialect::KimiAcpV1,
+                    ProviderWireDialect::KimiAcp,
+                ),
+            };
+            Ok(crate::product::logical_codebase::ProviderCapability {
+                provider_type: provider.provider_type,
+                version: "1.4.0".to_string(),
+                adapter_dialect,
+                wire_dialect,
+                capability_snapshot_ref: provider.capability_snapshot_ref.clone(),
+                action_capability: ProviderActionCapability {
+                    action,
+                    launch: ProviderCapabilityEvidence::Confirmed,
+                    resume: ProviderCapabilityEvidence::Confirmed,
+                    write_boundary: ProviderCapabilityEvidence::Confirmed,
+                    projection_digest: format!("projection-digest-{action:?}"),
+                    evidence_ref: format!("probe://{action:?}"),
+                },
+                trust: ProviderCapabilityEvidence::Confirmed,
+            })
+        }
+
+        fn require_resume_supported(
+            &self,
+            provider: &crate::product::logical_codebase::ProviderRef,
+            action: crate::product::logical_codebase::SessionPolicyAction,
+        ) -> Result<
+            crate::product::logical_codebase::ProviderCapability,
+            crate::product::logical_codebase::ProviderGatewayError,
+        > {
+            self.require_supported(provider, action)
+        }
+
+        fn require_write_boundary(
+            &self,
+            provider: &crate::product::logical_codebase::ProviderRef,
+            action: crate::product::logical_codebase::SessionPolicyAction,
+        ) -> Result<
+            crate::product::logical_codebase::ProviderCapability,
+            crate::product::logical_codebase::ProviderGatewayError,
+        > {
+            self.require_supported(provider, action)
+        }
+
+        fn require_root_recipe_supported(
+            &self,
+            provider: &crate::product::logical_codebase::ProviderRef,
+            _credential: &crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
+        ) -> Result<
+            crate::product::logical_codebase::ProviderCapability,
+            crate::product::logical_codebase::ProviderGatewayError,
+        > {
+            self.require_supported(
+                provider,
+                crate::product::logical_codebase::SessionPolicyAction::PlanningReadOnly,
+            )
+        }
+    }
+
+    struct CodingTrustTargetResolver;
+
+    impl crate::product::logical_codebase::PolicyTargetResolver for CodingTrustTargetResolver {
+        fn resolve_and_revalidate(
+            &self,
+            request: &crate::product::logical_codebase::SessionLaunchRequest,
+        ) -> Result<
+            crate::product::logical_codebase::PolicyTarget,
+            crate::product::logical_codebase::ProviderGatewayError,
+        > {
+            Ok(request.target.clone())
+        }
+    }
+
+    struct CodingTrustSyncAdapter;
+
+    impl crate::cross_cutting::provider_adapter::ProviderAdapter for CodingTrustSyncAdapter {
+        fn run(
+            &self,
+            _input: &crate::protocol::contracts::AdapterInput,
+        ) -> Result<
+            crate::protocol::contracts::AdapterOutput,
+            crate::cross_cutting::provider_adapter::ProviderAdapterError,
+        > {
+            Ok(crate::protocol::contracts::AdapterOutput {
+                exit_code: Some(0),
+                stdout: "ok".to_string(),
+                stderr: String::new(),
+                structured_output: None,
+                files_modified: Vec::new(),
+                duration_ms: 0,
+                timeout_status: crate::protocol::contracts::TimeoutStatus::NotTimedOut,
+            })
+        }
+    }
+
+    struct CodingTrustAlwaysHealthy;
+
+    impl crate::cross_cutting::provider_availability_gate::ProviderHealthSource
+        for CodingTrustAlwaysHealthy
+    {
+        fn snapshot(
+            &self,
+        ) -> std::sync::Arc<crate::cross_cutting::provider_health::ProviderHealthSnapshot> {
+            let checked_at = chrono::Utc::now();
+            std::sync::Arc::new(
+                crate::cross_cutting::provider_health::ProviderHealthSnapshot {
+                    schema_version: 1,
+                    generation: 1,
+                    checked_at,
+                    providers: [
+                        crate::product::models::ProviderName::ClaudeCode,
+                        crate::product::models::ProviderName::Codex,
+                        crate::product::models::ProviderName::KimiCode,
+                    ]
+                    .into_iter()
+                    .map(
+                        |provider| crate::cross_cutting::provider_health::ProviderHealthEntry {
+                            provider,
+                            command: "stub".to_string(),
+                            available: true,
+                            version: Some("1.0".to_string()),
+                            reason_code: None,
+                            reason: None,
+                            checked_at,
+                        },
+                    )
+                    .collect(),
+                },
+            )
+        }
+
+        fn degraded(&self) -> bool {
+            false
+        }
+    }
+
+    /// 零启动观测 provider：被启动即 panic（trust 拒绝必须先于 adapter）。
+    struct NeverStartAdapter;
+
+    #[async_trait::async_trait]
+    impl crate::cross_cutting::streaming_provider::StreamingProviderAdapter for NeverStartAdapter {
+        async fn start(
+            &self,
+            _input: crate::cross_cutting::streaming_provider::StreamingProviderInput,
+            _cancel: CancellationToken,
+        ) -> Result<ProviderSession, ProviderAdapterError> {
+            panic!("coding trust rejection must precede adapter start");
+        }
+
+        async fn start_validated(
+            &self,
+            validated: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+            cancel: CancellationToken,
+        ) -> Result<ProviderSession, ProviderAdapterError> {
+            let (input, _launch) = validated.into_parts();
+            self.start(input, cancel).await
+        }
+
+        async fn run_streaming(
+            &self,
+            _input: &crate::protocol::contracts::AdapterInput,
+            _cancel: CancellationToken,
+        ) -> Result<
+            mpsc::Receiver<crate::cross_cutting::streaming_provider::StreamChunk>,
+            ProviderAdapterError,
+        > {
+            unreachable!("coding launch tests use start paths")
+        }
+    }
+
+    fn coding_trust_gateway(
+        paths: &ProductAppPaths,
+        trust_home: &std::path::Path,
+    ) -> std::sync::Arc<crate::product::logical_codebase::LogicalCodebaseProviderGateway> {
+        let manifest = crate::product::logical_codebase::store::LogicalCodebaseManifest::new(
+            "project_0001",
+            paths.root().to_path_buf(),
+            vec![],
+        );
+        crate::product::logical_codebase::policy::AggregatePolicyArtifactStore::new(paths.clone())
+            .ensure_bootstrap(&manifest)
+            .expect("bootstrap aggregate policy");
+        let lc_id = "logical_codebase_0001".to_string();
+        let gateway =
+            crate::product::logical_codebase::LogicalCodebaseProviderGateway::with_audit(
+                crate::product::logical_codebase::policy::AggregatePolicyArtifactStore::new(
+                    paths.clone(),
+                ),
+                std::sync::Arc::new(CodingTrustCapabilitySource),
+                std::sync::Arc::new(CodingTrustTargetResolver),
+                std::sync::Arc::new(
+                    crate::cross_cutting::provider_registry::ProviderRegistry::new(),
+                ),
+                std::sync::Arc::new(CodingTrustSyncAdapter),
+                std::sync::Arc::new(
+                    crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate::new(
+                        std::sync::Arc::new(CodingTrustAlwaysHealthy),
+                    ),
+                ),
+                std::sync::Arc::new(
+                    crate::product::logical_codebase::provider_gateway::GatewayRunAudit::new(),
+                ),
+                std::fs::canonicalize(&manifest.provider_context_root).expect("authority root"),
+            )
+            .with_readonly_lc_facts(
+                crate::product::logical_codebase::RootRecipeReceiptStore::for_lc(
+                    paths.clone(),
+                    &lc_id,
+                ),
+                std::sync::Arc::new(
+                    crate::product::logical_codebase::provider_trust::ReadonlyProviderTrustSource::new(
+                        paths.clone(),
+                        Some(lc_id.clone()),
+                        vec![
+                            std::sync::Arc::new(
+                                crate::product::logical_codebase::provider_trust_adapters::CodexTrustAdapter::for_home(trust_home),
+                            ),
+                            std::sync::Arc::new(
+                                crate::product::logical_codebase::provider_trust_adapters::KimiTrustAdapter::for_home(trust_home),
+                            ),
+                        ],
+                    ),
+                ),
+                Some(lc_id),
+            );
+        std::sync::Arc::new(gateway)
+    }
+
+    fn coding_validated_input(
+        gateway: &std::sync::Arc<crate::product::logical_codebase::LogicalCodebaseProviderGateway>,
+        working_dir: std::path::PathBuf,
+    ) -> crate::cross_cutting::session_launch::ValidatedStreamingProviderInput {
+        let request = crate::product::logical_codebase::SessionLaunchRequest {
+            project_id: "project_0001".to_string(),
+            provider: crate::product::logical_codebase::ProviderRef::from_provider_name(
+                &crate::product::models::ProviderName::KimiCode,
+                "cap_managed_snapshot",
+            )
+            .expect("kimi provider ref"),
+            action: crate::product::logical_codebase::SessionPolicyAction::PlanningReadOnly,
+            target: crate::product::logical_codebase::PolicyTarget::aggregate_root(working_dir),
+            working_directory: gateway.authority_root().to_path_buf(),
+            readable_roots: vec![gateway.authority_root().to_path_buf()],
+            writable_roots: Vec::new(),
+            config_artifact_ref: "sha256:managed-config-artifact".to_string(),
+        };
+        let validated = gateway.validate(request).expect("coding launch validate");
+        let input = crate::cross_cutting::streaming_provider::StreamingProviderInput {
+            provider_type: crate::protocol::contracts::ProviderType::KimiCode,
+            role: crate::protocol::contracts::AdapterRole::Orchestrator,
+            prompt: "coding task prompt".to_string(),
+            working_dir: validated.envelope().target.worktree.clone(),
+            working_directory: Some(validated.envelope().working_directory.clone()),
+            workspace_session_id: None,
+            resume_provider_session_id: None,
+            permission_mode: crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
+            tool_policy: None,
+            audit_sink: None,
+            structured_output_contract: None,
+            env_vars: Default::default(),
+            timeout_secs: 30,
+            baseline_tree: None,
+        };
+        crate::cross_cutting::session_launch::ValidatedStreamingProviderInput::new(input, validated)
+    }
+
+    /// U8 主用例：Kimi 条目缺失 → Coding 共享启动口以
+    /// `provider_trust_missing` 分类＋同源指导＋**Coding 场景**
+    /// retry_action（重新发起该 Coding 任务，不借用「显式重新生成」）
+    /// 拒收；provider 零启动。
+    #[tokio::test]
+    async fn coding_launch_trust_missing_classifies_with_coding_retry_action() {
+        let root = tempfile::tempdir().expect("temporary product root");
+        let paths = ProductAppPaths::new(root.path().join(".aria"));
+        let trust_home = tempfile::tempdir().expect("isolated trust home");
+        let gateway = coding_trust_gateway(&paths, trust_home.path());
+        let target_dir = tempfile::tempdir().expect("coding target anchor");
+        let validated = coding_validated_input(&gateway, target_dir.path().to_path_buf());
+
+        let result = launch_provider_session(
+            &NeverStartAdapter,
+            crate::cross_cutting::streaming_provider::StreamingProviderInput {
+                provider_type: crate::protocol::contracts::ProviderType::KimiCode,
+                role: crate::protocol::contracts::AdapterRole::Orchestrator,
+                prompt: "coding task prompt".to_string(),
+                working_dir: target_dir.path().to_path_buf(),
+                working_directory: None,
+                workspace_session_id: None,
+                resume_provider_session_id: None,
+                permission_mode:
+                    crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
+                tool_policy: None,
+                audit_sink: None,
+                structured_output_contract: None,
+                env_vars: Default::default(),
+                timeout_secs: 30,
+                baseline_tree: None,
+            },
+            CancellationToken::new(),
+            Some(validated),
+            Some(&gateway),
+        )
+        .await;
+        let error = match result {
+            Ok(_) => panic!("coding launch must reject on missing trust"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error.details.contains("provider_trust_missing"),
+            "Coding 启动臂 trust 拒绝必须提升 provider_trust_missing 分类，got: {}",
+            error.details
+        );
+        assert!(
+            error
+                .details
+                .contains("provider trust not established for KimiCode"),
+            "原拒绝原文必须保留，got: {}",
+            error.details
+        );
+        assert!(
+            error.details.contains("人工登记") && error.details.contains("重新发起该 Coding 任务"),
+            "Coding 臂必须携带 Coding 场景 retry_action，got: {}",
+            error.details
+        );
+        assert!(
+            !error.details.contains("显式重新生成"),
+            "Coding 臂不得借用 generation 的「显式重新生成」，got: {}",
+            error.details
+        );
+        assert!(
+            error.details.contains(
+                &trust_home
+                    .path()
+                    .join(".kimi-code")
+                    .join("workspace-trust")
+                    .display()
+                    .to_string()
+            ),
+            "Coding 臂指导必须同源（真实工件路径），got: {}",
+            error.details
+        );
     }
 }

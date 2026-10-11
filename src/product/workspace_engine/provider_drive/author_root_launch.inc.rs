@@ -84,13 +84,18 @@ impl WorkspaceEngine {
             .clone()
             .expect("logical provider gateway must be injected before driving via gateway");
         let validated_input = self.attach_tool_policy_audit_to_validated(validated_input);
+        let author_provider = self.session.author_provider.clone();
         let session = gateway
             .start_streaming(validated_input, self.cancel.clone())
             .await
             .map_err(|error| {
-                // 诊断直通（claude×轻 握手谜团第 2 轮）：不丢弃 adapter stderr——
+                // 诊断直通（claude×轻 握手谜团 第 2 轮）：不丢弃 adapter stderr——
                 // 尾部（有界）并入 details，stderr 字段同源保留（其余 gateway 校验
                 // 错误维持 Display 文案）。同 review/drive.rs 的映射约定。
+                // T6 fix-loop r2：压平前经共享分类桥——trust 维度拒绝提升
+                // provider_trust_missing 分类+同源指导+生成场景 retry_action
+                // （owner 现场 Story 首生成裸串的根因位）；其余变体原样，
+                // 不给漂移根 trust 指导。
                 let mut mapped = crate::cross_cutting::provider_adapter::ProviderAdapterError {
                     code: crate::protocol::provider_errors::ProviderErrorCode::ProviderUnavailable,
                     details: error.to_string(),
@@ -110,6 +115,12 @@ impl WorkspaceEngine {
                     );
                     mapped.stderr = inner.stderr.clone();
                 }
+                mapped.details = gateway.classify_launch_trust_failure_details(
+                    &error,
+                    &author_provider,
+                    &mapped.details,
+                    crate::product::logical_codebase::provider_trust::ProviderTrustScenario::Generation,
+                );
                 mapped
             });
         self.drive_provider_session(ProviderSessionDriveInput {

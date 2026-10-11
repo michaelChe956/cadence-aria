@@ -21,13 +21,9 @@ use super::single_candidate_provider_run::{
 use super::*;
 
 use crate::cross_cutting::provider_adapter::ProviderAdapter;
-use crate::cross_cutting::provider_availability_gate::{
-    ProviderAvailabilityGate, ProviderHealthSource,
-};
+use crate::cross_cutting::provider_availability_gate::{ProviderAvailabilityGate, ProviderHealthSource};
 use crate::cross_cutting::provider_health::{ProviderHealthEntry, ProviderHealthSnapshot};
-use crate::cross_cutting::streaming_provider::{
-    ProviderCompletion, ProviderEvent, ProviderSession,
-};
+use crate::cross_cutting::streaming_provider::{ProviderCompletion, ProviderEvent, ProviderSession};
 use crate::product::logical_codebase::issue_selection::IssueCodebaseSelection;
 use crate::product::logical_codebase::policy::AggregatePolicyArtifactStore;
 use crate::product::logical_codebase::provider_gateway::{
@@ -594,6 +590,7 @@ async fn lc_missing_member_language_rules_converts_to_waiting_prepare_face() {
         WsInMessage::StartGeneration {
             provider_config: provider_config(),
             reviewer_enabled: false,
+            resume_recovery: None,
         },
     )
     .await;
@@ -648,6 +645,7 @@ async fn lc_waiting_face_resumes_after_member_rules_restored() {
         WsInMessage::StartGeneration {
             provider_config: provider_config(),
             reviewer_enabled: false,
+            resume_recovery: None,
         },
     )
     .await;
@@ -678,6 +676,7 @@ async fn lc_waiting_face_resumes_after_member_rules_restored() {
         WsInMessage::StartGeneration {
             provider_config: provider_config(),
             reviewer_enabled: false,
+            resume_recovery: None,
         },
     )
     .await;
@@ -723,6 +722,7 @@ async fn lc_run_with_member_rules_present_starts_author_directly() {
         WsInMessage::StartGeneration {
             provider_config: provider_config(),
             reviewer_enabled: false,
+            resume_recovery: None,
         },
     )
     .await;
@@ -757,6 +757,7 @@ async fn lc_plan_author_run_spawns_from_root_cwd_with_member_target() {
         WsInMessage::StartGeneration {
             provider_config: provider_config(),
             reviewer_enabled: false,
+            resume_recovery: None,
         },
     )
     .await;
@@ -815,6 +816,7 @@ async fn lc_sc_focus_member_rules_present_other_member_missing_continues() {
         WsInMessage::StartGeneration {
             provider_config: provider_config(),
             reviewer_enabled: false,
+            resume_recovery: None,
         },
     )
     .await;
@@ -869,6 +871,7 @@ async fn lc_sc_multi_target_without_unique_focus_consumes_root_rules() {
         WsInMessage::StartGeneration {
             provider_config: provider_config(),
             reviewer_enabled: false,
+            resume_recovery: None,
         },
     )
     .await;
@@ -919,6 +922,7 @@ async fn lc_sc_multi_target_root_rules_missing_waits_before_provider() {
         WsInMessage::StartGeneration {
             provider_config: provider_config(),
             reviewer_enabled: false,
+            resume_recovery: None,
         },
     )
     .await;
@@ -979,6 +983,7 @@ async fn lc_sc_consumed_rule_file_invalid_utf8_waits_before_provider() {
         WsInMessage::StartGeneration {
             provider_config: provider_config(),
             reviewer_enabled: false,
+            resume_recovery: None,
         },
     )
     .await;
@@ -1032,6 +1037,7 @@ async fn lc_sc_consumed_rule_file_directory_waits_before_provider() {
         WsInMessage::StartGeneration {
             provider_config: provider_config(),
             reviewer_enabled: false,
+            resume_recovery: None,
         },
     )
     .await;
@@ -1097,6 +1103,7 @@ async fn lc_sc_consumed_rule_file_unreadable_waits_before_provider() {
         WsInMessage::StartGeneration {
             provider_config: provider_config(),
             reviewer_enabled: false,
+            resume_recovery: None,
         },
     )
     .await;
@@ -1134,7 +1141,7 @@ async fn lc_sc_consumed_rule_file_unreadable_waits_before_provider() {
 /// Codex→CodexCliV1、KimiCode→KimiAcpV1——gateway 的只读 trust 复验
 /// （#4b）按 `provider_name_for_dialect` 命中对应 provider 的用户级
 /// workspace trust 面（默认 double 恒 ClaudeCodeCliV1，不会触发 trust）。
-struct LcDialectCapabilitySource;
+pub(super) struct LcDialectCapabilitySource;
 
 impl LcDialectCapabilitySource {
     fn capability(provider: &ProviderRef, action: SessionPolicyAction) -> ProviderCapability {
@@ -1223,7 +1230,7 @@ impl ProviderCapabilitySource for LcDialectCapabilitySource {
 }
 
 /// 可控 availability gate：ClaudeCode 恒健康，Codex/Kimi 按参数。
-fn lc_scoped_availability_gate(
+pub(super) fn lc_scoped_availability_gate(
     codex_available: bool,
     kimi_available: bool,
 ) -> Arc<ProviderAvailabilityGate> {
@@ -1379,6 +1386,7 @@ async fn lc_first_generation_codex_missing_trust_shows_manual_registration_guida
         WsInMessage::StartGeneration {
             provider_config: author_provider_config(ProviderName::Codex),
             reviewer_enabled: false,
+            resume_recovery: None,
         },
     )
     .await;
@@ -1494,6 +1502,7 @@ async fn lc_first_generation_kimi_missing_trust_shows_manual_registration_guidan
         WsInMessage::StartGeneration {
             provider_config: author_provider_config(ProviderName::KimiCode),
             reviewer_enabled: false,
+            resume_recovery: None,
         },
     )
     .await;
@@ -1605,6 +1614,7 @@ async fn lc_first_generation_other_unavailable_not_misattributed_as_trust_missin
         WsInMessage::StartGeneration {
             provider_config: author_provider_config(ProviderName::Codex),
             reviewer_enabled: false,
+            resume_recovery: None,
         },
     )
     .await;
@@ -1686,6 +1696,7 @@ async fn lc_first_generation_member_rules_missing_keeps_waiting_without_trust_gu
         WsInMessage::StartGeneration {
             provider_config: author_provider_config(ProviderName::Codex),
             reviewer_enabled: false,
+            resume_recovery: None,
         },
     )
     .await;
@@ -1766,6 +1777,7 @@ async fn lc_first_generation_conflict_trust_preserves_user_entry_without_writes(
         WsInMessage::StartGeneration {
             provider_config: author_provider_config(ProviderName::Codex),
             reviewer_enabled: false,
+            resume_recovery: None,
         },
     )
     .await;
@@ -1898,6 +1910,7 @@ async fn lc_first_generation_deleted_entry_does_not_resurrect_registration() {
         WsInMessage::StartGeneration {
             provider_config: author_provider_config(ProviderName::Codex),
             reviewer_enabled: false,
+            resume_recovery: None,
         },
     )
     .await;
@@ -1987,16 +2000,14 @@ async fn lc_legacy_generation_spawn_trust_missing_classifies_with_manual_guidanc
     let home_before = snapshot_tree(trust_home.path());
     let trust_facts_before = snapshot_tree(&trust_facts_root(&fixture));
 
-    let (context, _outbound_rx) = single_candidate_context_for_author(
-        &fixture,
-        ProviderName::KimiCode,
-        provider,
-    );
+    let (context, _outbound_rx) =
+        single_candidate_context_for_author(&fixture, ProviderName::KimiCode, provider);
     handle_workspace_inbound_message(
         context,
         WsInMessage::StartGeneration {
             provider_config: author_provider_config(ProviderName::KimiCode),
             reviewer_enabled: false,
+            resume_recovery: None,
         },
     )
     .await;
@@ -2058,5 +2069,108 @@ async fn lc_legacy_generation_spawn_trust_missing_classifies_with_manual_guidanc
         trust_facts_before,
         snapshot_tree(&trust_facts_root(&fixture)),
         "spawn 臂拒收不得写 trust durable 事实"
+    );
+}
+
+/// T6 fix-loop r2（owner 现场根因回归）：**Story 工作区**首生成走通用
+/// Author 链（StartGeneration → Author run → `handle_user_message_from_run`
+/// → `drive_author_provider_session_via_gateway` → gateway.start_streaming
+/// 复验），不经 WIP 七臂的任何一行。Kimi 条目缺失时 spawn trust 拒绝
+/// 必须以 `provider_trust_missing` 分类＋同源 manual_guidance＋生成场景
+/// retry_action 上浮（owner 现场裸串
+/// `provider_gateway_unavailable: provider trust not established for
+/// KimiCode: entry absent` 保留为原拒绝原文）；provider 零启动、
+/// home/trust durable 快照不变。Design/传统 WorkItem 首生成与
+/// ChoiceFollowup 在同口合流，由该臂一次覆盖。
+#[tokio::test]
+async fn story_generation_spawn_trust_missing_classifies_with_manual_guidance() {
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let provider = Arc::new(LcRecordingAuthorProvider {
+        output: single_candidate_markdown("story_0001", "design_0001"),
+        inputs: input_tx,
+    });
+    let trust_home = tempfile::tempdir().expect("isolated trust home");
+    let (fixture, mut engine_rx) =
+        ProviderRunFixture::new_logical_story_with_gateway_extras_and_engine_rx(
+            provider.clone(),
+            AliasLcGatewayExtras {
+                capability: Some(Arc::new(LcDialectCapabilitySource)),
+                trust_home: Some(trust_home.path().to_path_buf()),
+                availability: Some(lc_scoped_availability_gate(true, true)),
+            },
+            ProviderName::KimiCode,
+        );
+    let home_before = snapshot_tree(trust_home.path());
+    let trust_facts_before = snapshot_tree(&trust_facts_root(&fixture));
+
+    let (context, _outbound_rx) =
+        single_candidate_context_for_author(&fixture, ProviderName::KimiCode, provider);
+    handle_workspace_inbound_message(
+        context,
+        WsInMessage::StartGeneration {
+            provider_config: author_provider_config(ProviderName::KimiCode),
+            reviewer_enabled: false,
+            resume_recovery: None,
+        },
+    )
+    .await;
+
+    // 上浮面：spawn 失败经 EngineEvent::Error → WS error 消息（owner 现场
+    // 跨会话收件箱 HardErrorInboxRow 的同源观察点）。
+    let message = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            match engine_rx.recv().await {
+                Some(EngineEvent::Error { message }) => return message,
+                Some(_) => continue,
+                None => panic!("engine event channel closed before spawn error surfaced"),
+            }
+        }
+    })
+    .await
+    .expect("story author spawn trust failure must surface via EngineEvent::Error");
+
+    assert!(
+        message.contains("provider_trust_missing"),
+        "Story 通用 Author 臂 trust 拒绝必须提升 provider_trust_missing 分类，got: {message}"
+    );
+    assert!(
+        message.contains("provider trust not established for KimiCode"),
+        "原诊断原文（owner 现场同源裸串）必须保留，got: {message}"
+    );
+    // 同源 manual_guidance：Kimi 真实工件目录+稳定键+记录形状。
+    assert!(
+        message.contains(
+            &trust_home
+                .path()
+                .join(".kimi-code")
+                .join("workspace-trust")
+                .display()
+                .to_string()
+        ) && message.contains("wd_aggregate-root_")
+            && message.contains("trustedAt"),
+        "Story 生成臂指导必须同源（真实工件路径/键形/JSON 形状），got: {message}"
+    );
+    assert!(
+        message.contains("人工登记") && message.contains("显式重新生成"),
+        "Story 生成臂必须携带生成场景 retry_action，got: {message}"
+    );
+
+    // provider 零启动；home/trust durable 快照不变（零 trust 写）。
+    assert!(
+        !matches!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), input_rx.recv()).await,
+            Ok(Some(_))
+        ),
+        "Story 生成臂 trust 拒绝必须 reject before provider startup"
+    );
+    assert_eq!(
+        home_before,
+        snapshot_tree(trust_home.path()),
+        "Story 生成臂拒收不得写隔离 home"
+    );
+    assert_eq!(
+        trust_facts_before,
+        snapshot_tree(&trust_facts_root(&fixture)),
+        "Story 生成臂拒收不得写 trust durable 事实"
     );
 }

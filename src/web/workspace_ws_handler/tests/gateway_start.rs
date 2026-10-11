@@ -10,9 +10,7 @@ use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::cross_cutting::provider_adapter::{ProviderAdapter, ProviderAdapterError};
-use crate::cross_cutting::provider_availability_gate::{
-    ProviderAvailabilityGate, ProviderHealthSource,
-};
+use crate::cross_cutting::provider_availability_gate::{ProviderAvailabilityGate, ProviderHealthSource};
 use crate::cross_cutting::provider_health::{ProviderHealthEntry, ProviderHealthSnapshot};
 use crate::cross_cutting::streaming_provider::{
     ProviderPermissionMode, ProviderSession, StreamingProviderInput,
@@ -974,14 +972,21 @@ fn plan_author_launch_anchor_drifts_target_and_fingerprint_without_member_anchor
     // 只比 planning_request 锚形态(不 validate:fixture 无成员登记,
     // target 复验在本测试面之外;指纹随 target 三元组单调,锚形态区分
     // 即漂移机制的充分证据)。
-    let anchored_launch =
-        logical_plan_launch_for(&engine, Some("logical-uuid-1".into()), Some("checkout-uuid-1".into()))
-            .expect("anchored launch");
-    let unanchored_launch = logical_plan_launch_for(&engine, None, None)
-        .expect("unanchored launch");
+    let anchored_launch = logical_plan_launch_for(
+        &engine,
+        Some("logical-uuid-1".into()),
+        Some("checkout-uuid-1".into()),
+    )
+    .expect("anchored launch");
+    let unanchored_launch =
+        logical_plan_launch_for(&engine, None, None).expect("unanchored launch");
 
-    let anchored_request = anchored_launch.planning_request().expect("anchored request");
-    let unanchored_request = unanchored_launch.planning_request().expect("unanchored request");
+    let anchored_request = anchored_launch
+        .planning_request()
+        .expect("anchored request");
+    let unanchored_request = unanchored_launch
+        .planning_request()
+        .expect("unanchored request");
     assert_eq!(
         anchored_request.target.logical_repository_id, "logical-uuid-1",
         "成员锚 target 必须携带 logical id(checkout 锚)"
@@ -990,5 +995,221 @@ fn plan_author_launch_anchor_drifts_target_and_fingerprint_without_member_anchor
     assert_ne!(
         unanchored_request.target.logical_repository_id, "logical-uuid-1",
         "无锚 target 退 aggregate_root 锚(不带成员身份)——修订 turn 锚漂移即 9a 门恒拒"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T6 fix-loop r2：WIP plan author 家族共享启动口（U4-U7 物理口）trust 分类
+// 下沉——七已包 caller 与 followups 四续驱共用 `start_work_item_plan_author`
+// 的 Logical 分支，此处对该物理口直测分类合同。
+// ---------------------------------------------------------------------------
+
+/// U4-U7 共享物理启动口：Logical 分支内统一分类——Kimi author 条目缺失
+/// 时 spawn trust 拒绝以 `provider_trust_missing` 分类＋同源指导＋生成
+/// 场景 retry_action 拒收；provider 零启动。
+#[tokio::test]
+async fn start_work_item_plan_author_logical_classifies_spawn_trust_failure() {
+    use super::single_candidate_lc_admission::{
+        AliasLcGatewayExtras, LcDialectCapabilitySource, lc_scoped_availability_gate,
+    };
+    use super::single_candidate_provider_run::ProviderRunFixture;
+
+    let starts = Arc::new(AtomicUsize::new(0));
+    let provider = Arc::new(CountingStreamingAdapter {
+        starts: starts.clone(),
+    });
+    let trust_home = tempfile::tempdir().expect("isolated trust home");
+    let fixture = ProviderRunFixture::new_logical_with_gateway_extras(
+        true,
+        provider,
+        AliasLcGatewayExtras {
+            capability: Some(Arc::new(LcDialectCapabilitySource)),
+            trust_home: Some(trust_home.path().to_path_buf()),
+            availability: Some(lc_scoped_availability_gate(true, true)),
+        },
+    );
+    // engine：与 fixture 同 gateway/repository，author=Kimi（workspace
+    // trust 面）。launch 解析只读 session.repository_path 与 gateway。
+    let gateway = fixture
+        .engine
+        .lock()
+        .await
+        .logical_provider_gateway()
+        .expect("alias fixture must inject gateway")
+        .clone();
+    let (event_tx, _event_rx) = mpsc::channel::<crate::product::workspace_engine::EngineEvent>(8);
+    let mut session = workspace_session(fixture.member_checkout_root());
+    session.author_provider = crate::product::models::ProviderName::KimiCode;
+    let engine = WorkspaceEngine::new(
+        Arc::new(CheckpointStore::new(
+            fixture.app_paths.root().join("checkpoints"),
+        )),
+        event_tx,
+        session,
+    )
+    .with_logical_provider_gateway(gateway);
+
+    let plan_launch =
+        resolve_plan_author_launch(&engine, None, None).expect("kimi author logical launch");
+    let input = streaming_input(fixture.member_checkout_root());
+
+    let result = start_work_item_plan_author(
+        plan_launch,
+        Arc::new(CountingStreamingAdapter {
+            starts: starts.clone(),
+        }),
+        input,
+        CancellationToken::new(),
+        None,
+    )
+    .await;
+    let error = match result {
+        Ok(_) => panic!("plan author spawn must reject on missing trust"),
+        Err(error) => error,
+    };
+
+    assert!(
+        error.details.contains("provider_trust_missing"),
+        "Logical 分支 trust 拒绝必须提升 provider_trust_missing 分类，got: {}",
+        error.details
+    );
+    assert!(
+        error
+            .details
+            .contains("provider trust not established for KimiCode"),
+        "原拒绝原文必须保留，got: {}",
+        error.details
+    );
+    assert!(
+        error.details.contains("人工登记") && error.details.contains("显式重新生成"),
+        "Logical 分支必须携带生成场景 retry_action，got: {}",
+        error.details
+    );
+    assert!(
+        error.details.contains(
+            &trust_home
+                .path()
+                .join(".kimi-code")
+                .join("workspace-trust")
+                .display()
+                .to_string()
+        ),
+        "Logical 分支指导必须同源（真实工件路径），got: {}",
+        error.details
+    );
+    assert_eq!(
+        starts.load(Ordering::SeqCst),
+        0,
+        "trust 拒绝必须发生在 provider 启动之前"
+    );
+}
+
+/// U4-U7 负例：policy 漂移变体（TOCTOU）即使 trust 同时缺失也不得误附
+/// trust 分类——分类下沉后变体判据保持在共享桥内。
+#[test]
+fn start_work_item_plan_author_drift_variant_stays_bare_at_bridge() {
+    use super::single_candidate_lc_admission::{AliasLcGatewayExtras, LcDialectCapabilitySource};
+    use super::single_candidate_provider_run::ProviderRunFixture;
+
+    let provider = Arc::new(CountingStreamingAdapter {
+        starts: Arc::new(AtomicUsize::new(0)),
+    });
+    let trust_home = tempfile::tempdir().expect("isolated trust home");
+    let fixture = ProviderRunFixture::new_logical_with_gateway_extras(
+        true,
+        provider,
+        AliasLcGatewayExtras {
+            capability: Some(Arc::new(LcDialectCapabilitySource)),
+            trust_home: Some(trust_home.path().to_path_buf()),
+            availability: Some(
+                super::single_candidate_lc_admission::lc_scoped_availability_gate(true, true),
+            ),
+        },
+    );
+    let gateway = fixture
+        .engine
+        .blocking_lock()
+        .logical_provider_gateway()
+        .expect("alias fixture must inject gateway")
+        .clone();
+    let drift = crate::product::logical_codebase::ProviderGatewayError::PolicyDrift {
+        dimension: "config_digest".to_string(),
+    };
+    let details = gateway.classify_launch_trust_failure_details(
+        &drift,
+        &crate::product::models::ProviderName::KimiCode,
+        &drift.to_string(),
+        crate::product::logical_codebase::provider_trust::ProviderTrustScenario::Generation,
+    );
+    assert_eq!(
+        details,
+        drift.to_string(),
+        "漂移变体不得误附 trust 分类/指导（条目同时缺失也不误标），got: {details}"
+    );
+}
+
+/// U4-U7 负例：条目已 trusted——即使错误变体是 ProviderUnavailable 也不
+/// 得再附 trust 分类（只读判据当前已通过，无可指导事实）。
+#[test]
+fn start_work_item_plan_author_trusted_entry_stays_bare_at_bridge() {
+    use super::single_candidate_lc_admission::{AliasLcGatewayExtras, LcDialectCapabilitySource};
+    use super::single_candidate_provider_run::ProviderRunFixture;
+
+    let provider = Arc::new(CountingStreamingAdapter {
+        starts: Arc::new(AtomicUsize::new(0)),
+    });
+    let trust_home = tempfile::tempdir().expect("isolated trust home");
+    let fixture = ProviderRunFixture::new_logical_with_gateway_extras(
+        true,
+        provider,
+        AliasLcGatewayExtras {
+            capability: Some(Arc::new(LcDialectCapabilitySource)),
+            trust_home: Some(trust_home.path().to_path_buf()),
+            availability: Some(
+                super::single_candidate_lc_admission::lc_scoped_availability_gate(true, true),
+            ),
+        },
+    );
+    let gateway = fixture
+        .engine
+        .blocking_lock()
+        .logical_provider_gateway()
+        .expect("alias fixture must inject gateway")
+        .clone();
+    // 人工登记 Kimi 条目（同源 adapter 键算法/记录形状）。
+    let adapter =
+        crate::product::logical_codebase::provider_trust_adapters::KimiTrustAdapter::for_home(
+            trust_home.path(),
+        );
+    let authority_root = gateway.authority_root().to_path_buf();
+    let trust_key =
+        crate::product::logical_codebase::provider_trust_adapters::ProviderTrustHomeAdapter::trust_key(
+            &adapter, &authority_root,
+        );
+    let trust_dir = trust_home.path().join(".kimi-code").join("workspace-trust");
+    std::fs::create_dir_all(&trust_dir).expect("create kimi trust dir");
+    std::fs::write(
+        trust_dir.join(&trust_key),
+        serde_json::json!({
+            "root": authority_root.display().to_string(),
+            "trustedAt": 1_u64
+        })
+        .to_string(),
+    )
+    .expect("write trusted kimi entry");
+
+    let unavailable = crate::product::logical_codebase::ProviderGatewayError::ProviderUnavailable(
+        "provider trust not established for KimiCode: entry absent".to_string(),
+    );
+    let details = gateway.classify_launch_trust_failure_details(
+        &unavailable,
+        &crate::product::models::ProviderName::KimiCode,
+        &unavailable.to_string(),
+        crate::product::logical_codebase::provider_trust::ProviderTrustScenario::Generation,
+    );
+    assert_eq!(
+        details,
+        unavailable.to_string(),
+        "条目已 trusted 的 ProviderUnavailable 不得再附 trust 分类，got: {details}"
     );
 }

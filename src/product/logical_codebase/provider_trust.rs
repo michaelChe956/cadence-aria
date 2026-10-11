@@ -152,6 +152,21 @@ pub trait ProviderTrustSource: Send + Sync {
         None
     }
 
+    /// T6 fix-loop r2（信任批量确认按需登记）：
+    /// [`Self::read_only_generation_waiting`] 的场景参数化变体——共享
+    /// 分类桥（gateway `classify_launch_trust_failure_details`）消费，
+    /// Generation/Coding 面各自正确的 retry_action。默认 `None`：非
+    /// home 背书实现无同源指导可给，调用方保持既有投影，不伪造。
+    fn read_only_waiting_for_scenario(
+        &self,
+        provider: &ProviderName,
+        canonical_root: &Path,
+        scenario: ProviderTrustScenario,
+    ) -> Option<ProviderTrustWaiting> {
+        let _ = (provider, canonical_root, scenario);
+        None
+    }
+
     /// Task 3.1（B0a1）：冻结指纹消费的只读 trust 事实——verification 与
     /// [`Self::verify_trusted`] 共用同一 readonly 实现、工件摘要直接暴露
     /// [`ProviderTrustHomeAdapter::digest`]（Codex 整份 config、Kimi 对应
@@ -237,26 +252,27 @@ impl ReadonlyProviderTrustSource {
             })
     }
 
-    /// 6.1（方案 A 附带，D5）：generation 首次 trust 失败的同源只读等待
-    /// 投影。
+    /// 6.1（方案 A 附带，D5）：generation/launch trust 失败的同源只读
+    /// 等待投影（T6 fix-loop r2 起场景参数化，供共享分类桥按
+    /// Generation/Coding 场景取用）。
     ///
     /// 与 [`ProviderTrustSource::verify_trusted`] 同一 adapter、同一
     /// trust key 算法，只读判定 entry 状态；未通过（缺失/非 trusted/
-    /// 读取失败）时构造 `Generation` 场景等待面（场景化 retry_action＋
+    /// 读取失败）时构造给定场景的等待面（场景化 retry_action＋
     /// 同源 manual_guidance——adapter 真实工件路径/键形/人工形状）。
     /// **零 durable 副作用**：不 ensure、不写 waiting/ownership/audit
-    /// （generation 只补只读指导，不自动登记）；条目已 trusted 或
+    /// （只补只读指导，不自动登记）；条目已 trusted 或
     /// provider 无需 workspace trust 时返回 `None`（无可指导事实）。
-    fn generation_waiting(
+    fn scenario_waiting(
         &self,
         provider: &ProviderName,
         canonical_root: &Path,
+        scenario: ProviderTrustScenario,
     ) -> Option<ProviderTrustWaiting> {
         if !requires_workspace_trust(provider) {
             return None;
         }
         let waiting_for = |error: ProviderTrustError, trust_key: String| {
-            let scenario = ProviderTrustScenario::Generation;
             let retry_action = scenario.retry_action(trust_failure_kind(&error));
             let manual_guidance = provider_trust_manual_guidance(
                 &self.adapters,
@@ -477,7 +493,16 @@ impl ProviderTrustSource for ReadonlyProviderTrustSource {
         provider: &ProviderName,
         canonical_root: &Path,
     ) -> Option<ProviderTrustWaiting> {
-        self.generation_waiting(provider, canonical_root)
+        self.scenario_waiting(provider, canonical_root, ProviderTrustScenario::Generation)
+    }
+
+    fn read_only_waiting_for_scenario(
+        &self,
+        provider: &ProviderName,
+        canonical_root: &Path,
+        scenario: ProviderTrustScenario,
+    ) -> Option<ProviderTrustWaiting> {
+        self.scenario_waiting(provider, canonical_root, scenario)
     }
 }
 
@@ -495,6 +520,12 @@ pub enum ProviderTrustScenario {
     /// 失败后显式「人工登记/修复后显式重新生成」；只读投影，不自动
     /// 登记（start_generation 不插入 ensure）。
     Generation,
+
+    /// T6 fix-loop r2（信任批量确认按需登记）：Coding 面共享启动口
+    /// （Coder/CodeReviewer/InternalReviewer 经 provider_stream launch）
+    /// 的只读指导——失败后显式「重新发起该 Coding 任务」，尊重 Coding
+    /// 既有人工恢复语义，不借用 generation 的「显式重新生成」。
+    Coding,
 }
 
 impl ProviderTrustScenario {
@@ -515,6 +546,10 @@ impl ProviderTrustScenario {
                 }
                 Self::Generation => {
                     "用户自行核对该 trust 键的取值后显式重新生成；系统不覆盖用户条目".to_string()
+                }
+                Self::Coding => {
+                    "用户自行核对该 trust 键的取值后重新发起该 Coding 任务；系统不覆盖用户条目"
+                        .to_string()
                 }
             },
             TrustFailureKind::HomeArtifactRead | TrustFailureKind::HomeArtifactWrite => {
@@ -538,13 +573,14 @@ impl ProviderTrustScenario {
     }
 
     /// 场景的显式动作后缀（recipe=重试初始化，confirmation=重新确认，
-    /// generation=显式重新生成——方案 A 不自动登记，登记/修复由用户
-    /// 显式完成后重新发起生成）。
+    /// generation=显式重新生成，coding=重新发起该 Coding 任务——方案 A
+    /// 不自动登记，登记/修复由用户显式完成后按场景重新发起）。
     fn explicit_action(self) -> &'static str {
         match self {
             Self::Recipe => "重试初始化",
             Self::Confirmation => "重新确认",
             Self::Generation => "显式重新生成",
+            Self::Coding => "重新发起该 Coding 任务",
         }
     }
 }
@@ -2230,12 +2266,20 @@ mod tests {
         // 无需 workspace trust 的 provider 无指导事实。
         assert!(
             source
-                .generation_waiting(&ProviderName::ClaudeCode, &fixture.root)
+                .scenario_waiting(
+                    &ProviderName::ClaudeCode,
+                    &fixture.root,
+                    ProviderTrustScenario::Generation
+                )
                 .is_none()
         );
 
         let waiting = source
-            .generation_waiting(&ProviderName::KimiCode, &fixture.root)
+            .scenario_waiting(
+                &ProviderName::KimiCode,
+                &fixture.root,
+                ProviderTrustScenario::Generation,
+            )
             .expect("missing entry must project a read-only generation waiting");
         assert_eq!(waiting.reason_code, "trust_entry_missing");
         assert!(waiting.message.contains("entry absent"));
@@ -2268,7 +2312,11 @@ mod tests {
         .unwrap();
         assert!(
             source
-                .generation_waiting(&ProviderName::KimiCode, &fixture.root)
+                .scenario_waiting(
+                    &ProviderName::KimiCode,
+                    &fixture.root,
+                    ProviderTrustScenario::Generation
+                )
                 .is_none()
         );
         assert!(fixture.store().list_waiting(PROJECT).unwrap().is_empty());

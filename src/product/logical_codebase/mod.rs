@@ -123,7 +123,9 @@ pub use provider_admission_preflight::{
     BootstrapActionKind, LogicalCodebaseProviderAdmissionPreflight, ProviderAdmissionError,
     ProviderAdmissionPreflightResult, ProviderRuleReference,
 };
-pub use provider_boundary_probe::{BoundaryFixture, ProviderBoundaryProbe, ResumeChannelKind, ResumeProbeSpec};
+pub use provider_boundary_probe::{
+    BoundaryFixture, ProviderBoundaryProbe, ResumeChannelKind, ResumeProbeSpec,
+};
 pub use provider_capability_probe::{ProviderCapabilityProbeError, ProviderCapabilityProbeService};
 pub use provider_capability_store::{
     CapabilityEvidence, ProviderActionCapability, ProviderActionMatrix, ProviderCapabilityRecord,
@@ -141,10 +143,10 @@ pub use provider_projection::{
 };
 pub use provider_trust::{
     HomeBackedProviderTrustRegistry, ProviderTrustAction, ProviderTrustError,
-    ProviderTrustOwnership, ProviderTrustPrecondition, ProviderTrustPreparationResult,
-    ProviderTrustRegistration, ProviderTrustRegistrationResult, ProviderTrustRegistry,
-    ProviderTrustRevocation, ProviderTrustRevocationOutcome, ProviderTrustVerification,
-    ProviderTrustWaiting, requires_workspace_trust,
+    ProviderTrustScenario, ProviderTrustOwnership, ProviderTrustPrecondition,
+    ProviderTrustPreparationResult, ProviderTrustRegistration, ProviderTrustRegistrationResult,
+    ProviderTrustRegistry, ProviderTrustRevocation, ProviderTrustRevocationOutcome,
+    ProviderTrustVerification, ProviderTrustWaiting, requires_workspace_trust,
 };
 pub use provider_trust_adapters::{
     CodexTrustAdapter, KimiTrustAdapter, ProviderTrustEntryState, ProviderTrustHomeAdapter,

@@ -1,7 +1,5 @@
 use super::*;
-use crate::cross_cutting::provider_adapter::{
-    PROVIDER_ERROR_STDERR_TAIL_BYTES, ProviderAdapterError,
-};
+use crate::cross_cutting::provider_adapter::{PROVIDER_ERROR_STDERR_TAIL_BYTES, ProviderAdapterError};
 use crate::cross_cutting::session_launch::ValidatedStreamingProviderInput;
 use crate::product::logical_codebase::provider_gateway::{
     GatewaySessionDisposition, ResumeSessionLaunchRequest,
@@ -663,7 +661,9 @@ impl WorkspaceEngine {
             let session = gateway
                 .start_streaming(validated_input, self.cancel.clone())
                 .await
-                .map_err(map_gateway_error_to_adapter);
+                .map_err(|error| {
+                    map_gateway_error_to_adapter_with_trust(&gateway, &author, &error)
+                });
             self.drive_provider_session(ProviderSessionDriveInput {
                 session,
                 command_rx,
@@ -724,7 +724,9 @@ impl WorkspaceEngine {
     ///（`resume_allowed=false`，丢 resume id 走 full prompt 新 thread）。指纹
     /// 记忆缺失（跨连接重建 engine）→ fail-closed 新会话：无法证明旧 thread 与
     /// 当前 launch 全维度一致，绝不静默续接。
-    pub(crate) fn resolve_revision_root_launch(&self) -> Option<Result<RevisionLaunchDecision, String>> {
+    pub(crate) fn resolve_revision_root_launch(
+        &self,
+    ) -> Option<Result<RevisionLaunchDecision, String>> {
         let gateway = self.logical_provider_gateway()?;
         let Some(lifecycle) = self.lifecycle_store.as_ref() else {
             return Some(Err(
@@ -754,10 +756,9 @@ impl WorkspaceEngine {
         // B1a（Task 4.1，BP2）：candidateErr 即 `Some(Err(..))`（typed 类别
         // 保留），不落 `(None, _)` validate/fresh 臂；成功候选保留 native/seq
         // （seq 与 durable fullmap/audit 联合绑定已在候选内校验）。
-        let resume_session_id = match self.provider_resume_session_candidate(
-            ProviderConversationRole::Author,
-            &provider,
-        ) {
+        let resume_session_id = match self
+            .provider_resume_session_candidate(ProviderConversationRole::Author, &provider)
+        {
             Ok(candidate) => candidate
                 .map(|candidate| candidate.native_id)
                 .filter(|id| !id.trim().is_empty()),
@@ -925,7 +926,7 @@ async fn start_review_session_via_gateway(
     let request = SessionLaunchRequest {
         project_id,
         provider: ProviderRef::from_provider_name(reviewer, "cap_managed_snapshot")
-            .map_err(map_gateway_error_to_adapter)?,
+            .map_err(|error| map_gateway_error_to_adapter(&error))?,
         action: SessionPolicyAction::ReviewReadOnly,
         target: PolicyTarget::aggregate_root(input.working_dir.clone()),
         // Task 2.3：cwd=canonical root（独立于 target）；target 保持成员锚。
@@ -936,24 +937,44 @@ async fn start_review_session_via_gateway(
     };
     let validated = gateway
         .validate(request)
-        .map_err(map_gateway_error_to_adapter)?;
+        .map_err(|error| map_gateway_error_to_adapter(&error))?;
     let mut input = input;
     input.working_directory = Some(validated.envelope().working_directory.clone());
     let validated_input = ValidatedStreamingProviderInput::new(input, validated);
     gateway
         .start_streaming(validated_input, cancel)
         .await
-        .map_err(map_gateway_error_to_adapter)
+        .map_err(|error| map_gateway_error_to_adapter_with_trust(gateway, reviewer, &error))
+}
+
+/// T6 fix-loop r2：review/drive.rs 两个 gateway 启动口（author revision、
+/// reviewer 首发）共用的压平+分类——共享分类桥消费 typed 变体判据
+/// （压平前），Generation 场景；`provider` 是本次启动的真实角色
+/// provider（revision 传 author、review 传 reviewer），不得把参数名
+/// 机械照搬成错误角色。
+fn map_gateway_error_to_adapter_with_trust(
+    gateway: &crate::product::logical_codebase::LogicalCodebaseProviderGateway,
+    provider: &ProviderName,
+    error: &ProviderGatewayError,
+) -> ProviderAdapterError {
+    let mut mapped = map_gateway_error_to_adapter(error);
+    mapped.details = gateway.classify_launch_trust_failure_details(
+        error,
+        provider,
+        &mapped.details,
+        crate::product::logical_codebase::provider_trust::ProviderTrustScenario::Generation,
+    );
+    mapped
 }
 
 /// gateway 错误到 adapter 错误的桥接:使调用点后续对 `Err` 的处理与直接
 /// `provider.start` 完全一致(`ReviewProviderRunFailure::Start`)。
-/// 诊断直通（claude×轻 握手谜团第 2 轮）:Adapter 变体不再丢弃 stderr 字段
-/// ——stderr 尾部（有界）并入 details（随 Start 失败 → EngineEvent::Error →
-/// WS error 消息上浮），stderr 字段同源保留；其余 gateway 校验错误维持 Display
-/// 文案不变（零变化）。
-fn map_gateway_error_to_adapter(error: ProviderGatewayError) -> ProviderAdapterError {
-    match &error {
+/// 诊断直通（claude×轻 握手谜团 第 2 轮）:Adapter 变体不再丢弃 stderr
+/// 字段——stderr 尾部（有界）并入 details（随 Start 失败 →
+/// EngineEvent::Error → WS error 消息上浮），stderr 字段同源保留；其余
+/// gateway 校验错误维持 Display 文案不变（零变化）。
+fn map_gateway_error_to_adapter(error: &ProviderGatewayError) -> ProviderAdapterError {
+    match error {
         ProviderGatewayError::Adapter(inner) => {
             let mut mapped = ProviderAdapterError::provider_unavailable(error.to_string());
             ProviderAdapterError::append_bounded_stderr_tail(

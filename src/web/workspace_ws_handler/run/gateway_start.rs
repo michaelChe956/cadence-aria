@@ -29,9 +29,7 @@ use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::cross_cutting::provider_adapter::{
-    PROVIDER_ERROR_STDERR_TAIL_BYTES, ProviderAdapterError,
-};
+use crate::cross_cutting::provider_adapter::{PROVIDER_ERROR_STDERR_TAIL_BYTES, ProviderAdapterError};
 use crate::cross_cutting::session_launch::ValidatedStreamingProviderInput;
 use crate::cross_cutting::streaming_provider::{
     ProviderSession, StreamingProviderAdapter, StreamingProviderInput,
@@ -193,7 +191,9 @@ pub(crate) fn resolve_plan_author_launch(
     let Some(launch) = logical_plan_launch_for(engine, logical_repository_id, checkout_id) else {
         return Ok(PlanAuthorLaunch::Legacy);
     };
-    let validated = launch.validate().map_err(map_gateway_error_to_adapter)?;
+    let validated = launch
+        .validate()
+        .map_err(|error| map_gateway_error_to_adapter(&error))?;
     Ok(PlanAuthorLaunch::Logical(Box::new(ValidatedPlanLaunch {
         launch,
         validated,
@@ -347,6 +347,12 @@ pub(crate) async fn start_work_item_plan_author(
         return provider.start(input, cancel).await;
     };
     let plan = *plan;
+    // T6 fix-loop r2：分类下沉到 Logical 分支唯一物理启动口——七个已包
+    // caller（WIP draft/batch/human-gate 修订、legacy outline 首发/
+    // AutoRevision、SC 教学/主 spawn）与 followups 四处续驱（U4-U7）
+    // 共用此口，不再依赖 caller 逐臂枚举；provider 取 launch 携带的
+    // session author（与 envelope 冻结同源）；Legacy 分支不经此面。
+    let trust_provider = plan.launch.author_provider.clone();
     // Task 2.8(REQ-PLN-03,planning snapshot 贯穿):input 的独立 cwd 重绑
     // envelope 冻结的 canonical root——cwd/target 分离贯穿正常 run(worktree=
     // 成员 checkout)与 B3 StaleContext 重建 run(worktree=rebuilt.cwd=root),
@@ -365,10 +371,10 @@ pub(crate) async fn start_work_item_plan_author(
                 input,
                 plan.launch
                     .planning_request()
-                    .map_err(map_gateway_error_to_adapter)?,
+                    .map_err(|error| map_gateway_error_to_adapter(&error))?,
                 run_ctx.audit_context(),
             )
-            .map_err(map_gateway_error_to_adapter)?,
+            .map_err(|error| map_gateway_error_to_adapter(&error))?,
         None => ValidatedStreamingProviderInput::new(input, plan.validated),
     };
 
@@ -376,14 +382,23 @@ pub(crate) async fn start_work_item_plan_author(
         .gateway
         .start_streaming(validated_input, cancel)
         .await
-        .map_err(map_gateway_error_to_adapter)
+        .map_err(|error| {
+            let mut mapped = map_gateway_error_to_adapter(&error);
+            mapped.details = plan.launch.gateway.classify_launch_trust_failure_details(
+                &error,
+                &trust_provider,
+                &mapped.details,
+                crate::product::logical_codebase::provider_trust::ProviderTrustScenario::Generation,
+            );
+            mapped
+        })
 }
 
-fn map_gateway_error_to_adapter(error: ProviderGatewayError) -> ProviderAdapterError {
+fn map_gateway_error_to_adapter(error: &ProviderGatewayError) -> ProviderAdapterError {
     // 诊断直通（claude×轻 握手谜团第 2 轮）:Adapter 变体不再丢弃 stderr 字段——
     // stderr 尾部（有界）并入 details（随驱动 Err → EngineEvent::Error → WS error
     // 消息上浮），stderr 字段同源保留；其余 gateway 校验错误维持 Display 文案不变。
-    match &error {
+    match error {
         ProviderGatewayError::Adapter(inner) => {
             let mut mapped = ProviderAdapterError::provider_unavailable(error.to_string());
             ProviderAdapterError::append_bounded_stderr_tail(
@@ -414,7 +429,7 @@ mod tests {
             String::new(),
             stderr,
         );
-        let mapped = map_gateway_error_to_adapter(ProviderGatewayError::Adapter(inner));
+        let mapped = map_gateway_error_to_adapter(&ProviderGatewayError::Adapter(inner));
         assert!(
             mapped.details.contains("SENTINEL_WS_GW_STDERR_TAIL"),
             "gateway 映射应携带 adapter stderr 尾部，got: {}",

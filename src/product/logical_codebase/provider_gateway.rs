@@ -26,9 +26,7 @@ use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate;
 use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
 use crate::cross_cutting::provider_registry::ProviderRegistry;
-use crate::cross_cutting::session_launch::{
-    ValidatedAdapterInput, ValidatedStreamingProviderInput,
-};
+use crate::cross_cutting::session_launch::{ValidatedAdapterInput, ValidatedStreamingProviderInput};
 use crate::cross_cutting::streaming_provider::{ProviderSession, StreamingProviderAdapter};
 use crate::product::logical_codebase::policy::{
     AggregatePolicyArtifactStore, PolicyTarget, ProviderDialect, ProviderWireDialect,
@@ -1182,6 +1180,62 @@ impl LogicalCodebaseProviderGateway {
         trust.read_only_generation_waiting(provider, &self.authority_root)
     }
 
+    /// T6 fix-loop r2（信任批量确认按需登记）：gateway 启动口 trust 拒绝的
+    /// **共享分类桥**（产品层共享边界，web 与 product engine 共用，取代
+    /// web 层 6.1 的七处外围包装）。
+    ///
+    /// 供全部生产 gateway 启动口——Workspace 通用 Author/ChoiceFollowup
+    /// （`author_root_launch`）、Author Revision 与 Reviewer 首发
+    /// （`review/drive`）、WIP plan author 家族
+    /// （`start_work_item_plan_author` 的 Logical 分支，含七已包 caller 与
+    /// followups 续驱）及 Coding 共享启动口（`provider_stream/launch`）——
+    /// 在 typed `ProviderGatewayError` 压平为 `ProviderAdapterError`
+    /// **之前**消费：仅 `ProviderUnavailable` 变体（保留原变体判据，不以
+    /// 压平后的 code 代替）且注入的只读 trust source 当前仍判未通过时，
+    /// 把 `mapped_details` 提升为 `provider_trust_missing` 分类＋同源
+    /// manual_guidance＋场景化 retry_action；原拒绝原文保留。其余 gateway
+    /// 变体（policy/root/target 漂移、capability 等）、无注入 source、
+    /// provider 无需 workspace trust 或条目当前已 trusted 时原样返回
+    /// `mapped_details`——不给漂移根 trust 指导、不误标 availability
+    /// 拒绝。只读、零 trust 写、零 provider 启动、不自动重试。
+    pub fn classify_launch_trust_failure_details(
+        &self,
+        gateway_error: &ProviderGatewayError,
+        provider: &crate::product::models::ProviderName,
+        mapped_details: &str,
+        scenario: crate::product::logical_codebase::provider_trust::ProviderTrustScenario,
+    ) -> String {
+        if !matches!(gateway_error, ProviderGatewayError::ProviderUnavailable(_)) {
+            return mapped_details.to_string();
+        }
+        let Some(waiting) = self.read_only_trust_waiting_for_scenario(provider, scenario) else {
+            return mapped_details.to_string();
+        };
+        format!(
+            "provider_trust_missing: {}: {}；原拒绝：{}；人工登记指导：{}（retry_action：{}）",
+            waiting.reason_code,
+            waiting.message,
+            mapped_details,
+            waiting.manual_guidance,
+            waiting.retry_action,
+        )
+    }
+
+    /// [`classify_launch_trust_failure_details`] 的场景化只读判据（与
+    /// [`Self::read_only_generation_trust_waiting`] 同源 adapter/键算法，
+    /// 仅多场景参数）。
+    fn read_only_trust_waiting_for_scenario(
+        &self,
+        provider: &crate::product::models::ProviderName,
+        scenario: crate::product::logical_codebase::provider_trust::ProviderTrustScenario,
+    ) -> Option<crate::product::logical_codebase::provider_trust::ProviderTrustWaiting> {
+        let trust = self.trust.as_ref()?;
+        if !crate::product::logical_codebase::provider_trust::requires_workspace_trust(provider) {
+            return None;
+        }
+        trust.read_only_waiting_for_scenario(provider, &self.authority_root, scenario)
+    }
+
     /// 返回启动审计的共享句柄。供外部(测试 fixture、未来生产侧)观测启动计数与
     /// policy digest 完整性。
     pub fn audit(&self) -> Arc<GatewayRunAudit> {
@@ -2002,9 +2056,7 @@ impl LogicalCodebaseProviderGateway {
                 &validated.envelope().target.worktree,
             ),
         };
-        if !expected_audit.is_v2_complete()
-            || expected_audit.projection_digest.trim().is_empty()
-        {
+        if !expected_audit.is_v2_complete() || expected_audit.projection_digest.trim().is_empty() {
             return Err(ProviderGatewayError::UnsupportedCapability(
                 "lc start audit v2 material incomplete; refusing to spawn".to_string(),
             ));
@@ -2026,10 +2078,9 @@ impl LogicalCodebaseProviderGateway {
         )?;
         // kimi 例外映射(与 `start_streaming` 同源;LC 流式分发唯一漏斗)。
         if input.provider_type == crate::protocol::contracts::ProviderType::KimiCode {
-            input.tool_policy =
-                crate::cross_cutting::streaming_provider::kimi_exempted_tool_policy(
-                    input.tool_policy,
-                );
+            input.tool_policy = crate::cross_cutting::streaming_provider::kimi_exempted_tool_policy(
+                input.tool_policy,
+            );
         }
         let policy_digest = validated_full.envelope().policy_digest.clone();
         let config_artifact_ref = validated_full.envelope().config_artifact_ref.clone();
