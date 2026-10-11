@@ -132,9 +132,7 @@ pub use plan_projection::{
     WorkspaceEngineError, compile_plan_projection_bundle, compile_work_item_revision,
     plan_projection_input, prepare_initial_plan_publication, publish_initial_plan_revision,
 };
-pub use review::policy_routing::{
-    GateSnapshotContext, HumanGateSnapshot, RoutingAction, route_outcome,
-};
+pub use review::policy_routing::{GateSnapshotContext, HumanGateSnapshot, RoutingAction, route_outcome};
 pub use types::{
     ArtifactUpdateEvent, EngineEvent, LinkedWorkspaceAmendmentTarget,
     LinkedWorkspaceSessionSnapshot, PendingAuthorChoiceError, ReviewDecisionOutcome,
@@ -187,7 +185,8 @@ pub(crate) use single_candidate::{
 };
 pub(crate) use types::WorkItemDraftAuthorOutcome;
 pub(crate) use types::{
-    ArtifactRetryContext, AuthorPromptMode, HttpConfirmDisposition, OutlineRevisionCrashPoint,
+    ArtifactRetryContext, AuthorPromptMode, ExplicitTrustRegistrationContextWaiting,
+    ExplicitTrustRegistrationTarget, HttpConfirmDisposition, OutlineRevisionCrashPoint,
     OutlineRevisionPersistencePolicy, PendingAuthorChoice, PlanAuthorOutputContract,
     PlanRepairCrashPoint, ProviderRunKind, ProviderSessionDriveInput, ReviewProviderRunResult,
     RevisionResumeFallbackContext, StructuredOutputDisplayFilter, TimelineNodeDraft,

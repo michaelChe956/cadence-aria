@@ -287,6 +287,11 @@ pub(crate) fn requires_stage_validation(msg: &WsInMessage) -> bool {
             | WsInMessage::Rollback { .. }
             | WsInMessage::Hello { .. }
             | WsInMessage::Ping
+            // 「登记并重试」是带外修复动作（root 服务端解析、不触碰 run
+            // 状态）：任意阶段可用——trust 缺失错误恰恰出现在 Prepare 停等
+            // 与确认门开态（workspace_confirmation_trust_waiting），矩阵
+            // 豁免保证按钮在最需要它的时刻可达。
+            | WsInMessage::RegisterTrustEntry { .. }
     )
 }
 
@@ -366,6 +371,7 @@ pub(crate) fn message_type(msg: &WsInMessage) -> &'static str {
         WsInMessage::HumanGateFeedback { .. } => "human_gate_feedback",
         WsInMessage::Advance { .. } => "advance",
         WsInMessage::AbandonHumanGate { .. } => "abandon_human_gate",
+        WsInMessage::RegisterTrustEntry { .. } => "register_trust_entry",
         WsInMessage::Abort => "abort",
         WsInMessage::Ping => "ping",
     }

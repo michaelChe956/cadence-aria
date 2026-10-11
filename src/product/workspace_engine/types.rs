@@ -497,6 +497,32 @@ impl ConfirmationTrustWaiting {
     }
 }
 
+/// 指引卡「登记并重试」按钮（owner 2026-10-12 直批）的显式登记解析
+/// 结果——root 服务端解析（LC 会话=确认链同一冻结根+同一漂移重验；单仓
+/// 会话=canonicalized repository 根，lc 标签走 legacy 别名），**不接受
+/// 客户端传路径**。调用方据此在引擎锁外执行 ensure（home IO 不楔死
+/// 引擎），precondition 复用确认链/聚合初始化同一生产实例。
+pub(crate) struct ExplicitTrustRegistrationTarget {
+    pub(crate) precondition:
+        Arc<dyn crate::product::logical_codebase::ProviderTrustPrecondition>,
+    pub(crate) project_id: String,
+    pub(crate) session_id: String,
+    pub(crate) registry_lc_id: String,
+    pub(crate) canonical_root: PathBuf,
+}
+
+/// 解析失败的 fail-closed 等待（零 home 调用）：稳定原因码
+/// （trust_registration_context_unavailable / trust_registration_scope_changed /
+/// trust_registration_root_unavailable / trust_registration_root_changed）+
+/// 中文说明；web 层以稳定 code `trust_registration_waiting` 投影，
+/// reason_code 原样保留。
+#[derive(Debug)]
+pub(crate) struct ExplicitTrustRegistrationContextWaiting {
+    pub(crate) reason_code: String,
+    pub(crate) message: String,
+}
+
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkspaceConfirmOutcome {
     WorkItemPlan {

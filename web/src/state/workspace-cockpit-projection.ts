@@ -600,6 +600,11 @@ export interface CockpitInboxItem {
    * 仅 waiting/fresh_reserved/fresh_running 投卡，resolved 证据留 store
    * 不投卡（动作资格只镜像后端 allowed_actions，前端不推导）。 */
   recovery?: LcResumeRecoveryInboxProjection | null;
+  /** trust 缺失错误条的可登记投影（按稳定码识别 + provider wire 标签
+   * 同源解析；owner 2026-10-12 直批「登记并重试」按钮）；其余条目缺省。 */
+  trustMissing?: { provider: string } | null;
+  /** trustMissing 条目对应 provider 已显式登记成功（typed 回执对账）。 */
+  trustRegistered?: boolean;
 }
 
 /** C4 Task 9：LC 冷启动通知的收件箱投影（服务端
@@ -1030,6 +1035,10 @@ export function selectCockpitInbox(state: WorkspaceWsState): CockpitInboxItem[] 
     });
   }
 
+  // 「登记并重试」按钮面（owner 2026-10-12 直批）：按稳定码识别 trust
+  // 缺失错误 + provider wire 标签（同源生成器），回执对账切成功态。
+  const trustMissing =
+    state.error === null ? null : trustMissingFromErrorText(state.error);
   if (state.error) {
     items.push({
       id: "hard_error:error",
@@ -1043,6 +1052,9 @@ export function selectCockpitInbox(state: WorkspaceWsState): CockpitInboxItem[] 
       gate: null,
       inlineError: null,
       choice: null,
+      trustMissing,
+      trustRegistered:
+        trustMissing !== null && state.trustRegistration?.provider === trustMissing.provider,
     });
   }
 
@@ -1169,6 +1181,21 @@ export function selectCockpitInbox(state: WorkspaceWsState): CockpitInboxItem[] 
     }
     return left.id.localeCompare(right.id);
   });
+}
+
+/** trust 缺失稳定判别码（服务端 classify_launch_trust_failure_details/
+ * 只读等待投影生成，出现在 error 原文）与 provider wire 标签（codex/
+ * kimi_code，同源 provider_wire_label）；识别不到不投按钮面（fail-closed
+ * 不猜 provider）。 */
+const TRUST_MISSING_ERROR_CODES = ["provider_trust_missing", "trust_entry_missing"];
+const TRUST_PROVIDER_WIRE_LABELS = ["kimi_code", "codex"] as const;
+
+function trustMissingFromErrorText(message: string): { provider: string } | null {
+  if (!TRUST_MISSING_ERROR_CODES.some((code) => message.includes(code))) {
+    return null;
+  }
+  const provider = TRUST_PROVIDER_WIRE_LABELS.find((label) => message.includes(label));
+  return provider === undefined ? null : { provider };
 }
 
 export function selectCockpitFlow(state: WorkspaceWsState, nowMs = Date.now()): CockpitFlowRow[] {

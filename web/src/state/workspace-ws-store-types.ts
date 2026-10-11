@@ -515,6 +515,12 @@ export interface WorkspaceWsState {
    * 卡、不阻塞 generic 后续动作；null=当前无恢复事实。
    */
   lcResumeRecovery: LcResumeRecoveryDto | null;
+  /**
+   * 「登记并重试」按钮的最近一次 typed 回执（owner 2026-10-12 直批）：
+   * provider 匹配的 trust 缺失错误卡据此切「已登记，请显式重新生成」态；
+   * reset/切会话清空。null=尚未显式登记成功。
+   */
+  trustRegistration: TrustRegistrationReceipt | null;
   protocolError: ProtocolErrorState | null;
   providerLocked: boolean;
   providerSnapshot: ProviderConfigSnapshot | null;
@@ -681,10 +687,22 @@ export interface WorkspaceWsActions {
 
   applyGateProtocolError: (turnId: string, error: InlineProtocolError) => void;
   applyAdvanceProtocolError: (commandId: string, error: InlineProtocolError) => void;
+
+  /** 「登记并重试」回执对账：幂等覆盖最近回执（不自动重新生成）。 */
+  applyTrustEntryRegistered: (receipt: TrustRegistrationReceipt) => void;
   setTimelineNodesForTest: (nodes: TimelineNode[]) => void;
   setActiveNodeId: (nodeId: string | null) => void;
   setSessionStatus: (status: WorkspaceSessionStatus) => void;
   setHumanGateSnapshot: (snapshot: WorkItemPlanHumanGateSnapshot | null) => void;
   setSessionIdForTest: (sessionId: string) => void;
   reset: () => void;
+}
+
+/** 「登记并重试」按钮的 typed 回执（wire trust_entry_registered 的镜像）。 */
+export interface TrustRegistrationReceipt {
+  provider: WorkspaceProviderName;
+  action: "registered" | "replay" | "reuse_user_entry";
+  trust_key: string;
+  canonical_root: string;
+  registered_at: string;
 }

@@ -4,9 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::product::logical_codebase::provider_admission_preflight::BootstrapActionKind;
 use crate::product::models::{
-    HumanPresentationRevision, LcFreshOperationState, LcRecoveryRunContext,
-    LcResumeRecoveryRecord, LcResumeRecoveryState, NodeDetail, PlanRepairSessionSnapshotDto,
-    ProviderName, WorkspaceSessionStatus, WorkspaceType,
+    HumanPresentationRevision, LcFreshOperationState, LcRecoveryRunContext, LcResumeRecoveryRecord,
+    LcResumeRecoveryState, NodeDetail, PlanRepairSessionSnapshotDto, ProviderName,
+    WorkspaceSessionStatus, WorkspaceType,
 };
 use crate::product::work_item_plan_policy::{
     HumanGateSnapshot, PolicyDiagnostic, ProviderStartLedgerEntry, RepairReservation,
@@ -165,6 +165,18 @@ fn lc_recovery_run_kind(context: &LcRecoveryRunContext) -> &'static str {
         LcRecoveryRunContext::ScAuthor { .. } => "sc_author",
         LcRecoveryRunContext::ScManualRevision { .. } => "sc_manual_revision",
     }
+}
+
+/// 「登记并重试」回执的登记动作（与 ensure 审计 outcome 同词表）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrustEntryRegistrationActionDto {
+    /// 首次写入该根的用户级 trust 条目。
+    Registered,
+    /// 条目已 trusted 且归本 LC 管理：幂等重放，未写。
+    Replay,
+    /// 条目已 trusted 但属用户/他方：原样复用，未写、不覆盖。
+    ReuseUserEntry,
 }
 
 // SessionState 必须按既有 WebSocket wire schema 内联完整 durable snapshot；为节省
@@ -381,6 +393,19 @@ pub enum WsOutMessage {
         event_seq: u64,
     },
     Pong,
+    /// trust 指引卡「登记并重试」按钮的 typed 回执（owner 2026-10-12
+    /// 直批）：一次显式授权登记的结果。`action` 与 ensure 审计 outcome
+    /// 同词表（registered/replay/reuse_user_entry）；`canonical_root`/
+    /// `trust_key` 为服务端解析的真实登记目标（客户端可核对）。
+    /// 仅回执——不自动触发重新生成，成功后卡片态提示「已登记，请显式
+    /// 重新生成」。
+    TrustEntryRegistered {
+        provider: ProviderName,
+        action: TrustEntryRegistrationActionDto,
+        trust_key: String,
+        canonical_root: String,
+        registered_at: String,
+    },
 }
 
 #[cfg(test)]

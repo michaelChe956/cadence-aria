@@ -52,6 +52,11 @@ pub struct ProviderTrustArtifactHint {
     pub trust_key: String,
     /// 人工登记/修复该键的最小形状描述（provider 特定）。
     pub manual_shape: String,
+    /// 可直接复制执行/粘贴的人工登记命令（owner 2026-10-12 直批：指引卡
+    /// 登记按钮配套）。Kimi 给单行 shell（mkdir+printf 记录）；Codex 的
+    /// TOML 无法一行安全写，给「config.toml 路径 + 完整表片段」多行文本。
+    /// 路径/键/root 全部取 adapter 真实值（同源），凭据永不进入命令。
+    pub manual_command: Option<String>,
 }
 
 /// 用户级 trust 工件 adapter。所有 home 副作用只发生在这里；registry 与
@@ -273,6 +278,10 @@ impl ProviderTrustHomeAdapter for CodexTrustAdapter {
 
     fn manual_hint(&self, canonical_root: &Path) -> ProviderTrustArtifactHint {
         let trust_key = self.trust_key(canonical_root);
+        let manual_command = format!(
+            "在 {} 追加（或并入既有表）：\n{trust_key}\ntrust_level = \"trusted\"",
+            self.config_path.display()
+        );
         ProviderTrustArtifactHint {
             artifact_path: self.config_path.clone(),
             manual_shape: format!(
@@ -280,6 +289,7 @@ impl ProviderTrustHomeAdapter for CodexTrustAdapter {
                  （保留文件内其余用户配置不动）"
             ),
             trust_key,
+            manual_command: Some(manual_command),
         }
     }
 
@@ -463,10 +473,26 @@ impl ProviderTrustHomeAdapter for KimiTrustAdapter {
             "root": root_string(canonical_root),
             "trustedAt": "<毫秒时间戳>",
         });
+        // 单行可复制 shell：目录/记录路径整参单引号（内嵌单引号走 '\''
+        // 转义）；root 的 JSON 转义交给 serde（同源，不手抄算法），
+        // trustedAt 用 printf %s 占位（date +%s%3N 产毫秒时间戳）。
+        let payload = serde_json::to_string(&serde_json::json!({
+            "root": root_string(canonical_root),
+            "trustedAt": "%s",
+        }))
+        .unwrap_or_default()
+        .replace("\"%s\"", "%s");
+        let manual_command = format!(
+            "mkdir -p {} && printf '{}' \"$(date +%s%3N)\" > {}",
+            shell_single_quoted(&self.workspace_trust_root.display().to_string()),
+            payload,
+            shell_single_quoted(&self.record_path(canonical_root).display().to_string()),
+        );
         ProviderTrustArtifactHint {
             artifact_path: self.record_path(canonical_root),
             manual_shape: format!("记录 JSON 形如 {shape}"),
             trust_key,
+            manual_command: Some(manual_command),
         }
     }
 
@@ -478,6 +504,12 @@ impl ProviderTrustHomeAdapter for KimiTrustAdapter {
 
 fn root_string(canonical_root: &Path) -> String {
     canonical_root.display().to_string()
+}
+
+/// shell 单引号整参（POSIX '\'' 转义内嵌单引号）——可复制命令的路径
+/// 参数包装；不含任何求值，凭据永不进入。
+fn shell_single_quoted(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn table_header_for(canonical_root: &Path) -> String {

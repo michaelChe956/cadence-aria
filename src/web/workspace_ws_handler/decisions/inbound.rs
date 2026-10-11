@@ -430,6 +430,20 @@ async fn handle_workspace_inbound_message_inner(
                 });
             }
         }
+        // trust 指引卡「登记并重试」按钮（owner 2026-10-12 直批）：用户
+        // 显式授权的按需登记——root 服务端解析、复用 ensure 登记链、typed
+        // 回执/稳定等待码；不自动重新生成。阶段矩阵豁免（协议面
+        // requires_stage_validation）：带外修复动作，不触碰 run 状态，
+        // 门开态（确认链 trust 等待）同样可用。
+        WsInMessage::RegisterTrustEntry { provider } => {
+            handle_register_trust_entry_from_handler(
+                app_state.clone(),
+                engine.clone(),
+                outbound_tx.clone(),
+                provider,
+            )
+            .await;
+        }
         WsInMessage::Ping => {
             let _ = send_json_outbound(&outbound_tx, &WsOutMessage::Pong).await;
         }
@@ -822,22 +836,26 @@ async fn handle_lc_resume_recovery_fresh(
         &intent.recovery_id,
         &intent.operation_id,
     ) {
-        Ok(LcFreshClaimOutcome::Claimed { operation, .. }) => WsOutMessage::LcResumeRecoveryOperationResult {
-            recovery_id: intent.recovery_id.clone(),
-            operation_id: operation.operation_id.clone(),
-            delivery: LcResumeRecoveryDelivery::Accepted,
-            operation_state: operation.state,
-            fresh_node_id: operation.fresh_node_id.clone(),
-            reason_code: operation.reason_code.clone(),
-        },
-        Ok(LcFreshClaimOutcome::Replay { operation, .. }) => WsOutMessage::LcResumeRecoveryOperationResult {
-            recovery_id: intent.recovery_id.clone(),
-            operation_id: operation.operation_id.clone(),
-            delivery: LcResumeRecoveryDelivery::Replayed,
-            operation_state: operation.state,
-            fresh_node_id: operation.fresh_node_id.clone(),
-            reason_code: operation.reason_code.clone(),
-        },
+        Ok(LcFreshClaimOutcome::Claimed { operation, .. }) => {
+            WsOutMessage::LcResumeRecoveryOperationResult {
+                recovery_id: intent.recovery_id.clone(),
+                operation_id: operation.operation_id.clone(),
+                delivery: LcResumeRecoveryDelivery::Accepted,
+                operation_state: operation.state,
+                fresh_node_id: operation.fresh_node_id.clone(),
+                reason_code: operation.reason_code.clone(),
+            }
+        }
+        Ok(LcFreshClaimOutcome::Replay { operation, .. }) => {
+            WsOutMessage::LcResumeRecoveryOperationResult {
+                recovery_id: intent.recovery_id.clone(),
+                operation_id: operation.operation_id.clone(),
+                delivery: LcResumeRecoveryDelivery::Replayed,
+                operation_state: operation.state,
+                fresh_node_id: operation.fresh_node_id.clone(),
+                reason_code: operation.reason_code.clone(),
+            }
+        }
         Ok(LcFreshClaimOutcome::Busy {
             active_operation_id,
         }) => WsOutMessage::ProtocolError {

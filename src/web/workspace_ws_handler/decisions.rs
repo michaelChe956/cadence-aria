@@ -447,9 +447,11 @@ pub(crate) async fn handle_human_gate_termination_from_handler(
 
 mod advance;
 mod inbound;
+mod register_trust_entry;
 pub(crate) use advance::handle_advance_from_handler;
 pub(crate) use inbound::{WorkspaceInboundContext, handle_workspace_inbound_message};
 #[cfg(test)]
 pub(crate) use inbound::{
     finish_interrupted_recovery_spawn_error, provider_run_kind_for_interrupted_recovery,
 };
+pub(crate) use register_trust_entry::handle_register_trust_entry_from_handler;

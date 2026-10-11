@@ -98,6 +98,14 @@ pub enum WsInMessage {
         command_id: String,
     },
     Abort,
+    /// trust 指引卡「登记并重试」按钮（owner 2026-10-12 直批）：用户显式
+    /// 授权按需登记所选 provider 的用户级 workspace trust。root 由服务端
+    /// 解析（LC 冻结根/单仓 repository 根，与确认链同一 authority），
+    /// **不接受客户端传路径**；处理复用现有 ensure 登记链（幂等 +
+    /// ensure 审计）；成功回 `trust_entry_registered`，不自动重新生成。
+    RegisterTrustEntry {
+        provider: ProviderName,
+    },
     Ping,
 }
 

@@ -1183,3 +1183,66 @@ describe("anchor_t19 cockpit inbox lc resume recovery card", () => {
     ).toBe(false);
   });
 });
+
+// 「登记并重试」按钮投影（owner 2026-10-12 直批）：trust 缺失错误按稳定码
+// （provider_trust_missing/trust_entry_missing）识别 + provider wire 标签
+// 解析；typed 回执对账后同一错误条切 trustRegistered 态。
+describe("trust missing inbox projection", () => {
+  function trustErrorState(): WorkspaceWsState {
+    useWorkspaceStore.getState().reset();
+    useWorkspaceStore.getState().setError(
+      "provider_trust_missing: trust_entry_missing: canonical root 下未找到 codex 的用户级 workspace trust 条目（entry absent）",
+    );
+    return useWorkspaceStore.getState();
+  }
+
+  it("trust 缺失错误条挂 trustMissing 投影（稳定码+provider 解析）", () => {
+    const items = selectCockpitInbox(trustErrorState());
+    const errorItem = items.find((item) => item.id === "hard_error:error");
+    expect(errorItem?.trustMissing).toEqual({ provider: "codex" });
+    expect(errorItem?.trustRegistered).toBe(false);
+  });
+
+  it("kimi_code 标签同样识别；无稳定码的普通错误不投登记面", () => {
+    useWorkspaceStore.getState().reset();
+    useWorkspaceStore.getState().setError(
+      "provider_trust_missing: trust_entry_missing: canonical root 下未找到 kimi_code 的用户级 workspace trust 条目",
+    );
+    expect(
+      selectCockpitInbox(useWorkspaceStore.getState()).find((item) => item.id === "hard_error:error")
+        ?.trustMissing,
+    ).toEqual({ provider: "kimi_code" });
+
+    useWorkspaceStore.getState().reset();
+    useWorkspaceStore.getState().setError("provider start failed: command missing");
+    expect(
+      selectCockpitInbox(useWorkspaceStore.getState()).find((item) => item.id === "hard_error:error")
+        ?.trustMissing,
+    ).toBeNull();
+  });
+
+  it("typed 回执 provider 匹配时切 trustRegistered；不匹配保持可登记", () => {
+    const before = selectCockpitInbox(trustErrorState());
+    expect(before.find((item) => item.id === "hard_error:error")?.trustRegistered).toBe(false);
+
+    useWorkspaceStore.getState().applyTrustEntryRegistered({
+      provider: "codex",
+      action: "registered",
+      trust_key: "[projects.\"/fixture-root\"]",
+      canonical_root: "/fixture-root",
+      registered_at: "2026-10-12T00:00:00Z",
+    });
+    const after = selectCockpitInbox(useWorkspaceStore.getState());
+    expect(after.find((item) => item.id === "hard_error:error")?.trustRegistered).toBe(true);
+
+    useWorkspaceStore.getState().applyTrustEntryRegistered({
+      provider: "kimi_code",
+      action: "registered",
+      trust_key: "wd_fixture_000000000000",
+      canonical_root: "/fixture-root",
+      registered_at: "2026-10-12T00:00:00Z",
+    });
+    const mismatched = selectCockpitInbox(useWorkspaceStore.getState());
+    expect(mismatched.find((item) => item.id === "hard_error:error")?.trustRegistered).toBe(false);
+  });
+});

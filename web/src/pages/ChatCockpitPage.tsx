@@ -500,6 +500,7 @@ export function ChatCockpitPage({
           void sendC1Action(c1Payload);
         },
         sendLcBootstrapAction,
+        sendRegisterTrustEntry: workspaceWs.sendRegisterTrustEntry,
       }),
     [
       state.flowKind,
@@ -517,6 +518,7 @@ export function ChatCockpitPage({
       sendHumanActionRest,
       sendC1Action,
       sendLcBootstrapAction,
+      workspaceWs.sendRegisterTrustEntry,
     ],
   );
   const auditRows = useMemo(

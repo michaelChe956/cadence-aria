@@ -2,6 +2,7 @@ import { newCommandId } from "../hooks/useWorkspaceWs";
 import type {
   WorkItemPlanCompileRecoveryAction,
   WorkspaceHumanAction,
+  WorkspaceProviderName,
 } from "../api/types";
 import {
   gateActionBlockReason,
@@ -147,6 +148,9 @@ export type CockpitActionFacade = {
   /** C4 Task 9：LC 冷启动统一动作（Task 6 bootstrap action REST 透传，
    * 页面接线发送器；未接线零出站 fail-closed）。 */
   sendBootstrapAction(payload: LcBootstrapActionPayload): Promise<void>;
+  /** 「登记并重试」按钮（owner 2026-10-12 直批）：WS register_trust_entry
+   * 显式授权登记（root 服务端解析）；可选面——未接线零出站 fail-closed。 */
+  registerTrustEntry?(provider: WorkspaceProviderName): boolean;
 };
 
 
@@ -193,6 +197,9 @@ export function createCockpitActionFacade(input: {
    * 未接线时对应动作零出站（fail-closed）；前端不判定业务成功。
    */
   sendLcBootstrapAction?: (payload: LcBootstrapActionPayload) => Promise<void>;
+  /** 「登记并重试」发送器（useWorkspaceWs.sendRegisterTrustEntry 页面接线；
+   * 未接线零出站 fail-closed）。 */
+  sendRegisterTrustEntry?: (provider: WorkspaceProviderName) => boolean;
 }): CockpitActionFacade {
   return {
     confirm() {
@@ -365,6 +372,10 @@ export function createCockpitActionFacade(input: {
     // 零出站）；稳定 command_id 由卡片按 notice key 派生并复用。
     async sendBootstrapAction(payload) {
       await input.sendLcBootstrapAction?.(payload);
+    },
+    // 「登记并重试」：显式授权登记只透传发送器（fail-closed：未接线零出站）。
+    registerTrustEntry(provider) {
+      return input.sendRegisterTrustEntry?.(provider) ?? false;
     },
   };
 }

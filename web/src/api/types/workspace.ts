@@ -381,6 +381,12 @@ export type WsInMessage =
     }
   | { type: "abort" }
   | {
+      /** trust 指引卡「登记并重试」按钮：用户显式授权按需登记该 provider
+       * 的用户级 workspace trust；root 由服务端解析（wire 不带路径字段）。 */
+      type: "register_trust_entry";
+      provider: WorkspaceProviderName;
+    }
+  | {
       type: "hello";
       session_id: string;
       last_seen_node_id?: string | null;
@@ -887,5 +893,15 @@ export type WsOutMessage = WithEventSeq<
   | { type: "protocol_error"; code: string; message: string; context?: unknown }
   | { type: "provider_locked"; snapshot: ProviderConfigSnapshot; locked_at: string }
   | { type: "resync_required"; event_seq: number }
+  | {
+      /** 「登记并重试」typed 回执：action 与 ensure 审计 outcome 同词表
+       * （registered/replay/reuse_user_entry）；仅回执，不自动重新生成。 */
+      type: "trust_entry_registered";
+      provider: WorkspaceProviderName;
+      action: "registered" | "replay" | "reuse_user_entry";
+      trust_key: string;
+      canonical_root: string;
+      registered_at: string;
+    }
   | { type: "pong" }
 >;

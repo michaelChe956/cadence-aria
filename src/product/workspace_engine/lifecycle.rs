@@ -912,6 +912,189 @@ impl WorkspaceEngine {
         })
     }
 
+    /// 指引卡「登记并重试」按钮（owner 2026-10-12 直批）的显式登记目标
+    /// 解析：root 服务端解析，与确认链同一 authority（LC 会话=确认上下文
+    /// 冻结根 + 同一三项漂移重验；单仓会话=canonicalized repository 根，
+    /// lc 标签走 legacy 别名），**不接受客户端传路径**。precondition 复用
+    /// 确认链注入实例；单仓取调用方提供的生产 fallback（WebAppState 聚合
+    /// 初始化依赖的同一 trust 门）。
+    ///
+    /// 只解析不登记——home IO（ensure）由调用方在引擎锁外执行；漂移
+    /// fail-closed 时零 home 调用，只返回已知身份，不给错误根 trust 指引。
+    pub(crate) fn prepare_explicit_trust_registration(
+        &self,
+        fallback_precondition: Option<
+            Arc<dyn crate::product::logical_codebase::ProviderTrustPrecondition>,
+        >,
+    ) -> Result<
+        super::types::ExplicitTrustRegistrationTarget,
+        super::types::ExplicitTrustRegistrationContextWaiting,
+    > {
+        use super::types::{
+            ConfirmationTrustContext, ExplicitTrustRegistrationContextWaiting,
+            ExplicitTrustRegistrationTarget,
+        };
+        use crate::product::logical_codebase::{
+            LogicalCodebaseStore, legacy_logical_codebase_id, resolve_issue_logical_codebase_id,
+        };
+
+        let session_id = self.session.session_id.clone();
+        let project_id = self.session.project_id.clone();
+        let issue_id = self.session.issue_id.clone();
+        let context_waiting = |reason_code: &str, message: String| {
+            ExplicitTrustRegistrationContextWaiting {
+                reason_code: reason_code.to_string(),
+                message,
+            }
+        };
+
+        // LC 会话（已注入 gateway）：确认链同一 authority。
+        if self.logical_provider_gateway.is_some() {
+            let ConfirmationTrustContext {
+                precondition,
+                issue_lc_id,
+                frozen_root,
+            } = match self.confirmation_trust_context.clone() {
+                Some(context) => context,
+                None => {
+                    return Err(context_waiting(
+                        "trust_registration_context_unavailable",
+                        "LC 会话缺少确认 trust 登记上下文（manager 未注入 precondition/冻结身份）；\
+                         登记停等，未触碰 home。"
+                            .to_string(),
+                    ));
+                }
+            };
+            let Some(store) = self.lifecycle_store.as_ref() else {
+                return Err(context_waiting(
+                    "trust_registration_context_unavailable",
+                    "引擎无 lifecycle store，无法重验登记 trust 冻结身份；登记停等，未触碰 home。"
+                        .to_string(),
+                ));
+            };
+            let app_paths = store.app_paths();
+            // 漂移重验（与确认链同序同判据）：issue 原始 LC 归属未变、
+            // 冻结根可 canonicalize、同 scope manifest 根与冻结根一致。
+            let current_issue_lc = resolve_issue_logical_codebase_id(
+                &app_paths,
+                &project_id,
+                &issue_id,
+            )
+            .map_err(|error| {
+                context_waiting(
+                    "trust_registration_context_unavailable",
+                    format!(
+                        "重解析 issue 原始 LC 归属失败（issue store IO：{error}）；\
+                         登记停等，未触碰 home。"
+                    ),
+                )
+            })?;
+            if current_issue_lc != issue_lc_id {
+                return Err(context_waiting(
+                    "trust_registration_scope_changed",
+                    format!(
+                        "issue 原始 LC 归属已改变：create 期冻结 {issue_lc_id:?}，当前 \
+                         {current_issue_lc:?}；登记停等，不降级到另一 LC/成员 checkout/原路径。"
+                    ),
+                ));
+            }
+            let registry_lc_id = issue_lc_id
+                .clone()
+                .unwrap_or_else(|| legacy_logical_codebase_id(&project_id));
+            let canonical_frozen_root = std::fs::canonicalize(&frozen_root).map_err(|error| {
+                context_waiting(
+                    "trust_registration_root_unavailable",
+                    format!(
+                        "冻结聚合根 {} 无法 canonicalize（{error}）；登记停等，未触碰 home。",
+                        frozen_root.display()
+                    ),
+                )
+            })?;
+            let manifest = LogicalCodebaseStore::for_lc(app_paths.clone(), registry_lc_id.clone())
+                .load_manifest(&project_id)
+                .map_err(|error| {
+                    context_waiting(
+                        "trust_registration_root_changed",
+                        format!(
+                            "同 scope LC manifest 读取失败（{error}），无法复验与冻结根一致；\
+                             登记停等。"
+                        ),
+                    )
+                })?;
+            let Some(manifest) = manifest else {
+                return Err(context_waiting(
+                    "trust_registration_root_changed",
+                    "同 scope LC manifest 已缺失，无法复验与冻结根一致；登记停等。".to_string(),
+                ));
+            };
+            let canonical_manifest_root =
+                std::fs::canonicalize(&manifest.provider_context_root).map_err(|error| {
+                    context_waiting(
+                        "trust_registration_root_changed",
+                        format!(
+                            "manifest 聚合根 {} 无法 canonicalize（{error}），与冻结根一致性\
+                             无法复验；登记停等。",
+                            manifest.provider_context_root.display()
+                        ),
+                    )
+                })?;
+            if canonical_manifest_root != canonical_frozen_root {
+                return Err(context_waiting(
+                    "trust_registration_root_changed",
+                    format!(
+                        "同 scope manifest 聚合根 {} 与 gateway 冻结根 {} 不一致；登记停等，\
+                         不给错误根提供 trust 指引。",
+                        canonical_manifest_root.display(),
+                        canonical_frozen_root.display()
+                    ),
+                ));
+            }
+            return Ok(ExplicitTrustRegistrationTarget {
+                precondition,
+                project_id,
+                session_id,
+                registry_lc_id,
+                canonical_root: canonical_frozen_root,
+            });
+        }
+
+        // 单仓会话（无 gateway）：root=canonicalized repository 根；
+        // precondition 取生产 fallback；lc 标签走 legacy 别名（与
+        // aggregate initialization coordinator 的单仓 scope 推导同源）。
+        let Some(repository_path) = self.session.repository_path.clone() else {
+            return Err(context_waiting(
+                "trust_registration_root_unavailable",
+                "单仓会话缺少 repository 根，无法解析登记目标；登记停等，未触碰 home。"
+                    .to_string(),
+            ));
+        };
+        let canonical_root = std::fs::canonicalize(&repository_path).map_err(|error| {
+            context_waiting(
+                "trust_registration_root_unavailable",
+                format!(
+                    "单仓 repository 根 {} 无法 canonicalize（{error}）；登记停等，未触碰 home。",
+                    repository_path.display()
+                ),
+            )
+        })?;
+        let Some(precondition) = fallback_precondition else {
+            return Err(context_waiting(
+                "trust_registration_context_unavailable",
+                "单仓会话未装配 trust 登记前置门（aggregate initialization 依赖缺失）；\
+                 登记停等，未触碰 home。"
+                    .to_string(),
+            ));
+        };
+        let registry_lc_id = legacy_logical_codebase_id(&project_id);
+        Ok(ExplicitTrustRegistrationTarget {
+            precondition,
+            project_id,
+            session_id,
+            registry_lc_id,
+            canonical_root,
+        })
+    }
+
     /// 逻辑会话的 planning launch 标识:(project_id, target worktree 锚)。
     ///
     /// 仅当注入 `logical_provider_gateway` 且 `session.repository_path` 存在时返回
@@ -1003,11 +1186,8 @@ impl WorkspaceEngine {
         role: ProviderConversationRole,
         provider: &ProviderName,
     ) -> Result<Option<NativeResumeCandidate>, NativeResumeCandidateError> {
-        let in_memory_id = provider_conversation_session_id(
-            &self.session.provider_conversations,
-            &role,
-            provider,
-        );
+        let in_memory_id =
+            provider_conversation_session_id(&self.session.provider_conversations, &role, provider);
         let Some(store) = self.lifecycle_store.as_ref() else {
             // direct 内存态：无持久 store、无旧引用事实可读——内存引用即
             // 出生后的既有 direct conversation，seq 未知可 None。
@@ -1026,11 +1206,9 @@ impl WorkspaceEngine {
                     && tombstone.native_session_id == native_id
             })
         };
-        if let Some(native_id) =
-            in_memory_id.or_else(|| {
-                provider_conversation_session_id(&record.provider_conversations, &role, provider)
-            })
-        {
+        if let Some(native_id) = in_memory_id.or_else(|| {
+            provider_conversation_session_id(&record.provider_conversations, &role, provider)
+        }) {
             let is_tombstoned = tombstoned(&native_id);
             return self.bind_native_run_identity(
                 &record,
@@ -1051,10 +1229,8 @@ impl WorkspaceEngine {
             | crate::product::models::WorkspaceType::Design
             | crate::product::models::WorkspaceType::WorkItem => "orchestrator",
         };
-        let provider_canonical =
-            serde_json::to_value(provider).map_err(|_| {
-                NativeResumeCandidateError::ProviderIdentityInvalid
-            })?;
+        let provider_canonical = serde_json::to_value(provider)
+            .map_err(|_| NativeResumeCandidateError::ProviderIdentityInvalid)?;
         let Some(provider_canonical) = provider_canonical
             .as_str()
             .map(str::to_string)

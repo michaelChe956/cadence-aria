@@ -33,6 +33,8 @@ mod planning_resume;
 mod projection_artifact_batch;
 #[path = "tests/provider_run_events.rs"]
 mod provider_run_events;
+#[path = "tests/register_trust_entry.rs"]
+mod register_trust_entry;
 mod single_candidate_ir_reredrive;
 mod single_candidate_lc_admission;
 mod single_candidate_provider_run;

@@ -480,6 +480,15 @@ export function useWorkspaceWs(sessionId: string | null) {
     [sendJson],
   );
 
+  // 「登记并重试」按钮（owner 2026-10-12 直批）：显式授权按需登记——
+  // 沿 sendJson 既有 lease/connection 守卫；发送成功不做乐观本地变更
+  //（成功/失败一律以 typed trust_entry_registered / protocol_error 对账）。
+  const sendRegisterTrustEntry = useCallback(
+    (provider: WorkspaceProviderName): boolean =>
+      sendJson({ type: "register_trust_entry", provider }),
+    [sendJson],
+  );
+
   const sendHello = useCallback(
     (targetSessionId: string, lastSeenNodeId?: string | null) => {
       sendJson({
@@ -825,7 +834,7 @@ export function useWorkspaceWs(sessionId: string | null) {
     sendStartGeneration,
     sendLcResumeFresh,
     retryInterruptedRun,
-    sendRequestRevision,
+    sendRegisterTrustEntry,
     sendWorkItemPlanCompileRecoveryAction,
     sendConfirmGate,
     sendAbandonGate,

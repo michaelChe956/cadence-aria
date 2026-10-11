@@ -19,5 +19,6 @@ export function mockActions(): CockpitActionFacade {
     rebind: vi.fn(),
     resumeRepositoryInitialization: vi.fn(async () => undefined),
     sendBootstrapAction: vi.fn(async () => undefined),
+    registerTrustEntry: vi.fn(() => true),
   };
 }

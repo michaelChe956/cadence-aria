@@ -18,7 +18,7 @@ import type {
   UsageReportPayload,
   WsOutMessage,
 } from "../api/types";
-import type { ChatEntry, ChatEntryRole } from "../state/chat-entries";
+import type { TrustRegistrationReceipt } from "../state/workspace-ws-store-types";
 import {
   chatRoleForTimelineNode,
   useWorkspaceStore,
@@ -567,6 +567,20 @@ const store = useWorkspaceStore.getState();
             },
           });
         }
+      }
+      break;
+    case "trust_entry_registered":
+      {
+        // 「登记并重试」typed 回执对账（owner 2026-10-12 直批）：只记录
+        // 最近回执供卡片切「已登记，请显式重新生成」态；不自动重新生成、
+        // 不清除 error 原文（成功态由 provider 匹配判定）。
+        store.applyTrustEntryRegistered({
+          provider: msg.provider as TrustRegistrationReceipt["provider"],
+          action: msg.action as TrustRegistrationReceipt["action"],
+          trust_key: msg.trust_key as string,
+          canonical_root: msg.canonical_root as string,
+          registered_at: msg.registered_at as string,
+        });
       }
       break;
     // 已知协议成员但本 handler 不做处理：linked_workspace_amendment_created 由

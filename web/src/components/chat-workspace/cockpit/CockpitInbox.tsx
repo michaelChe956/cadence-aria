@@ -9,6 +9,7 @@ import {
   ListChecks,
   Play,
   RotateCcw,
+  ShieldCheck,
   UserRound,
 } from "lucide-react";
 import { useEffect, useMemo, useState, type Ref } from "react";
@@ -562,6 +563,33 @@ function HardErrorInboxRow({
               </p>
             ) : null}
           </details>
+          {/* 「登记并重试」按钮（owner 2026-10-12 直批）：trust 缺失错误卡
+              按稳定码识别（投影已解析 provider）；显式授权走 ensure 登记链，
+              成功回执后切「已登记，请显式重新生成」——不自动重新生成。 */}
+          {item.trustMissing ? (
+            item.trustRegistered ? (
+              <p
+                data-testid="cockpit-trust-registered-hint"
+                role="status"
+                className="mt-1 text-xs font-medium text-emerald-700"
+              >
+                已登记，请显式重新生成
+              </p>
+            ) : null
+          ) : null}
+          {actions && actionable && item.trustMissing && !item.trustRegistered ? (
+            <div className="mt-2 flex flex-wrap gap-2">
+              <button
+                type="button"
+                data-testid="cockpit-trust-register-button"
+                onClick={() => actions.registerTrustEntry?.(item.trustMissing?.provider ?? "")}
+                className={BTN_SECONDARY_CLASS}
+              >
+                <ShieldCheck className="h-4 w-4" aria-hidden="true" />
+                登记并重试
+              </button>
+            </div>
+          ) : null}
           {actions && actionable ? (
             <div className="mt-2 flex flex-wrap gap-2">
               {isStaleDriverLeaseItem(item) && onRetakeLease ? (

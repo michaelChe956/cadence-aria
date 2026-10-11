@@ -522,10 +522,14 @@ pub enum ProviderTrustScenario {
     Generation,
 
     /// T6 fix-loop r2（信任批量确认按需登记）：Coding 面共享启动口
-    /// （Coder/CodeReviewer/InternalReviewer 经 provider_stream launch）
+    /// (Coder/CodeReviewer/InternalReviewer 经 provider_stream launch）
     /// 的只读指导——失败后显式「重新发起该 Coding 任务」，尊重 Coding
     /// 既有人工恢复语义，不借用 generation 的「显式重新生成」。
     Coding,
+    /// 指引卡「登记并重试」按钮（owner 2026-10-12 直批）：用户显式授权
+    /// 的按需登记——ensure 失败的等待面 retry_action 指回按钮本身
+    /// （修复后重新点击「登记并重试」）；成功只回执，不自动重新生成。
+    ExplicitRegistration,
 }
 
 impl ProviderTrustScenario {
@@ -549,6 +553,10 @@ impl ProviderTrustScenario {
                 }
                 Self::Coding => {
                     "用户自行核对该 trust 键的取值后重新发起该 Coding 任务；系统不覆盖用户条目"
+                        .to_string()
+                }
+                Self::ExplicitRegistration => {
+                    "用户自行核对该 trust 键的取值后重新点击「登记并重试」；系统不覆盖用户条目"
                         .to_string()
                 }
             },
@@ -575,12 +583,15 @@ impl ProviderTrustScenario {
     /// 场景的显式动作后缀（recipe=重试初始化，confirmation=重新确认，
     /// generation=显式重新生成，coding=重新发起该 Coding 任务——方案 A
     /// 不自动登记，登记/修复由用户显式完成后按场景重新发起）。
+    /// explicit_registration=重新点击「登记并重试」（按钮场景失败指回
+    /// 按钮本身；成功后按原场景显式重新生成/发起）。
     fn explicit_action(self) -> &'static str {
         match self {
             Self::Recipe => "重试初始化",
             Self::Confirmation => "重新确认",
             Self::Generation => "显式重新生成",
             Self::Coding => "重新发起该 Coding 任务",
+            Self::ExplicitRegistration => "重新点击「登记并重试」",
         }
     }
 }
@@ -703,8 +714,28 @@ pub(crate) fn provider_trust_manual_guidance(
         | TrustFailureKind::NoAdapter
         | TrustFailureKind::InvalidRoot => None,
     };
+    let command_line = match kind {
+        // 指引卡登记按钮（owner 2026-10-12 直批）：entry 缺失时附可直接
+        // 复制的登记命令（adapter 同源真实路径/键/root）。仅 EntryMissing
+        // 给命令——冲突/工件损坏场景给一键命令会把「不覆盖用户条目」
+        // 弱化成覆盖指令。
+        TrustFailureKind::EntryMissing => adapters
+            .iter()
+            .find(|adapter| adapter.provider() == *provider)
+            .and_then(|adapter| adapter.manual_hint(canonical_root).manual_command)
+            .map(|command| format!("可直接复制的登记命令：{command}。")),
+        TrustFailureKind::UserConflict
+        | TrustFailureKind::HomeArtifactRead
+        | TrustFailureKind::HomeArtifactWrite
+        | TrustFailureKind::FactStore
+        | TrustFailureKind::NoAdapter
+        | TrustFailureKind::InvalidRoot => None,
+    };
     let mut guidance = disposition;
     if let Some(line) = artifact_line {
+        guidance.push_str(&line);
+    }
+    if let Some(line) = command_line {
         guidance.push_str(&line);
     }
     if scenario == ProviderTrustScenario::Confirmation {
@@ -2465,6 +2496,128 @@ mod tests {
             waiting
                 .manual_guidance
                 .contains(&fixture.root.display().to_string())
+        );
+    }
+
+    /// 指引卡登记命令（owner 2026-10-12 直批）：Kimi 的 entry 缺失指导附
+    /// 可直接复制的单行 shell（mkdir + printf 记录 + date 毫秒时间戳），
+    /// 路径/键/root 全部取 adapter 真实值（同源，不手抄算法）。
+    #[test]
+    fn provider_trust_kimi_guidance_carries_copyable_registration_command() {
+        let fixture = TrustFixture::new();
+        let adapters: Vec<Arc<dyn ProviderTrustHomeAdapter>> = vec![
+            Arc::new(CodexTrustAdapter::for_home(fixture.home())),
+            Arc::new(KimiTrustAdapter::for_home(fixture.home())),
+        ];
+        let kimi = KimiTrustAdapter::for_home(fixture.home());
+        let record_path = kimi.record_path(&fixture.root);
+        let error = ProviderTrustError::transient(
+            super::TRUST_ENTRY_MISSING_CODE,
+            "canonical root 下未找到 kimi_code 的用户级 workspace trust 条目（entry absent）"
+                .to_string(),
+        );
+        let guidance = super::provider_trust_manual_guidance(
+            &adapters,
+            &ProviderName::KimiCode,
+            &fixture.root,
+            &error,
+            ProviderTrustScenario::Generation,
+        );
+        let expected_command = format!(
+            "mkdir -p '{}' && printf '{{\"root\":\"{}\",\"trustedAt\":%s}}' \"$(date +%s%3N)\" > '{}'",
+            kimi.workspace_trust_root().display(),
+            fixture.root.display(),
+            record_path.display(),
+        );
+        assert!(
+            guidance.contains(&expected_command),
+            "guidance must carry the exact copyable command {expected_command}: {guidance}"
+        );
+    }
+
+    /// 指引卡登记命令：Codex 的 entry 缺失指导附 config.toml 路径与完整
+    /// [projects."<root>"] trust_level="trusted" TOML 片段（TOML 不可一行
+    /// 安全写，按「片段+路径」给）。
+    #[test]
+    fn provider_trust_codex_guidance_carries_config_snippet_and_path() {
+        let fixture = TrustFixture::new();
+        let adapters: Vec<Arc<dyn ProviderTrustHomeAdapter>> = vec![
+            Arc::new(CodexTrustAdapter::for_home(fixture.home())),
+            Arc::new(KimiTrustAdapter::for_home(fixture.home())),
+        ];
+        let codex = CodexTrustAdapter::for_home(fixture.home());
+        let error = ProviderTrustError::transient(
+            super::TRUST_ENTRY_MISSING_CODE,
+            "canonical root 下未找到 codex 的用户级 workspace trust 条目（entry absent）"
+                .to_string(),
+        );
+        let guidance = super::provider_trust_manual_guidance(
+            &adapters,
+            &ProviderName::Codex,
+            &fixture.root,
+            &error,
+            ProviderTrustScenario::Generation,
+        );
+        let header = codex.trust_key(&fixture.root);
+        let expected_snippet =
+            format!("在 {} 追加（或并入既有表）：\n{header}\ntrust_level = \"trusted\"", codex.config_path().display());
+        assert!(
+            guidance.contains(&expected_snippet),
+            "guidance must carry the exact config snippet at the real path: {guidance}"
+        );
+    }
+
+    /// 指引卡登记命令：用户值冲突（UserConflict）不给一键登记命令——避免
+    /// 把「不覆盖用户条目」的指导弱化成覆盖指令。
+    #[test]
+    fn provider_trust_conflict_guidance_does_not_carry_registration_command() {
+        let fixture = TrustFixture::new();
+        let error = ProviderTrustError::conflict("codex_trust_key_conflict", "conflict".into());
+        let guidance = super::provider_trust_manual_guidance(
+            &[
+                Arc::new(CodexTrustAdapter::for_home(fixture.home())) as Arc<dyn ProviderTrustHomeAdapter>,
+                Arc::new(KimiTrustAdapter::for_home(fixture.home())),
+            ],
+            &ProviderName::Codex,
+            &fixture.root,
+            &error,
+            ProviderTrustScenario::Generation,
+        );
+        assert!(
+            !guidance.contains("可直接复制的登记命令") && !guidance.contains("mkdir -p"),
+            "conflict guidance must not suggest a one-shot overwrite: {guidance}"
+        );
+    }
+
+    /// 显式按钮授权场景（ExplicitRegistration）的等待面 retry_action 指回
+    /// 按钮本身（重新点击「登记并重试」），不借用生成/确认场景文案。
+    #[test]
+    fn provider_trust_explicit_registration_waiting_retry_action_targets_the_button() {
+        let fixture = TrustFixture::new();
+        std::fs::create_dir_all(fixture.codex_config().parent().unwrap()).unwrap();
+        let header =
+            CodexTrustAdapter::for_home(fixture.home()).trust_key(&fixture.root);
+        std::fs::write(
+            fixture.codex_config(),
+            format!("{header}\ntrust_level = \"untrusted\"\n"),
+        )
+        .unwrap();
+
+        let outcome = fixture.registry.ensure_ready(
+            PROJECT,
+            OPERATION,
+            LC,
+            &fixture.root,
+            &[ProviderName::Codex],
+            ProviderTrustScenario::ExplicitRegistration,
+        );
+        let ProviderTrustPreparationResult::Waiting { waiting } = outcome else {
+            panic!("expected conflict waiting");
+        };
+        assert_eq!(waiting.reason_code, "codex_trust_key_conflict");
+        assert_eq!(
+            waiting.retry_action,
+            "用户自行核对该 trust 键的取值后重新点击「登记并重试」；系统不覆盖用户条目"
         );
     }
 

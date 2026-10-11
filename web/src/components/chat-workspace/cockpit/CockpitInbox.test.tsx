@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { CockpitInboxItem } from "../../../state/workspace-cockpit-projection";
@@ -1025,3 +1025,69 @@ describe("CockpitInbox choice card (P0 1.3)", () => {
   });
 });
 
+
+// 「登记并重试」按钮（owner 2026-10-12 直批）：trust 缺失错误卡按稳定码
+// 识别（投影已解析 provider）——按钮显式授权登记；成功回执后切
+// 「已登记，请显式重新生成」态，不再渲染按钮（不自动重新生成）。
+describe("CockpitInbox trust register button", () => {
+  const trustMissingItem: CockpitInboxItem = {
+    id: "session_001:hard_error:error",
+    kind: "hard_error",
+    severity: 3,
+    title: "引擎错误",
+    summary:
+      "provider_trust_missing: trust_entry_missing: canonical root 下未找到 codex 的用户级 workspace trust 条目",
+    triage: false,
+    source: "engine_error",
+    createdAt: null,
+    gate: null,
+    inlineError: null,
+    choice: null,
+    trustMissing: { provider: "codex" },
+    trustRegistered: false,
+  };
+
+  it("trust 缺失错误卡渲染「登记并重试」，点击经 facade 以 provider 出站", () => {
+    const actions = mockActions();
+    render(
+      <CockpitInbox
+        items={[trustMissingItem]}
+        actions={actions}
+        actionableSessionId="session_001"
+      />,
+    );
+
+    const button = screen.getByTestId("cockpit-trust-register-button");
+    expect(screen.queryByTestId("cockpit-trust-registered-hint")).toBeNull();
+    fireEvent.click(button);
+    expect(actions.registerTrustEntry).toHaveBeenCalledWith("codex");
+  });
+
+  it("成功回执后切「已登记，请显式重新生成」，不再渲染按钮", () => {
+    render(
+      <CockpitInbox
+        items={[{ ...trustMissingItem, trustRegistered: true }]}
+        actions={mockActions()}
+        actionableSessionId="session_001"
+      />,
+    );
+
+    expect(screen.getByTestId("cockpit-trust-registered-hint")).toHaveTextContent(
+      "已登记，请显式重新生成",
+    );
+    expect(screen.queryByTestId("cockpit-trust-register-button")).toBeNull();
+  });
+
+  it("非 trust 缺失错误卡不渲染登记面（fail-closed 不猜 provider）", () => {
+    render(
+      <CockpitInbox
+        items={[advanceErrorItem]}
+        actions={mockActions()}
+        actionableSessionId="session_001"
+      />,
+    );
+
+    expect(screen.queryByTestId("cockpit-trust-register-button")).toBeNull();
+    expect(screen.queryByTestId("cockpit-trust-registered-hint")).toBeNull();
+  });
+});

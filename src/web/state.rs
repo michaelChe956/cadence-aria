@@ -4,9 +4,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use crate::cross_cutting::aria_state_paths::AriaStatePaths;
-use crate::cross_cutting::bounded_command_runner::{
-    BoundedCommandRunner, TokioBoundedCommandRunner,
-};
+use crate::cross_cutting::bounded_command_runner::{BoundedCommandRunner, TokioBoundedCommandRunner};
 use crate::cross_cutting::claude_code_provider::ClaudeCodeProvider;
 use crate::cross_cutting::claude_code_provider::ClaudePolicyProjector;
 use crate::cross_cutting::codex_provider::CodexPolicyProjector;
@@ -50,9 +48,7 @@ pub use repository_initialization_run_registry::{
     RepositoryInitializationRunRegistry,
 };
 mod aggregate_index_rebuild_registry;
-pub use aggregate_index_rebuild_registry::{
-    AggregateIndexRebuildLease, AggregateIndexRebuildRegistry,
-};
+pub use aggregate_index_rebuild_registry::{AggregateIndexRebuildLease, AggregateIndexRebuildRegistry};
 
 #[derive(Clone, Default)]
 pub struct WorkspaceRunRegistry {
@@ -428,6 +424,17 @@ impl WebAppState {
         self.aggregate_initialization_dependencies
             .clone()
             .expect("aggregate initialization dependencies are initialized")
+    }
+
+    /// 聚合初始化依赖中的生产 trust 前置门（单仓显式登记按钮的
+    /// fallback）；依赖图未初始化/未装配 trust 时如实 `None`（测试态
+    /// WebAppState），不 panic——调用方按 fail-closed 等待处理。
+    pub(crate) fn aggregate_initialization_trust(
+        &self,
+    ) -> Option<Arc<dyn crate::product::logical_codebase::ProviderTrustPrecondition>> {
+        self.aggregate_initialization_dependencies
+            .as_ref()
+            .and_then(|dependencies| dependencies.trust.clone())
     }
 
     pub async fn refresh_provider_health(&self) -> Arc<ProviderHealthSnapshot> {

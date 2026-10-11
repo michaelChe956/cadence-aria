@@ -45,9 +45,9 @@ pub(crate) use crate::web::test_controls::WorkspaceSocketControl;
 pub(crate) use crate::web::types::GenerateWorkItemsRequest;
 pub(crate) use crate::web::workspace_context::ensure_workspace_context_message;
 pub(crate) use crate::web::workspace_ws_types::{
-    ChoiceOption, ChoiceQuestion, TimelineNodeRetryError, WorkspaceInboundEnvelope,
-    WsExecutionEvent, WsExecutionEventKind, WsExecutionEventStatus, WsInMessage, WsOutMessage,
-    WsPermissionRiskLevel, WsProviderStatus,
+    ChoiceOption, ChoiceQuestion, TimelineNodeRetryError, TrustEntryRegistrationActionDto,
+    WorkspaceInboundEnvelope, WsExecutionEvent, WsExecutionEventKind, WsExecutionEventStatus,
+    WsInMessage, WsOutMessage, WsPermissionRiskLevel, WsProviderStatus,
 };
 
 mod decisions;
@@ -74,6 +74,6 @@ pub(crate) use socket::parse_workspace_inbound_text;
 #[cfg(test)]
 pub(crate) use socket::{ActivityTimestamp, pump_outbound_controls, spawn_idle_timeout_task};
 pub(crate) use socket::{
-    OutboundControl, planning_resume_decision_with_fresh_index, planning_resume_run_kind,
-    send_json_outbound,
+    OutboundControl, PlanningResumeLaunchDecision, planning_resume_decision_with_fresh_index,
+    planning_resume_launch_decision, send_json_outbound,
 };
