@@ -2,6 +2,7 @@ import type {
   AutomationOwnership,
   ChoiceOption,
   ChoiceQuestion,
+  LcResumeRecoveryDto,
   UsageReportPayload,
 } from "../api/types/workspace";
 import type {
@@ -508,6 +509,12 @@ export interface WorkspaceWsState {
   error: string | null;
   activeRunId: string | null;
   recoverableInterruptedRun: RecoverableInterruptedRun | null;
+  /**
+   * C1（Task 6.1）：durable LC 恢复权威投影（session_state 全量替换；
+   * reset/切会话清空）。resolved 证据保留（供 Replay 对账）但收件箱不投
+   * 卡、不阻塞 generic 后续动作；null=当前无恢复事实。
+   */
+  lcResumeRecovery: LcResumeRecoveryDto | null;
   protocolError: ProtocolErrorState | null;
   providerLocked: boolean;
   providerSnapshot: ProviderConfigSnapshot | null;
@@ -573,6 +580,8 @@ export interface WorkspaceSessionStatePayload {
   human_presentation_revisions?: HumanPresentationRevision[];
   reviewer_enabled_at_start?: boolean | null;
   recoverable_interrupted_run?: RecoverableInterruptedRun | null;
+  /** C1（Task 6.1）：durable LC 恢复纯投影；空/旧 wire 缺省省略（→ null）。 */
+  lc_resume_recovery?: LcResumeRecoveryDto | null;
   plan_repair?: PlanRepairSessionSnapshot | null;
   /** F-59：挂起 choice 全量投影（含 role/created_at_ms）。 */
   pending_choice_requests?: unknown;

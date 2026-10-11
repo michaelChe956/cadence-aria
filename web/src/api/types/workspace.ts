@@ -208,6 +208,115 @@ export type RecoverableInterruptedRun = {
   label: string;
 };
 
+// C1（Task 6.1）：LC 恢复 wire 投影的 TS 镜像——与后端
+// src/web/workspace_ws_types/out.rs 的 LcResumeRecoveryDto/LcFreshOperationDto
+//（serde snake_case）逐字段一致；native session ID、full fingerprint 与秘密
+// 配置不在对外 DTO 中。resolved 保留证据与 last_operation 供 Replay。
+export type LcResumeRecoveryState =
+  | "waiting"
+  | "fresh_reserved"
+  | "fresh_running"
+  | "resolved";
+
+export type LcFreshOperationState =
+  | "not_started"
+  | "reserved"
+  | "running"
+  | "completed"
+  | "failed"
+  | "unknown";
+
+/** 设计 §5.1：显式 fresh operation 的受理/回放投递标记。 */
+export type LcResumeRecoveryDelivery = "accepted" | "replayed";
+
+/** SessionState.lc_resume_recovery.last_operation（接口字典：
+ * operation_id/state/reason?/fresh_node?）。 */
+export type LcFreshOperationDto = {
+  operation_id: string;
+  state: LcFreshOperationState;
+  reason?: string | null;
+  fresh_node?: string | null;
+};
+
+export type LcResumeRecoveryDto = {
+  recovery_id: string;
+  state: LcResumeRecoveryState;
+  reason_code: string;
+  provider: WorkspaceProviderName;
+  failed_node_id: string;
+  run_kind: string;
+  detected_at: string;
+  updated_at: string;
+  /** A/B 发布纪律：B 波接齐前恒空集；前端镜像事实，不推导动作。 */
+  allowed_actions: string[];
+  last_operation?: LcFreshOperationDto | null;
+};
+
+const LC_RESUME_RECOVERY_STATES: Record<string, true> = {
+  waiting: true,
+  fresh_reserved: true,
+  fresh_running: true,
+  resolved: true,
+};
+
+const LC_FRESH_OPERATION_STATES: Record<string, true> = {
+  not_started: true,
+  reserved: true,
+  running: true,
+  completed: true,
+  failed: true,
+  unknown: true,
+};
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+/**
+ * C1（Task 6.1）运行时守卫：session_state.lc_resume_recovery 的形状校验。
+ * wire 无编译期保障，畸形载荷不得进入 store 半成品事实（调用方决定保留
+ * 旧投影或落 null）；state 枚举严格校验（驱动卡可见性），provider/run_kind
+ * 只验非空字符串（后端扩展不致前端丢弃整个恢复事实）。
+ */
+export function isLcResumeRecoveryDto(value: unknown): value is LcResumeRecoveryDto {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  if (
+    !isNonEmptyString(record.recovery_id) ||
+    !LC_RESUME_RECOVERY_STATES[record.state as string] ||
+    !isNonEmptyString(record.reason_code) ||
+    !isNonEmptyString(record.provider) ||
+    !isNonEmptyString(record.failed_node_id) ||
+    !isNonEmptyString(record.run_kind) ||
+    !isNonEmptyString(record.detected_at) ||
+    !isNonEmptyString(record.updated_at) ||
+    !Array.isArray(record.allowed_actions) ||
+    !record.allowed_actions.every((action) => isNonEmptyString(action))
+  ) {
+    return false;
+  }
+  const lastOperation = record.last_operation;
+  if (lastOperation === null || lastOperation === undefined) {
+    return true;
+  }
+  if (typeof lastOperation !== "object") {
+    return false;
+  }
+  const operation = lastOperation as Record<string, unknown>;
+  return (
+    isNonEmptyString(operation.operation_id) &&
+    LC_FRESH_OPERATION_STATES[operation.state as string] &&
+    (operation.reason === undefined ||
+      operation.reason === null ||
+      typeof operation.reason === "string") &&
+    (operation.fresh_node === undefined ||
+      operation.fresh_node === null ||
+      typeof operation.fresh_node === "string")
+  );
+}
+
 export type LinkedWorkspaceAmendmentTarget = {
   entity_id: string;
   workspace_type: "story" | "design";
@@ -757,6 +866,22 @@ export type WsOutMessage = WithEventSeq<
       provider_start_ledger?: WorkItemPlanProviderStartLedgerEntry[];
       /** P0 1.2：durable automation 归属；服务端读取失败/未知时省略。 */
       automation?: AutomationOwnership | null;
+      /** C1（Task 6.1）：durable LC 恢复纯投影（waiting/fresh_reserved/
+       * fresh_running/resolved 主状态＋last_operation）；空/旧 wire 缺省
+       * 省略；resolved 保留证据供 Replay，allowed_actions 由后端权威下发。 */
+      lc_resume_recovery?: LcResumeRecoveryDto | null;
+    }
+  | {
+      /** C1（Task 6.1）：显式 fresh operation 的 typed 受理/回放结果（设计
+       * §5.1）——operation_state 取 durable 事实，不从客户端乐观态猜；
+       * 无 native/秘密字段；随 SessionState.last_operation 对账。 */
+      type: "lc_resume_recovery_operation_result";
+      recovery_id: string;
+      operation_id: string;
+      delivery: LcResumeRecoveryDelivery;
+      operation_state: LcFreshOperationState;
+      fresh_node_id?: string | null;
+      reason_code?: string | null;
     }
   | { type: "error"; message: string }
   | { type: "protocol_error"; code: string; message: string; context?: unknown }

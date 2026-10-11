@@ -1,4 +1,6 @@
 import { create } from "zustand";
+import type { LcResumeRecoveryDto } from "../api/types";
+import { isLcResumeRecoveryDto } from "../api/types";
 import type { ChatEntry, ChoiceResponsePayload } from "./chat-entries";
 import { snapshotGateFingerprint } from "./cockpit-action-routing";
 import { gateArchiveClosedCopy, gateArchiveFeedbackCopy } from "./gate-prompt-copy";
@@ -146,6 +148,8 @@ const initialState: WorkspaceWsState = {
   error: null,
   activeRunId: null,
   recoverableInterruptedRun: null,
+  // C1（Task 6.1）：LC 恢复权威投影；reset/切会话/首帧前为 null（无事实）。
+  lcResumeRecovery: null,
   protocolError: null,
   providerLocked: false,
   providerSnapshot: null,
@@ -165,6 +169,22 @@ const initialState: WorkspaceWsState = {
   protocolDiagnostics: [],
   connectionCloseDiagnostics: [],
 };
+
+/**
+ * C1（Task 6.1）：session_state.lc_resume_recovery 的权威全量替换口径。
+ * 字段缺席/显式 null = 当前无恢复事实（清卡，resolved 后续帧同规）；
+ * 畸形载荷不构成清卡权威事实——fail-closed 保留同会话旧投影（跨会话传
+ * previous=null 即不保留），不伪造 null 态、不从错误文本推恢复事实。
+ */
+function lcResumeRecoveryFromWire(
+  raw: unknown,
+  previous: LcResumeRecoveryDto | null,
+): LcResumeRecoveryDto | null {
+  if (raw === null || raw === undefined) {
+    return null;
+  }
+  return isLcResumeRecoveryDto(raw) ? raw : previous;
+}
 
 function snapshotIdentityFor(
   fingerprint: string,
@@ -395,6 +415,12 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
         protocolError: null,
         activeRunId: state.active_run_id ?? null,
         recoverableInterruptedRun: state.recoverable_interrupted_run ?? null,
+        // C1（Task 6.1）：恢复事实随权威 SessionState 全量替换；跨会话
+        // 不保留旧投影（previous 传 null），畸形载荷 fail-closed 不清卡。
+        lcResumeRecovery: lcResumeRecoveryFromWire(
+          state.lc_resume_recovery,
+          sameSession ? prev.lcResumeRecovery : null,
+        ),
         // D8：同会话重连保留 turn/command 去重集与诊断（不丢弃）；
         // 跨会话一律清空，避免上一会话的门与推进记忆串到新会话。
         humanGateTurn:

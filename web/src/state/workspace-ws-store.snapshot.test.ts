@@ -21,6 +21,10 @@ import type {
   WorkspaceSessionStatePayload,
 } from "./workspace-ws-store-types";
 import { planRepairSnapshotFixture } from "./workspace-plan-repair-test-fixtures";
+import {
+  lcFreshOperationFixture,
+  lcResumeRecoveryFixture,
+} from "./workspace-cockpit-projection.test-fixtures";
 
 describe("workspace ws store snapshots", () => {
   installWorkspaceStoreTestHooks();
@@ -868,5 +872,131 @@ describe("plan repair snapshot mirroring", () => {
       sessionStateBase({ plan_repair: snapshot }) as never,
     );
     expect(observerState.planRepair).toEqual(snapshot);
+  });
+});
+
+describe("anchor_t19 driver/observer authoritative lc resume recovery", () => {
+  installWorkspaceStoreTestHooks();
+
+  function recoverySessionState(
+    sessionId: string,
+    extras: Partial<WorkspaceSessionStatePayload> = {},
+  ): WorkspaceSessionStatePayload {
+    return {
+      session_id: sessionId,
+      workspace_type: "work_item_plan",
+      stage: "running",
+      session_status: "waiting_for_human",
+      flow_kind: "legacy",
+      run_policy: "interactive",
+      run_history: {
+        seen_fingerprints: [],
+        repairs_used: 0,
+        manual_repairs_used: 0,
+        transitions_used: 0,
+        initial_review_count: 0,
+        verification_review_count: 0,
+      },
+      messages: [],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "codex", reviewer: null },
+      ...extras,
+    };
+  }
+
+  it("anchor_t19_driver_observer_recovery_projection_and_resolved_clear", () => {
+    const store = useWorkspaceStore.getState();
+    const waiting = lcResumeRecoveryFixture({
+      state: "waiting",
+      last_operation: lcFreshOperationFixture({ state: "failed", reason: "prepare_failed" }),
+    });
+
+    // 全量：首帧带恢复事实 → driver store 落库（typed 字段，不从错误文本解析）。
+    store.setSessionState(recoverySessionState("session_rec", { lc_resume_recovery: waiting }));
+    const driver = useWorkspaceStore.getState();
+    expect(driver.lcResumeRecovery?.recovery_id).toBe("rec-1");
+    expect(driver.lcResumeRecovery?.state).toBe("waiting");
+    expect(driver.lcResumeRecovery?.allowed_actions).toEqual([]);
+    expect(driver.lcResumeRecovery?.last_operation).toMatchObject({
+      operation_id: "op-1",
+      state: "failed",
+      reason: "prepare_failed",
+    });
+
+    // 增量序列：权威 SessionState 逐帧推进，最新帧事实胜出。
+    store.setSessionState(
+      recoverySessionState("session_rec", {
+        lc_resume_recovery: lcResumeRecoveryFixture({
+          state: "fresh_reserved",
+          last_operation: lcFreshOperationFixture({ state: "reserved" }),
+        }),
+      }),
+    );
+    expect(useWorkspaceStore.getState().lcResumeRecovery?.state).toBe("fresh_reserved");
+    store.setSessionState(
+      recoverySessionState("session_rec", {
+        lc_resume_recovery: lcResumeRecoveryFixture({
+          state: "fresh_running",
+          last_operation: lcFreshOperationFixture({ state: "running" }),
+        }),
+      }),
+    );
+    expect(useWorkspaceStore.getState().lcResumeRecovery?.state).toBe("fresh_running");
+    store.setSessionState(
+      recoverySessionState("session_rec", {
+        lc_resume_recovery: lcResumeRecoveryFixture({
+          state: "resolved",
+          last_operation: lcFreshOperationFixture({ state: "completed", fresh_node: "node-2" }),
+        }),
+      }),
+    );
+    // resolved：卡消失方向由投影决定，store 证据保留。
+    expect(useWorkspaceStore.getState().lcResumeRecovery).toMatchObject({
+      recovery_id: "rec-1",
+      state: "resolved",
+      last_operation: { operation_id: "op-1", state: "completed", fresh_node: "node-2" },
+    });
+
+    // null：字段缺席的权威帧 → 清空（不复活旧恢复事实）。
+    store.setSessionState(recoverySessionState("session_rec"));
+    expect(useWorkspaceStore.getState().lcResumeRecovery).toBeNull();
+
+    // reset：显式清空。
+    store.setSessionState(recoverySessionState("session_rec", { lc_resume_recovery: waiting }));
+    expect(useWorkspaceStore.getState().lcResumeRecovery?.recovery_id).toBe("rec-1");
+    useWorkspaceStore.getState().reset();
+    expect(useWorkspaceStore.getState().lcResumeRecovery).toBeNull();
+
+    // 切会话：旧会话恢复事实不串入新会话。
+    store.setSessionState(recoverySessionState("session_rec", { lc_resume_recovery: waiting }));
+    store.setSessionState(recoverySessionState("session_other"));
+    expect(useWorkspaceStore.getState().lcResumeRecovery).toBeNull();
+
+    // 重连：同会话新全量帧同源重建；observer 同帧同 ID/action。
+    store.setSessionState(recoverySessionState("session_rec", { lc_resume_recovery: waiting }));
+    const observer = observerStateFromSessionState(
+      recoverySessionState("session_rec", { lc_resume_recovery: waiting }) as never,
+    );
+    expect(useWorkspaceStore.getState().lcResumeRecovery?.recovery_id).toBe("rec-1");
+    expect(observer.lcResumeRecovery?.recovery_id).toBe("rec-1");
+    expect(observer.lcResumeRecovery).toEqual(useWorkspaceStore.getState().lcResumeRecovery);
+  });
+
+  it("anchor_t19 driver keeps the previous authoritative recovery when a wire payload is malformed", () => {
+    const valid = lcResumeRecoveryFixture();
+    useWorkspaceStore
+      .getState()
+      .setSessionState(recoverySessionState("session_rec", { lc_resume_recovery: valid }));
+    // 畸形载荷（非法 state 字面量）不构成清卡权威事实：fail-closed 保留旧投影。
+    useWorkspaceStore.getState().setSessionState(
+      recoverySessionState("session_rec", {
+        lc_resume_recovery: { ...valid, state: "bogus" } as never,
+      }),
+    );
+    expect(useWorkspaceStore.getState().lcResumeRecovery).toMatchObject({
+      recovery_id: "rec-1",
+      state: "waiting",
+    });
   });
 });

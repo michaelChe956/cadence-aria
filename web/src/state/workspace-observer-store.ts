@@ -1,3 +1,4 @@
+import { isLcResumeRecoveryDto } from "../api/types";
 import type { WorkspaceSessionSummary, WsOutMessage } from "../api/types";
 import { workspaceSessionWebSocketUrl } from "../api/client";
 import type { CockpitInboxItem } from "./workspace-cockpit-projection";
@@ -412,6 +413,12 @@ export function observerStateFromSessionState(
     // P0 1.2（REQ-WIGA-08）：automation 原样透传；缺省=未知（null），D6 不从
     // stopPoints/run_policy 猜测 owner。
     automation: (message as { automation?: WorkspaceWsState["automation"] }).automation ?? null,
+    // C1（Task 6.1）：LC 恢复事实显式落位——本函数结尾的 as unknown 掩码
+    // 不暴露漏投影，必须逐字段写出；运行时守卫窄化 wire 字段（缺席=null，
+    // 畸形不落半成品，观察态无旧帧可保留、不猜）。
+    lcResumeRecovery: isLcResumeRecoveryDto(message.lc_resume_recovery)
+      ? message.lc_resume_recovery
+      : null,
     humanGateSnapshot: message.human_gate_snapshot ?? null,
     humanGateTurn: null,
     planRepair: message.plan_repair ?? null,

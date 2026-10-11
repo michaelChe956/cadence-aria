@@ -10,6 +10,10 @@ import {
   watchWindowCopy,
   type WorkspaceObserverSocketFactory,
 } from "./workspace-observer-store";
+import {
+  lcFreshOperationFixture,
+  lcResumeRecoveryFixture,
+} from "./workspace-cockpit-projection.test-fixtures";
 
 function summary(
   workspace_session_id: string,
@@ -806,5 +810,77 @@ describe("automation ownership projection (P0 1.2)", () => {
     expect(state.automation?.owner).toBe("client");
     expect(state.automation?.policy_revision).toBe(3);
     expect(state.automation?.enabled).toBe(false);
+  });
+});
+
+describe("anchor_t19 observer authoritative lc resume recovery", () => {
+  it("anchor_t19_driver_observer_recovery_projection_and_resolved_clear", () => {
+    // 全量帧（重连/首连同一入口）：observerStateFromSessionState 显式落
+    // lcResumeRecovery 字段（不因 as unknown 掩码漏投影），与 driver 同帧同 ID。
+    const waiting = observerStateFromSessionState({
+      ...sessionStateFrame("session_obs", 1),
+      lc_resume_recovery: lcResumeRecoveryFixture({ state: "waiting" }),
+    } as never);
+    expect(waiting.lcResumeRecovery?.recovery_id).toBe("rec-1");
+    expect(waiting.lcResumeRecovery?.state).toBe("waiting");
+    expect(waiting.lcResumeRecovery?.allowed_actions).toEqual([]);
+
+    // 增量推进：权威 SessionState 重基线帧序列，最新帧胜出。
+    const reserved = observerStateFromSessionState({
+      ...sessionStateFrame("session_obs", 2),
+      lc_resume_recovery: lcResumeRecoveryFixture({
+        state: "fresh_reserved",
+        last_operation: lcFreshOperationFixture({ state: "reserved" }),
+      }),
+    } as never);
+    expect(reserved.lcResumeRecovery).toMatchObject({
+      recovery_id: "rec-1",
+      state: "fresh_reserved",
+      last_operation: { operation_id: "op-1", state: "reserved" },
+    });
+
+    // resolved：证据保留在 store，观察收件箱不投恢复卡（卡消失）。
+    const resolved = observerStateFromSessionState({
+      ...sessionStateFrame("session_obs", 3),
+      lc_resume_recovery: lcResumeRecoveryFixture({
+        state: "resolved",
+        last_operation: lcFreshOperationFixture({ state: "completed", fresh_node: "node-2" }),
+      }),
+    } as never);
+    expect(resolved.lcResumeRecovery).toMatchObject({
+      recovery_id: "rec-1",
+      state: "resolved",
+      last_operation: { state: "completed", fresh_node: "node-2" },
+    });
+    expect(
+      selectObservedInbox([{ sessionId: "session_obs", state: resolved }]).some(
+        (item) => item.kind === "lc_resume_recovery",
+      ),
+    ).toBe(false);
+
+    // 等待态观察收件箱投恢复卡（observer 只见事实，不发写动作）。
+    expect(
+      selectObservedInbox([{ sessionId: "session_obs", state: waiting }]).some(
+        (item) => item.kind === "lc_resume_recovery",
+      ),
+    ).toBe(true);
+
+    // null：字段缺席的权威帧 → 观察态清空（不保留陈旧恢复）。
+    const cleared = observerStateFromSessionState({
+      ...sessionStateFrame("session_obs", 4),
+    } as never);
+    expect(cleared.lcResumeRecovery).toBeNull();
+    expect(
+      selectObservedInbox([{ sessionId: "session_obs", state: cleared }]).some(
+        (item) => item.kind === "lc_resume_recovery",
+      ),
+    ).toBe(false);
+
+    // 畸形载荷：观察态不落半成品事实（无旧帧可保留 → null，不猜）。
+    const malformed = observerStateFromSessionState({
+      ...sessionStateFrame("session_obs", 5),
+      lc_resume_recovery: { ...lcResumeRecoveryFixture(), state: "bogus" },
+    } as never);
+    expect(malformed.lcResumeRecovery).toBeNull();
   });
 });

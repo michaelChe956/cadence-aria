@@ -4,6 +4,8 @@ import type {
   C1WaitingItem,
   ChoiceQuestion,
   CodingFinalConfirmInfoItem,
+  LcFreshOperationDto,
+  LcResumeRecoveryDto,
   LogicalCodebaseBootstrapNoticeDto,
   LogicalCodebaseBootstrapProjection,
   PlanConfirmedInfoItem,
@@ -500,7 +502,8 @@ export type CockpitInboxKind =
   | "info"
   | "c1_recovery"
   | "sc_failed"
-  | "lc_bootstrap";
+  | "lc_bootstrap"
+  | "lc_resume_recovery";
 
 /**
  * P0 1.3（REQ-WIGA-05）Task 11：驾驶舱 choice 就地作答投影——workspace 侧
@@ -568,7 +571,8 @@ export interface CockpitInboxItem {
     | "coding_final_confirm_info"
     | "c1_waiting"
     | "sc_failed"
-    | "logical_codebase_bootstrap",
+    | "logical_codebase_bootstrap"
+    | "lc_resume_recovery",
   createdAt: string | null;
   gate: GateProjection | null;
   inlineError: { code: string; message: string } | null;
@@ -592,6 +596,10 @@ export interface CockpitInboxItem {
    * 等待/失败通知投影（notice key/step/object/原因/副作用/动作/下一步）；
    * 不进入错误计数，动作统一走 bootstrap action API。 */
   bootstrapInfo?: LogicalCodebaseBootstrapInfoProjection | null;
+  /** C1（Task 6.1）：kind="lc_resume_recovery" 时的 durable 恢复卡投影；
+   * 仅 waiting/fresh_reserved/fresh_running 投卡，resolved 证据留 store
+   * 不投卡（动作资格只镜像后端 allowed_actions，前端不推导）。 */
+  recovery?: LcResumeRecoveryInboxProjection | null;
 }
 
 /** C4 Task 9：LC 冷启动通知的收件箱投影（服务端
@@ -609,6 +617,22 @@ export interface LogicalCodebaseBootstrapInfoProjection {
   allowedActions: readonly string[];
   nextStep: string | null;
   membershipRevision: number | null;
+}
+
+/** C1（Task 6.1）：LC 恢复收件箱卡投影（wire LcResumeRecoveryDto 的只读
+ * camelCase 镜像，供 D 层卡面渲染；动作资格只镜像 allowed_actions，
+ * last_operation 为 typed 事实，不从错误文本解析）。 */
+export interface LcResumeRecoveryInboxProjection {
+  recoveryId: string;
+  state: LcResumeRecoveryDto["state"];
+  reasonCode: string;
+  provider: string;
+  failedNodeId: string;
+  runKind: string;
+  detectedAt: string;
+  updatedAt: string;
+  allowedActions: readonly string[];
+  lastOperation: LcFreshOperationDto | null;
 }
 
 /** C2 Task 12：等待项操作上下文的只读镜像（服务端 WaitingItemAction）。 */
@@ -1098,6 +1122,40 @@ export function selectCockpitInbox(state: WorkspaceWsState): CockpitInboxItem[] 
         scFailure: { failedNodeId: failedNode.node_id, phase: "failed" },
       });
     }
+  }
+
+  // C1（Task 6.1）：durable LC 恢复收件箱卡——仅 waiting/fresh_reserved/
+  // fresh_running 三活跃态投卡；resolved 证据保留在 store.lcResumeRecovery
+  // 供 Replay 对账，但不投卡、不阻塞 generic 后续动作（设计 §6：不得永久
+  // 屏蔽合法修订）。动作资格只镜像 wire allowed_actions，不从错误文本推导。
+  // 部分构造的观察态（as unknown 掩码路径）可能缺字段：undefined 视同 null。
+  const lcRecovery = state.lcResumeRecovery ?? null;
+  if (lcRecovery !== null && lcRecovery.state !== "resolved") {
+    items.push({
+      id: `lc_resume_recovery:${lcRecovery.recovery_id}`,
+      kind: "lc_resume_recovery",
+      severity: 2,
+      title: lcRecovery.state === "waiting" ? "旧原生会话已失效" : "正在启动新原生会话…",
+      summary: `${lcRecovery.reason_code} · ${lcRecovery.provider} · ${lcRecovery.run_kind}`,
+      triage: false,
+      source: "lc_resume_recovery",
+      createdAt: lcRecovery.detected_at,
+      gate: null,
+      inlineError: null,
+      choice: null,
+      recovery: {
+        recoveryId: lcRecovery.recovery_id,
+        state: lcRecovery.state,
+        reasonCode: lcRecovery.reason_code,
+        provider: lcRecovery.provider,
+        failedNodeId: lcRecovery.failed_node_id,
+        runKind: lcRecovery.run_kind,
+        detectedAt: lcRecovery.detected_at,
+        updatedAt: lcRecovery.updated_at,
+        allowedActions: lcRecovery.allowed_actions,
+        lastOperation: lcRecovery.last_operation ?? null,
+      },
+    });
   }
 
   return items.sort((left, right) => {

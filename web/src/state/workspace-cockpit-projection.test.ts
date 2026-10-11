@@ -16,7 +16,12 @@ import {
   topologyTokenName,
 } from "./workspace-cockpit-projection";
 import type { C1WaitingItem } from "../api/types";
-import { reviewVerdictEntry, timelineNode } from "./workspace-cockpit-projection.test-fixtures";
+import {
+  lcFreshOperationFixture,
+  lcResumeRecoveryFixture,
+  reviewVerdictEntry,
+  timelineNode,
+} from "./workspace-cockpit-projection.test-fixtures";
 
 function snapshotGateState(overrides: {
   trigger: "native_human_required" | "verification_new_findings";
@@ -1074,5 +1079,107 @@ describe("C5 project repository initialization waiting projection", () => {
     expect(item.c1Info?.issueId).toBe("issue_0001");
     expect(item.c1Info?.operationId).toBeNull();
     expect(item.c1Info?.diagnostics).toBeNull();
+  });
+});
+
+describe("anchor_t19 cockpit inbox lc resume recovery card", () => {
+  installWorkspaceStoreTestHooks();
+
+  function recoverySessionState(
+    extras: Record<string, unknown> = {},
+  ): Record<string, unknown> {
+    return {
+      session_id: "session_rec",
+      workspace_type: "work_item_plan",
+      stage: "running",
+      session_status: "waiting_for_human",
+      flow_kind: "legacy",
+      run_policy: "interactive",
+      run_history: {
+        seen_fingerprints: [],
+        repairs_used: 0,
+        manual_repairs_used: 0,
+        transitions_used: 0,
+        initial_review_count: 0,
+        verification_review_count: 0,
+      },
+      messages: [],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "codex", reviewer: null },
+      ...extras,
+    };
+  }
+
+  it("anchor_t19_driver_observer_recovery_projection_and_resolved_clear", () => {
+    // 三活跃态各投一张恢复卡；卡面携带 D 层渲染所需的完整恢复投影。
+    for (const state of ["waiting", "fresh_reserved", "fresh_running"] as const) {
+      useWorkspaceStore.getState().setSessionState(
+        recoverySessionState({
+          lc_resume_recovery: lcResumeRecoveryFixture({
+            state,
+            last_operation: lcFreshOperationFixture({ state: "failed", reason: "prepare_failed" }),
+          }),
+        }) as never,
+      );
+      const items = selectCockpitInbox(useWorkspaceStore.getState());
+      const card = items.find((item) => item.kind === "lc_resume_recovery");
+      expect(card, `state=${state}`).toMatchObject({
+        id: "lc_resume_recovery:rec-1",
+        severity: 2,
+        source: "lc_resume_recovery",
+      });
+      expect(card?.recovery).toMatchObject({
+        recoveryId: "rec-1",
+        state,
+        reasonCode: "resume_fingerprint_mismatch",
+        provider: "codex",
+        failedNodeId: "node-1",
+        runKind: "legacy_draft",
+        detectedAt: "2026-10-11T00:02:00Z",
+        updatedAt: "2026-10-11T00:04:00Z",
+        // 不推权限：allowedActions 只镜像 wire allowed_actions（B 未接齐恒空），
+        // 不从 reason_code/错误文本推导动作。
+        allowedActions: [],
+        lastOperation: { operation_id: "op-1", state: "failed", reason: "prepare_failed" },
+      });
+    }
+
+    // resolved：卡消失（不投 lc_resume_recovery 卡）……
+    useWorkspaceStore.getState().setSessionState(
+      recoverySessionState({
+        lc_resume_recovery: lcResumeRecoveryFixture({
+          state: "resolved",
+          last_operation: lcFreshOperationFixture({ state: "completed", fresh_node: "node-2" }),
+        }),
+      }) as never,
+    );
+    const resolvedState = useWorkspaceStore.getState();
+    expect(resolvedState.lcResumeRecovery).toMatchObject({
+      recovery_id: "rec-1",
+      state: "resolved",
+    });
+    expect(
+      selectCockpitInbox(resolvedState).some((item) => item.kind === "lc_resume_recovery"),
+    ).toBe(false);
+
+    // ……且 generic 卡不被永久隐藏（resolved 不阻塞合法后续动作的收件箱事实）。
+    useWorkspaceStore.getState().setSessionStatus("stopped_needs_human");
+    const afterResolved = selectCockpitInbox(useWorkspaceStore.getState());
+    expect(
+      afterResolved.some((item) => item.kind === "lc_resume_recovery"),
+    ).toBe(false);
+    expect(
+      afterResolved.some((item) => item.kind === "stopped"),
+    ).toBe(true);
+
+    // null：无恢复事实不投卡。
+    useWorkspaceStore.getState().reset();
+    useWorkspaceStore.getState().setSessionState(recoverySessionState() as never);
+    expect(
+      selectCockpitInbox(useWorkspaceStore.getState()).some(
+        (item) => item.kind === "lc_resume_recovery",
+      ),
+    ).toBe(false);
   });
 });
