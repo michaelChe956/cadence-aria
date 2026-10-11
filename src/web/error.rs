@@ -219,6 +219,9 @@ impl IntoResponse for ApiError {
             "human_action_rejected" => StatusCode::UNPROCESSABLE_ENTITY,
             "invalid_compile_recovery_action" => StatusCode::UNPROCESSABLE_ENTITY,
             "single_candidate_approval_compile_failed" => StatusCode::UNPROCESSABLE_ENTITY,
+            // T5.1（REQ-REG-15/D4）：确认 trust 未 Ready 的停等 422——语义
+            // fail-closed（门未关、不宣称 Confirmed），非 500 服务错误。
+            "workspace_confirmation_trust_waiting" => StatusCode::UNPROCESSABLE_ENTITY,
             // C1 Task 4：候选门恢复/缺快照裸 approve 稳定码——门/命令
             // 身份冲突 409，语义拒绝/快照不完整 422。
             "candidate_recovery_gate_mismatch" => StatusCode::CONFLICT,

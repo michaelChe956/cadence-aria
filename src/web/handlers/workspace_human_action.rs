@@ -19,7 +19,8 @@ use crate::web::state::WebAppState;
 use crate::web::types::{HumanActionRequest, HumanActionState, HumanActionStatus};
 use crate::web::workspace_ws_handler::{
     HumanGateFeedbackEffect, HumanGateTerminationEffect, ProviderRunKind,
-    apply_human_gate_feedback, apply_human_gate_termination, spawn_provider_run_from_handler,
+    apply_human_gate_feedback, apply_human_gate_termination,
+    confirmation_trust_waiting_projection, spawn_provider_run_from_handler,
 };
 
 pub async fn post_workspace_human_action(
@@ -249,6 +250,18 @@ async fn handle_request(
                     findings_context
                         .unwrap_or_else(|| json!({ "command_id": command_id, "gate_id": gate_id })),
                 )),
+                // T5.1（REQ-REG-15/D4）：确认 trust 未 Ready → 非 success
+                // ApiError（422，不宣称 Confirmed、不落 generic engine
+                // error）；稳定 code 与 message/context 同源投影（与 WS
+                // ProtocolError 共用 `confirmation_trust_waiting_projection`）。
+                HumanGateTerminationEffect::TrustWaiting { waiting } => {
+                    let projection = confirmation_trust_waiting_projection(&waiting);
+                    Err(ApiError::runtime(
+                        projection.code,
+                        projection.message,
+                        projection.context,
+                    ))
+                }
                 HumanGateTerminationEffect::EngineError(message) => {
                     // C1（REQ-C1-GATE-01）：缺完整候选快照的裸 approve 以
                     // 专用 code 上抛（422），不混入引擎噪音通道。
@@ -337,5 +350,413 @@ fn busy(command_id: String, gate_id: String) -> HumanActionStatus {
         command_id,
         state: HumanActionState::Busy,
         gate_id,
+    }
+}
+
+// —— T5.1（REQ-REG-15/D4）：确认 trust typed 停等的 REST 边界投影 ——
+// 真实 handler/request 测试锚（build_web_router + oneshot）：REST Approve 与
+// WS 共用 apply_human_gate_termination effect，TrustWaiting 必须映射为非
+// success ApiError（稳定 code=workspace_confirmation_trust_waiting，不宣称
+// Confirmed）；Ready 沿原链推进；Abandon 脱困不变。
+#[cfg(test)]
+mod confirmation_trust_waiting {
+    use super::*;
+    use crate::product::lifecycle_store::{
+        CreateWorkspaceSessionInput, LifecycleStore, WorkItemPlanSessionOptions,
+    };
+    use crate::product::logical_codebase::ProviderTrustPreparationResult;
+    use crate::product::logical_codebase::ProviderTrustWaiting;
+    use crate::product::models::{
+        ProviderName, SingleCandidatePhase, WorkspaceSessionStatus, WorkspaceType,
+    };
+    use crate::product::work_item_plan_policy::{HumanGateSnapshot, HumanReason, RunPolicy};
+    use crate::product::workspace_engine::{WorkspaceEngine, WorkspaceSession};
+    use crate::web::app::build_web_router;
+    use crate::web::handlers::automation_enrollment_test_support::seed_fixture;
+    use crate::web::state::WebAppState;
+    use crate::web::workspace_session::WorkspaceSessionManager;
+    use serde_json::json;
+
+    /// 剧本 precondition：默认 Ready，`script_waiting` 排队一条 HomeWaiting；
+    /// 记录 operation_id 调用（恰一次/零调用断言）。
+    #[derive(Default)]
+    struct ScriptedTrustPrecondition {
+        calls: std::sync::Mutex<Vec<String>>,
+        scripted: std::sync::Mutex<std::collections::VecDeque<ProviderTrustPreparationResult>>,
+    }
+
+    impl ScriptedTrustPrecondition {
+        fn script_waiting(&self, reason_code: &str) {
+            self.scripted
+                .lock()
+                .unwrap()
+                .push_back(ProviderTrustPreparationResult::Waiting {
+                    waiting: ProviderTrustWaiting {
+                        provider: ProviderName::Codex,
+                        canonical_root: std::path::PathBuf::from("/fixture-trust-root"),
+                        trust_key: "fixture-trust-key".to_string(),
+                        reason_code: reason_code.to_string(),
+                        message: "fixture 等待原因（home 读取失败）".to_string(),
+                        retry_action: "修复后重新确认".to_string(),
+                        manual_guidance: "fixture 人工指导：修复 Codex home 配置".to_string(),
+                        recorded_at: "2026-10-11T00:00:00Z".to_string(),
+                    },
+                });
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls.lock().unwrap().len()
+        }
+    }
+
+    impl crate::product::logical_codebase::ProviderTrustPrecondition for ScriptedTrustPrecondition {
+        fn ensure_ready(
+            &self,
+            _project_id: &str,
+            operation_id: &str,
+            _lc_id: &str,
+            _canonical_root: &std::path::Path,
+            _providers: &[ProviderName],
+            _scenario: crate::product::logical_codebase::provider_trust::ProviderTrustScenario,
+        ) -> ProviderTrustPreparationResult {
+            self.calls.lock().unwrap().push(operation_id.to_string());
+            self.scripted.lock().unwrap().pop_front().unwrap_or(
+                ProviderTrustPreparationResult::Ready {
+                    registrations: Vec::new(),
+                },
+            )
+        }
+    }
+
+    struct HumanActionTrustFixture {
+        _root: tempfile::TempDir,
+        lifecycle: LifecycleStore,
+        router: axum::Router,
+        manager: std::sync::Arc<WorkspaceSessionManager>,
+        session_id: String,
+        gate_id: String,
+        trust: std::sync::Arc<ScriptedTrustPrecondition>,
+    }
+
+    impl HumanActionTrustFixture {
+        async fn post_human_action(
+            &self,
+            body: serde_json::Value,
+        ) -> (axum::http::StatusCode, serde_json::Value) {
+            use tower::ServiceExt;
+            let uri = format!("/api/workspace-sessions/{}/human-actions", self.session_id);
+            let response = self
+                .router
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+            (status, json)
+        }
+
+        fn durable(&self) -> crate::product::models::WorkspaceSessionRecord {
+            self.lifecycle
+                .get_workspace_session(&self.session_id)
+                .expect("durable session")
+        }
+    }
+
+    static T5_REST_SEQUENCE: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(1);
+
+    /// LC SC Approval 门 + 真实 manager/router：seed LC 环境（issue/manifest/
+    /// members）→ SC WorkItemPlan 会话（相位 Approval + 快照静态资格）→
+    /// `enter_human_confirm` 落 durable 门节点（REST expected_gate_id 锚）→
+    /// WebAppState deps 注入剧本 precondition（生产 manager 注入链）。
+    async fn lc_sc_approval_gate_fixture(
+        trust: std::sync::Arc<ScriptedTrustPrecondition>,
+    ) -> HumanActionTrustFixture {
+        let fixture = seed_fixture(2, true);
+        let root_path = fixture._root.path().to_path_buf();
+        let lifecycle = fixture.lifecycle.clone();
+        let seq = T5_REST_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // 真实 plan 记录（Draft 空 plan）：manager create 的 repository 解析
+        // 对 WorkItemPlan 会话先读 plan；2 成员无唯一 focus → 聚合根视图
+        //（logical_repository_id=Some → gateway/确认上下文装配段可达）。
+        let plan_id = format!("plan_t5_rest_{seq}");
+        lifecycle
+            .create_issue_work_item_plan(crate::product::lifecycle_store::CreateIssueWorkItemPlanInput {
+                id: Some(plan_id.clone()),
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                source_story_spec_ids: vec![fixture.story_id.clone()],
+                source_design_spec_ids: Vec::new(),
+                options: crate::product::models::IssueWorkItemPlanOptions {
+                    include_integration_tests: false,
+                    include_e2e_tests: false,
+                    force_frontend_backend_split: false,
+                    require_execution_plan_confirm: false,
+                },
+                status: crate::product::models::IssueWorkItemPlanStatus::Draft,
+                work_item_ids: Vec::new(),
+                repository_profile_ref: None,
+                verification_plan_ids: Vec::new(),
+                dependency_graph: Vec::new(),
+                created_from_provider_run: None,
+                validator_findings: Vec::new(),
+            })
+            .expect("create fixture work item plan");
+        let created = lifecycle
+            .create_workspace_session(CreateWorkspaceSessionInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                entity_id: plan_id,
+                workspace_type: WorkspaceType::WorkItemPlan,
+                author_provider: ProviderName::Codex,
+                reviewer_provider: None,
+                review_rounds: 0,
+                superpowers_enabled: false,
+                openspec_enabled: false,
+                work_item_plan_options: Some(WorkItemPlanSessionOptions {
+                    flow_kind: crate::product::work_item_plan_policy::WorkItemPlanFlowKind::SingleCandidate,
+                    run_policy: RunPolicy::Interactive,
+                    rollout_snapshot: true,
+                }),
+            })
+            .expect("create SC session");
+        // 进程内唯一 session id（close CAS 计数不互窜）+ 开态门 durable 事实。
+        let session_id = format!("workspace_session_t5_rest_{seq}");
+        let mut record = lifecycle
+            .get_workspace_session(&created.id)
+            .expect("load created session");
+        let old_id = record.id.clone();
+        record.id = session_id.clone();
+        record.status = WorkspaceSessionStatus::WaitingForHuman;
+        record.single_candidate_phase = Some(SingleCandidatePhase::Approval);
+        record.human_gate_snapshot = Some(HumanGateSnapshot {
+            candidate_recovery: None,
+            findings: Vec::new(),
+            repeated_fingerprints: Vec::new(),
+            attempts_used: 0,
+            manual_repairs_remaining: 1,
+            trigger: HumanReason::NativeHumanRequired,
+            resumable: false,
+            accepted_feedback_turns: None,
+        });
+        let session_dir = fixture
+            .paths
+            .issue_root(&record.project_id, &record.issue_id)
+            .join("workspace-sessions");
+        crate::product::json_store::write_json(
+            &session_dir.join(format!("{}.json", record.id)),
+            &record,
+        )
+        .expect("persist t5 rest fixture session");
+        std::fs::remove_file(session_dir.join(format!("{old_id}.json"))).ok();
+
+        // durable 门节点：REST 的 expected_gate_id 以 active timeline node 为准
+        //（manager 引擎晚于该 durable 事实构建，与 campaign REST fixture 同款）。
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(8);
+        let session = WorkspaceSession::from_record(record);
+        let mut gate_engine = WorkspaceEngine::new_persistent(
+            std::sync::Arc::new(crate::product::checkpoint_store::CheckpointStore::new(
+                root_path.join("checkpoints"),
+            )),
+            lifecycle.clone(),
+            event_tx,
+            session,
+        );
+        gate_engine
+            .enter_human_confirm(Some("T5 REST 人工确认门".to_string()))
+            .await;
+
+        // C1 候选完整性 label 不在本测试面（本测试锁 trust 接线）：
+        // enter_human_confirm 会按 SC Approval 门落 candidate_recovery 评估
+        // label，approve 前的候选完整性重估将因 fixture 缺 plan 候选工件
+        // fail-closed（CANDIDATE_SNAPSHOT_INCOMPLETE，与 trust 无关）。
+        // 清掉该 additive label，走「label 缺席（旧会话/legacy 门）保持既有
+        // approve 语义」的零回归路径（与 WS 面夹具同形）。
+        let mut labeled = lifecycle
+            .get_workspace_session(&session_id)
+            .expect("labeled fixture session");
+        if let Some(snapshot) = labeled.human_gate_snapshot.as_mut() {
+            snapshot.candidate_recovery = None;
+        }
+        crate::product::json_store::write_json(
+            &session_dir.join(format!("{session_id}.json")),
+            &labeled,
+        )
+        .expect("clear candidate recovery label");
+
+        let registry = crate::cross_cutting::provider_registry::ProviderRegistry::new();
+        let state = WebAppState::with_provider_registry(
+            root_path.clone(),
+            crate::web::runtime::WebRuntime::new_fake(root_path.clone()),
+            registry,
+        );
+        // 生产 manager 注入链：deps 的 trust precondition 换成剧本实例
+        //（coordinator/runs/index 原样），manager create 冻结为确认上下文。
+        let deps = state
+            .aggregate_initialization_dependencies()
+            .with_trust(trust.clone());
+        let state = state.with_aggregate_initialization_dependencies(deps);
+        let manager = state
+            .workspace_sessions
+            .get_or_create(&session_id, || {
+                WorkspaceSessionManager::create(&state, &session_id)
+            })
+            .await
+            .expect("manager for t5 rest fixture");
+        let gate_id = {
+            let engine = manager.engine();
+            let engine = engine.lock().await;
+            engine
+                .active_timeline_node_id()
+                .expect("durable human gate node")
+        };
+        HumanActionTrustFixture {
+            _root: fixture._root,
+            lifecycle,
+            router: build_web_router(state),
+            manager,
+            session_id,
+            gate_id,
+            trust,
+        }
+    }
+
+    /// REST Approve 的 HomeWaiting：非 success ApiError（422），稳定 code=
+    /// workspace_confirmation_trust_waiting（不宣称 Confirmed、不落入 generic
+    /// engine error）；message 同源含原因/人工处置/门未关闭/重新确认短语；
+    /// details 携带已知身份与 retry_action/manual_guidance/retryable:true；
+    /// durable 全不变、close CAS 零推进、ensure 恰一次。
+    #[tokio::test]
+    async fn rest_approve_trust_waiting_is_non_success_stable_code() {
+        let trust = std::sync::Arc::new(ScriptedTrustPrecondition::default());
+        trust.script_waiting("fixture_home_failure");
+        let fixture = lc_sc_approval_gate_fixture(trust.clone()).await;
+        let before = serde_json::to_vec(&fixture.durable()).expect("serialize before");
+        let cas_before =
+            crate::product::workspace_engine::conversational_gate::close_cas_attempts(
+                &fixture.session_id,
+            );
+
+        let (status, body) = fixture
+            .post_human_action(json!({
+                "type": "approve",
+                "command_id": "cmd_t5_rest_approve_waiting",
+                "expected_gate_id": fixture.gate_id,
+            }))
+            .await;
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["code"], json!("workspace_confirmation_trust_waiting"));
+        let message = body["message"].as_str().expect("message");
+        assert!(message.contains("fixture 等待原因（home 读取失败）"), "{message}");
+        assert!(message.contains("fixture 人工指导：修复 Codex home 配置"), "{message}");
+        assert!(message.contains("修复后重新确认"), "{message}");
+        assert!(message.contains("门保持未关闭"), "{message}");
+        assert!(
+            message.contains("完成后请重新选择该门并确认；失败不自动重试"),
+            "{message}"
+        );
+        let details = &body["details"];
+        assert_eq!(details["session_id"], json!(fixture.session_id));
+        assert_eq!(details["project_id"], json!("project_0001"));
+        assert_eq!(details["provider"], json!("codex"));
+        assert_eq!(details["trust_key"], json!("fixture-trust-key"));
+        assert_eq!(details["reason_code"], json!("fixture_home_failure"));
+        assert_eq!(details["retry_action"], json!("修复后重新确认"));
+        assert_eq!(
+            details["manual_guidance"],
+            json!("fixture 人工指导：修复 Codex home 配置")
+        );
+        assert_eq!(details["retryable"], json!(true));
+        assert_eq!(
+            serde_json::to_vec(&fixture.durable()).expect("serialize after"),
+            before,
+            "waiting 前后 durable 会话记录完全不变（门开态、零定稿副作用）"
+        );
+        assert_eq!(
+            crate::product::workspace_engine::conversational_gate::close_cas_attempts(
+                &fixture.session_id
+            ),
+            cas_before,
+            "准备失败不推进原 close CAS"
+        );
+        assert_eq!(trust.call_count(), 1, "missing 才进入 ensure（恰一次）");
+    }
+
+    /// REST Approve 的 Ready 对照：trust Ready 后沿原链推进（close CAS 恰
+    /// +1），结果不再落 trust waiting——「REST Ready 才 accepted」的等待侧
+    /// 对照（accepted 全链由既有 campaign REST approve 用例锁定）。
+    #[tokio::test]
+    async fn rest_approve_ready_trust_proceeds_past_waiting_arm() {
+        let trust = std::sync::Arc::new(ScriptedTrustPrecondition::default());
+        let fixture = lc_sc_approval_gate_fixture(trust.clone()).await;
+        let cas_before =
+            crate::product::workspace_engine::conversational_gate::close_cas_attempts(
+                &fixture.session_id,
+            );
+
+        let (status, body) = fixture
+            .post_human_action(json!({
+                "type": "approve",
+                "command_id": "cmd_t5_rest_approve_ready",
+                "expected_gate_id": fixture.gate_id,
+            }))
+            .await;
+
+        assert_ne!(
+            status,
+            StatusCode::OK,
+            "fixture 缺 plan/compile 记录，原链如实失败（不伪成功）"
+        );
+        assert_ne!(
+            body["code"],
+            json!("workspace_confirmation_trust_waiting"),
+            "Ready 不得落 trust waiting 臂"
+        );
+        assert_eq!(
+            crate::product::workspace_engine::conversational_gate::close_cas_attempts(
+                &fixture.session_id
+            ),
+            cas_before + 1,
+            "Ready 才沿原链推进原带写 close CAS（恰一次）"
+        );
+        assert_eq!(trust.call_count(), 1, "Ready 也恰一次 ensure");
+    }
+
+    /// REST Abandon 脱困不变：LC 会话确认 trust 未 Ready 也不影响 abandon
+    /// 逃生门——200 accepted + durable Terminated + 零 trust 调用。
+    #[tokio::test]
+    async fn rest_abandon_escape_unchanged_under_trust_waiting() {
+        let trust = std::sync::Arc::new(ScriptedTrustPrecondition::default());
+        trust.script_waiting("fixture_home_failure");
+        let fixture = lc_sc_approval_gate_fixture(trust.clone()).await;
+
+        let (status, body) = fixture
+            .post_human_action(json!({
+                "type": "abandon",
+                "command_id": "cmd_t5_rest_abandon",
+                "expected_gate_id": fixture.gate_id,
+            }))
+            .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["state"], json!("accepted"));
+        assert_eq!(
+            fixture.durable().status,
+            WorkspaceSessionStatus::Terminated,
+            "abandon 脱困：durable Terminated"
+        );
+        assert_eq!(trust.call_count(), 0, "Abandon 不登记（脱困不受 trust 等待影响）");
     }
 }

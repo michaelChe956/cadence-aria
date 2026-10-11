@@ -1,5 +1,88 @@
 use super::*;
+use crate::product::workspace_engine::WorkspaceConfirmOutcome;
+use crate::product::workspace_engine::conversational_gate::ConfirmationTrustWaiting;
 use crate::product::workspace_engine::{HumanGateCloseDecision, HumanGateCloseOutcome};
+
+/// T5.1（REQ-REG-15/D4）：确认 trust typed 停等的 WS/REST 同源投影——稳定
+/// code `workspace_confirmation_trust_waiting`。中文 message 展示原因、门未
+/// 关闭、人工处置与「完成后请重新选择该门并确认；失败不自动重试」（不把
+/// 指导只藏 context）；context 携带已知身份与 retry_action/manual_guidance/
+/// retryable:true（Home），Context 变体只返回已知身份（不编造 provider/
+/// root/key、不给错误根 trust 指引）。WS ProtocolError 与 REST ApiError 共用
+/// 本投影，reason_code 原样保留（不靠 message 前缀识别）。
+pub(crate) const WORKSPACE_CONFIRMATION_TRUST_WAITING_CODE: &str =
+    "workspace_confirmation_trust_waiting";
+
+pub(crate) struct ConfirmationTrustWaitingProjection {
+    pub(crate) code: &'static str,
+    pub(crate) message: String,
+    pub(crate) context: serde_json::Value,
+}
+
+pub(crate) fn confirmation_trust_waiting_projection(
+    waiting: &ConfirmationTrustWaiting,
+) -> ConfirmationTrustWaitingProjection {
+    match waiting {
+        ConfirmationTrustWaiting::Home {
+            session_id,
+            project_id,
+            lc_id,
+            waiting,
+        } => {
+            let provider =
+                crate::product::logical_codebase::provider_trust::provider_wire_label(
+                    &waiting.provider,
+                );
+            ConfirmationTrustWaitingProjection {
+                code: WORKSPACE_CONFIRMATION_TRUST_WAITING_CODE,
+                message: format!(
+                    "确认 trust 未就绪（provider {provider}，root {}）：{}。人工处置：{}。{}；\
+                     修复前确认门保持未关闭，完成后请重新选择该门并确认；失败不自动重试。",
+                    waiting.canonical_root.display(),
+                    waiting.message,
+                    waiting.manual_guidance,
+                    waiting.retry_action,
+                ),
+                context: serde_json::json!({
+                    "session_id": session_id,
+                    "project_id": project_id,
+                    "lc_id": lc_id,
+                    "provider": provider,
+                    "canonical_root": waiting.canonical_root.display().to_string(),
+                    "trust_key": waiting.trust_key,
+                    "reason_code": waiting.reason_code,
+                    "retry_action": waiting.retry_action,
+                    "manual_guidance": waiting.manual_guidance,
+                    "retryable": true,
+                }),
+            }
+        }
+        ConfirmationTrustWaiting::Context {
+            session_id,
+            project_id,
+            issue_id,
+            issue_lc_id,
+            frozen_root,
+            reason_code,
+            message,
+        } => ConfirmationTrustWaitingProjection {
+            code: WORKSPACE_CONFIRMATION_TRUST_WAITING_CODE,
+            message: format!(
+                "确认 trust 上下文停等（reason_code={reason_code}）：{message} \
+                 修复前确认门保持未关闭，完成后请重新选择该门并确认；失败不自动重试。"
+            ),
+            context: serde_json::json!({
+                "session_id": session_id,
+                "project_id": project_id,
+                "issue_id": issue_id,
+                "reason_code": reason_code,
+                "retryable": true,
+                "issue_lc_id": issue_lc_id,
+                "frozen_root": frozen_root.as_ref().map(|root| root.display().to_string()),
+            }),
+        },
+    }
+}
 
 pub(crate) async fn handle_plan_amendment_confirmation_from_handler(
     app_state: WebAppState,
@@ -95,13 +178,29 @@ pub(crate) async fn handle_confirm_from_handler(
         let mut engine = run_context.engine.lock().await;
         engine.handle_confirm().await
     };
-    if let Err(message) = outcome {
-        let err = WsOutMessage::ProtocolError {
-            code: "INVALID_HUMAN_CONFIRM_ACTION".to_string(),
-            message,
-            context: None,
-        };
-        let _ = send_json_outbound(&outbound_tx, &err).await;
+    match outcome {
+        // T5.1（REQ-REG-15/D4）：非 SC 确认 trust 未 Ready 的 typed 停等——
+        // 与 SC termination 臂同源投影为稳定 code 的 ProtocolError（过渡期
+        // 曾静默吞掉 Ok(TrustWaiting)，客户端零回执）；门保持开态、零定稿
+        // 副作用（引擎面 4.1 锁定），不 abort、不落 generic Error。
+        Ok(WorkspaceConfirmOutcome::TrustWaiting { waiting }) => {
+            let projection = confirmation_trust_waiting_projection(&waiting);
+            let err = WsOutMessage::ProtocolError {
+                code: projection.code.to_string(),
+                message: projection.message,
+                context: Some(projection.context),
+            };
+            let _ = send_json_outbound(&outbound_tx, &err).await;
+        }
+        Ok(_) => {}
+        Err(message) => {
+            let err = WsOutMessage::ProtocolError {
+                code: "INVALID_HUMAN_CONFIRM_ACTION".to_string(),
+                message,
+                context: None,
+            };
+            let _ = send_json_outbound(&outbound_tx, &err).await;
+        }
     }
 }
 
@@ -174,6 +273,12 @@ pub(crate) enum HumanGateTerminationEffect {
         message: String,
         findings_context: Option<serde_json::Value>,
     },
+    /// T5.1（REQ-REG-15/D4）：确认 trust 未 Ready 的 typed 停等——门保持
+    /// 开态、零 durable 副作用；序列化方（WS ProtocolError / REST 非成功
+    /// ApiError）共用 `confirmation_trust_waiting_projection` 同源投影。
+    TrustWaiting {
+        waiting: ConfirmationTrustWaiting,
+    },
     EngineError(String),
 }
 
@@ -195,14 +300,13 @@ pub(crate) async fn apply_human_gate_termination(
         Ok(HumanGateCloseOutcome::AlreadyClosed { status }) => {
             HumanGateTerminationEffect::AlreadyClosed { status }
         }
-        // T4.1（REQ-REG-15/D4，过渡臂）：确认 trust 未 Ready 的 typed 停等
-        // ——真实行为是 fail-closed（不伪成功、不 abort），经既有 EngineError
-        // 通道携带 reason_code 上抛。change 5.1 将以稳定 code
-        // `workspace_confirmation_trust_waiting` 的 ProtocolError 投影
-        // （message/context 同源生成）替换本臂；此处仅为穷举 match 编译
-        // 闭包，非最终协议面。
+        // T5.1（REQ-REG-15/D4）：确认 trust 未 Ready 的 typed 停等——替换
+        // T4.1 过渡臂（EngineError(waiting.summary())）：保留 typed waiting
+        // 交由序列化方同源投影为稳定 code 的 ProtocolError/ApiError（不
+        // abort、不 compile failure、不 generic EngineError）；门保持开态、
+        // 零 durable 副作用（引擎面 4.1 锁定）。
         Ok(HumanGateCloseOutcome::TrustWaiting { waiting }) => {
-            HumanGateTerminationEffect::EngineError(waiting.summary())
+            HumanGateTerminationEffect::TrustWaiting { waiting }
         }
         Err(message) => {
             // F7 项 1（历史观察项族 12）：confirm 后 compile 失败的 validator
@@ -317,6 +421,16 @@ pub(crate) async fn handle_human_gate_termination_from_handler(
         HumanGateTerminationEffect::Confirmed
         | HumanGateTerminationEffect::Abandoned
         | HumanGateTerminationEffect::AlreadyClosed { .. } => None,
+        HumanGateTerminationEffect::TrustWaiting { waiting } => {
+            // T5.1：稳定 code 的 ProtocolError（同源 message/context），门未
+            // 关闭、无 close 广播——客户端据指导修复后重新确认。
+            let projection = confirmation_trust_waiting_projection(&waiting);
+            Some(WsOutMessage::ProtocolError {
+                code: projection.code.to_string(),
+                message: projection.message,
+                context: Some(projection.context),
+            })
+        }
         HumanGateTerminationEffect::CompileFailed {
             message,
             findings_context,

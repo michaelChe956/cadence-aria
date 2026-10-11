@@ -1814,7 +1814,7 @@ mod confirmation_trust {
         // 该 turn 关闭后（此处直接换新夹具段测 Abandon/Running——同一夹具
         // 上 Busy 会挡 close，故重开一个干净夹具逐段断言）。
         let trust2 = Arc::new(RecordingTrustGate::default());
-        let (_root2, _lifecycle2, mut engine2, _event_rx2, facts2) =
+        let (_root2, _lifecycle2, mut engine2, _event_rx2, _facts2) =
             sc_confirm_fixture(ProviderName::Codex, None, trust2.clone());
         let outcome = engine2
             .handle_human_gate_termination(HumanGateCloseDecision::Abandon)
