@@ -9,12 +9,16 @@ use crate::product::app_paths::ProductAppPaths;
 use crate::product::checkpoint_store::CheckpointStore;
 use crate::product::json_store::ProductStoreError;
 use crate::product::lifecycle_store::LifecycleStore;
-use crate::product::models::{WorkspaceSessionRecord, WorkspaceType};
+use crate::product::models::{
+    LcRecoveryArtifactRef, LcRecoveryBusinessContext, LcRecoveryRunContext, WorkspaceSessionRecord,
+    WorkspaceType,
+};
 use crate::product::workspace_engine::{EngineEvent, WorkspaceEngine, WorkspaceSession};
 use crate::product::workspace_repository::workspace_repository_for_session;
 use crate::web::workspace_ws_handler::{
-    ProviderRunContext, ProviderRunKind, planning_resume_decision_with_fresh_index,
-    planning_resume_run_kind, spawn_provider_run_from_handler,
+    PlanningResumeLaunchDecision, ProviderRunContext, ProviderRunKind,
+    planning_resume_decision_with_fresh_index, planning_resume_launch_decision,
+    spawn_provider_run_from_handler,
 };
 use crate::web::workspace_ws_types::WsOutMessage;
 
@@ -234,7 +238,7 @@ impl WorkspaceSessionManager {
         load_durable_workspace_projection(&app_paths, &identity)
     }
 
-    pub(super) async fn recover_on_creation(self: &Arc<Self>) {
+    pub(crate) async fn recover_on_creation(self: &Arc<Self>) {
         // A2b（Task 2.6，设计 §4.3/§4.4）：真实创建恢复入口**先**执行 LC
         // 等待收口（唯一写方：幂等终态化旧 provider 节点、清 active run、
         // run 阶段回 PrepareContext——在任何自动 recover_outline/human_turn
@@ -256,6 +260,21 @@ impl WorkspaceSessionManager {
                 "[aria-recovery] lc resume recovery waiting active; auto recovery chains blocked session={}",
                 self.session_id
             );
+            self.broadcast_current_session_state();
+            return;
+        }
+
+        // B2a（Task 5.1，设计 §4.3/§5.3）：Plan stale 等待先于一切自动接力
+        //（human gate turn resume / outline resume / 委托孤儿回落 / 僵尸终
+        // 态化）。legacy 规划会话存在可恢复中断 outline run 时先做 planning
+        // 指纹决策：StaleContext 不再自动 spawn OutlineRebuild（B3 旧行为
+        // 删除）——捕获 run_context（revision feedback 在任何 take 前固化）
+        // 落 `planning_context_stale` 等待并收口；此后由上方 lc_waiting_active
+        // 同语义阻断全部自动链（manual turn 不自动 resume/increment、旁路
+        // spawn 恒 0），重建仅显式 fresh 授权后（dispatch 面）。捕获写失败
+        // fail-closed：阻断自动链但不 spawn。SameContext/None/SC 交原恢复
+        // 链（SC stale 等待语义归 B2c/5.5）。
+        if self.persist_planning_stale_wait_if_drifted().await {
             self.broadcast_current_session_state();
             return;
         }
@@ -288,6 +307,198 @@ impl WorkspaceSessionManager {
         // AbortedByDisconnect 终态并整流回 prepare_context，否则会话永久楔死在
         // running、abort 无处落地（旧架构连接关闭曾走的正是同两条引擎 API）。
         self.recover_stale_run_if_zombie().await;
+    }
+
+    /// B2a（Task 5.1）：恢复入口的 planning 指纹预检（读侧判据与
+    /// `recover_outline_run` 的 should_resume 同源：WorkItemPlan/Running/
+    /// 活动 OutlineRun 节点/无活 run，且非 SC 流）。Stale 时捕获 run_context
+    /// 落 `planning_context_stale` 等待（0 spawn）；决策面错误交
+    /// `recover_outline_run` 原路径报错（可观测、行为不变）。
+    async fn persist_planning_stale_wait_if_drifted(self: &Arc<Self>) -> bool {
+        let eligible_node = {
+            let engine = self.engine.lock().await;
+            let should_check = engine.session().workspace_type == WorkspaceType::WorkItemPlan
+                && self.session_record.flow_kind
+                    != crate::product::work_item_plan_policy::WorkItemPlanFlowKind::SingleCandidate
+                && engine.session().stage
+                    == crate::product::workspace_engine::WorkspaceStage::Running
+                && engine.active_node_type()
+                    == Some(
+                        crate::web::workspace_ws_types::TimelineNodeType::WorkItemPlanOutlineRun,
+                    )
+                && engine.active_run_id().is_none();
+            if should_check {
+                engine.active_timeline_node_id()
+            } else {
+                None
+            }
+        };
+        let Some(node_id) = eligible_node else {
+            return false;
+        };
+        let decision = planning_resume_decision_with_fresh_index(
+            &self.app_paths,
+            &self.session_record.project_id,
+            &self.session_record.issue_id,
+        )
+        .await;
+        let Ok(decision) = decision else {
+            // 决策面错误交原恢复链报错路径（recover_outline_run 同判据重试）。
+            return false;
+        };
+        match planning_resume_launch_decision(
+            &decision,
+            ProviderRunKind::WorkItemPlanOutlineRevision { feedback: None },
+        ) {
+            PlanningResumeLaunchDecision::ResumeExisting(_) => false,
+            PlanningResumeLaunchDecision::SupersededWaiting => {
+                match self.persist_planning_stale_wait_for_node(&node_id).await {
+                    Ok(()) => {
+                        eprintln!(
+                            "[aria-recovery] planning context stale; waiting for explicit fresh session={} node={}",
+                            self.session_id, node_id
+                        );
+                        true
+                    }
+                    Err(message) => {
+                        // fail-closed（§4.3：先保存阻止旧 resume 的 recovery
+                        // record）：捕获写失败时阻断全部自动链（不 spawn 漂移
+                        // run），错误进 manager recovery_error 可观测。
+                        eprintln!(
+                            "[aria-recovery] planning stale wait persist failed session={}: {message}",
+                            self.session_id
+                        );
+                        self.state
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .recovery_error = Some(message);
+                        true
+                    }
+                }
+            }
+        }
+    }
+
+    /// B2a（Task 5.1，设计 §5.3）：捕获中断 outline run 的 tagged
+    /// run_context 并经 engine 2.6 安全线
+    ///（`persist_lc_superseded_wait` + `reconcile_lc_resume_waiting`）落
+    /// `planning_context_stale` 等待。feedback 取 durable node detail 冻结值
+    ///（任何 take 前）；未知身份留 None 不倒算（纪元前态：map/run 绑定归
+    /// 5.2 B2b1）。
+    async fn persist_planning_stale_wait_for_node(
+        self: &Arc<Self>,
+        node_id: &str,
+    ) -> Result<(), String> {
+        let store = LifecycleStore::new(self.app_paths.clone());
+        let detail = match store.load_node_detail(&self.session_id, node_id) {
+            Ok(detail) => Some(detail),
+            Err(ProductStoreError::NotFound { .. }) => None,
+            Err(error) => {
+                return Err(format!("load node detail failed for {node_id}: {error}"));
+            }
+        };
+        let (project_id, issue_id, entity_id, workspace_type, author_provider, reviewer_provider) = {
+            let engine = self.engine.lock().await;
+            let session = engine.session();
+            (
+                session.project_id.clone(),
+                session.issue_id.clone(),
+                session.entity_id.clone(),
+                session.workspace_type.clone(),
+                session.author_provider.clone(),
+                session.reviewer_provider.clone(),
+            )
+        };
+        let repository =
+            workspace_repository_for_session(&self.app_paths, &store, &self.session_record).ok();
+        let plan = store
+            .get_issue_work_item_plan(&project_id, &issue_id, &entity_id)
+            .ok();
+        let business = LcRecoveryBusinessContext {
+            entity_id: entity_id.clone(),
+            plan_id: Some(entity_id),
+            workspace_type,
+            business_repository_physical_id: repository
+                .as_ref()
+                .map(|repository| repository.id.clone()),
+            business_repository_logical_id: repository
+                .as_ref()
+                .and_then(|repository| repository.logical_repository_id.as_ref())
+                .map(|id| id.0.to_string()),
+            business_checkout_id: repository
+                .as_ref()
+                .and_then(|repository| repository.primary_checkout_id.as_ref())
+                .map(|id| id.0.to_string()),
+            business_repository_path: repository
+                .as_ref()
+                .map(|repository| repository.path.to_string_lossy().to_string()),
+            source_story_ids: plan
+                .as_ref()
+                .map(|plan| plan.source_story_spec_ids.clone())
+                .unwrap_or_default(),
+            source_design_ids: plan
+                .as_ref()
+                .map(|plan| plan.source_design_spec_ids.clone())
+                .unwrap_or_default(),
+            plan_options_ref: None,
+            artifact_refs: detail
+                .as_ref()
+                .and_then(|detail| detail.artifact_ref.as_ref())
+                .map(|artifact_ref| {
+                    vec![LcRecoveryArtifactRef {
+                        ref_id: artifact_ref.artifact_id.clone(),
+                        version: Some(artifact_ref.version),
+                        hash: None,
+                    }]
+                })
+                .unwrap_or_default(),
+            review_refs: Vec::new(),
+            author_provider,
+            effective_reviewer_provider: reviewer_provider,
+            original_node_id: Some(node_id.to_string()),
+            original_role_run_seq: None,
+        };
+        // 捕获 tag（§5.3）：revision 节点 → LegacyOutlineRevision（feedback
+        // 冻结值）；首发/重建中断节点 → LegacyOutlineAuthor（fresh=按当前
+        // inventory 重新 full outline，full fresh 臂归 5.3 B2b2 接管）。
+        let outline_ref = || {
+            detail
+                .as_ref()
+                .and_then(|detail| detail.artifact_ref.as_ref())
+                .map(|artifact_ref| artifact_ref.artifact_id.clone())
+        };
+        let outline_version = || {
+            detail
+                .as_ref()
+                .and_then(|detail| detail.artifact_ref.as_ref())
+                .map(|artifact_ref| artifact_ref.version)
+        };
+        let run_context = if detail.as_ref().is_some_and(|detail| detail.is_revision) {
+            LcRecoveryRunContext::LegacyOutlineRevision {
+                business,
+                normalized_feedback: detail
+                    .as_ref()
+                    .and_then(|detail| detail.revision_feedback.clone())
+                    .unwrap_or_default(),
+                outline_ref: outline_ref(),
+                outline_version: outline_version(),
+                outline_hash: None,
+            }
+        } else {
+            LcRecoveryRunContext::LegacyOutlineAuthor {
+                business,
+                flow: crate::product::work_item_plan_policy::WorkItemPlanFlowKind::Legacy,
+                original_provider_node_id: Some(node_id.to_string()),
+                outline_ref: outline_ref(),
+            }
+        };
+        let mut engine = self.engine.lock().await;
+        engine
+            .persist_lc_superseded_wait(run_context, "planning_context_stale")
+            .await
+            .map(|_| ())?;
+        engine.reconcile_lc_resume_waiting().await;
+        Ok(())
     }
 
     async fn recover_delegated_rerun_orphan(self: &Arc<Self>) {
@@ -416,13 +627,27 @@ impl WorkspaceSessionManager {
                 &self.session_record.issue_id,
             )
             .await?;
-            let (outbound_tx, _outbound_rx) = mpsc::channel(1);
-            spawn_provider_run_from_handler(
-                run_context.clone(),
-                planning_resume_run_kind(&decision, run_kind),
-                outbound_tx,
-            )
-            .await?;
+            match planning_resume_launch_decision(&decision, run_kind) {
+                PlanningResumeLaunchDecision::ResumeExisting(resume_kind) => {
+                    let (outbound_tx, _outbound_rx) = mpsc::channel(1);
+                    spawn_provider_run_from_handler(run_context.clone(), resume_kind, outbound_tx)
+                        .await?;
+                }
+                // B2a（Task 5.1）：漂移 0 自动 spawn——捕获 run_context 落
+                // planning_context_stale 等待（TOCTOU 安全臂：创建期预检
+                // `persist_planning_stale_wait_if_drifted` 已先行，这里只兜
+                // 同创建窗口内决策变化的残余）。
+                PlanningResumeLaunchDecision::SupersededWaiting => {
+                    let node_id = {
+                        let engine = self.engine.lock().await;
+                        engine.active_timeline_node_id()
+                    };
+                    if let Some(node_id) = node_id {
+                        self.persist_planning_stale_wait_for_node(&node_id).await?;
+                        self.broadcast_current_session_state();
+                    }
+                }
+            }
         }
         Ok(())
     }

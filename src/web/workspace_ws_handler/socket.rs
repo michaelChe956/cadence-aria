@@ -4,8 +4,7 @@ use crate::product::logical_codebase::{
     PlanningContextResolver, RepositoryRouting, RepositoryRoutingErrorCode, ResumeDecision,
 };
 use crate::product::models::{
-    LcRecoveryArtifactRef, LcRecoveryRunContext, LcResumeRecoveryRecord,
-    LcResumeRecoveryState,
+    LcRecoveryArtifactRef, LcRecoveryRunContext, LcResumeRecoveryRecord, LcResumeRecoveryState,
 };
 use crate::web::workspace_session::WorkspaceSessionManager;
 use crate::web::workspace_ws_types::{
@@ -271,27 +270,40 @@ fn planning_resume_routing_error(code: RepositoryRoutingErrorCode, reason: &str)
     format!("{stable_code}: {reason}")
 }
 
-/// 依据 planning resume 决策决定实际启动的 run kind（B3 修复）。
-///
-/// - `None`（传统单仓）/ `SameContext`：沿用 `fallback` run kind 续跑原中断 run。
-/// - `StaleContext`：重建 —— 强制全新 `WorkItemPlanOutlineRebuild`（携带 rebuilt 规划
-///   上下文：新建 OutlineRun 节点、使用 rebuilt cwd/inventory/policy），不使用可能复用
-///   旧 provider 会话/prompt 内容的 revision run kind，也不沿用中断 OutlineRun 节点。
-pub(crate) fn planning_resume_run_kind(
+/// B2a（Task 5.1，tasks.md 5.1 / 设计 §4.3）：planning resume 决策的启动归类。
+#[derive(Debug, Clone)]
+pub(crate) enum PlanningResumeLaunchDecision {
+    /// 沿用原 run kind 续跑（同 native resume 链路，行为与 B3 前一致）。
+    ResumeExisting(ProviderRunKind),
+    /// 漂移等待：0 自动 start——落 `planning_context_stale` durable 等待
+    ///（run_context 捕获 feedback 在任何 take 前固化），重建仅显式 fresh
+    /// 授权后（B2a dispatch 面，`dispatch_lc_fresh_recovery_run`）。
+    SupersededWaiting,
+}
+
+/// B2a（Task 5.1）：原 B3 `planning_resume_run_kind` 的 Stale 自动 spawn
+/// clean-cutover。
+/// - `None`（传统单仓）/ `SameContext`：`ResumeExisting` 沿用 fallback 续跑。
+/// - `StaleContext`：`SupersededWaiting`——B3 旧行为（自动转
+///   `WorkItemPlanOutlineRebuild` spawn）删除，漂移不再自动启动任何
+///   provider run，由 manager 恢复入口捕获 run_context 落等待。
+/// - SC author 透传保留：planning snapshot 漂移不得将其静默改写为 legacy
+///   OutlineRebuild（SC stale 等待语义归 B2c/5.5 接管）。
+pub(crate) fn planning_resume_launch_decision(
     decision: &Option<ResumeDecision>,
     fallback: ProviderRunKind,
-) -> ProviderRunKind {
-    // SingleCandidate 已在 durable run kind 中固化 markdown 链路；逻辑 planning
-    // snapshot 漂移不能将其静默改写为 legacy OutlineRebuild。
+) -> PlanningResumeLaunchDecision {
+    // SingleCandidate 已在 durable run kind 中固化 markdown 链路；逻辑
+    // planning snapshot 漂移不能将其静默改写为 legacy OutlineRebuild。
     if fallback.is_single_candidate_work_item_plan_author() {
-        return fallback;
+        return PlanningResumeLaunchDecision::ResumeExisting(fallback);
     }
     match decision {
-        None | Some(ResumeDecision::SameContext(_)) => fallback,
-        Some(ResumeDecision::StaleContext { rebuilt, .. }) => {
-            ProviderRunKind::WorkItemPlanOutlineRebuild {
-                rebuilt: Box::new(rebuilt.clone()),
-            }
+        None | Some(ResumeDecision::SameContext(_)) => {
+            PlanningResumeLaunchDecision::ResumeExisting(fallback)
+        }
+        Some(ResumeDecision::StaleContext { .. }) => {
+            PlanningResumeLaunchDecision::SupersededWaiting
         }
     }
 }
@@ -1240,6 +1252,11 @@ pub(crate) fn lc_resume_recovery_inbound_gate(
 pub(crate) const LC_RESUME_RECOVERY_CONFIGURATION_CHANGED_CODE: &str =
     "lc_resume_recovery_configuration_changed";
 pub(crate) const LC_RESUME_RECOVERY_BUSY_CODE: &str = "lc_resume_recovery_busy";
+/// B2a（Task 5.1，tasks.md 5.1）：LC 恢复 run_context 未知/非法 tag 的 typed
+/// 拒收码（设计 §5.3：不 fallback Author/plan_author，不 silently 当普通
+/// 生成处理）。
+pub(crate) const LC_RESUME_RECOVERY_CONTEXT_UNSUPPORTED_CODE: &str =
+    "lc_resume_recovery_context_unsupported";
 /// 与 engine `start_generation` 的 `LC_RESUME_RECOVERY_ACTIVE` 稳定码同串
 ///（Task 2.6 anchor_t07 已把该串定为等待期普通旁路拒收码）。
 const LC_RESUME_RECOVERY_ACTIVE_CODE: &str = "LC_RESUME_RECOVERY_ACTIVE";
@@ -1435,7 +1452,10 @@ fn lc_recovery_source_stale(
         let Some(version) = artifact_ref.version else {
             continue;
         };
-        let Some(current) = versions.iter().find(|candidate| candidate.version == version) else {
+        let Some(current) = versions
+            .iter()
+            .find(|candidate| candidate.version == version)
+        else {
             return Ok(true);
         };
         if let Some(frozen_hash) = artifact_ref.hash.as_deref()
@@ -1464,7 +1484,9 @@ fn lc_recovery_business_artifact_refs(
         | LcRecoveryRunContext::LegacyBatch { business, .. }
         | LcRecoveryRunContext::LegacyPlanRevision { business, .. }
         | LcRecoveryRunContext::ScAuthor { business, .. }
-        | LcRecoveryRunContext::ScManualRevision { business, .. } => business.artifact_refs.as_slice(),
+        | LcRecoveryRunContext::ScManualRevision { business, .. } => {
+            business.artifact_refs.as_slice()
+        }
     }
 }
 
@@ -1783,7 +1805,26 @@ pub(crate) async fn handle_workspace_socket(
                     continue;
                 }
 
+                let is_lc_fresh_intent = matches!(
+                    in_msg,
+                    WsInMessage::StartGeneration {
+                        resume_recovery: Some(_),
+                        ..
+                    }
+                );
                 handle_workspace_inbound_message(inbound_context.clone(), envelope).await;
+                // B2a（Task 5.1，设计 §5.1/§5.3）：显式 fresh claim（decisions
+                // `claim_lc_fresh` 已受理并发 typed Accepted/Reserved 帧）之后的
+                // tag 精确 dispatch——runner 侧消费 FreshReserved 启动 fresh
+                // native run（唯一启动口经 `start_work_item_plan_author`
+                // Logical 分支，B0 full prepare；旧 audit 不回捞）；未接管 tag
+                // typed 拒（context_unsupported），零 spawn、不 plan_author 兜底。
+                // 同 ID Replay/Busy/Stale 已由入站门先收口，此处仅推进刚受理的
+                // FreshReserved（幂等：非 FreshReserved 直接返回）。
+                if is_lc_fresh_intent {
+                    dispatch_lc_fresh_recovery_run(run_context.clone(), outbound_tx.clone())
+                        .await;
+                }
             }
         } => receiver_exit,
         _ = async {

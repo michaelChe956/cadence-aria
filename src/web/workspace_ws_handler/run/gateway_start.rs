@@ -29,7 +29,9 @@ use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::cross_cutting::provider_adapter::{PROVIDER_ERROR_STDERR_TAIL_BYTES, ProviderAdapterError};
+use crate::cross_cutting::provider_adapter::{
+    PROVIDER_ERROR_STDERR_TAIL_BYTES, ProviderAdapterError,
+};
 use crate::cross_cutting::session_launch::ValidatedStreamingProviderInput;
 use crate::cross_cutting::streaming_provider::{
     ProviderSession, StreamingProviderAdapter, StreamingProviderInput,
@@ -42,7 +44,8 @@ use crate::product::logical_codebase::{
     SessionLaunchRequest, SessionPolicyAction, ValidatedSessionLaunchPolicy,
 };
 use crate::product::models::ProviderName;
-use crate::product::workspace_engine::WorkspaceEngine;
+use crate::product::workspace_engine::{ProviderRunKind, WorkspaceEngine};
+use crate::web::workspace_ws_handler::ProviderRunContext;
 
 /// 逻辑会话经 gateway 启动所需的已解析 launch 信息。
 /// `Clone`：F2-B SC compile 教学重驱需在同一 run 内复用已 resolve 的 launch
@@ -410,6 +413,388 @@ fn map_gateway_error_to_adapter(error: &ProviderGatewayError) -> ProviderAdapter
             mapped
         }
         _ => ProviderAdapterError::provider_unavailable(error.to_string()),
+    }
+}
+
+// ============================================================================
+// B2a（Task 5.1，tasks.md 5.1 / 设计 §5.3）：显式 fresh claim 后的 tag 精确
+// dispatch——claim（FreshReserved）→ run_context tag → ProviderRunKind 精确
+// 对照；未知/非法/未接管 tag typed 拒（lc_resume_recovery_context_unsupported），
+// 不回落通用 plan_author。native 启动唯一经 `start_work_item_plan_author`
+// Logical 分支（B0 full prepare 消费；fresh 链 resume_provider_session_id=None，
+// 旧 audit 只由 B4.1 资格过滤消费，不回捞续驱）。
+// ============================================================================
+
+/// §5.3 tag→ProviderRunKind 精确对照的结果：可直接组装的 kind，或需要
+/// dispatch 时新解析 planning context 的 rebuild（仅 fresh 授权后用新
+/// resolved snapshot）。
+#[derive(Debug, Clone)]
+pub(crate) enum LcFreshRunKind {
+    Kind(ProviderRunKind),
+    NeedsFreshPlanningContext,
+}
+
+/// typed 拒（`lc_resume_recovery_context_unsupported` 族）。
+#[derive(Debug, Clone)]
+pub(crate) struct LcFreshDispatchRejection {
+    pub(crate) code: &'static str,
+    pub(crate) message: String,
+}
+
+fn lc_context_unsupported(message: String) -> LcFreshDispatchRejection {
+    LcFreshDispatchRejection {
+        code: crate::web::workspace_ws_handler::socket::LC_RESUME_RECOVERY_CONTEXT_UNSUPPORTED_CODE,
+        message,
+    }
+}
+
+/// run_context tag 的稳定短名（typed 拒帧可观测文案用，不泄业务 payload）。
+fn lc_recovery_context_tag_label(
+    context: &crate::product::models::LcRecoveryRunContext,
+) -> &'static str {
+    use crate::product::models::LcRecoveryRunContext;
+    match context {
+        LcRecoveryRunContext::Author { .. } => "author",
+        LcRecoveryRunContext::AuthorChoiceFollowup { .. } => "author_choice_followup",
+        LcRecoveryRunContext::AuthorFeedback { .. } => "author_feedback",
+        LcRecoveryRunContext::ReviewerRevision { .. } => "reviewer_revision",
+        LcRecoveryRunContext::LegacyOutlineAuthor { .. } => "legacy_outline_author",
+        LcRecoveryRunContext::LegacyOutlineRevision { .. } => "legacy_outline_revision",
+        LcRecoveryRunContext::LegacyOutlineRebuild { .. } => "legacy_outline_rebuild",
+        LcRecoveryRunContext::LegacyDraft { .. } => "legacy_draft",
+        LcRecoveryRunContext::LegacyBatch { .. } => "legacy_batch",
+        LcRecoveryRunContext::LegacyPlanRevision { .. } => "legacy_plan_revision",
+        LcRecoveryRunContext::ScAuthor { .. } => "sc_author",
+        LcRecoveryRunContext::ScManualRevision { .. } => "sc_manual_revision",
+    }
+}
+
+/// B2a（Task 5.1，设计 §5.3）：RecoveryRecord tagged `run_context` → fresh
+/// 显式启动的 `ProviderRunKind` 精确对照（纯映射，零副作用）。feedback 按
+/// durable 冻结值原样透传（不重算/不丢）；非法 flow typed 拒，不回落
+/// `work_item_plan_author_for_durable_flow` 通用兜底。
+pub(crate) fn lc_fresh_run_kind_for_recovery_context(
+    context: &crate::product::models::LcRecoveryRunContext,
+) -> Result<LcFreshRunKind, LcFreshDispatchRejection> {
+    use crate::product::models::LcRecoveryRunContext;
+    use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
+    match context {
+        LcRecoveryRunContext::Author {
+            original_content, ..
+        } => Ok(LcFreshRunKind::Kind(ProviderRunKind::Author {
+            content: original_content.clone().unwrap_or_default(),
+        })),
+        LcRecoveryRunContext::AuthorChoiceFollowup {
+            original_content, ..
+        } => Ok(LcFreshRunKind::Kind(
+            ProviderRunKind::AuthorChoiceFollowup {
+                content: original_content.clone().unwrap_or_default(),
+            },
+        )),
+        LcRecoveryRunContext::AuthorFeedback { .. }
+        | LcRecoveryRunContext::ReviewerRevision { .. } => {
+            Ok(LcFreshRunKind::Kind(ProviderRunKind::Revision))
+        }
+        LcRecoveryRunContext::LegacyOutlineAuthor { flow, .. } => {
+            if !matches!(flow, WorkItemPlanFlowKind::Legacy) {
+                return Err(lc_context_unsupported(format!(
+                    "legacy_outline_author run_context carries non-legacy flow {flow:?}"
+                )));
+            }
+            Ok(LcFreshRunKind::Kind(
+                ProviderRunKind::WorkItemPlanLegacyAuthor,
+            ))
+        }
+        LcRecoveryRunContext::LegacyOutlineRevision {
+            normalized_feedback,
+            ..
+        } => Ok(LcFreshRunKind::Kind(
+            ProviderRunKind::WorkItemPlanOutlineRevision {
+                feedback: if normalized_feedback.trim().is_empty() {
+                    None
+                } else {
+                    Some(normalized_feedback.clone())
+                },
+            },
+        )),
+        LcRecoveryRunContext::LegacyOutlineRebuild { .. } => {
+            Ok(LcFreshRunKind::NeedsFreshPlanningContext)
+        }
+        LcRecoveryRunContext::LegacyDraft {
+            pending_feedback, ..
+        } => Ok(LcFreshRunKind::Kind(ProviderRunKind::WorkItemPlanDraft {
+            feedback: pending_feedback.clone(),
+        })),
+        LcRecoveryRunContext::LegacyBatch { .. } => {
+            Ok(LcFreshRunKind::Kind(ProviderRunKind::WorkItemPlanBatch))
+        }
+        LcRecoveryRunContext::LegacyPlanRevision {
+            overall_feedback, ..
+        } => Ok(LcFreshRunKind::Kind(
+            ProviderRunKind::WorkItemPlanRevision {
+                feedback: overall_feedback.clone(),
+            },
+        )),
+        LcRecoveryRunContext::ScAuthor { flow, .. } => {
+            if !matches!(flow, WorkItemPlanFlowKind::SingleCandidate) {
+                return Err(lc_context_unsupported(format!(
+                    "sc_author run_context carries non-single-candidate flow {flow:?}"
+                )));
+            }
+            Ok(LcFreshRunKind::Kind(
+                ProviderRunKind::WorkItemPlanSingleCandidateAuthor,
+            ))
+        }
+        LcRecoveryRunContext::ScManualRevision { turn_id, .. } => {
+            Ok(LcFreshRunKind::Kind(
+                ProviderRunKind::HumanGateScManualRevision {
+                    turn_id: turn_id.clone(),
+                    // prompt 留空：臂内按 durable 同 turn 重装配（§5.3 同 turn
+                    // 语义；不在此重算 prompt）。
+                    prompt: String::new(),
+                },
+            ))
+        }
+    }
+}
+
+/// B2a（Task 5.1）fresh dispatch 的 tag 覆盖面——A/B 发布纪律（设计 §4.5/
+/// §10.1）：fresh 启动能力按 B2 子包逐 tag 放开，未接管 tag typed 拒零
+/// spawn。本波（5.1）仅覆盖 `legacy_outline_rebuild`（重建仅显式 fresh
+/// 授权后）：kind 由 dispatch 时新解析的 resolved planning context 组装
+///（§5.3：仅 fresh 授权后用新 snapshot），臂内经
+/// `start_work_item_plan_author` Logical 分支唯一启动口启动（B0 full
+/// prepare 消费；fresh 输入 `resume_provider_session_id=None`，旧 audit
+/// 不回捞）。其余 tag 的 full fresh 臂归 5.2–5.6（map/outline feedback/
+/// draft/batch/plan-revision/SC author/SC manual），接管后翻覆盖面。
+async fn lc_fresh_dispatch_kind(
+    recovery: &crate::product::models::LcResumeRecoveryRecord,
+    run_context: &ProviderRunContext,
+) -> Result<ProviderRunKind, LcFreshDispatchRejection> {
+    match lc_fresh_run_kind_for_recovery_context(&recovery.run_context)? {
+        LcFreshRunKind::NeedsFreshPlanningContext => {
+            let decision =
+                crate::web::workspace_ws_handler::planning_resume_decision_with_fresh_index(
+                    &run_context.app_paths,
+                    &run_context.session_record.project_id,
+                    &run_context.session_record.issue_id,
+                )
+                .await
+                .map_err(|error| {
+                    lc_context_unsupported(format!(
+                        "legacy_outline_rebuild fresh dispatch failed to resolve planning context: {error}"
+                    ))
+                })?;
+            let resolved = match decision {
+                // 漂移仍在：携带 rebuilt（重新 build 的权威上下文）。
+                Some(crate::product::logical_codebase::ResumeDecision::StaleContext {
+                    rebuilt,
+                    ..
+                }) => rebuilt,
+                // 快照已对齐（如等待期外力修复）：现解析结果即新 snapshot。
+                Some(crate::product::logical_codebase::ResumeDecision::SameContext(resolved)) => {
+                    resolved
+                }
+                None => {
+                    return Err(lc_context_unsupported(
+                        "legacy_outline_rebuild fresh dispatch requires logical planning routing"
+                            .to_string(),
+                    ));
+                }
+            };
+            Ok(ProviderRunKind::WorkItemPlanOutlineRebuild {
+                rebuilt: Box::new(resolved),
+            })
+        }
+        LcFreshRunKind::Kind(_) => Err(lc_context_unsupported(format!(
+            "run_context tag {} fresh handler lands with the remaining B2 packages (5.2-5.6); explicit fresh stays waiting",
+            lc_recovery_context_tag_label(&recovery.run_context)
+        ))),
+    }
+}
+
+fn lc_touch_operation(
+    record: &mut crate::product::models::LcResumeRecoveryRecord,
+    operation_id: &str,
+    mut mutate: impl FnMut(&mut crate::product::models::LcFreshOperationResult),
+) {
+    for operation in record.fresh_operations.iter_mut() {
+        if operation.operation_id == operation_id {
+            mutate(operation);
+        }
+    }
+}
+
+fn lc_resume_store_unavailable_frame(
+    session_id: &str,
+    error: &crate::product::json_store::ProductStoreError,
+) -> crate::web::workspace_ws_types::WsOutMessage {
+    crate::web::workspace_ws_types::WsOutMessage::ProtocolError {
+        code: crate::web::workspace_ws_handler::socket::LC_RESUME_STORE_UNAVAILABLE_CODE
+            .to_string(),
+        message: format!("durable projection unavailable for session {session_id}: {error}"),
+        context: None,
+    }
+}
+
+/// §4.3 prepare 失败行收口：operation failed（稳定 reason code）、
+/// recovery 回 Waiting（同 ID 仍 Replay、下一次显式点击用新 ID）、typed
+/// 拒帧上浮请求连接；零 spawn。
+#[allow(clippy::too_many_arguments)]
+async fn lc_fail_fresh_operation_to_waiting(
+    store: &crate::product::lifecycle_store::LifecycleStore,
+    session_id: &str,
+    outbound_tx: &tokio::sync::mpsc::Sender<crate::web::workspace_ws_handler::OutboundControl>,
+    expected: &crate::product::models::WorkspaceSessionRecord,
+    recovery: &crate::product::models::LcResumeRecoveryRecord,
+    operation_id: &str,
+    rejection: &LcFreshDispatchRejection,
+) {
+    use crate::product::models::{LcFreshOperationState, LcResumeRecoveryState};
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut next = recovery.clone();
+    next.state = LcResumeRecoveryState::Waiting;
+    next.operation_id = None;
+    next.updated_at = now.clone();
+    lc_touch_operation(&mut next, operation_id, |operation| {
+        operation.state = LcFreshOperationState::Failed;
+        operation.reason_code = Some(rejection.code.to_string());
+        operation.updated_at = now.clone();
+    });
+    if let Err(error) = store.compare_and_save_lc_resume_state(expected, next) {
+        let _ = crate::web::workspace_ws_handler::send_json_outbound(
+            outbound_tx,
+            &lc_resume_store_unavailable_frame(session_id, &error),
+        )
+        .await;
+        return;
+    }
+    let _ = crate::web::workspace_ws_handler::send_json_outbound(
+        outbound_tx,
+        &crate::web::workspace_ws_types::WsOutMessage::ProtocolError {
+            code: rejection.code.to_string(),
+            message: format!(
+                "lc resume fresh dispatch for operation {operation_id} rejected: {}",
+                rejection.message
+            ),
+            context: Some(serde_json::json!({
+                "recovery_id": recovery.recovery_id,
+                "operation_id": operation_id,
+            })),
+        },
+    )
+    .await;
+}
+
+/// B2a（Task 5.1）：decisions `claim_lc_fresh` 受理后的 dispatch 入口。
+/// 幂等：仅推进 FreshReserved（Waiting=无受理、FreshRunning/Resolved=已
+/// 推进、同 ID Replay/Busy/Stale 归 socket 入站门与 store claim）。
+/// 推进与启动之间以整记录 CAS single-flight；spawn 采用 ClaimIfIdle（fresh
+/// 语义不 supersede 无关 run，§4.3 原业务 run/turn 保持）。
+pub(crate) async fn dispatch_lc_fresh_recovery_run(
+    run_context: ProviderRunContext,
+    outbound_tx: tokio::sync::mpsc::Sender<crate::web::workspace_ws_handler::OutboundControl>,
+) {
+    use crate::product::lifecycle_store::LifecycleStore;
+    use crate::product::models::{LcFreshOperationState, LcResumeRecoveryState};
+    use crate::web::workspace_ws_handler::socket::LC_RESUME_RECOVERY_BUSY_CODE;
+
+    let store = LifecycleStore::new(run_context.app_paths.clone());
+    let latest = match store.get_workspace_session(&run_context.session_id) {
+        Ok(record) => record,
+        Err(error) => {
+            let _ = crate::web::workspace_ws_handler::send_json_outbound(
+                &outbound_tx,
+                &lc_resume_store_unavailable_frame(&run_context.session_id, &error),
+            )
+            .await;
+            return;
+        }
+    };
+    let Some(recovery) = latest.lc_resume_recovery.clone() else {
+        return;
+    };
+    if recovery.state != LcResumeRecoveryState::FreshReserved {
+        return;
+    }
+    let Some(operation_id) = recovery.operation_id.clone() else {
+        return;
+    };
+    match lc_fresh_dispatch_kind(&recovery, &run_context).await {
+        Ok(run_kind) => {
+            let now = chrono::Utc::now().to_rfc3339();
+            let mut next = recovery.clone();
+            next.state = LcResumeRecoveryState::FreshRunning;
+            next.updated_at = now.clone();
+            lc_touch_operation(&mut next, &operation_id, |operation| {
+                operation.state = LcFreshOperationState::Running;
+                operation.updated_at = now.clone();
+            });
+            // 整记录 CAS：并发 dispatch 只有一个赢（§5.1 single-flight）。
+            let saved = match store.compare_and_save_lc_resume_state(&latest, next) {
+                Ok(saved) => saved,
+                Err(_) => return,
+            };
+            let saved_recovery = saved
+                .lc_resume_recovery
+                .clone()
+                .unwrap_or_else(|| recovery.clone());
+            let spawned = super::spawn_provider_run_claiming_idle(
+                run_context.clone(),
+                run_kind,
+                outbound_tx.clone(),
+            )
+            .await;
+            match spawned {
+                Ok(true) => {}
+                // 认领窗口被占/run 面拒启：按 prepare 失败收口（operation
+                // failed、recovery 回 Waiting），typed 上浮——不残留无 run
+                // 的 FreshRunning。
+                Ok(false) => {
+                    lc_fail_fresh_operation_to_waiting(
+                        &store,
+                        &run_context.session_id,
+                        &outbound_tx,
+                        &saved,
+                        &saved_recovery,
+                        &operation_id,
+                        &LcFreshDispatchRejection {
+                            code: LC_RESUME_RECOVERY_BUSY_CODE,
+                            message: "session holds an active run; explicit fresh stays waiting"
+                                .to_string(),
+                        },
+                    )
+                    .await;
+                }
+                Err(message) => {
+                    lc_fail_fresh_operation_to_waiting(
+                        &store,
+                        &run_context.session_id,
+                        &outbound_tx,
+                        &saved,
+                        &saved_recovery,
+                        &operation_id,
+                        &LcFreshDispatchRejection {
+                            code: LC_RESUME_RECOVERY_BUSY_CODE,
+                            message: format!("fresh run spawn failed: {message}"),
+                        },
+                    )
+                    .await;
+                }
+            }
+        }
+        Err(rejection) => {
+            lc_fail_fresh_operation_to_waiting(
+                &store,
+                &run_context.session_id,
+                &outbound_tx,
+                &latest,
+                &recovery,
+                &operation_id,
+                &rejection,
+            )
+            .await;
+        }
     }
 }
 

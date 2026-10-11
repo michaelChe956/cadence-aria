@@ -16,6 +16,11 @@ use followups::{
 mod gateway_start;
 #[cfg(test)]
 pub(crate) use gateway_start::PlanAuthorLaunch;
+pub(crate) use gateway_start::dispatch_lc_fresh_recovery_run;
+#[cfg(test)]
+pub(crate) use gateway_start::{
+    LcFreshDispatchRejection, LcFreshRunKind, lc_fresh_run_kind_for_recovery_context,
+};
 pub(crate) use gateway_start::{
     PlanSplitRunContext, begin_plan_split_run, begin_plan_split_run_if_logical,
     close_plan_split_run, close_plan_split_run_with_markdown, fail_plan_split_run,
