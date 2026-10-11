@@ -2524,7 +2524,7 @@ mod tests {
             ProviderTrustScenario::Generation,
         );
         let expected_command = format!(
-            "mkdir -p '{}' && printf '{{\"root\":\"{}\",\"trustedAt\":%s}}' \"$(date +%s%3N)\" > '{}'",
+            "mkdir -p '{}' && printf '{{\"root\":\"{}\",\"trustedAt\":%s}}' \"$(date +%s%3N)\" > '{}' # GNU/Linux（date +%s%3N 需 GNU date）",
             kimi.workspace_trust_root().display(),
             fixture.root.display(),
             record_path.display(),
@@ -2533,6 +2533,85 @@ mod tests {
             guidance.contains(&expected_command),
             "guidance must carry the exact copyable command {expected_command}: {guidance}"
         );
+    }
+
+    /// P3 硬化（k3 审查 2026-10-12）：root 含 `%` 时 printf 格式串必须
+    /// 转义（字面 % → %%，保留唯一 %s 占位），用户复制执行才不写坏 JSON；
+    /// 命令尾部注明 GNU/Linux（`date +%s%3N` 需 GNU date，macOS/BSD 失效）。
+    #[test]
+    fn provider_trust_kimi_command_escapes_percent_and_notes_platform() {
+        let fixture = TrustFixture::new();
+        let special_root = fixture.home().join("100%s-%d-root");
+        std::fs::create_dir_all(&special_root).unwrap();
+        let adapters: Vec<Arc<dyn ProviderTrustHomeAdapter>> = vec![
+            Arc::new(CodexTrustAdapter::for_home(fixture.home())),
+            Arc::new(KimiTrustAdapter::for_home(fixture.home())),
+        ];
+        let kimi = KimiTrustAdapter::for_home(fixture.home());
+        let error = ProviderTrustError::transient(
+            super::TRUST_ENTRY_MISSING_CODE,
+            "entry absent".to_string(),
+        );
+        let guidance = super::provider_trust_manual_guidance(
+            &adapters,
+            &ProviderName::KimiCode,
+            &special_root,
+            &error,
+            ProviderTrustScenario::Generation,
+        );
+
+        // 转义后的 payload 逐字断言：root 中字面 % 全部 %%，占位符保持唯一 %s。
+        let expected_payload = format!(
+            "{{\"root\":\"{}\",\"trustedAt\":%s}}",
+            special_root.display().to_string().replace('%', "%%"),
+        );
+        assert!(
+            guidance.contains(&expected_payload),
+            "printf payload must escape literal % in root: {guidance}"
+        );
+        assert!(
+            guidance.contains("# GNU/Linux"),
+            "command tail must note the GNU date dependency: {guidance}"
+        );
+
+        // printf 语义回放：格式串中裸 %s 恰一处；按 %%→%、%s←参数渲染后，
+        // 产物必须是合法 Kimi 记录 JSON（root 原样、trustedAt 为数字）。
+        let command = guidance
+            .lines()
+            .find(|line| line.contains("printf"))
+            .expect("copyable command line");
+        let format_str = command
+            .split("printf '")
+            .nth(1)
+            .expect("printf format open")
+            .split("' \"$(date")
+            .next()
+            .expect("printf format close");
+        // 忠实 printf walker：%%→字面 %，%s←参数；其余 % 指令视为事故。
+        let mut rendered = String::new();
+        let mut placeholder_count = 0usize;
+        let mut chars = format_str.chars();
+        while let Some(current) = chars.next() {
+            if current != '%' {
+                rendered.push(current);
+                continue;
+            }
+            match chars.next() {
+                Some('%') => rendered.push('%'),
+                Some('s') => {
+                    placeholder_count += 1;
+                    rendered.push_str("1760000000000");
+                }
+                Some(other) => panic!("unexpected printf directive %{other}"),
+                None => panic!("dangling % in printf format"),
+            }
+        }
+        assert_eq!(placeholder_count, 1, "exactly one %s placeholder: {format_str}");
+        let record: serde_json::Value = serde_json::from_str(&rendered)
+            .expect("rendered command output must be valid Kimi record JSON");
+        assert_eq!(record["root"], special_root.display().to_string());
+        assert_eq!(record["trustedAt"], 1760000000000u64);
+        drop(kimi);
     }
 
     /// 指引卡登记命令：Codex 的 entry 缺失指导附 config.toml 路径与完整

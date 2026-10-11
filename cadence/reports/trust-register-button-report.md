@@ -73,3 +73,14 @@ e726e80d 的两处「替换而非新增」编辑事故与类型错（VerifyFront
 - `npx vitest --run` → **212 files / 2093 tests 全绿**（此前 2 failed 为 sendRequestRevision 缺失族，05078435 修复后随全量转绿）。
 
 教训入账：实施必跑 `tsc` 类型门——vitest 不做类型检查，替换式编辑事故只有类型门能拦。
+
+## 7. P3 硬化与构建解锁（2026-10-12，Main 定界/授权）
+
+【P3·k3 审查】Kimi 可复制命令 printf 转义（provider_trust_adapters.rs）：
+- root 中字面 `%` 一律转义 `%%`（serde 序列化 root JSON 后转义；`%s` 占位符在格式字面量独立插入，不与转义互扰）——复制执行不写坏 JSON；
+- 命令尾部注明 `# GNU/Linux（date +%s%3N 需 GNU date）`（macOS/BSD 失效提示）。
+- 红先：`provider_trust_kimi_command_escapes_percent_and_notes_platform`（root=`100%s-%d-root` 夹具）——转义 payload 逐字断言 + 忠实 printf walker 回放（%%→%、%s←参数、占位恰一）产物 serde 解析为合法 Kimi 记录；修前红（payload 未转义、无尾注），修后绿。既有逐字断言同步补尾注。
+- 回归：`cargo test --lib provider_trust` 36/36。
+
+【构建解锁·Main 追加授权】CockpitInbox KIND_GLYPH/KIND_CLASS 补 `lc_resume_recovery` 中性机械条目（glyph 复用 RotateCcw，class 沿用 amber 卡片风格；D7.1 真正渲染恢复卡时复用或改）。
+- 验收：`npx tsc -p .` 0 错（此前残余 2 条 TS7053 消除）；`npm run build` ✓（仅既有 chunk 体积告警）；CockpitInbox.test.tsx 41/41。

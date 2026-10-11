@@ -474,16 +474,16 @@ impl ProviderTrustHomeAdapter for KimiTrustAdapter {
             "trustedAt": "<毫秒时间戳>",
         });
         // 单行可复制 shell：目录/记录路径整参单引号（内嵌单引号走 '\''
-        // 转义）；root 的 JSON 转义交给 serde（同源，不手抄算法），
-        // trustedAt 用 printf %s 占位（date +%s%3N 产毫秒时间戳）。
-        let payload = serde_json::to_string(&serde_json::json!({
-            "root": root_string(canonical_root),
-            "trustedAt": "%s",
-        }))
-        .unwrap_or_default()
-        .replace("\"%s\"", "%s");
+        // 转义）；root 的 JSON 转义交给 serde（同源，不手抄算法）。
+        // printf 格式串语义（k3 P3 2026-10-12）：root 中字面 `%` 一律转义
+        // `%%`——占位符在格式字面量中独立插入，不与转义互扰——复制执行
+        // 才不写坏 JSON；`date +%s%3N` 需 GNU date，尾部注明 GNU/Linux。
+        let root_json = serde_json::to_string(&root_string(canonical_root))
+            .unwrap_or_default()
+            .replace('%', "%%");
+        let payload = format!(r#"{{"root":{root_json},"trustedAt":%s}}"#);
         let manual_command = format!(
-            "mkdir -p {} && printf '{}' \"$(date +%s%3N)\" > {}",
+            "mkdir -p {} && printf '{}' \"$(date +%s%3N)\" > {} # GNU/Linux（date +%s%3N 需 GNU date）",
             shell_single_quoted(&self.workspace_trust_root.display().to_string()),
             payload,
             shell_single_quoted(&self.record_path(canonical_root).display().to_string()),
