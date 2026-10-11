@@ -59,18 +59,22 @@ fn workspace_repository(
                             &manifest,
                             &selection,
                         ),
-                        // 方案X草稿态（缺陷 #2 修法 A，controller 裁决 2026-10-02）：
-                        // focus=None ∧ involved 空 = AI 自决 involved 之前，目标即
-                        // LC 聚合根本身（ENV-10/11 cwd≠target 合法形态；author_root_launch
-                        // 的 PolicyTarget::aggregate_root 锚同口径）。回写 focus 后
-                        // 恢复成员解析；involved 非空仍 fail-closed（下方 None 臂）。
-                        None if story.involved_repository_ids.is_empty() => {
-                            Ok(aggregate_root_view(&manifest))
-                        }
-                        None => Err(routing_error(
-                            RepositoryRoutingErrorCode::TargetMissing,
-                            format!("story {} has no focus repository", story.id),
-                        )),
+                    // 方案X草稿态（缺陷 #2 修法 A,controller 2026-10-02）+
+                    // story 焦点仓路由修复（2026-10-11,story_spec_0001 现场）:
+                    // focus=None 时锚定 LC 聚合根本身（ENV-10/11 cwd≠target 合法
+                    // 形态;author_root_launch 的 PolicyTarget::aggregate_root 锚
+                    // 同口径）。原「involved 非空仍 fail-closed」臂是缺陷 #2 时
+                    // 对「回写异常半态」的防放宽锁——但 structured output schema
+                    // 允许 AI 输出 focus=null（多仓均衡纵切无单一焦点）,该态是
+                    // AI 自决流合法可达的正常态,fail-closed 造成修订轮死区
+                    // （现场 involved=4/focus=None 恒 TargetMissing,不可重试）。
+                    // 与 plan S6（多 target + focus 非唯一回落聚合根,5a217fa8）
+                    // 同构:①锚与首轮草稿态连续 → 指纹可比对 → 原生恢复可达
+                    // （r23 根修目标）;②cwd 恒 canonical root,author 视野零变化
+                    // ;③design change_order 首仓（r62）家族先例同款。AI 显式
+                    // 回写 focus 后走上方成员锚臂（r23 语义零变化,锚迁移
+                    // supersede 语义正确）。
+                    None => Ok(aggregate_root_view(&manifest)),
                     }
                 }
                 RepositoryRouting::FailClosed { code, reason } => Err(routing_error(code, reason)),

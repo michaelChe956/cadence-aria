@@ -529,22 +529,29 @@ fn lc_story_with_focus_resolves_member_unchanged() {
     );
 }
 
-/// 边界 2：focus=None 但 involved 非空（回写异常半态）→ 保持 TargetMissing
-/// fail-closed，不锚聚合根（防放宽）。
+/// 边界 2（story 焦点仓路由修复,2026-10-11,story_spec_0001 现场）:focus=None 但
+/// involved 非空——AI 自决流合法可达态（structured output schema 允许 focus=null,
+/// 多仓均衡纵切无单一焦点）→ 锚定聚合根视图,不再 TargetMissing fail-closed。
+///
+/// 与 plan S6（多 target + focus 非唯一回落 AggregateRoot,5a217fa8）同构裁决:
+/// ①首轮草稿态锚=aggregate_root,本态回落聚合根 → 锚连续 → 指纹可比对 →
+/// 原生恢复可达（r23 根修目标）;②cwd 恒 canonical root（ScoutRootVsMember）,
+/// author 视野零变化;③story 草稿态（缺陷#2）/design 草稿态（缺陷#5）/
+/// design change_order 首仓（r62）家族先例同款。AI 显式给出 focus 时
+/// 仍走上方成员锚臂（r23 语义零变化）。
 #[test]
-fn lc_story_without_focus_but_involved_stays_target_missing() {
+fn lc_story_without_focus_but_involved_anchors_aggregate_root() {
     let fixture = LcStoryRoutingFixture::new();
     let session = fixture.story_session(vec![fixture.member_logical_id], None);
-    let error = workspace_repository_for_session(
+    let repository = workspace_repository_for_session(
         &fixture.paths,
         &LifecycleStore::new(fixture.paths.clone()),
         &session,
     )
-    .unwrap_err();
-    assert_eq!(
-        stable_routing_code(&error),
-        "repository_routing_target_missing"
-    );
+    .expect("involved-but-unfocused LC story must anchor at the aggregate root view");
+    assert_eq!(repository.path, fixture.manifest.provider_context_root);
+    assert!(repository.logical_repository_id.is_some());
+    assert!(repository.primary_checkout_id.is_none());
 }
 
 /// S6（2026-10-10 全旅程 E2E）红→绿主锁：多仓 plan 会话（LC 双成员，
