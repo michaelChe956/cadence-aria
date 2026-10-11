@@ -58,6 +58,40 @@ export function createBulkSocketFactory(
 interface ParsedFrame {
   type?: unknown;
   code?: unknown;
+  message?: unknown;
+  context?: unknown;
+}
+
+/** T5.1/5.2（REQ-REG-15/D4）：唯一透传 message/context 的 waiting code——
+ * 其它 protocol error 维持 detail=code。 */
+const TRUST_WAITING_CODE = "workspace_confirmation_trust_waiting";
+
+/** 确认 trust 等待的 detail 组装：同源 message 优先（后端 message 已内嵌
+ * 原因/人工处置/门未关闭/重新确认短语）；message 未含的 retry_action/
+ * manual_guidance 从 context 补齐并去重；无任何可读内容时回落稳定 code。
+ * 超时/断连不经过本函数（结果未知，不伪标 waiting）。 */
+function trustWaitingDetail(frame: ParsedFrame): string | null {
+  if (frame.code !== TRUST_WAITING_CODE) {
+    return null;
+  }
+  const parts: string[] = [];
+  if (typeof frame.message === "string" && frame.message !== "") {
+    parts.push(frame.message);
+  }
+  const context =
+    typeof frame.context === "object" && frame.context !== null
+      ? (frame.context as Record<string, unknown>)
+      : null;
+  for (const key of ["retry_action", "manual_guidance"]) {
+    const value = context?.[key];
+    if (typeof value !== "string" || value === "") {
+      continue;
+    }
+    if (!parts.some((part) => part.includes(value))) {
+      parts.push(value);
+    }
+  }
+  return parts.length > 0 ? parts.join(" ") : TRUST_WAITING_CODE;
 }
 
 /**
@@ -67,7 +101,9 @@ interface ParsedFrame {
  * 3. 发 typed `{type:"confirm"}` 并记审计 sent 行（detail:"bulk"）；
  * 4. human_gate_closed→confirmed+markCompleted（前置：auditRecordId !== null，即本连接
  *    confirm 已发出；早到关门帧=他方并发关门，按 failed(gate_closed_before_confirm) 如实呈现）；
- *    protocol_error|error→rejected+markRejected(code)；关闭/错误/超时→failed（detail 如实）；
+ *    protocol_error|error→rejected+markRejected(code)——T5.2 仅 trust waiting code
+ *    （workspace_confirmation_trust_waiting）以 message/context 组装 detail 展示指导，
+ *    其它 detail=code；关闭/错误/超时→failed（detail 如实，超时=结果未知不伪标 waiting）；
  * 5. 恒 close()（服务端 revoke_if_holder 撤 lease，run 不受影响——P2 语义）。
  */
 export function confirmGateOnSession(
@@ -149,10 +185,13 @@ export function confirmGateOnSession(
           const code = frame.type === "protocol_error" && typeof frame.code === "string"
             ? frame.code
             : "server_error";
+          // T5.2：仅 trust waiting code 透传 message/context 组装 detail；
+          // 审计仍存稳定 code（操作语义不随展示变化）。
+          const waitingDetail = trustWaitingDetail(frame);
           if (auditRecordId !== null) {
             useOperationAuditStore.getState().markRejected(auditRecordId, code);
           }
-          finish("rejected", code);
+          finish("rejected", waitingDetail ?? code);
           return;
         }
       },

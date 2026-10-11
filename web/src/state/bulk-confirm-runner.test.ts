@@ -199,3 +199,108 @@ describe("runBulkConfirm", () => {
     expect(maxOpen).toBeLessThanOrEqual(BULK_CONFIRM_CONCURRENCY);
   });
 });
+
+describe("confirmGateOnSession · 确认 trust 等待透传（T5.2 REQ-REG-15）", () => {
+  const waitingMessage =
+    "确认 trust 未就绪（provider codex，root /fixture-root）：home 读取失败。" +
+    "人工处置：修复 Codex home 配置。修复后重新确认；修复前确认门保持未关闭，" +
+    "完成后请重新选择该门并确认；失败不自动重试。";
+
+  it("仅新 waiting code 透传 message/context：detail=同源 message（指导已内嵌，去重不重复），审计 markRejected 存稳定 code", async () => {
+    const { factory, sockets } = scriptedSocketFactory(() => undefined);
+    const promise = confirmGateOnSession(target, factory, { timeoutMs: 1_000 });
+    await vi.waitFor(() => expect(factory).toHaveBeenCalled());
+    const socket = sockets[0]!;
+    socket.handlers.onOpen();
+    socket.handlers.onMessage(JSON.stringify({ type: "session_state", session_id: "s2" }));
+    socket.handlers.onMessage(JSON.stringify({
+      type: "protocol_error",
+      code: "workspace_confirmation_trust_waiting",
+      message: waitingMessage,
+      context: {
+        session_id: "s2",
+        provider: "codex",
+        reason_code: "codex_home_unreadable",
+        retry_action: "修复后重新确认",
+        manual_guidance: "修复 Codex home 配置",
+        retryable: true,
+      },
+    }));
+
+    await expect(promise).resolves.toMatchObject({
+      status: "rejected",
+      detail: waitingMessage,
+    });
+    expect(useOperationAuditStore.getState().records[0]).toMatchObject({
+      outcome: "rejected",
+      detail: "workspace_confirmation_trust_waiting",
+    });
+  });
+
+  it("message 缺指导时 detail 追加 context 的 retry_action/manual_guidance（必要指导可见）", async () => {
+    const { factory, sockets } = scriptedSocketFactory(() => undefined);
+    const promise = confirmGateOnSession(target, factory, { timeoutMs: 1_000 });
+    await vi.waitFor(() => expect(factory).toHaveBeenCalled());
+    const socket = sockets[0]!;
+    socket.handlers.onOpen();
+    socket.handlers.onMessage(JSON.stringify({ type: "session_state", session_id: "s2" }));
+    socket.handlers.onMessage(JSON.stringify({
+      type: "protocol_error",
+      code: "workspace_confirmation_trust_waiting",
+      message: "确认 trust 未就绪：home 读取失败。",
+      context: {
+        reason_code: "codex_home_unreadable",
+        retry_action: "修复后重新确认",
+        manual_guidance: "修复 Codex home 配置",
+      },
+    }));
+
+    await expect(promise).resolves.toMatchObject({
+      status: "rejected",
+      detail: "确认 trust 未就绪：home 读取失败。 修复后重新确认 修复 Codex home 配置",
+    });
+  });
+
+  it("其它 protocol error 维持 detail=code（不透传 message/context）", async () => {
+    const { factory, sockets } = scriptedSocketFactory(() => undefined);
+    const promise = confirmGateOnSession(target, factory, { timeoutMs: 1_000 });
+    await vi.waitFor(() => expect(factory).toHaveBeenCalled());
+    const socket = sockets[0]!;
+    socket.handlers.onOpen();
+    socket.handlers.onMessage(JSON.stringify({ type: "session_state", session_id: "s2" }));
+    socket.handlers.onMessage(JSON.stringify({
+      type: "protocol_error",
+      code: "SINGLE_CANDIDATE_APPROVAL_COMPILE_FAILED",
+      message: "compile failed with findings",
+      context: { retry_action: "不应透传" },
+    }));
+
+    await expect(promise).resolves.toMatchObject({
+      status: "rejected",
+      detail: "SINGLE_CANDIDATE_APPROVAL_COMPILE_FAILED",
+    });
+  });
+
+  it("超时=结果未知：不伪标 waiting（failed/timeout，审计行保持 sent）", async () => {
+    vi.useFakeTimers();
+    try {
+      const { factory, sockets } = scriptedSocketFactory(() => undefined);
+      const promise = confirmGateOnSession(target, factory, { timeoutMs: 20 });
+      await vi.waitFor(() => expect(factory).toHaveBeenCalled());
+      const socket = sockets[0]!;
+      socket.handlers.onOpen();
+      // confirm 已发出但服务端无应答（如等待 home 锁）：客户端超时保持结果未知。
+      socket.handlers.onMessage(JSON.stringify({ type: "session_state", session_id: "s2" }));
+
+      await vi.advanceTimersByTimeAsync(30);
+
+      await expect(promise).resolves.toMatchObject({
+        status: "failed",
+        detail: "timeout_after_20ms",
+      });
+      expect(useOperationAuditStore.getState().records[0].outcome).toBe("sent");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

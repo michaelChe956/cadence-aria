@@ -52,4 +52,36 @@ describe("BulkConfirmReport", () => {
 
     expect(screen.queryByTestId("bulk-confirm-report")).toBeNull();
   });
+
+  it("确认 trust 等待项：仍 rejected 且沿既有 detail 展示指导文本（T5.2 REQ-REG-15，不改布局）", () => {
+    useBulkConfirmStore.setState({
+      busy: false,
+      runs: [{
+        id: "run2",
+        startedAtIso: "2026-10-11T00:00:00Z",
+        concurrency: 3,
+        items: [
+          {
+            itemId: "s2:gate:g2",
+            sessionId: "s2",
+            gateKey: "g2",
+            title: "方案定稿",
+            status: "rejected",
+            detail:
+              "确认 trust 未就绪（provider codex，root /fixture-root）：home 读取失败。" +
+              "人工处置：修复 Codex home 配置。修复后重新确认；修复前确认门保持未关闭，" +
+              "完成后请重新选择该门并确认；失败不自动重试。",
+            atIso: "2026-10-11T00:00:01Z",
+          },
+        ],
+      }],
+    });
+
+    render(<BulkConfirmReport />);
+
+    const report = screen.getByTestId("bulk-confirm-report");
+    expect(report).toHaveTextContent("被拒绝");
+    expect(report).toHaveTextContent("修复 Codex home 配置");
+    expect(report).toHaveTextContent("完成后请重新选择该门并确认；失败不自动重试");
+  });
 });

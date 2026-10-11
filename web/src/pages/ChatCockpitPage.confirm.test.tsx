@@ -12,6 +12,7 @@ import {
   type CockpitInboxItem,
 } from "../state/workspace-cockpit-projection";
 import { useWorkspaceWs, type WorkspaceWsApi } from "../hooks/useWorkspaceWs";
+import { handleWorkspaceWsMessage } from "../hooks/workspace-ws-message-handler";
 import { useUnloadGuard } from "../hooks/useUnloadGuard";
 import {
   useWorkspaceStore,
@@ -767,6 +768,63 @@ describe("ChatCockpitPage", () => {
       renderCockpitWith(mockWorkspaceWs());
 
       expect(screen.queryByRole("button", { name: "手动推进" })).toBeNull();
+    });
+
+    // T5.2（REQ-REG-15/D4）：当前会话门经既有 live driver 恰一次 confirm
+    //（不进远端短连接通道）；服务端 trust 等待回执经真实消息 handler 链
+    // 落 store/对话流——指导 message 就地可见，不新增长期 waiting 面或重试按钮。
+    it("current-session gate confirms once over the live driver and trust-waiting guidance stays visible", async () => {
+      const user = userEvent.setup();
+      const workspaceWs = mockWorkspaceWs();
+      const store = useWorkspaceStore.getState();
+      store.applyHumanGateTurnOpen("g1", "confirm-g1", 1);
+      store.rebuildChatEntries();
+      cockpitInbox.push(gateItem("session_001", "g1"));
+      renderCockpitWith(workspaceWs);
+
+      const gateChoices = screen.getAllByRole("checkbox", { name: "选择 需要人工确认" });
+      expect(gateChoices).toHaveLength(1);
+      await user.click(gateChoices[0]);
+      await user.click(screen.getByRole("button", { name: /批量确认/ }));
+
+      // live driver 恰一次；当前会话条目不混入远端短连接批量通道。
+      expect(workspaceWs.sendConfirmGate).toHaveBeenCalledTimes(1);
+      expect(bulkConfirmStart).not.toHaveBeenCalled();
+
+      const waitingMessage =
+        "确认 trust 未就绪（provider codex，root /fixture-root）：home 读取失败。" +
+        "人工处置：修复 Codex home 配置。修复后重新确认；修复前确认门保持未关闭，" +
+        "完成后请重新选择该门并确认；失败不自动重试。";
+      act(() => {
+        handleWorkspaceWsMessage(
+          {
+            type: "protocol_error",
+            code: "workspace_confirmation_trust_waiting",
+            message: waitingMessage,
+            context: {
+              session_id: "session_001",
+              provider: "codex",
+              reason_code: "codex_home_unreadable",
+              retry_action: "修复后重新确认",
+              manual_guidance: "修复 Codex home 配置",
+              retryable: true,
+            },
+          } as Parameters<typeof handleWorkspaceWsMessage>[0],
+          {
+            invalidatedPreStageNodeIds: new Set<string>(),
+            scheduleFlush: () => undefined,
+            streamFlushTimeouts: {},
+          },
+        );
+      });
+
+      const protocolError = useWorkspaceStore.getState().protocolError;
+      expect(protocolError).toMatchObject({
+        code: "workspace_confirmation_trust_waiting",
+      });
+      expect(protocolError?.message).toContain("修复 Codex home 配置");
+      // 对话流 error 条目就地展示「code · message」——指导在 live driver 可见。
+      await screen.findByText(/修复 Codex home 配置/);
     });
   });
 });
