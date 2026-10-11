@@ -802,3 +802,335 @@ fn per_lc_issue_member_resolution_synthesizes_record_from_lc_authority() {
     assert_eq!(repository.logical_repository_id, Some(member_c));
     assert_eq!(repository.primary_checkout_id, Some(checkout_id));
 }
+
+/// E 包（fix-planning-session-anchor-recovery REQ-PLN-08）红→绿主锁：
+/// 三类 LC 规划会话（Story/Design/WorkItemPlan，PlanningReadOnly）的 native
+/// launch anchor 恒聚合根（path=canonical root、primary_checkout_id=None），
+/// scope 回写（focus/involved）不迁移锚；聚合视图逻辑身份不与成员混同；
+/// direct（Legacy 路由）与 WorkItem/Coding 的 native 与业务同锚同错。
+#[test]
+fn anchor_t01_native_anchor_stays_root_after_scope_writeback() {
+    let fixture = LcStoryRoutingFixture::new();
+    let lifecycle = crate::product::lifecycle_store::LifecycleStore::new(fixture.paths.clone());
+    let canonical_root = fixture.manifest.provider_context_root.clone();
+
+    // 三类规划会话 native anchor 恒聚合根（两 checkout/physical 身份为空）。
+    let story_session = fixture.story_session(Vec::new(), None);
+    let design_session = fixture.design_session(Vec::new());
+    let plan_session = fixture.plan_session();
+    for session in [&story_session, &design_session, &plan_session] {
+        let native = workspace_native_launch_anchor_for_session(
+            &fixture.paths,
+            &lifecycle,
+            session,
+        )
+        .expect("LC planning native launch anchor must stay at the aggregate root");
+        assert_eq!(native.path, canonical_root);
+        assert!(native.primary_checkout_id.is_none());
+        // 聚合视图逻辑身份=LC 身份，不与任何成员逻辑身份混同（更不等于成员物理 ID）。
+        assert_ne!(
+            native.logical_repository_id,
+            Some(fixture.member_logical_id)
+        );
+        assert_ne!(
+            native.logical_repository_id,
+            Some(fixture.member_b_logical_id)
+        );
+    }
+
+    // scope 回写（story focus: None→member）前后 native anchor 逐字段不变；
+    // 同一会话业务面恢复成员解析（锚迁移只允许发生在 business 输出）。
+    let before_scope = workspace_native_launch_anchor_for_session(
+        &fixture.paths,
+        &lifecycle,
+        &story_session,
+    )
+    .expect("native anchor before scope writeback");
+    lifecycle
+        .update_story_spec_aggregate(
+            "project_0001",
+            "issue_0001",
+            &story_session.entity_id,
+            &crate::product::lifecycle_store::AggregateStorySpecScope {
+                logical_codebase_ref: fixture.manifest.logical_codebase_id,
+                effective_member_ids: fixture.manifest.member_ids.clone(),
+                involved_repository_ids: vec![fixture.member_logical_id],
+                focus_repository_id: Some(fixture.member_logical_id),
+            },
+        )
+        .unwrap();
+    let after_scope = workspace_native_launch_anchor_for_session(
+        &fixture.paths,
+        &lifecycle,
+        &story_session,
+    )
+    .expect("native anchor after scope writeback");
+    assert_eq!(before_scope, after_scope);
+    let business = workspace_repository_for_session(&fixture.paths, &lifecycle, &story_session)
+        .expect("focused story business repository resolves the member");
+    assert_eq!(business.path, fixture.member_path);
+
+    // direct（Legacy 路由，无 LC manifest 的单仓项目）：native 与业务同锚=原目录。
+    let legacy_dir = fixture._temp.path().join("legacy-direct");
+    std::fs::create_dir_all(&legacy_dir).unwrap();
+    for args in [
+        vec!["init", "--quiet"],
+        vec!["config", "user.email", "anchor-t01@example.test"],
+        vec!["config", "user.name", "Anchor T01 Fixture"],
+    ] {
+        let status = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(&legacy_dir)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {:?} failed", args);
+    }
+    std::fs::write(legacy_dir.join("README.md"), "# legacy-direct\n").unwrap();
+    for args in [
+        vec!["add", "README.md"],
+        vec!["commit", "--quiet", "-m", "initial commit"],
+    ] {
+        let status = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(&legacy_dir)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {:?} failed", args);
+    }
+    crate::product::project_store::ProjectStore::new(fixture.paths.clone())
+        .create(crate::product::project_store::CreateProjectInput {
+            name: "anchor-t01-legacy-direct".to_string(),
+            description: None,
+        })
+        .unwrap();
+    let legacy_repo =
+        crate::product::repository_store::RepositoryStore::new(fixture.paths.clone())
+            .create(crate::product::repository_store::CreateRepositoryInput {
+                project_id: "project_0002".to_string(),
+                name: "legacy-direct".to_string(),
+                path: legacy_dir.clone(),
+                default_policy_preset: None,
+                default_provider_mode: None,
+                idempotency_key: "anchor-t01-legacy-direct".to_string(),
+            })
+            .unwrap();
+    let legacy_story = lifecycle
+        .create_story_spec(crate::product::lifecycle_store::CreateStorySpecInput {
+            project_id: "project_0002".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: legacy_repo.id.clone(),
+            title: "legacy direct story".to_string(),
+            aggregate_codebase: None,
+        })
+        .unwrap();
+    let legacy_session = lifecycle
+        .create_workspace_session(
+            crate::product::lifecycle_store::CreateWorkspaceSessionInput {
+                project_id: "project_0002".to_string(),
+                issue_id: "issue_0001".to_string(),
+                entity_id: legacy_story.id,
+                workspace_type: crate::product::models::WorkspaceType::Story,
+                author_provider: crate::product::models::ProviderName::ClaudeCode,
+                reviewer_provider: Some(crate::product::models::ProviderName::ClaudeCode),
+                review_rounds: 1,
+                superpowers_enabled: false,
+                openspec_enabled: false,
+                work_item_plan_options: None,
+            },
+        )
+        .unwrap();
+    let legacy_native = workspace_native_launch_anchor_for_session(
+        &fixture.paths,
+        &lifecycle,
+        &legacy_session,
+    )
+    .expect("legacy direct native anchor keeps the original directory");
+    let legacy_business = workspace_repository_for_session(
+        &fixture.paths,
+        &lifecycle,
+        &legacy_session,
+    )
+    .expect("legacy direct business repository keeps the original directory");
+    assert_eq!(legacy_native, legacy_business);
+    assert_eq!(legacy_native.path, legacy_dir);
+
+    // WorkItem/Coding：无 runtime binding 的会话两 getter 一致 fail-closed
+    // （native 不引入任何分流/旁路；成功路径同理同锚=原 member）。
+    let work_item_session = lifecycle
+        .create_workspace_session(
+            crate::product::lifecycle_store::CreateWorkspaceSessionInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                entity_id: "work_item_missing_runtime_binding".to_string(),
+                workspace_type: crate::product::models::WorkspaceType::WorkItem,
+                author_provider: crate::product::models::ProviderName::ClaudeCode,
+                reviewer_provider: Some(crate::product::models::ProviderName::ClaudeCode),
+                review_rounds: 1,
+                superpowers_enabled: false,
+                openspec_enabled: false,
+                work_item_plan_options: None,
+            },
+        )
+        .unwrap();
+    let work_item_native_error = workspace_native_launch_anchor_for_session(
+        &fixture.paths,
+        &lifecycle,
+        &work_item_session,
+    )
+    .unwrap_err();
+    let work_item_business_error = workspace_repository_for_session(
+        &fixture.paths,
+        &lifecycle,
+        &work_item_session,
+    )
+    .unwrap_err();
+    assert_eq!(
+        format!("{work_item_native_error:?}"),
+        format!("{work_item_business_error:?}"),
+        "work item native anchor must fail identically to business resolution"
+    );
+}
+
+/// E 包边界锁：business_repository 逐项保留现行 `workspace_repository_for_session`
+/// 语义（Story focus 成员／Design 首 change_order 成员／Plan 多 target 无唯一
+/// focus 的聚合视图材料行为）；selection 失效与 focus 越界共同守卫两用途一致
+/// 拒收（native anchor 不得绕过）；聚合视图 ID 不等于成员物理 ID。
+#[test]
+fn anchor_t01_business_target_and_selection_guards_unchanged() {
+    let fixture = LcStoryRoutingFixture::new();
+    let lifecycle = crate::product::lifecycle_store::LifecycleStore::new(fixture.paths.clone());
+
+    // Story focus=成员：business=成员（r23 原断言），native=聚合根，两身份不混同。
+    let story_session = fixture.story_session(
+        vec![fixture.member_logical_id],
+        Some(fixture.member_logical_id),
+    );
+    let original_member =
+        workspace_repository_for_session(&fixture.paths, &lifecycle, &story_session)
+            .expect("focused story keeps member business repository");
+    let context = resolve_workspace_repository_context(
+        &fixture.paths,
+        &lifecycle,
+        &story_session,
+    )
+    .expect("context resolves for focused story");
+    let business = context
+        .business_repository
+        .expect("focused story business output is the member");
+    let native = context
+        .native_launch_anchor
+        .expect("focused story native output is the aggregate root");
+    assert_eq!(business.id, original_member.id);
+    assert_eq!(business.path, original_member.path);
+    assert_eq!(business.path, fixture.member_path);
+    assert_eq!(
+        business.logical_repository_id,
+        Some(fixture.member_logical_id)
+    );
+    assert_ne!(native.id, business.id);
+    assert_eq!(native.path, fixture.manifest.provider_context_root);
+    assert!(native.primary_checkout_id.is_none());
+
+    // Design ≥2 involved + change_order：business=首成员（r62 原断言），native=聚合根。
+    let design_session = fixture.design_session_with_change_order(
+        vec![fixture.member_logical_id, fixture.member_b_logical_id],
+        vec![fixture.member_logical_id, fixture.member_b_logical_id],
+    );
+    let context = resolve_workspace_repository_context(
+        &fixture.paths,
+        &lifecycle,
+        &design_session,
+    )
+    .expect("context resolves for multi-repo design");
+    let business = context
+        .business_repository
+        .expect("multi-repo design business output is the first change_order member");
+    assert_eq!(business.path, fixture.member_path);
+    assert_eq!(
+        business.logical_repository_id,
+        Some(fixture.member_logical_id)
+    );
+    let native = context
+        .native_launch_anchor
+        .expect("multi-repo design native output is the aggregate root");
+    assert_eq!(native.path, fixture.manifest.provider_context_root);
+    assert_ne!(native.id, business.id);
+
+    // Plan 多 target 无唯一 focus：business=聚合视图（S6 原材料行为保留），
+    // native=聚合根。
+    let plan_session = fixture.plan_session();
+    let context =
+        resolve_workspace_repository_context(&fixture.paths, &lifecycle, &plan_session)
+            .expect("context resolves for multi-target plan");
+    let business = context
+        .business_repository
+        .expect("multi-target plan business output stays the aggregate view");
+    assert_eq!(business.path, fixture.manifest.provider_context_root);
+    assert!(business.primary_checkout_id.is_none());
+    let native = context
+        .native_launch_anchor
+        .expect("multi-target plan native output is the aggregate root");
+    assert_eq!(native.path, fixture.manifest.provider_context_root);
+    assert!(native.primary_checkout_id.is_none());
+
+    // focus 越界（focus ⊄ include 的持久化脏态，绕过 store save 校验直接落盘，
+    // 模拟旧版本/外部写入）：两输出一致拒收（现行守卫不变，native 不绕过）。
+    let out_of_bounds = LogicalRepositoryId(uuid::Uuid::new_v4());
+    crate::product::json_store::write_json(
+        &fixture
+            .paths
+            .codebase_selection_path("project_0001", "issue_0001"),
+        &IssueCodebaseSelection::explicit(
+            "project_0001",
+            "issue_0001",
+            vec![fixture.member_logical_id],
+            Vec::new(),
+            vec![out_of_bounds],
+            None,
+        ),
+    )
+    .unwrap();
+    let focus_overflow_native = workspace_native_launch_anchor_for_session(
+        &fixture.paths,
+        &lifecycle,
+        &story_session,
+    );
+    let focus_overflow_business = workspace_repository_for_session(
+        &fixture.paths,
+        &lifecycle,
+        &story_session,
+    );
+    assert!(focus_overflow_native.is_err());
+    assert!(focus_overflow_business.is_err());
+
+    // 恢复合法 selection 后标记失效（成员删除/停用）：两输出仍一致拒收
+    // （SelectionInvalidated；native anchor 不得绕过共同守卫）。
+    let selection_store =
+        crate::product::logical_codebase::IssueCodebaseSelectionStore::new(fixture.paths.clone());
+    selection_store
+        .save(&IssueCodebaseSelection::all_members(
+            "project_0001",
+            "issue_0001",
+            None,
+        ))
+        .unwrap();
+    selection_store
+        .mark_invalidated("project_0001", "issue_0001", "anchor_t01 member removed")
+        .unwrap();
+    let invalid_selection_result = workspace_native_launch_anchor_for_session(
+        &fixture.paths,
+        &lifecycle,
+        &story_session,
+    );
+    assert!(invalid_selection_result.is_err());
+    let invalid_business = workspace_repository_for_session(
+        &fixture.paths,
+        &lifecycle,
+        &story_session,
+    );
+    assert!(invalid_business.is_err());
+    assert_eq!(
+        stable_routing_code(invalid_selection_result.as_ref().unwrap_err()),
+        "repository_routing_inconsistent"
+    );
+}

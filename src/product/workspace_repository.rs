@@ -15,19 +15,55 @@ use crate::product::workspace_engine::draft_batch::compile_support::{
     load_involved_from_confirmed_design, resolve_logical_work_item_plan_repository_targets,
 };
 
+/// E（fix-planning-session-anchor-recovery REQ-PLN-08）：同一 resolver 一次读取
+/// manifest/selection/实体后派生的两种用途输出，不造第二 resolver
+/// （REQ-PLN-07 唯一 resolver／同 snapshot 派生）。
+///
+/// - `native_launch_anchor`：provider native launch 锚。LC 规划会话
+///   （Story/Design/WorkItemPlan，PlanningReadOnly）恒 LC 聚合根视图，产物
+///   involved/focus/change_order 回写不迁移锚；Legacy/direct 与 WorkItem/Coding
+///   与业务同锚（原目录/原 member）。selection 失效/focus 越界等共同守卫
+///   fail-closed，native launch 不得绕过。
+/// - `business_repository`：现行 `workspace_repository_for_session` 语义逐项
+///   保留（业务材料/compile target：成员选仓、多 target 无唯一 focus 已回
+///   root 的材料行为、无 target/未知成员错误均不变）。
+///
+/// 共享读取（routing/实体/runtime binding）失败对外为 `Err`（无共同基线即无
+/// 上下文，两 getter 同错）；仅单用途派生的失败落在对应字段。聚合视图 ID 是
+/// 合成身份（lc_aggregate_root_view_*），不得流入业务选仓/WorkItemPlan IR
+/// target（design §3.2）。
+#[derive(Debug)]
+pub struct WorkspaceRepositoryContext {
+    pub native_launch_anchor: Result<RepositoryRecord, ProductStoreError>,
+    pub business_repository: Result<RepositoryRecord, ProductStoreError>,
+}
+
 pub fn workspace_repository_for_session(
     app_paths: &ProductAppPaths,
     lifecycle: &LifecycleStore,
     session: &WorkspaceSessionRecord,
 ) -> Result<RepositoryRecord, ProductStoreError> {
-    workspace_repository(app_paths, lifecycle, session)
+    resolve_workspace_repository_context(app_paths, lifecycle, session)
+        .and_then(|context| context.business_repository)
 }
 
-fn workspace_repository(
+/// E（REQ-PLN-08）：native launch anchor getter——共享 resolver 结果的字段
+/// 选择，非第二 resolver；native launch caller 逐个迁移，不得以 API 名称
+/// 模糊两用途。
+pub fn workspace_native_launch_anchor_for_session(
     app_paths: &ProductAppPaths,
     lifecycle: &LifecycleStore,
     session: &WorkspaceSessionRecord,
 ) -> Result<RepositoryRecord, ProductStoreError> {
+    resolve_workspace_repository_context(app_paths, lifecycle, session)
+        .and_then(|context| context.native_launch_anchor)
+}
+
+pub fn resolve_workspace_repository_context(
+    app_paths: &ProductAppPaths,
+    lifecycle: &LifecycleStore,
+    session: &WorkspaceSessionRecord,
+) -> Result<WorkspaceRepositoryContext, ProductStoreError> {
     let routing =
         RepositoryRouting::load_for_issue(app_paths, &session.project_id, &session.issue_id)?;
     match session.workspace_type {
@@ -41,16 +77,22 @@ fn workspace_repository(
                     id: session.entity_id.clone(),
                 })?;
             match routing {
-                RepositoryRouting::Legacy { .. } => resolve_legacy_physical_repository(
-                    app_paths,
-                    &session.project_id,
-                    &story.repository_id,
-                ),
+                RepositoryRouting::Legacy { .. } => {
+                    let repository = resolve_legacy_physical_repository(
+                        app_paths,
+                        &session.project_id,
+                        &story.repository_id,
+                    )?;
+                    Ok(same_anchor_context(repository))
+                }
                 RepositoryRouting::Logical {
                     manifest,
                     selection,
-                } => {
-                    match story.focus_repository_id {
+                } => Ok(WorkspaceRepositoryContext {
+                    // E（REQ-PLN-08）：native anchor 与业务 target 同 resolver
+                    // 分离派生——native 恒聚合根，业务按现行规则逐项保留。
+                    native_launch_anchor: planning_native_launch_anchor(&manifest, &selection),
+                    business_repository: match story.focus_repository_id {
                         Some(logical_id) => resolve_selected_logical_repository(
                             app_paths,
                             &session.project_id,
@@ -75,8 +117,8 @@ fn workspace_repository(
                     // 回写 focus 后走上方成员锚臂（r23 语义零变化,锚迁移
                     // supersede 语义正确）。
                     None => Ok(aggregate_root_view(&manifest)),
-                    }
-                }
+                    },
+                }),
                 RepositoryRouting::FailClosed { code, reason } => Err(routing_error(code, reason)),
             }
         }
@@ -90,44 +132,24 @@ fn workspace_repository(
                     id: session.entity_id.clone(),
                 })?;
             match routing {
-                RepositoryRouting::Legacy { .. } => resolve_issue_repository(app_paths, session),
+                RepositoryRouting::Legacy { .. } => {
+                    let repository = resolve_issue_repository(app_paths, session)?;
+                    Ok(same_anchor_context(repository))
+                }
                 RepositoryRouting::Logical {
                     manifest,
                     selection,
-                } => {
-                    let target_ids = unique_ids(design.involved_repository_ids);
-                    // 方案X草稿态（缺陷 #5，同缺陷 #2 修法 A 口径）：involved 空 =
-                    // AI 自决之前，目标锚定 LC 聚合根视图；回写 involved 后恢复
-                    // 唯一成员解析。
-                    if target_ids.is_empty() {
-                        return Ok(aggregate_root_view(&manifest));
-                    }
-                    // r62(codex-6 design resume 现场):确认面已合法化多仓 Design
-                    // (REQ-PLN-05 决策 3b:involved>1 + change_order 通过确认
-                    // gate 落盘),路由面若对同一数据 TargetAmbiguous,则确认成功
-                    // 后修订轮永远 fail-closed(现场 design_spec_0001 involved=
-                    // [alpha,beta] 修订即拒)。≥2 involved 且 change_order 非空
-                    // 时按首成员确定性锚定(change_order 是该形态的确定性实施
-                    // 顺序,首仓=author 修订目标;与 plan 会话 selection.focus
-                    // 回落先例 REQ-COD-04 对称);change_order 空(未回写完成/
-                    // 中间态)保持 TargetAmbiguous fail-closed 不放宽。
-                    let logical_id = if target_ids.len() >= 2 {
-                        match design.change_order.first() {
-                            Some(first) if target_ids.contains(first) => *first,
-                            _ => unique_target(target_ids, &design.id)?,
-                        }
-                    } else {
-                        unique_target(target_ids, &design.id)?
-                    };
-                    resolve_selected_logical_repository(
+                } => Ok(WorkspaceRepositoryContext {
+                    native_launch_anchor: planning_native_launch_anchor(&manifest, &selection),
+                    business_repository: resolve_logical_design_repository(
                         app_paths,
                         &session.project_id,
                         &session.issue_id,
-                        logical_id,
+                        &design,
                         &manifest,
                         &selection,
-                    )
-                }
+                    ),
+                }),
                 RepositoryRouting::FailClosed { code, reason } => Err(routing_error(code, reason)),
             }
         }
@@ -138,48 +160,24 @@ fn workspace_repository(
                 &session.entity_id,
             )?;
             match routing {
-                RepositoryRouting::Legacy { .. } => resolve_issue_repository(app_paths, session),
+                RepositoryRouting::Legacy { .. } => {
+                    let repository = resolve_issue_repository(app_paths, session)?;
+                    Ok(same_anchor_context(repository))
+                }
                 RepositoryRouting::Logical {
                     manifest,
                     selection,
-                } => {
-                    let targets =
-                        resolve_logical_work_item_plan_repository_targets(lifecycle, &plan)
-                            .map_err(|reason| routing_error_for_target_error(&reason))?;
-                    let mut target_ids = targets
-                        .unwrap_or_default()
-                        .keys()
-                        .copied()
-                        .collect::<BTreeSet<LogicalRepositoryId>>();
-                    // 缺陷 #7（同族）：聚合 plan 会话 target 以源 Design involved 集
-                    // 过滤（LC selection 恒 all_members，不过滤恒 Ambiguous）；无聚合
-                    // 视野（involved 空）保持原 target 集不变。
-                    let design_involved = load_involved_from_confirmed_design(lifecycle, &plan)
-                        .map_err(|reason| routing_error_for_target_error(&reason))?;
-                    if !design_involved.is_empty() {
-                        let involved: std::collections::BTreeSet<LogicalRepositoryId> =
-                            design_involved.into_iter().collect();
-                        target_ids.retain(|id| involved.contains(id));
-                    }
-                    match plan_session_repository_target(target_ids, &plan.id, &selection)? {
-                        PlanSessionRepositoryTarget::Member(logical_id) => {
-                            resolve_selected_logical_repository(
-                                app_paths,
-                                &session.project_id,
-                                &session.issue_id,
-                                logical_id,
-                                &manifest,
-                                &selection,
-                            )
-                        }
-                        // S6 方案 B：plan 会话=orchestrator 角色，多 target 且
-                        // focus 非唯一时锚定聚合根视图（同 story 草稿态口径；
-                        // 视图仅供 attach/launch 锚定，不落盘、不参与写根授权）。
-                        PlanSessionRepositoryTarget::AggregateRoot => {
-                            Ok(aggregate_root_view(&manifest))
-                        }
-                    }
-                }
+                } => Ok(WorkspaceRepositoryContext {
+                    native_launch_anchor: planning_native_launch_anchor(&manifest, &selection),
+                    business_repository: resolve_logical_plan_repository(
+                        app_paths,
+                        lifecycle,
+                        session,
+                        &plan,
+                        &manifest,
+                        &selection,
+                    ),
+                }),
                 RepositoryRouting::FailClosed { code, reason } => Err(routing_error(code, reason)),
             }
         }
@@ -202,11 +200,12 @@ fn workspace_repository(
                             kind: "work_item",
                             id: session.entity_id.clone(),
                         })?;
-                    resolve_legacy_physical_repository(
+                    let repository = resolve_legacy_physical_repository(
                         app_paths,
                         &session.project_id,
                         &physical_repository_id,
-                    )
+                    )?;
+                    Ok(same_anchor_context(repository))
                 }
                 RepositoryRouting::Logical {
                     manifest,
@@ -226,18 +225,130 @@ fn workspace_repository(
                             format!("work item {} has no target repository", work_item.id),
                         )
                     })?;
-                    resolve_selected_logical_repository(
+                    let repository = resolve_selected_logical_repository(
                         app_paths,
                         &session.project_id,
                         &session.issue_id,
                         logical_id,
                         &manifest,
                         &selection,
-                    )
+                    )?;
+                    Ok(same_anchor_context(repository))
                 }
                 RepositoryRouting::FailClosed { code, reason } => Err(routing_error(code, reason)),
             }
         }
+    }
+}
+
+/// Legacy/direct 与 WorkItem/Coding 的双用途同锚：native launch 与业务解析是
+/// 同一计算（原目录/原 member/worktree），一次派生两字段共享同一结果；
+/// 失败对两 getter 同错（共享派生失败，outer Err）。
+fn same_anchor_context(repository: RepositoryRecord) -> WorkspaceRepositoryContext {
+    WorkspaceRepositoryContext {
+        native_launch_anchor: Ok(repository.clone()),
+        business_repository: Ok(repository),
+    }
+}
+
+/// 规划会话（Logical 路由，Story/Design/WorkItemPlan）的 native launch
+/// anchor（REQ-PLN-08）：共同 selection 守卫通过即恒 LC 聚合根视图——
+/// scope 回写（involved/focus/change_order/target）不迁移锚；守卫失败
+/// fail-closed，native launch 不得绕过。业务选仓歧义（TargetAmbiguous/
+/// TargetUnknown/无唯一 focus）不阻断 native-only launch——业务校验是
+/// `business_repository` 字段的职责（design §3.1：native-only launch 不被
+/// Design 草稿缺 change_order 的选仓歧义阻断，但产物/确认/compile 校验
+/// 仍保留）。
+fn planning_native_launch_anchor(
+    manifest: &crate::product::logical_codebase::LogicalCodebaseManifest,
+    selection: &crate::product::logical_codebase::IssueCodebaseSelection,
+) -> Result<RepositoryRecord, ProductStoreError> {
+    selection_context_guards(selection)?;
+    Ok(aggregate_root_view(manifest))
+}
+
+/// LC Design 业务选仓（business_repository 用途；E 前原语义逐项保留）。
+fn resolve_logical_design_repository(
+    app_paths: &ProductAppPaths,
+    project_id: &str,
+    issue_id: &str,
+    design: &crate::product::models::DesignSpecRecord,
+    manifest: &crate::product::logical_codebase::LogicalCodebaseManifest,
+    selection: &crate::product::logical_codebase::IssueCodebaseSelection,
+) -> Result<RepositoryRecord, ProductStoreError> {
+    let target_ids = unique_ids(design.involved_repository_ids.clone());
+    // 方案X草稿态（缺陷 #5，同缺陷 #2 修法 A 口径）：involved 空 =
+    // AI 自决之前，目标锚定 LC 聚合根视图；回写 involved 后恢复
+    // 唯一成员解析。
+    if target_ids.is_empty() {
+        return Ok(aggregate_root_view(manifest));
+    }
+    // r62(codex-6 design resume 现场):确认面已合法化多仓 Design
+    // (REQ-PLN-05 决策 3b:involved>1 + change_order 通过确认
+    // gate 落盘),路由面若对同一数据 TargetAmbiguous,则确认成功
+    // 后修订轮永远 fail-closed(现场 design_spec_0001 involved=
+    // [alpha,beta] 修订即拒)。≥2 involved 且 change_order 非空
+    // 时按首成员确定性锚定(change_order 是该形态的确定性实施
+    // 顺序,首仓=author 修订目标;与 plan 会话 selection.focus
+    // 回落先例 REQ-COD-04 对称);change_order 空(未回写完成/
+    // 中间态)保持 TargetAmbiguous fail-closed 不放宽。
+    let logical_id = if target_ids.len() >= 2 {
+        match design.change_order.first() {
+            Some(first) if target_ids.contains(first) => *first,
+            _ => unique_target(target_ids, &design.id)?,
+        }
+    } else {
+        unique_target(target_ids, &design.id)?
+    };
+    resolve_selected_logical_repository(
+        app_paths,
+        project_id,
+        issue_id,
+        logical_id,
+        manifest,
+        selection,
+    )
+}
+
+/// LC WorkItemPlan 业务选仓（business_repository 用途；E 前原语义逐项保留）。
+fn resolve_logical_plan_repository(
+    app_paths: &ProductAppPaths,
+    lifecycle: &LifecycleStore,
+    session: &WorkspaceSessionRecord,
+    plan: &crate::product::models::IssueWorkItemPlan,
+    manifest: &crate::product::logical_codebase::LogicalCodebaseManifest,
+    selection: &crate::product::logical_codebase::IssueCodebaseSelection,
+) -> Result<RepositoryRecord, ProductStoreError> {
+    let targets = resolve_logical_work_item_plan_repository_targets(lifecycle, plan)
+        .map_err(|reason| routing_error_for_target_error(&reason))?;
+    let mut target_ids = targets
+        .unwrap_or_default()
+        .keys()
+        .copied()
+        .collect::<BTreeSet<LogicalRepositoryId>>();
+    // 缺陷 #7（同族）：聚合 plan 会话 target 以源 Design involved 集
+    // 过滤（LC selection 恒 all_members，不过滤恒 Ambiguous）；无聚合
+    // 视野（involved 空）保持原 target 集不变。
+    let design_involved = load_involved_from_confirmed_design(lifecycle, plan)
+        .map_err(|reason| routing_error_for_target_error(&reason))?;
+    if !design_involved.is_empty() {
+        let involved: std::collections::BTreeSet<LogicalRepositoryId> =
+            design_involved.into_iter().collect();
+        target_ids.retain(|id| involved.contains(id));
+    }
+    match plan_session_repository_target(target_ids, &plan.id, selection)? {
+        PlanSessionRepositoryTarget::Member(logical_id) => resolve_selected_logical_repository(
+            app_paths,
+            &session.project_id,
+            &session.issue_id,
+            logical_id,
+            manifest,
+            selection,
+        ),
+        // S6 方案 B：plan 会话=orchestrator 角色，多 target 且
+        // focus 非唯一时锚定聚合根视图（同 story 草稿态口径；
+        // 视图仅供 attach/launch 锚定，不落盘、不参与写根授权）。
+        PlanSessionRepositoryTarget::AggregateRoot => Ok(aggregate_root_view(manifest)),
     }
 }
 
@@ -249,18 +360,7 @@ fn resolve_selected_logical_repository(
     manifest: &crate::product::logical_codebase::LogicalCodebaseManifest,
     selection: &crate::product::logical_codebase::IssueCodebaseSelection,
 ) -> Result<RepositoryRecord, ProductStoreError> {
-    if selection.invalidation.is_some() {
-        return Err(routing_error(
-            RepositoryRoutingErrorCode::SelectionInvalidated,
-            "issue codebase selection has been invalidated",
-        ));
-    }
-    selection.validate_focus_subset().map_err(|error| {
-        routing_error(
-            RepositoryRoutingErrorCode::Inconsistent,
-            format!("invalid issue codebase selection: {error}"),
-        )
-    })?;
+    selection_context_guards(selection)?;
     let selected_ids: BTreeSet<LogicalRepositoryId> = match selection.selection_policy {
         SelectionPolicy::AllMembers => manifest.member_ids.iter().copied().collect(),
         SelectionPolicy::Explicit => selection.resolve_effective_members().into_iter().collect(),
@@ -283,6 +383,27 @@ fn resolve_selected_logical_repository(
     RepositoryStore::for_project(app_paths.clone(), &project)
         .resolve_logical_repository_for_issue_codebase(project_id, lc_id.as_deref(), logical_id)
         .map(|(_, _, repository)| repository)
+}
+
+/// 规划上下文共同 selection 守卫（REQ-PLN-08 由 resolve_selected_logical_repository
+/// 原内联检查迁移同源）：selection 失效与 focus ⊄ include 在业务成员解析与
+/// native launch anchor 两用途共享 fail-closed，native anchor 不得绕过；成员
+/// 归属（TargetUnknown/TargetAmbiguous）仍只在业务选仓面判定。
+fn selection_context_guards(
+    selection: &crate::product::logical_codebase::IssueCodebaseSelection,
+) -> Result<(), ProductStoreError> {
+    if selection.invalidation.is_some() {
+        return Err(routing_error(
+            RepositoryRoutingErrorCode::SelectionInvalidated,
+            "issue codebase selection has been invalidated",
+        ));
+    }
+    selection.validate_focus_subset().map_err(|error| {
+        routing_error(
+            RepositoryRoutingErrorCode::Inconsistent,
+            format!("invalid issue codebase selection: {error}"),
+        )
+    })
 }
 
 fn resolve_legacy_physical_repository(
