@@ -107,6 +107,7 @@ export function CockpitInbox({
   repairReservation = null,
   onStartLcResumeFresh,
   resumeFreshConnectionBlocked = false,
+  resumeFreshTerminalBlockReason = null,
 }: {
   items: readonly CockpitInboxItem[];
   actions?: CockpitActionFacade;
@@ -140,6 +141,9 @@ export function CockpitInbox({
   onStartLcResumeFresh?: (recoveryId: string) => boolean;
   /** D（Task 7.1）：断连守卫（页面按 ws connectionStatus 传入，true=禁用）。 */
   resumeFreshConnectionBlocked?: boolean;
+  /** D fix-loop r1（P2）：终态守卫——非 null 即禁用并以该文案如实提示
+   *（fresh 链后端绕过 engine 终态拒收，前端补位；文案与 F-30 同源）。 */
+  resumeFreshTerminalBlockReason?: string | null;
 }) {
   const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(() => new Set());
   const selectableItems = useMemo(
@@ -209,6 +213,7 @@ export function CockpitInbox({
     repairReservation,
     onStartLcResumeFresh,
     resumeFreshConnectionBlocked,
+    resumeFreshTerminalBlockReason,
     takeoverButtonRef:
       actionableSessionId === cockpitInboxItemSessionId(item.id) ? takeoverButtonRef : undefined,
   });
@@ -308,6 +313,7 @@ function CockpitInboxRow({
   repairReservation,
   onStartLcResumeFresh,
   resumeFreshConnectionBlocked,
+  resumeFreshTerminalBlockReason,
   takeoverButtonRef,
 }: {
   item: CockpitInboxItem;
@@ -338,6 +344,8 @@ function CockpitInboxRow({
   /** D（Task 7.1）：恢复等待卡显式 fresh 出口（页面接线，见 CockpitInbox 同名 prop）。 */
   onStartLcResumeFresh?: (recoveryId: string) => boolean;
   resumeFreshConnectionBlocked: boolean;
+  /** D fix-loop r1（P2）：终态守卫禁用原因（非 null 即禁用，见同名 prop）。 */
+  resumeFreshTerminalBlockReason: string | null;
   takeoverButtonRef?: Ref<ConfirmTwiceButtonHandle>;
 }) {
   const pulse = useCockpitInboxPulse(item.id);
@@ -447,6 +455,7 @@ function CockpitInboxRow({
             actionable={actionable}
             onStartLcResumeFresh={onStartLcResumeFresh}
             connectionBlocked={resumeFreshConnectionBlocked}
+            terminalBlockReason={resumeFreshTerminalBlockReason}
           />
         ) : null}
         {item.kind === "sc_failed" && item.scFailure && onRetryFailedSc ? (
@@ -1038,8 +1047,9 @@ const LC_RESUME_MAP_MISSING_REASON = "resume_fingerprint_unavailable";
  * unknown 不伪成功也不自动换新 ID 重发）。inflight 禁双击：本地快照点击
  * 时的 durable updated_at，事实推进（受理离场或 prepare 失败回 waiting
  * 都会更新 updated_at）即解除禁用。observer（非 actionable）只显示事实
- * 不出写动作；断连/provider 不可用 fail-closed 禁用并保留原因（provider
- * 守卫与 ChatInputBar REQ-PPS-03 同源：快照未加载如实按未知放行）。
+ * 不出写动作；断连/provider 不可用/终态 fail-closed 禁用并保留原因
+ *（provider 守卫与 ChatInputBar REQ-PPS-03 同源：快照未加载如实按未知
+ * 放行；终态为 fix-loop r1 P2 补位——fresh 链后端绕过 engine 终态拒收）。
  * fresh_reserved/fresh_running 无动作面——投影标题已呈
  * 「正在启动新原生会话…」。
  */
@@ -1048,11 +1058,13 @@ function LcResumeRecoveryCard({
   actionable,
   onStartLcResumeFresh,
   connectionBlocked,
+  terminalBlockReason,
 }: {
   info: LcResumeRecoveryInboxProjection;
   actionable: boolean;
   onStartLcResumeFresh?: (recoveryId: string) => boolean;
   connectionBlocked: boolean;
+  terminalBlockReason: string | null;
 }) {
   const [requestedAtUpdatedAt, setRequestedAtUpdatedAt] = useState<string | null>(null);
   const providers = useWorkspaceStore((state) => state.providers);
@@ -1087,7 +1099,11 @@ function LcResumeRecoveryCard({
       ? info.lastOperation.reason ?? "未知原因"
       : null;
   const disabled =
-    inflight || operationPending || connectionBlocked || providerBlockReason !== null;
+    inflight ||
+    operationPending ||
+    connectionBlocked ||
+    providerBlockReason !== null ||
+    terminalBlockReason !== null;
   const handleStart = () => {
     if (disabled || onStartLcResumeFresh === undefined) {
       return;
@@ -1125,6 +1141,9 @@ function LcResumeRecoveryCard({
           </div>
           {connectionBlocked ? (
             <p className="mt-1 text-xs text-slate-500">连接已断开，恢复连接后可继续</p>
+          ) : null}
+          {terminalBlockReason !== null ? (
+            <p className="mt-1 text-xs text-slate-500">{terminalBlockReason}</p>
           ) : null}
           {providerBlockReason !== null ? (
             <p className="mt-1 text-xs text-[var(--aria-danger)]">{providerBlockReason}</p>

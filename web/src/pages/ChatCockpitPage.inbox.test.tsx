@@ -1069,6 +1069,14 @@ describe("ChatCockpitPage", () => {
 
     const observed = screen.getByTestId("cockpit-inbox-item-lc_resume_recovery");
     expect(observed).toHaveTextContent("旧原生会话已失效");
+    // fix-loop r1（P3）：判别断言——动作区容器必须在场（实现前不存在，
+    // 空转绿不可复现），容器内事实可见且无写动作按钮。
+    const actionArea = within(observed).getByTestId("lc-resume-recovery-actions");
+    expect(
+      within(actionArea).getByText(
+        "运行环境已变化，不能继续旧原生会话。当前工作区、产物、反馈与评审意见均保留。",
+      ),
+    ).toBeVisible();
     expect(within(observed).queryByRole("button")).toBeNull();
   });
 });

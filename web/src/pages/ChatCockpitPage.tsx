@@ -378,6 +378,17 @@ export function ChatCockpitPage({
       ) {
         return false;
       }
+      // D fix-loop r1（P2）：终态守卫——fresh 链后端早退绕过 engine
+      // start_generation 的终态拒收（inbound.rs resume_recovery 分支），
+      // 前端补位拒绝出站。与 F-30 判据同源但不带 stage 条件：恢复卡不随
+      // stage 显隐，终态（Confirmed/Terminated）任意 stage 下 fresh 均属
+      // 未定义路径，fail-closed。
+      if (
+        current.sessionStatus === "confirmed" ||
+        current.sessionStatus === "terminated"
+      ) {
+        return false;
+      }
       const { providers, reviewerEnabled, reviewRounds, permissionModes } = current;
       return workspaceWs.sendLcResumeFresh(
         recoveryId,
@@ -1217,6 +1228,11 @@ export function ChatCockpitPage({
           repairReservation={state.repairReservation}
           onStartLcResumeFresh={handleStartLcResumeFresh}
           resumeFreshConnectionBlocked={workspaceWs.connectionStatus !== "connected"}
+          resumeFreshTerminalBlockReason={
+            state.sessionStatus === "confirmed" || state.sessionStatus === "terminated"
+              ? startGenerationBlockedHint
+              : null
+          }
         />
       </CockpitInboxDrawer>
     </div>

@@ -836,4 +836,46 @@ describe("ChatCockpitPage", () => {
     expect(button).toBeDisabled();
     expect(screen.getByText(/连接已断开/)).toBeVisible();
   });
+
+  // D fix-loop r1（P2，审查 2026-10-12）：终态守卫——fresh 链后端绕过
+  // engine.start_generation 的终态拒收（inbound resume_recovery 早退），前端
+  // 必须补位：confirmed/terminated 会话恢复卡按钮禁用＋如实提示＋点击零出站
+  //（与同屏 F-30 generic「开始生成」终态禁用不矛盾）。terminate 不清
+  // lc_resume_recovery，卡面事实保留但动作资格被终态封死。
+  it("anchor_t21_recovery_fresh_button_blocks_terminal_sessions_without_sending", async () => {
+    const user = userEvent.setup();
+    const freshSends: string[] = [];
+    const workspaceWs = mockWorkspaceWs({
+      connectionStatus: "connected",
+      sendLcResumeFresh: (recoveryId) => {
+        freshSends.push(recoveryId);
+        return true;
+      },
+    });
+    useWorkspaceStore.setState({
+      stage: "prepare_context",
+      lcResumeRecovery: lcResumeRecoveryFixture(),
+    });
+
+    for (const [status, hint] of [
+      ["confirmed", /会话已确认（终态）/],
+      ["terminated", /会话已终止（终态）/],
+    ] as const) {
+      freshSends.length = 0;
+      const { unmount } = renderCockpitWith(workspaceWs, "session_001");
+      act(() => {
+        useWorkspaceStore.setState({ sessionStatus: status });
+      });
+
+      const button = screen.getByRole("button", { name: "启动新会话继续修订" });
+      expect(button, `sessionStatus=${status}`).toBeDisabled();
+      // 提示收窄到恢复卡内（ChatInputBar 的 F-30 终态提示同文案同屏共存）。
+      expect(
+        within(screen.getByTestId("cockpit-inbox-item-lc_resume_recovery")).getByText(hint),
+      ).toBeVisible();
+      await user.click(button);
+      expect(freshSends, `sessionStatus=${status} 点击零出站`).toHaveLength(0);
+      unmount();
+    }
+  });
 });
