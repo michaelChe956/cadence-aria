@@ -2088,3 +2088,52 @@ async fn anchor_t09_probe_timeout_or_cancel_cannot_revive_old_run() {
         "the cancelled old run must not start after barrier release"
     );
 }
+
+/// 审查 fix-loop R1(P2):winner panic 不得永久滞留 single-flight 槽——
+/// unwind 只丢弃 winner 侧的 sender 克隆,若 HashMap 槽内的克隆随之保留,
+/// watch 通道不关闭,同 key 后续 caller 走 Waiting 永久阻塞(无 typed
+/// 错误、无日志直至重启)。panic 后同 key 新 caller 必须能重新观测。
+#[tokio::test]
+async fn anchor_t09_winner_panic_evicts_inflight_slot_for_next_caller() {
+    use std::sync::Arc;
+
+    let cache = Arc::new(super::LcVersionCache::new());
+    let key = anchor_t09_key(crate::product::models::ProviderName::ClaudeCode, "identity-panic");
+
+    // winner 的 probe future 注入 panic:任务边界捕获(JoinError::is_panic),
+    // 不让测试进程直接终止。
+    let panicking_probe: super::LcVersionProbe = std::sync::Arc::new(|_key| {
+        Box::pin(async {
+            panic!("anchor t09 injected winner panic inside the probe future");
+        })
+    });
+    let panicked_winner = {
+        let cache = cache.clone();
+        let key = key.clone();
+        tokio::spawn(async move {
+            cache
+                .cached_lc_cli_version(key, panicking_probe, CancellationToken::new())
+                .await
+        })
+    };
+    let join_error = panicked_winner
+        .await
+        .expect_err("the panicking winner must surface as a JoinError, not a result");
+    assert!(
+        join_error.is_panic(),
+        "expected a panic-carrying JoinError, got {join_error:?}"
+    );
+
+    // panic 卸载必须逐出 InFlight 槽:同 key 后续 caller 重新观测并成功,
+    // 而不是在死通道上永久等待(timeout 守卫把「挂起」转为确定失败)。
+    let probe = AnchorT09ProbeFactory::default();
+    let next = tokio::time::timeout(
+        TEST_TIMEOUT,
+        cache.cached_lc_cli_version(key, probe.probe(), CancellationToken::new()),
+    )
+    .await
+    .expect("next same-key caller must not hang on the panicked in-flight slot")
+    .expect("re-observation after the panic succeeds");
+    assert_eq!(next.exact_version(), "cli 1.4.0");
+    assert_eq!(probe.calls(), 1);
+}

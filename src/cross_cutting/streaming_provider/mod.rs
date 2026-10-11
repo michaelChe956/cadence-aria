@@ -385,6 +385,10 @@ impl LcVersionCache {
                 settled
             }
             LcVersionCacheClaim::Won(sender) => {
+                // panic 卸载保护(fix-loop R1):guard 在本臂任何退出路径
+                // (含 unwind)丢弃;成功路径先写 Fresh,错误路径的显式逐出
+                // 与 guard 幂等共存。
+                let _guard = LcVersionInFlightDropGuard::new(&self.inner, &key, &sender);
                 // winner:唯一一次调用 probe(不预造 future、不 spawn)。
                 let probe_future = probe(key.clone());
                 let observed = tokio::select! {
@@ -420,6 +424,51 @@ impl LcVersionCache {
                     }
                 }
             }
+        }
+    }
+}
+
+/// 审查 fix-loop R1(P2):winner panic 卸载保护。winner 执行途中 panic
+/// (probe factory/future panic、锁中毒级联)时,unwind 只丢弃 winner 侧的
+/// sender 克隆——HashMap 槽内仍有另一克隆,watch 通道不关闭,同 key 后续
+/// caller 会走 `Waiting` 永久阻塞。本 guard 在 drop(含 unwind 路径)时以
+/// 与既有错误结算路径相同的语义逐出仍属自己的 InFlight 槽;成功路径在
+/// guard 丢弃前已写入 `Fresh`,不受影响。锁中毒时也强制逐出
+/// (`into_inner`),不把槽留给重启前的所有 caller。
+struct LcVersionInFlightDropGuard {
+    inner: std::sync::Arc<LcVersionCacheInner>,
+    key: LcVersionProbeKey,
+    sender: tokio::sync::watch::Sender<
+        Option<Result<LcVersionObservation, VersionProbeError>>,
+    >,
+}
+
+impl LcVersionInFlightDropGuard {
+    fn new(
+        inner: &std::sync::Arc<LcVersionCacheInner>,
+        key: &LcVersionProbeKey,
+        sender: &tokio::sync::watch::Sender<
+            Option<Result<LcVersionObservation, VersionProbeError>>,
+        >,
+    ) -> Self {
+        Self {
+            inner: inner.clone(),
+            key: key.clone(),
+            sender: sender.clone(),
+        }
+    }
+}
+
+impl Drop for LcVersionInFlightDropGuard {
+    fn drop(&mut self) {
+        let mut slots = match self.inner.slots.lock() {
+            Ok(slots) => slots,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(LcVersionCacheSlot::InFlight(current)) = slots.get(&self.key)
+            && current.same_channel(&self.sender)
+        {
+            slots.remove(&self.key);
         }
     }
 }
