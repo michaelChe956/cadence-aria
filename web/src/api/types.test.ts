@@ -16,6 +16,7 @@ import type {
   NodeDetail,
   PrepareWorkItemPlanRequest,
   PrepareWorkItemPlanResponse,
+  ProviderConfigSnapshot,
   RepositoryInitializationOperationSnapshot,
   TimelineNodeType,
   WorkItemExecutionPlan,
@@ -788,5 +789,61 @@ describe("human gate protocol variants", () => {
     ];
 
     expect(triggers).toHaveLength(4);
+  });
+});
+
+// C2（Task 6.2 / anchor_t20）：LC 恢复显式 fresh 的 wire 合同——出站 typed
+// 结果帧 snake_case 逐字段镜像后端 out.rs；普通 WsInMessage::
+// start_generation 不携带 resume_recovery（显式 fresh 意图只经 hooks 层
+// sendLcResumeFresh 的加宽发送联合发送，普通 literal None）。
+describe("anchor_t20 lc resume recovery wire contract", () => {
+  it("describes the typed operation result frame with durable operation states", () => {
+    const frame: WsOutMessage = {
+      type: "lc_resume_recovery_operation_result",
+      recovery_id: "rec-1",
+      operation_id: "op-1",
+      delivery: "replayed",
+      operation_state: "running",
+      fresh_node_id: "node-2",
+      reason_code: null,
+    };
+
+    expect(JSON.parse(JSON.stringify(frame))).toEqual({
+      type: "lc_resume_recovery_operation_result",
+      recovery_id: "rec-1",
+      operation_id: "op-1",
+      delivery: "replayed",
+      operation_state: "running",
+      fresh_node_id: "node-2",
+      reason_code: null,
+    });
+  });
+
+  it("keeps the plain start_generation inbound wire free of the fresh intent", () => {
+    const providerConfig: ProviderConfigSnapshot = {
+      author: "codex",
+      reviewer: null,
+      review_rounds: 1,
+    };
+    const plain: WsInMessage = {
+      type: "start_generation",
+      provider_config: providerConfig,
+      reviewer_enabled: true,
+    };
+    expect(JSON.parse(JSON.stringify(plain))).toEqual({
+      type: "start_generation",
+      provider_config: providerConfig,
+      reviewer_enabled: true,
+    });
+
+    const rejected: WsInMessage = {
+      type: "start_generation",
+      provider_config: providerConfig,
+      reviewer_enabled: true,
+      // @ts-expect-error 普通出生 wire 不携带 resume_recovery——显式 fresh
+      // 意图只经 hooks 层 sendLcResumeFresh 的发送联合（C2 接口字典）。
+      resume_recovery: { recovery_id: "rec-1", intent: "fresh", operation_id: "op-1" },
+    };
+    expect(rejected.type).toBe("start_generation");
   });
 });

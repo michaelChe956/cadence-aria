@@ -12,6 +12,9 @@ export function mockWorkspaceWs(overrides: Partial<WorkspaceWsApi> = {}) {
     sendMessage: vi.fn(),
     sendContextNote: vi.fn(),
     sendStartGeneration: vi.fn(),
+    // C2（Task 6.2）：显式 fresh 发送器 mock——保守缺省 false（未发送），
+    // 需要 fresh 流程的用例经 mockWorkspaceWs({ sendLcResumeFresh: ... }) 覆盖。
+    sendLcResumeFresh: vi.fn(() => false),
     retryInterruptedRun: vi.fn(() => true),
     sendRequestRevision: vi.fn(),
     sendWorkItemPlanCompileRecoveryAction: vi.fn(),

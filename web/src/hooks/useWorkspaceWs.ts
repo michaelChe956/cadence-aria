@@ -28,9 +28,30 @@ import {
   type PlanRepairSourceState,
 } from "./useWorkspaceWs-plan-repair";
 
+/**
+ * C2（Task 6.2，接口字典 §0.3 wire/前端）：`StartGeneration.resume_recovery`
+ * 的显式 fresh 意图 TS wire 镜像——snake_case 与后端
+ * `workspace_ws_types/in_.rs::LcResumeRecoveryIntent` 逐字段一致；intent 后端
+ * serde 只收 "fresh"，前端只发显式 fresh，不猜其它回落。
+ */
+export type LcResumeFreshIntentWire = {
+  recovery_id: string;
+  intent: "fresh";
+  operation_id: string;
+};
+
 type WorkspaceWsSendMessage =
   | WsInMessage
-  | { type: "provider_select"; role: string; provider: string };
+  | { type: "provider_select"; role: string; provider: string }
+  | {
+      // C2（Task 6.2）：显式 fresh 恢复的加宽发送变体——普通出生/重跑
+      // sendStartGeneration 仍不带 resume_recovery（literal None）。
+      type: "start_generation";
+      provider_config: ProviderConfigSnapshot;
+      reviewer_enabled: boolean;
+      resume_recovery?: LcResumeFreshIntentWire;
+    };
+
 const CONNECT_TIMEOUT_MS = 5_000;
 const PING_INTERVAL_MS = 25_000;
 const SERVER_SILENCE_TIMEOUT_MS = 60_000;
@@ -415,6 +436,33 @@ export function useWorkspaceWs(sessionId: string | null) {
     [sendJson],
   );
 
+  // C2（Task 6.2，设计 §5.1）：显式 fresh 恢复发送器。沿 sendJson 既有
+  // lease/connection 守卫；发送成功不做任何乐观本地变更（不清 artifact/
+  // feedback/历史、不伪 setProviderStatus("running")）——受理/回放/失败
+  // 一律以 typed `lc_resume_recovery_operation_result` 与 authoritative
+  // session_state 对账。operation_id 由调用方一次用户动作生成并保持稳定，
+  // 本函数不重新生成；running/unknown 结果不自动换新 ID 重发，也不进入
+  // retry_interrupted_run/advance 通道。
+  const sendLcResumeFresh = useCallback(
+    (
+      recoveryId: string,
+      operationId: string,
+      providerConfig: ProviderConfigSnapshot,
+      reviewerEnabled: boolean,
+    ): boolean =>
+      sendJson({
+        type: "start_generation",
+        provider_config: providerConfig,
+        reviewer_enabled: reviewerEnabled,
+        resume_recovery: {
+          recovery_id: recoveryId,
+          intent: "fresh",
+          operation_id: operationId,
+        },
+      }),
+    [sendJson],
+  );
+
   const retryInterruptedRun = useCallback(
     (failedNodeId: string) => {
       const sent = sendJson({
@@ -775,6 +823,7 @@ export function useWorkspaceWs(sessionId: string | null) {
     sendMessage,
     sendContextNote,
     sendStartGeneration,
+    sendLcResumeFresh,
     retryInterruptedRun,
     sendRequestRevision,
     sendWorkItemPlanCompileRecoveryAction,

@@ -1,9 +1,74 @@
 import { render } from "@testing-library/react";
 import { afterEach, beforeEach, vi } from "vitest";
-import type { WorkItemPlanCandidateDto } from "../api/types";
+import type {
+  LcResumeRecoveryDto,
+  WorkItemPlanCandidateDto,
+} from "../api/types";
 import { useWorkspaceStore } from "../state/workspace-ws-store";
 import { useOperationAuditStore } from "../state/operation-audit-store";
 import { useWorkspaceWs } from "./useWorkspaceWs";
+
+// C2（Task 6.2 / anchor_t20）：LC 恢复对账测试夹具——session_state 帧与
+// typed 结果帧的最小真实 wire 形状（snake_case）。恢复 DTO 复用 C1
+// anchor_t19 fixture（值与后端 anchor_t03 wire 逐字段一致），经真实
+// ws.receive / handleWorkspaceWsMessage 路径重建 store 恢复事实。
+export function lcResumeSessionStateMessage(
+  sessionId: string,
+  recovery: LcResumeRecoveryDto | null,
+  overrides: Record<string, unknown> = {},
+) {
+  return {
+    type: "session_state",
+    session_id: sessionId,
+    workspace_type: "work_item_plan",
+    stage: "running",
+    session_status: "stopped_needs_human",
+    flow_kind: "legacy",
+    run_policy: "interactive",
+    run_history: {
+      seen_fingerprints: [],
+      repairs_used: 0,
+      manual_repairs_used: 0,
+      transitions_used: 0,
+      initial_review_count: 0,
+      verification_review_count: 0,
+    },
+    messages: [],
+    checkpoints: [],
+    artifact: null,
+    providers: { author: "codex", reviewer: null },
+    timeline_nodes: [],
+    active_node_id: null,
+    artifact_versions: [],
+    timeline_node_details: {},
+    human_presentation_revisions: [],
+    lc_resume_recovery: recovery,
+    ...overrides,
+  };
+}
+
+export function lcResumeOperationResultMessage(
+  recoveryId: string,
+  operationId: string,
+  delivery: "accepted" | "replayed",
+  operationState:
+    | "not_started"
+    | "reserved"
+    | "running"
+    | "completed"
+    | "failed"
+    | "unknown",
+  extras: Record<string, unknown> = {},
+) {
+  return {
+    type: "lc_resume_recovery_operation_result",
+    recovery_id: recoveryId,
+    operation_id: operationId,
+    delivery,
+    operation_state: operationState,
+    ...extras,
+  };
+}
 
 export function makeWorkItemPlanCandidate(
   overrides: Partial<WorkItemPlanCandidateDto> = {},

@@ -8,6 +8,14 @@ import {
 } from "../state/workspace-ws-store.test-utils";
 import { selectCockpitInbox } from "../state/workspace-cockpit-projection";
 import { linkedWorkspaceAmendmentSnapshotFixture } from "../components/coding-workspace/plan-repair-test-fixtures";
+import {
+  lcResumeOperationResultMessage,
+  lcResumeSessionStateMessage,
+} from "./useWorkspaceWs.test-utils";
+import {
+  lcFreshOperationFixture,
+  lcResumeRecoveryFixture,
+} from "../state/workspace-cockpit-projection.test-fixtures";
 
 describe("workspace websocket provider parser", () => {
   it("accepts kimi_code as a workspace provider", () => {
@@ -697,5 +705,191 @@ describe("workspace websocket pending choice answer source projection", () => {
 
     expect(projected()[0]).toMatchObject({ id: "choice_answer_bad" });
     expect(projected()[0].questions).toEqual([]);
+  });
+});
+
+// C2（Task 6.2 / anchor_t20）：typed LcResumeRecoveryOperationResult 帧对账。
+// handler 按 recovery_id 与 store 当前权威恢复对账（被新漂移替换/权威清空
+// 后的迟到帧静默丢弃）；delivery=replayed 只读回放、不重复执行；running/
+// resolved/prepare 失败三态以幂等 typed 回执呈现；operation_state 直取
+// wire durable 事实，不从错误字符串推权限、不伪 running、不触发
+// retry/advance（与既有 advance 重放/retry_interrupted_run 通道分离）。
+describe("anchor_t20 fresh sender and typed operation result", () => {
+  installWorkspaceStoreTestHooks();
+
+  const handlerOptions = () => ({
+    invalidatedPreStageNodeIds: new Set<string>(),
+    scheduleFlush: vi.fn(),
+    streamFlushTimeouts: {},
+  });
+
+  const receipts = () =>
+    useWorkspaceStore
+      .getState()
+      .chatEntries.filter((entry) =>
+        entry.id.startsWith("lc_resume_recovery_operation_result:"),
+      );
+
+  const waitingRecovery = () =>
+    lcResumeRecoveryFixture({
+      state: "waiting",
+      last_operation: lcFreshOperationFixture({ state: "not_started" }),
+    });
+
+  const receive = (message: unknown) =>
+    handleWorkspaceWsMessage(message as unknown as WsServerMessage, handlerOptions());
+
+  it("anchor_t20_fresh_sender_and_typed_operation_result", () => {
+    // 权威首帧：waiting 恢复经真实 C1 投影路径落库。
+    receive(
+      lcResumeSessionStateMessage("session_rec", waitingRecovery()),
+    );
+    expect(useWorkspaceStore.getState().lcResumeRecovery?.recovery_id).toBe("rec-1");
+
+    // accepted/reserved：typed 回执落幂等条目，逐字段镜像 wire。
+    receive(lcResumeOperationResultMessage("rec-1", "op-1", "accepted", "reserved"));
+    expect(receipts()).toHaveLength(1);
+    expect(receipts()[0]).toMatchObject({
+      id: "lc_resume_recovery_operation_result:rec-1:op-1:accepted:reserved",
+      type: "start_generation",
+      role: "system",
+      metadata: {
+        recovery_id: "rec-1",
+        operation_id: "op-1",
+        delivery: "accepted",
+        operation_state: "reserved",
+        fresh_node_id: null,
+        reason_code: null,
+      },
+    });
+
+    // 已知协议成员：不得落 UNRECOGNIZED_EVENT 诊断（default 分支不接手）。
+    expect(useWorkspaceStore.getState().protocolDiagnostics).toHaveLength(0);
+    // 不伪造 generic 运行事实：providerStatus 不伪 running、无 error 面。
+    expect(useWorkspaceStore.getState().providerStatus).toBe("starting");
+    expect(useWorkspaceStore.getState().error).toBeNull();
+  });
+
+  it("replays the same operation without duplicating execution or receipts", () => {
+    receive(lcResumeSessionStateMessage("session_rec", waitingRecovery()));
+
+    const reserved = lcResumeOperationResultMessage("rec-1", "op-1", "accepted", "reserved");
+    for (let round = 0; round < 2; round += 1) {
+      receive(reserved);
+    }
+    // 同帧重放：幂等 upsert，回执不重复、不复活执行。
+    expect(receipts()).toHaveLength(1);
+
+    // replayed/running：只读回放按状态呈现，不产生重复执行副作用。
+    receive(
+      lcResumeOperationResultMessage("rec-1", "op-1", "replayed", "running", {
+        fresh_node_id: "node-2",
+      }),
+    );
+    expect(receipts()).toHaveLength(2);
+    expect(receipts().at(-1)?.metadata).toMatchObject({
+      delivery: "replayed",
+      operation_state: "running",
+      fresh_node_id: "node-2",
+    });
+    expect(useWorkspaceStore.getState().protocolDiagnostics).toHaveLength(0);
+  });
+
+  it("presents running, resolved and prepare-failed states while only session_state moves authority", () => {
+    // fresh_running 活跃态：恢复卡在场，旧 generic 出口由恢复卡替代（C6.1
+    // 投影边界回归：本 handler 不复活 generic 伪事实）。
+    receive(
+      lcResumeSessionStateMessage(
+        "session_rec",
+        lcResumeRecoveryFixture({
+          state: "fresh_running",
+          last_operation: lcFreshOperationFixture({ state: "running" }),
+        }),
+      ),
+    );
+    receive(lcResumeOperationResultMessage("rec-1", "op-1", "replayed", "running"));
+    let inbox = selectCockpitInbox(useWorkspaceStore.getState());
+    expect(inbox.some((item) => item.kind === "lc_resume_recovery")).toBe(true);
+    expect(receipts().at(-1)?.metadata).toMatchObject({ operation_state: "running" });
+
+    // resolved：同 ID 回放 completed；恢复卡消失、generic stopped 卡不被
+    // 永久屏蔽（后续正常动作恢复）。
+    receive(
+      lcResumeSessionStateMessage(
+        "session_rec",
+        lcResumeRecoveryFixture({
+          state: "resolved",
+          last_operation: lcFreshOperationFixture({
+            state: "completed",
+            fresh_node: "node-2",
+          }),
+        }),
+      ),
+    );
+    receive(
+      lcResumeOperationResultMessage("rec-1", "op-1", "replayed", "completed", {
+        fresh_node_id: "node-2",
+      }),
+    );
+    inbox = selectCockpitInbox(useWorkspaceStore.getState());
+    expect(inbox.some((item) => item.kind === "lc_resume_recovery")).toBe(false);
+    expect(inbox.some((item) => item.kind === "stopped")).toBe(true);
+    expect(receipts().at(-1)?.metadata).toMatchObject({
+      operation_state: "completed",
+      fresh_node_id: "node-2",
+    });
+
+    // prepare 失败：回 waiting 不删 ID；回执呈现 failed＋reason，typed 帧
+    // 不改写 store 权威恢复（仍由 session_state 全量替换承载）。
+    receive(lcResumeSessionStateMessage("session_rec", waitingRecovery()));
+    receive(
+      lcResumeOperationResultMessage("rec-1", "op-1", "replayed", "failed", {
+        reason_code: "prepare_failed",
+      }),
+    );
+    expect(useWorkspaceStore.getState().lcResumeRecovery).toMatchObject({
+      recovery_id: "rec-1",
+      state: "waiting",
+    });
+    expect(receipts().at(-1)?.metadata).toMatchObject({
+      operation_state: "failed",
+      reason_code: "prepare_failed",
+    });
+    expect(
+      selectCockpitInbox(useWorkspaceStore.getState()).some(
+        (item) => item.kind === "lc_resume_recovery",
+      ),
+    ).toBe(true);
+  });
+
+  it("keeps unknown operation state non-optimistic without generic fabrication", () => {
+    receive(lcResumeSessionStateMessage("session_rec", waitingRecovery()));
+    receive(lcResumeOperationResultMessage("rec-1", "op-9", "accepted", "unknown"));
+
+    expect(receipts()).toHaveLength(1);
+    expect(receipts()[0].metadata).toMatchObject({
+      operation_id: "op-9",
+      operation_state: "unknown",
+    });
+    // unknown 不乐观标成功/失败：不伪 running、无 error/protocol_error 面。
+    expect(useWorkspaceStore.getState().providerStatus).toBe("starting");
+    expect(useWorkspaceStore.getState().error).toBeNull();
+    expect(useWorkspaceStore.getState().protocolError).toBeNull();
+    expect(useWorkspaceStore.getState().protocolDiagnostics).toHaveLength(0);
+  });
+
+  it("drops result frames for a superseded or absent recovery without side effects", () => {
+    receive(lcResumeSessionStateMessage("session_rec", waitingRecovery()));
+    // 旧 recovery_id（已被新漂移替换）：迟到帧静默丢弃。
+    receive(lcResumeOperationResultMessage("rec-old", "op-1", "replayed", "running"));
+    expect(receipts()).toHaveLength(0);
+    expect(useWorkspaceStore.getState().protocolDiagnostics).toHaveLength(0);
+
+    // store 无恢复投影（权威帧清空后）：结果帧不复活恢复事实。
+    receive(lcResumeSessionStateMessage("session_rec", null));
+    receive(lcResumeOperationResultMessage("rec-1", "op-1", "replayed", "completed"));
+    expect(useWorkspaceStore.getState().lcResumeRecovery).toBeNull();
+    expect(receipts()).toHaveLength(0);
+    expect(useWorkspaceStore.getState().protocolDiagnostics).toHaveLength(0);
   });
 });

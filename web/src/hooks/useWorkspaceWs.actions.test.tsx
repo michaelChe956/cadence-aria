@@ -1,10 +1,13 @@
 import { act } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { ChatEntry } from "../state/chat-entries";
+import type { ProviderConfigSnapshot } from "../api/types";
 import { useWorkspaceStore } from "../state/workspace-ws-store";
 import {
   MockWebSocket,
   installWorkspaceWsTestHooks,
+  lcResumeOperationResultMessage,
+  lcResumeSessionStateMessage,
   makeBatchArtifactPayload,
   makeCompileArtifactPayload,
   makeDraftArtifactPayload,
@@ -12,6 +15,10 @@ import {
   makeWorkItemPlanCandidate,
   renderWorkspaceHook,
 } from "./useWorkspaceWs.test-utils";
+import {
+  lcFreshOperationFixture,
+  lcResumeRecoveryFixture,
+} from "../state/workspace-cockpit-projection.test-fixtures";
 
 describe("useWorkspaceWs outgoing actions", () => {
   installWorkspaceWsTestHooks();
@@ -821,4 +828,148 @@ describe("useWorkspaceWs outgoing actions", () => {
 
   // 退役留档（T5/REQ-RET-02）：`sends staged work item plan workflow messages` 驱动已删除的 legacy 决策发送面，
   // 随消息族退役（wp5-attribution-table.md）；T1 矩阵 legacy 回归留档在案。
+});
+
+// C2（Task 6.2 / anchor_t20）：显式 fresh 发送器——稳定 operation_id、
+// explicit fresh wire；发送不做乐观本地变更（不清产物/历史、不伪
+// running，typed authority 确认）；accepted/replayed/unknown 结果帧到达后
+// 不隐式 retry/advance/换新 ID 重发；普通 sendStartGeneration wire 仍不带
+// resume_recovery。与 advance 重放/retry_interrupted_run 通道分离。
+describe("anchor_t20 lc resume fresh sender and typed result reconciliation", () => {
+  installWorkspaceWsTestHooks();
+
+  const providerConfig: ProviderConfigSnapshot = {
+    author: "codex",
+    reviewer: null,
+    review_rounds: 1,
+  };
+
+  const waitingRecovery = () =>
+    lcResumeRecoveryFixture({
+      state: "waiting",
+      last_operation: lcFreshOperationFixture({ state: "not_started" }),
+    });
+
+  it("anchor_t20_fresh_sender_and_typed_operation_result", () => {
+    const harness = renderWorkspaceHook();
+    act(() => {
+      harness.ws.open();
+    });
+    act(() => {
+      harness.ws.receive(
+        lcResumeSessionStateMessage("session_001", waitingRecovery()),
+      );
+    });
+    expect(useWorkspaceStore.getState().lcResumeRecovery?.recovery_id).toBe("rec-1");
+
+    // 本地事实哨兵：fresh 发送不得清空产物（对照普通 sendStartGeneration
+    // 的既有清理行为，本路径一律以 typed 结果对账）。
+    useWorkspaceStore.getState().setArtifact("既有产物", 7);
+
+    let sentOk = false;
+    act(() => {
+      sentOk = harness.api.sendLcResumeFresh("rec-1", "op-1", providerConfig, true);
+    });
+    expect(sentOk).toBe(true);
+
+    const startFrames = harness.ws.sent
+      .map((raw) => JSON.parse(raw) as Record<string, unknown>)
+      .filter((frame) => frame.type === "start_generation");
+    expect(startFrames).toHaveLength(1);
+    const sent = startFrames[0];
+    expect(sent.type).toBe("start_generation");
+    expect(sent.provider_config).toEqual(providerConfig);
+    expect(sent.reviewer_enabled).toBe(true);
+    expect(sent.resume_recovery).toEqual({
+      recovery_id: "rec-1",
+      intent: "fresh",
+      operation_id: "op-1",
+    });
+    // 不伪运行、不清产物（无乐观本地变更）。
+    expect(useWorkspaceStore.getState().providerStatus).toBe("starting");
+    expect(useWorkspaceStore.getState().artifact).toBe("既有产物");
+
+    // typed 结果帧序列（accepted/reserved → replayed/running → completed）
+    // 与 busy typed 拒收（新 operation_id 被拒）：任何状态都不隐式重发。
+    act(() => {
+      harness.ws.receive(
+        lcResumeOperationResultMessage("rec-1", "op-1", "accepted", "reserved"),
+      );
+      harness.ws.receive(
+        lcResumeOperationResultMessage("rec-1", "op-1", "replayed", "running"),
+      );
+      harness.ws.receive(
+        lcResumeOperationResultMessage("rec-1", "op-1", "replayed", "completed", {
+          fresh_node_id: "node-2",
+        }),
+      );
+      harness.ws.receive({
+        type: "protocol_error",
+        code: "lc_resume_recovery_busy",
+        message: "already holds an accepted fresh operation",
+        context: { active_operation_id: "op-1" },
+      });
+    });
+
+    const frames = harness.ws.sent.map((raw) => JSON.parse(raw) as Record<string, unknown>);
+    expect(frames.filter((frame) => frame.type === "start_generation")).toHaveLength(1);
+    const automaticRetries = frames.filter(
+      (frame) =>
+        frame.type === "retry_interrupted_run" ||
+        frame.type === "advance" ||
+        (frame.type === "start_generation" &&
+          (frame.resume_recovery as { operation_id?: string } | undefined)
+            ?.operation_id !== "op-1"),
+    ).length;
+    expect(automaticRetries).toBe(0);
+  });
+
+  it("keeps the caller-provided operation id stable and never regenerates it", () => {
+    const harness = renderWorkspaceHook();
+    act(() => {
+      harness.ws.open();
+    });
+    act(() => {
+      harness.api.sendLcResumeFresh("rec-1", "op-1", providerConfig, true);
+      harness.api.sendLcResumeFresh("rec-1", "op-1", providerConfig, true);
+    });
+
+    const startFrames = harness.ws.sent
+      .map((raw) => JSON.parse(raw) as Record<string, unknown>)
+      .filter((frame) => frame.type === "start_generation");
+    expect(startFrames).toHaveLength(2);
+    for (const frame of startFrames) {
+      expect(frame.resume_recovery).toEqual({
+        recovery_id: "rec-1",
+        intent: "fresh",
+        operation_id: "op-1",
+      });
+    }
+  });
+
+  it("keeps the plain sendStartGeneration wire free of resume recovery", () => {
+    const harness = renderWorkspaceHook();
+    act(() => {
+      harness.ws.open();
+      harness.ws.sent.length = 0;
+      harness.api.sendStartGeneration(providerConfig, true);
+    });
+
+    const frames = harness.ws.sent.map((raw) => JSON.parse(raw) as Record<string, unknown>);
+    expect(frames).toHaveLength(1);
+    expect(frames[0].type).toBe("start_generation");
+    expect("resume_recovery" in frames[0]).toBe(false);
+    // 普通路径保留既有乐观行为（对照：fresh 路径不做本地乐观变更）。
+    expect(useWorkspaceStore.getState().providerStatus).toBe("running");
+  });
+
+  it("returns false without queueing when the socket is not open", () => {
+    const harness = renderWorkspaceHook();
+    let sentOk = true;
+    act(() => {
+      sentOk = harness.api.sendLcResumeFresh("rec-1", "op-1", providerConfig, true);
+    });
+    expect(sentOk).toBe(false);
+    expect(harness.ws.sent).toHaveLength(0);
+  });
 });

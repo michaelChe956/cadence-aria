@@ -1,5 +1,7 @@
 import type {
   HumanPresentationRevision,
+  LcFreshOperationState,
+  LcResumeRecoveryDelivery,
   PlanProjectionBundle,
   ProviderConfigSnapshot,
   ProjectionValidationReport,
@@ -527,6 +529,46 @@ const store = useWorkspaceStore.getState();
         msg.reason as string,
       );
       break;
+    case "lc_resume_recovery_operation_result":
+      {
+        // C2（Task 6.2，设计 §5.1）：typed 结果帧对账。recovery_id 必须匹配
+        // store 当前权威恢复——被新漂移替换/权威帧清空后的迟到帧静默丢弃
+        //（不伪造回执、不计协议漂移）。delivery=replayed 为服务端只读回放
+        // 已受理 operation：不重复执行（不重发 start_generation、不触发
+        // retry/advance）。operation_state 直取 wire durable 事实，unknown/
+        // failed 不乐观标成败、不自动换新 ID 重发；回执按 operation_id+
+        // delivery+state 幂等 upsert，权威恢复状态仍由 session_state.
+        // lc_resume_recovery 全量替换承载（本帧不写恢复状态、不从错误
+        // 字符串推导权限）。
+        const recovery = store.lcResumeRecovery;
+        if (recovery && recovery.recovery_id === msg.recovery_id) {
+          const delivery = msg.delivery;
+          const operationState = msg.operation_state;
+          store.appendChatEntry({
+            id: chatEntryId(
+              "lc_resume_recovery_operation_result",
+              `${msg.recovery_id}:${msg.operation_id}:${delivery}:${operationState}`,
+            ),
+            type: "start_generation",
+            role: "system",
+            content: lcResumeOperationReceiptContent(
+              delivery,
+              operationState,
+              msg.reason_code ?? null,
+            ),
+            timestamp: new Date().toISOString(),
+            metadata: {
+              recovery_id: msg.recovery_id,
+              operation_id: msg.operation_id,
+              delivery,
+              operation_state: operationState,
+              fresh_node_id: msg.fresh_node_id ?? null,
+              reason_code: msg.reason_code ?? null,
+            },
+          });
+        }
+      }
+      break;
     // 已知协议成员但本 handler 不做处理：linked_workspace_amendment_created 由
     // useWorkspaceWs 的 aggregatePlanRepairChildMessage 下游消费（该消息仍会流经本 switch），
     // provider_select_request 为协议保留成员。二者都不属于协议漂移，不计诊断——
@@ -765,6 +807,31 @@ function workItemPlanArtifactFromMessage(msg: WsServerMessage): WorkItemPlanArti
 
 function permissionRequestContent(request: { tool_name: string; description: string }) {
   return request.description ? `${request.tool_name} · ${request.description}` : request.tool_name;
+}
+
+// C2（Task 6.2，设计 §5.1/§6）：typed 结果回执文案——三态（running/
+// resolved/prepare 失败）＋unknown/not_started 非乐观收口；replayed 标注
+// 只读回放（不重复执行）。事实性文案，动作资格仍由 wire allowed_actions
+// 镜像，不从 reason_code/错误文本推导。
+function lcResumeOperationReceiptContent(
+  delivery: LcResumeRecoveryDelivery,
+  operationState: LcFreshOperationState,
+  reasonCode: string | null,
+) {
+  const replaySuffix = delivery === "replayed" ? "（回放）" : "";
+  switch (operationState) {
+    case "reserved":
+    case "running":
+      return `LC 恢复：新原生会话正在启动${replaySuffix}`;
+    case "completed":
+      return `LC 恢复：新原生会话已完成${replaySuffix}`;
+    case "failed":
+      return `LC 恢复：新原生会话启动准备失败${reasonCode ? `（${reasonCode}）` : ""}${replaySuffix}`;
+    case "unknown":
+      return `LC 恢复：operation 状态未知，等待权威对账${replaySuffix}`;
+    case "not_started":
+      return `LC 恢复：operation 尚未启动${replaySuffix}`;
+  }
 }
 
 function executionEventContent(event: ExecutionEvent, nodeTitle?: string | null) {
