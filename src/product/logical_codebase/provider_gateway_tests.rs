@@ -2219,15 +2219,15 @@ mod anchor_t09_prepare_contract {
     };
     use crate::product::logical_codebase::policy::SessionPolicyAction;
     use crate::product::logical_codebase::provider_projection::{
-        ProviderLcPrepareFacts, ProviderPolicyProjector, ProviderProjectionError,
-        ProviderProjectionInput, ProviderPolicyProjection, UnprovisionedProviderPolicyProjector,
+        ProviderLcPrepareFacts, ProviderPolicyProjection, ProviderPolicyProjector,
+        ProviderProjectionError, ProviderProjectionInput, UnprovisionedProviderPolicyProjector,
     };
     use crate::product::logical_codebase::provider_trust::{
         ProviderTrustSource, ProviderTrustVerification,
     };
     use crate::product::models::ProviderName;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// anchor_t09 fake streaming adapter:实现真实 prepare 链——
     /// `LcVersionCache`+计数 probe(口径①)、start/start_validated 计数
@@ -2299,10 +2299,8 @@ mod anchor_t09_prepare_contract {
             &self,
             _input: crate::cross_cutting::streaming_provider::StreamingProviderInput,
             _cancel: CancellationToken,
-        ) -> Result<
-            crate::cross_cutting::streaming_provider::ProviderSession,
-            ProviderAdapterError,
-        > {
+        ) -> Result<crate::cross_cutting::streaming_provider::ProviderSession, ProviderAdapterError>
+        {
             self.adapter_starts.fetch_add(1, Ordering::SeqCst);
             Ok(Self::minimal_session())
         }
@@ -2311,10 +2309,8 @@ mod anchor_t09_prepare_contract {
             &self,
             _input: ValidatedStreamingProviderInput,
             _cancel: CancellationToken,
-        ) -> Result<
-            crate::cross_cutting::streaming_provider::ProviderSession,
-            ProviderAdapterError,
-        > {
+        ) -> Result<crate::cross_cutting::streaming_provider::ProviderSession, ProviderAdapterError>
+        {
             self.adapter_starts.fetch_add(1, Ordering::SeqCst);
             // 模拟策略会话握手后的 native child 创建(口径③):真实链路中
             // 错 ID 必须 kill/reap,不得冒称零 child;本测试全部负例都在
@@ -2565,7 +2561,9 @@ mod anchor_t09_prepare_contract {
     }
 
     fn anchor_t09_audit_context(
-        sink: Arc<crate::cross_cutting::tool_policy_audit::test_support::RecordingToolPolicyAuditSink>,
+        sink: Arc<
+            crate::cross_cutting::tool_policy_audit::test_support::RecordingToolPolicyAuditSink,
+        >,
     ) -> ProviderLaunchAuditContext {
         ProviderLaunchAuditContext {
             workspace_session_id: "ws-anchor-t09".to_string(),
@@ -2581,7 +2579,9 @@ mod anchor_t09_prepare_contract {
         let recording = Arc::new(
             crate::cross_cutting::tool_policy_audit::test_support::RecordingToolPolicyAuditSink::default(),
         );
-        let fake = Arc::new(AnchorT09PrepareAdapter::new(Arc::new(LcVersionCache::new())));
+        let fake = Arc::new(AnchorT09PrepareAdapter::new(
+            Arc::new(LcVersionCache::new()),
+        ));
         let gateway = anchor_t09_gateway(&fixture, fake.clone());
         let request = anchor_t09_planning_request(&fixture);
 
@@ -2742,7 +2742,10 @@ mod anchor_t09_prepare_contract {
         ));
         assert_eq!(fake.adapter_starts(), adapter_starts_before_negative);
         assert_eq!(fake.session_children(), session_children_before_negative);
-        assert_eq!(fixture.gateway_audit().supersede_count(), claim_count_after_negative);
+        assert_eq!(
+            fixture.gateway_audit().supersede_count(),
+            claim_count_after_negative
+        );
 
         // 未接入 adapter(默认 trait 实现)只得到 typed unsupported 拒绝,
         // 且不触达 registry start(裸 fixture 的 CountingStreamingAdapter)。
@@ -2778,5 +2781,1629 @@ mod anchor_t09_prepare_contract {
             fixture.gateway_audit().supersede_count(),
             claim_count_after_negative
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Task 3.7(B0f):四 provider 公共汇合——full 唯一 start 路径与跨家组合守卫。
+// `anchor_t10_support` 为 pub(crate):lifecycle_store 的 durable 同源测试
+// 复用同一四家 fixture(仅测试构建可达)。
+// ---------------------------------------------------------------------------
+
+/// 四家形态参数(消费 3.3–3.6 各家已过的本家事实语义,公共行为断言归
+/// 本包):Claude `--resume` argv、Codex 受限 sandbox/approval、Pi
+/// extension 写时机、Kimi native-source 与 Aria MCP bundle 区分。
+pub(crate) mod anchor_t10_support {
+    use super::*;
+    use crate::cross_cutting::provider_adapter::ProviderAdapterError;
+    use crate::cross_cutting::provider_boundary::{ProviderBoundaryMode, ProviderBoundaryPlan};
+    use crate::cross_cutting::provider_registry::ProviderRegistry;
+    use crate::cross_cutting::streaming_provider::{
+        LcVersionCache, LcVersionProbe, LcVersionProbeKey, StreamingProviderAdapter,
+    };
+    use crate::cross_cutting::tool_policy_audit::{
+        DurableToolPolicyEvent, LcProjectionAudit, LcProviderStartAudit, ProviderStartAudit,
+        StoredProviderStart, ToolPolicyAuditSink, append_superseded_policy_drift,
+        resume_with_lc_start_record,
+    };
+    use crate::product::logical_codebase::policy::{ProviderDialect, ProviderWireDialect};
+    use crate::product::logical_codebase::provider_projection::{
+        ProviderLcPrepareFacts, ProviderPolicyProjection, ProviderPolicyProjector,
+        ProviderProjectionError, ProviderProjectionInput, UnprovisionedProviderPolicyProjector,
+    };
+    use crate::product::logical_codebase::provider_trust::{
+        ProviderTrustFingerprintFacts, ProviderTrustSource, ProviderTrustVerification,
+    };
+    use crate::product::models::ProviderName;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    /// 四家公共 family 形态(版本/exe 身份/approval/MCP/audit 文本各随本家)。
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum AnchorT10Family {
+        Claude,
+        Codex,
+        Pi,
+        Kimi,
+    }
+
+    impl AnchorT10Family {
+        pub(crate) const ALL: [AnchorT10Family; 4] = [
+            AnchorT10Family::Claude,
+            AnchorT10Family::Codex,
+            AnchorT10Family::Pi,
+            AnchorT10Family::Kimi,
+        ];
+
+        pub(crate) fn tag(&self) -> &'static str {
+            match self {
+                AnchorT10Family::Claude => "claude",
+                AnchorT10Family::Codex => "codex",
+                AnchorT10Family::Pi => "pi",
+                AnchorT10Family::Kimi => "kimi",
+            }
+        }
+
+        pub(crate) fn name(&self) -> ProviderName {
+            match self {
+                AnchorT10Family::Claude => ProviderName::ClaudeCode,
+                AnchorT10Family::Codex => ProviderName::Codex,
+                AnchorT10Family::Pi => ProviderName::Pi,
+                AnchorT10Family::Kimi => ProviderName::KimiCode,
+            }
+        }
+
+        fn ref_type(&self) -> ProviderRefType {
+            match self {
+                AnchorT10Family::Claude => ProviderRefType::ClaudeCode,
+                AnchorT10Family::Codex => ProviderRefType::Codex,
+                AnchorT10Family::Pi => ProviderRefType::Pi,
+                AnchorT10Family::Kimi => ProviderRefType::KimiCode,
+            }
+        }
+
+        fn provider_ref(&self) -> ProviderRef {
+            match self {
+                AnchorT10Family::Claude => ProviderRef::claude_code("cap_claude_t10"),
+                AnchorT10Family::Codex => ProviderRef::codex("cap_codex_t10"),
+                AnchorT10Family::Pi => ProviderRef::pi("cap_pi_t10"),
+                AnchorT10Family::Kimi => ProviderRef::kimi_code("cap_kimi_t10"),
+            }
+        }
+
+        fn dialect(&self) -> ProviderDialect {
+            match self {
+                AnchorT10Family::Claude => ProviderDialect::ClaudeCodeCliV1,
+                AnchorT10Family::Codex => ProviderDialect::CodexCliV1,
+                AnchorT10Family::Pi => ProviderDialect::PiRpcV1,
+                AnchorT10Family::Kimi => ProviderDialect::KimiAcpV1,
+            }
+        }
+
+        fn wire(&self) -> ProviderWireDialect {
+            match self {
+                AnchorT10Family::Claude => ProviderWireDialect::ClaudeCodeStreamJson,
+                AnchorT10Family::Codex => ProviderWireDialect::CodexAppServerRpc,
+                AnchorT10Family::Pi => ProviderWireDialect::PiRpc,
+                AnchorT10Family::Kimi => ProviderWireDialect::KimiAcp,
+            }
+        }
+
+        pub(crate) fn wire_text(&self) -> &'static str {
+            match self {
+                AnchorT10Family::Claude => "claude-stream-json",
+                AnchorT10Family::Codex => "codex-app-server-rpc",
+                AnchorT10Family::Pi => "pi-rpc",
+                AnchorT10Family::Kimi => "kimi-acp",
+            }
+        }
+
+        fn protocol_type(&self) -> crate::protocol::contracts::ProviderType {
+            match self {
+                AnchorT10Family::Claude => crate::protocol::contracts::ProviderType::ClaudeCode,
+                AnchorT10Family::Codex => crate::protocol::contracts::ProviderType::Codex,
+                AnchorT10Family::Pi => crate::protocol::contracts::ProviderType::Pi,
+                AnchorT10Family::Kimi => crate::protocol::contracts::ProviderType::KimiCode,
+            }
+        }
+
+        pub(crate) fn exact_version(&self) -> &'static str {
+            match self {
+                AnchorT10Family::Claude => "claude 1.4.0-t10",
+                AnchorT10Family::Codex => "codex 0.9.4-t10",
+                AnchorT10Family::Pi => "pi 0.83.0-t10",
+                AnchorT10Family::Kimi => "kimi 0.34.0-t10",
+            }
+        }
+
+        fn base_executable_identity(&self) -> String {
+            format!("sha256:t10-{}-exe-v1", self.tag())
+        }
+
+        fn canonical_executable(&self) -> std::path::PathBuf {
+            std::path::PathBuf::from(format!("/opt/anchor-t10/{}/cli", self.tag()))
+        }
+
+        pub(crate) fn approval_policy(&self) -> &'static str {
+            match self {
+                AnchorT10Family::Claude => "permission-prompt-tool=stdio",
+                AnchorT10Family::Codex => "on-request",
+                AnchorT10Family::Pi => "ask-for-extension",
+                AnchorT10Family::Kimi => "kimi-acp-default",
+            }
+        }
+
+        pub(crate) fn aria_mcp_bundle_digest(&self) -> &'static str {
+            match self {
+                AnchorT10Family::Kimi => "sha256:t10-mcp-aria-bundle",
+                _ => "sha256:t10-mcp-bundle",
+            }
+        }
+
+        pub(crate) fn audit_sandbox(&self) -> Option<String> {
+            match self {
+                AnchorT10Family::Codex => Some("read-only".to_string()),
+                _ => None,
+            }
+        }
+
+        pub(crate) fn audit_approval(&self) -> Option<String> {
+            match self {
+                AnchorT10Family::Codex => Some("on-request".to_string()),
+                _ => None,
+            }
+        }
+
+        pub(crate) fn audit_provider_text(&self) -> &'static str {
+            match self {
+                AnchorT10Family::Claude => "claude-code",
+                AnchorT10Family::Codex => "codex",
+                AnchorT10Family::Pi => "pi",
+                AnchorT10Family::Kimi => "kimi-code",
+            }
+        }
+
+        /// 本家 argv 形态(claude 携 `--resume <id>`;pi 携预生成 session id;
+        /// codex 携受限 sandbox/approval 片段;kimi 携 acp 冻结片段)。
+        fn audit_argv(&self, native_id: &str, resume_id: Option<&str>) -> Vec<String> {
+            match self {
+                AnchorT10Family::Claude => {
+                    let mut argv = vec![self.tag().to_string()];
+                    if let Some(id) = resume_id {
+                        argv.push("--resume".to_string());
+                        argv.push(id.to_string());
+                    }
+                    argv
+                }
+                AnchorT10Family::Codex => vec![
+                    self.tag().to_string(),
+                    "--sandbox".to_string(),
+                    "read-only".to_string(),
+                    "--ask".to_string(),
+                    "on-request".to_string(),
+                ],
+                AnchorT10Family::Pi => vec![
+                    self.tag().to_string(),
+                    "--session-id".to_string(),
+                    native_id.to_string(),
+                ],
+                AnchorT10Family::Kimi => {
+                    vec![self.tag().to_string(), "acp".to_string()]
+                }
+            }
+        }
+    }
+
+    fn anchor_t10_digest(parts: &[&str]) -> String {
+        use sha2::Digest as _;
+        let mut canonical = String::new();
+        for part in parts {
+            canonical.push_str(&format!("{}:{}", part.len(), part));
+        }
+        format!("sha256:{:x}", sha2::Sha256::digest(canonical.as_bytes()))
+    }
+
+    /// t10 四家 capability source:version/exact_version 同源,action 行
+    /// `projection_digest` 与 t10 projector 的 capability 摘要逐字相等
+    /// (`projection-digest-{action:?}`,与 StaticCapabilitySource 同形)。
+    pub(crate) struct AnchorT10CapabilitySource {
+        family: AnchorT10Family,
+    }
+
+    impl AnchorT10CapabilitySource {
+        pub(crate) fn new(family: AnchorT10Family) -> Self {
+            Self { family }
+        }
+
+        fn capability(
+            &self,
+            provider: &ProviderRef,
+            action: SessionPolicyAction,
+        ) -> ProviderCapability {
+            ProviderCapability {
+                provider_type: self.family.ref_type(),
+                version: self.family.exact_version().to_string(),
+                adapter_dialect: self.family.dialect(),
+                wire_dialect: self.family.wire(),
+                capability_snapshot_ref: provider.capability_snapshot_ref.clone(),
+                action_capability:
+                    crate::product::logical_codebase::provider_capability_store::ProviderActionCapability {
+                        action,
+                        launch: crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence::Confirmed,
+                        resume: crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence::Confirmed,
+                        write_boundary: crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence::Confirmed,
+                        projection_digest: format!("projection-digest-{action:?}"),
+                        evidence_ref: format!("probe://t10-{action:?}"),
+                    },
+                trust: crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence::Confirmed,
+            }
+        }
+    }
+
+    impl ProviderCapabilitySource for AnchorT10CapabilitySource {
+        fn require_supported(
+            &self,
+            provider: &ProviderRef,
+            action: SessionPolicyAction,
+        ) -> Result<ProviderCapability, ProviderGatewayError> {
+            Ok(self.capability(provider, action))
+        }
+
+        fn require_resume_supported(
+            &self,
+            provider: &ProviderRef,
+            action: SessionPolicyAction,
+        ) -> Result<ProviderCapability, ProviderGatewayError> {
+            Ok(self.capability(provider, action))
+        }
+
+        fn require_write_boundary(
+            &self,
+            provider: &ProviderRef,
+            action: SessionPolicyAction,
+        ) -> Result<ProviderCapability, ProviderGatewayError> {
+            Ok(self.capability(provider, action))
+        }
+
+        fn require_root_recipe_supported(
+            &self,
+            _provider: &ProviderRef,
+            _credential: &crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
+        ) -> Result<ProviderCapability, ProviderGatewayError> {
+            Err(ProviderGatewayError::UnsupportedCapability(
+                "anchor t10 fixture has no root recipe facts".to_string(),
+            ))
+        }
+    }
+
+    /// t10 可翻转只读 trust source:verify_trusted 与 fingerprint_facts 同源
+    /// 翻转(trust spawn 前变化负例);Codex/Kimi 需 workspace trust 的家族
+    /// 真实触达该 source。
+    pub(crate) struct AnchorT10TrustSource {
+        trusted: AtomicBool,
+    }
+
+    impl AnchorT10TrustSource {
+        pub(crate) fn new() -> Arc<Self> {
+            Arc::new(Self {
+                trusted: AtomicBool::new(true),
+            })
+        }
+
+        pub(crate) fn set_trusted(&self, trusted: bool) {
+            self.trusted.store(trusted, Ordering::SeqCst);
+        }
+
+        fn verification(
+            &self,
+            provider: &ProviderName,
+            canonical_root: &std::path::Path,
+        ) -> ProviderTrustVerification {
+            ProviderTrustVerification {
+                provider: provider.clone(),
+                canonical_root: canonical_root.to_path_buf(),
+                trust_key: String::new(),
+                trusted: self.trusted.load(Ordering::SeqCst),
+                ownership: None,
+                detail: String::new(),
+                verified_at: String::new(),
+            }
+        }
+    }
+
+    impl ProviderTrustSource for AnchorT10TrustSource {
+        fn verify_trusted(
+            &self,
+            _project_id: &str,
+            _lc_id: &str,
+            provider: &ProviderName,
+            canonical_root: &std::path::Path,
+        ) -> Result<ProviderTrustVerification, ProviderGatewayError> {
+            Ok(self.verification(provider, canonical_root))
+        }
+
+        fn fingerprint_facts(
+            &self,
+            _project_id: &str,
+            _lc_id: &str,
+            provider: &ProviderName,
+            canonical_root: &std::path::Path,
+        ) -> Result<ProviderTrustFingerprintFacts, ProviderGatewayError> {
+            if !self.trusted.load(Ordering::SeqCst) {
+                return Err(ProviderGatewayError::ProviderUnavailable(
+                    "anchor t10 trust source: entry not trusted; refusing to freeze facts"
+                        .to_string(),
+                ));
+            }
+            Ok(ProviderTrustFingerprintFacts {
+                verification: self.verification(provider, canonical_root),
+                record_digest: Some(format!("sha256:t10-trust-record-{}", provider_wire_tag(provider))),
+            })
+        }
+    }
+
+    fn provider_wire_tag(provider: &ProviderName) -> String {
+        format!("{provider:?}").to_lowercase()
+    }
+
+    /// t10 版本化 projector:capability 摘要与 capability 行逐字相等
+    /// (`projection-digest-{action:?}`);会话摘要为长度分隔+schema 前缀的
+    /// SHA-256(family/version/trust/MCP/approval/cwd/config 全部入摘要);
+    /// 负例可覆写 capability/会话摘要(v2 材料完整性门)。
+    pub(crate) struct AnchorT10Projector {
+        family: AnchorT10Family,
+        exact_version: String,
+        capability_digest_override: Option<String>,
+        session_digest_override: Option<String>,
+    }
+
+    impl AnchorT10Projector {
+        fn new(family: AnchorT10Family, exact_version: String) -> Self {
+            Self {
+                family,
+                exact_version,
+                capability_digest_override: None,
+                session_digest_override: None,
+            }
+        }
+    }
+
+    impl ProviderPolicyProjector for AnchorT10Projector {
+        fn project(
+            &self,
+            input: &ProviderProjectionInput,
+        ) -> Result<ProviderPolicyProjection, ProviderProjectionError> {
+            let envelope = input.envelope();
+            // 匹配门:只投影本家(跨家投影拒绝,与真实 projector 同构)。
+            if input.provider().provider_type != self.family.ref_type() {
+                return Err(ProviderProjectionError::Unsupported(format!(
+                    "anchor t10 projector only projects {} (got {:?})",
+                    self.family.tag(),
+                    input.provider().provider_type
+                )));
+            }
+            if envelope.provider_dialect != self.family.dialect() {
+                return Err(ProviderProjectionError::Unsupported(format!(
+                    "anchor t10 projector requires dialect {:?}",
+                    self.family.dialect()
+                )));
+            }
+            // read-only action 的 boundary 证据引用为空串(合法形态),
+            // 不消费 facts 边界计划。
+            let capability_projection_digest = self
+                .capability_digest_override
+                .clone()
+                .unwrap_or_else(|| format!("projection-digest-{:?}", envelope.action));
+            let session_projection_digest = self.session_digest_override.clone().unwrap_or_else(|| {
+                anchor_t10_digest(&[
+                    "anchor-t10-session-v1",
+                    self.family.tag(),
+                    self.exact_version.as_str(),
+                    capability_projection_digest.as_str(),
+                    input.trust_digest(),
+                    input.mcp_bundle_digest(),
+                    input.approval_policy(),
+                    &envelope.working_directory.to_string_lossy(),
+                    &envelope.config_digest,
+                ])
+            });
+            Ok(ProviderPolicyProjection::new(
+                self.family.ref_type(),
+                envelope.provider_dialect,
+                self.family.wire(),
+                self.exact_version.clone(),
+                envelope.action,
+                input.role().clone(),
+                input.permission_mode().clone(),
+                input.tool_policy().cloned(),
+                input.approval_policy().to_string(),
+                self.family
+                    .audit_sandbox()
+                    .unwrap_or_else(|| "read-only".to_string()),
+                envelope.working_directory.clone(),
+                envelope.working_directory.clone(),
+                envelope.target.clone(),
+                envelope.readable_roots.clone(),
+                envelope.writable_roots.clone(),
+                input.trust_digest().to_string(),
+                envelope.config_digest.clone(),
+                input.mcp_bundle_digest().to_string(),
+                String::new(),
+                capability_projection_digest,
+                session_projection_digest,
+            ))
+        }
+    }
+
+    /// t10 四家 fake streaming adapter:真实 prepare 链(TTL 缓存+计数
+    /// probe=口径①)+start_validated 消费冻结 full projection(口径②)并
+    /// 如实计数 native child(口径③)与 kill/reap;basis 旁路(裸投影
+    /// validated)typed 拒;audit 字面量与 gateway 冻结 full projection
+    /// 同源;pi extension 写只在 mismatch 判定之后;kimi 复验 MCP 来源。
+    pub(crate) struct AnchorT10FamilyAdapter {
+        family: AnchorT10Family,
+        cache: Arc<LcVersionCache>,
+        probe_calls: Arc<AtomicUsize>,
+        executable_identity: Mutex<String>,
+        observed_version: Arc<Mutex<String>>,
+        mcp_bundle_digest: Mutex<String>,
+        capability_digest_override: Mutex<Option<String>>,
+        session_digest_override: Mutex<Option<String>>,
+        handshake_native_id: Mutex<Option<String>>,
+        adapter_starts: AtomicUsize,
+        session_children: AtomicUsize,
+        children_killed: AtomicUsize,
+        extension_writes: AtomicUsize,
+        starts_without_projection: AtomicUsize,
+        last_start_projection_digest: Mutex<Option<String>>,
+        last_start_audit_literal: Mutex<Option<LcProviderStartAudit>>,
+    }
+
+    impl AnchorT10FamilyAdapter {
+        pub(crate) fn new(family: AnchorT10Family, cache: Arc<LcVersionCache>) -> Arc<Self> {
+            Arc::new(Self {
+                family,
+                cache,
+                probe_calls: Arc::new(AtomicUsize::new(0)),
+                executable_identity: Mutex::new(family.base_executable_identity()),
+                observed_version: Arc::new(Mutex::new(family.exact_version().to_string())),
+                mcp_bundle_digest: Mutex::new(family.aria_mcp_bundle_digest().to_string()),
+                capability_digest_override: Mutex::new(None),
+                session_digest_override: Mutex::new(None),
+                handshake_native_id: Mutex::new(None),
+                adapter_starts: AtomicUsize::new(0),
+                session_children: AtomicUsize::new(0),
+                children_killed: AtomicUsize::new(0),
+                extension_writes: AtomicUsize::new(0),
+                starts_without_projection: AtomicUsize::new(0),
+                last_start_projection_digest: Mutex::new(None),
+                last_start_audit_literal: Mutex::new(None),
+            })
+        }
+
+        pub(crate) fn set_executable_identity(&self, identity: &str) {
+            *self.executable_identity.lock().unwrap() = identity.to_string();
+        }
+
+        pub(crate) fn set_observed_version(&self, version: &str) {
+            *self.observed_version.lock().unwrap() = version.to_string();
+        }
+
+        pub(crate) fn set_mcp_bundle_digest(&self, digest: &str) {
+            *self.mcp_bundle_digest.lock().unwrap() = digest.to_string();
+        }
+
+        pub(crate) fn set_projector_overrides(
+            &self,
+            capability: Option<String>,
+            session: Option<String>,
+        ) {
+            *self.capability_digest_override.lock().unwrap() = capability;
+            *self.session_digest_override.lock().unwrap() = session;
+        }
+
+        pub(crate) fn set_handshake_native_id(&self, id: Option<String>) {
+            *self.handshake_native_id.lock().unwrap() = id;
+        }
+
+        pub(crate) fn probe_calls(&self) -> usize {
+            self.probe_calls.load(Ordering::SeqCst)
+        }
+
+        pub(crate) fn adapter_starts(&self) -> usize {
+            self.adapter_starts.load(Ordering::SeqCst)
+        }
+
+        pub(crate) fn session_children(&self) -> usize {
+            self.session_children.load(Ordering::SeqCst)
+        }
+
+        pub(crate) fn children_killed(&self) -> usize {
+            self.children_killed.load(Ordering::SeqCst)
+        }
+
+        pub(crate) fn extension_writes(&self) -> usize {
+            self.extension_writes.load(Ordering::SeqCst)
+        }
+
+        pub(crate) fn starts_without_projection(&self) -> usize {
+            self.starts_without_projection.load(Ordering::SeqCst)
+        }
+
+        pub(crate) fn last_start_projection_digest(&self) -> Option<String> {
+            self.last_start_projection_digest.lock().unwrap().clone()
+        }
+
+        pub(crate) fn last_start_audit_literal(&self) -> Option<LcProviderStartAudit> {
+            self.last_start_audit_literal.lock().unwrap().clone()
+        }
+
+        fn minimal_session(
+            native_id: Option<String>,
+        ) -> crate::cross_cutting::streaming_provider::ProviderSession {
+            let (_event_tx, events) = tokio::sync::mpsc::channel(1);
+            let (commands, _command_rx) = tokio::sync::mpsc::channel(1);
+            crate::cross_cutting::streaming_provider::ProviderSession {
+                events,
+                commands,
+                native_session_id: native_id,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl StreamingProviderAdapter for AnchorT10FamilyAdapter {
+        async fn start_validated(
+            &self,
+            input: ValidatedStreamingProviderInput,
+            _cancel: CancellationToken,
+        ) -> Result<crate::cross_cutting::streaming_provider::ProviderSession, ProviderAdapterError>
+        {
+            self.adapter_starts.fetch_add(1, Ordering::SeqCst);
+            let (input, launch) = input.into_parts();
+            // basis 旁路不可达:唯一 start 路径必须携带冻结 full projection。
+            let Some(lc_projection) = launch.lc_projection().cloned() else {
+                self.starts_without_projection
+                    .fetch_add(1, Ordering::SeqCst);
+                return Err(ProviderAdapterError::parse_error(
+                    "anchor t10 adapter: bare-basis validated input reached start_validated \
+                     (no frozen full projection); refusing to spawn"
+                        .to_string(),
+                    String::new(),
+                    String::new(),
+                ));
+            };
+            let envelope = launch.envelope();
+            // 本家 mutable facts 复验(与真实 adapter 同构:version 恒复验,
+            // kimi 追加 MCP 来源复验)。
+            let observed_version = self.observed_version.lock().unwrap().clone();
+            if lc_projection.exact_version() != observed_version.as_str() {
+                return Err(ProviderAdapterError::parse_error(
+                    format!(
+                        "anchor t10 {}: prepared projection version {} drifted from current \
+                         observation {observed_version}; refusing to spawn",
+                        self.family.tag(),
+                        lc_projection.exact_version()
+                    ),
+                    String::new(),
+                    String::new(),
+                ));
+            }
+            if self.family == AnchorT10Family::Kimi
+                && lc_projection.mcp_bundle_digest() != *self.mcp_bundle_digest.lock().unwrap()
+            {
+                return Err(ProviderAdapterError::parse_error(
+                    format!(
+                        "anchor t10 kimi: mcp source drifted before spawn (frozen={}, current={})",
+                        lc_projection.mcp_bundle_digest(),
+                        self.mcp_bundle_digest.lock().unwrap()
+                    ),
+                    String::new(),
+                    String::new(),
+                ));
+            }
+            // audit 字面量(与真实 lc_start_audit_literal 同形):从冻结
+            // full projection 装配,v2 材料不完整即拒。
+            let git_identity =
+                canonical_target_git_identity(&envelope.target.worktree);
+            let action_evidence = lc_projection.capability_projection_digest().to_string();
+            let literal = LcProviderStartAudit {
+                action: "planning_read_only".to_string(),
+                wire_dialect: self.family.wire_text().to_string(),
+                capability_projection_digest: action_evidence.clone(),
+                projection_digest: lc_projection.projection_digest().to_string(),
+                boundary_evidence_ref: lc_projection.boundary_evidence_ref().to_string(),
+                resume_fingerprint: SessionResumeFingerprint::from_envelope(
+                    envelope,
+                    &lc_projection,
+                    &action_evidence,
+                    &git_identity,
+                )
+                .digest,
+                action_evidence_digest: action_evidence,
+                target_git_identity: git_identity,
+            };
+            if !literal.is_v2_complete() {
+                return Err(ProviderAdapterError::parse_error(
+                    "anchor t10 adapter: lc start audit v2 material incomplete".to_string(),
+                    String::new(),
+                    String::new(),
+                ));
+            }
+            *self.last_start_projection_digest.lock().unwrap() =
+                Some(lc_projection.projection_digest().to_string());
+            *self.last_start_audit_literal.lock().unwrap() = Some(literal.clone());
+            // 显式 resume:先对存档完整字面量判定(漂移 → superseded 终止
+            // 审计写被取代旧 run,零 child typed 拒)。
+            let resume_id = input
+                .resume_provider_session_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(str::to_string);
+            if let (Some(resume_id), Some(sink)) =
+                (resume_id.clone(), input.audit_sink.as_ref())
+            {
+                let stored: Option<StoredProviderStart> = sink
+                    .find_provider_start(&resume_id)
+                    .map_err(|error| {
+                        ProviderAdapterError::parse_error(
+                            format!("anchor t10 resume lookup failed: {error}"),
+                            String::new(),
+                            String::new(),
+                        )
+                    })?;
+                if let Some(stored) = stored.as_ref()
+                    && matches!(
+                        resume_with_lc_start_record(&stored.record, &literal),
+                        crate::cross_cutting::tool_policy_audit::ResumeDecision::RejectSupersedeAndStartNew
+                    )
+                {
+                    append_superseded_policy_drift(sink.as_ref(), stored).map_err(|error| {
+                        ProviderAdapterError::parse_error(
+                            format!("anchor t10 superseded audit append failed: {error}"),
+                            String::new(),
+                            String::new(),
+                        )
+                    })?;
+                    return Err(ProviderAdapterError::parse_error(
+                        "anchor t10 adapter: resume audit drifted or legacy record lacks lc \
+                         projection; refusing to spawn a fresh child for an explicit LC resume"
+                            .to_string(),
+                        String::new(),
+                        String::new(),
+                    ));
+                }
+            }
+            // pi extension 准备在 mismatch 判定之后(早写拒收)。
+            if self.family == AnchorT10Family::Pi {
+                self.extension_writes.fetch_add(1, Ordering::SeqCst);
+            }
+            // native child(口径③)。
+            self.session_children.fetch_add(1, Ordering::SeqCst);
+            let native_id = self
+                .handshake_native_id
+                .lock()
+                .unwrap()
+                .clone()
+                .or_else(|| resume_id.clone())
+                .unwrap_or_else(|| format!("native-{}-t10", self.family.tag()));
+            if let (Some(expected), Some(confirmed)) =
+                (resume_id.as_deref(), self.handshake_native_id.lock().unwrap().as_deref())
+                && expected != confirmed
+            {
+                // 错 ID:child 已启动的 runtime 失败——如实 kill/reap,不伪称零 child。
+                self.children_killed.fetch_add(1, Ordering::SeqCst);
+                return Err(ProviderAdapterError::parse_error(
+                    format!(
+                        "anchor t10 {}: handshake confirmed {confirmed} but resume requested \
+                         {expected} (session NOT resumed; child killed and reaped)",
+                        self.family.tag()
+                    ),
+                    String::new(),
+                    String::new(),
+                ));
+            }
+            // 成功路径:provider_start 首行(含本家 argv/sandbox/approval 与
+            // lc_projection 五字段摘要)。
+            if let Some(sink) = input.audit_sink.as_ref() {
+                sink.append_bound(DurableToolPolicyEvent::ProviderStart(ProviderStartAudit {
+                    provider: self.family.audit_provider_text().to_string(),
+                    role: "executor".to_string(),
+                    workspace_session_id: input
+                        .workspace_session_id
+                        .clone()
+                        .unwrap_or_else(|| "ws-anchor-t10".to_string()),
+                    provider_session_id: native_id.clone(),
+                    tool_policy_canonical_digest: format!(
+                        "sha256:t10-{}-policy",
+                        self.family.tag()
+                    ),
+                    argv: self
+                        .family
+                        .audit_argv(&native_id, resume_id.as_deref()),
+                    sandbox: self.family.audit_sandbox(),
+                    approval_policy: self.family.audit_approval(),
+                    provider_version: observed_version,
+                    adapter_dialect: self.family.wire_text().to_string(),
+                    lc_projection: Some(LcProjectionAudit {
+                        action: literal.action.clone(),
+                        wire_dialect: literal.wire_dialect.clone(),
+                        capability_projection_digest: literal
+                            .capability_projection_digest
+                            .clone(),
+                        projection_digest: literal.projection_digest.clone(),
+                        boundary_evidence_ref: literal.boundary_evidence_ref.clone(),
+                    }),
+                }))
+                .map_err(|error| {
+                    ProviderAdapterError::parse_error(
+                        format!("anchor t10 provider_start append failed: {error}"),
+                        String::new(),
+                        String::new(),
+                    )
+                })?;
+            }
+            Ok(Self::minimal_session(Some(native_id)))
+        }
+
+        async fn prepare_lc_facts(
+            &self,
+            _input: &crate::cross_cutting::streaming_provider::StreamingProviderInput,
+            launch: &ValidatedSessionLaunchPolicy,
+            cancel: CancellationToken,
+        ) -> Result<ProviderLcPrepareFacts, ProviderAdapterError> {
+            let key = LcVersionProbeKey {
+                provider: self.family.name(),
+                canonical_executable: self.family.canonical_executable(),
+                executable_identity: self.executable_identity.lock().unwrap().clone(),
+                argv: vec!["--version".to_string()],
+                supplier_scope: 10 + (self.family.tag().len() as u64),
+            };
+            let probe_calls = self.probe_calls.clone();
+            let observed_version = self.observed_version.clone();
+            let probe: LcVersionProbe = Arc::new(move |_key| {
+                let probe_calls = probe_calls.clone();
+                let observed_version = observed_version.clone();
+                Box::pin(async move {
+                    probe_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(observed_version.lock().unwrap().clone())
+                })
+            });
+            let observation = self
+                .cache
+                .cached_lc_cli_version(key.clone(), probe, cancel)
+                .await
+                .map_err(|error| {
+                    ProviderAdapterError::execution_failed(
+                        None,
+                        String::new(),
+                        format!("anchor t10 fake prepare: {error}"),
+                        0,
+                    )
+                })?;
+            let envelope = launch.envelope();
+            let boundary = ProviderBoundaryPlan::new(
+                ProviderBoundaryMode::ReadOnly,
+                envelope.working_directory.clone(),
+                None,
+                Vec::new(),
+            );
+            let mut projector =
+                AnchorT10Projector::new(self.family, observation.exact_version().to_string());
+            projector.capability_digest_override =
+                self.capability_digest_override.lock().unwrap().clone();
+            projector.session_digest_override =
+                self.session_digest_override.lock().unwrap().clone();
+            Ok(ProviderLcPrepareFacts::new(
+                self.family.ref_type(),
+                envelope.provider_dialect,
+                self.family.wire(),
+                observation.exact_version().to_string(),
+                observation.observed_at(),
+                key,
+                self.family.approval_policy().to_string(),
+                self.mcp_bundle_digest.lock().unwrap().clone(),
+                boundary,
+                Arc::new(projector),
+            ))
+        }
+    }
+
+    /// t10 汇合 harness:四家公共 fixture(自包含 tempdir,不依赖
+    /// GatewayFixture;policy/capability/target/gate/audit 与 anchor_t09
+    /// 同形,registry 槽位随 family)。
+    pub(crate) struct AnchorT10Harness {
+        pub(crate) adapter: Arc<AnchorT10FamilyAdapter>,
+        pub(crate) gateway: LogicalCodebaseProviderGateway,
+        pub(crate) trust: Arc<AnchorT10TrustSource>,
+        pub(crate) audit: Arc<GatewayRunAudit>,
+        pub(crate) request: SessionLaunchRequest,
+        pub(crate) family: AnchorT10Family,
+        paths: ProductAppPaths,
+        authority_root: std::path::PathBuf,
+        capabilities: Arc<AnchorT10CapabilitySource>,
+        targets: Arc<MutableTargetResolver>,
+        _root: tempfile::TempDir,
+    }
+
+    impl AnchorT10Harness {
+        pub(crate) fn install_policy(&self) {
+            let manifest = LogicalCodebaseManifest::new(
+                "project_0001",
+                self.paths.root().to_path_buf(),
+                vec![],
+            );
+            AggregatePolicyArtifactStore::new(self.paths.clone())
+                .ensure_bootstrap(&manifest)
+                .expect("anchor t10 bootstrap policy");
+        }
+
+        pub(crate) fn streaming_input(
+            &self,
+            resume: Option<String>,
+        ) -> crate::cross_cutting::streaming_provider::StreamingProviderInput {
+            crate::cross_cutting::streaming_provider::StreamingProviderInput {
+                provider_type: self.family.protocol_type(),
+                role: crate::protocol::contracts::AdapterRole::Executor,
+                prompt: "anchor t10 convergence".to_string(),
+                working_dir: self.authority_root.clone(),
+                working_directory: Some(self.authority_root.clone()),
+                workspace_session_id: None,
+                resume_provider_session_id: resume,
+                permission_mode: crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
+                tool_policy: None,
+                audit_sink: None,
+                structured_output_contract: None,
+                env_vars: Default::default(),
+                timeout_secs: 5,
+                baseline_tree: None,
+            }
+        }
+
+        pub(crate) fn audit_context(
+            &self,
+            sink: Arc<dyn ToolPolicyAuditSink>,
+        ) -> ProviderLaunchAuditContext {
+            anchor_t10_audit_context(sink, "ws-anchor-t10", 1)
+        }
+
+        /// 以自定义 registry 构造同源 gateway(混合矩阵负例:换绑 adapter
+        /// 实例/跨家串接)。
+        pub(crate) fn gateway_with_registry(
+            &self,
+            registry: ProviderRegistry,
+        ) -> LogicalCodebaseProviderGateway {
+            self.build_gateway(Arc::new(registry))
+        }
+
+        pub(crate) fn registry(&self) -> ProviderRegistry {
+            let mut registry = ProviderRegistry::new();
+            registry.register_gated(
+                self.family.name(),
+                self.adapter.clone(),
+                Arc::new(UnprovisionedProviderPolicyProjector),
+                always_available_gate(),
+            )
+            .expect("anchor t10 harness registry register");
+            registry
+        }
+
+        fn build_gateway(
+            &self,
+            registry: Arc<ProviderRegistry>,
+        ) -> LogicalCodebaseProviderGateway {
+            LogicalCodebaseProviderGateway::with_audit(
+                AggregatePolicyArtifactStore::new(self.paths.clone()),
+                self.capabilities.clone(),
+                self.targets.clone(),
+                registry,
+                Arc::new(StubSyncAdapter),
+                always_available_gate(),
+                self.audit.clone(),
+                self.authority_root.clone(),
+            )
+            .with_readonly_lc_facts(
+                crate::product::logical_codebase::RootRecipeReceiptStore::for_lc(
+                    self.paths.clone(),
+                    "logical_codebase_0001",
+                ),
+                self.trust.clone(),
+                Some("logical_codebase_0001".to_string()),
+            )
+        }
+    }
+
+    pub(crate) fn anchor_t10_harness(family: AnchorT10Family) -> AnchorT10Harness {
+        let root = tempfile::tempdir().expect("anchor t10 tempdir");
+        let paths = ProductAppPaths::new(root.path());
+        let manifest =
+            LogicalCodebaseManifest::new("project_0001", paths.root().to_path_buf(), vec![]);
+        let authority_root =
+            std::fs::canonicalize(&manifest.provider_context_root).expect("authority root");
+        let worktree = paths.root().join("worktree");
+        std::fs::create_dir_all(&worktree).expect("anchor t10 worktree");
+        let request = SessionLaunchRequest {
+            project_id: manifest.project_id.clone(),
+            provider: family.provider_ref(),
+            action: SessionPolicyAction::PlanningReadOnly,
+            target: PolicyTarget::checkout("logical_repo_0001", "checkout_0001", worktree),
+            // LC 会话 cwd = canonical LC root(root-cwd 契约,与 target 分离)。
+            working_directory: authority_root.clone(),
+            readable_roots: vec![paths.root().to_path_buf()],
+            writable_roots: Vec::new(),
+            config_artifact_ref: "sha256:managed-config-artifact".to_string(),
+        };
+        let adapter = AnchorT10FamilyAdapter::new(family, Arc::new(LcVersionCache::new()));
+        let audit = Arc::new(GatewayRunAudit::new());
+        let trust = AnchorT10TrustSource::new();
+        let capabilities = Arc::new(AnchorT10CapabilitySource::new(family));
+        let targets = Arc::new(MutableTargetResolver::new(paths.root().join("baseline.git")));
+        let mut registry = ProviderRegistry::new();
+        registry
+            .register_gated(
+                family.name(),
+                adapter.clone(),
+                Arc::new(UnprovisionedProviderPolicyProjector),
+                always_available_gate(),
+            )
+            .expect("anchor t10 register gated family adapter");
+        let gateway = LogicalCodebaseProviderGateway::with_audit(
+            AggregatePolicyArtifactStore::new(paths.clone()),
+            capabilities.clone(),
+            targets.clone(),
+            Arc::new(registry),
+            Arc::new(StubSyncAdapter),
+            always_available_gate(),
+            audit.clone(),
+            authority_root.clone(),
+        )
+        .with_readonly_lc_facts(
+            crate::product::logical_codebase::RootRecipeReceiptStore::for_lc(
+                paths.clone(),
+                "logical_codebase_0001",
+            ),
+            trust.clone(),
+            Some("logical_codebase_0001".to_string()),
+        );
+        AnchorT10Harness {
+            adapter,
+            gateway,
+            trust,
+            audit,
+            request,
+            family,
+            paths,
+            authority_root,
+            capabilities,
+            targets,
+            _root: root,
+        }
+    }
+
+    pub(crate) fn anchor_t10_audit_context(
+        sink: Arc<dyn ToolPolicyAuditSink>,
+        workspace_session_id: &str,
+        role_run_seq: u64,
+    ) -> ProviderLaunchAuditContext {
+        ProviderLaunchAuditContext {
+            workspace_session_id: workspace_session_id.to_string(),
+            role_run_seq,
+            audit_sink: sink,
+        }
+    }
+
+    /// 预置旧 run 的 durable provider_start 存档(resume 检索输入;lc_
+    /// projection 五字段与冻结 full projection 同源)。
+    pub(crate) fn anchor_t10_preset_resume_archive(
+        sink: &Arc<crate::cross_cutting::tool_policy_audit::test_support::RecordingToolPolicyAuditSink>,
+        family: AnchorT10Family,
+        resume_id: &str,
+        projection: &ProviderPolicyProjection,
+    ) {
+        let record = ProviderStartAudit {
+            provider: family.audit_provider_text().to_string(),
+            role: "executor".to_string(),
+            workspace_session_id: "ws-anchor-t10".to_string(),
+            provider_session_id: resume_id.to_string(),
+            tool_policy_canonical_digest: format!("sha256:t10-{}-policy", family.tag()),
+            argv: Vec::new(),
+            sandbox: family.audit_sandbox(),
+            approval_policy: family.audit_approval(),
+            provider_version: family.exact_version().to_string(),
+            adapter_dialect: family.wire_text().to_string(),
+            lc_projection: Some(LcProjectionAudit {
+                action: "planning_read_only".to_string(),
+                wire_dialect: family.wire_text().to_string(),
+                capability_projection_digest: projection
+                    .capability_projection_digest()
+                    .to_string(),
+                projection_digest: projection.projection_digest().to_string(),
+                boundary_evidence_ref: projection.boundary_evidence_ref().to_string(),
+            }),
+        };
+        sink.with_stored_provider_start(record);
+    }
+}
+
+mod anchor_t10_convergence {
+    use super::anchor_t10_support::*;
+    use super::*;
+    use crate::cross_cutting::tool_policy_audit::test_support::RecordingToolPolicyAuditSink;
+    use crate::cross_cutting::tool_policy_audit::DurableToolPolicyEvent;
+
+    fn provider_start_records(
+        sink: &RecordingToolPolicyAuditSink,
+    ) -> Vec<crate::cross_cutting::tool_policy_audit::ProviderStartAudit> {
+        sink.events()
+            .iter()
+            .filter_map(|event| match event {
+                DurableToolPolicyEvent::ProviderStart(record) => Some(record.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Task 3.7 Step 1 用例一:四家公共 fixture 汇总——full 唯一 start 路径
+    /// 无 unsupported/basis 旁路;oldbasis/missingfull 拒等待(unavailable
+    /// 稳定原因码);投影/audit/fingerprint 同源;wrongID 如实 kill/reap;
+    /// TTL 三计数真实;Pi extension 早写拒收/Kimi native-source 与 Aria
+    /// bundle 区分/Codex 受限 sandbox/Claude --resume 事实逐家消费。
+    #[tokio::test]
+    async fn anchor_t10_full_projection_all_providers_no_basis_resume() {
+        for family in AnchorT10Family::ALL {
+            let tag = family.tag();
+            let harness = anchor_t10_harness(family);
+            harness.install_policy();
+            let sink = RecordingToolPolicyAuditSink::new();
+
+            // -- 默认 unsupported 不可达正例的前置:未接入 adapter(默认
+            //    trait)在 full 路径只得到 typed 拒,registry start 零触达。
+            let mut bare_registry = crate::cross_cutting::provider_registry::ProviderRegistry::new();
+            bare_registry.register(family.name(), Arc::new(CountingStreamingAdapter::new()) as Arc<dyn StreamingProviderAdapter>);
+            let bare_error = match harness
+                .gateway_with_registry(bare_registry)
+                .prepare_lc_streaming_candidate(
+                    harness.streaming_input(None),
+                    harness.request.clone(),
+                    harness.audit_context(sink.clone()),
+                    CancellationToken::new(),
+                )
+                .await
+            {
+                Err(ProviderGatewayError::Adapter(error)) => error,
+                Err(other) => panic!("[{tag}] unexpected rejection shape: {other}"),
+                Ok(_) => panic!("[{tag}] default adapter must fail closed with typed unsupported"),
+            };
+            assert!(
+                bare_error
+                    .stderr
+                    .contains("lc prepare facts is not supported"),
+                "[{tag}] unexpected default rejection: {bare_error:?}"
+            );
+
+            // -- 正例:真实 facts prepare(口径①恰一次)。
+            let candidate = harness
+                .gateway
+                .prepare_lc_streaming_candidate(
+                    harness.streaming_input(None),
+                    harness.request.clone(),
+                    harness.audit_context(sink.clone()),
+                    CancellationToken::new(),
+                )
+                .await
+                .unwrap_or_else(|error| panic!("[{tag}] prepare failed: {error}"));
+            assert_eq!(harness.adapter.probe_calls(), 1, "[{tag}] ① probe");
+            assert_eq!(candidate.facts().exact_version(), family.exact_version());
+            assert_eq!(candidate.facts().version_probe_key().provider, family.name());
+            assert_eq!(
+                candidate.facts().approval_policy(),
+                family.approval_policy()
+            );
+            assert_eq!(
+                candidate.full_projection().mcp_bundle_digest(),
+                family.aria_mcp_bundle_digest()
+            );
+
+            // -- full 指纹与 prepared full map(basis=FullLcProjectionV2)同源。
+            let fingerprint = candidate.full_context_fingerprint();
+            assert!(!fingerprint.digest.is_empty());
+            let persisted_prepared =
+                crate::product::models::LogicalLaunchFingerprintRecord {
+                    schema_version: 1,
+                    basis: crate::product::models::LogicalLaunchBasis::FullLcProjectionV2,
+                    role: crate::product::models::ProviderConversationRole::Author,
+                    provider: family.name(),
+                    role_run_seq: 1,
+                    node_id: "node-t10".to_string(),
+                    native_session_id: None,
+                    fingerprint_digest: fingerprint.digest.clone(),
+                    planning_access_fingerprint: fingerprint.digest.clone(),
+                    state: crate::product::models::LogicalLaunchFingerprintState::Prepared,
+                    created_at: "2026-10-11T00:00:00Z".to_string(),
+                    updated_at: "2026-10-11T00:00:00Z".to_string(),
+                };
+
+            // -- full-matching resume:Resume,validated 携带冻结 full 投影。
+            let disposition = harness
+                .gateway
+                .resume_or_start_prepared_lc_candidate(
+                    &candidate,
+                    PreparedLcResumeBasis::Full {
+                        previous_fingerprint: fingerprint.clone(),
+                        previous_session_id: "native-t10-previous".to_string(),
+                    },
+                )
+                .expect("[{tag}] full-matching resume decision");
+            match &disposition {
+                GatewaySessionDisposition::Resume(validated) => {
+                    assert_eq!(
+                        validated.lc_projection().map(|projection| projection.projection_digest()),
+                        Some(candidate.full_projection().projection_digest()),
+                        "[{tag}] Resume validated must carry the frozen full projection"
+                    );
+                    assert_eq!(validated.fingerprint().digest, persisted_prepared.fingerprint_digest);
+                }
+                _ => panic!("[{tag}] full-matching fingerprint must resume"),
+            }
+
+            // -- 旧 basis(legacy 指纹)不与 full 混比:StartNew 等待 mismatch。
+            let supersede_before = harness.audit.supersede_count();
+            let legacy = harness
+                .gateway
+                .resume_or_start_prepared_lc_candidate(
+                    &candidate,
+                    PreparedLcResumeBasis::Full {
+                        previous_fingerprint: SessionResumeFingerprint {
+                            digest: "sha256:legacy-v1-basis-t10".to_string(),
+                        },
+                        previous_session_id: "native-t10-legacy".to_string(),
+                    },
+                )
+                .expect("[{tag}] legacy basis disposition");
+            match legacy {
+                GatewaySessionDisposition::StartNew { waiting, .. } => {
+                    assert_eq!(waiting.reason_code, "resume_fingerprint_mismatch");
+                }
+                _ => panic!("[{tag}] legacy basis must wait for explicit fresh"),
+            }
+            assert_eq!(harness.audit.supersede_count(), supersede_before + 1);
+            assert_eq!(harness.adapter.adapter_starts(), 0, "[{tag}] ② after dispositions");
+            assert_eq!(harness.adapter.session_children(), 0, "[{tag}] ③ after dispositions");
+
+            // -- 缺 full map/旧 basis:Unavailable → resume_fingerprint_unavailable
+            //    等待,不 supersede 未知会话。
+            let unavailable = harness
+                .gateway
+                .resume_or_start_prepared_lc_candidate(
+                    &candidate,
+                    PreparedLcResumeBasis::Unavailable,
+                )
+                .expect("[{tag}] unavailable basis disposition");
+            match unavailable {
+                GatewaySessionDisposition::StartNew { waiting, validated, .. } => {
+                    assert_eq!(
+                        waiting.reason_code,
+                        RESUME_FINGERPRINT_UNAVAILABLE,
+                        "[{tag}] missing full map must wait with resume_fingerprint_unavailable"
+                    );
+                    assert!(validated.lc_projection().is_some());
+                }
+                _ => panic!("[{tag}] unavailable basis must wait for explicit fresh"),
+            }
+            assert_eq!(
+                harness.audit.supersede_count(),
+                supersede_before + 1,
+                "[{tag}] unavailable must not supersede an unknown session"
+            );
+            assert_eq!(harness.adapter.adapter_starts(), 0);
+            assert_eq!(harness.adapter.session_children(), 0);
+
+            // -- full 唯一 start 路径:成功 spawn,三计数真实(TTL 命中,①不增)。
+            let stream_launches_before = harness.audit.stream_launches();
+            let session = harness
+                .gateway
+                .start_lc_prepared_streaming(candidate.clone(), CancellationToken::new())
+                .await
+                .unwrap_or_else(|error| panic!("[{tag}] unique start failed: {error}"));
+            assert_eq!(
+                session.native_session_id.as_deref(),
+                Some(format!("native-{tag}-t10").as_str())
+            );
+            assert_eq!(harness.adapter.probe_calls(), 1, "[{tag}] TTL hit at revalidation");
+            assert_eq!(harness.adapter.adapter_starts(), 1, "[{tag}] ② unique start");
+            assert_eq!(harness.adapter.session_children(), 1, "[{tag}] ③ unique start");
+            assert_eq!(harness.adapter.children_killed(), 0);
+            assert_eq!(harness.adapter.starts_without_projection(), 0, "[{tag}] no basis bypass");
+            assert_eq!(harness.audit.stream_launches(), stream_launches_before + 1);
+
+            // 投影/audit/fingerprint 同源:adapter 消费冻结 full 投影,audit
+            // 字面量 v2 完整且 resume 指纹 == full 指纹 == prepared map digest。
+            assert_eq!(
+                harness.adapter.last_start_projection_digest().as_deref(),
+                Some(candidate.full_projection().projection_digest())
+            );
+            let literal = harness
+                .adapter
+                .last_start_audit_literal()
+                .expect("[{tag}] audit literal assembled");
+            assert!(literal.is_v2_complete());
+            assert_eq!(literal.resume_fingerprint, fingerprint.digest);
+            assert_eq!(literal.resume_fingerprint, persisted_prepared.fingerprint_digest);
+            assert_eq!(literal.wire_dialect, family.wire_text());
+
+            // durable provider_start:lc_projection 五字段与本家标记同源。
+            let records = provider_start_records(&sink);
+            assert_eq!(records.len(), 1, "[{tag}] one provider_start");
+            let record = &records[0];
+            assert_eq!(record.provider, family.audit_provider_text());
+            assert_eq!(record.provider_version, family.exact_version());
+            assert_eq!(record.adapter_dialect, family.wire_text());
+            assert_eq!(record.sandbox, family.audit_sandbox());
+            assert_eq!(record.approval_policy, family.audit_approval());
+            let audit_projection = record
+                .lc_projection
+                .as_ref()
+                .expect("[{tag}] lc projection persisted");
+            assert_eq!(
+                audit_projection.projection_digest,
+                candidate.full_projection().projection_digest()
+            );
+            assert_eq!(
+                audit_projection.capability_projection_digest,
+                candidate
+                    .full_projection()
+                    .capability_projection_digest()
+            );
+
+            // -- 本家事实消费(公共断言,不跨 provider 文件):
+            match family {
+                AnchorT10Family::Claude => {
+                    assert!(!record.argv.contains(&"--resume".to_string()));
+                }
+                AnchorT10Family::Codex => {
+                    assert_eq!(record.sandbox.as_deref(), Some("read-only"));
+                    assert!(record.argv.contains(&"read-only".to_string()));
+                }
+                AnchorT10Family::Pi => {
+                    assert_eq!(
+                        harness.adapter.extension_writes(),
+                        1,
+                        "[pi] extension 写只在 start 器械段(prepare/判定阶段零写)"
+                    );
+                }
+                AnchorT10Family::Kimi => {
+                    assert!(candidate
+                        .full_projection()
+                        .trust_digest()
+                        .starts_with(&format!("lc-trust-v1:{:?}:", family.name())));
+                    // native-source 与 Aria bundle 区分:换 native 标记后重
+                    // prepare,facts/projection digest 随 MCP 来源变化。
+                    harness
+                        .adapter
+                        .set_mcp_bundle_digest("kimi-native-project-config");
+                    let native_candidate = harness
+                        .gateway
+                        .prepare_lc_streaming_candidate(
+                            harness.streaming_input(None),
+                            harness.request.clone(),
+                            harness.audit_context(sink.clone()),
+                            CancellationToken::new(),
+                        )
+                        .await
+                        .expect("[kimi] native-source prepare");
+                    assert_eq!(
+                        native_candidate.full_projection().mcp_bundle_digest(),
+                        "kimi-native-project-config"
+                    );
+                    assert_ne!(
+                        native_candidate.full_projection().projection_digest(),
+                        candidate.full_projection().projection_digest(),
+                        "[kimi] native-source 与 Aria bundle 不得混源"
+                    );
+                }
+            }
+
+            // kimi 的 native-source 复验不得污染 wrongID 段:恢复 aria
+            // bundle,使存档/当前投影回到同源形态(错 ID 断言的是 handshake
+            // 失败的 kill/reap,不是 MCP 漂移拒绝)。
+            if family == AnchorT10Family::Kimi {
+                harness
+                    .adapter
+                    .set_mcp_bundle_digest(family.aria_mcp_bundle_digest());
+            }
+
+            // -- wrongID 如实 kill/reap(child 后 handshake 失败,不伪称零 child)。
+            let resume_id = format!("native-{tag}-t10");
+            anchor_t10_preset_resume_archive(
+                &sink,
+                family,
+                &resume_id,
+                candidate.full_projection(),
+            );
+            harness
+                .adapter
+                .set_handshake_native_id(Some(format!("native-{tag}-wrong")));
+            let resume_candidate = harness
+                .gateway
+                .prepare_lc_streaming_candidate(
+                    harness.streaming_input(Some(resume_id.clone())),
+                    harness.request.clone(),
+                    harness.audit_context(sink.clone()),
+                    CancellationToken::new(),
+                )
+                .await
+                .expect("[{tag}] resume prepare");
+            let children_before = harness.adapter.session_children();
+            let killed_before = harness.adapter.children_killed();
+            let provider_starts_before = provider_start_records(&sink).len();
+            let wrong = harness
+                .gateway
+                .start_lc_prepared_streaming(resume_candidate, CancellationToken::new())
+                .await;
+            assert!(wrong.is_err(), "[{tag}] wrong native id must fail the resume");
+            assert_eq!(harness.adapter.session_children(), children_before + 1);
+            assert_eq!(harness.adapter.children_killed(), killed_before + 1);
+            assert_eq!(
+                harness.adapter.session_children() - harness.adapter.children_killed(),
+                1,
+                "[{tag}] 只有成功路径的 child 存活;错 ID child 已 kill/reap"
+            );
+            assert_eq!(
+                provider_start_records(&sink).len(),
+                provider_starts_before,
+                "[{tag}] 错 ID 不写 fresh provider_start"
+            );
+
+            // -- Claude --resume 事实:同 ID resume 成功,argv 携 --resume <id>。
+            if family == AnchorT10Family::Claude {
+                harness.adapter.set_handshake_native_id(None);
+                let claude_resume_candidate = harness
+                    .gateway
+                    .prepare_lc_streaming_candidate(
+                        harness.streaming_input(Some(resume_id.clone())),
+                        harness.request.clone(),
+                        harness.audit_context(sink.clone()),
+                        CancellationToken::new(),
+                    )
+                    .await
+                    .expect("[claude] resume prepare");
+                let claude_session = harness
+                    .gateway
+                    .start_lc_prepared_streaming(
+                        claude_resume_candidate,
+                        CancellationToken::new(),
+                    )
+                    .await
+                    .expect("[claude] same-id resume start");
+                assert_eq!(
+                    claude_session.native_session_id.as_deref(),
+                    Some(resume_id.as_str())
+                );
+                let claude_records = provider_start_records(&sink);
+                let last = claude_records.last().expect("[claude] resume provider_start");
+                assert!(last.argv.contains(&"--resume".to_string()));
+                assert!(last.argv.contains(&resume_id));
+            }
+        }
+    }
+
+    /// Task 3.7 Step 1 用例二:spawn 前复验矩阵——prepared facts 在 session
+    /// start 前重验;version/trust/spawn 前变化受门、混合 provider 矩阵与
+    /// audit v2 完整性门全部 fail-closed 在真实 adapter start 之前(②③=0)。
+    #[tokio::test]
+    async fn anchor_t10_prepared_facts_revalidate_before_session_start() {
+        // A. 四家:prepare 后 executable identity+version 漂移 → typed 拒。
+        for family in AnchorT10Family::ALL {
+            let tag = family.tag();
+            let harness = anchor_t10_harness(family);
+            harness.install_policy();
+            let sink = RecordingToolPolicyAuditSink::new();
+            let candidate = harness
+                .gateway
+                .prepare_lc_streaming_candidate(
+                    harness.streaming_input(None),
+                    harness.request.clone(),
+                    harness.audit_context(sink.clone()),
+                    CancellationToken::new(),
+                )
+                .await
+                .unwrap_or_else(|error| panic!("[{tag}] prepare failed: {error}"));
+            assert_eq!(harness.adapter.probe_calls(), 1);
+            harness
+                .adapter
+                .set_executable_identity(&format!("sha256:t10-{tag}-exe-v2"));
+            harness
+                .adapter
+                .set_observed_version(&format!("{tag} 9.9.9-drifted"));
+            let drift = harness
+                .gateway
+                .start_lc_prepared_streaming(candidate.clone(), CancellationToken::new())
+                .await
+                .err()
+                .expect("[{tag}] version drift must typed-reject before spawn");
+            assert!(
+                matches!(
+                    &drift,
+                    ProviderGatewayError::PolicyDrift { dimension } if dimension == "provider_version"
+                ),
+                "[{tag}] unexpected drift shape: {drift}"
+            );
+            assert_eq!(harness.adapter.probe_calls(), 2, "[{tag}] 重观测换 key 再探测");
+            assert_eq!(harness.adapter.adapter_starts(), 0, "[{tag}] ② mismatch=0");
+            assert_eq!(harness.adapter.session_children(), 0, "[{tag}] ③ mismatch=0");
+            assert_eq!(harness.adapter.starts_without_projection(), 0);
+            assert_eq!(harness.audit.stream_launches(), 0);
+        }
+
+        // B. 混合 provider 矩阵:prepare→start 间换绑同家新实例/跨家 adapter。
+        let claude_harness = anchor_t10_harness(AnchorT10Family::Claude);
+        claude_harness.install_policy();
+        let sink = RecordingToolPolicyAuditSink::new();
+        let candidate = claude_harness
+            .gateway
+            .prepare_lc_streaming_candidate(
+                claude_harness.streaming_input(None),
+                claude_harness.request.clone(),
+                claude_harness.audit_context(sink.clone()),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("claude prepare");
+        let swapped_adapter = AnchorT10FamilyAdapter::new(
+            AnchorT10Family::Claude,
+            Arc::new(crate::cross_cutting::streaming_provider::LcVersionCache::new()),
+        );
+        let mut swapped_registry = claude_harness.registry();
+        swapped_registry.register_gated(
+            crate::product::models::ProviderName::ClaudeCode,
+            swapped_adapter.clone(),
+            Arc::new(
+                crate::product::logical_codebase::provider_projection::UnprovisionedProviderPolicyProjector,
+            ),
+            always_available_gate(),
+        )
+        .expect("anchor t10 register swapped adapter");
+        let swapped_error = claude_harness
+            .gateway_with_registry(swapped_registry)
+            .start_lc_prepared_streaming(candidate.clone(), CancellationToken::new())
+            .await
+            .err()
+            .expect("swapped same-family adapter must typed-reject");
+        assert!(
+            matches!(
+                &swapped_error,
+                ProviderGatewayError::PolicyDrift { dimension } if dimension == "provider_adapter"
+            ),
+            "unexpected swapped shape: {swapped_error}"
+        );
+
+        let cross_adapter = AnchorT10FamilyAdapter::new(
+            AnchorT10Family::Codex,
+            Arc::new(crate::cross_cutting::streaming_provider::LcVersionCache::new()),
+        );
+        let mut cross_registry = claude_harness.registry();
+        cross_registry.register_gated(
+            crate::product::models::ProviderName::ClaudeCode,
+            cross_adapter.clone(),
+            Arc::new(
+                crate::product::logical_codebase::provider_projection::UnprovisionedProviderPolicyProjector,
+            ),
+            always_available_gate(),
+        )
+        .expect("anchor t10 register cross adapter");
+        let cross_error = claude_harness
+            .gateway_with_registry(cross_registry)
+            .start_lc_prepared_streaming(candidate.clone(), CancellationToken::new())
+            .await
+            .err()
+            .expect("cross-family adapter must typed-reject");
+        assert!(
+            matches!(
+                &cross_error,
+                ProviderGatewayError::PolicyDrift { dimension } if dimension == "provider_adapter"
+            ),
+            "unexpected cross shape: {cross_error}"
+        );
+        assert_eq!(swapped_adapter.adapter_starts(), 0);
+        assert_eq!(cross_adapter.adapter_starts(), 0);
+        assert_eq!(claude_harness.adapter.adapter_starts(), 0);
+        assert_eq!(claude_harness.adapter.session_children(), 0);
+
+        // C. audit v2 材料不完整:会话投影摘要为空的 projector 可 prepare
+        //    冻结,但不可达生产 spawn(gateway 门先于 adapter start)。
+        let v2_harness = anchor_t10_harness(AnchorT10Family::Pi);
+        v2_harness.install_policy();
+        let v2_sink = RecordingToolPolicyAuditSink::new();
+        v2_harness
+            .adapter
+            .set_projector_overrides(None, Some(String::new()));
+        let v2_candidate = v2_harness
+            .gateway
+            .prepare_lc_streaming_candidate(
+                v2_harness.streaming_input(None),
+                v2_harness.request.clone(),
+                v2_harness.audit_context(v2_sink.clone()),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("v2-incomplete projector can freeze a candidate");
+        let v2_error = v2_harness
+            .gateway
+            .start_lc_prepared_streaming(v2_candidate, CancellationToken::new())
+            .await
+            .err()
+            .expect("v2-incomplete audit material must not spawn");
+        assert!(
+            matches!(&v2_error, ProviderGatewayError::UnsupportedCapability(message)
+                if message.contains("v2 material incomplete")),
+            "unexpected v2 shape: {v2_error}"
+        );
+        assert_eq!(v2_harness.adapter.adapter_starts(), 0);
+        assert_eq!(v2_harness.adapter.session_children(), 0);
+
+        // D. trust spawn 前变化受门(Codex 需 workspace trust):prepare 冻结
+        //    后 trust 失效 → typed 拒,零 spawn。
+        let codex_harness = anchor_t10_harness(AnchorT10Family::Codex);
+        codex_harness.install_policy();
+        let codex_sink = RecordingToolPolicyAuditSink::new();
+        let codex_candidate = codex_harness
+            .gateway
+            .prepare_lc_streaming_candidate(
+                codex_harness.streaming_input(None),
+                codex_harness.request.clone(),
+                codex_harness.audit_context(codex_sink.clone()),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("codex prepare under trusted source");
+        assert!(codex_candidate
+            .full_projection()
+            .trust_digest()
+            .contains("sha256:t10-trust-record-codex"));
+        codex_harness.trust.set_trusted(false);
+        let trust_error = codex_harness
+            .gateway
+            .start_lc_prepared_streaming(codex_candidate, CancellationToken::new())
+            .await
+            .err()
+            .expect("trust drift before spawn must reject");
+        assert!(
+            trust_error.to_string().contains("trust"),
+            "unexpected trust shape: {trust_error}"
+        );
+        assert_eq!(codex_harness.adapter.adapter_starts(), 0);
+        assert_eq!(codex_harness.adapter.session_children(), 0);
+
+        // E. 相位收口:非 PlanningReadOnly 候选不经唯一 start 路径(Coding/
+        //    Recipe/Review 等既有相位仍走同名 gateway API)。ReviewReadOnly
+        //    与 planning 同为 read-only 形态,只差 action,可直接 prepare。
+        let phase_harness = anchor_t10_harness(AnchorT10Family::Claude);
+        phase_harness.install_policy();
+        let phase_sink = RecordingToolPolicyAuditSink::new();
+        let mut review_request = phase_harness.request.clone();
+        review_request.action = SessionPolicyAction::ReviewReadOnly;
+        let phase_candidate = phase_harness
+            .gateway
+            .prepare_lc_streaming_candidate(
+                phase_harness.streaming_input(None),
+                review_request,
+                phase_harness.audit_context(phase_sink),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("review candidate can be prepared");
+        let phase_error = phase_harness
+            .gateway
+            .start_lc_prepared_streaming(phase_candidate, CancellationToken::new())
+            .await
+            .err()
+            .expect("non-planning candidate must not use the converged start path");
+        assert!(
+            matches!(&phase_error, ProviderGatewayError::UnsupportedCapability(message)
+                if message.contains("PlanningReadOnly")),
+            "unexpected phase shape: {phase_error}"
+        );
+        assert_eq!(phase_harness.adapter.adapter_starts(), 0);
     }
 }

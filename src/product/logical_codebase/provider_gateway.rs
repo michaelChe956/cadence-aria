@@ -224,9 +224,7 @@ pub struct PreparedLcStreamingCandidate {
 
 impl PreparedLcStreamingCandidate {
     /// 冻结的 streaming input(prepare 已绑定 run-bound audit/会话身份)。
-    pub fn input(
-        &self,
-    ) -> &crate::cross_cutting::streaming_provider::StreamingProviderInput {
+    pub fn input(&self) -> &crate::cross_cutting::streaming_provider::StreamingProviderInput {
         &self.input
     }
 
@@ -272,6 +270,20 @@ impl PreparedLcStreamingCandidate {
             });
         }
         Ok(())
+    }
+
+    /// Task 3.7(B0f):候选 full 上下文 resume 指纹——五参 `from_envelope`
+    /// 以冻结 full projection 与 validated 冻结的 capability row 摘要
+    /// (action evidence;admission 已保证与投影 capability 摘要逐字相等)
+    /// 计算。与 spawn 前复验重算、adapter audit 字面量、B1/B2 prepared
+    /// full map(basis=`FullLcProjectionV2`)的 `fingerprint_digest` 同源。
+    pub fn full_context_fingerprint(&self) -> SessionResumeFingerprint {
+        SessionResumeFingerprint::from_envelope(
+            self.validated.envelope(),
+            &self.full_projection,
+            self.validated.action_evidence_digest(),
+            &canonical_target_git_identity(&self.validated.envelope().target.worktree),
+        )
     }
 
     /// 转换面(冻结合同):仅在调用方完成 full-matching resume 判定或取得
@@ -477,6 +489,11 @@ pub const LC_RESUME_FINGERPRINT_SCHEMA: &str = "lc-session-resume-fingerprint/2"
 /// 等待投影同源)。
 pub const RESUME_FINGERPRINT_MISMATCH: &str = "resume_fingerprint_mismatch";
 
+/// 缺 full map/旧 basis 的等待稳定原因码(Task 3.7/设计 §4.1 reason 表):
+/// 旧会话无可信 full 指纹可比(legacy basis/缺 prepared map),不与 full
+/// 指纹混比、不折成出生 fresh,等待显式 `StartGeneration`。
+pub const RESUME_FINGERPRINT_UNAVAILABLE: &str = "resume_fingerprint_unavailable";
+
 impl SessionResumeFingerprint {
     /// 由 envelope、候选 LC 投影、action evidence 摘要与 target git identity
     /// 计算 canonical SHA-256(Task 9a 冻结五参签名)。每个域以 8 字节大端
@@ -594,6 +611,20 @@ impl LcSupersededWaiting {
             ],
         }
     }
+
+    /// 缺 full map/旧 basis 的等待形态(Task 3.7,B0f):无可信比对材料,
+    /// 不与 full 指纹混比、不 supersede 审计未知会话,仅等待显式
+    /// `StartGeneration` fresh(候选消费面 `resume_or_start_prepared_lc_
+    /// candidate` 的 `Unavailable` 臂;与 `superseded()` 的 full 漂移形态
+    /// 以稳定原因码区分)。
+    fn fingerprint_unavailable() -> Self {
+        Self {
+            reason_code: RESUME_FINGERPRINT_UNAVAILABLE.to_string(),
+            allowed_actions: vec![
+                crate::product::logical_codebase::provider_admission_preflight::BootstrapActionKind::StartGeneration,
+            ],
+        }
+    }
 }
 
 /// `resume_or_start` 的返回决策(Task 13;Task 9a 起 `StartNew` 携带稳定
@@ -613,6 +644,23 @@ pub enum GatewaySessionDisposition {
         /// Task 9a:稳定等待投影(仅显式 `StartGeneration`)。
         waiting: LcSupersededWaiting,
     },
+}
+
+/// Task 3.7(B0f):workspace LC 候选消费面的 resume 判定输入——旧会话
+/// full 冻结材料的可用性形态。
+#[derive(Debug, Clone)]
+pub enum PreparedLcResumeBasis {
+    /// full map 完整:旧会话冻结的 full 指纹与 native id,参与 full 对
+    /// full 的全维度比对(漂移 → supersede 审计并等待
+    /// [`RESUME_FINGERPRINT_MISMATCH`])。
+    Full {
+        previous_fingerprint: SessionResumeFingerprint,
+        previous_session_id: String,
+    },
+    /// 缺 full map/旧 basis:无可信比对材料,不与 full 指纹混比,等待
+    /// 显式 fresh(稳定原因码 [`RESUME_FINGERPRINT_UNAVAILABLE`]),
+    /// 不 supersede 审计未知会话。
+    Unavailable,
 }
 
 /// 配置来源类别(Task 13)。区分 Aria-owned(可注入)与非 Aria-owned(managed
@@ -1728,9 +1776,7 @@ impl LogicalCodebaseProviderGateway {
             .ok_or_else(|| ProviderGatewayError::RegistryLookup(format!("{provider_name:?}")))?;
 
         // 4. adapter 只读 facts(默认 typed unsupported 仅未接入/测试 adapter)。
-        let facts = adapter
-            .prepare_lc_facts(&input, &validated, cancel)
-            .await?;
+        let facts = adapter.prepare_lc_facts(&input, &validated, cancel).await?;
 
         // 5. 只读 trust 维度:注入 source 时以 B0a1 `fingerprint_facts` 的
         //    真实工件摘要冻结(缺/不可信 typed 拒,不冻结假事实);无需
@@ -1795,6 +1841,189 @@ impl LogicalCodebaseProviderGateway {
             .map_err(ProviderGatewayError::Adapter)
     }
 
+    /// Task 3.7(B0f):workspace LC 候选消费面的 resume 收口。
+    ///
+    /// - `Full`:委托 [`Self::resume_or_start_with_projection`](full 对 full
+    ///   比对;指纹漂移 → supersede 审计并等待 `RESUME_FINGERPRINT_MISMATCH`)。
+    /// - `Unavailable`(旧 basis/缺 full map):不与 full 指纹混比、不
+    ///   supersede 审计未知会话,直接 `StartNew` 等待显式 fresh(稳定
+    ///   原因码 `RESUME_FINGERPRINT_UNAVAILABLE`);旧 native id 已知时经
+    ///   `superseded_session_id` 透传,未知为空串。
+    ///
+    /// 两臂返回/冻结的 validated 都携带候选冻结 full projection;后续
+    /// spawn 仅经 [`Self::start_lc_prepared_streaming`]。
+    pub fn resume_or_start_prepared_lc_candidate(
+        &self,
+        candidate: &PreparedLcStreamingCandidate,
+        basis: PreparedLcResumeBasis,
+    ) -> Result<GatewaySessionDisposition, ProviderGatewayError> {
+        match basis {
+            PreparedLcResumeBasis::Full {
+                previous_fingerprint,
+                previous_session_id,
+            } => self.resume_or_start_with_projection(
+                ResumeSessionLaunchRequest {
+                    launch: candidate.request().clone(),
+                    previous_fingerprint,
+                    previous_session_id,
+                },
+                candidate.full_projection().clone(),
+            ),
+            PreparedLcResumeBasis::Unavailable => {
+                let superseded_session_id = candidate
+                    .input()
+                    .resume_provider_session_id
+                    .clone()
+                    .unwrap_or_default();
+                Ok(GatewaySessionDisposition::StartNew {
+                    validated: candidate.validated().clone().with_lc_projection(
+                        candidate.full_projection().clone(),
+                        candidate.full_context_fingerprint(),
+                    ),
+                    superseded_session_id,
+                    waiting: LcSupersededWaiting::fingerprint_unavailable(),
+                })
+            }
+        }
+    }
+
+    /// Task 3.7(B0f):workspace LC PlanningReadOnly full 唯一 start 路径。
+    ///
+    /// 只消费 [`Self::prepare_lc_streaming_candidate`] 冻结的 opaque 候选
+    /// (裸 validated/旧 basis 旁路不可达:候选字段私有、仅 gateway 可构造,
+    /// crate 内唯一 spawn 出口归本路径)。spawn 前 fail-closed 链,全部在
+    /// 真实 adapter start 之前:
+    ///
+    /// 1. **相位收口**:仅 `PlanningReadOnly` 收口候选 full;Coding/Recipe
+    ///    等既有相位仍走同名 gateway API(`start_streaming` 等),不经本路径。
+    /// 2. **重观测当前 facts**(version 单独允许 60 秒 TTL 命中;命令
+    ///    identity 变化换 key 再观测)→ **冻结版本比对**(漂移 → typed
+    ///    `PolicyDrift(provider_version)`,零 spawn)。
+    /// 3. **混合 provider 矩阵守卫**:registry 当前为该 dialect 绑定的
+    ///    adapter 必须仍是候选冻结的同一实例(prepare→start 间换绑
+    ///    adapter/跨家串接即 typed `PolicyDrift(provider_adapter)`)。
+    /// 4. **audit v2 完整性门**(四家同判据):以冻结 full projection 装配
+    ///    `LcProviderStartAudit` 字面量并要求 `is_v2_complete` 且会话投影
+    ///    摘要非空——v2 材料不完整的 projector 不可达生产 spawn(action/
+    ///    wire 文本不入 v2 判据,同源文本归 adapter 字面量)。
+    /// 5. **admission verdict + 完整复验**:身份一致门、policy/trust/
+    ///    config/cwd/target/git identity/availability 按冻结 full projection
+    ///    复验(capability row 摘要与投影 capability 摘要逐字相等由
+    ///    admission 第 3 步持有);validated 附带冻结 full projection 后
+    ///    `revalidate_before_spawn` 以同一基准重算指纹。
+    ///
+    /// 全部通过后把 validated(携带冻结 full projection,adapter 侧 audit
+    /// 字面量与 prepared full projection 同源、无 basis 旁路)交给候选
+    /// 冻结 adapter 的 `start_validated`;成功后与 `start_streaming` 同源
+    /// 记录 gateway stream 审计。kimi 通用策略例外映射同样在此施加
+    /// (LC 流式分发唯一漏斗)。
+    pub async fn start_lc_prepared_streaming(
+        &self,
+        candidate: PreparedLcStreamingCandidate,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderGatewayError> {
+        let validated = candidate.validated();
+        // 1. 相位收口(仅 workspace LC PlanningReadOnly)。
+        if validated.envelope().action != SessionPolicyAction::PlanningReadOnly {
+            return Err(ProviderGatewayError::UnsupportedCapability(
+                "lc prepared streaming start converges PlanningReadOnly launches only; \
+                 use the existing gateway APIs for other phases"
+                    .to_string(),
+            ));
+        }
+        // 2. spawn 前重观测 + 冻结版本比对。
+        let current = self
+            .reobserve_lc_prepare_facts(&candidate, cancel.clone())
+            .await?;
+        candidate.assert_frozen_version(&current)?;
+        // 3. 混合 provider 矩阵守卫:registry 绑定的 adapter 同一性。
+        let registered = self.lookup_real_streaming_adapter(validated)?;
+        if !Arc::ptr_eq(&registered, &candidate.adapter) {
+            return Err(ProviderGatewayError::PolicyDrift {
+                dimension: "provider_adapter".to_string(),
+            });
+        }
+        // 4. audit v2 完整性门(四家同判据)。
+        let fingerprint = candidate.full_context_fingerprint();
+        let capability_digest = candidate
+            .full_projection
+            .capability_projection_digest()
+            .to_string();
+        let expected_audit = crate::cross_cutting::tool_policy_audit::LcProviderStartAudit {
+            action: String::new(),
+            wire_dialect: String::new(),
+            capability_projection_digest: capability_digest.clone(),
+            projection_digest: candidate.full_projection.projection_digest().to_string(),
+            boundary_evidence_ref: candidate
+                .full_projection
+                .boundary_evidence_ref()
+                .to_string(),
+            resume_fingerprint: fingerprint.digest.clone(),
+            action_evidence_digest: capability_digest,
+            target_git_identity: canonical_target_git_identity(
+                &validated.envelope().target.worktree,
+            ),
+        };
+        if !expected_audit.is_v2_complete()
+            || expected_audit.projection_digest.trim().is_empty()
+        {
+            return Err(ProviderGatewayError::UnsupportedCapability(
+                "lc start audit v2 material incomplete; refusing to spawn".to_string(),
+            ));
+        }
+        // 5. 身份一致门 + admission verdict + 完整复验(指纹基准 = 候选
+        //    full projection,与冻结指纹逐字一致)。
+        let mut input = candidate.input.clone();
+        let is_resume = input.resume_provider_session_id.is_some();
+        Self::assert_projection_matches_envelope(validated, &candidate.full_projection)?;
+        self.admission_verdict(&candidate.request, &candidate.full_projection, is_resume)?;
+        let validated_full = candidate
+            .validated
+            .clone()
+            .with_lc_projection(candidate.full_projection.clone(), fingerprint);
+        self.revalidate_before_spawn(
+            &validated_full,
+            input.effective_working_directory(),
+            is_resume,
+        )?;
+        // kimi 例外映射(与 `start_streaming` 同源;LC 流式分发唯一漏斗)。
+        if input.provider_type == crate::protocol::contracts::ProviderType::KimiCode {
+            input.tool_policy =
+                crate::cross_cutting::streaming_provider::kimi_exempted_tool_policy(
+                    input.tool_policy,
+                );
+        }
+        let policy_digest = validated_full.envelope().policy_digest.clone();
+        let config_artifact_ref = validated_full.envelope().config_artifact_ref.clone();
+        let session = candidate
+            .adapter
+            .start_validated(
+                crate::cross_cutting::session_launch::ValidatedStreamingProviderInput::new(
+                    input,
+                    validated_full,
+                ),
+                cancel,
+            )
+            .await
+            .map_err(ProviderGatewayError::Adapter)?;
+        let ConfigSourceAudit {
+            argv,
+            config_digest,
+            ..
+        } = ConfigSourceAudit::from_launch(
+            &[],
+            &config_artifact_ref,
+            ConfigSourceProvenance::detect_from_setting_sources(&[]),
+        );
+        self.audit.record(
+            GatewayRunStack::Stream,
+            policy_digest,
+            Some(config_digest),
+            argv,
+        );
+        Ok(session)
+    }
+
     /// 只读 trust 维度装配(B0a1 `ProviderTrustFingerprintFacts` 消费面)。
     /// 零写:不 ensure/revoke、不追加 trust 审计;不造无适用 trust 记录。
     fn lc_trust_digest(
@@ -1820,10 +2049,7 @@ impl LogicalCodebaseProviderGateway {
         )?;
         Ok(format!(
             "lc-trust-v1:{provider_name:?}:{}",
-            facts
-                .record_digest
-                .as_deref()
-                .unwrap_or("no_record_digest")
+            facts.record_digest.as_deref().unwrap_or("no_record_digest")
         ))
     }
 
@@ -2563,4 +2789,4 @@ pub fn verify_published_policy_body(
 
 #[cfg(test)]
 #[path = "provider_gateway_tests.rs"]
-mod tests;
+pub(crate) mod tests;

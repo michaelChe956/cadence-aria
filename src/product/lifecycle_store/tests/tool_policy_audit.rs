@@ -992,3 +992,290 @@ fn lcg_t09_legacy_audit_missing_projection_cannot_resume_lc() {
     let new_run_lines = sink.read_tool_policy_lines("ws-t09", 1).unwrap();
     assert!(new_run_lines.is_empty());
 }
+
+// ---- Task 3.7(B0f):四家 audit 同源 durable 面 ----
+
+mod anchor_t10_durable_convergence {
+    use super::*;
+    use crate::cross_cutting::tool_policy_audit::{
+        LcProjectionAudit, LcProviderStartAudit, ProviderStartAudit, ResumeDecision,
+        resume_with_lc_start_record,
+    };
+    use crate::product::logical_codebase::provider_gateway::tests::anchor_t10_support as t10;
+    use std::sync::Arc;
+
+    /// 四家纯矩阵 fixture:action/wire/capability/projection/boundary 逐家
+    /// 形态(与 anchor_t10_support 的家族文本一致)。
+    fn family_projection(
+        wire: &str,
+        capability: &str,
+        projection: &str,
+    ) -> LcProjectionAudit {
+        LcProjectionAudit {
+            action: "planning_read_only".to_string(),
+            wire_dialect: wire.to_string(),
+            capability_projection_digest: capability.to_string(),
+            projection_digest: projection.to_string(),
+            boundary_evidence_ref: String::new(),
+        }
+    }
+
+    fn family_current_literal(
+        wire: &str,
+        capability: &str,
+        projection: &str,
+    ) -> LcProviderStartAudit {
+        LcProviderStartAudit {
+            action: "planning_read_only".to_string(),
+            wire_dialect: wire.to_string(),
+            capability_projection_digest: capability.to_string(),
+            projection_digest: projection.to_string(),
+            boundary_evidence_ref: String::new(),
+            resume_fingerprint: "sha256:t10-resume-fingerprint".to_string(),
+            action_evidence_digest: capability.to_string(),
+            target_git_identity: "/t10/.git/worktrees/target".to_string(),
+        }
+    }
+
+    fn family_stored(
+        provider: &str,
+        wire: &str,
+        capability: &str,
+        projection: &str,
+    ) -> ProviderStartAudit {
+        let mut record = provider_start_record("sha256:a", "provider 1.2.3", wire);
+        record.provider = provider.to_string();
+        record.lc_projection = Some(family_projection(wire, capability, projection));
+        record
+    }
+
+    /// Task 3.7 Step 1(durable 面):四家公共 fixture 汇总——`resume_with_
+    /// lc_start_record` 对四家同判据(匹配 Resume/跨家 wire 漂移拒/v2
+    /// 不完整拒/旧 basis 缺 lc_projection 拒),audit 同源四家一致。
+    #[test]
+    fn anchor_t10_lc_start_audit_matrix_four_families() {
+        let families: [(&str, &str); 4] = [
+            ("claude-code", "claude-stream-json"),
+            ("codex", "codex-app-server-rpc"),
+            ("pi", "pi-rpc"),
+            ("kimi-code", "kimi-acp"),
+        ];
+        for (provider, wire) in families {
+            let capability = format!("sha256:t10-capability-{provider}");
+            let projection = format!("sha256:t10-projection-{provider}");
+            let current = family_current_literal(wire, &capability, &projection);
+
+            // 匹配的完整字面量 → Resume(同家同判据)。
+            assert!(
+                matches!(
+                    resume_with_lc_start_record(
+                        &family_stored(provider, wire, &capability, &projection),
+                        &current
+                    ),
+                    ResumeDecision::Resume
+                ),
+                "[{provider}] matching full literal must resume"
+            );
+            // v2 材料不完整(三个 v2 字段任一为空)→ 拒,四家一致。
+            for incomplete in [
+                {
+                    let mut literal = current.clone();
+                    literal.resume_fingerprint = String::new();
+                    literal
+                },
+                {
+                    let mut literal = current.clone();
+                    literal.action_evidence_digest = String::new();
+                    literal
+                },
+                {
+                    let mut literal = current.clone();
+                    literal.target_git_identity = String::new();
+                    literal
+                },
+            ] {
+                assert!(
+                    matches!(
+                        resume_with_lc_start_record(
+                            &family_stored(provider, wire, &capability, &projection),
+                            &incomplete
+                        ),
+                        ResumeDecision::RejectSupersedeAndStartNew
+                    ),
+                    "[{provider}] v2-incomplete current literal must not resume"
+                );
+                assert!(!incomplete.is_v2_complete());
+            }
+            // 旧 basis(缺 lc_projection 的 direct/legacy 形态)→ 拒。
+            let legacy = provider_start_record("sha256:a", "provider 1.2.3", wire);
+            assert!(
+                matches!(
+                    resume_with_lc_start_record(&legacy, &current),
+                    ResumeDecision::RejectSupersedeAndStartNew
+                ),
+                "[{provider}] legacy record without lc projection must not resume"
+            );
+        }
+
+        // 跨家混比:claude 当前字面量 vs codex 存档(wire 漂移)→ 拒。
+        let claude_current = family_current_literal(
+            "claude-stream-json",
+            "sha256:t10-capability-claude-code",
+            "sha256:t10-projection-claude-code",
+        );
+        let codex_stored = family_stored(
+            "codex",
+            "codex-app-server-rpc",
+            "sha256:t10-capability-claude-code",
+            "sha256:t10-projection-claude-code",
+        );
+        assert!(
+            matches!(
+                resume_with_lc_start_record(&codex_stored, &claude_current),
+                ResumeDecision::RejectSupersedeAndStartNew
+            ),
+            "cross-family wire drift must not resume"
+        );
+    }
+
+    /// Task 3.7 Step 1(durable 面):full 唯一 start 路径经真实
+    /// LifecycleStore durable 分区落 provider_start——lc_projection 五字段
+    /// 与 gateway 冻结 full projection 同源;fresh(seq 1)与 full-matching
+    /// resume(seq 2)两代 provider_start 投影逐字相等;native id 检索命中
+    /// 最新代。
+    #[tokio::test]
+    async fn anchor_t10_durable_audit_same_source_full_path() {
+        let store = test_tool_policy_audit_sink();
+        let harness = t10::anchor_t10_harness(t10::AnchorT10Family::Codex);
+        harness.install_policy();
+        let sink: Arc<dyn ToolPolicyAuditSink> = Arc::new(store.clone());
+
+        // fresh 启动(seq 1)。
+        let candidate = harness
+            .gateway
+            .prepare_lc_streaming_candidate(
+                harness.streaming_input(None),
+                harness.request.clone(),
+                t10::anchor_t10_audit_context(sink.clone(), "ws-t10-durable", 1),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("codex prepare on the durable sink");
+        let session = harness
+            .gateway
+            .start_lc_prepared_streaming(candidate.clone(), tokio_util::sync::CancellationToken::new())
+            .await
+            .expect("unique full path start");
+        let native_id = session
+            .native_session_id
+            .clone()
+            .expect("fake native id from handshake");
+
+        let first_lines = store.read_tool_policy_lines("ws-t10-durable", 1).unwrap();
+        assert_eq!(first_lines.len(), 1, "provider_start 是首行且唯一");
+        let DurableToolPolicyEvent::ProviderStart(first) = &first_lines[0].event else {
+            panic!("first durable line must be provider_start");
+        };
+        let first_projection = first
+            .lc_projection
+            .as_ref()
+            .expect("durable provider_start carries lc projection");
+        assert_eq!(first.provider, "codex");
+        assert_eq!(first.sandbox.as_deref(), Some("read-only"));
+        assert_eq!(first.approval_policy.as_deref(), Some("on-request"));
+        assert_eq!(first.adapter_dialect, "codex-app-server-rpc");
+        assert_eq!(
+            first_projection.projection_digest,
+            candidate.full_projection().projection_digest()
+        );
+        assert_eq!(
+            first_projection.capability_projection_digest,
+            candidate
+                .full_projection()
+                .capability_projection_digest()
+        );
+        assert_eq!(
+            first_projection.action,
+            "planning_read_only"
+        );
+
+        // full-matching resume(seq 2):durable 检索最新代 → 完整字面量
+        // 判定 Resume → 同一冻结 full projection 再启动,两代投影逐字相等。
+        let stored = store
+            .find_latest_tool_policy_provider_start("ws-t10-durable", &native_id)
+            .unwrap()
+            .expect("durable resume lookup finds the latest provider_start");
+        let current_literal = harness
+            .adapter
+            .last_start_audit_literal()
+            .expect("adapter assembled the same-source literal at first start");
+        assert!(
+            matches!(
+                resume_with_lc_start_record(&stored.record, &current_literal),
+                ResumeDecision::Resume
+            ),
+            "durable stored record must full-match the assembled literal"
+        );
+
+        let resume_candidate = harness
+            .gateway
+            .prepare_lc_streaming_candidate(
+                harness.streaming_input(Some(native_id.clone())),
+                harness.request.clone(),
+                t10::anchor_t10_audit_context(sink, "ws-t10-durable", 2),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("resume prepare");
+        let fingerprint = resume_candidate.full_context_fingerprint();
+        match harness
+            .gateway
+            .resume_or_start_prepared_lc_candidate(
+                &resume_candidate,
+                crate::product::logical_codebase::provider_gateway::PreparedLcResumeBasis::Full {
+                    previous_fingerprint: fingerprint,
+                    previous_session_id: native_id.clone(),
+                },
+            )
+            .expect("full-matching resume disposition")
+        {
+            crate::product::logical_codebase::provider_gateway::GatewaySessionDisposition::Resume(
+                validated,
+            ) => {
+                assert_eq!(
+                    validated.fingerprint().digest,
+                    current_literal.resume_fingerprint,
+                    "gateway full 指纹与 durable audit 字面量同源"
+                );
+            }
+            _ => panic!("full-matching durable record must resume"),
+        }
+        harness
+            .gateway
+            .start_lc_prepared_streaming(resume_candidate, tokio_util::sync::CancellationToken::new())
+            .await
+            .expect("resume start via the unique full path");
+
+        let second_lines = store.read_tool_policy_lines("ws-t10-durable", 2).unwrap();
+        assert_eq!(second_lines.len(), 1, "resume run 分区同样首行唯一");
+        let DurableToolPolicyEvent::ProviderStart(second) = &second_lines[0].event else {
+            panic!("resume run first line must be provider_start");
+        };
+        let second_projection = second
+            .lc_projection
+            .as_ref()
+            .expect("resume provider_start carries lc projection");
+        assert_eq!(
+            first_projection, second_projection,
+            "两代 provider_start 的 lc_projection 五字段逐字相等(同源 full projection)"
+        );
+        assert_eq!(second.provider_session_id, native_id);
+
+        // 检索命中最新代(seq 2)。
+        let latest = store
+            .find_latest_tool_policy_provider_start("ws-t10-durable", &native_id)
+            .unwrap()
+            .expect("latest provider_start still found");
+        assert_eq!(latest.role_run_seq, 2);
+    }
+}
