@@ -63,6 +63,10 @@ const KIND_GLYPH = {
   c1_recovery: RotateCcw,
   sc_failed: CircleAlert,
   lc_bootstrap: Play,
+  // Main 授权（2026-10-12，最小构建解锁）：D7.1 恢复卡尚未真正渲染，
+  // 先补中性机械条目（glyph 复用 RotateCcw，class 沿用既有卡片风格）；
+  // 后续真正渲染恢复卡时复用或改。
+  lc_resume_recovery: RotateCcw,
 } as const;
 
 // F-50 视觉 v2 §3：门禁条目与门卡同一视觉常量（中性底+琥珀左线）；stopped 维持
@@ -75,6 +79,8 @@ const KIND_CLASS = {
   c1_recovery: "rounded-lg border border-amber-200 bg-amber-50 px-3 py-2",
   sc_failed: "rounded-lg border border-slate-200 bg-gray-50 px-3 py-2",
   lc_bootstrap: "rounded-lg border border-amber-200 bg-amber-50 px-3 py-2",
+  lc_resume_recovery:
+    "rounded-lg border border-amber-200 bg-amber-50 px-3 py-2",
 } as const;
 
 export function CockpitInbox({
