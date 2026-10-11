@@ -6,7 +6,8 @@ use crate::product::coding_attempt_store::locking::with_exclusive_lock;
 use crate::product::id::next_sequential_id;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::models::{
-    HumanGateTakeoverEvent, PlanRepairSessionSnapshotDto, ProviderConversationRef,
+    HumanGateTakeoverEvent, LcFreshOperationResult, LcFreshOperationState, LcResumeRecoveryRecord,
+    LcResumeRecoveryState, PlanRepairSessionSnapshotDto, ProviderConversationRef,
     WorkItemRuntimeBinding, WorkspaceMessageRecord, WorkspaceRolePermissionModes,
     WorkspaceSessionLink, WorkspaceSessionRecord, WorkspaceSessionStatus,
     WorkspaceSessionSummaryRecord, WorkspaceType,
@@ -848,6 +849,155 @@ impl LifecycleStore {
         })
     }
 
+    /// A2a（Task 2.5）：LC resume 状态迁移的整记录 expected CAS。锁内重读
+    /// 最新 record，仅替换 `lc_resume_recovery` 字段——非 LC 字段（人审
+    /// 快照/预算/ledger/tombstone 等）以锁内 stored 为准保留，绝不用
+    /// caller 侧过期副本覆盖；任何并发写都令整记录比较冲突
+    /// （single-flight）。后续新漂移替换 recovery 时传新 recovery_id 的
+    /// 完整记录。
+    pub fn compare_and_save_lc_resume_state(
+        &self,
+        expected: &WorkspaceSessionRecord,
+        next_lc_fields: LcResumeRecoveryRecord,
+    ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
+        let session_path = self.find_workspace_session_path(&expected.id)?;
+        let locked_session_path = session_path.clone();
+        with_exclusive_lock(&session_path, move || {
+            let mut stored: WorkspaceSessionRecord = read_json(&locked_session_path)?;
+            if stored != *expected {
+                return Err(ProductStoreError::Conflict {
+                    kind: "workspace_session",
+                    id: expected.id.clone(),
+                });
+            }
+            stored.lc_resume_recovery = Some(next_lc_fields);
+            stored.updated_at = Utc::now().to_rfc3339();
+            write_json(&locked_session_path, &stored)?;
+            Ok(stored)
+        })
+    }
+
+    /// A2a（Task 2.5，设计 §5.1 固定判定顺序）：显式 fresh 的 durable
+    /// claim。store 层落点：① recovery 身份（record 缺失 recovery 或
+    /// recovery_id 已被新漂移替换 → Stale）② 同 ID 已受理先 Replay——
+    /// waiting/prepare 失败、reserved/running、resolved/completed 一律回放
+    /// 原受理结果＋当前操作状态，禁止 spawn，且该查询先于一切
+    /// waiting/busy/resolved 判定 ③ 仅新 operation_id 才按状态机分类：
+    /// FreshReserved/FreshRunning → Busy、Resolved → Stale（不造第二会
+    /// 话）、Waiting → 排它锁下原子 CAS 受理（recovery → FreshReserved，
+    /// fresh_operations 追加 Reserved 结果）。已受理 operation 的 Replay
+    /// 只经本 store 文件锁读 durable 事实，不等待 engine mutex；write
+    /// 失败整体 Err，不残留半受理状态（跨文件不承诺事务）。
+    pub fn claim_lc_fresh(
+        &self,
+        session_id: &str,
+        recovery_id: &str,
+        operation_id: &str,
+    ) -> Result<LcFreshClaimOutcome, ProductStoreError> {
+        validate_relative_id(session_id)?;
+        if recovery_id.trim().is_empty() {
+            return Err(ProductStoreError::InvalidRecord {
+                kind: "lc_resume_recovery_claim",
+                reason: "recovery id must not be empty".to_string(),
+            });
+        }
+        if operation_id.trim().is_empty() {
+            return Err(ProductStoreError::InvalidRecord {
+                kind: "lc_resume_recovery_claim",
+                reason: "operation id must not be empty".to_string(),
+            });
+        }
+        let session_path = self.find_workspace_session_path(session_id)?;
+        with_exclusive_lock(&session_path, || {
+            let mut session: WorkspaceSessionRecord = read_json(&session_path)?;
+            // ① recovery 身份：缺失/被替换 → Stale。
+            let Some(recovery) = session.lc_resume_recovery.as_ref() else {
+                return Ok(LcFreshClaimOutcome::Stale {
+                    reason_code: LcFreshClaimOutcome::STALE_NO_RECOVERY.to_string(),
+                });
+            };
+            if recovery.recovery_id != recovery_id {
+                return Ok(LcFreshClaimOutcome::Stale {
+                    reason_code: LcFreshClaimOutcome::STALE_SUPERSEDED.to_string(),
+                });
+            }
+            // ② 同 ID 已受理先 Replay：先于一切 waiting/busy/resolved 判定，
+            //    只读 durable 事实，不 spawn、不等待 engine mutex。
+            if let Some(operation) = recovery
+                .fresh_operations
+                .iter()
+                .find(|operation| operation.operation_id == operation_id)
+            {
+                return Ok(LcFreshClaimOutcome::Replay {
+                    operation: operation.clone(),
+                    recovery_state: recovery.state,
+                });
+            }
+            // ③ 仅新 operation_id 才按 recovery 状态机分类。
+            match recovery.state {
+                LcResumeRecoveryState::FreshReserved | LcResumeRecoveryState::FreshRunning => {
+                    return Ok(LcFreshClaimOutcome::Busy {
+                        active_operation_id: recovery.operation_id.clone(),
+                    });
+                }
+                LcResumeRecoveryState::Resolved => {
+                    return Ok(LcFreshClaimOutcome::Stale {
+                        reason_code: LcFreshClaimOutcome::STALE_RESOLVED.to_string(),
+                    });
+                }
+                LcResumeRecoveryState::Waiting => {}
+            }
+            let now = Utc::now().to_rfc3339();
+            let operation = LcFreshOperationResult {
+                operation_id: operation_id.to_string(),
+                state: LcFreshOperationState::Reserved,
+                fresh_node_id: None,
+                reason_code: None,
+                role_run_seq: None,
+                accepted_at: now.clone(),
+                updated_at: now.clone(),
+            };
+            let recovery = session
+                .lc_resume_recovery
+                .as_mut()
+                .expect("lc resume recovery presence checked above");
+            recovery.state = LcResumeRecoveryState::FreshReserved;
+            recovery.operation_id = Some(operation_id.to_string());
+            recovery.fresh_operations.push(operation.clone());
+            recovery.updated_at = now.clone();
+            session.updated_at = now;
+            write_json(&session_path, &session)?;
+            Ok(LcFreshClaimOutcome::Claimed {
+                record: session,
+                operation,
+            })
+        })
+    }
+
+    /// A2a（Task 2.5）：已受理 fresh operation 的只读查询（§5.1：Replay
+    /// 对账不等待 engine mutex）。recovery 身份不匹配或 operation 未受理
+    /// 返回 None；不写任何字段，不与 claim 事务耦合。
+    pub fn query_lc_fresh_operation(
+        &self,
+        session_id: &str,
+        recovery_id: &str,
+        operation_id: &str,
+    ) -> Result<Option<LcFreshOperationResult>, ProductStoreError> {
+        validate_relative_id(session_id)?;
+        let session_path = self.find_workspace_session_path(session_id)?;
+        let session: WorkspaceSessionRecord = read_json(&session_path)?;
+        let Some(recovery) = session.lc_resume_recovery else {
+            return Ok(None);
+        };
+        if recovery.recovery_id != recovery_id {
+            return Ok(None);
+        }
+        Ok(recovery
+            .fresh_operations
+            .into_iter()
+            .find(|operation| operation.operation_id == operation_id))
+    }
+
     pub fn compare_and_update_workspace_session_status(
         &self,
         expected: &WorkspaceSessionRecord,
@@ -1018,6 +1168,42 @@ impl LifecycleStore {
             .join("workspace-timelines")
             .join(session_id))
     }
+}
+
+/// A2a（Task 2.5）：显式 fresh claim 的 typed 四态结果（设计 §5.1 固定
+/// 判定顺序）。Replay 为结构变体：同 ID 已受理一律回放原受理结果＋当前
+/// 操作状态（waiting/prepare 失败、reserved/running、resolved/completed
+/// 全覆盖），禁止 spawn，卡不复活。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LcFreshClaimOutcome {
+    /// 新 operation_id 在 recovery=Waiting 下原子 CAS 受理成功：
+    /// recovery → FreshReserved，fresh_operations 追加 Reserved 结果。
+    /// provider start/spawn 属于 engine 后续职责，不在 store 内发生。
+    Claimed {
+        record: WorkspaceSessionRecord,
+        operation: LcFreshOperationResult,
+    },
+    /// 同 ID 已受理：原受理结果＋当前操作状态；只读 durable 事实回放，
+    /// 不等待 engine mutex；resolved 同 ID 也只 Replay。
+    Replay {
+        operation: LcFreshOperationResult,
+        recovery_state: LcResumeRecoveryState,
+    },
+    /// 新 ID 撞上 FreshReserved/FreshRunning（已受理 operation 优先，
+    /// 不能只靠 UI disabled）。
+    Busy { active_operation_id: Option<String> },
+    /// recovery 缺失/已被新漂移替换，或已 resolved（新 ID 拒绝第二会
+    /// 话）；reason_code 见本类型常量。
+    Stale { reason_code: String },
+}
+
+impl LcFreshClaimOutcome {
+    /// record 上无 lc_resume_recovery（尚无等待恢复可认领）。
+    pub const STALE_NO_RECOVERY: &'static str = "lc_resume_recovery_required";
+    /// recovery_id 已被新漂移替换（旧 ID 非权威身份）。
+    pub const STALE_SUPERSEDED: &'static str = "lc_resume_recovery_stale";
+    /// recovery 已 resolved：新 operation 拒绝，不造第二会话。
+    pub const STALE_RESOLVED: &'static str = "lc_resume_recovery_resolved";
 }
 
 #[cfg(test)]
