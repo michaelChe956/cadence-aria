@@ -98,6 +98,28 @@ impl WorkspaceEngine {
         feedback: Option<&str>,
         context: &crate::product::cadence_skills::routing_reference::RoutingReferenceContext,
     ) -> Result<StreamingProviderInput, String> {
+        self.build_work_item_draft_streaming_input_variant(feedback, context, false)
+    }
+
+    /// B2b3（Task 5.4，设计 §5.3 legacy_draft 行）：LC 显式 fresh 构建——
+    /// feedback 为 durable 冻结值原样透传（不读/不清/不 take 内存
+    /// `pending_revision_context`），provider **全新启动**（resume=None，
+    /// 不回捞旧 native 会话）；其余材料同正常构建（当前 outline 全文 +
+    /// accepted drafts）。
+    pub(crate) fn build_current_work_item_draft_streaming_input_explicit_fresh(
+        &self,
+        feedback: Option<&str>,
+        context: &crate::product::cadence_skills::routing_reference::RoutingReferenceContext,
+    ) -> Result<StreamingProviderInput, String> {
+        self.build_work_item_draft_streaming_input_variant(feedback, context, true)
+    }
+
+    fn build_work_item_draft_streaming_input_variant(
+        &self,
+        feedback: Option<&str>,
+        context: &crate::product::cadence_skills::routing_reference::RoutingReferenceContext,
+        explicit_fresh: bool,
+    ) -> Result<StreamingProviderInput, String> {
         let store = self.work_item_plan_store()?;
         let index = store
             .load_active_index(
@@ -128,13 +150,23 @@ impl WorkspaceEngine {
             .clone()
             .or_else(|| std::env::current_dir().ok())
             .ok_or_else(|| "working directory unavailable".to_string())?;
-        self.build_work_item_plan_streaming_input(
-            provider_type_for_name(&self.session.author_provider),
-            invocation.prompt,
-            working_dir.to_string_lossy().to_string(),
-            self.session.author_provider.clone(),
-            PlanAuthorOutputContract::Structured,
-        )
+        if explicit_fresh {
+            self.build_work_item_plan_streaming_input_fresh(
+                provider_type_for_name(&self.session.author_provider),
+                invocation.prompt,
+                working_dir.to_string_lossy().to_string(),
+                self.session.author_provider.clone(),
+                PlanAuthorOutputContract::Structured,
+            )
+        } else {
+            self.build_work_item_plan_streaming_input(
+                provider_type_for_name(&self.session.author_provider),
+                invocation.prompt,
+                working_dir.to_string_lossy().to_string(),
+                self.session.author_provider.clone(),
+                PlanAuthorOutputContract::Structured,
+            )
+        }
     }
 
     pub(crate) fn build_current_work_item_batch_draft_streaming_input(
@@ -152,6 +184,30 @@ impl WorkspaceEngine {
             }
             None => self.pending_revision_context.take(),
         };
+        self.build_work_item_batch_streaming_input_variant(effective_feedback.as_deref(), context, false)
+    }
+
+    /// B2b3（Task 5.4，设计 §5.3 legacy_batch 行）：LC 显式 fresh 构建——
+    /// feedback 为 durable 冻结值原样透传（不读/不清/不 take 内存
+    /// `pending_revision_context`），provider **全新启动**（resume=None）；
+    /// 材料同正常构建（当前 batch 上下文全文）。
+    pub(crate) fn build_current_work_item_batch_draft_streaming_input_explicit_fresh(
+        &self,
+        feedback: Option<&str>,
+        context: &crate::product::cadence_skills::routing_reference::RoutingReferenceContext,
+    ) -> Result<StreamingProviderInput, String> {
+        if self.active_node_type() != Some(TimelineNodeType::WorkItemBatchRun) {
+            return Err("batch draft input requires active work_item_batch_run node".to_string());
+        }
+        self.build_work_item_batch_streaming_input_variant(feedback, context, true)
+    }
+
+    fn build_work_item_batch_streaming_input_variant(
+        &self,
+        feedback: Option<&str>,
+        context: &crate::product::cadence_skills::routing_reference::RoutingReferenceContext,
+        explicit_fresh: bool,
+    ) -> Result<StreamingProviderInput, String> {
         let store = self.work_item_plan_store()?;
         let index = store
             .load_active_index(
@@ -174,7 +230,7 @@ impl WorkspaceEngine {
             &active_outline_id,
             WorkItemGenerationMode::Batch,
             &batch_drafts,
-            effective_feedback.as_deref(),
+            feedback,
             context,
         )
         .map_err(|error| error.message)?;
@@ -184,13 +240,23 @@ impl WorkspaceEngine {
             .clone()
             .or_else(|| std::env::current_dir().ok())
             .ok_or_else(|| "working directory unavailable".to_string())?;
-        self.build_work_item_plan_streaming_input(
-            provider_type_for_name(&self.session.author_provider),
-            invocation.prompt,
-            working_dir.to_string_lossy().to_string(),
-            self.session.author_provider.clone(),
-            PlanAuthorOutputContract::Structured,
-        )
+        if explicit_fresh {
+            self.build_work_item_plan_streaming_input_fresh(
+                provider_type_for_name(&self.session.author_provider),
+                invocation.prompt,
+                working_dir.to_string_lossy().to_string(),
+                self.session.author_provider.clone(),
+                PlanAuthorOutputContract::Structured,
+            )
+        } else {
+            self.build_work_item_plan_streaming_input(
+                provider_type_for_name(&self.session.author_provider),
+                invocation.prompt,
+                working_dir.to_string_lossy().to_string(),
+                self.session.author_provider.clone(),
+                PlanAuthorOutputContract::Structured,
+            )
+        }
     }
 
     pub(crate) fn accepted_work_item_plan_draft_records(
@@ -313,5 +379,25 @@ impl WorkspaceEngine {
             status: TimelineNodeStatus::Active,
         })
         .await
+    }
+
+
+    /// B2b3（Task 5.4，设计 §5.3 legacy_batch 行）：LC 显式 fresh 的 batch
+    /// provider 运行节点重建——仅新建 `WorkItemBatchRun` 节点（stale 收口后
+    /// 活动节点已清空）；**不另建 batch、不重置 repair 预算**，完成仍走同
+    /// batch 完成器（`complete_work_item_batch_draft_author`）。
+    pub(crate) async fn begin_work_item_batch_fresh_recovery_run(&mut self) {
+        self.transition_stage(WorkspaceStage::Running).await;
+        let _ = self
+            .create_timeline_node(TimelineNodeDraft {
+                node_type: TimelineNodeType::WorkItemBatchRun,
+                agent: Some(self.session.author_provider.clone()),
+                stage: WorkspaceStage::Running,
+                round: None,
+                title: "Work Item Batch 生成".to_string(),
+                summary: Some("LC 显式 fresh 恢复：续跑当前 batch（不另建 batch）".to_string()),
+                status: TimelineNodeStatus::Active,
+            })
+            .await;
     }
 }

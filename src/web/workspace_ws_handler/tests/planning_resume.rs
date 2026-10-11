@@ -1220,3 +1220,837 @@ fn anchor_t13_plan_run_context_dispatch_never_falls_back() {
     let rejection = illegal.expect_err("非法 flow 必须拒收");
     assert_eq!(rejection.code, "lc_resume_recovery_context_unsupported");
 }
+
+// ============================================================================
+// B2b3（Task 5.4，tasks.md 5.4 / 设计 §5.3 legacy_draft·legacy_batch·
+// legacy_plan_revision 行）：Draft/Batch/PlanRevision 三 tag 的 full fresh
+// 臂接管——显式 fresh 后同业务代恢复：feedback 为 durable 冻结值（take 前）、
+// provider 全新启动（resume=None）、generation/outline/batch 不重建、
+// PlanRevision 重算 retained/redo 与 payload 一致、原完成器/门保持、
+// 未接管 tag typed 拒不回落。
+// ============================================================================
+
+use crate::product::lifecycle_store::CreateWorkItemInput;
+use crate::product::models::{
+    LcRecoveryDraftRef, LcRecoveryRedoSpec, LcRetainedPlanItemRef, ProviderConversationRef,
+    WorkItemBatchRecord, WorkItemBatchStatus, WorkItemContextBudget, WorkItemDraftRecord,
+    WorkItemDraftStatus, WorkItemGenerationMode, WorkItemKind, WorkItemPlanDraftActiveIndex,
+    WorkItemPlanOutline, WorkItemPlanStatus, WorkItemOutline,
+};
+use crate::product::work_item_plan_store::WorkItemPlanStore;
+use crate::web::workspace_ws_types::{
+    WorkItemCandidateDto, WorkItemCandidateMetaDto, WorkItemPlanCandidateDto, WorkItemPlanDto,
+    WorkItemPlanOutlineCandidateDto, WorkItemSplitOptionsDto,
+};
+use std::collections::BTreeMap;
+
+/// anchor_t16 业务夹具：T13 基座（物理仓+issue+story/design+plan+WorkItemPlan
+/// 会话）+ draft/batch/revision 业务事实（outline artifact 由各用例注入 engine
+/// session；WorkItemPlanStore index/draft 记录按场景落盘）。
+struct AnchorT16PlanFixture {
+    t13: AnchorT13PlanFixture,
+}
+
+impl AnchorT16PlanFixture {
+    fn new() -> Self {
+        Self {
+            t13: AnchorT13PlanFixture::new(),
+        }
+    }
+
+    fn lifecycle(&self) -> &LifecycleStore {
+        &self.t13.lifecycle
+    }
+
+    fn app_paths(&self) -> &ProductAppPaths {
+        &self.t13.app_paths
+    }
+
+    fn session_id(&self) -> &str {
+        &self.t13.session_record.id
+    }
+
+    fn latest_record(&self) -> WorkspaceSessionRecord {
+        self.t13.latest_record()
+    }
+
+    fn plan_store(&self) -> WorkItemPlanStore {
+        WorkItemPlanStore::new(self.t13.app_paths.clone())
+    }
+
+    /// 单 outline（outline_a）的 draft 场景 index + accepted draft 记录。
+    fn seed_serial_draft_business(&self) {
+        let store = self.plan_store();
+        let record = anchor_t16_draft_record("outline_a", "draft_outline_a", None);
+        store.put_draft_record(&record).expect("put draft record");
+        store
+            .save_active_index(&anchor_t16_active_index(
+                Some("outline_a".to_string()),
+                BTreeMap::from([(
+                    "outline_a".to_string(),
+                    "draft_outline_a".to_string(),
+                )]),
+                BTreeMap::from([(
+                    "draft_outline_a".to_string(),
+                    WorkItemDraftStatus::Accepted,
+                )]),
+                Vec::new(),
+            ))
+            .expect("save active index");
+    }
+
+    /// batch 场景 index（batch_0001 Generating，active_outline 生产形态）+
+    /// 三个 accepted batch draft 记录。
+    fn seed_batch_business(&self) {
+        let store = self.plan_store();
+        let mut statuses = BTreeMap::new();
+        let mut mapping = BTreeMap::new();
+        for outline_id in ["outline_a", "outline_b", "outline_c"] {
+            let draft_id = format!("draft_{outline_id}");
+            store
+                .put_draft_record(&anchor_t16_draft_record(
+                    outline_id,
+                    &draft_id,
+                    Some("batch_0001"),
+                ))
+                .expect("put batch draft record");
+            mapping.insert(outline_id.to_string(), draft_id.clone());
+            statuses.insert(draft_id, WorkItemDraftStatus::Accepted);
+        }
+        store
+            .save_active_index(&anchor_t16_active_index(
+                Some("outline_a".to_string()),
+                mapping,
+                statuses,
+                vec![WorkItemBatchRecord {
+                    batch_id: "batch_0001".to_string(),
+                    generation_round_id: "round_0001".to_string(),
+                    mode: WorkItemGenerationMode::Batch,
+                    item_draft_ids: vec![
+                        "draft_outline_a".to_string(),
+                        "draft_outline_b".to_string(),
+                        "draft_outline_c".to_string(),
+                    ],
+                    status: WorkItemBatchStatus::Generating,
+                    validation_failed_ids: Vec::new(),
+                    created_at: "2026-10-12T00:00:00Z".to_string(),
+                }],
+            ))
+            .expect("save active index");
+    }
+
+    /// revision 场景：两个 lifecycle work item（保留+重做），engine artifact
+    /// 由用例注入 candidate（一个 reverted 带反馈）。
+    fn seed_revision_work_items(&self, repository_id: &str) {
+        for (id, title) in [
+            ("wi_t16_keep", "保留项"),
+            ("wi_t16_redo", "重做项"),
+        ] {
+            self.t13
+                .lifecycle
+                .create_work_item(CreateWorkItemInput {
+                    id: Some(id.to_string()),
+                    project_id: "project_0001".to_string(),
+                    issue_id: "issue_0001".to_string(),
+                    repository_id: repository_id.to_string(),
+                    story_spec_ids: Vec::new(),
+                    design_spec_ids: Vec::new(),
+                    title: title.to_string(),
+                    work_item_set_id: None,
+                    source_work_item_plan_id: None,
+                    source_outline_id: None,
+                    source_draft_id: None,
+                    planned_implementation_context: None,
+                    kind: WorkItemKind::Backend,
+                    sequence_hint: None,
+                    depends_on: Vec::new(),
+                    exclusive_write_scopes: Vec::new(),
+                    forbidden_write_scopes: Vec::new(),
+                    context_budget: WorkItemContextBudget::default(),
+                    verification_plan_ref: None,
+                    require_execution_plan_confirm: false,
+                    plan_status: WorkItemPlanStatus::Draft,
+                })
+                .expect("create work item");
+        }
+    }
+
+    /// 直接落 Waiting 恢复记录（捕获面归 5.1/manager；本包验证 fresh 消费）。
+    fn seed_recovery_waiting(
+        &self,
+        recovery_id: &str,
+        run_context: LcRecoveryRunContext,
+    ) -> LcResumeRecoveryRecord {
+        let expected = self.latest_record();
+        let recovery = LcResumeRecoveryRecord {
+            schema_version: 1,
+            recovery_id: recovery_id.to_string(),
+            failed_provider_node_id: "timeline_node_001".to_string(),
+            reason_code: "planning_context_stale".to_string(),
+            role: ProviderConversationRole::Author,
+            provider: ProviderName::ClaudeCode,
+            superseded_native_session_id: Some("native-t16-old".to_string()),
+            previous_fingerprint_digest: Some("sha256:t16-old".to_string()),
+            previous_session_status: expected.status.clone(),
+            previous_stage: "running".to_string(),
+            run_context,
+            state: LcResumeRecoveryState::Waiting,
+            operation_id: None,
+            fresh_node_id: None,
+            fresh_native_session_id: None,
+            fresh_role_run_seq: None,
+            fresh_operations: Vec::new(),
+            detected_at: "2026-10-12T00:00:00Z".to_string(),
+            updated_at: "2026-10-12T00:00:00Z".to_string(),
+        };
+        self.t13
+            .lifecycle
+            .compare_and_save_lc_resume_state(&expected, recovery.clone())
+            .expect("seed t16 waiting recovery");
+        recovery
+    }
+
+    /// stale 收口后的 engine 形态：stage=PrepareContext、无活动节点、无
+    /// timeline 节点、artifact/candidate 由用例注入；注入旧 Author native
+    /// conversation 引用（fresh 必须不回捞，resume=None 的对账锚点）。
+    fn engine_after_stale_closure(
+        &self,
+        artifact: Option<crate::web::workspace_ws_types::ArtifactPayload>,
+        checkpoint_dir: &str,
+    ) -> Arc<Mutex<WorkspaceEngine>> {
+        let record = self.latest_record();
+        let mut session = WorkspaceSession::from_record(record.clone());
+        session.stage = WorkspaceStage::PrepareContext;
+        session.artifact = artifact;
+        session.provider_conversations = vec![ProviderConversationRef {
+            role: ProviderConversationRole::Author,
+            provider: ProviderName::ClaudeCode,
+            provider_session_id: "native-t16-old".to_string(),
+            updated_at: "2026-10-12T00:00:00Z".to_string(),
+            last_node_id: Some("timeline_node_001".to_string()),
+        }];
+        let checkpoint_store = Arc::new(CheckpointStore::new(
+            self.t13.base.temp.path().join(checkpoint_dir),
+        ));
+        let (engine_tx, _engine_rx) = mpsc::channel::<EngineEvent>(64);
+        let engine = WorkspaceEngine::new_persistent(
+            checkpoint_store,
+            self.t13.lifecycle.clone(),
+            engine_tx,
+            session,
+        );
+        Arc::new(Mutex::new(engine))
+    }
+}
+
+fn anchor_t16_active_index(
+    active_outline_id: Option<String>,
+    outline_to_current_draft_id: BTreeMap<String, String>,
+    draft_statuses: BTreeMap<String, WorkItemDraftStatus>,
+    batches: Vec<WorkItemBatchRecord>,
+) -> WorkItemPlanDraftActiveIndex {
+    WorkItemPlanDraftActiveIndex {
+        project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        plan_id: "issue_work_item_plan_0001".to_string(),
+        current_generation_round_id: "round_0001".to_string(),
+        outline_state: "confirmed".to_string(),
+        active_outline_id,
+        outline_to_current_draft_id,
+        draft_statuses,
+        batches,
+        updated_at: "2026-10-12T00:00:00Z".to_string(),
+    }
+}
+
+fn anchor_t16_work_item_plan_outline() -> WorkItemPlanOutline {
+    WorkItemPlanOutline {
+        id: "outline_001".to_string(),
+        project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        source_story_spec_ids: Vec::new(),
+        source_design_spec_ids: Vec::new(),
+        strategy_summary: "t16 strategy".to_string(),
+        work_item_outlines: vec![
+            WorkItemOutline {
+                target_repository_id: None,
+                outline_id: "outline_a".to_string(),
+                logical_work_item_id: "wi_a".to_string(),
+                title: "T16-A".to_string(),
+                kind: WorkItemKind::Backend,
+                goal: "T16-A goal".to_string(),
+                scope: vec!["src/a.rs".to_string()],
+                non_goals: Vec::new(),
+                estimated_context_tokens: Some(12_000),
+                session_fit: Some(
+                    crate::product::models::WorkItemOutlineSessionFit::FitsSingleAgentSession,
+                ),
+                source_story_spec_ids: Vec::new(),
+                source_design_spec_ids: Vec::new(),
+                exclusive_write_scopes: vec!["src/a.rs".to_string()],
+                forbidden_write_scopes: Vec::new(),
+                depends_on: Vec::new(),
+                verification_intent: vec!["cargo test --locked --lib t16".to_string()],
+                trusted_verification_commands: Vec::new(),
+                handoff_notes: "handoff A".to_string(),
+            },
+            WorkItemOutline {
+                target_repository_id: None,
+                outline_id: "outline_b".to_string(),
+                logical_work_item_id: "wi_b".to_string(),
+                title: "T16-B".to_string(),
+                kind: WorkItemKind::Frontend,
+                goal: "T16-B goal".to_string(),
+                scope: vec!["web/b.ts".to_string()],
+                non_goals: Vec::new(),
+                estimated_context_tokens: Some(10_000),
+                session_fit: Some(
+                    crate::product::models::WorkItemOutlineSessionFit::FitsSingleAgentSession,
+                ),
+                source_story_spec_ids: Vec::new(),
+                source_design_spec_ids: Vec::new(),
+                exclusive_write_scopes: vec!["web/b.ts".to_string()],
+                forbidden_write_scopes: Vec::new(),
+                depends_on: Vec::new(),
+                verification_intent: vec!["cargo test --locked --lib t16b".to_string()],
+                trusted_verification_commands: Vec::new(),
+                handoff_notes: "handoff B".to_string(),
+            },
+        ],
+        dependency_graph: Vec::new(),
+        risks: Vec::new(),
+        handoff_strategy: String::new(),
+        status: "confirmed".to_string(),
+    }
+}
+
+fn anchor_t16_outline_artifact() -> crate::web::workspace_ws_types::ArtifactPayload {
+    crate::web::workspace_ws_types::ArtifactPayload::WorkItemPlanOutlineCandidate {
+        outline_candidate: Box::new(WorkItemPlanOutlineCandidateDto {
+            outline: anchor_t16_work_item_plan_outline(),
+            design_context_gaps: Vec::new(),
+            validator_findings: Vec::new(),
+            context_blockers: Vec::new(),
+            current_generation_round_id: Some("round_0001".to_string()),
+            selected_generation_mode: None,
+        }),
+    }
+}
+
+fn anchor_t16_draft_record(
+    outline_id: &str,
+    draft_id: &str,
+    batch_id: Option<&str>,
+) -> WorkItemDraftRecord {
+    let now = "2026-10-12T00:00:00Z";
+    let logical_work_item_id = format!(
+        "wi_{}",
+        outline_id.strip_prefix("outline_").unwrap_or(outline_id)
+    );
+    let mut contract =
+        crate::product::work_item_contract::canonical_contract_fixture(&logical_work_item_id);
+    contract.identity.title = format!("{outline_id} draft");
+    contract.identity.kind = "backend".to_string();
+    contract.goal.summary = format!("实现 {outline_id}");
+    WorkItemDraftRecord {
+        project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        plan_id: "issue_work_item_plan_0001".to_string(),
+        draft_id: draft_id.to_string(),
+        outline_id: outline_id.to_string(),
+        generation_round_id: "round_0001".to_string(),
+        batch_id: batch_id.map(str::to_string),
+        attempt_index: 1,
+        outline_version_ref: "outline_001".to_string(),
+        generation_mode: if batch_id.is_some() {
+            WorkItemGenerationMode::Batch
+        } else {
+            WorkItemGenerationMode::Serial
+        },
+        generation_diagnostics: None,
+        candidate: crate::product::models::WorkItemDraftCandidate {
+            target_repository_id: None,
+            outline_id: outline_id.to_string(),
+            logical_work_item_id,
+            canonical_contract_candidate: contract.clone(),
+            verification_plan: crate::product::models::WorkItemDraftVerificationPlan {
+                checks: contract.verification_checks,
+            },
+        },
+        status: WorkItemDraftStatus::Accepted,
+        active: true,
+        superseded_by_draft_id: None,
+        supersede_reason: None,
+        copied_from_draft_id: None,
+        review_node_id: None,
+        review_verdict_ref: None,
+        generated_from_node_id: "timeline_node_draft".to_string(),
+        accepted_at: Some(now.to_string()),
+        superseded_at: None,
+        created_at: now.to_string(),
+        updated_at: now.to_string(),
+    }
+}
+
+fn anchor_t16_plan_candidate_artifact() -> crate::web::workspace_ws_types::ArtifactPayload {
+    crate::web::workspace_ws_types::ArtifactPayload::WorkItemPlanCandidate {
+        candidate: Box::new(WorkItemPlanCandidateDto {
+            plan: WorkItemPlanDto {
+                id: "issue_work_item_plan_0001".to_string(),
+                status: "draft".to_string(),
+                options: WorkItemSplitOptionsDto {
+                    include_integration_tests: false,
+                    include_e2e_tests: false,
+                    force_frontend_backend_split: false,
+                    require_execution_plan_confirm: false,
+                },
+                dependency_graph: Vec::new(),
+            },
+            work_items: vec![
+                WorkItemCandidateDto {
+                    id: "wi_t16_keep".to_string(),
+                    kind: "backend".to_string(),
+                    title: "保留项".to_string(),
+                    depends_on: Vec::new(),
+                    exclusive_write_scopes: Vec::new(),
+                    verification_plan_ref: None,
+                    meta: WorkItemCandidateMetaDto {
+                        reverted: false,
+                        revert_feedback: None,
+                    },
+                },
+                WorkItemCandidateDto {
+                    id: "wi_t16_redo".to_string(),
+                    kind: "backend".to_string(),
+                    title: "重做项".to_string(),
+                    depends_on: Vec::new(),
+                    exclusive_write_scopes: Vec::new(),
+                    verification_plan_ref: None,
+                    meta: WorkItemCandidateMetaDto {
+                        reverted: true,
+                        revert_feedback: Some("返修该组件".to_string()),
+                    },
+                },
+            ],
+            verification_plans: Vec::new(),
+            repository_profile: None,
+            validator_findings: Vec::new(),
+        }),
+    }
+}
+
+fn anchor_t16_business() -> LcRecoveryBusinessContext {
+    anchor_t13_business("issue_work_item_plan_0001")
+}
+
+/// dispatch 快捷封装：seed Waiting → claim → 组 run_context → dispatch。
+#[allow(clippy::too_many_arguments)]
+async fn anchor_t16_claim_and_dispatch(
+    fixture: &AnchorT16PlanFixture,
+    recovery: &LcResumeRecoveryRecord,
+    operation_id: &str,
+    engine_arc: Arc<Mutex<WorkspaceEngine>>,
+    input_tx: mpsc::UnboundedSender<StreamingProviderInput>,
+) -> mpsc::Receiver<OutboundControl> {
+    assert!(matches!(
+        fixture
+            .lifecycle()
+            .claim_lc_fresh(fixture.session_id(), &recovery.recovery_id, operation_id),
+        Ok(LcFreshClaimOutcome::Claimed { .. })
+    ));
+    let record = fixture.latest_record();
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::ClaudeCode,
+        Arc::new(RebuildRecordingProvider { input_tx }),
+    );
+    let run_context = ProviderRunContext::test_fixture(
+        Arc::new(registry),
+        engine_arc,
+        WorkspaceRunRegistry::default(),
+        record.id.clone(),
+        fixture.app_paths().clone(),
+        fixture.latest_record(),
+    );
+    let (outbound_tx, outbound_rx) = mpsc::channel::<OutboundControl>(8);
+    dispatch_lc_fresh_recovery_run(run_context, outbound_tx).await;
+    outbound_rx
+}
+
+/// 读 frame 的 (type, code)（typed 拒/等待帧断言用）。
+async fn anchor_t16_next_frame_code(
+    outbound_rx: &mut mpsc::Receiver<OutboundControl>,
+) -> (serde_json::Value, String) {
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(1), outbound_rx.recv())
+        .await
+        .expect("必须收到 typed 帧")
+        .expect("outbound frame");
+    match frame {
+        OutboundControl::Text(text) => {
+            let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+            let code = value["code"].as_str().unwrap_or_default().to_string();
+            (value.clone(), code)
+        }
+        other => panic!("期望 Text 帧，got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn anchor_t16_legacy_draft_batch_revision_fresh_preserves_business_generation() {
+    let fixture = AnchorT16PlanFixture::new();
+    fixture.seed_serial_draft_business();
+    let feedback = "draft 冻结返修反馈（t16，take 前 durable）".to_string();
+    let recovery = fixture.seed_recovery_waiting(
+        "recovery_anchor_t16_draft",
+        LcRecoveryRunContext::LegacyDraft {
+            business: anchor_t16_business(),
+            generation_round_id: "round_0001".to_string(),
+            active_outline_id: "outline_a".to_string(),
+            draft_refs: vec![LcRecoveryDraftRef {
+                draft_id: "draft_outline_a".to_string(),
+                status: WorkItemDraftStatus::Accepted,
+                version: None,
+                hash: None,
+            }],
+            pending_feedback: Some(feedback.clone()),
+            outline_ref: Some("outline_001".to_string()),
+            candidate_ref: None,
+        },
+    );
+    let engine_arc = fixture.engine_after_stale_closure(
+        Some(anchor_t16_outline_artifact()),
+        "checkpoints-t16-draft",
+    );
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let outbound_rx = anchor_t16_claim_and_dispatch(
+        &fixture,
+        &recovery,
+        "op-t16-draft",
+        engine_arc,
+        input_tx,
+    )
+    .await;
+
+    let input = tokio::time::timeout(std::time::Duration::from_secs(3), input_rx.recv())
+        .await
+        .expect("显式 fresh 授权后 Draft 臂必须启动 provider（resume=None 全新会话）")
+        .expect("provider input");
+    assert_eq!(
+        input.resume_provider_session_id, None,
+        "fresh 不回捞旧 native 会话（native-t16-old 在 conversation 引用中在场）"
+    );
+    assert!(
+        input.prompt.contains(&feedback),
+        "prompt 必须携带 durable 冻结 feedback（take 前）"
+    );
+    assert!(
+        input.prompt.contains("T16-A"),
+        "prompt 必须携带当前 outline 全量材料"
+    );
+
+    // 业务代同原：generation/outline/批次零重建（before==after）。
+    let index = fixture
+        .plan_store()
+        .load_active_index("project_0001", "issue_0001", "issue_work_item_plan_0001")
+        .expect("load index")
+        .expect("index present");
+    assert_eq!(index.current_generation_round_id, "round_0001");
+    assert_eq!(index.active_outline_id.as_deref(), Some("outline_a"));
+    assert!(index.batches.is_empty(), "draft fresh 不得新建 batch");
+    assert_eq!(
+        index.draft_statuses.get("draft_outline_a"),
+        Some(&WorkItemDraftStatus::Accepted)
+    );
+
+    let after = fixture.latest_record();
+    let recovery_after = after.lc_resume_recovery.expect("recovery kept");
+    assert_eq!(recovery_after.state, LcResumeRecoveryState::FreshRunning);
+    assert_eq!(recovery_after.fresh_operations.len(), 1);
+    assert_eq!(
+        recovery_after.fresh_operations[0].state,
+        LcFreshOperationState::Running
+    );
+    // dispatch 后无第二 input（无重复 spawn）。
+    assert!(input_rx.try_recv().is_err());
+    drop(outbound_rx);
+}
+
+#[tokio::test]
+async fn anchor_t16_legacy_batch_fresh_keeps_batch_and_budget() {
+    let fixture = AnchorT16PlanFixture::new();
+    fixture.seed_batch_business();
+    let feedback = "batch 冻结返修反馈（t16）".to_string();
+    let recovery = fixture.seed_recovery_waiting(
+        "recovery_anchor_t16_batch",
+        LcRecoveryRunContext::LegacyBatch {
+            business: anchor_t16_business(),
+            generation_round_id: "round_0001".to_string(),
+            active_outline_id: "outline_a".to_string(),
+            draft_refs: Vec::new(),
+            pending_feedback: Some(feedback.clone()),
+            outline_ref: Some("outline_001".to_string()),
+            candidate_ref: None,
+            batch_id: "batch_0001".to_string(),
+            batch_item_draft_refs: vec![
+                LcRecoveryDraftRef {
+                    draft_id: "draft_outline_a".to_string(),
+                    status: WorkItemDraftStatus::Accepted,
+                    version: None,
+                    hash: None,
+                },
+            ],
+        },
+    );
+    let engine_arc = fixture.engine_after_stale_closure(
+        Some(anchor_t16_outline_artifact()),
+        "checkpoints-t16-batch",
+    );
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let outbound_rx = anchor_t16_claim_and_dispatch(
+        &fixture,
+        &recovery,
+        "op-t16-batch",
+        engine_arc,
+        input_tx,
+    )
+    .await;
+
+    let input = tokio::time::timeout(std::time::Duration::from_secs(3), input_rx.recv())
+        .await
+        .expect("显式 fresh 授权后 Batch 臂必须启动 provider")
+        .expect("provider input");
+    assert_eq!(input.resume_provider_session_id, None);
+    assert!(input.prompt.contains(&feedback));
+
+    // 同 batch：不另建 batch、generation 不重建、draft 状态同原。
+    let index = fixture
+        .plan_store()
+        .load_active_index("project_0001", "issue_0001", "issue_work_item_plan_0001")
+        .expect("load index")
+        .expect("index present");
+    assert_eq!(index.current_generation_round_id, "round_0001");
+    assert_eq!(index.batches.len(), 1, "batch fresh 不得另建 batch");
+    assert_eq!(index.batches[0].batch_id, "batch_0001");
+    assert_eq!(index.batches[0].item_draft_ids.len(), 3);
+    assert_eq!(
+        index.draft_statuses.get("draft_outline_b"),
+        Some(&WorkItemDraftStatus::Accepted)
+    );
+
+    let after = fixture.latest_record();
+    assert_eq!(
+        after.lc_resume_recovery.expect("recovery kept").state,
+        LcResumeRecoveryState::FreshRunning
+    );
+    assert!(input_rx.try_recv().is_err());
+    drop(outbound_rx);
+}
+
+#[tokio::test]
+async fn anchor_t16_legacy_plan_revision_fresh_recomputes_matching_payload() {
+    let fixture = AnchorT16PlanFixture::new();
+    fixture.seed_revision_work_items("repository_0001");
+    let feedback = "plan 整体返修反馈（t16）".to_string();
+    let recovery = fixture.seed_recovery_waiting(
+        "recovery_anchor_t16_revision",
+        LcRecoveryRunContext::LegacyPlanRevision {
+            business: anchor_t16_business(),
+            candidate_ref: None,
+            candidate_version: None,
+            candidate_hash: None,
+            retained_items: vec![LcRetainedPlanItemRef {
+                item_id: "wi_t16_keep".to_string(),
+                revision: 0,
+            }],
+            redo_specs: vec![LcRecoveryRedoSpec {
+                old_item_id: "wi_t16_redo".to_string(),
+                feedback: Some(
+                    "返修该组件\n\n整体反馈: ".to_string() + &feedback,
+                ),
+            }],
+            overall_feedback: Some(feedback.clone()),
+        },
+    );
+    let engine_arc = fixture.engine_after_stale_closure(
+        Some(anchor_t16_plan_candidate_artifact()),
+        "checkpoints-t16-revision",
+    );
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let mut outbound_rx = anchor_t16_claim_and_dispatch(
+        &fixture,
+        &recovery,
+        "op-t16-revision",
+        engine_arc,
+        input_tx,
+    )
+    .await;
+
+    let input = tokio::time::timeout(std::time::Duration::from_secs(3), input_rx.recv())
+        .await
+        .expect(
+            "显式 fresh 授权后 PlanRevision 臂必须在 retained/redo 重算与 payload 一致时启动 provider",
+        )
+        .expect("provider input");
+    assert_eq!(input.resume_provider_session_id, None);
+    assert!(input.prompt.contains(&feedback));
+
+    let after = fixture.latest_record();
+    assert_eq!(
+        after.lc_resume_recovery.expect("recovery kept").state,
+        LcResumeRecoveryState::FreshRunning
+    );
+    assert!(input_rx.try_recv().is_err());
+    drop(outbound_rx);
+}
+
+#[tokio::test]
+async fn anchor_t16_fresh_draft_business_mismatch_waits_typed_stale() {
+    let fixture = AnchorT16PlanFixture::new();
+    fixture.seed_serial_draft_business();
+    // payload 携带旧业务代（round_9999）——与 durable index（round_0001）不一致。
+    let recovery = fixture.seed_recovery_waiting(
+        "recovery_anchor_t16_draft_mismatch",
+        LcRecoveryRunContext::LegacyDraft {
+            business: anchor_t16_business(),
+            generation_round_id: "round_9999".to_string(),
+            active_outline_id: "outline_a".to_string(),
+            draft_refs: Vec::new(),
+            pending_feedback: Some("过期反馈".to_string()),
+            outline_ref: None,
+            candidate_ref: None,
+        },
+    );
+    let engine_arc = fixture.engine_after_stale_closure(
+        Some(anchor_t16_outline_artifact()),
+        "checkpoints-t16-draft-mismatch",
+    );
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let mut outbound_rx = anchor_t16_claim_and_dispatch(
+        &fixture,
+        &recovery,
+        "op-t16-draft-mismatch",
+        engine_arc,
+        input_tx,
+    )
+    .await;
+
+    let (_frame, code) = anchor_t16_next_frame_code(&mut outbound_rx).await;
+    assert_eq!(code, "lc_resume_recovery_stale");
+    let after = fixture.latest_record();
+    let recovery = after.lc_resume_recovery.expect("recovery kept");
+    assert_eq!(recovery.state, LcResumeRecoveryState::Waiting);
+    assert_eq!(
+        recovery.fresh_operations[0].state,
+        LcFreshOperationState::Failed
+    );
+    // 零 spawn 判定：窗口内无输入，或通道在无输入情况下关闭（registry 随
+    // run_context 在 dispatch 返回时释放，recv 得 None 同样证明零输入）。
+    match tokio::time::timeout(std::time::Duration::from_millis(300), input_rx.recv()).await {
+        Err(_) | Ok(None) => {}
+        Ok(Some(_)) => panic!("业务代不一致必须零 spawn"),
+    }
+}
+
+#[tokio::test]
+async fn anchor_t16_fresh_plan_revision_payload_mismatch_waits_typed_stale() {
+    let fixture = AnchorT16PlanFixture::new();
+    fixture.seed_revision_work_items("repository_0001");
+    // payload redo feedback 与 candidate 重算（revert_feedback＋整体反馈组合）不一致。
+    let recovery = fixture.seed_recovery_waiting(
+        "recovery_anchor_t16_revision_mismatch",
+        LcRecoveryRunContext::LegacyPlanRevision {
+            business: anchor_t16_business(),
+            candidate_ref: None,
+            candidate_version: None,
+            candidate_hash: None,
+            retained_items: vec![LcRetainedPlanItemRef {
+                item_id: "wi_t16_keep".to_string(),
+                revision: 0,
+            }],
+            redo_specs: vec![LcRecoveryRedoSpec {
+                old_item_id: "wi_t16_redo".to_string(),
+                feedback: Some("过期 redo 反馈".to_string()),
+            }],
+            overall_feedback: Some("plan 整体返修反馈（t16）".to_string()),
+        },
+    );
+    let engine_arc = fixture.engine_after_stale_closure(
+        Some(anchor_t16_plan_candidate_artifact()),
+        "checkpoints-t16-revision-mismatch",
+    );
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let mut outbound_rx = anchor_t16_claim_and_dispatch(
+        &fixture,
+        &recovery,
+        "op-t16-revision-mismatch",
+        engine_arc,
+        input_tx,
+    )
+    .await;
+
+    let (_frame, code) = anchor_t16_next_frame_code(&mut outbound_rx).await;
+    assert_eq!(
+        code, "lc_resume_recovery_stale",
+        "retained/redo 重算与 payload 不一致必须 typed Stale 拒收（不用旧权限强行完成）"
+    );
+    let after = fixture.latest_record();
+    let recovery = after.lc_resume_recovery.expect("recovery kept");
+    assert_eq!(recovery.state, LcResumeRecoveryState::Waiting);
+    assert_eq!(
+        recovery.fresh_operations[0].state,
+        LcFreshOperationState::Failed
+    );
+    // 零 spawn 判定：窗口内无输入，或通道在无输入情况下关闭（registry 随
+    // run_context 在 dispatch 返回时释放，recv 得 None 同样证明零输入）。
+    match tokio::time::timeout(std::time::Duration::from_millis(300), input_rx.recv()).await {
+        Err(_) | Ok(None) => {}
+        Ok(Some(_)) => panic!("payload 对照失败必须零 provider start"),
+    }
+}
+
+#[tokio::test]
+async fn anchor_t16_untaken_tag_still_typed_rejected_no_fallback() {
+    let fixture = AnchorT16PlanFixture::new();
+    // 未接管 tag（sc_author 归 B2c/5.5）：typed 拒，不回落通用 plan_author。
+    let recovery = fixture.seed_recovery_waiting(
+        "recovery_anchor_t16_sc_author",
+        LcRecoveryRunContext::ScAuthor {
+            business: anchor_t16_business(),
+            flow: WorkItemPlanFlowKind::SingleCandidate,
+            single_candidate_phase: SingleCandidatePhase::Generate,
+            provider_start_reservation_key: None,
+            source_revision_ref: None,
+            ir_ref: None,
+            report_ref: None,
+            candidate_source_hash: None,
+            business_material_identity: None,
+        },
+    );
+    let engine_arc =
+        fixture.engine_after_stale_closure(None, "checkpoints-t16-sc-author");
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let mut outbound_rx = anchor_t16_claim_and_dispatch(
+        &fixture,
+        &recovery,
+        "op-t16-sc-author",
+        engine_arc,
+        input_tx,
+    )
+    .await;
+
+    let (_frame, code) = anchor_t16_next_frame_code(&mut outbound_rx).await;
+    assert_eq!(code, "lc_resume_recovery_context_unsupported");
+    let after = fixture.latest_record();
+    let recovery = after.lc_resume_recovery.expect("recovery kept");
+    assert_eq!(recovery.state, LcResumeRecoveryState::Waiting);
+    assert_eq!(
+        recovery.fresh_operations[0].state,
+        LcFreshOperationState::Failed
+    );
+    // 零 spawn 判定：窗口内无输入，或通道在无输入情况下关闭（registry 随
+    // run_context 在 dispatch 返回时释放，recv 得 None 同样证明零输入）。
+    match tokio::time::timeout(std::time::Duration::from_millis(300), input_rx.recv()).await {
+        Err(_) | Ok(None) => {}
+        Ok(Some(_)) => panic!("未接管 tag 必须零 spawn"),
+    }
+}

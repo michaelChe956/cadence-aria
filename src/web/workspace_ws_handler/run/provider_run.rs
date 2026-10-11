@@ -8,6 +8,25 @@ pub(crate) use entry::{
     spawn_provider_run_from_handler,
 };
 
+/// B2b3（Task 5.4，设计 §5.3）：读取本会话当前 LC 显式 fresh 恢复记录——
+/// 仅 `FreshRunning` 时返回 `Some`（臂内据此区分 fresh 消费与正常续跑：
+/// payload 冻结 feedback/节点重建/fresh builder）；正常 run（无恢复/
+/// Waiting/Resolved）返回 `None` 不受影响。读取失败 fail-closed 上浮，
+/// 不把恢复态吞成正常 run。
+pub(super) fn lc_fresh_recovery_record_if_running(
+    app_paths: &crate::product::app_paths::ProductAppPaths,
+    session_id: &str,
+) -> Result<Option<crate::product::models::LcResumeRecoveryRecord>, String> {
+    let record = crate::product::lifecycle_store::LifecycleStore::new(app_paths.clone())
+        .get_workspace_session(session_id)
+        .map_err(|error| format!("load workspace session for fresh recovery failed: {error}"))?;
+    Ok(record
+        .lc_resume_recovery
+        .filter(|recovery| {
+            recovery.state == crate::product::models::LcResumeRecoveryState::FreshRunning
+        }))
+}
+
 pub(super) async fn spawn_provider_run_with_start_mode(
     run_context: ProviderRunContext,
     run_kind: ProviderRunKind,
@@ -274,7 +293,60 @@ pub(super) async fn spawn_provider_run_with_start_mode(
                 }
                 ProviderRunKind::WorkItemPlanDraft { feedback } => {
                     let mut command_rx = command_rx;
-                    let mut feedback = feedback.or_else(|| engine.pending_revision_context.clone());
+                    // B2b3（Task 5.4，设计 §5.3 legacy_draft 行）：显式
+                    // fresh 接管——feedback 消费 durable 冻结 payload（take
+                    // 前；不再借内存 pending），stale 收口后活动 draft
+                    // provider 节点可重建（业务 generation 不重建），构建走
+                    // explicit fresh builder（resume=None，不回捞旧 native）。
+                    let mut draft_fresh_payload: Option<Option<String>> = None;
+                    let draft_fresh_outline = match lc_fresh_recovery_record_if_running(
+                        &run_context_clone.app_paths,
+                        &engine.session().session_id,
+                    ) {
+                        Ok(Some(recovery)) => {
+                            match &recovery.run_context {
+                                crate::product::models::LcRecoveryRunContext::LegacyDraft {
+                                    pending_feedback,
+                                    active_outline_id,
+                                    ..
+                                } => {
+                                    draft_fresh_payload = Some(pending_feedback.clone());
+                                    Some(active_outline_id.clone())
+                                }
+                                _ => None,
+                            }
+                        }
+                        Ok(None) => None,
+                        Err(message) => {
+                            engine.mark_active_run_finished(&run_label);
+                            drop(engine);
+                            let err = WsOutMessage::Error { message };
+                            let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                            return;
+                        }
+                    };
+                    let is_draft_fresh = draft_fresh_payload.is_some();
+                    let mut feedback = match draft_fresh_payload {
+                        Some(payload) => payload,
+                        None => feedback.or_else(|| engine.pending_revision_context.clone()),
+                    };
+                    if let Some(fresh_outline_id) = &draft_fresh_outline
+                        && engine.active_node_type()
+                            != Some(
+                                crate::web::workspace_ws_types::TimelineNodeType::WorkItemDraftRun,
+                            )
+                    {
+                        if let Err(message) = engine
+                            .start_serial_work_item_draft_run_for(fresh_outline_id)
+                            .await
+                        {
+                            engine.mark_active_run_finished(&run_label);
+                            drop(engine);
+                            let err = WsOutMessage::Error { message };
+                            let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                            return;
+                        }
+                    }
                     while engine.active_node_type()
                         == Some(crate::web::workspace_ws_types::TimelineNodeType::WorkItemDraftRun)
                     {
@@ -300,11 +372,20 @@ pub(super) async fn spawn_provider_run_with_start_mode(
                             }
                         };
                         let routing_context = plan_launch.routing_context();
-                        let provider_input = match engine
-                            .build_current_work_item_draft_streaming_input(
+                        // B2b3：fresh 全程走 explicit fresh builder（RetryOnce
+                        // 循环内同纪律——每轮 native 启动都不回捞旧会话）。
+                        let provider_input = if is_draft_fresh {
+                            engine.build_current_work_item_draft_streaming_input_explicit_fresh(
                                 feedback.as_deref(),
                                 &routing_context,
-                            ) {
+                            )
+                        } else {
+                            engine.build_current_work_item_draft_streaming_input(
+                                feedback.as_deref(),
+                                &routing_context,
+                            )
+                        };
+                        let provider_input = match provider_input {
                             Ok(input) => input,
                             Err(message) => {
                                 engine
@@ -436,7 +517,47 @@ pub(super) async fn spawn_provider_run_with_start_mode(
                 }
                 ProviderRunKind::WorkItemPlanBatch => {
                     let mut command_rx = command_rx;
-                    let mut feedback = engine.pending_revision_context.clone();
+                    // B2b3（Task 5.4，设计 §5.3 legacy_batch 行）：显式
+                    // fresh 接管——feedback 消费 durable 冻结 payload（take
+                    // 前；不借内存 pending），stale 收口后活动 batch provider
+                    // 节点可重建（不另建 batch、不重置 repair 预算，同 batch
+                    // 完成器收口），构建走 explicit fresh builder（resume=None）。
+                    let mut batch_fresh_payload: Option<Option<String>> = None;
+                    match lc_fresh_recovery_record_if_running(
+                        &run_context_clone.app_paths,
+                        &engine.session().session_id,
+                    ) {
+                        Ok(Some(recovery)) => {
+                            if let crate::product::models::LcRecoveryRunContext::LegacyBatch {
+                                pending_feedback,
+                                ..
+                            } = &recovery.run_context
+                            {
+                                batch_fresh_payload = Some(pending_feedback.clone());
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(message) => {
+                            engine.mark_active_run_finished(&run_label);
+                            drop(engine);
+                            let err = WsOutMessage::Error { message };
+                            let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                            return;
+                        }
+                    }
+                    let is_batch_fresh = batch_fresh_payload.is_some();
+                    let mut feedback = match batch_fresh_payload {
+                        Some(payload) => payload,
+                        None => engine.pending_revision_context.clone(),
+                    };
+                    if is_batch_fresh
+                        && engine.active_node_type()
+                            != Some(
+                                crate::web::workspace_ws_types::TimelineNodeType::WorkItemBatchRun,
+                            )
+                    {
+                        engine.begin_work_item_batch_fresh_recovery_run().await;
+                    }
                     while engine.active_node_type()
                         == Some(crate::web::workspace_ws_types::TimelineNodeType::WorkItemBatchRun)
                     {
@@ -462,11 +583,21 @@ pub(super) async fn spawn_provider_run_with_start_mode(
                             }
                         };
                         let routing_context = plan_launch.routing_context();
-                        let provider_input = match engine
-                            .build_current_work_item_batch_draft_streaming_input(
+                        // B2b3：fresh 全程走 explicit fresh builder（循环内
+                        // 每轮 native 启动都不回捞旧会话，同完整门）。
+                        let provider_input = if is_batch_fresh {
+                            engine
+                                .build_current_work_item_batch_draft_streaming_input_explicit_fresh(
+                                    feedback.as_deref(),
+                                    &routing_context,
+                                )
+                        } else {
+                            engine.build_current_work_item_batch_draft_streaming_input(
                                 feedback.as_deref(),
                                 &routing_context,
-                            ) {
+                            )
+                        };
+                        let provider_input = match provider_input {
                             Ok(input) => input,
                             Err(message) => {
                                 engine

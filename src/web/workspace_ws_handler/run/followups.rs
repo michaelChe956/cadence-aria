@@ -50,6 +50,56 @@ pub(super) fn work_item_plan_retry_error(
         })
 }
 
+/// B2b3（Task 5.4，设计 §5.3 legacy_plan_revision 行）：fresh 时重算
+/// retained/redo 与 durable payload 的对照规则——保留项按序逐项 item_id
+/// 相等；redo 按 old_item_id 与 feedback 精确相等（feedback 为捕获期同一
+/// 重算的冻结值，不重算不归一）。任一不一致返回 Err（调用方以
+/// `lc_resume_recovery_stale` typed 拒收，不用旧权限强行完成）。
+pub(super) fn legacy_plan_revision_payload_matches_recompute(
+    payload_retained: &[crate::product::models::LcRetainedPlanItemRef],
+    payload_redo: &[crate::product::models::LcRecoveryRedoSpec],
+    retained: &[crate::product::models::LifecycleWorkItemRecord],
+    redo_specs: &[crate::product::work_item_split_engine::RedoSpec],
+) -> Result<(), String> {
+    if payload_retained.len() != retained.len() {
+        return Err(format!(
+            "legacy_plan_revision payload retained count {} != recomputed {}",
+            payload_retained.len(),
+            retained.len()
+        ));
+    }
+    for (payload_item, record) in payload_retained.iter().zip(retained.iter()) {
+        if payload_item.item_id != record.id {
+            return Err(format!(
+                "legacy_plan_revision payload retained item {} != recomputed {}",
+                payload_item.item_id, record.id
+            ));
+        }
+    }
+    if payload_redo.len() != redo_specs.len() {
+        return Err(format!(
+            "legacy_plan_revision payload redo count {} != recomputed {}",
+            payload_redo.len(),
+            redo_specs.len()
+        ));
+    }
+    for (payload_spec, spec) in payload_redo.iter().zip(redo_specs.iter()) {
+        if payload_spec.old_item_id != spec.old_id {
+            return Err(format!(
+                "legacy_plan_revision payload redo old_id {} != recomputed {}",
+                payload_spec.old_item_id, spec.old_id
+            ));
+        }
+        if payload_spec.feedback.as_deref() != Some(spec.feedback.as_str()) {
+            return Err(format!(
+                "legacy_plan_revision payload redo feedback for {} drifted from recomputed value",
+                payload_spec.old_item_id
+            ));
+        }
+    }
+    Ok(())
+}
+
 macro_rules! workspace_ws_work_item_plan_revision_arm {
     (
         $engine:ident,
@@ -69,6 +119,43 @@ macro_rules! workspace_ws_work_item_plan_revision_arm {
                 let session_record_for_run = $run_context_clone.session_record.clone();
                 let mut $command_rx = $command_rx;
 
+                // B2b3（Task 5.4，设计 §5.3 legacy_plan_revision 行）：显式
+                // fresh 接管——重算 retained/redo 必须与 durable payload
+                // 一致（不一致 typed Stale 拒收回等待，不用旧权限强行完
+                // 成、不转 OutlineRebuild）；feedback 消费 payload 冻结值，
+                // stale 收口后无活动节点时重建 Revision 运行节点，provider
+                // 全新启动（fresh builder，resume=None）。
+                let plan_revision_fresh_payload = match lc_fresh_recovery_record_if_running(
+                    &$run_context_clone.app_paths,
+                    &$engine.session().session_id,
+                ) {
+                    Ok(Some(recovery)) => match &recovery.run_context {
+                        crate::product::models::LcRecoveryRunContext::LegacyPlanRevision {
+                            retained_items,
+                            redo_specs,
+                            overall_feedback,
+                            ..
+                        } => Some((
+                            retained_items.clone(),
+                            redo_specs.clone(),
+                            overall_feedback.clone(),
+                        )),
+                        _ => None,
+                    },
+                    Ok(None) => None,
+                    Err(message) => {
+                        $engine.mark_active_run_finished(&$run_label);
+                        drop($engine);
+                        let err = WsOutMessage::Error { message };
+                        let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
+                        return;
+                    }
+                };
+                let $feedback = match &plan_revision_fresh_payload {
+                    Some((_, _, overall)) => overall.clone(),
+                    None => $feedback,
+                };
+
                 let (retained, redo_specs, request) = match build_work_item_plan_revision_input(
                     &$engine,
                     &lifecycle_for_run,
@@ -85,6 +172,47 @@ macro_rules! workspace_ws_work_item_plan_revision_arm {
                         return;
                     }
                 };
+
+                // B2b3：fresh 时对照 payload——重算结果与捕获事实不一致即
+                // typed Stale 拒收（op Failed + recovery 回 Waiting + typed
+                // 帧上浮；零 provider start）。
+                if let Some((payload_retained, payload_redo, _)) = &plan_revision_fresh_payload
+                    && let Err(reason) = super::followups::legacy_plan_revision_payload_matches_recompute(
+                        payload_retained,
+                        payload_redo,
+                        &retained,
+                        &redo_specs,
+                    )
+                {
+                    if let Ok(latest_record) = lifecycle_for_run
+                        .get_workspace_session(&$engine.session().session_id)
+                        && let Some(recovery) = latest_record
+                            .lc_resume_recovery
+                            .clone()
+                            .filter(|recovery| {
+                                recovery.state
+                                    == crate::product::models::LcResumeRecoveryState::FreshRunning
+                            })
+                        && let Some(operation_id) = recovery.operation_id.clone()
+                    {
+                        super::gateway_start::lc_fail_fresh_operation_to_waiting(
+                            &lifecycle_for_run,
+                            &$engine.session().session_id,
+                            &$outbound_tx_for_task,
+                            &latest_record,
+                            &recovery,
+                            &operation_id,
+                            &super::gateway_start::LcFreshDispatchRejection {
+                                code: crate::product::lifecycle_store::LcFreshClaimOutcome::STALE_SUPERSEDED,
+                                message: reason,
+                            },
+                        )
+                        .await;
+                    }
+                    $engine.mark_active_run_finished(&$run_label);
+                    drop($engine);
+                    return;
+                }
 
                 let repository = match workspace_repository_for_session(
                     &app_paths_for_run,
@@ -154,6 +282,40 @@ macro_rules! workspace_ws_work_item_plan_revision_arm {
                         return;
                     }
                 };
+                // B2b3：fresh 且 stale 收口后无活动节点——重建 Revision 运行
+                // 节点（与 `request_work_item_plan_revision` 的节点形态同构，
+                // 不要求 AuthorConfirm 前置阶段）。
+                if plan_revision_fresh_payload.is_some()
+                    && $engine.active_timeline_node_id().is_none()
+                {
+                    $engine
+                        .transition_stage(WorkspaceStage::Revision)
+                        .await;
+                    let revision_round = ($engine
+                        .timeline_nodes
+                        .iter()
+                        .filter(|node| {
+                            node.node_type
+                                == crate::web::workspace_ws_types::TimelineNodeType::ReviewerRun
+                        })
+                        .count() as u32)
+                        .max(1);
+                    let fresh_revision_agent = $engine.session().author_provider.clone();
+                    let _ = $engine
+                        .create_timeline_node(
+                            crate::product::workspace_engine::TimelineNodeDraft {
+                            node_type: crate::web::workspace_ws_types::TimelineNodeType::Revision,
+                            agent: Some(fresh_revision_agent),
+                            stage: WorkspaceStage::Revision,
+                            round: Some(revision_round),
+                            title: format!("返修 Round {revision_round}"),
+                            summary: Some(
+                                "LC 显式 fresh 恢复：按 durable 反馈返修".to_string(),
+                            ),
+                            status: crate::web::workspace_ws_types::TimelineNodeStatus::Active,
+                        })
+                        .await;
+                }
                 let Some(node_id) = $engine.active_timeline_node_id() else {
                     $engine.mark_active_run_finished(&$run_label);
                     drop($engine);
@@ -163,13 +325,26 @@ macro_rules! workspace_ws_work_item_plan_revision_arm {
                     let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
                     return;
                 };
-                let provider_input = match $engine.build_work_item_plan_streaming_input(
-                    invocation.provider_type.clone(),
-                    invocation.prompt.clone(),
-                    invocation.worktree_path.clone(),
-                    invocation.author_provider.clone(),
-                    PlanAuthorOutputContract::Structured,
-                ) {
+                // B2b3：fresh provider 全新启动（fresh builder，resume=None，
+                // 不回捞旧 native 会话）。
+                let provider_input = if plan_revision_fresh_payload.is_some() {
+                    $engine.build_work_item_plan_streaming_input_fresh(
+                        invocation.provider_type.clone(),
+                        invocation.prompt.clone(),
+                        invocation.worktree_path.clone(),
+                        invocation.author_provider.clone(),
+                        PlanAuthorOutputContract::Structured,
+                    )
+                } else {
+                    $engine.build_work_item_plan_streaming_input(
+                        invocation.provider_type.clone(),
+                        invocation.prompt.clone(),
+                        invocation.worktree_path.clone(),
+                        invocation.author_provider.clone(),
+                        PlanAuthorOutputContract::Structured,
+                    )
+                };
+                let provider_input = match provider_input {
                     Ok(provider_input) => provider_input,
                     Err(message) => {
                         $engine.mark_active_run_finished(&$run_label);

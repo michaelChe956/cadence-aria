@@ -813,15 +813,16 @@ pub(crate) fn lc_fresh_run_kind_for_recovery_context(
     }
 }
 
-/// B2a（Task 5.1）fresh dispatch 的 tag 覆盖面——A/B 发布纪律（设计 §4.5/
-/// §10.1）：fresh 启动能力按 B2 子包逐 tag 放开，未接管 tag typed 拒零
-/// spawn。本波（5.1）仅覆盖 `legacy_outline_rebuild`（重建仅显式 fresh
-/// 授权后）：kind 由 dispatch 时新解析的 resolved planning context 组装
-///（§5.3：仅 fresh 授权后用新 snapshot），臂内经
-/// `start_work_item_plan_author` Logical 分支唯一启动口启动（B0 full
-/// prepare 消费；fresh 输入 `resume_provider_session_id=None`，旧 audit
-/// 不回捞）。其余 tag 的 full fresh 臂归 5.2–5.6（map/outline feedback/
-/// draft/batch/plan-revision/SC author/SC manual），接管后翻覆盖面。
+/// B2a（Task 5.1）/B2b3（Task 5.4）fresh dispatch 的 tag 覆盖面——A/B 发布
+/// 纪律（设计 §4.5/§10.1）：fresh 启动能力按 B2 子包逐 tag 放开，未接管
+/// tag typed 拒零 spawn。已覆盖：`legacy_outline_rebuild`（5.1，dispatch 时
+/// 新解析 resolved planning context 组装）；`legacy_draft`/`legacy_batch`/
+/// `legacy_plan_revision`（5.4，kind 可直接组装，Draft/Batch 的业务代事实
+/// spawn 前按 durable active index typed 校验，PlanRevision 的
+/// retained/redo 对照由臂内重算消费 engine artifact）。其余 tag（author 族/
+/// outline author·revision（B2b2）/SC author·manual（B2c/B2d））接管后翻
+/// 覆盖面；臂内均经 `start_work_item_plan_author` 唯一启动口（fresh 输入
+/// `resume_provider_session_id=None`，旧 audit 不回捞）。
 async fn lc_fresh_dispatch_kind(
     recovery: &crate::product::models::LcResumeRecoveryRecord,
     run_context: &ProviderRunContext,
@@ -861,11 +862,103 @@ async fn lc_fresh_dispatch_kind(
                 rebuilt: Box::new(resolved),
             })
         }
+        // B2b3（Task 5.4，设计 §5.3 Draft/Batch/PlanRevision 行）：三 tag 的
+        // full fresh 臂接管。Draft/Batch 业务代（generation/outline/batch）
+        // 在 spawn 前按 durable active index typed 校验——漂移即
+        // `lc_resume_recovery_stale` 拒收回等待，不用旧权限强行完成；
+        // PlanRevision 的 retained/redo 重算对照在臂内（需 engine artifact）。
+        kind @ LcFreshRunKind::Kind(
+            ProviderRunKind::WorkItemPlanDraft { .. }
+            | ProviderRunKind::WorkItemPlanBatch
+            | ProviderRunKind::WorkItemPlanRevision { .. },
+        ) => {
+            verify_lc_fresh_business_generation(&recovery.run_context, run_context)?;
+            match kind {
+                LcFreshRunKind::Kind(kind) => Ok(kind),
+                // 上面 match 收窄到 Kind；NeedsFreshPlanningContext 分支已消费。
+                LcFreshRunKind::NeedsFreshPlanningContext => unreachable!(
+                    "NeedsFreshPlanningContext arm is matched before the Kind arm"
+                ),
+            }
+        }
         LcFreshRunKind::Kind(kind) => Err(lc_context_unsupported(format!(
-            "run_context tag {} (resolved kind {kind:?}) fresh handler lands with the remaining B2 packages (5.2-5.6); explicit fresh stays waiting",
+            "run_context tag {} (resolved kind {kind:?}) fresh handler lands with the remaining B2 packages; explicit fresh stays waiting",
             lc_recovery_context_tag_label(&recovery.run_context)
         ))),
     }
+}
+
+/// B2b3（Task 5.4，设计 §5.3）：Draft/Batch tag 的业务代 typed 校验——
+/// payload 携带的 generation/outline/batch 事实与 durable active index
+/// 不一致时以 `lc_resume_recovery_stale` 拒收（等待新漂移裁决）；index
+/// 读取失败按 store unavailable 家族 typed 上浮。LegacyPlanRevision 不在
+/// 此校验（retained/redo 由臂内重算对照）。
+fn verify_lc_fresh_business_generation(
+    context: &crate::product::models::LcRecoveryRunContext,
+    run_context: &ProviderRunContext,
+) -> Result<(), LcFreshDispatchRejection> {
+    use crate::product::models::LcRecoveryRunContext;
+    use crate::product::work_item_plan_store::WorkItemPlanStore;
+
+    let (generation_round_id, active_outline_id, batch_id) = match context {
+        LcRecoveryRunContext::LegacyDraft {
+            generation_round_id,
+            active_outline_id,
+            ..
+        } => (generation_round_id.as_str(), Some(active_outline_id.as_str()), None),
+        LcRecoveryRunContext::LegacyBatch {
+            generation_round_id,
+            batch_id,
+            ..
+        } => (generation_round_id.as_str(), None, Some(batch_id.as_str())),
+        _ => return Ok(()),
+    };
+    let stale = |message: String| LcFreshDispatchRejection {
+        code: crate::product::lifecycle_store::LcFreshClaimOutcome::STALE_SUPERSEDED,
+        message,
+    };
+    let index = WorkItemPlanStore::new(run_context.app_paths.clone())
+        .load_active_index(
+            &run_context.session_record.project_id,
+            &run_context.session_record.issue_id,
+            &run_context.session_record.entity_id,
+        )
+        .map_err(|error| LcFreshDispatchRejection {
+            code: crate::web::workspace_ws_handler::socket::LC_RESUME_STORE_UNAVAILABLE_CODE,
+            message: format!("load work item plan active index failed: {error}"),
+        })?
+        .ok_or_else(|| {
+            stale(
+                "fresh business generation verify failed: work item plan active index missing"
+                    .to_string(),
+            )
+        })?;
+    if index.current_generation_round_id != generation_round_id {
+        return Err(stale(format!(
+            "fresh business generation verify failed: payload round {generation_round_id} != durable round {}",
+            index.current_generation_round_id
+        )));
+    }
+    if let Some(expected_outline) = active_outline_id
+        && index.active_outline_id.as_deref() != Some(expected_outline)
+    {
+        return Err(stale(format!(
+            "fresh business generation verify failed: payload outline {expected_outline} != durable outline {:?}",
+            index.active_outline_id
+        )));
+    }
+    if let Some(expected_batch) = batch_id
+        && !index.batches.iter().any(|batch| {
+            batch.batch_id == expected_batch
+                && batch.generation_round_id == index.current_generation_round_id
+        })
+    {
+        return Err(stale(format!(
+            "fresh business generation verify failed: payload batch {expected_batch} not found in durable generation {}",
+            index.current_generation_round_id
+        )));
+    }
+    Ok(())
 }
 
 fn lc_touch_operation(
@@ -961,8 +1054,10 @@ async fn lc_bind_fresh_node_after_spawn(
 /// §4.3 prepare 失败行收口：operation failed（稳定 reason code）、
 /// recovery 回 Waiting（同 ID 仍 Replay、下一次显式点击用新 ID）、typed
 /// 拒帧上浮请求连接；零 spawn。
+/// B2b3（Task 5.4）：臂内 fresh 消费面（PlanRevision retained/redo 对照
+/// 失败等 spawn 后拒收）复用同收口——pub(crate) 供 run 家族臂体调用。
 #[allow(clippy::too_many_arguments)]
-async fn lc_fail_fresh_operation_to_waiting(
+pub(crate) async fn lc_fail_fresh_operation_to_waiting(
     store: &crate::product::lifecycle_store::LifecycleStore,
     session_id: &str,
     outbound_tx: &tokio::sync::mpsc::Sender<crate::web::workspace_ws_handler::OutboundControl>,
