@@ -17,6 +17,8 @@ export function mockWorkspaceWs(overrides: Partial<WorkspaceWsApi> = {}) {
     sendLcResumeFresh: vi.fn(() => false),
     retryInterruptedRun: vi.fn(() => true),
     sendRequestRevision: vi.fn(),
+    // 「登记并重试」发送器 mock——保守缺省 false（未发送）。
+    sendRegisterTrustEntry: vi.fn(() => false),
     sendWorkItemPlanCompileRecoveryAction: vi.fn(),
     sendConfirmGate: vi.fn(() => true),
     sendAbandonGate: vi.fn(() => true),

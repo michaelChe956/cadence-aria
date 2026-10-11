@@ -28,6 +28,7 @@ import {
   isStaleDriverLeaseItem,
   type CockpitInboxItem,
 } from "../../../state/workspace-cockpit-projection";
+import type { WorkspaceProviderName } from "../../../api/types";
 import {
   GATE_TERMINATE_BUTTON_LABEL,
   GATE_TERMINATE_CONFIRM_LABEL,
@@ -582,7 +583,12 @@ function HardErrorInboxRow({
               <button
                 type="button"
                 data-testid="cockpit-trust-register-button"
-                onClick={() => actions.registerTrustEntry?.(item.trustMissing?.provider ?? "")}
+                onClick={() => {
+                  const provider = item.trustMissing?.provider;
+                  if (provider !== undefined) {
+                    actions.registerTrustEntry?.(provider as WorkspaceProviderName);
+                  }
+                }}
                 className={BTN_SECONDARY_CLASS}
               >
                 <ShieldCheck className="h-4 w-4" aria-hidden="true" />

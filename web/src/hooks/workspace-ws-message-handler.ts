@@ -19,6 +19,7 @@ import type {
   WsOutMessage,
 } from "../api/types";
 import type { TrustRegistrationReceipt } from "../state/workspace-ws-store-types";
+import type { ChatEntry, ChatEntryRole } from "../state/chat-entries";
 import {
   chatRoleForTimelineNode,
   useWorkspaceStore,

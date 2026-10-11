@@ -59,3 +59,17 @@
 
 Rust：provider_trust.rs、provider_trust_adapters.rs、workspace_engine/types.rs、workspace_engine/lifecycle.rs、workspace_engine/mod.rs、web/state.rs、workspace_ws_types/in_.rs、workspace_ws_types/out.rs、workspace_ws_handler/mod.rs、decisions.rs、decisions/inbound.rs、decisions/register_trust_entry.rs（新）、protocol.rs、tests.rs、tests/register_trust_entry.rs（新）
 TS：api/types/workspace.ts、hooks/useWorkspaceWs.ts、hooks/workspace-ws-message-handler.ts、state/workspace-ws-store-types.ts、state/workspace-ws-store.ts、state/workspace-cockpit-projection.ts、state/cockpit-action-routing.ts、components/chat-workspace/cockpit/CockpitInbox.tsx、CockpitInbox.test.tsx、CockpitInbox.test-utils.ts、state/workspace-cockpit-projection.test.ts、pages/ChatCockpitPage.tsx
+
+## 6. Fix round 收口（2026-10-12，Main 定界后）
+
+e726e80d 的两处「替换而非新增」编辑事故与类型错（VerifyFrontCount/Main 复现定界；05078435 已由 Main 修复 return 对象一处）：
+
+1. `workspace-ws-message-handler.ts`：恢复被覆盖的 `import type { ChatEntry, ChatEntryRole } from "../state/chat-entries";`（与 TrustRegistrationReceipt import 并存，消除 3×TS2304）。
+2. `CockpitInbox.tsx`：登记按钮 onClick 改为 provider 收窄后调用（`provider as WorkspaceProviderName`），消除 `?? ""` 传 string 的 TS2345。
+3. `ChatWorkspacePage.test-utils.tsx`：mockWorkspaceWs 补 `sendRegisterTrustEntry: vi.fn(() => false)`（TS2322）。
+
+验收（worktree/web）：
+- `npx tsc -p .` → 残余恰 2 条既有 TS7053（CockpitInbox.tsx:319/:345，D 侧移交项，非本变更引入）。
+- `npx vitest --run` → **212 files / 2093 tests 全绿**（此前 2 failed 为 sendRequestRevision 缺失族，05078435 修复后随全量转绿）。
+
+教训入账：实施必跑 `tsc` 类型门——vitest 不做类型检查，替换式编辑事故只有类型门能拦。
