@@ -89,6 +89,11 @@ pub trait ProviderTrustHomeAdapter: Send + Sync {
     /// 的稳定 trust 键与人工修复的最小形状；key/转义与 adapter 自身算法
     /// 同源，不手抄第二份。
     fn manual_hint(&self, canonical_root: &Path) -> ProviderTrustArtifactHint;
+    /// 本根登记/撤销会修改的稳定用户级工件路径（3.1 sidecar 锁目标）：
+    /// Codex=整份 config.toml（所有 root 共锁）；Kimi=单条记录文件。
+    /// 只描述位置；锁的获取/释放由 registry 经 `ExclusiveFileLock` 完成，
+    /// adapter 自身不持锁。
+    fn artifact_path(&self, canonical_root: &Path) -> PathBuf;
 }
 
 /// Codex 用户级 projects trust：`~/.codex/config.toml` 中
@@ -277,6 +282,11 @@ impl ProviderTrustHomeAdapter for CodexTrustAdapter {
             trust_key,
         }
     }
+
+    fn artifact_path(&self, _canonical_root: &Path) -> PathBuf {
+        // 整份 config 共锁（3.1）：同一 config 下不同 root 的增改互斥。
+        self.config_path.clone()
+    }
 }
 
 /// Kimi workspace-trust：`~/.kimi-code/workspace-trust/<key>` 记录
@@ -458,6 +468,11 @@ impl ProviderTrustHomeAdapter for KimiTrustAdapter {
             manual_shape: format!("记录 JSON 形如 {shape}"),
             trust_key,
         }
+    }
+
+    fn artifact_path(&self, canonical_root: &Path) -> PathBuf {
+        // 单记录锁（3.1）：不同 root 的记录互不串行。
+        self.record_path(canonical_root)
     }
 }
 

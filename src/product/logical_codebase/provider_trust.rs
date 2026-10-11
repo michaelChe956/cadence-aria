@@ -5,11 +5,26 @@
 //! 全部 Ready 后允许 Claude Code 五步 recipe 创建/启动。登记不属于五步
 //! operation、不插入步骤之间；任一失败进入可重试 fail-closed waiting，
 //! 不降级、不部分放行。
+//!
+//! 3.1/3.2：ensure/revoke 的全部 home 副作用与 durable fact 写入都在稳定
+//! 工件的 sidecar 锁（`ExclusiveFileLock` 先例：同目录 `.{name}.lock`）
+//! 临界区内定序——Codex 整 config 共锁、Kimi 单记录锁，固定
+//! home→LC fact 锁序，digest CAS 与 atomic rename 保留。该锁只约束
+//! Aria 自身的协作写方：外部进程非协作编辑用户工件的竞态不因此消失，
+//! 由 digest CAS/摘要校验 fail-closed 兜底（不宣称对外的强原子）。
+//! 失败的 record_waiting/gate_waiting 与成功 clear_waiting 在同一临界
+//! 区内定序；缺 adapter/未获锁时返回可见 Waiting、历史审计尽力写、
+//! 不无序改写当前 waiting fact。锁失败（含非 Unix 平台）fail-closed。
+//! 可取消入口（`ensure_ready_cancellable`）经 `acquire_async` 待锁
+//! （caller 取消即停止，不留 flock waiter）、临界区同步 IO 经
+//! spawn_blocking、Ready/Waiting 返回前释放 home 锁。
 
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::product::app_paths::ProductAppPaths;
+use crate::product::coding_attempt_store::locking::ExclusiveFileLock;
 use crate::product::json_store::ProductStoreError;
 use crate::product::logical_codebase::provider_gateway::ProviderGatewayError;
 use crate::product::logical_codebase::provider_trust_adapters::{
@@ -411,8 +426,9 @@ pub(crate) fn provider_trust_manual_guidance(
 }
 
 /// trust 硬前置门（场景中立）：全部所选 trust Ready 才放行调用方的后续
-/// 动作（五步 recipe 的创建/启动、会话确认准备等）。
-pub trait ProviderTrustPrecondition: Send + Sync {
+/// 动作（五步 recipe 的创建/启动、会话确认准备等）。`'static`：可取消
+/// 入口返回的 boxed future 持有 `Arc<Self>`。
+pub trait ProviderTrustPrecondition: Send + Sync + 'static {
     /// `providers` 中需要 workspace trust 的项（Codex/KimiCode）逐一登记；
     /// 任一失败返回可重试 Waiting（durable waiting fact + 审计），调用方
     /// 不得创建/启动后续动作。全部 Ready（或无需 trust）才返回 Ready。
@@ -428,6 +444,36 @@ pub trait ProviderTrustPrecondition: Send + Sync {
         providers: &[ProviderName],
         scenario: ProviderTrustScenario,
     ) -> ProviderTrustPreparationResult;
+
+    /// 可取消等待入口（3.2）：待锁获取按既有可取消语义（try-lock+退避，
+    /// caller 取消即停止，不留 flock waiter、释放后业务不复活）；临界区
+    /// 一旦开始（home 锁已获取=提交边界），取消 caller 只丢失结果观察，
+    /// 临界区自身安全收尾。同步 IO 经 spawn_blocking；Ready/Waiting
+    /// 返回前 home 锁已释放。
+    ///
+    /// 默认实现直接执行同步 [`Self::ensure_ready`]（无锁 fake 适用）；
+    /// 生产 `HomeBackedProviderTrustRegistry` 覆写为 `acquire_async`
+    /// 先行、再经 spawn_blocking 进入临界区。
+    fn ensure_ready_cancellable(
+        self: Arc<Self>,
+        project_id: String,
+        operation_id: String,
+        lc_id: String,
+        canonical_root: PathBuf,
+        providers: Vec<ProviderName>,
+        scenario: ProviderTrustScenario,
+    ) -> Pin<Box<dyn Future<Output = ProviderTrustPreparationResult> + Send>> {
+        Box::pin(async move {
+            self.ensure_ready(
+                &project_id,
+                &operation_id,
+                &lc_id,
+                &canonical_root,
+                &providers,
+                scenario,
+            )
+        })
+    }
 }
 
 /// What one ensure pass did to the user-level trust artifact.
@@ -688,34 +734,233 @@ impl HomeBackedProviderTrustRegistry {
             registered_at: now,
         })
     }
-}
 
-impl ProviderTrustRegistry for HomeBackedProviderTrustRegistry {
-    fn ensure_trusted(
+    /// 3.1：在首次 digest/read_state 之前获取稳定工件 sidecar 锁
+    /// （`ExclusiveFileLock` 先例：同目录 `.{name}.lock`，flock 互斥，
+    /// Drop 释放）。锁失败（含非 Unix 平台 fail-closed）映射为可重试
+    /// `trust_home_lock_failed`，绝不无锁进入临界区。
+    fn acquire_home_lock(
+        adapter: &dyn ProviderTrustHomeAdapter,
+        canonical_root: &Path,
+    ) -> Result<ExclusiveFileLock, ProviderTrustError> {
+        let artifact = adapter.artifact_path(canonical_root);
+        ExclusiveFileLock::acquire(&artifact).map_err(|error| {
+            ProviderTrustError::transient(
+                "trust_home_lock_failed",
+                format!(
+                    "acquire home trust sidecar lock at {}: {error}; \
+                     检查该工件父目录的可写性后重试",
+                    artifact.display()
+                ),
+            )
+        })
+    }
+
+    /// 3.2：可取消待锁（既有 `acquire_async` 语义：try-lock+退避，caller
+    /// drop 即停止等待，不留 flock waiter）。
+    async fn acquire_home_lock_async(
+        adapter: &dyn ProviderTrustHomeAdapter,
+        canonical_root: &Path,
+    ) -> Result<ExclusiveFileLock, ProviderTrustError> {
+        let artifact = adapter.artifact_path(canonical_root);
+        ExclusiveFileLock::acquire_async(&artifact).await.map_err(|error| {
+            ProviderTrustError::transient(
+                "trust_home_lock_failed",
+                format!(
+                    "acquire home trust sidecar lock at {}: {error}; \
+                     检查该工件父目录的可写性后重试",
+                    artifact.display()
+                ),
+            )
+        })
+    }
+
+    /// 失败等待投影（场景化 retry_action + 同源人工指导）；
+    /// reason_code/message 原样保留，不折叠。
+    #[allow(clippy::too_many_arguments)]
+    fn waiting_surface(
+        &self,
+        provider: &ProviderName,
+        canonical_root: &Path,
+        trust_key: &str,
+        error: &ProviderTrustError,
+        scenario: ProviderTrustScenario,
+    ) -> ProviderTrustWaiting {
+        let kind = trust_failure_kind(error);
+        let retry_action = scenario.retry_action(kind);
+        let manual_guidance = provider_trust_manual_guidance(
+            &self.adapters,
+            provider,
+            canonical_root,
+            error,
+            scenario,
+        );
+        ProviderTrustWaiting {
+            provider: provider.clone(),
+            canonical_root: canonical_root.to_path_buf(),
+            trust_key: trust_key.to_string(),
+            reason_code: error.code.to_string(),
+            message: error.message.clone(),
+            retry_action,
+            manual_guidance,
+            recorded_at: trust_now(),
+        }
+    }
+
+    /// 3.2：持锁失败的等待落盘——waiting fact 与 gate_waiting 审计都在
+    /// 调用方已持有的 home 临界区内（与成功 clear_waiting 同一定序）。
+    /// 落盘失败不吞 gate 判定：仍返回可见 Waiting（fail-closed），不伪称
+    /// 全审计落盘。
+    #[allow(clippy::too_many_arguments)]
+    fn gate_waiting_locked(
+        &self,
+        store: &ProviderTrustStore,
+        project_id: &str,
+        operation_id: &str,
+        lc_id: &str,
+        provider: &ProviderName,
+        canonical_root: &Path,
+        trust_key: &str,
+        error: ProviderTrustError,
+        scenario: ProviderTrustScenario,
+    ) -> ProviderTrustWaiting {
+        let waiting = self.waiting_surface(provider, canonical_root, trust_key, &error, scenario);
+        // durable waiting fact + 审计：失败也必须可关联、可重试。
+        let _ = store.record_waiting(
+            project_id,
+            ProviderTrustWaitingRecord {
+                lc_id: lc_id.to_string(),
+                provider: provider_wire_label(provider).to_string(),
+                canonical_root: canonical_root.to_path_buf(),
+                trust_key: trust_key.to_string(),
+                operation_id: non_empty(operation_id),
+                reason_code: error.code.to_string(),
+                message: error.message.clone(),
+                retry_action: waiting.retry_action.clone(),
+                recorded_at: waiting.recorded_at.clone(),
+            },
+        );
+        let _ = self.audit(
+            store,
+            project_id,
+            operation_id,
+            lc_id,
+            provider,
+            canonical_root,
+            trust_key,
+            "gate_waiting",
+            error.code,
+            None,
+            None,
+        );
+        waiting
+    }
+
+    /// 3.2：缺 adapter/未获锁（无法以 home 锁定序）时的等待投影：可见
+    /// Waiting + 历史审计尽力写，但不无序改写当前 waiting fact。
+    #[allow(clippy::too_many_arguments)]
+    fn gate_waiting_unordered(
         &self,
         project_id: &str,
         operation_id: &str,
         lc_id: &str,
         provider: &ProviderName,
         canonical_root: &Path,
-    ) -> Result<ProviderTrustRegistration, ProviderTrustError> {
-        let adapter = self.adapter_for(provider)?;
-        Self::validate_root(canonical_root)?;
+        trust_key: &str,
+        error: ProviderTrustError,
+        scenario: ProviderTrustScenario,
+    ) -> ProviderTrustWaiting {
+        let waiting = self.waiting_surface(provider, canonical_root, trust_key, &error, scenario);
         let store = self.store_for(lc_id);
-        let provider_label = provider_wire_label(provider);
-        let trust_key = adapter.trust_key(canonical_root);
+        let _ = self.audit(
+            &store,
+            project_id,
+            operation_id,
+            lc_id,
+            provider,
+            canonical_root,
+            trust_key,
+            "gate_waiting",
+            error.code,
+            None,
+            None,
+        );
+        waiting
+    }
 
+    /// [`Self::gate_waiting_unordered`] 的异步面：可见等待面在内存构建，
+    /// 历史审计（同步 IO）经 spawn_blocking 尽力写；JoinError 时仅返回
+    /// 等待面（不二次阻塞）。
+    #[allow(clippy::too_many_arguments)]
+    async fn gate_waiting_unordered_spawned(
+        self: &Arc<Self>,
+        project_id: &str,
+        operation_id: &str,
+        lc_id: &str,
+        provider: &ProviderName,
+        canonical_root: &Path,
+        trust_key: &str,
+        error: ProviderTrustError,
+        scenario: ProviderTrustScenario,
+    ) -> ProviderTrustWaiting {
+        let waiting = self.waiting_surface(provider, canonical_root, trust_key, &error, scenario);
+        let registry = Arc::clone(self);
+        let section_project = project_id.to_string();
+        let section_operation = operation_id.to_string();
+        let section_lc = lc_id.to_string();
+        let section_provider = provider.clone();
+        let section_root = canonical_root.to_path_buf();
+        let section_key = trust_key.to_string();
+        let section_outcome = error.code;
+        let _ = tokio::task::spawn_blocking(move || {
+            let store = registry.store_for(&section_lc);
+            let _ = registry.audit(
+                &store,
+                &section_project,
+                &section_operation,
+                &section_lc,
+                &section_provider,
+                &section_root,
+                &section_key,
+                "gate_waiting",
+                section_outcome,
+                None,
+                None,
+            );
+        })
+        .await;
+        waiting
+    }
+
+    /// 单 provider ensure 临界区核心（调用方必须已持 home sidecar 锁；
+    /// `_home_lock` 即持锁证明）。成功的 clear_waiting 与审计、失败的
+    /// record_waiting/gate_waiting 都在同一临界区内定序（3.1/3.2）；
+    /// digest CAS 与 atomic rename 语义保持不变。
+    #[allow(clippy::too_many_arguments)]
+    fn ensure_trusted_locked(
+        &self,
+        _home_lock: &ExclusiveFileLock,
+        store: &ProviderTrustStore,
+        project_id: &str,
+        operation_id: &str,
+        lc_id: &str,
+        provider: &ProviderName,
+        canonical_root: &Path,
+        adapter: &dyn ProviderTrustHomeAdapter,
+        trust_key: &str,
+    ) -> Result<ProviderTrustRegistration, ProviderTrustError> {
+        let provider_label = provider_wire_label(provider);
         let before_digest = adapter.digest(canonical_root)?;
         let state = adapter.read_state(canonical_root)?;
         let (registration, audit_outcome) = match state {
             ProviderTrustEntryState::Trusted => {
                 let registration = self.reuse_trusted_entry(
-                    &store,
+                    store,
                     project_id,
                     lc_id,
                     provider,
                     canonical_root,
-                    &trust_key,
+                    trust_key,
                     before_digest.clone(),
                 )?;
                 let outcome = if registration.action == ProviderTrustAction::Replay {
@@ -728,16 +973,15 @@ impl ProviderTrustRegistry for HomeBackedProviderTrustRegistry {
             ProviderTrustEntryState::Missing => {
                 match adapter.write_trusted(canonical_root, before_digest.as_deref())? {
                     ProviderTrustWriteOutcome::AlreadyTrusted => {
-                        // Another writer registered the root between the
-                        // state read and the write: re-digest and treat as
-                        // trusted reuse.
+                        // 另一写方在状态读取与写入之间登记了该根：重新
+                        // 摘要并按可信复用处理。
                         let registration = self.reuse_trusted_entry(
-                            &store,
+                            store,
                             project_id,
                             lc_id,
                             provider,
                             canonical_root,
-                            &trust_key,
+                            trust_key,
                             adapter.digest(canonical_root)?,
                         )?;
                         (registration, "replay")
@@ -754,7 +998,7 @@ impl ProviderTrustRegistry for HomeBackedProviderTrustRegistry {
                                     lc_id: lc_id.to_string(),
                                     provider: provider_label.to_string(),
                                     canonical_root: canonical_root.to_path_buf(),
-                                    trust_key: trust_key.clone(),
+                                    trust_key: trust_key.to_string(),
                                     owned: true,
                                     before_digest: before_digest.clone(),
                                     after_digest: Some(after_digest.clone()),
@@ -767,7 +1011,7 @@ impl ProviderTrustRegistry for HomeBackedProviderTrustRegistry {
                             ProviderTrustRegistration {
                                 provider: provider.clone(),
                                 canonical_root: canonical_root.to_path_buf(),
-                                trust_key: trust_key.clone(),
+                                trust_key: trust_key.to_string(),
                                 action: ProviderTrustAction::Register,
                                 before_digest: before_digest.clone(),
                                 after_digest: Some(after_digest),
@@ -782,13 +1026,13 @@ impl ProviderTrustRegistry for HomeBackedProviderTrustRegistry {
             }
             ProviderTrustEntryState::Untrusted { current_value } => {
                 self.audit(
-                    &store,
+                    store,
                     project_id,
                     operation_id,
                     lc_id,
                     provider,
                     canonical_root,
-                    &trust_key,
+                    trust_key,
                     "ensure",
                     "conflict",
                     before_digest.clone(),
@@ -808,22 +1052,99 @@ impl ProviderTrustRegistry for HomeBackedProviderTrustRegistry {
         };
 
         store
-            .clear_waiting(project_id, provider_label, &trust_key)
+            .clear_waiting(project_id, provider_label, trust_key)
             .map_err(ProviderTrustError::store)?;
         self.audit(
-            &store,
+            store,
             project_id,
             operation_id,
             lc_id,
             provider,
             canonical_root,
-            &trust_key,
+            trust_key,
             "ensure",
             audit_outcome,
             registration.before_digest.clone(),
             registration.after_digest.clone(),
         )?;
         Ok(registration)
+    }
+
+    /// 单 provider 完整临界区（已持锁进入）：ensure 尝试；失败时
+    /// record_waiting/gate_waiting 在同一临界区落盘后以 Err(waiting)
+    /// 返回。同步 `ensure_ready` 与可取消入口共用此核心，不二次获取
+    /// 非重入锁（3.2）；锁在返回前释放（值语义 Drop）。
+    #[allow(clippy::too_many_arguments, clippy::result_large_err)]
+    fn ensure_provider_critical_section(
+        &self,
+        home_lock: ExclusiveFileLock,
+        project_id: &str,
+        operation_id: &str,
+        lc_id: &str,
+        provider: &ProviderName,
+        canonical_root: &Path,
+        adapter: Arc<dyn ProviderTrustHomeAdapter>,
+        scenario: ProviderTrustScenario,
+    ) -> Result<ProviderTrustRegistration, ProviderTrustWaiting> {
+        let store = self.store_for(lc_id);
+        let trust_key = adapter.trust_key(canonical_root);
+        let outcome = self.ensure_trusted_locked(
+            &home_lock,
+            &store,
+            project_id,
+            operation_id,
+            lc_id,
+            provider,
+            canonical_root,
+            adapter.as_ref(),
+            &trust_key,
+        );
+        match outcome {
+            Ok(registration) => Ok(registration),
+            Err(error) => Err(self.gate_waiting_locked(
+                &store,
+                project_id,
+                operation_id,
+                lc_id,
+                provider,
+                canonical_root,
+                &trust_key,
+                error,
+                scenario,
+            )),
+        }
+    }
+}
+
+impl ProviderTrustRegistry for HomeBackedProviderTrustRegistry {
+    fn ensure_trusted(
+        &self,
+        project_id: &str,
+        operation_id: &str,
+        lc_id: &str,
+        provider: &ProviderName,
+        canonical_root: &Path,
+    ) -> Result<ProviderTrustRegistration, ProviderTrustError> {
+        let adapter = self.adapter_for(provider)?;
+        Self::validate_root(canonical_root)?;
+        // 3.1：首次 digest/read_state 之前拿稳定工件 sidecar 锁；锁失败
+        // fail-closed，绝不无锁进入临界区。
+        let home_lock = Self::acquire_home_lock(adapter.as_ref(), canonical_root)?;
+        let store = self.store_for(lc_id);
+        let trust_key = adapter.trust_key(canonical_root);
+        let registration = self.ensure_trusted_locked(
+            &home_lock,
+            &store,
+            project_id,
+            operation_id,
+            lc_id,
+            provider,
+            canonical_root,
+            adapter.as_ref(),
+            &trust_key,
+        );
+        drop(home_lock);
+        registration
     }
 
     fn verify_trusted(
@@ -894,6 +1215,10 @@ impl ProviderTrustRegistry for HomeBackedProviderTrustRegistry {
         let store = self.store_for(lc_id);
         let provider_label = provider_wire_label(provider);
         let trust_key = adapter.trust_key(canonical_root);
+        // 3.1：revoke 全程在稳定工件 sidecar 锁内（digest/ownership 读改/
+        // remove_trusted/审计）；锁失败 fail-closed。`_home_lock` 绑定
+        // 存活到函数末尾，所有 return 路径都在锁释放之后。
+        let _home_lock = Self::acquire_home_lock(adapter.as_ref(), canonical_root)?;
         let before_digest = adapter.digest(canonical_root)?;
 
         let ownership = store
@@ -1007,76 +1332,213 @@ impl ProviderTrustPrecondition for HomeBackedProviderTrustRegistry {
                 selected.push(provider.clone());
             }
         }
+        // 无 trust provider 不取锁、不触碰 home（3.1）。
         let mut registrations = Vec::new();
         for provider in selected {
-            match self.ensure_trusted(project_id, operation_id, lc_id, &provider, canonical_root) {
-                Ok(registration) => registrations.push(registration),
+            // 登记前无副作用合法性预检：无效输入不取锁、不触碰 home。
+            // 缺 adapter/根无效无法进入可定序的临界区：可见 Waiting +
+            // 历史审计尽力写，但不无序改写当前 waiting fact（3.2）。
+            let adapter = match self.adapter_for(&provider) {
+                Ok(adapter) => adapter,
                 Err(error) => {
-                    let provider_label = provider_wire_label(&provider);
-                    let trust_key = self
-                        .adapter_for(&provider)
-                        .map(|adapter| adapter.trust_key(canonical_root))
-                        .unwrap_or_default();
-                    // 场景化 retry_action + 同源人工指导：同一失败在
-                    // recipe/confirmation 场景给出各自的显式动作；durable
-                    // waiting fact 与返回面同源（reason_code/message 原样
-                    // 保留，不折叠）。
-                    let kind = trust_failure_kind(&error);
-                    let retry_action = scenario.retry_action(kind);
-                    let manual_guidance = provider_trust_manual_guidance(
-                        &self.adapters,
-                        &provider,
-                        canonical_root,
-                        &error,
-                        scenario,
-                    );
-                    let recorded_at = trust_now();
-                    // durable waiting fact + 审计：失败也必须可关联、可重试。
-                    // 落盘失败不吞掉 gate 判定——仍返回 Waiting（fail-closed）。
-                    let store = self.store_for(lc_id);
-                    let _ = store.record_waiting(
-                        project_id,
-                        ProviderTrustWaitingRecord {
-                            lc_id: lc_id.to_string(),
-                            provider: provider_label.to_string(),
-                            canonical_root: canonical_root.to_path_buf(),
-                            trust_key: trust_key.clone(),
-                            operation_id: non_empty(operation_id),
-                            reason_code: error.code.to_string(),
-                            message: error.message.clone(),
-                            retry_action: retry_action.clone(),
-                            recorded_at: recorded_at.clone(),
-                        },
-                    );
-                    let _ = self.audit(
-                        &store,
+                    return ProviderTrustPreparationResult::Waiting {
+                        waiting: self.gate_waiting_unordered(
+                            project_id,
+                            operation_id,
+                            lc_id,
+                            &provider,
+                            canonical_root,
+                            "",
+                            error,
+                            scenario,
+                        ),
+                    };
+                }
+            };
+            if let Err(error) = Self::validate_root(canonical_root) {
+                return ProviderTrustPreparationResult::Waiting {
+                    waiting: self.gate_waiting_unordered(
                         project_id,
                         operation_id,
                         lc_id,
                         &provider,
                         canonical_root,
-                        &trust_key,
-                        "gate_waiting",
-                        error.code,
-                        None,
-                        None,
-                    );
+                        &adapter.trust_key(canonical_root),
+                        error,
+                        scenario,
+                    ),
+                };
+            }
+            // 锁失败 fail-closed：同样不无序改写当前 waiting fact。
+            let home_lock = match Self::acquire_home_lock(adapter.as_ref(), canonical_root) {
+                Ok(lock) => lock,
+                Err(error) => {
                     return ProviderTrustPreparationResult::Waiting {
-                        waiting: ProviderTrustWaiting {
-                            provider,
-                            canonical_root: canonical_root.to_path_buf(),
-                            trust_key,
-                            reason_code: error.code.to_string(),
-                            message: error.message,
-                            retry_action,
-                            manual_guidance,
-                            recorded_at,
-                        },
+                        waiting: self.gate_waiting_unordered(
+                            project_id,
+                            operation_id,
+                            lc_id,
+                            &provider,
+                            canonical_root,
+                            &adapter.trust_key(canonical_root),
+                            error,
+                            scenario,
+                        ),
                     };
+                }
+            };
+            // 失败 record_waiting/gate_waiting 与成功 clear_waiting 在
+            // 同一已持 home 临界区内定序（3.2）；共用持锁核心
+            // ensure_provider_critical_section，不二次获取非重入锁；
+            // Ready/Waiting 返回前锁已释放。
+            match self.ensure_provider_critical_section(
+                home_lock,
+                project_id,
+                operation_id,
+                lc_id,
+                &provider,
+                canonical_root,
+                adapter,
+                scenario,
+            ) {
+                Ok(registration) => registrations.push(registration),
+                Err(waiting) => {
+                    return ProviderTrustPreparationResult::Waiting { waiting };
                 }
             }
         }
         ProviderTrustPreparationResult::Ready { registrations }
+    }
+
+    /// 3.2 覆写：待锁经 `acquire_async`（可取消：caller drop 即停止，
+    /// 不留 flock waiter、释放后业务不复活）；临界区同步 IO 经
+    /// spawn_blocking。临界区一旦开始（锁已获取=提交边界），取消 caller
+    /// 只丢失结果观察，临界区 detached 安全收尾、不误删他人事实。
+    fn ensure_ready_cancellable(
+        self: Arc<Self>,
+        project_id: String,
+        operation_id: String,
+        lc_id: String,
+        canonical_root: PathBuf,
+        providers: Vec<ProviderName>,
+        scenario: ProviderTrustScenario,
+    ) -> Pin<Box<dyn Future<Output = ProviderTrustPreparationResult> + Send>> {
+        Box::pin(async move {
+            let mut selected: Vec<ProviderName> = Vec::new();
+            for provider in &providers {
+                if requires_workspace_trust(provider) && !selected.contains(provider) {
+                    selected.push(provider.clone());
+                }
+            }
+            // 无 trust provider 不取锁、不触碰 home。
+            let mut registrations = Vec::new();
+            for provider in selected {
+                let adapter = match self.adapter_for(&provider) {
+                    Ok(adapter) => adapter,
+                    Err(error) => {
+                        return ProviderTrustPreparationResult::Waiting {
+                            waiting: self
+                                .gate_waiting_unordered_spawned(
+                                    &project_id,
+                                    &operation_id,
+                                    &lc_id,
+                                    &provider,
+                                    &canonical_root,
+                                    "",
+                                    error,
+                                    scenario,
+                                )
+                                .await,
+                        };
+                    }
+                };
+                if let Err(error) = Self::validate_root(&canonical_root) {
+                    return ProviderTrustPreparationResult::Waiting {
+                        waiting: self
+                            .gate_waiting_unordered_spawned(
+                                &project_id,
+                                &operation_id,
+                                &lc_id,
+                                &provider,
+                                &canonical_root,
+                                &adapter.trust_key(&canonical_root),
+                                error,
+                                scenario,
+                            )
+                            .await,
+                    };
+                }
+                let home_lock =
+                    match Self::acquire_home_lock_async(adapter.as_ref(), &canonical_root).await {
+                        Ok(lock) => lock,
+                        Err(error) => {
+                            return ProviderTrustPreparationResult::Waiting {
+                                waiting: self
+                                    .gate_waiting_unordered_spawned(
+                                        &project_id,
+                                        &operation_id,
+                                        &lc_id,
+                                        &provider,
+                                        &canonical_root,
+                                        &adapter.trust_key(&canonical_root),
+                                        error,
+                                        scenario,
+                                    )
+                                    .await,
+                            };
+                        }
+                    };
+                // 临界区同步 IO 经 spawn_blocking；caller 取消观察后本段
+                // detached 安全收尾（提交边界）。
+                let section_registry = Arc::clone(&self);
+                let adapter_trust_key = adapter.trust_key(&canonical_root);
+                let section_project = project_id.clone();
+                let section_operation = operation_id.clone();
+                let section_lc = lc_id.clone();
+                let section_root = canonical_root.clone();
+                let section_provider = provider.clone();
+                #[allow(clippy::result_large_err)]
+                let section = tokio::task::spawn_blocking(move || {
+                    section_registry.ensure_provider_critical_section(
+                        home_lock,
+                        &section_project,
+                        &section_operation,
+                        &section_lc,
+                        &section_provider,
+                        &section_root,
+                        adapter,
+                        scenario,
+                    )
+                });
+                match section.await {
+                    Ok(Ok(registration)) => registrations.push(registration),
+                    Ok(Err(waiting)) => {
+                        return ProviderTrustPreparationResult::Waiting { waiting };
+                    }
+                    Err(join_error) => {
+                        let error = ProviderTrustError::transient(
+                            "trust_section_failed",
+                            format!("home trust critical section aborted: {join_error}"),
+                        );
+                        return ProviderTrustPreparationResult::Waiting {
+                            waiting: self
+                                .gate_waiting_unordered_spawned(
+                                    &project_id,
+                                    &operation_id,
+                                    &lc_id,
+                                    &provider,
+                                    &canonical_root,
+                                    &adapter_trust_key,
+                                    error,
+                                    scenario,
+                                )
+                                .await,
+                        };
+                    }
+                }
+            }
+            ProviderTrustPreparationResult::Ready { registrations }
+        })
     }
 }
 
@@ -1087,18 +1549,29 @@ fn non_empty(value: &str) -> Option<String> {
 mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
 
     use crate::product::app_paths::ProductAppPaths;
-    use crate::product::logical_codebase::provider_trust_adapters::{
-        CodexTrustAdapter, KimiTrustAdapter, ProviderTrustHomeAdapter,
+    use crate::product::coding_attempt_store::locking::{
+        ExclusiveFileLock, LockAttemptHookGuard, register_lock_attempt_hook,
+        with_exact_exclusive_lock,
     };
-    use crate::product::logical_codebase::provider_trust_store::ProviderTrustStore;
+    use crate::product::json_store::ProductStoreError;
+    use crate::product::logical_codebase::provider_trust_adapters::{
+        CodexTrustAdapter, KimiTrustAdapter, ProviderTrustArtifactHint,
+        ProviderTrustEntryState, ProviderTrustHomeAdapter, ProviderTrustWriteOutcome,
+    };
+    use crate::product::logical_codebase::provider_trust_store::{
+        ProviderTrustOwnershipRecord, ProviderTrustStore, ProviderTrustWaitingRecord, trust_now,
+    };
     use crate::product::models::ProviderName;
 
     use super::{
-        HomeBackedProviderTrustRegistry, ProviderTrustAction, ProviderTrustPrecondition,
-        ProviderTrustPreparationResult, ProviderTrustRegistry, ProviderTrustRevocationOutcome,
-        ProviderTrustScenario,
+        HomeBackedProviderTrustRegistry, ProviderTrustAction, ProviderTrustError,
+        ProviderTrustOwnership, ProviderTrustPrecondition, ProviderTrustPreparationResult,
+        ProviderTrustRegistry, ProviderTrustRevocationOutcome, ProviderTrustScenario,
     };
 
     const PROJECT: &str = "project_0001";
@@ -1234,10 +1707,10 @@ mod tests {
     #[test]
     fn provider_trust_failure_enters_retryable_waiting_without_fallback() {
         let fixture = TrustFixture::new();
-        // 写入失败注入：workspace-trust 路径被普通文件占用（与权限无关、
-        // 任何环境都稳定失败）。
-        std::fs::create_dir_all(fixture.kimi_trust_dir().parent().unwrap()).unwrap();
-        std::fs::write(fixture.kimi_trust_dir(), b"not-a-directory").unwrap();
+        // 写入失败注入：该根的 workspace-trust 记录路径被目录占用（父目录
+        // 完好、sidecar 锁文件可创建；与权限无关、任何环境都稳定失败）。
+        std::fs::create_dir_all(fixture.kimi_trust_dir()).unwrap();
+        std::fs::create_dir(fixture.kimi_trust_dir().join(fixture.kimi_key())).unwrap();
 
         let providers = [ProviderName::Codex, ProviderName::KimiCode];
         let outcome = fixture.registry.ensure_ready(
@@ -1274,7 +1747,7 @@ mod tests {
         );
 
         // 可重试：移除阻断后重试转 Ready，并清空 waiting fact。
-        std::fs::remove_file(fixture.kimi_trust_dir()).unwrap();
+        std::fs::remove_dir(fixture.kimi_trust_dir().join(fixture.kimi_key())).unwrap();
         let retried = fixture.registry.ensure_ready(
             PROJECT,
             OPERATION,
@@ -1452,8 +1925,8 @@ mod tests {
     #[test]
     fn provider_trust_confirmation_scenario_directs_explicit_reconfirmation() {
         let fixture = TrustFixture::new();
-        std::fs::create_dir_all(fixture.kimi_trust_dir().parent().unwrap()).unwrap();
-        std::fs::write(fixture.kimi_trust_dir(), b"not-a-directory").unwrap();
+        std::fs::create_dir_all(fixture.kimi_trust_dir()).unwrap();
+        std::fs::create_dir(fixture.kimi_trust_dir().join(fixture.kimi_key())).unwrap();
         let providers = [ProviderName::KimiCode];
         let waiting_for = |scenario| {
             match fixture.registry.ensure_ready(
@@ -1501,8 +1974,12 @@ mod tests {
             panic!("claude-only recipe must stay ready without trust registration");
         };
         assert!(registrations.is_empty());
+        // Task 3.1：无 trust provider 不取锁——home 下不出现任何
+        // sidecar 锁文件（连同其父目录都不创建）。
         assert!(!fixture.codex_config().exists());
         assert!(!fixture.kimi_trust_dir().exists());
+        assert!(!fixture.home().join(".codex").exists());
+        assert!(!fixture.home().join(".kimi-code").exists());
         assert!(fixture.store().list_waiting(PROJECT).unwrap().is_empty());
         assert!(fixture.store().list_audit(PROJECT).unwrap().is_empty());
     }
@@ -1627,7 +2104,8 @@ mod tests {
     /// 工件修复，后者指明修服务端 trust fact store，互不误导。
     #[test]
     fn provider_trust_waiting_separates_home_write_from_fact_store_failures() {
-        // home 写失败：workspace-trust 目录只读（非 root 下 chmod 必生效）。
+        // home 侧失败：workspace-trust 目录只读（非 root 下 chmod 必生效）
+        // → sidecar 锁文件不可创建，锁失败 fail-closed。
         let fixture = TrustFixture::new();
         let kimi_dir = fixture.kimi_trust_dir();
         std::fs::create_dir_all(&kimi_dir).unwrap();
@@ -1646,7 +2124,9 @@ mod tests {
         std::fs::set_permissions(&kimi_dir, original).unwrap();
         match home_outcome {
             ProviderTrustPreparationResult::Waiting { waiting } => {
-                assert!(waiting.reason_code.starts_with("kimi_"));
+                // Task 3.1：锁文件不可创建时以 trust_home_lock_failed
+                // fail-closed，仍分型为用户级工件问题。
+                assert_eq!(waiting.reason_code, "trust_home_lock_failed");
                 assert!(
                     waiting.retry_action.contains("用户级 trust 配置"),
                     "home failure retry action must target the user-level artifact: {}",
@@ -1787,6 +2267,962 @@ mod tests {
             "read/format guidance must advise backing up first: {}",
             waiting.manual_guidance
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Task 3.1/3.2：sidecar 锁并发矩阵与取消安全（受控窗口：lock-attempt
+    // hook 先例 + 测试线程持锁 barrier；禁 sleep 概率绿灯——所有窗口都
+    // 由 hook 通知/信号 channel 精确控制，超时即揭红）。
+    // ------------------------------------------------------------------
+
+    /// 测试线程持有的 home sidecar 锁窗口：竞争者只能在锁上排队。
+    struct HeldHomeLock {
+        _guard: ExclusiveFileLock,
+        _hook: LockAttemptHookGuard,
+        attempts: mpsc::Receiver<()>,
+    }
+
+    fn hold_home_lock(target: &Path) -> HeldHomeLock {
+        let _guard = ExclusiveFileLock::acquire(target).expect("test holds the home sidecar lock");
+        let (_hook, attempts) = register_lock_attempt_hook(target);
+        HeldHomeLock {
+            _guard,
+            _hook,
+            attempts,
+        }
+    }
+
+    /// 竞争者到达 sidecar 锁的超时窗：未持锁实现永远不会通知——超时即红。
+    const CONTENDER_TIMEOUT: Duration = Duration::from_secs(5);
+
+    fn contender_arrived(attempts: &mpsc::Receiver<()>) -> bool {
+        attempts.recv_timeout(CONTENDER_TIMEOUT).is_ok()
+    }
+
+    /// 计数 adapter：委托真实 adapter 并统计 write_trusted/remove_trusted 的
+    /// 调用次数——「Trusted 写次数=0」按调用计数断言，不只比最终字节。
+    struct CountingTrustAdapter {
+        inner: Arc<dyn ProviderTrustHomeAdapter>,
+        writes: Arc<AtomicUsize>,
+    }
+
+    impl CountingTrustAdapter {
+        fn wrap(
+            inner: Arc<dyn ProviderTrustHomeAdapter>,
+            writes: Arc<AtomicUsize>,
+        ) -> Arc<dyn ProviderTrustHomeAdapter> {
+            Arc::new(Self { inner, writes })
+        }
+    }
+
+    impl ProviderTrustHomeAdapter for CountingTrustAdapter {
+        fn provider(&self) -> ProviderName {
+            self.inner.provider()
+        }
+
+        fn trust_key(&self, canonical_root: &Path) -> String {
+            self.inner.trust_key(canonical_root)
+        }
+
+        fn read_state(
+            &self,
+            canonical_root: &Path,
+        ) -> Result<ProviderTrustEntryState, ProviderTrustError> {
+            self.inner.read_state(canonical_root)
+        }
+
+        fn digest(&self, canonical_root: &Path) -> Result<Option<String>, ProviderTrustError> {
+            self.inner.digest(canonical_root)
+        }
+
+        fn write_trusted(
+            &self,
+            canonical_root: &Path,
+            expected_digest: Option<&str>,
+        ) -> Result<ProviderTrustWriteOutcome, ProviderTrustError> {
+            self.writes.fetch_add(1, Ordering::SeqCst);
+            self.inner.write_trusted(canonical_root, expected_digest)
+        }
+
+        fn remove_trusted(
+            &self,
+            canonical_root: &Path,
+            expected_digest: Option<&str>,
+        ) -> Result<(), ProviderTrustError> {
+            self.writes.fetch_add(1, Ordering::SeqCst);
+            self.inner.remove_trusted(canonical_root, expected_digest)
+        }
+
+        fn conflict_code(&self) -> &'static str {
+            self.inner.conflict_code()
+        }
+
+        fn manual_hint(&self, canonical_root: &Path) -> ProviderTrustArtifactHint {
+            self.inner.manual_hint(canonical_root)
+        }
+
+        fn artifact_path(&self, canonical_root: &Path) -> PathBuf {
+            self.inner.artifact_path(canonical_root)
+        }
+    }
+
+    /// 门闩 adapter：digest 先发信号再委托——信号到达时，持锁实现必已进入
+    /// home 临界区（digest 只在取锁之后执行），提供无竞态 barrier。
+    struct SectionSignalAdapter {
+        inner: Arc<dyn ProviderTrustHomeAdapter>,
+        entered: mpsc::Sender<()>,
+    }
+
+    impl ProviderTrustHomeAdapter for SectionSignalAdapter {
+        fn provider(&self) -> ProviderName {
+            self.inner.provider()
+        }
+
+        fn trust_key(&self, canonical_root: &Path) -> String {
+            self.inner.trust_key(canonical_root)
+        }
+
+        fn read_state(
+            &self,
+            canonical_root: &Path,
+        ) -> Result<ProviderTrustEntryState, ProviderTrustError> {
+            self.inner.read_state(canonical_root)
+        }
+
+        fn digest(&self, canonical_root: &Path) -> Result<Option<String>, ProviderTrustError> {
+            let _ = self.entered.send(());
+            self.inner.digest(canonical_root)
+        }
+
+        fn write_trusted(
+            &self,
+            canonical_root: &Path,
+            expected_digest: Option<&str>,
+        ) -> Result<ProviderTrustWriteOutcome, ProviderTrustError> {
+            self.inner.write_trusted(canonical_root, expected_digest)
+        }
+
+        fn remove_trusted(
+            &self,
+            canonical_root: &Path,
+            expected_digest: Option<&str>,
+        ) -> Result<(), ProviderTrustError> {
+            self.inner.remove_trusted(canonical_root, expected_digest)
+        }
+
+        fn conflict_code(&self) -> &'static str {
+            self.inner.conflict_code()
+        }
+
+        fn manual_hint(&self, canonical_root: &Path) -> ProviderTrustArtifactHint {
+            self.inner.manual_hint(canonical_root)
+        }
+
+        fn artifact_path(&self, canonical_root: &Path) -> PathBuf {
+            self.inner.artifact_path(canonical_root)
+        }
+    }
+
+    /// 3.1/3.2 并发测试夹具：独立 home/aria，按测试装配计数/门闩 registry。
+    struct ConcurrencyFixture {
+        _home: tempfile::TempDir,
+        aria: tempfile::TempDir,
+        root: PathBuf,
+    }
+
+    impl ConcurrencyFixture {
+        fn new() -> Self {
+            let home = tempfile::TempDir::new().unwrap();
+            let aria = tempfile::TempDir::new().unwrap();
+            let root = home.path().join("lc-root");
+            std::fs::create_dir_all(&root).unwrap();
+            Self {
+                _home: home,
+                aria,
+                root,
+            }
+        }
+
+        fn home(&self) -> &Path {
+            self._home.path()
+        }
+
+        fn root_b(&self) -> PathBuf {
+            let root = self.home().join("lc-root-b");
+            std::fs::create_dir_all(&root).unwrap();
+            root
+        }
+
+        fn codex_config(&self) -> PathBuf {
+            self.home().join(".codex").join("config.toml")
+        }
+
+        fn paths(&self) -> ProductAppPaths {
+            ProductAppPaths::new(self.aria.path().to_path_buf())
+        }
+
+        fn store(&self, lc: &str) -> ProviderTrustStore {
+            ProviderTrustStore::for_lc(self.paths(), lc)
+        }
+
+        fn counting_registry(
+            &self,
+            adapter: Arc<dyn ProviderTrustHomeAdapter>,
+        ) -> (HomeBackedProviderTrustRegistry, Arc<AtomicUsize>) {
+            let writes = Arc::new(AtomicUsize::new(0));
+            let registry = HomeBackedProviderTrustRegistry::new(
+                self.paths(),
+                vec![CountingTrustAdapter::wrap(adapter, Arc::clone(&writes))],
+            );
+            (registry, writes)
+        }
+
+        fn counting_codex_registry(&self) -> (HomeBackedProviderTrustRegistry, Arc<AtomicUsize>) {
+            self.counting_registry(Arc::new(CodexTrustAdapter::for_home(self.home())))
+        }
+    }
+
+    /// Task 3.1：同 root 同 LC 的并发 ensure 不得把 owned=true 降级——
+    /// 竞争者必须等在 sidecar 锁上，看到的只能是「W1 已完成登记」的完整
+    /// 状态（Replay），而不是 Trusted-but-ownership-missing 中间态。
+    #[test]
+    fn provider_trust_concurrent_same_lc_ensure_does_not_downgrade_ownership() {
+        let fixture = ConcurrencyFixture::new();
+        let (registry, writes) = fixture.counting_codex_registry();
+        // W1 中途态：home 条目已写、ownership 尚未落盘。
+        let codex = CodexTrustAdapter::for_home(fixture.home());
+        let created = codex.write_trusted(&fixture.root, None).unwrap();
+        assert!(matches!(created, ProviderTrustWriteOutcome::Created { .. }));
+        let trust_key = codex.trust_key(&fixture.root);
+
+        let held = hold_home_lock(&fixture.codex_config());
+        let (result_tx, result_rx) = mpsc::channel();
+        let root = fixture.root.clone();
+        std::thread::spawn(move || {
+            let _ = result_tx.send(registry.ensure_trusted(
+                PROJECT,
+                OPERATION,
+                LC,
+                &ProviderName::Codex,
+                &root,
+            ));
+        });
+
+        let arrived = contender_arrived(&held.attempts);
+        if arrived {
+            // 持锁实现：竞争者停在锁上；W1 在临界区内完成 ownership 落盘。
+            let now = trust_now();
+            fixture
+                .store(LC)
+                .record_ownership(
+                    PROJECT,
+                    ProviderTrustOwnershipRecord {
+                        lc_id: LC.to_string(),
+                        provider: "codex".to_string(),
+                        canonical_root: fixture.root.clone(),
+                        trust_key: trust_key.clone(),
+                        owned: true,
+                        before_digest: None,
+                        after_digest: codex.digest(&fixture.root).unwrap(),
+                        created_at: now.clone(),
+                        updated_at: now,
+                    },
+                )
+                .unwrap();
+        }
+        drop(held);
+
+        let registration = result_rx
+            .recv_timeout(CONTENDER_TIMEOUT)
+            .expect("contender completes")
+            .expect("same-LC ensure succeeds");
+        assert_eq!(
+            registration.ownership,
+            ProviderTrustOwnership::LcManaged,
+            "same-LC replay must stay LC-managed (arrival={arrived})"
+        );
+        assert_eq!(registration.action, ProviderTrustAction::Replay);
+        assert!(
+            fixture
+                .store(LC)
+                .load_ownership(PROJECT, "codex", &trust_key)
+                .unwrap()
+                .is_some_and(|record| record.owned),
+            "same-LC replay must not downgrade ownership to user-owned"
+        );
+        assert_eq!(
+            writes.load(Ordering::SeqCst),
+            0,
+            "Trusted replay must not call adapter writes (call count, not byte equality)"
+        );
+        // Ready 返回前 home 锁已释放：可立即重新获取。
+        assert!(ExclusiveFileLock::acquire(&fixture.codex_config()).is_ok());
+    }
+
+    /// Task 3.1：跨 LC 并发复用——另一 LC 的竞争者等在锁上直到 LC1 完成
+    /// 登记，随后以 ReuseUserEntry/owned=false 复用且零 adapter 写调用。
+    #[test]
+    fn provider_trust_concurrent_cross_lc_reuse_stays_user_owned_without_adapter_writes() {
+        let fixture = ConcurrencyFixture::new();
+        const LC2: &str = "logical_codebase_0002";
+        let (registry, writes) = fixture.counting_codex_registry();
+
+        let held = hold_home_lock(&fixture.codex_config());
+        let (result_tx, result_rx) = mpsc::channel();
+        let root = fixture.root.clone();
+        std::thread::spawn(move || {
+            let _ = result_tx.send(registry.ensure_trusted(
+                PROJECT,
+                OPERATION,
+                LC2,
+                &ProviderName::Codex,
+                &root,
+            ));
+        });
+
+        let arrived = contender_arrived(&held.attempts);
+        if arrived {
+            // 持锁实现：竞争者停在锁上；LC1 在临界区内完成登记。
+            let codex = CodexTrustAdapter::for_home(fixture.home());
+            let created = codex.write_trusted(&fixture.root, None).unwrap();
+            assert!(matches!(created, ProviderTrustWriteOutcome::Created { .. }));
+            let trust_key = codex.trust_key(&fixture.root);
+            let now = trust_now();
+            fixture
+                .store(LC)
+                .record_ownership(
+                    PROJECT,
+                    ProviderTrustOwnershipRecord {
+                        lc_id: LC.to_string(),
+                        provider: "codex".to_string(),
+                        canonical_root: fixture.root.clone(),
+                        trust_key,
+                        owned: true,
+                        before_digest: None,
+                        after_digest: codex.digest(&fixture.root).unwrap(),
+                        created_at: now.clone(),
+                        updated_at: now,
+                    },
+                )
+                .unwrap();
+        }
+        drop(held);
+
+        let registration = result_rx
+            .recv_timeout(CONTENDER_TIMEOUT)
+            .expect("contender completes")
+            .expect("cross-LC ensure succeeds");
+        assert_eq!(
+            registration.action,
+            ProviderTrustAction::ReuseUserEntry,
+            "cross-LC must reuse the LC1 entry without registering (arrival={arrived})"
+        );
+        assert_eq!(registration.ownership, ProviderTrustOwnership::UserOwned);
+        assert_eq!(
+            writes.load(Ordering::SeqCst),
+            0,
+            "cross-LC reuse must not call adapter writes (call count, not byte equality)"
+        );
+        let codex = CodexTrustAdapter::for_home(fixture.home());
+        let trust_key = codex.trust_key(&fixture.root);
+        assert!(
+            fixture
+                .store(LC)
+                .load_ownership(PROJECT, "codex", &trust_key)
+                .unwrap()
+                .is_some_and(|record| record.owned),
+            "LC1 ownership must survive the cross-LC reuse"
+        );
+        assert!(
+            !fixture
+                .store(LC2)
+                .load_ownership(PROJECT, "codex", &trust_key)
+                .unwrap()
+                .is_some_and(|record| record.owned),
+            "reusing LC must record owned=false"
+        );
+    }
+
+    /// Task 3.1：不同 root 共享 Codex config——两个 ensure 必须在整 config
+    /// 的 sidecar 锁上串行；持锁窗口内零写入，释放后两个 root 的条目都在
+    /// （无丢更新、无伪 CAS 失败）。
+    #[test]
+    fn provider_trust_concurrent_codex_roots_share_config_lock_without_lost_updates() {
+        let fixture = ConcurrencyFixture::new();
+        let root_b = fixture.root_b();
+        let (registry, writes) = fixture.counting_codex_registry();
+        let config_before = std::fs::read_to_string(fixture.codex_config()).ok();
+
+        let held = hold_home_lock(&fixture.codex_config());
+        let (done_tx, done_rx) = mpsc::channel();
+        let registry = Arc::new(registry);
+        for root in [fixture.root.clone(), root_b.clone()] {
+            let registry = Arc::clone(&registry);
+            let done_tx = done_tx.clone();
+            std::thread::spawn(move || {
+                let _ = done_tx.send(registry.ensure_trusted(
+                    PROJECT,
+                    OPERATION,
+                    LC,
+                    &ProviderName::Codex,
+                    &root,
+                ));
+            });
+        }
+        drop(done_tx);
+
+        let mut arrivals = 0;
+        for _ in 0..2 {
+            if contender_arrived(&held.attempts) {
+                arrivals += 1;
+            }
+        }
+        if arrivals == 2 {
+            // 持锁实现：他人临界区内零写入。
+            assert_eq!(
+                std::fs::read_to_string(fixture.codex_config()).ok(),
+                config_before,
+                "no writes inside another holder's critical section"
+            );
+            drop(held);
+            let mut outcomes = Vec::new();
+            for _ in 0..2 {
+                outcomes.push(
+                    done_rx
+                        .recv_timeout(CONTENDER_TIMEOUT)
+                        .expect("serialized contender finishes"),
+                );
+            }
+            assert!(
+                outcomes.iter().all(|outcome| outcome.is_ok()),
+                "serialized ensures must both succeed without spurious CAS failures: {outcomes:?}"
+            );
+        } else {
+            drop(held);
+            for _ in 0..2 {
+                let _ = done_rx.recv_timeout(CONTENDER_TIMEOUT);
+            }
+            assert_eq!(
+                std::fs::read_to_string(fixture.codex_config()).ok(),
+                config_before,
+                "ensures must not touch the shared config while another holder owns the sidecar lock"
+            );
+        }
+
+        // 无丢更新：两个 root 的条目都在。
+        let config = std::fs::read_to_string(fixture.codex_config()).unwrap();
+        let codex = CodexTrustAdapter::for_home(fixture.home());
+        assert!(config.contains(&codex.trust_key(&fixture.root)));
+        assert!(config.contains(&codex.trust_key(&root_b)));
+        assert_eq!(writes.load(Ordering::SeqCst), 2);
+    }
+
+    /// Task 3.1：ensure×revoke 交错——revoke 中途（条目已摘、ownership 待删）
+    /// 到达的 ensure 必须等在锁上；最终状态自洽：条目在 ⇒ 本 LC owned ⇒
+    /// 可再撤销，绝不留下不可撤销的孤儿条目。
+    #[test]
+    fn provider_trust_concurrent_ensure_and_revoke_keep_entry_ownership_coherent() {
+        let fixture = ConcurrencyFixture::new();
+        let (registry, _writes) = fixture.counting_codex_registry();
+        // 前置：本 LC 已完成登记（条目 + ownership owned=true）。
+        registry
+            .ensure_trusted(PROJECT, OPERATION, LC, &ProviderName::Codex, &fixture.root)
+            .unwrap();
+        let codex = CodexTrustAdapter::for_home(fixture.home());
+        let trust_key = codex.trust_key(&fixture.root);
+
+        let held = hold_home_lock(&fixture.codex_config());
+        // revoke 中途态：remove_trusted 已执行（条目摘除），delete_ownership
+        // 未执行——由测试在受控窗口内收尾。
+        let digest = codex.digest(&fixture.root).unwrap();
+        codex.remove_trusted(&fixture.root, digest.as_deref()).unwrap();
+        assert!(
+            !std::fs::read_to_string(fixture.codex_config())
+                .unwrap()
+                .contains(&trust_key)
+        );
+
+        let (result_tx, result_rx) = mpsc::channel();
+        let registry = Arc::new(registry);
+        let root = fixture.root.clone();
+        std::thread::spawn(move || {
+            let _ = result_tx.send(registry.ensure_trusted(
+                PROJECT,
+                OPERATION,
+                LC,
+                &ProviderName::Codex,
+                &root,
+            ));
+        });
+
+        let arrived = contender_arrived(&held.attempts);
+        let early = if !arrived {
+            Some(
+                result_rx
+                    .recv_timeout(CONTENDER_TIMEOUT)
+                    .expect("unlocked contender completes"),
+            )
+        } else {
+            None
+        };
+        // revoke 收尾：删除 ownership（未持锁实现里竞争者早已完成；持锁
+        // 实现里竞争者还停在锁上）。
+        fixture
+            .store(LC)
+            .delete_ownership(PROJECT, "codex", &trust_key)
+            .unwrap();
+        drop(held);
+
+        let registration = match early {
+            Some(result) => result,
+            None => result_rx
+                .recv_timeout(CONTENDER_TIMEOUT)
+                .expect("contender completes"),
+        }
+        .expect("ensure after revoke succeeds");
+        assert!(matches!(registration.action, ProviderTrustAction::Register));
+        // 自洽：条目在 ⇒ ownership 在且 owned（可撤销，不是孤儿）。
+        assert!(
+            std::fs::read_to_string(fixture.codex_config())
+                .unwrap()
+                .contains(&trust_key)
+        );
+        assert!(
+            fixture
+                .store(LC)
+                .load_ownership(PROJECT, "codex", &trust_key)
+                .unwrap()
+                .is_some_and(|record| record.owned),
+            "entry present must stay LC-owned and revocable after ensure×revoke interleave"
+        );
+    }
+
+    /// Task 3.1：Kimi 单记录锁粒度——R1 的记录锁被持有时，R2 的登记不被
+    /// 过度串行（不得把整个 workspace-trust 目录当锁面）。
+    #[test]
+    fn provider_trust_kimi_per_record_locks_allow_different_roots() {
+        let fixture = ConcurrencyFixture::new();
+        let root_b = fixture.root_b();
+        let kimi = KimiTrustAdapter::for_home(fixture.home());
+        let (registry, writes) =
+            fixture.counting_registry(Arc::new(KimiTrustAdapter::for_home(fixture.home())));
+
+        let record_a = kimi.record_path(&fixture.root);
+        let record_b = kimi.record_path(&root_b);
+        let held = hold_home_lock(&record_a);
+        let (result_tx, result_rx) = mpsc::channel();
+        let registry = Arc::new(registry);
+        std::thread::spawn(move || {
+            let _ = result_tx.send(registry.ensure_trusted(
+                PROJECT,
+                OPERATION,
+                LC,
+                &ProviderName::KimiCode,
+                &root_b,
+            ));
+        });
+
+        let registration = result_rx
+            .recv_timeout(CONTENDER_TIMEOUT)
+            .expect("per-record lock must not serialize different roots")
+            .expect("R2 ensure succeeds while R1's record lock is held");
+        assert!(matches!(registration.action, ProviderTrustAction::Register));
+        assert_eq!(writes.load(Ordering::SeqCst), 1);
+        // R2 的记录落盘；R1 的记录仍未被触碰。
+        assert!(record_b.is_file());
+        assert!(!record_a.exists());
+        drop(held);
+    }
+
+    /// Task 3.1：sidecar 锁失败（锁文件不可创建）fail-closed——可见
+    /// Waiting（trust_home_lock_failed），不无序写当前 waiting fact，
+    /// 历史审计尽力留痕，home 工件字节不动。
+    #[test]
+    fn provider_trust_home_lock_failure_fails_closed_without_waiting_fact() {
+        let fixture = ConcurrencyFixture::new();
+        let codex_dir = fixture.codex_config().parent().unwrap().to_path_buf();
+        std::fs::create_dir_all(&codex_dir).unwrap();
+        std::fs::write(
+            fixture.codex_config(),
+            "[projects.\"other\"]\ntrust_level = \"trusted\"\n",
+        )
+        .unwrap();
+        let original = std::fs::read_to_string(fixture.codex_config()).unwrap();
+        let original_permissions = std::fs::metadata(&codex_dir).unwrap().permissions();
+        let mut readonly = original_permissions.clone();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut readonly, 0o500);
+        std::fs::set_permissions(&codex_dir, readonly).unwrap();
+
+        let (registry, writes) = fixture.counting_codex_registry();
+        let outcome = registry.ensure_ready(
+            PROJECT,
+            OPERATION,
+            LC,
+            &fixture.root,
+            &[ProviderName::Codex],
+            ProviderTrustScenario::Confirmation,
+        );
+        std::fs::set_permissions(&codex_dir, original_permissions).unwrap();
+
+        match outcome {
+            ProviderTrustPreparationResult::Waiting { waiting } => {
+                assert_eq!(waiting.reason_code, "trust_home_lock_failed");
+                // 未获锁：不无序改写当前 waiting fact。
+                assert!(
+                    fixture
+                        .store(LC)
+                        .list_waiting(PROJECT)
+                        .unwrap()
+                        .is_empty()
+                );
+                // 历史审计尽力写。
+                assert!(fixture.store(LC).list_audit(PROJECT).unwrap().iter().any(
+                    |audit| audit.action == "gate_waiting"
+                        && audit.outcome == "trust_home_lock_failed"
+                ));
+                // home 工件字节不动、无 adapter 写调用。
+                assert_eq!(
+                    std::fs::read_to_string(fixture.codex_config()).unwrap(),
+                    original
+                );
+                assert_eq!(writes.load(Ordering::SeqCst), 0);
+            }
+            ProviderTrustPreparationResult::Ready { .. } => {
+                assert_eq!(
+                    unsafe { libc::geteuid() },
+                    0,
+                    "lock-failure injection relies on chmod biting (requires non-root)"
+                );
+            }
+        }
+    }
+
+    /// Task 3.2：失败的 record_waiting/gate_waiting 与成功 clear_waiting 在
+    /// 同一已持 home 临界区内定序——A（旧失败）停在临界区内（fact 锁被
+    /// 测试持有）时，较新的 B 只能等在 home 锁后面；A 落盘 waiting 后 B
+    /// 才能成功并清除，绝不残留旧当前 waiting（历史失败审计保留）。
+    #[test]
+    fn provider_trust_failure_waiting_fact_ordered_inside_home_critical_section() {
+        let fixture = ConcurrencyFixture::new();
+        // 注入：config.toml 为目录 → A 的 digest 确定性失败。
+        std::fs::create_dir_all(fixture.codex_config()).unwrap();
+
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let registry_a = HomeBackedProviderTrustRegistry::new(
+            fixture.paths(),
+            vec![Arc::new(SectionSignalAdapter {
+                inner: Arc::new(CodexTrustAdapter::for_home(fixture.home())),
+                entered: entered_tx,
+            })],
+        );
+        let registry_b = HomeBackedProviderTrustRegistry::new(
+            fixture.paths(),
+            vec![Arc::new(CodexTrustAdapter::for_home(fixture.home()))],
+        );
+        let fact_lock = crate::product::logical_codebase::lc_scope_root(
+            &fixture.paths(),
+            PROJECT,
+            &Some(LC.to_string()),
+        )
+        .unwrap()
+        .join(".provider-trust.lock");
+        let (a_tx, a_rx) = mpsc::channel();
+        let (b_tx, b_rx) = mpsc::channel();
+        let root_a = fixture.root.clone();
+        let root_b = fixture.root.clone();
+
+        let ordered = with_exact_exclusive_lock(&fact_lock, || {
+            // 预创建 sidecar 锁文件（未持锁实现不会创建它），供稍后注册 hook。
+            drop(ExclusiveFileLock::acquire(&fixture.codex_config()).unwrap());
+            std::thread::spawn(move || {
+                let _ = a_tx.send(registry_a.ensure_ready(
+                    PROJECT,
+                    OPERATION,
+                    LC,
+                    &root_a,
+                    &[ProviderName::Codex],
+                    ProviderTrustScenario::Recipe,
+                ));
+            });
+            // A 已进入其临界区（digest 只在取锁后执行）并将停在 fact 锁上。
+            entered_rx
+                .recv_timeout(CONTENDER_TIMEOUT)
+                .expect("failure pass must enter its home critical section");
+            // 解除注入：较新的 B 此后可以成功。
+            std::fs::remove_dir_all(fixture.codex_config()).unwrap();
+            // hook 注册（锁文件已存在）；排掉 A 自己的取锁尝试事件。
+            let (_hook, attempts) = register_lock_attempt_hook(&fixture.codex_config());
+            let _ = attempts.try_recv();
+            std::thread::spawn(move || {
+                let _ = b_tx.send(registry_b.ensure_ready(
+                    PROJECT,
+                    OPERATION,
+                    LC,
+                    &root_b,
+                    &[ProviderName::Codex],
+                    ProviderTrustScenario::Recipe,
+                ));
+            });
+            let b_waited = attempts.recv_timeout(CONTENDER_TIMEOUT).is_ok();
+            if b_waited {
+                Ok(())
+            } else {
+                Err(ProductStoreError::Io(
+                    "newer ensure did not wait behind the in-flight failing section on the home lock"
+                        .to_string(),
+                ))
+            }
+        });
+        ordered.expect("newer ensure must queue behind the in-flight failing section");
+
+        let a_outcome = a_rx
+            .recv_timeout(CONTENDER_TIMEOUT)
+            .expect("failure pass completes");
+        let b_outcome = b_rx
+            .recv_timeout(CONTENDER_TIMEOUT)
+            .expect("success pass completes");
+        match &a_outcome {
+            ProviderTrustPreparationResult::Waiting { waiting } => {
+                assert_eq!(waiting.reason_code, "codex_config_unreadable");
+            }
+            other => panic!("expected the old failure to surface waiting, got {other:?}"),
+        }
+        assert!(matches!(
+            b_outcome,
+            ProviderTrustPreparationResult::Ready { .. }
+        ));
+        // 较新 Ready 不残留旧当前 waiting。
+        assert!(
+            fixture
+                .store(LC)
+                .list_waiting(PROJECT)
+                .unwrap()
+                .is_empty()
+        );
+        // 历史失败审计保留 + B 的成功审计在案。
+        let audits = fixture.store(LC).list_audit(PROJECT).unwrap();
+        assert!(
+            audits
+                .iter()
+                .any(|audit| audit.action == "gate_waiting"
+                    && audit.outcome == "codex_config_unreadable")
+        );
+        assert!(
+            audits
+                .iter()
+                .any(|audit| audit.action == "ensure" && audit.outcome == "registered")
+        );
+    }
+
+    /// 异步取消测试共享装配：独立 home/aria + 只读 Codex registry。
+    struct AsyncFixture {
+        _home: tempfile::TempDir,
+        _aria: tempfile::TempDir,
+        root: PathBuf,
+        codex_config: PathBuf,
+        paths: ProductAppPaths,
+    }
+
+    impl AsyncFixture {
+        fn new() -> Self {
+            let home = tempfile::TempDir::new().unwrap();
+            let aria = tempfile::TempDir::new().unwrap();
+            let root = home.path().join("lc-root");
+            std::fs::create_dir_all(&root).unwrap();
+            Self {
+                codex_config: home.path().join(".codex").join("config.toml"),
+                paths: ProductAppPaths::new(aria.path().to_path_buf()),
+                _home: home,
+                _aria: aria,
+                root,
+            }
+        }
+
+        fn registry(&self) -> Arc<dyn ProviderTrustPrecondition> {
+            Arc::new(HomeBackedProviderTrustRegistry::new(
+                self.paths.clone(),
+                vec![Arc::new(CodexTrustAdapter::for_home(self._home.path()))],
+            ))
+        }
+
+        fn store(&self) -> ProviderTrustStore {
+            ProviderTrustStore::for_lc(self.paths.clone(), LC)
+        }
+    }
+
+    /// Task 3.2：待锁获取可取消——竞争锁上的 ensure_ready_cancellable 被
+    /// caller 取消后：不留 flock waiter、持锁者释放后业务不复活、不占满
+    /// Tokio worker，home/store 零副作用。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn provider_trust_cancellable_lock_wait_never_resurrects_registration() {
+        let fixture = AsyncFixture::new();
+        let registry = fixture.registry();
+        let guard = ExclusiveFileLock::acquire(&fixture.codex_config).unwrap();
+        let (_hook, attempts) = register_lock_attempt_hook(&fixture.codex_config);
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            release_rx.recv_timeout(Duration::from_secs(10)).ok();
+            drop(guard);
+        });
+
+        // 竞争锁上的等待必须可取消（caller 侧 timeout 即丢弃 future）。
+        let cancelled = tokio::time::timeout(
+            Duration::from_millis(300),
+            registry.ensure_ready_cancellable(
+                PROJECT.to_string(),
+                OPERATION.to_string(),
+                LC.to_string(),
+                fixture.root.clone(),
+                vec![ProviderName::Codex],
+                ProviderTrustScenario::Confirmation,
+            ),
+        )
+        .await;
+        assert!(
+            cancelled.is_err(),
+            "contended home-lock wait must be cancellable"
+        );
+        // 取消前确实在按退避尝试取锁（不是空转）。
+        assert!(
+            attempts.try_recv().is_ok(),
+            "cancellable wait must keep attempting the sidecar lock"
+        );
+
+        // 释放持锁者：取消后的业务不得复活（负向断言，有界宽限窗）。
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            !fixture.codex_config.exists(),
+            "cancelled lock wait must not resurrect the registration"
+        );
+        assert!(
+            fixture
+                .store()
+                .load_ownership(
+                    PROJECT,
+                    "codex",
+                    &CodexTrustAdapter::for_home(fixture._home.path())
+                        .trust_key(&fixture.root)
+                )
+                .unwrap()
+                .is_none()
+        );
+        assert!(fixture.store().list_waiting(PROJECT).unwrap().is_empty());
+        assert!(fixture.store().list_audit(PROJECT).unwrap().is_empty());
+        // runtime 未被占满：普通任务照常推进。
+        assert_eq!(tokio::task::spawn(async { 42 }).await.unwrap(), 42);
+        // 锁未被遗留 waiter 占用：可立即重新获取。
+        assert!(ExclusiveFileLock::acquire(&fixture.codex_config).is_ok());
+    }
+
+    /// Task 3.2：提交边界收尾不误删——临界区开始（home 锁已获取）后取消
+    /// caller：临界区 detached 安全收尾（条目 + ownership + 审计一致），
+    /// 他人 waiting fact 不被误删，收尾后 home 锁已释放。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn provider_trust_cancelled_commit_boundary_finalizes_without_deleting_others() {
+        let fixture = AsyncFixture::new();
+        let store = fixture.store();
+        let trust_key = CodexTrustAdapter::for_home(fixture._home.path())
+            .trust_key(&fixture.root);
+        // 他人（Kimi）的当前 waiting fact：不得被 Codex 收尾误删。
+        store
+            .record_waiting(
+                PROJECT,
+                ProviderTrustWaitingRecord {
+                    lc_id: LC.to_string(),
+                    provider: "kimi_code".to_string(),
+                    canonical_root: fixture.root.clone(),
+                    trust_key: "wd_other_deadbeef".to_string(),
+                    operation_id: None,
+                    reason_code: "kimi_trust_write_failed".to_string(),
+                    message: "injected".to_string(),
+                    retry_action: "fix".to_string(),
+                    recorded_at: "2026-10-11T00:00:00Z".to_string(),
+                },
+            )
+            .unwrap();
+        // fact 锁由外部线程持有：临界区将停在 record_ownership（提交已开始）。
+        let fact_lock = crate::product::logical_codebase::lc_scope_root(
+            &fixture.paths,
+            PROJECT,
+            &Some(LC.to_string()),
+        )
+        .unwrap()
+        .join(".provider-trust.lock");
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            with_exact_exclusive_lock(&fact_lock, || {
+                release_rx.recv_timeout(Duration::from_secs(10)).ok();
+                Ok::<(), ProductStoreError>(())
+            })
+        });
+        // 预创建 sidecar 锁文件并注册 hook（观察临界区开始）。
+        drop(ExclusiveFileLock::acquire(&fixture.codex_config).unwrap());
+        let (_hook, attempts) = register_lock_attempt_hook(&fixture.codex_config);
+
+        let registry = fixture.registry();
+        let mut section = std::pin::pin!(registry.ensure_ready_cancellable(
+            PROJECT.to_string(),
+            OPERATION.to_string(),
+            LC.to_string(),
+            fixture.root.clone(),
+            vec![ProviderName::Codex],
+            ProviderTrustScenario::Confirmation,
+        ));
+        // 等临界区开始（home 锁已获取 → 提交已开始，此后 spawn_blocking 已提交）。
+        tokio::select! {
+            outcome = &mut section => {
+                panic!("section must park on the fact lock, got {outcome:?}");
+            }
+            _ = async {
+                while attempts.try_recv().is_err() {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            } => {}
+        }
+        // 提交边界后取消 caller：临界区须 detached 安全收尾，不误删。
+        let cancelled =
+            tokio::time::timeout(Duration::from_millis(100), &mut section).await;
+        assert!(
+            cancelled.is_err(),
+            "in-flight section parked on the fact lock must not finish within the cancel window"
+        );
+
+        // 释放 fact 锁：临界区 detached 收尾（有界等待全部收尾事实落盘：
+        // ownership 与末尾的 ensure 审计都在案才算收尾完成）。
+        release_tx.send(()).unwrap();
+        holder.join().unwrap().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let finalized = loop {
+            let ownership = store
+                .load_ownership(PROJECT, "codex", &trust_key)
+                .unwrap()
+                .filter(|record| record.owned);
+            let audited = store.list_audit(PROJECT).unwrap().iter().any(
+                |audit| audit.action == "ensure" && audit.outcome == "registered",
+            );
+            if ownership.is_some() && audited {
+                break ownership;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "detached section must finalize after cancellation"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        assert!(finalized.is_some());
+        assert!(
+            std::fs::read_to_string(&fixture.codex_config)
+                .unwrap()
+                .contains(&trust_key)
+        );
+        // 他人 waiting fact 原样保留；本 provider 的 waiting 不存在。
+        let waiting = store.list_waiting(PROJECT).unwrap();
+        assert!(waiting.iter().any(|record| record.provider == "kimi_code"));
+        assert!(!waiting.iter().any(|record| record.provider == "codex"));
+        // 收尾完成后 home 锁已释放。
+        assert!(ExclusiveFileLock::acquire(&fixture.codex_config).is_ok());
     }
     fn sha256_hex_12(value: &str) -> String {
         use sha2::{Digest, Sha256};
