@@ -744,4 +744,220 @@ mod tests {
         let factory = state.gateway_factory().expect("factory").clone();
         assert!(Arc::ptr_eq(&factory.registry, &injected));
     }
+
+    // ------------------------------------------------------------------
+    // Task 7.1：`build_readonly_for_lc` 组装与 gateway 只读 trust 检查的
+    // 三态（missing/conflict/登记后删除）零副作用真实快照锚——factory 经
+    // HOME 装配生产 readonly source（隔离 home，真实用户 home 零读写），
+    // 组装/检查前后 home 与 durable trust 事实（ownership/waiting/audit，
+    // 连同整棵 .aria 树证伪 bootstrap 物化）快照逐字节相等；拒收不补写、
+    // 不伪造 capability（gateway 只读指导三态均在场，不报 trusted）。
+    // ------------------------------------------------------------------
+
+    /// 进程级 HOME 串行锚：本测试二进制内所有改写 HOME 的 T7 用例
+    /// （gateway_factory/part_01/conversational_gate_protocol）经同一
+    /// sidecar 文件锁互斥（先例：group_review_budget 的 env 互斥）。
+    fn t7_home_env_lock_target() -> std::path::PathBuf {
+        std::env::temp_dir().join("aria-t7-home-env")
+    }
+
+    struct T7HomeEnvGuard {
+        _lock: crate::product::coding_attempt_store::locking::ExclusiveFileLock,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl T7HomeEnvGuard {
+        fn isolate(home: &std::path::Path) -> Self {
+            let _lock = crate::product::coding_attempt_store::locking::ExclusiveFileLock::acquire(
+                &t7_home_env_lock_target(),
+            )
+            .expect("serialize HOME mutation across the test binary");
+            let previous = std::env::var_os("HOME");
+            // SAFETY: 与其它改写 HOME 的测试经同一文件锁串行；本二进制内
+            // 并行用例对 HOME 的消费只有 factory 装配的 adapter home 路径
+            // 拼接（无文件 IO），读写交错不产生可观察行为差异。
+            unsafe { std::env::set_var("HOME", home) };
+            Self { _lock, previous }
+        }
+    }
+
+    impl Drop for T7HomeEnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: 同上，文件锁串行下的恢复写。
+            unsafe {
+                if let Some(previous) = self.previous.clone() {
+                    std::env::set_var("HOME", previous);
+                } else {
+                    std::env::remove_var("HOME");
+                }
+            }
+        }
+    }
+
+    fn t7_factory_snapshot_tree(root: &std::path::Path) -> Vec<(String, String)> {
+        fn sha256_hex(bytes: &[u8]) -> String {
+            use sha2::{Digest, Sha256};
+            format!("sha256:{:x}", Sha256::digest(bytes))
+        }
+        fn walk(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else {
+                    let digest = std::fs::read(&path)
+                        .map(|bytes| sha256_hex(&bytes))
+                        .unwrap_or_else(|error| format!("read-error:{error}"));
+                    out.push((path.display().to_string(), digest));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(root, &mut out);
+        out.sort();
+        out
+    }
+
+    #[derive(Clone, Copy, PartialEq, Debug)]
+    enum T7ReadonlyEntryState {
+        Missing,
+        Conflict,
+        RegisteredThenDeleted,
+    }
+
+    #[test]
+    fn build_readonly_for_lc_keeps_home_and_trust_facts_frozen_across_entry_states() {
+        use crate::product::logical_codebase::{
+            CodexTrustAdapter, HomeBackedProviderTrustRegistry, KimiTrustAdapter,
+            ProviderTrustHomeAdapter, ProviderTrustRegistry, ProviderTrustStore,
+        };
+
+        let lc_id = "lc_t7_readonly";
+        for state in [
+            T7ReadonlyEntryState::Missing,
+            T7ReadonlyEntryState::Conflict,
+            T7ReadonlyEntryState::RegisteredThenDeleted,
+        ] {
+            let workspace = tempdir().expect("workspace root");
+            let home = tempdir().expect("isolated home");
+            let paths = ProductAppPaths::new(workspace.path().join(".aria"));
+            let aggregate_root = workspace.path().join("aggregate");
+            std::fs::create_dir_all(&aggregate_root).expect("create aggregate root");
+            let canonical_root = std::fs::canonicalize(&aggregate_root).expect("canonical");
+
+            LogicalCodebaseStore::for_lc(paths.clone(), lc_id)
+                .save_manifest(
+                    "project_0001",
+                    &LogicalCodebaseManifest::new("project_0001", aggregate_root.clone(), vec![]),
+                )
+                .expect("save lc manifest");
+
+            let codex_config = home.path().join(".codex").join("config.toml");
+            let kimi_record = KimiTrustAdapter::for_home(home.path()).record_path(&canonical_root);
+            let mut audit_baseline = 0;
+            match state {
+                T7ReadonlyEntryState::Missing => {}
+                T7ReadonlyEntryState::Conflict => {
+                    std::fs::create_dir_all(codex_config.parent().unwrap()).unwrap();
+                    std::fs::write(
+                        &codex_config,
+                        format!(
+                            "[projects.\"{}\"]\ntrust_level = \"untrusted\"\n",
+                            canonical_root.display()
+                        ),
+                    )
+                    .unwrap();
+                }
+                T7ReadonlyEntryState::RegisteredThenDeleted => {
+                    let registry = HomeBackedProviderTrustRegistry::new(
+                        paths.clone(),
+                        vec![
+                            Arc::new(CodexTrustAdapter::for_home(home.path())),
+                            Arc::new(KimiTrustAdapter::for_home(home.path())),
+                        ],
+                    );
+                    for provider in [ProviderName::Codex, ProviderName::KimiCode] {
+                        registry
+                            .ensure_trusted(
+                                "project_0001",
+                                "aggregate_initialization_0001",
+                                lc_id,
+                                &provider,
+                                &canonical_root,
+                            )
+                            .unwrap_or_else(|error| panic!("{state:?} seed: {error:?}"));
+                    }
+                    std::fs::remove_file(&codex_config).unwrap();
+                    std::fs::remove_file(&kimi_record).unwrap();
+                    audit_baseline = 2;
+                }
+            }
+
+            let store = ProviderTrustStore::for_lc(paths.clone(), lc_id);
+            assert_eq!(
+                store.list_audit("project_0001").unwrap().len(),
+                audit_baseline,
+                "{state:?}: 布置期审计基线"
+            );
+
+            let _env = T7HomeEnvGuard::isolate(home.path());
+            let factory = LogicalCodebaseGatewayFactory::new(
+                paths.clone(),
+                fake_registry(),
+                Arc::new(StubSyncAdapter),
+                always_available_gate(),
+            );
+            let home_before = t7_factory_snapshot_tree(home.path());
+            let aria_before = t7_factory_snapshot_tree(&workspace.path().join(".aria"));
+
+            let gateway = factory
+                .build_readonly_for_lc("project_0001", Some(lc_id))
+                .unwrap_or_else(|error| panic!("{state:?} readonly build: {error:?}"));
+
+            // gateway 只读 trust 检查（generation 同源指导面）：三态都必须
+            // 如实给等待/指导（不伪造 trusted/capability），且指向 HOME
+            // 装配的隔离 home 工件路径。
+            let waiting = gateway
+                .read_only_generation_trust_waiting(&ProviderName::Codex)
+                .unwrap_or_else(|| panic!("{state:?}: 只读检查必须给等待面，不得伪造 trusted"));
+            match state {
+                T7ReadonlyEntryState::Missing | T7ReadonlyEntryState::RegisteredThenDeleted => {
+                    assert_eq!(waiting.reason_code, "trust_entry_missing", "{state:?}");
+                }
+                T7ReadonlyEntryState::Conflict => {
+                    assert_eq!(waiting.reason_code, "codex_trust_key_conflict", "{state:?}");
+                }
+            }
+            assert_eq!(
+                waiting.trust_key,
+                CodexTrustAdapter::for_home(home.path()).trust_key(&canonical_root),
+                "{state:?}: 指导 trust key 与 adapter 同源算法一致（同一隔离 home）"
+            );
+            assert!(
+                waiting
+                    .manual_guidance
+                    .contains(&codex_config.display().to_string()),
+                "{state:?}: 指导指向 HOME 装配的隔离 home 工件路径"
+            );
+
+            assert_eq!(
+                t7_factory_snapshot_tree(home.path()),
+                home_before,
+                "{state:?}: readonly build/check 前后 home 快照必须相等"
+            );
+            assert_eq!(
+                t7_factory_snapshot_tree(&workspace.path().join(".aria")),
+                aria_before,
+                "{state:?}: readonly build 不得物化 bootstrap 材料、不得写 durable trust 事实"
+            );
+            assert_eq!(
+                store.list_audit("project_0001").unwrap().len(),
+                audit_baseline,
+                "{state:?}: 只读检查不得追加 trust 审计"
+            );
+        }
+    }
 }

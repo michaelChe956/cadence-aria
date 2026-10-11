@@ -410,8 +410,7 @@ impl ProviderTrustScenario {
                     "用户自行核对该 trust 键的取值后重新确认；系统不覆盖用户条目".to_string()
                 }
                 Self::Generation => {
-                    "用户自行核对该 trust 键的取值后显式重新生成；系统不覆盖用户条目"
-                        .to_string()
+                    "用户自行核对该 trust 键的取值后显式重新生成；系统不覆盖用户条目".to_string()
                 }
             },
             TrustFailureKind::HomeArtifactRead | TrustFailureKind::HomeArtifactWrite => {
@@ -912,16 +911,18 @@ impl HomeBackedProviderTrustRegistry {
         canonical_root: &Path,
     ) -> Result<ExclusiveFileLock, ProviderTrustError> {
         let artifact = adapter.artifact_path(canonical_root);
-        ExclusiveFileLock::acquire_async(&artifact).await.map_err(|error| {
-            ProviderTrustError::transient(
-                "trust_home_lock_failed",
-                format!(
-                    "acquire home trust sidecar lock at {}: {error}; \
+        ExclusiveFileLock::acquire_async(&artifact)
+            .await
+            .map_err(|error| {
+                ProviderTrustError::transient(
+                    "trust_home_lock_failed",
+                    format!(
+                        "acquire home trust sidecar lock at {}: {error}; \
                      检查该工件父目录的可写性后重试",
-                    artifact.display()
-                ),
-            )
-        })
+                        artifact.display()
+                    ),
+                )
+            })
     }
 
     /// 失败等待投影（场景化 retry_action + 同源人工指导）；
@@ -1709,8 +1710,8 @@ mod tests {
     };
     use crate::product::json_store::ProductStoreError;
     use crate::product::logical_codebase::provider_trust_adapters::{
-        CodexTrustAdapter, KimiTrustAdapter, ProviderTrustArtifactHint,
-        ProviderTrustEntryState, ProviderTrustHomeAdapter, ProviderTrustWriteOutcome,
+        CodexTrustAdapter, KimiTrustAdapter, ProviderTrustArtifactHint, ProviderTrustEntryState,
+        ProviderTrustHomeAdapter, ProviderTrustWriteOutcome,
     };
     use crate::product::logical_codebase::provider_trust_store::{
         ProviderTrustOwnershipRecord, ProviderTrustStore, ProviderTrustWaitingRecord, trust_now,
@@ -2078,18 +2079,16 @@ mod tests {
         std::fs::create_dir_all(fixture.kimi_trust_dir()).unwrap();
         std::fs::create_dir(fixture.kimi_trust_dir().join(fixture.kimi_key())).unwrap();
         let providers = [ProviderName::KimiCode];
-        let waiting_for = |scenario| {
-            match fixture.registry.ensure_ready(
-                PROJECT,
-                OPERATION,
-                LC,
-                &fixture.root,
-                &providers,
-                scenario,
-            ) {
-                ProviderTrustPreparationResult::Waiting { waiting } => waiting,
-                other => panic!("expected fail-closed waiting, got {other:?}"),
-            }
+        let waiting_for = |scenario| match fixture.registry.ensure_ready(
+            PROJECT,
+            OPERATION,
+            LC,
+            &fixture.root,
+            &providers,
+            scenario,
+        ) {
+            ProviderTrustPreparationResult::Waiting { waiting } => waiting,
+            other => panic!("expected fail-closed waiting, got {other:?}"),
         };
 
         let confirmation = waiting_for(ProviderTrustScenario::Confirmation);
@@ -2209,9 +2208,8 @@ mod tests {
             ProviderName::ClaudeCode,
             ProviderName::Codex,
         ];
-        let ProviderTrustPreparationResult::Ready { registrations } = fixture
-            .registry
-            .ensure_ready(
+        let ProviderTrustPreparationResult::Ready { registrations } =
+            fixture.registry.ensure_ready(
                 PROJECT,
                 OPERATION,
                 LC,
@@ -2220,12 +2218,11 @@ mod tests {
                 ProviderTrustScenario::Recipe,
             )
         else {
- panic!("expected ready");
+            panic!("expected ready");
         };
         assert_eq!(registrations.len(), 1);
         assert_eq!(registrations[0].provider, ProviderName::Codex);
     }
-
 
     /// Task 2.2：Codex 指导的键来自 adapter 自己的 trust_key（同源 TOML
     /// 转义）；根含引号/反斜杠时不给未转义原文当键，冲突不引导一键覆盖。
@@ -2305,14 +2302,18 @@ mod tests {
             "guidance must carry the actual trust key {key}: {}",
             waiting.manual_guidance
         );
-        assert!(waiting
-            .manual_guidance
-            .contains(&record_path.display().to_string()));
+        assert!(
+            waiting
+                .manual_guidance
+                .contains(&record_path.display().to_string())
+        );
         assert!(waiting.manual_guidance.contains("\"root\""));
         assert!(waiting.manual_guidance.contains("\"trustedAt\""));
-        assert!(waiting
-            .manual_guidance
-            .contains(&fixture.root.display().to_string()));
+        assert!(
+            waiting
+                .manual_guidance
+                .contains(&fixture.root.display().to_string())
+        );
     }
 
     /// Task 2.2：home 写失败与 fact IO 失败必须分型——前者指导用户级
@@ -2474,14 +2475,337 @@ mod tests {
             panic!("expected read-failure waiting");
         };
         assert_eq!(waiting.reason_code, "codex_config_unreadable");
-        assert!(waiting
-            .manual_guidance
-            .contains(&fixture.codex_config().display().to_string()));
+        assert!(
+            waiting
+                .manual_guidance
+                .contains(&fixture.codex_config().display().to_string())
+        );
         assert!(
             waiting.manual_guidance.contains("备份"),
             "read/format guidance must advise backing up first: {}",
             waiting.manual_guidance
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Task 7.1：只读 trust source 三态零副作用真实快照锚（missing/conflict/
+    // 登记后删除）。readonly verify 与 generation 同源指导前后，隔离 home
+    // 与 durable trust 事实（ownership/waiting/audit）快照逐字节相等；
+    // adapter 写次数与 audit 数可观察（计数 adapter 按调用计数断言，不只比
+    // 最终字节）；拒收不补写、不伪造 capability——不调用会追加审计的
+    // registry verify，也不经 ensure 复活被用户删除的条目。
+    // ------------------------------------------------------------------
+
+    struct ReadonlySourceFixture {
+        _home: tempfile::TempDir,
+        _aria: tempfile::TempDir,
+        root: PathBuf,
+        writes: Arc<AtomicUsize>,
+    }
+
+    impl ReadonlySourceFixture {
+        fn new() -> Self {
+            let home = tempfile::TempDir::new().unwrap();
+            let aria = tempfile::TempDir::new().unwrap();
+            let root = home.path().join("lc-root");
+            std::fs::create_dir_all(&root).unwrap();
+            Self {
+                _home: home,
+                _aria: aria,
+                root,
+                writes: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn home(&self) -> &Path {
+            self._home.path()
+        }
+
+        fn paths(&self) -> ProductAppPaths {
+            ProductAppPaths::new(self._aria.path().to_path_buf())
+        }
+
+        fn store(&self) -> ProviderTrustStore {
+            ProviderTrustStore::for_lc(self.paths(), LC)
+        }
+
+        /// 只读 source：计数 adapter 包装真实 Codex/Kimi adapter（隔离
+        /// home），write_trusted/remove_trusted 每次调用计数——「写次数=0」
+        /// 按调用计数断言。
+        fn source(&self) -> ReadonlyProviderTrustSource {
+            let writes = Arc::clone(&self.writes);
+            ReadonlyProviderTrustSource::new(
+                self.paths(),
+                Some(LC.to_string()),
+                vec![
+                    CountingTrustAdapter::wrap(
+                        Arc::new(CodexTrustAdapter::for_home(self.home())),
+                        Arc::clone(&writes),
+                    ),
+                    CountingTrustAdapter::wrap(
+                        Arc::new(KimiTrustAdapter::for_home(self.home())),
+                        writes,
+                    ),
+                ],
+            )
+        }
+
+        /// 布置用可写 registry（真实 adapter，同一隔离 home 与 durable 布局）。
+        fn registry(&self) -> HomeBackedProviderTrustRegistry {
+            HomeBackedProviderTrustRegistry::new(
+                self.paths(),
+                vec![
+                    Arc::new(CodexTrustAdapter::for_home(self.home())),
+                    Arc::new(KimiTrustAdapter::for_home(self.home())),
+                ],
+            )
+        }
+
+        fn codex_config(&self) -> PathBuf {
+            self.home().join(".codex").join("config.toml")
+        }
+
+        fn kimi_record(&self) -> PathBuf {
+            KimiTrustAdapter::for_home(self.home()).record_path(&self.root)
+        }
+
+        /// Codex 用户冲突条目：目标 root 的 projects 表持非 trusted 值。
+        fn seed_codex_conflict(&self) {
+            let config = self.codex_config();
+            std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+            std::fs::write(
+                &config,
+                format!(
+                    "[projects.\"{}\"]\ntrust_level = \"untrusted\"\n",
+                    self.root.display()
+                ),
+            )
+            .unwrap();
+        }
+
+        /// Kimi 用户冲突条目：本根稳定键的记录文件绑到其它 root。
+        fn seed_kimi_conflict(&self) {
+            let record = self.kimi_record();
+            std::fs::create_dir_all(record.parent().unwrap()).unwrap();
+            std::fs::write(
+                &record,
+                serde_json::json!({
+                    "root": "/definitely/another/root",
+                    "trustedAt": 1_u64,
+                })
+                .to_string(),
+            )
+            .unwrap();
+        }
+
+        /// 经真实 registry 登记两 provider（home 条目+ownership/audit），
+        /// 再删除 home 侧用户工件——模拟「登记后用户删除条目」，durable
+        /// 事实仍在场。
+        fn register_then_delete_home_entries(&self) {
+            let registry = self.registry();
+            for provider in [ProviderName::Codex, ProviderName::KimiCode] {
+                registry
+                    .ensure_trusted(PROJECT, OPERATION, LC, &provider, &self.root)
+                    .unwrap_or_else(|error| panic!("seed ensure {provider:?}: {error:?}"));
+            }
+            std::fs::remove_file(self.codex_config()).unwrap();
+            std::fs::remove_file(self.kimi_record()).unwrap();
+        }
+    }
+
+    /// 递归 sha256 快照（路径+内容摘要，排序稳定）——home 与 durable
+    /// trust 事实目录的前后逐字节对比锚。
+    fn readonly_snapshot_tree(root: &Path) -> Vec<(String, String)> {
+        fn sha256_hex(bytes: &[u8]) -> String {
+            use sha2::{Digest, Sha256};
+            format!("sha256:{:x}", Sha256::digest(bytes))
+        }
+        fn walk(dir: &Path, out: &mut Vec<(String, String)>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else {
+                    let digest = std::fs::read(&path)
+                        .map(|bytes| sha256_hex(&bytes))
+                        .unwrap_or_else(|error| format!("read-error:{error}"));
+                    out.push((path.display().to_string(), digest));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(root, &mut out);
+        out.sort();
+        out
+    }
+
+    /// 三态共用断言面：对每个 provider 执行只读 verify + generation 同源
+    /// 指导，断言 home/durable 快照前后相等、adapter 写次数=0、audit 数
+    /// 不变（基线由调用方给出），并回传 verification 供状态语义断言。
+    fn readonly_source_asserts_frozen(
+        fixture: &ReadonlySourceFixture,
+        audit_baseline: usize,
+    ) -> Vec<crate::product::logical_codebase::ProviderTrustVerification> {
+        use super::ProviderTrustSource;
+        let source = fixture.source();
+        let mut verifications = Vec::new();
+        for provider in [ProviderName::Codex, ProviderName::KimiCode] {
+            let home_before = readonly_snapshot_tree(fixture.home());
+            let durable_before = readonly_snapshot_tree(fixture._aria.path());
+            let audits_before = fixture.store().list_audit(PROJECT).unwrap().len();
+            assert_eq!(audits_before, audit_baseline);
+
+            let verification = source
+                .verify_trusted(PROJECT, LC, &provider, &fixture.root)
+                .unwrap_or_else(|error| panic!("readonly verify {provider:?}: {error:?}"));
+            verifications.push(verification);
+            let waiting = source.read_only_generation_waiting(&provider, &fixture.root);
+
+            assert_eq!(
+                fixture.writes.load(Ordering::SeqCst),
+                0,
+                "只读 source 不得调用 adapter 写面（{provider:?}）"
+            );
+            assert_eq!(
+                fixture.store().list_audit(PROJECT).unwrap().len(),
+                audit_baseline,
+                "只读 verify/guidance 不得追加 trust 审计（{provider:?}）"
+            );
+            assert!(
+                fixture.store().list_waiting(PROJECT).unwrap().is_empty(),
+                "只读路径不得落 waiting 事实（{provider:?}）"
+            );
+            assert_eq!(
+                readonly_snapshot_tree(fixture.home()),
+                home_before,
+                "只读检查前后 home 快照必须相等（{provider:?}）"
+            );
+            assert_eq!(
+                readonly_snapshot_tree(fixture._aria.path()),
+                durable_before,
+                "只读检查前后 durable trust 事实快照必须相等（{provider:?}）"
+            );
+            let _ = waiting;
+        }
+        verifications
+    }
+
+    /// 7.1 主用例①（missing）：无任何条目时 readonly verify 判
+    /// trusted=false、detail=entry absent、无 ownership 可言（不伪造）；
+    /// generation 同源指导在场（同 adapter/同 trust key 算法），全部
+    /// 只读——零写、零审计、零 waiting。
+    #[test]
+    fn readonly_source_missing_state_verifies_and_guides_with_zero_side_effects() {
+        use super::ProviderTrustSource;
+        let fixture = ReadonlySourceFixture::new();
+        let source = fixture.source();
+        let verifications = readonly_source_asserts_frozen(&fixture, 0);
+        for verification in &verifications {
+            assert!(!verification.trusted, "missing 不得伪造 trusted");
+            assert_eq!(verification.detail, "entry absent");
+            assert!(
+                verification.ownership.is_none(),
+                "missing 态无 durable ownership，不得伪造归属"
+            );
+        }
+        let waiting = source
+            .read_only_generation_waiting(&ProviderName::Codex, &fixture.root)
+            .expect("missing 态 generation 同源指导必须在场");
+        assert_eq!(waiting.reason_code, super::TRUST_ENTRY_MISSING_CODE);
+        assert_eq!(
+            waiting.trust_key,
+            CodexTrustAdapter::for_home(fixture.home()).trust_key(&fixture.root),
+            "指导携带的 trust key 必须与 adapter 同源算法生成"
+        );
+        assert!(
+            waiting
+                .manual_guidance
+                .contains(&fixture.codex_config().display().to_string()),
+            "同源指导指向隔离 home 的真实 Codex 工件路径"
+        );
+        assert_eq!(fixture.writes.load(Ordering::SeqCst), 0);
+    }
+
+    /// 7.1 主用例②（conflict）：用户既有非 trusted 条目只读拒收——
+    /// trusted=false（不伪造 capability）、detail=非 trusted 值、冲突
+    /// 原因进 generation 指导；用户条目字节保持（不覆盖、不补写）。
+    #[test]
+    fn readonly_source_conflict_state_rejects_without_fabrication_or_overwrite() {
+        use super::ProviderTrustSource;
+        let fixture = ReadonlySourceFixture::new();
+        fixture.seed_codex_conflict();
+        fixture.seed_kimi_conflict();
+        let conflict_config = std::fs::read_to_string(fixture.codex_config()).unwrap();
+
+        let verifications = readonly_source_asserts_frozen(&fixture, 0);
+        for verification in &verifications {
+            assert!(!verification.trusted, "conflict 不得伪造 trusted");
+            assert_eq!(verification.detail, "key holds a non-trusted value");
+        }
+        let source = fixture.source();
+        let codex_waiting = source
+            .read_only_generation_waiting(&ProviderName::Codex, &fixture.root)
+            .expect("conflict 态指导在场（引导人工核验）");
+        assert_eq!(codex_waiting.reason_code, "codex_trust_key_conflict");
+        let kimi_waiting = source
+            .read_only_generation_waiting(&ProviderName::KimiCode, &fixture.root)
+            .expect("Kimi 冲突同样给出指导");
+        assert_eq!(kimi_waiting.reason_code, "kimi_trust_key_conflict");
+        assert_eq!(
+            std::fs::read_to_string(fixture.codex_config()).unwrap(),
+            conflict_config,
+            "用户冲突条目字节保持不变（只读不覆盖）"
+        );
+        assert_eq!(fixture.writes.load(Ordering::SeqCst), 0);
+        assert!(fixture.store().list_audit(PROJECT).unwrap().is_empty());
+    }
+
+    /// 7.1 主用例③（登记后删除）：registry 曾登记（home 条目+ownership+
+    /// audit 在场），用户删除 home 侧工件后，readonly verify 判
+    /// trusted=false（不复活条目）、ownership 仍如实投影 LcManaged（durable
+    /// 事实未变）、audit 数保持登记基线；generation 指导回落 missing。
+    #[test]
+    fn readonly_source_deleted_after_registration_keeps_facts_frozen() {
+        use super::ProviderTrustSource;
+        let fixture = ReadonlySourceFixture::new();
+        fixture.register_then_delete_home_entries();
+        // 布置期 ensure 审计基线：两 provider 各一条 ensure/registered。
+        let audits = fixture.store().list_audit(PROJECT).unwrap();
+        assert_eq!(audits.len(), 2, "布置期恰好两条登记审计");
+        assert!(
+            audits
+                .iter()
+                .all(|record| record.action == "ensure" && record.outcome == "registered"),
+            "审计事件名以源码为准（ensure/registered），不存在 gate_registered"
+        );
+
+        let verifications = readonly_source_asserts_frozen(&fixture, 2);
+        for verification in &verifications {
+            assert!(
+                !verification.trusted,
+                "登记后删除不得按 durable 记录伪造 trusted"
+            );
+            assert_eq!(verification.detail, "entry absent");
+            assert_eq!(
+                verification.ownership,
+                Some(ProviderTrustOwnership::LcManaged),
+                "ownership 只读如实投影既有 durable 事实"
+            );
+        }
+        assert!(
+            !fixture.codex_config().exists() && !fixture.kimi_record().exists(),
+            "只读检查后 home 条目不得被复活"
+        );
+        let source = fixture.source();
+        let waiting = source
+            .read_only_generation_waiting(&ProviderName::Codex, &fixture.root)
+            .expect("删除后回落 missing 指导");
+        assert_eq!(waiting.reason_code, super::TRUST_ENTRY_MISSING_CODE);
+        assert_eq!(fixture.writes.load(Ordering::SeqCst), 0);
+        assert_eq!(fixture.store().list_audit(PROJECT).unwrap().len(), 2);
     }
 
     // ------------------------------------------------------------------
@@ -2950,7 +3274,9 @@ mod tests {
         // revoke 中途态：remove_trusted 已执行（条目摘除），delete_ownership
         // 未执行——由测试在受控窗口内收尾。
         let digest = codex.digest(&fixture.root).unwrap();
-        codex.remove_trusted(&fixture.root, digest.as_deref()).unwrap();
+        codex
+            .remove_trusted(&fixture.root, digest.as_deref())
+            .unwrap();
         assert!(
             !std::fs::read_to_string(fixture.codex_config())
                 .unwrap()
@@ -3083,18 +3409,17 @@ mod tests {
             ProviderTrustPreparationResult::Waiting { waiting } => {
                 assert_eq!(waiting.reason_code, "trust_home_lock_failed");
                 // 未获锁：不无序改写当前 waiting fact。
+                assert!(fixture.store(LC).list_waiting(PROJECT).unwrap().is_empty());
+                // 历史审计尽力写。
                 assert!(
                     fixture
                         .store(LC)
-                        .list_waiting(PROJECT)
+                        .list_audit(PROJECT)
                         .unwrap()
-                        .is_empty()
+                        .iter()
+                        .any(|audit| audit.action == "gate_waiting"
+                            && audit.outcome == "trust_home_lock_failed")
                 );
-                // 历史审计尽力写。
-                assert!(fixture.store(LC).list_audit(PROJECT).unwrap().iter().any(
-                    |audit| audit.action == "gate_waiting"
-                        && audit.outcome == "trust_home_lock_failed"
-                ));
                 // home 工件字节不动、无 adapter 写调用。
                 assert_eq!(
                     std::fs::read_to_string(fixture.codex_config()).unwrap(),
@@ -3207,20 +3532,12 @@ mod tests {
             ProviderTrustPreparationResult::Ready { .. }
         ));
         // 较新 Ready 不残留旧当前 waiting。
-        assert!(
-            fixture
-                .store(LC)
-                .list_waiting(PROJECT)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(fixture.store(LC).list_waiting(PROJECT).unwrap().is_empty());
         // 历史失败审计保留 + B 的成功审计在案。
         let audits = fixture.store(LC).list_audit(PROJECT).unwrap();
         assert!(
-            audits
-                .iter()
-                .any(|audit| audit.action == "gate_waiting"
-                    && audit.outcome == "codex_config_unreadable")
+            audits.iter().any(|audit| audit.action == "gate_waiting"
+                && audit.outcome == "codex_config_unreadable")
         );
         assert!(
             audits
@@ -3317,8 +3634,7 @@ mod tests {
                 .load_ownership(
                     PROJECT,
                     "codex",
-                    &CodexTrustAdapter::for_home(fixture._home.path())
-                        .trust_key(&fixture.root)
+                    &CodexTrustAdapter::for_home(fixture._home.path()).trust_key(&fixture.root)
                 )
                 .unwrap()
                 .is_none()
@@ -3338,8 +3654,7 @@ mod tests {
     async fn provider_trust_cancelled_commit_boundary_finalizes_without_deleting_others() {
         let fixture = AsyncFixture::new();
         let store = fixture.store();
-        let trust_key = CodexTrustAdapter::for_home(fixture._home.path())
-            .trust_key(&fixture.root);
+        let trust_key = CodexTrustAdapter::for_home(fixture._home.path()).trust_key(&fixture.root);
         // 他人（Kimi）的当前 waiting fact：不得被 Codex 收尾误删。
         store
             .record_waiting(
@@ -3397,8 +3712,7 @@ mod tests {
             } => {}
         }
         // 提交边界后取消 caller：临界区须 detached 安全收尾，不误删。
-        let cancelled =
-            tokio::time::timeout(Duration::from_millis(100), &mut section).await;
+        let cancelled = tokio::time::timeout(Duration::from_millis(100), &mut section).await;
         assert!(
             cancelled.is_err(),
             "in-flight section parked on the fact lock must not finish within the cancel window"
@@ -3414,9 +3728,11 @@ mod tests {
                 .load_ownership(PROJECT, "codex", &trust_key)
                 .unwrap()
                 .filter(|record| record.owned);
-            let audited = store.list_audit(PROJECT).unwrap().iter().any(
-                |audit| audit.action == "ensure" && audit.outcome == "registered",
-            );
+            let audited = store
+                .list_audit(PROJECT)
+                .unwrap()
+                .iter()
+                .any(|audit| audit.action == "ensure" && audit.outcome == "registered");
             if ownership.is_some() && audited {
                 break ownership;
             }

@@ -497,9 +497,7 @@ pub(super) fn register_alias_logical_codebase_with_extras(
     let capability_source: Arc<dyn ProviderCapabilitySource> = extras
         .capability
         .unwrap_or_else(|| Arc::new(LcStaticCapabilitySource));
-    let availability_gate = extras
-        .availability
-        .unwrap_or_else(lc_always_available_gate);
+    let availability_gate = extras.availability.unwrap_or_else(lc_always_available_gate);
     let mut gateway_registry = ProviderRegistry::new();
     gateway_registry.register(ProviderName::ClaudeCode, gateway_author);
     let gateway = LogicalCodebaseProviderGateway::with_audit(
@@ -1217,7 +1215,10 @@ impl ProviderCapabilitySource for LcDialectCapabilitySource {
                     .to_string(),
             ));
         }
-        Ok(Self::capability(provider, SessionPolicyAction::PlanningReadOnly))
+        Ok(Self::capability(
+            provider,
+            SessionPolicyAction::PlanningReadOnly,
+        ))
     }
 }
 
@@ -1710,5 +1711,250 @@ async fn lc_first_generation_member_rules_missing_keeps_waiting_without_trust_gu
             Ok(Some(_))
         ),
         "成员规则缺失必须 reject before provider startup"
+    );
+}
+
+/// 7.1 接线锚（conflict 态）：用户在隔离 home 预置非 trusted 冲突条目——
+/// 首次生成经真实 admission/spawn 复验链拒收（`provider_trust_missing`
+/// 同源判别+冲突 reason），带同源人工核验指导；用户冲突条目字节保持、
+/// home 与 durable trust 事实快照不变（不覆盖、不补写、不伪造 capability），
+/// provider 零启动。
+#[tokio::test]
+async fn lc_first_generation_conflict_trust_preserves_user_entry_without_writes() {
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let provider = Arc::new(LcRecordingAuthorProvider {
+        output: single_candidate_markdown("story_0001", "design_0001"),
+        inputs: input_tx,
+    });
+    let trust_home = tempfile::tempdir().expect("isolated trust home");
+    let fixture = ProviderRunFixture::new_logical_with_gateway_extras(
+        true,
+        provider.clone(),
+        AliasLcGatewayExtras {
+            capability: Some(Arc::new(LcDialectCapabilitySource)),
+            trust_home: Some(trust_home.path().to_path_buf()),
+            availability: Some(lc_scoped_availability_gate(true, true)),
+        },
+    );
+    let canonical_aggregate_root = std::fs::canonicalize(
+        fixture
+            .member_checkout_root()
+            .parent()
+            .expect("member checkout lives under the aggregate root"),
+    )
+    .expect("canonical aggregate root");
+    // 用户冲突条目：目标根 projects 表持非 trusted 值。
+    let codex_config = trust_home.path().join(".codex").join("config.toml");
+    std::fs::create_dir_all(codex_config.parent().expect("codex config dir"))
+        .expect("create codex config dir");
+    std::fs::write(
+        &codex_config,
+        format!(
+            "[projects.\"{}\"]\ntrust_level = \"untrusted\"\n",
+            canonical_aggregate_root.display()
+        ),
+    )
+    .expect("seed codex conflict");
+    let conflict_bytes = std::fs::read(&codex_config).expect("conflict bytes");
+    let home_before = snapshot_tree(trust_home.path());
+    let trust_facts_before = snapshot_tree(&trust_facts_root(&fixture));
+
+    let (context, mut outbound_rx) =
+        single_candidate_context_for_author(&fixture, ProviderName::Codex, provider);
+    handle_workspace_inbound_message(
+        context,
+        WsInMessage::StartGeneration {
+            provider_config: author_provider_config(ProviderName::Codex),
+            reviewer_enabled: false,
+        },
+    )
+    .await;
+
+    let error = next_error_frame(&mut outbound_rx).await;
+    let message = error["message"].as_str().expect("error message");
+    assert!(
+        message.contains("provider_trust_missing"),
+        "冲突态同样以稳定判别码上浮，got: {message}"
+    );
+    assert!(
+        message.contains("codex_trust_key_conflict"),
+        "原始冲突 reason（codex_trust_key_conflict）保留，got: {message}"
+    );
+    assert!(
+        message.contains(&codex_config.display().to_string()),
+        "冲突指导指向隔离 home 真实 Codex 工件路径，got: {message}"
+    );
+
+    let durable = durable_session(&fixture);
+    assert_eq!(
+        durable.single_candidate_phase,
+        Some(SingleCandidatePhase::Prepare),
+        "冲突拒收保持 waiting/Prepare 面，got status={:?}",
+        durable.status
+    );
+    assert_ne!(durable.status, WorkspaceSessionStatus::Failed);
+    assert!(
+        !matches!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), input_rx.recv()).await,
+            Ok(Some(_))
+        ),
+        "冲突态必须 reject before provider startup"
+    );
+    // 用户冲突条目字节保持；home/durable trust 事实零写入。
+    assert_eq!(
+        std::fs::read(&codex_config).expect("conflict bytes after"),
+        conflict_bytes,
+        "用户冲突条目不得被覆盖"
+    );
+    assert_eq!(
+        home_before,
+        snapshot_tree(trust_home.path()),
+        "冲突拒收不得写隔离 home"
+    );
+    assert_eq!(
+        trust_facts_before,
+        snapshot_tree(&trust_facts_root(&fixture)),
+        "冲突拒收不得写 trust durable 事实"
+    );
+}
+
+/// 7.1 接线锚（登记后删除态）：真实 registry 曾登记本根（durable
+/// ownership/audit 在场），用户删除 home 侧工件后首次生成——admission/
+/// spawn 复验按只读事实拒收（entry absent），不复活条目、不改写
+/// ownership、不追加 audit；durable trust 事实快照冻结。
+#[tokio::test]
+async fn lc_first_generation_deleted_entry_does_not_resurrect_registration() {
+    use crate::product::logical_codebase::ProviderTrustRegistry;
+
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let provider = Arc::new(LcRecordingAuthorProvider {
+        output: single_candidate_markdown("story_0001", "design_0001"),
+        inputs: input_tx,
+    });
+    let trust_home = tempfile::tempdir().expect("isolated trust home");
+    let fixture = ProviderRunFixture::new_logical_with_gateway_extras(
+        true,
+        provider.clone(),
+        AliasLcGatewayExtras {
+            capability: Some(Arc::new(LcDialectCapabilitySource)),
+            trust_home: Some(trust_home.path().to_path_buf()),
+            availability: Some(lc_scoped_availability_gate(true, true)),
+        },
+    );
+    let canonical_aggregate_root = std::fs::canonicalize(
+        fixture
+            .member_checkout_root()
+            .parent()
+            .expect("member checkout lives under the aggregate root"),
+    )
+    .expect("canonical aggregate root");
+    // 真实 registry 登记两 provider（legacy 别名 LC 作用域=本夹具 durable
+    // 布局），随后删除 home 侧用户工件——「登记后删除」。
+    let registry = crate::product::logical_codebase::HomeBackedProviderTrustRegistry::new(
+        fixture.app_paths.clone(),
+        vec![
+            Arc::new(
+                crate::product::logical_codebase::CodexTrustAdapter::for_home(trust_home.path()),
+            ),
+            Arc::new(
+                crate::product::logical_codebase::KimiTrustAdapter::for_home(trust_home.path()),
+            ),
+        ],
+    );
+    let lc_id = crate::product::logical_codebase::store::legacy_logical_codebase_id("project_0001");
+    for trust_provider in [ProviderName::Codex, ProviderName::KimiCode] {
+        registry
+            .ensure_trusted(
+                "project_0001",
+                "aggregate_initialization_0001",
+                &lc_id,
+                &trust_provider,
+                &canonical_aggregate_root,
+            )
+            .unwrap_or_else(|error| panic!("seed ensure {trust_provider:?}: {error:?}"));
+    }
+    std::fs::remove_file(trust_home.path().join(".codex").join("config.toml"))
+        .expect("user deletes codex entry");
+    std::fs::remove_file(
+        crate::product::logical_codebase::KimiTrustAdapter::for_home(trust_home.path())
+            .record_path(&canonical_aggregate_root),
+    )
+    .expect("user deletes kimi entry");
+    let home_before = snapshot_tree(trust_home.path());
+    let trust_facts_before = snapshot_tree(&trust_facts_root(&fixture));
+    let audits_before = crate::product::logical_codebase::ProviderTrustStore::for_lc(
+        fixture.app_paths.clone(),
+        &lc_id,
+    )
+    .list_audit("project_0001")
+    .expect("audit baseline")
+    .len();
+    assert_eq!(audits_before, 2, "布置期恰好两条 ensure/registered 审计");
+
+    let (context, mut outbound_rx) =
+        single_candidate_context_for_author(&fixture, ProviderName::Codex, provider);
+    handle_workspace_inbound_message(
+        context,
+        WsInMessage::StartGeneration {
+            provider_config: author_provider_config(ProviderName::Codex),
+            reviewer_enabled: false,
+        },
+    )
+    .await;
+
+    let error = next_error_frame(&mut outbound_rx).await;
+    let message = error["message"].as_str().expect("error message");
+    assert!(
+        message.contains("provider_trust_missing"),
+        "删除态以 entry absent 判据拒收，got: {message}"
+    );
+    assert!(
+        message.contains(&canonical_aggregate_root.display().to_string()),
+        "指导携带本根 trust 键（同源），got: {message}"
+    );
+
+    let durable = durable_session(&fixture);
+    assert_eq!(
+        durable.single_candidate_phase,
+        Some(SingleCandidatePhase::Prepare),
+        "删除态保持 waiting/Prepare 面，got status={:?}",
+        durable.status
+    );
+    assert_ne!(durable.status, WorkspaceSessionStatus::Failed);
+    assert!(
+        !matches!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), input_rx.recv()).await,
+            Ok(Some(_))
+        ),
+        "删除态必须 reject before provider startup"
+    );
+    assert!(
+        !trust_home
+            .path()
+            .join(".codex")
+            .join("config.toml")
+            .exists(),
+        "生成路径不得复活被用户删除的条目"
+    );
+    assert_eq!(
+        home_before,
+        snapshot_tree(trust_home.path()),
+        "删除态拒收不得写隔离 home"
+    );
+    assert_eq!(
+        trust_facts_before,
+        snapshot_tree(&trust_facts_root(&fixture)),
+        "删除态拒收不得改写 durable trust 事实（ownership/audit 冻结）"
+    );
+    assert_eq!(
+        crate::product::logical_codebase::ProviderTrustStore::for_lc(
+            fixture.app_paths.clone(),
+            &lc_id,
+        )
+        .list_audit("project_0001")
+        .expect("audit after")
+        .len(),
+        audits_before,
+        "只读拒收不得追加 trust 审计"
     );
 }
