@@ -370,6 +370,12 @@ pub enum EngineEvent {
     HumanGateOpened {
         stage: String,
     },
+    /// A1c（Task 2.2）：durable LC 恢复事实变化（waiting/fresh/resolved 状态
+    /// 或 operation 结果推进）。Web runtime 以全量 authoritative
+    /// session_state 同步所有已连接页面，不造竞态 delta。此事件不经
+    /// WebSocket 对客户端序列化；mapping.rs 仅穷举忽略（BP1 最小 None 臂），
+    /// 真实广播接线由 Task 2.4（A1b2）router 串行接管。
+    LcResumeRecoveryChanged,
     Error {
         message: String,
     },

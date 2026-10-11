@@ -794,10 +794,268 @@ fn session_state_artifact_accepts_markdown_payload() {
         publication_provenance_ref: None,
         pending_choice_requests: Vec::new(),
         automation: None,
+        // A1c（Task 2.2）：无恢复时 wire 省略该字段（旧客户端零变化）。
+        lc_resume_recovery: None,
     };
     let json = serde_json::to_value(state).unwrap();
     assert_eq!(json["artifact"]["markdown"], "# Story");
     assert!(json["artifact"]["diff"].is_null());
+}
+
+// === A1c（Task 2.2）：typed 恢复 snapshot 与 operation 结果 wire ===
+
+#[test]
+fn anchor_t03_recovery_snapshot_and_operation_result_wire() {
+    use crate::product::models::{
+        LcFreshOperationResult, LcFreshOperationState, LcRecoveryBusinessContext,
+        LcRecoveryDraftRef, LcRecoveryRunContext, LcResumeRecoveryRecord, LcResumeRecoveryState,
+        ProviderConversationRole, WorkspaceSessionStatus, WorkItemDraftStatus,
+    };
+    use crate::web::workspace_ws_types::{
+        LcFreshOperationDto, LcResumeRecoveryDelivery, LcResumeRecoveryDto,
+    };
+
+    fn anchor_t03_business() -> LcRecoveryBusinessContext {
+        LcRecoveryBusinessContext {
+            entity_id: "wi_core".to_string(),
+            plan_id: Some("work_item_plan_0001".to_string()),
+            workspace_type: WorkspaceType::WorkItemPlan,
+            business_repository_physical_id: Some("repo_phys_0001".to_string()),
+            business_repository_logical_id: Some("repo_logical_0001".to_string()),
+            business_checkout_id: Some("checkout_0001".to_string()),
+            business_repository_path: Some("/repos/business".to_string()),
+            source_story_ids: vec!["story_0001".to_string()],
+            source_design_ids: vec!["design_0001".to_string()],
+            plan_options_ref: Some("plan_options_0001".to_string()),
+            artifact_refs: Vec::new(),
+            review_refs: Vec::new(),
+            author_provider: ProviderName::Codex,
+            effective_reviewer_provider: Some(ProviderName::ClaudeCode),
+            original_node_id: Some("node-1".to_string()),
+            original_role_run_seq: Some(7),
+        }
+    }
+
+    fn anchor_t03_recovery_record(
+        state: LcResumeRecoveryState,
+        operation_state: LcFreshOperationState,
+    ) -> LcResumeRecoveryRecord {
+        LcResumeRecoveryRecord {
+            schema_version: 1,
+            recovery_id: "rec-1".to_string(),
+            failed_provider_node_id: "node-1".to_string(),
+            reason_code: "resume_fingerprint_mismatch".to_string(),
+            role: ProviderConversationRole::Author,
+            provider: ProviderName::Codex,
+            superseded_native_session_id: Some("native-secret-session".to_string()),
+            previous_fingerprint_digest: Some("sha256:secret-full".to_string()),
+            previous_session_status: WorkspaceSessionStatus::Running,
+            previous_stage: "running".to_string(),
+            run_context: LcRecoveryRunContext::LegacyDraft {
+                business: anchor_t03_business(),
+                generation_round_id: "round-1".to_string(),
+                active_outline_id: "outline-1".to_string(),
+                draft_refs: vec![LcRecoveryDraftRef {
+                    draft_id: "draft-1".to_string(),
+                    status: WorkItemDraftStatus::Draft,
+                    version: Some(1),
+                    hash: Some("sha256:draft".to_string()),
+                }],
+                pending_feedback: Some("take 前固化的反馈".to_string()),
+                outline_ref: None,
+                candidate_ref: None,
+            },
+            state,
+            operation_id: Some("op-1".to_string()),
+            fresh_node_id: None,
+            fresh_native_session_id: None,
+            fresh_role_run_seq: None,
+            fresh_operations: vec![LcFreshOperationResult {
+                operation_id: "op-1".to_string(),
+                state: operation_state,
+                fresh_node_id: None,
+                reason_code: None,
+                role_run_seq: None,
+                accepted_at: "2026-10-11T00:03:00Z".to_string(),
+                updated_at: "2026-10-11T00:04:00Z".to_string(),
+            }],
+            detected_at: "2026-10-11T00:02:00Z".to_string(),
+            updated_at: "2026-10-11T00:04:00Z".to_string(),
+        }
+    }
+
+    fn anchor_t03_session_state_frame(dto: LcResumeRecoveryDto) -> WsOutMessage {
+        WsOutMessage::SessionState {
+            connection_id: None,
+            session_id: "workspace_session_0001".to_string(),
+            workspace_type: WorkspaceType::Story,
+            stage: "author_confirm".to_string(),
+            superpowers_enabled: true,
+            openspec_enabled: true,
+            messages: Vec::new(),
+            checkpoints: Vec::new(),
+            artifact: None,
+            providers: crate::web::workspace_ws_types::WsProviderConfig {
+                author: ProviderName::ClaudeCode,
+                reviewer: None,
+            },
+            timeline_nodes: Vec::new(),
+            active_node_id: None,
+            artifact_versions: Vec::new(),
+            artifact_version_summaries: Vec::new(),
+            timeline_node_details: std::collections::HashMap::new(),
+            timeline_node_summaries: std::collections::HashMap::new(),
+            active_run_id: None,
+            human_presentation_revisions: Vec::new(),
+            reviewer_enabled_at_start: None,
+            recoverable_interrupted_run: None,
+            plan_repair: None,
+            session_status: crate::product::models::WorkspaceSessionStatus::Running,
+            flow_kind: crate::product::work_item_plan_policy::WorkItemPlanFlowKind::Legacy,
+            run_policy: crate::product::work_item_plan_policy::RunPolicy::Interactive,
+            run_history: crate::product::work_item_plan_policy::RunHistory::default(),
+            review_invocation_scope: None,
+            human_gate_snapshot: None,
+            repair_reservation: None,
+            policy_diagnostics: Vec::new(),
+            provider_start_ledger: Vec::new(),
+            single_candidate_phase: None,
+            work_item_plan_source_revision_ref: None,
+            plan_candidate_ir_ref: None,
+            mechanical_report_ref: None,
+            publication_provenance_ref: None,
+            pending_choice_requests: Vec::new(),
+            automation: None,
+            lc_resume_recovery: Some(dto),
+        }
+    }
+
+    // waiting/reserved/running/resolved 四态 snapshot：必要字段序列化、
+    // last_operation 随行、native/digest 秘密不下发。
+    let cases = [
+        (
+            LcResumeRecoveryState::Waiting,
+            LcFreshOperationState::Failed,
+            "waiting",
+            "failed",
+        ),
+        (
+            LcResumeRecoveryState::FreshReserved,
+            LcFreshOperationState::Reserved,
+            "fresh_reserved",
+            "reserved",
+        ),
+        (
+            LcResumeRecoveryState::FreshRunning,
+            LcFreshOperationState::Running,
+            "fresh_running",
+            "running",
+        ),
+        (
+            LcResumeRecoveryState::Resolved,
+            LcFreshOperationState::Completed,
+            "resolved",
+            "completed",
+        ),
+    ];
+    for (recovery_state, operation_state, recovery_wire, operation_wire) in cases {
+        let record = anchor_t03_recovery_record(recovery_state, operation_state);
+        let frame = anchor_t03_session_state_frame(LcResumeRecoveryDto::from_record(&record));
+        let wire = serde_json::to_value(&frame).unwrap();
+        let serialized = serde_json::to_string(&frame).unwrap();
+
+        assert_eq!(wire["lc_resume_recovery"]["recovery_id"], "rec-1");
+        assert_eq!(wire["lc_resume_recovery"]["state"], recovery_wire);
+        assert_eq!(
+            wire["lc_resume_recovery"]["reason_code"],
+            "resume_fingerprint_mismatch"
+        );
+        assert_eq!(wire["lc_resume_recovery"]["provider"], "codex");
+        assert_eq!(wire["lc_resume_recovery"]["failed_node_id"], "node-1");
+        assert_eq!(wire["lc_resume_recovery"]["run_kind"], "legacy_draft");
+        assert_eq!(
+            wire["lc_resume_recovery"]["detected_at"],
+            "2026-10-11T00:02:00Z"
+        );
+        assert_eq!(
+            wire["lc_resume_recovery"]["updated_at"],
+            "2026-10-11T00:04:00Z"
+        );
+        assert_eq!(
+            wire["lc_resume_recovery"]["last_operation"]["operation_id"],
+            "op-1"
+        );
+        assert_eq!(
+            wire["lc_resume_recovery"]["last_operation"]["state"],
+            operation_wire
+        );
+        // A/B 发布纪律：B 波接齐前不投可启动动作（resolved 证据保留但空集）。
+        assert_eq!(
+            wire["lc_resume_recovery"]["allowed_actions"],
+            serde_json::json!([])
+        );
+
+        // snapshot 必要字段不含 native/digest 秘密。
+        assert!(wire.get("native_session_id").is_none());
+        assert!(!serialized.contains("native-secret-session"));
+        assert!(!serialized.contains("sha256:secret-full"));
+
+        // resolved：证据（时间/last_operation）保留但 allowed 为空。
+        if recovery_state == LcResumeRecoveryState::Resolved {
+            assert!(!wire["lc_resume_recovery"]["detected_at"].is_null());
+            assert!(!wire["lc_resume_recovery"]["last_operation"].is_null());
+            assert_eq!(
+                wire["lc_resume_recovery"]["allowed_actions"],
+                serde_json::json!([])
+            );
+        }
+    }
+
+    // 内部 RecoveryChanged 不是 wire delta（BP1：mapping 最小 None 忽略臂）。
+    use crate::product::workspace_engine::EngineEvent;
+    use crate::web::workspace_ws_handler::map_engine_event;
+    assert!(map_engine_event(EngineEvent::LcResumeRecoveryChanged).is_none());
+
+    // typed operation 结果帧：受理/回放同形态、state 取 durable、无 native 字段。
+    let replayed = WsOutMessage::LcResumeRecoveryOperationResult {
+        recovery_id: "rec-1".to_string(),
+        operation_id: "op-1".to_string(),
+        delivery: LcResumeRecoveryDelivery::Replayed,
+        operation_state: LcFreshOperationState::Running,
+        fresh_node_id: None,
+        reason_code: None,
+    };
+    let value = serde_json::to_value(&replayed).unwrap();
+    assert_eq!(value["type"], "lc_resume_recovery_operation_result");
+    assert_eq!(value["recovery_id"], "rec-1");
+    assert_eq!(value["operation_id"], "op-1");
+    assert_eq!(value["delivery"], "replayed");
+    assert_eq!(value["operation_state"], "running");
+    let parsed: WsOutMessage = serde_json::from_value(value).unwrap();
+    assert!(matches!(
+        parsed,
+        WsOutMessage::LcResumeRecoveryOperationResult {
+            delivery: LcResumeRecoveryDelivery::Replayed,
+            ..
+        }
+    ));
+    assert_eq!(
+        serde_json::to_value(LcResumeRecoveryDelivery::Accepted).unwrap(),
+        "accepted"
+    );
+
+    // last_operation DTO：reason?/fresh_node? 缺省省略。
+    let dto = LcFreshOperationDto {
+        operation_id: "op-2".to_string(),
+        state: LcFreshOperationState::NotStarted,
+        reason: None,
+        fresh_node: None,
+    };
+    let dto_value = serde_json::to_value(&dto).unwrap();
+    assert_eq!(dto_value["operation_id"], "op-2");
+    assert_eq!(dto_value["state"], "not_started");
+    assert!(dto_value.get("reason").is_none());
+    assert!(dto_value.get("fresh_node").is_none());
 }
 
 // 退役留档（T5/REQ-RET-02）：`author_decision_new_variants_roundtrip` 直接驱动已删除的 legacy 决策面，

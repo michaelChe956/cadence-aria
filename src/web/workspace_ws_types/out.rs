@@ -2,9 +2,11 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::product::logical_codebase::provider_admission_preflight::BootstrapActionKind;
 use crate::product::models::{
-    HumanPresentationRevision, NodeDetail, PlanRepairSessionSnapshotDto, WorkspaceSessionStatus,
-    WorkspaceType,
+    HumanPresentationRevision, LcFreshOperationState, LcRecoveryRunContext,
+    LcResumeRecoveryRecord, LcResumeRecoveryState, NodeDetail, PlanRepairSessionSnapshotDto,
+    ProviderName, WorkspaceSessionStatus, WorkspaceType,
 };
 use crate::product::work_item_plan_policy::{
     HumanGateSnapshot, PolicyDiagnostic, ProviderStartLedgerEntry, RepairReservation,
@@ -68,6 +70,101 @@ pub struct RecoverableInterruptedRun {
     pub failed_node_id: String,
     pub operation: RecoverableInterruptedOperation,
     pub label: String,
+}
+
+/// A1c（Task 2.2）：显式 fresh operation 的受理/回放投递标记（设计 §5.1）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LcResumeRecoveryDelivery {
+    Accepted,
+    Replayed,
+}
+
+/// A1c（Task 2.2）：SessionState.lc_resume_recovery.last_operation 投影
+/// （接口字典：operation_id/state/reason?/fresh_node?）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LcFreshOperationDto {
+    pub operation_id: String,
+    pub state: LcFreshOperationState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fresh_node: Option<String>,
+}
+
+/// A1c（Task 2.2）：LC 恢复对外纯投影（RecoveryDto）——最新 durable 事实的
+/// 必要字段：recovery_id/state/reason_code/provider/failed_node_id/run_kind/
+/// 时间/allowed_actions＋last_operation。native session ID、full fingerprint
+/// 与秘密配置一律不下发；resolved 保留证据与 last_operation 供 Replay。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LcResumeRecoveryDto {
+    pub recovery_id: String,
+    pub state: LcResumeRecoveryState,
+    pub reason_code: String,
+    pub provider: ProviderName,
+    pub failed_node_id: String,
+    pub run_kind: String,
+    pub detected_at: String,
+    pub updated_at: String,
+    pub allowed_actions: Vec<BootstrapActionKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_operation: Option<LcFreshOperationDto>,
+}
+
+impl LcResumeRecoveryDto {
+    /// durable `LcResumeRecoveryRecord` 的对外纯投影。last_operation 取
+    /// record.operation_id 指向的已受理结果（缺锚时回退最新一条，证据不丢）。
+    pub fn from_record(record: &LcResumeRecoveryRecord) -> Self {
+        let last_operation = match record.operation_id.as_deref() {
+            Some(current) => record
+                .fresh_operations
+                .iter()
+                .rev()
+                .find(|operation| operation.operation_id == current),
+            None => record.fresh_operations.last(),
+        }
+        .map(|operation| LcFreshOperationDto {
+            operation_id: operation.operation_id.clone(),
+            state: operation.state,
+            reason: operation.reason_code.clone(),
+            fresh_node: operation.fresh_node_id.clone(),
+        });
+        Self {
+            recovery_id: record.recovery_id.clone(),
+            state: record.state,
+            reason_code: record.reason_code.clone(),
+            provider: record.provider.clone(),
+            failed_node_id: record.failed_provider_node_id.clone(),
+            run_kind: lc_recovery_run_kind(&record.run_context).to_string(),
+            detected_at: record.detected_at.clone(),
+            updated_at: record.updated_at.clone(),
+            // A/B 发布纪律（设计 §4.5）：B0 与 covered-run fresh handler 接齐
+            // 前一律空集——waiting 不投可启动半成品（Plan Task 2.6 判据：
+            // waiting allowed 为空直到 B 齐），后端普通 generation/Revision/
+            // retry 入口真实拒收兜底。
+            allowed_actions: Vec::new(),
+            last_operation,
+        }
+    }
+}
+
+/// run_context 的对外 kind 名与 durable serde tag（snake_case）严格一致，
+/// 不引入第二套字符串协议；未知 kind 拒收由 durable 反序列化承载。
+fn lc_recovery_run_kind(context: &LcRecoveryRunContext) -> &'static str {
+    match context {
+        LcRecoveryRunContext::Author { .. } => "author",
+        LcRecoveryRunContext::AuthorChoiceFollowup { .. } => "author_choice_followup",
+        LcRecoveryRunContext::AuthorFeedback { .. } => "author_feedback",
+        LcRecoveryRunContext::ReviewerRevision { .. } => "reviewer_revision",
+        LcRecoveryRunContext::LegacyOutlineAuthor { .. } => "legacy_outline_author",
+        LcRecoveryRunContext::LegacyOutlineRevision { .. } => "legacy_outline_revision",
+        LcRecoveryRunContext::LegacyOutlineRebuild { .. } => "legacy_outline_rebuild",
+        LcRecoveryRunContext::LegacyDraft { .. } => "legacy_draft",
+        LcRecoveryRunContext::LegacyBatch { .. } => "legacy_batch",
+        LcRecoveryRunContext::LegacyPlanRevision { .. } => "legacy_plan_revision",
+        LcRecoveryRunContext::ScAuthor { .. } => "sc_author",
+        LcRecoveryRunContext::ScManualRevision { .. } => "sc_manual_revision",
+    }
 }
 
 // SessionState 必须按既有 WebSocket wire schema 内联完整 durable snapshot；为节省
@@ -247,6 +344,25 @@ pub enum WsOutMessage {
         /// 对外帧由 manager 以 durable 事实覆盖。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         automation: Option<crate::product::models::automation::AutomationOwnership>,
+        /// A1c（Task 2.2）：durable LC 恢复纯投影（waiting/fresh/resolved 主
+        /// 状态＋last_operation）；空/旧 wire 缺省省略。resolved 保留证据供
+        /// Replay；allowed_actions 在 B 波接齐前恒空（A/B 发布纪律）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lc_resume_recovery: Option<LcResumeRecoveryDto>,
+    },
+    /// A1c（Task 2.2）：显式 fresh operation 的 typed 受理/回放结果（设计
+    /// §5.1）。接受/回放同形态；operation_state 取 durable 事实，不从客户
+    /// 端乐观态猜；无 native/秘密字段。结果同时随 authoritative
+    /// SessionState.lc_resume_recovery.last_operation 供 observer/重连对账。
+    LcResumeRecoveryOperationResult {
+        recovery_id: String,
+        operation_id: String,
+        delivery: LcResumeRecoveryDelivery,
+        operation_state: LcFreshOperationState,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fresh_node_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason_code: Option<String>,
     },
     Error {
         message: String,
@@ -319,6 +435,7 @@ mod tests {
             publication_provenance_ref: Some("provenance-ref".to_string()),
             pending_choice_requests: Vec::new(),
             automation: None,
+            lc_resume_recovery: None,
         }
     }
 

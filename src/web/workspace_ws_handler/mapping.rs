@@ -246,7 +246,11 @@ pub(crate) fn map_engine_event(event: EngineEvent) -> Option<WsOutMessage> {
         EngineEvent::ArtifactBatchUpdate { .. }
         | EngineEvent::ChoicePendingChanged
         | EngineEvent::ProviderRunRequested { .. }
-        | EngineEvent::HumanGateOpened { .. } => {
+        | EngineEvent::HumanGateOpened { .. }
+        // A1c（Task 2.2，BP1）：内部恢复事实变化仅触发 authoritative
+        // session_state 全量同步，不是客户端 wire delta；真实广播接线由
+        // Task 2.4（A1b2）router 串行接管。
+        | EngineEvent::LcResumeRecoveryChanged => {
             return None;
         }
         EngineEvent::PermissionRequest {

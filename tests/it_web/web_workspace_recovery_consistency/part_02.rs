@@ -149,9 +149,19 @@ fn session_state_serde_roundtrip_preserves_work_item_plan_candidate() {
         automation: Some(
             cadence_aria::product::models::automation::AutomationOwnership::client_default(),
         ),
+        // A1c（Task 2.2）：无恢复时省略，roundtrip 保持 None。
+        lc_resume_recovery: None,
     };
 
     let value = serde_json::to_value(&state).expect("serialize SessionState");
+    assert!(
+        value
+            .as_object()
+            .expect("session state object")
+            .get("lc_resume_recovery")
+            .is_none(),
+        "A1c（Task 2.2）：无恢复时 wire 省略 lc_resume_recovery 字段"
+    );
     let roundtrip: WsOutMessage = serde_json::from_value(value).expect("deserialize SessionState");
 
     match roundtrip {

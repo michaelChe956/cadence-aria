@@ -1,5 +1,5 @@
 use super::*;
-use crate::web::workspace_ws_types::WsPendingChoiceRequest;
+use crate::web::workspace_ws_types::{LcResumeRecoveryDto, WsPendingChoiceRequest};
 
 mod stream;
 mod timeline;
@@ -525,6 +525,14 @@ impl WorkspaceEngine {
             automation: Some(
                 crate::product::models::automation::AutomationOwnership::client_default(),
             ),
+            // A1c（Task 2.2）：durable LC 恢复纯投影——直取 runtime session
+            // 镜像的 durable 字段（2.1 from_record 逐字段透传），引擎不写
+            // 恢复业务；对外出口（manager/router）不二次覆写。
+            lc_resume_recovery: self
+                .session
+                .lc_resume_recovery
+                .as_ref()
+                .map(LcResumeRecoveryDto::from_record),
         }
     }
     /// F-27：session_state 顶层挂起 choice 全量投影，双来源统一：
@@ -623,6 +631,192 @@ impl WorkspaceEngine {
                     created_at: message.created_at.clone(),
                 });
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod anchor_t03_tests {
+    //! A1c（Task 2.2）：build_session_state 取 durable 恢复字段的红/绿锚点。
+    use crate::product::app_paths::ProductAppPaths;
+    use crate::product::checkpoint_store::CheckpointStore;
+    use crate::product::lifecycle_store::LifecycleStore;
+    use crate::product::models::{
+        LcFreshOperationResult, LcFreshOperationState, LcRecoveryBusinessContext,
+        LcRecoveryDraftRef, LcRecoveryRunContext, LcResumeRecoveryRecord, LcResumeRecoveryState,
+        ProviderConversationRole, ProviderName, WorkspaceRolePermissionModes,
+        WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceType, WorkItemDraftStatus,
+    };
+    use crate::product::work_item_plan_policy::{RunHistory, RunPolicy, WorkItemPlanFlowKind};
+    use crate::product::workspace_engine::{WorkspaceEngine, WorkspaceSession};
+    use crate::web::workspace_ws_types::WsOutMessage;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+    use tokio::sync::mpsc;
+
+    fn anchor_t03_record(recovery: Option<LcResumeRecoveryRecord>) -> WorkspaceSessionRecord {
+        WorkspaceSessionRecord {
+            id: "workspace_session_0001".to_string(),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: "wi_core".to_string(),
+            workspace_type: WorkspaceType::WorkItemPlan,
+            status: WorkspaceSessionStatus::Running,
+            author_provider: ProviderName::Codex,
+            reviewer_provider: None,
+            review_rounds: 0,
+            permission_modes: WorkspaceRolePermissionModes::default(),
+            provisional_reviewer_provider: None,
+            reviewer_enabled_at_start: None,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+            flow_kind: WorkItemPlanFlowKind::Legacy,
+            run_policy: RunPolicy::Interactive,
+            run_history: RunHistory::default(),
+            review_invocation_scope: None,
+            human_gate_snapshot: None,
+            repair_reservation: None,
+            human_gate_reservation: None,
+            policy_diagnostics: Vec::new(),
+            provider_start_ledger: Vec::new(),
+            single_candidate_phase: None,
+            work_item_plan_source_revision_ref: None,
+            plan_candidate_ir_ref: None,
+            mechanical_report_ref: None,
+            publication_provenance_ref: None,
+            approval_attempt_id: None,
+            approved_at: None,
+            compile_reservation: None,
+            sc_recovery_claim: None,
+            work_item_runtime_binding: None,
+            work_item_child_binding: None,
+            provider_conversations: Vec::new(),
+            logical_launch_fingerprints: Vec::new(),
+            superseded_native_sessions: Vec::new(),
+            lc_resume_recovery: recovery,
+            messages: Vec::new(),
+            created_at: "2026-10-11T00:00:00Z".to_string(),
+            updated_at: "2026-10-11T00:00:00Z".to_string(),
+        }
+    }
+
+    fn anchor_t03_recovery() -> LcResumeRecoveryRecord {
+        LcResumeRecoveryRecord {
+            schema_version: 1,
+            recovery_id: "recovery_0001".to_string(),
+            failed_provider_node_id: "node_0001".to_string(),
+            reason_code: "resume_fingerprint_mismatch".to_string(),
+            role: ProviderConversationRole::Author,
+            provider: ProviderName::Codex,
+            superseded_native_session_id: Some("native_session_0001".to_string()),
+            previous_fingerprint_digest: Some("sha256:secret-full".to_string()),
+            previous_session_status: WorkspaceSessionStatus::Running,
+            previous_stage: "running".to_string(),
+            run_context: LcRecoveryRunContext::LegacyDraft {
+                business: LcRecoveryBusinessContext {
+                    entity_id: "wi_core".to_string(),
+                    plan_id: Some("work_item_plan_0001".to_string()),
+                    workspace_type: WorkspaceType::WorkItemPlan,
+                    business_repository_physical_id: None,
+                    business_repository_logical_id: None,
+                    business_checkout_id: None,
+                    business_repository_path: None,
+                    source_story_ids: Vec::new(),
+                    source_design_ids: Vec::new(),
+                    plan_options_ref: None,
+                    artifact_refs: Vec::new(),
+                    review_refs: Vec::new(),
+                    author_provider: ProviderName::Codex,
+                    effective_reviewer_provider: None,
+                    original_node_id: Some("node_0001".to_string()),
+                    original_role_run_seq: Some(7),
+                },
+                generation_round_id: "round_0001".to_string(),
+                active_outline_id: "outline_0001".to_string(),
+                draft_refs: vec![LcRecoveryDraftRef {
+                    draft_id: "draft_0001".to_string(),
+                    status: WorkItemDraftStatus::Draft,
+                    version: Some(1),
+                    hash: Some("sha256:draft".to_string()),
+                }],
+                pending_feedback: None,
+                outline_ref: None,
+                candidate_ref: None,
+            },
+            state: LcResumeRecoveryState::Waiting,
+            operation_id: Some("operation_0001".to_string()),
+            fresh_node_id: None,
+            fresh_native_session_id: None,
+            fresh_role_run_seq: None,
+            fresh_operations: vec![LcFreshOperationResult {
+                operation_id: "operation_0001".to_string(),
+                state: LcFreshOperationState::Failed,
+                fresh_node_id: None,
+                reason_code: Some("provider_prepare_failed".to_string()),
+                role_run_seq: None,
+                accepted_at: "2026-10-11T00:03:00Z".to_string(),
+                updated_at: "2026-10-11T00:04:00Z".to_string(),
+            }],
+            detected_at: "2026-10-11T00:02:00Z".to_string(),
+            updated_at: "2026-10-11T00:04:00Z".to_string(),
+        }
+    }
+
+    // WorkItemPlan 会话的 build_session_state 走持久读侧（revision_store 等），
+    // 按引擎测试惯例用隔离 TempDir 的 new_persistent 构造。
+    fn anchor_t03_engine(record: WorkspaceSessionRecord) -> (WorkspaceEngine, TempDirGuard) {
+        let tmp = TempDir::new().unwrap();
+        let lifecycle = LifecycleStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
+        let (event_tx, _event_rx) = mpsc::channel(1);
+        let engine = WorkspaceEngine::new_persistent(
+            Arc::new(CheckpointStore::new(tmp.path().to_path_buf())),
+            lifecycle,
+            event_tx,
+            WorkspaceSession::from_record(record),
+        );
+        (engine, TempDirGuard(tmp))
+    }
+
+    /// 防止 TempDir 过早 drop 删除引擎仍要读取的隔离目录。
+    struct TempDirGuard(TempDir);
+
+    #[test]
+    fn anchor_t03_build_session_state_projects_durable_recovery() {
+        // durable 字段（from_record 透传）→ SessionState 纯投影。
+        let (engine, _tmp_guard) = anchor_t03_engine(anchor_t03_record(Some(anchor_t03_recovery())));
+        match engine.build_session_state() {
+            WsOutMessage::SessionState {
+                lc_resume_recovery: Some(dto),
+                ..
+            } => {
+                assert_eq!(dto.recovery_id, "recovery_0001");
+                assert_eq!(dto.state, LcResumeRecoveryState::Waiting);
+                assert_eq!(dto.reason_code, "resume_fingerprint_mismatch");
+                assert_eq!(dto.provider, ProviderName::Codex);
+                assert_eq!(dto.failed_node_id, "node_0001");
+                assert_eq!(dto.run_kind, "legacy_draft");
+                // A/B 发布纪律：waiting allowed 为空直到 B 齐。
+                assert!(dto.allowed_actions.is_empty());
+                let last_operation = dto.last_operation.expect("last_operation projected");
+                assert_eq!(last_operation.operation_id, "operation_0001");
+                assert_eq!(last_operation.state, LcFreshOperationState::Failed);
+                assert_eq!(
+                    last_operation.reason.as_deref(),
+                    Some("provider_prepare_failed")
+                );
+                assert!(last_operation.fresh_node.is_none());
+            }
+            _ => panic!("expected SessionState"),
+        }
+
+        // 无恢复的 durable record：字段 None（wire 省略，旧客户端零变化）。
+        let (plain, _tmp_guard) = anchor_t03_engine(anchor_t03_record(None));
+        match plain.build_session_state() {
+            WsOutMessage::SessionState {
+                lc_resume_recovery: None,
+                ..
+            } => {}
+            _ => panic!("expected SessionState"),
         }
     }
 }
