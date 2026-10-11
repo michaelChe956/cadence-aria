@@ -8,6 +8,7 @@ use crate::product::work_item_plan_policy::{
 };
 use crate::web::workspace_ws_types::{TimelineNodeStatus, TimelineNodeType};
 
+use super::outline::WorkItemDraftStatus;
 use super::provider::{ProviderConversationRef, ProviderConversationRole, ProviderName};
 use super::work_item_revision::{ChildBindingIdentity, WorkItemRuntimeBinding};
 
@@ -211,7 +212,7 @@ pub struct LcRecoveryArtifactRef {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LcRecoveryDraftRef {
     pub draft_id: String,
-    pub status: String,
+    pub status: WorkItemDraftStatus,
     pub version: Option<u32>,
     pub hash: Option<String>,
 }

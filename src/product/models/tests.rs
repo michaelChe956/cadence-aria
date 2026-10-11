@@ -915,7 +915,7 @@ use crate::product::models::{
     LcRecoveryBusinessContext, LcRecoveryDraftRef, LcRecoveryRedoSpec, LcRecoveryRunContext,
     LcRetainedPlanItemRef, LcResumeRecoveryRecord, LcResumeRecoveryState, LogicalLaunchBasis,
     LogicalLaunchFingerprintRecord, LogicalLaunchFingerprintState, ProviderConversationRole,
-    SingleCandidatePhase, SupersededNativeSessionRecord,
+    SingleCandidatePhase, SupersededNativeSessionRecord, WorkItemDraftStatus,
 };
 use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
 use crate::product::workspace_engine::WorkspaceSession;
@@ -1015,7 +1015,7 @@ fn anchor_t02_all_run_contexts() -> Vec<(LcRecoveryRunContext, &'static str)> {
                 active_outline_id: "outline_0001".to_string(),
                 draft_refs: vec![LcRecoveryDraftRef {
                     draft_id: "draft_0001".to_string(),
-                    status: "changes_requested".to_string(),
+                    status: WorkItemDraftStatus::Draft,
                     version: Some(1),
                     hash: Some("sha256:draft".to_string()),
                 }],
@@ -1032,7 +1032,7 @@ fn anchor_t02_all_run_contexts() -> Vec<(LcRecoveryRunContext, &'static str)> {
                 active_outline_id: "outline_0001".to_string(),
                 draft_refs: vec![LcRecoveryDraftRef {
                     draft_id: "draft_0001".to_string(),
-                    status: "accepted".to_string(),
+                    status: WorkItemDraftStatus::Accepted,
                     version: Some(1),
                     hash: Some("sha256:draft".to_string()),
                 }],
@@ -1042,7 +1042,7 @@ fn anchor_t02_all_run_contexts() -> Vec<(LcRecoveryRunContext, &'static str)> {
                 batch_id: "batch_0001".to_string(),
                 batch_item_draft_refs: vec![LcRecoveryDraftRef {
                     draft_id: "draft_0002".to_string(),
-                    status: "running".to_string(),
+                    status: WorkItemDraftStatus::Draft,
                     version: Some(1),
                     hash: Some("sha256:draft2".to_string()),
                 }],
@@ -1150,7 +1150,7 @@ fn anchor_t02_recovery_record(state: LcResumeRecoveryState) -> LcResumeRecoveryR
             active_outline_id: "outline_0001".to_string(),
             draft_refs: vec![LcRecoveryDraftRef {
                 draft_id: "draft_0001".to_string(),
-                status: "changes_requested".to_string(),
+                status: WorkItemDraftStatus::Draft,
                 version: Some(1),
                 hash: Some("sha256:draft".to_string()),
             }],
