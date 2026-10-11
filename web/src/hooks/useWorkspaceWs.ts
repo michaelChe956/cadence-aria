@@ -835,6 +835,7 @@ export function useWorkspaceWs(sessionId: string | null) {
     sendLcResumeFresh,
     retryInterruptedRun,
     sendRegisterTrustEntry,
+    sendRequestRevision,
     sendWorkItemPlanCompileRecoveryAction,
     sendConfirmGate,
     sendAbandonGate,
