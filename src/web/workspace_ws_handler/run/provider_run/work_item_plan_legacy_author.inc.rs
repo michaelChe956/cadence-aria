@@ -242,6 +242,10 @@
                         return;
                     }
                 };
+                // 6.1 fix-loop（owner 验收回归）：outline Author 经 gateway
+                // spawn 的 trust 拒绝提升分类+同源指导（裸
+                // ProviderUnavailable 不再直出）。
+                let trust_gateway = logical_launch_gateway(&plan_launch);
                 let provider_session = start_work_item_plan_author(
                     plan_launch,
                     provider_for_run.clone(),
@@ -250,6 +254,14 @@
                     plan_split_run.as_ref(),
                 )
                 .await;
+                let provider_session = match provider_session {
+                    Ok(session) => Ok(session),
+                    Err(error) => Err(classify_generation_spawn_trust_failure(
+                        error,
+                        trust_gateway.as_ref(),
+                        &invocation.author_provider,
+                    )),
+                };
                 // 新 BLOCKER 修复：rebuilt snapshot 仅在 provider 成功启动后 commit。
                 // provider 启动失败不落盘 —— 重连仍判 StaleContext（避免再次 TOCTOU）。
                 if let Some(rebuilt) = rebuilt {
@@ -441,6 +453,8 @@
                                     return;
                                 }
                             };
+                            // 6.1 fix-loop：AutoRevision respawn 同臂同桥。
+                            let trust_gateway = logical_launch_gateway(&plan_launch);
                             let provider_session = start_work_item_plan_author(
                                 plan_launch,
                                 provider_for_run.clone(),
@@ -449,6 +463,14 @@
                                 plan_split_run.as_ref(),
                             )
                             .await;
+                            let provider_session = match provider_session {
+                                Ok(session) => Ok(session),
+                                Err(error) => Err(classify_generation_spawn_trust_failure(
+                                    error,
+                                    trust_gateway.as_ref(),
+                                    &invocation.author_provider,
+                                )),
+                            };
                             let full_output = match engine
                                 .drive_work_item_plan_provider_session_to_output(
                                     provider_session,

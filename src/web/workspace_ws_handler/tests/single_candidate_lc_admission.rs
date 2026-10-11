@@ -1958,3 +1958,105 @@ async fn lc_first_generation_deleted_entry_does_not_resurrect_registration() {
         "只读拒收不得追加 trust 审计"
     );
 }
+
+/// 6.1 fix-loop（owner 验收回归）：多仓 WorkItemPlan（Legacy flow）会话
+/// 首生成——outline Author 经 gateway spawn 的 trust 拒绝走**裸
+/// ProviderUnavailable 臂**（无 admission 预检/无 drift 包装，经
+/// `EngineEvent::Error` 上浮）——必须提升分类：错误携带
+/// `provider_trust_missing`＋同源 manual_guidance（真实工件路径/键形/
+/// 人工形状）＋生成场景 retry_action「人工登记…显式重新生成」，原诊断
+/// 原文保留；provider 零启动、home/trust durable 快照不变。
+#[tokio::test]
+async fn lc_legacy_generation_spawn_trust_missing_classifies_with_manual_guidance() {
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let provider = Arc::new(LcRecordingAuthorProvider {
+        output: single_candidate_markdown("story_0001", "design_0001"),
+        inputs: input_tx,
+    });
+    let trust_home = tempfile::tempdir().expect("isolated trust home");
+    let (fixture, mut engine_rx) =
+        ProviderRunFixture::new_logical_legacy_with_gateway_extras_and_engine_rx(
+            true,
+            provider.clone(),
+            AliasLcGatewayExtras {
+                capability: Some(Arc::new(LcDialectCapabilitySource)),
+                trust_home: Some(trust_home.path().to_path_buf()),
+                availability: Some(lc_scoped_availability_gate(true, true)),
+            },
+        );
+    let home_before = snapshot_tree(trust_home.path());
+    let trust_facts_before = snapshot_tree(&trust_facts_root(&fixture));
+
+    let (context, _outbound_rx) = single_candidate_context_for_author(
+        &fixture,
+        ProviderName::KimiCode,
+        provider,
+    );
+    handle_workspace_inbound_message(
+        context,
+        WsInMessage::StartGeneration {
+            provider_config: author_provider_config(ProviderName::KimiCode),
+            reviewer_enabled: false,
+        },
+    )
+    .await;
+
+    // 裸臂上浮面：spawn 失败经 EngineEvent::Error → WS error 消息
+    //（owner 现场同源观察点）。
+    let message = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            match engine_rx.recv().await {
+                Some(EngineEvent::Error { message }) => return message,
+                Some(_) => continue,
+                None => panic!("engine event channel closed before spawn error surfaced"),
+            }
+        }
+    })
+    .await
+    .expect("legacy outline spawn trust failure must surface via EngineEvent::Error");
+
+    assert!(
+        message.contains("provider_trust_missing"),
+        "spawn 臂 trust 拒绝必须提升 provider_trust_missing 分类，got: {message}"
+    );
+    assert!(
+        message.contains("provider trust not established for KimiCode"),
+        "原诊断原文必须保留（不吞 gateway 拒绝事实），got: {message}"
+    );
+    // 同源 manual_guidance：Kimi 真实工件目录+稳定键+记录形状。
+    assert!(
+        message.contains(
+            &trust_home
+                .path()
+                .join(".kimi-code")
+                .join("workspace-trust")
+                .display()
+                .to_string()
+        ) && message.contains("wd_aggregate-root_")
+            && message.contains("trustedAt"),
+        "spawn 臂指导必须同源（真实工件路径/键形/JSON 形状），got: {message}"
+    );
+    assert!(
+        message.contains("人工登记") && message.contains("显式重新生成"),
+        "spawn 臂必须携带生成场景 retry_action，got: {message}"
+    );
+
+    // provider 零启动；home/trust durable 快照不变（零 trust 写）。
+    assert!(
+        !matches!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), input_rx.recv()).await,
+            Ok(Some(_))
+        ),
+        "spawn 臂 trust 拒绝必须 reject before provider startup"
+    );
+    assert_eq!(
+        home_before,
+        snapshot_tree(trust_home.path()),
+        "spawn 臂拒收不得写隔离 home"
+    );
+    assert_eq!(
+        trust_facts_before,
+        snapshot_tree(&trust_facts_root(&fixture)),
+        "spawn 臂拒收不得写 trust durable 事实"
+    );
+}

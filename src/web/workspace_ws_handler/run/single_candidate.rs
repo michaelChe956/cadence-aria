@@ -47,8 +47,12 @@ const SINGLE_CANDIDATE_TERMINAL_REOPEN_GUIDANCE: &str =
 /// 终态），教学重驱是其唯一一次自愈机会。
 // r41 B2:unknown_structured_key 入可教面(F-48 先例:一次自愈机会;
 // contract_autorepair 可收敛多数,残余经教学重驱带 B1 白名单自纠)。
-const TEACHABLE_PARSE_FAILURE_CODES: [&str; 4] =
-    ["missing_section", "invalid_ears", "invalid_work_item_id", "unknown_structured_key"];
+const TEACHABLE_PARSE_FAILURE_CODES: [&str; 4] = [
+    "missing_section",
+    "invalid_ears",
+    "invalid_work_item_id",
+    "unknown_structured_key",
+];
 
 /// 该诊断码是否属于可教学重驱的 parse 语法类。
 fn is_teachable_parse_failure(code: &str) -> bool {
@@ -340,7 +344,9 @@ fn prevalidate_plan_candidate_ir(
             .flat_map(|task| task.done_when_refs.iter())
             .filter(|reference| {
                 reference.starts_with("AC-")
-                    && !registered.iter().any(|registered| registered == reference.as_str())
+                    && !registered
+                        .iter()
+                        .any(|registered| registered == reference.as_str())
             })
             .cloned()
             .collect();
@@ -433,6 +439,8 @@ async fn drive_single_candidate_reredrive(
         )
         .map_err(SingleCandidateProviderRunError::Message)?;
     let reredrive_input = engine.attach_tool_policy_audit(reredrive_input);
+    // 6.1 fix-loop：spawn 臂 trust 拒绝提升分类+同源指导（教学重驱同臂）。
+    let trust_gateway = super::provider_run::logical_launch_gateway(launch);
     let reredrive_session = start_work_item_plan_author(
         launch.clone(),
         Arc::clone(&provider_for_run),
@@ -441,6 +449,14 @@ async fn drive_single_candidate_reredrive(
         plan_split_run,
     )
     .await;
+    let reredrive_session = match reredrive_session {
+        Ok(session) => Ok(session),
+        Err(error) => Err(super::provider_run::classify_generation_spawn_trust_failure(
+            error,
+            trust_gateway.as_ref(),
+            author_provider,
+        )),
+    };
     let reredrive_output = match engine
         .drive_work_item_plan_provider_session_to_output(
             reredrive_session,
@@ -888,6 +904,9 @@ pub(crate) async fn run_single_candidate_author(
                 return Err(SingleCandidateProviderRunError::Message(message));
             }
         };
+    // 6.1 fix-loop：spawn 臂 trust 拒绝提升分类+同源指导（preflight 之后
+    // 的撤销窗口残余也以分类面呈现，不再裸直出）。
+    let trust_gateway = super::provider_run::logical_launch_gateway(&launch);
     let provider_session = start_work_item_plan_author(
         launch.clone(),
         Arc::clone(&provider_for_run),
@@ -896,6 +915,14 @@ pub(crate) async fn run_single_candidate_author(
         plan_split_run.as_ref(),
     )
     .await;
+    let provider_session = match provider_session {
+        Ok(session) => Ok(session),
+        Err(error) => Err(super::provider_run::classify_generation_spawn_trust_failure(
+            error,
+            trust_gateway.as_ref(),
+            &author_provider,
+        )),
+    };
     let full_output = match engine
         .drive_work_item_plan_provider_session_to_output(
             provider_session,
@@ -1047,10 +1074,8 @@ pub(crate) async fn run_single_candidate_author(
         if let Some(reasons) = prevalidate_plan_candidate_ir(engine, &lifecycle, &request, &ir) {
             if first_round_failure.is_none() {
                 first_round_failure = Some(reasons.join("; "));
-                let reredrive_prompt = build_work_item_plan_ir_reredrive_prompt(
-                    &reasons,
-                    &design_requirement_ids,
-                );
+                let reredrive_prompt =
+                    build_work_item_plan_ir_reredrive_prompt(&reasons, &design_requirement_ids);
                 engine
                     .emit_execution_event(
                         ProviderExecutionEvent {
@@ -1383,7 +1408,9 @@ mod r41_teachable_and_ir_prompt_tests {
     /// r41 A2:IR 重驱 prompt 附已登记需求编号清单与约束指令。
     #[test]
     fn ir_reredrive_prompt_appends_registered_requirement_ids() {
-        let reasons = vec!["unknown_requirement_ref: task references unknown design requirement NFR-1".to_string()];
+        let reasons = vec![
+            "unknown_requirement_ref: task references unknown design requirement NFR-1".to_string(),
+        ];
         let ids = vec!["REQ-ENV-01".to_string(), "NFR-PERF-02".to_string()];
         let prompt = build_work_item_plan_ir_reredrive_prompt(&reasons, &ids);
         assert!(prompt.contains("[design_requirements] REQ-ENV-01、NFR-PERF-02"));
@@ -1394,11 +1421,11 @@ mod r41_teachable_and_ir_prompt_tests {
     /// AC-002/AC-003 编造;产品 unknown_done_when_ref 只查 WI 内自洽)。
     #[test]
     fn ir_reredrive_prompt_lists_ac_namespace() {
-        let reasons = vec!["unknown_done_when_ref: task references unknown acceptance criterion AC-002".to_string()];
-        let ids = vec![
-            "REQ-ENV-01".to_string(),
-            "AC-001".to_string(),
+        let reasons = vec![
+            "unknown_done_when_ref: task references unknown acceptance criterion AC-002"
+                .to_string(),
         ];
+        let ids = vec!["REQ-ENV-01".to_string(), "AC-001".to_string()];
         let prompt = build_work_item_plan_ir_reredrive_prompt(&reasons, &ids);
         assert!(prompt.contains("AC-001"));
         assert!(

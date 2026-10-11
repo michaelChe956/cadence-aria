@@ -220,6 +220,37 @@ impl ProviderRunFixture {
         fixture
     }
 
+    /// 6.1 fix-loop（owner 验收回归）：多仓 WorkItemPlan（Legacy flow）
+    /// + LogicalAlias 路由 + gateway 覆盖项，且保留 engine 事件接收端
+    /// （观察 outline author 经 gateway spawn 失败的 `EngineEvent::Error`
+    /// 上浮面）。调用方 MUST 持续 drain engine_rx。
+    pub(super) fn new_logical_legacy_with_gateway_extras_and_engine_rx(
+        write_member_language_rules: bool,
+        gateway_author: Arc<dyn StreamingProviderAdapter>,
+        gateway_extras: AliasLcGatewayExtras,
+    ) -> (
+        Self,
+        mpsc::Receiver<EngineEvent>,
+    ) {
+        let (engine_tx, engine_rx) = mpsc::channel(64);
+        let fixture = Self::build_routed(
+            WorkItemPlanFlowKind::Legacy,
+            FixtureRoute::LogicalAlias(LogicalAliasSpec {
+                members: vec![if write_member_language_rules {
+                    MemberRuleMaterial::Present(DEFAULT_MEMBER_LANGUAGE_RULES.to_string())
+                } else {
+                    MemberRuleMaterial::Absent
+                }],
+                root_rules: None,
+                focus: LogicalAliasFocus::FirstMember,
+                gateway_author,
+                gateway_extras,
+            }),
+            engine_tx,
+        );
+        (fixture, engine_rx)
+    }
+
     /// 保留 engine 事件接收端：仅用于必须观测内部接力事件（如
     /// `ProviderRunRequested{WorkItemPlanSingleCandidateAuthor}`）的用例。调用方
     /// MUST 持续 drain，否则 engine 事件发送端在缓冲区满后阻塞。
@@ -266,7 +297,9 @@ impl ProviderRunFixture {
         // Legacy 恒默认正文（与 C-1 夹具字节一致）。
         let member_materials: Vec<MemberRuleMaterial> = match &route {
             FixtureRoute::Legacy => {
-                vec![MemberRuleMaterial::Present(DEFAULT_MEMBER_LANGUAGE_RULES.to_string())]
+                vec![MemberRuleMaterial::Present(
+                    DEFAULT_MEMBER_LANGUAGE_RULES.to_string(),
+                )]
             }
             FixtureRoute::LogicalAlias(spec) => spec.members.clone(),
         };
@@ -322,7 +355,9 @@ impl ProviderRunFixture {
                         path: member_root.path().to_path_buf(),
                         default_policy_preset: None,
                         default_provider_mode: None,
-                        idempotency_key: format!("provider-run-fixture-{flow_kind:?}-member-{index}"),
+                        idempotency_key: format!(
+                            "provider-run-fixture-{flow_kind:?}-member-{index}"
+                        ),
                     })
                     .expect("create extra member repository")
             })
@@ -552,8 +587,11 @@ fn apply_member_rule_material(member_root: &std::path::Path, material: &MemberRu
                 .expect("create directory at member language.md path");
         }
         MemberRuleMaterial::InvalidUtf8 => {
-            std::fs::write(rules_dir.join("language.md"), b"\xef\xbb\xbf\xff\xff broken utf8 \xff")
-                .expect("write invalid utf-8 member language rules");
+            std::fs::write(
+                rules_dir.join("language.md"),
+                b"\xef\xbb\xbf\xff\xff broken utf8 \xff",
+            )
+            .expect("write invalid utf-8 member language rules");
         }
     }
 }
