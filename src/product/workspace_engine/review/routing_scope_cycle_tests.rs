@@ -270,6 +270,9 @@ fn single_candidate_policy_invocation_rebuilds_verification_scope_from_durable_r
         approved_at: None,
         compile_reservation: None,
         provider_conversations: Vec::new(),
+        logical_launch_fingerprints: Vec::new(),
+        superseded_native_sessions: Vec::new(),
+        lc_resume_recovery: None,
         repository_path: None,
     };
     session.workspace_type = crate::product::models::WorkspaceType::WorkItemPlan;

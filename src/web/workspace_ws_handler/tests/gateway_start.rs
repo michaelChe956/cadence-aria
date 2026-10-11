@@ -226,6 +226,9 @@ fn workspace_session(repository_path: std::path::PathBuf) -> WorkspaceSession {
         approved_at: None,
         compile_reservation: None,
         provider_conversations: vec![],
+        logical_launch_fingerprints: vec![],
+        superseded_native_sessions: vec![],
+        lc_resume_recovery: None,
         repository_path: Some(repository_path),
     }
 }

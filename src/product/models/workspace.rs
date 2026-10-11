@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::human_gate::HumanGateReservation;
+use super::human_gate::{HumanGateReservation, HumanGateTurnStatus};
 use crate::cross_cutting::streaming_provider::ProviderPermissionMode;
 use crate::product::work_item_plan_policy::{
     HumanGateSnapshot, PolicyDiagnostic, ProviderStartLedgerEntry, RepairReservation,
@@ -8,7 +8,7 @@ use crate::product::work_item_plan_policy::{
 };
 use crate::web::workspace_ws_types::{TimelineNodeStatus, TimelineNodeType};
 
-use super::provider::{ProviderConversationRef, ProviderName};
+use super::provider::{ProviderConversationRef, ProviderConversationRole, ProviderName};
 use super::work_item_revision::{ChildBindingIdentity, WorkItemRuntimeBinding};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,6 +101,308 @@ pub enum ScRecoveryClaimState {
     NeedsHuman,
 }
 
+
+/// A1a（Task 2.1）：LC launch 指纹的 basis。旧 basis 不与新 full 混比；
+/// 缺 map/旧 basis → `resume_fingerprint_unavailable` 等待，不自动回填。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogicalLaunchBasis {
+    FullLcProjectionV2,
+}
+
+/// launch 指纹耐久状态：Prepared=spawn 前冻结；Active=native/run 绑定后；
+/// Superseded=tombstone 已落，旧 native 永不复活。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogicalLaunchFingerprintState {
+    Prepared,
+    Active,
+    Superseded,
+}
+
+fn default_lc_launch_schema_version() -> u16 {
+    1
+}
+
+/// A1a（Task 2.1）：同源完整 candidate 与 run-bound audit identity 就绪后、
+/// session spawn 前持久化的 full 投影指纹记录——按 native/run 绑定，不只
+/// 按 provider 覆旧。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogicalLaunchFingerprintRecord {
+    #[serde(default = "default_lc_launch_schema_version")]
+    pub schema_version: u16,
+    pub basis: LogicalLaunchBasis,
+    pub role: ProviderConversationRole,
+    pub provider: ProviderName,
+    pub role_run_seq: u64,
+    pub node_id: String,
+    /// 仅从真实 handshake/Completed/同 role_run_seq provider_start audit
+    /// 绑定；Prepared 阶段为 None，不倒算、不伪造虚 ID。
+    pub native_session_id: Option<String>,
+    pub fingerprint_digest: String,
+    pub planning_access_fingerprint: String,
+    pub state: LogicalLaunchFingerprintState,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// 旧 native 会话的耐久 tombstone：多代保留；清 conversation 不代替吊销；
+/// 旧 ID 不验证不造虚 ID，但 recovery waiting 仍存。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SupersededNativeSessionRecord {
+    pub role: ProviderConversationRole,
+    pub provider: ProviderName,
+    pub native_session_id: String,
+    pub reason_code: String,
+    pub recovery_id: String,
+    pub superseded_at: String,
+}
+
+/// 显式 fresh operation 的耐久状态：已受理 ID 不可再次 claim，prepare
+/// 失败回 waiting 时同 ID 只 Replay，不删除结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LcFreshOperationState {
+    NotStarted,
+    Reserved,
+    Running,
+    Completed,
+    Failed,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LcFreshOperationResult {
+    pub operation_id: String,
+    pub state: LcFreshOperationState,
+    pub fresh_node_id: Option<String>,
+    pub reason_code: Option<String>,
+    pub role_run_seq: Option<u64>,
+    pub accepted_at: String,
+    pub updated_at: String,
+}
+
+/// recovery 状态机：Waiting=漂移判定后的持久等待；FreshReserved=显式
+/// fresh claim 受理（provider start 仍为 0）；FreshRunning=prepare 成功的
+/// 新 native 运行；Resolved=完整 artifact 完成、证据保留。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LcResumeRecoveryState {
+    Waiting,
+    FreshReserved,
+    FreshRunning,
+    Resolved,
+}
+
+fn default_lc_resume_recovery_schema_version() -> u16 {
+    1
+}
+
+/// tagged 原 run 上下文的 durable artifact/source 引用（引用＋hash，不
+/// 序列化 runtime Arc/ProviderRunKind）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LcRecoveryArtifactRef {
+    pub ref_id: String,
+    pub version: Option<u32>,
+    pub hash: Option<String>,
+}
+
+/// Legacy Draft/Batch 每稿的耐久状态引用（feedback 在 builder.take 前固化）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LcRecoveryDraftRef {
+    pub draft_id: String,
+    pub status: String,
+    pub version: Option<u32>,
+    pub hash: Option<String>,
+}
+
+/// LegacyPlanRevision 的保留项（retained item ID/revision）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LcRetainedPlanItemRef {
+    pub item_id: String,
+    pub revision: u32,
+}
+
+/// LegacyPlanRevision 的 redo 项（old_id/feedback）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LcRecoveryRedoSpec {
+    pub old_item_id: String,
+    pub feedback: Option<String>,
+}
+
+/// 全族公共业务事实：entity/plan、原 business repository 已知身份、
+/// story/design 源 ID、plan options、artifact/source 版本引用＋hash、
+/// review nodes、author/effective reviewer、原 node/role_run_seq。未知身份
+/// 留 None，不倒算。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LcRecoveryBusinessContext {
+    pub entity_id: String,
+    pub plan_id: Option<String>,
+    pub workspace_type: WorkspaceType,
+    pub business_repository_physical_id: Option<String>,
+    pub business_repository_logical_id: Option<String>,
+    pub business_checkout_id: Option<String>,
+    pub business_repository_path: Option<String>,
+    pub source_story_ids: Vec<String>,
+    pub source_design_ids: Vec<String>,
+    pub plan_options_ref: Option<String>,
+    pub artifact_refs: Vec<LcRecoveryArtifactRef>,
+    pub review_refs: Vec<String>,
+    pub author_provider: ProviderName,
+    pub effective_reviewer_provider: Option<ProviderName>,
+    pub original_node_id: Option<String>,
+    pub original_role_run_seq: Option<u64>,
+}
+
+/// LegacyOutlineRebuild 的 origin payload（legacy_outline_author）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LcLegacyOutlineAuthorPayload {
+    pub flow: WorkItemPlanFlowKind,
+    pub original_provider_node_id: Option<String>,
+    pub outline_ref: Option<String>,
+}
+
+/// LegacyOutlineRebuild 的 origin payload（legacy_outline_revision）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LcLegacyOutlineRevisionPayload {
+    pub normalized_feedback: String,
+    pub outline_ref: Option<String>,
+    pub outline_version: Option<u32>,
+    pub outline_hash: Option<String>,
+}
+
+/// rebuild origin 仅接受 legacy_author / outline_revision 的完整 payload，
+/// 不丢 feedback。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LcOutlineRebuildOrigin {
+    LegacyAuthor(LcLegacyOutlineAuthorPayload),
+    OutlineRevision(LcLegacyOutlineRevisionPayload),
+}
+
+/// A1a（Task 2.1）：tagged 原 run 上下文（serde kind tag）——各 Plan 身份
+/// 的可重建事实。未知 kind/非法 flow 反序列化拒收，由上层映射 typed
+/// `lc_resume_recovery_context_unsupported`，不 fallback Author/plan_author。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LcRecoveryRunContext {
+    Author {
+        business: LcRecoveryBusinessContext,
+        original_content: Option<String>,
+    },
+    AuthorChoiceFollowup {
+        business: LcRecoveryBusinessContext,
+        original_content: Option<String>,
+    },
+    AuthorFeedback {
+        business: LcRecoveryBusinessContext,
+        original_feedback: Option<String>,
+    },
+    ReviewerRevision {
+        business: LcRecoveryBusinessContext,
+        original_feedback: Option<String>,
+    },
+    LegacyOutlineAuthor {
+        business: LcRecoveryBusinessContext,
+        flow: WorkItemPlanFlowKind,
+        original_provider_node_id: Option<String>,
+        outline_ref: Option<String>,
+    },
+    LegacyOutlineRevision {
+        business: LcRecoveryBusinessContext,
+        normalized_feedback: String,
+        outline_ref: Option<String>,
+        outline_version: Option<u32>,
+        outline_hash: Option<String>,
+    },
+    LegacyOutlineRebuild {
+        business: LcRecoveryBusinessContext,
+        origin: LcOutlineRebuildOrigin,
+        previous_snapshot_access_fingerprint: Option<String>,
+    },
+    LegacyDraft {
+        business: LcRecoveryBusinessContext,
+        generation_round_id: String,
+        active_outline_id: String,
+        draft_refs: Vec<LcRecoveryDraftRef>,
+        pending_feedback: Option<String>,
+        outline_ref: Option<String>,
+        candidate_ref: Option<String>,
+    },
+    LegacyBatch {
+        business: LcRecoveryBusinessContext,
+        generation_round_id: String,
+        active_outline_id: String,
+        draft_refs: Vec<LcRecoveryDraftRef>,
+        pending_feedback: Option<String>,
+        outline_ref: Option<String>,
+        candidate_ref: Option<String>,
+        batch_id: String,
+        batch_item_draft_refs: Vec<LcRecoveryDraftRef>,
+    },
+    LegacyPlanRevision {
+        business: LcRecoveryBusinessContext,
+        candidate_ref: Option<String>,
+        candidate_version: Option<u32>,
+        candidate_hash: Option<String>,
+        retained_items: Vec<LcRetainedPlanItemRef>,
+        redo_specs: Vec<LcRecoveryRedoSpec>,
+        overall_feedback: Option<String>,
+    },
+    ScAuthor {
+        business: LcRecoveryBusinessContext,
+        flow: WorkItemPlanFlowKind,
+        single_candidate_phase: SingleCandidatePhase,
+        provider_start_reservation_key: Option<String>,
+        source_revision_ref: Option<String>,
+        ir_ref: Option<String>,
+        report_ref: Option<String>,
+        candidate_source_hash: Option<String>,
+        business_material_identity: Option<String>,
+    },
+    ScManualRevision {
+        business: LcRecoveryBusinessContext,
+        turn_id: String,
+        command_id: String,
+        source_hash: String,
+        turn_status: HumanGateTurnStatus,
+        attempt_no: u32,
+        budget_reserved: u32,
+        human_gate_reservation_key: Option<String>,
+        gate_snapshot_ref: Option<String>,
+        source_revision_ref: Option<String>,
+        feedback_text: Option<String>,
+        assembly_digest: Option<String>,
+        assembly_ref: Option<String>,
+    },
+}
+
+/// A1a（Task 2.1）：当前 LC 恢复的 durable 主记录——恢复身份、reason、旧
+/// native/digest/失败节点、原 business 状态、tagged run_context、状态机、
+/// fresh run/node/native 绑定与 operation 结果历史。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LcResumeRecoveryRecord {
+    #[serde(default = "default_lc_resume_recovery_schema_version")]
+    pub schema_version: u16,
+    pub recovery_id: String,
+    pub failed_provider_node_id: String,
+    pub reason_code: String,
+    pub role: ProviderConversationRole,
+    pub provider: ProviderName,
+    pub superseded_native_session_id: Option<String>,
+    pub previous_fingerprint_digest: Option<String>,
+    pub previous_session_status: WorkspaceSessionStatus,
+    pub previous_stage: String,
+    pub run_context: LcRecoveryRunContext,
+    pub state: LcResumeRecoveryState,
+    pub operation_id: Option<String>,
+    pub fresh_node_id: Option<String>,
+    pub fresh_native_session_id: Option<String>,
+    pub fresh_role_run_seq: Option<u64>,
+    pub fresh_operations: Vec<LcFreshOperationResult>,
+    pub detected_at: String,
+    pub updated_at: String,
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct WorkspaceSessionRecord {
@@ -167,6 +469,16 @@ pub struct WorkspaceSessionRecord {
     pub work_item_child_binding: Option<ChildBindingIdentity>,
     #[serde(default)]
     pub provider_conversations: Vec<ProviderConversationRef>,
+    /// A1a（Task 2.1）：LC launch 指纹耐久事实（session 唯一持久源；engine
+    /// 内存 map 仅索引）。旧 JSON 缺失读默认空。
+    #[serde(default)]
+    pub logical_launch_fingerprints: Vec<LogicalLaunchFingerprintRecord>,
+    /// A1a（Task 2.1）：旧 native 会话多代 tombstone（多代保留，不复活）。
+    #[serde(default)]
+    pub superseded_native_sessions: Vec<SupersededNativeSessionRecord>,
+    /// A1a（Task 2.1）：当前 LC 恢复记录（waiting/fresh/resolved 主状态）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lc_resume_recovery: Option<LcResumeRecoveryRecord>,
     pub messages: Vec<WorkspaceMessageRecord>,
     pub created_at: String,
     pub updated_at: String,

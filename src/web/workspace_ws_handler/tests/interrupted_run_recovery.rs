@@ -79,6 +79,9 @@ async fn interrupted_recovery_provider_start_failure_returns_to_prepare_context(
         approved_at: None,
         compile_reservation: None,
         provider_conversations: vec![],
+        logical_launch_fingerprints: vec![],
+        superseded_native_sessions: vec![],
+        lc_resume_recovery: None,
         repository_path: None,
     };
     let mut workspace_engine = WorkspaceEngine::new(checkpoint_store, tx, session);

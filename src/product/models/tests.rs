@@ -385,6 +385,9 @@ fn workspace_session_runtime_binding_is_optional_and_work_item_scoped() {
         work_item_runtime_binding: Some(binding.clone()),
         work_item_child_binding: None,
         sc_recovery_claim: None,
+        logical_launch_fingerprints: Vec::new(),
+        superseded_native_sessions: Vec::new(),
+        lc_resume_recovery: None,
     };
 
     assert_serde_roundtrip(&session);
@@ -899,4 +902,435 @@ fn legacy_design_spec_roundtrips_with_aggregate_defaults() {
         serde_json::from_value::<DesignSpecRecord>(encoded).unwrap(),
         record
     );
+}
+
+// === A1a（Task 2.1）：durable 恢复记录模型 ===
+// anchor_t02：旧 JSON 缺新字段读默认空；tagged run_context 各 Plan 身份
+// roundtrip；full basis/native/run 绑定；runtime from_record 逐字段透传且
+// reload 保留 business repository_path。
+
+use crate::product::models::{
+    LcFreshOperationResult, LcFreshOperationState, LcLegacyOutlineAuthorPayload,
+    LcLegacyOutlineRevisionPayload, LcOutlineRebuildOrigin, LcRecoveryArtifactRef,
+    LcRecoveryBusinessContext, LcRecoveryDraftRef, LcRecoveryRedoSpec, LcRecoveryRunContext,
+    LcRetainedPlanItemRef, LcResumeRecoveryRecord, LcResumeRecoveryState, LogicalLaunchBasis,
+    LogicalLaunchFingerprintRecord, LogicalLaunchFingerprintState, ProviderConversationRole,
+    SingleCandidatePhase, SupersededNativeSessionRecord,
+};
+use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
+use crate::product::workspace_engine::WorkspaceSession;
+
+fn anchor_t02_business_context() -> LcRecoveryBusinessContext {
+    LcRecoveryBusinessContext {
+        entity_id: "wi_core".to_string(),
+        plan_id: Some("work_item_plan_0001".to_string()),
+        workspace_type: WorkspaceType::WorkItemPlan,
+        business_repository_physical_id: Some("repo_phys_0001".to_string()),
+        business_repository_logical_id: Some("repo_logical_0001".to_string()),
+        business_checkout_id: Some("checkout_0001".to_string()),
+        business_repository_path: Some("/repos/business".to_string()),
+        source_story_ids: vec!["story_0001".to_string()],
+        source_design_ids: vec!["design_0001".to_string()],
+        plan_options_ref: Some("plan_options_0001".to_string()),
+        artifact_refs: vec![LcRecoveryArtifactRef {
+            ref_id: "artifact_0001".to_string(),
+            version: Some(3),
+            hash: Some("sha256:artifact".to_string()),
+        }],
+        review_refs: vec!["review_node_0001".to_string()],
+        author_provider: ProviderName::Codex,
+        effective_reviewer_provider: Some(ProviderName::ClaudeCode),
+        original_node_id: Some("node_0001".to_string()),
+        original_role_run_seq: Some(7),
+    }
+}
+
+fn anchor_t02_all_run_contexts() -> Vec<(LcRecoveryRunContext, &'static str)> {
+    let business = anchor_t02_business_context();
+    vec![
+        (
+            LcRecoveryRunContext::Author {
+                business: business.clone(),
+                original_content: Some("原 author prompt 内容".to_string()),
+            },
+            "author",
+        ),
+        (
+            LcRecoveryRunContext::AuthorChoiceFollowup {
+                business: business.clone(),
+                original_content: Some("choice followup 内容".to_string()),
+            },
+            "author_choice_followup",
+        ),
+        (
+            LcRecoveryRunContext::AuthorFeedback {
+                business: business.clone(),
+                original_feedback: Some("author 反馈".to_string()),
+            },
+            "author_feedback",
+        ),
+        (
+            LcRecoveryRunContext::ReviewerRevision {
+                business: business.clone(),
+                original_feedback: Some("reviewer 修订反馈".to_string()),
+            },
+            "reviewer_revision",
+        ),
+        (
+            LcRecoveryRunContext::LegacyOutlineAuthor {
+                business: business.clone(),
+                flow: WorkItemPlanFlowKind::Legacy,
+                original_provider_node_id: Some("node_outline_0001".to_string()),
+                outline_ref: Some("outline_0001".to_string()),
+            },
+            "legacy_outline_author",
+        ),
+        (
+            LcRecoveryRunContext::LegacyOutlineRevision {
+                business: business.clone(),
+                normalized_feedback: "规范化反馈（捕获实际 default）".to_string(),
+                outline_ref: Some("outline_0001".to_string()),
+                outline_version: Some(2),
+                outline_hash: Some("sha256:outline".to_string()),
+            },
+            "legacy_outline_revision",
+        ),
+        (
+            LcRecoveryRunContext::LegacyOutlineRebuild {
+                business: business.clone(),
+                origin: LcOutlineRebuildOrigin::OutlineRevision(LcLegacyOutlineRevisionPayload {
+                    normalized_feedback: "重建前的修订反馈不丢".to_string(),
+                    outline_ref: Some("outline_0001".to_string()),
+                    outline_version: Some(2),
+                    outline_hash: Some("sha256:outline".to_string()),
+                }),
+                previous_snapshot_access_fingerprint: Some("sha256:snapshot_access".to_string()),
+            },
+            "legacy_outline_rebuild",
+        ),
+        (
+            LcRecoveryRunContext::LegacyDraft {
+                business: business.clone(),
+                generation_round_id: "round_0001".to_string(),
+                active_outline_id: "outline_0001".to_string(),
+                draft_refs: vec![LcRecoveryDraftRef {
+                    draft_id: "draft_0001".to_string(),
+                    status: "changes_requested".to_string(),
+                    version: Some(1),
+                    hash: Some("sha256:draft".to_string()),
+                }],
+                pending_feedback: Some("take 前固化的反馈".to_string()),
+                outline_ref: Some("outline_0001".to_string()),
+                candidate_ref: Some("candidate_0001".to_string()),
+            },
+            "legacy_draft",
+        ),
+        (
+            LcRecoveryRunContext::LegacyBatch {
+                business: business.clone(),
+                generation_round_id: "round_0001".to_string(),
+                active_outline_id: "outline_0001".to_string(),
+                draft_refs: vec![LcRecoveryDraftRef {
+                    draft_id: "draft_0001".to_string(),
+                    status: "accepted".to_string(),
+                    version: Some(1),
+                    hash: Some("sha256:draft".to_string()),
+                }],
+                pending_feedback: Some("take 前固化的批量反馈".to_string()),
+                outline_ref: Some("outline_0001".to_string()),
+                candidate_ref: Some("candidate_0001".to_string()),
+                batch_id: "batch_0001".to_string(),
+                batch_item_draft_refs: vec![LcRecoveryDraftRef {
+                    draft_id: "draft_0002".to_string(),
+                    status: "running".to_string(),
+                    version: Some(1),
+                    hash: Some("sha256:draft2".to_string()),
+                }],
+            },
+            "legacy_batch",
+        ),
+        (
+            LcRecoveryRunContext::LegacyPlanRevision {
+                business: business.clone(),
+                candidate_ref: Some("candidate_0001".to_string()),
+                candidate_version: Some(2),
+                candidate_hash: Some("sha256:candidate".to_string()),
+                retained_items: vec![LcRetainedPlanItemRef {
+                    item_id: "wi_core".to_string(),
+                    revision: 3,
+                }],
+                redo_specs: vec![LcRecoveryRedoSpec {
+                    old_item_id: "wi_legacy".to_string(),
+                    feedback: Some("redo 反馈".to_string()),
+                }],
+                overall_feedback: Some("整体反馈".to_string()),
+            },
+            "legacy_plan_revision",
+        ),
+        (
+            LcRecoveryRunContext::ScAuthor {
+                business: business.clone(),
+                flow: WorkItemPlanFlowKind::SingleCandidate,
+                single_candidate_phase: SingleCandidatePhase::Generate,
+                provider_start_reservation_key: Some("compile_0001".to_string()),
+                source_revision_ref: Some("source_rev_0001".to_string()),
+                ir_ref: Some("ir_0001".to_string()),
+                report_ref: Some("report_0001".to_string()),
+                candidate_source_hash: Some("sha256:candidate_source".to_string()),
+                business_material_identity: Some("material_identity_0001".to_string()),
+            },
+            "sc_author",
+        ),
+        (
+            LcRecoveryRunContext::ScManualRevision {
+                business,
+                turn_id: "turn_0001".to_string(),
+                command_id: "command_0001".to_string(),
+                source_hash: "sha256:candidate".to_string(),
+                turn_status: HumanGateTurnStatus::Running,
+                attempt_no: 2,
+                budget_reserved: 1,
+                human_gate_reservation_key: Some("reservation_key_0001".to_string()),
+                gate_snapshot_ref: Some("gate_snapshot_0001".to_string()),
+                source_revision_ref: Some("source_rev_0001".to_string()),
+                feedback_text: Some("同 turn 的人工反馈".to_string()),
+                assembly_digest: Some("sha256:assembly".to_string()),
+                assembly_ref: Some("assembly_0001".to_string()),
+            },
+            "sc_manual_revision",
+        ),
+    ]
+}
+
+fn anchor_t02_launch_fingerprint(
+    state: LogicalLaunchFingerprintState,
+) -> LogicalLaunchFingerprintRecord {
+    LogicalLaunchFingerprintRecord {
+        schema_version: 1,
+        basis: LogicalLaunchBasis::FullLcProjectionV2,
+        role: ProviderConversationRole::Author,
+        provider: ProviderName::Codex,
+        role_run_seq: 7,
+        node_id: "node_0001".to_string(),
+        native_session_id: Some("native_session_0001".to_string()),
+        fingerprint_digest: "sha256:full_projection".to_string(),
+        planning_access_fingerprint: "sha256:planning_access".to_string(),
+        state,
+        created_at: "2026-10-11T00:00:00Z".to_string(),
+        updated_at: "2026-10-11T00:01:00Z".to_string(),
+    }
+}
+
+fn anchor_t02_superseded_native_session() -> SupersededNativeSessionRecord {
+    SupersededNativeSessionRecord {
+        role: ProviderConversationRole::Author,
+        provider: ProviderName::Codex,
+        native_session_id: "native_session_0001".to_string(),
+        reason_code: "resume_fingerprint_mismatch".to_string(),
+        recovery_id: "recovery_0001".to_string(),
+        superseded_at: "2026-10-11T00:02:00Z".to_string(),
+    }
+}
+
+fn anchor_t02_recovery_record(state: LcResumeRecoveryState) -> LcResumeRecoveryRecord {
+    LcResumeRecoveryRecord {
+        schema_version: 1,
+        recovery_id: "recovery_0001".to_string(),
+        failed_provider_node_id: "node_0001".to_string(),
+        reason_code: "resume_fingerprint_mismatch".to_string(),
+        role: ProviderConversationRole::Author,
+        provider: ProviderName::Codex,
+        superseded_native_session_id: Some("native_session_0001".to_string()),
+        previous_fingerprint_digest: Some("sha256:full_projection".to_string()),
+        previous_session_status: WorkspaceSessionStatus::Running,
+        previous_stage: "running".to_string(),
+        run_context: LcRecoveryRunContext::LegacyDraft {
+            business: anchor_t02_business_context(),
+            generation_round_id: "round_0001".to_string(),
+            active_outline_id: "outline_0001".to_string(),
+            draft_refs: vec![LcRecoveryDraftRef {
+                draft_id: "draft_0001".to_string(),
+                status: "changes_requested".to_string(),
+                version: Some(1),
+                hash: Some("sha256:draft".to_string()),
+            }],
+            pending_feedback: Some("take 前固化的反馈".to_string()),
+            outline_ref: Some("outline_0001".to_string()),
+            candidate_ref: Some("candidate_0001".to_string()),
+        },
+        state,
+        operation_id: Some("operation_0001".to_string()),
+        fresh_node_id: None,
+        fresh_native_session_id: None,
+        fresh_role_run_seq: None,
+        fresh_operations: vec![LcFreshOperationResult {
+            operation_id: "operation_0001".to_string(),
+            state: LcFreshOperationState::Reserved,
+            fresh_node_id: None,
+            reason_code: None,
+            role_run_seq: None,
+            accepted_at: "2026-10-11T00:03:00Z".to_string(),
+            updated_at: "2026-10-11T00:03:00Z".to_string(),
+        }],
+        detected_at: "2026-10-11T00:02:00Z".to_string(),
+        updated_at: "2026-10-11T00:03:00Z".to_string(),
+    }
+}
+
+#[test]
+fn anchor_t02_recovery_schema_roundtrips_all_run_contexts() {
+    // tagged run_context：每个 Plan 身份 roundtrip 且 wire kind 稳定；
+    // 未知 kind 的反序列化拒收由 typed 错误映射（context_unsupported）承载。
+    for (context, expected_kind) in anchor_t02_all_run_contexts() {
+        assert_serde_roundtrip(&context);
+        let value = serde_json::to_value(&context).unwrap();
+        assert_eq!(value["kind"], expected_kind, "run_context kind");
+    }
+
+    // rebuild origin 两种来源的完整 payload 不丢 feedback。
+    let origin_author = LcOutlineRebuildOrigin::LegacyAuthor(LcLegacyOutlineAuthorPayload {
+        flow: WorkItemPlanFlowKind::Legacy,
+        original_provider_node_id: Some("node_outline_0001".to_string()),
+        outline_ref: Some("outline_0001".to_string()),
+    });
+    assert_serde_roundtrip(&origin_author);
+    assert_eq!(
+        serde_json::to_value(&origin_author).unwrap()["legacy_author"]["flow"],
+        "legacy"
+    );
+
+    // full basis/native/run 绑定的 launch 指纹记录。
+    assert_enum_cases([(LogicalLaunchBasis::FullLcProjectionV2, "full_lc_projection_v2")]);
+    for state in [
+        LogicalLaunchFingerprintState::Prepared,
+        LogicalLaunchFingerprintState::Active,
+        LogicalLaunchFingerprintState::Superseded,
+    ] {
+        let fingerprint = anchor_t02_launch_fingerprint(state);
+        assert_serde_roundtrip(&fingerprint);
+        assert_eq!(fingerprint.schema_version, 1);
+    }
+    assert_enum_cases([
+        (LogicalLaunchFingerprintState::Prepared, "prepared"),
+        (LogicalLaunchFingerprintState::Active, "active"),
+        (LogicalLaunchFingerprintState::Superseded, "superseded"),
+    ]);
+
+    // 多代 tombstone：旧 native 吊销证据耐久保留。
+    assert_serde_roundtrip(&anchor_t02_superseded_native_session());
+
+    // 恢复状态机与 operation 状态 wire 名。
+    assert_enum_cases([
+        (LcResumeRecoveryState::Waiting, "waiting"),
+        (LcResumeRecoveryState::FreshReserved, "fresh_reserved"),
+        (LcResumeRecoveryState::FreshRunning, "fresh_running"),
+        (LcResumeRecoveryState::Resolved, "resolved"),
+    ]);
+    assert_enum_cases([
+        (LcFreshOperationState::NotStarted, "not_started"),
+        (LcFreshOperationState::Reserved, "reserved"),
+        (LcFreshOperationState::Running, "running"),
+        (LcFreshOperationState::Completed, "completed"),
+        (LcFreshOperationState::Failed, "failed"),
+        (LcFreshOperationState::Unknown, "unknown"),
+    ]);
+    let operation = LcFreshOperationResult {
+        operation_id: "operation_0001".to_string(),
+        state: LcFreshOperationState::Reserved,
+        fresh_node_id: None,
+        reason_code: None,
+        role_run_seq: None,
+        accepted_at: "2026-10-11T00:03:00Z".to_string(),
+        updated_at: "2026-10-11T00:03:00Z".to_string(),
+    };
+    assert_serde_roundtrip(&operation);
+
+    // 恢复记录整体 roundtrip：run_context 身份保持（plan 锚）。
+    let original = anchor_t02_recovery_record(LcResumeRecoveryState::Waiting);
+    let json = serde_json::to_value(&original).unwrap();
+    let roundtrip: LcResumeRecoveryRecord = serde_json::from_value(json).unwrap();
+    assert_eq!(roundtrip.run_context, original.run_context);
+    assert_eq!(roundtrip, original);
+}
+
+fn anchor_t02_session_record() -> WorkspaceSessionRecord {
+    WorkspaceSessionRecord {
+        id: "workspace_session_0001".to_string(),
+        project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        entity_id: "wi_core".to_string(),
+        workspace_type: WorkspaceType::WorkItemPlan,
+        status: WorkspaceSessionStatus::Running,
+        author_provider: ProviderName::Codex,
+        reviewer_provider: Some(ProviderName::ClaudeCode),
+        review_rounds: 2,
+        permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
+        provisional_reviewer_provider: None,
+        reviewer_enabled_at_start: None,
+        superpowers_enabled: true,
+        openspec_enabled: true,
+        flow_kind: WorkItemPlanFlowKind::Legacy,
+        run_policy: crate::product::work_item_plan_policy::RunPolicy::Interactive,
+        run_history: Default::default(),
+        review_invocation_scope: None,
+        human_gate_snapshot: None,
+        repair_reservation: None,
+        human_gate_reservation: None,
+        policy_diagnostics: Vec::new(),
+        provider_start_ledger: Vec::new(),
+        single_candidate_phase: None,
+        work_item_plan_source_revision_ref: None,
+        plan_candidate_ir_ref: None,
+        mechanical_report_ref: None,
+        publication_provenance_ref: None,
+        approval_attempt_id: None,
+        approved_at: None,
+        compile_reservation: None,
+        work_item_runtime_binding: None,
+        work_item_child_binding: None,
+        provider_conversations: Vec::new(),
+        messages: Vec::new(),
+        created_at: "2026-10-11T00:00:00Z".to_string(),
+        updated_at: "2026-10-11T00:00:00Z".to_string(),
+        sc_recovery_claim: None,
+        logical_launch_fingerprints: vec![anchor_t02_launch_fingerprint(
+            LogicalLaunchFingerprintState::Active,
+        )],
+        superseded_native_sessions: vec![anchor_t02_superseded_native_session()],
+        lc_resume_recovery: Some(anchor_t02_recovery_record(LcResumeRecoveryState::Waiting)),
+    }
+}
+
+#[test]
+fn anchor_t02_legacy_json_and_runtime_restore_defaults() {
+    let record = anchor_t02_session_record();
+
+    // 旧 JSON：三个新 durable 字段缺失时读默认空，不拒收历史会话。
+    let mut legacy = serde_json::to_value(&record).unwrap();
+    let object = legacy.as_object_mut().unwrap();
+    object.remove("logical_launch_fingerprints");
+    object.remove("superseded_native_sessions");
+    object.remove("lc_resume_recovery");
+    let from_legacy: WorkspaceSessionRecord = serde_json::from_value(legacy).unwrap();
+    assert_eq!(from_legacy.logical_launch_fingerprints.len(), 0);
+    assert!(from_legacy.superseded_native_sessions.is_empty());
+    assert!(from_legacy.lc_resume_recovery.is_none());
+
+    // runtime from_record：逐字段透传，不丢、不重构（plan 锚）。
+    let reloaded = WorkspaceSession::from_record(record.clone());
+    assert_eq!(
+        reloaded.logical_launch_fingerprints,
+        record.logical_launch_fingerprints
+    );
+    assert_eq!(
+        reloaded.superseded_native_sessions,
+        record.superseded_native_sessions
+    );
+    assert_eq!(reloaded.lc_resume_recovery, record.lc_resume_recovery);
+
+    // reload 注入的 business repository_path 保留（durable record 不含该字段）。
+    let injected_business_path = std::path::PathBuf::from("/repos/business");
+    let mut reloaded = reloaded;
+    reloaded.repository_path = Some(injected_business_path.clone());
+    assert_eq!(reloaded.repository_path, Some(injected_business_path));
 }

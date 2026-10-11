@@ -276,6 +276,9 @@ pub(crate) fn test_session_record(session_id: &str) -> WorkspaceSessionRecord {
         created_at: "2026-01-01T00:00:00Z".to_string(),
         updated_at: "2026-01-01T00:00:00Z".to_string(),
         sc_recovery_claim: None,
+        logical_launch_fingerprints: Vec::new(),
+        superseded_native_sessions: Vec::new(),
+        lc_resume_recovery: None,
     }
 }
 

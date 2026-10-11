@@ -317,6 +317,9 @@ impl LifecycleStore {
             messages: Vec::new(),
             created_at: now.clone(),
             updated_at: now,
+            logical_launch_fingerprints: Vec::new(),
+            superseded_native_sessions: Vec::new(),
+            lc_resume_recovery: None,
         };
 
         super::ensure_target_absent(&target_path)?;

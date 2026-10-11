@@ -108,6 +108,9 @@ pub struct WorkspaceSession {
     pub approved_at: Option<String>,
     pub compile_reservation: Option<crate::product::models::SingleCandidateCompileReservation>,
     pub provider_conversations: Vec<ProviderConversationRef>,
+    pub logical_launch_fingerprints: Vec<crate::product::models::LogicalLaunchFingerprintRecord>,
+    pub superseded_native_sessions: Vec<crate::product::models::SupersededNativeSessionRecord>,
+    pub lc_resume_recovery: Option<crate::product::models::LcResumeRecoveryRecord>,
     pub repository_path: Option<PathBuf>,
 }
 
@@ -162,6 +165,9 @@ impl WorkspaceSession {
             approved_at: record.approved_at,
             compile_reservation: record.compile_reservation,
             provider_conversations: record.provider_conversations,
+            logical_launch_fingerprints: record.logical_launch_fingerprints,
+            superseded_native_sessions: record.superseded_native_sessions,
+            lc_resume_recovery: record.lc_resume_recovery,
             repository_path: None,
         }
     }

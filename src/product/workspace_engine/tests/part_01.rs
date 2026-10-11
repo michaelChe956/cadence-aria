@@ -340,6 +340,9 @@ fn make_session(session_id: &str) -> WorkspaceSession {
         approved_at: None,
         compile_reservation: None,
         provider_conversations: Vec::new(),
+        logical_launch_fingerprints: Vec::new(),
+        superseded_native_sessions: Vec::new(),
+        lc_resume_recovery: None,
         repository_path: None,
     }
 }
