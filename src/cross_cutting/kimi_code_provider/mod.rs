@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::cross_cutting::bounded_command_runner::{
@@ -6,19 +7,20 @@ use crate::cross_cutting::bounded_command_runner::{
 };
 use crate::cross_cutting::json_rpc_peer::JsonRpcPeer;
 use crate::cross_cutting::process_manager::{
-    ProcessManager, PROVIDER_CHILD_EXIT_STREAM_DRAIN, SessionTailExit,
-    bounded_task_join, provider_child_exit_error, run_session_tail_with_exit_watch,
+    PROVIDER_CHILD_EXIT_STREAM_DRAIN, ProcessManager, SessionTailExit, bounded_task_join,
+    provider_child_exit_error, run_session_tail_with_exit_watch,
 };
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::streaming_provider::{
-    ProviderEvent, ProviderSession, ProviderStatus, StreamingProviderAdapter,
-    StreamingProviderInput, adapter_role_text,
+    LcVersionCache, LcVersionObservation, LcVersionProbe, LcVersionProbeKey, ProviderEvent,
+    ProviderSession, ProviderStatus, StreamingProviderAdapter, StreamingProviderInput,
+    VersionProbeError, adapter_role_text,
 };
 use crate::cross_cutting::tool_policy_audit::{LcProjectionAudit, ProviderStartAudit};
 use crate::product::logical_codebase::policy::ProviderDialect;
 use crate::product::logical_codebase::provider_gateway::ProviderRef;
 use crate::product::logical_codebase::provider_projection::{
-    ProviderPolicyProjector, ProviderProjectionInput,
+    ProviderLcPrepareFacts, ProviderPolicyProjector, ProviderProjectionInput,
 };
 use tokio::io::AsyncBufReadExt;
 use tokio::sync::mpsc;
@@ -85,6 +87,12 @@ pub fn parse_kimi_version(output: &str) -> KimiVersion {
         .unwrap_or(KimiVersion(0, 0, 0))
 }
 
+/// `KimiVersion` 的 audit/facts 统一文本形态(与既有 `start_validated`
+/// 的 `provider_version` 字面量同形)。
+fn kimi_version_text(version: KimiVersion) -> String {
+    format!("kimi {}.{}.{}", version.0, version.1, version.2)
+}
+
 pub fn ensure_kimi_version_compatible(version: &KimiVersion) -> Result<(), ProviderAdapterError> {
     let minimum = parse_kimi_version(MIN_KIMI_VERSION);
     if version < &minimum {
@@ -127,10 +135,31 @@ pub struct KimiMcpInjectionConfig {
     frozen_digest: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+/// Task 3.6(B0e):LC 只读 facts 的 supplier——除既有 command/MCP 注入外,
+/// 携带 LC 版本观测的 60 秒 TTL 缓存与 supplier 实例范围;direct
+/// `start` 不消费本状态,语义原样。
+#[derive(Clone)]
 pub struct KimiCodeProvider {
     command: PathBuf,
     mcp_injection: Option<KimiMcpInjectionConfig>,
+    /// LC 版本只读观测的 60 秒 TTL 缓存(prepare 与 spawn 前复验同 key
+    /// 命中;direct `start` 的无过期 `probe_kimi_version` 语义原样,
+    /// 两路严格分离)。
+    lc_version_cache: LcVersionCache,
+    /// 版本观测的 supplier 实例范围:每个 provider 实例唯一,不同实例
+    /// 的观测互不串值(`LcVersionProbeKey::supplier_scope`)。
+    supplier_scope: u64,
+}
+
+impl std::fmt::Debug for KimiCodeProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // LcVersionCache 无 Debug(观测缓存非投影语义面),手动实现
+        // 保持既有 Debug 输出的两个字段。
+        f.debug_struct("KimiCodeProvider")
+            .field("command", &self.command)
+            .field("mcp_injection", &self.mcp_injection)
+            .finish_non_exhaustive()
+    }
 }
 
 impl KimiCodeProvider {
@@ -138,6 +167,8 @@ impl KimiCodeProvider {
         Self {
             command,
             mcp_injection: None,
+            lc_version_cache: LcVersionCache::new(),
+            supplier_scope: next_kimi_supplier_scope(),
         }
     }
 
@@ -166,6 +197,112 @@ impl KimiCodeProvider {
 
     pub(crate) fn build_args(&self) -> Vec<String> {
         vec!["acp".to_string()]
+    }
+}
+
+/// supplier 实例范围分配:进程内单调递增,每实例唯一。
+fn next_kimi_supplier_scope() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+impl KimiCodeProvider {
+    /// LC 版本观测 key:provider + canonical executable + 只读可执行身份
+    /// (len/mtime;身份变化即换 key 再观测,不失效其它 key)+ `--version`
+    /// argv + supplier 实例范围(3.2 合同同形)。
+    fn lc_version_probe_key(&self) -> LcVersionProbeKey {
+        LcVersionProbeKey {
+            provider: crate::product::models::ProviderName::KimiCode,
+            canonical_executable: self
+                .command
+                .canonicalize()
+                .unwrap_or_else(|_| self.command.clone()),
+            executable_identity: self.lc_executable_identity(),
+            argv: vec!["--version".to_string()],
+            supplier_scope: self.supplier_scope,
+        }
+    }
+
+    /// 只读可执行身份(文件 len+mtime;不可得时固定哨兵,不写不探测)。
+    fn lc_executable_identity(&self) -> String {
+        match std::fs::metadata(&self.command) {
+            Ok(metadata) => {
+                let mtime = metadata
+                    .modified()
+                    .ok()
+                    .and_then(|moment| moment.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|duration| format!("{}.{}", duration.as_secs(), duration.subsec_nanos()))
+                    .unwrap_or_else(|| "unknown".to_string());
+                format!("len={},mtime={}", metadata.len(), mtime)
+            }
+            Err(_) => "metadata-unavailable".to_string(),
+        }
+    }
+
+    /// LC 版本观测 probe 闭包:有界 `--version` → 解析为 `kimi X.Y.Z`
+    /// 文本(兼容门在观测后统一施加);失败/超时 typed
+    /// `VersionProbeError`(不缓存、不回退过期成功,合同归
+    /// `LcVersionCache`)。
+    fn lc_version_probe(&self) -> LcVersionProbe {
+        let executable = self.command.to_string_lossy().into_owned();
+        std::sync::Arc::new(move |_key| {
+            let executable = executable.clone();
+            Box::pin(async move {
+                let request = BoundedCommandRequest {
+                    executable,
+                    argv: vec!["--version".to_string()],
+                    working_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+                    timeout: KIMI_VERSION_PROBE_TIMEOUT,
+                    cancellation: CancellationToken::new(),
+                    environment: Default::default(),
+                    stdout_limit: 64 * 1024,
+                    stderr_limit: 64 * 1024,
+                };
+                match TokioBoundedCommandRunner.run_inherited(request).await {
+                    Ok(result) if result.exit_code == Some(0) => {
+                        Ok(kimi_version_text(parse_kimi_version(&result.stdout)))
+                    }
+                    Ok(result) if result.timed_out => Err(VersionProbeError::Timeout),
+                    Ok(_) => Err(VersionProbeError::Unavailable),
+                    Err(_) => Err(VersionProbeError::Unavailable),
+                }
+            })
+        })
+    }
+
+    /// LC exact version 只读观测(TTL 缓存 + 兼容门;不可得 fail-closed)。
+    /// prepare 与 spawn 前复验共用同一 key/缓存,命中不伪称每次实测
+    /// 二进制;可执行身份变化换 key 再观测。
+    async fn observe_lc_version(
+        &self,
+        cancel: CancellationToken,
+    ) -> Result<(LcVersionProbeKey, LcVersionObservation), ProviderAdapterError> {
+        let key = self.lc_version_probe_key();
+        let probe = self.lc_version_probe();
+        let observation = self
+            .lc_version_cache
+            .cached_lc_cli_version(key.clone(), probe, cancel)
+            .await
+            .map_err(|error| {
+                ProviderAdapterError::execution_failed(
+                    None,
+                    String::new(),
+                    format!("kimi lc exact version observation failed: {error}"),
+                    0,
+                )
+            })?;
+        let version = parse_kimi_version(observation.exact_version());
+        ensure_kimi_version_compatible(&version)?;
+        Ok((key, observation))
+    }
+
+    /// LC MCP 来源事实:Aria 注入 bundle digest 或 native 项目配置标记
+    /// (单独标来源,不冒充 Aria bundle digest)。
+    fn lc_mcp_bundle_digest(&self) -> String {
+        match self.mcp_injection.as_ref() {
+            Some(config) => config.bundle.digest().to_string(),
+            None => projection::KIMI_NATIVE_MCP_SOURCE.to_string(),
+        }
     }
 }
 
@@ -387,17 +524,23 @@ impl StreamingProviderAdapter for KimiCodeProvider {
             )
         })?;
 
-        // 4) exact version probe(真实 `--version` 探测 + 兼容门;不可得
-        //    fail-closed)。全 LC 路径必填,不以 `tool_policy=None` 早退。
-        let version = probe_kimi_version(&self.command).await;
-        ensure_kimi_version_compatible(&version)?;
-        let provider_version = format!("kimi {}.{}.{}", version.0, version.1, version.2);
+        // 4) exact version:LC 只读 TTL 观测(与 prepare 同 key 命中,不
+        //    伪称每次实测;不可得 fail-closed)。全 LC 路径必填,不以
+        //    `tool_policy=None` 早退;direct `start` 的无过期
+        //    `probe_kimi_version` 语义原样(两路严格分离)。
+        let (_probe_key, observation) = self.observe_lc_version(cancel.clone()).await?;
+        let provider_version = observation.exact_version().to_string();
 
-        // 5) 不可伪造 boundary plan + LC 投影。`mcp_bundle_digest` 只对应
-        //    Aria 注入 bundle;无注入时标记 native 项目配置来源(单独标
-        //    来源,不冒充 Aria bundle digest)。trust digest 的 gateway 侧
-        //    装配(ProviderTrustSource)归 1b/1c;空串同样纳入 session
-        //    digest,装配后任一漂移都会改变 projection_digest。
+        // 5) 不可伪造 boundary plan + LC 投影。prepared 候选路径(B0e):
+        //    validate 携带冻结 full projection 时消费该投影——spawn 前
+        //    同 facts 复验(version/MCP 来源/boundary 引用与冻结值一致,
+        //    不一致 typed 拒于 child 之前),audit 字面量与 gateway 冻结
+        //    的 full projection(含 root trust digest)同源,不建第二套
+        //    投影矩阵;裸 validate 路径(既有测试/旧链)保持本 adapter
+        //    自建投影(trust 空)。`mcp_bundle_digest` 只对应 Aria 注入
+        //    bundle;无注入时标记 native 项目配置来源(单独标来源,不
+        //    冒充 Aria bundle digest)。装配后任一漂移都会改变
+        //    projection_digest。
         let boundary = projection::lc_boundary_plan(&envelope).map_err(|error| {
             ProviderAdapterError::parse_error(
                 format!("kimi lc validated start: {error}"),
@@ -405,31 +548,67 @@ impl StreamingProviderAdapter for KimiCodeProvider {
                 String::new(),
             )
         })?;
-        let mcp_bundle_digest = match self.mcp_injection.as_ref() {
-            Some(config) => config.bundle.digest().to_string(),
-            None => projection::KIMI_NATIVE_MCP_SOURCE.to_string(),
+        let mcp_bundle_digest = self.lc_mcp_bundle_digest();
+        let lc_projection = match launch.lc_projection() {
+            Some(frozen) => {
+                if frozen.exact_version() != provider_version {
+                    return Err(ProviderAdapterError::parse_error(
+                        format!(
+                            "kimi lc validated start rejected: provider version drifted before spawn (frozen={}, observed={}) (session NOT started; no child was spawned)",
+                            frozen.exact_version(),
+                            provider_version
+                        ),
+                        String::new(),
+                        String::new(),
+                    ));
+                }
+                if frozen.mcp_bundle_digest() != mcp_bundle_digest {
+                    return Err(ProviderAdapterError::parse_error(
+                        format!(
+                            "kimi lc validated start rejected: mcp source drifted before spawn (frozen={}, current={}) (session NOT started; no child was spawned)",
+                            frozen.mcp_bundle_digest(),
+                            mcp_bundle_digest
+                        ),
+                        String::new(),
+                        String::new(),
+                    ));
+                }
+                if frozen.boundary_evidence_ref()
+                    != projection::boundary_evidence_ref_for(&boundary)
+                {
+                    return Err(ProviderAdapterError::parse_error(
+                        "kimi lc validated start rejected: boundary evidence drifted from the frozen full projection (session NOT started; no child was spawned)",
+                        String::new(),
+                        String::new(),
+                    ));
+                }
+                frozen.clone()
+            }
+            None => {
+                let projection_input = ProviderProjectionInput::new(
+                    envelope.clone(),
+                    ProviderRef::kimi_code(launch.capability_snapshot_ref()),
+                    envelope.action,
+                    input.role.clone(),
+                    input.permission_mode.clone(),
+                    None,
+                    projection::KIMI_LC_APPROVAL_POLICY.to_string(),
+                    mcp_bundle_digest.clone(),
+                    envelope.config_artifact_ref.clone(),
+                    String::new(),
+                    Some(boundary.clone()),
+                );
+                KimiPolicyProjector::new(provider_version.clone())
+                    .project(&projection_input)
+                    .map_err(|error| {
+                        ProviderAdapterError::parse_error(
+                            format!("kimi lc validated start: {error}"),
+                            String::new(),
+                            String::new(),
+                        )
+                    })?
+            }
         };
-        let projection_input = ProviderProjectionInput::new(
-            envelope.clone(),
-            ProviderRef::kimi_code(launch.capability_snapshot_ref()),
-            envelope.action,
-            input.role.clone(),
-            input.permission_mode.clone(),
-            None,
-            projection::KIMI_LC_APPROVAL_POLICY.to_string(),
-            mcp_bundle_digest,
-            envelope.config_artifact_ref.clone(),
-            String::new(),
-            Some(boundary.clone()),
-        );
-        let projector = KimiPolicyProjector::new(provider_version.clone());
-        let lc_projection = projector.project(&projection_input).map_err(|error| {
-            ProviderAdapterError::parse_error(
-                format!("kimi lc validated start: {error}"),
-                String::new(),
-                String::new(),
-            )
-        })?;
         let tool_policy_digest = projection::lc_tool_policy_canonical_digest(
             input.tool_policy.as_ref(),
         )
@@ -637,5 +816,67 @@ impl StreamingProviderAdapter for KimiCodeProvider {
             events: event_rx,
             commands: command_tx,
         })
+    }
+
+    /// Task 3.6(B0e):LC 只读 prepare facts——把 `start_validated` 的
+    /// version/boundary/MCP 来源提取为只读观测(零 spawn 会话 child):
+    /// exact version 经 [`LcVersionCache`] 60 秒 TTL(与 spawn 前复验
+    /// 同 key)、approval/MCP/boundary 为 provider 特定 facts、projector
+    /// 与该 version 同源。guard(Kimi 通用策略例外/adapter 匹配)先于
+    /// version probe 与 child。
+    async fn prepare_lc_facts(
+        &self,
+        input: &StreamingProviderInput,
+        launch: &crate::product::logical_codebase::provider_gateway::ValidatedSessionLaunchPolicy,
+        cancel: CancellationToken,
+    ) -> Result<ProviderLcPrepareFacts, ProviderAdapterError> {
+        // 1) Kimi 通用策略例外(与 `start_validated` 同源的第二道门;
+        //    guard 早于 probe/child)。
+        if input.tool_policy.is_some() {
+            return Err(ProviderAdapterError::parse_error(
+                format!(
+                    "kimi lc prepare facts rejected: {}: kimi carries no generic tool policy",
+                    projection::KIMI_GENERIC_TOOL_POLICY_FORBIDDEN
+                ),
+                String::new(),
+                String::new(),
+            ));
+        }
+        // 2) adapter 匹配(不匹配即拒,不回退其它 provider/dialect)。
+        let envelope = launch.envelope();
+        if input.provider_type != crate::protocol::contracts::ProviderType::KimiCode
+            || envelope.provider_dialect != ProviderDialect::KimiAcpV1
+        {
+            return Err(ProviderAdapterError::parse_error(
+                "kimi lc prepare facts: only Kimi ACP launches are accepted by this adapter",
+                String::new(),
+                String::new(),
+            ));
+        }
+        // 3) exact version(TTL 观测 + 兼容门;不可得 fail-closed)。
+        let (probe_key, observation) = self.observe_lc_version(cancel).await?;
+        // 4) provider 特定 facts:boundary 由 envelope 派生;MCP 来源只
+        //    对应 Aria 注入 bundle,无注入时 native 标记(不冒充 digest)。
+        let boundary = projection::lc_boundary_plan(envelope).map_err(|error| {
+            ProviderAdapterError::parse_error(
+                format!("kimi lc prepare facts: {error}"),
+                String::new(),
+                String::new(),
+            )
+        })?;
+        Ok(ProviderLcPrepareFacts::new(
+            crate::product::logical_codebase::provider_gateway::ProviderRefType::KimiCode,
+            envelope.provider_dialect,
+            crate::product::logical_codebase::policy::ProviderWireDialect::KimiAcp,
+            observation.exact_version().to_string(),
+            observation.observed_at(),
+            probe_key,
+            projection::KIMI_LC_APPROVAL_POLICY.to_string(),
+            self.lc_mcp_bundle_digest(),
+            boundary,
+            std::sync::Arc::new(KimiPolicyProjector::new(
+                observation.exact_version().to_string(),
+            )),
+        ))
     }
 }

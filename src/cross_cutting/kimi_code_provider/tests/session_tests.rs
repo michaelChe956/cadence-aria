@@ -1243,7 +1243,7 @@ impl LcKimiResumeFixture {
         worktree
     }
 
-    fn gateway(&self) -> LogicalCodebaseProviderGateway {
+    pub(crate) fn gateway(&self) -> LogicalCodebaseProviderGateway {
         let mut registry = ProviderRegistry::new();
         registry.register(
             ProviderName::KimiCode,
@@ -1738,4 +1738,697 @@ async fn kimi_child_death_after_initialize_write_terminates_session_promptly() {
         !failure.is_empty(),
         "terminal failure must carry a cause message"
     );
+}
+
+// ==== Task 3.6(B0e):kimi 真实 facts 与 full 投影/audit 同源接线 ====
+
+use crate::cross_cutting::kimi_code_provider::projection::{
+    KIMI_GENERIC_TOOL_POLICY_FORBIDDEN, KIMI_LC_APPROVAL_POLICY, KIMI_NATIVE_MCP_SOURCE,
+    KimiPolicyProjector,
+};
+use crate::product::logical_codebase::RootRecipeReceiptStore;
+use crate::product::logical_codebase::policy::{
+    ProviderDialect, ProviderWireDialect, SessionPolicyEnvelope,
+};
+use crate::product::logical_codebase::provider_gateway::{
+    GatewaySessionDisposition, ProviderLaunchAuditContext, ProviderRef, ResumeSessionLaunchRequest,
+    SessionResumeFingerprint, canonical_target_git_identity,
+};
+use crate::product::logical_codebase::provider_projection::{
+    ProviderPolicyProjector as _, ProviderProjectionInput,
+};
+use crate::product::logical_codebase::provider_trust::{
+    ProviderTrustFingerprintFacts, ProviderTrustSource, ProviderTrustVerification,
+};
+
+impl LcKimiResumeFixture {
+    /// Task 3.6:注册真实 streaming adapter 的 gateway(prepare_lc_facts
+    /// 消费面),并注入只读 trust/receipt 事实源(Kimi 需 workspace trust,
+    /// root record digest 由 `AnchorT36KimiTrustSource` 提供)。
+    pub(crate) fn gateway_with_streaming_adapter(
+        &self,
+        adapter: std::sync::Arc<
+            dyn crate::cross_cutting::streaming_provider::StreamingProviderAdapter,
+        >,
+    ) -> LogicalCodebaseProviderGateway {
+        let mut registry = ProviderRegistry::new();
+        registry.register(ProviderName::KimiCode, adapter);
+        LogicalCodebaseProviderGateway::with_audit(
+            AggregatePolicyArtifactStore::new(self.paths.clone()),
+            std::sync::Arc::new(AnchorT36KimiCapabilitySource),
+            std::sync::Arc::new(LcTargetResolver),
+            std::sync::Arc::new(registry),
+            std::sync::Arc::new(LcNoopSyncAdapter),
+            lc_available_gate(),
+            self.audit.clone(),
+            self.canonical_root(),
+        )
+        .with_readonly_lc_facts(
+            RootRecipeReceiptStore::for_lc(self.paths.clone(), "logical_codebase_0001"),
+            std::sync::Arc::new(AnchorT36KimiTrustSource),
+            Some("logical_codebase_0001".to_string()),
+        )
+    }
+
+    /// policy 工件 revision/digest(prepare 零写观测面)。
+    pub(crate) fn policy_revision_and_digest(&self) -> (u64, String) {
+        let artifact = AggregatePolicyArtifactStore::new(self.paths.clone())
+            .get("project_0001")
+            .expect("lc fixture policy present")
+            .expect("lc fixture policy artifact");
+        (artifact.revision, artifact.digest)
+    }
+
+    /// gateway 审计 supersede 计数(prepare 零写观测面)。
+    pub(crate) fn gateway_supersede_count(&self) -> usize {
+        self.audit.supersede_count()
+    }
+}
+
+/// anchor t36 的 run-bound audit 上下文(prepare 冻结进候选)。
+fn anchor_t36_audit_context(
+    sink: std::sync::Arc<RecordingToolPolicyAuditSink>,
+) -> ProviderLaunchAuditContext {
+    ProviderLaunchAuditContext {
+        workspace_session_id: "ws-anchor-t36".to_string(),
+        role_run_seq: 1,
+        audit_sink: sink,
+    }
+}
+
+/// anchor t36 capability 源:version 与 fixture 脚本一致(`kimi 0.34.0`),
+/// action 行 `projection_digest` 用真实 `KimiPolicyProjector` 对同一
+/// action+native MCP 来源+version 计算(与 gateway prepare 冻结的 full
+/// projection `capability_projection_digest` 同源,admission 第 3 步消费)。
+fn anchor_t36_kimi_capability() -> ProviderCapability {
+    let action = SessionPolicyAction::CodingTargetWrite;
+    let envelope = SessionPolicyEnvelope {
+        policy_id: "policy-lc-0001".to_string(),
+        policy_revision: 1,
+        policy_digest: "sha256:policy-lc-0001".to_string(),
+        action,
+        target: PolicyTarget::checkout(
+            "logical_repo_0001",
+            "checkout_0001",
+            PathBuf::from("/lc/member-a"),
+        ),
+        working_directory: PathBuf::from("/lc/lc-root"),
+        readable_roots: vec![PathBuf::from("/lc/lc-root")],
+        writable_roots: vec![PathBuf::from("/lc/member-a")],
+        provider_dialect: ProviderDialect::KimiAcpV1,
+        config_artifact_ref: "sha256:cfg-a".to_string(),
+        config_digest: "sha256:cfg-digest-a".to_string(),
+        created_at: "2026-10-11T00:00:00Z".to_string(),
+        authority_root: PathBuf::from("/lc/lc-root"),
+    };
+    let projection_input = ProviderProjectionInput::new(
+        envelope,
+        ProviderRef::kimi_code("cap_kimi_anchor_t36"),
+        action,
+        AdapterRole::Executor,
+        ProviderPermissionMode::Auto,
+        None,
+        KIMI_LC_APPROVAL_POLICY.to_string(),
+        KIMI_NATIVE_MCP_SOURCE.to_string(),
+        "sha256:cfg-a".to_string(),
+        String::new(),
+        None,
+    );
+    let projection = KimiPolicyProjector::new("kimi 0.34.0")
+        .project(&projection_input)
+        .expect("anchor t36 capability-row projection");
+    ProviderCapability {
+        provider_type: ProviderRefType::KimiCode,
+        version: "kimi 0.34.0".to_string(),
+        adapter_dialect: ProviderDialect::KimiAcpV1,
+        wire_dialect: ProviderWireDialect::KimiAcp,
+        capability_snapshot_ref: "cap_kimi_anchor_t36".to_string(),
+        action_capability: ProviderActionCapability {
+            action,
+            launch:
+                crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence::Confirmed,
+            resume:
+                crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence::Confirmed,
+            write_boundary:
+                crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence::Confirmed,
+            projection_digest: projection.capability_projection_digest().to_string(),
+            evidence_ref: String::new(),
+        },
+        trust: crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence::Confirmed,
+    }
+}
+
+/// anchor t36 capability 源:全部走 `anchor_t36_kimi_capability()`。
+struct AnchorT36KimiCapabilitySource;
+
+impl ProviderCapabilitySource for AnchorT36KimiCapabilitySource {
+    fn require_supported(
+        &self,
+        _provider: &crate::product::logical_codebase::provider_gateway::ProviderRef,
+        _action: SessionPolicyAction,
+    ) -> Result<ProviderCapability, ProviderGatewayError> {
+        Ok(anchor_t36_kimi_capability())
+    }
+
+    fn require_resume_supported(
+        &self,
+        _provider: &crate::product::logical_codebase::provider_gateway::ProviderRef,
+        _action: SessionPolicyAction,
+    ) -> Result<ProviderCapability, ProviderGatewayError> {
+        Ok(anchor_t36_kimi_capability())
+    }
+
+    fn require_write_boundary(
+        &self,
+        _provider: &crate::product::logical_codebase::provider_gateway::ProviderRef,
+        _action: SessionPolicyAction,
+    ) -> Result<ProviderCapability, ProviderGatewayError> {
+        Ok(anchor_t36_kimi_capability())
+    }
+
+    fn require_root_recipe_supported(
+        &self,
+        _provider: &crate::product::logical_codebase::provider_gateway::ProviderRef,
+        _credential: &crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
+    ) -> Result<ProviderCapability, ProviderGatewayError> {
+        Err(ProviderGatewayError::UnsupportedCapability(
+            "anchor t36 fixture has no root recipe facts".to_string(),
+        ))
+    }
+}
+
+/// anchor t36 只读 trust 源:Kimi 需 workspace trust——root record digest
+/// 冻结为固定 fixture 摘要(`fingerprint_facts` 零写;admission 第 4 步
+/// `verify_trusted` 同源判定)。
+struct AnchorT36KimiTrustSource;
+
+impl ProviderTrustSource for AnchorT36KimiTrustSource {
+    fn verify_trusted(
+        &self,
+        _project_id: &str,
+        _lc_id: &str,
+        provider: &ProviderName,
+        canonical_root: &std::path::Path,
+    ) -> Result<ProviderTrustVerification, ProviderGatewayError> {
+        Ok(ProviderTrustVerification {
+            provider: provider.clone(),
+            canonical_root: canonical_root.to_path_buf(),
+            trust_key: String::new(),
+            trusted: true,
+            ownership: None,
+            detail: String::new(),
+            verified_at: String::new(),
+        })
+    }
+
+    fn fingerprint_facts(
+        &self,
+        _project_id: &str,
+        _lc_id: &str,
+        provider: &ProviderName,
+        canonical_root: &std::path::Path,
+    ) -> Result<ProviderTrustFingerprintFacts, ProviderGatewayError> {
+        Ok(ProviderTrustFingerprintFacts {
+            verification: ProviderTrustVerification {
+                provider: provider.clone(),
+                canonical_root: canonical_root.to_path_buf(),
+                trust_key: String::new(),
+                trusted: true,
+                ownership: None,
+                detail: String::new(),
+                verified_at: String::new(),
+            },
+            record_digest: Some("sha256:kimi-root-record-anchor-t36".to_string()),
+        })
+    }
+}
+
+/// anchor t36 fake kimi ACP 脚本:`--version` 打印指定版本(每次探测追加
+/// `${0}.probe` 计数);ACP 循环 initialize 应答完整 resume 能力;
+/// session/load 按 `KIMI_LOAD_SESSION_ID` 应答(与 9c fixture 同语义);
+/// session/new 应答冻结 fresh id 并追加 `${0}.session-new` 计数(显式
+/// fresh 观测面);pid 登记到 `KIMI_PID_MARKER`;终止只来自 adapter kill 链。
+/// 版本以 `__T36_VERSION__` 占位注入,`__T36_PAD__` 使不同版本脚本长度
+/// 确定不同(真实可执行身份漂移:len+mtime 都变)。
+#[cfg(unix)]
+fn anchor_t36_kimi_acp_script(version: &str) -> String {
+    let pad = version
+        .rsplit('.')
+        .next()
+        .and_then(|patch| patch.parse::<usize>().ok())
+        .map(|patch| "x".repeat(patch + 1))
+        .unwrap_or_else(|| "x".to_string());
+    r#"#!/usr/bin/env bash
+# anchor t36 fixture version: __T36_VERSION__
+# drift pad: __T36_PAD__
+if [[ "${1:-}" == "--version" ]]; then
+  echo x >> "${0}.probe"
+  echo "kimi __T36_VERSION__"
+  exit 0
+fi
+echo $$ > "${KIMI_PID_MARKER:-/dev/null}"
+while IFS= read -r line; do
+  id="$(printf '%s' "$line" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p')"
+  if [[ "$line" == *'"initialize"'* ]]; then
+    echo "{\"jsonrpc\":\"2.0\",\"id\":${id:-1},\"result\":{\"protocolVersion\":1,\"agentCapabilities\":{\"loadSession\":true,\"sessionCapabilities\":{\"resume\":{}}}}}"
+  elif [[ "$line" == *'"session/new"'* ]]; then
+    echo x >> "${0}.session-new"
+    echo "{\"jsonrpc\":\"2.0\",\"id\":${id:-2},\"result\":{\"sessionId\":\"kimi-session-fresh-anchor-t36\"}}"
+  elif [[ "$line" == *'"session/load"'* ]]; then
+    if [[ -n "${KIMI_LOAD_SESSION_ID:-}" ]]; then
+      echo "{\"jsonrpc\":\"2.0\",\"id\":${id:-2},\"result\":{\"sessionId\":\"${KIMI_LOAD_SESSION_ID}\"}}"
+    else
+      echo "{\"jsonrpc\":\"2.0\",\"id\":${id:-2},\"result\":{}}"
+    fi
+  elif [[ "$line" == *'"session/prompt"'* ]]; then
+    sid="${KIMI_LOAD_SESSION_ID:-kimi-session-fresh-anchor-t36}"
+    echo "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"$sid\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"lc anchor t36 done\"}}}}"
+    echo "{\"jsonrpc\":\"2.0\",\"id\":${id:-3},\"result\":{\"stopReason\":\"end_turn\"}}"
+    exit 0
+  fi
+done
+"#
+    .replace("__T36_VERSION__", version)
+    .replace("__T36_PAD__", &pad)
+}
+
+/// 写 anchor t36 fixture(0o755)到 dir/fake-kimi-anchor-t36-acp。
+#[cfg(unix)]
+pub(crate) fn anchor_t36_kimi_acp_fixture(dir: &std::path::Path, version: &str) -> PathBuf {
+    write_executable(
+        dir,
+        "fake-kimi-anchor-t36-acp",
+        &anchor_t36_kimi_acp_script(version),
+    )
+}
+
+/// 同路径重写 anchor t36 fixture(真实可执行身份漂移:len+mtime 变化)。
+#[cfg(unix)]
+pub(crate) fn anchor_t36_rewrite_kimi_acp_fixture(bin: &std::path::Path, version: &str) {
+    use std::io::Write as _;
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::write(bin, anchor_t36_kimi_acp_script(version))
+        .expect("rewrite anchor t36 fixture script");
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(bin)
+        .expect("open anchor t36 fixture for mtime bump");
+    // 确认 mtime 漂移不依赖同瞬写入:显式 flush 后再睡 2ms。
+    file.flush().expect("flush anchor t36 fixture");
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    std::fs::set_permissions(bin, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod anchor t36 fixture");
+}
+
+/// fixture `--version` 探测计数(`${0}.probe` 行数)。
+#[cfg(unix)]
+pub(crate) fn anchor_t36_probe_invocations(fixture_bin: &std::path::Path) -> usize {
+    std::fs::read_to_string(format!("{}.probe", fixture_bin.display()))
+        .map(|content| {
+            content
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+/// fixture session/new 计数(`${0}.session-new` 行数;显式 fresh 观测面)。
+#[cfg(unix)]
+pub(crate) fn anchor_t36_fresh_session_count(fixture_bin: &std::path::Path) -> usize {
+    std::fs::read_to_string(format!("{}.session-new", fixture_bin.display()))
+        .map(|content| {
+            content
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+/// Task 3.6(B0e Step 1):Kimi prepare facts/full projection/audit 同源
+/// 指纹——真实 `--version` TTL 观测恰一次;无 Aria 注入时 MCP 来源为
+/// native 标记;root trust record digest 冻结进 full projection;prepare
+/// 零 durable 写/零会话 child;full-matching resume 后 spawn 消费 prepared
+/// projection,`provider_start.lc_projection` 字面量与候选 full projection
+/// 逐字段同源;Kimi 通用策略例外保持(gateway 注入的非空策略以稳定码
+/// typed 拒,且拒于 version probe 之前);session/load 确认同 id(零
+/// session/new)。
+#[cfg(unix)]
+#[tokio::test]
+async fn anchor_t36_provider_prepare_and_audit_share_full_fingerprint() {
+    let fixture = LcKimiResumeFixture::new();
+    let marker_dir = tempfile::tempdir().expect("anchor t36 marker dir");
+    let sink = RecordingToolPolicyAuditSink::new();
+    let requested_native_id = "kimi-session-resume-anchor-t36".to_string();
+    let pid_marker = marker_dir.path().join("kimi-t36.pid");
+
+    let fixture_bin = anchor_t36_kimi_acp_fixture(marker_dir.path(), "0.34.0");
+    let provider = Arc::new(KimiCodeProvider::new(fixture_bin.clone()));
+    let gateway = fixture.gateway_with_streaming_adapter(provider.clone());
+
+    // 1) Kimi 通用策略例外保持:gateway 为 Orchestrator 注入非空通用策略
+    //    → adapter 以稳定码 typed 拒,且拒于 version probe 之前(计数 0)。
+    let mut orchestrator_raw = fixture.lc_streaming_input(None, None);
+    orchestrator_raw.role = AdapterRole::Orchestrator;
+    let policy_rejection = gateway
+        .prepare_lc_streaming_candidate(
+            orchestrator_raw,
+            fixture.coding_request(),
+            anchor_t36_audit_context(sink.clone()),
+            CancellationToken::new(),
+        )
+        .await;
+    let policy_error = match policy_rejection {
+        Err(ProviderGatewayError::Adapter(error)) => error,
+        Err(other) => panic!("unexpected gateway rejection shape: {other:?}"),
+        Ok(_) => {
+            panic!("a non-empty generic tool policy must be typed-rejected by the kimi adapter")
+        }
+    };
+    assert!(
+        policy_error
+            .details
+            .contains(KIMI_GENERIC_TOOL_POLICY_FORBIDDEN),
+        "unexpected rejection: {policy_error:?}"
+    );
+    assert_eq!(anchor_t36_probe_invocations(&fixture_bin), 0);
+
+    // 2) 真实 prepare:facts/full projection/root trust 同源冻结(native 来源)。
+    let durable_before = (
+        fixture.policy_revision_and_digest(),
+        fixture.gateway_supersede_count(),
+        sink.events().len(),
+    );
+    let mut raw = fixture.lc_streaming_input(
+        Some(sink.clone().bound()),
+        Some(requested_native_id.clone()),
+    );
+    raw.env_vars.insert(
+        "KIMI_LOAD_SESSION_ID".to_string(),
+        requested_native_id.clone(),
+    );
+    raw.env_vars.insert(
+        "KIMI_PID_MARKER".to_string(),
+        pid_marker.display().to_string(),
+    );
+
+    let candidate = gateway
+        .prepare_lc_streaming_candidate(
+            raw,
+            fixture.coding_request(),
+            anchor_t36_audit_context(sink.clone()),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("kimi prepare freezes real adapter facts into a full candidate");
+    assert_eq!(candidate.facts().exact_version(), "kimi 0.34.0");
+    assert_eq!(anchor_t36_probe_invocations(&fixture_bin), 1);
+    assert!(candidate.facts().version_observed_at() <= std::time::Instant::now());
+    assert_eq!(
+        candidate.facts().version_probe_key().provider,
+        ProviderName::KimiCode
+    );
+    assert_eq!(
+        candidate.facts().version_probe_key().argv,
+        vec!["--version".to_string()]
+    );
+    let native_mcp_source = candidate.full_projection().mcp_bundle_digest().to_string();
+    assert_eq!(native_mcp_source, "native-project-config");
+    // root trust:readonly root record digest 冻结进 full projection(同源)。
+    assert_eq!(
+        candidate.full_projection().trust_digest(),
+        "lc-trust-v1:KimiCode:sha256:kimi-root-record-anchor-t36"
+    );
+    // facts 与 full projection 同版本同源(同 projector);approval/MCP 面一致。
+    assert_eq!(
+        candidate.full_projection().exact_version(),
+        candidate.facts().exact_version()
+    );
+    assert!(!candidate.full_projection().projection_digest().is_empty());
+    // prepare 零 durable 写(policy revision/digest/supersede/audit)且零
+    // 会话 child(pid 标记未出现;probe 是独立 `--version` 观测,不计 child)。
+    assert!(!pid_marker.exists());
+    assert_eq!(fixture.policy_revision_and_digest(), durable_before.0);
+    assert_eq!(fixture.gateway_supersede_count(), durable_before.1);
+    assert_eq!(sink.events().len(), durable_before.2);
+
+    // 3) full-matching resume → Resume(冻结候选投影)→ spawn 消费 prepared
+    //    projection:audit 与 full projection 同 fingerprint(含 root trust)。
+    let previous = SessionResumeFingerprint::from_envelope(
+        candidate.validated().envelope(),
+        candidate.full_projection(),
+        candidate.validated().action_evidence_digest(),
+        &canonical_target_git_identity(&candidate.validated().envelope().target.worktree),
+    );
+    let disposition = gateway
+        .resume_or_start_with_projection(
+            ResumeSessionLaunchRequest {
+                launch: fixture.coding_request(),
+                previous_fingerprint: previous,
+                previous_session_id: "sess-anchor-t36".to_string(),
+            },
+            candidate.full_projection().clone(),
+        )
+        .expect("full-matching kimi fingerprint resumes");
+    let GatewaySessionDisposition::Resume(resume_validated) = disposition else {
+        panic!("a full-matching fingerprint must resume, not wait for explicit fresh");
+    };
+    let spawn_input =
+        ValidatedStreamingProviderInput::new(candidate.input().clone(), resume_validated);
+    let mut session = provider
+        .start_validated(spawn_input, CancellationToken::new())
+        .await
+        .expect("spawn consumes the prepared full projection");
+    assert_eq!(
+        session.native_session_id.as_deref(),
+        Some(requested_native_id.as_str())
+    );
+    // TTL:spawn 前复验同 key 命中——总 probe 数仍为 1。
+    assert_eq!(anchor_t36_probe_invocations(&fixture_bin), 1);
+    // ACP 同 ID:显式 resume 走 session/load(零 session/new)。
+    assert_eq!(anchor_t36_fresh_session_count(&fixture_bin), 0);
+
+    let events = sink.events();
+    assert_eq!(
+        events.len(),
+        1,
+        "the resumed spawn writes exactly one provider_start"
+    );
+    let DurableToolPolicyEvent::ProviderStart(record) = &events[0] else {
+        panic!("expected provider_start");
+    };
+    assert_eq!(record.provider, "kimi-code");
+    assert_eq!(record.provider_version, candidate.facts().exact_version());
+    assert_eq!(record.adapter_dialect, "kimi-acp");
+    assert_eq!(record.provider_session_id, requested_native_id);
+    assert!(!record.tool_policy_canonical_digest.is_empty());
+    let lc_projection = record
+        .lc_projection
+        .as_ref()
+        .expect("lc projection audit is recorded from the prepared projection");
+    assert_eq!(lc_projection.action, "coding_target_write");
+    assert_eq!(lc_projection.wire_dialect, "kimi-acp");
+    assert_eq!(
+        lc_projection.projection_digest,
+        candidate.full_projection().projection_digest()
+    );
+    assert_eq!(
+        lc_projection.capability_projection_digest,
+        candidate.full_projection().capability_projection_digest()
+    );
+    assert_eq!(
+        lc_projection.boundary_evidence_ref,
+        candidate.full_projection().boundary_evidence_ref()
+    );
+
+    let terminal = terminal_events(&mut session).await;
+    let completion = terminal
+        .iter()
+        .find_map(|event| match event {
+            ProviderEvent::Completed(completion) => Some(completion.clone()),
+            _ => None,
+        })
+        .expect("the resumed kimi session completes");
+    assert_eq!(completion.full_output, "lc anchor t36 done");
+}
+
+/// Task 3.6(B0e Step 1 断言组逐字):真实漂移零 session child——版本在
+/// prepare 冻结后真实替换(可执行身份变化→换 key 再观测):
+/// - gateway 复验 typed `PolicyDrift(provider_version)` 拒 resume;
+/// - adapter spawn 守卫在 child 之前 typed 拒(mismatch_children=0,零
+///   provider_start);
+/// - 错误握手(wrong native id):child 已启动 → kill/reap,显式 resume
+///   后零 fresh(fresh_after_explicit_resume_count=0)。
+#[cfg(unix)]
+#[tokio::test]
+async fn anchor_t36_real_drift_zero_session_child() {
+    let fixture = LcKimiResumeFixture::new();
+    let drift_dir = tempfile::tempdir().expect("anchor t36 drift dir");
+    let wrong_dir = tempfile::tempdir().expect("anchor t36 wrong-id dir");
+    let drift_pid_marker = drift_dir.path().join("kimi-t36-drift.pid");
+    let wrong_pid_marker = wrong_dir.path().join("kimi-t36-wrong-id.pid");
+
+    // —— 场景 1:真实版本漂移 ——
+    let drift_bin = anchor_t36_kimi_acp_fixture(drift_dir.path(), "0.34.0");
+    let drift_provider = Arc::new(KimiCodeProvider::new(drift_bin.clone()));
+    let drift_gateway = fixture.gateway_with_streaming_adapter(drift_provider.clone());
+    let drift_sink = RecordingToolPolicyAuditSink::new();
+    let mut drift_raw = fixture.lc_streaming_input(
+        Some(drift_sink.clone().bound()),
+        Some("kimi-session-drift-anchor-t36".to_string()),
+    );
+    drift_raw.env_vars.insert(
+        "KIMI_PID_MARKER".to_string(),
+        drift_pid_marker.display().to_string(),
+    );
+
+    let candidate = drift_gateway
+        .prepare_lc_streaming_candidate(
+            drift_raw,
+            fixture.coding_request(),
+            anchor_t36_audit_context(drift_sink.clone()),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("prepare freezes v1 facts before the drift");
+    assert_eq!(candidate.facts().exact_version(), "kimi 0.34.0");
+
+    // full-matching resume 判定先行(冻结 spawn 输入仍持 v1 投影)。
+    let previous = SessionResumeFingerprint::from_envelope(
+        candidate.validated().envelope(),
+        candidate.full_projection(),
+        candidate.validated().action_evidence_digest(),
+        &canonical_target_git_identity(&candidate.validated().envelope().target.worktree),
+    );
+    let disposition = drift_gateway
+        .resume_or_start_with_projection(
+            ResumeSessionLaunchRequest {
+                launch: fixture.coding_request(),
+                previous_fingerprint: previous,
+                previous_session_id: "sess-anchor-t36-drift".to_string(),
+            },
+            candidate.full_projection().clone(),
+        )
+        .expect("full-matching disposition is reached before the drift");
+    let GatewaySessionDisposition::Resume(resume_validated) = disposition else {
+        panic!("the pre-drift disposition must be a full-matching resume");
+    };
+    let drifted_spawn_input =
+        ValidatedStreamingProviderInput::new(candidate.input().clone(), resume_validated);
+
+    // 真实漂移:同路径替换 fixture 二进制(可执行身份变化→新 key 再观测)。
+    anchor_t36_rewrite_kimi_acp_fixture(&drift_bin, "0.34.1");
+
+    // gateway 复验:typed PolicyDrift。
+    let current = drift_gateway
+        .reobserve_lc_prepare_facts(&candidate, CancellationToken::new())
+        .await
+        .expect("reobservation probes the replaced executable under a new key");
+    assert_eq!(current.exact_version(), "kimi 0.34.1");
+    let typed_rejection = candidate
+        .assert_frozen_version(&current)
+        .expect_err("a real version drift must be typed-rejected against the frozen facts");
+    assert!(
+        matches!(
+            &typed_rejection,
+            ProviderGatewayError::PolicyDrift { dimension } if dimension == "provider_version"
+        ),
+        "unexpected rejection shape: {typed_rejection:?}"
+    );
+
+    // adapter spawn 守卫:child 之前 typed 拒 → 零 ACP child、零 audit。
+    let rejected = drift_provider
+        .start_validated(drifted_spawn_input, CancellationToken::new())
+        .await;
+    let Err(rejection) = rejected else {
+        panic!("a drifted provider version must reject the spawn before any child");
+    };
+    assert!(
+        rejection.details.contains("provider version drifted")
+            && rejection.details.contains("kimi 0.34.1")
+            && rejection.details.contains("kimi 0.34.0"),
+        "unexpected rejection: {rejection:?}"
+    );
+    let mismatch_children = usize::from(drift_pid_marker.exists());
+    assert_eq!(mismatch_children, 0);
+    assert_eq!(
+        drift_sink.events().len(),
+        0,
+        "no provider_start may be written for a drifted spawn"
+    );
+    assert_eq!(anchor_t36_fresh_session_count(&drift_bin), 0);
+
+    // —— 场景 2:错误握手 id(wrong native id)——
+    let wrong_bin = anchor_t36_kimi_acp_fixture(wrong_dir.path(), "0.34.0");
+    let wrong_provider = Arc::new(KimiCodeProvider::new(wrong_bin.clone()));
+    let wrong_gateway = fixture.gateway_with_streaming_adapter(wrong_provider.clone());
+    let wrong_sink = RecordingToolPolicyAuditSink::new();
+    let requested_native_id = "kimi-session-resume-t36-wrong".to_string();
+    let wrong_native_id = "kimi-session-native-wrong-t36".to_string();
+    let mut wrong_raw = fixture.lc_streaming_input(
+        Some(wrong_sink.clone().bound()),
+        Some(requested_native_id.clone()),
+    );
+    wrong_raw
+        .env_vars
+        .insert("KIMI_LOAD_SESSION_ID".to_string(), wrong_native_id.clone());
+    wrong_raw.env_vars.insert(
+        "KIMI_PID_MARKER".to_string(),
+        wrong_pid_marker.display().to_string(),
+    );
+
+    let wrong_candidate = wrong_gateway
+        .prepare_lc_streaming_candidate(
+            wrong_raw,
+            fixture.coding_request(),
+            anchor_t36_audit_context(wrong_sink.clone()),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("prepare for the wrong-id handshake scenario");
+    let wrong_previous = SessionResumeFingerprint::from_envelope(
+        wrong_candidate.validated().envelope(),
+        wrong_candidate.full_projection(),
+        wrong_candidate.validated().action_evidence_digest(),
+        &canonical_target_git_identity(&wrong_candidate.validated().envelope().target.worktree),
+    );
+    let wrong_disposition = wrong_gateway
+        .resume_or_start_with_projection(
+            ResumeSessionLaunchRequest {
+                launch: fixture.coding_request(),
+                previous_fingerprint: wrong_previous,
+                previous_session_id: "sess-anchor-t36-wrong".to_string(),
+            },
+            wrong_candidate.full_projection().clone(),
+        )
+        .expect("full-matching disposition for the wrong-id scenario");
+    let GatewaySessionDisposition::Resume(wrong_resume_validated) = wrong_disposition else {
+        panic!("the wrong-id scenario must start from a full-matching resume");
+    };
+    let wrong_spawn_input = ValidatedStreamingProviderInput::new(
+        wrong_candidate.input().clone(),
+        wrong_resume_validated,
+    );
+    let wrong_result = wrong_provider
+        .start_validated(wrong_spawn_input, CancellationToken::new())
+        .await;
+    let Err(wrong_rejection) = wrong_result else {
+        panic!("a wrong native id must fail the resume");
+    };
+    assert!(
+        wrong_rejection.details.contains(&wrong_native_id)
+            && wrong_rejection.details.contains(&requested_native_id)
+            && wrong_rejection.details.contains("session NOT resumed"),
+        "unexpected rejection: {wrong_rejection:?}"
+    );
+    assert!(
+        wrong_sink.events().is_empty(),
+        "no fresh provider_start may be written for a mismatched native resume confirmation"
+    );
+    let fresh_after_explicit_resume_count = anchor_t36_fresh_session_count(&wrong_bin);
+    assert_eq!(fresh_after_explicit_resume_count, 0);
+    let wrong_native_child_killed_and_reaped =
+        t09c_child_killed_and_reaped(&wrong_pid_marker).await;
+    assert!(wrong_native_child_killed_and_reaped);
 }

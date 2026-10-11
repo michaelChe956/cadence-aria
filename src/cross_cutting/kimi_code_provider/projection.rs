@@ -286,7 +286,7 @@ fn boundary_plan_ref(plan: &ProviderBoundaryPlan) -> String {
 }
 
 /// boundary 引用仅 Coding(有真实写面)非空;read-only 无写面为空串。
-fn boundary_evidence_ref_for(plan: &ProviderBoundaryPlan) -> String {
+pub(crate) fn boundary_evidence_ref_for(plan: &ProviderBoundaryPlan) -> String {
     if plan.mode() == ProviderBoundaryMode::ReadOnly {
         return String::new();
     }

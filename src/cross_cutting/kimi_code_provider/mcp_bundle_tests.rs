@@ -88,7 +88,7 @@ where
     (commands, events, run)
 }
 
-fn codegraph_bundle() -> ValidatedMcpServerBundle {
+pub(crate) fn codegraph_bundle() -> ValidatedMcpServerBundle {
     let mut server = McpServerConfig::new("codegraph", "/usr/local/bin/codegraph");
     server.args = vec!["mcp".to_string()];
     server.cwd = Some("/repo".to_string());
@@ -491,4 +491,58 @@ async fn lcg_t09_kimi_bundle_drift_never_session_new() {
     );
     let started_child_was_killed_and_reaped = t09c_child_killed_and_reaped(&pid_marker).await;
     assert!(started_child_was_killed_and_reaped);
+}
+
+// ==== Task 3.6(B0e):prepare facts 的 MCP 来源面 ====
+
+use super::session_tests::{anchor_t36_kimi_acp_fixture, anchor_t36_probe_invocations};
+use crate::product::logical_codebase::provider_gateway::ValidatedSessionLaunchPolicy;
+
+/// Task 3.6(B0e):prepare facts 的 MCP 来源面——Aria 注入 bundle digest
+/// 与 native-project-config 标记分开:注入实例冻结 bundle digest(裸
+/// 64 位 hex),无注入实例冻结 native 标记,两者互不冒充(adapter 级
+/// 只读观测,零 spawn:pid/会话不触达,各自实例 TTL 观测恰一次)。
+#[cfg(unix)]
+#[tokio::test]
+async fn anchor_t36_prepare_facts_mcp_source_follows_aria_injection() {
+    let fixture = LcKimiResumeFixture::new();
+    let native_dir = tempfile::tempdir().expect("anchor t36 native marker dir");
+    let aria_dir = tempfile::tempdir().expect("anchor t36 aria marker dir");
+    let native_bin = anchor_t36_kimi_acp_fixture(native_dir.path(), "0.34.0");
+    let aria_bin = anchor_t36_kimi_acp_fixture(aria_dir.path(), "0.34.0");
+    let validated: ValidatedSessionLaunchPolicy = fixture
+        .gateway()
+        .validate(fixture.coding_request())
+        .expect("lc coding launch validates");
+
+    let native_provider = KimiCodeProvider::new(native_bin.clone());
+    let native_facts = native_provider
+        .prepare_lc_facts(
+            &fixture.lc_streaming_input(None, None),
+            &validated,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("native-source prepare facts are observed");
+    assert_eq!(native_facts.mcp_bundle_digest(), "native-project-config");
+    assert!(!native_facts.mcp_bundle_digest().starts_with("sha256:"));
+
+    let bundle = codegraph_bundle();
+    let aria_provider = KimiCodeProvider::new(aria_bin.clone()).with_mcp_bundle(bundle.clone());
+    let aria_facts = aria_provider
+        .prepare_lc_facts(
+            &fixture.lc_streaming_input(None, None),
+            &validated,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("aria-bundle prepare facts are observed");
+    assert_eq!(aria_facts.mcp_bundle_digest(), bundle.digest());
+    assert_eq!(aria_facts.mcp_bundle_digest().len(), 64);
+    assert_ne!(aria_facts.mcp_bundle_digest(), "native-project-config");
+
+    // 同版本事实 + 供应商隔离:两个实例各自 TTL 观测恰一次,互不串值。
+    assert_eq!(aria_facts.exact_version(), native_facts.exact_version());
+    assert_eq!(anchor_t36_probe_invocations(&native_bin), 1);
+    assert_eq!(anchor_t36_probe_invocations(&aria_bin), 1);
 }
