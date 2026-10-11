@@ -446,10 +446,9 @@ pub(crate) enum PlanRepairCrashPoint {
 /// 第二套 HOME 推导）；确认动作据此重验漂移并按需登记，root 唯一权威
 /// 仍是冻结 gateway `authority_root()`，不另造浏览器/root authority。
 #[derive(Clone)]
-pub(crate) struct ConfirmationTrustContext {
+pub struct ConfirmationTrustContext {
     /// 共用 trust 前置门（与 aggregate initialization 生产依赖同一实例）。
-    pub(crate) precondition:
-        Arc<dyn crate::product::logical_codebase::ProviderTrustPrecondition>,
+    pub(crate) precondition: Arc<dyn crate::product::logical_codebase::ProviderTrustPrecondition>,
     /// create 期冻结的 issue 原始 LC 归属（None=单仓/legacy 无别名）。
     pub(crate) issue_lc_id: Option<String>,
     /// gateway 构造期冻结的 canonical 聚合根（`authority_root()`）。
@@ -466,7 +465,7 @@ pub(crate) struct ConfirmationTrustContext {
 /// web 层（change 5.1）以稳定 code `workspace_confirmation_trust_waiting`
 /// 投影为 WS ProtocolError / REST 非成功 ApiError；reason_code 原样保留。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ConfirmationTrustWaiting {
+pub enum ConfirmationTrustWaiting {
     Home {
         session_id: String,
         project_id: String,
@@ -494,32 +493,6 @@ impl ConfirmationTrustWaiting {
         match self {
             Self::Home { waiting, .. } => waiting.reason_code.as_str(),
             Self::Context { reason_code, .. } => reason_code,
-        }
-    }
-
-    /// 人类可读摘要（web 层过渡通道/日志用；change 5.1 以稳定 code +
-    /// message/context 全量同源投影替代，不以此为最终面）。
-    pub(crate) fn summary(&self) -> String {
-        match self {
-            Self::Home {
-                lc_id, waiting, ..
-            } => format!(
-                "确认 trust 未就绪（reason_code={}，LC {}，provider {:?}，root {}）：{}；{}。{} 修复前确认门保持未关闭，完成后请重新选择该门并确认；失败不自动重试。",
-                waiting.reason_code,
-                lc_id,
-                waiting.provider,
-                waiting.canonical_root.display(),
-                waiting.message,
-                waiting.retry_action,
-                waiting.manual_guidance,
-            ),
-            Self::Context {
-                reason_code,
-                message,
-                ..
-            } => format!(
-                "确认 trust 上下文停等（reason_code={reason_code}）：{message} 修复前确认门保持未关闭，完成后请重新选择该门并确认；失败不自动重试。"
-            ),
         }
     }
 }

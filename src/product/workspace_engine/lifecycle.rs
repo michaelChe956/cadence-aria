@@ -8,9 +8,8 @@ use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
 enum ConfirmationTrustEnsure {
     Skip,
     Ensure {
-        precondition: std::sync::Arc<
-            dyn crate::product::logical_codebase::ProviderTrustPrecondition,
-        >,
+        precondition:
+            std::sync::Arc<dyn crate::product::logical_codebase::ProviderTrustPrecondition>,
         session_id: String,
         project_id: String,
         operation_id: String,
@@ -368,12 +367,11 @@ impl WorkspaceEngine {
         event_tx: mpsc::Sender<EngineEvent>,
         mut session: WorkspaceSession,
     ) -> Result<Self, ProductStoreError> {
-        let persisted_timeline_nodes = lifecycle_store
-            .load_timeline_nodes_for_issue_session(
-                &session.project_id,
-                &session.issue_id,
-                &session.session_id,
-            )?;
+        let persisted_timeline_nodes = lifecycle_store.load_timeline_nodes_for_issue_session(
+            &session.project_id,
+            &session.issue_id,
+            &session.session_id,
+        )?;
         let persisted_artifact_versions = lifecycle_store
             .list_artifact_versions_for_issue_session(
                 &session.project_id,
@@ -580,7 +578,7 @@ impl WorkspaceEngine {
     /// （manager create 在 gateway 装配段调用；与 aggregate initialization
     /// 生产依赖共用同一 precondition 实例）。缺省 None 时 LC 会话（有
     /// gateway）确认 fail-closed ContextWaiting，非 LC 会话免登记。
-    pub fn with_confirmation_trust_context(
+    pub(crate) fn with_confirmation_trust_context(
         mut self,
         context: super::types::ConfirmationTrustContext,
     ) -> Self {
@@ -590,9 +588,7 @@ impl WorkspaceEngine {
 
     /// T4.1（REQ-REG-15）：确认 trust 冻结上下文的只读快照（manager 装配
     /// 断言/测试观察锚）。返回克隆的 precondition Arc 与冻结身份。
-    pub fn confirmation_trust_context(
-        &self,
-    ) -> Option<super::types::ConfirmationTrustContext> {
+    pub fn confirmation_trust_context(&self) -> Option<super::types::ConfirmationTrustContext> {
         self.confirmation_trust_context.clone()
     }
 
@@ -644,8 +640,8 @@ impl WorkspaceEngine {
         else {
             return Ok(());
         };
-        use crate::product::logical_codebase::provider_trust::ProviderTrustScenario;
         use crate::product::logical_codebase::ProviderTrustPreparationResult;
+        use crate::product::logical_codebase::provider_trust::ProviderTrustScenario;
         match precondition
             .ensure_ready_cancellable(
                 project_id.clone(),
@@ -678,10 +674,8 @@ impl WorkspaceEngine {
         author: ProviderName,
         reviewer: Option<ProviderName>,
     ) -> Result<ConfirmationTrustEnsure, super::types::ConfirmationTrustWaiting> {
-        use crate::product::logical_codebase::{
-            LogicalCodebaseStore, requires_workspace_trust,
-        };
         use super::types::{ConfirmationTrustContext, ConfirmationTrustWaiting};
+        use crate::product::logical_codebase::{LogicalCodebaseStore, requires_workspace_trust};
 
         // 非 LC 会话：未注入 gateway → 免登记（零调用放行）。
         if self.logical_provider_gateway.is_none() {
@@ -710,8 +704,8 @@ impl WorkspaceEngine {
                 });
             }
         };
-        let context_waiting = |reason_code: &'static str, message: String| {
-            ConfirmationTrustWaiting::Context {
+        let context_waiting =
+            |reason_code: &'static str, message: String| ConfirmationTrustWaiting::Context {
                 session_id: session_id.clone(),
                 project_id: project_id.clone(),
                 issue_id: issue_id.clone(),
@@ -719,8 +713,7 @@ impl WorkspaceEngine {
                 frozen_root: Some(frozen_root.clone()),
                 reason_code,
                 message,
-            }
-        };
+            };
         // 引擎无 lifecycle store（非持久构造，仅测试面）时无法重验冻结身份。
         let Some(store) = self.lifecycle_store.as_ref() else {
             return Err(context_waiting(
@@ -731,21 +724,20 @@ impl WorkspaceEngine {
         };
         let app_paths = store.app_paths();
         // 漂移重验 1：issue 原始 LC 归属（与 manager create 同源解析）。
-        let current_issue_lc =
-            crate::product::logical_codebase::resolve_issue_logical_codebase_id(
-                &app_paths,
-                &project_id,
-                &issue_id,
-            )
-            .map_err(|error| {
-                context_waiting(
-                    "confirmation_trust_context_unavailable",
-                    format!(
-                        "重解析 issue 原始 LC 归属失败（issue store IO：{error}）；\
+        let current_issue_lc = crate::product::logical_codebase::resolve_issue_logical_codebase_id(
+            &app_paths,
+            &project_id,
+            &issue_id,
+        )
+        .map_err(|error| {
+            context_waiting(
+                "confirmation_trust_context_unavailable",
+                format!(
+                    "重解析 issue 原始 LC 归属失败（issue store IO：{error}）；\
                          确认停等，未触碰 home。"
-                    ),
-                )
-            })?;
+                ),
+            )
+        })?;
         if current_issue_lc != issue_lc_id {
             return Err(context_waiting(
                 "confirmation_trust_scope_changed",

@@ -755,9 +755,10 @@ mod tests {
         let hint = kimi.manual_hint(&root);
         assert_eq!(hint.artifact_path, kimi.record_path(&root));
         assert_eq!(hint.trust_key, kimi.trust_key(&root));
-        assert!(hint
-            .manual_shape
-            .contains(&format!("\"root\":\"{}\"", root.display())));
+        assert!(
+            hint.manual_shape
+                .contains(&format!("\"root\":\"{}\"", root.display()))
+        );
         assert!(hint.manual_shape.contains("\"trustedAt\""));
     }
 }

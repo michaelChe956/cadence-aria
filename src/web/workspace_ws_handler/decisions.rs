@@ -29,10 +29,9 @@ pub(crate) fn confirmation_trust_waiting_projection(
             lc_id,
             waiting,
         } => {
-            let provider =
-                crate::product::logical_codebase::provider_trust::provider_wire_label(
-                    &waiting.provider,
-                );
+            let provider = crate::product::logical_codebase::provider_trust::provider_wire_label(
+                &waiting.provider,
+            );
             ConfirmationTrustWaitingProjection {
                 code: WORKSPACE_CONFIRMATION_TRUST_WAITING_CODE,
                 message: format!(
@@ -301,7 +300,7 @@ pub(crate) async fn apply_human_gate_termination(
             HumanGateTerminationEffect::AlreadyClosed { status }
         }
         // T5.1（REQ-REG-15/D4）：确认 trust 未 Ready 的 typed 停等——替换
-        // T4.1 过渡臂（EngineError(waiting.summary())）：保留 typed waiting
+        // T4.1 过渡臂（EngineError）：保留 typed waiting
         // 交由序列化方同源投影为稳定 code 的 ProtocolError/ApiError（不
         // abort、不 compile failure、不 generic EngineError）；门保持开态、
         // 零 durable 副作用（引擎面 4.1 锁定）。
