@@ -286,6 +286,24 @@ impl StreamingProviderAdapter for GatedStreamingProviderAdapter {
         self.inner.start_validated(input, cancel).await
     }
 
+    /// Task 3.2(B0a2)透传:先复验同一 gate,再转发 inner 的
+    /// `prepare_lc_facts`;inner 未接入(默认 typed unsupported)时错误
+    /// 原样上抛,不回落裸 `start`、不伪造 facts。
+    async fn prepare_lc_facts(
+        &self,
+        input: &StreamingProviderInput,
+        launch: &crate::product::logical_codebase::provider_gateway::ValidatedSessionLaunchPolicy,
+        cancel: CancellationToken,
+    ) -> Result<
+        crate::product::logical_codebase::provider_projection::ProviderLcPrepareFacts,
+        crate::cross_cutting::provider_adapter::ProviderAdapterError,
+    > {
+        self.gate
+            .ensure_available(&self.provider)
+            .map_err(ProviderAvailabilityError::into_adapter_error)?;
+        self.inner.prepare_lc_facts(input, launch, cancel).await
+    }
+
     async fn run_streaming(
         &self,
         input: &AdapterInput,

@@ -11,6 +11,7 @@
 //! (批次 D);digest 计算(固定字段序+长度分隔+schema 前缀)与 gateway
 //! 装配校验归 1b/1c;本文件只冻结 trait 与 DTO 形状。
 
+use std::sync::Arc;
 use std::path::{Path, PathBuf};
 
 use crate::cross_cutting::provider_boundary::ProviderBoundaryPlan;
@@ -335,6 +336,102 @@ impl ProviderPolicyProjector for UnprovisionedProviderPolicyProjector {
             "provider policy projector 未接入(1a 合同期占位,等待 Task 4/5 真实 projector)"
                 .to_string(),
         ))
+    }
+}
+
+/// Task 3.2(B0a2):adapter 只读观测的本家 LC prepare facts——携带当前有效
+/// exact-version 观测(允许 60 秒 TTL,见 `LcVersionCache`)、provider 特定
+/// approval/MCP/boundary facts 与**同版本**纯 projector;gateway 消费本结构
+/// 装配 gateway 私有 `ProviderProjectionInput` 冻结 full projection。
+///
+/// 字段私有 + `pub(crate)` 构造/getter:facts 只在 crate 内流转,provider/
+/// 调用方不能自造;`version_observed_at`/`version_probe_key` 供 spawn 前复验
+/// 消费同一 TTL 合同(prepare 与复验同 key 命中,不伪称每次实测二进制)。
+#[derive(Clone)]
+pub struct ProviderLcPrepareFacts {
+    provider_type: ProviderRefType,
+    provider_dialect: ProviderDialect,
+    wire_dialect: ProviderWireDialect,
+    exact_version: String,
+    version_observed_at: std::time::Instant,
+    version_probe_key: crate::cross_cutting::streaming_provider::LcVersionProbeKey,
+    approval_policy: String,
+    mcp_bundle_digest: String,
+    boundary: ProviderBoundaryPlan,
+    projector: Arc<dyn ProviderPolicyProjector>,
+}
+
+impl ProviderLcPrepareFacts {
+    /// crate 内构造(adapter 实现方)。
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        provider_type: ProviderRefType,
+        provider_dialect: ProviderDialect,
+        wire_dialect: ProviderWireDialect,
+        exact_version: String,
+        version_observed_at: std::time::Instant,
+        version_probe_key: crate::cross_cutting::streaming_provider::LcVersionProbeKey,
+        approval_policy: String,
+        mcp_bundle_digest: String,
+        boundary: ProviderBoundaryPlan,
+        projector: Arc<dyn ProviderPolicyProjector>,
+    ) -> Self {
+        Self {
+            provider_type,
+            provider_dialect,
+            wire_dialect,
+            exact_version,
+            version_observed_at,
+            version_probe_key,
+            approval_policy,
+            mcp_bundle_digest,
+            boundary,
+            projector,
+        }
+    }
+
+    pub(crate) fn provider_type(&self) -> ProviderRefType {
+        self.provider_type
+    }
+
+    pub(crate) fn provider_dialect(&self) -> ProviderDialect {
+        self.provider_dialect
+    }
+
+    pub(crate) fn wire_dialect(&self) -> ProviderWireDialect {
+        self.wire_dialect
+    }
+
+    pub fn exact_version(&self) -> &str {
+        &self.exact_version
+    }
+
+    pub fn version_observed_at(&self) -> std::time::Instant {
+        self.version_observed_at
+    }
+
+    pub fn version_probe_key(
+        &self,
+    ) -> &crate::cross_cutting::streaming_provider::LcVersionProbeKey {
+        &self.version_probe_key
+    }
+
+    pub(crate) fn approval_policy(&self) -> &str {
+        &self.approval_policy
+    }
+
+    pub(crate) fn mcp_bundle_digest(&self) -> &str {
+        &self.mcp_bundle_digest
+    }
+
+    pub(crate) fn boundary(&self) -> &ProviderBoundaryPlan {
+        &self.boundary
+    }
+
+    /// 与 exact_version 同源的纯 projector(gateway 装配 full projection 的
+    /// 唯一投影入口)。
+    pub fn projector(&self) -> Arc<dyn ProviderPolicyProjector> {
+        self.projector.clone()
     }
 }
 

@@ -190,6 +190,8 @@ pub enum VersionProbeError {
     Unavailable,
     /// 有界超时内未取得版本。
     Timeout,
+    /// caller 主动取消(Task 3.2/B0a2):typed 失败,不缓存、不回退过期成功。
+    Cancelled,
 }
 
 impl std::fmt::Display for VersionProbeError {
@@ -199,6 +201,7 @@ impl std::fmt::Display for VersionProbeError {
                 write!(f, "provider version unavailable")
             }
             VersionProbeError::Timeout => write!(f, "provider version probe timed out"),
+            VersionProbeError::Cancelled => write!(f, "provider version probe cancelled"),
         }
     }
 }
@@ -231,6 +234,229 @@ pub(crate) async fn cached_cli_version(
         guard.insert(command.to_path_buf(), version.clone());
     }
     Ok(version)
+}
+
+// ===== Task 3.2(B0a2):LC 版本只读观测的 60 秒 TTL/single-flight 合同 =====
+//
+// owner 2026-10-11 裁决:允许有界只读 CLI `--version` 观测(不算创建会话
+// 进程),并以 60 秒 TTL 缓存。本块是 LC 权威版本观测 helper,与上方 direct
+// 路径的无过期 `cached_cli_version` 严格分离——direct 旧语义零变化。
+
+/// LC 版本观测缓存 TTL(固定设计参数):从成功完成观测的单调时刻起算,
+/// 有效条件 age<60s,边界 age>=60s 必再观测;非滑动(命中不续期)。
+pub const LC_VERSION_PROBE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// LC 版本观测的缓存 key:按 provider + 实际配置 CLI 命令的 canonical
+/// executable 路径/可执行身份 + 版本观测参数 + supplier 实例范围区分;
+/// 路径/可执行身份变化直接换 key(不失效其它 key),测试 supplier 与真实
+/// CLI 不串值。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct LcVersionProbeKey {
+    pub provider: crate::product::models::ProviderName,
+    pub canonical_executable: PathBuf,
+    pub executable_identity: String,
+    pub argv: Vec<String>,
+    pub supplier_scope: u64,
+}
+
+/// 一次成功的版本观测(缓存值仅版本字符串+观测时刻,不缓存 trust/policy/
+/// projection/admission 或 fresh 授权)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LcVersionObservation {
+    exact_version: String,
+    observed_at: std::time::Instant,
+}
+
+impl LcVersionObservation {
+    // B0a2 合同先落:生产消费方为 Task 3.3–3.6 四家 adapter 的 prepare
+    // 接线,测试面已消费(kimi session.rs 同款 cfg_attr 先例)。
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn new(exact_version: String, observed_at: std::time::Instant) -> Self {
+        Self {
+            exact_version,
+            observed_at,
+        }
+    }
+
+    pub fn exact_version(&self) -> &str {
+        &self.exact_version
+    }
+
+    pub fn observed_at(&self) -> std::time::Instant {
+        self.observed_at
+    }
+}
+
+/// 版本观测 async factory:single-flight 下仅 winner 调用,不预造 future、
+/// 不 spawn;返回有界观测(成功为版本字符串,失败为 typed 错误)。
+pub type LcVersionProbe = std::sync::Arc<
+    dyn Fn(
+            LcVersionProbeKey,
+        ) -> std::pin::Pin<
+            Box<dyn Future<Output = Result<String, VersionProbeError>> + Send>,
+        > + Send
+        + Sync,
+>;
+
+/// LC 版本观测缓存实例(进程内、非 durable;进程/实例重建即失效,不跨
+/// 实例复用旧值)。同 key 并发 miss/到期 single-flight——只有 winner 执行
+/// 一次有界观测,其它 caller 等同一结果;不同 key 互不串行。观测失败/
+/// 超时/取消不缓存、不回退过期成功;成功值在 age<`LC_VERSION_PROBE_TTL`
+/// 内命中且不滑动续期。时钟默认单调 `Instant::now`,`with_clock` 为
+/// crate-private 测试 seam(注入手动时钟,禁止 sleep 概率测试)。
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone)]
+pub struct LcVersionCache {
+    inner: std::sync::Arc<LcVersionCacheInner>,
+}
+
+// 同上:B0a2 合同先落,生产消费方为 3.3–3.6 的 adapter 接线;测试面已消费。
+#[cfg_attr(not(test), allow(dead_code))]
+struct LcVersionCacheInner {
+    slots:
+        std::sync::Mutex<std::collections::HashMap<LcVersionProbeKey, LcVersionCacheSlot>>,
+    clock: std::sync::Arc<dyn Fn() -> std::time::Instant + Send + Sync>,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone)]
+enum LcVersionCacheSlot {
+    Fresh(LcVersionObservation),
+    InFlight(
+        tokio::sync::watch::Sender<Option<Result<LcVersionObservation, VersionProbeError>>>,
+    ),
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+enum LcVersionCacheClaim {
+    Fresh(LcVersionObservation),
+    Waiting(
+        tokio::sync::watch::Receiver<
+            Option<Result<LcVersionObservation, VersionProbeError>>,
+        >,
+    ),
+    Won(
+        tokio::sync::watch::Sender<Option<Result<LcVersionObservation, VersionProbeError>>>,
+    ),
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl LcVersionCache {
+    pub fn new() -> Self {
+        Self::with_clock(std::sync::Arc::new(std::time::Instant::now))
+    }
+
+    /// crate-private 测试 seam:注入单调时钟。
+    pub(crate) fn with_clock(
+        clock: std::sync::Arc<dyn Fn() -> std::time::Instant + Send + Sync>,
+    ) -> Self {
+        Self {
+            inner: std::sync::Arc::new(LcVersionCacheInner {
+                slots: std::sync::Mutex::new(std::collections::HashMap::new()),
+                clock,
+            }),
+        }
+    }
+
+    /// TTL 合同入口:命中(age<60s,非滑动)直接返回;miss/到期由 winner
+    /// 执行唯一一次有界观测。caller 取消返回 typed `Cancelled`(probe
+    /// future 随之丢弃,迟到结果不复活旧 run、不入缓存)。
+    pub(crate) async fn cached_lc_cli_version(
+        &self,
+        key: LcVersionProbeKey,
+        probe: LcVersionProbe,
+        cancel: CancellationToken,
+    ) -> Result<LcVersionObservation, VersionProbeError> {
+        match self.inner.claim(&key) {
+            LcVersionCacheClaim::Fresh(observation) => Ok(observation),
+            LcVersionCacheClaim::Waiting(mut receiver) => {
+                // loser:与 winner 等同一结果;自身取消立即 typed 失败。
+                let settled = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => Err(VersionProbeError::Cancelled),
+                    settled = receiver.wait_for(|value| value.is_some()) => match settled {
+                        Ok(value) => match &*value {
+                            Some(result) => result.clone(),
+                            None => Err(VersionProbeError::Unavailable),
+                        },
+                        Err(_) => Err(VersionProbeError::Unavailable),
+                    },
+                };
+                settled
+            }
+            LcVersionCacheClaim::Won(sender) => {
+                // winner:唯一一次调用 probe(不预造 future、不 spawn)。
+                let probe_future = probe(key.clone());
+                let observed = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => Err(VersionProbeError::Cancelled),
+                    version = probe_future => version,
+                };
+                let settled = observed.map(|exact_version| {
+                    LcVersionObservation::new(exact_version, (self.inner.clock)())
+                });
+                // single-flight:waiters 等同一结果(成功或 typed 失败)。
+                sender.send_replace(Some(settled.clone()));
+                match settled {
+                    Ok(observation) => {
+                        // 仅成功缓存;命中不滑动续期(observed_at 不变)。
+                        self.inner
+                            .slots
+                            .lock()
+                            .expect("lc version cache lock")
+                            .insert(key, LcVersionCacheSlot::Fresh(observation.clone()));
+                        Ok(observation)
+                    }
+                    Err(error) => {
+                        // 失败/取消不缓存:逐出本 in-flight 槽(仅当仍是
+                        // 自己的槽),后续 caller 重新观测,绝不回退旧值。
+                        let mut slots = self.inner.slots.lock().expect("lc version cache lock");
+                        if let Some(LcVersionCacheSlot::InFlight(current)) = slots.get(&key)
+                            && current.same_channel(&sender)
+                        {
+                            slots.remove(&key);
+                        }
+                        Err(error)
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl Default for LcVersionCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl LcVersionCacheInner {
+    fn expired(&self, observation: &LcVersionObservation) -> bool {
+        (self.clock)().duration_since(observation.observed_at()) >= LC_VERSION_PROBE_TTL
+    }
+
+    /// 短锁内裁决:TTL 内命中 → Fresh;已有 winner 在观测 → Waiting;
+    /// 否则逐出过期条目并注册自己为 winner。
+    fn claim(&self, key: &LcVersionProbeKey) -> LcVersionCacheClaim {
+        let mut slots = self.slots.lock().expect("lc version cache lock");
+        if let Some(slot) = slots.get(key) {
+            match slot {
+                LcVersionCacheSlot::Fresh(observation) if !self.expired(observation) => {
+                    return LcVersionCacheClaim::Fresh(observation.clone());
+                }
+                LcVersionCacheSlot::InFlight(sender) => {
+                    return LcVersionCacheClaim::Waiting(sender.subscribe());
+                }
+                _ => {}
+            }
+        }
+        slots.remove(key);
+        let (sender, _receiver) = tokio::sync::watch::channel(None);
+        slots.insert(key.clone(), LcVersionCacheSlot::InFlight(sender.clone()));
+        LcVersionCacheClaim::Won(sender)
+    }
 }
 
 /// 双向角色×策略守卫：Orchestrator/WorkItemSplitter/Reviewer 必须携带
@@ -989,6 +1215,30 @@ pub trait StreamingProviderAdapter: Send + Sync {
             None,
             String::new(),
             "streaming provider validated start is not supported by this adapter",
+            0,
+        ))
+    }
+
+    /// Task 3.2(B0a2):LC 公共 prepare 合同——adapter 以只读方式观测本家
+    /// facts(exact version 经 [`LcVersionCache`] 60 秒 TTL、provider 特定
+    /// approval/MCP/boundary facts、与该版本同源的纯 projector),供 gateway
+    /// 装配 full projection。默认返回 typed unsupported,仅供未接入/测试
+    /// adapter 显式拒绝(与上方 `start_validated` 默认同构);四家真实
+    /// provider 的接入归 Task 3.3–3.6,参与 LC candidate 正例的 fake 必须
+    /// 提供可观测 facts,不得靠默认拒绝使正例虚绿。
+    async fn prepare_lc_facts(
+        &self,
+        _input: &StreamingProviderInput,
+        _launch: &crate::product::logical_codebase::provider_gateway::ValidatedSessionLaunchPolicy,
+        _cancel: CancellationToken,
+    ) -> Result<
+        crate::product::logical_codebase::provider_projection::ProviderLcPrepareFacts,
+        ProviderAdapterError,
+    > {
+        Err(ProviderAdapterError::execution_failed(
+            None,
+            String::new(),
+            "streaming provider lc prepare facts is not supported by this adapter",
             0,
         ))
     }

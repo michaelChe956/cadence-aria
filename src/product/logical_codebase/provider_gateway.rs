@@ -196,6 +196,99 @@ impl ValidatedSessionLaunchPolicy {
     }
 }
 
+/// Task 3.2(B0a2):gateway `prepare_lc_streaming_candidate` 冻结的 opaque
+/// LC streaming 候选。字段私有、只能由 gateway 构造:私有 input/request/
+/// validated/full projection/facts/run-bound audit/adapter 句柄。
+///
+/// 冻结+复验矩阵:候选冻结 full projection 与 facts(exact version/观测
+/// 时刻);spawn 前经 gateway `reobserve_lc_prepare_facts` 重新取当前事实,
+/// 并以 [`Self::assert_frozen_version`] 比对——version 单独允许 60 秒 TTL
+/// 命中,但 identity 变更后的新观测与冻结事实不一致必须 typed 拒,不得
+/// spawn。
+///
+/// 转换纪律:workspace LC 仅在 **full-matching resume**(以本候选 full
+/// projection 走 `resume_or_start_with_projection` 判定为 `Resume`)或
+/// **明确 fresh** 后才可经 [`Self::into_validated_streaming_input`] 转换
+/// 为可 spawn 输入;`StartNew` 等待面的 validated 不得直接 start。
+#[derive(Clone)]
+pub struct PreparedLcStreamingCandidate {
+    input: crate::cross_cutting::streaming_provider::StreamingProviderInput,
+    request: SessionLaunchRequest,
+    validated: ValidatedSessionLaunchPolicy,
+    full_projection:
+        crate::product::logical_codebase::provider_projection::ProviderPolicyProjection,
+    facts: crate::product::logical_codebase::provider_projection::ProviderLcPrepareFacts,
+    run_bound_audit: ProviderLaunchAuditContext,
+    adapter: Arc<dyn crate::cross_cutting::streaming_provider::StreamingProviderAdapter>,
+}
+
+impl PreparedLcStreamingCandidate {
+    /// 冻结的 streaming input(prepare 已绑定 run-bound audit/会话身份)。
+    pub fn input(
+        &self,
+    ) -> &crate::cross_cutting::streaming_provider::StreamingProviderInput {
+        &self.input
+    }
+
+    /// 冻结的启动请求。
+    pub fn request(&self) -> &SessionLaunchRequest {
+        &self.request
+    }
+
+    /// 冻结的 validated policy(携带 run-bound audit 上下文)。
+    pub fn validated(&self) -> &ValidatedSessionLaunchPolicy {
+        &self.validated
+    }
+
+    /// 冻结的 full projection(prepare 时点由 facts 同版本 projector 产出)。
+    pub fn full_projection(
+        &self,
+    ) -> &crate::product::logical_codebase::provider_projection::ProviderPolicyProjection {
+        &self.full_projection
+    }
+
+    /// 冻结的 adapter facts(exact version/观测时刻/probe key)。
+    pub fn facts(
+        &self,
+    ) -> &crate::product::logical_codebase::provider_projection::ProviderLcPrepareFacts {
+        &self.facts
+    }
+
+    /// prepare 绑定的 run-bound audit 上下文。
+    pub fn run_bound_audit(&self) -> &ProviderLaunchAuditContext {
+        &self.run_bound_audit
+    }
+
+    /// 冻结+复验矩阵:以重观测的当前 facts 比对冻结 full projection 的
+    /// exact version;不一致 → typed `PolicyDrift(provider_version)` 拒
+    /// resume,不可 spawn。
+    pub fn assert_frozen_version(
+        &self,
+        current: &crate::product::logical_codebase::provider_projection::ProviderLcPrepareFacts,
+    ) -> Result<(), ProviderGatewayError> {
+        if self.full_projection.exact_version() != current.exact_version() {
+            return Err(ProviderGatewayError::PolicyDrift {
+                dimension: "provider_version".to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// 转换面(冻结合同):仅在调用方完成 full-matching resume 判定或取得
+    /// 显式 fresh 授权后调用;不得把 `StartNew` 等待面的 validated 直接
+    /// start(crate 内唯一转换出口)。生产 caller 接线归 B1/B2(Task
+    /// 4.x/5.x),此前只有合同测试消费。
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn into_validated_streaming_input(
+        self,
+    ) -> crate::cross_cutting::session_launch::ValidatedStreamingProviderInput {
+        crate::cross_cutting::session_launch::ValidatedStreamingProviderInput::new(
+            self.input,
+            self.validated,
+        )
+    }
+}
+
 /// provider 启动请求。gateway 据此解析政策 artifact、target 与 capability。
 #[derive(Debug, Clone)]
 pub struct SessionLaunchRequest {
@@ -1568,6 +1661,169 @@ impl LogicalCodebaseProviderGateway {
         Ok(ValidatedStreamingProviderInput::new(
             input,
             validated.with_launch_audit(context),
+        ))
+    }
+
+    /// Task 3.2(B0a2):LC 全上下文公共 prepare 合同。与
+    /// `prepare_streaming_launch` 同源的角色矩阵派生/双向守卫与 run-bound
+    /// audit 绑定之上,再读取真实 adapter 的只读 facts(`prepare_lc_facts`,
+    /// exact version 消费 60 秒 TTL 合同)、以 B0a1 只读 trust facts 冻结
+    /// trust 维度、用 facts 携带的**同版本** projector 装配 gateway 私有
+    /// `ProviderProjectionInput` 冻结 full projection,最后施加身份一致门
+    /// 与统一无副作用 `admission_verdict`。全程零 spawn/零 durable 写;
+    /// 未接入 adapter 得 typed unsupported 拒绝(不伪造 facts)。
+    ///
+    /// 返回 opaque [`PreparedLcStreamingCandidate`]:resume 判定仍走既有
+    /// `resume_or_start_with_projection`(以候选冻结的 full projection 为
+    /// 基准);spawn 前复验经 `reobserve_lc_prepare_facts` 重新取当前事实
+    /// (version 单独允许 TTL;trust/policy/target 等不得借版本缓存冻结)。
+    pub async fn prepare_lc_streaming_candidate(
+        &self,
+        mut input: crate::cross_cutting::streaming_provider::StreamingProviderInput,
+        request: SessionLaunchRequest,
+        audit: ProviderLaunchAuditContext,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<PreparedLcStreamingCandidate, ProviderGatewayError> {
+        // 1. 策略角色缺策略时按角色矩阵派生(与 prepare_streaming_launch
+        //    同源,gateway-owned);外来非法 Some(policy) 由双向守卫拒绝。
+        if input.tool_policy.is_none()
+            && matches!(
+                input.role,
+                crate::protocol::contracts::AdapterRole::Orchestrator
+                    | crate::protocol::contracts::AdapterRole::WorkItemSplitter
+                    | crate::protocol::contracts::AdapterRole::Reviewer
+            )
+        {
+            input.tool_policy = Some(
+                crate::cross_cutting::streaming_provider::ProviderToolPolicy::deny_file_write_builtins(
+                ),
+            );
+        }
+        crate::cross_cutting::streaming_provider::validate_tool_policy_for_role(
+            &input.role,
+            input.tool_policy.as_ref(),
+        )
+        .map_err(|error| ProviderGatewayError::UnsupportedCapability(error.to_string()))?;
+
+        // 2. validate(policy/target/envelope 冻结)+ run-bound audit 绑定。
+        let validated = self
+            .validate(request.clone())?
+            .with_launch_audit(audit.clone());
+        input.workspace_session_id = Some(audit.workspace_session_id.clone());
+        input.audit_sink = Some(
+            crate::cross_cutting::tool_policy_audit::RoleRunBoundAuditSink::new(
+                audit.audit_sink.clone(),
+                audit.workspace_session_id.clone(),
+                audit.role_run_seq,
+            )
+            .into_sink(),
+        );
+
+        // 3. registry 真实 adapter(register_gated 装配面恒为 availability
+        //    wrapper;查找先于 facts,未注册即 fail-closed)。
+        let provider_name = provider_name_for_dialect(validated.envelope().provider_dialect);
+        let adapter = self
+            .registry
+            .get(&provider_name)
+            .ok_or_else(|| ProviderGatewayError::RegistryLookup(format!("{provider_name:?}")))?;
+
+        // 4. adapter 只读 facts(默认 typed unsupported 仅未接入/测试 adapter)。
+        let facts = adapter
+            .prepare_lc_facts(&input, &validated, cancel)
+            .await?;
+
+        // 5. 只读 trust 维度:注入 source 时以 B0a1 `fingerprint_facts` 的
+        //    真实工件摘要冻结(缺/不可信 typed 拒,不冻结假事实);无需
+        //    workspace trust 的 provider 冻结「不适用」事实本身;未注入
+        //    source 的裸 gateway 维持空串现状(既有测试/旧链零回归)。零写。
+        let trust_digest = self.lc_trust_digest(&provider_name, &validated.project_id)?;
+
+        // 6. gateway 私有装配 full projection(不可伪造输入;projector 来自
+        //    facts,与 exact_version 同源)。
+        let projection_input =
+            crate::product::logical_codebase::provider_projection::ProviderProjectionInput::new(
+                validated.envelope().clone(),
+                validated.provider.clone(),
+                validated.envelope().action,
+                input.role.clone(),
+                input.permission_mode.clone(),
+                input.tool_policy.clone(),
+                facts.approval_policy().to_string(),
+                facts.mcp_bundle_digest().to_string(),
+                validated.envelope().config_artifact_ref.clone(),
+                trust_digest,
+                Some(facts.boundary().clone()),
+            );
+        let full_projection = facts
+            .projector()
+            .project(&projection_input)
+            .map_err(|error| ProviderGatewayError::UnsupportedCapability(error.to_string()))?;
+
+        // 7. 身份一致门 + 统一无副作用 admission verdict(不写 audit、
+        //    不 ensure/revoke、不 spawn)。
+        Self::assert_projection_matches_envelope(&validated, &full_projection)?;
+        let is_resume = input.resume_provider_session_id.is_some();
+        self.admission_verdict(&request, &full_projection, is_resume)?;
+
+        Ok(PreparedLcStreamingCandidate {
+            input,
+            request,
+            validated,
+            full_projection,
+            facts,
+            run_bound_audit: audit,
+            adapter,
+        })
+    }
+
+    /// Task 3.2(B0a2):spawn 前重新取当前 facts——同一 adapter/key 的再次
+    /// 只读观测(version 命中 60 秒 TTL 合同;命令 identity 变化则换 key
+    /// 再观测)。调用方以 [`PreparedLcStreamingCandidate::assert_frozen_version`]
+    /// 与冻结事实比对;trust/policy/target 等其它维度不借版本缓存冻结。
+    pub async fn reobserve_lc_prepare_facts(
+        &self,
+        candidate: &PreparedLcStreamingCandidate,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<
+        crate::product::logical_codebase::provider_projection::ProviderLcPrepareFacts,
+        ProviderGatewayError,
+    > {
+        candidate
+            .adapter
+            .prepare_lc_facts(candidate.input(), candidate.validated(), cancel)
+            .await
+            .map_err(ProviderGatewayError::Adapter)
+    }
+
+    /// 只读 trust 维度装配(B0a1 `ProviderTrustFingerprintFacts` 消费面)。
+    /// 零写:不 ensure/revoke、不追加 trust 审计;不造无适用 trust 记录。
+    fn lc_trust_digest(
+        &self,
+        provider_name: &crate::product::models::ProviderName,
+        project_id: &str,
+    ) -> Result<String, ProviderGatewayError> {
+        let Some(trust) = self.trust.as_ref() else {
+            return Ok(String::new());
+        };
+        if !crate::product::logical_codebase::provider_trust::requires_workspace_trust(
+            provider_name,
+        ) {
+            return Ok(format!(
+                "lc-trust-v1:{provider_name:?}:workspace_trust_not_required"
+            ));
+        }
+        let facts = trust.fingerprint_facts(
+            project_id,
+            self.lc_scope.as_deref().unwrap_or(""),
+            provider_name,
+            &self.authority_root,
+        )?;
+        Ok(format!(
+            "lc-trust-v1:{provider_name:?}:{}",
+            facts
+                .record_digest
+                .as_deref()
+                .unwrap_or("no_record_digest")
         ))
     }
 

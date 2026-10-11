@@ -1651,3 +1651,440 @@ fn lcg_kimi_exempted_tool_policy_maps_deny_intent_to_none_and_passes_others() {
         Some(marker_policy)
     );
 }
+
+// ===== Task 3.2(B0a2):LC 版本只读观测 60 秒 TTL/single-flight 合同 =====
+//
+// owner 2026-10-11 裁决:允许有界只读 `--version` 观测,60 秒非滑动 TTL
+// (单调时钟,age>=60s 必再观测),同 key single-flight,失败/取消不缓存、
+// 不回退过期成功;不同 key 独立不串行。观测口径①(version probe)与
+// ②adapter start/③session child 分列,本文件只测①的缓存合同。
+
+/// 手动单调时钟(注入 `LcVersionCache`;禁止 sleep 概率测试)。
+struct AnchorT09ManualClock {
+    now: std::sync::Mutex<std::time::Instant>,
+}
+
+impl AnchorT09ManualClock {
+    fn new() -> Self {
+        Self {
+            now: std::sync::Mutex::new(std::time::Instant::now()),
+        }
+    }
+
+    fn advance(&self, duration: Duration) {
+        let mut now = self.now.lock().expect("anchor t09 clock");
+        *now = now.checked_add(duration).expect("manual clock advance");
+    }
+
+    fn source(
+        self: &std::sync::Arc<Self>,
+    ) -> std::sync::Arc<dyn Fn() -> std::time::Instant + Send + Sync> {
+        let clock = self.clone();
+        std::sync::Arc::new(move || *clock.now.lock().expect("anchor t09 clock"))
+    }
+}
+
+/// 可切换观测结果的计数 probe factory(观测口径①)。
+#[derive(Clone, Default)]
+struct AnchorT09ProbeFactory {
+    calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    outcome: std::sync::Arc<std::sync::Mutex<AnchorT09ProbeOutcome>>,
+}
+
+#[derive(Clone)]
+enum AnchorT09ProbeOutcome {
+    Version(String),
+    Fail(super::VersionProbeError),
+}
+
+impl Default for AnchorT09ProbeOutcome {
+    fn default() -> Self {
+        Self::Version("cli 1.4.0".to_string())
+    }
+}
+
+impl AnchorT09ProbeFactory {
+    fn probe(&self) -> super::LcVersionProbe {
+        let calls = self.calls.clone();
+        let outcome = self.outcome.clone();
+        std::sync::Arc::new(move |_key| {
+            let calls = calls.clone();
+            let outcome = outcome.clone();
+            Box::pin(async move {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                match outcome.lock().expect("anchor t09 probe").clone() {
+                    AnchorT09ProbeOutcome::Version(version) => Ok(version),
+                    AnchorT09ProbeOutcome::Fail(error) => Err(error),
+                }
+            })
+        })
+    }
+
+    fn set_version(&self, version: &str) {
+        *self.outcome.lock().expect("anchor t09 probe") =
+            AnchorT09ProbeOutcome::Version(version.to_string());
+    }
+
+    fn set_failure(&self, error: super::VersionProbeError) {
+        *self.outcome.lock().expect("anchor t09 probe") =
+            AnchorT09ProbeOutcome::Fail(error);
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+fn anchor_t09_key(
+    provider: crate::product::models::ProviderName,
+    executable_identity: &str,
+) -> super::LcVersionProbeKey {
+    super::LcVersionProbeKey {
+        provider,
+        canonical_executable: std::path::PathBuf::from("/opt/anchor-t09-fake-bin/cli"),
+        executable_identity: executable_identity.to_string(),
+        argv: vec!["--version".to_string()],
+        supplier_scope: 1,
+    }
+}
+
+/// 59.999s 命中/60.000s 边界再观测(非滑动)、same-key burst single-flight、
+/// different-key 独立、失败不缓存、失败/过期不回退成功值。
+#[tokio::test]
+async fn anchor_t09_version_ttl_boundary_singleflight_and_failures() {
+    use std::sync::Arc;
+
+    let clock = Arc::new(AnchorT09ManualClock::new());
+    let cache = Arc::new(super::LcVersionCache::with_clock(clock.source()));
+    let probe = AnchorT09ProbeFactory::default();
+    let cancel = CancellationToken::new();
+    let key = anchor_t09_key(crate::product::models::ProviderName::ClaudeCode, "identity-1");
+
+    // same-key 并发 burst:barrier 同时释放 8 个 caller——single-flight 下
+    // 全程只有 winner 的一次有界观测,其余 caller 等同一结果或命中缓存。
+    let barrier = Arc::new(tokio::sync::Barrier::new(9));
+    let mut callers = Vec::new();
+    for _ in 0..8 {
+        let cache = cache.clone();
+        let probe = probe.probe();
+        let cancel = cancel.clone();
+        let key = key.clone();
+        let barrier = barrier.clone();
+        callers.push(tokio::spawn(async move {
+            barrier.wait().await;
+            cache
+                .cached_lc_cli_version(key, probe, cancel)
+                .await
+                .expect("burst caller observes the single-flight result")
+        }));
+    }
+    barrier.wait().await;
+    for caller in callers {
+        assert_eq!(
+            caller
+                .await
+                .expect("burst caller join")
+                .exact_version()
+                .to_string(),
+            "cli 1.4.0"
+        );
+    }
+    let probe_calls_after_burst = probe.calls();
+    assert_eq!(probe_calls_after_burst, 1);
+
+    // age=59.999s:非滑动 TTL 命中,不触发新观测。
+    clock.advance(Duration::from_millis(59_999));
+    let hit = cache
+        .cached_lc_cli_version(key.clone(), probe.probe(), cancel.clone())
+        .await
+        .expect("59.999s observation is still within the TTL");
+    assert_eq!(hit.exact_version(), "cli 1.4.0");
+    let probe_calls_at_59_999_ms = probe.calls();
+    assert_eq!(probe_calls_at_59_999_ms, 1);
+
+    // age=60.000s:边界到期(age>=60s 必再观测;若为滑动 TTL,59.999s 的
+    // 命中会把续期后 age 拉回 0.001s——仍会命中,此处即红)。
+    clock.advance(Duration::from_millis(1));
+    let refreshed = cache
+        .cached_lc_cli_version(key.clone(), probe.probe(), cancel.clone())
+        .await
+        .expect("60s boundary re-observes");
+    assert_eq!(refreshed.exact_version(), "cli 1.4.0");
+    let probe_calls_at_60_000_ms = probe.calls();
+    assert_eq!(probe_calls_at_60_000_ms, 2);
+
+    // 观测失败不缓存(独立 key,不受上面 key 的成功观测干扰):连续两次
+    // 失败都真实再观测、都 typed Err——失败结果不进入缓存。
+    let failure_key = anchor_t09_key(crate::product::models::ProviderName::KimiCode, "identity-failure");
+    probe.set_failure(super::VersionProbeError::Unavailable);
+    let failed_first = cache
+        .cached_lc_cli_version(failure_key.clone(), probe.probe(), cancel.clone())
+        .await;
+    assert!(matches!(
+        failed_first,
+        Err(super::VersionProbeError::Unavailable)
+    ));
+    let failed_second = cache
+        .cached_lc_cli_version(failure_key.clone(), probe.probe(), cancel.clone())
+        .await;
+    assert!(matches!(
+        failed_second,
+        Err(super::VersionProbeError::Unavailable)
+    ));
+    assert_eq!(probe.calls(), 4);
+
+    // 失败/过期不回退成功值:先成功并缓存,把时钟推过 TTL 后让观测失败——
+    // 调用必须得到 typed 失败,绝不返回过期成功值。
+    probe.set_version("cli 1.4.0");
+    cache
+        .cached_lc_cli_version(failure_key.clone(), probe.probe(), cancel.clone())
+        .await
+        .expect("successful re-observation");
+    clock.advance(Duration::from_secs(61));
+    probe.set_failure(super::VersionProbeError::Timeout);
+    let expired = cache
+        .cached_lc_cli_version(failure_key, probe.probe(), cancel.clone())
+        .await;
+    assert!(
+        matches!(expired, Err(super::VersionProbeError::Timeout)),
+        "expired success must never be served as a fallback"
+    );
+    assert_eq!(probe.calls(), 6);
+    probe.set_version("cli 1.4.0");
+
+    // different-key 独立不串行:key2 的观测阻塞在 gate 上,key3 仍能立即完成。
+    let (key2_started_tx, key2_started_rx) = tokio::sync::oneshot::channel::<()>();
+    let (key2_release_tx, key2_release_rx) = tokio::sync::oneshot::channel::<()>();
+    let key2 = anchor_t09_key(crate::product::models::ProviderName::Codex, "identity-1");
+    let key3 = anchor_t09_key(crate::product::models::ProviderName::Pi, "identity-1");
+    let blocking_probe: super::LcVersionProbe = {
+        let started = std::sync::Mutex::new(Some(key2_started_tx));
+        let release = std::sync::Mutex::new(Some(key2_release_rx));
+        std::sync::Arc::new(move |_key| {
+            let _ = started.lock().unwrap().take().map(|tx| tx.send(()));
+            let release = release.lock().unwrap().take();
+            Box::pin(async move {
+                if let Some(release) = release {
+                    let _ = release.await;
+                }
+                Ok("codex 2.0.0".to_string())
+            })
+        })
+    };
+    let key2_caller = {
+        let cache = cache.clone();
+        let cancel = cancel.clone();
+        let key = key2.clone();
+        tokio::spawn(async move {
+            cache
+                .cached_lc_cli_version(key, blocking_probe, cancel)
+                .await
+                .expect("blocked key2 observation settles after release")
+        })
+    };
+    key2_started_rx
+        .await
+        .expect("key2 probe has started and is parked on the gate");
+    let key3_observation = tokio::time::timeout(
+        TEST_TIMEOUT,
+        cache.cached_lc_cli_version(key3, probe.probe(), cancel.clone()),
+    )
+    .await
+    .expect("different-key observations must not serialize behind each other")
+    .expect("key3 observation");
+    assert_eq!(key3_observation.exact_version(), "cli 1.4.0");
+    key2_release_tx
+        .send(())
+        .expect("release the blocked key2 observation");
+    let key2_observation = key2_caller
+        .await
+        .expect("key2 caller join");
+    assert_eq!(key2_observation.exact_version(), "codex 2.0.0");
+}
+
+/// 活缓存期间命令 canonical executable identity/路径/supplier scope 变化
+/// 直接换 key:必须再观测;旧 key 命中不串值。
+#[tokio::test]
+async fn anchor_t09_command_identity_change_invalidates_live_cache() {
+    let cache = std::sync::Arc::new(super::LcVersionCache::new());
+    let probe = AnchorT09ProbeFactory::default();
+    let old_key = anchor_t09_key(crate::product::models::ProviderName::ClaudeCode, "identity-v1");
+    let observation = cache
+        .cached_lc_cli_version(old_key.clone(), probe.probe(), CancellationToken::new())
+        .await
+        .expect("initial observation");
+    assert_eq!(observation.exact_version(), "cli 1.4.0");
+
+    // executable identity 改变 → 新 key(路径相同也算不同命令)。
+    let new_key = anchor_t09_key(crate::product::models::ProviderName::ClaudeCode, "identity-v2");
+    assert_ne!(new_key, old_key);
+    // canonical executable 路径改变 → 新 key。
+    let path_key = super::LcVersionProbeKey {
+        canonical_executable: std::path::PathBuf::from("/opt/anchor-t09-other-bin/cli"),
+        ..old_key.clone()
+    };
+    assert_ne!(path_key, old_key);
+    // supplier 实例范围改变 → 新 key(测试 supplier 与真实 CLI 不串值)。
+    let scoped_key = super::LcVersionProbeKey {
+        supplier_scope: 2,
+        ..old_key.clone()
+    };
+    assert_ne!(scoped_key, old_key);
+
+    let probe_calls_before_identity_change = probe.calls();
+    let reobserved = cache
+        .cached_lc_cli_version(new_key.clone(), probe.probe(), CancellationToken::new())
+        .await
+        .expect("identity change must re-observe under the new key");
+    assert_eq!(reobserved.exact_version(), "cli 1.4.0");
+    let probe_calls_after_identity_change = probe.calls();
+    assert_eq!(
+        probe_calls_after_identity_change,
+        probe_calls_before_identity_change + 1
+    );
+
+    // 旧 key 仍在 TTL 内命中,不与新 key 串值(不再观测)。
+    let old_hit = cache
+        .cached_lc_cli_version(old_key, probe.probe(), CancellationToken::new())
+        .await
+        .expect("old key still hits within its TTL");
+    assert_eq!(old_hit.exact_version(), "cli 1.4.0");
+    assert_eq!(probe.calls(), 2);
+}
+
+/// 进程(缓存实例)重建不能复用旧 observed_at/值:同 key 必须重新观测。
+#[tokio::test]
+async fn anchor_t09_process_restart_does_not_reuse_version_cache() {
+    let clock = std::sync::Arc::new(AnchorT09ManualClock::new());
+    let probe = AnchorT09ProbeFactory::default();
+    let key = anchor_t09_key(crate::product::models::ProviderName::KimiCode, "identity-restart");
+    let first_cache = super::LcVersionCache::with_clock(clock.source());
+    let original = first_cache
+        .cached_lc_cli_version(key.clone(), probe.probe(), CancellationToken::new())
+        .await
+        .expect("original observation");
+    assert_eq!(probe.calls(), 1);
+
+    // 推进 5s(远小于 TTL):若跨实例复用旧值,新实例将命中而不观测。
+    clock.advance(Duration::from_secs(5));
+    let restarted = super::LcVersionCache::with_clock(clock.source());
+    let reobserved = restarted
+        .cached_lc_cli_version(key.clone(), probe.probe(), CancellationToken::new())
+        .await
+        .expect("restarted cache instance re-observes");
+    let new_cache_instance_probe_calls = probe.calls() - 1;
+    assert_eq!(new_cache_instance_probe_calls, 1);
+    assert_ne!(
+        reobserved.observed_at(),
+        original.observed_at(),
+        "restarted instance must not reuse the old observed_at"
+    );
+
+    // 旧实例自身的值未被新实例串改:原实例 TTL 内命中且不新增观测。
+    let still = first_cache
+        .cached_lc_cli_version(key, probe.probe(), CancellationToken::new())
+        .await
+        .expect("original instance still hits its own observation");
+    assert_eq!(still.observed_at(), original.observed_at());
+    assert_eq!(probe.calls(), 2);
+}
+
+/// probe 超时与 caller 取消各给 typed 失败;取消后的迟到成功不得入缓存、
+/// 不得复活被取消的旧 run;释放 barrier 后旧 run 仍为零启动。
+#[tokio::test]
+async fn anchor_t09_probe_timeout_or_cancel_cannot_revive_old_run() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let clock = Arc::new(AnchorT09ManualClock::new());
+    let cache = Arc::new(super::LcVersionCache::with_clock(clock.source()));
+    let probe = AnchorT09ProbeFactory::default();
+
+    // ① 超时:typed Err(Timeout),不缓存(再调必须再观测)。
+    probe.set_failure(super::VersionProbeError::Timeout);
+    let timeout_key = anchor_t09_key(crate::product::models::ProviderName::Codex, "identity-timeout");
+    let timed_out_observation = cache
+        .cached_lc_cli_version(
+            timeout_key.clone(),
+            probe.probe(),
+            CancellationToken::new(),
+        )
+        .await;
+    assert!(matches!(
+        timed_out_observation,
+        Err(super::VersionProbeError::Timeout)
+    ));
+    let timed_out_again = cache
+        .cached_lc_cli_version(timeout_key, probe.probe(), CancellationToken::new())
+        .await;
+    assert!(timed_out_again.is_err());
+    assert_eq!(probe.calls(), 2);
+
+    // ② caller 取消:probe 阻塞 → 取消 → typed Err;迟到成功不入缓存、
+    //    不复活旧 run(barrier 释放后 old_run_started 仍为 false)。
+    probe.set_version("cli 1.4.0");
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    let blocking_probe: super::LcVersionProbe = {
+        let started = std::sync::Mutex::new(Some(started_tx));
+        let release = std::sync::Mutex::new(Some(release_rx));
+        std::sync::Arc::new(move |_key| {
+            let _ = started.lock().unwrap().take().map(|tx| tx.send(()));
+            let release = release.lock().unwrap().take();
+            Box::pin(async move {
+                if let Some(release) = release {
+                    let _ = release.await;
+                }
+                Ok("cli 9.9.9-late".to_string())
+            })
+        })
+    };
+    let cancel = CancellationToken::new();
+    let cancel_key = anchor_t09_key(crate::product::models::ProviderName::Pi, "identity-cancel");
+    let old_run_started = Arc::new(AtomicBool::new(false));
+    let cancelled_caller = {
+        let cache = cache.clone();
+        let cancel = cancel.clone();
+        let key = cancel_key.clone();
+        let old_run_started = old_run_started.clone();
+        tokio::spawn(async move {
+            let observation = cache
+                .cached_lc_cli_version(key, blocking_probe, cancel)
+                .await;
+            // 只有观测成功才允许「启动旧 run」——取消路径必须到不了这里。
+            if observation.is_ok() {
+                old_run_started.store(true, Ordering::SeqCst);
+            }
+            observation
+        })
+    };
+    started_rx
+        .await
+        .expect("blocking probe has started and is parked");
+    cancel.cancel();
+    let cancelled_observation = cancelled_caller
+        .await
+        .expect("cancelled caller joins")
+        .map(|observation| observation.exact_version().to_string());
+    assert!(
+        cancelled_observation.is_err(),
+        "cancelled caller must receive a typed failure"
+    );
+
+    // 释放 barrier:probe 的迟到成功(if any)不得复活旧 run/进入缓存。
+    let late_release_succeeded = release_tx.send(()).is_ok();
+    let _ = late_release_succeeded;
+    let after_release = cache
+        .cached_lc_cli_version(cancel_key, probe.probe(), CancellationToken::new())
+        .await
+        .expect("fresh caller re-observes after cancellation");
+    assert_ne!(
+        after_release.exact_version(),
+        "cli 9.9.9-late",
+        "late result of the cancelled probe must not leak into the cache"
+    );
+    assert!(
+        !old_run_started.load(Ordering::SeqCst),
+        "the cancelled old run must not start after barrier release"
+    );
+}
