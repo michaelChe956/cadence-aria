@@ -763,9 +763,7 @@ async fn lcg_t04_no_generic_tool_policy_still_records_version_audit_and_native_s
 
 // ==== Task 9a:LC 显式 resume 的 child 前全 LC audit 比对 ====
 
-use crate::cross_cutting::tool_policy_audit::{
-    LcProjectionAudit, ProviderStartAudit, ResumeDecision,
-};
+use crate::cross_cutting::tool_policy_audit::{LcProjectionAudit, ProviderStartAudit};
 
 /// 以与 adapter 同源的材料(gateway validate 的 envelope + 相同投影输入)
 /// 预计算 LC 启动会得到的投影摘要,供存档记录构造。
@@ -1188,4 +1186,588 @@ async fn lcg_t09_pi_missing_or_wrong_native_id_never_fresh() {
         let started_child_was_killed_and_reaped = t09c_child_killed_and_reaped(&pid_marker);
         assert!(started_child_was_killed_and_reaped);
     }
+}
+
+// ==== Task 3.5(B0d):pi_provider 真实 facts 与 full 投影接线 ====
+//
+// 仅断言 Pi 专属面(tasks.md 3.5):本家 version/supplier/projection/audit
+// 同源、RPC/session-id 真实同 id 与错 id kill/reap、mismatch 判定前 extension
+// 零写;跨家组合守卫归 3.7。三口径计数分列:①version probe(fixture 计数
+// 文件)、②adapter session-start(计数装饰器)、③协议 child(pid marker)。
+
+use crate::cross_cutting::provider_adapter::ProviderAdapterError;
+use crate::cross_cutting::streaming_provider::ProviderSession;
+use crate::product::logical_codebase::provider_gateway::{
+    GatewaySessionDisposition, ProviderGatewayError, ProviderLaunchAuditContext,
+    ResumeSessionLaunchRequest, SessionResumeFingerprint, canonical_target_git_identity,
+};
+use crate::product::logical_codebase::provider_projection::ProviderLcPrepareFacts;
+use std::sync::atomic::AtomicUsize;
+
+/// t35 fixture(fake pi):`--version` 每次把计数 +1 写入 counter 文件并打印
+/// 指定版本(同路径重写为另一版本即模拟 executable identity 漂移→新
+/// `LcVersionProbeKey`);rpc 循环前写 cwd marker 与 pid marker,get_state 按
+/// `$PI_SESSION_ID` 应答,prompt 应答后送 text_delta 与 agent_settled——同
+/// t09c fixture 形态,另带版本观测计数。
+#[cfg(unix)]
+fn t35_counting_pi_fixture(
+    dir: &std::path::Path,
+    counter: &std::path::Path,
+    version: &str,
+) -> PathBuf {
+    write_executable(
+        dir,
+        "fake-lc-pi-t35",
+        &format!(
+            r#"#!/usr/bin/env bash
+if [ "$1" = "--version" ]; then
+  n=$(cat {counter} 2>/dev/null || echo 0)
+  echo $((n + 1)) > {counter}
+  echo {version}
+  exit 0
+fi
+pwd -P > "${{LC_CWD_MARKER:-/dev/null}}"
+echo $$ > "${{PI_PID_MARKER:-/dev/null}}"
+while IFS= read -r line; do
+  id="$(printf '%s' "$line" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+  if [[ "$line" == *'"get_state"'* ]]; then
+    if [[ -n "${{PI_SESSION_ID:-}}" ]]; then
+      echo "{{\"type\":\"response\",\"id\":\"${{id:-pi-1}}\",\"command\":\"get_state\",\"success\":true,\"data\":{{\"sessionId\":\"${{PI_SESSION_ID}}\"}}}}"
+    else
+      echo "{{\"type\":\"response\",\"id\":\"${{id:-pi-1}}\",\"command\":\"get_state\",\"success\":true,\"data\":{{}}}}"
+    fi
+  elif [[ "$line" == *'"prompt"'* ]]; then
+    echo "{{\"type\":\"response\",\"id\":\"${{id:-pi-2}}\",\"success\":true}}"
+    echo '{{"type":"message_update","assistantMessageEvent":{{"type":"text_delta","contentIndex":0,"delta":"t35 prepared resume done"}}}}'
+    echo '{{"type":"agent_settled"}}'
+  fi
+done
+"#,
+            counter = counter.display(),
+            version = version,
+        ),
+    )
+}
+
+/// 口径①读数:版本观测计数文件当前值(缺文件=0)。
+#[cfg(unix)]
+fn t35_version_probe_count(counter: &std::path::Path) -> u32 {
+    std::fs::read_to_string(counter)
+        .ok()
+        .and_then(|content| content.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// extension 缓存目录内的 aria-ask 写入计数(目录缺失=0)。
+#[cfg(unix)]
+fn t35_extension_writes(cache: &std::path::Path) -> usize {
+    std::fs::read_dir(cache)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with("aria-ask-"))
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+/// t35 能力源:与 `LcStaticCapabilitySource` 同形,但 `version` 与真实 CLI
+/// fixture 的 `--version` 观测(`pi 0.83.0`)对齐,`action_capability.
+/// projection_digest` 以同版本真实 `PiPolicyProjector` 预计算——
+/// `admission_verdict` 的能力行与真实 facts/projection 同源(生产两处都
+/// 来自真实 CLI 探测与真实 projector)。
+#[cfg(unix)]
+struct T35StaticCapabilitySource {
+    action_projection_digest: String,
+}
+
+/// capability 摘要不随单次 role/target/config 变化(lcg_t04 断言组),以
+/// Coding 行 canonical 形态(Executor+无通用策略)为代表计算。
+#[cfg(unix)]
+fn t35_capability_source(fixture: &LcLaunchFixture) -> T35StaticCapabilitySource {
+    let validated = fixture
+        .gateway()
+        .validate(fixture.coding_request())
+        .expect("t35 fixture coding launch validates");
+    let envelope = validated.envelope().clone();
+    let boundary = projection::lc_boundary_plan(&envelope).expect("t35 boundary plan");
+    let projection_input = ProviderProjectionInput::new(
+        envelope.clone(),
+        ProviderRef::pi(validated.capability_snapshot_ref()),
+        envelope.action,
+        AdapterRole::Executor,
+        crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
+        None,
+        projection::PI_LC_APPROVAL_POLICY.to_string(),
+        String::new(),
+        envelope.config_artifact_ref.clone(),
+        String::new(),
+        Some(boundary),
+    );
+    let action_projection_digest = PiPolicyProjector::new("pi 0.83.0")
+        .project(&projection_input)
+        .expect("t35 representative pi projection")
+        .capability_projection_digest()
+        .to_string();
+    T35StaticCapabilitySource {
+        action_projection_digest,
+    }
+}
+
+#[cfg(unix)]
+fn t35_pi_capability(
+    source: &T35StaticCapabilitySource,
+) -> crate::product::logical_codebase::provider_gateway::ProviderCapability {
+    crate::product::logical_codebase::provider_gateway::ProviderCapability {
+        version: "pi 0.83.0".to_string(),
+        action_capability:
+            crate::product::logical_codebase::provider_capability_store::ProviderActionCapability {
+                projection_digest: source.action_projection_digest.clone(),
+                ..lc_pi_capability().action_capability
+            },
+        ..lc_pi_capability()
+    }
+}
+
+#[cfg(unix)]
+impl crate::product::logical_codebase::provider_gateway::ProviderCapabilitySource
+    for T35StaticCapabilitySource
+{
+    fn require_supported(
+        &self,
+        _provider: &ProviderRef,
+        _action: SessionPolicyAction,
+    ) -> Result<
+        crate::product::logical_codebase::provider_gateway::ProviderCapability,
+        ProviderGatewayError,
+    > {
+        Ok(t35_pi_capability(self))
+    }
+
+    fn require_resume_supported(
+        &self,
+        _provider: &ProviderRef,
+        _action: SessionPolicyAction,
+    ) -> Result<
+        crate::product::logical_codebase::provider_gateway::ProviderCapability,
+        ProviderGatewayError,
+    > {
+        Ok(t35_pi_capability(self))
+    }
+
+    fn require_write_boundary(
+        &self,
+        _provider: &ProviderRef,
+        _action: SessionPolicyAction,
+    ) -> Result<
+        crate::product::logical_codebase::provider_gateway::ProviderCapability,
+        ProviderGatewayError,
+    > {
+        Ok(t35_pi_capability(self))
+    }
+
+    fn require_root_recipe_supported(
+        &self,
+        _provider: &ProviderRef,
+        _credential: &crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
+    ) -> Result<
+        crate::product::logical_codebase::provider_gateway::ProviderCapability,
+        ProviderGatewayError,
+    > {
+        Err(ProviderGatewayError::UnsupportedCapability(
+            "t35 fixture has no root recipe facts".to_string(),
+        ))
+    }
+}
+
+/// 以真实 PiProvider 装配的 LC gateway(validate/admission 链与
+/// `LcLaunchFixture::gateway` 同形,registry 槽位换成被测 adapter)。
+#[cfg(unix)]
+fn t35_lc_gateway(
+    fixture: &LcLaunchFixture,
+    adapter: std::sync::Arc<dyn StreamingProviderAdapter>,
+) -> crate::product::logical_codebase::provider_gateway::LogicalCodebaseProviderGateway {
+    let mut registry = crate::cross_cutting::provider_registry::ProviderRegistry::new();
+    registry.register(crate::product::models::ProviderName::Pi, adapter);
+    crate::product::logical_codebase::provider_gateway::LogicalCodebaseProviderGateway::with_audit(
+        crate::product::logical_codebase::policy::AggregatePolicyArtifactStore::new(
+            fixture.paths.clone(),
+        ),
+        std::sync::Arc::new(t35_capability_source(fixture)),
+        std::sync::Arc::new(LcTargetResolver),
+        std::sync::Arc::new(registry),
+        std::sync::Arc::new(LcNoopSyncAdapter),
+        lc_available_gate(),
+        fixture.audit.clone(),
+        fixture.canonical_root(),
+    )
+}
+
+/// 口径②计数装饰器:统计 adapter session-start 调用(`start`/`
+/// start_validated`);`prepare_lc_facts` 透传真实 PiProvider(③由 fixture
+/// pid marker 观测)。
+#[cfg(unix)]
+struct T35CountingAdapter {
+    inner: PiProvider,
+    adapter_starts: std::sync::Arc<AtomicUsize>,
+}
+
+#[cfg(unix)]
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for T35CountingAdapter {
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        self.adapter_starts.fetch_add(1, Ordering::SeqCst);
+        self.inner.start(input, cancel).await
+    }
+
+    async fn start_validated(
+        &self,
+        input: ValidatedStreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        self.adapter_starts.fetch_add(1, Ordering::SeqCst);
+        self.inner.start_validated(input, cancel).await
+    }
+
+    async fn prepare_lc_facts(
+        &self,
+        input: &StreamingProviderInput,
+        launch: &crate::product::logical_codebase::provider_gateway::ValidatedSessionLaunchPolicy,
+        cancel: CancellationToken,
+    ) -> Result<ProviderLcPrepareFacts, ProviderAdapterError> {
+        self.inner.prepare_lc_facts(input, launch, cancel).await
+    }
+}
+
+/// Task 3.5(B0d)Step 1 断言组 1:prepare 与 audit 同 full fingerprint。
+/// 真实 Pi `prepare_lc_facts`(①TTL 版本观测恰一次+同版本 projector)→
+/// gateway 冻结 full projection → full-matching resume 判定 →
+/// `start_validated` 消费 prepared projection:audit `lc_projection` 五字段
+/// 与冻结 full projection 同源相等;RPC/session-id 真实同 id;spawn 前版本
+/// 复验命中同一 TTL 观测(①不再增加);extension 在 mismatch 判定之后才写
+/// (读事实阶段零写)。
+#[cfg(unix)]
+#[tokio::test]
+async fn anchor_t35_provider_prepare_and_audit_share_full_fingerprint() {
+    let fixture = LcLaunchFixture::new();
+    let cli_dir = tempfile::tempdir().expect("t35 cli dir");
+    let counter = cli_dir.path().join("version-probe.count");
+    let ext_cache = tempfile::tempdir().expect("t35 extension cache dir");
+    let cwd_marker = fixture.paths.root().join("t35-matching-cwd-marker");
+    let sink = RecordingToolPolicyAuditSink::new();
+
+    let provider = PiProvider::new(t35_counting_pi_fixture(cli_dir.path(), &counter, "0.83.0"))
+        .with_extension_cache(ext_cache.path().to_path_buf());
+    let gateway = t35_lc_gateway(&fixture, std::sync::Arc::new(provider.clone()));
+
+    let mut raw = fixture.lc_streaming_input(
+        AdapterRole::Executor,
+        None,
+        None,
+        Some("pi-session-t35".to_string()),
+    );
+    raw.env_vars.insert(
+        "LC_CWD_MARKER".to_string(),
+        cwd_marker.display().to_string(),
+    );
+    raw.env_vars
+        .insert("PI_SESSION_ID".to_string(), "pi-session-t35".to_string());
+
+    let audit = ProviderLaunchAuditContext {
+        workspace_session_id: "ws-lc-fixture-1".to_string(),
+        role_run_seq: 1,
+        audit_sink: sink.clone(),
+    };
+    let candidate = gateway
+        .prepare_lc_streaming_candidate(
+            raw,
+            fixture.coding_request(),
+            audit,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("real pi prepare_lc_facts must produce observable facts");
+
+    // 读事实阶段三口径:①恰一次版本观测、②③零(零 adapter start/零
+    // child),extension 零写。
+    assert_eq!(t35_version_probe_count(&counter), 1);
+    assert_eq!(t35_extension_writes(ext_cache.path()), 0);
+    assert!(
+        !cwd_marker.exists(),
+        "prepare stage must not spawn a session child"
+    );
+
+    // facts 同源面:exact version 来自真实 `--version` 观测(pi_policy_version
+    // 形态),approval/boundary/projector 为本家冻结字面量。
+    assert_eq!(candidate.facts().exact_version(), "pi 0.83.0");
+    assert_eq!(candidate.full_projection().exact_version(), "pi 0.83.0");
+    assert_eq!(
+        candidate.facts().approval_policy(),
+        projection::PI_LC_APPROVAL_POLICY
+    );
+    assert_eq!(candidate.facts().mcp_bundle_digest(), "");
+    assert!(candidate.facts().version_probe_key().supplier_scope == 0);
+
+    // full-matching resume:五参 fingerprint 以候选冻结投影计算。
+    let envelope = candidate.validated().envelope();
+    let fingerprint = SessionResumeFingerprint::from_envelope(
+        envelope,
+        candidate.full_projection(),
+        candidate.validated().action_evidence_digest(),
+        &canonical_target_git_identity(&envelope.target.worktree),
+    );
+    let disposition = gateway
+        .resume_or_start_with_projection(
+            ResumeSessionLaunchRequest {
+                launch: fixture.coding_request(),
+                previous_fingerprint: fingerprint,
+                previous_session_id: "pi-session-t35".to_string(),
+            },
+            candidate.full_projection().clone(),
+        )
+        .expect("full-context resume decision");
+    let GatewaySessionDisposition::Resume(resume_validated) = disposition else {
+        panic!("matching full fingerprint must resume, not wait for explicit fresh");
+    };
+
+    // start_validated 消费 prepared projection(lc_projection 冻结于 validated)。
+    let mut session = provider
+        .start_validated(
+            ValidatedStreamingProviderInput::new(candidate.input().clone(), resume_validated),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("prepared resume must spawn the native pi session");
+    assert_eq!(session.native_session_id.as_deref(), Some("pi-session-t35"));
+
+    // 版本复验命中同一 TTL 观测:①不再增加(不伪称每次实测二进制)。
+    assert_eq!(t35_version_probe_count(&counter), 1);
+
+    // audit 同源:provider_start 的 lc_projection 五字段与冻结 full projection
+    // 相等(prepared 与 audit 同 full fingerprint)。
+    let events = sink.events();
+    assert_eq!(events.len(), 1, "exactly one provider_start is written");
+    let DurableToolPolicyEvent::ProviderStart(record) = &events[0] else {
+        panic!("expected provider_start");
+    };
+    let lc_projection = record
+        .lc_projection
+        .as_ref()
+        .expect("lc projection audit from the prepared full projection");
+    assert_eq!(
+        lc_projection.projection_digest,
+        candidate.full_projection().projection_digest()
+    );
+    assert_eq!(
+        lc_projection.capability_projection_digest,
+        candidate.full_projection().capability_projection_digest()
+    );
+    assert_eq!(
+        lc_projection.boundary_evidence_ref,
+        candidate.full_projection().boundary_evidence_ref()
+    );
+    assert_eq!(
+        lc_projection.action,
+        projection::action_text(candidate.full_projection().action())
+    );
+    assert_eq!(
+        lc_projection.wire_dialect,
+        projection::wire_dialect_text(candidate.full_projection().wire_dialect())
+    );
+    assert_eq!(record.provider_version, "pi 0.83.0");
+    assert_eq!(record.provider_session_id, "pi-session-t35");
+    assert_eq!(record.adapter_dialect, PI_POLICY_DIALECT);
+
+    // child 真实启动于 canonical root;extension 在判定之后写(恰一次)。
+    let observed_cwd = wait_for_lc_cwd_marker(&cwd_marker);
+    assert_eq!(
+        observed_cwd.trim(),
+        fixture.canonical_root().to_string_lossy(),
+        "prepared pi session must spawn at the canonical LC root"
+    );
+    assert_eq!(t35_extension_writes(ext_cache.path()), 1);
+
+    let completed = t09c_recv_pi_completed_text(&mut session.events).await;
+    assert_eq!(completed, "t35 prepared resume done");
+}
+
+/// Task 3.5(B0d)Step 1 断言组 2:真实漂移零 session child。executable
+/// identity 变化(同路径 CLI 内容替换 0.83.0→0.84.0)→ 重观测换新 key →
+/// version 与冻结事实不一致 → mismatch 判定 typed `PolicyDrift(provider_
+/// version)` 拒:②adapter start=0、③零 child、extension 判定前零写、零
+/// durable。随后 prepared resume 的错 id 握手 leg:get_state 应答陌生 id →
+/// 已启动 child kill/reap、零 provider_start(不冒称零 spawn)。
+#[cfg(unix)]
+#[tokio::test]
+async fn anchor_t35_real_drift_zero_session_child() {
+    // ---- leg A:漂移 mismatch 判定(三口径分列) ----
+    let fixture = LcLaunchFixture::new();
+    let cli_dir = tempfile::tempdir().expect("t35 drift cli dir");
+    let counter = cli_dir.path().join("version-probe.count");
+    let ext_cache = tempfile::tempdir().expect("t35 drift extension cache dir");
+    let pid_marker = cli_dir.path().join("t35-drift.pid");
+    let sink = RecordingToolPolicyAuditSink::new();
+    let adapter_starts = std::sync::Arc::new(AtomicUsize::new(0));
+
+    let fixture_path = t35_counting_pi_fixture(cli_dir.path(), &counter, "0.83.0");
+    let provider =
+        PiProvider::new(fixture_path.clone()).with_extension_cache(ext_cache.path().to_path_buf());
+    let gateway = t35_lc_gateway(
+        &fixture,
+        std::sync::Arc::new(T35CountingAdapter {
+            inner: provider.clone(),
+            adapter_starts: adapter_starts.clone(),
+        }),
+    );
+
+    let mut raw = fixture.lc_streaming_input(AdapterRole::Executor, None, None, None);
+    raw.env_vars.insert(
+        "PI_PID_MARKER".to_string(),
+        pid_marker.display().to_string(),
+    );
+    let audit = ProviderLaunchAuditContext {
+        workspace_session_id: "ws-lc-fixture-1".to_string(),
+        role_run_seq: 1,
+        audit_sink: sink.clone(),
+    };
+    let candidate = gateway
+        .prepare_lc_streaming_candidate(
+            raw,
+            fixture.coding_request(),
+            audit,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("real pi prepare must freeze observable facts");
+    assert_eq!(t35_version_probe_count(&counter), 1);
+    assert_eq!(adapter_starts.load(Ordering::SeqCst), 0);
+
+    // TTL 内重观测:同 key 命中,①不增加,冻结一致。
+    let current = gateway
+        .reobserve_lc_prepare_facts(&candidate, CancellationToken::new())
+        .await
+        .expect("ttl reobserve");
+    assert_eq!(t35_version_probe_count(&counter), 1);
+    candidate
+        .assert_frozen_version(&current)
+        .expect("frozen version still matches within ttl");
+
+    // 真实漂移:同路径重写 CLI(identity 变化→新 key)输出 0.84.0。
+    let replaced = t35_counting_pi_fixture(cli_dir.path(), &counter, "0.84.0");
+    assert_eq!(
+        replaced, fixture_path,
+        "drift rewrites the same canonical executable"
+    );
+    let drifted = gateway
+        .reobserve_lc_prepare_facts(&candidate, CancellationToken::new())
+        .await
+        .expect("drifted reobserve under the new executable identity");
+    assert_eq!(t35_version_probe_count(&counter), 2);
+    assert_eq!(drifted.exact_version(), "pi 0.84.0");
+    let mismatch = candidate
+        .assert_frozen_version(&drifted)
+        .expect_err("drifted provider version must refuse resume");
+    assert!(matches!(
+        &mismatch,
+        ProviderGatewayError::PolicyDrift { dimension } if dimension == "provider_version"
+    ));
+
+    // mismatch 判定后:②adapter start=0、③零 child(pid marker 未出现)、
+    // extension 判定前零写、零 durable 写。
+    assert_eq!(adapter_starts.load(Ordering::SeqCst), 0);
+    assert!(
+        !pid_marker.exists(),
+        "mismatch decision must not spawn a session child"
+    );
+    assert_eq!(t35_extension_writes(ext_cache.path()), 0);
+    assert!(sink.events().is_empty());
+
+    // ---- leg B:prepared resume 的错 id 握手 kill/reap ----
+    let fixture_b = LcLaunchFixture::new();
+    let cli_dir_b = tempfile::tempdir().expect("t35 wrong-id cli dir");
+    let counter_b = cli_dir_b.path().join("version-probe.count");
+    let ext_cache_b = tempfile::tempdir().expect("t35 wrong-id extension cache dir");
+    let pid_marker_b = cli_dir_b.path().join("t35-wrong-id.pid");
+    let sink_b = RecordingToolPolicyAuditSink::new();
+
+    let provider_b = PiProvider::new(t35_counting_pi_fixture(
+        cli_dir_b.path(),
+        &counter_b,
+        "0.83.0",
+    ))
+    .with_extension_cache(ext_cache_b.path().to_path_buf());
+    let gateway_b = t35_lc_gateway(&fixture_b, std::sync::Arc::new(provider_b.clone()));
+
+    let mut raw_b = fixture_b.lc_streaming_input(
+        AdapterRole::Executor,
+        None,
+        None,
+        Some("pi-session-t35-wrong".to_string()),
+    );
+    raw_b.env_vars.insert(
+        "PI_SESSION_ID".to_string(),
+        "pi-session-native-wrong-t35".to_string(),
+    );
+    raw_b.env_vars.insert(
+        "PI_PID_MARKER".to_string(),
+        pid_marker_b.display().to_string(),
+    );
+    let candidate_b = gateway_b
+        .prepare_lc_streaming_candidate(
+            raw_b,
+            fixture_b.coding_request(),
+            ProviderLaunchAuditContext {
+                workspace_session_id: "ws-lc-fixture-1".to_string(),
+                role_run_seq: 1,
+                audit_sink: sink_b.clone(),
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect("wrong-id leg prepare");
+
+    let envelope_b = candidate_b.validated().envelope();
+    let fingerprint_b = SessionResumeFingerprint::from_envelope(
+        envelope_b,
+        candidate_b.full_projection(),
+        candidate_b.validated().action_evidence_digest(),
+        &canonical_target_git_identity(&envelope_b.target.worktree),
+    );
+    let GatewaySessionDisposition::Resume(resume_validated_b) = gateway_b
+        .resume_or_start_with_projection(
+            ResumeSessionLaunchRequest {
+                launch: fixture_b.coding_request(),
+                previous_fingerprint: fingerprint_b,
+                previous_session_id: "pi-session-t35-wrong".to_string(),
+            },
+            candidate_b.full_projection().clone(),
+        )
+        .expect("wrong-id leg resume decision")
+    else {
+        panic!("wrong-id leg must reach the native handshake");
+    };
+
+    let rejected = provider_b
+        .start_validated(
+            ValidatedStreamingProviderInput::new(candidate_b.input().clone(), resume_validated_b),
+            CancellationToken::new(),
+        )
+        .await
+        .err()
+        .expect("a wrong native id must fail the prepared resume");
+    assert!(
+        rejected.details.contains("session NOT resumed")
+            && rejected.details.contains("pi-session-native-wrong-t35")
+            && rejected.details.contains("pi-session-t35-wrong"),
+        "rejection must name both ids and record the not-resumed outcome: {rejected:?}"
+    );
+    assert!(
+        sink_b.events().is_empty(),
+        "no provider_start may be written for an unconfirmed native resume"
+    );
+    assert!(t09c_child_killed_and_reaped(&pid_marker_b));
 }

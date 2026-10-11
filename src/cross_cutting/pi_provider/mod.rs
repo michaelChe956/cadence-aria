@@ -19,15 +19,16 @@ use crate::cross_cutting::bounded_command_runner::{
 };
 use crate::cross_cutting::json_rpc_peer::JsonRpcPeer;
 use crate::cross_cutting::process_manager::{
-    ProcessManager, PROVIDER_CHILD_EXIT_STREAM_DRAIN, SessionTailExit, bounded_child_wait,
+    PROVIDER_CHILD_EXIT_STREAM_DRAIN, ProcessManager, SessionTailExit, bounded_child_wait,
     bounded_task_join, provider_child_exit_error, run_session_tail_with_exit_watch,
 };
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::streaming_provider::{
-    ProviderEvent, ProviderExecutionEvent, ProviderExecutionEventKind,
-    ProviderExecutionEventStatus, ProviderPermissionMode, ProviderSession, ProviderStatus,
-    ProviderVersionSupplier, StreamingProviderAdapter, StreamingProviderInput, VersionProbeError,
-    canonical_tool_policy, validate_tool_policy_for_role,
+    LcVersionCache, LcVersionObservation, LcVersionProbe, LcVersionProbeKey, ProviderEvent,
+    ProviderExecutionEvent, ProviderExecutionEventKind, ProviderExecutionEventStatus,
+    ProviderPermissionMode, ProviderSession, ProviderStatus, ProviderVersionSupplier,
+    StreamingProviderAdapter, StreamingProviderInput, VersionProbeError, canonical_tool_policy,
+    validate_tool_policy_for_role,
 };
 use crate::cross_cutting::tool_policy_audit::{
     DurableToolPolicyEvent, ProviderStartAudit, ResumeDecision, ToolPolicyAuditSink,
@@ -212,6 +213,17 @@ async fn probe_pi_version_with_timeout(command: &Path, timeout: Duration) -> PiV
     }
 }
 
+/// 真实 CLI 的可执行身份(Task 3.5/B0a2 `LcVersionProbeKey` 维度):内容
+/// SHA-256——同路径替换 CLI 二进制即换 key,重观测不与旧值串值;不可读
+/// (如尚未解析 PATH 的裸命令名)退化为路径文本(identity 仍随路径漂移,
+/// 60 秒 TTL 窗口内的同值迟钝由 owner 裁决接受)。
+fn lc_executable_identity(command: &Path) -> String {
+    match std::fs::read(command) {
+        Ok(bytes) => format!("sha256:{}", hex::encode(Sha256::digest(&bytes))),
+        Err(_) => format!("unresolved:{}", command.display()),
+    }
+}
+
 /// 策略会话版本映射（GC9，Task 3.3）：`Known` → 精确字符串；
 /// `Unknown(TimedOut)` → `Timeout`；其余 `Unknown(_)` → `Unavailable`。
 /// 仅策略会话走本 fail-closed 映射；既有 `ensure_pi_version_compatible` 的
@@ -261,6 +273,16 @@ pub struct PiProvider {
     command: PathBuf,
     /// 策略会话 provider 版本 supplier（测试 seam；3.3 接线真实 CLI 探测后保留）。
     version_supplier: Option<ProviderVersionSupplier>,
+    /// Task 3.5(B0d):LC 只读 facts 的 60 秒 TTL/single-flight 版本观测缓存
+    /// (B0a2 合同;per-instance,clone 共享同一缓存槽)。与 direct `start`
+    /// 的无过期 `cached_cli_version` 严格分离——direct 旧语义零变化。
+    lc_version_cache: LcVersionCache,
+    /// supplier 注入实例的 scope(`LcVersionProbeKey.supplier_scope`):不同
+    /// 实例的测试 supplier 与真实 CLI 观测互不串值。
+    lc_supplier_scope: u64,
+    /// aria-ask extension 缓存目录注入面(测试 seam;`None` 沿
+    /// `$HOME/.cache/cadence-aria` 现状)。
+    extension_cache: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for PiProvider {
@@ -280,9 +302,16 @@ impl std::fmt::Debug for PiProvider {
 
 impl PiProvider {
     pub fn new(command: PathBuf) -> Self {
+        // supplier scope 按构造实例分配(0 保留给真实 CLI 探测);clone 共享。
+        static LC_SUPPLIER_SCOPE: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(0);
         Self {
             command,
             version_supplier: None,
+            lc_version_cache: LcVersionCache::new(),
+            lc_supplier_scope: LC_SUPPLIER_SCOPE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                + 1,
+            extension_cache: None,
         }
     }
 
@@ -290,6 +319,119 @@ impl PiProvider {
     pub fn with_version_supplier(mut self, supplier: ProviderVersionSupplier) -> Self {
         self.version_supplier = Some(supplier);
         self
+    }
+
+    /// 注入 aria-ask extension 缓存目录(测试 seam:mismatch 判定前零写断言
+    /// 的可观测面;生产缺省沿 `$HOME/.cache/cadence-aria`)。
+    pub fn with_extension_cache(mut self, cache: PathBuf) -> Self {
+        self.extension_cache = Some(cache);
+        self
+    }
+
+    /// 解析并准备 aria-ask extension:注入目录优先,缺省 `$HOME/.cache/
+    /// cadence-aria`(同一 `ensure_ask_extension_in` 实现,direct 语义不变)。
+    fn prepare_ask_extension(&self) -> Result<PathBuf, ProviderAdapterError> {
+        match self.extension_cache.as_deref() {
+            Some(cache) => ensure_ask_extension_in(cache),
+            None => ensure_ask_extension(),
+        }
+    }
+
+    /// LC 路径共用的前置守卫(Task 3.5:与 `prepare_lc_facts` 同源):run-context
+    /// guard + adapter 匹配,整体早于版本观测/extension/session child。
+    fn guard_lc_pi_launch(
+        input: &StreamingProviderInput,
+        launch: &crate::product::logical_codebase::provider_gateway::ValidatedSessionLaunchPolicy,
+    ) -> Result<(), ProviderAdapterError> {
+        crate::cross_cutting::streaming_provider::guard_lc_validated_launch(
+            launch.is_root_recipe_phase(),
+            &input.role,
+            &input.role,
+            input.tool_policy.as_ref(),
+        )
+        .map_err(|error| {
+            ProviderAdapterError::parse_error(error.to_string(), String::new(), String::new())
+        })?;
+        if input.provider_type != crate::protocol::contracts::ProviderType::Pi
+            || launch.envelope().provider_dialect
+                != crate::product::logical_codebase::policy::ProviderDialect::PiRpcV1
+        {
+            return Err(ProviderAdapterError::parse_error(
+                "pi lc launch: only Pi RPC launches are accepted by this adapter",
+                String::new(),
+                String::new(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// LC 版本观测 key(B0a2 合同):provider + canonical executable 路径 +
+    /// 可执行身份(真实 CLI 为内容摘要,内容替换即换 key) + 版本观测参数 +
+    /// supplier 实例范围。supplier 注入与真实 CLI 探测不同 key,不串值。
+    fn lc_version_probe_key(&self) -> LcVersionProbeKey {
+        let canonical_executable = self
+            .command
+            .canonicalize()
+            .unwrap_or_else(|_| self.command.clone());
+        let (executable_identity, argv, supplier_scope) = match self.version_supplier.as_ref() {
+            Some(_) => (
+                format!("version-supplier:{}", self.lc_supplier_scope),
+                Vec::new(),
+                self.lc_supplier_scope,
+            ),
+            None => (
+                lc_executable_identity(&self.command),
+                vec!["--version".to_string()],
+                0,
+            ),
+        };
+        LcVersionProbeKey {
+            provider: crate::product::models::ProviderName::Pi,
+            canonical_executable,
+            executable_identity,
+            argv,
+            supplier_scope,
+        }
+    }
+
+    /// LC 版本只读观测(60 秒 TTL/single-flight,B0a2):supplier seam 优先,
+    /// 默认真实 `--version` 有界探测(沿既有 probe+fail-closed 映射,不复制
+    /// 版本解析算法);失败/超时/取消不缓存、不回退过期成功。prepare 与
+    /// spawn 前复验消费同一 key/缓存,不伪称每次实测二进制。
+    async fn observe_lc_version(
+        &self,
+        cancel: CancellationToken,
+    ) -> Result<(LcVersionProbeKey, LcVersionObservation), ProviderAdapterError> {
+        let key = self.lc_version_probe_key();
+        let probe: LcVersionProbe = match self.version_supplier.clone() {
+            Some(supplier) => std::sync::Arc::new(move |_key| {
+                let supplier = supplier.clone();
+                Box::pin(async move { supplier() })
+            }),
+            None => {
+                let command = self.command.clone();
+                std::sync::Arc::new(move |_key| {
+                    let command = command.clone();
+                    Box::pin(async move {
+                        let probed =
+                            probe_pi_version_with_timeout(&command, PI_VERSION_PROBE_TIMEOUT).await;
+                        pi_policy_version(&probed)
+                    })
+                })
+            }
+        };
+        let observation = self
+            .lc_version_cache
+            .cached_lc_cli_version(key.clone(), probe, cancel)
+            .await
+            .map_err(|error| {
+                ProviderAdapterError::parse_error(
+                    format!("pi lc prepare facts: {error}"),
+                    String::new(),
+                    String::new(),
+                )
+            })?;
+        Ok((key, observation))
     }
 
     /// Constructs Pi's Auto-only RPC command line.
@@ -403,7 +545,7 @@ impl StreamingProviderAdapter for PiProvider {
         )?;
         let version = probe_pi_version(&self.command).await;
         ensure_pi_version_compatible(&version)?;
-        let extension_path = ensure_ask_extension()?;
+        let extension_path = self.prepare_ask_extension()?;
         // 策略会话（Task 3.2/3.3）：spawn 前解析版本并执行 resume 冻结三元组比对；
         // pi 的有界握手是 id 预生成/传入（既有 `--session-id` 语义）；fresh 策略
         // 会话预生成 uuid 并经 `--session-id` 传入，使 native session id 在 spawn 前
@@ -634,20 +776,15 @@ impl StreamingProviderAdapter for PiProvider {
                 let _ = child.start_kill();
             }
             // r19 续修:终态 join 一律有界(红线 a)。
-            let status = match bounded_child_wait(
-                &mut child,
-                PROVIDER_CHILD_EXIT_STREAM_DRAIN,
-            )
-            .await
-            {
-                Some(status) => Ok(status),
-                None => Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "bounded child join elapsed before exit status",
-                )),
-            };
-            let _ =
-                bounded_task_join(stderr_task, PROVIDER_CHILD_EXIT_STREAM_DRAIN).await;
+            let status =
+                match bounded_child_wait(&mut child, PROVIDER_CHILD_EXIT_STREAM_DRAIN).await {
+                    Some(status) => Ok(status),
+                    None => Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "bounded child join elapsed before exit status",
+                    )),
+                };
+            let _ = bounded_task_join(stderr_task, PROVIDER_CHILD_EXIT_STREAM_DRAIN).await;
             if let Err(error) = result {
                 let stderr = stderr_output.lock().await.trim().to_string();
                 let status_text = match status {
@@ -680,6 +817,10 @@ impl StreamingProviderAdapter for PiProvider {
     /// `tool_policy=None` 早退。Task 9:resume 在 child 前比较全 LC audit
     /// (9a),spawn 后由 RPC `get_state` 真实确认同 id(9c)——缺/错 id
     /// kill/reap 并显式记录「未恢复」,不回填请求 id、不清 id 转 fresh。
+    /// Task 3.5(B0d):exact version 与 `prepare_lc_facts` 消费同一 60 秒
+    /// TTL 观测;full-context resume 携带 prepare 冻结候选投影时,复验
+    /// version 后直接消费该投影(audit 与 prepared 同 fingerprint);
+    /// extension 准备在 resume mismatch 判定之后(拒绝路径零 extension 写)。
     async fn start_validated(
         &self,
         validated: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
@@ -688,31 +829,9 @@ impl StreamingProviderAdapter for PiProvider {
         let (input, launch) = validated.into_parts();
         let envelope = launch.envelope().clone();
 
-        // 共用 LC run-context guard(Task 7):projection/input role 一致 +
-        // 双向守卫,早于版本/session child/extension 准备(与 direct `start`
-        // 的纯双向守卫同源)。
-        crate::cross_cutting::streaming_provider::guard_lc_validated_launch(
-            launch.is_root_recipe_phase(),
-            &input.role,
-            &input.role,
-            input.tool_policy.as_ref(),
-        )
-        .map_err(|error| {
-            ProviderAdapterError::parse_error(error.to_string(), String::new(), String::new())
-        })?;
-
-        // adapter 匹配:validated input 必须是 pi RPC(不匹配即拒,不回退
-        // 其它 provider/dialect)。
-        if input.provider_type != crate::protocol::contracts::ProviderType::Pi
-            || envelope.provider_dialect
-                != crate::product::logical_codebase::policy::ProviderDialect::PiRpcV1
-        {
-            return Err(ProviderAdapterError::parse_error(
-                "pi lc validated start: only Pi RPC launches are accepted by this adapter",
-                String::new(),
-                String::new(),
-            ));
-        }
+        // 共用 LC 前置守卫(Task 3.5:与 `prepare_lc_facts` 同源):run-context
+        // guard + adapter 匹配,整体早于版本观测/extension/session child。
+        Self::guard_lc_pi_launch(&input, &launch)?;
 
         // 统一 launch audit sink:LC 会话必须绑定 run-bound sink,缺失
         // fail-closed(1b 的 prepare 契约之前由本路径强制)。
@@ -724,76 +843,68 @@ impl StreamingProviderAdapter for PiProvider {
             )
         })?;
 
-        // exact version(supplier seam 优先;默认真实 `--version` 探测+进程内
-        // 缓存,策略会话 fail-closed 映射;不可得 fail-closed)。全 LC 路径
-        // 必填,非仅策略角色。
-        let provider_version = match self.version_supplier.clone() {
-            Some(supplier) => supplier().map_err(|error| {
-                ProviderAdapterError::parse_error(
-                    format!("pi lc validated start: {error}"),
-                    String::new(),
-                    String::new(),
-                )
-            })?,
+        // Task 3.5(B0d):exact version 与 `prepare_lc_facts` 同源——同一 60
+        // 秒 TTL/single-flight 观测(prepare 与 spawn 前复验同 key 命中,不
+        // 伪称每次实测二进制;失败/超时/取消不缓存)。全 LC 路径必填,非仅
+        // 策略角色;direct `start` 的无过期 `cached_cli_version` 不受影响。
+        let (_version_probe_key, observation) = self.observe_lc_version(cancel.clone()).await?;
+        let provider_version = observation.exact_version().to_string();
+
+        // 投影来源(B0d):full-context resume 携带 prepare 冻结的候选投影时,
+        // adapter 先复验本家 mutable fact(exact version)——漂移 typed 拒
+        // (等价 gateway `assert_frozen_version` 的 provider_version 维度),
+        // 一致则**消费该投影**为 audit 字面量(prepared 与 audit 同
+        // fingerprint);裸 validate(无候选投影)沿现状:同版本 projector
+        // 现算。trust/MCP bundle digest 的 gateway 侧装配归 1b/1c/B0f;空串
+        // 同样纳入 session digest,装配后任一漂移都会改变 projection_digest。
+        let lc_projection = match launch.lc_projection() {
+            Some(prepared) => {
+                if prepared.exact_version() != provider_version.as_str() {
+                    return Err(ProviderAdapterError::parse_error(
+                        format!(
+                            "pi lc validated start: prepared projection provider version {} drifted from current observation {provider_version}; refusing to spawn",
+                            prepared.exact_version()
+                        ),
+                        String::new(),
+                        String::new(),
+                    ));
+                }
+                prepared.clone()
+            }
             None => {
-                let command = self.command.clone();
-                crate::cross_cutting::streaming_provider::cached_cli_version(
-                    &self.command,
-                    async move {
-                        let probed =
-                            probe_pi_version_with_timeout(&command, PI_VERSION_PROBE_TIMEOUT).await;
-                        pi_policy_version(&probed)
-                    },
-                )
-                .await
-                .map_err(|error| {
+                let boundary = projection::lc_boundary_plan(&envelope).map_err(|error| {
                     ProviderAdapterError::parse_error(
                         format!("pi lc validated start: {error}"),
                         String::new(),
                         String::new(),
                     )
-                })?
+                })?;
+                let projection_input = crate::product::logical_codebase::provider_projection::ProviderProjectionInput::new(
+                    envelope.clone(),
+                    crate::product::logical_codebase::provider_gateway::ProviderRef::pi(
+                        launch.capability_snapshot_ref(),
+                    ),
+                    envelope.action,
+                    input.role.clone(),
+                    input.permission_mode.clone(),
+                    input.tool_policy.clone(),
+                    projection::PI_LC_APPROVAL_POLICY.to_string(),
+                    String::new(),
+                    envelope.config_artifact_ref.clone(),
+                    String::new(),
+                    Some(boundary),
+                );
+                PiPolicyProjector::new(provider_version.clone())
+                    .project(&projection_input)
+                    .map_err(|error| {
+                        ProviderAdapterError::parse_error(
+                            format!("pi lc validated start: {error}"),
+                            String::new(),
+                            String::new(),
+                        )
+                    })?
             }
         };
-
-        // extension 准备在 guard 之后(计划 Task 4 Step 3:pi extension 准备
-        // 在 guard 之后、launcher 覆盖面内;RPC/MCP 继续既有 adapter)。
-        let extension_path = ensure_ask_extension()?;
-
-        // 不可伪造 boundary plan + LC 投影。trust/MCP bundle digest 的 gateway
-        // 侧装配(ProviderTrustSource/Aria bundle)归 1b/1c;空串同样纳入
-        // session digest,装配后任一漂移都会改变 projection_digest。
-        let boundary = projection::lc_boundary_plan(&envelope).map_err(|error| {
-            ProviderAdapterError::parse_error(
-                format!("pi lc validated start: {error}"),
-                String::new(),
-                String::new(),
-            )
-        })?;
-        let projection_input =
-            crate::product::logical_codebase::provider_projection::ProviderProjectionInput::new(
-                envelope.clone(),
-                crate::product::logical_codebase::provider_gateway::ProviderRef::pi(
-                    launch.capability_snapshot_ref(),
-                ),
-                envelope.action,
-                input.role.clone(),
-                input.permission_mode.clone(),
-                input.tool_policy.clone(),
-                projection::PI_LC_APPROVAL_POLICY.to_string(),
-                String::new(),
-                envelope.config_artifact_ref.clone(),
-                String::new(),
-                Some(boundary),
-            );
-        let projector = PiPolicyProjector::new(provider_version.clone());
-        let lc_projection = projector.project(&projection_input).map_err(|error| {
-            ProviderAdapterError::parse_error(
-                format!("pi lc validated start: {error}"),
-                String::new(),
-                String::new(),
-            )
-        })?;
 
         // Task 9a:LC 显式 resume 在 child 前比较全 LC audit(完整字面量含
         // 投影)。存档缺 lc_projection(旧/direct 形态)或任一投影摘要漂移
@@ -844,6 +955,11 @@ impl StreamingProviderAdapter for PiProvider {
                 }
             }
         }
+
+        // Task 3.5(B0d):extension 准备移至 resume mismatch 判定之后——
+        // mismatch 拒绝路径零 extension 写(读事实阶段不落盘);以下才进入
+        // launcher 覆盖面(RPC/MCP 继续既有 adapter)。
+        let extension_path = self.prepare_ask_extension()?;
 
         // 原生会话 id:fresh 预生成 uuid,resume 复用冻结 id(spawn 后由
         // Task 9c 的 get_state 确认真实同 id 才放行)。
@@ -1005,20 +1121,15 @@ impl StreamingProviderAdapter for PiProvider {
             if result.is_err() {
                 let _ = child.start_kill();
             }
-            let status = match bounded_child_wait(
-                &mut child,
-                PROVIDER_CHILD_EXIT_STREAM_DRAIN,
-            )
-            .await
-            {
-                Some(status) => Ok(status),
-                None => Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "bounded child join elapsed before exit status",
-                )),
-            };
-            let _ =
-                bounded_task_join(stderr_task, PROVIDER_CHILD_EXIT_STREAM_DRAIN).await;
+            let status =
+                match bounded_child_wait(&mut child, PROVIDER_CHILD_EXIT_STREAM_DRAIN).await {
+                    Some(status) => Ok(status),
+                    None => Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "bounded child join elapsed before exit status",
+                    )),
+                };
+            let _ = bounded_task_join(stderr_task, PROVIDER_CHILD_EXIT_STREAM_DRAIN).await;
             if let Err(error) = result {
                 let stderr = stderr_output.lock().await.trim().to_string();
                 let status_text = match status {
@@ -1041,5 +1152,47 @@ impl StreamingProviderAdapter for PiProvider {
             events: event_rx,
             commands: command_tx,
         })
+    }
+
+    /// Task 3.5(B0d):LC 公共 prepare 合同(B0a2)的 Pi 真实现——只读观测
+    /// 本家 facts:exact version(经 `LcVersionCache` 60 秒
+    /// TTL/single-flight)、Auto-only aria-ask approval 投影、无可信 MCP
+    /// 配置(空 digest)、由 envelope 派生的不可伪造 boundary plan 与
+    /// **同版本** `PiPolicyProjector`。全程零 extension 写、零 child、零
+    /// durable 写(extension 准备归 `start_validated` 的 mismatch 判定
+    /// 之后);守卫早于版本观测。
+    async fn prepare_lc_facts(
+        &self,
+        input: &StreamingProviderInput,
+        launch: &crate::product::logical_codebase::provider_gateway::ValidatedSessionLaunchPolicy,
+        cancel: CancellationToken,
+    ) -> Result<
+        crate::product::logical_codebase::provider_projection::ProviderLcPrepareFacts,
+        ProviderAdapterError,
+    > {
+        Self::guard_lc_pi_launch(input, launch)?;
+        let (version_probe_key, observation) = self.observe_lc_version(cancel).await?;
+        let exact_version = observation.exact_version().to_string();
+        let boundary = projection::lc_boundary_plan(launch.envelope()).map_err(|error| {
+            ProviderAdapterError::parse_error(
+                format!("pi lc prepare facts: {error}"),
+                String::new(),
+                String::new(),
+            )
+        })?;
+        Ok(
+            crate::product::logical_codebase::provider_projection::ProviderLcPrepareFacts::new(
+                crate::product::logical_codebase::provider_gateway::ProviderRefType::Pi,
+                crate::product::logical_codebase::policy::ProviderDialect::PiRpcV1,
+                crate::product::logical_codebase::policy::ProviderWireDialect::PiRpc,
+                exact_version.clone(),
+                observation.observed_at(),
+                version_probe_key,
+                projection::PI_LC_APPROVAL_POLICY.to_string(),
+                String::new(),
+                boundary,
+                std::sync::Arc::new(PiPolicyProjector::new(exact_version)),
+            ),
+        )
     }
 }
