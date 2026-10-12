@@ -48,7 +48,7 @@
 
 ## §5 发布链与环境纪律
 
-- web build（`tsc -b && vite build`，产物 `dist/assets/*`）→ cargo build（build.rs rust-embed 编译期嵌入 `web/dist`，`rerun-if-changed` 触发重嵌入）——顺序执行，无旧 dist 坑。
+- web build（`tsc -b && vite build`，产物 `dist/assets/*`）→ cargo build（build.rs rust-embed 编译期嵌入 `web/dist`，`rerun-if-changed` 触发重嵌入）——顺序执行（worktree 磁盘产物链证据见 §7；运行服务侧由 Main 补 build＋重启收口）。
 - cargo build 警告均为并行工作预存（来源文件均非本任务改动面）；controller 重启按「服务勿动」纪律留给 Main 执行发布。
 - 提交：`feat(trust): 指引卡简化为两行说明与可复制命令窗`（显式列文件，不带并行 worker 的未提交改动）。
 
@@ -57,3 +57,11 @@
 1. **单复数来源**：当前 SC admission waiting 每 provider 一条等待帧（单元素 providers）；多 provider 并列渲染已就绪（wire 列表+前端 join「与」），但「同帧多 provider」聚合尚无生产产生点——按冻结设计实现为列表，未来确认面/批量场景可直接受益。
 2. **冲突分型卡面**：结构化帧给 `providers/canonical_root/retry_action` 但无命令——卡面降级为两行说明+登记按钮（无命令窗），符合「不覆盖用户条目」纪律；登记按钮点击后走 ensure 链可能再落 `trust_registration_waiting` 平铺指导（既有行为）。
 3. **bulk-confirm 确认面**（`bulk-confirm-runner.ts`）仍消费平铺 `manual_guidance` 文本（结果列表行，非指引卡）——`command_markdown` 已随 context 下发，卡面化留给后续（不在本次冻结设计范围）。
+
+## §7 勘误：部署链证据纪律（Main 2026-10-12 11:05 勘误入账）
+
+本报告初版「无旧 dist 坑」表述不严谨，勘误如下：
+
+1. **属实部分（磁盘产物链，事后补证）**：worktree `web/dist/index.html` mtime `2026-10-12 10:54:32`，引用 `index-D7nkaPEs.js`（同 mtime存在）；worktree `target/debug/aria` mtime `2026-10-12 10:54:59` ≥ dist mtime——dev 构建确经 `rerun-if-changed` 重嵌入新 dist。
+2. **不采信部分**：运行中的服务进程曾持续嵌旧包（进程内嵌早于本任务 dist 的版本），直至 Main 补 cargo build＋重启（bg_522，期望 served bundle=`index-D7nkaPEs.js`）——**磁盘二进制更新 ≠ 运行服务更新**；初版仅口头声称「按序执行」，未附证据，按新纪律不采信。
+3. **流程教训（第二次同型事故，升级）**：凡报告「已构建/已部署」，必须附证据三元组：①服务二进制 mtime ≥ dist mtime；②服务 served bundle hash = dist `index.html` 引用 hash；③（涉及重启）服务进程 start time 晚于二进制 mtime。口头「已按序执行」不再作为完成依据。
