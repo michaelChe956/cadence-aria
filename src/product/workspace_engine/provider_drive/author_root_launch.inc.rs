@@ -298,6 +298,11 @@ impl WorkspaceEngine {
         command_rx: mpsc::Receiver<ProviderCommand>,
         session_record: &crate::product::models::WorkspaceSessionRecord,
     ) {
+        // B1（终审 P1）：显式 fresh（FreshRunning author 族 recovery）消费点
+        //——dispatch 已授权本 run：FullConversation prompt 自足、旧 native 已
+        // tombstone 不回捞；驱动结束后对账 recovery（Completed → Resolved /
+        // 其余回 Waiting）。普通 run（无 fresh 判据）零变化。
+        let fresh_recovery = self.lc_fresh_author_family_recovery();
         let gateway_launch = self.resolve_author_root_launch(session_record);
         self.handle_author_message_with_prompt_mode(
             content,
@@ -307,6 +312,9 @@ impl WorkspaceEngine {
             gateway_launch,
         )
         .await;
+        if fresh_recovery.is_some() {
+            self.reconcile_lc_fresh_author_family_run(None).await;
+        }
     }
 
     /// Task 2.1：ChoiceFollowup 复用同一 root launch/envelope/resume——choice
@@ -319,6 +327,8 @@ impl WorkspaceEngine {
         command_rx: mpsc::Receiver<ProviderCommand>,
         session_record: &crate::product::models::WorkspaceSessionRecord,
     ) {
+        // B1（终审 P1）：显式 fresh 消费点（同 handle_user_message_from_run）。
+        let fresh_recovery = self.lc_fresh_author_family_recovery();
         let gateway_launch = self.resolve_author_root_launch(session_record);
         self.handle_author_message_with_prompt_mode(
             content,
@@ -328,5 +338,8 @@ impl WorkspaceEngine {
             gateway_launch,
         )
         .await;
+        if fresh_recovery.is_some() {
+            self.reconcile_lc_fresh_author_family_run(None).await;
+        }
     }
 }

@@ -811,19 +811,23 @@ pub(crate) fn lc_fresh_run_kind_for_recovery_context(
     }
 }
 
-/// B2a（Task 5.1）/B2b3（Task 5.4）/B2c（Task 5.5）/B2d（Task 5.6）fresh
-/// dispatch 的 tag 覆盖面——A/B 发布纪律（设计 §4.5/§10.1）：fresh 启动
-/// 能力按 B2 子包逐 tag 放开，未接管 tag typed 拒零 spawn。已覆盖：
+/// B2a（Task 5.1）/B2b3（Task 5.4）/B2c（Task 5.5）/B2d（Task 5.6）/B1
+/// （终审 P1，author 族）fresh dispatch 的 tag 覆盖面——A/B 发布纪律
+/// （设计 §4.5/§10.1）：fresh 启动能力按子包逐 tag 放开，未接管 tag
+/// typed 拒零 spawn。已覆盖：
 /// `legacy_outline_rebuild`（5.1，dispatch 时新解析 resolved planning
 /// context 组装）；`legacy_draft`/`legacy_batch`/`legacy_plan_revision`
 /// （5.4，kind 可直接组装，Draft/Batch 的业务代事实 spawn 前按 durable
 /// active index typed 校验，PlanRevision 的 retained/redo 对照由臂内重算
 /// 消费 engine artifact）；`sc_author`（5.5，payload phase/reservation
 /// key/source ref spawn 前对 durable typed 对照）；`sc_manual_revision`
-/// （5.6，payload turn 事实 spawn 前对 durable turn/ledger typed 对照）。
-/// 其余 tag（author 族、outline author·revision（B2b2 放行臂））中 author
-/// 族仍 typed 拒（归 B1 author fresh 合约面接管）；
-/// `resume_provider_session_id=None`，旧 audit 不回捞）。
+/// （5.6，payload turn 事实 spawn 前对 durable turn/ledger typed 对照）；
+/// author 族（`author`/`author_choice_followup`/`author_feedback`/
+/// `reviewer_revision`，终审 P1：业务四元组身份/artifact/feedback spawn 前
+/// 对 durable typed 对照，臂内 author_root_launch/review drive 消费点以
+/// FreshRunning 重入——resume=None 全新 native + full-fresh prompt 自足）。
+/// 其余 tag typed 拒（fresh 链恒 `resume_provider_session_id=None`，旧
+/// audit 不回捞）。
 async fn lc_fresh_dispatch_kind(
     recovery: &crate::product::models::LcResumeRecoveryRecord,
     run_context: &ProviderRunContext,
@@ -910,6 +914,32 @@ async fn lc_fresh_dispatch_kind(
         // StartGeneration rearm）。
         kind @ LcFreshRunKind::Kind(ProviderRunKind::HumanGateScManualRevision { .. }) => {
             verify_lc_fresh_sc_manual_revision_payload(&recovery.run_context, run_context)?;
+            match kind {
+                LcFreshRunKind::Kind(kind) => Ok(kind),
+                // 上面 match 收窄到 Kind；NeedsFreshPlanningContext 分支已消费。
+                LcFreshRunKind::NeedsFreshPlanningContext => {
+                    unreachable!("NeedsFreshPlanningContext arm is matched before the Kind arm")
+                }
+            }
+        }
+        // B1（终审 P1，B1→B2 接缝，设计 §5.3 author 族行）：author 族四 tag
+        //（author/author_choice_followup/author_feedback/reviewer_revision，
+        // 生产唯一可达等待出生=review drive 的 ReviewerRevision mismatch
+        // persist）的 full fresh dispatch 臂接管——payload 冻结的业务四元组
+        //（entity/workspace 身份、author/reviewer provider、artifact 引用、
+        // feedback）spawn 前与 durable typed 对照（等待期任一维度被推进即
+        // 漂移，`lc_resume_recovery_stale` 拒收回等待，不用旧权限强行完
+        // 成），对照通过即放行 kind；臂内（provider_run Author/ChoiceFollowup
+        // 臂 + review drive revision 消费点）按 FreshRunning 重入：resume=None
+        // 全新 native、full-fresh prompt 自足（B1a
+        // `build_revision_input_with_resume(false)` 合同：artifact/feedback/
+        // review 全量内嵌）。4.2 的 OperationResult/claim 链零改动。
+        kind @ LcFreshRunKind::Kind(
+            ProviderRunKind::Author { .. }
+            | ProviderRunKind::AuthorChoiceFollowup { .. }
+            | ProviderRunKind::Revision,
+        ) => {
+            verify_lc_fresh_author_family_payload(&recovery.run_context, run_context)?;
             match kind {
                 LcFreshRunKind::Kind(kind) => Ok(kind),
                 // 上面 match 收窄到 Kind；NeedsFreshPlanningContext 分支已消费。
@@ -1157,6 +1187,138 @@ fn verify_lc_fresh_sc_manual_revision_payload(
         )));
     }
     Ok(())
+}
+
+/// B1（终审 P1，设计 §5.3 author 族行）：author 族 payload 与 durable 的
+/// typed 对照——冻结四元组逐维度比对：
+/// - 身份：entity/workspace_type 与 durable record 一致（会话换代即漂移）；
+/// - author/reviewer：冻结 provider 与 durable record 一致（等待期换
+///   provider 即漂移）；
+/// - artifact：冻结 artifact_refs（version/hash）与 durable artifact 版本
+///   一致（未冻结 version/hash 的引用跳过，不倒算——与 B1b 入场门 ⑦ 同
+///   纪律，birth 位 `lc_recovery_business_context` 冻结空集）；
+/// - feedback：ReviewerRevision/AuthorFeedback 冻结 original_feedback 与原
+///   修订节点 durable revision_feedback 一致（双侧均在场才比对；等待期反馈
+///   被替换即漂移）。
+/// 漂移 → `lc_resume_recovery_stale` 拒收回等待；store 读取失败按 store
+/// unavailable 家族 typed 上浮。
+fn verify_lc_fresh_author_family_payload(
+    context: &crate::product::models::LcRecoveryRunContext,
+    run_context: &ProviderRunContext,
+) -> Result<(), LcFreshDispatchRejection> {
+    use crate::product::lifecycle_store::LifecycleStore;
+    use crate::product::models::LcRecoveryRunContext;
+
+    let (business, frozen_feedback) = match context {
+        LcRecoveryRunContext::Author { business, .. }
+        | LcRecoveryRunContext::AuthorChoiceFollowup { business, .. } => (business, None),
+        LcRecoveryRunContext::AuthorFeedback {
+            business,
+            original_feedback,
+        }
+        | LcRecoveryRunContext::ReviewerRevision {
+            business,
+            original_feedback,
+        } => (business, original_feedback.clone()),
+        _ => return Ok(()),
+    };
+    let stale = |message: String| LcFreshDispatchRejection {
+        code: crate::product::lifecycle_store::LcFreshClaimOutcome::STALE_SUPERSEDED,
+        message,
+    };
+    let store_unavailable = |label: &str, error: crate::product::json_store::ProductStoreError| {
+        LcFreshDispatchRejection {
+            code: crate::web::workspace_ws_handler::socket::LC_RESUME_STORE_UNAVAILABLE_CODE,
+            message: format!("load {label} for author family fresh verify failed: {error}"),
+        }
+    };
+    let store = LifecycleStore::new(run_context.app_paths.clone());
+    let record = store
+        .get_workspace_session(&run_context.session_id)
+        .map_err(|error| store_unavailable("workspace session", error))?;
+    if business.entity_id != record.entity_id {
+        return Err(stale(format!(
+            "author family fresh verify failed: payload entity {} != durable entity {}",
+            business.entity_id, record.entity_id
+        )));
+    }
+    if business.workspace_type != record.workspace_type {
+        return Err(stale(format!(
+            "author family fresh verify failed: payload workspace {:?} != durable workspace {:?}",
+            business.workspace_type, record.workspace_type
+        )));
+    }
+    if business.author_provider != record.author_provider {
+        return Err(stale(format!(
+            "author family fresh verify failed: payload author {:?} != durable author {:?}",
+            business.author_provider, record.author_provider
+        )));
+    }
+    if business.effective_reviewer_provider != record.reviewer_provider {
+        return Err(stale(format!(
+            "author family fresh verify failed: payload reviewer {:?} != durable reviewer {:?}",
+            business.effective_reviewer_provider, record.reviewer_provider
+        )));
+    }
+    if !business.artifact_refs.is_empty() {
+        let versions = store
+            .list_artifact_versions(&run_context.session_id)
+            .map_err(|error| store_unavailable("artifact versions", error))?;
+        for artifact_ref in &business.artifact_refs {
+            let Some(frozen_version) = artifact_ref.version else {
+                continue;
+            };
+            let Some(current) = versions
+                .iter()
+                .find(|candidate| candidate.version == frozen_version)
+            else {
+                return Err(stale(format!(
+                    "author family fresh verify failed: frozen artifact version {frozen_version} disappeared from durable versions"
+                )));
+            };
+            if let Some(frozen_hash) = artifact_ref.hash.as_deref()
+                && author_family_artifact_digest(&current.payload).as_deref() != Some(frozen_hash)
+            {
+                return Err(stale(format!(
+                    "author family fresh verify failed: frozen artifact version {frozen_version} content drifted"
+                )));
+            }
+        }
+    }
+    if let (Some(frozen), Some(node_id)) = (
+        frozen_feedback
+            .as_deref()
+            .filter(|feedback| !feedback.trim().is_empty()),
+        business
+            .original_node_id
+            .as_deref()
+            .filter(|node_id| !node_id.is_empty()),
+    ) && let Ok(detail) = store.load_node_detail(&run_context.session_id, node_id)
+        && let Some(durable) = detail
+            .revision_feedback
+            .as_deref()
+            .filter(|feedback| !feedback.trim().is_empty())
+        && durable.trim() != frozen.trim()
+    {
+        return Err(stale(format!(
+            "author family fresh verify failed: frozen feedback drifted from durable revision node {node_id}"
+        )));
+    }
+    Ok(())
+}
+
+/// B1（终审 P1）：recovery 冻结 artifact 引用的当前内容指纹——serde 规范
+/// 序列化后 sha256（`sha256:<hex>`），与 socket.rs 入场门 ⑦ 的
+/// `lc_artifact_payload_digest` 同式比对（内容变化即 stale，不复活旧 source）。
+fn author_family_artifact_digest(
+    payload: &crate::web::workspace_ws_types::ArtifactPayload,
+) -> Option<String> {
+    use sha2::Digest as _;
+    let canonical = serde_json::to_string(payload).ok()?;
+    Some(format!(
+        "sha256:{:x}",
+        sha2::Sha256::digest(canonical.as_bytes())
+    ))
 }
 
 fn lc_touch_operation(

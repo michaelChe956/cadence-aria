@@ -8,6 +8,8 @@ use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+#[path = "tests/author_revision_fresh.rs"]
+mod author_revision_fresh;
 #[path = "tests/c1_recovery_surface.rs"]
 mod c1_recovery_surface;
 mod campaign_stage3_advance;

@@ -1,5 +1,7 @@
 use super::*;
-use crate::cross_cutting::provider_adapter::{PROVIDER_ERROR_STDERR_TAIL_BYTES, ProviderAdapterError};
+use crate::cross_cutting::provider_adapter::{
+    PROVIDER_ERROR_STDERR_TAIL_BYTES, ProviderAdapterError,
+};
 use crate::cross_cutting::session_launch::ValidatedStreamingProviderInput;
 use crate::product::logical_codebase::provider_gateway::{
     GatewaySessionDisposition, ResumeSessionLaunchRequest,
@@ -529,11 +531,19 @@ impl WorkspaceEngine {
         command_rx: mpsc::Receiver<ProviderCommand>,
     ) {
         let author = self.session.author_provider.clone();
-        let node_id = self.active_node_id.clone();
+        let mut node_id = self.active_node_id.clone();
+        // B1（终审 P1，B1→B2 接缝）：显式 fresh 消费判据以 durable 为准——
+        // dispatch（claim 受理）推进的是 durable record 的 FreshRunning，
+        // 长等待/重连的 engine 内存镜像可能仍停在 Waiting。author 族 tag +
+        // FreshRunning 即本 run 的授权凭证（入站门/engine 守卫已拒全部普通
+        // 旁路），本 driver 消费 fresh 而非继续等待。
+        let fresh_recovery = self.lc_fresh_author_family_recovery();
         // A2b（Task 2.6，设计 §4.3/§4.5）：active LC 恢复等待期间，同一
         // revision driver 不得绕过显式 fresh 授权启动（A/B 未齐前旁路一律
         // 后端拒收）——幂等收口后上浮 typed 等待错误，零 provider 启动。
-        if self.lc_resume_recovery_active() {
+        // B1（终审 P1）：FreshRunning author 族 recovery 的本 run 即已授权
+        // 的显式 fresh（上方判据），不落入等待臂。
+        if self.lc_resume_recovery_active() && fresh_recovery.is_none() {
             let (reason_code, recovery_id) = self
                 .session
                 .lc_resume_recovery
@@ -547,11 +557,79 @@ impl WorkspaceEngine {
             let _ = self.event_tx.send(EngineEvent::Error { message }).await;
             return;
         }
+        // B1（终审 P1）：fresh 重入准备——冻结 feedback 原样透传（重连重建
+        // 丢失内存态 pending_revision_context 时不重算、不丢）；等待收口已
+        // 终态化旧修订节点并回 PrepareContext，本 run 重建全新修订节点
+        //（retry-of 失败节点）并回 Running 阶段（完成后经
+        // complete_assistant_message 回 AuthorConfirm 确认门）。
+        if let Some(recovery) = fresh_recovery.as_ref() {
+            let frozen_feedback = match &recovery.run_context {
+                crate::product::models::LcRecoveryRunContext::AuthorFeedback {
+                    original_feedback,
+                    ..
+                }
+                | crate::product::models::LcRecoveryRunContext::ReviewerRevision {
+                    original_feedback,
+                    ..
+                } => original_feedback.clone(),
+                _ => None,
+            };
+            if let Some(feedback) = frozen_feedback.clone() {
+                self.pending_revision_context = Some(feedback);
+            }
+            self.transition_stage(WorkspaceStage::Running).await;
+            let retry_attempt = self
+                .timeline_nodes
+                .iter()
+                .filter(|node| {
+                    node.retry.as_ref().is_some_and(|retry| {
+                        retry.retry_of_node_id == recovery.failed_provider_node_id
+                    })
+                })
+                .count() as u32
+                + 1;
+            let fresh_node_id = self
+                .create_timeline_node_with_retry(
+                    TimelineNodeDraft {
+                        node_type: TimelineNodeType::Revision,
+                        agent: Some(author.clone()),
+                        stage: WorkspaceStage::Running,
+                        round: None,
+                        title: "显式 fresh 修订".to_string(),
+                        summary: frozen_feedback.clone(),
+                        status: TimelineNodeStatus::Active,
+                    },
+                    Some(TimelineNodeRetry {
+                        retry_of_node_id: recovery.failed_provider_node_id.clone(),
+                        retry_attempt,
+                        retry_reason: "lc_resume_explicit_fresh".to_string(),
+                        retry_error: TimelineNodeRetryError {
+                            code: "lc_resume_recovery_fresh".to_string(),
+                            message: "native 会话漂移，显式 fresh 重启修订 run".to_string(),
+                        },
+                    }),
+                )
+                .await;
+            if let Some(feedback) = frozen_feedback {
+                let _ = self
+                    .update_node_detail(&fresh_node_id, |detail| {
+                        detail.revision_feedback = Some(feedback);
+                    })
+                    .await;
+            }
+            node_id = Some(fresh_node_id);
+        }
         // Task 2.3（REQ-PLN-03/PLN-07、REQ-ENV-04/ENV-10）：LC revision 的 root
         // launch + resume 决策先于 input 构建——delta/full prompt 分流依赖 resume
         // 决策（cwd 漂移 supersede 后不得再以 delta 续写旧 thread）。`None` = 非
         // 逻辑会话（未注入 gateway）→ 下方 Legacy 直连原样（单仓零变化）。
-        let logical_launch = self.resolve_revision_root_launch();
+        let logical_launch = if fresh_recovery.is_some() {
+            // B1（终审 P1）：显式 fresh 不进 resume_or_start 的 supersede 决策
+            //（本 run 即授权的 StartNew），直接 validate 冻结全新 launch。
+            self.resolve_revision_root_launch_fresh()
+        } else {
+            self.resolve_revision_root_launch()
+        };
 
         // A2b（Task 2.6，设计 §4.3）：StartNew(supersede) 走**真实等待收口**
         // ——先持久 superseded waiting record（安全 record 先落盘，阻止旧
@@ -600,9 +678,12 @@ impl WorkspaceEngine {
             }
             return;
         }
-        let allow_resume = logical_launch
-            .as_ref()
-            .is_none_or(|decision| decision.as_ref().map(|d| d.resume_allowed) == Ok(true));
+        // B1（终审 P1）：显式 fresh 恒走 B1a 的 full-fresh 合同
+        //（allow_resume=false → resume=None + full prompt 自足）。
+        let allow_resume = fresh_recovery.is_none()
+            && logical_launch
+                .as_ref()
+                .is_none_or(|decision| decision.as_ref().map(|d| d.resume_allowed) == Ok(true));
         let input = match self.build_revision_input_with_resume(allow_resume) {
             Ok(input) => input,
             Err(message) => {
@@ -667,13 +748,23 @@ impl WorkspaceEngine {
             self.drive_provider_session(ProviderSessionDriveInput {
                 session,
                 command_rx,
-                node_id,
+                node_id: node_id.clone(),
                 agent: Some(author),
                 role: ProviderConversationRole::Author,
                 artifact_retry: None,
                 revision_resume_fallback: None,
             })
             .await;
+            // recovery（Completed → Resolved；其余回 Waiting，fail-safe）。
+            if fresh_recovery.is_some() {
+                let reconcile_node = node_id.clone().or_else(|| {
+                    fresh_recovery
+                        .as_ref()
+                        .and_then(|recovery| recovery.fresh_node_id.clone())
+                });
+                self.reconcile_lc_fresh_author_family_run(reconcile_node.as_deref())
+                    .await;
+            }
             return;
         }
         // 第一阶段不实证 Kimi resume 稳定性，排除 artifact retry（同 Pi）
@@ -703,13 +794,24 @@ impl WorkspaceEngine {
         self.drive_provider_session(ProviderSessionDriveInput {
             session,
             command_rx,
-            node_id,
+            node_id: node_id.clone(),
             agent: Some(author),
             role: ProviderConversationRole::Author,
             artifact_retry: retry_context,
             revision_resume_fallback,
         })
         .await;
+        // B1（终审 P1）：fresh 判据在直连臂同样对账（fresh 出生恒 LC，此处
+        // 为守卫完备性——非 fresh 时 reconcile 幂等返回）。
+        if fresh_recovery.is_some() {
+            let reconcile_node = node_id.clone().or_else(|| {
+                fresh_recovery
+                    .as_ref()
+                    .and_then(|recovery| recovery.fresh_node_id.clone())
+            });
+            self.reconcile_lc_fresh_author_family_run(reconcile_node.as_deref())
+                .await;
+        }
     }
 
     /// Task 2.3：LC revision 的 root launch + resume 决策（`drive_revision_session`
@@ -726,6 +828,23 @@ impl WorkspaceEngine {
     /// 当前 launch 全维度一致，绝不静默续接。
     pub(crate) fn resolve_revision_root_launch(
         &self,
+    ) -> Option<Result<RevisionLaunchDecision, String>> {
+        self.resolve_revision_root_launch_with_freshness(false)
+    }
+
+    /// B1（终审 P1）：`force_fresh=true` —— 显式 fresh run（FreshRunning
+    /// author 族 recovery spawn 的本 run）的 launch 决策：不进
+    /// `resume_or_start` 的 supersede 决策（本 run 即授权的 StartNew，旧
+    /// native 已 tombstone 不回捞），直接 `gateway.validate` 冻结全新
+    /// launch；`resume_allowed=false` 供调用方按 B1a 合同强制 resume=None
+    /// 的 full-fresh prompt。
+    fn resolve_revision_root_launch_fresh(&self) -> Option<Result<RevisionLaunchDecision, String>> {
+        self.resolve_revision_root_launch_with_freshness(true)
+    }
+
+    fn resolve_revision_root_launch_with_freshness(
+        &self,
+        force_fresh: bool,
     ) -> Option<Result<RevisionLaunchDecision, String>> {
         let gateway = self.logical_provider_gateway()?;
         let Some(lifecycle) = self.lifecycle_store.as_ref() else {
@@ -756,56 +875,11 @@ impl WorkspaceEngine {
         // B1a（Task 4.1，BP2）：candidateErr 即 `Some(Err(..))`（typed 类别
         // 保留），不落 `(None, _)` validate/fresh 臂；成功候选保留 native/seq
         // （seq 与 durable fullmap/audit 联合绑定已在候选内校验）。
-        let resume_session_id = match self
-            .provider_resume_session_candidate(ProviderConversationRole::Author, &provider)
-        {
-            Ok(candidate) => candidate
-                .map(|candidate| candidate.native_id)
-                .filter(|id| !id.trim().is_empty()),
-            Err(error) => {
-                return Some(Err(format!(
-                    "logical revision resume candidate unavailable: {error}"
-                )));
-            }
-        };
-        let decision = match (
-            resume_session_id,
-            self.logical_launch_fingerprints.get(&provider),
-        ) {
-            (Some(previous_session_id), Some(previous_fingerprint)) => {
-                match gateway.resume_or_start(ResumeSessionLaunchRequest {
-                    launch: request,
-                    previous_fingerprint: previous_fingerprint.clone(),
-                    previous_session_id,
-                }) {
-                    Ok(GatewaySessionDisposition::Resume(launch)) => RevisionLaunchDecision {
-                        launch,
-                        resume_allowed: true,
-                        superseded: None,
-                    },
-                    // Task 9c:StartNew 携带 superseded session id 与稳定等待
-                    // 投影——同一 revision driver 不得据此继续 start_streaming。
-                    Ok(GatewaySessionDisposition::StartNew {
-                        validated,
-                        superseded_session_id,
-                        waiting,
-                    }) => RevisionLaunchDecision {
-                        launch: validated,
-                        resume_allowed: false,
-                        superseded: Some(SupersededRevisionWait {
-                            superseded_session_id,
-                            waiting,
-                        }),
-                    },
-                    Err(error) => {
-                        return Some(Err(format!(
-                            "logical revision gateway validation failed: {error}"
-                        )));
-                    }
-                }
-            }
-            // 指纹记忆缺失（跨连接重建）：fail-closed 新会话。
-            (Some(_), None) => match gateway.validate(request) {
+        // B1（终审 P1）：fresh 直接 validate 全新 launch——不查旧 candidate
+        //（tombstone 候选的 FrozenBindingUnavailable 不阻断授权 fresh）、
+        // 不进 resume_or_start 的 supersede 决策。
+        let decision = if force_fresh {
+            match gateway.validate(request) {
                 Ok(launch) => RevisionLaunchDecision {
                     launch,
                     resume_allowed: false,
@@ -816,19 +890,82 @@ impl WorkspaceEngine {
                         "logical revision gateway validation failed: {error}"
                     )));
                 }
-            },
-            (None, _) => match gateway.validate(request) {
-                Ok(launch) => RevisionLaunchDecision {
-                    launch,
-                    resume_allowed: true,
-                    superseded: None,
-                },
+            }
+        } else {
+            let resume_session_id = match self
+                .provider_resume_session_candidate(ProviderConversationRole::Author, &provider)
+            {
+                Ok(candidate) => candidate
+                    .map(|candidate| candidate.native_id)
+                    .filter(|id| !id.trim().is_empty()),
                 Err(error) => {
                     return Some(Err(format!(
-                        "logical revision gateway validation failed: {error}"
+                        "logical revision resume candidate unavailable: {error}"
                     )));
                 }
-            },
+            };
+            match (
+                resume_session_id,
+                self.logical_launch_fingerprints.get(&provider),
+            ) {
+                (Some(previous_session_id), Some(previous_fingerprint)) => {
+                    match gateway.resume_or_start(ResumeSessionLaunchRequest {
+                        launch: request,
+                        previous_fingerprint: previous_fingerprint.clone(),
+                        previous_session_id,
+                    }) {
+                        Ok(GatewaySessionDisposition::Resume(launch)) => RevisionLaunchDecision {
+                            launch,
+                            resume_allowed: true,
+                            superseded: None,
+                        },
+                        // Task 9c:StartNew 携带 superseded session id 与稳定等待
+                        // 投影——同一 revision driver 不得据此继续 start_streaming。
+                        Ok(GatewaySessionDisposition::StartNew {
+                            validated,
+                            superseded_session_id,
+                            waiting,
+                        }) => RevisionLaunchDecision {
+                            launch: validated,
+                            resume_allowed: false,
+                            superseded: Some(SupersededRevisionWait {
+                                superseded_session_id,
+                                waiting,
+                            }),
+                        },
+                        Err(error) => {
+                            return Some(Err(format!(
+                                "logical revision gateway validation failed: {error}"
+                            )));
+                        }
+                    }
+                }
+                // 指纹记忆缺失（跨连接重建）：fail-closed 新会话。
+                (Some(_), None) => match gateway.validate(request) {
+                    Ok(launch) => RevisionLaunchDecision {
+                        launch,
+                        resume_allowed: false,
+                        superseded: None,
+                    },
+                    Err(error) => {
+                        return Some(Err(format!(
+                            "logical revision gateway validation failed: {error}"
+                        )));
+                    }
+                },
+                (None, _) => match gateway.validate(request) {
+                    Ok(launch) => RevisionLaunchDecision {
+                        launch,
+                        resume_allowed: true,
+                        superseded: None,
+                    },
+                    Err(error) => {
+                        return Some(Err(format!(
+                            "logical revision gateway validation failed: {error}"
+                        )));
+                    }
+                },
+            }
         };
         Some(Ok(decision))
     }
@@ -859,6 +996,156 @@ impl WorkspaceEngine {
             effective_reviewer_provider: self.session.reviewer_provider.clone(),
             original_node_id: self.active_node_id.clone(),
             original_role_run_seq: None,
+        }
+    }
+
+    /// B1（终审 P1）：durable 侧的 author 族显式 fresh run 判据——
+    /// `FreshRunning` 且 run_context tag 属 author 族（Author/
+    /// AuthorChoiceFollowup/AuthorFeedback/ReviewerRevision）。以 durable
+    /// record 为准（dispatch 推进的是 durable 状态；engine 内存镜像可能滞留
+    /// Waiting）；读取失败按无 fresh 处理（fail-safe 等待方向）并 warn。
+    pub(crate) fn lc_fresh_author_family_recovery(
+        &self,
+    ) -> Option<crate::product::models::LcResumeRecoveryRecord> {
+        let store = self.lifecycle_store.as_ref()?;
+        let record = match store.get_workspace_session(&self.session.session_id) {
+            Ok(record) => record,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    session_id = %self.session.session_id,
+                    "load workspace session for author family fresh recovery failed; treating as not-fresh"
+                );
+                return None;
+            }
+        };
+        record.lc_resume_recovery.filter(|recovery| {
+            recovery.state == crate::product::models::LcResumeRecoveryState::FreshRunning
+                && matches!(
+                    recovery.run_context,
+                    crate::product::models::LcRecoveryRunContext::Author { .. }
+                        | crate::product::models::LcRecoveryRunContext::AuthorChoiceFollowup { .. }
+                        | crate::product::models::LcRecoveryRunContext::AuthorFeedback { .. }
+                        | crate::product::models::LcRecoveryRunContext::ReviewerRevision { .. }
+                )
+        })
+    }
+
+    /// B1（终审 P1，§4.3/§5.3 author 族行）：fresh run 驱动结束后的 recovery
+    /// 对账——fresh 节点 Completed → Resolved（新 native/节点回填 +
+    /// operation Completed）；其余（Failed/悬置）→ 回 Waiting（operation
+    /// Failed，结果保留：同 ID 只 Replay、下一次显式点击用新 ID）。
+    /// 整记录 CAS single-flight；败给并发写方让位、store 写失败 warn（等待
+    /// 方向 fail-safe）；engine 内存镜像同步。
+    pub(crate) async fn reconcile_lc_fresh_author_family_run(
+        &mut self,
+        fresh_node_id: Option<&str>,
+    ) {
+        use crate::product::models::{
+            LcFreshOperationState, LcRecoveryRunContext, LcResumeRecoveryState,
+        };
+        let Some(store) = self.lifecycle_store.clone() else {
+            return;
+        };
+        let Ok(expected) = store.get_workspace_session(&self.session.session_id) else {
+            // 读取失败不误判终态（等待方向 fail-safe）。
+            return;
+        };
+        let Some(mut recovery) = expected.lc_resume_recovery.clone().filter(|recovery| {
+            recovery.state == LcResumeRecoveryState::FreshRunning
+                && matches!(
+                    recovery.run_context,
+                    LcRecoveryRunContext::Author { .. }
+                        | LcRecoveryRunContext::AuthorChoiceFollowup { .. }
+                        | LcRecoveryRunContext::AuthorFeedback { .. }
+                        | LcRecoveryRunContext::ReviewerRevision { .. }
+                )
+        }) else {
+            return;
+        };
+        let author_provider = self.session.author_provider.clone();
+        let conversation = self
+            .session
+            .provider_conversations
+            .iter()
+            .find(|conversation| {
+                conversation.role == ProviderConversationRole::Author
+                    && conversation.provider == author_provider
+            })
+            .cloned();
+        let fresh_node_id = fresh_node_id
+            .map(str::to_string)
+            .or_else(|| recovery.fresh_node_id.clone())
+            .or_else(|| {
+                conversation
+                    .as_ref()
+                    .and_then(|conversation| conversation.last_node_id.clone())
+            });
+        let native_session_id = conversation
+            .map(|conversation| conversation.provider_session_id)
+            .filter(|id| !id.trim().is_empty());
+        let node_completed = fresh_node_id
+            .as_deref()
+            .and_then(|node_id| {
+                self.timeline_nodes
+                    .iter()
+                    .find(|node| node.node_id == node_id)
+            })
+            .is_some_and(|node| node.status == TimelineNodeStatus::Completed);
+        let now = chrono::Utc::now().to_rfc3339();
+        if node_completed {
+            recovery.state = LcResumeRecoveryState::Resolved;
+            if recovery.fresh_native_session_id.is_none() {
+                recovery.fresh_native_session_id = native_session_id;
+            }
+            if recovery.fresh_node_id.is_none() {
+                recovery.fresh_node_id = fresh_node_id.clone();
+            }
+            if let Some(operation_id) = recovery.operation_id.as_deref() {
+                for operation in recovery.fresh_operations.iter_mut() {
+                    if operation.operation_id == operation_id {
+                        operation.state = LcFreshOperationState::Completed;
+                        if operation.fresh_node_id.is_none() {
+                            operation.fresh_node_id = fresh_node_id.clone();
+                        }
+                        operation.updated_at = now.clone();
+                    }
+                }
+            }
+        } else {
+            recovery.state = LcResumeRecoveryState::Waiting;
+            let operation_id = recovery.operation_id.take();
+            if let Some(operation_id) = operation_id.as_deref() {
+                for operation in recovery.fresh_operations.iter_mut() {
+                    if operation.operation_id == operation_id {
+                        operation.state = LcFreshOperationState::Failed;
+                        operation.reason_code = Some(
+                            "lc_resume_fresh_run_failed: fresh author run did not complete"
+                                .to_string(),
+                        );
+                        operation.updated_at = now.clone();
+                    }
+                }
+            }
+        }
+        recovery.updated_at = now.clone();
+        match store.compare_and_save_lc_resume_state(&expected, recovery) {
+            Ok(saved) => {
+                self.session.lc_resume_recovery = saved.lc_resume_recovery.clone();
+            }
+            Err(crate::product::json_store::ProductStoreError::Conflict { .. }) => {
+                tracing::debug!(
+                    session_id = %self.session.session_id,
+                    "lc fresh author run reconcile CAS lost to a concurrent writer; conceding"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    session_id = %self.session.session_id,
+                    "reconcile lc fresh author run outcome failed (fail-safe: durable state unchanged)"
+                );
+            }
         }
     }
 }

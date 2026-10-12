@@ -827,14 +827,15 @@ async fn anchor_t13_plan_stale_waits_for_explicit_fresh() {
         "未显式 fresh 前零受理 operation"
     );
 
-    // ⑤ 显式 fresh：claim 受理（FreshReserved）后 dispatch——未接管 tag
-    //    （author 族，归 B1 author fresh 合约面）typed 拒
+    // ⑤ 显式 fresh：claim 受理（FreshReserved）后 dispatch——非法 tag 形态
+    //    （legacy_outline_author 携非 legacy flow）typed 拒
     //    （context_unsupported），operation failed、recovery 回 Waiting、
     //    0 spawn（不回落通用 plan_author/legacy）。B2b2（5.3）已接管
     //    outline 反馈族两 tag（anchor_t15 正路覆盖）、B2c（5.5）已接管
     //    sc_author（anchor_t17 正路覆盖）、B2d（5.6）已接管 sc_manual_
-    //    revision（anchor_t18 正路覆盖），故先以同 recovery_id 换载仍未
-    //    接管的 author tag 再 claim。
+    //    revision（anchor_t18 正路覆盖）、B1（终审 P1）已接管 author 族
+    //    四 tag（anchor_t19 正路覆盖），故先以同 recovery_id 换载仍必然
+    //    typed 拒的非法 flow 形态再 claim。
     let before_swap = fixture.latest_record();
     let mut swapped_recovery = before_swap
         .lc_resume_recovery
@@ -844,9 +845,11 @@ async fn anchor_t13_plan_stale_waits_for_explicit_fresh() {
         LcRecoveryRunContext::LegacyOutlineRevision { business, .. } => business.clone(),
         other => panic!("期望换载前为 LegacyOutlineRevision，got {other:?}"),
     };
-    swapped_recovery.run_context = LcRecoveryRunContext::Author {
+    swapped_recovery.run_context = LcRecoveryRunContext::LegacyOutlineAuthor {
         business: swapped_business,
-        original_content: Some("t13 author swap content".to_string()),
+        flow: crate::product::work_item_plan_policy::WorkItemPlanFlowKind::SingleCandidate,
+        original_provider_node_id: None,
+        outline_ref: None,
     };
 
     fixture
@@ -2007,14 +2010,18 @@ async fn anchor_t16_fresh_plan_revision_payload_mismatch_waits_typed_stale() {
 #[tokio::test]
 async fn anchor_t16_untaken_tag_still_typed_rejected_no_fallback() {
     let fixture = AnchorT16PlanFixture::new();
-    // 未接管 tag（author 族，归 B1 author fresh 合约面；sc_author 已由
-    // B2c/5.5 接管、sc_manual_revision 已由 B2d/5.6 接管为真实 full
-    // fresh，见 anchor_t17/anchor_t18）：typed 拒，不回落通用 plan_author。
+    // 非法 tag 形态（legacy_outline_author 携非 legacy flow——kind 映射层
+    // typed 拒）：typed 拒，不回落通用 plan_author。author 族四 tag已由
+    // B1（终审 P1）接管为真实 full fresh（anchor_t19 正路覆盖）、
+    // sc_author 已由 B2c/5.5 接管、sc_manual_revision 已由 B2d/5.6 接管
+    //（见 anchor_t17/anchor_t18）。
     let recovery = fixture.seed_recovery_waiting(
         "recovery_anchor_t16_author",
-        LcRecoveryRunContext::Author {
+        LcRecoveryRunContext::LegacyOutlineAuthor {
             business: anchor_t16_business(),
-            original_content: Some("t16 author swap content".to_string()),
+            flow: crate::product::work_item_plan_policy::WorkItemPlanFlowKind::SingleCandidate,
+            original_provider_node_id: None,
+            outline_ref: None,
         },
     );
     let engine_arc = fixture.engine_after_stale_closure(None, "checkpoints-t16-author");
