@@ -297,6 +297,7 @@ pub(super) async fn spawn_provider_run_with_start_mode(
                                 missing_materials,
                                 allowed_actions,
                                 manual_guidance,
+                                trust_waiting,
                             },
                         ) => {
                             // C-1：LC admission waiting——durable phase 已由运行内
@@ -320,6 +321,18 @@ pub(super) async fn spawn_provider_run_with_start_mode(
                                 &WsOutMessage::Error { message },
                             )
                             .await;
+                            // 指引卡简化（owner 2026-10-12 直批）：trust 缺失时
+                            // 紧随 error 帧发送结构化指导帧——前端「两行说明＋
+                            // 可复制命令窗」直渲（providers/canonical_root/
+                            // command_markdown 同源只读投影），不解析平铺串；
+                            // 平铺 error/manual_guidance 原样保留（旧客户端兼容）。
+                            if let Some(waiting) = trust_waiting {
+                                let _ = send_json_outbound(
+                                    &outbound_tx_for_task,
+                                    &WsOutMessage::trust_missing_guidance_from_waiting(&waiting),
+                                )
+                                .await;
+                            }
                             return;
                         }
                         Err(

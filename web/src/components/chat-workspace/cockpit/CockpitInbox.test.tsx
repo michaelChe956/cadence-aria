@@ -1091,3 +1091,133 @@ describe("CockpitInbox trust register button", () => {
     expect(screen.queryByTestId("cockpit-trust-registered-hint")).toBeNull();
   });
 });
+
+// 指引卡简化（owner 2026-10-12 直批冻结设计）：trust 未信任指引卡从
+// 长文本卡改为「两行简洁说明＋可复制命令窗」——第一行直白告知该目录
+// 尚未被哪些 provider 信任（单复数按实际）；第二行怎么做；命令窗带
+// 复制按钮；「登记并重试」保留；冗长诊断收进「查看诊断详情」折叠。
+describe("CockpitInbox trust guidance card simplification", () => {
+  const trustCommand =
+    "mkdir -p '/home/u/.kimi-code/workspace-trust' && printf '{\"root\":\"/agg/root\",\"trustedAt\":%s}' \"$(date +%s%3N)\" > '/home/u/.kimi-code/workspace-trust/wd_root_000000000000' # GNU/Linux（date +%s%3N 需 GNU date）";
+
+  const structuredTrustItem: CockpitInboxItem = {
+    id: "session_001:hard_error:error",
+    kind: "hard_error",
+    severity: 3,
+    title: "引擎错误",
+    summary:
+      "provider_trust_missing: trust_entry_missing: canonical root /agg/root 下未找到 kimi_code 的用户级 workspace trust 条目（entry absent）；原拒绝：spawn denied；人工登记指导：……（长文本）",
+    triage: false,
+    source: "engine_error",
+    createdAt: null,
+    gate: null,
+    inlineError: null,
+    choice: null,
+    trustMissing: {
+      provider: "kimi_code",
+      providers: ["kimi_code"],
+      canonicalRoot: "/agg/root",
+      commandMarkdown: trustCommand,
+      retryAction: "人工登记后显式重新生成",
+    },
+    trustRegistered: false,
+  };
+
+  it("两行说明＋命令窗＋复制按钮＋登记按钮齐备；诊断进折叠", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    });
+    const actions = mockActions();
+    render(
+      <CockpitInbox
+        items={[structuredTrustItem]}
+        actions={actions}
+        actionableSessionId="session_001"
+      />,
+    );
+
+    // 第一行：直白告知（provider 显示名 Kimi，单数）。
+    expect(screen.getByTestId("cockpit-trust-missing-headline")).toHaveTextContent(
+      "该目录（/agg/root）尚未被 Kimi 信任",
+    );
+    // 第二行：怎么做（按钮一键登记 / 复制命令自行登记）。
+    const actionLine = screen.getByTestId("cockpit-trust-missing-action");
+    expect(actionLine).toHaveTextContent("点击下方按钮一键登记");
+    expect(actionLine).toHaveTextContent("复制命令自行登记后重新生成");
+
+    // 命令窗：渲染后端同源命令，带复制按钮；复制写入剪贴板并反馈。
+    const window = screen.getByTestId("cockpit-trust-command-window");
+    expect(window.textContent).toContain(trustCommand);
+    fireEvent.click(screen.getByTestId("cockpit-trust-command-copy"));
+    await vi.waitFor(() => expect(writeText).toHaveBeenCalledWith(trustCommand));
+    await vi.waitFor(() =>
+      expect(screen.getByTestId("cockpit-trust-command-copy")).toHaveTextContent("已复制"),
+    );
+
+    // 「登记并重试」保留：点击仍经 facade 以 provider 出站。
+    fireEvent.click(screen.getByTestId("cockpit-trust-register-button"));
+    expect(actions.registerTrustEntry).toHaveBeenCalledWith("kimi_code");
+
+    // 冗长细节（原拒绝串/长指导）只出现在「查看诊断详情」折叠内。
+    const fold = screen.getByTestId("cockpit-inbox-error-details");
+    expect(fold).toHaveTextContent("查看诊断详情");
+    expect(fold.textContent).toContain("原拒绝：spawn denied");
+    // 主卡面不再平铺长诊断。
+    expect(screen.getByTestId("cockpit-trust-missing-headline").textContent).not.toContain(
+      "人工登记指导",
+    );
+  });
+
+  it("多 provider 时标题按实际并列（Kimi 与 Codex）", () => {
+    render(
+      <CockpitInbox
+        items={[
+          {
+            ...structuredTrustItem,
+            trustMissing: {
+              provider: "kimi_code",
+              providers: ["kimi_code", "codex"],
+              canonicalRoot: "/agg/root",
+              commandMarkdown: trustCommand,
+              retryAction: "人工登记后显式重新生成",
+            },
+          },
+        ]}
+        actions={mockActions()}
+        actionableSessionId="session_001"
+      />,
+    );
+    expect(screen.getByTestId("cockpit-trust-missing-headline")).toHaveTextContent(
+      "该目录（/agg/root）尚未被 Kimi 与 Codex 信任",
+    );
+  });
+
+  it("无结构化命令（旧链文本识别/冲突分型）不渲染命令窗，说明与登记按钮仍在", () => {
+    render(
+      <CockpitInbox
+        items={[
+          {
+            ...structuredTrustItem,
+            trustMissing: {
+              provider: "codex",
+              providers: ["codex"],
+              canonicalRoot: null,
+              commandMarkdown: null,
+              retryAction: null,
+            },
+          },
+        ]}
+        actions={mockActions()}
+        actionableSessionId="session_001"
+      />,
+    );
+    expect(screen.getByTestId("cockpit-trust-missing-headline")).toHaveTextContent(
+      "该目录尚未被 Codex 信任",
+    );
+    expect(screen.getByTestId("cockpit-trust-missing-action")).toBeVisible();
+    expect(screen.queryByTestId("cockpit-trust-command-window")).toBeNull();
+    expect(screen.getByTestId("cockpit-trust-register-button")).toBeVisible();
+  });
+});

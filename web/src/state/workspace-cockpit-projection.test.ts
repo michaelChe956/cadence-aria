@@ -1245,4 +1245,53 @@ describe("trust missing inbox projection", () => {
     const mismatched = selectCockpitInbox(useWorkspaceStore.getState());
     expect(mismatched.find((item) => item.id === "hard_error:error")?.trustRegistered).toBe(false);
   });
+
+  // 指引卡简化（owner 2026-10-12 直批）：结构化 trust_missing_guidance
+  // 帧落 store 后，投影优先用 wire 事实（providers/canonicalRoot/
+  // commandMarkdown），不再解析 error 文本；error 缺席不投卡。
+  it("结构化指导优先于文本解析：providers/canonicalRoot/commandMarkdown 直挂投影", () => {
+    useWorkspaceStore.getState().reset();
+    useWorkspaceStore.getState().setError(
+      "provider_trust_missing: trust_entry_missing: canonical root 下未找到 kimi_code 的用户级 workspace trust 条目",
+    );
+    useWorkspaceStore.getState().applyTrustMissingGuidance({
+      providers: ["kimi_code", "codex"],
+      canonicalRoot: "/aggregate/root",
+      reasonCode: "trust_entry_missing",
+      retryAction: "人工登记后显式重新生成",
+      commandMarkdown:
+        "mkdir -p '/home/u/.kimi-code/workspace-trust' && printf '{\"root\":\"/aggregate/root\",\"trustedAt\":%s}' \"$(date +%s%3N)\" > '/home/u/.kimi-code/workspace-trust/wd_root_000000000000'",
+    });
+    const item = selectCockpitInbox(useWorkspaceStore.getState()).find(
+      (entry) => entry.id === "hard_error:error",
+    );
+    expect(item?.trustMissing).toEqual({
+      provider: "kimi_code",
+      providers: ["kimi_code", "codex"],
+      canonicalRoot: "/aggregate/root",
+      commandMarkdown:
+        "mkdir -p '/home/u/.kimi-code/workspace-trust' && printf '{\"root\":\"/aggregate/root\",\"trustedAt\":%s}' \"$(date +%s%3N)\" > '/home/u/.kimi-code/workspace-trust/wd_root_000000000000'",
+      retryAction: "人工登记后显式重新生成",
+    });
+  });
+
+  it("结构化指导缺席时回落既有稳定码文本识别（旧服务端兼容）", () => {
+    const items = selectCockpitInbox(trustErrorState());
+    expect(items.find((item) => item.id === "hard_error:error")?.trustMissing).toEqual({
+      provider: "codex",
+    });
+  });
+
+  it("error 缺席时结构化指导不单独投卡（指导只配对错误条）", () => {
+    useWorkspaceStore.getState().reset();
+    useWorkspaceStore.getState().applyTrustMissingGuidance({
+      providers: ["codex"],
+      canonicalRoot: "/aggregate/root",
+      reasonCode: "trust_entry_missing",
+      retryAction: "人工登记后显式重新生成",
+      commandMarkdown: null,
+    });
+    const items = selectCockpitInbox(useWorkspaceStore.getState());
+    expect(items.find((item) => item.id === "hard_error:error")).toBeUndefined();
+  });
 });

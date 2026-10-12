@@ -689,6 +689,7 @@ impl WaitingPrecondition {
                     message: "fixture 登记等待原因（home 读取失败）".to_string(),
                     retry_action: "fixture_retry_action".to_string(),
                     manual_guidance: "fixture 人工指导：修复 Codex home 配置".to_string(),
+                    command_markdown: None,
                     recorded_at: "2026-10-12T00:00:00Z".to_string(),
                 },
             });

@@ -26,6 +26,13 @@ pub(crate) enum SingleCandidateProviderRunError {
         /// 指导——真实 adapter 工件路径/trust 键/人工形状＋生成场景
         /// retry_action；其它 waiting 恒 `None`（原投影不变）。
         manual_guidance: Option<String>,
+        /// 指引卡简化（owner 2026-10-12 直批）：trust 缺失时的同源只读
+        /// 等待投影原样随行——供上层紧随 error 帧发送结构化
+        /// `trust_missing_guidance` 帧（providers/canonical_root/
+        /// command_markdown），前端不再解析平铺串；其它 waiting 恒 None。
+        trust_waiting: Option<
+            crate::product::logical_codebase::provider_trust::ProviderTrustWaiting,
+        >,
     },
     /// B2c（Task 5.5，设计 §5.3 SC 纪律①）：SC author native mismatch
     /// （旧 native 在而冻结绑定不可用/已吊销）的独立 typed 等待——不落
@@ -613,26 +620,30 @@ fn preflight_lc_member_rules_before_author_run(
             // 重新生成」）；只读零登记/零 trust 写（start_generation 不
             // 自动登记），指导缺席（无 source/无 adapter）时保持原投影，
             // 不伪造 capability。
-            let manual_guidance = if reason_code == PROVIDER_TRUST_MISSING_WAITING_REASON {
+            // 指引卡简化（owner 2026-10-12 直批）：除平铺 manual_guidance
+            // 外，同源等待投影原样随行（结构化 command_markdown 供上层
+            // trust_missing_guidance 帧；旧客户端只读平铺串，不受影响）。
+            let trust_waiting = if reason_code == PROVIDER_TRUST_MISSING_WAITING_REASON {
                 let author_provider = engine.session().author_provider.clone();
                 launch
                     .gateway
                     .read_only_generation_trust_waiting(&author_provider)
-                    .map(|waiting| {
-                        format!(
-                            "{}（retry_action：{}）",
-                            waiting.manual_guidance, waiting.retry_action
-                        )
-                    })
             } else {
                 None
             };
+            let manual_guidance = trust_waiting.as_ref().map(|waiting| {
+                format!(
+                    "{}（retry_action：{}）",
+                    waiting.manual_guidance, waiting.retry_action
+                )
+            });
             Err(SingleCandidateProviderRunError::AdmissionWaiting {
                 reason_code,
                 detail,
                 missing_materials,
                 allowed_actions,
                 manual_guidance,
+                trust_waiting,
             })
         }
         Err(crate::product::logical_codebase::ProviderAdmissionError::Store(error)) => {
@@ -776,6 +787,7 @@ pub(crate) async fn run_single_candidate_author(
                 ],
                 // 成员规则等待不携带 trust 指导（指导只绑定 trust 维度失败）。
                 manual_guidance: None,
+                trust_waiting: None,
             });
         }
         Err(error) => {

@@ -893,3 +893,62 @@ describe("anchor_t20 fresh sender and typed operation result", () => {
     expect(useWorkspaceStore.getState().protocolDiagnostics).toHaveLength(0);
   });
 });
+
+// 指引卡简化（owner 2026-10-12 直批）：trust 缺失 error 帧后紧随的
+// trust_missing_guidance 帧落 store（结构化 providers/命令窗文本）；
+// 新 error 帧清空过期指导（指导只配对最近一次错误）。
+describe("workspace websocket trust missing guidance frame", () => {
+  installWorkspaceStoreTestHooks();
+
+  const handlerOptions = () => ({
+    invalidatedPreStageNodeIds: new Set<string>(),
+    scheduleFlush: vi.fn(),
+    streamFlushTimeouts: {},
+  });
+
+  const guidanceFrame = {
+    type: "trust_missing_guidance",
+    providers: ["kimi_code"],
+    canonical_root: "/aggregate/root",
+    reason_code: "trust_entry_missing",
+    retry_action: "人工登记后显式重新生成",
+    command_markdown:
+      "mkdir -p '/home/u/.kimi-code/workspace-trust' && printf 'x' > '/home/u/.kimi-code/workspace-trust/wd_root_000000000000'",
+  };
+
+  it("stores the structured guidance paired with the error card", () => {
+    useWorkspaceStore.getState().reset();
+    handleWorkspaceWsMessage(
+      {
+        type: "error",
+        message: "provider_trust_missing: trust_entry_missing: kimi 条目缺失",
+      } as WsServerMessage,
+      handlerOptions(),
+    );
+    handleWorkspaceWsMessage(guidanceFrame as unknown as WsServerMessage, handlerOptions());
+
+    expect(useWorkspaceStore.getState().trustMissingGuidance).toEqual({
+      providers: ["kimi_code"],
+      canonicalRoot: "/aggregate/root",
+      reasonCode: "trust_entry_missing",
+      retryAction: "人工登记后显式重新生成",
+      commandMarkdown:
+        "mkdir -p '/home/u/.kimi-code/workspace-trust' && printf 'x' > '/home/u/.kimi-code/workspace-trust/wd_root_000000000000'",
+    });
+    expect(useWorkspaceStore.getState().error).toContain("provider_trust_missing");
+  });
+
+  it("a fresh error frame clears stale guidance (no cross-error pairing)", () => {
+    useWorkspaceStore.getState().reset();
+    handleWorkspaceWsMessage(guidanceFrame as unknown as WsServerMessage, handlerOptions());
+    expect(useWorkspaceStore.getState().trustMissingGuidance).not.toBeNull();
+
+    handleWorkspaceWsMessage(
+      { type: "error", message: "unrelated engine failure" } as WsServerMessage,
+      handlerOptions(),
+    );
+    expect(useWorkspaceStore.getState().trustMissingGuidance).toBeNull();
+    // 指导帧不计协议漂移诊断（已知协议成员）。
+    expect(useWorkspaceStore.getState().protocolDiagnostics).toHaveLength(0);
+  });
+});

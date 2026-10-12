@@ -565,6 +565,30 @@ async fn next_error_frame(outbound_rx: &mut mpsc::Receiver<OutboundControl>) -> 
     .expect("error frame")
 }
 
+/// 读取下一条指定 type 的出站帧（跳过其它帧；2s 超时 fail-closed）。
+async fn next_frame_of_type(
+    outbound_rx: &mut mpsc::Receiver<OutboundControl>,
+    frame_type: &str,
+) -> serde_json::Value {
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let outbound = outbound_rx
+                .recv()
+                .await
+                .expect("admission waiting must emit an outbound frame");
+            let OutboundControl::Text(json) = outbound else {
+                continue;
+            };
+            let value: serde_json::Value = serde_json::from_str(&json).expect("outbound json");
+            if value["type"] == frame_type {
+                return value;
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{frame_type} frame"))
+}
+
 fn durable_session(fixture: &ProviderRunFixture) -> crate::product::models::WorkspaceSessionRecord {
     fixture
         .lifecycle
@@ -1562,6 +1586,152 @@ async fn lc_first_generation_kimi_missing_trust_shows_manual_registration_guidan
         trust_facts_before,
         snapshot_tree(&trust_facts_root(&fixture)),
         "Kimi 首次 generation trust 失败不得写 trust durable 事实"
+    );
+}
+
+/// 指引卡简化（owner 2026-10-12 直批）：trust 缺失首次生成的上浮不
+/// 只有平铺 error message——紧随其后携带结构化 `trust_missing_guidance`
+/// 帧（providers/canonical_root/reason_code/retry_action/command_markdown
+/// 全部同源只读等待投影），前端「两行说明＋可复制命令窗」直渲，不再
+/// 解析平铺串。entry 缺失给命令；用户值冲突不给（一键命令不得弱化
+/// 「不覆盖用户条目」纪律）。
+#[tokio::test]
+async fn lc_first_generation_trust_missing_emits_structured_guidance_frame() {
+    let (input_tx, _input_rx) = mpsc::unbounded_channel();
+    let provider = Arc::new(LcRecordingAuthorProvider {
+        output: single_candidate_markdown("story_0001", "design_0001"),
+        inputs: input_tx,
+    });
+    let trust_home = tempfile::tempdir().expect("isolated trust home");
+    let fixture = ProviderRunFixture::new_logical_with_gateway_extras(
+        true,
+        provider.clone(),
+        AliasLcGatewayExtras {
+            capability: Some(Arc::new(LcDialectCapabilitySource)),
+            trust_home: Some(trust_home.path().to_path_buf()),
+            availability: Some(lc_scoped_availability_gate(true, true)),
+        },
+    );
+    let canonical_aggregate_root = std::fs::canonicalize(
+        fixture
+            .member_checkout_root()
+            .parent()
+            .expect("member checkout lives under the aggregate root"),
+    )
+    .expect("canonical aggregate root");
+
+    let (context, mut outbound_rx) =
+        single_candidate_context_for_author(&fixture, ProviderName::KimiCode, provider);
+    handle_workspace_inbound_message(
+        context,
+        WsInMessage::StartGeneration {
+            provider_config: author_provider_config(ProviderName::KimiCode),
+            reviewer_enabled: false,
+            resume_recovery: None,
+        },
+    )
+    .await;
+
+    // 平铺 error 帧保留（旧客户端兼容，稳定判别码不变）。
+    let error = next_error_frame(&mut outbound_rx).await;
+    assert!(
+        error["message"]
+            .as_str()
+            .expect("error message")
+            .contains("provider_trust_missing"),
+        "flat error frame keeps the stable code, got: {error}"
+    );
+    // 紧随其后的结构化指导帧。
+    let guidance = next_frame_of_type(&mut outbound_rx, "trust_missing_guidance").await;
+    assert_eq!(
+        guidance["providers"],
+        serde_json::json!(["kimi_code"]),
+        "providers carry wire labels for the card headline: {guidance}"
+    );
+    assert_eq!(
+        guidance["canonical_root"],
+        canonical_aggregate_root.display().to_string(),
+        "canonical root is the frozen authority root, got: {guidance}"
+    );
+    assert_eq!(guidance["reason_code"], "trust_entry_missing");
+    assert!(
+        guidance["retry_action"]
+            .as_str()
+            .expect("retry action")
+            .contains("显式重新生成"),
+        "retry action stays the generation-scoped wording: {guidance}"
+    );
+    let command = guidance["command_markdown"]
+        .as_str()
+        .expect("entry missing carries the copyable command");
+    assert!(
+        command.contains("mkdir -p")
+            && command.contains(
+                &trust_home
+                    .path()
+                    .join(".kimi-code")
+                    .join("workspace-trust")
+                    .display()
+                    .to_string()
+            ),
+        "command markdown is the same-source kimi one-line shell: {command}"
+    );
+
+    // 用户值冲突变体：结构化帧同样上浮，但 command_markdown 缺席。
+    let (input_tx, _input_rx) = mpsc::unbounded_channel();
+    let provider = Arc::new(LcRecordingAuthorProvider {
+        output: single_candidate_markdown("story_0001", "design_0001"),
+        inputs: input_tx,
+    });
+    let conflict_home = tempfile::tempdir().expect("isolated conflict home");
+    let fixture = ProviderRunFixture::new_logical_with_gateway_extras(
+        true,
+        provider.clone(),
+        AliasLcGatewayExtras {
+            capability: Some(Arc::new(LcDialectCapabilitySource)),
+            trust_home: Some(conflict_home.path().to_path_buf()),
+            availability: Some(lc_scoped_availability_gate(true, true)),
+        },
+    );
+    let conflict_root = std::fs::canonicalize(
+        fixture
+            .member_checkout_root()
+            .parent()
+            .expect("member checkout lives under the aggregate root"),
+    )
+    .expect("canonical aggregate root");
+    let codex_config = conflict_home.path().join(".codex").join("config.toml");
+    std::fs::create_dir_all(codex_config.parent().expect("codex config dir"))
+        .expect("create codex config dir");
+    std::fs::write(
+        &codex_config,
+        format!(
+            "[projects.\"{}\"]\ntrust_level = \"untrusted\"\n",
+            conflict_root.display()
+        ),
+    )
+    .expect("seed codex conflict");
+
+    let (context, mut outbound_rx) =
+        single_candidate_context_for_author(&fixture, ProviderName::Codex, provider);
+    handle_workspace_inbound_message(
+        context,
+        WsInMessage::StartGeneration {
+            provider_config: author_provider_config(ProviderName::Codex),
+            reviewer_enabled: false,
+            resume_recovery: None,
+        },
+    )
+    .await;
+
+    let _ = next_error_frame(&mut outbound_rx).await;
+    let guidance = next_frame_of_type(&mut outbound_rx, "trust_missing_guidance").await;
+    assert_eq!(guidance["providers"], serde_json::json!(["codex"]));
+    assert_eq!(guidance["reason_code"], "codex_trust_key_conflict");
+    assert!(
+        guidance.get("command_markdown").is_none()
+            || guidance["command_markdown"].is_null(),
+        "conflict guidance must not carry a one-shot command: {guidance}"
     );
 }
 

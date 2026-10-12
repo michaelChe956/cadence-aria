@@ -1187,6 +1187,7 @@ mod confirmation_trust {
                 message: "fixture 等待".to_string(),
                 retry_action: "修复后重新确认".to_string(),
                 manual_guidance: "fixture 指导".to_string(),
+                command_markdown: None,
                 recorded_at: "2026-10-11T00:00:00Z".to_string(),
             },
         }

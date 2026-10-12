@@ -1035,6 +1035,7 @@ impl ScriptedTrustPrecondition {
                     message: "fixture 等待原因（home 读取失败）".to_string(),
                     retry_action: "修复后重新确认".to_string(),
                     manual_guidance: "fixture 人工指导：修复 Codex home 配置".to_string(),
+                    command_markdown: None,
                     recorded_at: "2026-10-11T00:00:00Z".to_string(),
                 },
             },

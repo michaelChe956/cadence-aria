@@ -113,6 +113,9 @@ pub(crate) async fn handle_register_trust_entry_from_handler(
                     "trust_key": waiting.trust_key,
                     "canonical_root": waiting.canonical_root.display().to_string(),
                     "retry_action": waiting.retry_action,
+                    // 指引卡简化（owner 2026-10-12 直批）：结构化命令段
+                    //（entry 缺失才有值），消费方直渲命令窗。
+                    "command_markdown": waiting.command_markdown,
                     "retryable": true,
                 })),
             };

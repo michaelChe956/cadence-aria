@@ -52,6 +52,7 @@ impl crate::product::logical_codebase::ProviderTrustPrecondition for RouteTrustG
                     manual_guidance: "Resolve the workspace-trust entry for this root, \
                                        then retry aggregate initialization."
                         .to_string(),
+                    command_markdown: None,
                     recorded_at: "2026-10-01T00:00:00Z".to_string(),
                 },
             };

@@ -52,6 +52,9 @@ pub(crate) fn confirmation_trust_waiting_projection(
                     "reason_code": waiting.reason_code,
                     "retry_action": waiting.retry_action,
                     "manual_guidance": waiting.manual_guidance,
+                    // 指引卡简化（owner 2026-10-12 直批）：结构化命令段
+                    //（entry 缺失才有值），消费方直渲命令窗，不解析平铺串。
+                    "command_markdown": waiting.command_markdown,
                     "retryable": true,
                 }),
             }

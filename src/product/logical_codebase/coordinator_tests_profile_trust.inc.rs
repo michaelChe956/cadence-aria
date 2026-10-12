@@ -417,6 +417,7 @@
                         manual_guidance: "Resolve the blocked workspace trust entry for \
                                            this root, then retry aggregate initialization."
                             .to_string(),
+                        command_markdown: None,
                         recorded_at: CREATED_AT.to_string(),
                     },
                 };

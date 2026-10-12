@@ -152,6 +152,8 @@ const initialState: WorkspaceWsState = {
   lcResumeRecovery: null,
   // 「登记并重试」最近回执；reset/切会话清空（跨会话不保留旧登记）。
   trustRegistration: null,
+  // trust 指引卡结构化指导；reset/切会话/新 error 帧清空（只配对最近错误）。
+  trustMissingGuidance: null,
   protocolError: null,
   providerLocked: false,
   providerSnapshot: null,
@@ -425,6 +427,9 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
         ),
         // 「登记并重试」回执是本会话修复事实：同会话保留，跨会话清空。
         trustRegistration: sameSession ? prev.trustRegistration : null,
+        // 结构化 trust 指导是易失错误伴影：SessionState 全量替换时清空
+        //（error 本身也不在 SessionState 里，重连后由新帧重建）。
+        trustMissingGuidance: null,
         // D8：同会话重连保留 turn/command 去重集与诊断（不丢弃）；
         // 跨会话一律清空，避免上一会话的门与推进记忆串到新会话。
         humanGateTurn:
@@ -1151,6 +1156,10 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
   // 「登记并重试」回执对账（owner 2026-10-12 直批）：幂等覆盖最近回执；
   // 不自动重新生成、不改 error 原文（卡片据 provider 匹配切成功态）。
   applyTrustEntryRegistered: (receipt) => set({ trustRegistration: receipt }),
+
+  // 结构化 trust 指导（owner 2026-10-12 直批卡简化）：与最近一次
+  // trust 缺失 error 帧配对；null=清空（新 error 帧/reset/切会话）。
+  applyTrustMissingGuidance: (guidance) => set({ trustMissingGuidance: guidance }),
 
   setTimelineNodesForTest: (nodes) => set({ timelineNodes: nodes }),
   setActiveNodeId: (nodeId) => set({ activeNodeId: nodeId }),

@@ -602,9 +602,28 @@ export interface CockpitInboxItem {
   recovery?: LcResumeRecoveryInboxProjection | null;
   /** trust 缺失错误条的可登记投影（按稳定码识别 + provider wire 标签
    * 同源解析；owner 2026-10-12 直批「登记并重试」按钮）；其余条目缺省。 */
-  trustMissing?: { provider: string } | null;
+  trustMissing?: TrustMissingProjection | null;
   /** trustMissing 条目对应 provider 已显式登记成功（typed 回执对账）。 */
   trustRegistered?: boolean;
+}
+
+/** trust 缺失指引卡投影（owner 2026-10-12 直批简化）：结构化指导
+ *（providers/canonicalRoot/commandMarkdown）优先——wire
+ * trust_missing_guidance 帧镜像，前端不解析 error 文本；旧服务端无
+ * 结构化帧时回落稳定码文本识别（仅 provider 字段）。 */
+export interface TrustMissingProjection {
+  /** 首个 provider 的 wire 标签（「登记并重试」按钮出站参数）。 */
+  provider: string;
+  /** 缺 trust 的 provider wire 标签全集（卡面按实际单复数）；文本回落
+   * 时缺省（视为仅 provider 单元素）。 */
+  providers?: readonly string[];
+  /** 冻结聚合根（第一行「该目录（…）」）；文本回落/未知时缺省。 */
+  canonicalRoot?: string | null;
+  /** 可复制登记命令（Kimi 单行 shell／Codex TOML 片段）；冲突等分型
+   * 或文本回落时缺省（卡面不渲染命令窗）。 */
+  commandMarkdown?: string | null;
+  /** 场景化重试动作文案；文本回落时缺省。 */
+  retryAction?: string | null;
 }
 
 /** C4 Task 9：LC 冷启动通知的收件箱投影（服务端
@@ -1037,8 +1056,13 @@ export function selectCockpitInbox(state: WorkspaceWsState): CockpitInboxItem[] 
 
   // 「登记并重试」按钮面（owner 2026-10-12 直批）：按稳定码识别 trust
   // 缺失错误 + provider wire 标签（同源生成器），回执对账切成功态。
+  // 指引卡简化（owner 2026-10-12 直批）：结构化 trust_missing_guidance
+  // 帧优先（wire 事实直挂 providers/canonicalRoot/commandMarkdown）；
+  // 无结构化帧（旧服务端/其它启动臂）回落既有稳定码文本识别。
   const trustMissing =
-    state.error === null ? null : trustMissingFromErrorText(state.error);
+    state.error === null
+      ? null
+      : (trustMissingFromGuidance(state) ?? trustMissingFromErrorText(state.error));
   if (state.error) {
     items.push({
       id: "hard_error:error",
@@ -1190,12 +1214,32 @@ export function selectCockpitInbox(state: WorkspaceWsState): CockpitInboxItem[] 
 const TRUST_MISSING_ERROR_CODES = ["provider_trust_missing", "trust_entry_missing"];
 const TRUST_PROVIDER_WIRE_LABELS = ["kimi_code", "codex"] as const;
 
-function trustMissingFromErrorText(message: string): { provider: string } | null {
+/** 旧服务端/无结构化帧回落：仅 provider 字段（识别不到不投按钮面，
+ * fail-closed 不猜 provider）。 */
+function trustMissingFromErrorText(message: string): TrustMissingProjection | null {
   if (!TRUST_MISSING_ERROR_CODES.some((code) => message.includes(code))) {
     return null;
   }
   const provider = TRUST_PROVIDER_WIRE_LABELS.find((label) => message.includes(label));
   return provider === undefined ? null : { provider };
+}
+
+/** 结构化 trust 指导（wire trust_missing_guidance 镜像）→ 指引卡投影；
+ * 与 `trustMissingFromErrorText` 成对（调用侧 `??` 回落）：镜像字段做
+ * 空串/缺席归一（canonicalRoot/retryAction 空→null），指导缺席或
+ * providers 为空返回 null 交回落。 */
+function trustMissingFromGuidance(state: WorkspaceWsState): TrustMissingProjection | null {
+  const guidance = state.trustMissingGuidance;
+  if (guidance == null || guidance.providers.length === 0) {
+    return null;
+  }
+  return {
+    provider: guidance.providers[0],
+    providers: guidance.providers,
+    canonicalRoot: guidance.canonicalRoot !== "" ? guidance.canonicalRoot : null,
+    commandMarkdown: guidance.commandMarkdown,
+    retryAction: guidance.retryAction !== "" ? guidance.retryAction : null,
+  };
 }
 
 export function selectCockpitFlow(state: WorkspaceWsState, nowMs = Date.now()): CockpitFlowRow[] {

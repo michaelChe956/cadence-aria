@@ -396,6 +396,10 @@ const store = useWorkspaceStore.getState();
     // 出站消息随保存命令族删除（wp5-attribution-table.md §2）。
     case "error":
       store.setError(msg.message as string);
+      // 指引卡简化（owner 2026-10-12 直批）：结构化指导只配对最近一次
+      // 错误——新 error 帧先清空旧指导；若本错误是 trust 缺失，服务端
+      // 紧随其后的 trust_missing_guidance 帧会立即重建。
+      store.applyTrustMissingGuidance(null);
       store.appendChatEntry({
         id: chatEntryId("error", msg.message as string),
         type: "error",
@@ -406,6 +410,22 @@ const store = useWorkspaceStore.getState();
           message: msg.message as string,
         },
       });
+      break;
+    case "trust_missing_guidance":
+      {
+        // 指引卡结构化指导（owner 2026-10-12 直批卡简化）：镜像 wire 字段
+        // 供收件箱卡「两行说明＋可复制命令窗」直渲，不解析平铺 error 文本。
+        store.applyTrustMissingGuidance({
+          providers: Array.isArray(msg.providers) ? (msg.providers as string[]) : [],
+          canonicalRoot: typeof msg.canonical_root === "string" ? msg.canonical_root : "",
+          reasonCode: typeof msg.reason_code === "string" ? msg.reason_code : "",
+          retryAction: typeof msg.retry_action === "string" ? msg.retry_action : "",
+          commandMarkdown:
+            typeof msg.command_markdown === "string" && msg.command_markdown !== ""
+              ? msg.command_markdown
+              : null,
+        });
+      }
       break;
     case "protocol_error":
       {

@@ -289,6 +289,12 @@ impl ReadonlyProviderTrustSource {
                 message: error.message.clone(),
                 retry_action,
                 manual_guidance,
+                command_markdown: trust_command_markdown(
+                    &self.adapters,
+                    provider,
+                    canonical_root,
+                    &error,
+                ),
                 recorded_at: trust_now(),
             }
         };
@@ -714,23 +720,12 @@ pub(crate) fn provider_trust_manual_guidance(
         | TrustFailureKind::NoAdapter
         | TrustFailureKind::InvalidRoot => None,
     };
-    let command_line = match kind {
-        // 指引卡登记按钮（owner 2026-10-12 直批）：entry 缺失时附可直接
-        // 复制的登记命令（adapter 同源真实路径/键/root）。仅 EntryMissing
-        // 给命令——冲突/工件损坏场景给一键命令会把「不覆盖用户条目」
-        // 弱化成覆盖指令。
-        TrustFailureKind::EntryMissing => adapters
-            .iter()
-            .find(|adapter| adapter.provider() == *provider)
-            .and_then(|adapter| adapter.manual_hint(canonical_root).manual_command)
-            .map(|command| format!("可直接复制的登记命令：{command}。")),
-        TrustFailureKind::UserConflict
-        | TrustFailureKind::HomeArtifactRead
-        | TrustFailureKind::HomeArtifactWrite
-        | TrustFailureKind::FactStore
-        | TrustFailureKind::NoAdapter
-        | TrustFailureKind::InvalidRoot => None,
-    };
+    // 指引卡登记按钮（owner 2026-10-12 直批）：entry 缺失时附可直接
+    // 复制的登记命令（与 `trust_command_markdown` 同源 adapter hint；
+    // 仅 EntryMissing 给命令——冲突/工件损坏场景给一键命令会把
+    // 「不覆盖用户条目」弱化成覆盖指令）。
+    let command_line = trust_command_markdown(adapters, provider, canonical_root, error)
+        .map(|command| format!("可直接复制的登记命令：{command}。"));
     let mut guidance = disposition;
     if let Some(line) = artifact_line {
         guidance.push_str(&line);
@@ -742,6 +737,27 @@ pub(crate) fn provider_trust_manual_guidance(
         guidance.push_str("修复前确认门保持未关闭；完成修复后请显式重新发起确认。");
     }
     guidance
+}
+
+/// 指引卡结构化命令（owner 2026-10-12 直批简化）：entry 缺失分型的
+/// adapter 同源 `manual_command`（Kimi 单行 shell／Codex TOML 片段），
+/// 供 wire `command_markdown` 直达前端「可复制命令窗」。冲突/工件
+/// 损坏/装配/根参数等其余分型一律 `None`——一键命令只该出现在 entry
+/// 缺失（冲突场景给命令会把「不覆盖用户条目」弱化成覆盖指令）。与
+/// 平铺 `manual_guidance` 的命令段同源（同一 adapter hint，不手抄）。
+fn trust_command_markdown(
+    adapters: &[Arc<dyn ProviderTrustHomeAdapter>],
+    provider: &ProviderName,
+    canonical_root: &Path,
+    error: &ProviderTrustError,
+) -> Option<String> {
+    if !matches!(trust_failure_kind(error), TrustFailureKind::EntryMissing) {
+        return None;
+    }
+    adapters
+        .iter()
+        .find(|adapter| adapter.provider() == *provider)
+        .and_then(|adapter| adapter.manual_hint(canonical_root).manual_command)
 }
 
 /// trust 硬前置门（场景中立）：全部所选 trust Ready 才放行调用方的后续
@@ -895,6 +911,12 @@ pub struct ProviderTrustWaiting {
     /// 由 adapter 窄只读能力生成；不含完整配置内容或凭据。确认等待与
     /// generation 只读指导投影共用同一生成器。
     pub manual_guidance: String,
+    /// 结构化登记命令（owner 2026-10-12 直批卡简化）：entry 缺失分型
+    /// 携带 adapter 同源 `manual_command`（Kimi 单行 shell／Codex TOML
+    /// 片段），经 wire `command_markdown` 直达前端「可复制命令窗」，
+    /// 前端不再解析平铺 `manual_guidance`；其余分型 `None`（与平铺
+    /// 命令段同源生成，不手抄第二份）。
+    pub command_markdown: Option<String>,
     pub recorded_at: String,
 }
 
@@ -1124,6 +1146,7 @@ impl HomeBackedProviderTrustRegistry {
             message: error.message.clone(),
             retry_action,
             manual_guidance,
+            command_markdown: trust_command_markdown(&self.adapters, provider, canonical_root, error),
             recorded_at: trust_now(),
         }
     }
@@ -2352,6 +2375,77 @@ mod tests {
         );
         assert!(fixture.store().list_waiting(PROJECT).unwrap().is_empty());
         assert!(fixture.store().list_audit(PROJECT).unwrap().is_empty());
+    }
+
+    /// 指引卡简化（owner 2026-10-12 直批）：等待面结构化携带
+    /// `command_markdown`——entry 缺失分型＝adapter 同源 `manual_command`
+    /// （Kimi 单行 shell／Codex TOML 片段，前端命令窗直渲不解析平铺
+    /// 串）；用户值冲突分型 None（一键命令不得弱化「不覆盖」纪律）。
+    #[test]
+    fn provider_trust_waiting_structures_command_markdown_same_source_as_adapter() {
+        let fixture = TrustFixture::new();
+        let source = ReadonlyProviderTrustSource::new(
+            ProductAppPaths::new(fixture.aria.path().to_path_buf()),
+            Some(LC.to_string()),
+            vec![
+                Arc::new(CodexTrustAdapter::for_home(fixture.home())),
+                Arc::new(KimiTrustAdapter::for_home(fixture.home())),
+            ],
+        );
+
+        // entry 缺失（Kimi）：command_markdown 与 adapter manual_command 同源。
+        let kimi = KimiTrustAdapter::for_home(fixture.home());
+        let waiting = source
+            .scenario_waiting(
+                &ProviderName::KimiCode,
+                &fixture.root,
+                ProviderTrustScenario::Generation,
+            )
+            .expect("missing entry must project a read-only waiting");
+        let expected_command = kimi
+            .manual_hint(&fixture.root)
+            .manual_command
+            .expect("adapter hint carries the kimi registration command");
+        assert_eq!(
+            waiting.command_markdown.as_deref(),
+            Some(expected_command.as_str()),
+            "command_markdown must be the same-source adapter manual_command, got: {:?}",
+            waiting.command_markdown
+        );
+        assert!(
+            waiting
+                .command_markdown
+                .as_deref()
+                .unwrap_or_default()
+                .contains("mkdir -p"),
+            "kimi command markdown is the copyable one-line shell"
+        );
+
+        // 用户值冲突（Codex 预置非 trusted 值）：结构化命令必须缺席。
+        std::fs::create_dir_all(fixture.codex_config().parent().unwrap()).unwrap();
+        let codex = CodexTrustAdapter::for_home(fixture.home());
+        let header = codex.trust_key(&fixture.root);
+        std::fs::write(
+            fixture.codex_config(),
+            format!("{header}\ntrust_level = \"untrusted\"\n"),
+        )
+        .unwrap();
+        let conflict = source
+            .scenario_waiting(
+                &ProviderName::Codex,
+                &fixture.root,
+                ProviderTrustScenario::Generation,
+            )
+            .expect("user conflict must project a read-only waiting");
+        assert_eq!(
+            conflict.reason_code, "codex_trust_key_conflict",
+            "conflict kind must reach the waiting surface"
+        );
+        assert!(
+            conflict.command_markdown.is_none(),
+            "conflict must not carry a one-shot registration command: {:?}",
+            conflict.command_markdown
+        );
     }
 
     /// Task 2.1：Claude-only recipe 零登记行为不变——无需 workspace trust

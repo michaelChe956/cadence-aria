@@ -406,6 +406,44 @@ pub enum WsOutMessage {
         canonical_root: String,
         registered_at: String,
     },
+    /// trust 指引卡结构化指导（owner 2026-10-12 直批简化）：紧随 engine
+    /// `error` 帧之后发送——把平铺 `manual_guidance` 的命令段结构化，
+    /// 前端「两行说明＋可复制命令窗」直渲，不解析字符串。`providers`
+    /// 为 wire 标签（codex/kimi_code，卡面按实际单复数）；`command_markdown`
+    /// 仅 entry 缺失分型携带（同源 adapter `manual_command`；冲突等分型
+    /// 省略字段）。平铺 error message 与 `manual_guidance` 原样保留
+    ///（旧客户端兼容，稳定判别码协议不变）。
+    TrustMissingGuidance {
+        providers: Vec<String>,
+        canonical_root: String,
+        reason_code: String,
+        retry_action: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command_markdown: Option<String>,
+    },
+}
+
+impl WsOutMessage {
+    /// 从同源只读 trust 等待投影构造 [`WsOutMessage::TrustMissingGuidance`]
+    /// 帧（owner 2026-10-12 直批卡简化）：providers 取该等待的 provider
+    /// wire 标签（单 provider 等待即单元素）；command_markdown 原样透传
+    /// （entry 缺失才有值），不在 wire 层二次推导。
+    pub fn trust_missing_guidance_from_waiting(
+        waiting: &crate::product::logical_codebase::provider_trust::ProviderTrustWaiting,
+    ) -> Self {
+        WsOutMessage::TrustMissingGuidance {
+            providers: vec![
+                crate::product::logical_codebase::provider_trust::provider_wire_label(
+                    &waiting.provider,
+                )
+                .to_string(),
+            ],
+            canonical_root: waiting.canonical_root.display().to_string(),
+            reason_code: waiting.reason_code.clone(),
+            retry_action: waiting.retry_action.clone(),
+            command_markdown: waiting.command_markdown.clone(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -581,5 +619,45 @@ mod tests {
         let value = serde_json::to_value(message).unwrap();
 
         assert_eq!(value["connection_id"], "conn-1");
+    }
+    #[test]
+    fn trust_missing_guidance_frame_roundtrips_and_omits_absent_command() {
+        let with_command = WsOutMessage::TrustMissingGuidance {
+            providers: vec!["kimi_code".to_string()],
+            canonical_root: "/fixture/root".to_string(),
+            reason_code: "trust_entry_missing".to_string(),
+            retry_action: "人工登记后显式重新生成".to_string(),
+            command_markdown: Some("mkdir -p '/fixture/.kimi-code/workspace-trust'".to_string()),
+        };
+        let value = serde_json::to_value(&with_command).unwrap();
+        assert_eq!(value["type"], "trust_missing_guidance");
+        assert_eq!(value["providers"], serde_json::json!(["kimi_code"]));
+        assert_eq!(
+            value["command_markdown"],
+            "mkdir -p '/fixture/.kimi-code/workspace-trust'"
+        );
+        assert_eq!(
+            serde_json::from_value::<WsOutMessage>(value).unwrap(),
+            with_command
+        );
+
+        // 缺席命令省略字段（冲突等分型；wire 兼容——旧客户端不读新帧，
+        // 新客户端按可选消费）。
+        let without_command = WsOutMessage::TrustMissingGuidance {
+            providers: vec!["codex".to_string()],
+            canonical_root: "/fixture/root".to_string(),
+            reason_code: "codex_trust_key_conflict".to_string(),
+            retry_action: "人工核对后重新发起".to_string(),
+            command_markdown: None,
+        };
+        let value = serde_json::to_value(&without_command).unwrap();
+        assert!(
+            value.get("command_markdown").is_none(),
+            "absent command must be omitted from the wire: {value}"
+        );
+        assert_eq!(
+            serde_json::from_value::<WsOutMessage>(value).unwrap(),
+            without_command
+        );
     }
 }

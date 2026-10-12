@@ -892,6 +892,18 @@ export type WsOutMessage = WithEventSeq<
   | { type: "error"; message: string }
   | { type: "protocol_error"; code: string; message: string; context?: unknown }
   | { type: "provider_locked"; snapshot: ProviderConfigSnapshot; locked_at: string }
+  | {
+      /** 指引卡结构化指导（owner 2026-10-12 直批简化）：紧随 error 帧到达。
+       * providers 为 wire 标签（codex/kimi_code，卡面按实际单复数）；
+       * command_markdown 仅 entry 缺失携带（同源 adapter manual_command），
+       * 冲突等分型省略。 */
+      type: "trust_missing_guidance";
+      providers: string[];
+      canonical_root: string;
+      reason_code: string;
+      retry_action: string;
+      command_markdown?: string | null;
+    }
   | { type: "resync_required"; event_seq: number }
   | {
       /** 「登记并重试」typed 回执：action 与 ensure 审计 outcome 同词表

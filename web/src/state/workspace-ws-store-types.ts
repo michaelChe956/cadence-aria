@@ -521,6 +521,13 @@ export interface WorkspaceWsState {
    * reset/切会话清空。null=尚未显式登记成功。
    */
   trustRegistration: TrustRegistrationReceipt | null;
+  /**
+   * trust 指引卡结构化指导（wire trust_missing_guidance 的镜像，owner
+   * 2026-10-12 直批简化）：紧随 trust 缺失 error 帧到达并与之配对；新
+   * error 帧/reset/切会话清空（不跨错误存活）。null=最近错误无结构化
+   * 指导（旧服务端/非 trust 错误，投影回落稳定码文本识别）。
+   */
+  trustMissingGuidance: TrustMissingGuidanceState | null;
   protocolError: ProtocolErrorState | null;
   providerLocked: boolean;
   providerSnapshot: ProviderConfigSnapshot | null;
@@ -690,6 +697,8 @@ export interface WorkspaceWsActions {
 
   /** 「登记并重试」回执对账：幂等覆盖最近回执（不自动重新生成）。 */
   applyTrustEntryRegistered: (receipt: TrustRegistrationReceipt) => void;
+  /** 结构化 trust 指导对账：null=清空（新 error 帧/reset/切会话）。 */
+  applyTrustMissingGuidance: (guidance: TrustMissingGuidanceState | null) => void;
   setTimelineNodesForTest: (nodes: TimelineNode[]) => void;
   setActiveNodeId: (nodeId: string | null) => void;
   setSessionStatus: (status: WorkspaceSessionStatus) => void;
@@ -705,4 +714,15 @@ export interface TrustRegistrationReceipt {
   trust_key: string;
   canonical_root: string;
   registered_at: string;
+}
+
+/** trust 指引卡结构化指导（wire trust_missing_guidance 的 camelCase 镜像，
+ * owner 2026-10-12 直批卡简化：providers/canonicalRoot 供两行说明，
+ * commandMarkdown 供可复制命令窗——前端不解析平铺 error 文本）。 */
+export interface TrustMissingGuidanceState {
+  providers: readonly string[];
+  canonicalRoot: string;
+  reasonCode: string;
+  retryAction: string;
+  commandMarkdown: string | null;
 }

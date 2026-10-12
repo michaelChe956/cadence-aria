@@ -520,6 +520,100 @@ function CockpitInboxRow({
   );
 }
 
+
+/** 硬错误条的长诊断折叠（原拒绝串/长指导原文；F-50 §4.1-10）。 */
+function HardErrorDiagnostics({ item }: { item: CockpitInboxItem }) {
+  return (
+    <details data-testid="cockpit-inbox-error-details" className="group mt-1">
+      <summary
+        className={`${DISCLOSURE_SUMMARY_CLASS} flex items-center gap-1 text-xs font-medium text-slate-600`}
+      >
+        <ChevronRight className={DISCLOSURE_CHEVRON_CLASS} aria-hidden="true" />
+        {PROTOCOL_ERROR_DETAILS_LABEL}
+      </summary>
+      <p className="aria-mono mt-1 break-words text-xs leading-4 text-slate-600">
+        {item.summary}
+      </p>
+      {/* 裁决 5：不可安全重放的原因作为可见文本（title 悬停不可达）。 */}
+      {item.source !== "advance" ? (
+        <p className="mt-1 text-xs text-slate-600">{PROTOCOL_ERROR_NO_RETRY_NOTE}</p>
+      ) : null}
+    </details>
+  );
+}
+
+/** trust 指引卡显示名（wire 标签 → 卡面用名）。 */
+const TRUST_PROVIDER_DISPLAY_NAMES: Record<string, string> = {
+  kimi_code: "Kimi",
+  codex: "Codex",
+};
+
+/**
+ * trust 未信任指引卡（owner 2026-10-12 直批冻结设计）：两行简洁说明＋
+ * 可复制命令窗——第一行直白告知该目录尚未被哪些 provider 信任（按实际
+ * 单复数）；第二行怎么做（一键登记或复制命令自行登记后重新生成）；
+ * 命令文本来自后端同源 `trust_missing_guidance` 帧（Kimi 单行 shell／
+ * Codex TOML 片段），前端不解析平铺 error 串。无结构化命令（旧链文本
+ * 识别/用户值冲突分型）不渲染命令窗，说明与登记按钮仍在。
+ */
+function TrustMissingPanel({ trust }: { trust: NonNullable<CockpitInboxItem["trustMissing"]> }) {
+  const [copied, setCopied] = useState(false);
+  const providers = trust.providers ?? [trust.provider];
+  const providerLabel = providers
+    .map((provider) => TRUST_PROVIDER_DISPLAY_NAMES[provider] ?? provider)
+    .join(" 与 ");
+  const rootLabel = trust.canonicalRoot ? `（${trust.canonicalRoot}）` : "";
+  const command = trust.commandMarkdown ?? null;
+  const copyCommand = async () => {
+    if (command === null) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(command);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // 剪贴板不可用（权限/非安全上下文）：保持未复制态，不伪称成功。
+    }
+  };
+  return (
+    <div data-testid="cockpit-trust-guidance" className="mt-2 space-y-2">
+      <p
+        data-testid="cockpit-trust-missing-headline"
+        className="text-sm font-medium text-slate-900"
+      >
+        该目录{rootLabel}尚未被 {providerLabel} 信任
+      </p>
+      <p data-testid="cockpit-trust-missing-action" className="text-xs leading-4 text-slate-600">
+        点击下方按钮一键登记；或复制命令自行登记后重新生成
+      </p>
+      {command !== null ? (
+        <div
+          data-testid="cockpit-trust-command-window"
+          className="rounded-md border border-slate-300 bg-slate-50"
+        >
+          <div className="flex items-center justify-between gap-2 border-b border-slate-200 px-2 py-1">
+            <span className="text-[11px] font-medium text-slate-500">登记命令</span>
+            <button
+              type="button"
+              data-testid="cockpit-trust-command-copy"
+              onClick={() => {
+                void copyCommand();
+              }}
+              className="inline-flex items-center gap-1 rounded border border-slate-300 bg-white px-2 py-0.5 text-[11px] font-semibold text-slate-700 hover:bg-slate-100"
+            >
+              <ClipboardCopy className="h-3 w-3" aria-hidden="true" />
+              {copied ? "已复制" : "复制命令"}
+            </button>
+          </div>
+          <pre className="aria-mono overflow-x-auto px-2 py-1.5 text-[11px] leading-4 text-slate-800">
+            {command}
+          </pre>
+        </div>
+      ) : null}
+    </div>
+  );
+}
 /**
  * F-50 §4.1-7/8/10：协议/引擎错误条——紧凑 alert（role=alert），不再复刻门禁卡
  * 高度；原文与长诊断进折叠详情；无安全重放命令（source ≠ advance）的重试不渲染
@@ -586,26 +680,14 @@ function HardErrorInboxRow({
               {item.inlineError.code} · {item.inlineError.message}
             </p>
           ) : null}
-          <details
-            data-testid="cockpit-inbox-error-details"
-            className="group mt-1"
-          >
-            <summary
-              className={`${DISCLOSURE_SUMMARY_CLASS} flex items-center gap-1 text-xs font-medium text-slate-600`}
-            >
-              <ChevronRight className={DISCLOSURE_CHEVRON_CLASS} aria-hidden="true" />
-              {PROTOCOL_ERROR_DETAILS_LABEL}
-            </summary>
-            <p className="aria-mono mt-1 break-words text-xs leading-4 text-slate-600">
-              {item.summary}
-            </p>
-            {/* 裁决 5：不可安全重放的原因作为可见文本（title 悬停不可达）。 */}
-            {item.source !== "advance" ? (
-              <p className="mt-1 text-xs text-slate-600">
-                {PROTOCOL_ERROR_NO_RETRY_NOTE}
-              </p>
-            ) : null}
-          </details>
+          {/* 指引卡简化（owner 2026-10-12 直批冻结设计）：trust 未信任
+              指引卡重排为「两行简洁说明＋可复制命令窗」——冗长细节
+              （原拒绝串/长指导）收进「查看诊断详情」折叠并移到卡尾；
+              非 trust 错误条维持折叠在正文的既有布局。 */}
+          {item.trustMissing ? null : <HardErrorDiagnostics item={item} />}
+          {item.trustMissing && !item.trustRegistered ? (
+            <TrustMissingPanel trust={item.trustMissing} />
+          ) : null}
           {/* 「登记并重试」按钮（owner 2026-10-12 直批）：trust 缺失错误卡
               按稳定码识别（投影已解析 provider）；显式授权走 ensure 登记链，
               成功回执后切「已登记，请显式重新生成」——不自动重新生成。 */}
@@ -636,6 +718,11 @@ function HardErrorInboxRow({
                 <ShieldCheck className="h-4 w-4" aria-hidden="true" />
                 登记并重试
               </button>
+            </div>
+          ) : null}
+          {item.trustMissing ? (
+            <div className="mt-2">
+              <HardErrorDiagnostics item={item} />
             </div>
           ) : null}
           {actions && actionable ? (
