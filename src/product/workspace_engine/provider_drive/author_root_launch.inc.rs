@@ -168,8 +168,9 @@ impl WorkspaceEngine {
     /// Task 2.3：`resolve_author_root_launch` 的参数化内核——provider ref 与
     /// action 随角色注入（author/revision 共用 `PlanningReadOnly`；错误文案保持
     /// 2.1 的「author」口径，revision 即 author 角色修订面）。解析链（lifecycle
-    /// store、repository 唯一成员 checkout、authority manifest root、C-2 集中
-    /// provider ref 映射）与 2.1 完全同源；返回未校验的 launch request，供
+    /// store、E 分离 resolver 双输出（native anchor 聚合根 target +
+    /// business 材料面）、authority manifest root、C-2 集中 provider ref
+    /// 映射）与 2.1 完全同源；返回未校验的 launch request，供
     /// `validate`（author）或 `resume_or_start`（revision resume 决策）消费。
     pub(crate) fn build_root_launch_request(
         &self,
@@ -277,8 +278,8 @@ impl WorkspaceEngine {
             provider: provider_ref,
             action,
             target,
-            // root cwd 与成员 target 显式分离（Task 2.5 字段合同；`planning()`
-            // 构造器的 cwd==target 默认不适用于 LC root 形态）。
+            // root cwd 与聚合根锚 target 显式分离（Task 2.5 字段合同；
+            // `planning()` 构造器的 cwd==target 默认不适用于 LC root 形态）。
             working_directory: root.clone(),
             readable_roots: vec![root],
             writable_roots: Vec::new(),
@@ -287,8 +288,9 @@ impl WorkspaceEngine {
     }
 
     /// Task 2.1：web run 臂的 Author 首轮入口——LC 会话先解析 root launch（cwd=
-    /// canonical root、target=成员 checkout、PlanningReadOnly 策略）再驱动；
-    /// 非逻辑会话（None）保持直接 `provider.start` 路径（单仓零变化）。
+    /// canonical root、target=E `native_launch_anchor` 聚合根锚、
+    /// PlanningReadOnly 策略）再驱动；非逻辑会话（None）保持直接
+    /// `provider.start` 路径（单仓零变化）。
     pub(crate) async fn handle_user_message_from_run(
         &mut self,
         content: String,

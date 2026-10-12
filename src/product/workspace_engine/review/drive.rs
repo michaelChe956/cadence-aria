@@ -1176,7 +1176,8 @@ impl WorkspaceEngine {
 }
 
 /// Task 2.3：LC revision launch 决策结果——validated launch（cwd=root、
-/// target=成员 checkout）+ resume 是否放行（supersede/fresh 时 false）。
+/// target=E `native_launch_anchor` 聚合根锚）+ resume 是否放行（supersede/
+/// fresh 时 false）。
 /// Task 9c:`superseded` 携带 StartNew 的旧会话 id 与稳定等待投影(仅显式
 /// `StartGeneration` fresh)。
 #[derive(Debug)]
@@ -1241,7 +1242,8 @@ async fn start_review_session_via_gateway(
             .map_err(|error| map_gateway_error_to_adapter(&error))?,
         action: SessionPolicyAction::ReviewReadOnly,
         target: PolicyTarget::aggregate_root(input.working_dir.clone()),
-        // Task 2.3：cwd=canonical root（独立于 target）；target 保持成员锚。
+        // Task 2.3：cwd=canonical root（独立于 target）；target 是
+        // aggregate_root 锚（worktree 取成员路径，即 review 对象）。
         working_directory: root.clone(),
         readable_roots: vec![root],
         writable_roots: Vec::new(),
