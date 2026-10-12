@@ -137,10 +137,9 @@ impl WorkspaceEngine {
 
     /// Task 2.1（REQ-ENV-01/ENV-10）：LC 会话 Author/ChoiceFollowup 的 root launch
     /// 解析。cwd = 唯一 authority resolver 冻结的 manifest `provider_context_root`
-    ///（canonical root）；target = 与生产建链同源的 session 路由唯一成员 checkout
-    ///（`workspace_repository_for_session`：Story focus/Design involved/Plan
-    /// selection），resolved 逻辑身份成对时显式 `PolicyTarget::checkout`。经
-    /// `gateway.validate` 冻结 envelope/resume fingerprint。
+    ///（canonical root）；target = E `native_launch_anchor` 聚合根锚（REQ-PLN-08：
+    /// scope 回写不迁移，与 gateway_start.rs 同口径）。经 `gateway.validate`
+    /// 冻结 envelope/resume fingerprint。
     ///
     /// 返回值：`None` = 非逻辑会话（未注入 gateway），调用方保持 Legacy 直连
     /// `provider.start` 路径（单仓零变化）；`Some(Err(..))` = 逻辑会话但解析/校验
@@ -186,9 +185,11 @@ impl WorkspaceEngine {
         };
         let app_paths = lifecycle.app_paths();
         // B1a（Task 4.1）/E（REQ-PLN-08）：同 resolver 一次派生两用途——
-        // `business_repository` 给 target（成员 checkout 语义不变）；
-        // `native_launch_anchor` 给 deferred aggregate_root 锚（native 锚恒
-        // 聚合根视图，scope 回写 involved/focus/change_order 不迁移锚）。
+        // `native_launch_anchor` 给 native launch target（恒聚合根视图，
+        // scope 回写 involved/focus/change_order 不迁移锚；business 成员
+        // 不再进入 target——2026-10-12 design 修订指纹漂移根因修复）；
+        // `business_repository` 保留原用途（gateway 注入谓词 fail-closed
+        // 与业务材料面：SC compile/language.md 走原字段）。
         let context =
             match crate::product::workspace_repository::resolve_workspace_repository_context(
                 &app_paths,
@@ -213,12 +214,12 @@ impl WorkspaceEngine {
         let native_launch_anchor = context.native_launch_anchor;
         // gateway 注入谓词即 `repository.logical_repository_id.is_some()`（manager
         // 工厂）；此处不一致属持久状态漂移——fail-closed，绝不回落 legacy 直连。
-        let Some(logical_repository_id) = repository.logical_repository_id else {
+        if repository.logical_repository_id.is_none() {
             return Some(Err(
                 "logical session repository has no logical identity; refusing legacy direct fallback"
                     .to_string(),
             ));
-        };
+        }
         let root = match crate::product::logical_codebase::RepositoryAuthorityResolver::new(
             app_paths.clone(),
         )
@@ -255,24 +256,21 @@ impl WorkspaceEngine {
                 )));
             }
         };
-        let target = match repository.primary_checkout_id {
-            Some(checkout_id) => PolicyTarget::checkout(
-                logical_repository_id.0.to_string(),
-                checkout_id.0.to_string(),
-                repository.path.clone(),
-            ),
-            // 身份不可得时镜像 gateway_start.rs 的 deferred 口径退 aggregate_root
-            // 锚（cwd/target 分离语义不受影响：cwd 恒为 root）——B1a（4.1）：
-            // deferred 锚取 E native anchor（聚合根视图），不随业务成员的
-            // scope 回写迁移。
-            None => match native_launch_anchor {
-                Ok(anchor) => PolicyTarget::aggregate_root(anchor.path.clone()),
-                Err(error) => {
-                    return Some(Err(format!(
-                        "resolve logical author native launch anchor failed: {error}"
-                    )));
-                }
-            },
+        // E（REQ-PLN-08）author launch 消费缺口修复（2026-10-12 design
+        // 修订指纹漂移现场）：native launch target 一律取
+        // `native_launch_anchor`（PlanningReadOnly 的 story/design/plan 恒
+        // 聚合根视图，与 gateway_start.rs 同口径）——scope 回写后 business
+        // 恢复成员解析也不迁移锚，resume 指纹四漂移域（target logical
+        // id/checkout/worktree/git identity）恒定。成员 checkout 不再进入
+        // launch target（原 Some(checkout) 臂即漂移根因：生成轮聚合根 vs
+        // 修订轮 busi 首成员 target）。
+        let target = match native_launch_anchor {
+            Ok(anchor) => PolicyTarget::aggregate_root(anchor.path.clone()),
+            Err(error) => {
+                return Some(Err(format!(
+                    "resolve logical author native launch anchor failed: {error}"
+                )));
+            }
         };
         Some(Ok(SessionLaunchRequest {
             project_id: session_record.project_id.clone(),

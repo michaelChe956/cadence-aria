@@ -720,7 +720,8 @@ impl WorkspaceEngine {
             .await;
         }
         // Task 2.3：LC 分支——cwd 重绑 root（envelope 冻结的 canonical
-        // working_directory），target worktree（input.working_dir）保持成员 checkout；
+        // working_directory）；input.working_dir 保持业务材料锚（成员
+        // checkout），envelope target 恒 E native anchor 聚合根锚；
         // 经 gateway start_streaming 启动（validate→spawn 复验 + audit）。解析/
         // 校验 fail-closed 与 input 构建失败同形收口，绝不静默回落 member cwd
         // 直连。artifact retry 与 Codex resume fallback 属直连专用路径，LC 下真实
@@ -839,8 +840,9 @@ impl WorkspaceEngine {
 
     /// Task 2.3：LC revision 的 root launch + resume 决策（`drive_revision_session`
     /// 的 LC 分支消费）。launch 与 Task 2.1 author 首轮同源（cwd = authority
-    /// manifest `provider_context_root`；target = 唯一成员 checkout；
-    /// `PlanningReadOnly` + author provider ref），envelope/resume 面一致。
+    /// manifest `provider_context_root`；target = E `native_launch_anchor`
+    /// 聚合根锚，REQ-PLN-08：scope 回写不迁移；`PlanningReadOnly` + author
+    /// provider ref），envelope/resume 面一致。
     ///
     /// resume 决策（REQ-ENV-04 cwd 维度）：input 携带旧 native session 且引擎
     /// 记有其发行 launch 的 cwd-inclusive 指纹时，经 `gateway.resume_or_start`

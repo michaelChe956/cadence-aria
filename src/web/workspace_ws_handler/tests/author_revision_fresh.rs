@@ -465,6 +465,47 @@ async fn anchor_t19_story_revision_fresh_dispatch_resolves_after_completion() {
         ),
         "fresh dispatch 不得产生 typed 拒帧"
     );
+
+    // ③（max-task 定案补验②）一次 fresh 即解锁（非永久锁）：Resolved 后
+    // 普通 RequestRevision 语义的修订重驱不再被 LC_RESUME_RECOVERY_ACTIVE
+    // 拒收——engine 不落等待臂，正常经 gateway 驱动（下一条 input 即证据），
+    // 且 resume 面续接 fresh native（锚修复后指纹恒聚合根，scope 无关不漂）。
+    let direct_sentinel = Arc::new(T19RecordingAuthorProvider {
+        output: t19_story_output(),
+        native_session_id: "t19-direct-sentinel",
+        inputs: {
+            let (sentinel_tx, _sentinel_rx) = mpsc::unbounded_channel();
+            sentinel_tx
+        },
+    });
+    {
+        let mut engine = fixture.engine.lock().await;
+        engine.session.stage = WorkspaceStage::Revision;
+        engine.pending_revision_context = Some("Resolved 后普通修订重驱".to_string());
+        let (_plain_command_tx, plain_command_rx) = mpsc::channel(8);
+        engine
+            .drive_revision_session(direct_sentinel, plain_command_rx)
+            .await;
+    }
+    let plain_input = tokio::time::timeout(std::time::Duration::from_secs(5), input_rx.recv())
+        .await
+        .expect("Resolved 后普通修订重驱必须真实 spawn（不再被恢复等待拒收）")
+        .expect("plain revision input");
+    assert!(
+        !plain_input.prompt.is_empty(),
+        "普通修订重驱 prompt 非空（非等待臂 typed 错误路径）"
+    );
+    assert_eq!(
+        plain_input.resume_provider_session_id.as_deref(),
+        Some("t19-fresh-native-story"),
+        "锚恒聚合根 → 指纹不漂 → 普通重驱原样续接 fresh native（不 supersede）"
+    );
+    let post_resolve_recovery = t19_latest_recovery(&fixture.lifecycle, &session_id);
+    assert_eq!(
+        post_resolve_recovery.state,
+        LcResumeRecoveryState::Resolved,
+        "普通修订重驱不得复活恢复等待（Resolved 只保留证据）"
+    );
 }
 
 /// Design 同型正例：同一 author 族臂对 Design 修订链等价放行与收口。

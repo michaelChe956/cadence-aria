@@ -718,6 +718,21 @@ mod tests {
             lc_resume_recovery_inbound_gate(&run_context, &plain_generation).is_none(),
             "resolved 后普通 generation 不得被恢复门拦截"
         );
+        let plain_request_revision_after_resolve = lc_resume_recovery_inbound_gate(
+            &run_context,
+            &WsInMessage::RequestRevision {
+                feedback: StructuredFeedback {
+                    feedback_types: vec!["clarification".to_string()],
+                    description: "Resolved 后普通修订".to_string(),
+                    target_artifact_version: None,
+                },
+            },
+        )
+        .is_none();
+        assert!(
+            plain_request_revision_after_resolve,
+            "resolved 后普通 RequestRevision 不得被恢复门拦截（一次 fresh 即解锁，非永久锁）"
+        );
 
         // 三态之 prepare 失败回 Waiting：同 ID op-1（NotStarted）只 Replay。
         anchor_t12_seed(

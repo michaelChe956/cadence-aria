@@ -577,8 +577,9 @@ async fn logical_revision_rebinds_root_cwd_and_preserves_revision_target() {
         1,
         "gateway 必须记录一次 stream launch"
     );
-    // cwd 重绑 canonical root；target worktree 保持成员 checkout——两个字段
-    // 显式分离（revision target 不从 cwd 推导）。
+    // cwd 重绑 canonical root；input.working_dir 保持业务材料锚（成员
+    // checkout，business 材料面不变）——E 修复后 envelope target 恒聚合根
+    // 锚，两字段语义独立（cwd 恒 root）。
     assert_eq!(
         input.working_directory.as_deref(),
         Some(fixture.manifest_root.as_path()),
@@ -586,7 +587,7 @@ async fn logical_revision_rebinds_root_cwd_and_preserves_revision_target() {
     );
     assert_eq!(
         input.working_dir, fixture.member_root,
-        "target worktree 保持成员 checkout（cwd/target 分离）"
+        "input.working_dir 保持业务材料锚（成员 checkout 材料面不变）"
     );
     assert_ne!(
         input.working_dir,
@@ -594,7 +595,7 @@ async fn logical_revision_rebinds_root_cwd_and_preserves_revision_target() {
             .working_directory
             .clone()
             .expect("cwd must be rebound"),
-        "cwd 与 target 必须是两个独立维度"
+        "cwd 与材料锚必须是两个独立维度"
     );
     // author 工具策略不放宽：deny_file_write_builtins + durable audit sink。
     assert_eq!(
@@ -613,23 +614,24 @@ async fn logical_revision_rebinds_root_cwd_and_preserves_revision_target() {
         "LC revision run 完成后必须回 AuthorConfirm"
     );
 
-    // envelope 面：launch 冻结 root cwd 与显式 member/checkout target（与
-    // Task 2.1 author 首轮同一 resolver，envelope/resume 面一致）。
+    // envelope 面（E 修复后）：launch 冻结 root cwd 与聚合根锚 target
+    // （native_launch_anchor；与 Task 2.1 author 首轮、gateway_start 同口径）
+    // ——成员/checkout 身份不入 target（scope 回写不迁移锚、指纹恒定）。
     let launch = engine
         .resolve_author_root_launch(&fixture.record)
         .expect("LC 会话必须解析出 root launch")
         .expect("gateway validate 必须通过");
     let envelope = launch.envelope();
     assert_eq!(envelope.working_directory, fixture.manifest_root);
-    assert_eq!(envelope.target.worktree, fixture.member_root);
     assert_eq!(
-        envelope.target.logical_repository_id,
-        fixture.member_id.0.to_string(),
-        "target 是显式 member（不从 cwd 推导）"
+        envelope.target.worktree,
+        fixture.manifest_root.canonicalize().expect("canonical root"),
+        "target 是 E native anchor（聚合根），非成员 checkout"
     );
     assert!(
-        !envelope.target.checkout_id.is_empty(),
-        "target 是显式 checkout"
+        envelope.target.logical_repository_id.is_empty()
+            && envelope.target.checkout_id.is_empty(),
+        "聚合根锚不携带成员/checkout 身份"
     );
 }
 
@@ -1145,5 +1147,465 @@ async fn logical_revision_spawn_trust_missing_classifies_with_manual_guidance() 
             Ok(Some(_))
         ),
         "trust 拒绝必须 reject before provider startup"
+    );
+}
+
+// ============================================================================
+// E 锚点消费缺口（author launch 侧，2026-10-12 design 修订指纹漂移现场）：
+// `build_root_launch_request` 的 target 仍从 `business_repository` 的成员
+// checkout 派生（Some(checkout) 臂），scope 回写（involved/focus/
+// change_order）即迁移 launch target → resume 指纹四漂移域（target
+// logical id/checkout/worktree/git identity）随之漂移 → 修订轮 supersede。
+// E 包（REQ-PLN-08）已交付 `native_launch_anchor`（恒聚合根）；本族测试
+// 锁 author launch 消费面：两轮（生成无业务态 → 修订 involved=4+
+// change_order）launch 指纹必须相等。
+// ============================================================================
+
+/// 四成员 LC + Design 会话夹具（登记链与 `logical_revision_fixture` 同构：
+/// record/manifest/member/checkout/selection/policy + repos strict 投影 +
+/// design aggregate scope），成员 checkout 均为聚合根直接子目录。
+struct LogicalDesignRevisionFixture {
+    _root: tempfile::TempDir,
+    paths: ProductAppPaths,
+    lifecycle: LifecycleStore,
+    record: WorkspaceSessionRecord,
+    gateway: Arc<LogicalCodebaseProviderGateway>,
+    manifest: LogicalCodebaseManifest,
+    /// 四成员逻辑身份（involved/change_order 现场形态：involved=4）。
+    member_ids: Vec<LogicalRepositoryId>,
+    /// 首成员 checkout（业务材料锚，与 manifest root 分离）。
+    first_member_root: std::path::PathBuf,
+    /// manifest 冻结的 provider_context_root（cwd 来源）。
+    manifest_root: std::path::PathBuf,
+}
+
+fn logical_design_revision_fixture() -> LogicalDesignRevisionFixture {
+    let root = tempfile::tempdir().expect("temporary workspace root");
+    let manifest_root = root.path().join("lc-root");
+    let member_roots: Vec<std::path::PathBuf> = (0..4)
+        .map(|index| manifest_root.join(format!("design-member-{index}")))
+        .collect();
+    for member_root in &member_roots {
+        std::fs::create_dir_all(member_root).expect("create design member checkout");
+        init_revision_git_repo(member_root);
+    }
+
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    crate::product::project_store::ProjectStore::new(paths.clone())
+        .create(CreateProjectInput {
+            name: "logical design revision fixture".to_string(),
+            description: None,
+        })
+        .expect("create project");
+    let repositories: Vec<_> = member_roots
+        .iter()
+        .enumerate()
+        .map(|(index, member_root)| {
+            crate::product::repository_store::RepositoryStore::new(paths.clone())
+                .create(CreateRepositoryInput {
+                    project_id: "project_0001".to_string(),
+                    name: format!("logical design revision member {index}"),
+                    path: member_root.clone(),
+                    default_policy_preset: None,
+                    default_provider_mode: None,
+                    idempotency_key: format!("logical-design-revision-{index}"),
+                })
+                .expect("create member repository")
+        })
+        .collect();
+    crate::product::issue_store::IssueStore::new(paths.clone())
+        .create(CreateProductIssueInput {
+            project_id: "project_0001".to_string(),
+            repo_id: Some(repositories[0].id.clone()),
+            logical_codebase_id: Some(
+                crate::product::logical_codebase::store::legacy_logical_codebase_id(
+                    "project_0001",
+                ),
+            ),
+            title: "logical design revision fixture issue".to_string(),
+            description: Some("design revision anchor".to_string()),
+            change_id: None,
+            base_branch: None,
+        })
+        .expect("create issue");
+
+    // LC 权威记录（alias 位置）+ manifest/四成员/四 checkout + 显式全成员
+    // selection（登记链与 logical_revision_fixture 同构，×4）。
+    let lc_id = crate::product::logical_codebase::store::legacy_logical_codebase_id("project_0001");
+    let record_root = paths.logical_codebase_record_root("project_0001", &lc_id);
+    std::fs::create_dir_all(&record_root).expect("create lc record root");
+    std::fs::write(
+        record_root.join("record.json"),
+        serde_json::to_vec_pretty(&LogicalCodebaseRecord {
+            id: lc_id.clone(),
+            name: "logical design revision alias lc".to_string(),
+            aggregate_root: manifest_root.clone(),
+            created_at: "2026-10-12T00:00:00Z".to_string(),
+        })
+        .expect("serialize lc record"),
+    )
+    .expect("write lc record.json");
+
+    let member_ids: Vec<LogicalRepositoryId> = (0..4)
+        .map(|_| LogicalRepositoryId(uuid::Uuid::new_v4()))
+        .collect();
+    let checkout_ids: Vec<RepositoryCheckoutId> = (0..4)
+        .map(|_| RepositoryCheckoutId(uuid::Uuid::new_v4()))
+        .collect();
+    let authority = LogicalCodebaseStore::new(paths.clone());
+    let manifest =
+        LogicalCodebaseManifest::new("project_0001", manifest_root.clone(), member_ids.clone());
+    authority
+        .save_manifest("project_0001", &manifest)
+        .expect("save manifest");
+    let now = "2026-10-12T00:00:00Z".to_string();
+    for index in 0..4 {
+        authority
+            .save_member(
+                "project_0001",
+                &CodebaseMemberRecord {
+                    logical_repository_id: member_ids[index],
+                    physical_repository_id: repositories[index].id.clone(),
+                    alias: format!("design-member-{index}"),
+                    role: "member".to_string(),
+                    ordinal: (index + 1) as u32,
+                    source_identity: RepositorySourceIdentity::from_git_parts(
+                        &member_roots[index],
+                        member_roots[index].join(".git"),
+                        Some(format!("ssh://git@example.test/design/member-{index}.git")),
+                    ),
+                    repo_type: RepositoryType::Unknown,
+                    tech_stack: Vec::new(),
+                    owner: None,
+                    tags: Vec::new(),
+                    default_ref: None,
+                    checkout_ids: vec![checkout_ids[index]],
+                    status: MemberStatus::Active,
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                },
+            )
+            .expect("save design member");
+        authority
+            .save_checkout(
+                "project_0001",
+                &RepositoryCheckoutRecord {
+                    checkout_id: checkout_ids[index],
+                    logical_repository_id: member_ids[index],
+                    physical_repository_id: repositories[index].id.clone(),
+                    kind: CheckoutKind::Main,
+                    canonical_path: member_roots[index].clone(),
+                    checkout_path_hash: format!("sha256:logical-design-revision-checkout-{index}"),
+                    git_dir_identity: format!("sha256:logical-design-revision-git-dir-{index}"),
+                    revision: Some("abc123".to_string()),
+                    availability: CheckoutAvailability::Available,
+                    observed_at: now.clone(),
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                },
+            )
+            .expect("save design checkout");
+    }
+    IssueCodebaseSelectionStore::new(paths.clone())
+        .save(&IssueCodebaseSelection::explicit(
+            "project_0001",
+            "issue_0001",
+            member_ids.clone(),
+            Vec::new(),
+            Vec::new(),
+            None,
+        ))
+        .expect("save issue selection");
+    AggregatePolicyArtifactStore::new(paths.clone())
+        .ensure_bootstrap(&manifest)
+        .expect("bootstrap aggregate policy");
+
+    // strict 三层身份投影：repos.json 升级为已登记形态（×4）。
+    let projections: Vec<_> = repositories
+        .iter()
+        .enumerate()
+        .map(|(index, repository)| {
+            let mut projection = repository.clone();
+            projection.logical_repository_id = Some(member_ids[index]);
+            projection.primary_checkout_id = Some(checkout_ids[index]);
+            projection.identity_schema_version = 1;
+            projection
+        })
+        .collect();
+    std::fs::write(
+        paths.project_root("project_0001").join("repos.json"),
+        serde_json::to_vec_pretty(&projections).expect("serialize repos projection"),
+    )
+    .expect("rewrite repos.json");
+
+    // Design aggregate scope（生成形态：无业务态 involved/change_order 均空）
+    // + 持久会话记录。
+    let lifecycle = LifecycleStore::new(paths.clone());
+    let design = lifecycle
+        .create_design_spec(crate::product::lifecycle_store::CreateDesignSpecInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            story_spec_ids: Vec::new(),
+            title: "logical design revision design".to_string(),
+            aggregate_codebase: Some(crate::product::lifecycle_store::AggregateDesignSpecScope {
+                logical_codebase_ref: manifest.logical_codebase_id.clone(),
+                effective_member_ids: member_ids.clone(),
+                involved_repository_ids: Vec::new(),
+                change_order: Vec::new(),
+            }),
+        })
+        .expect("create design spec");
+    let record = lifecycle
+        .create_workspace_session_with_id(
+            CreateWorkspaceSessionInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                entity_id: design.id,
+                workspace_type: WorkspaceType::Design,
+                author_provider: ProviderName::ClaudeCode,
+                reviewer_provider: Some(ProviderName::ClaudeCode),
+                review_rounds: 0,
+                superpowers_enabled: false,
+                openspec_enabled: false,
+                work_item_plan_options: None,
+            },
+            format!(
+                "workspace_session_logical_design_revision_{}",
+                uuid::Uuid::new_v4().simple()
+            ),
+        )
+        .expect("create workspace session");
+
+    // gateway：capture provider 注册为 ClaudeCode 真实 adapter（validate 面
+    // 与生产同构；resolver/doubles 复用 part_32 测试件）。
+    let starts = Arc::new(AtomicUsize::new(0));
+    let (input_tx, _input_rx) = mpsc::unbounded_channel();
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::ClaudeCode,
+        Arc::new(RevisionCaptureProvider {
+            starts,
+            inputs: input_tx,
+            output: revision_story_output(),
+        }),
+    );
+    let audit = Arc::new(GatewayRunAudit::new());
+    let gateway = Arc::new(LogicalCodebaseProviderGateway::with_audit(
+        AggregatePolicyArtifactStore::new(paths.clone()),
+        Arc::new(super::ReviewStaticCapabilitySource::default()),
+        Arc::new(super::ReviewPassThroughTargetResolver),
+        Arc::new(registry),
+        Arc::new(super::ReviewStubSyncAdapter),
+        super::review_always_available_gate(),
+        audit,
+        std::fs::canonicalize(&manifest_root).expect("canonical manifest root"),
+    ));
+
+    LogicalDesignRevisionFixture {
+        _root: root,
+        paths,
+        lifecycle,
+        record,
+        gateway,
+        manifest,
+        member_ids,
+        first_member_root: member_roots[0].clone(),
+        manifest_root,
+    }
+}
+
+/// Design 修订态的持久 LC engine（gateway 注入；repository_path=首成员
+/// checkout 业务材料锚，与 cwd 来源分离）。
+fn design_stage_engine(fixture: &LogicalDesignRevisionFixture) -> WorkspaceEngine {
+    let mut session = WorkspaceSession::from_record(fixture.record.clone());
+    session.repository_path = Some(fixture.first_member_root.clone());
+    let (tx, _) = mpsc::channel(8);
+    let mut engine = WorkspaceEngine::new_persistent(
+        Arc::new(CheckpointStore::new(
+            fixture.paths.root().join("checkpoints"),
+        )),
+        fixture.lifecycle.clone(),
+        tx,
+        session,
+    )
+    .with_logical_provider_gateway(fixture.gateway.clone());
+    engine.session.stage = WorkspaceStage::Revision;
+    engine.session.artifact = Some(artifact_payload("# Design Spec\n\n修订前产物"));
+    engine.pending_revision_context = Some("补充异常场景".to_string());
+    engine
+}
+
+/// E 锚点消费缺口红→绿主锁（author launch 侧）：Design 带 involved=4+
+/// change_order 的两轮 launch——生成轮（无业务态，business=聚合视图）与
+/// 修订轮（scope 回写后 business=首 change_order 成员）的 launch 指纹必须
+/// 相等：native launch target 恒取 E `native_launch_anchor`（聚合根），
+/// scope 回写不迁移锚（今晨 design 修订指纹漂移现场：聚合根=388779…
+/// 生成轮 vs busi 成员=dda858… 修订轮，四漂移域全动）。
+#[test]
+fn anchor_t12_design_revision_launch_fingerprint_stable_across_scope_writeback() {
+    let fixture = logical_design_revision_fixture();
+    let engine = design_stage_engine(&fixture);
+
+    // 生成轮：design 无业务态（involved 空）→ business 派生聚合根视图。
+    let generation_request = engine
+        .build_root_launch_request(
+            &fixture.record,
+            &ProviderName::ClaudeCode,
+            crate::product::logical_codebase::SessionPolicyAction::PlanningReadOnly,
+        )
+        .expect("LC 会话必须解析出 launch request")
+        .expect("generation round must resolve");
+    let generation_target = generation_request.target.clone();
+    let generation_fingerprint = fixture
+        .gateway
+        .validate(generation_request)
+        .expect("generation round gateway validate")
+        .fingerprint()
+        .clone();
+
+    // 修订轮：scope 回写 involved=4 + change_order=4（REQ-PLN-05 合法确认
+    // 态）→ business 恢复首成员解析；成员 checkout 不得进入 native launch。
+    fixture
+        .lifecycle
+        .update_design_spec_aggregate(
+            "project_0001",
+            "issue_0001",
+            &fixture.record.entity_id,
+            &crate::product::lifecycle_store::AggregateDesignSpecScope {
+                logical_codebase_ref: fixture.manifest.logical_codebase_id.clone(),
+                effective_member_ids: fixture.member_ids.clone(),
+                involved_repository_ids: fixture.member_ids.clone(),
+                change_order: fixture.member_ids.clone(),
+            },
+        )
+        .expect("scope writeback to multi-repo revision form");
+    let revision_request = engine
+        .build_root_launch_request(
+            &fixture.record,
+            &ProviderName::ClaudeCode,
+            crate::product::logical_codebase::SessionPolicyAction::PlanningReadOnly,
+        )
+        .expect("LC 会话必须解析出 launch request")
+        .expect("revision round must resolve");
+    let revision_target = revision_request.target.clone();
+    let revision_fingerprint = fixture
+        .gateway
+        .validate(revision_request)
+        .expect("revision round gateway validate")
+        .fingerprint()
+        .clone();
+
+    assert_eq!(
+        generation_fingerprint, revision_fingerprint,
+        "Design 两轮 launch 指纹必须相等（native target 恒聚合根锚，scope 回写不迁移）"
+    );
+    assert!(
+        generation_target.logical_repository_id.is_empty()
+            && generation_target.checkout_id.is_empty(),
+        "生成轮 target 是 aggregate_root 锚"
+    );
+    assert!(
+        revision_target.logical_repository_id.is_empty()
+            && revision_target.checkout_id.is_empty(),
+        "修订轮 native launch target 必须是聚合根锚（成员 checkout 不入 target）"
+    );
+    assert_eq!(
+        revision_target.worktree,
+        fixture
+            .manifest_root
+            .canonicalize()
+            .expect("canonical root"),
+        "修订轮 native launch target 锚定 canonical 聚合根"
+    );
+}
+
+/// E 锚点消费缺口（max-task 定案补验①）：Story focus 回写用例——story
+/// 生成轮（AI 自决前草稿态，focus=None → business 聚合视图）→ 完成后回写
+/// involved/focus（business 恢复成员解析）→ 修订轮：两轮 launch 指纹必须
+/// 相等、native target 恒聚合根锚（今晨 story「侥幸通过」变必然——修复前
+/// 成员 target 恰好两轮同成员才未漂，design 无业务态生成轮即漂）。
+#[test]
+fn anchor_t13_story_focus_writeback_launch_fingerprint_stays_aggregate() {
+    let (fixture, _inputs) = logical_revision_fixture(LogicalRevisionAuthority::ManifestRoot);
+    // 生成轮形态：story focus=None（anchor_t11 同款 JSON 改写）。
+    let story_spec_path = fixture
+        .paths
+        .issue_lifecycle_root("project_0001", "issue_0001")
+        .join("story-specs")
+        .join(format!("{}.json", fixture.record.entity_id));
+    let mut story_spec: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&story_spec_path).expect("read story spec"))
+            .expect("parse story spec");
+    story_spec["focus_repository_id"] = serde_json::Value::Null;
+    std::fs::write(
+        &story_spec_path,
+        serde_json::to_vec_pretty(&story_spec).expect("serialize story spec"),
+    )
+    .expect("rewrite story spec without focus");
+
+    let engine = revision_stage_engine(&fixture);
+    let generation_request = engine
+        .build_root_launch_request(
+            &fixture.record,
+            &ProviderName::ClaudeCode,
+            crate::product::logical_codebase::SessionPolicyAction::PlanningReadOnly,
+        )
+        .expect("LC 会话必须解析出 launch request")
+        .expect("generation round must resolve");
+    let generation_fingerprint = fixture
+        .gateway
+        .validate(generation_request)
+        .expect("generation round gateway validate")
+        .fingerprint()
+        .clone();
+
+    // 完成后回写 involved/focus（r23 生产口径：AI 显式回写 focus 走成员
+    // 锚 business 臂）→ 修订轮。
+    fixture
+        .lifecycle
+        .update_story_spec_aggregate(
+            "project_0001",
+            "issue_0001",
+            &fixture.record.entity_id,
+            &crate::product::lifecycle_store::AggregateStorySpecScope {
+                logical_codebase_ref: fixture.manifest.logical_codebase_id.clone(),
+                effective_member_ids: vec![fixture.member_id],
+                involved_repository_ids: vec![fixture.member_id],
+                focus_repository_id: Some(fixture.member_id),
+            },
+        )
+        .expect("focus writeback to revision form");
+    let revision_request = engine
+        .build_root_launch_request(
+            &fixture.record,
+            &ProviderName::ClaudeCode,
+            crate::product::logical_codebase::SessionPolicyAction::PlanningReadOnly,
+        )
+        .expect("LC 会话必须解析出 launch request")
+        .expect("revision round must resolve");
+    let revision_target = revision_request.target.clone();
+    let revision_fingerprint = fixture
+        .gateway
+        .validate(revision_request)
+        .expect("revision round gateway validate")
+        .fingerprint()
+        .clone();
+
+    assert_eq!(
+        generation_fingerprint, revision_fingerprint,
+        "Story focus 回写前后两轮 launch 指纹必须相等（native target 恒聚合根锚）"
+    );
+    assert!(
+        revision_target.logical_repository_id.is_empty()
+            && revision_target.checkout_id.is_empty(),
+        "回写后修订轮 native launch target 仍是聚合根锚（成员不入 target）"
+    );
+    assert_eq!(
+        revision_target.worktree,
+        fixture
+            .manifest_root
+            .canonicalize()
+            .expect("canonical root"),
+        "回写后 native launch target 仍锚定 canonical 聚合根"
     );
 }

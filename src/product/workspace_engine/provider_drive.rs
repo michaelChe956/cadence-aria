@@ -164,10 +164,12 @@ impl WorkspaceEngine {
         );
         if let Some(launch) = gateway_launch {
             // Task 2.1（REQ-ENV-01/ENV-10）：LC 分支——input 冻结 root cwd
-            //（envelope.working_directory，即 effective working directory），target
-            // worktree（input.working_dir）保持成员 checkout；经 gateway
-            // validate→start_streaming 启动并留 audit（tool-policy 审计接线在
-            // via_gateway 内部对 validated input 施加）。Legacy 直连路径不受影响。
+            //（envelope.working_directory，即 effective working directory）；
+            // input.working_dir 保持业务材料锚（成员 checkout），envelope
+            // target 恒 E native anchor 聚合根（REQ-PLN-08：scope 回写不
+            // 迁移锚）；经 gateway validate→start_streaming 启动并留 audit
+            //（tool-policy 审计接线在 via_gateway 内部对 validated input 施加）。
+            // Legacy 直连路径不受影响。
             // Task 2.3：记忆本次 launch 的 cwd-inclusive 指纹——revision resume
             // 决策据此比对 cwd 漂移（同 root 续接一致、漂移 supersede，见
             // review/drive.rs）。

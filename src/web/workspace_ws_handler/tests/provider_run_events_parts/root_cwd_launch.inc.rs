@@ -152,8 +152,10 @@ async fn logical_author_and_choice_followup_keep_root_cwd_and_target_separate() 
         "follow-up 以 choice 内容原样驱动（DeltaOnly），不构造新 target"
     );
 
-    // envelope 面：launch 冻结显式 member/checkout target 与 root cwd；两次解析
-    // 的 resume fingerprint 相等（首轮与 follow-up 复用同一 launch/resume 面）。
+    // envelope 面（E 修复后）：launch 冻结聚合根锚 target（native_launch_
+    // anchor，与 gateway_start 同口径——成员/checkout 身份不入 target，
+    // scope 回写不迁移锚）与 root cwd；两次解析的 resume fingerprint 相等
+    //（首轮与 follow-up 复用同一 launch/resume 面）。
     let first_launch = fixture
         .engine
         .lock()
@@ -170,22 +172,14 @@ async fn logical_author_and_choice_followup_keep_root_cwd_and_target_separate() 
         .expect("gateway validate 必须通过");
     let envelope = first_launch.envelope();
     assert_eq!(envelope.working_directory, canonical_root);
-    assert_eq!(envelope.target.worktree, canonical_member);
-    let lc_store = crate::product::logical_codebase::LogicalCodebaseStore::for_lc(
-        fixture.app_paths.clone(),
-        crate::product::logical_codebase::store::legacy_logical_codebase_id("project_0001"),
-    );
-    let member = &lc_store
-        .list_members("project_0001")
-        .expect("list lc members")[0];
     assert_eq!(
-        envelope.target.logical_repository_id,
-        member.logical_repository_id.0.to_string(),
-        "target 是显式 member"
+        envelope.target.worktree, canonical_root,
+        "target 是 E native anchor（聚合根），非成员 checkout"
     );
     assert!(
-        !envelope.target.checkout_id.is_empty(),
-        "target 是显式 checkout"
+        envelope.target.logical_repository_id.is_empty()
+            && envelope.target.checkout_id.is_empty(),
+        "聚合根锚不携带成员/checkout 身份"
     );
     assert_eq!(
         first_launch.fingerprint(),
