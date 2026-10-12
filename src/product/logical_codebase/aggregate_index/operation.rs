@@ -42,9 +42,18 @@ impl AggregateIndexAcceptance {
         root: &Path,
         member_names: &[String],
     ) -> Result<Self, AggregateIndexError> {
-        let files = cli.files(root)?;
+        let files = match cli.files(root) {
+            Ok(files) => files,
+            // 空索引＝每个成员都没有任何可索引文件：把上游人读提示归并
+            // 为业务语义的覆盖不足错误并点名全部成员，而不是让
+            // `expected value at line 1 column 1` 这类 JSON 解析天书透出。
+            Err(AggregateIndexError::Failed {
+                code: "codegraph_files_empty_index",
+                ..
+            }) => return Err(member_coverage_failed(member_names)),
+            Err(error) => return Err(error),
+        };
         let member_files = verify_member_coverage(&files, member_names)?;
-
         let mut excluded_queries = BTreeMap::new();
         for query in EXCLUDED_QUERIES {
             let result = cli.query_json(root, query)?;
@@ -383,7 +392,7 @@ impl AggregateIndexOperation {
         let index_id = building.aggregate_index_id.clone();
 
         let command_result = (|| {
-            self.cli.verify_version()?;
+            let codegraph_version = self.cli.verify_version()?;
             let config = self.excludes.generate(manifest, &members, &checkouts)?;
             let config_digest = self
                 .excludes
@@ -400,10 +409,13 @@ impl AggregateIndexOperation {
                     self.cli.sync(&manifest.provider_context_root)?;
                 }
                 IndexApplicationMode::Sync => {
-                    self.cli.sync(&manifest.provider_context_root)?;
+                    // 防漂移：durable Active 记录可能指向已被清理/重建的
+                    // 磁盘库（.codegraph 缺失或未初始化），sync-only 对
+                    // 未初始化库必然 exit 1——回退 init＋sync 自愈。
+                    self.cli.sync_or_reinit(&manifest.provider_context_root)?;
                 }
             }
-            Ok::<_, AggregateIndexError>(config_digest)
+            Ok::<_, AggregateIndexError>((codegraph_version, config_digest))
         })();
 
         let after_result = self.snapshots.capture_included(project_id, manifest);
@@ -413,8 +425,8 @@ impl AggregateIndexOperation {
                 return self.fail_building(project_id, &index_id, mode, error, Vec::new());
             }
         };
-        let config_digest = match command_result {
-            Ok(config_digest) => config_digest,
+        let (codegraph_version, config_digest) = match command_result {
+            Ok((codegraph_version, config_digest)) => (codegraph_version, config_digest),
             Err(error) => return self.fail_building(project_id, &index_id, mode, error, after),
         };
         if snapshots_differ(&building.member_snapshots, &after) {
@@ -444,6 +456,9 @@ impl AggregateIndexOperation {
         record.observed_after_member_snapshots = after;
         record.status = AggregateIndexStatus::Active;
         record.codegraph_root = manifest.provider_context_root.clone();
+        // 实测版本透传：激活世代记录真实 CLI 版本（版本门实测值），
+        // building/failed 世代保持空值，不伪造未实测的版本号。
+        record.codegraph_version = codegraph_version;
         record.config_digest = config_digest;
         record.warning = acceptance.soft_warning();
         record.updated_at = now;
@@ -626,6 +641,7 @@ fn verify_member_coverage(
     member_names: &[String],
 ) -> Result<BTreeMap<String, Vec<PathBuf>>, AggregateIndexError> {
     let mut result = BTreeMap::new();
+    let mut uncovered = Vec::new();
     for member_name in member_names {
         validate_relative_id(member_name)?;
         let prefix = Path::new(member_name);
@@ -635,16 +651,30 @@ fn verify_member_coverage(
             .cloned()
             .collect::<Vec<_>>();
         if covered.is_empty() {
-            return Err(AggregateIndexError::Failed {
-                code: "aggregate_index_member_coverage_failed",
-                message: format!(
-                    "codegraph files has no indexed file under included member {member_name}"
-                ),
-            });
+            // 收集全部未覆盖成员再失败：bootstrap 失败卡要呈现完整的
+            // 「无可索引代码文件的成员」清单，不止第一个。
+            uncovered.push(member_name.clone());
+            continue;
         }
         result.insert(member_name.clone(), covered);
     }
+    if !uncovered.is_empty() {
+        return Err(member_coverage_failed(&uncovered));
+    }
     Ok(result)
+}
+
+/// 覆盖不足的业务语义错误：点名无可索引代码文件的成员清单（空索引时
+/// 即全部成员），并携带「每成员至少 1 个可索引代码文件」修复指引。
+fn member_coverage_failed(uncovered: &[String]) -> AggregateIndexError {
+    AggregateIndexError::Failed {
+        code: "aggregate_index_member_coverage_failed",
+        message: format!(
+            "no indexable code file under included members [{}]; each included member \
+             needs at least 1 indexable code file",
+            uncovered.join(", ")
+        ),
+    }
 }
 
 fn is_empty_query_result(value: &Value) -> bool {

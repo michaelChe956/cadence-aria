@@ -1,7 +1,9 @@
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
+
+    use parking_lot::Mutex;
 
     use sha2::Digest;
 
@@ -75,6 +77,9 @@ mod tests {
         assert_eq!(record.status, AggregateIndexStatus::Active);
         assert_eq!(record.membership_revision, 3);
         assert_eq!(record.config_digest, fixture.config_digest());
+        // ③ 版本透传：codegraph_version 必须是 CLI 实测值（fake 输出
+        // 1.6.2），不得沿用 types.rs 硬编码默认值误导排障。
+        assert_eq!(record.codegraph_version, "1.6.2");
         assert_eq!(record.member_snapshots.len(), 2);
         assert_eq!(record.observed_after_member_snapshots.len(), 2);
         assert_eq!(
@@ -120,6 +125,125 @@ mod tests {
             fixture.operation().build("project_0001", 3),
             Err(AggregateIndexError::Failed { code, .. }) if code == "aggregate_index_member_coverage_failed"
         ));
+    }
+
+    /// ① 现场（/tmp/notify-center）：成员仓仅 .git+README，init 建出
+    /// 0 文件库，codegraph 1.6 的 `files --json` 以 exit 0 输出人读提示。
+    /// 该形态必须归并为业务语义的覆盖不足错误并点名全部成员，而不是
+    /// 把提示文本当 JSON 解析出 `expected value at line 1 column 1` 天书。
+    #[test]
+    fn build_on_empty_index_reports_member_coverage_naming_all_members() {
+        let fixture = aggregate_index_fixture();
+        fixture.cli.files_return_empty_index_notice();
+
+        let error = fixture.operation().build("project_0001", 3).unwrap_err();
+        assert!(
+            matches!(&error, AggregateIndexError::Failed { code, .. }
+                if *code == "aggregate_index_member_coverage_failed"),
+            "empty index must surface business semantics, got: {error}"
+        );
+        let message = error.to_string();
+        assert!(message.contains("api"), "must name member api: {message}");
+        assert!(message.contains("web"), "must name member web: {message}");
+    }
+
+    /// ① 部分覆盖：点名全部无可索引文件的成员清单（不止第一个），
+    /// 供 bootstrap 失败卡呈现「每成员至少 1 个可索引代码文件」指引。
+    #[test]
+    fn build_names_all_uncovered_members_in_coverage_failure() {
+        let fixture = aggregate_index_fixture();
+        fixture.cli.files_return(["api/src/A.java"]);
+
+        let error = fixture.operation().build("project_0001", 3).unwrap_err();
+        assert!(
+            matches!(&error, AggregateIndexError::Failed { code, .. }
+                if *code == "aggregate_index_member_coverage_failed"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            error.to_string().contains("members [web]"),
+            "must name the uncovered member list, got: {error}"
+        );
+    }
+
+    /// ② 防漂移（探测路径）：durable Active 记录与磁盘库漂移——
+    /// `.codegraph` 被 清理/tmp 重建）后，stale→sync 对未初始化库是死路；
+    /// Sync 模式必须探测库目录缺失并回退 init＋sync 自愈。
+    #[test]
+    fn sync_reinitializes_when_index_library_drifted_away() {
+        let fixture = aggregate_index_fixture();
+        let active = fixture.persist_active_index();
+        fixture.cli.requests(); // drain 建库期请求
+
+        let refreshed = fixture
+            .operation()
+            .sync_and_verify("project_0001", active)
+            .expect("sync must self-heal via init when the library drifted away");
+        assert_eq!(refreshed.status, AggregateIndexStatus::Active);
+        let commands = codegraph_index_commands(
+            fixture
+                .cli
+                .requests()
+                .into_iter()
+                .map(|request| request.argv)
+                .collect(),
+        );
+        // 探测到 `.codegraph` 缺失：直接 init＋sync，不先跑必败的 sync。
+        assert_eq!(
+            commands,
+            vec![
+                vec!["init".to_string(), ".".to_string()],
+                vec!["sync".to_string(), ".".to_string()],
+            ]
+        );
+    }
+
+    /// ② 防漂移（捕获路径）：`.codegraph` 目录存在但库未初始化时，
+    /// 捕获 `✗ CodeGraph not initialized` 失败回退 init＋sync。
+    #[test]
+    fn sync_recovers_from_not_initialized_failure() {
+        let fixture = aggregate_index_fixture();
+        let root = fixture
+            .logical
+            .load_manifest("project_0001")
+            .unwrap()
+            .unwrap()
+            .provider_context_root;
+        std::fs::create_dir_all(root.join(".codegraph")).unwrap();
+        let active = fixture.persist_active_index();
+        fixture.cli.requests();
+        fixture
+            .cli
+            .fail_next_sync_not_initialized("✗ CodeGraph not initialized in /aggregate");
+
+        let refreshed = fixture
+            .operation()
+            .sync_and_verify("project_0001", active)
+            .expect("sync must fall back to init after a not-initialized failure");
+        assert_eq!(refreshed.status, AggregateIndexStatus::Active);
+        let commands = codegraph_index_commands(
+            fixture
+                .cli
+                .requests()
+                .into_iter()
+                .map(|request| request.argv)
+                .collect(),
+        );
+        assert_eq!(
+            commands,
+            vec![
+                vec!["sync".to_string(), ".".to_string()],
+                vec!["init".to_string(), ".".to_string()],
+                vec!["sync".to_string(), ".".to_string()],
+            ]
+        );
+    }
+
+    fn codegraph_index_commands(argvs: Vec<Vec<String>>) -> Vec<Vec<String>> {
+        argvs
+            .into_iter()
+            .filter(|argv| matches!(argv.first().map(String::as_str), Some("init" | "sync")))
+            .collect()
     }
 
     /// G4（终局关闸缺口）：真实业务仓不含 canonical fixture 预置的
@@ -632,11 +756,17 @@ mod tests {
     #[derive(Default)]
     struct FakeCodeGraphState {
         files: Vec<PathBuf>,
+        /// 复刻 codegraph 1.6 契约缺陷：空索引（0 文件）时 `files --json`
+        /// 以 exit 0 输出人读提示而非 JSON 数组（现场 /tmp/notify-center）。
+        files_empty_index_notice: bool,
         queries: BTreeMap<String, Value>,
         requests: Vec<BoundedCommandRequest>,
         /// When set, the next `init` invocation fails with this stderr and a
         /// non-zero exit, simulating a CodeGraph parser crash mid-rebuild.
         fail_next_init: Option<String>,
+        /// When set, the next `sync` invocation exits 1 with this stderr,
+        /// simulating `✗ CodeGraph not initialized` on a drifted-away library.
+        fail_next_sync_not_initialized: Option<String>,
         drift_on_init: bool,
         drift_on_sync: bool,
         revision_overrides: BTreeMap<String, String>,
@@ -649,38 +779,48 @@ mod tests {
             I: IntoIterator<Item = P>,
             P: AsRef<Path>,
         {
-            self.state.lock().unwrap().files = paths
+            let mut state = self.state.lock();
+            state.files_empty_index_notice = false;
+            state.files = paths
                 .into_iter()
                 .map(|path| path.as_ref().to_path_buf())
                 .collect();
         }
 
+        /// README-only 空仓形态：init 建出 0 文件库，`files --json` 输出
+        /// 上游人读提示。
+        fn files_return_empty_index_notice(&self) {
+            let mut state = self.state.lock();
+            state.files_empty_index_notice = true;
+            state.files.clear();
+        }
+
         fn query_returns(&self, query: &str, value: Value) {
-            self.state
-                .lock()
-                .unwrap()
-                .queries
-                .insert(query.to_string(), value);
+            self.state.lock().queries.insert(query.to_string(), value);
         }
 
         fn fail_next_init(&self, stderr: &str) {
-            self.state.lock().unwrap().fail_next_init = Some(stderr.to_string());
+            self.state.lock().fail_next_init = Some(stderr.to_string());
+        }
+
+        fn fail_next_sync_not_initialized(&self, stderr: &str) {
+            self.state.lock().fail_next_sync_not_initialized = Some(stderr.to_string());
         }
 
         fn drift_on_init(&self) {
-            self.state.lock().unwrap().drift_on_init = true;
+            self.state.lock().drift_on_init = true;
         }
 
         fn drift_on_sync(&self) {
-            self.state.lock().unwrap().drift_on_sync = true;
+            self.state.lock().drift_on_sync = true;
         }
 
         fn observe_init(&self, observer: Arc<dyn Fn() + Send + Sync>) {
-            self.state.lock().unwrap().init_observer = Some(observer);
+            self.state.lock().init_observer = Some(observer);
         }
 
         fn requests(&self) -> Vec<BoundedCommandRequest> {
-            std::mem::take(&mut self.state.lock().unwrap().requests)
+            std::mem::take(&mut self.state.lock().requests)
         }
     }
 
@@ -690,7 +830,7 @@ mod tests {
             &self,
             request: BoundedCommandRequest,
         ) -> Result<BoundedCommandResult, BoundedCommandError> {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock();
             state.requests.push(request.clone());
             if request.argv.as_slice() == ["init", "."] {
                 if state.drift_on_init {
@@ -727,8 +867,26 @@ mod tests {
                     duration_ms: 1,
                 });
             }
+            // 漂移态现场：库不存在时 `sync` exit 1（`✗ CodeGraph not
+            // initialized …`，stderr）。
+            if let [sync, dot] = request.argv.as_slice()
+                && sync == "sync"
+                && dot == "."
+                && let Some(stderr) = state.fail_next_sync_not_initialized.take()
+            {
+                return Ok(BoundedCommandResult {
+                    exit_code: Some(1),
+                    stdout: String::new(),
+                    stderr,
+                    timed_out: false,
+                    cancelled: false,
+                    stdout_truncated: false,
+                    stderr_truncated: false,
+                    duration_ms: 1,
+                });
+            }
             let stdout = match request.argv.as_slice() {
-                [version] if version == "--version" => "1.6.0\n".to_string(),
+                [version] if version == "--version" => "1.6.2\n".to_string(),
                 [rev_parse, head] if rev_parse == "rev-parse" && head == "HEAD" => {
                     match request
                         .working_dir
@@ -750,14 +908,21 @@ mod tests {
                 }
                 [init, dot] if init == "init" && dot == "." => "Indexed 2 files\n".to_string(),
                 [sync, dot] if sync == "sync" && dot == "." => "Synced 2 files\n".to_string(),
-                [files, json] if files == "files" && json == "--json" => serde_json::to_string(
-                    &state
-                        .files
-                        .iter()
-                        .map(|path| serde_json::json!({"path": path}))
-                        .collect::<Vec<_>>(),
-                )
-                .unwrap(),
+                [files, json] if files == "files" && json == "--json" => {
+                    // 空索引形态复刻上游契约缺陷：exit 0 + 人读提示（非 JSON）。
+                    if state.files_empty_index_notice {
+                        "ℹ No files indexed. Run \"codegraph index\" first.".to_string()
+                    } else {
+                        serde_json::to_string(
+                            &state
+                                .files
+                                .iter()
+                                .map(|path| serde_json::json!({"path": path}))
+                                .collect::<Vec<_>>(),
+                        )
+                        .unwrap()
+                    }
+                }
                 [query, symbol, json] if query == "query" && json == "--json" => state
                     .queries
                     .get(symbol)

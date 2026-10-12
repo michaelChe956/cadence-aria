@@ -99,7 +99,9 @@ impl CodeGraphCli {
         Self { runner, executable }
     }
 
-    pub fn verify_version(&self) -> Result<(), AggregateIndexError> {
+    /// 返回实测的 CLI 版本字符串（stdout 去空白），供聚合索引记录在
+    /// 激活时透传；不再让调用方依赖硬编码默认值误导排障。
+    pub fn verify_version(&self) -> Result<String, AggregateIndexError> {
         let output = self.run_checked(
             &["--version"],
             Path::new("."),
@@ -111,7 +113,7 @@ impl CodeGraphCli {
             version >= CODEGRAPH_MIN_VERSION && version < CODEGRAPH_MAX_VERSION_EXCLUSIVE
         });
         if in_range {
-            Ok(())
+            Ok(actual.to_string())
         } else {
             Err(AggregateIndexError::Degraded {
                 code: "codegraph_version_mismatch",
@@ -138,6 +140,34 @@ impl CodeGraphCli {
         )
     }
 
+    /// Sync 模式防漂移：durable Active 记录可能与磁盘库漂移——`.codegraph`
+    /// 被清理或聚合根被重建后，对未初始化的库执行 `sync` 必然 exit 1
+    /// （`✗ CodeGraph not initialized`），stale→sync 成为死路。探测到库
+    /// 目录缺失，或捕获该失败时，回退 init＋sync（等价 Initialize/Rebuild
+    /// 的建库序列），让增量刷新自愈而不是恒败。
+    pub fn sync_or_reinit(
+        &self,
+        root: &Path,
+    ) -> Result<CodeGraphCommandResult, AggregateIndexError> {
+        if !root.join(".codegraph").is_dir() {
+            self.init(root)?;
+            return self.sync(root);
+        }
+        match self.sync(root) {
+            Ok(result) => Ok(result),
+            Err(error) => match &error {
+                AggregateIndexError::Failed {
+                    code: "codegraph_sync_failed",
+                    message,
+                } if message.contains("not initialized") => {
+                    self.init(root)?;
+                    self.sync(root)
+                }
+                _ => Err(error),
+            },
+        }
+    }
+
     pub fn files(&self, root: &Path) -> Result<Vec<PathBuf>, AggregateIndexError> {
         let output = self.run_checked(
             &["files", "--json"],
@@ -145,6 +175,19 @@ impl CodeGraphCli {
             AggregateIndexBudget::INCREMENTAL,
             "codegraph_files_failed",
         )?;
+        // codegraph 1.6 实证契约缺陷：空索引（0 文件）时 `files --json`
+        // 以 exit 0 输出人读提示而非 JSON 数组。先识别该形态返回专用
+        // 空索引码，交给上层归并为业务语义的覆盖不足错误；
+        // `codegraph_files_invalid_json` 仅保留给真正的意外输出。
+        if is_empty_index_notice(&output.stdout) {
+            return Err(AggregateIndexError::Failed {
+                code: "codegraph_files_empty_index",
+                message: format!(
+                    "codegraph files --json reported an empty index: {}",
+                    output.stdout.trim()
+                ),
+            });
+        }
         let entries: Vec<CodeGraphFile> =
             serde_json::from_str(&output.stdout).map_err(|error| AggregateIndexError::Failed {
                 code: "codegraph_files_invalid_json",
@@ -292,6 +335,13 @@ fn command_failure_message(argv: &[&str], output: &BoundedCommandResult) -> Stri
         argv.join(" "),
         output.exit_code
     )
+}
+
+/// codegraph 1.6 空索引时以 exit 0 输出的固定人读提示（实测 1.6.2：
+/// `ℹ No files indexed. Run "codegraph index" first.`，stdout）。合法的
+/// files JSON 数组不可能包含该文本。
+fn is_empty_index_notice(stdout: &str) -> bool {
+    stdout.trim().contains("No files indexed")
 }
 
 #[cfg(test)]
@@ -551,6 +601,24 @@ mod tests {
             cli.status(root),
             Err(AggregateIndexError::Failed { code, .. }) if code == "codegraph_status_invalid_json"
         ));
+    }
+
+    /// 现场（/tmp/notify-center，成员仓仅 .git+README）：codegraph 1.6 对
+    /// 0 文件库执行 `files --json` 以 exit 0 输出人读提示而非 JSON 数组
+    /// （`--json` 契约被上游违反）。必须识别该形态返回专用空索引码，
+    /// 交给上层归并为业务语义错误，不得把提示文本当 JSON 解析天书透出。
+    #[test]
+    fn files_on_empty_index_reports_dedicated_code_instead_of_json_gibberish() {
+        let runner = Arc::new(ScriptedCodeGraphRunner::from_results(vec![
+            CommandCapture::success("ℹ No files indexed. Run \"codegraph index\" first."),
+        ]));
+        let cli = CodeGraphCli::new(runner, "codegraph".into());
+        let error = cli.files(Path::new("/aggregate")).unwrap_err();
+        assert!(
+            matches!(&error, AggregateIndexError::Failed { code, .. }
+                if *code == "codegraph_files_empty_index"),
+            "empty index must be business-semantic, got: {error}"
+        );
     }
 
     fn assert_clean_environment(request: &BoundedCommandRequest) {

@@ -822,8 +822,25 @@ const LC_BOOTSTRAP_REASON_TITLES: Record<string, string> = {
   identity_migration_failed: "逻辑代码库身份迁移失败，等待人工修复",
   aggregate_initialization_failed: "成员索引构建失败，等待显式重试",
   aggregate_index_failed: "聚合索引首建失败，等待显式重试",
+  // codegraph 语义化（owner 直批）：空仓/成员无可索引代码文件时给出
+  // 业务标题，不再让 JSON 解析天书上卡。
+  aggregate_index_member_coverage_failed: "聚合索引失败:成员代码覆盖不足",
   bootstrap_waiting_for_human: "逻辑代码库冷启动等待人工动作",
   member_rules_missing: "成员规则材料缺失，provider 保持零启动",
+};
+
+/** 覆盖不足的成员清单提取——后端 detail 契约：
+ * `... no indexable code file under included members [api, web]; ...`。 */
+const MEMBER_COVERAGE_LIST_PATTERN = /members \[([^\]]*)\]/;
+const LC_BOOTSTRAP_REASON_HINTS: Partial<
+  Record<string, (detail: string) => string>
+> = {
+  aggregate_index_member_coverage_failed: (detail) => {
+    const members = MEMBER_COVERAGE_LIST_PATTERN.exec(detail)?.[1];
+    return members
+      ? `无可索引代码文件的成员：${members} · 每成员至少 1 个可索引代码文件`
+      : "每成员至少 1 个可索引代码文件";
+  },
 };
 
 /** C4 Task 9：durable bootstrap notice → 只读收件箱条目（不进错误计数；
@@ -836,7 +853,9 @@ export function logicalCodebaseBootstrapItem(
   >,
 ): CockpitInboxItem {
   const stepLabel = LC_BOOTSTRAP_STEP_LABELS[notice.step] ?? notice.step;
+  const reasonHint = LC_BOOTSTRAP_REASON_HINTS[notice.reason_code]?.(notice.summary);
   const summaryParts = [
+    reasonHint,
     notice.summary,
     `步骤：${stepLabel} · 对象 ${notice.object_id}`,
     notice.external_side_effect && notice.external_side_effect !== "none"

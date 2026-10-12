@@ -84,7 +84,10 @@ impl AggregateIndexRecord {
             status: AggregateIndexStatus::Building,
             member_snapshots,
             observed_after_member_snapshots: Vec::new(),
-            codegraph_version: "1.6.0".into(),
+            // 空值＝尚未实测：激活时由 operation 透传 verify_version 的
+            // 实测 CLI 版本；building/failed 世代不伪造版本号误导排障
+            // （现场 durable record 曾以硬编码 1.6.0 冒充实测值）。
+            codegraph_version: String::new(),
             codegraph_root: PathBuf::new(),
             config_digest: String::new(),
             updated_at: created_at.clone(),

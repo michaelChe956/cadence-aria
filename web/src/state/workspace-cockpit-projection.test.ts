@@ -10,6 +10,7 @@ import {
   gateKindOf,
   gateTerminateBlockReason,
   isStaleDriverLeaseItem,
+  logicalCodebaseBootstrapItem,
   selectCockpitFlow,
   selectCockpitInbox,
   selectGateProjection,
@@ -1293,5 +1294,75 @@ describe("trust missing inbox projection", () => {
     });
     const items = selectCockpitInbox(useWorkspaceStore.getState());
     expect(items.find((item) => item.id === "hard_error:error")).toBeUndefined();
+  });
+});
+
+// ① UI 语义（owner 直批 codegraph 错误语义化）：空仓/成员无可索引代码
+// 文件时，bootstrap 失败卡沿既有通道呈现业务文案——专用标题 + 成员
+// 清单 +「每成员至少 1 个可索引代码文件」指引；通用 CLI 失败仍走既有
+// 标题，不新建卡型。
+describe("lc_bootstrap 聚合索引覆盖不足文案", () => {
+  const projection = {
+    project_id: "project_0001",
+    logical_codebase_id: "logical_codebase_0001",
+    membership_revision: 5,
+  };
+
+  it("覆盖不足：专用标题 + 无可索引文件的成员清单 + 每成员至少 1 个可索引代码文件", () => {
+    const item = logicalCodebaseBootstrapItem(
+      {
+        key: "lc:aggregate_index_active:aggregate_index_cov_0001",
+        step: "aggregate_index_active",
+        object_id: "aggregate_index_cov_0001",
+        reason_code: "aggregate_index_member_coverage_failed",
+        summary:
+          "aggregate_index_failed:aggregate_index_member_coverage_failed: no indexable code file under included members [api, web]; each included member needs at least 1 indexable code file",
+        external_side_effect: "aggregate_index_cli",
+        allowed_actions: ["retry"],
+        next_step: null,
+        created_at: "2026-10-12T00:00:00Z",
+      },
+      projection,
+    );
+    expect(item.title).toBe("聚合索引失败:成员代码覆盖不足");
+    expect(item.summary).toContain("无可索引代码文件的成员：api, web");
+    expect(item.summary).toContain("每成员至少 1 个可索引代码文件");
+    expect(item.bootstrapInfo?.allowedActions).toEqual(["retry"]);
+  });
+
+  it("清单提取不到时保留指引文案；通用失败沿用既有标题", () => {
+    const noList = logicalCodebaseBootstrapItem(
+      {
+        key: "lc:aggregate_index_active:aggregate_index_cov_0002",
+        step: "aggregate_index_active",
+        object_id: "aggregate_index_cov_0002",
+        reason_code: "aggregate_index_member_coverage_failed",
+        summary: "aggregate_index_failed:aggregate_index_member_coverage_failed: coverage lost",
+        external_side_effect: "aggregate_index_cli",
+        allowed_actions: ["retry"],
+        next_step: null,
+        created_at: "2026-10-12T00:00:00Z",
+      },
+      projection,
+    );
+    expect(noList.title).toBe("聚合索引失败:成员代码覆盖不足");
+    expect(noList.summary).toContain("每成员至少 1 个可索引代码文件");
+
+    const generic = logicalCodebaseBootstrapItem(
+      {
+        key: "lc:aggregate_index_active:aggregate_index_gen_0003",
+        step: "aggregate_index_active",
+        object_id: "aggregate_index_gen_0003",
+        reason_code: "aggregate_index_failed",
+        summary: "aggregate_index_failed:codegraph_init_failed: cli exploded",
+        external_side_effect: "aggregate_index_cli",
+        allowed_actions: ["retry"],
+        next_step: null,
+        created_at: "2026-10-12T00:00:00Z",
+      },
+      projection,
+    );
+    expect(generic.title).toBe("聚合索引首建失败，等待显式重试");
+    expect(generic.summary).not.toContain("可索引代码文件");
   });
 });

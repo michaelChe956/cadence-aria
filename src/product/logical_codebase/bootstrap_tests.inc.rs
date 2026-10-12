@@ -1109,6 +1109,80 @@ mod tests {
         ));
     }
 
+    /// ① UI 语义：覆盖不足（成员无可索引代码文件）的 Failed 记录投影
+    /// 专用 reason_code（aggregate_index_member_coverage_failed），前端
+    /// 呈现「聚合索引失败:成员代码覆盖不足」业务标题；其它 CLI 失败仍
+    /// 回落通用 aggregate_index_failed。沿既有失败卡通道，不新建卡型。
+    #[test]
+    fn aggregate_coverage_failure_projects_dedicated_reason_code() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let lc_id = create_project_and_lc(&paths, &temp.path().join("aggregate-root"));
+        let store = AggregateIndexStore::for_lc(paths.clone(), &lc_id);
+        store
+            .create(
+                "project_0001",
+                AggregateIndexRecord::building(
+                    "aggregate_index_cov_failed_0001".to_string(),
+                    "project_0001".to_string(),
+                    2,
+                    Vec::new(),
+                    chrono::Utc::now().to_rfc3339(),
+                ),
+            )
+            .unwrap();
+        store
+            .mark_status(
+                "project_0001",
+                "aggregate_index_cov_failed_0001",
+                AggregateIndexStatus::Failed,
+                Some(
+                    "aggregate_index_failed:aggregate_index_member_coverage_failed: \
+                     no indexable code file under included members [api, web]; each included \
+                     member needs at least 1 indexable code file"
+                        .to_string(),
+                ),
+            )
+            .unwrap();
+
+        let projection = LogicalCodebaseBootstrapProjector::new(paths.clone())
+            .project("project_0001", &lc_id)
+            .unwrap();
+        let step = projection
+            .steps
+            .iter()
+            .find(|step| step.step == LogicalCodebaseBootstrapStep::AggregateIndexActive)
+            .unwrap();
+        assert_eq!(step.status, LogicalCodebaseBootstrapStepStatus::Failed);
+        let failure = step.failure.as_ref().expect("coverage failure detail");
+        assert_eq!(
+            failure.reason_code, "aggregate_index_member_coverage_failed",
+            "coverage failure must project the dedicated reason code"
+        );
+        assert!(failure.detail.contains("members [api, web]"));
+        // 沿既有通道：失败步仍允许 Retry（G3 派发 init+sync 重建）。
+        assert!(step.allowed_actions.contains(&BootstrapActionKind::Retry));
+
+        // 对照：非覆盖类 CLI 失败保持通用 reason_code。
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let lc_id = create_project_and_lc(&paths, &temp.path().join("aggregate-root"));
+        seed_failed_aggregate_index_record(&paths, &lc_id, "cmd-semantics-control");
+        let projection = LogicalCodebaseBootstrapProjector::new(paths)
+            .project("project_0001", &lc_id)
+            .unwrap();
+        let step = projection
+            .steps
+            .iter()
+            .find(|step| step.step == LogicalCodebaseBootstrapStep::AggregateIndexActive)
+            .unwrap();
+        assert_eq!(step.status, LogicalCodebaseBootstrapStepStatus::Failed);
+        assert_eq!(
+            step.failure.as_ref().unwrap().reason_code,
+            "aggregate_index_failed"
+        );
+    }
+
     // Task 2（aggregate-policy-root-publication）：桩等待谓词专用测试。
     // 按既有 .inc 拆分先例（tests_parts）把本主题测试拆入独立 part,
     // 保持本文件低于 large_file_guard 的 1200 行上限。

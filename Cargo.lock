@@ -448,6 +448,7 @@ dependencies = [
  "libc",
  "mime_guess",
  "mockito",
+ "parking_lot",
  "png 0.17.16",
  "pulldown-cmark",
  "reqwest",

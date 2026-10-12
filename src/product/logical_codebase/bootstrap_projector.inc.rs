@@ -599,19 +599,32 @@ impl LogicalCodebaseBootstrapProjector {
                     record.aggregate_index_id.clone(),
                     None,
                 ),
-                AggregateIndexStatus::Failed => (
-                    LogicalCodebaseBootstrapStepStatus::Failed,
-                    record.aggregate_index_id.clone(),
-                    Some(BootstrapFailure {
-                        reason_code: "aggregate_index_failed".to_string(),
-                        detail: record
-                            .warning
-                            .clone()
-                            .unwrap_or_else(|| "first aggregate index build failed".to_string()),
-                        retryable: true,
-                        external_side_effect: "aggregate_index_cli".to_string(),
-                    }),
-                ),
+                AggregateIndexStatus::Failed => {
+                    let warning = record
+                        .warning
+                        .clone()
+                        .unwrap_or_else(|| "first aggregate index build failed".to_string());
+                    // 覆盖不足（成员无可索引代码文件，如 README-only 空
+                    // 仓）投影专用 reason_code，前端呈现「聚合索引失败:
+                    // 成员代码覆盖不足」业务标题；其它 CLI 失败保持通用
+                    // aggregate_index_failed。沿既有失败卡通道。
+                    let reason_code = if warning.contains("aggregate_index_member_coverage_failed")
+                    {
+                        "aggregate_index_member_coverage_failed"
+                    } else {
+                        "aggregate_index_failed"
+                    };
+                    (
+                        LogicalCodebaseBootstrapStepStatus::Failed,
+                        record.aggregate_index_id.clone(),
+                        Some(BootstrapFailure {
+                            reason_code: reason_code.to_string(),
+                            detail: warning,
+                            retryable: true,
+                            external_side_effect: "aggregate_index_cli".to_string(),
+                        }),
+                    )
+                }
                 AggregateIndexStatus::Stale | AggregateIndexStatus::Degraded => (
                     LogicalCodebaseBootstrapStepStatus::WaitingForHuman,
                     record.aggregate_index_id.clone(),
