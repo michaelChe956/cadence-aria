@@ -354,3 +354,134 @@ async fn conversational_gate_revision_compiles_with_lc_shaped_empty_story_reposi
         "LC 形态(空 story.repository_id)修订必须经会话记录解析 repository 完成编译,不得 lowering_error"
     );
 }
+
+/// 诊断冻结缺口：SC 门内修订轮换 refs 后旧 Approval 元组未被失效 → 复评
+/// 通过的 confirm 在 compile 冲突臂以新 refs 重算 attempt id ≠ 旧元组 →
+/// `single_candidate_approval_conflict`，门永久卡死。本测试铺真实事故链：
+/// 首轮 confirm 在 provenance 边界中断（元组/reservation/provenance 已
+/// durable）→ 门重开 → 门内修订换 refs → 复评路由回 Approval → confirm。
+/// 修复后修订 CAS 随 refs 真正轮换失效旧元组，confirm 以新元组/新编译
+/// 代次走通完整批准链（同 source 重放不动有效元组由 store 层测试钉住）。
+#[tokio::test]
+async fn conversational_gate_revision_rotates_stale_approval_tuple_then_confirm_compiles() {
+    let _serial = crate::product::workspace_engine::single_candidate_compile_test_lock().await;
+    let (_root, lifecycle, mut engine) =
+        evaluate_gate_revision_fixture("revision_rotate_tuple", 2, 0);
+
+    // 首轮 confirm：close CAS 原子提升 Evaluate→Approval（人工权威升级），
+    // compile 在 provenance 边界中断；durable 留下与 v1 refs 绑定的旧元组、
+    // compile reservation 与旧 provenance 引用，门按 F-54 B2 重开等待人工。
+    let failpoint = engine.register_single_candidate_compile_failpoint(
+        crate::product::workspace_engine::SingleCandidateCompileCheckpoint::ProvenancePersisted,
+    );
+    let first_error = engine
+        .handle_human_gate_termination(HumanGateCloseDecision::Approve)
+        .await
+        .expect_err("首轮 confirm 必须在 provenance 边界中断");
+    drop(failpoint);
+    assert!(
+        first_error.contains("single-candidate approval compile failed"),
+        "unexpected first confirm error: {first_error}"
+    );
+    let stalled = lifecycle
+        .get_workspace_session(engine.session().session_id.as_str())
+        .expect("stalled session after provenance boundary");
+    assert_eq!(
+        stalled.single_candidate_phase,
+        Some(crate::product::models::SingleCandidatePhase::Approval)
+    );
+    assert_eq!(
+        stalled.status,
+        crate::product::models::WorkspaceSessionStatus::WaitingForHuman,
+        "F-54 B2：compile 可恢复失败必须重开门而不是落终态"
+    );
+    assert!(stalled.approval_attempt_id.is_some());
+    let stale_attempt_id = stalled.approval_attempt_id.clone().unwrap();
+    let stale_compile_id = stalled
+        .compile_reservation
+        .as_ref()
+        .expect("reservation 必须先于 provenance durable")
+        .compile_id
+        .clone();
+    let stale_provenance_ref = stalled
+        .publication_provenance_ref
+        .clone()
+        .expect("provenance ref 必须先于中断 durable");
+
+    // 门内人工修订：v2 source 内容寻址出新 refs，修订 CAS 必须随 refs 真正
+    // 轮换失效旧批准绑定（红：旧代码保留旧元组 → confirm 撞冲突臂）。
+    let turn_id = open_running_revision_turn(&mut engine, "revision_rotate_tuple_command").await;
+    let result = engine
+        .run_sc_manual_revision_turn(&turn_id, handoff_clean_rep4_v2())
+        .await
+        .expect("in-gate revision must complete");
+    assert!(matches!(
+        result,
+        crate::product::workspace_engine::ScManualRevisionResult::Accepted { .. }
+    ));
+    let revised = lifecycle
+        .get_workspace_session(engine.session().session_id.as_str())
+        .expect("revised session");
+    assert_ne!(
+        revised.work_item_plan_source_revision_ref, stalled.work_item_plan_source_revision_ref,
+        "门内修订必须真正轮换 refs"
+    );
+    assert_eq!(
+        revised.approval_attempt_id, None,
+        "修订轮换 refs 必须失效旧 Approval 元组"
+    );
+    assert_eq!(revised.approved_at, None, "approved_at 随元组失效");
+    assert_eq!(
+        revised.compile_reservation, None,
+        "compile_reservation 随元组失效"
+    );
+    assert_eq!(
+        revised.publication_provenance_ref, None,
+        "旧 provenance 引用随旧编译代次失效"
+    );
+    assert_eq!(
+        revised.single_candidate_phase,
+        Some(crate::product::models::SingleCandidatePhase::Approval),
+        "复评通过（无 reviewer 走 synthetic Pass）必须路由回 Approval"
+    );
+
+    // 再 confirm：批准链必须以新元组走通（红：`single_candidate_approval_conflict`）。
+    let outcome = engine
+        .handle_human_gate_termination(HumanGateCloseDecision::Approve)
+        .await
+        .expect("confirm after in-gate revision must re-approve the rotated refs");
+    assert_eq!(
+        outcome,
+        crate::product::workspace_engine::HumanGateCloseOutcome::Confirmed
+    );
+    let closed = lifecycle
+        .get_workspace_session(engine.session().session_id.as_str())
+        .expect("closed session");
+    assert_eq!(
+        closed.status,
+        crate::product::models::WorkspaceSessionStatus::Confirmed
+    );
+    assert_eq!(
+        closed.single_candidate_phase,
+        Some(crate::product::models::SingleCandidatePhase::Completed)
+    );
+    // 新批准元组与新 refs 绑定，编译建立新代次（不静默覆盖旧 compile/provenance）。
+    let new_attempt_id = closed
+        .approval_attempt_id
+        .clone()
+        .expect("rotated approval tuple");
+    assert_ne!(new_attempt_id, stale_attempt_id);
+    let new_reservation = closed
+        .compile_reservation
+        .as_ref()
+        .expect("new compile reservation");
+    assert_ne!(
+        new_reservation.compile_id, stale_compile_id,
+        "refs 轮换后的 confirm 必须建立新编译代次"
+    );
+    assert_ne!(
+        closed.publication_provenance_ref.as_deref(),
+        Some(stale_provenance_ref.as_str()),
+        "新代次 provenance 引用不得复用旧代次"
+    );
+}

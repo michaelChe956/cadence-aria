@@ -542,9 +542,27 @@ impl LifecycleStore {
                 self.save_artifact_versions(&stored.id, artifact_versions)?;
             }
             let mut next = stored;
+            // F-54 B1 同构（诊断冻结）：门内修订真正轮换 refs 即产生新候选，
+            // 旧 Approval 绑定对新 refs 失效，必须随轮换一并清空——否则复评
+            // 通过后的 confirm 在 compile 冲突臂以新 refs 重算 attempt id ≠
+            // 旧元组 → `single_candidate_approval_conflict`，门永久卡死；旧
+            // compile_reservation/publication_provenance_ref 同属旧编译代次，
+            // 一并失效，下次 approve 走 (None, None) 全新元组并建立新代次。
+            // refs 未轮换（同 source 重放，source-only 内容寻址 refs 不变）时
+            // 现元组仍与 refs 精确绑定，原样保留。
+            let refs_rotated = next.work_item_plan_source_revision_ref.as_deref()
+                != Some(source_revision_ref)
+                || next.plan_candidate_ir_ref.as_deref() != Some(plan_candidate_ir_ref)
+                || next.mechanical_report_ref.as_deref() != Some(mechanical_report_ref);
             next.work_item_plan_source_revision_ref = Some(source_revision_ref.to_string());
             next.plan_candidate_ir_ref = Some(plan_candidate_ir_ref.to_string());
             next.mechanical_report_ref = Some(mechanical_report_ref.to_string());
+            if refs_rotated {
+                next.approval_attempt_id = None;
+                next.approved_at = None;
+                next.compile_reservation = None;
+                next.publication_provenance_ref = None;
+            }
             next.updated_at = turn.updated_at.clone();
             if let Err(error) = write_json(&session_path, &next) {
                 let _ = self.save_artifact_versions(&next.id, &original_versions);

@@ -478,3 +478,214 @@ fn repair_generation_rotation_invalidates_stale_approval_tuple() {
         Some(fresh_attempt.as_str())
     );
 }
+
+/// SC 门内人工修订经 `complete_human_gate_revision` 轮换 refs 时必须同时
+/// 失效旧 Approval 绑定（approval_attempt_id / approved_at /
+/// compile_reservation / publication_provenance_ref）。缺口形态（诊断冻结）：
+/// 首轮 confirm 在 Approval/reservation/provenance 持久化后中断 → 门重开 →
+/// 门内修订换 refs → 复评通过再 confirm 时 compile 以新 refs 重算 attempt
+/// id ≠ 旧元组 → `single_candidate_approval_conflict`，门永久卡死。refs 未
+/// 真正轮换（同 source 重放：source-only 内容寻址下 refs 不变）时旧元组对
+/// 当前 refs 仍有效，必须原样保留——同 refs 无新代次，不得静默覆盖。
+#[test]
+fn human_gate_revision_rotation_invalidates_stale_approval_tuple() {
+    let temp = tempdir().unwrap();
+    let store = LifecycleStore::new(ProductAppPaths::new(temp.path()));
+    let mut session = store
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: "entity_0001".to_string(),
+            workspace_type: WorkspaceType::WorkItemPlan,
+            author_provider: ProviderName::Codex,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
+            review_rounds: 1,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+            work_item_plan_options: Some(WorkItemPlanSessionOptions {
+                flow_kind: WorkItemPlanFlowKind::SingleCandidate,
+                run_policy: RunPolicy::Interactive,
+                rollout_snapshot: true,
+            }),
+        })
+        .expect("create single candidate session");
+    let source_ref_v1 =
+        "project/project_0001/issue/issue_0001/plan/entity_0001/source_revision/source-001";
+    let ir_ref_v1 =
+        "project/project_0001/issue/issue_0001/plan/entity_0001/plan_candidate_ir/ir-001";
+    let report_ref_v1 =
+        "project/project_0001/issue/issue_0001/plan/entity_0001/mechanical_report/report-001";
+    let stale_attempt = single_candidate_approval_attempt_id(
+        &session.id,
+        &session.entity_id,
+        source_ref_v1,
+        ir_ref_v1,
+        report_ref_v1,
+    );
+    let stale_provenance_ref = "project/project_0001/issue/issue_0001/plan/entity_0001/publication_provenance/1f94b833_stale_compile";
+    // 首轮 confirm 中断后的 durable 形态：Approval 相位 + v1 refs + 与 v1 绑定
+    // 的旧 Approval 元组 + compile reservation + 旧 provenance 引用。
+    session.single_candidate_phase = Some(SingleCandidatePhase::Approval);
+    session.work_item_plan_source_revision_ref = Some(source_ref_v1.to_string());
+    session.plan_candidate_ir_ref = Some(ir_ref_v1.to_string());
+    session.mechanical_report_ref = Some(report_ref_v1.to_string());
+    session.approval_attempt_id = Some(stale_attempt.clone());
+    session.approved_at = Some("2026-10-12T08:00:00Z".to_string());
+    session.compile_reservation = Some(SingleCandidateCompileReservation {
+        compile_id: single_candidate_compile_id(
+            &session.id,
+            &session.entity_id,
+            &stale_attempt,
+            "2026-10-12T08:00:00Z",
+        ),
+        now: "2026-10-12T08:00:00Z".to_string(),
+        publication_provenance_ref: stale_provenance_ref.to_string(),
+    });
+    session.publication_provenance_ref = Some(stale_provenance_ref.to_string());
+    write_json(
+        &store
+            .workspace_sessions_root("project_0001", "issue_0001")
+            .join(format!("{}.json", session.id)),
+        &session,
+    )
+    .expect("seed approval gate with stale tuple");
+    let expected = store
+        .get_workspace_session(&session.id)
+        .expect("reload approval gate session");
+
+    let running_turn = crate::product::models::HumanGateTurn {
+        turn_id: "human_gate_turn_rotation_0001".to_string(),
+        session_id: expected.id.clone(),
+        command_id: "cmd_rotation_0001".to_string(),
+        feedback_text: "修订当前候选".to_string(),
+        status: crate::product::models::HumanGateTurnStatus::Running,
+        attempt_no: 1,
+        budget_reserved: 1,
+        source_hash: "a1b2c3d4".repeat(8),
+        result_artifact_ref: None,
+        failure_class: None,
+        created_at: "2026-10-12T09:00:00Z".to_string(),
+        updated_at: "2026-10-12T09:00:01Z".to_string(),
+    };
+    write_json(
+        &store
+            .human_gate_turn_path(&expected, &running_turn.turn_id)
+            .expect("revision turn path"),
+        &running_turn,
+    )
+    .expect("seed running revision turn");
+
+    let source_ref_v2 =
+        "project/project_0001/issue/issue_0001/plan/entity_0001/source_revision/source-002";
+    let ir_ref_v2 =
+        "project/project_0001/issue/issue_0001/plan/entity_0001/plan_candidate_ir/ir-002";
+    let report_ref_v2 =
+        "project/project_0001/issue/issue_0001/plan/entity_0001/mechanical_report/report-002";
+    let mut completed = running_turn.clone();
+    completed.status = crate::product::models::HumanGateTurnStatus::Completed;
+    let rotated = store
+        .complete_human_gate_revision(
+            &expected,
+            completed,
+            source_ref_v2,
+            ir_ref_v2,
+            report_ref_v2,
+            &[],
+            "artifact_version_001",
+        )
+        .expect("persist in-gate revision refs");
+    assert_eq!(
+        rotated.work_item_plan_source_revision_ref.as_deref(),
+        Some(source_ref_v2)
+    );
+    assert_eq!(rotated.plan_candidate_ir_ref.as_deref(), Some(ir_ref_v2));
+    assert_eq!(
+        rotated.mechanical_report_ref.as_deref(),
+        Some(report_ref_v2)
+    );
+    assert_eq!(
+        rotated.approval_attempt_id, None,
+        "门内修订轮换 refs 必须失效旧 Approval 元组"
+    );
+    assert_eq!(rotated.approved_at, None, "approved_at 随元组失效");
+    assert_eq!(
+        rotated.compile_reservation, None,
+        "compile_reservation 随元组失效"
+    );
+    assert_eq!(
+        rotated.publication_provenance_ref, None,
+        "旧 provenance 引用随旧编译代次一并失效"
+    );
+
+    // 复评通过后的下一次 approve 不得再冲突：清空后走 (None, None) 全新元组
+    // 分支，新 attempt id 按新 refs 计算（旧代码在此命中 `_` 冲突臂）。
+    let fresh_attempt = single_candidate_approval_attempt_id(
+        &rotated.id,
+        &rotated.entity_id,
+        source_ref_v2,
+        ir_ref_v2,
+        report_ref_v2,
+    );
+    let approved = store
+        .compare_and_save_single_candidate_approval(
+            &rotated,
+            &fresh_attempt,
+            "2026-10-12T10:00:00Z",
+        )
+        .expect("approve after in-gate revision must not conflict with the stale tuple");
+    assert_eq!(
+        approved.approval_attempt_id.as_deref(),
+        Some(fresh_attempt.as_str())
+    );
+
+    // refs 未真正轮换（同 source 重放）时不得误伤仍有效的新元组：source-only
+    // 内容寻址使同 source 产出同 refs，现元组按 refs 计算仍精确匹配。
+    let replay_expected = store
+        .get_workspace_session(&approved.id)
+        .expect("reload session after fresh approval");
+    let replay_turn = crate::product::models::HumanGateTurn {
+        turn_id: "human_gate_turn_rotation_0002".to_string(),
+        session_id: replay_expected.id.clone(),
+        command_id: "cmd_rotation_0002".to_string(),
+        feedback_text: "按同一 source 重放修订".to_string(),
+        status: crate::product::models::HumanGateTurnStatus::Running,
+        attempt_no: 1,
+        budget_reserved: 1,
+        source_hash: "a1b2c3d4".repeat(8),
+        result_artifact_ref: None,
+        failure_class: None,
+        created_at: "2026-10-12T11:00:00Z".to_string(),
+        updated_at: "2026-10-12T11:00:01Z".to_string(),
+    };
+    write_json(
+        &store
+            .human_gate_turn_path(&replay_expected, &replay_turn.turn_id)
+            .expect("replay turn path"),
+        &replay_turn,
+    )
+    .expect("seed running replay turn");
+    let mut replay_completed = replay_turn.clone();
+    replay_completed.status = crate::product::models::HumanGateTurnStatus::Completed;
+    let replayed = store
+        .complete_human_gate_revision(
+            &replay_expected,
+            replay_completed,
+            source_ref_v2,
+            ir_ref_v2,
+            report_ref_v2,
+            &[],
+            "artifact_version_002",
+        )
+        .expect("same-refs revision replay must persist");
+    assert_eq!(
+        replayed.approval_attempt_id.as_deref(),
+        Some(fresh_attempt.as_str()),
+        "refs 未轮换时有效元组必须原样保留"
+    );
+    assert_eq!(
+        replayed.approved_at.as_deref(),
+        Some("2026-10-12T10:00:00Z"),
+        "refs 未轮换时 approved_at 不得被重置"
+    );
+}
