@@ -38,14 +38,16 @@ pub(crate) fn reviewer_baseline_teaching_block(branch: &str) -> String {
 impl WorkspaceEngine {
     /// issue 基线树解析（REQ-PIB-02，四面同链同源：author 两族 / reviewer 族 /
     /// author 修订面）。跳过面（`Ok(None)`，行为不变）：无持久 store 的内存态
-    /// engine、无仓库路径会话、聚合 Logical Story/Design（Non-Goal 多仓差异基线）。
+    /// engine、无仓库路径会话、聚合 Logical 规划会话（Story/Design/WorkItemPlan，
+    /// Non-Goal 多仓差异基线：repository_path 为聚合根视图无 `.git`，见
+    /// `is_aggregate_planning_session`）。
     /// 否则经 `IssueStore` 读 issue.base_branch → `resolve_effective_base_branch`
     ///（三面同源唯一解析链）：不可解析（分支被删/存量皆无/仓库不可用）→
     /// `Err(diagnosis)` fail-closed 终止该轮 provider 运行，不回退不猜替代分支。
     fn resolve_issue_baseline_tree(
         &self,
     ) -> Result<Option<crate::cross_cutting::streaming_provider::BaselineTreeRef>, String> {
-        if self.is_aggregate_story_or_design() {
+        if self.is_aggregate_planning_session() {
             return Ok(None);
         }
         let Some(repository_path) = self.session.repository_path.as_ref() else {
@@ -201,14 +203,78 @@ mod baseline_teaching_fixture {
             engine,
         }
     }
+    /// LC（多仓聚合）反例夹具：WorkItemPlan 会话 + `repository_path` = 裸目录
+    /// （无 `.git`，模拟聚合根视图）+ issue（repo_id=None、base_branch=None，
+    /// 与生产 LC 建模口径一致）。聚合视野 marker 由测试按需注入（生产由
+    /// `workspace_context/builder.rs` 在 Logical routing × WorkItemPlan 下注入
+    /// 同 marker 系统消息）。
+    pub(super) fn lc_plan_engine_on_bare_directory() -> BaselineEngineFixture {
+        let aria_root = tempfile::tempdir().expect("aria root");
+        let bare_root = tempfile::tempdir().expect("bare aggregate root dir");
+        let app_paths =
+            crate::product::app_paths::ProductAppPaths::new(aria_root.path().join(".aria"));
+        crate::product::project_store::ProjectStore::new(app_paths.clone())
+            .create(crate::product::project_store::CreateProjectInput {
+                name: "lc plan baseline fixture".to_string(),
+                description: None,
+            })
+            .expect("create project");
+        crate::product::issue_store::IssueStore::new(app_paths.clone())
+            .create(crate::product::issue_store::CreateProductIssueInput {
+                project_id: "project_0001".to_string(),
+                repo_id: None,
+                logical_codebase_id: None,
+                base_branch: None,
+                title: "LC plan baseline".to_string(),
+                description: None,
+                change_id: None,
+            })
+            .expect("create issue");
+        let lifecycle = crate::product::lifecycle_store::LifecycleStore::new(app_paths);
+        let session_record = lifecycle
+            .create_workspace_session(
+                crate::product::lifecycle_store::CreateWorkspaceSessionInput {
+                    project_id: "project_0001".to_string(),
+                    issue_id: "issue_0001".to_string(),
+                    entity_id: "story_spec_0001".to_string(),
+                    workspace_type: WorkspaceType::WorkItemPlan,
+                    author_provider: ProviderName::ClaudeCode,
+                    reviewer_provider: Some(ProviderName::Codex),
+
+                    review_rounds: 1,
+                    superpowers_enabled: false,
+                    openspec_enabled: false,
+                    work_item_plan_options: None,
+                },
+            )
+            .expect("create workspace session");
+        let mut session =
+            crate::product::workspace_engine::types::WorkspaceSession::from_record(session_record);
+        session.repository_path = Some(bare_root.path().to_path_buf());
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(8);
+        let engine = WorkspaceEngine::new_persistent(
+            std::sync::Arc::new(crate::product::checkpoint_store::CheckpointStore::new(
+                aria_root.path().join("checkpoints"),
+            )),
+            lifecycle,
+            event_tx,
+            session,
+        );
+        BaselineEngineFixture {
+            _aria_root: aria_root,
+            _repo: bare_root,
+            engine,
+        }
+    }
 }
 
 #[cfg(test)]
 mod author_baseline_tests {
-    use super::baseline_teaching_fixture::baseline_engine;
+    use super::baseline_teaching_fixture::{baseline_engine, lc_plan_engine_on_bare_directory};
     use crate::product::models::{ProviderName, WorkspaceType};
     use crate::product::workspace_engine::types::AuthorPromptMode;
     use crate::product::workspace_engine::types::PlanAuthorOutputContract;
+    use crate::product::workspace_engine::types::SessionMessage;
 
     /// REQ-PIB-02 场景 4（软限制注入）：native（ClaudeCode）会话正常构造（不
     /// 拒启），prompt 含基线教学块，input 携带基线锚点——story/design 与 plan
@@ -305,6 +371,67 @@ mod author_baseline_tests {
             .build_streaming_input("生成", AuthorPromptMode::FullConversation)
             .expect_err("no default branch must fail closed");
         assert!(error.contains("无法推断默认基准分支"), "{error}");
+    }
+    /// LC 多仓 plan 会话（聚合视野 marker + repository_path=聚合根裸目录无
+    /// `.git`，缺口现场：ttt/LC notify-center）：issue 基线解析整体跳过
+    /// （Non-Goal 多仓差异基线，与 `plan_preflight` 的 repo_id=None 口径对齐），
+    /// 不 fail-closed、不注入基线教学块；共享解析链 `resolve_issue_baseline_tree`
+    /// 对 author 两族/reviewer 族/修订面同源生效。
+    #[test]
+    fn lc_aggregate_plan_session_skips_baseline_resolution_on_bare_directory_root() {
+        let mut fixture = lc_plan_engine_on_bare_directory();
+        fixture.engine.session.messages.push(SessionMessage {
+            id: "msg_aggregate_scope".to_string(),
+            role: "system".to_string(),
+            content: "## 聚合代码库成员清单\n- busi\n- api\n- gateway\n- frontend".to_string(),
+            checkpoint_id: None,
+            created_at: "2026-10-12T00:00:00Z".to_string(),
+        });
+        // 共享解析链直接断言（author/reviewer/修订全族同源跳过）。
+        assert!(
+            fixture
+                .engine
+                .resolve_issue_baseline_tree()
+                .expect("LC plan 会话基线解析必须跳过而非 fail-closed")
+                .is_none(),
+            "LC 聚合 plan 会话基线解析应为 Ok(None)"
+        );
+        // 端到端：plan author 面（缺口现场首个 plan 生成报错链）不 fail-closed。
+        let input = fixture
+            .engine
+            .build_work_item_plan_streaming_input(
+                crate::protocol::contracts::ProviderType::ClaudeCode,
+                "plan prompt".to_string(),
+                "/tmp/worktree".to_string(),
+                ProviderName::ClaudeCode,
+                PlanAuthorOutputContract::Structured,
+            )
+            .expect("LC 多仓 plan 会话基线解析必须跳过而非 fail-closed");
+        assert!(input.baseline_tree.is_none());
+        assert!(
+            !input.prompt.contains("基准分支基线"),
+            "跳过面不得注入基线教学块：{}",
+            input.prompt
+        );
+    }
+
+    /// 对照面（REQ-PIB-02 不变量不削）：同一裸目录 repository_path，无聚合
+    /// 视野 marker（单仓/Legacy 形态）→ 默认链 `git show-ref` 128 仍
+    /// fail-closed，不回退不猜。
+    #[test]
+    fn bare_directory_without_aggregate_scope_still_fails_closed() {
+        let fixture = lc_plan_engine_on_bare_directory();
+        let error = fixture
+            .engine
+            .build_work_item_plan_streaming_input(
+                crate::protocol::contracts::ProviderType::ClaudeCode,
+                "plan prompt".to_string(),
+                "/tmp/worktree".to_string(),
+                ProviderName::ClaudeCode,
+                PlanAuthorOutputContract::Structured,
+            )
+            .expect_err("无聚合 marker 的裸目录必须保持 fail-closed");
+        assert!(error.contains("基准分支解析所需 git 仓库不可用"), "{error}");
     }
 }
 

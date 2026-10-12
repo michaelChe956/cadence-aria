@@ -419,6 +419,19 @@ impl WorkspaceEngine {
         ) && self.has_aggregate_scope_system_context()
     }
 
+    /// 聚合规划会话（Story/Design/WorkItemPlan × 聚合视野 context）—— issue
+    /// 基线解析整体跳过（Non-Goal 多仓差异基线）：Logical routing 下
+    /// `session.repository_path` 为聚合根视图（无 `.git`），默认链 `git show-ref`
+    /// 必 128；与 `plan_preflight` 的 repo_id=None 跳过口径对齐。仅用于
+    /// `resolve_issue_baseline_tree` 跳过，不得接入 structured output 合同
+    /// （`aggregate_author_schema_for` 只有 Story/Design 两臂）。
+    fn is_aggregate_planning_session(&self) -> bool {
+        matches!(
+            self.session.workspace_type,
+            WorkspaceType::Story | WorkspaceType::Design | WorkspaceType::WorkItemPlan
+        ) && self.has_aggregate_scope_system_context()
+    }
+
     pub fn build_work_item_plan_streaming_input(
         &self,
         provider_type: ProviderType,
