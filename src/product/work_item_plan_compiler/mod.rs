@@ -10,8 +10,8 @@ mod validate;
 pub use freshness::{FreshnessError, verify_publish_freshness};
 pub use grammar::*;
 pub use lower::{
-    PlanCandidateIr, PlanCandidateItemIr, WorkItemPlanSourceContext, compile_work_item_plan,
-    lower_work_item_plan,
+    PlanCandidateIr, PlanCandidateItemIr, PlanMemberTargets, WorkItemPlanSourceContext,
+    compile_work_item_plan, lower_work_item_plan,
 };
 pub use normalize::{
     NormalizedPlanSource, PLAN_EARS_SPACING_NORMALIZATION_DIAGNOSTIC,

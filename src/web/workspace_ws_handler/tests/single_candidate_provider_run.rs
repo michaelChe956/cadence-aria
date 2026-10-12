@@ -1469,3 +1469,6 @@ include!("single_candidate_provider_run/ears_reredrive.rs");
 // B2c（Task 5.5）：SC author 真链回归（成员材料/compile target 不跟随 native
 // 锚）与显式 fresh 同 reservation 重入用例（大文件守卫拆分）。
 include!("single_candidate_provider_run/anchor_t17.rs");
+// B1（多仓 plan 聚合视图缺口）：NonUnique focus 聚合会话真链——IR target
+// 按 WI 成员归属落成员物理仓（大文件守卫拆分）。
+include!("single_candidate_provider_run/aggregate_ir_target.rs");

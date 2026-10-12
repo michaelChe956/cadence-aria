@@ -185,6 +185,45 @@ pub(crate) fn resolve_logical_work_item_plan_repository_targets(
         .map(Some)
 }
 
+/// B1 铁律（多仓 plan 聚合视图缺口，session_0003 现场）：plan 会话
+/// IR/compile 写入点的 per-WI 成员归属目标表。
+/// - Legacy（单仓，target map 为空）→ `Ok(None)`：既有单 target 语义零变化；
+/// - LC → `Ok(Some)`：`physical_by_logical` 与 Final Compile 的 logical_targets
+///   同源（`resolve_logical_work_item_plan_repository_targets`）；确定性回落
+///   `fallback_physical_id` 按既有规则——成员锚定会话（唯一 target/唯一
+///   focus）= 会话业务成员物理仓；聚合视图会话（多 target 无唯一 focus）=
+///   confirmed design `change_order` 首成员物理仓（r62 design 首仓兜底先例），
+///   change_order 空 → None（无归属 WI 由 lowering 语义错 fail-closed）。
+///   聚合视图 ID 不得作 compile target（Final Compile 以
+///   work_item_target_missing 拒收）。
+pub(crate) fn plan_compile_member_targets(
+    lifecycle: &LifecycleStore,
+    plan: &IssueWorkItemPlan,
+    session_repository: &crate::product::models::RepositoryRecord,
+) -> Result<Option<crate::product::work_item_plan_compiler::PlanMemberTargets>, String> {
+    let Some(physical_by_logical) =
+        resolve_logical_work_item_plan_repository_targets(lifecycle, plan)?
+    else {
+        return Ok(None);
+    };
+    let fallback_physical_id =
+        if crate::product::workspace_repository::is_aggregate_root_view_repository(
+            session_repository,
+        ) {
+            load_change_order_from_confirmed_design(lifecycle, plan)?
+                .iter()
+                .find_map(|logical| physical_by_logical.get(logical).cloned())
+        } else {
+            Some(session_repository.id.clone())
+        };
+    Ok(Some(
+        crate::product::work_item_plan_compiler::PlanMemberTargets {
+            physical_by_logical,
+            fallback_physical_id,
+        },
+    ))
+}
+
 /// 加载 issue 的 confirmed Design 的 change_order（仓级执行顺序，REQ-TGT-04 消费点）。
 /// compile 入口经 lifecycle + plan.source_design_spec_ids 加载 confirmed design，取
 /// DesignSpecRecord.change_order。单仓/无 aggregate scope（无 confirmed design）→ 返回空

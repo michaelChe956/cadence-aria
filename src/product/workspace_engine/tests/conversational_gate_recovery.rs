@@ -218,9 +218,7 @@ fn conversational_gate_recovery_revision_crash_window_with_cross_round_refs_fail
         .expect("repository id");
     let ir = compile_work_item_plan(
         &revised_source,
-        &WorkItemPlanSourceContext {
-            target_repository_id: repository_id,
-        },
+        &WorkItemPlanSourceContext { target_repository_id: repository_id, member_targets: None },
     )
     .expect("compile revised source");
     let repository_profile = plan.repository_profile_ref.as_deref().map(|profile_id| {
@@ -452,9 +450,7 @@ fn conversational_gate_recovery_forward_evidence_completes_revision() {
         .expect("repository id");
     let ir = compile_work_item_plan(
         revised_source,
-        &WorkItemPlanSourceContext {
-            target_repository_id: repository_id,
-        },
+        &WorkItemPlanSourceContext { target_repository_id: repository_id, member_targets: None },
     )
     .expect("compile revised source");
     let repository_profile = plan.repository_profile_ref.as_deref().map(|profile_id| {

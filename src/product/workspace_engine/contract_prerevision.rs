@@ -309,6 +309,7 @@ mod tests {
             &source,
             &crate::product::work_item_plan_compiler::WorkItemPlanSourceContext {
                 target_repository_id: "repo_fixture".to_string(),
+                member_targets: None,
             },
         )
         .expect("compile gap fixture")
@@ -327,6 +328,7 @@ mod tests {
             &source,
             &crate::product::work_item_plan_compiler::WorkItemPlanSourceContext {
                 target_repository_id: "repo_fixture".to_string(),
+                member_targets: None,
             },
         )
         .expect("compile clean fixture")

@@ -23,6 +23,7 @@ fn empty_blockers_section_parses_and_lowers_to_no_blocker_rules() {
         );
     let context = WorkItemPlanSourceContext {
         target_repository_id: "repo-levels".to_string(),
+        member_targets: None,
     };
 
     let ast = parse_work_item_plan(&source).expect("空 Blockers 的完整文档应通过 parse");

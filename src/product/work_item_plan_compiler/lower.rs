@@ -32,6 +32,24 @@ pub struct PlanCandidateItemIr {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkItemPlanSourceContext {
     pub target_repository_id: String,
+    /// B1 铁律（多仓 plan 聚合视图缺口）：聚合根视图 ID 不得流入 IR target。
+    /// `Some` 时（LC 多仓 plan 会话）每 WI 按 Plan Intent 成员归属落成员
+    /// 物理仓 ID，无归属 WI 按 `fallback_physical_id` 回落（既有规则：
+    /// 成员锚定会话=会话成员物理仓；聚合会话=confirmed design change_order
+    /// 首仓），回落缺失即语义错 fail-closed；`None` 时（legacy 单仓）全部
+    /// WI 沿用 `target_repository_id`（既有语义零变化）。
+    pub member_targets: Option<PlanMemberTargets>,
+}
+
+/// 多仓 plan 会话的 per-WI 成员归属目标表（与 Final Compile 的
+/// logical_targets 同源构建：逻辑成员 → 物理成员仓 ID）。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PlanMemberTargets {
+    /// 逻辑成员 ID → 物理成员仓 ID。
+    pub physical_by_logical:
+        std::collections::BTreeMap<crate::product::logical_codebase::LogicalRepositoryId, String>,
+    /// 无 Plan Intent 归属声明的 WI 的确定性回落物理仓 ID。
+    pub fallback_physical_id: Option<String>,
 }
 
 type TaskState = (String, String, Vec<String>, Vec<String>, usize);
@@ -75,12 +93,7 @@ pub fn lower_work_item_plan(
     let source_revision_hash = hex::encode(Sha256::digest(source.as_bytes()));
     let mut items = Vec::with_capacity(ast.items.len());
     for item in &ast.items {
-        if let Some(item) = lower_item(
-            item,
-            context.target_repository_id.clone(),
-            &source_revision_hash,
-            &mut diagnostics,
-        ) {
+        if let Some(item) = lower_item(item, context, &source_revision_hash, &mut diagnostics) {
             items.push(item);
         }
     }
@@ -112,7 +125,7 @@ pub fn compile_work_item_plan(
 
 fn lower_item(
     item: &WorkItemPlanItemAst,
-    target_repository_id: String,
+    context: &WorkItemPlanSourceContext,
     source_revision_hash: &str,
     diagnostics: &mut Vec<CompilerDiagnostic>,
 ) -> Option<PlanCandidateItemIr> {
@@ -246,6 +259,13 @@ fn lower_item(
         _ => return None,
     };
 
+    let target_repository_id = resolve_item_target_repository_id(
+        context,
+        contract.intent_contract.as_ref(),
+        &contract.identity.logical_work_item_id,
+        item.id.line,
+        diagnostics,
+    )?;
     let trusted_commands =
         trusted_commands_for_checks(&verification_checks, source_revision_hash, diagnostics);
     Some(PlanCandidateItemIr {
@@ -256,6 +276,99 @@ fn lower_item(
         contract,
         trusted_commands,
     })
+}
+
+/// B1 铁律（多仓 plan 聚合视图缺口）：解析单个 WI 的 IR target。
+///
+/// - `member_targets=None`（legacy 单仓）：沿用会话级 `target_repository_id`
+///   （既有语义零变化）；但聚合根视图 ID 恒拒绝——漏传成员表的调用方在
+///   写入点 fail-closed，绝不把聚合视图 ID 写进 IR target（否则 Final
+///   Compile 以 work_item_target_missing 卡死 owner 验收）。
+/// - `member_targets=Some`（LC 多仓）：按 Plan Intent 成员归属落成员物理仓
+///   ID——logical_codebase 归属查成员表；single_repository 归属必须命中
+///   成员物理仓；无归属 WI 落确定性回落（focus/首仓）；归属失效/非成员
+///   仓/回落缺失 → `work_item_target_missing` 语义错 fail-closed。
+fn resolve_item_target_repository_id(
+    context: &WorkItemPlanSourceContext,
+    intent: Option<&crate::product::work_item_contract::WorkItemIntentContract>,
+    work_item_id: &str,
+    line: usize,
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+) -> Option<String> {
+    use crate::product::logical_codebase::EnrollmentTarget;
+
+    let reject = |diagnostics: &mut Vec<CompilerDiagnostic>, message: String| {
+        diagnostics.push(CompilerDiagnostic {
+            code: "work_item_target_missing".to_string(),
+            line,
+            field: work_item_id.to_string(),
+            message,
+            repair_example: "### Plan Intent\n- intent: create\n- provider_work_item_id: WI-001\n- intent_target_kind: logical_codebase\n- intent_target_codebase: <logical codebase id>\n- intent_target_logical_repo: <成员逻辑仓 UUID>".to_string(),
+        });
+    };
+
+    let Some(members) = context.member_targets.as_ref() else {
+        if context
+            .target_repository_id
+            .starts_with(crate::product::workspace_repository::AGGREGATE_ROOT_VIEW_ID_PREFIX)
+        {
+            reject(
+                diagnostics,
+                format!(
+                    "work_item_target_missing: `{work_item_id}` 的会话级 target `{}` 是聚合根视图（多仓 plan），成员归属表缺失；聚合视图 ID 不得作 IR target",
+                    context.target_repository_id
+                ),
+            );
+            return None;
+        }
+        return Some(context.target_repository_id.clone());
+    };
+    match intent.map(|intent| &intent.target) {
+        Some(EnrollmentTarget::LogicalCodebase {
+            logical_repository_id,
+            ..
+        }) => match members.physical_by_logical.get(logical_repository_id) {
+            Some(physical) => Some(physical.clone()),
+            None => {
+                reject(
+                    diagnostics,
+                    format!(
+                        "work_item_target_missing: `{work_item_id}` 声明的逻辑成员 {logical_repository_id:?} 不在有效成员集（成员归属失效或未登记）"
+                    ),
+                );
+                None
+            }
+        },
+        Some(EnrollmentTarget::SingleRepository { repository_id }) => {
+            let effective = members
+                .physical_by_logical
+                .values()
+                .any(|physical| physical == repository_id);
+            if effective {
+                Some(repository_id.clone())
+            } else {
+                reject(
+                    diagnostics,
+                    format!(
+                        "work_item_target_missing: `{work_item_id}` 声明的物理仓 {repository_id} 不是有效成员仓（多仓 plan 的 IR/WI 目标必须落成员物理 ID）"
+                    ),
+                );
+                None
+            }
+        }
+        None => match members.fallback_physical_id.clone() {
+            Some(fallback) => Some(fallback),
+            None => {
+                reject(
+                    diagnostics,
+                    format!(
+                        "work_item_target_missing: `{work_item_id}` 未声明 Plan Intent 成员归属且无确定性回落（focus/首仓）；多仓 plan 每 WI 必须落成员物理仓 ID"
+                    ),
+                );
+                None
+            }
+        },
+    }
 }
 
 /// C1 Task 5（REQ-C1-PLAN-01）：`Plan Intent` section → `WorkItemIntentContract`。

@@ -83,6 +83,7 @@ mod contract_autorepair {
             .complete_single_candidate_work_item_plan_author(
                 capability_gap_candidate(1),
                 "repo_fixture".to_string(),
+                None,
             )
             .await
             .expect("gapped candidate must complete author round after autorepair");
@@ -117,6 +118,7 @@ mod contract_autorepair {
             &source,
             &WorkItemPlanSourceContext {
                 target_repository_id: "repo_fixture".to_string(),
+                member_targets: None,
             },
         )
         .expect("repaired source must recompile");
@@ -141,6 +143,7 @@ mod contract_autorepair {
             .complete_single_candidate_work_item_plan_author(
                 REP4_FIXTURE.to_string(),
                 "repo_fixture".to_string(),
+                None,
             )
             .await
             .expect("unconsumed-handoff candidate must complete after autorepair");
@@ -164,6 +167,7 @@ mod contract_autorepair {
             &source,
             &WorkItemPlanSourceContext {
                 target_repository_id: "repo_fixture".to_string(),
+                member_targets: None,
             },
         )
         .expect("repaired source must recompile");
@@ -185,6 +189,7 @@ mod contract_autorepair {
             .complete_single_candidate_work_item_plan_author(
                 cycle_candidate(1),
                 "repo_fixture".to_string(),
+                None,
             )
             .await
             .expect("cycle candidate must still complete");
@@ -223,6 +228,7 @@ mod contract_autorepair {
             .complete_single_candidate_work_item_plan_author(
                 mixed_gap_candidate(1),
                 "repo_fixture".to_string(),
+                None,
             )
             .await
             .expect("mixed-gap candidate must still complete");

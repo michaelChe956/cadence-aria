@@ -10,6 +10,7 @@ mod c1_existing_create;
 mod ears_spacing;
 mod full_lowering_validator;
 mod heading_normalization;
+mod member_targets;
 mod null_placeholder_command;
 mod preflight_baseline_paths;
 mod preflight_options;
@@ -926,6 +927,7 @@ fn source_linter_sorts_complete_diagnostics_stably() {
 fn lower_typed_ir() {
     let context = WorkItemPlanSourceContext {
         target_repository_id: "repo-levels".to_string(),
+        member_targets: None,
     };
     let ir = compile_work_item_plan(REP4_FIXTURE, &context).expect("rep4 应 lower 为 typed IR");
 
@@ -1020,6 +1022,7 @@ fn lower_typed_ir() {
 fn declared_commands_project_deterministically_per_item_and_keep_duplicate_hygiene() {
     let context = WorkItemPlanSourceContext {
         target_repository_id: "repo-levels".to_string(),
+        member_targets: None,
     };
     let first = compile_work_item_plan(REP4_FIXTURE, &context)
         .expect("rep4 Verification.command 必须投影为 trusted commands");

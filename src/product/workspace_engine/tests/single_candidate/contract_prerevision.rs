@@ -80,6 +80,7 @@ mod contract_prerevision {
             .complete_single_candidate_work_item_plan_author(
                 cycle_gap_candidate(1),
                 "repo_fixture".to_string(),
+                None,
             )
             .await
             .expect("gapped candidate must still compile and persist");
@@ -174,6 +175,7 @@ mod contract_prerevision {
             .complete_single_candidate_work_item_plan_author(
                 clean_candidate(),
                 "repo_fixture".to_string(),
+                None,
             )
             .await
             .expect("clean candidate must complete author round");
@@ -211,6 +213,7 @@ mod contract_prerevision {
             .complete_single_candidate_work_item_plan_author(
                 cycle_gap_candidate(1),
                 "repo_fixture".to_string(),
+                None,
             )
             .await
             .expect("first gapped round completes");
@@ -226,6 +229,7 @@ mod contract_prerevision {
             .complete_single_candidate_work_item_plan_author(
                 cycle_gap_candidate(2),
                 "repo_fixture".to_string(),
+                None,
             )
             .await
             .expect("second gapped round completes");

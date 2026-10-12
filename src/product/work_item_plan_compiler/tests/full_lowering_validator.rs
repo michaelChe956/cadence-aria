@@ -63,6 +63,7 @@ fn full_lowering_validator_projects_rep4_through_all_existing_validator_layers()
         REP4_FIXTURE,
         &WorkItemPlanSourceContext {
             target_repository_id: "repo-levels".to_string(),
+            member_targets: None,
         },
     )
     .expect("rep4 必须先 lower 为 typed IR");
@@ -104,6 +105,7 @@ fn terminal_empty_handoff_refs_are_valid_and_not_unconsumed() {
         &source,
         &WorkItemPlanSourceContext {
             target_repository_id: "repo-levels".to_string(),
+            member_targets: None,
         },
     )
     .expect("terminal WI with explicit empty handoff refs must lower");
@@ -129,6 +131,7 @@ fn p4_sc_long_verification_command_does_not_emit_catalog_field_finding() {
         REP4_FIXTURE,
         &WorkItemPlanSourceContext {
             target_repository_id: "repo-levels".to_string(),
+            member_targets: None,
         },
     )
     .expect("rep4 fixture must lower");
@@ -160,6 +163,7 @@ fn p4_sc_outline_identity_rules_remain_active() {
         REP4_FIXTURE,
         &WorkItemPlanSourceContext {
             target_repository_id: "repo-levels".to_string(),
+            member_targets: None,
         },
     )
     .expect("rep4 fixture must lower");
@@ -195,6 +199,7 @@ fn full_lowering_validator_rejects_unregistered_requirement_and_missing_reviewer
         &source,
         &WorkItemPlanSourceContext {
             target_repository_id: "repo-levels".to_string(),
+            member_targets: None,
         },
     )
     .expect("交叉引用错误必须可 lower 为供 validator 拒绝的 typed IR");
@@ -225,6 +230,7 @@ fn full_lowering_validator_preserves_existing_unknown_provider_code() {
         REP4_FIXTURE,
         &WorkItemPlanSourceContext {
             target_repository_id: "repo-levels".to_string(),
+            member_targets: None,
         },
     )
     .expect("rep4 必须先 lower 为 typed IR");
@@ -263,6 +269,7 @@ fn full_lowering_validator_preserves_existing_unknown_provider_code() {
 fn full_lowering_validator_is_byte_stable_for_same_ir_and_context() {
     let source_context = WorkItemPlanSourceContext {
         target_repository_id: "repo-levels".to_string(),
+        member_targets: None,
     };
     let first_ir = compile_work_item_plan(REP4_FIXTURE, &source_context)
         .expect("rep4 必须先 lower 为 typed IR");

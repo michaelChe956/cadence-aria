@@ -36,6 +36,7 @@ fn compile_item_count(source: &str) -> Result<usize, Vec<String>> {
         source,
         &WorkItemPlanSourceContext {
             target_repository_id: "repository_0001".to_string(),
+            member_targets: None,
         },
     )
     .map(|ir| ir.items.len())

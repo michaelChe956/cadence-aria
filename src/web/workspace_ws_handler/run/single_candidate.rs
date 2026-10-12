@@ -30,9 +30,8 @@ pub(crate) enum SingleCandidateProviderRunError {
         /// 等待投影原样随行——供上层紧随 error 帧发送结构化
         /// `trust_missing_guidance` 帧（providers/canonical_root/
         /// command_markdown），前端不再解析平铺串；其它 waiting 恒 None。
-        trust_waiting: Option<
-            crate::product::logical_codebase::provider_trust::ProviderTrustWaiting,
-        >,
+        trust_waiting:
+            Option<crate::product::logical_codebase::provider_trust::ProviderTrustWaiting>,
     },
     /// B2c（Task 5.5，设计 §5.3 SC 纪律①）：SC author native mismatch
     /// （旧 native 在而冻结绑定不可用/已吊销）的独立 typed 等待——不落
@@ -738,6 +737,32 @@ pub(crate) async fn run_single_candidate_author(
     .map_err(|error| {
         SingleCandidateProviderRunError::Message(format!("load repository failed: {error}"))
     })?;
+    // B1 铁律（多仓 plan 聚合视图缺口，session_0003 现场）：聚合视图会话
+    // 的 IR/WI 目标按每 WI Plan Intent 成员归属落成员物理 ID——聚合视图
+    // ID 不得作 compile target（Final Compile 以 work_item_target_missing
+    // 拒收，owner 验收卡死）。业务 target/材料来源仍用上方 `repository`。
+    let member_targets_plan = lifecycle
+        .get_issue_work_item_plan(
+            &run_context.session_record.project_id,
+            &run_context.session_record.issue_id,
+            &run_context.session_record.entity_id,
+        )
+        .map_err(|error| {
+            SingleCandidateProviderRunError::Message(format!(
+                "load plan for member targets failed: {error}"
+            ))
+        })?;
+    let member_targets =
+        crate::product::workspace_engine::draft_batch::compile_support::plan_compile_member_targets(
+            &lifecycle,
+            &member_targets_plan,
+            &repository,
+        )
+        .map_err(|error| {
+            SingleCandidateProviderRunError::Message(format!(
+                "resolve plan member targets failed: {error}"
+            ))
+        })?;
     let issue = IssueStore::new(run_context.app_paths.clone())
         .get(
             &run_context.session_record.project_id,
@@ -1104,6 +1129,7 @@ pub(crate) async fn run_single_candidate_author(
     // 重驱机会在 compile/IR 两类间共享（first_round_failure 单槽）。
     let compile_context = crate::product::work_item_plan_compiler::WorkItemPlanSourceContext {
         target_repository_id: repository.id.clone(),
+        member_targets: member_targets.clone(),
     };
     let mut compile_source = full_output;
     let mut first_round_failure: Option<String> = None;
@@ -1274,7 +1300,11 @@ pub(crate) async fn run_single_candidate_author(
         }
 
         break match engine
-            .complete_single_candidate_work_item_plan_author(compile_source, repository.id.clone())
+            .complete_single_candidate_work_item_plan_author(
+                compile_source,
+                repository.id.clone(),
+                member_targets,
+            )
             .await
         {
             Ok(candidate_item_count) => candidate_item_count,
@@ -1449,6 +1479,7 @@ mod tests {
             source,
             &WorkItemPlanSourceContext {
                 target_repository_id: "repository_0001".to_string(),
+                member_targets: None,
             },
         )
         .map(|ir| ir.items.len())

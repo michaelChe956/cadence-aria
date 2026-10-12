@@ -251,6 +251,7 @@ mod internal_generation_mode {
             source,
             &crate::product::work_item_plan_compiler::WorkItemPlanSourceContext {
                 target_repository_id: "repo-levels".to_string(),
+                member_targets: None,
             },
         )
         .expect("rep4 source must compile to IR");

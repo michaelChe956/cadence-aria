@@ -218,6 +218,7 @@ fn sc_revision_prompt_carries_mechanical_contract_gap_verdict() {
         &gap_source,
         &crate::product::work_item_plan_compiler::WorkItemPlanSourceContext {
             target_repository_id: "repo_fixture".to_string(),
+            member_targets: None,
         },
     )
     .expect("compile gap fixture");

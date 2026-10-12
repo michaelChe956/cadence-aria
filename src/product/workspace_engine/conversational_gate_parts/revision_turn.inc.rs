@@ -115,14 +115,23 @@ impl super::WorkspaceEngine {
         // 门上修订对 LC 会话恒不可用。与 fresh 生成链(single_candidate.rs
         // 经 workspace_repository_for_session 取 repository.id)同源解析;
         // 解析失败回退 legacy story 字段口径。
-        let repository_id =
+        let (repository_id, member_targets) =
             match crate::product::workspace_repository::workspace_repository_for_session(
                 &lifecycle.app_paths(),
                 &lifecycle,
                 &expected,
             ) {
-                Ok(resolved) => resolved.id,
-                Err(_) => self.work_item_plan_repository_id(&lifecycle, &plan)?,
+                Ok(resolved) => {
+                    // B1 铁律（多仓 plan 聚合视图缺口）：聚合视图会话的
+                    // IR/WI 目标按每 WI 成员归属落成员物理 ID，聚合视图
+                    // ID 不得作 compile target（Final Compile 拒收）。
+                    let member_targets =
+                        crate::product::workspace_engine::draft_batch::compile_support::plan_compile_member_targets(
+                            &lifecycle, &plan, &resolved,
+                        )?;
+                    (resolved.id, member_targets)
+                }
+                Err(_) => (self.work_item_plan_repository_id(&lifecycle, &plan)?, None),
             };
         let repository_profile = plan
             .repository_profile_ref
@@ -143,6 +152,7 @@ impl super::WorkspaceEngine {
             &source,
             &WorkItemPlanSourceContext {
                 target_repository_id: repository_id,
+                member_targets,
             },
         ) {
             Ok(ir) => ir,

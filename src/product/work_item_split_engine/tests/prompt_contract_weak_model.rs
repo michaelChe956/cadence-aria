@@ -171,6 +171,7 @@ fn weak_model_precision_teaching_matches_contract_validator_judgement() {
             &source,
             &crate::product::work_item_plan_compiler::WorkItemPlanSourceContext {
                 target_repository_id: "repo_0001".to_string(),
+                member_targets: None,
             },
         )
     };

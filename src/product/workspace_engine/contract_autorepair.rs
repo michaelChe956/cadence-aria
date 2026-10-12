@@ -596,9 +596,7 @@ mod tests {
     fn compile(source: &str) -> PlanCandidateIr {
         compile_work_item_plan(
             source,
-            &WorkItemPlanSourceContext {
-                target_repository_id: "repo_fixture".to_string(),
-            },
+            &WorkItemPlanSourceContext { target_repository_id: "repo_fixture".to_string(), member_targets: None },
         )
         .expect("fixture compiles")
     }
@@ -778,9 +776,7 @@ mod tests {
     fn converge_loop_repairs_until_clean_and_reports_log() {
         let (ir, source, applied) = converge_work_item_plan_source(
             &capability_gap_candidate(),
-            WorkItemPlanSourceContext {
-                target_repository_id: "repo_fixture".to_string(),
-            },
+            WorkItemPlanSourceContext { target_repository_id: "repo_fixture".to_string(), member_targets: None },
         )
         .expect("converge must succeed");
         assert!(
@@ -805,9 +801,7 @@ mod tests {
         );
         let (ir, source, applied) = converge_work_item_plan_source(
             &source,
-            WorkItemPlanSourceContext {
-                target_repository_id: "repo_fixture".to_string(),
-            },
+            WorkItemPlanSourceContext { target_repository_id: "repo_fixture".to_string(), member_targets: None },
         )
         .expect("duplicate trusted command must be mechanically repaired");
 
@@ -840,9 +834,7 @@ mod tests {
         );
         let (ir, source, applied) = converge_work_item_plan_source(
             &source,
-            WorkItemPlanSourceContext {
-                target_repository_id: "repo_fixture".to_string(),
-            },
+            WorkItemPlanSourceContext { target_repository_id: "repo_fixture".to_string(), member_targets: None },
         )
         .expect("duplicate check without manual instruction must be removed");
 
@@ -863,9 +855,7 @@ mod tests {
     }
 
     fn source_context() -> WorkItemPlanSourceContext {
-        WorkItemPlanSourceContext {
-            target_repository_id: "repo_fixture".to_string(),
-        }
+        WorkItemPlanSourceContext { target_repository_id: "repo_fixture".to_string(), member_targets: None }
     }
 
     fn unknown_key_diagnostic(line: usize, field: &str) -> CompilerDiagnostic {
@@ -980,9 +970,7 @@ mod tests {
         let source = REP4_FIXTURE.replacen("- kind: backend\n", "", 1);
         let diagnostics = converge_work_item_plan_source(
             &source,
-            WorkItemPlanSourceContext {
-                target_repository_id: "repo_fixture".to_string(),
-            },
+            WorkItemPlanSourceContext { target_repository_id: "repo_fixture".to_string(), member_targets: None },
         )
         .expect_err("non-mechanical compiler diagnostics must remain errors");
         assert!(diagnostics.iter().any(|diagnostic| {

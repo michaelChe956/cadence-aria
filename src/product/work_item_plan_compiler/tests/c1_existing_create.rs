@@ -259,6 +259,7 @@ fn c1_existing_create_declared_create_compiles_and_persists_intent() {
         &source,
         &WorkItemPlanSourceContext {
             target_repository_id: C1_TARGET_REPO.to_string(),
+            member_targets: None,
         },
     )
     .expect("declared create plan must lower");
@@ -364,6 +365,7 @@ fn c1_existing_create_undeclared_baseline_writes_stop_for_revision() {
         &source,
         &WorkItemPlanSourceContext {
             target_repository_id: C1_TARGET_REPO.to_string(),
+            member_targets: None,
         },
     )
     .expect("plan without intent must still lower (intent is optional at grammar level)");
@@ -423,6 +425,7 @@ fn c1_existing_create_unexecutable_contract_is_rejected_with_facts() {
             &c1_source(intent, ("src/levels_new/**", "web/**"), depends_on),
             &WorkItemPlanSourceContext {
                 target_repository_id: C1_TARGET_REPO.to_string(),
+                member_targets: None,
             },
         )
         .expect("lower")
@@ -476,6 +479,7 @@ fn c1_existing_create_unexecutable_contract_is_rejected_with_facts() {
         ),
         &WorkItemPlanSourceContext {
             target_repository_id: C1_TARGET_REPO.to_string(),
+            member_targets: None,
         },
     )
     .expect("lower");

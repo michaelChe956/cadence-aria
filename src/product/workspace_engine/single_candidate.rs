@@ -403,6 +403,7 @@ impl WorkspaceEngine {
         &mut self,
         source: String,
         target_repository_id: String,
+        member_targets: Option<crate::product::work_item_plan_compiler::PlanMemberTargets>,
     ) -> Result<usize, String> {
         if self.session.workspace_type != WorkspaceType::WorkItemPlan
             || self.session.flow_kind != WorkItemPlanFlowKind::SingleCandidate
@@ -445,6 +446,7 @@ impl WorkspaceEngine {
             &source,
             WorkItemPlanSourceContext {
                 target_repository_id,
+                member_targets,
             },
         )
         .map_err(|diagnostics| {

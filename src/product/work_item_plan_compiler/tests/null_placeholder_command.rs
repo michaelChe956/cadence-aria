@@ -6,6 +6,7 @@ const REP4_FIXTURE: &str = include_str!("../fixtures/work-item-plan-rep4.md");
 fn null_literal_command_lowers_to_manual_only_check_without_trusted_commands() {
     let context = WorkItemPlanSourceContext {
         target_repository_id: "repo-levels".to_string(),
+        member_targets: None,
     };
     // prompt 教学的 manual check 形态：显式 `- command: null` + manual_instruction。
     let source = REP4_FIXTURE.replacen(

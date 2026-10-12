@@ -93,6 +93,7 @@ fn compile_candidate(
         source,
         &WorkItemPlanSourceContext {
             target_repository_id: "repo-levels".to_string(),
+            member_targets: None,
         },
     )
     .expect("candidate must lower to typed IR")

@@ -28,6 +28,7 @@ fn compile(source: &str) -> Result<usize, String> {
         source,
         &WorkItemPlanSourceContext {
             target_repository_id: "repository_0001".to_string(),
+            member_targets: None,
         },
     )
     .map(|ir| ir.items.len())

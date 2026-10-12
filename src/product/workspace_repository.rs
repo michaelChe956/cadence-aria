@@ -101,22 +101,22 @@ pub fn resolve_workspace_repository_context(
                             &manifest,
                             &selection,
                         ),
-                    // 方案X草稿态（缺陷 #2 修法 A,controller 2026-10-02）+
-                    // story 焦点仓路由修复（2026-10-11,story_spec_0001 现场）:
-                    // focus=None 时锚定 LC 聚合根本身（ENV-10/11 cwd≠target 合法
-                    // 形态;author_root_launch 的 PolicyTarget::aggregate_root 锚
-                    // 同口径）。原「involved 非空仍 fail-closed」臂是缺陷 #2 时
-                    // 对「回写异常半态」的防放宽锁——但 structured output schema
-                    // 允许 AI 输出 focus=null（多仓均衡纵切无单一焦点）,该态是
-                    // AI 自决流合法可达的正常态,fail-closed 造成修订轮死区
-                    // （现场 involved=4/focus=None 恒 TargetMissing,不可重试）。
-                    // 与 plan S6（多 target + focus 非唯一回落聚合根,5a217fa8）
-                    // 同构:①锚与首轮草稿态连续 → 指纹可比对 → 原生恢复可达
-                    // （r23 根修目标）;②cwd 恒 canonical root,author 视野零变化
-                    // ;③design change_order 首仓（r62）家族先例同款。AI 显式
-                    // 回写 focus 后走上方成员锚臂（r23 语义零变化,锚迁移
-                    // supersede 语义正确）。
-                    None => Ok(aggregate_root_view(&manifest)),
+                        // 方案X草稿态（缺陷 #2 修法 A,controller 2026-10-02）+
+                        // story 焦点仓路由修复（2026-10-11,story_spec_0001 现场）:
+                        // focus=None 时锚定 LC 聚合根本身（ENV-10/11 cwd≠target 合法
+                        // 形态;author_root_launch 的 PolicyTarget::aggregate_root 锚
+                        // 同口径）。原「involved 非空仍 fail-closed」臂是缺陷 #2 时
+                        // 对「回写异常半态」的防放宽锁——但 structured output schema
+                        // 允许 AI 输出 focus=null（多仓均衡纵切无单一焦点）,该态是
+                        // AI 自决流合法可达的正常态,fail-closed 造成修订轮死区
+                        // （现场 involved=4/focus=None 恒 TargetMissing,不可重试）。
+                        // 与 plan S6（多 target + focus 非唯一回落聚合根,5a217fa8）
+                        // 同构:①锚与首轮草稿态连续 → 指纹可比对 → 原生恢复可达
+                        // （r23 根修目标）;②cwd 恒 canonical root,author 视野零变化
+                        // ;③design change_order 首仓（r62）家族先例同款。AI 显式
+                        // 回写 focus 后走上方成员锚臂（r23 语义零变化,锚迁移
+                        // supersede 语义正确）。
+                        None => Ok(aggregate_root_view(&manifest)),
                     },
                 }),
                 RepositoryRouting::FailClosed { code, reason } => Err(routing_error(code, reason)),
@@ -170,12 +170,7 @@ pub fn resolve_workspace_repository_context(
                 } => Ok(WorkspaceRepositoryContext {
                     native_launch_anchor: planning_native_launch_anchor(&manifest, &selection),
                     business_repository: resolve_logical_plan_repository(
-                        app_paths,
-                        lifecycle,
-                        session,
-                        &plan,
-                        &manifest,
-                        &selection,
+                        app_paths, lifecycle, session, &plan, &manifest, &selection,
                     ),
                 }),
                 RepositoryRouting::FailClosed { code, reason } => Err(routing_error(code, reason)),
@@ -301,12 +296,7 @@ fn resolve_logical_design_repository(
         unique_target(target_ids, &design.id)?
     };
     resolve_selected_logical_repository(
-        app_paths,
-        project_id,
-        issue_id,
-        logical_id,
-        manifest,
-        selection,
+        app_paths, project_id, issue_id, logical_id, manifest, selection,
     )
 }
 
@@ -428,6 +418,17 @@ fn resolve_legacy_physical_repository(
         })
 }
 
+/// B1 铁律：聚合根视图 id 前缀。视图仅供 attach/launch 锚定用途，
+/// 不得作 compile/IR target（多仓 plan 的 IR/WI 目标按每 WI 成员归属
+/// 落成员物理 ID；lowering 守卫同源引用本前缀）。
+pub const AGGREGATE_ROOT_VIEW_ID_PREFIX: &str = "lc_aggregate_root_view_";
+
+/// 会话解析出的业务仓记录是否为聚合根视图（写点判定与 lowering 守卫
+/// 共用；聚合视图会话的 IR/compile 目标必须走 per-WI 成员归属解析）。
+pub fn is_aggregate_root_view_repository(repository: &RepositoryRecord) -> bool {
+    repository.id.starts_with(AGGREGATE_ROOT_VIEW_ID_PREFIX)
+}
+
 /// 草稿 Story（Logical 路由、focus 未定、involved 空）的聚合根锚视图：
 /// cwd 仍由唯一 authority resolver 冻结为 canonical root；target 锚定
 /// `PolicyTarget::aggregate_root(provider_context_root)`（primary_checkout_id
@@ -440,7 +441,10 @@ fn aggregate_root_view(
 ) -> RepositoryRecord {
     let root = manifest.provider_context_root.clone();
     RepositoryRecord {
-        id: format!("lc_aggregate_root_view_{}", manifest.logical_codebase_id),
+        id: format!(
+            "{AGGREGATE_ROOT_VIEW_ID_PREFIX}{}",
+            manifest.logical_codebase_id
+        ),
         project_id: manifest.project_id.clone(),
         name: "lc-aggregate-root".to_string(),
         path: root.clone(),

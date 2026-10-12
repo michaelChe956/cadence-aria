@@ -56,6 +56,7 @@ mod preflight_options_loop {
             .complete_single_candidate_work_item_plan_author(
                 no_integration_candidate(1),
                 "repo_fixture".to_string(),
+                None,
             )
             .await
             .expect("options gap candidate must compile, persist and route (not hard-fail)");
@@ -92,7 +93,10 @@ mod preflight_options_loop {
                 &reviewer_node.node_id,
             )
             .expect("load reviewer node detail");
-        assert!(detail.verdict.is_some(), "mechanical verdict must be durable");
+        assert!(
+            detail.verdict.is_some(),
+            "mechanical verdict must be durable"
+        );
 
         // policy：TriggerAggregateRepair（预算计入），不进 Approval/人工门。
         let persisted = lifecycle
@@ -127,6 +131,7 @@ mod preflight_options_loop {
             .complete_single_candidate_work_item_plan_author(
                 no_integration_candidate(1),
                 "repo_fixture".to_string(),
+                None,
             )
             .await
             .expect("first gapped round completes");
@@ -139,6 +144,7 @@ mod preflight_options_loop {
                     "Integration levels API coverage round-2",
                 ),
                 "repo_fixture".to_string(),
+                None,
             )
             .await
             .expect("fixed candidate must complete");
@@ -193,6 +199,7 @@ mod preflight_options_loop {
             .complete_single_candidate_work_item_plan_author(
                 no_integration_candidate(1),
                 "repo_fixture".to_string(),
+                None,
             )
             .await
             .expect("first gapped round completes");
@@ -201,6 +208,7 @@ mod preflight_options_loop {
             .complete_single_candidate_work_item_plan_author(
                 no_integration_candidate(2),
                 "repo_fixture".to_string(),
+                None,
             )
             .await
             .expect("second gapped round completes");
@@ -241,6 +249,7 @@ mod preflight_options_loop {
             .complete_single_candidate_work_item_plan_author(
                 no_integration_candidate(1),
                 "repo_fixture".to_string(),
+                None,
             )
             .await
             .expect("candidate without options intent completes");
@@ -274,6 +283,7 @@ mod preflight_options_loop {
             .complete_single_candidate_work_item_plan_author(
                 no_integration_candidate(1),
                 "repo_fixture".to_string(),
+                None,
             )
             .await
             .expect("first gapped round completes");
@@ -313,6 +323,7 @@ mod preflight_options_loop {
                     "Integration levels API coverage round-2",
                 ),
                 "repo_fixture".to_string(),
+                None,
             )
             .await
             .expect("fixed candidate must complete");

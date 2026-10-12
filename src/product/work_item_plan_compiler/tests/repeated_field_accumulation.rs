@@ -112,6 +112,7 @@ fn compile_plan(source: &str) -> PlanCandidateIr {
         source,
         &WorkItemPlanSourceContext {
             target_repository_id: "repository_0001".to_string(),
+            member_targets: None,
         },
     )
     .expect("测试计划必须 lower 为 typed IR")
@@ -123,6 +124,7 @@ fn compile_fixture(source: &str) -> PlanCandidateIr {
         &normalized.source,
         &WorkItemPlanSourceContext {
             target_repository_id: "repository_0001".to_string(),
+            member_targets: None,
         },
     )
     .expect("fixture 必须经生产归一化链路 lower 为 typed IR")
@@ -287,6 +289,7 @@ fn empty_list_value_and_unknown_key_stay_fail_closed() {
         ),
         &WorkItemPlanSourceContext {
             target_repository_id: "repository_0001".to_string(),
+            member_targets: None,
         },
     )
     .expect_err("未知结构化 key 必须 fail-closed");
