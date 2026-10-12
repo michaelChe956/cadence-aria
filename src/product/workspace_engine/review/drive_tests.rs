@@ -286,18 +286,31 @@ async fn reviewer_gateway_spawn_trust_missing_classifies_with_manual_guidance() 
     let gateway = reviewer_trust_gateway(&paths, trust_home.path());
     let target_dir = tempfile::tempdir().expect("review target anchor");
 
-    let error = match start_review_session_via_gateway(
+    let (result, trust_waiting) = start_review_session_via_gateway(
         &gateway,
         &crate::product::models::ProviderName::KimiCode,
         reviewer_trust_streaming_input(target_dir.path().to_path_buf()),
         "project_0001".to_string(),
         tokio_util::sync::CancellationToken::new(),
     )
-    .await
-    {
+    .await;
+    let error = match result {
         Ok(_) => panic!("reviewer spawn must reject on missing trust"),
         Err(error) => error,
     };
+
+    // 指引卡简化补缺：结构化等待投影同源随行（供上层紧随 error 帧发出
+    // trust_missing_guidance）——entry 缺失携带可复制命令。
+    let waiting = trust_waiting.expect("trust-classified start failure carries the waiting");
+    assert_eq!(waiting.reason_code, "trust_entry_missing");
+    assert!(
+        waiting
+            .command_markdown
+            .as_deref()
+            .is_some_and(|command| command.contains("mkdir -p")),
+        "entry missing carries the copyable kimi command: {:?}",
+        waiting.command_markdown
+    );
 
     assert!(
         error.details.contains("provider_trust_missing"),
@@ -340,18 +353,22 @@ async fn reviewer_gateway_rejection_without_trust_face_stays_bare() {
     let gateway = reviewer_trust_gateway(&paths, trust_home.path());
     let target_dir = tempfile::tempdir().expect("review target anchor");
 
-    let error = match start_review_session_via_gateway(
+    let (result, trust_waiting) = start_review_session_via_gateway(
         &gateway,
         &crate::product::models::ProviderName::ClaudeCode,
         reviewer_trust_streaming_input(target_dir.path().to_path_buf()),
         "project_0001".to_string(),
         tokio_util::sync::CancellationToken::new(),
     )
-    .await
-    {
+    .await;
+    let error = match result {
         Ok(_) => panic!("claude reviewer launch must fail without registered adapter"),
         Err(error) => error,
     };
+    assert!(
+        trust_waiting.is_none(),
+        "无 workspace trust 面的拒绝不得携带结构化等待投影，got: {trust_waiting:?}"
+    );
 
     assert!(
         !error.details.contains("provider_trust_missing")

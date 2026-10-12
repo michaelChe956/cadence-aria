@@ -379,6 +379,17 @@ pub enum EngineEvent {
     Error {
         message: String,
     },
+    /// 指引卡简化补缺：author/reviewer 启动臂 trust 拒绝的结构化指导
+    /// （同源只读等待投影：providers/canonical_root/reason_code/
+    /// retry_action/command_markdown）。紧随 `EngineEvent::Error` 之后
+    /// 发出（error 帧先清旧指导、此帧再建——与 SC admission waiting 路径
+    /// 同 pattern）；web 层映射 `WsOutMessage::TrustMissingGuidance`，前端
+    /// 「两行说明＋可复制命令窗」直渲。平铺 error/manual_guidance 原样
+    /// 保留（旧客户端兼容）。仅分类桥实际命中 trust 分型时发出（非
+    /// trust 错误零发出）。
+    TrustMissingGuidance {
+        waiting: crate::product::logical_codebase::provider_trust::ProviderTrustWaiting,
+    },
     ProtocolError {
         code: String,
         message: String,

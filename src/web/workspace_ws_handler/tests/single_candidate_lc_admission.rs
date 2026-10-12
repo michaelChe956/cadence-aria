@@ -21,9 +21,13 @@ use super::single_candidate_provider_run::{
 use super::*;
 
 use crate::cross_cutting::provider_adapter::ProviderAdapter;
-use crate::cross_cutting::provider_availability_gate::{ProviderAvailabilityGate, ProviderHealthSource};
+use crate::cross_cutting::provider_availability_gate::{
+    ProviderAvailabilityGate, ProviderHealthSource,
+};
 use crate::cross_cutting::provider_health::{ProviderHealthEntry, ProviderHealthSnapshot};
-use crate::cross_cutting::streaming_provider::{ProviderCompletion, ProviderEvent, ProviderSession};
+use crate::cross_cutting::streaming_provider::{
+    ProviderCompletion, ProviderEvent, ProviderSession,
+};
 use crate::product::logical_codebase::issue_selection::IssueCodebaseSelection;
 use crate::product::logical_codebase::policy::AggregatePolicyArtifactStore;
 use crate::product::logical_codebase::provider_gateway::{
@@ -2343,4 +2347,286 @@ async fn story_generation_spawn_trust_missing_classifies_with_manual_guidance() 
         snapshot_tree(&trust_facts_root(&fixture)),
         "Story 生成臂拒收不得写 trust durable 事实"
     );
+}
+
+/// 指引卡简化补缺（owner 2026-10-12 多仓 story 生成现场）：trust 缺失
+/// 的 **Story 通用 Author 启动臂**（StartGeneration → Author run →
+/// `drive_author_provider_session_via_gateway`）上浮不只有平铺 error
+/// message——紧随其后携带结构化 `trust_missing_guidance` 帧
+/// （providers/canonical_root/reason_code/retry_action/command_markdown
+/// 全部同源只读等待投影），与 SC admission waiting 路径同 pattern；前端
+/// 「两行说明＋可复制命令窗」直渲，不再解析平铺串。
+#[tokio::test]
+async fn story_generation_trust_missing_emits_structured_guidance_frame() {
+    let (input_tx, _input_rx) = mpsc::unbounded_channel();
+    let provider = Arc::new(LcRecordingAuthorProvider {
+        output: single_candidate_markdown("story_0001", "design_0001"),
+        inputs: input_tx,
+    });
+    let trust_home = tempfile::tempdir().expect("isolated trust home");
+    let (fixture, engine_rx) =
+        ProviderRunFixture::new_logical_story_with_gateway_extras_and_engine_rx(
+            provider.clone(),
+            AliasLcGatewayExtras {
+                capability: Some(Arc::new(LcDialectCapabilitySource)),
+                trust_home: Some(trust_home.path().to_path_buf()),
+                availability: Some(lc_scoped_availability_gate(true, true)),
+            },
+            ProviderName::KimiCode,
+        );
+    let canonical_aggregate_root = std::fs::canonicalize(
+        fixture
+            .member_checkout_root()
+            .parent()
+            .expect("member checkout lives under the aggregate root"),
+    )
+    .expect("canonical aggregate root");
+
+    let (context, mut outbound_rx) =
+        single_candidate_context_for_author(&fixture, ProviderName::KimiCode, provider);
+    // 引擎事件经生产同构 forward 任务（map_engine_event）落 outbound——
+    // author 臂错误/指导均走 EngineEvent 通道上浮。
+    let forward = spawn_engine_event_forward_task(
+        engine_rx,
+        context.outbound_tx.clone(),
+        None,
+    );
+    handle_workspace_inbound_message(
+        context,
+        WsInMessage::StartGeneration {
+            provider_config: author_provider_config(ProviderName::KimiCode),
+            reviewer_enabled: false,
+            resume_recovery: None,
+        },
+    )
+    .await;
+
+    // 平铺 error 帧保留（旧客户端兼容，稳定判别码不变）。
+    let error = next_error_frame(&mut outbound_rx).await;
+    assert!(
+        error["message"]
+            .as_str()
+            .expect("error message")
+            .contains("provider_trust_missing"),
+        "flat error frame keeps the stable code, got: {error}"
+    );
+    // 紧随其后的结构化指导帧（entry 缺失携带可复制命令窗）。
+    let guidance = next_frame_of_type(&mut outbound_rx, "trust_missing_guidance").await;
+    assert_eq!(
+        guidance["providers"],
+        serde_json::json!(["kimi_code"]),
+        "providers carry wire labels for the card headline: {guidance}"
+    );
+    assert_eq!(
+        guidance["canonical_root"],
+        canonical_aggregate_root.display().to_string(),
+        "canonical root is the frozen authority root, got: {guidance}"
+    );
+    assert_eq!(guidance["reason_code"], "trust_entry_missing");
+    assert!(
+        guidance["retry_action"]
+            .as_str()
+            .expect("retry action")
+            .contains("显式重新生成"),
+        "retry action stays the generation-scoped wording: {guidance}"
+    );
+    let command = guidance["command_markdown"]
+        .as_str()
+        .expect("entry missing carries the copyable command");
+    assert!(
+        command.contains("mkdir -p")
+            && command.contains(
+                &trust_home
+                    .path()
+                    .join(".kimi-code")
+                    .join("workspace-trust")
+                    .display()
+                    .to_string()
+            ),
+        "command markdown is the same-source kimi one-line shell: {command}"
+    );
+    forward.abort();
+}
+
+/// 指引卡简化补缺（reviewer 臂同型）：Reviewer 首发 gateway 启动臂
+/// （`drive_review_session_via_gateway` → `start_review_session_via_gateway`）
+/// trust 拒绝同样以结构化 `trust_missing_guidance` 帧紧随 error 帧上浮
+/// （Codex entry 缺失：TOML 片段命令窗）；provider 零启动。
+#[tokio::test]
+async fn reviewer_launch_trust_missing_emits_structured_guidance_frame() {
+    let (input_tx, _input_rx) = mpsc::unbounded_channel();
+    let provider = Arc::new(LcRecordingAuthorProvider {
+        output: single_candidate_markdown("story_0001", "design_0001"),
+        inputs: input_tx,
+    });
+    let trust_home = tempfile::tempdir().expect("isolated trust home");
+    let (fixture, engine_rx) =
+        ProviderRunFixture::new_logical_story_with_gateway_extras_and_engine_rx(
+            provider.clone(),
+            AliasLcGatewayExtras {
+                capability: Some(Arc::new(LcDialectCapabilitySource)),
+                trust_home: Some(trust_home.path().to_path_buf()),
+                availability: Some(lc_scoped_availability_gate(true, true)),
+            },
+            ProviderName::KimiCode,
+        );
+    let canonical_aggregate_root = std::fs::canonicalize(
+        fixture
+            .member_checkout_root()
+            .parent()
+            .expect("member checkout lives under the aggregate root"),
+    )
+    .expect("canonical aggregate root");
+    // reviewer 臂就位：夹具会话 reviewer 固定 Codex（story 夹具形态），
+    // 空隔离 home → Codex entry 缺失。
+    {
+        let mut engine = fixture.engine.lock().await;
+        engine.session.review_rounds = 2;
+        engine.session.artifact = Some(crate::web::workspace_ws_types::ArtifactPayload::Markdown {
+            markdown: "# Artifact\n\n可以确认".to_string(),
+            diff: None,
+        });
+    }
+    let (outbound_tx, mut outbound_rx) = mpsc::channel(64);
+    let forward = spawn_engine_event_forward_task(engine_rx, outbound_tx, None);
+    {
+        let mut engine = fixture.engine.lock().await;
+        engine.start_review_or_skip().await;
+        let (_command_tx, command_rx) =
+            mpsc::channel::<crate::cross_cutting::streaming_provider::ProviderCommand>(8);
+        engine.drive_review_session_via_gateway(command_rx).await;
+    }
+
+    // 平铺 error 帧保留（旧客户端兼容，稳定判别码不变）。
+    let error = next_error_frame(&mut outbound_rx).await;
+    assert!(
+        error["message"]
+            .as_str()
+            .expect("error message")
+            .contains("provider_trust_missing"),
+        "reviewer arm flat error keeps the stable code, got: {error}"
+    );
+    // 紧随其后的结构化指导帧（Codex entry 缺失 → TOML 片段命令窗）。
+    let guidance = next_frame_of_type(&mut outbound_rx, "trust_missing_guidance").await;
+    assert_eq!(
+        guidance["providers"],
+        serde_json::json!(["codex"]),
+        "reviewer guidance names the reviewer provider: {guidance}"
+    );
+    assert_eq!(
+        guidance["canonical_root"],
+        canonical_aggregate_root.display().to_string(),
+        "canonical root is the frozen authority root, got: {guidance}"
+    );
+    assert_eq!(guidance["reason_code"], "trust_entry_missing");
+    let command = guidance["command_markdown"]
+        .as_str()
+        .expect("codex entry missing carries the copyable command");
+    assert!(
+        command.contains("trust_level")
+            && command.contains(
+                &trust_home
+                    .path()
+                    .join(".codex")
+                    .join("config.toml")
+                    .display()
+                    .to_string()
+            ),
+        "command markdown is the same-source codex TOML snippet: {command}"
+    );
+    forward.abort();
+}
+
+/// 负例（不误发）：Story Author 启动臂的非 trust ProviderUnavailable 不得
+/// 发结构化指导帧——Codex trust 已人工预登记（waiting=None）而 availability
+/// gate 不健康时，拒绝来自 availability 而非 trust 面，分类桥不命中
+/// trust 分型、零结构化帧（与 6.1 SC 负例
+/// `lc_first_generation_other_unavailable_not_misattributed_as_trust_missing`
+/// 同判据，Story 通用 Author 臂面）。
+#[tokio::test]
+async fn story_generation_other_unavailable_emits_no_guidance_frame() {
+    let (input_tx, _input_rx) = mpsc::unbounded_channel();
+    let provider = Arc::new(LcRecordingAuthorProvider {
+        output: single_candidate_markdown("story_0001", "design_0001"),
+        inputs: input_tx,
+    });
+    let trust_home = tempfile::tempdir().expect("isolated trust home");
+    let (fixture, engine_rx) =
+        ProviderRunFixture::new_logical_story_with_gateway_extras_and_engine_rx(
+            provider.clone(),
+            AliasLcGatewayExtras {
+                capability: Some(Arc::new(LcDialectCapabilitySource)),
+                trust_home: Some(trust_home.path().to_path_buf()),
+                // Codex 不健康：ProviderUnavailable 来自 availability gate
+                // 而非 trust 面。
+                availability: Some(lc_scoped_availability_gate(false, true)),
+            },
+            ProviderName::Codex,
+        );
+    // 人工预登记 Codex trust（用户级工件已登记 → trust 复验通过，
+    // 拒绝只能来自 availability）。
+    let canonical_aggregate_root = std::fs::canonicalize(
+        fixture
+            .member_checkout_root()
+            .parent()
+            .expect("member checkout lives under the aggregate root"),
+    )
+    .expect("canonical aggregate root");
+    let codex_config = trust_home.path().join(".codex").join("config.toml");
+    std::fs::create_dir_all(codex_config.parent().expect("codex config dir"))
+        .expect("create codex config dir");
+    std::fs::write(
+        &codex_config,
+        format!(
+            "[projects.\"{}\"]\ntrust_level = \"trusted\"\n",
+            canonical_aggregate_root.display()
+        ),
+    )
+    .expect("pre-register codex trust");
+
+    let (context, mut outbound_rx) =
+        single_candidate_context_for_author(&fixture, ProviderName::Codex, provider);
+    let forward = spawn_engine_event_forward_task(
+        engine_rx,
+        context.outbound_tx.clone(),
+        None,
+    );
+    handle_workspace_inbound_message(
+        context,
+        WsInMessage::StartGeneration {
+            provider_config: author_provider_config(ProviderName::Codex),
+            reviewer_enabled: false,
+            resume_recovery: None,
+        },
+    )
+    .await;
+
+    let error = next_error_frame(&mut outbound_rx).await;
+    let message = error["message"].as_str().expect("error message");
+    assert!(
+        !message.contains("provider_trust_missing"),
+        "availability rejection must not be misattributed as trust missing, got: {message}"
+    );
+    // 有界窗口内不得出现任何 trust_missing_guidance 帧。
+    let guidance_leak = tokio::time::timeout(std::time::Duration::from_millis(400), async {
+        loop {
+            let control = outbound_rx
+                .recv()
+                .await
+                .expect("outbound channel must stay open");
+            let OutboundControl::Text(text) = control else {
+                continue;
+            };
+            let value: serde_json::Value = serde_json::from_str(&text).expect("frame json");
+            if value["type"] == "trust_missing_guidance" {
+                return true;
+            }
+        }
+    })
+    .await;
+    assert!(
+        matches!(guidance_leak, Err(_)),
+        "non-trust launch failure must not emit a guidance frame, got: {guidance_leak:?}"
+    );
+    forward.abort();
 }

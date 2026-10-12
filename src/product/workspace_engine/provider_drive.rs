@@ -214,6 +214,25 @@ impl WorkspaceEngine {
             && detect_author_choice_request(full_content, &self.session.workspace_type).is_none()
     }
 
+    /// 指引卡简化补缺（author/reviewer 启动臂）：分类桥命中 trust 分型
+    /// 时，紧随 `EngineEvent::Error` 之后发出的结构化指导事件（同源只读
+    /// 等待投影）。web 层映射 `WsOutMessage::TrustMissingGuidance`（前端
+    /// 「两行说明＋可复制命令窗」直渲）；平铺 error/manual_guidance 原样
+    /// 保留（旧客户端兼容）。`None` 时零发出（非 trust 错误不得误发）。
+    pub(crate) async fn emit_launch_trust_guidance(
+        &mut self,
+        waiting: Option<
+            crate::product::logical_codebase::provider_trust::ProviderTrustWaiting,
+        >,
+    ) {
+        if let Some(waiting) = waiting {
+            let _ = self
+                .event_tx
+                .send(EngineEvent::TrustMissingGuidance { waiting })
+                .await;
+        }
+    }
+
     pub(crate) async fn drive_provider_session(&mut self, input: ProviderSessionDriveInput) {
         let ProviderSessionDriveInput {
             session,
@@ -245,7 +264,6 @@ impl WorkspaceEngine {
                 return;
             }
         };
-
         let assistant_msg_id = format!("msg_{:03}", self.session.messages.len() + 1);
         let mut full_content = String::new();
         let cancel = self.cancel.clone();

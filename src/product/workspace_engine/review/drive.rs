@@ -326,7 +326,7 @@ impl WorkspaceEngine {
             ProviderConversationRole::Reviewer,
             reviewer.clone(),
         );
-        let first_session = start_review_session_via_gateway(
+        let (first_session, first_trust_waiting) = start_review_session_via_gateway(
             &gateway,
             &reviewer,
             input.clone(),
@@ -342,6 +342,10 @@ impl WorkspaceEngine {
             ReviewProviderRunResult::Aborted => return,
             ReviewProviderRunResult::Failed(failure) => {
                 self.finish_review_provider_run_failure(failure).await;
+                // 指引卡简化补缺：trust 分型命中时，紧随 error 事件之后
+                // 发出结构化指导（启动成功恒 None，其余 Failed 形态同样
+                // 零发出）。
+                self.emit_launch_trust_guidance(first_trust_waiting).await;
                 return;
             }
         };
@@ -380,7 +384,9 @@ impl WorkspaceEngine {
                 )
                 .await;
                 let repair_input = self.attach_tool_policy_audit(repair_input);
-                let repair_session = start_review_session_via_gateway(
+                // 修复轮：首发已成功启动（trust 已复验通过），结构化等待
+                // 恒 None——解包丢弃。
+                let (repair_session, _repair_trust_waiting) = start_review_session_via_gateway(
                     &gateway,
                     &reviewer,
                     repair_input,
@@ -501,7 +507,9 @@ impl WorkspaceEngine {
                         .filter(|session_id| !session_id.trim().is_empty()),
                     ..input.clone()
                 };
-                let retry_session = start_review_session_via_gateway(
+                // 静默重试：首发已成功启动（trust 已复验通过），结构化等待
+                // 恒 None——解包丢弃。
+                let (retry_session, _retry_trust_waiting) = start_review_session_via_gateway(
                     &gateway,
                     &reviewer,
                     retry_input,
@@ -763,12 +771,20 @@ impl WorkspaceEngine {
                 author.clone(),
             );
             let validated_input = ValidatedStreamingProviderInput::new(input, decision.launch);
-            let session = gateway
+            // 指引卡简化补缺：分类桥结构化变体携带同源等待投影，
+            // `trust_waiting` 随驱动收尾紧随 error 事件发出结构化指导
+            // （`EngineEvent::TrustMissingGuidance`）；非 trust 分型为 None。
+            let (session, revision_trust_waiting) = match gateway
                 .start_streaming(validated_input, self.cancel.clone())
                 .await
-                .map_err(|error| {
-                    map_gateway_error_to_adapter_with_trust(&gateway, &author, &error)
-                });
+            {
+                Ok(session) => (Ok(session), None),
+                Err(error) => {
+                    let (mapped, trust_waiting) =
+                        map_gateway_error_to_adapter_with_trust(&gateway, &author, &error);
+                    (Err(mapped), trust_waiting)
+                }
+            };
             self.drive_provider_session(ProviderSessionDriveInput {
                 session,
                 command_rx,
@@ -779,6 +795,7 @@ impl WorkspaceEngine {
                 revision_resume_fallback: None,
             })
             .await;
+            self.emit_launch_trust_guidance(revision_trust_waiting).await;
             // recovery（Completed → Resolved；其余回 Waiting，fail-safe）。
             if fresh_recovery.is_some() {
                 let reconcile_node = node_id.clone().or_else(|| {
@@ -1228,18 +1245,28 @@ fn provider_allows_review_repair(provider: &ProviderName) -> bool {
 /// （成员 worktree，即 review 对象），readable roots 随 cwd root 化（成员位于
 /// root 子树内的聚合布局）。validated 后 input 显式回填独立 cwd——spawn 前
 /// effective cwd 复验以 envelope 冻结值为准。
+///
+/// 指引卡简化补缺：返回值携带分类桥同源等待投影（`trust_waiting`，仅
+/// trust 分型命中且启动失败时 Some）——reviewer 首发臂消费它紧随 error
+/// 事件发出 `EngineEvent::TrustMissingGuidance`；启动成功恒 None。
 async fn start_review_session_via_gateway(
     gateway: &Arc<LogicalCodebaseProviderGateway>,
     reviewer: &ProviderName,
     input: StreamingProviderInput,
     project_id: String,
     cancel: CancellationToken,
-) -> Result<ProviderSession, ProviderAdapterError> {
+) -> (
+    Result<ProviderSession, ProviderAdapterError>,
+    Option<crate::product::logical_codebase::provider_trust::ProviderTrustWaiting>,
+) {
     let root = gateway.authority_root().to_path_buf();
+    let provider_ref = match ProviderRef::from_provider_name(reviewer, "cap_managed_snapshot") {
+        Ok(provider_ref) => provider_ref,
+        Err(error) => return (Err(map_gateway_error_to_adapter(&error)), None),
+    };
     let request = SessionLaunchRequest {
         project_id,
-        provider: ProviderRef::from_provider_name(reviewer, "cap_managed_snapshot")
-            .map_err(|error| map_gateway_error_to_adapter(&error))?,
+        provider: provider_ref,
         action: SessionPolicyAction::ReviewReadOnly,
         target: PolicyTarget::aggregate_root(input.working_dir.clone()),
         // Task 2.3：cwd=canonical root（独立于 target）；target 是
@@ -1249,16 +1276,21 @@ async fn start_review_session_via_gateway(
         writable_roots: Vec::new(),
         config_artifact_ref: "sha256:managed-config-artifact".to_string(),
     };
-    let validated = gateway
-        .validate(request)
-        .map_err(|error| map_gateway_error_to_adapter(&error))?;
+    let validated = match gateway.validate(request) {
+        Ok(validated) => validated,
+        Err(error) => return (Err(map_gateway_error_to_adapter(&error)), None),
+    };
     let mut input = input;
     input.working_directory = Some(validated.envelope().working_directory.clone());
     let validated_input = ValidatedStreamingProviderInput::new(input, validated);
-    gateway
-        .start_streaming(validated_input, cancel)
-        .await
-        .map_err(|error| map_gateway_error_to_adapter_with_trust(gateway, reviewer, &error))
+    match gateway.start_streaming(validated_input, cancel).await {
+        Ok(session) => (Ok(session), None),
+        Err(error) => {
+            let (mapped, trust_waiting) =
+                map_gateway_error_to_adapter_with_trust(gateway, reviewer, &error);
+            (Err(mapped), trust_waiting)
+        }
+    }
 }
 
 /// T6 fix-loop r2：review/drive.rs 两个 gateway 启动口（author revision、
@@ -1266,19 +1298,26 @@ async fn start_review_session_via_gateway(
 /// （压平前），Generation 场景；`provider` 是本次启动的真实角色
 /// provider（revision 传 author、review 传 reviewer），不得把参数名
 /// 机械照搬成错误角色。
+/// 指引卡简化补缺：结构化变体一次产出平铺 details 与同源等待投影
+/// （`trust_waiting` 供调用方紧随 error 事件发出
+/// `EngineEvent::TrustMissingGuidance`）；判据/文案与平铺面完全一致。
 fn map_gateway_error_to_adapter_with_trust(
     gateway: &crate::product::logical_codebase::LogicalCodebaseProviderGateway,
     provider: &ProviderName,
     error: &ProviderGatewayError,
-) -> ProviderAdapterError {
+) -> (
+    ProviderAdapterError,
+    Option<crate::product::logical_codebase::provider_trust::ProviderTrustWaiting>,
+) {
     let mut mapped = map_gateway_error_to_adapter(error);
-    mapped.details = gateway.classify_launch_trust_failure_details(
+    let classification = gateway.classify_launch_trust_failure(
         error,
         provider,
         &mapped.details,
         crate::product::logical_codebase::provider_trust::ProviderTrustScenario::Generation,
     );
-    mapped
+    mapped.details = classification.details;
+    (mapped, classification.trust_waiting)
 }
 
 /// gateway 错误到 adapter 错误的桥接:使调用点后续对 `Err` 的处理与直接

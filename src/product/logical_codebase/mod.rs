@@ -132,10 +132,10 @@ pub use provider_capability_store::{
     ProviderCapabilityStore, RootRecipeEvidence,
 };
 pub use provider_gateway::{
-    GatewayRunAudit, GatewayRunAuditEntry, GatewayRunStack, LogicalCodebaseProviderGateway,
-    PolicyTargetResolver, ProviderCapability, ProviderCapabilitySource, ProviderGatewayError,
-    ProviderRef, ProviderRefType, SessionLaunchRequest, SessionResumeFingerprint,
-    ValidatedSessionLaunchPolicy,
+    GatewayRunAudit, GatewayRunAuditEntry, GatewayRunStack, LaunchTrustFailureClassification,
+    LogicalCodebaseProviderGateway, PolicyTargetResolver, ProviderCapability,
+    ProviderCapabilitySource, ProviderGatewayError, ProviderRef, ProviderRefType,
+    SessionLaunchRequest, SessionResumeFingerprint, ValidatedSessionLaunchPolicy,
 };
 pub use provider_projection::{
     ProviderPolicyProjection, ProviderPolicyProjector, ProviderProjectionError,

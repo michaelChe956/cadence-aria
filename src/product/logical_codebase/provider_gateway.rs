@@ -1061,6 +1061,18 @@ impl GatewayRunAudit {
     }
 }
 
+/// [`LogicalCodebaseProviderGateway::classify_launch_trust_failure`] 的
+/// 结构化输出：平铺 details（既有协议不变）＋同源等待投影（author/
+/// reviewer 启动臂紧随 error 帧发出 `trust_missing_guidance` 结构化
+/// 指导帧的来源，见 `EngineEvent::TrustMissingGuidance`）。未命中
+/// trust 分型时 `trust_waiting=None`（details 原样，零结构化帧）。
+#[derive(Debug, Clone)]
+pub struct LaunchTrustFailureClassification {
+    pub details: String,
+    pub trust_waiting:
+        Option<crate::product::logical_codebase::provider_trust::ProviderTrustWaiting>,
+}
+
 /// 逻辑代码库真实 provider 的唯一建造与启动入口。
 ///
 /// 构造时注入 policy store、capability source、target resolver、真实 provider
@@ -1205,20 +1217,52 @@ impl LogicalCodebaseProviderGateway {
         mapped_details: &str,
         scenario: crate::product::logical_codebase::provider_trust::ProviderTrustScenario,
     ) -> String {
+        self.classify_launch_trust_failure(
+            gateway_error,
+            provider,
+            mapped_details,
+            scenario,
+        )
+        .details
+    }
+
+    /// [`classify_launch_trust_failure_details`] 的结构化变体（单一事实
+    /// 源）：分类平铺 details 与同源等待投影一次产出——author/reviewer
+    /// 启动臂消费 `trust_waiting` 紧随 error 帧发出结构化
+    /// `trust_missing_guidance` 指导帧（`EngineEvent::TrustMissingGuidance`
+    /// → `WsOutMessage::TrustMissingGuidance`，前端「两行说明＋可复制
+    /// 命令窗」直渲）；判据/文案与平铺变体完全一致，未命中 trust 分型
+    /// 时 `trust_waiting=None`（零结构化帧，不误发）。
+    pub fn classify_launch_trust_failure(
+        &self,
+        gateway_error: &ProviderGatewayError,
+        provider: &crate::product::models::ProviderName,
+        mapped_details: &str,
+        scenario: crate::product::logical_codebase::provider_trust::ProviderTrustScenario,
+    ) -> LaunchTrustFailureClassification {
         if !matches!(gateway_error, ProviderGatewayError::ProviderUnavailable(_)) {
-            return mapped_details.to_string();
+            return LaunchTrustFailureClassification {
+                details: mapped_details.to_string(),
+                trust_waiting: None,
+            };
         }
         let Some(waiting) = self.read_only_trust_waiting_for_scenario(provider, scenario) else {
-            return mapped_details.to_string();
+            return LaunchTrustFailureClassification {
+                details: mapped_details.to_string(),
+                trust_waiting: None,
+            };
         };
-        format!(
-            "provider_trust_missing: {}: {}；原拒绝：{}；人工登记指导：{}（retry_action：{}）",
-            waiting.reason_code,
-            waiting.message,
-            mapped_details,
-            waiting.manual_guidance,
-            waiting.retry_action,
-        )
+        LaunchTrustFailureClassification {
+            details: format!(
+                "provider_trust_missing: {}: {}；原拒绝：{}；人工登记指导：{}（retry_action：{}）",
+                waiting.reason_code,
+                waiting.message,
+                mapped_details,
+                waiting.manual_guidance,
+                waiting.retry_action,
+            ),
+            trust_waiting: Some(waiting),
+        }
     }
 
     /// [`classify_launch_trust_failure_details`] 的场景化只读判据（与

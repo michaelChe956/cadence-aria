@@ -337,6 +337,11 @@ pub(crate) fn map_engine_event(event: EngineEvent) -> Option<WsOutMessage> {
             WsOutMessage::HumanGateClosed { decision, stage }
         }
         EngineEvent::Error { message } => WsOutMessage::Error { message },
+        // 指引卡简化补缺：结构化指导帧紧随 error 帧映射（前端 error 清
+        // 旧指导、此帧重建——与 SC admission waiting 路径同 pattern）。
+        EngineEvent::TrustMissingGuidance { waiting } => {
+            WsOutMessage::trust_missing_guidance_from_waiting(&waiting)
+        }
         EngineEvent::ProtocolError {
             code,
             message,

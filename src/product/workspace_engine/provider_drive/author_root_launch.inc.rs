@@ -85,6 +85,11 @@ impl WorkspaceEngine {
             .expect("logical provider gateway must be injected before driving via gateway");
         let validated_input = self.attach_tool_policy_audit_to_validated(validated_input);
         let author_provider = self.session.author_provider.clone();
+        // 指引卡简化补缺：分类桥结构化变体一次产出平铺 details 与同源
+        // 等待投影——`trust_waiting` 随驱动收尾紧随 error 事件发出结构化
+        // 指导帧（`EngineEvent::TrustMissingGuidance`）；非 trust 分型为
+        // None，零发出。
+        let mut launch_trust_waiting = None;
         let session = gateway
             .start_streaming(validated_input, self.cancel.clone())
             .await
@@ -115,12 +120,14 @@ impl WorkspaceEngine {
                     );
                     mapped.stderr = inner.stderr.clone();
                 }
-                mapped.details = gateway.classify_launch_trust_failure_details(
+                let classification = gateway.classify_launch_trust_failure(
                     &error,
                     &author_provider,
                     &mapped.details,
                     crate::product::logical_codebase::provider_trust::ProviderTrustScenario::Generation,
                 );
+                launch_trust_waiting = classification.trust_waiting;
+                mapped.details = classification.details;
                 mapped
             });
         self.drive_provider_session(ProviderSessionDriveInput {
@@ -133,6 +140,10 @@ impl WorkspaceEngine {
             revision_resume_fallback: None,
         })
         .await;
+        // 紧随 error 事件之后的结构化指导（error 帧先清旧指导、此帧再建；
+        // 驱动 Err 收口内部已发 EngineEvent::Error，Ok 路径 waiting 恒
+        // None）。
+        self.emit_launch_trust_guidance(launch_trust_waiting).await;
     }
 
     /// Task 2.1（REQ-ENV-01/ENV-10）：LC 会话 Author/ChoiceFollowup 的 root launch
