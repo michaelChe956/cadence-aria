@@ -225,6 +225,21 @@ fn t19_seed_waiting(
     seeded_record: &crate::product::models::WorkspaceSessionRecord,
     effective_reviewer: Option<ProviderName>,
 ) -> LcResumeRecoveryRecord {
+    t19_seed_waiting_with_feedback(
+        lifecycle,
+        seeded_record,
+        effective_reviewer,
+        Some(T19_FEEDBACK.to_string()),
+    )
+}
+
+/// [`t19_seed_waiting`] 的 feedback 覆盖项变体（`None`＝冻结反馈缺失形态）。
+fn t19_seed_waiting_with_feedback(
+    lifecycle: &LifecycleStore,
+    seeded_record: &crate::product::models::WorkspaceSessionRecord,
+    effective_reviewer: Option<ProviderName>,
+    original_feedback: Option<String>,
+) -> LcResumeRecoveryRecord {
     let recovery = LcResumeRecoveryRecord {
         schema_version: 1,
         recovery_id: "recovery_anchor_t19".to_string(),
@@ -238,7 +253,7 @@ fn t19_seed_waiting(
         previous_stage: "revision".to_string(),
         run_context: LcRecoveryRunContext::ReviewerRevision {
             business: t19_business(seeded_record, effective_reviewer),
-            original_feedback: Some(T19_FEEDBACK.to_string()),
+            original_feedback,
         },
         state: LcResumeRecoveryState::Waiting,
         operation_id: None,
@@ -625,5 +640,87 @@ async fn anchor_t19_author_family_business_drift_waits_typed_stale() {
     match tokio::time::timeout(std::time::Duration::from_millis(300), input_rx.recv()).await {
         Err(_) | Ok(None) => {}
         Ok(Some(_)) => panic!("业务四元组漂移必须零 spawn"),
+    }
+}
+
+/// 复审 P2：fresh 修订链**驱动前**失败（input 构建 Err 形态——冻结反馈缺失
+/// 且无 verdict，`build_revision_input_with_resume` fail-closed）也必须对账
+/// recovery：回 Waiting + operation Failed——不得滞留 FreshRunning 令后续
+/// claim 恒 Busy（owner 主线无 typed 出口）。新 operation 可再 claim 是回归
+/// 判据（非 Busy/Stale）。
+#[tokio::test]
+async fn anchor_t19_author_family_fresh_prestart_failure_returns_to_waiting() {
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let provider = Arc::new(T19RecordingAuthorProvider {
+        output: t19_story_output(),
+        native_session_id: "t19-fresh-native-unused",
+        inputs: input_tx,
+    });
+    let (fixture, mut engine_rx) =
+        ProviderRunFixture::new_logical_story_with_gateway_extras_and_engine_rx(
+            provider.clone(),
+            AliasLcGatewayExtras {
+                capability: Some(Arc::new(LcDialectCapabilitySource)),
+                ..AliasLcGatewayExtras::default()
+            },
+            ProviderName::ClaudeCode,
+        );
+    tokio::spawn(async move { while engine_rx.recv().await.is_some() {} });
+    let session_id = fixture.record.id.clone();
+
+    let seeded = t19_rewrite_record(&fixture.app_paths, &fixture.record);
+    // 冻结反馈缺失（original_feedback=None）——fresh 臂不恢复 pending；配合
+    // verdict 缺失，input 构建 fail-closed（review verdict is unavailable）。
+    t19_seed_waiting_with_feedback(&fixture.lifecycle, &seeded, Some(ProviderName::Codex), None);
+    t19_rearm_engine_after_waiting(&fixture.engine, &seeded, WorkspaceType::Story).await;
+    {
+        let mut engine = fixture.engine.lock().await;
+        engine.latest_review_verdict = None;
+    }
+
+    let _outbound_rx = t19_claim_and_dispatch(
+        &fixture,
+        &fixture.lifecycle,
+        &session_id,
+        &t19_latest_recovery(&fixture.lifecycle, &session_id),
+        "op-t19-prestart-fail",
+        fixture.engine.clone(),
+        provider,
+    )
+    .await;
+
+    // 驱动前失败必须对账回 Waiting（轮询等待异步 run task 收口）。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let after = t19_latest_recovery(&fixture.lifecycle, &session_id);
+        if after.state == LcResumeRecoveryState::Waiting {
+            assert_eq!(
+                after.fresh_operations[0].state,
+                LcFreshOperationState::Failed,
+                "驱动前失败的 operation 必须 Failed（结果保留）"
+            );
+            assert_eq!(after.operation_id, None);
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "fresh 驱动前失败后 recovery 必须回 Waiting（不得滞留 FreshRunning 令 claim 恒 Busy），当前 state={:?}",
+            after.state
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    // 新 operation 可再 claim（非 Busy/Stale）——owner 主线出口恢复。
+    assert!(matches!(
+        fixture.lifecycle.claim_lc_fresh(
+            &session_id,
+            "recovery_anchor_t19",
+            "op-t19-prestart-retry"
+        ),
+        Ok(LcFreshClaimOutcome::Claimed { .. })
+    ));
+    match tokio::time::timeout(std::time::Duration::from_millis(300), input_rx.recv()).await {
+        Err(_) | Ok(None) => {}
+        Ok(Some(_)) => panic!("驱动前失败必须零 provider spawn"),
     }
 }

@@ -689,6 +689,18 @@ impl WorkspaceEngine {
             Err(message) => {
                 let _ = self.event_tx.send(EngineEvent::Error { message }).await;
                 self.finish_failed_run().await;
+                // 复审 P2：驱动前失败必须对账 recovery——回 Waiting +
+                // operation Failed（fail-safe），不得滞留 FreshRunning 令后续
+                // claim 恒 Busy。
+                if fresh_recovery.is_some() {
+                    let reconcile_node = node_id.clone().or_else(|| {
+                        fresh_recovery
+                            .as_ref()
+                            .and_then(|recovery| recovery.fresh_node_id.clone())
+                    });
+                    self.reconcile_lc_fresh_author_family_run(reconcile_node.as_deref())
+                        .await;
+                }
                 return;
             }
         };
@@ -719,6 +731,17 @@ impl WorkspaceEngine {
                 Err(message) => {
                     let _ = self.event_tx.send(EngineEvent::Error { message }).await;
                     self.finish_failed_run().await;
+                    // 复审 P2：驱动前（launch 决策 Err）同 input 构建失败——
+                    // fresh 判据下对账回 Waiting，不滞留 FreshRunning。
+                    if fresh_recovery.is_some() {
+                        let reconcile_node = node_id.clone().or_else(|| {
+                            fresh_recovery
+                                .as_ref()
+                                .and_then(|recovery| recovery.fresh_node_id.clone())
+                        });
+                        self.reconcile_lc_fresh_author_family_run(reconcile_node.as_deref())
+                            .await;
+                    }
                     return;
                 }
             };

@@ -100,3 +100,24 @@ author 族由 typed 拒转为接管后，两个以「author tag 仍 typed 拒」
   不变），不自动重试。
 - 未跑全量门禁四条（fmt/clippy -D/check/test 全库）——归 Main 统一验证；本写面
   fmt 已干净、触及模块 test 全绿。
+
+## 7. 复审 P2 收口：fresh 驱动前失败对账（第二轮）
+
+- 缺口：fresh 修订链**驱动前**两处 early-return（input 构建 Err、launch 决策
+  Err，`review/drive.rs`）未调 reconcile——durable 滞留 FreshRunning，后续 claim
+  恒 Busy，无 typed 出口。
+- 修法：两处 early-return 前在 fresh 判据下补
+  `reconcile_lc_fresh_author_family_run`（fail-safe 回 Waiting + operation
+  Failed；fresh 节点由 finish_failed_run 终态化，对账判非 Completed 走失败臂）。
+- TDD 红先：`anchor_t19_author_family_fresh_prestart_failure_returns_to_waiting`
+  （注入驱动前失败：冻结 original_feedback=None + verdict 缺失 →
+  `build_revision_input_with_resume` fail-closed）——红：`当前
+  state=FreshRunning`（滞留 10s 轮询超时）；绿：recovery 回 Waiting ✓
+  operation Failed ✓ operation_id 清空 ✓ 新 operation `op-t19-prestart-retry`
+  再 claim == Claimed（非 Busy/Stale）✓ 零 provider spawn ✓。
+- 红例注入点说明：两处 early-return 同缺口同修；红例取 input 构建 Err 臂
+  （该夹具下 launch validate Err 无稳定注入面，validate 臂以同判据同 helper
+  覆盖）。
+- 回归：anchor_t19 4/4、anchor_t 全族 76/76、gateway_start 18/18、
+  planning_resume 17/17 全绿；本写面 rustfmt 干净。
+- 提交：`fix: author fresh 驱动前失败回等待`。
