@@ -54,10 +54,6 @@ export function useCockpitHotkeyActions({
         const current = useWorkspaceStore.getState();
         createCockpitActionFacade({
           flowKind: current.flowKind,
-          commandId:
-            typeof current.humanGateTurn?.command_id === "string"
-              ? current.humanGateTurn.command_id
-              : null,
           getState: useWorkspaceStore.getState,
           sendConfirm: routeGateConfirm,
           sendAbandonGate: workspaceWs.sendAbandonGate,
@@ -96,10 +92,6 @@ export function useCockpitHotkeyActions({
         const current = useWorkspaceStore.getState();
         createCockpitActionFacade({
           flowKind: current.flowKind,
-          commandId:
-            typeof current.humanGateTurn?.command_id === "string"
-              ? current.humanGateTurn.command_id
-              : null,
           getState: useWorkspaceStore.getState,
           sendConfirm: routeGateConfirm,
           sendAbandonGate: workspaceWs.sendAbandonGate,

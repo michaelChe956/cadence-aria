@@ -25,9 +25,20 @@ pub(crate) enum ScManualRevisionResult {
 }
 pub(crate) const HUMAN_GATE_COMMAND_ID_MAX_BYTES: usize = 256;
 pub(crate) const HUMAN_GATE_BUDGET_EXHAUSTED_CODE: &str = "HUMAN_GATE_BUDGET_EXHAUSTED";
+/// 蒸发链修法②（诊断 local://diag-manual-revision-evaporate.md）：command_id
+/// 命中**终态**（Failed/Completed）turn 时的稳定拒收码。重连重放的幂等语义
+/// 只需覆盖 Reserved/Running——终态 turn 的 command_id 复用必须以可见错误
+/// 回显，否则提交被 Replayed 效果吞掉（零 durable 写 + 客户端对同 turn_id
+/// 幂等吞帧 = 无声蒸发，现场 workspace_session_0003 / turn 71b47478）。
+pub(crate) const HUMAN_GATE_COMMAND_REPLAYED_AFTER_TERMINAL_TURN_CODE: &str =
+    "HUMAN_GATE_COMMAND_REPLAYED_AFTER_TERMINAL_TURN";
 /// Fixed upper bound for real provider starts belonging to one logical turn.
 /// A turn is reserved as attempt 1 and may be resumed once as attempt 2.
 pub(crate) const HUMAN_GATE_PROVIDER_MAX_ATTEMPTS: u32 = 2;
+/// 顺手项（attempt_no 单源）：turn 预约恒为 attempt 1（恢复链
+/// conversational_gate_recovery 可同 turn 续跑一次为 attempt 2）——预约侧
+/// 的 turn 字段与 provider_start 幂等键共用同一常量，不再散落字面量。
+const HUMAN_GATE_TURN_RESERVATION_ATTEMPT_NO: u32 = 1;
 
 #[derive(Debug, Clone)]
 pub(crate) struct HumanGateFeedbackInput {
@@ -142,6 +153,26 @@ fn non_terminal(turn: &HumanGateTurn) -> bool {
         turn.status,
         HumanGateTurnStatus::Reserved | HumanGateTurnStatus::Running
     )
+}
+
+/// 蒸发链修法②：按 (session_id, command_id) 查重命中的 turn 分派重放效果——
+/// 非终态（Reserved/Running）保持 `Replayed`（重连重放幂等，回显 TurnOpen）；
+/// 终态（Failed/Completed）返回 typed `Rejected` 回显——该 command_id 已被
+/// durable 终态消费，任何客户端都能把 ProtocolError/422 显示出来，蒸发变
+/// 回显。
+fn replay_outcome_for_command_turn(turn: HumanGateTurn) -> HumanGateCommandOutcome {
+    if non_terminal(&turn) {
+        HumanGateCommandOutcome::Replayed { turn }
+    } else {
+        rejected(
+            HUMAN_GATE_COMMAND_REPLAYED_AFTER_TERMINAL_TURN_CODE,
+            format!(
+                "command_id was already consumed by terminal turn {} ({:?}); \
+                 resubmit feedback with a fresh command_id",
+                turn.turn_id, turn.status
+            ),
+        )
+    }
 }
 
 pub(crate) fn validate_command_id(command_id: &str) -> Result<(), String> {
@@ -303,11 +334,18 @@ impl super::WorkspaceEngine {
         Ok(())
     }
 
+    /// 终态化一个 human-gate turn（durable Failed + failure_class）。返回
+    /// `true` 表示发生了真实迁移；已终态（Completed/Failed）的 turn 幂等
+    /// 返回 `Ok(false)`——调用方（取消臂回显）据此不重复回显误导帧。
+    ///
+    /// 蒸发链顺手项：迁移成功时同步收口修订 author 载体节点（与成功路径
+    /// revision_turn.inc.rs 的 complete_active_node 同构）——否则节点永停
+    /// Active（时间线幻影，现场 workspace_session_0003 node_005）。
     pub(crate) async fn fail_human_gate_turn(
         &mut self,
         turn_id: &str,
         failure_class: crate::product::models::HumanGateTurnFailureClass,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         use crate::product::models::HumanGateTurnStatus;
         let store = self
             .lifecycle_store
@@ -323,7 +361,7 @@ impl super::WorkspaceEngine {
             turn.status,
             HumanGateTurnStatus::Completed | HumanGateTurnStatus::Failed
         ) {
-            return Ok(());
+            return Ok(false);
         }
         turn.status = HumanGateTurnStatus::Failed;
         turn.failure_class = Some(failure_class);
@@ -332,7 +370,25 @@ impl super::WorkspaceEngine {
             .update_human_gate_turn(&expected, turn)
             .map_err(|error| error.to_string())?;
         self.session.provider_start_ledger = saved.provider_start_ledger;
-        Ok(())
+        self.close_revision_author_node_after_turn_failure().await;
+        Ok(true)
+    }
+
+    /// 失败收口：活动节点是修订 author 载体（AuthorRun）时置 Failed。门节点
+    /// 载体（历史直驱形态）保持 Active——门仍开着，收口归 enter_human_confirm
+    /// 与终态 compile。
+    async fn close_revision_author_node_after_turn_failure(&mut self) {
+        use crate::web::workspace_ws_types::{TimelineNodeStatus, TimelineNodeType};
+        if self.active_node_type() == Some(TimelineNodeType::AuthorRun)
+            && let Some(node_id) = self.active_node_id.clone()
+        {
+            self.update_timeline_node(
+                &node_id,
+                TimelineNodeStatus::Failed,
+                Some("人工修订失败，本轮反馈未采纳".to_string()),
+            )
+            .await;
+        }
     }
 }
 
@@ -361,7 +417,9 @@ impl super::WorkspaceEngine {
             .get_human_gate_turn_by_command_id(&self.session.session_id, &input.command_id)
             .map_err(|error| error.to_string())?
         {
-            return Ok(HumanGateCommandOutcome::Replayed { turn });
+            // 蒸发链修法②：终态 turn 的 command_id 复用必须 typed 拒收回显，
+            // 仅 Reserved/Running 保持重连重放幂等。
+            return Ok(replay_outcome_for_command_turn(turn));
         }
 
         // REQ-GCE-03 场景二：attempt 处于 AwaitingPlanAmendment 期间，原 SC plan
@@ -450,7 +508,7 @@ impl super::WorkspaceEngine {
             command_id: input.command_id.clone(),
             feedback_text: input.feedback,
             status: HumanGateTurnStatus::Reserved,
-            attempt_no: 1,
+            attempt_no: HUMAN_GATE_TURN_RESERVATION_ATTEMPT_NO,
             budget_reserved: 1,
             source_hash,
             result_artifact_ref: None,
@@ -461,7 +519,10 @@ impl super::WorkspaceEngine {
         let reservation = HumanGateReservation {
             command_id: turn.command_id.clone(),
             turn_id: turn.turn_id.clone(),
-            provider_start_idempotency_key: format!("human_gate:{}:attempt:1", turn.turn_id),
+            provider_start_idempotency_key: format!(
+                "human_gate:{}:attempt:{}",
+                turn.turn_id, HUMAN_GATE_TURN_RESERVATION_ATTEMPT_NO
+            ),
             reserved_at: now,
         };
         let expected = store
@@ -510,7 +571,9 @@ impl super::WorkspaceEngine {
                         )
                         .map_err(|read_error| read_error.to_string())?
                     {
-                        return Ok(HumanGateCommandOutcome::Replayed { turn: existing });
+                        // 蒸发链修法②：和解路径同款分派——竞态窗口内同
+                        // command_id 的 turn 已终态时同样 typed 拒收。
+                        return Ok(replay_outcome_for_command_turn(existing));
                     }
                     if let Some(existing) = store
                         .list_human_gate_turns(&self.session.session_id)

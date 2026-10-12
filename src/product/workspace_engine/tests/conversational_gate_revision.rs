@@ -21,3 +21,4 @@ include!("conversational_gate_revision/part_03.rs");
 include!("conversational_gate_revision/part_04.rs");
 include!("conversational_gate_revision/part_05.rs");
 include!("conversational_gate_revision/part_06.rs");
+include!("conversational_gate_revision/part_07.rs");

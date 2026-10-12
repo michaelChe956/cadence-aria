@@ -529,10 +529,6 @@ export function ChatCockpitPage({
     () =>
       createCockpitActionFacade({
         flowKind: state.flowKind,
-        commandId:
-          typeof state.humanGateTurn?.command_id === "string"
-            ? state.humanGateTurn.command_id
-            : null,
         getState: useWorkspaceStore.getState,
         sendConfirm: routeGateConfirm,
         sendAbandonGate: workspaceWs.sendAbandonGate,
@@ -550,7 +546,6 @@ export function ChatCockpitPage({
       }),
     [
       state.flowKind,
-      state.humanGateTurn?.command_id,
       state.humanGateClosure,
       state.humanGateSnapshot,
       state.sessionStatus,

@@ -100,7 +100,6 @@ describe("cockpit gate action facade", () => {
     const actions = createCockpitActionFacade({
       getState: useWorkspaceStore.getState,
       flowKind: "single_candidate",
-      commandId: null,
       sendConfirm: vi.fn(() => true),
       sendAbandonGate: vi.fn(() => true),
       sendHumanGateFeedback,
@@ -121,26 +120,90 @@ describe("cockpit gate action facade", () => {
     );
   });
 
-  it("reuses the live turn command id instead of regenerating one", () => {
-    const sendHumanGateFeedback = vi.fn(
-      (_feedback: string, _commandId?: string) => true,
-    );
-    const actions = createCockpitActionFacade({
-      flowKind: "single_candidate",
-      getState: useWorkspaceStore.getState,
-      commandId: "cmd_1",
-      sendConfirm: vi.fn(() => true),
-      sendAbandonGate: vi.fn(() => true),
-      sendHumanGateFeedback,
-      sendAdvance: vi.fn(() => true),
-      adoptReview: vi.fn(),
-      sendBatchConfirm: vi.fn(async () => undefined),
-      sendCompileRecovery: vi.fn(),
-    });
-    actions.feedback("请补齐边界");
+  it.each(["open", "busy"] as const)(
+    "reuses the live (%s) turn command id instead of regenerating one",
+    (status) => {
+      useWorkspaceStore.setState({
+        humanGateTurn: {
+          turn_id: "turn_1",
+          command_id: "cmd_1",
+          remaining_budget: 1,
+          status,
+          artifact_ref: null,
+          failure_class: null,
+          failure_message: null,
+          opened_at: "2026-10-12T00:00:00.000Z",
+          inlineError: null,
+          opened_snapshot_identity: null,
+        },
+      });
+      const sendHumanGateFeedback = vi.fn(
+        (_feedback: string, _commandId?: string) => true,
+      );
+      const actions = createCockpitActionFacade({
+        flowKind: "single_candidate",
+        getState: useWorkspaceStore.getState,
+        sendConfirm: vi.fn(() => true),
+        sendAbandonGate: vi.fn(() => true),
+        sendHumanGateFeedback,
+        sendAdvance: vi.fn(() => true),
+        adoptReview: vi.fn(),
+        sendBatchConfirm: vi.fn(async () => undefined),
+        sendCompileRecovery: vi.fn(),
+      });
+      actions.feedback("请补齐边界");
 
-    expect(sendHumanGateFeedback).toHaveBeenCalledWith("请补齐边界", "cmd_1");
-  });
+      expect(sendHumanGateFeedback).toHaveBeenCalledWith("请补齐边界", "cmd_1");
+    },
+  );
+
+  // 蒸发链修法①（诊断 local://diag-manual-revision-evaporate.md）：终态
+  //（failed/awaiting_confirm）turn 的 command_id 已被 durable 终态消费——复用
+  // 会被服务端按 (session_id, command_id) 查重吞掉（现场 workspace_session_0003：
+  // 第二次提交复用死 turn 的 command_id，零 spawn、零回显）。终态必须生成新
+  // command_id 开新回合。
+  it.each(["failed", "awaiting_confirm"] as const)(
+    "regenerates the command id when the gate turn is terminal (%s)",
+    (status) => {
+      useWorkspaceStore.setState({
+        humanGateTurn: {
+          turn_id: "turn_dead",
+          command_id: "cmd_dead_turn",
+          remaining_budget: 1,
+          status,
+          artifact_ref: null,
+          failure_class: null,
+          failure_message: null,
+          opened_at: "2026-10-12T00:00:00.000Z",
+          inlineError: null,
+          opened_snapshot_identity: null,
+        },
+      });
+      const sendHumanGateFeedback = vi.fn(
+        (_feedback: string, _commandId?: string) => true,
+      );
+      const actions = createCockpitActionFacade({
+        flowKind: "single_candidate",
+        getState: useWorkspaceStore.getState,
+        sendConfirm: vi.fn(() => true),
+        sendAbandonGate: vi.fn(() => true),
+        sendHumanGateFeedback,
+        sendAdvance: vi.fn(() => true),
+        adoptReview: vi.fn(),
+        sendBatchConfirm: vi.fn(async () => undefined),
+        sendCompileRecovery: vi.fn(),
+      });
+      actions.feedback("再修一次");
+
+      expect(sendHumanGateFeedback).toHaveBeenCalledTimes(1);
+      const [feedback, commandId] = sendHumanGateFeedback.mock.calls[0];
+      expect(feedback).toBe("再修一次");
+      expect(commandId).not.toBe("cmd_dead_turn");
+      expect(commandId).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      );
+    },
+  );
 
   it("keeps legacy flow feedback off the typed websocket helper", () => {
     const sendHumanGateFeedback = vi.fn(
@@ -148,7 +211,6 @@ describe("cockpit gate action facade", () => {
     );
     const actions = createCockpitActionFacade({
       flowKind: "legacy",
-      commandId: "cmd_1",
       getState: useWorkspaceStore.getState,
       sendConfirm: vi.fn(() => true),
       sendAbandonGate: vi.fn(() => true),
@@ -190,7 +252,6 @@ describe("cockpit gate action facade", () => {
     const sendHumanGateFeedback = vi.fn((_feedback: string, _commandId?: string) => true);
     const actions = createCockpitActionFacade({
       flowKind: "single_candidate",
-      commandId: null,
       getState: useWorkspaceStore.getState,
       sendConfirm,
       sendAbandonGate,
@@ -229,7 +290,6 @@ describe("cockpit gate action facade", () => {
     const sendHumanGateFeedback = vi.fn((_feedback: string, _commandId?: string) => true);
     const actions = createCockpitActionFacade({
       flowKind: "single_candidate",
-      commandId: null,
       getState: useWorkspaceStore.getState,
       sendConfirm: vi.fn(() => true),
       sendAbandonGate: vi.fn(() => true),
@@ -257,7 +317,6 @@ describe("cockpit gate action facade", () => {
     const sendConfirm = vi.fn((_withReview?: boolean) => true);
     const facade = createCockpitActionFacade({
       flowKind: "legacy",
-      commandId: null,
       getState: useWorkspaceStore.getState,
       sendConfirm,
       sendAbandonGate: vi.fn(() => true),
@@ -287,7 +346,6 @@ describe("cockpit gate action facade", () => {
     const adoptReview = vi.fn();
     const facade = createCockpitActionFacade({
       flowKind: "legacy",
-      commandId: null,
       getState: useWorkspaceStore.getState,
       sendConfirm: vi.fn(() => true),
       sendAbandonGate: vi.fn(() => true),
@@ -316,7 +374,6 @@ describe("cockpit gate action facade", () => {
     const sendAdvance = vi.fn<(commandId?: string) => boolean>(() => true);
     createCockpitActionFacade({
       flowKind: "legacy",
-      commandId: null,
       getState: useWorkspaceStore.getState,
       sendConfirm: vi.fn(() => true),
       sendAbandonGate: vi.fn(() => true),
@@ -343,7 +400,6 @@ describe("cockpit gate action facade", () => {
     expect(
       createCockpitActionFacade({
         flowKind: "single_candidate",
-        commandId: null,
         getState: useWorkspaceStore.getState,
         sendConfirm: vi.fn(() => true),
       sendAbandonGate: vi.fn(() => true),
@@ -406,7 +462,6 @@ describe("cockpit gate action facade", () => {
     expect(
       createCockpitActionFacade({
         flowKind: "single_candidate",
-        commandId: null,
         getState: useWorkspaceStore.getState,
         sendConfirm: vi.fn(() => true),
         sendAbandonGate: vi.fn(() => true),
@@ -437,7 +492,6 @@ describe("cockpit gate action facade", () => {
     expect(
       createCockpitActionFacade({
         flowKind: "single_candidate",
-        commandId: null,
         getState: useWorkspaceStore.getState,
         sendConfirm: vi.fn(() => true),
         sendAbandonGate: vi.fn(() => true),
@@ -458,7 +512,6 @@ describe("cockpit gate action facade", () => {
     const sendAdvance = vi.fn(() => true);
     const actions = createCockpitActionFacade({
       flowKind: "single_candidate",
-      commandId: "cmd_1",
       getState: useWorkspaceStore.getState,
       sendConfirm,
       sendHumanGateFeedback,
@@ -510,7 +563,6 @@ describe("cockpit gate action facade", () => {
       expect(
         createCockpitActionFacade({
           flowKind: "legacy",
-          commandId: null,
           getState: useWorkspaceStore.getState,
           sendConfirm: vi.fn(() => true),
           sendAbandonGate: vi.fn(() => true),
@@ -549,7 +601,6 @@ describe("cockpit gate action facade", () => {
       const sendHumanGateFeedback = vi.fn(() => true);
       const actions = createCockpitActionFacade({
         flowKind: "single_candidate",
-        commandId: null,
         getState: useWorkspaceStore.getState,
         sendConfirm,
         sendAbandonGate,
@@ -586,7 +637,6 @@ describe("cockpit gate action facade", () => {
 
     createCockpitActionFacade({
       flowKind: "single_candidate",
-      commandId: "cmd_live",
       getState: useWorkspaceStore.getState,
       sendConfirm: vi.fn(() => true),
       sendAbandonGate,
@@ -610,7 +660,6 @@ describe("cockpit repository initialization resume facade", () => {
     const sendC1Action = vi.fn();
     const facade = createCockpitActionFacade({
       flowKind: "single_candidate",
-      commandId: null,
       getState: useWorkspaceStore.getState,
       sendConfirm: vi.fn(() => true),
       sendAbandonGate: vi.fn(() => true),
@@ -634,7 +683,6 @@ describe("cockpit repository initialization resume facade", () => {
   it("stays fail-closed (no outbound call) when no sender is wired", async () => {
     const facade = createCockpitActionFacade({
       flowKind: "single_candidate",
-      commandId: null,
       getState: useWorkspaceStore.getState,
       sendConfirm: vi.fn(() => true),
       sendAbandonGate: vi.fn(() => true),
@@ -729,7 +777,6 @@ describe("cockpit batch confirm & compile recovery facade", () => {
     const sendCompileRecovery = vi.fn();
     const actions = createCockpitActionFacade({
       flowKind: "single_candidate",
-      commandId: null,
       getState: useWorkspaceStore.getState,
       sendConfirm,
       sendAbandonGate,
@@ -940,7 +987,6 @@ describe("cockpit REST human action routing (P0 1.3)", () => {
     const sendCompileRecovery = vi.fn();
     const actions = createCockpitActionFacade({
       flowKind: "single_candidate",
-      commandId: null,
       getState: useWorkspaceStore.getState,
       sendConfirm,
       sendAbandonGate,

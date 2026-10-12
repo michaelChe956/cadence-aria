@@ -160,9 +160,27 @@ export function actionFacadeForFlowKind(
   return flowKind === "single_candidate" ? "typed" : "legacy";
 }
 
+/**
+ * 蒸发链修法①（诊断 local://diag-manual-revision-evaporate.md）：门命令
+ * command_id 的复用策略——仅非终态活 turn（"open"/"busy" ↔ 服务端
+ * Reserved/Running）才复用其 command_id（重试/重连重放同 id，幂等）。
+ * 终态 turn（"failed" / "awaiting_confirm" ↔ Failed/Completed）的
+ * command_id 已被 durable 查重消费，复用会被服务端 Replayed/Rejected 吞掉
+ * （现场 workspace_session_0003：第二次提交复用死 turn 的 command_id，
+ * 零 spawn、零回显）；必须返回 null 交由调用方 newCommandId() 开新回合。
+ */
+export function replayableGateCommandId(
+  state: Pick<WorkspaceWsState, "humanGateTurn">,
+): string | null {
+  const turn = state.humanGateTurn;
+  if (turn && (turn.status === "open" || turn.status === "busy")) {
+    return turn.command_id;
+  }
+  return null;
+}
+
 export function createCockpitActionFacade(input: {
   flowKind: WorkspaceWsState["flowKind"];
-  commandId: string | null;
   getState: () => WorkspaceWsState;
   sendConfirm: (withReview?: boolean) => boolean;
   sendAbandonGate: (commandId: string) => boolean;
@@ -242,8 +260,15 @@ export function createCockpitActionFacade(input: {
       // driver/client 生成；服务端按 (session_id, command_id) durable 查重并开新
       // turn（Reserved+扣预算）。重连/刷新后 typed 门只剩 session_state 快照、无活
       // turn 提供既有 command_id 时，凭新生成的 command_id 提交反馈而非拒发。
-      // 有活 turn 时仍复用其 command_id（重试/重连重放同 id，不重新生成）。
-      return input.sendHumanGateFeedback(feedback, input.commandId ?? newCommandId());
+      // 蒸发链修法①（诊断 local://diag-manual-revision-evaporate.md）：复用仅限
+      // 非终态活 turn（open/busy ↔ 服务端 Reserved/Running，重连重放幂等）；
+      // 终态（failed/awaiting_confirm）turn 的 command_id 已被 durable 消费，复用
+      // 会被服务端查重吞掉——必须 newCommandId() 开新回合。点击时现读 store，
+      // 不吃 memo 闭包过期。
+      return input.sendHumanGateFeedback(
+        feedback,
+        replayableGateCommandId(state) ?? newCommandId(),
+      );
     },
     terminate() {
       const state = input.getState();
@@ -268,7 +293,8 @@ export function createCockpitActionFacade(input: {
           }) ?? false
         );
       }
-      return input.sendAbandonGate(input.commandId ?? newCommandId());
+      // 与 feedback 同款复用纪律：仅非终态活 turn 复用其 command_id。
+      return input.sendAbandonGate(replayableGateCommandId(state) ?? newCommandId());
     },
     advance() {
       const state = input.getState();

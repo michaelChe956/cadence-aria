@@ -18,6 +18,9 @@ pub enum HumanGateTurnFailureClass {
     ValidationReject,
     Timeout,
     BudgetExhausted,
+    /// 蒸发链顺手项（取消臂回显化）：run 被 supersede/断连取消、drive 被
+    /// drop——turn 不会自然收口，由取消臂终态化为 Failed(cancelled)。
+    Cancelled,
 }
 
 /// Durable record for one accepted human-gate feedback command.

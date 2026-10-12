@@ -72,6 +72,9 @@ fn human_gate_turn_durable_schema_roundtrips_and_rejects_unknown_fields() {
         HumanGateTurnFailureClass::ValidationReject,
         HumanGateTurnFailureClass::Timeout,
         HumanGateTurnFailureClass::BudgetExhausted,
+        // 蒸发链顺手项（取消臂回显化）：run 被取消 drop drive 的 turn 终态
+        // 分类——serde "cancelled"，前端 failure_class 字符串直收。
+        HumanGateTurnFailureClass::Cancelled,
     ];
     for status in &statuses {
         assert_serde_roundtrip(status);
@@ -96,6 +99,7 @@ fn human_gate_turn_durable_schema_roundtrips_and_rejects_unknown_fields() {
             HumanGateTurnFailureClass::BudgetExhausted,
             "budget_exhausted",
         ),
+        (HumanGateTurnFailureClass::Cancelled, "cancelled"),
     ]);
 
     let turn = HumanGateTurn {
@@ -913,7 +917,7 @@ use crate::product::models::{
     LcFreshOperationResult, LcFreshOperationState, LcLegacyOutlineAuthorPayload,
     LcLegacyOutlineRevisionPayload, LcOutlineRebuildOrigin, LcRecoveryArtifactRef,
     LcRecoveryBusinessContext, LcRecoveryDraftRef, LcRecoveryRedoSpec, LcRecoveryRunContext,
-    LcRetainedPlanItemRef, LcResumeRecoveryRecord, LcResumeRecoveryState, LogicalLaunchBasis,
+    LcResumeRecoveryRecord, LcResumeRecoveryState, LcRetainedPlanItemRef, LogicalLaunchBasis,
     LogicalLaunchFingerprintRecord, LogicalLaunchFingerprintState, ProviderConversationRole,
     SingleCandidatePhase, SupersededNativeSessionRecord, WorkItemDraftStatus,
 };
@@ -1200,7 +1204,10 @@ fn anchor_t02_recovery_schema_roundtrips_all_run_contexts() {
     );
 
     // full basis/native/run 绑定的 launch 指纹记录。
-    assert_enum_cases([(LogicalLaunchBasis::FullLcProjectionV2, "full_lc_projection_v2")]);
+    assert_enum_cases([(
+        LogicalLaunchBasis::FullLcProjectionV2,
+        "full_lc_projection_v2",
+    )]);
     for state in [
         LogicalLaunchFingerprintState::Prepared,
         LogicalLaunchFingerprintState::Active,

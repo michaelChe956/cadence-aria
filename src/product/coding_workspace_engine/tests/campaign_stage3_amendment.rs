@@ -859,7 +859,9 @@ async fn campaign_stage3_amendment_returns_to_same_attempt_via_original_plan_ses
             CodingAttemptStatus::AwaitingPlanAmendment
         );
         assert_eq!(fixture.trigger_context().id, context.id);
-        // 同 command 重发：Replay 同一 turn，预算/ledger 不再变化。
+        // 同 command 重发（turn 已 Completed 终态）：蒸发链修法②——typed
+        // Rejected 回显取代 Replayed（重连幂等只覆盖 Reserved/Running），
+        // 预算/ledger 不变。
         let replayed = recovered
             .handle_human_gate_feedback(HumanGateFeedbackInput {
                 command_id: "cmd-campaign-amend-1".to_string(),
@@ -869,7 +871,8 @@ async fn campaign_stage3_amendment_returns_to_same_attempt_via_original_plan_ses
             .expect("replay");
         assert!(matches!(
             replayed,
-            HumanGateCommandOutcome::Replayed { ref turn } if turn.turn_id == turn_id
+            HumanGateCommandOutcome::Rejected { ref code, .. }
+                if code == "HUMAN_GATE_COMMAND_REPLAYED_AFTER_TERMINAL_TURN"
         ));
         let after_replay = fixture
             .lifecycle

@@ -25,6 +25,55 @@ pub(super) fn lc_fresh_recovery_record_if_running(
     }))
 }
 
+/// 蒸发链顺手项（取消臂回显化，诊断 local://diag-manual-revision-evaporate.md
+/// §a-①）：`tokio::select!` 取消臂 drop drive 后，SC 修订 turn 此前永停
+/// Reserved/Running——无失败落盘、无回显帧，后续 feedback 全被 gate_busy 卡死。
+/// 本助手是取消臂的收口核心（供取消臂与测试共享）：durable
+/// Failed(cancelled) + `HumanGateTurnFailed` 回显帧 + eprintln 打点（对齐
+/// aria-cancellation 风格）。返回 `true` 表示发生了真实迁移；刚自然收口的
+/// turn 由 `fail_human_gate_turn` 幂等跳过（不回显误导帧）。
+pub(crate) async fn fail_cancelled_human_gate_revision_turn(
+    engine: &Arc<Mutex<crate::product::workspace_engine::WorkspaceEngine>>,
+    outbound_tx: &mpsc::Sender<OutboundControl>,
+    session_id: &str,
+    turn_id: &str,
+) -> bool {
+    let mut engine = engine.lock().await;
+    match engine
+        .fail_human_gate_turn(
+            turn_id,
+            crate::product::models::HumanGateTurnFailureClass::Cancelled,
+        )
+        .await
+    {
+        Ok(true) => {
+            drop(engine);
+            eprintln!(
+                "[aria-cancellation] workspace provider_run_cancelled_fail_turn session_id={session_id} turn_id={turn_id} failure_class=cancelled"
+            );
+            let _ = send_json_outbound(
+                outbound_tx,
+                &WsOutMessage::HumanGateTurnFailed {
+                    turn_id: turn_id.to_string(),
+                    failure_class: "cancelled".to_string(),
+                    message:
+                        "修订运行已取消（被新命令取代或连接中止），本轮反馈未执行；请重新提交反馈"
+                            .to_string(),
+                },
+            )
+            .await;
+            true
+        }
+        Ok(false) => false,
+        Err(message) => {
+            eprintln!(
+                "[aria-cancellation] workspace provider_run_cancelled_fail_turn_error session_id={session_id} turn_id={turn_id} error={message}"
+            );
+            false
+        }
+    }
+}
+
 pub(super) async fn spawn_provider_run_with_start_mode(
     run_context: ProviderRunContext,
     run_kind: ProviderRunKind,
@@ -145,6 +194,13 @@ pub(super) async fn spawn_provider_run_with_start_mode(
         &run_kind,
         ProviderRunKind::WorkItemPlanOutlineRevision { .. }
     );
+    // 蒸发链顺手项（取消臂回显化）：run_kind 被 move 进 drive 前取出 SC 修订
+    // turn id 与回显通道克隆——取消臂 drop drive 后据此终态化 turn 并回显。
+    let cancelled_revision_turn_id = match &run_kind {
+        ProviderRunKind::HumanGateScManualRevision { turn_id, .. } => Some(turn_id.clone()),
+        _ => None,
+    };
+    let cancel_arm_outbound_tx = outbound_tx_for_task.clone();
     tokio::spawn(async move {
         let mut provider_drive_guard = Some(provider_drive_guard);
         let mut engine = engine_for_run.lock().await;
@@ -1270,6 +1326,24 @@ pub(super) async fn spawn_provider_run_with_start_mode(
         };
         tokio::select! {
             _ = run_cancel.cancelled() => {
+                // 蒸发链顺手项（取消臂回显化）：drive 被 drop，run 永不收口——
+                // SC 修订 turn 会永停 Reserved/Running（后续 feedback 全被
+                // gate_busy 卡死）且零回显。此处兜底：打点 + durable
+                // Failed(cancelled) + HumanGateTurnFailed 回显帧；刚自然收口的
+                // turn 幂等跳过（见助手注释）。
+                eprintln!(
+                    "[aria-cancellation] workspace provider_run_cancelled_dropped_drive session_id={} run_label={} revision_turn={:?}",
+                    session_id, run_label, cancelled_revision_turn_id
+                );
+                if let Some(turn_id) = cancelled_revision_turn_id {
+                    fail_cancelled_human_gate_revision_turn(
+                        &engine_for_run,
+                        &cancel_arm_outbound_tx,
+                        &session_id,
+                        &turn_id,
+                    )
+                    .await;
+                }
                 let _ = supersede_reclaim_manager.finish_run(run_token).await;
             }
             _ = drive => {}

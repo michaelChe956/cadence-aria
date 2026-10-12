@@ -39,7 +39,10 @@ async fn assert_amendment_row_final_invariants(
     expected_ledger_len: usize,
 ) -> crate::product::coding_models::CodingExecutionAttempt {
     let resumed = fixture.durable_attempt();
-    assert_eq!(resumed.id, fixture.attempt.id, "恢复必须回到原 attempt（不新建）");
+    assert_eq!(
+        resumed.id, fixture.attempt.id,
+        "恢复必须回到原 attempt（不新建）"
+    );
     assert_eq!(
         fixture
             .store
@@ -51,8 +54,7 @@ async fn assert_amendment_row_final_invariants(
     );
     let binding = fixture.store.get_plan_binding(&resumed).expect("binding");
     assert_eq!(
-        binding.bound_plan_revision_id,
-        manifest.new_plan_revision_id,
+        binding.bound_plan_revision_id, manifest.new_plan_revision_id,
         "binding 恰一次切换到新 revision"
     );
     assert_eq!(
@@ -110,17 +112,29 @@ async fn assert_amendment_row_final_invariants(
             assert_eq!(resumed.status, CodingAttemptStatus::Running);
         }
         AmendmentResumeMode::Revalidate => {
-            assert_eq!(resume_unit.status, CodingExecutionUnitStatus::NeedsRevalidation);
-            assert_eq!(resumed.stage, crate::product::coding_models::CodingExecutionStage::CodeReview);
+            assert_eq!(
+                resume_unit.status,
+                CodingExecutionUnitStatus::NeedsRevalidation
+            );
+            assert_eq!(
+                resumed.stage,
+                crate::product::coding_models::CodingExecutionStage::CodeReview
+            );
         }
         AmendmentResumeMode::AwaitHandoff => {
-            assert_eq!(resume_unit.status, CodingExecutionUnitStatus::AwaitingAmendment);
+            assert_eq!(
+                resume_unit.status,
+                CodingExecutionUnitStatus::AwaitingAmendment
+            );
             assert_eq!(
                 resumed.status,
                 CodingAttemptStatus::AwaitingPlanAmendment,
                 "AwaitHandoff：恢复后回到等待 handoff 的暂停位"
             );
-            assert_eq!(resumed.active_unit_id.as_deref(), Some(resume_unit.id.as_str()));
+            assert_eq!(
+                resumed.active_unit_id.as_deref(),
+                Some(resume_unit.id.as_str())
+            );
         }
     }
     // 原 plan session 的重开门关回 Confirmed；原预算源/ledger 终值对账。
@@ -150,8 +164,7 @@ async fn assert_amendment_row_final_invariants(
 /// 原 plan session 上同 command（typed feedback）恰一次受理，
 /// group attempt/binding/context 零切换；重发 Replay 零增量。
 #[tokio::test]
-async fn campaign_stage3_recovery_matrix_amendment_context_window_reconnect_resumes_same_command()
-{
+async fn campaign_stage3_recovery_matrix_amendment_context_window_reconnect_resumes_same_command() {
     let fixture = campaign_amendment_fixture().await;
     let paused = fixture.durable_attempt();
     assert_eq!(paused.status, CodingAttemptStatus::AwaitingPlanAmendment);
@@ -231,7 +244,10 @@ async fn campaign_stage3_recovery_matrix_amendment_context_window_reconnect_resu
     );
     // binding 前缀不变：context 窗口不切换 revision。
     assert_eq!(
-        fixture.store.get_plan_binding(&paused).expect("binding after"),
+        fixture
+            .store
+            .get_plan_binding(&paused)
+            .expect("binding after"),
         binding_before
     );
     assert_eq!(
@@ -239,7 +255,8 @@ async fn campaign_stage3_recovery_matrix_amendment_context_window_reconnect_resu
         PlanAmendmentContextStatus::Open
     );
 
-    // 重连后再同 command 重发：Replay 同一 turn，预算/ledger 零增量。
+    // 重连后再同 command 重发（turn 已 Completed 终态）：typed Rejected 回显
+    //（蒸发链修法②：重连幂等只覆盖 Reserved/Running），预算/ledger 零增量。
     let mut replay_engine = fixture.plan_session_engine("matrix-context-replay");
     let replayed = replay_engine
         .handle_human_gate_feedback(HumanGateFeedbackInput {
@@ -250,7 +267,8 @@ async fn campaign_stage3_recovery_matrix_amendment_context_window_reconnect_resu
         .expect("replay");
     assert!(matches!(
         &replayed,
-        HumanGateCommandOutcome::Replayed { turn } if turn.turn_id == turn_id
+        HumanGateCommandOutcome::Rejected { code, .. }
+            if code == "HUMAN_GATE_COMMAND_REPLAYED_AFTER_TERMINAL_TURN"
     ));
     assert_eq!(matrix_plan_session_budget(&fixture), 1);
     assert_eq!(matrix_provider_ledger_len(&fixture), 1);
@@ -261,8 +279,7 @@ async fn campaign_stage3_recovery_matrix_amendment_context_window_reconnect_resu
 /// command（同一 confirm 入口重发）恢复；崩溃窗口内 lock 不释放、coding
 /// binding 前缀不变、request 不 Published；恢复后全链收口回原 attempt。
 #[tokio::test]
-async fn campaign_stage3_recovery_matrix_amendment_publication_checkpoints_resume_same_command()
-{
+async fn campaign_stage3_recovery_matrix_amendment_publication_checkpoints_resume_same_command() {
     let cases = [
         (
             PlanAmendmentPublicationCheckpoint::JournalPreparing,
@@ -396,7 +413,10 @@ async fn campaign_stage3_recovery_matrix_amendment_publication_checkpoints_resum
             .expect("failed journal");
         assert_eq!(failed_journal.phase, failed_phase, "{label}: journal phase");
         assert!(failed_journal.error.is_some(), "{label}: journal 错误留痕");
-        assert!(failed_journal.recovery.is_some(), "{label}: recovery 提示留痕");
+        assert!(
+            failed_journal.recovery.is_some(),
+            "{label}: recovery 提示留痕"
+        );
         assert_eq!(
             fixture
                 .revision_store
@@ -407,7 +427,11 @@ async fn campaign_stage3_recovery_matrix_amendment_publication_checkpoints_resum
             "{label}: request 未 Published"
         );
         // campaign 不变量：出版崩溃窗口内 coding 侧零切换。
-        assert_eq!(fixture.durable_attempt(), paused, "{label}: 同 attempt 不变");
+        assert_eq!(
+            fixture.durable_attempt(),
+            paused,
+            "{label}: 同 attempt 不变"
+        );
         assert_eq!(
             fixture
                 .store
@@ -421,7 +445,11 @@ async fn campaign_stage3_recovery_matrix_amendment_publication_checkpoints_resum
             fixture.trigger_context().status,
             PlanAmendmentContextStatus::Open
         );
-        assert_eq!(matrix_plan_session_budget(&fixture), 2, "{label}: 原预算源不动");
+        assert_eq!(
+            matrix_plan_session_budget(&fixture),
+            2,
+            "{label}: 原预算源不动"
+        );
         assert_eq!(
             matrix_provider_ledger_len(&fixture),
             0,
@@ -484,9 +512,10 @@ async fn campaign_stage3_recovery_matrix_amendment_publication_checkpoints_resum
 /// command（typed 生产入口）从 journal 前缀恢复，binding 恰一次写入。
 #[tokio::test]
 async fn campaign_stage3_recovery_matrix_amendment_binding_window_resumes_from_journal_prefix() {
-    for (label, seed_through_binding) in
-        [("started_before_binding", false), ("after_binding_written", true)]
-    {
+    for (label, seed_through_binding) in [
+        ("started_before_binding", false),
+        ("after_binding_written", true),
+    ] {
         let fixture = campaign_amendment_fixture().await;
         let paused = fixture.durable_attempt();
         let context = fixture.trigger_context();
@@ -547,14 +576,12 @@ async fn campaign_stage3_recovery_matrix_amendment_binding_window_resumes_from_j
             .expect("crashed binding");
         if seed_through_binding {
             assert_eq!(
-                crashed_binding.bound_plan_revision_id,
-                manifest.new_plan_revision_id,
+                crashed_binding.bound_plan_revision_id, manifest.new_plan_revision_id,
                 "{label}: binding 已写（前缀校验锚点）"
             );
         } else {
             assert_eq!(
-                crashed_binding.bound_plan_revision_id,
-                context.previous_plan_revision_id,
+                crashed_binding.bound_plan_revision_id, context.previous_plan_revision_id,
                 "{label}: binding 前缀不变"
             );
         }
@@ -577,8 +604,10 @@ async fn campaign_stage3_recovery_matrix_amendment_binding_window_resumes_from_j
 /// 未送达事实（Unsent / 悬挂 Pending），补投递入口重投同一 event_id 恰一次。
 #[tokio::test]
 async fn campaign_stage3_recovery_matrix_amendment_application_delivery_recovers_same_event() {
-    for (label, socket_write_succeeds) in [("socket_write_failed", false), ("delivery_mark_crash", true)]
-    {
+    for (label, socket_write_succeeds) in [
+        ("socket_write_failed", false),
+        ("delivery_mark_crash", true),
+    ] {
         let fixture = campaign_amendment_fixture().await;
         let paused = fixture.durable_attempt();
         let context = fixture.trigger_context();
@@ -608,7 +637,9 @@ async fn campaign_stage3_recovery_matrix_amendment_application_delivery_recovers
         let resumed = engine
             .resume_group_after_plan_amendment(&paused, &context, &manifest)
             .await
-            .unwrap_or_else(|error| panic!("{label}: delivery 观察失败不得中断业务 resume: {error}"));
+            .unwrap_or_else(|error| {
+                panic!("{label}: delivery 观察失败不得中断业务 resume: {error}")
+            });
         assert_eq!(resumed.id, paused.id, "{label}: 同 attempt");
         let settled = fixture.durable_attempt();
         assert_eq!(settled.id, paused.id, "{label}: 同 attempt");
@@ -624,7 +655,8 @@ async fn campaign_stage3_recovery_matrix_amendment_application_delivery_recovers
         } else {
             CodingPlanAmendmentDeliveryStatus::Unsent
         };
-        let delivery = poll_delivery_marker(&fixture, &settled, &manifest.id, expected_marker).await;
+        let delivery =
+            poll_delivery_marker(&fixture, &settled, &manifest.id, expected_marker).await;
         let journal = fixture
             .store
             .get_amendment_application_journal(&settled, &manifest.id)
@@ -667,16 +699,16 @@ async fn campaign_stage3_recovery_matrix_amendment_application_delivery_recovers
         // current_amendment_journal_id 重选（delivered_current 仅认 Delivered），
         // 改由补投递入口重投同 event 恰一次。
         let observed_recovery: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
-        let recovered_engine = matrix_coding_engine_with_socket_outcome(
-            &fixture,
-            true,
-            observed_recovery.clone(),
-        );
+        let recovered_engine =
+            matrix_coding_engine_with_socket_outcome(&fixture, true, observed_recovery.clone());
         let redelivered = recovered_engine
             .redeliver_undelivered_plan_amendments(&settled)
             .await
             .unwrap_or_else(|error| panic!("{label}: 同 event 补投必须完成: {error}"));
-        assert_eq!(redelivered, 1, "{label}: 未送达条目恰一条真实达成 Delivered");
+        assert_eq!(
+            redelivered, 1,
+            "{label}: 未送达条目恰一条真实达成 Delivered"
+        );
         // 补投返回前已等待真实写 ack（ack 在观察记录之后），同一 event_id 恰一次。
         let recovered_event_ids = observed_recovery.lock().expect("observed").clone();
         assert_eq!(
@@ -710,11 +742,7 @@ fn matrix_coding_engine_with_socket_outcome(
             }
         }
     });
-    CodingWorkspaceEngine::new(
-        fixture.store.clone(),
-        GitWorkspaceService::new(),
-        event_tx,
-    )
+    CodingWorkspaceEngine::new(fixture.store.clone(), GitWorkspaceService::new(), event_tx)
 }
 
 /// 轮询 durable delivery marker 到期望状态（观察任务 detached，marker

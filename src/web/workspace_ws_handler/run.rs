@@ -16,25 +16,25 @@ use followups::{
 mod gateway_start;
 #[cfg(test)]
 pub(crate) use gateway_start::PlanAuthorLaunch;
+#[cfg(test)]
+pub(crate) use gateway_start::begin_plan_split_run;
 pub(crate) use gateway_start::dispatch_lc_fresh_recovery_run;
 #[cfg(test)]
 pub(crate) use gateway_start::{
     LcFreshDispatchRejection, LcFreshRunKind, lc_fresh_run_kind_for_recovery_context,
 };
-#[cfg(test)]
-pub(crate) use gateway_start::begin_plan_split_run;
 pub(crate) use gateway_start::{
-    PlanSplitRunContext, begin_plan_split_run_if_logical,
-    close_plan_split_run, close_plan_split_run_with_markdown, fail_plan_split_run,
-    resolve_plan_author_launch, start_work_item_plan_author,
+    PlanSplitRunContext, begin_plan_split_run_if_logical, close_plan_split_run,
+    close_plan_split_run_with_markdown, fail_plan_split_run, resolve_plan_author_launch,
+    start_work_item_plan_author,
 };
 #[path = "run/provider_run.rs"]
 mod provider_run;
 #[path = "run/single_candidate.rs"]
 mod single_candidate;
 pub(crate) use provider_run::{
-    spawn_provider_run_claiming_idle, spawn_provider_run_from_event,
-    spawn_provider_run_from_handler,
+    fail_cancelled_human_gate_revision_turn, spawn_provider_run_claiming_idle,
+    spawn_provider_run_from_event, spawn_provider_run_from_handler,
 };
 
 pub(crate) static NEXT_ACTIVE_RUN_TOKEN: AtomicU64 = AtomicU64::new(1);

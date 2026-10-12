@@ -89,7 +89,8 @@ async fn campaign_stage3_recovery_matrix_turn_reservation_row_alive_and_dead() {
         "门预算经路由重建接续（改写登记：原重置断言 3）"
     );
     assert_eq!(harness.provider_start_keys().len(), 1, "ledger 恰一项");
-    // 重开后再同 command：Replay 同一终态 turn，零增量。
+    // 重开后再同 command（turn 已 Completed 终态）：typed Rejected 回显
+    //（蒸发链修法②：重连幂等只覆盖 Reserved/Running），零增量。
     let mut replay_a = matrix_reopened_engine(&harness, "matrix-turn-a-replay");
     let replayed = replay_a
         .handle_human_gate_feedback(HumanGateFeedbackInput {
@@ -100,7 +101,8 @@ async fn campaign_stage3_recovery_matrix_turn_reservation_row_alive_and_dead() {
         .expect("replay");
     assert!(matches!(
         &replayed,
-        HumanGateCommandOutcome::Replayed { turn } if turn.turn_id == turn_a.turn_id
+        HumanGateCommandOutcome::Rejected { code, .. }
+            if code == "HUMAN_GATE_COMMAND_REPLAYED_AFTER_TERMINAL_TURN"
     ));
     assert_eq!(harness.budget_remaining(), 1);
     assert_eq!(harness.provider_start_keys().len(), 1);

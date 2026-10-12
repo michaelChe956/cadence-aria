@@ -68,7 +68,10 @@ async fn campaign_stage3_interactive_multi_turn_revision_then_approve_confirms_p
     // C2（REQ-CG-02 预算重置边界修订，改写登记）：修订完成后 Evaluate route
     // 重建 approval 门快照 MUST carry-forward durable 剩余（2−1=1），本轮
     // reserve 后 remaining=0——同 logical gate 预算真实递减，不回填默认 3。
-    assert_eq!(remaining_2, 0, "门预算同 logical gate 内真实递减（改写登记：原重置断言 2）");
+    assert_eq!(
+        remaining_2, 0,
+        "门预算同 logical gate 内真实递减（改写登记：原重置断言 2）"
+    );
     let completed2 = harness.await_gate_event("human_gate_turn_completed").await;
     let WsOutMessage::HumanGateTurnCompleted {
         artifact_ref: artifact_ref_2,
@@ -114,7 +117,11 @@ async fn campaign_stage3_interactive_multi_turn_revision_then_approve_confirms_p
     );
     // C2（改写登记）：两轮修订重建均 carry-forward（2→1→0），耗尽态如实
     // 显示 0 而非回填默认 3；预算耗尽不关门，confirm 仍可用。
-    assert_eq!(harness.budget_remaining(), 0, "门预算经两次路由重建后真实耗尽（改写登记：原重置断言 3）");
+    assert_eq!(
+        harness.budget_remaining(),
+        0,
+        "门预算经两次路由重建后真实耗尽（改写登记：原重置断言 3）"
+    );
     let keys = harness.provider_start_keys();
     assert_eq!(keys.len(), 2, "provider ledger 每真实 start 一项");
     assert!(
@@ -315,9 +322,8 @@ async fn campaign_stage3_oversized_feedback_rejects_before_turn_reservation() {
     let harness = campaign_stage3_fixture(2, vec![]).await;
 
     // 案 1：反馈文本超长。
-    let oversized_feedback = "x".repeat(
-        crate::product::workspace_engine::SC_MANUAL_REVISION_FEEDBACK_MAX_BYTES + 1,
-    );
+    let oversized_feedback =
+        "x".repeat(crate::product::workspace_engine::SC_MANUAL_REVISION_FEEDBACK_MAX_BYTES + 1);
     let before = harness.session_bytes();
     harness
         .send(WsInMessage::HumanGateFeedback {
@@ -537,12 +543,13 @@ async fn campaign_stage3_turn_reservation_crash_recovers_exactly_once() {
             lifecycle.clone(),
             event_tx,
             WorkspaceSession::from_record(
-                lifecycle.get_workspace_session(session_id).expect("durable session"),
+                lifecycle
+                    .get_workspace_session(session_id)
+                    .expect("durable session"),
             ),
         )
     };
-    let mut recovered =
-        recovered_engine(&harness.root, &harness.lifecycle, &harness.session_id);
+    let mut recovered = recovered_engine(&harness.root, &harness.lifecycle, &harness.session_id);
     let actions = recovered
         .recover_human_gate_turns(false)
         .expect("recover fp-a");
@@ -576,7 +583,11 @@ async fn campaign_stage3_turn_reservation_crash_recovers_exactly_once() {
     assert_eq!(recovered_turn.attempt_no, 1, "不超过上限");
     // C2（改写登记）：修订完成后 Evaluate route 重建 MUST carry-forward
     // durable 剩余（fixture 预算 2，本轮 reserve 后 1），不回填默认 3。
-    assert_eq!(harness.budget_remaining(), 1, "门预算经路由重建接续（改写登记：原重置断言 3）");
+    assert_eq!(
+        harness.budget_remaining(),
+        1,
+        "门预算经路由重建接续（改写登记：原重置断言 3）"
+    );
     assert_eq!(harness.provider_start_keys().len(), 1, "ledger 恰一项");
 
     // —— fault point B：启动 ledger 后 / 完成前 ——
@@ -687,7 +698,8 @@ async fn campaign_stage3_turn_reservation_crash_recovers_exactly_once() {
     assert_eq!(resumed.created_at, turn_b.created_at);
 
     // —— provider 故障 flavor：transport death 与 validation reject 后，
-    // 同 command 重发均 Replay 同一终态 turn，不二次扣预算/不新建 turn。
+    // 同 command 重发均被 typed 拒收回显（蒸发链修法②：终态 turn 的重放
+    // 不再 Replayed 吞掉），不二次扣预算/不新建 turn。
     for (scenario, script, expected_class) in [
         (
             "crash_transport_death",
@@ -716,7 +728,8 @@ async fn campaign_stage3_turn_reservation_crash_recovers_exactly_once() {
             panic!("expected turn failed, got {failed:?}");
         };
         assert_eq!(failure_class, expected_class);
-        // 终态 turn 上的同 command 重发：Replay 且零增量。
+        // 终态 turn 上的同 command 重发：typed Rejected 且零增量
+        //（蒸发链修法②——旧 Replayed 语义在此场景即无声蒸发）。
         let replay = {
             let mut engine = harness.engine.lock().await;
             engine
@@ -729,7 +742,8 @@ async fn campaign_stage3_turn_reservation_crash_recovers_exactly_once() {
         };
         assert!(matches!(
             replay,
-            HumanGateCommandOutcome::Replayed { ref turn } if turn.turn_id == turn_id
+            HumanGateCommandOutcome::Rejected { ref code, .. }
+                if code == "HUMAN_GATE_COMMAND_REPLAYED_AFTER_TERMINAL_TURN"
         ));
         assert_eq!(harness.budget_remaining(), 1, "预算恰减一次");
         assert_eq!(harness.durable_turns().len(), 1, "不新建 turn");
@@ -1047,10 +1061,7 @@ async fn campaign_stage3_interactive_gate_round_records_author_revision_facts() 
         TimelineNodeStatus::Completed,
         "门内轮次切换必须收口被取代的门节点"
     );
-    assert!(
-        superseded_gate.completed_at.is_some(),
-        "收口必须落完成时间"
-    );
+    assert!(superseded_gate.completed_at.is_some(), "收口必须落完成时间");
     let active_gates: Vec<&str> = nodes
         .iter()
         .filter(|node| {
@@ -1165,4 +1176,3 @@ async fn campaign_stage3_gate_revision_resumes_from_spawn_audit_when_conversatio
         "会话引用缺失时修订 turn 必须经 spawn 审计兜底携带 fresh 轮原生 resume id"
     );
 }
-

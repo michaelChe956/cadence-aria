@@ -19,8 +19,8 @@ use crate::web::state::WebAppState;
 use crate::web::types::{HumanActionRequest, HumanActionState, HumanActionStatus};
 use crate::web::workspace_ws_handler::{
     HumanGateFeedbackEffect, HumanGateTerminationEffect, ProviderRunKind,
-    apply_human_gate_feedback, apply_human_gate_termination,
-    confirmation_trust_waiting_projection, spawn_provider_run_from_handler,
+    apply_human_gate_feedback, apply_human_gate_termination, confirmation_trust_waiting_projection,
+    spawn_provider_run_from_handler,
 };
 
 pub async fn post_workspace_human_action(
@@ -188,9 +188,11 @@ async fn handle_request(
             match effect {
                 HumanGateFeedbackEffect::TurnOpened { turn, prompt, .. } => {
                     // 经唯一 manager run 与事件路由驱动修订 turn（connection_id=None：
-                    // 不挂 attachment、不抢 lease）；outbound 汇入丢弃通道——会话事件
-                    // 由 event router 广播给观察者，错误细节以 durable 状态为准。
-                    let (sink_tx, _sink_rx) = tokio::sync::mpsc::channel(1);
+                    // 不挂 attachment、不抢 lease）。outbound 汇入逐帧打点 drain
+                    //（蒸发链修法③：原先的丢弃通道令 run 内 HumanGateTurnFailed
+                    // 等错误帧全部蒸发，对 Replayed/Busy 类零落盘效果无 durable 可
+                    // 查）；观察者侧事实仍由 event router 的 EngineEvent 广播承载。
+                    let sink_tx = rest_feedback_outbound_drain(session_id);
                     let run_context = manager.provider_run_context(state.workspace_runs.clone());
                     spawn_provider_run_from_handler(
                         run_context,
@@ -353,6 +355,26 @@ fn busy(command_id: String, gate_id: String) -> HumanActionStatus {
     }
 }
 
+/// 蒸发链修法③（诊断 local://diag-manual-revision-evaporate.md §a-②）：
+/// REST 反馈 spawn 的 outbound 通道——无连接可投递，改为常驻 drain 任务逐帧
+/// eprintln 打点（对齐 aria-cancellation 风格），使 run 内 HumanGateTurnFailed
+/// 等错误帧至少服务端日志可见，不再静默蒸发。返回发送端交给
+/// spawn_provider_run_from_handler。
+fn rest_feedback_outbound_drain(
+    session_id: &str,
+) -> tokio::sync::mpsc::Sender<crate::web::workspace_ws_handler::OutboundControl> {
+    let (sink_tx, mut sink_rx) = tokio::sync::mpsc::channel(1);
+    let session_id = session_id.to_string();
+    tokio::spawn(async move {
+        while let Some(control) = sink_rx.recv().await {
+            eprintln!(
+                "[aria-rest-feedback] workspace human_action outbound_dropped session_id={session_id} frame={control:?}"
+            );
+        }
+    });
+    sink_tx
+}
+
 // —— T5.1（REQ-REG-15/D4）：确认 trust typed 停等的 REST 边界投影 ——
 // 真实 handler/request 测试锚（build_web_router + oneshot）：REST Approve 与
 // WS 共用 apply_human_gate_termination effect，TrustWaiting 必须映射为非
@@ -474,8 +496,7 @@ mod confirmation_trust_waiting {
         }
     }
 
-    static T5_REST_SEQUENCE: std::sync::atomic::AtomicU64 =
-        std::sync::atomic::AtomicU64::new(1);
+    static T5_REST_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
     /// LC SC Approval 门 + 真实 manager/router：seed LC 环境（issue/manifest/
     /// members）→ SC WorkItemPlan 会话（相位 Approval + 快照静态资格）→
@@ -493,26 +514,28 @@ mod confirmation_trust_waiting {
         //（logical_repository_id=Some → gateway/确认上下文装配段可达）。
         let plan_id = format!("plan_t5_rest_{seq}");
         lifecycle
-            .create_issue_work_item_plan(crate::product::lifecycle_store::CreateIssueWorkItemPlanInput {
-                id: Some(plan_id.clone()),
-                project_id: "project_0001".to_string(),
-                issue_id: "issue_0001".to_string(),
-                source_story_spec_ids: vec![fixture.story_id.clone()],
-                source_design_spec_ids: Vec::new(),
-                options: crate::product::models::IssueWorkItemPlanOptions {
-                    include_integration_tests: false,
-                    include_e2e_tests: false,
-                    force_frontend_backend_split: false,
-                    require_execution_plan_confirm: false,
+            .create_issue_work_item_plan(
+                crate::product::lifecycle_store::CreateIssueWorkItemPlanInput {
+                    id: Some(plan_id.clone()),
+                    project_id: "project_0001".to_string(),
+                    issue_id: "issue_0001".to_string(),
+                    source_story_spec_ids: vec![fixture.story_id.clone()],
+                    source_design_spec_ids: Vec::new(),
+                    options: crate::product::models::IssueWorkItemPlanOptions {
+                        include_integration_tests: false,
+                        include_e2e_tests: false,
+                        force_frontend_backend_split: false,
+                        require_execution_plan_confirm: false,
+                    },
+                    status: crate::product::models::IssueWorkItemPlanStatus::Draft,
+                    work_item_ids: Vec::new(),
+                    repository_profile_ref: None,
+                    verification_plan_ids: Vec::new(),
+                    dependency_graph: Vec::new(),
+                    created_from_provider_run: None,
+                    validator_findings: Vec::new(),
                 },
-                status: crate::product::models::IssueWorkItemPlanStatus::Draft,
-                work_item_ids: Vec::new(),
-                repository_profile_ref: None,
-                verification_plan_ids: Vec::new(),
-                dependency_graph: Vec::new(),
-                created_from_provider_run: None,
-                validator_findings: Vec::new(),
-            })
+            )
             .expect("create fixture work item plan");
         let created = lifecycle
             .create_workspace_session(CreateWorkspaceSessionInput {
@@ -644,10 +667,9 @@ mod confirmation_trust_waiting {
         trust.script_waiting("fixture_home_failure");
         let fixture = lc_sc_approval_gate_fixture(trust.clone()).await;
         let before = serde_json::to_vec(&fixture.durable()).expect("serialize before");
-        let cas_before =
-            crate::product::workspace_engine::conversational_gate::close_cas_attempts(
-                &fixture.session_id,
-            );
+        let cas_before = crate::product::workspace_engine::conversational_gate::close_cas_attempts(
+            &fixture.session_id,
+        );
 
         let (status, body) = fixture
             .post_human_action(json!({
@@ -660,8 +682,14 @@ mod confirmation_trust_waiting {
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(body["code"], json!("workspace_confirmation_trust_waiting"));
         let message = body["message"].as_str().expect("message");
-        assert!(message.contains("fixture 等待原因（home 读取失败）"), "{message}");
-        assert!(message.contains("fixture 人工指导：修复 Codex home 配置"), "{message}");
+        assert!(
+            message.contains("fixture 等待原因（home 读取失败）"),
+            "{message}"
+        );
+        assert!(
+            message.contains("fixture 人工指导：修复 Codex home 配置"),
+            "{message}"
+        );
         assert!(message.contains("修复后重新确认"), "{message}");
         assert!(message.contains("门保持未关闭"), "{message}");
         assert!(
@@ -702,10 +730,9 @@ mod confirmation_trust_waiting {
     async fn rest_approve_ready_trust_proceeds_past_waiting_arm() {
         let trust = std::sync::Arc::new(ScriptedTrustPrecondition::default());
         let fixture = lc_sc_approval_gate_fixture(trust.clone()).await;
-        let cas_before =
-            crate::product::workspace_engine::conversational_gate::close_cas_attempts(
-                &fixture.session_id,
-            );
+        let cas_before = crate::product::workspace_engine::conversational_gate::close_cas_attempts(
+            &fixture.session_id,
+        );
 
         let (status, body) = fixture
             .post_human_action(json!({
@@ -758,6 +785,34 @@ mod confirmation_trust_waiting {
             WorkspaceSessionStatus::Terminated,
             "abandon 脱困：durable Terminated"
         );
-        assert_eq!(trust.call_count(), 0, "Abandon 不登记（脱困不受 trust 等待影响）");
+        assert_eq!(
+            trust.call_count(),
+            0,
+            "Abandon 不登记（脱困不受 trust 等待影响）"
+        );
+    }
+}
+
+// 蒸发链修法③（诊断 local://diag-manual-revision-evaporate.md §a-②）：
+// REST 反馈 spawn 的 outbound 此前接丢弃通道（`_sink_rx` 立即 drop）——
+// run 内 HumanGateTurnFailed 等错误帧全部蒸发，注释里「错误细节以 durable
+// 状态为准」对 Replayed/Busy 类零落盘效果不成立。改为常驻 drain 任务逐帧
+// eprintln 打点（对齐 aria-cancellation 风格），通道不再静默丢弃。
+#[cfg(test)]
+mod rest_feedback_outbound_drain {
+    use super::*;
+
+    #[tokio::test]
+    async fn rest_feedback_outbound_drain_consumes_run_frames_instead_of_dropping() {
+        let sender = rest_feedback_outbound_drain("session_drain_probe");
+        // 通道容量为 1：若无 drain 任务消费，第二帧起 send 将永久挂起。
+        for index in 0..3 {
+            sender
+                .send(crate::web::workspace_ws_handler::OutboundControl::Text(
+                    format!("{{\"drain_probe\":{index}}}"),
+                ))
+                .await
+                .expect("drain must keep consuming REST feedback outbound frames");
+        }
     }
 }
