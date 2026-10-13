@@ -717,8 +717,7 @@ fn sg_03a_0_structure_payload_bindings_reject_tampering() {
 
     // 篡改任一绑定字段后重封外层 id/content_hash（模拟完整伪造），
     // put 仍必须按 payload 级绑定拒绝。
-    let tamper = |mutate: &dyn Fn(&mut PersistedPlanningStructureReport),
-                      expected_code: &str| {
+    let tamper = |mutate: &dyn Fn(&mut PersistedPlanningStructureReport), expected_code: &str| {
         let mut tampered = sealed.clone();
         mutate(tampered.structure_report.as_mut().unwrap());
         tampered.id = tampered.content_addressed_id().unwrap();
