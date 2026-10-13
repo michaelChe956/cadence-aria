@@ -134,13 +134,16 @@ impl RepositoryStore {
         // legacy 可迁:槽位 manifest 缺失不得误判为「待迁移」而 bootstrap 出
         // 指向数据目录、0 成员的假 LC 覆盖默认槽位(路由权威重灌事故,
         // 2026-10-13 诊断)。迁移执行器的唯一 legacy 源是 repos.json——
-        // 槽位 manifest 缺失时仅当 repos.json 存在才执行迁移;否则权威在
-        // per-LC 子树,由 issue 归属解析(resolve_logical_repository_for_issue_codebase)。
+        // 槽位 manifest 缺失时仅当 repos.json 确有仓记录才执行迁移;
+        // 「存在但为空」(legacy 项目删除最后一仓后 delete_legacy 覆写)
+        // 等同无 legacy 布局,干净 no-op(P2 复审:零输入 fail-closed 会把
+        // Failed journal 落盘,永久锁死全部仓库入口)。v1.3 权威在 per-LC
+        // 子树,由 issue 归属解析(resolve_logical_repository_for_issue_codebase)。
         if self.logical_codebase_feature.is_enabled()
             && LogicalCodebaseStore::new(self.paths.clone())
                 .load_manifest(project_id)?
                 .is_none()
-            && self.repos_path(project_id).exists()
+            && self.legacy_repositories_present(project_id)?
         {
             IdentityMigrationExecutor::new(self.paths.clone())
                 .ensure_identity_schema(project_id)?;
@@ -174,6 +177,18 @@ include!("repository_store_parts/helpers.inc.rs");
 impl RepositoryStore {
     fn repos_path(&self, project_id: &str) -> PathBuf {
         self.paths.project_root(project_id).join("repos.json")
+    }
+
+    /// v1.2 legacy 布局的迁移前提:repos.json 存在且确有仓记录。解析失败
+    /// 按读路径现语义上抛(与 `list` 一致);空数组等同无 legacy 布局。
+    fn legacy_repositories_present(&self, project_id: &str) -> Result<bool, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        let path = self.repos_path(project_id);
+        if !path.exists() {
+            return Ok(false);
+        }
+        let records: Vec<RepositoryRecord> = read_json(&path)?;
+        Ok(!records.is_empty())
     }
 }
 include!("repository_store_parts/tests.inc.rs");

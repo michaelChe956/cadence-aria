@@ -610,6 +610,145 @@ mod tests {
         );
     }
 
+    /// P2 复审(2026-10-13):repos.json「存在但为空」(legacy 项目删除最后
+    /// 一仓后 delete_legacy 覆写)等同无 legacy 布局——ensure 必须干净 no-op,
+    /// 不得进入零输入 fail-closed 把 Failed journal 落盘锁死仓库 API。
+    #[test]
+    fn empty_repos_json_is_treated_as_no_legacy_layout() {
+        let fixture = repository_fixture();
+        let project = fixture.create_project("project_empty_repos");
+        LogicalCodebaseStore::new(fixture.paths.clone())
+            .create(
+                &project.id,
+                LogicalCodebaseCreateInput {
+                    name: "aggregate".to_string(),
+                    aggregate_root: fixture.root.path().to_path_buf(),
+                },
+            )
+            .unwrap();
+        write_json(
+            &fixture.paths.project_root(&project.id).join("repos.json"),
+            &Vec::<RepositoryRecord>::new(),
+        )
+        .unwrap();
+
+        let store = RepositoryStore::for_project(fixture.paths.clone(), &project);
+        store
+            .ensure_identity_schema(&project.id)
+            .expect("空 repos.json 等同无 legacy 布局,ensure 干净 no-op");
+        assert!(
+            store.list(&project.id).unwrap().is_empty(),
+            "仓库 API 必须保持可用"
+        );
+        // 二次 ensure 仍 Ok:不得因 Failed journal 锁死。
+        store.ensure_identity_schema(&project.id).unwrap();
+    }
+
+    /// P2 复审(2026-10-13):空 legacy 布局经 RepositoryStore 的一切读路径
+    /// 都不得把任何 journal(含 Failed)落盘——锁死面是 identity-migration.json。
+    #[test]
+    fn empty_repos_json_zero_input_never_persists_failed_journal() {
+        let fixture = repository_fixture();
+        let project = fixture.create_project("project_zero_input");
+        LogicalCodebaseStore::new(fixture.paths.clone())
+            .create(
+                &project.id,
+                LogicalCodebaseCreateInput {
+                    name: "aggregate".to_string(),
+                    aggregate_root: fixture.root.path().to_path_buf(),
+                },
+            )
+            .unwrap();
+        write_json(
+            &fixture.paths.project_root(&project.id).join("repos.json"),
+            &Vec::<RepositoryRecord>::new(),
+        )
+        .unwrap();
+
+        let store = RepositoryStore::for_project(fixture.paths.clone(), &project);
+        let _ = store.list(&project.id);
+        let _ = store.resolve_logical_repository_strict(
+            &project.id,
+            LogicalRepositoryId(Uuid::new_v4()),
+        );
+
+        let journal = IdentityMigrationJournalStore::new(fixture.paths.clone())
+            .load(&project.id)
+            .unwrap();
+        assert!(
+            journal.is_none(),
+            "零输入不得落盘任何 journal(含 Failed):{journal:?}"
+        );
+    }
+
+    /// P2 复审补测:create 槽位 bootstrap 的 fail-closed 子分支——槽位存在
+    /// 非本事务成员(孤儿成员)而 manifest 缺失属损坏窗口,NotFound 不猜,
+    /// 不得重建 manifest 掩盖。
+    #[test]
+    fn create_refuses_slot_bootstrap_when_orphan_members_exist() {
+        let fixture = repository_fixture();
+        let project = fixture.create_project("project_orphan");
+        LogicalCodebaseStore::new(fixture.paths.clone())
+            .create(
+                &project.id,
+                LogicalCodebaseCreateInput {
+                    name: "aggregate".to_string(),
+                    aggregate_root: fixture.root.path().to_path_buf(),
+                },
+            )
+            .unwrap();
+        // 损坏窗口:成员已落盘、manifest 缺失。
+        let orphan_source = RepositorySourceIdentity::from_git_parts(
+            &fixture.root.path().join("orphan"),
+            fixture.root.path().join("orphan").join(".git"),
+            None,
+        );
+        LogicalCodebaseStore::new(fixture.paths.clone())
+            .save_member(
+                &project.id,
+                &CodebaseMemberRecord {
+                    logical_repository_id: LogicalRepositoryId(Uuid::new_v4()),
+                    physical_repository_id: "repository_orphan".to_string(),
+                    alias: "orphan".to_string(),
+                    role: "repository".to_string(),
+                    ordinal: 1,
+                    source_identity: orphan_source,
+                    repo_type: RepositoryType::Unknown,
+                    tech_stack: Vec::new(),
+                    owner: None,
+                    tags: Vec::new(),
+                    default_ref: None,
+                    checkout_ids: vec![RepositoryCheckoutId(Uuid::new_v4())],
+                    status: MemberStatus::Active,
+                    created_at: "2026-10-13T00:00:00Z".to_string(),
+                    updated_at: "2026-10-13T00:00:00Z".to_string(),
+                },
+            )
+            .unwrap();
+
+        let store = RepositoryStore::for_project(fixture.paths.clone(), &project);
+        let created = store.create(fixture.input(&project, "api"));
+
+        assert!(
+            matches!(
+                created,
+                Err(ProductStoreError::NotFound {
+                    kind: "logical_codebase_manifest",
+                    ..
+                })
+            ),
+            "孤儿成员 + 缺 manifest 必须 fail-closed,不得 bootstrap 掩盖"
+        );
+        assert!(
+            !fixture
+                .paths
+                .logical_codebase_root(&project.id)
+                .join("manifest.json")
+                .exists(),
+            "不得写出掩盖性 manifest"
+        );
+    }
+
     #[test]
     fn repository_initialization_launch_is_nameable_through_repository_store() {
         let _: Option<crate::product::repository_store::RepositoryInitializationLaunch> = None;
