@@ -100,6 +100,7 @@ import {
   findWorkspaceSession,
   lifecycleCardKey,
   lifecycleEntityKey,
+  lifecycleWorkItemCard,
   normalizeLifecycleResponse,
   resolveGroupCodingAttempt,
   selectedLifecycleColumns,
@@ -360,10 +361,23 @@ export function IssueLifecycleWorkbench({
         : undefined,
     [lifecycles, focusedIssueIdForGroups],
   );
-  const focusedEntity = useMemo(
-    () => findCardInColumns(allColumns, drawerFocusedEntityKey),
-    [allColumns, drawerFocusedEntityKey],
-  );
+  const focusedEntity = useMemo(() => {
+    // 展示列只包含计划组卡；分仓卡片和深链接的单个 Work Item 从完整实体中解析。
+    if (drawerFocusedEntityKey?.startsWith("work_item:")) {
+      for (const lifecycle of lifecycles) {
+        const item = lifecycle.work_items.find(
+          (candidate) =>
+            lifecycleEntityKey("work_item", candidate.issue_id, candidate.work_item_id) ===
+            drawerFocusedEntityKey,
+        );
+        if (item) {
+          return lifecycleWorkItemCard(item);
+        }
+      }
+      return null;
+    }
+    return findCardInColumns(allColumns, drawerFocusedEntityKey);
+  }, [allColumns, drawerFocusedEntityKey, lifecycles]);
   const logicalCodebases = codebases.filter(
     (codebase) => codebase.kind === "logical",
   );

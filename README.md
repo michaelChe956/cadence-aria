@@ -83,6 +83,8 @@ Work Item 以 Group 形式组织，包含：
 
 生成 Plan 并经人工确认后，方可进入 Coding Workspace 执行开发、测试、Review、Rework 与最终验收。
 
+按目标仓库分组展示时，点击单个 Work Item 卡片可打开详情抽屉；URL 的 `focus=work_item:<issueId>:<workItemId>` 可恢复该任务详情，刷新后仍使用对应 Issue 的最新任务数据。未分仓时仍保留 Work Item Group 入口。
+
 ![Work Item Group 明细](assets/readme/work-item-group-details.jpg)
 
 ### 6. Provider Workspace 弹窗

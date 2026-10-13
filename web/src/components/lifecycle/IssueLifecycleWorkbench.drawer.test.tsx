@@ -1,6 +1,7 @@
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
+import type { IssueLifecycleResponse } from "../../api/types";
 import { useLifecycleWorkbenchStore } from "../../state/lifecycle-workbench-store";
 import {
   defaultLaunchTitle,
@@ -16,6 +17,8 @@ import {
   lifecycleFetch,
   projectRecord,
   repositoryRecord,
+  workItemRecord,
+  workItemRepositoryGroupRecord,
 } from "./IssueLifecycleWorkbench.test-utils";
 
 vi.mock("../shared/MonacoViewer", () => ({
@@ -28,6 +31,129 @@ vi.mock("../shared/MonacoViewer", () => ({
 
 describe("IssueLifecycleWorkbench drawer and work item groups", () => {
   installIssueLifecycleWorkbenchTestHooks();
+
+  it.each([
+    ["目标仓库", "repo_target_0001", false],
+    ["兼容投影", null, true],
+  ] as const)("点击%s分组中的 Work Item 后打开抽屉并保持刷新后的焦点", async (_label, repositoryId, compatibilityProjection) => {
+    vi.stubGlobal(
+      "fetch",
+      lifecycleFetch({
+        confirmedWorkItem: true,
+        workItemRepositoryGroups: [
+          workItemRepositoryGroupRecord({
+            target_repository_id: repositoryId,
+            compatibility_projection: compatibilityProjection,
+            items: [workItemRecord({ plan_status: "confirmed" })],
+          }),
+        ],
+      }),
+    );
+    const user = userEvent.setup();
+    const onDrawerFocusChange = vi.fn();
+
+    render(
+      <IssueLifecycleWorkbench
+        focusEntityKey={null}
+        onDrawerFocusChange={onDrawerFocusChange}
+      />,
+    );
+
+    await user.click(
+      await screen.findByRole("button", { name: "选择 Issue 登录会话过期" }),
+    );
+    await user.click(screen.getByRole("button", { name: "实现提示组件" }));
+
+    // 区分开关被重置与实体查找失败：开关和 URL 焦点正确仍必须渲染抽屉。
+    expect(useLifecycleWorkbenchStore.getState()).toMatchObject({
+      isDrawerOpen: true,
+      focusedEntityKey: "work_item:issue_0001:work_item_0001",
+    });
+    expect(onDrawerFocusChange).toHaveBeenLastCalledWith(
+      "work_item:issue_0001:work_item_0001",
+    );
+    expect(screen.getByTestId("lifecycle-card-drawer")).toHaveTextContent(
+      "实现提示组件",
+    );
+    expect(screen.getByTestId("workbench-shell")).toHaveClass(
+      "lg:pr-[calc(480px+1rem)]",
+    );
+
+    await user.click(screen.getByRole("button", { name: "刷新" }));
+    expect(await screen.findByTestId("lifecycle-card-drawer")).toHaveTextContent(
+      "实现提示组件",
+    );
+    await user.click(within(screen.getByTestId("lifecycle-card-drawer")).getByRole("button", { name: "关闭", exact: true }));
+    expect(screen.queryByTestId("lifecycle-card-drawer")).not.toBeInTheDocument();
+    expect(onDrawerFocusChange).toHaveBeenLastCalledWith(null);
+  });
+
+  it("从 Work Item 深链接恢复抽屉且不串到相同局部 ID 的其他 Issue", async () => {
+    vi.stubGlobal("fetch", lifecycleFetch({ sharedLifecycleIdsAcrossIssues: true }));
+    const user = userEvent.setup();
+    const onOpenWorkspace = vi.fn();
+
+    render(
+      <IssueLifecycleWorkbench
+        focusEntityKey="work_item:issue_0002:work_item_0001"
+        onOpenWorkspace={onOpenWorkspace}
+      />,
+    );
+
+    const drawer = await screen.findByTestId("lifecycle-card-drawer");
+    expect(drawer).toHaveTextContent("issue_0002 Child");
+    expect(drawer).not.toHaveTextContent("issue_0001 Child");
+    await user.click(screen.getByTestId("drawer-open-workspace"));
+    await waitFor(() =>
+      expect(onOpenWorkspace).toHaveBeenCalledWith(
+        "workspace_session_issue_0002_work_item",
+      ),
+    );
+  });
+
+  it("刷新时重解析 Work Item，缺项时保持现有空抽屉语义", async () => {
+    const fetchMock = lifecycleFetch({ confirmedWorkItem: true });
+    let responseState: "initial" | "updated" | "missing" = "initial";
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const response = await fetchMock(input, init);
+      if (String(input) !== "/api/issues/issue_0001/lifecycle?project_id=project_0001") {
+        return response;
+      }
+      const lifecycle = (await response.json()) as IssueLifecycleResponse;
+      if (responseState === "updated") {
+        lifecycle.work_items[0].title = "刷新后的任务详情";
+      } else if (responseState === "missing") {
+        lifecycle.work_items = [];
+      }
+      return new Response(JSON.stringify(lifecycle), {
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+    const user = userEvent.setup();
+
+    render(
+      <IssueLifecycleWorkbench focusEntityKey="work_item:issue_0001:work_item_0001" />,
+    );
+    expect(await screen.findByTestId("lifecycle-card-drawer")).toHaveTextContent(
+      "实现提示组件",
+    );
+
+    responseState = "updated";
+    await user.click(screen.getByRole("button", { name: "刷新" }));
+    expect(await within(screen.getByTestId("lifecycle-card-drawer")).findByRole(
+      "heading", { name: "刷新后的任务详情" },
+    )).toBeInTheDocument();
+
+    responseState = "missing";
+    await user.click(screen.getByRole("button", { name: "刷新" }));
+    await waitFor(() =>
+      expect(screen.queryByTestId("lifecycle-card-drawer")).not.toBeInTheDocument(),
+    );
+    expect(useLifecycleWorkbenchStore.getState()).toMatchObject({
+      isDrawerOpen: true,
+      focusedEntityKey: "work_item:issue_0001:work_item_0001",
+    });
+  });
 
   it.each([
     [
