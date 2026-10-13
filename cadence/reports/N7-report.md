@@ -28,8 +28,11 @@
   资源清理走上述 target-scoped 包装（schema-v2 步骤 4 由包装替换 issue-wide 枚举；
   无 run 保持原 `cleanup_shared_worktree_by_routing` 路径不动）；闭包尾部
   `purge_plan`（缺失幂等 OK；早拒/门禁路径不 purge、不动 run）。
-- **Test `lifecycle_tests.inc.rs`**（+夹具：最小 project/issue/plan 种子、group 绑定
-  attempt、冻结地址 run 直写、仓维 worktree 他人持锁改写、DELETE 路由请求器）：
+- **Test `lifecycle_tests_n7.inc.rs`**（审查派回 P3 拆分：原写入
+  lifecycle_tests.inc.rs 的 N7 段迁出为独立 include 文件，经 lifecycle.rs
+  tests mod 注册；源文件回落 1169 行守卫内。+夹具：最小 project/issue/plan
+  种子、group 绑定 attempt、冻结地址 run 直写、仓维 worktree 他人持锁改写、
+  DELETE 路由请求器）：
   - `plan_coding_n7_workspace_gate_zero_mutation`：有 coding workspace 拒删
     （409 `coding_workspace_exists`）时 run 字节级零改动、plan/attempt 保留
     ——门禁基线保护（既有能力，非伪造红）。
@@ -64,6 +67,11 @@
 | `cargo check --locked`（lib） | — | 通过 |
 
 rustfmt（仅本包四文件，edition 2024）后复验 `--lib plan_coding_n7_` 仍 4 passed。
+
+审查派回 P3（守卫拆分）复验：N7 段迁出后 `--lib plan_coding_n7_` 仍 4 passed；
+`large_file_guard` 超限清单不再含本包文件（lifecycle_tests.inc.rs 1169 行 /
+lifecycle_tests_n7.inc.rs 501 行；清单余项均为 cross_cutting 兄弟在途文件，
+非本包写面）。
 
 ## 边界与移交
 

@@ -23,7 +23,9 @@ mod deletion;
 pub(crate) mod plan_preparation;
 pub(crate) mod preflight;
 
-pub use deletion::{delete_design_spec, delete_story_spec, delete_work_item, delete_work_item_plan};
+pub use deletion::{
+    delete_design_spec, delete_story_spec, delete_work_item, delete_work_item_plan,
+};
 pub(crate) use plan_preparation::{PreparedPlanRecords, prepare_plan_records};
 // 仅测试模块消费（见 lifecycle_tests.inc.rs）。
 #[cfg(test)]
@@ -1155,5 +1157,6 @@ mod tests {
     use super::*;
 
     include!("lifecycle_tests.inc.rs");
+    include!("lifecycle_tests_n7.inc.rs");
     include!("lifecycle_recent_completion_tests.inc.rs");
 }
