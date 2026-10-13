@@ -2774,3 +2774,73 @@ fn cascade_d1_3c_delete_and_upsert_mutually_exclusive_with_stable_inode() {
         .upsert_repo_shared_worktree(d1_3c_repo_upsert_input(api_member, "aria/second"))
         .expect("lease 释放后 upsert 放行");
 }
+
+/// P2 修复轮：issue 键位记录的第一方迁移 tagged 态（backfill_shared_worktree
+/// 原地写 Some(target)+path_schema_version=1，legacy_shared_worktree_migration
+/// 显式容忍）不得被 None 键准入当 IdentityMismatch 硬拒——过渡窗口在途
+/// Legacy attempt 的合法 owner 操作必须放行；repo 维（Some 键）严格比对保持。
+#[test]
+fn cascade_d1_3c_issue_admission_tolerates_backfill_tagged_record() {
+    let (_tmp, store) = setup();
+    let api_member = LogicalRepositoryId(stable_member_uuid(0x0001));
+    d1_3a_plan(&store, "work_item_plan_0001", Vec::new());
+    d1_3a_wi(&store, "work_item_0001", "work_item_plan_0001");
+    d1_3c_seed_issue_worktree(&store, |record| {
+        record.target_repository_id = Some(api_member);
+        record.path_schema_version = 1;
+        record.current_active_work_item_id = Some("work_item_0001".to_string());
+        record.current_lock_owner_id = Some("issue_worktree_lease_d13c_tagged".to_string());
+    });
+
+    // 在途 Legacy attempt 的合法 owner 操作：不得因迁移 tagged 态硬失败。
+    let released = store
+        .release_issue_worktree_lock_by_owner(
+            PROJECT_ID,
+            ISSUE_ID,
+            "issue_worktree_lease_d13c_tagged",
+        )
+        .expect("迁移 tagged 态的合法 owner 操作必须放行");
+    assert!(released.current_lock_owner_id.is_none());
+
+    // hint 空 upsert 更新同样容忍 tagged 态（键位由文件路径确定）。
+    let updated = store
+        .upsert_issue_shared_worktree(d1_3c_issue_upsert_input("aria/tagged-update"))
+        .expect("tagged 态 upsert 更新放行");
+    assert_eq!(updated.branch_name, "aria/tagged-update");
+    assert_eq!(updated.target_repository_id, Some(api_member));
+
+    // 重新持锁后删除 Plan：tagged 态不放宽 late deleted owner 拒绝语义。
+    store
+        .try_acquire_issue_worktree_lock(
+            PROJECT_ID,
+            ISSUE_ID,
+            "work_item_0001",
+            "issue_worktree_lease_d13c_tagged",
+        )
+        .expect("live plan re-acquire");
+    d1_3c_begin_purge_plan_with_owned(&store, "work_item_plan_0001", Vec::new(), Vec::new());
+    assert!(
+        matches!(
+            store.release_issue_worktree_lock_by_owner(
+                PROJECT_ID,
+                ISSUE_ID,
+                "issue_worktree_lease_d13c_tagged"
+            ),
+            Err(ProductStoreError::Conflict {
+                kind: "entity_deleting",
+                ..
+            })
+        ),
+        "tagged 态 late deleted owner 仍必须拒绝"
+    );
+    assert!(
+        matches!(
+            store.upsert_issue_shared_worktree(d1_3c_issue_upsert_input("aria/tagged-late")),
+            Err(ProductStoreError::Conflict {
+                kind: "entity_deleting",
+                ..
+            })
+        ),
+        "tagged 态已删 Plan 现资源仍不得覆盖"
+    );
+}

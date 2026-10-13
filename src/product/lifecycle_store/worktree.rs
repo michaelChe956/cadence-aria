@@ -1211,8 +1211,10 @@ impl LifecycleStore {
         })
     }
 
-    /// 读取准入用记录（NotFound=None）；记录 repository 键只用于核目标，
-    /// 错档 IdentityMismatch fail-closed（不改写归属矛盾的现资源）。
+    /// 读取准入用记录（NotFound=None）；记录 repository 键只用于核目标——
+    /// repo 维（Some 键）严格比对 target；issue 维键位由文件路径确定、
+    /// 容忍迁移 tagged 态，只核 project/issue 身份。错档 IdentityMismatch
+    /// fail-closed（不改写归属矛盾的现资源）。
     fn read_shared_worktree_for_admission(
         &self,
         project_id: &str,
@@ -1242,14 +1244,11 @@ impl LifecycleStore {
                     });
                 }
             }
-            None => {
-                if record.target_repository_id.is_some() {
-                    return Err(ProductStoreError::IdentityMismatch {
-                        kind: "issue_shared_worktree",
-                        id: record.id,
-                    });
-                }
-            }
+            // issue 维键位由文件路径确定：第一方迁移 backfill 会原地在
+            // issue-shared-worktree.json 写 Some(target)（tagged 态，
+            // legacy_shared_worktree_migration 显式容忍），故不比对 target，
+            // 只保留上方 project/issue 身份核验；repo 维（Some 键）严格比对。
+            None => {}
         }
         Ok(Some(record))
     }
