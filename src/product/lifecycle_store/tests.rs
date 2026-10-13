@@ -1,4 +1,5 @@
 use tempfile::TempDir;
+use std::os::unix::fs::MetadataExt;
 
 use uuid::Uuid;
 
@@ -2036,4 +2037,740 @@ async fn cascade_d1_3b_engine_assistant_checkpoint_late_write_rejected() {
             && !checkpoints_dir.join("cp_003.json").exists(),
         "deleted 实体的迟到 checkpoint 不得落盘"
     );
+}
+
+// ==== cascade_d1_3c（fix-cascade-deletion Task D1.3c：shared-worktree 中央 writer 准入与真实归属）====
+
+/// 直接落盘一条 issue 维 shared worktree 记录（绕过被测入口，构造归因夹具）。
+fn d1_3c_seed_issue_worktree(
+    store: &LifecycleStore,
+    mutate: impl FnOnce(&mut crate::product::models::IssueSharedWorktree),
+) -> crate::product::models::IssueSharedWorktree {
+    let mut record = crate::product::models::IssueSharedWorktree {
+        id: format!("issue_shared_worktree_{PROJECT_ID}_{ISSUE_ID}"),
+        project_id: PROJECT_ID.to_string(),
+        issue_id: ISSUE_ID.to_string(),
+        repository_id: REPOSITORY_ID.to_string(),
+        target_repository_id: None,
+        checkout_id: None,
+        path_schema_version: 0,
+        branch_name: "aria/issues/issue_0001".to_string(),
+        worktree_path: std::path::PathBuf::from("/tmp/aria-worktree-d13c"),
+        base_branch: "main".to_string(),
+        status: crate::product::models::IssueSharedWorktreeStatus::Ready,
+        current_active_work_item_id: None,
+        current_lock_owner_id: None,
+        last_completed_work_item_id: None,
+        created_at: "2026-10-14T00:00:00Z".to_string(),
+        updated_at: "2026-10-14T00:00:00Z".to_string(),
+    };
+    mutate(&mut record);
+    let path = store.issue_shared_worktree_path(PROJECT_ID, ISSUE_ID);
+    write_json(&path, &record).expect("seed issue shared worktree");
+    record
+}
+
+/// 直接落盘一条仓维 shared worktree 记录（归因夹具）。
+fn d1_3c_seed_repo_worktree(
+    store: &LifecycleStore,
+    repository_id: LogicalRepositoryId,
+    mutate: impl FnOnce(&mut crate::product::models::IssueSharedWorktree),
+) -> crate::product::models::IssueSharedWorktree {
+    let mut record = crate::product::models::IssueSharedWorktree {
+        id: format!("repo_shared_worktree_{PROJECT_ID}_{ISSUE_ID}_{}", repository_id.0),
+        project_id: PROJECT_ID.to_string(),
+        issue_id: ISSUE_ID.to_string(),
+        repository_id: repository_id.0.to_string(),
+        target_repository_id: Some(repository_id),
+        checkout_id: None,
+        path_schema_version: 0,
+        branch_name: "aria/issues/issue_0001".to_string(),
+        worktree_path: std::path::PathBuf::from("/tmp/aria-worktree-d13c"),
+        base_branch: "main".to_string(),
+        status: crate::product::models::IssueSharedWorktreeStatus::Ready,
+        current_active_work_item_id: None,
+        current_lock_owner_id: None,
+        last_completed_work_item_id: None,
+        created_at: "2026-10-14T00:00:00Z".to_string(),
+        updated_at: "2026-10-14T00:00:00Z".to_string(),
+    };
+    mutate(&mut record);
+    let path = store.repo_shared_worktree_path(PROJECT_ID, ISSUE_ID, repository_id);
+    write_json(&path, &record).expect("seed repo shared worktree");
+    record
+}
+
+/// 种一条 coding attempt 记录（经真实 create_attempt 落盘后按需改写归属字段）。
+fn d1_3c_seed_attempt(
+    paths: &crate::product::app_paths::ProductAppPaths,
+    attempt_id: &str,
+    work_item_id: &str,
+    work_item_group_id: Option<&str>,
+    target: Option<LogicalRepositoryId>,
+) -> crate::product::coding_models::CodingExecutionAttempt {
+    use crate::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttemptInput};
+    let store = CodingAttemptStore::new(paths.clone());
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            work_item_id: work_item_id.to_string(),
+            base_branch: "HEAD".to_string(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: None,
+            provider_config_snapshot: crate::web::workspace_ws_types::ProviderConfigSnapshot {
+                author: ProviderName::Fake,
+                reviewer: None,
+                review_rounds: 0,
+                permission_modes: Default::default(),
+            },
+            target_snapshot: target.map(|logical_id| {
+                crate::product::coding_models::AttemptTargetSnapshot {
+                    logical_repository_id: logical_id,
+                    checkout_id: crate::product::logical_codebase::RepositoryCheckoutId(Uuid::new_v4()),
+                    physical_repository_id: REPOSITORY_ID.to_string(),
+                    canonical_path: std::path::PathBuf::from("/tmp/repository_0001"),
+                    git_dir_identity: "sha256:test".to_string(),
+                    revision: Some("abcdef".to_string()),
+                    policy_digest: "policy_digest".to_string(),
+                    membership_revision: 1,
+                    captured_at: "2026-10-14T00:00:00Z".to_string(),
+                    capture_source: "test".to_string(),
+                }
+            }),
+            max_auto_rework: 2,
+        })
+        .expect("create attempt");
+    let mut patched = attempt.clone();
+    patched.id = attempt_id.to_string();
+    patched.work_item_group_id = work_item_group_id.map(str::to_string);
+    write_json(
+        &paths
+            .issue_lifecycle_root(PROJECT_ID, ISSUE_ID)
+            .join("coding-attempts")
+            .join(format!("{attempt_id}.json")),
+        &patched,
+    )
+    .expect("patch attempt");
+    patched
+}
+
+/// 种一条 group 初始化 journal（最小归属视图：plan/lock WI/lease join 事实）。
+fn d1_3c_seed_journal(
+    paths: &crate::product::app_paths::ProductAppPaths,
+    plan_id: &str,
+    lock_work_item_id: &str,
+    worktree_lease_id: &str,
+) {
+    let journal_path = paths
+        .issue_lifecycle_root(PROJECT_ID, ISSUE_ID)
+        .join("coding-attempts")
+        .join("group-initializations")
+        .join(format!("{plan_id}.json"));
+    write_json(
+        &journal_path,
+        &serde_json::json!({
+            "id": format!("group_init_{plan_id}"),
+            "project_id": PROJECT_ID,
+            "issue_id": ISSUE_ID,
+            "plan_id": plan_id,
+            "lock_work_item_id": lock_work_item_id,
+            "worktree_lease_id": worktree_lease_id,
+            "phase": "completed",
+            "created_at": "2026-10-14T00:00:00Z",
+            "updated_at": "2026-10-14T00:00:00Z",
+        }),
+    )
+    .expect("seed journal");
+}
+
+/// Purge 一个 Plan：墓碑 begin + owned-index 落盘（模拟 D1.1/D2.2 收集的事实）。
+fn d1_3c_begin_purge_plan_with_owned(
+    store: &LifecycleStore,
+    plan_id: &str,
+    work_item_ids: Vec<String>,
+    target_repository_ids: Vec<String>,
+) -> EntityDeletionLease {
+    let scope = d1_3a_scope(DeletionEntityKind::Plan, plan_id);
+    let lease = EntityOperationStore::new(store.app_paths())
+        .try_acquire_delete(&scope)
+        .expect("acquire delete lease");
+    EntityDeletionStore::new(store.app_paths())
+        .begin(&lease)
+        .expect("begin purging tombstone");
+    let mut manifest =
+        crate::product::entity_deletion_store::EntityDeletionManifest::empty(scope.clone());
+    manifest.work_item_ids = work_item_ids;
+    manifest.target_repository_ids = target_repository_ids;
+    EntityDeletionStore::new(store.app_paths())
+        .index_owned_artifact_ids(&lease, &manifest)
+        .expect("index owned artifact ids");
+    lease
+}
+
+fn d1_3c_issue_upsert_input(branch: &str) -> UpsertIssueSharedWorktreeInput {
+    UpsertIssueSharedWorktreeInput {
+        project_id: PROJECT_ID.to_string(),
+        issue_id: ISSUE_ID.to_string(),
+        repository_id: REPOSITORY_ID.to_string(),
+        branch_name: branch.to_string(),
+        worktree_path: std::path::PathBuf::from("/tmp/aria-worktree-d13c"),
+        base_branch: "main".to_string(),
+    }
+}
+
+fn d1_3c_repo_upsert_input(
+    repository_id: LogicalRepositoryId,
+    branch: &str,
+) -> UpsertRepoSharedWorktreeInput {
+    UpsertRepoSharedWorktreeInput {
+        project_id: PROJECT_ID.to_string(),
+        issue_id: ISSUE_ID.to_string(),
+        repository_id,
+        branch_name: branch.to_string(),
+        worktree_path: std::path::PathBuf::from("/tmp/aria-worktree-d13c"),
+        base_branch: "main".to_string(),
+    }
+}
+
+fn d1_3c_wi_with_target(
+    store: &LifecycleStore,
+    id: &str,
+    plan_id: &str,
+    target: Option<LogicalRepositoryId>,
+) -> crate::product::models::LifecycleWorkItemRecord {
+    let mut record = d1_3a_wi(store, id, plan_id);
+    if record.target_repository_id != target {
+        record.target_repository_id = target;
+        let path = store
+            .app_paths()
+            .issue_lifecycle_root(PROJECT_ID, ISSUE_ID)
+            .join("work-items")
+            .join(format!("{id}.json"));
+        write_json(&path, &record).expect("patch wi target");
+    }
+    record
+}
+
+/// issue 两路每类真实入口：late Deleted owner 全拒且记录/旧 lock 不复活；
+/// 实体 cleanup 清档后不得凭旧缓存 path 重建（归属未知 fail-closed）。
+#[test]
+fn cascade_d1_3c_issue_entries_reject_late_deleted_owner_without_revival() {
+    let (_tmp, store) = setup();
+    d1_3a_plan(&store, "work_item_plan_0001", Vec::new());
+    d1_3a_wi(&store, "work_item_0001", "work_item_plan_0001");
+    d1_3a_wi(&store, "work_item_0002", "work_item_plan_0001");
+    store
+        .upsert_issue_shared_worktree(d1_3c_issue_upsert_input("aria/issues/issue_0001"))
+        .expect("seed issue worktree");
+    store
+        .try_acquire_issue_worktree_lock(
+            PROJECT_ID,
+            ISSUE_ID,
+            "work_item_0001",
+            "issue_worktree_lease_d13c",
+        )
+        .expect("initial lock");
+
+    // purging 墓碑在位：晚到写者全部拒绝。
+    d1_3c_begin_purge_plan_with_owned(
+        &store,
+        "work_item_plan_0001",
+        vec!["work_item_0001".to_string(), "work_item_0002".to_string()],
+        vec![REPOSITORY_ID.to_string()],
+    );
+    let record_path = store.issue_shared_worktree_path(PROJECT_ID, ISSUE_ID);
+    let bytes_before = std::fs::read(&record_path).expect("record exists");
+    for denial in [
+        store.upsert_issue_shared_worktree(d1_3c_issue_upsert_input("aria/late")),
+        store
+            .try_acquire_issue_worktree_lock(
+                PROJECT_ID,
+                ISSUE_ID,
+                "work_item_0001",
+                "issue_worktree_lease_late",
+            )
+            .map(|leased| leased.worktree),
+        store.bind_issue_worktree_lock_to_attempt(
+            PROJECT_ID,
+            ISSUE_ID,
+            "work_item_0001",
+            "coding_attempt_0001",
+        ),
+        store.transfer_issue_worktree_lock(
+            PROJECT_ID,
+            ISSUE_ID,
+            "work_item_0001",
+            "work_item_0002",
+            "issue_worktree_lease_d13c",
+        ),
+        store.release_issue_worktree_lock(
+            PROJECT_ID,
+            ISSUE_ID,
+            "work_item_0001",
+            "issue_worktree_lease_d13c",
+        ),
+        store.release_issue_worktree_lock_by_owner(
+            PROJECT_ID,
+            ISSUE_ID,
+            "issue_worktree_lease_d13c",
+        ),
+        store.mark_issue_worktree_completed_item(
+            PROJECT_ID,
+            ISSUE_ID,
+            "work_item_0001",
+            "issue_worktree_lease_d13c",
+        ),
+        store.takeover_issue_worktree_lock_after_dead_owner(
+            PROJECT_ID,
+            ISSUE_ID,
+            "issue_worktree_lease_d13c",
+        ),
+    ] {
+        assert!(
+            matches!(
+                &denial,
+                Err(ProductStoreError::Conflict {
+                    kind: "entity_deleting",
+                    ..
+                })
+            ),
+            "late deleted owner 写必须以 entity_deleting 拒绝，实际: {denial:?}"
+        );
+    }
+    assert_eq!(
+        std::fs::read(&record_path).expect("record unchanged"),
+        bytes_before,
+        "拒绝路径不得改写记录"
+    );
+
+    // 模拟 D2.2 实体 cleanup 清档 + 删除完成：旧缓存 path 重建必须归属未知拒绝。
+    store
+        .delete_issue_shared_worktree(PROJECT_ID, ISSUE_ID)
+        .expect("cleanup record");
+    store
+        .delete_work_item(PROJECT_ID, ISSUE_ID, "work_item_0001")
+        .expect("cleanup wi 1");
+    store
+        .delete_work_item(PROJECT_ID, ISSUE_ID, "work_item_0002")
+        .expect("cleanup wi 2");
+    EntityDeletionStore::new(store.app_paths())
+        .complete(
+            &EntityOperationStore::new(store.app_paths())
+                .try_acquire_delete(&d1_3a_scope(
+                    DeletionEntityKind::Plan,
+                    "work_item_plan_0001",
+                ))
+                .expect("re-acquire delete lease"),
+        )
+        .expect("complete tombstone");
+    assert!(
+        matches!(
+            store.upsert_issue_shared_worktree(d1_3c_issue_upsert_input("aria/revive")),
+            Err(ProductStoreError::Conflict {
+                kind: "entity_deleting",
+                ..
+            })
+        ),
+        "无可证 owner 且原资源已被实体 cleanup 清除：不得凭旧缓存 path 重建"
+    );
+    assert!(
+        !record_path.exists(),
+        "拒绝路径不得复活已清档记录"
+    );
+
+    // 新 Plan（真实 live owner）同仓正常创建不当旧 Plan 复活。
+    d1_3a_plan(&store, "work_item_plan_0002", Vec::new());
+    d1_3a_wi(&store, "work_item_0003", "work_item_plan_0002");
+    let revived = store
+        .upsert_issue_shared_worktree(d1_3c_issue_upsert_input("aria/new-plan"))
+        .expect("新 live Plan 的正常创建必须放行");
+    assert_eq!(revived.branch_name, "aria/new-plan");
+    store
+        .try_acquire_issue_worktree_lock(
+            PROJECT_ID,
+            ISSUE_ID,
+            "work_item_0003",
+            "issue_worktree_lease_new_plan",
+        )
+        .expect("新 live Plan 正常取锁");
+}
+
+/// 仓维（三元键）同款闭包：late Deleted owner 全拒；异仓与另一 live Plan 不受牵连。
+#[test]
+fn cascade_d1_3c_repo_entries_reject_late_deleted_owner_and_live_plan_kept() {
+    let (_tmp, store) = setup();
+    let api_member = LogicalRepositoryId(stable_member_uuid(0x0001));
+    let web_member = LogicalRepositoryId(stable_member_uuid(0x0002));
+    d1_3a_plan(&store, "work_item_plan_0001", Vec::new());
+    d1_3c_wi_with_target(&store, "work_item_0001", "work_item_plan_0001", Some(api_member));
+    d1_3c_wi_with_target(&store, "work_item_0002", "work_item_plan_0001", Some(api_member));
+    store
+        .upsert_repo_shared_worktree(d1_3c_repo_upsert_input(api_member, "aria/api"))
+        .expect("seed api repo worktree");
+    store
+        .try_acquire_repo_worktree_lock(
+            PROJECT_ID,
+            ISSUE_ID,
+            api_member,
+            "work_item_0001",
+            "repo_worktree_lease_d13c",
+        )
+        .expect("initial repo lock");
+
+    d1_3c_begin_purge_plan_with_owned(
+        &store,
+        "work_item_plan_0001",
+        vec!["work_item_0001".to_string(), "work_item_0002".to_string()],
+        vec![api_member.0.to_string()],
+    );
+    let record_path = store.repo_shared_worktree_path(PROJECT_ID, ISSUE_ID, api_member);
+    let bytes_before = std::fs::read(&record_path).expect("record exists");
+    for denial in [
+        store.upsert_repo_shared_worktree(d1_3c_repo_upsert_input(api_member, "aria/late")),
+        store
+            .try_acquire_repo_worktree_lock(
+                PROJECT_ID,
+                ISSUE_ID,
+                api_member,
+                "work_item_0001",
+                "repo_worktree_lease_late",
+            )
+            .map(|leased| leased.worktree),
+        store.bind_repo_worktree_lock_to_attempt(
+            PROJECT_ID,
+            ISSUE_ID,
+            api_member,
+            "work_item_0001",
+            "coding_attempt_0001",
+        ),
+        store.transfer_repo_worktree_lock(
+            PROJECT_ID,
+            ISSUE_ID,
+            api_member,
+            "work_item_0001",
+            "work_item_0002",
+            "repo_worktree_lease_d13c",
+        ),
+        store.release_repo_worktree_lock(
+            PROJECT_ID,
+            ISSUE_ID,
+            api_member,
+            "work_item_0001",
+            "repo_worktree_lease_d13c",
+        ),
+        store.release_repo_worktree_lock_by_owner(
+            PROJECT_ID,
+            ISSUE_ID,
+            api_member,
+            "repo_worktree_lease_d13c",
+        ),
+        store.mark_repo_worktree_completed_item(
+            PROJECT_ID,
+            ISSUE_ID,
+            api_member,
+            "work_item_0001",
+            "repo_worktree_lease_d13c",
+        ),
+        store.takeover_repo_worktree_lock_after_dead_owner(
+            PROJECT_ID,
+            ISSUE_ID,
+            api_member,
+            "repo_worktree_lease_d13c",
+        ),
+    ] {
+        assert!(
+            matches!(
+                &denial,
+                Err(ProductStoreError::Conflict {
+                    kind: "entity_deleting",
+                    ..
+                })
+            ),
+            "仓维 late deleted owner 写必须拒绝，实际: {denial:?}"
+        );
+    }
+    assert_eq!(
+        std::fs::read(&record_path).expect("record unchanged"),
+        bytes_before
+    );
+
+    // 清档完成后：该仓归属未知拒绝重建；另一 live Plan 同仓正常；异仓不受牵连。
+    store
+        .delete_repo_shared_worktree(PROJECT_ID, ISSUE_ID, api_member)
+        .expect("cleanup api record");
+    store
+        .delete_work_item(PROJECT_ID, ISSUE_ID, "work_item_0001")
+        .expect("cleanup wi 1");
+    store
+        .delete_work_item(PROJECT_ID, ISSUE_ID, "work_item_0002")
+        .expect("cleanup wi 2");
+    EntityDeletionStore::new(store.app_paths())
+        .complete(
+            &EntityOperationStore::new(store.app_paths())
+                .try_acquire_delete(&d1_3a_scope(
+                    DeletionEntityKind::Plan,
+                    "work_item_plan_0001",
+                ))
+                .expect("re-acquire delete lease"),
+        )
+        .expect("complete tombstone");
+    assert!(
+        matches!(
+            store.upsert_repo_shared_worktree(d1_3c_repo_upsert_input(api_member, "aria/revive")),
+            Err(ProductStoreError::Conflict {
+                kind: "entity_deleting",
+                ..
+            })
+        ),
+        "已删 Plan 清档后的仓维资源不得重建"
+    );
+
+    d1_3a_plan(&store, "work_item_plan_0002", Vec::new());
+    d1_3c_wi_with_target(&store, "work_item_0003", "work_item_plan_0002", Some(api_member));
+    store
+        .upsert_repo_shared_worktree(d1_3c_repo_upsert_input(api_member, "aria/new-plan"))
+        .expect("另一 live Plan 同仓正常创建");
+    store
+        .try_acquire_repo_worktree_lock(
+            PROJECT_ID,
+            ISSUE_ID,
+            api_member,
+            "work_item_0003",
+            "repo_worktree_lease_new_plan",
+        )
+        .expect("另一 live Plan 同仓正常取锁");
+    store
+        .upsert_repo_shared_worktree(d1_3c_repo_upsert_input(web_member, "aria/web"))
+        .expect("异仓不受已删 Plan 牵连");
+    store
+        .try_acquire_repo_worktree_lock(
+            PROJECT_ID,
+            ISSUE_ID,
+            web_member,
+            "work_item_0003",
+            "repo_worktree_lease_web",
+        )
+        .expect("异仓正常取锁");
+}
+
+/// 无 plan_id 参数时按真实记录反推：WI 记录、attempt group 绑定、
+/// group 初始化 journal 的 lease join 三源各自命中已删 Plan 即拒。
+#[test]
+fn cascade_d1_3c_ownership_reversed_from_wi_attempt_and_journal() {
+    let (_tmp, store) = setup();
+
+    // 源 1：记录 current_active WI 的 source_work_item_plan_id。
+    d1_3a_plan(&store, "work_item_plan_0001", Vec::new());
+    d1_3a_wi(&store, "work_item_0001", "work_item_plan_0001");
+    d1_3c_seed_issue_worktree(&store, |record| {
+        record.current_active_work_item_id = Some("work_item_0001".to_string());
+        record.current_lock_owner_id = Some("opaque_owner_d13c_1".to_string());
+    });
+    d1_3c_begin_purge_plan_with_owned(&store, "work_item_plan_0001", Vec::new(), Vec::new());
+    assert!(
+        matches!(
+            store.release_issue_worktree_lock_by_owner(PROJECT_ID, ISSUE_ID, "opaque_owner_d13c_1"),
+            Err(ProductStoreError::Conflict {
+                kind: "entity_deleting",
+                ..
+            })
+        ),
+        "WI 记录反推已删 Plan：迟到释放必须拒绝"
+    );
+
+    // 源 2：lock owner 是 attempt id，group 绑定（work_item_group_id）反推 Plan。
+    let (_tmp2, store2) = setup();
+    d1_3a_plan(&store2, "work_item_plan_0002", Vec::new());
+    let attempt = d1_3c_seed_attempt(
+        &store2.app_paths(),
+        "coding_attempt_0002",
+        "work_item_0009",
+        Some("work_item_plan_0002"),
+        None,
+    );
+    d1_3c_seed_issue_worktree(&store2, |record| {
+        record.current_lock_owner_id = Some(attempt.id.clone());
+    });
+    d1_3c_begin_purge_plan_with_owned(&store2, "work_item_plan_0002", Vec::new(), Vec::new());
+    assert!(
+        matches!(
+            store2.release_issue_worktree_lock_by_owner(PROJECT_ID, ISSUE_ID, &attempt.id),
+            Err(ProductStoreError::Conflict {
+                kind: "entity_deleting",
+                ..
+            })
+        ),
+        "attempt group 绑定反推已删 Plan：迟到释放必须拒绝"
+    );
+
+    // 源 3：lock owner 是 issue/repo_worktree_lease_* 不透明租约，经 group
+    // 初始化 journal 的 worktree_lease_id join 反推（不按 prefix 解析）。
+    let (_tmp3, store3) = setup();
+    d1_3a_plan(&store3, "work_item_plan_0003", Vec::new());
+    d1_3c_seed_journal(
+        &store3.app_paths(),
+        "work_item_plan_0003",
+        "work_item_0010",
+        "issue_worktree_lease_d13c_3",
+    );
+    d1_3c_seed_issue_worktree(&store3, |record| {
+        record.current_active_work_item_id = Some("work_item_0010".to_string());
+        record.current_lock_owner_id = Some("issue_worktree_lease_d13c_3".to_string());
+    });
+    d1_3c_begin_purge_plan_with_owned(&store3, "work_item_plan_0003", Vec::new(), Vec::new());
+    assert!(
+        matches!(
+            store3.release_issue_worktree_lock_by_owner(
+                PROJECT_ID,
+                ISSUE_ID,
+                "issue_worktree_lease_d13c_3"
+            ),
+            Err(ProductStoreError::Conflict {
+                kind: "entity_deleting",
+                ..
+            })
+        ),
+        "journal lease join 反推已删 Plan：迟到释放必须拒绝"
+    );
+    assert!(
+        matches!(
+            store3.takeover_issue_worktree_lock_after_dead_owner(
+                PROJECT_ID,
+                ISSUE_ID,
+                "issue_worktree_lease_d13c_3",
+            ),
+            Err(ProductStoreError::Conflict {
+                kind: "entity_deleting",
+                ..
+            })
+        ),
+        "journal 反推同样约束死亡租约接管"
+    );
+}
+
+/// 互相矛盾或损坏 fail-closed：journal join 与记录 active WI 互相矛盾报
+/// 归属错误；record repository 键只用于核目标，错档拒改。
+#[test]
+fn cascade_d1_3c_contradictory_or_corrupt_ownership_fails_closed() {
+    let (_tmp, store) = setup();
+    let paths = store.app_paths();
+
+    // journal 按 lease 命中，但其 lock_work_item_id 与记录 active WI 矛盾。
+    d1_3a_plan(&store, "work_item_plan_0001", Vec::new());
+    d1_3c_seed_journal(
+        &paths,
+        "work_item_plan_0001",
+        "work_item_0010",
+        "issue_worktree_lease_d13c_conflict",
+    );
+    d1_3c_seed_issue_worktree(&store, |record| {
+        record.current_active_work_item_id = Some("work_item_0099".to_string());
+        record.current_lock_owner_id = Some("issue_worktree_lease_d13c_conflict".to_string());
+    });
+    assert!(
+        matches!(
+            store.release_issue_worktree_lock_by_owner(
+                PROJECT_ID,
+                ISSUE_ID,
+                "issue_worktree_lease_d13c_conflict",
+            ),
+            Err(ProductStoreError::InvalidRecord { kind, .. }) if kind == "shared_worktree_owner"
+        ),
+        "journal join 与记录 active WI 矛盾必须归属错误 fail-closed"
+    );
+
+    // 仓维记录 target 键错档（API 文件内容却是 WEB target）：不得改写。
+    let (_tmp2, store2) = setup();
+    let api_member = LogicalRepositoryId(stable_member_uuid(0x0001));
+    let web_member = LogicalRepositoryId(stable_member_uuid(0x0002));
+    d1_3c_seed_repo_worktree(&store2, api_member, |record| {
+        record.target_repository_id = Some(web_member);
+    });
+    assert!(
+        matches!(
+            store2.upsert_repo_shared_worktree(d1_3c_repo_upsert_input(api_member, "aria/late")),
+            Err(ProductStoreError::IdentityMismatch {
+                kind: "repo_shared_worktree",
+                ..
+            })
+        ),
+        "record repository 键错档必须 IdentityMismatch fail-closed"
+    );
+}
+
+/// delete 与 upsert 两顺序互斥（稳定 resource 短 lease），且锁 inode 稳定不 unlink。
+#[test]
+fn cascade_d1_3c_delete_and_upsert_mutually_exclusive_with_stable_inode() {
+    let (_tmp, store) = setup();
+    let api_member = LogicalRepositoryId(stable_member_uuid(0x0001));
+    let operations = EntityOperationStore::new(store.app_paths());
+    let key = crate::product::entity_operation_store::SharedResourceKey {
+        project_id: PROJECT_ID.to_string(),
+        issue_id: ISSUE_ID.to_string(),
+        repository_id: Some(api_member),
+    };
+
+    // 顺序 1：writer 短 lease 在持 → 同仓 upsert Busy 拒 + cleanup 互斥。
+    store
+        .upsert_repo_shared_worktree(d1_3c_repo_upsert_input(api_member, "aria/first"))
+        .expect("seed repo worktree");
+    let resource_lock_path = store
+        .app_paths()
+        .issue_lifecycle_root(PROJECT_ID, ISSUE_ID)
+        .join("entity-operations")
+        .join("resource-locks")
+        .join(format!("{}.lock", api_member.0));
+    let _writer = operations
+        .try_acquire_shared_resource_write(&key)
+        .expect("writer lease");
+    assert!(
+        matches!(
+            operations.try_acquire_shared_resource_cleanup(&key),
+            Err(crate::product::entity_operation_store::EntityOperationError::Busy)
+        ),
+        "writer 在持：cleanup 互斥"
+    );
+    assert!(
+        matches!(
+            store.upsert_repo_shared_worktree(d1_3c_repo_upsert_input(api_member, "aria/contended")),
+            Err(ProductStoreError::Conflict {
+                kind: "shared_resource_busy",
+                ..
+            })
+        ),
+        "writer 在持：upsert 必须稳定 Busy 拒（不等待）"
+    );
+    let inode_before = std::fs::metadata(&resource_lock_path)
+        .expect("resource lock file")
+        .ino();
+    drop(_writer);
+
+    // 顺序 2：cleanup 短 lease 在持 → upsert 同样 Busy 拒。
+    let _cleanup = operations
+        .try_acquire_shared_resource_cleanup(&key)
+        .expect("cleanup lease");
+    assert!(
+        matches!(
+            store.upsert_repo_shared_worktree(d1_3c_repo_upsert_input(api_member, "aria/contended")),
+            Err(ProductStoreError::Conflict {
+                kind: "shared_resource_busy",
+                ..
+            })
+        ),
+        "cleanup 在持：upsert 必须稳定 Busy 拒"
+    );
+    drop(_cleanup);
+    assert_eq!(
+        std::fs::metadata(&resource_lock_path)
+            .expect("resource lock file")
+            .ino(),
+        inode_before,
+        "resource 锁 inode 稳定（purge 外、不 unlink 在持 inode）"
+    );
+
+    // lease 释放后正常放行。
+    store
+        .upsert_repo_shared_worktree(d1_3c_repo_upsert_input(api_member, "aria/second"))
+        .expect("lease 释放后 upsert 放行");
 }
