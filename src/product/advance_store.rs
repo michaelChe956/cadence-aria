@@ -358,35 +358,55 @@ impl AdvanceStore {
         ] {
             validate_relative_id(id)?;
         }
-        // plan Task D1.2c：删除事实优先于旧幂等重放——purging/deleted 身份上
-        // 同/异 command 重放一律先拒（REQ-GRP-01）。
-        self.with_plan_live_write(&input.project_id, &input.issue_id, &input.plan_id, || Ok(()))?;
-        if let Some(record) =
-            self.get_advance_by_command_id(&input.project_id, &input.issue_id, &input.command_id)?
-        {
-            return Ok(record);
-        }
-        if let Some(record) =
-            self.get_advance_for_plan(&input.project_id, &input.issue_id, &input.plan_id)?
-        {
-            return Ok(record);
-        }
-        let record = self.now_record(input, plan_revision_id.to_string());
-        match self.put_record(&record) {
-            Ok(record) => Ok(record),
-            Err(ProductStoreError::Conflict { .. }) => self
-                .get_advance_by_command_id(&input.project_id, &input.issue_id, &input.command_id)?
-                .or_else(|| {
-                    self.get_advance_for_plan(&input.project_id, &input.issue_id, &input.plan_id)
-                        .ok()
-                        .flatten()
-                })
-                .ok_or(ProductStoreError::Conflict {
-                    kind: "advance_record_identity",
-                    id: record.id,
-                }),
-            Err(error) => Err(error),
-        }
+        // plan Task D1.2c＋P3 修复轮：准入（scope try-shared）跨「重放→put」
+        // 全流程持有——删除独占无法在预检与 put 之间插入，purging/deleted
+        // 事实在入口即拒；put_record 的 entity_deleting 因此不可能落入下方
+        // 身份兜底被改判（REQ-GRP-01 删除身份优先）。
+        self.with_plan_live_write(
+            &input.project_id,
+            &input.issue_id,
+            &input.plan_id,
+            || {
+                if let Some(record) = self.get_advance_by_command_id(
+                    &input.project_id,
+                    &input.issue_id,
+                    &input.command_id,
+                )? {
+                    return Ok(record);
+                }
+                if let Some(record) = self.get_advance_for_plan(
+                    &input.project_id,
+                    &input.issue_id,
+                    &input.plan_id,
+                )? {
+                    return Ok(record);
+                }
+                let record = self.now_record(input, plan_revision_id.to_string());
+                match self.put_record(&record) {
+                    Ok(record) => Ok(record),
+                    Err(ProductStoreError::Conflict { .. }) => self
+                        .get_advance_by_command_id(
+                            &input.project_id,
+                            &input.issue_id,
+                            &input.command_id,
+                        )?
+                        .or_else(|| {
+                            self.get_advance_for_plan(
+                                &input.project_id,
+                                &input.issue_id,
+                                &input.plan_id,
+                            )
+                            .ok()
+                            .flatten()
+                        })
+                        .ok_or(ProductStoreError::Conflict {
+                            kind: "advance_record_identity",
+                            id: record.id,
+                        }),
+                    Err(error) => Err(error),
+                }
+            },
+        )
     }
 
     /// Update only mutable state while enforcing the immutable advance identity.
@@ -1804,6 +1824,109 @@ mod tests {
                 store.list_plan_artifacts(p, i, "plan_0001"),
                 Err(ProductStoreError::IdentityMismatch { .. })
             ));
+        }
+    }
+
+    #[test]
+    fn cascade_d1_2c_persist_window_deletion_never_yields_stale_ok_or_identity_reclass() {
+        // P3 修复轮（REQ-GRP-01 删除身份优先）：「预检后/put 前恰 begin 删除」
+        // 微秒窗口内，persist 不得把陈旧 record 当幂等 Ok 命中，也不得把
+        // put_record 的 entity_deleting 改判为 advance_record_identity。
+        persist_deletion_window(/* seed_ours= */ true);
+        persist_deletion_window(/* seed_ours= */ false);
+    }
+
+    fn persist_deletion_window(seed_ours: bool) {
+        use std::sync::{Arc, Barrier};
+        use std::time::Duration;
+
+        use crate::product::coding_attempt_store::locking::{
+            ExclusiveFileLock, register_lock_attempt_hook,
+        };
+        use crate::product::entity_operation_store::EntityOperationError;
+
+        let (_root, store) = cascade_store();
+        let (p, i) = ("project_0001", "issue_0001");
+        if seed_ours {
+            let ours = cascade_record(
+                "advance_command_0001",
+                "command_0001",
+                "plan_0001",
+                Some("attempt_0001"),
+                AdvanceStatus::Ready,
+            );
+            store.put_record(&ours).unwrap();
+        } else {
+            // 异 plan record 使根存在：重放读取根锁但不命中，put 走新建路径。
+            let other = cascade_record(
+                "advance_command_0003",
+                "command_0003",
+                "plan_0002",
+                Some("attempt_0002"),
+                AdvanceStatus::Ready,
+            );
+            store.put_record(&other).unwrap();
+        }
+
+        let root = store.root(p, i).unwrap();
+        let held = ExclusiveFileLock::acquire(&root).expect("hold advance root lock");
+        // 持锁后注册 hook：主线程自身的 acquire 不触发通知。
+        let (_hook, attempts) = register_lock_attempt_hook(&root);
+
+        let worker_store = store.clone();
+        let input = AdvanceInput {
+            command_id: "command_0001".into(),
+            project_id: p.into(),
+            issue_id: i.into(),
+            plan_id: "plan_0001".into(),
+        };
+        let started = Arc::new(Barrier::new(2));
+        let worker_started = Arc::clone(&started);
+        let worker = std::thread::spawn(move || {
+            worker_started.wait();
+            worker_store.persist_advance_record_if_absent(&input, "revision_0001")
+        });
+        started.wait();
+
+        // worker 停在重放读的根锁获取上：预检已过、put 未至的注入窗口。
+        attempts
+            .recv_timeout(Duration::from_secs(5))
+            .expect("persist worker must contend on the advance root lock");
+
+        let scope = EntityScope::new(p, i, DeletionEntityKind::Plan, "plan_0001");
+        let operations = EntityOperationStore::new(store.app_paths());
+        let deletions = EntityDeletionStore::new(store.app_paths());
+        let deletion_began = match operations.try_acquire_delete(&scope) {
+            Ok(lease) => {
+                assert_eq!(
+                    deletions.begin(&lease).unwrap().phase,
+                    DeletionPhase::Purging
+                );
+                drop(lease);
+                true
+            }
+            Err(EntityOperationError::Busy) => false,
+            Err(other) => panic!("unexpected delete admission: {other:?}"),
+        };
+
+        drop(held);
+        let result = worker.join().expect("persist worker thread");
+
+        if deletion_began {
+            // 窗口内删除事实已立：不得陈旧 Ok（seed_ours=true 旧路径）、不得
+            // 改判 identity（seed_ours=false 旧路径），必须上抛 entity_deleting。
+            assert!(
+                matches!(
+                    result,
+                    Err(ProductStoreError::Conflict { kind, .. }) if kind == "entity_deleting"
+                ),
+                "persist must surface entity_deleting after deletion began, got {result:?}"
+            );
+        } else {
+            // 准入跨全流程持有：persist 活着完成、删除被推迟（无墓碑）。
+            let record = result.expect("live persist must complete while holding admission");
+            assert_eq!(record.plan_id, "plan_0001");
+            assert!(deletions.get(&scope).unwrap().is_none());
         }
     }
 }
