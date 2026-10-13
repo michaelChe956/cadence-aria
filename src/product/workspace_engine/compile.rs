@@ -381,6 +381,7 @@ pub fn execute_initial_plan_compile(
 }
 
 mod finalizer;
+pub(crate) use finalizer::work_item_record_attribution;
 #[cfg(test)]
 mod ir_adapter_tests;
 
@@ -392,6 +393,7 @@ pub(crate) enum WorkItemPlanCompileFinalizerCheckpoint {
     FirstChildBindingEnsured,
     FirstChildContextPrepared,
     CompileReportPersisted,
+    WorkItemRecordsPersisted,
 }
 
 #[cfg(test)]

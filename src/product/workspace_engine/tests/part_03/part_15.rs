@@ -59,6 +59,7 @@ async fn work_item_plan_initial_compile_phase2_normal_records_transaction_journa
             "validating",
             "committing",
             "plan_summary_prepared",
+            "work_item_records_persisted",
             "child_session_001_ensured",
             "child_session_001_binding_ensured",
             "child_session_001_context_prepared",
@@ -79,6 +80,7 @@ async fn work_item_plan_initial_compile_phase2_normal_records_transaction_journa
         vec![
             WorkItemPlanCompileStatus::Preparing,
             WorkItemPlanCompileStatus::Validating,
+            WorkItemPlanCompileStatus::Committing,
             WorkItemPlanCompileStatus::Committing,
             WorkItemPlanCompileStatus::Committing,
             WorkItemPlanCompileStatus::Committing,

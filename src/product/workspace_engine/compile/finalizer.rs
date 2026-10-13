@@ -1,7 +1,10 @@
 use super::*;
 use crate::product::issue_automation_store::IssueAutomationStore;
 use crate::product::models::automation::EnrollmentBindingIdentity;
-use crate::product::models::{ChildBindingIdentity, WorkItemRuntimeBinding, match_compile_child};
+use crate::product::models::{
+    ChildBindingIdentity, WorkItemContextBudget, WorkItemExecutionPlanStatus, WorkItemRuntimeBinding,
+    WorkItemStatus, match_compile_child,
+};
 use crate::web::workspace_context::ensure_workspace_context_message;
 use crate::web::workspace_ws_types::{
     WorkItemHistoryEntryDto, WorkItemHistoryEntryKind, WorkItemRevisionHistoryDto,
@@ -106,6 +109,163 @@ impl WorkspaceEngine {
         Ok(outcome)
     }
 
+    /// park-1（8-19 验收欠账）：finalize 持久化 per-target
+    /// LifecycleWorkItemRecord（work-items/{id}.json）。
+    ///
+    /// 记录 id 取 logical work item id（entity 语义）：coding 会话创建走
+    /// `workspace_repository` 的 WorkItem 臂 `list_work_items →
+    /// find(work_item.id == session.entity_id)`，plan.work_item_ids 与
+    /// child session entity_id 均为 logical 域。归属从 compiled
+    /// work_item_revision（intent target）+ 与 Final Compile 同源的成员
+    /// target 表派生；Legacy 单仓落 story 仓。upsert 幂等：重放不重复建、
+    /// 不清执行态。
+    fn persist_compiled_work_item_records(
+        &self,
+        lifecycle: &LifecycleStore,
+        tx: &mut WorkItemPlanCompileTransaction,
+        outcome: &InitialPlanCompileOutcome,
+    ) -> Result<(), String> {
+        let ordered = &outcome
+            .plan_projection_bundle
+            .coder_group_context
+            .ordered_logical_work_item_ids;
+        let compiled_by_logical_id = outcome
+            .work_items
+            .iter()
+            .map(|item| (item.work_item_revision.logical_work_item_id.as_str(), item))
+            .collect::<BTreeMap<_, _>>();
+        let member_targets = match self.logical_work_item_plan_repository_targets(
+            lifecycle,
+            &tx.previous_plan_snapshot,
+        )
+        .map_err(|error| {
+            format!("resolve plan repository targets for work item records failed: {error}")
+        })? {
+            None => None,
+            Some(_) => {
+                let session_record = lifecycle
+                    .get_workspace_session(&self.session.session_id)
+                    .map_err(|error| {
+                        format!("load plan session record for work item records failed: {error}")
+                    })?;
+                let session_repository =
+                    crate::product::workspace_repository::resolve_workspace_repository_context(
+                        &lifecycle.app_paths(),
+                        lifecycle,
+                        &session_record,
+                    )
+                    .map_err(|error| {
+                        format!(
+                            "resolve plan session repository for work item records failed: {error}"
+                        )
+                    })?
+                    .business_repository
+                    .map_err(|error| {
+                        format!(
+                            "resolve plan session business repository for work item records failed: {error}"
+                        )
+                    })?;
+                crate::product::workspace_engine::draft_batch::compile_support::plan_compile_member_targets(
+                    lifecycle,
+                    &tx.previous_plan_snapshot,
+                    &session_repository,
+                )
+                .map_err(|error| {
+                    format!("resolve plan member targets for work item records failed: {error}")
+                })?
+            }
+        };
+        let legacy_repository_id = if member_targets.is_none() {
+            self.work_item_plan_repository_id(lifecycle, &tx.previous_plan_snapshot)
+                .map_err(|error| {
+                    format!("resolve legacy repository for work item records failed: {error}")
+                })?
+        } else {
+            String::new()
+        };
+        // SC 纪律：finalize 不得读 legacy compile store（panic_on_legacy_
+        // compile_reads 只挂读方法），source_draft_id 不在此派生——消费面
+        // （group draft context）自有 tx 兜底解析。
+        let mut records = Vec::with_capacity(ordered.len());
+        for (index, logical_id) in ordered.iter().enumerate() {
+            let compiled = compiled_by_logical_id.get(logical_id.as_str()).ok_or_else(|| {
+                format!(
+                    "compiled outcome missing logical work item `{logical_id}` during work item record derivation"
+                )
+            })?;
+            let contract = &compiled.work_item_revision.canonical_contract;
+            let intent_target = contract
+                .intent_contract
+                .as_ref()
+                .map(|intent| &intent.target);
+            let (repository_id, target_repository_id) = work_item_record_attribution(
+                member_targets.as_ref(),
+                &legacy_repository_id,
+                intent_target,
+                logical_id,
+            )?;
+            // outline 反查双域兼容：legacy tx 值域为 logical id，SC tx 键域
+            // （outline id）== logical id。
+            let source_outline_id = tx
+                .outline_to_work_item_id
+                .iter()
+                .find(|(_, value)| value.as_str() == logical_id.as_str())
+                .map(|(outline_id, _)| outline_id.clone())
+                .or_else(|| tx.outline_to_work_item_id.get(logical_id).cloned());
+            let source_draft_id = None;
+            let depends_on = outcome
+                .dependency_graph_revision
+                .edges
+                .iter()
+                .filter(|edge| edge.to == *logical_id)
+                .map(|edge| edge.from.clone())
+                .collect::<Vec<_>>();
+            records.push(LifecycleWorkItemRecord {
+                id: logical_id.clone(),
+                project_id: tx.project_id.clone(),
+                issue_id: tx.issue_id.clone(),
+                repository_id,
+                target_repository_id,
+                story_spec_ids: tx.previous_plan_snapshot.source_story_spec_ids.clone(),
+                design_spec_ids: tx.previous_plan_snapshot.source_design_spec_ids.clone(),
+                title: contract.identity.title.clone(),
+                plan_status: WorkItemPlanStatus::Confirmed,
+                execution_status: WorkItemStatus::Pending,
+                worktree_path: None,
+                work_item_set_id: Some(tx.plan_id.clone()),
+                source_work_item_plan_id: Some(tx.plan_id.clone()),
+                source_outline_id,
+                source_draft_id,
+                planned_implementation_context: None,
+                kind: crate::product::work_item_split_engine::types::parse_work_item_kind(
+                    &contract.identity.kind,
+                ),
+                sequence_hint: Some((index + 1) as u32),
+                depends_on,
+                exclusive_write_scopes: contract.write_policy.exclusive_scopes.clone(),
+                forbidden_write_scopes: contract.write_policy.forbidden_scopes.clone(),
+                context_budget: WorkItemContextBudget::default(),
+                verification_plan_ref: Some(compiled.verification_plan_revision.id.clone()),
+                require_execution_plan_confirm: tx
+                    .previous_plan_snapshot
+                    .options
+                    .require_execution_plan_confirm,
+                execution_plan_status: WorkItemExecutionPlanStatus::NotStarted,
+                completion_commit: None,
+                completion_diff_summary_ref: None,
+                created_at: tx.created_at.clone(),
+                updated_at: tx.created_at.clone(),
+            });
+        }
+        for record in records {
+            lifecycle
+                .upsert_compiled_work_item_record(record)
+                .map_err(|error| format!("persist compiled work item record failed: {error}"))?;
+        }
+        tx.created_work_item_ids = ordered.clone();
+        Ok(())
+    }
+
     pub(super) async fn finalize_initial_plan_compile(
         &mut self,
         lifecycle: &LifecycleStore,
@@ -162,6 +322,20 @@ impl WorkspaceEngine {
         self.maybe_fail_work_item_plan_compile_finalizer(
             tx,
             WorkItemPlanCompileFinalizerCheckpoint::PlanSummaryPrepared,
+        )?;
+
+        // park-1：per-target work item 记录必须在 child session 建立前
+        // 落盘——coding 会话创建的 WorkItem 臂 find(entity_id) 依赖它们。
+        self.persist_compiled_work_item_records(lifecycle, tx, outcome)?;
+        tx.step_cursor = "work_item_records_persisted".to_string();
+        tx.updated_at = tx.created_at.clone();
+        store
+            .put_compile_transaction(tx)
+            .map_err(|error| format!("save work item records cursor failed: {error}"))?;
+        #[cfg(test)]
+        self.maybe_fail_work_item_plan_compile_finalizer(
+            tx,
+            WorkItemPlanCompileFinalizerCheckpoint::WorkItemRecordsPersisted,
         )?;
 
         // C1 Task 8（REQ-C1-CHILD-01）：读取 durable enrollment 当前代
@@ -639,5 +813,69 @@ impl WorkspaceEngine {
                 .then_with(|| left.id.cmp(&right.id))
         });
         WorkItemRevisionHistoryDto { entries }
+    }
+}
+/// park-1：单个 compiled work item 的仓库归属解析（纯函数，供 finalize 与
+/// 单测共用）。与 Final Compile 的成员归属语义同源（lower.rs
+/// `resolve_item_target_repository_id` / ir_adapter `logical_target_for_ir_item`）：
+/// - Legacy（`member_targets=None`）：story 仓，无逻辑 target；
+/// - LC：intent target 按声明落成员物理仓（logical_codebase 声明直取，
+///   single_repository 声明反查唯一逻辑成员）；未声明 intent 落确定性
+///   回落仓并反查逻辑成员。目标失效/非成员/回落缺失 →
+///   `work_item_target_missing` 语义错 fail-closed，不猜默认。
+pub(crate) fn work_item_record_attribution(
+    member_targets: Option<&crate::product::work_item_plan_compiler::PlanMemberTargets>,
+    legacy_repository_id: &str,
+    intent_target: Option<&crate::product::logical_codebase::EnrollmentTarget>,
+    logical_work_item_id: &str,
+) -> Result<(String, Option<crate::product::logical_codebase::LogicalRepositoryId>), String> {
+    use crate::product::logical_codebase::{EnrollmentTarget, LogicalRepositoryId};
+
+    let Some(targets) = member_targets else {
+        return Ok((legacy_repository_id.to_string(), None));
+    };
+    let reverse_logical = |physical: &str| -> Result<LogicalRepositoryId, String> {
+        let matches = targets
+            .physical_by_logical
+            .iter()
+            .filter(|(_, value)| value.as_str() == physical)
+            .map(|(logical, _)| *logical)
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [logical] => Ok(*logical),
+            [] => Err(format!(
+                "work_item_target_missing: physical repository `{physical}` for `{logical_work_item_id}` is not an effective logical member"
+            )),
+            _ => Err(format!(
+                "work_item_target_missing: physical repository `{physical}` for `{logical_work_item_id}` maps to multiple logical repositories"
+            )),
+        }
+    };
+    match intent_target {
+        Some(EnrollmentTarget::LogicalCodebase {
+            logical_repository_id,
+            ..
+        }) => {
+            let physical = targets.physical_by_logical.get(logical_repository_id).ok_or_else(
+                || {
+                    format!(
+                        "work_item_target_missing: declared logical member `{logical_repository_id:?}` for `{logical_work_item_id}` is not effective"
+                    )
+                },
+            )?;
+            Ok((physical.clone(), Some(*logical_repository_id)))
+        }
+        Some(EnrollmentTarget::SingleRepository { repository_id }) => Ok((
+            repository_id.clone(),
+            Some(reverse_logical(repository_id)?),
+        )),
+        None => {
+            let fallback = targets.fallback_physical_id.as_deref().ok_or_else(|| {
+                format!(
+                    "work_item_target_missing: `{logical_work_item_id}` has no intent target and no deterministic fallback repository"
+                )
+            })?;
+            Ok((fallback.to_string(), Some(reverse_logical(fallback)?)))
+        }
     }
 }

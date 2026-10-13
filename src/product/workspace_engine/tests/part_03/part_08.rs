@@ -159,13 +159,24 @@ async fn work_item_plan_initial_compile_publishes_revision_and_projection_bundle
             )
             .unwrap();
     }
+    // park-1（8-19 验收欠账收敛）：initial revision compile 现在必须为每个
+    // logical work item 落一条 per-target LifecycleWorkItemRecord（id=entity
+    // 语义），供 coding 会话创建的 WorkItem 臂 find(entity_id) 解析仓归属。
     assert_eq!(
         lifecycle
             .count_work_items("project_0001", "issue_0001")
             .unwrap(),
-        lifecycle_work_item_count,
-        "initial revision compile must not create legacy LifecycleWorkItemRecord facts"
+        lifecycle_work_item_count + 2,
+        "initial revision compile must persist per-target LifecycleWorkItemRecord facts (wi_a/wi_b)"
     );
+    let persisted_ids = lifecycle
+        .list_work_items("project_0001", "issue_0001")
+        .unwrap()
+        .into_iter()
+        .map(|record| record.id)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(persisted_ids.contains("wi_a"));
+    assert!(persisted_ids.contains("wi_b"));
 }
 
 #[tokio::test]

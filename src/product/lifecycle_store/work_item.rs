@@ -71,6 +71,57 @@ impl LifecycleStore {
         Ok(work_item)
     }
 
+    /// park-1：compile finalize 的 per-target work item 记录写入点。
+    ///
+    /// 键域 (project, issue, record.id)。已存在时仅覆盖 compile 派生归属
+    /// 字段，保留执行态（execution_status/worktree_path/execution_plan_status/
+    /// completion_*）与首次 created_at——重复 finalize / 恢复重放 / 再编译
+    /// 均不重复建、不清执行进度；新建时执行态按 Pending 初始。
+    pub fn upsert_compiled_work_item_record(
+        &self,
+        record: LifecycleWorkItemRecord,
+    ) -> Result<LifecycleWorkItemRecord, ProductStoreError> {
+        validate_relative_id(&record.project_id)?;
+        validate_relative_id(&record.issue_id)?;
+        validate_relative_id(&record.id)?;
+        validate_relative_id(&record.repository_id)?;
+
+        let path = self
+            .work_items_root(&record.project_id, &record.issue_id)
+            .join(format!("{}.json", record.id));
+        crate::product::coding_attempt_store::locking::with_exclusive_lock(&path, || {
+            let mut persisted = if super::utils::path_is_regular_file(&path)? {
+                let mut existing: LifecycleWorkItemRecord = read_json(&path)?;
+                existing.repository_id = record.repository_id.clone();
+                existing.target_repository_id = record.target_repository_id;
+                existing.story_spec_ids = record.story_spec_ids.clone();
+                existing.design_spec_ids = record.design_spec_ids.clone();
+                existing.title = record.title.clone();
+                existing.plan_status = record.plan_status.clone();
+                existing.work_item_set_id = record.work_item_set_id.clone();
+                existing.source_work_item_plan_id = record.source_work_item_plan_id.clone();
+                existing.source_outline_id = record.source_outline_id.clone();
+                existing.source_draft_id = record.source_draft_id.clone();
+                existing.planned_implementation_context =
+                    record.planned_implementation_context.clone();
+                existing.kind = record.kind.clone();
+                existing.sequence_hint = record.sequence_hint;
+                existing.depends_on = record.depends_on.clone();
+                existing.exclusive_write_scopes = record.exclusive_write_scopes.clone();
+                existing.forbidden_write_scopes = record.forbidden_write_scopes.clone();
+                existing.context_budget = record.context_budget.clone();
+                existing.verification_plan_ref = record.verification_plan_ref.clone();
+                existing.require_execution_plan_confirm = record.require_execution_plan_confirm;
+                existing
+            } else {
+                record
+            };
+            persisted.updated_at = Utc::now().to_rfc3339();
+            write_json(&path, &persisted)?;
+            Ok(persisted)
+        })
+    }
+
     pub fn count_work_items(
         &self,
         project_id: &str,
