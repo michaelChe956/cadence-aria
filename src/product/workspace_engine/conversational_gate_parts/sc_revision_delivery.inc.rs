@@ -47,35 +47,165 @@ impl super::WorkspaceEngine {
         &self,
         feedback: &str,
     ) -> Result<String, String> {
-        let candidate_markdown = self
-            .session
+        let candidate_markdown = self.current_revision_candidate_markdown().ok_or_else(|| {
+            "HUMAN_GATE_REVISION_CANDIDATE_MISSING: current candidate markdown is required"
+                .to_string()
+        })?;
+        let grammar_boundary =
+            crate::product::work_item_split_engine::prompts::work_item_plan_markdown_grammar();
+        super::prompts::build_sc_manual_revision_prompt(
+            super::prompts::ScManualRevisionPromptInput {
+                candidate_markdown: candidate_markdown.as_str(),
+                feedback,
+                grammar_boundary: &grammar_boundary,
+                language_rule: super::prompts::LANGUAGE_RULE_FILE_CONTENT,
+            },
+        )
+    }
+
+    /// 当前修订基线候选：session artifact 优先；批准链 compile 会把 current
+    /// artifact 推成非 Markdown 投影，此时回落到最近一个 Markdown artifact
+    /// version（批准时经 SC 流程 update_artifact(Markdown) 持久化的候选文本，
+    /// 语义上正是修订基线）。版本列表完全无 Markdown 时返回 None（调用方
+    /// 保持既有拒绝语义不变）。
+    fn current_revision_candidate_markdown(&self) -> Option<String> {
+        self.session
             .artifact
             .as_ref()
             .and_then(|artifact| artifact.markdown())
-            // 批准链 compile 会把 current artifact 推成非 Markdown 投影；修订基线
-            // 回落到最近一个 Markdown artifact version（批准时经 SC 流程
-            // update_artifact(Markdown) 持久化的候选文本，语义上正是修订基线）。
-            // 版本列表完全无 Markdown 时保持既有拒绝语义不变。
             .or_else(|| {
                 self.artifact_versions
                     .iter()
                     .rev()
                     .find_map(|version| version.payload.markdown())
             })
-            .ok_or_else(|| {
-                "HUMAN_GATE_REVISION_CANDIDATE_MISSING: current candidate markdown is required"
-                    .to_string()
-            })?;
-        let grammar_boundary =
-            crate::product::work_item_split_engine::prompts::work_item_plan_markdown_grammar();
-        super::prompts::build_sc_manual_revision_prompt(
-            super::prompts::ScManualRevisionPromptInput {
-                candidate_markdown,
-                feedback,
-                grammar_boundary: &grammar_boundary,
-                language_rule: super::prompts::LANGUAGE_RULE_FILE_CONTENT,
-            },
-        )
+            .map(str::to_string)
+    }
+
+    /// SG5.3（plan v1.1 Task SG5.3）：SC 修订 resume 的冻结修复子 prompt
+    /// delivery 与 fresh builder 分支——有结构 state（活动 grant）时
+    /// delivery 读取冻结 ref/digest 精确 join 交付冻结全文，不以复造的原
+    /// turn prompt 覆盖当前 instruction；无结构 state（无活动 grant）时原
+    /// fresh builder 分支逐字段保持（B2d 同 turn 复验语义）。
+    ///
+    /// 分支判据是 durable 聚合状态（engine 冻结权威），不是调用方参数：
+    /// - 活动 grant：必须携冻结件并逐身份精确 join——grant.prompt_ref/
+    ///   prompt_digest == frozen 同名身份（SG4a claim 绑定）、frozen 自身
+    ///   经 `adjudicate_provider_budget` fail-closed（缺 ref／digest 不绑定
+    ///   内容／超硬限）、当前候选 hash == grant.failing_source_hash（claim
+    ///   绑定的失败候选＝合法中间 hash，允许不同于原 turn.source_hash，
+    ///   不借旧 turn 权限修订漂移候选）。全部 join 失败都在任何 turn
+    ///   CAS／组装落账之前以稳定码拒绝（零 delivery、零 provider start）；
+    ///   通过后复用 `assemble_sc_revision_delivery` 现有运输路径交付冻结
+    ///   全文（复用 build_sc_manual_revision_prompt 路径，无新 run kind）。
+    /// - 无活动 grant（含无聚合状态）：原 fresh builder 逐字段不变。
+    /// - 活动 grant 绑定其它 turn/command：fail-closed 拒绝，不回落原
+    ///   builder（防复造原 turn prompt 覆盖另一授权窗口的当前 instruction）。
+    ///
+    /// 尚未接线生产 caller（SG6a.2 handler／SG6b recovery 消费）：本包只
+    /// 落 delivery 接口，不发布自动能力。
+    #[allow(dead_code)]
+    pub(crate) fn build_sc_revision_delivery_for_resume(
+        &self,
+        command_id: &str,
+        turn: &crate::product::models::HumanGateTurn,
+        frozen: Option<&super::prompts::FrozenStructuralPrompt>,
+    ) -> Result<String, String> {
+        let store = self
+            .lifecycle_store
+            .as_ref()
+            .ok_or_else(|| "lifecycle_store unavailable".to_string())?;
+        let record = store
+            .get_workspace_session(&self.session.session_id)
+            .map_err(|error| error.to_string())?;
+        let Some(grant) = record
+            .structural_governance_state
+            .as_ref()
+            .and_then(|state| state.current_grant.as_ref())
+        else {
+            // 无结构授权窗口：原 fresh builder 分支（逐字段不变）。
+            return self.build_sc_manual_revision_prompt_for_fresh_turn(turn);
+        };
+
+        // 活动 grant 面的精确 join（全部先于任何 turn CAS／组装落账）。
+        match grant.turn_id.as_deref() {
+            Some(grant_turn_id) if grant_turn_id == turn.turn_id => {}
+            Some(grant_turn_id) => {
+                return Err(format!(
+                    "STRUCTURAL_REVISION_DELIVERY_GRANT_TURN_MISMATCH: structural grant is bound to turn {grant_turn_id} but resume carries turn {}; refusing to deliver a revision prompt across an unjoined grant",
+                    turn.turn_id
+                ));
+            }
+            None => {
+                return Err(
+                    "STRUCTURAL_REVISION_DELIVERY_GRANT_TURN_MISMATCH: active structural grant has no bound turn; refusing to deliver a revision prompt across an unjoined grant"
+                        .to_string(),
+                );
+            }
+        }
+        if let Some(grant_command_id) = grant.command_id.as_deref()
+            && grant_command_id != turn.command_id
+        {
+            return Err(format!(
+                "STRUCTURAL_REVISION_DELIVERY_GRANT_TURN_MISMATCH: structural grant is bound to command {grant_command_id} but resume carries command {}; refusing to deliver a revision prompt across an unjoined grant",
+                turn.command_id
+            ));
+        }
+        let Some(frozen) = frozen else {
+            return Err(format!(
+                "STRUCTURAL_REVISION_DELIVERY_PROMPT_IDENTITY_MISMATCH: grant binds prompt ref {} / digest {} but no frozen structural prompt was supplied; delivery must read the frozen identity, not reassemble the original turn prompt",
+                grant.prompt_ref.as_deref().unwrap_or("<missing>"),
+                grant.prompt_digest.as_deref().unwrap_or("<missing>"),
+            ));
+        };
+        // provider 预算 fail-closed（SG5.2 裁决：缺 ref／digest 不绑定内容／
+        // 超硬限——Operational，不驱 author、零 delivery/start）。
+        let budget = super::prompts::sc_provider_input_budget(&self.session.author_provider);
+        if let Err(rejection) = frozen.adjudicate_provider_budget(&budget) {
+            return Err(render_structural_prompt_rejection(&rejection));
+        }
+        if grant.prompt_ref.as_deref() != Some(frozen.prompt_ref.as_str())
+            || grant.prompt_digest.as_deref() != Some(frozen.prompt_digest.as_str())
+        {
+            return Err(format!(
+                "STRUCTURAL_REVISION_DELIVERY_PROMPT_IDENTITY_MISMATCH: grant binds prompt ref {} / digest {} but frozen prompt carries ref {} / digest {}; refusing to deliver across an unbound prompt identity",
+                grant.prompt_ref.as_deref().unwrap_or("<missing>"),
+                grant.prompt_digest.as_deref().unwrap_or("<missing>"),
+                frozen.prompt_ref,
+                frozen.prompt_digest,
+            ));
+        }
+
+        // 候选精确 join：claim 绑定的失败候选＝合法中间 hash（允许不同于
+        // 原 turn.source_hash）；grant 未绑定（旧记录）时回落原
+        // turn.source_hash 口径。空 hash（legacy 记录）不可判定，同码
+        // fail-closed（先例 B2d）。
+        use sha2::Digest;
+        let candidate_markdown = self.current_revision_candidate_markdown().ok_or_else(|| {
+            "HUMAN_GATE_REVISION_CANDIDATE_MISSING: current candidate markdown is required"
+                .to_string()
+        })?;
+        let current_hash = hex::encode(sha2::Sha256::digest(candidate_markdown.as_bytes()));
+        let expected_hash = grant
+            .failing_source_hash
+            .as_deref()
+            .filter(|hash| !hash.is_empty())
+            .unwrap_or(turn.source_hash.as_str());
+        if expected_hash.is_empty()
+            || current_hash != expected_hash
+            || !frozen.full_prompt.contains(&candidate_markdown)
+        {
+            return Err(format!(
+                "STRUCTURAL_REVISION_DELIVERY_CANDIDATE_DRIFTED: grant binds failing source sha256:{expected_hash} but the current candidate is sha256:{current_hash}; the frozen prompt no longer matches its business candidate"
+            ));
+        }
+
+        // 交付冻结全文：复用现完整组装/传输路径（inline/分块 artifact 落
+        // 账口径与 C2 Task 11 一致，无新 run kind）。
+        match self.assemble_sc_revision_delivery(command_id, frozen.full_prompt.clone()) {
+            Ok(delivered) => Ok(delivered),
+            Err((code, reason)) => Err(format!("{code}: {reason}")),
+        }
     }
 
     /// B2d（Task 5.6，设计 §5.3 sc_manual_revision 行）：显式 fresh 的同
@@ -91,21 +221,10 @@ impl super::WorkspaceEngine {
     ) -> Result<String, String> {
         use sha2::Digest;
 
-        let candidate_markdown = self
-            .session
-            .artifact
-            .as_ref()
-            .and_then(|artifact| artifact.markdown())
-            .or_else(|| {
-                self.artifact_versions
-                    .iter()
-                    .rev()
-                    .find_map(|version| version.payload.markdown())
-            })
-            .ok_or_else(|| {
-                "HUMAN_GATE_REVISION_CANDIDATE_MISSING: current candidate markdown is required"
-                    .to_string()
-            })?;
+        let candidate_markdown = self.current_revision_candidate_markdown().ok_or_else(|| {
+            "HUMAN_GATE_REVISION_CANDIDATE_MISSING: current candidate markdown is required"
+                .to_string()
+        })?;
         if turn.source_hash.is_empty() {
             return Err(
                 "HUMAN_GATE_REVISION_CANDIDATE_DRIFTED: turn carries no candidate hash (legacy record); cannot re-assemble a fresh revision prompt"
@@ -291,6 +410,25 @@ impl super::WorkspaceEngine {
             && let Err(error) = std::fs::remove_file(&path)
         {
             tracing::warn!(%error, "remove sc revision blocked record failed");
+        }
+    }
+}
+
+/// SG5.3：SG5.2 `adjudicate_provider_budget` 拒绝（单 Operational 失败）→
+/// "稳定码: cause" 字符串（与本文件既有错误口径一致；无稳定码时
+/// fail-closed 泛化拒收，不吞错）。
+fn render_structural_prompt_rejection(
+    set: &crate::product::planning_failure::PlanningFailureSet,
+) -> String {
+    use crate::product::planning_failure::{PlanningFailure, PlanningFailureKind};
+    match set.failures.first() {
+        Some(PlanningFailure {
+            kind: PlanningFailureKind::Operational { stable_code, cause },
+            ..
+        }) => format!("{stable_code}: {cause}"),
+        _ => {
+            "STRUCTURAL_REVISION_PROMPT_REJECTED: adjudication returned no stable operational code"
+                .to_string()
         }
     }
 }
