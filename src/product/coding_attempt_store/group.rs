@@ -569,6 +569,16 @@ impl super::CodingAttemptStore {
         let Some(run) = run_store.matching_first_ready_run(&stored)? else {
             return Ok(None);
         };
+        // 相位门（审查修复轮 P1）：Invalidated run 不构成暂停身份——否则
+        // attempt 先写成 Blocked+CodeReview，随后 run 补记 Paused 必以
+        // coding_plan_run_invalidated 失败，留下 attempt 自身校验器拒绝的
+        // 半执行态且不可自愈。失效授权只允许 None 退出，attempt 零触碰。
+        if matches!(
+            run.phase,
+            crate::product::coding_plan_run::CodingPlanRunPhase::Invalidated
+        ) {
+            return Ok(None);
+        }
         let Some(selection) = run.selection.clone() else {
             return Ok(None);
         };

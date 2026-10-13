@@ -21,8 +21,8 @@ use crate::product::coding_attempt_store::{CodingAttemptStore, path_is_regular_f
 use crate::product::coding_models::{
     CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionUnitStatus,
 };
-use crate::product::entity_deletion_store::DeletionEntityKind;
-use crate::product::entity_operation_store::EntityDeletionLease;
+use crate::product::entity_deletion_store::{DeletionEntityKind, EntityDeletionStore, EntityScope};
+use crate::product::entity_operation_store::{EntityDeletionLease, EntityOperationStore};
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::models::IssueWorkItemPlanStatus;
@@ -224,6 +224,32 @@ impl CodingPlanRunStore {
         Ok(())
     }
 
+    fn plan_scope(
+        project_id: &str,
+        issue_id: &str,
+        plan_id: &str,
+    ) -> Result<EntityScope, ProductStoreError> {
+        let scope = EntityScope::new(project_id, issue_id, DeletionEntityKind::Plan, plan_id);
+        scope.validate()?;
+        Ok(scope)
+    }
+
+    /// plan §0.2 owner 写准入（同 `AdvanceStore::with_plan_live_write` 惯例，
+    /// 审查修复轮 P2）：scope try-shared 外层——争用/墓碑一律立即
+    /// `Conflict{entity_deleting}`（零阻塞等待），再进 run 文件锁内层；锁内
+    /// 重读/CAS 语义不变。迟到 coding-start 在删除窗口被拒，不重建可重放
+    /// 孤儿 run（REQ-CS-07）。
+    fn with_plan_live_write<T>(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        plan_id: &str,
+        operation: impl FnOnce() -> Result<T, ProductStoreError>,
+    ) -> Result<T, ProductStoreError> {
+        let scope = Self::plan_scope(project_id, issue_id, plan_id)?;
+        EntityOperationStore::new(self.paths.clone()).with_live_write(&scope, operation)
+    }
+
     /// REQ-CS-02：显式授权冻结入口。confirmed/当前 authoritative 身份校验并
     /// 冻结 graph；同 plan/revision 第二 command 返回原 run（原 command/
     /// selection 不漂移）；异 revision/graph 拒绝；Paused/Invalidated 不再
@@ -246,92 +272,95 @@ impl CodingPlanRunStore {
             validate_relative_id(id)?;
         }
         let run_path = self.run_path(project_id, issue_id, plan_id)?;
-        with_exclusive_lock(&run_path, || {
-            // ① confirmed 权威身份。
-            let lifecycle = LifecycleStore::new(self.paths.clone());
-            let plan = lifecycle.get_issue_work_item_plan(project_id, issue_id, plan_id)?;
-            if plan.status != IssueWorkItemPlanStatus::Confirmed {
-                return Err(ProductStoreError::Conflict {
-                    kind: "coding_plan_run_plan_not_confirmed",
-                    id: plan_id.to_string(),
-                });
-            }
-            // ② 当前 authoritative revision（无在途 amendment）。
-            let revision_store = WorkItemRevisionStore::new(self.paths.clone());
-            let lineage = revision_store.get_plan_lineage(project_id, issue_id, plan_id)?;
-            let active_revision_id = lineage.active_revision_id.clone().ok_or_else(|| {
-                ProductStoreError::InvalidRecord {
-                    kind: "coding_plan_run_plan_revision",
-                    reason: "active plan revision is missing".to_string(),
+        self.with_plan_live_write(project_id, issue_id, plan_id, || {
+            with_exclusive_lock(&run_path, || {
+                // ① confirmed 权威身份。
+                let lifecycle = LifecycleStore::new(self.paths.clone());
+                let plan = lifecycle.get_issue_work_item_plan(project_id, issue_id, plan_id)?;
+                if plan.status != IssueWorkItemPlanStatus::Confirmed {
+                    return Err(ProductStoreError::Conflict {
+                        kind: "coding_plan_run_plan_not_confirmed",
+                        id: plan_id.to_string(),
+                    });
                 }
-            })?;
-            if lineage.active_amendment_id.is_some() {
-                return Err(ProductStoreError::Conflict {
-                    kind: "coding_plan_run_active_amendment",
-                    id: plan_id.to_string(),
-                });
-            }
-            if active_revision_id != expected_plan_revision_id {
-                return Err(ProductStoreError::IdentityMismatch {
-                    kind: "coding_plan_run_revision",
-                    id: expected_plan_revision_id.to_string(),
-                });
-            }
-            // ③ 冻结 graph（同源权威绑定校验全图）。
-            let attempt_store = CodingAttemptStore::new(self.paths.clone());
-            let authoritative = attempt_store
-                .resolve_authoritative_group_plan_binding_for_revision(
-                    project_id,
-                    issue_id,
-                    plan_id,
-                    &active_revision_id,
-                )?;
-            // ④ 幂等：已有 run 按冻结身份返回，不写第二 claim 账本。
-            if path_is_regular_file(&run_path)? {
-                let stored = self.read_run(&run_path, project_id, issue_id, plan_id)?;
-                if stored.bound_plan_revision_id != expected_plan_revision_id {
+                // ② 当前 authoritative revision（无在途 amendment）。
+                let revision_store = WorkItemRevisionStore::new(self.paths.clone());
+                let lineage = revision_store.get_plan_lineage(project_id, issue_id, plan_id)?;
+                let active_revision_id = lineage.active_revision_id.clone().ok_or_else(|| {
+                    ProductStoreError::InvalidRecord {
+                        kind: "coding_plan_run_plan_revision",
+                        reason: "active plan revision is missing".to_string(),
+                    }
+                })?;
+                if lineage.active_amendment_id.is_some() {
+                    return Err(ProductStoreError::Conflict {
+                        kind: "coding_plan_run_active_amendment",
+                        id: plan_id.to_string(),
+                    });
+                }
+                if active_revision_id != expected_plan_revision_id {
                     return Err(ProductStoreError::IdentityMismatch {
                         kind: "coding_plan_run_revision",
                         id: expected_plan_revision_id.to_string(),
                     });
                 }
-                if stored.dependency_graph_revision_id != authoritative.dependency_graph_revision_id
-                {
-                    return Err(ProductStoreError::IdentityMismatch {
-                        kind: "coding_plan_run_graph",
-                        id: authoritative.dependency_graph_revision_id,
-                    });
+                // ③ 冻结 graph（同源权威绑定校验全图）。
+                let attempt_store = CodingAttemptStore::new(self.paths.clone());
+                let authoritative = attempt_store
+                    .resolve_authoritative_group_plan_binding_for_revision(
+                        project_id,
+                        issue_id,
+                        plan_id,
+                        &active_revision_id,
+                    )?;
+                // ④ 幂等：已有 run 按冻结身份返回，不写第二 claim 账本。
+                if path_is_regular_file(&run_path)? {
+                    let stored = self.read_run(&run_path, project_id, issue_id, plan_id)?;
+                    if stored.bound_plan_revision_id != expected_plan_revision_id {
+                        return Err(ProductStoreError::IdentityMismatch {
+                            kind: "coding_plan_run_revision",
+                            id: expected_plan_revision_id.to_string(),
+                        });
+                    }
+                    if stored.dependency_graph_revision_id
+                        != authoritative.dependency_graph_revision_id
+                    {
+                        return Err(ProductStoreError::IdentityMismatch {
+                            kind: "coding_plan_run_graph",
+                            id: authoritative.dependency_graph_revision_id,
+                        });
+                    }
+                    if matches!(
+                        stored.phase,
+                        CodingPlanRunPhase::Paused | CodingPlanRunPhase::Invalidated
+                    ) {
+                        return Err(ProductStoreError::Conflict {
+                            kind: "coding_plan_run_not_active",
+                            id: stored.command_id.clone(),
+                        });
+                    }
+                    return Ok(stored);
                 }
-                if matches!(
-                    stored.phase,
-                    CodingPlanRunPhase::Paused | CodingPlanRunPhase::Invalidated
-                ) {
-                    return Err(ProductStoreError::Conflict {
-                        kind: "coding_plan_run_not_active",
-                        id: stored.command_id.clone(),
-                    });
-                }
-                return Ok(stored);
-            }
-            let now = Utc::now().to_rfc3339();
-            let run = CodingPlanRun {
-                project_id: project_id.to_string(),
-                issue_id: issue_id.to_string(),
-                plan_id: plan_id.to_string(),
-                command_id: command_id.to_string(),
-                bound_plan_revision_id: expected_plan_revision_id.to_string(),
-                dependency_graph_revision_id: authoritative.dependency_graph_revision_id,
-                target_attempts: Vec::new(),
-                mode: PLAN_CODING_MODE_FIRST_READY_UNIT.to_string(),
-                selection: None,
-                phase: CodingPlanRunPhase::Prepared,
-                start_outcome: None,
-                pause_reason: None,
-                created_at: now.clone(),
-                updated_at: now,
-            };
-            write_json(&run_path, &run)?;
-            Ok(run)
+                let now = Utc::now().to_rfc3339();
+                let run = CodingPlanRun {
+                    project_id: project_id.to_string(),
+                    issue_id: issue_id.to_string(),
+                    plan_id: plan_id.to_string(),
+                    command_id: command_id.to_string(),
+                    bound_plan_revision_id: expected_plan_revision_id.to_string(),
+                    dependency_graph_revision_id: authoritative.dependency_graph_revision_id,
+                    target_attempts: Vec::new(),
+                    mode: PLAN_CODING_MODE_FIRST_READY_UNIT.to_string(),
+                    selection: None,
+                    phase: CodingPlanRunPhase::Prepared,
+                    start_outcome: None,
+                    pause_reason: None,
+                    created_at: now.clone(),
+                    updated_at: now,
+                };
+                write_json(&run_path, &run)?;
+                Ok(run)
+            })
         })
     }
 
@@ -362,113 +391,117 @@ impl CodingPlanRunStore {
             }
         }
         let run_path = self.run_path(&run.project_id, &run.issue_id, &run.plan_id)?;
-        with_exclusive_lock(&run_path, || {
-            let stored = self.load_run(&run_path, &run.project_id, &run.issue_id, &run.plan_id)?;
-            self.verify_same_identity(&stored, run)?;
-            if matches!(stored.phase, CodingPlanRunPhase::Invalidated) {
-                return Err(ProductStoreError::Conflict {
-                    kind: "coding_plan_run_invalidated",
-                    id: run.plan_id.clone(),
-                });
-            }
-            if matches!(stored.phase, CodingPlanRunPhase::Paused) {
-                return Err(ProductStoreError::Conflict {
-                    kind: "coding_plan_run_not_active",
-                    id: run.plan_id.clone(),
-                });
-            }
-            let attempt_store = CodingAttemptStore::new(self.paths.clone());
-            match stored.phase {
-                CodingPlanRunPhase::Prepared => {
-                    // 首次绑定：逐 attempt 核 plan 归属、target 桶与未首启状态
-                    // （REQ-CS-02：不收养 Running/Waiting/Blocked/Failed/终态集合）。
-                    for binding in bindings {
-                        let attempt = attempt_store.get_attempt(
-                            &run.project_id,
-                            &run.issue_id,
-                            &binding.attempt_id,
-                        )?;
-                        if attempt.work_item_group_id.as_deref() != Some(run.plan_id.as_str()) {
-                            return Err(ProductStoreError::IdentityMismatch {
-                                kind: "coding_plan_run_attempt_binding",
-                                id: binding.attempt_id.clone(),
-                            });
-                        }
-                        let attempt_target = attempt
-                            .target_snapshot
-                            .as_ref()
-                            .map(|snapshot| snapshot.logical_repository_id.0.to_string());
-                        if attempt_target.as_deref() != Some(binding.target_repository_id.as_str())
-                        {
-                            return Err(ProductStoreError::IdentityMismatch {
-                                kind: "coding_plan_run_attempt_target",
-                                id: binding.attempt_id.clone(),
-                            });
-                        }
-                        if attempt.status != CodingAttemptStatus::Created {
-                            return Err(ProductStoreError::Conflict {
-                                kind: "coding_plan_run_set_not_first_start",
-                                id: binding.attempt_id.clone(),
-                            });
-                        }
-                    }
-                    if let Some(selection) = &selection {
-                        self.verify_selection_locked(run, bindings, selection, &attempt_store)?;
-                    }
-                    let mut updated = stored.clone();
-                    updated.target_attempts = bindings.to_vec();
-                    updated.selection = selection;
-                    updated.phase = CodingPlanRunPhase::ReadyBound;
-                    updated.updated_at = Utc::now().to_rfc3339();
-                    write_json(&run_path, &updated)?;
-                    Ok(updated)
+        self.with_plan_live_write(&run.project_id, &run.issue_id, &run.plan_id, || {
+            with_exclusive_lock(&run_path, || {
+                let stored =
+                    self.load_run(&run_path, &run.project_id, &run.issue_id, &run.plan_id)?;
+                self.verify_same_identity(&stored, run)?;
+                if matches!(stored.phase, CodingPlanRunPhase::Invalidated) {
+                    return Err(ProductStoreError::Conflict {
+                        kind: "coding_plan_run_invalidated",
+                        id: run.plan_id.clone(),
+                    });
                 }
-                CodingPlanRunPhase::ReadyBound => {
-                    if stored.target_attempts != bindings {
-                        return Err(ProductStoreError::IdentityMismatch {
-                            kind: "coding_plan_run_target_attempts",
-                            id: run.plan_id.clone(),
-                        });
-                    }
-                    if stored.selection.is_some() && stored.selection != selection {
-                        return Err(ProductStoreError::IdentityMismatch {
-                            kind: "coding_plan_run_selection",
-                            id: run.plan_id.clone(),
-                        });
-                    }
-                    if let Some(selection) = &selection {
-                        self.verify_selection_locked(run, bindings, selection, &attempt_store)?;
-                    }
-                    if stored.selection == selection {
-                        return Ok(stored);
-                    }
-                    let mut updated = stored.clone();
-                    updated.selection = selection;
-                    updated.updated_at = Utc::now().to_rfc3339();
-                    write_json(&run_path, &updated)?;
-                    Ok(updated)
-                }
-                // 中断窗口重放：读同一冻结集合/selection（不重捕、不重发）。
-                CodingPlanRunPhase::StartRequested
-                | CodingPlanRunPhase::Started
-                | CodingPlanRunPhase::AlreadyStarted
-                | CodingPlanRunPhase::NeedsHuman => {
-                    if stored.target_attempts != bindings || stored.selection != selection {
-                        return Err(ProductStoreError::IdentityMismatch {
-                            kind: "coding_plan_run_replay_drift",
-                            id: run.plan_id.clone(),
-                        });
-                    }
-                    Ok(stored)
-                }
-                CodingPlanRunPhase::Paused | CodingPlanRunPhase::Invalidated => {
-                    // 上面已按 not_active/invalidated 拒绝，此处不可达。
-                    Err(ProductStoreError::Conflict {
+                if matches!(stored.phase, CodingPlanRunPhase::Paused) {
+                    return Err(ProductStoreError::Conflict {
                         kind: "coding_plan_run_not_active",
                         id: run.plan_id.clone(),
-                    })
+                    });
                 }
-            }
+                let attempt_store = CodingAttemptStore::new(self.paths.clone());
+                match stored.phase {
+                    CodingPlanRunPhase::Prepared => {
+                        // 首次绑定：逐 attempt 核 plan 归属、target 桶与未首启状态
+                        // （REQ-CS-02：不收养 Running/Waiting/Blocked/Failed/终态集合）。
+                        for binding in bindings {
+                            let attempt = attempt_store.get_attempt(
+                                &run.project_id,
+                                &run.issue_id,
+                                &binding.attempt_id,
+                            )?;
+                            if attempt.work_item_group_id.as_deref() != Some(run.plan_id.as_str()) {
+                                return Err(ProductStoreError::IdentityMismatch {
+                                    kind: "coding_plan_run_attempt_binding",
+                                    id: binding.attempt_id.clone(),
+                                });
+                            }
+                            let attempt_target = attempt
+                                .target_snapshot
+                                .as_ref()
+                                .map(|snapshot| snapshot.logical_repository_id.0.to_string());
+                            if attempt_target.as_deref()
+                                != Some(binding.target_repository_id.as_str())
+                            {
+                                return Err(ProductStoreError::IdentityMismatch {
+                                    kind: "coding_plan_run_attempt_target",
+                                    id: binding.attempt_id.clone(),
+                                });
+                            }
+                            if attempt.status != CodingAttemptStatus::Created {
+                                return Err(ProductStoreError::Conflict {
+                                    kind: "coding_plan_run_set_not_first_start",
+                                    id: binding.attempt_id.clone(),
+                                });
+                            }
+                        }
+                        if let Some(selection) = &selection {
+                            self.verify_selection_locked(run, bindings, selection, &attempt_store)?;
+                        }
+                        let mut updated = stored.clone();
+                        updated.target_attempts = bindings.to_vec();
+                        updated.selection = selection;
+                        updated.phase = CodingPlanRunPhase::ReadyBound;
+                        updated.updated_at = Utc::now().to_rfc3339();
+                        write_json(&run_path, &updated)?;
+                        Ok(updated)
+                    }
+                    CodingPlanRunPhase::ReadyBound => {
+                        if stored.target_attempts != bindings {
+                            return Err(ProductStoreError::IdentityMismatch {
+                                kind: "coding_plan_run_target_attempts",
+                                id: run.plan_id.clone(),
+                            });
+                        }
+                        if stored.selection.is_some() && stored.selection != selection {
+                            return Err(ProductStoreError::IdentityMismatch {
+                                kind: "coding_plan_run_selection",
+                                id: run.plan_id.clone(),
+                            });
+                        }
+                        if let Some(selection) = &selection {
+                            self.verify_selection_locked(run, bindings, selection, &attempt_store)?;
+                        }
+                        if stored.selection == selection {
+                            return Ok(stored);
+                        }
+                        let mut updated = stored.clone();
+                        updated.selection = selection;
+                        updated.updated_at = Utc::now().to_rfc3339();
+                        write_json(&run_path, &updated)?;
+                        Ok(updated)
+                    }
+                    // 中断窗口重放：读同一冻结集合/selection（不重捕、不重发）。
+                    CodingPlanRunPhase::StartRequested
+                    | CodingPlanRunPhase::Started
+                    | CodingPlanRunPhase::AlreadyStarted
+                    | CodingPlanRunPhase::NeedsHuman => {
+                        if stored.target_attempts != bindings || stored.selection != selection {
+                            return Err(ProductStoreError::IdentityMismatch {
+                                kind: "coding_plan_run_replay_drift",
+                                id: run.plan_id.clone(),
+                            });
+                        }
+                        Ok(stored)
+                    }
+                    CodingPlanRunPhase::Paused | CodingPlanRunPhase::Invalidated => {
+                        // 上面已按 not_active/invalidated 拒绝，此处不可达。
+                        Err(ProductStoreError::Conflict {
+                            kind: "coding_plan_run_not_active",
+                            id: run.plan_id.clone(),
+                        })
+                    }
+                }
+            })
         })
     }
 
@@ -556,42 +589,45 @@ impl CodingPlanRunStore {
         run: &CodingPlanRun,
     ) -> Result<CodingPlanRun, ProductStoreError> {
         let run_path = self.run_path(&run.project_id, &run.issue_id, &run.plan_id)?;
-        with_exclusive_lock(&run_path, || {
-            let stored = self.load_run(&run_path, &run.project_id, &run.issue_id, &run.plan_id)?;
-            self.verify_same_identity(&stored, run)?;
-            if matches!(stored.phase, CodingPlanRunPhase::Invalidated) {
-                return Err(ProductStoreError::Conflict {
-                    kind: "coding_plan_run_invalidated",
-                    id: run.plan_id.clone(),
-                });
-            }
-            if matches!(stored.phase, CodingPlanRunPhase::Paused) {
-                return Err(ProductStoreError::Conflict {
-                    kind: "coding_plan_run_not_active",
-                    id: run.plan_id.clone(),
-                });
-            }
-            if matches!(
-                stored.phase,
-                CodingPlanRunPhase::StartRequested
-                    | CodingPlanRunPhase::Started
-                    | CodingPlanRunPhase::AlreadyStarted
-                    | CodingPlanRunPhase::NeedsHuman
-            ) {
-                return Ok(stored);
-            }
-            // ReadyBound：必须有冻结 selection。
-            if stored.selection.is_none() {
-                return Err(ProductStoreError::Conflict {
-                    kind: "coding_plan_run_selection_missing",
-                    id: run.plan_id.clone(),
-                });
-            }
-            let mut updated = stored.clone();
-            updated.phase = CodingPlanRunPhase::StartRequested;
-            updated.updated_at = Utc::now().to_rfc3339();
-            write_json(&run_path, &updated)?;
-            Ok(updated)
+        self.with_plan_live_write(&run.project_id, &run.issue_id, &run.plan_id, || {
+            with_exclusive_lock(&run_path, || {
+                let stored =
+                    self.load_run(&run_path, &run.project_id, &run.issue_id, &run.plan_id)?;
+                self.verify_same_identity(&stored, run)?;
+                if matches!(stored.phase, CodingPlanRunPhase::Invalidated) {
+                    return Err(ProductStoreError::Conflict {
+                        kind: "coding_plan_run_invalidated",
+                        id: run.plan_id.clone(),
+                    });
+                }
+                if matches!(stored.phase, CodingPlanRunPhase::Paused) {
+                    return Err(ProductStoreError::Conflict {
+                        kind: "coding_plan_run_not_active",
+                        id: run.plan_id.clone(),
+                    });
+                }
+                if matches!(
+                    stored.phase,
+                    CodingPlanRunPhase::StartRequested
+                        | CodingPlanRunPhase::Started
+                        | CodingPlanRunPhase::AlreadyStarted
+                        | CodingPlanRunPhase::NeedsHuman
+                ) {
+                    return Ok(stored);
+                }
+                // ReadyBound：必须有冻结 selection。
+                if stored.selection.is_none() {
+                    return Err(ProductStoreError::Conflict {
+                        kind: "coding_plan_run_selection_missing",
+                        id: run.plan_id.clone(),
+                    });
+                }
+                let mut updated = stored.clone();
+                updated.phase = CodingPlanRunPhase::StartRequested;
+                updated.updated_at = Utc::now().to_rfc3339();
+                write_json(&run_path, &updated)?;
+                Ok(updated)
+            })
         })
     }
 
@@ -606,47 +642,52 @@ impl CodingPlanRunStore {
             validate_relative_id(attempt_id)?;
         }
         let run_path = self.run_path(&run.project_id, &run.issue_id, &run.plan_id)?;
-        with_exclusive_lock(&run_path, || {
-            let stored = self.load_run(&run_path, &run.project_id, &run.issue_id, &run.plan_id)?;
-            self.verify_same_identity(&stored, run)?;
-            if matches!(stored.phase, CodingPlanRunPhase::Invalidated) {
-                return Err(ProductStoreError::Conflict {
-                    kind: "coding_plan_run_invalidated",
-                    id: run.plan_id.clone(),
-                });
-            }
-            if matches!(stored.phase, CodingPlanRunPhase::Paused) {
-                return Err(ProductStoreError::Conflict {
-                    kind: "coding_plan_run_not_active",
-                    id: run.plan_id.clone(),
-                });
-            }
-            if stored.start_outcome.as_ref() == Some(&outcome) {
-                return Ok(stored);
-            }
-            if stored.start_outcome.is_some() {
-                return Err(ProductStoreError::Conflict {
-                    kind: "coding_plan_run_outcome_frozen",
-                    id: run.plan_id.clone(),
-                });
-            }
-            if stored.phase != CodingPlanRunPhase::StartRequested {
-                return Err(ProductStoreError::Conflict {
-                    kind: "coding_plan_run_phase",
-                    id: format!("{:?}", stored.phase),
-                });
-            }
-            let phase = match &outcome {
-                CodingPlanStartOutcome::Started { .. } => CodingPlanRunPhase::Started,
-                CodingPlanStartOutcome::AlreadyStarted { .. } => CodingPlanRunPhase::AlreadyStarted,
-                CodingPlanStartOutcome::NeedsHuman { .. } => CodingPlanRunPhase::NeedsHuman,
-            };
-            let mut updated = stored.clone();
-            updated.phase = phase;
-            updated.start_outcome = Some(outcome);
-            updated.updated_at = Utc::now().to_rfc3339();
-            write_json(&run_path, &updated)?;
-            Ok(updated)
+        self.with_plan_live_write(&run.project_id, &run.issue_id, &run.plan_id, || {
+            with_exclusive_lock(&run_path, || {
+                let stored =
+                    self.load_run(&run_path, &run.project_id, &run.issue_id, &run.plan_id)?;
+                self.verify_same_identity(&stored, run)?;
+                if matches!(stored.phase, CodingPlanRunPhase::Invalidated) {
+                    return Err(ProductStoreError::Conflict {
+                        kind: "coding_plan_run_invalidated",
+                        id: run.plan_id.clone(),
+                    });
+                }
+                if matches!(stored.phase, CodingPlanRunPhase::Paused) {
+                    return Err(ProductStoreError::Conflict {
+                        kind: "coding_plan_run_not_active",
+                        id: run.plan_id.clone(),
+                    });
+                }
+                if stored.start_outcome.as_ref() == Some(&outcome) {
+                    return Ok(stored);
+                }
+                if stored.start_outcome.is_some() {
+                    return Err(ProductStoreError::Conflict {
+                        kind: "coding_plan_run_outcome_frozen",
+                        id: run.plan_id.clone(),
+                    });
+                }
+                if stored.phase != CodingPlanRunPhase::StartRequested {
+                    return Err(ProductStoreError::Conflict {
+                        kind: "coding_plan_run_phase",
+                        id: format!("{:?}", stored.phase),
+                    });
+                }
+                let phase = match &outcome {
+                    CodingPlanStartOutcome::Started { .. } => CodingPlanRunPhase::Started,
+                    CodingPlanStartOutcome::AlreadyStarted { .. } => {
+                        CodingPlanRunPhase::AlreadyStarted
+                    }
+                    CodingPlanStartOutcome::NeedsHuman { .. } => CodingPlanRunPhase::NeedsHuman,
+                };
+                let mut updated = stored.clone();
+                updated.phase = phase;
+                updated.start_outcome = Some(outcome);
+                updated.updated_at = Utc::now().to_rfc3339();
+                write_json(&run_path, &updated)?;
+                Ok(updated)
+            })
         })
     }
 
@@ -693,22 +734,25 @@ impl CodingPlanRunStore {
             return Ok(());
         };
         let run_path = self.run_path(&run.project_id, &run.issue_id, &run.plan_id)?;
-        with_exclusive_lock(&run_path, || {
-            let stored = self.load_run(&run_path, &run.project_id, &run.issue_id, &run.plan_id)?;
-            if stored.project_id != attempt.project_id || stored.issue_id != attempt.issue_id {
-                return Err(ProductStoreError::IdentityMismatch {
-                    kind: "coding_plan_run",
-                    id: run.plan_id.clone(),
-                });
-            }
-            if matches!(stored.phase, CodingPlanRunPhase::Invalidated) {
-                return Ok(());
-            }
-            let mut updated = stored.clone();
-            updated.phase = CodingPlanRunPhase::Invalidated;
-            updated.updated_at = Utc::now().to_rfc3339();
-            write_json(&run_path, &updated)?;
-            Ok(())
+        self.with_plan_live_write(&run.project_id, &run.issue_id, &run.plan_id, || {
+            with_exclusive_lock(&run_path, || {
+                let stored =
+                    self.load_run(&run_path, &run.project_id, &run.issue_id, &run.plan_id)?;
+                if stored.project_id != attempt.project_id || stored.issue_id != attempt.issue_id {
+                    return Err(ProductStoreError::IdentityMismatch {
+                        kind: "coding_plan_run",
+                        id: run.plan_id.clone(),
+                    });
+                }
+                if matches!(stored.phase, CodingPlanRunPhase::Invalidated) {
+                    return Ok(());
+                }
+                let mut updated = stored.clone();
+                updated.phase = CodingPlanRunPhase::Invalidated;
+                updated.updated_at = Utc::now().to_rfc3339();
+                write_json(&run_path, &updated)?;
+                Ok(())
+            })
         })
     }
 
@@ -716,30 +760,38 @@ impl CodingPlanRunStore {
     /// matching completed selection 重放恢复。
     pub fn mark_paused(&self, run: &CodingPlanRun) -> Result<CodingPlanRun, ProductStoreError> {
         let run_path = self.run_path(&run.project_id, &run.issue_id, &run.plan_id)?;
-        with_exclusive_lock(&run_path, || {
-            let stored = self.load_run(&run_path, &run.project_id, &run.issue_id, &run.plan_id)?;
-            self.verify_same_identity(&stored, run)?;
-            match stored.phase {
-                CodingPlanRunPhase::Paused => Ok(stored),
-                CodingPlanRunPhase::Invalidated => Err(ProductStoreError::Conflict {
-                    kind: "coding_plan_run_invalidated",
-                    id: run.plan_id.clone(),
-                }),
-                _ => {
-                    let mut updated = stored.clone();
-                    updated.phase = CodingPlanRunPhase::Paused;
-                    updated.pause_reason = Some(PLAN_CODING_CONTINUATION_NOT_ENABLED.to_string());
-                    updated.updated_at = Utc::now().to_rfc3339();
-                    write_json(&run_path, &updated)?;
-                    Ok(updated)
+        self.with_plan_live_write(&run.project_id, &run.issue_id, &run.plan_id, || {
+            with_exclusive_lock(&run_path, || {
+                let stored =
+                    self.load_run(&run_path, &run.project_id, &run.issue_id, &run.plan_id)?;
+                self.verify_same_identity(&stored, run)?;
+                match stored.phase {
+                    CodingPlanRunPhase::Paused => Ok(stored),
+                    CodingPlanRunPhase::Invalidated => Err(ProductStoreError::Conflict {
+                        kind: "coding_plan_run_invalidated",
+                        id: run.plan_id.clone(),
+                    }),
+                    _ => {
+                        let mut updated = stored.clone();
+                        updated.phase = CodingPlanRunPhase::Paused;
+                        updated.pause_reason =
+                            Some(PLAN_CODING_CONTINUATION_NOT_ENABLED.to_string());
+                        updated.updated_at = Utc::now().to_rfc3339();
+                        write_json(&run_path, &updated)?;
+                        Ok(updated)
+                    }
                 }
-            }
+            })
         })
     }
 
     /// REQ-CS-07：现删除分支的精确 purge。核删除/归属（run 身份必须与
-    /// (project,issue,plan) 全等）；缺失 OK；只有本确定安全无 writer 的删除
-    /// 窗口清 run 锁（不为他处重放 unlink 活锁）。
+    /// (project,issue,plan) 全等）；缺失 OK。run 文件删除恒受 run 锁互斥；
+    /// 锁文件 unlink 仅在 Plan scope 墓碑在位的删除窗口执行——墓碑在位后
+    /// 任何 run writer 都被 `with_plan_live_write` 以 `entity_deleting` 拒，
+    /// 不再有新 writer 进入，unlink 无 inode 双 writer 风险；非窗口调用不
+    /// 清锁（残留锁文件无授权语义，留待真正删除窗口清理，不为他处重放
+    /// unlink 活锁）。
     pub fn purge_plan(
         &self,
         project_id: &str,
@@ -750,20 +802,31 @@ impl CodingPlanRunStore {
             validate_relative_id(id)?;
         }
         let run_path = self.run_path(project_id, issue_id, plan_id)?;
-        if !path_is_regular_file(&run_path)? {
-            return Ok(());
+        if path_is_regular_file(&run_path)? {
+            with_exclusive_lock(&run_path, || {
+                let _ = self.read_run(&run_path, project_id, issue_id, plan_id)?;
+                std::fs::remove_file(&run_path).map_err(|error| {
+                    ProductStoreError::Io(format!("remove {}: {error}", run_path.display()))
+                })
+            })?;
         }
-        let lock_path = self.lock_path(project_id, issue_id, plan_id)?;
-        with_exclusive_lock(&run_path, || {
-            let _ = self.read_run(&run_path, project_id, issue_id, plan_id)?;
-            std::fs::remove_file(&run_path).map_err(|error| {
-                ProductStoreError::Io(format!("remove {}: {error}", run_path.display()))
-            })
-        })?;
-        crate::product::coding_attempt_store::remove_file_if_exists(&lock_path)
+        // run 缺失不短路锁清理：删除窗口重入（run 已清、墓碑在位）仍需
+        // 幂等清锁；无墓碑则保持只读退出（Ok）。
+        let scope = Self::plan_scope(project_id, issue_id, plan_id)?;
+        if EntityDeletionStore::new(self.paths.clone())
+            .get(&scope)?
+            .is_some()
+        {
+            let lock_path = self.lock_path(project_id, issue_id, plan_id)?;
+            return crate::product::coding_attempt_store::remove_file_if_exists(&lock_path);
+        }
+        Ok(())
     }
 
     /// REQ-CS-07/D2.2：持精确 Plan lease 的删除闭包消费；scope 必须是 Plan。
+    /// 租约本身（scope try-exclusive）即安全删除窗口——租约持有期间任何
+    /// run writer 的 try-shared 准入全部 Busy 拒，锁 unlink 在租约保护内
+    /// 强制执行（不依赖墓碑时序）。
     pub fn purge_plan_with_lease(
         &self,
         lease: &EntityDeletionLease,
@@ -776,7 +839,22 @@ impl CodingPlanRunStore {
                 id: scope.entity_id.clone(),
             });
         }
-        self.purge_plan(&scope.project_id, &scope.issue_id, &scope.entity_id)
+        let (project_id, issue_id, plan_id) = (
+            scope.project_id.as_str(),
+            scope.issue_id.as_str(),
+            scope.entity_id.as_str(),
+        );
+        let run_path = self.run_path(project_id, issue_id, plan_id)?;
+        if path_is_regular_file(&run_path)? {
+            with_exclusive_lock(&run_path, || {
+                let _ = self.read_run(&run_path, project_id, issue_id, plan_id)?;
+                std::fs::remove_file(&run_path).map_err(|error| {
+                    ProductStoreError::Io(format!("remove {}: {error}", run_path.display()))
+                })
+            })?;
+        }
+        let lock_path = self.lock_path(project_id, issue_id, plan_id)?;
+        crate::product::coding_attempt_store::remove_file_if_exists(&lock_path)
     }
 
     fn scan_runs_for_attempt(
@@ -1819,7 +1897,7 @@ mod tests {
             .join("coding-plan-runs")
             .join("work_item_plan_other.json");
         write_json(&other_path, &other_run).unwrap();
-
+        // ① 无墓碑窗口 purge：只清 run 文件不清锁（防 inode 双 writer）。
         run_store.purge_plan(PROJECT_ID, ISSUE_ID, PLAN_ID).unwrap();
         assert!(
             run_store
@@ -1839,18 +1917,33 @@ mod tests {
             .issue_root(PROJECT_ID, ISSUE_ID)
             .join("coding-plan-runs")
             .join(format!(".{PLAN_ID}.json.lock"));
-        assert!(
-            !lock_path.exists(),
-            "run lock is cleared in the deletion window"
-        );
-        // 缺失幂等 OK；对缺失 run 的迟到写是 NotFound（不当 None 吞掉）。
-        run_store.purge_plan(PROJECT_ID, ISSUE_ID, PLAN_ID).unwrap();
+        // 对缺失 run 的迟到写是 NotFound（live-write 放行后 run 锁内判缺失，
+        // 不当 None 吞掉）。
         let error = run_store
             .bind_ready(&invalidated, &fixture.bindings, None)
             .unwrap_err();
         assert!(
             matches!(error, ProductStoreError::NotFound { ref kind, .. } if *kind == "coding_plan_run"),
             "missing run must surface NotFound, not None: {error}"
+        );
+        assert!(
+            lock_path.exists(),
+            "purge outside the deletion window keeps the lock file"
+        );
+
+        // ② 真实删除闭包形态：Plan scope 墓碑在位后 purge 幂等清文件与锁。
+        let tombstone_scope =
+            EntityScope::new(PROJECT_ID, ISSUE_ID, DeletionEntityKind::Plan, PLAN_ID);
+        let operations = EntityOperationStore::new(fixture.paths.clone());
+        let deletions =
+            crate::product::entity_deletion_store::EntityDeletionStore::new(fixture.paths.clone());
+        let tombstone_lease = operations.try_acquire_delete(&tombstone_scope).unwrap();
+        deletions.begin(&tombstone_lease).unwrap();
+        drop(tombstone_lease);
+        run_store.purge_plan(PROJECT_ID, ISSUE_ID, PLAN_ID).unwrap();
+        assert!(
+            !lock_path.exists(),
+            "run lock is cleared inside the deletion window"
         );
 
         // purge_plan_with_lease：Plan scope 精确消费；非 Plan scope 拒绝。
@@ -1869,6 +1962,265 @@ mod tests {
         assert!(
             matches!(error, ProductStoreError::IdentityMismatch { ref kind, .. } if *kind == "coding_plan_run_purge_scope"),
             "unexpected error: {error}"
+        );
+    }
+
+    /// P1（审查修复轮）：Invalidated run 不构成暂停身份——完成首项在场也
+    /// 不得写 attempt（半执行：attempt Blocked 后 run 补记必败）。
+    #[tokio::test]
+    async fn plan_coding_n2_pause_rejects_invalidated_run() {
+        let fixture = n2_fixture().await;
+        let run_store = fixture.run_store();
+        let coding_store = fixture.coding_store();
+
+        let selection = fixture.core_selection("cmd_n2_pause_invalid");
+        let run = run_store
+            .prepare(
+                PROJECT_ID,
+                ISSUE_ID,
+                PLAN_ID,
+                "cmd_n2_pause_invalid",
+                &fixture.revision_id,
+            )
+            .unwrap();
+        let bound = run_store
+            .bind_ready(&run, &fixture.bindings, Some(selection.clone()))
+            .unwrap();
+        let requested = run_store.mark_start_requested(&bound).unwrap();
+        run_store
+            .record_start_outcome(
+                &requested,
+                CodingPlanStartOutcome::Started {
+                    attempt_id: selection.attempt_id.clone(),
+                },
+            )
+            .unwrap();
+
+        coding_store
+            .seed_running_attempt_for_test(PROJECT_ID, ISSUE_ID, &selection.attempt_id)
+            .unwrap();
+        let attempt = coding_store
+            .get_attempt(PROJECT_ID, ISSUE_ID, &selection.attempt_id)
+            .unwrap();
+        let unit = fixture.core_unit(&attempt);
+        let now = Utc::now().to_rfc3339();
+        coding_store
+            .create_coding_unit_run(
+                &attempt,
+                &CodingUnitRun {
+                    id: "coding_unit_run_n2_invalid_0001".to_string(),
+                    unit_id: unit.id.clone(),
+                    execution_no: 1,
+                    work_item_revision_id: unit.work_item_revision_id.clone(),
+                    resolved_handoff_revision_ids: Vec::new(),
+                    canonical_contract_hash: "n2_invalid_hash".to_string(),
+                    projection_bundle_id: "projection_bundle_n2_invalid".to_string(),
+                    projection_compiler_version: "n2-compiler".to_string(),
+                    coder_provider_renderer_version: "n2-coder".to_string(),
+                    reviewer_provider_renderer_version: "n2-reviewer".to_string(),
+                    internal_reviewer_provider_renderer_version: None,
+                    coder_projection_hash: "n2-coder-hash".to_string(),
+                    reviewer_projection_hash: "n2-reviewer-hash".to_string(),
+                    coder_execution_context_hash: None,
+                    reviewer_execution_context_hash: None,
+                    internal_reviewer_execution_context_hash: None,
+                    status: CodingUnitRunStatus::Running,
+                    unit_rework_count: 0,
+                    verification_retry_count: 0,
+                    operational_retry_count: 0,
+                    plan_repair_count: 0,
+                    start_commit: None,
+                    completion_commit: None,
+                    created_at: now.clone(),
+                    updated_at: now,
+                },
+            )
+            .unwrap();
+        coding_store
+            .complete_coding_unit_run(
+                &attempt,
+                "coding_unit_run_n2_invalid_0001",
+                "n2_invalid_commit",
+            )
+            .unwrap();
+        coding_store
+            .update_coding_unit_status(
+                PROJECT_ID,
+                ISSUE_ID,
+                &attempt.id,
+                &unit.id,
+                crate::product::coding_models::CodingExecutionUnitStatus::Completed,
+                Some("wi_core completed".to_string()),
+            )
+            .unwrap();
+        coding_store
+            .update_coding_unit_latest_handoff_revision_id(
+                PROJECT_ID,
+                ISSUE_ID,
+                &attempt.id,
+                &unit.id,
+                Some("handoff_revision_n2_invalid".to_string()),
+            )
+            .unwrap();
+        coding_store
+            .update_coding_unit_completion_commit(
+                PROJECT_ID,
+                ISSUE_ID,
+                &attempt.id,
+                &unit.id,
+                Some("n2_invalid_commit".to_string()),
+            )
+            .unwrap();
+        let running = coding_store
+            .get_attempt(PROJECT_ID, ISSUE_ID, &attempt.id)
+            .unwrap();
+
+        // 成员删除使 run Invalidated：pause 不匹配（None），不得触碰 attempt。
+        run_store
+            .invalidate_for_deleted_attempt(&fixture.web_attempt())
+            .unwrap();
+        let outcome = coding_store
+            .pause_completed_plan_first_unit(&running, &unit.id)
+            .unwrap();
+        assert!(
+            outcome.is_none(),
+            "invalidated run must not be treated as a pause identity"
+        );
+
+        let untouched = coding_store
+            .get_attempt(PROJECT_ID, ISSUE_ID, &running.id)
+            .unwrap();
+        assert_eq!(untouched.status, CodingAttemptStatus::Running);
+        assert!(
+            coding_store
+                .list_open_blocked_gates(PROJECT_ID, ISSUE_ID, &running.id)
+                .unwrap()
+                .is_empty(),
+            "no pause gate may be created for an invalidated run"
+        );
+        assert_eq!(
+            run_store
+                .get(PROJECT_ID, ISSUE_ID, PLAN_ID)
+                .unwrap()
+                .unwrap()
+                .phase,
+            CodingPlanRunPhase::Invalidated,
+            "run stays invalidated, never paused"
+        );
+    }
+
+    /// P2（审查修复轮）：Plan scope live-write 准入——墓碑在位时全部 run
+    /// 写点以 entity_deleting 拒（不重建可重放孤儿）；读路径不受阻；删除
+    /// 窗口内 purge 清文件与锁。
+    #[tokio::test]
+    async fn plan_coding_n2_writers_reject_entity_deleting_tombstone() {
+        let fixture = n2_fixture().await;
+        let run_store = fixture.run_store();
+
+        let selection = fixture.core_selection("cmd_n2_tombstone");
+        let run = run_store
+            .prepare(
+                PROJECT_ID,
+                ISSUE_ID,
+                PLAN_ID,
+                "cmd_n2_tombstone",
+                &fixture.revision_id,
+            )
+            .unwrap();
+        let bound = run_store
+            .bind_ready(&run, &fixture.bindings, Some(selection.clone()))
+            .unwrap();
+        let requested = run_store.mark_start_requested(&bound).unwrap();
+
+        // 放置 purging 墓碑（真实删除闭包形态：lease→begin→释放）。
+        let scope = EntityScope::new(PROJECT_ID, ISSUE_ID, DeletionEntityKind::Plan, PLAN_ID);
+        let operations = EntityOperationStore::new(fixture.paths.clone());
+        let deletions =
+            crate::product::entity_deletion_store::EntityDeletionStore::new(fixture.paths.clone());
+        let lease = operations.try_acquire_delete(&scope).unwrap();
+        deletions.begin(&lease).unwrap();
+        drop(lease);
+
+        // 迟到写点全部被 entity_deleting 拒。
+        for name in [
+            "prepare",
+            "bind_ready",
+            "mark_start_requested",
+            "mark_paused",
+        ] {
+            let result = match name {
+                "prepare" => run_store.prepare(
+                    PROJECT_ID,
+                    ISSUE_ID,
+                    PLAN_ID,
+                    "cmd_n2_tombstone_late",
+                    &fixture.revision_id,
+                ),
+                "bind_ready" => {
+                    run_store.bind_ready(&bound, &fixture.bindings, Some(selection.clone()))
+                }
+                "mark_start_requested" => run_store.mark_start_requested(&requested),
+                _ => run_store.mark_paused(&requested),
+            };
+            let error = result.unwrap_err();
+            assert!(
+                matches!(error, ProductStoreError::Conflict { ref kind, .. } if *kind == "entity_deleting"),
+                "{name}: unexpected error: {error}"
+            );
+        }
+        let error = run_store
+            .record_start_outcome(
+                &requested,
+                CodingPlanStartOutcome::Started {
+                    attempt_id: selection.attempt_id.clone(),
+                },
+            )
+            .unwrap_err();
+        assert!(
+            matches!(error, ProductStoreError::Conflict { ref kind, .. } if *kind == "entity_deleting"),
+            "record_start_outcome: unexpected error: {error}"
+        );
+
+        // 读路径不受阻：run 事实仍可观察。
+        assert_eq!(
+            run_store
+                .get(PROJECT_ID, ISSUE_ID, PLAN_ID)
+                .unwrap()
+                .unwrap()
+                .phase,
+            CodingPlanRunPhase::StartRequested
+        );
+
+        // 删除窗口（墓碑在位）purge：清 run 文件与锁，不留可重放孤儿。
+        run_store.purge_plan(PROJECT_ID, ISSUE_ID, PLAN_ID).unwrap();
+        assert!(
+            run_store
+                .get(PROJECT_ID, ISSUE_ID, PLAN_ID)
+                .unwrap()
+                .is_none()
+        );
+        let lock_path = fixture
+            .paths
+            .issue_root(PROJECT_ID, ISSUE_ID)
+            .join("coding-plan-runs")
+            .join(format!(".{PLAN_ID}.json.lock"));
+        assert!(
+            !lock_path.exists(),
+            "lock is cleared inside the deletion window"
+        );
+        // 墓碑仍在：purge 后迟到 prepare 依旧拒，不重建孤儿。
+        let error = run_store
+            .prepare(
+                PROJECT_ID,
+                ISSUE_ID,
+                PLAN_ID,
+                "cmd_n2_tombstone_replay",
+                &fixture.revision_id,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(error, ProductStoreError::Conflict { ref kind, .. } if *kind == "entity_deleting"),
+            "no orphan run may be rebuilt after purge: {error}"
         );
     }
 }

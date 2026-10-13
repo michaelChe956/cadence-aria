@@ -93,10 +93,41 @@
 - `plan_coding_n2_late_write_and_deleted_member_invalidates`：删 web 成员→run
   Invalidated（冻结集/selection 保留不抹除）；迟到 mark_start_requested/
   record_start_outcome/bind_ready/prepare（同/新 command）全部 Conflict 不复活；
-  幂等 invalidate；无匹配 run 不自动补建；purge 清本 plan run+前导点锁、保留他 plan
-  run；缺失幂等 OK；对缺失 run 的迟到写上抛 NotFound（不当 None 吞）；
-  `purge_plan_with_lease` Plan scope 通过、Story scope 拒
-  `coding_plan_run_purge_scope`。
+  幂等 invalidate；无匹配 run 不自动补建；purge（修复轮后：无墓碑窗口只清 run 文件、
+  墓碑在位幂等清文件+前导点锁）保留他 plan run；缺失幂等 OK；对缺失 run 的迟到写
+  上抛 NotFound（不当 None 吞）；`purge_plan_with_lease` Plan scope 通过、Story scope
+  拒 `coding_plan_run_purge_scope`。
+
+## 审查修复轮（P1+P2，commit `34d3cfc3`）
+
+- **P1 暂停相位门**（group.rs）：`pause_completed_plan_first_unit` 在
+  `matching_first_ready_run` 命中后先核相位——Invalidated run 直接 `Ok(None)`，
+  attempt 零触碰。修前缺陷：Invalidated run 被当暂停身份，attempt 写成
+  Blocked+CodeReview 后 `mark_paused` 必以 `coding_plan_run_invalidated` 失败
+  ——半执行态被自身 integrity 校验器拒绝且不可自愈。
+- **P2 Plan scope live-write 准入**（coding_plan_run.rs）：六个 run 写点
+  （prepare/bind_ready/mark_start_requested/record_start_outcome/mark_paused/
+  invalidate_for_deleted_attempt）全部套 `with_plan_live_write`（同
+  `AdvanceStore::with_plan_live_write` 惯例：Plan scope try-shared 外层、run
+  文件锁内层、锁内重读/CAS 不变）——删除窗口迟到 coding-start 一律
+  `Conflict{entity_deleting}`，run 文件不重建（REQ-CS-07 无可重放孤儿）。
+  purge 锁 unlink 收进安全窗口：`purge_plan` 仅在 Plan scope 墓碑在位时清锁
+  （run 缺失不短路锁清理，删除窗口重入幂等清锁）；`purge_plan_with_lease`
+  以租约（scope try-exclusive）为安全窗口强制清锁——两路径都不再有 inode
+  双 writer 风险，非窗口调用不清锁（残留锁文件无授权语义）。
+- 新增测试：`plan_coding_n2_pause_rejects_invalidated_run`（P1 红：Invalidated
+  run+完成首项→Ok(None)、attempt 保持 Running、无 gate、run 保持 Invalidated）、
+  `plan_coding_n2_writers_reject_entity_deleting_tombstone`（P2 红：purging 墓碑
+  在位时 prepare/bind_ready/mark_start_requested/record_start_outcome/mark_paused
+  全拒 `entity_deleting`；读路径 get 不受阻；删除窗口 purge 清文件+锁；purge 后
+  迟到 prepare 仍拒不重建孤儿）。既有 purge 测试重排为「无墓碑只清文件→迟到写
+  NotFound→墓碑→幂等清锁」双窗口断言。
+- 修复轮证据（红→绿）：两新测先红（P1=半执行后 `coding_plan_run_invalidated` Err；
+  P2=墓碑下 prepare Ok）→修复后 `plan_coding_n2_` 8 passed；回归
+  `coding_plan_repair_group_attempt_missing_active_pointer` 1、`coding_attempt_store`
+  全族 198、`plan_coding_n1_` 3、`group_split_target` 11、`sc_group_dependency_gate` 9、
+  `group_terminal` 11、`plan_amendment` 54 全绿（波次 C 半写期间曾以 HEAD+修复的
+  隔离临时 worktree 复验同绿，最终共享树收敛后复验同绿）。
 
 ## 边界与移交
 
