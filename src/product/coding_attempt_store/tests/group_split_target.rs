@@ -539,3 +539,184 @@ fn split_ensure_attempt_allows_other_target_active() {
         .expect("other-target active attempt does not block target B");
     assert_ne!(attempt_a.id, attempt_b.id);
 }
+
+// ───────────────────────────────────────────────────────────────
+// N1 依赖同源（fix-multi-repo-group-coding-start REQ-CS-03/08）
+// ───────────────────────────────────────────────────────────────
+
+fn split_unit_with_deps(
+    target: LogicalRepositoryId,
+    logical_id: &str,
+    deps: &[&str],
+) -> AuthoritativeCodingUnitBinding {
+    AuthoritativeCodingUnitBinding {
+        logical_work_item_id: logical_id.to_string(),
+        work_item_revision_id: format!("revision_{logical_id}"),
+        verification_plan_revision_id: format!("verification_{logical_id}"),
+        projection_bundle_id: format!("projection_{logical_id}"),
+        target_repository_id: Some(target),
+        source_draft_error: None,
+        dependency_logical_work_item_ids: deps.iter().map(|d| d.to_string()).collect(),
+    }
+}
+
+#[test]
+fn plan_coding_n1_cross_target_edges_preserved_on_initialize_and_replay() {
+    // A1→B1→A2：跨仓依赖合法。target A 桶初始化必须先全图校验、再按桶内边
+    // 排序且只物化 {A1,A2}，A2 保留对桶外 B1 的原 depends（plan gate 消费）；
+    // 重放命中同一 journal（同集合/顺序/冻结快照）。target B 同理保留 B1→A1。
+    let (_tmp, store, fixture_ids) = logical_routing_fixture();
+    let [project_id, issue_id, target_a, target_b] = fixture_ids.as_slice() else {
+        panic!("fixture ids");
+    };
+    let target_a = LogicalRepositoryId(uuid::Uuid::parse_str(target_a).unwrap());
+    let target_b = LogicalRepositoryId(uuid::Uuid::parse_str(target_b).unwrap());
+    let plan_id = "work_item_plan_n1_cross_0001";
+    let all = vec![
+        split_unit_with_deps(target_a, "wi_n1_a1", &[]),
+        split_unit_with_deps(target_b, "wi_n1_b1", &["wi_n1_a1"]),
+        split_unit_with_deps(target_a, "wi_n1_a2", &["wi_n1_b1"]),
+    ];
+    let input_a = CreateGroupCodingAttemptInput {
+        project_id: project_id.clone(),
+        issue_id: issue_id.clone(),
+        plan_id: plan_id.to_string(),
+        current_work_item_id: "wi_n1_a1".to_string(),
+        base_branch: "main".to_string(),
+        branch_name: format!("aria/issues/{issue_id}/{}", target_a.0),
+        worktree_path: None,
+        provider_config_snapshot: provider_snapshot(),
+        target_snapshot: Some(target_snapshot(target_a)),
+        max_auto_rework: 2,
+        start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+    };
+
+    let journal_a = store
+        .prepare_group_initialization_with_admission_for_target(
+            &input_a,
+            "plan_revision_n1_cross",
+            &all,
+            CodingAdmissionKind::ScAdvance,
+            Some(target_a),
+        )
+        .expect("prepare target A with legal cross-target edges");
+    let bucket_a_ids: Vec<&str> = journal_a
+        .units
+        .iter()
+        .map(|unit| unit.logical_work_item_id.as_str())
+        .collect();
+    assert_eq!(
+        bucket_a_ids,
+        vec!["wi_n1_a1", "wi_n1_a2"],
+        "target A bucket narrows to its own units and orders by intra-bucket edges"
+    );
+    assert_eq!(
+        journal_a.units[1].dependency_logical_work_item_ids,
+        vec!["wi_n1_b1".to_string()],
+        "external depends stay declared on the bucket unit"
+    );
+    assert_eq!(journal_a.lock_work_item_id, "wi_n1_a1");
+
+    let input_b = CreateGroupCodingAttemptInput {
+        current_work_item_id: "wi_n1_b1".to_string(),
+        branch_name: format!("aria/issues/{issue_id}/{}", target_b.0),
+        target_snapshot: Some(target_snapshot(target_b)),
+        ..input_a.clone()
+    };
+    let journal_b = store
+        .prepare_group_initialization_with_admission_for_target(
+            &input_b,
+            "plan_revision_n1_cross",
+            &all,
+            CodingAdmissionKind::ScAdvance,
+            Some(target_b),
+        )
+        .expect("prepare target B keeps its inbound cross-target depends");
+    let bucket_b_ids: Vec<&str> = journal_b
+        .units
+        .iter()
+        .map(|unit| unit.logical_work_item_id.as_str())
+        .collect();
+    assert_eq!(bucket_b_ids, vec!["wi_n1_b1"]);
+    assert_eq!(
+        journal_b.units[0].dependency_logical_work_item_ids,
+        vec!["wi_n1_a1".to_string()]
+    );
+
+    let replay_a = store
+        .prepare_group_initialization_with_admission_for_target(
+            &input_a,
+            "plan_revision_n1_cross",
+            &all,
+            CodingAdmissionKind::ScAdvance,
+            Some(target_a),
+        )
+        .expect("replay target A journal");
+    assert_eq!(replay_a.attempt.id, journal_a.attempt.id);
+    assert_eq!(replay_a.units, journal_a.units);
+    assert_eq!(
+        replay_a.attempt.target_snapshot, journal_a.attempt.target_snapshot,
+        "frozen target snapshot survives replay"
+    );
+    assert_eq!(replay_a.created_at, journal_a.created_at);
+}
+
+#[test]
+fn plan_coding_n1_global_invalid_graph_fail_closed() {
+    // 全图校验失败关闭：真 unknown（不在权威全集）、重复 WI、self 边、跨桶环
+    // 都必须在初始化拒绝整个 plan——桶内排序的合法化不得放宽全图合法性。
+    let (_tmp, store, fixture_ids) = logical_routing_fixture();
+    let [project_id, issue_id, target_a, target_b] = fixture_ids.as_slice() else {
+        panic!("fixture ids");
+    };
+    let target_a = LogicalRepositoryId(uuid::Uuid::parse_str(target_a).unwrap());
+    let target_b = LogicalRepositoryId(uuid::Uuid::parse_str(target_b).unwrap());
+    let plan_id = "work_item_plan_n1_invalid_0001";
+    let input = CreateGroupCodingAttemptInput {
+        project_id: project_id.clone(),
+        issue_id: issue_id.clone(),
+        plan_id: plan_id.to_string(),
+        current_work_item_id: "wi_n1_a1".to_string(),
+        base_branch: "main".to_string(),
+        branch_name: format!("aria/issues/{issue_id}/{}", target_a.0),
+        worktree_path: None,
+        provider_config_snapshot: provider_snapshot(),
+        target_snapshot: Some(target_snapshot(target_a)),
+        max_auto_rework: 2,
+        start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+    };
+    let unknown_dependency = vec![
+        split_unit_with_deps(target_a, "wi_n1_a1", &[]),
+        split_unit_with_deps(target_a, "wi_n1_a2", &["wi_n1_missing"]),
+    ];
+    let duplicate_work_item = vec![
+        split_unit_with_deps(target_a, "wi_n1_a1", &[]),
+        split_unit_with_deps(target_a, "wi_n1_a1", &[]),
+    ];
+    let self_edge = vec![split_unit_with_deps(target_a, "wi_n1_a1", &["wi_n1_a1"])];
+    let cross_bucket_cycle = vec![
+        split_unit_with_deps(target_a, "wi_n1_a1", &[]),
+        split_unit_with_deps(target_b, "wi_n1_b1", &["wi_n1_a2"]),
+        split_unit_with_deps(target_a, "wi_n1_a2", &["wi_n1_b1"]),
+    ];
+    for (name, all) in [
+        ("unknown_dependency", &unknown_dependency),
+        ("duplicate_work_item", &duplicate_work_item),
+        ("self_edge", &self_edge),
+        ("cross_bucket_cycle", &cross_bucket_cycle),
+    ] {
+        assert!(
+            store
+                .prepare_group_initialization_with_admission_for_target(
+                    &input,
+                    "plan_revision_n1_invalid",
+                    all,
+                    CodingAdmissionKind::ScAdvance,
+                    Some(target_a),
+                )
+                .is_err(),
+            "{name}: invalid global graph must fail closed at initialization"
+        );
+        // 直排 helper 的等价拒绝由 prepare 内部同一排序语义覆盖（N1 同源）。
+    }
+}

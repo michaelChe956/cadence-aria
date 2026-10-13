@@ -134,6 +134,12 @@ impl super::CodingAttemptStore {
     /// `{plan_id}.json` 零迁移——本函数对既有调用方（`None`）行为零变化）。
     /// attempt 级前置（唯一性/单 active）按输入快照 target 桶细化，与存储路径
     /// 键无关。
+    ///
+    /// N1 依赖同源（REQ-CS-03/08）：`journal_target=Some(t)` 且 ScAdvance 时
+    /// `unit_bindings` 期望是**权威 plan 全 units**——先全图校验（真 unknown/
+    /// 重复/self/全局环失败关闭），再仅按桶内边排序 `t` 桶，journal units 保留
+    /// 全部原 depends（外部 depends 不删，plan gate 消费）。`None` 保持全集
+    /// 拓扑序旧语义。
     pub fn prepare_group_initialization_with_admission_for_target(
         &self,
         input: &CreateGroupCodingAttemptInput,
@@ -159,7 +165,11 @@ impl super::CodingAttemptStore {
                 ),
             };
         let ordered_unit_bindings = if admission_kind == CodingAdmissionKind::ScAdvance {
-            topologically_order_unit_bindings(unit_bindings)?
+            match journal_target {
+                // N1：全图校验 → 桶内边排序，外部 depends 保留。
+                Some(target) => topologically_order_target_unit_bindings(unit_bindings, target)?,
+                None => topologically_order_unit_bindings(unit_bindings)?,
+            }
         } else {
             unit_bindings.to_vec()
         };
@@ -909,6 +919,16 @@ fn journal_matches_request(
             })
 }
 
+/// 按依赖边拓扑排序 unit bindings。
+///
+/// N1 依赖同源（fix-multi-repo-group-coding-start REQ-CS-03/08）：依赖端点不在
+/// 输入集内的边是**合法外部边**（跨 target 桶依赖）——保留在返回 binding 的
+/// `dependency_logical_work_item_ids`（plan gate 消费），但不参与入度与排序。
+/// 重复 logical WI、声明列表内重复依赖、self 边、输入集内部的环仍失败关闭；
+/// 「真 unknown 依赖」（连权威 plan 全集都不存在）由
+/// [`topologically_order_target_unit_bindings`] 的全图校验与 plan revision
+/// 绑定解析（`resolve_authoritative_group_plan_binding_for_revision` 的边端点
+/// 校验）失败关闭，本函数对子集输入不做 unknown 判定。
 pub(crate) fn topologically_order_unit_bindings(
     bindings: &[AuthoritativeCodingUnitBinding],
 ) -> Result<Vec<AuthoritativeCodingUnitBinding>, ProductStoreError> {
@@ -935,18 +955,23 @@ pub(crate) fn topologically_order_unit_bindings(
                     id: binding.logical_work_item_id.clone(),
                 });
             }
-            if !known.contains(dependency) || !dependencies.insert(dependency.clone()) {
+            if !dependencies.insert(dependency.clone()) {
                 return Err(ProductStoreError::IdentityMismatch {
                     kind: "coding_group_dependency_graph",
                     id: dependency.clone(),
                 });
             }
-            dependents
-                .entry(dependency.clone())
-                .or_default()
-                .push(binding.logical_work_item_id.clone());
+            if known.contains(dependency) {
+                dependents
+                    .entry(dependency.clone())
+                    .or_default()
+                    .push(binding.logical_work_item_id.clone());
+            }
         }
-        indegree.insert(binding.logical_work_item_id.clone(), dependencies.len());
+        indegree.insert(
+            binding.logical_work_item_id.clone(),
+            dependencies.intersection(&known).count(),
+        );
     }
     let mut ready = indegree
         .iter()
@@ -986,6 +1011,49 @@ pub(crate) fn topologically_order_unit_bindings(
         .into_iter()
         .map(|id| by_id.remove(&id).expect("ordered binding was registered"))
         .collect())
+}
+
+/// N1 依赖同源（REQ-CS-03/08）：按**已验证全局图**的 target 桶排序。
+///
+/// 先对 `all`（权威 plan 全 units）做全图校验——真 unknown 依赖（端点不在全集
+/// 内）、重复 WI、self 边、全局环（含跨桶环，不按仓缩图）失败关闭；再仅以
+/// 桶内边排序 `target` 桶（复用 [`topologically_order_unit_bindings`]，同一
+/// 算法与并列打破规则），返回的 binding 保留全部原
+/// `dependency_logical_work_item_ids`（外部 depends 不删，plan gate 消费）。
+/// 空 target 桶失败关闭。完整性/integrity 恢复面消费同一排序语义。
+pub(crate) fn topologically_order_target_unit_bindings(
+    all: &[AuthoritativeCodingUnitBinding],
+    target: crate::product::logical_codebase::LogicalRepositoryId,
+) -> Result<Vec<AuthoritativeCodingUnitBinding>, ProductStoreError> {
+    let known = all
+        .iter()
+        .map(|binding| binding.logical_work_item_id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    for binding in all {
+        for dependency in &binding.dependency_logical_work_item_ids {
+            if !known.contains(dependency) {
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "coding_group_dependency_graph",
+                    id: dependency.clone(),
+                });
+            }
+        }
+    }
+    // 全图结构校验（重复/self/全局环；unknown 已核，全部边在集内）。
+    topologically_order_unit_bindings(all)?;
+    let bucket = all
+        .iter()
+        .filter(|binding| binding.target_repository_id == Some(target))
+        .cloned()
+        .collect::<Vec<_>>();
+    if bucket.is_empty() {
+        return Err(ProductStoreError::IdentityMismatch {
+            kind: "coding_group_dependency_graph",
+            id: format!("empty_target_bucket_{}", target.0),
+        });
+    }
+    // 桶内排序：同一 helper，外部边保留不计入。
+    topologically_order_unit_bindings(&bucket)
 }
 fn same_group_initialization_identity(
     left: &CodingGroupInitializationJournal,

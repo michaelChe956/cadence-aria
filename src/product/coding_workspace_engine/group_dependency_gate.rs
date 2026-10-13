@@ -111,29 +111,42 @@ impl CodingWorkspaceEngine {
             return Ok(GroupUnitSelectionOutcome::Complete);
         }
 
-        let mut graph_dependencies = BTreeMap::<String, BTreeSet<String>>::new();
-        for logical_id in by_logical.keys() {
-            graph_dependencies.insert(logical_id.clone(), BTreeSet::new());
-        }
-        for edge in &graph.edges {
-            let Some(dependent) = by_logical.get(&edge.to) else {
+        // N1 依赖同源（REQ-CS-03/08）：全图身份/边合法性按 bound plan 全 units
+        // 核（`plan_revision.work_item_bindings` 即权威全集），本 attempt units
+        // 只是当前 target 桶——桶外合法端点不是 unknown。真 unknown（不在全集
+        // 内）、self 边失败关闭；declared 与权威图全等（含外部 depends）。
+        let plan_ids: BTreeSet<String> = plan_revision.work_item_bindings.keys().cloned().collect();
+        for unit in by_logical.values() {
+            if !plan_ids.contains(&unit.logical_work_item_id) {
                 return Ok(failed_unknown(
-                    &edge.to,
-                    "dependency graph points to an unknown work item",
+                    &unit.logical_work_item_id,
+                    "coding unit is absent from the bound plan revision",
                 ));
-            };
+            }
+        }
+        let mut graph_dependencies: BTreeMap<String, BTreeSet<String>> = plan_ids
+            .iter()
+            .map(|logical_id| (logical_id.clone(), BTreeSet::new()))
+            .collect();
+        for edge in &graph.edges {
             if edge.from == edge.to {
                 return Ok(failed_self(&edge.from));
             }
-            if !by_logical.contains_key(&edge.from) {
+            if !plan_ids.contains(&edge.from) {
                 return Ok(failed_unknown(
                     &edge.from,
                     "dependency graph points from an unknown work item",
                 ));
             }
+            if !plan_ids.contains(&edge.to) {
+                return Ok(failed_unknown(
+                    &edge.to,
+                    "dependency graph points to an unknown work item",
+                ));
+            }
             graph_dependencies
-                .get_mut(&dependent.logical_work_item_id)
-                .expect("unit map initialized")
+                .get_mut(&edge.to)
+                .expect("plan unit map initialized")
                 .insert(edge.from.clone());
         }
         for unit in by_logical.values() {
@@ -145,11 +158,7 @@ impl CodingWorkspaceEngine {
             if declared.iter().any(|id| id == &unit.logical_work_item_id) {
                 return Ok(failed_self(&unit.logical_work_item_id));
             }
-            if declared.iter().any(|id| !by_logical.contains_key(id)) {
-                let id = declared
-                    .iter()
-                    .find(|id| !by_logical.contains_key(*id))
-                    .expect("unknown dependency exists");
+            if let Some(id) = declared.iter().find(|id| !plan_ids.contains(*id)) {
                 return Ok(failed_unknown(
                     id,
                     "coding unit references an unknown dependency",
@@ -167,6 +176,7 @@ impl CodingWorkspaceEngine {
             }
         }
 
+        // N1：全图判环（不按仓缩图——仓级缩图会把合法 WI 图误判成假环）。
         let (layers, cycle) = topological_layers(&graph_dependencies);
         if cycle {
             return Ok(GroupUnitSelectionOutcome::FailedClosed {
@@ -192,14 +202,33 @@ impl CodingWorkspaceEngine {
         for unit in &candidates {
             let mut unit_ready = true;
             for dependency_id in &graph_dependencies[&unit.logical_work_item_id] {
-                let dependency = &by_logical[dependency_id];
-                match self.dependency_handoff_ready(
-                    attempt,
-                    &lineage,
-                    &plan_revision,
-                    &binding.bound_plan_revision_id,
-                    dependency,
-                )? {
+                // N1：桶内依赖走完整 handoff 就绪判定；合法桶外上游一律
+                // Waiting（携带 bound revision 证据）——完整跨 attempt handoff
+                // 解析属 S1，不得以「查不到本桶上游」判 Ready 或 Unknown。
+                let readiness = match by_logical.get(dependency_id) {
+                    Some(dependency) => self.dependency_handoff_ready(
+                        attempt,
+                        &lineage,
+                        &plan_revision,
+                        &binding.bound_plan_revision_id,
+                        dependency,
+                    )?,
+                    None => DependencyReadiness::Waiting {
+                        audit: Some(GroupDependencyGateAudit {
+                            dependency_unit_id: None,
+                            handoff_id: None,
+                            dependency_work_item_revision_id: plan_revision
+                                .work_item_bindings
+                                .get(dependency_id)
+                                .cloned(),
+                            handoff_work_item_revision_id: None,
+                        }),
+                        message: format!(
+                            "dependency work item {dependency_id} belongs to another target and awaits its cross-target handoff"
+                        ),
+                    },
+                };
+                match readiness {
                     DependencyReadiness::Ready { audit } => {
                         ready_audit = audit;
                     }

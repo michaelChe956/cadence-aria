@@ -498,4 +498,120 @@ mod tests {
             SelectionOutcome::Complete
         ));
     }
+
+    #[test]
+    fn plan_coding_n1_external_dependency_waits_without_unknown_or_ready() {
+        // N1 依赖同源（REQ-CS-03/08）：A1→B1→A2 全图中本 attempt 只是 target A
+        // 桶 {A1,A2}，A2 依赖桶外 B1（合法跨仓依赖）。运行 selector 对合法桶外
+        // 上游必须 Waiting（携带依赖证据），不得误报 SC_GROUP_DEPENDENCY_UNKNOWN，
+        // 也不得把「查不到本桶上游」当 Ready（完整跨 attempt handoff 解析属 S1）。
+        let fixture = fixture();
+        // 前置态 seed（campaign 纪律：只改 unit/依赖图 JSON 事实，Waiting 终态
+        // 由真实 select_next_sc_group_unit 产生）：全图边 A1→B1→A2；本桶物化
+        // {A1,A2}（A2 声明对 B1 的依赖），B1 留在桶外（删除其 unit）。
+        let revision_store = WorkItemRevisionStore::new(fixture.store.paths());
+        let lineage = revision_store
+            .get_plan_lineage(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                "work_item_plan_0001",
+            )
+            .expect("lineage");
+        let plan_revision = revision_store
+            .get_plan_revision(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                "work_item_plan_0001",
+                "plan_revision_0001",
+            )
+            .expect("plan revision");
+        let mut graph = revision_store
+            .get_dependency_graph_revision(&lineage, &plan_revision.dependency_graph_revision_id)
+            .expect("dependency graph");
+        graph.edges = vec![
+            crate::product::work_item_contract::DependencyContractEdge {
+                from: "work_item_0001".to_string(),
+                to: "work_item_0002".to_string(),
+                required_contracts: Vec::new(),
+            },
+            crate::product::work_item_contract::DependencyContractEdge {
+                from: "work_item_0002".to_string(),
+                to: "work_item_0003".to_string(),
+                required_contracts: Vec::new(),
+            },
+        ];
+        let plan_root = fixture
+            .store
+            .paths()
+            .issue_root(&fixture.attempt.project_id, &fixture.attempt.issue_id)
+            .join("work-item-revisions")
+            .join("work_item_plan_0001");
+        std::fs::write(
+            plan_root
+                .join("dependency-graph-revisions")
+                .join(format!("{}.json", graph.id)),
+            serde_json::to_vec(&graph).expect("graph json"),
+        )
+        .expect("rewrite full-graph edges");
+        let mut projection = revision_store
+            .get_plan_projection_bundle(&lineage, &plan_revision.plan_projection_bundle_id)
+            .expect("plan projection bundle");
+        projection.coder_group_context.dependency_edges = graph.edges.clone();
+        projection.reviewer_group_matrix.dependency_edges = graph.edges.clone();
+        std::fs::write(
+            plan_root
+                .join("plan-projection-bundles")
+                .join(format!("{}.json", projection.id)),
+            serde_json::to_vec(&projection).expect("projection json"),
+        )
+        .expect("keep projection edges consistent");
+
+        let unit_b = unit(&fixture, "work_item_0002");
+        std::fs::remove_file(fixture.store.coding_unit_path(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+            &unit_b.id,
+        ))
+        .expect("B1 stays out of the target A bucket");
+        let mut unit_a2 = unit(&fixture, "work_item_0003");
+        unit_a2.dependency_logical_work_item_ids = vec!["work_item_0002".to_string()];
+        std::fs::write(
+            fixture.store.coding_unit_path(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &fixture.attempt.id,
+                &unit_a2.id,
+            ),
+            serde_json::to_vec(&unit_a2).expect("unit json"),
+        )
+        .expect("A2 keeps its external depends declaration");
+
+        let outcome = fixture
+            .engine
+            .select_next_sc_group_unit(&fixture.attempt)
+            .expect("selector");
+        let SelectionOutcome::Waiting {
+            pending_unit_ids,
+            reason_code,
+            message,
+            audit,
+        } = outcome
+        else {
+            panic!("external legal dependency must wait without unknown or ready");
+        };
+        assert_eq!(pending_unit_ids, vec![unit_a2.id]);
+        assert_eq!(reason_code, "SC_GROUP_DEPENDENCY_HANDOFF_PENDING");
+        assert!(
+            message.contains("work_item_0002"),
+            "waiting message names the external dependency: {message}"
+        );
+        let audit = audit.expect("waiting audit carries dependency evidence");
+        assert_eq!(audit.dependency_unit_id, None);
+        assert_eq!(
+            audit.dependency_work_item_revision_id.as_deref(),
+            Some("work_item_revision_0002")
+        );
+        assert_eq!(audit.handoff_id, None);
+    }
 }

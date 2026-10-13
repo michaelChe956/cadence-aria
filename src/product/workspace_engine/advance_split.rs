@@ -13,7 +13,7 @@ use crate::product::coding_attempt_store::target_snapshot::build_attempt_target_
 use crate::product::coding_attempt_store::{
     AuthoritativeGroupPlanBinding, CodingAttemptStore, CreateGroupCodingAttemptInput,
     SplitAuditRecord, SplitAuditTrigger, SplitAuditTriggerKind, UnitsByTarget,
-    topologically_order_unit_bindings,
+    topologically_order_target_unit_bindings, topologically_order_unit_bindings,
 };
 use crate::product::coding_models::CodingAdmissionKind;
 use crate::product::logical_codebase::{RepositoryRouting, resolve_issue_logical_codebase_id};
@@ -120,9 +120,12 @@ impl WorkspaceEngine {
             order_index: usize,
         }
         let mut targets: Vec<SplitTarget> = Vec::with_capacity(grouped.by_target.len());
-        for (target, units) in grouped.by_target {
-            let ordered_units = topologically_order_unit_bindings(&units)
-                .map_err(|error| format!("order split units failed: {error}"))?;
+        for (target, _bucket) in grouped.by_target {
+            // N1 依赖同源：per-target 桶排序=全图校验（跨仓依赖合法、真
+            // unknown/self/全局环失败关闭）+ 桶内边排序，外部 depends 保留。
+            let ordered_units =
+                topologically_order_target_unit_bindings(&authoritative.units, target)
+                    .map_err(|error| format!("order split units failed: {error}"))?;
             if !manifest.member_ids.contains(&target) {
                 return Err("advance logical repository target is not selected".to_string());
             }
@@ -199,7 +202,9 @@ impl WorkspaceEngine {
                     .prepare_group_initialization_with_admission_for_target(
                         &group_input,
                         &authoritative.plan_revision_id,
-                        &ordered_units,
+                        // N1：传权威全集——store 内全图校验+按 target 桶内边
+                        // 排序同源；journal 只物化本桶 units。
+                        &authoritative.units,
                         CodingAdmissionKind::ScAdvance,
                         Some(target),
                     )
