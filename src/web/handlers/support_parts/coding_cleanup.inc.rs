@@ -187,14 +187,116 @@ pub(crate) fn cleanup_shared_worktree_by_routing(
     Ok(())
 }
 
+/// N7（REQ-CS-07）：plan-run 冻结 target 集合的精确仓维资源清理包装。
+///
+/// 供 plan 删除闭包（存在新 plan-run 时）在 purge run 前按冻结 target 集合
+/// 逐仓清理 repo shared worktree——**只清本 run 冻结的仓**，不走旧
+/// issue-wide helper（不扫其它仓，`cleanup_shared_worktree_by_routing` 的
+/// 其它 caller 语义不变）。每仓先取 `try_acquire_shared_resource_cleanup`
+/// 短 lease（与资源写者互斥，争用 fail-closed 上抛），锁内复核记录真实
+/// owner：记录身份必须仍属本 (project, issue, target)；活动锁 owner 为他人
+/// （不属本 run 冻结 attempt 集/selection）时保留不删。NotFound=OK（缺失
+/// 视为已清理），IO/JSON 错误上抛不吞。D2.2 后行统一消费本包装，不重复实现。
+pub(crate) fn cleanup_plan_run_shared_worktrees(
+    app_paths: &ProductAppPaths,
+    run: &crate::product::coding_plan_run::CodingPlanRun,
+) -> ApiResult<()> {
+    let operations =
+        crate::product::entity_operation_store::EntityOperationStore::new(app_paths.clone());
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    for binding in &run.target_attempts {
+        let Ok(repository_uuid) = uuid::Uuid::parse_str(&binding.target_repository_id) else {
+            return Err(ApiError::runtime(
+                "plan_coding_run_target_invalid",
+                "plan run frozen target is not a logical repository id",
+                json!({
+                    "plan_id": run.plan_id,
+                    "target_repository_id": binding.target_repository_id,
+                }),
+            ));
+        };
+        let repository_id = LogicalRepositoryId(repository_uuid);
+        let key = crate::product::entity_operation_store::SharedResourceKey {
+            project_id: run.project_id.clone(),
+            issue_id: run.issue_id.clone(),
+            repository_id: Some(repository_id),
+        };
+        // 清理短 lease：与写者互斥；争用（Busy）fail-closed 上抛，客户端可
+        // 重试，绝不静默跳过留下孤儿授权资源。
+        let _cleanup_lease = operations
+            .try_acquire_shared_resource_cleanup(&key)
+            .map_err(shared_resource_cleanup_api_error)?;
+        let Some(record) = lifecycle
+            .get_repo_shared_worktree(&run.project_id, &run.issue_id, repository_id)
+            .map_err(product_store_api_error)?
+        else {
+            continue;
+        };
+        // 复核真实 owner（记录身份）：路径派生读回的记录若身份漂移则
+        // fail-closed，绝不删除无法归属的记录。
+        if record.project_id != run.project_id
+            || record.issue_id != run.issue_id
+            || record.target_repository_id != Some(repository_id)
+        {
+            return Err(product_store_api_error(
+                ProductStoreError::IdentityMismatch {
+                    kind: "repo_shared_worktree",
+                    id: binding.target_repository_id.clone(),
+                },
+            ));
+        }
+        // 复核活动锁 owner：他人（另一 plan 的 attempt）持有的活动锁保留；
+        // 空主或本 run 冻结 attempt 集/selection 内的残留 owner 才可清。
+        let owner_within_run = record.current_lock_owner_id.is_none_or(|owner| {
+            run.target_attempts
+                .iter()
+                .any(|frozen| frozen.attempt_id == owner)
+                || run
+                    .selection
+                    .as_ref()
+                    .is_some_and(|selection| selection.attempt_id == owner)
+        });
+        if !owner_within_run {
+            continue;
+        }
+        lifecycle
+            .delete_repo_shared_worktree(&run.project_id, &run.issue_id, repository_id)
+            .map_err(product_store_api_error)?;
+    }
+    Ok(())
+}
+
+/// `try_acquire_shared_resource_cleanup` 的稳定错误映射（N7 包装专用）。
+fn shared_resource_cleanup_api_error(
+    error: crate::product::entity_operation_store::EntityOperationError,
+) -> ApiError {
+    use crate::product::entity_operation_store::EntityOperationError;
+    match error {
+        EntityOperationError::Busy => ApiError::runtime(
+            "plan_coding_run_resource_busy",
+            "plan run target resource is held by a concurrent writer",
+            json!({}),
+        ),
+        EntityOperationError::Deleting | EntityOperationError::Deleted => ApiError::runtime(
+            "plan_coding_run_resource_unavailable",
+            "plan run target resource is being deleted or already deleted",
+            json!({}),
+        ),
+        EntityOperationError::Store(error) => product_store_api_error(error),
+    }
+}
+
 /// 完成 attempt 删除的尾部清理（worktree/handoff 清理之后）。
 ///
-/// 顺序（spec `harden-coding-attempt-deletion`）：
+/// 顺序（spec `harden-coding-attempt-deletion` + N7 REQ-CS-07）：
 /// 1. 先取该 attempt 的 work_item 集合（依赖 attempt 的 unit 目录可读，必须在
 ///    `delete_attempt` 之前）。
 /// 2. `delete_attempt` 删 attempt 数据（json + 目录）。
-/// 3. `purge_coding_attempt_lock_residue` 清残留 lock（NotFound=OK，按 work_item 精确）。
-/// 4. `cleanup_issue_shared_worktree_if_no_attempts` 条件清 shared-worktree。
+/// 3. `invalidate_for_deleted_attempt` 精确失效引用该 attempt 的 plan run
+///    （N7：member 删除后旧 command 不得再首启/补建不完整集合；无匹配 run
+///    直接 OK，不自动补建）。
+/// 4. `purge_coding_attempt_lock_residue` 清残留 lock（NotFound=OK，按 work_item 精确）。
+/// 5. `cleanup_issue_shared_worktree_if_no_attempts` 条件清 shared-worktree。
 pub(crate) fn finalize_coding_attempt_deletion(
     coding_store: &CodingAttemptStore,
     app_paths: &ProductAppPaths,
@@ -204,14 +306,21 @@ pub(crate) fn finalize_coding_attempt_deletion(
     coding_store
         .delete_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .map_err(product_store_api_error)?;
+    // N7（REQ-CS-07）：冻结集合含该 attempt（或 selection 指向它）时精确
+    // 失效本 plan run；身份错配/IO 错误上抛（不吞）。
+    crate::product::coding_plan_run::CodingPlanRunStore::new(app_paths.clone())
+        .invalidate_for_deleted_attempt(attempt)
+        .map_err(product_store_api_error)?;
     purge_coding_attempt_lock_residue(app_paths, attempt, &attempt_work_item_ids);
-    if let Some(snapshot) = &attempt.target_snapshot { cleanup_repo_shared_worktree_if_no_active_attempts(
-        coding_store,
-        app_paths,
-        &attempt.project_id,
-        &attempt.issue_id,
-        snapshot.logical_repository_id,
-    )? }
+    if let Some(snapshot) = &attempt.target_snapshot {
+        cleanup_repo_shared_worktree_if_no_active_attempts(
+            coding_store,
+            app_paths,
+            &attempt.project_id,
+            &attempt.issue_id,
+            snapshot.logical_repository_id,
+        )?
+    }
     // 缺陷 #13 层2 存量出口：组入口路由分流修复前，Logical 路由的 group
     // create 会误写 issue 维 legacy 布局（与运行期 preflight 契约相反，恢复/
     // 完成门 fail-closed legacy_shared_worktree_present）。删除该 issue 的
@@ -225,4 +334,3 @@ pub(crate) fn finalize_coding_attempt_deletion(
     )?;
     Ok(())
 }
-

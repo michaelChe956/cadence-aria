@@ -115,8 +115,7 @@ fn finalize_coding_attempt_deletion_removes_repo_worktree_for_snapshot_attempt()
         ))
         .expect("seed repo worktree");
 
-    finalize_coding_attempt_deletion(&coding_store, &paths, &attempt)
-        .expect("finalize deletion");
+    finalize_coding_attempt_deletion(&coding_store, &paths, &attempt).expect("finalize deletion");
 
     assert!(
         lifecycle
@@ -152,8 +151,7 @@ fn finalize_coding_attempt_deletion_keeps_repo_worktree_for_active_same_repo_att
         ))
         .expect("seed repo worktree");
 
-    finalize_coding_attempt_deletion(&coding_store, &paths, &first)
-        .expect("finalize deletion");
+    finalize_coding_attempt_deletion(&coding_store, &paths, &first).expect("finalize deletion");
 
     assert!(
         lifecycle
@@ -183,8 +181,7 @@ fn finalize_coding_attempt_deletion_keeps_legacy_cleanup_for_none_attempt() {
         })
         .expect("seed legacy worktree");
 
-    finalize_coding_attempt_deletion(&coding_store, &paths, &attempt)
-        .expect("finalize deletion");
+    finalize_coding_attempt_deletion(&coding_store, &paths, &attempt).expect("finalize deletion");
 
     assert!(
         lifecycle
@@ -300,4 +297,112 @@ fn gateway_error_reaches_http_with_stable_code_via_provider_adapter() {
     ));
     assert_eq!(error.code, "provider_gateway_policy_drift");
     assert_eq!(error.into_response().status(), StatusCode::CONFLICT);
+}
+
+// ───────────────────────────────────────────────────────────────
+// N7（REQ-CS-07）：member attempt 删除 → 本 plan run 授权精确失效
+// ───────────────────────────────────────────────────────────────
+
+const T11_PLAN_ID: &str = "work_item_plan_0001";
+
+fn t11_plan_run(
+    attempt: &CodingExecutionAttempt,
+) -> crate::product::coding_plan_run::CodingPlanRun {
+    use crate::product::advance_store::AdvanceTargetAttemptBinding;
+    use crate::product::coding_plan_run::{
+        CodingPlanRun, CodingPlanRunPhase, CodingPlanSelection, PLAN_CODING_MODE_FIRST_READY_UNIT,
+    };
+
+    CodingPlanRun {
+        project_id: attempt.project_id.clone(),
+        issue_id: attempt.issue_id.clone(),
+        plan_id: T11_PLAN_ID.to_string(),
+        command_id: "plan_command_0001".to_string(),
+        bound_plan_revision_id: "plan_revision_0001".to_string(),
+        dependency_graph_revision_id: "graph_revision_0001".to_string(),
+        target_attempts: vec![AdvanceTargetAttemptBinding {
+            target_repository_id: Uuid::new_v4().to_string(),
+            attempt_id: attempt.id.clone(),
+        }],
+        mode: PLAN_CODING_MODE_FIRST_READY_UNIT.to_string(),
+        selection: Some(CodingPlanSelection {
+            unit_id: "unit_0001".to_string(),
+            logical_work_item_id: "logical_work_item_0001".to_string(),
+            attempt_id: attempt.id.clone(),
+            target_repository_id: "frozen_target".to_string(),
+            start_command_id: "plan_start_deterministic_0001".to_string(),
+        }),
+        phase: CodingPlanRunPhase::ReadyBound,
+        start_outcome: None,
+        pause_reason: None,
+        created_at: "2026-10-14T00:00:00Z".to_string(),
+        updated_at: "2026-10-14T00:00:00Z".to_string(),
+    }
+}
+
+/// 冻结集合 member 被独立删除：run 必须 Invalidated（冻结集合/selection 保留），
+/// 旧 command 的迟到首启标记必须拒绝——不得用原授权补建/推进不完整集合。
+#[test]
+fn plan_coding_n7_member_delete_invalidates_authorization() {
+    let root = tempdir().expect("tempdir");
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let coding_store = CodingAttemptStore::new(paths.clone());
+    let member = t11_create_attempt(&coding_store, "work_item_0001", None);
+    let mut group_member = member.clone();
+    group_member.work_item_group_id = Some(T11_PLAN_ID.to_string());
+    coding_store
+        .write_coding_attempt_for_test(&group_member)
+        .expect("bind member attempt to plan");
+
+    let run = t11_plan_run(&group_member);
+    let runs_root = paths
+        .issue_root(T11_PROJECT_ID, T11_ISSUE_ID)
+        .join("coding-plan-runs");
+    std::fs::create_dir_all(&runs_root).expect("create runs root");
+    crate::product::json_store::write_json(&runs_root.join(format!("{T11_PLAN_ID}.json")), &run)
+        .expect("seed plan run");
+    let run_store = crate::product::coding_plan_run::CodingPlanRunStore::new(paths.clone());
+
+    finalize_coding_attempt_deletion(&coding_store, &paths, &group_member)
+        .expect("finalize member deletion");
+
+    let invalidated = run_store
+        .get(T11_PROJECT_ID, T11_ISSUE_ID, T11_PLAN_ID)
+        .expect("load run after member deletion")
+        .expect("run record persists (invalidation, not purge)");
+    assert!(
+        matches!(
+            invalidated.phase,
+            crate::product::coding_plan_run::CodingPlanRunPhase::Invalidated
+        ),
+        "member deletion must invalidate the plan run authorization"
+    );
+    // 冻结集合/selection 保留（失效不抹除冻结事实，仅拒绝复活）。
+    assert_eq!(invalidated.target_attempts, run.target_attempts);
+    assert_eq!(
+        invalidated.selection.as_ref().map(|s| s.attempt_id.clone()),
+        Some(group_member.id.clone())
+    );
+
+    // 旧 command 不补 attempt：失效 run 上的迟到首启标记必须 Conflict 拒绝。
+    let replay = run_store.mark_start_requested(&run);
+    assert!(
+        matches!(
+            replay,
+            Err(crate::product::json_store::ProductStoreError::Conflict { kind, .. })
+                if kind == "coding_plan_run_invalidated"
+        ),
+        "late start replay on invalidated run must reject, got {replay:?}"
+    );
+    let after = run_store
+        .get(T11_PROJECT_ID, T11_ISSUE_ID, T11_PLAN_ID)
+        .expect("reload run")
+        .expect("run still on disk");
+    assert!(
+        matches!(
+            after.phase,
+            crate::product::coding_plan_run::CodingPlanRunPhase::Invalidated
+        ),
+        "rejected replay must not flip the run back to startable"
+    );
 }

@@ -64,6 +64,14 @@ pub async fn delete_work_item_plan(
     {
         return Err(coding_workspace_exists_error(&plan_id, &attempt.id));
     }
+    // N7（REQ-CS-07）：有新 plan-run 时在闭包前捕获冻结 target 集合（purge
+    // 后不可再读）；IO/JSON 错误不吞（损坏 run 阻断删除且不落任何变更）。
+    // 早拒（上方门禁）不 purge、不动 run。
+    let plan_run_store =
+        crate::product::coding_plan_run::CodingPlanRunStore::new(app_paths.clone());
+    let plan_run = plan_run_store
+        .get(&project_id, &issue_id, &plan_id)
+        .map_err(product_store_api_error)?;
     // 部分失败也必须驱逐：前面已删 work item 的 session 磁盘级联（delete_work_item）
     // 已完成，靠后 work item 被门禁拒绝时跳过驱逐会留下「磁盘已删、内存残留」的
     // 旧 manager。失败路径驱逐安全：磁盘记录尚存时，下次 attach 从磁盘重建 manager。
@@ -75,7 +83,17 @@ pub async fn delete_work_item_plan(
         store
             .delete_issue_work_item_plan(&project_id, &issue_id, &plan_id)
             .map_err(product_store_api_error)?;
-        purge_work_item_plan_store_artifacts(&app_paths, &project_id, &issue_id, &plan_id)
+        purge_work_item_plan_store_artifacts(&app_paths, &project_id, &issue_id, &plan_id)?;
+        // N7（REQ-CS-07）：run 授权资源按冻结 target 集合 target-scoped 精确
+        // 清理（不整 issue 扫描；无 run 零动作）。
+        if let Some(run) = plan_run.as_ref() {
+            cleanup_plan_run_shared_worktrees(&app_paths, run)?;
+        }
+        // N7（REQ-CS-07）：清理成功闭包尾部精确 purge 本 plan run（缺失幂等
+        // OK；安全删除窗口连带前导点 run 锁一并清）。
+        plan_run_store
+            .purge_plan(&project_id, &issue_id, &plan_id)
+            .map_err(product_store_api_error)
     }
     .await;
     evict_workspace_session_managers(&state, &session_ids).await;
@@ -283,6 +301,13 @@ async fn delete_schema_v2_work_item_plan_with_cleanup(
         return Err(coding_workspace_exists_error(plan_id, &attempt.id));
     }
 
+    // N7（REQ-CS-07）：有新 plan-run 时在清理前捕获冻结 target 集合（purge
+    // 后不可再读）；IO/JSON 错误不吞（损坏 run 阻断删除且不落任何变更）。
+    let plan_run_store =
+        crate::product::coding_plan_run::CodingPlanRunStore::new(app_paths.clone());
+    let plan_run = plan_run_store
+        .get(project_id, issue_id, plan_id)
+        .map_err(product_store_api_error)?;
     // 取本 plan 的 work_item_ids：用于精确清理 work-item-attempt-locks（按 work_item 删，
     // 不误伤同 issue 其他 plan 共享目录里的锁）。必须在删 plan 元数据之前取。
     let work_item_ids = store
@@ -325,12 +350,23 @@ async fn delete_schema_v2_work_item_plan_with_cleanup(
         .map_err(product_store_api_error)?;
     // 3. plan store drafts/compiles/outlines
     purge_work_item_plan_store_artifacts(app_paths, project_id, issue_id, plan_id)?;
-    // 4. issue shared worktree json + lock（Task 1）：多仓按 routing 枚举
-    //    `shared-worktrees/` 全清，单仓走老逻辑清 `issue-shared-worktree.json`。
-    cleanup_shared_worktree_by_routing(app_paths, project_id, issue_id)?;
+    // 4. issue shared worktree json + lock（Task 1）：无新 run 时维持原路径
+    //    （多仓按 routing 枚举 `shared-worktrees/` 全清，单仓走老逻辑清
+    //    `issue-shared-worktree.json`）；有新 run（N7 REQ-CS-07）按冻结
+    //    target 集合 target-scoped 精确清理，不 issue-wide 扫其它仓。
+    if let Some(run) = plan_run.as_ref() {
+        cleanup_plan_run_shared_worktrees(app_paths, run)?;
+    } else {
+        cleanup_shared_worktree_by_routing(app_paths, project_id, issue_id)?;
+    }
     // 5. coding attempt 初始化残留 lock（attempt json 已被门禁确认不存在，
     //    残留的 arbitration / journal / attempt lock 一并清理）
     purge_attempt_lock_residue(app_paths, project_id, issue_id, plan_id, &work_item_ids)?;
+    // 6. N7（REQ-CS-07）：清理成功闭包尾部精确 purge 本 plan run（缺失幂等
+    //    OK；只有此确定安全无 writer 的删除窗口清 run 文件与前导点锁）。
+    plan_run_store
+        .purge_plan(project_id, issue_id, plan_id)
+        .map_err(product_store_api_error)?;
 
     Ok(())
 }
