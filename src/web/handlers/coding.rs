@@ -17,6 +17,7 @@ use crate::web::coding_ws_handler::{coding_pending_gates, coding_role_run_snapsh
 use crate::web::state::CodingAttemptRunKey;
 mod advance;
 mod group;
+mod plan_start;
 mod progress;
 pub(crate) mod repository_resolution;
 pub(crate) mod scope;
@@ -31,9 +32,13 @@ mod worktree_route;
 #[allow(unused_imports)]
 pub(crate) use advance::map_advance_outcome;
 pub use group::create_group_coding_attempt;
+pub use plan_start::{get_plan_coding_progress, post_plan_coding_start};
 #[cfg(test)]
 #[path = "coding/advance_tests.rs"]
 mod advance_tests;
+#[cfg(test)]
+#[path = "coding/plan_start_tests.rs"]
+mod plan_start_tests;
 pub(crate) use progress::build_group_work_item_progress;
 use repository_resolution::{resolve_work_item_repository, routing_error};
 use scope::{CodingAttemptArtifactRoutePath, CodingAttemptRoutePath, resolve_coding_attempt};
@@ -1036,10 +1041,10 @@ include!("coding_parts/c2_gate_response_rest_tests.inc.rs");
 mod coding_provider_snapshot_tests {
     use super::*;
     use crate::product::app_paths::ProductAppPaths;
+    use crate::product::lifecycle_store::LifecycleStore;
     use crate::product::lifecycle_store::inputs::{
         CreateWorkItemChildSessionInput, CreateWorkspaceSessionInput,
     };
-    use crate::product::lifecycle_store::LifecycleStore;
     use crate::product::models::work_item_revision::WorkItemRuntimeBinding;
     use crate::product::models::{ChildBindingIdentity, ProviderName, WorkspaceType};
 
@@ -1094,9 +1099,10 @@ mod coding_provider_snapshot_tests {
                     enrollment_id: "enrollment_0001".to_string(),
                     target: crate::product::logical_codebase::EnrollmentTarget::LogicalCodebase {
                         logical_codebase_id: "lc_0001".to_string(),
-                        logical_repository_id: crate::product::logical_codebase::LogicalRepositoryId(
-                            uuid::Uuid::from_u128(1),
-                        ),
+                        logical_repository_id:
+                            crate::product::logical_codebase::LogicalRepositoryId(
+                                uuid::Uuid::from_u128(1),
+                            ),
                     },
                 },
             })

@@ -338,6 +338,10 @@ pub fn build_web_router_with_evidence(state: WebAppState, evidence_enabled: bool
             post(handlers::create_group_coding_attempt),
         )
         .route(
+            "/api/projects/{project_id}/issues/{issue_id}/work-item-plans/{plan_id}/coding-start",
+            get(handlers::get_plan_coding_progress).post(handlers::post_plan_coding_start),
+        )
+        .route(
             "/api/projects/{project_id}/issues/{issue_id}/work-items/{work_item_id}/coding-attempts",
             post(handlers::create_coding_attempt),
         )

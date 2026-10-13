@@ -1200,3 +1200,79 @@ pub struct ResolveGateResponse {
     pub decision: String,
     pub next_node: Option<String>,
 }
+
+/// N3（REQ-CS-01）：多仓 confirmed plan 的一键显式 Coding 启动请求——
+/// `command_id` 为稳定幂等键，`expected_plan_revision_id` 与 GET 聚合返回的
+/// bound revision 互证（漂移即拒）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct PlanCodingStartRequest {
+    pub command_id: String,
+    pub expected_plan_revision_id: String,
+}
+
+/// N3（REQ-CS-06）：plan 聚合中的 target 仓投影。`lease_state` 沿现 repo
+/// worktree lock 事实（`absent|held|contested`），不造 provider_running 猜测。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct PlanCodingTargetDto {
+    pub target_repository_id: String,
+    pub attempt_id: String,
+    pub attempt_status: crate::product::coding_models::CodingAttemptStatus,
+    pub worktree_path: Option<PathBuf>,
+    pub lease_state: String,
+}
+
+/// N3（REQ-CS-06）：plan 聚合中的 WI 进度投影。`execution_state` 值域
+/// `initialized|running|waiting_dependency|waiting_slot|paused|completed`，
+/// provider 事实与初始化 unit Running 区分；`waiting_reason` 值域
+/// `dependency_not_ready|execution_slot_occupied|plan_coding_continuation_not_enabled`。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct PlanCodingUnitProgressDto {
+    pub unit_id: String,
+    pub logical_work_item_id: String,
+    pub target_repository_id: String,
+    pub attempt_id: String,
+    pub unit_status: crate::product::coding_models::CodingExecutionUnitStatus,
+    pub execution_state: String,
+    pub unsatisfied_dependency_ids: Vec<String>,
+    pub waiting_reason: Option<String>,
+}
+
+/// N3（REQ-CS-06）：按 bound target attempts 聚合的 plan 进度（GET/POST 共用
+/// 读函数产出）。primary 仅表示打开入口，不代表整 plan 执行或完成。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct PlanCodingProgressDto {
+    pub plan_id: String,
+    pub bound_plan_revision_id: String,
+    pub command_id: Option<String>,
+    pub mode: Option<String>,
+    pub phase: Option<String>,
+    pub primary_attempt_id: Option<String>,
+    pub selected_unit_id: Option<String>,
+    pub selected_attempt_id: Option<String>,
+    pub target_attempts: Vec<PlanCodingTargetDto>,
+    pub units: Vec<PlanCodingUnitProgressDto>,
+    pub plan_complete: bool,
+}
+
+/// N3（REQ-CS-01/02）：一键启动结果——`operation_state` 沿现
+/// `accepted|replayed|needs_human|rejected` 语义；`start_outcome` 为冻结的
+/// 首启真实回执。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct PlanCodingStartResultDto {
+    pub plan_id: String,
+    pub bound_plan_revision_id: String,
+    pub command_id: String,
+    pub operation_state: crate::product::models::automation::OperationState,
+    pub primary_attempt_id: Option<String>,
+    pub target_attempts: Vec<PlanCodingTargetDto>,
+    pub selected_unit_id: Option<String>,
+    pub selected_attempt_id: Option<String>,
+    pub start_outcome: Option<crate::product::coding_plan_run::CodingPlanStartOutcome>,
+    pub waiting_units: Vec<PlanCodingUnitProgressDto>,
+    pub progress: PlanCodingProgressDto,
+}
