@@ -3,7 +3,7 @@
 - Change：`openspec/changes/fix-multi-repo-group-coding-start/`（Task 2.3，REQ-CS-05/03）
 - Plan：`cadence/plans/2026-10-13_实施计划_多仓分组coding启动_v1.0.md` §6
 - Worktree：`.worktrees/feat-b-0808-add-monorepo`（分支 feat-b-0808-add-monorepo）
-- 状态：DONE（红→绿→回归全绿；独立 commit `01330f24`，父提交 `2ba4bd12`=N3）
+- 状态：DONE（红→绿→回归全绿；初轮 commit `01330f24` + P2 审查修复轮 `fix: N5 advance传参保留更新前attempt`，父提交 `2ba4bd12`=N3）
 
 ## 交付（三处窄改；计划 Files 中 engine group.rs 最终零改动）
 
@@ -19,9 +19,9 @@
     transition）落定后、`advance_to_next_group_unit` 及其 SC selector 之前，Running 分支
     显式把 selected unit 置 Completed（原 `complete_current_group_unit` 的前半段，同一
     summary），随后调用 N2 `pause_completed_plan_first_unit`；命中即返回暂停 attempt。
-    旧无 run 路径行为等价保留：unit Completed 后直接 `advance_to_next_group_unit`（与原
-    `complete_current_group_unit→advance` 组合逐步等价，`complete_current_group_unit`
-    函数本体与其余调用方零改动）。
+    旧无 run 路径行为保持：unit Completed 后直接 `advance_to_next_group_unit`，且
+    advance/pause 一律传**更新前**的内存 attempt（P2 审查修复轮，见下）；
+    `complete_current_group_unit` 函数本体与其余调用方零改动。
   - **runner 识别入口**：`pub fn plan_first_unit_safely_paused`——暂停形状 +
     matching first_ready run `phase=Paused` 才为 true（真实暂停身份，非任意 Blocked
     文本）；无 run/未暂停/Invalidated 均 false。
@@ -32,7 +32,7 @@
   不依赖 stage 自然停止，内部循环不再获得推进机会。N2 `ensure_provider_run_allowed`
   （flow 入口调用）继续作为普通 retry/StartCoding 的第二防线，未新增 WS 自动
   start/重置 claim。
-- **Test**：`tests/group_completion_recovery.rs` 追加 4 测（含
+- **Test**：`tests/group_completion_recovery.rs` 追加 5 测（含
   `seed_plan_coding_first_ready_run` 夹具：按 N2 冻结地址直写
   `{issue_root}/coding-plan-runs/{plan_id}.json`，selection 指向 fixture attempt/首 unit，
   phase=Started）；`runner.rs` 新增内联 `#[cfg(test)] mod tests`（原无测试模块），复刻
@@ -43,12 +43,13 @@
 
 | 命令 | 红（实现前） | 绿（rustfmt 后复验同） |
 |---|---|---|
-| `plan_coding_n5_` | 引擎 3 测业务红：完成后 attempt 仍 Running（旧路径推进下一 unit），`left: Running, right: Blocked`；runner 测业务红：单 unit 完成后直入 ReviewRequest/push——`git ls-remote --heads origin` 失败暴露无暂停短路；`plan_coding_n5_no_run_uses_existing_advance` 基线即绿（回归位） | **5 passed** |
-| `group_completion_authority`（计划指定绿窗） | — | 38 passed（含既有 owner-conflict/abort/mutation-pause 全族） |
-| `coding_plan_repair_group_completion` | — | 15 passed |
-| `plan_coding_n2_`（N2 pause 原语族，含 77ab13d7 相位门修复后状态） | — | 8 passed |
+| `plan_coding_n5_` | 初轮：引擎 3 测业务红（完成后 attempt 仍 Running，旧路径推进下一 unit，`left: Running, right: Blocked`）；runner 测业务红（单 unit 完成后直入 ReviewRequest/push，`git ls-remote --heads origin` 失败暴露无暂停短路）；`no_run_uses_existing_advance` 基线即绿（回归位）。P2 轮：新增 `plan_coding_n5_second_unit_advance_keeps_worktree_lock_transfer` 业务红——`issue_worktree_active: issue issue_0001 locked by work_item_0002`（重读后指针清空→advance 锁转移 from 回退创建期 WI≠锁 owner） | 初轮 **5 passed**；P2 轮后 **6 passed** |
+| `group_completion_authority`（计划指定绿窗） | — | 初轮 38；P2 轮后 **39 passed**（含既有 owner-conflict/abort/mutation-pause 全族） |
+| `coding_plan_repair_group_completion` | — | 15 passed（两轮均复验） |
+| `plan_coding_n2_`（N2 pause 原语族，含 77ab13d7 相位门修复后状态） | — | 8 passed（两轮均复验） |
 | `plan_coding_n1_` | — | 3 passed |
 | `group_final_readiness`（execute_start_coding_flow 面） | — | 30 passed |
+| `handoffs_worktree_routing` / `worktree_discipline` / `group_split_target`（P2 轮锁转移补充面） | — | 4 / 4 / 11 passed |
 | `runner`（web 全族） | — | 61 passed / **2 failed（既有红，非 N5，见下）** |
 
 新测试断言覆盖 plan 验收句：completion commit=git HEAD/权威 run Completed+commit/handoff/
@@ -57,7 +58,25 @@ gate（reason=`plan_coding_continuation_not_enabled`）；其余 units 保持 Pe
 SC selector 零落盘（`get_group_dependency_gate_snapshot` None）、review request/push 零
 （`list_review_requests` 空）、provider probe starts=0；runner emit session_state 后返回；
 暂停后重入 runner 被 `plan_coding_paused` 拒且状态零变化；integrity 认可合法暂停分支；
-无 run 旧 group 仍推进（unit2 Running+PrepareContext+无 gate）。
+无 run 旧 group 仍推进（unit2 Running+PrepareContext+无 gate）；非首 unit 完成时共享
+worktree 锁成功转移到下一 unit（P2 轮）。
+
+## P2 审查修复轮（commit：`fix: N5 advance传参保留更新前attempt`）
+
+- **缺陷**：尾部短路在 `update_coding_unit_status(Completed)` 后重读 attempt 再传
+  `advance_to_next_group_unit`；该 store 调用会同步清空 durable active/current 指针，
+  重读对象的 `active_work_item_id_for_attempt` 回退到创建期 `work_item_id`（不可变）。
+  多 unit（≥3）组完成**非首** unit 时，锁转移 from≠共享锁 owner（锁在刚完成 unit 的
+  WI 上）→ `issue_worktree_active` 失败。fixture 首 unit 恰为创建期 WI 故初轮未暴露。
+- **修复**：按审查 suggestion 保留更新前的内存 attempt 引用，pause 与 advance 一律传
+  旧值（`pause_completed_plan_first_unit` 内部 `validate_attempt_lineage` 重读磁盘，
+  传旧值安全）；旧路径 `complete_current_group_unit→advance` 本就传调用方内存对象，
+  行为对齐。初轮报告中「与原组合逐步等价」的断言按此修正：等价前提是传更新前引用。
+- **TDD**：红 `plan_coding_n5_second_unit_advance_keeps_worktree_lock_transfer`
+  （第 2 unit 完成+issue 共享锁 owner=attempt→断言锁成功转移到 work_item_0003 且
+  unit3 Running）；绿后 `plan_coding_n5_` 6/6、`group_completion_authority` 39、
+  `coding_plan_repair_group_completion` 15、`handoffs_worktree_routing` 4、
+  `worktree_discipline` 4、`group_split_target` 11、`plan_coding_n2_` 8 全绿。
 
 ## 既有红（非 N5，请 Main 知悉）
 
