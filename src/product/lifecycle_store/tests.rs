@@ -2844,3 +2844,4 @@ fn cascade_d1_3c_issue_admission_tolerates_backfill_tagged_record() {
         "tagged 态已删 Plan 现资源仍不得覆盖"
     );
 }
+include!("tests/cascade_d1_1.rs");
