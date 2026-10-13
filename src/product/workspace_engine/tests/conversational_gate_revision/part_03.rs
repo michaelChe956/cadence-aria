@@ -485,3 +485,289 @@ async fn conversational_gate_revision_rotates_stale_approval_tuple_then_confirm_
         "新代次 provenance 引用不得复用旧代次"
     );
 }
+
+// ---------------------------------------------------------------------------
+// SG6a.1（续 part_02）：业务事实缺少走原门（ExistingGate）、operational
+// waiting、类别/class_hint 不能许可、L1 多解不用户拓扑、超限 typed 系统
+// 故障、terminal replay 稳定拒收。
+// ---------------------------------------------------------------------------
+
+use crate::product::workspace_engine::conversational_gate::HUMAN_GATE_COMMAND_REPLAYED_AFTER_TERMINAL_TURN_CODE;
+
+/// 未 typed 编译失败候选：未知三级 section（`### 未知段`）在固定归一化
+/// 表外 → compiler 共享 `unknown_structured_key` 码、无 typed kind。其
+/// message/字段虽指向「section/heading」，但类别与 class_hint 不得许可
+/// L1——必须折叠为 Unknown、走原门（ExistingGate），零机器指令/零 claim。
+fn sg61_untyped_section_candidate() -> String {
+    REP4_FIXTURE.replace(
+        "## Work Item WI-002: Frontend level selector",
+        "## Work Item WI-002: Frontend level selector\n### 未知业务段",
+    )
+}
+
+/// SG6a.1 主验收③：业务事实缺少/未 typed 失败走原门——`ExistingGate`
+/// 分支零机器指令、零 claim、零 author；turn 仍 Running、门开态；类别
+/// 与 class_hint（message 里的 heading/section 字样）不构成 L1 许可。
+#[tokio::test]
+async fn sg_06a_1_untyped_failure_goes_existing_gate_and_category_cannot_license() {
+    let (_root, lifecycle, mut engine) = durable_revision_fixture("sg06a1_existing_gate", 3);
+    let turn_id = open_running_revision_turn(&mut engine, "sg06a1_existing_command").await;
+    let turn = lifecycle
+        .get_human_gate_turn(engine.session().session_id.as_str(), &turn_id)
+        .expect("turn after open");
+    sg61_seed_structural_grant(&lifecycle, &engine, &turn, 1);
+    let output = sg61_untyped_section_candidate();
+
+    let assessment = engine
+        .assess_sc_revision_output(&turn_id, &output)
+        .expect("untyped compile failure must still classify deterministically");
+    match &assessment {
+        StructuralAssessment::ExistingGate(set) => {
+            assert!(
+                set.failures.iter().all(|failure| matches!(
+                    failure.kind,
+                    crate::product::planning_failure::PlanningFailureKind::Unknown { .. }
+                )),
+                "untyped diagnostics fold to Unknown kinds, never inferred from message text"
+            );
+        }
+        other => panic!(
+            "untyped failure without business-fact evidence must hit the existing gate, got {other:?}"
+        ),
+    }
+
+    let result = engine
+        .run_sc_manual_revision_turn(&turn_id, output)
+        .await
+        .expect("existing-gate escalation is in-band");
+    assert!(matches!(
+        result,
+        crate::product::workspace_engine::ScManualRevisionResult::ValidationRejected { .. }
+    ));
+    // 原门语义：turn 仍 Running、grant 未被 claim 推进（零 L1 授权）、
+    // 零 provider 启动。
+    let turn_after = lifecycle
+        .get_human_gate_turn(engine.session().session_id.as_str(), &turn_id)
+        .expect("turn after existing-gate outcome");
+    assert_eq!(
+        turn_after.status,
+        crate::product::models::HumanGateTurnStatus::Running
+    );
+    let grant = sg61_current_grant(&lifecycle, engine.session().session_id.as_str())
+        .expect("seeded grant untouched");
+    assert_eq!(
+        grant.attempt_no, 1,
+        "ExistingGate outcome must not claim an L1 attempt"
+    );
+    assert_eq!(
+        grant.phase,
+        Some(crate::product::models::workspace::StructuralGrantPhase::AuthorRunning)
+    );
+}
+
+/// SG6a.1 主验收④⑤：operational 等待不驱 author（超硬限裁决 → 零
+/// claim/零启动，turn 仍 Running）；L1 多解（环修复候选族）不把拓扑
+/// 决策推给用户——指令为 Candidates 族（无唯一性标签）、不新开反馈轮、
+/// 用户零结构动作。
+#[tokio::test]
+async fn sg_06a_1_operational_waits_without_claim_and_l1_multi_solution_keeps_user_topology() {
+    // —— operational waiting：超 provider 硬限的失败候选，冻结 prompt
+    // 裁决 fail-closed（SG5.2 adjudicate），不 claim、不启动、turn Running。
+    let (_root, lifecycle, mut engine) = durable_revision_fixture("sg06a1_operational_wait", 3);
+    let turn_id = open_running_revision_turn(&mut engine, "sg06a1_wait_command").await;
+    let turn = lifecycle
+        .get_human_gate_turn(engine.session().session_id.as_str(), &turn_id)
+        .expect("turn after open");
+    sg61_seed_structural_grant(&lifecycle, &engine, &turn, 1);
+    let before_ledger = lifecycle
+        .get_workspace_session(engine.session().session_id.as_str())
+        .expect("session before")
+        .provider_start_ledger
+        .len();
+    // 环候选 + Rationale 填充超过 author provider（ClaudeCode）300,000B
+    // 硬限——冻结 prompt 裁决 fail-closed（SG5.2 adjudicate）。
+    let mut oversized = sg61_cycle_candidate();
+    while oversized.len() < 320_000 {
+        oversized.push_str("- 超限填充行：驱动冻结 prompt 超 provider 硬限的等待面。\n");
+    }
+    let result = engine
+        .run_sc_manual_revision_turn(&turn_id, oversized)
+        .await
+        .expect("operational wait is in-band");
+    assert!(matches!(
+        result,
+        crate::product::workspace_engine::ScManualRevisionResult::ValidationRejected {
+            ref diagnostics
+        } if diagnostics.iter().any(|line| line.contains("OVER_HARD_LIMIT"))
+    ));
+    let grant = sg61_current_grant(&lifecycle, engine.session().session_id.as_str())
+        .expect("grant untouched by operational wait");
+    assert_eq!(grant.attempt_no, 1, "operational wait must not claim");
+    assert_eq!(
+        lifecycle
+            .get_workspace_session(engine.session().session_id.as_str())
+            .expect("session after wait")
+            .provider_start_ledger
+            .len(),
+        before_ledger
+    );
+    assert_eq!(
+        lifecycle
+            .get_human_gate_turn(engine.session().session_id.as_str(), &turn_id)
+            .expect("turn after wait")
+            .status,
+        crate::product::models::HumanGateTurnStatus::Running
+    );
+
+    // —— L1 多解不用户拓扑：同一环失败的指令是 Candidates 候选族（无
+    // Precise 唯一性标签），author 在保护约束下选择；用户不必选仓 UUID、
+    // 删依赖或修行号——零新反馈轮（turn 计数不增）。
+    let (_root2, _lifecycle2, mut engine2) = durable_revision_fixture("sg06a1_multi_solution", 3);
+    let turn_id2 = open_running_revision_turn(&mut engine2, "sg06a1_multi_command").await;
+    let output2 = sg61_cycle_candidate();
+    let assessment = engine2
+        .assess_sc_revision_output(&turn_id2, &output2)
+        .expect("facts-complete cycle failure is L1-classifiable");
+    let instructions = match &assessment {
+        StructuralAssessment::Rejected(set, instructions) => {
+            assert!(
+                set.failures.iter().any(|failure| matches!(
+                    failure.kind,
+                    crate::product::planning_failure::PlanningFailureKind::DependencyCycle { .. }
+                )),
+                "cycle candidate must carry a typed DependencyCycle failure"
+            );
+            instructions
+        }
+        other => panic!("multi-solution cycle must stay L1 (Rejected), got {other:?}"),
+    };
+    let instruction = instructions
+        .first()
+        .expect("cycle failure yields machine instructions");
+    assert!(
+        matches!(
+            &instruction.solution,
+            crate::product::workspace_engine::contract_prerevision::StructuralRepairSolution::Candidates { .. }
+        ),
+        "topology-shaped repair space must expose candidates, never a fabricated unique fix"
+    );
+    assert!(
+        !instruction.expected_predicates.is_empty(),
+        "machine instructions must carry verifiable post-predicates"
+    );
+    assert!(
+        !instruction.forbidden_operations.is_empty(),
+        "protected business facts are enforced via explicit forbidden operations"
+    );
+    let turns = _lifecycle2
+        .list_human_gate_turns(engine2.session().session_id.as_str())
+        .expect("list turns");
+    assert_eq!(
+        turns.len(),
+        1,
+        "L1 repair drives the same turn (attempt2), not a new user feedback round"
+    );
+}
+
+/// SG6a.1 主验收⑥⑦：物理 attempt 耗尽 → typed 系统故障（稳定码、零
+/// claim 写、零第三次启动、turn 不先终态）；成功路径的 terminal replay
+/// 稳定拒收（command_id 复用可见回显）保持不变。
+#[tokio::test]
+async fn sg_06a_1_attempts_exhausted_typed_system_fault_and_terminal_replay_stable() {
+    let (_root, lifecycle, mut engine) = durable_revision_fixture("sg06a1_exhausted", 3);
+    let turn_id = open_running_revision_turn(&mut engine, "sg06a1_exhausted_command").await;
+    // L0 已消费 attempt2（恢复链同 turn 续跑一次）——物理上限耗尽。
+    let mut attempt2 = lifecycle
+        .get_human_gate_turn(engine.session().session_id.as_str(), &turn_id)
+        .expect("turn");
+    attempt2.attempt_no = 2;
+    let expected = lifecycle
+        .get_workspace_session(engine.session().session_id.as_str())
+        .expect("session");
+    lifecycle
+        .update_human_gate_turn(&expected, attempt2)
+        .expect("bump turn to attempt 2");
+    let before = lifecycle
+        .get_workspace_session(engine.session().session_id.as_str())
+        .expect("session after attempt bump");
+    let output = sg61_cycle_candidate();
+
+    // 判定面：attempt 耗尽 → typed 系统故障（Err 携稳定码），不是新的
+    // L1 资格。
+    let assessment = engine.assess_sc_revision_output(&turn_id, &output);
+    let failure = assessment.expect_err("exhausted attempts turn L1 into a typed system fault");
+    assert_eq!(
+        failure.stable_code(),
+        "STRUCTURAL_ATTEMPTS_EXHAUSTED",
+        "typed system fault must carry a stable code"
+    );
+
+    // 驱动面：同停点 in-band 回显；turn 不被先验终态化；session/grant
+    // 零新写、零第三次启动。
+    let result = engine
+        .run_sc_manual_revision_turn(&turn_id, output)
+        .await
+        .expect("typed system fault is in-band");
+    assert!(matches!(
+        result,
+        crate::product::workspace_engine::ScManualRevisionResult::ValidationRejected {
+            ref diagnostics
+        } if diagnostics
+            .iter()
+            .any(|line| line.contains("STRUCTURAL_ATTEMPTS_EXHAUSTED"))
+    ));
+    let after = lifecycle
+        .get_workspace_session(engine.session().session_id.as_str())
+        .expect("session after exhausted stop");
+    assert_eq!(
+        after.provider_start_ledger.len(),
+        before.provider_start_ledger.len(),
+        "no third provider start beyond the physical attempt cap"
+    );
+    assert_eq!(
+        lifecycle
+            .get_human_gate_turn(engine.session().session_id.as_str(), &turn_id)
+            .expect("turn after exhausted stop")
+            .status,
+        crate::product::models::HumanGateTurnStatus::Running,
+        "SG6a.1 does not terminalize; the exhaustion closure belongs to SG6a.3"
+    );
+
+    // —— terminal replay 稳定拒收（既有语义回归守卫）：成功完成后同
+    // command_id 重放 → typed 拒收回显。
+    let (_root2, lifecycle2, mut engine2) = durable_revision_fixture("sg06a1_replay_stable", 2);
+    let command_id = "sg06a1_replay_command".to_string();
+    let turn2 = open_running_revision_turn(&mut engine2, &command_id).await;
+    engine2
+        .run_sc_manual_revision_turn(&turn2, handoff_clean_rep4())
+        .await
+        .expect("successful revision completes the turn");
+    let ledger_before_replay = lifecycle2
+        .get_workspace_session(engine2.session().session_id.as_str())
+        .expect("session after successful revision")
+        .provider_start_ledger
+        .len();
+    let replay = engine2
+        .handle_human_gate_feedback(HumanGateFeedbackInput {
+            command_id,
+            feedback: "重放同一命令".to_string(),
+        })
+        .await
+        .expect("replay outcome is in-band");
+    match replay {
+        HumanGateCommandOutcome::Rejected { code, .. } => assert_eq!(
+            code, HUMAN_GATE_COMMAND_REPLAYED_AFTER_TERMINAL_TURN_CODE,
+            "terminal replay keeps its stable rejection code"
+        ),
+        other => panic!("terminal replay must stay a typed rejection, got {other:?}"),
+    }
+    assert_eq!(
+        lifecycle2
+            .get_workspace_session(engine2.session().session_id.as_str())
+            .expect("session after replay")
+            .provider_start_ledger
+            .len(),
+        ledger_before_replay,
+        "terminal replay is zero-side-effect on the provider ledger"
+    );
+}
