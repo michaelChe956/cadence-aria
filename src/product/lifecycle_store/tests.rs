@@ -709,3 +709,55 @@ include!("tests/human_gate_close_promotion.rs");
 include!("tests/tool_policy_audit.rs");
 // 聚合视野 StorySpec/DesignSpec scope 校验与 confirm gate 测试拆分到独立文件，经 include! 引入（large_file_guard 1200 行红线）。
 include!("tests/aggregate_spec_scope.rs");
+
+// SG4a.0（plan v1.1 §0.6.1）：durable store 兼容——旧 session JSON 缺
+// structural_governance_state 经 store 读写保持 None/不拒收；含聚合状态
+// 的 JSON 落盘后 store 读出不丢；ledger 旧 started=true 不在 store 路径
+// 冒充实际 start（聚合 launch 证据读 Unknown）。
+#[test]
+fn sg_04a_0_store_session_json_preserves_governance_state_compat() {
+    let (_tmp, store) = setup();
+    let session = create_session(&store, "work_item_plan_0001", WorkspaceType::WorkItemPlan);
+    let session_path = store
+        .app_paths()
+        .issue_lifecycle_root(PROJECT_ID, ISSUE_ID)
+        .join("workspace-sessions")
+        .join(format!("{}.json", session.id));
+
+    // ① 手写旧 JSON（缺聚合字段、ledger started=true）→ store 读出成功且
+    //    不凭空长出聚合状态。
+    let mut old = serde_json::to_value(&session).unwrap();
+    old["provider_start_ledger"] = serde_json::json!([
+        {"provider_start_idempotency_key": "workspace_author:session:0", "started": true}
+    ]);
+    old.as_object_mut()
+        .unwrap()
+        .remove("structural_governance_state");
+    write_json(&session_path, &old).unwrap();
+    let reloaded = store.get_workspace_session(&session.id).unwrap();
+    let encoded = serde_json::to_value(&reloaded).unwrap();
+    assert!(
+        encoded.get("structural_governance_state").is_none(),
+        "旧 durable 记录经 store 读写不得凭空长出聚合状态"
+    );
+
+    // ② 含聚合状态的 JSON 落盘 → store 读出保留；缺字段 launch 证据读
+    //    Unknown，不被 ledger 旧 started=true 抬成实际 start。
+    let mut with_state = old;
+    with_state["structural_governance_state"] =
+        serde_json::json!({"user_budget_total": 3, "launch_evidence": {}});
+    write_json(&session_path, &with_state).unwrap();
+    let reloaded = store.get_workspace_session(&session.id).unwrap();
+    let encoded = serde_json::to_value(&reloaded).unwrap();
+    let state = encoded["structural_governance_state"]
+        .as_object()
+        .expect("聚合状态经 store 读写必须保留");
+    assert_eq!(
+        state
+            .get("launch_evidence")
+            .and_then(|value| value.get("launch_state")),
+        Some(&serde_json::json!("unknown")),
+        "旧 started 布尔不得在 store 路径冒充实际 start"
+    );
+    assert_eq!(state.get("user_budget_total"), Some(&serde_json::json!(3)));
+}

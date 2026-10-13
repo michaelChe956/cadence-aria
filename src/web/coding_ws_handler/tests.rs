@@ -272,6 +272,7 @@ fn falls_back_to_assistant_artifact_when_persisted_markdown_lacks_commands() {
         logical_launch_fingerprints: Vec::new(),
         superseded_native_sessions: Vec::new(),
         lc_resume_recovery: None,
+        structural_governance_state: None,
     };
 
     let selected = select_work_item_markdown(

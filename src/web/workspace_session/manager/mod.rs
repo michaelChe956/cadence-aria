@@ -10,8 +10,8 @@ use crate::product::app_paths::ProductAppPaths;
 use crate::product::checkpoint_store::CheckpointStore;
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::logical_codebase::resolve_issue_logical_codebase_id;
-use crate::product::workspace_engine::conversational_gate::ConfirmationTrustContext;
 use crate::product::models::WorkspaceSessionRecord;
+use crate::product::workspace_engine::conversational_gate::ConfirmationTrustContext;
 use crate::product::workspace_engine::{EngineEvent, WorkspaceEngine, WorkspaceSession};
 use crate::product::workspace_repository::workspace_repository_for_session;
 use crate::web::state::WebAppState;
@@ -285,6 +285,7 @@ pub(crate) fn test_session_record(session_id: &str) -> WorkspaceSessionRecord {
         logical_launch_fingerprints: Vec::new(),
         superseded_native_sessions: Vec::new(),
         lc_resume_recovery: None,
+        structural_governance_state: None,
     }
 }
 
@@ -414,13 +415,12 @@ impl WorkspaceSessionManager {
                 .trust()
                 .cloned()
             {
-                engine_workspace = engine_workspace.with_confirmation_trust_context(
-                    ConfirmationTrustContext {
+                engine_workspace =
+                    engine_workspace.with_confirmation_trust_context(ConfirmationTrustContext {
                         precondition,
                         issue_lc_id: lc_id.clone(),
                         frozen_root,
-                    },
-                );
+                    });
             }
             engine_workspace = engine_workspace.with_logical_provider_gateway(Arc::new(gateway));
         }

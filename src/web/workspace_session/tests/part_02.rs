@@ -188,6 +188,7 @@ fn automation_test_record(
         logical_launch_fingerprints: Vec::new(),
         superseded_native_sessions: Vec::new(),
         lc_resume_recovery: None,
+        structural_governance_state: None,
     }
 }
 

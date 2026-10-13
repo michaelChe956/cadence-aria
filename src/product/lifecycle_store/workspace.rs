@@ -321,6 +321,7 @@ impl LifecycleStore {
             logical_launch_fingerprints: Vec::new(),
             superseded_native_sessions: Vec::new(),
             lc_resume_recovery: None,
+            structural_governance_state: None,
         };
 
         super::ensure_target_absent(&target_path)?;

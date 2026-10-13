@@ -644,8 +644,8 @@ mod anchor_t03_tests {
     use crate::product::models::{
         LcFreshOperationResult, LcFreshOperationState, LcRecoveryBusinessContext,
         LcRecoveryDraftRef, LcRecoveryRunContext, LcResumeRecoveryRecord, LcResumeRecoveryState,
-        ProviderConversationRole, ProviderName, WorkspaceRolePermissionModes,
-        WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceType, WorkItemDraftStatus,
+        ProviderConversationRole, ProviderName, WorkItemDraftStatus, WorkspaceRolePermissionModes,
+        WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceType,
     };
     use crate::product::work_item_plan_policy::{RunHistory, RunPolicy, WorkItemPlanFlowKind};
     use crate::product::workspace_engine::{WorkspaceEngine, WorkspaceSession};
@@ -694,6 +694,7 @@ mod anchor_t03_tests {
             logical_launch_fingerprints: Vec::new(),
             superseded_native_sessions: Vec::new(),
             lc_resume_recovery: recovery,
+            structural_governance_state: None,
             messages: Vec::new(),
             created_at: "2026-10-11T00:00:00Z".to_string(),
             updated_at: "2026-10-11T00:00:00Z".to_string(),
@@ -783,7 +784,8 @@ mod anchor_t03_tests {
     #[test]
     fn anchor_t03_build_session_state_projects_durable_recovery() {
         // durable 字段（from_record 透传）→ SessionState 纯投影。
-        let (engine, _tmp_guard) = anchor_t03_engine(anchor_t03_record(Some(anchor_t03_recovery())));
+        let (engine, _tmp_guard) =
+            anchor_t03_engine(anchor_t03_record(Some(anchor_t03_recovery())));
         match engine.build_session_state() {
             WsOutMessage::SessionState {
                 lc_resume_recovery: Some(dto),

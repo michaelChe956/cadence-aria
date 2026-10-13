@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use super::human_gate::{HumanGateReservation, HumanGateTurnStatus};
+use super::human_gate::{
+    HumanGateReservation, HumanGateTurnStatus, UserBudgetHold, UserBudgetReceipt,
+};
 use crate::cross_cutting::streaming_provider::ProviderPermissionMode;
 use crate::product::work_item_plan_policy::{
     HumanGateSnapshot, PolicyDiagnostic, ProviderStartLedgerEntry, RepairReservation,
@@ -101,7 +103,6 @@ pub enum ScRecoveryClaimState {
     Accepted,
     NeedsHuman,
 }
-
 
 /// A1a（Task 2.1）：LC launch 指纹的 basis。旧 basis 不与新 full 混比；
 /// 缺 map/旧 basis → `resume_fingerprint_unavailable` 等待，不自动回填。
@@ -404,6 +405,187 @@ pub struct LcResumeRecoveryRecord {
     pub detected_at: String,
     pub updated_at: String,
 }
+
+/// SG4a.0（plan v1.1 §0.5/§0.6.1）：结构治理唯一耐久聚合状态。纯模型
+/// 兼容迁移——旧 session 记录整体 None/空，不回填、不授予任何执行权；
+/// hold 结算/预算数学/attempt 账本归 SG4a/SG4b/SG6，runtime 镜像与
+/// from_record 接线归 SG7a。accepted_feedback_turns 单源仍为
+/// HumanGateSnapshot，actual launch 单源仍为 provider_start_ledger，
+/// 本聚合不另立第二总账。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StructuralGovernanceState {
+    /// 当前结构修订授权窗口；旧记录 None（无授权，不回填）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_grant: Option<StructuralRevisionGrant>,
+    /// 用户结构预算总额（沿现 human gate 默认 3）；可用额数学
+    /// （总额−已计费 receipt−活动 hold）归 SG4a 投影，不在本字段预存。
+    #[serde(default = "default_structural_user_budget_total")]
+    pub user_budget_total: u32,
+    /// 活动用户预算 hold（按 turn 幂等；SG4a.0 恒空，仅耐久形状）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub user_holds: Vec<UserBudgetHold>,
+    /// 三终态用户预算 receipt（按 turn 幂等互斥；SG4a.0 恒空，仅耐久形状）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub user_receipts: Vec<UserBudgetReceipt>,
+    /// 跨合法业务轮次继承的结构 checkpoint（SG4a.0 恒空，仅耐久形状）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub structure_checkpoints: Vec<StructuralCheckpoint>,
+    /// 已解决结构事实（规则谓词＋证据；SG4a.0 恒空，仅耐久形状）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resolved_structure_facts: Vec<ResolvedStructureFact>,
+    /// 当前结构报告 ref（同当前 mechanical_report_ref 的聚合位；不另立
+    /// 与 source/IR/report 三 refs 脱节的第四候选权威）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_structure_report_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_context_digest: Option<String>,
+    /// 可选 turn 摘要（呈现用；accepted 单源仍为 gate 快照，不是第二总账）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_turn_summary: Option<String>,
+    /// 可选 launch reason（启动动机说明；不是启动授权）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_reason: Option<String>,
+    /// 可选 launch 证据（实际观察承载；旧 started 布尔不构成证据）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_evidence: Option<StructuralLaunchEvidence>,
+}
+
+fn default_structural_user_budget_total() -> u32 {
+    3
+}
+
+/// 结构修订授权窗口（§0.5：绑定原 authorization hash/turn/command 与中间
+/// candidate/phase/attempt/prompt/review 身份）。SG4a.0 只落耐久形状：
+/// 缺字段默认 None/0，不构成任何新授权；claim/attempt 语义归 SG4a。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StructuralRevisionGrant {
+    pub grant_id: String,
+    /// 原授权身份摘要（typed feedback turn／原 run 等耐久授权的 hash）。
+    #[serde(default)]
+    pub authorization_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_id: Option<String>,
+    /// 中间候选身份（同代 source/IR/report refs，不另立第二权威）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_source_revision_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_candidate_ir_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mechanical_report_ref: Option<String>,
+    /// grant phase（§0.5：非人工门枚举；缺字段读 None=Unknown，无阶段权）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<StructuralGrantPhase>,
+    #[serde(default)]
+    pub attempt_no: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_identity: Option<String>,
+    pub granted_at: String,
+}
+
+/// grant phase（§0.5 SG4a：AuthorRunning/…/BusinessGate，非人工门枚举）。
+/// SG4a.0 仅形状；阶段推进权归 SG4a。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StructuralGrantPhase {
+    AuthorRunning,
+    Assessing,
+    InstructionFrozen,
+    Attempt2Claimed,
+    Reviewing,
+    BlockedByLcRecovery,
+    Resolved,
+    SystemFault,
+    BusinessGate,
+}
+
+/// 结构 checkpoint（§0.5：整组 refs/version/hash/context/authorization/
+/// receipt/review scope/status；跨合法业务轮次继承，不重置预算）。
+/// SG4a.0 恒空，仅耐久形状。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StructuralCheckpoint {
+    pub checkpoint_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_revision_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_candidate_ir_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structure_report_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_version: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_scope: Option<String>,
+    /// checkpoint 状态；缺字段读 Unknown（无推进权）。
+    #[serde(default)]
+    pub status: StructuralCheckpointStatus,
+    pub recorded_at: String,
+}
+
+/// checkpoint 状态；旧/缺字段读 Unknown，不构成推进事实。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum StructuralCheckpointStatus {
+    #[default]
+    Unknown,
+    Active,
+    Superseded,
+}
+
+/// 已解决结构事实（§0.5：规则谓词＋证据，非固定边值）。历史恢复整组
+/// 回绑边界归 SG6；SG4a.0 恒空，仅耐久形状。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResolvedStructureFact {
+    /// 规则谓词单源标识（finding code／谓词名，非边值）。
+    pub predicate: String,
+    /// 证据 refs（source/report/instruction 等耐久引用）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence_refs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_hash: Option<String>,
+    pub resolved_at: String,
+}
+
+/// launch 实际观察证据（设计 v1.1：launch_state/launch_observed_at/
+/// launch_evidence_ref）。actual launch 单源仍为 provider_start_ledger
+/// ——旧 started 布尔不用于新链证据、不冒充实际 start；缺字段读 Unknown。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StructuralLaunchEvidence {
+    #[serde(default)]
+    pub launch_state: StructuralLaunchState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_observed_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_evidence_ref: Option<String>,
+}
+
+/// launch 观察态；缺字段读 Unknown（旧 started 布尔不映射为 Started）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum StructuralLaunchState {
+    #[default]
+    Unknown,
+    NotStarted,
+    Started,
+    Completed,
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct WorkspaceSessionRecord {
@@ -480,6 +662,11 @@ pub struct WorkspaceSessionRecord {
     /// A1a（Task 2.1）：当前 LC 恢复记录（waiting/fresh/resolved 主状态）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lc_resume_recovery: Option<LcResumeRecoveryRecord>,
+    /// SG4a.0（§0.6.1）：结构治理唯一耐久聚合状态；旧 JSON 缺失读 None
+    /// （不回填、不补授权）。hold 结算/启动行为归 SG4a/4b，runtime 镜像
+    /// 与 from_record 接线归 SG7a。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structural_governance_state: Option<StructuralGovernanceState>,
     pub messages: Vec<WorkspaceMessageRecord>,
     pub created_at: String,
     pub updated_at: String,

@@ -58,3 +58,72 @@ pub struct HumanGateReservation {
     pub provider_start_idempotency_key: String,
     pub reserved_at: String,
 }
+
+/// SG4a.0（plan v1.1 §0.5/§0.6.1）：用户预算 hold——接受真实反馈时占用
+/// 一轮可用预算的耐久锚（按 turn 幂等）。本包只落耐久形状：旧记录恒不
+/// 产生，reserve/settle 行为归 SG4a。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UserBudgetHold {
+    pub turn_id: String,
+    pub command_id: String,
+    /// hold 冻结时候选 source hash（对齐 HumanGateTurn.source_hash 语义；
+    /// 空值仅旧 JSON 兼容）。
+    #[serde(default)]
+    pub source_hash: String,
+    pub held_at: String,
+}
+
+/// 三终态用户预算 receipt（REQ-CG-02/05：按 turn 幂等互斥、恰一次）。
+/// 本包只落耐久形状，结算逻辑归 SG4a。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UserBudgetReceipt {
+    pub kind: UserBudgetReceiptKind,
+    pub turn_id: String,
+    pub command_id: String,
+    /// attempt 归因（REQ-CG-05：attempt reason 同 session CAS 绑定）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_reason: Option<StructuralAttemptReason>,
+    /// 结算绑定的同代 refs/digest（诊断聚合，不另立第二候选权威）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_revision_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_candidate_ir_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structure_report_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_digest: Option<String>,
+    pub settled_at: String,
+}
+
+/// 三终态 receipt 种类（REQ-CG-02：可用预算 = 总额 − delivered_charge −
+/// nonstructural_failure_charge − 活动 hold；仅 typed
+/// structural_exhausted_before_delivery 释放为 released_structural）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UserBudgetReceiptKind {
+    DeliveredCharge,
+    NonstructuralFailureCharge,
+    ReleasedStructural,
+}
+
+/// 结构 attempt 归因（§0.5：HumanRevision/MechanicalRecovery/
+/// StructuralRepair/ExplicitFresh）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StructuralAttemptReason {
+    HumanRevision,
+    MechanicalRecovery,
+    StructuralRepair,
+    ExplicitFresh,
+}
+
+/// 预算分层（§0.5：user/structural/mechanical 事件分层可重建）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BudgetLayer {
+    User,
+    Structural,
+    Mechanical,
+}

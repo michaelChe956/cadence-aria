@@ -392,6 +392,7 @@ fn workspace_session_runtime_binding_is_optional_and_work_item_scoped() {
         logical_launch_fingerprints: Vec::new(),
         superseded_native_sessions: Vec::new(),
         lc_resume_recovery: None,
+        structural_governance_state: None,
     };
 
     assert_serde_roundtrip(&session);
@@ -1305,6 +1306,7 @@ fn anchor_t02_session_record() -> WorkspaceSessionRecord {
         )],
         superseded_native_sessions: vec![anchor_t02_superseded_native_session()],
         lc_resume_recovery: Some(anchor_t02_recovery_record(LcResumeRecoveryState::Waiting)),
+        structural_governance_state: None,
     }
 }
 
@@ -1340,4 +1342,180 @@ fn anchor_t02_legacy_json_and_runtime_restore_defaults() {
     let mut reloaded = reloaded;
     reloaded.repository_path = Some(injected_business_path.clone());
     assert_eq!(reloaded.repository_path, Some(injected_business_path));
+}
+
+// === SG4a.0（plan v1.1 §0.6.1）：结构治理聚合状态的旧记录兼容闭包 ===
+// 旧 session JSON 缺 structural_governance_state 读 None（无授权/无实际
+// start）；ledger 旧 started=true 不冒充实际 start；新可选字段 roundtrip、
+// 缺省子字段读 Unknown/None/默认；非法 future 权限字段仍拒；原
+// budget_reserved 预算值不改。
+
+fn sg_04a_0_old_session_json() -> serde_json::Value {
+    serde_json::json!({
+        "id": "workspace_session_0001",
+        "project_id": "project_0001",
+        "issue_id": "issue_0001",
+        "entity_id": "work_item_plan_0001",
+        "workspace_type": "work_item_plan",
+        "status": "waiting_for_human",
+        "author_provider": "codex",
+        "reviewer_provider": "claude_code",
+        "review_rounds": 2,
+        "superpowers_enabled": true,
+        "openspec_enabled": true,
+        // 旧 started 布尔=true 的 ledger 条目：幂等占位事实，不是实际 launch 证据。
+        "provider_start_ledger": [
+            {"provider_start_idempotency_key": "workspace_author:session:0", "started": true}
+        ],
+        "messages": [],
+        "created_at": "2026-10-13T00:00:00Z",
+        "updated_at": "2026-10-13T00:00:00Z"
+    })
+}
+
+fn sg_04a_0_full_governance_state_json() -> serde_json::Value {
+    serde_json::json!({
+        "current_grant": {
+            "grant_id": "sgr_0001",
+            "authorization_hash": "sha256:auth",
+            "turn_id": "turn_0001",
+            "command_id": "command_0001",
+            "candidate_source_revision_ref": "source_revision_0001",
+            "plan_candidate_ir_ref": "plan_candidate_ir_0001",
+            "mechanical_report_ref": "mechanical_report_0001",
+            "phase": "reviewing",
+            "attempt_no": 1,
+            "prompt_ref": "prompt_0001",
+            "prompt_digest": "sha256:prompt",
+            "review_identity": "review_cycle_0001",
+            "granted_at": "2026-10-13T00:00:00Z"
+        },
+        "user_budget_total": 3,
+        "user_holds": [
+            {"turn_id": "turn_0001", "command_id": "command_0001",
+             "source_hash": "sha256:source", "held_at": "2026-10-13T00:00:00Z"}
+        ],
+        "user_receipts": [
+            {"kind": "delivered_charge", "turn_id": "turn_0000",
+             "command_id": "command_0000", "attempt_reason": "human_revision",
+             "source_revision_ref": "source_revision_0000",
+             "plan_candidate_ir_ref": "plan_candidate_ir_0000",
+             "structure_report_ref": "mechanical_report_0000",
+             "context_digest": "sha256:context", "settled_at": "2026-10-12T00:00:00Z"}
+        ],
+        "structure_checkpoints": [
+            {"checkpoint_id": "ckpt_0001",
+             "source_revision_ref": "source_revision_0001",
+             "plan_candidate_ir_ref": "plan_candidate_ir_0001",
+             "structure_report_ref": "mechanical_report_0001",
+             "artifact_version": 2,
+             "source_hash": "sha256:source",
+             "context_digest": "sha256:context",
+             "authorization_hash": "sha256:auth",
+             "receipt_ref": "user_receipt:turn_0000",
+             "review_scope": "single_candidate",
+             "status": "active",
+             "recorded_at": "2026-10-13T00:00:00Z"}
+        ],
+        "resolved_structure_facts": [
+            {"predicate": "dependency_cycle_resolved",
+             "evidence_refs": ["mechanical_report_0001"],
+             "source_hash": "sha256:source",
+             "resolved_at": "2026-10-13T00:00:00Z"}
+        ],
+        "current_structure_report_ref": "mechanical_report_0001",
+        "current_context_digest": "sha256:context",
+        "current_turn_summary": "turn 1 结构修订摘要",
+        "launch_reason": "human revision re-drive",
+        "launch_evidence": {
+            "launch_state": "started",
+            "launch_observed_at": "2026-10-13T01:00:00Z",
+            "launch_evidence_ref": "provider_start_ledger:workspace_author:session:0"
+        }
+    })
+}
+
+#[test]
+fn sg_04a_0_old_record_no_authority_or_actual_start() {
+    // ① 旧 JSON（缺 structural_governance_state）反序列化成功，重序列化
+    //    不凭空长出聚合状态——grant/receipt/checkpoint/launch 全 None/空。
+    let old = sg_04a_0_old_session_json();
+    let record: WorkspaceSessionRecord = serde_json::from_value(old).unwrap();
+    let encoded = serde_json::to_value(&record).unwrap();
+    assert!(
+        encoded.get("structural_governance_state").is_none(),
+        "旧记录不得凭空长出结构治理聚合状态"
+    );
+
+    // ② 旧 started=true 不变成真实 start：注入缺字段 launch_evidence 的
+    //    聚合状态，roundtrip 后 launch_state 仍 Unknown，不得被 ledger 旧
+    //    布尔抬成 started/completed。
+    let mut with_unknown_launch = sg_04a_0_old_session_json();
+    with_unknown_launch["structural_governance_state"] = serde_json::json!({"launch_evidence": {}});
+    let record: WorkspaceSessionRecord = serde_json::from_value(with_unknown_launch).unwrap();
+    let encoded = serde_json::to_value(&record).unwrap();
+    let state = encoded["structural_governance_state"]
+        .as_object()
+        .expect("新可选字段必须 roundtrip 保留（serde default/skip_none）");
+    assert_eq!(
+        state
+            .get("launch_evidence")
+            .and_then(|value| value.get("launch_state")),
+        Some(&serde_json::json!("unknown")),
+        "缺字段的 launch 证据必须读 Unknown，旧 started 布尔不冒充实际 start"
+    );
+    assert_eq!(
+        state.get("user_budget_total"),
+        Some(&serde_json::json!(3)),
+        "预算总额缺省沿现 gate 默认 3"
+    );
+
+    // ③ session 顶层未知字段容忍度不变（record 不加 deny，旧容错保持）。
+    let mut tolerant = sg_04a_0_old_session_json();
+    tolerant["future_top_level_field"] = serde_json::json!(true);
+    assert!(serde_json::from_value::<WorkspaceSessionRecord>(tolerant).is_ok());
+
+    // ④ 原 budget_reserved 预算值不改（HumanGateTurn 单源不动）。
+    let turn: HumanGateTurn = serde_json::from_value(serde_json::json!({
+        "turn_id": "turn_0001",
+        "session_id": "workspace_session_0001",
+        "command_id": "command_0001",
+        "feedback_text": "please revise",
+        "status": "reserved",
+        "attempt_no": 1,
+        "budget_reserved": 1,
+        "source_hash": "sha256:source",
+        "result_artifact_ref": null,
+        "failure_class": null,
+        "created_at": "2026-10-13T00:00:00Z",
+        "updated_at": "2026-10-13T00:00:00Z"
+    }))
+    .unwrap();
+    assert_eq!(turn.budget_reserved, 1);
+}
+
+#[test]
+fn sg_04a_0_governance_state_roundtrip_and_future_field_rejection() {
+    // ① 新可选字段完整 roundtrip：typed 值往返等价（skip_none 不新增字段、
+    //    默认值不漂移）。
+    let mut full = sg_04a_0_old_session_json();
+    let expected_state = sg_04a_0_full_governance_state_json();
+    full["structural_governance_state"] = expected_state.clone();
+    let record: WorkspaceSessionRecord = serde_json::from_value(full).unwrap();
+    let encoded = serde_json::to_value(&record).unwrap();
+    assert_eq!(
+        encoded["structural_governance_state"], expected_state,
+        "聚合状态全字段必须 roundtrip 等价"
+    );
+
+    // ② 非法 future 权限字段仍拒：聚合状态内的未知权限字段 fail-closed。
+    let mut forged = sg_04a_0_old_session_json();
+    forged["structural_governance_state"] = serde_json::json!({
+        "user_budget_total": 3,
+        "authorization_granted": true
+    });
+    assert!(
+        serde_json::from_value::<WorkspaceSessionRecord>(forged).is_err(),
+        "聚合状态内的未知/future 权限字段必须拒收"
+    );
 }

@@ -228,6 +228,7 @@ pub(super) fn scope_test_context(
         logical_launch_fingerprints: vec![],
         superseded_native_sessions: vec![],
         lc_resume_recovery: None,
+        structural_governance_state: None,
     };
     let session = WorkspaceSession::from_record(session_record.clone());
     let (event_tx, event_rx) = mpsc::channel(8);
