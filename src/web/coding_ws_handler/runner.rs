@@ -866,6 +866,19 @@ pub(crate) async fn execute_start_coding_flow(
                 .complete_group_unit_after_code_review(&current)
                 .await?;
             refresh_runtime_history(&current)?;
+            // N5（REQ-CS-05）：group completion 返回后、任何 ReviewRequest/push
+            // 分支之前识别真实 plan-run 安全暂停（matching first_ready run
+            // phase=Paused，而非任意 Blocked 文本），emit session_state 并立即
+            // return——不依赖 stage 自然停止，内部循环不再获得推进机会。
+            if engine.plan_first_unit_safely_paused(&current)? {
+                return emit_current_session_state(
+                    event_tx,
+                    coding_store,
+                    &current,
+                    engine.cancellation_token(),
+                )
+                .await;
+            }
             emit_current_session_state(
                 event_tx,
                 coding_store,
@@ -934,5 +947,673 @@ pub(crate) async fn execute_start_coding_flow(
         }
 
         unreachable!("only work-item and work-item-group coding attempt scopes exist");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::path::Path;
+    use std::process::Command as StdCommand;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
+
+    use crate::cross_cutting::provider_adapter::ProviderAdapterError;
+    use crate::cross_cutting::provider_registry::ProviderRegistry;
+    use crate::cross_cutting::streaming_provider::{
+        ProviderSession, StreamingProviderAdapter, StreamingProviderInput,
+    };
+    use crate::product::app_paths::ProductAppPaths;
+    use crate::product::coding_attempt_store::{
+        CodingAttemptStore, CreateCodingExecutionUnitInput, CreateGroupCodingAttemptInput,
+    };
+    use crate::product::coding_models::{
+        CodingAttemptPlanBinding, CodingAttemptStatus, CodingExecutionAttempt,
+        CodingExecutionUnitStatus, CodingUnitRun, CodingUnitRunStatus,
+    };
+    use crate::product::coding_plan_run::{
+        CodingPlanRun, CodingPlanRunPhase, CodingPlanRunStore, CodingPlanSelection,
+        PLAN_CODING_MODE_FIRST_READY_UNIT,
+    };
+    use crate::product::coding_workspace_engine::CodingWorkspaceEngine;
+    use crate::product::git_workspace_service::GitWorkspaceService;
+    use crate::product::models::ProviderName;
+    use crate::product::models::{
+        DependencyGraphRevision, LogicalWorkItem, PlanProjectionBundle, PlanRevisionReason,
+        VerificationPlanRevision, WorkItemPlanLineage, WorkItemPlanRevision,
+        WorkItemProjectionBundle, WorkItemRevision,
+    };
+    use crate::product::work_item_contract::{
+        CanonicalWorkItemContract, HandoffContract, WorkItemContractIdentity, WorkItemGoal,
+        WorkItemWritePolicy, canonical_contract_hash,
+    };
+    use crate::product::work_item_projection::{
+        CoderGroupContext, CompiledPlanProjections, HumanGroupProjection,
+        HumanGroupWorkItemSummary, ReviewerGroupMatrix, ReviewerGroupMatrixEntry,
+        WorkItemProjectionCompiler, plan_projection_hashes, projection_hashes, renderer_for,
+    };
+    use crate::product::work_item_revision_store::WorkItemRevisionStore;
+    use crate::web::coding_ws_handler::execute_start_coding_flow;
+    use crate::web::runtime::WebRuntime;
+    use crate::web::state::WebAppState;
+    use crate::web::workspace_ws_types::ProviderConfigSnapshot;
+
+    use tempfile::TempDir;
+
+    /// 受控 provider probe：任何 start 都计数并失败——暂停路径 provider
+    /// 计数必须为 0。
+    #[derive(Clone, Default)]
+    struct CountingProvider {
+        starts: Arc<AtomicUsize>,
+    }
+    impl CountingProvider {
+        fn starts(&self) -> usize {
+            self.starts.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl StreamingProviderAdapter for CountingProvider {
+        async fn start(
+            &self,
+            _input: StreamingProviderInput,
+            _cancel: CancellationToken,
+        ) -> Result<ProviderSession, ProviderAdapterError> {
+            self.starts.fetch_add(1, Ordering::SeqCst);
+            Err(ProviderAdapterError::command_missing(
+                "provider must not start during the plan-coding pause",
+            ))
+        }
+    }
+
+    struct N5RunnerFixture {
+        _root: TempDir,
+        paths: ProductAppPaths,
+        store: CodingAttemptStore,
+        attempt: CodingExecutionAttempt,
+        unit: crate::product::coding_models::CodingExecutionUnit,
+        original_head: String,
+    }
+
+    fn run_git(worktree: &Path, args: &[&str]) {
+        let status = StdCommand::new("git")
+            .args(args)
+            .current_dir(worktree)
+            .status()
+            .expect("git command");
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    fn git_head(worktree: &Path) -> String {
+        let output = StdCommand::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(worktree)
+            .output()
+            .expect("git rev-parse");
+        assert!(output.status.success(), "git rev-parse failed");
+        String::from_utf8(output.stdout)
+            .expect("utf8 head")
+            .trim()
+            .to_string()
+    }
+
+    fn minimal_contract(logical_id: &str) -> CanonicalWorkItemContract {
+        CanonicalWorkItemContract {
+            intent_contract: None,
+            schema_version: 1,
+            identity: WorkItemContractIdentity {
+                logical_work_item_id: logical_id.to_string(),
+                title: logical_id.to_string(),
+                kind: "implementation".to_string(),
+            },
+            goal: WorkItemGoal {
+                summary: logical_id.to_string(),
+            },
+            non_goals: Vec::new(),
+            depends_on: Vec::new(),
+            input_contracts: Vec::new(),
+            output_contracts: Vec::new(),
+            tasks: Vec::new(),
+            write_policy: WorkItemWritePolicy {
+                exclusive_scopes: Vec::new(),
+                forbidden_scopes: Vec::new(),
+            },
+            acceptance_criteria: Vec::new(),
+            verification_checks: Vec::new(),
+            handoff_contract: HandoffContract {
+                required_fields: Vec::new(),
+                provided_contract_refs: Vec::new(),
+                reviewer_check_refs: Vec::new(),
+            },
+            blocker_rules: Vec::new(),
+            design_traceability: Vec::new(),
+        }
+    }
+
+    /// 单 unit group 夹具：attempt Running@ReviewRequest + 活跃 Running
+    /// unit run + 完整 plan lineage/binding（web 版 plan_repair 支撑夹具的
+    /// 最小化复刻；进入 ReviewRequest 完成分支不需要 provider 会话）。
+    fn n5_runner_fixture() -> N5RunnerFixture {
+        let root = TempDir::new().expect("temp dir");
+        let paths = ProductAppPaths::new(root.path().join(".aria"));
+        let worktree = root.path().join("worktree");
+        std::fs::create_dir_all(&worktree).expect("worktree directory");
+        run_git(&worktree, &["init", "--quiet"]);
+        run_git(&worktree, &["config", "user.email", "n5@example.test"]);
+        run_git(&worktree, &["config", "user.name", "N5 Runner"]);
+        std::fs::write(worktree.join("README.md"), "# n5\n").expect("readme");
+        run_git(&worktree, &["add", "README.md"]);
+        run_git(&worktree, &["commit", "--quiet", "-m", "initial commit"]);
+        let original_head = git_head(&worktree);
+
+        let store = CodingAttemptStore::new(paths.clone());
+        let attempt = store
+            .create_group_attempt(CreateGroupCodingAttemptInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                plan_id: "work_item_plan_0001".to_string(),
+                current_work_item_id: "wi_current".to_string(),
+                base_branch: original_head.clone(),
+                branch_name: "aria/issues/issue_0001".to_string(),
+                worktree_path: Some(worktree.clone()),
+                provider_config_snapshot: ProviderConfigSnapshot {
+                    author: ProviderName::Codex,
+                    reviewer: Some(ProviderName::ClaudeCode),
+                    review_rounds: 1,
+                    permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(
+                    ),
+                },
+                target_snapshot: None,
+                max_auto_rework: 2,
+                start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+            })
+            .expect("group attempt");
+
+        let revision_store = WorkItemRevisionStore::new(paths.clone());
+        let plan = WorkItemPlanLineage {
+            id: "work_item_plan_0001".to_string(),
+            project_id: attempt.project_id.clone(),
+            issue_id: attempt.issue_id.clone(),
+            story_spec_refs: Vec::new(),
+            design_spec_refs: Vec::new(),
+            active_revision_id: None,
+            active_amendment_id: None,
+            created_at: "2026-10-13T00:00:00Z".to_string(),
+            updated_at: "2026-10-13T00:00:00Z".to_string(),
+        };
+        revision_store
+            .put_plan_lineage(&plan)
+            .expect("plan lineage");
+        let current_item = LogicalWorkItem {
+            id: "wi_current".to_string(),
+            plan_id: plan.id.clone(),
+            title: "wi_current".to_string(),
+            active_revision_id: None,
+            created_at: "2026-10-13T00:00:00Z".to_string(),
+            updated_at: "2026-10-13T00:00:00Z".to_string(),
+        };
+        revision_store
+            .put_logical_work_item(&plan, &current_item)
+            .expect("logical work item");
+        let contract = minimal_contract(&current_item.id);
+        let revision = WorkItemRevision {
+            id: "work_item_revision_current".to_string(),
+            logical_work_item_id: current_item.id.clone(),
+            source_draft_revision_id: "draft_work_item_revision_current".to_string(),
+            canonical_contract_hash: canonical_contract_hash(&contract).unwrap(),
+            canonical_contract: contract,
+            work_item_projection_bundle_id: "projection_bundle_current".to_string(),
+            verification_plan_revision_id: "verification_work_item_revision_current".to_string(),
+            created_at: "2026-10-13T00:00:00Z".to_string(),
+        };
+        revision_store
+            .put_verification_plan_revision(
+                &plan,
+                &VerificationPlanRevision {
+                    id: revision.verification_plan_revision_id.clone(),
+                    logical_work_item_id: current_item.id.clone(),
+                    source_draft_revision_id: revision.source_draft_revision_id.clone(),
+                    verification_checks: Vec::new(),
+                    created_at: "2026-10-13T00:00:00Z".to_string(),
+                },
+            )
+            .expect("verification plan revision");
+        revision_store
+            .put_work_item_revision(&plan, &revision)
+            .expect("work item revision");
+        let compiled = WorkItemProjectionCompiler
+            .compile(&revision.canonical_contract, &revision.id)
+            .unwrap();
+        let hashes = projection_hashes(&compiled).unwrap();
+        let bundle = WorkItemProjectionBundle {
+            id: revision.work_item_projection_bundle_id.clone(),
+            work_item_revision_id: revision.id.clone(),
+            canonical_contract_hash: revision.canonical_contract_hash.clone(),
+            projection_schema_version: 1,
+            compiler_version: "work-item-projection-compiler-v1".to_string(),
+            human_projection: compiled.human.clone(),
+            coder_projection: compiled.coder.clone(),
+            reviewer_projection: compiled.reviewer.clone(),
+            human_projection_hash: hashes.human,
+            coder_projection_hash: hashes.coder.clone(),
+            reviewer_projection_hash: hashes.reviewer.clone(),
+            created_at: "2026-10-13T00:00:00Z".to_string(),
+        };
+        revision_store
+            .put_work_item_projection_bundle(&plan, &bundle)
+            .expect("work item projection bundle");
+        revision_store
+            .set_active_work_item_revision(&plan, &current_item, None, &revision.id)
+            .expect("active work item revision");
+        let dependency_graph = DependencyGraphRevision {
+            id: "dependency_graph_revision_n5".to_string(),
+            plan_id: plan.id.clone(),
+            edges: Vec::new(),
+            created_at: "2026-10-13T00:00:00Z".to_string(),
+        };
+        revision_store
+            .put_dependency_graph_revision(&plan, &dependency_graph)
+            .expect("dependency graph revision");
+        let plan_revision = WorkItemPlanRevision {
+            id: "plan_revision_n5".to_string(),
+            plan_id: plan.id.clone(),
+            revision_no: 1,
+            supersedes: None,
+            reason: PlanRevisionReason::InitialCompile,
+            work_item_bindings: BTreeMap::from([(current_item.id.clone(), revision.id.clone())]),
+            dependency_graph_revision_id: dependency_graph.id.clone(),
+            validation_report_ref: "validation_report_n5".to_string(),
+            plan_projection_bundle_id: "plan_projection_bundle_n5".to_string(),
+            publication_provenance_ref: None,
+            created_at: "2026-10-13T00:00:00Z".to_string(),
+        };
+        let compiled_plan = CompiledPlanProjections {
+            human: HumanGroupProjection {
+                plan_id: plan.id.clone(),
+                goal: "n5 runner fixture".to_string(),
+                split_reason: "n5 runner fixture".to_string(),
+                work_items: vec![HumanGroupWorkItemSummary {
+                    logical_work_item_id: current_item.id.clone(),
+                    title: compiled.human.title.clone(),
+                    goal: compiled.human.goal.clone(),
+                    depends_on: Vec::new(),
+                    provides: Vec::new(),
+                    scope_summary: compiled.human.scope_summary.clone(),
+                }],
+                contract_flow: Vec::new(),
+                risks: Vec::new(),
+                source_refs: Vec::new(),
+                normative: false,
+                used_by_provider: false,
+            },
+            coder: CoderGroupContext {
+                plan_id: plan.id.clone(),
+                ordered_logical_work_item_ids: vec![current_item.id.clone()],
+                dependency_edges: Vec::new(),
+                group_write_scopes: BTreeMap::from([(
+                    current_item.id.clone(),
+                    compiled.coder.write_policy.clone(),
+                )]),
+            },
+            reviewer: ReviewerGroupMatrix {
+                plan_id: plan.id.clone(),
+                work_items: vec![ReviewerGroupMatrixEntry {
+                    logical_work_item_id: current_item.id.clone(),
+                    criterion_refs: compiled.reviewer.criterion_refs.clone(),
+                    input_contract_refs: Vec::new(),
+                    output_contract_refs: Vec::new(),
+                }],
+                dependency_edges: Vec::new(),
+                design_traceability_refs: Vec::new(),
+            },
+        };
+        let plan_hashes = plan_projection_hashes(&compiled_plan).unwrap();
+        revision_store
+            .put_plan_projection_bundle(
+                &plan,
+                &PlanProjectionBundle {
+                    id: plan_revision.plan_projection_bundle_id.clone(),
+                    plan_revision_id: plan_revision.id.clone(),
+                    dependency_graph_revision_id: plan_revision
+                        .dependency_graph_revision_id
+                        .clone(),
+                    work_item_projection_bundle_refs: vec![bundle.id.clone()],
+                    human_group_projection: compiled_plan.human,
+                    coder_group_context: compiled_plan.coder,
+                    reviewer_group_matrix: compiled_plan.reviewer,
+                    human_group_projection_hash: plan_hashes.human,
+                    coder_group_context_hash: plan_hashes.coder,
+                    reviewer_group_matrix_hash: plan_hashes.reviewer,
+                    compiler_version: "plan-projection-compiler-v1".to_string(),
+                    created_at: "2026-10-13T00:00:00Z".to_string(),
+                },
+            )
+            .expect("plan projection bundle");
+        revision_store
+            .put_plan_revision(&plan, &plan_revision)
+            .expect("plan revision");
+        revision_store
+            .set_active_plan_revision(&plan, &plan_revision.id)
+            .expect("active plan revision");
+        store
+            .save_plan_binding(
+                &attempt,
+                &CodingAttemptPlanBinding {
+                    attempt_id: attempt.id.clone(),
+                    plan_id: plan.id.clone(),
+                    bound_plan_revision_id: plan_revision.id.clone(),
+                    applied_amendment_ids: Vec::new(),
+                    updated_at: "2026-10-13T00:00:00Z".to_string(),
+                },
+            )
+            .expect("plan binding");
+        let lifecycle = crate::product::lifecycle_store::LifecycleStore::new(paths.clone());
+        let plan_session = lifecycle
+            .create_workspace_session(
+                crate::product::lifecycle_store::CreateWorkspaceSessionInput {
+                    project_id: attempt.project_id.clone(),
+                    issue_id: attempt.issue_id.clone(),
+                    entity_id: plan.id.clone(),
+                    workspace_type: crate::product::models::WorkspaceType::WorkItemPlan,
+                    author_provider: ProviderName::Codex,
+                    reviewer_provider: Some(ProviderName::ClaudeCode),
+                    review_rounds: 1,
+                    superpowers_enabled: true,
+                    openspec_enabled: true,
+                    work_item_plan_options: None,
+                },
+            )
+            .expect("plan workspace session");
+        lifecycle
+            .save_artifact_versions(
+                &plan_session.id,
+                &[crate::web::workspace_ws_types::ArtifactVersion {
+                    version: 1,
+                    payload:
+                        crate::web::workspace_ws_types::ArtifactPayload::WorkItemRevisionHistory {
+                            history: Box::new(
+                                crate::web::workspace_ws_types::WorkItemRevisionHistoryDto {
+                                    entries: vec![
+                                        crate::web::workspace_ws_types::WorkItemHistoryEntryDto {
+                                            kind:
+                                            crate::web::workspace_ws_types::WorkItemHistoryEntryKind::WorkItemRevision,
+                                            id: revision.id.clone(),
+                                            logical_work_item_id: current_item.id.clone(),
+                                            related_revision_id: None,
+                                            summary: "Compiled current WorkItem revision"
+                                                .to_string(),
+                                            created_at: "2026-10-13T00:00:00Z".to_string(),
+                                        },
+                                    ],
+                                },
+                            ),
+                        },
+                    generated_by: ProviderName::Codex,
+                    reviewed_by: None,
+                    review_verdict: None,
+                    confirmed_by: None,
+                    is_current: false,
+                    created_at: "2026-10-13T00:00:00Z".to_string(),
+                    source_node_id: "timeline_node_compile".to_string(),
+                }],
+            )
+            .expect("plan history artifact");
+
+        let unit = store
+            .create_coding_unit(CreateCodingExecutionUnitInput {
+                attempt_id: attempt.id.clone(),
+                project_id: attempt.project_id.clone(),
+                issue_id: attempt.issue_id.clone(),
+                plan_id: plan.id.clone(),
+                logical_work_item_id: current_item.id.clone(),
+                work_item_revision_id: revision.id.clone(),
+                dependency_logical_work_item_ids: Vec::new(),
+                order_index: 1,
+                status: CodingExecutionUnitStatus::Running,
+            })
+            .expect("coding unit");
+        let mut seeded = store
+            .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .unwrap();
+        seeded.status = CodingAttemptStatus::Running;
+        // Running 必须带 admission 会话标记，否则过不了 ensure_provider_run_allowed。
+        seeded.admission_ticket_consumed_at = Some(chrono::Utc::now().to_rfc3339());
+        seeded.stage = crate::product::coding_models::CodingExecutionStage::ReviewRequest;
+        seeded.active_unit_id = Some(unit.id.clone());
+        seeded.current_work_item_id = Some(current_item.id.clone());
+        store
+            .write_coding_attempt_for_test(&seeded)
+            .expect("seeded running attempt");
+        store
+            .create_coding_unit_run(
+                &seeded,
+                &CodingUnitRun {
+                    id: "coding_unit_run_n5_0001".to_string(),
+                    unit_id: unit.id.clone(),
+                    execution_no: 1,
+                    work_item_revision_id: revision.id.clone(),
+                    resolved_handoff_revision_ids: Vec::new(),
+                    canonical_contract_hash: bundle.canonical_contract_hash.clone(),
+                    projection_bundle_id: bundle.id.clone(),
+                    projection_compiler_version: bundle.compiler_version.clone(),
+                    coder_provider_renderer_version: renderer_for(&ProviderName::Codex)
+                        .renderer_version()
+                        .to_string(),
+                    reviewer_provider_renderer_version: renderer_for(&ProviderName::ClaudeCode)
+                        .renderer_version()
+                        .to_string(),
+                    internal_reviewer_provider_renderer_version: None,
+                    coder_projection_hash: hashes.coder,
+                    reviewer_projection_hash: hashes.reviewer,
+                    coder_execution_context_hash: None,
+                    reviewer_execution_context_hash: None,
+                    internal_reviewer_execution_context_hash: None,
+                    status: CodingUnitRunStatus::Running,
+                    unit_rework_count: 0,
+                    verification_retry_count: 0,
+                    operational_retry_count: 0,
+                    plan_repair_count: 0,
+                    start_commit: Some(original_head.clone()),
+                    completion_commit: None,
+                    created_at: "2026-10-13T00:00:00Z".to_string(),
+                    updated_at: "2026-10-13T00:00:00Z".to_string(),
+                },
+            )
+            .expect("running unit run");
+
+        N5RunnerFixture {
+            _root: root,
+            paths,
+            store,
+            attempt: seeded,
+            unit,
+            original_head,
+        }
+    }
+
+    fn seed_n5_plan_run(fixture: &N5RunnerFixture) {
+        let selection = CodingPlanSelection {
+            unit_id: fixture.unit.id.clone(),
+            logical_work_item_id: fixture.unit.logical_work_item_id.clone(),
+            attempt_id: fixture.attempt.id.clone(),
+            target_repository_id: "repository_0001".to_string(),
+            start_command_id: CodingPlanSelection::deterministic_start_command_id(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                "work_item_plan_0001",
+                "cmd_n5_plan_run",
+                "repository_0001",
+            ),
+        };
+        let run = CodingPlanRun {
+            project_id: fixture.attempt.project_id.clone(),
+            issue_id: fixture.attempt.issue_id.clone(),
+            plan_id: "work_item_plan_0001".to_string(),
+            command_id: "cmd_n5_plan_run".to_string(),
+            bound_plan_revision_id: "plan_revision_n5".to_string(),
+            dependency_graph_revision_id: "dependency_graph_revision_n5".to_string(),
+            target_attempts: Vec::new(),
+            mode: PLAN_CODING_MODE_FIRST_READY_UNIT.to_string(),
+            selection: Some(selection),
+            phase: CodingPlanRunPhase::Started,
+            start_outcome: None,
+            pause_reason: None,
+            created_at: "2026-10-13T00:00:00Z".to_string(),
+            updated_at: "2026-10-13T00:00:00Z".to_string(),
+        };
+        let runs_dir = fixture
+            .paths
+            .issue_root(&fixture.attempt.project_id, &fixture.attempt.issue_id)
+            .join("coding-plan-runs");
+        std::fs::create_dir_all(&runs_dir).expect("coding-plan-runs directory");
+        std::fs::write(
+            runs_dir.join("work_item_plan_0001.json"),
+            serde_json::to_string(&run).expect("serialize plan run"),
+        )
+        .expect("persist plan run");
+    }
+
+    /// runner 在 group completion 返回后、任何 ReviewRequest/push 之前识别
+    /// 真实暂停并 return：无下一 unit 启动、无 review request/push、provider
+    /// probe 计数 0；暂停后重入被 N2 provider gate 拒绝。
+    #[tokio::test]
+    async fn plan_coding_n5_retry_and_runner_do_not_push_or_start_next() {
+        let fixture = n5_runner_fixture();
+        seed_n5_plan_run(&fixture);
+        let provider = CountingProvider::default();
+        let mut registry = ProviderRegistry::new();
+        registry.register(ProviderName::Codex, Arc::new(provider.clone()));
+        let mut web_state = WebAppState::new(
+            fixture._root.path().to_path_buf(),
+            WebRuntime::new_fake(fixture._root.path().to_path_buf()),
+        );
+        web_state.provider_registry = Arc::new(registry);
+        web_state.test_provider_enabled = true;
+
+        let (event_tx, mut event_rx) = mpsc::channel(64);
+        let (_command_tx, command_rx) = mpsc::channel(8);
+        let engine = CodingWorkspaceEngine::new(
+            fixture.store.clone(),
+            GitWorkspaceService::new(),
+            event_tx.clone(),
+        );
+        let attempt = fixture.attempt.clone();
+        execute_start_coding_flow(
+            &web_state,
+            &fixture.store,
+            &engine,
+            &event_tx,
+            command_rx,
+            &attempt,
+        )
+        .await
+        .expect("paused runner flow returns without push");
+        drop(event_tx);
+
+        let paused = fixture
+            .store
+            .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("paused attempt");
+        assert_eq!(paused.status, CodingAttemptStatus::Blocked);
+        assert_eq!(
+            paused.stage,
+            crate::product::coding_models::CodingExecutionStage::CodeReview
+        );
+        assert!(paused.active_unit_id.is_none());
+        assert!(paused.current_work_item_id.is_none());
+        assert!(
+            fixture
+                .store
+                .list_review_requests(&paused.project_id, &paused.issue_id, &paused.id)
+                .expect("review requests")
+                .is_empty(),
+            "runner must not issue review request/push after the pause"
+        );
+        let units = fixture
+            .store
+            .list_coding_units(&paused.project_id, &paused.issue_id, &paused.id)
+            .expect("units");
+        assert_eq!(units.len(), 1, "no next unit may be started");
+        assert_eq!(units[0].status, CodingExecutionUnitStatus::Completed);
+        let unit_run = fixture
+            .store
+            .list_coding_unit_runs(&paused, &units[0].id)
+            .expect("unit runs")
+            .into_iter()
+            .find(|run| run.id == "coding_unit_run_n5_0001")
+            .expect("authoritative run preserved");
+        assert_eq!(unit_run.status, CodingUnitRunStatus::Completed);
+        assert_eq!(
+            unit_run.completion_commit.as_deref(),
+            Some(fixture.original_head.as_str())
+        );
+        assert_eq!(
+            fixture
+                .store
+                .list_open_blocked_gates(&paused.project_id, &paused.issue_id, &paused.id)
+                .expect("pause gates")
+                .len(),
+            1
+        );
+        assert_eq!(
+            CodingPlanRunStore::new(fixture.paths.clone())
+                .get(&paused.project_id, &paused.issue_id, "work_item_plan_0001")
+                .expect("plan run lookup")
+                .expect("plan run present")
+                .phase,
+            CodingPlanRunPhase::Paused
+        );
+        assert_eq!(
+            provider.starts(),
+            0,
+            "provider probe must not start during the paused flow"
+        );
+        let mut session_state_events = 0;
+        while let Ok(event) = event_rx.try_recv() {
+            if matches!(
+                event,
+                crate::web::coding_ws_handler::CodingWsOutMessage::CodingSessionState { .. }
+            ) {
+                session_state_events += 1;
+            }
+        }
+        assert!(
+            session_state_events > 0,
+            "runner must emit session_state when it stops at the pause"
+        );
+
+        // 暂停后重入（普通 retry/内部重跑）不得绕行：provider gate 拒绝。
+        let (event_tx2, _event_rx2) = mpsc::channel(16);
+        let (_command_tx2, command_rx2) = mpsc::channel(8);
+        let engine2 = CodingWorkspaceEngine::new(
+            fixture.store.clone(),
+            GitWorkspaceService::new(),
+            event_tx2.clone(),
+        );
+        let error = execute_start_coding_flow(
+            &web_state,
+            &fixture.store,
+            &engine2,
+            &event_tx2,
+            command_rx2,
+            &paused,
+        )
+        .await
+        .expect_err("paused plan run must reject runner re-entry");
+        assert!(
+            error.to_string().contains("plan_coding_paused"),
+            "unexpected re-entry result: {error}"
+        );
+        assert_eq!(provider.starts(), 0);
+        assert!(
+            fixture
+                .store
+                .list_review_requests(&paused.project_id, &paused.issue_id, &paused.id)
+                .expect("review requests after re-entry")
+                .is_empty()
+        );
     }
 }

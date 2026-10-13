@@ -36,12 +36,7 @@ fn group_completion_fixture_at_stage(
         .seed_running_attempt_for_test(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("running attempt");
     let attempt = store
-        .update_attempt_stage(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            stage,
-        )
+        .update_attempt_stage(&attempt.project_id, &attempt.issue_id, &attempt.id, stage)
         .expect("completion stage");
     if dirty {
         fs::write(worktree.join("unit1.txt"), "unit 1 change\n").expect("unit change");
@@ -275,7 +270,9 @@ async fn abort_during_running_group_completion_prewrite_pause_is_stable() {
         .expect_err("aborted running completion must fail closed");
 
     assert!(
-        error.to_string().contains("group_completion_status_not_ready"),
+        error
+            .to_string()
+            .contains("group_completion_status_not_ready"),
         "{error}"
     );
     assert_eq!(snapshot_group_completion_state(&fixture), after_abort);
@@ -311,7 +308,9 @@ async fn abort_during_completed_retry_prewrite_pause_is_stable() {
         .expect_err("aborted completed retry must fail closed");
 
     assert!(
-        error.to_string().contains("group_completion_status_not_ready"),
+        error
+            .to_string()
+            .contains("group_completion_status_not_ready"),
         "{error}"
     );
     assert_eq!(snapshot_group_completion_state(&fixture), after_abort);
@@ -343,11 +342,8 @@ fn cleared_active_recovery_fixture_at_stage(
         )
         .expect("active unit lookup")
         .expect("active unit");
-    let handoff = expected_handoff_revision(
-        &source_run,
-        &fixture.original_head,
-        "2026-07-19T00:00:00Z",
-    );
+    let handoff =
+        expected_handoff_revision(&source_run, &fixture.original_head, "2026-07-19T00:00:00Z");
     let revision_store = WorkItemRevisionStore::new(fixture.store.paths());
     let lineage = revision_store
         .get_plan_lineage(
@@ -463,7 +459,9 @@ async fn coding_plan_repair_group_completion_running_wrong_stages_are_zero_write
             .expect_err("wrong running stage must fail closed");
 
         assert!(
-            error.to_string().contains("group_completion_stage_not_ready"),
+            error
+                .to_string()
+                .contains("group_completion_stage_not_ready"),
             "{error}"
         );
         assert_eq!(snapshot_group_completion_state(&fixture), before);
@@ -502,7 +500,9 @@ async fn coding_plan_repair_group_completion_completed_retry_wrong_stages_are_ze
             .expect_err("wrong completed retry stage must fail closed");
 
         assert!(
-            error.to_string().contains("group_completion_stage_not_ready"),
+            error
+                .to_string()
+                .contains("group_completion_stage_not_ready"),
             "{error}"
         );
         assert_eq!(snapshot_group_completion_state(&fixture), before);
@@ -541,8 +541,7 @@ async fn coding_plan_repair_group_completion_completed_retry_dirty_worktree_reus
     fs::write(fixture.worktree.join("staged.txt"), "staged\n").expect("staged file");
     run_test_git(&fixture.worktree, &["add", "staged.txt"]);
     fs::write(fixture.worktree.join("README.md"), "unstaged\n").expect("unstaged file");
-    fs::write(fixture.worktree.join("untracked.txt"), "untracked\n")
-        .expect("untracked file");
+    fs::write(fixture.worktree.join("untracked.txt"), "untracked\n").expect("untracked file");
     let before = snapshot_group_completion_state(&fixture);
 
     let first_error = fixture
@@ -566,27 +565,30 @@ async fn coding_plan_repair_group_completion_completed_retry_dirty_worktree_reus
         .expect("first blocked gates");
     assert_eq!(first_gates.len(), 1);
     let first_gate = &first_gates[0];
-    assert_eq!(
-        first_gate.stage,
-        Some(CodingExecutionStage::ReviewRequest)
-    );
+    assert_eq!(first_gate.stage, Some(CodingExecutionStage::ReviewRequest));
     assert_eq!(
         first_gate.reason_code.as_deref(),
         Some("shared_worktree_dirty_manual_gate")
     );
     assert_eq!(first_gate.available_actions.len(), 2);
-    assert!(first_gate.available_actions.iter().any(|action| {
-        action.action_type == CodingGateActionType::ManualContinue
-    }));
+    assert!(
+        first_gate
+            .available_actions
+            .iter()
+            .any(|action| { action.action_type == CodingGateActionType::ManualContinue })
+    );
     assert!(
         first_gate
             .available_actions
             .iter()
             .any(|action| action.action_type == CodingGateActionType::Abort)
     );
-    assert!(!first_gate.available_actions.iter().any(|action| {
-        action.action_type == CodingGateActionType::SendToCoder
-    }));
+    assert!(
+        !first_gate
+            .available_actions
+            .iter()
+            .any(|action| { action.action_type == CodingGateActionType::SendToCoder })
+    );
     assert_eq!(snapshot_group_completion_state(&fixture), before);
 
     let second_error = fixture
@@ -707,9 +709,475 @@ async fn coding_plan_repair_group_completion_recovers_git_commit_before_store_id
         .find(|run| run.id == "coding_unit_run_0001")
         .expect("completed run");
 
-    assert_eq!(updated.head_commit.as_deref(), Some(committed_head.as_str()));
+    assert_eq!(
+        updated.head_commit.as_deref(),
+        Some(committed_head.as_str())
+    );
     assert_eq!(
         completed.completion_commit.as_deref(),
         Some(committed_head.as_str())
+    );
+}
+
+// ---- N5（REQ-CS-05）：plan-run first_ready 首项完成安全暂停短路 ----
+
+fn seed_plan_coding_first_ready_run(
+    fixture: &GroupCompletionFixture,
+    unit: &crate::product::coding_models::CodingExecutionUnit,
+    phase: crate::product::coding_plan_run::CodingPlanRunPhase,
+) {
+    let selection = crate::product::coding_plan_run::CodingPlanSelection {
+        unit_id: unit.id.clone(),
+        logical_work_item_id: unit.logical_work_item_id.clone(),
+        attempt_id: fixture.attempt.id.clone(),
+        target_repository_id: "repository_0001".to_string(),
+        start_command_id:
+            crate::product::coding_plan_run::CodingPlanSelection::deterministic_start_command_id(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                "work_item_plan_0001",
+                "cmd_n5_plan_run",
+                "repository_0001",
+            ),
+    };
+    let run = crate::product::coding_plan_run::CodingPlanRun {
+        project_id: fixture.attempt.project_id.clone(),
+        issue_id: fixture.attempt.issue_id.clone(),
+        plan_id: "work_item_plan_0001".to_string(),
+        command_id: "cmd_n5_plan_run".to_string(),
+        bound_plan_revision_id: "plan_revision_n5_fixture".to_string(),
+        dependency_graph_revision_id: "dependency_graph_revision_n5_fixture".to_string(),
+        target_attempts: Vec::new(),
+        mode: crate::product::coding_plan_run::PLAN_CODING_MODE_FIRST_READY_UNIT.to_string(),
+        selection: Some(selection),
+        phase,
+        start_outcome: None,
+        pause_reason: None,
+        created_at: "2026-10-13T00:00:00Z".to_string(),
+        updated_at: "2026-10-13T00:00:00Z".to_string(),
+    };
+    let runs_dir = fixture
+        .store
+        .paths()
+        .issue_root(&fixture.attempt.project_id, &fixture.attempt.issue_id)
+        .join("coding-plan-runs");
+    fs::create_dir_all(&runs_dir).expect("coding-plan-runs directory");
+    fs::write(
+        runs_dir.join("work_item_plan_0001.json"),
+        serde_json::to_string(&run).expect("serialize plan run"),
+    )
+    .expect("persist plan run");
+}
+
+fn n5_first_selected_unit(
+    fixture: &GroupCompletionFixture,
+) -> crate::product::coding_models::CodingExecutionUnit {
+    fixture
+        .store
+        .get_active_coding_unit(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+        )
+        .expect("active unit lookup")
+        .expect("selected first unit")
+}
+
+fn n5_plan_run_phase(
+    fixture: &GroupCompletionFixture,
+) -> crate::product::coding_plan_run::CodingPlanRunPhase {
+    crate::product::coding_plan_run::CodingPlanRunStore::new(fixture.store.paths())
+        .get(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            "work_item_plan_0001",
+        )
+        .expect("plan run lookup")
+        .expect("plan run present")
+        .phase
+}
+
+/// 有剩余 Pending units：完成事实落定后、SC selector/推进之前安全暂停；
+/// completion commit/权威 run/handoff/unit Completed 均不回滚。
+#[tokio::test]
+async fn plan_coding_n5_completion_pauses_before_selector() {
+    let fixture = group_completion_fixture(true, false);
+    let mut sc_attempt = fixture.attempt.clone();
+    sc_attempt.admission_kind = crate::product::coding_models::CodingAdmissionKind::ScAdvance;
+    fixture
+        .store
+        .write_coding_attempt_for_test(&sc_attempt)
+        .expect("sc admission kind");
+    let selected = n5_first_selected_unit(&fixture);
+    create_authoritative_active_run(
+        &fixture,
+        "coding_unit_run_0001",
+        1,
+        CodingUnitRunStatus::Running,
+        None,
+        None,
+    );
+    seed_plan_coding_first_ready_run(
+        &fixture,
+        &selected,
+        crate::product::coding_plan_run::CodingPlanRunPhase::Started,
+    );
+
+    let paused = fixture
+        .engine
+        .complete_group_unit_after_code_review(&sc_attempt)
+        .await
+        .expect("first unit completion pauses before the selector");
+
+    assert_eq!(paused.status, CodingAttemptStatus::Blocked);
+    assert_eq!(paused.stage, CodingExecutionStage::CodeReview);
+    assert!(paused.active_unit_id.is_none());
+    assert!(paused.current_work_item_id.is_none());
+
+    let units = fixture
+        .store
+        .list_coding_units(&paused.project_id, &paused.issue_id, &paused.id)
+        .expect("units after pause");
+    let completed = units
+        .iter()
+        .find(|unit| unit.id == selected.id)
+        .expect("selected unit");
+    assert_eq!(completed.status, CodingExecutionUnitStatus::Completed);
+    assert_eq!(
+        completed.completion_commit.as_deref(),
+        Some(fixture.original_head.as_str())
+    );
+    assert!(completed.latest_handoff_revision_id.is_some());
+    for unit in units.iter().filter(|unit| unit.id != selected.id) {
+        assert_eq!(
+            unit.status,
+            CodingExecutionUnitStatus::Pending,
+            "remaining units keep their factual state"
+        );
+        assert!(
+            fixture
+                .store
+                .list_coding_unit_runs(&paused, &unit.id)
+                .expect("other unit runs")
+                .is_empty(),
+            "no other unit may be started"
+        );
+    }
+    let completed_run = fixture
+        .store
+        .list_coding_unit_runs(&paused, &selected.id)
+        .expect("selected unit runs")
+        .into_iter()
+        .find(|run| run.id == "coding_unit_run_0001")
+        .expect("authoritative run preserved");
+    assert_eq!(completed_run.status, CodingUnitRunStatus::Completed);
+    assert_eq!(
+        completed_run.completion_commit.as_deref(),
+        Some(fixture.original_head.as_str())
+    );
+
+    assert!(
+        fixture
+            .store
+            .get_group_dependency_gate_snapshot(&paused)
+            .expect("dependency gate snapshot lookup")
+            .is_none(),
+        "the SC selector must not run before the pause"
+    );
+    assert!(
+        fixture
+            .store
+            .list_review_requests(&paused.project_id, &paused.issue_id, &paused.id)
+            .expect("review requests")
+            .is_empty(),
+        "no review request/push may be issued"
+    );
+
+    let gates = fixture
+        .store
+        .list_open_blocked_gates(&paused.project_id, &paused.issue_id, &paused.id)
+        .expect("pause gates");
+    assert_eq!(gates.len(), 1);
+    assert_eq!(
+        gates[0].reason_code.as_deref(),
+        Some(crate::product::coding_plan_run::PLAN_CODING_CONTINUATION_NOT_ENABLED)
+    );
+    assert!(
+        gates[0].available_actions.is_empty(),
+        "pause gate exposes no actions"
+    );
+
+    assert_eq!(
+        n5_plan_run_phase(&fixture),
+        crate::product::coding_plan_run::CodingPlanRunPhase::Paused
+    );
+    fixture
+        .store
+        .validate_group_attempt_integrity(&paused)
+        .expect("legal plan-coding pause passes integrity validation");
+    let error = fixture
+        .store
+        .ensure_provider_run_allowed(&paused)
+        .expect_err("paused run must reject provider admission");
+    assert!(
+        error.to_string().contains("plan_coding_paused"),
+        "unexpected admission result: {error}"
+    );
+}
+
+/// 无剩余 Pending units：不因本仓无下一 unit 转入 ReviewRequest/push，保持
+/// Blocked+CodeReview 暂停。
+#[tokio::test]
+async fn plan_coding_n5_last_target_unit_stays_code_review() {
+    let fixture = group_completion_fixture(true, false);
+    let selected = n5_first_selected_unit(&fixture);
+    for unit in fixture
+        .store
+        .list_coding_units(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+        )
+        .expect("units")
+        .iter()
+        .filter(|unit| unit.id != selected.id)
+    {
+        fixture
+            .store
+            .update_coding_unit_status(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &fixture.attempt.id,
+                &unit.id,
+                CodingExecutionUnitStatus::Completed,
+                Some("already completed before the pause".to_string()),
+            )
+            .expect("pre-complete remaining unit");
+    }
+    create_authoritative_active_run(
+        &fixture,
+        "coding_unit_run_0001",
+        1,
+        CodingUnitRunStatus::Running,
+        None,
+        None,
+    );
+    seed_plan_coding_first_ready_run(
+        &fixture,
+        &selected,
+        crate::product::coding_plan_run::CodingPlanRunPhase::Started,
+    );
+
+    let paused = fixture
+        .engine
+        .complete_group_unit_after_code_review(&fixture.attempt)
+        .await
+        .expect("last target unit pauses instead of ReviewRequest");
+
+    assert_eq!(paused.status, CodingAttemptStatus::Blocked);
+    assert_eq!(paused.stage, CodingExecutionStage::CodeReview);
+    assert!(paused.active_unit_id.is_none());
+    assert!(paused.current_work_item_id.is_none());
+    assert!(
+        fixture
+            .store
+            .list_review_requests(&paused.project_id, &paused.issue_id, &paused.id)
+            .expect("review requests")
+            .is_empty(),
+        "no review request/push may be issued"
+    );
+    let units = fixture
+        .store
+        .list_coding_units(&paused.project_id, &paused.issue_id, &paused.id)
+        .expect("units after pause");
+    assert!(
+        units
+            .iter()
+            .all(|unit| unit.status == CodingExecutionUnitStatus::Completed),
+        "completion facts are preserved"
+    );
+    let gates = fixture
+        .store
+        .list_open_blocked_gates(&paused.project_id, &paused.issue_id, &paused.id)
+        .expect("pause gates");
+    assert_eq!(gates.len(), 1);
+    assert!(gates[0].available_actions.is_empty());
+    assert_eq!(
+        n5_plan_run_phase(&fixture),
+        crate::product::coding_plan_run::CodingPlanRunPhase::Paused
+    );
+}
+
+/// CompletedRetry 同身份恢复：清指针后 pause 写回前的中断窗口先补安全暂停；
+/// 暂停后的重入幂等返回，run Paused 补记中断可恢复；均不推进下一 unit。
+#[tokio::test]
+async fn plan_coding_n5_completed_retry_reconciles_pause_window() {
+    let (fixture, partial, lineage, handoff) = cleared_active_recovery_fixture();
+    let selected = fixture
+        .store
+        .list_coding_units(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+        )
+        .expect("units")
+        .into_iter()
+        .find(|unit| unit.logical_work_item_id == handoff.logical_work_item_id)
+        .expect("completed selected unit");
+    seed_plan_coding_first_ready_run(
+        &fixture,
+        &selected,
+        crate::product::coding_plan_run::CodingPlanRunPhase::Started,
+    );
+
+    // ① 清指针后、pause 写回前的中断窗口：CompletedRetry 先落安全暂停，
+    // 不进 SC FailedClosed/next-unit。
+    let paused = fixture
+        .engine
+        .complete_group_unit_after_code_review(&partial)
+        .await
+        .expect("completed retry reconciles the pause window");
+    assert_eq!(paused.status, CodingAttemptStatus::Blocked);
+    assert_eq!(paused.stage, CodingExecutionStage::CodeReview);
+    assert!(paused.active_unit_id.is_none());
+    assert!(paused.current_work_item_id.is_none());
+    let units = fixture
+        .store
+        .list_coding_units(&paused.project_id, &paused.issue_id, &paused.id)
+        .expect("units after pause");
+    let next = units
+        .iter()
+        .find(|unit| unit.logical_work_item_id == "work_item_0002")
+        .expect("next unit");
+    assert_eq!(next.status, CodingExecutionUnitStatus::Pending);
+    assert!(
+        fixture
+            .store
+            .list_coding_unit_runs(&paused, &next.id)
+            .expect("next unit runs")
+            .is_empty()
+    );
+    assert_eq!(
+        WorkItemRevisionStore::new(fixture.store.paths())
+            .get_handoff_revision(&lineage, &handoff.logical_work_item_id, &handoff.id)
+            .expect("handoff preserved"),
+        handoff
+    );
+    assert_eq!(
+        n5_plan_run_phase(&fixture),
+        crate::product::coding_plan_run::CodingPlanRunPhase::Paused
+    );
+
+    // ② 暂停后的 CompletedRetry 重入：不因 Blocked+清指针被 preflight 误拒，
+    // 幂等返回暂停形状，不新增 gate、不推进。
+    let again = fixture
+        .engine
+        .complete_group_unit_after_code_review(&paused)
+        .await
+        .expect("paused re-entry returns the paused attempt");
+    assert_eq!(again.status, CodingAttemptStatus::Blocked);
+    assert_eq!(again.stage, CodingExecutionStage::CodeReview);
+    assert_eq!(
+        fixture
+            .store
+            .list_open_blocked_gates(&again.project_id, &again.issue_id, &again.id)
+            .expect("gates after re-entry")
+            .len(),
+        1
+    );
+    assert_eq!(
+        fixture
+            .store
+            .list_coding_units(&again.project_id, &again.issue_id, &again.id)
+            .expect("units after re-entry")
+            .iter()
+            .find(|unit| unit.logical_work_item_id == "work_item_0002")
+            .expect("next unit")
+            .status,
+        CodingExecutionUnitStatus::Pending
+    );
+
+    // ③ run Paused 补记中断窗口：attempt 已暂停而 run 相位仍是 Started，
+    // 重入按 matching completed selection 恢复补记。
+    let runs_dir = fixture
+        .store
+        .paths()
+        .issue_root(&fixture.attempt.project_id, &fixture.attempt.issue_id)
+        .join("coding-plan-runs");
+    let run_path = runs_dir.join("work_item_plan_0001.json");
+    let mut run_value: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&run_path).expect("read plan run"))
+            .expect("parse plan run");
+    run_value["phase"] = serde_json::json!("started");
+    run_value
+        .as_object_mut()
+        .expect("run object")
+        .remove("pause_reason");
+    fs::write(
+        &run_path,
+        serde_json::to_string(&run_value).expect("serialize plan run"),
+    )
+    .expect("reset run phase");
+
+    let recovered = fixture
+        .engine
+        .complete_group_unit_after_code_review(&again)
+        .await
+        .expect("re-entry re-marks the run paused");
+    assert_eq!(recovered.status, CodingAttemptStatus::Blocked);
+    assert_eq!(recovered.stage, CodingExecutionStage::CodeReview);
+    assert_eq!(
+        n5_plan_run_phase(&fixture),
+        crate::product::coding_plan_run::CodingPlanRunPhase::Paused
+    );
+    assert_eq!(
+        fixture
+            .store
+            .list_coding_units(&recovered.project_id, &recovered.issue_id, &recovered.id)
+            .expect("units after recovery")
+            .iter()
+            .find(|unit| unit.logical_work_item_id == "work_item_0002")
+            .expect("next unit")
+            .status,
+        CodingExecutionUnitStatus::Pending
+    );
+}
+
+/// 无 plan-run 的普通旧 group：完成链维持既有推进（下一 unit 正常启动）。
+#[tokio::test]
+async fn plan_coding_n5_no_run_uses_existing_advance() {
+    let fixture = group_completion_fixture(true, false);
+    create_authoritative_active_run(
+        &fixture,
+        "coding_unit_run_0001",
+        1,
+        CodingUnitRunStatus::Running,
+        None,
+        None,
+    );
+
+    let updated = fixture
+        .engine
+        .complete_group_unit_after_code_review(&fixture.attempt)
+        .await
+        .expect("legacy advance path is unchanged");
+
+    let next = fixture
+        .store
+        .list_coding_units(&updated.project_id, &updated.issue_id, &updated.id)
+        .expect("units")
+        .into_iter()
+        .find(|unit| unit.logical_work_item_id == "work_item_0002")
+        .expect("next unit");
+    assert_eq!(next.status, CodingExecutionUnitStatus::Running);
+    assert_eq!(updated.active_unit_id.as_deref(), Some(next.id.as_str()));
+    assert_eq!(updated.stage, CodingExecutionStage::PrepareContext);
+    assert!(
+        fixture
+            .store
+            .list_open_blocked_gates(&updated.project_id, &updated.issue_id, &updated.id)
+            .expect("blocked gates")
+            .is_empty(),
+        "no pause gate without a matching plan run"
     );
 }
