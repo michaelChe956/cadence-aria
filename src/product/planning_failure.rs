@@ -190,7 +190,10 @@ pub enum PlanningFailureOrigin {
     TargetAttribution,
     /// Inputs∪change_order 有效图排序阻断（SG1）。
     EffectiveGraph,
-    /// logical/physical 投影同构（F2c/SG3b Final Compile）。
+    /// logical/physical 投影同构（F2c/SG3b Final Compile）。F2c 起
+    /// projection 校验 finding 继承 canonical 依赖 kind（IDs 原样），其
+    /// projection 内部 invariant 违反一律 Operational——同一 kind 可来自
+    /// 不同层，origin 保留该事实，classification 不因 origin 改变资格。
     Projection,
     /// 系统/工程内部错（不驱 author 的 operational 源头）。
     System,

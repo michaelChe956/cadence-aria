@@ -205,6 +205,7 @@ async fn plan_repair_awaiting_rejects_invalid_projection_before_timeline_persist
                 code: "missing_projection".to_string(),
                 projection: "coder".to_string(),
                 contract_ref: None,
+                kind: None,
                 message: "projection missing".to_string(),
             },
         );

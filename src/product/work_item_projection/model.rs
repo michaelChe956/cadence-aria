@@ -168,6 +168,16 @@ pub struct ProjectionValidationFinding {
     pub projection: String,
     pub contract_ref: Option<String>,
     pub message: String,
+    /// F2c（REQ-SG-01/02/03）：projection 校验 finding 的 typed 失败原因。
+    /// canonical 依赖失败（F2a typed 族）原样继承 kind 与 IDs；projection
+    /// 内部 invariant 违反（逻辑/物理投影不一致、排序阻断）一律显式写
+    /// `Operational`——编译器对 canonical 输入的确定性投影漂移是系统故障，
+    /// 不驱 author。旧 JSON 无该字段解析为 None（按 Unknown 折影，绝不
+    /// 产生 L1 资格）。serde 形状遵循 plan §0.5 哈希兼容纪律：Option +
+    /// default + skip，旧记录再序列化字节不变；不从 code/message/Display
+    /// 拆码反推 kind。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<crate::product::planning_failure::PlanningFailureKind>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

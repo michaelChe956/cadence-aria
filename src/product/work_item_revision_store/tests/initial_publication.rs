@@ -183,6 +183,7 @@ fn initial_plan_publication_rejects_projection_failure_before_journal_or_live_fa
                 code: "projection_binding_mismatch".to_string(),
                 projection: "coder".to_string(),
                 contract_ref: None,
+                kind: None,
                 message: "projection does not match the allocated revision".to_string(),
             },
         );
@@ -278,6 +279,7 @@ fn initial_plan_publication_boundary_rejects_invalid_validation_reports_without_
                             code: "projection_binding_mismatch".to_string(),
                             projection: "coder".to_string(),
                             contract_ref: None,
+                            kind: None,
                             message: "projection does not match publication".to_string(),
                         },
                     );
