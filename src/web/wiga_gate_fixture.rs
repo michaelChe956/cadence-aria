@@ -127,13 +127,17 @@ impl EnrolledGateFixture {
         let root_path = inner._root.path().to_path_buf();
         let state = fake_state_with_gateway(root_path.clone());
         // 子 WorkItem 上下文经 issue.repo_id 解析 repo-1：补进 repos.json
-        //（seed_logical_codebase 重写后仅剩 physical 成员条目）。
+        //（seed_logical_codebase 重写后仅剩 physical 成员条目）。SG3b 门
+        // 接入后 Final Compile 结构复验会经 plan_baseline_tree 对该路径做
+        // fail-closed 基线解析（REQ-PIB main→master 默认链），裸目录即
+        // 128 拒绝——须与 new_single_repository 同款真实 git 仓（main 分支
+        // + 空提交 + 本地 bare origin）。
         {
             let repos_path = inner.paths.project_root(PROJECT_ID).join("repos.json");
             let mut repositories: Vec<crate::product::models::RepositoryRecord> =
                 crate::product::json_store::read_json(&repos_path).unwrap();
             let repo_root = inner._root.path().join("repo-1");
-            std::fs::create_dir_all(&repo_root).unwrap();
+            init_real_main_checkout(&repo_root);
             let now = "2026-09-27T00:00:00Z".to_string();
             repositories.push(crate::product::models::RepositoryRecord {
                 id: crate::web::handlers::automation_enrollment_test_support::REPOSITORY_ID
