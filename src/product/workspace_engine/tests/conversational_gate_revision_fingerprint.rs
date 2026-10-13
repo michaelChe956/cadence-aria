@@ -613,6 +613,85 @@ async fn sg_05_3_frozen_subprompt_delivery_missing_ref_or_digest_rejects_before_
 }
 
 #[tokio::test]
+async fn sg_05_3_frozen_subprompt_delivery_grant_turn_mismatch_rejects_without_builder_fallback() {
+    let (_root, lifecycle, mut engine) = super::conversational_gate::gate_fixture(3);
+    let (turn, opened_prompt) = sg53_open_turn(&mut engine, "sg53_mismatch").await;
+    let intermediate = sg53_intermediate_candidate();
+    let intermediate_hash = sg53_sha256_hex(&intermediate);
+    let instruction = sg53_instruction(&intermediate_hash);
+    let context = sg53_context(&intermediate_hash);
+    let resolved = sg53_resolved(&intermediate_hash);
+    let frozen = build_structural_revision_prompt(
+        &turn.feedback_text,
+        &intermediate,
+        &instruction,
+        &context,
+        &resolved,
+    )
+    .expect("freeze structural prompt");
+    // 候选保持原 turn 绑定候选不漂移：若实现误回落原 builder，本用例会以
+    // Ok(原 prompt) 形式在 expect_err 处显式失败（不静默通过）。
+    let session_id = engine.session().session_id.clone();
+    let partition = sg53_session_partition(&lifecycle, &session_id);
+    let ledger_before = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("session")
+        .provider_start_ledger
+        .clone();
+
+    // 两分支：grant 绑定异 turn / grant 无绑定 turn。
+    let mut bound_elsewhere = sg53_grant(
+        &turn,
+        Some(frozen.prompt_ref.clone()),
+        Some(frozen.prompt_digest.clone()),
+        &instruction,
+        Some(intermediate_hash.clone()),
+    );
+    bound_elsewhere.turn_id = Some("human_gate_turn_other_turn_0001".to_string());
+    let mut unbound = bound_elsewhere.clone();
+    unbound.turn_id = None;
+
+    for (label, grant) in [
+        ("grant bound to another turn", bound_elsewhere),
+        ("grant has no bound turn", unbound),
+    ] {
+        sg53_persist_structural_state(&lifecycle, &session_id, grant);
+        let error = engine
+            .build_sc_revision_delivery_for_resume(&turn.command_id, &turn, Some(&frozen))
+            .expect_err(label);
+        assert!(
+            error.starts_with("STRUCTURAL_REVISION_DELIVERY_GRANT_TURN_MISMATCH"),
+            "{label}: {error}"
+        );
+        // 不回落任一 builder 输出（expect_err 已证非 Ok；再核错误非原
+        // builder 的漂移/缺失码——失配必须以失配码显式拒绝）。
+        assert_ne!(error, opened_prompt, "{label}");
+        assert!(!error.starts_with("HUMAN_GATE_REVISION"), "{label}");
+        // 零 delivery/start：turn 仍 Reserved、ledger 不变、无组装/停等记录。
+        let turn_after = lifecycle
+            .get_human_gate_turn(&session_id, &turn.turn_id)
+            .expect("turn");
+        assert_eq!(turn_after.status, HumanGateTurnStatus::Reserved, "{label}");
+        let session_after = lifecycle
+            .get_workspace_session(&session_id)
+            .expect("session");
+        assert_eq!(
+            session_after.provider_start_ledger, ledger_before,
+            "{label}"
+        );
+        assert!(
+            !partition.join("sc-revision-assembly.json").exists(),
+            "{label}"
+        );
+        assert!(
+            !partition.join("sc-revision-blocked.json").exists(),
+            "{label}"
+        );
+        assert!(!partition.join("sc-revision-inputs").exists(), "{label}");
+    }
+}
+
+#[tokio::test]
 async fn sg_05_3_frozen_subprompt_delivery_without_state_keeps_original_builder_and_fresh_none_resume()
  {
     let (_root, lifecycle, mut engine) = super::conversational_gate::gate_fixture(3);
