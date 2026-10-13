@@ -86,7 +86,7 @@ export interface DrawerEntity {
 interface LifecycleCardDrawerProps {
   entity: DrawerEntity;
   onClose: () => void;
-  onOpenWorkspace: () => void;
+  onOpenWorkspace?: () => void;
   onOpenCodingWorkspace?: () => void;
   onGenerateNext?: () => void;
   onDelete?: () => void;
@@ -397,15 +397,17 @@ export function LifecycleCardDrawer({
       ) : null}
 
       <footer className="space-y-2 border-t border-[var(--aria-line)] px-4 py-3">
-        <button
-          data-testid="drawer-open-workspace"
-          type="button"
-          onClick={onOpenWorkspace}
-          className="inline-flex h-9 w-full items-center justify-center gap-2 rounded-md bg-[var(--aria-ink)] px-3 text-sm font-semibold text-white hover:opacity-90"
-        >
-          <ExternalLink className="h-4 w-4" />
-          打开 Workspace
-        </button>
+        {onOpenWorkspace ? (
+          <button
+            data-testid="drawer-open-workspace"
+            type="button"
+            onClick={onOpenWorkspace}
+            className="inline-flex h-9 w-full items-center justify-center gap-2 rounded-md bg-[var(--aria-ink)] px-3 text-sm font-semibold text-white hover:opacity-90"
+          >
+            <ExternalLink className="h-4 w-4" />
+            打开 Workspace
+          </button>
+        ) : null}
         {nextActionLabel && onGenerateNext ? (
           <button
             data-testid="drawer-generate-next"

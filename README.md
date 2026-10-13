@@ -83,7 +83,9 @@ Work Item 以 Group 形式组织，包含：
 
 生成 Plan 并经人工确认后，方可进入 Coding Workspace 执行开发、测试、Review、Rework 与最终验收。
 
-按目标仓库分组展示时，点击单个 Work Item 卡片可打开详情抽屉；URL 的 `focus=work_item:<issueId>:<workItemId>` 可恢复该任务详情，刷新后仍使用对应 Issue 的最新任务数据。未分仓时仍保留 Work Item Group 入口。
+按目标仓库分组展示时，顶部保留唯一的 Work Item Group（Plan）卡片。点击可查看计划状态、来源、子任务、依赖和 Review 状态；通过「打开 Workspace」进入 Plan 工作台，查看完整内容、版本历史和审批记录。计划确认后，由该抽屉统一开始 Coding 或进入已有 Coding Workspace；整组删除也只从该抽屉发起，确认后删除 Plan 及关联子任务，刷新后可重新准备 Work Item Plan。
+
+单个 Work Item 卡片仍可打开详情抽屉；URL 的 `focus=work_item:<issueId>:<workItemId>` 可恢复该任务详情，刷新后使用对应 Issue 的最新数据。归属于 Plan 的 v2 单项仅展示详情，不提供独立 Workspace、Coding 或删除入口；没有 Plan 归属的 v1 单项保留原有操作。
 
 ![Work Item Group 明细](assets/readme/work-item-group-details.jpg)
 

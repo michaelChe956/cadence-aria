@@ -13,12 +13,14 @@ import {
   deferred,
   installIssueLifecycleWorkbenchTestHooks,
   issueWorkItemPlanRecord,
+  jsonResponse,
   lifecycleCardTitle,
   lifecycleFetch,
   projectRecord,
   repositoryRecord,
   workItemRecord,
   workItemRepositoryGroupRecord,
+  type LifecycleFetchOptions,
 } from "./IssueLifecycleWorkbench.test-utils";
 
 vi.mock("../shared/MonacoViewer", () => ({
@@ -29,8 +31,196 @@ vi.mock("../shared/MonacoViewer", () => ({
   ),
 }));
 
+function repositoryGroupedLifecycleFetch(options: LifecycleFetchOptions = {}) {
+  const fetchLifecycle = lifecycleFetch({
+    confirmedWorkItem: true,
+    splitWorkItems: true,
+    ...options,
+  });
+  return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const response = await fetchLifecycle(input, init);
+    if (String(input) !== "/api/issues/issue_0001/lifecycle?project_id=project_0001") {
+      return response;
+    }
+    const lifecycle = (await response.json()) as IssueLifecycleResponse;
+    const workItems = lifecycle.work_items.map((item) => ({
+      ...item,
+      source_work_item_plan_id: "issue_plan_0001",
+    }));
+    return jsonResponse({
+      ...lifecycle,
+      work_items: workItems,
+      work_item_repository_groups: workItems.length > 0
+        ? [
+            workItemRepositoryGroupRecord({
+              target_repository_id: "repo_api",
+              alias: "api",
+              items: workItems.filter((item) => item.kind === "backend"),
+            }),
+            workItemRepositoryGroupRecord({
+              target_repository_id: "repo_web",
+              alias: "web",
+              items: workItems.filter((item) => item.kind === "frontend"),
+            }),
+          ]
+        : [],
+    });
+  });
+}
+
 describe("IssueLifecycleWorkbench drawer and work item groups", () => {
   installIssueLifecycleWorkbenchTestHooks();
+
+  it("分仓视图保留唯一最新 Plan 卡及其 Workspace、Coding 和删除入口", async () => {
+    const fetchMock = repositoryGroupedLifecycleFetch({
+      workItemPlans: [
+        issueWorkItemPlanRecord({
+          id: "issue_plan_old",
+          work_item_ids: [],
+          updated_at: "2026-05-19T00:00:00Z",
+        }),
+        issueWorkItemPlanRecord({
+          status: "confirmed",
+          work_item_ids: ["work_item_backend", "work_item_frontend"],
+          review_status: "completed",
+          validator_findings: [{
+            finding_id: "finding_plan",
+            level: "warning",
+            code: "integration_or_e2e_skipped_risk",
+            message: "补充贯通验证证据",
+            affected_scopes: ["web/**"],
+          }],
+          dependency_graph: [{
+            from_work_item_id: "work_item_backend",
+            to_work_item_id: "work_item_frontend",
+          }],
+        }),
+      ],
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    const onOpenWorkspace = vi.fn();
+    const onOpenCodingWorkspace = vi.fn();
+
+    render(
+      <IssueLifecycleWorkbench
+        onOpenWorkspace={onOpenWorkspace}
+        onOpenCodingWorkspace={onOpenCodingWorkspace}
+      />,
+    );
+
+    const region = await screen.findByRole("region", { name: "Work Item 内容" });
+    const planCards = within(region).getAllByRole("button", { name: "Work Item Group" });
+    expect(planCards).toHaveLength(1);
+    expect(within(region).getAllByTestId(/^lifecycle-card-(?:work_item|work_item_group)$/u)[0])
+      .toBe(within(region).getByTestId("lifecycle-card-work_item_group"));
+    expect(region).toHaveTextContent("issue_plan_0001");
+    expect(region).not.toHaveTextContent("issue_plan_old");
+    expect(region).toHaveTextContent("后端 API");
+    expect(region).toHaveTextContent("前端 UI");
+    expect(within(region).queryByRole("button", { name: /^删除 Work Item Group/u })).toBeNull();
+    await user.click(planCards[0]);
+
+    const drawer = screen.getByTestId("lifecycle-card-drawer");
+    expect(drawer).toHaveTextContent("work_item_backend");
+    expect(drawer).toHaveTextContent("work_item_frontend");
+    expect(drawer).toHaveTextContent("story_spec_0001");
+    expect(drawer).toHaveTextContent("design_spec_0001");
+    expect(drawer).toHaveTextContent("补充贯通验证证据");
+    expect(drawer).toHaveTextContent("work_item_backend -> work_item_frontend");
+    expect(within(drawer).getByTestId("drawer-review-status")).toHaveTextContent("Review 已完成");
+    expect(within(drawer).getByRole("button", { name: "开始 Coding" })).toBeInTheDocument();
+    expect(within(drawer).getByRole("button", { name: "删除 Work Item Group" })).toBeInTheDocument();
+    await user.click(within(drawer).getByRole("button", { name: "打开 Workspace" }));
+    await waitFor(() => expect(onOpenWorkspace).toHaveBeenCalledWith("workspace_session_plan_group_0001"));
+    await user.click(screen.getByTestId("drawer-open-coding-workspace"));
+    await waitFor(() => expect(onOpenCodingWorkspace).toHaveBeenCalledWith({
+      projectId: "project_0001",
+      issueId: "issue_0001",
+      attemptId: "coding_attempt_0001",
+    }));
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/project_0001/issues/issue_0001/work-item-plans/issue_plan_0001/coding-attempts",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      expect.stringMatching(/\/work-items\/[^/]+\/coding-attempts$/u),
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it.each(["running", "completed"] as const)("分仓 Plan 卡复用已有 %s Coding Attempt 而不重复创建", async (status) => {
+    const fetchMock = repositoryGroupedLifecycleFetch({
+      codingAttempts: [{
+        ...codingGroupAttemptRecord("issue_plan_0001"),
+        attempt_id: "coding_attempt_existing_group",
+        status,
+      }],
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const onOpenCodingWorkspace = vi.fn();
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench onOpenCodingWorkspace={onOpenCodingWorkspace} />);
+    await user.click(await screen.findByRole("button", { name: "Work Item Group" }));
+    await user.click(screen.getByRole("button", { name: "进入 Coding Workspace" }));
+    await waitFor(() => expect(onOpenCodingWorkspace).toHaveBeenCalledWith({
+      projectId: "project_0001",
+      issueId: "issue_0001",
+      attemptId: "coding_attempt_existing_group",
+    }));
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      expect.stringMatching(/\/coding-attempts$/u),
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("分仓 Plan 抽屉删除整组后关闭并恢复重新生成入口", async () => {
+    const fetchMock = repositoryGroupedLifecycleFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    const confirmSpy = vi.spyOn(window, "confirm")
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(true);
+    const user = userEvent.setup();
+    const onOpenWorkspace = vi.fn();
+
+    render(<IssueLifecycleWorkbench onOpenWorkspace={onOpenWorkspace} />);
+    await user.click(await screen.findByRole("button", { name: "Work Item Group" }));
+    await user.click(within(screen.getByTestId("lifecycle-card-drawer")).getByRole("button", {
+      name: "删除 Work Item Group",
+    }));
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      expect.stringContaining("/work-item-plans/"),
+      expect.objectContaining({ method: "DELETE" }),
+    );
+    expect(screen.getByTestId("lifecycle-card-drawer")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "删除 Work Item Group" }));
+
+    expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining("删除 Work Item Group"));
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/project_0001/issues/issue_0001/work-item-plans/issue_plan_0001",
+      expect.objectContaining({ method: "DELETE" }),
+    );
+    expect(await screen.findByRole("button", { name: "准备 Work Item Plan" })).toBeInTheDocument();
+    expect(screen.queryByTestId("lifecycle-card-drawer")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Work Item Group" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "后端 API" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "前端 UI" })).toBeNull();
+    expect(useLifecycleWorkbenchStore.getState()).toMatchObject({
+      isDrawerOpen: false,
+      focusedEntityKey: null,
+    });
+    await user.click(screen.getByRole("button", { name: "准备 Work Item Plan" }));
+    const dialog = await screen.findByRole("dialog", { name: "Work Item Plan 配置" });
+    await user.click(within(dialog).getByRole("button", { name: "创建并打开 Workspace" }));
+    await waitFor(() => expect(onOpenWorkspace).toHaveBeenCalledWith("workspace_session_plan_group_0001"));
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/project_0001/issues/issue_0001/work-item-plans:prepare",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(await screen.findByRole("button", { name: "Work Item Group" })).toBeInTheDocument();
+    confirmSpy.mockRestore();
+  });
 
   it.each([
     ["目标仓库", "repo_target_0001", false],
@@ -233,6 +423,7 @@ describe("IssueLifecycleWorkbench drawer and work item groups", () => {
       name: "Work Item 内容",
     });
     expect(workItemRegion).toHaveTextContent("已确认");
+    expect(within(workItemRegion).queryByRole("button", { name: /^删除 Work Item Group/u })).toBeNull();
 
     await user.click(
       await screen.findByRole("button", { name: "Work Item Group" }),

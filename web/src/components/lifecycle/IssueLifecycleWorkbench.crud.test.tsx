@@ -432,6 +432,7 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
     const fetchMock = lifecycleFetch();
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
 
     render(<IssueLifecycleWorkbench />);
 
@@ -477,9 +478,15 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
     await user.click(
       within(screen.getByRole("region", { name: "Work Item 内容" })).getByRole(
         "button",
-        { name: /删除 Work Item Group/u },
+        { name: "Work Item Group" },
       ),
     );
+    await user.click(
+      within(screen.getByTestId("lifecycle-card-drawer")).getByRole("button", {
+        name: "删除 Work Item Group",
+      }),
+    );
+    expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining("删除 Work Item Group"));
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/projects/project_0001/issues/issue_0001/work-item-plans/issue_plan_0001",
       expect.objectContaining({ method: "DELETE" }),
@@ -489,6 +496,7 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
         screen.getByRole("region", { name: "Work Item 内容" }),
       ).not.toHaveTextContent("Work Item Group"),
     );
+    confirmSpy.mockRestore();
   });
 
   it("requires repository when creating issue", async () => {

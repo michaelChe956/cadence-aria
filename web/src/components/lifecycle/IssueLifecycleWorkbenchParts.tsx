@@ -273,6 +273,7 @@ export function IssueLifecycleDetail({
         {activeStage === "work_item" ? (
           workItemRepositoryGroups.length > 0 ? (
             <WorkItemRepositoryGroupSection
+              planCard={workItems.find((card) => card.kind === "work_item_group")}
               groups={workItemRepositoryGroups}
               selectedKey={selectedKey}
               deletingKey={deletingKey}
@@ -371,6 +372,7 @@ export function lifecycleWorkItemCard(
 // 语义对齐后端 group_work_items_by_target）：每组标注仓库名（alias）、聚合状态，
 // 遗留/未指定仓库组标注“兼容投影”。
 function WorkItemRepositoryGroupSection({
+  planCard,
   groups,
   selectedKey,
   deletingKey,
@@ -379,6 +381,7 @@ function WorkItemRepositoryGroupSection({
   sectionTestId,
   bodyTestId,
 }: {
+  planCard: LifecycleCardData | undefined;
   groups: WorkItemRepositoryGroup[];
   selectedKey: string | null;
   deletingKey: string | null;
@@ -403,6 +406,16 @@ function WorkItemRepositoryGroupSection({
           {groups.length} 个仓库分组
         </span>
       </div>
+      {planCard ? (
+        <div className="mb-3 shrink-0">
+          <LifecycleCard
+            card={planCard}
+            selected={selectedKey === lifecycleCardKey(planCard)}
+            deleting={deletingKey === lifecycleCardKey(planCard)}
+            onSelect={() => onSelect(planCard)}
+          />
+        </div>
+      ) : null}
       {groups.length === 0 ? (
         <div
           data-testid={bodyTestId}
@@ -453,7 +466,9 @@ function WorkItemRepositoryGroupSection({
                             selected={selectedKey === lifecycleCardKey(card)}
                             deleting={deletingKey === lifecycleCardKey(card)}
                             onSelect={() => onSelect(card)}
-                            onDelete={() => onDelete(card)}
+                            onDelete={item.source_work_item_plan_id
+                              ? undefined
+                              : () => onDelete(card)}
                             allWorkItems={groupItems}
                           />
                         </li>
@@ -539,7 +554,10 @@ function LifecycleContentSection({
                 deleting={deletingKey === lifecycleCardKey(card)}
                 onSelect={() => onSelect(card)}
                 onDelete={
-                  () => onDelete(card)
+                  card.kind === "work_item_group" ||
+                  (card.kind === "work_item" && card.raw.source_work_item_plan_id)
+                    ? undefined
+                    : () => onDelete(card)
                 }
                 allWorkItems={allWorkItems}
               />
