@@ -204,14 +204,19 @@ impl WorkspaceEngine {
                 intent_target,
                 logical_id,
             )?;
-            // outline 反查双域兼容：legacy tx 值域为 logical id，SC tx 键域
-            // （outline id）== logical id。
+            // outline 反查双域兼容：legacy tx 值域为 logical id；SC tx 键域
+            //（outline id == logical id）命中时取键本身，绝不取值（值为物理
+            // work_item id，P2 复审缺陷）。
             let source_outline_id = tx
                 .outline_to_work_item_id
                 .iter()
                 .find(|(_, value)| value.as_str() == logical_id.as_str())
                 .map(|(outline_id, _)| outline_id.clone())
-                .or_else(|| tx.outline_to_work_item_id.get(logical_id).cloned());
+                .or_else(|| {
+                    tx.outline_to_work_item_id
+                        .contains_key(logical_id)
+                        .then(|| logical_id.clone())
+                });
             let source_draft_id = None;
             let depends_on = outcome
                 .dependency_graph_revision
@@ -264,6 +269,16 @@ impl WorkspaceEngine {
         }
         tx.created_work_item_ids = ordered.clone();
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn persist_compiled_work_item_records_for_test(
+        &self,
+        lifecycle: &LifecycleStore,
+        tx: &mut WorkItemPlanCompileTransaction,
+        outcome: &InitialPlanCompileOutcome,
+    ) -> Result<(), String> {
+        self.persist_compiled_work_item_records(lifecycle, tx, outcome)
     }
 
     pub(super) async fn finalize_initial_plan_compile(

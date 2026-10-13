@@ -173,6 +173,55 @@ async fn finalize_replay_after_work_item_records_persisted_keeps_records_unique(
     assert_eq!(wi_a.plan_status, WorkItemPlanStatus::Confirmed);
 }
 
+#[tokio::test]
+async fn sc_shaped_outline_map_persists_logical_source_outline_id() {
+    let (_tmp, lifecycle, plan_id, mut engine) =
+        make_work_item_plan_engine_with_accepted_contract_drafts();
+    let compile_id = "compile_park1_sc_outline_domain".to_string();
+    let (mut compile_tx, accepted_drafts) = prepare_initial_compile_transaction(
+        &engine,
+        &lifecycle,
+        &plan_id,
+        &compile_id,
+        "2026-10-13T00:00:00Z",
+    );
+    engine
+        .work_item_plan_store()
+        .unwrap()
+        .put_compile_transaction(&compile_tx)
+        .unwrap();
+    let outcome = engine
+        .compile_initial_plan_revision(&accepted_drafts)
+        .unwrap();
+    // SC 路径的 tx 形态(single_candidate.rs:537 / execute):键=outline id
+    //(== logical id),值=work_item.id(物理)。source_outline_id 必须落键域。
+    compile_tx.outline_to_work_item_id = BTreeMap::from([
+        ("wi_a".to_string(), "work_item_phys_001".to_string()),
+        ("wi_b".to_string(), "work_item_phys_002".to_string()),
+    ]);
+    engine
+        .persist_compiled_work_item_records_for_test(&lifecycle, &mut compile_tx, &outcome)
+        .unwrap();
+
+    let records = lifecycle
+        .list_work_items("project_0001", "issue_0001")
+        .unwrap();
+    let wi_a = records
+        .iter()
+        .find(|record| record.id == "wi_a")
+        .expect("wi_a record");
+    let wi_b = records
+        .iter()
+        .find(|record| record.id == "wi_b")
+        .expect("wi_b record");
+    assert_eq!(
+        wi_a.source_outline_id.as_deref(),
+        Some("wi_a"),
+        "SC 形态 map 命中键时必须取键(logical/outline id),不得回退取值(物理 work_item id)"
+    );
+    assert_eq!(wi_b.source_outline_id.as_deref(), Some("wi_b"));
+}
+
 fn compile_work_item_record(id: &str, repository_id: &str, title: &str) -> LifecycleWorkItemRecord {
     LifecycleWorkItemRecord {
         id: id.to_string(),

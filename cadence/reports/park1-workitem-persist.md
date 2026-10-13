@@ -94,3 +94,20 @@ tx 兜底)。
 
 park-2(start_generation 路由)由 5a217fa8+3372bdbe 解决,与本修正交;
 本修后 LC 链 coding 会话创建的 resolve 链已通(单测覆盖,实测以验收环境为准)。
+
+## Fix Round(复审 P2):source_outline_id 回退取键域
+
+- 提交:`fix: park-1 source_outline_id 回退取键域`
+- 缺陷:回退分支 `tx.outline_to_work_item_id.get(logical_id)` 取的是
+  **值**;SC 路径 map 形态为 {outline/logical id → work_item.id(物理)},
+  Continue 恢复重放时落盘 source_outline_id 变成 `work_item_{compile_id}_{nnn}`。
+- 修法(复审给定):键命中则取键——
+  `contains_key(logical_id).then(|| logical_id.clone())`。
+- TDD:红(sc_shaped_outline_map_persists_logical_source_outline_id,
+  left `Some("work_item_phys_001")` / right `Some("wi_a")`)→绿。
+- 回归(隔离基线树 /tmp,= 本包 HEAD + 修复 diff;当时主 worktree 被
+  SG1 in-flight compile_support.rs 未编译态阻塞):workspace_engine 全族
+  1269 passed / 0 failed(首轮 1 例 failpoint 并行 flaky,复跑全绿)、
+  lifecycle_store 105 passed / 0 failed、single_candidate 172 passed /
+  0 failed;park1 包 12 测试(含新 sc_shaped 红绿)全绿。
+
