@@ -24,6 +24,7 @@ pub mod lifecycle_store;
 pub mod logical_codebase;
 pub mod models;
 pub mod plan_repair;
+pub mod planning_failure;
 pub mod product_data_schema;
 pub mod project_store;
 pub mod provider_workspace_runner;
