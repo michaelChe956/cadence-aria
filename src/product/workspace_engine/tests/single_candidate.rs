@@ -1269,6 +1269,7 @@ mod sg3a1_structure_gate {
         let before = lifecycle
             .get_workspace_session(&engine.session().session_id)
             .expect("session before cycle candidate");
+        let (reviewer_before, confirm_before) = reviewer_and_confirm_node_counts(&engine);
         let error = engine
             .complete_single_candidate_work_item_plan_author(
                 cycle_candidate(),
@@ -1285,7 +1286,6 @@ mod sg3a1_structure_gate {
             error.contains("dependency_cycle[WI-001->WI-002]"),
             "witness-path evidence must ride the typed stop: {error}"
         );
-        let (reviewer_before, confirm_before) = reviewer_and_confirm_node_counts(&engine);
         assert_zero_promotion_and_zero_review(
             &lifecycle,
             &engine,
@@ -1301,6 +1301,7 @@ mod sg3a1_structure_gate {
         let before2 = lifecycle2
             .get_workspace_session(&engine2.session().session_id)
             .expect("session before parser candidate");
+        let (reviewer2_before, confirm2_before) = reviewer_and_confirm_node_counts(&engine2);
         let error2 = engine2
             .complete_single_candidate_work_item_plan_author(
                 illegal_heading_candidate(),
@@ -1313,7 +1314,6 @@ mod sg3a1_structure_gate {
             error2.contains("compile markdown source failed"),
             "parser evidence surfaces the compiler diagnostics: {error2}"
         );
-        let (reviewer2_before, confirm2_before) = reviewer_and_confirm_node_counts(&engine2);
         assert_zero_promotion_and_zero_review(
             &lifecycle2,
             &engine2,
@@ -1329,6 +1329,7 @@ mod sg3a1_structure_gate {
         let before3 = lifecycle3
             .get_workspace_session(&engine3.session().session_id)
             .expect("session before scope candidate");
+        let (reviewer3_before, confirm3_before) = reviewer_and_confirm_node_counts(&engine3);
         let error3 = engine3
             .complete_single_candidate_work_item_plan_author(
                 unknown_provider_candidate(),
@@ -1341,7 +1342,6 @@ mod sg3a1_structure_gate {
             error3.contains("unknown_provider_logical_work_item[WI-009->WI-002]"),
             "scope evidence must carry provider/consumer ids: {error3}"
         );
-        let (reviewer3_before, confirm3_before) = reviewer_and_confirm_node_counts(&engine3);
         assert_zero_promotion_and_zero_review(
             &lifecycle3,
             &engine3,
