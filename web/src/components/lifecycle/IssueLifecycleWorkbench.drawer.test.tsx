@@ -20,6 +20,7 @@ import {
   repositoryRecord,
   workItemRecord,
   workItemRepositoryGroupRecord,
+  type LifecycleFetchMock,
   type LifecycleFetchOptions,
 } from "./IssueLifecycleWorkbench.test-utils";
 
@@ -68,35 +69,142 @@ function repositoryGroupedLifecycleFetch(options: LifecycleFetchOptions = {}) {
   });
 }
 
+// N6（REQ-CS-01/06）：多仓 plan 一键启动夹具——GET 返回聚合（bound revision
+// 互证），POST 逐条回放 startResults 并记录出站 body。
+function planCodingStartResultRecord(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    plan_id: "issue_plan_0001",
+    bound_plan_revision_id: "plan_revision_0002",
+    command_id: "plan_start_abc123",
+    operation_state: "accepted",
+    primary_attempt_id: "coding_attempt_selected_0001",
+    target_attempts: [],
+    selected_unit_id: "coding_unit_0001",
+    selected_attempt_id: "coding_attempt_selected_0001",
+    start_outcome: {
+      kind: "started",
+      attempt_id: "coding_attempt_selected_0001",
+    },
+    waiting_units: [],
+    progress: {
+      plan_id: "issue_plan_0001",
+      bound_plan_revision_id: "plan_revision_0002",
+      command_id: "plan_start_abc123",
+      mode: "first_ready_unit",
+      phase: "started",
+      primary_attempt_id: "coding_attempt_selected_0001",
+      selected_unit_id: "coding_unit_0001",
+      selected_attempt_id: "coding_attempt_selected_0001",
+      target_attempts: [],
+      units: [],
+      plan_complete: false,
+    },
+    ...overrides,
+  };
+}
+
+function planCodingProgressRecord(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    plan_id: "issue_plan_0001",
+    bound_plan_revision_id: "plan_revision_0002",
+    command_id: null,
+    mode: null,
+    phase: null,
+    primary_attempt_id: null,
+    selected_unit_id: null,
+    selected_attempt_id: null,
+    target_attempts: [],
+    units: [],
+    plan_complete: false,
+    ...overrides,
+  };
+}
+
+function withPlanCodingStartRoutes(
+  fetchLifecycle: LifecycleFetchMock,
+  options: {
+    getResponse?: () => Promise<Response> | Response;
+    postResponses?: Array<{ status: number; body: unknown }>;
+    onPostBody?: (body: {
+      command_id: string;
+      expected_plan_revision_id: string;
+    }) => void;
+  } = {},
+) {
+  const postResponses = [
+    ...(options.postResponses ?? [
+      { status: 200, body: planCodingStartResultRecord() },
+    ]),
+  ];
+  return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    const match = url.match(
+      /^\/api\/projects\/([^/]+)\/issues\/([^/]+)\/work-item-plans\/([^/]+)\/coding-start$/u,
+    );
+    if (!match) {
+      return fetchLifecycle(input, init);
+    }
+    if (init?.method === "POST") {
+      options.onPostBody?.(
+        JSON.parse(String(init.body)) as {
+          command_id: string;
+          expected_plan_revision_id: string;
+        },
+      );
+      const next =
+        postResponses.shift() ??
+        ({ status: 200, body: planCodingStartResultRecord() } as {
+          status: number;
+          body: unknown;
+        });
+      return new Response(JSON.stringify(next.body), { status: next.status });
+    }
+    return options.getResponse
+      ? await options.getResponse()
+      : jsonResponse(planCodingProgressRecord());
+  });
+}
+
+const CODING_START_URL =
+  "/api/projects/project_0001/issues/issue_0001/work-item-plans/issue_plan_0001/coding-start";
+
 describe("IssueLifecycleWorkbench drawer and work item groups", () => {
   installIssueLifecycleWorkbenchTestHooks();
 
-  it("分仓视图保留唯一最新 Plan 卡及其 Workspace、Coding 和删除入口", async () => {
-    const fetchMock = repositoryGroupedLifecycleFetch({
-      workItemPlans: [
-        issueWorkItemPlanRecord({
-          id: "issue_plan_old",
-          work_item_ids: [],
-          updated_at: "2026-05-19T00:00:00Z",
-        }),
-        issueWorkItemPlanRecord({
-          status: "confirmed",
-          work_item_ids: ["work_item_backend", "work_item_frontend"],
-          review_status: "completed",
-          validator_findings: [{
-            finding_id: "finding_plan",
-            level: "warning",
-            code: "integration_or_e2e_skipped_risk",
-            message: "补充贯通验证证据",
-            affected_scopes: ["web/**"],
-          }],
-          dependency_graph: [{
-            from_work_item_id: "work_item_backend",
-            to_work_item_id: "work_item_frontend",
-          }],
-        }),
-      ],
-    });
+  it("多仓开始 Coding 先 GET bound revision 再单发 POST 并打开 selected workspace", async () => {
+    const postBodies: Array<{ command_id: string; expected_plan_revision_id: string }> = [];
+    const fetchMock = withPlanCodingStartRoutes(
+      repositoryGroupedLifecycleFetch({
+        workItemPlans: [
+          issueWorkItemPlanRecord({
+            id: "issue_plan_old",
+            work_item_ids: [],
+            updated_at: "2026-05-19T00:00:00Z",
+          }),
+          issueWorkItemPlanRecord({
+            status: "confirmed",
+            work_item_ids: ["work_item_backend", "work_item_frontend"],
+            review_status: "completed",
+            validator_findings: [{
+              finding_id: "finding_plan",
+              level: "warning",
+              code: "integration_or_e2e_skipped_risk",
+              message: "补充贯通验证证据",
+              affected_scopes: ["web/**"],
+            }],
+            dependency_graph: [{
+              from_work_item_id: "work_item_backend",
+              to_work_item_id: "work_item_frontend",
+            }],
+          }),
+        ],
+      }),
+      { onPostBody: (body) => postBodies.push(body) },
+    );
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
     const onOpenWorkspace = vi.fn();
@@ -137,9 +245,22 @@ describe("IssueLifecycleWorkbench drawer and work item groups", () => {
     await waitFor(() => expect(onOpenCodingWorkspace).toHaveBeenCalledWith({
       projectId: "project_0001",
       issueId: "issue_0001",
-      attemptId: "coding_attempt_0001",
+      attemptId: "coding_attempt_selected_0001",
     }));
-    expect(fetchMock).toHaveBeenCalledWith(
+
+    // 一键顺序固定：先 GET 聚合取 bound revision，再精确 POST 一次。
+    const startCalls = fetchMock.mock.calls.filter(
+      ([input]) => String(input) === CODING_START_URL,
+    );
+    const firstInit = startCalls[0]?.[1] as RequestInit | undefined;
+    expect(firstInit?.method).toBeUndefined();
+    expect(firstInit?.body).toBeUndefined();
+    expect(startCalls[1]?.[1]).toMatchObject({ method: "POST" });
+    expect(postBodies).toHaveLength(1);
+    expect(postBodies[0]?.command_id).toEqual(expect.any(String));
+    expect(postBodies[0]?.expected_plan_revision_id).toBe("plan_revision_0002");
+    // 旧 group 创建端点零调用（多仓不走旧 POST）。
+    expect(fetchMock).not.toHaveBeenCalledWith(
       "/api/projects/project_0001/issues/issue_0001/work-item-plans/issue_plan_0001/coding-attempts",
       expect.objectContaining({ method: "POST" }),
     );
@@ -173,6 +294,87 @@ describe("IssueLifecycleWorkbench drawer and work item groups", () => {
       expect.stringMatching(/\/coding-attempts$/u),
       expect.objectContaining({ method: "POST" }),
     );
+    // 旧现 attempt 普通打开零 POST：也不触发新 coding-start GET/POST。
+    expect(fetchMock).not.toHaveBeenCalledWith(CODING_START_URL, expect.anything());
+  });
+
+  it("多仓开始请求进行中重复点击不产生第二次出站", async () => {
+    const getGate = deferred<Response>();
+    const postBodies: Array<{ command_id: string; expected_plan_revision_id: string }> = [];
+    const fetchMock = withPlanCodingStartRoutes(
+      repositoryGroupedLifecycleFetch(),
+      {
+        getResponse: () => getGate.promise,
+        onPostBody: (body) => postBodies.push(body),
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    const onOpenCodingWorkspace = vi.fn();
+
+    render(<IssueLifecycleWorkbench onOpenCodingWorkspace={onOpenCodingWorkspace} />);
+    await user.click(await screen.findByRole("button", { name: "Work Item Group" }));
+    const startButton = screen.getByTestId("drawer-open-coding-workspace");
+    await user.click(startButton);
+    // GET 仍在途时第二次点击必须被忽略。
+    await user.click(startButton);
+
+    getGate.resolve(
+      new Response(JSON.stringify(planCodingProgressRecord()), { status: 200 }),
+    );
+    await waitFor(() =>
+      expect(onOpenCodingWorkspace).toHaveBeenCalledWith({
+        projectId: "project_0001",
+        issueId: "issue_0001",
+        attemptId: "coding_attempt_selected_0001",
+      }),
+    );
+
+    const startCalls = fetchMock.mock.calls.filter(
+      ([input]) => String(input) === CODING_START_URL,
+    );
+    expect(startCalls).toHaveLength(2);
+    expect(postBodies).toHaveLength(1);
+  });
+
+  it("多仓开始失败后重试复用同一 command 并重新互证 revision", async () => {
+    const postBodies: Array<{ command_id: string; expected_plan_revision_id: string }> = [];
+    const fetchMock = withPlanCodingStartRoutes(
+      repositoryGroupedLifecycleFetch(),
+      {
+        postResponses: [
+          { status: 500, body: { code: "internal_error", message: "启动失败", details: {} } },
+          { status: 200, body: planCodingStartResultRecord() },
+        ],
+        onPostBody: (body) => postBodies.push(body),
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    const onOpenCodingWorkspace = vi.fn();
+
+    render(<IssueLifecycleWorkbench onOpenCodingWorkspace={onOpenCodingWorkspace} />);
+    await user.click(await screen.findByRole("button", { name: "Work Item Group" }));
+    await user.click(screen.getByTestId("drawer-open-coding-workspace"));
+
+    // 首次启动失败：错误可见且未打开工作台。
+    expect(await screen.findByRole("alert")).toHaveTextContent("启动失败");
+    expect(onOpenCodingWorkspace).not.toHaveBeenCalled();
+
+    // 同一启动动作重试：GET 重新互证 revision，POST 复用同一 command_id。
+    await user.click(screen.getByTestId("drawer-open-coding-workspace"));
+    await waitFor(() =>
+      expect(onOpenCodingWorkspace).toHaveBeenCalledWith({
+        projectId: "project_0001",
+        issueId: "issue_0001",
+        attemptId: "coding_attempt_selected_0001",
+      }),
+    );
+
+    expect(postBodies).toHaveLength(2);
+    expect(postBodies[1]?.command_id).toBe(postBodies[0]?.command_id);
+    expect(postBodies[0]?.expected_plan_revision_id).toBe("plan_revision_0002");
+    expect(postBodies[1]?.expected_plan_revision_id).toBe("plan_revision_0002");
   });
 
   it("分仓 Plan 抽屉删除整组后关闭并恢复重新生成入口", async () => {
@@ -543,6 +745,8 @@ describe("IssueLifecycleWorkbench drawer and work item groups", () => {
       "/api/projects/project_0001/issues/issue_0001/work-item-plans/issue_plan_0001/coding-attempts",
       expect.objectContaining({ method: "POST" }),
     );
+    // v1 旧动作不变：无分仓投影的单仓 group 仍走旧创建端点，零 coding-start 出站。
+    expect(fetchMock).not.toHaveBeenCalledWith(CODING_START_URL, expect.anything());
   });
 
   it("shows existing group coding label and reuses the active fallback attempt", async () => {

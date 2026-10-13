@@ -795,6 +795,10 @@ export function CodingWorkspacePage({
           planId={store.workItemGroupId}
           currentWorkItemId={store.currentWorkItemId}
           units={store.units}
+          projectId={address.projectId}
+          issueId={address.issueId}
+          selectedAttemptId={address.attemptId}
+          refreshKey={`${store.status ?? "-"}-${store.stage ?? "-"}-${store.units.length}`}
         />
       ) : null}
       <CodingDashboard />

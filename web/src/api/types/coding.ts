@@ -548,6 +548,96 @@ export type ArtifactContentResponse = {
   content: string;
 };
 
+// ── N6（REQ-CS-01/06）：plan 一键启动与聚合进度 DTO（N3 冻结，前端只读镜像）──
+
+export type PlanCodingStartRequest = {
+  command_id: string;
+  expected_plan_revision_id: string;
+};
+
+// lease_state 沿 repo worktree lock 事实（absent|held|contested），不猜 provider 运行。
+export type PlanCodingLeaseState = "absent" | "held" | "contested";
+
+// execution_state 值域 initialized|running|waiting_dependency|waiting_slot|paused|
+// completed——provider 事实与初始化桶首 unit Running（物化事实）严格区分。
+export type PlanCodingExecutionState =
+  | "initialized"
+  | "running"
+  | "waiting_dependency"
+  | "waiting_slot"
+  | "paused"
+  | "completed";
+
+// waiting_reason 值域 dependency_not_ready|execution_slot_occupied|
+// plan_coding_continuation_not_enabled（依赖优先于暂停文案）。
+export type PlanCodingWaitingReason =
+  | "dependency_not_ready"
+  | "execution_slot_occupied"
+  | "plan_coding_continuation_not_enabled";
+
+// operation_state 沿现 accepted|replayed|needs_human|rejected 语义。
+export type PlanCodingOperationState =
+  | "accepted"
+  | "replayed"
+  | "needs_human"
+  | "rejected";
+
+// N2 tagged 首启真实回执（kind=started|already_started|needs_human）。
+export type CodingPlanStartOutcome =
+  | { kind: "started"; attempt_id: string }
+  | { kind: "already_started"; attempt_id: string }
+  | { kind: "needs_human"; attempt_id: string; reason: string };
+
+export type PlanCodingTargetDto = {
+  target_repository_id: string;
+  attempt_id: string;
+  attempt_status: CodingAttemptStatus;
+  worktree_path: string | null;
+  lease_state: PlanCodingLeaseState;
+};
+
+export type PlanCodingUnitProgressDto = {
+  unit_id: string;
+  logical_work_item_id: string;
+  target_repository_id: string;
+  attempt_id: string;
+  unit_status: CodingExecutionUnitStatus;
+  execution_state: PlanCodingExecutionState;
+  unsatisfied_dependency_ids: string[];
+  waiting_reason: PlanCodingWaitingReason | null;
+};
+
+// 按 bound target attempts 聚合的 plan 进度；primary 仅打开入口，不代表整 plan
+// 执行或完成（plan_complete 只在全部 authoritative units Completed 时为 true）。
+export type PlanCodingProgressDto = {
+  plan_id: string;
+  bound_plan_revision_id: string;
+  command_id: string | null;
+  mode: string | null;
+  phase: string | null;
+  primary_attempt_id: string | null;
+  selected_unit_id: string | null;
+  selected_attempt_id: string | null;
+  target_attempts: PlanCodingTargetDto[];
+  units: PlanCodingUnitProgressDto[];
+  plan_complete: boolean;
+};
+
+// 一键启动结果：start_outcome 为冻结首启回执；waiting_units 为等待绑定集合。
+export type PlanCodingStartResultDto = {
+  plan_id: string;
+  bound_plan_revision_id: string;
+  command_id: string;
+  operation_state: PlanCodingOperationState;
+  primary_attempt_id: string | null;
+  target_attempts: PlanCodingTargetDto[];
+  selected_unit_id: string | null;
+  selected_attempt_id: string | null;
+  start_outcome: CodingPlanStartOutcome | null;
+  waiting_units: PlanCodingUnitProgressDto[];
+  progress: PlanCodingProgressDto;
+};
+
 export type CodingWsInMessage =
   | { type: "coding_hello"; attempt_id: string; last_seen_node_id?: string | null }
   | { type: "start_coding" }

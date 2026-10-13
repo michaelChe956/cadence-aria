@@ -124,6 +124,11 @@ describe("IssueLifecycleWorkbench single work item coding", () => {
       "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0001/coding-attempts",
       expect.objectContaining({ method: "POST" }),
     );
+    // v1 旧动作不变：单项启动不触发新 plan coding-start 出站。
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      expect.stringMatching(/\/coding-start$/u),
+      expect.anything(),
+    );
   });
 
   it.each([undefined, null])("v1 计划归属为 %s 时复用已有单项 Coding Attempt", async (sourcePlanId) => {

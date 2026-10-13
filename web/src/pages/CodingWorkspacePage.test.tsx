@@ -6,6 +6,7 @@ import {
   confirmWorkItemExecutionPlan,
   deleteCodingAttempt,
   getCodingAttemptDiff,
+  getPlanCodingProgress,
   requestWorkItemExecutionPlanChange,
 } from "../api/client";
 import { useCodingWorkspaceWs } from "../hooks/useCodingWorkspaceWs";
@@ -28,6 +29,10 @@ vi.mock("../api/client", () => ({
   confirmWorkItemExecutionPlan: vi.fn(),
   deleteCodingAttempt: vi.fn(),
   getCodingAttemptDiff: vi.fn(),
+  // 默认无 plan 聚合（旧用例降级回局部投影）；需要聚合的用例单独 mockResolvedValue。
+  getPlanCodingProgress: vi.fn(async () => {
+    throw new Error("plan aggregate not configured for this test");
+  }),
   requestWorkItemExecutionPlanChange: vi.fn(),
 }));
 
@@ -291,6 +296,87 @@ describe("CodingWorkspacePage shell and actions", () => {
     expect(await screen.findByText("WorkItemGroup")).toBeInTheDocument();
     expect(screen.getByText("1 / 2")).toBeInTheDocument();
     expect(screen.getAllByText("work_item_0001").length).toBeGreaterThan(0);
+  });
+
+  it("passes the current address to the plan aggregate and never starts the WS", async () => {
+    const api = mockCodingWs();
+    mockCodingSessionState({
+      attempt_scope: "work_item_group",
+      work_item_group_id: "work_item_plan_0001",
+      current_work_item_id: "work_item_0001",
+      active_unit_id: "coding_unit_0001",
+      units: [
+        {
+          unit_id: "coding_unit_0001",
+          logical_work_item_id: "work_item_0001",
+          work_item_revision_id: "work_item_revision_0001",
+          dependency_logical_work_item_ids: [],
+          order_index: 0,
+          status: "running",
+          summary: null,
+          latest_handoff_revision_id: null,
+          completion_commit: null,
+        },
+      ],
+    });
+    vi.mocked(getPlanCodingProgress).mockResolvedValueOnce({
+      plan_id: "work_item_plan_0001",
+      bound_plan_revision_id: "plan_revision_0002",
+      command_id: "plan_start_abc123",
+      mode: "first_ready_unit",
+      phase: "started",
+      primary_attempt_id: "coding_attempt_0001",
+      selected_unit_id: "coding_unit_0001",
+      selected_attempt_id: "coding_attempt_0001",
+      target_attempts: [
+        {
+          target_repository_id: "repo_busi",
+          attempt_id: "coding_attempt_0001",
+          attempt_status: "running",
+          worktree_path: "/tmp/wt/busi",
+          lease_state: "held",
+        },
+      ],
+      units: [
+        {
+          unit_id: "coding_unit_0001",
+          logical_work_item_id: "work_item_0001",
+          target_repository_id: "repo_busi",
+          attempt_id: "coding_attempt_0001",
+          unit_status: "running",
+          execution_state: "running",
+          unsatisfied_dependency_ids: [],
+          waiting_reason: null,
+        },
+        {
+          unit_id: "coding_unit_0005",
+          logical_work_item_id: "work_item_0005",
+          target_repository_id: "repo_frontend",
+          attempt_id: "coding_attempt_0002",
+          unit_status: "pending",
+          execution_state: "waiting_dependency",
+          unsatisfied_dependency_ids: ["work_item_0001"],
+          waiting_reason: "dependency_not_ready",
+        },
+      ],
+      plan_complete: false,
+    });
+
+    render(
+      <CodingWorkspacePage address={CODING_ATTEMPT_ADDRESS} onBack={vi.fn()} />,
+    );
+
+    expect(await screen.findByTestId("plan-coding-progress")).toBeInTheDocument();
+    expect(getPlanCodingProgress).toHaveBeenCalledWith(
+      "project_0001",
+      "issue_0001",
+      "work_item_plan_0001",
+    );
+    expect(screen.getByTestId("plan-coding-progress")).toHaveTextContent(
+      "等待依赖完成",
+    );
+    // selected attempt WS 仍是局部实时通道：聚合展示不触发任何 WS start。
+    expect(api.startCoding).not.toHaveBeenCalled();
   });
 
   it("renders automatic retry history and waits for human handling after the third failure", async () => {

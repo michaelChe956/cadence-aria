@@ -36,6 +36,9 @@ import type {
   RepositoryListResponse,
   RetryFailedScRunStatus,
   TakeoverResponse,
+  PlanCodingProgressDto,
+  PlanCodingStartRequest,
+  PlanCodingStartResultDto,
   WorkspaceHumanAction,
   WorkspaceHumanActionStatus,
   WorkspaceSession,
@@ -677,6 +680,35 @@ export function createGroupCodingAttempt(
       method: "POST",
       body: JSON.stringify({}),
     },
+  );
+}
+
+// N6（REQ-CS-01）：多仓 confirmed plan 的一键显式启动——command_id 为稳定幂等键，
+// expected_plan_revision_id 与 GET 聚合返回的 bound revision 互证（漂移即拒）。
+export function startPlanCoding(
+  projectId: string,
+  issueId: string,
+  planId: string,
+  request: PlanCodingStartRequest,
+): Promise<PlanCodingStartResultDto> {
+  return requestJson<PlanCodingStartResultDto>(
+    `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/work-item-plans/${encodeURIComponent(planId)}/coding-start`,
+    {
+      method: "POST",
+      body: JSON.stringify(request),
+    },
+  );
+}
+
+// N6（REQ-CS-06）：plan 聚合进度 GET（与 POST 同地址）——未建 run 时只读投影，
+// bound_plan_revision_id 供一键启动互证。
+export function getPlanCodingProgress(
+  projectId: string,
+  issueId: string,
+  planId: string,
+): Promise<PlanCodingProgressDto> {
+  return requestJson<PlanCodingProgressDto>(
+    `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/work-item-plans/${encodeURIComponent(planId)}/coding-start`,
   );
 }
 

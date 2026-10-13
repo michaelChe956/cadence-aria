@@ -9,7 +9,9 @@ import {
   getCodingAttemptDiff,
   getCodingAttemptSnapshot,
   getLegacyCodingAttemptSnapshot,
+  getPlanCodingProgress,
   requestWorkItemExecutionPlanChange,
+  startPlanCoding,
 } from "./client";
 
 const CODING_ATTEMPT_ADDRESS = {
@@ -165,6 +167,86 @@ describe("coding attempts api client", () => {
       expect.objectContaining({ method: "POST" }),
     );
   });
+
+  it("starts plan coding with exact body via explicit coding-start route", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify(planCodingStartResultResponse()), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await startPlanCoding(
+      "project/with space",
+      "issue/with space",
+      "plan/1",
+      {
+        command_id: "plan_start_abc123",
+        expected_plan_revision_id: "plan_revision_0002",
+      },
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/project%2Fwith%20space/issues/issue%2Fwith%20space/work-item-plans/plan%2F1/coding-start",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          command_id: "plan_start_abc123",
+          expected_plan_revision_id: "plan_revision_0002",
+        }),
+      },
+    );
+    expect(result.operation_state).toBe("accepted");
+    expect(result.selected_attempt_id).toBe("coding_attempt_busi_0001");
+    expect(result.start_outcome).toEqual({
+      kind: "started",
+      attempt_id: "coding_attempt_busi_0001",
+    });
+  });
+
+  it("gets plan coding progress from the same route without a payload", async () => {
+    const fetchMock = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        new Response(JSON.stringify(planCodingProgressResponse()), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const progress = await getPlanCodingProgress(
+      "project/with space",
+      "issue/with space",
+      "plan/1",
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "/api/projects/project%2Fwith%20space/issues/issue%2Fwith%20space/work-item-plans/plan%2F1/coding-start",
+    );
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit | undefined;
+    expect(init?.method).toBeUndefined();
+    expect(init?.body).toBeUndefined();
+    expect(progress.plan_id).toBe("issue_plan_0001");
+    expect(progress.bound_plan_revision_id).toBe("plan_revision_0002");
+    expect(progress.plan_complete).toBe(false);
+    expect(progress.units).toHaveLength(5);
+  });
+
+  it("keeps the legacy group coding attempt post a single empty object", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify(codingAttemptResponse()), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await createGroupCodingAttempt("project_0001", "issue_0001", "issue_plan_0001");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/project_0001/issues/issue_0001/work-item-plans/issue_plan_0001/coding-attempts",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      },
+    );
+  });
 });
 
 function codingAttemptResponse() {
@@ -252,5 +334,100 @@ function artifactContentResponse() {
     path: "/tmp/worktree/.aria/coding-artifacts/test-output/unit.stdout.log",
     content_type: "text/plain",
     content: "cargo test ok",
+  };
+}
+
+// N6（REQ-CS-01/06）：N3 冻结 DTO 的镜像夹具——四 target/五 WI（busi=wi_core、
+// web=wi_registration、gateway=wi_unrelated、frontend={wi_service, wi_panel}），
+// wi_panel 直接依赖 {wi_service, wi_unrelated}。
+function planCodingUnitRecord(overrides: Record<string, unknown> = {}) {
+  return {
+    unit_id: "coding_unit_0001",
+    logical_work_item_id: "wi_core",
+    target_repository_id: "repo_busi",
+    attempt_id: "coding_attempt_busi_0001",
+    unit_status: "running",
+    execution_state: "running",
+    unsatisfied_dependency_ids: [],
+    waiting_reason: null,
+    ...overrides,
+  };
+}
+
+function planCodingProgressResponse() {
+  return {
+    plan_id: "issue_plan_0001",
+    bound_plan_revision_id: "plan_revision_0002",
+    command_id: null,
+    mode: null,
+    phase: null,
+    primary_attempt_id: null,
+    selected_unit_id: null,
+    selected_attempt_id: null,
+    target_attempts: [],
+    units: [
+      planCodingUnitRecord(),
+      planCodingUnitRecord({
+        unit_id: "coding_unit_0002",
+        logical_work_item_id: "wi_registration",
+        target_repository_id: "repo_web",
+        attempt_id: "coding_attempt_web_0001",
+        unit_status: "pending",
+        execution_state: "waiting_dependency",
+        unsatisfied_dependency_ids: ["wi_core"],
+        waiting_reason: "dependency_not_ready",
+      }),
+      planCodingUnitRecord({
+        unit_id: "coding_unit_0003",
+        logical_work_item_id: "wi_unrelated",
+        target_repository_id: "repo_gateway",
+        attempt_id: "coding_attempt_gateway_0001",
+        unit_status: "pending",
+        execution_state: "waiting_slot",
+        unsatisfied_dependency_ids: [],
+        waiting_reason: "execution_slot_occupied",
+      }),
+      planCodingUnitRecord({
+        unit_id: "coding_unit_0004",
+        logical_work_item_id: "wi_service",
+        target_repository_id: "repo_frontend",
+        attempt_id: "coding_attempt_frontend_0001",
+        unit_status: "pending",
+        execution_state: "waiting_dependency",
+        unsatisfied_dependency_ids: ["wi_unrelated"],
+        waiting_reason: "dependency_not_ready",
+      }),
+      planCodingUnitRecord({
+        unit_id: "coding_unit_0005",
+        logical_work_item_id: "wi_panel",
+        target_repository_id: "repo_frontend",
+        attempt_id: "coding_attempt_frontend_0001",
+        unit_status: "pending",
+        execution_state: "waiting_dependency",
+        unsatisfied_dependency_ids: ["wi_service", "wi_unrelated"],
+        waiting_reason: "dependency_not_ready",
+      }),
+    ],
+    plan_complete: false,
+  };
+}
+
+function planCodingStartResultResponse() {
+  const progress = planCodingProgressResponse();
+  return {
+    plan_id: progress.plan_id,
+    bound_plan_revision_id: progress.bound_plan_revision_id,
+    command_id: "plan_start_abc123",
+    operation_state: "accepted",
+    primary_attempt_id: "coding_attempt_busi_0001",
+    target_attempts: [],
+    selected_unit_id: "coding_unit_0001",
+    selected_attempt_id: "coding_attempt_busi_0001",
+    start_outcome: {
+      kind: "started",
+      attempt_id: "coding_attempt_busi_0001",
+    },
+    waiting_units: [],
+    progress,
   };
 }

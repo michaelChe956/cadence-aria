@@ -15,11 +15,13 @@ import {
   deleteWorkItem,
   deleteWorkItemPlan,
   getIssueLifecycle,
+  getPlanCodingProgress,
   getRepositoryInitialization,
   listProductIssues,
   listProjects,
   listRepositoryBranches,
   listRepositories,
+  startPlanCoding,
 } from "../../api/client";
 import { rebuildAggregateIndex } from "../../api/aggregate-index";
 import {
@@ -112,6 +114,36 @@ export { defaultLaunchTitle } from "./IssueLifecycleWorkbenchParts";
 // 稳定空数组引用：避免每次 render 新建 [] 使 useMemo 依赖失效。
 const EMPTY_GROUP_KEYS: IssueQueueGroupKey[] = [];
 
+// N6（REQ-CS-01）：多仓 plan 判定——plan 的 work items 落在 ≥2 个非兼容投影
+// target 仓时走新一键 coding-start；单仓/无分仓投影保持 v1 旧路径不变。
+function countPlanTargetRepositories(
+  lifecycle: IssueLifecycleResponse | undefined,
+  planWorkItemIds: readonly string[],
+): number {
+  if (!lifecycle) {
+    return 0;
+  }
+  const planItems = new Set(planWorkItemIds);
+  const targetIds = new Set<string>();
+  for (const group of lifecycle.work_item_repository_groups) {
+    if (!group.target_repository_id) {
+      continue;
+    }
+    if (group.items.some((item) => planItems.has(item.work_item_id))) {
+      targetIds.add(group.target_repository_id);
+    }
+  }
+  return targetIds.size;
+}
+
+// 一次用户启动动作生成一次，同动作失败重试复用（后端按 command_id 幂等）。
+function newPlanCodingCommandId(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return `plan_start_ui_${crypto.randomUUID()}`;
+  }
+  return `plan_start_ui_${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 export function IssueLifecycleWorkbench({
   focusEntityKey,
   onDrawerFocusChange,
@@ -172,6 +204,9 @@ export function IssueLifecycleWorkbench({
   >({});
   const refreshRequestId = useRef(0);
   const createdIssuesRef = useRef<ProductIssue[]>([]);
+  // N6：多仓 plan 一键启动的幂等 command（同动作重试复用）与在途防抖。
+  const planCodingStartRef = useRef<{ planId: string; commandId: string } | null>(null);
+  const planCodingStartInFlightRef = useRef(false);
   const drawerFocusedEntityKey = useLifecycleWorkbenchStore(
     (state) => state.focusedEntityKey,
   );
@@ -724,6 +759,61 @@ export function IssueLifecycleWorkbench({
         issueId: card.issueId,
         attemptId: latestGroupAttempt.attempt_id,
       });
+      return;
+    }
+
+    // N6（REQ-CS-01）：多仓 confirmed plan 的一键启动——先 GET 聚合取 bound
+    // revision 互证，再单发 POST coding-start，打开 selected（否则 primary，仅
+    // 投影入口）workspace。请求中禁重复出站；同一启动动作失败重试复用同一
+    // command_id。v1 单仓/无分仓投影 plan 保持旧创建端点不变。
+    if (
+      countPlanTargetRepositories(lifecycle, card.childWorkItemIds) >= 2 &&
+      !planCodingStartInFlightRef.current
+    ) {
+      planCodingStartInFlightRef.current = true;
+      setError(null);
+      try {
+        const progress = await getPlanCodingProgress(
+          selectedProjectId,
+          card.issueId,
+          card.id,
+        );
+        const previous = planCodingStartRef.current;
+        const commandId =
+          previous && previous.planId === card.id
+            ? previous.commandId
+            : newPlanCodingCommandId();
+        planCodingStartRef.current = { planId: card.id, commandId };
+        const result = await startPlanCoding(
+          selectedProjectId,
+          card.issueId,
+          card.id,
+          {
+            command_id: commandId,
+            expected_plan_revision_id: progress.bound_plan_revision_id,
+          },
+        );
+        const openAttemptId =
+          result.selected_attempt_id ?? result.primary_attempt_id;
+        if (!openAttemptId) {
+          setError("尚无 ready 首项，plan 已绑定等待；请稍后刷新查看进度");
+          return;
+        }
+        await refresh(selectedProjectId);
+        onOpenCodingWorkspace({
+          projectId: selectedProjectId,
+          issueId: card.issueId,
+          attemptId: openAttemptId,
+        });
+      } catch (reason) {
+        setError(errorMessage(reason, "Plan Coding 启动失败"));
+      } finally {
+        planCodingStartInFlightRef.current = false;
+      }
+      return;
+    }
+
+    if (planCodingStartInFlightRef.current) {
       return;
     }
 
