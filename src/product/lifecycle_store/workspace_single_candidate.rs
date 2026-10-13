@@ -19,33 +19,6 @@ use crate::product::workspace_engine::draft_batch::compile_support::PlanningStru
 use crate::product::workspace_engine::freeze_persisted_structure_report;
 use crate::web::workspace_ws_types::ArtifactVersion;
 
-pub(super) fn max_workspace_session_sequence(
-    projects_root: &std::path::Path,
-) -> Result<usize, ProductStoreError> {
-    let mut max_sequence = 0usize;
-    for project_path in super::child_directories(projects_root)? {
-        let issues_root = project_path.join("issues");
-        for issue_path in super::child_directories(&issues_root)? {
-            let workspace_sessions_root = issue_path.join("workspace-sessions");
-            for session_path in super::workspace_session_file_paths(&workspace_sessions_root)? {
-                let Some(session) = super::read_workspace_session_record(&session_path)? else {
-                    continue;
-                };
-                if let Some(sequence) = parse_sequential_id(&session.id, "workspace_session") {
-                    max_sequence = max_sequence.max(sequence);
-                }
-            }
-        }
-    }
-    Ok(max_sequence)
-}
-
-fn parse_sequential_id(value: &str, prefix: &str) -> Option<usize> {
-    value
-        .strip_prefix(prefix)
-        .and_then(|suffix| suffix.strip_prefix('_'))
-        .and_then(|suffix| suffix.parse().ok())
-}
 
 #[derive(Debug)]
 pub enum CompileReservationError {
@@ -157,6 +130,8 @@ impl LifecycleStore {
         expected: &WorkspaceSessionRecord,
         provider_start_idempotency_key: &str,
     ) -> Result<(WorkspaceSessionRecord, bool), ProductStoreError> {
+        let admission_scope = self.entity_scope_for_session(expected)?;
+        self.with_optional_entity_live_write(admission_scope.as_ref(), move || {
         if expected.workspace_type != WorkspaceType::WorkItemPlan
             || expected.flow_kind != WorkItemPlanFlowKind::SingleCandidate
             || provider_start_idempotency_key.trim().is_empty()
@@ -232,6 +207,7 @@ impl LifecycleStore {
             write_json(&session_path, &stored)?;
             Ok((stored, true))
         })
+        })
     }
 
     /// 用户显式重新生成时，原子重臂失败的 SingleCandidate 会话；已完成会话保持拒绝。
@@ -239,6 +215,8 @@ impl LifecycleStore {
         &self,
         expected: &WorkspaceSessionRecord,
     ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
+        let admission_scope = self.entity_scope_for_session(expected)?;
+        self.with_optional_entity_live_write(admission_scope.as_ref(), move || {
         if expected.workspace_type != WorkspaceType::WorkItemPlan
             || expected.flow_kind != WorkItemPlanFlowKind::SingleCandidate
         {
@@ -270,6 +248,7 @@ impl LifecycleStore {
             }
             Ok(stored)
         })
+        })
     }
 
     /// 在 session 文件锁内冻结 `(failed_node_id, command_id)` 单发认领：
@@ -281,7 +260,8 @@ impl LifecycleStore {
         failed_node_id: &str,
         command_id: &str,
     ) -> Result<ClaimScRecoveryOutcome, ProductStoreError> {
-        let session_path = self.find_workspace_session_path(session_id)?;
+        let (session_path, admission_scope) = self.resolve_session_scope(session_id)?;
+        self.with_optional_entity_live_write(admission_scope.as_ref(), move || {
         with_exclusive_lock(&session_path, || {
             let mut stored: WorkspaceSessionRecord = read_json(&session_path)?;
             if stored.workspace_type != WorkspaceType::WorkItemPlan
@@ -311,6 +291,7 @@ impl LifecycleStore {
             write_json(&session_path, &stored)?;
             Ok(ClaimScRecoveryOutcome::Claimed(stored))
         })
+        })
     }
 
     /// 派发外部副作用是否发生不可证明时，把认领结果固化为 NeedsHuman
@@ -321,7 +302,8 @@ impl LifecycleStore {
         failed_node_id: &str,
         command_id: &str,
     ) -> Result<(), ProductStoreError> {
-        let session_path = self.find_workspace_session_path(session_id)?;
+        let (session_path, admission_scope) = self.resolve_session_scope(session_id)?;
+        self.with_optional_entity_live_write(admission_scope.as_ref(), move || {
         with_exclusive_lock(&session_path, || {
             let mut stored: WorkspaceSessionRecord = read_json(&session_path)?;
             let matches_claim = stored.sc_recovery_claim.as_ref().is_some_and(|claim| {
@@ -340,6 +322,7 @@ impl LifecycleStore {
             write_json(&session_path, &stored)?;
             Ok(())
         })
+        })
     }
 
     /// CAS 推进 SingleCandidate 的持久阶段。终态只能保持自身，防止重放重新启动工作流。
@@ -349,6 +332,8 @@ impl LifecycleStore {
         phase: SingleCandidatePhase,
         status: crate::product::models::WorkspaceSessionStatus,
     ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
+        let admission_scope = self.entity_scope_for_session(expected)?;
+        self.with_optional_entity_live_write(admission_scope.as_ref(), move || {
         if expected.workspace_type != WorkspaceType::WorkItemPlan
             || expected.flow_kind != WorkItemPlanFlowKind::SingleCandidate
         {
@@ -382,6 +367,7 @@ impl LifecycleStore {
             write_json(&session_path, &stored)?;
             Ok(stored)
         })
+        })
     }
 
     /// Atomically bind generated immutable source and IR refs. Mechanical validation is
@@ -392,6 +378,8 @@ impl LifecycleStore {
         source_revision_ref: &str,
         plan_candidate_ir_ref: &str,
     ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
+        let admission_scope = self.entity_scope_for_session(expected)?;
+        self.with_optional_entity_live_write(admission_scope.as_ref(), move || {
         if expected.workspace_type != WorkspaceType::WorkItemPlan
             || expected.flow_kind != WorkItemPlanFlowKind::SingleCandidate
         {
@@ -469,6 +457,7 @@ impl LifecycleStore {
             write_json(&session_path, &stored)?;
             Ok(stored)
         })
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -482,6 +471,8 @@ impl LifecycleStore {
         artifact_versions: &[ArtifactVersion],
         result_artifact_ref: &str,
     ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
+        let admission_scope = self.entity_scope_for_session(expected)?;
+        self.with_optional_entity_live_write(admission_scope.as_ref(), move || {
         use crate::product::models::{HumanGateTurnStatus, WorkspaceType};
         if expected.workspace_type != WorkspaceType::WorkItemPlan
             || expected.flow_kind != WorkItemPlanFlowKind::SingleCandidate
@@ -582,6 +573,7 @@ impl LifecycleStore {
             }
             Ok(next)
         })
+        })
     }
 
     /// materialized by reviewer startup ensure from the current ReviewerRun cycle.
@@ -590,6 +582,8 @@ impl LifecycleStore {
         expected: &WorkspaceSessionRecord,
         mechanical_report_ref: &str,
     ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
+        let admission_scope = self.entity_scope_for_session(expected)?;
+        self.with_optional_entity_live_write(admission_scope.as_ref(), move || {
         if expected.workspace_type != WorkspaceType::WorkItemPlan
             || expected.flow_kind != WorkItemPlanFlowKind::SingleCandidate
             || expected.single_candidate_phase != Some(SingleCandidatePhase::Evaluate)
@@ -654,6 +648,7 @@ impl LifecycleStore {
             write_json(&session_path, &stored)?;
             Ok(stored)
         })
+        })
     }
 
     pub fn compare_and_save_single_candidate_approval(
@@ -662,6 +657,8 @@ impl LifecycleStore {
         approval_attempt_id: &str,
         approved_at: &str,
     ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
+        let admission_scope = self.entity_scope_for_session(expected)?;
+        self.with_optional_entity_live_write(admission_scope.as_ref(), move || {
         let (_, source_ref, ir_ref, report_ref) = valid_single_candidate_session(expected)
             .map_err(|reason| ProductStoreError::InvalidRecord {
                 kind: "single_candidate_approval",
@@ -714,6 +711,7 @@ impl LifecycleStore {
             stored.updated_at = Utc::now().to_rfc3339();
             write_json(&session_path, &stored)?;
             Ok(stored)
+        })
         })
     }
 
@@ -774,9 +772,12 @@ impl LifecycleStore {
                 "reservation does not match durable Approval tuple".to_string(),
             ));
         }
-        let session_path = self
-            .find_workspace_session_path(session_id)
+        let admission_scope = self
+            .entity_scope_for_session(expected)
             .map_err(CompileReservationError::PersistenceFailure)?;
+        let outcome =
+            self.with_optional_entity_live_write(admission_scope.as_ref(), move || {
+                let session_path = self.find_workspace_session_path(session_id)?;
         with_exclusive_lock(&session_path, || {
             let mut stored: WorkspaceSessionRecord = read_json(&session_path)?;
             if stored != *expected {
@@ -807,7 +808,8 @@ impl LifecycleStore {
                 }
             }
         })
-        .map_err(|error| match error {
+        });
+        outcome.map_err(|error| match error {
             ProductStoreError::Conflict { .. } => CompileReservationError::Conflict,
             other => CompileReservationError::PersistenceFailure(other),
         })
@@ -832,6 +834,8 @@ impl LifecycleStore {
         result_artifact_ref: &str,
         structure_report: &PlanningStructureReport,
     ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
+        let admission_scope = self.entity_scope_for_session(expected)?;
+        self.with_optional_entity_live_write(admission_scope.as_ref(), move || {
         if expected.workspace_type != WorkspaceType::WorkItemPlan
             || expected.flow_kind != WorkItemPlanFlowKind::SingleCandidate
             || turn.status != HumanGateTurnStatus::Running
@@ -1085,6 +1089,7 @@ impl LifecycleStore {
             }
             Ok(next)
         })
+        })
     }
 
     /// SG4b（plan v1.1 §0.5 / REQ-SG-04）：grant 终态化。turn
@@ -1099,6 +1104,8 @@ impl LifecycleStore {
         review_node_id: Option<&str>,
         review_scope_digest: Option<&str>,
     ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
+        let admission_scope = self.entity_scope_for_session(expected)?;
+        self.with_optional_entity_live_write(admission_scope.as_ref(), move || {
         if expected.workspace_type != WorkspaceType::WorkItemPlan
             || expected.flow_kind != WorkItemPlanFlowKind::SingleCandidate
             || !matches!(
@@ -1269,6 +1276,7 @@ impl LifecycleStore {
             write_json(&session_path, &next)?;
             Ok(next)
         })
+        })
     }
 
     /// SG4b（plan v1.1 §0.5 / REQ-SG-04）：整组历史恢复（纯状态回绑）。
@@ -1282,6 +1290,8 @@ impl LifecycleStore {
         checkpoint: &StructuralCheckpoint,
         current_report: &PlanningStructureReport,
     ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
+        let admission_scope = self.entity_scope_for_session(expected)?;
+        self.with_optional_entity_live_write(admission_scope.as_ref(), move || {
         if expected.workspace_type != WorkspaceType::WorkItemPlan
             || expected.flow_kind != WorkItemPlanFlowKind::SingleCandidate
         {
@@ -1434,6 +1444,7 @@ impl LifecycleStore {
             next.updated_at = Utc::now().to_rfc3339();
             write_json(&session_path, &next)?;
             Ok(next)
+        })
         })
     }
 }

@@ -1,5 +1,6 @@
 use chrono::Utc;
 
+use crate::product::entity_deletion_store::{DeletionEntityKind, EntityScope};
 use crate::product::id::next_sequential_id_in_directory;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::models::{
@@ -25,38 +26,70 @@ impl LifecycleStore {
         validate_relative_ids(&input.work_item_ids)?;
         validate_relative_ids(&input.verification_plan_ids)?;
 
+        // D1.3a：issue 级 ID 分配先走关系短锁；关联创建同时核上游 Story/Design
+        // scope（plan §0.2 锁序 scope→关系，上游准入跨分配与写全程持有）。
         let root = self.issue_work_item_plans_root(&input.project_id, &input.issue_id);
-        let id =
-            match input.id {
-                Some(ref id) => {
+        let upstream_scopes: Vec<EntityScope> = input
+            .source_story_spec_ids
+            .iter()
+            .map(|story_id| EntityScope::new(&input.project_id, &input.issue_id, DeletionEntityKind::Story, story_id))
+            .chain(input.source_design_spec_ids.iter().map(|design_id| EntityScope::new(&input.project_id, &input.issue_id, DeletionEntityKind::Design, design_id)))
+            .collect();
+        let project_id = input.project_id.clone();
+        let issue_id = input.issue_id.clone();
+        let input_id = input.id.clone();
+        let mut admission_scopes = upstream_scopes;
+        // 显式 id 的自身 scope 一并准入（墓碑拒复用）。
+        if let Some(id) = &input_id {
+            admission_scopes.push(EntityScope::new(
+                &project_id,
+                &issue_id,
+                DeletionEntityKind::Plan,
+                id,
+            ));
+        }
+        self.with_entity_live_writes(&admission_scopes, move || {
+            let id = match &input_id {
+                Some(id) => {
                     validate_relative_id(id)?;
                     id.clone()
                 }
-                None => next_sequential_id_in_directory("issue_work_item_plan", &root).map_err(
-                    |error| ProductStoreError::Io(format!("read {}: {error}", root.display())),
+                None => self.entity_operation_store().with_issue_relations(
+                    &project_id,
+                    &issue_id,
+                    || {
+                        self.next_fresh_entity_id(
+                            "issue_work_item_plan",
+                            &root,
+                            DeletionEntityKind::Plan,
+                            &project_id,
+                            &issue_id,
+                        )
+                    },
                 )?,
             };
-        let now = Utc::now().to_rfc3339();
-        let plan = IssueWorkItemPlan {
-            id: id.clone(),
-            project_id: input.project_id,
-            issue_id: input.issue_id,
-            source_story_spec_ids: input.source_story_spec_ids,
-            source_design_spec_ids: input.source_design_spec_ids,
-            options: input.options,
-            status: input.status,
-            work_item_ids: input.work_item_ids,
-            repository_profile_ref: input.repository_profile_ref,
-            verification_plan_ids: input.verification_plan_ids,
-            dependency_graph: input.dependency_graph,
-            created_from_provider_run: input.created_from_provider_run,
-            validator_findings: input.validator_findings,
-            review_summary: None,
-            created_at: now.clone(),
-            updated_at: now,
-        };
-        write_json(&root.join(format!("{id}.json")), &plan)?;
-        Ok(plan)
+            let now = Utc::now().to_rfc3339();
+            let plan = IssueWorkItemPlan {
+                id: id.clone(),
+                project_id: input.project_id,
+                issue_id: input.issue_id,
+                source_story_spec_ids: input.source_story_spec_ids,
+                source_design_spec_ids: input.source_design_spec_ids,
+                options: input.options,
+                status: input.status,
+                work_item_ids: input.work_item_ids,
+                repository_profile_ref: input.repository_profile_ref,
+                verification_plan_ids: input.verification_plan_ids,
+                dependency_graph: input.dependency_graph,
+                created_from_provider_run: input.created_from_provider_run,
+                validator_findings: input.validator_findings,
+                review_summary: None,
+                created_at: now.clone(),
+                updated_at: now,
+            };
+            write_json(&root.join(format!("{id}.json")), &plan)?;
+            Ok(plan)
+        })
     }
 
     /// P1 WIGA Task 3：绑定创建——固定 id 既存时必须与冻结身份（project/issue/
@@ -72,26 +105,46 @@ impl LifecycleStore {
                 reason: "bound plan creation requires an explicit id".to_string(),
             });
         };
-        let path = self
-            .issue_work_item_plans_root(&input.project_id, &input.issue_id)
-            .join(format!("{id}.json"));
-        if path_exists(&path)? {
-            let existing: IssueWorkItemPlan = read_json(&path)?;
-            if existing.id == id
-                && existing.project_id == input.project_id
-                && existing.issue_id == input.issue_id
-                && existing.source_story_spec_ids == input.source_story_spec_ids
-                && existing.source_design_spec_ids == input.source_design_spec_ids
-                && existing.options == input.options
-            {
-                return Ok(existing);
+        let project_id = input.project_id.clone();
+        let issue_id = input.issue_id.clone();
+        let mut admission_scopes: Vec<EntityScope> = input
+            .source_story_spec_ids
+            .iter()
+            .map(|story_id| {
+                EntityScope::new(&project_id, &issue_id, DeletionEntityKind::Story, story_id)
+            })
+            .chain(input.source_design_spec_ids.iter().map(|design_id| {
+                EntityScope::new(&project_id, &issue_id, DeletionEntityKind::Design, design_id)
+            }))
+            .collect();
+        admission_scopes.push(EntityScope::new(
+            &project_id,
+            &issue_id,
+            DeletionEntityKind::Plan,
+            &id,
+        ));
+        self.with_entity_live_writes(&admission_scopes, move || {
+            let path = self
+                .issue_work_item_plans_root(&input.project_id, &input.issue_id)
+                .join(format!("{id}.json"));
+            if path_exists(&path)? {
+                let existing: IssueWorkItemPlan = read_json(&path)?;
+                if existing.id == id
+                    && existing.project_id == input.project_id
+                    && existing.issue_id == input.issue_id
+                    && existing.source_story_spec_ids == input.source_story_spec_ids
+                    && existing.source_design_spec_ids == input.source_design_spec_ids
+                    && existing.options == input.options
+                {
+                    return Ok(existing);
+                }
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "issue_work_item_plan",
+                    id,
+                });
             }
-            return Err(ProductStoreError::IdentityMismatch {
-                kind: "issue_work_item_plan",
-                id,
-            });
-        }
-        self.create_issue_work_item_plan(input)
+            self.create_issue_work_item_plan(input)
+        })
     }
 
     pub fn get_issue_work_item_plan(
@@ -186,7 +239,9 @@ impl LifecycleStore {
         ),
         ProductStoreError,
     > {
-        let mut plan = self.get_issue_work_item_plan(project_id, issue_id, plan_id)?;
+        let plan_scope = EntityScope::new(project_id, issue_id, DeletionEntityKind::Plan, plan_id);
+        self.with_entity_live_write(&plan_scope, move || {
+            let mut plan = self.get_issue_work_item_plan(project_id, issue_id, plan_id)?;
         if plan.status != IssueWorkItemPlanStatus::Draft {
             return Err(ProductStoreError::Io(
                 "issue_work_item_plan_not_draft".to_string(),
@@ -235,7 +290,8 @@ impl LifecycleStore {
             )?;
             confirmed.push(updated);
         }
-        Ok((plan, confirmed))
+            Ok((plan, confirmed))
+        })
     }
 
     /// 为 plan 关联的每个 WorkItem 幂等创建 WorkspaceType::WorkItem 子 session。
@@ -295,7 +351,9 @@ impl LifecycleStore {
         ),
         ProductStoreError,
     > {
-        let mut plan = self.get_issue_work_item_plan(project_id, issue_id, plan_id)?;
+        let plan_scope = EntityScope::new(project_id, issue_id, DeletionEntityKind::Plan, plan_id);
+        self.with_entity_live_write(&plan_scope, move || {
+            let mut plan = self.get_issue_work_item_plan(project_id, issue_id, plan_id)?;
         if plan.status != IssueWorkItemPlanStatus::Draft
             && plan.status != IssueWorkItemPlanStatus::Confirmed
         {
@@ -346,7 +404,8 @@ impl LifecycleStore {
             )?;
             updated_items.push(updated);
         }
-        Ok((plan, updated_items))
+            Ok((plan, updated_items))
+            })
     }
 
     pub fn update_issue_work_item_plan(
@@ -356,19 +415,22 @@ impl LifecycleStore {
         plan_id: &str,
         update: IssueWorkItemPlanUpdate,
     ) -> Result<IssueWorkItemPlan, ProductStoreError> {
-        let mut plan = self.get_issue_work_item_plan(project_id, issue_id, plan_id)?;
-        plan.work_item_ids = update.work_item_ids;
-        plan.verification_plan_ids = update.verification_plan_ids;
-        plan.repository_profile_ref = update.repository_profile_ref;
-        plan.dependency_graph = update.dependency_graph;
-        plan.created_from_provider_run = update.created_from_provider_run;
-        plan.validator_findings = update.validator_findings;
-        plan.updated_at = Utc::now().to_rfc3339();
-        let path = self
-            .issue_work_item_plans_root(project_id, issue_id)
-            .join(format!("{plan_id}.json"));
-        write_json(&path, &plan)?;
-        Ok(plan)
+        let plan_scope = EntityScope::new(project_id, issue_id, DeletionEntityKind::Plan, plan_id);
+        self.with_entity_live_write(&plan_scope, move || {
+            let mut plan = self.get_issue_work_item_plan(project_id, issue_id, plan_id)?;
+            plan.work_item_ids = update.work_item_ids;
+            plan.verification_plan_ids = update.verification_plan_ids;
+            plan.repository_profile_ref = update.repository_profile_ref;
+            plan.dependency_graph = update.dependency_graph;
+            plan.created_from_provider_run = update.created_from_provider_run;
+            plan.validator_findings = update.validator_findings;
+            plan.updated_at = Utc::now().to_rfc3339();
+            let path = self
+                .issue_work_item_plans_root(project_id, issue_id)
+                .join(format!("{plan_id}.json"));
+            write_json(&path, &plan)?;
+            Ok(plan)
+        })
     }
 
     pub fn commit_issue_work_item_plan(
@@ -380,14 +442,17 @@ impl LifecycleStore {
     ) -> Result<IssueWorkItemPlan, ProductStoreError> {
         validate_relative_ids(&update.work_item_ids)?;
         validate_relative_ids(&update.verification_plan_ids)?;
-        let mut plan = self.update_issue_work_item_plan(project_id, issue_id, plan_id, update)?;
-        plan.status = IssueWorkItemPlanStatus::Confirmed;
-        plan.updated_at = Utc::now().to_rfc3339();
-        let path = self
-            .issue_work_item_plans_root(project_id, issue_id)
-            .join(format!("{plan_id}.json"));
-        write_json(&path, &plan)?;
-        Ok(plan)
+        let plan_scope = EntityScope::new(project_id, issue_id, DeletionEntityKind::Plan, plan_id);
+        self.with_entity_live_write(&plan_scope, move || {
+            let mut plan = self.update_issue_work_item_plan(project_id, issue_id, plan_id, update)?;
+            plan.status = IssueWorkItemPlanStatus::Confirmed;
+            plan.updated_at = Utc::now().to_rfc3339();
+            let path = self
+                .issue_work_item_plans_root(project_id, issue_id)
+                .join(format!("{plan_id}.json"));
+            write_json(&path, &plan)?;
+            Ok(plan)
+        })
     }
 
     pub fn restore_issue_work_item_plan_snapshot(
@@ -408,13 +473,16 @@ impl LifecycleStore {
                 "issue_work_item_plan_snapshot_mismatch: {plan_id}"
             )));
         }
-        let mut plan = snapshot.clone();
-        plan.updated_at = Utc::now().to_rfc3339();
-        let path = self
-            .issue_work_item_plans_root(project_id, issue_id)
-            .join(format!("{plan_id}.json"));
-        write_json(&path, &plan)?;
-        Ok(plan)
+        let plan_scope = EntityScope::new(project_id, issue_id, DeletionEntityKind::Plan, plan_id);
+        self.with_entity_live_write(&plan_scope, move || {
+            let mut plan = snapshot.clone();
+            plan.updated_at = Utc::now().to_rfc3339();
+            let path = self
+                .issue_work_item_plans_root(project_id, issue_id)
+                .join(format!("{plan_id}.json"));
+            write_json(&path, &plan)?;
+            Ok(plan)
+        })
     }
 
     pub fn replace_issue_work_item_plan_candidate(
@@ -425,6 +493,8 @@ impl LifecycleStore {
         output: &WorkItemSplitProviderOutput,
         validator_findings: Vec<crate::product::models::WorkItemSplitFinding>,
     ) -> Result<WorkItemPlanCandidateSnapshot, ProductStoreError> {
+        let plan_scope = EntityScope::new(project_id, issue_id, DeletionEntityKind::Plan, plan_id);
+        self.with_entity_live_write(&plan_scope, move || {
         let existing = self.get_issue_work_item_plan(project_id, issue_id, plan_id)?;
         if existing.status != IssueWorkItemPlanStatus::Draft {
             return Err(ProductStoreError::Io(format!(
@@ -542,6 +612,7 @@ impl LifecycleStore {
             work_item_ids: new_wi_ids,
             verification_plan_ids: new_vp_ids,
             repository_profile_id: new_profile_id,
+        })
         })
     }
 

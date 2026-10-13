@@ -1,7 +1,8 @@
 use chrono::Utc;
 use std::path::PathBuf;
 
-use crate::product::id::{next_sequential_id, next_sequential_id_in_directory};
+use crate::product::entity_deletion_store::{DeletionEntityKind, EntityScope};
+use crate::product::id::next_sequential_id;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::models::{
     DesignSpecRecord, LifecycleConfirmationStatus, ProjectProviderDefaultsRecord,
@@ -110,6 +111,40 @@ impl From<ProductStoreError> for ConfirmAggregateGateError {
     }
 }
 
+/// Spec 实体归属种类解析（D1.3a）：story/design 根文件真实存在者为准；
+/// 两者皆缺（将被 load_existing_spec 判 NotFound）→ None 保持原行为。
+impl LifecycleStore {
+    fn existing_spec_kind(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        entity_id: &str,
+    ) -> Result<Option<DeletionEntityKind>, ProductStoreError> {
+        let story_path = self
+            .story_specs_root(project_id, issue_id)
+            .join(format!("{entity_id}.json"));
+        if path_is_regular_file(&story_path)? {
+            return Ok(Some(DeletionEntityKind::Story));
+        }
+        let design_path = self
+            .design_specs_root(project_id, issue_id)
+            .join(format!("{entity_id}.json"));
+        if path_is_regular_file(&design_path)? {
+            return Ok(Some(DeletionEntityKind::Design));
+        }
+        Ok(None)
+    }
+
+    fn spec_entity_scope(
+        kind: DeletionEntityKind,
+        project_id: &str,
+        issue_id: &str,
+        entity_id: &str,
+    ) -> EntityScope {
+        EntityScope::new(project_id, issue_id, kind, entity_id)
+    }
+}
+
 impl LifecycleStore {
     pub fn create_story_spec(
         &self,
@@ -124,8 +159,13 @@ impl LifecycleStore {
         }
 
         let root = self.story_specs_root(&input.project_id, &input.issue_id);
-        let id = next_sequential_id_in_directory("story_spec", &root)
-            .map_err(|error| ProductStoreError::Io(format!("read {}: {error}", root.display())))?;
+        let id = self.next_fresh_entity_id(
+            "story_spec",
+            &root,
+            DeletionEntityKind::Story,
+            &input.project_id,
+            &input.issue_id,
+        )?;
         let now = Utc::now().to_rfc3339();
 
         // 逻辑代码库分支：以聚合视野字段为权威。AI 未明确涉及仓库或涉及不在有效集合的
@@ -159,8 +199,16 @@ impl LifecycleStore {
             updated_at: now,
         };
 
-        write_json(&root.join(format!("{id}.json")), &story)?;
-        Ok(story)
+        let scope = Self::spec_entity_scope(
+            DeletionEntityKind::Story,
+            &story.project_id,
+            &story.issue_id,
+            &story.id,
+        );
+        self.with_entity_live_write(&scope, move || {
+            write_json(&root.join(format!("{id}.json")), &story)?;
+            Ok(story)
+        })
     }
 
     pub fn list_story_specs(
@@ -207,9 +255,29 @@ impl LifecycleStore {
         validate_relative_id(&input.issue_id)?;
         validate_relative_ids(&input.story_spec_ids)?;
 
+        let upstream_scopes: Vec<EntityScope> = input
+            .story_spec_ids
+            .iter()
+            .map(|story_id| {
+                Self::spec_entity_scope(
+                    DeletionEntityKind::Story,
+                    &input.project_id,
+                    &input.issue_id,
+                    story_id,
+                )
+            })
+            .collect();
         let root = self.design_specs_root(&input.project_id, &input.issue_id);
-        let id = next_sequential_id_in_directory("design_spec", &root)
-            .map_err(|error| ProductStoreError::Io(format!("read {}: {error}", root.display())))?;
+        let project_id = input.project_id.clone();
+        let issue_id = input.issue_id.clone();
+        self.with_entity_live_writes(&upstream_scopes, move || {
+        let id = self.next_fresh_entity_id(
+            "design_spec",
+            &root,
+            DeletionEntityKind::Design,
+            &project_id,
+            &issue_id,
+        )?;
         let now = Utc::now().to_rfc3339();
 
         // 逻辑代码库分支：以聚合视野字段为权威。AI 未明确涉及仓库或涉及不在有效集合的
@@ -246,6 +314,7 @@ impl LifecycleStore {
 
         write_json(&root.join(format!("{id}.json")), &design)?;
         Ok(design)
+        })
     }
 
     pub fn list_design_specs(
@@ -292,35 +361,41 @@ impl LifecycleStore {
         validate_relative_id(&input.issue_id)?;
         validate_relative_id(&input.entity_id)?;
 
-        let spec = self.load_existing_spec(&input.project_id, &input.issue_id, &input.entity_id)?;
-        let root = self.versions_root(&input.project_id, &input.issue_id, &input.entity_id);
-        let versions: Vec<SpecVersionRecord> = list_json_records(&root)?;
-        let version = super::next_version_number(&versions)?;
-        let id = next_sequential_id(
-            "version",
-            usize::try_from(version - 1).map_err(|_| {
-                ProductStoreError::Io(format!("version sequence overflow: {version}"))
-            })?,
-        );
-        let now = Utc::now().to_rfc3339();
-        let record = SpecVersionRecord {
-            id: id.clone(),
-            project_id: input.project_id,
-            issue_id: input.issue_id,
-            entity_id: input.entity_id,
-            version,
-            markdown: input.markdown,
-            provider_run_refs: input.provider_run_refs,
-            review_refs: input.review_refs,
-            confirmed_by: input.confirmed_by,
-            created_at: now.clone(),
-        };
+        let kind = self.existing_spec_kind(&input.project_id, &input.issue_id, &input.entity_id)?;
+        let scope = kind.map(|kind| {
+            Self::spec_entity_scope(kind, &input.project_id, &input.issue_id, &input.entity_id)
+        });
+        self.with_optional_entity_live_write(scope.as_ref(), move || {
+            let spec = self.load_existing_spec(&input.project_id, &input.issue_id, &input.entity_id)?;
+            let root = self.versions_root(&input.project_id, &input.issue_id, &input.entity_id);
+            let versions: Vec<SpecVersionRecord> = list_json_records(&root)?;
+            let version = super::next_version_number(&versions)?;
+            let id = next_sequential_id(
+                "version",
+                usize::try_from(version - 1).map_err(|_| {
+                    ProductStoreError::Io(format!("version sequence overflow: {version}"))
+                })?,
+            );
+            let now = Utc::now().to_rfc3339();
+            let record = SpecVersionRecord {
+                id: id.clone(),
+                project_id: input.project_id,
+                issue_id: input.issue_id,
+                entity_id: input.entity_id,
+                version,
+                markdown: input.markdown,
+                provider_run_refs: input.provider_run_refs,
+                review_refs: input.review_refs,
+                confirmed_by: input.confirmed_by,
+                created_at: now.clone(),
+            };
 
-        let target_path = root.join(format!("{id}.json"));
-        ensure_target_absent(&target_path)?;
-        write_json(&target_path, &record)?;
-        self.update_spec_current_version(spec, version, now)?;
-        Ok(record)
+            let target_path = root.join(format!("{id}.json"));
+            ensure_target_absent(&target_path)?;
+            write_json(&target_path, &record)?;
+            self.update_spec_current_version(spec, version, now)?;
+            Ok(record)
+        })
     }
 
     pub(crate) fn ensure_version(
@@ -363,26 +438,30 @@ impl LifecycleStore {
         validate_relative_id(issue_id)?;
         validate_relative_id(entity_id)?;
 
-        let spec = self.load_existing_spec(project_id, issue_id, entity_id)?;
-        let updated_at = Utc::now().to_rfc3339();
-        match spec {
-            ExistingSpecRecord::Story {
-                path,
-                record: mut story,
-            } => {
-                story.confirmation_status = status;
-                story.updated_at = updated_at;
-                write_json(&path, &story)
+        let kind = self.existing_spec_kind(project_id, issue_id, entity_id)?;
+        let scope = kind.map(|kind| Self::spec_entity_scope(kind, project_id, issue_id, entity_id));
+        self.with_optional_entity_live_write(scope.as_ref(), move || {
+            let spec = self.load_existing_spec(project_id, issue_id, entity_id)?;
+            let updated_at = Utc::now().to_rfc3339();
+            match spec {
+                ExistingSpecRecord::Story {
+                    path,
+                    record: mut story,
+                } => {
+                    story.confirmation_status = status;
+                    story.updated_at = updated_at;
+                    write_json(&path, &story)
+                }
+                ExistingSpecRecord::Design {
+                    path,
+                    record: mut design,
+                } => {
+                    design.confirmation_status = status;
+                    design.updated_at = updated_at;
+                    write_json(&path, &design)
+                }
             }
-            ExistingSpecRecord::Design {
-                path,
-                record: mut design,
-            } => {
-                design.confirmation_status = status;
-                design.updated_at = updated_at;
-                write_json(&path, &design)
-            }
-        }
+        })
     }
 
     pub fn update_story_spec_aggregate(
@@ -399,29 +478,34 @@ impl LifecycleStore {
         // focus_repository_id ∈ involved。Draft 态允许空 involved（AI 尚未产出）。
         validate_aggregate_story_scope(scope, LifecycleConfirmationStatus::Draft)?;
 
-        let ExistingSpecRecord::Story {
-            path,
-            record: mut story,
-        } = self.load_existing_spec(project_id, issue_id, entity_id)?
-        else {
-            return Err(ProductStoreError::Conflict {
-                kind: "story_aggregate_kind_mismatch",
-                id: entity_id.to_string(),
-            });
-        };
-        // 仅 Draft 态可更新（Confirmed 后锁定）。
-        if story.confirmation_status != LifecycleConfirmationStatus::Draft {
-            return Err(ProductStoreError::Conflict {
-                kind: "story_aggregate_locked",
-                id: entity_id.to_string(),
-            });
-        }
+        let kind = self.existing_spec_kind(project_id, issue_id, entity_id)?;
+        let admission_scope =
+            kind.map(|kind| Self::spec_entity_scope(kind, project_id, issue_id, entity_id));
+        self.with_optional_entity_live_write(admission_scope.as_ref(), move || {
+            let ExistingSpecRecord::Story {
+                path,
+                record: mut story,
+            } = self.load_existing_spec(project_id, issue_id, entity_id)?
+            else {
+                return Err(ProductStoreError::Conflict {
+                    kind: "story_aggregate_kind_mismatch",
+                    id: entity_id.to_string(),
+                });
+            };
+            // 仅 Draft 态可更新（Confirmed 后锁定）。
+            if story.confirmation_status != LifecycleConfirmationStatus::Draft {
+                return Err(ProductStoreError::Conflict {
+                    kind: "story_aggregate_locked",
+                    id: entity_id.to_string(),
+                });
+            }
 
-        story.involved_repository_ids = scope.involved_repository_ids.clone();
-        story.focus_repository_id = scope.focus_repository_id;
-        story.updated_at = Utc::now().to_rfc3339();
-        write_json(&path, &story)?;
-        Ok(story)
+            story.involved_repository_ids = scope.involved_repository_ids.clone();
+            story.focus_repository_id = scope.focus_repository_id;
+            story.updated_at = Utc::now().to_rfc3339();
+            write_json(&path, &story)?;
+            Ok(story)
+        })
     }
 
     pub fn update_design_spec_aggregate(
@@ -438,29 +522,34 @@ impl LifecycleStore {
         // change_order ⊆ involved 且不重复。Draft 态允许空 involved（AI 尚未产出）。
         validate_aggregate_design_scope(scope, LifecycleConfirmationStatus::Draft)?;
 
-        let ExistingSpecRecord::Design {
-            path,
-            record: mut design,
-        } = self.load_existing_spec(project_id, issue_id, entity_id)?
-        else {
-            return Err(ProductStoreError::Conflict {
-                kind: "design_aggregate_kind_mismatch",
-                id: entity_id.to_string(),
-            });
-        };
-        // 仅 Draft 态可更新（Confirmed 后锁定）。
-        if design.confirmation_status != LifecycleConfirmationStatus::Draft {
-            return Err(ProductStoreError::Conflict {
-                kind: "design_aggregate_locked",
-                id: entity_id.to_string(),
-            });
-        }
+        let kind = self.existing_spec_kind(project_id, issue_id, entity_id)?;
+        let admission_scope =
+            kind.map(|kind| Self::spec_entity_scope(kind, project_id, issue_id, entity_id));
+        self.with_optional_entity_live_write(admission_scope.as_ref(), move || {
+            let ExistingSpecRecord::Design {
+                path,
+                record: mut design,
+            } = self.load_existing_spec(project_id, issue_id, entity_id)?
+            else {
+                return Err(ProductStoreError::Conflict {
+                    kind: "design_aggregate_kind_mismatch",
+                    id: entity_id.to_string(),
+                });
+            };
+            // 仅 Draft 态可更新（Confirmed 后锁定）。
+            if design.confirmation_status != LifecycleConfirmationStatus::Draft {
+                return Err(ProductStoreError::Conflict {
+                    kind: "design_aggregate_locked",
+                    id: entity_id.to_string(),
+                });
+            }
 
-        design.involved_repository_ids = scope.involved_repository_ids.clone();
-        design.change_order = scope.change_order.clone();
-        design.updated_at = Utc::now().to_rfc3339();
-        write_json(&path, &design)?;
-        Ok(design)
+            design.involved_repository_ids = scope.involved_repository_ids.clone();
+            design.change_order = scope.change_order.clone();
+            design.updated_at = Utc::now().to_rfc3339();
+            write_json(&path, &design)?;
+            Ok(design)
+        })
     }
 
     pub fn upsert_project_provider_defaults(

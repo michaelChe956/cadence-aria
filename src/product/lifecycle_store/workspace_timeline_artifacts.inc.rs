@@ -5,10 +5,13 @@ impl LifecycleStore {
         nodes: &[TimelineNode],
     ) -> Result<(), ProductStoreError> {
         validate_relative_id(session_id)?;
-        let path = self
-            .workspace_timeline_root_for_session(session_id)?
-            .join("timeline_nodes.json");
-        write_json(&path, &nodes)
+        let (_, scope) = self.resolve_session_scope(session_id)?;
+        self.with_optional_entity_live_write(scope.as_ref(), move || {
+            let path = self
+                .workspace_timeline_root_for_session(session_id)?
+                .join("timeline_nodes.json");
+            write_json(&path, &nodes)
+        })
     }
 
     pub fn load_timeline_nodes(
@@ -48,11 +51,14 @@ impl LifecycleStore {
     ) -> Result<(), ProductStoreError> {
         validate_relative_id(session_id)?;
         validate_relative_id(node_id)?;
-        let path = self
-            .workspace_timeline_root_for_session(session_id)?
-            .join("timeline_node_details")
-            .join(format!("{node_id}.json"));
-        write_json(&path, detail)
+        let (_, scope) = self.resolve_session_scope(session_id)?;
+        self.with_optional_entity_live_write(scope.as_ref(), move || {
+            let path = self
+                .workspace_timeline_root_for_session(session_id)?
+                .join("timeline_node_details")
+                .join(format!("{node_id}.json"));
+            write_json(&path, detail)
+        })
     }
 
     pub fn load_node_detail(
@@ -149,9 +155,12 @@ impl LifecycleStore {
         session_id: &str,
         version: ArtifactVersion,
     ) -> Result<(), ProductStoreError> {
-        let mut versions = self.list_artifact_versions(session_id)?;
-        versions.push(version);
-        self.save_artifact_versions(session_id, &versions)
+        let (_, scope) = self.resolve_session_scope(session_id)?;
+        self.with_optional_entity_live_write(scope.as_ref(), move || {
+            let mut versions = self.list_artifact_versions(session_id)?;
+            versions.push(version);
+            self.save_artifact_versions(session_id, &versions)
+        })
     }
 
     pub fn list_artifact_versions(
@@ -192,10 +201,13 @@ impl LifecycleStore {
         versions: &[ArtifactVersion],
     ) -> Result<(), ProductStoreError> {
         validate_relative_id(session_id)?;
-        let path = self
-            .workspace_timeline_root_for_session(session_id)?
-            .join("artifact_versions.json");
-        write_json(&path, &versions)
+        let (_, scope) = self.resolve_session_scope(session_id)?;
+        self.with_optional_entity_live_write(scope.as_ref(), move || {
+            let path = self
+                .workspace_timeline_root_for_session(session_id)?
+                .join("artifact_versions.json");
+            write_json(&path, &versions)
+        })
     }
 
     pub(crate) fn delete_workspace_sessions_for_entity(

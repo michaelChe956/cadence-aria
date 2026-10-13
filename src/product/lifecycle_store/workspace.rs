@@ -1,16 +1,22 @@
+use std::cell::RefCell;
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use chrono::Utc;
 
 use crate::product::coding_attempt_store::locking::with_exclusive_lock;
-use crate::product::id::next_sequential_id;
+use crate::product::entity_deletion_store::{
+    DeletionEntityKind, EntityDeletionStore, EntityScope,
+};
+use crate::product::entity_operation_store::EntityOperationStore;
+use crate::product::id::{next_sequential_id, next_sequential_id_in_directory};
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::models::{
-    HumanGateTakeoverEvent, LcFreshOperationResult, LcFreshOperationState, LcResumeRecoveryRecord,
-    LcResumeRecoveryState, PlanRepairSessionSnapshotDto, ProviderConversationRef,
-    WorkItemRuntimeBinding, WorkspaceMessageRecord, WorkspaceRolePermissionModes,
-    WorkspaceSessionLink, WorkspaceSessionRecord, WorkspaceSessionStatus,
-    WorkspaceSessionSummaryRecord, WorkspaceType,
+    ChildBindingIdentity, HumanGateTakeoverEvent, LcFreshOperationResult, LcFreshOperationState,
+    LcResumeRecoveryRecord, LcResumeRecoveryState, LifecycleWorkItemRecord,
+    PlanRepairSessionSnapshotDto, ProviderConversationRef, WorkItemRuntimeBinding,
+    WorkspaceMessageRecord, WorkspaceRolePermissionModes, WorkspaceSessionLink,
+    WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceSessionSummaryRecord, WorkspaceType,
 };
 use crate::web::workspace_ws_types::{ArtifactVersion, TimelineNode};
 
@@ -40,21 +46,24 @@ impl LifecycleStore {
                 id: session_id.to_string(),
             });
         }
-        let path = self
-            .workspace_timeline_root_for_issue_session(project_id, issue_id, session_id)?
-            .join("plan_repair_session_state.json");
-        with_exclusive_lock(&path, || {
-            let stored: PlanRepairSessionSnapshotDto = read_json(&path)?;
-            if stored != *expected {
-                return Err(ProductStoreError::IdentityMismatch {
-                    kind: "plan_repair_session_state",
-                    id: session_id.to_string(),
-                });
-            }
-            if stored == *next {
-                return Ok(());
-            }
-            write_json(&path, next)
+        let scope = self.resolve_session_scope_lenient(session_id)?;
+        self.with_optional_entity_live_write(scope.as_ref(), move || {
+            let path = self
+                .workspace_timeline_root_for_issue_session(project_id, issue_id, session_id)?
+                .join("plan_repair_session_state.json");
+            with_exclusive_lock(&path, || {
+                let stored: PlanRepairSessionSnapshotDto = read_json(&path)?;
+                if stored != *expected {
+                    return Err(ProductStoreError::IdentityMismatch {
+                        kind: "plan_repair_session_state",
+                        id: session_id.to_string(),
+                    });
+                }
+                if stored == *next {
+                    return Ok(());
+                }
+                write_json(&path, next)
+            })
         })
     }
 
@@ -74,10 +83,13 @@ impl LifecycleStore {
                 id: session_id.to_string(),
             });
         }
-        let path = self
-            .workspace_timeline_root_for_issue_session(project_id, issue_id, session_id)?
-            .join("plan_repair_session_state.json");
-        write_json(&path, value)
+        let scope = self.resolve_session_scope_lenient(session_id)?;
+        self.with_optional_entity_live_write(scope.as_ref(), move || {
+            let path = self
+                .workspace_timeline_root_for_issue_session(project_id, issue_id, session_id)?
+                .join("plan_repair_session_state.json");
+            write_json(&path, value)
+        })
     }
 
     pub fn load_plan_repair_session_state(
@@ -116,22 +128,25 @@ impl LifecycleStore {
         validate_relative_id(&value.id)?;
         validate_relative_id(&value.parent_session_id)?;
         validate_relative_id(&value.child_session_id)?;
-        let path = self
-            .paths
-            .issue_lifecycle_root(project_id, issue_id)
-            .join("workspace-session-links")
-            .join(format!("{}.json", value.id));
-        if path_exists(&path)? {
-            let existing: WorkspaceSessionLink = read_json(&path)?;
-            if existing == *value {
-                return Ok(());
+        let scope = self.resolve_session_scope_lenient(&value.child_session_id)?;
+        self.with_optional_entity_live_write(scope.as_ref(), move || {
+            let path = self
+                .paths
+                .issue_lifecycle_root(project_id, issue_id)
+                .join("workspace-session-links")
+                .join(format!("{}.json", value.id));
+            if path_exists(&path)? {
+                let existing: WorkspaceSessionLink = read_json(&path)?;
+                if existing == *value {
+                    return Ok(());
+                }
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "workspace_session_link",
+                    id: value.id.clone(),
+                });
             }
-            return Err(ProductStoreError::IdentityMismatch {
-                kind: "workspace_session_link",
-                id: value.id.clone(),
-            });
-        }
-        write_json(&path, value)
+            write_json(&path, value)
+        })
     }
 
     pub fn list_session_links(
@@ -199,7 +214,10 @@ impl LifecycleStore {
         input: CreateWorkspaceSessionInput,
     ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
         let id = self.next_workspace_session_id()?;
-        self.create_workspace_session_with_id(input, id)
+        // auto 分配：防复用由耐久高水位保证（D1.0 allocate），不落同名的
+        // 身份绑定文件（state/entity-identity/sessions/{id}.json 与 session
+        // 记录同名，全树文件名唯一性探测会撞名）；绑定在显式 id 路径落盘。
+        self.create_workspace_session_with_child_binding(input, id, None, false)
     }
 
     pub(crate) fn create_workspace_session_with_id(
@@ -207,7 +225,7 @@ impl LifecycleStore {
         input: CreateWorkspaceSessionInput,
         id: String,
     ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
-        self.create_workspace_session_with_child_binding(input, id, None)
+        self.create_workspace_session_with_child_binding(input, id, None, true)
     }
 
     /// C1 Task 8（REQ-C1-CHILD-01）：WorkItem compile child 专用创建入口
@@ -235,6 +253,7 @@ impl LifecycleStore {
             input.session,
             id,
             Some(input.child_binding),
+            false,
         )
     }
 
@@ -243,6 +262,7 @@ impl LifecycleStore {
         input: CreateWorkspaceSessionInput,
         id: String,
         child_binding: Option<crate::product::models::ChildBindingIdentity>,
+        explicit_identity: bool,
     ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
         validate_relative_id(&input.project_id)?;
         validate_relative_id(&input.issue_id)?;
@@ -257,76 +277,89 @@ impl LifecycleStore {
             });
         }
 
-        let root = self.workspace_sessions_root(&input.project_id, &input.issue_id);
-        let target_path = root.join(format!("{id}.json"));
-        if path_exists(&target_path)? {
-            let existing: WorkspaceSessionRecord = read_json(&target_path)?;
-            if existing.id == id
-                && existing.project_id == input.project_id
-                && existing.issue_id == input.issue_id
-                && existing.entity_id == input.entity_id
-                && existing.workspace_type == input.workspace_type
-                && existing.work_item_child_binding == child_binding
-            {
-                return Ok(existing);
+        let scope = self.entity_scope_for_new_session(&input, child_binding.as_ref())?;
+        let closure_scope = scope.clone();
+        self.with_optional_entity_live_write(scope.as_ref(), move || {
+            // 会话身份绑定（D1.0 §0.2）：只 ID/scope；同身份幂等。显式 id 在
+            // 创建时绑定（跨实体复用拒）；auto id 由耐久高水位保证不复用，
+            // 旧 auto 会话的索引迁移按 §0.2「删除前迁移」归 D1.1 收集。
+            if explicit_identity {
+                if let Some(scope) = &closure_scope {
+                    self.entity_operation_store()
+                        .bind_workspace_session_identity(&id, scope)?;
+                }
             }
-            return Err(ProductStoreError::IdentityMismatch {
-                kind: "workspace_session",
-                id,
-            });
-        }
-        let now = Utc::now().to_rfc3339();
-        let work_item_plan_options = input.work_item_plan_options.unwrap_or_default();
-        let session = WorkspaceSessionRecord {
-            id: id.clone(),
-            project_id: input.project_id,
-            issue_id: input.issue_id,
-            entity_id: input.entity_id,
-            workspace_type: input.workspace_type,
-            status: WorkspaceSessionStatus::Open,
-            author_provider: input.author_provider,
-            reviewer_provider: input.reviewer_provider,
-            review_rounds: input.review_rounds,
-            permission_modes: WorkspaceRolePermissionModes::default(),
-            provisional_reviewer_provider: None,
-            reviewer_enabled_at_start: None,
-            superpowers_enabled: input.superpowers_enabled,
-            openspec_enabled: input.openspec_enabled,
-            flow_kind: work_item_plan_options.flow_kind,
-            run_policy: work_item_plan_options.run_policy,
-            run_history: Default::default(),
-            review_invocation_scope: None,
-            human_gate_snapshot: None,
-            repair_reservation: None,
-            human_gate_reservation: None,
-            policy_diagnostics: Vec::new(),
-            provider_start_ledger: Vec::new(),
-            single_candidate_phase: (work_item_plan_options.flow_kind
-                == crate::product::work_item_plan_policy::WorkItemPlanFlowKind::SingleCandidate)
-                .then_some(crate::product::models::SingleCandidatePhase::Prepare),
-            work_item_plan_source_revision_ref: None,
-            plan_candidate_ir_ref: None,
-            mechanical_report_ref: None,
-            publication_provenance_ref: None,
-            approval_attempt_id: None,
-            approved_at: None,
-            compile_reservation: None,
-            sc_recovery_claim: None,
-            work_item_runtime_binding: None,
-            work_item_child_binding: child_binding,
-            provider_conversations: Vec::new(),
-            messages: Vec::new(),
-            created_at: now.clone(),
-            updated_at: now,
-            logical_launch_fingerprints: Vec::new(),
-            superseded_native_sessions: Vec::new(),
-            lc_resume_recovery: None,
-            structural_governance_state: None,
-        };
+            let root = self.workspace_sessions_root(&input.project_id, &input.issue_id);
+            let target_path = root.join(format!("{id}.json"));
+            if path_exists(&target_path)? {
+                let existing: WorkspaceSessionRecord = read_json(&target_path)?;
+                if existing.id == id
+                    && existing.project_id == input.project_id
+                    && existing.issue_id == input.issue_id
+                    && existing.entity_id == input.entity_id
+                    && existing.workspace_type == input.workspace_type
+                    && existing.work_item_child_binding == child_binding
+                {
+                    return Ok(existing);
+                }
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "workspace_session",
+                    id,
+                });
+            }
+            let now = Utc::now().to_rfc3339();
+            let work_item_plan_options = input.work_item_plan_options.unwrap_or_default();
+            let session = WorkspaceSessionRecord {
+                id: id.clone(),
+                project_id: input.project_id,
+                issue_id: input.issue_id,
+                entity_id: input.entity_id,
+                workspace_type: input.workspace_type,
+                status: WorkspaceSessionStatus::Open,
+                author_provider: input.author_provider,
+                reviewer_provider: input.reviewer_provider,
+                review_rounds: input.review_rounds,
+                permission_modes: WorkspaceRolePermissionModes::default(),
+                provisional_reviewer_provider: None,
+                reviewer_enabled_at_start: None,
+                superpowers_enabled: input.superpowers_enabled,
+                openspec_enabled: input.openspec_enabled,
+                flow_kind: work_item_plan_options.flow_kind,
+                run_policy: work_item_plan_options.run_policy,
+                run_history: Default::default(),
+                review_invocation_scope: None,
+                human_gate_snapshot: None,
+                repair_reservation: None,
+                human_gate_reservation: None,
+                policy_diagnostics: Vec::new(),
+                provider_start_ledger: Vec::new(),
+                single_candidate_phase: (work_item_plan_options.flow_kind
+                    == crate::product::work_item_plan_policy::WorkItemPlanFlowKind::SingleCandidate)
+                    .then_some(crate::product::models::SingleCandidatePhase::Prepare),
+                work_item_plan_source_revision_ref: None,
+                plan_candidate_ir_ref: None,
+                mechanical_report_ref: None,
+                publication_provenance_ref: None,
+                approval_attempt_id: None,
+                approved_at: None,
+                compile_reservation: None,
+                sc_recovery_claim: None,
+                work_item_runtime_binding: None,
+                work_item_child_binding: child_binding,
+                provider_conversations: Vec::new(),
+                messages: Vec::new(),
+                created_at: now.clone(),
+                updated_at: now,
+                logical_launch_fingerprints: Vec::new(),
+                superseded_native_sessions: Vec::new(),
+                lc_resume_recovery: None,
+                structural_governance_state: None,
+            };
 
-        super::ensure_target_absent(&target_path)?;
-        write_json(&target_path, &session)?;
-        Ok(session)
+            super::ensure_target_absent(&target_path)?;
+            write_json(&target_path, &session)?;
+            Ok(session)
+        })
     }
 
     /// P1 WIGA Task 3：绑定创建——既存 session 必须与完整创建快照一致
@@ -419,7 +452,9 @@ impl LifecycleStore {
             .issue_lifecycle_root(&parent.project_id, &parent.issue_id)
             .join("human-gate-takeovers")
             .join(format!("{event_id}.json"));
-        with_exclusive_lock(&event_path, || {
+        let parent_scope = self.entity_scope_for_session(&parent)?;
+        self.with_optional_entity_live_write(parent_scope.as_ref(), || {
+            with_exclusive_lock(&event_path, || {
             if path_exists(&event_path)? {
                 let event: HumanGateTakeoverEvent = read_json(&event_path)?;
                 if event.id != event_id || event.parent_session_id != parent.id {
@@ -488,6 +523,7 @@ impl LifecycleStore {
             };
             write_json(&event_path, &event)?;
             Ok(child)
+            })
         })
     }
 
@@ -573,28 +609,30 @@ impl LifecycleStore {
         binding: &WorkItemRuntimeBinding,
     ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
         validate_relative_id(session_id)?;
-        let session_path = self.find_workspace_session_path(session_id)?;
-        with_exclusive_lock(&session_path, || {
-            let mut session: WorkspaceSessionRecord = read_json(&session_path)?;
-            if session.workspace_type != WorkspaceType::WorkItem {
-                return Err(ProductStoreError::IdentityMismatch {
-                    kind: "workspace_session_type",
-                    id: session.id.clone(),
-                });
-            }
-            match &session.work_item_runtime_binding {
-                Some(existing) if existing == binding => Ok(session),
-                Some(_) => Err(ProductStoreError::IdentityMismatch {
-                    kind: "work_item_runtime_binding",
-                    id: session.id.clone(),
-                }),
-                None => {
-                    session.work_item_runtime_binding = Some(binding.clone());
-                    session.updated_at = Utc::now().to_rfc3339();
-                    write_json(&session_path, &session)?;
-                    Ok(session)
+        let (session_path, scope) = self.resolve_session_scope(session_id)?;
+        self.with_optional_entity_live_write(scope.as_ref(), move || {
+            with_exclusive_lock(&session_path, || {
+                let mut session: WorkspaceSessionRecord = read_json(&session_path)?;
+                if session.workspace_type != WorkspaceType::WorkItem {
+                    return Err(ProductStoreError::IdentityMismatch {
+                        kind: "workspace_session_type",
+                        id: session.id.clone(),
+                    });
                 }
-            }
+                match &session.work_item_runtime_binding {
+                    Some(existing) if existing == binding => Ok(session),
+                    Some(_) => Err(ProductStoreError::IdentityMismatch {
+                        kind: "work_item_runtime_binding",
+                        id: session.id.clone(),
+                    }),
+                    None => {
+                        session.work_item_runtime_binding = Some(binding.clone());
+                        session.updated_at = Utc::now().to_rfc3339();
+                        write_json(&session_path, &session)?;
+                        Ok(session)
+                    }
+                }
+            })
         })
     }
 
@@ -605,17 +643,19 @@ impl LifecycleStore {
         content: String,
     ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
         validate_relative_id(session_id)?;
-        let session_path = self.find_workspace_session_path(session_id)?;
-        let mut session: WorkspaceSessionRecord = read_json(&session_path)?;
-        let now = Utc::now().to_rfc3339();
-        session.messages.push(WorkspaceMessageRecord {
-            role,
-            content,
-            created_at: now.clone(),
-        });
-        session.updated_at = now;
-        write_json(&session_path, &session)?;
-        Ok(session)
+        let (session_path, scope) = self.resolve_session_scope(session_id)?;
+        self.with_optional_entity_live_write(scope.as_ref(), move || {
+            let mut session: WorkspaceSessionRecord = read_json(&session_path)?;
+            let now = Utc::now().to_rfc3339();
+            session.messages.push(WorkspaceMessageRecord {
+                role,
+                content,
+                created_at: now.clone(),
+            });
+            session.updated_at = now;
+            write_json(&session_path, &session)?;
+            Ok(session)
+        })
     }
 
     pub fn replace_workspace_messages(
@@ -624,12 +664,14 @@ impl LifecycleStore {
         messages: Vec<WorkspaceMessageRecord>,
     ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
         validate_relative_id(session_id)?;
-        let session_path = self.find_workspace_session_path(session_id)?;
-        let mut session: WorkspaceSessionRecord = read_json(&session_path)?;
-        session.messages = messages;
-        session.updated_at = Utc::now().to_rfc3339();
-        write_json(&session_path, &session)?;
-        Ok(session)
+        let (session_path, scope) = self.resolve_session_scope(session_id)?;
+        self.with_optional_entity_live_write(scope.as_ref(), move || {
+            let mut session: WorkspaceSessionRecord = read_json(&session_path)?;
+            session.messages = messages;
+            session.updated_at = Utc::now().to_rfc3339();
+            write_json(&session_path, &session)?;
+            Ok(session)
+        })
     }
 
     pub fn replace_workspace_provider_conversations(
@@ -638,12 +680,14 @@ impl LifecycleStore {
         provider_conversations: Vec<ProviderConversationRef>,
     ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
         validate_relative_id(session_id)?;
-        let session_path = self.find_workspace_session_path(session_id)?;
-        let mut session: WorkspaceSessionRecord = read_json(&session_path)?;
-        session.provider_conversations = provider_conversations;
-        session.updated_at = Utc::now().to_rfc3339();
-        write_json(&session_path, &session)?;
-        Ok(session)
+        let (session_path, scope) = self.resolve_session_scope(session_id)?;
+        self.with_optional_entity_live_write(scope.as_ref(), move || {
+            let mut session: WorkspaceSessionRecord = read_json(&session_path)?;
+            session.provider_conversations = provider_conversations;
+            session.updated_at = Utc::now().to_rfc3339();
+            write_json(&session_path, &session)?;
+            Ok(session)
+        })
     }
 
     pub fn update_workspace_session_status(
@@ -652,20 +696,22 @@ impl LifecycleStore {
         status: WorkspaceSessionStatus,
     ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
         validate_relative_id(session_id)?;
-        let session_path = self.find_workspace_session_path(session_id)?;
-        let mut session: WorkspaceSessionRecord = read_json(&session_path)?;
-        session.status = status;
-        if matches!(
-            session.status,
-            WorkspaceSessionStatus::Confirmed
-                | WorkspaceSessionStatus::Terminated
-                | WorkspaceSessionStatus::Failed
-        ) {
-            session.human_gate_snapshot = None;
-        }
-        session.updated_at = Utc::now().to_rfc3339();
-        write_json(&session_path, &session)?;
-        Ok(session)
+        let (session_path, scope) = self.resolve_session_scope(session_id)?;
+        self.with_optional_entity_live_write(scope.as_ref(), move || {
+            let mut session: WorkspaceSessionRecord = read_json(&session_path)?;
+            session.status = status;
+            if matches!(
+                session.status,
+                WorkspaceSessionStatus::Confirmed
+                    | WorkspaceSessionStatus::Terminated
+                    | WorkspaceSessionStatus::Failed
+            ) {
+                session.human_gate_snapshot = None;
+            }
+            session.updated_at = Utc::now().to_rfc3339();
+            write_json(&session_path, &session)?;
+            Ok(session)
+        })
     }
 
     /// Atomically claims the human-gate close operation.  The expected record
@@ -694,63 +740,66 @@ impl LifecycleStore {
         expected: &WorkspaceSessionRecord,
         status: WorkspaceSessionStatus,
     ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
-        if expected.workspace_type != WorkspaceType::WorkItemPlan
-            || expected.flow_kind
-                != crate::product::work_item_plan_policy::WorkItemPlanFlowKind::SingleCandidate
-        {
-            return Err(ProductStoreError::InvalidRecord {
-                kind: "human_gate_close",
-                reason: "session is not a SingleCandidate WorkItemPlan".to_string(),
-            });
-        }
-        let relaxed_terminate = status == WorkspaceSessionStatus::Terminated
-            && matches!(
-                expected.single_candidate_phase,
-                None | Some(crate::product::models::SingleCandidatePhase::Prepare)
-                    | Some(crate::product::models::SingleCandidatePhase::Generate)
-                    // F-54 B3：失败残留相位的开门也必须可终止（用户脱困权）。
-                    | Some(crate::product::models::SingleCandidatePhase::Failed)
-            );
-        if expected.status != WorkspaceSessionStatus::WaitingForHuman
-            || !(relaxed_terminate
-                || (matches!(
+        let gate_scope = self.entity_scope_for_session(expected)?;
+        self.with_optional_entity_live_write(gate_scope.as_ref(), move || {
+            if expected.workspace_type != WorkspaceType::WorkItemPlan
+                || expected.flow_kind
+                    != crate::product::work_item_plan_policy::WorkItemPlanFlowKind::SingleCandidate
+            {
+                return Err(ProductStoreError::InvalidRecord {
+                    kind: "human_gate_close",
+                    reason: "session is not a SingleCandidate WorkItemPlan".to_string(),
+                });
+            }
+            let relaxed_terminate = status == WorkspaceSessionStatus::Terminated
+                && matches!(
                     expected.single_candidate_phase,
-                    Some(crate::product::models::SingleCandidatePhase::Approval)
-                        | Some(crate::product::models::SingleCandidatePhase::Evaluate)
-                ) && expected.human_gate_snapshot.is_some()))
-        {
-            return Err(ProductStoreError::Conflict {
-                kind: "human_gate_close",
-                id: expected.id.clone(),
-            });
-        }
-        let session_path = self.find_workspace_session_path(&expected.id)?;
-        let locked_session_path = session_path.clone();
-        with_exclusive_lock(&session_path, move || {
-            let mut stored: WorkspaceSessionRecord = read_json(&locked_session_path)?;
-            if stored != *expected {
+                    None | Some(crate::product::models::SingleCandidatePhase::Prepare)
+                        | Some(crate::product::models::SingleCandidatePhase::Generate)
+                        // F-54 B3：失败残留相位的开门也必须可终止（用户脱困权）。
+                        | Some(crate::product::models::SingleCandidatePhase::Failed)
+                );
+            if expected.status != WorkspaceSessionStatus::WaitingForHuman
+                || !(relaxed_terminate
+                    || (matches!(
+                        expected.single_candidate_phase,
+                        Some(crate::product::models::SingleCandidatePhase::Approval)
+                            | Some(crate::product::models::SingleCandidatePhase::Evaluate)
+                    ) && expected.human_gate_snapshot.is_some()))
+            {
                 return Err(ProductStoreError::Conflict {
-                    kind: "workspace_session",
+                    kind: "human_gate_close",
                     id: expected.id.clone(),
                 });
             }
-            stored.status = status.clone();
-            if status == WorkspaceSessionStatus::Running {
-                // confirm（Running）＝人工批准权威：锁内原子提升相位，
-                // Evaluate 进门 × Approval 关门死锁在此解开。
-                stored.single_candidate_phase =
-                    Some(crate::product::models::SingleCandidatePhase::Approval);
-            }
-            if matches!(
-                status,
-                WorkspaceSessionStatus::Confirmed | WorkspaceSessionStatus::Terminated
-            ) {
-                stored.human_gate_snapshot = None;
-                stored.human_gate_reservation = None;
-            }
-            stored.updated_at = Utc::now().to_rfc3339();
-            write_json(&locked_session_path, &stored)?;
-            Ok(stored)
+            let session_path = self.find_workspace_session_path(&expected.id)?;
+            let locked_session_path = session_path.clone();
+            with_exclusive_lock(&session_path, move || {
+                let mut stored: WorkspaceSessionRecord = read_json(&locked_session_path)?;
+                if stored != *expected {
+                    return Err(ProductStoreError::Conflict {
+                        kind: "workspace_session",
+                        id: expected.id.clone(),
+                    });
+                }
+                stored.status = status.clone();
+                if status == WorkspaceSessionStatus::Running {
+                    // confirm（Running）＝人工批准权威：锁内原子提升相位，
+                    // Evaluate 进门 × Approval 关门死锁在此解开。
+                    stored.single_candidate_phase =
+                        Some(crate::product::models::SingleCandidatePhase::Approval);
+                }
+                if matches!(
+                    status,
+                    WorkspaceSessionStatus::Confirmed | WorkspaceSessionStatus::Terminated
+                ) {
+                    stored.human_gate_snapshot = None;
+                    stored.human_gate_reservation = None;
+                }
+                stored.updated_at = Utc::now().to_rfc3339();
+                write_json(&locked_session_path, &stored)?;
+                Ok(stored)
+            })
         })
     }
 
@@ -763,32 +812,35 @@ impl LifecycleStore {
         expected: &WorkspaceSessionRecord,
         recovery: crate::product::work_item_plan_policy::CandidateSnapshotRecovery,
     ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
-        if expected.human_gate_snapshot.is_none() {
-            return Err(ProductStoreError::InvalidRecord {
-                kind: "candidate_recovery",
-                reason: "human gate snapshot is missing".to_string(),
-            });
-        }
-        let session_path = self.find_workspace_session_path(&expected.id)?;
-        let locked_session_path = session_path.clone();
-        with_exclusive_lock(&session_path, move || {
-            let mut stored: WorkspaceSessionRecord = read_json(&locked_session_path)?;
-            if stored != *expected {
-                return Err(ProductStoreError::Conflict {
-                    kind: "workspace_session",
-                    id: expected.id.clone(),
-                });
-            }
-            let Some(snapshot) = stored.human_gate_snapshot.as_mut() else {
+        let recovery_scope = self.entity_scope_for_session(expected)?;
+        self.with_optional_entity_live_write(recovery_scope.as_ref(), move || {
+            if expected.human_gate_snapshot.is_none() {
                 return Err(ProductStoreError::InvalidRecord {
                     kind: "candidate_recovery",
                     reason: "human gate snapshot is missing".to_string(),
                 });
-            };
-            snapshot.candidate_recovery = Some(recovery);
-            stored.updated_at = Utc::now().to_rfc3339();
-            write_json(&locked_session_path, &stored)?;
-            Ok(stored)
+            }
+            let session_path = self.find_workspace_session_path(&expected.id)?;
+            let locked_session_path = session_path.clone();
+            with_exclusive_lock(&session_path, move || {
+                let mut stored: WorkspaceSessionRecord = read_json(&locked_session_path)?;
+                if stored != *expected {
+                    return Err(ProductStoreError::Conflict {
+                        kind: "workspace_session",
+                        id: expected.id.clone(),
+                    });
+                }
+                let Some(snapshot) = stored.human_gate_snapshot.as_mut() else {
+                    return Err(ProductStoreError::InvalidRecord {
+                        kind: "candidate_recovery",
+                        reason: "human gate snapshot is missing".to_string(),
+                    });
+                };
+                snapshot.candidate_recovery = Some(recovery);
+                stored.updated_at = Utc::now().to_rfc3339();
+                write_json(&locked_session_path, &stored)?;
+                Ok(stored)
+            })
         })
     }
 
@@ -826,27 +878,31 @@ impl LifecycleStore {
                 reason: "idempotency key must not be empty".to_string(),
             });
         }
-        let session_path = self.find_workspace_session_path(session_id)?;
-        with_exclusive_lock(&session_path, || {
-            let mut session: WorkspaceSessionRecord = read_json(&session_path)?;
-            if session
-                .provider_start_ledger
-                .iter()
-                .any(|entry| entry.provider_start_idempotency_key == provider_start_idempotency_key)
-            {
-                return Ok(false);
-            }
-            session.provider_start_ledger.push(
-                crate::product::work_item_plan_policy::ProviderStartLedgerEntry {
-                    provider_start_idempotency_key: provider_start_idempotency_key.to_string(),
-                    started: true,
-                    provider: provider.map(ToString::to_string),
-                    started_at,
-                },
-            );
-            session.updated_at = Utc::now().to_rfc3339();
-            write_json(&session_path, &session)?;
-            Ok(true)
+        let (session_path, scope) = self.resolve_session_scope(session_id)?;
+        self.with_optional_entity_live_write(scope.as_ref(), move || {
+            with_exclusive_lock(&session_path, || {
+                let mut session: WorkspaceSessionRecord = read_json(&session_path)?;
+                if session
+                    .provider_start_ledger
+                    .iter()
+                    .any(|entry| {
+                        entry.provider_start_idempotency_key == provider_start_idempotency_key
+                    })
+                {
+                    return Ok(false);
+                }
+                session.provider_start_ledger.push(
+                    crate::product::work_item_plan_policy::ProviderStartLedgerEntry {
+                        provider_start_idempotency_key: provider_start_idempotency_key.to_string(),
+                        started: true,
+                        provider: provider.map(ToString::to_string),
+                        started_at,
+                    },
+                );
+                session.updated_at = Utc::now().to_rfc3339();
+                write_json(&session_path, &session)?;
+                Ok(true)
+            })
         })
     }
 
@@ -861,20 +917,23 @@ impl LifecycleStore {
         expected: &WorkspaceSessionRecord,
         next_lc_fields: LcResumeRecoveryRecord,
     ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
-        let session_path = self.find_workspace_session_path(&expected.id)?;
-        let locked_session_path = session_path.clone();
-        with_exclusive_lock(&session_path, move || {
-            let mut stored: WorkspaceSessionRecord = read_json(&locked_session_path)?;
-            if stored != *expected {
-                return Err(ProductStoreError::Conflict {
-                    kind: "workspace_session",
-                    id: expected.id.clone(),
-                });
-            }
-            stored.lc_resume_recovery = Some(next_lc_fields);
-            stored.updated_at = Utc::now().to_rfc3339();
-            write_json(&locked_session_path, &stored)?;
-            Ok(stored)
+        let resume_scope = self.entity_scope_for_session(expected)?;
+        self.with_optional_entity_live_write(resume_scope.as_ref(), move || {
+            let session_path = self.find_workspace_session_path(&expected.id)?;
+            let locked_session_path = session_path.clone();
+            with_exclusive_lock(&session_path, move || {
+                let mut stored: WorkspaceSessionRecord = read_json(&locked_session_path)?;
+                if stored != *expected {
+                    return Err(ProductStoreError::Conflict {
+                        kind: "workspace_session",
+                        id: expected.id.clone(),
+                    });
+                }
+                stored.lc_resume_recovery = Some(next_lc_fields);
+                stored.updated_at = Utc::now().to_rfc3339();
+                write_json(&locked_session_path, &stored)?;
+                Ok(stored)
+            })
         })
     }
 
@@ -908,7 +967,8 @@ impl LifecycleStore {
                 reason: "operation id must not be empty".to_string(),
             });
         }
-        let session_path = self.find_workspace_session_path(session_id)?;
+        let (session_path, scope) = self.resolve_session_scope(session_id)?;
+        self.with_optional_entity_live_write(scope.as_ref(), move || {
         with_exclusive_lock(&session_path, || {
             let mut session: WorkspaceSessionRecord = read_json(&session_path)?;
             // ① recovery 身份：缺失/被替换 → Stale。
@@ -972,6 +1032,7 @@ impl LifecycleStore {
                 record: session,
                 operation,
             })
+            })
         })
     }
 
@@ -1005,7 +1066,9 @@ impl LifecycleStore {
         status: WorkspaceSessionStatus,
     ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
         validate_relative_id(&expected.id)?;
-        let session_path = self.find_workspace_session_path(&expected.id)?;
+        let cas_scope = self.entity_scope_for_session(expected)?;
+        self.with_optional_entity_live_write(cas_scope.as_ref(), move || {
+            let session_path = self.find_workspace_session_path(&expected.id)?;
         with_exclusive_lock(&session_path, || {
             let mut stored: WorkspaceSessionRecord = read_json(&session_path)?;
             if stored != *expected {
@@ -1022,6 +1085,7 @@ impl LifecycleStore {
             write_json(&session_path, &stored)?;
             Ok(stored)
         })
+        })
     }
 
     pub fn update_workspace_session_providers(
@@ -1031,13 +1095,15 @@ impl LifecycleStore {
         reviewer_provider: Option<crate::product::models::ProviderName>,
     ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
         validate_relative_id(session_id)?;
-        let session_path = self.find_workspace_session_path(session_id)?;
-        let mut session: WorkspaceSessionRecord = read_json(&session_path)?;
-        session.author_provider = author_provider;
-        session.reviewer_provider = reviewer_provider;
-        session.updated_at = Utc::now().to_rfc3339();
-        write_json(&session_path, &session)?;
-        Ok(session)
+        let (session_path, scope) = self.resolve_session_scope(session_id)?;
+        self.with_optional_entity_live_write(scope.as_ref(), move || {
+            let mut session: WorkspaceSessionRecord = read_json(&session_path)?;
+            session.author_provider = author_provider;
+            session.reviewer_provider = reviewer_provider;
+            session.updated_at = Utc::now().to_rfc3339();
+            write_json(&session_path, &session)?;
+            Ok(session)
+        })
     }
 
     pub fn update_workspace_session_permission_modes(
@@ -1046,12 +1112,14 @@ impl LifecycleStore {
         permission_modes: WorkspaceRolePermissionModes,
     ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
         validate_relative_id(session_id)?;
-        let session_path = self.find_workspace_session_path(session_id)?;
-        let mut session: WorkspaceSessionRecord = read_json(&session_path)?;
-        session.permission_modes = permission_modes;
-        session.updated_at = Utc::now().to_rfc3339();
-        write_json(&session_path, &session)?;
-        Ok(session)
+        let (session_path, scope) = self.resolve_session_scope(session_id)?;
+        self.with_optional_entity_live_write(scope.as_ref(), move || {
+            let mut session: WorkspaceSessionRecord = read_json(&session_path)?;
+            session.permission_modes = permission_modes;
+            session.updated_at = Utc::now().to_rfc3339();
+            write_json(&session_path, &session)?;
+            Ok(session)
+        })
     }
 
     pub fn update_workspace_session_provisional_reviewer(
@@ -1061,13 +1129,15 @@ impl LifecycleStore {
         reviewer_enabled_at_start: Option<bool>,
     ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
         validate_relative_id(session_id)?;
-        let session_path = self.find_workspace_session_path(session_id)?;
-        let mut session: WorkspaceSessionRecord = read_json(&session_path)?;
-        session.provisional_reviewer_provider = provisional_reviewer_provider;
-        session.reviewer_enabled_at_start = reviewer_enabled_at_start;
-        session.updated_at = Utc::now().to_rfc3339();
-        write_json(&session_path, &session)?;
-        Ok(session)
+        let (session_path, scope) = self.resolve_session_scope(session_id)?;
+        self.with_optional_entity_live_write(scope.as_ref(), move || {
+            let mut session: WorkspaceSessionRecord = read_json(&session_path)?;
+            session.provisional_reviewer_provider = provisional_reviewer_provider;
+            session.reviewer_enabled_at_start = reviewer_enabled_at_start;
+            session.updated_at = Utc::now().to_rfc3339();
+            write_json(&session_path, &session)?;
+            Ok(session)
+        })
     }
 
     pub fn truncate_workspace_session_messages(
@@ -1077,13 +1147,15 @@ impl LifecycleStore {
         status: WorkspaceSessionStatus,
     ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
         validate_relative_id(session_id)?;
-        let session_path = self.find_workspace_session_path(session_id)?;
-        let mut session: WorkspaceSessionRecord = read_json(&session_path)?;
-        session.messages.truncate(keep_count);
-        session.status = status;
-        session.updated_at = Utc::now().to_rfc3339();
-        write_json(&session_path, &session)?;
-        Ok(session)
+        let (session_path, scope) = self.resolve_session_scope(session_id)?;
+        self.with_optional_entity_live_write(scope.as_ref(), move || {
+            let mut session: WorkspaceSessionRecord = read_json(&session_path)?;
+            session.messages.truncate(keep_count);
+            session.status = status;
+            session.updated_at = Utc::now().to_rfc3339();
+            write_json(&session_path, &session)?;
+            Ok(session)
+        })
     }
 }
 
@@ -1091,10 +1163,9 @@ include!("workspace_timeline_artifacts.inc.rs");
 
 impl LifecycleStore {
     fn next_workspace_session_id(&self) -> Result<String, ProductStoreError> {
-        let max_sequence = super::workspace_single_candidate::max_workspace_session_sequence(
-            &self.paths.projects_root(),
-        )?;
-        Ok(next_sequential_id("workspace_session", max_sequence))
+        // D1.3a：全项目 session 最大序号与耐久高水位取 max 再增（D1.0
+        // `allocate_workspace_session_id`）；已分配（含已删实体）ID 不复用。
+        self.entity_operation_store().allocate_workspace_session_id()
     }
 
     pub(super) fn find_workspace_session_path(
@@ -1168,6 +1239,297 @@ impl LifecycleStore {
             .issue_lifecycle_root(project_id, issue_id)
             .join("workspace-timelines")
             .join(session_id))
+    }
+}
+
+// ==== 实体 scope 准入（fix-cascade-deletion Task D1.3a；plan §0.2/§0.4）====
+//
+// 生命周期/session 写入口的迟到写防御：先按真实归属归约出 `EntityScope`，
+// 在任何 session/对象锁之前取得 scope 共享准入（try-shared＋锁内墓碑复核，
+// 由 `EntityOperationStore::with_live_write` 提供），purging/deleted 一律稳定
+// 拒绝 `Conflict{entity_deleting}`；无法归属任何存活实体的旧档案（无 owner
+// refs）保持原行为，不引入第二套授权。锁序遵守 §0.2 固定序：scope →
+// resource → 关系短锁 → session/对象锁。
+
+thread_local! {
+    /// 本线程已取得 scope 共享准入的实体集合：同一外层准入内的组合流程
+    /// （confirm→WI 状态、SC 门修订→artifact/回滚等）内层写不再重复取
+    /// scope 锁（plan §0.4：内层只消费已持 lease，嵌套取 scope 不当合法设计）。
+    static ADMITTED_ENTITY_SCOPES: RefCell<HashSet<EntityScope>> =
+        RefCell::new(HashSet::new());
+}
+
+/// 单个已准入 scope 的线程级登记守卫（正常返回/Err/panic 均撤销登记）。
+struct AdmittedEntityScope(EntityScope);
+
+impl Drop for AdmittedEntityScope {
+    fn drop(&mut self) {
+        ADMITTED_ENTITY_SCOPES.with(|admitted| {
+            admitted.borrow_mut().remove(&self.0);
+        });
+    }
+}
+
+impl LifecycleStore {
+    pub(super) fn entity_operation_store(&self) -> EntityOperationStore {
+        EntityOperationStore::new(self.paths.clone())
+    }
+
+    /// scope 共享准入（try-shared＋锁内墓碑复核）；本线程已在同一外层准入
+    /// 内持有该 scope 时不重复获取，直接执行（消费已持 lease）。
+    pub(super) fn with_entity_live_write<T>(
+        &self,
+        scope: &EntityScope,
+        operation: impl FnOnce() -> Result<T, ProductStoreError>,
+    ) -> Result<T, ProductStoreError> {
+        let already_admitted =
+            ADMITTED_ENTITY_SCOPES.with(|admitted| admitted.borrow().contains(scope));
+        if already_admitted {
+            return operation();
+        }
+        ADMITTED_ENTITY_SCOPES.with(|admitted| admitted.borrow_mut().insert(scope.clone()));
+        let _guard = AdmittedEntityScope(scope.clone());
+        self.entity_operation_store().with_live_write(scope, operation)
+    }
+
+    /// 无法归属实体的旧档案保持原行为（None → 不准入，非授权放宽）。
+    pub(super) fn with_optional_entity_live_write<T>(
+        &self,
+        scope: Option<&EntityScope>,
+        operation: impl FnOnce() -> Result<T, ProductStoreError>,
+    ) -> Result<T, ProductStoreError> {
+        match scope {
+            Some(scope) => self.with_entity_live_write(scope, operation),
+            None => operation(),
+        }
+    }
+
+    /// 多 scope 准入（外层按 kind/project/issue/entity 固定排序、去重后
+    /// 嵌套获取；关联创建同时核自身与上游 scope，plan §0.2）。
+    pub(super) fn with_entity_live_writes<T>(
+        &self,
+        scopes: &[EntityScope],
+        operation: impl FnOnce() -> Result<T, ProductStoreError>,
+    ) -> Result<T, ProductStoreError> {
+        let mut ordered: Vec<EntityScope> = scopes.to_vec();
+        ordered.sort_by(|left, right| {
+            (
+                left.kind.path_segment(),
+                left.project_id.as_str(),
+                left.issue_id.as_str(),
+                left.entity_id.as_str(),
+            )
+                .cmp(&(
+                    right.kind.path_segment(),
+                    right.project_id.as_str(),
+                    right.issue_id.as_str(),
+                    right.entity_id.as_str(),
+                ))
+        });
+        ordered.dedup();
+
+        fn nested<T>(
+            store: &LifecycleStore,
+            scopes: &[EntityScope],
+            operation: &mut dyn FnMut() -> Result<T, ProductStoreError>,
+        ) -> Result<T, ProductStoreError> {
+            let Some((first, rest)) = scopes.split_first() else {
+                return operation();
+            };
+            store.with_entity_live_write(first, || nested(store, rest, operation))
+        }
+        let mut operation = Some(operation);
+        nested(
+            self,
+            &ordered,
+            &mut || (operation.take().expect("entity admission operation invoked once"))(),
+        )
+    }
+
+    /// session 记录 → 拥有实体 scope 归约（真实 parent/Plan binding，
+    /// plan §0.5 WI/session 行）：Story/Design/WorkItemPlan 直接映射；
+    /// WorkItem session 先 child_binding.plan_id，再 WI 记录
+    /// source_work_item_plan_id，最后按 issue 计划 work_item_ids 反查；
+    /// 全部来源耗尽（旧无 owner 档案）→ None（不误伤，也不当 live 授权）。
+    pub(super) fn entity_scope_for_session(
+        &self,
+        session: &WorkspaceSessionRecord,
+    ) -> Result<Option<EntityScope>, ProductStoreError> {
+        match &session.workspace_type {
+            WorkspaceType::Story => Ok(Some(EntityScope::new(
+                &session.project_id,
+                &session.issue_id,
+                DeletionEntityKind::Story,
+                &session.entity_id,
+            ))),
+            WorkspaceType::Design => Ok(Some(EntityScope::new(
+                &session.project_id,
+                &session.issue_id,
+                DeletionEntityKind::Design,
+                &session.entity_id,
+            ))),
+            WorkspaceType::WorkItemPlan => Ok(Some(EntityScope::new(
+                &session.project_id,
+                &session.issue_id,
+                DeletionEntityKind::Plan,
+                &session.entity_id,
+            ))),
+            WorkspaceType::WorkItem => {
+                if let Some(binding) = &session.work_item_child_binding {
+                    return Ok(Some(EntityScope::new(
+                        &session.project_id,
+                        &session.issue_id,
+                        DeletionEntityKind::Plan,
+                        &binding.plan_id,
+                    )));
+                }
+                self.owning_plan_scope(&session.project_id, &session.issue_id, &session.entity_id)
+            }
+        }
+    }
+
+    /// 新建 session 的目标 scope（创建入口无已存记录可读，按输入归约）。
+    fn entity_scope_for_new_session(
+        &self,
+        input: &CreateWorkspaceSessionInput,
+        child_binding: Option<&ChildBindingIdentity>,
+    ) -> Result<Option<EntityScope>, ProductStoreError> {
+        match (&input.workspace_type, child_binding) {
+            (WorkspaceType::Story, _) => Ok(Some(EntityScope::new(
+                &input.project_id,
+                &input.issue_id,
+                DeletionEntityKind::Story,
+                &input.entity_id,
+            ))),
+            (WorkspaceType::Design, _) => Ok(Some(EntityScope::new(
+                &input.project_id,
+                &input.issue_id,
+                DeletionEntityKind::Design,
+                &input.entity_id,
+            ))),
+            (WorkspaceType::WorkItemPlan, _) => Ok(Some(EntityScope::new(
+                &input.project_id,
+                &input.issue_id,
+                DeletionEntityKind::Plan,
+                &input.entity_id,
+            ))),
+            (WorkspaceType::WorkItem, Some(binding)) => Ok(Some(EntityScope::new(
+                &input.project_id,
+                &input.issue_id,
+                DeletionEntityKind::Plan,
+                &binding.plan_id,
+            ))),
+            (WorkspaceType::WorkItem, None) => {
+                self.owning_plan_scope(&input.project_id, &input.issue_id, &input.entity_id)
+            }
+        }
+    }
+
+    /// WorkItem → 拥有 Plan 归约：WI 记录 source_work_item_plan_id 优先，
+    /// 缺失时按 issue 计划 work_item_ids refs 反查（旧无 owner 档案按 refs
+    /// 核归属，plan D1.3a Interfaces）。
+    pub(super) fn owning_plan_scope(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        work_item_id: &str,
+    ) -> Result<Option<EntityScope>, ProductStoreError> {
+        // 直接构造路径：work_item_path 对缺失记录报 NotFound，而归约必须
+        // 允许「档案缺失 → 无归属」的旧形态。
+        let work_item_path = self
+            .work_items_root(project_id, issue_id)
+            .join(format!("{work_item_id}.json"));
+        if path_is_regular_file(&work_item_path)? {
+            let record: LifecycleWorkItemRecord = read_json(&work_item_path)?;
+            if let Some(plan_id) = &record.source_work_item_plan_id {
+                return Ok(Some(EntityScope::new(
+                    project_id,
+                    issue_id,
+                    DeletionEntityKind::Plan,
+                    plan_id,
+                )));
+            }
+        }
+        for plan in self.list_issue_work_item_plans(project_id, issue_id)? {
+            if plan.work_item_ids.iter().any(|id| id == work_item_id) {
+                return Ok(Some(EntityScope::new(
+                    project_id,
+                    issue_id,
+                    DeletionEntityKind::Plan,
+                    &plan.id,
+                )));
+            }
+        }
+        Ok(None)
+    }
+
+    /// session_id → (session 路径, scope)。只读解析，不持锁；随后写体在
+    /// 准入内重读最新记录（先 find 后删除再 write 的竞态由准入闭合）。
+    pub(super) fn resolve_session_scope(
+        &self,
+        session_id: &str,
+    ) -> Result<(PathBuf, Option<EntityScope>), ProductStoreError> {
+        let session_path = self.find_workspace_session_path(session_id)?;
+        let session: WorkspaceSessionRecord = read_json(&session_path)?;
+        let scope = self.entity_scope_for_session(&session)?;
+        Ok((session_path, scope))
+    }
+
+    /// 宽松版：session 档案缺失（NotFound）→ None（原行为本就不读 session 的
+    /// 写入口：link/repair state/review round——不因准入引入新 NotFound）。
+    pub(super) fn resolve_session_scope_lenient(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<EntityScope>, ProductStoreError> {
+        match self.resolve_session_scope(session_id) {
+            Ok((_, scope)) => Ok(scope),
+            Err(ProductStoreError::NotFound { .. }) => Ok(None),
+            Err(other) => Err(other),
+        }
+    }
+
+    /// issue 级实体 ID 分配：目录序号扫描跳过已有删除墓碑的 ID（创建新
+    /// entity 跳过 tombstone ID，plan D1.3a Interfaces；已删实体 ID 不复用）。
+    pub(super) fn next_fresh_entity_id(
+        &self,
+        prefix: &str,
+        directory: &std::path::Path,
+        kind: DeletionEntityKind,
+        project_id: &str,
+        issue_id: &str,
+    ) -> Result<String, ProductStoreError> {
+        let deletions = EntityDeletionStore::new(self.paths.clone());
+        let mut id = next_sequential_id_in_directory(prefix, directory).map_err(|error| {
+            ProductStoreError::Io(format!("read {}: {error}", directory.display()))
+        })?;
+        loop {
+            let scope = EntityScope::new(project_id, issue_id, kind, &id);
+            if deletions.get(&scope)?.is_none() {
+                return Ok(id);
+            }
+            let sequence = id
+                .rsplit_once('_')
+                .and_then(|(_, suffix)| suffix.parse::<usize>().ok())
+                .unwrap_or(0);
+            id = next_sequential_id(prefix, sequence);
+        }
+    }
+
+    /// WI 记录 → 拥有 Plan scope（D1.3a work_item 写入口消费）：
+    /// source_work_item_plan_id 优先，缺失按 refs 反查。
+    pub(super) fn entity_scope_for_work_item_record(
+        &self,
+        record: &LifecycleWorkItemRecord,
+    ) -> Result<Option<EntityScope>, ProductStoreError> {
+        if let Some(plan_id) = &record.source_work_item_plan_id {
+            return Ok(Some(EntityScope::new(
+                &record.project_id,
+                &record.issue_id,
+                DeletionEntityKind::Plan,
+                plan_id,
+            )));
+        }
+        self.owning_plan_scope(&record.project_id, &record.issue_id, &record.id)
     }
 }
 

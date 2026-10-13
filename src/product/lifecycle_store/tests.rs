@@ -761,3 +761,812 @@ fn sg_04a_0_store_session_json_preserves_governance_state_compat() {
     );
     assert_eq!(state.get("user_budget_total"), Some(&serde_json::json!(3)));
 }
+
+// ==== cascade_d1_3a（fix-cascade-deletion Task D1.3a：生命周期/session 准入与身份不串代）====
+fn d1_3a_node_detail(session_id: &str) -> crate::product::models::NodeDetail {
+    crate::product::models::NodeDetail {
+        node_id: "node_0001".to_string(),
+        session_id: session_id.to_string(),
+        node_type: crate::web::workspace_ws_types::TimelineNodeType::WorkItemPlanOutlineRun,
+        status: crate::web::workspace_ws_types::TimelineNodeStatus::Active,
+        agent_role: None,
+        provider: None,
+        prompt: None,
+        messages: Vec::new(),
+        streaming_content: String::new(),
+        execution_events: Vec::new(),
+        permission_events: Vec::new(),
+        verdict: None,
+        artifact_ref: None,
+        is_revision: false,
+        revision_feedback: None,
+        base_artifact_ref: None,
+        started_at: "2026-10-13T00:00:00Z".to_string(),
+        ended_at: None,
+    }
+}
+
+fn d1_3a_artifact_version() -> crate::web::workspace_ws_types::ArtifactVersion {
+    crate::web::workspace_ws_types::ArtifactVersion {
+        version: 1,
+        payload: crate::web::workspace_ws_types::ArtifactPayload::Markdown {
+            markdown: "# artifact".to_string(),
+            diff: None,
+        },
+        generated_by: crate::product::models::ProviderName::Codex,
+        reviewed_by: None,
+        review_verdict: None,
+        confirmed_by: None,
+        is_current: true,
+        created_at: "2026-10-13T00:00:00Z".to_string(),
+        source_node_id: "node_0001".to_string(),
+    }
+}
+
+use crate::product::entity_deletion_store::{
+    DeletionEntityKind, EntityDeletionStore, EntityScope, issue_entity_operations_root,
+};
+use crate::product::entity_operation_store::{EntityDeletionLease, EntityOperationStore};
+
+fn d1_3a_plan_options() -> crate::product::models::IssueWorkItemPlanOptions {
+    crate::product::models::IssueWorkItemPlanOptions {
+        include_integration_tests: false,
+        include_e2e_tests: false,
+        force_frontend_backend_split: false,
+        require_execution_plan_confirm: false,
+    }
+}
+
+fn d1_3a_scope(kind: DeletionEntityKind, entity_id: &str) -> EntityScope {
+    EntityScope::new(PROJECT_ID, ISSUE_ID, kind, entity_id)
+}
+
+fn d1_3a_begin_purge(store: &LifecycleStore, scope: &EntityScope) -> EntityDeletionLease {
+    let lease = EntityOperationStore::new(store.app_paths())
+        .try_acquire_delete(scope)
+        .expect("acquire delete lease");
+    EntityDeletionStore::new(store.app_paths())
+        .begin(&lease)
+        .expect("begin purging tombstone");
+    lease
+}
+
+fn d1_3a_complete_purge(store: &LifecycleStore, lease: EntityDeletionLease) {
+    EntityDeletionStore::new(store.app_paths())
+        .complete(&lease)
+        .expect("complete deletion tombstone");
+}
+
+fn d1_3a_story(store: &LifecycleStore) -> crate::product::models::StorySpecRecord {
+    store
+        .create_story_spec(CreateStorySpecInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            repository_id: REPOSITORY_ID.to_string(),
+            title: "story".to_string(),
+            aggregate_codebase: None,
+        })
+        .unwrap()
+}
+
+fn d1_3a_plan(
+    store: &LifecycleStore,
+    id: &str,
+    story_ids: Vec<String>,
+) -> crate::product::models::IssueWorkItemPlan {
+    store
+        .create_issue_work_item_plan(CreateIssueWorkItemPlanInput {
+            id: Some(id.to_string()),
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            source_story_spec_ids: story_ids,
+            source_design_spec_ids: Vec::new(),
+            options: d1_3a_plan_options(),
+            status: crate::product::models::IssueWorkItemPlanStatus::Draft,
+            work_item_ids: Vec::new(),
+            repository_profile_ref: None,
+            verification_plan_ids: Vec::new(),
+            dependency_graph: Vec::new(),
+            created_from_provider_run: None,
+            validator_findings: Vec::new(),
+        })
+        .unwrap()
+}
+
+fn d1_3a_sc_session(
+    store: &LifecycleStore,
+    plan_id: &str,
+) -> crate::product::models::WorkspaceSessionRecord {
+    store
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            entity_id: plan_id.to_string(),
+            workspace_type: WorkspaceType::WorkItemPlan,
+            author_provider: ProviderName::Codex,
+            reviewer_provider: None,
+            review_rounds: 1,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+            work_item_plan_options: Some(WorkItemPlanSessionOptions {
+                flow_kind: crate::product::work_item_plan_policy::WorkItemPlanFlowKind::SingleCandidate,
+                run_policy: crate::product::work_item_plan_policy::RunPolicy::Interactive,
+                rollout_snapshot: false,
+            }),
+        })
+        .unwrap()
+}
+
+fn d1_3a_wi(
+    store: &LifecycleStore,
+    id: &str,
+    plan_id: &str,
+) -> crate::product::models::LifecycleWorkItemRecord {
+    store
+        .create_work_item(CreateWorkItemInput {
+            id: Some(id.to_string()),
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            repository_id: REPOSITORY_ID.to_string(),
+            story_spec_ids: Vec::new(),
+            design_spec_ids: Vec::new(),
+            title: "wi".to_string(),
+            work_item_set_id: None,
+            source_work_item_plan_id: Some(plan_id.to_string()),
+            source_outline_id: None,
+            source_draft_id: None,
+            planned_implementation_context: None,
+            kind: crate::product::models::WorkItemKind::Backend,
+            sequence_hint: None,
+            depends_on: Vec::new(),
+            exclusive_write_scopes: Vec::new(),
+            forbidden_write_scopes: Vec::new(),
+            context_budget: Default::default(),
+            verification_plan_ref: None,
+            require_execution_plan_confirm: false,
+            plan_status: crate::product::models::WorkItemPlanStatus::Draft,
+        })
+        .unwrap()
+}
+
+#[test]
+fn cascade_d1_3a_spec_version_and_review_round_late_writes_rejected() {
+    let (_tmp, store) = setup();
+    let story = d1_3a_story(&store);
+    let session = create_session(&store, &story.id, WorkspaceType::Story);
+
+    // 存活实体正常写不受影响。
+    store
+        .append_version(AppendSpecVersionInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            entity_id: story.id.clone(),
+            markdown: "# v1".to_string(),
+            provider_run_refs: Vec::new(),
+            review_refs: Vec::new(),
+            confirmed_by: None,
+        })
+        .expect("live spec version append must succeed");
+
+    let scope = d1_3a_scope(DeletionEntityKind::Story, &story.id);
+    let lease = d1_3a_begin_purge(&store, &scope);
+    let spec_path = store
+        .app_paths()
+        .issue_lifecycle_root(PROJECT_ID, ISSUE_ID)
+        .join("story-specs")
+        .join(format!("{}.json", story.id));
+    let spec_bytes = std::fs::read(&spec_path).unwrap();
+
+    let late_version = AppendSpecVersionInput {
+        project_id: PROJECT_ID.to_string(),
+        issue_id: ISSUE_ID.to_string(),
+        entity_id: story.id.clone(),
+        markdown: "# late".to_string(),
+        provider_run_refs: Vec::new(),
+        review_refs: Vec::new(),
+        confirmed_by: None,
+    };
+    assert!(matches!(
+        store.append_version(late_version.clone()),
+        Err(ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            ..
+        })
+    ));
+    assert!(matches!(
+        store.update_spec_confirmation_status(
+            PROJECT_ID,
+            ISSUE_ID,
+            &story.id,
+            crate::product::models::LifecycleConfirmationStatus::Confirmed
+        ),
+        Err(ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            ..
+        })
+    ));
+    assert!(matches!(
+        store.append_provider_review_round(AppendProviderReviewRoundInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            session_id: session.id.clone(),
+            round_index: 1,
+            author_provider: ProviderName::Codex,
+            reviewer_provider: None,
+            review_result: "ok".to_string(),
+            revision_result: "ok".to_string(),
+        }),
+        Err(ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            ..
+        })
+    ));
+    assert_eq!(std::fs::read(&spec_path).unwrap(), spec_bytes);
+
+    // deleted（完成）后仍稳定拒。
+    d1_3a_complete_purge(&store, lease);
+    assert!(matches!(
+        store.append_version(late_version),
+        Err(ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn cascade_d1_3a_session_message_status_conversations_rejected() {
+    let (_tmp, store) = setup();
+    d1_3a_plan(&store, "issue_work_item_plan_0001", Vec::new());
+    let session = create_session(&store, "issue_work_item_plan_0001", WorkspaceType::WorkItemPlan);
+    store
+        .append_workspace_message(&session.id, "user".to_string(), "live".to_string())
+        .expect("live message append must succeed");
+
+    let scope = d1_3a_scope(DeletionEntityKind::Plan, "issue_work_item_plan_0001");
+    let _lease = d1_3a_begin_purge(&store, &scope);
+    let session_path = store
+        .app_paths()
+        .issue_lifecycle_root(PROJECT_ID, ISSUE_ID)
+        .join("workspace-sessions")
+        .join(format!("{}.json", session.id));
+    let bytes = std::fs::read(&session_path).unwrap();
+
+    assert!(matches!(
+        store.append_workspace_message(&session.id, "user".to_string(), "late".to_string()),
+        Err(ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            ..
+        })
+    ));
+    assert!(matches!(
+        store.replace_workspace_messages(&session.id, Vec::new()),
+        Err(ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            ..
+        })
+    ));
+    assert!(matches!(
+        store.replace_workspace_provider_conversations(&session.id, Vec::new()),
+        Err(ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            ..
+        })
+    ));
+    assert!(matches!(
+        store.update_workspace_session_status(
+            &session.id,
+            crate::product::models::WorkspaceSessionStatus::Terminated
+        ),
+        Err(ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            ..
+        })
+    ));
+    assert!(matches!(
+        store.compare_and_update_workspace_session_status(
+            &session,
+            crate::product::models::WorkspaceSessionStatus::Terminated
+        ),
+        Err(ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            ..
+        })
+    ));
+    assert!(matches!(
+        store.truncate_workspace_session_messages(
+            &session.id,
+            0,
+            crate::product::models::WorkspaceSessionStatus::Open
+        ),
+        Err(ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            ..
+        })
+    ));
+    assert!(matches!(
+        store.claim_provider_start(&session.id, "late_start_key"),
+        Err(ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            ..
+        })
+    ));
+    assert_eq!(std::fs::read(&session_path).unwrap(), bytes);
+}
+
+#[test]
+fn cascade_d1_3a_timeline_detail_artifact_rejected() {
+    let (_tmp, store) = setup();
+    d1_3a_plan(&store, "issue_work_item_plan_0001", Vec::new());
+    let session = create_session(&store, "issue_work_item_plan_0001", WorkspaceType::WorkItemPlan);
+    store
+        .save_timeline_nodes(&session.id, &[])
+        .expect("live timeline save must succeed");
+
+    let scope = d1_3a_scope(DeletionEntityKind::Plan, "issue_work_item_plan_0001");
+    let _lease = d1_3a_begin_purge(&store, &scope);
+    assert!(matches!(
+        store.save_timeline_nodes(&session.id, &[]),
+        Err(ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            ..
+        })
+    ));
+    assert!(matches!(
+        store.save_node_detail(&session.id, "node_0001", &d1_3a_node_detail(&session.id)),
+        Err(ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            ..
+        })
+    ));
+    assert!(matches!(
+        store.append_artifact_version(&session.id, d1_3a_artifact_version()),
+        Err(ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            ..
+        })
+    ));
+    assert!(matches!(
+        store.save_artifact_versions(&session.id, &[]),
+        Err(ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn cascade_d1_3a_sc_cas_late_writes_rejected() {
+    let (_tmp, store) = setup();
+    d1_3a_plan(&store, "issue_work_item_plan_0001", Vec::new());
+    let session = d1_3a_sc_session(&store, "issue_work_item_plan_0001");
+    let expected = store.get_workspace_session(&session.id).unwrap();
+
+    let scope = d1_3a_scope(DeletionEntityKind::Plan, "issue_work_item_plan_0001");
+    let _lease = d1_3a_begin_purge(&store, &scope);
+
+    assert!(matches!(
+        store.compare_and_save_single_candidate_phase(
+            &expected,
+            crate::product::models::SingleCandidatePhase::Generate,
+            crate::product::models::WorkspaceSessionStatus::Running
+        ),
+        Err(ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            ..
+        })
+    ));
+    assert!(matches!(
+        store.compare_and_save_single_candidate_generation(
+            &expected,
+            "project/project_0001/issue/issue_0001/x",
+            "project/project_0001/issue/issue_0001/y"
+        ),
+        Err(ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            ..
+        })
+    ));
+    assert!(matches!(
+        store.reserve_single_candidate_provider_start(&expected, "late_key"),
+        Err(ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            ..
+        })
+    ));
+    assert!(matches!(
+        store.compare_and_save_human_gate_close(
+            &expected,
+            crate::product::models::WorkspaceSessionStatus::Terminated
+        ),
+        Err(ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            ..
+        })
+    ));
+    let turn = crate::product::models::HumanGateTurn {
+        turn_id: "turn_0001".to_string(),
+        session_id: expected.id.clone(),
+        command_id: "command_0001".to_string(),
+        feedback_text: String::new(),
+        status: crate::product::models::HumanGateTurnStatus::Completed,
+        attempt_no: 1,
+        budget_reserved: 1,
+        source_hash: String::new(),
+        result_artifact_ref: None,
+        failure_class: None,
+        created_at: "2026-10-13T00:00:00Z".to_string(),
+        updated_at: "2026-10-13T00:00:00Z".to_string(),
+    };
+    assert!(matches!(
+        store.complete_human_gate_revision(
+            &expected,
+            turn,
+            "project/project_0001/issue/issue_0001/source",
+            "project/project_0001/issue/issue_0001/ir",
+            "project/project_0001/issue/issue_0001/report",
+            &[],
+            "project/project_0001/issue/issue_0001/artifact"
+        ),
+        Err(ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn cascade_d1_3a_scope_lock_taken_and_tombstone_arm_covers_find_delete_race() {
+    use crate::product::coding_attempt_store::locking::register_exact_lock_attempt_hook;
+    use std::time::Duration;
+
+    let (_tmp, store) = setup();
+    d1_3a_plan(&store, "issue_work_item_plan_0001", Vec::new());
+    let session = create_session(&store, "issue_work_item_plan_0001", WorkspaceType::WorkItemPlan);
+
+    let scope = d1_3a_scope(DeletionEntityKind::Plan, "issue_work_item_plan_0001");
+    let scope_lock_path = issue_entity_operations_root(&store.app_paths(), &scope)
+        .unwrap()
+        .join("scope-locks")
+        .join("plan")
+        .join("issue_work_item_plan_0001.lock");
+    std::fs::create_dir_all(scope_lock_path.parent().unwrap()).unwrap();
+    std::fs::File::create(&scope_lock_path).unwrap();
+    let (_hook, attempts) = register_exact_lock_attempt_hook(&scope_lock_path);
+
+    // 存活写：scope 锁真实被取（准入接线存在，非旁路）。
+    store
+        .append_workspace_message(&session.id, "user".to_string(), "live".to_string())
+        .expect("live write must succeed");
+    attempts
+        .recv_timeout(Duration::from_secs(5))
+        .expect("session writer must take the entity scope lock");
+
+    // 「先 find path 后删除再 write」竞态：即便 scope 锁空闲（无争用臂），
+    // 锁内墓碑复核臂必须拒。
+    let lease = d1_3a_begin_purge(&store, &scope);
+    drop(lease);
+    assert!(matches!(
+        store.append_workspace_message(&session.id, "user".to_string(), "late".to_string()),
+        Err(ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn cascade_d1_3a_session_and_entity_ids_never_reused() {
+    let (_tmp, store) = setup();
+    let story = d1_3a_story(&store);
+    d1_3a_plan(&store, "issue_work_item_plan_0001", Vec::new());
+    let first_session =
+        create_session(&store, "issue_work_item_plan_0001", WorkspaceType::WorkItemPlan);
+    // 显式 id 探针：创建即落身份绑定（§0.2 显式身份不跨实体复用）。
+    let probe_id = "workspace_session_d1_3a_probe".to_string();
+    store
+        .create_workspace_session_bound(
+            CreateWorkspaceSessionInput {
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                entity_id: "issue_work_item_plan_0001".to_string(),
+                workspace_type: WorkspaceType::WorkItemPlan,
+                author_provider: ProviderName::Codex,
+                reviewer_provider: None,
+                review_rounds: 1,
+                superpowers_enabled: false,
+                openspec_enabled: false,
+                work_item_plan_options: None,
+            },
+            probe_id.clone(),
+        )
+        .unwrap();
+
+    // 旧删除路径清理文件 + 删除事实完成。
+    store
+        .delete_issue_work_item_plan(PROJECT_ID, ISSUE_ID, "issue_work_item_plan_0001")
+        .unwrap();
+    store.delete_story_spec(PROJECT_ID, ISSUE_ID, &story.id).unwrap();
+    let plan_lease = d1_3a_begin_purge(
+        &store,
+        &d1_3a_scope(DeletionEntityKind::Plan, "issue_work_item_plan_0001"),
+    );
+    d1_3a_complete_purge(&store, plan_lease);
+    let story_lease =
+        d1_3a_begin_purge(&store, &d1_3a_scope(DeletionEntityKind::Story, &story.id));
+    d1_3a_complete_purge(&store, story_lease);
+
+    // 新 session/实体 ID 不复用已删旧 ID。
+    d1_3a_plan(&store, "issue_work_item_plan_0002", Vec::new());
+    let second_session =
+        create_session(&store, "issue_work_item_plan_0002", WorkspaceType::WorkItemPlan);
+    assert_ne!(second_session.id, first_session.id);
+    let new_story = d1_3a_story(&store);
+    assert_ne!(new_story.id, story.id);
+
+    // 显式 id 跨实体复用被身份绑定拒绝。
+    assert!(matches!(
+        store.create_workspace_session_bound(
+            CreateWorkspaceSessionInput {
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                entity_id: "issue_work_item_plan_0002".to_string(),
+                workspace_type: WorkspaceType::WorkItemPlan,
+                author_provider: ProviderName::Codex,
+                reviewer_provider: None,
+                review_rounds: 1,
+                superpowers_enabled: false,
+                openspec_enabled: false,
+                work_item_plan_options: None,
+            },
+            probe_id
+        ),
+        Err(ProductStoreError::Conflict { .. })
+    ));
+}
+
+#[test]
+fn cascade_d1_3a_same_logical_wi_other_plan_preserved_and_late_wi_writes_rejected() {
+    let (_tmp, store) = setup();
+    d1_3a_plan(&store, "issue_work_item_plan_0001", Vec::new());
+    d1_3a_plan(&store, "issue_work_item_plan_0002", Vec::new());
+    let deleted_wi = d1_3a_wi(&store, "work_item_0001", "issue_work_item_plan_0001");
+    let kept_wi = d1_3a_wi(&store, "work_item_0002", "issue_work_item_plan_0002");
+
+    let scope = d1_3a_scope(DeletionEntityKind::Plan, "issue_work_item_plan_0001");
+    let _lease = d1_3a_begin_purge(&store, &scope);
+
+    // 另一 Plan 的同 logical WI 写保留。
+    store
+        .update_work_item_plan_status(
+            PROJECT_ID,
+            ISSUE_ID,
+            &kept_wi.id,
+            crate::product::models::WorkItemPlanStatus::Confirmed,
+        )
+        .expect("other plan work item writes must stay live");
+
+    // 已删 Plan 名下 WI 的迟到写拒。
+    assert!(matches!(
+        store.update_work_item_plan_status(
+            PROJECT_ID,
+            ISSUE_ID,
+            &deleted_wi.id,
+            crate::product::models::WorkItemPlanStatus::Confirmed
+        ),
+        Err(ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            ..
+        })
+    ));
+    assert!(matches!(
+        store.update_work_item_execution_status(
+            PROJECT_ID,
+            ISSUE_ID,
+            &deleted_wi.id,
+            crate::product::models::WorkItemStatus::Completed
+        ),
+        Err(ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            ..
+        })
+    ));
+    assert!(matches!(
+        store.update_work_item_completion_commit(PROJECT_ID, ISSUE_ID, &deleted_wi.id, None),
+        Err(ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            ..
+        })
+    ));
+    let mut compiled = deleted_wi.clone();
+    compiled.title = "late".to_string();
+    assert!(matches!(
+        store.upsert_compiled_work_item_record(compiled),
+        Err(ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            ..
+        })
+    ));
+    assert!(matches!(
+        store.create_verification_plan(CreateVerificationPlanInput {
+            id: None,
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            work_item_id: deleted_wi.id.clone(),
+            repository_profile_ref: None,
+            provider_run_ref: None,
+            scope: crate::product::models::VerificationScope::Unit,
+            commands: Vec::new(),
+            manual_checks: Vec::new(),
+            required_gates: Vec::new(),
+            risk_notes: Vec::new(),
+            confidence: crate::product::models::RepositoryProfileConfidence::Low,
+            fallback_policy: crate::product::models::VerificationFallbackPolicy::ManualGate,
+        }),
+        Err(ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn cascade_d1_3a_incoming_ref_vs_upstream_delete_single_winner() {
+    let (_tmp, store) = setup();
+    let story = d1_3a_story(&store);
+    let story_scope = d1_3a_scope(DeletionEntityKind::Story, &story.id);
+
+    // 顺序 A：上游删除先行 → 新增 incoming ref（新 Plan 引用）被拒，不留半截记录。
+    let lease = d1_3a_begin_purge(&store, &story_scope);
+    drop(lease);
+    assert!(matches!(
+        store.create_issue_work_item_plan(CreateIssueWorkItemPlanInput {
+            id: Some("issue_work_item_plan_0001".to_string()),
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            source_story_spec_ids: vec![story.id.clone()],
+            source_design_spec_ids: Vec::new(),
+            options: d1_3a_plan_options(),
+            status: crate::product::models::IssueWorkItemPlanStatus::Draft,
+            work_item_ids: Vec::new(),
+            repository_profile_ref: None,
+            verification_plan_ids: Vec::new(),
+            dependency_graph: Vec::new(),
+            created_from_provider_run: None,
+            validator_findings: Vec::new(),
+        }),
+        Err(ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            ..
+        })
+    ));
+    assert!(!store
+        .app_paths()
+        .issue_root(PROJECT_ID, ISSUE_ID)
+        .join("issue-work-item-plans")
+        .join("issue_work_item_plan_0001.json")
+        .exists());
+
+    // 顺序 B：写方持上游共享 lease → 关联创建成功、删除被挡（恰一赢家）。
+    let story_two = d1_3a_story(&store);
+    let story_two_scope = d1_3a_scope(DeletionEntityKind::Story, &story_two.id);
+    let run_lease = EntityOperationStore::new(store.app_paths())
+        .acquire_run(&story_two_scope)
+        .expect("writer holds upstream run lease");
+    let plan = store
+        .create_issue_work_item_plan(CreateIssueWorkItemPlanInput {
+            id: Some("issue_work_item_plan_0002".to_string()),
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            source_story_spec_ids: vec![story_two.id.clone()],
+            source_design_spec_ids: Vec::new(),
+            options: d1_3a_plan_options(),
+            status: crate::product::models::IssueWorkItemPlanStatus::Draft,
+            work_item_ids: Vec::new(),
+            repository_profile_ref: None,
+            verification_plan_ids: Vec::new(),
+            dependency_graph: Vec::new(),
+            created_from_provider_run: None,
+            validator_findings: Vec::new(),
+        })
+        .expect("plan creation referencing a live upstream must succeed");
+    assert!(store
+        .get_issue_work_item_plan(PROJECT_ID, ISSUE_ID, &plan.id)
+        .is_ok());
+    assert!(matches!(
+        EntityOperationStore::new(store.app_paths()).try_acquire_delete(&story_two_scope),
+        Err(crate::product::entity_operation_store::EntityOperationError::Busy)
+    ));
+    drop(run_lease);
+}
+
+#[test]
+fn cascade_d1_3a_plan_root_late_writes_rejected() {
+    let (_tmp, store) = setup();
+    let plan = d1_3a_plan(&store, "issue_work_item_plan_0001", Vec::new());
+    store
+        .update_issue_work_item_plan(
+            PROJECT_ID,
+            ISSUE_ID,
+            &plan.id,
+            IssueWorkItemPlanUpdate {
+                work_item_ids: Vec::new(),
+                verification_plan_ids: Vec::new(),
+                repository_profile_ref: None,
+                dependency_graph: Vec::new(),
+                created_from_provider_run: None,
+                validator_findings: Vec::new(),
+            },
+        )
+        .expect("live plan update must succeed");
+
+    let scope = d1_3a_scope(DeletionEntityKind::Plan, "issue_work_item_plan_0001");
+    let _lease = d1_3a_begin_purge(&store, &scope);
+    assert!(matches!(
+        store.update_issue_work_item_plan(
+            PROJECT_ID,
+            ISSUE_ID,
+            &plan.id,
+            IssueWorkItemPlanUpdate {
+                work_item_ids: Vec::new(),
+                verification_plan_ids: Vec::new(),
+                repository_profile_ref: None,
+                dependency_graph: Vec::new(),
+                created_from_provider_run: None,
+                validator_findings: Vec::new(),
+            }
+        ),
+        Err(ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            ..
+        })
+    ));
+    assert!(matches!(
+        store.commit_issue_work_item_plan(
+            PROJECT_ID,
+            ISSUE_ID,
+            &plan.id,
+            IssueWorkItemPlanUpdate {
+                work_item_ids: Vec::new(),
+                verification_plan_ids: Vec::new(),
+                repository_profile_ref: None,
+                dependency_graph: Vec::new(),
+                created_from_provider_run: None,
+                validator_findings: Vec::new(),
+            }
+        ),
+        Err(ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            ..
+        })
+    ));
+    assert!(matches!(
+        store.restore_issue_work_item_plan_snapshot(PROJECT_ID, ISSUE_ID, &plan.id, &plan),
+        Err(ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            ..
+        })
+    ));
+    // 显式 id 复用已删 Plan 身份同样拒绝。
+    assert!(matches!(
+        store.ensure_issue_work_item_plan_with_identity(CreateIssueWorkItemPlanInput {
+            id: Some("issue_work_item_plan_0001".to_string()),
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            source_story_spec_ids: Vec::new(),
+            source_design_spec_ids: Vec::new(),
+            options: d1_3a_plan_options(),
+            status: crate::product::models::IssueWorkItemPlanStatus::Draft,
+            work_item_ids: Vec::new(),
+            repository_profile_ref: None,
+            verification_plan_ids: Vec::new(),
+            dependency_graph: Vec::new(),
+            created_from_provider_run: None,
+            validator_findings: Vec::new(),
+        }),
+        Err(ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            ..
+        })
+    ));
+}
