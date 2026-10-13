@@ -83,7 +83,7 @@ describe("IssueLifecycleWorkbench drawer and work item groups", () => {
     expect(await screen.findByTestId("lifecycle-card-drawer")).toHaveTextContent(
       "实现提示组件",
     );
-    await user.click(within(screen.getByTestId("lifecycle-card-drawer")).getByRole("button", { name: "关闭", exact: true }));
+    await user.click(within(screen.getByTestId("lifecycle-card-drawer")).getByRole("button", { name: /^关闭$/u }));
     expect(screen.queryByTestId("lifecycle-card-drawer")).not.toBeInTheDocument();
     expect(onDrawerFocusChange).toHaveBeenLastCalledWith(null);
   });
