@@ -506,6 +506,7 @@ fn new_split_output_with_ids(
             created_from_provider_run: Some("provider_run_split_0001".to_string()),
             validator_findings: Vec::new(),
             review_summary: None,
+            ever_confirmed: None,
             created_at: "2026-06-17T00:00:00Z".to_string(),
             updated_at: "2026-06-17T00:00:00Z".to_string(),
         },

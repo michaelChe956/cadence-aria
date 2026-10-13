@@ -370,6 +370,8 @@ fn build_revision_provider_output(
         created_from_provider_run: Some(provider_run_ref),
         validator_findings: Vec::new(),
         review_summary: None,
+        // D1.4：候选 parser 内存 record 不把旧未知当新 false；实际 root 创建决定。
+        ever_confirmed: None,
         created_at: String::new(),
         updated_at: String::new(),
     };

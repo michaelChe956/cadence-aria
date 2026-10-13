@@ -325,6 +325,7 @@ async fn complete_work_item_plan_author_pushes_candidate_and_enters_author_confi
         created_from_provider_run: None,
         validator_findings: vec![],
         review_summary: None,
+        ever_confirmed: None,
         created_at: now.clone(),
         updated_at: now.clone(),
     };

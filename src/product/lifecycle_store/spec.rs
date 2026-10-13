@@ -195,6 +195,9 @@ impl LifecycleStore {
             focus_repository_id,
             current_version: None,
             confirmation_status: LifecycleConfirmationStatus::Draft,
+            // D1.4（REQ-DEL-04）：新创建 Some(false)；确凿确认/发布成功在原
+            // write 置 true，回退单调合并；旧记录 None＝历史未知。
+            ever_confirmed: Some(false),
             created_at: now.clone(),
             updated_at: now,
         };
@@ -271,49 +274,51 @@ impl LifecycleStore {
         let project_id = input.project_id.clone();
         let issue_id = input.issue_id.clone();
         self.with_entity_live_writes(&upstream_scopes, move || {
-        let id = self.next_fresh_entity_id(
-            "design_spec",
-            &root,
-            DeletionEntityKind::Design,
-            &project_id,
-            &issue_id,
-        )?;
-        let now = Utc::now().to_rfc3339();
+            let id = self.next_fresh_entity_id(
+                "design_spec",
+                &root,
+                DeletionEntityKind::Design,
+                &project_id,
+                &issue_id,
+            )?;
+            let now = Utc::now().to_rfc3339();
 
-        // 逻辑代码库分支：以聚合视野字段为权威。AI 未明确涉及仓库或涉及不在有效集合的
-        // 仓库 → blocker，不回落 issue.repo_id（REQ-PLN-08）。Draft 时 change_order 可为空；
-        // Confirmed 时 involved > 1 的 Design 必须提供。若给出则全部 id 必须 ∈ involved 且
-        // 不重复。传统单仓 issue（scope = None）聚合字段保持空/None。
-        let (logical_codebase_ref, involved_repository_ids, change_order) =
-            match &input.aggregate_codebase {
-                Some(scope) => {
-                    validate_aggregate_design_scope(scope, LifecycleConfirmationStatus::Draft)?;
-                    (
-                        Some(scope.logical_codebase_ref),
-                        scope.involved_repository_ids.clone(),
-                        scope.change_order.clone(),
-                    )
-                }
-                None => (None, Vec::new(), Vec::new()),
+            // 逻辑代码库分支：以聚合视野字段为权威。AI 未明确涉及仓库或涉及不在有效集合的
+            // 仓库 → blocker，不回落 issue.repo_id（REQ-PLN-08）。Draft 时 change_order 可为空；
+            // Confirmed 时 involved > 1 的 Design 必须提供。若给出则全部 id 必须 ∈ involved 且
+            // 不重复。传统单仓 issue（scope = None）聚合字段保持空/None。
+            let (logical_codebase_ref, involved_repository_ids, change_order) =
+                match &input.aggregate_codebase {
+                    Some(scope) => {
+                        validate_aggregate_design_scope(scope, LifecycleConfirmationStatus::Draft)?;
+                        (
+                            Some(scope.logical_codebase_ref),
+                            scope.involved_repository_ids.clone(),
+                            scope.change_order.clone(),
+                        )
+                    }
+                    None => (None, Vec::new(), Vec::new()),
+                };
+
+            let design = DesignSpecRecord {
+                id: id.clone(),
+                project_id: input.project_id,
+                issue_id: input.issue_id,
+                story_spec_ids: input.story_spec_ids,
+                title: input.title,
+                logical_codebase_ref,
+                involved_repository_ids,
+                change_order,
+                current_version: None,
+                confirmation_status: LifecycleConfirmationStatus::Draft,
+                // D1.4（REQ-DEL-04）：同 Story——新创建 Some(false)，单调只增。
+                ever_confirmed: Some(false),
+                created_at: now.clone(),
+                updated_at: now,
             };
 
-        let design = DesignSpecRecord {
-            id: id.clone(),
-            project_id: input.project_id,
-            issue_id: input.issue_id,
-            story_spec_ids: input.story_spec_ids,
-            title: input.title,
-            logical_codebase_ref,
-            involved_repository_ids,
-            change_order,
-            current_version: None,
-            confirmation_status: LifecycleConfirmationStatus::Draft,
-            created_at: now.clone(),
-            updated_at: now,
-        };
-
-        write_json(&root.join(format!("{id}.json")), &design)?;
-        Ok(design)
+            write_json(&root.join(format!("{id}.json")), &design)?;
+            Ok(design)
         })
     }
 
@@ -366,7 +371,16 @@ impl LifecycleStore {
             Self::spec_entity_scope(kind, &input.project_id, &input.issue_id, &input.entity_id)
         });
         self.with_optional_entity_live_write(scope.as_ref(), move || {
-            let spec = self.load_existing_spec(&input.project_id, &input.issue_id, &input.entity_id)?;
+            let mut spec =
+                self.load_existing_spec(&input.project_id, &input.issue_id, &input.entity_id)?;
+            // D1.4：confirmed_by 版本＝确凿确认证据，同事务把根 ever_confirmed
+            // 单调置 true（§0.2「任何确凿确认/发布成功根写 Some(true)」）。
+            if input.confirmed_by.is_some() {
+                match &mut spec {
+                    ExistingSpecRecord::Story { record, .. } => record.ever_confirmed = Some(true),
+                    ExistingSpecRecord::Design { record, .. } => record.ever_confirmed = Some(true),
+                }
+            }
             let root = self.versions_root(&input.project_id, &input.issue_id, &input.entity_id);
             let versions: Vec<SpecVersionRecord> = list_json_records(&root)?;
             let version = super::next_version_number(&versions)?;
@@ -410,7 +424,8 @@ impl LifecycleStore {
             Self::spec_entity_scope(kind, &input.project_id, &input.issue_id, &input.entity_id)
         });
         self.with_optional_entity_live_write(scope.as_ref(), move || {
-            let versions = self.list_versions(&input.project_id, &input.issue_id, &input.entity_id)?;
+            let versions =
+                self.list_versions(&input.project_id, &input.issue_id, &input.entity_id)?;
             if let Some(latest) = versions
                 .last()
                 .filter(|record| record.markdown.trim() == input.markdown.trim())
@@ -457,7 +472,15 @@ impl LifecycleStore {
                     path,
                     record: mut story,
                 } => {
+                    // D1.4：确认置 true；Confirmed 回退 Draft 单调合并 true；
+                    // 其余保持原值（旧 None 不补字段）。
+                    let confirming = status == LifecycleConfirmationStatus::Confirmed;
+                    let was_confirmed =
+                        story.confirmation_status == LifecycleConfirmationStatus::Confirmed;
                     story.confirmation_status = status;
+                    if confirming || was_confirmed {
+                        story.ever_confirmed = Some(true);
+                    }
                     story.updated_at = updated_at;
                     write_json(&path, &story)
                 }
@@ -465,7 +488,14 @@ impl LifecycleStore {
                     path,
                     record: mut design,
                 } => {
+                    // D1.4：同 Story 分支——确认/曾确认单调置 true。
+                    let confirming = status == LifecycleConfirmationStatus::Confirmed;
+                    let was_confirmed =
+                        design.confirmation_status == LifecycleConfirmationStatus::Confirmed;
                     design.confirmation_status = status;
+                    if confirming || was_confirmed {
+                        design.ever_confirmed = Some(true);
+                    }
                     design.updated_at = updated_at;
                     write_json(&path, &design)
                 }

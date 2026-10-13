@@ -700,6 +700,7 @@ async fn sg_03b_confirm_compile_failure_typed_context_as_protocol_error() {
                 created_from_provider_run: None,
                 validator_findings: Vec::new(),
                 review_summary: None,
+                ever_confirmed: None,
                 created_at: "2026-09-04T00:00:00Z".to_string(),
                 updated_at: "2026-09-04T00:00:00Z".to_string(),
             },

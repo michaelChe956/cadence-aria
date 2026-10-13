@@ -128,6 +128,7 @@ fn sample_plan() -> IssueWorkItemPlan {
         created_from_provider_run: None,
         validator_findings: vec![],
         review_summary: None,
+        ever_confirmed: None,
         created_at: "2026-06-22T10:00:00Z".to_string(),
         updated_at: "2026-06-22T10:00:00Z".to_string(),
     }

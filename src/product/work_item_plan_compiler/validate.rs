@@ -475,6 +475,8 @@ fn project_issue_work_item_plan(
         created_from_provider_run: None,
         validator_findings: Vec::new(),
         review_summary: None,
+        // D1.4：候选投影内存 record；root 持久化由 create_issue_work_item_plan 决定。
+        ever_confirmed: None,
         created_at: context.now.to_string(),
         updated_at: context.now.to_string(),
     }

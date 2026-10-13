@@ -113,6 +113,12 @@ pub struct StorySpecRecord {
     pub focus_repository_id: Option<LogicalRepositoryId>,
     pub current_version: Option<u32>,
     pub confirmation_status: LifecycleConfirmationStatus,
+    /// D1.4（REQ-DEL-04）：单调「曾确凿确认」标记。新创建 Some(false)；任何
+    /// 确凿确认/发布成功在原 write 置 Some(true)；回退/restore 单调合并 true，
+    /// 不改原确认 CAS。旧记录 None＝历史未知（删除分类保守要求确认），
+    /// 再 serialize 不补字段。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ever_confirmed: Option<bool>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -138,6 +144,9 @@ pub struct DesignSpecRecord {
     pub change_order: Vec<LogicalRepositoryId>,
     pub current_version: Option<u32>,
     pub confirmation_status: LifecycleConfirmationStatus,
+    /// D1.4（REQ-DEL-04）：同 [`StorySpecRecord::ever_confirmed`]（单调曾确认标记）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ever_confirmed: Option<bool>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -302,6 +311,30 @@ pub struct IssueWorkItemPlan {
     pub created_from_provider_run: Option<String>,
     pub validator_findings: Vec<WorkItemSplitFinding>,
     pub review_summary: Option<String>,
+    /// D1.4（REQ-DEL-04）：单调「曾确凿确认」标记。root 首次持久由真实创建
+    /// 决定（Draft 创建 Some(false)，直接以 Confirmed 落档 Some(true)）；候选
+    /// parser 的内存 record 保持 None，不把旧未知当新 false；确认/commit 成功
+    /// 在原 write 置 Some(true)；回退/替换/restore 读取当前根单调合并 true，
+    /// 不改原确认 CAS/发布条件。旧记录 None＝历史未知。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ever_confirmed: Option<bool>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// D1.4（REQ-DEL-04）：删除前确认分类的原因。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeletionConfirmationReason {
+    /// 曾确凿确认过（current Confirmed / ever_confirmed=true / 真实发布在档）。
+    PreviouslyConfirmed,
+    /// 旧记录无 ever_confirmed 字段且无确凿证据——历史未知，保守要求确认。
+    LegacyHistoryUnknown,
+}
+
+/// D1.4（REQ-DEL-04）：实体删除前三分类（`classify_entity_deletion_confirmation`）。
+/// 新路径可证未确认（Some(false)）零提示；曾确认/真实发布/旧未知各自恰一次确认。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeletionConfirmation {
+    NotRequired,
+    Required { reason: DeletionConfirmationReason },
 }

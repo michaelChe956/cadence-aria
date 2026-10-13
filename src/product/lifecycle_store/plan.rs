@@ -10,7 +10,8 @@ use crate::product::entity_operation_store::EntityDeletionLease;
 use crate::product::id::next_sequential_id_in_directory;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::models::{
-    IssueWorkItemPlan, IssueWorkItemPlanStatus, LifecycleWorkItemRecord, ProviderName,
+    DeletionConfirmation, DeletionConfirmationReason, IssueWorkItemPlan,
+    IssueWorkItemPlanStatus, LifecycleConfirmationStatus, LifecycleWorkItemRecord, ProviderName,
     ProviderReviewRoundRecord, RepositoryProfile, SpecVersionRecord, VerificationPlan,
     WorkItemPlanLineage, WorkItemPlanStatus, WorkspaceSessionRecord, WorkspaceType,
 };
@@ -19,8 +20,8 @@ use crate::product::work_item_split_engine::WorkItemSplitProviderOutput;
 use super::{
     CreateIssueWorkItemPlanInput, CreateRepositoryProfileInput, CreateVerificationPlanInput,
     CreateWorkItemInput, IssueWorkItemPlanUpdate, LifecycleStore, WorkItemPlanCandidateSnapshot,
-    child_directories, delete_required_file, list_json_records, path_exists, path_is_regular_file,
-    remove_dir_all_if_exists, remove_file_if_exists, validate_relative_ids,
+    child_directories, delete_required_file, json_file_paths, list_json_records, path_exists,
+    path_is_regular_file, remove_dir_all_if_exists, remove_file_if_exists, validate_relative_ids,
 };
 
 impl LifecycleStore {
@@ -90,6 +91,9 @@ impl LifecycleStore {
                 )?,
             };
             let now = Utc::now().to_rfc3339();
+            // D1.4：root 首次持久由真实创建决定——Draft 创建 Some(false)，直接以
+            // Confirmed 落档则已是确凿确认态 Some(true)。
+            let ever_confirmed = Some(matches!(input.status, IssueWorkItemPlanStatus::Confirmed));
             let plan = IssueWorkItemPlan {
                 id: id.clone(),
                 project_id: input.project_id,
@@ -105,6 +109,7 @@ impl LifecycleStore {
                 created_from_provider_run: input.created_from_provider_run,
                 validator_findings: input.validator_findings,
                 review_summary: None,
+                ever_confirmed,
                 created_at: now.clone(),
                 updated_at: now,
             };
@@ -298,6 +303,8 @@ impl LifecycleStore {
 
             let now = Utc::now().to_rfc3339();
             plan.status = IssueWorkItemPlanStatus::Confirmed;
+            // D1.4：确认成功在原 write 单调置 true（不改原确认 CAS/条件）。
+            plan.ever_confirmed = Some(true);
             plan.updated_at = now.clone();
             write_json(
                 &self
@@ -411,7 +418,12 @@ impl LifecycleStore {
             }
 
             let now = Utc::now().to_rfc3339();
+            // D1.4：Confirmed→ChangeRequested 回退，曾确认事实单调合并 true。
+            let was_confirmed = plan.status == IssueWorkItemPlanStatus::Confirmed;
             plan.status = IssueWorkItemPlanStatus::ChangeRequested;
+            if was_confirmed {
+                plan.ever_confirmed = Some(true);
+            }
             plan.updated_at = now.clone();
             write_json(
                 &self
@@ -473,6 +485,8 @@ impl LifecycleStore {
             let mut plan =
                 self.update_issue_work_item_plan(project_id, issue_id, plan_id, update)?;
             plan.status = IssueWorkItemPlanStatus::Confirmed;
+            // D1.4：commit 成功等同确认，在原 write 单调置 true。
+            plan.ever_confirmed = Some(true);
             plan.updated_at = Utc::now().to_rfc3339();
             let path = self
                 .issue_work_item_plans_root(project_id, issue_id)
@@ -502,7 +516,16 @@ impl LifecycleStore {
         }
         let plan_scope = EntityScope::new(project_id, issue_id, DeletionEntityKind::Plan, plan_id);
         self.with_entity_live_write(&plan_scope, move || {
+            // D1.4：restore 读取当前根单调合并（Some(true) 赢；None 吸收
+            // Some(false)），typed 字段不可经 restore/候选替换降级。
+            let current_ever: Option<bool> = read_json_if_exists::<IssueWorkItemPlan>(
+                &self
+                    .issue_work_item_plans_root(project_id, issue_id)
+                    .join(format!("{plan_id}.json")),
+            )?
+            .and_then(|current| current.ever_confirmed);
             let mut plan = snapshot.clone();
+            plan.ever_confirmed = merge_ever_confirmed(current_ever, plan.ever_confirmed);
             plan.updated_at = Utc::now().to_rfc3339();
             let path = self
                 .issue_work_item_plans_root(project_id, issue_id)
@@ -1218,6 +1241,77 @@ impl LifecycleStore {
         Ok(references)
     }
 
+    /// D1.4（REQ-DEL-04，§0.2）：实体删除前三分类。读取真实记录＋versions
+    /// （Story/Design 的 confirmed_by 版本＝确凿确认证据）＋publication（Plan
+    /// 的 `work-item-revision-publications/{plan_id}` 发布日志＝真实发布证据）：
+    /// current Confirmed、ever_confirmed=Some(true) 或真实发布在档 →
+    /// Required(PreviouslyConfirmed)；Some(false) → NotRequired；None 旧记录 →
+    /// Required(LegacyHistoryUnknown)。session 存在不是确认证据（Draft 阶段即有
+    /// session），不参与分类；不回填旧 confirmed_by、不重写旧发布日志。
+    pub fn classify_entity_deletion_confirmation(
+        &self,
+        scope: &EntityScope,
+    ) -> Result<DeletionConfirmation, ProductStoreError> {
+        scope.validate()?;
+        match scope.kind {
+            DeletionEntityKind::Story | DeletionEntityKind::Design => {
+                let (status, ever_confirmed) = match self.load_existing_spec(
+                    &scope.project_id,
+                    &scope.issue_id,
+                    &scope.entity_id,
+                )? {
+                    super::spec::ExistingSpecRecord::Story { record, .. } => {
+                        (record.confirmation_status, record.ever_confirmed)
+                    }
+                    super::spec::ExistingSpecRecord::Design { record, .. } => {
+                        (record.confirmation_status, record.ever_confirmed)
+                    }
+                };
+                let confirmed_version = list_json_records::<SpecVersionRecord>(
+                    &self
+                        .versions_root(&scope.project_id, &scope.issue_id, &scope.entity_id),
+                )?
+                .iter()
+                .any(|version| version.confirmed_by.is_some());
+                if status == LifecycleConfirmationStatus::Confirmed
+                    || ever_confirmed == Some(true)
+                    || confirmed_version
+                {
+                    Ok(d1_4_previously_confirmed())
+                } else if ever_confirmed == Some(false) {
+                    Ok(DeletionConfirmation::NotRequired)
+                } else {
+                    Ok(d1_4_legacy_history_unknown())
+                }
+            }
+            DeletionEntityKind::Plan => {
+                let plan = self.get_issue_work_item_plan(
+                    &scope.project_id,
+                    &scope.issue_id,
+                    &scope.entity_id,
+                )?;
+                let published = !json_file_paths(
+                    &self
+                        .paths
+                        .issue_root(&scope.project_id, &scope.issue_id)
+                        .join("work-item-revision-publications")
+                        .join(&scope.entity_id),
+                )?
+                .is_empty();
+                if plan.status == IssueWorkItemPlanStatus::Confirmed
+                    || plan.ever_confirmed == Some(true)
+                    || published
+                {
+                    Ok(d1_4_previously_confirmed())
+                } else if plan.ever_confirmed == Some(false) {
+                    Ok(DeletionConfirmation::NotRequired)
+                } else {
+                    Ok(d1_4_legacy_history_unknown())
+                }
+            }
+        }
+    }
+
     /// 精准 purge（§0.2/Step 3 依赖序）：review/run/session 审计先于 refs 来源
     /// 记录；advance 闭包（retry→journal→record）由 D1.2c `purge_plan_artifacts`
     /// 提供；owned WI/VP/profile 随后；versions 固定子树按 scope 清；对象缺失
@@ -1450,6 +1544,33 @@ impl LifecycleStore {
             }
         }
         remove_file_if_exists(&path)
+    }
+}
+
+/// D1.4：Required(PreviouslyConfirmed) 分类值。
+fn d1_4_previously_confirmed() -> DeletionConfirmation {
+    DeletionConfirmation::Required {
+        reason: DeletionConfirmationReason::PreviouslyConfirmed,
+    }
+}
+
+/// D1.4：Required(LegacyHistoryUnknown) 分类值。
+fn d1_4_legacy_history_unknown() -> DeletionConfirmation {
+    DeletionConfirmation::Required {
+        reason: DeletionConfirmationReason::LegacyHistoryUnknown,
+    }
+}
+
+/// D1.4：ever_confirmed 单调合并——Some(true) 赢；否则 None（历史未知）吸收
+/// Some(false)（restore/update 不得把「未知」降级成「可证未确认」）；
+/// 双 Some(false) 才保持 Some(false)。
+fn merge_ever_confirmed(current: Option<bool>, incoming: Option<bool>) -> Option<bool> {
+    if current == Some(true) || incoming == Some(true) {
+        Some(true)
+    } else if current.is_none() || incoming.is_none() {
+        None
+    } else {
+        Some(false)
     }
 }
 

@@ -188,6 +188,7 @@ async fn complete_work_item_plan_author_errors_trigger_auto_revision_then_human_
             created_from_provider_run: None,
             validator_findings: vec![],
             review_summary: None,
+            ever_confirmed: None,
             created_at: now.clone(),
             updated_at: now.clone(),
         };

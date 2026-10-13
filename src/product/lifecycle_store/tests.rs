@@ -2845,3 +2845,4 @@ fn cascade_d1_3c_issue_admission_tolerates_backfill_tagged_record() {
     );
 }
 include!("tests/cascade_d1_1.rs");
+include!("tests/cascade_d1_4.rs");

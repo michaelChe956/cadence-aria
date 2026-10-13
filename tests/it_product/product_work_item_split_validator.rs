@@ -79,6 +79,7 @@ fn split_plan(ids: Vec<&str>, edges: Vec<(&str, &str)>) -> IssueWorkItemPlan {
         created_from_provider_run: None,
         validator_findings: Vec::new(),
         review_summary: None,
+        ever_confirmed: None,
         created_at: "2026-06-16T00:00:00Z".to_string(),
         updated_at: "2026-06-16T00:00:00Z".to_string(),
     }
@@ -178,6 +179,7 @@ fn issue_work_item_plan_serializes_options_and_dependency_graph_as_snake_case() 
         created_from_provider_run: Some("provider_run_0001".to_string()),
         validator_findings: Vec::new(),
         review_summary: Some("backend first, frontend second".to_string()),
+        ever_confirmed: None,
         created_at: "2026-06-16T00:00:00Z".to_string(),
         updated_at: "2026-06-16T00:00:00Z".to_string(),
     };
