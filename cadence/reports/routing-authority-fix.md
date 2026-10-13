@@ -36,6 +36,19 @@
 
 干净 HEAD 的 lib test 编译自带 3 处 `PlanCandidateMechanicalReportRecord.structure_report` E0560(tests 先行提交引用 SG3a.0 未落库字段)。仅在 `/tmp/routing-auth-verify/src/product/lifecycle_store/workspace_single_candidate_tests.rs` 本地删 3 行解堵取证,不在 517f18be 中。`web/dist` 从 feat-b 拷入以满足 rust-embed 编译。
 
+## P2 复审修复(2026-10-13 第二轮,commit `6bb1e982`)
+
+**缺陷**:首轮门只判 `repos.json` 存在、不判有无记录。legacy 项目删除最后一仓后 `delete_legacy` 覆写出空 `repos.json` → 门放行 → 迁移执行器零输入 fail-closed → `journal.phase=Failed` 落盘 → 此后全部 RepositoryStore 入口 `Conflict{identity_migration_failed}` 永久锁死(修复前该状态 ensure 返回 Ok,属本 patch 引入的行为收窄)。
+
+**修法**:门条件改为 `legacy_repositories_present(project_id)?`——读并解析 repos.json,`!records.is_empty()` 才迁;解析失败按读路径现语义上抛;空 legacy 布局等同无 legacy 布局,ensure 干净 no-op、零落盘。
+
+**TDD**(隔离树,红先):
+
+- 红 2/2(在 517f18be 上):`empty_repos_json_is_treated_as_no_legacy_layout`(ensure 返回 IdentityMismatch,仓库 API 不可用)、`empty_repos_json_zero_input_never_persists_failed_journal`(Failed journal 落盘)——锁死链精确复刻。
+- 绿 2/2(6bb1e982 后);另补声明外缺口专测 `create_refuses_slot_bootstrap_when_orphan_members_exist`(create 孤儿成员 + 缺 manifest → NotFound fail-closed,不写掩盖性 manifest)。
+
+**回归**(隔离树):核心族+迁移族(repository_store/logical_codebase/issue_delivery/plan_group_projection/migration)597 passed / 0 failed(迁移族 fixture 均写非空 repos.json,无误伤);全量 `--lib` 4502 passed / 1 failed(仅 campaign_stage3,干净 HEAD 基线同败,SG3a.0 在途面)。
+
 ## 后续(交 controller,顺序敏感)
 
 数据清理按诊断 d 节步骤执行(前置:先部署含 517f18be 的二进制再清数据,否则首次页面刷新复发)。
