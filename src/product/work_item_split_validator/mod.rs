@@ -16,6 +16,7 @@ use crate::product::models::{
     WorkItemKind, WorkItemOutline, WorkItemOutlineSessionFit, WorkItemPlanOutline,
     WorkItemSplitFinding, WorkItemSplitFindingSeverity,
 };
+use crate::product::planning_failure::PlanningFailureKind;
 
 pub use types::{
     WorkItemDraftLocalValidator, WorkItemPlanOutlineValidator, WorkItemSplitValidationReport,

@@ -9,7 +9,11 @@ pub(crate) fn validate_plan_membership(
 
     for item in work_items {
         if !plan_ids.contains(item.id.as_str()) {
+            // F2b：成员/依赖引用缺口缺封闭 L1 kind 事实，折叠 Unknown。
             findings.push(error(
+                PlanningFailureKind::Unknown {
+                    code: "work_item_not_in_plan".to_string(),
+                },
                 "work_item_not_in_plan",
                 format!(
                     "work item {} is not listed in IssueWorkItemPlan.work_item_ids",
@@ -38,6 +42,9 @@ pub(crate) fn validate_dependencies(
         for dep in &item.depends_on {
             if !plan_ids.contains(dep.as_str()) {
                 findings.push(error(
+                    PlanningFailureKind::Unknown {
+                        code: "dependency_not_in_plan".to_string(),
+                    },
                     "dependency_not_in_plan",
                     format!(
                         "work item {} depends on {} which is not in IssueWorkItemPlan.work_item_ids",
@@ -56,6 +63,9 @@ pub(crate) fn validate_dependencies(
     for edge in &plan.dependency_graph {
         if !plan_ids.contains(edge.from_work_item_id.as_str()) {
             findings.push(error(
+                PlanningFailureKind::Unknown {
+                    code: "dependency_not_in_plan".to_string(),
+                },
                 "dependency_not_in_plan",
                 format!(
                     "dependency graph references from_work_item_id {} which is not in plan",
@@ -66,6 +76,9 @@ pub(crate) fn validate_dependencies(
         }
         if !plan_ids.contains(edge.to_work_item_id.as_str()) {
             findings.push(error(
+                PlanningFailureKind::Unknown {
+                    code: "dependency_not_in_plan".to_string(),
+                },
                 "dependency_not_in_plan",
                 format!(
                     "dependency graph references to_work_item_id {} which is not in plan",
@@ -85,6 +98,9 @@ pub(crate) fn validate_dependencies(
     mismatched_edges.sort();
     for edge in mismatched_edges {
         findings.push(error(
+            PlanningFailureKind::Unknown {
+                code: "dependency_graph_mismatch".to_string(),
+            },
             "dependency_graph_mismatch",
             format!(
                 "dependency graph mismatch: edge {} -> {} differs between IssueWorkItemPlan.dependency_graph and work_item.depends_on",
@@ -146,7 +162,13 @@ pub(crate) fn validate_dependencies(
     }
 
     if cycle_found {
+        // F2b：derived 图 DFS 只给布尔事实，不是有效图有向 witness
+        // （REQ-PLN-10），不编造 DependencyCycle typed payload；真实
+        // witness 归 SG1 有效图。
         findings.push(error(
+            PlanningFailureKind::Unknown {
+                code: "dependency_cycle".to_string(),
+            },
             "dependency_cycle",
             "dependency graph derived from work_item.depends_on contains a cycle",
             Vec::new(),
@@ -193,6 +215,9 @@ fn validate_scope_conflicts(
                 true,
             ) {
                 findings.push(error(
+                    PlanningFailureKind::Unknown {
+                        code: "parallel_scope_overlap".to_string(),
+                    },
                     "parallel_scope_overlap",
                     format!(
                         "work items {} and {} have no dependency ordering but their write scopes overlap",
@@ -218,6 +243,9 @@ pub(crate) fn validate_scopes_and_budgets(
     for item in work_items {
         if item.exclusive_write_scopes.is_empty() {
             findings.push(error(
+                PlanningFailureKind::Unknown {
+                    code: "write_scope_required".to_string(),
+                },
                 "write_scope_required",
                 format!(
                     "work item {} must have at least one exclusive_write_scope",
@@ -234,6 +262,9 @@ pub(crate) fn validate_scopes_and_budgets(
             || budget.max_traceability_refs > MAX_TRACEABILITY_REFS
         {
             findings.push(error(
+                PlanningFailureKind::Unknown {
+                    code: "context_budget_over_limit".to_string(),
+                },
                 "context_budget_over_limit",
                 format!("work item {} context budget exceeds proxy limits", item.id),
                 vec![item.id.clone()],
@@ -263,6 +294,9 @@ pub(crate) fn validate_semantics(
 
         if item.story_spec_ids.is_empty() || item.design_spec_ids.is_empty() {
             findings.push(error(
+                PlanningFailureKind::Unknown {
+                    code: "traceability_refs_required".to_string(),
+                },
                 "traceability_refs_required",
                 format!(
                     "work item {} must reference at least one story spec and one design spec",
@@ -273,8 +307,14 @@ pub(crate) fn validate_semantics(
         }
     }
 
+    // F2b（REQ-SG-02）：options×items 预检缺口携已确认 options 的业务事实，
+    // 是业务/结构混合裁决——折叠 Unknown 不免费 L1，机器不得替用户开关
+    // 已确认 options（原 options 权限不变，业务门保留）。
     if plan.options.force_frontend_backend_split && (!has_backend || !has_frontend) {
         findings.push(error(
+            PlanningFailureKind::Unknown {
+                code: "frontend_backend_split_required".to_string(),
+            },
             "frontend_backend_split_required",
             format!(
                 "force_frontend_backend_split is enabled but the plan does not contain both a backend and a frontend work item；修复动作：{FRONTEND_BACKEND_SPLIT_REQUIRED_REPAIR_ACTION}"
@@ -285,6 +325,9 @@ pub(crate) fn validate_semantics(
 
     if plan.options.include_integration_tests && !has_integration {
         findings.push(error(
+            PlanningFailureKind::Unknown {
+                code: "integration_work_item_required".to_string(),
+            },
             "integration_work_item_required",
             format!(
                 "include_integration_tests is enabled but the plan does not contain an integration work item；修复动作：{INTEGRATION_WORK_ITEM_REQUIRED_REPAIR_ACTION}"
@@ -295,6 +338,9 @@ pub(crate) fn validate_semantics(
 
     if plan.options.include_e2e_tests && !has_e2e {
         findings.push(error(
+            PlanningFailureKind::Unknown {
+                code: "e2e_work_item_required".to_string(),
+            },
             "e2e_work_item_required",
             format!(
                 "include_e2e_tests is enabled but the plan does not contain an e2e work item；修复动作：{E2E_WORK_ITEM_REQUIRED_REPAIR_ACTION}"
@@ -305,6 +351,9 @@ pub(crate) fn validate_semantics(
 
     if !plan.options.include_integration_tests {
         findings.push(warning(
+            PlanningFailureKind::Unknown {
+                code: "integration_or_e2e_skipped_risk".to_string(),
+            },
             "integration_or_e2e_skipped_risk",
             "integration tests are skipped; consider adding manual verification before acceptance",
             Vec::new(),
@@ -313,6 +362,9 @@ pub(crate) fn validate_semantics(
 
     if !plan.options.include_e2e_tests {
         findings.push(warning(
+            PlanningFailureKind::Unknown {
+                code: "integration_or_e2e_skipped_risk".to_string(),
+            },
             "integration_or_e2e_skipped_risk",
             "e2e tests are skipped; consider adding manual verification before acceptance",
             Vec::new(),
@@ -332,6 +384,9 @@ pub(crate) fn validate_verification_plans(
             Some(profile) if &profile.id == profile_ref => {}
             _ => {
                 findings.push(error(
+                    PlanningFailureKind::Unknown {
+                        code: "repository_profile_missing".to_string(),
+                    },
                     "repository_profile_missing",
                     format!(
                         "IssueWorkItemPlan references repository profile {} but it was not provided",
@@ -347,6 +402,9 @@ pub(crate) fn validate_verification_plans(
         && profile.confidence == RepositoryProfileConfidence::Low
     {
         findings.push(warning(
+            PlanningFailureKind::Unknown {
+                code: "repository_profile_low_confidence".to_string(),
+            },
             "repository_profile_low_confidence",
             "repository profile confidence is low; verification commands require manual gate or provider repair",
             Vec::new(),
@@ -366,6 +424,9 @@ pub(crate) fn validate_verification_plans(
     for item in work_items {
         let Some(plan_ref) = &item.verification_plan_ref else {
             findings.push(error(
+                PlanningFailureKind::Unknown {
+                    code: "verification_plan_missing".to_string(),
+                },
                 "verification_plan_missing",
                 format!(
                     "work item {} does not reference a verification plan",
@@ -378,6 +439,9 @@ pub(crate) fn validate_verification_plans(
 
         let Some(verification) = plan_by_id.get(plan_ref.as_str()) else {
             findings.push(error(
+                PlanningFailureKind::Unknown {
+                    code: "verification_plan_missing".to_string(),
+                },
                 "verification_plan_missing",
                 format!(
                     "work item {} references verification plan {} which was not provided",
@@ -393,6 +457,9 @@ pub(crate) fn validate_verification_plans(
             || verification.work_item_id != item.id
         {
             findings.push(error(
+                PlanningFailureKind::Unknown {
+                    code: "verification_plan_mismatch".to_string(),
+                },
                 "verification_plan_mismatch",
                 format!(
                     "verification plan {} does not match project/issue/work_item for work item {}",
@@ -412,6 +479,9 @@ pub(crate) fn validate_verification_plans(
         .collect();
     if declared_plan_ids != available_plan_ids {
         findings.push(error(
+            PlanningFailureKind::Unknown {
+                code: "verification_plan_mismatch".to_string(),
+            },
             "verification_plan_mismatch",
             "IssueWorkItemPlan.verification_plan_ids does not match the provided verification plans",
             Vec::new(),
@@ -438,7 +508,13 @@ fn validate_verification_commands(
 
     for command in &verification.commands {
         if command.source != VerificationCommandSource::Provider {
+            // F2b（REQ-SG-05）：命令来源/路径/安全是 security operational
+            // 分支——沿原安全等待/人工门恢复，不借 L1 启动 author。
             findings.push(error(
+                PlanningFailureKind::Operational {
+                    stable_code: "verification_command_source_invalid".to_string(),
+                    cause: "verification command source is not provider".to_string(),
+                },
                 "verification_command_source_invalid",
                 format!(
                     "verification command {} for work item {} has an invalid source; only provider sources are allowed",
@@ -450,6 +526,10 @@ fn validate_verification_commands(
 
         if !is_cwd_inside_repository(&command.cwd) {
             findings.push(error(
+                PlanningFailureKind::Operational {
+                    stable_code: "verification_command_cwd_outside_repository".to_string(),
+                    cause: "verification command cwd escapes the repository root".to_string(),
+                },
                 "verification_command_cwd_outside_repository",
                 format!(
                     "verification command {} for work item {} has cwd {} outside the repository",
@@ -461,6 +541,11 @@ fn validate_verification_commands(
 
         if command.safety == VerificationCommandSafety::NeedsManualReview && command.required {
             findings.push(warning(
+                PlanningFailureKind::Operational {
+                    stable_code: "verification_command_needs_manual_review".to_string(),
+                    cause: "required verification command safety is pending manual review"
+                        .to_string(),
+                },
                 "verification_command_needs_manual_review",
                 format!(
                     "required verification command {} for work item {} requires manual review",
@@ -472,6 +557,10 @@ fn validate_verification_commands(
 
         if is_command_unsafe(&command.command) {
             findings.push(error(
+                PlanningFailureKind::Operational {
+                    stable_code: "verification_command_unsafe".to_string(),
+                    cause: "verification command matches the unsafe command deny list".to_string(),
+                },
                 "verification_command_unsafe",
                 format!(
                     "verification command {} for work item {} is unsafe: {}",
@@ -485,6 +574,9 @@ fn validate_verification_commands(
     for gate_id in &verification.required_gates {
         if !available_gate_ids.contains(gate_id.as_str()) {
             findings.push(error(
+                PlanningFailureKind::Unknown {
+                    code: "verification_gate_missing".to_string(),
+                },
                 "verification_gate_missing",
                 format!(
                     "verification plan {} requires gate {} which is not defined as a command or manual check",

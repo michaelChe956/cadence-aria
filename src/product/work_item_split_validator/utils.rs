@@ -1,34 +1,37 @@
 use super::*;
 
 pub(crate) fn error(
+    kind: PlanningFailureKind,
     code: &str,
     message: impl Into<String>,
     work_item_ids: Vec<String>,
 ) -> WorkItemSplitFinding {
-    // F1.2（REQ-SG-01/02/02A）：旧三参签名保持不变，恒写 kind=None
-    //（None 按 Unknown 投影，不产生 L1 自动资格）；显式 kind 工厂与全
-    // caller 清切归 F2b，本包不得从 code/message 推导 kind。
+    // F2b（REQ-SG-01/02/02A）：显式 typed 工厂——kind 由调用 producer 的
+    // 具体失败分支给出（canonical 传递 / 供需三元 ID / security operational /
+    // 缺事实折叠 Unknown），不从 code/message 反推；原 stable code 保持。
+    // 旧三参签名与 kind=None 兼容层已删除，无 shim（plan 接地 P2-1）。
     WorkItemSplitFinding {
         severity: WorkItemSplitFindingSeverity::Error,
         code: code.to_string(),
         message: message.into(),
         work_item_ids,
-        kind: None,
+        kind: Some(kind),
     }
 }
 
 pub(crate) fn warning(
+    kind: PlanningFailureKind,
     code: &str,
     message: impl Into<String>,
     work_item_ids: Vec<String>,
 ) -> WorkItemSplitFinding {
-    // F1.2：同 error——旧三参签名不变，恒写 kind=None。
+    // F2b：同 error——warning 也携带显式 kind；advisory 语义不变。
     WorkItemSplitFinding {
         severity: WorkItemSplitFindingSeverity::Warning,
         code: code.to_string(),
         message: message.into(),
         work_item_ids,
-        kind: None,
+        kind: Some(kind),
     }
 }
 

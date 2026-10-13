@@ -275,11 +275,12 @@ pub struct WorkItemSplitFinding {
     pub code: String,
     pub message: String,
     pub work_item_ids: Vec<String>,
-    /// F1.2（REQ-SG-01/02/02A）：可选 typed 失败 payload。旧 JSON 无该字段
-    /// 解析为 None（按 Unknown 投影，绝不产生 L1 自动资格，也不得反推
-    /// kind）；仅确定性 producer 显式写入，不从 code/message/severity 推导。
-    /// `work_item_split_validator::utils` 的 error/warning 旧三参签名恒写
-    /// None；显式 kind 工厂与全 caller 清切归 F2b。
+    /// F1.2/F2b（REQ-SG-01/02/02A）：可选 typed 失败 payload。旧 JSON 无该
+    /// 字段解析为 None（按 Unknown 投影，绝不产生 L1 自动资格，也不得反推
+    /// kind）；F2b 起 split 预检 producer 经 `utils::error/warning` 显式
+    /// kind 工厂写入（canonical 传递 / 供需三元 ID / security operational /
+    /// 缺事实折叠 Unknown），不从 code/message/severity 推导，旧三参签名
+    /// 无 shim 残留。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<crate::product::planning_failure::PlanningFailureKind>,
 }

@@ -21,8 +21,9 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 /// typed 结构失败 payload 的封闭 enum。kind 携带判定所需的全部机器事实；
-/// 每个变体由确定性 producer（F1.2 compiler、F2a canonical、F2c projection、
-/// SG1 有效图、SG4A 防回归）显式构造，旧 wire 记录只能折叠为 `Unknown`。
+/// 每个变体由确定性 producer（F1.2 compiler、F2a canonical、F2b split/
+/// preflight、F2c projection、SG1 有效图、SG4A 防回归）显式构造，旧 wire
+/// 记录只能折叠为 `Unknown`。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PlanningFailureKind {
