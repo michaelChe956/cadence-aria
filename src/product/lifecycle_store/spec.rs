@@ -402,17 +402,26 @@ impl LifecycleStore {
         &self,
         input: AppendSpecVersionInput,
     ) -> Result<SpecVersionRecord, ProductStoreError> {
-        let versions = self.list_versions(&input.project_id, &input.issue_id, &input.entity_id)?;
-        if let Some(latest) = versions
-            .last()
-            .filter(|record| record.markdown.trim() == input.markdown.trim())
-        {
-            let spec =
-                self.load_existing_spec(&input.project_id, &input.issue_id, &input.entity_id)?;
-            self.update_spec_current_version(spec, latest.version, Utc::now().to_rfc3339())?;
-            return Ok(latest.clone());
-        }
-        self.append_version(input)
+        // D1.3a P2 修复轮：幂等分支（load_existing_spec→update_spec_current_version
+        // →write_json）与 append 分支同接 scope 准入；墓碑在位时按删除事实拒，
+        // 不得把已删 Story/Design 根文件重新落盘（REQ-DEL-03）。
+        let kind = self.existing_spec_kind(&input.project_id, &input.issue_id, &input.entity_id)?;
+        let scope = kind.map(|kind| {
+            Self::spec_entity_scope(kind, &input.project_id, &input.issue_id, &input.entity_id)
+        });
+        self.with_optional_entity_live_write(scope.as_ref(), move || {
+            let versions = self.list_versions(&input.project_id, &input.issue_id, &input.entity_id)?;
+            if let Some(latest) = versions
+                .last()
+                .filter(|record| record.markdown.trim() == input.markdown.trim())
+            {
+                let spec =
+                    self.load_existing_spec(&input.project_id, &input.issue_id, &input.entity_id)?;
+                self.update_spec_current_version(spec, latest.version, Utc::now().to_rfc3339())?;
+                return Ok(latest.clone());
+            }
+            self.append_version(input)
+        })
     }
 
     pub fn list_versions(

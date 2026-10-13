@@ -1570,3 +1570,54 @@ fn cascade_d1_3a_plan_root_late_writes_rejected() {
         })
     ));
 }
+
+#[test]
+fn cascade_d1_3a_ensure_version_idempotent_write_rejected_when_deleted() {
+    use crate::product::coding_attempt_store::locking::register_exact_lock_attempt_hook;
+    use std::time::Duration;
+
+    let (_tmp, store) = setup();
+    let story = d1_3a_story(&store);
+    let idempotent_input = || AppendSpecVersionInput {
+        project_id: PROJECT_ID.to_string(),
+        issue_id: ISSUE_ID.to_string(),
+        entity_id: story.id.clone(),
+        markdown: "# same".to_string(),
+        provider_run_refs: Vec::new(),
+        review_refs: Vec::new(),
+        confirmed_by: None,
+    };
+    let version = store
+        .append_version(idempotent_input())
+        .expect("live append must succeed");
+
+    // 存活幂等重放：scope 锁真实被取（接线存在，非旁路）。
+    let scope = d1_3a_scope(DeletionEntityKind::Story, &story.id);
+    let scope_lock_path = issue_entity_operations_root(&store.app_paths(), &scope)
+        .unwrap()
+        .join("scope-locks")
+        .join("story")
+        .join(format!("{}.lock", story.id));
+    std::fs::create_dir_all(scope_lock_path.parent().unwrap()).unwrap();
+    std::fs::File::create(&scope_lock_path).unwrap();
+    let (_hook, attempts) = register_exact_lock_attempt_hook(&scope_lock_path);
+    let replayed = store
+        .ensure_version(idempotent_input())
+        .expect("live idempotent replay must succeed");
+    assert_eq!(replayed.version, version.version);
+    attempts
+        .recv_timeout(Duration::from_secs(5))
+        .expect("ensure_version must take the entity scope lock");
+
+    // purging（墓碑在位、scope 锁空闲）下幂等分支写必须按删除事实拒，
+    // 不得把已删 Story/Design 根文件重新落盘（REQ-DEL-03）。
+    let lease = d1_3a_begin_purge(&store, &scope);
+    drop(lease);
+    assert!(matches!(
+        store.ensure_version(idempotent_input()),
+        Err(ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            ..
+        })
+    ));
+}
