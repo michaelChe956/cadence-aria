@@ -6,11 +6,11 @@
 const TEST_SINGLE_CANDIDATE_LANGUAGE_RULES: &str =
     "## 语言规则\n\n- **必须使用中文** - 所有响应、解释、注释和文档必须使用中文。\n";
 
-
 const ANTI_PREAMBLE_LINE: &str =
     "禁止任何前言、寒暄、说明性开场或路由回执；输出的第一个字符必须是文档标题。";
 
-fn anti_preamble_context() -> crate::product::work_item_split_engine::prompts::WorkItemPlanMarkdownAuthorContext<'static> {
+fn anti_preamble_context()
+-> crate::product::work_item_split_engine::prompts::WorkItemPlanMarkdownAuthorContext<'static> {
     crate::product::work_item_split_engine::prompts::WorkItemPlanMarkdownAuthorContext {
         story_context: "story_spec_0001: level selection",
         design_context: "design_spec_0001: levels API",
@@ -19,6 +19,8 @@ fn anti_preamble_context() -> crate::product::work_item_split_engine::prompts::W
         language_rules: TEST_SINGLE_CANDIDATE_LANGUAGE_RULES,
         plan_options: &TEST_ALL_FALSE_PLAN_OPTIONS,
         routing_context: &RoutingReferenceContext::Legacy,
+        member_targets: None,
+        change_order: &[],
     }
 }
 
@@ -50,7 +52,9 @@ fn sc_author_prompt_carries_anti_preamble_line_right_before_output_directive() {
 
     // 既有教学段不删不改：[output] 指令仍逐字节居尾，共享尾部指令保持唯一。
     assert_eq!(
-        prompt.matches("[output] 现在仅输出完整 markdown source。").count(),
+        prompt
+            .matches("[output] 现在仅输出完整 markdown source。")
+            .count(),
         1
     );
     assert!(prompt.ends_with("[output] 现在仅输出完整 markdown source。"));

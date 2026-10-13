@@ -1,9 +1,11 @@
 //! SC author prompt 固定教学面：markdown grammar、交叉引用纪律、弱模型精度
-//! 教学、最小合法源与 options 镜像/AC 基线纪律。自 prompts.rs 拆出以守
-//! 1200 行文件守护（先例：prompts/sc_revision.rs、conversational_gate 拆
-//! story_terminate.rs）。内容零改动，纯移动。
+//! 教学、最小合法源、options 镜像/AC 基线纪律与已确认成员/仓序教学
+//! （SG5.1）。自 prompts.rs 拆出以守 1200 行文件守护（先例：
+//! prompts/sc_revision.rs、conversational_gate 拆 story_terminate.rs）。
 
 use super::IssueWorkItemPlanOptions;
+use crate::product::logical_codebase::LogicalRepositoryId;
+use crate::product::work_item_plan_compiler::PlanMemberTargets;
 use crate::product::work_item_plan_compiler::grammar;
 use crate::product::work_item_split_validator::{
     E2E_WORK_ITEM_REQUIRED_REPAIR_ACTION, FRONTEND_BACKEND_SPLIT_REQUIRED_REPAIR_ACTION,
@@ -195,4 +197,60 @@ pub(crate) fn work_item_plan_option_mirror_teaching(options: &IssueWorkItemPlanO
          {}\n\n",
         lines.join("\n")
     )
+}
+
+/// SG5.1（REQ-CG-03、REQ-SG-02）：SC author prompt 的已确认成员/仓序教学
+/// ——初轮与修订轮共享同源（修订 prompt 以首轮为逐字节前缀，自动继承）。
+///
+/// 数据单源：成员表=compile member targets（logical UUID → 物理成员仓 ID）、
+/// 仓序=confirmed design change_order；本段不另立白名单——成员归属合法值
+/// 即上列已确认事实，grammar 值域/WI 合法 ID 仍由
+/// `work_item_plan_markdown_grammar` 单源注入，仓序自动边规则与编译器
+/// （`compile_support::apply_change_order_cross_repo_depends_on`）同一条
+/// 规则源。`member_targets=None`（legacy 单仓）返回空串：首轮 prompt
+/// 逐字节不变，`WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES`
+/// 预算不扩大。Plan Intent 保持可选 section，本段不新增任何创建/入站授权。
+pub(crate) fn work_item_plan_confirmed_member_order_teaching(
+    member_targets: Option<&PlanMemberTargets>,
+    change_order: &[LogicalRepositoryId],
+) -> String {
+    let Some(members) = member_targets else {
+        return String::new();
+    };
+    if members.physical_by_logical.is_empty() {
+        return String::new();
+    }
+    let mut lines = String::new();
+    lines.push_str("[confirmed_member_order]\n");
+    lines.push_str(
+        "已确认成员仓（Plan Intent 成员归属的唯一合法值域，逐字取用，禁止编造或改写）：\n",
+    );
+    for (logical, physical) in &members.physical_by_logical {
+        lines.push_str(&format!(
+            "- logical_repository: {} → physical_repository: {physical}\n",
+            logical.0
+        ));
+    }
+    if change_order.is_empty() {
+        lines.push_str(
+            "仓级执行顺序（change_order）：无已确认仓序——本计划无仓序自动边，跨仓依赖仅由 depends_on 与 Inputs 契约显式声明，不得虚构先后顺序。\n",
+        );
+    } else {
+        lines.push_str("仓级执行顺序（change_order，先执行 → 后执行）：\n");
+        for (index, logical) in change_order.iter().enumerate() {
+            match members.physical_by_logical.get(logical) {
+                Some(physical) => {
+                    lines.push_str(&format!("{}. {}（{physical}）\n", index + 1, logical.0))
+                }
+                None => lines.push_str(&format!("{}. {}\n", index + 1, logical.0)),
+            }
+        }
+    }
+    lines.push_str(
+        "仓序自动边规则（与编译器仓序规则同源）：仓序在前的成员仓 Work Item 是仓序在后成员仓 Work Item 的依赖前置——后仓 WI 消费前仓产出时，Inputs 的 provider_logical_work_item_id 逐字填前仓 WI 在本计划 `## Work Item` 标题中的 `WI-<数字>`；同一成员仓内的 WI 之间无仓序自动边，同仓顺序仅由 depends_on 显式声明；跨仓依赖逆写仓序（后仓 WI 作为前仓 WI 的 provider）会构成 dependency_cycle，整份计划拒绝。\n",
+    );
+    lines.push_str(
+        "成员归属纪律：intent_target_kind=logical_codebase 时 intent_target_logical_repo 只能逐字取上列成员 logical UUID；intent_target_kind=single_repository 时 intent_target_repo 只能逐字取上列物理成员仓 ID；会话根仓/聚合根视图 ID 不得替代业务成员 target（→ work_item_target_missing 拒绝）。Plan Intent 仍为可选 section——本段不改变其可选性，也不新增任何创建/入站授权。\n\n",
+    );
+    lines
 }

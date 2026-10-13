@@ -802,6 +802,8 @@ fn work_item_plan_markdown_prompt_keeps_cross_reference_discipline_when_design_l
                 language_rules: TEST_SINGLE_CANDIDATE_LANGUAGE_RULES,
                 plan_options: &TEST_ALL_FALSE_PLAN_OPTIONS,
                 routing_context: &RoutingReferenceContext::Legacy,
+                member_targets: None,
+                change_order: &[],
             },
         )
         .expect("markdown author prompt");
@@ -841,6 +843,8 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
                 language_rules: TEST_SINGLE_CANDIDATE_LANGUAGE_RULES,
                 plan_options: &TEST_ALL_FALSE_PLAN_OPTIONS,
                 routing_context: &RoutingReferenceContext::Legacy,
+                member_targets: None,
+                change_order: &[],
             },
         )
         .expect("markdown author prompt");
@@ -1065,6 +1069,8 @@ fn sc_author_handoff_teaches_outputs_and_provided_refs_scopes() {
                 language_rules: TEST_SINGLE_CANDIDATE_LANGUAGE_RULES,
                 plan_options: &TEST_ALL_FALSE_PLAN_OPTIONS,
                 routing_context: &RoutingReferenceContext::Legacy,
+                member_targets: None,
+                change_order: &[],
             },
         )
         .expect("markdown author prompt");
@@ -1107,6 +1113,8 @@ fn sc_author_prompt_tail_clamps_heading_language_and_raises_budget() {
                 language_rules: TEST_SINGLE_CANDIDATE_LANGUAGE_RULES,
                 plan_options: &TEST_ALL_FALSE_PLAN_OPTIONS,
                 routing_context: &RoutingReferenceContext::Legacy,
+                member_targets: None,
+                change_order: &[],
             },
         )
         .expect("markdown author prompt");

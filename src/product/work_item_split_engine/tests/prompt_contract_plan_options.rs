@@ -25,9 +25,7 @@ fn all_false_plan_options() -> crate::product::models::IssueWorkItemPlanOptions 
     }
 }
 
-fn plan_options_prompt(
-    options: &crate::product::models::IssueWorkItemPlanOptions,
-) -> String {
+fn plan_options_prompt(options: &crate::product::models::IssueWorkItemPlanOptions) -> String {
     let (request, issue, repository) = split_prompt_fixture();
     crate::product::work_item_split_engine::prompts::build_work_item_plan_markdown_prompt(
         &request,
@@ -41,6 +39,8 @@ fn plan_options_prompt(
             language_rules: PLAN_OPTIONS_TEST_LANGUAGE_RULES,
             plan_options: options,
             routing_context: &RoutingReferenceContext::Legacy,
+            member_targets: None,
+            change_order: &[],
         },
     )
     .expect("markdown author prompt")
@@ -75,7 +75,9 @@ fn sc_author_prompt_mirrors_enabled_plan_options_with_verbatim_repair_actions() 
         );
     }
 
-    let few_shot_pos = prompt.find("[real_finding_few_shot]").expect("few-shot marker");
+    let few_shot_pos = prompt
+        .find("[real_finding_few_shot]")
+        .expect("few-shot marker");
     let mirror_pos = prompt.find("[plan_options_mirror]").expect("mirror marker");
     let clamp_pos = prompt.find("[format_clamp]").expect("format clamp marker");
     assert!(

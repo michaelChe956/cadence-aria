@@ -6,15 +6,12 @@
 
 /// 最小 prompt 夹具（对齐 work_item_split_engine tests 的 split_prompt_fixture
 /// 形状；本模块自持，不跨测试树取依赖）。
-fn anchor_t17_prompt_fixture()
--> (
+fn anchor_t17_prompt_fixture() -> (
     crate::web::types::GenerateWorkItemsRequest,
     crate::product::models::IssueRecord,
     crate::product::models::RepositoryRecord,
 ) {
-    use crate::product::models::{
-        IssuePhase, IssueRecord, IssueStatus, RepositoryRecord,
-    };
+    use crate::product::models::{IssuePhase, IssueRecord, IssueStatus, RepositoryRecord};
     use crate::web::types::GenerateWorkItemsRequest;
     let request = GenerateWorkItemsRequest {
         title: "test plan".to_string(),
@@ -66,8 +63,7 @@ fn anchor_t17_prompt_fixture()
 
 /// t17 author context（静态材料；两次构造供 fresh/ordinary 各自消费）。
 fn anchor_t17_author_context()
--> crate::product::work_item_split_engine::prompts::WorkItemPlanMarkdownAuthorContext<'static>
-{
+-> crate::product::work_item_split_engine::prompts::WorkItemPlanMarkdownAuthorContext<'static> {
     static T17_PLAN_OPTIONS: crate::product::models::IssueWorkItemPlanOptions =
         crate::product::models::IssueWorkItemPlanOptions {
             include_integration_tests: false,
@@ -83,6 +79,8 @@ fn anchor_t17_author_context()
         language_rules: "## 语言规则\n\n- **必须使用中文** - t17 契约夹具。\n",
         plan_options: &T17_PLAN_OPTIONS,
         routing_context: &RoutingReferenceContext::Legacy,
+        member_targets: None,
+        change_order: &[],
     }
 }
 
@@ -183,6 +181,8 @@ fn anchor_t17_fresh_revision_prompt_keeps_hard_budget() {
             language_rules: "规则",
             plan_options: &plan_options,
             routing_context: &RoutingReferenceContext::Legacy,
+            member_targets: None,
+            change_order: &[],
         };
     let verdict = ReviewVerdict {
         verdict: ReviewVerdictType::Revise,

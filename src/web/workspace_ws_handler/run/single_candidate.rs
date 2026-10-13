@@ -763,6 +763,19 @@ pub(crate) async fn run_single_candidate_author(
                 "resolve plan member targets failed: {error}"
             ))
         })?;
+    // SG5.1（REQ-CG-03、REQ-SG-02）：author prompt 的已确认仓序事实——与
+    // Final Compile / SG1 有效图的 change_order 同一规则源（confirmed design
+    // 单源装载，只读消费、不改 admission）；LC 多仓 plan 才有成员/仓序教学，
+    // legacy 单仓 member_targets=None → 教学段缺席、首轮 prompt 逐字节不变。
+    let confirmed_change_order = crate::product::workspace_engine::draft_batch::compile_support::load_change_order_from_confirmed_design(
+        &lifecycle,
+        &member_targets_plan,
+    )
+    .map_err(|error| {
+        SingleCandidateProviderRunError::Message(format!(
+            "load confirmed change order for author prompt failed: {error}"
+        ))
+    })?;
     let issue = IssueStore::new(run_context.app_paths.clone())
         .get(
             &run_context.session_record.project_id,
@@ -951,6 +964,8 @@ pub(crate) async fn run_single_candidate_author(
                         plan_options: &plan_options,
                         language_rules: &language_rules,
                         routing_context: &launch.routing_context(),
+                        member_targets: member_targets.as_ref(),
+                        change_order: &confirmed_change_order,
                     },
                     review,
                     previous_source,
@@ -970,6 +985,8 @@ pub(crate) async fn run_single_candidate_author(
                         plan_options: &plan_options,
                         language_rules: &language_rules,
                         routing_context: &launch.routing_context(),
+                        member_targets: member_targets.as_ref(),
+                        change_order: &confirmed_change_order,
                     },
                     review,
                 )
@@ -986,6 +1003,8 @@ pub(crate) async fn run_single_candidate_author(
                 plan_options: &plan_options,
                 language_rules: &language_rules,
                 routing_context: &launch.routing_context(),
+                member_targets: member_targets.as_ref(),
+                change_order: &confirmed_change_order,
             },
         ),
     }

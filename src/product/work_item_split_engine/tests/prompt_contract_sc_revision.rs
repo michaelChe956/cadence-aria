@@ -9,7 +9,6 @@ use crate::web::workspace_ws_types::{
 const TEST_SINGLE_CANDIDATE_LANGUAGE_RULES: &str =
     "## 语言规则\n\n- **必须使用中文** - 所有响应、解释、注释和文档必须使用中文。\n";
 
-
 const SC_REVISION_OUTPUT_DIRECTIVE: &str = "[output] 现在仅输出完整 markdown source。";
 
 fn revise_verdict_fixture(
@@ -62,6 +61,8 @@ fn author_context()
         language_rules: TEST_SINGLE_CANDIDATE_LANGUAGE_RULES,
         plan_options: &TEST_ALL_FALSE_PLAN_OPTIONS,
         routing_context: &RoutingReferenceContext::Legacy,
+        member_targets: None,
+        change_order: &[],
     }
 }
 
@@ -247,6 +248,295 @@ fn sc_revision_prompt_carries_mechanical_contract_gap_verdict() {
         assert!(
             revision.contains(required),
             "mechanical verdict must reach the revision prompt verbatim: {required}\n{revision}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SG5.1（REQ-CG-03、REQ-SG-02）：同源 author/revision grammar 教学——初轮与
+// SC 修订 prompt 都必须携带 [confirmed_member_order]（已确认成员归属/仓序
+// 事实 + 仓序自动边规则）；成员事实与 compile member targets/confirmed
+// design change_order 单源同构，不另立白名单；Plan Intent 保持可选，不造
+// 创建/入站授权；author 质量预算不扩大（legacy 单仓教学段整段缺席）。
+// ---------------------------------------------------------------------------
+
+/// 真实形态 LC 夹具：两个已确认成员仓（logical UUID → 物理成员仓 ID）与
+/// confirmed design 的两仓执行顺序（rep 形态与生产 member targets 同构）。
+fn sg_05_1_member_facts() -> (
+    crate::product::work_item_plan_compiler::PlanMemberTargets,
+    Vec<crate::product::logical_codebase::LogicalRepositoryId>,
+) {
+    use crate::product::logical_codebase::LogicalRepositoryId;
+    let backend = LogicalRepositoryId(
+        uuid::Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("fixture uuid"),
+    );
+    let web = LogicalRepositoryId(
+        uuid::Uuid::parse_str("22222222-2222-2222-2222-222222222222").expect("fixture uuid"),
+    );
+    let mut physical_by_logical = std::collections::BTreeMap::new();
+    physical_by_logical.insert(backend, "repo_backend_0001".to_string());
+    physical_by_logical.insert(web, "repo_web_0002".to_string());
+    (
+        crate::product::work_item_plan_compiler::PlanMemberTargets {
+            physical_by_logical,
+            fallback_physical_id: Some("repo_backend_0001".to_string()),
+        },
+        vec![backend, web],
+    )
+}
+
+fn sg_05_1_author_context<'a>(
+    member_targets: &'a crate::product::work_item_plan_compiler::PlanMemberTargets,
+    change_order: &'a [crate::product::logical_codebase::LogicalRepositoryId],
+) -> crate::product::work_item_split_engine::prompts::WorkItemPlanMarkdownAuthorContext<'a> {
+    use crate::product::cadence_skills::routing_reference::LogicalPolicyReference;
+    static SG_05_1_ROUTING:
+        crate::product::cadence_skills::routing_reference::RoutingReferenceContext =
+        crate::product::cadence_skills::routing_reference::RoutingReferenceContext::Logical(
+            LogicalPolicyReference {
+                policy_id: String::new(),
+                policy_revision: 0,
+                policy_digest: String::new(),
+                authority_root: String::new(),
+            },
+        );
+    crate::product::work_item_split_engine::prompts::WorkItemPlanMarkdownAuthorContext {
+        story_context: "story_spec_0001: level selection",
+        design_context: "design_spec_0001: levels API + gateway/web 两仓划分",
+        design_requirement_ids: &[],
+        repository_structure: "cadence/src/product/levels; web/src/levels",
+        language_rules: TEST_SINGLE_CANDIDATE_LANGUAGE_RULES,
+        plan_options: &TEST_ALL_FALSE_PLAN_OPTIONS,
+        routing_context: &SG_05_1_ROUTING,
+        member_targets: Some(member_targets),
+        change_order,
+    }
+}
+
+#[test]
+fn sg_05_1_shared_grammar_template_teaches_confirmed_member_order_and_auto_edges_in_initial_and_revision_prompts()
+ {
+    let (request, issue, repository) = split_prompt_fixture();
+    let (members, change_order) = sg_05_1_member_facts();
+    let context = sg_05_1_author_context(&members, &change_order);
+    let initial =
+        crate::product::work_item_split_engine::prompts::build_work_item_plan_markdown_prompt(
+            &request,
+            &issue,
+            &repository,
+            context,
+        )
+        .expect("initial markdown author prompt with member facts");
+
+    // 成员表：真实 logical UUID → 物理成员仓 ID 逐字成行（确定性 BTreeMap 序）。
+    let member_line_backend = "- logical_repository: 11111111-1111-1111-1111-111111111111 → physical_repository: repo_backend_0001";
+    let member_line_web = "- logical_repository: 22222222-2222-2222-2222-222222222222 → physical_repository: repo_web_0002";
+    // 仓序：confirmed change_order 先后如实注入（1. 先执行仓 → 2. 后执行仓）。
+    let order_line_backend = "1. 11111111-1111-1111-1111-111111111111（repo_backend_0001）";
+    let order_line_web = "2. 22222222-2222-2222-2222-222222222222（repo_web_0002）";
+    for required in [
+        "[confirmed_member_order]",
+        member_line_backend,
+        member_line_web,
+        order_line_backend,
+        order_line_web,
+    ] {
+        assert!(
+            initial.contains(required),
+            "initial prompt must carry confirmed member/order fact {required}: {initial}"
+        );
+    }
+    assert!(
+        initial.find(order_line_backend).expect("order line 1")
+            < initial.find(order_line_web).expect("order line 2"),
+        "change_order teaching must preserve the confirmed execution order"
+    );
+
+    // auto 边规则与编译器仓序规则同源：前仓为后仓依赖前置、同仓无自动边、
+    // 逆写仓序成环拒绝；WI 合法 ID 仍指回本计划 `## Work Item` 标题。
+    for required in [
+        "仓序自动边规则（与编译器仓序规则同源）",
+        "provider_logical_work_item_id 逐字填前仓 WI 在本计划 `## Work Item` 标题中的 `WI-<数字>`",
+        "同一成员仓内的 WI 之间无仓序自动边",
+        "dependency_cycle",
+    ] {
+        assert!(
+            initial.contains(required),
+            "initial prompt must carry the auto-edge rule {required}: {initial}"
+        );
+    }
+
+    // 成员归属纪律：归属合法值=上列成员事实；native root/聚合根视图不得替换
+    // 业务成员 target。
+    for required in [
+        "intent_target_logical_repo 只能逐字取上列成员 logical UUID",
+        "intent_target_repo 只能逐字取上列物理成员仓 ID",
+        "不得替代业务成员 target",
+        "work_item_target_missing 拒绝",
+    ] {
+        assert!(
+            initial.contains(required),
+            "initial prompt must carry member enrollment discipline {required}: {initial}"
+        );
+    }
+    let member_section = &initial[initial
+        .find("[confirmed_member_order]")
+        .expect("member section start")
+        ..initial
+            .find("[format_clamp]")
+            .expect("format clamp must follow")];
+    assert!(
+        !member_section.contains("repo_0001")
+            && !member_section.contains("lc_aggregate_root_view_"),
+        "member teaching must keep real business member targets, not the session native root or aggregate view: {member_section}"
+    );
+    assert_eq!(
+        initial.matches("[confirmed_member_order]").count(),
+        1,
+        "member/order teaching renders exactly once"
+    );
+
+    // 同源 grammar/template/WI 合法 ID 教学在初轮仍在场（新教学不替换旧面）。
+    for required in [
+        "[markdown_grammar]",
+        "[minimum_legal_source]",
+        "provider_logical_work_item_id 的合法值只能来自本计划的 `## Work Item` 标题中的 `WI-<数字>`",
+    ] {
+        assert!(
+            initial.contains(required),
+            "initial prompt must keep the shared grammar/template teaching {required}"
+        );
+    }
+
+    // SC 修订轮：以初轮 prompt 为逐字节前缀，成员/仓序教学同源继承。
+    let verdict = revise_verdict_fixture(
+        "WI 归属与仓序依赖需返修。",
+        "成员归属返修",
+        vec![must_fix_finding(
+            "WI-002 intent_target_logical_repo 编造成员 UUID",
+            "intent_target_logical_repo 逐字改取已确认成员表中的 22222222-2222-2222-2222-222222222222。",
+        )],
+    );
+    let revision =
+        crate::product::work_item_split_engine::prompts::build_work_item_plan_markdown_revision_prompt(
+            &request, &issue, &repository,
+            sg_05_1_author_context(&members, &change_order),
+            &verdict,
+        )
+        .expect("revision prompt with member facts");
+    let initial_prefix_end = initial
+        .rfind(SC_REVISION_OUTPUT_DIRECTIVE)
+        .expect("initial prompt ends with the shared output directive");
+    assert!(
+        revision.starts_with(&initial[..initial_prefix_end]),
+        "revision prompt must keep the initial prompt bytes (incl. member/order teaching) as prefix"
+    );
+    for required in [
+        "[confirmed_member_order]",
+        member_line_backend,
+        member_line_web,
+        "[markdown_grammar]",
+        "[minimum_legal_source]",
+    ] {
+        assert!(
+            revision.contains(required),
+            "revision prompt must inherit shared member/grammar teaching {required}"
+        );
+    }
+
+    // 显式 fresh 返修轮同样自足携带成员/仓序教学。
+    let fresh = crate::product::work_item_split_engine::prompts::
+        build_work_item_plan_markdown_fresh_revision_prompt(
+            &request,
+            &issue,
+            &repository,
+            sg_05_1_author_context(&members, &change_order),
+            &verdict,
+            "# Work Item Plan\n## Work Item WI-001: x\n（上一版 source 全文）\n",
+        )
+        .expect("fresh revision prompt with member facts");
+    assert!(fresh.contains("[confirmed_member_order]"));
+    assert!(fresh.contains(member_line_web));
+}
+
+#[test]
+fn sg_05_1_shared_grammar_template_keeps_plan_intent_optional_and_author_budget_unexpanded() {
+    let (request, issue, repository) = split_prompt_fixture();
+    let (members, change_order) = sg_05_1_member_facts();
+    let context = sg_05_1_author_context(&members, &change_order);
+    let initial =
+        crate::product::work_item_split_engine::prompts::build_work_item_plan_markdown_prompt(
+            &request,
+            &issue,
+            &repository,
+            context,
+        )
+        .expect("initial markdown author prompt with member facts");
+
+    // Plan Intent 保持可选 section：教学明示不改可选性、不新增创建/入站授权；
+    // 成员段不重列 intent 值域（grammar 段是唯一白名单来源，不另白名单）。
+    let member_section = &initial[initial
+        .find("[confirmed_member_order]")
+        .expect("member section start")
+        ..initial
+            .find("[format_clamp]")
+            .expect("format clamp must follow")];
+    for required in ["Plan Intent 仍为可选 section", "不新增任何创建/入站授权"] {
+        assert!(
+            member_section.contains(required),
+            "member teaching must state {required}: {member_section}"
+        );
+    }
+    assert!(
+        !member_section.contains("create、existing"),
+        "member teaching must not re-list the intent value domain (grammar is the single whitelist source)"
+    );
+
+    // author 质量预算不扩大：常量保持 23,500（历史红线，SG5.1 不提额），
+    // legacy 单仓 prompt（无成员事实）不渲染成员段且仍在预算内。
+    assert_eq!(
+        crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES,
+        23_500
+    );
+    let legacy =
+        crate::product::work_item_split_engine::prompts::build_work_item_plan_markdown_prompt(
+            &request,
+            &issue,
+            &repository,
+            author_context(),
+        )
+        .expect("legacy single-repo markdown author prompt");
+    assert!(
+        !legacy.contains("[confirmed_member_order]"),
+        "legacy single-repo prompt must stay free of member/order teaching"
+    );
+    assert!(
+        legacy.len()
+            < crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES,
+        "legacy prompt must remain below the unexpanded author budget: {} bytes",
+        legacy.len()
+    );
+
+    // 缺席事实不编造：LC 成员在场但 confirmed change_order 为空时，如实教
+    // 「无已确认仓序、无仓序自动边」，成员表照常教学。
+    let empty_order_context = sg_05_1_author_context(&members, &[]);
+    let empty_order =
+        crate::product::work_item_split_engine::prompts::build_work_item_plan_markdown_prompt(
+            &request,
+            &issue,
+            &repository,
+            empty_order_context,
+        )
+        .expect("LC prompt without confirmed change order");
+    for required in [
+        "无已确认仓序",
+        "无仓序自动边，跨仓依赖仅由 depends_on 与 Inputs 契约显式声明",
+        "不得虚构先后顺序",
+        "- logical_repository: 22222222-2222-2222-2222-222222222222 → physical_repository: repo_web_0002",
+    ] {
+        assert!(
+            empty_order.contains(required),
+            "empty change order must be taught as-is without inventing an order: {required}"
         );
     }
 }

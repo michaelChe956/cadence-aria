@@ -2,12 +2,14 @@ use crate::product::cadence_skills::routing_reference::{
     RoutingReferenceContext, generation_cadence_routing_rules_reference,
 };
 use crate::product::lifecycle_store::LifecycleStore;
+use crate::product::logical_codebase::LogicalRepositoryId;
 use crate::product::models::{
     IssueRecord, IssueWorkItemPlanOptions, LifecycleWorkItemRecord,
     OutlineContextBlockerResolution, ProviderName, RepositoryRecord, WorkItemDraftRecord,
     WorkItemGenerationMode, WorkspaceType,
 };
 use crate::product::work_item_plan_compiler::ACCEPTANCE_PATH_NOT_IN_BASELINE_REPAIR_ACTION;
+use crate::product::work_item_plan_compiler::PlanMemberTargets;
 use crate::product::work_item_plan_compiler::grammar;
 use crate::product::workspace_engine::{allowed_outputs_for, forbidden_outputs_for};
 use crate::web::error::{ApiError, ApiResult};
@@ -48,6 +50,15 @@ pub(crate) struct WorkItemPlanMarkdownAuthorContext<'a> {
     pub plan_options: &'a IssueWorkItemPlanOptions,
     /// 仅在逻辑代码库中保留 gateway 已验证的政策权威信息；传统单仓不注入旧指针。
     pub routing_context: &'a RoutingReferenceContext,
+    /// SG5.1（REQ-CG-03、REQ-SG-02）：已确认成员归属事实——与 Final Compile
+    /// 的 per-WI 成员目标表同源（逻辑成员 UUID → 物理成员仓 ID），由生产
+    /// 调用方一次装载、prompt 只读消费；`None`（legacy 单仓）时成员/仓序
+    /// 教学整段缺席，首轮 prompt 逐字节不变、author 质量预算不扩大。
+    pub member_targets: Option<&'a PlanMemberTargets>,
+    /// SG5.1：confirmed design 的仓级执行顺序（change_order 单源装载）；
+    /// 仓序自动边规则与编译器同源消费，空序如实教「无已确认仓序」，
+    /// 不虚构先后顺序。
+    pub change_order: &'a [LogicalRepositoryId],
 }
 
 /// Draft prompt 质量预算：真实规模中文 fixture 的确定性预算测试阈值。
@@ -139,13 +150,13 @@ pub(crate) const WORK_ITEM_PLAN_MARKDOWN_OUTPUT_DIRECTIVE: &str =
     "[output] 现在仅输出完整 markdown source。";
 
 mod sc_revision;
-pub(crate) use sc_revision::build_work_item_plan_markdown_revision_prompt;
 pub(crate) use sc_revision::build_work_item_plan_markdown_fresh_revision_prompt;
+pub(crate) use sc_revision::build_work_item_plan_markdown_revision_prompt;
 mod sc_author_teaching;
 pub(crate) use sc_author_teaching::{
-    WORK_ITEM_PLAN_WEAK_MODEL_PRECISION_DISCIPLINE, work_item_plan_markdown_grammar,
-    work_item_plan_markdown_reference_discipline, work_item_plan_minimum_legal_source,
-    work_item_plan_option_mirror_teaching,
+    WORK_ITEM_PLAN_WEAK_MODEL_PRECISION_DISCIPLINE, work_item_plan_confirmed_member_order_teaching,
+    work_item_plan_markdown_grammar, work_item_plan_markdown_reference_discipline,
+    work_item_plan_minimum_legal_source, work_item_plan_option_mirror_teaching,
 };
 mod outline_contract;
 #[cfg(test)]
@@ -293,6 +304,13 @@ pub(crate) fn build_work_item_plan_markdown_prompt(
     let dependency_syntax_rules = work_item_plan_dependency_syntax_rules();
     let reference_discipline =
         work_item_plan_markdown_reference_discipline(Some(context.design_requirement_ids));
+    // SG5.1（REQ-CG-03、REQ-SG-02）：已确认成员/仓序教学——LC 多仓 plan 注入
+    // （数据单源 member targets/change_order），legacy 单仓空串缺席，首轮
+    // prompt 逐字节不变；修订轮以首轮为前缀同源继承。
+    let confirmed_member_order = work_item_plan_confirmed_member_order_teaching(
+        context.member_targets,
+        context.change_order,
+    );
     // story/design 真实上下文可能远大于旧 JSON outline 路径。固定 grammar、最小合法
     // source 与 few-shot 永不截断；只按确定性配额压缩可再加载的上下文，并显式标记。
     let (story_context, design_context, repository_structure) = budget_markdown_context(
@@ -319,6 +337,7 @@ pub(crate) fn build_work_item_plan_markdown_prompt(
          [minimum_legal_source] 仅示语法形状；按当前上下文替换，勿照抄。\n{minimum_source}\n\
          {few_shot}\n\
          {plan_options_mirror}\
+         {confirmed_member_order}\
          [format_clamp]\n\
          结构标题必须逐字照抄 [markdown_grammar]/[minimum_legal_source] 的英文原文（含 `# Work Item Plan` 与全部 `###` 标题）；仅自由文本值用中文；禁止翻译、改写或加中文括号。\n\
          禁止任何前言、寒暄、说明性开场或路由回执；输出的第一个字符必须是文档标题。\n\
@@ -344,6 +363,7 @@ pub(crate) fn build_work_item_plan_markdown_prompt(
         minimum_source = work_item_plan_minimum_legal_source(),
         traceability_example = WORK_ITEM_PLAN_MULTI_SOURCE_TRACEABILITY_EXAMPLE,
         few_shot = few_shot,
+        confirmed_member_order = confirmed_member_order,
         output_directive = WORK_ITEM_PLAN_MARKDOWN_OUTPUT_DIRECTIVE,
     );
     if prompt.len() > WORK_ITEM_PLAN_MARKDOWN_PROMPT_MAX_BYTES {
@@ -623,7 +643,9 @@ struct OutlineFreshRevisionFacts {
 }
 
 /// run_context tag 的稳定短名（typed 拒错误文案用，不泄业务 payload）。
-fn lc_recovery_context_tag_label_for_prompt(context: &crate::product::models::LcRecoveryRunContext) -> &'static str {
+fn lc_recovery_context_tag_label_for_prompt(
+    context: &crate::product::models::LcRecoveryRunContext,
+) -> &'static str {
     use crate::product::models::LcRecoveryRunContext;
     match context {
         LcRecoveryRunContext::Author { .. } => "author",
@@ -655,15 +677,14 @@ fn outline_fresh_revision_facts(
         }
     }
     match source_context {
-        LcRecoveryRunContext::LegacyOutlineAuthor {
-            business,
-            ..
-        } => Ok(OutlineFreshRevisionFacts {
-            plan_entity_id: business.entity_id.clone(),
-            feedback: None,
-            outline_version: None,
-            review_refs: business.review_refs.clone(),
-        }),
+        LcRecoveryRunContext::LegacyOutlineAuthor { business, .. } => {
+            Ok(OutlineFreshRevisionFacts {
+                plan_entity_id: business.entity_id.clone(),
+                feedback: None,
+                outline_version: None,
+                review_refs: business.review_refs.clone(),
+            })
+        }
         LcRecoveryRunContext::LegacyOutlineRevision {
             business,
             normalized_feedback,
@@ -675,7 +696,9 @@ fn outline_fresh_revision_facts(
             outline_version: *outline_version,
             review_refs: business.review_refs.clone(),
         }),
-        LcRecoveryRunContext::LegacyOutlineRebuild { business, origin, .. } => match origin {
+        LcRecoveryRunContext::LegacyOutlineRebuild {
+            business, origin, ..
+        } => match origin {
             LcOutlineRebuildOrigin::LegacyAuthor(payload) => Ok(OutlineFreshRevisionFacts {
                 plan_entity_id: business.entity_id.clone(),
                 feedback: None,
@@ -772,7 +795,9 @@ fn load_fresh_review_feedback_sections(
         .filter_map(|node_id| {
             let detail = lifecycle.load_node_detail(&session.id, node_id).ok()?;
             let verdict = detail.verdict.as_ref()?;
-            Some(format!("review 节点 {node_id} 的 durable 审核记录:\n{verdict}"))
+            Some(format!(
+                "review 节点 {node_id} 的 durable 审核记录:\n{verdict}"
+            ))
         })
         .collect()
 }
