@@ -96,6 +96,23 @@ impl LifecycleStore {
             });
         }
 
+        // D1.3b（fix-cascade-deletion plan §0.4 human_gate 行）：最外层 scope
+        // 准入——expected 记录域在 session flock 外先取 scope；锁内 CAS/预算/
+        // nonce 与失败回滚零变化，回滚不重取锁。
+        let scope = self.entity_scope_for_session(expected)?;
+        self.with_optional_entity_live_write(scope.as_ref(), move || {
+            self.compare_and_reserve_human_gate_turn_in_admission(expected, turn, reservation)
+        })
+    }
+
+    /// `compare_and_reserve_human_gate_turn` 的已准入内层（D1.3b：外层已持
+    /// scope 共享准入/已按删除事实拒；session flock 内原 CAS 语义不变）。
+    fn compare_and_reserve_human_gate_turn_in_admission(
+        &self,
+        expected: &WorkspaceSessionRecord,
+        turn: HumanGateTurn,
+        reservation: HumanGateReservation,
+    ) -> Result<(WorkspaceSessionRecord, HumanGateTurn), ProductStoreError> {
         let session_path = self.find_workspace_session_path(&expected.id)?;
         let turn_path = self.human_gate_turn_path(expected, &turn.turn_id)?;
         with_exclusive_lock(&session_path, || {
@@ -338,6 +355,23 @@ impl LifecycleStore {
         validate_relative_id(&expected.id)?;
         validate_relative_id(&turn.turn_id)?;
         Self::validate_human_gate_turn(&turn, &expected.id, &turn.turn_id)?;
+
+        // D1.3b（fix-cascade-deletion plan §0.4 human_gate 行）：最外层 scope
+        // 准入——expected 记录域在 session flock 外先取 scope；锁内 CAS/回滚
+        // 零变化，回滚不重取锁。
+        let scope = self.entity_scope_for_session(expected)?;
+        self.with_optional_entity_live_write(scope.as_ref(), move || {
+            self.update_human_gate_turn_in_admission(expected, turn)
+        })
+    }
+
+    /// `update_human_gate_turn` 的已准入内层（D1.3b：外层已持 scope 共享准入/
+    /// 已按删除事实拒；session flock 内原 CAS 语义不变）。
+    fn update_human_gate_turn_in_admission(
+        &self,
+        expected: &WorkspaceSessionRecord,
+        turn: HumanGateTurn,
+    ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
         let session_path = self.find_workspace_session_path(&expected.id)?;
         let turn_path = self.human_gate_turn_path(expected, &turn.turn_id)?;
         with_exclusive_lock(&session_path, || {
@@ -465,6 +499,31 @@ impl LifecycleStore {
                 reason: "prompt ref/digest must not be empty".to_string(),
             });
         }
+
+        // D1.3b（fix-cascade-deletion plan §0.4）：最外层 scope 准入——expected
+        // 记录域在 session flock 外先取 scope；锁内 grant/attempt 语义零变化。
+        let scope = self.entity_scope_for_session(expected)?;
+        self.with_optional_entity_live_write(scope.as_ref(), move || {
+            self.claim_structural_attempt_in_admission(
+                expected,
+                turn_id,
+                instruction,
+                prompt_ref,
+                prompt_digest,
+            )
+        })
+    }
+
+    /// `claim_structural_attempt` 的已准入内层（D1.3b：外层已持 scope 共享
+    /// 准入/已按删除事实拒；session flock 内原语义不变）。
+    fn claim_structural_attempt_in_admission(
+        &self,
+        expected: &WorkspaceSessionRecord,
+        turn_id: &str,
+        instruction: &crate::product::workspace_engine::contract_prerevision::StructuralRepairInstruction,
+        prompt_ref: &str,
+        prompt_digest: &str,
+    ) -> Result<StructuralClaimOutcome, ProductStoreError> {
         let session_path = self.find_workspace_session_path(&expected.id)?;
         let turn_path = self.human_gate_turn_path(expected, turn_id)?;
         with_exclusive_lock(&session_path, || {
@@ -612,6 +671,23 @@ impl LifecycleStore {
                 id: turn_id.to_string(),
             });
         }
+
+        // D1.3b（fix-cascade-deletion plan §0.4）：最外层 scope 准入——expected
+        // 记录域在 session flock 外先取 scope；锁内结算/重放语义零变化。
+        let scope = self.entity_scope_for_session(expected)?;
+        self.with_optional_entity_live_write(scope.as_ref(), move || {
+            self.settle_structural_user_budget_in_admission(expected, turn_id, receipt)
+        })
+    }
+
+    /// `settle_structural_user_budget` 的已准入内层（D1.3b：外层已持 scope
+    /// 共享准入/已按删除事实拒；session flock 内原结算语义不变）。
+    fn settle_structural_user_budget_in_admission(
+        &self,
+        expected: &WorkspaceSessionRecord,
+        turn_id: &str,
+        receipt: UserBudgetReceipt,
+    ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
         let session_path = self.find_workspace_session_path(&expected.id)?;
         with_exclusive_lock(&session_path, || {
             let stored: WorkspaceSessionRecord = read_json(&session_path)?;

@@ -34,16 +34,20 @@ impl LifecycleStore {
         diagnostics: &[crate::product::work_item_plan_policy::PolicyDiagnostic],
     ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
         validate_relative_id(session_id)?;
-        let session_path = self.find_workspace_session_path(session_id)?;
+        // D1.3b（fix-cascade-deletion plan §0.4）：最外层 scope 准入——在
+        // session flock 外先解析归属再取 scope；锁内失败投影零变化。
+        let (session_path, scope) = self.resolve_session_scope(session_id)?;
         let locked_session_path = session_path.clone();
-        with_exclusive_lock(&session_path, move || {
-            let mut session: WorkspaceSessionRecord = read_json(&locked_session_path)?;
-            session.status = WorkspaceSessionStatus::Failed;
-            session.human_gate_snapshot = None;
-            session.policy_diagnostics = diagnostics.to_vec();
-            session.updated_at = Utc::now().to_rfc3339();
-            write_json(&locked_session_path, &session)?;
-            Ok(session)
+        self.with_optional_entity_live_write(scope.as_ref(), move || {
+            with_exclusive_lock(&session_path, move || {
+                let mut session: WorkspaceSessionRecord = read_json(&locked_session_path)?;
+                session.status = WorkspaceSessionStatus::Failed;
+                session.human_gate_snapshot = None;
+                session.policy_diagnostics = diagnostics.to_vec();
+                session.updated_at = Utc::now().to_rfc3339();
+                write_json(&locked_session_path, &session)?;
+                Ok(session)
+            })
         })
     }
 
@@ -51,6 +55,21 @@ impl LifecycleStore {
     /// The expected record check prevents stale websocket workers from
     /// overwriting a newer route; callers must reload and re-evaluate on clash.
     pub fn compare_and_save_policy_route(
+        &self,
+        expected: &WorkspaceSessionRecord,
+        persist: PolicyRoutePersist,
+    ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
+        // D1.3b（fix-cascade-deletion plan §0.4）：最外层 scope 准入——expected
+        // 记录域在 session flock 外先取 scope；锁内 route CAS 零变化。
+        let entity_scope = self.entity_scope_for_session(expected)?;
+        self.with_optional_entity_live_write(entity_scope.as_ref(), move || {
+            self.compare_and_save_policy_route_in_admission(expected, persist)
+        })
+    }
+
+    /// `compare_and_save_policy_route` 的已准入内层（D1.3b：外层已持 scope
+    /// 共享准入/已按删除事实拒；session flock 内原 CAS 语义不变）。
+    fn compare_and_save_policy_route_in_admission(
         &self,
         expected: &WorkspaceSessionRecord,
         persist: PolicyRoutePersist,

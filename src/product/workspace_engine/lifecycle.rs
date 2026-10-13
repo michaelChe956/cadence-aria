@@ -249,13 +249,18 @@ fn recover_complete_artifact_misclassified_as_text_fallback(
     }) {
         checkpoint.id.clone()
     } else {
-        checkpoint_store
-            .create_checkpoint(
-                &session.session_id,
-                message_index,
-                Some(&payload),
-                WorkspaceStage::AuthorConfirm.as_str(),
-            )
+        // D1.3b（fix-cascade-deletion plan Interfaces）：persistent checkpoint
+        // 的 scope guard 包实际 write——purging/deleted 会话拒绝且 checkpoints
+        // 目录不复活；锁内恢复逻辑零变化。
+        lifecycle_store
+            .with_workspace_session_live_write(&session.session_id, || {
+                checkpoint_store.create_checkpoint(
+                    &session.session_id,
+                    message_index,
+                    Some(&payload),
+                    WorkspaceStage::AuthorConfirm.as_str(),
+                )
+            })
             .map_err(|error| format!("save recovered artifact checkpoint failed: {error}"))?
             .id
     };

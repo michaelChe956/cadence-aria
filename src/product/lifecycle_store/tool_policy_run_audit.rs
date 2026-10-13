@@ -163,6 +163,23 @@ impl LifecycleStore {
         &self,
         workspace_session_id: &str,
     ) -> Result<u64, ToolPolicyAuditError> {
+        // D1.3b（plan §0.4）：seq 分配是 durable 写（marker 落盘/分区目录
+        // 创建），scope 准入在日志 Mutex 之前取得；purging/deleted 会话拒绝
+        // 分配，分区目录不复活。
+        self.with_workspace_session_live_write(workspace_session_id, || {
+            Ok(self.next_tool_policy_role_run_seq_in_admission(workspace_session_id))
+        })
+        .map_err(|error| {
+            ToolPolicyAuditError::Io(format!("workspace session admission: {error}"))
+        })?
+    }
+
+    /// `next_tool_policy_role_run_seq` 的已准入内层（D1.3b：外层已持 scope
+    /// 共享准入/已按删除事实拒，本函数不重复取 scope）。
+    fn next_tool_policy_role_run_seq_in_admission(
+        &self,
+        workspace_session_id: &str,
+    ) -> Result<u64, ToolPolicyAuditError> {
         // P1-5：与 append 同锁互斥。P1-6：分配即持久化——高水位 marker 追加式
         // 落盘，provider_start 写失败/崩溃后 seq 不得被复用。🔴 单写者约束：
         // 互斥与高水位均为**进程内**语义（进程内 Mutex+marker 高水位）；跨进程
@@ -207,6 +224,43 @@ impl LifecycleStore {
                 audit_sink: std::sync::Arc::new(self.clone()),
             },
         )
+    }
+
+    /// D1.3b（fix-cascade-deletion，plan §0.2/§0.4）：session 键控辅助写的
+    /// 迟到写准入桥——门/checkpoint/audit/usage/split-run 等按
+    /// `workspace_session_id` 定位的 durable 写共用。归属归约顺序（真实
+    /// 归属，不以 prompt/run_ref 猜 owner）：
+    /// ① D1.0 会话身份占用索引（显式 id 创建路径落盘；删除后仍可反查，
+    ///    墓碑 fail-closed）；
+    /// ② session 记录归约（`resolve_session_scope_lenient`，档案缺失→None）。
+    /// 两者都未命中（旧无 owner 档案）→ 不准入，保持原行为。准入在任何
+    /// session/对象锁与日志 Mutex 之前取得（§0.4 锁序：scope → 日志 Mutex）。
+    pub fn with_workspace_session_live_write<T>(
+        &self,
+        workspace_session_id: &str,
+        operation: impl FnOnce() -> Result<T, crate::product::json_store::ProductStoreError>,
+    ) -> Result<T, crate::product::json_store::ProductStoreError> {
+        use crate::product::json_store::ProductStoreError;
+        let scope = match self
+            .entity_operation_store()
+            .scope_for_workspace_session(workspace_session_id)
+        {
+            Ok(scope) => Some(scope),
+            Err(ProductStoreError::NotFound { .. }) => None,
+            Err(ProductStoreError::Conflict { kind, .. }) if kind == "entity_deleted" => {
+                // 身份索引命中且墓碑在位（purging/deleted）：迟到写按删除事实拒。
+                return Err(ProductStoreError::Conflict {
+                    kind: "entity_deleting",
+                    id: workspace_session_id.to_string(),
+                });
+            }
+            Err(other) => return Err(other),
+        };
+        let scope = match scope {
+            Some(scope) => Some(scope),
+            None => self.resolve_session_scope_lenient(workspace_session_id)?,
+        };
+        self.with_optional_entity_live_write(scope.as_ref(), operation)
     }
 }
 
@@ -255,6 +309,46 @@ fn scan_max_role_run_seq(root: &std::path::Path) -> Result<Option<u64>, ToolPoli
 
 impl ToolPolicyAuditSink for LifecycleStore {
     fn append(
+        &self,
+        workspace_session_id: &str,
+        role_run_seq: u64,
+        mut event: DurableToolPolicyEvent,
+    ) -> Result<(), ToolPolicyAuditError> {
+        // D1.3b（plan §0.4）：迟到写防御——scope 准入在进程内日志 Mutex 之前
+        // 取得；purging/deleted 会话拒绝追加且分区目录不复活。原 P1-5 互斥与
+        // provider_start 首行/唯一、seq 单调合同零变化。
+        self.with_workspace_session_live_write(workspace_session_id, || {
+            Ok(self.append_in_admission(workspace_session_id, role_run_seq, event))
+        })
+        .map_err(|error| {
+            ToolPolicyAuditError::Io(format!("workspace session admission: {error}"))
+        })?
+    }
+
+    fn find_provider_start(
+        &self,
+        _native_provider_session_id: &str,
+    ) -> Result<Option<StoredProviderStart>, ToolPolicyAuditError> {
+        // 裸 sink 的检索需显式 workspace 维度；bound 装饰器总是走
+        // `find_provider_start_by_session`，本入口仅对未绑定调用方兜底。
+        Ok(None)
+    }
+
+    fn find_provider_start_by_session(
+        &self,
+        workspace_session_id: &str,
+        native_provider_session_id: &str,
+    ) -> Result<Option<StoredProviderStart>, ToolPolicyAuditError> {
+        self.find_latest_tool_policy_provider_start(
+            workspace_session_id,
+            native_provider_session_id,
+        )
+    }
+}
+
+impl LifecycleStore {
+    /// `append` 的已准入内层（D1.3b：外层已持 scope 共享准入/已按删除事实拒）。
+    fn append_in_admission(
         &self,
         workspace_session_id: &str,
         role_run_seq: u64,
@@ -311,28 +405,6 @@ impl ToolPolicyAuditSink for LifecycleStore {
         Ok(())
     }
 
-    fn find_provider_start(
-        &self,
-        _native_provider_session_id: &str,
-    ) -> Result<Option<StoredProviderStart>, ToolPolicyAuditError> {
-        // 裸 sink 的检索需显式 workspace 维度；bound 装饰器总是走
-        // `find_provider_start_by_session`，本入口仅对未绑定调用方兜底。
-        Ok(None)
-    }
-
-    fn find_provider_start_by_session(
-        &self,
-        workspace_session_id: &str,
-        native_provider_session_id: &str,
-    ) -> Result<Option<StoredProviderStart>, ToolPolicyAuditError> {
-        self.find_latest_tool_policy_provider_start(
-            workspace_session_id,
-            native_provider_session_id,
-        )
-    }
-}
-
-impl LifecycleStore {
     /// resume 检索（Task 3.3）：在 workspace 分区内按原生 provider session id
     /// 扫描最近 provider_start（max role_run_seq），返回记录及其所在 run 文件
     /// 定位（P1-4：drift 的 superseded 事件追加到被取代旧 run 的文件）。

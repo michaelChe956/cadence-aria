@@ -1621,3 +1621,419 @@ fn cascade_d1_3a_ensure_version_idempotent_write_rejected_when_deleted() {
         })
     ));
 }
+// ==== cascade_d1_3b（fix-cascade-deletion Task D1.3b：门/checkpoint/审计辅助写全闭包）====
+
+#[test]
+fn cascade_d1_3b_human_gate_turn_and_structural_late_writes_rejected() {
+    let (_tmp, store) = setup();
+    d1_3a_plan(&store, "issue_work_item_plan_0001", Vec::new());
+    let mut session = create_session(
+        &store,
+        "issue_work_item_plan_0001",
+        WorkspaceType::WorkItemPlan,
+    );
+    session.human_gate_snapshot = Some(HumanGateSnapshot {
+        candidate_recovery: None,
+        findings: Vec::new(),
+        repeated_fingerprints: Vec::new(),
+        attempts_used: 0,
+        manual_repairs_remaining: 2,
+        trigger: HumanReason::NativeHumanRequired,
+        resumable: true,
+        accepted_feedback_turns: None,
+    });
+    let session_path = store
+        .app_paths()
+        .issue_lifecycle_root(PROJECT_ID, ISSUE_ID)
+        .join("workspace-sessions")
+        .join(format!("{}.json", session.id));
+    write_json(&session_path, &session).unwrap();
+
+    let turn = crate::product::models::HumanGateTurn {
+        turn_id: "turn_d13b_0001".to_string(),
+        session_id: session.id.clone(),
+        command_id: "command_d13b_0001".to_string(),
+        feedback_text: "revise".to_string(),
+        status: crate::product::models::HumanGateTurnStatus::Reserved,
+        attempt_no: 1,
+        budget_reserved: 1,
+        source_hash: String::new(),
+        result_artifact_ref: None,
+        failure_class: None,
+        created_at: "2026-10-14T00:00:00Z".to_string(),
+        updated_at: "2026-10-14T00:00:00Z".to_string(),
+    };
+    let reservation = crate::product::models::HumanGateReservation {
+        command_id: turn.command_id.clone(),
+        turn_id: turn.turn_id.clone(),
+        provider_start_idempotency_key: "d13b_start_0001".to_string(),
+        reserved_at: "2026-10-14T00:00:00Z".to_string(),
+    };
+
+    // 存活实体：原 CAS/预算/nonce 路径零变化（reserve → update Running）。
+    let (reserved, _) = store
+        .compare_and_reserve_human_gate_turn(&session, turn.clone(), reservation)
+        .expect("live gate turn reserve must keep working");
+    let mut running = turn.clone();
+    running.status = crate::product::models::HumanGateTurnStatus::Running;
+    let running_session = store
+        .update_human_gate_turn(&reserved, running)
+        .expect("live gate turn update must keep working");
+    let live_bytes = std::fs::read(&session_path).unwrap();
+
+    // purging：迟到 turn/session 写全部按删除事实拒（原 CAS 检查不动）。
+    let scope = d1_3a_scope(DeletionEntityKind::Plan, "issue_work_item_plan_0001");
+    let lease = d1_3a_begin_purge(&store, &scope);
+
+    let mut late_turn = turn.clone();
+    late_turn.turn_id = "turn_d13b_0002".to_string();
+    late_turn.command_id = "command_d13b_0002".to_string();
+    let late_reservation = crate::product::models::HumanGateReservation {
+        command_id: late_turn.command_id.clone(),
+        turn_id: late_turn.turn_id.clone(),
+        provider_start_idempotency_key: "d13b_start_0002".to_string(),
+        reserved_at: "2026-10-14T00:00:00Z".to_string(),
+    };
+    assert!(matches!(
+        store
+            .compare_and_reserve_human_gate_turn(&running_session, late_turn, late_reservation),
+        Err(ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            ..
+        })
+    ));
+    let mut late_update = turn;
+    late_update.status = crate::product::models::HumanGateTurnStatus::Completed;
+    assert!(matches!(
+        store.update_human_gate_turn(&running_session, late_update),
+        Err(ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            ..
+        })
+    ));
+    assert!(matches!(
+        store.claim_structural_attempt(
+            &running_session,
+            "turn_d13b_0001",
+            &sg_04a_instruction(),
+            "prompt_ref_d13b",
+            "digest_d13b",
+        ),
+        Err(ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            ..
+        })
+    ));
+    assert!(matches!(
+        store.settle_structural_user_budget(
+            &running_session,
+            "turn_d13b_0001",
+            sg_04a_receipt(
+                "turn_d13b_0001",
+                "command_d13b_0001",
+                crate::product::models::UserBudgetReceiptKind::ReleasedStructural,
+            ),
+        ),
+        Err(ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            ..
+        })
+    ));
+    assert_eq!(std::fs::read(&session_path).unwrap(), live_bytes);
+
+    // deleted（完成）后仍稳定拒。
+    d1_3a_complete_purge(&store, lease);
+    let mut late_failed = crate::product::models::HumanGateTurn {
+        turn_id: "turn_d13b_0001".to_string(),
+        session_id: session.id.clone(),
+        command_id: "command_d13b_0001".to_string(),
+        feedback_text: "revise".to_string(),
+        status: crate::product::models::HumanGateTurnStatus::Failed,
+        attempt_no: 1,
+        budget_reserved: 1,
+        source_hash: String::new(),
+        result_artifact_ref: None,
+        failure_class: Some(crate::product::models::HumanGateTurnFailureClass::ProviderErr),
+        created_at: "2026-10-14T00:00:00Z".to_string(),
+        updated_at: "2026-10-14T00:00:00Z".to_string(),
+    };
+    late_failed.updated_at = "2026-10-14T00:01:00Z".to_string();
+    assert!(matches!(
+        store.update_human_gate_turn(&running_session, late_failed),
+        Err(ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn cascade_d1_3b_amendment_gate_reopen_close_late_writes_rejected() {
+    let (_tmp, store) = setup();
+    d1_3a_plan(&store, "issue_work_item_plan_0002", Vec::new());
+    let mut record = d1_3a_sc_session(&store, "issue_work_item_plan_0002");
+    record.single_candidate_phase = Some(crate::product::models::SingleCandidatePhase::Completed);
+    record.human_gate_snapshot = Some(HumanGateSnapshot {
+        candidate_recovery: None,
+        findings: Vec::new(),
+        repeated_fingerprints: Vec::new(),
+        attempts_used: 0,
+        manual_repairs_remaining: 2,
+        trigger: HumanReason::NativeHumanRequired,
+        resumable: true,
+        accepted_feedback_turns: None,
+    });
+    record.status = crate::product::models::WorkspaceSessionStatus::Confirmed;
+    let session_path = store
+        .app_paths()
+        .issue_lifecycle_root(PROJECT_ID, ISSUE_ID)
+        .join("workspace-sessions")
+        .join(format!("{}.json", record.id));
+    write_json(&session_path, &record).unwrap();
+
+    // 存活实体：reopen → close 原 CAS 路径零变化。
+    let reopened = store
+        .compare_and_reopen_amendment_gate(&record)
+        .expect("live amendment reopen must keep working");
+    assert_eq!(
+        reopened.status,
+        crate::product::models::WorkspaceSessionStatus::WaitingForHuman
+    );
+    let closed = store
+        .compare_and_close_reopened_amendment_gate(&reopened)
+        .expect("live amendment close must keep working");
+
+    // purging：迟到 reopen 拒（旧码会直接把已删会话改回 WaitingForHuman）。
+    let scope = d1_3a_scope(DeletionEntityKind::Plan, "issue_work_item_plan_0002");
+    let lease = d1_3a_begin_purge(&store, &scope);
+    assert!(matches!(
+        store.compare_and_reopen_amendment_gate(&closed),
+        Err(ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            ..
+        })
+    ));
+    // 迟到 close：把开态记录放回磁盘（purging 前的真实开态形态），必须拒。
+    write_json(&session_path, &reopened).unwrap();
+    let reopened_bytes = std::fs::read(&session_path).unwrap();
+    assert!(matches!(
+        store.compare_and_close_reopened_amendment_gate(&reopened),
+        Err(ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            ..
+        })
+    ));
+    assert_eq!(std::fs::read(&session_path).unwrap(), reopened_bytes);
+
+    // deleted（完成）后仍稳定拒。
+    d1_3a_complete_purge(&store, lease);
+    assert!(matches!(
+        store.compare_and_reopen_amendment_gate(&closed),
+        Err(ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn cascade_d1_3b_policy_route_late_writes_rejected() {
+    let (_tmp, store) = setup();
+    d1_3a_plan(&store, "issue_work_item_plan_0003", Vec::new());
+    let session = create_session(
+        &store,
+        "issue_work_item_plan_0003",
+        WorkspaceType::WorkItemPlan,
+    );
+    let session_path = store
+        .app_paths()
+        .issue_lifecycle_root(PROJECT_ID, ISSUE_ID)
+        .join("workspace-sessions")
+        .join(format!("{}.json", session.id));
+    let persist = |status| crate::product::lifecycle_store::PolicyRoutePersist {
+        status,
+        single_candidate_phase: None,
+        run_history: session.run_history.clone(),
+        scope: None,
+        gate: None,
+        diagnostics: Vec::new(),
+        repair_reservation: None,
+        provider_start_ledger: Vec::new(),
+    };
+
+    // 存活实体：policy route CAS 与失败投影原路径零变化。
+    let routed = store
+        .compare_and_save_policy_route(
+            &session,
+            persist(crate::product::models::WorkspaceSessionStatus::Running),
+        )
+        .expect("live policy route CAS must keep working");
+    let failed = store
+        .fail_workspace_session_policy(&routed.id, &[])
+        .expect("live policy failure projection must keep working");
+    let live_bytes = std::fs::read(&session_path).unwrap();
+
+    // purging：迟到 route CAS / 失败投影拒且 session 字节不变。
+    let scope = d1_3a_scope(DeletionEntityKind::Plan, "issue_work_item_plan_0003");
+    let lease = d1_3a_begin_purge(&store, &scope);
+    assert!(matches!(
+        store.compare_and_save_policy_route(
+            &failed,
+            persist(crate::product::models::WorkspaceSessionStatus::Running),
+        ),
+        Err(ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            ..
+        })
+    ));
+    assert!(matches!(
+        store.fail_workspace_session_policy(&session.id, &[]),
+        Err(ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            ..
+        })
+    ));
+    assert_eq!(std::fs::read(&session_path).unwrap(), live_bytes);
+
+    // deleted（完成）后仍稳定拒。
+    d1_3a_complete_purge(&store, lease);
+    assert!(matches!(
+        store.fail_workspace_session_policy(&session.id, &[]),
+        Err(ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn cascade_d1_3b_usage_diagnostic_late_write_rejected_no_timeline_revival() {
+    let (_tmp, store) = setup();
+    d1_3a_plan(&store, "issue_work_item_plan_0004", Vec::new());
+    let session = create_session(
+        &store,
+        "issue_work_item_plan_0004",
+        WorkspaceType::WorkItemPlan,
+    );
+    let timeline_dir = store
+        .app_paths()
+        .issue_lifecycle_root(PROJECT_ID, ISSUE_ID)
+        .join("workspace-timelines")
+        .join(&session.id);
+    // 会话 timeline 根下的 usage 诊断分区文件名（脚本检索契约）。
+    let diagnostic_path = timeline_dir.join("usage-diagnostics.jsonl");
+
+    // 存活实体：usage 落盘失败降级写原路径零变化。
+    store
+        .append_usage_persistence_diagnostic(&session.id, &serde_json::json!({"schema_version": 1}))
+        .expect("live usage diagnostic append must keep working");
+    assert!(diagnostic_path.exists());
+
+    // purging + 模拟 D1.1 清理掉 timeline 分区后：迟到降级写拒且不复活目录。
+    let scope = d1_3a_scope(DeletionEntityKind::Plan, "issue_work_item_plan_0004");
+    let _lease = d1_3a_begin_purge(&store, &scope);
+    std::fs::remove_dir_all(&timeline_dir).unwrap();
+    assert!(matches!(
+        store.append_usage_persistence_diagnostic(&session.id, &serde_json::json!({"schema_version": 1})),
+        Err(ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            ..
+        })
+    ));
+    assert!(
+        !timeline_dir.exists(),
+        "usage fallback 不得在删除后重建会话 timeline 分区"
+    );
+}
+
+#[tokio::test]
+async fn cascade_d1_3b_engine_assistant_checkpoint_late_write_rejected() {
+    let checkpoint_root = tempfile::tempdir().expect("checkpoint root");
+    let checkpoint_store =
+        std::sync::Arc::new(crate::product::checkpoint_store::CheckpointStore::new(
+            checkpoint_root.path().to_path_buf(),
+        ));
+    let aria_root = tempfile::tempdir().expect("aria root");
+    let store = LifecycleStore::new(crate::product::app_paths::ProductAppPaths::new(
+        aria_root.path().join(".aria"),
+    ));
+    let story = store
+        .create_story_spec(CreateStorySpecInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            repository_id: REPOSITORY_ID.to_string(),
+            title: "story d13b checkpoint".to_string(),
+            aggregate_codebase: None,
+        })
+        .expect("story spec");
+    let session_record = create_session(&store, &story.id, WorkspaceType::Story);
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let mut engine = crate::product::workspace_engine::WorkspaceEngine::new_persistent(
+        checkpoint_store.clone(),
+        store.clone(),
+        tx,
+        crate::product::workspace_engine::WorkspaceSession::from_record(session_record.clone()),
+    );
+    let checkpoints_dir = checkpoint_root
+        .path()
+        .join("workspace-sessions")
+        .join(&session_record.id)
+        .join("checkpoints");
+
+    let compliant = format!(
+        "# Story Spec\n\n## 范围\n来源 source id: Issue {ISSUE_ID}；级联删除验收。\n\n\
+         ## 用户故事\n作为用户，我希望当前问题被清晰解决。\n\n\
+         ## 功能需求\n- [REQ-001] 级联删除验收。\n\n\
+         ## 成功标准\n- [AC-001] 迟到 checkpoint 被拒绝。\n\n\
+         ## 待确认项\n无。\n\n\
+         ## 非功能需求\n无。\n"
+    );
+    let output = format!("前言\n```artifact\n{compliant}```\n尾随说明\n");
+
+    // 存活实体：真实 assistant 完成路径照常落 checkpoint。
+    engine
+        .complete_assistant_message("assistant_msg_d13b_1".to_string(), output.clone(), false)
+        .await;
+    assert!(
+        checkpoints_dir.join("cp_001.json").exists(),
+        "live assistant completion must keep persisting checkpoints"
+    );
+
+    // purging：迟到完成路径的 persistent checkpoint 写被拒且目录不新增。
+    let scope = d1_3a_scope(DeletionEntityKind::Story, &story.id);
+    let lease = d1_3a_begin_purge(&store, &scope);
+    engine
+        .complete_assistant_message("assistant_msg_d13b_2".to_string(), output, false)
+        .await;
+    let mut saw_deleting = false;
+    while let Ok(event) = rx.try_recv() {
+        if let crate::product::workspace_engine::EngineEvent::Error { message } = event
+            && message.contains("entity_deleting")
+        {
+            saw_deleting = true;
+        }
+    }
+    assert!(
+        saw_deleting,
+        "迟到 checkpoint 必须以 entity_deleting 冲突上抛引擎事件"
+    );
+    assert!(
+        !checkpoints_dir.join("cp_002.json").exists(),
+        "purging 实体的迟到 checkpoint 不得落盘"
+    );
+
+    // deleted（完成）后仍稳定拒。
+    d1_3a_complete_purge(&store, lease);
+    engine
+        .complete_assistant_message(
+            "assistant_msg_d13b_3".to_string(),
+            format!("前言二\n```artifact\n{compliant}```\n尾随说明二\n"),
+            false,
+        )
+        .await;
+    assert!(
+        !checkpoints_dir.join("cp_002.json").exists()
+            && !checkpoints_dir.join("cp_003.json").exists(),
+        "deleted 实体的迟到 checkpoint 不得落盘"
+    );
+}

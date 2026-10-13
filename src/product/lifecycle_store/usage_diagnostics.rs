@@ -36,27 +36,36 @@ impl LifecycleStore {
         record: &serde_json::Value,
     ) -> Result<(), ProductStoreError> {
         validate_relative_id(session_id)?;
-        let _guard = USAGE_DIAGNOSTICS_LOG_MUTEX
-            .lock()
-            .map_err(|error| ProductStoreError::Io(format!("usage diagnostics lock: {error}")))?;
-        let path = self.usage_diagnostics_path(session_id)?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| {
-                ProductStoreError::Io(format!("create {}: {error}", parent.display()))
+        // D1.3b（fix-cascade-deletion，plan §0.4）：scope 准入在日志 Mutex 之前
+        // 取得——purging/deleted 会话的 usage 降级写拒绝，不在删除后重建会话
+        // timeline 分区（REQ-DEL-06/07 迟到不可再写）。
+        self.with_workspace_session_live_write(session_id, || {
+            let _guard = USAGE_DIAGNOSTICS_LOG_MUTEX.lock().map_err(|error| {
+                ProductStoreError::Io(format!("usage diagnostics lock: {error}"))
             })?;
-        }
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .map_err(|error| ProductStoreError::Io(format!("open {}: {error}", path.display())))?;
-        serde_json::to_writer(&mut file, record)
-            .map_err(|error| ProductStoreError::Json(error.to_string()))?;
-        file.write_all(b"\n")
-            .map_err(|error| ProductStoreError::Io(format!("write {}: {error}", path.display())))?;
-        file.flush()
-            .map_err(|error| ProductStoreError::Io(format!("flush {}: {error}", path.display())))?;
-        Ok(())
+            let path = self.usage_diagnostics_path(session_id)?;
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(|error| {
+                    ProductStoreError::Io(format!("create {}: {error}", parent.display()))
+                })?;
+            }
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .map_err(|error| {
+                    ProductStoreError::Io(format!("open {}: {error}", path.display()))
+                })?;
+            serde_json::to_writer(&mut file, record)
+                .map_err(|error| ProductStoreError::Json(error.to_string()))?;
+            file.write_all(b"\n").map_err(|error| {
+                ProductStoreError::Io(format!("write {}: {error}", path.display()))
+            })?;
+            file.flush().map_err(|error| {
+                ProductStoreError::Io(format!("flush {}: {error}", path.display()))
+            })?;
+            Ok(())
+        })
     }
 
     /// 会话级 usage 诊断 jsonl 路径（调用方与事后调查脚本共用同一命名）。

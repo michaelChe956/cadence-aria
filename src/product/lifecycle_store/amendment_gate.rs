@@ -24,6 +24,21 @@ impl super::LifecycleStore {
                 id: expected.id.clone(),
             });
         }
+
+        // D1.3b（fix-cascade-deletion plan §0.4）：最外层 scope 准入——expected
+        // 记录域在 session flock 外先取 scope；锁内 reopen CAS 零变化。
+        let scope = self.entity_scope_for_session(expected)?;
+        self.with_optional_entity_live_write(scope.as_ref(), move || {
+            self.compare_and_reopen_amendment_gate_in_admission(expected)
+        })
+    }
+
+    /// `compare_and_reopen_amendment_gate` 的已准入内层（D1.3b：外层已持
+    /// scope 共享准入/已按删除事实拒；session flock 内原 CAS 语义不变）。
+    fn compare_and_reopen_amendment_gate_in_admission(
+        &self,
+        expected: &WorkspaceSessionRecord,
+    ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
         let session_path = self.find_workspace_session_path(&expected.id)?;
         with_exclusive_lock(&session_path, || {
             let mut stored: WorkspaceSessionRecord = read_json(&session_path)?;
@@ -57,6 +72,21 @@ impl super::LifecycleStore {
                 id: expected.id.clone(),
             });
         }
+
+        // D1.3b（fix-cascade-deletion plan §0.4）：最外层 scope 准入——expected
+        // 记录域在 session flock 外先取 scope；锁内 close CAS 零变化。
+        let scope = self.entity_scope_for_session(expected)?;
+        self.with_optional_entity_live_write(scope.as_ref(), move || {
+            self.compare_and_close_reopened_amendment_gate_in_admission(expected)
+        })
+    }
+
+    /// `compare_and_close_reopened_amendment_gate` 的已准入内层（D1.3b：外层
+    /// 已持 scope 共享准入/已按删除事实拒；session flock 内原 CAS 语义不变）。
+    fn compare_and_close_reopened_amendment_gate_in_admission(
+        &self,
+        expected: &WorkspaceSessionRecord,
+    ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
         let session_path = self.find_workspace_session_path(&expected.id)?;
         with_exclusive_lock(&session_path, || {
             let mut stored: WorkspaceSessionRecord = read_json(&session_path)?;

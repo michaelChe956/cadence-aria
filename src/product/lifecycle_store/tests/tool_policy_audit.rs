@@ -1279,3 +1279,82 @@ mod anchor_t10_durable_convergence {
         assert_eq!(latest.role_run_seq, 2);
     }
 }
+
+// ==== cascade_d1_3b（fix-cascade-deletion Task D1.3b：audit seq/append 迟到写防御）====
+
+/// purging/deleted 实体的会话：迟到 seq 分配与 audit append 必须按删除事实拒，
+/// 分区目录（D1.1 将清理的全局 session 分区）不得复活；other-session（存活会话）
+/// 审计零变化；原 seq 起点/首行 provider_start/唯一合同不动。
+#[test]
+fn cascade_d1_3b_audit_seq_and_append_late_writes_rejected_partition_not_revived() {
+    let (_tmp, store) = setup();
+    let story = d1_3a_story(&store);
+    let session = create_session(&store, &story.id, WorkspaceType::Story);
+
+    // other-session（存活会话）审计不变：seq 从 0 起、provider_start 恰为首行。
+    let other = create_session(&store, &story.id, WorkspaceType::Story);
+    let other_seq = store
+        .next_tool_policy_role_run_seq(&other.id)
+        .expect("live seq allocation for other session");
+    assert_eq!(other_seq, 0);
+    ToolPolicyAuditSink::append(
+        &store,
+        &other.id,
+        other_seq,
+        provider_start_event("codex"),
+    )
+    .expect("live audit append for other session");
+    let other_lines = store
+        .read_tool_policy_lines(&other.id, other_seq)
+        .expect("read back other session lines");
+    assert_eq!(other_lines.len(), 1);
+    assert_eq!(other_lines[0].seq, 0);
+    assert_eq!(other_lines[0].event_type(), "provider_start");
+
+    // 受害会话存活面照常（seq/append 可用）。
+    let live_seq = store
+        .next_tool_policy_role_run_seq(&session.id)
+        .expect("live seq allocation");
+    ToolPolicyAuditSink::append(
+        &store,
+        &session.id,
+        live_seq,
+        provider_start_event("codex"),
+    )
+    .expect("live audit append");
+
+    // purging + 模拟 D1.1 清掉全局分区：迟到 seq/append 拒且目录不复活。
+    let scope = d1_3a_scope(DeletionEntityKind::Story, &story.id);
+    let lease = d1_3a_begin_purge(&store, &scope);
+    let partition = store
+        .app_paths()
+        .root()
+        .join(crate::cross_cutting::tool_policy_audit::TOOL_POLICY_RUN_AUDIT_PARTITION)
+        .join(&session.id);
+    assert!(partition.exists());
+    std::fs::remove_dir_all(&partition).unwrap();
+    assert!(matches!(
+        store.next_tool_policy_role_run_seq(&session.id),
+        Err(ToolPolicyAuditError::Io(message)) if message.contains("entity_deleting")
+    ));
+    assert!(
+        !partition.exists(),
+        "迟到 seq 分配不得复活 tool-policy-run-audit 分区目录"
+    );
+    assert!(matches!(
+        ToolPolicyAuditSink::append(&store, &session.id, 1, provider_start_event("codex")),
+        Err(ToolPolicyAuditError::Io(message)) if message.contains("entity_deleting")
+    ));
+    assert!(
+        !partition.exists(),
+        "迟到 audit append 不得复活分区目录"
+    );
+
+    // deleted（完成）后仍稳定拒。
+    d1_3a_complete_purge(&store, lease);
+    assert!(matches!(
+        store.next_tool_policy_role_run_seq(&session.id),
+        Err(ToolPolicyAuditError::Io(message)) if message.contains("entity_deleting")
+    ));
+    assert!(!partition.exists());
+}

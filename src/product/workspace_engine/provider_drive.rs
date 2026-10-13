@@ -1045,12 +1045,28 @@ impl WorkspaceEngine {
 
         let message_index = self.session.messages.len() as u32;
         let artifact_snapshot = self.session.artifact.as_ref();
-        let checkpoint = self.checkpoint_store.create_checkpoint(
-            &self.session.session_id,
-            message_index,
-            artifact_snapshot,
-            WorkspaceStage::AuthorConfirm.as_str(),
-        );
+        // D1.3b（fix-cascade-deletion plan Interfaces）：persistent engine
+        // checkpoint 的 scope guard 包实际 write——purging/deleted 会话拒绝且
+        // checkpoints 目录不复活；非 persistent（无 lifecycle_store）保持原路径。
+        let checkpoint = match &self.lifecycle_store {
+            Some(store) => store.with_workspace_session_live_write(
+                &self.session.session_id,
+                || {
+                    self.checkpoint_store.create_checkpoint(
+                        &self.session.session_id,
+                        message_index,
+                        artifact_snapshot,
+                        WorkspaceStage::AuthorConfirm.as_str(),
+                    )
+                },
+            ),
+            None => self.checkpoint_store.create_checkpoint(
+                &self.session.session_id,
+                message_index,
+                artifact_snapshot,
+                WorkspaceStage::AuthorConfirm.as_str(),
+            ),
+        };
 
         let checkpoint_id = match checkpoint {
             Ok(cp) => {

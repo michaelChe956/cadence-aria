@@ -1292,3 +1292,173 @@ async fn sync_bridge_run_must_not_starve_caller_runtime() {
         failure.message
     );
 }
+
+// ---------------------------------------------------------------------------
+// cascade_d1_3b(fix-cascade-deletion Task D1.3b):split run begin/complete/fail
+// 的迟到写防御——按真实 session 归属核 scope,不解析不透明 run_ref 猜路径。
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cascade_d1_3b_split_run_begin_complete_fail_late_writes_rejected() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let lifecycle = LifecycleStore::new(paths.clone());
+
+    let story = lifecycle
+        .create_story_spec(crate::product::lifecycle_store::CreateStorySpecInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            title: "story d13b split".to_string(),
+            aggregate_codebase: None,
+        })
+        .expect("story spec");
+    let session = lifecycle
+        .create_workspace_session(crate::product::lifecycle_store::CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: story.id.clone(),
+            workspace_type: crate::product::models::WorkspaceType::Story,
+            author_provider: ProviderName::ClaudeCode,
+            reviewer_provider: None,
+            review_rounds: 1,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+            work_item_plan_options: None,
+        })
+        .expect("workspace session");
+
+    // 存活实体：begin/complete 原路径零变化（read-back 断言收口状态）。
+    let live_one = lifecycle
+        .begin_work_item_split_provider_run(
+            "project_0001",
+            "issue_0001",
+            &ProviderName::ClaudeCode,
+            &session.id,
+        )
+        .expect("live begin");
+    let snapshot = crate::product::work_item_split_engine::parse::complete_split_provider_run(
+        &lifecycle,
+        &live_one,
+        "split prompt",
+        &serde_json::json!({"work_items": []}),
+    )
+    .expect("live complete");
+    assert_eq!(snapshot.status, "completed");
+
+    // running run 记录：begin 后不收口，供迟到 complete/fail 断言字节不变。
+    let running = lifecycle
+        .begin_work_item_split_provider_run(
+            "project_0001",
+            "issue_0001",
+            &ProviderName::ClaudeCode,
+            &session.id,
+        )
+        .expect("live begin for running record");
+    let run_json = root
+        .path()
+        .join(".aria")
+        .join("work-item-split-runs")
+        .join(&session.id)
+        .join(running.role_run_seq.to_string())
+        .join("run.json");
+    let running_bytes = std::fs::read(&run_json).expect("running run.json");
+
+    // purging：迟到 complete/fail 拒，run 记录字节不变（不伪造收口）。
+    let scope = crate::product::entity_deletion_store::EntityScope::new(
+        "project_0001",
+        "issue_0001",
+        crate::product::entity_deletion_store::DeletionEntityKind::Story,
+        &story.id,
+    );
+    let lease = crate::product::entity_operation_store::EntityOperationStore::new(
+        lifecycle.app_paths(),
+    )
+    .try_acquire_delete(&scope)
+    .expect("delete lease");
+    crate::product::entity_deletion_store::EntityDeletionStore::new(lifecycle.app_paths())
+        .begin(&lease)
+        .expect("purging tombstone");
+
+    assert!(matches!(
+        lifecycle.complete_work_item_split_provider_run(
+            &running,
+            "late prompt",
+            &serde_json::json!({"work_items": []}),
+        ),
+        Err(crate::product::json_store::ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            ..
+        })
+    ));
+    assert!(matches!(
+        lifecycle.fail_work_item_split_provider_run(&running, "late failure"),
+        Err(crate::product::json_store::ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            ..
+        })
+    ));
+    assert_eq!(std::fs::read(&run_json).unwrap(), running_bytes);
+
+    // 迟到 begin：拒且分区目录不复活（模拟 D1.1 清掉全局 session 分区）。
+    let partition = root
+        .path()
+        .join(".aria")
+        .join("work-item-split-runs")
+        .join(&session.id);
+    assert!(partition.exists());
+    std::fs::remove_dir_all(&partition).unwrap();
+    assert!(matches!(
+        lifecycle.begin_work_item_split_provider_run(
+            "project_0001",
+            "issue_0001",
+            &ProviderName::ClaudeCode,
+            &session.id,
+        ),
+        Err(crate::product::json_store::ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            ..
+        })
+    ));
+    assert!(
+        !partition.exists(),
+        "迟到 begin 不得复活 work-item-split-runs 分区目录"
+    );
+
+    // 不透明 run_ref 不参与归属判定：仅凭真实 session 归属即可拒，
+    // 而不是按 run_ref/路径猜出「never begun」。
+    let opaque = crate::product::work_item_split_engine::parse::WorkItemSplitProviderRunHandle {
+        run_ref: "ws-opaque-unparseable-ref".to_string(),
+        workspace_session_id: session.id.clone(),
+        role_run_seq: 99,
+    };
+    assert!(matches!(
+        lifecycle.complete_work_item_split_provider_run(
+            &opaque,
+            "late prompt",
+            &serde_json::json!({"work_items": []}),
+        ),
+        Err(crate::product::json_store::ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            ..
+        })
+    ));
+
+    // deleted（完成）后仍稳定拒。
+    crate::product::entity_deletion_store::EntityDeletionStore::new(lifecycle.app_paths())
+        .complete(&lease)
+        .expect("deleted tombstone");
+    assert!(matches!(
+        lifecycle.begin_work_item_split_provider_run(
+            "project_0001",
+            "issue_0001",
+            &ProviderName::ClaudeCode,
+            &session.id,
+        ),
+        Err(crate::product::json_store::ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            ..
+        })
+    ));
+    assert!(!partition.exists());
+}

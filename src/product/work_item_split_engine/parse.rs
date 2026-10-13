@@ -674,6 +674,29 @@ impl LifecycleStore {
         crate::product::json_store::validate_relative_id(issue_id).map_err(io_error)?;
         crate::product::json_store::validate_relative_id(workspace_session_id).map_err(io_error)?;
 
+        // D1.3b（fix-cascade-deletion plan Interfaces）：split run 档案按真实
+        // session 归属核 scope（handle/session 占用索引），purging/deleted 拒绝
+        // begin 且不重建 work-item-split-runs 分区目录；run_ref 是不透明字符串，
+        // 不解析猜路径。内层 seq 分配消费同一线程已准入 scope，不重复取。
+        self.with_workspace_session_live_write(workspace_session_id, || {
+            self.begin_work_item_split_provider_run_in_admission(
+                project_id,
+                issue_id,
+                provider,
+                workspace_session_id,
+            )
+        })
+    }
+
+    /// `begin_work_item_split_provider_run` 的已准入内层（D1.3b：外层已持
+    /// scope 共享准入/已按删除事实拒）。
+    fn begin_work_item_split_provider_run_in_admission(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        provider: &ProviderName,
+        workspace_session_id: &str,
+    ) -> Result<WorkItemSplitProviderRunHandle, crate::product::json_store::ProductStoreError> {
         let role_run_seq = self
             .next_tool_policy_role_run_seq(workspace_session_id)
             .map_err(|error| {
@@ -710,6 +733,27 @@ impl LifecycleStore {
         prompt: &str,
         structured_output: &serde_json::Value,
     ) -> Result<(), crate::product::json_store::ProductStoreError> {
+
+        // D1.3b（fix-cascade-deletion plan Interfaces）：收口写按 handle 的
+        // 真实 session 归属核 scope（不解析不透明 run_ref 猜路径）；
+        // purging/deleted 拒绝收口，run 记录不被迟到写改写。
+        self.with_workspace_session_live_write(&handle.workspace_session_id, || {
+            self.complete_work_item_split_provider_run_in_admission(
+                handle,
+                prompt,
+                structured_output,
+            )
+        })
+    }
+
+    /// `complete_work_item_split_provider_run` 的已准入内层（D1.3b：外层已持
+    /// scope 共享准入/已按删除事实拒）。
+    fn complete_work_item_split_provider_run_in_admission(
+        &self,
+        handle: &WorkItemSplitProviderRunHandle,
+        prompt: &str,
+        structured_output: &serde_json::Value,
+    ) -> Result<(), crate::product::json_store::ProductStoreError> {
         let dir = self.work_item_split_provider_run_dir(handle)?;
         let run_path = dir.join("run.json");
         if !run_path.exists() {
@@ -739,6 +783,21 @@ impl LifecycleStore {
 
     /// 收口失败的 split provider run:run 记录改写为 status=failed 与 reason。
     pub fn fail_work_item_split_provider_run(
+        &self,
+        handle: &WorkItemSplitProviderRunHandle,
+        reason: &str,
+    ) -> Result<(), crate::product::json_store::ProductStoreError> {
+
+        // D1.3b（fix-cascade-deletion plan Interfaces）：失败收口同样按 handle
+        // 的真实 session 归属核 scope；purging/deleted 拒绝，run 记录字节不变。
+        self.with_workspace_session_live_write(&handle.workspace_session_id, || {
+            self.fail_work_item_split_provider_run_in_admission(handle, reason)
+        })
+    }
+
+    /// `fail_work_item_split_provider_run` 的已准入内层（D1.3b：外层已持
+    /// scope 共享准入/已按删除事实拒）。
+    fn fail_work_item_split_provider_run_in_admission(
         &self,
         handle: &WorkItemSplitProviderRunHandle,
         reason: &str,
